@@ -9,7 +9,6 @@ from openai.types.chat import (
     ChatCompletionContentPartImageParam,
     ChatCompletionContentPartTextParam,
 )
-from openai.types.chat.chat_completion_content_part_image_param import ImageURL
 
 from vllm import PoolingParams
 from vllm.inputs import tokens_input
@@ -20,6 +19,7 @@ from vllm.renderers.chat_utils import (
     ChatCompletionContentPartParam,
     ChatCompletionMessageParam,
     CustomChatCompletionMessageParam,
+    ImageURL,
 )
 from vllm.renderers.hf import resolve_chat_template
 from vllm.utils.collection_utils import chunk_list

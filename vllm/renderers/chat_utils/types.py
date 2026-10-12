@@ -16,6 +16,8 @@ from openai.types.chat import (
 from openai.types.chat import (
     ChatCompletionMessageParam as OpenAIChatCompletionMessageParam,
 )
+from openai.types.chat.chat_completion_content_part_image_param import ImageURL
+from openai.types.chat.chat_completion_content_part_input_audio_param import InputAudio
 from openai_harmony import Message as OpenAIHarmonyMessage
 from PIL import Image
 from pydantic import BaseModel, ConfigDict
@@ -24,21 +26,24 @@ __all__ = [
     "ChatCompletionContentPartAudioEmbedsParam",
     "ChatCompletionContentPartAudioParam",
     "ChatCompletionContentPartImageEmbedsParam",
-    "ChatCompletionContentPartImageEmbedsParam",
     "ChatCompletionContentPartImageParam",
-    "ChatCompletionContentPartParam",
     "ChatCompletionContentPartParam",
     "ChatCompletionContentPartPromptEmbedsParam",
     "ChatCompletionContentPartTextParam",
     "ChatCompletionContentPartVideoEmbedsParam",
     "ChatCompletionContentPartVideoParam",
-    "ChatCompletionContentPartVideoParam",
     "ChatCompletionMessageParam",
     "ConversationMessage",
     "CustomChatCompletionContentPILImageParam",
+    "CustomChatCompletionContentSimpleAudioParam",
+    "CustomChatCompletionContentSimpleImageParam",
+    "CustomChatCompletionContentSimpleVideoParam",
     "CustomChatCompletionContentToolReferenceParam",
     "CustomChatCompletionMessageParam",
     "CustomThinkCompletionContentParam",
+    "ImageURL",
+    "InputAudio",
+    "ModalityStr",
     "MultiModalEmbedsPayload",
     "PILImage",
 ]

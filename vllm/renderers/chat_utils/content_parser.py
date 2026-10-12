@@ -8,7 +8,6 @@ from functools import cached_property, partial
 from typing import Any, Final, override
 
 import torch
-from openai.types.chat.chat_completion_content_part_input_audio_param import InputAudio
 from PIL import Image
 
 from vllm import envs
@@ -24,7 +23,7 @@ from .item_tracker import (
     AsyncMultiModalItemTracker,
     MultiModalItemTracker,
 )
-from .types import ModalityStr, MultiModalEmbedsPayload
+from .types import InputAudio, ModalityStr, MultiModalEmbedsPayload
 
 MODALITY_PLACEHOLDERS_MAP = {
     "image": "<##IMAGE##>",

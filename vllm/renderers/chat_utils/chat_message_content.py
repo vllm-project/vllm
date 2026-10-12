@@ -3,21 +3,19 @@
 import types
 from collections.abc import Iterable
 from functools import partial
-from typing import Any, Final, Union, cast, get_args, get_origin
+from typing import Any, Final, Literal, Union, cast, get_args, get_origin
 
 from openai.types.chat import (
     ChatCompletionAssistantMessageParam,
     ChatCompletionContentPartTextParam,
     ChatCompletionToolMessageParam,
 )
-from openai.types.chat.chat_completion_content_part_input_audio_param import InputAudio
 from PIL import Image
 
 from vllm.config import ModelConfig
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 
-from .chat_message import ChatTemplateContentFormat
 from .content_parser import (
     MODALITY_PLACEHOLDERS_MAP,
     PROMPT_EMBEDS_PLACEHOLDER_TOKEN,
@@ -43,6 +41,10 @@ from .types import (
 )
 
 logger = init_logger(__name__)
+
+
+# After resolving "auto"
+ChatTemplateContentFormat = Literal["string", "openai"]
 
 
 _RESERVED_PLACEHOLDER_IN_TEXT_ERROR: Final[str] = (

@@ -1,22 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import json
-from typing import Any, Literal
+from typing import Any
 
 from vllm.config import ModelConfig
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs import MultiModalDataDict, MultiModalUUIDDict
 from vllm.logger import init_logger
 
-from .chat_message_content import parse_chat_message_content
+from .chat_message_content import ChatTemplateContentFormat, parse_chat_message_content
 from .item_tracker import AsyncMultiModalItemTracker, MultiModalItemTracker
 from .types import ChatCompletionMessageParam, ConversationMessage
 
 logger = init_logger(__name__)
-
-
-# After resolving "auto"
-ChatTemplateContentFormat = Literal["string", "openai"]
 
 
 def _postprocess_messages(messages: list[ConversationMessage]) -> None:

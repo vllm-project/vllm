@@ -11,11 +11,10 @@ from openai.types.chat import (
     ChatCompletionContentPartRefusalParam,
     ChatCompletionContentPartTextParam,
 )
-from openai.types.chat.chat_completion_content_part_input_audio_param import InputAudio
 from openai.types.responses import ResponseInputImageParam
 from pydantic import TypeAdapter
 
-from vllm.renderers.chat_utils.types import (
+from vllm.renderers.chat_utils import (
     ChatCompletionContentPartAudioEmbedsParam,
     ChatCompletionContentPartAudioParam,
     ChatCompletionContentPartImageEmbedsParam,
@@ -26,6 +25,7 @@ from vllm.renderers.chat_utils.types import (
     CustomChatCompletionContentPILImageParam,
     CustomChatCompletionContentToolReferenceParam,
     CustomThinkCompletionContentParam,
+    InputAudio,
     MultiModalEmbedsPayload,
     PILImage,
 )
