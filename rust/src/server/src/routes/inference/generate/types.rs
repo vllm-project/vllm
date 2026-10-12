@@ -8,6 +8,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use validator::Validate;
 use vllm_engine_core_client::protocol::output::RequestSpecDecodeMetrics;
+use vllm_engine_core_client::protocol::request::ReasoningParserKwargs;
+use vllm_llm::WeightVersionSpan;
 use vllm_text::SamplingParams;
 
 use crate::routes::openai::utils::types::{Normalizable, StreamOptions, Usage};
@@ -48,6 +50,13 @@ pub struct GenerateRequest {
     /// Raw multimodal input; server resolves media. Mutually exclusive with `features`.
     pub content_parts: Option<Vec<MediaContentPart>>,
     pub return_token_ids: Option<bool>,
+    /// Whether reasoning has ended before the first generated token, as
+    /// resolved by `/render`. `true` applies structured outputs from the first
+    /// token; `None` lets the engine check the prompt with its reasoning parser.
+    pub reasoning_ended: Option<bool>,
+    /// Set by `/render` so the engine-side reasoning parser agrees with the
+    /// frontend on flags such as `enable_thinking`.
+    pub reasoning_parser_kwargs: Option<ReasoningParserKwargs>,
     #[serde(flatten)]
     pub other: Map<String, Value>,
 }
@@ -65,6 +74,7 @@ pub(super) struct GenerateResponseChoice {
     pub finish_reason: Option<String>,
     pub token_ids: Vec<u32>,
     pub sampling_mask: Option<Vec<Vec<u32>>>,
+    pub weight_versions: Option<Vec<WeightVersionSpan>>,
 }
 
 /// Mirrors the Python vLLM `GenerateResponseStreamChoice` class.
@@ -76,6 +86,8 @@ pub(super) struct GenerateResponseStreamChoice {
     pub finish_reason: Option<String>,
     pub token_ids: Vec<u32>,
     pub sampling_mask: Option<Vec<Vec<u32>>>,
+    /// Set on the final chunk only; covers the whole output.
+    pub weight_versions: Option<Vec<WeightVersionSpan>>,
 }
 
 /// Mirrors the Python vLLM `GenerateStreamResponse` class.
