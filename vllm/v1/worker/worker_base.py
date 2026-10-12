@@ -247,19 +247,15 @@ class WorkerWrapperBase:
         self._worker_extension_cls: type | None = None
 
     def shutdown(self) -> None:
-        worker = self.__dict__.get("worker")
-        if worker is None:
-            return
-        hook = getattr(self._worker_extension_cls, "destroy_worker_extension", None)
-        try:
+        if self.worker is not None:
+            hook = getattr(self._worker_extension_cls, "destroy_worker_extension", None)
             if callable(hook):
-                hook(worker)
-        except Exception:
-            # Log instead of raising so that callers still run their own
-            # teardown (e.g. destroying the distributed environment).
-            logger.exception("Worker extension destroy hook failed.")
-        finally:
-            worker.shutdown()
+                try:
+                    hook(self.worker)
+                except Exception:
+                    # Don't raise: callers still need to run their own teardown.
+                    logger.exception("Worker extension destroy hook failed.")
+            self.worker.shutdown()
 
     def update_environment_variables(
         self,
