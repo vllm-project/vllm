@@ -609,3 +609,25 @@ def test_update_draft_decode_metadata_skips_without_scheduler_metadata(monkeypat
 
     assert not called
     assert metadata.scheduler_metadata is None
+
+
+@pytest.mark.parametrize(("num_speculative_steps", "expected"), [(1, False), (3, True)])
+def test_decode_metadata_update_needs_draft_decode_steps(
+    num_speculative_steps, expected
+):
+    """One speculative step runs no draft decodes, so the in-place metadata
+    update (and its fallback log) does not apply even on a capable backend."""
+    speculator = object.__new__(_TestSpeculator)
+    speculator.num_speculative_steps = num_speculative_steps
+    speculator.attn_groups = [
+        [
+            SimpleNamespace(
+                supports_draft_decode_metadata_update=True,
+                backend=SimpleNamespace(get_name=lambda: "CAPABLE"),
+            )
+        ]
+    ]
+
+    speculator._configure_decode_metadata_update()
+
+    assert speculator.supports_decode_metadata_update is expected
