@@ -2,10 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for the MXFP4 activation quant folds in the ROCm AITER fusion passes:
 SiLU-mul + mxfp4 quant (bitwise equal to the compiled native silu_and_mul
-followed by the quant) and RMSNorm /
-fused_add_rms_norm + mxfp4 quant. The first is on by default
-(VLLM_ROCM_USE_AITER_MXFP4_SILU_QUANT_FUSION), the second is opt-in
-(VLLM_ROCM_USE_AITER_MXFP4_RMSNORM_QUANT_FUSION).
+followed by the quant) and RMSNorm / fused_add_rms_norm + mxfp4 quant. The
+first runs with fuse_act_quant, the second needs fuse_norm_quant plus the
+opt-in fuse_norm_mxfp4_quant.
 """
 
 import pytest
@@ -60,11 +59,10 @@ class RMSNormMxfp4Model(torch.nn.Module):
         return q, s, r
 
 
-def _setup(monkeypatch: pytest.MonkeyPatch, env: str, enabled: bool) -> None:
+def _setup(monkeypatch: pytest.MonkeyPatch) -> None:
     if not current_platform.supports_mx():
         pytest.skip("MXFP4 is not supported on this GPU")
     monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
-    monkeypatch.setenv(env, "1" if enabled else "0")
     rocm_aiter_ops.refresh_env_variables()
     if not rocm_aiter_ops._fused_mxfp4_quant_supported():
         pytest.skip("installed AITER lacks round_to_input_dtype / transpose_scale")
@@ -73,26 +71,27 @@ def _setup(monkeypatch: pytest.MonkeyPatch, env: str, enabled: bool) -> None:
     torch.set_default_dtype(torch.bfloat16)
 
 
-def _compile(make_model, pass_cls, custom_ops, *args):
-    config = VllmConfig(
+def _config(custom_ops, mode=CompilationMode.VLLM_COMPILE, **pass_flags):
+    return VllmConfig(
         model_config=ModelConfig(dtype=torch.bfloat16),
         compilation_config=CompilationConfig(
-            mode=CompilationMode.VLLM_COMPILE,
+            mode=mode,
             custom_ops=custom_ops,
-            pass_config=PassConfig(
-                fuse_act_quant=True, fuse_norm_quant=True, eliminate_noops=True
-            ),
+            pass_config=PassConfig(eliminate_noops=True, **pass_flags),
         ),
     )
+
+
+def _compile(config, make_passes, make_model, *args):
     with set_current_vllm_config(config):
-        fusion_pass = pass_cls(config)
+        fusion_passes = make_passes(config)
         backend = TestBackend(
-            NoOpEliminationPass(config), fusion_pass, PostCleanupPass(config)
+            NoOpEliminationPass(config), *fusion_passes, PostCleanupPass(config)
         )
         # custom ops pick native vs custom forward at init, so build it here
         model = make_model()
         out = torch.compile(model, backend=backend)(*args)
-    return out, fusion_pass, backend
+    return out, fusion_passes, backend
 
 
 @pytest.mark.parametrize("num_tokens", [1, 7, 64, 257])
@@ -108,7 +107,12 @@ def test_silu_mul_mxfp4_quant_fusion(
         RocmAiterSiluMulFp8GroupQuantFusionPass,
     )
 
-    env = "VLLM_ROCM_USE_AITER_MXFP4_SILU_QUANT_FUSION"
+    def make_passes(config):
+        # PostGradPassManager only adds this pass under fuse_act_quant
+        if not config.compilation_config.pass_config.fuse_act_quant:
+            return []
+        return [RocmAiterSiluMulFp8GroupQuantFusionPass(config)]
+
     custom_ops = ["none"] + (["+silu_and_mul"] if enable_silu_mul_custom_op else [])
     quant_op = rocm_aiter_ops.get_dynamic_mxfp4_quant_op()
     fused_op = rocm_aiter_ops.get_act_mul_fused_mxfp4_quant_op()
@@ -118,21 +122,20 @@ def test_silu_mul_mxfp4_quant_fusion(
     results = {}
     for enabled in (False, True):
         with monkeypatch.context() as m:
-            _setup(m, env, enabled)
+            _setup(m)
             xi = x.clone()
             torch._dynamo.mark_dynamic(xi, 0)
-            results[enabled], fusion_pass, backend = _compile(
-                SiluMulMxfp4Model,
-                RocmAiterSiluMulFp8GroupQuantFusionPass,
-                custom_ops,
-                xi,
+            config = _config(custom_ops, fuse_act_quant=enabled, fuse_norm_quant=False)
+            results[enabled], fusion_passes, backend = _compile(
+                config, make_passes, SiluMulMxfp4Model, xi
             )
             if enabled:
-                assert fusion_pass.matched_count == 1
+                assert len(fusion_passes) == 1
+                assert fusion_passes[0].matched_count == 1
                 backend.check_after_ops([fused_op])
                 backend.check_before_ops([quant_op])
             else:
-                assert fusion_pass.matched_count == 0
+                assert not fusion_passes
                 assert backend.op_count(fused_op) == 0
                 assert backend.op_count(quant_op) == 1
 
@@ -163,7 +166,6 @@ def test_rmsnorm_mxfp4_quant_fusion(
         RocmAiterRMSNormQuantFusionPass,
     )
 
-    env = "VLLM_ROCM_USE_AITER_MXFP4_RMSNORM_QUANT_FUSION"
     fused_op = (
         rocm_aiter_ops.get_fused_add_rmsnorm_mxfp4_quant_op()
         if residual
@@ -181,14 +183,21 @@ def test_rmsnorm_mxfp4_quant_fusion(
     results = {}
     for enabled in (False, True):
         with monkeypatch.context() as m:
-            _setup(m, env, enabled)
+            _setup(m)
             xi, ri = x.clone(), r.clone()
             torch._dynamo.mark_dynamic(xi, 0)
             torch._dynamo.mark_dynamic(ri, 0)
-            results[enabled], fusion_pass, backend = _compile(
-                make_model,
-                RocmAiterRMSNormQuantFusionPass,
+            # fuse_norm_quant alone must leave the mxfp4 quant alone
+            config = _config(
                 ["none", "+rms_norm"],
+                fuse_act_quant=False,
+                fuse_norm_quant=True,
+                fuse_norm_mxfp4_quant=enabled,
+            )
+            results[enabled], (fusion_pass,), backend = _compile(
+                config,
+                lambda c: [RocmAiterRMSNormQuantFusionPass(c)],
+                make_model,
                 xi,
                 ri,
             )
@@ -206,3 +215,40 @@ def test_rmsnorm_mxfp4_quant_fusion(
     # moves a small share of values across an e2m1 / e8m0 rounding boundary
     assert (q == q_ref).float().mean().item() > 0.95
     assert (s == s_ref).float().mean().item() > 0.95
+
+
+@pytest.mark.parametrize(
+    "mode, flags, expected",
+    [
+        (CompilationMode.VLLM_COMPILE, {"fuse_act_quant": True}, True),
+        (CompilationMode.VLLM_COMPILE, {"fuse_norm_quant": True}, False),
+        (
+            CompilationMode.VLLM_COMPILE,
+            {"fuse_norm_quant": True, "fuse_norm_mxfp4_quant": True},
+            True,
+        ),
+        (CompilationMode.VLLM_COMPILE, {}, False),
+        (CompilationMode.NONE, {"fuse_act_quant": True}, False),
+    ],
+)
+def test_mxfp4_linear_splits_quant_only_for_a_fold(
+    mode, flags, expected, monkeypatch: pytest.MonkeyPatch
+):
+    from vllm.model_executor.kernels.linear.mxfp4.aiter import (
+        AiterMxfp4LinearKernel,
+    )
+    from vllm.model_executor.kernels.linear.mxfp4.base import (
+        MxFp4LinearLayerConfig,
+    )
+    from vllm.model_executor.layers.quantization.utils.quant_utils import (
+        kMxfp4Dynamic,
+    )
+
+    _setup(monkeypatch)
+    pass_flags = {"fuse_act_quant": False, "fuse_norm_quant": False, **flags}
+    config = _config(["none"], mode=mode, **pass_flags)
+    with set_current_vllm_config(config):
+        kernel = AiterMxfp4LinearKernel(
+            MxFp4LinearLayerConfig(activation_quant_key=kMxfp4Dynamic)
+        )
+    assert kernel.fold_act_quant is expected
