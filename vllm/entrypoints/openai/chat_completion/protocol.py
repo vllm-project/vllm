@@ -31,6 +31,7 @@ from vllm.entrypoints.generate.base.protocol import (
     TopLogprobsParam,
     structured_outputs_from_response_format,
     validate_cache_salt,
+    validate_inline_kv_request,
     validate_structural_tag_response_format,
     validate_structured_outputs_structural_tag,
 )
@@ -525,6 +526,12 @@ class ChatCompletionRequest(OpenAIBaseModel):
     )
 
     # --8<-- [end:chat-completion-extra-params]
+
+    @model_validator(mode="before")
+    @classmethod
+    def validate_inline_output(cls, data):
+        validate_inline_kv_request(data)
+        return data
 
     @model_validator(mode="before")
     @classmethod

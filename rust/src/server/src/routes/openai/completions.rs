@@ -64,6 +64,13 @@ pub async fn completions(
     headers: HeaderMap,
     ValidatedJson(body): ValidatedJson<CompletionRequest>,
 ) -> Response {
+    if let Err(error) = crate::routes::openai::utils::validate_inline_hidden_states_backend(
+        body.kv_transfer_params.as_ref(),
+        body.vllm_xargs.as_ref(),
+        &state,
+    ) {
+        return error.into_response();
+    }
     let stream = body.stream;
     let request_context = resolve_request_context(&headers, body.request_id.as_deref());
     let requested_model = body.model.as_deref().filter(|model| !model.is_empty());

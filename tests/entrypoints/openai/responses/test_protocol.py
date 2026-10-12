@@ -72,3 +72,13 @@ def test_malformed_tools_rejected_by_field_validation(tools) -> None:
     AttributeError inside the custom-format validator (500)."""
     with pytest.raises(ValidationError):
         ResponsesRequest(input="hi", tools=tools)
+
+
+def test_inline_hidden_states_rejected_by_responses():
+    with pytest.raises(VLLMValidationError, match="return_last_hidden_state"):
+        ResponsesRequest(
+            model="test",
+            input="hello",
+            max_output_tokens=1,
+            kv_transfer_params={"return_last_hidden_state": True},
+        )
