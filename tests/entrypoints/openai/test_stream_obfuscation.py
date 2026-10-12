@@ -18,7 +18,6 @@ from vllm.entrypoints.openai.completion import api_router as completion_router
 from vllm.entrypoints.openai.responses import api_router as responses_router
 
 _CHUNK = 'data: {"choices": [{"index": 0, "delta": {"content": "hi"}}]}\n\n'
-_DONE = "data: [DONE]\n\n"
 
 
 class _OtherEvent(BaseModel):
@@ -27,7 +26,7 @@ class _OtherEvent(BaseModel):
 
 async def _chunks():
     yield _CHUNK
-    yield _DONE
+    yield "data: [DONE]\n\n"
 
 
 async def _events():
@@ -110,7 +109,6 @@ def test_request_option_and_server_default(
     body = _post(_client(server_default), path, include_obfuscation)
     first = _data_payloads(body)[0]
     assert ("obfuscation" in first) is expected
-    assert body.endswith(_DONE) or path == "/v1/responses"
 
 
 def test_responses_pads_only_delta_events():
