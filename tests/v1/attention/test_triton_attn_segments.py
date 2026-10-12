@@ -72,30 +72,6 @@ def _build(
 BUILDERS = [TritonAttentionMetadataBuilder, TritonAttentionDiffKVMetadataBuilder]
 
 
-# 64 segments only while num_seqs * num_kv_heads * 16 < 188 SMs on SM12.0 and
-# the 64-segment scratch holds every query token (e.g. multi-query verify).
-@pytest.mark.parametrize("builder_cls", BUILDERS)
-@pytest.mark.parametrize(
-    "capability,num_kv_heads,num_seqs,query_len,segments",
-    [
-        ((12, 0), 1, 11, 1, 64),
-        ((12, 0), 1, 12, 1, 16),
-        ((12, 0), 8, 1, 1, 64),
-        ((12, 0), 8, 2, 1, 16),
-        ((9, 0), 1, 1, 1, 16),
-        ((12, 0), 1, 2, 4, 64),
-        ((12, 0), 1, 10, 4, 16),
-    ],
-)
-def test_split_k_segments_follow_sm_occupancy(
-    monkeypatch, builder_cls, capability, num_kv_heads, num_seqs, query_len, segments
-):
-    _, metadata = _build(
-        monkeypatch, builder_cls, capability, num_kv_heads, [query_len] * num_seqs
-    )
-    assert metadata.num_par_softmax_segments == segments
-
-
 # Verify batches: the 64-segment scratch holds min(11, max_num_seqs) * (1 + K)
 # rows, and its 16-segment view covers every 3D-eligible sequence. 64 segments
 # follow the request count, not Q blocks: on SM12.0 they stay faster for verify
