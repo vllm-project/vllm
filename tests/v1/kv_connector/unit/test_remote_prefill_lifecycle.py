@@ -857,6 +857,7 @@ def test_async_load_does_not_double_reserve_mamba_spec_blocks(
         disable_hybrid_kv_cache_manager=False,
     )
     vllm_config.cache_config.mamba_cache_mode = mamba_cache_mode
+    vllm_config.cache_config.enable_prefix_caching = mamba_cache_mode == "align"
     kv_cache_config = make_kv_cache_config(
         block_size,
         mamba_enabled=True,
