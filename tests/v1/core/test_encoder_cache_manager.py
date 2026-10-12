@@ -460,8 +460,9 @@ def test_encoder_decoder_cache_manager_reset():
 
     manager.reset()
 
-    assert len(manager.allocated) == 0
-    assert len(manager.to_free) == 0
+    assert not manager.check_and_update_cache(req1, 0)
+    assert not manager.check_and_update_cache(req2, 0)
+    assert manager.get_freed_mm_hashes() == []
     assert manager.num_free_slots == 20
 
 
@@ -479,4 +480,22 @@ def test_encoder_decoder_cache_manager_reset_allows_fresh_allocations():
     manager.allocate(req2, 0)
 
     assert manager.num_free_slots == 2
-    assert "img2" in manager.allocated
+    assert manager.check_and_update_cache(req2, 0)
+
+
+def test_encoder_decoder_reuses_audio_until_evicted():
+    manager = EncoderDecoderCacheManager(cache_size=10)
+    first = MockRequest("first", ["audio"], [10])
+    beam = MockRequest("beam", ["audio"], [10])
+    other = MockRequest("other", ["other_audio"], [10])
+
+    manager.allocate(first, 0)
+    manager.free(first)
+    assert manager.get_freed_mm_hashes() == []
+    assert manager.check_and_update_cache(beam, 0)
+    assert not manager.can_allocate(other, 0, 10, 0)
+
+    manager.free(beam)
+    assert manager.can_allocate(other, 0, 10, 0)
+    assert manager.get_freed_mm_hashes() == ["audio"]
+    assert not manager.check_and_update_cache(first, 0)
