@@ -22,6 +22,7 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     UniformTypeKVCacheSpecs,
 )
+from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
 from vllm.v1.worker.mamba_utils import (
     MambaCopyBuffers,
@@ -398,7 +399,7 @@ def _make_kv_cache_config(cfg: _TestConfig, layer_names: list[str]) -> KVCacheCo
             (cfg.temporal_state_dim,),
         ),
         dtypes=(cfg.dtype, cfg.dtype),
-        mamba_cache_mode="all",
+        mamba_cache_mode="align",
     )
     group = KVCacheGroupSpec(
         layer_names=layer_names,
@@ -638,6 +639,50 @@ def test_mamba_groups_support_mixed_specs_in_uniform_group():
     assert ctx.state_conv_widths.tolist() == [4, 0, 4, 0, 12]
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
+def test_v2_align_ctx_binds_request_slot_tables_for_state_copies():
+    """V2 state copies may run steps after their batch (PP), so they must read
+    the per-request-slot tables; aligned state indices are computed for the
+    current batch and keep reading the gathered tables."""
+    cfg = _TestConfig(num_layers=1)
+    device = torch.device("cuda")
+    kv_cache_config = _make_kv_cache_config(cfg, ["layer_0"])
+    forward_context = {
+        "layer_0": _make_mock_attention(
+            torch.empty(cfg.num_blocks, cfg.conv_width, cfg.conv_inner_dim),
+            torch.empty(cfg.num_blocks, cfg.temporal_state_dim),
+        )
+    }
+    block_tables = BlockTables(
+        block_sizes=[cfg.block_size],
+        max_num_reqs=cfg.max_num_reqs,
+        max_num_batched_tokens=64,
+        max_num_blocks_per_group=[4],
+        device=device,
+    )
+
+    state = object.__new__(MambaHybridModelState)
+    state._align_mode = True
+    state._mamba_group_ids = []
+    state._mamba_spec = None
+    state._mamba_state_copy_funcs = _COPY_FUNCS
+    state.max_num_reqs = cfg.max_num_reqs
+    state.device = device
+    state.vllm_config = MagicMock()
+    state.vllm_config.compilation_config.static_forward_context = forward_context
+
+    state.initialize_kv_cache(kv_cache_config, block_tables)
+
+    ctx = state._mamba_ctx
+    assert ctx is not None and ctx.is_initialized
+    assert ctx.block_table_ptrs.tolist() == [
+        block_tables.block_tables[0].gpu.data_ptr()
+    ]
+    assert ctx.aligned_index_block_table_ptrs.tolist() == [
+        block_tables.input_block_tables[0].data_ptr()
+    ]
+
+
 # -----------------------------------------------------------------------------
 # stage_postprocess_inputs_to_gpu: single-pass staging into pinned views
 # -----------------------------------------------------------------------------
@@ -867,8 +912,7 @@ class TestPostprocessMambaFusedKernel:
             torch.testing.assert_close(state, expected, rtol=0, atol=0)
 
     def test_matches_python_postprocess_mamba(self, device, test_config):
-        """
-        Golden test: GPU kernel produces identical results to Python impl.
+        """Golden test: GPU kernel produces identical results to Python impl.
 
         This test:
         1. Sets up identical initial state for both paths
@@ -1146,8 +1190,7 @@ class TestPostprocessMambaFusedKernel:
         )
 
     def test_block_table_with_realistic_stride(self, device, test_config):
-        """
-        Test kernel with realistic block table strides.
+        """Test kernel with realistic block table strides.
 
         In real usage, the block table is pre-allocated with shape
         [max_num_reqs, max_num_blocks_per_req] and then sliced to
@@ -1275,8 +1318,7 @@ class TestPostprocessMambaFusedKernel:
     def test_src_addr_equals_dst_addr_skips_copy_and_sets_accepted_to_1(
         self, device, test_config
     ):
-        """
-        Test the ``src_addr == dst_addr`` early-return path in
+        """Test the ``src_addr == dst_addr`` early-return path in
         postprocess_mamba_fused_kernel matches Python behavior.
 
         When src_addr == dst_addr (source and destination memory addresses are
@@ -1419,8 +1461,7 @@ class TestPostprocessMambaFusedKernel:
     def test_same_block_idx_with_offset_copies_then_sets_accepted_to_1(
         self, device, test_config
     ):
-        """
-        Test the ``src_block_idx == dest_block_idx`` post-copy update in
+        """Test the ``src_block_idx == dest_block_idx`` post-copy update in
         postprocess_mamba_fused_kernel matches Python behavior.
 
         When src_block_idx == dest_block_idx but accept_token_bias > 0, both
@@ -1583,8 +1624,7 @@ class TestPostprocessMambaFusedKernel:
     def test_different_block_idx_copies_without_setting_accepted_to_1(
         self, device, test_config
     ):
-        """
-        Test that neither special-case path triggers when
+        """Test that neither special-case path triggers when
         src_block_idx != dest_block_idx, and GPU matches Python behavior.
 
         When copying between different blocks:
@@ -1716,8 +1756,7 @@ class TestPostprocessMambaFusedKernel:
     def test_prefix_caching_shared_block_does_not_set_accepted_to_1(
         self, device, test_config
     ):
-        """
-        Regression test: with prefix caching, different logical block indices
+        """Regression test: with prefix caching, different logical block indices
         can map to the same physical block. The kernel must NOT set
         num_accepted_tokens to 1 in that case.
 
@@ -1849,8 +1888,7 @@ class TestPostprocessMambaFusedKernel:
         )
 
     def test_prefix_caching_nonsequential_block_ids_boundary(self, device, test_config):
-        """
-        Regression test: non-sequential physical block IDs under prefix caching
+        """Regression test: non-sequential physical block IDs under prefix caching
         with the needs_copy boundary at exact equality.
 
         Under PC, the block allocator assigns physical block IDs in arbitrary
@@ -2000,8 +2038,7 @@ class TestPostprocessMambaFusedKernel:
         assert input_batch_py.num_accepted_tokens_cpu[1] == num_accepted_tokens[1]
 
     def test_prefix_caching_mixed_shared_and_distinct_blocks(self, device, test_config):
-        """
-        Regression test: mixed batch under prefix caching where some requests
+        """Regression test: mixed batch under prefix caching where some requests
         have shared physical blocks (aliased) and others have distinct blocks,
         with the needs_copy boundary at various positions.
 
@@ -2166,8 +2203,7 @@ class TestPostprocessMambaFusedKernel:
     def test_pc_aliased_blocks_skip_must_use_logical_idx_not_addr(
         self, device, test_config
     ):
-        """
-        Regression test for 6466ce0d vs 959ca0fd: the kernel's early-return
+        """Regression test for 6466ce0d vs 959ca0fd: the kernel's early-return
         guard must compare logical block indices, not physical addresses.
 
         Under prefix caching, different logical blocks (src_block_idx=0,
@@ -2299,8 +2335,7 @@ class TestPostprocessMambaFusedKernel:
         )
 
     def test_as_strided_temporal_copy_size(self, device, test_config):
-        """
-        Regression test for 240723d46: temporal copy_size must be
+        """Regression test for 240723d46: temporal copy_size must be
         inner_size * elem_size, not state_block_stride.
 
         In production (gpu_model_runner.py), conv and temporal states share
@@ -2458,8 +2493,7 @@ class TestPostprocessMambaFusedKernel:
         )
 
     def test_temporal_copy_with_bias_ge_2(self, device, test_config):
-        """
-        Coverage test for the temporal-state block-table stride arithmetic
+        """Coverage test for the temporal-state block-table stride arithmetic
         when ``accept_token_bias >= 2``.
 
         The kernel computes, for temporal (non-conv) states::

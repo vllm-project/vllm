@@ -35,6 +35,13 @@ pub(super) fn validate_request_compat(
         );
     }
 
+    if request.logprob_token_ids.as_ref().is_some_and(|ids| !ids.is_empty()) && !request.logprobs {
+        bail_invalid_request!(
+            param = "logprob_token_ids",
+            "when using `logprob_token_ids`, `logprobs` must be set to true."
+        );
+    }
+
     if let Some(prompt_logprobs) = request.prompt_logprobs {
         if prompt_logprobs < 0 && prompt_logprobs != -1 {
             bail_invalid_request!(
@@ -125,8 +132,8 @@ fn validate_function_tools(tools: &[Tool], param: &'static str) -> Result<(), Ap
 mod tests {
     use std::collections::HashMap;
 
+    use crate::routes::openai::utils::types::ReasoningEffort;
     use serde_json::json;
-    use vllm_chat::ReasoningEffort;
 
     use super::validate_request_compat;
     use crate::routes::openai::chat_completions::types::ChatCompletionRequest;
@@ -195,7 +202,9 @@ mod tests {
                     description: None,
                     parameters: json!({}),
                     strict: None,
+                    defer_loading: None,
                 },
+                defer_loading: None,
             }]),
             ..base_request()
         };
@@ -212,7 +221,9 @@ mod tests {
                         description: None,
                         parameters: json!({}),
                         strict: None,
+                        defer_loading: None,
                     },
+                    defer_loading: None,
                 }]),
                 name: None,
             }],
@@ -234,7 +245,9 @@ mod tests {
                         description: None,
                         parameters: json!({}),
                         strict: None,
+                        defer_loading: None,
                     },
+                    defer_loading: None,
                 }]),
                 name: None,
             }],

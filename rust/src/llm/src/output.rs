@@ -11,12 +11,26 @@ use futures::stream::FusedStream;
 use futures::{Stream, StreamExt as _, pin_mut};
 use serde::{Deserialize, Serialize};
 use vllm_engine_core_client::protocol::logprobs::Logprobs;
-use vllm_engine_core_client::protocol::output::{EngineCoreFinishReason, StopReason};
-use vllm_engine_core_client::{AbortCause, EngineCoreOutputStream};
+use vllm_engine_core_client::protocol::output::{
+    EngineCoreFinishReason, RequestSpecDecodeMetrics, StopReason,
+};
+use vllm_engine_core_client::protocol::sampling_mask::SamplingMask;
+use vllm_engine_core_client::protocol::tensor::WireNdArray;
+use vllm_engine_core_client::{
+    AbortCause, EngineCoreOutputStream, EngineCoreStreamDelivery, EngineCoreStreamOutput,
+};
 
 use crate::error::Result;
 use crate::inflight::RequestGuard;
 use crate::request_metrics::{RequestMetricsTracker, current_unix_timestamp_secs};
+
+/// Output tokens `[start, end)` were sampled by weights labelled `version`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct WeightVersionSpan {
+    pub version: Arc<str>,
+    pub start: usize,
+    pub end: usize,
+}
 
 /// Token usage metadata for one request.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -35,6 +49,7 @@ pub struct CollectedGenerateOutput {
     pub request_id: String,
     pub prompt_token_ids: Vec<u32>,
     pub prompt_logprobs: Option<Logprobs>,
+    pub prompt_token_id_logprobs: Option<WireNdArray>,
     pub token_ids: Vec<u32>,
     pub logprobs: Option<Logprobs>,
     pub finish_reason: FinishReason,
@@ -44,6 +59,11 @@ pub struct CollectedGenerateOutput {
     /// Connector-specific encoder cache transfer parameters for disaggregated
     /// serving.
     pub ec_transfer_params: Option<serde_json::Value>,
+    /// Sampling support sets aligned one-to-one with generated token positions.
+    pub sampling_mask: Option<SamplingMask>,
+    /// Per-request speculative-decoding metrics from the terminal output.
+    pub spec_decode_metrics: Option<RequestSpecDecodeMetrics>,
+    pub weight_versions: Option<Vec<WeightVersionSpan>>,
 }
 
 /// Prompt-scoped metadata emitted only once on the first [`GenerateOutput`] for
@@ -55,6 +75,8 @@ pub struct GeneratePromptInfo {
     /// Prompt logprobs returned by engine-core for scored prompt positions,
     /// when requested.
     pub prompt_logprobs: Option<Logprobs>,
+    /// Log probabilities of `prompt_logprob_token_ids`, when requested.
+    pub prompt_token_id_logprobs: Option<WireNdArray>,
 }
 
 /// The reason a request finished.
@@ -141,7 +163,7 @@ pub struct GenerateOutput {
     pub request_id: String,
     /// One-time prompt metadata emitted only on the first output for this
     /// request.
-    pub prompt_info: Option<GeneratePromptInfo>,
+    pub prompt_info: Option<Box<GeneratePromptInfo>>,
     /// Newly produced token IDs for this step.
     pub token_ids: Vec<u32>,
     /// Sample logprobs for the generated positions in this step.
@@ -151,10 +173,16 @@ pub struct GenerateOutput {
     /// Number of prompt tokens served from cache, when reported by prefill stats.
     pub cached_token_count: usize,
     /// Connector-specific KV transfer parameters for disaggregated serving.
-    pub kv_transfer_params: Option<serde_json::Value>,
+    pub kv_transfer_params: Option<Box<serde_json::Value>>,
     /// Connector-specific encoder cache transfer parameters for disaggregated
     /// serving.
-    pub ec_transfer_params: Option<serde_json::Value>,
+    pub ec_transfer_params: Option<Box<serde_json::Value>>,
+    /// Sampling support sets aligned one-to-one with `token_ids`.
+    pub sampling_mask: Option<SamplingMask>,
+    /// Per-request speculative-decoding metrics, present on terminal outputs.
+    pub spec_decode_metrics: Option<Box<RequestSpecDecodeMetrics>>,
+    /// Weight-version spans over all output tokens, set on terminal outputs only.
+    pub weight_versions: Option<Vec<WeightVersionSpan>>,
 }
 
 impl GenerateOutput {
@@ -180,6 +208,36 @@ impl GenerateOutput {
     pub fn finished(&self) -> bool {
         self.finish_reason.is_some()
     }
+
+    /// Append a later output of the same request, as if both were produced in
+    /// one step. Per-token data is concatenated; per-output fields take the
+    /// later output's value, like Python's `RequestState.make_request_output()`
+    /// does for the output that flushes a stream interval.
+    fn merge(&mut self, next: GenerateOutput) {
+        debug_assert!(
+            next.prompt_info.is_none(),
+            "only the first output carries prompt info"
+        );
+        self.token_ids.extend(next.token_ids);
+        if let Some(next_logprobs) = next.logprobs {
+            match &mut self.logprobs {
+                Some(logprobs) => logprobs.positions.extend(next_logprobs.positions),
+                None => self.logprobs = Some(next_logprobs),
+            }
+        }
+        if let Some(next_mask) = next.sampling_mask {
+            match &mut self.sampling_mask {
+                Some(mask) => mask.rows.extend(next_mask.rows),
+                None => self.sampling_mask = Some(next_mask),
+            }
+        }
+        self.cached_token_count = self.cached_token_count.max(next.cached_token_count);
+        self.finish_reason = next.finish_reason;
+        self.kv_transfer_params = next.kv_transfer_params;
+        self.ec_transfer_params = next.ec_transfer_params;
+        self.spec_decode_metrics = next.spec_decode_metrics;
+        self.weight_versions = next.weight_versions;
+    }
 }
 
 #[cfg(any(test, feature = "test-util"))]
@@ -192,9 +250,12 @@ impl GenerateOutput {
     ) -> Self {
         Self {
             request_id: String::new(),
-            prompt_info: prompt_token_ids.map(|ids| GeneratePromptInfo {
-                prompt_token_ids: ids,
-                prompt_logprobs: None,
+            prompt_info: prompt_token_ids.map(|ids| {
+                Box::new(GeneratePromptInfo {
+                    prompt_token_ids: ids,
+                    prompt_logprobs: None,
+                    prompt_token_id_logprobs: None,
+                })
             }),
             token_ids,
             logprobs: None,
@@ -202,6 +263,9 @@ impl GenerateOutput {
             cached_token_count: 0,
             kv_transfer_params: None,
             ec_transfer_params: None,
+            sampling_mask: None,
+            spec_decode_metrics: None,
+            weight_versions: None,
         }
     }
 }
@@ -213,9 +277,12 @@ impl GenerateOutput {
 ///   with `finish_reason = Abort` before the stream ends.
 /// - For errors or unexpected engine-side closes, the stream terminates with an error.
 pub struct GenerateOutputStream {
-    pending_prompt_info: Option<GeneratePromptInfo>,
+    pending_prompt_info: Option<Box<GeneratePromptInfo>>,
     raw_stream: EngineCoreOutputStream,
     request_metrics: RequestMetricsTracker,
+    /// (weight version, first output-token index) for each span.
+    weight_version_starts: Vec<(Arc<str>, usize)>,
+    num_output_tokens: usize,
     /// Removes this request's external→internal tracking edge on drop. Held for
     /// its `Drop` side effect only; never read directly.
     _request_guard: RequestGuard,
@@ -231,12 +298,15 @@ impl GenerateOutputStream {
         request_guard: RequestGuard,
     ) -> Self {
         Self {
-            pending_prompt_info: Some(GeneratePromptInfo {
+            pending_prompt_info: Some(Box::new(GeneratePromptInfo {
                 prompt_token_ids,
                 prompt_logprobs: None,
-            }),
+                prompt_token_id_logprobs: None,
+            })),
             raw_stream,
             request_metrics,
+            weight_version_starts: Vec::new(),
+            num_output_tokens: 0,
             _request_guard: request_guard,
         }
     }
@@ -245,20 +315,38 @@ impl GenerateOutputStream {
     pub fn request_id(&self) -> &str {
         self.raw_stream.request_id()
     }
-}
 
-impl Stream for GenerateOutputStream {
-    type Item = Result<GenerateOutput>;
-
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let raw = match ready!(Pin::new(&mut self.raw_stream).poll_next(cx)) {
-            Some(Ok(raw)) => raw,
-            Some(Err(error)) => return Poll::Ready(Some(Err(error.into()))),
-            None => return Poll::Ready(None),
+    /// Merge the outputs of one delivery into one output, like Python
+    /// `RequestState.make_request_output()` does for outputs held back by
+    /// `stream_interval`. Request metrics still observe every raw output.
+    fn merge_delivery(&mut self, delivery: EngineCoreStreamDelivery) -> Result<GenerateOutput> {
+        // Match rather than iterate, so the common single output is converted
+        // without first being moved into an iterator.
+        let mut outputs = match delivery {
+            EngineCoreStreamDelivery::One(output) => return self.convert_output(output),
+            EngineCoreStreamDelivery::Many(outputs) => outputs.into_iter(),
         };
+        let first = outputs.next().expect("deliveries are never empty");
+        let mut merged = self.convert_output(first)?;
+        for raw in outputs {
+            merged.merge(self.convert_output(raw)?);
+        }
+        Ok(merged)
+    }
 
+    /// Convert one raw engine-core output.
+    fn convert_output(&mut self, raw: EngineCoreStreamOutput) -> Result<GenerateOutput> {
         let received_at = current_unix_timestamp_secs();
         self.request_metrics.observe_output(raw.timestamp, received_at, &raw.output);
+        let num_new_tokens = raw.output.new_token_ids.len();
+        // Start a span when tokens arrive under a new label.
+        if num_new_tokens > 0
+            && let Some(version) = raw.weight_version
+            && self.weight_version_starts.last().is_none_or(|(last, _)| *last != version)
+        {
+            self.weight_version_starts.push((version, self.num_output_tokens));
+        }
+        self.num_output_tokens += num_new_tokens;
 
         let raw = raw.output;
 
@@ -269,8 +357,23 @@ impl Stream for GenerateOutputStream {
             info.prompt_logprobs =
                 raw.new_prompt_logprobs_tensors.map(|value| value.into_direct().unwrap());
         }
+        if let Some(info) = &mut self.pending_prompt_info
+            && info.prompt_token_id_logprobs.is_none()
+        {
+            info.prompt_token_id_logprobs = raw.prompt_token_id_logprobs.map(|logprobs| *logprobs);
+        }
 
         let logprobs = raw.new_logprobs.map(|value| value.into_direct().unwrap());
+        let sampling_mask = raw.new_sampling_mask.map(|value| value.into_direct().unwrap());
+        if let Some(mask) = sampling_mask.as_ref()
+            && mask.rows.len() != raw.new_token_ids.len()
+        {
+            return Err(crate::Error::SamplingMaskTokenCountMismatch {
+                request_id: raw.request_id,
+                token_count: raw.new_token_ids.len(),
+                row_count: mask.rows.len(),
+            });
+        }
         let cached_token_count = raw
             .prefill_stats
             .as_ref()
@@ -281,6 +384,11 @@ impl Stream for GenerateOutputStream {
         if let Some(finish_reason) = finish_reason.as_ref() {
             self.request_metrics.record_finished(received_at, finish_reason.clone());
         }
+        let weight_versions = if finish_reason.is_some() {
+            self.weight_version_spans()
+        } else {
+            None
+        };
 
         let output = GenerateOutput {
             request_id: raw.request_id,
@@ -291,9 +399,45 @@ impl Stream for GenerateOutputStream {
             cached_token_count,
             kv_transfer_params: raw.kv_transfer_params,
             ec_transfer_params: raw.ec_transfer_params,
+            sampling_mask,
+            spec_decode_metrics: raw.spec_decode_metrics,
+            weight_versions,
         };
 
-        Poll::Ready(Some(Ok(output)))
+        Ok(output)
+    }
+
+    /// Spans over the output so far; `[]` for no tokens, `None` if no label was reported.
+    fn weight_version_spans(&self) -> Option<Vec<WeightVersionSpan>> {
+        let starts = &self.weight_version_starts;
+        if starts.is_empty() && self.num_output_tokens > 0 {
+            return None;
+        }
+        let ends = starts.iter().skip(1).map(|(_, start)| *start).chain([self.num_output_tokens]);
+        Some(
+            starts
+                .iter()
+                .zip(ends)
+                .map(|((version, start), end)| WeightVersionSpan {
+                    version: version.clone(),
+                    start: *start,
+                    end,
+                })
+                .collect(),
+        )
+    }
+}
+
+impl Stream for GenerateOutputStream {
+    type Item = Result<GenerateOutput>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let delivery = match ready!(Pin::new(&mut self.raw_stream).poll_next(cx)) {
+            Some(Ok(delivery)) => delivery,
+            Some(Err(error)) => return Poll::Ready(Some(Err(error.into()))),
+            None => return Poll::Ready(None),
+        };
+        Poll::Ready(Some(self.merge_delivery(delivery)))
     }
 }
 
@@ -336,17 +480,22 @@ impl<T: Stream<Item = Result<GenerateOutput>> + Send> T {
             pin_mut!(stream);
             let mut prompt_token_ids = None;
             let mut prompt_logprobs = None;
+            let mut prompt_token_id_logprobs = None;
             let mut cached_token_count = 0;
             let mut collected: Option<CollectedGenerateOutput> = None;
 
             while let Some(output) = stream.next().await.transpose()? {
                 cached_token_count = cached_token_count.max(output.cached_token_count);
+                let sampling_mask = output.sampling_mask;
                 if let Some(info) = output.prompt_info {
                     if prompt_token_ids.is_none() {
                         prompt_token_ids = Some(info.prompt_token_ids.to_vec());
                     }
                     if prompt_logprobs.is_none() {
                         prompt_logprobs = info.prompt_logprobs;
+                    }
+                    if prompt_token_id_logprobs.is_none() {
+                        prompt_token_id_logprobs = info.prompt_token_id_logprobs;
                     }
                 }
 
@@ -359,11 +508,15 @@ impl<T: Stream<Item = Result<GenerateOutput>> + Send> T {
                             existing.logprobs = Some(step_logprobs);
                         }
                     }
+                    if let Some(mut mask) = sampling_mask {
+                        existing.sampling_mask.get_or_insert_default().rows.append(&mut mask.rows);
+                    }
                 } else {
                     collected = Some(CollectedGenerateOutput {
                         request_id: output.request_id,
                         prompt_token_ids: prompt_token_ids.take().unwrap_or_default(),
                         prompt_logprobs: prompt_logprobs.take(),
+                        prompt_token_id_logprobs: prompt_token_id_logprobs.take(),
                         token_ids: output.token_ids,
                         logprobs: output.logprobs,
                         finish_reason: FinishReason::Error,
@@ -374,6 +527,9 @@ impl<T: Stream<Item = Result<GenerateOutput>> + Send> T {
                         },
                         kv_transfer_params: None,
                         ec_transfer_params: None,
+                        sampling_mask,
+                        spec_decode_metrics: None,
+                        weight_versions: None,
                     });
                 }
 
@@ -385,8 +541,19 @@ impl<T: Stream<Item = Result<GenerateOutput>> + Send> T {
                         output_token_count: collected.token_ids.len(),
                         cached_token_count,
                     };
-                    collected.kv_transfer_params = output.kv_transfer_params;
-                    collected.ec_transfer_params = output.ec_transfer_params;
+                    collected.kv_transfer_params = output.kv_transfer_params.map(|value| *value);
+                    collected.ec_transfer_params = output.ec_transfer_params.map(|value| *value);
+                    collected.spec_decode_metrics = output.spec_decode_metrics.map(|value| *value);
+                    collected.weight_versions = output.weight_versions;
+                    if let Some(mask) = collected.sampling_mask.as_ref()
+                        && mask.rows.len() != collected.token_ids.len()
+                    {
+                        return Err(crate::Error::SamplingMaskTokenCountMismatch {
+                            request_id: collected.request_id,
+                            token_count: collected.token_ids.len(),
+                            row_count: mask.rows.len(),
+                        });
+                    }
                     return Ok(collected);
                 }
             }

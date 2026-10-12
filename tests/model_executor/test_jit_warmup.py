@@ -171,6 +171,19 @@ def test_warmup_range_validates_custom_advancement() -> None:
         )
 
 
+def test_warmup_cases_support_lambda_advancement() -> None:
+    def warmup_inputs() -> dict[str, Any]:
+        value: Any = WarmupIntRange(1, 9, advance=lambda value: value * 2)
+        return dict(value=value)
+
+    assert list(ToyKernel()._expand_warmup_cases(warmup_inputs)) == [
+        {"value": 1},
+        {"value": 2},
+        {"value": 4},
+        {"value": 8},
+    ]
+
+
 def test_compile_key_uses_defaults_locals_attributes_and_expressions() -> None:
     cfg = _config(bias=3, disabled=True, name="cfg", vectorized=True)
 
@@ -575,6 +588,25 @@ def test_registry_records_only_inside_model_setup_context() -> None:
 
     assert len(registry) == 1
     assert kernel.compiled == []
+
+
+def test_registry_capture() -> None:
+    class Owner:
+        @JitWarmupRegistry.capture
+        def __init__(
+            self,
+            vllm_config: Any,
+            kernel: RecordingToyKernel,
+        ) -> None:
+            kernel.register_warmup(3, vllm_config)
+
+    kernel = RecordingToyKernel()
+    config = _config()
+    owner = Owner(config, kernel)
+
+    assert len(owner.jit_warmup_registry) == 1  # type: ignore[attr-defined]
+    kernel.register_warmup(5, config)
+    assert len(owner.jit_warmup_registry) == 1  # type: ignore[attr-defined]
 
 
 def test_registry_expands_requests_and_deduplicates_owner_keys() -> None:

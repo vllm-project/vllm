@@ -284,7 +284,9 @@ fn chat_top_logprob_entries(
         usize::try_from(top_logprobs).unwrap_or(0)
     };
 
-    position.entries.iter().take(limit)
+    // The engine row is the sampled token followed by the top-k or requested
+    // tokens, so the sampled token may repeat. Keep each token's first entry.
+    position.entries.iter().unique_by(|entry| entry.token_id).take(limit)
 }
 
 fn token_bytes(token: &str) -> Vec<u8> {
@@ -368,5 +370,72 @@ mod tests {
         assert_eq!(chat_top_logprobs_len(0), 0);
         assert_eq!(chat_top_logprobs_len(1), 1);
         assert_eq!(chat_top_logprobs_len(-1), 3);
+    }
+
+    #[test]
+    fn chat_logprobs_dedupes_repeated_tokens_before_top_logprobs_cut() {
+        // Sampled `A` is also the top-1 token: the engine row is `[A, A, B, C]`.
+        let mut logprobs = sample_logprobs();
+        let sampled = logprobs.positions[0].entries[0].clone();
+        logprobs.positions[0].entries.insert(0, sampled);
+
+        let top_tokens = |top_logprobs| {
+            let chat_logprobs =
+                decoded_logprobs_to_openai_chat(&logprobs, top_logprobs, false).unwrap();
+            chat_logprobs.content.unwrap()[0]
+                .top_logprobs
+                .iter()
+                .map(|entry| entry.token.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(top_tokens(2), ["A", "B"]);
+        assert_eq!(top_tokens(-1), ["A", "B", "C"]);
+    }
+
+    #[test]
+    fn chat_logprobs_clamps_nan_and_negative_infinity_for_json() {
+        let mut logprobs = sample_logprobs();
+        logprobs.positions[0].entries[0].logprob = f32::NAN;
+        logprobs.positions[0].entries[0].rank = 0;
+        logprobs.positions[0].entries[1].logprob = f32::NEG_INFINITY;
+
+        let response = decoded_logprobs_to_openai_chat(&logprobs, -1, false).unwrap();
+        let json = serde_json::to_string_pretty(&response).unwrap();
+        expect_test::expect![[r#"
+            {
+              "content": [
+                {
+                  "token": "A",
+                  "logprob": -9999.0,
+                  "bytes": [
+                    65
+                  ],
+                  "top_logprobs": [
+                    {
+                      "token": "A",
+                      "logprob": -9999.0,
+                      "bytes": [
+                        65
+                      ]
+                    },
+                    {
+                      "token": "B",
+                      "logprob": -9999.0,
+                      "bytes": [
+                        66
+                      ]
+                    },
+                    {
+                      "token": "C",
+                      "logprob": -2.0,
+                      "bytes": [
+                        67
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }"#]]
+        .assert_eq(&json);
     }
 }

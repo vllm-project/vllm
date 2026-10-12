@@ -21,7 +21,6 @@ license-files = ["LICENSE"]
 readme = "README.md"
 description = "A high-throughput and memory-efficient inference and serving engine for LLMs"
 classifiers = [
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
@@ -32,7 +31,7 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
     "Topic :: Scientific/Engineering :: Information Analysis",
 ]
-requires-python = ">=3.10,<3.15"
+requires-python = ">=3.11,<3.15"
 dynamic = [ "version", "dependencies", "optional-dependencies"]
 
 [project.urls]
@@ -55,12 +54,18 @@ where = ["."]
 include = ["vllm*"]
 
 [tool.ruff.lint.per-file-ignores]
+# `vllm` is the only installed package; everything else is standalone scripts
+"!vllm/**" = ["INP"]
 "vllm/third_party/**" = ["ALL"]
 "vllm/version.py" = ["F401"]
 "vllm/_version.py" = ["ALL"]
+# test args are mostly pytest fixtures, which don't benefit from descriptions
+"tests/**" = ["D417"]
 
 [tool.ruff.lint]
 select = [
+    # pydocstyle
+    "D",
     # pycodestyle
     "E",
     # Pyflakes
@@ -77,8 +82,16 @@ select = [
     "I",
     # flake8-logging-format
     "G",
+    # flake8-no-pep420
+    "INP",
 ]
 ignore = [
+    # don't enforce that everything has a docstring
+    "D100", "D101", "D102", "D103", "D104", "D105", "D106", "D107",
+    # unwanted pydocstyle rules
+    "D205", "D209", "D301", "D400", "D401", "D404", "D415",
+    # incompatible pydocstyle pairs; pin the half `ruff` already picks
+    "D203", "D213",
     # star imports
     "F405", "F403",
     # lambda expression assignment
@@ -89,7 +102,12 @@ ignore = [
     "B007",
     # f-string format
     "UP032",
+    # `StrEnum` changes `str()` and `format()` output of members
+    "UP042",
 ]
+
+[tool.ruff.lint.pydocstyle]
+ignore-var-parameters = true
 
 [tool.ruff.format]
 docstring-code-format = true
@@ -99,6 +117,11 @@ plugins = ['pydantic.mypy']
 ignore_missing_imports = true
 check_untyped_defs = true
 follow_imports = "silent"
+
+[[tool.mypy.overrides]]
+module = "tests.*"
+disable_error_code = ["arg-type", "assignment"]
+enable_error_code = ["method-assign"]
 
 [tool.pytest.ini_options]
 markers = [
@@ -113,6 +136,54 @@ markers = [
     "optional: optional tests that are automatically skipped, include --optional to run them",
 ]
 
+[tool.coverage.run]
+# Track the installed vllm package (this is what actually gets imported during tests)
+# Use wildcard pattern to match the installed location
+source = ["vllm", "*/dist-packages/vllm", "*/site-packages/vllm"]
+omit = [
+    "*/tests/*",
+    "*/test_*",
+    "*/__pycache__/*",
+    "*/build/*",
+    "*/dist/*",
+    "*/vllm.egg-info/*",
+    "*/third_party/*",
+    "*/examples/*",
+    "*/benchmarks/*",
+    "*/docs/*",
+]
+
+[tool.coverage.paths]
+# Map all possible vllm locations to a canonical "vllm" path
+# This ensures coverage.combine properly merges data from different test runs
+source = [
+    "vllm",
+    "/vllm-workspace/src/vllm",
+    "/vllm-workspace/vllm",
+    "*/site-packages/vllm",
+    "*/dist-packages/vllm",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    'pragma: no cover',
+    'def __repr__',
+    'if self.debug:',
+    'if settings.DEBUG',
+    'raise AssertionError',
+    'raise NotImplementedError',
+    'if 0:',
+    'if __name__ == .__main__.:',
+    'class .*\bProtocol\):',
+    '@(abc\.)?abstractmethod',
+]
+
+[tool.coverage.html]
+directory = "htmlcov"
+
+[tool.coverage.xml]
+output = "coverage.xml"
+
 [tool.ty.src]
 respect-ignore-files = true
 
@@ -122,12 +193,11 @@ python = "./.venv"
 [tool.typos.files]
 # these files may be written in non english words
 extend-exclude = ["tests/models/fixtures/*", "tests/prompts/*", "tests/tokenizers_/*",
-    "benchmarks/sonnet.txt", "rust/src/bench/src/datasets/sonnet.txt",
     "tests/lora/data/*", "build/*",
     "examples/pooling/token_embed/*", "tests/models/language/pooling/*",
     "vllm/third_party/*", "vllm/entrypoints/serve/instrumentator/static/*",
     "tests/entrypoints/speech_to_text/transcription/test_transcription_validation.py",
-    "docs/governance/process.md", "docs/assets/contributing/vllm_bench_serve_timeline.html", 
+    "docs/governance/process.md", "docs/community/reviewers.md", "docs/assets/contributing/vllm_bench_serve_timeline.html", 
     "tests/v1/engine/test_fast_incdec_prefix_err.py", ".git/*", "csrc/cpu/sgl-kernels/*",
     "rust/src/chat/src/renderer/deepseek_v32/fixtures/*", "rust/src/parser/**",
     "rust/src/text/src/output/decoded.rs",
@@ -193,3 +263,8 @@ CANN = "CANN"
 
 [tool.uv]
 no-build-isolation-package = ["torch"]
+# vLLM depends on oss-harmony, a fork that ships the same `openai_harmony`
+# module without downloading tiktoken vocabularies at runtime. Installing
+# openai-harmony alongside it silently overwrites those files, so keep it out
+# of every resolution; gpt-oss pulls it in transitively.
+exclude-dependencies = ["openai-harmony"]

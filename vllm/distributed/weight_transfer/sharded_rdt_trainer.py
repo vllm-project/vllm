@@ -24,7 +24,7 @@ import uuid
 from collections.abc import Callable, Collection
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Self
 
 import ray
 import torch
@@ -33,7 +33,6 @@ from torch.multiprocessing.reductions import (
     rebuild_cuda_tensor,
     reduce_tensor,
 )
-from typing_extensions import Self
 
 from vllm.distributed.weight_transfer.base import (
     ParamMeta,
@@ -47,6 +46,7 @@ from vllm.distributed.weight_transfer.sharded_rdt_common import (
     ALLOWED_OPS,
     buffer_alloc_bytes,
     check_ray_rdt_version,
+    register_nixl_memory,
 )
 from vllm.logger import init_logger
 
@@ -334,8 +334,6 @@ class _RDTProducerServer:
         doc). The warmup buffer stays registered so the agent's CUDA-HMEM path
         stays initialized.
         """
-        from ray.experimental import register_nixl_memory
-
         self._nixl_warmup_buf = torch.zeros(1 << 20, dtype=torch.uint8, device="cuda")
         with self._reg_lock:
             register_nixl_memory(self._nixl_warmup_buf)
@@ -510,8 +508,6 @@ class _RDTProducerServer:
         """Allocate + NIXL-register one serve slot: the single allocation seam,
         so registration cannot be skipped on either of the two paths that make
         buffers (the init-time reservation and the serve-path backstop)."""
-        from ray.experimental import register_nixl_memory
-
         t = torch.empty(nbytes, dtype=torch.uint8, device=self._serve_device)
         with self._reg_lock:
             register_nixl_memory(t)
@@ -537,6 +533,7 @@ class _RDTProducerServer:
         Raises:
             RuntimeError: two consumers of one sharing group disagree on the
                 chunks they pull from this producer.
+
         """
         sg = self._share_group(consumer_id)
         if plan_digest is not None:
@@ -684,6 +681,7 @@ class _RDTProducerServer:
 
         Raises:
             ValueError: ``seq`` was not supplied.
+
         """
         needed = sorted({n for n, _ in specs})
         if self._served_names is not None:
@@ -1026,6 +1024,7 @@ class ShardedRDTTrainerWeightTransferEngine(
 
         Raises:
             RuntimeError: called before ``trainer_init`` cached the server names.
+
         """
         if self._server_names is None:
             raise RuntimeError(

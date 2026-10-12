@@ -5,7 +5,7 @@ import asyncio
 import contextlib
 import signal
 import socket
-from collections.abc import Generator
+from collections.abc import Generator, MutableSequence
 from functools import partial
 from typing import Any
 
@@ -34,27 +34,152 @@ from .utils.constants import (
 
 logger = init_logger(__name__)
 
+# A worker with more connections than another leaves a pending connection to
+# the less loaded one, rechecking every 1 ms, for up to 5 ms (it may be busy).
+_ACCEPT_DEFER_CHECKS = 5
+# The load of a worker that is not accepting (also the initial value of the
+# shared array), so it is never the least loaded.
+_NOT_ACCEPTING = 2**31 - 1
+
 
 class NoSignalServer(uvicorn.Server):
     """Uvicorn server that never installs its own SIGINT/SIGTERM handlers.
 
     Callers register their own handlers on the event loop for graceful
     shutdown; uvicorn's would race with and override them (see #49668).
+
+    With ``peer_loads`` (several API workers on one shared socket: a shared
+    array with one slot per worker, and this worker's index), each worker
+    publishes its number of open connections, and a pending connection is
+    accepted by the least loaded worker. The event loop's own server would
+    accept every queued connection in whichever worker wakes first.
     """
+
+    def __init__(
+        self,
+        config: uvicorn.Config,
+        peer_loads: tuple[MutableSequence[int], int] | None = None,
+    ):
+        super().__init__(config)
+        self.peer_loads = peer_loads
+        self._accept_tasks: set[asyncio.Task] = set()
+        self._connecting = 0
 
     @contextlib.contextmanager
     def capture_signals(self) -> Generator[None, None, None]:
         yield
+
+    def _publish_load(self) -> None:
+        assert self.peer_loads is not None
+        loads, index = self.peer_loads
+        loads[index] = len(self.server_state.connections) + self._connecting
+
+    def _least_loaded(self) -> bool:
+        assert self.peer_loads is not None
+        loads, index = self.peer_loads
+        return loads[index] <= min(loads)
+
+    async def startup(self, sockets: list[socket.socket] | None = None) -> None:
+        if not (self.peer_loads and sockets):
+            return await super().startup(sockets)
+        # With no sockets uvicorn starts no asyncio server; _accept serves
+        # them with uvicorn's protocol instead.
+        await super().startup(sockets=[])
+        if not self.started:  # lifespan startup failed (uvicorn < 0.50)
+            return
+        self._publish_load()
+        for sock in sockets:
+            sock.listen(self.config.backlog)
+            sock.setblocking(False)
+            self._track(self._accept(sock))
+
+    def _track(self, coro) -> None:
+        task = asyncio.create_task(coro)
+        self._accept_tasks.add(task)
+        task.add_done_callback(self._accept_tasks.discard)
+
+    async def _accept(self, sock: socket.socket) -> None:
+        loop = asyncio.get_running_loop()
+        while True:
+            await _readable(loop, sock)
+            # Connections closed since the last accept; peers refresh likewise.
+            self._publish_load()
+            for _ in range(_ACCEPT_DEFER_CHECKS):
+                if self._least_loaded():
+                    break
+                await asyncio.sleep(0.001)
+            try:
+                conn, _ = sock.accept()
+            except (BlockingIOError, InterruptedError, ConnectionAbortedError):
+                continue  # another worker took it
+            except OSError:
+                # e.g. EMFILE; asyncio's own server also retries after 1 s.
+                logger.exception("Error accepting a connection")
+                await asyncio.sleep(1)
+                continue
+            self._connecting += 1
+            self._publish_load()
+            # Its own task, so a TLS handshake does not hold up the next accept.
+            self._track(self._connect(loop, conn))
+
+    async def _connect(self, loop: asyncio.AbstractEventLoop, conn: socket.socket):
+        config = self.config
+        try:
+            await loop.connect_accepted_socket(
+                lambda: config.http_protocol_class(  # type: ignore[call-arg]
+                    config=config,
+                    server_state=self.server_state,
+                    app_state=self.lifespan.state,
+                    _loop=loop,
+                ),
+                conn,
+                ssl=config.ssl,
+            )
+        except asyncio.CancelledError:
+            conn.close()
+            raise
+        except Exception:
+            # e.g. a failed TLS handshake
+            logger.debug("Accepted connection failed to start", exc_info=True)
+            conn.close()
+        finally:
+            self._connecting -= 1
+            self._publish_load()
+
+    async def shutdown(self, sockets: list[socket.socket] | None = None) -> None:
+        # Before super() closes the listening sockets.
+        tasks = list(self._accept_tasks)
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        if self.peer_loads is not None:
+            loads, index = self.peer_loads
+            loads[index] = _NOT_ACCEPTING
+        await super().shutdown(sockets)
+
+
+async def _readable(loop: asyncio.AbstractEventLoop, sock: socket.socket) -> None:
+    ready: asyncio.Future[None] = loop.create_future()
+
+    def wake() -> None:
+        if not ready.done():
+            ready.set_result(None)
+
+    loop.add_reader(sock, wake)
+    try:
+        await ready
+    finally:
+        loop.remove_reader(sock)
 
 
 async def serve_http(
     app: FastAPI,
     sock: socket.socket | None,
     enable_ssl_refresh: bool = False,
+    peer_loads: tuple[MutableSequence[int], int] | None = None,
     **uvicorn_kwargs: Any,
 ):
-    """
-    Start a FastAPI app using Uvicorn, with support for custom Uvicorn config
+    """Start a FastAPI app using Uvicorn, with support for custom Uvicorn config
     options.  Supports http header limits via h11_max_incomplete_event_size and
     h11_max_header_count.
     """
@@ -97,7 +222,7 @@ async def serve_http(
     config.h11_max_incomplete_event_size = h11_max_incomplete_event_size
     config.h11_max_header_count = h11_max_header_count
     config.load()
-    server = NoSignalServer(config)
+    server = NoSignalServer(config, peer_loads=peer_loads)
     app.state.server = server
 
     loop = asyncio.get_running_loop()
@@ -185,8 +310,7 @@ async def serve_http(
 
 
 async def watchdog_loop(server: uvicorn.Server, engine: EngineClient):
-    """
-    # Watchdog task that runs in the background, checking
+    """# Watchdog task that runs in the background, checking
     # for error state in the engine. Needed to trigger shutdown
     # if an exception arises is StreamingResponse() generator.
     """
@@ -197,8 +321,7 @@ async def watchdog_loop(server: uvicorn.Server, engine: EngineClient):
 
 
 def terminate_if_errored(server: uvicorn.Server, engine: EngineClient):
-    """
-    See discussions here on shutting down a uvicorn server
+    """See discussions here on shutting down a uvicorn server
     https://github.com/encode/uvicorn/discussions/1103
     In this case we cannot await the server shutdown here
     because handler must first return to close the connection
@@ -254,7 +377,6 @@ def validate_api_server_args(args):
 @instrument(span_name="API server setup")
 def setup_server(args, *, reuse_port: bool):
     """Validate API server args and create the server socket."""
-
     log_version_and_model(logger, VLLM_VERSION, args.model)
     log_non_default_args(args)
 

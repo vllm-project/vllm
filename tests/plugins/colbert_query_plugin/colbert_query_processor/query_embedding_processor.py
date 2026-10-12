@@ -121,7 +121,7 @@ class ColBERTQueryEmbeddingProcessor(
         tokenizer,
         content_ids: list[int],
     ) -> TokensPrompt:
-        """[CLS] [DocumentMarker] <tokens> [SEP]"""
+        """[CLS] [DocumentMarker] <tokens> [SEP]."""
         _, document_marker_id = self._resolve_marker_ids(tokenizer)
 
         content_ids = content_ids[: self.max_model_len - 3]

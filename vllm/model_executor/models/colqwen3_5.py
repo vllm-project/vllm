@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-ColQwen3.5 late interaction model for multi-modal retrieval and reranking.
+"""ColQwen3.5 late interaction model for multi-modal retrieval and reranking.
 
 ColQwen3.5 extends Qwen3.5 with a ColBERT-style late interaction head,
 producing per-token embeddings for both text and image inputs. It uses
@@ -59,7 +58,6 @@ class ColQwen3_5ProcessingInfo(Qwen3_5ProcessingInfo):
     def get_hf_processor(self, **kwargs: object) -> Qwen3VLProcessor:
         return self.ctx.get_hf_processor(
             Qwen3VLProcessor,
-            use_fast=kwargs.pop("use_fast", True),
             **kwargs,
         )
 
@@ -128,6 +126,7 @@ class ColQwen3_5Model(
     Attributes:
         custom_text_proj: Linear projection from hidden_size to embed_dim.
             This is passed to the pooler as pooler.head.projector.
+
     """
 
     # Mark this as a pooling model so vLLM routes to pooler path

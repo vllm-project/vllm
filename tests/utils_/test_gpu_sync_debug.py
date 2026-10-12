@@ -124,6 +124,24 @@ def test_suppressing_works_while_compiling(monkeypatch):
 
 
 @create_new_process_for_each_test()
+def test_copy_checker_is_traceable_while_compiling(monkeypatch):
+    """The copy wrapper must bypass ContextVars while Dynamo is tracing."""
+    monkeypatch.setattr(gsd, "_SYNC_CHECK_MODE", "error")
+    monkeypatch.setattr(gsd, "_sync_check_enabled", True)
+    gsd._install_copy_checkers()
+
+    def convert_like(x, like):
+        return x.to(device=like.device, dtype=like.dtype)
+
+    compiled = torch.compile(convert_like, fullgraph=True)
+    result = compiled(
+        torch.ones(4, device="cuda", dtype=torch.float64),
+        torch.ones(4, device="cuda", dtype=torch.float32),
+    )
+    assert result.dtype == torch.float32
+
+
+@create_new_process_for_each_test()
 def test_sync_debug_mode_restored_after_checked_call(monkeypatch):
     """The mode is armed only for the duration of a checked call. Leaving it
     on process-wide made every sync outside a checked region emit a

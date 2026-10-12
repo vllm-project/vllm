@@ -1,7 +1,6 @@
 version: v2
 modules:
   - path: .
-    name: buf.build/vllm-project/vllm
 lint:
   use:
     - MINIMAL

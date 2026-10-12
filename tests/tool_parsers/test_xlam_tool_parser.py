@@ -100,7 +100,7 @@ def test_extract_tool_calls_no_tools(xlam_tool_parser):
     model_output = "This is a test"
     extracted_tool_calls = xlam_tool_parser.extract_tool_calls(
         model_output, request=None
-    )  # type: ignore[arg-type]
+    )
     assert not extracted_tool_calls.tools_called
     assert extracted_tool_calls.tool_calls == []
     assert extracted_tool_calls.content == model_output
@@ -225,7 +225,7 @@ def test_extract_tool_calls(
 ):
     extracted_tool_calls = xlam_tool_parser.extract_tool_calls(
         model_output, request=None
-    )  # type: ignore[arg-type]
+    )
     assert extracted_tool_calls.tools_called
 
     assert_tool_calls(extracted_tool_calls.tool_calls, expected_tool_calls)
@@ -263,7 +263,7 @@ def test_extract_tool_calls_list_structure(
     """Test extraction of tool calls when the model outputs a list-structured tool call."""  # noqa: E501
     extracted_tool_calls = xlam_tool_parser.extract_tool_calls(
         model_output, request=None
-    )  # type: ignore[arg-type]
+    )
     assert extracted_tool_calls.tools_called
 
     assert_tool_calls(extracted_tool_calls.tool_calls, expected_tool_calls)
@@ -550,7 +550,7 @@ def test_extract_tool_calls_non_ascii(xlam_tool_parser, xlam_tokenizer, streamin
             if delta.tool_calls and delta.tool_calls[0].function.arguments
         )
     else:
-        extracted = xlam_tool_parser.extract_tool_calls(model_output, request=None)  # type: ignore[arg-type]
+        extracted = xlam_tool_parser.extract_tool_calls(model_output, request=None)
         args = "".join(tc.function.arguments for tc in extracted.tool_calls)
 
     assert "北京" in args

@@ -1,11 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import inspect
 from pathlib import Path
 
 import numpy as np
 import pytest
 from PIL import Image
 
+from vllm.multimodal.image import (
+    ALLOWED_IMAGE_FORMATS,
+    open_image,
+)
 from vllm.multimodal.media import ImageMediaIO
 
 pytestmark = pytest.mark.cpu_test
@@ -105,7 +110,6 @@ def test_image_media_io_no_mode_conversion(tmp_path):
 
 def test_image_media_io_rgba_background_color_validation():
     """Test that invalid rgba_background_color values are properly rejected."""
-
     # Test invalid types
     with pytest.raises(
         ValueError, match="rgba_background_color must be a list or tuple"
@@ -282,3 +286,72 @@ def test_image_pixel_limit_disabled(monkeypatch):
     image_io = ImageMediaIO()
     result = image_io.load_bytes(data)
     assert result.media.size == (1000, 1000)
+
+
+def test_image_media_io_rejects_postscript_payload():
+    """EPS/PostScript bytes must not reach an external renderer."""
+    import pybase64 as base64
+
+    eps = b"""%!PS-Adobe-3.0 EPSF-3.0
+%%BoundingBox: 0 0 10 10
+%%EndComments
+0 0 moveto 10 10 lineto stroke
+showpage
+"""
+    image_io = ImageMediaIO()
+    with pytest.raises(ValueError, match="Failed to load image"):
+        image_io.load_bytes(eps)
+
+    payload = base64.b64encode(eps).decode("ascii")
+    with pytest.raises(ValueError, match="Failed to load image"):
+        image_io.load_base64("image/png", payload)
+
+
+def test_image_media_io_accepts_common_raster_formats(tmp_path):
+    """Common Pillow-writable raster formats remain loadable."""
+    image_io = ImageMediaIO()
+    formats = (
+        ("PNG", "ok.png"),
+        ("JPEG", "ok.jpg"),
+        ("WEBP", "ok.webp"),
+        ("GIF", "ok.gif"),
+        ("BMP", "ok.bmp"),
+        ("TIFF", "ok.tiff"),
+        ("PPM", "ok.ppm"),
+        ("TGA", "ok.tga"),
+        ("DDS", "ok.dds"),
+        ("PCX", "ok.pcx"),
+        ("SGI", "ok.sgi"),
+        ("QOI", "ok.qoi"),
+        ("JPEG2000", "ok.jp2"),
+    )
+    for fmt, name in formats:
+        path = tmp_path / name
+        Image.new("RGB", (4, 4), (1, 2, 3)).save(path, format=fmt)
+        result = image_io.load_bytes(path.read_bytes())
+        assert result.media.size == (4, 4)
+
+
+def test_allowed_image_formats_exclude_external_renderer_plugins():
+    """Formats that shell out or use stubs stay off the allowlist."""
+    denied = {"EPS", "WMF", "BUFR", "GRIB", "HDF5", "MPEG"}
+    assert denied.isdisjoint(ALLOWED_IMAGE_FORMATS)
+
+
+def test_kimi_fused_vision_rejects_postscript_payload():
+    """Kimi fused vision must use the same image format allowlist."""
+    from vllm.transformers_utils.processors.kimi_k25_vision_fused import _to_pil
+
+    eps = b"""%!PS-Adobe-3.0 EPSF-3.0
+%%BoundingBox: 0 0 10 10
+%%EndComments
+0 0 moveto 10 10 lineto stroke
+showpage
+"""
+    with pytest.raises(Image.UnidentifiedImageError):
+        _to_pil(eps)
+
+
+def test_open_image_does_not_accept_format_override():
+    """The allowlist helper must not expose a formats override."""
+    assert "formats" not in inspect.signature(open_image).parameters
