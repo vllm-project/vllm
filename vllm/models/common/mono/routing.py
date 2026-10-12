@@ -10,6 +10,7 @@ batches and every width is a capture size (``guards.set_capture_sizes``), so
 no replay pads a request's rows. PIECEWISE steps run vLLM's layers.
 """
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -17,6 +18,7 @@ import torch
 from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
+from vllm.model_executor.warmup.jit_warmup import VllmJitKernel
 from vllm.models.common.mono import failstop
 from vllm.models.common.mono.guards import agree
 from vllm.models.common.mono.spec import (
@@ -31,6 +33,27 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
 logger = init_logger(__name__)
+
+
+class MonoWarmup(VllmJitKernel["MonoWarmup.CompileKey"]):
+    """A spec's layer-kernel builds as vLLM JIT warm-up keys."""
+
+    @dataclass(frozen=True)
+    class CompileKey:
+        spec: str
+        build: Any  # a hashable build key its LayerKernel compiles
+
+    def __init__(self, spec: str, owners: dict[Any, LayerKernel]):
+        super().__init__()
+        self.spec = spec
+        self.owners = owners
+
+    def get_warmup_keys(self) -> list["MonoWarmup.CompileKey"]:
+        return [self.CompileKey(self.spec, b) for b in self.owners]
+
+    def compile(self, compile_key: "MonoWarmup.CompileKey") -> None:
+        self.owners[compile_key.build].compile(compile_key.build)
+        self._compiled_cache[compile_key] = True
 
 
 class Mono:
@@ -62,7 +85,12 @@ class Mono:
         self.cache_layers = sorted(
             {n for k in self.kernels.values() for n in k.cache_layers}
         )
+        self._register_warmup()
         self.step: MonoStep | None = None
+        # the decision each captured FULL graph baked in, by size: a replay
+        # runs no Python, so a step is counted from its size (``account``)
+        self.baked: dict[int, str | None] = {}
+        self.last: str | None = "no step"
         self._fc: Any = None
         self._bound: tuple | None = None
         logger.info(
@@ -71,6 +99,15 @@ class Mono:
             len({i for i, _ in self.kernels}),
             list(self.widths),
         )
+
+    def _register_warmup(self) -> None:
+        """Every width's builds compile in vLLM's JIT warm-up, before capture."""
+        owners: dict[Any, LayerKernel] = {}
+        for k in self.kernels.values():
+            for key in k.warmup_keys():
+                owners.setdefault(key, k)
+        if owners:
+            MonoWarmup(self.spec.name, owners).register_warmup()
 
     def _bind(self) -> None:
         """Re-checks the caches whenever they moved (keyed on every tensor's
@@ -97,8 +134,18 @@ class Mono:
         reason it runs vLLM's layers."""
         self.step = None
         why = self._decide(positions)
-        failstop.count_step(self.spec.name, why)
+        if get_forward_context().cudagraph_runtime_mode == CUDAGraphMode.FULL:
+            self.baked[positions.size(-1)] = why
+        self.last = why
         return why
+
+    def account(self, num_tokens: int, runtime_mode: CUDAGraphMode) -> None:
+        """Counts one served step, after its forward."""
+        if runtime_mode == CUDAGraphMode.FULL:
+            why = self.baked.get(num_tokens, "not captured")
+        else:
+            why, self.last = self.last, "no step"
+        failstop.count_step(self.spec.name, why)
 
     def _decide(self, positions: torch.Tensor) -> str | None:
         fc = get_forward_context()

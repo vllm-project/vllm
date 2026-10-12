@@ -77,6 +77,15 @@ class LayerKernel(Protocol):
         """The error words (``abi``)."""
         ...
 
+    def warmup_keys(self) -> list[Any]:
+        """Hashable build keys of this width's launches, compiled before CUDA
+        graph capture by vLLM's JIT warm-up."""
+        ...
+
+    def compile(self, key: Any) -> None:
+        """Compiles one of ``warmup_keys`` without launching it."""
+        ...
+
 
 @dataclass(frozen=True)
 class MonoSpec:

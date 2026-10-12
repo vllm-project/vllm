@@ -178,6 +178,8 @@ def pack(model, ctx: MonoContext) -> Any:
     from vllm.models.kimi_k3.amd.mono.runner import MonoRunner
 
     runner = MonoRunner(ctx.device)
+    spec = ctx.vllm_config.speculative_config
+    runner.num_spec = 0 if spec is None else spec.num_speculative_tokens
     if (fault := fault_inject()) is not None:
         rank, epoch, us = fault
         runner.fault = {
@@ -234,7 +236,7 @@ def build(ctx: MonoContext, packed, layer, width: int):
     from vllm.models.kimi_k3.amd.mono.kernel import FfnLayer, WholeLayer
 
     whole = isinstance(layer.self_attn, KimiK3DeltaAttention)
-    return (WholeLayer if whole else FfnLayer)(layer, packed)
+    return (WholeLayer if whole else FfnLayer)(layer, packed, width)
 
 
 MONO_SPEC = MonoSpec(

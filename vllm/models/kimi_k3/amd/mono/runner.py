@@ -58,6 +58,7 @@ class MonoRunner:
         self.fault: dict = {}  # K2Build's fault_* fields (tests only)
         self.first_layer = -1  # the step's first kernel layer: bumps the epoch
         self.kda_prefix = ""  # a KDA layer's name: the step's metadata
+        self.num_spec = 0  # speculative tokens a request
 
     def step_begin(self) -> None:
         """Once a forward, before its first mono launch (a graph captures it)."""
