@@ -6,8 +6,10 @@ Request bookkeeping (states, block tables, input preparation, sampling
 post-processing) is the stock V2 runner's. The forward pass is replaced by a
 `TimingProvider` that predicts how long the step would take, and sampling by
 trace replay (`SamplingParams.trace_decode_token_ids`) with a fixed fallback
-token. The predicted time is paid in `SimulatedAsyncOutput.get_output()`, so
-the engine core can keep scheduling the next step meanwhile.
+token. A step's predicted host time holds the engine thread inside
+`sample_tokens()`, as the real calls would; its device time runs on a serial
+device queue and is paid in `SimulatedAsyncOutput.get_output()`, so the engine
+core can schedule the next step meanwhile.
 """
 
 from contextlib import AbstractContextManager
@@ -35,6 +37,7 @@ from vllm.v1.worker.simulated.timing import (
     StepCost,
     StepDescriptor,
     StepLogWriter,
+    ZeroTimingProvider,
     build_step_descriptor,
     get_timing_provider,
     parallel_summary,
@@ -51,7 +54,9 @@ class _PendingStep:
     input_batch: InputBatch
     descriptor: StepDescriptor
     cost: StepCost
+    t_entry: float
     t_start: float
+    t_deadline: float
     finished_req_ids: list[str]
 
 
@@ -109,7 +114,7 @@ class SimulatedModelRunner(GPUModelRunner):
         hundreds of milliseconds and distorts early TTFT samples.
 
         Best effort: a failure costs only the warmup, and the step is neither
-        timed nor logged."""
+        priced nor logged."""
         from vllm.sampling_params import SamplingParams
         from vllm.v1.core.sched.output import NewRequestData, SchedulerOutput
 
@@ -134,6 +139,8 @@ class SimulatedModelRunner(GPUModelRunner):
         done.finished_req_ids = {req_id}
 
         step_log, self.step_log = self.step_log, None
+        provider = self.timing_provider
+        self.timing_provider = ZeroTimingProvider(self.vllm_config)
         try:
             assert self.execute_model(step) is None
             out = self.sample_tokens(None)
@@ -145,6 +152,7 @@ class SimulatedModelRunner(GPUModelRunner):
                 torch.accelerator.synchronize()
         finally:
             self.step_log = step_log
+            self.timing_provider = provider
             self._pending_step = None
             self._prompt_lens.clear()
             self._step_index = 0
@@ -169,6 +177,7 @@ class SimulatedModelRunner(GPUModelRunner):
         if dummy_run:
             return EMPTY_MODEL_RUNNER_OUTPUT
 
+        t_entry = self.clock.now()
         self.finish_requests(scheduler_output)
         self.free_states(scheduler_output)
         self.add_requests(scheduler_output)
@@ -197,14 +206,17 @@ class SimulatedModelRunner(GPUModelRunner):
             scheduler_output, self._prompt_lens, self._step_index, self._parallel
         )
         cost = self.timing_provider.estimate(descriptor)
-        # Queue the step behind whatever the device is still "executing".
-        t_start = max(self.clock.now(), self._device_free_at)
-        self._device_free_at = t_start + cost.total_s
+        # Queue the step behind whatever the device is still "executing". It
+        # cannot complete before its host work (launches, sampling) is done.
+        t_start = max(t_entry, self._device_free_at)
+        self._device_free_at = t_start + cost.device_s
         self._pending_step = _PendingStep(
             input_batch=input_batch,
             descriptor=descriptor,
             cost=cost,
+            t_entry=t_entry,
             t_start=t_start,
+            t_deadline=max(self._device_free_at, t_entry + cost.host_s),
             finished_req_ids=list(scheduler_output.finished_req_ids),
         )
         self._step_index += 1
@@ -258,16 +270,17 @@ class SimulatedModelRunner(GPUModelRunner):
             sampled_token_ids=sampled_token_ids_list,
         )
 
-        deadline = pending.t_start + pending.cost.total_s
         if self.step_log is not None:
             self.step_log.write(
                 pending.descriptor,
                 pending.cost,
                 pending.t_start,
-                deadline,
+                pending.t_deadline,
                 pending.finished_req_ids,
             )
-        return SimulatedAsyncOutput(output, deadline, self.clock)
+        # Hold the engine thread for the rest of the step's host time.
+        self.clock.sleep_until(pending.t_entry + pending.cost.host_s)
+        return SimulatedAsyncOutput(output, pending.t_deadline, self.clock)
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:
         return None

@@ -12,6 +12,7 @@ step decomposes into kernels is the provider's business.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import time
 from dataclasses import asdict, dataclass, field
@@ -187,10 +188,13 @@ def build_step_descriptor(
 class StepCost:
     """Predicted cost of one step.
 
-    `device_s` is the time the device is busy. `host_s` is an optional extra
-    host-side term for the *target* machine; the host where the simulation
-    runs already pays its own scheduler cost in real time, so providers should
-    leave it at zero unless they model a different host."""
+    `device_s` is the time the device is busy with the step. `host_s` is the
+    host time the target deployment spends inside the step's
+    `execute_model`/`sample_tokens` calls (input preparation, kernel launches,
+    sampling); the simulated runner holds the engine thread for that long, as
+    the real calls would, while the device time runs on the device queue. The
+    rest of the host loop (scheduling, output processing) is the real code and
+    pays its own cost."""
 
     device_s: float
     host_s: float = 0.0
@@ -198,10 +202,6 @@ class StepCost:
     """Per-request accepted draft tokens (speculative decoding), or None."""
     breakdown: dict[str, float] | None = None
     """Optional named components (e.g. per kernel class), for logging."""
-
-    @property
-    def total_s(self) -> float:
-        return self.device_s + self.host_s
 
 
 @runtime_checkable
@@ -276,10 +276,15 @@ def _step_features(step: StepDescriptor) -> tuple[float, float, float]:
 
 class _KNNTable:
     """Inverse-distance weighted k-NN over z-scored (num_reqs, num_tokens,
-    sum_past_kv) features. Points are normalized once; a query is one
-    vectorized distance pass, so lookups stay off the step's critical path."""
+    sum_past_kv) features, interpolating (device_s, host_s). Points are
+    normalized once; a query is one vectorized distance pass, so lookups stay
+    off the step's critical path."""
 
-    def __init__(self, points: list[tuple[tuple[float, float, float], float]], k: int):
+    def __init__(
+        self,
+        points: list[tuple[tuple[float, float, float], tuple[float, float]]],
+        k: int,
+    ):
         if not points:
             raise ValueError("timing table is empty")
         feats = np.asarray([p for p, _ in points], dtype=np.float64)
@@ -290,15 +295,17 @@ class _KNNTable:
         self.points = (feats - self.mean) / self.std
         self.k = min(max(1, k), len(points))
 
-    def query(self, f: tuple[float, float, float]) -> float:
+    def query(self, f: tuple[float, float, float]) -> StepCost:
         q = (np.asarray(f, dtype=np.float64) - self.mean) / self.std
         dist = np.sqrt(((self.points - q) ** 2).sum(axis=1))
         idx = np.argpartition(dist, self.k - 1)[: self.k]
         d = dist[idx]
         if (d == 0.0).any():
-            return float(self.values[idx[d == 0.0]].mean())
-        w = 1.0 / d
-        return float((w * self.values[idx]).sum() / w.sum())
+            device_s, host_s = self.values[idx[d == 0.0]].mean(axis=0)
+        else:
+            w = 1.0 / d
+            device_s, host_s = (w[:, None] * self.values[idx]).sum(axis=0) / w.sum()
+        return StepCost(device_s=float(device_s), host_s=float(host_s))
 
 
 def _load_json_or_jsonl(path: str) -> list[dict[str, Any]]:
@@ -312,21 +319,10 @@ def _load_json_or_jsonl(path: str) -> list[dict[str, Any]]:
     return [json.loads(line) for line in text.splitlines() if line.strip()]
 
 
-_CRITICAL_PATHS = ("max", "device")
-
-
-def _record_device_s(rec: dict[str, Any], critical_path: str = "device") -> float:
-    """Step time of a record from `--simulation-config log_path` or a
-    hand-written table: {"cost": {"device_s", "host_s"}}, {"device_s"} or
-    {"device_ms"}.
-
-    With ``critical_path="max"`` a recorded step costs
-    ``max(device_s, host_s)``: a real step whose host work (input preparation,
-    kernel launches, sampling) outlasts its device work is host-bound, e.g.
-    large prefills under piecewise CUDA graphs. ``"device"`` uses the device
-    time alone."""
-    if critical_path not in _CRITICAL_PATHS:
-        raise ValueError(f"critical_path must be one of {_CRITICAL_PATHS}")
+def _record_cost(rec: dict[str, Any]) -> tuple[float, float]:
+    """(device_s, host_s) of a record from `--simulation-config log_path` or
+    a hand-written table: {"cost": {"device_s", "host_s"}}, {"device_s"} or
+    {"device_ms"}, with an optional "host_s"/"host_ms"."""
     cost = rec["cost"] if isinstance(rec.get("cost"), dict) else rec
     if "device_s" in cost:
         device_s = float(cost["device_s"])
@@ -334,9 +330,8 @@ def _record_device_s(rec: dict[str, Any], critical_path: str = "device") -> floa
         device_s = float(cost["device_ms"]) * 1e-3
     else:
         raise ValueError(f"record has no device time: {list(rec)}")
-    if critical_path == "max":
-        return max(device_s, float(cost.get("host_s", 0.0)))
-    return device_s
+    host_s = float(cost.get("host_s", cost.get("host_ms", 0.0) * 1e-3))
+    return device_s, host_s
 
 
 def _record_features(rec: dict[str, Any]) -> tuple[float, float, float]:
@@ -357,31 +352,19 @@ def _record_features(rec: dict[str, Any]) -> tuple[float, float, float]:
 class TableTimingProvider:
     """Interpolates a measured table of step costs.
 
-    `path` is a JSON/JSONL file of records; each record carries a device time
-    and either a full `step` descriptor (as written by `log_path`) or the
-    features `num_reqs`, `num_tokens`, `sum_past_kv`. `critical_path` is as in
-    `_record_device_s`."""
+    `path` is a JSON/JSONL file of records; each record carries a device time,
+    optionally a host time, and either a full `step` descriptor (as written by
+    `log_path`) or the features `num_reqs`, `num_tokens`, `sum_past_kv`."""
 
-    def __init__(
-        self,
-        vllm_config: VllmConfig,
-        *,
-        path: str,
-        k: int = 4,
-        critical_path: str = "max",
-    ) -> None:
+    def __init__(self, vllm_config: VllmConfig, *, path: str, k: int = 4) -> None:
         records = _load_json_or_jsonl(path)
         self.table = _KNNTable(
-            [
-                (_record_features(r), _record_device_s(r, critical_path))
-                for r in records
-            ],
-            k,
+            [(_record_features(r), _record_cost(r)) for r in records], k
         )
         logger.info("Loaded %d timing records from %s", len(records), path)
 
     def estimate(self, step: StepDescriptor) -> StepCost:
-        return StepCost(device_s=self.table.query(_step_features(step)))
+        return self.table.query(_step_features(step))
 
 
 class ReplayTimingProvider:
@@ -402,13 +385,12 @@ class ReplayTimingProvider:
         fallback: str = "knn",
         k: int = 4,
         miss_fallback_s: float = 0.0,
-        critical_path: str = "max",
     ) -> None:
         records = _load_json_or_jsonl(path)
-        self.exact: dict[str, float] = {}
+        self.exact: dict[str, tuple[float, float]] = {}
         points = []
         for rec in records:
-            device_s = _record_device_s(rec, critical_path)
+            cost = _record_cost(rec)
             if "step" in rec:
                 reqs = rec["step"]["requests"]
                 key = json.dumps(
@@ -418,8 +400,8 @@ class ReplayTimingProvider:
                     ),
                     separators=(",", ":"),
                 )
-                self.exact[key] = device_s
-            points.append((_record_features(rec), device_s))
+                self.exact[key] = cost
+            points.append((_record_features(rec), cost))
         if fallback not in ("knn", "zero"):
             raise ValueError(f"unknown replay fallback {fallback!r}")
         self.fallback = fallback
@@ -435,14 +417,17 @@ class ReplayTimingProvider:
         )
 
     def estimate(self, step: StepDescriptor) -> StepCost:
-        device_s = self.exact.get(step.replay_key())
-        if device_s is not None:
+        cost = self.exact.get(step.replay_key())
+        if cost is not None:
             self.hits += 1
-            return StepCost(device_s=device_s, breakdown={"replay_exact": 1.0})
+            device_s, host_s = cost
+            return StepCost(
+                device_s=device_s, host_s=host_s, breakdown={"replay_exact": 1.0}
+            )
         self.misses += 1
         if self.table is not None:
-            return StepCost(
-                device_s=self.table.query(_step_features(step)),
+            return dataclasses.replace(
+                self.table.query(_step_features(step)),
                 breakdown={"replay_exact": 0.0},
             )
         return StepCost(device_s=self.miss_fallback_s, breakdown={"replay_exact": 0.0})

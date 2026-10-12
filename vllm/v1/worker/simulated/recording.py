@@ -60,7 +60,7 @@ class _RecordedOutput(AsyncModelRunnerOutput):
             self.descriptor,
             StepCost(device_s=device_s, host_s=self.host_s),
             self.t_start,
-            self.t_start + device_s,
+            self.t_start + max(device_s, self.host_s),
             self.finished_req_ids,
         )
         return output
@@ -123,7 +123,7 @@ class RecordingWorker(Worker):
             descriptor,
             StepCost(device_s=device_s, host_s=host_s),
             t_start,
-            t_start + device_s,
+            t_start + max(device_s, host_s),
             finished,
         )
         return output

@@ -20,12 +20,17 @@ a CPU-only CI node.
   [trace replay](../serving/online_serving/trace_replay.md)) or, for requests
   without a trace, from `fallback_token_id`; such requests end by
   `max_tokens`.
-* Each step's duration comes from a *timing provider*. The provider sees a
-  plain description of the step and returns how long the device would be
-  busy. The time is paid when the engine core consumes the step's output, so
-  the engine keeps scheduling the next step meanwhile, exactly as with a real
-  GPU under async scheduling. The device is modeled as a serial resource:
-  steps queue behind the previous one.
+* Each step's cost comes from a *timing provider*. The provider sees a plain
+  description of the step and returns how long the device would be busy
+  (`device_s`) and, optionally, how long the host spends inside the step's
+  `execute_model`/`sample_tokens` calls (`host_s`: input preparation, kernel
+  launches, sampling). The host time holds the engine thread, as the real
+  calls do; the device time runs on a serial device queue and is paid when
+  the engine core consumes the step's output, so the engine keeps scheduling
+  the next step meanwhile, exactly as with a real GPU under async scheduling.
+  A step completes when both its device work and its host work are done. The
+  rest of the host loop (scheduling, output processing, the frontend) is the
+  real code and takes its real time.
 
 The worker runs on CUDA-alike hosts as well as the CPU platform. On a CUDA host
 it binds a device for the runner's small request-state buffers and uses the
@@ -72,8 +77,8 @@ and preemption behavior depend strongly on it.
 |---|---|---|
 | `zero` | every step takes no device time (default; KV/scheduler-only simulation) | none |
 | `constant` | `fixed_us + prefill_us_per_token * P + decode_us_per_req * D + decode_us_per_kv_token * K` | those four, plus `host_us` |
-| `table` | nearest-neighbour interpolation over recorded steps | `path`, `k`, `critical_path` |
-| `replay` | exact match on the step's batch composition, nearest-neighbour fallback, reports the miss rate | `path`, `fallback` (`knn`/`zero`), `k`, `miss_fallback_s`, `critical_path` |
+| `table` | nearest-neighbour interpolation over recorded steps | `path`, `k` |
+| `replay` | exact match on the step's batch composition, nearest-neighbour fallback, reports the miss rate | `path`, `fallback` (`knn`/`zero`), `k`, `miss_fallback_s` |
 | `module.Class` | any class implementing `vllm.v1.worker.simulated.timing.TimingProvider` | passed as keyword arguments |
 
 A provider receives a `StepDescriptor`: per request the tokens scheduled this
@@ -99,16 +104,19 @@ reported miss rate measures how far the two runs diverged. The `table`
 provider interpolates the same records for workloads the recording did not
 cover.
 
-Both default to `critical_path: "max"`: a recorded step costs
-`max(device_s, host_s)`. Steps whose host work outlasts the device work
-(typically large prefills, whose kernel launches and sampling take longer on
-the CPU than the kernels take on the GPU) are host-bound on the real
-deployment, and pricing them by device time alone underestimates TTFT. Use
-`"device"` to price by device time only.
+Both providers return the recorded device and host times. Recording both
+matters: large prefills are typically host-bound (their kernel launches and
+sampling take longer on the CPU than the kernels take on the GPU), and pricing
+them by device time alone underestimates TTFT. The recorded host time spans
+the engine thread from `execute_model` to the end of `sample_tokens`, so it
+also contains whatever the engine core does between the two calls (e.g. the
+structured-output grammar bitmask) and any wait on a full kernel-launch queue;
+replaying it under a different scheduler configuration attributes that time
+to the step regardless.
 
 On Qwen3-0.6B / H200 with `vllm bench serve` (ISL 512, OSL 64, 10 rps,
 64 prompts), replaying a recording of the same workload reproduces the real
-run within 2% on mean TTFT, TPOT and E2E latency and within 7% on P99 TTFT.
+run within 2% on mean, median and P99 TTFT, TPOT and ITL.
 
 ## Limitations
 

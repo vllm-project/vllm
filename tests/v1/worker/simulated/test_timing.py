@@ -91,7 +91,6 @@ def test_constant_provider_linear_terms():
     expected_us = 1000 + 10 * 100 + 50 * 2 + 0.1 * (1000 + 2000)
     assert cost.device_s == pytest.approx(expected_us * 1e-6)
     assert cost.host_s == pytest.approx(200e-6)
-    assert cost.total_s == pytest.approx((expected_us + 200) * 1e-6)
     assert cost.breakdown == {"prefill_us": 1000.0, "decode_us": 400.0}
 
 
@@ -171,24 +170,21 @@ def test_replay_key_is_order_independent():
     assert a.replay_key() == b.replay_key()
 
 
-def test_replay_critical_path_uses_host_time_when_host_bound(tmp_path):
+def test_replay_and_table_return_recorded_host_time(tmp_path):
     log = tmp_path / "steps.jsonl"
     writer = StepLogWriter(str(log))
     prefill = _step(0, _req("a", 512, 0, 512))
     decode = _step(1, _req("a", 1, 512, 512))
     # Host-bound prefill, device-bound decode.
-    writer.write(prefill, StepCost(device_s=0.006, host_s=0.008), 0.0, 0.006, [])
+    writer.write(prefill, StepCost(device_s=0.006, host_s=0.008), 0.0, 0.008, [])
     writer.write(decode, StepCost(device_s=0.002, host_s=0.001), 0.0, 0.002, [])
     writer.close()
-    by_max = ReplayTimingProvider(_Cfg(), path=str(log))  # type: ignore[arg-type]
-    assert by_max.estimate(prefill).device_s == pytest.approx(0.008)
-    assert by_max.estimate(decode).device_s == pytest.approx(0.002)
-    by_device = ReplayTimingProvider(
-        _Cfg(),  # type: ignore[arg-type]
-        path=str(log),
-        critical_path="device",
-    )
-    assert by_device.estimate(prefill).device_s == pytest.approx(0.006)
+    replay = ReplayTimingProvider(_Cfg(), path=str(log))  # type: ignore[arg-type]
+    cost = replay.estimate(prefill)
+    assert (cost.device_s, cost.host_s) == pytest.approx((0.006, 0.008))
+    table = TableTimingProvider(_Cfg(), path=str(log), k=1)  # type: ignore[arg-type]
+    cost = table.estimate(_step(2, _req("b", 1, 500, 500)))
+    assert (cost.device_s, cost.host_s) == pytest.approx((0.002, 0.001))
 
 
 def test_build_step_descriptor_from_scheduler_output():
@@ -282,4 +278,3 @@ def test_build_step_descriptor_from_scheduler_output():
     d2 = build_step_descriptor(so2, prompt_lens, 2, parallel)
     assert "b" not in prompt_lens
     assert d2.is_decode_only and d2.requests[0].num_computed_tokens == 300
-
