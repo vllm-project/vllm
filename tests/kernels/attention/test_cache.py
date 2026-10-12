@@ -174,7 +174,7 @@ def test_reshape_and_cache(
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.parametrize("device", CUDA_DEVICES)
-@pytest.mark.parametrize("kv_cache_dtype", KV_CACHE_DTYPE + ["nvfp4"])
+@pytest.mark.parametrize("kv_cache_dtype", KV_CACHE_DTYPE + ["nvfp4", "nvfp4_4over6"])
 @pytest.mark.parametrize("kv_cache_layout", CACHE_LAYOUTS)
 @pytest.mark.parametrize("kv_scale_type", KV_SCALE_TYPES)
 @pytest.mark.parametrize("implementation", RESHAPE_FLASH_IMPLEMENTATIONS)
@@ -194,6 +194,7 @@ def test_reshape_and_cache_flash(
     kv_scale_type: str,
     implementation: str,
 ) -> None:
+    is_nvfp4 = kv_cache_dtype.startswith("nvfp4")
     set_random_seed(seed)
     torch.set_default_device(device)
     torch.accelerator.set_device_index(device)
@@ -204,7 +205,8 @@ def test_reshape_and_cache_flash(
     if kv_scale_type == "attn_head" and implementation != "cuda":
         pytest.skip("Only CUDA implementation supports attn_head scaling.")
 
-    if kv_cache_dtype == "nvfp4":
+    if is_nvfp4:
+        v_scales_swizzled = not current_platform.is_device_capability_family(120)
         if not current_platform.has_device_capability(100):
             pytest.skip("NVFP4 requires compute capability >= 10.0 (Blackwell).")
         if implementation != "cuda":
@@ -213,12 +215,12 @@ def test_reshape_and_cache_flash(
             pytest.skip("NVFP4 only supports per-tensor scaling.")
         if head_size % 16 != 0:
             pytest.skip("NVFP4 requires head_size divisible by 16.")
-        if (head_size // 16) % 4 != 0:
+        if v_scales_swizzled and (head_size // 16) % 4 != 0:
             pytest.skip(
                 "NVFP4 requires (head_size // 16) divisible by 4 "
                 "for 4x4 block scale swizzle."
             )
-        if block_size % 4 != 0:
+        if v_scales_swizzled and block_size % 4 != 0:
             pytest.skip("NVFP4 requires block_size divisible by 4.")
         if dtype not in (torch.float16, torch.bfloat16):
             pytest.skip("NVFP4 quantization only supports fp16/bf16 input.")
@@ -256,11 +258,11 @@ def test_reshape_and_cache_flash(
     value_scale_cache = None
     nvfp4_key_data = None
     nvfp4_value_data = None
-    if kv_cache_dtype == "nvfp4":
+    if is_nvfp4:
         nvfp4_key_data, key_scale_cache = nvfp4_split_data_scale(key_cache)
         nvfp4_value_data, value_scale_cache = nvfp4_split_data_scale(value_cache)
 
-    if kv_cache_dtype == "nvfp4":
+    if is_nvfp4:
         # Global scale = amax / 448 (per-tensor)
         k_scale = (key.abs().amax() / 448.0).to(torch.float32)
         v_scale = (value.abs().amax() / 448.0).to(torch.float32)
@@ -275,7 +277,7 @@ def test_reshape_and_cache_flash(
         y = x if kv_cache_layout == "NHD" else x.permute(0, 2, 1, 3)
         return y.contiguous()
 
-    if kv_cache_dtype != "nvfp4":
+    if not is_nvfp4:
         key_cache_compact = permute_and_compact(key_cache)
         value_cache_compact = permute_and_compact(value_cache)
 
@@ -301,13 +303,13 @@ def test_reshape_and_cache_flash(
         convert_fp8_local(
             cloned_value_cache, value_cache_compact, v_scale, kv_cache_dtype
         )
-    elif kv_cache_dtype != "nvfp4":
+    elif not is_nvfp4:
         cloned_key_cache = key_cache_compact.clone()
         cloned_value_cache = value_cache_compact.clone()
 
     # Call the reshape_and_cache kernel.
     if implementation == "cuda":
-        if kv_cache_dtype != "nvfp4":
+        if not is_nvfp4:
             opcheck(
                 torch.ops._C_cache_ops.reshape_and_cache_flash,
                 (
@@ -348,7 +350,7 @@ def test_reshape_and_cache_flash(
             v_scale,
         )
 
-    if kv_cache_dtype == "nvfp4":
+    if is_nvfp4:
         # Verify NVFP4 by dequantizing the entire cache and comparing
         # the written positions against original bf16 values.
         # Same pattern as FP8: dequant whole cache, then extract and compare.
@@ -372,10 +374,8 @@ def test_reshape_and_cache_flash(
             )
             return result_hnd.permute(0, 2, 1, 3)  # back to [B, N, H, dim]
 
-        # The kernel writes K scales linearly on every arch and V scales in
-        # the 4x4 swizzle of the SM100 trtllm-gen reader. The FlashInfer
-        # reader used on SM12x expects linear V scales as well.
-        v_scales_swizzled = not current_platform.is_device_capability_family(120)
+        # K scales are linear. SM100 trtllm-gen requires swizzled V scales;
+        # direct callers on SM12x expect linear V scales for FA2/XQA readers.
         result_key_cache = dequant_nvfp4_cache(
             nvfp4_key_data, key_scale_cache, k_scale.item(), swizzled_scales=False
         )
