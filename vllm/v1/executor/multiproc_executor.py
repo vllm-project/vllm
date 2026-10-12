@@ -24,6 +24,7 @@ from typing import Any, NoReturn, cast
 
 import cloudpickle
 import torch
+import zmq
 
 import vllm.envs as envs
 from vllm.config import VllmConfig
@@ -106,6 +107,17 @@ class FutureWrapper(Future):
         except Exception as e:
             with suppress(InvalidStateError):
                 self.set_exception(e)
+
+
+def _wait_for_worker_event(
+    local_events: Sequence[int], remote_events: Sequence[zmq.Socket]
+) -> list[int | zmq.Socket]:
+    if not remote_events:
+        return multiprocessing.connection.wait(local_events)
+    poller = zmq.Poller()
+    for event in (*local_events, *remote_events):
+        poller.register(event, zmq.POLLIN)
+    return [event for event, _ in poller.poll()]
 
 
 class MultiprocExecutor(Executor):
@@ -219,10 +231,6 @@ class MultiprocExecutor(Executor):
             # contention with them.
             set_torch_threads_for_runtime()
 
-            # Start background thread to monitor worker health if not in headless mode.
-            if self.monitor_workers:
-                self.start_worker_monitor()
-
             self.response_mqs = []
             # Only leader node have remote response mqs
             if self.parallel_config.node_rank_within_dp == 0:
@@ -237,6 +245,10 @@ class MultiprocExecutor(Executor):
                         ]
                         assert remote_message_queue is not None
                         self.response_mqs.append(remote_message_queue)
+
+            # Remote response sockets must exist before arming the monitor.
+            if self.monitor_workers:
+                self.start_worker_monitor()
 
             # Ensure message queues are ready. Will deadlock if re-ordered
             # Must be kept consistent with the WorkerProc.
@@ -296,32 +308,47 @@ class MultiprocExecutor(Executor):
         return rank % self.parallel_config.tensor_parallel_size == 0
 
     def start_worker_monitor(self, inline=False) -> None:
-        workers = self.workers
+        sentinels = {h.proc.sentinel: h.proc for h in self.workers}
+        # The monitor thread owns these sockets, not the response data sockets.
+        remote_monitors = {
+            mq.remote_socket.get_monitor_socket(events=zmq.EVENT_DISCONNECTED): rank
+            for rank, mq in enumerate(self.response_mqs)
+            if mq.remote_socket is not None
+        }
         self_ref = weakref.ref(self)
 
-        # Monitors worker process liveness. If any die unexpectedly,
-        # logs an error, shuts down the executor and invokes the failure
-        # callback to inform the engine.
         def monitor_workers():
-            sentinels = [h.proc.sentinel for h in workers]
-            died = multiprocessing.connection.wait(sentinels)
-            _self = self_ref()
-            if not _self or getattr(_self, "shutting_down", False):
-                logger.debug("MultiprocWorkerMonitor: shutdown already initiated")
-                return
-            _self.is_failed = True
-            proc = next(h.proc for h in workers if h.proc.sentinel == died[0])
-            logger.error(
-                "Worker proc %s died unexpectedly (exit code: %s), "
-                "shutting down executor.",
-                proc.name,
-                proc.exitcode,
-            )
-            _self.shutdown()
-            callback = _self.failure_callback
-            if callback is not None:
-                _self.failure_callback = None
-                callback()
+            try:
+                ready = _wait_for_worker_event(list(sentinels), list(remote_monitors))
+                _self = self_ref()
+                if not _self or getattr(_self, "shutting_down", False):
+                    logger.debug("MultiprocWorkerMonitor: shutdown already initiated")
+                    return
+                _self.is_failed = True
+                died = [sentinels[event] for event in ready if event in sentinels]
+                if died:
+                    logger.error(
+                        "Worker proc %s died unexpectedly (exit code: %s), "
+                        "shutting down executor.",
+                        died[0].name,
+                        died[0].exitcode,
+                    )
+                else:
+                    rank = next(r for m, r in remote_monitors.items() if m in ready)
+                    logger.error(
+                        "Remote worker rank %d disconnected, shutting down executor.",
+                        rank,
+                    )
+                try:
+                    _self.shutdown()
+                finally:
+                    callback = _self.failure_callback
+                    if callback is not None:
+                        _self.failure_callback = None
+                        callback()
+            finally:
+                for monitor in remote_monitors:
+                    monitor.close(linger=0)
 
         if not inline:
             Thread(
@@ -850,9 +877,28 @@ class WorkerProc:
         if death_pipe is None:
             return
 
+        remote_socket = (
+            self.rpc_broadcast_mq.remote_socket
+            if self.rpc_broadcast_mq is not None
+            else None
+        )
+        remote_monitor = (
+            remote_socket.get_monitor_socket(events=zmq.EVENT_DISCONNECTED)
+            if remote_socket is not None
+            else None
+        )
+        death_fd = death_pipe.fileno()
+
         def death_pipe_monitor(queues_to_shutdown: list[MessageQueue]):
             try:
-                # This will block until parent process exits (pipe closes)
+                if remote_monitor is not None:
+                    ready = _wait_for_worker_event([death_fd], [remote_monitor])
+                    if death_fd not in ready:
+                        logger.error("Coordinator connection lost, exiting worker.")
+                        # Wake the headless parent's process monitor even when
+                        # the worker's main thread is stuck in a collective.
+                        os._exit(1)
+                # A local parent shutdown takes precedence over disconnects.
                 death_pipe.recv()
             except EOFError:
                 logger.info_once("Parent process exited, terminating worker queues")
@@ -862,6 +908,9 @@ class WorkerProc:
                         mq.shutdown()
             except Exception as e:
                 logger.warning("Death monitoring error: %s", e)
+            finally:
+                if remote_monitor is not None:
+                    remote_monitor.close(linger=0)
 
         # Pass queue references directly to avoid gc issues if passing self
         Thread(

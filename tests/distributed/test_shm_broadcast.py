@@ -603,6 +603,98 @@ def test_reader_rechecks_shm_after_idle_wait_timeout_without_notify():
             socket.close(linger=0)
 
 
+@pytest.fixture
+def socket_queue_pair(request):
+    local = getattr(request, "param", False)
+    writer = MessageQueue(
+        n_reader=1,
+        n_local_reader=int(local),
+        max_chunk_bytes=4096,
+        max_chunks=1,
+        connect_ip="127.0.0.1",
+    )
+    reader = MessageQueue.create_from_handle(writer.export_handle(), rank=0)
+    writer_socket = writer.local_socket if local else writer.remote_socket
+    reader_socket = reader.local_socket if local else reader.remote_socket
+    try:
+        writer.wait_until_ready()
+        reader.wait_until_ready()
+        yield writer, reader, writer_socket, reader_socket
+    finally:
+        reader.shutdown()
+        writer.shutdown()
+        reader_socket.context.destroy(linger=0)
+        writer_socket.context.destroy(linger=0)
+
+
+@pytest.mark.parametrize(
+    "socket_queue_pair", [False, True], indirect=True, ids=["remote", "local-overflow"]
+)
+@pytest.mark.parametrize("timeout", [None, 30], ids=["untimed", "timed"])
+def test_socket_read_shutdown_cancels_pending(socket_queue_pair, timeout, monkeypatch):
+    writer, reader, writer_socket, reader_socket = socket_queue_pair
+    if writer.local_socket is not None:
+        # Publish the overflow marker without the payload, as when a writer dies
+        # between its SHM write and socket send.
+        with writer.acquire_write() as buf:
+            buf[0] = 1
+
+    poll_started = threading.Event()
+    outcome = {}
+    original_poll = shm_broadcast.zmq.Poller.poll
+
+    def poll(poller, timeout=None):
+        if reader_socket in dict(poller.sockets):
+            poll_started.set()
+        return original_poll(poller, timeout)
+
+    monkeypatch.setattr(shm_broadcast.zmq.Poller, "poll", poll)
+
+    def read():
+        try:
+            outcome["value"] = reader.dequeue(timeout=timeout)
+        except Exception as exc:
+            outcome["error"] = exc
+
+    thread = threading.Thread(target=read, daemon=True)
+    thread.start()
+    try:
+        assert poll_started.wait(timeout=5)
+        reader.shutdown()
+        thread.join(timeout=5)
+        assert not thread.is_alive(), "shutdown left a socket read blocked"
+        assert isinstance(outcome.get("error"), RuntimeError), outcome
+    finally:
+        # Also unblock the unpatched implementation so a regression cannot
+        # leave a thread using sockets that the fixture is about to destroy.
+        if thread.is_alive():
+            writer_socket.send_multipart([pickle.dumps("cleanup")])
+            thread.join(timeout=5)
+        assert not thread.is_alive()
+
+
+@pytest.mark.parametrize(
+    "socket_queue_pair", [False, True], indirect=True, ids=["remote", "local-overflow"]
+)
+def test_socket_read_shutdown_preserves_queued_data(socket_queue_pair):
+    writer, reader, _, reader_socket = socket_queue_pair
+    payload = bytes(8192)  # Exceeds the fixture's local SHM slot size.
+    writer.enqueue(payload)
+    assert reader_socket.poll(timeout=5000)
+    reader.shutdown()
+    assert reader.dequeue(timeout=1) == payload
+    with pytest.raises(RuntimeError):
+        reader.dequeue(timeout=1)
+
+
+def test_socket_read_timeout_preserves_usability(socket_queue_pair):
+    writer, reader, _, _ = socket_queue_pair
+    with pytest.raises(TimeoutError):
+        reader.dequeue(timeout=0.01)
+    writer.enqueue("after timeout")
+    assert reader.dequeue(timeout=5) == "after timeout"
+
+
 def test_acquire_read_releases_slot_when_reader_raises():
     writer = MessageQueue(
         n_reader=1,
