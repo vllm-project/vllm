@@ -141,6 +141,88 @@ struct PersistentTopKParams {
 };
 
 // ============================================================================
+// Exact fallback for an overflowing threshold bin
+// ============================================================================
+
+// Emits the remaining_k largest members of one threshold bin exactly, for bins
+// with more members than the shared buffer holds. One pass over the row per
+// FP32 key byte finds the remaining_k-th largest key, then one emit pass
+// writes the entries above it and its ties. Overwrites hist (RADIX ints) and
+// scratch (3 ints). *out_count must equal TopK - remaining_k on entry.
+template <int TopK, typename InBin>
+__device__ __noinline__ void select_in_bin_exact(
+    const float* __restrict__ logits, int32_t* __restrict__ output_indices,
+    int seq_len, int remaining_k, InBin in_bin, int* hist, int* scratch,
+    int* out_count) {
+  const int tx = threadIdx.x;
+  const int lane = tx & 31;
+  uint32_t prefix = 0;
+  uint32_t mask = 0;
+
+  for (int shift = 24; shift >= 0; shift -= 8) {
+    if (tx < RADIX) hist[tx] = 0;
+    __syncthreads();
+    for (int i = tx; i < seq_len; i += kThreadsPerBlock) {
+      const float x = logits[i];
+      const uint32_t key = convert_to_uint32_v2(x);
+      if (in_bin(x) && (key & mask) == prefix) {
+        atomicAdd(&hist[(key >> shift) & 0xFF], 1);
+      }
+    }
+    __syncthreads();
+
+    // Warp 0 finds which byte value holds the remaining_k-th largest key.
+    // Each lane owns eight of the 256 values, lane 0 the highest eight.
+    if (tx < 32) {
+      int counts[8];
+      int lane_total = 0;
+#pragma unroll
+      for (int j = 0; j < 8; ++j) {
+        counts[j] = hist[RADIX - 1 - lane * 8 - j];
+        lane_total += counts[j];
+      }
+      int above = lane_total;
+#pragma unroll
+      for (int d = 1; d < 32; d *= 2) {
+        const int v = __shfl_up_sync(0xffffffff, above, d);
+        if (lane >= d) above += v;
+      }
+      above -= lane_total;
+#pragma unroll
+      for (int j = 0; j < 8; ++j) {
+        if (above < remaining_k && remaining_k <= above + counts[j]) {
+          scratch[0] = RADIX - 1 - lane * 8 - j;
+          scratch[1] = above;
+        }
+        above += counts[j];
+      }
+    }
+    __syncthreads();
+
+    prefix |= static_cast<uint32_t>(scratch[0]) << shift;
+    mask |= 0xFFu << shift;
+    remaining_k -= scratch[1];
+  }
+
+  // prefix holds the exact k-th largest key. remaining_k is how many entries
+  // equal to it still fit in the output.
+  if (tx == 0) scratch[2] = remaining_k;
+  __syncthreads();
+  for (int i = tx; i < seq_len; i += kThreadsPerBlock) {
+    const float x = logits[i];
+    if (!in_bin(x)) continue;
+    const uint32_t key = convert_to_uint32_v2(x);
+    if (key > prefix) {
+      output_indices[atomicAdd(out_count, 1)] = i;
+    } else if (key == prefix) {
+      const int slot = atomicSub(&scratch[2], 1);
+      if (slot > 0) output_indices[TopK - slot] = i;
+    }
+  }
+  __syncthreads();
+}
+
+// ============================================================================
 // Decode path: 2048-bin histogram for short sequences (seq_len <= 8192)
 // Uses 11-bit half-precision bins for fine granularity.
 // One histogram pass typically suffices since 8192/2048 = 4 elements/bin avg.
@@ -315,7 +397,16 @@ __device__ __noinline__ void histogram_2048_topk(
     return;
   }
 
-  // ---- Phase 3: Deferred refinement (rare path) ----
+  if (raw_buf0 > DBUF) {
+    const uint32_t uthr = static_cast<uint32_t>(threshold);
+    select_in_bin_exact<TopK>(
+        logits, output_indices, seq_len, remaining_k,
+        [=](float x) { return decode_bin(x) == uthr; }, decode_smem,
+        &decode_smem[SBASE + sREF], &decode_smem[sOUT_abs]);
+    return;
+  }
+
+  // ---- Phase 3: Deferred refinement ----
   int* refine[2] = {decode_smem, decode_smem + RHIST};
   const int num_buf0 = (raw_buf0 < DBUF) ? raw_buf0 : DBUF;
 
@@ -518,6 +609,14 @@ __device__ __noinline__ void histogram_256_topk(
     }
   }
   __syncthreads();
+
+  if (shared_buffered_count[0] > MAX_BUFFERED_ITEMS) {
+    select_in_bin_exact<TopK>(
+        logits + logits_offset, output_indices, seq_len, remaining_k,
+        [=](float x) { return convert_to_uint8(x) == threshold_bin; },
+        shared_histogram[0], &medium_scalars[2], &shared_output_count);
+    return;
+  }
 
 #pragma unroll 4
   for (int pass = 0; pass < 4; ++pass) {
