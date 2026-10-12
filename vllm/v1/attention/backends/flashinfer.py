@@ -562,6 +562,8 @@ class FlashInferBackend(AttentionBackend):
                 return "fa2 prefill misreads an NVFP4 KV cache at head_size 64"
             if has_sink:
                 return "the sink prefill wrapper cannot read an NVFP4 KV cache"
+        if device_capability == DeviceCapability(7, 5) and head_size > 256:
+            return "head_size > 256 not supported on SM75 (64 KiB smem)"
         return None
 
     @classmethod
