@@ -251,6 +251,7 @@ async def init_generate_state(
         except ValueError as e:
             # Info, since every model without a read strategy lands here.
             logger.info("/v1/systemone is disabled: %s", e)
+            state.structured_decisions_disabled_reason = str(e)
             strategy = None
     state.serving_structured_decisions = (
         ServingStructuredDecisions(

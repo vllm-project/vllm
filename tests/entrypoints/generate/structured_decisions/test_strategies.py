@@ -73,10 +73,11 @@ def test_route_is_registered_by_default():
     assert "/v1/systemone" in paths
 
 
-def test_unsupported_model_returns_501():
+def test_disabled_endpoint_returns_501_with_reason():
     app = FastAPI()
     app.state.args = SimpleNamespace(log_error_stack=False)
     app.state.serving_structured_decisions = None
+    app.state.structured_decisions_disabled_reason = "the chat prompt opens a thought"
     init_exception_handler(app)
     register_structured_decisions_api_router(app)
 
@@ -90,6 +91,9 @@ def test_unsupported_model_returns_501():
             },
         )
     assert response.status_code == 501
+    assert response.json()["error"]["message"] == (
+        "/v1/systemone is disabled: the chat prompt opens a thought"
+    )
 
 
 def test_structured_state_keeps_unicode_in_prompt():
@@ -229,6 +233,41 @@ async def test_request_metadata_reaches_every_question(
         assert call.kwargs["trace_headers"] == (
             TRACE_HEADERS if request_headers else None
         )
+
+
+CHATML = (
+    "{% for m in messages %}<|im_start|>{{ m.role }}\n{{ m.content }}<|im_end|>\n"
+    "{% endfor %}<|im_start|>assistant\n"
+)
+DROPS_THOUGHTS = CHATML.replace(
+    "{{ m.content }}", "{{ m.content.split('</think>')[-1] }}"
+)
+
+
+@pytest.mark.parametrize(
+    "template,reason",
+    [
+        # Like Qwen3-4B-Thinking-2507
+        (CHATML + "<think>\n", "opens a thought"),
+        # Like DeepSeek-R1-0528-Qwen3-8B
+        (DROPS_THOUGHTS, "drops thoughts"),
+        # Like Qwen3-4B-Instruct-2507
+        (CHATML, None),
+        # Qwen3-0.6B, which closes the thought
+        (None, None),
+    ],
+)
+def test_thinking_only_templates_are_refused(qwen, template, reason):
+    tokenizer, _ = qwen
+    renderer = SimpleNamespace(get_tokenizer=lambda: tokenizer)
+    context = ReadContext(
+        None, SimpleNamespace(renderer=renderer), template, "auto", {}
+    )
+    if reason is None:
+        NextTokenStrategy(context)
+    else:
+        with pytest.raises(ValueError, match=reason):
+            NextTokenStrategy(context)
 
 
 def test_canvas_read():
