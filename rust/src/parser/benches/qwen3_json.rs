@@ -6,7 +6,7 @@ use std::time::Duration;
 use criterion::{BatchSize, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use tool_parser::parsers::QwenParser as ExternalQwenParser;
 use vllm_parser::tool::test_utils::{split_by_chars, test_tools};
-use vllm_parser::tool::{Qwen3XmlToolParser, Tool, ToolParser};
+use vllm_parser::tool::{Qwen3JsonToolParser, Tool, ToolParser};
 
 mod utils;
 use utils::{feed_external_parser, feed_parser, openai_tools};
@@ -27,12 +27,12 @@ fn mixed_fixture() -> String {
 }
 
 fn long_normal_text_fixture() -> String {
-    let line = "This is ordinary assistant text with no Qwen XML tool markers at all.\n";
+    let line = "This is ordinary assistant text with no Qwen3 JSON tool markers at all.\n";
     line.repeat(LONG_NORMAL_TEXT_REPEATS)
 }
 
 fn native_parser(tools: &[Tool]) -> Box<dyn ToolParser> {
-    Qwen3XmlToolParser::create(tools).expect("Qwen XML parser should initialize")
+    Qwen3JsonToolParser::create(tools).expect("Qwen3 JSON parser should initialize")
 }
 
 fn run_stream_group(
@@ -98,14 +98,14 @@ fn run_stream_group(
     group.finish();
 }
 
-fn bench_qwen3_xml(c: &mut Criterion) {
+fn bench_qwen3_json(c: &mut Criterion) {
     let tools = test_tools();
     let mixed_text = mixed_fixture();
     let long_normal_text = long_normal_text_fixture();
 
     run_stream_group(
         c,
-        "qwen3_xml/mixed_text_tool_call",
+        "qwen3_json/mixed_text_tool_call",
         &tools,
         &mixed_text,
         CHUNK_CHARS,
@@ -115,7 +115,7 @@ fn bench_qwen3_xml(c: &mut Criterion) {
 
     run_stream_group(
         c,
-        "qwen3_xml/long_normal_text",
+        "qwen3_json/long_normal_text",
         &tools,
         &long_normal_text,
         CHUNK_CHARS,
@@ -124,5 +124,5 @@ fn bench_qwen3_xml(c: &mut Criterion) {
     );
 }
 
-criterion_group!(benches, bench_qwen3_xml);
+criterion_group!(benches, bench_qwen3_json);
 criterion_main!(benches);
