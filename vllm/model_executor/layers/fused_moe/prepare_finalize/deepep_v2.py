@@ -18,17 +18,17 @@ from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     swizzle_mxfp8_scale,
 )
 from vllm.triton_utils import tl, triton
-from vllm.utils.math_utils import round_up
+from vllm.utils.math_utils import cdiv, round_up
 from vllm.v1.worker.ubatching import (
     dbo_current_ubatch_id,
+    dbo_enabled,
 )
 
 
 def _quantize_before_dispatch(
     quant_config: FusedMoEQuantConfig, defer_input_quant: bool
 ) -> bool:
-    """
-    Do quantized dispatch for blockfp8 and mxfp8, unless the
+    """Do quantized dispatch for blockfp8 and mxfp8, unless the
     subsequent moe kernel requires bf16 inputs.
     """
     if defer_input_quant:
@@ -68,8 +68,7 @@ def _unpack_mxfp8_scale(
 
 
 class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
-    """
-    Prepare/Finalize using DeepEP v2 ElasticBuffer (unified API).
+    """Prepare/Finalize using DeepEP v2 ElasticBuffer (unified API).
 
     Supports two modes controlled by the `use_cudagraph` constructor arg:
 
@@ -89,8 +88,10 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         use cudagraphs anyway
       - Provides expert_tokens_meta for efficient batched expert kernels
 
-    Both modes use async_with_compute_stream=False (synchronous from
-    caller's perspective). The ElasticBuffer handles comm internally.
+    Dispatch always uses async_with_compute_stream=False. finalize_async
+    issues the combine with async_with_compute_stream=True (except under
+    DBO) so the modular kernel can overlap the shared-expert FFN with the
+    combine a2a; the returned receiver joins via a device-side event wait.
     """
 
     @staticmethod
@@ -113,6 +114,7 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         num_topk: int,
         use_fp8_dispatch: bool = False,
         use_cudagraph: bool = False,
+        sp_size: int = 1,
     ):
         super().__init__()
         self.buffer = buffer
@@ -123,6 +125,7 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         self.num_topk = num_topk
         self.use_fp8_dispatch = use_fp8_dispatch
         self.use_cudagraph = use_cudagraph
+        self.sp_size = sp_size
 
         # DBO microbatching: one handle slot per micro-batch.
         self.handles: list[deep_ep.EPHandle | None] = [None, None]
@@ -191,12 +194,14 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         # high concurrency). Round up to a power of 2 instead: this bounds the
         # set to ~log2(max_num_batched_tokens) values (compiled once, then
         # cached) while staying small for decode (e.g. 1 token -> 1) and capped
-        # at the buffer's init capacity for prefill.
+        # at the buffer's init capacity for prefill. With sequence parallelism,
+        # each EP rank holds a ceil(n / sp_size) shard of its DP rank's batch.
         num_max_tokens_per_rank = None
         if not do_expand:
             dp_meta = get_forward_context().dp_metadata
             if dp_meta is not None:
                 n = int(dp_meta.num_tokens_across_dp_cpu.max())
+                n = cdiv(n, self.sp_size)
             else:
                 n = tokens.shape[0]
             num_max_tokens_per_rank = 1 << max(n - 1, 0).bit_length()
@@ -465,15 +470,31 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
                 f"got {fused_expert_output.dtype}"
             )
 
+        # DBO drives its own hook/receiver schedule; keep the combine
+        # synchronous there (the receiver then only performs the copy).
+        combine_async = do_async and not dbo_enabled()
         combined_x, _, event = self.buffer.combine(
             x=fused_expert_output,
             handle=handle,
             topk_weights=None,
-            async_with_compute_stream=False,
+            async_with_compute_stream=combine_async,
+            allocate_on_comm_stream=combine_async,
         )
 
-        output.copy_(combined_x, non_blocking=True)
-        return None
+        if do_async:
+            # The combine ran on DeepEP's comm stream; the modular kernel
+            # issues the shared-expert FFN before calling the receiver, which
+            # joins via a device-side cudaStreamWaitEvent (no host sync, so
+            # this is safe inside a captured region).
+            def _receiver():
+                if event.event is not None:
+                    event.current_stream_wait()
+                output.copy_(combined_x, non_blocking=True)
+
+            return _receiver
+        else:
+            output.copy_(combined_x, non_blocking=True)
+            return None
 
     def finalize_async(
         self,
@@ -484,16 +505,17 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         apply_router_weight_on_input: bool,
         weight_and_reduce_impl: mk.TopKWeightAndReduce,
     ) -> Callable:
-        self._finalize(
+        receiver = self._finalize(
             output,
             fused_expert_output,
             topk_weights,
             topk_ids,
             apply_router_weight_on_input,
             weight_and_reduce_impl,
-            False,
+            True,
         )
-        return lambda: None
+        assert receiver is not None
+        return receiver
 
     def finalize(
         self,

@@ -2,11 +2,13 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 use std::collections::{BTreeSet, HashMap};
+use std::num::NonZeroU32;
 
 use serde::{Deserialize, Serialize};
 use serde_default::DefaultFromSerde;
 
 use crate::protocol::structured_outputs::StructuredOutputsParams;
+use crate::protocol::tensor::WireNdArray;
 
 fn default_top_p() -> f32 {
     1.0
@@ -18,6 +20,10 @@ fn default_repetition_penalty() -> f32 {
 
 fn default_temperature() -> f32 {
     1.0
+}
+
+fn default_watermarking() -> bool {
+    true
 }
 
 fn default_max_tokens() -> u32 {
@@ -68,6 +74,9 @@ pub struct EngineCoreSamplingParams {
     /// greedy sampling.
     #[serde(default = "default_temperature")]
     pub temperature: f32,
+    /// Whether to apply the engine's configured watermark to this request.
+    #[serde(default = "default_watermarking")]
+    pub watermarking: bool,
     /// Cumulative probability threshold for nucleus sampling.
     #[serde(default = "default_top_p")]
     pub top_p: f32,
@@ -94,6 +103,11 @@ pub struct EngineCoreSamplingParams {
     ///
     /// `None` disables prompt logprobs. `-1` requests the full vocabulary.
     pub prompt_logprobs: Option<i32>,
+    /// `[num_rows, num_ids]` candidate token IDs per scored causal prompt row,
+    /// `-1` padding shorter rows.
+    pub prompt_logprob_token_ids: Option<WireNdArray>,
+    /// First causal prompt row to score; `None` scores from the first row.
+    pub prompt_logprob_start: Option<u32>,
     /// Minimum probability threshold for token sampling.
     pub min_p: f32,
     /// Frequency penalty applied by the sampler.
@@ -148,6 +162,11 @@ pub struct EngineCoreSamplingParams {
     /// Number of prompt tokens to skip from returned routed-expert data.
     /// A value of zero returns routing data for the entire prompt.
     pub routed_experts_prompt_start: u32,
+    /// Number of newly generated tokens to batch into each streamed output.
+    /// The first and final outputs are always emitted immediately. Engine-core
+    /// ignores it; [`EngineCoreClient::call`](crate::EngineCoreClient::call)
+    /// batches output deliveries by it.
+    pub stream_interval: Option<NonZeroU32>,
 }
 
 impl EngineCoreSamplingParams {
@@ -155,6 +174,7 @@ impl EngineCoreSamplingParams {
     pub fn for_test() -> Self {
         Self {
             temperature: 1.0,
+            watermarking: true,
             top_p: 1.0,
             top_k: 0,
             seed: None,
@@ -163,6 +183,8 @@ impl EngineCoreSamplingParams {
             thinking_token_budget: None,
             logprobs: None,
             prompt_logprobs: None,
+            prompt_logprob_token_ids: None,
+            prompt_logprob_start: None,
             min_p: 0.0,
             frequency_penalty: 0.0,
             presence_penalty: 0.0,
@@ -179,6 +201,7 @@ impl EngineCoreSamplingParams {
             skip_reading_prefix_cache: None,
             extra_args: None,
             routed_experts_prompt_start: 0,
+            stream_interval: None,
         }
     }
 }
@@ -229,6 +252,7 @@ mod tests {
 
         // Omitted fields -> Python defaults.
         assert_eq!(sampling.temperature, 1.0);
+        assert!(sampling.watermarking);
         assert_eq!(sampling.top_p, 1.0);
         assert_eq!(sampling.top_k, 0);
         assert_eq!(sampling.seed, None);

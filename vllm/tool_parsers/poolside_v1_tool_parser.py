@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-GLM-4 Tool Call Parser with incremental string streaming support.
+"""GLM-4 Tool Call Parser with incremental string streaming support.
 
 This parser fixes the streaming issue reported in Issue #32829 where long string
 parameters (e.g., file content with 4000+ characters of code) are buffered until
@@ -20,7 +19,6 @@ import regex as re
 from openai.types.responses import ToolChoiceFunction
 from partial_json_parser.core.options import Allow
 
-from vllm.entrypoints.chat_utils import make_tool_call_id
 from vllm.entrypoints.generate.base.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
@@ -37,6 +35,7 @@ from vllm.entrypoints.openai.responses.protocol import (
     ResponsesRequest,
 )
 from vllm.logger import init_logger
+from vllm.renderers.chat_utils import make_tool_call_id
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.abstract_tool_parser import (
     Tool,

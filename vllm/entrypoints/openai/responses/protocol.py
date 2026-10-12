@@ -4,7 +4,7 @@
 # Adapted from
 # https://github.com/lm-sys/FastChat/blob/168ccc29d3f7edc50823016105c024fe2282732a/fastchat/protocol/openai_api_protocol.py
 import time
-from typing import Any, Literal, TypeAlias
+from typing import Annotated, Any, Literal, TypeAlias
 
 from openai.types.responses import (
     ResponseCodeInterpreterCallCodeDeltaEvent,
@@ -42,13 +42,11 @@ from openai.types.responses import (
     ResponseInProgressEvent as OpenAIResponseInProgressEvent,
 )
 from openai.types.responses.response import IncompleteDetails, ToolChoice
-from openai.types.responses.response_reasoning_item import (
-    Content as ResponseReasoningTextContent,
-)
 from openai.types.responses.tool import Tool
 from openai.types.shared import Metadata, Reasoning
 from openai_harmony import Message as OpenAIHarmonyMessage
 from pydantic import (
+    BeforeValidator,
     Field,
     ValidationError,
     field_serializer,
@@ -56,15 +54,20 @@ from pydantic import (
 )
 
 from vllm.config import ModelConfig
-from vllm.entrypoints.chat_utils import (
-    ChatCompletionMessageParam,
-    ChatTemplateContentFormatOption,
+from vllm.entrypoints.generate.base.protocol import (
+    PerRequestMetrics,
+    StopParam,
+    TopLogprobsParam,
+    validate_cache_salt,
 )
-from vllm.entrypoints.generate.base.protocol import StopParam, validate_cache_salt
 from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
+from vllm.renderers.chat_utils import (
+    ChatCompletionMessageParam,
+    ChatTemplateContentFormatOption,
+)
 from vllm.sampling_params import (
     RequestOutputKind,
     SamplingParams,
@@ -80,6 +83,7 @@ _INT64_MAX = 2**63 - 1
 
 class InputTokensDetails(OpenAIBaseModel):
     cached_tokens: int
+    cache_write_tokens: int
     input_tokens_per_turn: list[int] = Field(default_factory=list)
     cached_tokens_per_turn: list[int] = Field(default_factory=list)
 
@@ -100,9 +104,7 @@ class ResponseUsage(OpenAIBaseModel):
 
 
 def serialize_message(msg):
-    """
-    Serializes a single message
-    """
+    """Serializes a single message."""
     if isinstance(msg, dict):
         return msg
     elif hasattr(msg, "to_dict"):
@@ -113,9 +115,7 @@ def serialize_message(msg):
 
 
 def serialize_messages(msgs):
-    """
-    Serializes multiple messages
-    """
+    """Serializes multiple messages."""
     return [serialize_message(msg) for msg in msgs] if msgs else None
 
 
@@ -132,6 +132,76 @@ ResponseInputOutputMessage: TypeAlias = (
     list[ChatCompletionMessageParam] | list[ResponseRawMessageAndToken]
 )
 ResponseInputOutputItem: TypeAlias = ResponseInputItemParam | ResponseOutputItem
+
+
+def _default_input_image_details(value: Any) -> Any:
+    """Set the API default for input images before SDK type validation."""
+    if not isinstance(value, dict):
+        return value
+
+    content = value.get("content")
+    if not isinstance(content, list):
+        return value
+
+    new_content = []
+    changed = False
+    for part in content:
+        new_part = part
+        if (
+            isinstance(part, dict)
+            and part.get("type") == "input_image"
+            and "detail" not in part
+        ):
+            new_part = {**part, "detail": "auto"}
+            changed = True
+        new_content.append(new_part)
+
+    return {**value, "content": new_content} if changed else value
+
+
+def _tool_field(tool: Any, field: str) -> Any:
+    return tool.get(field) if isinstance(tool, dict) else getattr(tool, field, None)
+
+
+def _resolve_named_tool_choice(tool_name: str, tools: list[Any]) -> str:
+    """Resolve a named tool choice to the flat ``<namespace>__<name>`` form."""
+    from vllm.tool_parsers.utils import flat_namespace_tool_name
+
+    exact_names: set[str] = set()
+    local_names: dict[str, list[str]] = {}
+    for tool in tools:
+        if _tool_field(tool, "type") == "namespace":
+            namespace = _tool_field(tool, "name")
+            namespaced_tools = _tool_field(tool, "tools")
+            if not isinstance(namespaced_tools, list) or not isinstance(namespace, str):
+                return tool_name
+            for namespaced_tool in namespaced_tools:
+                local_name = _tool_field(namespaced_tool, "name")
+                if not isinstance(local_name, str):
+                    continue
+                flat_name = flat_namespace_tool_name(namespace, local_name)
+                exact_names.add(flat_name)
+                local_names.setdefault(local_name, []).append(flat_name)
+        else:
+            name = _tool_field(tool, "name")
+            if isinstance(name, str):
+                exact_names.add(name)
+    if tool_name in exact_names:
+        return tool_name
+    candidates = local_names.get(tool_name, [])
+    if len(candidates) == 1:
+        return candidates[0]
+    if len(candidates) > 1:
+        raise VLLMValidationError(
+            f"Tool choice '{tool_name}' is ambiguous: it is defined in more "
+            f"than one namespace ({', '.join(candidates)}). Select it by its "
+            "full '<namespace>__<name>' name.",
+            parameter="tool_choice",
+        )
+    raise VLLMValidationError(
+        "Tool choice 'function' not found in 'tools' parameter.",
+        parameter="tool_choice",
+    )
 
 
 class ResponsesRequest(OpenAIBaseModel):
@@ -151,7 +221,15 @@ class ResponsesRequest(OpenAIBaseModel):
         ]
         | None
     ) = None
-    input: str | list[ResponseInputOutputItem]
+    input: (
+        str
+        | list[
+            Annotated[
+                ResponseInputOutputItem,
+                BeforeValidator(_default_input_image_details),
+            ]
+        ]
+    )
     instructions: str | None = None
     max_output_tokens: int | None = None
     max_tool_calls: int | None = None
@@ -178,9 +256,10 @@ class ResponsesRequest(OpenAIBaseModel):
     text: ResponseTextConfig | None = None
     tool_choice: ToolChoice = "auto"
     tools: list[Tool] = Field(default_factory=list)
-    top_logprobs: int | None = 0
+    top_logprobs: TopLogprobsParam = 0
     top_p: float | None = None
     top_k: int | None = None
+    min_p: float | None = None
     truncation: Literal["auto", "disabled"] | None = "disabled"
     user: str | None = None
     skip_special_tokens: bool = True
@@ -213,7 +292,7 @@ class ResponsesRequest(OpenAIBaseModel):
     )
 
     # --8<-- [start:responses-extra-params]
-    watermarking: bool = True
+    watermarking: bool | None = None
     request_id: str = Field(
         default_factory=lambda: f"resp_{random_uuid()}",
         description=(
@@ -251,6 +330,17 @@ class ResponsesRequest(OpenAIBaseModel):
             "if the served model does not use priority scheduling."
         ),
     )
+    return_mm_kwargs: bool = Field(
+        default=True,
+        description=(
+            "If false, the render response's `features` set `kwargs_data` "
+            "and `mm_metadata` to null, for callers that need only the token "
+            "layout and item hashes, such as cache-aware routers. Do not send "
+            "such a response to `/inference/v1/generate`, which reads a null "
+            "`kwargs_data` as every item being cached. Only supported on the "
+            "render endpoints; ignored on regular generation endpoints."
+        ),
+    )
     cache_salt: str | None = Field(
         default=None,
         min_length=1,
@@ -285,6 +375,7 @@ class ResponsesRequest(OpenAIBaseModel):
     repetition_penalty: float | None = None
     seed: int | None = Field(None, ge=_INT64_MIN, le=_INT64_MAX)
     stop: StopParam = []
+    stop_token_ids: list[int] | None = []
     ignore_eos: bool = False
     vllm_xargs: dict[str, str | int | float | list[str | int | float]] | None = Field(
         default=None,
@@ -365,6 +456,7 @@ class ResponsesRequest(OpenAIBaseModel):
         "temperature": 1.0,
         "top_p": 1.0,
         "top_k": 0,
+        "min_p": 0.0,
     }
 
     def extract_structured_outputs(self) -> StructuredOutputsParams | None:
@@ -415,6 +507,10 @@ class ResponsesRequest(OpenAIBaseModel):
             top_k = default_sampling_params.get(
                 "top_k", self._DEFAULT_SAMPLING_PARAMS["top_k"]
             )
+        if (min_p := self.min_p) is None:
+            min_p = default_sampling_params.get(
+                "min_p", self._DEFAULT_SAMPLING_PARAMS["min_p"]
+            )
 
         if (repetition_penalty := self.repetition_penalty) is None:
             repetition_penalty = default_sampling_params.get("repetition_penalty", 1.0)
@@ -440,9 +536,11 @@ class ResponsesRequest(OpenAIBaseModel):
             watermarking=self.watermarking,
             top_p=top_p,
             top_k=top_k,
+            min_p=min_p,
             max_tokens=max_tokens,
             logprobs=self.top_logprobs if self.is_include_output_logprobs() else None,
             stop=stop,
+            stop_token_ids=self.stop_token_ids,
             frequency_penalty=frequency_penalty,
             presence_penalty=presence_penalty,
             repetition_penalty=repetition_penalty,
@@ -629,31 +727,14 @@ class ResponsesRequest(OpenAIBaseModel):
                 )
         elif is_named_tool_choice and tools is not None:
             tool_name = tool_choice.get("name")
-            tool_names = set()
-            for tool in tools:
-                if isinstance(tool, dict):
-                    if tool.get("type") == "namespace":
-                        namespace = tool.get("name")
-                        namespaced_tools = tool.get("tools")
-                        if not isinstance(namespaced_tools, list):
-                            return data
-                        for namespaced_tool in namespaced_tools:
-                            namespaced_name = (
-                                namespaced_tool.get("name")
-                                if isinstance(namespaced_tool, dict)
-                                else getattr(namespaced_tool, "name", None)
-                            )
-                            tool_names.add(namespaced_name)
-                            tool_names.add(f"{namespace}__{namespaced_name}")
-                    else:
-                        tool_names.add(tool.get("name"))
-                else:
-                    tool_names.add(getattr(tool, "name", None))
-            if not tool_name or tool_name not in tool_names:
+            if not tool_name:
                 raise VLLMValidationError(
                     "Tool choice 'function' not found in 'tools' parameter.",
                     parameter="tool_choice",
                 )
+            resolved = _resolve_named_tool_choice(tool_name, tools)
+            if resolved != tool_name:
+                data["tool_choice"] = {**tool_choice, "name": resolved}
 
         return data
 
@@ -686,6 +767,11 @@ class ResponsesResponse(OpenAIBaseModel):
     truncation: Literal["auto", "disabled"]
     usage: ResponseUsage | None = None
     user: str | None = None
+
+    # vLLM-specific per-request metrics. Omitted unless enabled server-side.
+    metrics: PerRequestMetrics | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
 
     presence_penalty: float | None = Field(
         default=None,
@@ -755,6 +841,7 @@ class ResponsesResponse(OpenAIBaseModel):
         output: list[ResponseOutputItem],
         status: ResponseStatus,
         usage: ResponseUsage | None = None,
+        metrics: PerRequestMetrics | None = None,
         input_messages: ResponseInputOutputMessage | None = None,
         output_messages: ResponseInputOutputMessage | None = None,
         kv_transfer_params: dict[str, Any] | None = None,
@@ -798,53 +885,10 @@ class ResponsesResponse(OpenAIBaseModel):
             truncation=request.truncation,
             user=request.user,
             usage=usage,
+            metrics=metrics,
             kv_transfer_params=kv_transfer_params,
             ec_transfer_params=ec_transfer_params,
         )
-
-
-# TODO: this code can be removed once
-# https://github.com/openai/openai-python/issues/2634 has been resolved
-class ResponseReasoningPartDoneEvent(OpenAIBaseModel):
-    content_index: int
-    """The index of the content part that is done."""
-
-    item_id: str
-    """The ID of the output item that the content part was added to."""
-
-    output_index: int
-    """The index of the output item that the content part was added to."""
-
-    part: ResponseReasoningTextContent
-    """The content part that is done."""
-
-    sequence_number: int
-    """The sequence number of this event."""
-
-    type: Literal["response.reasoning_part.done"]
-    """The type of the event. Always `response.reasoning_part.done`."""
-
-
-# TODO: this code can be removed once
-# https://github.com/openai/openai-python/issues/2634 has been resolved
-class ResponseReasoningPartAddedEvent(OpenAIBaseModel):
-    content_index: int
-    """The index of the content part that is done."""
-
-    item_id: str
-    """The ID of the output item that the content part was added to."""
-
-    output_index: int
-    """The index of the output item that the content part was added to."""
-
-    part: ResponseReasoningTextContent
-    """The content part that is done."""
-
-    sequence_number: int
-    """The sequence number of this event."""
-
-    type: Literal["response.reasoning_part.added"]
-    """The type of the event. Always `response.reasoning_part.added`."""
 
 
 # vLLM Streaming Events
@@ -871,8 +915,6 @@ StreamingResponsesResponse: TypeAlias = (
     | ResponseContentPartDoneEvent
     | ResponseReasoningTextDeltaEvent
     | ResponseReasoningTextDoneEvent
-    | ResponseReasoningPartAddedEvent
-    | ResponseReasoningPartDoneEvent
     | ResponseCodeInterpreterCallInProgressEvent
     | ResponseCodeInterpreterCallCodeDeltaEvent
     | ResponseWebSearchCallInProgressEvent

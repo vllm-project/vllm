@@ -16,6 +16,7 @@ from vllm.model_executor.determinism.batch_invariant_configs import (
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.mem_utils import get_max_shared_memory_bytes
+from vllm.utils.nccl import pin_nccl_env
 from vllm.utils.platform_utils import num_compute_units
 from vllm.utils.torch_utils import is_torch_equal_or_newer
 
@@ -231,6 +232,7 @@ def matmul_descriptor_persistent(
 
     Returns:
         Output matrix [M, N] with dtype matching the inputs.
+
     """
     assert a.shape[1] == b.shape[0], "Incompatible dimensions"
     assert a.dtype == b.dtype, "Incompatible dtypes"
@@ -378,7 +380,7 @@ def bmm_kernel(
     B_LARGE: tl.constexpr,
     C_LARGE: tl.constexpr,
 ):
-    """Batched GEMM: (B, M, K) x (B, K, N) -> (B, M, N)
+    """Batched GEMM: (B, M, K) x (B, K, N) -> (B, M, N).
 
     Each program computes one (batch_idx, tile_m, tile_n) tile, accumulating
     along K in a fixed order to preserve batch invariance.
@@ -495,8 +497,7 @@ def _log_softmax_kernel(
     n_cols,
     BLOCK_SIZE: tl.constexpr,
 ):
-    """
-    Compute log_softmax along the last dimension of a 2D tensor.
+    """Compute log_softmax along the last dimension of a 2D tensor.
     Each block handles one row of the input tensor.
     """
     # Get the row index for this block
@@ -550,8 +551,7 @@ def _log_softmax_kernel(
 
 
 def log_softmax(input: torch.Tensor, dim: int = -1) -> torch.Tensor:
-    """
-    Compute log_softmax using Triton kernel.
+    """Compute log_softmax using Triton kernel.
 
     Args:
         input: Input tensor
@@ -560,6 +560,7 @@ def log_softmax(input: torch.Tensor, dim: int = -1) -> torch.Tensor:
 
     Returns:
         Tensor with log_softmax applied along the specified dimension
+
     """
     if dim != -1 and dim != input.ndim - 1:
         raise ValueError(
@@ -607,8 +608,7 @@ def mean_kernel(
     K,  # size after reduction dim
     BLOCK_SIZE: tl.constexpr,
 ):
-    """
-    Kernel for computing mean along a single dimension.
+    """Kernel for computing mean along a single dimension.
     Input is viewed as (M, N, K) where N is the dimension being reduced.
     """
     # Program ID gives us which output element we're computing
@@ -649,8 +649,7 @@ def mean_dim(
     keepdim: bool = False,
     dtype: torch.dtype | None = None,
 ) -> torch.Tensor:
-    """
-    Triton implementation of torch.mean with single dimension reduction.
+    """Triton implementation of torch.mean with single dimension reduction.
 
     Args:
         input: Input tensor
@@ -661,6 +660,7 @@ def mean_dim(
 
     Returns:
         Tensor with mean values along specified dimension
+
     """
     # Validate inputs
     assert -input.ndim <= dim < input.ndim, (
@@ -918,7 +918,7 @@ def mean_batch_invariant(input, dim, keepdim=False, dtype: torch.dtype | None = 
         for d in sorted_dims:
             result = result.squeeze(d)
 
-    return result
+    return result if dtype is not None else result.to(input.dtype)
 
 
 @triton.jit
@@ -933,8 +933,7 @@ def _rms_norm_kernel(
     BLOCK_SIZE: tl.constexpr,
     HAS_WEIGHT: tl.constexpr,
 ):
-    """
-    Compute RMS normalization along the last dimension of a 2D tensor.
+    """Compute RMS normalization along the last dimension of a 2D tensor.
     RMS Norm: y = x / sqrt(mean(x^2) + eps) * weight
     Each block handles one row of the input tensor.
     """
@@ -980,9 +979,7 @@ def rms_norm_batch_invariant(
     eps: float = 1e-6,
     residual: torch.Tensor | None = None,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-    """
-    Compute RMS normalization using Triton kernel.
-
+    """Compute RMS normalization using Triton kernel.
 
     Args:
         input: Input tensor of shape (..., hidden_size)
@@ -994,6 +991,7 @@ def rms_norm_batch_invariant(
     Returns:
         RMS normalized tensor, or ``(output, residual_out)`` when ``residual``
         is provided
+
     """
     if residual is not None:
         assert input.shape == residual.shape, (
@@ -1107,7 +1105,10 @@ def enable_batch_invariant_mode():
 
         _fp16_block_size_n = 128
 
-    # Softmax, log_softmax, mean, and bmm are already batch-invariant on XPU
+    # Native mean can change reduction order with the row count on XPU too.
+    _batch_invariant_LIB.impl("aten::mean.dim", mean_batch_invariant, key)
+
+    # Softmax, log_softmax, and bmm are already batch-invariant on XPU
     # (oneDNN backend produces bitwise-identical results regardless of batch
     # context). Only register these overrides on CUDA where they are needed.
     if not current_platform.is_xpu():
@@ -1116,7 +1117,6 @@ def enable_batch_invariant_mode():
         )
         _batch_invariant_LIB.impl("aten::softmax", softmax_batch_invariant, key)
         _batch_invariant_LIB.impl("aten::_softmax", softmax_batch_invariant, key)
-        _batch_invariant_LIB.impl("aten::mean.dim", mean_batch_invariant, key)
         # torch 2.12+ registers a built-in Triton bmm kernel for CUDA
         # (torch._native.ops.bmm_outer_product), so we need allow_override
         # to replace it at the dispatcher level.
@@ -1140,20 +1140,33 @@ def enable_batch_invariant_mode():
 
 def override_envs_for_invariance():
     os.environ["VLLM_ALLREDUCE_USE_SYMM_MEM"] = "0"
+    # Only the 1-stage kernel has a size- and rank-independent reduction order.
+    os.environ["VLLM_CUSTOM_ALLREDUCE_ALGO"] = "1stage"
 
     os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
 
-    # NCCL determinism settings
+    # NCCL determinism settings. NCCL keeps the launch mode process-wide, so,
+    # unlike the pins below, it also applies to communicators shared with other
+    # processes.
     os.environ["NCCL_LAUNCH_MODE"] = "GROUP"
-    os.environ["NCCL_COLLNET_ENABLE"] = "0"
-    os.environ["NCCL_NVLS_ENABLE"] = "0"
-    os.environ["NCCL_P2P_NET_DISABLE"] = "1"
-    os.environ["NCCL_MIN_NCHANNELS"] = "1"
-    os.environ["NCCL_MAX_NCHANNELS"] = "1"
-    os.environ["NCCL_PROTO"] = "Simple"
-    os.environ["NCCL_ALGO"] = "allreduce:tree"
-    os.environ["NCCL_NTHREADS"] = "1"
-    os.environ["NCCL_SOCKET_NTHREADS"] = "1"
+    pin_nccl_env(
+        {
+            "NCCL_COLLNET_ENABLE": "0",
+            "NCCL_NVLS_ENABLE": "0",
+            "NCCL_P2P_NET_DISABLE": "1",
+            "NCCL_MIN_NCHANNELS": "1",
+            "NCCL_MAX_NCHANNELS": "1",
+            "NCCL_PROTO": "Simple",
+            # NCCL >= 2.31 zero-fills the algorithm table of every collective
+            # when NCCL_ALGO is set and re-enables only the named ones; together
+            # with the NCCL_PROTO above, collectives not named here end up with
+            # no algorithm and fail with ncclInvalidUsage. Re-enable Ring and
+            # Tree for all collectives, then pin AllReduce to Tree.
+            "NCCL_ALGO": "ring,tree;allreduce:tree",
+            "NCCL_NTHREADS": "1",
+            "NCCL_SOCKET_NTHREADS": "1",
+        }
+    )
 
     # torch.compile settings
     os.environ["VLLM_USE_AOT_COMPILE"] = "0"

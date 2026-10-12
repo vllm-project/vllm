@@ -8,7 +8,6 @@ from typing import Any
 
 import torch
 from torch import nn
-from torch.nn.parameter import Parameter
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
@@ -18,13 +17,13 @@ from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
-    get_tp_group,
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul, SwigluStepAndMul
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
+    GateLinear,
     MoERunner,
     fused_moe_make_expert_params_mapping,
 )
@@ -33,7 +32,6 @@ from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     MergedColumnParallelLinear,
     QKVParallelLinear,
-    ReplicatedLinear,
     RowParallelLinear,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -50,7 +48,7 @@ from vllm.v1.attention.backend import AttentionType
 if typing.TYPE_CHECKING:
     from vllm.transformers_utils.configs.step3p5 import Step3p5Config
 else:
-    from transformers import PretrainedConfig as Step3p5Config
+    from transformers import PreTrainedConfig as Step3p5Config
 
 from .interfaces import MixtureOfExperts, SupportsPP
 from .utils import (
@@ -66,19 +64,6 @@ from .utils import (
 )
 
 logger = init_logger(__name__)
-
-
-class FP32ReplicatedLinear(ReplicatedLinear):
-    """
-    Use FP32 for higher precision.
-    """
-
-    def forward(
-        self,
-        x: torch.Tensor,
-    ) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
-        assert self.params_dtype == torch.float32
-        return super().forward(x.to(torch.float32))
 
 
 class Step3p5MLP(nn.Module):
@@ -173,7 +158,6 @@ class Step3p5Attention(nn.Module):
                 rope_scaling = None
 
         if sliding_window is not None and enable_sliding_window:
-            sliding_window = sliding_window
             if swa_num_attention_heads is not None:
                 num_heads = swa_num_attention_heads
                 self.total_num_heads = swa_num_attention_heads
@@ -329,12 +313,12 @@ class FusedMoEBlock(nn.Module):
                 f"the number of experts {config.moe_num_experts}."
             )
 
-        self.gate = FP32ReplicatedLinear(
+        # Router logits are accumulated in FP32 for higher precision.
+        self.gate = GateLinear(
             config.hidden_size,
             config.moe_num_experts,
-            bias=False,
-            quant_config=None,
-            params_dtype=torch.float32,  # Use FP32 for higher precision.
+            out_dtype=torch.float32,
+            params_dtype=torch.float32,
             prefix=f"{prefix}.gate",
         )
         self.use_moe_router_bias = config.use_moe_router_bias
@@ -474,7 +458,6 @@ class Step3p5DecoderLayer(nn.Module):
                 f"Unsupported attention implementation: {config.att_impl_type}"
             )
         self.use_moe = False
-        self.tp_group = get_tp_group()
         self.use_fused_all_reduce = (
             get_tensor_model_parallel_world_size() > 1
             and get_dp_group().world_size == 1
@@ -510,13 +493,6 @@ class Step3p5DecoderLayer(nn.Module):
             config.hidden_size, config.rms_norm_eps
         )
         self.prefix = prefix
-
-    def add_and_maybe_inplace_all_reduce(
-        self, in1: torch.Tensor, in2: torch.Tensor
-    ) -> torch.Tensor:
-        if not self.use_fused_all_reduce:
-            return in1 + in2
-        return self.tp_group.all_reduce(in1 + in2)
 
     def forward(
         self, positions: torch.Tensor, hidden_states: torch.Tensor

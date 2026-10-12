@@ -173,6 +173,18 @@ if (CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64" OR ENABLE_X86_ISA)
         set(AMX_FP8_SUPPORTED FALSE)
         message(STATUS "AMX-FP8 disabled by ENABLE_AMX_FP8=OFF")
     endif()
+
+    # AVX10.2 arrived in GCC 15, so the target attribute, the fp8 convert
+    # intrinsics and __builtin_cpu_supports("avx10.2") are all hard errors on
+    # the 12.3+ the backend otherwise supports. Probe instead of assuming.
+    check_cxx_compiler_flag("-mavx10.2" COMPILER_SUPPORTS_AVX10_2_FLAG)
+    if (COMPILER_SUPPORTS_AVX10_2_FLAG)
+        set(AVX10_2_SUPPORTED TRUE)
+    else()
+        set(AVX10_2_SUPPORTED FALSE)
+        message(STATUS "AVX10.2 disabled: compiler does not support -mavx10.2 (compiler: ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION})")
+    endif()
+
     list(APPEND CXX_COMPILE_FLAGS_AVX2
         "-mavx2")
 elseif (POWER9_FOUND OR POWER10_FOUND OR POWER11_FOUND)
@@ -488,6 +500,8 @@ set(VLLM_EXT_SRC
     "csrc/moe/dynamic_4bit_int_moe_cpu.cpp"
     "csrc/cpu/cpu_fused_moe.cpp"
     "csrc/cpu/cpu_attn.cpp"
+    "csrc/cpu/cpu_isa.cpp"
+    "csrc/cpu/sampling_kernels.cpp"
     "csrc/cpu/torch_bindings.cpp")
 
 if (CMAKE_SYSTEM_PROCESSOR MATCHES "riscv64" AND VLLM_RVV_VLEN AND
@@ -510,15 +524,23 @@ if (ASIMD_FOUND AND NOT APPLE_SILICON_FOUND)
         "csrc/cpu/cpu_tanhf_neon.hpp"
         ${VLLM_EXT_SRC})
     if (ARM_BF16_FOUND)
+        set(VLLM_EXT_SRC "csrc/cpu/sgl-kernels/conv.cpp" ${VLLM_EXT_SRC})
         if (ARM_I8MM_FOUND)
             set(VLLM_EXT_SRC "csrc/cpu/cpu_fused_moe_int8.cpp" ${VLLM_EXT_SRC})
         endif()
     endif()
 endif()
 
-if (POWER9_FOUND OR POWER10_FOUND OR POWER11_FOUND)	
+if (POWER9_FOUND OR POWER10_FOUND OR POWER11_FOUND)
     set(VLLM_EXT_SRC
+        "csrc/cpu/cpu_wna16.cpp"
         "csrc/cpu/shm.cpp"
+        ${VLLM_EXT_SRC})
+endif()
+
+if (POWER10_FOUND OR POWER11_FOUND)
+    set(VLLM_EXT_SRC
+        "csrc/cpu/cpu_fused_moe_int8.cpp"
         ${VLLM_EXT_SRC})
 endif()
 
@@ -540,11 +562,13 @@ if (ENABLE_X86_ISA)
         "csrc/cpu/sgl-kernels/gemm.cpp"
         "csrc/cpu/sgl-kernels/gemm_int8.cpp"
         "csrc/cpu/sgl-kernels/gemm_fp8.cpp"
+        "csrc/cpu/sgl-kernels/gemm_fp8_w8a8.cpp"
         "csrc/cpu/sgl-kernels/gemm_int4.cpp"
         "csrc/cpu/sgl-kernels/moe.cpp"
         "csrc/cpu/sgl-kernels/moe_int8.cpp"
         "csrc/cpu/sgl-kernels/moe_int4.cpp"
         "csrc/cpu/sgl-kernels/moe_fp8.cpp"
+        "csrc/cpu/sgl-kernels/moe_fp8_w8a8.cpp"
         "csrc/cpu/sgl-kernels/bmm.cpp"
         "csrc/cpu/sgl-kernels/decode.cpp"
         "csrc/cpu/sgl-kernels/extend.cpp"
@@ -565,8 +589,10 @@ if (ENABLE_X86_ISA)
         "csrc/cpu/utils.cpp"
         "csrc/cpu/spec_decode_utils.cpp"
         "csrc/cpu/cpu_attn.cpp"
+        "csrc/cpu/cpu_isa.cpp"
         "csrc/cpu/dnnl_kernels.cpp"
         "csrc/cpu/mamba_cpu.cpp"
+        "csrc/cpu/sampling_kernels.cpp"
         "csrc/cpu/torch_bindings.cpp"
         # TODO: Remove these files
         "csrc/cpu/activation.cpp"
@@ -581,8 +607,10 @@ if (ENABLE_X86_ISA)
         "csrc/cpu/utils.cpp"
         "csrc/cpu/spec_decode_utils.cpp"
         "csrc/cpu/cpu_attn.cpp"
+        "csrc/cpu/cpu_isa.cpp"
         "csrc/cpu/mamba_cpu.cpp"
         "csrc/cpu/dnnl_kernels.cpp"
+        "csrc/cpu/sampling_kernels.cpp"
         "csrc/cpu/torch_bindings.cpp"
         # TODO: Remove these files
         "csrc/cpu/activation.cpp"
@@ -616,6 +644,12 @@ if (ENABLE_X86_ISA)
     if (AMX_FP8_SUPPORTED)
         target_compile_definitions(_C PRIVATE "-DCPU_CAPABILITY_AMXFP8")
         message(STATUS "AMX-FP8 (Diamond Rapids) enabled")
+    endif()
+
+    # For the sgl-kernels AVX10.2 fp8 quantize paths
+    if (AVX10_2_SUPPORTED)
+        target_compile_definitions(_C PRIVATE "-DCPU_CAPABILITY_AVX10_2")
+        message(STATUS "AVX10.2 enabled")
     endif()
 
     # AVX512F 

@@ -5,7 +5,6 @@ pull_request_rules:
     - label != stale
     - -closed
     - or:
-      - files~=^[^/]+\.md$
       - files~=^docs/
       - files~=^examples/
   actions:
@@ -112,6 +111,32 @@ pull_request_rules:
     label:
       add:
         - frontend
+
+- name: label-pooling
+  description: Automatically apply pooling label
+  conditions:
+    - -closed
+    - or:
+      - files~=^vllm/entrypoints/pooling/
+      - files~=^vllm/model_executor/layers/pooler/
+      - files=vllm/model_executor/models/transformers/pooling.py
+      - files=vllm/model_executor/models/adapters.py
+      - files=vllm/config/pooler.py
+      - files=vllm/pooling_params.py
+      - files~=^vllm/v1/pool/
+      - files~=^vllm/v1/worker/gpu/pool/
+      - files~=^tests/entrypoints/pooling/
+      - files~=^tests/models/(language|multimodal)/pooling(_mteb_test)?/
+      - files~=^tests/model_executor/layers/test_pooler_.*\.py$
+      - files=tests/test_pooling_params.py
+      - files~=^tests/v1/e2e/general/test_pooling_.*\.py$
+      - files~=^docs/models/pooling_models/
+      - files~=^examples/pooling/
+      - title~=(?i)\bpooling\b
+  actions:
+    label:
+      add:
+        - pooling
 
 - name: label-rust
   description: Automatically apply rust label
@@ -343,9 +368,8 @@ pull_request_rules:
   conditions:
     - label != stale
     - or:
-      # The 4.1 sources spell the model three ways: deepseek_v4_1 (models),
-      # deepseek_v41 (most) and deepseekv41 (tool parsers).
-      - files~=^vllm/models/deepseek_v4_1/
+      # The 4.1 sources use deepseek_v41 and deepseekv41 (tool parsers).
+      - files~=^vllm/models/deepseek_v41/
       - files~=^vllm/(?:parser|tokenizers|reasoning|transformers_utils/configs)/deepseek_v41.*\.py
       - files~=^vllm/tool_parsers/deepseekv41.*\.py
       - files~=^rust/src/(?:chat|parser)/src/.*deepseek_v41
@@ -525,8 +549,6 @@ pull_request_rules:
     - label != stale
     - or:
       - files~=tpu.py
-      - files~=_tpu
-      - files~=tpu_
       - files~=/tpu/
   actions:
     label:
@@ -540,8 +562,6 @@ pull_request_rules:
     - label != stale
     - and:
       - -files~=tpu.py
-      - -files~=_tpu
-      - -files~=tpu_
       - -files~=/tpu/
   actions:
     label:
@@ -573,7 +593,7 @@ pull_request_rules:
     - base = main
     - label=ready
     - "#approved-reviews-by >= 1"
-    - "#commits-behind >= 50"
+    - "#commits-behind >= 100"
     - "#check-failure = 0"
     - -closed
     - -draft
@@ -662,6 +682,30 @@ pull_request_rules:
       add:
         - kv-connector
 
+- name: label-mooncake
+  description: Automatically apply mooncake label
+  conditions:
+    - label != stale
+    - or:
+      - files~=^vllm/distributed/kv_transfer/kv_connector/v1/mooncake/
+      # Covers the mooncake/ connector dir, mooncake_store_embedding/ and
+      # mooncake_ec_connector.py.
+      - files~=^vllm/distributed/ec_transfer/ec_connector/mooncake
+      - files=vllm/distributed/mooncake_store.py
+      - files~=^tests/v1/kv_connector/.*mooncake
+      - files~=^tests/v1/ec_connector/.*mooncake
+      - files~=^docs/features/mooncake.*\.md
+      - files=.buildkite/test_areas/disaggregated_mooncake.yaml
+      - title~=(?i)mooncake
+  actions:
+    label:
+      add:
+        - mooncake
+    assign:
+      users:
+        - "stmatengss"
+        - "LCAIZJ"
+
 - name: label-scheduler
   description: Automatically apply scheduler label
   conditions:
@@ -726,3 +770,19 @@ pull_request_rules:
     label:
       add:
         - vllm-ir
+
+- name: label-agents
+  description: Automatically apply agents label
+  conditions:
+    - label != stale
+    - or:
+      - files~=(?:^|/)AGENTS\.md$
+      - files~=^\.agents/
+      - files~=^\.claude/
+      # The [Agents] title tag only: a bare "agents" also matches CI, K8s and
+      # NIXL agents.
+      - title~=(?i)\[agents\]
+  actions:
+    label:
+      add:
+        - agents

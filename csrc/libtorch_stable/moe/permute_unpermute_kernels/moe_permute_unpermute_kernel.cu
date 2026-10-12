@@ -82,34 +82,40 @@ __device__ inline int64_t findTotalEltsLessThanTarget(T const* sorted_indices,
   return target_location + 1;
 }
 
-// Calculates the start offset of the tokens for a given expert. The last
-// element is the total number of valid tokens
-__global__ void computeExpertFirstTokenOffsetKernel(
+// Computes expert offsets (ending with the valid row count) and optional
+// inverse indices.
+__global__ void computeExpertOffsetsAndInverseKernel(
     int const* sorted_experts, int64_t const sorted_experts_len,
-    int const num_experts, int64_t* expert_first_token_offset) {
-  // First, compute the global tid. We only need 1 thread per expert.
-  int const expert = blockIdx.x * blockDim.x + threadIdx.x;
+    int const num_experts, int64_t* expert_first_token_offset,
+    int const* sorted_rows, int* inverse) {
+  int const index = blockIdx.x * blockDim.x + threadIdx.x;
 
   // Note that expert goes [0, num_experts] (inclusive) because we want a count
   // for the total number of active tokens at the end of the scan.
-  if (expert >= num_experts + 1) {
-    return;
+  if (index < num_experts + 1) {
+    expert_first_token_offset[index] =
+        findTotalEltsLessThanTarget(sorted_experts, sorted_experts_len, index);
   }
-  expert_first_token_offset[expert] =
-      findTotalEltsLessThanTarget(sorted_experts, sorted_experts_len, expert);
+  if (inverse != nullptr && index < sorted_experts_len) {
+    inverse[sorted_rows[index]] = index;
+  }
 }
 
-void computeExpertFirstTokenOffset(int const* sorted_indices,
-                                   int const total_indices,
-                                   int const num_experts,
-                                   int64_t* expert_first_token_offset,
-                                   cudaStream_t stream) {
-  int const num_entries = num_experts + 1;
-  int const threads = std::min(1024, num_entries);
+void computeExpertOffsetsAndInverse(int const* sorted_indices,
+                                    int const total_indices,
+                                    int const num_experts,
+                                    int64_t* expert_first_token_offset,
+                                    int const* sorted_rows, int* inverse,
+                                    cudaStream_t stream) {
+  int const num_entries = inverse != nullptr
+                              ? std::max(num_experts + 1, total_indices)
+                              : num_experts + 1;
+  int const threads = inverse != nullptr ? 256 : std::min(1024, num_entries);
   int const blocks = (num_entries + threads - 1) / threads;
 
-  computeExpertFirstTokenOffsetKernel<<<blocks, threads, 0, stream>>>(
-      sorted_indices, total_indices, num_experts, expert_first_token_offset);
+  computeExpertOffsetsAndInverseKernel<<<blocks, threads, 0, stream>>>(
+      sorted_indices, total_indices, num_experts, expert_first_token_offset,
+      sorted_rows, inverse);
 }
 
 void sortAndScanExpert(const int* expert_for_source_row, const int* source_rows,
@@ -117,7 +123,7 @@ void sortAndScanExpert(const int* expert_for_source_row, const int* source_rows,
                        int64_t* expert_first_token_offset, int num_rows,
                        int num_experts, int num_experts_per_node, int k,
                        CubKeyValueSorter& sorter, void* sorter_ws,
-                       cudaStream_t stream) {
+                       cudaStream_t stream, int* inverse) {
   int64_t const expanded_num_rows = static_cast<int64_t>(k) * num_rows;
   // We need to use the full num_experts because that is the sentinel value used
   // by topk for disabled experts
@@ -127,9 +133,9 @@ void sortAndScanExpert(const int* expert_for_source_row, const int* source_rows,
   sorter.run((void*)sorter_ws, sorter_ws_size_bytes, expert_for_source_row,
              permuted_experts, source_rows, permuted_rows, expanded_num_rows,
              stream);
-  computeExpertFirstTokenOffset(permuted_experts, expanded_num_rows,
-                                num_experts_per_node, expert_first_token_offset,
-                                stream);
+  computeExpertOffsetsAndInverse(
+      permuted_experts, expanded_num_rows, num_experts_per_node,
+      expert_first_token_offset, permuted_rows, inverse, stream);
 }
 
 __global__ void preprocessTopkIdKernel(int* topk_id_ptr, int size,
@@ -142,7 +148,7 @@ __global__ void preprocessTopkIdKernel(int* topk_id_ptr, int size,
   extern __shared__ int smem_expert_map[];
   // store expert_map in smem
   for (int i = tidx; i < num_experts; i += blockDim.x) {
-    smem_expert_map[i] = expert_map_ptr[i];
+    smem_expert_map[i] = expert_map_ptr ? expert_map_ptr[i] : i;
   }
   __syncthreads();
 

@@ -33,9 +33,7 @@ def set_elastic_ep_rank_retired(value):
 
 
 class ScalingMiddleware:
-    """
-    Middleware that pauses serving while the model is scaling or after the
-    local external-LB rank has been retired.
+    """Pause serving during scaling or after rank retirement, returning 503.
 
     Health and scaling-status requests remain available so an external
     orchestrator can observe the operation and remove a retired process.

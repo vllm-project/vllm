@@ -52,6 +52,7 @@ class HYV4Config(PreTrainedConfig):
             below zero disable the clamp.
         num_nextn_predict_layers: Number of MTP layers in the checkpoint.
         mtp_loss_factor: Training-time MTP loss weight (unused at inference).
+
     """
 
     model_type = "hy_v4"

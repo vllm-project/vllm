@@ -13,6 +13,7 @@ enabling prefix caching via hash-based deduplication.
 
 from collections import Counter
 from collections.abc import Iterable, Sequence
+from contextlib import AbstractContextManager
 from typing import Any
 
 import torch
@@ -27,6 +28,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     KVConnectorMetadata,
     KVConnectorRole,
+    KVConnectorTransferResults,
     KVConnectorWorkerMetadata,
     SupportsHMA,
 )
@@ -132,20 +134,22 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
         from vllm.v1.kv_cache_interface import CrossAttentionSpec, MambaSpec
 
         unsupported: list[str] = []
-        cache_block_size = vllm_config.cache_config.block_size
-        for g_idx, g in enumerate(kv_cache_config.transfer_groups):
-            spec = g.kv_cache_spec
+        store_group_ids = kv_cache_config.prefix_cacheable_group_ids
+        if not store_group_ids:
+            raise ValueError(
+                "MooncakeStore requires at least one prefix-cacheable KV cache group"
+            )
+        for group_id in store_group_ids:
+            spec = kv_cache_config.kv_cache_groups[group_id].kv_cache_spec
             if isinstance(spec, CrossAttentionSpec):
-                unsupported.append(f"group {g_idx}: CrossAttentionSpec")
-            # Enforce Mamba align mode
-            if isinstance(spec, MambaSpec) and spec.block_size != cache_block_size:
+                unsupported.append(f"group {group_id}: CrossAttentionSpec")
+            if isinstance(spec, MambaSpec) and spec.mamba_cache_mode != "align":
                 unsupported.append(
-                    f"group {g_idx}: MambaSpec with block_size="
-                    f"{spec.block_size} != cache_config.block_size="
-                    f"{cache_block_size} (mamba_cache_mode != 'align')"
+                    f"group {group_id}: mamba_cache_mode="
+                    f"{spec.mamba_cache_mode!r} != 'align'"
                 )
         pcp = vllm_config.parallel_config.prefill_context_parallel_size
-        if len(kv_cache_config.transfer_groups) > 1 and pcp > 1:
+        if len(store_group_ids) > 1 and pcp > 1:
             unsupported.append(f"PCP > 1 (pcp={pcp}) with hybrid attention")
         if unsupported:
             raise ValueError(
@@ -319,6 +323,17 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
     # Worker-side methods
     # ============================================================
 
+    def get_mem_pool_context(self) -> AbstractContextManager | None:
+        """Return a context manager for the custom MemPool, or None.
+
+        Called by the Worker before ``initialize_kv_cache`` so that KV
+        cache is allocated from the Mooncake-managed pool when
+        ``custom_mem_pool`` is set in ``kv_connector_extra_config``.
+        """
+        if self.connector_worker is None:
+            return None
+        return self.connector_worker.get_mem_pool_context()
+
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         assert self.connector_worker is not None
         self.connector_worker.register_kv_caches(kv_caches)
@@ -356,6 +371,14 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
         metadata = self._get_connector_metadata()
         assert isinstance(metadata, MooncakeStoreConnectorMetadata)
         return self.connector_worker.get_finished(finished_req_ids, metadata)
+
+    def get_transfer_results(
+        self, finished_req_ids: set[str]
+    ) -> KVConnectorTransferResults:
+        assert self.connector_worker is not None
+        metadata = self._get_connector_metadata()
+        assert isinstance(metadata, MooncakeStoreConnectorMetadata)
+        return self.connector_worker.get_transfer_results(finished_req_ids, metadata)
 
     def get_block_ids_with_load_errors(self) -> set[int]:
         assert self.connector_worker is not None

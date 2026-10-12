@@ -25,9 +25,11 @@ from torch import nn
 from vllm.model_executor.models.interfaces import (
     MultiModalEmbeddings,
     SupportsEagle3,
+    SupportsLoRA,
     SupportsMultiModal,
     SupportsPP,
 )
+from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     WeightsMapper,
@@ -35,6 +37,7 @@ from vllm.model_executor.models.utils import (
     maybe_prefix,
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.inputs import MultiModalKwargsItem
 
 from .mm_preprocess import (
     IMAGE_PLACEHOLDER,
@@ -81,7 +84,7 @@ def _make_deepseek_v4_vl_weights_mapper(
     dummy_inputs=DeepseekV4VLDummyInputsBuilder,
 )
 class DeepseekV4ForConditionalGeneration(
-    nn.Module, SupportsMultiModal, SupportsPP, SupportsEagle3
+    nn.Module, SupportsMultiModal, SupportsPP, SupportsEagle3, SupportsLoRA
 ):
     """Multimodal entry point for DeepSeek-V4 checkpoints with a vision tower.
 
@@ -89,9 +92,19 @@ class DeepseekV4ForConditionalGeneration(
     delegates through ``language_model`` via the protocol defaults.
     """
 
+    packed_modules_mapping = {
+        "gate_up_proj": ["w1", "w3"],
+        "fused_wqa_wkv": ["wq_a", "wkv"],
+        "fused_wkv_wgate": ["wkv", "wgate"],
+        # for visual encoder
+        "wqkv": ["wqkv"],
+        "w1": ["w1"],
+    }
+
     # The MoE router needs raw token ids to detect image sentinel tokens
     # (borrowed reserved ids, see common/mm_preprocess.py) and apply bias_vl.
     requires_raw_input_tokens = True
+    supports_tower_connector_lora = True
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
@@ -329,3 +342,29 @@ class DeepseekV4ForConditionalGeneration(
             return
         self.language_model.process_weights_after_loading()
         self._weights_finalized = True
+
+    def get_mm_mapping(self) -> MultiModelKeys:
+        """Get the module prefixes in the multimodal model."""
+        return MultiModelKeys.from_string_field(
+            language_model="language_model",
+            connector="aligner",
+            tower_model="vision.",
+        )
+
+    def get_mm_lora_token_counts(
+        self,
+        *,
+        modality: str,
+        mm_kwargs: MultiModalKwargsItem | None,
+        num_mm_embeds: int,
+    ) -> tuple[int, int | None]:
+        if modality != "image":
+            raise ValueError(f"Unsupported modality: {modality!r}")
+
+        patches = mm_kwargs.get("patches") if mm_kwargs else None
+        if patches is not None and isinstance(patches.data, torch.Tensor):
+            tower_tokens = patches.data.shape[0]
+        else:
+            tower_tokens = num_mm_embeds * self.config.vision_downsample_ratio**2
+
+        return tower_tokens, num_mm_embeds

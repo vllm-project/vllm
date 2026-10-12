@@ -30,6 +30,7 @@ from vllm.model_executor.layers.fused_moe.router.gate_linear import GateLinear
 from vllm.model_executor.layers.fused_moe.router.grouped_topk_router import (
     fused_grouped_topk,
 )
+from vllm.model_executor.layers.fusion.mm_input_norm import build_mm_input_norm
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
@@ -155,59 +156,42 @@ def shard_sequence_parallel_mlp(
     )
 
 
+def can_shard_sequence_parallel_shared_expert(vllm_config: VllmConfig) -> bool:
+    """Whether the active MoE backend preserves the SP shared-expert contract.
+
+    MegaMoE invokes the shared expert directly. DeepEP v2 invokes it through
+    ``MoERunner``, but its EP combine returns the routed output in the local
+    sequence-sharded layout, so the shared expert can use the same
+    all-gather/partial-GEMM/reduce-scatter implementation.
+    """
+    return (
+        vllm_config.kernel_config.moe_backend == "deep_gemm_mega_moe"
+        or vllm_config.parallel_config.all2all_backend == "deepep_v2"
+    )
+
+
 def maybe_init_gemm_rs_ar(vllm_config: VllmConfig, use_sequence_parallel: bool) -> bool:
     # Both feature flags may be enabled; the worker's static SP topology binds
     # its singleton to exactly one mode.
     all_reduce = not use_sequence_parallel
     mode = "GEMM-AR" if all_reduce else "GEMM-RS"
-    enabled = envs.VLLM_KIMI_K3_GEMM_AR if all_reduce else envs.VLLM_KIMI_K3_GEMM_RS
+    enabled = envs.VLLM_KIMI_K3_GEMM_AR if all_reduce else envs.VLLM_ENABLE_GEMM_RS
     if not enabled:
         return False
 
-    parallel_config = vllm_config.parallel_config
-    tp_size = parallel_config.tensor_parallel_size
-    if parallel_config.use_ubatching:
-        reason = "ubatching is enabled"
-    elif vllm_config.model_config.dtype != torch.bfloat16:
-        reason = "the model dtype is not BF16"
-    elif not current_platform.is_cuda():
-        reason = "the device is not CUDA"
-    elif not current_platform.is_device_capability_family(100):
-        reason = "the device is not SM100-family"
-    elif not 1 < tp_size <= 16:
-        reason = "TP size is not in the supported range 2-16"
-    elif 128 % tp_size != 0:
-        reason = "TP size does not divide 128"
-    else:
-        reason = None
-
-    if reason is not None:
-        logger.warning_once("%s is disabled because %s.", mode, reason)
-        return False
-
-    from vllm.models.kimi_k3.nvidia.ops.cute_dsl.gemm_rs_ar import init_gemm_rs_ar
+    # The kernel module pulls in cute_dsl, so import it only once the flag
+    # asks for it.
+    from vllm.model_executor.kernels.linear.cute_dsl.gemm_rs_ar import (
+        maybe_init_gemm_rs_ar as maybe_init_shared_gemm_rs_ar,
+    )
 
     config = vllm_config.model_config.hf_text_config
-    try:
-        init_gemm_rs_ar(
-            max_M=vllm_config.scheduler_config.max_num_batched_tokens,
-            N=config.hidden_size,
-            all_reduce=all_reduce,
-        )
-    except RuntimeError as e:
-        logger.warning_once(
-            "%s is disabled because initialization failed: %s. This may mean "
-            "the TP ranks do not share one NVLink domain.",
-            mode,
-            e,
-        )
+    if not maybe_init_shared_gemm_rs_ar(
+        vllm_config, N=config.hidden_size, all_reduce=all_reduce
+    ):
         return False
-    if all_reduce:
-        logger.info_once(
-            "GEMM-AR is enabled. To disable it, set VLLM_KIMI_K3_GEMM_AR=0."
-        )
-    else:
-        logger.info_once("GEMM-RS is enabled.")
+    flag = "VLLM_KIMI_K3_GEMM_AR" if all_reduce else "VLLM_ENABLE_GEMM_RS"
+    logger.info_once("To disable %s, set %s=0.", mode, flag)
     return True
 
 
@@ -276,7 +260,7 @@ class KimiMLP(nn.Module):
             not use_sequence_parallel and reduce_results
         )
         if use_gemm_rs_ar and run_gemm_rs_ar:
-            from vllm.models.kimi_k3.nvidia.ops.cute_dsl.gemm_rs_ar import (
+            from vllm.model_executor.kernels.linear.cute_dsl.gemm_rs_ar import (
                 get_gemm_rs_ar,
             )
 
@@ -309,7 +293,7 @@ class KimiMLP(nn.Module):
         x = self.act_fn(gate_up)
 
         if self.gemm_rs_ar is not None and self.gemm_rs_ar.should_run(x):
-            return self.gemm_rs_ar(x, self.down_proj.weight)
+            return self.gemm_rs_ar.apply(x, self.down_proj)
 
         x, _ = self.down_proj(x)
         if self.shard_sequence_parallel:
@@ -339,6 +323,7 @@ class KimiRoutedOutputTransform(nn.Module):
             residual: Optional tensor of the up-projection's output shape to
                 accumulate into. It is consumed in the GEMM's beta-add
                 epilogue, so adding it costs no extra kernel.
+
         """
         if self.norm is not None:
             hidden_states = self.norm(hidden_states)
@@ -394,27 +379,16 @@ class KimiK3MegaMoEExperts(DeepseekV4MegaMoEExperts):
             return
 
         self._check_runtime_supported()
-        from vllm.utils.deep_gemm import _import_deep_gemm
-
-        deep_gemm = _import_deep_gemm()
-        w13_scale = deep_gemm.transform_sf_into_required_layout(
-            self._ue8m0_uint8_to_float(self.w13_weight_scale.data).contiguous(),
-            2 * self.intermediate_size,
-            self.hidden_size,
-            (1, 32),
-            self.num_local_experts,
-        )
-        w2_scale = deep_gemm.transform_sf_into_required_layout(
-            self._ue8m0_uint8_to_float(self.w2_weight_scale.data).contiguous(),
-            self.hidden_size,
-            self.intermediate_size,
-            (1, 32),
-            self.num_local_experts,
-        )
+        backend = self._ensure_backend()
         self._transformed_l1_weights, self._transformed_l2_weights = (
-            deep_gemm.transform_weights_for_mega_moe(
-                (self.w13_weight.data.view(torch.int8).contiguous(), w13_scale),
-                (self.w2_weight.data.view(torch.int8).contiguous(), w2_scale),
+            backend.transform_weights(
+                w13_weight=self.w13_weight.data,
+                w13_weight_scale=self.w13_weight_scale.data,
+                w2_weight=self.w2_weight.data,
+                w2_weight_scale=self.w2_weight_scale.data,
+                num_local_experts=self.num_local_experts,
+                hidden_size=self.hidden_size,
+                intermediate_size=self.intermediate_size,
                 activation=self.activation,
             )
         )
@@ -436,6 +410,7 @@ class KimiK3MegaMoEExperts(DeepseekV4MegaMoEExperts):
         from vllm.utils.deep_gemm import _import_deep_gemm
 
         deep_gemm = _import_deep_gemm()
+        backend = self._ensure_backend()
         group = get_ep_group().device_group
         device = torch.accelerator.current_device_index()
         key = (
@@ -447,6 +422,7 @@ class KimiK3MegaMoEExperts(DeepseekV4MegaMoEExperts):
             self.hidden_size,
             self.intermediate_size,
             self.activation,
+            backend.mma_type,
         )
         symm_buffer = self._kimi_symm_buffer_cache.get(key)
         if symm_buffer is None:
@@ -458,6 +434,7 @@ class KimiK3MegaMoEExperts(DeepseekV4MegaMoEExperts):
                 self.hidden_size,
                 self.intermediate_size,
                 activation=self.activation,
+                mma_type=backend.mma_type,
             )
             self._kimi_symm_buffer_cache[key] = symm_buffer
         return symm_buffer
@@ -478,10 +455,6 @@ class KimiK3MegaMoEExperts(DeepseekV4MegaMoEExperts):
                 f"but its symmetric buffer supports {self.max_num_tokens}."
             )
         y = torch.empty_like(hidden_states, dtype=torch.bfloat16)
-        from vllm.utils.deep_gemm import _import_deep_gemm
-
-        deep_gemm = _import_deep_gemm()
-        symm_buffer = self.get_symm_buffer()
         num_tokens = hidden_states.shape[0]
         is_padding = None
         if envs.VLLM_MOE_SKIP_PADDING and is_forward_context_available():
@@ -512,6 +485,8 @@ class KimiK3MegaMoEExperts(DeepseekV4MegaMoEExperts):
                 else None,
             )
 
+        backend = self._ensure_backend()
+        symm_buffer = self.get_symm_buffer()
         prepare_megamoe_inputs(
             hidden_states,
             topk_weights,
@@ -521,20 +496,23 @@ class KimiK3MegaMoEExperts(DeepseekV4MegaMoEExperts):
             symm_buffer.topk_idx[:num_tokens],
             symm_buffer.topk_weights[:num_tokens],
             is_padding=is_padding,
+            hidden_quant=backend.hidden_quant,
         )
         self.finalize_weights()
         assert self._transformed_l1_weights is not None
         assert self._transformed_l2_weights is not None
-        deep_gemm.fp8_fp4_mega_moe(
-            y,
-            self._transformed_l1_weights,
-            self._transformed_l2_weights,
-            symm_buffer,
+        backend.run_mega_moe(
+            y=y,
+            l1_weights=self._transformed_l1_weights,
+            l2_weights=self._transformed_l2_weights,
+            symm_buffer=symm_buffer,
             activation_clamp=activation_clamp,
-            activation=self.activation,
-            situ_beta=self.activation_beta,
-            situ_linear_beta=self.activation_linear_beta,
             fast_math=fast_math,
+            # DeepGEMM names the SiTU gate tanh scale `activation_alpha` and the
+            # linear/up tanh scale `activation_beta`; beta=0 leaves up untouched.
+            activation=self.activation,
+            activation_alpha=self.activation_beta or 1.0,
+            activation_beta=self.activation_linear_beta or 0.0,
         )
         return y
 
@@ -653,10 +631,12 @@ class KimiMoE(nn.Module):
                 quant_config=quant_config,
                 reduce_results=False,
                 use_sequence_parallel=use_sequence_parallel,
-                # Only the MegaMoE path calls the shared experts directly; the
-                # FusedMoE path below hands them to the runner, which fuses
-                # their reduction and assumes the replicated layout.
-                can_shard_sequence_parallel=self.use_mega_moe,
+                # MegaMoE calls the shared expert directly. DeepEP v2 hands it
+                # to MoERunner, but preserves the local SP output layout needed
+                # by the sharded shared-expert path.
+                can_shard_sequence_parallel=can_shard_sequence_parallel_shared_expert(
+                    vllm_config
+                ),
                 run_gemm_rs_ar=run_gemm_rs_ar,
                 prefix=f"{prefix}.shared_experts",
                 activation_situ_beta=activation_situ_beta,
@@ -674,7 +654,7 @@ class KimiMoE(nn.Module):
                 hidden_size,
                 self.moe_hidden_size,
                 bias=False,
-                quant_config=None,
+                quant_config=quant_config,
                 prefix=f"{prefix}.routed_expert_down_proj",
             )
             self.routed_expert_norm = (
@@ -691,7 +671,7 @@ class KimiMoE(nn.Module):
                 self.moe_hidden_size,
                 hidden_size,
                 bias=False,
-                quant_config=None,
+                quant_config=quant_config,
                 prefix=f"{prefix}.routed_expert_up_proj",
             )
 
@@ -758,6 +738,7 @@ class KimiMoE(nn.Module):
                 routed_input_transform=None,
                 routed_output_transform=self.routed_output_transform,
                 is_sequence_parallel=use_sequence_parallel,
+                skip_padding=True,
                 runner_cls=LatentMoERunner if self.use_latent_moe else None,
             )
         if self.padded_moe_intermediate_size != moe_intermediate_size:
@@ -794,6 +775,7 @@ class KimiMoE(nn.Module):
             ``router_output`` holds the grouped top-k weights and ``topk_ids``
             the selected experts; otherwise ``router_output`` holds the raw gate
             logits and ``topk_ids`` is ``None``.
+
         """
 
         def _router(
@@ -917,14 +899,12 @@ class KimiDecoderLayer(nn.Module):
                     aux_stream=aux_stream,
                     run_gemm_rs_ar=run_gemm_rs_ar,
                 )
-                self._self_attn_writes_output = False
             else:
                 self.self_attn = KimiLinearGatedDeltaNetAttention(
                     config,
                     vllm_config,
                     prefix=f"{prefix}.self_attn",
                 )
-                self._self_attn_writes_output = True
         else:
             qk_nope_head_dim = config.qk_nope_head_dim
             qk_rope_head_dim = config.qk_rope_head_dim
@@ -954,7 +934,6 @@ class KimiDecoderLayer(nn.Module):
                 aux_stream=aux_stream,
                 run_gemm_rs_ar=run_gemm_rs_ar,
             )
-            self._self_attn_writes_output = False
 
         if self.use_sequence_parallel:
             self.self_attn.o_proj.reduce_results = False
@@ -1020,14 +999,6 @@ class KimiDecoderLayer(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
-        if self._self_attn_writes_output:
-            output = torch.empty_like(hidden_states)
-            self.self_attn(
-                hidden_states=hidden_states,
-                positions=positions,
-                output=output,
-            )
-            return output
         return self.self_attn(
             hidden_states=hidden_states,
             positions=positions,
@@ -1773,6 +1744,7 @@ class KimiK3ForConditionalGeneration(
     """Kimi-K3 model with Kimi-K2.5 vision and KimiLinear text."""
 
     supports_encoder_tp_data = True
+    supports_mm_device_do_normalize = True
 
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
@@ -1812,6 +1784,7 @@ class KimiK3ForConditionalGeneration(
             self.vision_tower = MoonViT3dPretrainedModel(
                 config.vision_config,
                 quant_config=self._maybe_ignore_quant_config(quant_config),
+                input_norm=build_mm_input_norm(vllm_config.model_config),
                 prefix=maybe_prefix(prefix, "vision_tower"),
             )
             if is_meta_module(self.vision_tower):
@@ -1852,6 +1825,7 @@ class KimiK3ForConditionalGeneration(
 
             self.mm_projector = KimiK25MultiModalProjector(
                 config=config.vision_config,
+                out_hidden_size=config.text_config.hidden_size,
                 use_data_parallel=self.use_data_parallel,
                 quant_config=self._maybe_ignore_quant_config(quant_config),
                 prefix=maybe_prefix(prefix, "mm_projector"),
@@ -2001,13 +1975,13 @@ class KimiK3ForConditionalGeneration(
         if isinstance(patch_size, int):
             patch_size = (patch_size, patch_size)
         total_patches = sum(t * h * w for t, h, w in grid_thws)
-        pixel_values = torch.randn(
+        pixel_values = torch.zeros(
             total_patches,
             3,
             patch_size[0],
             patch_size[1],
             device=device,
-            dtype=dtype,
+            dtype=self.vision_tower.patch_embed.input_norm.input_dtype or dtype,
         )
         metadata = self.vision_tower.prepare_encoder_cudagraph_metadata(
             grid_thws,
@@ -2065,9 +2039,7 @@ class KimiK3ForConditionalGeneration(
         path: str = "default",
     ) -> torch.Tensor:
         image_features = self.vision_tower(
-            self._get_pixel_values(mm_kwargs).to(
-                next(self.vision_tower.parameters()).dtype
-            ),
+            self._get_pixel_values(mm_kwargs),
             self._get_grid_thws(mm_kwargs),
         )
         return self._project_encoder_features(torch.cat(image_features))
@@ -2100,8 +2072,6 @@ class KimiK3ForConditionalGeneration(
                 pixel_values.shape[0] * pixel_values.shape[1], *pixel_values.shape[2:]
             )
 
-        target_dtype = next(self.vision_tower.parameters()).dtype
-        pixel_values = pixel_values.to(target_dtype)
         assert isinstance(grid_thws, torch.Tensor), (
             f"expect grid_thws to be a tensor, got {type(grid_thws)}"
         )

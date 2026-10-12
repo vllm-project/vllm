@@ -82,6 +82,7 @@ def register_quantization_config(quantization: str):
         >>>
         >>> get_quantization_config("my_quant")
         <class 'MyQuantConfig'>
+
     """  # noqa: E501
 
     def _wrapper(quant_config_cls):
@@ -120,7 +121,7 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
         # The v4.1 class is the v4 one extended to accept model_type
         # "deepseek_v41" and its 32x32 MXFP8 linear layout. V4.1 has
         # platform-specific implementations for both CUDA and ROCm.
-        from vllm.models.deepseek_v4_1 import (
+        from vllm.models.deepseek_v41 import (
             DeepseekV4FP8Config as DeepseekV41FP8Config,
         )
 

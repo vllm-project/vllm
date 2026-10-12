@@ -1349,6 +1349,7 @@ def fused_kda_gate_chunk_cumsum(
     )
     return y
 
+
 def _chunk_kda_fwd_with_cumulative_g(
     q: torch.Tensor,
     k: torch.Tensor,
