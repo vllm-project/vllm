@@ -177,68 +177,23 @@ class TestPushScheduler:
         # Tracked as awaiting a recv.
         assert request.request_id in sched._reqs_need_recv
 
-    def test_d_side_registration_carries_transfer_id(self):
-        # Given
-        sched = make_nixl_push_scheduler()
-        _stub_sw_clipping(sched)
-        request = _make_request(request_id="req-d-1", transfer_id="xfer-1")
-        sched.update_state_after_alloc(request, _BlocksMock(([1],)), 16)
-        scheduler_output = MagicMock()
-        scheduler_output.scheduled_new_reqs = []
-        scheduler_output.scheduled_cached_reqs = MagicMock(
-            req_ids=[], resumed_req_ids=set()
-        )
-
-        # When
-        with patch.object(
-            sched.__class__.__mro__[1],
-            "build_connector_meta",
-            return_value=NixlConnectorMetadata(),
-        ):
-            meta = sched.build_connector_meta(scheduler_output)
-
-        # Then
-        assert meta.push_registrations["req-d-1"]["transfer_id"] == "xfer-1"
-
-    def test_p_side_transfer_id_shipped_with_finished_blocks(self):
-        # Given
-        sched = make_nixl_push_scheduler()
-        _stub_sw_clipping(sched)
-        sched.request_finished(
-            _make_request(request_id="req-p-1", is_d_side=False, transfer_id="xfer-1"),
-            ([4, 5],),
-        )
-        scheduler_output = MagicMock()
-        scheduler_output.scheduled_new_reqs = []
-        scheduler_output.scheduled_cached_reqs = MagicMock(
-            req_ids=[], resumed_req_ids=set()
-        )
-
-        # When
-        with patch.object(
-            sched.__class__.__mro__[1],
-            "build_connector_meta",
-            return_value=NixlConnectorMetadata(),
-        ):
-            meta = sched.build_connector_meta(scheduler_output)
-
-        # Then
-        assert meta.push_finished_blocks == {"req-p-1": (([4, 5],), "xfer-1")}
-
     def test_d_side_without_transfer_id_prefills_locally(self):
         # Given
         sched = make_nixl_push_scheduler()
         _stub_sw_clipping(sched)
         request = _make_request(request_id="req-d-1", transfer_id=None)
         request.prompt_token_ids = list(range(64))
+        sched.on_new_request(request)
 
         # When
         matched = sched.get_num_new_matched_tokens(request, 0)
+        heartbeats = dict(sched._heartbeat_req_engine)
         sched.update_state_after_alloc(request, _BlocksMock(([1],)), 0)
         sched.request_finished(request, ([1],))
 
         # Then
         assert matched == (0, False)
+        assert heartbeats == {}
         assert sched._push_pending_registrations == {}
         assert sched._reqs_need_recv == {}
 
@@ -282,11 +237,13 @@ class TestPushScheduler:
         _stub_sw_clipping(sched)
 
         # Stage one D registration and one P finished entry.
-        d_req = _make_request(request_id="req-d-9")
+        d_req = _make_request(request_id="req-d-9", transfer_id="xfer-9")
         sched.update_state_after_alloc(
             d_req, _BlocksMock(([1, 2, 3],)), num_external_tokens=48
         )
-        p_req = _make_request(request_id="req-p-9", is_d_side=False)
+        p_req = _make_request(
+            request_id="req-p-9", is_d_side=False, transfer_id="xfer-9"
+        )
         sched.request_finished(p_req, ([4, 5, 6],))
 
         scheduler_output = MagicMock()
@@ -305,8 +262,8 @@ class TestPushScheduler:
             meta = sched.build_connector_meta(scheduler_output)
 
         assert isinstance(meta, NixlConnectorMetadata)
-        assert "req-d-9" in meta.push_registrations
-        assert "req-p-9" in meta.push_finished_blocks
+        assert meta.push_registrations["req-d-9"]["transfer_id"] == "xfer-9"
+        assert meta.push_finished_blocks == {"req-p-9": (([4, 5, 6],), "xfer-9")}
         # Staging dicts cleared.
         assert sched._push_pending_registrations == {}
         assert sched._newly_finished_push_blocks == {}
@@ -636,7 +593,7 @@ class TestPushWriterMatching:
         w._handle_push_reg_notif(notif)
 
         assert len(w.start_push_calls) == 0
-        assert "req-B" in w._pending_d_registrations
+        assert ("decode-engine", "req-B") in w._pending_d_registrations
 
     def test_handle_push_reg_drops_malformed(self, caplog):
         # The writer logs WARNING/ERROR when it sees these bad payloads;
@@ -707,21 +664,31 @@ class TestPushWriterTransferId:
         ]
         assert pushes == [(p_1, ([1],), d_1), (p_2, ([2],), d_2)]
 
-    def test_different_transfer_ids_never_pair_by_base_id(self):
+    def test_same_request_id_on_two_decode_engines(self):
         # Given
-        p_1 = "cmpl-shared-0-aaaaaaaa"
-        d_2 = "cmpl-shared-0-dddddddd"
+        p_1, p_2 = "cmpl-shared-0-aaaaaaaa", "cmpl-shared-0-cccccccc"
+        d_id = "cmpl-shared-0"
         w = _StubWriterWorker.fresh()
-        w._handle_finished_blocks(p_1, ([1],), "xfer-1")
+        for engine_id, transfer_id in (("decode-1", "xfer-1"), ("decode-2", "xfer-2")):
+            w._handle_push_reg_notif(
+                PUSH_REG_NOTIF_PREFIX
+                + msgspec.msgpack.encode(
+                    _registration_data(
+                        d_id, decode_engine_id=engine_id, transfer_id=transfer_id
+                    )
+                )
+            )
 
         # When
-        w._handle_push_reg_notif(
-            PUSH_REG_NOTIF_PREFIX
-            + msgspec.msgpack.encode(_registration_data(d_2, transfer_id="xfer-2"))
-        )
+        w._handle_finished_blocks(p_1, ([1],), "xfer-1")
+        w._handle_finished_blocks(p_2, ([2],), "xfer-2")
 
         # Then
-        assert w.start_push_calls == []
+        pushes = [
+            (p_id, blocks, reg["decode_engine_id"])
+            for p_id, blocks, reg in w.start_push_calls
+        ]
+        assert pushes == [(p_1, ([1],), "decode-1"), (p_2, ([2],), "decode-2")]
 
     def test_registration_without_transfer_id_is_dropped(self, caplog):
         # Given
@@ -1383,7 +1350,7 @@ class TestPushWriterNegative:
         )
         w._handle_push_reg_notif(notif)
         w._handle_push_reg_notif(notif)
-        assert "req-dup" in w._pending_d_registrations
+        assert ("decode-engine", "req-dup") in w._pending_d_registrations
         assert len(w._pending_d_registrations) == 1
         assert w.start_push_calls == []
 

@@ -60,13 +60,16 @@ def get_representative_spec_type(spec: KVCacheSpec) -> type[KVCacheSpec]:
     return type(spec)
 
 
-def get_transfer_id(kv_transfer_params: dict[str, Any]) -> TransferId | None:
+def get_transfer_id(
+    kv_transfer_params: dict[str, Any], request_id: str
+) -> TransferId | None:
     """Id the router sets on the prefill and decode request of one dispatch."""
     transfer_id = kv_transfer_params.get("transfer_id")
     if isinstance(transfer_id, str) and transfer_id:
         return transfer_id
     logger.warning(
         "Missing transfer_id in kv_transfer_params from router. "
-        "This request will not utilize KVTransfer."
+        "Request %s will not utilize KVTransfer.",
+        request_id,
     )
     return None

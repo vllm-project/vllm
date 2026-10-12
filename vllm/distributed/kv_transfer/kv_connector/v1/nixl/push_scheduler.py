@@ -121,9 +121,10 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
 
         if params is None or not params.get("do_remote_prefill"):
             return 0, False
-        if get_transfer_id(params) is None:
+        if get_transfer_id(params, request.request_id) is None:
             # P can't pair with this request, so prefill it locally.
             params["do_remote_prefill"] = False
+            self._stop_heartbeat(request.request_id)
             return 0, False
 
         token_ids = request.prompt_token_ids or []
@@ -258,12 +259,14 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
         if not is_p_node:
             return False, None
 
-        # Without a transfer_id no D can pair with this request.
-        transfer_id = get_transfer_id(params)
-        if transfer_id is None or request.status not in (
+        transfer_id = None
+        if request.status in (
             RequestStatus.FINISHED_LENGTH_CAPPED,
             RequestStatus.FINISHED_STOPPED,
         ):
+            # Without a transfer_id no D can pair with this request.
+            transfer_id = get_transfer_id(params, request.request_id)
+        if transfer_id is None:
             self._reqs_not_processed.add(request.request_id)
             self._reqs_need_save.pop(request.request_id, None)
             return False, None

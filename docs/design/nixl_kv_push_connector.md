@@ -122,8 +122,8 @@ finished blocks waiting for an unmatched ``PUSH_REG``.
 
 When a request completes on P (lease expires or the WRITE finishes),
 ``get_finished`` enqueues the request id onto ``_evict_finished_inbox``,
-which the writer drains to drop stale ``_push_finished_blocks`` /
-``_pending_d_registrations`` and stop self-polling.
+which the writer drains to drop stale ``_push_finished_blocks`` and stop
+self-polling.
 
 ## Writer-local matching tables
 

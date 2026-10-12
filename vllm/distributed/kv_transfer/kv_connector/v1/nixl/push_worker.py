@@ -27,8 +27,8 @@ the handshake-completion callback sets the same event after a deferred
 PUSH_REG send or a deferred push WRITE has been queued. When a request's
 lease expires (the base worker reports it via ``done_sending``) or the WRITE completes,
 ``get_finished`` enqueues an eviction onto ``_evict_finished_inbox`` so
-the writer drops any leftover ``_push_finished_blocks`` /
-``_pending_d_registrations`` and stops self-polling.
+the writer drops any leftover ``_push_finished_blocks`` and stops
+self-polling.
 """
 
 import queue
@@ -40,7 +40,7 @@ from typing import TYPE_CHECKING, Any
 
 import msgspec
 
-from vllm.distributed.kv_transfer.kv_connector.utils import BlockIds
+from vllm.distributed.kv_transfer.kv_connector.utils import BlockIds, EngineId
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorTransferResults,
 )
@@ -112,8 +112,9 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         # registration.
         self._push_finished_blocks: dict[ReqId, tuple[BlockIds, TransferId]] = {}
         # P-side: D registrations received via NIXL notification that have
-        # not yet been matched with a finished P request.
-        self._pending_d_registrations: dict[ReqId, dict[str, Any]] = {}
+        # not yet been matched with a finished P request. Keyed by D engine
+        # too since D request ids can repeat across D instances.
+        self._pending_d_registrations: dict[tuple[EngineId, ReqId], dict[str, Any]] = {}
 
         # Cross-thread channels.
         self._reg_send_inbox: queue.Queue[tuple[str, dict[str, Any]]] = queue.Queue()
@@ -264,15 +265,13 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
 
                 # 3b. Evict finished blocks for requests that have either
                 # completed (WRITE acknowledged) or whose lease expired
-                # without a D registration.  Drop pending registrations
-                # for the same reason so we don't leak state.
+                # without a D registration.
                 while True:
                     try:
                         rid = self._evict_finished_inbox.get_nowait()
                     except queue.Empty:
                         break
                     self._push_finished_blocks.pop(rid, None)
-                    self._pending_d_registrations.pop(rid, None)
 
                 # 4. NIXL notifs: route PUSH_REG; forward the rest.
                 for notifs in self.nixl_wrapper.get_new_notifs().values():
@@ -313,7 +312,8 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             fin_id, blocks = match
             self._do_start_push_kv(fin_id, blocks, reg_data)
         else:
-            self._pending_d_registrations[rid] = reg_data
+            reg_key = (reg_data.get("decode_engine_id"), rid)
+            self._pending_d_registrations[reg_key] = reg_data
 
     def _handle_finished_blocks(
         self, request_id: str, blocks: BlockIds, transfer_id: TransferId
