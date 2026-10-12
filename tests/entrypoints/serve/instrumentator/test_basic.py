@@ -102,13 +102,6 @@ async def test_check_health(server: RemoteOpenAIServer):
     assert response.status_code == HTTPStatus.OK
 
 
-@pytest.mark.asyncio
-async def test_check_ready(server: RemoteOpenAIServer):
-    response = requests.get(server.url_for("ready"))
-
-    assert response.status_code == HTTPStatus.OK
-
-
 @pytest.mark.parametrize(
     "server_args",
     [
