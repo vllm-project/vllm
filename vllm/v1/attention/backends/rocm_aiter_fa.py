@@ -484,10 +484,13 @@ class AiterFlashAttentionMetadataBuilder(
     def build_for_cudagraph_capture(
         self, common_attn_metadata: CommonAttentionMetadata
     ):
-        return self.build(common_attn_metadata=common_attn_metadata)
+        return self.build(
+            common_prefix_len=0, common_attn_metadata=common_attn_metadata
+        )
 
     def build(
         self,
+        common_prefix_len: int,
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
     ) -> "AiterFlashAttentionMetadata":

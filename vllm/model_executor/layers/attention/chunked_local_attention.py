@@ -49,6 +49,7 @@ def create_chunked_local_attention_backend(
 
         def build(
             self,
+            common_prefix_len: int,
             common_attn_metadata: CommonAttentionMetadata,
             fast_build: bool = False,
         ):
@@ -57,7 +58,7 @@ def create_chunked_local_attention_backend(
                 common_attn_metadata,
                 self.kv_cache_spec.block_size,
             )
-            metadata = super().build(cm, fast_build)
+            metadata = super().build(common_prefix_len, cm, fast_build)
             metadata.make_virtual_batches_block_table = make_virtual_batches_block_table
             return metadata
 

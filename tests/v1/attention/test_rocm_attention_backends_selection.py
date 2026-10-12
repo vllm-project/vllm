@@ -286,7 +286,7 @@ def test_aiter_unified_attention_capture_preserves_query_start_locations():
 
     actual = builder.build_for_cudagraph_capture(common)
 
-    builder.build.assert_called_once_with(common)
+    builder.build.assert_called_once_with(0, common)
     assert actual is metadata
     assert torch.equal(actual.seq_lens, torch.ones_like(actual.seq_lens))
     assert actual.query_start_loc is common.query_start_loc

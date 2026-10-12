@@ -74,7 +74,7 @@ class _TextOnlyDraftModel(torch.nn.Module):
 
 @pytest.mark.parametrize("cg_mode", [CUDAGraphMode.NONE, CUDAGraphMode.FULL])
 def test_pcp_draft_metadata_keeps_graph_padding_in_decode(cg_mode):
-    def build(common_attn_metadata):
+    def build(common_prefix_len, common_attn_metadata):
         return split_decodes_and_prefills(
             common_attn_metadata,
             decode_threshold=1,
@@ -104,7 +104,7 @@ def test_pcp_draft_metadata_keeps_graph_padding_in_decode(cg_mode):
                 get_metadata_builder=lambda _: SimpleNamespace(
                     build=build, supports_update_block_table=False
                 ),
-                build_metadata=lambda cm, ubatch_idx=0, **_: build(cm),
+                build_metadata=lambda cm, ubatch_idx=0, **_: build(0, cm),
                 layer_names=["draft"],
             )
         ]

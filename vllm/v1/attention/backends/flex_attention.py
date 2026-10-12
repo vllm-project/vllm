@@ -977,7 +977,9 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
         common_attn_metadata.max_seq_len = int(
             common_attn_metadata.seq_lens_cpu_upper_bound.max().item()
         )
-        return self.build(common_attn_metadata=common_attn_metadata)
+        return self.build(
+            common_prefix_len=0, common_attn_metadata=common_attn_metadata
+        )
 
     def _maybe_get_custom_mask_mod(self, layers) -> _mask_mod_signature | None:
         mask_mods = {
@@ -996,6 +998,7 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
 
     def build(
         self,
+        common_prefix_len: int,
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
     ) -> FlexAttentionMetadata:

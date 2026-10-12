@@ -196,7 +196,7 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
     def build_for_cudagraph_capture(
         self, common_attn_metadata: CommonAttentionMetadata
     ) -> TritonAttentionMetadata:
-        attn_metadata = self.build(common_attn_metadata)
+        attn_metadata = self.build(0, common_attn_metadata)
         # When doing full graph capture, setting seq_lens to
         # max_model_len will cause graph capture to be extremely
         # slow, so here we set it to 1.
@@ -205,6 +205,7 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
 
     def build(
         self,
+        common_prefix_len: int,
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
     ) -> TritonAttentionMetadata:

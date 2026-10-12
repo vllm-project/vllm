@@ -80,6 +80,7 @@ def create_cross_attention_backend(
     class CrossAttentionBuilder(underlying_builder):  # type: ignore
         def build(
             self,
+            common_prefix_len: int,
             common_attn_metadata: CommonAttentionMetadata,
             fast_build: bool = False,
         ) -> AttentionMetadata:
@@ -124,7 +125,7 @@ def create_cross_attention_backend(
                 self.kv_cache_spec,
                 self.device,
             )
-            attn_metadata = super().build(new_metadata, fast_build)
+            attn_metadata = super().build(common_prefix_len, new_metadata, fast_build)
             attn_metadata.slot_mapping = slot_mapping  # type: ignore[attr-defined]
             return attn_metadata
 

@@ -336,6 +336,7 @@ def run_attention_backend(
         ):
             builder = builder_cls(kv_cache_spec, layer_names, vllm_config, device)
             attn_metadata = builder.build(
+                common_prefix_len=0,
                 common_attn_metadata=common_attn_metadata,
             )
     else:
@@ -344,6 +345,7 @@ def run_attention_backend(
         if backend == AttentionBackendEnum.FLEX_ATTENTION:
             builder.direct_build = use_direct_block_mask
         attn_metadata = builder.build(
+            common_prefix_len=0,
             common_attn_metadata=common_attn_metadata,
         )
 
@@ -1143,7 +1145,7 @@ def test_flashinfer_avoids_seq_lens_copy_without_spec_tokens(
             "cpu",
             wraps=common_attn_metadata.seq_lens.cpu,
         ) as copy_to_cpu:
-            metadata = builder.build(common_attn_metadata)
+            metadata = builder.build(0, common_attn_metadata)
 
     assert copy_to_cpu.call_count == expected_copies
     assert metadata.num_decodes == 1
@@ -1235,7 +1237,7 @@ def test_spec_as_decode_width_follows_model_runner(
         def __init__(self, vllm_config):
             self.vllm_config = vllm_config
 
-        def build(self, common_attn_metadata, fast_build=False):
+        def build(self, common_prefix_len, common_attn_metadata, fast_build=False):
             raise NotImplementedError
 
     config = SimpleNamespace(
@@ -1416,7 +1418,7 @@ def test_flashinfer_varlen_decode_graph_replays_changed_layout(
     prepare(dummy_lens)
     with set_current_vllm_config(config):
         builder = fi.FlashInferMetadataBuilder(spec, ["layer"], config, device)
-        metadata = builder.build(common)
+        metadata = builder.build(0, common)
         assert metadata.num_prefills == 0
         assert metadata.decode.q_len_per_req == 8
         impl = fi.FlashInferImpl(
@@ -1506,6 +1508,7 @@ def test_flashinfer_varlen_decode_graph_replays_changed_layout(
         def mixed_forward():
             with set_current_vllm_config(config):
                 metadata = builder.build(
+                    0,
                     replace(
                         common,
                         query_start_loc=common.query_start_loc[:6],
@@ -1660,7 +1663,7 @@ def test_flashinfer_xqa_decode_correctness(default_vllm_config):
             common_attn_metadata = create_common_attn_metadata(
                 batch_spec, vllm_config.cache_config.block_size, device
             )
-            attn_metadata = builder.build(common_attn_metadata)
+            attn_metadata = builder.build(0, common_attn_metadata)
 
     assert (
         flashinfer_backend.FlashInferMetadataBuilder.get_cudagraph_support(

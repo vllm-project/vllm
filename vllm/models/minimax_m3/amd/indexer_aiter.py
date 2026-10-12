@@ -253,6 +253,7 @@ class MiniMaxM3IndexerAiterMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
 
     def build(
         self,
+        common_prefix_len: int,
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
     ) -> MiniMaxM3IndexerAiterMetadata:

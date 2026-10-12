@@ -245,6 +245,7 @@ def test_kda_recoverssm_startup_metadata_flow_without_model(monkeypatch):
         "align",
     )
     prefill_metadata = builder.build(
+        0,
         prefill_common,
         num_decode_draft_tokens_cpu=torch.tensor([-1], dtype=torch.int32),
         num_accepted_tokens=torch.ones(1, dtype=torch.int32),
@@ -278,6 +279,7 @@ def test_kda_recoverssm_startup_metadata_flow_without_model(monkeypatch):
         return_value=recoverssm_context,
     ) as create_context:
         spec_metadata = builder.build(
+            0,
             spec_common,
             num_decode_draft_tokens_cpu=torch.tensor([2], dtype=torch.int32),
             num_accepted_tokens=torch.ones(1, dtype=torch.int32),
@@ -342,7 +344,7 @@ def test_internal_checkpoint_metadata_targets_last_aligned_boundary(
         builder.kv_cache_spec,
         "align",
     )
-    actual = builder.build(common_attn_metadata)
+    actual = builder.build(0, common_attn_metadata)
 
     assert actual.checkpoint is not None
     torch.testing.assert_close(
@@ -400,7 +402,7 @@ def test_spec_internal_checkpoint_metadata_targets_replay_boundary(
         builder.kv_cache_spec,
         "align",
     )
-    actual = builder.build(common_attn_metadata)
+    actual = builder.build(0, common_attn_metadata)
 
     if expected_offset is None:
         assert actual.checkpoint is None
@@ -441,7 +443,7 @@ def test_internal_checkpoint_metadata_skips_unaligned_offset():
         builder.kv_cache_spec,
         "align",
     )
-    actual = builder.build(common_attn_metadata)
+    actual = builder.build(0, common_attn_metadata)
 
     assert actual.checkpoint is None
 
@@ -530,6 +532,7 @@ def test_kimi_k3_kda_metadata_matches_shared_gdn(
         num_speculative_tokens,
         full_cuda_graph,
     ).build(
+        0,
         common_attn_metadata,
         **kwargs,
     )
@@ -537,7 +540,7 @@ def test_kimi_k3_kda_metadata_matches_shared_gdn(
         KimiK3KDAMetadataBuilder,
         num_speculative_tokens,
         full_cuda_graph,
-    ).build(common_attn_metadata, **kwargs)
+    ).build(0, common_attn_metadata, **kwargs)
 
     assert isinstance(actual, KimiK3KDAMetadata)
     _assert_matches_shared_gdn(reference, actual)
@@ -556,6 +559,7 @@ def test_mixed_regular_and_spec_decode_uses_packed_decode_metadata():
         num_speculative_tokens=2,
         full_cuda_graph=False,
     ).build(
+        0,
         common_attn_metadata,
         num_decode_draft_tokens_cpu=torch.tensor([-1, -1, 2], dtype=torch.int32),
         num_accepted_tokens=torch.ones(3, dtype=torch.int32, device=DEVICE),
@@ -590,6 +594,7 @@ def test_mixed_regular_and_spec_decode_excludes_request_padding():
         num_speculative_tokens=2,
         full_cuda_graph=False,
     ).build(
+        0,
         common_attn_metadata,
         num_decode_draft_tokens_cpu=torch.tensor([-1, -1, 2], dtype=torch.int32),
         num_accepted_tokens=torch.ones(3, dtype=torch.int32, device=DEVICE),
@@ -634,6 +639,7 @@ def test_recoverssm_spec_uses_one_state_slot_and_current_window(
     context = builder.recoverssm_context
     assert context is not None
     actual = builder.build(
+        0,
         common_attn_metadata,
         num_decode_draft_tokens_cpu=torch.tensor([-1, -1, 2], dtype=torch.int32),
         num_accepted_tokens=torch.tensor([3, 2, 2], dtype=torch.int32, device=device),
@@ -686,6 +692,7 @@ def test_recoverssm_distinguishes_draftless_decode_from_one_token_prefill():
         full_cuda_graph=False,
         use_recoverssm=True,
     ).build(
+        0,
         common_attn_metadata,
         num_decode_draft_tokens_cpu=torch.full((2,), -1, dtype=torch.int32),
         num_accepted_tokens=torch.ones(2, dtype=torch.int32),
@@ -722,6 +729,7 @@ def test_mixed_one_token_prefill_and_spec_decode_uses_prefill_metadata(
         num_speculative_tokens=2,
         full_cuda_graph=False,
     ).build(
+        0,
         common_attn_metadata,
         num_decode_draft_tokens_cpu=torch.tensor([-1, 2], dtype=torch.int32),
         num_accepted_tokens=torch.ones(2, dtype=torch.int32, device=DEVICE),
@@ -809,6 +817,7 @@ def test_cudagraph_capture_metadata_avoids_device_to_host_copy(
 
     num_accepted_tokens = torch.diff(common_attn_metadata.query_start_loc)
     reference = builder.build(
+        0,
         common_attn_metadata,
         num_accepted_tokens,
         (num_accepted_tokens - 1).cpu(),
@@ -887,7 +896,7 @@ def test_kimi_k3_metadata_uses_precomputed_aligned_state_indices():
     )
     builder.mamba_aligned_state_indices = precomputed_indices
 
-    metadata = builder.build(common_attn_metadata)
+    metadata = builder.build(0, common_attn_metadata)
 
     torch.testing.assert_close(
         metadata.non_spec_state_indices_tensor,
@@ -1004,7 +1013,7 @@ def _build_non_spec(batch, is_prefilling, full_cuda_graph=False):
         num_speculative_tokens=0,
         full_cuda_graph=full_cuda_graph,
     )
-    return builder, common_attn_metadata, builder.build(common_attn_metadata)
+    return builder, common_attn_metadata, builder.build(0, common_attn_metadata)
 
 
 def test_one_token_first_chunk_excludes_padding():
@@ -1020,7 +1029,7 @@ def test_one_token_first_chunk_excludes_padding():
     builder = _make_builder(
         KimiK3KDAMetadataBuilder, num_speculative_tokens=0, full_cuda_graph=False
     )
-    actual = builder.build(common)
+    actual = builder.build(0, common)
 
     assert actual.num_decodes == 1
     assert actual.num_prefills == 1

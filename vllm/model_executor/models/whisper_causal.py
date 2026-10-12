@@ -204,6 +204,7 @@ def create_whisper_attention_backend_with_block_pooling(
 
         def build(
             self,
+            common_prefix_len: int,
             common_attn_metadata: CommonAttentionMetadata,
             fast_build: bool = False,
         ) -> AttentionMetadata:
@@ -260,6 +261,7 @@ def create_whisper_attention_backend_with_block_pooling(
                 slot_mapping=slot_buf,
             )
             return super().build(
+                common_prefix_len * block_pool_size,
                 new_common_attn_metadata,
                 fast_build,
             )

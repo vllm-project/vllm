@@ -524,6 +524,9 @@ class GPUModelRunner(
         # Model-related.
         self.inputs_embeds_size = model_config.get_inputs_embeds_size()
         self.is_mm_prefix_lm = self.model_config.is_mm_prefix_lm
+        # Deprecated: cascade attention has been removed. Kept for
+        # out-of-tree model runners.
+        self.cascade_attn_enabled = False
 
         # Multi-modal data support
         self.mm_registry = MULTIMODAL_REGISTRY
@@ -3714,6 +3717,8 @@ class GPUModelRunner(
         num_reqs: int,
         num_scheduled_tokens_np: np.ndarray,
         max_num_scheduled_tokens: int,
+        # Deprecated and ignored. Kept for out-of-tree model runners.
+        use_cascade_attn: bool = False,
         allow_microbatching: bool = True,
         force_eager: bool = False,
         # For cudagraph capture TODO(lucas): Refactor how we capture cudagraphs (will
@@ -4024,6 +4029,7 @@ class GPUModelRunner(
                 num_reqs=num_reqs,
                 num_scheduled_tokens_np=num_scheduled_tokens_np,
                 max_num_scheduled_tokens=max_num_scheduled_tokens,
+                use_cascade_attn=False,
                 num_encoder_reqs=len(scheduler_output.scheduled_encoder_inputs),
                 allow_microbatching=self._allow_microbatching(
                     num_reqs, num_scheduled_tokens_np
@@ -5601,6 +5607,7 @@ class GPUModelRunner(
                 num_reqs=num_reqs,
                 num_scheduled_tokens_np=num_scheduled_tokens,
                 max_num_scheduled_tokens=max_query_len,
+                use_cascade_attn=False,
                 allow_microbatching=allow_microbatching,
                 force_eager=is_profile
                 or (cudagraph_runtime_mode == CUDAGraphMode.NONE),

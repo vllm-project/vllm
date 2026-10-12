@@ -158,7 +158,9 @@ def _run_verify_block():
         common_attn_metadata = create_common_attn_metadata(
             batch_spec, PAGE_SIZE, device, arange_block_indices=True
         )
-        metadata = builder.build(common_attn_metadata=common_attn_metadata)
+        metadata = builder.build(
+            common_prefix_len=0, common_attn_metadata=common_attn_metadata
+        )
 
         impl = impl_cls(
             num_heads=NUM_QUERY_HEADS,

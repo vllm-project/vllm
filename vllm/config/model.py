@@ -309,6 +309,9 @@ class ModelConfig:
     """Whether to disable sliding window. If True, we will disable the sliding
     window functionality of the model, capping to sliding window size. If the
     model does not support sliding window, this argument is ignored."""
+    disable_cascade_attn: bool = True
+    """Deprecated: cascade attention has been removed, so this has no effect.
+    It will be removed in v0.33.0."""
     skip_tokenizer_init: bool = False
     """Skip initialization of tokenizer and detokenizer. Expects valid
     `prompt_token_ids` and `None` for prompt from the input. The generated
@@ -473,6 +476,7 @@ class ModelConfig:
             "logprobs_mode",
             "use_fp64_gumbel",
             "enable_trace_replay",
+            "disable_cascade_attn",
             "skip_tokenizer_init",
             "served_model_name",
             "config_format",

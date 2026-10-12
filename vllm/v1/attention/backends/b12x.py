@@ -292,10 +292,11 @@ class B12xPagedMetadataBuilder(AttentionMetadataBuilder[B12xPagedMetadata]):
 
     def build(
         self,
+        common_prefix_len: int,
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
     ) -> B12xPagedMetadata:
-        del fast_build
+        del common_prefix_len, fast_build
         cm = common_attn_metadata
         return B12xPagedMetadata(
             num_actual_tokens=cm.num_actual_tokens,
