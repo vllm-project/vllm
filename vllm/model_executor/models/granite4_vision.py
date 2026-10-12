@@ -26,11 +26,6 @@ from transformers.models.llava_next.modeling_llava_next import (
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed.parallel_state import get_pp_group
-from vllm.distributed.pp_transport import (
-    PPTransport,
-    PPTransportDataType,
-    PPTransportTensor,
-)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -241,37 +236,6 @@ class WindowQFormerDownsampler(nn.Module):
 class Granite4VisionLLMModel(GraniteModel):
     """GraniteModel with deepstack feature injection in the layer loop."""
 
-    def __init__(
-        self,
-        *,
-        vllm_config: VllmConfig,
-        prefix: str = "",
-        deepstack_layer_indices: Iterable[int] = (),
-    ) -> None:
-        super().__init__(vllm_config=vllm_config, prefix=prefix)
-        hidden_size = vllm_config.model_config.hf_config.hidden_size
-        self.pp_transport = PPTransport(
-            {
-                PPTransportDataType.HIDDEN_STATES: PPTransportTensor((hidden_size,)),
-                **{
-                    (
-                        PPTransportDataType.DEEPSTACK_EMBEDDINGS,
-                        layer_idx,
-                    ): PPTransportTensor(
-                        (hidden_size,),
-                        receive=layer_idx >= self.start_layer,
-                        send=layer_idx >= self.end_layer,
-                        zero_if_missing=True,
-                        clone_on_send=get_pp_group().is_first_rank,
-                    )
-                    for layer_idx in deepstack_layer_indices
-                },
-            }
-        )
-        self.make_empty_intermediate_tensors = (
-            self.pp_transport.make_empty_intermediate_tensors
-        )
-
     def forward(
         self,
         input_ids: torch.Tensor | None,
@@ -289,14 +253,21 @@ class Granite4VisionLLMModel(GraniteModel):
         else:
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
+            # Recover deepstack features forwarded from the previous PP rank.
             if deepstack_input_embeds is None:
-                deepstack_input_embeds = intermediate_tensors
+                ds_keys = [
+                    k for k in intermediate_tensors.tensors if k.startswith("ds_")
+                ]
+                if ds_keys:
+                    deepstack_input_embeds = IntermediateTensors(
+                        {k: intermediate_tensors[k] for k in ds_keys}
+                    )
 
         for layer_idx, layer in islice(
             enumerate(self.layers), self.start_layer, self.end_layer
         ):
             if deepstack_input_embeds is not None:
-                key = PPTransportDataType.DEEPSTACK_EMBEDDINGS.key(layer_idx)
+                key = f"ds_{layer_idx}"
                 if key in deepstack_input_embeds.tensors:
                     feat = deepstack_input_embeds[key]
                     # Resize to match hidden_states in case of CUDA graph padding
@@ -311,11 +282,16 @@ class Granite4VisionLLMModel(GraniteModel):
             hidden_states = layer(positions, hidden_states)
 
         if not get_pp_group().is_last_rank:
-            return self.pp_transport.make_intermediate_tensors(
-                hidden_states.shape[0],
-                side_inputs=deepstack_input_embeds,
-                hidden_states=hidden_states,
-            )
+            # Forward hidden_states and any deepstack features for later ranks.
+            it = {"hidden_states": hidden_states}
+            if deepstack_input_embeds is not None:
+                remaining = {
+                    k: v
+                    for k, v in deepstack_input_embeds.tensors.items()
+                    if int(k.split("_")[1]) >= self.end_layer
+                }
+                it.update(remaining)
+            return IntermediateTensors(it)
 
         hidden_states = self.norm(hidden_states)
         return hidden_states
@@ -324,22 +300,14 @@ class Granite4VisionLLMModel(GraniteModel):
 class Granite4VisionLLMForCausalLM(GraniteForCausalLM):
     """GraniteForCausalLM backed by Granite4VisionLLMModel."""
 
-    def __init__(
-        self,
-        *,
-        vllm_config: VllmConfig,
-        prefix: str = "",
-        deepstack_layer_indices: Iterable[int] = (),
-    ) -> None:
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         nn.Module.__init__(self)
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         self.config = config
         self.quant_config = quant_config
         self.model = Granite4VisionLLMModel(
-            vllm_config=vllm_config,
-            prefix=maybe_prefix(prefix, "model"),
-            deepstack_layer_indices=deepstack_layer_indices,
+            vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
         if get_pp_group().is_last_rank:
             self.lm_head = ParallelLMHead(
@@ -359,9 +327,17 @@ class Granite4VisionLLMForCausalLM(GraniteForCausalLM):
         else:
             self.lm_head = PPMissingLayer()
 
-        self.make_empty_intermediate_tensors = (  # type: ignore[method-assign]
-            self.model.make_empty_intermediate_tensors
-        )
+    def make_empty_intermediate_tensors(
+        self, batch_size: int, dtype: torch.dtype, device: torch.device
+    ) -> IntermediateTensors:
+        tensors = super().make_empty_intermediate_tensors(batch_size, dtype, device)
+        # Include deepstack buffers so non-first PP ranks receive them.
+        # _ds_layer_indices is set directly on this instance by the outer model.
+        for llm_layer in getattr(self, "_ds_layer_indices", []):
+            tensors.tensors[f"ds_{llm_layer}"] = torch.zeros(
+                (batch_size, self.config.hidden_size), dtype=dtype, device=device
+            )
+        return tensors
 
 
 # ---------------------------------------------------------------------------
@@ -556,17 +532,11 @@ class Granite4VisionForConditionalGeneration(
                     ]
                 )
 
-        # Register injection points before constructing the PP receive schema.
-        self._ds_layer_indices: list[int] = [
-            llm_layer for _, llm_layer in config.deepstack_layer_map
-        ] + list(getattr(config, "spatial_target_layers", []))
-
         # ----- Language model (marked as LM) -----
         with self._mark_language_model(vllm_config):
             self.language_model = Granite4VisionLLMForCausalLM(
                 vllm_config=vllm_config.with_hf_config(config.text_config),
                 prefix=maybe_prefix(prefix, "language_model"),
-                deepstack_layer_indices=self._ds_layer_indices,
             )
 
         self.make_empty_intermediate_tensors = (
@@ -582,6 +552,18 @@ class Granite4VisionForConditionalGeneration(
             config, "vision_feature_select_strategy", "full"
         )
         self._downsample_rate = Fraction(config.downsample_rate)
+
+        # Ordered list of LLM layer indices for each deepstack level.
+        # Pre-populated from config so it's available during CUDA graph capture
+        # (before any embed_multimodal call).
+        self._ds_layer_indices: list[int] = [
+            llm_layer for _, llm_layer in config.deepstack_layer_map
+        ] + list(getattr(config, "spatial_target_layers", []))
+
+        # Share ds_layer_indices with the LLM causal model so
+        # make_empty_intermediate_tensors includes the correct keys
+        # (its self.config is text_config, no deepstack_layer_map).
+        self.language_model._ds_layer_indices = self._ds_layer_indices
 
         # Pre-allocated persistent GPU buffers for deepstack features.
         # Written via .copy_() in embed_input_ids(), read by forward() via a
@@ -911,9 +893,7 @@ class Granite4VisionForConditionalGeneration(
             n = inputs_embeds.size(0)
             ds: IntermediateTensors | None = IntermediateTensors(
                 {
-                    PPTransportDataType.DEEPSTACK_EMBEDDINGS.key(
-                        llm_layer
-                    ): self._ds_buffers[lvl][:n]
+                    f"ds_{llm_layer}": self._ds_buffers[lvl][:n]
                     for lvl, llm_layer in enumerate(self._ds_layer_indices)
                 }
             )

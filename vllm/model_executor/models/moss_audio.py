@@ -24,11 +24,6 @@ from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_world_size,
 )
-from vllm.distributed.pp_transport import (
-    PPTransport,
-    PPTransportDataType,
-    PPTransportTensor,
-)
 from vllm.inputs import ModalityData, MultiModalDataDict
 from vllm.model_executor.layers.activation import _ACTIVATION_REGISTRY, SiluAndMul
 from vllm.model_executor.layers.linear import (
@@ -801,36 +796,9 @@ class GatedMLP(nn.Module):
     }
 )
 class MossQwen3Model(Qwen3Model):
-    def __init__(
-        self,
-        *,
-        vllm_config: VllmConfig,
-        prefix: str = "",
-        deepstack_layer_indices: Iterable[int] = (),
-    ) -> None:
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__(vllm_config=vllm_config, prefix=prefix)
-        hidden_size = vllm_config.model_config.hf_config.hidden_size
-        self.pp_transport = PPTransport(
-            {
-                PPTransportDataType.HIDDEN_STATES: PPTransportTensor((hidden_size,)),
-                PPTransportDataType.RESIDUAL: PPTransportTensor((hidden_size,)),
-                **{
-                    (
-                        PPTransportDataType.DEEPSTACK_EMBEDDINGS,
-                        layer_idx,
-                    ): PPTransportTensor(
-                        (hidden_size,),
-                        receive=layer_idx >= self.start_layer,
-                        send=layer_idx >= self.end_layer,
-                        zero_if_missing=True,
-                    )
-                    for layer_idx in deepstack_layer_indices
-                },
-            }
-        )
-        self.make_empty_intermediate_tensors = (
-            self.pp_transport.make_empty_intermediate_tensors
-        )
+        self.deepstack_inject_layer_indices: Iterable[int] = range(0)
 
     def forward(
         self,
@@ -857,7 +825,7 @@ class MossQwen3Model(Qwen3Model):
             start=self.start_layer,
         ):
             hidden_states, residual = layer(positions, hidden_states, residual)
-            deepstack_key = PPTransportDataType.DEEPSTACK_EMBEDDINGS.key(layer_idx)
+            deepstack_key = f"deepstack_input_embeds_{layer_idx}"
             if (
                 deepstack_input_embeds is not None
                 and deepstack_key in deepstack_input_embeds.tensors
@@ -871,12 +839,25 @@ class MossQwen3Model(Qwen3Model):
             )
 
         if not get_pp_group().is_last_rank:
-            return self.pp_transport.make_intermediate_tensors(
-                hidden_states.shape[0],
-                side_inputs=deepstack_input_embeds,
-                hidden_states=hidden_states,
-                residual=residual,
-            )
+            tensors = {"hidden_states": hidden_states, "residual": residual}
+            # Keep the DeepStack PP schema config-driven, but only carry
+            # payloads needed by downstream injection points across this rank.
+            # Missing downstream payloads are zero-filled below to clear
+            # receive buffers instead of leaving stale tensors.
+            for layer_idx in self.deepstack_inject_layer_indices:
+                if layer_idx < self.end_layer:
+                    continue
+                deepstack_key = f"deepstack_input_embeds_{layer_idx}"
+                if (
+                    deepstack_input_embeds is not None
+                    and deepstack_key in deepstack_input_embeds.tensors
+                ):
+                    tensors[deepstack_key] = deepstack_input_embeds[deepstack_key]
+                else:
+                    tensors[deepstack_key] = hidden_states.new_zeros(
+                        hidden_states.shape
+                    )
+            return IntermediateTensors(tensors)
 
         hidden_states, _ = self.norm(hidden_states, residual)
         if len(aux_hidden_states) > 0:
@@ -885,13 +866,7 @@ class MossQwen3Model(Qwen3Model):
 
 
 class MossQwen3ForCausalLM(Qwen3ForCausalLM):
-    def __init__(
-        self,
-        *,
-        vllm_config: VllmConfig,
-        prefix: str = "",
-        deepstack_layer_indices: Iterable[int] = (),
-    ) -> None:
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super(Qwen3ForCausalLM, self).__init__()
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
@@ -900,9 +875,7 @@ class MossQwen3ForCausalLM(Qwen3ForCausalLM):
         self.vllm_config = vllm_config
         self.quant_config = quant_config
         self.model = MossQwen3Model(
-            vllm_config=vllm_config,
-            prefix=maybe_prefix(prefix, "model"),
-            deepstack_layer_indices=deepstack_layer_indices,
+            vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
 
         if get_pp_group().is_last_rank:
@@ -920,9 +893,28 @@ class MossQwen3ForCausalLM(Qwen3ForCausalLM):
             self.lm_head = PPMissingLayer()
 
         self.logits_processor = LogitsProcessor(config.vocab_size)
-        self.make_empty_intermediate_tensors = (
-            self.model.make_empty_intermediate_tensors
+        self.deepstack_inject_layer_indices: Iterable[int] = range(0)
+
+    def make_empty_intermediate_tensors(
+        self,
+        batch_size: int,
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> IntermediateTensors:
+        intermediate_tensors = self.model.make_empty_intermediate_tensors(
+            batch_size, dtype, device
         )
+        for layer_idx in self.deepstack_inject_layer_indices:
+            # Non-first PP ranks only receive DeepStack payloads for layers
+            # at or after their local start layer.
+            if layer_idx < self.model.start_layer:
+                continue
+            intermediate_tensors[f"deepstack_input_embeds_{layer_idx}"] = torch.zeros(
+                (batch_size, self.config.hidden_size),
+                dtype=dtype,
+                device=device,
+            )
+        return intermediate_tensors
 
     def forward(
         self,
@@ -1598,7 +1590,10 @@ class MossAudioModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
                     language_config, architectures=["Qwen3ForCausalLM"]
                 ),
                 prefix=maybe_prefix(prefix, "language_model"),
-                deepstack_layer_indices=range(deepstack_k),
+            )
+            self.language_model.deepstack_inject_layer_indices = range(deepstack_k)
+            self.language_model.model.deepstack_inject_layer_indices = range(
+                deepstack_k
             )
 
         self.make_empty_intermediate_tensors = (
@@ -1842,7 +1837,7 @@ class MossAudioModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
         for layer_idx, layer_embeds in enumerate(flat_by_layer):
             scattered = inputs_embeds.new_zeros(inputs_embeds.shape)
             scattered[is_multimodal] = layer_embeds
-            data[PPTransportDataType.DEEPSTACK_EMBEDDINGS.key(layer_idx)] = scattered
+            data[f"deepstack_input_embeds_{layer_idx}"] = scattered
         self.deepstack_input_embeds = IntermediateTensors(data)
 
     def embed_input_ids(

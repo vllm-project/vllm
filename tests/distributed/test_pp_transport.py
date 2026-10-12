@@ -34,15 +34,6 @@ def _run_transport_stage(rank: int, init_method: str):
             PPTransportDataType.TOPK_INDICES: PPTransportTensor(
                 buffer=buffer, receive=rank > 0, send=rank < 2
             ),
-            **{
-                (PPTransportDataType.DEEPSTACK_EMBEDDINGS, layer): PPTransportTensor(
-                    (4,),
-                    receive=layer >= rank * 2,
-                    send=layer >= (rank + 1) * 2,
-                    zero_if_missing=True,
-                )
-                for layer in (1, 3, 5)
-            },
         },
         payload_types=(PPTransportDataType.MULTIMODAL_EMBEDDINGS,),
     )
@@ -50,16 +41,6 @@ def _run_transport_stage(rank: int, init_method: str):
         for step in range(2):
             if rank == 0:
                 payload = transport.new_payload()
-                side_inputs = IntermediateTensors(
-                    {
-                        PPTransportDataType.DEEPSTACK_EMBEDDINGS.key(layer): torch.full(
-                            (4, 4), layer
-                        )
-                        for layer in (1, 3, 5)
-                    }
-                    if step == 0
-                    else {}
-                )
                 if step == 0:
                     embedding = torch.arange(15).reshape(3, 5)[:, :4]
                     embedding.modality = "image"
@@ -75,28 +56,15 @@ def _run_transport_stage(rank: int, init_method: str):
                 for callback in postprocess:
                     callback()
                 payload = transport.new_payload(tensors)
-                side_inputs = IntermediateTensors(tensors)
-                expected = transport.make_empty_intermediate_tensors(
-                    4, torch.float32, torch.device("cpu")
-                )
-                assert set(tensors) - set(payload.tensors) == set(expected.tensors)
-                transport.restore_buffers(side_inputs)
+                transport.restore_buffers(IntermediateTensors(tensors))
                 torch.testing.assert_close(
                     buffer[:4],
                     torch.full((4, 2), rank - 1, dtype=torch.int32),
                 )
-                for layer in (1, 3, 5):
-                    key = PPTransportDataType.DEEPSTACK_EMBEDDINGS.key(layer)
-                    assert (key in tensors) == (layer >= rank * 2)
-                    if key in tensors:
-                        torch.testing.assert_close(
-                            tensors[key],
-                            torch.full_like(tensors[key], layer if step == 0 else 0),
-                        )
             if rank < 2:
                 buffer.fill_(rank)
                 output = transport.make_intermediate_tensors(
-                    4, side_inputs=side_inputs, hidden_states=torch.zeros(4, 4)
+                    4, hidden_states=torch.zeros(4, 4)
                 )
                 handles = group.isend_tensor_dict(
                     payload.relay(output).tensors, all_gather_tensors=policy
@@ -309,46 +277,6 @@ def test_payload_selection_and_unknown_fields():
         )
 
 
-@pytest.mark.parametrize("compiled", [False, True])
-def test_deepstack_send_survives_source_clear(compiled):
-    """Granite clears its feature cache before the worker sends the PP output."""
-    field = PPTransportDataType.DEEPSTACK_EMBEDDINGS
-    key = field.key(3)
-    transport = PPTransport(
-        {
-            PPTransportDataType.HIDDEN_STATES: PPTransportTensor((4,)),
-            (field, 1): PPTransportTensor((4,), send=False),
-            (field, 3): PPTransportTensor(
-                (4,), zero_if_missing=True, clone_on_send=True
-            ),
-        }
-    )
-
-    def forward(hidden_states, features):
-        side_inputs = (
-            IntermediateTensors({key: features}) if features is not None else None
-        )
-        output = transport.make_intermediate_tensors(
-            hidden_states.shape[0],
-            side_inputs=side_inputs,
-            hidden_states=hidden_states,
-        )
-        if features is not None:
-            features.zero_()
-        return output[key]
-
-    if compiled:
-        forward = torch.compile(forward, backend="eager", fullgraph=True)
-    for size in (3, 2):
-        hidden_states = torch.zeros(size, 4, dtype=torch.bfloat16)
-        features = torch.ones_like(hidden_states)
-        torch.testing.assert_close(
-            forward(hidden_states, features), torch.ones_like(features)
-        )
-        assert not features.count_nonzero()
-        torch.testing.assert_close(forward(hidden_states, None), hidden_states)
-
-
 @pytest.mark.parametrize("keys", [["hidden_states"], ["hidden_states", "residual"]])
 def test_base_tensor_factory_preserves_layout(keys):
     factory = make_empty_intermediate_tensors_factory(keys, 4)
@@ -356,16 +284,3 @@ def test_base_tensor_factory_preserves_layout(keys):
     assert list(tensors.tensors) == keys
     for tensor in tensors.tensors.values():
         torch.testing.assert_close(tensor, torch.zeros(3, 4, dtype=torch.float16))
-
-
-@pytest.mark.parametrize(
-    "field",
-    [
-        PPTransportDataType.DEEPSTACK_EMBEDDINGS,
-        (PPTransportDataType.DEEPSTACK_EMBEDDINGS, -1),
-        (PPTransportDataType.HIDDEN_STATES, 1),
-    ],
-)
-def test_model_schema_rejects_invalid_field_index(field):
-    with pytest.raises(ValueError, match="Invalid index"):
-        PPTransport({field: PPTransportTensor((4,))})

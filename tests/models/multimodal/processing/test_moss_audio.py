@@ -8,11 +8,6 @@ import pytest
 import torch
 from transformers import Qwen3Config
 
-from vllm.distributed.pp_transport import (
-    PPTransport,
-    PPTransportDataType,
-    PPTransportTensor,
-)
 from vllm.model_executor.models.interfaces import SupportsLoRA, supports_lora
 from vllm.model_executor.models.moss_audio import (
     MOSS_AUDIO_BOS_TOKEN,
@@ -30,6 +25,7 @@ from vllm.model_executor.models.moss_audio import (
     MossAudioMultiModalProcessor,
     MossAudioProcessingInfo,
     MossAudioProcessor,
+    MossQwen3ForCausalLM,
     MossQwen3Model,
 )
 from vllm.model_executor.models.utils import AutoWeightsLoader
@@ -420,10 +416,7 @@ def test_moss_audio_embed_input_ids_caches_packed_deepstack():
     assert torch.equal(inputs_embeds[3], torch.full((8,), 7.0))
     assert model.deepstack_input_embeds is not None
     tensors = model.deepstack_input_embeds.tensors
-    assert set(tensors) == {
-        PPTransportDataType.DEEPSTACK_EMBEDDINGS.key(0),
-        PPTransportDataType.DEEPSTACK_EMBEDDINGS.key(1),
-    }
+    assert set(tensors) == {"deepstack_input_embeds_0", "deepstack_input_embeds_1"}
     for tensor in tensors.values():
         assert tensor[is_multimodal].abs().sum() > 0
         assert torch.equal(tensor[~is_multimodal], torch.zeros(2, 8))
@@ -452,13 +445,12 @@ def test_moss_audio_pp_forward_routes_deepstack(monkeypatch):
         model = object.__new__(MossAudioModel)
         torch.nn.Module.__init__(model)
         model.language_model = fake_lm
-        key = PPTransportDataType.DEEPSTACK_EMBEDDINGS.key(0)
-        cached = IntermediateTensors({key: torch.ones(3, 8)})
+        cached = IntermediateTensors({"deepstack_input_embeds_0": torch.ones(3, 8)})
         inter = IntermediateTensors(
             {
                 "hidden_states": torch.ones(3, 8),
                 "residual": torch.zeros(3, 8),
-                key: torch.full((3, 8), 5.0),
+                "deepstack_input_embeds_0": torch.full((3, 8), 5.0),
             }
         )
         inputs_embeds = torch.full((3, 8), 9.0)
@@ -518,26 +510,8 @@ def test_moss_qwen3_deepstack_keys_for_pp(monkeypatch):
         model.layers = torch.nn.ModuleList([AddOne() for _ in range(num_layers)])
         model.norm = lambda hidden_states, residual: (hidden_states, residual)
         model._maybe_add_hidden_state = lambda aux, *args: aux
-        model.pp_transport = PPTransport(
-            {
-                PPTransportDataType.HIDDEN_STATES: PPTransportTensor((4,)),
-                PPTransportDataType.RESIDUAL: PPTransportTensor((4,)),
-                **{
-                    (
-                        PPTransportDataType.DEEPSTACK_EMBEDDINGS,
-                        layer_idx,
-                    ): PPTransportTensor(
-                        (4,),
-                        receive=layer_idx >= model.start_layer,
-                        send=layer_idx >= model.end_layer,
-                        zero_if_missing=True,
-                    )
-                    for layer_idx in (deepstack_layers or ())
-                },
-            }
-        )
-        model.make_empty_intermediate_tensors = (
-            model.pp_transport.make_empty_intermediate_tensors
+        model.deepstack_inject_layer_indices = (
+            range(0) if deepstack_layers is None else deepstack_layers
         )
         return model
 
@@ -548,9 +522,7 @@ def test_moss_qwen3_deepstack_keys_for_pp(monkeypatch):
         inputs_embeds=torch.zeros(2, 4),
         deepstack_input_embeds=IntermediateTensors(
             {
-                PPTransportDataType.DEEPSTACK_EMBEDDINGS.key(2): torch.full(
-                    (2, 4), 5.0
-                ),
+                "deepstack_input_embeds_2": torch.full((2, 4), 5.0),
             }
         ),
     )
@@ -559,8 +531,8 @@ def test_moss_qwen3_deepstack_keys_for_pp(monkeypatch):
     _patch_pp_group(monkeypatch, first=True, last=False)
     deepstack = IntermediateTensors(
         {
-            PPTransportDataType.DEEPSTACK_EMBEDDINGS.key(0): torch.full((2, 4), 7.0),
-            PPTransportDataType.DEEPSTACK_EMBEDDINGS.key(3): torch.full((2, 4), 11.0),
+            "deepstack_input_embeds_0": torch.full((2, 4), 7.0),
+            "deepstack_input_embeds_3": torch.full((2, 4), 11.0),
         }
     )
     output = make_model(2, range(4)).forward(
@@ -573,18 +545,30 @@ def test_moss_qwen3_deepstack_keys_for_pp(monkeypatch):
     assert set(output.tensors) == {
         "hidden_states",
         "residual",
-        PPTransportDataType.DEEPSTACK_EMBEDDINGS.key(2),
-        PPTransportDataType.DEEPSTACK_EMBEDDINGS.key(3),
+        "deepstack_input_embeds_2",
+        "deepstack_input_embeds_3",
     }
     assert torch.equal(output["hidden_states"], torch.full((2, 4), 9.0))
-    assert torch.equal(
-        output[PPTransportDataType.DEEPSTACK_EMBEDDINGS.key(2)], torch.zeros(2, 4)
-    )
-    key = PPTransportDataType.DEEPSTACK_EMBEDDINGS.key(3)
-    assert output[key] is deepstack[key]
+    assert torch.equal(output["deepstack_input_embeds_2"], torch.zeros(2, 4))
+    assert output["deepstack_input_embeds_3"] is deepstack["deepstack_input_embeds_3"]
 
     inner_model = make_model(0, range(2))
-    tensors = inner_model.make_empty_intermediate_tensors(
+    inner_model.make_empty_intermediate_tensors = lambda batch, dtype, device: (
+        IntermediateTensors(
+            {
+                "hidden_states": torch.zeros(batch, 4, dtype=dtype, device=device),
+                "residual": torch.zeros(batch, 4, dtype=dtype, device=device),
+            }
+        )
+    )
+    language_model = object.__new__(MossQwen3ForCausalLM)
+    torch.nn.Module.__init__(language_model)
+    language_model.model = inner_model
+    language_model.config = SimpleNamespace(hidden_size=4)
+    language_model.deepstack_inject_layer_indices = range(2)
+
+    tensors = MossQwen3ForCausalLM.make_empty_intermediate_tensors(
+        language_model,
         batch_size=3,
         dtype=torch.float16,
         device=torch.device("cpu"),
@@ -593,12 +577,11 @@ def test_moss_qwen3_deepstack_keys_for_pp(monkeypatch):
     assert set(tensors.tensors) == {
         "hidden_states",
         "residual",
-        PPTransportDataType.DEEPSTACK_EMBEDDINGS.key(0),
-        PPTransportDataType.DEEPSTACK_EMBEDDINGS.key(1),
+        "deepstack_input_embeds_0",
+        "deepstack_input_embeds_1",
     }
-    key = PPTransportDataType.DEEPSTACK_EMBEDDINGS.key(0)
-    assert tensors[key].shape == (3, 4)
-    assert tensors[key].dtype == torch.float16
+    assert tensors["deepstack_input_embeds_0"].shape == (3, 4)
+    assert tensors["deepstack_input_embeds_0"].dtype == torch.float16
 
     _patch_pp_group(monkeypatch, first=True, last=False)
     forward_tensors = inner_model.forward(

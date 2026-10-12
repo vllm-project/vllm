@@ -16,7 +16,6 @@ tensors, and companions select related fields together.
 | --- | --- | --- |
 | Hidden states, residual | Model inputs | Existing worker policy |
 | Shared top-k indices | Model inputs | Matching TP lane |
-| Per-layer DeepStack embeddings | Model inputs | Existing worker policy |
 | Multimodal embeddings and CPU mask | Graph-external payload | Matching TP lane |
 
 Unknown `pp_transport.*` fields are rejected. Other existing intermediate tensor
@@ -70,35 +69,6 @@ The existing `model_executor.models.utils.make_empty_intermediate_tensors_factor
 entry point delegates to `PPTransport`, so its callers share the same allocator
 without changing their import paths. It selects the registered hidden-state and
 residual fields used by existing models.
-
-MOSS Audio and Granite4 Vision also use `PPTransport` for their existing
-layer-specific DeepStack relay. They register each injection point at model
-initialization:
-
-```python
-deepstack_fields = {
-    (PPTransportDataType.DEEPSTACK_EMBEDDINGS, layer_id): PPTransportTensor(
-        shape=(hidden_size,),
-        receive=layer_id >= self.start_layer,
-        send=layer_id >= self.end_layer,
-        zero_if_missing=True,
-    )
-    for layer_id in injection_layers
-}
-```
-
-The factory allocates only incoming fields; output packaging selects only those
-needed downstream. `make_intermediate_tensors(..., side_inputs=features)` reads
-these fields from the provided `IntermediateTensors`. Optional missing features
-are zero-filled so a text-only batch cannot reuse the previous batch's media.
-Models keep their layer injection logic and use
-`PPTransportDataType.DEEPSTACK_EMBEDDINGS.key(layer_id)` to read the registered
-field; they no longer implement separate allocation or forwarding loops.
-
-Granite4 Vision uses `clone_on_send=True` for DeepStack fields on the first stage
-because its outer forward clears the feature cache before the worker sends. The
-snapshot protects the outgoing tensors from that mutation. Other models retain
-zero-copy packing unless their source lifetime requires a snapshot.
 
 ## Graph-External Payloads
 
