@@ -271,7 +271,14 @@ def test_v41_renderer_keeps_reordered_image_data_aligned(image_order, with_embed
 @pytest.mark.parametrize(
     ("model_id", "placeholder"),
     [
-        ("deepseek-ai/DeepSeek-V4-Flash-Vision-Exp", V4_IMAGE_PLACEHOLDER),
+        pytest.param(
+            "deepseek-ai/DeepSeek-V4-Flash-Vision-Exp",
+            V4_IMAGE_PLACEHOLDER,
+            marks=pytest.mark.skipif(
+                not (current_platform.is_cuda() or current_platform.is_rocm()),
+                reason="DeepSeek-V4 vision is only supported on CUDA/ROCm",
+            ),
+        ),
         ("deepseek-ai/DeepSeek-V4.1-Flash", V41_IMAGE_PLACEHOLDER),
     ],
 )
