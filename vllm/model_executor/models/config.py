@@ -912,11 +912,21 @@ class Qwen4ExpForConditionalGenerationConfig(Qwen3_5ForConditionalGenerationConf
 
     @staticmethod
     def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        from vllm.platforms import current_platform
+
         Qwen3_5ForConditionalGenerationConfig.verify_and_update_config(vllm_config)
         text_config = vllm_config.model_config.hf_text_config
         if text_config.hc_count <= 1:
             raise ValueError("Qwen4Exp requires hc_count > 1")
         parallel_config = vllm_config.parallel_config
+        # MoE SP also enables HC SP without the explicit HC flag.
+        if (
+            current_platform.is_cuda()
+            and parallel_config.use_sequence_parallel_moe
+            and parallel_config.pipeline_parallel_size != 1
+        ):
+            raise ValueError("Qwen4Exp MoE SP requires PP=1")
+
         uses_ple_or_qsa = bool(text_config.ple_layer_ids) or (
             getattr(text_config, "indexer_n_heads", None) is not None
         )

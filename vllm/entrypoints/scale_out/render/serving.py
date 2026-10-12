@@ -186,6 +186,12 @@ class ServingRender(BaseServing):
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
             return error_check_ret
+
+        if request.use_beam_search:
+            return self.create_error_response(
+                "Beam search is not supported by the render endpoint"
+            )
+
         result = await self.online_renderer.render_completion(
             request, skip_mm_cache=True
         )
