@@ -283,11 +283,10 @@ class NixlConnectorMetadata(KVConnectorMetadata):
         # Push mode (D side): registration data the D worker should send to
         # P workers via NIXL notification on this step.
         self.push_registrations: dict[ReqId, dict[str, Any]] = {}
-        # Push mode (P side): newly finished request blocks to be matched
-        # against pending D registrations on the P worker.
-        self.push_finished_blocks: dict[ReqId, BlockIds] = {}
-        # Push mode (P side): router-assigned transfer_id of those requests.
-        self.push_transfer_ids: dict[ReqId, TransferId] = {}
+        # Push mode (P side): newly finished request blocks (and their
+        # transfer_id) to be matched against pending D registrations on the
+        # P worker.
+        self.push_finished_blocks: dict[ReqId, tuple[BlockIds, TransferId]] = {}
 
     def _add_new_req(
         self,

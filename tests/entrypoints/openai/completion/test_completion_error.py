@@ -1061,7 +1061,7 @@ def test_non_numeric_logprobs_rejected(field_name):
     [("Test prompt", ["xfer-1"]), (["A", "B"], ["xfer-1-0", "xfer-1-1"])],
 )
 async def test_completion_batch_gets_per_prompt_transfer_id(prompt, expected_ids):
-    """P and D must not pair prompt 1 of a batch with prompt 0 of the other leg."""
+    """P must not pair prompt 1 of a batch with prompt 0 on D."""
     mock_engine = MagicMock(spec=AsyncLLM)
     mock_engine.errored = False
     mock_engine.model_config = MockModelConfig()

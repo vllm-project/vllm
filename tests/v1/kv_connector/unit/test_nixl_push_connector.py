@@ -223,7 +223,7 @@ class TestPushScheduler:
             meta = sched.build_connector_meta(scheduler_output)
 
         # Then
-        assert meta.push_transfer_ids == {"req-p-1": "xfer-1"}
+        assert meta.push_finished_blocks == {"req-p-1": (([4, 5],), "xfer-1")}
 
     def test_d_side_without_transfer_id_prefills_locally(self):
         # Given
@@ -761,9 +761,8 @@ class TestPushWriterStartLoadKv:
             "req-D": _registration_data("req-D"),
         }
         meta.push_finished_blocks = {
-            "req-E": ([5, 6, 7],),
+            "req-E": (([5, 6, 7],), "xfer-E"),
         }
-        meta.push_transfer_ids = {"req-E": "xfer-E"}
 
         w.start_load_kv(meta)
 
@@ -785,8 +784,7 @@ class TestPushWriterStartLoadKv:
         w._send_heartbeats = MagicMock()
 
         meta = NixlConnectorMetadata()
-        meta.push_finished_blocks["req"] = ([1, 2],)
-        meta.push_transfer_ids["req"] = "xfer-0"
+        meta.push_finished_blocks["req"] = (([1, 2],), "xfer-0")
         meta.reqs_in_batch.add("req")
         meta.reqs_to_send["req"] = time.perf_counter() + 10
 

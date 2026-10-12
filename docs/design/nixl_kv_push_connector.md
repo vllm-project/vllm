@@ -138,7 +138,7 @@ when finished blocks arrive we look up ``_pending_d_registrations``.
 Both lookups match on the per-dispatch ``transfer_id`` the router sets in the
 ``kv_transfer_params`` of both requests (D sends it in ``PUSH_REG``).
 Request ids can't serve as the key: the router may forward the caller's
-``X-Request-Id`` to both legs, which repeats on a client retry.
+``X-Request-Id`` to P and D, which repeats on a client retry.
 A request without a ``transfer_id`` skips the KV transfer: P frees its
 blocks right away while D prefills locally.
 

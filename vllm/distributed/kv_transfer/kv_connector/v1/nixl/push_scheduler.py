@@ -88,10 +88,9 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
         # P-side: block IDs for finished requests, kept for the lease and
         # used to drive ``has_pending_push_work``.
         self._finished_request_blocks: dict[ReqId, BlockIds] = {}
-        # P-side: newly finished blocks to ship to P workers on next step.
-        self._newly_finished_push_blocks: dict[ReqId, BlockIds] = {}
-        # P-side: router transfer_id of those requests.
-        self._newly_finished_transfer_ids: dict[ReqId, TransferId] = {}
+        # P-side: newly finished blocks (and their transfer_id) to ship to P
+        # workers on next step.
+        self._newly_finished_push_blocks: dict[ReqId, tuple[BlockIds, TransferId]] = {}
 
         # Soft watchdog timeout (seconds) for D-side registrations that
         # never receive a push completion. Defaults to the existing
@@ -288,8 +287,10 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
             # Store finished blocks for worker-level matching with D
             # registrations (via NIXL notifications).
             self._finished_request_blocks[request.request_id] = block_ids
-            self._newly_finished_push_blocks[request.request_id] = block_ids
-            self._newly_finished_transfer_ids[request.request_id] = transfer_id
+            self._newly_finished_push_blocks[request.request_id] = (
+                block_ids,
+                transfer_id,
+            )
 
         return delay_free_blocks, dict(
             do_remote_prefill=True,
@@ -349,8 +350,6 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
         if self._newly_finished_push_blocks:
             meta.push_finished_blocks = dict(self._newly_finished_push_blocks)
             self._newly_finished_push_blocks.clear()
-            meta.push_transfer_ids = dict(self._newly_finished_transfer_ids)
-            self._newly_finished_transfer_ids.clear()
 
         return meta
 

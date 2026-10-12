@@ -205,9 +205,8 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
 
         # --- P-side: newly finished blocks awaiting a D registration match ---
         if metadata.push_finished_blocks:
-            for req_id, block_ids in metadata.push_finished_blocks.items():
-                transfer_id = metadata.push_transfer_ids[req_id]
-                self._finished_blocks_inbox.put((req_id, block_ids, transfer_id))
+            for req_id, (block_ids, tid) in metadata.push_finished_blocks.items():
+                self._finished_blocks_inbox.put((req_id, block_ids, tid))
             self._push_writer_wake.set()
 
         # Batch + lease tracking (same as pull).

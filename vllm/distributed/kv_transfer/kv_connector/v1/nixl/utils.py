@@ -66,8 +66,7 @@ def get_transfer_id(kv_transfer_params: dict[str, Any]) -> TransferId | None:
     if isinstance(transfer_id, str) and transfer_id:
         return transfer_id
     logger.warning_once(
-        "NIXL push mode needs a transfer_id in kv_transfer_params, set by the "
-        "router on both the prefill and decode request. Requests without one "
-        "skip the KV transfer."
+        "Missing transfer_id in kv_transfer_params from router. "
+        "This request will not utilize KVTransfer."
     )
     return None
