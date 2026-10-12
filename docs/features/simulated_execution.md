@@ -166,11 +166,44 @@ reference for a comparison is produced.
 [examples/features/simulated_execution/sweep_offline.py](../../examples/features/simulated_execution/sweep_offline.py)
 sweeps `max_num_seqs` this way.
 
+### Speculative decoding
+
+With a `speculative_config`, the scheduler schedules draft tokens as usual and
+the simulated runner decides how many are accepted per request and step. The
+draft model is built on the meta device like the target (its KV cache counts
+against the budget), and no draft is ever proposed: the runner reports
+placeholder drafts, as the real runner does under async scheduling.
+
+`spec_acceptance_rates` gives the probability that the draft at each position
+is accepted given that all earlier ones were; the last value applies to later
+positions. A timing provider that sets `StepCost.num_accepted` overrides it.
+A step log recorded with speculative decoding stores the accepted count of
+every request, and passing its path instead of a list estimates the rates from
+it:
+
+```python
+simulation_config={
+    "simulate_forward": True,
+    "timing": "replay",
+    "timing_args": {"path": "/tmp/real_steps.jsonl"},
+    "spec_acceptance_rates": "/tmp/real_steps.jsonl",
+}
+```
+
+Recorded on Qwen3-8B with an EAGLE3 speculator (3 drafts) on H200 and
+replayed this way under the `fast_forward` clock, a Poisson workload of 100
+MMLU-Pro prompts at 4 requests/s reproduces mean TPOT, TTFT and E2E latency
+within 2.5% and tokens per step within 3%, in 5 s instead of 30 s. Acceptance
+is sampled independently per step, so the spread of per-request acceptance
+(and with it P99 TPOT) is narrower than on the real deployment. Trace replay
+is not available with speculative decoding; outputs are fallback tokens.
+
 ## Limitations
 
 * Single rank: tensor, pipeline and data parallelism are rejected. The
   parallel configuration is passed to the provider for modeling purposes only.
-* No speculative decoding, LoRA, KV transfer or pooling models.
+* No LoRA, KV transfer or pooling models. Speculative decoding without
+  adaptive verification only, and no diffusion models.
 * The `fast_forward` and `virtual` clocks are offline-only and single-process;
   served simulations run in real time.
 * Prompt and output token ids are not meaningful; only their counts are.

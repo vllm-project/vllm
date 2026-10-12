@@ -23,6 +23,7 @@ from vllm.v1.worker.simulated.timing import (
     TimingProvider,
     VirtualClock,
     ZeroTimingProvider,
+    acceptance_rates_from_log,
     get_timing_provider,
 )
 
@@ -294,3 +295,19 @@ def test_build_step_descriptor_from_scheduler_output():
     d2 = build_step_descriptor(so2, prompt_lens, 2, parallel)
     assert "b" not in prompt_lens
     assert d2.is_decode_only and d2.requests[0].num_computed_tokens == 300
+
+
+def test_acceptance_rates_from_log(tmp_path):
+    def spec_req(req_id: str, drafts: int) -> SimRequestStep:
+        return SimRequestStep(req_id, 1 + drafts, 100, 50, 0, drafts, False)
+
+    log = tmp_path / "steps.jsonl"
+    writer = StepLogWriter(str(log))
+    # Four requests with 3 drafts accept 3, 2, 0, 1; one with 1 draft accepts 1.
+    step = _step(0, *(spec_req(r, 3) for r in "abcd"), spec_req("e", 1))
+    writer.write(step, StepCost(device_s=0.01, num_accepted=(3, 2, 0, 1, 1)), 0, 0, [])
+    writer.write(_step(1, _req("f", 1, 100, 50)), StepCost(device_s=0.01), 0, 0, [])
+    writer.close()
+    # Position 1: 4 of 5 accepted. Position 2: 2 of the 3 that reached it.
+    # Position 3: 1 of the 2 that reached it.
+    assert acceptance_rates_from_log(str(log)) == pytest.approx([4 / 5, 2 / 3, 1 / 2])

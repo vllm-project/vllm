@@ -201,3 +201,62 @@ def test_simulate_offline_host_time_holds_engine_thread() -> None:
     # is consumed. Nothing follows the last step, so its device time ends with
     # that host work and its token arrives together with the previous one.
     assert result.requests[0].itls == pytest.approx([3e-3] * 6 + [0.0])
+
+
+class AcceptAllDrafts:
+    """Timing provider that accepts every draft, overriding the rates."""
+
+    def __init__(self, vllm_config, **kwargs):
+        pass
+
+    def estimate(self, step):
+        from vllm.v1.worker.simulated.timing import StepCost
+
+        return StepCost(
+            device_s=1e-3,
+            num_accepted=tuple(r.num_spec_tokens for r in step.requests),
+        )
+
+
+@pytest.mark.parametrize(
+    ("rates", "timing", "chunks"),
+    [
+        ([1.0], "constant", 5),
+        ([0.0], "constant", 16),
+        ([0.0], f"{__name__}.AcceptAllDrafts", 5),
+    ],
+)
+def test_simulate_offline_speculative_decoding(
+    rates: list[float], timing: str, chunks: int
+) -> None:
+    """Accepted drafts follow `spec_acceptance_rates` unless the timing
+    provider sets them: with every draft accepted a step yields 1 + 3 tokens,
+    with none it yields one."""
+    if not (current_platform.is_cpu() or current_platform.is_cuda_alike()):
+        pytest.skip("Simulated forward needs the CPU or a CUDA-alike platform.")
+    from vllm.engine.arg_utils import EngineArgs
+    from vllm.v1.worker.simulated.offline import TimedRequest, simulate
+
+    args = EngineArgs(
+        model="Qwen/Qwen3-0.6B",
+        max_model_len=1024,
+        kv_cache_memory_bytes=1024**3,
+        speculative_config={
+            "method": "ngram",
+            "num_speculative_tokens": 3,
+            "prompt_lookup_max": 3,
+            "prompt_lookup_min": 2,
+        },
+        simulation_config={
+            "simulate_forward": True,
+            "clock": "virtual",
+            "timing": timing,
+            "timing_args": {"fixed_us": 1000} if timing == "constant" else {},
+            "spec_acceptance_rates": rates,
+        },
+    )
+    params = SamplingParams(max_tokens=16, ignore_eos=True)
+    result = simulate(args, [TimedRequest(list(range(16)), params) for _ in range(4)])
+    for timing in result.requests:
+        assert timing.num_output_tokens == 16
+        assert len(timing.token_times) == chunks

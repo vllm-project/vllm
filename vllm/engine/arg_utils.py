@@ -2925,10 +2925,6 @@ class EngineArgs:
                 )
             if self.enable_lora:
                 _raise_unsupported_error(feature_name="simulated forward with LoRA")
-            if self.speculative_config is not None or self.spec_model is not None:
-                _raise_unsupported_error(
-                    feature_name="simulated forward with speculative decoding"
-                )
             if self.kv_transfer_config is not None:
                 _raise_unsupported_error(
                     feature_name="simulated forward with KV transfer"

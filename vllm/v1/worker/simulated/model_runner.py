@@ -12,10 +12,12 @@ device queue and is paid in `SimulatedAsyncOutput.get_output()`, so the engine
 core can schedule the next step meanwhile.
 """
 
+import dataclasses
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+import numpy as np
 import torch
 
 from vllm.config import VllmConfig
@@ -25,7 +27,6 @@ from vllm.sequence import IntermediateTensors
 from vllm.v1.outputs import (
     EMPTY_MODEL_RUNNER_OUTPUT,
     AsyncModelRunnerOutput,
-    DraftTokenIds,
     ModelRunnerOutput,
 )
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
@@ -37,6 +38,7 @@ from vllm.v1.worker.simulated.timing import (
     StepDescriptor,
     StepLogWriter,
     ZeroTimingProvider,
+    acceptance_rates_from_log,
     build_step_descriptor,
     get_clock,
     get_timing_provider,
@@ -59,6 +61,7 @@ class _PendingStep:
     t_start: float
     t_deadline: float
     finished_req_ids: list[str]
+    num_spec_tokens_to_schedule: int
 
 
 class SimulatedModelRunner(GPUModelRunner):
@@ -85,6 +88,28 @@ class SimulatedModelRunner(GPUModelRunner):
         self._device_free_at = 0.0
         self._parallel = parallel_summary(vllm_config)
         self._prompt_lens: dict[str, int] = {}
+        self._rng = np.random.default_rng(vllm_config.model_config.seed)
+        self._acceptance_rates = None
+        spec = vllm_config.speculative_config
+        if spec is not None and spec.enable_adaptive_verification:
+            raise ValueError(
+                "Simulated execution does not support adaptive verification."
+            )
+        if vllm_config.model_config.is_diffusion:
+            raise ValueError("Simulated execution does not support diffusion models.")
+        if self.num_speculative_steps > 0:
+            rates = sim.spec_acceptance_rates
+            if rates is None:
+                raise ValueError(
+                    "Simulated speculative decoding needs "
+                    "simulation_config.spec_acceptance_rates: per-position "
+                    "acceptance probabilities, or the path of a step log "
+                    "recorded with speculative decoding."
+                )
+            if isinstance(rates, str):
+                rates = acceptance_rates_from_log(rates)
+            self._acceptance_rates = np.asarray(rates, dtype=np.float64)
+            logger.info("Draft acceptance rates by position: %s", rates)
 
     # ------------------------------------------------------------------ #
     # Virtual KV cache: specs and block tables are real, tensors are not.
@@ -225,6 +250,7 @@ class SimulatedModelRunner(GPUModelRunner):
             t_start=t_start,
             t_deadline=max(self._device_free_at, t_entry + cost.host_s),
             finished_req_ids=list(scheduler_output.finished_req_ids),
+            num_spec_tokens_to_schedule=scheduler_output.num_spec_tokens_to_schedule,
         )
         self._step_index += 1
         # The output is produced by sample_tokens(), as with the real runner.
@@ -242,39 +268,72 @@ class SimulatedModelRunner(GPUModelRunner):
         input_batch = pending.input_batch
         num_reqs = input_batch.num_reqs
 
-        # Output tokens: the recorded trace where a request has one, otherwise
-        # the fallback token. Logits are never computed.
+        # A request yields tokens only once its prefill is complete; then one
+        # per accepted draft plus the bonus token.
+        completes = (
+            input_batch.num_computed_tokens_np + input_batch.num_scheduled_tokens
+            >= input_batch.prefill_len_np
+        )
+        row = {req_id: i for i, req_id in enumerate(input_batch.req_ids)}
+        num_drafts = input_batch.num_draft_tokens_per_req
+        if num_drafts is None or input_batch.num_draft_tokens == 0:
+            num_drafts = np.zeros(num_reqs, dtype=np.int32)
+            num_accepted = num_drafts
+        else:
+            num_accepted = np.where(
+                completes, self._num_accepted(pending, input_batch, num_drafts), 0
+            )
+            pending.cost = dataclasses.replace(
+                pending.cost,
+                num_accepted=tuple(
+                    int(num_accepted[row[r.req_id]])
+                    for r in pending.descriptor.requests
+                ),
+            )
+        num_sampled_np = np.where(completes, 1 + num_accepted, 0).astype(np.int32)
+
+        # Output tokens: the recorded trace where a request has one (trace
+        # replay excludes speculative decoding), otherwise the fallback token.
+        # Logits are never computed.
         sampled = torch.full(
-            (num_reqs,), self.fallback_token_id, dtype=torch.int64, device=self.device
+            (num_reqs, 1 + self.num_speculative_steps),
+            self.fallback_token_id,
+            dtype=torch.int64,
+            device=self.device,
         )
         assert self.sampler is not None
         trace_state = self.sampler.trace_replay_state
-        if trace_state is not None:
-            trace_state.apply_trace(sampled, input_batch.idx_mapping)
-        sampled_token_ids = sampled.view(-1, 1)
+        if trace_state is not None and self.num_speculative_steps == 0:
+            trace_state.apply_trace(sampled.view(-1), input_batch.idx_mapping)
 
-        # A request yields a token only once its prefill is complete.
-        seq_lens = input_batch.seq_lens[:num_reqs]
-        prefill_lens = torch.from_numpy(input_batch.prefill_len_np).to(
-            seq_lens.device, non_blocking=True
-        )
-        num_sampled = (seq_lens >= prefill_lens).to(torch.int32)
-        num_rejected = torch.zeros_like(num_sampled)
         self.postprocess_sampled(
             idx_mapping=input_batch.idx_mapping,
-            sampled_tokens=sampled_token_ids,
-            num_sampled=num_sampled,
-            num_rejected=num_rejected,
+            sampled_tokens=sampled,
+            num_sampled=torch.from_numpy(num_sampled_np).to(self.device),
+            num_rejected=torch.from_numpy(
+                np.where(completes, num_drafts - num_accepted, 0).astype(np.int32)
+            ).to(self.device),
             query_start_loc=input_batch.query_start_loc,
         )
-        sampled_token_ids_list = [
-            token_ids[:n]
-            for token_ids, n in zip(sampled_token_ids.tolist(), num_sampled.tolist())
-        ]
+        if self.num_speculative_steps > 0:
+            # Placeholder drafts, as the real runner reports under async
+            # scheduling; the scheduler only counts them.
+            self.draft_tokens_handler.set_draft_tokens(
+                input_batch,
+                torch.full(
+                    (num_reqs, pending.num_spec_tokens_to_schedule),
+                    -1,
+                    dtype=torch.int64,
+                    device=self.device,
+                ),
+            )
         output = ModelRunnerOutput(
             req_ids=input_batch.req_ids,
-            req_id_to_index={req_id: i for i, req_id in enumerate(input_batch.req_ids)},
-            sampled_token_ids=sampled_token_ids_list,
+            req_id_to_index=row,
+            sampled_token_ids=[
+                tokens[:n]
+                for tokens, n in zip(sampled.tolist(), num_sampled_np.tolist())
+            ],
         )
 
         if self.step_log is not None:
@@ -289,5 +348,26 @@ class SimulatedModelRunner(GPUModelRunner):
         self.clock.sleep_until(pending.t_entry + pending.cost.host_s)
         return SimulatedAsyncOutput(output, pending.t_deadline, self.clock)
 
-    def take_draft_token_ids(self) -> DraftTokenIds | None:
-        return None
+    def _num_accepted(
+        self, pending: _PendingStep, input_batch: InputBatch, num_drafts: np.ndarray
+    ) -> np.ndarray:
+        """Accepted drafts per batch row: the timing provider's, if it gives
+        them, else sampled from the per-position acceptance rates."""
+        if pending.cost.num_accepted is not None:
+            by_req = dict(
+                zip(
+                    (r.req_id for r in pending.descriptor.requests),
+                    pending.cost.num_accepted,
+                )
+            )
+            accepted = np.array([by_req[r] for r in input_batch.req_ids])
+            return np.minimum(accepted, num_drafts)
+        assert self._acceptance_rates is not None
+        width = int(num_drafts.max())
+        rates = self._acceptance_rates[
+            np.minimum(np.arange(width), len(self._acceptance_rates) - 1)
+        ]
+        accepted_at = self._rng.random((len(num_drafts), width)) < rates
+        accepted_at &= np.arange(width) < num_drafts[:, None]
+        # Drafts are accepted up to the first rejection.
+        return np.cumprod(accepted_at, axis=1).sum(axis=1)

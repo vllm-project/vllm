@@ -351,6 +351,30 @@ def _record_features(rec: dict[str, Any]) -> tuple[float, float, float]:
     )
 
 
+def acceptance_rates_from_log(path: str) -> list[float]:
+    """Per-position conditional draft acceptance rates of a step log recorded
+    with speculative decoding: rate[i] is the fraction of requests that had a
+    draft at position i, and had all earlier drafts accepted, whose draft at
+    position i was accepted too."""
+    reached = np.zeros(0)
+    accepted = np.zeros(0)
+    for rec in _load_json_or_jsonl(path):
+        num_accepted = rec.get("cost", {}).get("num_accepted")
+        if not num_accepted:
+            continue
+        for req, n in zip(rec["step"]["requests"], num_accepted):
+            drafts = req["num_spec_tokens"]
+            if drafts > len(reached):
+                reached = np.pad(reached, (0, drafts - len(reached)))
+                accepted = np.pad(accepted, (0, drafts - len(accepted)))
+            n = min(n, drafts)
+            reached[: min(n + 1, drafts)] += 1
+            accepted[:n] += 1
+    if not reached.any():
+        raise ValueError(f"{path} has no speculative decoding steps")
+    return (accepted / np.maximum(reached, 1)).tolist()
+
+
 class TableTimingProvider:
     """Interpolates a measured table of step costs.
 

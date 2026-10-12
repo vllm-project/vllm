@@ -4,7 +4,7 @@
 
 from typing import Any, Literal
 
-from pydantic import Field
+from pydantic import Field, field_validator
 
 from vllm.config.utils import config
 
@@ -54,10 +54,27 @@ class SimulationConfig:
     them to `log_path`. This is the calibration source for simulated runs of
     the same model and hardware."""
 
+    spec_acceptance_rates: list[float] | str | None = None
+    """Speculative decoding: the probability that the draft token at each
+    position is accepted given that all earlier drafts were (the last value
+    applies to later positions), or the path of a step log recorded with
+    speculative decoding to estimate them from. Accepted counts are sampled
+    per request and step unless the timing provider sets
+    `StepCost.num_accepted`."""
+
     fallback_token_id: int = Field(default=0, ge=0)
     """Token id emitted at every decode step for requests that carry no
     `trace_decode_token_ids`. Such requests end by `max_tokens` (or by this
     token being an EOS/stop token)."""
+
+    @field_validator("spec_acceptance_rates")
+    @classmethod
+    def _check_rates(cls, rates: list[float] | str | None) -> list[float] | str | None:
+        if isinstance(rates, list) and (
+            not rates or not all(0.0 <= r <= 1.0 for r in rates)
+        ):
+            raise ValueError("spec_acceptance_rates must be probabilities in [0, 1].")
+        return rates
 
     @property
     def enabled(self) -> bool:

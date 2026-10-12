@@ -58,12 +58,30 @@ class _RecordedOutput(AsyncModelRunnerOutput):
         device_s = self.start.elapsed_time(self.end) * 1e-3
         self.writer.write(
             self.descriptor,
-            StepCost(device_s=device_s, host_s=self.host_s),
+            StepCost(
+                device_s=device_s,
+                host_s=self.host_s,
+                num_accepted=_num_accepted(self.descriptor, output),
+            ),
             self.t_start,
             self.t_start + max(device_s, self.host_s),
             self.finished_req_ids,
         )
         return output
+
+
+def _num_accepted(
+    descriptor: StepDescriptor, output: ModelRunnerOutput
+) -> tuple[int, ...] | None:
+    """Accepted drafts per request of a speculative step, in descriptor order."""
+    sampled = output.sampled_token_ids
+    if not sampled or not any(r.num_spec_tokens for r in descriptor.requests):
+        return None
+    index = output.req_id_to_index
+    return tuple(
+        max(len(sampled[index[r.req_id]]) - 1, 0) if r.req_id in index else 0
+        for r in descriptor.requests
+    )
 
 
 class RecordingWorker(Worker):
@@ -121,7 +139,11 @@ class RecordingWorker(Worker):
         device_s = start.elapsed_time(end) * 1e-3
         self._writer.write(
             descriptor,
-            StepCost(device_s=device_s, host_s=host_s),
+            StepCost(
+                device_s=device_s,
+                host_s=host_s,
+                num_accepted=_num_accepted(descriptor, output),
+            ),
             t_start,
             t_start + max(device_s, host_s),
             finished,
