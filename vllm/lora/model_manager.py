@@ -606,7 +606,7 @@ class LoRAModelManager:
                 continue
             self.register_module(module_name, new_module)
 
-            self._register_packed_modules(module_name)
+            self._register_packed_modules(module_name, module)
             # All lora layers share the same punica_wrapper based on reference.
             new_module.set_mapping(punica_wrapper)
 
@@ -822,10 +822,14 @@ class LoRAModelManager:
 
         return None
 
-    def _register_packed_modules(self, module_full_name: str) -> None:
+    def _register_packed_modules(
+        self, module_full_name: str, module: nn.Module
+    ) -> None:
         parts = module_full_name.split(".")
         module_name = parts[-1]
-        replacements = self.packed_modules_mapping.get(module_name, [])
+        replacements = getattr(
+            module, "lora_packed_modules", None
+        ) or self.packed_modules_mapping.get(module_name, [])
         # When replacements is less than or equal to 1, it indicates that this
         # module is not a packed module.
         if len(replacements) <= 1:
