@@ -173,7 +173,7 @@ Pipeline parallelism is supported only on a prefill instance (`kv_producer`) in 
 
 ### Transport configuration
 
-MoRI has two transport backends: RDMA and xGMI. You can select backend using `--kv-transfer-config.kv_connector_extra_config.backend $BACKEND`, with `$BACKEND` being `rdma` or `xgmi`. RDMA is the default backend and should be used in multi-node deployments.
+MoRI has three transport backends: RDMA, xGMI, and OFI. You can select a backend using `--kv-transfer-config.kv_connector_extra_config.backend $BACKEND`, with `$BACKEND` being `rdma`, `xgmi`, or `ofi`. RDMA is the default backend and should be used in multi-node deployments.
 
 The configuration options for each backend are as follows.
 
@@ -188,6 +188,16 @@ Advanced users can also configure MoRI itself using environment variables such a
 #### xGMI backend
 
 Use xGMI when the prefiller and decoder run on the same physical host so transfers go over the AMD GPU fabric and skip the NIC entirely. Currently only configured using MoRI-specific environment variables; see the [MoRI repository](https://github.com/rocm/mori).
+
+#### OFI backend
+
+Use OFI for multi-node transfers on a libfabric-supported network fabric. This backend requires MoRI >= 1.2.5 and a MoRI build compiled with libfabric support; vLLM reports an error if the installed MoRI lacks `OfiBackendConfig` or the OFI backend. Select it with:
+
+```bash
+--kv-transfer-config.kv_connector_extra_config.backend ofi
+```
+
+The provider name is left empty, so libfabric/MoRI selects an available provider for the node; providers can be selected through the MoRI/libfabric environment and configuration for that installation. No additional OFI-specific vLLM options are currently required. READ and WRITE transfer modes have both been validated with the OFI backend.
 
 ## Multi-node deployment
 

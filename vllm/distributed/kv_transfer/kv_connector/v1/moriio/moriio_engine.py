@@ -71,6 +71,13 @@ try:
 except ImportError:
     StatusCode = None
 
+try:
+    from mori.io import OfiBackendConfig
+except ImportError:
+    OfiBackendConfig = None
+
+OFI_UNAVAILABLE_MSG = "backend 'ofi' requires MoRI >= 1.2.5 built with libfabric"
+
 """Write task execution logic for MoRIIO connector."""
 
 
@@ -821,6 +828,22 @@ class MoRIIOWrapper:
         if backend_type == BackendType.XGMI:
             logger.info("Using MoRIIO backend: XGMI")
             self.moriio_engine.create_backend(backend_type, XgmiBackendConfig())
+        elif (
+            getattr(BackendType, "OFI", None) is not None
+            and backend_type == BackendType.OFI
+        ):
+            if OfiBackendConfig is None:
+                raise RuntimeError(OFI_UNAVAILABLE_MSG)
+            if (qp_per_transfer, post_batch_size, num_workers) != (1, -1, 1):
+                logger.warning(
+                    "RDMA options (qp_per_transfer=%d, post_batch_size=%d, "
+                    "num_workers=%d) are ignored by the OFI backend",
+                    qp_per_transfer,
+                    post_batch_size,
+                    num_workers,
+                )
+            logger.info("Using MoRIIO backend: OFI")
+            self.moriio_engine.create_backend(backend_type, OfiBackendConfig(provider="", cq_batch=64))
         else:
             logger.info(
                 "Using MoRIIO backend: RDMA "
