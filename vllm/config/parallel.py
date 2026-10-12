@@ -634,10 +634,12 @@ class ParallelConfig:
         PCP-only execution replicates the KV cache, so each decode request can
         have a single PCP owner. DCP shards the KV cache and therefore requires
         every decode request to run on every participating DCP rank.
+        PCP O-Proj TP also requires replicated queries for its output reduction.
         """
         return (
             self.prefill_context_parallel_size > 1
             and self.decode_context_parallel_size == 1
+            and not self.enable_pcp_o_proj_tp
         )
 
     @property

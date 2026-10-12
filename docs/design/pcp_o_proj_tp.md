@@ -20,6 +20,8 @@ the name `pcp_o_proj_tp`.
 
 - `prefill_context_parallel_size > 1`.
 - `decode_context_parallel_size = 1`.
+- Decode queries run on every PCP rank when the feature is enabled, so the
+  PCP O-Proj output reduction combines partial projections for the same rows.
 - Only DeepSeek V2/V3/V3.2, GLM-4 MoE Lite MLA, and the GLM-5 family are
   supported.
   GLM-4 MoE Lite attention inherits the DeepSeekV2 MLA path. GLM-5.2 reuses the
