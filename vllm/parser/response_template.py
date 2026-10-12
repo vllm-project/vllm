@@ -30,8 +30,7 @@ from vllm.parser.chat_parsing.response_templates import (
 )
 from vllm.reasoning.abs_reasoning_parsers import ReasoningParser
 from vllm.tool_parsers.abstract_tool_parser import ToolParser
-from vllm.tool_parsers.utils import iter_response_function_tool_dicts, \
-    make_tool_call_id
+from vllm.tool_parsers.utils import iter_response_function_tool_dicts, make_tool_call_id
 
 if TYPE_CHECKING:
     from vllm.entrypoints.openai.chat_completion.protocol import (

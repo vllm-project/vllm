@@ -21,13 +21,16 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 )
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.logger import init_logger
-from vllm.tool_parsers.utils import make_tool_call_id
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.abstract_tool_parser import (
     Tool,
     ToolParser,
 )
-from vllm.tool_parsers.utils import partial_tag_overlap, safe_literal_eval
+from vllm.tool_parsers.utils import (
+    make_tool_call_id,
+    partial_tag_overlap,
+    safe_literal_eval,
+)
 from vllm.utils import random_uuid
 
 logger = init_logger(__name__)

@@ -30,7 +30,9 @@ from vllm.tool_parsers.utils import (
     coerce_to_schema_type,
     extract_types_from_schema,
     find_tool_name,
-    find_tool_properties, get_tool_call_id_type, make_tool_call_id,
+    find_tool_properties,
+    get_tool_call_id_type,
+    make_tool_call_id,
 )
 
 if TYPE_CHECKING:

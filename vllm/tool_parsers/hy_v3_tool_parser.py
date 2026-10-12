@@ -20,13 +20,12 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionToolsParam,
 )
 from vllm.logger import init_logger
-from vllm.tool_parsers.utils import make_tool_call_id
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.abstract_tool_parser import (
     Tool,
     ToolParser,
 )
-from vllm.tool_parsers.utils import safe_literal_eval
+from vllm.tool_parsers.utils import make_tool_call_id, safe_literal_eval
 
 logger = init_logger(__name__)
 

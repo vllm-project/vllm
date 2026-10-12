@@ -1251,6 +1251,7 @@ def compute_tool_delta(
         else None
     )
 
+
 _KIMI_MODEL_TYPES = ("kimi_k2", "kimi_k25", "kimi_k3")
 
 

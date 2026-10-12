@@ -21,7 +21,6 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
 )
 from vllm.logger import init_logger
-from vllm.tool_parsers.utils import make_tool_call_id
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.abstract_tool_parser import (
     Tool,
@@ -31,6 +30,7 @@ from vllm.tool_parsers.utils import (
     consume_space,
     find_common_prefix,
     is_complete_json,
+    make_tool_call_id,
     partial_json_loads,
 )
 
