@@ -282,9 +282,7 @@ def is_nyi_config(config: Config) -> bool:
     # gpt-oss' own usage); SILU/GELU hit "Unsupported kernel config for moe
     # heuristic dispatch" at runtime despite being declared supported by
     # AiterExperts._supports_activation(). https://github.com/ROCm/aiter/issues/2419
-    is_w4a16_mxfp4 = (
-        config.fused_experts_type is AiterExperts and config.is_w4a16_mxfp4
-    )
+    is_w4a16_mxfp4 = config.fused_experts_type is AiterExperts and config.is_w4a16_mxfp4
     if config.activation == MoEActivation.SWIGLUOAI:
         return not is_w4a16_mxfp4
     if is_w4a16_mxfp4:
