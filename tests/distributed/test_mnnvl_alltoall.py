@@ -49,7 +49,7 @@ DEVICE = current_platform.device_type
 def cuda_host(monkeypatch):
     """Resolve the all2all default as it would on a datacenter Blackwell host,
     where only a Grace CPU distinguishes GB200/GB300 from x86 HGX B200/B300."""
-    from vllm.config.parallel import _prefers_one_sided_all2all
+    from vllm.config.parallel import _is_gb200_or_gb300
 
     def apply(cpu_arch: CpuArchEnum) -> None:
         monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
@@ -61,10 +61,10 @@ def cuda_host(monkeypatch):
             "get_device_capability",
             staticmethod(lambda device_id=0: DeviceCapability(major=10, minor=0)),
         )
-        _prefers_one_sided_all2all.cache_clear()
+        _is_gb200_or_gb300.cache_clear()
 
     yield apply
-    _prefers_one_sided_all2all.cache_clear()
+    _is_gb200_or_gb300.cache_clear()
 
 
 @pytest.mark.parametrize(
@@ -116,7 +116,11 @@ def test_default_ep_communicator_uses_platform_all2all_backend(
     monkeypatch.setattr(All2AllManagerBase, "__init__", init_all2all_manager)
 
     vllm_config = VllmConfig(
-        parallel_config=ParallelConfig(enable_expert_parallel=True)
+        parallel_config=ParallelConfig(
+            enable_expert_parallel=True,
+            data_parallel_size=8,
+            distributed_executor_backend="mp",
+        )
     )
     with set_current_vllm_config(vllm_config):
         device_comm_cls = CudaCommunicator
@@ -144,22 +148,28 @@ def test_default_ep_communicator_uses_platform_all2all_backend(
         (CpuArchEnum.X86, "allgather_reducescatter"),
     ],
 )
-def test_engine_args_resolves_all2all_backend_default(
+def test_engine_args_all2all_backend_default_round_trips(
     monkeypatch, cuda_host, cpu_arch, expected_backend
 ):
-    """`EngineArgs` mirrors this field from `ParallelConfig`, and
-    `create_engine_config()` passes the value straight back. The default must
-    therefore arrive as a resolved string; leaking a `FieldInfo` through makes
-    every launch without `--all2all-backend` fail config validation."""
+    """`EngineArgs` mirrors this field from `ParallelConfig` and
+    `create_engine_config()` passes the value straight back, so the default has
+    to survive that round trip as a plain string. Anything else (a `FieldInfo`,
+    a sentinel the config does not accept) fails every launch that omits
+    `--all2all-backend`."""
     cuda_host(cpu_arch)
     monkeypatch.setattr(
         "vllm.utils.flashinfer.has_flashinfer_nvlink_one_sided", lambda: True
     )
 
     backend = EngineArgs().all2all_backend
+    assert backend == "auto"
 
-    assert backend == expected_backend
-    config = ParallelConfig(all2all_backend=backend, enable_expert_parallel=True)
+    config = ParallelConfig(
+        all2all_backend=backend,
+        enable_expert_parallel=True,
+        data_parallel_size=8,
+        distributed_executor_backend="mp",
+    )
     assert config.all2all_backend == expected_backend
 
 

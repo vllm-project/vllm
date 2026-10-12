@@ -1557,6 +1557,27 @@ def _pretend_cuda_host(monkeypatch, cpu_arch, capability) -> None:
     )
 
 
+def _parallel_config(**kwargs) -> ParallelConfig:
+    """ParallelConfig with the executor pinned, so that multi-rank configs do
+    not reach the platform probe that picks one for us."""
+    kwargs.setdefault("distributed_executor_backend", "mp")
+    return ParallelConfig(**kwargs)
+
+
+@pytest.fixture
+def one_sided_capable_host(monkeypatch):
+    """A GB200 host with FlashInfer present, i.e. everything but the EP group."""
+    from vllm.config.parallel import _is_gb200_or_gb300
+
+    _pretend_cuda_host(monkeypatch, CpuArchEnum.ARM, (10, 0))
+    monkeypatch.setattr(
+        "vllm.utils.flashinfer.has_flashinfer_nvlink_one_sided", lambda: True
+    )
+    _is_gb200_or_gb300.cache_clear()
+    yield
+    _is_gb200_or_gb300.cache_clear()
+
+
 @pytest.mark.parametrize(
     ("cpu_arch", "capability", "expected"),
     [
@@ -1578,52 +1599,84 @@ def test_all2all_backend_defaults_to_one_sided_only_on_gb200_gb300(
 ):
     """x86 HGX B200/B300 report the same compute capability as GB200/GB300, so
     the default needs the Grace host to stay off unbenchmarked parts."""
-    from vllm.config.parallel import _prefers_one_sided_all2all
+    from vllm.config.parallel import _is_gb200_or_gb300
 
     _pretend_cuda_host(monkeypatch, cpu_arch, capability)
-    _prefers_one_sided_all2all.cache_clear()
-    try:
-        default_factory = get_field(ParallelConfig, "all2all_backend").default_factory
-        assert default_factory() == expected
-    finally:
-        _prefers_one_sided_all2all.cache_clear()
-
-
-def test_one_sided_all2all_default_requires_expert_parallel(monkeypatch):
-    """The all2all backend is only used by expert parallelism, so the GB200
-    default must not leak into non-EP deployments."""
-    from vllm.config.parallel import _prefers_one_sided_all2all
-
-    _pretend_cuda_host(monkeypatch, CpuArchEnum.ARM, (10, 0))
     monkeypatch.setattr(
         "vllm.utils.flashinfer.has_flashinfer_nvlink_one_sided", lambda: True
     )
-    _prefers_one_sided_all2all.cache_clear()
+    _is_gb200_or_gb300.cache_clear()
     try:
-        assert ParallelConfig().all2all_backend == "allgather_reducescatter"
-        assert (
-            ParallelConfig(enable_expert_parallel=True).all2all_backend
-            == "flashinfer_nvlink_one_sided"
-        )
+        config = _parallel_config(enable_expert_parallel=True, data_parallel_size=8)
+        assert config.all2all_backend == expected
     finally:
-        _prefers_one_sided_all2all.cache_clear()
+        _is_gb200_or_gb300.cache_clear()
+
+
+@pytest.mark.parametrize(
+    ("data_parallel_size", "tensor_parallel_size", "expected"),
+    [
+        # One-sided only pays off once a token stops reaching every rank, which
+        # needs ep_size >= 8; below that large prefill chunks regress.
+        (8, 1, "flashinfer_nvlink_one_sided"),
+        (16, 1, "flashinfer_nvlink_one_sided"),
+        # EP flattens TP across DP, so DP x TP is what counts, not DP alone.
+        (4, 2, "flashinfer_nvlink_one_sided"),
+        (4, 1, "allgather_reducescatter"),
+        (2, 1, "allgather_reducescatter"),
+        (1, 1, "allgather_reducescatter"),
+    ],
+)
+def test_one_sided_all2all_default_requires_wide_enough_ep_group(
+    one_sided_capable_host, data_parallel_size, tensor_parallel_size, expected
+):
+    """Below ep_size 8 one-sided loses on large prefill chunks, so the default
+    must stay on allgather_reducescatter there."""
+    config = _parallel_config(
+        enable_expert_parallel=True,
+        data_parallel_size=data_parallel_size,
+        tensor_parallel_size=tensor_parallel_size,
+    )
+    assert config.all2all_backend == expected
+
+
+def test_explicit_all2all_backend_survives_a_narrow_ep_group(one_sided_capable_host):
+    """The EP-size threshold is a default-picking heuristic, not a constraint:
+    asking for one-sided explicitly must still get it."""
+    config = _parallel_config(
+        all2all_backend="flashinfer_nvlink_one_sided",
+        enable_expert_parallel=True,
+        data_parallel_size=2,
+    )
+    assert config.all2all_backend == "flashinfer_nvlink_one_sided"
+
+
+def test_one_sided_all2all_default_requires_expert_parallel(one_sided_capable_host):
+    """The all2all backend is only used by expert parallelism, so the GB200
+    default must not leak into non-EP deployments."""
+    assert _parallel_config(data_parallel_size=8).all2all_backend == (
+        "allgather_reducescatter"
+    )
+    assert _parallel_config(
+        enable_expert_parallel=True, data_parallel_size=8
+    ).all2all_backend == ("flashinfer_nvlink_one_sided")
 
 
 def test_one_sided_all2all_default_falls_back_without_flashinfer(monkeypatch):
     """FlashInferNVLinkOneSidedManager asserts on the missing module, so an
     image without it must degrade instead of failing startup."""
-    from vllm.config.parallel import _prefers_one_sided_all2all
+    from vllm.config.parallel import _is_gb200_or_gb300
 
     _pretend_cuda_host(monkeypatch, CpuArchEnum.ARM, (10, 0))
     monkeypatch.setattr(
         "vllm.utils.flashinfer.has_flashinfer_nvlink_one_sided", lambda: False
     )
-    _prefers_one_sided_all2all.cache_clear()
+    _is_gb200_or_gb300.cache_clear()
     try:
-        config = ParallelConfig(enable_expert_parallel=True)
+        config = _parallel_config(enable_expert_parallel=True, data_parallel_size=8)
         assert config.all2all_backend == "allgather_reducescatter"
     finally:
-        _prefers_one_sided_all2all.cache_clear()
+        _is_gb200_or_gb300.cache_clear()
 
 
 def test_dp_group_uses_configured_timeout_without_current_config(monkeypatch):

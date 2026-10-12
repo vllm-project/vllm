@@ -57,21 +57,86 @@ All2AllBackend = Literal[
     "flashinfer_nvlink_two_sided",
     "flashinfer_nvlink_one_sided",
     "passthrough",
+    "auto",
 ]
+
+# One-sided only beats all-gather/reduce-scatter once a token stops reaching
+# every rank, which needs a wide enough expert-parallel group. Measured on
+# GB200 and GB300 at ep 2/4/8 (hidden 4096, top_k 10, 512 experts, NVFP4):
+# one-sided wins at every batch size at ep=8, but loses up to 1.24x on large
+# prefill chunks at ep<=4. 8 is the smallest group that was measured clean.
+_ONE_SIDED_MIN_EP_SIZE = 8
 
 
 @cache
-def _prefers_one_sided_all2all() -> bool:
-    """Only GB200/GB300 prefer one-sided all2all"""
+def _is_gb200_or_gb300() -> bool:
+    """Whether this is a GB200 or GB300, and nothing else.
+
+    Two conditions are needed because neither alone is specific enough: the
+    Grace host rules out x86 HGX B200/B300, which report the same compute
+    capability, and the 10.x family rules out the other Grace parts, GB10
+    (12.1) and GH200 (9.0).
+    """
     if not current_platform.is_cuda():
         return False
     if current_platform.get_cpu_architecture() != CpuArchEnum.ARM:
-        # Corner case to distinguish x86 HGX B200/B300 from ARM GB200/GB300
         return False
     try:
         return current_platform.is_device_capability_family(100)
     except Exception:
         return False
+
+
+def _resolve_all2all_backend(
+    requested: All2AllBackend, enable_expert_parallel: bool, ep_size: int
+) -> All2AllBackend:
+    """Pick the all2all backend, resolving "auto" against the deployment.
+
+    Args:
+        requested: The configured backend, or "auto" to choose one here.
+        enable_expert_parallel: Whether expert parallelism is on.
+        ep_size: Size of the expert-parallel group.
+
+    Returns:
+        A concrete backend; never "auto".
+
+    """
+    if requested in ("pplx", "naive"):
+        logger.warning(
+            "The '%s' all2all backend has been removed. "
+            "Falling back to 'allgather_reducescatter'.",
+            requested,
+        )
+        return "allgather_reducescatter"
+
+    if requested == "auto":
+        if not (
+            enable_expert_parallel
+            and _is_gb200_or_gb300()
+            and ep_size >= _ONE_SIDED_MIN_EP_SIZE
+        ):
+            return "allgather_reducescatter"
+        requested = "flashinfer_nvlink_one_sided"
+
+    if requested == "flashinfer_nvlink_one_sided":
+        if not enable_expert_parallel:
+            logger.debug(
+                "Expert parallel is disabled; using the "
+                "'allgather_reducescatter' all2all backend instead of "
+                "'flashinfer_nvlink_one_sided'."
+            )
+            return "allgather_reducescatter"
+        # Deferred so the ~3s FlashInfer import stays off non-EP paths.
+        from vllm.utils.flashinfer import has_flashinfer_nvlink_one_sided
+
+        if not has_flashinfer_nvlink_one_sided():
+            logger.warning_once(
+                "FlashInfer trtllm_moe_alltoall is unavailable; falling "
+                "back to the 'allgather_reducescatter' all2all backend."
+            )
+            return "allgather_reducescatter"
+
+    return requested
 
 
 @config
@@ -226,16 +291,11 @@ class ParallelConfig:
       with 4 experts and 2 ranks, rank 0 will have experts [0, 2] and rank 1
       will have experts [1, 3]. This strategy can help improve load balancing
       for grouped expert models with no redundant experts."""
-    all2all_backend: All2AllBackend = Field(
-        default_factory=lambda: (
-            "flashinfer_nvlink_one_sided"
-            if _prefers_one_sided_all2all()
-            else "allgather_reducescatter"
-        )
-    )
-    """All2All backend for MoE expert parallel communication. Defaults to
-    "flashinfer_nvlink_one_sided" on GB200/GB300 and "allgather_reducescatter"
-    everywhere else. Available options:
+    all2all_backend: All2AllBackend = "auto"
+    """All2All backend for MoE expert parallel communication. Available options:
+
+    - "auto": "flashinfer_nvlink_one_sided" on GB200/GB300 with an
+      expert-parallel group of at least 8, "allgather_reducescatter" otherwise
 
     - "allgather_reducescatter": All2all based on allgather and reducescatter
     - "deepep_high_throughput": Use deepep high-throughput kernels
@@ -548,32 +608,17 @@ class ParallelConfig:
                 "The FT system assumes one AsyncMPClient manages all engines."
             )
 
-        if self.all2all_backend in ["pplx", "naive"]:
-            logger.warning(
-                "The '%s' all2all backend has been removed. "
-                "Falling back to 'allgather_reducescatter'.",
-                self.all2all_backend,
-            )
-            self.all2all_backend = "allgather_reducescatter"
-
-        if self.all2all_backend == "flashinfer_nvlink_one_sided":
-            if not self.enable_expert_parallel:
-                logger.debug(
-                    "Expert parallel is disabled; using the "
-                    "'allgather_reducescatter' all2all backend instead of "
-                    "'flashinfer_nvlink_one_sided'."
-                )
-                self.all2all_backend = "allgather_reducescatter"
-            else:
-                # Deferred so the ~3s FlashInfer import stays off non-EP paths.
-                from vllm.utils.flashinfer import has_flashinfer_nvlink_one_sided
-
-                if not has_flashinfer_nvlink_one_sided():
-                    logger.warning_once(
-                        "FlashInfer trtllm_moe_alltoall is unavailable; falling "
-                        "back to the 'allgather_reducescatter' all2all backend."
-                    )
-                    self.all2all_backend = "allgather_reducescatter"
+        # EP flattens TP across DP and PCP, so the group spans all three
+        # (FusedMoEParallelConfig.flatten_tp_across_dp_and_pcp).
+        self.all2all_backend = _resolve_all2all_backend(
+            self.all2all_backend,
+            enable_expert_parallel=self.enable_expert_parallel,
+            ep_size=(
+                self.data_parallel_size
+                * self.prefill_context_parallel_size
+                * self.tensor_parallel_size
+            ),
+        )
 
         if self.data_parallel_size_local > self.data_parallel_size:
             raise ValueError(
