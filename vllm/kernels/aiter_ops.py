@@ -136,6 +136,7 @@ def _rocm_aiter_rmsnorm2d_fwd_with_add_impl(
     residual: torch.Tensor,
     weight: torch.Tensor,
     variance_epsilon: float,
+    gemma_norm: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     from aiter import rmsnorm2d_fwd_with_add
 
@@ -157,6 +158,7 @@ def _rocm_aiter_rmsnorm2d_fwd_with_add_impl(
         residual_out,  # residual output
         weight,
         variance_epsilon,
+        gemma_norm=gemma_norm,
     )
     return out.reshape(x_shape), residual_out.reshape(residual_shape)
 
@@ -166,6 +168,7 @@ def _rocm_aiter_rmsnorm2d_fwd_with_add_fake(
     residual: torch.Tensor,
     weight: torch.Tensor,
     variance_epsilon: float,
+    gemma_norm: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     residual_out = torch.empty_like(residual)
     out = torch.empty_like(x)
