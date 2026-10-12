@@ -187,8 +187,8 @@ If you need to recompile the `vllm-rs` Rust frontend binary, you can rebuild and
 install it without re-running the full installation:
 
     ```bash
-    ./build_rust.sh          # release build
-    ./build_rust.sh --debug  # faster build for development
+    ./tools/build_rust.sh          # release build
+    ./tools/build_rust.sh --debug  # faster build for development
     ```
 
     This will install the required Rust toolchain if needed, build the binary,

@@ -221,13 +221,15 @@ def _make_cutlass_fp4_moe_batch_invariant_case(
         in_dtype=dtype,
         activation=activation,
     )
+    prepare_finalize = maybe_make_prepare_finalize(
+        moe=moe_config,
+        quant_config=quant_config,
+        allow_new_interface=True,
+        use_monolithic=False,
+    )
+    assert prepare_finalize is not None
     kernel = mk.FusedMoEKernel(
-        maybe_make_prepare_finalize(
-            moe=moe_config,
-            quant_config=quant_config,
-            allow_new_interface=True,
-            use_monolithic=False,
-        ),
+        prepare_finalize,
         CutlassExpertsFp4(
             moe_config=moe_config,
             quant_config=quant_config,

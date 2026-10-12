@@ -215,7 +215,9 @@ def test_use_cudagraphs(
 
 # forked needed to workaround https://github.com/vllm-project/vllm/issues/21073
 @pytest.mark.forked
-def test_stock_torch_compile(vllm_runner, monkeypatch):
+@pytest.mark.parametrize("use_v2_model_runner", [False, True])
+def test_stock_torch_compile(vllm_runner, monkeypatch, use_v2_model_runner):
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", str(int(use_v2_model_runner)))
     # Disable multiprocessing so that the counter is in the same process
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
 
@@ -226,9 +228,10 @@ def test_stock_torch_compile(vllm_runner, monkeypatch):
             "facebook/opt-125m",
             compilation_config={"mode": CompilationMode.STOCK_TORCH_COMPILE},
             gpu_memory_utilization=0.4,
-        ) as _,
+        ) as runner,
     ):
-        pass
+        outputs = runner.generate_greedy(["Hello, my name is"], max_tokens=5)
+        assert outputs[0][0]
 
 
 # forked needed to workaround https://github.com/vllm-project/vllm/issues/21073
@@ -262,6 +265,21 @@ def test_enforce_eager(vllm_runner, monkeypatch):
         ) as _,
     ):
         pass
+
+
+@pytest.mark.parametrize("enable_fault_tolerance", [False, True])
+def test_enforce_eager_jit_warmup(enable_fault_tolerance):
+    """Enforce-eager disables JIT warmup unless fault tolerance is on.
+
+    FT fault detection runs against deadlines that in-inference Triton
+    compilation latency spikes can blow past, so warmup stays enabled.
+    """
+    config = VllmConfig(
+        model_config=ModelConfig(model="facebook/opt-125m", enforce_eager=True),
+        parallel_config=ParallelConfig(enable_fault_tolerance=enable_fault_tolerance),
+    )
+    assert config.compilation_config.mode == CompilationMode.NONE
+    assert config.kernel_config.enable_jit_warmup == enable_fault_tolerance
 
 
 @pytest.mark.forked
@@ -446,49 +464,41 @@ def test_should_split():
     (
         "cudagraph_capture_sizes",
         "max_cudagraph_capture_size",
-        "tp_size",
-        "enable_sp",
         "max_num_batched_tokens",
         "cudagraph_mode",
         "expected_max_size",
     ),
     [
-        (None, None, 1, False, 2048, CUDAGraphMode.FULL_AND_PIECEWISE, 256),
-        ([1, 2, 4], 4, 1, False, 2048, CUDAGraphMode.FULL_AND_PIECEWISE, 4),
+        (None, None, 2048, CUDAGraphMode.FULL_AND_PIECEWISE, 256),
+        ([1, 2, 4], 4, 2048, CUDAGraphMode.FULL_AND_PIECEWISE, 4),
         (
             [1, 2, 4],
             8,
-            1,
-            False,
             2048,
             CUDAGraphMode.FULL_AND_PIECEWISE,
             ValidationError,
         ),
-        ([1, 256], None, 1, False, 2048, CUDAGraphMode.FULL_AND_PIECEWISE, 256),
-        ([], None, 1, False, 2048, CUDAGraphMode.NONE, 0),
-        (None, 0, 1, False, 2048, CUDAGraphMode.NONE, 0),
+        ([1, 256], None, 2048, CUDAGraphMode.FULL_AND_PIECEWISE, 256),
+        ([], None, 2048, CUDAGraphMode.NONE, 0),
+        (None, 0, 2048, CUDAGraphMode.NONE, 0),
         # truncated to nearest multiple of 8 or 16
-        (None, 257, 1, False, 2048, CUDAGraphMode.FULL_AND_PIECEWISE, 256),
+        (None, 257, 2048, CUDAGraphMode.FULL_AND_PIECEWISE, 256),
         # max_num_batched_tokens <= max_cudagraph_capture_size should always be
         # captured even if not landing on a 16-stride step
-        (None, 2048, 1, False, 257, CUDAGraphMode.FULL_AND_PIECEWISE, 257),
+        (None, 2048, 257, CUDAGraphMode.FULL_AND_PIECEWISE, 257),
         # max from list
-        ([1, 2, 4, 15], None, 1, False, 2048, CUDAGraphMode.FULL_AND_PIECEWISE, 15),
-        # SP forces full-graph compilation, sizes are filtered by TP
-        ([1, 2, 4, 15], None, 2, True, 2048, CUDAGraphMode.FULL_AND_PIECEWISE, 4),
+        ([1, 2, 4, 15], None, 2048, CUDAGraphMode.FULL_AND_PIECEWISE, 15),
         # limited by the max_tokens
-        ([1, 2, 4, 15], None, 1, False, 8, CUDAGraphMode.FULL_AND_PIECEWISE, 4),
+        ([1, 2, 4, 15], None, 8, CUDAGraphMode.FULL_AND_PIECEWISE, 4),
         # the list should contain at least 1 element when use cudagraph
-        ([], None, 1, False, 2048, CUDAGraphMode.FULL_AND_PIECEWISE, ValidationError),
+        ([], None, 2048, CUDAGraphMode.FULL_AND_PIECEWISE, ValidationError),
         # the max capturing size should be >= 1 when use cudagraph
-        (None, 0, 1, False, 2048, CUDAGraphMode.FULL_AND_PIECEWISE, ValidationError),
+        (None, 0, 2048, CUDAGraphMode.FULL_AND_PIECEWISE, ValidationError),
     ],
 )
 def test_cudagraph_sizes_post_init(
     cudagraph_capture_sizes,
     max_cudagraph_capture_size,
-    tp_size,
-    enable_sp,
     max_num_batched_tokens,
     cudagraph_mode,
     expected_max_size,
@@ -497,10 +507,7 @@ def test_cudagraph_sizes_post_init(
     if expected_max_size == ValidationError:
         ctx = pytest.raises(expected_max_size)
 
-    with (
-        ctx,
-        patch.object(current_platform, "device_count", return_value=tp_size),
-    ):
+    with ctx:
         kwargs = {}
         if cudagraph_capture_sizes is not None:
             kwargs["cudagraph_capture_sizes"] = cudagraph_capture_sizes
@@ -508,18 +515,15 @@ def test_cudagraph_sizes_post_init(
             kwargs["max_cudagraph_capture_size"] = max_cudagraph_capture_size
         compilation_config = CompilationConfig(
             pass_config=PassConfig(
-                enable_sp=enable_sp,
                 fuse_norm_quant=True,
                 fuse_act_quant=True,
                 eliminate_noops=True,
-                sp_min_token_num=512 if enable_sp else None,
             ),
             cudagraph_mode=cudagraph_mode,
             **kwargs,
         )
         engine_args = EngineArgs(
             model="facebook/opt-125m",
-            tensor_parallel_size=tp_size,
             max_num_seqs=min(max_num_batched_tokens, 128),
             max_num_batched_tokens=max_num_batched_tokens,
             compilation_config=compilation_config,
@@ -708,35 +712,6 @@ def test_default_cudagraph_capture_sizes_keep_all_sizes_bounded():
         size <= default_max_graph_size
         for size in compilation_config.cudagraph_capture_sizes
     )
-
-
-def test_cudagraph_capture_sizes_respect_sequence_parallelism():
-    """Sequence-parallel capture sizes stay divisible by tensor parallel size."""
-    compilation_config = CompilationConfig(
-        cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE
-    )
-    compilation_config.pass_config.enable_sp = True
-    config = _mock_config_for_cudagraph_sizes(
-        max_num_seqs=32,
-        num_speculative_tokens=16,
-        max_num_batched_tokens=32768,
-        compilation_config=compilation_config,
-    )
-    config.parallel_config = SimpleNamespace(tensor_parallel_size=2)
-    config.update_sizes_for_sequence_parallelism = lambda sizes: (
-        VllmConfig.update_sizes_for_sequence_parallelism(config, sizes)
-    )
-
-    with patch.object(
-        current_platform,
-        "is_device_capability_family",
-        return_value=False,
-    ):
-        VllmConfig._set_cudagraph_sizes(config)
-
-    assert all(size % 2 == 0 for size in compilation_config.cudagraph_capture_sizes)
-    assert 544 not in compilation_config.cudagraph_capture_sizes
-    assert compilation_config.max_cudagraph_capture_size == 512
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Only test CUDA")
@@ -1028,123 +1003,6 @@ def test_blackwell_cudagraph_default(is_blackwell, expected_max_size):
     )
 
 
-@pytest.mark.skipif(
-    not current_platform.support_static_graph_mode(),
-    reason="Skip if not cudagraph mode supported",
-)
-@pytest.mark.parametrize(
-    (
-        "cudagraph_mode",
-        "use_inductor_graph_partition",
-        "expected_enable_sp",
-        "expected_cudagraph_mode",
-        "expected_piecewise_compile",
-        "expected_capture_sizes",
-        "expected_max_size",
-    ),
-    [
-        (CUDAGraphMode.PIECEWISE, False, True, CUDAGraphMode.FULL, False, [2, 4], 4),
-        (
-            CUDAGraphMode.FULL_DECODE_ONLY,
-            False,
-            True,
-            CUDAGraphMode.FULL_DECODE_ONLY,
-            False,
-            [2, 4],
-            4,
-        ),
-        (
-            CUDAGraphMode.FULL_AND_PIECEWISE,
-            False,
-            True,
-            CUDAGraphMode.FULL,
-            False,
-            [2, 4],
-            4,
-        ),
-        (
-            CUDAGraphMode.FULL_AND_PIECEWISE,
-            True,
-            True,
-            CUDAGraphMode.FULL_AND_PIECEWISE,
-            True,
-            [2, 4],
-            4,
-        ),
-    ],
-)
-def test_sequence_parallelism_requires_full_graph_compilation(
-    cudagraph_mode: CUDAGraphMode,
-    use_inductor_graph_partition: bool,
-    expected_enable_sp: bool,
-    expected_cudagraph_mode: CUDAGraphMode,
-    expected_piecewise_compile: bool,
-    expected_capture_sizes: list[int],
-    expected_max_size: int,
-):
-    with patch.object(current_platform, "device_count", return_value=2):
-        vllm_config = VllmConfig(
-            parallel_config=ParallelConfig(tensor_parallel_size=2),
-            scheduler_config=SchedulerConfig(
-                max_num_seqs=128,
-                max_num_batched_tokens=2048,
-                max_model_len=2048,
-                is_encoder_decoder=False,
-            ),
-        )
-        vllm_config.model_config = MagicMock(
-            dtype=torch.float16,
-            enforce_eager=False,
-            is_moe=False,
-            disable_cascade_attn=False,
-            get_hidden_size=MagicMock(return_value=4096),
-        )
-        vllm_config.compilation_config = CompilationConfig(
-            mode=CompilationMode.VLLM_COMPILE,
-            cudagraph_capture_sizes=[1, 2, 4, 15],
-            max_cudagraph_capture_size=None,
-            compile_sizes=["cudagraph_capture_sizes"],
-            use_inductor_graph_partition=use_inductor_graph_partition,
-            pass_config=PassConfig(
-                enable_sp=True,
-                fuse_gemm_comms=True,
-                fuse_norm_quant=True,
-                fuse_act_quant=True,
-                eliminate_noops=True,
-                sp_min_token_num=512,
-            ),
-            cudagraph_mode=cudagraph_mode,
-        )
-        vllm_config.compilation_config.set_splitting_ops_for_v1(
-            all2all_backend=vllm_config.parallel_config.all2all_backend,
-            data_parallel_size=1,
-        )
-        vllm_config._set_compile_ranges()
-        vllm_config._set_cudagraph_sizes()
-
-    assert (
-        vllm_config.compilation_config.use_inductor_graph_partition
-        == use_inductor_graph_partition
-    )
-    assert (
-        bool(vllm_config.compilation_config.splitting_ops) == expected_piecewise_compile
-    )
-    assert vllm_config.compilation_config.pass_config.enable_sp == expected_enable_sp
-    assert (
-        vllm_config.compilation_config.pass_config.fuse_gemm_comms == expected_enable_sp
-    )
-    assert vllm_config.compilation_config.cudagraph_mode == expected_cudagraph_mode
-    assert (
-        vllm_config.compilation_config.cudagraph_capture_sizes == expected_capture_sizes
-    )
-    assert (
-        vllm_config.compilation_config.max_cudagraph_capture_size == expected_max_size
-    )
-    assert (
-        511 in vllm_config.compilation_config.compile_ranges_endpoints
-    ) == expected_enable_sp
-
-
 def test_cached_compilation_config(default_vllm_config):
     import torch
     from torch._inductor.utils import run_and_get_code
@@ -1348,3 +1206,70 @@ def test_inductor_asserts_user_override(monkeypatch):
     assert config.inductor_compile_config.get("size_asserts") is True
     if not _is_torch_equal_or_newer(torch.__version__, "2.12.0.dev"):
         assert config.inductor_compile_config.get("alignment_asserts") is False
+
+
+@pytest.mark.parametrize("deterministic", [False, True])
+@pytest.mark.parametrize("override", [None, False, True])
+def test_combo_kernel_benchmarking_respects_deterministic(deterministic, override):
+    from torch._inductor import config as inductor_config
+
+    overrides = {} if override is None else {"deterministic": override}
+    with (
+        inductor_config.patch(deterministic=deterministic),
+        patch("vllm.config.compilation.current_platform.is_cpu", return_value=False),
+    ):
+        config = CompilationConfig(inductor_compile_config=overrides)
+
+    assert config.inductor_compile_config["combo_kernels"] is True
+    effective_deterministic = deterministic if override is None else override
+    assert config.inductor_compile_config["benchmark_combo_kernel"] is (
+        not effective_deterministic
+    )
+
+
+@pytest.mark.parametrize("deterministic", [False, True])
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"combo_kernels": False},
+        {"combo_kernels": True},
+        {"benchmark_combo_kernel": False},
+        {"benchmark_combo_kernel": True},
+    ],
+)
+def test_combo_kernel_explicit_settings_preserved(deterministic, overrides):
+    from torch._inductor import config as inductor_config
+
+    with (
+        inductor_config.patch(deterministic=deterministic),
+        patch("vllm.config.compilation.current_platform.is_cpu", return_value=False),
+    ):
+        config = CompilationConfig(inductor_compile_config=overrides.copy())
+
+    for key in ("combo_kernels", "benchmark_combo_kernel"):
+        assert config.inductor_compile_config.get(key) == overrides.get(key)
+
+
+@pytest.mark.parametrize("is_cpu,torch_version", [(True, "2.13.0"), (False, "2.8.0")])
+def test_combo_kernel_defaults_require_supported_platform_and_torch(
+    is_cpu, torch_version
+):
+    with (
+        patch("vllm.config.compilation.current_platform.is_cpu", return_value=is_cpu),
+        patch("torch.__version__", torch_version),
+    ):
+        config = CompilationConfig()
+
+    assert "combo_kernels" not in config.inductor_compile_config
+    assert "benchmark_combo_kernel" not in config.inductor_compile_config
+
+
+def test_combo_kernel_defaults_without_inductor_deterministic_setting():
+    with (
+        patch("torch._inductor.config", SimpleNamespace()),
+        patch("vllm.config.compilation.current_platform.is_cpu", return_value=False),
+    ):
+        config = CompilationConfig()
+
+    assert config.inductor_compile_config["combo_kernels"] is True
+    assert config.inductor_compile_config["benchmark_combo_kernel"] is True

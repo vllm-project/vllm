@@ -26,7 +26,7 @@ class PauseState(enum.IntEnum):
 
     - UNPAUSED: Normal operation
     - PAUSE_NEW: No new requests are scheduled, requests already in
-                 running state are scheduled.
+                 running state or holding KV blocks are scheduled.
     - PAUSE_ALL: No requests are scheduled
     """
 

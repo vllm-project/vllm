@@ -183,6 +183,40 @@ docker run \
     vllm/vllm-openai-cpu:latest-x86_64 <args...>
 ```
 
+### Serve with vLLM Recipes
+
+The CPU image includes the [vLLM Recipes](https://recipes.vllm.ai/) deployment
+tool. Recipe-assisted serving queries the site at runtime, so the image can use
+the latest published recipe for the selected model and hardware.
+
+To find the value for `--hardware`, open vLLM Recipes, select the model, and
+choose the target in the **Hardware** picker. The selected page URL also
+contains the hardware key; for example, `?hardware=xeon6` maps to
+`--hardware xeon6`.
+
+Keep the normal image entrypoint for regular serving. For recipe-assisted
+serving, override it with `serve_with_recipe.sh`:
+
+```bash
+docker run --rm \
+    --shm-size=4g \
+    -v ~/.cache/huggingface:/root/.cache/huggingface \
+    -p 8000:8000 \
+    --env "HF_TOKEN=<secret>" \
+    --entrypoint tools/recipes/serve_with_recipe.sh \
+    vllm/vllm-openai-cpu:latest-x86_64 \
+    --model meta-llama/Llama-3.1-8B-Instruct \
+    --hardware xeon6
+```
+
+For Xeon 6, the script enables hardware detection automatically, generates
+`config.yml` and `env.sh`, and starts `vllm serve`. The image keeps
+`/vllm-workspace` as its working directory so relative recipe assets under
+`examples/` continue to resolve.
+
+See the [Recipes tool documentation](../../../tools/recipes/README.md) for
+interactive discovery and additional options.
+
 --8<-- [end:pre-built-images]
 --8<-- [start:build-image-from-source]
 

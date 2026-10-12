@@ -58,6 +58,7 @@ AMD_CI_COMMANDS = frozenset(
 RETRY_COMMANDS = frozenset({COMMAND_RETRY_FAILED, COMMAND_RETRY_AMD_FAILED})
 CANCEL_COMMANDS = frozenset({COMMAND_CANCEL_CI, COMMAND_CANCEL_AMD_CI})
 ALL_CI_COMMANDS = UPSTREAM_CI_COMMANDS | AMD_CI_COMMANDS
+CI_COMMAND_PREFIXES = frozenset({"/ci", "/amd-ci"})
 CI_AUTHORIZED_COMMENT_MARKER = "<!-- vllm-ci-authorized -->"
 READY_LABELS = {"ready", "ready-run-all-tests"}
 TRUSTED_PERMISSIONS = {"admin", "maintain", "write"}
@@ -461,9 +462,15 @@ class BuildkiteClient:
 
 
 def parse_command(body: str) -> str | None:
+    body = body.strip()
     if body in ALL_CI_COMMANDS:
         return body
     return None
+
+
+def is_ci_command_attempt(body: str) -> bool:
+    words = body.split(maxsplit=1)
+    return bool(words) and words[0].casefold() in CI_COMMAND_PREFIXES
 
 
 def pipeline_for_command(
@@ -1086,6 +1093,28 @@ def handle_cancel_ci(
     )
 
 
+def reply_unrecognized_command(
+    event: Mapping[str, Any],
+    github: GitHubClient,
+) -> None:
+    if "pull_request" not in event["issue"]:
+        return
+    issue_number = event["issue"]["number"]
+    comment_id = event["comment"]["id"]
+    actor = event["comment"]["user"]["login"]
+    if is_already_handled(github, issue_number, comment_id):
+        print(f"Comment {comment_id} was already handled.")
+        return
+    add_reaction_safely(github, comment_id, "-1")
+    commands = ", ".join(f"`{command}`" for command in sorted(ALL_CI_COMMANDS))
+    github.add_comment(
+        issue_number,
+        f"❌ @{actor}, that is not a recognized CI command, so no CI was "
+        "started. Post a new comment containing only one of: "
+        f"{commands}.\n\n{command_comment_marker(comment_id)}",
+    )
+
+
 def run(
     event: Mapping[str, Any],
     github: GitHubClient,
@@ -1217,8 +1246,11 @@ def main() -> None:
         )
         return
 
-    command = parse_command(event["comment"]["body"])
+    body = event["comment"]["body"]
+    command = parse_command(body)
     if not command:
+        if is_ci_command_attempt(body):
+            reply_unrecognized_command(event, github)
         return
 
     pipeline = pipeline_for_command(

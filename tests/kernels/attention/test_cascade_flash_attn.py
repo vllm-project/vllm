@@ -151,7 +151,7 @@ def test_cascade(
         max_seqlen_k=max_kv_len,
         softmax_scale=scale,
         causal=True,
-        window_size=window_size,
+        window_size=list(window_size),
         block_table=block_tables,
         softcap=soft_cap if soft_cap is not None else 0,
     )

@@ -499,32 +499,30 @@ def _setup_tilelang_jit_hook() -> None:
     jit_kernel_cls.__init__ = _init_with_monitor
 
     if jit_impl_cls is not None:
-        original_call = jit_impl_cls.__call__
+        # JITImpl.__call__ only calls compile() on a kernel-cache miss, so
+        # hooking compile() keeps the per-call hot path untouched.
+        original_compile = jit_impl_cls.compile
 
-        @functools.wraps(original_call)
-        def _call_with_monitor(self, *args, **kwargs):
+        @functools.wraps(original_compile)
+        def _compile_with_monitor(self, *args, **kwargs):
             global _tilelang_jitimpl_compile_depth
-            cache_key = _tilelang_cache_miss_key(self, args, kwargs)
-            if cache_key is None:
-                return original_call(self, *args, **kwargs)
-
             _tilelang_jitimpl_compile_depth += 1
             try:
                 detail = None
                 if _verbose:
                     detail = _format_verbose_tilelang_compile_details(
-                        self, args, kwargs, cache_key
+                        self, args, kwargs, _tilelang_cache_miss_key(self, args, kwargs)
                     )
                 func = getattr(self, "func", None)
                 orig_func = getattr(func, "orig_func", None)
                 _log_tilelang_jit_compile(
                     _tilelang_kernel_name(orig_func or func), detail
                 )
-                return original_call(self, *args, **kwargs)
+                return original_compile(self, *args, **kwargs)
             finally:
                 _tilelang_jitimpl_compile_depth -= 1
 
-        jit_impl_cls.__call__ = _call_with_monitor
+        jit_impl_cls.compile = _compile_with_monitor
 
     _tilelang_hook_installed = True
 

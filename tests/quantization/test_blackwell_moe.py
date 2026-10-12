@@ -297,3 +297,16 @@ def test_nemotron_fp4_moe_flashinfer_trtllm(monkeypatch: pytest.MonkeyPatch):
         hf_overrides=HF_OVERRIDE_TEXT,
         extra_args=["--moe-backend=flashinfer_trtllm"],
     )
+
+
+def test_nemotron_nvfp4_per_token_moe_flashinfer_trtllm(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    can_initialize(
+        "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4",
+        hf_overrides=HF_OVERRIDE_TEXT,
+        extra_args=[
+            "--moe-backend=flashinfer_trtllm",
+            "--quantization-config.moe.activation=nvfp4_per_token",
+        ],
+    )

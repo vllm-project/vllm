@@ -13,7 +13,7 @@ vllm-bench --backend vllm --base-url http://127.0.0.1:8000 \
 
 - **Fast** — ~7 ms startup, single ~7 MB static binary, no Python imports.
 - **Scales** — `Arc<str>` prompt sharing + mimalloc keep memory <100 MB at 1400+ concurrency.
-- **Many datasets** — `random`, `random-mm` (VLM), `sharegpt`, `sonnet`, `speed-bench`, and any HuggingFace dataset.
+- **Many datasets** — `random`, `random-mm` (VLM), `sharegpt`, `speed-bench`, and any HuggingFace dataset.
 - **Many backends** — completions, chat, embeddings, pooling, and rerank.
 - **Beyond a single run** — concurrency/rate **sweeps**, **multi-run** stats, **multi-turn** conversations, **LoRA** multi-adapter, and result **comparison**.
 - **Steady-state metrics** — throughput/latency measured over the saturated plateau, excluding ramp-up and drain.
@@ -127,7 +127,7 @@ vllm-bench \
 </details>
 
 <details>
-<summary><b>Datasets (ShareGPT / Sonnet / HuggingFace / SPEED-Bench)</b></summary>
+<summary><b>Datasets (ShareGPT / HuggingFace / SPEED-Bench)</b></summary>
 
 ```bash
 # ShareGPT (auto-downloads from HuggingFace on first run, cached afterwards)
@@ -140,14 +140,6 @@ vllm-bench \
   --backend openai-chat --base-url http://127.0.0.1:8000 --model <model-name> \
   --dataset-name sharegpt --dataset-path /path/to/ShareGPT_V3.json \
   --num-prompts 500 --save-result
-
-# Sonnet — built-in Shakespeare sonnets, no dataset file needed.
-# Generates prompts of a controllable token length with a shared prefix.
-vllm-bench \
-  --backend openai-chat --base-url http://127.0.0.1:8000 --model <model-name> \
-  --dataset-name sonnet \
-  --sonnet-input-len 550 --sonnet-output-len 150 --sonnet-prefix-len 200 \
-  --num-prompts 500
 
 # Any HuggingFace dataset (downloads parquet shards into the standard HF hub
 # cache — shared with `hf download` and Python tooling — auto-detects columns)
@@ -449,7 +441,7 @@ to measure a concurrent serving-style workload.
 | `vllm-pooling` | `/pooling` | vLLM native pooling endpoint |
 | `vllm-rerank` | `/v1/rerank` | vLLM reranking (query from prompt, documents via `--extra-body`) |
 
-Pooling backends are non-streaming and report E2EL (end-to-end latency) only. Use `--dataset-name sharegpt`, `sonnet`, or `hf` for text-based embedding/rerank benchmarks, or `random` for token-ID-based embedding benchmarks.
+Pooling backends are non-streaming and report E2EL (end-to-end latency) only. Use `--dataset-name sharegpt` or `hf` for text-based embedding/rerank benchmarks, or `random` for token-ID-based embedding benchmarks.
 
 ## Supported Datasets
 
@@ -458,7 +450,6 @@ Pooling backends are non-streaming and report E2EL (end-to-end latency) only. Us
 | `random` | Synthetic prompts with exact token-length matching (default) |
 | `random-mm` | Synthetic multimodal prompts with random JPEG images for VLM benchmarking (requires `openai-chat`) |
 | `sharegpt` | Real conversations from ShareGPT (auto-downloads from HuggingFace, or use `--dataset-path`) |
-| `sonnet` | Built-in Shakespeare sonnets; controllable token length + shared prefix, no dataset file needed |
 | `speed-bench` | NVIDIA SPEED-Bench for speculative decoding evaluation (auto-downloads, 11 categories) |
 | `hf` | Any HuggingFace dataset with parquet data (downloads parquet shards via hf-hub into the standard HF hub cache, auto-detects chat/text columns) |
 
@@ -523,8 +514,8 @@ Run `vllm-bench --help` for the authoritative list. Grouped reference below.
 
 | Flag | Default | Description |
 | ------ | --------- | ------------- |
-| `--dataset-name` | `random` | Dataset type (`random`, `random-mm`, `sharegpt`, `sonnet`, `speed-bench`, `hf`) |
-| `--dataset-path` | — | Path to dataset file (optional for `sharegpt`/`sonnet`, which auto-source) |
+| `--dataset-name` | `random` | Dataset type (`random`, `random-mm`, `sharegpt`, `speed-bench`, `hf`) |
+| `--dataset-path` | — | Path to dataset file (`sharegpt` auto-downloads when omitted) |
 | `--num-prompts` | `1000` | Number of prompts to generate (conversations in multi-turn mode) |
 | `--max-model-len` | — | Filter out requests where `prompt_len + output_len` exceeds this context length |
 | `--input-len` | — | Override input length (general) |
@@ -545,10 +536,6 @@ Run `vllm-bench --help` for the authoritative list. Grouped reference below.
 | `--random-mm-bucket-config` | `{(256,256,1): 0.5, (720,1280,1): 0.5}` | `(height,width,frames)` → probability (Python tuple syntax; frames=1 = image) |
 | **ShareGPT** | | |
 | `--sharegpt-output-len` | — | Override output length |
-| **Sonnet** | | |
-| `--sonnet-input-len` | `550` | Input tokens per request |
-| `--sonnet-output-len` | `150` | Output tokens per request |
-| `--sonnet-prefix-len` | `200` | Prefix tokens shared across requests |
 | **SPEED-Bench** | | |
 | `--speed-bench-config` | `qualitative` | Split (`qualitative`, `throughput_1k`/`2k`/`8k`/`16k`/`32k`); alias: `--speed-bench-dataset-subset` (Python name) |
 | `--speed-bench-output-len` | `4096` | Output tokens per request (matches Python default) |
@@ -817,7 +804,6 @@ src/
 │   ├── random_mm.rs         # Random multimodal dataset (JPEG generation, bucket sampling)
 │   ├── multi_turn.rs        # Multi-turn synthetic + ShareGPT conversation generators
 │   ├── sharegpt.rs          # ShareGPT JSON dataset loader
-│   ├── sonnet.rs            # Sonnet dataset (built-in Shakespeare sonnets)
 │   ├── speed_bench.rs       # NVIDIA SPEED-Bench loader (auto-download + cache)
 │   └── hf_dataset.rs        # Generic HuggingFace dataset (auto-download, column detection)
 ├── metrics/

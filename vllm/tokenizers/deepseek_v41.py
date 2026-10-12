@@ -6,7 +6,7 @@ from typing import Any
 
 from transformers import TokenizersBackend
 
-from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
+from vllm.renderers.chat_utils import ChatCompletionMessageParam
 
 from .deepseek_v41_encoding import (
     IMAGE_PLACEHOLDER,

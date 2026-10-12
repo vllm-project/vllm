@@ -28,6 +28,14 @@ A special case of wrapping a request-level logits processor where the processor 
 python examples/features/logits_processor/custom_req_init.py
 ```
 
+### `dry.py` — DRY repetition penalty (Model Runner V2)
+
+Implements the DRY (Don't Repeat Yourself) repetition penalty, ported from llama.cpp, as `DryState`, a custom logits processor for the Model Runner V2 interface. Requests turn it on through `SamplingParams.extra_args`, for example `{"dry_multiplier": 0.8}`. The example sends one prompt twice in one batch, once without DRY and once with it, and prints both outputs. `tests/v1/sample/test_dry.py` imports the processor from this file.
+
+```bash
+python examples/features/logits_processor/dry.py
+```
+
 ## Key Concepts
 
 - **Batch-level vs. request-level**: vLLM processes logits at the batch level for efficiency. If you have a per-request processor, you need to wrap it using the patterns shown in `custom_req.py` and `custom_req_init.py`.

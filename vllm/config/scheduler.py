@@ -3,10 +3,9 @@
 
 from collections.abc import Callable
 from dataclasses import InitVar
-from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, Self, cast
 
 from pydantic import Field, field_validator
-from typing_extensions import Self
 
 from vllm.config.utils import config
 from vllm.logger import init_logger
@@ -53,7 +52,7 @@ class SchedulerConfig:
     In real usage, this should be set in `EngineArgs.create_engine_config`.
     """
 
-    max_num_scheduled_tokens: int | None = Field(default=None, ge=0)
+    max_num_scheduled_tokens: int | None = Field(default=None, ge=1)
     """Maximum number of tokens that the scheduler may issue in a single iteration.
     
     This is usually equal to max_num_batched_tokens, but can be smaller in cases
@@ -83,6 +82,12 @@ class SchedulerConfig:
 
     The cap is not applied when the request is the only one in the batch,
     since there is no other request for it to starve."""
+
+    long_prefill_token_threshold_adaptive: bool = Field(default=False)
+    """Floor the effective long prefill token threshold at a fair share of
+    the token budget: max_num_batched_tokens divided by the number of
+    queued and running requests. Only applies when
+    long_prefill_token_threshold is nonzero."""
 
     max_num_queued_reqs: int | None = Field(default=None, ge=0)
     """Maximum number of requests that can be in-flight (waiting or running)

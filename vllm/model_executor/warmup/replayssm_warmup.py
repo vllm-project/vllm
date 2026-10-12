@@ -21,6 +21,7 @@ logger = init_logger(__name__)
 
 def _replayssm_autotune_kwargs(
     runner: "GPUModelRunner",
+    max_token_prefill_kwargs: dict[str, Any],
 ) -> tuple[int, dict[str, Any]] | None:
     config = runner.vllm_config
     if not (
@@ -46,11 +47,16 @@ def _replayssm_autotune_kwargs(
         runner.max_num_tokens // query_len,
         runner.kv_cache_config.num_blocks - 1,
     )
+    if max_num_reqs <= 0:
+        logger.warning_once(
+            "Skipping FlashInfer ReplaySSM autotuning because no non-padding "
+            "state slot is available."
+        )
+        return None
+
     decode_kwargs = {
+        **max_token_prefill_kwargs,
         "num_tokens": max_num_reqs * query_len,
-        "skip_eplb": True,
-        "is_profile": True,
-        "randomize_inputs": True,
         "uniform_decode": True,
     }
     if config.use_v2_model_runner:
@@ -75,18 +81,22 @@ def _temporary_replayssm_autotune_state(
     )
 
     reset_tensors: dict[int, torch.Tensor] = {}
-    tracker_specs: dict[int, tuple[torch.Tensor, torch.Tensor, int, int]] = {}
+    tracker_specs: dict[
+        int, tuple[torch.Tensor, torch.Tensor, torch.Tensor, int, int]
+    ] = {}
     for module in runner.get_model().modules():
         if not isinstance(module, MambaMixer2) or not module.use_replayssm:
             continue
         assert module.replayssm_buffer_len is not None
         ring_start = module._replayssm_ring_start
         prev_num_accepted = module._replayssm_prev_num_accepted
+        prev_query_len = module._replayssm_prev_query_len
         tracker_specs.setdefault(
             ring_start.data_ptr(),
             (
                 ring_start,
                 prev_num_accepted,
+                prev_query_len,
                 module.replayssm_buffer_len,
                 module.kv_cache[2].size(2),
             ),
@@ -95,6 +105,7 @@ def _temporary_replayssm_autotune_state(
             *module.kv_cache,
             ring_start,
             prev_num_accepted,
+            prev_query_len,
         )
         for tensor in tensors:
             if tensor.numel():
@@ -121,20 +132,26 @@ def _temporary_replayssm_autotune_state(
         for (
             ring_start,
             prev_num_accepted,
+            prev_query_len,
             logical_window,
             ring_buffer_len,
         ) in tracker_specs.values():
             # Compile reset (prefill) and advance (decode) before inference.
             # The final reset leaves the decode tuning run in a clean state.
-            reset_replayssm_ring_trackers(ring_start, prev_num_accepted, state_slots)
+            reset_replayssm_ring_trackers(
+                ring_start, prev_num_accepted, prev_query_len, state_slots
+            )
             update_replayssm_ring_trackers(
                 ring_start,
                 prev_num_accepted,
+                prev_query_len,
                 state_slots,
                 logical_window,
                 ring_buffer_len,
             )
-            reset_replayssm_ring_trackers(ring_start, prev_num_accepted, state_slots)
+            reset_replayssm_ring_trackers(
+                ring_start, prev_num_accepted, prev_query_len, state_slots
+            )
 
     try:
         yield
@@ -151,7 +168,13 @@ def _temporary_replayssm_autotune_state(
 
 
 def replayssm_autotune_warmup(runner: "GPUModelRunner") -> None:
-    autotune = _replayssm_autotune_kwargs(runner)
+    max_token_prefill_kwargs = {
+        "num_tokens": runner.scheduler_config.max_num_batched_tokens,
+        "skip_eplb": True,
+        "is_profile": True,
+        "randomize_inputs": True,
+    }
+    autotune = _replayssm_autotune_kwargs(runner, max_token_prefill_kwargs)
     if autotune is None:
         return
     max_num_reqs, decode_kwargs = autotune

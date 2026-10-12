@@ -511,6 +511,13 @@ class CompressedTensorsConfig(QuantizationConfig):
     def _is_dynamic_token_w4a8_int(
         weight_quant: QuantizationArgs, input_quant: QuantizationArgs
     ) -> bool:
+        if not weight_quant or not input_quant:
+            return False
+        if (
+            weight_quant.type != QuantizationType.INT
+            or input_quant.type != QuantizationType.INT
+        ):
+            return False
         is_weight_4_bits = weight_quant.num_bits == 4
         is_activation_8_bits = input_quant.num_bits == 8
         weight_strategy = (
@@ -574,6 +581,11 @@ class CompressedTensorsConfig(QuantizationConfig):
         weight_quant: QuantizationArgs, input_quant: QuantizationArgs
     ) -> bool:
         if not weight_quant or not input_quant:
+            return False
+        if (
+            weight_quant.type != QuantizationType.INT
+            or input_quant.type != QuantizationType.FLOAT
+        ):
             return False
         is_weight_4_bits = weight_quant.num_bits == 4
         is_activation_8_bits = input_quant.num_bits == 8
@@ -787,6 +799,7 @@ class CompressedTensorsConfig(QuantizationConfig):
                 num_bits=weight_quant.num_bits,
                 strategy=weight_quant.strategy,
                 group_size=weight_quant.group_size,
+                symmetric=weight_quant.symmetric,
                 input_quant=input_quant,
                 layer_name=layer_name,
                 quant_format=format,
@@ -799,6 +812,7 @@ class CompressedTensorsConfig(QuantizationConfig):
                 num_bits=weight_quant.num_bits,
                 strategy=weight_quant.strategy,
                 group_size=weight_quant.group_size,
+                symmetric=weight_quant.symmetric,
                 input_quant=input_quant,
                 layer_name=layer_name,
                 quant_format=format,
@@ -1194,9 +1208,10 @@ class CompressedTensorsKVCacheMethod(BaseKVCacheMethod):
         """Override the default vLLM placeholder scales with the llm-compressor loaded
         scales. Zero points are not used as only symmetric quantization is supported.
         """
-        layer._k_scale = layer.k_scale
-        layer._v_scale = layer.v_scale
-        layer._q_scale = layer.q_scale
+        # Buffers (not Parameters) so sleep snapshots them; ATTN_HEAD changes shape.
+        layer.register_buffer("_k_scale", layer.k_scale.detach())
+        layer.register_buffer("_v_scale", layer.v_scale.detach())
+        layer.register_buffer("_q_scale", layer.q_scale.detach())
 
         # Set the _float variants that the attention backend uses.
         def _to_scalar(tensor: torch.Tensor) -> float:

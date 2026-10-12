@@ -114,6 +114,7 @@ mod tests {
                 "properties": { "city": { "type": "string" } },
             }),
             strict: None,
+            defer_loading: None,
         }]
     }
 

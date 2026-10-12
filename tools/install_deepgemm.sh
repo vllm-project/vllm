@@ -10,7 +10,7 @@ DEEPGEMM_GIT_REPO="https://github.com/vllm-project/DeepGEMM.git"
 # NOTE: This targets the vLLM fork's dev branch, which carries the sm120
 # and sm90 paged-MQA ports plus the SwiGLU alpha/beta and SiTU Mega MoE
 # activations, plus the CUDA 12.x layout header fix from vllm-project/DeepGEMM#12.
-DEEPGEMM_GIT_REF="e1f418c2a4f20818221f6b0e578b4c2f634d4c3f"
+DEEPGEMM_GIT_REF="1e1842a833699298f7afc02eefb2ed168fff6938"
 WHEEL_DIR=""
 
 # Parse command line arguments
@@ -93,6 +93,8 @@ pushd "$INSTALL_DIR/deepgemm"
 
 # Checkout the specific reference
 git checkout "$DEEPGEMM_GIT_REF"
+git submodule sync --recursive
+git submodule update --init --recursive
 
 # Clean previous build artifacts
 # (Based on https://github.com/deepseek-ai/DeepGEMM/blob/main/install.sh)

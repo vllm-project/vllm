@@ -5,9 +5,13 @@ from collections.abc import Iterable
 
 import torch
 import torch.nn as nn
-from transformers import AutoModel, PretrainedConfig
+from transformers import AutoModel, PreTrainedConfig
 
 from vllm.config import VllmConfig
+from vllm.model_executor.layers.fusion.mm_input_norm import (
+    FusedMMInputNorm,
+    IdentityInputNorm,
+)
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.pooler import DispatchPooler
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -26,6 +30,8 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.processor import cached_image_processor_from_config
 from vllm.transformers_utils.processors.nemotron_vl import (
+    SIGLIP_MEAN,
+    SIGLIP_STD,
     LlamaNemotronNanoVLImageProcessor,
     LlamaNemotronNanoVLProcessor,
     LlamaNemotronVLEmbedImageProcessor,
@@ -146,7 +152,7 @@ class LlamaNemotronVLChatModel(nn.Module, SupportsMultiModal, SupportsPP, Suppor
         )
 
     def _patch_quant_config(
-        self, config: PretrainedConfig, quant_config: QuantizationConfig | None
+        self, config: PreTrainedConfig, quant_config: QuantizationConfig | None
     ):
         # the awq models from OpenGVLab missing `modules_to_not_convert`
         # patch the quant_config to add `modules_to_not_convert` back
@@ -160,7 +166,7 @@ class LlamaNemotronVLChatModel(nn.Module, SupportsMultiModal, SupportsPP, Suppor
 
     def _init_vision_model(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None,
         *,
         prefix: str,
@@ -172,7 +178,7 @@ class LlamaNemotronVLChatModel(nn.Module, SupportsMultiModal, SupportsPP, Suppor
 
     def _init_mlp1(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         vit_hidden_size: int | None = None,
         vision_projection_hidden_size: int | None = None,
     ) -> nn.Module:
@@ -474,6 +480,7 @@ class LlamaNemotronVLForEmbedding(LlamaNemotronVLChatModel, VllmModelForPooling)
     """
 
     is_pooling_model = True
+    supports_mm_device_do_normalize = True
 
     # Weight mapping from checkpoint format to vLLM format
     # Different from parent class due to different vision model structure
@@ -498,6 +505,15 @@ class LlamaNemotronVLForEmbedding(LlamaNemotronVLChatModel, VllmModelForPooling)
         # Override: get img_context_token_id from config (parent sets None)
         self.img_context_token_id = getattr(config, "img_context_token_id", None)
 
+        if self.model_config.get_multimodal_config().mm_device_do_normalize:
+            self.input_norm = FusedMMInputNorm(
+                image_mean=list(SIGLIP_MEAN),
+                image_std=list(SIGLIP_STD),
+                rescale_factor=1 / 255,
+            )
+        else:
+            self.input_norm = IdentityInputNorm()
+
         # Initialize pooler for embedding output
         pooler_config = vllm_config.model_config.pooler_config
         assert pooler_config is not None
@@ -505,7 +521,7 @@ class LlamaNemotronVLForEmbedding(LlamaNemotronVLChatModel, VllmModelForPooling)
 
     def _init_vision_model(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config,
         *,
         prefix: str,
@@ -520,7 +536,7 @@ class LlamaNemotronVLForEmbedding(LlamaNemotronVLChatModel, VllmModelForPooling)
 
     def _init_mlp1(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         vit_hidden_size: int | None = None,
         vision_projection_hidden_size: int | None = None,
     ) -> nn.Module:
@@ -537,6 +553,10 @@ class LlamaNemotronVLForEmbedding(LlamaNemotronVLChatModel, VllmModelForPooling)
 
     def _call_vision_model(self, pixel_values: torch.Tensor) -> torch.Tensor:
         """Override to handle SigLIP interface."""
+        original_shape = pixel_values.shape
+        pixel_values = self.input_norm(
+            pixel_values.flatten(start_dim=1), self.vision_model.dtype
+        ).view(original_shape)
         return self.vision_model(pixel_values)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:

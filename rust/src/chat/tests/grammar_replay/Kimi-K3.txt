@@ -1,0 +1,65 @@
+# auto (final_output_only)
+sequence
+  optional `<|open|>response<|sep|>`
+  tag `` text excluding [`<|open|>`, `<|close|>`, `<|end_of_msg|>`] `<|close|>response<|sep|>`
+  optional
+    tag `<|open|>tools<|sep|>` .. `<|close|>tools<|sep|>`
+      tags_with_separator `` at_least_one
+        tag `<|open|>call tool="get_weather" index="` .. `<|close|>call<|sep|>`
+          sequence
+            /[1-9][0-9]*/
+            `"<|sep|>`
+            or
+              tag `<|open|>argument key="location" type="string"<|sep|>` text excluding [`<|close|>argument<|sep|>`, `<|close|>call<|sep|>`] `<|close|>argument<|sep|>`
+              tag `<|open|>json type="object"<|sep|>` json({ location: string }) `<|close|>json<|sep|>`
+        tag `<|open|>call tool="add" index="` .. `<|close|>call<|sep|>`
+          sequence
+            /[1-9][0-9]*/
+            `"<|sep|>`
+            or
+              sequence
+                tag `<|open|>argument key="y" type="number"<|sep|>` json(number) `<|close|>argument<|sep|>`
+                tag `<|open|>argument key="x" type="number"<|sep|>` json(number) `<|close|>argument<|sep|>`
+                tag `<|open|>argument key="items" type="array"<|sep|>` json(string[]) `<|close|>argument<|sep|>`
+              tag `<|open|>json type="object"<|sep|>` json({ y: number, x: number, items: string[] }) `<|close|>json<|sep|>`
+  optional `<|close|>message<|sep|>`
+
+# required (final_output_only)
+sequence
+  optional `<|open|>response<|sep|>`
+  tag `` text excluding [`<|open|>`, `<|close|>`, `<|end_of_msg|>`] `<|close|>response<|sep|>`
+  tag `<|open|>tools<|sep|>` .. `<|close|>tools<|sep|>`
+    tags_with_separator `` at_least_one
+      tag `<|open|>call tool="get_weather" index="` .. `<|close|>call<|sep|>`
+        sequence
+          /[1-9][0-9]*/
+          `"<|sep|>`
+          or
+            tag `<|open|>argument key="location" type="string"<|sep|>` text excluding [`<|close|>argument<|sep|>`, `<|close|>call<|sep|>`] `<|close|>argument<|sep|>`
+            tag `<|open|>json type="object"<|sep|>` json({ location: string }) `<|close|>json<|sep|>`
+      tag `<|open|>call tool="add" index="` .. `<|close|>call<|sep|>`
+        sequence
+          /[1-9][0-9]*/
+          `"<|sep|>`
+          or
+            sequence
+              tag `<|open|>argument key="y" type="number"<|sep|>` json(number) `<|close|>argument<|sep|>`
+              tag `<|open|>argument key="x" type="number"<|sep|>` json(number) `<|close|>argument<|sep|>`
+              tag `<|open|>argument key="items" type="array"<|sep|>` json(string[]) `<|close|>argument<|sep|>`
+            tag `<|open|>json type="object"<|sep|>` json({ y: number, x: number, items: string[] }) `<|close|>json<|sep|>`
+  optional `<|close|>message<|sep|>`
+
+# named (final_output_only)
+sequence
+  optional `<|open|>response<|sep|>`
+  tag `` text excluding [`<|open|>`, `<|close|>`, `<|end_of_msg|>`] `<|close|>response<|sep|>`
+  tag `<|open|>tools<|sep|>` .. `<|close|>tools<|sep|>`
+    tags_with_separator `` at_least_one
+      tag `<|open|>call tool="get_weather" index="` .. `<|close|>call<|sep|>`
+        sequence
+          /[1-9][0-9]*/
+          `"<|sep|>`
+          or
+            tag `<|open|>argument key="location" type="string"<|sep|>` text excluding [`<|close|>argument<|sep|>`, `<|close|>call<|sep|>`] `<|close|>argument<|sep|>`
+            tag `<|open|>json type="object"<|sep|>` json({ location: string }) `<|close|>json<|sep|>`
+  optional `<|close|>message<|sep|>`

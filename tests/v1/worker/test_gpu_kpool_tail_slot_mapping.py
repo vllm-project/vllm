@@ -5,7 +5,7 @@
 The kpool tail cache holds one circular block per request, so its block table
 row is orders of magnitude shorter than the sequence it serves.
 `_compute_slot_mappings_kernel` indexes block tables by
-`position // kernel_block_size` with an effectively unmasked load, so
+`position // block_size` with an effectively unmasked load, so
 this leads to a read of neighboring requests' rows (and for the later requests, outside
 the buffer entirely).
 """
@@ -15,7 +15,7 @@ import torch
 
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
-from vllm.v1.kv_cache_interface import KpoolTailSpec
+from vllm.v1.kv_cache_interface import CircularBufferSpec
 from vllm.v1.worker.block_table import get_block_table_width
 from vllm.v1.worker.gpu.block_table import BlockTables
 
@@ -32,13 +32,12 @@ POISON_BLOCK_ID = 1 << 20
 
 
 def make_tail_spec():
-    return KpoolTailSpec(
+    return CircularBufferSpec(
         block_size=KPOOL,
         num_kv_heads=2,
         head_size=128,
         head_size_v=0,
         dtype=torch.bfloat16,
-        sliding_window=KPOOL,
     )
 
 
@@ -67,7 +66,6 @@ def test_kpool_tail_group_never_position_indexes_its_block_table():
         max_num_batched_tokens=len(positions),
         max_num_blocks_per_group=[mla_width, tail_width],
         device=device,
-        kernel_block_sizes=[MLA_BLOCK_SIZE, spec.block_size],
         slot_mapping_enabled=[True, spec.uses_slot_mapping],
     )
     mla_blocks = list(range(1, mla_width + 1))

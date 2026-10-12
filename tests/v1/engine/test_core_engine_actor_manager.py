@@ -13,14 +13,17 @@ from unittest.mock import Mock
 import pytest
 import ray
 import zmq
+from torch.distributed import TCPStore
 
-from vllm.utils.network_utils import make_zmq_socket, split_zmq_path
+from vllm.utils.network_utils import get_open_port, make_zmq_socket, split_zmq_path
 from vllm.v1.engine.core import EngineCoreActorMixin
 from vllm.v1.engine.core_client import BackgroundResources
 from vllm.v1.engine.utils import (
     CoreEngineActorManager,
     EngineZmqAddresses,
-    get_engine_zmq_addresses,
+    _dp_nodes_master_first,
+    _node_ip_from_resources,
+    bind_engine_zmq_listeners,
     launch_core_engines,
 )
 from vllm.v1.utils import APIServerProcessManager
@@ -64,35 +67,27 @@ class _StubEngineCoreActor(EngineCoreActorMixin):
 
 
 # Module-level stub worker for the Ray-DP regression test. Must be importable
-# by ``multiprocessing.spawn`` (no closures, no nesting). Mirrors the worker
-# in ``tests/entrypoints/test_api_server_process_manager.py``.
-def _bind_and_report_worker(listen_address, sock, args, client_config):
-    """Bind ROUTER/PULL with a kernel-assigned port, report the actual
-    endpoints back via ``actual_address_pipe``, then exit."""
+# by ``multiprocessing.spawn`` (no closures, no nesting).
+def _adopt_listener_worker(listen_address, sock, args, client_config):
+    """Adopt the supervisor-bound ROUTER/PULL listeners, then exit."""
     ctx = zmq.Context()
     try:
         in_sock = make_zmq_socket(
-            ctx, client_config["input_address"], zmq.ROUTER, bind=True
+            ctx,
+            client_config["input_address"],
+            zmq.ROUTER,
+            bind=True,
+            listener=client_config["input_listener"],
         )
         out_sock = make_zmq_socket(
-            ctx, client_config["output_address"], zmq.PULL, bind=True
+            ctx,
+            client_config["output_address"],
+            zmq.PULL,
+            bind=True,
+            listener=client_config["output_listener"],
         )
-        try:
-            pipe = client_config["actual_address_pipe"]
-            try:
-                pipe.send(
-                    {
-                        "input_address": in_sock.getsockopt(zmq.LAST_ENDPOINT).decode(),
-                        "output_address": out_sock.getsockopt(
-                            zmq.LAST_ENDPOINT
-                        ).decode(),
-                    }
-                )
-            finally:
-                pipe.close()
-        finally:
-            in_sock.close(linger=0)
-            out_sock.close(linger=0)
+        in_sock.close(linger=0)
+        out_sock.close(linger=0)
     finally:
         ctx.term()
 
@@ -130,6 +125,72 @@ def _make_addresses() -> EngineZmqAddresses:
         inputs=["tcp://127.0.0.1:12345"],
         outputs=["tcp://127.0.0.1:12346"],
     )
+
+
+@pytest.mark.parametrize(
+    ("overrides", "expect_store"),
+    [
+        ({"data_parallel_backend": "mp"}, True),
+        ({}, True),
+        (
+            {
+                "data_parallel_backend": "mp",
+                "data_parallel_rank": 1,
+                "local_engines_only": True,
+            },
+            False,
+        ),
+        ({"data_parallel_backend": "mp", "data_parallel_rank_local": 0}, False),
+        ({"data_parallel_backend": "mp", "enable_elastic_ep": True}, False),
+        ({"data_parallel_backend": "mp", "data_parallel_size": 1}, False),
+    ],
+    ids=["mp", "ray", "non-master-node", "offline", "elastic-ep", "single-engine"],
+)
+def test_coordination_store_held_only_by_the_online_dp_master(
+    monkeypatch: pytest.MonkeyPatch, overrides: dict[str, Any], expect_store: bool
+) -> None:
+    """The DP master node holds a coordination store for both engine backends,
+    so engines there pick world-group ports at bind time. Every other
+    deployment keeps the pre-allocated ports and must not hold one."""
+
+    class FakeManager:
+        def __init__(self, **kwargs) -> None:
+            self.kwargs = kwargs
+
+    vllm_config = _make_vllm_config_ray_dp_multinode()
+    parallel_config = vllm_config.parallel_config
+    for name, value in overrides.items():
+        setattr(parallel_config, name, value)
+    # A fresh port per case so a lingering handshake socket cannot fail the next.
+    parallel_config.data_parallel_rpc_port = get_open_port()
+    parallel_config._coord_store_port = 0
+    monkeypatch.setattr("vllm.v1.engine.utils.CoreEngineProcManager", FakeManager)
+    monkeypatch.setattr("vllm.v1.engine.utils.CoreEngineActorManager", FakeManager)
+    monkeypatch.setattr(
+        "vllm.v1.engine.utils.wait_for_engine_startup", lambda *args, **kwargs: None
+    )
+
+    with launch_core_engines(
+        vllm_config,
+        executor_class=_DummyExecutor,
+        log_stats=False,
+        addresses=_make_addresses(),
+    ) as engine_launch:
+        assert engine_launch.engine_manager is not None
+        if not expect_store:
+            assert not parallel_config._coord_store_port
+            return
+        assert parallel_config._coord_store_port
+        # Engines look the store up while they start, so it must be reachable
+        # for as long as this frame is alive.
+        client = TCPStore(
+            parallel_config.data_parallel_master_ip,
+            parallel_config._coord_store_port,
+            is_master=False,
+            wait_for_workers=False,
+        )
+        client.set("probe", b"1")
+        assert client.get("probe") == b"1"
 
 
 def _make_cpu_placement_group():
@@ -258,17 +319,9 @@ def test_ray_dp_addresses_resolved_before_actor_creation(
     ``launch_core_engines`` Ray branch pickles ``addresses`` into each engine
     actor at ``.remote()`` time, and ``EngineCoreActorMixin._perform_handshakes``
     is a no-op, so the actor uses that pickled snapshot for the rest of its
-    life. If ``run_multi_api_server`` allocates ``addresses`` as
-    ``tcp://host:0`` placeholders (its default), the actors hold placeholders
-    forever and DEALER-connect to port 0 — ZMQ ``connect`` is async and does
-    not raise, so the failure mode is a deterministic hang.
-
-    The Ray-DP carve-out in ``run_multi_api_server`` forces
-    ``defer_api_server_ports=False`` when ``data_parallel_backend == "ray"``
-    so addresses are pre-allocated in the driver and Ray pickles real ports
-    into each actor. This test mirrors that call-site logic and asserts the
-    actors hold real (non-placeholder) endpoints. If the carve-out is
-    removed without an alternative fix, the test fails.
+    life. The supervisor therefore binds the frontend listeners before actor
+    construction and Ray pickles their resolved endpoints. This test asserts
+    that each actor holds real (non-placeholder) endpoints.
     """
     created_placement_groups: list[Any] = []
 
@@ -287,15 +340,10 @@ def test_ray_dp_addresses_resolved_before_actor_creation(
 
     vllm_config = _make_vllm_config_ray_dp_multinode()
 
-    # Mirror run_multi_api_server's address-allocation logic. The Ray DP
-    # carve-out forces pre-allocation so the addresses pickled into engine
-    # actors at .remote() time are real, not ``tcp://host:0``.
-    is_ray_dp = vllm_config.parallel_config.data_parallel_backend == "ray"
-    addresses = get_engine_zmq_addresses(
-        vllm_config,
-        num_api_servers=2,
-        defer_api_server_ports=not is_ray_dp,
-    )
+    # Mirror run_multi_api_server: bind listeners in the supervisor so the
+    # addresses pickled into Ray actors contain kernel-assigned ports.
+    listeners = bind_engine_zmq_listeners(vllm_config, num_api_servers=2)
+    addresses = listeners.addresses
 
     sock = socket.socket()
     engine_manager: CoreEngineActorManager | None = None
@@ -312,25 +360,16 @@ def test_ray_dp_addresses_resolved_before_actor_creation(
             engine_manager = engine_launch.engine_manager
             assert isinstance(engine_manager, CoreEngineActorManager)
 
-            # API-server children bind to the pre-allocated ports.
+            # API-server children adopt the already-bound listener FDs.
             api_server_manager = APIServerProcessManager(
                 listen_address="tcp://127.0.0.1:0",
                 sock=sock,
                 args="test_args",
                 num_servers=2,
-                input_addresses=addresses.inputs,
-                output_addresses=addresses.outputs,
-                target_server_fn=_bind_and_report_worker,
+                input_listeners=listeners.inputs,
+                output_listeners=listeners.outputs,
+                target_server_fn=_adopt_listener_worker,
             )
-
-            # run_multi_api_server skips ``gather_actual_addresses`` for
-            # Ray DP (addresses are already real). Mirror that.
-            if not is_ray_dp:
-                actual_inputs, actual_outputs = (
-                    api_server_manager.gather_actual_addresses(timeout=15.0)
-                )
-                addresses.inputs = actual_inputs
-                addresses.outputs = actual_outputs
 
             # Snapshot what each Ray actor actually holds.
             actors = (
@@ -358,8 +397,115 @@ def test_ray_dp_addresses_resolved_before_actor_creation(
             assert scheme == "tcp", url
             assert port and int(port) > 0, (
                 f"Ray actor was pickled with placeholder address {url!r}; "
-                "``run_multi_api_server`` must pre-allocate ports for the "
-                "Ray DP backend so the actors hold real endpoints by the "
-                "time they DEALER-connect. See PR #42585 / Ray-DP "
+                "``run_multi_api_server`` must bind frontend listeners before "
+                "constructing Ray DP actors so they hold real endpoints when "
+                "they DEALER-connect. See PR #42585 / Ray-DP "
                 "multi-API-server regression."
             )
+
+
+def test_dp_nodes_master_first_orders_and_validates():
+    master = {"GPU": 2.0, "node:10.0.0.1": 1.0, "node:__internal_head__": 1.0}
+    worker = {"GPU": 2.0, "node:10.0.0.2": 1.0}
+
+    nodes = _dp_nodes_master_first({"w": worker, "m": master}, "10.0.0.1")
+    assert [node_id for node_id, _ in nodes] == ["m", "w"]
+
+    with pytest.raises(AssertionError, match="DP master node"):
+        _dp_nodes_master_first({"w": worker}, "10.0.0.1")
+    with pytest.raises(AssertionError, match="one head node"):
+        _dp_nodes_master_first({"a": master, "b": dict(master)}, "10.0.0.1")
+
+
+@pytest.fixture
+def ray_2gpu_node(monkeypatch: pytest.MonkeyPatch):
+    """Real single-node Ray with 2 virtual GPUs and no dashboard.
+
+    Resource maps and placement groups are real. Without the dashboard any
+    ``ray.util.state.list_nodes()`` call fails, the production condition this
+    path must survive. Only the platform device key is patched ("" on CPU).
+    """
+    from ray._private.state import available_resources_per_node
+
+    if ray.is_initialized():
+        ray.shutdown()
+    ray.init(num_cpus=4, num_gpus=2, include_dashboard=False, log_to_driver=False)
+    monkeypatch.setattr("vllm.v1.engine.utils.current_platform.ray_device_key", "GPU")
+
+    (node_resources,) = available_resources_per_node().values()
+    master_ip = _node_ip_from_resources(node_resources)
+    assert master_ip is not None
+    created = []
+
+    def hold_gpus(num_gpus: int):
+        """Occupy GPUs so the node looks like it already runs engines."""
+        pg = ray.util.placement_group([{"GPU": 1.0}] * num_gpus)
+        ray.get(pg.ready(), timeout=60)
+        created.append(pg)
+
+    yield SimpleNamespace(master_ip=master_ip, hold_gpus=hold_gpus, created=created)
+
+    for pg in created:
+        ray.util.remove_placement_group(pg)
+    ray.shutdown()
+
+
+def _elastic_ep_config(dp_size: int, world_size: int, master_ip: str):
+    return SimpleNamespace(
+        parallel_config=SimpleNamespace(
+            data_parallel_size=dp_size,
+            data_parallel_master_ip=master_ip,
+            world_size=world_size,
+        )
+    )
+
+
+@pytest.mark.timeout(120)
+def test_add_dp_placement_groups_does_not_require_ray_default(ray_2gpu_node):
+    """DP 1 -> 2 on an idle node: one schedulable group pinned to the master,
+    found without the dashboard (``list_nodes`` would fail here)."""
+    ip = ray_2gpu_node.master_ip
+
+    pgs, local_ranks = CoreEngineActorManager.add_dp_placement_groups(
+        _elastic_ep_config(dp_size=1, world_size=1, master_ip=ip), 2
+    )
+    ray_2gpu_node.created.extend(pgs)
+
+    assert [pg.bundle_specs for pg in pgs] == [
+        [{"GPU": 1.0, f"node:{ip}": 0.001}, {"CPU": 1.0}]
+    ]
+    assert local_ranks == [0]
+    ray.get(pgs[0].ready(), timeout=60)
+
+
+@pytest.mark.timeout(120)
+def test_add_dp_placement_groups_counts_engines_already_on_node(ray_2gpu_node):
+    """One GPU already held -> the new engine gets local rank 1."""
+    ray_2gpu_node.hold_gpus(1)
+
+    pgs, local_ranks = CoreEngineActorManager.add_dp_placement_groups(
+        _elastic_ep_config(dp_size=1, world_size=1, master_ip=ray_2gpu_node.master_ip),
+        2,
+    )
+    ray_2gpu_node.created.extend(pgs)
+
+    assert len(pgs) == 1
+    assert local_ranks == [1]
+    ray.get(pgs[0].ready(), timeout=60)
+
+
+@pytest.mark.timeout(120)
+def test_add_dp_placement_groups_respects_world_size(ray_2gpu_node):
+    """With TP=2 a node with one idle GPU cannot host a new engine."""
+    ray_2gpu_node.hold_gpus(1)
+
+    assert CoreEngineActorManager.add_dp_placement_groups(
+        _elastic_ep_config(dp_size=1, world_size=2, master_ip=ray_2gpu_node.master_ip),
+        2,
+    ) == ([], [])
+
+
+def test_add_dp_placement_groups_noop_without_growth():
+    assert CoreEngineActorManager.add_dp_placement_groups(
+        _elastic_ep_config(dp_size=2, world_size=1, master_ip="10.0.0.1"), 2
+    ) == ([], [])

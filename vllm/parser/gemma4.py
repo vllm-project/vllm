@@ -120,7 +120,7 @@ def _parse_gemma4_args(args_str: str, *, partial: bool = False) -> dict:
                 result[key] = ""
             break
 
-        if args_str[i : i + _DELIM_LEN] == STRING_DELIM:
+        if args_str.startswith(STRING_DELIM, i):
             i += _DELIM_LEN
             val_start = i
             end_pos = args_str.find(STRING_DELIM, i)
@@ -139,7 +139,7 @@ def _parse_gemma4_args(args_str: str, *, partial: bool = False) -> dict:
             obj_start = i + 1
             i += 1
             while i < n and depth > 0:
-                if args_str[i : i + _DELIM_LEN] == STRING_DELIM:
+                if args_str.startswith(STRING_DELIM, i):
                     # Skip over string contents to avoid counting { inside strings
                     i += _DELIM_LEN
                     next_delim = args_str.find(STRING_DELIM, i)
@@ -162,7 +162,7 @@ def _parse_gemma4_args(args_str: str, *, partial: bool = False) -> dict:
             arr_start = i + 1
             i += 1
             while i < n and depth > 0:
-                if args_str[i : i + _DELIM_LEN] == STRING_DELIM:
+                if args_str.startswith(STRING_DELIM, i):
                     i += _DELIM_LEN
                     next_delim = args_str.find(STRING_DELIM, i)
                     i = n if next_delim == -1 else next_delim + _DELIM_LEN
@@ -213,7 +213,7 @@ def _parse_gemma4_array(arr_str: str, *, partial: bool = False) -> list:
         if i >= n:
             break
 
-        if arr_str[i : i + _DELIM_LEN] == STRING_DELIM:
+        if arr_str.startswith(STRING_DELIM, i):
             i += _DELIM_LEN
             end_pos = arr_str.find(STRING_DELIM, i)
             if end_pos == -1:
@@ -227,7 +227,7 @@ def _parse_gemma4_array(arr_str: str, *, partial: bool = False) -> list:
             obj_start = i + 1
             i += 1
             while i < n and depth > 0:
-                if arr_str[i : i + _DELIM_LEN] == STRING_DELIM:
+                if arr_str.startswith(STRING_DELIM, i):
                     i += _DELIM_LEN
                     nd = arr_str.find(STRING_DELIM, i)
                     i = nd + _DELIM_LEN if nd != -1 else n
@@ -247,7 +247,7 @@ def _parse_gemma4_array(arr_str: str, *, partial: bool = False) -> list:
             sub_start = i + 1
             i += 1
             while i < n and depth > 0:
-                if arr_str[i : i + _DELIM_LEN] == STRING_DELIM:
+                if arr_str.startswith(STRING_DELIM, i):
                     i += _DELIM_LEN
                     nd = arr_str.find(STRING_DELIM, i)
                     i = nd + _DELIM_LEN if nd != -1 else n

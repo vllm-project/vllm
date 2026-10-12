@@ -6,9 +6,9 @@ import signal
 import subprocess
 import time
 from types import TracebackType
+from typing import Self
 
 import requests
-from typing_extensions import Self
 
 
 class ServerProcess:

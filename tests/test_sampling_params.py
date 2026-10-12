@@ -71,7 +71,6 @@ def _verify_diffusion(params: SamplingParams, canvas_length: int | None = None):
         params,
         canvas_length=canvas_length,
         vocab_size=model_config.get_vocab_size(),
-        async_scheduling=True,
     )
 
 
@@ -100,7 +99,7 @@ def test_diffusion_extra_args_are_validated_without_a_served_canvas():
         {"diffusion_canvas_length": 8},
     ],
 )
-def test_narrow_diffusion_canvas_requires_async_scheduling(
+def test_diffusion_canvas_width_is_accepted_with_either_scheduler(
     async_scheduling, extra_args
 ):
     processor = SimpleNamespace(
@@ -113,13 +112,10 @@ def test_narrow_diffusion_canvas_requires_async_scheduling(
         diffusion_config=DiffusionConfig(canvas_length=8),
         tokenizer=None,
         validate_logits_processors_params=lambda params: None,
+        resolve_watermarking=lambda params: False,
     )
     params = SamplingParams(extra_args=extra_args)
-    if not async_scheduling and extra_args.get("diffusion_canvas_length") == 4:
-        with pytest.raises(VLLMValidationError, match="requires --async-scheduling"):
-            InputProcessor._validate_params(processor, params, ("generate",))
-    else:
-        InputProcessor._validate_params(processor, params, ("generate",))
+    InputProcessor._validate_params(processor, params, ("generate",))
 
 
 @pytest.mark.parametrize(
@@ -143,6 +139,29 @@ def test_narrow_diffusion_canvas_requires_async_scheduling(
 def test_diffusion_rejects_bad_extra_args(extra_args: dict, match: str):
     with pytest.raises(VLLMValidationError, match=match):
         _verify_diffusion(SamplingParams(extra_args=extra_args))
+
+
+@pytest.mark.parametrize("flag", [True, 1])
+def test_diffusion_constrained_needs_logprob_token_ids(flag):
+    bad = SamplingParams(extra_args={"diffusion_constrained": flag})
+    with pytest.raises(VLLMValidationError, match="needs logprob_token_ids"):
+        _verify_diffusion(bad)
+
+    ok = SamplingParams(
+        logprob_token_ids=[3, 5], extra_args={"diffusion_constrained": flag}
+    )
+    _verify_diffusion(ok)
+
+    # An unset or false flag needs no ids.
+    _verify_diffusion(SamplingParams(extra_args={"diffusion_constrained": False}))
+    _verify_diffusion(SamplingParams(extra_args={"diffusion_constrained": 0}))
+
+
+@pytest.mark.parametrize("value", ["yes", 2, [1]])
+def test_diffusion_constrained_must_be_a_bool(value):
+    params = SamplingParams(extra_args={"diffusion_constrained": value})
+    with pytest.raises(VLLMValidationError, match="must be a boolean"):
+        _verify_diffusion(params)
 
 
 def test_diffusion_seed_canvas_must_fill_the_canvas():

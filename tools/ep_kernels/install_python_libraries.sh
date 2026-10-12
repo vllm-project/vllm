@@ -78,10 +78,25 @@ mkdir -p "$WHEEL_DIR"
 pushd "$WORKSPACE"
 
 # install dependencies if not installed
+UV_PIP_TARGET=()
 if [ -z "$VIRTUAL_ENV" ]; then
-  uv pip install --system cmake torch ninja
-else
-  uv pip install cmake torch ninja
+  UV_PIP_TARGET=(--system)
+fi
+uv pip install "${UV_PIP_TARGET[@]}" cmake torch ninja
+
+# DeepEPv2 needs NCCL >= 2.30.4 at both build time and runtime, but PyTorch
+# pins an older release.
+DEEPEP_V2_MIN_NCCL="2.30.4"
+NCCL_PACKAGE="nvidia-nccl-cu${CUDA_VERSION_MAJOR}"
+NCCL_WARNING=""
+NCCL_INSTALLED=$(uv pip show "${UV_PIP_TARGET[@]}" "$NCCL_PACKAGE" 2>/dev/null | sed -n 's/^Version: //p')
+if [ -n "$NCCL_INSTALLED" ] && \
+    [ "$(printf '%s\n' "$DEEPEP_V2_MIN_NCCL" "$NCCL_INSTALLED" | sort -V | head -n1)" != "$DEEPEP_V2_MIN_NCCL" ]; then
+    NCCL_WARNING="WARNING: ${NCCL_PACKAGE} ${NCCL_INSTALLED} is installed, but the deepep_v2 backend
+requires NCCL >= ${DEEPEP_V2_MIN_NCCL} when DeepEP is built and when it runs. To use deepep_v2, run
+    uv pip install \"${NCCL_PACKAGE}>=${DEEPEP_V2_MIN_NCCL}\" --no-deps
+and then run this script again. See tools/ep_kernels/README.md."
+    echo "$NCCL_WARNING" >&2
 fi
 
 # fetch nvshmem
@@ -235,4 +250,9 @@ do_build \
 if [ "$MODE" = "wheel" ]; then
     echo "All wheels written to $WHEEL_DIR"
     ls -l "$WHEEL_DIR"
+fi
+
+# Repeat after the verbose build output, where the first copy is easy to miss.
+if [ -n "$NCCL_WARNING" ]; then
+    echo "$NCCL_WARNING" >&2
 fi

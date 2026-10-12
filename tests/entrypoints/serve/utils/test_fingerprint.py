@@ -18,7 +18,7 @@ def _cfg(tp=1, pp=1, dp=1, ep=False, digest="a3b21f94deadbeef"):
             enable_expert_parallel=ep,
         )
     )
-    c.compute_hash = lambda: digest  # type: ignore[attr-defined]
+    c.compute_hash = lambda: digest
     return c
 
 
@@ -59,6 +59,7 @@ def test_get_respects_set_default():
 
     fp.set_default_fingerprint_mode("hash")
     hashed = fp.get_system_fingerprint(cfg)
+    assert hashed is not None
     assert hashed != full
     assert "tp8" not in hashed
 
@@ -72,5 +73,7 @@ def test_get_respects_set_default():
 def test_compute_hash_failure_does_not_raise():
     cfg = _cfg()
     cfg.compute_hash = lambda: (_ for _ in ()).throw(RuntimeError("boom"))
-    assert fp.build_system_fingerprint(cfg, "full").endswith("-nohash")
-    assert fp.build_system_fingerprint(cfg, "hash").endswith("-nohash")
+    full_fp = fp.build_system_fingerprint(cfg, "full")
+    assert full_fp is not None and full_fp.endswith("-nohash")
+    hash_fp = fp.build_system_fingerprint(cfg, "hash")
+    assert hash_fp is not None and hash_fp.endswith("-nohash")

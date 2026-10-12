@@ -109,3 +109,60 @@ def test_unrecognized_env(monkeypatch):
         fail_on_environ_validation=True,
     )
     engine_args.create_engine_config()
+
+
+def test_get_diff_sampling_param_includes_penalties():
+    """``--override-generation-config`` must apply presence_penalty and
+    frequency_penalty as server-side defaults, like the other sampling
+    params. Regression test for the whitelist silently dropping them.
+
+    Called unbound with a lightweight stand-in so no model is loaded:
+    generation_config="vllm" makes the method skip try_get_generation_config
+    and read only override_generation_config.
+    """
+    from types import SimpleNamespace
+
+    from vllm.config.model import ModelConfig
+
+    fake = SimpleNamespace(
+        generation_config="vllm",
+        override_generation_config={
+            "presence_penalty": 1.5,
+            "frequency_penalty": 0.5,
+            "temperature": 0.6,
+        },
+    )
+
+    diff = ModelConfig.get_diff_sampling_param(fake)
+
+    assert diff["presence_penalty"] == 1.5
+    assert diff["frequency_penalty"] == 0.5
+    assert diff["temperature"] == 0.6
+
+
+def test_generation_config_penalties_survive_diff_sampling_filter():
+    """``generation_config.json`` penalties must survive the diff-sampling
+    whitelist (regression for #50767, auto path).
+
+    Covers the ``generation_config="auto"`` branch, where the override
+    dict is empty and the values come from ``try_get_generation_config``.
+    """
+    from types import SimpleNamespace
+
+    from vllm.config.model import ModelConfig
+
+    fake = SimpleNamespace(
+        generation_config="auto",
+        override_generation_config={},
+        try_get_generation_config=lambda: {
+            "presence_penalty": 1.1,
+            "frequency_penalty": 0.7,
+            "temperature": 0.9,
+        },
+    )
+
+    diff = ModelConfig.get_diff_sampling_param(fake)
+
+    assert diff["presence_penalty"] == 1.1
+    assert diff["frequency_penalty"] == 0.7
+    assert diff["temperature"] == 0.9

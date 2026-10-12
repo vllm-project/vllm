@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import inspect
 from collections.abc import Callable
+from contextlib import nullcontext
 from functools import wraps
 from weakref import WeakKeyDictionary, WeakSet
 
@@ -321,7 +322,21 @@ def _reload_attention_scales(layer: torch.nn.Module, info: LayerReloadingInfo) -
         _get_weight_loader(param)(*args.args, **args.kwargs)
 
     if quant_method is not None:
-        quant_method.process_weights_after_loading(layer)
+        from vllm.model_executor.layers.quantization.online.fp8 import OnlineLinearBase
+        from vllm.model_executor.layers.quantization.online.moe_base import (
+            OnlineMoEMethodBase,
+        )
+        from vllm.model_executor.model_loader.utils import (
+            online_quantization_timing_context,
+        )
+
+        timing_context = (
+            online_quantization_timing_context(layer, quant_method)
+            if isinstance(quant_method, (OnlineLinearBase, OnlineMoEMethodBase))
+            else nullcontext()
+        )
+        with timing_context:
+            quant_method.process_weights_after_loading(layer)
 
     _copy_and_restore_kernel_tensors(layer, info)
 
@@ -356,7 +371,21 @@ def _layerwise_process(layer: torch.nn.Module, info: LayerReloadingInfo):
     # Process weights (quantization, repacking, etc.)
     quant_method = getattr(layer, "quant_method", None)
     if isinstance(quant_method, QuantizeMethodBase):
-        quant_method.process_weights_after_loading(layer)
+        from vllm.model_executor.layers.quantization.online.fp8 import OnlineLinearBase
+        from vllm.model_executor.layers.quantization.online.moe_base import (
+            OnlineMoEMethodBase,
+        )
+        from vllm.model_executor.model_loader.utils import (
+            online_quantization_timing_context,
+        )
+
+        timing_context = (
+            online_quantization_timing_context(layer, quant_method)
+            if isinstance(quant_method, (OnlineLinearBase, OnlineMoEMethodBase))
+            else nullcontext()
+        )
+        with timing_context:
+            quant_method.process_weights_after_loading(layer)
         # Re-reconcile parameter TP state: process_weights_after_loading may
         # have re-created Parameters (stamped with the global rank), which would
         # otherwise break replicated (disable_tp) weights on a subsequent reload.

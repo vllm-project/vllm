@@ -255,6 +255,27 @@ jobs:
               // phrases go in `substrings`: they are specific enough on their
               // own, and a boundary match would miss ordinary variations --
               // "structured outputs", "tool parsers", "prefix caching".
+              pooling: {
+                keywords: [
+                  { term: "pooling",   searchIn: "title" },
+                  { term: "pooler",    searchIn: "title" },
+                  { term: "rerank",    searchIn: "title" },
+                  { term: "reranker",  searchIn: "title" },
+                  { term: "reranking", searchIn: "title" },
+                ],
+                substrings: [
+                  { term: "embedding model",         searchIn: "title" },
+                  { term: "embedding API",           searchIn: "title" },
+                  { term: "embeddings API",          searchIn: "title" },
+                  { term: "sentence embedding",      searchIn: "title" },
+                  { term: "sequence classification", searchIn: "title" },
+                  { term: "token classification",    searchIn: "title" },
+                  { term: "cross-encoder",           searchIn: "title" },
+                  { term: "late interaction",        searchIn: "title" },
+                  { term: "late-interaction",        searchIn: "title" },
+                  { term: "reward model",            searchIn: "title" },
+                ],
+              },
               "speculative-decoding": {
                 keywords: [
                   { term: "eagle",  searchIn: "title" },

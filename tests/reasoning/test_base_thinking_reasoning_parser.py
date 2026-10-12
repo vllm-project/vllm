@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pytest
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
 from tests.reasoning.utils import run_reasoning_extraction
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
@@ -39,8 +39,10 @@ REASONING_MODEL_NAME = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
 
 
 @pytest.fixture(scope="module")
-def test_tokenizer():
-    tokenizer = AutoTokenizer.from_pretrained(REASONING_MODEL_NAME)
+def test_tokenizer() -> PreTrainedTokenizerBase:
+    tokenizer: PreTrainedTokenizerBase = AutoTokenizer.from_pretrained(
+        REASONING_MODEL_NAME
+    )
     # Add custom test tokens
     test_tokens = ["<test:think>", "</test:think>", "<alt:start>", "<alt:end>"]
     existing_tokens = set(tokenizer.get_vocab().keys())

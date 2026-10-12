@@ -142,6 +142,7 @@ def _silu_mul_quant_fp8_packed_kernel(
     input_ptr,
     output_q_ptr,
     output_scale_ptr,
+    expert_ends_ptr,
     M,
     input_stride_m,
     output_q_stride_m,
@@ -158,6 +159,7 @@ def _silu_mul_quant_fp8_packed_kernel(
     PACKS_PER_CTA: tl.constexpr,
     BLOCK_M: tl.constexpr,
     HAS_CLAMP: tl.constexpr,
+    EXPERT_ALIGNMENT: tl.constexpr,
 ):
     GROUPS_PER_PACK: tl.constexpr = 4
     hidden_size: tl.constexpr = N // 2
@@ -165,6 +167,13 @@ def _silu_mul_quant_fp8_packed_kernel(
     pack_tile = tl.program_id(0)
     row_start = tl.program_id(1).to(tl.int64) * BLOCK_M
     row_step = tl.num_programs(1).to(tl.int64) * BLOCK_M
+
+    if EXPERT_ALIGNMENT:
+        expert = tl.program_id(2)
+        previous_end = tl.load(expert_ends_ptr + expert - 1, expert > 0, other=0)
+        expert_start = tl.cdiv(previous_end, EXPERT_ALIGNMENT) * EXPERT_ALIGNMENT
+        row_start += expert_start.to(tl.int64)
+        M = tl.load(expert_ends_ptr + expert)
 
     groups_per_cta: tl.constexpr = PACKS_PER_CTA * GROUPS_PER_PACK
     elems_per_cta: tl.constexpr = groups_per_cta * GROUP_SIZE
@@ -254,7 +263,19 @@ def silu_mul_quant_fp8_packed_triton(
     clamp_limit: float | None = None,
     alpha: float = 1.0,
     beta: float = 0.0,
+    *,
+    expert_ends: torch.Tensor | None = None,
+    expert_alignment: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    """Fuse activation and FP8 quantization, optionally skipping expert padding.
+
+    ``expert_ends`` uses DeepGEMM's prefix-sum layout: each entry is the
+    exclusive end of an expert's live rows, including earlier alignment gaps.
+    An expert starts at the preceding end rounded up to ``expert_alignment``.
+    Padding outputs are left unwritten and must not be consumed as live rows.
+    Without ``expert_ends``, the original dense launch configuration is used
+    and the metadata loads are compiled out.
+    """
     assert input.dim() == 2
     assert input.is_contiguous()
 
@@ -293,13 +314,29 @@ def silu_mul_quant_fp8_packed_triton(
 
     grid_n = triton.cdiv(packs_per_row, packs_per_cta)
     grid_m = min(triton.cdiv(M, BM), 4096)
-    grid = (grid_n, grid_m)
+    grid: tuple[int, ...] = (grid_n, grid_m)
+    if expert_ends is not None:
+        assert expert_ends.ndim == 1 and expert_ends.numel() > 0
+        assert expert_ends.dtype == torch.int32
+        assert expert_ends.device == input.device and expert_ends.is_contiguous()
+        assert expert_alignment > 0
+        num_experts = expert_ends.numel()
+        # Bound empty CTAs while retaining enough parallelism for full experts.
+        max_ctas = 4096 if group_size < 128 else 8192
+        grid_m = min(
+            triton.cdiv(M, BM * num_experts),
+            max(1, triton.cdiv(max_ctas, grid_n * num_experts)),
+        )
+        grid = (grid_n, grid_m, num_experts)
+    else:
+        assert expert_alignment == 0
 
     has_clamp = clamp_limit is not None
     _silu_mul_quant_fp8_packed_kernel[grid](
         input,
         output_q,
         output_scale_packed,
+        expert_ends,
         M,
         input.stride(0),
         output_q.stride(0),
@@ -316,6 +353,7 @@ def silu_mul_quant_fp8_packed_triton(
         PACKS_PER_CTA=packs_per_cta,
         BLOCK_M=BM,
         HAS_CLAMP=has_clamp,
+        EXPERT_ALIGNMENT=expert_alignment,
         num_warps=num_warps,
         num_stages=num_stages,
     )
@@ -328,6 +366,7 @@ def _silu_mul_per_token_group_quant_fp8_colmajor(
     y_ptr,  # [M, N]
     y_q_ptr,  # [M, N // 2]
     y_s_ptr,  # [M, (N // 2) // GROUP_SIZE]
+    expert_ends_ptr,
     M,  # num tokens
     N,  # intermediate size
     # Stride
@@ -345,8 +384,8 @@ def _silu_mul_per_token_group_quant_fp8_colmajor(
     GROUP_SIZE: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
+    EXPERT_ALIGNMENT: tl.constexpr,
 ):
-    # TODO(varun) : Add expert_ids so we may early-exit no-op thread blocks.
     """Each thread block (BLOCK_N) computes [BLOCK_M, GROUP_SIZE] act-mul outputs. Then
     the thread block quantizes the [BLOCK_M, GROUP_SIZE] block of values and fills
     the outputs tensors at the right positions.
@@ -357,56 +396,77 @@ def _silu_mul_per_token_group_quant_fp8_colmajor(
 
     m_offset = pid_m.to(tl.int64) * BLOCK_M
     n_offset = pid_n.to(tl.int64) * BLOCK_N
-    if m_offset >= M:
-        return
+    row_step = tl.num_programs(0).to(tl.int64) * BLOCK_M
+    num_iterations = 1
+    if EXPERT_ALIGNMENT:
+        expert = tl.program_id(2)
+        previous_end = tl.load(expert_ends_ptr + expert - 1, expert > 0, other=0)
+        expert_start = tl.cdiv(previous_end, EXPERT_ALIGNMENT) * EXPERT_ALIGNMENT
+        m_offset += expert_start.to(tl.int64)
+        M = tl.load(expert_ends_ptr + expert)
+        num_iterations = tl.cdiv(tl.maximum(M - m_offset, 0), row_step)
 
     offs_n = tl.arange(0, BLOCK_N).to(tl.int64)
     offs_m = tl.arange(0, BLOCK_M).to(tl.int64)
 
-    base_y_ptr = y_ptr + m_offset * N + n_offset
+    for _ in range(num_iterations):
+        base_y_ptr = y_ptr + m_offset * N + n_offset
 
-    act_in_ptrs = base_y_ptr + offs_m[:, None] * N + offs_n[None, :]
+        act_in_ptrs = base_y_ptr + offs_m[:, None] * N + offs_n[None, :]
 
-    act_in = tl.load(act_in_ptrs)
-    mul_in = tl.load(act_in_ptrs + N_2)
+        if EXPERT_ALIGNMENT:
+            live = m_offset + offs_m < M
+            act_in = tl.load(act_in_ptrs, live[:, None], other=0)
+            mul_in = tl.load(act_in_ptrs + N_2, live[:, None], other=0)
+        else:
+            act_in = tl.load(act_in_ptrs)
+            mul_in = tl.load(act_in_ptrs + N_2)
 
-    # silu & mul — match C++ silu_and_mul: clamp in fp32 then store back to the
-    # input dtype, run silu in fp32 then narrow, and do the mul at input
-    # precision so HAS_CLAMP True/False share the same multiplication path.
-    if HAS_CLAMP:
-        act_in = tl.minimum(act_in.to(tl.float32), clamp_limit).to(
-            y_ptr.dtype.element_ty
-        )
-        mul_in = tl.clamp(mul_in.to(tl.float32), -clamp_limit, clamp_limit).to(
-            y_ptr.dtype.element_ty
-        )
-    # Unified gated activation: silu == swigluoai with alpha=1, beta=0.
-    #   glu = gate * sigmoid(alpha * gate); y = (up + beta) * glu
-    # Keep glu/up at input precision (narrow before the mul) so the alpha=1,
-    # beta=0 defaults match the C++ silu_and_mul path bit-for-bit.
-    act_in = act_in.to(tl.float32)
-    glu = (act_in / (1.0 + tl.exp(-act_in * alpha))).to(y_ptr.dtype.element_ty)
-    up = (mul_in.to(tl.float32) + beta).to(y_ptr.dtype.element_ty)
-    y = (glu * up).to(tl.float32)
+        # silu & mul — match C++ silu_and_mul: clamp in fp32 then store back to the
+        # input dtype, run silu in fp32 then narrow, and do the mul at input
+        # precision so HAS_CLAMP True/False share the same multiplication path.
+        if HAS_CLAMP:
+            act_in = tl.minimum(act_in.to(tl.float32), clamp_limit).to(
+                y_ptr.dtype.element_ty
+            )
+            mul_in = tl.clamp(mul_in.to(tl.float32), -clamp_limit, clamp_limit).to(
+                y_ptr.dtype.element_ty
+            )
+        # Unified gated activation: silu == swigluoai with alpha=1, beta=0.
+        #   glu = gate * sigmoid(alpha * gate); y = (up + beta) * glu
+        # Keep glu/up at input precision (narrow before the mul) so the alpha=1,
+        # beta=0 defaults match the C++ silu_and_mul path bit-for-bit.
+        act_in = act_in.to(tl.float32)
+        glu = (act_in / (1.0 + tl.exp(-act_in * alpha))).to(y_ptr.dtype.element_ty)
+        up = (mul_in.to(tl.float32) + beta).to(y_ptr.dtype.element_ty)
+        y = (glu * up).to(tl.float32)
 
-    # quant
-    _absmax = tl.maximum(tl.max(tl.abs(y), axis=1), eps)
-    scale_raw = _absmax * (1.0 / fp8_max)
-    y_s = tl.math.exp2(tl.ceil(tl.log2(scale_raw))) if use_ue8m0 else scale_raw
-    y_s = tl.reshape(y_s, (BLOCK_M, 1))
-    y_q = tl.clamp(y / y_s, fp8_min, fp8_max).to(y_q_ptr.dtype.element_ty)
+        # quant
+        _absmax = tl.maximum(tl.max(tl.abs(y), axis=1), eps)
+        scale_raw = _absmax * (1.0 / fp8_max)
+        y_s = tl.math.exp2(tl.ceil(tl.log2(scale_raw))) if use_ue8m0 else scale_raw
+        y_s = tl.reshape(y_s, (BLOCK_M, 1))
+        y_q = tl.clamp(y / y_s, fp8_min, fp8_max).to(y_q_ptr.dtype.element_ty)
 
-    # store y_q
-    base_y_q_ptr = y_q_ptr + m_offset * N_2 + n_offset
-    y_q_ptrs = base_y_q_ptr + offs_m[:, None] * N_2 + offs_n[None, :]
-    tl.store(y_q_ptrs, y_q)
+        # store y_q
+        base_y_q_ptr = y_q_ptr + m_offset * N_2 + n_offset
+        y_q_ptrs = base_y_q_ptr + offs_m[:, None] * N_2 + offs_n[None, :]
+        if EXPERT_ALIGNMENT:
+            tl.store(y_q_ptrs, y_q, live[:, None])
+        else:
+            tl.store(y_q_ptrs, y_q)
 
-    # store y_s
-    group_id = n_offset // GROUP_SIZE
-    base_y_s_ptr = y_s_ptr + group_id * y_s_col_stride + m_offset
-    y_s_ptrs = base_y_s_ptr + offs_m
-    y_s = tl.reshape(y_s, (BLOCK_M,))
-    tl.store(y_s_ptrs, y_s)
+        # store y_s
+        group_id = n_offset // GROUP_SIZE
+        base_y_s_ptr = y_s_ptr + group_id * y_s_col_stride + m_offset
+        y_s_ptrs = base_y_s_ptr + offs_m
+        y_s = tl.reshape(y_s, (BLOCK_M,))
+        if EXPERT_ALIGNMENT:
+            tl.store(y_s_ptrs, y_s, live)
+        else:
+            tl.store(y_s_ptrs, y_s)
+
+        m_offset += row_step
 
 
 def silu_mul_per_token_group_quant_fp8_colmajor(
@@ -418,9 +478,15 @@ def silu_mul_per_token_group_quant_fp8_colmajor(
     group_size: int = 128,
     alpha: float = 1.0,
     beta: float = 0.0,
+    *,
+    expert_ends: torch.Tensor | None = None,
+    expert_alignment: int = 0,
 ):
     """Gated activation + block-fp8 quant. ``alpha``/``beta`` select the gate
     (silu: alpha=1, beta=0; swigluoai: alpha, beta from config).
+
+    Optional expert endpoints follow DeepGEMM's prefix-sum layout. Padding
+    values and scales are left unwritten and must not be consumed as live rows.
     """
     GROUP_SIZE = group_size
     assert input.ndim == 2
@@ -458,13 +524,27 @@ def silu_mul_per_token_group_quant_fp8_colmajor(
     # Force even division so we can avoid edgecases within the kernel.
     assert M % BLOCK_M == 0
     assert N_2 % BLOCK_N == 0
-    grid = (M // BLOCK_M, N_2 // BLOCK_N)
+    grid: tuple[int, ...] = (M // BLOCK_M, N_2 // BLOCK_N)
+    if expert_ends is not None:
+        assert expert_ends.ndim == 1 and expert_ends.numel() > 0
+        assert expert_ends.dtype == torch.int32
+        assert expert_ends.device == input.device and expert_ends.is_contiguous()
+        assert expert_alignment > 0 and expert_alignment % BLOCK_M == 0
+        num_experts = expert_ends.numel()
+        grid_m = min(
+            triton.cdiv(M, BLOCK_M * num_experts),
+            max(1, triton.cdiv(8192, grid[1] * num_experts)),
+        )
+        grid = (grid_m, grid[1], num_experts)
+    else:
+        assert expert_alignment == 0
 
     has_clamp = clamp_limit is not None
     _silu_mul_per_token_group_quant_fp8_colmajor[grid](
         input,
         output,
         output_scales,
+        expert_ends,
         M,
         N,
         output_scales.stride(-1),
@@ -479,6 +559,7 @@ def silu_mul_per_token_group_quant_fp8_colmajor(
         GROUP_SIZE,
         BLOCK_M,
         BLOCK_N,
+        expert_alignment,
     )
 
     return output, output_scales
@@ -1373,7 +1454,7 @@ def process_fp8_weight_tensor_strategy(
     logical_widths: list[int],
     input_scale: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
-    """Process weights for tensor-wise quantization strategy."""
+    """Requantize fused shards to one scale and return ``(K, N)`` weight."""
     from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
         normalize_e4m3fn_to_e4m3fnuz,
         requantize_with_max_scale,
@@ -1391,7 +1472,7 @@ def process_fp8_weight_tensor_strategy(
         logical_widths=logical_widths,
     )
 
-    weight = _maybe_pad_fp8_weight(weight)
+    weight = _maybe_pad_fp8_weight(weight).t()
     return weight, weight_scale, input_scale
 
 
@@ -1400,7 +1481,7 @@ def process_fp8_weight_channel_strategy(
     weight_scale: torch.Tensor,
     input_scale: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
-    """Process weights for channel-wise quantization strategy."""
+    """Normalize FNUZ if needed and return ``(K, N)`` weight."""
     from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
         normalize_e4m3fn_to_e4m3fnuz,
     )
@@ -1410,14 +1491,14 @@ def process_fp8_weight_channel_strategy(
             weight=weight, weight_scale=weight_scale, input_scale=input_scale
         )
 
-    return weight, weight_scale, input_scale
+    return weight.t(), weight_scale, input_scale
 
 
 def process_fp8_weight_block_strategy(
     weight: torch.Tensor,
     weight_scale: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Process weights for block-wise quantization strategy."""
+    """Normalize FNUZ if needed and return ``(N, K)`` weight (no transpose)."""
     from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
         normalize_e4m3fn_to_e4m3fnuz,
     )

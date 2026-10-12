@@ -1,0 +1,268 @@
+{
+  "model_id": "Qwen/Qwen3.5-4B",
+  "vocab_size": 248320,
+  "all_stop_token_ids": [248044, 248046],
+  "cases": {
+    "auto": {
+      "grammar": {
+        "format": {
+          "type": "sequence",
+          "elements": [
+            {
+              "type": "sequence",
+              "elements": [
+                {
+                  "type": "tag",
+                  "begin": "",
+                  "content": {
+                    "type": "any_text",
+                    "excludes": [],
+                    "max_tokens": null,
+                    "max_chars": null
+                  },
+                  "end": "</think>"
+                },
+                {
+                  "type": "const_string",
+                  "value": "\n\n"
+                }
+              ]
+            },
+            {
+              "type": "triggered_tags",
+              "triggers": [
+                "<tool_call>\n<function="
+              ],
+              "tags": [
+                {
+                  "type": "tag",
+                  "begin": "<tool_call>\n<function=get_weather>\n",
+                  "content": {
+                    "type": "json_schema",
+                    "json_schema": {
+                      "type": "object",
+                      "properties": {
+                        "location": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "location"
+                      ]
+                    },
+                    "style": "qwen_xml",
+                    "any_order": false,
+                    "max_whitespace_cnt": null,
+                    "excludes": []
+                  },
+                  "end": "\n</function>\n</tool_call>"
+                },
+                {
+                  "type": "tag",
+                  "begin": "<tool_call>\n<function=add>\n",
+                  "content": {
+                    "type": "json_schema",
+                    "json_schema": {
+                      "type": "object",
+                      "properties": {
+                        "y": {
+                          "type": "number"
+                        },
+                        "x": {
+                          "type": "number"
+                        },
+                        "items": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        }
+                      },
+                      "required": [
+                        "y",
+                        "x",
+                        "items"
+                      ]
+                    },
+                    "style": "qwen_xml",
+                    "any_order": false,
+                    "max_whitespace_cnt": null,
+                    "excludes": []
+                  },
+                  "end": "\n</function>\n</tool_call>"
+                }
+              ],
+              "at_least_one": false,
+              "stop_after_first": false,
+              "excludes": [
+                "<think>",
+                "</think>"
+              ]
+            }
+          ]
+        },
+        "coverage": "from_token_zero"
+      },
+      "completion": "Need call the weather and add tools.\n</think>\n\nI will call the tools.\n\n<tool_call>\n<function=get_weather>\n<parameter=location>\nShanghai\n</parameter>\n</function>\n</tool_call>\n<tool_call>\n<function=add>\n<parameter=y>\n1.0\n</parameter>\n<parameter=x>\n2\n</parameter>\n<parameter=items>\n[\"left\", \"right\"]\n</parameter>\n</function>\n</tool_call>",
+      "generation_token_ids": [22916, 1562, 279, 8831, 321, 884, 7141, 13, 198, 248069, 271, 40, 668, 1562, 279, 7141, 13, 271, 248058, 198, 27, 1628, 27362, 67017, 29, 198, 27, 15704, 28, 2447, 29, 198, 1948, 29086, 198, 510, 15704, 29, 198, 510, 1628, 29, 198, 248059, 198, 248058, 198, 27, 1628, 89587, 29, 198, 27, 15704, 28408, 29, 198, 16, 13, 15, 198, 510, 15704, 29, 198, 27, 15704, 24582, 29, 198, 17, 198, 510, 15704, 29, 198, 27, 15704, 28, 3494, 29, 198, 1143, 2282, 487, 328, 1246, 1293, 198, 510, 15704, 29, 198, 510, 1628, 29, 198, 248059, 248046]
+    },
+    "required": {
+      "grammar": {
+        "format": {
+          "type": "sequence",
+          "elements": [
+            {
+              "type": "sequence",
+              "elements": [
+                {
+                  "type": "tag",
+                  "begin": "",
+                  "content": {
+                    "type": "any_text",
+                    "excludes": [],
+                    "max_tokens": null,
+                    "max_chars": null
+                  },
+                  "end": "</think>"
+                },
+                {
+                  "type": "const_string",
+                  "value": "\n\n"
+                }
+              ]
+            },
+            {
+              "type": "triggered_tags",
+              "triggers": [
+                "<tool_call>\n<function="
+              ],
+              "tags": [
+                {
+                  "type": "tag",
+                  "begin": "<tool_call>\n<function=get_weather>\n",
+                  "content": {
+                    "type": "json_schema",
+                    "json_schema": {
+                      "type": "object",
+                      "properties": {
+                        "location": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "location"
+                      ]
+                    },
+                    "style": "qwen_xml",
+                    "any_order": false,
+                    "max_whitespace_cnt": null,
+                    "excludes": []
+                  },
+                  "end": "\n</function>\n</tool_call>"
+                },
+                {
+                  "type": "tag",
+                  "begin": "<tool_call>\n<function=add>\n",
+                  "content": {
+                    "type": "json_schema",
+                    "json_schema": {
+                      "type": "object",
+                      "properties": {
+                        "y": {
+                          "type": "number"
+                        },
+                        "x": {
+                          "type": "number"
+                        },
+                        "items": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        }
+                      },
+                      "required": [
+                        "y",
+                        "x",
+                        "items"
+                      ]
+                    },
+                    "style": "qwen_xml",
+                    "any_order": false,
+                    "max_whitespace_cnt": null,
+                    "excludes": []
+                  },
+                  "end": "\n</function>\n</tool_call>"
+                }
+              ],
+              "at_least_one": true,
+              "stop_after_first": false,
+              "excludes": [
+                "<think>",
+                "</think>"
+              ]
+            }
+          ]
+        },
+        "coverage": "from_token_zero"
+      },
+      "completion": "Need call the weather and add tools.\n</think>\n\n<tool_call>\n<function=get_weather>\n<parameter=location>\nShanghai\n</parameter>\n</function>\n</tool_call>\n<tool_call>\n<function=add>\n<parameter=y>\n1.0\n</parameter>\n<parameter=x>\n2\n</parameter>\n<parameter=items>\n[\"left\", \"right\"]\n</parameter>\n</function>\n</tool_call>",
+      "generation_token_ids": [22916, 1562, 279, 8831, 321, 884, 7141, 13, 198, 248069, 271, 248058, 198, 27, 1628, 27362, 67017, 29, 198, 27, 15704, 28, 2447, 29, 198, 1948, 29086, 198, 510, 15704, 29, 198, 510, 1628, 29, 198, 248059, 198, 248058, 198, 27, 1628, 89587, 29, 198, 27, 15704, 28408, 29, 198, 16, 13, 15, 198, 510, 15704, 29, 198, 27, 15704, 24582, 29, 198, 17, 198, 510, 15704, 29, 198, 27, 15704, 28, 3494, 29, 198, 1143, 2282, 487, 328, 1246, 1293, 198, 510, 15704, 29, 198, 510, 1628, 29, 198, 248059, 248046]
+    },
+    "named": {
+      "grammar": {
+        "format": {
+          "type": "sequence",
+          "elements": [
+            {
+              "type": "sequence",
+              "elements": [
+                {
+                  "type": "tag",
+                  "begin": "",
+                  "content": {
+                    "type": "any_text",
+                    "excludes": [],
+                    "max_tokens": null,
+                    "max_chars": null
+                  },
+                  "end": "</think>"
+                },
+                {
+                  "type": "const_string",
+                  "value": "\n\n"
+                }
+              ]
+            },
+            {
+              "type": "tag",
+              "begin": "<tool_call>\n<function=get_weather>\n",
+              "content": {
+                "type": "json_schema",
+                "json_schema": {
+                  "type": "object",
+                  "properties": {
+                    "location": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "location"
+                  ]
+                },
+                "style": "qwen_xml",
+                "any_order": false,
+                "max_whitespace_cnt": null,
+                "excludes": []
+              },
+              "end": "\n</function>\n</tool_call>"
+            }
+          ]
+        },
+        "coverage": "from_token_zero"
+      },
+      "completion": "Need call the weather and add tools.\n</think>\n\n<tool_call>\n<function=get_weather>\n<parameter=location>\nShanghai\n</parameter>\n</function>\n</tool_call>",
+      "generation_token_ids": [22916, 1562, 279, 8831, 321, 884, 7141, 13, 198, 248069, 271, 248058, 198, 27, 1628, 27362, 67017, 29, 198, 27, 15704, 28, 2447, 29, 198, 1948, 29086, 198, 510, 15704, 29, 198, 510, 1628, 29, 198, 248059, 248046]
+    }
+  }
+}

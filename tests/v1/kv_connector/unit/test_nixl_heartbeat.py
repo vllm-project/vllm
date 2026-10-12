@@ -30,6 +30,10 @@ def _worker_stub():
     w = object.__new__(NixlConnectorWorker)
     w._reqs_to_send = {}
     w._lease_extension = 20
+    w._reqs_to_process = set()
+    w.consumer_notification_counts_by_req = {}
+    w.expected_consumer_notifications_by_req = {}
+    w.xfer_stats = MagicMock()
     return w
 
 
@@ -163,3 +167,87 @@ def test_handle_heartbeat():
     assert w._reqs_to_send["req-b"] >= far_future
     # req-unknown: not added.
     assert "req-unknown" not in w._reqs_to_send
+
+
+def test_reaper_reclaims_expired_leases_behind_heartbeated_head(monkeypatch):
+    """A heartbeated head entry must not strand expired leases behind it.
+
+    Mirrors the stdlib repro in https://github.com/vllm-project/vllm/issues/58222:
+    A is inserted first and kept alive via heartbeats; B and C expire and
+    must still be reaped. The old early-exit scan returned nothing here.
+    """
+    w = _worker_stub()
+    w._reqs_to_process.update(("A", "B", "C"))
+    # Insertion order is A, B, C. Heartbeats will keep A at the head.
+    w._reqs_to_send = {"A": 30.0, "B": 32.0, "C": 34.0}
+
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl import base_worker
+
+    now = {"t": 0.0}
+    monkeypatch.setattr(base_worker.time, "perf_counter", lambda: now["t"])
+    for t in (20.0, 40.0, 60.0, 80.0):
+        now["t"] = t
+        w._handle_heartbeat("A")
+
+    # A was renewed in place: still the dict head, expiry 100.
+    assert next(iter(w._reqs_to_send)) == "A"
+    assert w._reqs_to_send["A"] == pytest.approx(100.0)
+
+    done: set[str] = set()
+    now["t"] = 50.0
+    w._reap_expired_send_leases(done)
+
+    assert done == {"B", "C"}
+    assert list(w._reqs_to_send) == ["A"]
+    assert w._reqs_to_process == {"A"}
+    assert w.xfer_stats.record_kv_expired_req.call_count == 2
+
+    # now == expires is expired (now >= expires): A is due at 100.
+    done_eq: set[str] = set()
+    now["t"] = 100.0
+    w._reap_expired_send_leases(done_eq)
+    assert done_eq == {"A"}
+    assert not w._reqs_to_send
+    assert not w._reqs_to_process
+    assert w.xfer_stats.record_kv_expired_req.call_count == 3
+
+
+def test_reaper_reclaims_when_now_equals_expiry(monkeypatch):
+    """The reaper must reclaim on the now == expires boundary."""
+    w = _worker_stub()
+    w._reqs_to_process.add("eq")
+    w._reqs_to_send = {"eq": 50.0}
+
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl import base_worker
+
+    monkeypatch.setattr(base_worker.time, "perf_counter", lambda: 50.0)
+
+    done: set[str] = set()
+    w._reap_expired_send_leases(done)
+
+    assert done == {"eq"}
+    assert not w._reqs_to_send
+    assert not w._reqs_to_process
+    w.xfer_stats.record_kv_expired_req.assert_called_once()
+
+
+def test_reaper_reclaims_shorter_lease_behind_later_deadline(monkeypatch):
+    """A later-inserted longer TTL must not block an earlier-expiring entry.
+
+    Delete+reinsert on heartbeat cannot restore expiry order in this case
+    (issue #58222), so the reaper must scan the whole map.
+    """
+    w = _worker_stub()
+    w._reqs_to_process.update(("X", "Y"))
+    w._reqs_to_send = {"X": 55.0, "Y": 46.0}
+
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl import base_worker
+
+    monkeypatch.setattr(base_worker.time, "perf_counter", lambda: 50.0)
+
+    done: set[str] = set()
+    w._reap_expired_send_leases(done)
+
+    assert done == {"Y"}
+    assert list(w._reqs_to_send) == ["X"]
+    assert w._reqs_to_process == {"X"}

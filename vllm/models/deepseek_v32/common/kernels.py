@@ -1052,6 +1052,7 @@ def fused_q(
             index_weights_out,
             has_indexer=has_indexer,
             index_rope_interleave=index_rope_interleave,
+            quantize_mqa=quantize_mqa,
         )
         return index_q_fp8, index_weights_out, mqa_q
 

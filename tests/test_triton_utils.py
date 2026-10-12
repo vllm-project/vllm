@@ -10,10 +10,13 @@ from vllm.triton_utils import importing as triton_importing
 from vllm.triton_utils.importing import TritonLanguagePlaceholder, TritonPlaceholder
 
 
-def _has_triton_for_backends(**drivers: bool) -> bool:
+def _has_triton_for_backends(*, vllm_version: str = "0.0.0", **drivers: bool) -> bool:
     """Re-evaluate ``HAS_TRITON`` against a synthetic ``triton.backends`` map.
 
     ``drivers`` maps backend name to whether its driver reports itself active.
+    ``vllm_version`` selects the build type: importing.py takes its Triton-CPU
+    branch only when "cpu" is in the installed vLLM version, so pin it rather
+    than depending on the real install (the CPU CI image is a "+cpu" build).
     """
     backends = {}
     for name, is_active in drivers.items():
@@ -34,6 +37,7 @@ def _has_triton_for_backends(**drivers: bool) -> bool:
         with (
             mock.patch.dict(sys.modules, patched_modules),
             mock.patch.dict("os.environ", {}, clear=True),
+            mock.patch("importlib.metadata.version", return_value=vllm_version),
         ):
             return importlib.reload(triton_importing).HAS_TRITON
     finally:
@@ -129,19 +133,50 @@ def test_cpu_backend_alone_disables_triton():
     assert _has_triton_for_backends(cpu=True) is False
 
 
+def test_cpu_build_with_cpu_backend_keeps_triton():
+    assert _has_triton_for_backends(vllm_version="0.0.0+cpu", cpu=True) is True
+
+
+def test_cpu_build_without_cpu_backend_disables_triton():
+    assert _has_triton_for_backends(vllm_version="0.0.0+cpu", amd=True) is False
+
+
 def test_no_triton_fallback():
-    # clear existing triton modules
-    sys.modules.pop("triton", None)
-    sys.modules.pop("triton.language", None)
-    sys.modules.pop("vllm.triton_utils", None)
-    sys.modules.pop("vllm.triton_utils.importing", None)
+    # Save the real modules so they can be put back afterward - popping them
+    # (rather than mock.patch.dict alone) is what forces vllm.triton_utils to
+    # be freshly, unmemoized re-imported under the "triton is absent"
+    # condition below.
+    saved_modules = {
+        name: sys.modules.get(name)
+        for name in (
+            "triton",
+            "triton.language",
+            "vllm.triton_utils",
+            "vllm.triton_utils.importing",
+        )
+    }
+    for name in saved_modules:
+        sys.modules.pop(name, None)
 
-    # mock triton not being installed
-    with mock.patch.dict(sys.modules, {"triton": None}):
-        from vllm.triton_utils import HAS_TRITON, tl, triton
+    try:
+        # mock triton not being installed
+        with mock.patch.dict(sys.modules, {"triton": None}):
+            from vllm.triton_utils import HAS_TRITON, tl, triton
 
-        assert HAS_TRITON is False
-        assert triton.__class__.__name__ == "TritonPlaceholder"
-        assert triton.language.__class__.__name__ == "TritonLanguagePlaceholder"
-        assert tl.__class__.__name__ == "TritonLanguagePlaceholder"
-        assert tl.constexpr(2**31 - 1) == 2**31 - 1
+            assert HAS_TRITON is False
+            assert triton.__class__.__name__ == "TritonPlaceholder"
+            assert triton.language.__class__.__name__ == "TritonLanguagePlaceholder"
+            assert tl.__class__.__name__ == "TritonLanguagePlaceholder"
+            assert tl.constexpr(2**31 - 1) == 2**31 - 1
+    finally:
+        # The pops above are outside mock.patch.dict's scope, so exiting the
+        # `with` restores "triton" to absent, not to the real module - unlike
+        # _has_triton_for_backends above, nothing here puts it back. Left
+        # alone, every subsequent import of vllm.triton_utils in this process
+        # (including other test files, and other tests' cleanup fixtures that
+        # need real triton) would get this fake, HAS_TRITON=False module.
+        for name, module in saved_modules.items():
+            if module is not None:
+                sys.modules[name] = module
+            else:
+                sys.modules.pop(name, None)

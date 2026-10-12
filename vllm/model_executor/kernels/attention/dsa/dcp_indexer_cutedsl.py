@@ -25,6 +25,22 @@ from vllm.model_executor.warmup.jit_warmup_triton_helper import (
 from vllm.triton_utils import tl, triton
 
 
+def _dcp_merge_topk_and_interleave(vllm_config: Any) -> tuple[int, int]:
+    """(topk, cp_interleave) the DCP merge runs with.
+
+    Kpool indexers (GLM-5.x) merge pool ids: topk and the interleave are both
+    in units of ``index_kpool`` tokens.
+    """
+    hf_text_config = vllm_config.model_config.hf_text_config
+    topk = hf_text_config.index_topk
+    cp_interleave = vllm_config.parallel_config.cp_kv_cache_interleave_size
+    kpool = getattr(hf_text_config, "index_kpool", None) or 1
+    if kpool > 1:
+        topk //= kpool
+        cp_interleave //= kpool
+    return topk, cp_interleave
+
+
 def stable_topk_from_gathered_candidates_cutedsl(
     gathered: torch.Tensor,
     topk: int,
@@ -171,8 +187,7 @@ class PackDCPTopkCandidatesKernel(
         dcp_world_size = vllm_config.parallel_config.decode_context_parallel_size
         if dcp_world_size <= 1:
             return []
-        cp_interleave = vllm_config.parallel_config.cp_kv_cache_interleave_size
-        topk = vllm_config.model_config.hf_text_config.index_topk
+        topk, cp_interleave = _dcp_merge_topk_and_interleave(vllm_config)
         if topk <= 0:
             return []
 
@@ -545,7 +560,7 @@ class StableTopKFromGatheredCandidatesKernel(
         dcp_world_size = vllm_config.parallel_config.decode_context_parallel_size
         if dcp_world_size <= 1:
             return []
-        topk = vllm_config.model_config.hf_text_config.index_topk
+        topk, _ = _dcp_merge_topk_and_interleave(vllm_config)
         if topk <= 0:
             return []
         return self._trace_dispatch(self.dispatch)(

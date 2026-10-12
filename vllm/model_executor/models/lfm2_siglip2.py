@@ -334,7 +334,7 @@ class Siglip2Encoder(nn.Module):
     self attention layers. Each layer is a [`Siglip2EncoderLayer`].
 
     Args:
-        config: PretrainedConfig
+        config: PreTrainedConfig
 
     """
 

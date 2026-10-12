@@ -7,6 +7,7 @@ from collections.abc import Iterable
 
 import torch
 import torch.nn as nn
+from transformers import Aimv2VisionConfig
 
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.distributed.utils import divide
@@ -21,20 +22,19 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.models.utils import AutoWeightsLoader, WeightsMapper
-from vllm.transformers_utils.configs.ovis import AIMv2Config
 
 
 class AIMv2SwiGLUFFN(nn.Module):
     def __init__(
         self,
-        config: AIMv2Config,
+        config: Aimv2VisionConfig,
         quant_config: QuantizationConfig | None,
         prefix: str,
     ):
         super().__init__()
         hidden_features = config.intermediate_size
         in_features = config.hidden_size
-        bias = config.use_bias
+        bias = config.mlp_bias
 
         self.fc13 = MergedColumnParallelLinear(
             in_features,
@@ -60,7 +60,7 @@ class AIMv2SwiGLUFFN(nn.Module):
 
 
 class AIMv2PatchEmbed(nn.Module):
-    def __init__(self, config: AIMv2Config):
+    def __init__(self, config: Aimv2VisionConfig):
         super().__init__()
         self.proj = Conv2dLayer(
             config.num_channels,
@@ -77,7 +77,7 @@ class AIMv2PatchEmbed(nn.Module):
 
 
 class AIMv2ViTPreprocessor(nn.Module):
-    def __init__(self, config: AIMv2Config):
+    def __init__(self, config: Aimv2VisionConfig):
         super().__init__()
         num_patches = (config.image_size // config.patch_size) ** 2
 
@@ -95,7 +95,7 @@ class AIMv2ViTPreprocessor(nn.Module):
 class AIMv2Attention(nn.Module):
     def __init__(
         self,
-        config: AIMv2Config,
+        config: Aimv2VisionConfig,
         quant_config: QuantizationConfig | None,
         prefix: str,
     ):
@@ -124,7 +124,7 @@ class AIMv2Attention(nn.Module):
         self.proj = RowParallelLinear(
             input_size=self.embed_dim,
             output_size=self.embed_dim,
-            bias=config.use_bias,
+            bias=config.mlp_bias,
             quant_config=quant_config,
             prefix=f"{prefix}.proj",
         )
@@ -151,7 +151,7 @@ class AIMv2Attention(nn.Module):
 class AIMv2Block(nn.Module):
     def __init__(
         self,
-        config: AIMv2Config,
+        config: Aimv2VisionConfig,
         quant_config: QuantizationConfig | None,
         prefix: str,
     ):
@@ -174,7 +174,7 @@ class AIMv2Block(nn.Module):
 class AIMv2Transformer(nn.Module):
     def __init__(
         self,
-        config: AIMv2Config,
+        config: Aimv2VisionConfig,
         quant_config: QuantizationConfig | None,
         *,
         require_post_norm: bool | None = None,
@@ -214,7 +214,7 @@ class AIMv2Model(torch.nn.Module):
 
     def __init__(
         self,
-        config: AIMv2Config,
+        config: Aimv2VisionConfig,
         quant_config: QuantizationConfig | None,
         *,
         require_post_norm: bool | None = None,

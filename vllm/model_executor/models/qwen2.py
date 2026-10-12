@@ -187,6 +187,12 @@ class Qwen2Attention(nn.Module):
             if attn_type == AttentionType.ENCODER_ONLY
             else Attention
         )
+        attention_kwargs: dict[str, Any] = {}
+        if dual_chunk_attention_config:
+            attention_kwargs = {
+                "layer_idx": extract_layer_index(prefix),
+                "dual_chunk_attention_config": dual_chunk_attention_config,
+            }
         self.attn = attn_cls(
             self.num_heads,
             self.head_dim,
@@ -196,12 +202,7 @@ class Qwen2Attention(nn.Module):
             quant_config=quant_config,
             attn_type=attn_type,
             prefix=f"{prefix}.attn",
-            **{
-                "layer_idx": extract_layer_index(prefix),
-                "dual_chunk_attention_config": dual_chunk_attention_config,
-            }
-            if dual_chunk_attention_config
-            else {},
+            **attention_kwargs,
         )
 
     def forward(

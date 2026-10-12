@@ -22,6 +22,7 @@ Sorted alphabetically by GitHub handle:
 - [@DarkLight1337](https://github.com/DarkLight1337): Multimodality, API server
 - [@dllehr-amd](https://github.com/dllehr-amd): AMD integration
 - [@esmeetu](https://github.com/esmeetu): developer marketing, community
+- [@gau-nernst](https://github.com/gau-nernst): Kernels and performance
 - [@gshtras](https://github.com/gshtras): ROCm / AMD GPU integration
 - [@Harry-Chen](https://github.com/Harry-Chen): Build, CI, CUDA architecture
 - [@heheda12345](https://github.com/heheda12345): Hybrid memory allocator
@@ -54,6 +55,7 @@ Sorted alphabetically by GitHub handle:
 - [@tomeras91](https://github.com/tomeras91): MoE, Mamba, Ray
 - [@vadiklyutiy](https://github.com/vadiklyutiy): CI, performance, kernels
 - [@WoosukKwon](https://github.com/WoosukKwon): Project lead, engine core
+- [@wzhao18](https://github.com/wzhao18): Kernels and performance, KV offloading
 - [@xinli-sw](https://github.com/xinli-sw): Quantization and model support
 - [@xuechendi](https://github.com/xuechendi): Intel CPU/XPU integration, KV connector
 - [@yaochengji](https://github.com/yaochengji): TPU integration
@@ -173,9 +175,10 @@ If you have PRs touching the area, please feel free to ping the area owner for r
 ### External Kernels Integration
 
 - FlashAttention: @LucasWilkinson, @MatthewBonanni
-- FlashInfer: @LucasWilkinson, @mgoin, @WoosukKwon, @MatthewBonanni
+- FlashInfer: @LucasWilkinson, @mgoin, @WoosukKwon, @MatthewBonanni, @wzhao18
 - Blackwell Kernels: @mgoin, @yewentao256
 - DeepEP/DeepGEMM: @mgoin, @yewentao256
+- FlashKDA: @gau-nernst
 
 ### Integrations
 
@@ -186,7 +189,7 @@ If you have PRs touching the area, please feel free to ping the area owner for r
 ### Hardware
 
 - Plugin Interface: @youkaichao, @Yikun
-- NVIDIA GPU: @pavanimajety
+- NVIDIA GPU: @pavanimajety, @wzhao18
 - AMD GPU: @gshtras, @tjtanaa, @hongxiayang, @shen-shanshan, @AndreasKaratzas
 - Intel CPU/GPU: @jikunshang, @bigPYJ1151, @xuechendi
 - Google TPU: @yaochengji

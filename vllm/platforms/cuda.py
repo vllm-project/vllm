@@ -299,10 +299,6 @@ class CudaPlatformBase(Platform):
         raise NotImplementedError
 
     @classmethod
-    def log_warnings(cls):
-        pass
-
-    @classmethod
     def is_pin_memory_available(cls) -> bool:
         if in_wsl():
             # WSL1 has no CUDA support, so being on the CUDA platform under
@@ -328,12 +324,6 @@ class CudaPlatformBase(Platform):
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
         parallel_config = vllm_config.parallel_config
         model_config = vllm_config.model_config
-
-        if (
-            parallel_config.prefill_context_parallel_size > 1
-            and parallel_config.data_parallel_size > 1
-        ):
-            raise ValueError("PCP does not support data parallelism on CUDA yet.")
 
         if parallel_config.worker_cls == "auto":
             parallel_config.worker_cls = "vllm.v1.worker.gpu_worker.Worker"
@@ -423,26 +413,6 @@ class CudaPlatformBase(Platform):
                 )
 
         return valid_backends_priorities, invalid_reasons
-
-    @classmethod
-    def _get_indexer_block_alignment(cls, vllm_config: VllmConfig) -> int | None:
-        index_kpool = getattr(
-            vllm_config.model_config.hf_text_config, "index_kpool", None
-        )
-        if not index_kpool or index_kpool <= 1:
-            return None
-        from vllm.utils.deep_gemm import PAGED_MQA_PAGE_SIZES
-
-        # kpool paged-MQA indexer: the storage block (block_size /
-        # index_kpool) is virtually split into pool pages, so block_size
-        # must be a multiple of index_kpool times a legal pool page.
-        page = min(PAGED_MQA_PAGE_SIZES)
-        if cls.is_device_capability_family(120):
-            # On sm120 the DeepGEMM paged-MQA kernel only accepts block_kv
-            # 64 for the fp8 indexer cache, so align to the largest pool
-            # page here to make the page split land on 64 not the min 32.
-            page = max(PAGED_MQA_PAGE_SIZES)
-        return index_kpool * page
 
     @classmethod
     def get_attn_backend_cls(
@@ -1015,11 +985,12 @@ class NvmlCudaPlatform(CudaPlatformBase):
                 len(set(device_names)) > 1
                 and os.environ.get("CUDA_DEVICE_ORDER") != "PCI_BUS_ID"
             ):
-                logger.warning(
+                logger.warning_once(
                     "Detected different devices in the system: %s. Please"
                     " make sure to set `CUDA_DEVICE_ORDER=PCI_BUS_ID` to "
                     "avoid unexpected behavior.",
                     ", ".join(device_names),
+                    scope="process",
                 )
 
 
@@ -1071,5 +1042,3 @@ finally:
         pynvml.nvmlShutdown()
 
 CudaPlatform = NvmlCudaPlatform if nvml_available else NonNvmlCudaPlatform
-
-CudaPlatform.log_warnings()

@@ -13,7 +13,7 @@ import regex as re
 import torch
 import torch.nn.functional as F
 from torch import nn
-from transformers import BatchFeature, PretrainedConfig, Qwen3Config
+from transformers import BatchFeature, PreTrainedConfig, Qwen3Config
 from transformers.models.whisper import WhisperFeatureExtractor
 from typing_extensions import TypedDict
 
@@ -263,7 +263,7 @@ class MossAudioEncoderConfig:
         return cls(**values)
 
 
-class MossAudioConfig(PretrainedConfig):
+class MossAudioConfig(PreTrainedConfig):
     model_type = "moss_audio"
     is_composition = True
 

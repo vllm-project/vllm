@@ -23,7 +23,7 @@ export PATH="$CARGO_HOME/bin:$PATH"
 
 CARGO_BINSTALL_VERSION="${CARGO_BINSTALL_VERSION:-1.20.1}"
 UV_VERSION="${UV_VERSION:-0.11.28}"
-PYO3_PYTHON_VERSION="${PYO3_PYTHON_VERSION:-3.12}"
+UV_SCRIPT_PYTHON_VERSION="${UV_SCRIPT_PYTHON_VERSION:-3.12}"
 
 CARGO_SORT_VERSION_REQ="${CARGO_SORT_VERSION_REQ:-2}"
 CARGO_DENY_VERSION_REQ="${CARGO_DENY_VERSION_REQ:-0.20}"
@@ -60,12 +60,12 @@ install_cargo_binstall() {
 
 install_cargo_sort() {
   log_section "Installing cargo-sort ${CARGO_SORT_VERSION_REQ}"
-  cargo binstall --no-confirm --force "cargo-sort@${CARGO_SORT_VERSION_REQ}"
+  cargo binstall --no-confirm --force --locked "cargo-sort@${CARGO_SORT_VERSION_REQ}"
 }
 
 install_cargo_deny() {
   log_section "Installing cargo-deny ${CARGO_DENY_VERSION_REQ}"
-  cargo binstall --no-confirm --force "cargo-deny@${CARGO_DENY_VERSION_REQ}"
+  cargo binstall --no-confirm --force --locked "cargo-deny@${CARGO_DENY_VERSION_REQ}"
 }
 
 install_cargo_nextest() {
@@ -74,6 +74,7 @@ install_cargo_nextest() {
     --no-confirm \
     --force \
     --secure \
+    --locked \
     "cargo-nextest@${CARGO_NEXTEST_VERSION_REQ}"
 }
 
@@ -83,34 +84,7 @@ install_uv() {
     "https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/uv-installer.sh" \
     | env UV_INSTALL_DIR="$CARGO_HOME/bin" sh
   uv --version
-}
-
-setup_pyo3_python() {
-  log_section "Installing Python ${PYO3_PYTHON_VERSION} for PyO3 tests"
-  uv python install "$PYO3_PYTHON_VERSION"
-  PYO3_PYTHON="$(uv python find \
-    --managed-python \
-    --no-project \
-    --resolve-links \
-    "$PYO3_PYTHON_VERSION")"
-  export PYO3_PYTHON
-
-  local python_libdir
-  python_libdir="$("$PYO3_PYTHON" - <<'PY'
-import pathlib
-import sysconfig
-
-libdir = pathlib.Path(sysconfig.get_config_var("LIBDIR"))
-ldlibrary = sysconfig.get_config_var("LDLIBRARY")
-assert sysconfig.get_config_var("Py_ENABLE_SHARED") == 1
-assert ldlibrary
-assert (libdir / ldlibrary).exists(), libdir / ldlibrary
-print(libdir)
-PY
-)"
-
-  export LD_LIBRARY_PATH="${python_libdir}:${LD_LIBRARY_PATH:-}"
-  export LIBRARY_PATH="${python_libdir}:${LIBRARY_PATH:-}"
+  uv python install "$UV_SCRIPT_PYTHON_VERSION"
 }
 
 run_style_clippy() {
@@ -144,7 +118,6 @@ run_style_clippy() {
 
 run_tests() {
   install_uv
-  setup_pyo3_python
   install_cargo_binstall
   install_cargo_nextest
 

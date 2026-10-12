@@ -22,7 +22,7 @@ from typing import Annotated, Any, Literal, TypeAlias
 
 import torch
 import torch.nn as nn
-from transformers import BatchFeature, PretrainedConfig
+from transformers import BatchFeature, PreTrainedConfig
 from transformers.models.audioflamingo3 import (
     AudioFlamingo3Config,
     AudioFlamingo3Processor,
@@ -118,7 +118,7 @@ AudioFlamingo3Inputs: TypeAlias = (
 class AudioFlamingo3Encoder(Qwen2AudioEncoder):
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
     ):
         super().__init__(config)
         self.avg_pooler = nn.AvgPool1d(kernel_size=2, stride=2)
@@ -161,7 +161,7 @@ class AudioFlamingo3Encoder(Qwen2AudioEncoder):
 
 
 class AudioFlamingo3MultiModalProjector(nn.Module):
-    def __init__(self, config: PretrainedConfig):
+    def __init__(self, config: PreTrainedConfig):
         super().__init__()
         self.linear_1 = nn.Linear(
             config.audio_config.hidden_size,

@@ -46,6 +46,7 @@ from vllm.models.deepseek_v4.common.ops.fused_mtp_input_rmsnorm import (
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
+from .mega_moe import finalize_mega_moe_weights
 from .model import DeepseekV4DecoderLayer
 
 logger = init_logger(__name__)
@@ -240,13 +241,11 @@ class DeepSeekV4MultiTokenPredictor(nn.Module):
             current_step_idx,
         )
 
-    def compute_logits(
+    def _pre_head(
         self,
+        mtp_layer: DeepSeekV4MultiTokenPredictorLayer,
         hidden_states: torch.Tensor,
-        spec_step_idx: int = 0,
     ) -> torch.Tensor:
-        current_step_idx = spec_step_idx % self.num_mtp_layers
-        mtp_layer = self.layers[str(self.mtp_start_layer_idx + current_step_idx)]
         # MTP forward returns the pre-hc_head residual (T, hc_mult * D); apply
         # hc_head here so logits are computed from the dense hidden state.
         hidden_states = hidden_states.view(
@@ -260,13 +259,37 @@ class DeepSeekV4MultiTokenPredictor(nn.Module):
             mtp_layer.rms_norm_eps,
             mtp_layer.hc_eps,
         )
-        hidden_states = _MTP_SHARED_HEAD_RMSNORM_KERNEL(
+        return _MTP_SHARED_HEAD_RMSNORM_KERNEL(
             hidden_states,
             mtp_layer.shared_head.norm.weight.data,
             mtp_layer.shared_head.norm.variance_epsilon,
         )
-        logits = self.logits_processor(mtp_layer.shared_head.head, hidden_states)
+
+    def compute_logits(
+        self,
+        hidden_states: torch.Tensor,
+        spec_step_idx: int = 0,
+    ) -> torch.Tensor:
+        current_step_idx = spec_step_idx % self.num_mtp_layers
+        mtp_layer = self.layers[str(self.mtp_start_layer_idx + current_step_idx)]
+        logits = self.logits_processor(
+            mtp_layer.shared_head.head, self._pre_head(mtp_layer, hidden_states)
+        )
         return logits
+
+    def get_top_tokens(
+        self,
+        hidden_states: torch.Tensor,
+        spec_step_idx: int = 0,
+    ) -> torch.Tensor:
+        current_step_idx = spec_step_idx % self.num_mtp_layers
+        mtp_layer = self.layers[str(self.mtp_start_layer_idx + current_step_idx)]
+        # Vocab-parallel argmax for the greedy draft: per-rank head projection
+        # + local argmax + a [batch, 2*tp] (value, index) reduce, instead of
+        # all-gathering the full vocab logits.
+        return self.logits_processor.get_top_tokens(
+            mtp_layer.shared_head.head, self._pre_head(mtp_layer, hidden_states)
+        )
 
 
 class DeepSeekV4MTP(nn.Module):
@@ -301,6 +324,15 @@ class DeepSeekV4MTP(nn.Module):
         spec_step_idx: int = 0,
     ) -> torch.Tensor | None:
         return self.model.compute_logits(hidden_states, spec_step_idx)
+
+    def get_top_tokens(
+        self,
+        hidden_states: torch.Tensor,
+        spec_step_idx: int = 0,
+    ) -> torch.Tensor:
+        # Greedy-draft path used when use_local_argmax_reduction is enabled:
+        # vocab-parallel argmax, no full-vocab logits.
+        return self.model.get_top_tokens(hidden_states, spec_step_idx)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         # Weight name remapping for checkpoint compatibility.
@@ -361,12 +393,16 @@ class DeepSeekV4MTP(nn.Module):
         head_rank_end = n_local_head * (tp_rank + 1)
 
         # Pre-compute expert mapping ONCE.
+        first_layer = next(iter(self.model.layers.values()))
         expert_mapping = fused_moe_make_expert_params_mapping(
             self,
             ckpt_gate_proj_name="w1",
             ckpt_down_proj_name="w2",
             ckpt_up_proj_name="w3",
             num_experts=self.config.n_routed_experts,
+            routed_experts_prefix=(
+                "" if first_layer.mtp_block.ffn.use_mega_moe else "routed_experts"
+            ),
         )
 
         # FP8 experts register ``..._weight_scale_inv`` (block_quant) while
@@ -494,6 +530,9 @@ class DeepSeekV4MTP(nn.Module):
                 )
         logger.info_once("MTP draft model loaded: %d params", len(loaded_params))
         return loaded_params
+
+    def process_weights_after_loading(self) -> None:
+        finalize_mega_moe_weights(self)
 
     def _rewrite_spec_layer_name(self, spec_layer: int, name: str) -> str:
         """Rewrite the weight name to match the format of the original model.

@@ -6,9 +6,9 @@ use std::sync::Arc;
 use axum::Json;
 use axum::extract::rejection::QueryRejection;
 use axum::extract::{Query, RawQuery, State};
-use axum::http::StatusCode;
 use serde::{Deserialize, Serialize};
 use vllm_engine_core_client::protocol::utility::PauseMode;
+use vllm_metrics::METRICS;
 
 use crate::error::ApiError;
 use crate::state::AppState;
@@ -17,6 +17,24 @@ use crate::utils::utility_call_error;
 #[derive(Serialize)]
 pub(crate) struct IsSleepingResponse {
     is_sleeping: bool,
+}
+
+#[derive(Serialize)]
+pub struct SleepResponse {
+    status: &'static str,
+    level: u32,
+}
+
+#[derive(Serialize)]
+pub struct ReleaseKvCacheMemoryResponse {
+    status: &'static str,
+}
+
+#[derive(Serialize)]
+pub struct WakeUpResponse {
+    status: &'static str,
+    /// Tags requested by the caller; null means wake all resources.
+    tags: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -32,43 +50,56 @@ const fn default_sleep_level() -> u32 {
 }
 
 fn invalid_query(error: QueryRejection) -> ApiError {
-    ApiError::invalid_request(error.body_text(), Some("mode"))
+    ApiError::invalid_request(error.body_text(), None)
 }
 
 /// Put the engine to sleep.
 pub async fn sleep(
     State(state): State<Arc<AppState>>,
     params: Result<Query<SleepParams>, QueryRejection>,
-) -> Result<StatusCode, ApiError> {
-    let Query(params) = params.map_err(invalid_query)?;
+) -> Result<Json<SleepResponse>, ApiError> {
+    let Query(SleepParams { level, mode }) = params.map_err(invalid_query)?;
+    if level > 2 {
+        return Err(ApiError::invalid_request(
+            "level must be between 0 and 2",
+            Some("level"),
+        ));
+    }
+    let _recorder = METRICS.api_server.record_sleep_mode_operation("sleep");
 
     state
         .engine_core_client()
-        .sleep(params.level, params.mode)
+        .sleep(level, mode)
         .await
         .map_err(|error| utility_call_error("sleep", error))?;
 
-    Ok(StatusCode::OK)
+    Ok(Json(SleepResponse {
+        status: "sleeping",
+        level,
+    }))
 }
 
 /// Release KV cache memory while keeping model weights resident.
 pub async fn release_kv_cache_memory(
     State(state): State<Arc<AppState>>,
-) -> Result<StatusCode, ApiError> {
+) -> Result<Json<ReleaseKvCacheMemoryResponse>, ApiError> {
+    let _recorder = METRICS.api_server.record_sleep_mode_operation("release_kv_cache_memory");
     state
         .engine_core_client()
         .release_kv_cache_memory()
         .await
         .map_err(|error| utility_call_error("release_kv_cache_memory", error))?;
 
-    Ok(StatusCode::OK)
+    Ok(Json(ReleaseKvCacheMemoryResponse {
+        status: "kv_cache_released",
+    }))
 }
 
 /// Wake the engine from sleep mode.
 pub async fn wake_up(
     State(state): State<Arc<AppState>>,
     RawQuery(query): RawQuery,
-) -> Result<StatusCode, ApiError> {
+) -> Result<Json<WakeUpResponse>, ApiError> {
     let tags = query.and_then(|query| {
         let tags = url::form_urlencoded::parse(query.as_bytes())
             .filter(|(key, _)| key == "tags")
@@ -77,13 +108,17 @@ pub async fn wake_up(
         (!tags.is_empty()).then_some(tags)
     });
 
-    state
+    let _recorder = METRICS.api_server.record_sleep_mode_operation("wake");
+    let fully_awake = state
         .engine_core_client()
-        .wake_up(tags)
+        .wake_up(tags.clone())
         .await
         .map_err(|error| utility_call_error("wake_up", error))?;
 
-    Ok(StatusCode::OK)
+    Ok(Json(WakeUpResponse {
+        status: if fully_awake { "awake" } else { "sleeping" },
+        tags,
+    }))
 }
 
 /// Return whether the engine is currently sleeping at any level.

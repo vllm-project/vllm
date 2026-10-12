@@ -332,6 +332,35 @@ def test_rocm_gfx950_fp4_is_explicit_opt_in(monkeypatch):
     platform.is_device_capability_family.assert_not_called()
 
 
+@pytest.mark.parametrize("cdna", [3, 4])
+def test_rocm_fp4_deepseek_v41_keeps_its_own_gate(monkeypatch, cdna):
+    _, gfx_probe = _platform(monkeypatch, rocm=True)
+    rocm_module = sys.modules["vllm.platforms.rocm"]
+    monkeypatch.setattr(rocm_module, "get_cdna_version", lambda: cdna, raising=False)
+    aiter_ops = ModuleType("vllm._aiter_ops")
+    monkeypatch.setattr(
+        aiter_ops,
+        "rocm_aiter_ops",
+        SimpleNamespace(is_enabled=lambda: True),
+        raising=False,
+    )
+    monkeypatch.setitem(sys.modules, "vllm._aiter_ops", aiter_ops)
+    aiter_probe = Mock(side_effect=AssertionError("V4.1 must not probe FlyDSL"))
+    monkeypatch.setattr(indexer, "aiter_mxfp4_available", aiter_probe)
+    config = _config("mxfp4", dcp=2)
+    config.model_config = SimpleNamespace(
+        hf_config=SimpleNamespace(model_type="deepseek_v41")
+    )
+
+    if cdna == 4:
+        assert indexer.dsa_indexer_uses_fp4(config) is True
+    else:
+        with pytest.raises(ValueError, match="requires CDNA4"):
+            indexer.dsa_indexer_uses_fp4(config)
+    gfx_probe.assert_not_called()
+    aiter_probe.assert_not_called()
+
+
 def test_rocm_fp4_rejects_other_architectures_before_aiter(monkeypatch):
     _platform(monkeypatch, rocm=True, gfx950=False)
     aiter_probe = Mock(side_effect=AssertionError("unsupported GPU must fail first"))

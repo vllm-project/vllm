@@ -9,6 +9,8 @@ have the original unpadded size. These tests verify that weight loading
 correctly handles this mismatch.
 """
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 
@@ -542,6 +544,244 @@ class TestLoadWeightsExpertBias:
         weights = [(expert_name, torch.zeros(self.NUM_EXPERTS, 1))]
         with pytest.raises(AttributeError, match=param_name.replace(".", r"\.")):
             list(RoutedExperts.load_weights(experts, weights))
+
+
+class TestLoadWeightsExpertMapping:
+    @staticmethod
+    def _mapping(projs=("gate_proj", "down_proj", "up_proj"), **kwargs):
+        return RoutedExperts.build_expert_params_mapping(
+            *projs,
+            num_experts=16,
+            routed_experts_prefix="",
+            include_fused=True,
+            **kwargs,
+        )
+
+    @staticmethod
+    def _load(
+        mapping,
+        weights,
+        suffix="weight",
+        *,
+        transposed=False,
+        quant_method="tensor",
+        layer_name="model.layers.0.mlp.experts",
+        is_gated=True,
+    ):
+        experts = torch.nn.Module()
+        experts.layer_name = layer_name
+        experts.moe_config = SimpleNamespace(is_act_and_mul=is_gated)
+        experts.get_expert_mapping = lambda **_: mapping
+        experts.is_fused_checkpoint_transposed = transposed
+        experts._orient_fused_weight = RoutedExperts._orient_fused_weight
+        calls = []
+
+        def weight_loader(param, loaded_weight, shard_id, expert_id, **_):
+            calls.append((param.test_name, shard_id, expert_id, loaded_weight.clone()))
+            return True
+
+        for prefix in ("w13", "w2"):
+            param_name = f"{prefix}_{suffix}"
+            param = torch.nn.Parameter(torch.empty(0), requires_grad=False)
+            param.test_name = param_name
+            param.quant_method = quant_method
+            param.weight_loader = weight_loader
+            setattr(experts, param_name, param)
+        loaded = list(RoutedExperts.load_weights(experts, iter(weights)))
+        assert loaded == [call[0] for call in calls]
+        return calls
+
+    @pytest.mark.parametrize(
+        "projs,lora_prefix",
+        [
+            (("gate_proj", "down_proj", "up_proj"), ""),
+            (("w1", "w2", "w3"), ""),
+            (("up_proj", "down_proj", "up_proj"), ""),
+            (("up_proj", "down_proj", None), ""),
+            (("gate_proj", "down_proj", "up_proj"), "base_layer."),
+        ],
+    )
+    @pytest.mark.parametrize(
+        "suffix,shape,dtype",
+        [
+            ("weight", (2, 3), torch.bfloat16),
+            ("input_scale", (), torch.float32),
+            ("g_idx", (2,), torch.int32),
+        ],
+    )
+    def test_per_expert_weights_keep_all_physical_destinations(
+        self, projs, lora_prefix, suffix, shape, dtype
+    ):
+        mapping = self._mapping(
+            projs,
+            num_redundant_experts=4,
+            lora_base_layer_prefix=lora_prefix,
+            is_gated=projs[2] is not None,
+        )
+        for logical_id, physical_ids in [(1, (1, 17)), (10, (10,))]:
+            for proj in dict.fromkeys(projs):
+                if not proj:
+                    continue
+                weight = torch.full(shape, logical_id + 1, dtype=dtype)
+                name = f"{logical_id}.{proj}.{lora_prefix}{suffix}"
+                calls = self._load(mapping, [(name, weight)], suffix)
+                shards = [s for p, s in zip(projs, ("w1", "w2", "w3")) if p == proj]
+                expected = [
+                    (f"{'w2' if shard == 'w2' else 'w13'}_{suffix}", shard, physical)
+                    for physical in physical_ids
+                    for shard in shards
+                ]
+                assert [call[:3] for call in calls] == expected
+                for call in calls:
+                    torch.testing.assert_close(call[3], weight, rtol=0, atol=0)
+
+    @pytest.mark.parametrize(
+        "projs,fused_name,lora_prefix",
+        [
+            (("gate_proj", "down_proj", "up_proj"), "gate_up_proj", ""),
+            (("w1", "w2", "w3"), "w13", "base_layer."),
+        ],
+    )
+    def test_per_expert_fused_gate_up_keeps_both_halves(
+        self, projs, fused_name, lora_prefix
+    ):
+        mapping = self._mapping(
+            projs, num_redundant_experts=4, lora_base_layer_prefix=lora_prefix
+        )
+        weight = torch.arange(12).reshape(4, 3)
+        calls = self._load(mapping, [(f"1.{fused_name}.{lora_prefix}weight", weight)])
+        assert [call[:3] for call in calls] == [
+            ("w13_weight", shard, expert)
+            for expert in (1, 17)
+            for shard in ("w1", "w3")
+        ]
+        for call, expected in zip(calls, weight.chunk(2) * 2):
+            torch.testing.assert_close(call[3], expected, rtol=0, atol=0)
+
+    def test_non_gated_mapping_uses_stacked_up_proj_without_warning(self, caplog_vllm):
+        mapping = self._mapping(("up_proj", "down_proj", None), is_gated=False)
+        assert "Unexpected gate/up projection names" not in caplog_vllm.text
+        assert mapping[:2] == [
+            ("experts.w13_weight", "experts.up_proj", 0, "w1"),
+            ("experts.w2_weight", "experts.down_proj", 0, "w2"),
+        ]
+        assert mapping[2:] == [
+            (param, f"experts.{expert}.{proj}.", expert, shard)
+            for expert in range(16)
+            for param, proj, shard in (
+                ("experts.w13_", "up_proj", "w1"),
+                ("experts.w2_", "down_proj", "w2"),
+            )
+        ]
+
+    def test_gated_mapping_with_unknown_names_warns_and_skips_fused(self, caplog_vllm):
+        mapping = self._mapping(("fc1", "fc2", "fc3"))
+        assert "Unexpected gate/up projection names: fc1, fc3" in caplog_vllm.text
+        assert [name for _, name, _, _ in mapping[:3]] == [
+            "experts.0.fc1.",
+            "experts.0.fc2.",
+            "experts.0.fc3.",
+        ]
+
+    def test_stacked_non_gated_tensors_load_unsplit(self):
+        mapping = self._mapping(("up_proj", "down_proj", None), is_gated=False)
+        up_proj = torch.arange(16 * 4 * 3).reshape(16, 4, 3)
+        down_proj = torch.arange(16 * 3 * 4).reshape(16, 3, 4)
+        calls = self._load(
+            mapping,
+            [("up_proj", up_proj), ("down_proj", down_proj)],
+            is_gated=False,
+        )
+        assert [call[:3] for call in calls] == [
+            *(("w13_weight", "w1", expert) for expert in range(16)),
+            *(("w2_weight", "w2", expert) for expert in range(16)),
+        ]
+        for call, expected in zip(calls, [*up_proj, *down_proj]):
+            torch.testing.assert_close(call[3], expected, rtol=0, atol=0)
+
+    @pytest.mark.parametrize(
+        "suffix,quant_method,transposed",
+        [
+            ("weight", "tensor", False),
+            ("weight", "tensor", True),
+            ("weight_scale", "channel", True),
+            ("weight_scale", "block", True),
+        ],
+    )
+    def test_mixed_weights_reset_mapping_and_keep_fused_layout(
+        self, transposed, suffix, quant_method
+    ):
+        weight = torch.arange(192).reshape(16, 4, 3)
+        checkpoint = (
+            weight.transpose(-1, -2)
+            if (transposed and (suffix == "weight" or quant_method == "block"))
+            else weight
+        )
+        calls = self._load(
+            self._mapping(),
+            [
+                (f"1.gate_proj.{suffix}", weight[1, :2]),
+                ("gate_up_proj" + suffix[6:], checkpoint),
+                (f"10.down_proj.{suffix}", weight[10, :2]),
+            ],
+            suffix,
+            transposed=transposed,
+            quant_method=quant_method,
+        )
+        fused_calls = [
+            (f"w13_{suffix}", shard, expert)
+            for shard in ("w1", "w3")
+            for expert in range(16)
+        ]
+        assert [call[:3] for call in calls] == [
+            (f"w13_{suffix}", "w1", 1),
+            *fused_calls,
+            (f"w2_{suffix}", "w2", 10),
+        ]
+        expected = [weight[1, :2]]
+        expected += [expert for half in weight.chunk(2, dim=1) for expert in half]
+        expected += [weight[10, :2]]
+        for call, tensor in zip(calls, expected):
+            torch.testing.assert_close(call[3], tensor, rtol=0, atol=0)
+
+    def test_fused_weights_stop_after_first_matching_run(self):
+        mapping = self._mapping()
+        calls = self._load(
+            [mapping[0], mapping[2], mapping[1]],
+            [("gate_up_proj", torch.ones(2, 4, 3))],
+        )
+        assert [call[:3] for call in calls] == [
+            ("w13_weight", "w1", 0),
+            ("w13_weight", "w1", 1),
+        ]
+
+    def test_repeated_experts_prefix_does_not_hide_later_matches(self):
+        calls = self._load(
+            self._mapping(),
+            [("1.gate_proj.weight", torch.ones(2, 3))],
+            layer_name="model.experts.0.child.experts",
+        )
+        assert [call[:3] for call in calls] == [("w13_weight", "w1", 1)]
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "01.gate_proj.weight",
+            "16.gate_proj.weight",
+            "gate.weight",
+            "non_expert.weight",
+        ],
+    )
+    def test_unmatched_names_do_not_load_experts(self, name):
+        assert self._load(self._mapping(), [(name, torch.ones(2, 3))]) == []
+
+    @pytest.mark.parametrize(
+        "weight_name", ["1.gate_proj.", "experts.", "experts.1", ""]
+    )
+    def test_unusual_matching_entries_are_not_silently_skipped(self, weight_name):
+        mapping = self._mapping() + [("missing", weight_name, 1, "w3")]
+        with pytest.raises(AttributeError, match="has no parameter"):
+            self._load(mapping, [("1.gate_proj.weight", torch.ones(2, 3))])
 
 
 class TestPerTensorScaleCoercion:

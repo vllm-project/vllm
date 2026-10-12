@@ -396,6 +396,7 @@ class DeepseekV2MoE(nn.Module):
             if self.is_fused_shared_expert_enabled
             else None,
             fuse_shared_experts=self.is_fused_shared_expert_enabled,
+            shared_expert_prefix=f"{prefix}.shared_experts",
             router_logits_dtype=self.gate.out_dtype,
         )
 
@@ -658,6 +659,7 @@ class DeepseekV32IndexerCache(torch.nn.Module, AttentionLayerBase):
         return MLAAttentionSpec(
             block_size=self.cache_config.block_size,
             num_kv_heads=1,
+            max_tp_shards=1,
             head_size=self.head_dim,
             dtype=self.dtype,
             cache_role=SparseCacheRole.INDEXER,
@@ -715,7 +717,7 @@ class Indexer(nn.Module):
             disable_tp=True,
             prefix=f"{prefix}.wk_weights_proj",
         )
-        self.k_norm = LayerNorm(self.head_dim, eps=1e-6)
+        self.k_norm = LayerNorm(self.head_dim, eps=1e-6, dtype=torch.float32)
         self.softmax_scale = self.head_dim**-0.5
 
         self.scale_fmt = "ue8m0"

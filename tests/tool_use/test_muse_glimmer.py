@@ -24,9 +24,11 @@ a real tokenizer live in ``test_muse_glimmer_parse_delta.py``.
 
 import json
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
 
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.reasoning.muse_glimmer_reasoning_parser import MuseGlimmerReasoningParser
 from vllm.tool_parsers.muse_glimmer_tool_parser import MuseGlimmerToolParser
 
@@ -61,10 +63,21 @@ class _FakeReq:
     tools = None
 
 
-def _req(*names):
+def _fake_req() -> ChatCompletionRequest:
+    return cast(ChatCompletionRequest, _FakeReq())
+
+
+# The parsers accept a missing request at runtime.
+_NO_REQ = cast(ChatCompletionRequest, None)
+
+
+def _req(*names: str) -> ChatCompletionRequest:
     """A request with ``names`` registered as tools."""
-    return SimpleNamespace(
-        tools=[SimpleNamespace(function=SimpleNamespace(name=n)) for n in names]
+    return cast(
+        ChatCompletionRequest,
+        SimpleNamespace(
+            tools=[SimpleNamespace(function=SimpleNamespace(name=n)) for n in names]
+        ),
     )
 
 
@@ -90,7 +103,7 @@ def test_single_tool_call_after_reasoning():
         '<atem:parameter name="units">celsius</atem:parameter>\n'
         "</atem:invoke>\n</atem:function_calls><|eot|>"
     )
-    out = MuseGlimmerToolParser.extract_tool_calls(T, raw, None)
+    out = MuseGlimmerToolParser.extract_tool_calls(T, raw, _NO_REQ)
     assert out.tools_called and len(out.tool_calls) == 1
     assert out.tool_calls[0].function.name == "weather.get"
     assert json.loads(out.tool_calls[0].function.arguments) == {
@@ -112,7 +125,7 @@ def test_parallel_calls_across_eom_boundaries():
         '<atem:parameter name="b">4</atem:parameter>\n'
         "</atem:invoke>\n</atem:function_calls><|eot|>"
     )
-    out = MuseGlimmerToolParser.extract_tool_calls(T, raw, None)
+    out = MuseGlimmerToolParser.extract_tool_calls(T, raw, _NO_REQ)
     assert out.tools_called and len(out.tool_calls) == 2, len(out.tool_calls)
     assert [t.function.name for t in out.tool_calls] == ["math.add", "math.mul"]
     # JSON-typed values decode to ints
@@ -127,14 +140,14 @@ def test_echoed_invoke_in_reasoning_is_not_parsed():
         "but I will not.<|eom|>"
         "<|start|>assistant to=user<|message|>The answer is 42.<|eot|>"
     )
-    out = MuseGlimmerToolParser.extract_tool_calls(T, raw, None)
+    out = MuseGlimmerToolParser.extract_tool_calls(T, raw, _NO_REQ)
     assert not out.tools_called, "channel scoping failed -- echoed invoke parsed!"
     assert out.content == "The answer is 42.", repr(out.content)
 
 
 def test_plain_answer_yields_no_tool_calls():
     out = MuseGlimmerToolParser.extract_tool_calls(
-        T, "to=user<|message|>Just a plain answer.<|eot|>", None
+        T, "to=user<|message|>Just a plain answer.<|eot|>", _NO_REQ
     )
     assert not out.tools_called
 
@@ -147,7 +160,7 @@ def test_json_object_array_and_bool_params_decode():
         '<atem:parameter name="flag">true</atem:parameter>\n'
         "</atem:invoke>\n</atem:function_calls><|eot|>"
     )
-    out = MuseGlimmerToolParser.extract_tool_calls(T, raw, None)
+    out = MuseGlimmerToolParser.extract_tool_calls(T, raw, _NO_REQ)
     assert json.loads(out.tool_calls[0].function.arguments) == {
         "payload": {"nested": [1, 2, 3]},
         "flag": True,
@@ -166,10 +179,10 @@ def test_reasoning_to_toolcall_handoff():
         '<atem:parameter name="city">Paris</atem:parameter>\n'
         "</atem:invoke>\n</atem:function_calls>"
     )
-    reasoning, content = MuseGlimmerReasoningParser.extract_reasoning(R, raw, None)
+    reasoning, content = MuseGlimmerReasoningParser.extract_reasoning(R, raw, _NO_REQ)
     assert reasoning == "Let me call the tool.", repr(reasoning)
     assert content is not None and "<atem:invoke" in content, repr(content)
-    out = MuseGlimmerToolParser.extract_tool_calls(T, content, None)
+    out = MuseGlimmerToolParser.extract_tool_calls(T, content, _NO_REQ)
     assert out.tools_called and len(out.tool_calls) == 1
     assert out.tool_calls[0].function.name == "weather.get"
 
@@ -179,15 +192,17 @@ def test_reasoning_then_user_answer():
         " to=self<|message|>thinking<|eom|>"
         "<|start|>assistant to=user<|message|>The answer is 42.<|eot|>"
     )
-    reasoning, content = MuseGlimmerReasoningParser.extract_reasoning(R, raw, None)
+    reasoning, content = MuseGlimmerReasoningParser.extract_reasoning(R, raw, _NO_REQ)
     assert reasoning == "thinking", repr(reasoning)
     assert content == "The answer is 42.", repr(content)
-    assert not MuseGlimmerToolParser.extract_tool_calls(T, content, None).tools_called
+    assert not MuseGlimmerToolParser.extract_tool_calls(
+        T, content, _NO_REQ
+    ).tools_called
 
 
 def test_plain_content_without_framing_passes_through():
     reasoning, content = MuseGlimmerReasoningParser.extract_reasoning(
-        R, "Just a direct answer.", None
+        R, "Just a direct answer.", _NO_REQ
     )
     assert reasoning is None and content == "Just a direct answer.", (
         reasoning,
@@ -207,9 +222,10 @@ def test_reasoning_then_parallel_calls():
         '<atem:parameter name="a">3</atem:parameter>\n</atem:invoke>\n'
         "</atem:function_calls><|eot|>"
     )
-    reasoning, content = MuseGlimmerReasoningParser.extract_reasoning(R, raw, None)
+    reasoning, content = MuseGlimmerReasoningParser.extract_reasoning(R, raw, _NO_REQ)
     assert reasoning == "need two calls", repr(reasoning)
-    out = MuseGlimmerToolParser.extract_tool_calls(T, content, None)
+    assert content is not None
+    out = MuseGlimmerToolParser.extract_tool_calls(T, content, _NO_REQ)
     assert [t.function.name for t in out.tool_calls] == ["math.add", "math.mul"], (
         out.tool_calls
     )
@@ -231,7 +247,7 @@ def _stream(raw: str, chunk: int):
             R, prev, cur, delta, [], [], []
         )
         if dm is not None:
-            if getattr(dm, "reasoning", None):
+            if dm.reasoning:
                 reasoning.append(dm.reasoning)
             content_delta = getattr(dm, "content", None)
             # Tool-channel content is an internal handoff to the tool parser,
@@ -239,7 +255,7 @@ def _stream(raw: str, chunk: int):
             if content_delta and "<atem:function_calls>" not in content_delta:
                 content.append(content_delta)
         dt = MuseGlimmerToolParser.extract_tool_calls_streaming(
-            T, prev, cur, delta, [], [], [], _FakeReq()
+            T, prev, cur, delta, [], [], [], _fake_req()
         )
         if dt is not None and dt.tool_calls:
             toolcalls.extend(dt.tool_calls)
@@ -319,11 +335,11 @@ def test_streaming_reasoning_then_content():
 
 
 def test_truncated_cot_no_toolcall_nonstreaming():
-    out = MuseGlimmerToolParser.extract_tool_calls(T, RAW_TRUNCATED, _FakeReq())
+    out = MuseGlimmerToolParser.extract_tool_calls(T, RAW_TRUNCATED, _fake_req())
     assert not out.tools_called and out.tool_calls == []
     # partial reasoning must still be recovered by the reasoning parser
     reasoning, _ = MuseGlimmerReasoningParser.extract_reasoning(
-        R, RAW_TRUNCATED, _FakeReq()
+        R, RAW_TRUNCATED, _fake_req()
     )
     assert reasoning and "Maybe I should call" in reasoning, repr(reasoning)
 
@@ -374,7 +390,7 @@ def test_trailing_segment_ambiguous_left_alone():
 
 def test_no_registered_tools_passthrough():
     out = MuseGlimmerToolParser.extract_tool_calls(
-        T, _call("get_weather.get_weather"), None
+        T, _call("get_weather.get_weather"), _NO_REQ
     )
     assert out.tool_calls[0].function.name == "get_weather.get_weather"
 

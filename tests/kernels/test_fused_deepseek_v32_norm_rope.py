@@ -24,6 +24,7 @@ outputs are checked within 1 representable-step (ULP); bf16 norm/RoPE outputs us
 rtol/atol=1e-2 (the tolerance the sibling deepseek_v4 fused-kernel test uses).
 """
 
+from functools import partial
 from typing import NamedTuple
 
 import pytest
@@ -880,22 +881,36 @@ def test_fused_q_no_indexer(num_tokens: int, cfg: ModelConfig):
 @pytest.mark.parametrize("cfg", MODEL_CONFIGS, ids=MODEL_IDS)
 @pytest.mark.parametrize("num_tokens", [1, 17, 512])
 @pytest.mark.parametrize("has_indexer", [True, False])
-def test_fused_q_bf16_query(num_tokens: int, has_indexer: bool, cfg: ModelConfig):
+@pytest.mark.parametrize("use_mha", [True, False])
+@pytest.mark.parametrize(
+    "index_interleave,cache_dtype", [(False, torch.float32), (True, torch.bfloat16)]
+)
+@pytest.mark.parametrize("capture", [False, True])
+def test_fused_q_bf16_query(
+    num_tokens: int,
+    has_indexer: bool,
+    use_mha: bool,
+    index_interleave: bool,
+    cache_dtype: torch.dtype,
+    capture: bool,
+    cfg: ModelConfig,
+):
     """bf16-query path (FlashMLA sparse, SM90/SM100): only the RoPE'd q_pe is
-    produced (bf16, unquantized); ql_nope is consumed directly by the caller."""
+    produced; MHA does not need an absorbed ql_nope projection."""
     torch.manual_seed(6)
     dev = "cuda"
     max_pos = 8192
     pos = torch.arange(num_tokens, device=dev, dtype=torch.int64) % max_pos
 
+    # Attention takes q_pe as a strided slice of the full Q projection.
     q_pe = torch.randn(
-        num_tokens, cfg.num_heads, cfg.rope_dim, device=dev, dtype=torch.bfloat16
-    )
+        num_tokens, cfg.num_heads, 4 * cfg.rope_dim, device=dev, dtype=torch.bfloat16
+    )[..., -cfg.rope_dim :]
     ql_nope = torch.randn(
         num_tokens, cfg.num_heads, cfg.kv_lora, device=dev, dtype=torch.bfloat16
     )
     q_scale = torch.tensor([0.37], device=dev, dtype=torch.float32)
-    q_cos_sin = make_cos_sin(max_pos, cfg.rope_dim, dev)
+    q_cos_sin = make_cos_sin(max_pos, cfg.rope_dim, dev).to(cache_dtype)
 
     index_q = index_w = idx_cos_sin = None
     if has_indexer:
@@ -909,23 +924,34 @@ def test_fused_q_bf16_query(num_tokens: int, has_indexer: bool, cfg: ModelConfig
         index_w = torch.randn(
             num_tokens, cfg.index_heads, device=dev, dtype=torch.float32
         )
-        idx_cos_sin = make_cos_sin(max_pos, cfg.rope_dim, dev)
+        idx_cos_sin = make_cos_sin(max_pos, cfg.rope_dim, dev).to(cache_dtype)
 
-    iq_fp8, iw_out, q_pe_out = K.fused_q(
+    run = partial(
+        K.fused_q,
         pos,
         q_pe,
         q_cos_sin,
         index_q,
         idx_cos_sin,
-        ql_nope,
+        q_pe if use_mha else ql_nope,
         q_scale,
         index_w,
         cfg.index_head_dim**-0.5,
         cfg.index_heads**-0.5,
         has_indexer=has_indexer,
-        index_rope_interleave=False,
+        index_rope_interleave=index_interleave,
         quantize_mqa=False,
     )
+
+    iq_fp8, iw_out, q_pe_out = run()
+    if capture:
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            iq_fp8, iw_out, q_pe_out = run()
+        q_pe.mul_(0.5)
+        if index_q is not None:
+            index_q.mul_(1.5)
+        graph.replay()
 
     # MQA query: only the RoPE'd q_pe, bf16, unquantized.
     assert q_pe_out.dtype == torch.bfloat16
@@ -945,7 +971,7 @@ def test_fused_q_bf16_query(num_tokens: int, has_indexer: bool, cfg: ModelConfig
             index_q.float(),
             pos.unsqueeze(-1).expand(num_tokens, cfg.index_heads),
             idx_cos_sin,
-            interleave=False,
+            interleave=index_interleave,
         )
         q_ref, scale_ref = ue8m0_quant(iq_ref)
         assert_fp8(iq_fp8, q_ref, "indexer-Q fp8 (bf16-query path)")

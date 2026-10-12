@@ -16,7 +16,9 @@ import regex as re
 import torch
 from transformers import AutoTokenizer
 
-from vllm.entrypoints.chat_utils import (
+from vllm.exceptions import VLLMValidationError
+from vllm.renderers import TokenizeParams
+from vllm.renderers.chat_utils import (
     _ENABLE_PROMPT_EMBEDS_ERROR,
     _PROMPT_EMBEDS_MISSING_DATA_ERROR,
     _RESERVED_PLACEHOLDER_IN_TEXT_ERROR,
@@ -26,8 +28,6 @@ from vllm.entrypoints.chat_utils import (
     parse_chat_messages,
     parse_chat_messages_async,
 )
-from vllm.exceptions import VLLMValidationError
-from vllm.renderers import TokenizeParams
 from vllm.renderers.hf import (
     _PROMPT_EMBEDS_PLACEHOLDER_SPAN_MISMATCH_ERROR,
     _build_mixed_prompt_embeds,

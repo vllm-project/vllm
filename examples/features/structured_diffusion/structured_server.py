@@ -399,6 +399,14 @@ def canvas_width(template):
     return min(CANVAS_LEN, -(-need // CANVAS_STEP) * CANVAS_STEP)
 
 
+def constrained_xargs():
+    """Read over the labels only. The engine runs the unembedding, sampler and
+    self-conditioning over the request's logprob_token_ids instead of the whole
+    vocabulary. Same argmax, about a quarter less GPU time per read. Logprobs
+    come back normalized over the labels."""
+    return {"diffusion_constrained": True} if ARGS.constrained else {}
+
+
 def pin_xargs(template, slots, steps):
     """Past one denoise step the template must be held, or accept/renoise
     rewrites it: pin every canvas position that is not an answer slot."""
@@ -552,6 +560,7 @@ def one_read(
             "diffusion_max_steps": schema["steps"],
             "diffusion_read_only": True,
             **pin_xargs(template, slots, schema["steps"]),
+            **constrained_xargs(),
         },
     }
     d = upstream_chat(body)
@@ -601,6 +610,7 @@ def one_read_continuation(schema, template, slots, prompt_ids, seed):
             "diffusion_max_steps": schema["steps"],
             "diffusion_read_only": True,
             **pin_xargs(template, slots, schema["steps"]),
+            **constrained_xargs(),
         },
     }
     d = upstream_completions(body)
@@ -1495,6 +1505,12 @@ def main():
         type=int,
         default=16,
         help="request widths round up to a multiple of this",
+    )
+    p.add_argument(
+        "--no-constrained",
+        dest="constrained",
+        action="store_false",
+        help="read over the whole vocabulary instead of the labels",
     )
     p.add_argument("--host", default="0.0.0.0")
     p.add_argument("--port", type=int, default=8011)

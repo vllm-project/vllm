@@ -4,7 +4,7 @@
 
 import torch
 import torch.nn as nn
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 from vllm.config.lora import LoRAConfig
 from vllm.distributed import (
@@ -89,7 +89,7 @@ class RowParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
         source_layer: nn.Module,
         lora_config: LoRAConfig,
         packed_modules_list: list,
-        model_config: PretrainedConfig | None = None,
+        model_config: PreTrainedConfig | None = None,
     ) -> bool:
         return type(source_layer) is maybe_get_oot_by_class(RowParallelLinear)
 
@@ -165,7 +165,7 @@ class RowParallelLinearWithShardedLoRA(RowParallelLinearWithLoRA):
         source_layer: nn.Module,
         lora_config: LoRAConfig,
         packed_modules_list: list,
-        model_config: PretrainedConfig | None = None,
+        model_config: PreTrainedConfig | None = None,
     ) -> bool:
         # specifying kwargs so they can be easily accessed in decorator
         return super().can_replace_layer(

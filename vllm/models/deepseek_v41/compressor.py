@@ -37,7 +37,7 @@ class CompressorBackend(AttentionBackend):
         return "CompressorBackend"
 
     @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
         return [MultipleOf(1)]
 
     @classmethod
@@ -57,7 +57,7 @@ class CompressorMetadata:
     token_to_req_indices: torch.Tensor  # [num_tokens]
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["block_table_stride", "num_actual_tokens", "num_tokens"])
 def _ring_slot_mapping_kernel(
     slot_mapping_ptr,
     block_table_ptr,
@@ -75,8 +75,12 @@ def _ring_slot_mapping_kernel(
     block = tl.load(block_table_ptr + req * block_table_stride, mask=valid, other=0)
     pos = tl.load(positions_ptr + offsets, mask=valid, other=0)
     slot = block.to(tl.int64) * CAPACITY + pos % CAPACITY
+    # Block 0 is the null block. A request without a ring block (dummy or padding
+    # rows, which the runners fill with the null block) must not write.
     tl.store(
-        slot_mapping_ptr + offsets, tl.where(valid, slot, -1), mask=offsets < num_tokens
+        slot_mapping_ptr + offsets,
+        tl.where(valid & (block != 0), slot, -1),
+        mask=offsets < num_tokens,
     )
 
 

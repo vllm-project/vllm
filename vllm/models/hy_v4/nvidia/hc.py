@@ -17,7 +17,7 @@ requires restructuring the decoder-layer forward scheduling.
 
 import torch
 from torch import nn
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 from vllm.model_executor.layers.hpc import HpcIHCHead, HpcIHCPost, HpcIHCPre
 from vllm.model_executor.layers.linear import ReplicatedLinear
@@ -40,7 +40,7 @@ class HYV4HCPreLayer(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         hidden_dim: int,
         hc_mult: int = 4,
         magnitude: float = 2.0,
@@ -163,7 +163,7 @@ class HYV4HCPostLayer(nn.Module):
         y[n, i, d] = post[n, i] * x[n, d] + residual[n, i, d]
     """
 
-    def __init__(self, config: PretrainedConfig):
+    def __init__(self, config: PreTrainedConfig):
         super().__init__()
         self.config = config
 
@@ -213,7 +213,7 @@ class HYV4HCHeadLayer(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         hidden_size: int,
         hc_mult: int = 4,
         hc_eps: float = 1e-6,
@@ -301,7 +301,7 @@ class HYV4HCLayer(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         layer_idx: int,
         init_std: float = 6e-3,
         base_noise_std: float = 0.0,

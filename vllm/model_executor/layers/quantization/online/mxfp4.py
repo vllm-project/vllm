@@ -119,7 +119,8 @@ class Mxfp4OnlineLinearMethod(OnlineLinearBase):
         if getattr(layer, "_already_called_process_weights_after_loading", False):
             return
 
-        weight_fp4, weight_scale = mxfp4_quantize(layer.weight.contiguous())
+        weight = self.get_weight_for_quantization(layer)
+        weight_fp4, weight_scale = mxfp4_quantize(weight.contiguous())
 
         layer.input_scale = None
         replace_parameter(layer, "weight", weight_fp4.data)
@@ -220,6 +221,7 @@ class Mxfp4OnlineMoEMethod(OnlineMoEMethodBase):
                 w2_weight_scale=w2_scale,
                 w13_bias=w13_bias,
                 w2_bias=w2_bias,
+                use_separated_a4w4=self.moe.use_mxfp4_w4a4_dsv4,
             )
         )
 

@@ -63,6 +63,7 @@ from vllm.multimodal.processing import (
 )
 from vllm.multimodal.processing.processor import HFMultiModalInputs
 from vllm.renderers import TokenizeParams
+from vllm.tokenizers import TokenizerLike
 from vllm.transformers_utils.processor import cached_processor_from_config
 from vllm.utils.jsontree import json_map_leaves
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
@@ -325,7 +326,7 @@ class WhisperCrossAttention(WhisperAttention):
             prefix=f"{prefix}.kv_proj",
         )
 
-    def forward(
+    def forward(  # type: ignore[override]
         self,
         hidden_states: torch.Tensor,
         encoder_hidden_states: torch.Tensor | None,
@@ -872,7 +873,7 @@ class WhisperForConditionalGeneration(
     @classmethod
     def get_language_token_ids(
         cls,
-        tokenizer: object,
+        tokenizer: TokenizerLike,
     ) -> list[int]:
         """Return token IDs for all supported language tokens.
 
@@ -908,8 +909,8 @@ class WhisperForConditionalGeneration(
     def parse_language_detection_output(
         cls,
         token_ids: list[int],
-        tokenizer: object,
-    ) -> str | None:
+        tokenizer: TokenizerLike,
+    ) -> str:
         """Parse the language token predicted by Whisper.
 
         Decodes the first token ID and extracts the language code from the
@@ -1004,6 +1005,7 @@ class WhisperForConditionalGeneration(
         audio_input = self._parse_and_validate_audio_input(**kwargs)
         # Split concatenated encoder outputs into one tensor per audio input
         enc_output = self.model.get_encoder_outputs(audio_input["input_features"])
+        assert enc_output is not None
         # The assumption is we can only process whole mm items (audios)
         return enc_output.unbind(dim=0)
 
@@ -1021,8 +1023,12 @@ class WhisperForConditionalGeneration(
     def _parse_and_validate_audio_input(self, **kwargs: object) -> WhisperAudioInputs:
         input_features = kwargs.pop("input_features", None)
 
+        def to_dtype(value: object) -> torch.Tensor:
+            assert isinstance(value, torch.Tensor)
+            return value.to(self.dtype)
+
         if input_features is not None:
-            input_features = json_map_leaves(lambda x: x.to(self.dtype), input_features)
+            input_features = json_map_leaves(to_dtype, input_features)
 
         return WhisperAudioInputs(input_features=input_features)
 
@@ -1033,20 +1039,54 @@ class WhisperForConditionalGeneration(
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
 
-        # add fake zeros bias for k_proj to state_dict
-        weights = _create_fake_bias_for_k_proj(weights, ".k_proj.weight")
+        # add fake zeros bias for k_proj to state_dict. Covers the
+        # ``.k_proj.weight`` and the compressed-tensors packed
+        # ``.k_proj.weight_packed`` checkpoints.
+        k_proj_weight_suffixes = (".k_proj.weight", ".k_proj.weight_packed")
+        for suffix in k_proj_weight_suffixes:
+            weights = _create_fake_bias_for_k_proj(
+                weights, suffix, out_features=self.config.d_model
+            )
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
 def _create_fake_bias_for_k_proj(
-    weights: Iterable[tuple[str, torch.Tensor]], fake_bias_key_name: str
+    weights: Iterable[tuple[str, torch.Tensor]],
+    fake_bias_key_name: str,
+    out_features: int | None = None,
 ) -> Iterable[tuple[str, torch.Tensor]]:
     """Create full zeros bias for k_proj weight in self-attn and x-attn layers.
-    So that the bias for k_proj in qkv_proj can be initialized with zeros.
+    So that the bias for k_proj in qkv_proj or kv_proj can be initialized with
+    zeros.
+
+    If the checkpoint already provides a real ``.bias`` entry for the given
+    weight, it is forwarded as-is and no fake bias is injected for that layer.
     """
+    # Map the weight-name suffix to the corresponding bias-name suffix, e.g.
+    # ".k_proj.weight_packed" / ".k_proj.weight" -> ".k_proj.bias",
+    # ".wk.weight" -> ".wk.bias". ``.weight_packed`` is stripped first so the
+    # longer suffix wins.
+    bias_key_name = (
+        fake_bias_key_name.removesuffix(".weight_packed").removesuffix(".weight")
+        + ".bias"
+    )
+
+    real_bias_names: set[str] = set()
+    pending: dict[str, torch.Tensor] = {}
     for name, weight in weights:
         yield name, weight
+
+        if name.endswith(bias_key_name):
+            real_bias_names.add(name)
+            pending.pop(name, None)
+            continue
+
         if name.endswith(fake_bias_key_name):
-            bias = torch.zeros(weight.size(0))
-            bias_name = name.replace("weight", "bias")
-            yield bias_name, bias
+            bias_name = name[: -len(fake_bias_key_name)] + bias_key_name
+            if bias_name not in real_bias_names:
+                pending[bias_name] = torch.zeros(
+                    out_features if out_features is not None else weight.size(0)
+                )
+
+    for bias_name, bias in pending.items():
+        yield bias_name, bias

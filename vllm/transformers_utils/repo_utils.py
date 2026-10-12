@@ -63,6 +63,11 @@ def resolve_revision(
     requested revision that also carries the commit hash, so downstream error
     messages stay readable and offline loads reuse the cached `refs/` entry.
 
+    A commit hash only means something for the repo it was resolved against, so
+    a repo that is not `repo_id` needs its own call. Passing a revision resolved
+    for another repo back in is safe: the revision initially requested is
+    resolved again, against `repo_id` this time.
+
     Returns:
         The resolved revision, or `revision` unchanged if it cannot be resolved
         (local path, ModelScope, or any Hub error).

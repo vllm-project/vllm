@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Backend and engine-reasoner checks that are not manager-flow tests."""
 
+from typing import Literal
+
 import pytest
 from transformers import AutoTokenizer
 
@@ -9,6 +11,7 @@ from vllm.config import StructuredOutputsConfig, VllmConfig
 from vllm.config.model import ModelConfig
 from vllm.config.speculative import SpeculativeConfig
 from vllm.parser.engine.adapters import ParserEngineReasoningAdapter
+from vllm.parser.engine.parser_engine import ReasoningEnd
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.v1.request import Request
 from vllm.v1.structured_output import StructuredOutputManager
@@ -17,7 +20,9 @@ TOKENIZER = "gpt2"
 NUM_SPEC_TOKENS = 4
 
 
-def _make_manager_and_request(backend: str, prompt_str: str = '{"a": "b"}'):
+def _make_manager_and_request(
+    backend: Literal["xgrammar", "guidance"], prompt_str: str = '{"a": "b"}'
+):
     tokenizer = AutoTokenizer.from_pretrained(TOKENIZER)
     prompt = tokenizer.encode(prompt_str)
 
@@ -33,6 +38,7 @@ def _make_manager_and_request(backend: str, prompt_str: str = '{"a": "b"}'):
     sampling_params = SamplingParams(
         structured_outputs=StructuredOutputsParams(json='{"type": "object"}'),
     )
+    assert sampling_params.structured_outputs is not None
     sampling_params.structured_outputs._backend = backend
     sampling_params.update_from_generation_config({}, tokenizer.eos_token_id)
 
@@ -43,6 +49,7 @@ def _make_manager_and_request(backend: str, prompt_str: str = '{"a": "b"}'):
         pooling_params=None,
     )
     manager.grammar_init(request)
+    assert request.structured_output_request is not None
     while not request.structured_output_request._check_grammar_completion():
         continue
 
@@ -107,12 +114,12 @@ class _EngineReasonerStub(ParserEngineReasoningAdapter):
     def reasoning_end_token_ids(self):
         return self._end_token_ids
 
-    def find_reasoning_end_offset(self, token_ids):
+    def find_reasoning_end(self, token_ids):
         self.windows.append(list(token_ids))
         for offset, token in enumerate(token_ids):
             if token in self._end_token_ids:
-                return offset
-        return len(token_ids)
+                return ReasoningEnd(offset, False)
+        return ReasoningEnd(len(token_ids), False)
 
     def is_reasoning_end(self, input_ids):
         return any(token in self._end_token_ids for token in input_ids)

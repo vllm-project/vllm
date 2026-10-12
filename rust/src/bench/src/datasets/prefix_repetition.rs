@@ -107,15 +107,8 @@ pub fn generate_prefix_repetition_dataset(
 
 #[cfg(test)]
 mod tests {
+    use super::super::test_support::test_tokenizer;
     use super::*;
-
-    /// gpt2 via built-in tiktoken encoding — loads without network access.
-    fn test_tokenizer() -> TokenizerKind {
-        TokenizerKind::Tiktoken(
-            crate::tiktoken::load_builtin_tiktoken("gpt2")
-                .expect("gpt2 built-in tiktoken should always load without network"),
-        )
-    }
 
     #[test]
     fn test_prefix_repetition_structure() {

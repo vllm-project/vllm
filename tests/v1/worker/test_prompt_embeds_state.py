@@ -15,16 +15,20 @@ import pytest
 import torch
 
 pytest.importorskip("triton")
-if not torch.cuda.is_available():
+
+from vllm.platforms import current_platform
+
+if not (current_platform.is_cuda_alike() or current_platform.is_xpu()):
     pytest.skip(
-        "CUDA required for prompt-embeds overlay tests", allow_module_level=True
+        "An accelerator is required for prompt-embeds overlay tests",
+        allow_module_level=True,
     )
 
 from vllm.v1.worker.gpu.model_states.prompt_embeds import PromptEmbedsState
 
 HIDDEN = 24
 MAX_NUM_REQS = 8
-DEVICE = torch.device("cuda")
+DEVICE = torch.device(current_platform.device_type)
 
 
 @dataclass

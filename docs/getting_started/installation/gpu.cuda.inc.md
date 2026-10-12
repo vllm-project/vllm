@@ -23,13 +23,27 @@ Therefore, it is recommended to install vLLM with a **fresh new** environment. I
 
 ```bash
 uv pip install vllm --torch-backend=auto
+vllm download-kernels
 ```
 
 ??? console "pip"
     ```bash
     # Install vLLM with CUDA 12.9.
     pip install vllm --extra-index-url https://download.pytorch.org/whl/cu129
+    vllm download-kernels
     ```
+
+`vllm download-kernels` installs [FlashInfer](https://docs.flashinfer.ai/)'s
+precompiled kernels for the installed FlashInfer and CUDA versions. Without them,
+vLLM downloads and compiles kernels at startup, which can add several minutes on
+Hopper and newer GPUs, **especially Blackwell**, and logs a warning. Run it in the
+same Python environment after every vLLM install or upgrade, and in custom
+container images. The kernels are tied to the FlashInfer version, and FlashInfer
+refuses to import when they do not match, so an upgrade needs them refreshed.
+With a PyTorch built for CUDA older than 12.9, only `flashinfer-cubin` is
+installed, because FlashInfer does not publish `flashinfer-jit-cache` for it.
+For CUDA overrides and nightly kernels, use the
+[FlashInfer CLI](https://docs.flashinfer.ai/cli.html#download-kernels) directly.
 
 We recommend leveraging `uv` to [automatically select the appropriate PyTorch index at runtime](https://docs.astral.sh/uv/guides/integration/pytorch/#automatic-backend-selection) by inspecting the installed CUDA driver version via `--torch-backend=auto` (or `UV_TORCH_BACKEND=auto`). To select a specific backend (e.g., `cu130`), set `--torch-backend=cu130` (or `UV_TORCH_BACKEND=cu130`). If this doesn't work, try running `uv self update` to update `uv` first.
 
@@ -94,9 +108,10 @@ If you only need to change Python code, you can build and install vLLM without c
 git clone https://github.com/vllm-project/vllm.git
 cd vllm
 VLLM_USE_PRECOMPILED=1 uv pip install --editable . --torch-backend=auto
+vllm download-kernels
 ```
 
-This command will do the following:
+The install command will do the following:
 
 1. Look for the current branch in your vLLM clone.
 1. Identify the corresponding base commit in the main branch.
@@ -111,24 +126,27 @@ This command will do the following:
 If you need to recompile the `vllm-rs` Rust frontend binary, you can rebuild and install it without re-running the full pip install:
 
     ```bash
-    ./build_rust.sh          # release build
-    ./build_rust.sh --debug  # faster build for development
+    ./tools/build_rust.sh          # release build
+    ./tools/build_rust.sh --debug  # faster build for development
     ```
 
     This will install the required Rust toolchain if needed, build the binary, and place it in `vllm/vllm-rs`.
 
-In case you see an error about wheel not found when running the above command, it might be because the commit you based on in the `main` branch was just merged and its precompiled wheel is not available yet. You can wait around an hour and retry, or set `VLLM_PRECOMPILED_WHEEL_COMMIT=nightly` to automatically select the most recent already-built commit on `main`.
+Wheels are published an hour or two after a commit lands on `main`. If the wheel for
+your merge-base with upstream `main` is not available yet, the installer uses the
+nearest older commit that has one, searching up to 20 commits back. It stops with an
+error if compiled sources or build configuration (`csrc/`, `cmake/`, `CMakeLists.txt`,
+`pyproject.toml`, `vllm/_custom_ops.py`) changed between that commit and your
+merge-base, and warns if `rust/` or `setup.py` did. This is a source-level check, not
+a guarantee of binary compatibility.
 
-```bash
-export VLLM_PRECOMPILED_WHEEL_COMMIT=nightly
-export VLLM_USE_PRECOMPILED=1
-uv pip install --editable .
-```
+Setting `VLLM_PRECOMPILED_WHEEL_LOCATION` or a full SHA in
+`VLLM_PRECOMPILED_WHEEL_COMMIT` skips this search and check.
 
 There are more environment variables to control the behavior of Python-only build:
 
 - `VLLM_PRECOMPILED_WHEEL_LOCATION`: specify the exact wheel URL or local file path of a pre-compiled wheel to use. All other logic to find the wheel will be skipped.
-- `VLLM_PRECOMPILED_WHEEL_COMMIT`: override the commit hash to download the pre-compiled wheel. It can be `nightly` to use the last **already built** commit on the main branch.
+- `VLLM_PRECOMPILED_WHEEL_COMMIT`: override the commit to download the pre-compiled wheel from. Must be a full 40-character SHA.
 - `VLLM_PRECOMPILED_WHEEL_VARIANT`: specify the variant subdirectory to use on the nightly index, e.g., `cu129`, `cu130`, `cpu`. If not specified, the variant is auto-detected based on your system's CUDA version (from PyTorch or nvidia-smi). You can also set `VLLM_MAIN_CUDA_VERSION` to override auto-detection.
 
 You can find more information about vLLM's wheels in [Install the latest code](#install-the-latest-code).
@@ -140,13 +158,8 @@ You can find more information about vLLM's wheels in [Install the latest code](#
 #### Full build (with compilation) {#full-build}
 
 !!! note "Compiler requirement"
-    Building from source requires GCC/G++ ≥ 11.3. PyTorch's C++20 headers are
-    not compatible with GCC 10 or GCC < 11.3. On Ubuntu 22.04:
-    ```bash
-    sudo apt-get install -y gcc-11 g++-11
-    sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-11 110 \
-        --slave /usr/bin/g++ g++ /usr/bin/g++-11
-    ```
+    Building from source requires GCC/G++ ≥ 13 ([#58158](https://github.com/vllm-project/vllm/issues/58158)).
+    Ubuntu 24.04, the base of the default vLLM image, ships GCC 13 by default.
 
 If you want to modify C++ or CUDA code, you'll need to build vLLM from source. This can take several minutes:
 
@@ -183,7 +196,7 @@ To build vLLM using an existing PyTorch installation:
 # install PyTorch first, either from PyPI or from source
 git clone https://github.com/vllm-project/vllm.git
 cd vllm
-python use_existing_torch.py
+python tools/use_existing_torch.py
 uv pip install -r requirements/build/cuda.txt
 uv pip install --no-build-isolation -e .
 ```
@@ -439,8 +452,14 @@ BuildKit does not automatically invalidate cached layers when a mutable Git
 ref changes. Use `--no-cache-filter extensions-build` to refresh an empty,
 branch, or tag revision.
 
+Set `BUILD_NIXL=true` to build NIXL from source. NIXL's release wheels do not
+include the NIXL EP extension for the PyTorch nightly used by the Rubin build.
+The build uses the NIXL version pinned in `requirements/kv_connectors.txt` and
+replaces the NIXL packages installed from the KV-connector requirements.
+
 For `FINAL_BASE_IMAGE`, use the public, multi-arch
-`nvcr.io/nvidia/cuda-dl-base:26.08-cuda13.4-devel-ubuntu24.04` image.
+`nvidia/cuda:13.4.1-base-ubuntu24.04` image. Set `NCCL_VERSION` to 2.32.3 or
+newer, the first NCCL release with Rubin (SM107) support.
 For `BUILD_BASE_IMAGE`, use:
 
 - `pytorch/manylinux2_28-builder:cuda13.4` for x86_64 CPUs.
@@ -462,7 +481,8 @@ For `BUILD_BASE_IMAGE`, use:
       --build-arg TRITON_INSTALL_FROM_SOURCE_REVISION=3f6e41132b5edf639bfb872ad73d4688765e08b8 \
       --build-arg CUDA_VERSION=13.4 \
       --build-arg BUILD_BASE_IMAGE="pytorch/manylinuxaarch64-builder:cuda13.4" \
-      --build-arg FINAL_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base:26.08-cuda13.4-devel-ubuntu24.04" \
+      --build-arg FINAL_BASE_IMAGE="nvidia/cuda:13.4.1-base-ubuntu24.04" \
+      --build-arg NCCL_VERSION=2.32.3 \
       .
     ```
 
@@ -482,7 +502,8 @@ For `BUILD_BASE_IMAGE`, use:
       --build-arg TRITON_INSTALL_FROM_SOURCE_REVISION=3f6e41132b5edf639bfb872ad73d4688765e08b8 \
       --build-arg CUDA_VERSION=13.4 \
       --build-arg BUILD_BASE_IMAGE="pytorch/manylinux2_28-builder:cuda13.4" \
-      --build-arg FINAL_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base:26.08-cuda13.4-devel-ubuntu24.04" \
+      --build-arg FINAL_BASE_IMAGE="nvidia/cuda:13.4.1-base-ubuntu24.04" \
+      --build-arg NCCL_VERSION=2.32.3 \
       .
     ```
 
@@ -490,9 +511,6 @@ For `BUILD_BASE_IMAGE`, use:
     Keep the default explicit `torch_cuda_arch_list`. GPU-less BuildKit builds
     cannot inspect the host GPU. R100 and VR200 report compute capability 10.7,
     for which the generic `10.0` target provides family-compatible kernels.
-    The Ubuntu `devel` final image is also required: the corresponding `base`
-    image lacks the CUDA runtime/JIT package closure used by vLLM and the
-    prerelease PyTorch wheel.
 
     `RUN_WHEEL_CHECK=false` disables only the PyPI publication-size guard for
     this private staging image.

@@ -9,7 +9,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 from torch.nn import LayerNorm
-from transformers.configuration_utils import PretrainedConfig
+from transformers.configuration_utils import PreTrainedConfig
 from transformers.modeling_utils import PreTrainedModel
 
 from vllm.third_party.deep_gemm import per_block_cast_to_fp8
@@ -27,7 +27,7 @@ from .vision_attention import (
 from .vision_moe import note_vision_fused_moe_fp8
 
 
-class DotsMoEVitConfig(PretrainedConfig):
+class DotsMoEVitConfig(PreTrainedConfig):
     model_type: str = "dots_moe_vit"
 
     def __init__(

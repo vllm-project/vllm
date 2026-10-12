@@ -10,14 +10,28 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import vllm.envs as envs
+from vllm.config import CacheConfig, VllmConfig, replace
 
 if TYPE_CHECKING:
     from vllm.distributed.parallel_state import GroupCoordinator
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 
+def _normalize_cache_config_for_hash(cache_config: CacheConfig) -> CacheConfig:
+    """Normalize cache config for hashing"""
+    if cache_config.mamba_block_size is None and cache_config.kv_cache_layout is None:
+        return cache_config
+    normalized = replace(cache_config, mamba_block_size=None)
+    assert normalized.kv_cache_layout is None
+    return normalized
+
+
 def flashinfer_autotune_cache_hash(runner: "GPUModelRunner") -> str:
-    config_hash = runner.vllm_config.compute_hash(include_version=False)
+    vllm_config: VllmConfig = runner.vllm_config
+    cache_config = _normalize_cache_config_for_hash(vllm_config.cache_config)
+    if cache_config is not vllm_config.cache_config:
+        vllm_config = replace(vllm_config, cache_config=cache_config)
+    config_hash = vllm_config.compute_hash(include_version=False)
     return hashlib.sha256(config_hash.encode()).hexdigest()
 
 

@@ -25,7 +25,6 @@ class LoRARequest(
     lora_int_id: int
     lora_path: str = ""
     base_model_name: str | None = msgspec.field(default=None)
-    tensorizer_config_dict: dict | None = None
     load_inplace: bool = False
     is_3d_lora_weight: bool = False
     """Whether this adapter's MoE weights are stored in the 3D fused

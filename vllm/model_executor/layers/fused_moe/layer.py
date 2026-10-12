@@ -118,10 +118,11 @@ def FusedMoEFactory(
     has_bias: bool = False,
     is_sequence_parallel: bool = False,
     reduce_results: bool = True,
-    ckpt_names: tuple[str, str, str] = ("gate_proj", "down_proj", "up_proj"),
+    ckpt_names: tuple[str, str, str | None] = ("gate_proj", "down_proj", "up_proj"),
     is_fused_checkpoint_transposed: bool = False,
     n_shared_experts: int | None = None,
     fuse_shared_experts: bool = False,
+    shared_expert_prefix: str | None = None,
     router_logits_dtype: torch.dtype | None = None,
     gate: torch.nn.Module | None = None,
     shared_experts: torch.nn.Module | None = None,
@@ -197,6 +198,7 @@ def FusedMoEFactory(
         n_shared_experts: Number of shared experts to fuse into the routed
             grouped GEMM (ROCm; requires aiter FSE or the router-append path)
         fuse_shared_experts: Whether to enable shared-expert fusion.
+        shared_expert_prefix: Checkpoint prefix for the fused shared expert.
         router_logits_dtype: Data type for router logits buffers
         gate: Pre-configured gate module
         shared_experts: Pre-configured shared experts module
@@ -360,6 +362,7 @@ def FusedMoEFactory(
         elastic_ep_max_dp_size=vllm_config.parallel_config.elastic_ep_max_dp_size,
         has_bias=has_bias,
         is_lora_enabled=vllm_config.lora_config is not None,
+        shared_expert_prefix=shared_expert_prefix,
         activation=moe_activation,
         device=vllm_config.device_config.device,
         routing_method=router.routing_method_type,  # Not ideal
@@ -442,7 +445,7 @@ def fused_moe_make_expert_params_mapping(
     model: torch.nn.Module,
     ckpt_gate_proj_name: str,
     ckpt_down_proj_name: str,
-    ckpt_up_proj_name: str,
+    ckpt_up_proj_name: str | None,
     num_experts: int,
     num_redundant_experts: int = 0,
     routed_experts_prefix: str = "routed_experts",

@@ -16,9 +16,10 @@
 #   - OOB-mask correctness fix: present (all tl.load use mask=..., other=0).
 # Validated on gfx950: no core-dump, gsm8k 94.1%.
 #
-# AMD-specific deltas vs the NVIDIA copy: NONE yet (byte-identical). Keep in sync
-# with the NVIDIA copy on FLA updates; any divergence should be an intentional,
-# documented gfx950-specific change (a #869-style AMD-only fix).
+# AMD-specific deltas vs the NVIDIA copy:
+#   - fused recurrent gated speculative-decode launch geometry is tuned for
+#     gfx950.
+# Keep the copies in sync on FLA updates outside documented platform tuning.
 
 from .chunk import (
     chunk_kda,

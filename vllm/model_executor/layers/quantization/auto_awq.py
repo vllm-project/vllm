@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Any, Union
 import torch
 from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
 from torch.nn import Parameter
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 import vllm.model_executor.layers.fused_moe  # noqa
 from vllm import _custom_ops as ops
@@ -370,7 +370,7 @@ class AutoAWQConfig(QuantizationConfig):
     def maybe_update_config(
         self,
         model_name: str,
-        hf_config: PretrainedConfig | None = None,
+        hf_config: PreTrainedConfig | None = None,
         revision: str | None = None,
     ):
         if self.modules_to_not_convert:
@@ -790,6 +790,7 @@ class AutoAWQMoEMethod(FusedMoEMethodBase):
             topk_group=layer.topk_group,
             e_score_correction_bias=layer.e_score_correction_bias,
             routed_scaling_factor=layer.routed_scaling_factor,
+            routing_sink=layer.routing_sink,
         )
 
 

@@ -61,7 +61,9 @@ def test_scaled_fp8_quant_per_channel_shape() -> None:
     weight to `ops.scaled_fp8_quant` with `use_per_token_if_dynamic=True`
     yields one scale per output row -- a [N, 1] fp32 tensor.
     """
-    x = (torch.randn(size=(96, 256), device="cuda") * 13).to(torch.bfloat16)
+    x = (torch.randn(size=(96, 256), device=current_platform.device_type) * 13).to(
+        torch.bfloat16
+    )
     y, s = ops.scaled_fp8_quant(x, scale=None, use_per_token_if_dynamic=True)
     assert y.shape == (96, 256)
     assert y.dtype == current_platform.fp8_dtype()

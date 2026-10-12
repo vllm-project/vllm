@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 from torch import nn
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
@@ -54,7 +54,7 @@ from vllm.sequence import IntermediateTensors
 # Only used for type hinting.
 if TYPE_CHECKING:
 
-    class Plamo3Config(PretrainedConfig):  # type: ignore
+    class Plamo3Config(PreTrainedConfig):  # type: ignore
         model_type: str = "plamo3"
 
         hidden_size: int

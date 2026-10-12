@@ -58,6 +58,7 @@ from vllm.model_executor.layers.attention.mla_attention import (
     accumulate_mla_context_chunk,
     init_mla_context_partial,
     neutralize_empty_context_partials,
+    split_kv_b_proj,
 )
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -72,9 +73,6 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.quantization import (
     QuantizationConfig,
     resolve_quant_method,
-)
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    get_and_maybe_dequant_weights,
 )
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding, get_rope
 from vllm.model_executor.utils import replace_parameter
@@ -424,6 +422,7 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
         return MLAAttentionSpec(  # type: ignore[call-arg]
             block_size=vllm_config.cache_config.block_size,
             num_kv_heads=1,
+            max_tp_shards=1,
             head_size=self.head_size,
             dtype=kv_cache_dtype,
             cache_dtype_str=self.kv_cache_dtype,
@@ -441,20 +440,13 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
         projected into latent space by ``W_UK_T`` and the attention output is
         projected back to ``v`` by ``W_UV`` -- avoiding materializing full K/V.
         """
-        kv_b_proj_weight = get_and_maybe_dequant_weights(
-            self.kv_b_proj, out_dtype=act_dtype
-        ).T
-        assert kv_b_proj_weight.shape == (
-            self.kv_lora_rank,
-            self.num_local_heads * (self.qk_nope_head_dim + self.v_head_dim),
-        ), f"{kv_b_proj_weight.shape=}"
-        kv_b_proj_weight = kv_b_proj_weight.view(
+        W_UK, W_UV = split_kv_b_proj(
+            self.kv_b_proj,
+            act_dtype,
             self.kv_lora_rank,
             self.num_local_heads,
-            self.qk_nope_head_dim + self.v_head_dim,
-        )
-        W_UK, W_UV = kv_b_proj_weight.split(
-            [self.qk_nope_head_dim, self.v_head_dim], dim=-1
+            self.qk_nope_head_dim,
+            self.v_head_dim,
         )
         # (L, N, V) -> (N, L, V)
         replace_parameter(self, "W_UV", W_UV.transpose(0, 1), prefer_copy=True)
@@ -794,6 +786,15 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
             cos_sin_cache=cos_sin_cache,
         )
 
+    def _fused_mla_kv_concat(
+        self, kv_nope: torch.Tensor, k_pe: torch.Tensor, use_fp8_prefill: bool
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Pack one DCP context chunk's ``(k, v)`` with the fused kernels."""
+        k_nope, v = kv_nope.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
+        if use_fp8_prefill:
+            return fused_mla_kv_concat_quant_fp8(k_nope, k_pe, v)
+        return fused_mla_kv_concat(k_nope, k_pe), v
+
     def _compute_prefill_context(
         self,
         q: torch.Tensor,
@@ -823,8 +824,8 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
         copied per chunk.
 
         Decode context parallelism keeps using
-        ``impl._context_parallel_compute_prefill_context``; its extra allgather
-        and reorg are not fused here.
+        ``impl._context_parallel_compute_prefill_context`` for its allgather and
+        reorg, with this layer's ``_fused_mla_kv_concat`` as its per-chunk pack.
         """
         prefill = attn_metadata.prefill
         assert prefill is not None
@@ -1083,6 +1084,7 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
                         attn_metadata,
                         k_scale=self._k_scale,
                         dcp_world_size=self.dcp_world_size,
+                        fused_mla_kv_concat_fn=self._fused_mla_kv_concat,
                     )
                 )
             else:

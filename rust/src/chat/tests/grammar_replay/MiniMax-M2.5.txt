@@ -1,0 +1,32 @@
+# auto (from_token_zero)
+sequence
+  sequence
+    tag `` text `</think>`
+    `\n\n`
+  triggered_tags [`<minimax:tool_call>`] excluding [`<think>`, `</think>`]
+    tag `<minimax:tool_call>\n` .. `</minimax:tool_call>`
+      tags_with_separator `` at_least_one
+        tag `<invoke name="get_weather">\n` minimax_xml({ location: string }) `</invoke>\n`
+        tag `<invoke name="add">\n` minimax_xml({ y: number, x: number, items: string[] }) `</invoke>\n`
+
+# required (from_token_zero)
+sequence
+  sequence
+    tag `` text `</think>`
+    `\n\n`
+  sequence
+    `\n<minimax:tool_call>\n`
+    tags_with_separator `` at_least_one
+      tag `<invoke name="get_weather">\n` minimax_xml({ location: string }) `</invoke>\n`
+      tag `<invoke name="add">\n` minimax_xml({ y: number, x: number, items: string[] }) `</invoke>\n`
+    `</minimax:tool_call>`
+
+# named (from_token_zero)
+sequence
+  sequence
+    tag `` text `</think>`
+    `\n\n`
+  sequence
+    `\n<minimax:tool_call>\n`
+    tag `<invoke name="get_weather">\n` minimax_xml({ location: string }) `</invoke>\n`
+    `</minimax:tool_call>`

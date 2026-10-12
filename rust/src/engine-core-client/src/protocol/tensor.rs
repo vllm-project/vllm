@@ -121,6 +121,18 @@ impl<Dtype: From<TensorDtype> + Serialize + DeserializeOwned> WireArray<Dtype> {
         ))
     }
 
+    /// Build an int32 tensor/ndarray backed by native-endian raw-view bytes.
+    ///
+    /// Takes ownership of the backing buffer without copying its data.
+    pub fn from_i32(shape: Vec<usize>, data: Vec<i32>) -> Result<Self, String> {
+        validate_element_count(&shape, data.len())?;
+        Ok(Self::from_raw_bytes(
+            TensorDtype::I32,
+            shape,
+            bytes_from_pod_vec(data),
+        ))
+    }
+
     /// Build a uint32 tensor/ndarray backed by native-endian raw-view bytes.
     ///
     /// Takes ownership of the backing buffer without copying its data.

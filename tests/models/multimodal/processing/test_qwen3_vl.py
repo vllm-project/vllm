@@ -1,24 +1,53 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Regression tests for Qwen3-VL processor.
+"""Regression tests for Qwen3-VL multimodal processing."""
 
-Covers the fix for num_frames-based timestamp calculation
-(issue vllm-project/vllm#35909).
-"""
-
+from copy import deepcopy
+from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
 import pytest
+import torch
+from transformers.models.qwen3_vl import Qwen3VLVideoProcessor
 
 from vllm.config import ModelConfig
 from vllm.config.multimodal import MultiModalDummyOptions
+from vllm.model_executor.models.qwen3_vl import Qwen3VLProcessingInfo
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.cache import MultiModalProcessorOnlyCache
+from vllm.multimodal.processing.context import BaseProcessingInfo
 
 from ...registry import HF_EXAMPLE_MODELS
 from ...utils import build_model_context
 
 MODEL_ID = "Qwen/Qwen3-VL-4B-Instruct"
+
+
+def test_qwen3_video_routing_schema_adds_vllm_compatibility_kwargs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    native_video_kwargs = set(Qwen3VLVideoProcessor.valid_kwargs.__annotations__)
+    assert "size" in native_video_kwargs
+    assert "min_pixels" not in native_video_kwargs
+    assert "max_pixels" not in native_video_kwargs
+
+    info = Qwen3VLProcessingInfo(SimpleNamespace())
+    parent_supported = {
+        "text_kwargs": {"padding"},
+        "images_kwargs": {"size", "min_pixels", "max_pixels"},
+        "videos_kwargs": set(native_video_kwargs),
+    }
+    monkeypatch.setattr(
+        BaseProcessingInfo,
+        "get_supported_mm_processor_kwargs",
+        lambda self: {scope: set(kwargs) for scope, kwargs in parent_supported.items()},
+    )
+
+    supported = info.supported_mm_processor_kwargs
+
+    assert {"min_pixels", "max_pixels"} <= supported["videos_kwargs"]
+    assert parent_supported["videos_kwargs"] == native_video_kwargs
 
 
 def _build_video_mm_data(
@@ -43,6 +72,122 @@ def _build_video_mm_data(
         "do_sample_frames": True,
     }
     return {"video": [(video, metadata)]}
+
+
+@pytest.mark.parametrize("model_id", [MODEL_ID])
+def test_processor_partial_scoped_image_size(model_id: str) -> None:
+    """Partial image ``size`` must be completed and applied before the HF call.
+
+    Keep video compatibility and per-video kwargs in an image-only call as well:
+    Qwen3 must sanitize the video scope before HF validates it. Regression for
+    #56363.
+    """
+    ctx = build_model_context(
+        model_id,
+        limit_mm_per_prompt={"image": 1, "video": 0},
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+
+    image = np.zeros((128, 128, 3), dtype=np.uint8)
+    min_pixels = 256 * 32 * 32
+    default_size = dict(processor.info.get_image_processor().size)
+    complete_size = default_size | {"shortest_edge": min_pixels}
+
+    def process(hf_mm_kwargs: dict[str, Any]) -> torch.Tensor:
+        mm_items = processor.info.parse_mm_data({"image": [image]})
+        return processor._apply_hf_processor_main(mm_items, hf_mm_kwargs)[
+            "image_grid_thw"
+        ]
+
+    stock_grid = process({})
+    complete_grid = process({"images_kwargs": {"size": complete_size}})
+    partial_grid = process(
+        {
+            "images_kwargs": {
+                "size": {"shortest_edge": min_pixels},
+            },
+            "videos_kwargs": {
+                "min_pixels": 4096,
+                "max_pixels": 469_762_048,
+                "fps": [2.0],
+                "num_frames": [8],
+            },
+        }
+    )
+
+    assert torch.equal(partial_grid, complete_grid)
+    assert not torch.equal(partial_grid, stock_grid)
+
+
+@pytest.mark.parametrize("model_id", [MODEL_ID])
+def test_processor_partial_scoped_video_size(model_id: str) -> None:
+    """Partial scoped video ``size`` must be completed and applied before HF."""
+    ctx = build_model_context(
+        model_id,
+        limit_mm_per_prompt={"image": 0, "video": 1},
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+
+    min_pixels = 512 * 32 * 32
+    default_size = dict(processor.info.get_video_processor().size)
+    complete_size = default_size | {"shortest_edge": min_pixels}
+
+    def process(hf_mm_kwargs: dict[str, Any]) -> torch.Tensor:
+        mm_items = processor.info.parse_mm_data(_build_video_mm_data(num_frames=8))
+        return processor._apply_hf_processor_main(mm_items, hf_mm_kwargs)[
+            "video_grid_thw"
+        ]
+
+    stock_grid = process({})
+    complete_grid = process({"videos_kwargs": {"size": complete_size}})
+    partial_grid = process(
+        {
+            "videos_kwargs": {
+                "size": {"shortest_edge": min_pixels},
+            },
+        }
+    )
+
+    assert torch.equal(partial_grid, complete_grid)
+    assert not torch.equal(partial_grid, stock_grid)
+
+
+@pytest.mark.parametrize("model_id", [MODEL_ID])
+def test_processor_flat_video_pixel_aliases_match_scoped_size(model_id: str) -> None:
+    """Flat min/max pixel aliases keep their historical Qwen3 video effect."""
+    ctx = build_model_context(
+        model_id,
+        limit_mm_per_prompt={"image": 0, "video": 1},
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    pixel_budget = 512 * 32 * 32
+
+    def process(hf_mm_kwargs: dict[str, Any]) -> torch.Tensor:
+        mm_items = processor.info.parse_mm_data(_build_video_mm_data(num_frames=8))
+        return processor._apply_hf_processor_main(mm_items, hf_mm_kwargs)[
+            "video_grid_thw"
+        ]
+
+    stock_grid = process({})
+    scoped_grid = process(
+        {
+            "videos_kwargs": {
+                "size": {
+                    "shortest_edge": pixel_budget,
+                    "longest_edge": pixel_budget,
+                },
+            },
+        }
+    )
+    flat_grid = process(
+        {
+            "min_pixels": pixel_budget,
+            "max_pixels": pixel_budget,
+        }
+    )
+
+    assert torch.equal(flat_grid, scoped_grid)
+    assert not torch.equal(flat_grid, stock_grid)
 
 
 @pytest.mark.parametrize("model_id", [MODEL_ID])
@@ -189,48 +334,139 @@ def test_processor_kwargs_videos_kwargs_does_not_leak_into_image_budget(
 
 @pytest.mark.parametrize("model_id", [MODEL_ID])
 @pytest.mark.parametrize(
-    "hf_mm_kwargs",
-    [{"num_frames": [8, 16]}, {"fps": [2.0, 4.0]}],
+    ("hf_mm_kwargs", "scalar_kwargs"),
+    [
+        ({"num_frames": [8, 16]}, [{"num_frames": 8}, {"num_frames": 16}]),
+        ({"fps": [2.0, 4.0]}, [{"fps": 2.0}, {"fps": 4.0}]),
+        ({"num_frames": [8, 16, 32]}, [{"num_frames": 8}, {"num_frames": 16}]),
+        ({"fps": [2.0, 4.0, 8.0]}, [{"fps": 2.0}, {"fps": 4.0}]),
+    ],
 )
+@pytest.mark.parametrize("model_kwargs", [False, True])
+@pytest.mark.parametrize("use_uuids", [False, True])
+@pytest.mark.parametrize("scoped", [False, True])
+@pytest.mark.skip_global_cleanup
 def test_processor_multi_video_list_kwargs(
     model_id: str,
     hf_mm_kwargs: dict[str, Any],
+    scalar_kwargs: list[dict[str, Any]],
+    model_kwargs: bool,
+    use_uuids: bool,
+    scoped: bool,
 ) -> None:
-    """Regression test: a multi-video request with list-valued per-video
-    ``mm_processor_kwargs`` (one ``fps``/``num_frames`` per video) must not
-    crash.
-
-    Before the fix, ``_apply_hf_processor_main`` copied the whole kwargs to every
-    video without slicing, so ``_get_video_second_idx`` received the list
-    where a scalar was expected and raised ``TypeError``.
-    """
+    """Per-video options must survive duplicate items and partial cache hits."""
+    if scoped:
+        hf_mm_kwargs = {"videos_kwargs": hf_mm_kwargs}
+    hf_mm_kwargs_before = deepcopy(hf_mm_kwargs)
     ctx = build_model_context(
         model_id,
         limit_mm_per_prompt={"image": 0, "video": 2},
+        mm_processor_kwargs=hf_mm_kwargs if model_kwargs else None,
+        mm_processor_cache_gb=1,
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    cache = MultiModalProcessorOnlyCache(ctx.model_config)
+    prompt = "<|vision_start|><|video_pad|><|vision_end|>" * 2
+    videos = [
+        _build_video_mm_data(num_frames=32, original_fps=8.0)["video"][0]
+        for _ in range(3)
+    ]
+    for i, (frames, _) in enumerate(videos):
+        frames.fill(i)
+
+    def process_single(hf_kwargs: dict[str, Any]) -> torch.Tensor:
+        single_prompt = "<|vision_start|><|video_pad|><|vision_end|>"
+        single = processor(
+            single_prompt,
+            mm_items=processor.info.parse_mm_data({"video": [videos[0]]}),
+            hf_processor_mm_kwargs=hf_kwargs,
+        )
+        return single["mm_kwargs"].get_data()["video_grid_thw"][0]
+
+    expected_grids = [process_single(kwargs) for kwargs in scalar_kwargs]
+    assert not torch.equal(expected_grids[0], expected_grids[1])
+
+    def run(indices, *, cache=None, cached_only=False):
+        return processor(
+            prompt,
+            mm_items=processor.info.parse_mm_data(
+                {"video": [None if cached_only else videos[i] for i in indices]}
+            ),
+            mm_uuid_items=(
+                {"video": [f"video-{i}" for i in indices]} if use_uuids else None
+            ),
+            hf_processor_mm_kwargs={} if model_kwargs else hf_mm_kwargs,
+            cache=cache,
+        )
+
+    for indices in ([0, 0], [0, 1], [0, 2], [2, 0]):
+        expected = run(indices)
+        actual = run(indices, cache=cache)
+        assert actual["prompt_token_ids"] == expected["prompt_token_ids"]
+        assert actual["mm_placeholders"] == expected["mm_placeholders"]
+        assert actual["mm_kwargs"] == expected["mm_kwargs"]
+        assert actual["mm_hashes"] == expected["mm_hashes"]
+        assert len(set(actual["mm_hashes"]["video"])) == 2
+        multi_grids = actual["mm_kwargs"].get_data()["video_grid_thw"]
+        assert torch.equal(multi_grids[0], expected_grids[0])
+        assert torch.equal(multi_grids[1], expected_grids[1])
+
+    if use_uuids:
+        cached_only = run([2, 0], cache=cache, cached_only=True)
+        assert cached_only["prompt_token_ids"] == actual["prompt_token_ids"]
+        assert cached_only["mm_kwargs"] == actual["mm_kwargs"]
+    assert hf_mm_kwargs == hf_mm_kwargs_before
+
+
+@pytest.mark.parametrize(("key", "value"), [("fps", 2.0), ("num_frames", 8)])
+@pytest.mark.parametrize("length", [0, 1])
+@pytest.mark.parametrize("use_cache", [False, True])
+@pytest.mark.parametrize("scoped", [False, True])
+def test_processor_rejects_short_per_video_options(
+    key: str, value: float | int, length: int, use_cache: bool, scoped: bool
+) -> None:
+    """Reject malformed option lists with and without a warm processor cache."""
+    ctx = build_model_context(
+        MODEL_ID,
+        limit_mm_per_prompt={"image": 0, "video": 2},
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    cache = MultiModalProcessorOnlyCache(ctx.model_config) if use_cache else None
+    prompt = "<|vision_start|><|video_pad|><|vision_end|>" * 2
+    videos = _build_video_mm_data(num_frames=32, original_fps=8.0)["video"] * 2
+
+    def process(values: list[float | int]) -> None:
+        kwargs = {key: values}
+        processor(
+            prompt,
+            mm_items=processor.info.parse_mm_data({"video": videos}),
+            hf_processor_mm_kwargs={"videos_kwargs": kwargs} if scoped else kwargs,
+            cache=cache,
+        )
+
+    if use_cache:
+        process([value, value])
+
+    with pytest.raises(ValueError, match=f"{key} must have at least 2 entries"):
+        process([value] * length)
+
+
+@pytest.mark.parametrize("kwargs", [{"fps": [2.0, 4.0]}, {"num_frames": [8, 16]}])
+def test_processor_profiles_fewer_videos_than_configured_options(
+    kwargs: dict[str, list[float] | list[int]],
+) -> None:
+    """Profiling may use fewer videos than the configured per-video list."""
+    ctx = build_model_context(
+        MODEL_ID,
+        limit_mm_per_prompt={"image": 0, "video": 2},
+        mm_processor_kwargs=kwargs,
     )
     processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
 
-    prompt = (
-        "<|vision_start|><|video_pad|><|vision_end|>"
-        "<|vision_start|><|video_pad|><|vision_end|>"
-    )
-    mm_data = {
-        "video": [
-            _build_video_mm_data(num_frames=16)["video"][0],
-            _build_video_mm_data(num_frames=32)["video"][0],
-        ]
-    }
+    profiled = processor.get_dummy_mm_inputs({"video": 1})
 
-    processed = processor(
-        prompt,
-        mm_items=processor.info.parse_mm_data(mm_data),
-        hf_processor_mm_kwargs=hf_mm_kwargs,
-    )
-
-    video_phs = processed["mm_placeholders"].get("video", [])
-    assert len(video_phs) == 2, (
-        f"Expected exactly 2 video placeholders, got {len(video_phs)}"
-    )
+    assert len(profiled["mm_placeholders"]["video"]) == 1
+    assert profiled["mm_kwargs"].get_data()["video_grid_thw"].shape[0] == 1
 
 
 def _build_video_embeds_mm_data(
@@ -336,7 +572,12 @@ def test_dummy_video_spreads_budget_when_frame_cap_enabled(model_id: str) -> Non
 
     capped_ctx = build_model_context(
         model_id,
-        mm_processor_kwargs={"size": size, "cap_pixels_per_frame": True},
+        mm_processor_kwargs={
+            "videos_kwargs": {
+                "size": size,
+                "cap_pixels_per_frame": True,
+            },
+        },
         limit_mm_per_prompt={"image": 0, "video": 1},
     )
     capped = MULTIMODAL_REGISTRY.create_processor(capped_ctx.model_config)
@@ -350,7 +591,7 @@ def test_dummy_video_spreads_budget_when_frame_cap_enabled(model_id: str) -> Non
 
     uncapped_ctx = build_model_context(
         model_id,
-        mm_processor_kwargs={"size": size},
+        mm_processor_kwargs={"videos_kwargs": {"size": size}},
         limit_mm_per_prompt={"image": 0, "video": 1},
     )
     uncapped = MULTIMODAL_REGISTRY.create_processor(uncapped_ctx.model_config)

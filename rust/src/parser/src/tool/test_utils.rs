@@ -24,6 +24,7 @@ pub fn test_tools() -> Vec<Tool> {
                 }
             }),
             strict: None,
+            defer_loading: None,
         },
         Tool {
             name: "add".to_string(),
@@ -36,6 +37,7 @@ pub fn test_tools() -> Vec<Tool> {
                 }
             }),
             strict: None,
+            defer_loading: None,
         },
         Tool {
             name: "convert".to_string(),
@@ -51,6 +53,7 @@ pub fn test_tools() -> Vec<Tool> {
                 }
             }),
             strict: None,
+            defer_loading: None,
         },
         Tool {
             name: "calculate_area".to_string(),
@@ -64,6 +67,7 @@ pub fn test_tools() -> Vec<Tool> {
                 }
             }),
             strict: None,
+            defer_loading: None,
         },
         Tool {
             name: "update_record".to_string(),
@@ -80,6 +84,7 @@ pub fn test_tools() -> Vec<Tool> {
                 }
             }),
             strict: None,
+            defer_loading: None,
         },
     ]
 }

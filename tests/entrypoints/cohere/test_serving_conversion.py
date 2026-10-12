@@ -25,6 +25,7 @@ from vllm.entrypoints.cohere.cohere_chat_message import (
 from vllm.entrypoints.cohere.protocol import (
     CohereChatV2Request,
     CohereChatV2Response,
+    CohereLogprobItem,
 )
 from vllm.entrypoints.cohere.serving import (
     _FINISH_REASON_MAP,
@@ -130,6 +131,8 @@ def _build_chat_completion_response(
     citations: list[Any] | None = None,
     usage: dict[str, Any] | None = None,
     kv_transfer_params: dict[str, Any] | None = None,
+    logprobs: list[tuple[str, float]] | None = None,
+    token_ids: list[int] | None = None,
 ) -> ChatCompletionResponse:
     message: dict[str, Any] = {"role": "assistant"}
     if content is not None:
@@ -151,6 +154,12 @@ def _build_chat_completion_response(
                 "message": message,
                 "finish_reason": finish_reason,
                 "stop_reason": stop_reason,
+                "logprobs": (
+                    {"content": [{"token": t, "logprob": lp} for t, lp in logprobs]}
+                    if logprobs is not None
+                    else None
+                ),
+                "token_ids": token_ids,
             }
         ],
         # ``usage`` is a required field on ChatCompletionResponse, but the
@@ -689,6 +698,8 @@ class TestBuildBaseChatCompletion:
         assert result.top_k == 50
         assert result.top_p == 0.95
         assert result.logprobs is True
+        # Needed to fill ``token_ids`` in the Cohere logprobs response.
+        assert result.return_token_ids is True
         assert result.priority == 2
         assert result.kv_transfer_params == {"x": 1}
         # ``chat_template_kwargs`` may be expanded by _apply_cohere_*; the
@@ -1907,6 +1918,7 @@ class TestChatCompletionToV2:
         assert v2.message.tool_calls is None
         assert v2.message.tool_plan is None
         assert v2.usage is None
+        assert v2.logprobs is None
 
     def test_stop_sequence_finish_reason(self):
         serving = _serving()
@@ -1989,6 +2001,19 @@ class TestChatCompletionToV2:
         )
         v2 = serving._chat_completion_to_v2(resp, _make_request())
         assert v2.kv_transfer_params == {"k": 1}
+
+    def test_logprobs_propagated(self):
+        serving = _serving()
+        resp = _build_chat_completion_response(
+            content="Hello",
+            logprobs=[("Hel", -0.25), ("lo", -0.5)],
+            token_ids=[101, 102],
+        )
+        v2 = serving._chat_completion_to_v2(resp, _make_request(logprobs=True))
+        assert v2.logprobs == [
+            CohereLogprobItem(text="Hel", token_ids=[101], logprobs=[-0.25]),
+            CohereLogprobItem(text="lo", token_ids=[102], logprobs=[-0.5]),
+        ]
 
 
 # ======================================================================
@@ -2510,3 +2535,24 @@ class TestCreateErrorResponse:
         assert err.error.message == "oops"
         assert err.error.code == 400
         assert err.error.type == "bad_request"
+
+
+def test_watermarking_defaults_to_unspecified():
+    assert _convert(_make_request()).watermarking is None
+
+
+def test_watermarking_explicit_enable_is_forwarded():
+    assert _convert(_make_request(watermarking=True)).watermarking is True
+
+
+def test_watermarking_opt_out_is_forwarded():
+    assert _convert(_make_request(watermarking=False)).watermarking is False
+
+
+@pytest.mark.parametrize("watermarking", [None, True, False])
+def test_watermarking_reaches_sampling_params(watermarking):
+    request = _make_request(watermarking=watermarking)
+
+    params = _convert(request).to_sampling_params(16, {})
+
+    assert params.watermarking is watermarking

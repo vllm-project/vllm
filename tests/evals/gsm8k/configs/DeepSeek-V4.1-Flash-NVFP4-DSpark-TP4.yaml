@@ -1,0 +1,15 @@
+model_name: "nvidia/DeepSeek-V4.1-Flash-NVFP4"
+accuracy_threshold: 0.88
+tolerance: 0.03
+# The bundled DSpark draft (mtp.*) stays MXFP4 in this checkpoint. Loading it
+# as NVFP4 keeps accuracy but drops acceptance length to 1.0 (3.57 when correct).
+min_acceptance_length: 2.5
+num_questions: 1319
+num_fewshot: 5
+startup_max_wait_seconds: 1800
+server_args: >-
+  --tokenizer-mode deepseek_v41
+  --trust-remote-code
+  --max-model-len 8192
+  --tensor-parallel-size 4
+  --speculative-config '{"method":"dspark","num_speculative_tokens":5}'

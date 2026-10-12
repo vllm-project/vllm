@@ -11,8 +11,8 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
     prepare_nvfp4_moe_layer_for_fi_or_cutlass,
 )
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
+    align_fp4_moe_hidden_dim_for_fi,
     align_fp4_moe_weights_for_fi,
-    align_trtllm_fp4_moe_hidden_dim_for_fi,
 )
 
 
@@ -63,7 +63,7 @@ def test_align_trtllm_fp4_moe_hidden_dim_noop():
     w2_scale = torch.arange(2 * 512 * 1, dtype=torch.uint8).reshape(2, 512, 1)
 
     out_w13, out_w13_scale, out_w2, out_w2_scale, padded_hidden = (
-        align_trtllm_fp4_moe_hidden_dim_for_fi(w13, w13_scale, w2, w2_scale)
+        align_fp4_moe_hidden_dim_for_fi(w13, w13_scale, w2, w2_scale)
     )
 
     assert padded_hidden == 512
@@ -90,7 +90,7 @@ def test_align_trtllm_fp4_moe_hidden_dim_pads_to_256_multiple():
     )
 
     out_w13, out_w13_scale, out_w2, out_w2_scale, out_hidden_dim = (
-        align_trtllm_fp4_moe_hidden_dim_for_fi(w13, w13_scale, w2, w2_scale)
+        align_fp4_moe_hidden_dim_for_fi(w13, w13_scale, w2, w2_scale)
     )
 
     assert out_hidden_dim == padded_hidden_dim

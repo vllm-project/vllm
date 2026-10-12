@@ -50,7 +50,7 @@ def unpack_tensor(
     unpacked_tensors = packed_tensor.split(tensor_sizes)
 
     return [
-        (name, tensor.contiguous().view(dtype).view(*shape))
+        (name, tensor.contiguous().view(dtype).view(shape))
         for name, shape, dtype, tensor in zip(names, shapes, dtypes, unpacked_tensors)
     ]
 
@@ -105,7 +105,7 @@ def pack_tensors(
 
         name, orig_tensor = item
         # Apply post processing and convert to linearized uint8 tensor
-        tensor = post_iter_func(item).contiguous().view(torch.uint8).view(-1)
+        tensor = post_iter_func(item).contiguous().view(-1).view(torch.uint8)
 
         if tensor.numel() > buffer_size_bytes:
             import warnings
@@ -350,7 +350,7 @@ def packed_ipc_producer(
 
     for name, orig_tensor in iterator:
         flat = (
-            post_iter_func((name, orig_tensor)).contiguous().view(torch.uint8).view(-1)
+            post_iter_func((name, orig_tensor)).contiguous().view(-1).view(torch.uint8)
         )
 
         if flat.numel() > buffer_size_bytes:

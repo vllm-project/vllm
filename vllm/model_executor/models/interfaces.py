@@ -21,6 +21,7 @@ from typing import (
     ClassVar,
     Literal,
     Protocol,
+    Self,
     TypeAlias,
     overload,
     runtime_checkable,
@@ -31,7 +32,7 @@ import torch
 import torch.nn as nn
 from torch import Tensor
 from transformers.models.whisper.tokenization_whisper import LANGUAGES
-from typing_extensions import Self, TypeIs, deprecated
+from typing_extensions import TypeIs
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -61,6 +62,7 @@ if TYPE_CHECKING:
     from vllm.multimodal.registry import _ProcessorFactories
     from vllm.sequence import IntermediateTensors
     from vllm.tasks import ScoreType
+    from vllm.tokenizers import TokenizerLike
     from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
     from vllm.v1.worker.encoder_cudagraph_defs import (
         EncoderCudaGraphCaptureInputs,
@@ -421,17 +423,6 @@ class SupportsMultiModal(SupportsMultiModalEmbeddings, Protocol):
 
             yield
 
-    @deprecated(
-        "get_num_mm_encoder_tokens is deprecated; use get_mm_lora_token_counts instead."
-    )
-    def get_num_mm_encoder_tokens(self, num_image_tokens: int) -> int: ...
-
-    @deprecated(
-        "get_num_mm_connector_tokens is deprecated; use "
-        "get_mm_lora_token_counts instead."
-    )
-    def get_num_mm_connector_tokens(self, num_vision_tokens: int) -> int: ...
-
     def get_mm_lora_token_counts(
         self,
         *,
@@ -445,12 +436,9 @@ class SupportsMultiModal(SupportsMultiModalEmbeddings, Protocol):
         connector forwards. Models with multiple modalities can override this
         when each modality has different encoder padding or pooling behavior.
         """
-        del modality, mm_kwargs
-        num_encoder_tokens = self.get_num_mm_encoder_tokens(num_mm_embeds)
-        num_connector_tokens = self.get_num_mm_connector_tokens(num_encoder_tokens)
-        return (
-            num_encoder_tokens,
-            num_connector_tokens if isinstance(num_connector_tokens, int) else None,
+        raise NotImplementedError(
+            f"{type(self).__name__} must implement get_mm_lora_token_counts "
+            "to support tower/connector LoRA."
         )
 
     def _embed_text_input_ids(
@@ -1262,7 +1250,7 @@ class SupportsRealtime(Protocol):
     Override in subclasses based on the model's expected output length."""
 
     @classmethod
-    async def buffer_realtime_audio(
+    def buffer_realtime_audio(
         cls,
         audio_stream: AsyncGenerator[np.ndarray, None],
         input_stream: asyncio.Queue[list[int]],
@@ -1449,7 +1437,7 @@ class SupportsTranscription(Protocol):
     def parse_language_detection_output(
         cls,
         token_ids: list[int],
-        tokenizer: object,
+        tokenizer: "TokenizerLike",
     ) -> str:
         """Parse the detected language from model output token IDs.
 
@@ -1461,7 +1449,7 @@ class SupportsTranscription(Protocol):
     @classmethod
     def get_language_token_ids(
         cls,
-        tokenizer: object,
+        tokenizer: "TokenizerLike",
     ) -> list[int] | None:
         """Return token IDs that represent valid language tokens.
 

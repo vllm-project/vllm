@@ -6,7 +6,7 @@ import math
 import os
 import stat
 from pathlib import Path
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, Self
 
 from pydantic import (
     BaseModel,
@@ -19,7 +19,6 @@ from pydantic import (
     field_validator,
     model_validator,
 )
-from typing_extensions import Self
 
 
 class SnapshotCompatibilityError(RuntimeError):

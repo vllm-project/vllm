@@ -23,6 +23,7 @@ from itertools import islice
 
 import torch
 from torch import nn
+from transformers import NemotronHConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import (
@@ -34,7 +35,7 @@ from vllm.config.parallel import ParallelConfig
 from vllm.distributed import get_ep_group, get_tensor_model_parallel_world_size
 from vllm.distributed.communication_op import tensor_model_parallel_all_gather
 from vllm.distributed.parallel_state import get_pp_group
-from vllm.model_executor.layers.activation import ReLUSquaredActivation
+from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
@@ -87,13 +88,12 @@ from vllm.model_executor.models.utils import (
     sequence_parallel_chunk,
 )
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.configs.nemotron_h import NemotronHConfig
 
 
 class NemotronHMLP(nn.Module):
     def __init__(
         self,
-        config: NemotronHConfig,
+        config: NemotronHConfig | None,
         hidden_size: int,
         intermediate_size: int,
         quant_config: QuantizationConfig | None = None,
@@ -101,6 +101,9 @@ class NemotronHMLP(nn.Module):
         reduce_results: bool = True,
         is_sequence_parallel: bool = False,
         prefix: str = "",
+        *,
+        hidden_act: str = "relu2",
+        output_size: int | None = None,
     ) -> None:
         super().__init__()
 
@@ -114,14 +117,14 @@ class NemotronHMLP(nn.Module):
         )
         self.down_proj = RowParallelLinear(
             input_size=intermediate_size,
-            output_size=hidden_size,
+            output_size=hidden_size if output_size is None else output_size,
             bias=bias,
             quant_config=quant_config,
             reduce_results=reduce_results,
             disable_tp=is_sequence_parallel,
             prefix=f"{prefix}.down_proj",
         )
-        self.act_fn = ReLUSquaredActivation()
+        self.act_fn = get_act_fn(hidden_act)
 
     def forward(self, x: torch.Tensor):
         x, _ = self.up_proj(x)
@@ -232,7 +235,7 @@ class NemotronHMoE(nn.Module):
             intermediate_size=config.moe_intermediate_size,
             renormalize=config.norm_topk_prob,
             quant_config=quant_config,
-            ckpt_names=("up_proj", "down_proj", ""),
+            ckpt_names=("up_proj", "down_proj", None),
             use_grouped_topk=True,
             num_expert_group=config.n_group,
             topk_group=config.topk_group,
@@ -704,7 +707,7 @@ class NemotronHModel(nn.Module, EagleModelMixin):
                 self,
                 ckpt_gate_proj_name="up_proj",
                 ckpt_down_proj_name="down_proj",
-                ckpt_up_proj_name="",
+                ckpt_up_proj_name=None,
                 num_experts=self._get_max_n_routed_experts(),
                 num_redundant_experts=getattr(self, "num_redundant_experts", 0),
             )
@@ -812,6 +815,7 @@ class NemotronHForCausalLM(
                 tp_world_size=parallel_config.tensor_parallel_size,
                 logical_window=cache_config.replayssm_buffer_len,
                 backend=vllm_config.mamba_config.backend,
+                num_speculative_tokens=vllm_config.num_speculative_tokens,
             )
         return base_shape
 

@@ -6,7 +6,7 @@ from vllm.logger import init_logger
 from vllm.utils.math_utils import round_up
 
 if TYPE_CHECKING:
-    from transformers import PretrainedConfig
+    from transformers import PreTrainedConfig
 
     from vllm.config import CacheConfig, ModelConfig, VllmConfig
     from vllm.config.cache import MambaDType
@@ -43,6 +43,26 @@ class DeepseekV32ForCausalLM(VerifyAndUpdateConfig):
 class GlmMoeDsaForCausalLM(VerifyAndUpdateConfig):
     @staticmethod
     def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        from vllm.platforms import current_platform
+
+        cache_config = vllm_config.cache_config
+        if (
+            cache_config.cache_dtype == "auto"
+            and current_platform.is_cuda()
+            and current_platform.is_device_capability_family(100)
+        ):
+            cache_config.cache_dtype = "fp8_e4m3"
+            logger.info_once("Using fp8 kv-cache for GlmMoeDsaForCausalLM on SM10x")
+            # MTP shares the target's KV cache layout; a separate draft model
+            # must not inherit a default it was never validated with.
+            spec_config = vllm_config.speculative_config
+            if (
+                spec_config is not None
+                and spec_config.method != "mtp"
+                and spec_config.kv_cache_dtype is None
+            ):
+                spec_config.kv_cache_dtype = "auto"
+
         # For Glm-Moe-DSA, qrep + a2a is better than the default all-gather + ag-rs
         # in most cases.
         vllm_config.parallel_config.set_dcp_defaults(
@@ -212,12 +232,15 @@ class Gemma4Config(VerifyAndUpdateConfig):
         """Configure attention for heterogeneous head dimensions.
 
         Gemma4 uses different head dimensions for sliding window vs full attention
-        layers. The default FA3 on Hopper cannot handle head_dim > 256, which causes
-        mixed backend selection and numerical divergence.
+        layers. The default FA3 on Hopper cannot handle head_dim > 256.
 
-        When FA4 is available we force it for ALL layers, giving a uniform kernel path
-        and avoiding the mixed FA3+FA4 penalty. When FA4 is not available we fall back
-        to Triton.
+        On SM90 with FP8 KV cache, use FA3 for supported layers and let the generic
+        FlashAttention selector upgrade larger head dimensions to FA4.
+        The multimodal-prefix composite routes image masks to Triton and causal
+        requests to this per-layer FA3/FA4 selection. For other configurations,
+        force FA4 for all layers to avoid the mixed
+        FA3+FA4 penalty.
+        When FA4 is not available, fall back to Triton.
         """
         model_config = vllm_config.model_config
         arch_config = model_config.model_arch_config
@@ -230,6 +253,7 @@ class Gemma4Config(VerifyAndUpdateConfig):
         if len(set(head_dims.values())) <= 1:
             return
 
+        from vllm.platforms import current_platform
         from vllm.v1.attention.backends.fa_utils import is_fa_version_supported
         from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
@@ -241,12 +265,22 @@ class Gemma4Config(VerifyAndUpdateConfig):
                 and vllm_config.attention_config.backend
                 in (None, AttentionBackendEnum.FLASH_ATTN)
             ):
-                vllm_config.attention_config.flash_attn_version = 4
-                logger.info(
-                    "Gemma4 model has heterogeneous head dimensions %s. Using FA4 for "
-                    "all layers to avoid mixed FA3/FA4 penalty.",
-                    head_dims,
-                )
+                use_per_layer_fa = current_platform.is_device_capability_family(
+                    90
+                ) and vllm_config.cache_config.cache_dtype.startswith("fp8")
+                if use_per_layer_fa:
+                    logger.info(
+                        "Gemma4 model has heterogeneous head dimensions %s. Using "
+                        "per-layer FA3/FA4 selection for FP8 KV cache on SM90.",
+                        head_dims,
+                    )
+                else:
+                    vllm_config.attention_config.flash_attn_version = 4
+                    logger.info(
+                        "Gemma4 model has heterogeneous head dimensions %s. Using FA4 "
+                        "for all layers to avoid mixed FA3/FA4 penalty.",
+                        head_dims,
+                    )
         elif vllm_config.attention_config.backend is None:
             vllm_config.attention_config.backend = AttentionBackendEnum.TRITON_ATTN
             logger.info(
@@ -254,6 +288,31 @@ class Gemma4Config(VerifyAndUpdateConfig):
                 "%s. FA4 not available, forcing TRITON_ATTN backend.",
                 head_dims,
             )
+
+
+class EmbeddingGemma2ModelConfig(Gemma4Config):
+    @staticmethod
+    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        Gemma4Config.verify_and_update_config(vllm_config)
+        from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+        attn_config = vllm_config.attention_config
+        if attn_config.backend is None:
+            attn_config.backend = AttentionBackendEnum.TRITON_ATTN
+            logger.info(
+                "EmbeddingGemma2: attention backend not specified; defaulting to "
+                "TRITON_ATTN (validated backend for heterogeneous head dimensions)."
+            )
+        else:
+            logger.info(
+                "EmbeddingGemma2: using attention backend %s", attn_config.backend
+            )
+
+        model_config = vllm_config.model_config
+        if model_config.max_model_len > 8192 and getattr(
+            model_config, "original_max_model_len", None
+        ) in (None, -1):
+            model_config.max_model_len = 8192
 
 
 class DiffusionGemmaModelForBlockDiffusionConfig(VerifyAndUpdateConfig):
@@ -532,6 +591,7 @@ class JinaVLForSequenceClassificationConfig(VerifyAndUpdateConfig):
     def verify_and_update_model_config(model_config: "ModelConfig") -> None:
         config = model_config.hf_config
         config.num_labels = 1
+        config.get_text_config().num_labels = 1
         pooler_config = model_config.pooler_config
         assert pooler_config is not None
         if pooler_config.logit_mean is None:
@@ -631,20 +691,9 @@ class MambaModelConfig(VerifyAndUpdateConfig):
                     cache_config.mamba_cache_mode,
                     model_config.architecture,
                 )
-            if (
-                cache_config.mamba_cache_mode == "all"
-                and not model_config.supports_mamba_prefix_caching
-            ):
-                cache_config.mamba_cache_mode = "align"
-                logger.warning(
-                    "Hybrid or mamba-based model detected without support "
-                    "for prefix caching with Mamba cache 'all' mode: "
-                    "falling back to 'align' mode."
-                )
-            if cache_config.mamba_cache_mode == "align":
-                assert vllm_config.scheduler_config.enable_chunked_prefill, (
-                    "Chunked prefill is required for mamba cache mode 'align'."
-                )
+            assert vllm_config.scheduler_config.enable_chunked_prefill, (
+                "Chunked prefill is required for mamba cache mode 'align'."
+            )
             # By default, mamba block size will be set to max_model_len (see
             # below). When enabling prefix caching, we align mamba block size
             # to the block size as the basic granularity for prefix caching.
@@ -666,7 +715,7 @@ class NemotronHForCausalLMConfig(VerifyAndUpdateConfig):
 
     @classmethod
     def update_mamba_ssm_cache_dtype(
-        cls, *, cache_config: "CacheConfig", hf_config: "PretrainedConfig"
+        cls, *, cache_config: "CacheConfig", hf_config: "PreTrainedConfig"
     ) -> None:
         """Update mamba_ssm_cache_dtype for NemotronH models when set to 'auto'
         (or not explicitly set), to the value specified in the HF config, or to
@@ -1009,6 +1058,7 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "DeepseekV41ForCausalLM": DeepseekV4ForCausalLMConfig,
     "DeepseekV32ForCausalLM": DeepseekV32ForCausalLM,
     "DiffusionGemmaForBlockDiffusion": DiffusionGemmaModelForBlockDiffusionConfig,  # noqa: E501
+    "EmbeddingGemma2Model": EmbeddingGemma2ModelConfig,
     "Ernie4_5_VLMoeForConditionalGeneration": Ernie4_5_VLMoeForConditionalGenerationConfig,  # noqa: E501
     "FalconMambaForCausalLM": MambaModelConfig,
     "Gemma3TextModel": Gemma3TextModelConfig,

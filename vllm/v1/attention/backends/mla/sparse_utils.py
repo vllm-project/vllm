@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Utility functions for sparse MLA backends."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 import numpy as np
@@ -22,6 +22,7 @@ from vllm.model_executor.warmup.jit_warmup_triton_helper import (
 )
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv
+from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.worker.block_table import get_block_table_width
 
 
@@ -38,6 +39,12 @@ def request_row_bounds(req_idx: np.ndarray) -> np.ndarray:
         "rows of one request must be adjacent"
     )
     return bounds
+
+
+def align_blocks_to_rows(spec: AttentionSpec, rows: int = 1) -> AttentionSpec:
+    """Sparse kernels read the cache as flat rows, viewed as ``rows``-row pages,
+    so blocks must be whole pages apart."""
+    return replace(spec, block_stride_alignment=rows * spec.state_content_size_bytes)
 
 
 def flat_kv_row_view(

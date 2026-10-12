@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import torch
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 from vllm.config import (
     VllmConfig,
@@ -24,7 +24,7 @@ class LinearAttention(PluggableLayer, MambaBase):
     """Base class for Linear attention layer."""
 
     def __init__(
-        self, config: PretrainedConfig, vllm_config: VllmConfig, prefix: str = ""
+        self, config: PreTrainedConfig, vllm_config: VllmConfig, prefix: str = ""
     ):
         super().__init__()
         self.layer_idx = extract_layer_index(prefix)

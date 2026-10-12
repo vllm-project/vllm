@@ -284,7 +284,8 @@ def _prepare_commit_plan_kernel(
         )
         final_num_computed = num_computed + commit_len
         final_state_col = tl.minimum(
-            final_num_computed // mamba_block_size, block_table_width - 1
+            tl.maximum(final_num_computed - 1, 0) // mamba_block_size,
+            block_table_width - 1,
         )
         final_state_idx = tl.load(
             block_table_ptr

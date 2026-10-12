@@ -130,7 +130,7 @@ class AMXMLABackend(MLACommonBackend):
         return [576]
 
     @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
         return [MultipleOf(32)]
 
     @classmethod

@@ -7,7 +7,8 @@ import numpy as np
 import pytest
 import torch
 
-from vllm.config import VllmConfig
+from vllm.config import CompilationConfig, VllmConfig
+from vllm.config.compilation import CompilationMode
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.models import gemma
 from vllm.model_executor.models.gemma3n import (
@@ -18,8 +19,70 @@ from vllm.model_executor.models.gemma4 import (
     Gemma4ForCausalLM,
     _gemma4_layer_weights_mapper,
 )
+from vllm.model_executor.models.gemma4_dspark import (
+    Gemma4DSparkForCausalLM,
+    Gemma4DSparkModel,
+)
 
 MODELS = ["google/gemma-2b", "google/gemma-2-2b", "google/gemma-3-4b-it"]
+
+
+@pytest.mark.usefixtures("dist_init")
+@pytest.mark.parametrize(
+    "enabled,has_weights,with_markov",
+    [
+        pytest.param(True, True, False, id="hidden-only"),
+        pytest.param(True, True, True, id="with-markov"),
+        pytest.param(True, False, True, id="missing-weights"),
+        pytest.param(False, True, True, id="disabled-head"),
+    ],
+)
+def test_gemma4_dspark_loads_confidence_head(
+    monkeypatch, enabled, has_weights, with_markov
+) -> None:
+    """Use checkpoint confidence parameters, or disable an unavailable head."""
+    config = SimpleNamespace(
+        vocab_size=64,
+        hidden_size=8,
+        target_layer_ids=[0, 1],
+        num_hidden_layers=0,
+        rms_norm_eps=1e-6,
+        markov_rank=4,
+        enable_confidence_head=enabled,
+        confidence_head_with_markov=with_markov,
+    )
+    vllm_config = SimpleNamespace(
+        compilation_config=CompilationConfig(mode=CompilationMode.NONE),
+        model_config=SimpleNamespace(dtype=torch.bfloat16),
+        speculative_config=SimpleNamespace(
+            draft_model_config=SimpleNamespace(hf_config=config),
+        ),
+    )
+    monkeypatch.setattr(Gemma4DSparkModel, "_build_fused_kv_buffers", lambda _: None)
+    model = Gemma4DSparkForCausalLM(vllm_config=cast(VllmConfig, vllm_config))
+    width = config.hidden_size + (config.markov_rank if with_markov else 0)
+    weight = torch.arange(width, dtype=torch.bfloat16).reshape(1, -1) / 16
+    bias = torch.tensor([-0.5], dtype=torch.bfloat16)
+    loaded = model.load_weights(
+        [("confidence_head.proj.weight", weight), ("confidence_head.proj.bias", bias)]
+        if has_weights
+        else []
+    )
+    if not (enabled and has_weights):
+        assert model.model.confidence_head is None
+        assert not loaded
+        return
+
+    assert loaded == {
+        "model.confidence_head.proj.weight",
+        "model.confidence_head.proj.bias",
+    }
+    assert model.model.confidence_head.proj.weight.dtype == torch.float32
+    hidden = torch.full((3, config.hidden_size), 0.25, dtype=torch.bfloat16)
+    markov = torch.full((3, config.markov_rank), -0.5, dtype=torch.bfloat16)
+    inputs = torch.cat([hidden, markov], dim=-1) if with_markov else hidden
+    expected = (inputs.float() @ weight.float().T + bias.float()).sigmoid().squeeze(-1)
+    torch.testing.assert_close(model.compute_confidence(hidden, markov), expected)
 
 
 @pytest.mark.cpu_test
@@ -164,7 +227,9 @@ def test_dummy_loader(vllm_runner, monkeypatch, model: str) -> None:
         ) as llm:
             if model == "google/gemma-3-4b-it":
                 normalizers = llm.llm.collective_rpc(
-                    lambda self: self.model_runner.model.language_model.model.normalizer.cpu().item()  # noqa: E501
+                    lambda self: (
+                        self.model_runner.model.language_model.model.normalizer.cpu().item()
+                    )  # noqa: E501
                 )
                 config = llm.llm.llm_engine.model_config.hf_config.text_config
             else:

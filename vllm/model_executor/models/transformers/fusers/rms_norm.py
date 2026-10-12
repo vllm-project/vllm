@@ -36,33 +36,53 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
+def _operand(node: fx.Node, index: int, name: str) -> object | None:
+    """Operand `index` of `node`, whether it was passed positionally or as `name`."""
+    if len(node.args) > index:
+        return node.args[index]
+    return node.kwargs.get(name)
+
+
 def _is_squared(node: object, x: fx.Node) -> bool:
     """`x**2`, `x.square()` or `x * x`, through any dtype casts."""
     node = peel(node)
     if is_op(node, "pow"):
-        base, exp = node.args
-        return peel(base) is x and exp == 2
+        return (
+            peel(_operand(node, 0, "input")) is x and _operand(node, 1, "exponent") == 2
+        )
     if is_op(node, "square"):
-        return peel(node.args[0]) is x
+        return peel(_operand(node, 0, "input")) is x
     if is_op(node, "mul"):
-        a, b = node.args
-        return peel(a) is x and peel(b) is x
+        return (
+            peel(_operand(node, 0, "input")) is x
+            and peel(_operand(node, 1, "other")) is x
+        )
+    return False
+
+
+def _is_inverse_sqrt(node: object) -> bool:
+    """Detect `rsqrt(v)`, or the `pow(v, -0.5)` / `v ** -0.5` spelling of it."""
+    if is_op(node, "rsqrt"):
+        return True
+    if is_op(node, "pow"):
+        return _operand(node, 1, "exponent") == -0.5
     return False
 
 
 def _variance_eps(rsqrt: fx.Node, x: fx.Node) -> float | None:
-    """Eps from `rsqrt(mean(x**2, -1) + eps)`, or `None` if not that shape."""
-    add = peel(rsqrt.args[0])
+    """`eps` from `rsqrt(mean(x**2, -1) + eps)`, or `None` if not that shape."""
+    add = peel(_operand(rsqrt, 0, "input"))
     if not is_op(add, "add"):
         return None
-    consts = [a for a in add.args if isinstance(a, (int, float))]
-    nodes = [a for a in add.args if isinstance(a, fx.Node)]
+    operands = [_operand(add, 0, "input"), _operand(add, 1, "other")]
+    consts = [a for a in operands if isinstance(a, (int, float))]
+    nodes = [a for a in operands if isinstance(a, fx.Node)]
     if len(consts) != 1 or len(nodes) != 1:
         return None
     mean = peel(nodes[0])
     if not is_op(mean, "mean"):
         return None
-    if not _is_squared(mean.args[0], x):
+    if not _is_squared(_operand(mean, 0, "input"), x):
         return None
     return float(consts[0])
 
@@ -72,7 +92,10 @@ def _is_one_plus(node: object) -> bool:
     node = peel(node)
     if not is_op(node, "add"):
         return False
-    return any(isinstance(a, (int, float)) and a == 1 for a in node.args)
+    return any(
+        isinstance(a, (int, float)) and a == 1
+        for a in (_operand(node, 0, "input"), _operand(node, 1, "other"))
+    )
 
 
 def _has_trailing_compute(graph: fx.Graph, node: fx.Node) -> bool:
@@ -144,7 +167,7 @@ class RMSNormFuser(BaseFuser):
             return None
         # Handle native torch `rms_norm` op.
         rms_norm = find_node(graph, lambda n: is_op(n, "rms_norm"))
-        if rms_norm is not None and rms_norm.args and peel(rms_norm.args[0]) is x:
+        if rms_norm is not None and peel(_operand(rms_norm, 0, "input")) is x:
             if _has_trailing_compute(graph, rms_norm):
                 return None
             eps_attr, eps = cls._eps_source(graph, module)
@@ -158,14 +181,16 @@ class RMSNormFuser(BaseFuser):
         # The rsqrt over the mean-square variance is the spine of the norm.
         rsqrt = None
         for node in graph.nodes:
-            if is_op(node, "rsqrt") and _variance_eps(node, x) is not None:
+            if _is_inverse_sqrt(node) and _variance_eps(node, x) is not None:
                 rsqrt = node
                 break
         if rsqrt is None:
             return None
         # The `x * rsqrt(...)` normalize multiply.
         normalize = find_node(
-            graph, lambda n: is_op(n, "mul") and rsqrt in map(peel, n.args)
+            graph,
+            lambda n: is_op(n, "mul")
+            and rsqrt in map(peel, (_operand(n, 0, "input"), _operand(n, 1, "other"))),
         )
         if normalize is None:
             return None
@@ -174,7 +199,11 @@ class RMSNormFuser(BaseFuser):
         for node in graph.nodes:
             if not is_op(node, "mul") or node is normalize:
                 continue
-            operands = [peel(a) for a in node.args if isinstance(a, fx.Node)]
+            operands = [
+                peel(a)
+                for a in (_operand(node, 0, "input"), _operand(node, 1, "other"))
+                if isinstance(a, fx.Node)
+            ]
             if len(operands) == 2 and normalize in operands:
                 weight = next(o for o in operands if o is not normalize)
                 tail, zero_centered = node, _is_one_plus(weight)
@@ -234,12 +263,12 @@ class RMSNormFuser(BaseFuser):
         if (x := find_node(graph, lambda n: n.op == "placeholder")) is None:
             return None
         fused = find_node(graph, lambda n: is_op(n, "rms_norm"))
-        if fused is not None and fused.args and peel(fused.args[0]) is x:
+        if fused is not None and peel(_operand(fused, 0, "input")) is x:
             args, kwargs = fused.args, fused.kwargs
             eps = args[3] if len(args) > 3 else kwargs.get("eps")
             return float(eps) if isinstance(eps, (int, float)) else None
         for node in graph.nodes:
-            if is_op(node, "rsqrt") and (eps := _variance_eps(node, x)) is not None:
+            if _is_inverse_sqrt(node) and (eps := _variance_eps(node, x)) is not None:
                 return eps
         return None
 

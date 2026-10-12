@@ -18,6 +18,7 @@ from vllm.config.speech_to_text import SpeechToTextParams
 from vllm.inputs import PromptType, TokensPrompt
 from vllm.model_executor.model_loader import DefaultModelLoader
 from vllm.model_executor.models.interfaces import (
+    MultiModalEmbeddings,
     SupportsMultiModal,
     SupportsPP,
     SupportsTranscription,
@@ -240,6 +241,7 @@ class KimiAudioMultiModalProcessor(BaseMultiModalProcessor[KimiAudioProcessingIn
         # KimiAudioProcessor expects raw numpy arrays
         mm_data = hf_inputs.hf_data
         if audios := mm_data.pop("audio", []):
+            assert isinstance(audios, Sequence)
             audio_arrays = []
             for aud in audios:
                 if isinstance(aud, (tuple, list)) and len(aud) == 2:
@@ -485,7 +487,7 @@ class KimiAudioForConditionalGeneration(
     def embed_input_ids(
         self,
         input_ids: torch.Tensor,
-        multimodal_embeddings: tuple[torch.Tensor, ...] | None = None,
+        multimodal_embeddings: MultiModalEmbeddings | None = None,
         *,
         is_multimodal: torch.Tensor | None = None,
     ) -> torch.Tensor:

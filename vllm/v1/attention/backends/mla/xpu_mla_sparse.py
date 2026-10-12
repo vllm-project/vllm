@@ -27,6 +27,7 @@ from vllm.v1.attention.backend import (
     MLAAttentionImpl,
 )
 from vllm.v1.attention.backends.mla.sparse_utils import (
+    align_blocks_to_rows,
     flat_kv_row_view,
     triton_convert_req_index_to_global_index,
 )
@@ -49,6 +50,10 @@ class XPUMLASparseBackend(AttentionBackend):
     @staticmethod
     def get_name() -> str:
         return "XPU_MLA_SPARSE"
+
+    @classmethod
+    def customize_spec(cls, spec: AttentionSpec) -> AttentionSpec:
+        return align_blocks_to_rows(spec)
 
     @staticmethod
     def get_metadata_cls() -> type["XPUMLASparseMetadata"]:

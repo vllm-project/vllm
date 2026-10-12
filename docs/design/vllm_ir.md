@@ -233,19 +233,17 @@ storing this information in vLLM's `PassContext` for later use in clone eliminat
 ### 3. IR Fusion and Transformation Passes
 
 After functionalization, custom vLLM passes operate on the functional FX graph containing high-level IR operations.
-These passes can perform fusion, distribute operations for sequence parallelism, and other transformations:
+These passes can perform fusion and other transformations:
 
 ```python
-# Example: Sequence Parallelism (see SequenceParallelismPass)
-# Before SP pass
+# Example: AllReduce + RMSNorm fusion (see AllReduceFusionPass)
+# Before
 
 all_reduce = torch.ops.vllm.all_reduce(x, "tp:0")
 rms_norm = torch.ops.vllm_ir.rms_norm(all_reduce, weight, 1e-5)
 
-# after SP pass
-reduce_scatter = torch.ops.vllm.reduce_scatter(x, "tp:0")
-rms_norm = torch.ops.vllm_ir.rms_norm(all_reduce, weight, 1e-5)
-all_gather = torch.ops.vllm.all_gather(x, "tp:0")
+# After
+rms_norm = torch.ops.vllm.flashinfer_trtllm_fused_allreduce_norm(x, weight, ...)
 ```
 
 Fusion passes benefit from the high-level representation: they don't need to match against low-level PyTorch operations,

@@ -35,9 +35,9 @@ def test_reference_encoder_fixtures(case_id):
 @pytest.mark.parametrize(
     ("effort", "budget"),
     [
-        (None, 50),
-        ("low", 25),
-        ("high", 50),
+        (None, 75),
+        ("low", 50),
+        ("high", 75),
         ("xhigh", 75),
         ("max", 100),
         (1, 1),
@@ -138,7 +138,7 @@ def test_top_level_effort_overrides_template_effort():
         chat_template_kwargs={"reasoning_effort": 100},
     )
     kwargs = request.build_chat_params(None, "auto").get_apply_chat_template_kwargs()
-    assert "Reasoning Effort: 25 " in render(request.messages, **kwargs)
+    assert "Reasoning Effort: 50 " in render(request.messages, **kwargs)
 
 
 def test_encode_uses_one_bos_and_forwards_truncation():

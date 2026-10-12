@@ -5,7 +5,7 @@ from collections.abc import Iterable
 
 import torch
 import torch.nn as nn
-from transformers import ProcessorMixin
+from transformers import NemotronHConfig, ProcessorMixin
 
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -20,7 +20,6 @@ from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.configs.nemotron_h import NemotronHConfig
 from vllm.utils.torch_utils import async_tensor_h2d
 
 from .interfaces import (
