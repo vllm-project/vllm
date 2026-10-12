@@ -34,13 +34,23 @@ use crate::routes::openai::{
 };
 use crate::utils::{resolve_request_context, unix_timestamp};
 
+/// Render endpoint request: an OpenAI request plus options that only the render
+/// endpoints honor.
 #[derive(Deserialize, Validate)]
 struct RenderRequest<T: Validate> {
+    /// The OpenAI request to render.
     #[serde(flatten)]
     #[validate(nested)]
     request: T,
+    /// Whether to return [`RenderResponse::token_offsets`].
     return_token_offsets: Option<bool>,
 }
+
+/// Request body of `/v1/chat/completions/render`.
+type RenderChatCompletionRequest = RenderRequest<ChatCompletionRequest>;
+
+/// Request body of `/v1/completions/render`.
+type RenderCompletionRequest = RenderRequest<CompletionRequest>;
 
 impl<T: Validate + Normalizable> Normalizable for RenderRequest<T> {
     fn normalize(&mut self) {
@@ -48,10 +58,19 @@ impl<T: Validate + Normalizable> Normalizable for RenderRequest<T> {
     }
 }
 
+/// Render endpoint response: a request that `/inference/v1/generate` accepts
+/// unchanged, plus render metadata that generation does not consume.
+#[serde_with::skip_serializing_none]
 #[derive(Serialize)]
 struct RenderResponse {
+    /// The rendered generate request.
     #[serde(flatten)]
     request: GenerateRequest,
+    /// Unicode character span `(start, end)` of each prompt token in the source
+    /// text, aligned with `token_ids`; chat spans refer to the templated prompt.
+    /// Special tokens without source text get `(0, 0)`. Unset unless requested,
+    /// and for pre-tokenized or multimodal prompts and tokenizers without
+    /// offsets.
     token_offsets: Option<Vec<(usize, usize)>>,
 }
 
@@ -185,7 +204,7 @@ fn hoist_transfer_params(
 async fn render_chat(
     State(state): State<Arc<RenderState>>,
     headers: HeaderMap,
-    ValidatedJson(render): ValidatedJson<RenderRequest<ChatCompletionRequest>>,
+    ValidatedJson(render): ValidatedJson<RenderChatCompletionRequest>,
 ) -> Result<Json<RenderResponse>, ApiError> {
     let body = render.request;
     let model = response_model(&state, body.model.as_deref());
@@ -219,7 +238,7 @@ async fn render_chat(
 async fn render_completion(
     State(state): State<Arc<RenderState>>,
     headers: HeaderMap,
-    ValidatedJson(render): ValidatedJson<RenderRequest<CompletionRequest>>,
+    ValidatedJson(render): ValidatedJson<RenderCompletionRequest>,
 ) -> Result<Json<Vec<RenderResponse>>, ApiError> {
     let body = render.request;
     let model = response_model(&state, body.model.as_deref());

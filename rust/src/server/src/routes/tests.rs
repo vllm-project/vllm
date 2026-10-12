@@ -1634,7 +1634,7 @@ async fn render_chat_returns_generate_request_with_header_request_id() {
     assert!(!json["token_ids"].as_array().unwrap().is_empty());
     assert!(json.get("prompt_token_ids").is_none());
     assert!(json.get("mm_features").is_none());
-    assert_eq!(json.get("token_offsets"), Some(&serde_json::Value::Null));
+    assert!(json.get("token_offsets").is_none());
 }
 
 #[tokio::test]
@@ -1743,7 +1743,7 @@ async fn render_completion_returns_generate_request_with_body_request_id() {
     assert!(json[0].get("mm_features").is_none());
     assert!(json[0].get("reasoning_ended").is_none());
     assert!(json[0].get("reasoning_parser_kwargs").is_none());
-    assert_eq!(json[0].get("token_offsets"), Some(&serde_json::Value::Null));
+    assert!(json[0].get("token_offsets").is_none());
 }
 
 #[tokio::test]
@@ -1808,7 +1808,7 @@ async fn render_offsets_are_opt_in_and_require_source_text() {
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{body}");
-        assert_eq!(body[0].get("token_offsets"), Some(&serde_json::Value::Null));
+        assert!(body[0].get("token_offsets").is_none());
     }
 }
 
