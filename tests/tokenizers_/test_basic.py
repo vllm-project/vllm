@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from pathlib import Path
 from typing import _get_protocol_attrs  # type: ignore
 from unittest.mock import patch
 
@@ -69,7 +68,7 @@ def test_hub_tokenizer_loads_from_local_snapshot():
         tokenizer = get_tokenizer("openai-community/gpt2")
 
     assert isinstance(tokenizer, PreTrainedTokenizerBase)
-    assert Path(tokenizer.name_or_path).is_dir()
+    assert tokenizer.name_or_path == "openai-community/gpt2"
     list_repo_templates.assert_not_called()
 
 

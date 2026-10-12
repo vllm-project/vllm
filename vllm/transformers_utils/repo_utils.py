@@ -369,6 +369,8 @@ def get_non_weight_snapshot_path(
     """
     if envs.VLLM_USE_MODELSCOPE or Path(repo_id).exists():
         return repo_id
+    # Normalise so that `None` and "main" share a cache entry
+    revision = revision or huggingface_hub.constants.DEFAULT_REVISION
     try:
         return _snapshot_non_weight_files(repo_id, revision, cache_dir, token)
     except (HfHubHTTPError, OSError, ValueError):

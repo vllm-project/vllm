@@ -4,7 +4,7 @@ import contextlib
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
-from typing import TYPE_CHECKING, assert_never
+from typing import TYPE_CHECKING, assert_never, cast
 
 import huggingface_hub
 from typing_extensions import TypeVar
@@ -19,7 +19,7 @@ from vllm.transformers_utils.repo_utils import (
 )
 from vllm.utils.import_utils import resolve_obj_by_qualname
 
-from .hf import CachedHfTokenizer
+from .hf import CachedHfTokenizer, HfTokenizer
 from .protocol import TokenizerLike
 
 if TYPE_CHECKING:
@@ -209,6 +209,7 @@ def get_tokenizer(
 
         apply_fastokens_patch()
 
+    requested_name = str(tokenizer_name)
     tokenizer_mode, tokenizer_name, args, kwargs = cached_resolve_tokenizer_args(
         tokenizer_name,
         *args,
@@ -261,6 +262,9 @@ def get_tokenizer(
         kwargs.setdefault("config", config)
 
     tokenizer = tokenizer_cls_.from_pretrained(tokenizer_name, *args, **kwargs)
+    # Report the Hub ID rather than the local snapshot it was loaded from
+    if tokenizer_mode == "hf" and not envs.VLLM_USE_MODELSCOPE:
+        cast(HfTokenizer, tokenizer).name_or_path = requested_name
     if model_type in _MODEL_TYPES_WITH_INCORRECT_TOKENIZER_CLASS:
         from vllm.tokenizers.hf import get_cached_tokenizer
 

@@ -219,13 +219,18 @@ This is needed because `lru_cache` does not cache when an exception happens.
 
 
 def _try_get_processor_chat_template(
-    processor_name: str,
+    tokenizer: HfTokenizer,
     *,
     revision: str | None,
     code_revision: str | None,
     trust_remote_code: bool,
 ) -> str | None:
-    cache_key = (processor_name, revision, code_revision, trust_remote_code)
+    cache_key = (
+        tokenizer.name_or_path,
+        revision,
+        code_revision,
+        trust_remote_code,
+    )
     if cache_key in _PROCESSOR_CHAT_TEMPLATES:
         return _PROCESSOR_CHAT_TEMPLATES[cache_key]
 
@@ -233,7 +238,7 @@ def _try_get_processor_chat_template(
 
     try:
         processor = cached_get_processor(
-            processor_name,
+            tokenizer.name_or_path,
             processor_cls=(PythonBackend, TokenizersBackend, ProcessorMixin),
             revision=revision,
             code_revision=code_revision,
@@ -249,7 +254,7 @@ def _try_get_processor_chat_template(
     except Exception:
         logger.debug(
             "Failed to load AutoProcessor chat template for %s",
-            processor_name,
+            tokenizer.name_or_path,
             exc_info=True,
         )
 
@@ -272,23 +277,14 @@ def resolve_chat_template(
 
     # 2nd priority: AutoProcessor chat template, unless tool calling is enabled
     if tools is None:
-        revision = model_config.tokenizer_revision
-        code_revision = (
-            model_config.code_revision
-            if model_config.tokenizer == model_config.model
-            else None
-        )
-        # The tokenizer may be a local snapshot pinned to `revision`, so use the
-        # repo id for remote code pinned to a different `code_revision`
-        processor_name = (
-            tokenizer.name_or_path
-            if code_revision in (None, revision)
-            else model_config.tokenizer
-        )
         chat_template = _try_get_processor_chat_template(
-            processor_name,
-            revision=revision,
-            code_revision=code_revision,
+            tokenizer,
+            revision=model_config.tokenizer_revision,
+            code_revision=(
+                model_config.code_revision
+                if model_config.tokenizer == model_config.model
+                else None
+            ),
             trust_remote_code=model_config.trust_remote_code,
         )
         if chat_template is not None:
