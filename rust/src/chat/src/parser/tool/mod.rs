@@ -39,12 +39,9 @@ pub mod names {
     pub const MISTRAL: &str = "mistral";
     pub const PHI4_MINI_JSON: &str = "phi4_mini_json";
     pub const QWEN3_CODER: &str = "qwen3_coder";
-    // The `<tool_call>`-wrapped JSON format of Qwen2.5, QwQ and Qwen3, selected
-    // by auto-detection. Python registers the same name as an alias of the
-    // generic `hermes` for now.
+    // The `<tool_call>`-wrapped JSON format of Qwen2.5, QwQ and Qwen3.
     pub const QWEN3_JSON: &str = "qwen3_json";
-    // Matches the Python CLI name `--tool-call-parser qwen3_xml`, an alias of
-    // `qwen3_coder` for the same XML format.
+    // An alias of `qwen3_coder` for the same XML format.
     pub const QWEN3_XML: &str = "qwen3_xml";
     pub const SEED_OSS: &str = "seed_oss";
 }
