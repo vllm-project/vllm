@@ -134,11 +134,6 @@ _MM_PREFIX_KV_CACHE_DTYPES = (
 )
 
 
-def _mm_prefix_q_dtype(cache_dtype: str, model_dtype: torch.dtype) -> torch.dtype:
-    # fa2 takes no FP8 query, and FP16 is its cheapest dequant target.
-    return torch.float16 if is_quantized_kv_cache(cache_dtype) else model_dtype
-
-
 def _native_mm_prefix(vllm_config: VllmConfig | None) -> bool:
     """Whether FlashInfer serves this model's mm-prefix ranges itself.
 
@@ -1516,7 +1511,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             self._mm_prefill_wrapper = wrapper_cls(
                 self._get_workspace_buffer(),
                 get_flashinfer_layout_string(self.kv_cache_layout),
-                q_data_type=_mm_prefix_q_dtype(self.cache_dtype, dtype),
+                q_data_type=dtype,
                 kv_data_type=torch.uint8
                 if self.is_kvcache_nvfp4
                 else self.kv_cache_dtype,
@@ -1777,7 +1772,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         # When all attention (both prefill and decode) uses TRTLLM,
         # seq_lens_cpu is not needed since TRTLLM paths use GPU tensors
         # (block_tables, seq_lens) directly.
-        needs_seq_lens_cpu = self.use_dcp or use_cascade or not all_uses_trtllm
+        needs_seq_lens_cpu = (
+            self.use_dcp or use_cascade or not all_uses_trtllm or use_mm_prefix
+        )
         if needs_seq_lens_cpu:
             if (
                 self._num_speculative_tokens == 0
@@ -2344,6 +2341,12 @@ class FlashInferImpl(AttentionImpl):
             and is_quantized_kv_cache(self.kv_cache_dtype)
             and current_platform.is_device_capability_family(100)
             and quant_key in (kFp8StaticTensorSym, kNvfp4Dynamic)
+            # The mm-prefix branch quantizes an FP8 output only, as the
+            # TRITON_FLASHINFER composite does.
+            and (
+                quant_key == kFp8StaticTensorSym
+                or not _native_mm_prefix(get_current_vllm_config_or_none())
+            )
         )
 
     # FlashInfer requires attention sinks to be float32
@@ -2634,15 +2637,20 @@ class FlashInferImpl(AttentionImpl):
                 else:
                     mm_kv_cache = kv_cache_tuple
                     mm_kv_cache_sf = None
+                # fa2 takes no FP8 query or output: a query the layer already
+                # quantized goes back to the model dtype (losslessly, keeping
+                # its q_scale), and a fused FP8 output is quantized afterwards.
+                mm_out = output[num_decode_tokens:]
+                if output.dtype == FP8_DTYPE:
+                    mm_out = torch.empty_like(prefill_query, dtype=layer.dtype)
                 mm_wrapper.run(
-                    prefill_query.to(
-                        _mm_prefix_q_dtype(self.kv_cache_dtype, prefill_query.dtype)
-                    ),
+                    prefill_query
+                    if prefill_query.dtype != FP8_DTYPE
+                    else prefill_query.to(layer.dtype),
                     mm_kv_cache,
                     attn_metadata.mm_prefill_ranges,
                     causal_window_left=causal_sw,
                     range_window_left=clamp_sw,
-                    # Only a query the layer already quantized carries q_scale.
                     q_scale=(
                         layer._q_scale_float
                         if prefill_query.dtype == FP8_DTYPE
@@ -2650,9 +2658,15 @@ class FlashInferImpl(AttentionImpl):
                     ),
                     k_scale=layer._k_scale_float,
                     v_scale=layer._v_scale_float,
-                    out=output[num_decode_tokens:],
+                    out=mm_out,
                     kv_cache_sf=mm_kv_cache_sf,
                 )
+                if output.dtype == FP8_DTYPE:
+                    custom_ops.scaled_fp8_quant(
+                        mm_out.view(num_prefill_tokens, -1),
+                        output_scale,
+                        output=output[num_decode_tokens:].view(num_prefill_tokens, -1),
+                    )
             elif not prefill_use_trtllm:
                 assert isinstance(attn_metadata.prefill, FIPrefill)
                 prefill_wrapper = attn_metadata.prefill.wrapper
