@@ -487,8 +487,6 @@ __device__ void norm_and_quant(
   const int VEC_SIZE = 4;
   int32_t const num_vec_elems = hidden_size >> 2;
 
-// TODO(luka/varun) extract into type-agnostic vectorized quant function to
-//  replace scaled_fp8_conversion_vec
 #pragma unroll 4
   for (auto i = threadIdx.x; i < num_vec_elems; i += blockDim.x) {
     vec4_t<scalar_t> const in = vec_input[i];
@@ -514,7 +512,7 @@ __device__ void norm_and_quant(
       vec_residual[i] = r;
     }
 
-    q8x4_t<scalar_out_t> out;
+    vec4_t<float> normed_x;
 
     float scale_val;
 
@@ -535,10 +533,12 @@ __device__ void norm_and_quant(
     }
 #pragma unroll
     for (int j = 0; j < VEC_SIZE; ++j) {
-      out.val[j] = ScaledQuant<scalar_out_t, is_scale_inverted>::quant_fn(
-          static_cast<scalar_t>(x.val[j] * rms) * w.val[j], scale_val);
+      normed_x.val[j] =
+          static_cast<float>(static_cast<scalar_t>(x.val[j] * rms) * w.val[j]);
     }
-    vec_output[i] = out;
+    // Single type-agnostic vectorized quantization call
+    vec_output[i] = ScaledQuantVec4<scalar_out_t, is_scale_inverted>::quant_vec(
+        normed_x, scale_val);
   }
 }
 
