@@ -3,6 +3,7 @@
 import asyncio
 import itertools
 import logging
+import os
 import queue
 import threading
 import time
@@ -809,6 +810,10 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
     @classmethod
     def supports_sleep_mode(cls, kv_transfer_config: "KVTransferConfig") -> bool:
         # Only RDMA peers drop a stale remote key (the failed access refreshes it).
+        # Mooncake installs its NVLink transport instead if either variable is set,
+        # whatever its value; a peer then keeps its import of the old pages.
+        if any(v in os.environ for v in ("MC_FORCE_MNNVL", "MC_INTRANODE_NVLINK")):
+            return False
         extra_config = kv_transfer_config.kv_connector_extra_config
         return extra_config.get("mooncake_protocol", "rdma") == "rdma"
 

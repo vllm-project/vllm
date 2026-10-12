@@ -215,6 +215,21 @@ def test_sleep_mode_requires_kv_connector_support(
         )
 
 
+@pytest.mark.parametrize(
+    "env", ["MC_FORCE_MNNVL=1", "MC_FORCE_MNNVL=0", "MC_INTRANODE_NVLINK=1"]
+)
+def test_sleep_mode_refuses_mooncake_nvlink_transport(monkeypatch, env):
+    """Mooncake switches to its NVLink transport when either variable is set,
+    whatever its value and the configured protocol."""
+    monkeypatch.setenv(*env.split("="))
+    with pytest.raises(ValueError, match="^MooncakeConnector does not support sleep"):
+        _build_config(
+            kv_connector="MooncakeConnector",
+            kv_connector_extra_config={"mooncake_protocol": "rdma"},
+            enable_sleep_mode=True,
+        )
+
+
 def test_kv_connector_allows_other_alloc_conf(monkeypatch):
     """Other PYTORCH_CUDA_ALLOC_CONF values must not be rejected."""
     monkeypatch.setenv(
