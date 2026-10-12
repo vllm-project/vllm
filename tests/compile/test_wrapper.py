@@ -167,7 +167,7 @@ def test_reset_compile_wrapper_keeps_model_tag_and_config():
     def make_config():
         vllm_config = VllmConfig()
         vllm_config.compilation_config = CompilationConfig()
-        vllm_config.compilation_config.mode = CompilationMode.DYNAMO_TRACE_ONCE
+        vllm_config.compilation_config.mode = CompilationMode.VLLM_COMPILE
         return vllm_config
 
     draft_config = make_config()

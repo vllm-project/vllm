@@ -91,11 +91,9 @@ class TorchCompileWithNoGuardsWrapper:
         compile_prefix: str = "",
         is_encoder: bool = False,
     ) -> None:
-        from vllm.compilation.backends import model_tag
+        from vllm.compilation.backends import VllmBackend
 
         self.compiled = False
-        # Keep the model tag so reset_compile_wrapper reuses the same cache dir.
-        self._compile_prefix = compile_prefix or model_tag
         self._is_encoder = is_encoder
 
         vllm_config = get_current_vllm_config()
@@ -109,6 +107,9 @@ class TorchCompileWithNoGuardsWrapper:
 
         backend = vllm_config.compilation_config.init_backend(
             vllm_config, prefix=compile_prefix, is_encoder=is_encoder
+        )
+        self._compile_prefix = (
+            backend.prefix if isinstance(backend, VllmBackend) else compile_prefix
         )
         options = {}
 
