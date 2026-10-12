@@ -11,7 +11,7 @@ import sys
 import threading
 import types
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 import torch
@@ -4856,3 +4856,72 @@ def test_blob_block_hashes_empty():
     view = BlobBlockHashes(memoryview(b""), 0)
     assert len(view) == 0
     assert list(view) == []
+
+
+def _run_reset_message(monkeypatch, store_worker):
+    socket = MagicMock()
+    monkeypatch.setattr(worker.zmq, "Context", MagicMock())
+    monkeypatch.setattr(worker, "get_zmq_rpc_path_lookup", lambda _: "inproc://reset")
+    monkeypatch.setattr(worker, "make_zmq_socket", lambda *args, **kwargs: socket)
+    with patch.object(worker.threading, "Thread") as thread:
+        server = worker.LookupKeyServer(store_worker, MagicMock())
+        process_request = thread.call_args.kwargs["target"]
+    socket.recv_multipart.return_value = [worker.RESET_MSG]
+    socket.send.side_effect = lambda _: setattr(server, "running", False)
+    process_request()
+    return socket.send.call_args.args[0]
+
+
+@pytest.mark.parametrize(
+    ("result", "expected"),
+    [
+        (-1, worker.RESP_ERR),
+        (-200, worker.RESP_ERR),
+        (0, worker.RESP_OK),
+        (7, worker.RESP_OK),
+        (False, worker.RESP_ERR),
+        (True, worker.RESP_ERR),
+        (None, worker.RESP_ERR),
+        ("0", worker.RESP_ERR),
+        (RuntimeError("master unavailable"), worker.RESP_ERR),
+    ],
+)
+def test_reset_reports_legacy_removal_result(monkeypatch, result, expected):
+    w = worker.MooncakeStoreWorker.__new__(worker.MooncakeStoreWorker)
+    w.kv_send_thread = None
+    w.recv_request_queue = MagicMock()
+    w.store = MagicMock(spec=["remove_all"])
+    if isinstance(result, Exception):
+        w.store.remove_all.side_effect = result
+    else:
+        w.store.remove_all.return_value = result
+    assert _run_reset_message(monkeypatch, w) == expected
+    w.recv_request_queue.join.assert_not_called()
+    w.store.remove_all.assert_called_once_with(force=True)
+
+
+@pytest.mark.parametrize("has_sender", [False, True])
+def test_reset_drains_local_sends_before_removal(monkeypatch, has_sender):
+    w = worker.MooncakeStoreWorker.__new__(worker.MooncakeStoreWorker)
+    calls = MagicMock()
+    w.kv_send_thread = MagicMock() if has_sender else None
+    if has_sender:
+        w.kv_send_thread.request_queue = calls.send
+    w.recv_request_queue = calls.recv
+    w.recv_request_queue.join.side_effect = RuntimeError("unfinished receive work")
+    w.store = calls.store
+    w.store.remove_all.return_value = 0
+    assert _run_reset_message(monkeypatch, w) == worker.RESP_OK
+    expected = [call.send.join()] if has_sender else []
+    expected += [call.store.remove_all(force=True)]
+    assert calls.mock_calls == expected
+
+
+def test_reset_send_drain_failure_prevents_removal(monkeypatch):
+    w = worker.MooncakeStoreWorker.__new__(worker.MooncakeStoreWorker)
+    w.kv_send_thread = MagicMock()
+    w.recv_request_queue = MagicMock()
+    w.store = MagicMock(spec=["remove_all"])
+    w.kv_send_thread.request_queue.join.side_effect = RuntimeError("drain failed")
+    assert _run_reset_message(monkeypatch, w) == worker.RESP_ERR
+    w.store.remove_all.assert_not_called()
