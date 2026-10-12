@@ -143,6 +143,13 @@ class WorkerBase:
         if callable(reset_fn):
             reset_fn()
 
+    def release_late_interaction_query_cache(self, query_keys: list[str]) -> None:
+        release_fn = getattr(
+            self.model_runner, "release_late_interaction_query_cache", None
+        )
+        if callable(release_fn):
+            release_fn(query_keys)
+
     def get_model(self) -> nn.Module:
         raise NotImplementedError
 
@@ -267,6 +274,12 @@ class WorkerWrapperBase:
         from vllm.plugins import load_general_plugins
 
         load_general_plugins()
+
+        # Let the platform replace core Triton kernels (e.g. CPU fallback
+        # implementations) before any worker or model code can launch them.
+        from vllm.platforms import current_platform
+
+        current_platform.register_triton_kernel_overrides()
 
         parallel_config = vllm_config.parallel_config
         if isinstance(parallel_config.worker_cls, str):

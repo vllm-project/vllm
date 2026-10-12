@@ -614,11 +614,13 @@ def test_aiter_fp4_gemm_skinny_shapes(M, N, K):
     out = gemm_afp4wfp4(A_fp4, B_fp4, A_scale, B_scale)
 
     assert out.shape == (M, N)
+    assert out.dtype == torch.bfloat16
     assert not torch.any(torch.isnan(out))
 
+    # Accumulate in FP32, then match the GEMM's BF16 output rounding.
     A_dq = quant_dequant_mxfp4(A)
     B_dq = quant_dequant_mxfp4(B)
-    ref = torch.matmul(A_dq.float(), B_dq.t().float())
+    ref = torch.matmul(A_dq.float(), B_dq.t().float()).to(torch.bfloat16).float()
 
     _print_close_stats(
         f"skinny_gemm M={M} N={N} K={K}",
