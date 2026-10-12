@@ -350,7 +350,7 @@ class StandaloneARSpeculator(DraftModelSpeculator):
         next_prefill_tokens: torch.Tensor,
         temperature: torch.Tensor,
         seeds: torch.Tensor,
-        dp_sync: DPSyncState | None = None,
+        dp_sync_state: DPSyncState | None = None,
         dummy_run: bool = False,
         skip_attn_for_dummy_run: bool = False,
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
@@ -362,7 +362,7 @@ class StandaloneARSpeculator(DraftModelSpeculator):
         num_reqs = input_batch.num_reqs
         skip_attn = dummy_run and skip_attn_for_dummy_run
         num_tokens_across_dp = (
-            dp_sync.num_tokens_across_dp if dp_sync is not None else None
+            dp_sync_state.num_tokens_across_dp if dp_sync_state is not None else None
         )
 
         # Copy per-request temperature/seeds/idx_mapping into pre-allocated
@@ -402,7 +402,7 @@ def _prepare_prefill_inputs_kernel(
     target_input_ids_ptr,  # [src_tokens] int32
     target_positions_ptr,  # [src_tokens] int64
     last_sampled_ptr,  # [max_num_reqs] int32
-    idx_mapping_ptr,  # [num_reqs] int32
+    idx_mapping_ptr,  # [num_reqs] int64
     out_input_ids_ptr,  # [src_tokens + num_reqs] int32
     out_positions_ptr,  # [src_tokens + num_reqs] int64
     last_token_indices_ptr,  # [max_num_reqs] int64
