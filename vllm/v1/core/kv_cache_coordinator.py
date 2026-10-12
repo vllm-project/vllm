@@ -108,7 +108,6 @@ class KVCacheCoordinator(ABC):
         use_lookahead_block_hashes: bool = False,
     ):
         self.kv_cache_config = kv_cache_config
-        self.use_lookahead_block_hashes = use_lookahead_block_hashes
         # The scheduling granularity (LCM of all group block sizes), must be a multiple
         # of the hash_block_size and the block size of each group.
         assert scheduler_block_size % hash_block_size == 0 and all(
@@ -134,6 +133,10 @@ class KVCacheCoordinator(ABC):
         # Conservatively fall back to flag all groups when no group is flagged.
         if use_eagle and not self.eagle_group_ids:
             self.eagle_group_ids = set(range(len(kv_cache_config.kv_cache_groups)))
+        # Lookahead hashes prove the boundary token, so no group drops a block.
+        self.drop_eagle_group_ids = (
+            set() if use_lookahead_block_hashes else self.eagle_group_ids
+        )
 
         # During chunked prefill with EAGLE, the single next prefill lookahead
         # token past the chunk boundary is combined with the final hidden state
@@ -367,9 +370,7 @@ class KVCacheCoordinator(ABC):
         boundaries = replay_boundaries(
             request.num_prompt_tokens,
             self.scheduler_block_size,
-            # Lookahead hashes make EAGLE groups match without the drop.
-            use_eagle=bool(self.eagle_group_ids)
-            and not self.use_lookahead_block_hashes,
+            use_eagle=bool(self.drop_eagle_group_ids),
         )
         for group_id, manager in enumerate(self.single_type_managers):
             if not manager.enable_caching:
@@ -598,7 +599,7 @@ class UnitaryKVCacheCoordinator(KVCacheCoordinator):
             "UnitaryKVCacheCoordinator assumes only one kv cache group"
         )
         # Single group; useless but just set ``use_eagle`` for consistency regardless.
-        self.single_type_managers[0].use_eagle = 0 in self.eagle_group_ids
+        self.single_type_managers[0].use_eagle = 0 in self.drop_eagle_group_ids
 
     def find_longest_cache_hit(
         self,
@@ -611,9 +612,7 @@ class UnitaryKVCacheCoordinator(KVCacheCoordinator):
             kv_cache_group_ids=[0],
             block_pool=self.block_pool,
             kv_cache_spec=self.kv_cache_spec,
-            drop_eagle_block=(
-                0 in self.eagle_group_ids and not self.use_lookahead_block_hashes
-            ),
+            drop_eagle_block=0 in self.drop_eagle_group_ids,
             alignment_tokens=self.block_size,
             dcp_world_size=self.dcp_world_size,
             pcp_world_size=self.pcp_world_size,
@@ -753,7 +752,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                 continue
             manager_cls = self.single_type_managers[i].__class__
             spec = g.kv_cache_spec
-            use_eagle = i in self.eagle_group_ids
+            use_eagle = i in self.drop_eagle_group_ids
 
             # Try to find an existing group with the same spec
             for idx, group in enumerate(self.attention_groups):
@@ -814,20 +813,15 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
     ) -> int:
         cached_num_computed_tokens = self._align_cacheable(num_computed_tokens)
         manager = self.single_type_managers[kv_cache_group_id]
+        # EAGLE matches one block past the aligned boundary, then drops it.
         if manager.use_eagle and cached_num_computed_tokens > 0:
             num_finalized_computed_tokens = max(
                 0, num_computed_tokens - self.num_reprefillable_tokens
             )
-            cached_num_finalized_computed_tokens = self._align_cacheable(
-                num_finalized_computed_tokens
-            )
-            # Lookahead hashes make EAGLE groups match without the drop.
-            if self.use_lookahead_block_hashes:
-                return cached_num_finalized_computed_tokens
-            # EAGLE matches one block past the aligned boundary, then drops it.
             return min(
                 num_finalized_computed_tokens,
-                cached_num_finalized_computed_tokens + manager.block_size,
+                self._align_cacheable(num_finalized_computed_tokens)
+                + manager.block_size,
             )
         return cached_num_computed_tokens
 
@@ -892,11 +886,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                     )
                     continue
 
-                drop_eagle_block = (
-                    use_eagle
-                    and not self.use_lookahead_block_hashes
-                    and idx not in eagle_verified
-                )
+                drop_eagle_block = use_eagle and idx not in eagle_verified
 
                 _max_length = curr_hit_length
                 # Eagle matches one extra drop unit (one hash unit for
@@ -989,9 +979,8 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
 
         for spec, group_ids, manager_cls, use_eagle in self.attention_groups:
             manager = self.single_type_managers[group_ids[0]]
-            drop_eagle_block = use_eagle and not self.use_lookahead_block_hashes
             lookup_length = max_cache_hit_length
-            if drop_eagle_block and not isinstance(spec, MambaSpec):
+            if use_eagle and not isinstance(spec, MambaSpec):
                 eagle_margin = eagle_proof_margin(
                     manager.block_size,
                     self.hash_block_size,
@@ -1008,7 +997,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                 kv_cache_group_ids=group_ids,
                 block_pool=manager.block_pool,
                 kv_cache_spec=spec,
-                drop_eagle_block=drop_eagle_block,
+                drop_eagle_block=use_eagle,
                 alignment_tokens=self._cache_hit_alignment_tokens,
                 dcp_world_size=manager.dcp_world_size,
                 pcp_world_size=manager.pcp_world_size,

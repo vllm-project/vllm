@@ -76,9 +76,9 @@ def _stub(manager, block_size, hash_block_size, *, block_drop=True):
         # they exist only to compensate for the drop, which lookahead hashes
         # make unnecessary.
         use_eagle_block_drop=(
-            block_drop and not manager.coordinator.use_lookahead_block_hashes
+            block_drop and not manager.block_pool.use_lookahead_block_hashes
         ),
-        use_lookahead_block_hashes=manager.coordinator.use_lookahead_block_hashes,
+        use_lookahead_block_hashes=manager.block_pool.use_lookahead_block_hashes,
         hash_block_size=hash_block_size,
         mamba_has_prefill_checkpoint_blocks=False,  # forced False under eagle
         mamba_partial_cache_hit=partial_hit,

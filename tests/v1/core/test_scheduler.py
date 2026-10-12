@@ -81,11 +81,9 @@ from .utils import EOS_TOKEN_ID, create_requests, create_scheduler, mock_kv
 pytestmark = pytest.mark.cpu_test
 
 
-def _enable_eagle_prefix_hashing(scheduler: Scheduler) -> None:
+def _enable_lookahead_block_hashes(scheduler: Scheduler) -> None:
     scheduler.use_lookahead_block_hashes = True
-    manager = scheduler.kv_cache_manager
-    manager.coordinator.use_lookahead_block_hashes = True
-    manager.block_pool.use_lookahead_block_hashes = True
+    scheduler.kv_cache_manager.block_pool.use_lookahead_block_hashes = True
 
 
 def test_make_scheduled_encoder_input_stats_output_embeddings():
@@ -342,7 +340,7 @@ def test_scheduler_publishes_lookahead_blocks_at_allocation():
         block_size=block_size,
         max_num_batched_tokens=16,
     )
-    _enable_eagle_prefix_hashing(scheduler)
+    _enable_lookahead_block_hashes(scheduler)
 
     def make_request(request_id: str, prompt_token_ids: list[int]) -> Request:
         return Request(
@@ -387,7 +385,7 @@ def test_finished_request_publishes_block_ending_at_last_sampled_token():
         block_size=block_size,
         max_num_batched_tokens=16,
     )
-    _enable_eagle_prefix_hashing(scheduler)
+    _enable_lookahead_block_hashes(scheduler)
     request = Request(
         request_id="request",
         prompt_token_ids=[0, 1, 2],
@@ -433,7 +431,7 @@ def test_connector_finish_includes_partial_eagle_block(
         max_num_batched_tokens=64,
         use_kv_connector=mock_kv(matched_tokens=0, is_async=False),
     )
-    _enable_eagle_prefix_hashing(scheduler)
+    _enable_lookahead_block_hashes(scheduler)
     request = Request(
         request_id="request",
         prompt_token_ids=list(range(33)),

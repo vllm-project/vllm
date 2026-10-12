@@ -40,11 +40,9 @@ def _make_model_runner_output(
     )
 
 
-def _enable_eagle_prefix_hashing(scheduler: AsyncScheduler) -> None:
+def _enable_lookahead_block_hashes(scheduler: AsyncScheduler) -> None:
     scheduler.use_lookahead_block_hashes = True
-    manager = scheduler.kv_cache_manager
-    manager.coordinator.use_lookahead_block_hashes = True
-    manager.block_pool.use_lookahead_block_hashes = True
+    scheduler.kv_cache_manager.block_pool.use_lookahead_block_hashes = True
 
 
 @pytest.mark.parametrize("max_tokens", [1, 2, 3, 5])
@@ -698,7 +696,7 @@ def test_stale_output_does_not_republish_preempted_lookahead_blocks():
         max_num_batched_tokens=32,
     )
     assert isinstance(scheduler, AsyncScheduler)
-    _enable_eagle_prefix_hashing(scheduler)
+    _enable_lookahead_block_hashes(scheduler)
     request = Request(
         request_id="eagle",
         prompt_token_ids=list(range(9)),
