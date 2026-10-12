@@ -13,12 +13,19 @@ import torch
 from vllm.triton_utils import tl, triton
 
 from .index import prepare_chunk_indices, prepare_chunk_offsets
-from .op import exp, exp2
+from .op import exp, exp2, make_tensor_descriptor
 from .utils import FLA_CHUNK_SIZE, use_cuda_graph
 
 NUM_WARPS = [2, 4, 8, 16]
 # Triton's AMD backend fails to lower this kernel with num_stages=4.
-_CHUNK_DELTA_H_NUM_STAGES = [2, 3] if torch.version.hip else [2, 3, 4]
+# gfx1250 needs num_stages=1 on top of that: any deeper pipeline corrupts the
+# recurrent state and accuracy drops to zero. Root cause not established.
+if torch.version.hip:
+    from vllm.platforms.rocm import on_gfx1250
+
+    _CHUNK_DELTA_H_NUM_STAGES = [1] if on_gfx1250() else [2, 3]
+else:
+    _CHUNK_DELTA_H_NUM_STAGES = [2, 3, 4]
 
 
 @triton.heuristics(
@@ -111,108 +118,56 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
 
     # load initial state
     if USE_INITIAL_STATE:
-        p_h0_1 = tl.make_block_ptr(h0, (V, K), (K, 1), (i_v * BV, 0), (BV, 64), (1, 0))
-        b_h1 += tl.load(p_h0_1, boundary_check=(0, 1)).to(tl.float32)
+        desc_h0 = make_tensor_descriptor(h0, [V, K], [K, 1], [BV, 64])
+        b_h1 += desc_h0.load([i_v * BV, 0]).to(tl.float32)
         if K > 64:
-            p_h0_2 = tl.make_block_ptr(
-                h0, (V, K), (K, 1), (i_v * BV, 64), (BV, 64), (1, 0)
-            )
-            b_h2 += tl.load(p_h0_2, boundary_check=(0, 1)).to(tl.float32)
+            b_h2 += desc_h0.load([i_v * BV, 64]).to(tl.float32)
         if K > 128:
-            p_h0_3 = tl.make_block_ptr(
-                h0, (V, K), (K, 1), (i_v * BV, 128), (BV, 64), (1, 0)
-            )
-            b_h3 += tl.load(p_h0_3, boundary_check=(0, 1)).to(tl.float32)
+            b_h3 += desc_h0.load([i_v * BV, 128]).to(tl.float32)
         if K > 192:
-            p_h0_4 = tl.make_block_ptr(
-                h0, (V, K), (K, 1), (i_v * BV, 192), (BV, 64), (1, 0)
-            )
-            b_h4 += tl.load(p_h0_4, boundary_check=(0, 1)).to(tl.float32)
+            b_h4 += desc_h0.load([i_v * BV, 192]).to(tl.float32)
+
+    desc_w = make_tensor_descriptor(w, [T, K], [stride_w, 1], [BT, 64])
+    desc_v = make_tensor_descriptor(v, [T, V], [stride_v, 1], [BT, BV])
+    if SAVE_NEW_VALUE:
+        desc_v_new = make_tensor_descriptor(v_new, [T, V], [stride_v, 1], [BT, BV])
+    desc_k = make_tensor_descriptor(k, [T, K], [stride_k, 1], [BT, 64])
 
     # main recurrence
     for i_t in range(NT):
-        p_h1 = tl.make_block_ptr(
-            h + i_t.to(tl.int64) * stride_h,
-            (V, K),
-            (K, 1),
-            (i_v * BV, 0),
-            (BV, 64),
-            (1, 0),
+        desc_h = make_tensor_descriptor(
+            h + i_t.to(tl.int64) * stride_h, [V, K], [K, 1], [BV, 64]
         )
-        tl.store(p_h1, b_h1.to(p_h1.dtype.element_ty), boundary_check=(0, 1))
+        desc_h.store([i_v * BV, 0], b_h1.to(desc_h.dtype))
         if K > 64:
-            p_h2 = tl.make_block_ptr(
-                h + i_t.to(tl.int64) * stride_h,
-                (V, K),
-                (K, 1),
-                (i_v * BV, 64),
-                (BV, 64),
-                (1, 0),
-            )
-            tl.store(p_h2, b_h2.to(p_h2.dtype.element_ty), boundary_check=(0, 1))
+            desc_h.store([i_v * BV, 64], b_h2.to(desc_h.dtype))
         if K > 128:
-            p_h3 = tl.make_block_ptr(
-                h + i_t.to(tl.int64) * stride_h,
-                (V, K),
-                (K, 1),
-                (i_v * BV, 128),
-                (BV, 64),
-                (1, 0),
-            )
-            tl.store(p_h3, b_h3.to(p_h3.dtype.element_ty), boundary_check=(0, 1))
+            desc_h.store([i_v * BV, 128], b_h3.to(desc_h.dtype))
         if K > 192:
-            p_h4 = tl.make_block_ptr(
-                h + i_t.to(tl.int64) * stride_h,
-                (V, K),
-                (K, 1),
-                (i_v * BV, 192),
-                (BV, 64),
-                (1, 0),
-            )
-            tl.store(p_h4, b_h4.to(p_h4.dtype.element_ty), boundary_check=(0, 1))
+            desc_h.store([i_v * BV, 192], b_h4.to(desc_h.dtype))
 
-        p_w = tl.make_block_ptr(
-            w, (T, K), (stride_w, 1), (i_t * BT, 0), (BT, 64), (1, 0)
-        )
-        b_w = tl.load(p_w, boundary_check=(0, 1))
+        b_w = desc_w.load([i_t * BT, 0])
         b_v = tl.dot(b_w, tl.trans(b_h1).to(b_w.dtype))
         if K > 64:
-            p_w = tl.make_block_ptr(
-                w, (T, K), (stride_w, 1), (i_t * BT, 64), (BT, 64), (1, 0)
-            )
-            b_w = tl.load(p_w, boundary_check=(0, 1))
+            b_w = desc_w.load([i_t * BT, 64])
             b_v += tl.dot(b_w, tl.trans(b_h2).to(b_w.dtype))
         if K > 128:
-            p_w = tl.make_block_ptr(
-                w, (T, K), (stride_w, 1), (i_t * BT, 128), (BT, 64), (1, 0)
-            )
-            b_w = tl.load(p_w, boundary_check=(0, 1))
+            b_w = desc_w.load([i_t * BT, 128])
             b_v += tl.dot(b_w, tl.trans(b_h3).to(b_w.dtype))
         if K > 192:
-            p_w = tl.make_block_ptr(
-                w, (T, K), (stride_w, 1), (i_t * BT, 192), (BT, 64), (1, 0)
-            )
-            b_w = tl.load(p_w, boundary_check=(0, 1))
+            b_w = desc_w.load([i_t * BT, 192])
             b_v += tl.dot(b_w, tl.trans(b_h4).to(b_w.dtype))
-        p_v = tl.make_block_ptr(
-            v, (T, V), (stride_v, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0)
-        )
-        b_v = tl.load(p_v, boundary_check=(0, 1)) - b_v
+        b_v = desc_v.load([i_t * BT, i_v * BV]) - b_v
 
         if SAVE_NEW_VALUE:
-            p_v = tl.make_block_ptr(
-                v_new, (T, V), (stride_v, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0)
-            )
-            tl.store(p_v, b_v.to(p_v.dtype.element_ty), boundary_check=(0, 1))
+            desc_v_new.store([i_t * BT, i_v * BV], b_v.to(desc_v_new.dtype))
 
         last_idx = min((i_t.to(tl.int64) + 1) * BT, T) - 1
         if USE_G:
-            m_t = (i_t.to(tl.int64) * BT + tl.arange(0, BT)) < T
+            o_t = i_t.to(tl.int64) * BT + tl.arange(0, BT)
+            m_t = o_t < T
             b_g_last = tl.load(g + bos * H + last_idx * H + i_h)
-            p_g = tl.make_block_ptr(
-                g + bos * H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,)
-            )
-            b_g = tl.load(p_g, boundary_check=(0,))
+            b_g = tl.load(g + (bos + o_t) * H + i_h, mask=m_t, other=0.0)
             if USE_EXP2:
                 b_v = b_v * tl.where(m_t, exp2(b_g_last - b_g), 0)[:, None]
                 b_g_last = exp2(b_g_last)
@@ -273,48 +228,27 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
                     b_h4 *= exp(b_gk_last4)[None, :]
         b_v = b_v.to(k.dtype.element_ty)
 
-        p_k = tl.make_block_ptr(
-            k, (K, T), (1, stride_k), (0, i_t * BT), (64, BT), (0, 1)
-        )
-        b_k = tl.load(p_k, boundary_check=(0, 1))
+        b_k = tl.trans(desc_k.load([i_t * BT, 0]))
         b_h1 += tl.trans(tl.dot(b_k, b_v))
         if K > 64:
-            p_k = tl.make_block_ptr(
-                k, (K, T), (1, stride_k), (64, i_t * BT), (64, BT), (0, 1)
-            )
-            b_k = tl.load(p_k, boundary_check=(0, 1))
+            b_k = tl.trans(desc_k.load([i_t * BT, 64]))
             b_h2 += tl.trans(tl.dot(b_k, b_v))
         if K > 128:
-            p_k = tl.make_block_ptr(
-                k, (K, T), (1, stride_k), (128, i_t * BT), (64, BT), (0, 1)
-            )
-            b_k = tl.load(p_k, boundary_check=(0, 1))
+            b_k = tl.trans(desc_k.load([i_t * BT, 128]))
             b_h3 += tl.trans(tl.dot(b_k, b_v))
         if K > 192:
-            p_k = tl.make_block_ptr(
-                k, (K, T), (1, stride_k), (192, i_t * BT), (64, BT), (0, 1)
-            )
-            b_k = tl.load(p_k, boundary_check=(0, 1))
+            b_k = tl.trans(desc_k.load([i_t * BT, 192]))
             b_h4 += tl.trans(tl.dot(b_k, b_v))
     # epilogue
     if STORE_FINAL_STATE:
-        p_ht = tl.make_block_ptr(ht, (V, K), (K, 1), (i_v * BV, 0), (BV, 64), (1, 0))
-        tl.store(p_ht, b_h1.to(p_ht.dtype.element_ty), boundary_check=(0, 1))
+        desc_ht = make_tensor_descriptor(ht, [V, K], [K, 1], [BV, 64])
+        desc_ht.store([i_v * BV, 0], b_h1.to(desc_ht.dtype))
         if K > 64:
-            p_ht = tl.make_block_ptr(
-                ht, (V, K), (K, 1), (i_v * BV, 64), (BV, 64), (1, 0)
-            )
-            tl.store(p_ht, b_h2.to(p_ht.dtype.element_ty), boundary_check=(0, 1))
+            desc_ht.store([i_v * BV, 64], b_h2.to(desc_ht.dtype))
         if K > 128:
-            p_ht = tl.make_block_ptr(
-                ht, (V, K), (K, 1), (i_v * BV, 128), (BV, 64), (1, 0)
-            )
-            tl.store(p_ht, b_h3.to(p_ht.dtype.element_ty), boundary_check=(0, 1))
+            desc_ht.store([i_v * BV, 128], b_h3.to(desc_ht.dtype))
         if K > 192:
-            p_ht = tl.make_block_ptr(
-                ht, (V, K), (K, 1), (i_v * BV, 192), (BV, 64), (1, 0)
-            )
-            tl.store(p_ht, b_h4.to(p_ht.dtype.element_ty), boundary_check=(0, 1))
+            desc_ht.store([i_v * BV, 192], b_h4.to(desc_ht.dtype))
 
 
 def chunk_gated_delta_rule_fwd_h(
