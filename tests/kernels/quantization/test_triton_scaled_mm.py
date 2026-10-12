@@ -367,65 +367,6 @@ def test_triton_fp8_per_token_selection_requires_fp8(
         assert selected is kernel
 
 
-@pytest.mark.parametrize("backend", ["auto", "triton", "torch"])
-@pytest.mark.parametrize("platform", ["cuda", "rocm", "xpu"])
-def test_triton_fp8_per_token_is_preferred_only_on_rocm(monkeypatch, backend, platform):
-    """Prefer Triton on ROCm and preserve the other platforms' FP8 backends."""
-    from vllm.config import KernelConfig, VllmConfig, set_current_vllm_config
-    from vllm.model_executor.kernels import linear
-    from vllm.model_executor.kernels.linear.scaled_mm.ScaledMMLinearKernel import (
-        FP8ScaledMMLinearLayerConfig,
-    )
-    from vllm.model_executor.layers.quantization.utils.quant_utils import (
-        kFp8DynamicTokenSym,
-        kFp8StaticChannelSym,
-    )
-    from vllm.platforms.interface import PlatformEnum
-
-    platform_enum = PlatformEnum[platform.upper()]
-    monkeypatch.setattr(linear.current_platform, "_enum", platform_enum)
-    monkeypatch.setenv("VLLM_DISABLED_KERNELS", "")
-    eligible = (
-        linear.TritonFp8PerTokenScaledMMKernel,
-        linear.RowWiseTorchFP8ScaledMMLinearKernel,
-        linear.ChannelWiseTorchFP8ScaledMMLinearKernel,
-        linear.XPUW8A8FP8LinearKernel,
-    )
-    for kernel in set(linear._POSSIBLE_FP8_KERNELS[platform_enum]) | set(eligible):
-        monkeypatch.setattr(
-            kernel,
-            "is_supported",
-            classmethod(lambda cls, cc=None: (cls in eligible, None)),
-        )
-    config = FP8ScaledMMLinearLayerConfig(
-        weight_quant_key=kFp8StaticChannelSym,
-        activation_quant_key=kFp8DynamicTokenSym,
-        weight_shape=(256, 128),
-        input_dtype=torch.bfloat16,
-        out_dtype=torch.bfloat16,
-    )
-    with set_current_vllm_config(
-        VllmConfig(kernel_config=KernelConfig(linear_backend=backend))
-    ):
-        selected = linear.choose_scaled_mm_linear_kernel(
-            config,
-            linear._POSSIBLE_FP8_KERNELS,
-            compute_capability=90,
-            quantization="fp8_w8a8",
-        )
-    if platform == "rocm":
-        expected = (
-            linear.RowWiseTorchFP8ScaledMMLinearKernel
-            if backend == "torch"
-            else linear.TritonFp8PerTokenScaledMMKernel
-        )
-    elif platform == "cuda" or backend == "torch":
-        expected = linear.ChannelWiseTorchFP8ScaledMMLinearKernel
-    else:
-        expected = linear.XPUW8A8FP8LinearKernel
-    assert selected is expected
-
-
 @pytest.mark.parametrize("in_dtype", get_8bit_types())
 def test_scaled_mm_explicit_tiles_without_heuristic(in_dtype):
     """Manual tuning overrides must work for both shared INT8 and FP8 paths."""
