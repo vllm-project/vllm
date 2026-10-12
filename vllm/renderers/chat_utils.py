@@ -6,7 +6,7 @@ import json
 import types
 from abc import ABC, abstractmethod
 from collections import Counter, defaultdict
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass
 from functools import cached_property, lru_cache, partial
 from itertools import accumulate
@@ -72,7 +72,10 @@ from vllm.renderers.embed_utils import (
     safe_load_prompt_embeds,
     safe_load_prompt_embeds_async,
 )
-from vllm.transformers_utils.processor import get_video_processor_cls_name
+from vllm.transformers_utils.processor import (
+    get_qwen3_vl_video_resize_config,
+    get_video_processor_cls_name,
+)
 from vllm.utils import random_uuid
 from vllm.utils.collection_utils import is_list_of, is_list_of_numbers
 from vllm.utils.import_utils import LazyLoader
@@ -654,6 +657,10 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
     def video_processor_name(self) -> str | None:
         return get_video_processor_cls_name(self.model_config)
 
+    @property
+    def video_resize_size_config(self) -> dict[str, int] | None:
+        return get_qwen3_vl_video_resize_config(self.model_config)
+
     def add(self, modality: ModalityStr, item: _T) -> str | None:
         """Add a multi-modal item to the current prompt and returns the
         placeholder string to use, if any.
@@ -1019,6 +1026,32 @@ class BaseMultiModalContentParser(ABC):
     def parse_prompt_embeds(self, data: str) -> None:
         raise NotImplementedError
 
+    @staticmethod
+    def _should_pass_video_resize_config(
+        mm_processor_kwargs: Mapping[str, Any] | None,
+    ) -> bool:
+        if not mm_processor_kwargs:
+            return True
+        override_keys = {
+            "size",
+            "min_pixels",
+            "max_pixels",
+            "longest_edge",
+            "shortest_edge",
+            "patch_size",
+            "merge_size",
+            "temporal_patch_size",
+            "do_resize",
+        }
+        if any(k in mm_processor_kwargs for k in override_keys):
+            return False
+
+        videos_kwargs = mm_processor_kwargs.get("videos_kwargs")
+        return not (
+            isinstance(videos_kwargs, Mapping)
+            and any(k in videos_kwargs for k in override_keys)
+        )
+
     @abstractmethod
     def parse_video(self, video_url: str | None, uuid: str | None = None) -> None:
         raise NotImplementedError
@@ -1164,10 +1197,16 @@ class MultiModalContentParser(BaseMultiModalContentParser):
         return self.parse_audio(audio_url, uuid)
 
     def parse_video(self, video_url: str | None, uuid: str | None = None) -> None:
+        video_resize_size_config = (
+            self._tracker.video_resize_size_config
+            if self._should_pass_video_resize_config(self._mm_processor_kwargs)
+            else None
+        )
         video = (
             self._connector.fetch_video(
                 video_url=video_url,
                 video_processor=self._tracker.video_processor_name,
+                video_resize_size_config=video_resize_size_config,
             )
             if video_url
             else None
@@ -1385,14 +1424,19 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
         return self.parse_audio(audio_url, uuid)
 
     async def _video_with_uuid_async(self, video_url: str | None, uuid: str | None):
-        video = (
-            await self._connector.fetch_video_async(
+        if video_url:
+            video_resize_size_config = (
+                self._tracker.video_resize_size_config
+                if self._should_pass_video_resize_config(self._mm_processor_kwargs)
+                else None
+            )
+            video = await self._connector.fetch_video_async(
                 video_url,
                 video_processor=self._tracker.video_processor_name,
+                video_resize_size_config=video_resize_size_config,
             )
-            if video_url
-            else None
-        )
+        else:
+            video = None
         return video, uuid
 
     def parse_video(self, video_url: str | None, uuid: str | None = None) -> None:

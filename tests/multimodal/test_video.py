@@ -1829,3 +1829,156 @@ def test_clef_omni_backend_samples_reference_frames(tmp_path):
     assert metadata["do_sample_frames"] is False
     for frame, idx in zip(frames, [0, 15, 30, 45]):
         assert abs(round(float(np.asarray(frame).mean())) - idx) <= 1
+
+
+# ============================================================================
+# Qwen3-VL Early Video Frame Resize Tests (#60985)
+# ============================================================================
+
+
+def test_qwen3_vl_early_resize_target_dimensions():
+    """Verify target calculation matches smart_resize under valid configurations."""
+    cfg = {
+        "shortest_edge": 4096,
+        "longest_edge": 25165824,
+        "factor": 32,
+        "temporal_factor": 2,
+    }
+    target = Qwen3VLVideoBackend._early_resize_target(32, 1080, 1920, **cfg)
+    assert target is not None
+    h, w = target
+    assert h % 32 == 0 and w % 32 == 0
+    assert h == 640 and w == 1152
+
+
+def test_qwen3_vl_early_resize_idempotency_and_safety():
+    """Unsafe configurations, zero/negative dimensions, or
+    non-idempotent sizes return None."""
+    cfg = {
+        "shortest_edge": 4096,
+        "longest_edge": 25165824,
+        "factor": 32,
+        "temporal_factor": 2,
+    }
+    # Zero or negative inputs
+    assert Qwen3VLVideoBackend._early_resize_target(0, 1080, 1920, **cfg) is None
+    assert Qwen3VLVideoBackend._early_resize_target(16, 0, 1920, **cfg) is None
+    assert Qwen3VLVideoBackend._early_resize_target(16, 1080, -1, **cfg) is None
+
+    # Incomplete or invalid config keys
+    assert (
+        Qwen3VLVideoBackend._early_resize_target(16, 1080, 1920, **{**cfg, "factor": 0})
+        is None
+    )
+
+
+def test_qwen3_vl_early_resize_frame_recovery_bypassed(dummy_video_path):
+    """When frame_recovery=True is enabled, early resize is bypassed."""
+    cfg = {
+        "shortest_edge": 4096,
+        "longest_edge": 25165824,
+        "factor": 32,
+        "temporal_factor": 2,
+    }
+    data = dummy_video_path.read_bytes()
+    # With frame_recovery=True, frames remain at full source resolution
+    frames, _ = Qwen3VLVideoBackend.load_bytes(
+        data,
+        fps=2,
+        frame_recovery=True,
+        _resize_size_config=cfg,
+    )
+    # The dummy video has full frame dimensions from stop_sign.jpg (not resized)
+    assert frames.ndim == 4
+    assert frames.dtype == np.uint8
+    assert frames.shape[1] > 200 and frames.shape[2] > 200
+
+
+def test_qwen3_vl_load_bytes_early_resized_bit_identical_to_hf(dummy_video_path):
+    """Early frame resize produces bit-identical pixel_values_videos
+    and video_grid_thw."""
+    import torch
+    from transformers.models.qwen3_vl.video_processing_qwen3_vl import (
+        Qwen3VLVideoProcessor,
+    )
+    from transformers.video_utils import VideoMetadata
+
+    vp = Qwen3VLVideoProcessor()
+    cfg = {
+        "shortest_edge": vp.size["shortest_edge"],
+        "longest_edge": vp.size["longest_edge"],
+        "factor": vp.patch_size * vp.merge_size,
+        "temporal_factor": vp.temporal_patch_size,
+    }
+
+    data = dummy_video_path.read_bytes()
+
+    # 1. Baseline decode (full resolution)
+    base_frames, base_meta = Qwen3VLVideoBackend.load_bytes(
+        data,
+        fps=2,
+        backend="opencv",
+    )
+
+    # 2. Early resize decode
+    early_frames, early_meta = Qwen3VLVideoBackend.load_bytes(
+        data,
+        fps=2,
+        backend="opencv",
+        _resize_size_config=cfg,
+    )
+
+    assert early_frames.dtype == np.uint8
+    assert early_frames.shape[0] == base_frames.shape[0]
+    assert early_meta["frames_indices"] == base_meta["frames_indices"]
+
+    # Target size was computed and applied
+    target = Qwen3VLVideoBackend._early_resize_target(
+        base_frames.shape[0], base_frames.shape[1], base_frames.shape[2], **cfg
+    )
+    assert target is not None
+    assert (early_frames.shape[1], early_frames.shape[2]) == target
+
+    # 3. Process both with HuggingFace processor
+    md_base = VideoMetadata(
+        total_num_frames=base_meta["total_num_frames"],
+        fps=base_meta["fps"],
+        duration=base_meta["duration"],
+    )
+    md_early = VideoMetadata(
+        total_num_frames=early_meta["total_num_frames"],
+        fps=early_meta["fps"],
+        duration=early_meta["duration"],
+    )
+
+    out_base = vp(
+        videos=[base_frames],
+        video_metadata=[md_base],
+        do_sample_frames=False,
+        return_tensors="pt",
+    )
+    out_early = vp(
+        videos=[early_frames],
+        video_metadata=[md_early],
+        do_sample_frames=False,
+        return_tensors="pt",
+    )
+
+    assert torch.equal(out_base["video_grid_thw"], out_early["video_grid_thw"])
+    assert torch.equal(
+        out_base["pixel_values_videos"], out_early["pixel_values_videos"]
+    )
+
+
+def test_get_qwen3_vl_video_resize_config_from_config():
+    """Extracting resize config from model preprocessor dict works accurately."""
+    from vllm.transformers_utils.processor import (
+        get_qwen3_vl_video_resize_config_from_config,
+    )
+
+    cfg = get_qwen3_vl_video_resize_config_from_config("Qwen/Qwen3-VL-4B-Instruct")
+    assert cfg is not None
+    assert cfg["shortest_edge"] == 4096
+    assert cfg["longest_edge"] == 25165824
+    assert cfg["factor"] == 32
+    assert cfg["temporal_factor"] == 2

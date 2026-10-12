@@ -393,6 +393,195 @@ class Qwen3VLVideoBackend(VideoBackend):
         return indices
 
     @classmethod
+    def _early_resize_target(
+        cls,
+        num_frames: int,
+        height: int,
+        width: int,
+        *,
+        shortest_edge: int,
+        longest_edge: int,
+        factor: int,
+        temporal_factor: int,
+        **kwargs: Any,
+    ) -> tuple[int, int] | None:
+        """The size the HF processor will pick, or None if resizing early is unsafe."""
+        if (
+            num_frames <= 0
+            or height <= 0
+            or width <= 0
+            or factor <= 0
+            or temporal_factor <= 0
+            or shortest_edge <= 0
+            or longest_edge <= 0
+        ):
+            return None
+        try:
+            from transformers.models.qwen3_vl.video_processing_qwen3_vl import (
+                smart_resize,
+            )
+        except ImportError:
+            return None
+
+        kw = dict(
+            num_frames=num_frames,
+            height=height,
+            width=width,
+            factor=factor,
+            min_pixels=shortest_edge,
+            max_pixels=longest_edge,
+            temporal_factor=temporal_factor,
+        )
+        try:
+            h, w = smart_resize(**kw)
+        except Exception:
+            return None
+
+        # The processor recomputes the size from the already-resized frames. Only
+        # resize early if that recomputation is a no-op (it isn't for a few
+        # odd frame counts with very large or very wide frames).
+        try:
+            if smart_resize(**{**kw, "height": h, "width": w}) != (h, w):
+                return None
+        except Exception:
+            return None
+
+        return (h, w)
+
+    @classmethod
+    def _read_frames_resized(
+        cls,
+        cap: "cv2.VideoCapture",
+        frame_idx: list[int],
+        target_size: tuple[int, int],
+    ) -> tuple[npt.NDArray, list[int]]:
+        """Decode OpenCV frames and resize immediately to reduce peak memory."""
+        import torch
+        from torchvision.transforms.v2 import functional as tvF
+
+        num_expected_frames = len(frame_idx)
+        frame_indices = set(frame_idx)
+        max_frame_idx = max(frame_idx) if frame_idx else 0
+        new_height, new_width = target_size
+
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        is_same_size = new_height == height and new_width == width
+
+        frames = np.empty(
+            (num_expected_frames, new_height, new_width, 3), dtype=np.uint8
+        )
+        valid_frame_indices: list[int] = []
+        i = 0
+        for idx in range(max_frame_idx + 1):
+            ok = cap.grab()
+            if not ok:
+                if idx in frame_indices:
+                    logger.debug(
+                        "Failed to grab frame %d during video loading. "
+                        "This frame will be skipped.",
+                        idx,
+                    )
+                continue
+            if idx in frame_indices:
+                ret, frame = cap.retrieve()
+                if ret and frame is not None and frame.size > 0:
+                    if is_same_size:
+                        frames[i] = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    else:
+                        chw = torch.from_numpy(frame).permute(2, 0, 1)
+                        small = tvF.resize(
+                            chw,
+                            [new_height, new_width],
+                            interpolation=tvF.InterpolationMode.BICUBIC,
+                            antialias=True,
+                        )
+                        frames[i] = small.permute(1, 2, 0).flip(-1).numpy()
+                    valid_frame_indices.append(idx)
+                    i += 1
+                else:
+                    logger.debug(
+                        "Failed to retrieve frame %d during video loading. "
+                        "This frame will be skipped.",
+                        idx,
+                    )
+
+        valid_num_frames = len(valid_frame_indices)
+        if valid_num_frames < num_expected_frames:
+            logger.warning(
+                "Video loading completed with %d broken/unreadable frames. "
+                "Expected %d frames but only loaded %d frames.",
+                num_expected_frames - valid_num_frames,
+                num_expected_frames,
+                valid_num_frames,
+            )
+
+        return frames[:valid_num_frames], valid_frame_indices
+
+    @classmethod
+    def _load_bytes_early_resized(
+        cls,
+        data: bytes,
+        num_frames: int,
+        fps: int,
+        max_duration: int,
+        resize_size_config: dict[str, Any],
+        backend: VideoDecoderBackend,
+        **kwargs: Any,
+    ) -> tuple[npt.NDArray, dict[str, Any]] | None:
+        from vllm.multimodal.video_decoders.base import (
+            VideoTargetMetadata,
+            check_frame_pixel_limit,
+        )
+        from vllm.multimodal.video_decoders.opencv import (
+            OpenCVVideoBackendMixin,
+        )
+
+        cap = OpenCVVideoBackendMixin.open_video_capture(data)
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        if width <= 0 or height <= 0:
+            return None
+        check_frame_pixel_limit(width, height)
+
+        source = cls._prepare_source(OpenCVVideoBackendMixin.get_video_metadata(cap))
+        target = VideoTargetMetadata(
+            num_frames=num_frames, fps=fps, max_duration=max_duration
+        )
+        sampling_kwargs, _ = resolve_video_backend_kwargs(backend, kwargs)
+        frame_idx = cls.compute_frames_index_to_sample(
+            source=source, target=target, **sampling_kwargs
+        )
+        if not frame_idx:
+            frames = np.empty((0, height, width, 3), dtype=np.uint8)
+            return frames, cls.create_hf_metadata(
+                source=source,
+                video_backend=f"{backend}{cls._sampling_suffix}",
+                valid_frame_indices=[],
+            )
+
+        target_size = cls._early_resize_target(
+            len(frame_idx), height, width, **resize_size_config
+        )
+        if target_size is None:
+            return None
+
+        frames, valid = cls._read_frames_resized(cap, frame_idx, target_size)
+        if len(valid) < len(frame_idx):
+            logger.warning(
+                "%s video loading: expected %d frames but got %d.",
+                backend,
+                len(frame_idx),
+                len(valid),
+            )
+
+        return frames, cls.create_hf_metadata(
+            source=source,
+            video_backend=f"{backend}{cls._sampling_suffix}",
+            valid_frame_indices=valid,
+        )
+
+    @classmethod
     def load_bytes(
         cls,
         data: bytes,
@@ -404,6 +593,32 @@ class Qwen3VLVideoBackend(VideoBackend):
         backend: VideoDecoderBackend = "opencv",
         **kwargs,
     ) -> tuple[npt.NDArray, dict[str, Any]]:
+        resize_size_config = kwargs.pop("_resize_size_config", None)
+        if (
+            resize_size_config is not None
+            and backend == "opencv"
+            and not frame_recovery
+        ):
+            try:
+                result = cls._load_bytes_early_resized(
+                    data,
+                    num_frames=num_frames,
+                    fps=fps,
+                    max_duration=max_duration,
+                    resize_size_config=resize_size_config,
+                    backend=backend,
+                    **kwargs,
+                )
+                if result is not None:
+                    return result
+            except Exception:
+                logger.warning(
+                    (
+                        "Early video frame resize failed; falling back to "
+                        "full-resolution decoding."
+                    ),
+                    exc_info=True,
+                )
         return super().load_bytes(
             data,
             num_frames=num_frames,

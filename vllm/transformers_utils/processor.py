@@ -205,6 +205,62 @@ def get_video_processor_cls_name(
     return _cached_get_video_processor_cls_name(model, revision=revision)
 
 
+def get_qwen3_vl_video_resize_config_from_config(
+    processor_name: str,
+    revision: str | None = "main",
+) -> dict[str, int] | None:
+    """Extract size budget for Qwen3-VL/Cosmos3-Edge video processor if available."""
+    processor_name = convert_model_repo_to_path(processor_name)
+    config_file = [
+        "video_preprocessor_config.json",
+        "preprocessor_config.json",
+    ]
+    for file in config_file:
+        config = get_hf_file_to_dict(file, processor_name, revision=revision)
+        if not config:
+            continue
+        v_type = config.get("video_processor_type")
+        p_class = config.get("processor_class")
+        if v_type in ("Qwen3VLVideoProcessor", "Cosmos3EdgeVideoProcessor") or (
+            v_type is None and p_class in ("Qwen3VLProcessor", "Cosmos3EdgeProcessor")
+        ):
+            size = config.get("size")
+            if not isinstance(size, dict):
+                continue
+            shortest_edge = size.get("shortest_edge")
+            longest_edge = size.get("longest_edge")
+            patch_size = config.get("patch_size")
+            merge_size = config.get("merge_size")
+            temporal_patch_size = config.get("temporal_patch_size")
+            if (
+                shortest_edge is not None
+                and longest_edge is not None
+                and patch_size is not None
+                and merge_size is not None
+                and temporal_patch_size is not None
+            ):
+                return {
+                    "shortest_edge": int(shortest_edge),
+                    "longest_edge": int(longest_edge),
+                    "factor": int(patch_size * merge_size),
+                    "temporal_factor": int(temporal_patch_size),
+                }
+    return None
+
+
+_cached_get_qwen3_vl_video_resize_config = lru_cache(
+    get_qwen3_vl_video_resize_config_from_config
+)
+
+
+def get_qwen3_vl_video_resize_config(
+    model_config: "ModelConfig",
+) -> dict[str, int] | None:
+    model = model_config.model
+    revision = model_config.revision
+    return _cached_get_qwen3_vl_video_resize_config(model, revision=revision)
+
+
 def get_processor(
     processor_name: str,
     *args: Any,
