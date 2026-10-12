@@ -230,7 +230,9 @@ class TieringMetricsTracker:
             if transfer_job.is_promotion
             else TieringOffloadingMetrics.WRITE_TIME
         )
-        transfer_size = completed_key_count * self._primary_chunk_size
+        transfer_size = completed_job.transfer_bytes
+        if transfer_size is None:
+            transfer_size = completed_key_count * self._primary_chunk_size
         self._stats.increase_counter(bytes_metric, transfer_size, labelvalues)
         if completed_job.transfer_time is not None:
             self._stats.increase_counter(

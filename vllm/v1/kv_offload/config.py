@@ -16,6 +16,9 @@ class OffloadingGroupConfig:
     layer_names: tuple[str, ...]
     # Original KVCacheConfig group index.
     group_id: int
+    # Packed block (byte offset, padded page bytes), in layer_names order.
+    # Empty when the group is not certified for compact filesystem storage.
+    packed_layout: tuple[tuple[int, int], ...] = ()
 
 
 @dataclass(frozen=True)
