@@ -49,8 +49,6 @@ class FlashAttnMLABackend(MLACommonBackend):
 
     @staticmethod
     def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
-        if current_platform.is_xpu():
-            return [MultipleOf(64)]
         return [MultipleOf(16)]
 
     @staticmethod
@@ -71,15 +69,7 @@ class FlashAttnMLABackend(MLACommonBackend):
 
     @classmethod
     def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
-        if current_platform.is_xpu():
-            return True
         return capability.major == 9
-
-    @classmethod
-    def get_supported_head_sizes(cls) -> list[int]:
-        if current_platform.is_xpu():
-            return [576]
-        return super().get_supported_head_sizes()
 
     @classmethod
     def supports_combination(
@@ -99,6 +89,28 @@ class FlashAttnMLABackend(MLACommonBackend):
         return None
 
 
+class XPUFlashAttnMLABackend(FlashAttnMLABackend):
+    @staticmethod
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
+        return [MultipleOf(64)]
+
+    @staticmethod
+    def get_builder_cls() -> type["XPUFlashAttnMLAMetadataBuilder"]:
+        return XPUFlashAttnMLAMetadataBuilder
+
+    @staticmethod
+    def get_impl_cls() -> type["XPUFlashAttnMLAImpl"]:
+        return XPUFlashAttnMLAImpl
+
+    @classmethod
+    def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
+        return True
+
+    @classmethod
+    def get_supported_head_sizes(cls) -> list[int]:
+        return [576]
+
+
 @dataclass
 class FlashAttnMLADecodeMetadata(MLACommonDecodeMetadata):
     query_start_loc: torch.Tensor
@@ -114,17 +126,9 @@ class FlashAttnMLAMetadata(MLACommonMetadata[FlashAttnMLADecodeMetadata]):
 
 
 class FlashAttnMLAMetadataBuilder(MLACommonMetadataBuilder[FlashAttnMLAMetadata]):
-    _cudagraph_support: ClassVar[AttentionCGSupport] = (
-        AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
-        if current_platform.is_xpu()
-        else AttentionCGSupport.UNIFORM_BATCH
-    )
-    query_len_support: ClassVar[QueryLenSupport] = (
-        QueryLenSupport.SINGLE_ONLY
-        if current_platform.is_xpu()
-        else QueryLenSupport.VARLEN
-    )
-    reorder_batch_threshold: int = 1 if current_platform.is_xpu() else 512
+    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
+    query_len_support: ClassVar[QueryLenSupport] = QueryLenSupport.VARLEN
+    reorder_batch_threshold: int = 512  # process small prefills with decode pathway
 
     def __init__(
         self,
@@ -273,9 +277,30 @@ class FlashAttnMLAMetadataBuilder(MLACommonMetadataBuilder[FlashAttnMLAMetadata]
         return metadata
 
 
+class XPUFlashAttnMLAMetadataBuilder(FlashAttnMLAMetadataBuilder):
+    _cudagraph_support: ClassVar[AttentionCGSupport] = (
+        AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
+    )
+    query_len_support: ClassVar[QueryLenSupport] = QueryLenSupport.SINGLE_ONLY
+    reorder_batch_threshold: int = 1
+
+    def _schedule_decode(
+        self,
+        num_reqs,
+        cu_query_lens,
+        max_query_len,
+        seqlens,
+        max_seq_len,
+        causal,
+        max_num_splits,
+    ):
+        # XPU uses the FA2 varlen interface, which has no AOT scheduler metadata.
+        return None
+
+
 class FlashAttnMLAImpl(MLACommonImpl[FlashAttnMLAMetadata]):
     can_return_lse_for_decode: bool = True
-    supports_dcp: bool = not current_platform.is_xpu()
+    supports_dcp: bool = True
 
     def __init__(
         self,
@@ -328,57 +353,6 @@ class FlashAttnMLAImpl(MLACommonImpl[FlashAttnMLAMetadata]):
                 "FlashAttnMLA V1 with FP8 KV cache not yet supported"
             )
 
-        if current_platform.is_xpu() and self.dcp_world_size > 1:
-            raise NotImplementedError(
-                "FlashAttnMLA on XPU does not support decode context parallelism"
-            )
-
-    def _forward_mqa_xpu(
-        self,
-        q: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
-        kv_c_and_k_pe_cache: torch.Tensor,
-        attn_metadata: FlashAttnMLAMetadata,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        assert attn_metadata.decode is not None
-        num_decodes = attn_metadata.num_decodes
-        decode_cu_seqlens_q = attn_metadata.query_start_loc[: num_decodes + 1]
-
-        cache = kv_c_and_k_pe_cache
-        if cache.dim() == 3:
-            cache = cache.unsqueeze(-2)
-        assert cache.dim() == 4 and cache.size(-2) == 1, (
-            "kv_c_and_k_pe_cache must be [num_blocks, block_size, "
-            "(num_heads_kv=1)?, kv_lora_rank+qk_rope_head_dim]"
-        )
-
-        if type(q) is tuple:  # noqa: SIM108
-            q_in = torch.cat(q, dim=-1)
-        else:
-            q_in = q
-        if not q_in.is_contiguous():
-            q_in = q_in.contiguous()
-
-        attn_out = flash_attn_varlen_func(
-            q_in,
-            cache,
-            cache.narrow(-1, 0, self.kv_lora_rank),
-            max_seqlen_q=1,
-            cu_seqlens_q=decode_cu_seqlens_q,
-            max_seqlen_k=attn_metadata.decode.max_seq_len,
-            seqused_k=attn_metadata.decode.seq_lens,
-            block_table=attn_metadata.decode.block_table,
-            softmax_scale=self.scale,
-            causal=False,
-            fa_version=2,
-            return_softmax_lse=self.need_to_return_lse_for_decode,
-        )
-
-        if self.need_to_return_lse_for_decode:
-            o, lse = attn_out
-            # FA returns LSE in shape [ H, B ] but DCP wants [ B, H ]
-            return o, lse.transpose(0, 1)  # [ H, B ] -> [ B, H ]
-        return attn_out, None
-
     def forward_mqa(
         self,
         q: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
@@ -388,9 +362,6 @@ class FlashAttnMLAImpl(MLACommonImpl[FlashAttnMLAMetadata]):
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         assert kv_c_and_k_pe_cache.numel() > 0
         assert attn_metadata.decode is not None
-
-        if current_platform.is_xpu():
-            return self._forward_mqa_xpu(q, kv_c_and_k_pe_cache, attn_metadata)
 
         if type(q) is tuple:
             q_nope, q_pe = q
@@ -438,3 +409,95 @@ class FlashAttnMLAImpl(MLACommonImpl[FlashAttnMLAMetadata]):
         else:
             o = attn_out
             return o, None
+
+
+class XPUFlashAttnMLAImpl(FlashAttnMLAImpl):
+    supports_dcp: bool = False
+
+    def __init__(
+        self,
+        num_heads: int,
+        head_size: int,
+        scale: float,
+        num_kv_heads: int,
+        alibi_slopes: list[float] | None,
+        sliding_window: int | None,
+        kv_cache_dtype: str,
+        logits_soft_cap: float | None,
+        attn_type: str,
+        kv_sharing_target_layer_name: str | None,
+        # MLA Specific Arguments
+        **mla_args,
+    ) -> None:
+        super().__init__(
+            num_heads,
+            head_size,
+            scale,
+            num_kv_heads,
+            alibi_slopes,
+            sliding_window,
+            kv_cache_dtype,
+            logits_soft_cap,
+            attn_type,
+            kv_sharing_target_layer_name,
+            **mla_args,
+        )
+
+        if self.dcp_world_size > 1:
+            raise NotImplementedError(
+                "FlashAttnMLA on XPU does not support decode context parallelism"
+            )
+
+    def forward_mqa(
+        self,
+        q: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+        kv_c_and_k_pe_cache: torch.Tensor,
+        attn_metadata: FlashAttnMLAMetadata,
+        layer: AttentionLayer,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        assert kv_c_and_k_pe_cache.numel() > 0
+        assert attn_metadata.decode is not None
+        num_decodes = attn_metadata.num_decodes
+        decode_cu_seqlens_q = attn_metadata.query_start_loc[: num_decodes + 1]
+
+        cache = kv_c_and_k_pe_cache
+        if cache.dim() == 3:
+            cache = cache.unsqueeze(-2)
+        assert cache.dim() == 4 and cache.size(-2) == 1, (
+            "kv_c_and_k_pe_cache must be [num_blocks, block_size, "
+            "(num_heads_kv=1)?, kv_lora_rank+qk_rope_head_dim]"
+        )
+
+        if type(q) is tuple:  # noqa: SIM108
+            q_in = torch.cat(q, dim=-1)
+        else:
+            q_in = q
+        if not q_in.is_contiguous():
+            q_in = q_in.contiguous()
+
+        attn_out = flash_attn_varlen_func(
+            q_in,
+            cache,
+            cache.narrow(-1, 0, self.kv_lora_rank),
+            max_seqlen_q=1,
+            cu_seqlens_q=decode_cu_seqlens_q,
+            max_seqlen_k=attn_metadata.decode.max_seq_len,
+            seqused_k=attn_metadata.decode.seq_lens,
+            block_table=attn_metadata.decode.block_table,
+            softmax_scale=self.scale,
+            # Single-token paged decode has no future KV to mask; seqused_k
+            # already restricts each request to its valid KV prefix.
+            causal=False,
+            fa_version=2,
+            return_softmax_lse=self.need_to_return_lse_for_decode,
+        )
+
+        if self.need_to_return_lse_for_decode:
+            o, lse = attn_out
+            # FA returns LSE in shape [ H, B ] but DCP wants [ B, H ]
+            return o, lse.transpose(0, 1)  # [ H, B ] -> [ B, H ]
+        return attn_out, None
+
+
+if current_platform.is_xpu():
+    FlashAttnMLABackend = XPUFlashAttnMLABackend  # type: ignore[misc]
