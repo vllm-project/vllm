@@ -25,6 +25,8 @@ import torch
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl import base_worker as bw
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     NixlAgentMetadata,
+    RemoteMeta,
+    ReqMeta,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.pull_worker import (
     NixlPullConnectorWorker,
@@ -526,7 +528,7 @@ def test_peer_tail_zeroing_uses_device_cache_with_host_staging():
 
 
 @pytest.mark.cpu_test
-def test_mixed_packed_layout_uses_cached_per_layer_peer_descriptors():
+def test_mixed_packed_layout_read_completes_with_per_layer_peer_descriptors():
     worker, _ = _make_packed_mla_view_worker(
         {"L0": (0, 64), "L1": (64, 64)},
         256,
@@ -646,6 +648,32 @@ def test_mixed_packed_layout_uses_cached_per_layer_peer_descriptors():
     assert worker._peer_transfer_plans[metadata.engine_id] is peer_plan
     remote_handle = worker.dst_xfer_side_handles[metadata.engine_id][0]
     assert len(worker.nixl_wrapper.dlists[remote_handle]) == 8
+
+    worker._remote_agents[metadata.engine_id] = {(0, 0): "remote-agent"}
+    request_id = "mixed-layout-read"
+    req_meta = ReqMeta(
+        local_block_ids=([2],),
+        local_physical_block_ids=([2],),
+        tp_size=1,
+        remote=RemoteMeta(
+            block_ids=([1], [3]),
+            host="127.0.0.1",
+            port=1234,
+            engine_id=metadata.engine_id,
+            request_id="prefill-request",
+        ),
+    )
+    worker._recving_metadata[request_id] = req_meta
+    worker._read_blocks_for_req(request_id, req_meta)
+
+    op, _, local_desc_ids, _, remote_desc_ids = worker.nixl_wrapper.xfers[-1]
+    assert op == "READ"
+    np.testing.assert_array_equal(local_desc_ids, [2, 6])
+    np.testing.assert_array_equal(remote_desc_ids, [1, 7])
+
+    results = worker.get_transfer_results()
+    assert results.finished_recving == {request_id}
+    assert request_id not in worker._recving_metadata
 
 
 @pytest.mark.cpu_test
