@@ -28,10 +28,14 @@ from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import MultiCo
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.hisparse import runtime as runtime_module
 from vllm.v1.hisparse.coordinator import get_hisparse_coordinator
-from vllm.v1.hisparse.runtime import HiSparseCacheHandle
+from vllm.v1.hisparse.runtime import (
+    HiSparseCacheHandle,
+    update_hisparse_residency,
+)
 from vllm.v1.hisparse.types import (
     SparseKVOffloadCommand,
     SparseKVPageTransfer,
+    SparseKVResidencyUpdate,
     SparseKVRowMirror,
 )
 from vllm.v1.metrics.stats import KVCacheEvictionEvent
@@ -183,7 +187,7 @@ def test_full_graph_step_prepares_host_mirror_outside_model():
     connector = object.__new__(HiSparseConnector)
     connector.connector_worker = worker
     connector._get_connector_metadata = MagicMock(
-        return_value=HiSparseConnectorMetadata(None, (), (), {}, True)
+        return_value=HiSparseConnectorMetadata(None, (), (), {}, True, {})
     )
     req_id_per_token = torch.tensor([0, 1], dtype=torch.int32)
     attn_metadata = SimpleNamespace(
@@ -321,6 +325,7 @@ def test_draft_layer_rows_mirrored_after_drafter(monkeypatch, cg_mode):
                 )
             },
             True,
+            {},
         )
     )
     # A verification step: four query tokens of one request fill the page.
@@ -354,7 +359,7 @@ def test_draft_layer_rows_mirrored_after_drafter(monkeypatch, cg_mode):
     # The next step's start mirrors the drafter's rows, then hands the page over.
     compute_stream.wait_event.reset_mock()
     connector._get_connector_metadata.return_value = HiSparseConnectorMetadata(
-        None, (), (), {}, True
+        None, (), (), {}, True, {}
     )
     connector.start_load_kv(
         SimpleNamespace(),
@@ -397,7 +402,8 @@ def test_draft_layer_rows_mirrored_after_drafter(monkeypatch, cg_mode):
 
 
 def test_scheduled_prefix_hit_publishes_adopted_copies():
-    """Copies adopted after scheduling must reach the worker's block table."""
+    """Copies adopted after scheduling reach the worker as a residency update,
+    leaving the block-table row the scheduler output carries untouched."""
     from tests.v1.core.test_prefix_caching import (
         HISPARSE_BLOCK_SIZE,
         _allocate_scheduled,
@@ -443,7 +449,39 @@ def test_scheduled_prefix_hit_publishes_adopted_copies():
         num_scheduled_tokens={resumed.request_id: num_new_tokens},
     )
 
-    scheduler.build_connector_meta(scheduler_output)
+    core_row = list(scheduler_output.scheduled_new_reqs[0].block_ids[2])
 
-    resident_ids = scheduler_output.block_table_updates[resumed.request_id][2]
-    assert resident_ids[:3] == copy_ids[:3]
+    metadata = scheduler.build_connector_meta(scheduler_output)
+
+    update = metadata.residency_updates[resumed.request_id]
+    assert update.pages == [0, 1, 2, 3]
+    assert update.block_ids[0][:3] == copy_ids[:3]
+    assert manager.get_block_ids(resumed.request_id)[2] == core_row
+    assert core_row[:3] == [0, 0, 0]
+
+
+def test_residency_updates_persist_by_state_row():
+    """Updates name requests by batch row but are stored by state row.
+
+    An update for a lost page and an appended page must leave the other pages
+    and the other request's row intact across steps that reorder the batch.
+    """
+    table = torch.zeros((4, 2, 4), dtype=torch.int32)
+    update_hisparse_residency(
+        table,
+        {
+            "a": SparseKVResidencyUpdate([0, 1, 2], ([1, 2, 3], [11, 12, 13])),
+            "b": SparseKVResidencyUpdate([0, 1], ([4, 5], [14, 15])),
+        },
+        ["a", "b"],
+        torch.tensor([2, 0], dtype=torch.int32),
+    )
+    update_hisparse_residency(
+        table,
+        {"a": SparseKVResidencyUpdate([1, 3], ([0, 6], [0, 16]))},
+        ["b", "a"],
+        torch.tensor([0, 2], dtype=torch.int32),
+    )
+
+    assert table[[0, 2], 0].tolist() == [[4, 5, 0, 0], [1, 0, 3, 6]]
+    assert table[[0, 2], 1].tolist() == [[14, 15, 0, 0], [11, 0, 13, 16]]
