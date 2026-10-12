@@ -57,10 +57,9 @@ steps:
       - tests/models/language/pooling/test_classification.py
       - vllm/_aiter_ops.py
       - vllm/platforms/rocm.py
-- label: ":nvidia: (H200 MIG 35GB) Language Models (Hybrid)"
+- label: ":nvidia: (H200 MIG 35GB) Language Models (Hybrid) Shard %N"
   device: h200_35gb
   key: language-models-tests-hybrid
-  automatic_shard: true
   timeout_in_minutes: 65
   env:
     # GitHub intermittently rejects HTTP/2 upload-pack requests from the H200
@@ -79,16 +78,14 @@ steps:
     - rm -rf /tmp/mamba-src && git clone --depth 1 --branch v2.3.0 https://github.com/state-spaces/mamba /tmp/mamba-src && sed -i 's/-std=c++17/-std=c++20/g' /tmp/mamba-src/setup.py && MAMBA_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation /tmp/mamba-src
     - CAUSAL_CONV1D_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
     # Shard the hybrid language model tests that are numerically stable on Hopper.
-    - pytest -v -s models/language/generation -m hybrid_model -k 'not granite-4.0-tiny-preview'
+    - pytest -v -s models/language/generation -m hybrid_model -k 'not granite-4.0-tiny-preview' --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
+  parallelism: 2
   mirror:
     amd:
       label: ":amd: (MI355 DPX) Language Models (Hybrid) Shard %N"
       dind: false
       device: mi355_dpx
       timeout_in_minutes: 65
-      # automatic_shard covers NVIDIA steps only; the mirror keeps its
-      # fixed pytest shards.
-      parallelism: 2
       depends_on:
       - image-build-amd
       commands:
