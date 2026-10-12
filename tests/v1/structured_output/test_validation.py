@@ -269,8 +269,8 @@ def test_unsupported_grammar_is_a_client_error(backend, structured_outputs):
     ],
 )
 def test_supported_spec_is_not_rejected(backend, structured_outputs):
-    """The validators' final rejection must not catch specs that skip their early
-    returns: json_object, regex, and the falsy but valid regex="" and json={}."""
+    """Supported specs, including the falsy but valid regex="" and json={}, must
+    not reach the validators' final rejection."""
     params = SamplingParams(structured_outputs=structured_outputs)
     params._validate_structured_outputs(
         _StubModelConfig(is_diffusion=False),
