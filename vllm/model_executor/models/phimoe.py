@@ -577,7 +577,7 @@ class PhiMoEForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         return hidden_states
 
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        logits = self.logits_processor(self.lm_head, hidden_states, self.lm_head.bias)
+        logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:

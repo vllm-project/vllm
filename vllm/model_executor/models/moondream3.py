@@ -1313,7 +1313,7 @@ class Moondream3ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         self,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor | None:
-        logits = self.logits_processor(self.lm_head, hidden_states, self.lm_head.bias)
+        logits = self.logits_processor(self.lm_head, hidden_states)
         if logits is not None:
             logits[:, self._answer_id] = float("-inf")
         return logits
