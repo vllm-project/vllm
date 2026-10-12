@@ -1788,6 +1788,16 @@ class VllmConfig:
         self._maybe_override_dynamic_sd_cudagraph_mode()
 
         if (
+            self.attention_config.sparse_mla_prefill_workspace_factor is None
+            and self.model_config is not None
+        ):
+            # Resolved once: KV cache auto-fit can lower max_model_len later, and
+            # factor * max_model_len must stay within the workspace reserved at init.
+            self.attention_config.sparse_mla_prefill_workspace_factor = (
+                5 if self.model_config.max_model_len <= 256 * 1024 else 2
+            )
+
+        if (
             self.attention_config.hisparse_config is None
             and self.kv_transfer_config is not None
             and self.kv_transfer_config.has_connector("HiSparseConnector")
