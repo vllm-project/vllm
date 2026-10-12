@@ -172,11 +172,10 @@ class _FixedLinearAttention(torch.nn.Module):
         self,
         hidden_states: torch.Tensor,
         positions: torch.Tensor,
-        output: torch.Tensor,
-    ) -> None:
+    ) -> torch.Tensor:
         del positions
         self.inputs.append(hidden_states.detach().clone())
-        output.fill_(self.value)
+        return torch.full_like(hidden_states, self.value)
 
 
 def _make_state_layer(

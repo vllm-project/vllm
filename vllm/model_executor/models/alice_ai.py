@@ -287,9 +287,7 @@ class AliceAIDecoderBlock(Qwen3NextDecoderLayer):
         self, hidden_states: torch.Tensor, positions: torch.Tensor
     ) -> torch.Tensor:
         if self.layer_type == "linear_attention":
-            output = torch.empty_like(hidden_states)
-            self.linear_attn(hidden_states, positions, output)
-            return output
+            return self.linear_attn(hidden_states, positions)
         return self.self_attn(hidden_states=hidden_states, positions=positions)
 
     def forward_attn_res(
