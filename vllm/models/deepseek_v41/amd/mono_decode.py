@@ -28,7 +28,7 @@ import vllm.envs as envs
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
-from vllm.models.common.mono import Feature, MonoOp, MonoRuntime, MonoSpec, StepDecision
+from vllm.models.common.mono import Feature, MonoOp, MonoRuntime, MonoSpec
 
 if TYPE_CHECKING:
     from vllm.models.deepseek_v41.amd.model import DeepseekV4DecoderLayer
@@ -58,7 +58,7 @@ DSV41_MONO = MonoSpec(
     name="DSv4.1 mono decode",
     supports=frozenset({Feature.SPECULATIVE_DECODE}),
     tp_sizes=(2, 4),
-    cdna_versions=(4,),  # the kernels' ISA: gfx950 scaled MFMA and MX formats
+    device_archs=("gfx950",),  # the kernels' ISA: scaled MFMA and MX formats
     widths=tuple(range(1, MAX_ROWS + 1)),
     kernel_module="vllm.models.deepseek_v41.amd.mono.runner",
     resident_blocks="BLOCKS",
@@ -115,7 +115,7 @@ class MonoDecodeLayer(MonoOp):
         self._weights: MonoLayerWeights | None = None
         self._kernels: DSV41MonoLayer | None = None
 
-    def refuse(self) -> list[str]:
+    def refuse_model(self) -> list[str]:
         """The kernels read every one of the 384 experts on each rank, TP-sharded,
         in AITER's A8W4 MXFP4 layout: no other MoE backend is servable."""
         from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import Mxfp4MoeBackend
@@ -123,14 +123,14 @@ class MonoDecodeLayer(MonoOp):
         ffn = self.layer.ffn
         experts = getattr(getattr(ffn, "experts", None), "routed_experts", None)
         if experts is None:
-            return []  # not a routed MoE: the layer checks decline it
+            return []  # not a routed MoE: the layer checks refuse it
         backend = getattr(experts.quant_method, "mxfp4_backend", None)
         if backend != Mxfp4MoeBackend.AITER_MXFP4_BF16:
             return [f"needs the AITER_MXFP4_BF16 MoE backend, not {backend}"]
         return []
 
-    def decline(self) -> list[str]:
-        """Decline the layers whose seams or MoE the kernels do not serve, and
+    def skip_layer(self) -> list[str]:
+        """Skip the layers whose seams or MoE the kernels do not serve, and
         pick the seam the rest are entered at (``ffn_only``)."""
         layer = self.layer
         attn, ffn = layer.attn, layer.ffn
@@ -191,7 +191,7 @@ class MonoDecodeLayer(MonoOp):
         layer = self.layer
         a, f = layer.attn, layer.ffn
         e, sh = f.experts.routed_experts, f.shared_experts
-        assert sh is not None  # ``decline`` took only layers with one
+        assert sh is not None  # ``skip_layer`` took only layers with one
         self._weights = MonoLayerWeights(
             attn=None if self.ffn_only else self._attn_weights(a),
             hc_attn_fn=layer.hc_attn_fn,
@@ -241,42 +241,62 @@ class MonoDecodeLayer(MonoOp):
         return attn
 
     @staticmethod
-    def _skip(step: StepDecision) -> None:
-        logger.debug_once("DSv4.1 mono decode skipped a step: %s", step.reason)
+    def _skip(why: str) -> None:
+        logger.debug_once("DSv4.1 mono decode skipped a step: %s", why)
         return None
 
-    def eligible(self, rows: int):
-        """(this step's decision, the layer's SWA metadata, its compressed
-        cache's)."""
+    def _metadata(self):
+        """(the layer's SWA metadata, its compressed cache's), None when the
+        step carries none."""
         if not is_forward_context_available():
-            return self.rt.step_begin(rows, "no forward context"), None, None
-        fc = get_forward_context()
-        md = fc.attn_metadata
+            return None, None
+        md = get_forward_context().attn_metadata
+        if not isinstance(md, dict):  # a profile / dummy run, or DBO ubatches
+            return None, None
         attn = self.layer.attn
-        swa, comp = None, None
-        if isinstance(md, dict):
-            swa = cast(
-                "DeepseekV4ROCMAiterSparseSWAMetadata | None",
-                md.get(attn.swa_cache_layer.prefix),
+        swa = cast(
+            "DeepseekV4ROCMAiterSparseSWAMetadata | None",
+            md.get(attn.swa_cache_layer.prefix),
+        )
+        comp = None
+        if attn.compressed_cache_prefix is not None:
+            comp = cast(
+                "DeepseekV4FlashMLAMetadata | None",
+                md.get(attn.compressed_cache_prefix),
             )
-            if attn.compressed_cache_prefix is not None:
-                comp = cast(
-                    "DeepseekV4FlashMLAMetadata | None",
-                    md.get(attn.compressed_cache_prefix),
-                )
-        why = ""
+        return swa, comp
+
+    def skip_step(self, rows: int, tensors, whole_layer: bool) -> str:
+        if not is_forward_context_available():
+            return "no forward context"
+        fc = get_forward_context()
         if not self.spec.graph_mode_ok(fc.cudagraph_runtime_mode):
             # a PIECEWISE (breakable) capture is replayed for mixed batches too
-            why = f"{fc.cudagraph_runtime_mode} step"
-        elif not isinstance(md, dict):  # a profile / dummy run, or DBO ubatches
-            why = "no attention metadata"
-        elif swa is None:
-            why = "layer metadata missing"
-        elif swa.num_prefills != 0 or swa.num_decodes == 0:
-            why = "not a decode-only step"
-        elif swa.num_decode_tokens > rows:
-            why = "more decode tokens than rows"
-        return self.rt.step_begin(rows, why), swa, comp
+            return f"{fc.cudagraph_runtime_mode} step"
+        if not isinstance(fc.attn_metadata, dict):
+            return "no attention metadata"
+        swa, comp = self._metadata()
+        if swa is None:
+            return "layer metadata missing"
+        if swa.num_prefills != 0 or swa.num_decodes == 0:
+            return "not a decode-only step"
+        if swa.num_decode_tokens > rows:
+            return "more decode tokens than rows"
+        if whole_layer:
+            # the kernels' attention: causal SWA windows, the compressed cache
+            if comp is None:
+                return "layer metadata missing"
+            if swa.decode_swa_width != SWA_WIDTH:
+                return f"SWA width {swa.decode_swa_width}"
+            if (
+                swa.decode_swa_indices is None
+                or swa.decode_swa_lens is None
+                or swa.token_to_req_indices is None
+            ):
+                return "SWA decode metadata missing"
+        if not all(t is not None and t.is_contiguous() for t in tensors):
+            return "non-contiguous layer inputs"
+        return ""
 
     def forward(
         self,
@@ -293,27 +313,13 @@ class MonoDecodeLayer(MonoOp):
         if self.ffn_only:
             return None
         if residual is None or x.dim() != 2:
-            return self._skip(StepDecision("first layer"))
-        step, swa, comp = self.eligible(x.shape[0])
-        attn = self.layer.attn
+            return self._skip("first layer")
         tensors = (x, residual, post_mix, res_mix, pre_mix)
-        why = step.reason
-        if not why:
-            # the kernels' attention: causal SWA windows, the compressed cache
-            if comp is None:
-                why = "layer metadata missing"
-            elif swa.decode_swa_width != SWA_WIDTH:
-                why = f"SWA width {swa.decode_swa_width}"
-            elif (
-                swa.decode_swa_indices is None
-                or swa.decode_swa_lens is None
-                or swa.token_to_req_indices is None
-            ):
-                why = "SWA decode metadata missing"
-            elif not all(t is not None and t.is_contiguous() for t in tensors):
-                why = "non-contiguous layer inputs"
-        if why:
-            return self._skip(StepDecision(why))
+        step = self.step(x.shape[0], tensors, whole_layer=True)
+        if not step:
+            return self._skip(step.reason)
+        attn = self.layer.attn
+        swa, comp = self._metadata()
         assert swa is not None and comp is not None
         logger.info_once(
             "DSv4.1 mono decode layer active (decode steps of <= %d rows)", MAX_ROWS
@@ -349,13 +355,10 @@ class MonoDecodeLayer(MonoOp):
         """The layer's outputs by the FFN launch from ``part``, wo_b's unreduced
         output, and the attention seam's outputs; None when this step takes the
         original path (the caller then reduces ``part`` itself)."""
-        step, _, _ = self.eligible(part.shape[0])
         tensors = (part, residual, post_mix, res_mix, pre_mix)
-        why = step.reason
-        if not why and not all(t.is_contiguous() for t in tensors):
-            why = "non-contiguous layer inputs"
-        if why:
-            return self._skip(StepDecision(why))
+        step = self.step(part.shape[0], tensors, whole_layer=False)
+        if not step:
+            return self._skip(step.reason)
         logger.info_once(
             "DSv4.1 mono decode FFN launch active (decode steps of <= %d rows)",
             MAX_ROWS,

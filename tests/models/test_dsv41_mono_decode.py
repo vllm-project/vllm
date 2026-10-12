@@ -295,13 +295,13 @@ def _config(**parallel):
     )
 
 
-def _deployment(monkeypatch, cdna=4, cus=256):
+def _deployment(monkeypatch, arch="gfx950", cus=256):
     """A deployment the kernels take (the runner module stubbed: no FlyDSL)."""
-    import vllm.platforms.rocm as rocm
+    from vllm.models.common.mono import spec as mono_spec
 
     monkeypatch.setenv("VLLM_ROCM_MONO_DECODE", "1")
     monkeypatch.delenv("VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4", raising=False)
-    monkeypatch.setattr(rocm, "get_cdna_version", lambda: cdna)
+    monkeypatch.setattr(mono_spec, "_device_arch", lambda: arch)
     monkeypatch.setattr(torch.accelerator, "current_device_index", lambda: 0)
     monkeypatch.setattr(md.current_platform, "num_compute_units", lambda _: cus)
     name = "vllm.models.deepseek_v41.amd.mono.runner"
@@ -311,10 +311,10 @@ def _deployment(monkeypatch, cdna=4, cus=256):
     _runtime(monkeypatch)
 
 
-@pytest.mark.parametrize("cdna", [3, 5])
-def test_opt_in_outside_the_kernels_cdna_raises(monkeypatch, cdna):
-    _deployment(monkeypatch, cdna=cdna)
-    with pytest.raises(ValueError, match="want CDNA4"):
+@pytest.mark.parametrize("arch", ["gfx942", "gfx1250"])
+def test_opt_in_outside_the_kernels_arch_raises(monkeypatch, arch):
+    _deployment(monkeypatch, arch=arch)
+    with pytest.raises(ValueError, match="want gfx950"):
         md.MonoDecodeLayer.create(_config(), layer=_decoder_layer())
 
 

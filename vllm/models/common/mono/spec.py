@@ -9,7 +9,7 @@ before a feature existed refuses it rather than silently miscomputing. The
 parametric fields (``dtypes``, ``tp_sizes``, ...) hold no opinion when left
 empty. Anything a spec cannot express goes in ``constraints``.
 
-``refuse`` is plain Python over ``VllmConfig`` and is CPU-testable.
+``refuse_config`` is plain Python over ``VllmConfig`` and is CPU-testable.
 """
 
 from __future__ import annotations
@@ -70,6 +70,25 @@ Constraint = Callable[[VllmConfig], str | None]
 """A model-specific gate, returning a refusal reason or None."""
 
 
+def _device_arch() -> str:
+    """The GPU's ISA name: ``gfx950`` on ROCm, ``sm90`` on CUDA."""
+    from vllm.platforms import current_platform
+
+    if current_platform.is_rocm():
+        props = torch.cuda.get_device_properties(
+            torch.accelerator.current_device_index()
+        )
+        return str(props.gcnArchName).split(":")[0]
+    capability = current_platform.get_device_capability()
+    return f"sm{capability.major}{capability.minor}" if capability else ""
+
+
+def _compute_units() -> int:
+    from vllm.platforms import current_platform
+
+    return current_platform.num_compute_units(torch.accelerator.current_device_index())
+
+
 @dataclass(frozen=True)
 class MonoSpec:
     """What a MonoKernel can run.
@@ -82,9 +101,10 @@ class MonoSpec:
         dtypes: Model dtypes, empty for any.
         kv_cache_dtypes: ``cache_config.cache_dtype`` values, empty for any.
         tp_sizes: Tensor-parallel sizes, empty for any.
-        cdna_versions: ROCm CDNA ISA versions, empty for any. Ignored off ROCm.
-        min_compute_units: Compute units the persistent launch needs resident.
-            Ignored off ROCm.
+        device_archs: GPU ISA names the kernels are built for, empty for any:
+            ``gfx950`` on ROCm, ``sm90`` on CUDA.
+        min_compute_units: Compute units the persistent launch needs resident
+            (AMD CUs, NVIDIA SMs).
         kernel_module: Import path of the kernel package, empty to not check.
             Importing it pulls in FlyDSL and AITER's FlyDSL helpers, so a
             deployment without them refuses here instead of failing in
@@ -111,7 +131,7 @@ class MonoSpec:
     dtypes: tuple[torch.dtype, ...] = ()
     kv_cache_dtypes: tuple[str, ...] = ()
     tp_sizes: tuple[int, ...] = ()
-    cdna_versions: tuple[int, ...] = ()
+    device_archs: tuple[str, ...] = ()
     min_compute_units: int = 0
     kernel_module: str = ""
     resident_blocks: str = ""
@@ -124,7 +144,7 @@ class MonoSpec:
     def wanted(self, vllm_config: VllmConfig) -> bool:
         return self.opt_in is None or bool(self.opt_in(vllm_config))
 
-    def refuse(self, vllm_config: VllmConfig) -> list[str]:
+    def refuse_config(self, vllm_config: VllmConfig) -> list[str]:
         """Every reason this configuration cannot run the kernel.
 
         Args:
@@ -168,39 +188,25 @@ class MonoSpec:
             return [f"needs FlyDSL and AITER's FlyDSL helpers ({e})"]
         if not self.resident_blocks:
             return []
-        from vllm.platforms import current_platform
-
         blocks = getattr(module, self.resident_blocks)
-        units = current_platform.num_compute_units(
-            torch.accelerator.current_device_index()
-        )
+        units = _compute_units()
         if units < blocks:
             return [f"needs {blocks} compute units, the GPU has {units}"]
         return []
 
     def _platform(self) -> list[str]:
-        """ROCm device checks. Off ROCm these fields hold no opinion: both ask
-        about CDNA hardware, so a CUDA MonoKernel will want its own fields and
-        should not be refused by ones it cannot answer."""
-        if not self.cdna_versions and not self.min_compute_units:
+        """The GPU runs the ISA the kernels were built for and is wide enough."""
+        if not self.device_archs and not self.min_compute_units:
             return []
         try:
-            from vllm.platforms import current_platform
-
-            if not current_platform.is_rocm():
-                return []
-            from vllm.platforms.rocm import get_cdna_version
-
-            cdna = get_cdna_version()
-            units = current_platform.num_compute_units(
-                torch.accelerator.current_device_index()
-            )
+            arch = _device_arch()
+            units = _compute_units()
         except Exception as e:  # noqa: BLE001
             return [f"platform check failed: {e!r}"]
         why = []
-        if self.cdna_versions and cdna not in self.cdna_versions:
-            want = "/".join(f"CDNA{v}" for v in self.cdna_versions)
-            why.append(f"CDNA version {cdna} (want {want})")
+        if self.device_archs and arch not in self.device_archs:
+            want = "/".join(self.device_archs)
+            why.append(f"device arch {arch or 'unknown'} (want {want})")
         if units < self.min_compute_units:
             why.append(
                 f"{units} compute units, the resident launch needs "

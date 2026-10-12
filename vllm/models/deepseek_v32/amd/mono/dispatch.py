@@ -197,20 +197,22 @@ class Glm5MonoDecode(MonoOp):
         self._guarded = (kv.data_ptr(), kv.numel())
         return True
 
-    def eligible(self, layer, positions, hidden_states, residual) -> StepDecision:
-        """This step's decision, taken once at the first mono layer.
+    def skip_step(self, rows: int, layer, hidden_states, residual) -> str:
+        """Why this step takes vLLM's path instead.
 
-        The reason is rank-uniform (metadata only); rank-local state enters through the
-        runtime's vote. A go step then fills the padded per-step inputs at the width the
-        runtime chose.
+        Rank-uniform (metadata only); rank-local state enters through the runtime's
+        vote.
         """
         if residual is None:
-            why = "no_residual"
-        elif not self._maybe_guard(layer):
-            why = "no_kv_cache"
-        else:
-            why = self.lv.step_reason(layer, hidden_states, residual)
-        step = self.rt.step_begin(hidden_states.shape[0], why)
+            return "no_residual"
+        if not self._maybe_guard(layer):
+            return "no_kv_cache"
+        return self.lv.step_reason(layer, hidden_states, residual)
+
+    def begin_step(self, layer, positions, hidden_states, residual) -> StepDecision:
+        """This step's decision, taken once at the first mono layer. A go step fills
+        the padded per-step inputs at the width the runtime chose."""
+        step = self.step(hidden_states.shape[0], layer, hidden_states, residual)
         if step:
             assert step.width is not None  # a go step was given a width
             self.lv.prepare_step(positions, step.width)
@@ -220,7 +222,7 @@ class Glm5MonoDecode(MonoOp):
         """One mono layer index. The step decision and vLLM's layer on no-go steps stay
         outside the custom op; under FULL graphs this Python runs at capture only."""
         if layer.layer_idx == self.lv.first:
-            self.eligible(layer, positions, hidden_states, residual)
+            self.begin_step(layer, positions, hidden_states, residual)
         if residual is None or not self.rt.step:
             return layer(positions, hidden_states, residual)
         return mono_layer(

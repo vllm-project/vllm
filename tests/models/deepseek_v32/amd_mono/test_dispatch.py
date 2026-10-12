@@ -49,9 +49,9 @@ def test_refusal(make_vc, no_platform_check, kw, frag):
         vc.model_config.dtype = torch.float16
     elif isinstance(kw, str):
         setattr(vc, kw, object())
-    why = GLM5_MONO.refuse(vc)
+    why = GLM5_MONO.refuse_config(vc)
     assert why and any(frag in w for w in why), why
-    assert not GLM5_MONO.refuse(make_vc())
+    assert not GLM5_MONO.refuse_config(make_vc())
 
 
 def test_env_off_and_on(make_vc, no_platform_check, monkeypatch):
