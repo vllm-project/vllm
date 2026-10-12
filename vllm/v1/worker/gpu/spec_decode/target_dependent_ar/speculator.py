@@ -79,6 +79,13 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
         """
         return True
 
+    def _configure_decode_metadata_update(self) -> None:
+        # With one speculative step there are no draft decode steps to update.
+        if self.num_speculative_steps == 1:
+            self.supports_decode_metadata_update = False
+            return
+        super()._configure_decode_metadata_update()
+
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
         # Initialize cudagraph manager for draft prefill (draft position 0).
         self.prefill_cudagraph_manager = SpeculatorCudaGraphManager(
