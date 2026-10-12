@@ -104,7 +104,7 @@ class MonoDecodeRunner:
     def __init__(self, model, name: str = "mono") -> None:
         config = model.config
         npes = get_tensor_model_parallel_world_size()
-        _need(npes == TP, f"TP {npes}, kernels are built for {TP}")
+        _need(npes in (2, 4, 8), f"TP {npes}, kernels are built for 2, 4, or 8")
         layers = model.layers
         _need(
             model.start_layer == 0 and model.end_layer == len(layers),
@@ -190,7 +190,7 @@ class MonoDecodeRunner:
         self.q = torch.empty(
             MAX_TOKENS, LOCAL_Q_HEADS * HEAD_DIM, dtype=bf16, device=dev
         )
-        self.iq = torch.empty(MAX_TOKENS, 1, HEAD_DIM, dtype=bf16, device=dev)
+        self.iq = torch.empty(MAX_TOKENS, heads.count, HEAD_DIM, dtype=bf16, device=dev)
         # each layer's K1 pointers that do not change per step (K1_ARGS order)
         self.k1_args = []
         for i, lw in enumerate(self.sparse):

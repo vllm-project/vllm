@@ -58,7 +58,9 @@ from vllm.models.minimax_m3.amd.mono.config import (
     HIDDEN,
     INDEX_CP_FROM_BLOCKS,
     INTER,
+    LOCAL_KV_HEADS,
     MAX_INDEX_BLOCKS,
+    MAX_SPARSE_KEYS,
     MAX_TOKENS,
     MOE_SLOTS,
     N_ROUTED,
@@ -185,7 +187,7 @@ assert N_SPLIT * THREADS * CAND_BATCH >= MAX_INDEX_BLOCKS
 # (``step_rows``; every long request context-parallel: no TP long selection in that
 # build), its rows ending less than a block apart are >= INDEX_CP_FROM_BLOCKS blocks
 # each, and a split task then scans >= TOPK_BLOCKS blocks
-assert N_SPLIT == 2 * TP
+assert N_SPLIT == MAX_SPARSE_KEYS // SPLIT_KEYS
 assert N_SPLIT * TOPK_BLOCKS <= INDEX_CP_FROM_BLOCKS <= THREADS
 assert MAX_TOKENS <= SPARSE_BLOCK
 
@@ -228,6 +230,20 @@ def build_post_attn_kernel(
     WIDE = wide_moe(tokens)
     POOL = pool_words(tokens)
     U_MAX = TOP_K * tokens + 1  # distinct routed experts at most, then the shared
+    H_SUB = min(H, 16)
+    O_K_SUB = H_SUB * HEAD_DIM
+    SUBPASSES = max(1, H // 16)
+    WORDS_PER_THREAD = (O_K // 4 + THREADS - 1) // THREADS
+
+    OPART_WORDS = WAVES * O_K_SUB
+    P8_WORDS = H_SUB * SPLIT_KEYS // 4
+    Q8_WORDS = O_K_SUB // 4
+    HST_WORDS = 3 * WAVES * H_SUB
+    P8_OFF = OPART_WORDS
+    Q8_OFF = P8_OFF + P8_WORDS
+    HST_OFF = Q8_OFF + Q8_WORDS
+    KEYS_OFF = HST_OFF + HST_WORDS
+    RANKS_OFF = KEYS_OFF + THREADS
 
     @fx.struct
     class Smem:
@@ -235,23 +251,23 @@ def build_post_attn_kernel(
         # mid; wide: also the split's PV partials (the stages take turns)
         x: fx.Array[fx.Int32, POOL, 16]
         red: fx.Array[fx.Float32, WAVES * 64 * 4, 16]
-        p8: fx.Array[fx.Int32, H * SPLIT_KEYS // 4, 16]
-        q8: fx.Array[fx.Int32, O_K // 4, 16]
-        opart: fx.Array[fx.Float32, 1 if WIDE else WAVES * O_K, 16]  # PV partials
+        p8: fx.Array[fx.Int32, 1 if WIDE else H_SUB * SPLIT_KEYS // 4, 16]
+        q8: fx.Array[fx.Int32, 1 if WIDE else O_K_SUB // 4, 16]
+        opart: fx.Array[fx.Float32, 1 if WIDE else WAVES * O_K_SUB, 16]  # PV partials
         # wide MoE: the step's distinct experts (the shared one last), token masks
         uexp: fx.Array[fx.Int32, U_MAX + 2, 16]
         umask: fx.Array[fx.Int32, U_MAX + 2, 16]
         # and per (expert, B column) the down stage's mid row and route weight
         urow: fx.Array[fx.Int32, U_MAX * 16 if WIDE else 1, 16]
         uwt: fx.Array[fx.Float32, U_MAX * 16 if WIDE else 1, 16]
-        hst: fx.Array[fx.Float32, 3 * WAVES * H, 16]  # head max / sum, max
+        hst: fx.Array[fx.Float32, 1 if WIDE else 3 * WAVES * H_SUB, 16]  # head max / sum, max
         misc: fx.Array[fx.Float32, O_ROWS * MAX_TOKENS, 16]  # a task's output rows
         route: fx.Array[fx.Int32, 8 * MAX_TOKENS, 16]  # token k's slots at 8 k
         rwt: fx.Array[fx.Float32, 8 * MAX_TOKENS, 16]  # and their routing weights
         # indexer sort keys, a block a thread (a long request: the waves'
         # candidate (key, block) pairs) and their ranks
-        keys: fx.Array[fx.Int32, THREADS, 16]
-        ranks: fx.Array[fx.Int32, THREADS, 16]
+        keys: fx.Array[fx.Int32, 1 if WIDE else THREADS, 16]
+        ranks: fx.Array[fx.Int32, 1 if WIDE else THREADS, 16]
         blk: fx.Array[fx.Int32, 32, 16]  # this split's 16 pages, n_ctx, tail flag
         tls: fx.Array[fx.Int64, TL_POINTS if timeline else 1, 16]  # timeline stamps
         # fuse_k1: index q (every head's: in the pool)
@@ -323,21 +339,21 @@ def build_post_attn_kernel(
         lds = fx.SharedAllocator().allocate(Smem).peek()
         xs = lds.x.ptr
         red = lds.red.ptr
-        p8 = lds.p8.ptr
-        q8 = lds.q8.ptr
         # the pool read and written as f32 (wide: the split's PV partials live there)
         fpool = fx.recast_iter(fx.Float32, xs)
         opart = fpool if WIDE else lds.opart.ptr
+        p8 = xs + P8_OFF if WIDE else lds.p8.ptr
+        q8 = xs + Q8_OFF if WIDE else lds.q8.ptr
+        hst = fpool + HST_OFF if WIDE else lds.hst.ptr
         uexp = lds.uexp.ptr
         umask = lds.umask.ptr
         urow = lds.urow.ptr
         uwt = lds.uwt.ptr
-        hst = lds.hst.ptr
         misc = lds.misc.ptr
         route = lds.route.ptr
         rwt = lds.rwt.ptr
-        keys = lds.keys.ptr
-        ranks = lds.ranks.ptr
+        keys = xs + KEYS_OFF if WIDE else lds.keys.ptr
+        ranks = xs + RANKS_OFF if WIDE else lds.ranks.ptr
         blk = lds.blk.ptr
         tls = lds.tls.ptr
         v4f = fx.Vector.make_type(4, fx.Float32)
@@ -863,17 +879,17 @@ def build_post_attn_kernel(
                 if const_expr(fuse_k1):
                     # this token's q heads and every token's new K / V: a request's
                     # tokens of one step (speculative decode) attend to each other's
-                    if wave == 0:
-                        kv = lane - H
+                    if tid < H + tokens * (2 * LOCAL_KV_HEADS):
+                        kv = tid - H
                         k1_poll(
                             [
                                 (
                                     hdone_mb,
-                                    (lane < H).select(
-                                        tok * K1_HEAD_TASKS + lane,
-                                        fx.min(kv // 2, tokens - 1) * K1_HEAD_TASKS
+                                    (tid < H).select(
+                                        tok * K1_HEAD_TASKS + tid,
+                                        fx.min(kv // (2 * LOCAL_KV_HEADS), tokens - 1) * K1_HEAD_TASKS
                                         + H
-                                        + kv % 2,
+                                        + kv % (2 * LOCAL_KV_HEADS),
                                     ),
                                     1,
                                 )
@@ -887,173 +903,183 @@ def build_post_attn_kernel(
                 pages = [
                     uniform(fx.ptr_load(blk + (wave * PPW + j))) for j in range(PPW)
                 ]
-                qv = ld_bf16x4(rsrc(q), tok * O_K + tid * 4, CM_K1)
-                # K (QK B operand, key = lane % 16 of page j), V (PV B operand: dims
-                # 16 jd + lane % 16, keys 8 (lane / 16) .. + 8)
-                kw = []
-                for j in range_constexpr(PPW):
-                    for s in range_constexpr(HEAD_DIM // 32):
-                        kw.append(
-                            fx.Vector(
-                                bo.buffer_load(
-                                    r_k,
-                                    (
-                                        pages[j] * PAGE_BYTES
-                                        + (2 * s + g4 // 2) * 256
-                                        + l16 * 16
-                                        + (g4 % 2) * 8
-                                    )
-                                    // 4,
-                                    vec_width=2,
-                                    dtype=T.i32,
-                                    cache_modifier=CM_K1,
-                                )
-                            ).bitcast(fx.Int64)[0]
-                        )
-                vpg = (g4 // 2 == 0).select(pages[0], pages[1])
-                vw = [
-                    fx.Vector(
-                        bo.buffer_load(
-                            r_v,
-                            (vpg * PAGE_BYTES + (16 * jd + l16) * PAGE16 + (g4 % 2) * 8)
-                            // 4,
-                            vec_width=2,
-                            dtype=T.i32,
-                            cache_modifier=CM_K1,
-                        )
-                    ).bitcast(fx.Int64)[0]
-                    for jd in range(HEAD_DIM // 16)
-                ]
-                fx.ptr_store(fp8_pack4(qv[0], qv[1], qv[2], qv[3]), q8 + tid)
-                gpu.barrier()
-                stamp(12)
-                # QK per page j: A = q (heads), B = K (keys); lane holds heads
-                # 4 g4 + e, key l16
                 key0 = t * SPLIT_KEYS + wave * (PPW * PAGE16)
                 valid = [key0 + j * PAGE16 + l16 < n_ctx for j in range(PPW)]
-                sc = []
-                for j in range_constexpr(PPW):
-                    c = fx.Vector.filled(4, 0.0, fx.Float32)
-                    for s in range_constexpr(HEAD_DIM // 32):
-                        qw = fx.Vector(
-                            fx.ptr_load(
-                                q8 + (l16 * 32 + 8 * s + 2 * g4), result_type=v2i
-                            )
-                        )
-                        c = mfma_fp8(
-                            qw.bitcast(fx.Int64)[0], kw[j * (HEAD_DIM // 32) + s], c
-                        )
-                    sc.append(
-                        [
-                            valid[j].select(qk_scale * c[e], fx.Float32(NEG))
-                            for e in range(4)
-                        ]
-                    )
-                # partition max per head: in-wave butterfly, then LDS
-                for e in range_constexpr(4):
-                    mh = butterfly(fx.max(sc[0][e], sc[1][e]), (8, 4, 2, 1), fx.max)
-                    if l16 == 0:
-                        fx.ptr_store(mh, hst + (wave * H + g4 * 4 + e))
-                gpu.barrier()
-                stamp(13)
-                # every wave partial is read before the first p8 store below: LDS
-                # stores in between serialize each read behind its own wait
-                mxs = []
-                for e in range_constexpr(4):
-                    mx = fx.ptr_load(hst + (g4 * 4 + e))
-                    for w in range_constexpr(1, WAVES):
-                        mx = fx.max(mx, fx.ptr_load(hst + (w * H + g4 * 4 + e)))
-                    mxs.append(mx)
-                for e in range_constexpr(4):
-                    head = g4 * 4 + e
-                    mx = mxs[e]
-                    ls = fx.Float32(0.0)
+
+                for subpass in range_constexpr(SUBPASSES):
+                    h_offset = subpass * H_SUB
+                    elem_offset = subpass * O_K_SUB
+                    kv_head = subpass if const_expr(LOCAL_KV_HEADS > 1) else 0
+
+                    qv = ld_bf16x4(rsrc(q), tok * O_K + elem_offset + tid * 4, CM_K1)
+                    # K (QK B operand, key = lane % 16 of page j), V (PV B operand: dims
+                    # 16 jd + lane % 16, keys 8 (lane / 16) .. + 8)
+                    kw = []
                     for j in range_constexpr(PPW):
-                        pj = hw_exp2((sc[j][e] - mx) * LOG2E)
-                        ls = ls + pj
-                        # P spans the whole FP8 range: p is in (0, 1] after the max
-                        # subtraction, and V's scale comes back out through pscale
-                        # rather than being folded in a key at a time
-                        b8 = (
-                            fp8_pack4(
-                                valid[j].select(fx.Float32(FP8_MAX), fx.Float32(0.0))
-                                * pj,
-                                0.0,
-                                0.0,
-                                0.0,
+                        for s in range_constexpr(HEAD_DIM // 32):
+                            kw.append(
+                                fx.Vector(
+                                    bo.buffer_load(
+                                        r_k,
+                                        (
+                                            (pages[j] * LOCAL_KV_HEADS + kv_head) * PAGE_BYTES
+                                            + (2 * s + g4 // 2) * 256
+                                            + l16 * 16
+                                            + (g4 % 2) * 8
+                                        )
+                                        // 4,
+                                        vec_width=2,
+                                        dtype=T.i32,
+                                        cache_modifier=CM_K1,
+                                    )
+                                ).bitcast(fx.Int64)[0]
                             )
-                            & 0xFF
+                    vpg = (g4 // 2 == 0).select(pages[0], pages[1])
+                    vw = [
+                        fx.Vector(
+                            bo.buffer_load(
+                                r_v,
+                                (
+                                    (vpg * LOCAL_KV_HEADS + kv_head) * PAGE_BYTES
+                                    + (16 * jd + l16) * PAGE16
+                                    + (g4 % 2) * 8
+                                )
+                                // 4,
+                                vec_width=2,
+                                dtype=T.i32,
+                                cache_modifier=CM_K1,
+                            )
+                        ).bitcast(fx.Int64)[0]
+                        for jd in range(HEAD_DIM // 16)
+                    ]
+                    fx.ptr_store(fp8_pack4(qv[0], qv[1], qv[2], qv[3]), q8 + tid)
+                    gpu.barrier()
+                    stamp(12)
+                    # QK per page j: A = q (heads), B = K (keys); lane holds heads
+                    # 4 g4 + e, key l16
+                    sc = []
+                    for j in range_constexpr(PPW):
+                        c = fx.Vector.filled(4, 0.0, fx.Float32)
+                        for s in range_constexpr(HEAD_DIM // 32):
+                            qw = fx.Vector(
+                                fx.ptr_load(
+                                    q8 + (l16 * 32 + 8 * s + 2 * g4), result_type=v2i
+                                )
+                            )
+                            c = mfma_fp8(
+                                qw.bitcast(fx.Int64)[0], kw[j * (HEAD_DIM // 32) + s], c
+                            )
+                        sc.append(
+                            [
+                                valid[j].select(qk_scale * c[e], fx.Float32(NEG))
+                                for e in range(4)
+                            ]
                         )
-                        w8 = b8 | (xshfl(b8, 1) << 8)
-                        w8 = w8 | (xshfl(w8, 2) << 16)
-                        if l16 % 4 == 0:
-                            kloc = wave * (PPW * PAGE16) + j * PAGE16 + l16
-                            fx.ptr_store(
-                                w8, p8 + (head * (SPLIT_KEYS // 4) + kloc // 4)
-                            )
-                    ls = butterfly(ls, (8, 4, 2, 1))
-                    if l16 == 0:
-                        fx.ptr_store(ls, hst + (WAVES * H + wave * H + head))
-                        fx.ptr_store(mx, hst + (2 * WAVES * H + head))
-                gpu.barrier()
-                stamp(14)
-                # PV over this wave's 32 keys: A = P (heads), B = V (dims)
-                pw = fx.Vector(
-                    fx.ptr_load(
-                        p8
-                        + (
-                            l16 * (SPLIT_KEYS // 4)
-                            + (wave * (PPW * PAGE16) + 8 * g4) // 4
-                        ),
-                        result_type=v2i,
-                    )
-                ).bitcast(fx.Int64)[0]
-                # keys past the context carry P = 0, but a NaN V byte would still poison
-                nv = n_ctx - (key0 + 8 * g4)
-                vmask = (nv >= 8).select(
-                    fx.Int64(-1),
-                    (nv <= 0).select(
-                        fx.Int64(0), (fx.Int64(1) << (fx.Int64(nv) * 8)) - 1
-                    ),
-                )
-                for jd in range_constexpr(HEAD_DIM // 16):
-                    cv = mfma_fp8(
-                        pw, vw[jd] & vmask, fx.Vector.filled(4, 0.0, fx.Float32)
-                    )
+                    # partition max per head: in-wave butterfly, then LDS
                     for e in range_constexpr(4):
-                        fx.ptr_store(
-                            cv[e],
-                            opart
-                            + (wave * O_K + (g4 * 4 + e) * HEAD_DIM + 16 * jd + l16),
+                        mh = butterfly(fx.max(sc[0][e], sc[1][e]), (8, 4, 2, 1), fx.max)
+                        if l16 == 0:
+                            fx.ptr_store(mh, hst + (wave * H_SUB + g4 * 4 + e))
+                    gpu.barrier()
+                    stamp(13)
+                    # every wave partial is read before the first p8 store below: LDS
+                    # stores in between serialize each read behind its own wait
+                    mxs = []
+                    for e in range_constexpr(4):
+                        mx = fx.ptr_load(hst + (g4 * 4 + e))
+                        for w in range_constexpr(1, WAVES):
+                            mx = fx.max(mx, fx.ptr_load(hst + (w * H_SUB + g4 * 4 + e)))
+                        mxs.append(mx)
+                    for e in range_constexpr(4):
+                        head = g4 * 4 + e
+                        mx = mxs[e]
+                        ls = fx.Float32(0.0)
+                        for j in range_constexpr(PPW):
+                            pj = hw_exp2((sc[j][e] - mx) * LOG2E)
+                            ls = ls + pj
+                            # P spans the whole FP8 range: p is in (0, 1] after the max
+                            # subtraction, and V's scale comes back out through pscale
+                            # rather than being folded in a key at a time
+                            b8 = (
+                                fp8_pack4(
+                                    valid[j].select(fx.Float32(FP8_MAX), fx.Float32(0.0))
+                                    * pj,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                )
+                                & 0xFF
+                            )
+                            w8 = b8 | (xshfl(b8, 1) << 8)
+                            w8 = w8 | (xshfl(w8, 2) << 16)
+                            if l16 % 4 == 0:
+                                kloc = wave * (PPW * PAGE16) + j * PAGE16 + l16
+                                fx.ptr_store(
+                                    w8, p8 + (head * (SPLIT_KEYS // 4) + kloc // 4)
+                                )
+                        ls = butterfly(ls, (8, 4, 2, 1))
+                        if l16 == 0:
+                            fx.ptr_store(ls, hst + (WAVES * H_SUB + wave * H_SUB + head))
+                            fx.ptr_store(mx, hst + (2 * WAVES * H_SUB + head))
+                    gpu.barrier()
+                    stamp(14)
+                    # PV over this wave's 32 keys: A = P (heads), B = V (dims)
+                    pw = fx.Vector(
+                        fx.ptr_load(
+                            p8
+                            + (
+                                l16 * (SPLIT_KEYS // 4)
+                                + (wave * (PPW * PAGE16) + 8 * g4) // 4
+                            ),
+                            result_type=v2i,
                         )
-                gpu.barrier()
-                stamp(15)
-                # sum the waves' partials; gluon: acc = prob_scale * PV, then
-                # * (1 / exp_sum), bf16
-                e0 = tid * 4
-                head = e0 // HEAD_DIM
-                lsum = fx.ptr_load(hst + (WAVES * H + head))
-                for w in range_constexpr(1, WAVES):
-                    lsum = lsum + fx.ptr_load(hst + (WAVES * H + w * H + head))
-                inv_l = 1.0 / (lsum > 0.0).select(lsum, fx.Float32(1.0))
-                ov = []
-                for k in range_constexpr(4):
-                    acc = fx.ptr_load(opart + (e0 + k))
-                    for w in range_constexpr(1, WAVES):
-                        acc = acc + fx.ptr_load(opart + (w * O_K + e0 + k))
-                    ov.append((pscale * acc) * inv_l)
-                mb_put_bf(mb("sp_o"), ts * O_K + e0, ov)
-                if tid < H:
-                    mb_put(
-                        mb("sp_m"),
-                        ts * H + tid,
-                        fx.ptr_load(hst + (2 * WAVES * H + tid)),
+                    ).bitcast(fx.Int64)[0]
+                    # keys past the context carry P = 0, but a NaN V byte would still poison
+                    nv = n_ctx - (key0 + 8 * g4)
+                    vmask = (nv >= 8).select(
+                        fx.Int64(-1),
+                        (nv <= 0).select(
+                            fx.Int64(0), (fx.Int64(1) << (fx.Int64(nv) * 8)) - 1
+                        ),
                     )
-                    lt = fx.ptr_load(hst + (WAVES * H + tid))
+                    for jd in range_constexpr(HEAD_DIM // 16):
+                        cv = mfma_fp8(
+                            pw, vw[jd] & vmask, fx.Vector.filled(4, 0.0, fx.Float32)
+                        )
+                        for e in range_constexpr(4):
+                            fx.ptr_store(
+                                cv[e],
+                                opart
+                                + (wave * O_K_SUB + (g4 * 4 + e) * HEAD_DIM + 16 * jd + l16),
+                            )
+                    gpu.barrier()
+                    stamp(15)
+                    # sum the waves' partials; gluon: acc = prob_scale * PV, then
+                    # * (1 / exp_sum), bf16
+                    e0 = tid * 4
+                    head = e0 // HEAD_DIM
+                    lsum = fx.ptr_load(hst + (WAVES * H_SUB + head))
                     for w in range_constexpr(1, WAVES):
-                        lt = lt + fx.ptr_load(hst + (WAVES * H + w * H + tid))
-                    mb_put(mb("sp_l"), ts * H + tid, lt)
-                gpu.barrier()
+                        lsum = lsum + fx.ptr_load(hst + (WAVES * H_SUB + w * H_SUB + head))
+                    inv_l = 1.0 / (lsum > 0.0).select(lsum, fx.Float32(1.0))
+                    ov = []
+                    for k in range_constexpr(4):
+                        acc = fx.ptr_load(opart + (e0 + k))
+                        for w in range_constexpr(1, WAVES):
+                            acc = acc + fx.ptr_load(opart + (w * O_K_SUB + e0 + k))
+                        ov.append((pscale * acc) * inv_l)
+                    mb_put_bf(mb("sp_o"), ts * O_K + elem_offset + e0, ov)
+                    if tid < H_SUB:
+                        mb_put(
+                            mb("sp_m"),
+                            ts * H + h_offset + tid,
+                            fx.ptr_load(hst + (2 * WAVES * H_SUB + tid)),
+                        )
+                        lt = fx.ptr_load(hst + (WAVES * H_SUB + tid))
+                        for w in range_constexpr(1, WAVES):
+                            lt = lt + fx.ptr_load(hst + (WAVES * H_SUB + w * H_SUB + tid))
+                        mb_put(mb("sp_l"), ts * H + h_offset + tid, lt)
+                    gpu.barrier()
 
         stage_select_long()
         stage_split()
@@ -1062,9 +1088,7 @@ def build_post_attn_kernel(
         def merge_token(k):
             """Token k's partitions merged (the gluon decode's reduce; thread = 4 dims
             of one head) and quantized per token (standalone quant: scale = amax *
-            (1 / FP8_MAX), x * rcp(scale)) -> (this thread's fp8 word, scale)."""
-            hm = tid // (HEAD_DIM // 4)
-            e0 = tid * 4
+            (1 / FP8_MAX), x * rcp(scale)) -> (this thread's fp8 words, scale)."""
             sp0 = k * N_SPLIT  # token k's partitions
             # wave 0 waits on every partition's l, then the CTA polls once: 512
             # threads x 24 loads spinning through the whole split load the memory
@@ -1077,50 +1101,62 @@ def build_post_attn_kernel(
                     ]
                 )
             gpu.barrier()
-            # one batch: every partition's (m, l) and this thread's 4 outputs
-            got = mb_poll(
-                [(mb("sp_m"), (sp0 + i) * H + hm, 1) for i in range(N_SPLIT)]
-                + [(mb("sp_l"), (sp0 + i) * H + hm, 1) for i in range(N_SPLIT)]
-                + [
-                    (mb("sp_o"), ((sp0 + i) * O_K + e0) // 2, 2) for i in range(N_SPLIT)
-                ],
-                batch=3 * N_SPLIT,
-            )
-            mls = got[: 2 * N_SPLIT]
-            ovs = got[2 * N_SPLIT :]
-            stamp(3)
-            m_i = [mls[i][0].bitcast(fx.Float32) for i in range(N_SPLIT)]
-            l_i = [mls[N_SPLIT + i][0].bitcast(fx.Float32) for i in range(N_SPLIT)]
-            gm = m_i[0]
-            for i in range_constexpr(1, N_SPLIT):
-                gm = fx.max(gm, m_i[i])
-            sl = [l_i[i] * hw_exp2((m_i[i] - gm) * LOG2E) for i in range(N_SPLIT)]
-            gs = sl[0]
-            for i in range_constexpr(1, N_SPLIT):
-                gs = gs + sl[i]
-            gs = (gs > 0.0).select(gs, fx.Float32(1.0))
-            av = [fx.Float32(0.0) for _ in range(4)]
-            for i in range_constexpr(N_SPLIT):
-                wi = sl[i] / gs
-                o01 = bf2_f32(ovs[i][0])
-                o23 = bf2_f32(ovs[i][1])
-                av = [
-                    av[0] + wi * o01[0],
-                    av[1] + wi * o01[1],
-                    av[2] + wi * o23[0],
-                    av[3] + wi * o23[1],
-                ]
-            a0, a1, a2, a3 = (bf16_round(x) for x in av)
-            amax = block_max(
-                fx.max(
-                    fx.max(fmath.absf(a0), fmath.absf(a1)),
-                    fx.max(fmath.absf(a2), fmath.absf(a3)),
+            avs = []
+            th_max = fx.Float32(0.0)
+            for c in range_constexpr(WORDS_PER_THREAD):
+                word_idx = tid + c * THREADS
+                hm = word_idx // (HEAD_DIM // 4)
+                e0 = word_idx * 4
+                got = mb_poll(
+                    [(mb("sp_m"), (sp0 + i) * H + hm, 1) for i in range(N_SPLIT)]
+                    + [(mb("sp_l"), (sp0 + i) * H + hm, 1) for i in range(N_SPLIT)]
+                    + [
+                        (mb("sp_o"), ((sp0 + i) * O_K + e0) // 2, 2) for i in range(N_SPLIT)
+                    ],
+                    batch=3 * N_SPLIT,
                 )
-            )
+                mls = got[: 2 * N_SPLIT]
+                ovs = got[2 * N_SPLIT :]
+                stamp(3)
+                m_i = [mls[i][0].bitcast(fx.Float32) for i in range(N_SPLIT)]
+                l_i = [mls[N_SPLIT + i][0].bitcast(fx.Float32) for i in range(N_SPLIT)]
+                gm = m_i[0]
+                for i in range_constexpr(1, N_SPLIT):
+                    gm = fx.max(gm, m_i[i])
+                sl = [l_i[i] * hw_exp2((m_i[i] - gm) * LOG2E) for i in range(N_SPLIT)]
+                gs = sl[0]
+                for i in range_constexpr(1, N_SPLIT):
+                    gs = gs + sl[i]
+                gs = (gs > 0.0).select(gs, fx.Float32(1.0))
+                av = [fx.Float32(0.0) for _ in range(4)]
+                for i in range_constexpr(N_SPLIT):
+                    wi = sl[i] / gs
+                    o01 = bf2_f32(ovs[i][0])
+                    o23 = bf2_f32(ovs[i][1])
+                    av = [
+                        av[0] + wi * o01[0],
+                        av[1] + wi * o01[1],
+                        av[2] + wi * o23[0],
+                        av[3] + wi * o23[1],
+                    ]
+                a0, a1, a2, a3 = (bf16_round(x) for x in av)
+                avs.append((a0, a1, a2, a3))
+                th_max = fx.max(
+                    th_max,
+                    fx.max(
+                        fx.max(fmath.absf(a0), fmath.absf(a1)),
+                        fx.max(fmath.absf(a2), fmath.absf(a3)),
+                    ),
+                )
+            amax = block_max(th_max)
             x_scale = amax * (1.0 / FP8_MAX)
             # an all-zero row (a pad row) quantizes to zeros, not 0 * inf
             inv = (amax == 0.0).select(fx.Float32(0.0), hw_rcp(x_scale))
-            return fp8_pack4(a0 * inv, a1 * inv, a2 * inv, a3 * inv), x_scale
+            words = [
+                fp8_pack4(a[0] * inv, a[1] * inv, a[2] * inv, a[3] * inv)
+                for a in avs
+            ]
+            return words, x_scale
 
         # ======================================= 2b. attention merge (S > 1)
         # One task per token, in parallel on its own CTA: merged in the o tasks, the
@@ -1129,14 +1165,15 @@ def build_post_attn_kernel(
             if const_expr(tokens > 1):
                 for k in range(start("merge"), tokens, G):
                     k = fx.Int32(k)
-                    word, x_scale = merge_token(k)
+                    words, x_scale = merge_token(k)
                     # plain words, then the scale: its pair is the flag
-                    bo.buffer_store(
-                        word,
-                        rsrc(mb("attnq")),
-                        k * (O_K // 4) + tid,
-                        cache_modifier=CM_DEV,
-                    )
+                    for c in range_constexpr(WORDS_PER_THREAD):
+                        bo.buffer_store(
+                            words[c],
+                            rsrc(mb("attnq")),
+                            k * (O_K // 4) + tid + c * THREADS,
+                            cache_modifier=CM_DEV,
+                        )
                     fx.memory_fence(
                         syncscope=rocdl.SyncScope.Workgroup,
                         ordering=fx.AtomicOrdering.Release,
@@ -1176,9 +1213,10 @@ def build_post_attn_kernel(
 
                 if const_expr(tokens == 1):
                     # the merge folded in: the partitions -> this CTA's fp8 input
-                    word, x_scale = merge_token(0)
+                    words, x_scale = merge_token(0)
                     x_scales = [x_scale]
-                    fx.ptr_store(word, xs + tid)
+                    for c in range_constexpr(WORDS_PER_THREAD):
+                        fx.ptr_store(words[c], xs + (tid + c * THREADS))
                 else:
                     # the merge tasks' fp8 inputs: every token's scale (published
                     # after its plain words), then the words, 16 B a load

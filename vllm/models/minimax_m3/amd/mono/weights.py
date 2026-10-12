@@ -22,6 +22,8 @@ from vllm.models.minimax_m3.amd.mono.config import (
     HEAD_DIM,
     HIDDEN,
     INTER,
+    LOCAL_INDEX_HEADS,
+    LOCAL_KV_HEADS,
     LOCAL_Q_HEADS,
     N_ROUTED,
     O_K,
@@ -203,7 +205,7 @@ class SparseMoeLayer:
                 indexer.num_index_heads,
                 attn.head_dim,
             )
-            == (LOCAL_Q_HEADS, 1, heads.count, HEAD_DIM),
+            == (LOCAL_Q_HEADS, LOCAL_KV_HEADS, heads.count, HEAD_DIM),
             f"layer {layer_id}: heads {attn.num_heads}/{attn.num_kv_heads}/"
             f"{indexer.num_index_heads}/{attn.head_dim}",
         )

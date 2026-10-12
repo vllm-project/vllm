@@ -32,6 +32,7 @@ from vllm.models.minimax_m3.amd.mono.config import (
     BLOCKS,
     HEAD_DIM,
     HIDDEN,
+    LOCAL_KV_HEADS,
     LOCAL_Q_HEADS,
     MAX_QKV_ROWS,
     MAX_TOKENS,
@@ -74,21 +75,27 @@ FP8_MAX = 448.0
 ROWS_PER_TASK = 16
 K_CHUNKS = HIDDEN // 64  # 64-k chunks: one dwordx4 of weight per lane
 CHUNKS_PER_WAVE = K_CHUNKS // WAVES
-Q_OFF, K_OFF, V_OFF = 0, LOCAL_Q_HEADS * HEAD_DIM, (LOCAL_Q_HEADS + 1) * HEAD_DIM
-N_HEAD_TASKS = LOCAL_Q_HEADS + 4  # q heads, k, v, the rank's index_q, index_k
-IK_TASK = LOCAL_Q_HEADS + 3
+Q_OFF, K_OFF, V_OFF = (
+    0,
+    LOCAL_Q_HEADS * HEAD_DIM,
+    (LOCAL_Q_HEADS + LOCAL_KV_HEADS) * HEAD_DIM,
+)
+IQ_OFF = (LOCAL_Q_HEADS + 2 * LOCAL_KV_HEADS) * HEAD_DIM
+IK_OFF = (LOCAL_Q_HEADS + 2 * LOCAL_KV_HEADS + 1) * HEAD_DIM
+N_HEAD_TASKS = LOCAL_Q_HEADS + 2 * LOCAL_KV_HEADS + 2  # q heads, k, v, the rank's index_q, index_k
+IK_TASK = LOCAL_Q_HEADS + 2 * LOCAL_KV_HEADS + 1
 HEAD_ROW_GROUPS = HEAD_DIM // ROWS_PER_TASK  # GEMV tasks a head
 ELEMS = 4  # per lane in a head task: 32 lanes x 4 = 128, the aiter kernel's split
 PAGE_BYTES = PAGE16 * HEAD_DIM  # one page-16 of one kv head (fp8)
 # GEMV tasks, head tasks (every token of a head on one CTA) and the tokens' norm
 # tasks each own a CTA, in this order; a head CTA's half waves hold the tokens.
-# The rank's own rows (q | k | v | its index q | index k) are the first ONE_GEMV
-# tasks under indexer context parallelism too, and its other index q heads' the
-# OTHER_GEMV after the norm tasks, run only in a step that needs them: the CTA
-# layout of a step without long requests is the one-head build's.
+# On TP=2, ONE_GEMV = 304 tasks; sequential task folding (TASKS_PER_CTA = 2)
+# reduces dedicated GEMV CTAs to 152 so total persistent CTAs <= BLOCKS (256).
+TASKS_PER_CTA = 2 if TP == 2 else 1
 ONE_GEMV = qkv_rows(1) // ROWS_PER_TASK
+ONE_GEMV_CTAS = (ONE_GEMV + TASKS_PER_CTA - 1) // TASKS_PER_CTA
 OTHER_GEMV = (TP - 1) * HEAD_ROW_GROUPS
-HT0 = ONE_GEMV
+HT0 = ONE_GEMV_CTAS
 NT0 = HT0 + N_HEAD_TASKS
 XT0 = NT0 + MAX_TOKENS
 assert XT0 + OTHER_GEMV <= BLOCKS
@@ -349,24 +356,33 @@ def emit_pre_attn(
                 mb_put(x8s_mb, tk, x_scale)
 
     # ============================================ GEMV tasks (one per CTA)
-    # CTA bid < ONE_GEMV: row group bid of q | k | v, then the own index q head's
-    # and index k's (the identity in the one-head build)
-    own_q = (LOCAL_Q_HEADS + 2) * HEAD_ROW_GROUPS
-    rg = (bid < own_q).select(
-        bid,
-        (bid < own_q + HEAD_ROW_GROUPS).select(
-            heads.iq_off // ROWS_PER_TASK + bid - own_q,
-            heads.ik_off // ROWS_PER_TASK + bid - own_q - HEAD_ROW_GROUPS,
-        ),
-    )
-    gemv = bid < ONE_GEMV
+    # Primary GEMV CTAs: bid < ONE_GEMV_CTAS
+    # Sequential task folding: each CTA executes TASKS_PER_CTA tasks (row groups).
+    own_q = (LOCAL_Q_HEADS + 2 * LOCAL_KV_HEADS) * HEAD_ROW_GROUPS
+
+    def get_rg(task_id):
+        return (task_id < own_q).select(
+            task_id,
+            (task_id < own_q + HEAD_ROW_GROUPS).select(
+                heads.iq_off // ROWS_PER_TASK + task_id - own_q,
+                heads.ik_off // ROWS_PER_TASK + task_id - own_q - HEAD_ROW_GROUPS,
+            ),
+        )
+
+    is_primary_gemv = bid < ONE_GEMV_CTAS
+    is_other_gemv = False
+    other_rg = fx.Int32(0)
     if const_expr(heads.count > 1):
         xt = bid - XT0
         if (xt >= 0) & (xt < OTHER_GEMV):
             other = xt // HEAD_ROW_GROUPS  # the other heads in head order, own skipped
             head = other + (other >= heads.own).select(1, 0)
-            rg = (LOCAL_Q_HEADS + 2 + head) * HEAD_ROW_GROUPS + xt % HEAD_ROW_GROUPS
-            gemv = long_step()
+            other_rg = (
+                LOCAL_Q_HEADS + 2 * LOCAL_KV_HEADS + head
+            ) * HEAD_ROW_GROUPS + xt % HEAD_ROW_GROUPS
+            is_other_gemv = long_step()
+
+    gemv = is_primary_gemv | is_other_gemv
     if gemv:
         if const_expr(tokens <= 2):
             raw_g, raw_ar = load_norm_inputs(list(range(tokens)))
@@ -376,29 +392,7 @@ def emit_pre_attn(
         # before it uses a loaded value, so it does not wait either)
         rocdl.sched_barrier(0)
         r_w = rsrc(w_qkv)
-        # 64-k chunk kc of row group rg is 1 KB at ((rg*K/32 + 2kc)*512); lane l
-        # holds row l%16, k = 64kc + 16(l/16) + [0, 16).
-        wts = []
-        for c in range_constexpr(CHUNKS_PER_WAVE):
-            kc = wave * CHUNKS_PER_WAVE + c
-            wts.append(
-                fx.Vector(
-                    bo.buffer_load(
-                        r_w,
-                        ((rg * (HIDDEN // 32) + kc * 2) * 512 + lane * 16) // 4,
-                        vec_width=4,
-                        dtype=T.i32,
-                    )
-                )
-            )
-        ws = fx.Float32(  # row tid % 16's scale, sampled below by tid < 16 tokens
-            bo.buffer_load(
-                rsrc(s_qkv),
-                rg * ROWS_PER_TASK + tid % ROWS_PER_TASK,
-                vec_width=1,
-                dtype=T.f32,
-            )
-        )
+
         if const_expr(tokens <= 2):
             x_scales = norm_quant(
                 list(range(tokens)), raw_g, raw_ar, lambda j: bid == j
@@ -432,45 +426,79 @@ def emit_pre_attn(
                     )
             gpu.barrier()
             stamp(2)
-        # 12 chunks per wave: two 16x16x32 FP8 MFMAs each (k halves of 8 bytes).
-        # B column l % 16 is token l % 16 (token 0 past the last): C column t is
-        # token t's rows, the weight stream is the same for any token count.
+
         col_tok = fx.min(lane % 16, tokens - 1)
-        c = fx.Vector.filled(4, 0.0, fx.Float32)
-        for cc in range_constexpr(CHUNKS_PER_WAVE):
-            kc = wave * CHUNKS_PER_WAVE + cc
-            xb = fx.Vector(
-                fx.ptr_load(
-                    x8 + (col_tok * (HIDDEN // 4) + kc * 16 + (lane // 16) * 4),
-                    result_type=fx.Vector.make_type(4, fx.Float32),
-                )
-            ).bitcast(fx.Int64)
-            wa = wts[cc].bitcast(fx.Int64)
-            for h in range_constexpr(2):
-                c = fx.Vector(
-                    rocdl.mfma_f32_16x16x32_fp8_fp8(
-                        T.vec(4, T.f32), [wa[h], xb[h], c, 0, 0, 0]
+
+        def run_gemv_row_group(curr_rg):
+            # 64-k chunk kc of row group rg is 1 KB at ((rg*K/32 + 2kc)*512); lane l
+            # holds row l%16, k = 64kc + 16(l/16) + [0, 16).
+            wts = []
+            for c in range_constexpr(CHUNKS_PER_WAVE):
+                kc = wave * CHUNKS_PER_WAVE + c
+                wts.append(
+                    fx.Vector(
+                        bo.buffer_load(
+                            r_w,
+                            ((curr_rg * (HIDDEN // 32) + kc * 2) * 512 + lane * 16)
+                            // 4,
+                            vec_width=4,
+                            dtype=T.i32,
+                        )
                     )
                 )
-        fx.ptr_store(c, red + (wave * 64 + lane) * 4)
-        gpu.barrier()
-        # sample column t of C: lanes t, 16 + t, 32 + t, 48 + t hold rows 4 (l/16) + e
-        if tid < ROWS_PER_TASK * tokens:
-            r = tid % ROWS_PER_TASK
-            tk = tid // ROWS_PER_TASK
-            tot_r = fx.Float32(0.0)
-            for w in range_constexpr(WAVES):
-                tot_r = tot_r + fx.ptr_load(
-                    red + ((w * 64 + 16 * (r // 4) + tk) * 4 + r % 4)
+            ws = fx.Float32(  # row tid % 16's scale, sampled below by tid < 16 tokens
+                bo.buffer_load(
+                    rsrc(s_qkv),
+                    curr_rg * ROWS_PER_TASK + tid % ROWS_PER_TASK,
+                    vec_width=1,
+                    dtype=T.f32,
                 )
-            x_scale = x_scales[0]
-            for k in range_constexpr(1, tokens):
-                x_scale = (tk == k).select(x_scales[k], x_scale)
-            mb_put(
-                qkv_mb,
-                tk * rows + rg * ROWS_PER_TASK + r,
-                bf16_round(tot_r * x_scale * ws),
             )
+            c = fx.Vector.filled(4, 0.0, fx.Float32)
+            for cc in range_constexpr(CHUNKS_PER_WAVE):
+                kc = wave * CHUNKS_PER_WAVE + cc
+                xb = fx.Vector(
+                    fx.ptr_load(
+                        x8 + (col_tok * (HIDDEN // 4) + kc * 16 + (lane // 16) * 4),
+                        result_type=fx.Vector.make_type(4, fx.Float32),
+                    )
+                ).bitcast(fx.Int64)
+                wa = wts[cc].bitcast(fx.Int64)
+                for h in range_constexpr(2):
+                    c = fx.Vector(
+                        rocdl.mfma_f32_16x16x32_fp8_fp8(
+                            T.vec(4, T.f32), [wa[h], xb[h], c, 0, 0, 0]
+                        )
+                    )
+            fx.ptr_store(c, red + (wave * 64 + lane) * 4)
+            gpu.barrier()
+            # sample column t of C: lanes t, 16 + t, 32 + t, 48 + t hold rows 4 (l/16) + e
+            if tid < ROWS_PER_TASK * tokens:
+                r = tid % ROWS_PER_TASK
+                tk = tid // ROWS_PER_TASK
+                tot_r = fx.Float32(0.0)
+                for w in range_constexpr(WAVES):
+                    tot_r = tot_r + fx.ptr_load(
+                        red + ((w * 64 + 16 * (r // 4) + tk) * 4 + r % 4)
+                    )
+                x_scale = x_scales[0]
+                for k in range_constexpr(1, tokens):
+                    x_scale = (tk == k).select(x_scales[k], x_scale)
+                mb_put(
+                    qkv_mb,
+                    tk * rows + curr_rg * ROWS_PER_TASK + r,
+                    bf16_round(tot_r * x_scale * ws),
+                )
+            gpu.barrier()
+
+        if is_primary_gemv:
+            for step_i in range_constexpr(TASKS_PER_CTA):
+                task_id = bid * TASKS_PER_CTA + step_i
+                if task_id < ONE_GEMV:
+                    run_gemv_row_group(get_rg(task_id))
+        if const_expr(heads.count > 1):
+            if is_other_gemv:
+                run_gemv_row_group(other_rg)
 
         stamp(3)
 
@@ -481,13 +509,22 @@ def emit_pre_attn(
         tk = tid // 32
         l32 = tid % 32
         is_q = ht < LOCAL_Q_HEADS
-        is_k = ht == LOCAL_Q_HEADS
-        is_v = ht == LOCAL_Q_HEADS + 1
-        is_iq = ht == LOCAL_Q_HEADS + 2
+        is_k = (ht >= LOCAL_Q_HEADS) & (ht < LOCAL_Q_HEADS + LOCAL_KV_HEADS)
+        is_v = (ht >= LOCAL_Q_HEADS + LOCAL_KV_HEADS) & (
+            ht < LOCAL_Q_HEADS + 2 * LOCAL_KV_HEADS
+        )
+        is_iq = ht == LOCAL_Q_HEADS + 2 * LOCAL_KV_HEADS
+        is_ik = ht == IK_TASK
+        k_head = ht - LOCAL_Q_HEADS
+        v_head = ht - (LOCAL_Q_HEADS + LOCAL_KV_HEADS)
         base = tk * rows + is_q.select(
             ht * HEAD_DIM,
             is_k.select(
-                K_OFF, is_v.select(V_OFF, is_iq.select(heads.iq_off, heads.ik_off))
+                K_OFF + k_head * HEAD_DIM,
+                is_v.select(
+                    V_OFF + v_head * HEAD_DIM,
+                    is_iq.select(heads.iq_off, heads.ik_off),
+                ),
             ),
         )
         if tk < tokens:
@@ -519,7 +556,9 @@ def emit_pre_attn(
                         bo.buffer_store(
                             fx.Int8(q8),
                             r_v,
-                            b * PAGE_BYTES + (d0 + j) * PAGE16 + t,
+                            (b * LOCAL_KV_HEADS + v_head) * PAGE_BYTES
+                            + (d0 + j) * PAGE16
+                            + t,
                             cache_modifier=cm_out,
                         )
             else:
@@ -546,7 +585,7 @@ def emit_pre_attn(
                             fp8_pack4(qk[0], qk[1], qk[2], qk[3]),
                             rsrc(k_cache),
                             (
-                                b * PAGE_BYTES
+                                (b * LOCAL_KV_HEADS + k_head) * PAGE_BYTES
                                 + (d0 // 16) * (PAGE16 * 16)
                                 + t * 16
                                 + d0 % 16
@@ -554,7 +593,7 @@ def emit_pre_attn(
                             // 4,
                             cache_modifier=cm_out,
                         )
-                if (ht == IK_TASK) & (slot >= 0):
+                if is_ik & (slot >= 0):
                     qi = [bf16_round(out[j]) for j in range(ELEMS)]
                     bo.buffer_store(
                         fp8_pack4(qi[0], qi[1], qi[2], qi[3]),
@@ -669,7 +708,7 @@ def emit_k1(
     stamp(5)
     # the scorers: the idle CTAs first (the norm tasks' come first but finish
     # early), then the GEMV CTAs, the head CTAs last
-    score_base = ONE_GEMV + N_HEAD_TASKS
+    score_base = ONE_GEMV_CTAS + N_HEAD_TASKS
     hdone_mb = mbox.addr(SCRATCH_HDONE)
 
     def wait_new_keys():

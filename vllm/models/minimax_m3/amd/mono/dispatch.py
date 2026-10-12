@@ -25,6 +25,7 @@ writes, and padding is in whole requests, so the block table and sequence length
 cover every row.
 """
 
+import os
 import torch
 
 from vllm.config import CUDAGraphMode, get_current_vllm_config
@@ -53,6 +54,8 @@ def _config_refusal() -> str | None:
     serve says so while it is starting instead of at its first decode. What the
     model itself has to satisfy is checked when the runner is built.
     """
+    if os.environ.get("VLLM_DISABLE_MONO", "0") in ("1", "true", "True"):
+        return "disabled by VLLM_DISABLE_MONO"
     try:
         cfg = get_current_vllm_config()
     except Exception:
@@ -60,6 +63,11 @@ def _config_refusal() -> str | None:
         # checks everything that decides whether its kernels can run.
         return None
     checks = (
+        # Kernels are compiled for TP=2, TP=4, or TP=8.
+        (
+            cfg.parallel_config.tensor_parallel_size in (2, 4, 8),
+            f"TP {cfg.parallel_config.tensor_parallel_size}, kernels are built for 2, 4, or 8",
+        ),
         # Each replica holds the whole model and reduces within its own TP group,
         # so a second replica would route the MoE differently than K4 reduces.
         (
@@ -87,6 +95,7 @@ class MonoDecode:
         self.runner: MonoDecodeRunner | None = None
         self.off = False
         self.off_reason = ""
+        self._logged_off = False
         # settled by ``begin`` each step, read by the layers behind the first
         self.active = False
         self._fwd = None
@@ -234,10 +243,10 @@ class MonoDecode:
         row tables are built once instead of 57 times.
         """
         self.active = False
-        # Repeated rather than said once at the moment it was decided: the reason
-        # is settled during startup, thousands of lines before the first request.
         if self.off:
-            self._say(f"off: {self.off_reason}")
+            if not self._logged_off:
+                self._say(f"off: {self.off_reason}")
+                self._logged_off = True
             return False
         why = self._declined(rows, positions, residual)
         if why is not None:
@@ -250,6 +259,7 @@ class MonoDecode:
                 self.off_reason = str(why)
                 self._say(f"OFF for the rest of the run: {why}")
                 self.off = True
+                self._logged_off = True
                 return False
             self._say(f"ARMED for {len(self.runner.sparse)} sparse layers")
         self._fwd = get_forward_context()

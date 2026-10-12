@@ -8,6 +8,7 @@ model that does not match is never routed to the mono path.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 
 # One CTA per MI355X CU; the kernels rely on every CTA being co-resident.
@@ -18,14 +19,23 @@ WAVES = THREADS // 64
 HIDDEN = 6144
 HEAD_DIM = 128
 ROTARY_DIM = 64
-LOCAL_Q_HEADS = 16
+
+TP = int(os.environ.get("VLLM_MONO_TP", "2"))
+TOTAL_Q_HEADS = 64
+TOTAL_KV_HEADS = 4
+TOTAL_INDEX_HEADS = 4
+TOTAL_INTER = 3072
+
+LOCAL_Q_HEADS = TOTAL_Q_HEADS // TP
+LOCAL_KV_HEADS = max(1, TOTAL_KV_HEADS // TP)
+LOCAL_INDEX_HEADS = max(1, TOTAL_INDEX_HEADS // TP)
 
 
 def qkv_rows(idx_heads: int) -> int:
-    """Rows of a rank's fused projection, q | k | v | index_q | index_k: 16 q
-    heads, one k and v head, ``idx_heads`` index q heads (the rank's one, or every
-    one under indexer context parallelism) and the index k head."""
-    return (LOCAL_Q_HEADS + 3 + idx_heads) * HEAD_DIM
+    """Rows of a rank's fused projection, q | k | v | index_q | index_k:
+    LOCAL_Q_HEADS q heads, LOCAL_KV_HEADS k and v heads, ``idx_heads`` index q
+    heads, and 1 replicated index k head."""
+    return (LOCAL_Q_HEADS + 2 * LOCAL_KV_HEADS + 1 + idx_heads) * HEAD_DIM
 
 
 O_K = LOCAL_Q_HEADS * HEAD_DIM
@@ -34,7 +44,7 @@ N_ROUTED = 128
 TOP_K = 4
 SHARED_EXPERT = N_ROUTED  # the fused shared expert's id
 MOE_SLOTS = TOP_K + 1
-INTER = 768  # expert intermediate per rank
+INTER = TOTAL_INTER // TP  # expert intermediate per rank
 
 SPARSE_BLOCK = 128
 TOPK_BLOCKS = 16
@@ -52,7 +62,6 @@ PAGE16_SIDES = 2
 BLOCK_PAGES = PAGE16_SIDES * SPARSE_BLOCK // PAGE16  # page ids a block spans
 
 MAX_TOKENS = 16  # tokens one mono step serves (the MFMA B operand holds 16)
-TP = 4
 # indexer context parallelism: a rank computes every index q head
 MAX_QKV_ROWS = qkv_rows(TP)
 # indexer context parallelism serves a step's requests past this many index
@@ -65,14 +74,14 @@ INDEX_CP_FROM_BLOCKS = 288
 @dataclass(frozen=True)
 class IndexHeads:
     """The index q heads in a rank's fused projection, a build parameter:
-    ``count`` of them (1, or all TP in head order under indexer context
+    ``count`` of them (LOCAL_INDEX_HEADS, or all TP in head order under indexer context
     parallelism) and ``own``, the one this rank's selection scores."""
 
-    count: int = 1
+    count: int = LOCAL_INDEX_HEADS
     own: int = 0
 
     def __post_init__(self):
-        assert self.count in (1, TP) and 0 <= self.own < self.count
+        assert self.count in (1, TP, LOCAL_INDEX_HEADS) and 0 <= self.own < max(self.count, 1)
 
     @property
     def rows(self) -> int:
@@ -80,11 +89,11 @@ class IndexHeads:
 
     @property
     def iq_off(self) -> int:
-        return (LOCAL_Q_HEADS + 2 + self.own) * HEAD_DIM
+        return (LOCAL_Q_HEADS + 2 * LOCAL_KV_HEADS + self.own) * HEAD_DIM
 
     @property
     def ik_off(self) -> int:
-        return (LOCAL_Q_HEADS + 2 + self.count) * HEAD_DIM
+        return (LOCAL_Q_HEADS + 2 * LOCAL_KV_HEADS + self.count) * HEAD_DIM
 
 
 # without indexer context parallelism: the rank's own index q head only

@@ -22,6 +22,7 @@ from vllm.models.minimax_m3.amd.mono.config import (
     SPARSE_BLOCK,
     TOP_K,
     TOPK_BLOCKS,
+    TP,
     WAVES,
 )
 
@@ -191,7 +192,7 @@ def shared_after_routing(tokens: int) -> bool:
     return min(loads) == max(loads)
 
 
-WIDE_FROM = 5  # token counts from here run the expert-grouped MoE
+WIDE_FROM = 4  # token counts from here run the expert-grouped MoE
 
 
 def wide_moe(tokens: int) -> bool:
@@ -210,7 +211,7 @@ XSC_ROW = HIDDEN // 32 + 4
 # and the down stage's MXFP8 mid rows / their scales (16 lanes, 16 rows): 196 and
 # 28 words put the rows' 16 B reads, and 4 B scale reads, in distinct banks
 MID_ROW = INTER // 4 + 4
-MIDSC_ROW = INTER // 32 + 4
+MIDSC_ROW = INTER // 32 if TP == 2 else INTER // 32 + 4
 # and the o stage's FP8 attention rows (512 words: the same 16-way conflict)
 O_ROW = O_K // 4 + 4
 
@@ -223,8 +224,15 @@ def pool_words(tokens: int) -> int:
     if not wide_moe(tokens):
         return HIDDEN // 2 * tokens
     rows = MOE_SLOTS * tokens + 1
+    split_stage_words = (
+        WAVES * min(O_K, 16 * HEAD_DIM)
+        + (16 * SPLIT_KEYS // 4)
+        + (min(O_K, 16 * HEAD_DIM) // 4)
+        + (3 * WAVES * min(LOCAL_Q_HEADS, 16))
+        + 1024
+    )
     return max(
-        WAVES * O_K,
+        split_stage_words,
         tokens * (XN8_ROW + XSC_ROW + N_ROUTED) + WAVES * 64 * 4,
         rows * (MID_ROW + MIDSC_ROW),
     )
