@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import functools
 import math
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Sequence
@@ -678,43 +679,44 @@ def make_kv_sharing_fast_prefill_common_attn_metadata(
     # query_start_loc: [0, 15, 20, 28]
     # seq_lens:        [41, 31, 40]
 
-    # Find how many decode indices belong to each request
-    # request_ids: [0, 1, 1, 2]
-    request_ids = torch.bucketize(logits_indices, query_start_loc[1:], right=True)
+    # When each request samples a single token, query_start_loc is a unit-step range.
+    decode_max_query_len: int
+    if common_attn_metadata.max_logits_per_req == 1 and num_logits_indices == num_reqs:
+        decode_query_start_loc = torch.arange(
+            0, num_reqs + 1, device=query_start_loc.device, dtype=query_start_loc.dtype
+        )
+        decode_query_start_loc_cpu = torch.arange(
+            0, num_reqs + 1, device="cpu", dtype=query_start_loc.dtype
+        )
+        decode_max_query_len = 1
+        total_num_decode_tokens = num_reqs
+    else:
+        # Multiple decode indices per request (e.g. speculative decode)
+        # Find how many decode indices belong to each request
+        request_ids = torch.bucketize(logits_indices, query_start_loc[1:], right=True)
 
-    # Figure out how many tokens are in each request
-    # num_decode_tokens: [1, 2, 1]
-    # Avoid `torch.bincount` here — on CUDA it forces a sync to determine
-    # the output size (even with `minlength`, the kernel must confirm no
-    # value exceeds the bound). `scatter_add_` into a preallocated buffer
-    # is equivalent and stays async.
-    num_decode_tokens = torch.zeros(
-        num_reqs, dtype=request_ids.dtype, device=request_ids.device
-    )
-    num_decode_tokens.scatter_add_(
-        0, request_ids.to(num_decode_tokens.dtype), torch.ones_like(request_ids)
-    )
+        num_decode_tokens = torch.zeros(
+            num_reqs, dtype=request_ids.dtype, device=request_ids.device
+        )
+        num_decode_tokens.scatter_add_(
+            0, request_ids.to(num_decode_tokens.dtype), torch.ones_like(request_ids)
+        )
 
-    # Calculate new query_start_loc with tokens in generation_indices
-    # decode_query_start_loc: [0, 1, 3, 4]
-    decode_query_start_loc = torch.empty(
-        num_reqs + 1, device=query_start_loc.device, dtype=query_start_loc.dtype
-    )
+        decode_query_start_loc = torch.empty(
+            num_reqs + 1, device=query_start_loc.device, dtype=query_start_loc.dtype
+        )
 
-    decode_query_start_loc[:1].fill_(0)  # Avoid sync from scalar assignment.
-    decode_query_start_loc[1:] = torch.cumsum(num_decode_tokens, dim=0)
+        decode_query_start_loc[:1].fill_(0)  # Avoid sync from scalar assignment.
+        decode_query_start_loc[1:] = torch.cumsum(num_decode_tokens, dim=0)
 
-    # `num_decode_tokens` is a histogram over `logits_indices`, so its total is
-    # just how many there were -- already known as a Python int.
-    total_num_decode_tokens = num_logits_indices
-
-    # Largest per-request logits count.
-    decode_max_query_len = common_attn_metadata.max_logits_per_req
-    assert decode_max_query_len is not None
+        total_num_decode_tokens = num_logits_indices
+        assert common_attn_metadata.max_logits_per_req is not None
+        decode_max_query_len = common_attn_metadata.max_logits_per_req
+        decode_query_start_loc_cpu = decode_query_start_loc.to("cpu", non_blocking=True)
 
     common_attn_metadata = CommonAttentionMetadata(
         query_start_loc=decode_query_start_loc,
-        query_start_loc_cpu=decode_query_start_loc.to("cpu", non_blocking=True),
+        query_start_loc_cpu=decode_query_start_loc_cpu,
         seq_lens=common_attn_metadata.seq_lens,
         num_reqs=num_reqs,
         num_actual_tokens=total_num_decode_tokens,
@@ -1015,6 +1017,27 @@ class KVSharingFastPrefillMetadata(Protocol):
     num_logits_indices: int | None = None
 
 
+@functools.lru_cache
+def _get_fast_prefill_metadata_cls(metadata_cls: type) -> type:
+    field_names = tuple(f.name for f in fields(metadata_cls))
+
+    class KVSharingFastPrefillAttentionMetadata(
+        metadata_cls,  # type: ignore
+        KVSharingFastPrefillMetadata,
+    ):
+        def __init__(self, metadata, common_attn_metadata):
+            for name in field_names:
+                setattr(self, name, getattr(metadata, name))
+            self.logits_indices_padded = common_attn_metadata.logits_indices_padded
+            self.num_logits_indices = common_attn_metadata.num_logits_indices
+            self._attention_backend_variant = getattr(
+                metadata, "_attention_backend_variant", 0
+            )
+
+    return KVSharingFastPrefillAttentionMetadata
+
+
+@functools.lru_cache
 def create_fast_prefill_custom_backend(
     prefix: str,
     underlying_attn_backend: type[AttentionBackend],
@@ -1034,25 +1057,8 @@ def create_fast_prefill_custom_backend(
             metadata = super().build(
                 common_prefix_len, new_common_attn_metadata, fast_build
             )
-
-            class KVSharingFastPrefillAttentionMetadata(
-                metadata.__class__,  #  type: ignore
-                KVSharingFastPrefillMetadata,
-            ):
-                def __init__(self, metadata, common_attn_metadata):
-                    # Shallow copy all fields in metadata cls
-                    for _field in fields(metadata.__class__):
-                        setattr(self, _field.name, getattr(metadata, _field.name))
-
-                    self.logits_indices_padded = (
-                        common_attn_metadata.logits_indices_padded
-                    )
-                    self.num_logits_indices = common_attn_metadata.num_logits_indices
-                    self._attention_backend_variant = getattr(
-                        metadata, "_attention_backend_variant", 0
-                    )
-
-            return KVSharingFastPrefillAttentionMetadata(metadata, common_attn_metadata)
+            wrapper_cls = _get_fast_prefill_metadata_cls(metadata.__class__)
+            return wrapper_cls(metadata, common_attn_metadata)
 
     attn_backend = subclass_attention_backend(
         name_prefix=prefix,
