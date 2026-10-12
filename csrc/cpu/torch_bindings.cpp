@@ -398,6 +398,18 @@ torch::Tensor fused_gumbel_argmax(const torch::Tensor& logits,
 
 torch::Tensor greedy_argmax(const torch::Tensor& logits);
 
+void ultraquant_store(const torch::Tensor& key, const torch::Tensor& value,
+                      torch::Tensor& kv_cache,
+                      const torch::Tensor& slot_mapping,
+                      const torch::Tensor& rotation, const double constant_c);
+
+void ultraquant_decode_attention(const torch::Tensor& query,
+                                 const torch::Tensor& kv_cache,
+                                 const torch::Tensor& block_table,
+                                 const torch::Tensor& seq_lens,
+                                 torch::Tensor& out, const double scale,
+                                 const std::optional<torch::Tensor>& sinks);
+
 void init_cpu_memory_env(std::vector<int64_t> node_ids);
 
 namespace cpu_utils {
@@ -556,6 +568,23 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "fused_add_rms_norm(Tensor! input, Tensor! residual, Tensor? weight, "
       "float epsilon) -> ()");
   ops.impl("fused_add_rms_norm", torch::kCPU, &fused_add_rms_norm);
+
+  // UltraQuant 4-bit KV cache
+  // Pack rotated K and raw V into FP4 E2M1 codes with UE8M0 group-of-32
+  // scales, in the slot layout of v1/attention/ops/ultraquant/format.py.
+  ops.def(
+      "ultraquant_store(Tensor key, Tensor value, Tensor(a2!) kv_cache, "
+      "Tensor slot_mapping, Tensor rotation, float constant_c) -> ()");
+  ops.impl("ultraquant_store", torch::kCPU, &ultraquant_store);
+
+  // Decode attention over the UltraQuant slots. Query arrives Hadamard-rotated
+  // and already rounded through FP8 E4M3, matching the reference launcher.
+  ops.def(
+      "ultraquant_decode_attention(Tensor query, Tensor kv_cache, "
+      "Tensor block_table, Tensor seq_lens, Tensor(a4!) out, float scale, "
+      "Tensor? sinks) -> ()");
+  ops.impl("ultraquant_decode_attention", torch::kCPU,
+           &ultraquant_decode_attention);
 
   // Rotary embedding
   // Apply GPT-NeoX or GPT-J style rotary embedding to query and key.

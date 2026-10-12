@@ -174,6 +174,13 @@ class CpuPlatform(Platform):
                 logger.info("Cannot use %s backend on CPU.", selected_backend)
             logger.info_once("Using %s backend.", AttentionBackendEnum.CPU_MLA.name)
             return AttentionBackendEnum.CPU_MLA.get_path()
+        if attn_selector_config.kv_cache_dtype == "ultraquant_4bit":
+            # Selected by the KV cache dtype: the slot is packed FP4 codes and
+            # UE8M0 scales, which CPU_ATTN cannot address.
+            logger.info_once(
+                "Using %s backend.", AttentionBackendEnum.CPU_ULTRAQUANT.name
+            )
+            return AttentionBackendEnum.CPU_ULTRAQUANT.get_path()
         if selected_backend and selected_backend != AttentionBackendEnum.CPU_ATTN:
             logger.info("Cannot use %s backend on CPU.", selected_backend)
         return AttentionBackendEnum.CPU_ATTN.get_path()
