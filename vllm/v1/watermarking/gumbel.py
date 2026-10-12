@@ -226,16 +226,10 @@ class GumbelWatermarkDetector(WatermarkDetector):
         p_value_threshold: float = 0.01,
         prf: WatermarkPRF | WatermarkPRFName = "philox",
         deduplicate_contexts: bool = True,
-        skip_partial_contexts: bool = True,
     ) -> None:
         prf = create_prf(prf, key) if isinstance(prf, str) else prf
         _validate_context_width(context_width)
-        super().__init__(
-            context_width,
-            p_value_threshold,
-            deduplicate_contexts,
-            skip_partial_contexts,
-        )
+        super().__init__(context_width, p_value_threshold, deduplicate_contexts)
         self.prf = prf
 
     def _score_tokens(
@@ -265,7 +259,6 @@ class DualKeyGumbelWatermarkDetector(GumbelWatermarkDetector):
         prf: WatermarkPRFName = "philox",
         deduplicate_contexts: bool = True,
         alpha: float = 0.1,
-        skip_partial_contexts: bool = True,
     ) -> None:
         if not 0 <= alpha <= 1:
             raise ValueError("alpha must be between 0 and 1")
@@ -275,7 +268,6 @@ class DualKeyGumbelWatermarkDetector(GumbelWatermarkDetector):
             p_value_threshold,
             prf,
             deduplicate_contexts,
-            skip_partial_contexts,
         )
         self.key_b_prf = create_prf(prf, derive_watermark_key(key, b"key_b"))
         self.alpha = alpha

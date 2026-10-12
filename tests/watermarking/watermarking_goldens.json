@@ -28,10 +28,10 @@
       },
       "detection": {
         "is_watermarked": true,
-        "num_scored_tokens": 46,
-        "p_value": 2.673452848214917e-41,
-        "p_value_ratio": 2.6734528482149168e-39,
-        "score": 203.82265439335362
+        "num_scored_tokens": 47,
+        "p_value": 9.328228199706808e-41,
+        "p_value_ratio": 9.328228199706808e-39,
+        "score": 204.1386637439661
       },
       "generation": [
         46,
@@ -111,7 +111,6 @@
           "key_b_prf_key": "9736202488081271922",
           "p_value_threshold": 0.01,
           "prf_key": "15691511769010696906",
-          "skip_partial_contexts": true,
           "type": "DualKeyGumbelWatermarkDetector"
         },
         "watermark_config": {
@@ -160,10 +159,10 @@
       },
       "detection": {
         "is_watermarked": true,
-        "num_scored_tokens": 60,
-        "p_value": 9.339016453783408e-46,
-        "p_value_ratio": 9.339016453783407e-44,
-        "score": 219.52729234070546
+        "num_scored_tokens": 64,
+        "p_value": 1.992980086016679e-45,
+        "p_value_ratio": 1.992980086016679e-43,
+        "score": 225.7747505052879
       },
       "generation": [
         46,
@@ -243,7 +242,6 @@
           "key_b_prf_key": "9736202488081271922",
           "p_value_threshold": 0.01,
           "prf_key": "15691511769010696906",
-          "skip_partial_contexts": true,
           "type": "DualKeyGumbelWatermarkDetector"
         },
         "watermark_config": {
@@ -292,10 +290,10 @@
       },
       "detection": {
         "is_watermarked": true,
-        "num_scored_tokens": 59,
-        "p_value": 1.3455739765414013e-31,
-        "p_value_ratio": 1.3455739765414013e-29,
-        "score": 146.24642883405483
+        "num_scored_tokens": 64,
+        "p_value": 1.722813782184003e-30,
+        "p_value_ratio": 1.722813782184003e-28,
+        "score": 151.6400843002725
       },
       "generation": [
         46,
@@ -375,7 +373,6 @@
           "key_b_prf_key": "10834826187781349534",
           "p_value_threshold": 0.01,
           "prf_key": "9864452095710749384",
-          "skip_partial_contexts": true,
           "type": "DualKeyGumbelWatermarkDetector"
         },
         "watermark_config": {
@@ -424,10 +421,10 @@
       },
       "detection": {
         "is_watermarked": true,
-        "num_scored_tokens": 60,
-        "p_value": 9.385413261788232e-53,
-        "p_value_ratio": 9.385413261788231e-51,
-        "score": 215.33350499943634
+        "num_scored_tokens": 64,
+        "p_value": 1.8470318032902688e-53,
+        "p_value_ratio": 1.847031803290269e-51,
+        "score": 223.92630745713234
       },
       "generation": [
         46,
@@ -507,7 +504,6 @@
           "key_b_prf_key": "15826636237805488045",
           "p_value_threshold": 0.01,
           "prf_key": "37150756557148556",
-          "skip_partial_contexts": true,
           "type": "DualKeyGumbelWatermarkDetector"
         },
         "watermark_config": {
@@ -556,10 +552,10 @@
       },
       "detection": {
         "is_watermarked": false,
-        "num_scored_tokens": 4,
-        "p_value": 0.04347456035475033,
-        "p_value_ratio": 14.49152011825011,
-        "score": 7.550416700307802
+        "num_scored_tokens": 8,
+        "p_value": 0.06466135597575498,
+        "p_value_ratio": 21.55378532525166,
+        "score": 12.18687159016856
       },
       "generation": [
         7,
@@ -583,7 +579,6 @@
           "key_b_prf_key": "7720047515392181251",
           "p_value_threshold": 0.003,
           "prf_key": "3490214442843822077",
-          "skip_partial_contexts": true,
           "type": "DualKeyGumbelWatermarkDetector"
         },
         "watermark_config": {
@@ -632,10 +627,10 @@
       },
       "detection": {
         "is_watermarked": true,
-        "num_scored_tokens": 48,
-        "p_value": 9.18720619988891e-40,
-        "p_value_ratio": 9.187206199888909e-38,
-        "score": 203.08442034998012
+        "num_scored_tokens": 64,
+        "p_value": 1.6144211344994527e-36,
+        "p_value_ratio": 1.6144211344994528e-34,
+        "score": 222.1459095651853
       },
       "generation": [
         46,
@@ -715,7 +710,6 @@
           "key_b_prf_key": "7399018451426338514",
           "p_value_threshold": 0.01,
           "prf_key": "11075965703501209888",
-          "skip_partial_contexts": true,
           "type": "DualKeyGumbelWatermarkDetector"
         },
         "watermark_config": {
@@ -764,10 +758,10 @@
       },
       "detection": {
         "is_watermarked": true,
-        "num_scored_tokens": 60,
-        "p_value": 1.886471852274358e-38,
-        "p_value_ratio": 1.8864718522743582e-36,
-        "score": 163.2126768406024
+        "num_scored_tokens": 64,
+        "p_value": 1.593394558888888e-36,
+        "p_value_ratio": 1.593394558888888e-34,
+        "score": 165.81381375991106
       },
       "generation": [
         46,
@@ -847,7 +841,6 @@
           "key_b_prf_key": "7399018451426338514",
           "p_value_threshold": 0.01,
           "prf_key": "11075965703501209888",
-          "skip_partial_contexts": true,
           "type": "DualKeyGumbelWatermarkDetector"
         },
         "watermark_config": {
@@ -896,10 +889,10 @@
       },
       "detection": {
         "is_watermarked": true,
-        "num_scored_tokens": 12,
-        "p_value": 0.0013352864032227896,
-        "p_value_ratio": 0.13352864032227896,
-        "score": 23.631729827415846
+        "num_scored_tokens": 13,
+        "p_value": 0.002750266035191537,
+        "p_value_ratio": 0.2750266035191537,
+        "score": 23.896456918277966
       },
       "generation": [
         3,
@@ -963,7 +956,6 @@
           "key_b_prf_key": "15826636237805488045",
           "p_value_threshold": 0.01,
           "prf_key": "37150756557148556",
-          "skip_partial_contexts": true,
           "type": "DualKeyGumbelWatermarkDetector"
         },
         "watermark_config": {
@@ -1012,10 +1004,10 @@
       },
       "detection": {
         "is_watermarked": true,
-        "num_scored_tokens": 43,
-        "p_value": 2.0495033055144378e-07,
-        "p_value_ratio": 2.049503305514438e-05,
-        "score": 80.0679177040783
+        "num_scored_tokens": 47,
+        "p_value": 8.656644652657153e-07,
+        "p_value_ratio": 8.656644652657152e-05,
+        "score": 82.86886159792212
       },
       "generation": [
         3,
@@ -1079,7 +1071,6 @@
           "key_b_prf_key": "15826636237805488045",
           "p_value_threshold": 0.01,
           "prf_key": "37150756557148556",
-          "skip_partial_contexts": true,
           "type": "DualKeyGumbelWatermarkDetector"
         },
         "watermark_config": {
@@ -1128,10 +1119,10 @@
       },
       "detection": {
         "is_watermarked": true,
-        "num_scored_tokens": 49,
-        "p_value": 2.42670399672341e-42,
-        "p_value_ratio": 2.42670399672341e-40,
-        "score": 212.66970732680613
+        "num_scored_tokens": 50,
+        "p_value": 1.4007213809569734e-42,
+        "p_value_ratio": 1.4007213809569735e-40,
+        "score": 215.2895651715656
       },
       "generation": [
         46,
@@ -1211,7 +1202,6 @@
           "key_b_prf_key": null,
           "p_value_threshold": 0.01,
           "prf_key": "0",
-          "skip_partial_contexts": true,
           "type": "GumbelWatermarkDetector"
         },
         "watermark_config": {
@@ -1260,10 +1250,10 @@
       },
       "detection": {
         "is_watermarked": true,
-        "num_scored_tokens": 59,
-        "p_value": 1.1649274893167092e-45,
-        "p_value_ratio": 1.1649274893167091e-43,
-        "score": 241.5246555283404
+        "num_scored_tokens": 64,
+        "p_value": 1.9611239427821415e-44,
+        "p_value_ratio": 1.9611239427821415e-42,
+        "score": 247.02009211765568
       },
       "generation": [
         46,
@@ -1343,7 +1333,6 @@
           "key_b_prf_key": null,
           "p_value_threshold": 0.01,
           "prf_key": "4294967296",
-          "skip_partial_contexts": true,
           "type": "GumbelWatermarkDetector"
         },
         "watermark_config": {
@@ -1392,10 +1381,10 @@
       },
       "detection": {
         "is_watermarked": true,
-        "num_scored_tokens": 60,
-        "p_value": 4.566623114501872e-55,
-        "p_value_ratio": 4.566623114501871e-53,
-        "score": 271.4579846224608
+        "num_scored_tokens": 64,
+        "p_value": 6.0283750962334736e-55,
+        "p_value_ratio": 6.028375096233473e-53,
+        "score": 278.8159437407263
       },
       "generation": [
         46,
@@ -1475,7 +1464,6 @@
           "key_b_prf_key": null,
           "p_value_threshold": 0.01,
           "prf_key": "42",
-          "skip_partial_contexts": true,
           "type": "GumbelWatermarkDetector"
         },
         "watermark_config": {
@@ -1524,10 +1512,10 @@
       },
       "detection": {
         "is_watermarked": true,
-        "num_scored_tokens": 60,
-        "p_value": 4.566623114501872e-55,
-        "p_value_ratio": 4.566623114501871e-53,
-        "score": 271.4579846224608
+        "num_scored_tokens": 64,
+        "p_value": 6.0283750962334736e-55,
+        "p_value_ratio": 6.028375096233473e-53,
+        "score": 278.8159437407263
       },
       "generation": [
         46,
@@ -1607,7 +1595,6 @@
           "key_b_prf_key": null,
           "p_value_threshold": 0.01,
           "prf_key": "42",
-          "skip_partial_contexts": true,
           "type": "GumbelWatermarkDetector"
         },
         "watermark_config": {
@@ -1662,10 +1649,10 @@
       },
       "detection": {
         "is_watermarked": true,
-        "num_scored_tokens": 60,
-        "p_value": 3.1863432601839863e-56,
-        "p_value_ratio": 3.1863432601839865e-54,
-        "score": 274.84969151667974
+        "num_scored_tokens": 64,
+        "p_value": 4.330336079473992e-56,
+        "p_value_ratio": 4.3303360794739913e-54,
+        "score": 282.2076506349452
       },
       "generation": [
         46,
@@ -1745,7 +1732,6 @@
           "key_b_prf_key": null,
           "p_value_threshold": 0.01,
           "prf_key": "42",
-          "skip_partial_contexts": true,
           "type": "GumbelWatermarkDetector"
         },
         "watermark_config": {
@@ -1794,10 +1780,10 @@
       },
       "detection": {
         "is_watermarked": true,
-        "num_scored_tokens": 54,
-        "p_value": 1.4118027719734051e-08,
-        "p_value_ratio": 1.4118027719734052e-06,
-        "score": 105.17672640338174
+        "num_scored_tokens": 58,
+        "p_value": 1.6692708568346358e-08,
+        "p_value_ratio": 1.6692708568346358e-06,
+        "score": 110.3077257312174
       },
       "generation": [
         7,
@@ -1877,7 +1863,6 @@
           "key_b_prf_key": null,
           "p_value_threshold": 0.01,
           "prf_key": "42",
-          "skip_partial_contexts": true,
           "type": "GumbelWatermarkDetector"
         },
         "watermark_config": {
@@ -1926,10 +1911,10 @@
       },
       "detection": {
         "is_watermarked": true,
-        "num_scored_tokens": 54,
-        "p_value": 1.4118027719734051e-08,
-        "p_value_ratio": 1.4118027719734052e-06,
-        "score": 105.17672640338174
+        "num_scored_tokens": 58,
+        "p_value": 1.6692708568346358e-08,
+        "p_value_ratio": 1.6692708568346358e-06,
+        "score": 110.3077257312174
       },
       "generation": [
         7,
@@ -2009,7 +1994,6 @@
           "key_b_prf_key": null,
           "p_value_threshold": 0.01,
           "prf_key": "42",
-          "skip_partial_contexts": true,
           "type": "GumbelWatermarkDetector"
         },
         "watermark_config": {
@@ -2058,10 +2042,10 @@
       },
       "detection": {
         "is_watermarked": true,
-        "num_scored_tokens": 48,
-        "p_value": 1.3288047964885925e-10,
-        "p_value_ratio": 1.3288047964885925e-08,
-        "score": 105.45558632654328
+        "num_scored_tokens": 52,
+        "p_value": 1.8781893707206995e-10,
+        "p_value_ratio": 1.8781893707206996e-08,
+        "score": 110.58658565437895
       },
       "generation": [
         7,
@@ -2141,7 +2125,6 @@
           "key_b_prf_key": null,
           "p_value_threshold": 0.01,
           "prf_key": "42",
-          "skip_partial_contexts": true,
           "type": "GumbelWatermarkDetector"
         },
         "watermark_config": {
@@ -2190,10 +2173,10 @@
       },
       "detection": {
         "is_watermarked": true,
-        "num_scored_tokens": 60,
-        "p_value": 2.332582312673589e-14,
-        "p_value_ratio": 2.3325823126735886e-12,
-        "score": 138.19402063334576
+        "num_scored_tokens": 64,
+        "p_value": 3.574439385243652e-14,
+        "p_value_ratio": 3.5744393852436515e-12,
+        "score": 143.3250199611814
       },
       "generation": [
         7,
@@ -2273,7 +2256,6 @@
           "key_b_prf_key": null,
           "p_value_threshold": 0.01,
           "prf_key": "42",
-          "skip_partial_contexts": true,
           "type": "GumbelWatermarkDetector"
         },
         "watermark_config": {
@@ -2322,10 +2304,10 @@
       },
       "detection": {
         "is_watermarked": false,
-        "num_scored_tokens": 4,
-        "p_value": 0.012419140177383582,
-        "p_value_ratio": 8.279426784922387,
-        "score": 9.748169428063001
+        "num_scored_tokens": 8,
+        "p_value": 0.01929640564957887,
+        "p_value_ratio": 12.86427043305258,
+        "score": 14.87916875589866
       },
       "generation": [
         7,
@@ -2349,7 +2331,6 @@
           "key_b_prf_key": null,
           "p_value_threshold": 0.0015,
           "prf_key": "42",
-          "skip_partial_contexts": true,
           "type": "GumbelWatermarkDetector"
         },
         "watermark_config": {
@@ -2398,10 +2379,10 @@
       },
       "detection": {
         "is_watermarked": false,
-        "num_scored_tokens": 60,
-        "p_value": 0.3261976950800783,
-        "p_value_ratio": 32.61976950800783,
-        "score": 63.2126779194827
+        "num_scored_tokens": 64,
+        "p_value": 0.2828706308952799,
+        "p_value_ratio": 28.28706308952799,
+        "score": 68.35824606073034
       },
       "generation": [
         46,
@@ -2481,7 +2462,6 @@
           "key_b_prf_key": null,
           "p_value_threshold": 0.01,
           "prf_key": "43",
-          "skip_partial_contexts": true,
           "type": "GumbelWatermarkDetector"
         },
         "watermark_config": {
@@ -2530,10 +2510,10 @@
       },
       "detection": {
         "is_watermarked": true,
-        "num_scored_tokens": 48,
-        "p_value": 5.157173698480824e-41,
-        "p_value_ratio": 5.1571736984808235e-39,
-        "score": 206.81452899512774
+        "num_scored_tokens": 64,
+        "p_value": 6.166345567165222e-36,
+        "p_value_ratio": 6.166345567165221e-34,
+        "score": 220.27675734217124
       },
       "generation": [
         46,
@@ -2613,7 +2593,6 @@
           "key_b_prf_key": null,
           "p_value_threshold": 0.01,
           "prf_key": "18446744073709551615",
-          "skip_partial_contexts": true,
           "type": "GumbelWatermarkDetector"
         },
         "watermark_config": {
@@ -2662,10 +2641,10 @@
       },
       "detection": {
         "is_watermarked": true,
-        "num_scored_tokens": 11,
-        "p_value": 0.002758977395973605,
-        "p_value_ratio": 0.2758977395973605,
-        "score": 22.433432662525846
+        "num_scored_tokens": 12,
+        "p_value": 0.005144056058572893,
+        "p_value_ratio": 0.5144056058572893,
+        "score": 22.72751449601693
       },
       "generation": [
         3,
@@ -2729,7 +2708,6 @@
           "key_b_prf_key": null,
           "p_value_threshold": 0.01,
           "prf_key": "42",
-          "skip_partial_contexts": true,
           "type": "GumbelWatermarkDetector"
         },
         "watermark_config": {
@@ -2778,10 +2756,10 @@
       },
       "detection": {
         "is_watermarked": true,
-        "num_scored_tokens": 43,
-        "p_value": 9.362863633513122e-09,
-        "p_value_ratio": 9.362863633513122e-07,
-        "score": 90.58549276302051
+        "num_scored_tokens": 47,
+        "p_value": 6.687298332874737e-08,
+        "p_value_ratio": 6.687298332874737e-06,
+        "score": 92.47607252164308
       },
       "generation": [
         3,
@@ -2845,7 +2823,6 @@
           "key_b_prf_key": null,
           "p_value_threshold": 0.01,
           "prf_key": "42",
-          "skip_partial_contexts": true,
           "type": "GumbelWatermarkDetector"
         },
         "watermark_config": {
