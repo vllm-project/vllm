@@ -482,5 +482,14 @@ class StructuredOutputManager:
         return grammar.accept_tokens(request.request_id, new_token_ids[grammar_start:])
 
     def clear_backend(self) -> None:
+        # Finish tasks that can still use the backend before releasing it.
+        if not self.vllm_config.model_config.skip_tokenizer_init:
+            self.executor.shutdown(wait=True, cancel_futures=True)
+        if (
+            self.fill_bitmask_parallel_threshold
+            < self.vllm_config.scheduler_config.max_num_seqs
+        ):
+            self.executor_for_fillmask.shutdown(wait=True, cancel_futures=True)
         if self.backend is not None:
             self.backend.destroy()
+            self.backend = None

@@ -2,12 +2,19 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import time
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
+from threading import Event
 
 import pytest
 from transformers import AutoTokenizer
 
-from vllm.config import DeviceConfig, StructuredOutputsConfig, VllmConfig
+from vllm.config import (
+    DeviceConfig,
+    SchedulerConfig,
+    StructuredOutputsConfig,
+    VllmConfig,
+)
 from vllm.config.model import ModelConfig
 from vllm.config.speculative import SpeculativeConfig
 from vllm.config.structured_outputs import StructuredOutputsBackend
@@ -576,3 +583,79 @@ def test_outlines_choice_with_non_bmp_characters(tokenizer):
     grammar = backend.compile_grammar(request_type, grammar_spec)
 
     assert grammar.accept_tokens("", tokenizer.encode(choices[0]))
+
+
+def test_clear_backend_waits_for_running_grammar_and_cancels_pending(
+    tokenizer, monkeypatch
+):
+    """Keep the compiler alive until running work finishes during shutdown."""
+    manager, request = _build_harness(tokenizer, "xgrammar", use_reasoner=False)
+    manager.executor.shutdown(wait=True)
+    manager.executor = ThreadPoolExecutor(max_workers=1)
+    started, release = Event(), Event()
+    assert manager.backend is not None
+    compile_grammar = manager.backend.compile_grammar
+
+    def delayed_compile(*args, **kwargs):
+        started.set()
+        assert release.wait(MAX_WAIT_SECONDS)
+        return compile_grammar(*args, **kwargs)
+
+    monkeypatch.setattr(manager.backend, "compile_grammar", delayed_compile)
+    try:
+        manager.grammar_init(request)
+        assert request.structured_output_request is not None
+        running = request.structured_output_request._grammar
+        assert isinstance(running, Future)
+        assert started.wait(MAX_WAIT_SECONDS)
+        pending_request = Request(
+            request_id="pending-at-shutdown",
+            prompt_token_ids=[],
+            sampling_params=request.sampling_params,
+            pooling_params=None,
+        )
+        manager.grammar_init(pending_request)
+        assert pending_request.structured_output_request is not None
+        pending = pending_request.structured_output_request._grammar
+        assert isinstance(pending, Future)
+        # Cancellation releases the running task without timing-based sleeps.
+        pending.add_done_callback(lambda _: release.set())
+        manager.clear_backend()
+        release.set()
+        assert running.result(timeout=MAX_WAIT_SECONDS) is not None
+        assert pending.cancelled()
+        assert manager.backend is None
+        manager.clear_backend()
+    finally:
+        release.set()
+        manager.executor.shutdown(wait=True, cancel_futures=True)
+
+
+@pytest.mark.parametrize("skip_tokenizer_init", [False, True])
+@pytest.mark.parametrize("max_num_seqs", [1, 256])
+def test_clear_backend_without_grammar(skip_tokenizer_init, max_num_seqs):
+    """Stop initialized thread pools even if no request needed a backend."""
+    manager = StructuredOutputManager(
+        VllmConfig(
+            model_config=ModelConfig(
+                tokenizer=TOKENIZER, skip_tokenizer_init=skip_tokenizer_init
+            ),
+            scheduler_config=SchedulerConfig(
+                max_num_seqs=max_num_seqs,
+                max_model_len=128,
+                is_encoder_decoder=False,
+            ),
+            device_config=DeviceConfig(device="cpu"),
+        )
+    )
+    manager.clear_backend()
+    manager.clear_backend()
+    assert manager.backend is None
+    executors = []
+    if not skip_tokenizer_init:
+        executors.append(manager.executor)
+    if max_num_seqs > manager.fill_bitmask_parallel_threshold:
+        executors.append(manager.executor_for_fillmask)
+    for executor in executors:
+        with pytest.raises(RuntimeError, match="cannot schedule new futures"):
+            executor.submit(int, 0)
