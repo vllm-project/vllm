@@ -47,6 +47,7 @@ pub(crate) struct RequestMetricsTracker {
     num_generation_tokens: u32,
     num_preemptions: u64,
     latest_num_cached_tokens: u32,
+    is_corrupted: bool,
 }
 
 /// Cached request metric handles for one model and engine index.
@@ -61,6 +62,7 @@ struct RequestMetricHandles {
     prompt_tokens_external_kv_transfer: U64Counter,
     prompt_tokens_cached: U64Counter,
     generation_tokens: U64Counter,
+    corrupted_requests: U64Counter,
 
     // Request lifecycle counters and histograms.
     request_success: Family<FinishedReasonLabels, U64Counter>,
@@ -123,6 +125,7 @@ impl RequestMetricsTracker {
             num_generation_tokens: 0,
             num_preemptions: 0,
             latest_num_cached_tokens: 0,
+            is_corrupted: false,
         }
     }
 
@@ -141,6 +144,7 @@ impl RequestMetricsTracker {
         }
         self.num_generation_tokens += output.new_token_ids.len() as u32;
         self.handles.generation_tokens.inc_by(output.new_token_ids.len() as u64);
+        self.is_corrupted |= output.num_nans_in_logits > 0;
 
         if let Some(events) = &output.events {
             self.observe_events(events);
@@ -187,6 +191,9 @@ impl RequestMetricsTracker {
         };
 
         self.record_request_success(finish_reason);
+        if self.is_corrupted {
+            self.handles.corrupted_requests.inc();
+        }
 
         self.handles.request_prompt_tokens.observe(self.prompt_len as f64);
         self.handles
@@ -297,6 +304,7 @@ fn resolve_request_metric_handles(
         ),
         prompt_tokens_cached: metrics.prompt_tokens_cached.get_or_create_owned(&labels),
         generation_tokens: metrics.generation_tokens.get_or_create_owned(&labels),
+        corrupted_requests: metrics.corrupted_requests.get_or_create_owned(&labels),
         request_success: metrics.request_success.clone(),
         request_prompt_tokens: metrics.request_prompt_tokens.get_or_create_owned(&labels),
         request_generation_tokens: metrics.request_generation_tokens.get_or_create_owned(&labels),
