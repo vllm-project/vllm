@@ -1558,6 +1558,10 @@ class FusedMoEKernelModularImpl:
                 )
             return fused_out
 
+        # Experts that drop the hidden padding return a narrower, final result.
+        if fused_out.dim() == output.dim() and fused_out.shape != output.shape:
+            output = fused_out
+
         return self._finalize(
             output,
             fused_out,
