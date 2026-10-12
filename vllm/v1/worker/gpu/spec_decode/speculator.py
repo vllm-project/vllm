@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
@@ -446,13 +446,34 @@ class DraftModelSpeculator(BaseSpeculator):
         draft_step: torch.Tensor,
         draft_logits: torch.Tensor | None,
         spec_step_idx: int = 0,
+        num_steps: int = 1,
     ) -> torch.Tensor:
         if draft_logits is None and self.use_local_argmax_reduction:
             return self.get_draft_top_tokens(hidden_states, spec_step_idx)
 
         logits = self.compute_draft_logits(hidden_states, spec_step_idx)
-        if draft_logits is not None:
-            sampled = self._draft_sampler()(
+        if (
+            draft_logits is not None
+            and num_steps > 1
+            and self.draft_watermarker is not None
+        ):
+            sampled = self.draft_watermarker.sample_block(
+                logits,
+                idx_mapping,
+                temperature,
+                seeds,
+                sample_src_positions,
+                logits_cache=draft_logits,
+                logits_cache_col=draft_step,
+                use_fp64=self.use_fp64_gumbel,
+            )
+        elif draft_logits is not None:
+            sampler = (
+                gumbel_sample
+                if self.draft_watermarker is None
+                else self.draft_watermarker.sample
+            )
+            sampled = sampler(
                 logits,
                 idx_mapping,
                 temperature,
@@ -468,16 +489,6 @@ class DraftModelSpeculator(BaseSpeculator):
             sampled = logits.argmax(dim=-1)
         self._maybe_predict_acceptance(logits, idx_mapping, draft_step)
         return sampled
-
-    def _draft_sampler(self) -> Callable[..., torch.Tensor]:
-        """Return the sampler for one sample_draft batch.
-
-        Parallel drafters, which pass all steps at once flattened as
-        (request, step), override this.
-        """
-        if self.draft_watermarker is None:
-            return gumbel_sample
-        return self.draft_watermarker.sample
 
     def _maybe_predict_acceptance(
         self, logits: torch.Tensor, idx_mapping: torch.Tensor, draft_step: torch.Tensor

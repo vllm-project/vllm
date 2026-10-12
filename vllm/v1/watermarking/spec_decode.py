@@ -155,8 +155,6 @@ class DraftWatermarker:
         temperature: torch.Tensor,
         seed: torch.Tensor,
         pos: torch.Tensor,
-        apply_temperature: bool,
-        is_drafting: bool,
         logits_cache: torch.Tensor | None = None,
         logits_cache_col: torch.Tensor | None = None,
         use_fp64: bool = False,
@@ -166,8 +164,6 @@ class DraftWatermarker:
         drafts of its request, so steps must be sampled in order even when
         their logits were computed in parallel.
         """
-        assert apply_temperature
-        assert is_drafting
         assert logits_cache_col is not None
         num_steps = self.num_speculative_steps
         sampled_block = self.watermarker._try_sample_block(
@@ -206,8 +202,8 @@ class DraftWatermarker:
                 temperature,
                 seed,
                 pos[:, step],
-                apply_temperature,
-                is_drafting,
+                apply_temperature=True,
+                is_drafting=True,
                 logits_cache=logits_cache,
                 logits_cache_col=logits_cache_col[:, step],
                 use_fp64=use_fp64,

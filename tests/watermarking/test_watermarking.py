@@ -1718,6 +1718,7 @@ def test_dflash_draft_sampler_watermarks_drafts_in_step_order(monkeypatch):
         seeds=torch.tensor([100, 200, 300]),
         draft_step=torch.arange(num_steps).repeat(num_reqs),
         draft_logits=draft_logits,
+        num_steps=num_steps,
     )
 
     # Row 0 is watermarked in step order: [1, 2] -> 3, then [2, 3] -> 4. The
@@ -1770,7 +1771,6 @@ def test_dflash_draft_sampler_matches_step_loop_on_cuda(deduplicate_contexts, dt
         draft_logits = torch.zeros(max_num_reqs, num_steps, vocab_size, dtype=dtype)
         draft_logits = draft_logits.cuda()
         args = (temperature, seeds)
-        kwargs = dict(apply_temperature=True, is_drafting=True)
         if fused:
             sampled = draft_watermarker.sample_block(
                 logits.view(-1, vocab_size),
@@ -1779,7 +1779,6 @@ def test_dflash_draft_sampler_matches_step_loop_on_cuda(deduplicate_contexts, dt
                 pos,
                 logits_cache=draft_logits,
                 logits_cache_col=draft_step,
-                **kwargs,
             )
         else:
             by_step = [t.view(num_reqs, num_steps) for t in (idx_mapping, pos)]
@@ -1793,7 +1792,8 @@ def test_dflash_draft_sampler_matches_step_loop_on_cuda(deduplicate_contexts, dt
                         by_step[1][:, step],
                         logits_cache=draft_logits,
                         logits_cache_col=steps[:, step],
-                        **kwargs,
+                        apply_temperature=True,
+                        is_drafting=True,
                     )
                     for step in range(num_steps)
                 ],
