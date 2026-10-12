@@ -13,7 +13,7 @@ from vllm.v1.attention.backends.triton_attn import TritonAttentionMetadataBuilde
 from vllm.v1.attention.backends.triton_attn_diffkv import (
     TritonAttentionDiffKVMetadataBuilder,
 )
-from vllm.v1.kv_cache_interface import FullAttentionSpec
+from vllm.v1.kv_cache_interface import FullAttentionSpec, KVQuantMode
 
 
 def _build(
@@ -25,6 +25,7 @@ def _build(
     max_num_seqs=16,
     num_speculative_tokens=None,
     parallel_drafting=False,
+    kv_quant_mode=KVQuantMode.NONE,
 ):
     monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
     monkeypatch.setattr(
@@ -53,7 +54,11 @@ def _build(
         ),
     )
     spec = FullAttentionSpec(
-        block_size=16, num_kv_heads=num_kv_heads, head_size=128, dtype=torch.bfloat16
+        block_size=16,
+        num_kv_heads=num_kv_heads,
+        head_size=128,
+        dtype=torch.bfloat16,
+        kv_quant_mode=kv_quant_mode,
     )
     builder = builder_cls(spec, ["layer.0"], config, "cpu")
     batch = BatchSpec(seq_lens=[128] * len(query_lens), query_lens=query_lens)
@@ -123,9 +128,20 @@ def test_split_k_segment_rows_cover_verify_queries(
         (5, False, 1, 6),
     ],
 )
+@pytest.mark.parametrize(
+    "kv_quant_mode", [KVQuantMode.NONE, KVQuantMode.INT4_PER_TOKEN_HEAD]
+)
 def test_split_k_scratch_rows_follow_speculative_config(
-    monkeypatch, num_speculative_tokens, parallel_drafting, max_num_seqs, rows
+    monkeypatch,
+    num_speculative_tokens,
+    parallel_drafting,
+    max_num_seqs,
+    rows,
+    kv_quant_mode,
 ):
+    # The INT4 launcher never runs multi-query split-K.
+    if kv_quant_mode == KVQuantMode.INT4_PER_TOKEN_HEAD:
+        rows = max_num_seqs
     builder, _ = _build(
         monkeypatch,
         TritonAttentionMetadataBuilder,
@@ -135,6 +151,7 @@ def test_split_k_scratch_rows_follow_speculative_config(
         max_num_seqs,
         num_speculative_tokens,
         parallel_drafting,
+        kv_quant_mode,
     )
     assert builder.softmax_segm_output.shape == (rows, 8, 16, 128)
     assert builder.softmax_segm_max.shape == (rows, 8, 16)
