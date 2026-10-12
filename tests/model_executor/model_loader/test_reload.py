@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import ast
 import gc
 import importlib.machinery
 import inspect
 import sys
 import types
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
 from weakref import WeakKeyDictionary, ref
@@ -42,6 +44,104 @@ from vllm.model_executor.model_loader.weight_utils import (
     load_attention_sink,
 )
 from vllm.platforms import current_platform
+
+
+@pytest.mark.parametrize(
+    "path,class_name,sink_name",
+    [
+        ("models/deepseek_v4/attention.py", "DeepseekV4Attention", "attn_sink"),
+        ("models/deepseek_v41/attention.py", "DeepseekV4Attention", "attn_sink"),
+        (
+            "models/hy_v4/nvidia/attention.py",
+            "HYV4MLAAttention",
+            "learnable_sink_param",
+        ),
+        ("model_executor/models/mimo_v2.py", "MiMoV2Attention", "attention_sink_bias"),
+        ("model_executor/models/gpt_oss.py", "OAIAttention", "sinks"),
+    ],
+)
+def test_attention_sink_weight_loader_registration(path, class_name, sink_name):
+    """Execute production sink construction/registration without kernel imports."""
+    source = Path(__file__).resolve().parents[3] / "vllm" / path
+    tree = ast.parse(source.read_text(encoding="utf-8"))
+    assert any(
+        isinstance(node, ast.ImportFrom)
+        and node.module == "vllm.model_executor.model_loader.weight_utils"
+        and any(alias.name == "load_attention_sink" for alias in node.names)
+        for node in tree.body
+    )
+    cls = next(
+        n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == class_name
+    )
+    init = next(
+        n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == "__init__"
+    )
+    model = torch.nn.Module()
+    model.padded_heads = model.num_local_heads = model.num_heads = 4
+    namespace = dict(
+        self=model,
+        torch=torch,
+        nn=torch.nn,
+        load_attention_sink=load_attention_sink,
+        config=SimpleNamespace(num_attention_heads=8),
+        tp_size=2,
+        enable_sink=True,
+        add_swa_attention_sink_bias=True,
+    )
+    # Execute the declaration and its following registration statement. If the
+    # registration is removed, the parameter remains without the common loader.
+    for block in ast.walk(init):
+        body = getattr(block, "body", [])
+        if not isinstance(body, list):
+            continue
+        for index, node in enumerate(body):
+            if isinstance(node, ast.Assign) and any(
+                isinstance(t, ast.Attribute) and t.attr == sink_name
+                for t in node.targets
+            ):
+                code = ast.Module(body=body[index : index + 2], type_ignores=[])
+                exec(compile(code, str(source), "exec"), namespace)
+                param = dict(model.named_parameters())[sink_name]
+                assert inspect.unwrap(param.weight_loader) is load_attention_sink
+                return
+    pytest.fail(f"No sink parameter declaration found in {class_name}")
+
+
+@pytest.mark.parametrize("quant_method", ["mxfp4", "quark", None])
+def test_gpt_oss_sink_uses_parameter_loader(monkeypatch, quant_method):
+    """All quantization dispatch paths honor the sink's current weight loader."""
+    from vllm.model_executor.models import gpt_oss
+
+    group = SimpleNamespace(world_size=1, rank_in_group=0)
+    for name in ("get_dp_group", "get_ep_group", "get_pcp_group"):
+        monkeypatch.setattr(gpt_oss, name, lambda: group)
+    monkeypatch.setattr(gpt_oss, "get_tensor_model_parallel_world_size", lambda: 1)
+    monkeypatch.setattr(gpt_oss, "get_tensor_model_parallel_rank", lambda: 0)
+    monkeypatch.setattr(gpt_oss, "is_pp_missing_parameter", lambda *args: False)
+    model = gpt_oss.GptOssModel.__new__(gpt_oss.GptOssModel)
+    torch.nn.Module.__init__(model)
+    model.config = SimpleNamespace(num_local_experts=1, intermediate_size=32)
+    if quant_method is not None:
+        model.config.quantization_config = {"quant_method": quant_method}
+    model.parallel_config = SimpleNamespace(enable_expert_parallel=True)
+    model.layers = [
+        SimpleNamespace(
+            mlp=SimpleNamespace(
+                experts=SimpleNamespace(
+                    _quant_method=SimpleNamespace(weight_dtype=None)
+                )
+            )
+        )
+    ]
+    model.get_expert_mapping = lambda: []
+    model.sinks = torch.nn.Parameter(torch.zeros(4), requires_grad=False)
+    # A replacement loader must see the unsliced checkpoint even after reload
+    # wraps the parameter; bare model-specific copies would bypass this spy.
+    model.sinks.weight_loader = Mock(side_effect=default_weight_loader)
+    checkpoint = torch.arange(4, dtype=torch.float32)
+    assert model.load_weights([("sinks", checkpoint)]) == {"sinks"}
+    model.sinks.weight_loader.assert_called_once_with(model.sinks, checkpoint)
+    assert torch.equal(model.sinks, checkpoint)
 
 
 @pytest.mark.parametrize("tp_rank", [0, 1])
