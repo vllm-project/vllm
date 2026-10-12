@@ -23,6 +23,23 @@ pub(crate) fn validate_request_compat(
         );
     }
 
+    if request.return_top_k_logprobs == Some(true) {
+        if request.stream {
+            bail_invalid_request!(
+                param = "return_top_k_logprobs",
+                "return_top_k_logprobs is not supported with stream=true"
+            );
+        }
+        let logprobs = request.sampling_params.inner.logprobs;
+        if logprobs.is_none_or(|k| k < 1) {
+            bail_invalid_request!(
+                param = "return_top_k_logprobs",
+                "return_top_k_logprobs requires sampling_params.logprobs >= 1, got {}",
+                logprobs.map_or("None".to_string(), |k| k.to_string())
+            );
+        }
+    }
+
     if request.sampling_params.n.unwrap_or(1) != 1 {
         bail_invalid_request!(param = "n", "Only n=1 is supported.");
     }
@@ -129,6 +146,37 @@ mod tests {
         }))
         .expect("parse request");
         assert!(validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"])).is_ok());
+    }
+
+    #[test]
+    fn validate_request_compat_return_top_k_logprobs() {
+        let served = served(&["Qwen/Qwen1.5-0.5B-Chat"]);
+        for (stream, sampling_params, ok) in [
+            (false, json!({"logprobs": 1}), true),
+            (false, json!({"logprobs": 128}), true),
+            (true, json!({"logprobs": 5}), false),
+            (false, json!({}), false),
+            (false, json!({"logprobs": 0}), false),
+            (false, json!({"logprobs": -1}), false),
+        ] {
+            let request: GenerateRequest = serde_json::from_value(json!({
+                "token_ids": [11, 22],
+                "return_top_k_logprobs": true,
+                "stream": stream,
+                "sampling_params": sampling_params
+            }))
+            .expect("parse request");
+            match validate_request_compat(&request, &served) {
+                Ok(()) => assert!(ok, "{sampling_params}"),
+                Err(error) => {
+                    assert!(!ok, "{sampling_params}");
+                    assert_eq!(
+                        axum::response::IntoResponse::into_response(error).status(),
+                        axum::http::StatusCode::BAD_REQUEST
+                    );
+                }
+            }
+        }
     }
 
     #[test]
