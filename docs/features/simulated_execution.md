@@ -140,8 +140,8 @@ run within 2% on mean, median and P99 TTFT, TPOT and ITL.
 ### Offline runs in simulated time
 
 `vllm.v1.worker.simulated.offline` drives an in-process engine with a timed
-arrival schedule and timestamps every output token, so a workload can be run
-without waiting for it:
+arrival schedule (of requests and multi-turn sessions) and timestamps every
+output token, so a workload can be run without waiting for it:
 
 ```python
 from vllm.engine.arg_utils import EngineArgs
@@ -184,6 +184,43 @@ real (non-simulated) engine on the real clock, which is how the
 reference for a comparison is produced.
 [examples/features/simulated_execution/sweep_offline.py](../../examples/features/simulated_execution/sweep_offline.py)
 sweeps `max_num_seqs` this way.
+
+A `TimedSession` is a multi-turn conversation: each `Turn` appends its tokens
+to the previous turn's prompt and output, and arrives `think_time` seconds
+after the previous turn finished. Later turns therefore reuse the
+conversation's KV cache, from the device's prefix cache or, with KV
+offloading, the CPU cache, and how long a session waits depends on how fast
+the engine served its earlier turns. `run()` and `simulate()` accept sessions
+alongside single requests and report one timing per turn, flattened in input
+order. Prompts are token ids concatenated exactly, so chat-template tokens
+(end-of-turn markers, role headers) belong in each turn's `new_token_ids`. A
+turn whose prompt exceeds `max_model_len` aborts the run, so size it for a
+session's whole conversation.
+
+```python
+from vllm.v1.worker.simulated.offline import TimedSession, Turn
+
+params = SamplingParams(max_tokens=128, ignore_eos=True)
+session = TimedSession(
+    turns=[Turn(first_prompt_ids, params)]
+    + [Turn(user_ids, params, think_time=3.0) for user_ids in follow_ups],
+    arrival_time=0.0,
+)
+```
+
+On Qwen3-8B / H200 with a 2 GiB GPU KV cache and a 32 GiB CPU cache, 32
+sessions (arriving at 2/s) of 5 turns each (a shared 1024-token system
+prompt plus 1024 tokens, then 256 tokens per turn, OSL 128, think time
+exponential with mean 3 s), replayed from a recording under the
+`fast_forward` clock:
+
+| | TTFT mean | TTFT P99 | TPOT mean | E2E mean |
+| --- | --- | --- | --- | --- |
+| With CPU offloading, real / simulated (ms) | 420.9 / 417.0 | 1625 / 1588 | 6.161 / 6.162 | 1203 / 1200 |
+| Without, real / simulated (ms) | 655.9 / 647.6 | 2234 / 2179 | 6.951 / 6.960 | 1539 / 1531 |
+
+The simulation reproduces the 36% lower TTFT that offloading buys, and takes
+6–7 s per run instead of 39 s.
 
 ### Speculative decoding
 

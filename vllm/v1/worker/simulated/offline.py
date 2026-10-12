@@ -2,7 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Drive an in-process engine with a timed arrival schedule.
 
-`simulate()` replays a list of requests, each with an arrival time, against an
+`simulate()` replays a list of requests, each with an arrival time, and
+multi-turn sessions, whose turns arrive as earlier ones finish, against an
 `LLMEngine` running in the caller's process, and timestamps every request's
 output tokens. With ``simulation_config.clock`` set to ``"virtual"`` or
 ``"fast_forward"`` the timestamps are simulated time and the run takes only as
@@ -13,9 +14,9 @@ wall-clock baseline to compare against.
 
 from __future__ import annotations
 
+import heapq
 import math
 import time
-from collections import deque
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
@@ -44,6 +45,28 @@ class TimedRequest:
     sampling_params: SamplingParams
     arrival_time: float = 0.0
     """Seconds after the start of the run."""
+
+
+@dataclass
+class Turn:
+    new_token_ids: list[int]
+    """Tokens this turn appends to the conversation."""
+    sampling_params: SamplingParams
+    think_time: float = 0.0
+    """Seconds between the previous turn's completion and this turn's arrival
+    (ignored for the first turn)."""
+
+
+@dataclass
+class TimedSession:
+    """A multi-turn conversation. A turn's prompt is the previous turn's prompt
+    and output followed by its own tokens, and it arrives only after the
+    previous turn finished, so later turns can reuse the conversation's KV
+    cache (on the device or, with offloading, in the CPU cache)."""
+
+    turns: list[Turn]
+    arrival_time: float = 0.0
+    """Seconds after the start of the run at which the first turn arrives."""
 
 
 @dataclass
@@ -136,15 +159,16 @@ def make_engine(engine_args: EngineArgs) -> LLMEngine:
 
 def run(
     engine: LLMEngine,
-    requests: Sequence[TimedRequest],
+    requests: Sequence[TimedRequest | TimedSession],
     max_stalled_steps: int = 10_000,
 ) -> SimulationResult:
     """Feed `requests` to `engine` (from `make_engine()`) at their arrival
     times and timestamp the outputs. A request is admitted at the first
     engine step at or after its arrival, as the engine core of a server picks
-    up requests between steps. Under the virtual clock, `max_stalled_steps`
-    consecutive engine steps without output or clock progress abort the
-    run."""
+    up requests between steps; a session's turns arrive one after another.
+    The result lists one timing per request, or per turn of a session, in
+    input order. Under the virtual clock, `max_stalled_steps` consecutive
+    engine steps without output or clock progress abort the run."""
     from vllm.v1.engine.core_client import InprocClient
 
     sim = engine.vllm_config.simulation_config
@@ -152,38 +176,57 @@ def run(
         raise ValueError("run() needs an engine built by make_engine().")
     if sim.clock != "real" and not sim.simulate_forward:
         raise ValueError(f"The {sim.clock} clock needs simulate_forward.")
-    if any(r.sampling_params.n != 1 for r in requests):
+    turns = [
+        r.turns
+        if isinstance(r, TimedSession)
+        else [Turn(r.prompt_token_ids, r.sampling_params)]
+        for r in requests
+    ]
+    if not all(turns):
+        raise ValueError("A session needs at least one turn.")
+    if any(t.sampling_params.n != 1 for ts in turns for t in ts):
         raise ValueError("Timed runs support n=1 only.")
+    request_ids = [
+        [f"timed-{i}" if len(ts) == 1 else f"timed-{i}.{k}" for k in range(len(ts))]
+        for i, ts in enumerate(turns)
+    ]
     clock = get_clock(sim.clock)
     # The driven clocks are process-global; drop a horizon an aborted run left.
     clock.horizon = math.inf
     wall_start = time.perf_counter()
     t0 = clock.now()
-    pending = deque(sorted(enumerate(requests), key=lambda x: x[1].arrival_time))
+    # (arrival time, request index, turn index, prompt), earliest first.
+    pending = [
+        (r.arrival_time, i, 0, ts[0].new_token_ids)
+        for i, (r, ts) in enumerate(zip(requests, turns))
+    ]
+    heapq.heapify(pending)
     timings: dict[str, RequestTiming] = {}
+    # Session turns followed by another: their index, prompt and output.
+    in_flight: dict[str, tuple[int, int, list[int]]] = {}
+    outputs_so_far: dict[str, list[int]] = {}
     stalled = 0
     while pending or engine.has_unfinished_requests():
         # Compare absolute times: after jumping to `t0 + arrival_time`,
         # `now - t0` can round to just below `arrival_time`.
         now = clock.now()
-        while pending and t0 + pending[0][1].arrival_time <= now:
-            i, req = pending.popleft()
-            request_id = f"timed-{i}"
-            params = req.sampling_params.clone()
+        while pending and t0 + pending[0][0] <= now:
+            arrival, i, k, prompt = heapq.heappop(pending)
+            request_id = request_ids[i][k]
+            params = turns[i][k].sampling_params.clone()
             params.output_kind = RequestOutputKind.DELTA
-            engine.add_request(
-                request_id, {"prompt_token_ids": req.prompt_token_ids}, params
-            )
-            timings[request_id] = RequestTiming(
-                request_id, req.arrival_time, len(req.prompt_token_ids)
-            )
+            engine.add_request(request_id, {"prompt_token_ids": prompt}, params)
+            timings[request_id] = RequestTiming(request_id, arrival, len(prompt))
+            if k + 1 < len(turns[i]):
+                in_flight[request_id] = (i, k, prompt)
+                outputs_so_far[request_id] = []
         if not engine.has_unfinished_requests():
             # Idle until the next arrival.
-            clock.sleep_until(t0 + pending[0][1].arrival_time)
+            clock.sleep_until(t0 + pending[0][0])
             continue
 
         # Lets an engine waiting only on its own transfers skip ahead.
-        clock.horizon = t0 + pending[0][1].arrival_time if pending else math.inf
+        clock.horizon = t0 + pending[0][0] if pending else math.inf
         before = clock.now()
         outputs = engine.step()
         t = clock.now() - t0
@@ -194,8 +237,24 @@ def run(
             if n:
                 timing.num_output_tokens += n
                 timing.token_times.append(t)
+            if out.request_id in outputs_so_far:
+                outputs_so_far[out.request_id].extend(out.outputs[0].token_ids)
             if out.finished:
                 timing.finish_time = t
+                if out.request_id in in_flight:
+                    # The next turn continues the conversation.
+                    i, k, prompt = in_flight.pop(out.request_id)
+                    output = outputs_so_far.pop(out.request_id)
+                    nxt = turns[i][k + 1]
+                    heapq.heappush(
+                        pending,
+                        (
+                            t + nxt.think_time,
+                            i,
+                            k + 1,
+                            prompt + output + nxt.new_token_ids,
+                        ),
+                    )
 
         if outputs or clock.now() != before:
             stalled = 0
@@ -210,14 +269,14 @@ def run(
 
     finished = [r.finish_time for r in timings.values() if r.finish_time is not None]
     return SimulationResult(
-        requests=[timings[f"timed-{i}"] for i in range(len(requests))],
+        requests=[timings[request_id] for ids in request_ids for request_id in ids],
         duration=max(finished, default=0.0),
         wall_time=time.perf_counter() - wall_start,
     )
 
 
 def simulate(
-    engine_args: EngineArgs, requests: Sequence[TimedRequest]
+    engine_args: EngineArgs, requests: Sequence[TimedRequest | TimedSession]
 ) -> SimulationResult:
     """Build an in-process engine from `engine_args` and run `requests`
     through it. Pass ``simulation_config={"simulate_forward": True,

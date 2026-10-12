@@ -205,6 +205,41 @@ def test_simulate_offline_host_time_holds_engine_thread() -> None:
     assert result.requests[0].itls == pytest.approx([3e-3] * 6 + [0.0])
 
 
+def test_simulate_offline_sessions() -> None:
+    """A session's next turn arrives a think time after the previous one
+    finished, extends its prompt and output, and reuses their KV cache."""
+    if not (current_platform.is_cpu() or current_platform.is_cuda_alike()):
+        pytest.skip("Simulated forward needs the CPU or a CUDA-alike platform.")
+    from vllm.engine.arg_utils import EngineArgs
+    from vllm.v1.worker.simulated.offline import TimedSession, Turn, simulate
+
+    args = EngineArgs(
+        model="Qwen/Qwen3-0.6B",
+        max_model_len=1024,
+        kv_cache_memory_bytes=1024**3,
+        simulation_config={
+            "simulate_forward": True,
+            "clock": "virtual",
+            "timing": "constant",
+            "timing_args": {"fixed_us": 1000, "prefill_us_per_token": 10},
+        },
+    )
+    params = SamplingParams(max_tokens=12, ignore_eos=True)
+    session = TimedSession(
+        [Turn(list(range(56)), params), Turn(list(range(100, 116)), params, 0.5)],
+        arrival_time=1.0,
+    )
+    first, second = simulate(args, [session]).requests
+
+    assert first.ttft == pytest.approx(1000e-6 + 56 * 10e-6)
+    assert second.arrival_time == pytest.approx(first.finish_time + 0.5)
+    assert second.num_prompt_tokens == 56 + 12 + 16
+    # The KV of the prompt and the first 8 output tokens (64 tokens, whole
+    # blocks) is cached only if the output follows the prompt; 20 tokens are
+    # prefilled.
+    assert second.ttft == pytest.approx(1000e-6 + 20 * 10e-6)
+
+
 def test_simulate_offline_kv_offloading(tmp_path) -> None:
     """A prompt evicted from the GPU KV cache is loaded back from the CPU
     cache: its request waits exactly for the modeled load, then prefills only
