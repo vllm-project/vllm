@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 from torch import nn
@@ -15,6 +17,8 @@ from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import 
 )
 from vllm.model_executor.models.qwen3_dspark import DSparkMarkovHead
 from vllm.platforms import current_platform
+from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
+from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
 
 
 def _markov_head(weight: torch.Tensor) -> DSparkMarkovHead:
@@ -68,6 +72,52 @@ def test_gathered_markov_bias_matches_dense_at_full_vocab():
 
     expected = original + markov_embed @ weight.T * scale
     torch.testing.assert_close(result, expected)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@pytest.mark.parametrize("verification", ["standard", "block"])
+@pytest.mark.parametrize("use_fp64", [False, True])
+def test_dspark_revisited_position_uses_round_seed(verification, use_fp64):
+    """A later round must refresh probabilistic drafts only in block mode."""
+    device = torch.device("cuda")
+    batch = 4096
+    spec = DSparkSpeculator.__new__(DSparkSpeculator)
+    spec.speculative_config = SimpleNamespace(rejection_sample_method=verification)
+    spec.acceptance_estimator = None
+    spec._d2t_scatter_index = None
+    spec.draft_watermarker = None
+    spec.use_fp64_gumbel = use_fp64
+    spec.temperature = torch.ones(batch, device=device)
+    spec.seeds = torch.arange(batch, dtype=torch.int64, device=device)
+    spec._step_cols = torch.arange(2, dtype=torch.int32, device=device)
+    spec.draft_logits = torch.empty(batch, 2, 2, device=device)
+    logits = torch.tensor([0.7, 0.3], device=device).log().expand(batch, -1)
+    mapping = torch.arange(batch, device=device)
+    positions = torch.full((batch,), 22, dtype=torch.int64, device=device)
+
+    first = spec._sample_logits(logits, mapping, positions, 1)
+    repeated = spec._sample_logits(logits, mapping, positions, 1)
+    next_round = spec._sample_logits(logits, mapping, positions, 0)
+    torch.testing.assert_close(first, repeated)
+    expected = gumbel_sample(
+        logits,
+        mapping,
+        spec.temperature,
+        spec.seeds,
+        positions - 1,
+        apply_temperature=True,
+        is_drafting=True,
+        logits_cache=spec.draft_logits,
+        logits_cache_col=spec._step_cols[0],
+        use_fp64=use_fp64,
+        use_round_seed=verification == "block",
+    )
+    torch.testing.assert_close(next_round, expected)
+    if verification == "block":
+        mismatch_rate = (first != next_round).float().mean().item()
+        assert 0.35 < mismatch_rate < 0.5
+    else:
+        torch.testing.assert_close(first, next_round)
 
 
 @pytest.mark.parametrize("cuda_alike_platform", [False, True])

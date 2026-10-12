@@ -1664,6 +1664,7 @@ def test_draft_watermarker_cuda_graph_reads_current_prompt_lens():
 
 def test_dspark_reduced_vocab_draft_sampler_applies_watermarking(monkeypatch):
     speculator = object.__new__(DSparkSpeculator)
+    speculator.speculative_config = SimpleNamespace(rejection_sample_method="standard")
     speculator.draft_logits = torch.zeros(2, 1, 8)
     speculator._d2t_scatter_index = torch.tensor([1, 5])
     speculator._draft_scatter_buf = torch.full((2, 8), float("-inf"))
@@ -1686,6 +1687,7 @@ def test_dspark_reduced_vocab_draft_sampler_applies_watermarking(monkeypatch):
         logits_cache_col=None,
         use_fp64=False,
         logits_cache_source=None,
+        use_round_seed=False,
     ):
         watermark_logits.append(logits.clone())
         return torch.tensor([4, 5])
@@ -1708,6 +1710,7 @@ def test_dspark_reduced_vocab_draft_sampler_applies_watermarking(monkeypatch):
 
 def test_dspark_target_only_watermarking_leaves_drafts_unwatermarked(monkeypatch):
     speculator = object.__new__(DSparkSpeculator)
+    speculator.speculative_config = SimpleNamespace(rejection_sample_method="standard")
     speculator.draft_logits = torch.zeros(2, 1, 8)
     speculator._d2t_scatter_index = None
     speculator.temperature = torch.ones(2)
