@@ -205,12 +205,12 @@ steps:
   device: h200_35gb
   source_file_dependencies:
   - vllm/models/qwen4_exp/
-  - vllm/transformers_utils/configs/qwen4_exp.py
   - vllm/config/compilation.py
   - vllm/v1/attention/backends/short_conv_attn.py
   - tests/models/qwen4_exp/
   commands:
     - pytest -v -s models/qwen4_exp/test_hc_ops.py models/qwen4_exp/test_qsa_prepare.py models/qwen4_exp/test_qsa_reference.py
+    - pytest -v -s models/qwen4_exp/test_ple.py -k test_fused_conv_correctness
   mirror:
     amd:
       label: ":amd: (MI355 DPX) Qwen4 Exp"
@@ -231,7 +231,6 @@ steps:
   device: cpu-small
   source_file_dependencies:
   - vllm/models/qwen4_exp/
-  - vllm/transformers_utils/configs/qwen4_exp.py
   - vllm/config/compilation.py
   - vllm/v1/attention/backends/short_conv_attn.py
   - tests/models/qwen4_exp/
