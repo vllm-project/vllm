@@ -149,9 +149,9 @@ def _wait_for_metric_delta(
 
 
 def test_mtp_pd_reuses_last_safe_prefix_block():
-    """Repeated MTP requests hit the successor-proven boundary on both nodes."""
+    """Repeated MTP requests hit the lookahead-proven boundary on both nodes."""
     if SD_METHOD != "mtp":
-        pytest.skip("successor-aware MTP prefix caching test")
+        pytest.skip("lookahead-hash MTP prefix caching test")
 
     aligned_page_size = 544
     prompt_len = 2 * aligned_page_size + 1

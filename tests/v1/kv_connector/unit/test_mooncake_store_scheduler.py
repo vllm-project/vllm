@@ -1797,7 +1797,7 @@ def test_worker_metadata_aggregates_completions_across_ranks():
     assert merged.completed_saves == {1: 2, 2: 1}
 
 
-def test_eagle_hashed_prefix_is_retried_without_new_blocks():
+def test_lookahead_hashed_prefix_is_retried_without_new_blocks():
     scheduler = _make_bare_scheduler()
     scheduler.use_lookahead_block_hashes = True
     token_ids = list(range(32))
@@ -1839,7 +1839,7 @@ def test_eagle_hashed_prefix_is_retried_without_new_blocks():
     assert scheduler._request_trackers["req-0"].num_saved_tokens == 16
 
 
-def test_eagle_finished_request_flushes_last_hashed_block():
+def test_lookahead_finished_request_flushes_last_hashed_block():
     # The last lookahead hash exists only once the request has finished, so
     # its save is pinned at finish and emitted on the next step.
     scheduler = _make_bare_scheduler()

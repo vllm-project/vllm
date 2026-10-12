@@ -3408,8 +3408,8 @@ class TestEagle:
         # 3 hits, pop to 2 → 2 * block_size = 8 tokens loadable
         assert sched._lookup(req_status) == 8
 
-    def test_successor_hash_lookup_keeps_proven_boundary(self, request_runner):
-        """A successor hash proves the EAGLE boundary, so no hit is dropped."""
+    def test_lookahead_hash_lookup_keeps_proven_boundary(self, request_runner):
+        """A lookahead hash proves the EAGLE boundary, so no hit is dropped."""
         block_size = 4
         groups = [
             KVCacheGroupSpec(
@@ -4802,6 +4802,7 @@ def _shared_kv_mtp_config():
     spec = MagicMock(name="shared_kv_mtp_spec")
     spec.use_eagle.return_value = True
     spec.use_eagle_block_drop.return_value = True
+    spec.disable_lookahead_block_hashes = False
     spec.use_multi_module_mtp.return_value = False
     spec.num_speculative_tokens_per_batch_size = None
     spec.max_num_new_slots_for_drafting = 0
@@ -4855,7 +4856,7 @@ class TestSharedGroupMTPOffload:
             generate_store_output(keys)
         )
         runner.run(decoded_tokens=[0])
-        # Successor-aware hashing is enabled for this connector, so each
+        # Lookahead hashing is enabled for this connector, so each
         # block is published once the token after it is materialized: the
         # last decode block is stored on the finishing step.
         runner.run(

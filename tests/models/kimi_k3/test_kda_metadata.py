@@ -362,7 +362,7 @@ def test_internal_checkpoint_metadata_targets_last_aligned_boundary(
     (
         "seq_len",
         "disable_eagle_block_drop",
-        "successor_hashing",
+        "lookahead_hashing",
         "prefix_match_unit",
         "expected_offset",
     ),
@@ -380,15 +380,15 @@ def test_spec_internal_checkpoint_metadata_targets_replay_boundary(
     monkeypatch: pytest.MonkeyPatch,
     seq_len: int,
     disable_eagle_block_drop: bool,
-    successor_hashing: bool,
+    lookahead_hashing: bool,
     prefix_match_unit: int,
     expected_offset: int | None,
 ) -> None:
-    """Successor-aware hashes need no back-off from the replay boundary."""
+    """Lookahead hashes need no back-off from the replay boundary."""
     monkeypatch.setattr(
         mamba_checkpoint,
         "is_lookahead_block_hashing_enabled",
-        lambda *_: successor_hashing,
+        lambda *_: lookahead_hashing,
     )
     device = torch.device("cuda")
     batch = BatchSpec(seq_lens=[seq_len], query_lens=[seq_len])

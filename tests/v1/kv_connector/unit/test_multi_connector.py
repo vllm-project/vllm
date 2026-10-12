@@ -139,8 +139,8 @@ class MockHMAConnector(KVConnectorBase_V1, SupportsHMA):
         return (False, None)
 
 
-class PrefixHashingTestConnector(KVConnectorBase_V1):
-    """Minimal real connector for prefix-hash protocol tests."""
+class LookaheadHashingTestConnector(KVConnectorBase_V1):
+    """Minimal real connector for lookahead-hash protocol tests."""
 
     @property
     def supports_lookahead_block_hashes(self) -> bool:
@@ -182,7 +182,7 @@ KVConnectorFactory.register_connector(
     "MockHMAConnector", __name__, MockHMAConnector.__name__
 )
 KVConnectorFactory.register_connector(
-    "PrefixHashingTestConnector", __name__, PrefixHashingTestConnector.__name__
+    "LookaheadHashingTestConnector", __name__, LookaheadHashingTestConnector.__name__
 )
 KVConnectorFactory.register_connector(
     "MockDivergentHMAConnector",
@@ -191,9 +191,9 @@ KVConnectorFactory.register_connector(
 )
 
 
-def _prefix_hashing_connector_config(supported: bool) -> dict[str, Any]:
+def _lookahead_connector_config(supported: bool) -> dict[str, Any]:
     return {
-        "kv_connector": "PrefixHashingTestConnector",
+        "kv_connector": "LookaheadHashingTestConnector",
         "kv_role": "kv_both",
         "kv_connector_module_path": __name__,
         "kv_connector_extra_config": {
@@ -206,6 +206,7 @@ def _enable_eagle(vllm_config) -> None:
     vllm_config.speculative_config = SimpleNamespace(
         use_eagle=lambda: True,
         use_eagle_block_drop=lambda: True,
+        disable_lookahead_block_hashes=False,
         use_multi_module_mtp=lambda: False,
     )
 
@@ -423,7 +424,7 @@ def test_multi_example_connector_consistency():
     events = get_connector_events()
     storage1_scheduler_events = _ignore_event_collection(events["storage1-SCHEDULER"])
     storage2_scheduler_events = _ignore_event_collection(events["storage2-SCHEDULER"])
-    # Prefix-hash mode is propagated first; then the cache manager is bound,
+    # Lookahead-hash mode is propagated first; then the cache manager is bound,
     # completion counts queried, and handshake metadata exchanged before the
     # request is enqueued.
     assert storage1_scheduler_events[:8] == [
@@ -436,7 +437,7 @@ def test_multi_example_connector_consistency():
         f"update_state_after_alloc num_blocks=[{expected_num_blocks}] 0",
         "build_connector_meta",
     ]
-    # Prefix-hash mode is propagated before the connector is initialized. Layer
+    # Lookahead-hash mode is propagated before the connector is initialized. Layer
     # hooks run before the deferred load starts after the forward pass.
     expected_worker_prefix = [
         "set_lookahead_block_hashes False",
@@ -1091,15 +1092,14 @@ Options:
     ("child_support", "expected"),
     [([True, True], True), ([True, False], False)],
 )
-def test_factory_configures_multi_connector_eagle_prefix_hashing(
+def test_factory_configures_multi_connector_lookahead_block_hashes(
     child_support: list[bool], expected: bool
 ):
     vllm_config = create_vllm_config(
         kv_connector="MultiConnector",
         kv_connector_extra_config={
             "connectors": [
-                _prefix_hashing_connector_config(supported)
-                for supported in child_support
+                _lookahead_connector_config(supported) for supported in child_support
             ],
         },
         kv_role="kv_both",

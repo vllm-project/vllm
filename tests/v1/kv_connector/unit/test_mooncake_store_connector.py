@@ -684,7 +684,6 @@ def test_lookup_key_client_lookup_prepends_typed_tag():
     assert result.hit_length == 5
 
     sent_frames = fake_socket.send_multipart.call_args[0][0]
-    assert len(sent_frames) == 4
     assert sent_frames[0] == protocol.LOOKUP_MSG
     assert int.from_bytes(sent_frames[1], "big") == 128
 

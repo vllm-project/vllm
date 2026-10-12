@@ -696,7 +696,7 @@ def test_lookahead_hashes_skip_legacy_eagle_drop():
     )
 
     _, legacy_hit = coord.find_longest_cache_hit(hashes, 64, cached)
-    _, successor_hit = coord.find_longest_cache_hit(
+    _, lookahead_hit = coord.find_longest_cache_hit(
         hashes,
         64,
         cached,
@@ -704,10 +704,10 @@ def test_lookahead_hashes_skip_legacy_eagle_drop():
     )
 
     assert legacy_hit == 48
-    assert successor_hit == 64
+    assert lookahead_hit == 64
 
 
-def test_successor_hash_lookup_and_store_masks_match():
+def test_lookahead_lookup_and_store_masks_match():
     groups = [
         KVCacheGroupSpec(["full"], _full(64)),
         KVCacheGroupSpec(

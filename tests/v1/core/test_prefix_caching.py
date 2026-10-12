@@ -93,7 +93,6 @@ def make_request(
     cache_salt: str | None = None,
     lora_request: LoRARequest | None = None,
     use_lookahead_hashes: bool = False,
-    resumable: bool = False,
     session_id: str | None = None,
 ):
     mm_features = []
@@ -119,12 +118,9 @@ def make_request(
         pooling_params=None,
         lora_request=lora_request,
         cache_salt=cache_salt,
-        block_hasher=(
-            get_request_block_hasher(block_size, hash_fn, True)
-            if use_lookahead_hashes
-            else get_request_block_hasher(block_size, hash_fn)
+        block_hasher=get_request_block_hasher(
+            block_size, hash_fn, use_lookahead_hashes
         ),
-        resumable=resumable,
         session_id=session_id,
     )
 
@@ -4198,93 +4194,52 @@ def test_emit_cached_block_events_zero_cached():
     assert pool.take_events() == []
 
 
-def test_eagle_identical_prompt_hits_last_safe_block():
-    """An identical prompt hits the last block before the logits token."""
+@pytest.mark.parametrize(
+    ("lookahead", "num_prompt_tokens", "expected_blocks"),
+    [
+        # Legacy drop: pop the logits block, then drop one more.
+        (False, 48, 1),
+        (False, 37, 1),
+        # Lookahead hashes prove the boundary, so no extra block is dropped.
+        (True, 48, 2),
+        (True, 37, 2),
+    ],
+)
+def test_eagle_identical_prompt_hit(
+    lookahead: bool, num_prompt_tokens: int, expected_blocks: int
+):
     block_size = 16
     manager = make_kv_cache_manager(
         make_kv_cache_config(block_size, num_blocks=10),
         max_model_len=8192,
         enable_caching=True,
         use_eagle=True,
-        use_lookahead_block_hashes=True,
+        use_lookahead_block_hashes=lookahead,
         hash_block_size=block_size,
     )
+    token_ids = [0] * num_prompt_tokens
 
-    # Request with 3 full blocks (48 tokens)
-    token_ids = [0] * (3 * block_size)
     req = make_request(
-        "divisible_request",
-        token_ids,
-        block_size,
-        sha256,
-        use_lookahead_hashes=True,
+        "prime", token_ids, block_size, sha256, use_lookahead_hashes=lookahead
     )
-
-    # Prime the cache
     computed_blocks, _, _ = manager.get_computed_blocks(req)
     manager.allocate_slots(
-        req, len(token_ids), len(computed_blocks.blocks[0]) * 16, computed_blocks
+        req,
+        len(token_ids),
+        len(computed_blocks.blocks[0]) * block_size,
+        computed_blocks,
     )
     manager.free(req)
 
-    # New request with same tokens + Eagle enabled
     req_eagle = make_request(
-        "eagle_divisible",
-        token_ids,
-        block_size,
-        sha256,
-        use_lookahead_hashes=True,
+        "eagle", token_ids, block_size, sha256, use_lookahead_hashes=lookahead
     )
     computed_blocks, num_tokens, _ = manager.get_computed_blocks(req_eagle)
-
-    # The final block is recomputed to obtain logits, but EAGLE should not
-    # force an additional block to be replayed for an identical prompt.
-    assert len(computed_blocks.blocks[0]) == 2
-    assert num_tokens == 2 * block_size
+    assert len(computed_blocks.blocks[0]) == expected_blocks
+    assert num_tokens == expected_blocks * block_size
 
 
-def test_eagle_with_partial_blocks():
-    """An identical partial-tail prompt reuses every full safe block."""
-    block_size = 16
-    manager = make_kv_cache_manager(
-        make_kv_cache_config(block_size, num_blocks=10),
-        max_model_len=8192,
-        enable_caching=True,
-        use_eagle=True,
-        use_lookahead_block_hashes=True,
-        hash_block_size=block_size,
-    )
-    # 2 full blocks + 5 tokens (non-divisible length)
-    token_ids = [0] * (2 * block_size + 5)
-    req = make_request(
-        "partial_block_test",
-        token_ids,
-        block_size,
-        sha256,
-        use_lookahead_hashes=True,
-    )
-
-    # Prime the cache
-    computed_blocks, _, _ = manager.get_computed_blocks(req)
-    manager.allocate_slots(
-        req, len(token_ids), len(computed_blocks.blocks[0]) * 16, computed_blocks
-    )
-    manager.free(req)
-
-    # New request with Eagle enabled
-    req_eagle = make_request(
-        "partial_eagle",
-        token_ids,
-        block_size,
-        sha256,
-        use_lookahead_hashes=True,
-    )
-    computed_blocks, num_tokens, _ = manager.get_computed_blocks(req_eagle)
-    assert len(computed_blocks.blocks[0]) == 2
-    assert num_tokens == 2 * block_size
-
-
-def test_eagle_successor_token_controls_last_block_hit():
+def test_lookahead_token_controls_last_block_hit():
     block_size = 2
     manager = make_kv_cache_manager(
         make_kv_cache_config(block_size, num_blocks=20),
@@ -4306,28 +4261,28 @@ def test_eagle_successor_token_controls_last_block_hit():
     manager.allocate_slots(first, first.num_tokens, 0, computed_blocks)
     manager.free(first)
 
-    same_successor = make_request(
-        "same_successor",
+    same_lookahead = make_request(
+        "same_lookahead",
         [0, 1, 2, 3, 4, 6],
         block_size,
         sha256,
         use_lookahead_hashes=True,
     )
-    _, num_tokens, _ = manager.get_computed_blocks(same_successor)
+    _, num_tokens, _ = manager.get_computed_blocks(same_lookahead)
     assert num_tokens == 2 * block_size
 
-    different_successor = make_request(
-        "different_successor",
+    different_lookahead = make_request(
+        "different_lookahead",
         [0, 1, 2, 3, 7, 6],
         block_size,
         sha256,
         use_lookahead_hashes=True,
     )
-    _, num_tokens, _ = manager.get_computed_blocks(different_successor)
+    _, num_tokens, _ = manager.get_computed_blocks(different_lookahead)
     assert num_tokens == block_size
 
 
-def test_eagle_kv_events_publish_successor_hashes():
+def test_kv_events_reconstruct_lookahead_block_hashes():
     block_size = 2
     manager = make_kv_cache_manager(
         make_kv_cache_config(block_size, num_blocks=20),

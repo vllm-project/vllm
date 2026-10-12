@@ -143,7 +143,7 @@ def test_hybrid_gdn_remote_decode_truncates_prefill_before_cache_lookup():
 
 
 @pytest.mark.cpu_test
-def test_successor_hashing_still_truncates_remote_decode_prompt():
+def test_lookahead_hashing_still_truncates_remote_decode_prompt():
     """D always recomputes the last token, so P must stop at h(N-1)."""
     vllm_config = create_vllm_config(
         kv_connector="MooncakeConnector",

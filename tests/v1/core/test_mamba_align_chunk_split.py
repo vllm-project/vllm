@@ -157,7 +157,7 @@ def _split(
     return Scheduler._mamba_block_aligned_split(stub, request, num_new_tokens)
 
 
-def test_successor_hashing_preserves_last_mamba_cache_boundary() -> None:
+def test_lookahead_hashing_preserves_last_mamba_cache_boundary() -> None:
     prompt_len = 2 * MAMBA_BLOCK_SIZE + 1
     (request,) = create_requests(1, num_tokens=prompt_len, block_size=ATTN_BLOCK_SIZE)
 
