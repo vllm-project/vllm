@@ -326,10 +326,10 @@ def test_captured_context_anchor_rereads_fixed_inputs():
     spec.prepare_context_anchor = lambda *args: (
         LiLiCorrSpeculator.prepare_context_anchor(spec, *args)
     )
-    DFlashSpeculator._prepare_graph_context(spec, 2)
+    DFlashSpeculator._prepare_graph_forward(spec, 2, None)
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
-        DFlashSpeculator._prepare_graph_context(spec, 2)
+        DFlashSpeculator._prepare_graph_forward(spec, 2, None)
     # One live request padded to two; the second case anchors past the 4 graph
     # rows, on a row stored eagerly before replay.
     for loc, rejected, row in (([0, 2, 2], [1, 5], 0), ([0, 7, 7], [0, 0], 6)):

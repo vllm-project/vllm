@@ -18,6 +18,7 @@ from vllm.config import (
     SpeculativeConfig,
     VllmConfig,
 )
+from vllm.config.model import RunnerOption
 from vllm.config.scheduler import SchedulerPolicy
 from vllm.multimodal.inputs import (
     MultiModalFeatureSpec,
@@ -78,6 +79,7 @@ def create_scheduler(
     ec_role: str | None = None,
     use_v2_model_runner: bool | None = None,
     kv_cache_spec: KVCacheSpec | None = None,
+    runner: RunnerOption = "auto",
     per_request_spec_decode_metrics: str = "none",
     scheduling_policy: SchedulerPolicy = "fcfs",
     diffusion_canvas_length: int | None = None,
@@ -109,6 +111,7 @@ def create_scheduler(
         # The scheduler reads model_config.max_model_len, not the
         # SchedulerConfig one, so both must agree.
         max_model_len=max_model_len,
+        runner=runner,
     )
     if mm_encoder_only:
         model_config.multimodal_config.mm_encoder_only = True
@@ -235,7 +238,7 @@ def create_scheduler(
         structured_output_manager=StructuredOutputManager(vllm_config),
     )
     if use_v2_model_runner is None:
-        use_v2_model_runner = bool(envs.VLLM_USE_V2_MODEL_RUNNER)
+        use_v2_model_runner = envs.VLLM_USE_V2_MODEL_RUNNER is not False
     scheduler.use_v2_model_runner = use_v2_model_runner
     return scheduler
 

@@ -7,7 +7,7 @@ import pytest
 import torch
 from torch import nn
 
-from vllm.config import ParallelConfig
+from vllm.config import KernelConfig, ParallelConfig
 from vllm.model_executor.models.utils import WeightsMapper
 from vllm.platforms import current_platform
 
@@ -58,6 +58,7 @@ def test_rocm_moe_routing_and_shared_experts_match_reference(
                 model_config=SimpleNamespace(hf_config=config),
                 quant_config=None,
                 parallel_config=ParallelConfig(),
+                kernel_config=default_vllm_config.kernel_config,
             ),
             prefix="model.layers.0.ffn",
         )
@@ -230,6 +231,7 @@ def test_rocm_moe_wires_vision_routing_on_hash_and_regular_layers(
         model_config=SimpleNamespace(hf_config=config),
         quant_config=None,
         parallel_config=ParallelConfig(),
+        kernel_config=KernelConfig(),
     )
 
     hash_moe = rocm_model.DeepseekV4MoE(vllm_config, prefix="model.layers.0.ffn")
