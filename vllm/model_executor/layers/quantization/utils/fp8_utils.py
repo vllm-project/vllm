@@ -981,7 +981,7 @@ def w8a8_triton_per_token_scaled_mm(
     bias: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Apply per-token/per-channel FP8 scales to A[M,K] @ B[K,N]."""
-    from vllm.model_executor.layers.quantization.compressed_tensors.triton_scaled_mm import (  # noqa: E501
+    from vllm.model_executor.kernels.linear.scaled_mm.triton_scaled_mm import (
         triton_scaled_mm,
     )
 

@@ -18,7 +18,7 @@ from vllm.utils.torch_utils import set_random_seed
 device = current_platform.device_type
 
 triton_scaled_mm_module = importlib.import_module(
-    "vllm.model_executor.layers.quantization.compressed_tensors.triton_scaled_mm"
+    "vllm.model_executor.kernels.linear.scaled_mm.triton_scaled_mm"
 )
 triton_scaled_mm = triton_scaled_mm_module.triton_scaled_mm
 fp8_utils_module = importlib.import_module(

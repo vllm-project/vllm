@@ -5,9 +5,6 @@
 import torch
 
 from vllm import _custom_ops as ops
-from vllm.model_executor.layers.quantization.compressed_tensors.triton_scaled_mm import (  # noqa: E501
-    triton_scaled_mm,
-)
 from vllm.model_executor.layers.quantization.utils import replace_parameter
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
@@ -28,6 +25,7 @@ from .ScaledMMLinearKernel import (
     FP8ScaledMMLinearLayerConfig,
     Int8ScaledMMLinearLayerConfig,
 )
+from .triton_scaled_mm import triton_scaled_mm
 
 
 class TritonFp8PerTokenScaledMMKernel(FP8ScaledMMLinearKernel):
