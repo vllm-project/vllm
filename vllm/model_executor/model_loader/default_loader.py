@@ -247,9 +247,11 @@ class DefaultModelLoader(BaseModelLoader):
                     subfolder=subfolder,
                     revision=revision,
                 )
-            hf_weights_files = filter_duplicate_safetensors_files(
-                hf_weights_files, hf_folder, index_file
-            )
+            # only filter the weights from index without explicit allow patterns
+            if allow_patterns_overrides is None:
+                hf_weights_files = filter_duplicate_safetensors_files(
+                    hf_weights_files, hf_folder, index_file
+                )
         else:
             hf_weights_files = filter_files_not_needed_for_inference(hf_weights_files)
 

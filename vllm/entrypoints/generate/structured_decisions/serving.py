@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
-import json
 from typing import Any
 
 from fastapi import Request
@@ -22,10 +21,6 @@ from .question_types import Question, StructuredDecisionError, build_question
 from .strategies import DecisionLimits, ReadStrategy
 
 logger = init_logger(__name__)
-
-
-def state_text(state: Any) -> str:
-    return state if isinstance(state, str) else json.dumps(state, ensure_ascii=False)
 
 
 def parse_questions(
@@ -72,6 +67,18 @@ class ServingStructuredDecisions(BaseServing):
         self.strategy = strategy
         self.limits = strategy.limits()
 
+    def _media(self, request: StructuredDecisionRequest) -> dict[str, list[str]]:
+        urls = {
+            "image": request.images,
+            "audio": request.audio,
+            "video": request.videos,
+        }
+        media = {modality: items for modality, items in urls.items() if items}
+        if unsupported := media.keys() - self.strategy.modalities:
+            names = ", ".join(sorted(unsupported))
+            raise StructuredDecisionError(f"this model does not take {names} inputs")
+        return media
+
     async def create_decision(
         self,
         request: StructuredDecisionRequest,
@@ -87,8 +94,9 @@ class ServingStructuredDecisions(BaseServing):
         request_id = f"decision-{base_id}"
         try:
             questions = parse_questions(request, self.limits)
+            media = self._media(request)
             lora_request = self._maybe_get_adapters(request)  # type: ignore[arg-type]
-            engine_client.check_admission(len(questions))
+            engine_client.check_admission(self.strategy.num_requests(questions))
             trace_headers = (
                 None
                 if raw_request is None
@@ -97,13 +105,14 @@ class ServingStructuredDecisions(BaseServing):
             reads = await self.strategy.read(
                 questions,
                 request.instructions,
-                state_text(request.state),
+                self.strategy.render_state(request.state),
                 request_id=request_id,
                 chat_template_kwargs=request.chat_template_kwargs,
                 lora_request=lora_request,
                 priority=request.priority,
                 cache_salt=request.cache_salt,
                 trace_headers=trace_headers,
+                media=media,
             )
         except StructuredDecisionError as e:
             return self.create_error_response(e)

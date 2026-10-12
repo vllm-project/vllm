@@ -5,24 +5,40 @@
 Only models in READ_STRATEGIES are currently supported.
 """
 
+import asyncio
 import hashlib
 import json
 import math
 import random
+import time
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any
+from functools import cached_property
+from typing import Any, ClassVar, TypeVar
 
+import numpy as np
+
+import vllm.envs as envs
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.generate.label_reads import next_token_label_reads
-from vllm.inputs import EngineInput, tokens_input
+from vllm.inputs import EngineInput, MultiModalInput, TokensPrompt, tokens_input
+from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
+from vllm.multimodal.media import (
+    MEDIA_CONNECTOR_REGISTRY,
+    ImageMediaIO,
+    MediaConnector,
+    MediaIO,
+    VideoMediaIO,
+)
+from vllm.pooling_params import PoolingParams
 from vllm.renderers.chat_utils import ChatTemplateContentFormatOption
 from vllm.renderers.inputs.preprocess import extract_prompt_components
 from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.sampling_params import SamplingParams
+from vllm.tasks import SupportedTask
 from vllm.tokenizers import TokenizerLike
 
 from .protocol import ReadPromptRequest
@@ -33,6 +49,10 @@ from .question_types import (
     StructuredDecisionError,
     label_softmax,
 )
+
+_M = TypeVar("_M")
+
+logger = init_logger(__name__)
 
 
 @dataclass
@@ -59,12 +79,29 @@ class QuestionRead:
     output_tokens: int
 
 
+def state_text(state: Any) -> str:
+    return state if isinstance(state, str) else json.dumps(state, ensure_ascii=False)
+
+
 class ReadStrategy(ABC):
+    #: The engine task reads run as.
+    task: ClassVar[SupportedTask] = "generate"
+    #: The modalities a request may attach media of.
+    modalities: ClassVar[frozenset[str]] = frozenset()
+
     def __init__(self, context: ReadContext):
         self.context = context
 
     @abstractmethod
     def limits(self) -> DecisionLimits: ...
+
+    def render_state(self, state: Any) -> str:
+        """The request's state as the model reads it."""
+        return state_text(state)
+
+    def num_requests(self, questions: list[Question]) -> int:
+        """The engine requests a decision takes."""
+        return len(questions)
 
     @abstractmethod
     async def read(
@@ -79,6 +116,7 @@ class ReadStrategy(ABC):
         priority: int,
         cache_salt: str | None = None,
         trace_headers: Mapping[str, str] | None = None,
+        media: Mapping[str, Sequence[str]] | None = None,
     ) -> list[QuestionRead]:
         """One read per question, in order."""
 
@@ -214,6 +252,7 @@ class NextTokenStrategy(ReadStrategy):
         priority: int,
         cache_salt: str | None = None,
         trace_headers: Mapping[str, str] | None = None,
+        media: Mapping[str, Sequence[str]] | None = None,
     ) -> list[QuestionRead]:
         ctx = self.context
         read_request = self._read_request(chat_template_kwargs, cache_salt)
@@ -334,7 +373,315 @@ class DiffusionGemmaCanvasStrategy(NextTokenStrategy):
         )
 
 
+class JointSchemaStrategy(ReadStrategy):
+    """Clef-Omni. The whole request is one pooling read: the state, then every
+    question with its options, as the model was trained to read them. The
+    model's joint schema head scores each option, so a read has no labels.
+
+    Mirrors ``encode_record`` in the checkpoint's ``joint_schema_model.py``.
+    Each piece is tokenized on its own, so the spans of the questions and the
+    options are known. The spans count from the end of the prompt, so they
+    hold after the media placeholders, which come before the state, expand."""
+
+    task = "token_classify"
+    modalities = frozenset({"image", "audio", "video"})
+
+    SYSTEM_PROMPT = (
+        "Read the complete state and schema. Decide every field jointly. Each "
+        "answer must be exactly one of that field's allowed options."
+    )
+    #: The reference's default bound on a prompt, in tokens.
+    MAX_LENGTH = 64000
+    TYPE_IDS = {"noul": 0, "choice": 1, "score": 2}
+    NOUL_CRITERIA = {
+        "true": "The proposition is true or the answer is yes.",
+        "false": "The proposition is false or the answer is no.",
+    }
+    PLACEHOLDERS = {
+        "image": "<|vision_start|><|image_pad|><|vision_end|>\n",
+        "audio": "<|audio_start|><|audio_pad|><|audio_end|>\n",
+        "video": "<|vision_start|><|video_pad|><|vision_end|>\n",
+    }
+    IMAGE_SIZE = {"shortest_edge": 65_536, "longest_edge": 1_048_576}
+    #: The reference samples videos at 2 fps; the "clef_omni" video backend
+    #: reproduces the reference's sampling, pixel cap and frame count cap.
+    VIDEO_FPS = 2
+
+    def __init__(self, context: ReadContext):
+        super().__init__(context)
+        self.tokenizer = context.online_renderer.renderer.get_tokenizer()
+        self.max_length = min(
+            self.MAX_LENGTH, context.engine_client.model_config.max_model_len
+        )
+        self.prefix = self._tokens(
+            f"<|im_start|>system\n{self.SYSTEM_PROMPT}<|im_end|>\n"
+            "<|im_start|>user\nSTATE:\n"
+        )
+        self.suffix = self._tokens(
+            "\n<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+            "JOINT SCHEMA DECISIONS:"
+        )
+
+    def limits(self) -> DecisionLimits:
+        return DecisionLimits(max_questions=64, max_options=len(LABELS))
+
+    def render_state(self, state: Any) -> str:
+        return self._render(state)
+
+    def num_requests(self, questions: list[Question]) -> int:
+        return 1
+
+    @staticmethod
+    def _render(value: Any) -> str:
+        if isinstance(value, str):
+            return value
+        return json.dumps(
+            value, ensure_ascii=False, separators=(",", ":"), sort_keys=True
+        )
+
+    def _tokens(self, text: str) -> list[int]:
+        return self.tokenizer.encode(text, add_special_tokens=False)
+
+    @cached_property
+    def _connector(self) -> MediaConnector:
+        model_config = self.context.engine_client.model_config
+        return MEDIA_CONNECTOR_REGISTRY.load(
+            envs.VLLM_MEDIA_CONNECTOR,
+            media_io_kwargs=model_config.get_multimodal_config().media_io_kwargs,
+            allowed_local_media_path=model_config.allowed_local_media_path,
+            allowed_media_domains=model_config.allowed_media_domains,
+        )
+
+    async def _fetch(
+        self, urls: Sequence[str], media_io: MediaIO[_M], timeout: int
+    ) -> list[_M]:
+        return await asyncio.gather(
+            *(
+                self._connector.load_from_url_async(
+                    url, media_io, fetch_timeout=timeout
+                )
+                for url in urls
+            )
+        )
+
+    async def _soundtrack(
+        self, video_url: str
+    ) -> tuple[np.ndarray, int | float] | None:
+        """The video's soundtrack, or None when it has no decodable one."""
+        try:
+            return await self._connector.fetch_audio_async(video_url)
+        except ValueError as e:
+            logger.debug("no decodable soundtrack in %s: %s", video_url, e)
+            return None
+
+    async def _render_media(
+        self, media: Mapping[str, Sequence[str]], cache_salt: str | None
+    ) -> MultiModalInput:
+        """The system prompt and the media, with the media's placeholders
+        expanded. A video's soundtrack is heard with it when every video has
+        one."""
+        connector = self._connector
+        video_io = VideoMediaIO(
+            ImageMediaIO(),
+            num_frames=-1,
+            fps=self.VIDEO_FPS,
+            video_backend="clef_omni",
+        )
+        try:
+            images, audio, videos, tracks = await asyncio.gather(
+                asyncio.gather(
+                    *map(connector.fetch_image_async, media.get("image", ()))
+                ),
+                asyncio.gather(
+                    *map(connector.fetch_audio_async, media.get("audio", ()))
+                ),
+                self._fetch(
+                    media.get("video", ()), video_io, envs.VLLM_VIDEO_FETCH_TIMEOUT
+                ),
+                asyncio.gather(*map(self._soundtrack, media.get("video", ()))),
+            )
+        except ValueError as e:
+            raise StructuredDecisionError(f"media: {e}") from e
+
+        audio_in_video = bool(videos) and all(t is not None for t in tracks)
+        if audio_in_video and audio:
+            raise StructuredDecisionError(
+                "audio clips cannot be read with videos that have soundtracks"
+            )
+        text = (
+            self.PLACEHOLDERS["image"] * len(images)
+            + self.PLACEHOLDERS["audio"] * len(audio)
+            + self.PLACEHOLDERS["video"] * len(videos)
+        )
+        if audio_in_video:
+            audio = [track for track in tracks if track is not None]
+        mm_data: dict[str, Any] = {}
+        if images:
+            mm_data["image"] = images
+        if audio:
+            mm_data["audio"] = audio
+        if videos:
+            mm_data["video"] = videos
+        mm_kwargs: dict[str, Any] = {"images_kwargs": {"size": self.IMAGE_SIZE}}
+        if videos:
+            mm_kwargs["use_audio_in_video"] = audio_in_video
+        prompt = TokensPrompt(
+            prompt_token_ids=self.prefix + self._tokens(text),
+            multi_modal_data=mm_data,
+            mm_processor_kwargs=mm_kwargs,
+        )
+        if cache_salt is not None:
+            prompt["cache_salt"] = cache_salt
+        renderer = self.context.online_renderer.renderer
+        try:
+            engine_input = await renderer.process_for_engine_async(prompt, time.time())
+        except ValueError as e:
+            raise StructuredDecisionError(f"media: {e}") from e
+        assert engine_input["type"] == "multimodal"
+        return engine_input
+
+    def _options(self, q: Question) -> list[tuple[int, str, Any]]:
+        """Each option's index in ``q.options``, id and description, in the
+        model's order: choices sorted by name, noul true then false, score
+        levels by index."""
+        if q.type.name == "noul":
+            return [
+                (
+                    i,
+                    key,
+                    self.NOUL_CRITERIA[key] if o.description is None else o.description,
+                )
+                for i, (key, o) in enumerate(zip(("true", "false"), q.options))
+            ]
+        if q.type.name == "choice":
+            return sorted(
+                ((i, o.name, o.description) for i, o in enumerate(q.options)),
+                key=lambda option: option[1],
+            )
+        if q.type.name == "score":
+            return [(i, str(i), o.name) for i, o in enumerate(q.options)]
+        raise StructuredDecisionError(
+            f"question {q.id!r}: this model does not answer {q.type.name!r} questions"
+        )
+
+    def encode(
+        self, questions: list[Question], state: str, prefix: list[int] | None = None
+    ) -> tuple[list[int], dict[str, list[Any]], list[list[int]]]:
+        """The prompt, the schema for the pooler, and each question's option
+        indices in the order of the output. ``prefix`` is what precedes the
+        state: the system prompt, and the media if there are any."""
+        prefix = self.prefix if prefix is None else prefix
+        schema_ids = self._tokens("\n\nSCHEMA FIELDS:\n")
+        question_spans, option_spans, orders = [], [], []
+        for n, q in enumerate(questions, start=1):
+            schema_ids += self._tokens(
+                f"\nFIELD {n}\nID: {q.id}\nTYPE: {q.type.name}\nINSTRUCTION: "
+            )
+            start = len(schema_ids)
+            schema_ids += self._tokens(q.instructions or q.id)
+            question_spans.append([start, len(schema_ids)])
+            schema_ids += self._tokens("\nALLOWED OPTIONS:\n")
+            options = self._options(q)
+            for m, (_, option_id, description) in enumerate(options, start=1):
+                schema_ids += self._tokens(f"OPTION {m}: ")
+                start = len(schema_ids)
+                semantics = {"option_id": option_id}
+                if description is not None:
+                    semantics["description"] = description
+                schema_ids += self._tokens(self._render(semantics))
+                option_spans.append([start, len(schema_ids)])
+                schema_ids += self._tokens("\n")
+            schema_ids += self._tokens("END FIELD\n")
+            orders.append([i for i, _, _ in options])
+
+        fixed = len(prefix) + len(schema_ids) + len(self.suffix)
+        if fixed > self.max_length:
+            raise StructuredDecisionError(
+                f"the questions take {fixed} tokens, more than the "
+                f"{self.max_length} this model reads"
+            )
+        state_ids = self._tokens(state)[: self.max_length - fixed]
+        prompt = prefix + state_ids + schema_ids + self.suffix
+        # The schema ends len(self.suffix) tokens before the prompt does.
+        end = len(schema_ids) + len(self.suffix)
+        schema: dict[str, list[Any]] = {
+            "question_types": [self.TYPE_IDS[q.type.name] for q in questions],
+            "question_spans": [[s - end, e - end] for s, e in question_spans],
+            "option_spans": [[s - end, e - end] for s, e in option_spans],
+            "option_counts": [len(order) for order in orders],
+        }
+        return prompt, schema, orders
+
+    async def read(
+        self,
+        questions: list[Question],
+        instructions: str | None,
+        state: str,
+        *,
+        request_id: str,
+        chat_template_kwargs: dict[str, Any] | None,
+        lora_request: LoRARequest | None,
+        priority: int,
+        cache_salt: str | None = None,
+        trace_headers: Mapping[str, str] | None = None,
+        media: Mapping[str, Sequence[str]] | None = None,
+    ) -> list[QuestionRead]:
+        if instructions:
+            raise StructuredDecisionError(
+                "this model reads a fixed prompt, so it takes no instructions"
+            )
+        engine_input: EngineInput
+        if media:
+            engine_input = await self._render_media(media, cache_salt)
+            prompt, schema, orders = self.encode(
+                questions, state, engine_input["prompt_token_ids"]
+            )
+            engine_input["prompt_token_ids"] = prompt
+        else:
+            prompt, schema, orders = self.encode(questions, state)
+            engine_input = tokens_input(prompt, cache_salt=cache_salt)
+        result = None
+        async for result in self.context.engine_client.encode(
+            engine_input,
+            PoolingParams(task="token_classify", extra_kwargs={"joint_schema": schema}),
+            f"{request_id}-0",
+            lora_request=lora_request,
+            trace_headers=trace_headers,
+            priority=priority,
+        ):
+            pass
+        if result is None:
+            raise ValueError("Failed to score the questions")
+        if result.error is not None:
+            raise ValueError(f"Failed to score the questions: {result.error.message}")
+        probs = result.outputs.data.tolist()
+        if len(probs) != sum(schema["option_counts"]):
+            raise ValueError(
+                f"Expected {sum(schema['option_counts'])} option scores, "
+                f"got {len(probs)}"
+            )
+
+        reads, offset = [], 0
+        for n, order in enumerate(orders):
+            q_probs = [0.0] * len(order)
+            for i, p in zip(order, probs[offset : offset + len(order)]):
+                q_probs[i] = p
+            offset += len(order)
+            reads.append(
+                QuestionRead(
+                    probs=q_probs,
+                    label_mass=1.0,
+                    argmax_is_label=True,
+                    # One forward pass reads the prompt for every question.
+                    input_tokens=len(prompt) if n == 0 else 0,
+                    output_tokens=0,
+                )
+            )
+        return reads
+
+
 READ_STRATEGIES: dict[str, type[ReadStrategy]] = {
+    "ClefOmniForJointSchema": JointSchemaStrategy,
     "Qwen3ForCausalLM": NextTokenStrategy,
     "Qwen3_5ForConditionalGeneration": NextTokenStrategy,
     "Qwen3_5MoeForConditionalGeneration": NextTokenStrategy,
@@ -347,7 +694,9 @@ READ_STRATEGIES: dict[str, type[ReadStrategy]] = {
 LOGPROBS_MODES = frozenset({"raw_logprobs", "processed_logprobs"})
 
 
-def select_read_strategy(model_config: ModelConfig) -> type[ReadStrategy]:
+def select_read_strategy(
+    model_config: ModelConfig, supported_tasks: Sequence[SupportedTask]
+) -> type[ReadStrategy]:
     """Raise ValueError when the model cannot serve structured decisions."""
     strategy = READ_STRATEGIES.get(model_config.architecture)
     if strategy is None:
@@ -356,7 +705,12 @@ def select_read_strategy(model_config: ModelConfig) -> type[ReadStrategy]:
             f"{model_config.architecture}. Supported architectures: "
             f"{sorted(READ_STRATEGIES)}"
         )
-    if model_config.logprobs_mode not in LOGPROBS_MODES:
+    if strategy.task not in supported_tasks:
+        raise ValueError(
+            f"Structured decisions on {model_config.architecture} need the "
+            f"{strategy.task} task"
+        )
+    if strategy.task == "generate" and model_config.logprobs_mode not in LOGPROBS_MODES:
         raise ValueError(
             "Structured decisions need --logprobs-mode raw_logprobs or "
             f"processed_logprobs, not {model_config.logprobs_mode}"

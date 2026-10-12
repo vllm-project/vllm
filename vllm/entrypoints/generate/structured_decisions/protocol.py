@@ -30,6 +30,15 @@ class StructuredDecisionRequest(OpenAIBaseModel):
     instructions: str | None = Field(
         default=None, description="Context placed ahead of the questions."
     )
+    images: list[str] | None = Field(
+        default=None, description="Image URLs or data URLs, for models that see."
+    )
+    audio: list[str] | None = Field(
+        default=None, description="Audio URLs or data URLs, for models that hear."
+    )
+    videos: list[str] | None = Field(
+        default=None, description="Video URLs or data URLs, for models that see."
+    )
     chat_template_kwargs: dict[str, Any] | None = None
     cache_salt: str | None = Field(
         default=None,
