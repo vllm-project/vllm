@@ -4,9 +4,11 @@ import dataclasses
 
 import pytest
 
-from vllm.config import CompilationMode
+from vllm.compilation.counter import compilation_counter
+from vllm.config import CompilationConfig, CompilationMode
 from vllm.platforms import current_platform
 
+from ...models.utils import check_logprobs_close
 from ...utils import compare_all_settings
 
 ATTN_BACKEND = "FLASH_ATTN" if not current_platform.is_rocm() else "ROCM_ATTN"
@@ -115,3 +117,46 @@ def test_compile_correctness(
         all_args.append(final_args + [f"-cc.mode={mode.name}", "-cc.backend=eager"])
         all_envs.append(dict(runner_env))
     compare_all_settings(model, all_args, all_envs, method=method)
+
+
+def test_moe_splitting_op_piecewise_cudagraph(
+    vllm_runner, example_prompts, monkeypatch
+):
+    """PIECEWISE graphs split at the MoE op match graphs split at attention
+    only."""
+    # Disable multiprocessing so that the counter is in the same process
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    moe_split = [
+        *CompilationConfig._attention_ops,
+        "vllm::unified_kv_cache_update",
+        "vllm::unified_mla_kv_cache_update",
+        "vllm::moe_forward",
+    ]
+    outputs = []
+    num_captured = []
+    for splitting_ops in (None, moe_split):
+        captured_before = compilation_counter.num_cudagraph_captured
+        with vllm_runner(
+            "ibm-granite/granite-3.0-1b-a400m-instruct",
+            max_num_seqs=16,
+            compilation_config={
+                "cudagraph_mode": "PIECEWISE",
+                "splitting_ops": splitting_ops,
+            },
+        ) as llm:
+            outputs.append(
+                llm.generate_greedy_logprobs(
+                    example_prompts, max_tokens=32, num_logprobs=5
+                )
+            )
+        num_captured.append(
+            compilation_counter.num_cudagraph_captured - captured_before
+        )
+    # Splitting at the MoE op adds pieces to capture.
+    assert num_captured[1] > num_captured[0]
+    check_logprobs_close(
+        outputs_0_lst=outputs[0],
+        outputs_1_lst=outputs[1],
+        name_0="attention split",
+        name_1="MoE split",
+    )
