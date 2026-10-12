@@ -328,10 +328,11 @@ def maybe_make_prepare_finalize(
         )
 
     elif moe.use_mori_epv2_kernels:
+        num_local_experts = moe.num_experts // all2all_manager.world_size
         all_to_all_args = dict(
             hidden_dim=moe.hidden_dim,
             max_num_inp_token_per_rank=moe.max_num_tokens,
-            num_experts_per_rank=moe.num_experts // all2all_manager.world_size,
+            num_experts_per_rank=num_local_experts,
             num_experts_per_token=moe.experts_per_token,
         )
         handle = all2all_manager.get_handle(all_to_all_args)
@@ -339,6 +340,8 @@ def maybe_make_prepare_finalize(
             handle,
             max_tokens_per_rank=moe.max_num_tokens,
             num_dispatchers=all2all_manager.world_size,
+            num_local_experts=num_local_experts,
+            rank_expert_offset=all2all_manager.rank * num_local_experts,
         )
 
     elif moe.use_mori_kernels:

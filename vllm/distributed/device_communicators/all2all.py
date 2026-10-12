@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import ctypes
 import os
 import threading
 from collections.abc import Iterator
@@ -1098,6 +1099,17 @@ class MoriAll2AllManager(All2AllManagerBase):
         return handle
 
 
+def _mori_epv2_arena_bytes(cfg) -> int:
+    """Upper bound of a MORI EPv2 gather-mode op's symmetric arena."""
+    # The hip backend pads scale rows to 128 B; FlyDSL uses the unpadded row.
+    scale_row = -(-cfg.scale_dim * cfg.scale_type_size // 128) * 128
+    topk = cfg.num_experts_per_token
+    per_recv_row = cfg.token_nbytes + cfg.combine_token_nbytes + scale_row
+    per_recv_row += topk * 8 + 4
+    # The arena aligns each of its (at most 12) regions to 256 B.
+    return cfg.effective_max_recv * per_recv_row + cfg.world_size * 12 + 12 * 256
+
+
 class MoriEPv2All2AllManager(All2AllManagerBase):
     def __init__(self, cpu_group):
         super().__init__(cpu_group)
@@ -1113,12 +1125,14 @@ class MoriEPv2All2AllManager(All2AllManagerBase):
         per_rank_vmm_gb = int(os.environ.get("VLLM_MORI_EPV2_PER_RANK_VMM_GB", "4"))
         if per_rank_vmm_gb <= 0:
             raise ValueError("VLLM_MORI_EPV2_PER_RANK_VMM_GB must be positive")
+        self._per_rank_vmm = per_rank_vmm_gb * (1 << 30)
         self._comm = Communicator.init(
-            self.world_size,
-            self.rank,
-            values[0],
-            per_rank_vmm=per_rank_vmm_gb * (1 << 30),
+            self.world_size, self.rank, values[0], per_rank_vmm=self._per_rank_vmm
         )
+        # cco probes fabric handles with hipMemCreate and, where they are
+        # unsupported, leaves hipErrorNotSupported as the HIP last error; the
+        # next torch call that checks it (an allocation) would raise it.
+        ctypes.CDLL("libamdhip64.so").hipGetLastError()
         requirements = CCODevCommRequirements()
         requirements.gda_connection_type = GDA_CONNECTION_NONE
         try:
@@ -1156,6 +1170,19 @@ class MoriEPv2All2AllManager(All2AllManagerBase):
             combine_mode="gather",
             **kwargs,
         )
+        # Every op carves its arena out of the one cco window; past it, the
+        # allocation fails deep inside MORI without naming the cause.
+        arena = _mori_epv2_arena_bytes(config)
+        live = sum(
+            _mori_epv2_arena_bytes(op.cfg) for op in self.handle_cache._cache.values()
+        )
+        if live + arena > self._per_rank_vmm:
+            raise ValueError(
+                f"MORI EPv2 needs {(live + arena) / (1 << 30):.2f} GiB of cco window "
+                f"({arena / (1 << 30):.2f} GiB for this op) but "
+                f"VLLM_MORI_EPV2_PER_RANK_VMM_GB is {self._per_rank_vmm >> 30}; raise "
+                "it or lower --max-num-batched-tokens"
+            )
         handle = EpDispatchCombineOp(config, self._comm)
         self._comm.barrier()
         logger.warning(

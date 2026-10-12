@@ -1,15 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import inspect
 from typing import Any
 
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 
 logger = init_logger(__name__)
+
+# Receive-row bounds are rounded up to this many rows (as SGLang's MORI path does).
+_RECV_ROW_ALIGN = 32
 
 
 class MoriEPv2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
@@ -18,13 +23,26 @@ class MoriEPv2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         mori_op: Any,
         max_tokens_per_rank: int,
         num_dispatchers: int,
+        num_local_experts: int | None = None,
+        rank_expert_offset: int = 0,
     ):
         super().__init__()
         self.mori_op = mori_op
         self.num_dispatchers_ = num_dispatchers
         self.max_tokens_per_rank = max_tokens_per_rank
+        self.num_local_experts = num_local_experts
+        self.rank_expert_offset = rank_expert_offset
+        self._padding_expert_ids: torch.Tensor | None = None
         self._routing = None
         self._recv_topk_ids = None
+        # MORI main dropped clone_routing; its dispatch already returns the
+        # op-owned live routing, which is what clone_routing=False asked for.
+        self._dispatch_kwargs = {"return_routing": True}
+        params = inspect.signature(mori_op.dispatch).parameters
+        if "clone_routing" in params or any(
+            p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()
+        ):
+            self._dispatch_kwargs["clone_routing"] = False
 
     @property
     def activation_format(self) -> mk.FusedMoEActivationFormat:
@@ -44,6 +62,48 @@ class MoriEPv2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
 
     def supports_async(self) -> bool:
         return False
+
+    def _route_padding_locally(self, topk_ids: torch.Tensor) -> torch.Tensor:
+        # DP padding tokens carry expert id -1 (VLLM_MOE_SKIP_PADDING) and zero
+        # weight. MORI EPv2 has no invalid-expert slot and its FlyDSL dispatch
+        # faults on -1, so send them to this rank's own experts instead.
+        if self.num_local_experts is None:
+            return topk_ids
+        if self._padding_expert_ids is None:
+            slots = torch.arange(topk_ids.shape[1], device=topk_ids.device)
+            self._padding_expert_ids = (
+                self.rank_expert_offset + slots % self.num_local_experts
+            ).to(topk_ids.dtype)
+        return torch.where(topk_ids < 0, self._padding_expert_ids, topk_ids)
+
+    def _recv_rows_bound(self, a1: torch.Tensor, capacity: int) -> int:
+        """Host-side upper bound on the rows this rank can receive this step.
+
+        MORI receives each source token at most once per rank, so the receive
+        count is at most the tokens all dispatchers send: the sum of the DP
+        batches, times the dispatchers per DP rank (each TP rank may send the
+        same batch). Slicing the capacity-sized buffers (world_size *
+        max_num_tokens rows) to this bound keeps the row masking, the experts
+        and combine's copy-in off the unused tail; on gfx1250 A0 those
+        full-capacity writes cost seconds per step. The bound is rounded up to
+        a multiple of _RECV_ROW_ALIGN to limit the distinct expert shapes.
+        """
+        dp_meta = (
+            get_forward_context().dp_metadata
+            if is_forward_context_available()
+            else None
+        )
+        if dp_meta is None:
+            return capacity
+        tokens = dp_meta.num_tokens_across_dp_cpu
+        n_dp = tokens.numel()
+        if n_dp > 0 and self.num_dispatchers_ % n_dp == 0:
+            bound = self.num_dispatchers_ // n_dp * int(tokens.sum())
+        else:
+            bound = self.num_dispatchers_ * int(tokens.max())
+        bound = max(bound, a1.shape[0], 1)
+        bound = -(-bound // _RECV_ROW_ALIGN) * _RECV_ROW_ALIGN
+        return min(capacity, bound)
 
     def prepare(
         self,
@@ -74,10 +134,16 @@ class MoriEPv2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             a1,
             topk_weights.to(torch.float32),
             None,
-            topk_ids.to(torch.int32),
-            return_routing=True,
-            clone_routing=False,
+            self._route_padding_locally(topk_ids.to(torch.int32)),
+            **self._dispatch_kwargs,
         )
+        rows = self._recv_rows_bound(a1, dispatch_a1.shape[0])
+        if rows < dispatch_a1.shape[0]:
+            dispatch_a1 = dispatch_a1[:rows]
+            dispatch_weights = dispatch_weights[:rows]
+            dispatch_ids = dispatch_ids[:rows]
+            if dispatch_scale is not None:
+                dispatch_scale = dispatch_scale[:rows]
         # MORI reuses capacity-sized buffers without clearing unused rows.
         unused = (
             torch.arange(dispatch_a1.shape[0], device=dispatch_a1.device)
