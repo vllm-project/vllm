@@ -8,9 +8,15 @@ terminator. These cover that path plus the multi-turn prompts where an
 earlier turn's markers must not be read as the current turn's state.
 """
 
+import json
+
 import pytest
 
 from tests.parser.engine.conftest import make_mock_tokenizer
+from tests.parser.engine.streaming_helpers import (
+    collect_tool_arguments,
+    simulate_tool_streaming,
+)
 from vllm.parser.glm47_moe import (
     THINK_END,
     THINK_START,
@@ -46,6 +52,51 @@ def no_thinking_parser():
         make_mock_tokenizer(VOCAB),
         chat_template_kwargs={"thinking": False},
     )
+
+
+class TestLastArgValue:
+    @pytest.mark.parametrize(
+        "closing_tag", ["", "</arg_value>"], ids=["unclosed", "closed"]
+    )
+    def test_non_streaming_preserves_trailing_value(
+        self, parser, mock_request, closing_tag
+    ):
+        result = parser.extract_tool_calls(
+            "<tool_call>get_weather"
+            "<arg_key>city</arg_key><arg_value>Seattle</arg_value>"
+            f"<arg_key>unit</arg_key><arg_value>celsius{closing_tag}"
+            "</tool_call>",
+            mock_request,
+        )
+
+        assert result.tools_called is True
+        assert json.loads(result.tool_calls[0].function.arguments) == {
+            "city": "Seattle",
+            "unit": "celsius",
+        }
+
+    @pytest.mark.parametrize(
+        "closing_tag", ["", "</arg_value>"], ids=["unclosed", "closed"]
+    )
+    def test_streaming_preserves_trailing_value(
+        self, parser, mock_request, closing_tag
+    ):
+        results = simulate_tool_streaming(
+            parser,
+            mock_request,
+            [
+                "<tool_call>",
+                "get_weather",
+                "<arg_key>city</arg_key><arg_value>Seattle</arg_value>",
+                f"<arg_key>unit</arg_key><arg_value>celsius{closing_tag}",
+                "</tool_call>",
+            ],
+        )
+
+        assert json.loads(collect_tool_arguments(results)) == {
+            "city": "Seattle",
+            "unit": "celsius",
+        }
 
 
 class TestIsReasoningEnd:
