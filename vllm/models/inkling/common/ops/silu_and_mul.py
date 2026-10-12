@@ -9,8 +9,9 @@ variant with the per-expert dequant scale and per-token gamma fused in.
 
 import torch
 
-from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+
+from ..platform import num_compute_units
 
 
 @triton.jit(do_not_specialize=["M"])
@@ -105,10 +106,7 @@ def silu_and_mul_triton(gateup_output: torch.Tensor) -> torch.Tensor:
         BLOCK_SIZE_M = 16
         BLOCK_SIZE_N = max(8, min(128, triton.next_power_of_2(N)))
     max_grid_size = triton.cdiv(M, BLOCK_SIZE_M) * triton.cdiv(N, BLOCK_SIZE_N)
-    index = gateup_output.device.index
-    if index is None:
-        index = torch.accelerator.current_device_index()
-    num_sms = current_platform.num_compute_units(index)
+    num_sms = num_compute_units(gateup_output.device)
     grid_size = min(num_sms * 4, max_grid_size)
 
     _silu_and_mul_triton_kernel[(grid_size,)](

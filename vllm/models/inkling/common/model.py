@@ -34,14 +34,6 @@ from vllm.model_executor.models.utils import (
     make_layers,
     maybe_prefix,
 )
-from vllm.models.inkling.common.mm_preprocess import (
-    InklingDummyInputsBuilder,
-    InklingMultiModalProcessor,
-    InklingProcessingInfo,
-    inkling_audio_enabled,
-    inkling_vision_enabled,
-)
-from vllm.models.inkling.common.towers import InklingAudio, InklingVision
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sequence import IntermediateTensors
 
@@ -50,10 +42,18 @@ from .attention import InklingAttention, compute_log_scaling_tau
 from .layernorm import InklingRMSNorm
 from .logits_processor import InklingLogitsProcessor
 from .mlp import InklingDenseMLP
+from .mm_preprocess import (
+    InklingDummyInputsBuilder,
+    InklingMultiModalProcessor,
+    InklingProcessingInfo,
+    inkling_audio_enabled,
+    inkling_vision_enabled,
+)
 from .moe import InklingMoE
 from .ops.norm import add_rmsnorm, embed_rmsnorm
 from .sconv_swa_attn import _ATTN, _MLP, InklingConvState
 from .short_conv import InklingShortConv
+from .towers import InklingAudio, InklingVision
 
 
 def _layer_id(name: str) -> int | None:
@@ -70,13 +70,14 @@ def _sconv_add_norm(
 ) -> tuple[torch.Tensor | None, torch.Tensor]:
     """``h = hidden + sconv(TP-sum(delta)); y = rmsnorm(h)``.
 
-    ROCm uses the portable collective path. The Lamport P2P implementation in
+    This path uses portable collectives. The Lamport P2P implementation in
     the NVIDIA model relies on CUDA GDC and CUDA-specific symmetric-memory
-    publication semantics which cannot be linked into a gfx950 HSACO."""
+    publication semantics, which cannot be linked into a gfx950 HSACO or
+    expressed on XPU."""
     norm_w = norm.weight if norm is not None else None
     eps = norm.variance_epsilon if norm is not None else 0.0
 
-    # RCCL RS -> shard sconv -> AG -> fused add(+rmsnorm).
+    # RS -> shard sconv -> AG -> fused add(+rmsnorm).
     shard = tensor_model_parallel_reduce_scatter(delta, dim=-1)
     shard = sconv(shard.contiguous(), positions)
     full = tensor_model_parallel_all_gather(shard, dim=-1)

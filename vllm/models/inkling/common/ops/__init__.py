@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Inkling kernels (NVIDIA).
+"""Inkling Triton kernels.
 
 ``rmsnorm`` / ``sconv`` import eagerly. The SwiGLU kernels and the FA4
 relative-attention wrapper are exposed lazily to keep this package's
