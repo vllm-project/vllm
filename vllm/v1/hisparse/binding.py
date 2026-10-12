@@ -71,7 +71,7 @@ def resolve_hisparse_specs(
     assert groups is not None
     return (
         kv_cache_spec
-        | mla_specs
+        | resized_specs
         | {
             layer_name: group.kv_cache_spec
             for group in groups
