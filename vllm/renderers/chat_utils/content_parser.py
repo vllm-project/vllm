@@ -5,7 +5,7 @@ from abc import ABC, abstractmethod
 from collections import defaultdict
 from collections.abc import Awaitable, Callable
 from functools import cached_property, partial
-from typing import Any, Final, override
+from typing import TYPE_CHECKING, Any, Final, override
 
 import torch
 from PIL import Image
@@ -19,11 +19,10 @@ from vllm.renderers.embed_utils import (
     safe_load_prompt_embeds_async,
 )
 
-from .item_tracker import (
-    AsyncMultiModalItemTracker,
-    MultiModalItemTracker,
-)
 from .types import InputAudio, ModalityStr, MultiModalEmbedsPayload
+
+if TYPE_CHECKING:
+    from .item_tracker import AsyncMultiModalItemTracker, MultiModalItemTracker
 
 MODALITY_PLACEHOLDERS_MAP = {
     "image": "<##IMAGE##>",
@@ -128,7 +127,7 @@ class BaseMultiModalContentParser(ABC):
 class MultiModalContentParser(BaseMultiModalContentParser):
     def __init__(
         self,
-        tracker: MultiModalItemTracker,
+        tracker: "MultiModalItemTracker",
         mm_processor_kwargs: dict[str, Any] | None = None,
     ) -> None:
         super().__init__()
@@ -309,7 +308,7 @@ class MultiModalContentParser(BaseMultiModalContentParser):
 class AsyncMultiModalContentParser(BaseMultiModalContentParser):
     def __init__(
         self,
-        tracker: AsyncMultiModalItemTracker,
+        tracker: "AsyncMultiModalItemTracker",
         mm_processor_kwargs: dict[str, Any] | None = None,
     ) -> None:
         super().__init__()
