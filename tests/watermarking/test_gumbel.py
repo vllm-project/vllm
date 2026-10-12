@@ -224,7 +224,8 @@ def test_philox_gumbel_sample_skip_mask_matches_separate_samplers(use_fp64: bool
 @pytest.mark.skipif(
     not current_platform.is_cuda_alike(), reason="requires a CUDA-like accelerator"
 )
-def test_philox_mixed_draft_sampling_caches_unprocessed_logits():
+@pytest.mark.parametrize("use_round_seed", [False, True])
+def test_philox_mixed_draft_sampling_caches_unprocessed_logits(use_round_seed: bool):
     torch.manual_seed(0)
     num_rows, vocab_size, num_steps = 5, 4099, 3
     logits = torch.randn(num_rows, vocab_size, device="cuda", dtype=torch.float16)
@@ -253,6 +254,9 @@ def test_philox_mixed_draft_sampling_caches_unprocessed_logits():
         positions,
         apply_temperature=True,
         is_drafting=True,
+        logits_cache=cache,
+        logits_cache_col=cols,
+        use_round_seed=use_round_seed,
     )
     watermarked = philox_gumbel_sample(processed_logits, contexts, 42)
     expected = torch.where(skip_mask, ordinary, watermarked)
@@ -270,6 +274,7 @@ def test_philox_mixed_draft_sampling_caches_unprocessed_logits():
                 logits_cache=cache,
                 logits_cache_col=cols,
                 logits_cache_source=logits,
+                use_round_seed=use_round_seed,
             ),
             skip_mask=skip_mask,
         )

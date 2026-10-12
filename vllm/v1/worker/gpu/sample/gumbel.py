@@ -227,6 +227,7 @@ def gumbel_block_argmax(
     APPLY_TEMPERATURE: tl.constexpr,
     USE_FP64: tl.constexpr,
     PER_TOKEN_COL: tl.constexpr = False,
+    USE_ROUND_SEED: tl.constexpr = False,
 ):
     req_state_idx = tl.load(expanded_idx_mapping_ptr + token_idx).to(tl.int64)
     is_valid_req = req_state_idx >= 0
@@ -257,6 +258,10 @@ def gumbel_block_argmax(
 
     seed = tl.load(seeds_ptr + req_state_idx, mask=is_valid_req, other=0)
     pos = tl.load(pos_ptr + token_idx)
+    if USE_ROUND_SEED:
+        # Subtract the draft step to identify the round independently of batch order.
+        round_start = pos.to(tl.int64) - col.to(tl.int64)
+        seed ^= round_start << 32
     return gumbel_noised_argmax(
         logits,
         block,
@@ -295,6 +300,7 @@ def _gumbel_sample_kernel(
     APPLY_TEMPERATURE: tl.constexpr,
     USE_FP64: tl.constexpr,
     PER_TOKEN_COL: tl.constexpr,
+    USE_ROUND_SEED: tl.constexpr,
 ):
     token_idx = tl.program_id(0).to(tl.int64)
     block_idx = tl.program_id(1)
@@ -327,6 +333,7 @@ def _gumbel_sample_kernel(
         APPLY_TEMPERATURE=APPLY_TEMPERATURE,
         USE_FP64=USE_FP64,
         PER_TOKEN_COL=PER_TOKEN_COL,
+        USE_ROUND_SEED=USE_ROUND_SEED,
     )
     token_id = block_idx * BLOCK_SIZE + idx
     tl.store(local_argmax_ptr + token_idx * local_argmax_stride + block_idx, token_id)
@@ -345,7 +352,11 @@ def gumbel_sample(
     logits_cache_col: torch.Tensor | None = None,  # scalar or [num_tokens]
     use_fp64: bool = False,
     logits_cache_source: torch.Tensor | None = None,
+    use_round_seed: bool = False,
 ) -> torch.Tensor:
+    assert not use_round_seed or (
+        is_drafting and logits_cache is not None and logits_cache_col is not None
+    ), "Round-seeded draft sampling requires the draft step."
     # Enforce contiguity on non-strided input tensors
     expanded_idx_mapping = expanded_idx_mapping.contiguous()
     pos = pos.contiguous()
@@ -402,6 +413,7 @@ def gumbel_sample(
         APPLY_TEMPERATURE=apply_temperature,
         USE_FP64=use_fp64,
         PER_TOKEN_COL=per_token_col,
+        USE_ROUND_SEED=use_round_seed,
     )
     # NOTE(woosuk): Use int64 for later indexing.
     max_block_idx = local_max.argmax(dim=-1, keepdim=True)

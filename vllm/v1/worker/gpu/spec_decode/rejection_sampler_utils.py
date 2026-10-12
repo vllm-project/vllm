@@ -547,6 +547,10 @@ def _rejection_kernel(
     seed = tl.load(seed_ptr + req_state_idx)
     temp = tl.load(temp_ptr + req_state_idx).to(tl.float32)
     is_greedy = temp == 0.0
+    if USE_BLOCK_VERIFICATION:
+        # The first position advances each round, unlike uncommitted draft positions.
+        round_start = tl.load(pos_ptr + start_idx).to(tl.int64)
+        seed ^= round_start << 32
 
     accepted_length = tl.zeros((), tl.int64)
     target_lse = 0.0

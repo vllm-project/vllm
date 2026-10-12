@@ -1314,6 +1314,7 @@ def test_draft_sampler_uses_draft_key_and_advances_context(monkeypatch):
 
     speculator = object.__new__(StubSpeculator)
     speculator.model = StubModel()
+    speculator.speculative_config = SimpleNamespace(rejection_sample_method="standard")
     speculator.use_fp64_gumbel = False
     speculator.acceptance_estimator = None
     draft_watermarker = DraftWatermarker(
