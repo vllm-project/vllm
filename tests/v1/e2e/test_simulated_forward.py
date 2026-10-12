@@ -137,3 +137,67 @@ def test_simulate_forward_prefix_cache_hybrid_retention_zero(
         hits_after_second = _get_counter_value(vllm_model, "vllm:prefix_cache_hits")
 
         assert hits_after_second > hits_after_first
+
+
+def test_simulate_offline_virtual_clock() -> None:
+    """Under the virtual clock, request timestamps are exactly the constant
+    timing model's step times, idle gaps are skipped, and arrivals are
+    honored."""
+    if not (current_platform.is_cpu() or current_platform.is_cuda_alike()):
+        pytest.skip("Simulated forward needs the CPU or a CUDA-alike platform.")
+    from vllm.engine.arg_utils import EngineArgs
+    from vllm.v1.worker.simulated.offline import TimedRequest, simulate
+
+    step_s = 1e-3
+    args = EngineArgs(
+        model="Qwen/Qwen3-0.6B",
+        max_model_len=1024,
+        kv_cache_memory_bytes=1024**3,
+        simulation_config={
+            "simulate_forward": True,
+            "clock": "virtual",
+            "timing": "constant",
+            "timing_args": {"fixed_us": step_s * 1e6},
+        },
+    )
+    params = SamplingParams(max_tokens=8, ignore_eos=True)
+    requests = [TimedRequest(list(range(16)), params, 0.0) for _ in range(4)]
+    requests.append(TimedRequest(list(range(16)), params, 10.0))
+
+    result = simulate(args, requests)
+
+    for timing in result.requests:
+        # One prefill step yields the first token, then one token per step.
+        expected = [timing.arrival_time + k * step_s for k in range(1, 9)]
+        assert timing.num_output_tokens == 8
+        assert timing.token_times == pytest.approx(expected)
+        assert timing.finish_time == pytest.approx(expected[-1])
+    assert result.duration == pytest.approx(10.0 + 8 * step_s)
+    assert result.summary()["mean_tpot_ms"] == pytest.approx(step_s * 1e3)
+
+
+def test_simulate_offline_host_time_holds_engine_thread() -> None:
+    """A step whose host time exceeds its device time paces the run by the
+    host time: the next step cannot start before the engine thread is free."""
+    if not (current_platform.is_cpu() or current_platform.is_cuda_alike()):
+        pytest.skip("Simulated forward needs the CPU or a CUDA-alike platform.")
+    from vllm.engine.arg_utils import EngineArgs
+    from vllm.v1.worker.simulated.offline import TimedRequest, simulate
+
+    args = EngineArgs(
+        model="Qwen/Qwen3-0.6B",
+        max_model_len=1024,
+        kv_cache_memory_bytes=1024**3,
+        simulation_config={
+            "simulate_forward": True,
+            "clock": "virtual",
+            "timing": "constant",
+            "timing_args": {"fixed_us": 1000, "host_us": 3000},
+        },
+    )
+    params = SamplingParams(max_tokens=8, ignore_eos=True)
+    result = simulate(args, [TimedRequest(list(range(16)), params)])
+    # Under async scheduling step k+1's host work runs before step k's output
+    # is consumed. Nothing follows the last step, so its device time ends with
+    # that host work and its token arrives together with the previous one.
+    assert result.requests[0].itls == pytest.approx([3e-3] * 6 + [0.0])

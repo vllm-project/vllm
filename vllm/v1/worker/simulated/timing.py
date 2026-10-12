@@ -12,9 +12,11 @@ step decomposes into kernels is the provider's business.
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import json
 import time
+from collections.abc import Iterator
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
@@ -489,6 +491,74 @@ class RealClock:
         remaining = deadline - time.monotonic()
         if remaining > 0:
             time.sleep(remaining)
+
+
+class VirtualClock:
+    """Simulated time: waiting for a deadline moves the clock to it at once.
+
+    With the in-process engine the worker and the driver share one process
+    and therefore one `VIRTUAL_CLOCK`. The engine's own host loop
+    (scheduling, output processing) takes no simulated time; a step's
+    predicted `host_s` still holds the engine thread."""
+
+    def __init__(self) -> None:
+        self._now = 0.0
+
+    def now(self) -> float:
+        return self._now
+
+    def sleep_until(self, deadline: float) -> None:
+        self._now = max(self._now, deadline)
+
+
+class FastForwardClock:
+    """The wall clock with waits skipped: host work takes its real time, and
+    waiting for a deadline shifts the clock forward instead of sleeping. With
+    the in-process engine nothing else runs while the engine core waits for a
+    step, so this reproduces the `real` clock's timeline in a fraction of the
+    time, host overheads included."""
+
+    def __init__(self) -> None:
+        self._offset = 0.0
+
+    def now(self) -> float:
+        return time.monotonic() + self._offset
+
+    def sleep_until(self, deadline: float) -> None:
+        self._offset += max(0.0, deadline - self.now())
+
+
+# One instance per process, shared by the in-process engine's worker and the
+# driver that timestamps requests.
+VIRTUAL_CLOCK = VirtualClock()
+FAST_FORWARD_CLOCK = FastForwardClock()
+_building_driven_engine = False
+
+
+@contextlib.contextmanager
+def building_driven_engine() -> Iterator[None]:
+    """Engines built in this context run in the process of a driver that
+    reads the same clock (`vllm.v1.worker.simulated.offline`)."""
+    global _building_driven_engine
+    _building_driven_engine = True
+    try:
+        yield
+    finally:
+        _building_driven_engine = False
+
+
+def is_building_driven_engine() -> bool:
+    return _building_driven_engine
+
+
+def get_clock(kind: str) -> Clock:
+    if kind == "real":
+        return RealClock()
+    if kind == "virtual":
+        return VIRTUAL_CLOCK
+    if kind == "fast_forward":
+        return FAST_FORWARD_CLOCK
+    raise ValueError(f"unknown clock {kind!r}")
 
 
 class SimulatedAsyncOutput(AsyncModelRunnerOutput):

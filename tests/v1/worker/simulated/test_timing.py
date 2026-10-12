@@ -11,6 +11,7 @@ from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.worker.simulated.timing import (
     BUILTIN_TIMING_PROVIDERS,
     ConstantTimingProvider,
+    FastForwardClock,
     RealClock,
     ReplayTimingProvider,
     SimRequestStep,
@@ -20,6 +21,7 @@ from vllm.v1.worker.simulated.timing import (
     StepLogWriter,
     TableTimingProvider,
     TimingProvider,
+    VirtualClock,
     ZeroTimingProvider,
     get_timing_provider,
 )
@@ -185,6 +187,20 @@ def test_replay_and_table_return_recorded_host_time(tmp_path):
     table = TableTimingProvider(_Cfg(), path=str(log), k=1)  # type: ignore[arg-type]
     cost = table.estimate(_step(2, _req("b", 1, 500, 500)))
     assert (cost.device_s, cost.host_s) == pytest.approx((0.002, 0.001))
+
+
+def test_clocks():
+    virtual = VirtualClock()
+    virtual.sleep_until(1.5)
+    virtual.sleep_until(1.0)
+    assert virtual.now() == 1.5
+
+    ff = FastForwardClock()
+    t0 = time.monotonic()
+    target = ff.now() + 10.0
+    ff.sleep_until(target)
+    assert time.monotonic() - t0 < 1.0
+    assert ff.now() >= target
 
 
 def test_build_step_descriptor_from_scheduler_output():

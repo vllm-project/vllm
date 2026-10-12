@@ -118,11 +118,59 @@ On Qwen3-0.6B / H200 with `vllm bench serve` (ISL 512, OSL 64, 10 rps,
 64 prompts), replaying a recording of the same workload reproduces the real
 run within 2% on mean, median and P99 TTFT, TPOT and ITL.
 
+### Offline runs in simulated time
+
+`vllm.v1.worker.simulated.offline` drives an in-process engine with a timed
+arrival schedule and timestamps every output token, so a workload can be run
+without waiting for it:
+
+```python
+from vllm.engine.arg_utils import EngineArgs
+from vllm.sampling_params import SamplingParams
+from vllm.v1.worker.simulated.offline import TimedRequest, simulate
+
+requests = [
+    TimedRequest(prompt_token_ids=list(range(512)),
+                 sampling_params=SamplingParams(max_tokens=128, ignore_eos=True),
+                 arrival_time=0.05 * i)
+    for i in range(200)
+]
+result = simulate(
+    EngineArgs(
+        model="Qwen/Qwen3-0.6B",
+        kv_cache_memory_bytes=8 * 1024**3,
+        simulation_config={"simulate_forward": True, "clock": "fast_forward",
+                           "timing": "replay",
+                           "timing_args": {"path": "/tmp/real_steps.jsonl"}},
+    ),
+    requests,
+)
+print(result.summary())  # TTFT/TPOT/ITL/E2E percentiles, as vllm bench serve
+```
+
+`simulation_config.clock` selects the time base:
+
+| `clock` | waits (device time, idle gaps between arrivals) | engine host loop (scheduling, output processing) | use |
+|---|---|---|---|
+| `real` (default) | slept | real time | serving; the wall-clock baseline |
+| `fast_forward` | skipped | real time | sweeps: same latencies as `real` in a fraction of the time |
+| `virtual` | skipped | free | deterministic runs (CI, scheduler research); underestimates host-bound workloads |
+
+Under every clock a step's predicted `host_s` holds the engine thread. The
+non-real clocks need an engine built by `make_engine()` (which `simulate()`
+calls), so that the engine core runs in the driver's process. A run takes as long as the engine's host
+work, roughly 1 ms per step, so the speedup over real time is the step time
+of the modeled deployment divided by that. `make_engine()` and `run()` also drive a
+real (non-simulated) engine on the real clock, which is how the
+reference for a comparison is produced.
+[examples/features/simulated_execution/sweep_offline.py](../../examples/features/simulated_execution/sweep_offline.py)
+sweeps `max_num_seqs` this way.
+
 ## Limitations
 
 * Single rank: tensor, pipeline and data parallelism are rejected. The
   parallel configuration is passed to the provider for modeling purposes only.
 * No speculative decoding, LoRA, KV transfer or pooling models.
-* Time is real time: a simulated run takes as long as the deployment it
-  models. An offline virtual clock for fast sweeps is planned.
+* The `fast_forward` and `virtual` clocks are offline-only and single-process;
+  served simulations run in real time.
 * Prompt and output token ids are not meaningful; only their counts are.

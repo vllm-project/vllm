@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Configuration for simulated execution."""
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import Field
 
@@ -30,6 +30,17 @@ class SimulationConfig:
 
     timing_args: dict[str, Any] = Field(default_factory=dict)
     """Keyword arguments passed to the timing provider."""
+
+    clock: Literal["real", "virtual", "fast_forward"] = "real"
+    """`real`: a simulated step takes its predicted time on the wall clock, so
+    the server, benchmark clients and metrics observe realistic latencies.
+    The other two need `simulate_forward` and an engine built by
+    `vllm.v1.worker.simulated.offline`, whose driver timestamps requests on
+    the same clock. `fast_forward`: host work takes its wall time and only the
+    waits (device time, idle gaps between arrivals) are skipped.
+    `virtual`: the waits are skipped and the engine's own host loop
+    (scheduling, output processing) takes no time either, which makes runs
+    deterministic; a step's predicted `host_s` is still charged."""
 
     log_path: str | None = None
     """If set, append one JSON line per step (the step descriptor, its cost and

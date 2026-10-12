@@ -32,14 +32,15 @@ from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 from vllm.v1.worker.simulated.timing import (
-    RealClock,
     SimulatedAsyncOutput,
     StepCost,
     StepDescriptor,
     StepLogWriter,
     ZeroTimingProvider,
     build_step_descriptor,
+    get_clock,
     get_timing_provider,
+    is_building_driven_engine,
     parallel_summary,
 )
 
@@ -67,7 +68,13 @@ class SimulatedModelRunner(GPUModelRunner):
         self.timing_provider = get_timing_provider(
             sim.timing, dict(sim.timing_args), vllm_config
         )
-        self.clock = RealClock()
+        if sim.clock != "real" and not is_building_driven_engine():
+            raise ValueError(
+                f"The {sim.clock} clock needs the engine core in the process of "
+                "a driver reading the same clock; build the engine with "
+                "vllm.v1.worker.simulated.offline.make_engine()."
+            )
+        self.clock = get_clock(sim.clock)
         self.step_log = StepLogWriter(sim.log_path) if sim.log_path else None
         self.fallback_token_id = sim.fallback_token_id
         self._pending_step: _PendingStep | None = None
