@@ -156,6 +156,29 @@ vllm serve Cloudflare/clef-omni
   with it when every video has one. Audio clips cannot be sent together with
   videos that have soundtracks.
 
+## Liquid d1
+
+[`LiquidAI/d1-3B`](https://huggingface.co/LiquidAI/d1-3B) is LFM2.5-VL-3B
+post-trained to answer decisions as the first token of its reply. vLLM serves
+it as a generative model.
+
+```bash
+vllm serve LiquidAI/d1-3B
+```
+
+- The server writes the prompt and reads the label tokens the way the
+  `prompt.py` shipped with the checkpoint does, so picks and probabilities
+  match `model.system_one()`. `confidence` and `usage` follow the definitions
+  on this page instead.
+- A JSON state is written as indented JSON. A `null` state leaves the images,
+  or the question alone, as the prompt.
+- `images` are placed before the state and shrunk to at most 1024 x 1024
+  pixels, as the reference does.
+- A `choice` whose option names are all single letters is labeled with those
+  letters.
+- When each request carries one question over a state that changes from
+  request to request, `--no-enable-prefix-caching` lowers latency.
+
 ## Request fields
 
 | field | meaning |
@@ -165,7 +188,7 @@ vllm serve Cloudflare/clef-omni
 | `instructions` | optional context placed ahead of the questions |
 | `chat_template_kwargs` | passed to the chat template, for example `{"enable_thinking": false}` |
 | `cache_salt` | optional [prefix-cache salt](../../usage/security.md#cache-salting) applied to every question |
-| `images`, `audio`, `videos` | optional media URLs or data URLs, for models that take them ([Clef-Omni](#clef-omni)) |
+| `images`, `audio`, `videos` | optional media URLs or data URLs, for models that take them ([Clef-Omni](#clef-omni), [Liquid d1](#liquid-d1), images only) |
 
 A question with any field other than `type`, `instructions` and `criteria` is
 rejected with a 400.
