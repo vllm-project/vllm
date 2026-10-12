@@ -120,48 +120,23 @@ def test_rocm_sparse_mla_supports_glm_packed_layout():
 
 
 @pytest.mark.parametrize(
-    (
-        "kv_cache_dtype",
-        "head_size",
-        "num_prefills",
-        "num_decodes",
-        "num_decode_tokens",
-        "max_query_len",
-        "expected",
-    ),
+    ("head_size", "num_prefills", "num_decodes", "expected"),
     [
-        ("auto", 512, 1, 0, 0, 32, True),
-        ("auto", 512, 1, 2, 2, 32, True),
-        ("auto", 512, 0, 2, 2, 1, True),
-        ("fp8", 512, 1, 0, 0, 32, True),
-        ("fp8_e4m3", 512, 0, 2, 2, 1, True),
-        ("auto", 576, 1, 0, 0, 32, False),
-        ("auto", 512, 0, 2, 4, 2, True),
-        ("auto", 512, 0, 2, 12, 6, True),
-        ("fp8", 512, 0, 2, 12, 6, True),
-        ("fp8", 576, 1, 0, 0, 32, False),
-        ("auto", 512, 0, 0, 0, 0, True),
+        (512, 1, 0, True),
+        (512, 1, 2, True),
+        (512, 0, 2, True),
+        (576, 1, 0, False),
+        (512, 0, 0, False),
     ],
 )
-def test_rocm_sparse_triton_route(
-    kv_cache_dtype,
-    head_size,
-    num_prefills,
-    num_decodes,
-    num_decode_tokens,
-    max_query_len,
-    expected,
-):
+def test_rocm_sparse_triton_route(head_size, num_prefills, num_decodes, expected):
     """Validate Triton routing for prefill, decode, and MTP verification."""
     assert (
         _use_rocm_sparse_triton(
-            kv_cache_dtype=kv_cache_dtype,
             head_size=head_size,
             kv_lora_rank=512,
             num_prefills=num_prefills,
             num_decodes=num_decodes,
-            num_decode_tokens=num_decode_tokens,
-            max_query_len=max_query_len,
         )
         is expected
     )

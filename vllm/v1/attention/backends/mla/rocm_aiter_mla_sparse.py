@@ -55,13 +55,10 @@ logger = init_logger(__name__)
 
 def _use_rocm_sparse_triton(
     *,
-    kv_cache_dtype: str,
     head_size: int,
     kv_lora_rank: int,
     num_prefills: int,
     num_decodes: int,
-    num_decode_tokens: int,
-    max_query_len: int,
 ) -> bool:
     """Select the rope-free path not supported by AITER sparse MLA.
 
@@ -71,8 +68,7 @@ def _use_rocm_sparse_triton(
     precompiled kernels assume a 576-element DeepSeek row (512 latent + 64
     RoPE), so they cannot serve a 512-element NoPE row.
     """
-    del kv_cache_dtype  # NoPE routing is geometry-based for every KV dtype.
-    return head_size == kv_lora_rank
+    return head_size == kv_lora_rank and (num_prefills > 0 or num_decodes > 0)
 
 
 @triton.jit
@@ -648,13 +644,10 @@ class ROCMAiterMLASparseMetadataBuilder(
         # fingerprint those CPU-side and skip the launch when nothing changed.
         head_size = self.mla_dims.kv_lora_rank + self.mla_dims.qk_rope_head_dim
         use_triton_sparse = _use_rocm_sparse_triton(
-            kv_cache_dtype=self.kv_cache_dtype,
             head_size=head_size,
             kv_lora_rank=self.mla_dims.kv_lora_rank,
             num_prefills=num_prefills,
             num_decodes=num_decodes,
-            num_decode_tokens=num_decode_tokens,
-            max_query_len=common_attn_metadata.max_query_len,
         )
         work_meta_data = None
         work_indptr = None
@@ -894,13 +887,10 @@ class ROCMAiterMLASparseImpl(
         )
 
         if triton_sink_fallback or _use_rocm_sparse_triton(
-            kv_cache_dtype=self.kv_cache_dtype,
             head_size=q.shape[-1],
             kv_lora_rank=self.kv_lora_rank,
             num_prefills=attn_metadata.num_prefills,
             num_decodes=attn_metadata.num_decodes,
-            num_decode_tokens=attn_metadata.num_decode_tokens,
-            max_query_len=attn_metadata.max_query_len,
         ):
             output = torch.empty(
                 [num_tokens, q.shape[1], self.kv_lora_rank],
@@ -1150,13 +1140,10 @@ class ROCMAiterMLASparseImpl(
         head_size = sum(t.shape[-1] for t in q) if isinstance(q, tuple) else q.shape[-1]
         # The AITER sparse MLA opt-in takes precedence and reads FP8 Q.
         use_triton_sparse = not self.use_aiter_sparse_mla and _use_rocm_sparse_triton(
-            kv_cache_dtype=self.kv_cache_dtype,
             head_size=head_size,
             kv_lora_rank=self.kv_lora_rank,
             num_prefills=attn_metadata.num_prefills,
             num_decodes=attn_metadata.num_decodes,
-            num_decode_tokens=attn_metadata.num_decode_tokens,
-            max_query_len=attn_metadata.max_query_len,
         )
         if isinstance(q, tuple):
             ql_nope, q_pe = q
