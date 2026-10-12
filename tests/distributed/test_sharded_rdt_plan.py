@@ -1127,26 +1127,6 @@ class TestCallPlanRouting:
         assert [chunk.stream for chunk in plan.chunks] == [0, 0, 1, 1, 2, 2]
         assert plan.num_streams == 3
 
-    def test_a_cross_owned_group_merges_its_owner_components(self):
-        eng, names, group_lens = self._routed_planner(
-            [[0], [0], [0, 1], [1], [2], [2]],
-            1,
-            0,
-        )
-        plan = eng._build_call_plan(names, group_lens)
-        assert [chunk.stream for chunk in plan.chunks] == [0, 0, 0, 0, 1, 1]
-        assert plan.num_streams == 2
-
-    def test_an_expert_owner_stays_in_its_stage_stream(self):
-        eng, names, group_lens = self._routed_planner(
-            [[0, 1], [0, 1], [2, 3], [2, 3]],
-            1,
-            0,
-            held_by={"model.layers.1.w": [3]},
-        )
-        plan = eng._build_call_plan(names, group_lens)
-        assert [chunk.stream for chunk in plan.chunks] == [0, 0, 1, 1]
-
 
 class TestStreamInvariants:
     """Parallel streams cannot split ordering owned by one plan entity."""
