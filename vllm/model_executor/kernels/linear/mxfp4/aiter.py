@@ -6,6 +6,7 @@ from torch.nn.parameter import Parameter
 
 import vllm.envs as envs
 from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
+from vllm.config import CompilationMode, get_current_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp4Dynamic,
@@ -157,11 +158,25 @@ if is_aiter_found_and_supported():
 class AiterMxfp4LinearKernel(MxFp4LinearKernel):
     """AITER-based native MXFP4 GEMM kernel for ROCm."""
 
+    # class level so a kernel built without __init__ (object.__new__, as the
+    # tests do) keeps the single gemm_with_dynamic_quant call
+    fold_act_quant = False
+    split_act_quant = False
+
     def __init__(self, config: MxFp4LinearLayerConfig) -> None:
         super().__init__(config)
         self.asm_gemm_supported = rocm_aiter_ops.is_asm_fp4_gemm_supported()
         self.use_asm_gemm = False
         self.out_dtype = torch.get_default_dtype()
+        # only emit the quant as its own op when a pass will fold it, so eager
+        # mode and -O0 keep the single gemm_with_dynamic_quant call
+        compilation_config = get_current_vllm_config().compilation_config
+        pass_config = compilation_config.pass_config
+        compiled = compilation_config.mode == CompilationMode.VLLM_COMPILE
+        self.fold_act_quant = compiled and (
+            bool(pass_config.fuse_act_quant)
+            or bool(pass_config.fuse_norm_quant and pass_config.fuse_norm_mxfp4_quant)
+        )
         self.split_act_quant = False
 
     @classmethod
@@ -222,9 +237,10 @@ class AiterMxfp4LinearKernel(MxFp4LinearKernel):
             self.use_asm_gemm = False
 
         # the MXFP4 quant fusions only cover the Triton afp4wfp4 path
-        self.split_act_quant = not self.use_asm_gemm and (
-            bool(rocm_aiter_ops.is_mxfp4_silu_quant_fusion_enabled())
-            or bool(rocm_aiter_ops.is_mxfp4_rmsnorm_quant_fusion_enabled())
+        self.split_act_quant = (
+            not self.use_asm_gemm
+            and self.fold_act_quant
+            and bool(rocm_aiter_ops.is_mxfp4_quant_fusion_supported())
         )
 
         if self.use_asm_gemm:

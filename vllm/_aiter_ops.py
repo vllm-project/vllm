@@ -2292,8 +2292,6 @@ class rocm_aiter_ops:
     _MOE_SITUV2 = _resolve_situv2_activation()
     # TODO: Consolidate under _LINEAR_ENABLED
     _TRITON_UNQUANT_GEMM = envs.VLLM_ROCM_USE_AITER_TRITON_GEMM
-    _MXFP4_SILU_QUANT_FUSION = envs.VLLM_ROCM_USE_AITER_MXFP4_SILU_QUANT_FUSION
-    _MXFP4_RMSNORM_QUANT_FUSION = envs.VLLM_ROCM_USE_AITER_MXFP4_RMSNORM_QUANT_FUSION
     # Lazily probed: whether aiter.topk_softmax supports the
     # num_shared_experts / shared_expert_scoring_func args (7-arg form).
     _TOPK_SOFTMAX_FUSED_SIGMOID: bool | None = None
@@ -2324,10 +2322,6 @@ class rocm_aiter_ops:
         _sync_aiter_situv2_moe_env()
         cls._TRITON_UNQUANT_GEMM = envs.VLLM_ROCM_USE_AITER_TRITON_GEMM
         cls._MOE_DISPATCH_POLICY = envs.VLLM_ROCM_AITER_MOE_DISPATCH_POLICY
-        cls._MXFP4_SILU_QUANT_FUSION = envs.VLLM_ROCM_USE_AITER_MXFP4_SILU_QUANT_FUSION
-        cls._MXFP4_RMSNORM_QUANT_FUSION = (
-            envs.VLLM_ROCM_USE_AITER_MXFP4_RMSNORM_QUANT_FUSION
-        )
 
     @staticmethod
     def get_aiter_activation_type(activation_str: str) -> "ActivationType | None":
@@ -2684,21 +2678,10 @@ class rocm_aiter_ops:
 
     @classmethod
     @if_aiter_supported
-    def is_mxfp4_silu_quant_fusion_enabled(cls) -> bool:
-        return (
-            cls._AITER_ENABLED
-            and cls._MXFP4_SILU_QUANT_FUSION
-            and cls._fused_mxfp4_quant_supported()
-        )
-
-    @classmethod
-    @if_aiter_supported
-    def is_mxfp4_rmsnorm_quant_fusion_enabled(cls) -> bool:
-        return (
-            cls._AITER_ENABLED
-            and cls._MXFP4_RMSNORM_QUANT_FUSION
-            and cls._fused_mxfp4_quant_supported()
-        )
+    def is_mxfp4_quant_fusion_supported(cls) -> bool:
+        # which fold runs is up to fuse_act_quant / fuse_norm_quant +
+        # fuse_norm_mxfp4_quant in the pass config
+        return cls._AITER_ENABLED and cls._fused_mxfp4_quant_supported()
 
     @classmethod
     @if_aiter_supported

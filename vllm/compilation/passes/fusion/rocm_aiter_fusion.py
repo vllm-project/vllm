@@ -702,7 +702,7 @@ class AiterRMSNormMxfp4QuantPattern:
     ``rocm_aiter_dynamic_mxfp4_quant`` that the MXFP4 linear emits when one of
     the MXFP4 quant fusions is enabled. Not bitwise equal to the unfused pair
     (the fused kernel reduces the norm in a different order), so it is only
-    registered with VLLM_ROCM_USE_AITER_MXFP4_RMSNORM_QUANT_FUSION.
+    registered with pass_config.fuse_norm_mxfp4_quant.
     """
 
     QUANT_OP = rocm_aiter_ops.get_dynamic_mxfp4_quant_op()
@@ -899,7 +899,10 @@ class RocmAiterRMSNormQuantFusionPass(VllmPatternMatcherPass):
                         match_aiter_quant=match_aiter_quant_op,
                     ).register(self.patterns)
 
-            if rocm_aiter_ops.is_mxfp4_rmsnorm_quant_fusion_enabled():
+            if (
+                config.compilation_config.pass_config.fuse_norm_mxfp4_quant
+                and rocm_aiter_ops.is_mxfp4_quant_fusion_supported()
+            ):
                 AiterFusedAddRMSNormMxfp4QuantPattern(epsilon).register(self.patterns)
                 AiterRMSNormMxfp4QuantPattern(epsilon).register(self.patterns)
 
@@ -974,10 +977,10 @@ class AiterSiluMulMxfp4QuantPattern(VllmPatternReplacement):
     ``fused_reduce_act_mul_and_mxfp4_quant``, the MXFP4 analog of
     ``AiterSiluMulFp8GroupQuantPattern``. The MXFP4 linear path emits the
     activation quant as a standalone ``rocm_aiter_dynamic_mxfp4_quant`` op when
-    VLLM_ROCM_USE_AITER_MXFP4_SILU_QUANT_FUSION is on (the default), so the
-    down_proj input (SiLU-mul of gate_up) matches here. The fused kernel is
-    called with ``round_to_input_dtype`` so the result is bitwise equal to the
-    compiled native silu_and_mul + quant. With ``+silu_and_mul`` the _C kernel
+    fuse_act_quant is on, so the down_proj input (SiLU-mul of gate_up) matches
+    here. The fused kernel is called with ``round_to_input_dtype`` so the
+    result is bitwise equal to the compiled native silu_and_mul + quant. With
+    ``+silu_and_mul`` the _C kernel
     rounds silu before the multiply, so there it can be one fp4 code off.
     """
 
@@ -1025,7 +1028,7 @@ class RocmAiterSiluMulFp8GroupQuantFusionPass(VllmFusionPatternMatcherPass):
         self.register(
             AiterSiluMulFp8GroupQuantPattern(match_aiter_quant_op=match_aiter_quant_op)
         )
-        if rocm_aiter_ops.is_mxfp4_silu_quant_fusion_enabled():
+        if rocm_aiter_ops.is_mxfp4_quant_fusion_supported():
             self.register(AiterSiluMulMxfp4QuantPattern())
 
         self.dump_patterns(config, self.pm_pass)
