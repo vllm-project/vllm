@@ -130,10 +130,6 @@ class RocmAiterUnifiedAttentionBackend(RocmAttentionBackend):
         return (KVCacheLayout.LBHNC, KVCacheLayout.LHBNC)
 
     @staticmethod
-    def use_cascade_attention(*args, **kwargs) -> bool:
-        return False
-
-    @staticmethod
     def get_builder_cls() -> type["RocmAiterUnifiedAttentionMetadataBuilder"]:
         return RocmAiterUnifiedAttentionMetadataBuilder
 
@@ -236,8 +232,6 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
         if attn_metadata is None:
             # Profiling run.
             return output.fill_(0)
-
-        assert attn_metadata.use_cascade is False
 
         # IMPORTANT!
         # NOTE(woosuk): With piece-wise CUDA graphs, this method is executed in
