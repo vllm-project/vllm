@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from vllm.tool_parsers.abstract_tool_parser import (
+from vllm.tool_parsers.abstract_tool_parser import ( # circular import
     ToolParser,
     ToolParserManager,
 )
