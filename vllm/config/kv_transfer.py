@@ -62,7 +62,9 @@ class KVTransferConfig:
     """
 
     engine_id: str | None = None
-    """The engine id for KV transfers."""
+    """The engine id for KV transfers. Peers use it to identify each other, so
+    it must be unique per vLLM instance. Leave it unset to generate a random
+    id."""
 
     kv_buffer_device: str = field(default_factory=kv_buffer_device_default_factory)
     """The device used by kv connector to buffer the KV cache. Choices are
