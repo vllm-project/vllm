@@ -5,6 +5,9 @@
 import torch
 
 from vllm import _custom_ops as ops
+from vllm.model_executor.layers.quantization.compressed_tensors.triton_scaled_mm import (  # noqa: E501
+    triton_scaled_mm,
+)
 from vllm.model_executor.layers.quantization.utils import replace_parameter
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
@@ -25,7 +28,6 @@ from .ScaledMMLinearKernel import (
     FP8ScaledMMLinearLayerConfig,
     Int8ScaledMMLinearLayerConfig,
 )
-from .triton_scaled_mm import triton_scaled_mm
 
 
 class TritonFp8PerTokenScaledMMKernel(FP8ScaledMMLinearKernel):
@@ -234,11 +236,46 @@ def _w8a8_triton_per_token_scaled_mm_func(
     bias: torch.Tensor | None,
 ) -> torch.Tensor:
     from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-        w8a8_triton_per_token_scaled_mm,
+        get_w8a8_per_token_fp8_config,
     )
 
-    return w8a8_triton_per_token_scaled_mm(
-        qx, weight, x_scale, weight_scale, output_dtype, bias
+    config = None
+    if qx.stride(1) == 1 and weight.stride(0) == 1:
+        config = get_w8a8_per_token_fp8_config(
+            qx.size(0), weight.size(1), qx.size(1), qx.dtype, output_dtype
+        )
+    if config is None:
+        return triton_scaled_mm(qx, weight, x_scale, weight_scale, output_dtype, bias)
+
+    # Configs select the device/dtypes; retain the measured scale/bias contract.
+    group_m, n_stripe, unmasked_loads = 1, 0, False
+    if x_scale.dtype == weight_scale.dtype == torch.float32:
+        n_stripe = config.get("N_STRIPE", 0)
+        unmasked_loads = bool(config.get("UNMASKED_LOADS", False))
+        if (
+            bias is None
+            and x_scale.numel() != 1
+            and weight_scale.numel() != 1
+            and x_scale.is_contiguous()
+            and weight_scale.is_contiguous()
+        ):
+            group_m = config.get("GROUP_M", 1)
+    return triton_scaled_mm(
+        qx,
+        weight,
+        x_scale,
+        weight_scale,
+        output_dtype,
+        bias,
+        use_heuristic=False,
+        block_size_m=config["BLOCK_SIZE_M"],
+        block_size_n=config["BLOCK_SIZE_N"],
+        block_size_k=config["BLOCK_SIZE_K"],
+        num_warps=config["num_warps"],
+        num_stages=config["num_stages"],
+        group_m=group_m,
+        n_stripe=n_stripe,
+        unmasked_loads=unmasked_loads,
     )
 
 

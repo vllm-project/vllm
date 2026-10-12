@@ -806,7 +806,7 @@ def cutlass_scaled_mm(
 
     cutlass_compatible_b = b.shape[0] % 16 == 0 and b.shape[1] % 16 == 0
     if current_platform.is_rocm() or not cutlass_compatible_b:
-        from vllm.model_executor.kernels.linear.scaled_mm.triton_scaled_mm import (
+        from vllm.model_executor.layers.quantization.compressed_tensors.triton_scaled_mm import (  # noqa
             triton_scaled_mm,
         )
 

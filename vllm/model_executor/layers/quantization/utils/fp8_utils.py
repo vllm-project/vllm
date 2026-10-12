@@ -972,59 +972,6 @@ def get_w8a8_per_token_fp8_config(
     return config
 
 
-def w8a8_triton_per_token_scaled_mm(
-    A: torch.Tensor,
-    B: torch.Tensor,
-    As: torch.Tensor,
-    Bs: torch.Tensor,
-    output_dtype: torch.dtype = torch.bfloat16,
-    bias: torch.Tensor | None = None,
-) -> torch.Tensor:
-    """Apply per-token/per-channel FP8 scales to A[M,K] @ B[K,N]."""
-    from vllm.model_executor.kernels.linear.scaled_mm.triton_scaled_mm import (
-        triton_scaled_mm,
-    )
-
-    config = None
-    if A.stride(1) == 1 and B.stride(0) == 1:
-        config = get_w8a8_per_token_fp8_config(
-            A.size(0), B.size(1), A.size(1), A.dtype, output_dtype
-        )
-    if config is None:
-        return triton_scaled_mm(A, B, As, Bs, output_dtype, bias)
-
-    # Configs select the device/dtypes; retain the measured scale/bias contract.
-    group_m, n_stripe, unmasked_loads = 1, 0, False
-    if As.dtype == Bs.dtype == torch.float32:
-        n_stripe = config.get("N_STRIPE", 0)
-        unmasked_loads = bool(config.get("UNMASKED_LOADS", False))
-        if (
-            bias is None
-            and As.numel() != 1
-            and Bs.numel() != 1
-            and As.is_contiguous()
-            and Bs.is_contiguous()
-        ):
-            group_m = config.get("GROUP_M", 1)
-    return triton_scaled_mm(
-        A,
-        B,
-        As,
-        Bs,
-        output_dtype,
-        bias,
-        use_heuristic=False,
-        block_size_m=config["BLOCK_SIZE_M"],
-        block_size_n=config["BLOCK_SIZE_N"],
-        block_size_k=config["BLOCK_SIZE_K"],
-        num_warps=config["num_warps"],
-        num_stages=config["num_stages"],
-        group_m=group_m,
-        n_stripe=n_stripe,
-        unmasked_loads=unmasked_loads,
-    )
-
-
 @functools.lru_cache
 def get_w8a8_block_fp8_configs(
     N: int, K: int, block_n: int, block_k: int

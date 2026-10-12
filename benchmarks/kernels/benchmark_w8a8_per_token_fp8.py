@@ -29,7 +29,7 @@ from pathlib import Path
 
 import torch
 
-from vllm.model_executor.kernels.linear.scaled_mm.triton_scaled_mm import (
+from vllm.model_executor.layers.quantization.compressed_tensors.triton_scaled_mm import (  # noqa: E501
     triton_scaled_mm,
 )
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (

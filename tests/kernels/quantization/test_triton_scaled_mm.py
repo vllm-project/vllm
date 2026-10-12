@@ -18,7 +18,7 @@ from vllm.utils.torch_utils import set_random_seed
 device = current_platform.device_type
 
 triton_scaled_mm_module = importlib.import_module(
-    "vllm.model_executor.kernels.linear.scaled_mm.triton_scaled_mm"
+    "vllm.model_executor.layers.quantization.compressed_tensors.triton_scaled_mm"
 )
 triton_scaled_mm = triton_scaled_mm_module.triton_scaled_mm
 fp8_utils_module = importlib.import_module(
@@ -535,7 +535,7 @@ def test_triton_fp8_launch_policies_preserve_mutated_graph_inputs(
     padded_a[:, :k].copy_(a)
     padded_b[:, :k].copy_(b.t())
     bias = torch.randn(n, device=device, dtype=torch.bfloat16)
-    actual = fp8_utils_module.w8a8_triton_per_token_scaled_mm(
+    actual = torch.ops.vllm.w8a8_triton_per_token_scaled_mm_func(
         padded_a[:, :k], padded_b[:, :k].t(), sa, sb, torch.bfloat16, bias
     )
     expected = torch_scaled_mm(a, b, sa, sb, torch.bfloat16, bias)
