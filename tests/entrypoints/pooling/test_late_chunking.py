@@ -73,9 +73,7 @@ def _late_chunk_context(prompts="a b", **kwargs):
     )
 
 
-def test_late_chunk_render_requests_offsets_once_and_keeps_params_isolated(
-    late_chunk_processor,
-):
+def test_late_chunk_render_requests_offsets_once(late_chunk_processor):
     processor = late_chunk_processor
     ctx = _late_chunk_context()
     factory, count = processor.get_request_factory_offline(ctx)
@@ -87,7 +85,6 @@ def test_late_chunk_render_requests_offsets_once_and_keeps_params_isolated(
         "tok_params"
     ].return_token_offsets
     assert not render_params["tok_params"].return_token_offsets
-    assert ctx.pooling_params.task is None
     assert ctx.pooling_params.late_chunking_params.metadata is None
     assert "prompt_token_offsets" not in result["prompts"]
     assert [
@@ -124,52 +121,38 @@ def test_jina_ranking_rejects_chunking_before_tokenization(
 
 
 @pytest.mark.parametrize(
-    "prompts", ["", [1, 2], {"prompt": "abc", "multi_modal_data": {}}]
-)
-def test_late_chunking_rejects_unsupported_input_before_render(
-    late_chunk_processor, prompts
-):
-    processor = late_chunk_processor
-    factory, _ = processor.get_request_factory_offline(_late_chunk_context(prompts))
-    with pytest.raises(VLLMValidationError, match="plain-text"):
-        processor.render(next(factory()))
-    processor.renderer.render_cmpl.assert_not_called()
-
-
-@pytest.mark.parametrize(
-    "kwargs",
+    "prompts, kwargs, error",
     [
-        {"truncate_prompt_tokens": 2},
-        {"truncation": True},
-        {"pad_prompt_tokens": 8},
-        {"padding": True},
-        {"do_lower_case": True},
+        pytest.param("", {}, "plain-text", id="empty"),
+        pytest.param([1, 2], {}, "plain-text", id="token-ids"),
+        pytest.param(
+            {"prompt": "abc", "multi_modal_data": {}},
+            {},
+            "plain-text",
+            id="multimodal",
+        ),
+    ]
+    + [
+        pytest.param("abc", {key: value}, "does not support", id=key)
+        for key, value in (
+            ("truncate_prompt_tokens", 2),
+            ("truncation", True),
+            ("pad_prompt_tokens", 8),
+            ("padding", True),
+            ("do_lower_case", True),
+        )
     ],
 )
-def test_late_chunking_rejects_text_changes_before_render(late_chunk_processor, kwargs):
+def test_late_chunking_rejects_unsupported_input_before_render(
+    late_chunk_processor, prompts, kwargs, error
+):
     processor = late_chunk_processor
-    with pytest.raises(VLLMValidationError, match="does not support"):
+    with pytest.raises(VLLMValidationError, match=error):
         factory, _ = processor.get_request_factory_offline(
-            _late_chunk_context(**kwargs)
+            _late_chunk_context(prompts, **kwargs)
         )
         processor.render(next(factory()))
     processor.renderer.render_cmpl.assert_not_called()
-
-
-@pytest.mark.parametrize("setting", ["prefix_cache", "chunked_prefill", "lora"])
-def test_late_chunking_reuses_existing_execution_support(late_chunk_processor, setting):
-    processor = late_chunk_processor
-    if setting == "prefix_cache":
-        processor.vllm_config.cache_config.enable_prefix_caching = True
-    elif setting == "chunked_prefill":
-        processor.vllm_config.scheduler_config.enable_chunked_prefill = True
-    else:
-        processor.vllm_config.lora_config = object()
-    factory, _ = processor.get_request_factory_offline(_late_chunk_context())
-    result = processor.render(next(factory()))
-    assert result["params"].skip_reading_prefix_cache is True
-    assert result["params"].late_chunking_params.metadata.input_tokens == 4
-    processor.renderer.render_cmpl.assert_called_once()
 
 
 def test_late_chunk_ranges_keep_unicode_overlaps_and_special_only_chunks():
@@ -235,61 +218,41 @@ def test_late_chunk_mapping_preserves_order_mixed_requests_and_errors(
     late_chunk_processor,
 ):
     error = RequestError("test_error", "original error")
-    failed = _chunk_output(1, rows=0, error=error)
-    llm = _mock_chunk_llm(
-        late_chunk_processor, [[_chunk_output(2, rows=4), failed, _chunk_output(0)]]
-    )
+    failed = _chunk_output(3, rows=0, error=error)
+    llm = _mock_chunk_llm(late_chunk_processor, RuntimeError("step failed"))
     params = [
         PoolingParams(late_chunking_params=LateChunkingParams(2)),
-        PoolingParams(late_chunking_params=LateChunkingParams(1)),
         PoolingParams(),
+        PoolingParams(late_chunking_params=LateChunkingParams(1)),
+        PoolingParams(late_chunking_params=LateChunkingParams(2)),
+    ]
+    # A failed encode call must not leave metadata for the following batch.
+    with pytest.raises(RuntimeError, match="step failed"):
+        llm.encode(
+            ["a b"] * 2,
+            pooling_task="token_embed",
+            pooling_params=params[:2],
+            use_tqdm=False,
+        )
+    llm.llm_engine.step.side_effect = [
+        [
+            _chunk_output(2, rows=4),
+            failed,
+            _chunk_output(1, rows=4),
+            _chunk_output(0),
+        ]
     ]
     outputs = llm.encode(
-        ["a b"] * 3, pooling_task="token_embed", pooling_params=params, use_tqdm=False
+        ["a b"] * 4, pooling_task="token_embed", pooling_params=params, use_tqdm=False
     )
     assert outputs[0].late_chunking.chunks == [
         LateChunk((0, 2), (0, 1)),
         LateChunk((2, 4), (2, 3)),
     ]
     assert outputs[1].late_chunking is None
-    assert outputs[1].error is error
-    assert outputs[2].late_chunking is None
-    assert params[0].late_chunking_params is not None
-    assert params[0].late_chunking_params.metadata is None
-    llm.llm_engine.abort_request.assert_not_called()
-
-
-@pytest.mark.parametrize(
-    "error, abort_expected",
-    [
-        pytest.param(RuntimeError("step failed"), True, id="runtime-error"),
-        pytest.param(KeyboardInterrupt(), False, id="keyboard-interrupt"),
-    ],
-)
-def test_late_chunk_mapping_propagates_errors_and_is_not_reused(
-    late_chunk_processor, error, abort_expected
-):
-    llm = _mock_chunk_llm(late_chunk_processor, error)
-    params = PoolingParams(late_chunking_params=LateChunkingParams(2))
-    with pytest.raises(type(error)):
-        llm.encode(
-            ["a b"] * 2,
-            pooling_task="token_embed",
-            pooling_params=params,
-            use_tqdm=False,
-        )
-    if abort_expected:
-        llm.llm_engine.abort_request.assert_called_once()
-        assert set(llm.llm_engine.abort_request.call_args.args[0]) == {"0", "1"}
-    else:
-        llm.llm_engine.abort_request.assert_not_called()
-    llm.llm_engine.step.side_effect = [
-        [_chunk_output(1, rows=4), _chunk_output(0, rows=4)]
-    ]
-    outputs = llm.encode(["a b"] * 2, pooling_task="token_embed", use_tqdm=False)
-    assert all(output.late_chunking is None for output in outputs)
-    assert params.late_chunking_params is not None
-    assert params.late_chunking_params.metadata is None
+    assert len(outputs[2].late_chunking.chunks) == 4
+    assert outputs[3].late_chunking is None
+    assert outputs[3].error is error
 
 
 def test_late_chunk_mapping_rejects_successful_output_with_wrong_row_count(

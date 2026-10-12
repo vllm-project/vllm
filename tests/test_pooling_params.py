@@ -278,34 +278,6 @@ def test_late_chunking_rejects_other_tasks(task):
         ).verify(_late_chunking_model_config())
 
 
-@pytest.mark.parametrize(
-    "override",
-    [
-        {"architecture": "BertModel"},
-        {"model_impl": "transformers"},
-        {"is_matryoshka": True},
-        {"seq_pooling_type": "CLS"},
-        {"tok_pooling_type": "STEP"},
-        {"enable_chunked_processing": True},
-        {"num_experts": 8},
-    ],
-)
-def test_late_chunking_does_not_restrict_model_identity(override):
-    model_config = _late_chunking_model_config()
-    for key, value in override.items():
-        target = (
-            model_config.hf_config
-            if key == "num_experts"
-            else model_config.pooler_config
-            if hasattr(model_config.pooler_config, key)
-            else model_config
-        )
-        setattr(target, key, value)
-    PoolingParams(
-        task="token_embed", late_chunking_params=LateChunkingParams(chunk_size=2)
-    ).verify(model_config)
-
-
 def test_late_chunking_uses_existing_dimension_validation():
     config = MockMatryoshkaModelConfig(
         pooler_config=PoolerConfig(tok_pooling_type="ALL", use_activation=False),

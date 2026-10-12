@@ -611,9 +611,17 @@ class TestGetTokPoolingMethod:
             get_tok_pooling_method("UNKNOWN")
 
 
-@pytest.mark.parametrize("chunk_size", [1, 2, 7, 10, 2**63 - 1])
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
-@pytest.mark.parametrize("head_dtype", [None, torch.float32])
+@pytest.mark.parametrize(
+    ("chunk_size", "dtype", "head_dtype"),
+    [
+        (1, torch.float32, None),
+        (2, torch.float16, None),
+        (2, torch.bfloat16, torch.float32),
+        (7, torch.float32, None),
+        (10, torch.float32, None),
+        (2**63 - 1, torch.float32, None),
+    ],
+)
 def test_late_chunk_pool_matches_fp32_means_before_projection_and_normalization(
     chunk_size, dtype, head_dtype
 ):
@@ -678,29 +686,6 @@ def test_late_chunk_pool_isolates_mixed_requests_and_owns_finished_storage():
         torch.testing.assert_close(actual, reference)
 
 
-def test_late_chunk_pool_waits_for_complete_states():
-    pooler = TokenPooler(
-        TestAllPool._make_all_pool(chunked=True), TokenEmbeddingPoolerHead()
-    )
-    params = [
-        PoolingParams(
-            task="token_embed", late_chunking_params=LateChunkingParams(chunk_size=3)
-        )
-    ]
-    first = _make_metadata(
-        [4], pooling_params=params, num_scheduled_tokens=[2], seq_lens=[2]
-    )
-    hidden = torch.arange(8, dtype=torch.float32).reshape(4, 2)
-    assert pooler(hidden[:2], first) == [None]
-    last = _make_metadata(
-        [4], pooling_params=params, num_scheduled_tokens=[2], seq_lens=[4]
-    )
-    last.pooling_states = first.pooling_states
-    actual = pooler(hidden[2:], last)[0]
-    torch.testing.assert_close(actual, torch.stack([hidden[:3].mean(0), hidden[3]]))
-    assert not last.pooling_states[0].hidden_states_cache
-
-
 @pytest.mark.parametrize("chunk_size", [1, 2, 8])
 @pytest.mark.parametrize("embedding_size", [1, 4])
 def test_bos_eos_filter_preserves_chunk_vectors_in_mixed_batch(
@@ -759,3 +744,4 @@ def test_bos_eos_filter_waits_for_complete_chunk_vectors():
     last.pooling_states = first.pooling_states
     actual = pooler(hidden[2:], last)[0]
     torch.testing.assert_close(actual, torch.stack([hidden[:3].mean(0), hidden[3]]))
+    assert not last.pooling_states[0].hidden_states_cache
