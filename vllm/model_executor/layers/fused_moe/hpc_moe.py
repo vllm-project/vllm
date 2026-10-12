@@ -122,8 +122,7 @@ class HPCExperts(mk.FusedMoEExpertsModular):
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
         # We use global_num_experts due to how moe_align_block_size handles
         # expert_maps.
-        """
-        Compute the shapes for the temporary and final outputs of the two gemms
+        """Compute the shapes for the temporary and final outputs of the two gemms
         and activation in the fused expert function.  Since the gemms are
         independent, the workspace for the first gemm can be shared with the
         workspace for the last gemm.

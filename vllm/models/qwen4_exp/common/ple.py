@@ -28,7 +28,6 @@ def compute_ple_shard_overlap(
     tp_end: int,
 ) -> PLEShardOverlap | None:
     """Compute the overlap of a checkpoint shard and one TP vocabulary range."""
-
     if checkpoint_start < 0 or checkpoint_rows < 0:
         raise ValueError("checkpoint shard bounds must be non-negative")
     if tp_start < 0 or tp_end < tp_start:
@@ -54,7 +53,6 @@ def copy_ple_embedding_shard_(
     tp_end: int,
 ) -> int:
     """Copy the overlapping rows of a PLE checkpoint shard into a TP table."""
-
     if destination.ndim == 0 or loaded_weight.ndim != destination.ndim:
         raise ValueError("destination and loaded weight must have matching ranks")
     if destination.shape[1:] != loaded_weight.shape[1:]:

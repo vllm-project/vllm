@@ -7,14 +7,14 @@ from typing import Annotated, Any, TypeAlias
 from pydantic import ConfigDict, Field, model_validator
 
 from vllm.config import ModelConfig
-from vllm.entrypoints.chat_utils import (
-    ChatCompletionMessageParam,
-    ChatTemplateContentFormatOption,
-)
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionToolsParam
 from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel
 from vllm.exceptions import VLLMValidationError
 from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
+from vllm.renderers.chat_utils import (
+    ChatCompletionMessageParam,
+    ChatTemplateContentFormatOption,
+)
 
 
 class TokenizeCompletionRequest(OpenAIBaseModel):
@@ -181,8 +181,7 @@ class DetokenizeResponse(OpenAIBaseModel):
 
 
 class TokenizerInfoResponse(OpenAIBaseModel):
-    """
-    Response containing tokenizer configuration
+    """Response containing tokenizer configuration
     equivalent to tokenizer_config.json
     """
 

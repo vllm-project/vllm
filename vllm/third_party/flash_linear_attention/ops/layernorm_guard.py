@@ -335,9 +335,7 @@ class LayerNormFwdKernel(VllmJitKernel["LayerNormFwdKernel.CompileKey"]):
         assert warmup is not None
         variant = compile_key.input_variant
 
-        def pointer(
-            name: str, dtype: torch.dtype | None
-        ) -> TritonWarmupTensor | None:
+        def pointer(name: str, dtype: torch.dtype | None) -> TritonWarmupTensor | None:
             return None if dtype is None else variant.pointer(name, dtype)
 
         warmup(

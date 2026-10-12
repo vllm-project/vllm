@@ -16,7 +16,8 @@ use vllm_engine_core_client::protocol::multimodal::{
     SliceSpec,
 };
 
-use super::{ModalitySupport, MultimodalModelInfo, PreparedItem, PreparedMedia, tensor};
+use super::timing::MM_STAGE_TARGET;
+use super::{MultimodalModelInfo, PreparedItem, PreparedMedia, VisionModalitySupport, tensor};
 use crate::error::{Error, Result, bail_multimodal, multimodal};
 
 /// Forward-kwargs name of the primary video encoder input.
@@ -32,6 +33,12 @@ impl MultimodalModelInfo {
     /// Unlike images, each clip runs through the preprocessor independently
     /// (a batch of one), so its tensors are complete per item and need no
     /// cross-item slicing.
+    #[tracing::instrument(
+        name = "mm_stage",
+        target = MM_STAGE_TARGET,
+        skip_all,
+        fields(stage = "preprocess_video")
+    )]
     pub(super) async fn prepare_videos(
         &self,
         clips: Vec<Arc<VideoClip>>,
@@ -76,18 +83,17 @@ impl MultimodalModelInfo {
     /// processor.
     async fn preprocess_video_clip(
         &self,
-        support: &ModalitySupport,
+        support: &VisionModalitySupport,
         clip: Arc<VideoClip>,
     ) -> Result<PreprocessedEncoderInputs> {
-        let config = support.config.clone();
-        let processor = support.processor;
+        let processor = Arc::clone(&support.processor);
 
         tokio::task::spawn_blocking(move || {
             // Prefer the borrowed-RGB fast path, which avoids materializing a
             // `DynamicImage` per sampled frame after media decode.
             if let Some(rgb_video) = clip.rgb_video() {
                 match rgb_video.frame_refs() {
-                    Ok(frame_refs) => match processor.preprocess_video_rgb(&frame_refs, &config) {
+                    Ok(frame_refs) => match processor.preprocess_video_rgb(&frame_refs) {
                         Ok(preprocessed) => return Ok(preprocessed),
                         Err(error) => warn!(
                             error = %error.as_report(),
@@ -102,7 +108,7 @@ impl MultimodalModelInfo {
             }
 
             let frames = clip.materialized_frames().map_err(|error| multimodal!("{error}"))?;
-            Ok(processor.preprocess_video(&frames, &config)?)
+            Ok(processor.preprocess_video(&frames)?)
         })
         .await
         .map_err(|error| multimodal!("video preprocessing task failed: {error}"))?
@@ -117,7 +123,7 @@ impl MultimodalModelInfo {
 /// `flat_from_sizes` treatment of video patches), and batched metadata
 /// tensors drop their singleton batch axis.
 fn build_video_item(
-    support: &ModalitySupport,
+    support: &VisionModalitySupport,
     preprocessed: PreprocessedEncoderInputs,
     hash: String,
     uuid: Option<String>,

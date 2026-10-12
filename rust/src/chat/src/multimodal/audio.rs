@@ -8,6 +8,7 @@ use std::sync::Arc;
 use llm_multimodal::{AudioClip, Modality, PreprocessedEncoderInputs};
 use vllm_engine_core_client::protocol::dtype::ModelDtype;
 
+use super::timing::MM_STAGE_TARGET;
 use super::{AudioModalitySupport, MultimodalModelInfo, PreparedMedia, item};
 use crate::error::{Error, Result, bail_multimodal, multimodal};
 
@@ -16,6 +17,12 @@ pub(super) const AUDIO_PRIMARY_KEY: &str = "input_audio_features";
 
 impl MultimodalModelInfo {
     /// Preprocess fetched audio clips as one batch and build per-item features.
+    #[tracing::instrument(
+        name = "mm_stage",
+        target = MM_STAGE_TARGET,
+        skip_all,
+        fields(stage = "preprocess_audio")
+    )]
     pub(super) async fn prepare_audios(
         &self,
         clips: Vec<Arc<AudioClip>>,
@@ -234,6 +241,45 @@ mod tests {
             &item.data[AUDIO_PRIMARY_KEY].field,
             MmField::Batched(_)
         ));
+    }
+
+    #[tokio::test]
+    async fn audio_pipeline_attributes_stage_timings_to_request() {
+        use tracing::Instrument as _;
+        use tracing::instrument::WithSubscriber as _;
+        use tracing_subscriber::layer::SubscriberExt as _;
+
+        use crate::{mm_request_span, mm_timing_layer};
+
+        let info = qwen3_asr_info();
+        let (layer, timings) = mm_timing_layer();
+        let parts = vec![MediaContentPart::AudioData {
+            data: wav_i16_mono(16_000, &[0; 1_600]),
+            mime_type: Some("audio/wav".to_string()),
+            uuid: Some("audio-1".to_string()),
+        }];
+        async {
+            info.prepare_multimodal(parts, &mut vec![AUDIO_PAD_ID], ModelDtype::Float32, None)
+                .instrument(mm_request_span("request-1"))
+                .await
+                .unwrap();
+        }
+        .with_subscriber(tracing_subscriber::registry().with(layer))
+        .await;
+
+        let records = timings.stat();
+        assert_eq!(records.len(), 1);
+        let mut stages = records["request-1"].keys().collect::<Vec<_>>();
+        stages.sort();
+        expect_test::expect![[r#"
+            [
+                "media_fetch_secs",
+                "preprocess_audio_secs",
+                "preprocessor_total_secs",
+                "prompt_expansion_secs",
+            ]
+        "#]]
+        .assert_debug_eq(&stages);
     }
 
     #[tokio::test]

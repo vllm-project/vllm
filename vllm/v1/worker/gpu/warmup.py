@@ -139,9 +139,16 @@ def run_mixed_prefill_decode_warmup(
         next_block_id += num_blocks
         return block_ids
 
-    sampling_params = SamplingParams(max_tokens=2, temperature=0.0)
+    sampling_params = SamplingParams(
+        max_tokens=2,
+        temperature=0.0,
+        watermarking=False,
+    )
 
     decode_prefill_output = SchedulerOutput.make_empty()
+    decode_prefill_output.num_spec_tokens_to_schedule = (
+        model_runner.num_speculative_steps
+    )
     decode_prefill_output.scheduled_new_reqs = [
         NewRequestData(
             req_id=decode_req_id,
@@ -171,6 +178,7 @@ def run_mixed_prefill_decode_warmup(
     ]
 
     mixed_output = SchedulerOutput.make_empty()
+    mixed_output.num_spec_tokens_to_schedule = model_runner.num_speculative_steps
     mixed_output.scheduled_cached_reqs = cached_decode_req
     mixed_output.scheduled_new_reqs = [
         NewRequestData(
@@ -294,7 +302,11 @@ def _warmup_kernels(
         model_runner.scheduler_config.max_num_batched_tokens
         // max(prompt_len, decode_query_len),
     )
-    if max_blocks_per_req > 0:
+    block_tables = getattr(model_runner, "block_tables", None)
+    null_blocks = block_tables is not None and (
+        block_tables.redirect_writes_to_null_block
+    )
+    if max_blocks_per_req > 0 and not null_blocks:
         # Reserve block 0 (null block) and ensure we have enough blocks.
         # Encoder-only models allocate no KV blocks, so this cap doesn't apply.
         num_reqs = min(
@@ -345,6 +357,7 @@ def _warmup_kernels(
     ]
 
     prefill_output = SchedulerOutput.make_empty()
+    prefill_output.num_spec_tokens_to_schedule = num_spec_steps
     prefill_output.scheduled_new_reqs = new_reqs
     prefill_output.num_scheduled_tokens = {rid: prompt_len for rid in req_ids}
     prefill_output.total_num_scheduled_tokens = prompt_len * num_reqs
@@ -404,6 +417,7 @@ def _warmup_kernels(
                     step_spec_tokens[req_ids[i]] = [0] * num_spec_steps
 
             decode_output = SchedulerOutput.make_empty()
+            decode_output.num_spec_tokens_to_schedule = num_spec_steps
             decode_output.scheduled_cached_reqs = cached_req_data
             decode_output.num_scheduled_tokens = step_num_scheduled_tokens
             decode_output.scheduled_spec_decode_tokens = step_spec_tokens
@@ -450,4 +464,6 @@ def _warmup_kernels(
     cleanup_output.finished_req_ids = set(req_ids)
     worker_execute_model(cleanup_output)
     model_runner.kv_connector.set_disabled(False)
+    if model_runner.kv_block_zeroer is not None:
+        model_runner.kv_block_zeroer.zero_block_ids([0])
     torch.accelerator.synchronize()

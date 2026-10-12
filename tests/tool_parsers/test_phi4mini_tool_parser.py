@@ -16,7 +16,6 @@ class TestPhi4MiniToolParser(ToolParserTests):
     @pytest.fixture
     def tokenizer(self, default_tokenizer: TokenizerLike) -> TokenizerLike:
         """Add some phi4mini specific tokens to the default vocab."""
-
         tokenizer = default_tokenizer
         tokenizer_vocab = tokenizer.get_vocab()
         tokenizer.get_vocab = MagicMock()

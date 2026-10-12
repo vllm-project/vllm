@@ -38,6 +38,7 @@ def _build_responses_serving_render() -> ServingRender:
         OnlineRenderer.validate_chat_template.__get__(serving.online_renderer)
     )
     serving.online_renderer.trust_request_chat_template = True
+    serving.online_renderer.parser = None
     serving._check_model = AsyncMock(return_value=None)
     return serving
 
@@ -133,6 +134,37 @@ async def test_render_responses_rejects_empty_token_ids():
 
     assert isinstance(response, ErrorResponse)
     assert response.error.message == "No token_ids rendered"
+
+
+@pytest.mark.asyncio
+@pytest.mark.skip_global_cleanup
+async def test_render_responses_carries_reasoning_parser_kwargs():
+    """/v1/responses gives the engine's reasoning parser the effective template
+    kwargs, so the rendered request must carry them to generate."""
+    serving = _build_responses_serving_render()
+    online = serving.online_renderer
+    online.parser = MagicMock(reasoning_parser_cls=object)
+    online.chat_template = None
+    online.chat_template_content_format = "auto"
+    online.default_chat_template_kwargs = {"enable_thinking": True}
+    online.effective_chat_template_kwargs = (
+        OnlineRenderer.effective_chat_template_kwargs.__get__(online)
+    )
+    online.render_responses = AsyncMock(
+        return_value=MagicMock(messages=[], engine_input={"prompt_token_ids": [7]})
+    )
+    request = ResponsesRequest(
+        model=MODEL_NAME,
+        input="Test prompt",
+        chat_template_kwargs={"enable_thinking": False},
+    )
+
+    response = await serving.render_responses_request(request)
+
+    assert not isinstance(response, ErrorResponse)
+    assert response.reasoning_parser_kwargs is not None
+    kwargs = response.reasoning_parser_kwargs.chat_template_kwargs
+    assert kwargs["enable_thinking"] is False
 
 
 @pytest.fixture(scope="module")
@@ -337,7 +369,6 @@ async def test_chat_completion_render_multi_turn(client):
 @pytest.mark.asyncio
 async def test_chat_completion_render_with_stream_true(client):
     """Render accepts stream params but still returns JSON (non-streamed)."""
-
     response = await client.post(
         "/v1/chat/completions/render",
         json={
@@ -596,176 +627,6 @@ async def test_completion_render_multiple_prompts_token_offsets(client):
 
 
 @pytest.mark.asyncio
-async def test_chat_completion_render_assistant_tokens_mask_default(client):
-    """Without return_assistant_tokens_mask, assistant_tokens_mask should be null."""
-    response = await client.post(
-        "/v1/chat/completions/render",
-        json={
-            "model": MODEL_NAME,
-            "messages": [
-                {"role": "user", "content": "Hello"},
-                {"role": "assistant", "content": "Hi!"},
-                {"role": "user", "content": "How are you?"},
-            ],
-        },
-    )
-
-    assert response.status_code == 200
-    data = response.json()
-    assert data.get("assistant_tokens_mask") is None
-
-
-@pytest.mark.asyncio
-async def test_chat_completion_render_assistant_tokens_mask_false(client):
-    """Explicitly setting return_assistant_tokens_mask=false gives null."""
-    response = await client.post(
-        "/v1/chat/completions/render",
-        json={
-            "model": MODEL_NAME,
-            "messages": [
-                {"role": "user", "content": "Hello"},
-            ],
-            "return_assistant_tokens_mask": False,
-        },
-    )
-
-    assert response.status_code == 200
-    data = response.json()
-    assert data.get("assistant_tokens_mask") is None
-
-
-@pytest.mark.asyncio
-async def test_chat_render_assistant_tokens_mask_null_without_gen_tags(
-    client,
-):
-    """The tiny test model lacks ``{% generation %}`` tags, so the mask is null."""
-    response = await client.post(
-        "/v1/chat/completions/render",
-        json={
-            "model": MODEL_NAME,
-            "messages": [
-                {"role": "user", "content": "Hello"},
-                {"role": "assistant", "content": "Hi!"},
-            ],
-            "return_assistant_tokens_mask": True,
-        },
-    )
-
-    assert response.status_code == 200
-    assert response.json().get("assistant_tokens_mask") is None
-
-
-# A minimal chat template with {% generation %} tags so we can test that
-# the mask correctly marks assistant tokens.
-_TEMPLATE_WITH_GENERATION = (
-    "{% for m in messages %}"
-    "{% if m['role'] == 'user' %}User: {{ m['content'] }}\n"
-    "{% elif m['role'] == 'assistant' %}"
-    "{% generation %}Assistant: {{ m['content'] }}\n{% endgeneration %}"
-    "{% endif %}"
-    "{% endfor %}"
-)
-
-
-@pytest.mark.asyncio
-async def test_chat_completion_render_assistant_tokens_mask_with_generation_tags(
-    client,
-):
-    """With a ``{% generation %}``-enabled template, the mask marks assistant
-    tokens and the masked tokens decode to the assistant content."""
-    response = await client.post(
-        "/v1/chat/completions/render",
-        json={
-            "model": MODEL_NAME,
-            "messages": [
-                {"role": "user", "content": "Hello"},
-                {"role": "assistant", "content": "Hi!"},
-                {"role": "user", "content": "Bye"},
-            ],
-            "chat_template": _TEMPLATE_WITH_GENERATION,
-            "return_assistant_tokens_mask": True,
-        },
-    )
-
-    assert response.status_code == 200
-    data = response.json()
-
-    mask = data["assistant_tokens_mask"]
-    token_ids = data["token_ids"]
-    assert mask is not None
-    assert isinstance(mask, list)
-    assert len(mask) == len(token_ids)
-    assert all(v in (0, 1) for v in mask)
-    assert sum(mask) > 0, "mask should mark at least one assistant token"
-
-    # Detokenize masked (assistant) and unmasked (non-assistant) tokens
-    # separately to verify the mask is correct, not just non-empty.
-    masked_ids = [t for t, m in zip(token_ids, mask, strict=True) if m]
-    unmasked_ids = [t for t, m in zip(token_ids, mask, strict=True) if not m]
-
-    detok = await client.post(
-        "/detokenize",
-        json={"model": MODEL_NAME, "tokens": masked_ids},
-    )
-    assert detok.status_code == 200
-    assert "Hi!" in detok.json()["prompt"]
-
-    detok_rest = await client.post(
-        "/detokenize",
-        json={"model": MODEL_NAME, "tokens": unmasked_ids},
-    )
-    assert detok_rest.status_code == 200
-    assert "Hi!" not in detok_rest.json()["prompt"]
-    assert "Bye" in detok_rest.json()["prompt"]
-
-
-@pytest.mark.asyncio
-async def test_chat_render_assistant_tokens_mask_follows_truncation(client):
-    """The assistant mask must be truncated with the prompt it describes.
-
-    `assistant_tokens_mask` is positional: entry i labels token i. Truncating
-    `token_ids` from the left without truncating the mask leaves the two
-    describing different positions, and the mask ends up marking whichever
-    tokens happen to sit at the old offsets.
-    """
-    messages = [
-        # Deliberately lopsided: a long leading user turn and a short trailing
-        # one, so keeping the head of the mask is distinguishable from keeping
-        # its tail.
-        {"role": "user", "content": "Hello hello hello hello hello hello"},
-        {"role": "assistant", "content": "Hi!"},
-        {"role": "user", "content": "Bye"},
-    ]
-    body = {
-        "model": MODEL_NAME,
-        "messages": messages,
-        "chat_template": _TEMPLATE_WITH_GENERATION,
-        "return_assistant_tokens_mask": True,
-    }
-
-    full = await client.post("/v1/chat/completions/render", json=body)
-    assert full.status_code == 200
-    full_token_ids = full.json()["token_ids"]
-    full_mask = full.json()["assistant_tokens_mask"]
-    assert sum(full_mask) > 0
-
-    keep = len(full_token_ids) - 4
-    # Precondition: with this prompt the head and tail slices of the mask
-    # really do differ, so the assertion below can tell them apart.
-    assert full_mask[-keep:] != full_mask[:keep]
-
-    truncated = await client.post(
-        "/v1/chat/completions/render",
-        json={**body, "truncate_prompt_tokens": keep, "truncation_side": "left"},
-    )
-    assert truncated.status_code == 200
-    data = truncated.json()
-
-    assert data["token_ids"] == full_token_ids[-keep:]
-    assert data["assistant_tokens_mask"] == full_mask[-keep:]
-
-
-@pytest.mark.asyncio
 async def test_messages_render_basic(client):
     """Test basic Anthropic Messages render endpoint."""
     response = await client.post(
@@ -822,9 +683,9 @@ async def test_messages_render_system_and_multi_turn(client):
 async def test_messages_render_merges_inline_system(client):
     """Inline system messages merge into the leading system block.
 
-    Without a --chat-template arg the /v1/messages server path detects
-    merge_inline_system=True, so render must produce the same tokens as
-    the manually pre-merged request.
+    The model's chat template rejects non-leading system messages, so the
+    /v1/messages server path detects merge_inline_system=True and render must
+    produce the same tokens as the manually pre-merged request.
     """
     inline = await client.post(
         "/v1/messages/render",

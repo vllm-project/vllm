@@ -18,10 +18,14 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.coordinator imp
     MooncakeStoreCoordinator,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
+    BoundaryPut,
     ChunkedTokenDatabase,
     KeyMetadata,
     LoadSpec,
     ReqMeta,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.scheduler import (  # noqa: E501
+    _partial_tail_non_mamba_puts,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.worker import (  # noqa: E501
     KVCacheStoreRecvingThread,
@@ -31,7 +35,6 @@ from vllm.v1.core.kv_cache_utils import BlockHash
 from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
     FullAttentionSpec,
-    KpoolTailSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheTensor,
@@ -147,8 +150,7 @@ def _build_worker_with_dict_store(vllm_config, kv_cache_config, store):
 
 
 def test_e2e_swa_plus_full_save_then_lookup_hits():
-    """
-    E2E: build a SWA+Full hybrid worker, save all blocks via the sending
+    """E2E: build a SWA+Full hybrid worker, save all blocks via the sending
     thread (synchronously), then verify lookup returns the full hit length.
     Also verify that evicting SWA's early blocks (outside its window) still
     allows a full hit because the window covers the tail.
@@ -380,6 +382,15 @@ def test_chunked_token_database_hash_block_size_smaller_than_block_size():
     assert out[1][2].hex() == fine_hashes[6].hex()
 
 
+def _resolve_partial_tail(thread, req: ReqMeta) -> ReqMeta:
+    """Add the tail's non-Mamba puts as the scheduler does before the worker."""
+    req.boundary_puts = [BoundaryPut(*put) for put in req.boundary_puts or []]
+    req.boundary_puts[:0] = _partial_tail_non_mamba_puts(
+        thread.coord, req, [db.block_size for db in thread.token_databases]
+    )
+    return req
+
+
 def test_sub_block_partial_tail_offload_reads_cow_block():
     """Sub-block prompt (the 900/128/1536 shape, scaled to 12/4/16): the
     partial tail is offloaded for both groups under the boundary sub-hash. The
@@ -396,7 +407,12 @@ def test_sub_block_partial_tail_offload_reads_cow_block():
         KVCacheGroupSpec(["L0"], full),
         KVCacheGroupSpec(["L1"], mamba),
     ]
-    coord = MooncakeStoreCoordinator(groups, scheduler_block_size=16, hash_block_size=4)
+    coord = MooncakeStoreCoordinator(
+        groups,
+        scheduler_block_size=16,
+        hash_block_size=4,
+        enable_partial_hash_hits=True,
+    )
     assert coord.enable_partial_hash_hits
 
     class _RecordingStore(_DictStore):
@@ -443,11 +459,13 @@ def test_sub_block_partial_tail_offload_reads_cow_block():
         block_ids=([1], [2]),
         block_hashes=hs,
         can_save=True,
-        num_prompt_tokens=20,
-        boundary_state_offloads=[(1, mamba_cow_block, 12)],
+        num_prompt_tokens=13,
+        prefill_end_tokens=20,
+        completed_token_len=20,
+        boundary_puts=[(1, mamba_cow_block, 12)],
     )
 
-    send._maybe_offload_boundary_states(req)
+    send._maybe_offload_boundary_states(_resolve_partial_tail(send, req))
 
     # boundary = 12 // 4 * 4 = 12 -> keyed by hs[12 // 4 - 1] = hs[2].
     partial_hash = hs[2]
@@ -475,7 +493,12 @@ def test_offload_syncs_event_before_put():
         KVCacheGroupSpec(["L0"], full),
         KVCacheGroupSpec(["L1"], mamba),
     ]
-    coord = MooncakeStoreCoordinator(groups, scheduler_block_size=16, hash_block_size=4)
+    coord = MooncakeStoreCoordinator(
+        groups,
+        scheduler_block_size=16,
+        hash_block_size=4,
+        enable_partial_hash_hits=True,
+    )
     event = MagicMock()
 
     class _FencedStore(_DictStore):
@@ -515,12 +538,13 @@ def test_offload_syncs_event_before_put():
         block_hashes=hs,
         can_save=True,
         num_prompt_tokens=12,
+        completed_token_len=12,
         store_job_id=1,
-        boundary_state_offloads=[(1, 7, 12)],
+        boundary_puts=[(1, 7, 8)],
     )
     req.current_event = event
 
-    send.add_request(req)
+    send.add_request(_resolve_partial_tail(send, req))
     send._handle_request(send.request_queue.get())
     assert send.request_queue.qsize() == 0
     assert store._data
@@ -534,7 +558,8 @@ def test_sub_block_partial_tail_offload_covers_smaller_group_blocks():
     offload must persist every FA block up to the boundary — the normal save
     floors to the lcm, so those blocks are otherwise never written and the
     consumer's per-group lookup would miss. The mamba boundary block still
-    reads the core-provided CoW target."""
+    reads the core-provided CoW target. Without EAGLE, the 12-token prompt's
+    resend-safe checkpoint is 8, leaving two attention blocks to save."""
     full = FullAttentionSpec(block_size=4, num_kv_heads=8, head_size=64, dtype=None)
     mamba = MambaSpec(
         block_size=16,
@@ -546,7 +571,12 @@ def test_sub_block_partial_tail_offload_covers_smaller_group_blocks():
         KVCacheGroupSpec(["L0"], full),
         KVCacheGroupSpec(["L1"], mamba),
     ]
-    coord = MooncakeStoreCoordinator(groups, scheduler_block_size=16, hash_block_size=4)
+    coord = MooncakeStoreCoordinator(
+        groups,
+        scheduler_block_size=16,
+        hash_block_size=4,
+        enable_partial_hash_hits=True,
+    )
     assert coord.enable_partial_hash_hits
 
     class _RecordingStore(_DictStore):
@@ -592,19 +622,19 @@ def test_sub_block_partial_tail_offload_covers_smaller_group_blocks():
         block_hashes=hs,
         can_save=True,
         num_prompt_tokens=12,
-        boundary_state_offloads=[(1, mamba_cow_block, 12)],
+        completed_token_len=12,
+        boundary_puts=[(1, mamba_cow_block, 8)],
     )
 
-    send._maybe_offload_boundary_states(req)
+    send._maybe_offload_boundary_states(_resolve_partial_tail(send, req))
 
-    # FA (block 4): full blocks ending at 4, 8 and 12, keyed by their normal
+    # FA (block 4): full blocks ending at 4 and 8, keyed by their normal
     # block-end hashes; mamba (block 16): the partial boundary block under
     # the boundary sub-hash, read from the CoW target.
     expected = {
         token_dbs[0].key_for(hs[0]): [1 * 512],
         token_dbs[0].key_for(hs[1]): [2 * 512],
-        token_dbs[0].key_for(hs[2]): [3 * 512],
-        token_dbs[1].key_for(hs[2]): [10_000 + mamba_cow_block * 512],
+        token_dbs[1].key_for(hs[1]): [10_000 + mamba_cow_block * 512],
     }
     assert store.puts == expected
 
@@ -613,11 +643,10 @@ def test_worker_lookup_hits_sub_block_partial_tail():
     """worker.lookup must query sub-block keys when partial hash hits are on.
 
     Regression test: ``lookup`` hard-coded ``fine_grained = False``, so the
-    sub-block keys persisted by ``_sub_block_tail_puts`` were never probed and
-    partial prefix hits silently returned 0 while the store side kept writing
-    them. Here the mamba block (16) exceeds the hash unit (4), so
-    ``enable_partial_hash_hits`` is on and the lookup must find the stored
-    boundary at 12.
+    partial tail's sub-block keys were never probed and partial prefix hits
+    silently returned 0 while the store side kept writing them. Here the
+    mamba block (16) exceeds the hash unit (4), so ``enable_partial_hash_hits``
+    is on and the lookup must find the stored boundary at 8.
     """
     full = FullAttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
     mamba = MambaSpec(
@@ -646,6 +675,8 @@ def test_worker_lookup_hits_sub_block_partial_tail():
             KVCacheGroupSpec(["L0"], full),
             KVCacheGroupSpec(["L1"], mamba),
         ],
+        # The hit alignment the engine core resolves for this config.
+        cache_hit_alignment_tokens=4,
     )
     vllm_config = _minimal_vllm_config(cache_block_size=16)
     # Hash unit 4 < mamba block 16 -> partial hash hits are enabled.
@@ -674,7 +705,7 @@ def test_worker_lookup_hits_sub_block_partial_tail():
         replicate_config=MagicMock(),
     )
 
-    # Persist the sub-block partial tail at boundary 12 (keyed by hs[12//4-1]).
+    # A 12-token prompt leaves a resend-safe sub-block checkpoint at 8.
     hs = [BlockHash(bytes([i + 1]) * 4) for i in range(5)]
     req = ReqMeta(
         req_id="r0",
@@ -682,15 +713,16 @@ def test_worker_lookup_hits_sub_block_partial_tail():
         block_ids=([1], [2]),
         block_hashes=hs,
         can_save=True,
-        num_prompt_tokens=20,
-        boundary_state_offloads=[(1, 7, 12)],
+        num_prompt_tokens=12,
+        completed_token_len=12,
+        boundary_puts=[(1, 7, 8)],
     )
-    send_thread._maybe_offload_boundary_states(req)
+    send_thread._maybe_offload_boundary_states(_resolve_partial_tail(send_thread, req))
 
     worker.store = store
 
-    # A 13-token prompt sharing the prefix must hit the stored boundary at 12.
-    assert worker.lookup(num_tokens=13, block_hashes=hs).hit_length == 12
+    # A 13-token prompt sharing the prefix must hit the stored boundary at 8.
+    assert worker.lookup(num_tokens=13, block_hashes=hs).hit_length == 8
 
 
 def test_worker_setup_tolerates_finer_scratch_group():
@@ -712,13 +744,12 @@ def test_worker_setup_tolerates_finer_scratch_group():
         mamba_cache_mode="align",
     )
     # Scratch block 4 is not divisible by the hash unit 8 below.
-    scratch = KpoolTailSpec(
+    scratch = CircularBufferSpec(
         block_size=4,
         num_kv_heads=2,
         head_size=64,
         head_size_v=0,
         dtype=torch.bfloat16,
-        sliding_window=4,
     )
     cfg = KVCacheConfig(
         num_blocks=4,
@@ -747,6 +778,8 @@ def test_worker_setup_tolerates_finer_scratch_group():
             KVCacheGroupSpec(["L1"], mamba),
             KVCacheGroupSpec(["L2"], scratch),
         ],
+        # The hit alignment the engine core resolves for this config.
+        cache_hit_alignment_tokens=8,
     )
     vllm_config = _minimal_vllm_config(cache_block_size=16)
     # Hash unit 8 divides the participating groups (16) but not the scratch
@@ -780,7 +813,7 @@ def test_worker_setup_tolerates_finer_scratch_group():
         group_participates=[True, True],
     )
 
-    # Persist the sub-block partial tail at boundary 12 (keyed by hs[12//8-1]).
+    # Persist the sub-block partial tail at boundary 8 (keyed by hs[8//8-1]).
     hs = [BlockHash(bytes([i + 1]) * 8) for i in range(3)]
     req = ReqMeta(
         req_id="r0",
@@ -788,10 +821,11 @@ def test_worker_setup_tolerates_finer_scratch_group():
         block_ids=([1], [2]),
         block_hashes=hs,
         can_save=True,
-        num_prompt_tokens=20,
-        boundary_state_offloads=[(1, 7, 12)],
+        num_prompt_tokens=12,
+        completed_token_len=12,
+        boundary_puts=[(1, 7, 8)],
     )
-    send_thread._maybe_offload_boundary_states(req)
+    send_thread._maybe_offload_boundary_states(_resolve_partial_tail(send_thread, req))
 
     worker.store = store
 
