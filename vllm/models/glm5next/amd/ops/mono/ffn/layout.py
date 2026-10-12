@@ -11,6 +11,7 @@ from vllm.models.glm5next.amd.ops.mono.config import (
     HIDDEN,
     MOE_SLOTS,
     N_EXPERTS,
+    FlashShard,
 )
 from vllm.models.glm5next.amd.ops.mono.layout import (
     BLOCKS,
@@ -21,7 +22,24 @@ from vllm.models.glm5next.amd.ops.mono.layout import (
 )
 
 # Stages a bounded mailbox poll can expire in, one error word each.
-POLL_STAGES = ("seam", "gate", "router", "ug", "down")
+POLL_STAGES = (
+    "aseam",
+    "agate",
+    "inproj",
+    "fgb",
+    "kda",
+    "oproj",
+    "seam",
+    "gate",
+    "router",
+    "ug",
+    "down",
+)
+KDA_STAGES = POLL_STAGES[:6]
+# rows of a projection task: one MFMA tile, or one tile a wave when K is 128
+IN_TILE = 16
+FGB_TILE = 16 * WAVES
+O_TILE = 16
 
 N_ROW_TILES = HIDDEN // ROW_TILE
 # mix projection outputs (pre, post, comb) plus one sum of squares a tile
@@ -61,10 +79,22 @@ def _align(size: int, alignment: int = 256) -> int:
     return (size + alignment - 1) // alignment * alignment
 
 
-def layout(samples: int, npes: int, inter: int):
+def layout(samples: int, npes: int, inter: int, kda: bool = False):
     """Byte offsets of the per-rank scratch and the symmetric peer buffer."""
     pair_bytes = 8
-    items = [
+    shard = FlashShard(npes)
+    items = []
+    if kda:
+        items = [
+            ("rnew_a", samples * HC_MULT * HIDDEN // 2 * pair_bytes),
+            ("pmix_a", samples * N_ROW_TILES * PMIX * pair_bytes),
+            ("a_in", samples * HIDDEN // 2 * pair_bytes),
+            ("mix_a", samples * HC_MULT * (1 + HC_MULT) * pair_bytes),
+            ("proj", samples * shard.kda_in_rows * pair_bytes),
+            ("gates", samples * 2 * shard.kda_proj * pair_bytes),
+            ("o_in", samples * shard.kda_proj // 2 * pair_bytes),
+        ]
+    items += [
         ("rnew", samples * HC_MULT * HIDDEN // 2 * pair_bytes),
         ("pmix", samples * N_ROW_TILES * PMIX * pair_bytes),
         ("a", samples * HIDDEN // 2 * pair_bytes),
@@ -97,9 +127,20 @@ def layout(samples: int, npes: int, inter: int):
     return scratch, symmetric
 
 
-def stage_tasks(samples: int, inter: int):
+def stage_tasks(samples: int, inter: int, npes: int = 1, kda: bool = False):
     """``(stage name, task count)`` pairs in execution order."""
-    return [
+    shard = FlashShard(npes)
+    attention = []
+    if kda:
+        attention = [
+            ("aseam", N_ROW_TILES),
+            ("agate", samples),
+            ("inproj", (shard.kda_in_rows + IN_TILE - 1) // IN_TILE),
+            ("fgb", 2 * shard.kda_proj // FGB_TILE),
+            ("kda", samples * shard.kda_heads),
+            ("oproj", HIDDEN // O_TILE),
+        ]
+    return attention + [
         ("seam", N_ROW_TILES),
         ("gate", samples),
         ("router", samples * N_ROUTER),
