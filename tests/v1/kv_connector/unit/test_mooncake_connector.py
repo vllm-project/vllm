@@ -57,7 +57,12 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.request import RequestStatus
 
-from .utils import create_request, create_scheduler, create_vllm_config
+from .utils import (
+    create_request,
+    create_scheduler,
+    create_vllm_config,
+    maybe_update_block_size,
+)
 
 
 @pytest.mark.parametrize(
@@ -148,6 +153,7 @@ def test_region_length_validation_checks_replicated_gqa_heads(
 
 
 def _make_test_kv_cache_config() -> KVCacheConfig:
+    block_size = maybe_update_block_size(16)
     return KVCacheConfig(
         num_blocks=0,
         kv_cache_tensors=[],
@@ -160,13 +166,21 @@ def _make_test_kv_cache_config() -> KVCacheConfig:
                     "model.layers.1.eagle_attn",
                 ],
                 FullAttentionSpec(
-                    block_size=16,
+                    block_size=block_size,
                     num_kv_heads=4,
                     head_size=64,
                     dtype=torch.float16,
                 ),
             )
         ],
+    )
+
+
+def _make_worker_vllm_config(kv_role: str):
+    return create_vllm_config(
+        kv_connector="MooncakeConnector",
+        kv_role=kv_role,
+        block_size=maybe_update_block_size(16),
     )
 
 
@@ -429,9 +443,7 @@ async def test_send_kv_to_decode_aligns_consumer_regions_by_layer_metadata(
 ):
     """Producer sends its PP layer shard to the matching consumer layer address."""
     monkeypatch.setenv("VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT", "5")
-    vllm_config = create_vllm_config(
-        kv_connector="MooncakeConnector", kv_role="kv_producer"
-    )
+    vllm_config = _make_worker_vllm_config("kv_producer")
 
     with set_current_vllm_config(vllm_config), patch_worker_dependencies():
         prefill_connector = MooncakeConnector(
@@ -1205,7 +1217,7 @@ def _xfer_meta(
 @contextlib.contextmanager
 def mooncake_register_worker(kv_cache_config, *, kv_role: str = "kv_consumer"):
     """Build a worker whose engine registration and sender thread are patched."""
-    vllm_config = create_vllm_config(kv_connector="MooncakeConnector", kv_role=kv_role)
+    vllm_config = _make_worker_vllm_config(kv_role)
     connector_mod = (
         "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector"
     )
@@ -1241,9 +1253,7 @@ async def test_receive_kv_selects_remote_pp_workers(
     expected_addrs: list[str],
 ):
     """Decode workers should not hard-code producer pp_rank 0."""
-    vllm_config = create_vllm_config(
-        kv_connector="MooncakeConnector", kv_role="kv_consumer"
-    )
+    vllm_config = _make_worker_vllm_config("kv_consumer")
 
     with set_current_vllm_config(vllm_config), patch_worker_dependencies():
         decode_connector = MooncakeConnector(
@@ -1314,7 +1324,7 @@ def test_resolve_need_send_accounts_for_remote_tp_fanout():
 @pytest.mark.asyncio
 async def test_heterogeneous_pp_waits_for_consumer_without_shared_layers():
     """P4/D2 must retain KV until both D stages finish, including a no-op pull."""
-    config = create_vllm_config(kv_connector="MooncakeConnector", kv_role="kv_producer")
+    config = _make_worker_vllm_config("kv_producer")
     with (
         set_current_vllm_config(config),
         patch_worker_dependencies(),
@@ -1386,9 +1396,7 @@ async def test_kv_producer(monkeypatch):
     Verifies memory offset calculation: ptr = base_addr + block_id * block_len.
     """
     monkeypatch.setenv("VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT", "5")
-    vllm_config = create_vllm_config(
-        kv_connector="MooncakeConnector", kv_role="kv_producer"
-    )
+    vllm_config = _make_worker_vllm_config("kv_producer")
 
     with set_current_vllm_config(vllm_config), patch_worker_dependencies():
         prefill_connector = MooncakeConnector(
@@ -1589,9 +1597,7 @@ async def test_kv_consumuer(monkeypatch):
 
     Verifies that MooncakeXferMetadata is correctly serialized and sent via ZMQ.
     """
-    vllm_config = create_vllm_config(
-        kv_connector="MooncakeConnector", kv_role="kv_consumer"
-    )
+    vllm_config = _make_worker_vllm_config("kv_consumer")
 
     with set_current_vllm_config(vllm_config), patch_worker_dependencies() as mocks:
         decode_connector = MooncakeConnector(
@@ -1661,9 +1667,7 @@ async def test_kv_consumuer(monkeypatch):
 @pytest.mark.asyncio
 async def test_worker_get_finished_timeout(monkeypatch):
     """Tests the cleanup mechanism for requests."""
-    vllm_config = create_vllm_config(
-        kv_connector="MooncakeConnector", kv_role="kv_producer"
-    )
+    vllm_config = _make_worker_vllm_config("kv_producer")
     with set_current_vllm_config(vllm_config), patch_worker_dependencies():
         prefill_connector = MooncakeConnector(
             vllm_config,
@@ -1713,7 +1717,7 @@ async def test_worker_get_finished_timeout(monkeypatch):
 def test_register_kv_caches(layout: KVCacheLayout, separate_kv_head_groups: bool):
     """Tests the memory registration logic with the underlying Mooncake engine."""
     spec = FullAttentionSpec(
-        block_size=16,
+        block_size=maybe_update_block_size(16),
         num_kv_heads=4,
         head_size=64,
         dtype=torch.float16,
@@ -1794,7 +1798,10 @@ def test_register_noncontiguous_packed_allows_matching_pp():
     known. Rejecting every local PP>1 layout at startup is too strict.
     """
     spec = FullAttentionSpec(
-        block_size=16, num_kv_heads=4, head_size=64, dtype=torch.float16
+        block_size=maybe_update_block_size(16),
+        num_kv_heads=4,
+        head_size=64,
+        dtype=torch.float16,
     )
     layer_names = ["model.layers.0.self_attn", "model.layers.1.self_attn"]
     with mooncake_register_worker(_make_test_kv_cache_config()) as (worker, _reg):
@@ -1814,8 +1821,9 @@ def test_register_kv_caches_supports_mixed_mla_and_eagle_shapes():
     with mooncake_register_worker(_make_test_kv_cache_config()) as (worker, reg):
         worker.use_mla = True
         worker.transfer_topo.is_mla = True
-        mla_cache = torch.zeros((2, 16, 512), dtype=torch.float16)
-        eagle_cache = torch.zeros((2, 16, 8, 64), dtype=torch.float16)
+        block_size = maybe_update_block_size(16)
+        mla_cache = torch.zeros((2, block_size, 512), dtype=torch.float16)
+        eagle_cache = torch.zeros((2, block_size, 8, 64), dtype=torch.float16)
         kv_caches = {
             "model.layers.0.mla_attn": mla_cache,
             "model.layers.1.eagle_attn": eagle_cache,
@@ -2240,7 +2248,7 @@ def _register_sliced_packed_mla(
 ):
     """Register column slices of one MLA packed row. Returns worker fields."""
     spec = MLAAttentionSpec(
-        block_size=16,
+        block_size=maybe_update_block_size(16),
         num_kv_heads=1,
         head_size=64,
         dtype=torch.uint8,
@@ -2286,7 +2294,7 @@ def test_sliced_packed_mla_registers_each_layer_view():
                 KVCacheGroupSpec(
                     [_layer_name(i) for i in layer_idxs],
                     MLAAttentionSpec(
-                        block_size=16,
+                        block_size=maybe_update_block_size(16),
                         num_kv_heads=1,
                         head_size=64,
                         dtype=torch.uint8,
@@ -2436,9 +2444,7 @@ async def test_kv_producer_heterogeneous_tp(monkeypatch, d_tp_size):
     remote_block_len = LOCAL_BLOCK_LEN * P_TP_SIZE // d_tp_size
 
     monkeypatch.setenv("VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT", "5")
-    vllm_config = create_vllm_config(
-        kv_connector="MooncakeConnector", kv_role="kv_producer"
-    )
+    vllm_config = _make_worker_vllm_config("kv_producer")
 
     with set_current_vllm_config(vllm_config), patch_worker_dependencies():
         prefill_connector = MooncakeConnector(
