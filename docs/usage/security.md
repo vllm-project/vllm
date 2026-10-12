@@ -178,7 +178,7 @@ When `--api-key` is configured, the following endpoints require Bearer token aut
 - `/v1/systemone` - Structured decisions API
 - `/v1/load_lora_adapter` - Load a LoRA adapter (can alter model behavior; only available when `--enable-lora` is set and `VLLM_ALLOW_RUNTIME_LORA_UPDATING=True`)
 - `/v1/unload_lora_adapter` - Unload a LoRA adapter (can alter model behavior; only available when `--enable-lora` is set and `VLLM_ALLOW_RUNTIME_LORA_UPDATING=True`)
-- `/inference/v1/generate` - Generate completions (available when `--enable-scale-out` is set, or with `--tokens-only`)
+- `/inference/v1/generate` - Generate completions (available when `--enable-scale-out` is set, or with `--tokens-only`; otherwise returns HTTP 403 with instructions to enable it)
 - `/cohere/v2/chat/render` - Render Cohere Chat v2 requests (requires `VLLM_ENABLE_COHERE_API=1` and either `--enable-scale-out` or `--tokens-only`)
 - `/v2/embed` - Cohere Embed API
 - `/v2/rerank` - Cohere Rerank API
@@ -208,9 +208,13 @@ The following endpoints **do not require authentication** even when `--api-key` 
 - `/update_weights` - Update model weights (can alter model behavior)
 - `/get_world_size` - Get distributed world size
 - `/abort_requests` - Abort in-flight requests (available with `--tokens-only`. Use the authenticated `/inference/v1/abort_requests` otherwise)
+- `/fault_tolerance/apply` - Trigger fault-recovery operations across ranks (available when fault tolerance is enabled)
+- `/fault_tolerance/status` - Query fault-recovery status (available when fault tolerance is enabled)
 
 **Utility endpoints:**
 
+- `/metrics` - Prometheus metrics, including model, throughput, queue, and KV-cache statistics
+- `/kv_event_sources` - KV-event publisher configuration for each data-parallel rank, which may reveal internal transport endpoints (when KV events are configured)
 - `/tokenize` - Tokenize text (not gated by `--enable-scale-out`)
 - `/detokenize` - Detokenize tokens
 - `/health` - Health check
@@ -302,6 +306,25 @@ configuration.
 Only deployments whose API clients are trusted should start the server with
 `--trust-request-mm-kwargs` to restore per-request overrides. Do not enable
 this option on an endpoint exposed to untrusted clients.
+
+### P2P KV-Offload Peer Session Limits
+
+Deployments that enable the P2P secondary tier (`OffloadingConnector` with `TieringOffloadingSpec` and a `p2p` secondary tier) accept peer addresses from `kv_transfer_params` in API requests. Without limits, an attacker with API access could submit many unique non-listening peer addresses, each consuming ZeroMQ sockets until the context quota is exhausted, crashing the EngineCore.
+
+vLLM enforces several configurable limits to prevent this:
+
+| Environment Variable | Default | Description |
+| --- | --- | --- |
+| `VLLM_P2P_MAX_PEERS` | `128` | Maximum concurrent P2P peer sessions. New peers (both outbound and inbound) are rejected when this limit is reached. |
+| `VLLM_P2P_HANDSHAKE_TIMEOUT_S` | `30` | Seconds to wait for a newly connected peer to complete the P2P handshake. Sessions that remain connected but not ready after this deadline are torn down. |
+| `VLLM_P2P_IDLE_TIMEOUT_S` | `300` | Seconds a P2P session may remain idle (no pending work, no messages) before it is eligible for eviction. Idle eviction runs only when remaining peer slots are within 8 of `VLLM_P2P_MAX_PEERS`. Set to `0` to disable idle eviction. |
+
+Connections that fail (ZMQ socket errors, handshake failures) are handled gracefully — the request falls back to local prefill instead of crashing the engine.
+
+**Recommendations:**
+
+- **Public-facing deployments with P2P enabled:** Lower `VLLM_P2P_MAX_PEERS` to the expected number of legitimate peers (e.g., `16` or `32`).
+- **Sensitive deployments:** Consider deploying behind a reverse proxy that strips or validates `kv_transfer_params` from API requests to prevent client-supplied peer addresses entirely.
 
 ## Tool Server and MCP Security
 

@@ -336,3 +336,47 @@ class TestZmqReconnect:
         finally:
             transport_a.close()
             transport_b.close()
+
+
+class TestExpandedMonitorEvents:
+    """The monitor mask includes EVENT_DISCONNECTED and EVENT_CLOSED so
+    both are treated as fatal."""
+
+    def test_fatal_events_include_disconnected_and_closed(self):
+        from vllm.v1.kv_offload.tiering.p2p.control.zmq import (
+            _FATAL_MONITOR_EVENTS,
+        )
+
+        assert zmq.EVENT_DISCONNECTED in _FATAL_MONITOR_EVENTS
+        assert zmq.EVENT_CLOSED in _FATAL_MONITOR_EVENTS
+
+    def test_monitor_mask_covers_fatal_events(self):
+        from vllm.v1.kv_offload.tiering.p2p.control.zmq import (
+            _FATAL_MONITOR_EVENTS,
+            _MONITOR_EVENT_MASK,
+        )
+
+        for ev in _FATAL_MONITOR_EVENTS:
+            assert _MONITOR_EVENT_MASK & ev == ev
+
+    def test_disconnect_detected_after_peer_shutdown(self):
+        """When a peer's transport closes, the outbound connection is
+        eventually marked dead by the monitor."""
+        transport_a, port_a = _make_transport()
+        transport_b, _ = _make_transport()
+
+        try:
+            conn_out = transport_b.connect(f"127.0.0.1:{port_a}")
+            conn_out.send({"type": "hello"})
+            _wait_for_inbound(transport_a)
+
+            transport_a.close()
+
+            end = time.monotonic() + 15
+            while conn_out.alive and time.monotonic() < end:
+                transport_b.poll()
+                time.sleep(0.05)
+
+            assert not conn_out.alive
+        finally:
+            transport_b.close()
