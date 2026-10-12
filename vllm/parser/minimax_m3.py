@@ -113,9 +113,17 @@ def _parse_element(text: str, pos: int, depth: int) -> tuple[str, _Element, int]
 def _recover_untagged_param(
     raw_args: str, pos: int
 ) -> tuple[str, str, int] | None:
-    """Try to recover a parameter whose opening tag was elided by the model."""
+    """Try to recover a parameter whose opening tag was elided by the model.
+
+    Only recovers when the closing tag appears before any opening tag,
+    i.e. the model truly skipped the opener rather than emitting junk
+    before a well-formed element.
+    """
     close_idx = raw_args.find(ELEMENT_END_START, pos)
     if close_idx < 0:
+        return None
+    open_idx = raw_args.find(ELEMENT_START, pos)
+    if 0 <= open_idx < close_idx:
         return None
     name_start = close_idx + len(ELEMENT_END_START)
     name_end = raw_args.find(">", name_start)
