@@ -14,8 +14,7 @@ if TYPE_CHECKING:
 
 
 class GptOssReasoningParser(ReasoningParser):
-    """
-    Reasoning parser for GptOss model.
+    """Reasoning parser for GptOss model.
 
     The GptOss model uses harmony to extract reasoning content and this parser
     is only used for detecting the end of the reasoning content.

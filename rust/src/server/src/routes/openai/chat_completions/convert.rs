@@ -150,6 +150,7 @@ pub(super) fn prepare_chat_request(
         messages,
         sampling_params: SamplingParams {
             temperature: request.temperature,
+            watermarking: request.watermarking,
             top_p: request.top_p,
             top_k: request.top_k,
             seed: request.seed,
@@ -158,6 +159,8 @@ pub(super) fn prepare_chat_request(
             thinking_token_budget: request.thinking_token_budget,
             logprobs: request.logprobs.then_some(top_logprobs),
             prompt_logprobs,
+            prompt_logprob_token_ids: None,
+            prompt_logprob_start: None,
             min_p: request.min_p,
             frequency_penalty: request.frequency_penalty,
             presence_penalty: request.presence_penalty,
@@ -168,6 +171,7 @@ pub(super) fn prepare_chat_request(
             logit_bias: convert_logit_bias(request.logit_bias)?,
             allowed_token_ids: request.allowed_token_ids,
             bad_words: request.bad_words,
+            bad_words_token_ids: None,
             logprob_token_ids: None,
             structured_outputs,
             skip_reading_prefix_cache: None,
@@ -175,11 +179,12 @@ pub(super) fn prepare_chat_request(
                 merge_ec_transfer_params(request.vllm_xargs, request.ec_transfer_params.as_ref()),
                 request.kv_transfer_params.as_ref(),
             ),
+            stream_interval: request.stream_interval,
         },
         chat_options: ChatOptions {
             generation_prompt_mode,
             chat_template: request.chat_template,
-            reasoning_effort: request.reasoning_effort,
+            reasoning_effort: request.reasoning_effort.map(|effort| effort.as_str().into()),
             response_format,
             template_kwargs,
         },
@@ -316,6 +321,9 @@ pub(crate) fn convert_message(message: ChatMessage) -> Result<VllmChatMessage, A
             convert_content(content)?,
             convert_message_tools(tools)?,
         )),
+        ChatMessage::Custom { role, content } => {
+            Ok(VllmChatMessage::custom(role, convert_content(content)?))
+        }
     }
 }
 
@@ -403,6 +411,7 @@ pub(crate) fn convert_tools(tools: Option<Vec<Tool>>) -> Result<Vec<ChatTool>, A
                 description: tool.function.description,
                 parameters: tool.function.parameters,
                 strict: tool.function.strict,
+                defer_loading: tool.function.defer_loading.or(tool.defer_loading),
             })
         })
         .collect()
@@ -435,12 +444,14 @@ fn convert_tool_choice(tool_choice: &ToolChoice) -> Result<ChatToolChoice, ApiEr
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::num::NonZeroU32;
     use std::sync::Arc;
 
-    use axum::http::HeaderMap;
+    use axum::http::{HeaderMap, StatusCode};
     use expect_test::expect;
     use llm_multimodal::ImageDetail;
     use serde_json::json;
+    use thiserror_ext::AsReport as _;
     use validator::Validate;
     use vllm_chat::{
         AssistantContentBlock, AssistantToolCall, ChatContentPart, ChatMessage as VllmChatMessage,
@@ -485,6 +496,59 @@ mod tests {
             stream: true,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn chat_http_reasoning_effort_preserves_omission_none_and_kwargs() {
+        for effort in [None, Some(json!(null))].into_iter().chain(
+            ["none", "minimal", "low", "medium", "high", "xhigh", "max"]
+                .map(|name| Some(json!(name))),
+        ) {
+            let kwargs = json!({"reasoning_effort": 37, "thinking": true});
+            let mut value = json!({
+                "messages": [{"role": "user", "content": "hello"}],
+                "chat_template_kwargs": kwargs,
+            });
+            if let Some(effort) = &effort {
+                value["reasoning_effort"] = effort.clone();
+            }
+            let request: ChatCompletionRequest = serde_json::from_value(value).unwrap();
+            let prepared = prepare_chat_request(
+                request,
+                &served(&["test-model"]),
+                request_context(&HeaderMap::new(), None),
+            )
+            .unwrap();
+            let options = prepared.chat_request.chat_options;
+            assert_eq!(
+                serde_json::to_value(options.reasoning_effort).unwrap(),
+                effort.unwrap_or(serde_json::Value::Null)
+            );
+            assert_eq!(
+                serde_json::to_value(options.template_kwargs).unwrap(),
+                kwargs
+            );
+        }
+    }
+
+    #[test]
+    fn chat_http_reasoning_effort_rejects_model_extensions_at_top_level() {
+        for effort in [json!(37), json!("custom")] {
+            let request = json!({
+                "messages": [{"role": "user", "content": "hello"}],
+                "reasoning_effort": effort,
+            });
+            assert!(serde_json::from_value::<ChatCompletionRequest>(request).is_err());
+        }
+    }
+
+    #[test]
+    fn chat_http_request_rejects_zero_stream_interval() {
+        let request = json!({
+            "messages": [{"role": "user", "content": "hello"}],
+            "stream_interval": 0,
+        });
+        assert!(serde_json::from_value::<ChatCompletionRequest>(request).is_err());
     }
 
     #[test]
@@ -584,6 +648,61 @@ mod tests {
     }
 
     #[test]
+    fn prepare_chat_request_rejects_empty_json_schema() {
+        let mut request = base_request();
+        request.response_format = Some(ResponseFormat::JsonSchema {
+            json_schema: JsonSchemaFormat {
+                name: "answer".to_string(),
+                description: None,
+                schema: json!("  "),
+                strict: None,
+            },
+        });
+
+        let error = prepare_chat_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.status_code(), StatusCode::BAD_REQUEST);
+        assert!(
+            error
+                .to_error_response()
+                .error
+                .message
+                .contains("json cannot be an empty string")
+        );
+    }
+
+    #[test]
+    fn prepare_chat_request_rejects_whitespace_only_structured_outputs_grammar() {
+        let request: ChatCompletionRequest = serde_json::from_value(json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "messages": [{"role": "user", "content": "hello"}],
+            "structured_outputs": {"grammar": " \t\n"},
+        }))
+        .expect("parse structured_outputs");
+
+        let error = prepare_chat_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.status_code(), StatusCode::BAD_REQUEST);
+        assert!(
+            error
+                .to_error_response()
+                .error
+                .message
+                .contains("grammar cannot be an empty string")
+        );
+    }
+
+    #[test]
     fn prepare_chat_request_defaults_function_tool_fields() {
         let request: ChatCompletionRequest = serde_json::from_value(json!({
             "model": "Qwen/Qwen1.5-0.5B-Chat",
@@ -606,7 +725,47 @@ mod tests {
                 description: None,
                 parameters: serde_json::Value::Null,
                 strict: None,
+                defer_loading: None,
             }]
+        );
+    }
+
+    #[test]
+    fn prepare_chat_request_maps_tool_defer_loading() {
+        let request: ChatCompletionRequest = serde_json::from_value(json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "messages": [{"role": "user", "content": "hello"}],
+            "tools": [
+                {"function": {"name": "tool_level"}, "defer_loading": true},
+                {"function": {"name": "function_level", "defer_loading": true}},
+                {
+                    "function": {"name": "function_wins", "defer_loading": false},
+                    "defer_loading": true,
+                },
+            ],
+        }))
+        .expect("parse defer_loading");
+
+        let prepared = prepare_chat_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .expect("prepare defer_loading");
+
+        let defer_loading = prepared
+            .chat_request
+            .tools()
+            .iter()
+            .map(|tool| (tool.name.as_str(), tool.defer_loading))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            defer_loading,
+            [
+                ("tool_level", Some(true)),
+                ("function_level", Some(true)),
+                ("function_wins", Some(false)),
+            ]
         );
     }
 
@@ -691,7 +850,7 @@ mod tests {
         );
 
         let tokenizer = Arc::new(TestTokenizer::new());
-        let prompt = KimiK3ChatRenderer::new(tokenizer.clone())
+        let prompt = KimiK3ChatRenderer::new(tokenizer.clone(), Default::default())
             .render(&prepared.chat_request)
             .expect("Kimi K3 rendering succeeds")
             .prompt;
@@ -856,6 +1015,7 @@ mod tests {
             frequency_penalty: Some(0.3),
             presence_penalty: Some(0.4),
             repetition_penalty: Some(1.1),
+            stream_interval: NonZeroU32::new(4),
             ..base_request()
         };
 
@@ -871,6 +1031,7 @@ mod tests {
             frequency_penalty: Some(0.3),
             presence_penalty: Some(0.4),
             repetition_penalty: Some(1.1),
+            stream_interval: NonZeroU32::new(4),
             ..VllmSamplingParams::default()
         };
         assert_eq!(prepared.chat_request.sampling_params, expected);
@@ -916,7 +1077,9 @@ mod tests {
                             "properties": {"city": {"type": "string"}},
                         }),
                         strict: Some(true),
+                        defer_loading: None,
                     },
+                    defer_loading: None,
                 }]),
                 name: None,
             }],
@@ -942,9 +1105,47 @@ mod tests {
                         "properties": {"city": {"type": "string"}},
                     }),
                     strict: Some(true),
+                    defer_loading: None,
                 }]),
             )]
         );
+    }
+
+    #[test]
+    fn prepare_chat_request_accepts_custom_role_messages() {
+        let request: ChatCompletionRequest = serde_json::from_value(json!({
+            "messages": [
+                {"role": "root", "content": "Custom identity."},
+                {"role": "user", "content": "hello"},
+            ],
+        }))
+        .expect("parse custom role message");
+
+        let prepared = prepare_chat_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .expect("request is valid");
+
+        assert_eq!(
+            prepared.chat_request.messages,
+            vec![
+                VllmChatMessage::custom("root", "Custom identity."),
+                VllmChatMessage::user("hello"),
+            ]
+        );
+    }
+
+    #[test]
+    fn chat_http_message_keeps_standard_role_errors() {
+        let error = serde_json::from_value::<ChatMessage>(json!({
+            "role": "tool",
+            "content": "Sunny",
+        }))
+        .unwrap_err();
+
+        expect!["missing field `tool_call_id`"].assert_eq(&error.to_report_string());
     }
 
     #[test]
@@ -1235,7 +1436,9 @@ mod tests {
                         "properties": {"city": {"type": "string"}},
                     }),
                     strict: None,
+                    defer_loading: None,
                 },
+                defer_loading: None,
             }]),
             tool_choice: Some(ToolChoice::Value(ToolChoiceValue::None)),
             ..base_request()
@@ -1270,6 +1473,7 @@ mod tests {
                     "properties": {"city": {"type": "string"}},
                 }),
                 strict: None,
+                defer_loading: None,
             }]
         );
         assert_eq!(prepared.chat_request.tool_choice(), &ChatToolChoice::None);
@@ -1288,7 +1492,9 @@ mod tests {
                         "properties": {"city": {"type": "string"}},
                     }),
                     strict: None,
+                    defer_loading: None,
                 },
+                defer_loading: None,
             }]),
             tool_choice: Some(ToolChoice::Value(ToolChoiceValue::Required)),
             ..base_request()
@@ -1321,7 +1527,9 @@ mod tests {
                         "properties": {"city": {"type": "string"}},
                     }),
                     strict: None,
+                    defer_loading: None,
                 },
+                defer_loading: None,
             }]),
             tool_choice: Some(ToolChoice::Function {
                 tool_type: "function".to_string(),

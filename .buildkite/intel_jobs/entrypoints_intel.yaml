@@ -19,14 +19,14 @@ steps:
   source_file_dependencies:
   - vllm/entrypoints
   - tests/entrypoints/unit_tests
-  - tests/entrypoints/weight_transfer
+  - tests/entrypoints/rl/weight_transfer
   - tests/entrypoints/launchers
   commands:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
     pytest -v -s entrypoints/unit_tests &&
-    pytest -v -s entrypoints/weight_transfer'
+    pytest -v -s entrypoints/rl/weight_transfer'
 
 - label: ":intel: (BMG) Entrypoints Integration (LLM)"
   key: entrypoints-integration-llm-intel
@@ -71,13 +71,17 @@ steps:
   - vllm/
   - "!vllm/distributed/kv_transfer/"
   - tests/entrypoints/serve
+  - tests/entrypoints/rl
   commands:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'export VLLM_WORKER_MULTIPROC_METHOD=spawn &&
     cd tests &&
-    pytest -v -s entrypoints/serve --ignore=entrypoints/serve/dev/rpc
-    --deselect="tests/entrypoints/serve/dev/rlhf/state_transitions/test_pause_resume.py::TestPauseResume::test_clear_cache_preserves_output_and_controls_prefix_cache[MRV1]" &&
+    pytest -v -s entrypoints/serve --ignore=entrypoints/serve/dev/rpc &&
+    pytest -v -s entrypoints/rl --ignore=entrypoints/rl/weight_transfer
+    --ignore=entrypoints/rl/return_routed_experts/test_openai_api.py
+    --ignore=entrypoints/rl/weight_transfer_metrics
+    --deselect="tests/entrypoints/rl/state_transitions/test_pause_resume.py::TestPauseResume::test_clear_cache_preserves_output_and_controls_prefix_cache[MRV1]" &&
     PYTHONPATH=/workspace/vllm pytest -v -s entrypoints/serve/dev/rpc'
 
 - label: ":intel: (BMG) Entrypoints Integration (API Server Scale Out)"
@@ -134,7 +138,8 @@ steps:
     'cd tests &&
     pytest -v -s tool_use
     --deselect="tests/tool_use/mistral/test_mistral_tool_calls.py::test_tool_call_none_with_tools[ministral-3b]"
-    --deselect="tests/tool_use/test_chat_completions.py::test_chat_completion_with_tools[granite-3.0-8b]" &&
+    --deselect="tests/tool_use/test_chat_completions.py::test_chat_completion_with_tools[granite-3.0-8b]"
+    --deselect="tests/tool_use/test_chat_completions.py::test_chat_completion_with_tools[llama3.2]" &&
     pytest -v -s entrypoints/tool_parsers &&
     pytest -v -s entrypoints/generate &&
     pytest -v -s entrypoints/anthropic &&

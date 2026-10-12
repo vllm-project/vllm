@@ -42,6 +42,10 @@ _TOOL_PARSERS_TO_REGISTER = {
         "deepseekv4_engine_tool_parser",
         "DeepSeekV4EngineToolParser",
     ),
+    "deepseek_v41": (
+        "deepseekv41_engine_tool_parser",
+        "DeepSeekV41EngineToolParser",
+    ),
     "cohere_command3": (
         "cohere_command_tool_parser",
         "CohereCommand3ToolParser",
@@ -71,8 +75,8 @@ _TOOL_PARSERS_TO_REGISTER = {
         "Granite20bFCToolParser",
     ),
     "granite": (
-        "granite_tool_parser",
-        "GraniteToolParser",
+        "granite_engine_tool_parser",
+        "GraniteEngineToolParser",
     ),
     "granite4": (
         "granite4_tool_parser",
@@ -81,6 +85,10 @@ _TOOL_PARSERS_TO_REGISTER = {
     "hermes": (
         "hermes_tool_parser",
         "Hermes2ProToolParser",
+    ),
+    "hf": (
+        "response_template_tool_parser",
+        "ResponseTemplateToolParser",
     ),
     "poolside_v1": (
         "poolside_v1_tool_parser",
@@ -139,8 +147,8 @@ _TOOL_PARSERS_TO_REGISTER = {
         "LongcatFlashToolParser",
     ),
     "mimo": (
-        "qwen3_engine_tool_parser",
-        "Qwen3EngineToolParser",
+        "mimo_tool_parser",
+        "MiMoToolParser",
     ),
     "minimax_m2": (
         "minimax_m2_tool_parser",
@@ -161,6 +169,10 @@ _TOOL_PARSERS_TO_REGISTER = {
     "olmo3": (
         "olmo3_tool_parser",
         "Olmo3PythonicToolParser",
+    ),
+    "plamo3": (
+        "plamo3_engine_tool_parser",
+        "Plamo3EngineToolParser",
     ),
     "muse_glimmer": (
         "muse_glimmer_tool_parser",

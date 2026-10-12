@@ -10,6 +10,7 @@ use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::routing::{get, post};
 use thiserror_ext::AsReport as _;
+use vllm_engine_core_client::protocol::request::ReasoningParserKwargs;
 use vllm_text::TextRequest;
 
 use crate::DEFAULT_REQUEST_BODY_LIMIT_BYTES;
@@ -105,6 +106,13 @@ fn lower_render_request(
         kv_transfer_params: None,
         ec_transfer_params: None,
         content_parts: None,
+        return_token_ids: None,
+        // Carry what the chat route would pass to the engine, so the engine
+        // gates structured outputs the same way on `/inference/v1/generate`.
+        reasoning_ended: text_request.reasoning_ended,
+        reasoning_parser_kwargs: (text_request.reasoning_parser_kwargs
+            != ReasoningParserKwargs::default())
+        .then_some(text_request.reasoning_parser_kwargs),
         other: Default::default(),
     };
     validate_generate_request(&request, &state.served_model_names)?;
@@ -123,7 +131,7 @@ async fn render_chat(
     let chat_request = lower_chat_request(body, &model_resolution(&state), request_context)?;
     let (text_request, _) = state
         .chat
-        .prepare(chat_request)
+        .prepare(chat_request, &state.text)
         .await
         .map_err(|error| ApiError::invalid_request(error.to_report_string(), None))?;
     Ok(Json(lower_render_request(

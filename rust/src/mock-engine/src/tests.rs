@@ -10,6 +10,7 @@ use tokio_util::sync::CancellationToken;
 use vllm_engine_core_client::protocol::output::EngineCoreFinishReason;
 use vllm_engine_core_client::protocol::request::EngineCoreRequest;
 use vllm_engine_core_client::protocol::sampling::EngineCoreSamplingParams;
+use vllm_engine_core_client::protocol::stats::PrefillStats;
 use vllm_engine_core_client::test_utils::IpcNamespace;
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig, TransportMode};
 
@@ -28,6 +29,7 @@ fn client_config(handshake_address: String, engine_count: usize) -> EngineCoreCl
         coordinator_mode: None,
         model_name: "mock-model".to_string(),
         client_index: 0,
+        engine_stats_enabled: true,
     }
 }
 
@@ -114,17 +116,27 @@ async fn chunk_size_one_outputs_one_token_per_update() {
     let ipc = IpcNamespace::new().expect("ipc namespace");
     let handshake_address = ipc.handshake_endpoint();
     let (client, shutdown, task) = connect_with_mock(handshake_address, 1, 1).await;
-    let mut stream = client.call(sample_request("req-1", 3)).await.expect("call");
+    let mut stream = client.call(sample_request("req-1", 3)).await.expect("call").into_outputs();
 
     let first = stream.next().await.expect("first").expect("first ok");
     assert_eq!(first.new_token_ids.len(), 1);
     assert_eq!(first.finish_reason, None);
+    assert_eq!(
+        first.prefill_stats,
+        Some(Box::new(PrefillStats {
+            num_prompt_tokens: 3,
+            num_computed_tokens: 3,
+            ..Default::default()
+        }))
+    );
     let second = stream.next().await.expect("second").expect("second ok");
     assert_eq!(second.new_token_ids.len(), 1);
     assert_eq!(second.finish_reason, None);
+    assert!(second.prefill_stats.is_none());
     let third = stream.next().await.expect("third").expect("third ok");
     assert_eq!(third.new_token_ids.len(), 1);
     assert_eq!(third.finish_reason, Some(EngineCoreFinishReason::Length));
+    assert!(third.prefill_stats.is_none());
     assert!(stream.next().await.is_none());
 
     shutdown_mock(client, shutdown, task).await;
@@ -135,7 +147,7 @@ async fn chunk_size_clips_final_output_to_max_tokens() {
     let ipc = IpcNamespace::new().expect("ipc namespace");
     let handshake_address = ipc.handshake_endpoint();
     let (client, shutdown, task) = connect_with_mock(handshake_address, 1, 4).await;
-    let mut stream = client.call(sample_request("req-clip", 6)).await.expect("call");
+    let mut stream = client.call(sample_request("req-clip", 6)).await.expect("call").into_outputs();
 
     let first = stream.next().await.expect("first").expect("first ok");
     assert_eq!(first.new_token_ids.len(), 4);
@@ -153,7 +165,11 @@ async fn abort_cancels_active_request_and_emits_terminal_output() {
     let ipc = IpcNamespace::new().expect("ipc namespace");
     let handshake_address = ipc.handshake_endpoint();
     let (client, shutdown, task) = connect_with_mock(handshake_address, 1, 1).await;
-    let mut stream = client.call(sample_request("req-abort", 1_000_000)).await.expect("call");
+    let mut stream = client
+        .call(sample_request("req-abort", 1_000_000))
+        .await
+        .expect("call")
+        .into_outputs();
     let first = stream.next().await.expect("first").expect("first ok");
     assert_eq!(first.finish_reason, None);
 
@@ -184,6 +200,7 @@ async fn utility_requests_return_minimal_success_responses() {
     assert!(client.reset_prefix_cache(false, false).await.expect("reset prefix cache"));
     client.reset_mm_cache().await.expect("reset mm cache");
     client.reset_encoder_cache().await.expect("reset encoder cache");
+    assert!(client.wake_up(Some(vec!["kv_cache".to_string()])).await.expect("wake up"));
 
     shutdown_mock(client, shutdown, task).await;
 }

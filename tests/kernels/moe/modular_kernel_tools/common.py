@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from types import SimpleNamespace
 from typing import Any
 
@@ -15,6 +15,7 @@ from tests.kernels.quantization.nvfp4_utils import (
     dequantize_nvfp4_to_dtype,
 )
 from tests.kernels.utils import torch_experts
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig
 from vllm.distributed import (
     get_dp_group,
@@ -33,7 +34,9 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     RoutingMethodType,
 )
+from vllm.model_executor.layers.quantization.utils.fp8_utils import is_fp8
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
     kFp8Dynamic128Sym,
     kFp8DynamicTensorSym,
     kFp8DynamicTokenSym,
@@ -81,7 +84,18 @@ class Config:
 
     world_size: int
 
+    activation: MoEActivation = MoEActivation.SILU
+
     torch_trace_dir_path: str | None = None
+
+    # Force AiterExperts's hidden_pad/intermediate_pad computation
+    # (`experts/rocm_aiter_moe.py`) to diverge from the padded K/N sizes above.
+    # None (default) preserves today's behavior: FusedMoEConfig defaults both
+    # to the (unpadded) K/intermediate_size_per_partition, so hidden_pad and
+    # intermediate_pad come out to 0.
+    # See https://github.com/vllm-project/vllm/issues/54966 ("Test padding").
+    hidden_dim_unpadded: int | None = None
+    intermediate_size_per_partition_unpadded: int | None = None
 
     def __post_init__(self):
         if self.quant_config is None:
@@ -148,9 +162,7 @@ class Config:
         return self.E // self.world_size
 
     def make_env_data(self) -> tuple[VllmConfig, dict[Any, Any]]:
-        """
-        make env data for vllm launch.
-        """
+        """Make env data for vllm launch."""
         vllm_config = VllmConfig()
         vllm_config.model_config = SimpleNamespace(
             enforce_eager=True,
@@ -167,31 +179,34 @@ class Config:
 
         return vllm_config, env_dict
 
+    def fp8_quant_key_pair(self) -> tuple[QuantKey, QuantKey]:
+        """Derive the (weight_quant_key, activation_quant_key) pair an FP8
+        quant config of this shape corresponds to (either OCP or FNUZ FP8,
+        see ``current_platform.fp8_dtype()``)."""
+        if self.quant_block_shape is not None:
+            return kFp8Static128BlockSym, kFp8Dynamic128Sym
+        if self.is_per_out_ch_quant:
+            return (
+                kFp8StaticChannelSym,
+                kFp8DynamicTokenSym
+                if self.is_per_act_token_quant
+                else kFp8StaticTensorSym,
+            )
+        return (
+            kFp8StaticTensorSym,
+            kFp8DynamicTensorSym
+            if self.is_per_act_token_quant
+            else kFp8StaticTensorSym,
+        )
+
     def fe_supports_quant_scheme(self) -> bool:
         """Check if the fused experts class supports this quant config.
         See https://github.com/ROCm/aiter/issues/2419 for AITER gaps."""
         if self.quant_config is None or self.quant_dtype is None:
             return True
-        if self.quant_dtype != torch.float8_e4m3fn:
+        if not is_fp8(self.quant_dtype):
             return True
-        # Derive QuantKeys from test config
-        if self.quant_block_shape is not None:
-            w_key = kFp8Static128BlockSym
-            a_key = kFp8Dynamic128Sym
-        elif self.is_per_out_ch_quant:
-            w_key = kFp8StaticChannelSym
-            a_key = (
-                kFp8DynamicTokenSym
-                if self.is_per_act_token_quant
-                else kFp8StaticTensorSym
-            )
-        else:
-            w_key = kFp8StaticTensorSym
-            a_key = (
-                kFp8DynamicTensorSym
-                if self.is_per_act_token_quant
-                else kFp8StaticTensorSym
-            )
+        w_key, a_key = self.fp8_quant_key_pair()
         fe_cls = self.fused_experts_type
         if hasattr(fe_cls, "_supports_quant_scheme"):
             try:
@@ -201,10 +216,7 @@ class Config:
         return True
 
     def is_fp8_block_quantized(self):
-        return (
-            self.quant_dtype == torch.float8_e4m3fn
-            and self.quant_block_shape is not None
-        )
+        return is_fp8(self.quant_dtype) and self.quant_block_shape is not None
 
     def is_batched_prepare_finalize(self):
         info = prepare_finalize_info(self.prepare_finalize_type)
@@ -310,6 +322,16 @@ class Config:
                 f"block={self.quant_block_shape})"
             )
 
+        # Check activation support; NotImplementedError means no opinion.
+        try:
+            if not self.fused_experts_type._supports_activation(self.activation):
+                return False, (
+                    f"FE {self.fused_experts_type.__name__} does not support "
+                    f"activation {self.activation}"
+                )
+        except NotImplementedError:
+            pass
+
         # Check block quantization support
         is_block_quantized = self.quant_block_shape is not None
         if is_block_quantized and self.quant_dtype is None:
@@ -336,6 +358,11 @@ class Config:
             return False, "Needs Aiter, but Aiter not available."
         if self.needs_mori() and not has_mori():  # noqa: SIM103
             return False, "Needs MoRI, but MoRI not available."
+        if self.needs_mori() and not rocm_aiter_ops.is_fused_moe_enabled():
+            return False, (
+                "Mori requires AITER's fused-moe backend to be enabled "
+                "(VLLM_ROCM_USE_AITER=1 and VLLM_ROCM_USE_AITER_MOE=1)."
+            )
 
         try:
             if not self.fused_experts_type._supports_current_device():
@@ -372,7 +399,7 @@ class WeightTensors:
     def is_quantized(self) -> bool:
         # or w1_scale is not None?
         return (
-            self.w1.dtype == torch.float8_e4m3fn
+            is_fp8(self.w1.dtype)
             or self.w1.dtype == torch.uint8
             or self.w1.dtype == torch.int8
         )
@@ -444,9 +471,7 @@ class RankTensors:
     def make_hidden_states(
         config: Config,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        """
-        Return hidden_states
-        """
+        """Return hidden_states."""
         m, k, dtype = (config.M, config.K, config.dtype)
         device = torch.accelerator.current_device_index()
         a = torch.randn((m, k), device=device, dtype=dtype) / 15.0
@@ -601,6 +626,7 @@ def reference_moe_impl(
         topk_ids=rank_tensors.topk_ids,
         global_num_experts=config.E,
         expert_map=None,
+        activation=config.activation,
         w1_scale=w1_scale,
         w2_scale=w2_scale,
         a1_scale=a_scale,
@@ -644,9 +670,13 @@ def make_modular_kernel(
         moe_parallel_config=moe_parallel_config,
         in_dtype=config.dtype,
         max_num_tokens=next_power_of_2(config.M),
-        activation=MoEActivation.SILU,
+        activation=config.activation,
         device=vllm_config.device_config.device,
         routing_method=RoutingMethodType.DeepSeekV3,
+        hidden_dim_unpadded=config.hidden_dim_unpadded,
+        intermediate_size_per_partition_unpadded=(
+            config.intermediate_size_per_partition_unpadded
+        ),
     )
 
     prepare_finalize = maybe_make_prepare_finalize(
@@ -672,6 +702,21 @@ def make_modular_kernel(
     return modular_kernel
 
 
+def _shuffle_weights_for_aiter(rank_weights: WeightTensors) -> WeightTensors:
+    """Pre-shuffle weights so AITER selects its prebuilt `preshuffle_on` module.
+
+    Production shuffles in `process_weights_after_loading`; this harness builds its
+    tensors directly, so without this every call asks for a `preshuffle_off` module
+    that is not prebuilt, and JIT-compiles a kernel the image already ships.
+    """
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    w1, w2 = rocm_aiter_ops.shuffle_weights(rank_weights.w1, rank_weights.w2)
+    w1.is_shuffled = True
+    w2.is_shuffled = True
+    return replace(rank_weights, w1=w1, w2=w2)
+
+
 def _maybe_convert_weights_for_experts(
     config: Config,
     rank_weights: WeightTensors,
@@ -684,6 +729,15 @@ def _maybe_convert_weights_for_experts(
 
     fe_type = config.fused_experts_type
     fe_name = getattr(fe_type, "__name__", "")
+
+    # AITER's prebuilt modules carry a gfx950 instance table even on gfx942 and reject
+    # intermediate sizes that are not a multiple of 256, but only for the fp8 per-tensor
+    # and per-token schemes. Those keep JIT-compiling until
+    # https://github.com/ROCm/aiter/issues/5766 is fixed.
+    if fe_name == "AiterExperts" and (
+        config.quant_dtype is None or config.quant_block_shape is not None
+    ):
+        return _shuffle_weights_for_aiter(rank_weights)
 
     backend: Fp8MoeBackend | None = None
     if fe_name == "TrtLlmFp8ExpertsModular":
@@ -770,7 +824,7 @@ def run_modular_kernel(
         "w2": rank_weights.w2,
         "topk_weights": rank_tensors.topk_weights,
         "topk_ids": topk_ids,
-        "activation": MoEActivation.SILU,
+        "activation": config.activation,
         "expert_map": rank_tensors.expert_map,
         "global_num_experts": config.E,
         "apply_router_weight_on_input": config.topk == 1

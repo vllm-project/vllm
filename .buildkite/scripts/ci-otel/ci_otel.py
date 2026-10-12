@@ -14,12 +14,13 @@ import sys
 import time
 import urllib.request
 from collections.abc import Iterable
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 ENDPOINT = os.getenv("CI_INFRA_OTEL_ENDPOINT", "https://ci.vllm.ai/api/otel/v1/traces")
 AUDIENCE = os.getenv("CI_INFRA_OTEL_AUDIENCE", "https://ci.vllm.ai/api/otel")
 MAX_BATCH_SIZE = 2_000
+MAX_BATCH_BYTES = 1024 * 1024
 TEST_SPOOL_BATCH_SIZE = 100
 
 
@@ -56,6 +57,7 @@ class Span:
     end_ns: int
     attributes: dict[str, str | int | bool]
     status_code: int = 1
+    events: list[dict] = field(default_factory=list)
 
 
 def _varint(value: int) -> bytes:
@@ -137,6 +139,12 @@ def _encode_span(span: Span) -> bytes:
         )
     for name, value in attributes.items():
         encoded += _bytes_field(9, _attribute(name, value))
+    for event in span.events:
+        encoded_event = _fixed64_field(1, int(event["time_ns"]))
+        encoded_event += _string_field(2, event["name"])
+        for name, value in event["attributes"].items():
+            encoded_event += _bytes_field(3, _attribute(name, value))
+        encoded += _bytes_field(11, encoded_event)
     return encoded + _bytes_field(15, _varint_field(3, span.status_code))
 
 
@@ -482,10 +490,24 @@ def export_spans(spans: list[Span], timeout_seconds: float = 3.0) -> bool:
     try:
         deadline = time.monotonic() + max(timeout_seconds, 0.1)
         token = _oidc_token(deadline)
-        for offset in range(0, len(spans), MAX_BATCH_SIZE):
+        batches: list[list[Span]] = []
+        batch: list[Span] = []
+        size = 0
+        for span in spans:
+            span_size = len(_encode_span(span))
+            if batch and (
+                size + span_size > MAX_BATCH_BYTES or len(batch) >= MAX_BATCH_SIZE
+            ):
+                batches.append(batch)
+                batch, size = [], 0
+            batch.append(span)
+            size += span_size
+        if batch:
+            batches.append(batch)
+        for batch in batches:
             request = urllib.request.Request(
                 ENDPOINT,
-                data=encode_request(spans[offset : offset + MAX_BATCH_SIZE]),
+                data=encode_request(batch),
                 method="POST",
                 headers={
                     "Authorization": f"Bearer {token}",

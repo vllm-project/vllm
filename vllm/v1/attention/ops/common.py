@@ -5,11 +5,11 @@ from typing import Any
 
 import torch
 
+from vllm.model_executor.warmup.jit_warmup import kernel_launcher
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     LaunchSpec,
     TritonWarmupTensor,
     VllmTritonJitKernel,
-    kernel_launcher,
 )
 from vllm.triton_utils import tl, triton
 
@@ -178,6 +178,7 @@ def pack_seq_triton(
 
     Returns:
         packed: [B, Lmax, ...] — packed tensor.
+
     """
     is_uint8 = x.dtype == torch.uint8
     if is_uint8:
@@ -334,8 +335,7 @@ def unpack_seq_triton(
     block_t: int = 64,
     block_d: int = 64,
 ) -> torch.Tensor:
-    """
-    Unpack a packed decode query tensor back to the original format.
+    """Unpack a packed decode query tensor back to the original format.
     Efficient Triton implementation.
 
     Args:
@@ -346,8 +346,8 @@ def unpack_seq_triton(
 
     Returns:
         unpacked_tensor: [N, ...] where N = sum(lengths)
-    """
 
+    """
     # Handle multi-dimensional input by reshaping to (B, Lmax, -1)
     original_shape = packed_tensor.shape
     if len(original_shape) > 3:
