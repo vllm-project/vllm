@@ -84,8 +84,7 @@ def init_structured_decisions_state(
             )
         )
     except ValueError as e:
-        # Info, since every model without a read strategy lands here.
-        logger.info("/v1/systemone is disabled: %s", e)
+        logger.debug("/v1/systemone is disabled: %s", e)
         return
     state.serving_structured_decisions = ServingStructuredDecisions(
         state.openai_serving_models, strategy, request_logger=request_logger
