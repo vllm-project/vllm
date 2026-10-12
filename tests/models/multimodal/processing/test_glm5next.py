@@ -12,6 +12,7 @@ inside a worker and takes the engine down with it.
 The checks below are arithmetic: no weights, no GPU.
 """
 
+import numpy as np
 import pytest
 import torch
 from PIL import Image
@@ -22,7 +23,12 @@ from transformers.models.glm5_next.video_processing_glm5_next import (
 from transformers.video_utils import VideoMetadata
 
 from vllm.model_executor.layers.fusion.mm_input_norm import build_mm_input_norm
+from vllm.models.glm5next.common.multimodal import (
+    Glm5NextMultiModalProcessor,
+    Glm5NextProcessingInfo,
+)
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.processing import ProcessorInputs, TimingContext
 from vllm.platforms import current_platform
 
 from ...utils import build_model_context
@@ -239,3 +245,49 @@ def test_image_encoder_cache_follows_max_pixels_override():
         info.get_num_image_tokens(image_width=size.width, image_height=size.height)
         == 100
     )
+
+
+def test_routing_metadata_fast_path_requires_exact_processor_opt_in() -> None:
+    capability = "_supports_routing_metadata_image_fast_path"
+    assert Glm5NextMultiModalProcessor.__dict__[capability]
+    assert Glm5NextProcessingInfo.__dict__[capability]
+    assert (
+        Glm5NextMultiModalProcessor.__dict__["_routing_metadata_processing_info_type"]
+        is Glm5NextProcessingInfo
+    )
+
+
+def test_routing_metadata_matches_full_image_processing():
+    ctx = build_model_context(
+        "zai-org/GLM-5.3-Flash",
+        limit_mm_per_prompt={"image": 2, "video": 0},
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(
+        ctx.model_config,
+        tokenizer=ctx.tokenizer,
+    )
+    hf_processor = processor.info.get_hf_processor()
+    image_token_ids = processor.info.get_tokenizer().encode(
+        hf_processor.image_token, add_special_tokens=False
+    )
+    images = [
+        np.zeros((720, 1280, 3), dtype=np.uint8),
+        np.full((480, 640, 3), 90, dtype=np.uint8),
+    ]
+
+    def make_inputs() -> ProcessorInputs:
+        return ProcessorInputs(
+            prompt=image_token_ids + image_token_ids,
+            mm_data_items=processor.info.parse_mm_data({"image": images}),
+        )
+
+    full = processor.apply(make_inputs(), TimingContext(enabled=False))
+    routing = processor.apply_routing_metadata(
+        make_inputs(),
+        TimingContext(enabled=False),
+    )
+
+    assert routing["prompt_token_ids"] == full["prompt_token_ids"]
+    assert routing["mm_hashes"] == full["mm_hashes"]
+    assert routing["mm_placeholders"] == full["mm_placeholders"]
+    assert routing["mm_kwargs"] == {}
