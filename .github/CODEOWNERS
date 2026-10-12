@@ -46,6 +46,8 @@
 /vllm/entrypoints/pooling @noooop @DarkLight1337
 /vllm/entrypoints/rl @aoshen02 @njhill
 /vllm/entrypoints/scale_out @noooop @DarkLight1337
+/vllm/entrypoints/scale_out/token_in_token_out @aoshen02
+/vllm/entrypoints/scale_out/factories.py @aoshen02
 /vllm/entrypoints/speech_to_text/realtime @njhill
 /vllm/entrypoints/speech_to_text @NickLucche
 /vllm/entrypoints/serve/sagemaker @DarkLight1337
@@ -75,6 +77,7 @@
 # Rust Frontend
 /rust/ @BugenZhao @njhill
 /rust/src/bench @esmeetu
+/rust/src/server/src/routes/inference @aoshen02
 /tools/build_rust.sh @BugenZhao @njhill
 /rust-toolchain.toml @BugenZhao @njhill
 /.buildkite/test_areas/rust* @BugenZhao @njhill
