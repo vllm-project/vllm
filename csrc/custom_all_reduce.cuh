@@ -267,22 +267,26 @@ class CustomAllreduce {
     auto bytes = size * sizeof(typename packed_t<T>::P);
     int blocks = std::min(block_limit, (size + threads - 1) / threads);
 
-    // Check environment variable once
-    const char* env_algo = std::getenv("VLLM_CUSTOM_ALLREDUCE_ALGO");
-    bool force_1stage = false;
-    bool force_2stage = false;
-    if (env_algo != nullptr) {
-      if (std::strcmp(env_algo, "1stage") == 0 ||
-          std::strcmp(env_algo, "oneshot") == 0) {
-        force_1stage = true;
-      } else if (std::strcmp(env_algo, "2stage") == 0 ||
-                 std::strcmp(env_algo, "twoshot") == 0) {
-        force_2stage = true;
-      } else {
-        throw std::runtime_error(
-            "Invalid VLLM_CUSTOM_ALLREDUCE_ALGO: " + std::string(env_algo) +
-            ". Valid values: 1stage, oneshot, 2stage, twoshot");
+    // Check environment variable once (cached via static locals)
+    static const char* env_algo = std::getenv("VLLM_CUSTOM_ALLREDUCE_ALGO");
+    static bool force_1stage = false;
+    static bool force_2stage = false;
+    static bool algo_parsed = false;
+    if (!algo_parsed) {
+      if (env_algo != nullptr) {
+        if (std::strcmp(env_algo, "1stage") == 0 ||
+            std::strcmp(env_algo, "oneshot") == 0) {
+          force_1stage = true;
+        } else if (std::strcmp(env_algo, "2stage") == 0 ||
+                   std::strcmp(env_algo, "twoshot") == 0) {
+          force_2stage = true;
+        } else {
+          throw std::runtime_error(
+              "Invalid VLLM_CUSTOM_ALLREDUCE_ALGO: " + std::string(env_algo) +
+              ". Valid values: 1stage, oneshot, 2stage, twoshot");
+        }
       }
+      algo_parsed = true;
     }
 
 #define KL(ngpus, name)                                                       \
