@@ -421,6 +421,19 @@ def main():
         help="Check filtered distributions against PyTorch outside the timed region",
     )
 
+    parser.add_argument(
+        "--scenarios",
+        nargs="+",
+        choices=[
+            "topk_whole",
+            "topk_partial",
+            "topp_whole",
+            "topp_partial",
+            "topk_topp_whole",
+            "mixed_partial",
+        ],
+        help="Run only the selected scenarios (default: all)",
+    )
     parser.add_argument("--output", type=Path, help="Save incremental JSONL results")
 
     args = parser.parse_args()
@@ -440,6 +453,8 @@ def main():
 
     # Create configs
     configs = create_benchmark_configs(args.batch_sizes, args.vocab_sizes)
+    if args.scenarios is not None:
+        configs = [c for c in configs if c.name.split("_b")[0] in args.scenarios]
 
     # Run benchmarks
     results = run_benchmark(
