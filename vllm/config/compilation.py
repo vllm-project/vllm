@@ -1092,9 +1092,9 @@ class CompilationConfig:
         Arguments:
             vllm_config: The vllm config to initialize the backend from.
             prefix: Cache directory prefix for this compiled module.
-            use_aot_compile: Whether the module permits AOT and direct artifacts.
             is_encoder: Whether this module is used in an encoder (as
                 opposed to a text backbone).
+            use_aot_compile: Whether the module permits AOT and direct artifacts.
 
         Returns:
             The backend for the compilation config.

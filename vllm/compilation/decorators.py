@@ -368,7 +368,6 @@ def _support_torch_compile(
     old_init = cls.__init__
 
     setattr(cls, IGNORE_COMPILE_KEY, False)
-    cls._allow_aot_compile = use_aot_compile
 
     def __init__(
         self: _T,
