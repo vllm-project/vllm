@@ -177,3 +177,32 @@ def test_scaled_mm_td_matches_plain(M, N, K, in_dtype, use_scalar_scale_a, use_b
     out_plain = triton_scaled_mm(a, b, scale_a, scale_b, out_dtype, bias, use_td=False)
     out_td = triton_scaled_mm(a, b, scale_a, scale_b, out_dtype, bias, use_td=True)
     torch.testing.assert_close(out_td, out_plain, rtol=0, atol=0)
+
+
+# The launch must stay opaque to torch.compile (inline tracing breaks split_graph).
+@pytest.mark.skipif(
+    not (current_platform.is_cuda_alike() or current_platform.is_xpu()),
+    reason="Triton scaled_mm runs on CUDA-alike or XPU.",
+)
+@pytest.mark.parametrize("M", [1, 64])
+def test_scaled_mm_custom_op_under_compile(M):
+    import vllm.model_executor.kernels.linear.scaled_mm.triton  # noqa: F401
+
+    N, K = 2048, 4096
+    out_dtype = torch.bfloat16
+    set_random_seed(0)
+    a = torch.randint(-32, 32, (M, K), dtype=torch.int8, device=device)
+    # Checkpoint layout: a transposed [N, K] view.
+    b = torch.randint(-32, 32, (N, K), dtype=torch.int8, device=device).t()
+    scale_a = 0.25 * torch.rand((M, 1), device=device)
+    scale_b = 0.25 * torch.rand((N, 1), device=device)
+    bias = torch.rand((N,), device=device, dtype=out_dtype)
+
+    def fn(a, b, scale_a, scale_b, bias):
+        return torch.ops.vllm.triton_scaled_mm_func(
+            a, b, scale_a, scale_b, out_dtype, bias
+        )
+
+    expected = triton_scaled_mm(a, b, scale_a, scale_b, out_dtype, bias)
+    compiled = torch.compile(fn, fullgraph=True)(a, b, scale_a, scale_b, bias)
+    torch.testing.assert_close(compiled, expected, rtol=0, atol=0)

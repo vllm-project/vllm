@@ -133,9 +133,7 @@ class TritonInt8ScaledMMLinearKernel(CutlassInt8ScaledMMLinearKernel):
             x.contiguous(), i_s, i_zp, symmetric=symmetric
         )
 
-        out = triton_scaled_mm(
-            x_q, w_q, scale_a=x_s, scale_b=w_s, out_dtype=x.dtype, bias=bias
-        )
+        out = torch.ops.vllm.triton_scaled_mm_func(x_q, w_q, x_s, w_s, x.dtype, bias)
 
         if azp_adj is not None:
             # Asymmetric quantization: subtract the zero-point correction.
@@ -220,6 +218,38 @@ class TritonFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
             list(self.weight_group_shape),
             self.config.out_dtype,
         )
+
+
+# Opaque to torch.compile so the (tensor-descriptor) launch is not traced inline.
+def _triton_scaled_mm_func(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    scale_a: torch.Tensor,
+    scale_b: torch.Tensor,
+    out_dtype: torch.dtype,
+    bias: torch.Tensor | None,
+) -> torch.Tensor:
+    return triton_scaled_mm(
+        a, b, scale_a=scale_a, scale_b=scale_b, out_dtype=out_dtype, bias=bias
+    )
+
+
+def _triton_scaled_mm_fake(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    scale_a: torch.Tensor,
+    scale_b: torch.Tensor,
+    out_dtype: torch.dtype,
+    bias: torch.Tensor | None,
+) -> torch.Tensor:
+    return torch.empty((a.size(0), b.size(1)), dtype=out_dtype, device=a.device)
+
+
+direct_register_custom_op(
+    "triton_scaled_mm_func",
+    _triton_scaled_mm_func,
+    fake_impl=_triton_scaled_mm_fake,
+)
 
 
 # TODO we should be able to change the type of block_size to GroupShape
