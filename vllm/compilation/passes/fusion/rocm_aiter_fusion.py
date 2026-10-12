@@ -1,14 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import operator
+import os
 from collections.abc import Callable
 from typing import Any
 
 import torch
 import torch._inductor.pattern_matcher as pm
 from torch import fx
+from torch._higher_order_ops import auto_functionalized
 from torch._inductor.fx_passes.post_grad import view_to_reshape
 from torch._inductor.pattern_matcher import PatternMatcherPass
 
+import vllm.envs as envs
 import vllm.ir.ops
 import vllm.model_executor.layers.quantization.utils.fp8_utils  # noqa: F401
 from vllm._aiter_ops import rocm_aiter_ops
@@ -23,7 +27,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.platforms import current_platform
 
-from ..inductor_pass import enable_fake_mode
+from ..inductor_pass import enable_fake_mode, get_pass_context
 from ..vllm_inductor_pass import (
     VllmFusionPatternMatcherPass,
     VllmInductorPass,
@@ -34,6 +38,7 @@ from ..vllm_inductor_pass import (
     remove_noop_reshapes,
 )
 from .matcher_utils import (
+    SILU_MUL_OP,
     MatcherGeluAndMul,
     MatcherQuantFP8,
     MatcherRMSNormGated,
@@ -957,12 +962,303 @@ class AiterActMulMxfp4GemmPattern(VllmPatternReplacement):
         return _replacement
 
 
-class RocmAiterActMulMxfp4GemmFusionPass(VllmFusionPatternMatcherPass):
+def _model_dtype(config: VllmConfig) -> torch.dtype:
+    """The dtype of the model's activations (bf16 when there is no model config)."""
+    if config.model_config is None:
+        return torch.bfloat16
+    dtype = config.model_config.dtype
+    assert isinstance(dtype, torch.dtype), dtype
+    return dtype
+
+
+# The compile prefix of a graph whose model tag was not set (`model_tag` in
+# compilation/backends.py).
+DEFAULT_COMPILE_PREFIX = "backbone"
+
+# Compile prefixes (VllmBackend.prefix) of the graphs that belong to speculative
+# decoding rather than to the target model, taken from the set_model_tag(...) calls
+# in v1/spec_decode, v1/worker/gpu/spec_decode and the draft parts of
+# models/qwen3_dflash2.py and models/lilicorr.py. The MTP head is bf16 and has no
+# MXFP4 GEMM to fuse into, so a fusion pass finding no site in these graphs is
+# expected. tests/compile/passes/test_rocm_aiter_mxfp4_fusion_gating.py checks this
+# set against every set_model_tag literal in the source tree.
+DRAFT_GRAPH_PREFIXES = frozenset(
+    {
+        "eagle_head",
+        "draft_model",
+        "dflash_head",
+        "dspark_head",
+        "extract_hidden_states",
+        "dflash2_candidate_selector",
+        "lilicorr_head",
+    }
+)
+
+
+def is_target_model_graph(prefix: str) -> bool:
+    """Whether a compile prefix names a graph of the target model.
+
+    False for the graphs of speculative decoding (DRAFT_GRAPH_PREFIXES), True for
+    everything else, including the model-internal tags such as ``self_decoder``.
+    """
+    return prefix not in DRAFT_GRAPH_PREFIXES
+
+
+def _mxfp4_pass_gate(fuse_in_pass_config: bool, opt_in_flag: bool) -> bool:
+    """The rule that registers the MXFP4 activation-quant fusion pass.
+
+    The pass config asks for the fusion AND the opt-in env flag is set AND the GPU
+    is a gfx950, the only architecture with the asm MXFP4 GEMM the pass rewrites
+    the input of. The default optimization level turns ``fuse_act_quant`` on, so the
+    env flag is what keeps a default start unchanged.
+    """
+    from vllm.platforms.rocm import on_gfx950
+
+    return bool(fuse_in_pass_config) and opt_in_flag and on_gfx950()
+
+
+def act_mxfp4_pass_enabled(fuse_act_quant: bool) -> bool:
+    """Whether RocmAiterActMulMxfp4GemmFusionPass is registered.
+
+    Needs ``fuse_act_quant`` and VLLM_ROCM_AITER_FP4_ACT_QUANT_FUSION on a gfx950.
+    """
+    return _mxfp4_pass_gate(fuse_act_quant, envs.VLLM_ROCM_AITER_FP4_ACT_QUANT_FUSION)
+
+
+def _asm_gemm_nodes(graph: torch.fx.Graph) -> list[fx.Node]:
+    """The MXFP4 GEMM calls of the graph that run on the asm kernel.
+
+    AITER chooses the asm kernel per layer, for the shapes it has tuned configs for,
+    and passes the choice as the use_asm_gemm argument of gemm_with_dynamic_quant. The
+    graph tracer records an argument only when it differs from the op's default, so a
+    call on the Triton path has no such argument and one on the asm kernel has the
+    literal True, the one the fusion patterns match.
+    """
+    # gemm_with_dynamic_quant is registered when the MXFP4 kernel module is imported.
+    import vllm.model_executor.kernels.linear.mxfp4.aiter  # noqa: F401
+
+    gemm_op = torch.ops.vllm.gemm_with_dynamic_quant.default
+    nodes = []
+    for node in graph.nodes:
+        if node.target != gemm_op:
+            continue
+        use_asm_gemm = (
+            node.args[3]
+            if len(node.args) > 3
+            else node.kwargs.get("rocm_use_aiter_fp4_asm_gemm", False)
+        )
+        if use_asm_gemm is True:
+            nodes.append(node)
+    return nodes
+
+
+def _asm_gemm_count(graph: torch.fx.Graph) -> int:
+    """How many MXFP4 GEMMs of the graph run on the asm kernel."""
+    return len(_asm_gemm_nodes(graph))
+
+
+# The custom ops of act_and_mul that a graph holds, as auto_functionalized(<op>), while
+# the activation's custom op is enabled.
+_ACT_AND_MUL_OPS = (
+    SILU_MUL_OP,
+    torch.ops._C.gelu_and_mul.default,
+    torch.ops._C.gelu_tanh_and_mul.default,
+)
+
+
+def _sliced_tensors(node: fx.Node) -> set[fx.Node]:
+    """The tensors that slices upstream of `node` cut a part from.
+
+    Follows the inputs of `node` and stops at each aten.slice.Tensor, whose first input
+    it collects.
+    """
+    sliced: set[fx.Node] = set()
+    seen: set[fx.Node] = set()
+    todo = [node]
+    while todo:
+        current = todo.pop()
+        if current in seen:
+            continue
+        seen.add(current)
+        if current.target == torch.ops.aten.slice.Tensor:
+            source = current.args[0]
+            if isinstance(source, fx.Node):
+                sliced.add(source)
+        else:
+            todo.extend(current.all_input_nodes)
+    return sliced
+
+
+def _is_act_and_mul_output(node: fx.Node) -> bool:
+    """Whether `node` is the output of SiLU/GELU-and-mul, in either form a graph has it.
+
+    With the custom op enabled the graph calls it through auto_functionalized and reads
+    the result with getitem. With it disabled the graph holds the native ops: the
+    product of a function of one half of the fused gate/up tensor and the other half,
+    that is an aten.mul whose two factors both slice the same tensor.
+    """
+    if node.target == operator.getitem:
+        producer = node.args[0]
+        return (
+            isinstance(producer, fx.Node)
+            and producer.target is auto_functionalized
+            and producer.args[0] in _ACT_AND_MUL_OPS
+        )
+    if node.target == torch.ops.aten.mul.Tensor and len(node.args) == 2:
+        gate, up = node.args
+        return (
+            isinstance(gate, fx.Node)
+            and isinstance(up, fx.Node)
+            and bool(_sliced_tensors(gate) & _sliced_tensors(up))
+        )
+    return False
+
+
+def _act_and_mul_gemm_count(graph: torch.fx.Graph) -> int:
+    """How many MXFP4 GEMMs of the graph run on the asm kernel with act_and_mul in
+    front of them: the only GEMMs RocmAiterActMulMxfp4GemmFusionPass can rewrite.
+
+    A GEMM on a plain input, such as a qkv_proj, is not one, and neither is a down_proj
+    that took the Triton path.
+    """
+    return sum(
+        1
+        for gemm in _asm_gemm_nodes(graph)
+        if gemm.args
+        and isinstance(gemm.args[0], fx.Node)
+        and _is_act_and_mul_output(gemm.args[0])
+    )
+
+
+class TargetGraphSiteCheckMixin:
+    """Counts the rewrites of a fusion pass and checks the target model got some.
+
+    Put it before VllmFusionPatternMatcherPass in the bases and set two class
+    attributes: ``flag_name``, the env flag that switches the pass on (quoted in the
+    error), and ``site_label``, what is fused (as the log line says it). A third,
+    ``gemm_label``, names the GEMMs the pass fuses into when the warning and the error
+    say why.
+
+    vLLM calls a pass once per compiled piece and per compile range, and a piece such
+    as the first one (embedding, layer 0) legitimately has no site, so ``__call__``
+    only tallies the rewrites and never raises. ``finish_compile`` judges the tally;
+    VllmBackend calls it, through PostGradPassManager.finish_compile, after the last
+    piece. N in the log line is the number of sites in the pieces the pass ran on:
+    vLLM compiles identical pieces once, so it can be lower than the layer count.
+
+    The pass can only rewrite GEMMs that run on the asm kernel, which AITER picks per
+    layer for the shapes it has tuned configs for, and only those its patterns target.
+    ``__call__`` therefore also counts the GEMMs the pass could fuse into, so that
+    ``finish_compile`` can tell a pass that missed its sites (targets but no rewrite)
+    from a model that has none to fuse. ``targetable_gemm_count`` says which GEMMs
+    those are: every GEMM on the asm kernel unless the pass overrides it with a narrower
+    rule.
+    """
+
+    flag_name: str
+    site_label: str
+    gemm_label: str = "MXFP4 GEMM"
+    # Set by the VllmPatternMatcherPass this mixin is combined with.
+    matched_count: int
+
+    def __init__(self, *args, compile_prefix: str | None = None, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        # The VllmBackend prefix of the graph being compiled: "backbone" for the
+        # model, "eagle_head" for an MTP head. It names the graph in the log and
+        # decides whether finding no site is an error.
+        self.compile_prefix = compile_prefix or DEFAULT_COMPILE_PREFIX
+        self.sites_by_range: dict[str, int] = {}
+        self.targetable_gemms_by_range: dict[str, int] = {}
+
+    def targetable_gemm_count(self, graph: torch.fx.Graph) -> int:
+        """How many GEMMs of the graph the pass could fuse into (before it runs)."""
+        return _asm_gemm_count(graph)
+
+    def __call__(self, graph: torch.fx.Graph) -> None:
+        compile_range = str(get_pass_context().compile_range)
+        self.targetable_gemms_by_range[compile_range] = (
+            self.targetable_gemms_by_range.get(compile_range, 0)
+            + self.targetable_gemm_count(graph)
+        )
+        super().__call__(graph)  # type: ignore[misc]
+        self.sites_by_range[compile_range] = (
+            self.sites_by_range.get(compile_range, 0) + self.matched_count
+        )
+
+    def finish_compile(self) -> None:
+        """Log the rewritten sites per compile range, and fail a start without any.
+
+        A target model graph fails when the pass ran for a compile range that holds
+        a GEMM it could fuse into and rewrote nothing there: the flag is on, so a start
+        that leaves the model unfused should not pass silently. A range without one
+        (AITER has no tuned config for the shapes the pass targets) has nothing to
+        rewrite and is only warned about. So is a graph the pass never ran on:
+        Inductor's FX graph cache can serve every piece without running the passes, so
+        nothing can be judged. Draft model graphs are only logged.
+        """
+        for compile_range, sites in self.sites_by_range.items():
+            logger.info(
+                "Fused %s at %d sites (graph=%s) for compile range %s",
+                self.site_label,
+                sites,
+                self.compile_prefix,
+                compile_range,
+            )
+        if not is_target_model_graph(self.compile_prefix):
+            return
+        if not self.sites_by_range:
+            cache_dir = os.path.join(envs.VLLM_CACHE_ROOT, "torch_compile_cache")
+            logger.warning(
+                "%s is on but the pass ran on no piece of the %s graph, so nothing "
+                "was rewritten or checked: Inductor's cache served every piece. "
+                "Clear %s to compile with the pass.",
+                self.flag_name,
+                self.compile_prefix,
+                cache_dir,
+            )
+            return
+        unfused = [r for r, sites in self.sites_by_range.items() if sites == 0]
+        without_target = [r for r in unfused if self.targetable_gemms_by_range[r] == 0]
+        if without_target:
+            logger.warning(
+                "%s is on but no %s of the %s graph runs on the asm kernel, "
+                "so there is nothing to rewrite for compile range(s) %s: AITER picks "
+                "the asm GEMM per layer, only for shapes it has tuned configs for.",
+                self.flag_name,
+                self.gemm_label,
+                self.compile_prefix,
+                without_target,
+            )
+        missed = [r for r in unfused if r not in without_target]
+        if missed:
+            raise RuntimeError(
+                f"{self.flag_name} is on but 0 sites were rewritten in the "
+                f"{self.compile_prefix} graph for compile range(s) {missed}, "
+                f"although it has a {self.gemm_label} on the asm kernel"
+            )
+
+
+class RocmAiterActMulMxfp4GemmFusionPass(
+    TargetGraphSiteCheckMixin, VllmFusionPatternMatcherPass
+):
     """Fuses SiLU/GELU-and-mul into the following AITER ASM MXFP4 GEMM."""
 
-    def __init__(self, config: VllmConfig) -> None:
-        super().__init__(config, "rocm_aiter_act_mul_mxfp4_gemm_fusion_pass")
-        out_dtype = config.model_config.dtype if config.model_config else torch.bfloat16
+    flag_name = "VLLM_ROCM_AITER_FP4_ACT_QUANT_FUSION"
+    site_label = "act+mxfp4 quant"
+    gemm_label = "MXFP4 GEMM fed by act_and_mul"
+
+    def targetable_gemm_count(self, graph: torch.fx.Graph) -> int:
+        # Only the GEMM that act_and_mul feeds (a down_proj) is a site; a qkv_proj on
+        # the asm kernel gives this pass nothing to fuse.
+        return _act_and_mul_gemm_count(graph)
+
+    def __init__(self, config: VllmConfig, compile_prefix: str | None = None) -> None:
+        super().__init__(
+            config,
+            "rocm_aiter_act_mul_mxfp4_gemm_fusion_pass",
+            compile_prefix=compile_prefix,
+        )
+        out_dtype = _model_dtype(config)
         matchers: dict[tuple[bool, str], MatcherGeluAndMul | MatcherSiluAndMul] = {}
         silu = MatcherSiluAndMul()
         matchers[(silu.enabled, "silu")] = silu
