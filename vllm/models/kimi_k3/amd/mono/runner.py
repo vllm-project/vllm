@@ -1,108 +1,74 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The mono decode's process-wide state: one scratch buffer every launch
-shares (their mailbox tags differ), the device step epoch and the TP group's
-peer memory.
+"""The mono decode's per-rank state: one scratch buffer every launch shares
+(their mailbox tags differ), the device step epoch, the health words and the TP
+group's peer memory.
 
 Mailbox tags carry the epoch the model bumps once a forward (``step_begin``,
 which a CUDA graph captures), so no buffer is zeroed between steps.
-"""
 
-from typing import TYPE_CHECKING
+The peer buffer's first ``PEER_HEAD`` bytes hold the output rank's flags, a
+word a rank (``alarm``): a rank whose wait gives up sets its word there before it
+stores anything else. The kernels see the buffer past the head.
+"""
 
 import torch
 
 from vllm.distributed import get_tp_group
+from vllm.models.kimi_k3.amd.mono.common.peer_memory import PeerBuffer
+from vllm.models.kimi_k3.amd.mono.common.plan import HEALTH_WORDS
+from vllm.models.kimi_k3.amd.mono.spec import MAX_TOKENS
 
-if TYPE_CHECKING:
-    from vllm.models.kimi_k3.amd.mono.common.peer_memory import PeerBuffer
-
-MAX_TOKENS = 8  # the x rows fit one CTA's LDS
-
-
-class _State:
-    scratch: torch.Tensor | None = None
-    zero_bytes = 0
-    epoch: torch.Tensor | None = None
-    queue: torch.Tensor | None = None
-    peers: "PeerBuffer | None" = None
+PEER_HEAD = 256
 
 
-def alloc_scratch(device) -> None:
-    """At model init, outside any graph capture: the largest build's scratch
-    and the epoch."""
-    if _State.scratch is not None:
-        return
-    from vllm.models.kimi_k3.amd.mono import layer
-    from vllm.models.kimi_k3.amd.mono.attention import kda
-    from vllm.models.kimi_k3.amd.mono.stages import moe
+class MonoRunner:
+    """Collective: every TP rank builds it at the same point."""
 
-    n = max(
-        kda.scratch_bytes(
-            kda.KdaPreBuild(
-                tokens=MAX_TOKENS,
-                qlen=MAX_TOKENS,
-                nblocks=8,
-                delta=True,
-                state_len=3 + MAX_TOKENS,
-            )
-        ),
-        moe.scratch_bytes(moe.MoeBuild(tokens=MAX_TOKENS)),
-        layer.scratch_bytes(layer.K2Build(tokens=MAX_TOKENS, nblocks=8)),
-    )
-    _State.zero_bytes = (n + 255) // 256 * 256
-    _State.scratch = torch.zeros(_State.zero_bytes, dtype=torch.uint8, device=device)
-    _State.epoch = torch.zeros(1, dtype=torch.int32, device=device)
-    _State.queue = torch.zeros(moe.QUEUE_BYTES // 4, dtype=torch.int32, device=device)
-
-
-def step_begin() -> None:
-    """Once a forward, before its first mono launch (a graph captures it)."""
-    if _State.epoch is not None:
-        _State.epoch.add_(1)
-
-
-def peers(device) -> "PeerBuffer":
-    """The TP group's peer buffer. Collective: every rank builds the same layers
-    in the same order, so every rank reaches it at the first MoE layer."""
-    if _State.peers is None:
+    def __init__(self, device: torch.device):
         from vllm.models.kimi_k3.amd.mono import layer
-        from vllm.models.kimi_k3.amd.mono.common.peer_memory import PeerBuffer
-        from vllm.models.kimi_k3.amd.mono.stages import moe
+        from vllm.models.kimi_k3.amd.mono.attention import kda
+
+        self.scratch = torch.zeros(
+            max(
+                kda.scratch_bytes(
+                    kda.KdaPreBuild(
+                        tokens=MAX_TOKENS,
+                        qlen=MAX_TOKENS,
+                        nblocks=8,
+                        delta=True,
+                        state_len=3 + MAX_TOKENS,
+                    )
+                ),
+                layer.scratch_bytes(layer.K2Build(tokens=MAX_TOKENS, nblocks=8)),
+            ),
+            dtype=torch.uint8,
+            device=device,
+        )
+        self.epoch = torch.zeros(1, dtype=torch.int32, device=device)
+        self.health = torch.zeros(HEALTH_WORDS, dtype=torch.int32, device=device)
 
         tp = get_tp_group()
-        nbytes = max(moe.peer_bytes(MAX_TOKENS), layer.peer_bytes(MAX_TOKENS))
-        buf = PeerBuffer(nbytes, tp.cpu_group, tp.rank_in_group, tp.world_size, device)
-        buf.bytes.zero_()
-        _State.peers = buf
-    return _State.peers
+        self.rank = tp.rank_in_group
+        nbytes = PEER_HEAD + layer.peer_bytes(MAX_TOKENS)
+        self.peers = PeerBuffer(nbytes, tp.cpu_group, self.rank, tp.world_size, device)
+        self.peers.bytes.zero_()
+        self.peer_table = self.peers.addresses + PEER_HEAD
+        self.alarm = int(self.peers.addresses[0].item()) + 4 * self.rank
+        self.flags = self.peers.bytes[: 4 * tp.world_size].view(torch.int32)
+        self.fault: dict = {}  # K2Build's fault_* fields (tests only)
 
+    def step_begin(self) -> None:
+        """Once a forward, before its first mono launch (a graph captures it)."""
+        self.epoch.add_(1)
 
-def launch_args() -> dict:
-    """The state every launch takes."""
-    assert _State.peers is not None and _State.epoch is not None
-    return {
-        "scratch": _State.scratch,
-        "peers": _State.peers.addresses,
-        "rank": get_tp_group().rank_in_group,
-        "epoch": _State.epoch,
-    }
+    def launch_args(self) -> dict:
+        return {
+            "scratch": self.scratch,
+            "epoch": self.epoch,
+            "health": self.health,
+            "alarm": self.alarm,
+        }
 
-
-def scratch_bytes() -> int:
-    return _State.zero_bytes
-
-
-def scratch() -> torch.Tensor:
-    assert _State.scratch is not None
-    return _State.scratch
-
-
-def epoch() -> torch.Tensor:
-    assert _State.epoch is not None
-    return _State.epoch
-
-
-def queue() -> torch.Tensor:
-    assert _State.queue is not None
-    return _State.queue
+    def peer_args(self) -> dict:
+        return {"peers": self.peer_table, "rank": self.rank}

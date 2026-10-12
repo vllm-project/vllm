@@ -20,52 +20,49 @@ from vllm.models.kimi_k3.amd.mono.common.ops import (
     CM_DEV,
     CM_SYS,
     bf16_pair,
+    ld_i32,
     memrealtime,
     rsrc,
     traced,
+    uniform,
 )
-from vllm.models.kimi_k3.amd.mono.common.plan import DIAG_WORDS, Space, note
+from vllm.models.kimi_k3.amd.mono.common.plan import (
+    DIAG_WORDS,
+    FAILED,
+    Space,
+    note,
+)
 
 POLL_MAX = 12  # mailbox specs polled per batch (bounds live registers)
 
 
-@traced
-def _spin(load_all, pending):
-    """Re-issue ``load_all`` until ``pending`` clears; a side-effecting op in the
-    loop keeps the loads from being hoisted."""
-    v = load_all()
-    while pending(v):
-        rocdl.s_sleep(1)
-        v = load_all()
-    return v
-
-
-# a debug build's mailbox wait gives up after this long (100 MHz ticks: 10 s)
-DIAG_TICKS = 10 * 100_000_000
+# a wait gives up after this long (100 MHz ticks: 10 s)
+WAIT_TICKS = 10 * 100_000_000
 
 
 @traced
-def _spin_bounded(load_all, pending, diag, region_id, index, tag):
-    """``_spin`` giving up after DIAG_TICKS: the CTA's record in ``diag`` names the
-    wait (the runner raises with it after the step), and the kernel runs on."""
+def _spin(load_all, pending, health, alarm, region_id, index, tag):
+    """Re-issue ``load_all`` until ``pending`` clears, for at most WAIT_TICKS, and
+    not at all once this rank has failed (``health`` word FAILED), so a failed
+    step runs to its end instead of hanging. A side-effecting op in the loop keeps
+    the loads from being hoisted.
+
+    A CTA's first give-up is recorded in its ``health`` record; it then raises the
+    output rank's flag for this rank (``alarm``) and drains that store before it
+    sets FAILED, so no later store of this rank's can overtake the flag."""
     t0 = memrealtime()
     v = load_all()
-    late = fx.Int32(0)
-    while pending(v) & (late == 0):
+    why = fx.Int32(0)  # 1: timed out, 2: the rank had failed
+    while pending(v) & (why == 0):
         rocdl.s_sleep(1)
         v = load_all()
-        late = (memrealtime() - t0 > DIAG_TICKS).select(fx.Int32(1), fx.Int32(0))
-    if late != 0:
+        failed = ld_health(health, FAILED) != 0
+        late = memrealtime() - t0 > WAIT_TICKS
+        why = failed.select(fx.Int32(2), late.select(fx.Int32(1), fx.Int32(0)))
+    if why == 1:
         bid = fx.block_idx.x
-        # the CTA's first give-up of the step: the later ones wait on its fallout
-        seen = bo.buffer_load(
-            rsrc(diag),
-            bid * DIAG_WORDS,
-            vec_width=1,
-            dtype=T.i32,
-            cache_modifier=CM_SYS,
-        )
-        if fx.Int32(seen) == 0:
+        rec = (bid + 1) * DIAG_WORDS
+        if ld_health(health, rec) == 0:
             at = fx.Int32(memrealtime() & 0x7FFFFFFF)
             record = [1, region_id, index, tag, v[1], bid, at, 0]
             for h in range_constexpr(2):  # 16 B a store
@@ -73,11 +70,36 @@ def _spin_bounded(load_all, pending, diag, region_id, index, tag):
                     fx.Vector.from_elements(
                         [fx.Int32(w) for w in record[4 * h : 4 * h + 4]], fx.Int32
                     ),
-                    rsrc(diag),
-                    bid * DIAG_WORDS + 4 * h,
+                    rsrc(health),
+                    rec + 4 * h,
                     cache_modifier=CM_SYS,
                 )
+        bo.buffer_store(fx.Int32(1), rsrc(alarm), 0, cache_modifier=CM_SYS)
+        rocdl.s_waitcnt(vmcnt=0)
+        bo.buffer_store(fx.Int32(1), rsrc(health), FAILED, cache_modifier=CM_SYS)
     return v
+
+
+@traced
+def stall(fault_rank, fault_epoch, ticks, rank, epoch):
+    """The fault hook (``VLLM_MONO_FAULT_INJECT``): CTA 0 of rank ``fault_rank``
+    stalls ``ticks`` in every step from epoch ``fault_epoch`` on."""
+    if (
+        (rank == fault_rank)
+        & (uniform(ld_i32(epoch, 0)) >= fault_epoch)
+        & (fx.block_idx.x == 0)
+    ):
+        t0 = memrealtime()
+        now = memrealtime()
+        while now - t0 < ticks:
+            rocdl.s_sleep(127)
+            now = memrealtime()
+
+
+def ld_health(health, i):
+    return fx.Int32(
+        bo.buffer_load(rsrc(health), i, vec_width=1, dtype=T.i32, cache_modifier=CM_SYS)
+    )
 
 
 @dataclass(frozen=True)
@@ -127,13 +149,14 @@ class Mailbox:
     carries a live tag. Every address is an ``Addr``: its space picks the scope.
     """
 
-    def __init__(self, layer, diag=None, region_ids=None):
-        """``diag`` (a debug build): the address of the per-CTA wait records, every
-        wait bounded (``_spin_bounded``); ``region_ids``: region name -> the id a
-        record names it by."""
+    def __init__(self, layer, health, alarm, region_ids):
+        """``health``: this rank's health words (FAILED, then a wait record a
+        CTA); ``alarm``: this rank's flag word on the output rank;
+        ``region_ids``: region name -> the id a record names it by."""
         self.tag = layer + 1
-        self.diag = diag
-        self.region_ids = region_ids or {}
+        self.health = health
+        self.alarm = alarm
+        self.region_ids = region_ids
 
     def put(self, a, i, v):
         bits = v.bitcast(fx.Int32) if isinstance(v, fx.Float32) else fx.Int32(v)
@@ -210,11 +233,8 @@ class Mailbox:
                 bad = bad | (v[e] != tag)
             return bad
 
-        if const_expr(self.diag is None):
-            v = _spin(load_all, pending)
-        else:
-            rid = self.region_ids.get(specs[0][0].region, -1)
-            v = _spin_bounded(load_all, pending, self.diag, rid, specs[0][1], tag)
+        rid = self.region_ids.get(specs[0][0].region, -1)
+        v = _spin(load_all, pending, self.health, self.alarm, rid, specs[0][1], tag)
         outs, e = [], 0
         for _, _, n in specs:
             outs.append([v[e + 2 * q] for q in range(n)])

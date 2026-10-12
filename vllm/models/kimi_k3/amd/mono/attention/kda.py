@@ -39,7 +39,12 @@ from aiter.ops.flydsl.kernels import buffer_ops as bo
 from flydsl.expr import const_expr, gpu, range_constexpr
 from flydsl.expr.typing import Int32, Int64, T
 
-from vllm.models.kimi_k3.amd.mono.common.debug import stamp, stamp_begin, stamp_flush
+from vllm.models.kimi_k3.amd.mono.common.debug import (
+    region_ids,
+    stamp,
+    stamp_begin,
+    stamp_flush,
+)
 from vllm.models.kimi_k3.amd.mono.common.ops import (
     CM_DEV,
     CM_NT,
@@ -99,6 +104,7 @@ TL_POINTS = 15
 assert NA + GEMV_CTAS <= BLOCKS and NA == 8 * GSL
 
 _STREAM = fx.Stream(None)
+REGIONS = ("part", "wgt", "msq", "xrdy", "proj", "qk", "onrm")
 # every mono source file: in every build's JIT cache key
 _SOURCES = source_digest(".")
 
@@ -114,7 +120,6 @@ class KdaPreBuild:
     out_eps: float = 1e-5  # input_layernorm
     onorm_eps: float = 1e-5
     lower_bound: float = -5.0
-    debug: bool = False
     timeline: bool = False
     write_idx: int = -1  # a block-write layer's block: the updated prefix stored there
     kda0: int = 0  # the first KDA task's CTA
@@ -147,11 +152,11 @@ ABI = KernelAbi(
         "st_stride",
         "num_acc",
         "core_out",
-        "x_dbg",
-        "proj_dbg",
         "scratch",
         "layer",
         "epoch",
+        "health",
+        "alarm",
         "tl",
     )
 )
@@ -462,8 +467,6 @@ def stage_mix(c, task):
     if mine:
         at = (t * HIDDEN + c0 + cc) // 2
         bo.buffer_store(xw, rsrc(c["xbuf"]), at, cache_modifier=CM_DEV)
-        if const_expr(c["debug"]):
-            bo.buffer_store(xw, rsrc(a["x_dbg"]), at)
     publish(c["put"], c["xrdy"], task, fx.Int32(1), tid == 0)
     gpu.barrier()
 
@@ -523,7 +526,7 @@ def load_x(c):
 
 @traced
 def stage_gemv(c, rg, ops):
-    """Rows 16 rg .. of in_proj against the LDS x -> bf16 PROJ (and proj_dbg)."""
+    """Rows 16 rg .. of in_proj against the LDS x -> bf16 PROJ."""
     s, tid, lane, wave, red = c["S"], c["tid"], c["lane"], c["wave"], c["red"]
     g = lane // ROWS
     t = fx.min(lane % ROWS, s - 1)
@@ -548,12 +551,6 @@ def stage_gemv(c, rg, ops):
         tt = tid // ROWS
         v = bf16r(row_sum(red, r, tt))
         c["put"](c["proj"], tt * NPROJ + rg * ROWS + r, v)
-        if const_expr(c["debug"]):
-            bo.buffer_store(
-                v.to(fx.BFloat16),
-                rsrc(c["args"]["proj_dbg"]),
-                tt * NPROJ + rg * ROWS + r,
-            )
     gpu.barrier()
 
 
@@ -848,7 +845,7 @@ def build(key: KdaPreBuild):
     keyed = key_tuple(key, _SOURCES)
     name = (
         f"k3_mono_kda_pre_s{s}_l{L}_nb{key.nblocks}_d{int(key.delta)}"
-        f"_g{int(key.debug)}_t{int(key.timeline)}"
+        f"_t{int(key.timeline)}"
     )
 
     @flyc.kernel(name=name, known_block_size=[THREADS, 1, 1])
@@ -877,11 +874,11 @@ def build(key: KdaPreBuild):
         st_stride: Int32,
         num_acc: Int64,
         core_out: Int64,
-        x_dbg: Int64,
-        proj_dbg: Int64,
         scratch: Int64,
         layer: Int32,
         epoch: Int64,
+        health: Int64,
+        alarm: Int64,
         tl: Int64,
     ):
         _ = keyed
@@ -891,7 +888,7 @@ def build(key: KdaPreBuild):
         lds = alloc.allocate(Smem).peek()
         role = alloc.allocate(RoleLds)
         al, gl, kl = role.attn.peek(), role.gemv.peek(), role.kda.peek()
-        mb = Mailbox(step_tag(epoch, layer) - 1)
+        mb = Mailbox(step_tag(epoch, layer) - 1, health, alarm, region_ids(REGIONS))
         c = {
             "S": s,
             "L": L,
@@ -903,7 +900,6 @@ def build(key: KdaPreBuild):
             "lane": tid % 64,
             "wave": tid // 64,
             "delta": key.delta,
-            "debug": key.debug,
             "eps": key.eps,
             "out_eps": key.out_eps,
             "onorm_eps": key.onorm_eps,
@@ -949,11 +945,9 @@ def build(key: KdaPreBuild):
                 "st_stride": st_stride,
                 "num_acc": num_acc,
                 "core_out": core_out,
-                "x_dbg": x_dbg,
-                "proj_dbg": proj_dbg,
             },
         }
-        for region in ("part", "wgt", "msq", "xrdy", "proj", "qk", "onrm"):
+        for region in REGIONS:
             c[region] = sreg(scratch, lay[region][0], region)
         on, tls = key.timeline, lds.tls.ptr
         c["on"], c["tls"] = on, tls
@@ -1009,11 +1003,11 @@ def build(key: KdaPreBuild):
         st_stride: Int32,
         num_acc: Int64,
         core_out: Int64,
-        x_dbg: Int64,
-        proj_dbg: Int64,
         scratch: Int64,
         layer: Int32,
         epoch: Int64,
+        health: Int64,
+        alarm: Int64,
         tl: Int64,
         stream: fx.Stream = _STREAM,
     ):
@@ -1043,11 +1037,11 @@ def build(key: KdaPreBuild):
             st_stride,
             num_acc,
             core_out,
-            x_dbg,
-            proj_dbg,
             scratch,
             layer,
             epoch,
+            health,
+            alarm,
             tl,
         ).launch(grid=(BLOCKS,), block=(THREADS,), stream=stream)
 
@@ -1083,8 +1077,8 @@ def kda_pre(
     scratch,
     layer,
     epoch,
-    x_dbg=None,
-    proj_dbg=None,
+    health,
+    alarm,
     tl=None,
 ):
     """Host launcher. ``conv_state`` [slots, dim, state_len] or a transposed view
@@ -1092,12 +1086,6 @@ def kda_pre(
     fp32; ``st_idx`` [R, >= L] int32; ``scratch`` zeroed before the step's first
     layer (tags are a layer's); ``epoch`` a device int32 bumped once a step and
     ``layer`` this launch's slot below ``TAG_SLOTS``."""
-    assert w_in.shape == (NPROJ, HIDDEN) and w_in.is_contiguous()
-    assert rstate.dtype == torch.float32 and rstate[0].numel() == NH * HD * HD
-    assert rstate[0].is_contiguous(), (
-        "a slot's state must be dense; slots may be strided"
-    )
-    assert conv_state.dtype == torch.bfloat16
     f = build(key)
     f(
         prefix.data_ptr(),
@@ -1124,11 +1112,11 @@ def kda_pre(
         st_idx.stride(0),
         num_acc.data_ptr(),
         core_out.data_ptr(),
-        ptr(x_dbg),
-        ptr(proj_dbg),
         scratch.data_ptr(),
         layer,
         epoch.data_ptr(),
+        health.data_ptr(),
+        alarm,
         ptr(tl),
         stream=torch.cuda.current_stream(),
     )

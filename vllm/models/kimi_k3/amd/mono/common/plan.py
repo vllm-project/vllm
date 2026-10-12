@@ -103,9 +103,13 @@ def first_task(bid, base):
 # A kernel's mailbox regions laid out in its scratch or peer buffer.
 
 PAIR_BYTES = 8  # a (value, tag) pair
-# a debug build's wait record, one a CTA: flag, region id, pair index, tag,
-# seen tag, CTA, clock, pad (``vllm.models.kimi_k3.amd.mono.common.sync._spin_bounded``)
+# A rank's health words (``vllm.models.kimi_k3.amd.mono.common.sync._spin``): a
+# header whose word FAILED is set once any wait gave up, then a record a CTA of
+# the first wait it gave up on: flag, region id, pair index, tag, seen tag, CTA,
+# clock, pad. Never zeroed: a failed rank stays failed.
 DIAG_WORDS = 8
+FAILED = 0
+HEALTH_WORDS = (BLOCKS + 1) * DIAG_WORDS
 
 
 def pair_layout(items, align: int = PAIR_BYTES, start: int = 0) -> dict:

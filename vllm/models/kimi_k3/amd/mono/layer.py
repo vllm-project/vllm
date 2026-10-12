@@ -53,7 +53,7 @@ from vllm.models.kimi_k3.amd.mono.common.plan import (
     pair_layout,
 )
 from vllm.models.kimi_k3.amd.mono.common.ranks import peer_bases
-from vllm.models.kimi_k3.amd.mono.common.sync import Mailbox, preg, shift, sreg
+from vllm.models.kimi_k3.amd.mono.common.sync import Mailbox, preg, shift, sreg, stall
 from vllm.models.kimi_k3.amd.mono.stages import gemv as gemv
 from vllm.models.kimi_k3.amd.mono.stages import moe as k2b
 
@@ -85,7 +85,10 @@ class K2Build:
     ln_eps: float = 1e-5  # the latent RMSNorm
     reduce: bool = True  # the final reduce here (else the next layer's K1)
     reset: bool = False  # a block-write layer: the prefix restarts at the o_proj output
-    diag: bool = False
+    # the fault hook (sync.stall): rank fault_rank stalls fault_ticks from fault_epoch
+    fault_rank: int = -1
+    fault_epoch: int = 0
+    fault_ticks: int = 0
     timeline: bool = False
     xp: int = 0  # timing experiments (7: route without its selection)
 
@@ -118,7 +121,8 @@ ABI = KernelAbi(
         "rank",
         "epoch",
         "layer",
-        "diag",
+        "health",
+        "alarm",
         "tl",
     )
 )
@@ -137,9 +141,9 @@ def peer_bytes(s):
 
 def scratch_layout(key: K2Build) -> dict:
     s = key.tokens
-    a = k2a.scratch_layout(k2a.AttnPostBuild(tokens=s, nblocks=key.nblocks))
+    a = k2a.scratch_layout(s, key.nblocks)
     end = max(o + n for o, n in a.values())
-    b = k2b.scratch_layout(k2b.MoeBuild(tokens=s))
+    b = k2b.scratch_layout(s)
     lay = dict(a)
     for name, (o, n) in b.items():
         lay[name] = ((end + 15) // 16 * 16 + o, n)
@@ -220,8 +224,10 @@ def build(key: K2Build):
     keyed = key_tuple(key, _SOURCES)
     name = (
         f"k3_mono_k2_s{s}_nb{key.nblocks}_x{int(key.reset)}_r{int(key.reduce)}"
-        f"_g{int(key.diag)}_t{int(key.timeline)}"
+        f"_t{int(key.timeline)}"
     )
+    if key.fault_rank >= 0:
+        name += f"_f{key.fault_rank}_{key.fault_epoch}_{key.fault_ticks}"
 
     @flyc.kernel(name=name, known_block_size=[THREADS, 1, 1])
     def k2(
@@ -251,7 +257,8 @@ def build(key: K2Build):
         rank: Int32,
         epoch: Int64,
         layer: Int32,
-        diag: Int64,
+        health: Int64,
+        alarm: Int64,
         tl: Int64,
     ):
         _ = keyed
@@ -262,10 +269,9 @@ def build(key: K2Build):
         rl = alloc.allocate(RouteLds).peek()
         st = alloc.allocate(StageLds)
         el, al, ul, dl = st.early.peek(), st.attn.peek(), st.ug.peek(), st.down.peek()
-        if const_expr(key.diag):
-            mb = Mailbox(step_tag(epoch, layer) - 1, diag, region_ids(REGIONS))
-        else:
-            mb = Mailbox(step_tag(epoch, layer) - 1)
+        if const_expr(key.fault_rank >= 0):
+            stall(key.fault_rank, key.fault_epoch, key.fault_ticks, rank, epoch)
+        mb = Mailbox(step_tag(epoch, layer) - 1, health, alarm, region_ids(REGIONS))
         par = uniform(ld_i32(epoch, 0)) % 2
         bases = peer_bases(peers, TP_)
         own = load_ptr64(peers, rank)
@@ -288,7 +294,6 @@ def build(key: K2Build):
             "delta": True,
             "reset": key.reset,
             "gate_local": False,
-            "debug": False,
             "eps": key.eps,
             "out_eps": key.out_eps,
             "ln_eps": key.ln_eps,
@@ -478,7 +483,8 @@ def build(key: K2Build):
         rank: Int32,
         epoch: Int64,
         layer: Int32,
-        diag: Int64,
+        health: Int64,
+        alarm: Int64,
         tl: Int64,
         stream: fx.Stream = _STREAM,
     ):
@@ -510,7 +516,8 @@ def build(key: K2Build):
             rank,
             epoch,
             layer,
-            diag,
+            health,
+            alarm,
             tl,
         ).launch(grid=(BLOCKS,), block=(THREADS,), stream=stream)
 
@@ -553,17 +560,12 @@ def k2_launch(
     rank,
     epoch,
     layer,
-    diag=None,
+    health,
+    alarm,
     tl=None,
 ):
     """Host launcher: ``core`` [S, 1536] (o_proj's input), ``prefix`` updated in
     place, ``out`` the MoE output [S, 7168]; MoE weights as ``moe``."""
-    assert (
-        w_o.shape == (HIDDEN, k2a.OK)
-        and core.is_contiguous()
-        and prefix.is_contiguous()
-    )
-    assert w_up.shape == (k2b.UP_N, k2b.LAT) and w_up.is_contiguous()
     f = build(key)
     f(
         core.data_ptr(),
@@ -592,7 +594,8 @@ def k2_launch(
         rank,
         epoch.data_ptr(),
         layer,
-        ptr(diag),
+        health.data_ptr(),
+        alarm,
         ptr(tl),
         stream=torch.cuda.current_stream(),
     )

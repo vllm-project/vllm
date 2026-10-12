@@ -10,6 +10,8 @@ import torch
 import torch.distributed as dist
 from aiter.ops.flydsl.quick_allreduce_int4_ipc import UncachedIpcHeap
 
+from vllm.models.kimi_k3.amd.mono.spec import MonoUnsupported
+
 
 class _DeviceBytes:
     """``__cuda_array_interface__`` of ``nbytes`` bytes at a raw device address, for a
@@ -104,10 +106,6 @@ class PeerBuffer:
 # on the GPU for ever. Each such decision is a local verdict agreed on over the TP
 # group's CPU group before anything collective (peer handshake, launch) follows.
 #
-
-
-class MonoUnsupported(Exception):
-    """The loaded model or runtime configuration is outside what mono serves."""
 
 
 def tp_agree(ok: bool, group) -> bool:

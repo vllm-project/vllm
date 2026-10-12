@@ -34,22 +34,12 @@ Peer regions are double-buffered by the epoch's parity.
 """
 
 import math
-from dataclasses import dataclass
 
-import flydsl.compiler as flyc
 import flydsl.expr as fx
-import torch
 from aiter.ops.flydsl.kernels import buffer_ops as bo
 from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
-from flydsl.expr.typing import Int32, Int64, T, as_ir_value
+from flydsl.expr.typing import T, as_ir_value
 
-from vllm.models.kimi_k3.amd.mono.attention.kda import _SOURCES, step_tag
-from vllm.models.kimi_k3.amd.mono.common.debug import (
-    region_ids,
-    stamp,
-    stamp_begin,
-    stamp_flush,
-)
 from vllm.models.kimi_k3.amd.mono.common.mx import (
     FP4,
     UNIT_SCALE,
@@ -69,8 +59,6 @@ from vllm.models.kimi_k3.amd.mono.common.ops import (
     hw_rcp,
     hw_rsq,
     lanes_below,
-    ld_i32,
-    load_ptr64,
     popcount,
     row_sum,
     rsrc,
@@ -82,12 +70,10 @@ from vllm.models.kimi_k3.amd.mono.common.plan import (
     BLOCKS,
     THREADS,
     WAVES,
-    KernelAbi,
-    key_tuple,
     pair_layout,
 )
-from vllm.models.kimi_k3.amd.mono.common.ranks import peer_bases, sum_partials
-from vllm.models.kimi_k3.amd.mono.common.sync import Mailbox, preg, publish, shift, sreg
+from vllm.models.kimi_k3.amd.mono.common.ranks import sum_partials
+from vllm.models.kimi_k3.amd.mono.common.sync import publish
 from vllm.models.kimi_k3.amd.mono.stages import gemv as gemv
 
 REGIONS = (
@@ -149,46 +135,6 @@ TL_POINTS = 8  # start, early, sdown, ug, down, lnorm, up, reduce
 _STREAM = fx.Stream(None)
 
 
-@dataclass(frozen=True)
-class MoeBuild:
-    tokens: int
-    eps: float = 1e-5  # the latent RMSNorm
-    reduce: bool = True  # the final reduce in this launch (standalone)
-    timeline: bool = False
-    diag: bool = False  # bounded waits recording into ``diag`` (debug)
-    xp: int = 0  # timing experiments: 1 ug without its epilogue, 2 ug loads only
-    # debug: run phases < stop only (1 early, 2 route/sdown, 3 ug, 4 down,
-    # 5 lnorm, 6 up)
-    stop: int = 99
-
-
-ABI = KernelAbi(
-    (
-        "x",
-        "w_gate",
-        "bias",
-        "w_ld",
-        "w_sgu",
-        "w_sd",
-        "w13",
-        "w13s",
-        "w2",
-        "w2s",
-        "ln_w",
-        "w_up",
-        "out",
-        "scratch",
-        "queue",
-        "peers",
-        "rank",
-        "epoch",
-        "layer",
-        "diag",
-        "tl",
-    )
-)
-
-
 def peer_pairs(s):
     """One parity's peer regions, pairs: name -> count."""
     return {
@@ -199,17 +145,7 @@ def peer_pairs(s):
     }
 
 
-def peer_layout(s):
-    return pair_layout(peer_pairs(s).items())
-
-
-def peer_bytes(s):
-    lay = peer_layout(s)
-    return 2 * max(o + n for o, n in lay.values())
-
-
-def scratch_layout(key: MoeBuild) -> dict:
-    s = key.tokens
+def scratch_layout(s: int) -> dict:
     pairs = {
         "sgu": s * SI,
         "h": s * SI // 2,
@@ -228,15 +164,6 @@ def scratch_layout(key: MoeBuild) -> dict:
     end = lay["ln"][0] + lay["ln"][1]
     lay["shp"] = ((end + 15) // 16 * 16, s * UP_N * 2)
     return lay
-
-
-# the task queues, their own buffer: [slot 256][epoch parity][ug, down] counters
-# (persistent words: a shared scratch's other launches would overwrite them)
-QUEUE_BYTES = 256 * 2 * 2 * 4
-
-
-def scratch_bytes(key: MoeBuild) -> int:
-    return max(o + n for o, n in scratch_layout(key).values())
 
 
 def f32_of(w):
@@ -734,35 +661,6 @@ def stage_ug(c, task, ops):
 
 # ---------------------------------------------------------------- queues
 @traced
-def take(c, which):
-    """The launch's next task of queue ``which`` (0 ug, 1 down) past the first
-    static round: an agent-scope atomic on this slot's counter of this epoch's
-    parity (the other parity's is reset by this launch for the next step)."""
-    if c["tid"] == 0:
-        at = c["queue"] + fx.Int64(((c["slot"] * 2 + c["par"]) * 2 + which) * 4)
-        ptr = fx.inttoptr(fx.PointerType.get(T.i32, fx.AddressSpace.Global, 4), at)
-        task = fx.llvm.atomic_add(ptr, fx.Int32(1), syncscope="agent")
-        fx.ptr_store(fx.Int32(task), c["qslot"])
-    gpu.barrier()
-    v = fx.ptr_load(c["qslot"])
-    gpu.barrier()
-    return BLOCKS + v
-
-
-@traced
-def reset_queues(c):
-    """The next step's counters of this slot (the other parity) to zero."""
-    if (c["bid"] == 0) & (c["tid"] < 2):
-        bo.buffer_store(
-            fx.Int32(0),
-            rsrc(c["queue"]),
-            (c["slot"] * 2 + 1 - c["par"]) * 2 + c["tid"],
-            cache_modifier=CM_DEV,
-        )
-
-
-# ---------------------------------------------------------------- down
-@traced
 def load_inter(c):
     """Every pick's INTER words and ISC codes -> LDS."""
     s, tid = c["S"], c["tid"]
@@ -1136,356 +1034,3 @@ def stage_reduce(c, j):
 
 
 # ---------------------------------------------------------------- kernel
-_BUILDS: dict = {}
-
-
-def build(key: MoeBuild):
-    if key in _BUILDS:
-        return _BUILDS[key]
-    s = key.tokens
-    assert 1 <= s <= 8
-    lay = scratch_layout(key)
-    play = peer_layout(s)
-    half = peer_bytes(s) // 2
-
-    @fx.struct
-    class RouteLds:
-        route: fx.Array[fx.Int32, s * 2 * TOPK, 16]
-        flag: fx.Array[fx.Int32, E, 16]
-        expert: fx.Array[fx.Int32, MAX_U, 16]
-        kof: fx.Array[fx.Int32, MAX_U * 8, 16]
-        scan: fx.Array[fx.Int32, WAVES, 16]
-
-    @fx.struct
-    class EarlyLds:
-        xl: fx.Array[fx.Int32, s * (HIDDEN + gemv.LDS_PAD) // 2, 16]
-
-    @fx.struct
-    class UgLds:
-        latq: fx.Array[fx.Int32, s * LAT // 8, 16]
-        latsc: fx.Array[fx.Int32, s * LAT // 32, 16]
-        av: fx.Array[fx.Float32, THREADS, 16]
-
-    @fx.struct
-    class DownLds:
-        interq: fx.Array[fx.Int32, s * TOPK * 48, 16]
-        intsc: fx.Array[fx.Int32, s * TOPK * UG_GROUPS, 16]
-        contrib: fx.Array[fx.Float32, s * TOPK * ROWS, 16]
-
-    @fx.union
-    class StageLds:
-        early: EarlyLds
-        ug: UgLds
-        down: DownLds
-
-    @fx.struct
-    class Smem:
-        red: fx.Array[fx.Float32, WAVES * 64 * 4, 16]
-        tls: fx.Array[fx.Int64, TL_POINTS, 16]
-        qslot: fx.Array[fx.Int32, 4, 16]
-
-    keyed = key_tuple(key, _SOURCES)
-    name = f"k3_mono_moe_s{s}_r{int(key.reduce)}_t{int(key.timeline)}"
-
-    @flyc.kernel(name=name, known_block_size=[THREADS, 1, 1])
-    def moe(
-        x: Int64,
-        w_gate: Int64,
-        bias: Int64,
-        w_ld: Int64,
-        w_sgu: Int64,
-        w_sd: Int64,
-        w13: Int64,
-        w13s: Int64,
-        w2: Int64,
-        w2s: Int64,
-        ln_w: Int64,
-        w_up: Int64,
-        out: Int64,
-        scratch: Int64,
-        queue: Int64,
-        peers: Int64,
-        rank: Int32,
-        epoch: Int64,
-        layer: Int32,
-        diag: Int64,
-        tl: Int64,
-    ):
-        _ = keyed
-        tid = fx.thread_idx.x
-        bid = fx.block_idx.x
-        alloc = fx.SharedAllocator()
-        lds = alloc.allocate(Smem).peek()
-        rl = alloc.allocate(RouteLds).peek()
-        st_lds = alloc.allocate(StageLds)
-        el, ul, dl = st_lds.early.peek(), st_lds.ug.peek(), st_lds.down.peek()
-        if const_expr(key.diag):
-            mb = Mailbox(step_tag(epoch, layer) - 1, diag, region_ids(REGIONS))
-        else:
-            mb = Mailbox(step_tag(epoch, layer) - 1)
-        par = uniform(ld_i32(epoch, 0)) % 2
-        bases = peer_bases(peers, TP)
-        own = load_ptr64(peers, rank)
-        peer = {}
-        for region in ("rlog", "lat", "latr", "final"):
-            off = play[region][0]
-            peer[region] = [
-                shift(preg(b, off, region), fx.Int64(par) * half) for b in bases
-            ]
-            peer[region + "_own"] = shift(preg(own, off, region), fx.Int64(par) * half)
-        c = {
-            "S": s,
-            "tid": tid,
-            "bid": bid,
-            "lane": tid % 64,
-            "wave": tid // 64,
-            "rank": rank,
-            "ln_eps": key.eps,
-            "put": mb.put,
-            "put_bf": mb.put_bf,
-            "put_words": mb.put_words,
-            "poll": mb.poll,
-            "red": lds.red.ptr,
-            "peer": peer,
-            "xl": el.xl.ptr,
-            "latq": ul.latq.ptr,
-            "latsc": ul.latsc.ptr,
-            "av": ul.av.ptr,
-            "interq": dl.interq.ptr,
-            "intsc": dl.intsc.ptr,
-            "contrib": dl.contrib.ptr,
-            "scan": rl.scan.ptr,
-            "rt": {
-                "route": rl.route.ptr,
-                "flag": rl.flag.ptr,
-                "expert": rl.expert.ptr,
-                "kof": rl.kof.ptr,
-            },
-            "ln": scratch + fx.Int64(lay["ln"][0]),
-            "shp": scratch + fx.Int64(lay["shp"][0]),
-            "queue": queue,
-            "qslot": lds.qslot.ptr,
-            "slot": layer,
-            "par": par,
-            "xp": key.xp,
-            "lazy_inter": True,
-            "args": {
-                "x": x,
-                "w_gate": w_gate,
-                "bias": bias,
-                "w_ld": w_ld,
-                "w_sgu": w_sgu,
-                "w_sd": w_sd,
-                "w13": w13,
-                "w13s": w13s,
-                "w2": w2,
-                "w2s": w2s,
-                "ln_w": ln_w,
-                "w_up": w_up,
-                "out": out,
-            },
-        }
-        for region in (
-            "sgu",
-            "h",
-            "rpart",
-            "lpart",
-            "route",
-            "inter",
-            "isc",
-            "lmsq",
-            "lnrdy",
-            "shrdy",
-        ):
-            c[region] = sreg(scratch, lay[region][0], region)
-        on, tls = key.timeline, lds.tls.ptr
-        stamp_begin(on, tls, tid, TL_POINTS)
-        if const_expr(key.stop > 1):  # noqa: SIM102 (traced: `and` does not combine traced values)
-            if bid < EARLY:
-                stage_early(c, bid)
-        stamp(on, tls, tid, 1)
-        if const_expr(key.stop <= 2):
-            stamp_flush(on, tls, tl, tid, bid, TL_POINTS)
-            return
-        if (bid >= LATE0) & (bid < LATE0 + s):
-            stage_route(c, bid - LATE0)
-        if (bid >= H_CTA) & (bid < H_CTA + s):
-            stage_h(c, bid - H_CTA)
-        stamp(on, tls, tid, 2)
-        if const_expr(key.stop <= 3):
-            return
-        nu = load_route(c)
-        if const_expr(key.stop == 35):
-            # debug: the route table, |U| and U into ``out`` (as int32), CTA 0
-            if bid == 0:
-                n = s * 2 * TOPK
-                if tid < n:
-                    bo.buffer_store(fx.ptr_load(c["rt"]["route"] + tid), rsrc(out), tid)
-                if tid < MAX_U:
-                    bo.buffer_store(
-                        fx.ptr_load(c["rt"]["expert"] + tid), rsrc(out), n + 1 + tid
-                    )
-                if tid == 0:
-                    bo.buffer_store(nu, rsrc(out), n)
-            return
-        load_latq(c)
-        if const_expr(key.stop == 36):
-            return
-        # static round-robin: deterministic, no state across launches (a
-        # counter carried between steps went stale when a step skipped K2b)
-        total = nu * UG_GROUPS
-        last = total - 1
-        # reversed placement: the round's leftover tasks go to the high CTAs,
-        # whose early work ends first (the AttnRes / route CTAs start ug last)
-        task = BLOCKS - 1 - bid
-        ops = ug_loads(c, fx.min(task, last))
-        while task < total:
-            nxt = task + BLOCKS
-            # the next task's weights in flight under this one's MFMAs and
-            # epilogue (past the end: the last task's, cache hits)
-            ops_n = ug_loads(c, fx.min(nxt, last))
-            stage_ug(c, task, ops)
-            task = nxt
-            ops = ops_n
-        stamp(on, tls, tid, 3)
-        if const_expr(key.stop <= 4):
-            stamp_flush(on, tls, tl, tid, bid, TL_POINTS)
-            return
-        if bid < DOWN_TASKS:
-            # the first w2 batch in flight before INTER (every ug) is waited for
-            dops = down_loads(c, bid, nu, fx.min(c["wave"], nu - 1))
-            load_inter(c)
-            stage_down(c, bid, nu, dops)
-        run_sdown_rest(c, bid, w_sd)
-        # the shared down (needed only by up) on the CTAs with no down task:
-        # after their ug, so every CTA's ug starts as the route lands
-        run_sdown(c, bid, w_sd)
-        stamp(on, tls, tid, 4)
-        if const_expr(key.stop <= 5):
-            return
-        if (bid >= LN0) & (bid < LN0 + LN_TASKS):
-            stage_lnorm(c, bid - LN0)
-        stamp(on, tls, tid, 5)
-        if const_expr(key.stop <= 6):
-            return
-        if bid < UP_TASKS:
-            stage_up(c, bid)
-        stamp(on, tls, tid, 6)
-        if const_expr(key.reduce):  # noqa: SIM102 (traced: `and` does not combine traced values)
-            if (bid >= RED0) & (bid < RED0 + RED_TASKS):
-                stage_reduce(c, bid - RED0)
-        stamp(on, tls, tid, 7)
-        stamp_flush(on, tls, tl, tid, bid, TL_POINTS)
-
-    @flyc.jit
-    def launch(
-        x: Int64,
-        w_gate: Int64,
-        bias: Int64,
-        w_ld: Int64,
-        w_sgu: Int64,
-        w_sd: Int64,
-        w13: Int64,
-        w13s: Int64,
-        w2: Int64,
-        w2s: Int64,
-        ln_w: Int64,
-        w_up: Int64,
-        out: Int64,
-        scratch: Int64,
-        queue: Int64,
-        peers: Int64,
-        rank: Int32,
-        epoch: Int64,
-        layer: Int32,
-        diag: Int64,
-        tl: Int64,
-        stream: fx.Stream = _STREAM,
-    ):
-        _ = keyed
-        moe(
-            x,
-            w_gate,
-            bias,
-            w_ld,
-            w_sgu,
-            w_sd,
-            w13,
-            w13s,
-            w2,
-            w2s,
-            ln_w,
-            w_up,
-            out,
-            scratch,
-            queue,
-            peers,
-            rank,
-            epoch,
-            layer,
-            diag,
-            tl,
-        ).launch(grid=(BLOCKS,), block=(THREADS,), stream=stream)
-
-    ABI.check(moe, launch)
-    _BUILDS[key] = launch
-    return launch
-
-
-def moe(
-    key: MoeBuild,
-    *,
-    x,
-    w_gate,
-    bias,
-    w_ld,
-    w_sgu,
-    w_sd,
-    w13,
-    w13s,
-    w2,
-    w2s,
-    ln_w,
-    w_up,
-    out,
-    scratch,
-    queue,
-    peers,
-    rank,
-    epoch,
-    layer,
-    tl=None,
-    diag=None,
-):
-    """Host launcher; every weight as vLLM holds it after loading (MOE_SPEC.md
-    §5), the experts' shuffled. ``queue``: QUEUE_BYTES of zeros, this launch's
-    alone (no other kernel writes it)."""
-    assert queue.numel() * queue.element_size() >= QUEUE_BYTES
-    assert w_gate.shape == (E, HIDDEN) and w_ld.shape == (LAT, HIDDEN)
-    assert w_sgu.shape == (2 * SI, HIDDEN) and w_sd.shape == (HIDDEN, SI)
-    assert w_up.shape == (UP_N, LAT) and w_up.is_contiguous()
-    f = build(key)
-    f(
-        x.data_ptr(),
-        w_gate.data_ptr(),
-        bias.data_ptr(),
-        w_ld.data_ptr(),
-        w_sgu.data_ptr(),
-        w_sd.data_ptr(),
-        w13.data_ptr(),
-        w13s.data_ptr(),
-        w2.data_ptr(),
-        w2s.data_ptr(),
-        ln_w.data_ptr(),
-        w_up.data_ptr(),
-        out.data_ptr(),
-        scratch.data_ptr(),
-        queue.data_ptr(),
-        peers.data_ptr(),
-        rank,
-        epoch.data_ptr(),
-        layer,
-        0 if diag is None else diag.data_ptr(),
-        0 if tl is None else tl.data_ptr(),
-        stream=torch.cuda.current_stream(),
-    )

@@ -1,15 +1,24 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Numerics of the Kimi-K3 mono decode kernels (``VLLM_ROCM_MONO_DECODE``) on MI355X
-against the ops vLLM runs for the same spec-verify step, random weights in the
-checkpoint's formats at TP8 shapes.
+"""The Kimi-K3 mono decode (``VLLM_ROCM_MONO_DECODE``).
+
+CPU: the widths and kernel layers, every refusal reported at once, and the
+per-step routing.
+
+MI355X, against the ops vLLM runs for the same spec-verify step, random weights
+in the checkpoint's formats at TP8 shapes:
 
 - K1 (one GPU): AttnRes -> in_proj -> f_b -> conv -> KDA recurrence -> gated
   norm, the conv / SSM state updates and a block-write layer's block store.
-- K2 and the standalone MoE launch (eight GPUs): o_proj + all-reduce + the MLP
-  AttnRes + the latent MoE. The MoE is compared on the kernel's own MLP input,
-  where routing cannot differ.
+- K2 (eight GPUs): o_proj + all-reduce + the MLP AttnRes + the latent MoE. The
+  MoE is compared on the kernel's own MLP input, where routing cannot differ.
+  Then a CUDA graph of K2 replayed 300 times, bit-identical, and a stalled rank
+  (the fault hook): every rank's launch finishes and the output rank's flags
+  fail the step.
 """
+
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 import ray
@@ -37,7 +46,7 @@ def _on_gfx950() -> bool:
     return on_gfx950()
 
 
-pytestmark = pytest.mark.skipif(
+needs_gfx950 = pytest.mark.skipif(
     not _on_gfx950(), reason="the K3 mono kernels need gfx950 (MI355X)"
 )
 
@@ -173,6 +182,7 @@ def _kda_reference(w, nb: int, S: int, write_idx: int):
     }
 
 
+@needs_gfx950
 @pytest.mark.parametrize("dim_first", [True, False])
 @pytest.mark.parametrize("nacc", [1, 3])
 @pytest.mark.parametrize("write", [False, True])
@@ -186,6 +196,7 @@ def test_k1_matches_vllm_ops(dim_first: bool, nacc: int, write: bool) -> None:
         kda_pre,
         scratch_bytes,
     )
+    from vllm.models.kimi_k3.amd.mono.common.plan import HEALTH_WORDS
 
     S, nb = 8, 4
     # a block-write layer appends block nb (block_write_idx == prev_valid_blocks)
@@ -204,6 +215,8 @@ def test_k1_matches_vllm_ops(dim_first: bool, nacc: int, write: bool) -> None:
     prefix, blocks = w["prefix"].clone(), w["blocks"].clone()
     conv_state, rstate = w["conv_state"].clone(), w["rstate"].clone()
     core = torch.zeros(S, PROJ, dtype=bf, device="cuda")
+    health = torch.zeros(HEALTH_WORDS, dtype=torch.int32, device="cuda")
+    flags = torch.zeros(1, dtype=torch.int32, device="cuda")
     kda_pre(
         key,
         prefix=prefix,
@@ -226,8 +239,11 @@ def test_k1_matches_vllm_ops(dim_first: bool, nacc: int, write: bool) -> None:
         scratch=torch.zeros(scratch_bytes(key), dtype=torch.uint8, device="cuda"),
         layer=0,
         epoch=torch.ones(1, dtype=torch.int32, device="cuda"),
+        health=health,
+        alarm=flags.data_ptr(),
     )
     torch.accelerator.synchronize()
+    assert not health.any() and not flags.any()
 
     torch.testing.assert_close(prefix, ref["prefix"], atol=0, rtol=0)
     torch.testing.assert_close(blocks, ref["blocks"], atol=0, rtol=0)
@@ -354,6 +370,52 @@ def _moe_args(mw):
     }
 
 
+def _k2_inputs(rank: int, device):
+    from vllm.models.kimi_k3.amd.mono.attention.kda import HIDDEN, PROJ
+
+    gc = torch.Generator(device=device).manual_seed(11)
+    gr = torch.Generator(device=device).manual_seed(200 + rank)
+    return {
+        "core": _randn(gr, 8, PROJ),
+        "w_o": _randn(gr, HIDDEN, PROJ, scale=0.02),
+        "prefix": _randn(gc, 8, HIDDEN, scale=2.0),
+        "blocks": _randn(gc, 8, 8, HIDDEN, scale=2.0),
+        "ares_nw": (1 + _randn(gc, HIDDEN, scale=0.1, dtype=torch.float32)).to(bf),
+        "ares_qk": _randn(gc, HIDDEN, scale=0.05),
+        "in_nw": (1 + _randn(gc, HIDDEN, scale=0.1, dtype=torch.float32)).to(bf),
+    }
+
+
+def _k2_launch(runner, w, mw, prefix, out, reset: bool, nb: int = 4):
+    from vllm.models.kimi_k3.amd.mono import layer as k2
+
+    key = k2.K2Build(tokens=8, nblocks=nb + int(reset), reset=reset, **runner.fault)
+    k2.k2_launch(
+        key,
+        core=w["core"],
+        w_o=w["w_o"],
+        prefix=prefix,
+        blocks=w["blocks"],
+        ares_nw=w["ares_nw"],
+        ares_qk=w["ares_qk"],
+        in_nw=w["in_nw"],
+        out=out,
+        layer=3,
+        **_moe_args(mw),
+        **runner.launch_args(),
+        **runner.peer_args(),
+    )
+    return key
+
+
+def _init_worker(monkeypatch, tp_size, pp_size, rank, distributed_init_port):
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    device = torch.device(f"cuda:{rank}")
+    torch.accelerator.set_device_index(device)
+    init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
+    return device
+
+
 @ray.remote(num_gpus=1, max_calls=1)
 def _k2_worker(
     monkeypatch: pytest.MonkeyPatch,
@@ -362,72 +424,36 @@ def _k2_worker(
     rank: int,
     distributed_init_port: str,
 ) -> None:
-    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
-    device = torch.device(f"cuda:{rank}")
-    torch.accelerator.set_device_index(device)
-    init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
+    device = _init_worker(monkeypatch, tp_size, pp_size, rank, distributed_init_port)
 
-    from vllm.distributed import get_tp_group
     from vllm.models.kimi_k3.amd.mono import layer as k2
-    from vllm.models.kimi_k3.amd.mono.attention.kda import HIDDEN, PROJ
-    from vllm.models.kimi_k3.amd.mono.common.peer_memory import PeerBuffer
-    from vllm.models.kimi_k3.amd.mono.stages import moe
+    from vllm.models.kimi_k3.amd.mono.attention.kda import HIDDEN
+    from vllm.models.kimi_k3.amd.mono.runner import MonoRunner
     from vllm.models.kimi_k3.amd.ops.attn_res import attn_res
 
     S, nb = 8, 4
-    tp = get_tp_group()
-    peers = PeerBuffer(
-        max(k2.peer_bytes(S), moe.peer_bytes(S)), tp.cpu_group, rank, tp_size, device
-    )
-    peers.bytes.zero_()
-    epoch = torch.zeros(1, dtype=torch.int32, device=device)
+    runner = MonoRunner(device)
     mw = _moe_weights(rank, device)
-    gc = torch.Generator(device=device).manual_seed(11)
-    gr = torch.Generator(device=device).manual_seed(200 + rank)
-    core = _randn(gr, S, PROJ)
-    w_o = _randn(gr, HIDDEN, PROJ, scale=0.02)
-    prefix0 = _randn(gc, S, HIDDEN, scale=2.0)
-    blocks = _randn(gc, S, 8, HIDDEN, scale=2.0)
-    ares_nw = (1 + _randn(gc, HIDDEN, scale=0.1, dtype=torch.float32)).to(bf)
-    ares_qk = _randn(gc, HIDDEN, scale=0.05)
-    in_nw = (1 + _randn(gc, HIDDEN, scale=0.1, dtype=torch.float32)).to(bf)
+    w = _k2_inputs(rank, device)
 
     for reset in (False, True):
-        epoch.add_(1)
-        key = k2.K2Build(tokens=S, nblocks=nb + int(reset), reset=reset)
-        scratch = torch.zeros(k2.scratch_bytes(key), dtype=torch.uint8, device=device)
-        prefix = prefix0.clone()
+        runner.step_begin()
+        prefix = w["prefix"].clone()
         out = torch.empty(S, HIDDEN, dtype=bf, device=device)
-        k2.k2_launch(
-            key,
-            core=core,
-            w_o=w_o,
-            prefix=prefix,
-            blocks=blocks,
-            ares_nw=ares_nw,
-            ares_qk=ares_qk,
-            in_nw=in_nw,
-            out=out,
-            scratch=scratch,
-            peers=peers.addresses,
-            rank=rank,
-            epoch=epoch,
-            layer=3,
-            **_moe_args(mw),
-        )
+        key = _k2_launch(runner, w, mw, prefix, out, reset)
         torch.accelerator.synchronize()
 
-        attn = _all_reduce_fp32(F.linear(core, w_o))
+        attn = _all_reduce_fp32(F.linear(w["core"], w["w_o"]))
         # a block-write layer's prefix restarts at the attention output
-        ref_prefix = attn if reset else prefix0.clone()
+        ref_prefix = attn if reset else w["prefix"].clone()
         delta = None if reset else attn
         x_ref = attn_res(
             ref_prefix,
             delta,
-            blocks,
-            ares_nw,
-            ares_qk,
-            in_nw,
+            w["blocks"],
+            w["ares_nw"],
+            w["ares_qk"],
+            w["in_nw"],
             nb + int(reset),
             -1,
             1e-5,
@@ -436,37 +462,277 @@ def _k2_worker(
         # the kernel sums the ranks in rank order, NCCL in its own order
         assert _rel_l2(prefix, ref_prefix) < 1e-2
         lay = k2.scratch_layout(key)["xrow"][0]
-        x = scratch[lay : lay + S * HIDDEN * 2].view(bf).view(S, HIDDEN)
+        x = runner.scratch[lay : lay + S * HIDDEN * 2].view(bf).view(S, HIDDEN)
         assert _cos(x, x_ref) > COS_MIN
         assert _cos(out, _moe_reference(x, mw, rank)) > COS_MIN
         outs = [torch.empty_like(out) for _ in range(tp_size)]
         dist.all_gather(outs, out)
         assert all(torch.equal(outs[0], o) for o in outs), "ranks disagree"
 
-    # the standalone MoE launch (a layer K2 does not serve)
-    epoch.add_(1)
-    x = _randn(gc, S, HIDDEN)
-    out = torch.empty_like(x)
-    queue = torch.zeros(moe.QUEUE_BYTES // 4, dtype=torch.int32, device=device)
-    moe.moe(
-        moe.MoeBuild(tokens=S),
-        x=x,
-        out=out,
-        scratch=torch.zeros(
-            moe.scratch_bytes(moe.MoeBuild(tokens=S)), dtype=torch.uint8, device=device
-        ),
-        queue=queue,
-        peers=peers.addresses,
-        rank=rank,
-        epoch=epoch,
-        layer=128 + 3,
-        **_moe_args(mw),
-    )
+    # A graph of one step (the epoch bump captured with it), replayed: a
+    # block-write launch writes its prefix, so every replay must match the first.
+    prefix = torch.empty_like(w["prefix"])
+    out = torch.empty(S, HIDDEN, dtype=bf, device=device)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        runner.step_begin()
+        _k2_launch(runner, w, mw, prefix, out, reset=True)
+    graph.replay()
     torch.accelerator.synchronize()
-    assert _cos(out, _moe_reference(x, mw, rank)) > COS_MIN
-    peers.close()
+    want_prefix, want_out = prefix.clone(), out.clone()
+    for _ in range(300):
+        graph.replay()
+    torch.accelerator.synchronize()
+    assert torch.equal(prefix, want_prefix) and torch.equal(out, want_out)
+    assert not runner.health.any() and not runner.flags.any()
 
 
+@needs_gfx950
 @multi_gpu_test(num_gpus=8)
-def test_k2_and_moe_tp8_match_vllm_ops(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_k2_tp8_matches_vllm_ops_and_replays(monkeypatch: pytest.MonkeyPatch) -> None:
     multi_process_parallel(monkeypatch, 8, 1, _k2_worker)
+
+
+STALLED = 3
+
+
+@ray.remote(num_gpus=1, max_calls=1)
+def _fault_worker(
+    monkeypatch: pytest.MonkeyPatch,
+    tp_size: int,
+    pp_size: int,
+    rank: int,
+    distributed_init_port: str,
+) -> None:
+    device = _init_worker(monkeypatch, tp_size, pp_size, rank, distributed_init_port)
+
+    from vllm.models.kimi_k3.amd.mono import layer as k2
+    from vllm.models.kimi_k3.amd.mono.attention.kda import HIDDEN
+    from vllm.models.kimi_k3.amd.mono.common.debug import given_up_waits
+    from vllm.models.kimi_k3.amd.mono.common.sync import WAIT_TICKS
+    from vllm.models.kimi_k3.amd.mono.runner import MonoRunner
+
+    runner = MonoRunner(device)
+    # rank STALLED's CTA 0 stalls past every wait's bound from epoch 2 on
+    runner.fault = {
+        "fault_rank": STALLED,
+        "fault_epoch": 2,
+        "fault_ticks": WAIT_TICKS * 3 // 2,
+    }
+    mw = _moe_weights(rank, device)
+    w = _k2_inputs(rank, device)
+    out = torch.empty(8, HIDDEN, dtype=bf, device=device)
+    runner.step_begin()  # epoch 1: no stall
+    _k2_launch(runner, w, mw, w["prefix"].clone(), out, reset=True)
+    torch.accelerator.synchronize()
+    assert not runner.flags.any()
+
+    runner.step_begin()  # epoch 2: rank STALLED stalls; every launch ends
+    _k2_launch(runner, w, mw, w["prefix"].clone(), out, reset=True)
+    torch.accelerator.synchronize()
+    waits = given_up_waits(runner.health.cpu(), k2.REGIONS)
+    gave_up = torch.tensor([int(bool(waits))], device=device)
+    dist.all_reduce(gave_up)
+    assert gave_up.item() > 0, "no rank's wait gave up"
+    if rank == 0:
+        assert runner.flags.any(), "the output rank's flags missed the failure"
+
+
+@needs_gfx950
+@multi_gpu_test(num_gpus=8)
+def test_stalled_rank_fails_the_step_without_a_hang(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    multi_process_parallel(monkeypatch, 8, 1, _fault_worker)
+
+
+# ---------------------------------------------------------------- CPU
+
+
+def test_widths_are_whole_requests_up_to_eight_rows() -> None:
+    from vllm.models.kimi_k3.amd.mono.spec import widths
+
+    assert widths(7) == (8,)
+    assert widths(3) == (4, 8)
+    assert widths(1) == (2, 4, 6, 8)
+
+
+def _k3_text_config():
+    """Kimi-K3's layer pattern: 93 layers, MLA every 4th, AttnRes blocks of 12,
+    layer 0 dense."""
+    mla = {i for i in range(93) if i % 4 == 3} | {92}
+    return SimpleNamespace(
+        num_hidden_layers=93,
+        attn_res_block_size=12,
+        num_experts=896,
+        first_k_dense_replace=1,
+        moe_layer_freq=1,
+        is_kda_layer=lambda i: i not in mla,
+    )
+
+
+def test_kernel_layers_follow_the_k3_pattern() -> None:
+    from vllm.models.kimi_k3.amd.mono.spec import FFN, WHOLE, layers
+
+    kinds = layers(_k3_text_config())
+    assert sorted(kinds) == list(range(1, 93))
+    assert kinds[1] == WHOLE and kinds[12] == WHOLE
+    assert kinds[3] == FFN and kinds[92] == FFN
+
+
+def _vllm_config(**over):
+    from vllm.config import CUDAGraphMode
+
+    c = SimpleNamespace(
+        parallel_config=SimpleNamespace(
+            tensor_parallel_size=8,
+            pipeline_parallel_size=1,
+            data_parallel_size=1,
+            enable_expert_parallel=False,
+            enable_eplb=False,
+            prefill_context_parallel_size=1,
+        ),
+        lora_config=None,
+        kv_transfer_config=None,
+        aux_output_config=SimpleNamespace(enable_return_routed_experts=False),
+        model_config=SimpleNamespace(enable_sleep_mode=False),
+        offload_config=SimpleNamespace(
+            uva=SimpleNamespace(cpu_offload_gb=0),
+            prefetch=SimpleNamespace(offload_group_size=0),
+        ),
+        weight_transfer_config=None,
+        use_v2_model_runner=True,
+        speculative_config=SimpleNamespace(num_speculative_tokens=7),
+        compilation_config=SimpleNamespace(
+            cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
+            cudagraph_capture_sizes=list(range(2, 17)),
+        ),
+    )
+    for path, v in over.items():
+        obj = c
+        *head, last = path.split(".")
+        for h in head:
+            obj = getattr(obj, h)
+        setattr(obj, last, v)
+    return c
+
+
+def test_supported_config_is_accepted(monkeypatch: pytest.MonkeyPatch) -> None:
+    from vllm.models.kimi_k3.amd.mono import spec
+
+    monkeypatch.setattr(spec, "refuse_platform", lambda: [])
+    assert spec.refuse_config(_vllm_config()) == []
+
+
+def test_every_refusal_is_reported_at_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    from vllm.config import CUDAGraphMode
+    from vllm.models.kimi_k3.amd.mono import spec
+
+    monkeypatch.setattr(spec, "refuse_platform", lambda: ["needs gfx950 (MI355X)"])
+    reasons = spec.refuse_config(
+        _vllm_config(
+            **{
+                "parallel_config.tensor_parallel_size": 4,
+                "parallel_config.pipeline_parallel_size": 2,
+                "parallel_config.data_parallel_size": 2,
+                "parallel_config.enable_expert_parallel": True,
+                "parallel_config.enable_eplb": True,
+                "parallel_config.prefill_context_parallel_size": 2,
+                "lora_config": object(),
+                "kv_transfer_config": object(),
+                "aux_output_config.enable_return_routed_experts": True,
+                "model_config.enable_sleep_mode": True,
+                "offload_config.uva.cpu_offload_gb": 4,
+                "weight_transfer_config": object(),
+                "use_v2_model_runner": False,
+                "compilation_config.cudagraph_mode": CUDAGraphMode.PIECEWISE,
+            }
+        )
+    )
+    assert len(reasons) == 15, reasons
+
+
+@pytest.mark.parametrize(
+    "over, reason",
+    [
+        ({"speculative_config": None}, "speculative decoding"),
+        ({"speculative_config.num_speculative_tokens": 8}, "exceed 8"),
+        ({"compilation_config.cudagraph_capture_sizes": [2, 4]}, "miss widths [8]"),
+    ],
+)
+def test_spec_decode_and_capture_size_refusals(
+    monkeypatch: pytest.MonkeyPatch, over, reason
+) -> None:
+    from vllm.models.kimi_k3.amd.mono import spec
+
+    monkeypatch.setattr(spec, "refuse_platform", lambda: [])
+    reasons = spec.refuse_config(_vllm_config(**over))
+    assert len(reasons) == 1 and reason in reasons[0], reasons
+
+
+def test_refuse_caches_names_the_layer() -> None:
+    from vllm.models.kimi_k3.amd.mono.spec import refuse_caches
+
+    conv = torch.zeros(2, 4, 3, dtype=torch.float32)
+    rstate = torch.zeros(2, 12, 128, 128, dtype=torch.bfloat16)
+    reasons = refuse_caches(5, conv, rstate)
+    assert len(reasons) == 2 and all(r.startswith("layer 5:") for r in reasons)
+
+
+def _routing(monkeypatch, mode, **md):
+    from vllm.config import CUDAGraphMode
+    from vllm.models.kimi_k3.amd.mono import routing
+
+    m = SimpleNamespace(
+        spec_sequence_masks=torch.ones(1, dtype=torch.bool),
+        num_prefills=0,
+        num_decodes=0,
+        num_spec_decodes=1,
+        spec_state_indices_tensor=torch.zeros(1, 4, dtype=torch.int32),
+        uniform_spec_sequence_length=4,
+    )
+    for k, v in md.items():
+        setattr(m, k, v)
+    fc = SimpleNamespace(
+        cudagraph_runtime_mode=getattr(CUDAGraphMode, mode),
+        attn_metadata={"kda": m},
+    )
+    monkeypatch.setattr(routing, "get_forward_context", lambda: fc)
+    mono = object.__new__(routing.Mono)
+    mono.widths = (4, 8)
+    attn = SimpleNamespace(prefix="kda")
+    mono.whole = [SimpleNamespace(layer=SimpleNamespace(self_attn=attn))]
+    return mono
+
+
+@pytest.mark.parametrize(
+    "mode, tokens, md, why",
+    [
+        ("FULL", 4, {}, None),
+        ("NONE", 8, {"num_spec_decodes": 2}, None),
+        ("PIECEWISE", 4, {}, "piecewise"),
+        ("FULL", 6, {}, "width"),
+        ("NONE", 4, {"num_prefills": 1}, "not pure decode"),
+        ("NONE", 4, {"num_decodes": 1}, "not pure decode"),
+        ("NONE", 4, {"spec_sequence_masks": None}, "not spec-verify"),
+        ("NONE", 8, {}, "not uniform"),
+        ("NONE", 4, {"uniform_spec_sequence_length": None}, "not uniform"),
+    ],
+)
+def test_routing_runs_pure_decode_widths_only(
+    monkeypatch: pytest.MonkeyPatch, mode, tokens, md, why
+) -> None:
+    assert _routing(monkeypatch, mode, **md).no_go(tokens) == why
+
+
+@pytest.mark.parametrize("active", [False, True])
+def test_forward_layer_routes_by_the_step_decision(active: bool) -> None:
+    from vllm.models.kimi_k3.amd.mono import routing
+
+    layer, kernel = Mock(return_value="vllm"), Mock()
+    kernel.launch.return_value = "mono"
+    mono = SimpleNamespace(active=active, kernels={7: kernel})
+    got = routing.forward_layer(mono, 7, layer, "pos", "h", "r", "d")
+    assert got == ("mono" if active else "vllm")
+    # a layer without a kernel always runs vLLM's
+    assert routing.forward_layer(mono, 8, layer, "pos", "h", "r", "d") == "vllm"
