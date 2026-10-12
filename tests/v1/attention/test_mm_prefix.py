@@ -688,36 +688,19 @@ def test_flashinfer_mm_prefix_supports_combination(kv_dtype, sink, reason):
         assert reason in result
 
 
-@pytest.mark.parametrize(
-    ("use_dcp", "use_rswa", "reason"),
-    [(True, False, "DCP"), (False, True, "R-SWA not supported"), (False, False, None)],
-)
-def test_flashinfer_mm_prefix_validate_configuration(use_dcp, use_rswa, reason):
-    """DCP is rejected here; R-SWA is decided by the base class, so the
-    override has to pass the flag through."""
-    from vllm.platforms.interface import DeviceCapability
-    from vllm.v1.attention.backends.flashinfer import FlashInferBackend
+@pytest.mark.parametrize("dcp", [1, 2])
+def test_flashinfer_mm_prefix_rejects_dcp(dcp):
+    import unittest.mock
 
-    reasons = FlashInferBackend.validate_configuration(
-        head_size=128,
-        dtype=torch.bfloat16,
-        kv_cache_dtype=None,
-        block_size=16,
-        use_mla=False,
-        has_sink=False,
-        use_sparse=False,
-        use_mm_prefix=True,
-        use_per_head_quant_scales=False,
-        device_capability=DeviceCapability(8, 0),
-        attn_type="decoder",
-        use_dcp=use_dcp,
-        use_rswa=use_rswa,
-    )
+    from vllm.v1.attention.backends.flashinfer import _native_mm_prefix
 
-    if reason is None:
-        assert not any("DCP" in r or "R-SWA" in r for r in reasons), reasons
-    else:
-        assert any(reason in r for r in reasons), reasons
+    vllm_config, _, _ = _flashinfer_builder_env(None)
+    vllm_config.parallel_config.decode_context_parallel_size = dcp
+    with unittest.mock.patch(
+        "vllm.v1.attention.backends.flashinfer._mm_prefix_wrapper_cls",
+        return_value=object,
+    ):
+        assert _native_mm_prefix(vllm_config) == (dcp == 1)
 
 
 def _flashinfer_builder_env(sliding_window: int | None, cache_dtype: str = "auto"):
