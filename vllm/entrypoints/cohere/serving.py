@@ -498,7 +498,7 @@ class CohereServingChatV2(OpenAIServingChat):
         # Map every content block to a plain ``{"type": "text", "text":
         # ...}`` part, mirroring the shape :meth:`_convert_user_message`
         # emits for multi-part user content. vLLM's
-        # ``_parse_chat_message_content`` collapses a text-only tool
+        # ``parse_chat_message_content`` collapses a text-only tool
         # part list back into ``"\n".join(...)`` on the way to the
         # renderer, so simple chat templates that expect string tool
         # content still work; keeping the list here just preserves the

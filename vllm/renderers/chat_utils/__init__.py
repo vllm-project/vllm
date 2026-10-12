@@ -1,5 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from .chat_message import (
+    ChatTemplateContentFormat,
+    parse_chat_messages,
+    parse_chat_messages_async,
+)
+from .chat_message_content import (
+    has_non_text_content,
+    parse_chat_message_content,
+    parse_chat_message_content_parts,
+)
 from .chat_template import (
     ChatTemplateConfig,
     ChatTemplateContentFormatOption,
@@ -12,12 +22,6 @@ from .item_tracker import (
     BaseMultiModalItemTracker,
     MultiModalItemTracker,
 )
-from .parse_chat_message import (
-    ChatTemplateContentFormat,
-    parse_chat_messages,
-    parse_chat_messages_async,
-)
-from .parse_chat_message_content import has_non_text_content
 from .tool_call import get_tool_call_id_type, make_tool_call_id
 from .types import *
 from .types import __all__ as all_types
@@ -37,5 +41,9 @@ __all__ += [
     "MultiModalItemTracker",
     "AsyncMultiModalItemTracker",
 ]
-__all__ += ["has_non_text_content"]
+__all__ += [
+    "has_non_text_content",
+    "parse_chat_message_content",
+    "parse_chat_message_content_parts",
+]
 __all__ += ["PROMPT_EMBEDS_PLACEHOLDER_TOKEN"]

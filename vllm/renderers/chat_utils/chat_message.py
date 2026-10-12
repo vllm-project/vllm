@@ -8,8 +8,8 @@ from vllm.exceptions import VLLMValidationError
 from vllm.inputs import MultiModalDataDict, MultiModalUUIDDict
 from vllm.logger import init_logger
 
+from .chat_message_content import parse_chat_message_content
 from .item_tracker import AsyncMultiModalItemTracker, MultiModalItemTracker
-from .parse_chat_message_content import _parse_chat_message_content
 from .types import ChatCompletionMessageParam, ConversationMessage
 
 logger = init_logger(__name__)
@@ -114,7 +114,7 @@ def parse_chat_messages(
     )
 
     for msg in messages:
-        sub_messages = _parse_chat_message_content(
+        sub_messages = parse_chat_message_content(
             msg,
             mm_tracker,
             content_format,
@@ -153,7 +153,7 @@ async def parse_chat_messages_async(
     )
 
     for msg in messages:
-        sub_messages = _parse_chat_message_content(
+        sub_messages = parse_chat_message_content(
             msg,
             mm_tracker,
             content_format,

@@ -17,6 +17,7 @@ from vllm.config import ModelConfig
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 
+from .chat_message import ChatTemplateContentFormat
 from .content_parser import (
     MODALITY_PLACEHOLDERS_MAP,
     PROMPT_EMBEDS_PLACEHOLDER_TOKEN,
@@ -25,7 +26,6 @@ from .content_parser import (
 from .item_tracker import BaseMultiModalItemTracker
 from .mm_parser_map import MM_PARSER_MAP, _ContentPart, _InputAudioParser
 from .multimodal import _get_full_multimodal_text_prompt
-from .parse_chat_message import ChatTemplateContentFormat
 from .types import (
     ChatCompletionContentPartAudioEmbedsParam,
     ChatCompletionContentPartImageEmbedsParam,
@@ -132,7 +132,7 @@ def _collect_extra_fields(part: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in part.items() if k not in _KNOWN_CONTENT_PART_FIELDS}
 
 
-def _parse_chat_message_content_part(
+def parse_chat_message_content_part(
     part: ChatCompletionContentPartParam,
     mm_parser: BaseMultiModalContentParser,
     *,
@@ -152,7 +152,7 @@ def _parse_chat_message_content_part(
             return {"type": "text", "text": part}
         return part
     # Handle structured dictionary parts
-    part_type, content = _parse_chat_message_content_mm_part(part)
+    part_type, content = parse_chat_message_content_mm_part(part)
     # if part_type is text/refusal/image_url/audio_url/video_url/input_audio but
     # content is None, log a warning and skip
     if part_type in PART_TYPES_TO_SKIP_NONE_CONTENT and content is None:
@@ -259,7 +259,7 @@ def _parse_chat_message_content_part(
     return MODALITY_PLACEHOLDERS_MAP[modality] if interleave_strings else None
 
 
-def _parse_chat_message_content_parts(
+def parse_chat_message_content_parts(
     role: str,
     parts: Iterable[ChatCompletionContentPartParam],
     mm_tracker: BaseMultiModalItemTracker,
@@ -274,7 +274,7 @@ def _parse_chat_message_content_parts(
     mm_parser = mm_tracker.create_parser(mm_processor_kwargs=mm_processor_kwargs)
 
     for part in parts:
-        parse_res = _parse_chat_message_content_part(
+        parse_res = parse_chat_message_content_part(
             part,
             mm_parser,
             wrap_dicts=wrap_dicts,
@@ -306,7 +306,7 @@ _AssistantParser = partial(cast, ChatCompletionAssistantMessageParam)
 _ToolParser = partial(cast, ChatCompletionToolMessageParam)
 
 
-def _parse_chat_message_content(
+def parse_chat_message_content(
     message: ChatCompletionMessageParam,
     mm_tracker: BaseMultiModalItemTracker,
     content_format: ChatTemplateContentFormat,
@@ -323,7 +323,7 @@ def _parse_chat_message_content(
         content = [ChatCompletionContentPartTextParam(type="text", text=content)]
     if role == "system":
         content = _strip_claude_code_billing_header(content)  # type: ignore[arg-type]
-    result = _parse_chat_message_content_parts(
+    result = parse_chat_message_content_parts(
         role,
         content,  # type: ignore
         mm_tracker,
@@ -385,7 +385,7 @@ def _parse_chat_message_content(
     return result
 
 
-def _parse_chat_message_content_mm_part(
+def parse_chat_message_content_mm_part(
     part: ChatCompletionContentPartParam,
 ) -> tuple[str, _ContentPart]:
     """Parses a given multi-modal content part based on its type.
