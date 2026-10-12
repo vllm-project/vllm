@@ -193,7 +193,8 @@ class ServingGenerativeScoring(BaseServing):
             ErrorResponse if an error occurred.
 
         """
-        spec_config = self.engine_client.vllm_config.speculative_config
+        vllm_config = getattr(self.engine_client, "vllm_config", None)
+        spec_config = getattr(vllm_config, "speculative_config", None)
         if (
             spec_config is not None
             and spec_config.rejection_sample_method == "synthetic"
