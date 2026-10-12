@@ -17,12 +17,12 @@ from vllm.engine.arg_utils import AsyncEngineArgs, optional_type
 from vllm.entrypoints.anthropic.protocol import (
     AnthropicDisabledThinkingEffortOption,
 )
-from vllm.entrypoints.chat_utils import (
+from vllm.entrypoints.openai.models.protocol import LoRAModulePath
+from vllm.logger import init_logger
+from vllm.renderers.chat_utils import (
     ChatTemplateContentFormatOption,
     validate_chat_template,
 )
-from vllm.entrypoints.openai.models.protocol import LoRAModulePath
-from vllm.logger import init_logger
 from vllm.tool_parsers import ToolParserManager
 from vllm.tool_parsers.tool_strict_level import ToolStrictLevelName
 from vllm.utils.argparse_utils import FlexibleArgumentParser
@@ -163,8 +163,6 @@ class BaseFrontendArgs:
     enable_tokenizer_info_endpoint: bool = False
     """Enable the `/tokenizer_info` endpoint. May expose chat
     templates and other tokenizer configuration."""
-    enable_structured_decisions: bool = False
-    """Enable the `/v1/systemone` structured decisions endpoint."""
     enable_log_outputs: bool = False
     """If set to True, log model outputs (generations). Requires
     `--enable-log-requests`. Output text and finish reasons are logged at INFO,
@@ -318,8 +316,8 @@ class FrontendArgs(BaseFrontendArgs):
     while keeping logs for other endpoints."""
     allow_credentials: bool = False
     """Allow credentials."""
-    allowed_origins: list[str] = field(default_factory=lambda: ["*"])
-    """Allowed origins."""
+    allowed_origins: list[str] = field(default_factory=list)
+    """Allowed origins. Cross-origin browser access is disabled by default."""
     allowed_methods: list[str] = field(default_factory=lambda: ["*"])
     """Allowed methods."""
     allowed_headers: list[str] = field(default_factory=lambda: ["*"])

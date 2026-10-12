@@ -852,6 +852,20 @@ def test_logprobs_below_minus_one_rejected():
         )
 
 
+@pytest.mark.parametrize("max_tokens", [5, 0])
+def test_beam_search_echo_logprobs_rejected(max_tokens):
+    """Beam search does not compute prompt logprobs, so echo + logprobs is rejected."""
+    with pytest.raises(VLLMValidationError, match="not supported with beam search"):
+        CompletionRequest(
+            model=MODEL_NAME,
+            prompt="Test prompt",
+            max_tokens=max_tokens,
+            use_beam_search=True,
+            echo=True,
+            logprobs=1,
+        )
+
+
 class TestCompletionPromptListLimit:
     """Regression tests for CVE: unbounded prompt list fan-out."""
 
