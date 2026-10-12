@@ -15,6 +15,7 @@ from typing import Any
 import pytest
 import torch
 
+import vllm.v1.core.kv_cache_planning as kv_cache_planning
 import vllm.v1.core.kv_cache_utils as kv_cache_utils
 import vllm.v1.hisparse.runtime as hisparse_runtime_module
 from vllm.config import (
@@ -35,23 +36,25 @@ from vllm.sampling_params import SamplingParams
 from vllm.utils.hashing import sha256, sha256_cbor, xxhash, xxhash_cbor
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
+from vllm.v1.core.kv_cache_planning import (
+    check_enough_kv_cache_memory,
+    estimate_max_model_len,
+    get_kv_cache_configs,
+    get_kv_cache_groups,
+    is_kv_cache_spec_uniform,
+    kv_cache_groups_tp_replicas,
+)
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     FreeKVCacheBlockQueue,
     KVCacheBlock,
-    check_enough_kv_cache_memory,
-    estimate_max_model_len,
     generate_block_hash_extra_keys,
     generate_scheduler_kv_cache_config,
     get_kv_cache_capacity,
-    get_kv_cache_configs,
-    get_kv_cache_groups,
     get_max_concurrency_for_kv_cache_config,
     get_request_block_hasher,
     hash_block_tokens,
     init_none_hash,
-    is_kv_cache_spec_uniform,
-    kv_cache_groups_tp_replicas,
     make_block_hash_with_group_id,
     tensor_data,
     to_event_extra_keys,
@@ -138,8 +141,10 @@ def test_hisparse_hma_uses_resolved_gpu_block_size(
             get_resolved_kv_cache_layout=lambda: KVCacheLayout.BLHNC,
         ),
     )
-    monkeypatch.setattr(kv_cache_utils, "get_hisparse_host_pool_bytes", lambda _: 2**30)
-    cache_config = kv_cache_utils.get_kv_cache_config_from_groups(
+    monkeypatch.setattr(
+        kv_cache_planning, "get_hisparse_host_pool_bytes", lambda _: 2**30
+    )
+    cache_config = kv_cache_planning.get_kv_cache_config_from_groups(
         config, get_hisparse_kv_cache_groups(config, specs), available_memory=2**30
     )
     assert cache_config.num_blocks == 7
@@ -303,7 +308,9 @@ def test_hisparse_pool_must_fit_max_model_len(
     monkeypatch.setattr(
         hisparse_runtime_module.current_platform, "is_cuda_alike", lambda: True
     )
-    monkeypatch.setattr(kv_cache_utils, "get_hisparse_host_pool_bytes", lambda _: 2**30)
+    monkeypatch.setattr(
+        kv_cache_planning, "get_hisparse_host_pool_bytes", lambda _: 2**30
+    )
     specs: dict[str, KVCacheSpec] = {}
     for i in range(4):
         specs[f"model.layers.{i}.self_attn"] = MLAAttentionSpec(
@@ -337,10 +344,10 @@ def test_hisparse_pool_must_fit_max_model_len(
     }
 
     if ok:
-        kv_cache_utils.get_kv_cache_configs(config, [specs], [2**34])
+        kv_cache_planning.get_kv_cache_configs(config, [specs], [2**34])
     else:
         with pytest.raises(ValueError, match="max seq len"):
-            kv_cache_utils.get_kv_cache_configs(config, [specs], [2**34])
+            kv_cache_planning.get_kv_cache_configs(config, [specs], [2**34])
 
 
 def test_hisparse_derived_specs_do_not_affect_kv_cache_layout(monkeypatch):
@@ -1834,14 +1841,14 @@ def test_project_kv_cache_groups_to_worker():
         KVCacheGroupSpec(["layer1", "layer2", "layer3"], spec_a),
     ]
     worker_spec = {"layer1": spec_a, "layer2": spec_a}
-    projected = kv_cache_utils._project_kv_cache_groups_to_worker(
+    projected = kv_cache_planning._project_kv_cache_groups_to_worker(
         global_groups, worker_spec
     )
     assert len(projected) == 1
     assert projected[0].layer_names == ["layer1", "layer2"]
     assert projected[0].kv_cache_spec is spec_a
 
-    projected = kv_cache_utils._project_kv_cache_groups_to_worker(
+    projected = kv_cache_planning._project_kv_cache_groups_to_worker(
         global_groups, {"layer4": spec_a}
     )
     assert len(projected) == 1
@@ -1855,7 +1862,7 @@ def test_project_kv_cache_groups_to_worker():
     global_groups_uniform = [
         KVCacheGroupSpec(["layer1", "layer2", "layer3"], uniform_spec),
     ]
-    projected = kv_cache_utils._project_kv_cache_groups_to_worker(
+    projected = kv_cache_planning._project_kv_cache_groups_to_worker(
         global_groups_uniform, {"layer1": spec_a, "layer3": spec_a}
     )
     assert len(projected) == 1
@@ -1901,7 +1908,7 @@ def test_dcp_target_allocates_replicated_draft_independently(
     widths = [g.kv_cache_spec.max_num_blocks_per_req(config, 1024) for g in groups]
     assert widths == [16, 64]
 
-    cache_config = kv_cache_utils.get_kv_cache_config_from_groups(
+    cache_config = kv_cache_planning.get_kv_cache_config_from_groups(
         config, groups, available_memory=16 * 1024 * 1024
     )
     scheduler_config = generate_scheduler_kv_cache_config([cache_config])
@@ -2008,7 +2015,7 @@ def test_sparse_mla_preserves_physical_row_addressing(with_draft, indexer_alignm
     if not with_draft:
         del specs["draft"]
     groups = get_kv_cache_groups(config, specs)
-    cache_config = kv_cache_utils.get_kv_cache_config_from_groups(
+    cache_config = kv_cache_planning.get_kv_cache_config_from_groups(
         config, groups, available_memory=8 * 1024 * 1024
     )
     caches = allocate_kv_cache(
@@ -2149,7 +2156,7 @@ def test_is_kv_cache_spec_uniform():
     script = """
 import sys
 
-from vllm.v1.core.kv_cache_utils import is_kv_cache_spec_uniform
+from vllm.v1.core.kv_cache_planning import is_kv_cache_spec_uniform
 from vllm.v1.kv_cache_interface import KVCacheSpec
 
 if sys.flags.optimize < 1:
@@ -2938,7 +2945,7 @@ def test_packed_groups_glm5_like_hybrid():
             block_size=block_size,
         )
 
-    groups = kv_cache_utils.get_kv_cache_groups(vllm_config, kv_cache_spec)
+    groups = kv_cache_planning.get_kv_cache_groups(vllm_config, kv_cache_spec)
     attn = [
         g
         for g in groups
@@ -2964,7 +2971,7 @@ def test_packed_groups_glm5_like_hybrid():
     assert len(mamba) == 3
     assert sum(len(g.layer_names) for g in mamba) == 34
 
-    kv_cache_config = kv_cache_utils.get_kv_cache_config_from_groups(
+    kv_cache_config = kv_cache_planning.get_kv_cache_config_from_groups(
         vllm_config, groups, available_memory=2 * 1024**3
     )
     strides = {t.block_stride for t in kv_cache_config.kv_cache_tensors}
@@ -3145,7 +3152,7 @@ def test_multi_run_layer_compact_strides_place_hoisted_heads():
 
     vllm_config = VllmConfig(model_config=ModelConfig(max_model_len=16))
     vllm_config.cache_config.kv_cache_layout = "LHBNC"
-    config = kv_cache_utils.get_kv_cache_config_from_groups(
+    config = kv_cache_planning.get_kv_cache_config_from_groups(
         vllm_config,
         [
             KVCacheGroupSpec(["full.0", "full.1"], full),
@@ -3683,7 +3690,7 @@ def test_unify_kv_cache_page_size_uses_padding_for_non_divisible_sizes():
         sliding_window=1024,
     )
 
-    unified_specs = kv_cache_utils.unify_kv_cache_spec_page_size(
+    unified_specs = kv_cache_planning.unify_kv_cache_spec_page_size(
         {
             "target_attn": target_spec,
             "draft_attn": draft_spec,
@@ -3741,7 +3748,7 @@ def test_unify_hybrid_kv_cache_specs():
     }
     kv_cache_spec["draft_layer_1"] = replace(before_spec_1, dcp_sharded=False)
     kv_cache_spec["draft_layer_2"] = replace(before_spec_2, dcp_sharded=False)
-    kv_cache_utils.unify_hybrid_kv_cache_specs(kv_cache_spec)
+    kv_cache_planning.unify_hybrid_kv_cache_specs(kv_cache_spec)
     expected_spec_1 = new_kv_cache_spec(block_size=64)
     expected_spec_2 = new_kv_cache_spec(
         block_size=64, page_size_padded=64 * 1024, sliding_window=1024
@@ -3760,7 +3767,7 @@ def test_unify_hybrid_kv_cache_specs():
         "layer_1": before_spec_1,
         "layer_2": before_spec_2,
     }
-    kv_cache_utils.unify_hybrid_kv_cache_specs(kv_cache_spec)
+    kv_cache_planning.unify_hybrid_kv_cache_specs(kv_cache_spec)
     expected_spec_1 = new_kv_cache_spec()
     expected_spec_2 = new_kv_cache_spec(
         page_size_padded=32 * 1024, attention_chunk_size=512
@@ -3782,7 +3789,7 @@ def test_unify_hybrid_kv_cache_specs():
         "layer_2": before_spec_2,
         "layer_3": before_spec_3,
     }
-    kv_cache_utils.unify_hybrid_kv_cache_specs(kv_cache_spec)
+    kv_cache_planning.unify_hybrid_kv_cache_specs(kv_cache_spec)
     expected_spec_1 = new_kv_cache_spec()
     expected_spec_2 = new_kv_cache_spec(page_size_padded=32 * 1024, sliding_window=1024)
     expected_spec_3 = new_kv_cache_spec(
@@ -3799,12 +3806,12 @@ def test_unify_hybrid_kv_cache_specs():
     }
 
     with pytest.raises(ValueError):
-        kv_cache_utils.unify_hybrid_kv_cache_specs(kv_cache_spec)
+        kv_cache_planning.unify_hybrid_kv_cache_specs(kv_cache_spec)
 
     # Replicated Mamba state still requires the hybrid cache manager.
     kv_cache_spec = {"attention": new_kv_cache_spec(), "mamba": new_mamba_spec()}
     with pytest.raises(ValueError):
-        kv_cache_utils.unify_hybrid_kv_cache_specs(kv_cache_spec)
+        kv_cache_planning.unify_hybrid_kv_cache_specs(kv_cache_spec)
 
 
 def test_unify_kv_cache_spec_page_size_mamba():
@@ -3828,7 +3835,7 @@ def test_unify_kv_cache_spec_page_size_mamba():
     assert mamba_spec.page_size_bytes == main_attn_spec.page_size_bytes == 16384
     assert draft_attn_spec.page_size_bytes == 32768
 
-    unified = kv_cache_utils.unify_kv_cache_spec_page_size(
+    unified = kv_cache_planning.unify_kv_cache_spec_page_size(
         {
             "mamba_layer": mamba_spec,
             "main_attn_layer": main_attn_spec,
@@ -3852,7 +3859,7 @@ def test_unify_kv_cache_spec_page_size_mamba():
         shapes=((2, 256), (3, 32, 32)), page_size_padded=16384
     )
     assert padded_mamba_spec.page_size_bytes == 16384
-    unified = kv_cache_utils.unify_kv_cache_spec_page_size(
+    unified = kv_cache_planning.unify_kv_cache_spec_page_size(
         {
             "mamba_layer": padded_mamba_spec,
             "draft_attn_layer": draft_attn_spec,
@@ -3867,7 +3874,7 @@ def test_unify_kv_cache_spec_page_size_mamba():
     odd_mamba_spec = new_mamba_spec(shapes=((6144,),))
     assert odd_mamba_spec.page_size_bytes == 24576
     assert 32768 % odd_mamba_spec.page_size_bytes != 0
-    unified = kv_cache_utils.unify_kv_cache_spec_page_size(
+    unified = kv_cache_planning.unify_kv_cache_spec_page_size(
         {
             "mamba_layer": odd_mamba_spec,
             "draft_attn_layer": draft_attn_spec,
@@ -3878,7 +3885,7 @@ def test_unify_kv_cache_spec_page_size_mamba():
     # 4. Attention layers with non-divisible page sizes are padded too: every
     # backend reads a padded page through the view's block stride, so there is
     # no longer a case that must raise.
-    unified = kv_cache_utils.unify_kv_cache_spec_page_size(
+    unified = kv_cache_planning.unify_kv_cache_spec_page_size(
         {
             "attn_layer": new_kv_cache_spec(block_size=24),  # 24576
             "draft_attn_layer": draft_attn_spec,  # 32768
@@ -3893,7 +3900,7 @@ def test_unify_kv_cache_spec_page_size_mamba():
         "mamba_layer": new_mamba_spec(),
         "attn_layer": new_kv_cache_spec(),
     }
-    assert kv_cache_utils.unify_kv_cache_spec_page_size(specs) == specs
+    assert kv_cache_planning.unify_kv_cache_spec_page_size(specs) == specs
 
 
 def test_hma_not_disabled_when_kv_events_enabled():
@@ -4330,7 +4337,7 @@ def test_trailing_layer_fallback_requires_exact_partition():
     # If the groups do not partition the layers exactly (e.g. a caller that
     # dropped or duplicated layers), the positional rule is meaningless and
     # must not fire.
-    from vllm.v1.core.kv_cache_utils import _annotate_eagle_groups
+    from vllm.v1.core.kv_cache_planning import _annotate_eagle_groups
 
     specs = _qwen3_5_hybrid_specs(with_mtp_layer=True)
     config = _spec_decode_grouping_config(method="mtp", model_type="qwen3_5")
