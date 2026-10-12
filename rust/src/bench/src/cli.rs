@@ -73,8 +73,6 @@ pub enum DatasetName {
     RandomMm,
     #[value(name = "sharegpt")]
     ShareGpt,
-    #[value(name = "sonnet")]
-    Sonnet,
     #[value(name = "speed-bench", alias = "speed_bench")]
     SpeedBench,
     #[value(name = "hf")]
@@ -85,6 +83,8 @@ pub enum DatasetName {
     PrefixRepetition,
     #[value(name = "random-rerank")]
     RandomRerank,
+    #[value(name = "timed_trace", alias = "timed-trace")]
+    TimedTrace,
 }
 
 /// Ramp-up strategy for request rate.
@@ -176,7 +176,7 @@ pub struct BenchServeArgs {
     #[arg(long)]
     pub tokenizer: Option<String>,
 
-    /// Tokenizer mode (auto, hf, slow, mistral). Accepted for Python CLI
+    /// Tokenizer mode (auto, hf, mistral). Accepted for Python CLI
     /// compatibility; non-auto values are ignored with a warning.
     #[arg(long, default_value = "auto")]
     pub tokenizer_mode: String,
@@ -323,6 +323,33 @@ pub struct BenchServeArgs {
     #[arg(long, default_value_t = 128)]
     pub prefix_repetition_output_len: usize,
 
+    // --- Timed-trace dataset ---
+    /// How many tokens each prefix hash in the trace represents
+    /// (e.g. 512 for Moonshot traces, 16 for Qwen/Alibaba).
+    #[arg(long, default_value_t = 16)]
+    pub timed_trace_chunk_hash_size: usize,
+
+    /// Multiplier converting trace timestamps to seconds
+    /// (e.g. 0.001 if timestamps are in milliseconds).
+    #[arg(long, default_value_t = 1.0)]
+    pub timed_trace_sec_multiplier: f64,
+
+    /// JSON key of the timestamp field in the trace.
+    #[arg(long, default_value = "timestamp")]
+    pub timed_trace_label_timestamp: String,
+
+    /// JSON key of the input length field in the trace.
+    #[arg(long, default_value = "input_length")]
+    pub timed_trace_label_input_length: String,
+
+    /// JSON key of the output length field in the trace.
+    #[arg(long, default_value = "output_length")]
+    pub timed_trace_label_output_length: String,
+
+    /// JSON key of the hash ids field in the trace.
+    #[arg(long, default_value = "hash_ids")]
+    pub timed_trace_label_hash_ids: String,
+
     /// Number of prompts to generate.
     #[arg(long, default_value_t = 1000)]
     pub num_prompts: usize,
@@ -334,6 +361,16 @@ pub struct BenchServeArgs {
     /// Burstiness factor of request generation.
     #[arg(long, default_value_t = 1.0)]
     pub burstiness: f64,
+
+    /// Schedule requests at the timestamps recorded in the trace instead of
+    /// --request-rate. Defaults to on for --dataset-name timed_trace (the only
+    /// dataset that carries timestamps); an error for any other dataset.
+    #[arg(long, overrides_with = "no_self_timed")]
+    pub self_timed: bool,
+
+    /// Force trace-driven timing off for timed_trace and use --request-rate.
+    #[arg(long, overrides_with = "self_timed")]
+    pub no_self_timed: bool,
 
     /// Maximum number of concurrent requests.
     #[arg(long)]
@@ -520,19 +557,6 @@ pub struct BenchServeArgs {
     /// Do not shuffle the dataset.
     #[arg(long, default_value_t = false)]
     pub disable_shuffle: bool,
-
-    // --- Sonnet dataset ---
-    /// Number of input tokens per request (sonnet dataset).
-    #[arg(long, default_value_t = crate::datasets::sonnet::DEFAULT_INPUT_LEN)]
-    pub sonnet_input_len: usize,
-
-    /// Number of output tokens per request (sonnet dataset).
-    #[arg(long, default_value_t = crate::datasets::sonnet::DEFAULT_OUTPUT_LEN)]
-    pub sonnet_output_len: usize,
-
-    /// Number of prefix tokens shared across requests (sonnet dataset).
-    #[arg(long, default_value_t = crate::datasets::sonnet::DEFAULT_PREFIX_LEN)]
-    pub sonnet_prefix_len: usize,
 
     /// SPEED-Bench config/split (qualitative, throughput_1k, throughput_2k, throughput_8k,
     /// throughput_16k, throughput_32k).

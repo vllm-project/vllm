@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import Any
 
-import torch
 from typing_extensions import override
 
 from vllm.platforms import current_platform
@@ -162,7 +161,9 @@ class CPUOffloadingSpec(OffloadingSpec):
     def _uses_shared_region(self) -> bool:
         """Whether the worker CPU buffer is the shared mmap region (vs a private
         per-rank tensor); replicated-layout dedup is gated on this being True."""
-        return current_platform.is_cuda_alike()
+        return (
+            current_platform.is_cuda_alike() and not current_platform.is_rocm()
+        ) or current_platform.is_xpu()
 
     def create_worker(self, kv_caches: CanonicalKVCaches) -> CPUOffloadingWorker:
         mmap_region: SharedOffloadRegion | None = None
@@ -170,12 +171,8 @@ class CPUOffloadingSpec(OffloadingSpec):
         # mmap'd; fall back to the tensor path (empty tensors) as before.
         if self._uses_shared_region() and self.num_chunks > 0:
             # Replicated layout puts all ranks on slot 0 (single MLA copy);
-            # otherwise each rank takes its own slot by physical device index.
-            if self.replicated_layout:
-                rank = 0
-            else:
-                world_size = self.config.parallel.world_size
-                rank = torch.accelerator.current_device_index() % world_size
+            # otherwise each worker uses its own rank-indexed slot.
+            rank = 0 if self.replicated_layout else self.config.parallel.rank
             mmap_region = SharedOffloadRegion(
                 engine_id=self.config.engine_id,
                 num_chunks=self.num_chunks,

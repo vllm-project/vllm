@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-TieringOffloadingManager: Multi-tier KV cache offloading orchestrator.
+"""TieringOffloadingManager: Multi-tier KV cache offloading orchestrator.
 
 This manager coordinates between a CPU primary tier (with direct GPU access)
 and zero or more secondary tiers (Storage, Network, etc.) to provide
@@ -55,6 +54,7 @@ from vllm.v1.kv_offload.tiering.base import (
     TransferJob,
 )
 from vllm.v1.kv_offload.tiering.metrics import TieringMetricsTracker
+from vllm.v1.metrics.cache_hit_source import CacheHitSource
 
 logger = init_logger(__name__)
 
@@ -110,12 +110,21 @@ class CPUPrimaryTierOffloadingManager(CPUOffloadingManager):
         # read/write is for CPU<->secondary transfers,
         # load/store is for CPU<->GPU transfers.
         # These aliases avoid calling prepare_load inside a store path.
-        self.prepare_read = self.prepare_load
         self.complete_read = self.complete_load
         self.prepare_write = self.prepare_store
         self.complete_write = self.complete_store
 
         self._kv_memoryview = mmap_region.create_kv_memoryview()
+
+    def prepare_read(
+        self, keys: Collection[OffloadKey], req_context: ReqContext
+    ) -> LoadStoreSpec:
+        """Pin chunks for a CPU-to-secondary transfer.
+
+        Cascade reads are implementation details of tiering, not additional
+        request accesses, so they must not alter request-scoped recency.
+        """
+        return self._prepare_load(keys, req_context, record_access=False)
 
     def get_kv_memoryview(self) -> memoryview:
         """Return the memoryview over the primary tier's KV cache buffer.
@@ -165,8 +174,7 @@ class _SecondaryTierFacingParent(ParentManager):
 
 
 class TieringOffloadingManager(OffloadingManager):
-    """
-    Orchestrates multi-tier KV cache offloading.
+    """Orchestrates multi-tier KV cache offloading.
 
     This manager coordinates between a CPU primary tier (with direct GPU access)
     and zero or more secondary tiers (Storage, Network, etc.) to provide
@@ -185,13 +193,13 @@ class TieringOffloadingManager(OffloadingManager):
         primary_tier: CPUPrimaryTierOffloadingManager,
         secondary_tiers: list[SecondaryTierManager] | None = None,
     ):
-        """
-        Initialize the TieringOffloadingManager.
+        """Initialize the TieringOffloadingManager.
 
         Args:
             primary_tier: The primary tier manager (CPU-based).
             secondary_tiers: List of secondary tier managers (e.g., Storage,
                             Network). Can be None or empty list.
+
         """
         self.primary_tier: CPUPrimaryTierOffloadingManager = primary_tier
         self.secondary_tiers = secondary_tiers or []
@@ -225,10 +233,19 @@ class TieringOffloadingManager(OffloadingManager):
         # complete_store(), since complete_store() can still submit cascades.
         self._req_state: dict[str, RequestState] = {}
 
+        # Preserve the original tier for this request's cache-hit metrics,
+        # even after its KV blocks are promoted into host memory
+        # (otherwise a disk or P2P hit would be mislabeled as a host hit).
+        self._request_load_sources: dict[str, dict[OffloadKey, CacheHitSource]] = {}
+
         # Cached ParentManager wrappers for each secondary tier.
         self._tier_parents: dict[SecondaryTierManager, _SecondaryTierFacingParent] = {
             tier: _SecondaryTierFacingParent(self, tier_idx)
             for tier_idx, tier in enumerate(self.secondary_tiers)
+        }
+
+        self._tier_index: dict[SecondaryTierManager, int] = {
+            tier: i for i, tier in enumerate(self.secondary_tiers)
         }
 
     @property
@@ -250,8 +267,7 @@ class TieringOffloadingManager(OffloadingManager):
         return self._jobs.pop(job_id, None)
 
     def _maybe_process_finished_jobs(self):
-        """
-        Poll secondary tiers for completed jobs (at most once per step).
+        """Poll secondary tiers for completed jobs (at most once per step).
 
         Guarded by _processed_jobs_this_step: the first call in an engine step
         does the actual polling; subsequent calls are no-ops. The flag is reset
@@ -283,6 +299,13 @@ class TieringOffloadingManager(OffloadingManager):
             successful_keys = ()
             failed_keys = transfer_job.keys
 
+        load_sources = self._request_load_sources.get(transfer_job.req_context.req_id)
+        if load_sources is not None:
+            source = self.secondary_tiers[job_metadata.tier_idx].cache_hit_source
+            for key in failed_keys:
+                if load_sources.get(key) == source:
+                    del load_sources[key]
+
         if successful_keys:
             self.primary_tier.complete_write(
                 successful_keys,
@@ -297,8 +320,7 @@ class TieringOffloadingManager(OffloadingManager):
             )
 
     def _process_finished_jobs(self):
-        """
-        Unconditionally poll all secondary tiers for completed jobs.
+        """Unconditionally poll all secondary tiers for completed jobs.
 
         This method:
         1. Calls get_finished_jobs() on each secondary tier
@@ -332,6 +354,43 @@ class TieringOffloadingManager(OffloadingManager):
                     self.primary_tier.complete_read(
                         transfer_job.keys, transfer_job.req_context
                     )
+                    if completed_job.success:
+                        self._update_backpressure(tier, job_metadata, completed_job)
+
+    def _should_store_to_tier(
+        self, tier: SecondaryTierManager, num_blocks: int
+    ) -> bool:
+        detector = tier.bp_detector
+        if detector is None:
+            return True
+        return detector.should_store(num_blocks)
+
+    def _update_backpressure(
+        self,
+        tier: SecondaryTierManager,
+        job_metadata: JobMetadata,
+        completed_job: JobResult,
+    ) -> None:
+        detector = tier.bp_detector
+        if detector is None:
+            return
+        was_under_pressure = detector.is_under_pressure()
+        tj = job_metadata.transfer_job
+        num_bytes = (
+            completed_job.transfer_bytes
+            if completed_job.transfer_bytes is not None
+            else len(tj.keys) * tier.block_size_bytes
+        )
+        detector.update(tj.submit_time, num_bytes)
+        if detector.is_under_pressure() != was_under_pressure:
+            tier_idx = self._tier_index[tier]
+            logger.info(
+                "Tier #%d (%s) back-pressure %s (stats=%s)",
+                tier_idx,
+                tier.tier_type,
+                "activated" if detector.is_under_pressure() else "cleared",
+                detector.stats,
+            )
 
     @override
     def lookup(
@@ -341,8 +400,7 @@ class TieringOffloadingManager(OffloadingManager):
         *,
         exclude_tier_idx: int | None = None,
     ) -> LookupResult:
-        """
-        Check whether a single chunk is offloaded and ready.
+        """Check whether a single chunk is offloaded and ready.
 
         Algorithm:
             1. Process any completed async jobs first.
@@ -353,6 +411,7 @@ class TieringOffloadingManager(OffloadingManager):
         Args:
             key: Chunk hash to look up.
             req_context: Per-request context.
+            exclude_tier_idx: Skip this tier index during the lookup.
 
         Returns:
             HIT       — chunk is ready in the primary tier.
@@ -361,6 +420,7 @@ class TieringOffloadingManager(OffloadingManager):
             RETRY     — promotion started or a secondary tier is busy.
             MISS      — chunk not found in any tier, or primary is full
                         and cannot accept a promotion.
+
         """
         # Poll first so a promotion that finished since the last call is
         # already reflected as HIT (not stale HIT_PENDING/MISS) below, and
@@ -417,14 +477,22 @@ class TieringOffloadingManager(OffloadingManager):
             return LookupResult.RETRY
         return LookupResult.MISS
 
+    @override
+    def get_load_source(
+        self, key: OffloadKey, req_context: ReqContext
+    ) -> CacheHitSource:
+        load_sources = self._request_load_sources.get(req_context.req_id)
+        if load_sources is not None and key in load_sources:
+            return load_sources[key]
+        return self.primary_tier.get_load_source(key, req_context)
+
     def _initiate_promotion(
         self,
         tier_idx: int,
         key: OffloadKey,
         req_context: ReqContext,
     ) -> bool:
-        """
-        Queue a chunk for promotion from a secondary tier to the primary tier.
+        """Queue a chunk for promotion from a secondary tier to the primary tier.
 
         Allocates space in the primary tier immediately (sets ref_cnt=-1 so
         subsequent lookups within the same step see the slot as in-flight),
@@ -439,6 +507,7 @@ class TieringOffloadingManager(OffloadingManager):
 
         Returns:
             True if promotion was initiated, False if primary tier is full.
+
         """
         # Allocate space in primary tier for promoted chunk.
         # Must happen immediately so primary.lookup() returns None (in-flight)
@@ -454,6 +523,10 @@ class TieringOffloadingManager(OffloadingManager):
 
         store_spec = primary_write_result.store_spec
         assert isinstance(store_spec, CPULoadStoreSpec)
+        load_sources = self._request_load_sources.setdefault(req_context.req_id, {})
+        source = self.secondary_tiers[tier_idx].cache_hit_source
+        for promoted_key in primary_write_result.keys_to_store:
+            load_sources[promoted_key] = source
         # Defer submit_load to on_schedule_end(). Group by (tier, request) so
         # each request's chunks are submitted as one batched job per tier.
         tier_pending = self._pending_load_submissions.setdefault(tier_idx, {})
@@ -496,8 +569,7 @@ class TieringOffloadingManager(OffloadingManager):
     def prepare_load(
         self, keys: Collection[OffloadKey], req_context: ReqContext
     ) -> LoadStoreSpec:
-        """
-        Prepare chunks to be loaded from primary tier to GPU.
+        """Prepare chunks to be loaded from primary tier to GPU.
 
         Callers only pass keys already confirmed HIT by lookup() earlier this
         step.
@@ -511,17 +583,18 @@ class TieringOffloadingManager(OffloadingManager):
 
         Returns:
             LoadStoreSpec for reading from primary tier.
+
         """
         return self.primary_tier.prepare_load(keys, req_context)
 
     @override
     def touch(self, keys: Collection[OffloadKey], req_context: ReqContext):
-        """
-        Mark chunks as recently used in all tiers.
+        """Mark chunks as recently used in all tiers.
 
         Args:
             keys: Chunks to mark as recently used.
             req_context: Per-request context.
+
         """
         self.primary_tier.touch(keys, req_context)
         for tier in self.secondary_tiers:
@@ -529,8 +602,7 @@ class TieringOffloadingManager(OffloadingManager):
 
     @override
     def complete_load(self, keys: Collection[OffloadKey], req_context: ReqContext):
-        """
-        Mark chunks as done loading from primary tier to GPU.
+        """Mark chunks as done loading from primary tier to GPU.
 
         This decrements ref_cnt on the chunks in the primary tier, allowing
         them to be evicted again.
@@ -538,6 +610,7 @@ class TieringOffloadingManager(OffloadingManager):
         Args:
             keys: Chunks that finished loading.
             req_context: Per-request context.
+
         """
         self.primary_tier.complete_load(keys, req_context)
 
@@ -545,8 +618,7 @@ class TieringOffloadingManager(OffloadingManager):
     def prepare_store(
         self, keys: Collection[OffloadKey], req_context: ReqContext
     ) -> PrepareStoreOutput | None:
-        """
-        Prepare chunks to be stored from GPU to primary tier.
+        """Prepare chunks to be stored from GPU to primary tier.
 
         CRITICAL: This method calls _maybe_process_finished_jobs() FIRST to ensure
         that any completed async transfers have their ref_cnt decremented
@@ -562,6 +634,7 @@ class TieringOffloadingManager(OffloadingManager):
         Returns:
             PrepareStoreOutput describing where to store chunks and what was
             evicted, or None if store cannot proceed.
+
         """
         # Step 1: Poll for completed async jobs FIRST
         # _process_finished_jobs() handles two kinds of completions here:
@@ -608,8 +681,7 @@ class TieringOffloadingManager(OffloadingManager):
         req_context: ReqContext,
         request_level_tiers: set[int],
     ) -> None:
-        """
-        For tiers that requested request-level policy, submit_store() for
+        """For tiers that requested request-level policy, submit_store() for
         chunks that are already present in the primary tier.
 
         A key whose primary write is still in flight (HIT_PENDING) cannot be
@@ -638,8 +710,10 @@ class TieringOffloadingManager(OffloadingManager):
             return
 
         for tier_idx in request_level_tiers:
-            job_metadata = self.create_store_job(ready_keys, req_context, tier_idx)
             tier = self.secondary_tiers[tier_idx]
+            if not self._should_store_to_tier(tier, len(ready_keys)):
+                continue
+            job_metadata = self.create_store_job(ready_keys, req_context, tier_idx)
             tier.submit_store(job_metadata)
 
     def _flush_pending_cascades(self) -> None:
@@ -665,8 +739,7 @@ class TieringOffloadingManager(OffloadingManager):
         req_context: ReqContext,
         success: bool = True,
     ) -> None:
-        """
-        Mark chunks as done storing from GPU to primary tier.
+        """Mark chunks as done storing from GPU to primary tier.
 
         This is where secondary tier cascading happens — after chunks are
         confirmed to be in the primary tier, they are cascaded to ALL
@@ -682,6 +755,7 @@ class TieringOffloadingManager(OffloadingManager):
             keys: Chunks that finished storing.
             success: Whether the GPU→primary transfer succeeded.
             req_context: Per-request context forwarded to primary.prepare_read().
+
         """
         # Step 1: Complete store in primary tier (makes chunks loadable)
         self.primary_tier.complete_store(keys, req_context, success)
@@ -693,6 +767,8 @@ class TieringOffloadingManager(OffloadingManager):
             # eviction during the async transfer). One prepare_read() call per
             # secondary tier.
             for tier_idx, tier in enumerate(self.secondary_tiers):
+                if not self._should_store_to_tier(tier, len(keys)):
+                    continue
                 job_metadata = self.create_store_job(keys, req_context, tier_idx)
                 tier.submit_store(job_metadata)
 
@@ -739,8 +815,7 @@ class TieringOffloadingManager(OffloadingManager):
         *,
         exclude_tier_idx: int | None = None,
     ) -> RequestOffloadingContext:
-        """
-        Query each secondary tier for its offload policy preference.
+        """Query each secondary tier for its offload policy preference.
 
         Returns REQUEST_LEVEL if ANY secondary tier wants request-level.
         Only stores REQUEST_LEVEL tier decisions for use in prepare_store.
@@ -781,11 +856,10 @@ class TieringOffloadingManager(OffloadingManager):
         req_id: str,
         exclude_tier_idx: int | None = None,
     ) -> None:
-        """Finalize secondary tiers once no more store cascades can be submitted.
+        """Finalize secondary tiers once no more cascades can be submitted.
 
-        Finalization means forwarding on_request_finished() to secondary tiers.
-        It is delayed until pending GPU->primary stores finish, since their
-        complete_store() callbacks may still submit primary->secondary stores.
+        Their finalization is delayed until pending GPU->primary stores
+        finish, since those callbacks may still submit secondary stores.
         """
         state = self._req_state[req_id]
         if not state.is_finished:
@@ -800,6 +874,7 @@ class TieringOffloadingManager(OffloadingManager):
                 continue
             tier.on_request_finished(state.req_context)
         self._metrics.on_request_finished(state.req_context)
+        self._request_load_sources.pop(req_id, None)
         del self._req_state[req_id]
 
     @override
@@ -850,6 +925,7 @@ class TieringOffloadingManager(OffloadingManager):
 
         Yields:
             New OffloadingEvents collected by each tier since the last call.
+
         """
         yield from self.primary_tier.take_events()
         for tier in self.secondary_tiers:
@@ -881,6 +957,7 @@ class TieringOffloadingManager(OffloadingManager):
         # reset below invalidates; their submit_load() has not yet been
         # called so no tier I/O is touching that memory.
         self._pending_load_submissions.clear()
+        self._request_load_sources.clear()
         self._metrics.assert_idle()
 
         finished_req_ids = []
@@ -900,6 +977,10 @@ class TieringOffloadingManager(OffloadingManager):
             del self._req_state[req_id]
         self._processed_jobs_this_step = False
 
+        for tier in self.secondary_tiers:
+            if tier.bp_detector is not None:
+                tier.bp_detector.reset()
+
     @override
     def get_stats(self) -> OffloadingConnectorStats | None:
         stats = self.primary_tier.get_stats()
@@ -907,6 +988,7 @@ class TieringOffloadingManager(OffloadingManager):
         if stats is not None and stats.is_empty():
             stats = None
 
+        self._metrics.record_backpressure(self.secondary_tiers)
         metrics_stats = self._metrics.take_stats()
         if metrics_stats is not None:
             if stats is None:

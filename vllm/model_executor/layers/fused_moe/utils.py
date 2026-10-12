@@ -69,6 +69,7 @@ def resolve_layer_fused_shared_expert(
 
     Raises:
         ValueError: If requested shared-expert fusion is quantization-incompatible.
+
     """
     # NOTE: is_fusion_moe_shared_experts_enabled is decorated with @if_aiter_supported
     # that returns None if AITER is not available.
@@ -83,6 +84,40 @@ def resolve_layer_fused_shared_expert(
         else (True, None)
     )
     is_fused_shared_expert_enabled = fse_requested and fse_compatible
+
+    # In online shared_expert quantization is used, register it to
+    # `online_quantization_config.quantized_layers` ahead of weight loading.
+    if is_fused_shared_expert_enabled and quant_config is not None:
+        online_quantization_config = quant_config.online_quantization_config
+        if online_quantization_config is not None:
+            from vllm.model_executor.layers.linear import (
+                LinearBase,
+                UnquantizedLinearMethod,
+            )
+
+            for projection_name in ("gate_up_proj", "down_proj"):
+                projection_prefix = f"{prefix}.{shared_expert_name}.{projection_name}"
+                quant_method_metadata = (
+                    online_quantization_config.resolve_quant_method_cls(
+                        LinearBase, projection_prefix
+                    )
+                )
+
+                if quant_method_metadata is None:
+                    continue
+
+                source, quant_key_str, target_pattern, _, quant_method_cls = (
+                    quant_method_metadata
+                )
+
+                if quant_method_cls in (None, UnquantizedLinearMethod):
+                    continue
+
+                online_quantization_config.quantized_layers[projection_prefix] = (
+                    source.value,
+                    quant_key_str,
+                    target_pattern,
+                )
     if fse_requested and not is_fused_shared_expert_enabled:
         logger.warning(
             "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS is enabled but "
@@ -164,20 +199,19 @@ def _count_expert_num_tokens(
 def count_expert_num_tokens(
     topk_ids: torch.Tensor, num_local_experts: int, expert_map: torch.Tensor | None
 ) -> torch.Tensor:
-    """
-    Count the number to tokens assigned to each expert.
+    """Count the number to tokens assigned to each expert.
 
-    Parameters:
-    - topk_ids (torch.Tensor): Tensor mapping each token to its
-    list of experts.
-    - num_local_experts (int): Number of experts in this rank.
-    - expert_map (Optional[torch.Tensor]):  A tensor mapping expert indices
-    from the global expert space to the local expert space of the expert
-    parallel shard.
+    Args:
+        topk_ids (torch.Tensor): Tensor mapping each token to its list of experts.
+        num_local_experts (int): Number of experts in this rank.
+        expert_map (Optional[torch.Tensor]):  A tensor mapping expert indices
+            from the global expert space to the local expert space of the expert
+            parallel shard.
 
     Returns:
     A tensor of size num_local_experts, where tensor[i] holds the number
     of tokens assigned to the ith expert.
+
     """
     assert topk_ids.dtype.is_signed, "The kernel uses -1 to represent invalid topk_ids"
     expert_num_tokens = torch.empty(
@@ -201,9 +235,75 @@ def count_expert_num_tokens(
     return expert_num_tokens
 
 
-def _resize_cache(x: torch.Tensor, v: tuple[int, ...]) -> torch.Tensor:
+@triton.jit
+def _remap_topk_to_local_kernel(
+    topk_ids_ptr,  # [n] global expert IDs (-1 = invalid)
+    expert_map_ptr,  # [num_experts] global->local (-1 for non-local)
+    out_ptr,  # [n] local expert IDs (-1 for invalid/non-local)
+    n_elements,
+    BLOCK: tl.constexpr,
+    OUT_INT32: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    offs = pid * BLOCK + tl.arange(0, BLOCK)
+    mask = offs < n_elements
+    tid = tl.load(topk_ids_ptr + offs, mask=mask, other=-1)
+    # Gather expert_map[tid] for valid (tid >= 0); clamp the index so invalid
+    # rows don't read OOB, then select -1 for them. Matches
+    # torch.where(tid >= 0, expert_map[clamp(tid, 0)], -1) -- preserving -1 (a
+    # plain expert_map[-1] would wrap to a valid local id and misroute).
+    valid = tid >= 0
+    idx = tl.where(valid, tid, 0)
+    local = tl.load(expert_map_ptr + idx, mask=mask, other=-1)
+    if OUT_INT32:
+        out = tl.where(valid, local, -1)
+    else:
+        out = tl.where(valid, local.to(tl.int64), -1)
+    tl.store(out_ptr + offs, out, mask=mask)
+
+
+def remap_topk_to_local(
+    topk_ids: torch.Tensor,
+    expert_map: torch.Tensor,
+    *,
+    out_dtype: torch.dtype = torch.int64,
+) -> torch.Tensor:
+    """Map global expert ids to local ids; non-local or invalid routes become -1.
+
+    Replaces ``torch.where(topk_ids >= 0, expert_map[topk_ids.clamp(min=0)], -1)``
+    with one kernel. Returns a NEW tensor -- the caller keeps the original
+    ``topk_ids`` as ``global_topk_ids``, so this must not write in place.
+
+    Args:
+        topk_ids: Global expert ids; -1 marks invalid slots. Must be contiguous;
+            the Triton kernel indexes by flat ``numel()`` offsets.
+        expert_map: Global-to-local mapping; -1 marks non-local experts.
+        out_dtype: Output dtype, ``torch.int32`` or ``torch.int64``.
+
+    Returns:
+        Remapped local expert ids with the same shape as ``topk_ids``.
+
     """
-    Shrink the given tensor and apply the given view to it.  This is
+    if out_dtype not in (torch.int32, torch.int64):
+        raise ValueError(f"out_dtype must be int32 or int64, got {out_dtype}")
+    assert topk_ids.is_contiguous()
+    out = torch.empty(topk_ids.shape, dtype=out_dtype, device=topk_ids.device)
+    n = topk_ids.numel()
+    BLOCK = 1024
+    grid = (triton.cdiv(n, BLOCK),)
+    _remap_topk_to_local_kernel[grid](
+        topk_ids,
+        expert_map,
+        out,
+        n,
+        BLOCK=BLOCK,
+        OUT_INT32=out_dtype == torch.int32,
+    )
+    return out
+
+
+def _resize_cache(x: torch.Tensor, v: tuple[int, ...]) -> torch.Tensor:
+    """Shrink the given tensor and apply the given view to it.  This is
     used to resize the intermediate fused_moe caches.
     """
     assert prod(v) <= x.numel(), (
@@ -226,8 +326,7 @@ def _fp8_quantize(
     per_act_token: bool,
     block_shape: list[int] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    Perform fp8 quantization on the inputs.  If a block_shape
+    """Perform fp8 quantization on the inputs.  If a block_shape
     is provided, the output will be blocked.
     """
     if block_shape is None:
@@ -252,11 +351,9 @@ def _int8_quantize(
     per_act_token: bool,
     block_shape: list[int] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    Perform int8 quantization on the inputs.  If a block_shape
+    """Perform int8 quantization on the inputs.  If a block_shape
     is provided, the output will be blocked.
     """
-
     # If weights are per-channel (per_channel_quant=True), then
     # activations apply per-token quantization. Otherwise, assume
     # activation tensor-wise fp8/int8 quantization, dynamic or static
@@ -455,35 +552,6 @@ def normalize_batched_scales_shape(
             scales = scales.view(num_experts, -1, scales.size(-1))
 
     return scales
-
-
-@triton.jit
-def _pack_topk_ids_weights_kernel(
-    topk_ids_ptr,
-    topk_weights_ptr,
-    output_ptr,
-    n_elements,
-    BLOCK_SIZE: tl.constexpr,
-    USE_GDC: tl.constexpr,
-    launch_pdl: tl.constexpr,  # triton metadata
-):
-    pid = tl.program_id(axis=0)
-    offsets = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-    mask = offsets < n_elements
-    if USE_GDC:
-        tl.extra.cuda.gdc_launch_dependents()
-        tl.extra.cuda.gdc_wait()
-    expert_id = tl.load(topk_ids_ptr + offsets, mask=mask, other=0).to(tl.int32)
-    expert_id_shifted = expert_id << 16
-
-    weight = tl.load(topk_weights_ptr + offsets, mask=mask, other=0.0)
-    weight_bf16 = weight.to(tl.bfloat16)
-    weight_int16 = weight_bf16.to(tl.int16, bitcast=True)
-
-    weight_int32 = weight_int16.to(tl.int32) & 0xFFFF
-
-    packed = expert_id_shifted | weight_int32
-    tl.store(output_ptr + offsets, packed, mask=mask)
 
 
 def fi_moe_largest_bucket(moe_config: "FusedMoEConfig") -> int:

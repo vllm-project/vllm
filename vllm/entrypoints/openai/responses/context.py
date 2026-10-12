@@ -21,10 +21,6 @@ from openai.types.responses.tool import Mcp
 from openai_harmony import Author, Message, Role, TextContent
 
 from vllm import envs
-from vllm.entrypoints.chat_utils import (
-    ChatTemplateContentFormatOption,
-)
-from vllm.entrypoints.generate.base.protocol import FunctionCall
 from vllm.entrypoints.mcp.tool import Tool
 from vllm.entrypoints.mcp.tool_server import ToolServer
 from vllm.entrypoints.openai.parser.harmony_utils import render_for_completion
@@ -37,13 +33,21 @@ from vllm.entrypoints.openai.responses.utils import (
     build_response_output_items,
     construct_tool_dicts,
 )
+from vllm.entrypoints.serve.utils.tool_calls_utils import (
+    maybe_filter_parallel_tool_calls,
+)
 from vllm.outputs import RequestOutput
 from vllm.parser.abstract_parser import Parser
+from vllm.renderers.chat_utils import (
+    ChatTemplateContentFormatOption,
+)
 from vllm.tokenizers import TokenizerLike
 from vllm.utils import random_uuid
 
 if TYPE_CHECKING:
     from mcp.client import ClientSession
+
+    from vllm.v1.metrics.stats import RequestStateStats
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +106,11 @@ class TurnMetrics:
 
 class ConversationContext(ABC):
     response_parser: Parser | None = None
+    request_metrics: "RequestStateStats | None" = None
+    # Built-in tools can trigger additional model generations. In that case,
+    # the stored engine timestamps cover only one turn, while token usage is
+    # accumulated across all turns.
+    request_metrics_cover_all_generation_turns: bool = True
 
     @abstractmethod
     def append_output(self, output: RequestOutput) -> None:
@@ -141,9 +150,7 @@ class ConversationContext(ABC):
 def _create_json_parse_error_messages(
     last_msg: Message, e: json.JSONDecodeError
 ) -> list[Message]:
-    """
-    Creates an error message when json parse failed.
-    """
+    """Creates an error message when json parse failed."""
     error_msg = (
         f"Error parsing tool arguments as JSON: {str(e)}. "
         "Please ensure the tool call arguments are valid JSON and try again."
@@ -161,7 +168,7 @@ def _create_json_parse_error_messages(
 
 
 class SimpleContext(ConversationContext):
-    """This is a context that cannot handle MCP tool calls"""
+    """This is a context that cannot handle MCP tool calls."""
 
     def __init__(
         self,
@@ -187,10 +194,14 @@ class SimpleContext(ConversationContext):
         self._accumulated_text: str = ""
         self._accumulated_token_ids: list[int] = []
         self._accumulated_logprobs: list = []
+        # Items already sent as output_item.done events; the final
+        # streaming response reuses them instead of reparsing.
+        self.streamed_output_items: list[ResponseOutputItem] | None = None
 
         self.num_prompt_tokens = 0
         self.num_output_tokens = 0
         self.num_cached_tokens = 0
+        self.num_cache_creation_tokens = 0
         # todo num_reasoning_tokens is not implemented yet.
         self.num_reasoning_tokens = 0
         # not implemented yet for SimpleContext
@@ -206,6 +217,8 @@ class SimpleContext(ConversationContext):
             raise ValueError("SimpleContext only supports RequestOutput.")
         self.num_prompt_tokens = len(output.prompt_token_ids or [])
         self.num_cached_tokens = output.num_cached_tokens or 0
+        if output.num_cache_creation_tokens is not None:
+            self.num_cache_creation_tokens = output.num_cache_creation_tokens
         self.num_output_tokens += len(output.outputs[0].token_ids or [])
         if output.kv_transfer_params is not None:
             self.kv_transfer_params = output.kv_transfer_params
@@ -302,6 +315,7 @@ class ParsableContext(ConversationContext):
         self.num_prompt_tokens = 0
         self.num_output_tokens = 0
         self.num_cached_tokens = 0
+        self.num_cache_creation_tokens = 0
         self.num_reasoning_tokens = 0
         # not implemented yet for ParsableContext
         self.all_turn_metrics: list[TurnMetrics] = []
@@ -334,6 +348,7 @@ class ParsableContext(ConversationContext):
     def append_output(self, output: RequestOutput) -> None:
         self.num_prompt_tokens = len(output.prompt_token_ids or [])
         self.num_cached_tokens = output.num_cached_tokens or 0
+        self.num_cache_creation_tokens += output.num_cache_creation_tokens or 0
         self.num_output_tokens += len(output.outputs[0].token_ids or [])
         if output.kv_transfer_params is not None:
             self.kv_transfer_params = output.kv_transfer_params
@@ -351,13 +366,19 @@ class ParsableContext(ConversationContext):
                 enable_auto_tools=self.enable_auto_tools,
                 model_output_token_ids=completion.token_ids,
             )
+            # Each round is a separate generation, so count it on its own ids.
+            self.num_reasoning_tokens += self.response_parser.count_reasoning_tokens(
+                completion.token_ids or []
+            )
             if not self.request.include_reasoning:
                 reasoning = None
             self.response_messages.extend(
                 build_response_output_items(
                     reasoning=reasoning,
                     content=content,
-                    tool_calls=tool_calls,
+                    tool_calls=maybe_filter_parallel_tool_calls(
+                        tool_calls or [], self.request
+                    ),
                     tools=self.request.tools,
                 )
             )
@@ -423,7 +444,9 @@ class ParsableContext(ConversationContext):
         return False
 
     async def call_python_tool(
-        self, tool_session: Union["ClientSession", Tool], last_msg: FunctionCall
+        self,
+        tool_session: Union["ClientSession", Tool],
+        last_msg: ResponseFunctionToolCall,
     ) -> list[ResponseInputOutputItem]:
         self.called_tools.add("python")
         if isinstance(tool_session, Tool):
@@ -438,7 +461,7 @@ class ParsableContext(ConversationContext):
         message = ResponseFunctionToolCallOutputItem(
             id=f"mcpo_{random_uuid()}",
             type="function_call_output",
-            call_id=f"call_{random_uuid()}",
+            call_id=last_msg.call_id,
             output=result_str,
             status="completed",
         )
@@ -446,7 +469,9 @@ class ParsableContext(ConversationContext):
         return [message]
 
     async def call_search_tool(
-        self, tool_session: Union["ClientSession", Tool], last_msg: FunctionCall
+        self,
+        tool_session: Union["ClientSession", Tool],
+        last_msg: ResponseFunctionToolCall,
     ) -> list[ResponseInputOutputItem]:
         self.called_tools.add("browser")
         if isinstance(tool_session, Tool):
@@ -464,7 +489,7 @@ class ParsableContext(ConversationContext):
         message = ResponseFunctionToolCallOutputItem(
             id=f"fco_{random_uuid()}",
             type="function_call_output",
-            call_id=f"call_{random_uuid()}",
+            call_id=last_msg.call_id,
             output=result_str,
             status="completed",
         )
@@ -472,10 +497,11 @@ class ParsableContext(ConversationContext):
         return [message]
 
     async def call_container_tool(
-        self, tool_session: Union["ClientSession", Tool], last_msg: Message
-    ) -> list[Message]:
-        """
-        Call container tool. Expect this to be run in a stateful docker
+        self,
+        tool_session: Union["ClientSession", Tool],
+        last_msg: ResponseFunctionToolCall,
+    ) -> list[ResponseInputOutputItem]:
+        """Call container tool. Expect this to be run in a stateful docker
         with command line terminal.
         The official container tool would at least
         expect the following format:
@@ -507,7 +533,7 @@ class ParsableContext(ConversationContext):
         message = ResponseFunctionToolCallOutputItem(
             id=f"fco_{random_uuid()}",
             type="function_call_output",
-            call_id=f"call_{random_uuid()}",
+            call_id=last_msg.call_id,
             output=result_str,
             status="completed",
         )
@@ -565,6 +591,7 @@ class ParsableContext(ConversationContext):
         mcp_tools: dict[str, Mcp],
     ):
         if tool_server:
+            initialized_session = False
             for tool_name in self.available_tools:
                 if tool_name in self._tool_sessions:
                     continue
@@ -577,10 +604,12 @@ class ParsableContext(ConversationContext):
                     tool_server.new_session(tool_name, request_id, headers)
                 )
                 self._tool_sessions[tool_name] = tool_session
+                initialized_session = True
+            if initialized_session:
                 exit_stack.push_async_exit(self.cleanup_session)
 
     async def cleanup_session(self, *args, **kwargs) -> None:
-        """Can be used as coro to used in __aexit__"""
+        """Can be used as coro to used in __aexit__."""
 
         async def cleanup_tool_session(tool_session):
             if not isinstance(tool_session, Tool):
@@ -605,12 +634,14 @@ class HarmonyContext(ConversationContext):
         available_tools: list[str],
         function_tool_names: frozenset[str],
         response_parser: Parser | None = None,
+        request: ResponsesRequest | None = None,
     ):
         from vllm.parser.harmony import HarmonyParser, Segment
 
         assert isinstance(response_parser, HarmonyParser)
 
         self._messages = messages
+        self.request = request
         self.response_parser: HarmonyParser = response_parser
         self.finish_reason: str | None = None
         self.available_tools = available_tools
@@ -622,11 +653,17 @@ class HarmonyContext(ConversationContext):
         self.num_prompt_tokens = 0
         self.num_output_tokens = 0
         self.num_cached_tokens = 0
+        self.num_cache_creation_tokens = 0
         self.num_reasoning_tokens = 0
         self.num_tool_output_tokens = 0
 
         self.last_append_segments: list[Segment] = []
         self.last_append_flush_status: bool = False
+        # Each completed message with the items sent for it in
+        # output_item.done events, so the final response can reuse their ids.
+        self.streamed_items_by_message: list[
+            tuple[Message, list[ResponseOutputItem]]
+        ] = []
 
         # Turn tracking - replaces multiple individual tracking variables
         self.current_turn_metrics = TurnMetrics()
@@ -690,6 +727,7 @@ class HarmonyContext(ConversationContext):
 
         Args:
             output: The RequestOutput containing prompt token information
+
         """
         if output.prompt_token_ids is not None:
             this_turn_input_tokens = len(output.prompt_token_ids)
@@ -738,6 +776,8 @@ class HarmonyContext(ConversationContext):
             self.num_cached_tokens += num_cached_token
             self.current_turn_metrics.cached_input_tokens = num_cached_token
 
+        self.num_cache_creation_tokens += output.num_cache_creation_tokens or 0
+
     def _update_decode_token_usage(self, output: RequestOutput) -> int:
         """Update token usage statistics for the decode phase of generation.
 
@@ -754,6 +794,7 @@ class HarmonyContext(ConversationContext):
 
         Returns:
             int: Number of output tokens processed in this call
+
         """
         updated_output_token_count = 0
         if output.outputs:
@@ -863,6 +904,7 @@ class HarmonyContext(ConversationContext):
         mcp_tools: dict[str, Mcp],
     ):
         if tool_server:
+            initialized_session = False
             for tool_name in self.available_tools:
                 if tool_name not in self._tool_sessions:
                     tool_type = _map_tool_name_to_tool_type(tool_name)
@@ -873,13 +915,14 @@ class HarmonyContext(ConversationContext):
                         tool_server.new_session(tool_name, request_id, headers)
                     )
                     self._tool_sessions[tool_name] = tool_session
-                    exit_stack.push_async_exit(self.cleanup_session)
+                    initialized_session = True
+            if initialized_session:
+                exit_stack.push_async_exit(self.cleanup_session)
 
     async def call_container_tool(
         self, tool_session: Union["ClientSession", Tool], last_msg: Message
     ) -> list[Message]:
-        """
-        Call container tool. Expect this to be run in a stateful docker
+        """Call container tool. Expect this to be run in a stateful docker
         with command line terminal.
         The official container tool would at least
         expect the following format:
@@ -919,7 +962,7 @@ class HarmonyContext(ConversationContext):
         ]
 
     async def cleanup_session(self, *args, **kwargs) -> None:
-        """Can be used as coro to used in __aexit__"""
+        """Can be used as coro to used in __aexit__."""
 
         async def cleanup_tool_session(tool_session):
             if not isinstance(tool_session, Tool):

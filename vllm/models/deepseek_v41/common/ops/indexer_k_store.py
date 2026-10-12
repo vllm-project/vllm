@@ -46,11 +46,13 @@ def indexer_k_norm_rope_store(
         cos_sin_cache: [max_pos, rope_head_dim] GPT-J layout (cos half, then
             sin half), from the layer's compress-RoPE instance.
         rms_norm_weight: [128] k_norm weight.
+        rms_norm_eps: Epsilon of the k_norm RMSNorm.
         k_cache: uint8 paged indexer cache [num_blocks, block_size, row_bytes].
         kv_slot_mapping: [num_tokens] slots in the indexer cache (-1 = skip).
         compress_ratio: group size; keys are emitted at group boundaries.
         use_fp4_cache: MXFP4 (2 nibbles/byte + ue8m0 per 32) when True, else
             per-token FP8 with a single fp32 scale.
+
     """
     num_tokens = kv_slot_mapping.numel()
     assert k_pre.ndim == 2 and k_pre.shape[1] == 128

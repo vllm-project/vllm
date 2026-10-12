@@ -2,9 +2,13 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 use std::collections::HashMap;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use axum::BoxError;
 use axum::http::HeaderMap;
+use axum::response::sse::{Event, KeepAlive, Sse};
+use axum::response::{IntoResponse, Response};
+use futures::Stream;
 use serde_json::Value;
 use thiserror_ext::AsReport;
 use uuid::Uuid;
@@ -25,6 +29,27 @@ pub fn unix_timestamp() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs())
         .unwrap_or_default()
+}
+
+/// Build a streaming SSE response, optionally sending keep-alive comments
+/// while the stream is idle.
+///
+/// With `keep_alive_interval` set, a `: keep-alive` comment is sent whenever no
+/// event has been produced for that long (queued, prefill, between tokens, or
+/// while a parser buffers a long tool call). SSE parsers ignore comments, but
+/// they still count as bytes for read timeouts in reverse proxies and clients.
+pub fn sse_response<S, E>(stream: S, keep_alive_interval: Option<Duration>) -> Response
+where
+    S: Stream<Item = Result<Event, E>> + Send + 'static,
+    E: Into<BoxError>,
+{
+    let sse = Sse::new(stream);
+    match keep_alive_interval {
+        Some(interval) => sse
+            .keep_alive(KeepAlive::new().interval(interval).text("keep-alive"))
+            .into_response(),
+        None => sse.into_response(),
+    }
 }
 
 /// Construct an API error for a failed utility call to the engine core.
@@ -156,4 +181,85 @@ pub fn resolve_base_request_id(
         id.truncate(8);
         id
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::convert::Infallible;
+
+    use futures::{StreamExt as _, stream};
+    use tokio::time::{Instant, sleep};
+
+    use super::*;
+
+    /// Collect `(elapsed seconds, frame)` pairs from a response whose event
+    /// stream idles for 20 seconds between its two events.
+    async fn idle_stream_frames(keep_alive_interval: Option<Duration>) -> Vec<(u64, String)> {
+        let events = stream::iter([Ok::<_, Infallible>(Event::default().data("first"))]).chain(
+            stream::once(async {
+                sleep(Duration::from_secs(20)).await;
+                Ok(Event::default().data("second"))
+            }),
+        );
+        let start = Instant::now();
+        sse_response(events, keep_alive_interval)
+            .into_body()
+            .into_data_stream()
+            .map(|frame| {
+                let frame = frame.expect("read frame");
+                (
+                    start.elapsed().as_secs(),
+                    String::from_utf8(frame.to_vec()).expect("utf-8 frame"),
+                )
+            })
+            .collect()
+            .await
+    }
+
+    /// An idle gap is filled with `: keep-alive` comments at the configured
+    /// interval, and real events still pass through in order.
+    #[tokio::test(start_paused = true)]
+    async fn sse_response_sends_keep_alive_comments_while_idle() {
+        let frames = idle_stream_frames(Some(Duration::from_secs(8))).await;
+        expect_test::expect![[r#"
+            [
+                (
+                    0,
+                    "data: first\n\n",
+                ),
+                (
+                    8,
+                    ": keep-alive\n\n",
+                ),
+                (
+                    16,
+                    ": keep-alive\n\n",
+                ),
+                (
+                    20,
+                    "data: second\n\n",
+                ),
+            ]
+        "#]]
+        .assert_debug_eq(&frames);
+    }
+
+    /// Without an interval, an idle gap produces no extra bytes.
+    #[tokio::test(start_paused = true)]
+    async fn sse_response_without_keep_alive_interval_sends_no_comments() {
+        let frames = idle_stream_frames(None).await;
+        expect_test::expect![[r#"
+            [
+                (
+                    0,
+                    "data: first\n\n",
+                ),
+                (
+                    20,
+                    "data: second\n\n",
+                ),
+            ]
+        "#]]
+        .assert_debug_eq(&frames);
+    }
 }

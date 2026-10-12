@@ -132,6 +132,26 @@ async def test_load(
         )
         after.callback(engine.shutdown)
 
+        # The first request an engine serves pays a few hundred milliseconds of
+        # one-off setup, and while it does the engine holds the requests already
+        # routed to it while reporting itself idle, which is enough to skew the
+        # split asserted on below. Pay it on every engine first, then measure.
+        await asyncio.gather(
+            *(
+                generate(
+                    engine,
+                    f"warmup-{rank}",
+                    prompt,
+                    output_kind,
+                    max_tokens=1,
+                    data_parallel_rank=rank,
+                )
+                for rank in range(DP_SIZE)
+            )
+        )
+        for sl in stats_loggers.values():
+            sl.finished_req_count = 0
+
         NUM_REQUESTS = 100
         NUM_EXPECTED_TOKENS = 10
 
@@ -493,7 +513,6 @@ async def test_dp_pause_abort(expert_parallel: bool):
 @pytest.mark.parametrize("expert_parallel", [False, True])
 async def test_dp_pause_keep_then_resume(expert_parallel: bool):
     """Start generation, pause after a few tokens (keep mode), resume; verify gap."""
-
     pause_duration = 2.0
     min_tokens_before_pause = 3
 
@@ -607,8 +626,7 @@ async def test_dp_pause_keep_race_staggered_engines():
 
 @pytest.mark.asyncio
 async def test_dp_pause_barrier_request_deadlock():
-    """
-    Test that start_dp_wave is ignored while paused.
+    """Test that start_dp_wave is ignored while paused.
 
     Sequence:
       1. Pause all engines (PAUSED_ALL).
@@ -701,7 +719,7 @@ async def test_dp_pause_barrier_request_deadlock():
         # Drive the staggered barrier.  Old code deadlocks here.
         try:
             await asyncio.wait_for(client.call_utility_async("barrier"), timeout=30)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             for t in mid_barrier_tasks:
                 t.cancel()
             pytest.fail(
@@ -729,12 +747,13 @@ async def test_dp_pause_wait_mode_drains_in_flight():
             prompt=DP_PAUSE_PROMPT,
             params=SamplingParams(max_tokens=64),
         )
+        # Wait for the first output, so drain has something to observe: a
+        # request still queued holds no blocks and is not waited on.
+        out = await asyncio.wait_for(collector.get(), timeout=30)
         await engine.pause_generation(mode="wait")
         assert await engine.is_paused()
-        while True:
+        while not out.finished:
             out = await asyncio.wait_for(collector.get(), timeout=30)
-            if out.finished:
-                break
 
         await engine.resume_generation()
         async for out in engine.generate(

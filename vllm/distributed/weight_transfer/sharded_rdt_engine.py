@@ -66,6 +66,7 @@ from vllm.distributed.weight_transfer.sharded_rdt_common import (
     RdtRouter,
     buffer_alloc_bytes,
     check_ray_rdt_version,
+    register_nixl_memory,
 )
 from vllm.distributed.weight_transfer.sharded_rdt_fake import (
     BakeSink,
@@ -588,8 +589,6 @@ class ShardedRDTWeightTransferEngine(
         plan = self._cached_plan
         if plan is None or not plan.chunks:
             return
-        from ray.experimental import register_nixl_memory
-
         # (a) consumer receive buffers — one per ring slot, at the largest chunk.
         max_pack = max(c.pack_bytes for c in plan.chunks)
         alloc = buffer_alloc_bytes(max_pack, self._buffer_presize)
@@ -740,7 +739,7 @@ class ShardedRDTWeightTransferEngine(
         any time after the metadata push. See the doc's "slot generation
         handshake".
         """
-        from ray.experimental import register_nixl_memory, set_target_for_ref
+        from ray.experimental import set_target_for_ref
 
         if self._slot_read_done:
             with self._slot_cv:
