@@ -359,21 +359,53 @@ def test_per_token_fp8_config_respects_device_dtype_and_measured_m(
     module.get_w8a8_per_token_fp8_configs.cache_clear()
 
 
-@pytest.mark.parametrize("platform", ["cuda", "rocm", "xpu", "cpu"])
-def test_triton_fp8_per_token_support_matches_block_scaled(monkeypatch, platform):
+@pytest.mark.parametrize("platform", ["cuda", "rocm", "xpu", "oot"])
+@pytest.mark.parametrize("supports_fp8", [False, True])
+def test_triton_fp8_per_token_selection_requires_fp8(
+    monkeypatch, platform, supports_fp8
+):
+    """Selection requires FP8 capability regardless of the platform vendor."""
+    from vllm.model_executor.kernels import linear
     from vllm.model_executor.kernels.linear.scaled_mm import triton as module
+    from vllm.model_executor.kernels.linear.scaled_mm.ScaledMMLinearKernel import (
+        FP8ScaledMMLinearLayerConfig,
+    )
+    from vllm.model_executor.layers.quantization.utils.quant_utils import (
+        kFp8DynamicTokenSym,
+        kFp8StaticChannelSym,
+    )
+    from vllm.platforms import PlatformEnum
 
-    monkeypatch.setattr(
-        module,
-        "current_platform",
-        SimpleNamespace(
-            is_cuda_alike=lambda: platform in ("cuda", "rocm"),
-            is_xpu=lambda: platform == "xpu",
-        ),
+    platform_mock = SimpleNamespace(
+        _enum=PlatformEnum[platform.upper()],
+        supports_fp8=lambda: supports_fp8,
+        is_cuda_alike=lambda: platform in ("cuda", "rocm"),
+        is_xpu=lambda: platform == "xpu",
     )
-    assert module.TritonFp8PerTokenScaledMMKernel.is_supported() == (
-        module.TritonFp8BlockScaledMMKernel.is_supported()
+    monkeypatch.setattr(module, "current_platform", platform_mock)
+    monkeypatch.setattr(linear, "current_platform", platform_mock)
+    monkeypatch.setenv("VLLM_DISABLED_KERNELS", "")
+    config = FP8ScaledMMLinearLayerConfig(
+        weight_quant_key=kFp8StaticChannelSym,
+        activation_quant_key=kFp8DynamicTokenSym,
+        weight_shape=(256, 128),
+        input_dtype=torch.bfloat16,
+        out_dtype=torch.bfloat16,
     )
+    kernel = module.TritonFp8PerTokenScaledMMKernel
+    try:
+        selected = linear.choose_scaled_mm_linear_kernel(
+            config,
+            {platform_mock._enum: [kernel]},
+            compute_capability=90,
+            quantization="fp8_w8a8",
+        )
+    except ValueError as exc:
+        assert not supports_fp8
+        assert "requires FP8 support" in str(exc)
+    else:
+        assert supports_fp8
+        assert selected is kernel
 
 
 @pytest.mark.parametrize("backend", ["auto", "triton", "torch"])

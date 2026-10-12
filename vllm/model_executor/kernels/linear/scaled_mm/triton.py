@@ -37,8 +37,8 @@ class TritonFp8PerTokenScaledMMKernel(FP8ScaledMMLinearKernel):
     def is_supported(
         cls, compute_capability: int | None = None
     ) -> tuple[bool, str | None]:
-        if not (current_platform.is_cuda_alike() or current_platform.is_xpu()):
-            return False, "only CUDA-alike and XPU devices are supported."
+        if not current_platform.supports_fp8():
+            return False, "requires FP8 support."
         return True, None
 
     @classmethod
