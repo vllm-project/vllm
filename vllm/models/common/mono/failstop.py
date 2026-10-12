@@ -9,7 +9,9 @@ like on any other engine death, and the deployment's restart policy recovers
 it. ``VLLM_MONO_UNSAFE_WARN=1`` (tests and benchmarks only, no CLI flag) logs
 the incident and keeps serving instead.
 
-Counters: steps on the kernels, steps on vLLM's path by reason, incidents.
+Counters (``drain``, exported as ``vllm:monokernel_steps`` and
+``vllm:monokernel_incidents``): steps on the kernels, steps on vLLM's path by
+reason, and incidents by failed rank.
 """
 
 from collections import Counter
@@ -22,11 +24,23 @@ from vllm.logger import init_logger
 logger = init_logger(__name__)
 
 STEPS: Counter[tuple[str, str]] = Counter()  # (spec, "mono" or the no-go reason)
-INCIDENTS: Counter[str] = Counter()  # failed ranks, "rank r"
+INCIDENTS: Counter[str] = Counter()  # by failed TP rank
 
 
 def count_step(spec: str, why: str | None) -> None:
     STEPS[spec, why or "mono"] += 1
+
+
+def drain() -> dict[str, int] | None:
+    """The counts since the last drain: ``"steps:<spec>:<path>"`` (path "mono"
+    or the reason the step ran vLLM's layers) and ``"incidents:<rank>"``."""
+    if not STEPS and not INCIDENTS:
+        return None
+    out = {f"steps:{spec}:{path}": n for (spec, path), n in STEPS.items()}
+    out.update({f"incidents:{rank}": n for rank, n in INCIDENTS.items()})
+    STEPS.clear()
+    INCIDENTS.clear()
+    return out
 
 
 def check(words: torch.Tensor) -> None:
@@ -36,7 +50,7 @@ def check(words: torch.Tensor) -> None:
         return
     ranks = [r for r, w in enumerate(words.tolist()) if w]
     for r in ranks:
-        INCIDENTS[f"rank {r}"] += 1
+        INCIDENTS[str(r)] += 1
     msg = (
         f"MonoKernel step failed: TP ranks {ranks} gave up an in-kernel wait; "
         "the step's tokens are discarded"

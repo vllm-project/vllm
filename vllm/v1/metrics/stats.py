@@ -254,6 +254,9 @@ class SchedulerStats:
 
     perf_stats: PerfStats | None = None
 
+    # MonoKernel counters since the last stats (models.common.mono.failstop)
+    mono_kernel_stats: dict[str, int] | None = None
+
 
 @dataclass
 class RequestStateStats:

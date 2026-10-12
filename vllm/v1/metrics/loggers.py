@@ -590,6 +590,23 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                     gauge_kv_fetch_by_stage, per_engine_labelvalues_with_stage
                 )
 
+        self.counter_monokernel_steps = self._counter_cls(
+            name="vllm:monokernel_steps",
+            documentation=(
+                "Steps of a model with MonoKernels, by spec and path: 'mono' "
+                "ran on the kernels, any other path is the reason the step ran "
+                "vLLM's layers."
+            ),
+            labelnames=labelnames + ["spec", "path"],
+        )
+        self.counter_monokernel_incidents = self._counter_cls(
+            name="vllm:monokernel_incidents",
+            documentation=(
+                "MonoKernel steps that failed (an in-kernel wait gave up), by TP rank."
+            ),
+            labelnames=labelnames + ["rank"],
+        )
+
         gauge_engine_sleep_state = self._gauge_cls(
             name="vllm:engine_sleep_state",
             documentation=(
@@ -1206,6 +1223,15 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
 
             if scheduler_stats.perf_stats is not None:
                 self.perf_metrics_prom.observe(scheduler_stats.perf_stats, engine_idx)
+
+            for key, n in (scheduler_stats.mono_kernel_stats or {}).items():
+                kind, *labels = key.split(":")
+                counter = (
+                    self.counter_monokernel_steps
+                    if kind == "steps"
+                    else self.counter_monokernel_incidents
+                )
+                counter.labels(*labelvalues, *labels).inc(n)
 
             if (
                 self.kv_cache_metrics_enabled
