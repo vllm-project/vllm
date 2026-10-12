@@ -83,7 +83,9 @@ from vllm.lora.request import LoRARequest
 from vllm.outputs import CompletionOutput
 from vllm.parser import Parser, ParserManager
 from vllm.renderers import TokenizeParams
-from vllm.renderers.chat_utils import ChatTemplateContentFormatOption
+from vllm.renderers.chat_utils import (
+    ChatTemplateContentFormatOption,
+)
 from vllm.renderers.online_renderer import (
     OnlineRenderer,
     ResponsesPreviousMessages,
