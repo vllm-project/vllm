@@ -344,6 +344,7 @@ impl RequestRegistry {
             let output = EngineCoreStreamOutput {
                 engine_index: engine_id.engine_index().unwrap_or(0),
                 timestamp,
+                weight_version: None,
                 output: EngineCoreOutput {
                     request_id: request_id.clone(),
                     finish_reason: Some(EngineCoreFinishReason::Abort),
@@ -527,6 +528,7 @@ mod tests {
         EngineCoreStreamOutput {
             engine_index: 0,
             timestamp: 0.0,
+            weight_version: None,
             output,
         }
     }

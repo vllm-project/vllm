@@ -2884,6 +2884,9 @@ fn python_msgpack_fixtures_match_rust_encoding() {
                         "req-1",
                     },
                 ),
+                weight_version: Some(
+                    "v7",
+                ),
             },
         )
     "#]]

@@ -130,6 +130,7 @@ mod tests {
         EngineCoreStreamOutput {
             engine_index: 0,
             timestamp: 0.0,
+            weight_version: None,
             output: EngineCoreOutput {
                 request_id: "req".to_string(),
                 new_token_ids: token_ids.to_vec(),

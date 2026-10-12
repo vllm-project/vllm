@@ -24,6 +24,14 @@ use crate::error::Result;
 use crate::inflight::RequestGuard;
 use crate::request_metrics::{RequestMetricsTracker, current_unix_timestamp_secs};
 
+/// Output tokens `[start, end)` were sampled by weights labelled `version`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct WeightVersionSpan {
+    pub version: Arc<str>,
+    pub start: usize,
+    pub end: usize,
+}
+
 /// Token usage metadata for one request.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct TokenUsage {
@@ -55,6 +63,7 @@ pub struct CollectedGenerateOutput {
     pub sampling_mask: Option<SamplingMask>,
     /// Per-request speculative-decoding metrics from the terminal output.
     pub spec_decode_metrics: Option<RequestSpecDecodeMetrics>,
+    pub weight_versions: Option<Vec<WeightVersionSpan>>,
 }
 
 /// Prompt-scoped metadata emitted only once on the first [`GenerateOutput`] for
@@ -172,6 +181,8 @@ pub struct GenerateOutput {
     pub sampling_mask: Option<SamplingMask>,
     /// Per-request speculative-decoding metrics, present on terminal outputs.
     pub spec_decode_metrics: Option<Box<RequestSpecDecodeMetrics>>,
+    /// Weight-version spans over all output tokens, set on terminal outputs only.
+    pub weight_versions: Option<Vec<WeightVersionSpan>>,
 }
 
 impl GenerateOutput {
@@ -225,6 +236,7 @@ impl GenerateOutput {
         self.kv_transfer_params = next.kv_transfer_params;
         self.ec_transfer_params = next.ec_transfer_params;
         self.spec_decode_metrics = next.spec_decode_metrics;
+        self.weight_versions = next.weight_versions;
     }
 }
 
@@ -253,6 +265,7 @@ impl GenerateOutput {
             ec_transfer_params: None,
             sampling_mask: None,
             spec_decode_metrics: None,
+            weight_versions: None,
         }
     }
 }
@@ -267,6 +280,9 @@ pub struct GenerateOutputStream {
     pending_prompt_info: Option<Box<GeneratePromptInfo>>,
     raw_stream: EngineCoreOutputStream,
     request_metrics: RequestMetricsTracker,
+    /// (weight version, first output-token index) for each span.
+    weight_version_starts: Vec<(Arc<str>, usize)>,
+    num_output_tokens: usize,
     /// Removes this request's external→internal tracking edge on drop. Held for
     /// its `Drop` side effect only; never read directly.
     _request_guard: RequestGuard,
@@ -289,6 +305,8 @@ impl GenerateOutputStream {
             })),
             raw_stream,
             request_metrics,
+            weight_version_starts: Vec::new(),
+            num_output_tokens: 0,
             _request_guard: request_guard,
         }
     }
@@ -320,6 +338,15 @@ impl GenerateOutputStream {
     fn convert_output(&mut self, raw: EngineCoreStreamOutput) -> Result<GenerateOutput> {
         let received_at = current_unix_timestamp_secs();
         self.request_metrics.observe_output(raw.timestamp, received_at, &raw.output);
+        let num_new_tokens = raw.output.new_token_ids.len();
+        // Start a span when tokens arrive under a new label.
+        if num_new_tokens > 0
+            && let Some(version) = raw.weight_version
+            && self.weight_version_starts.last().is_none_or(|(last, _)| *last != version)
+        {
+            self.weight_version_starts.push((version, self.num_output_tokens));
+        }
+        self.num_output_tokens += num_new_tokens;
 
         let raw = raw.output;
 
@@ -357,6 +384,11 @@ impl GenerateOutputStream {
         if let Some(finish_reason) = finish_reason.as_ref() {
             self.request_metrics.record_finished(received_at, finish_reason.clone());
         }
+        let weight_versions = if finish_reason.is_some() {
+            self.weight_version_spans()
+        } else {
+            None
+        };
 
         let output = GenerateOutput {
             request_id: raw.request_id,
@@ -369,9 +401,30 @@ impl GenerateOutputStream {
             ec_transfer_params: raw.ec_transfer_params,
             sampling_mask,
             spec_decode_metrics: raw.spec_decode_metrics,
+            weight_versions,
         };
 
         Ok(output)
+    }
+
+    /// Spans over the output so far; `[]` for no tokens, `None` if no label was reported.
+    fn weight_version_spans(&self) -> Option<Vec<WeightVersionSpan>> {
+        let starts = &self.weight_version_starts;
+        if starts.is_empty() && self.num_output_tokens > 0 {
+            return None;
+        }
+        let ends = starts.iter().skip(1).map(|(_, start)| *start).chain([self.num_output_tokens]);
+        Some(
+            starts
+                .iter()
+                .zip(ends)
+                .map(|((version, start), end)| WeightVersionSpan {
+                    version: version.clone(),
+                    start: *start,
+                    end,
+                })
+                .collect(),
+        )
     }
 }
 
@@ -476,6 +529,7 @@ impl<T: Stream<Item = Result<GenerateOutput>> + Send> T {
                         ec_transfer_params: None,
                         sampling_mask,
                         spec_decode_metrics: None,
+                        weight_versions: None,
                     });
                 }
 
@@ -490,6 +544,7 @@ impl<T: Stream<Item = Result<GenerateOutput>> + Send> T {
                     collected.kv_transfer_params = output.kv_transfer_params.map(|value| *value);
                     collected.ec_transfer_params = output.ec_transfer_params.map(|value| *value);
                     collected.spec_decode_metrics = output.spec_decode_metrics.map(|value| *value);
+                    collected.weight_versions = output.weight_versions;
                     if let Some(mask) = collected.sampling_mask.as_ref()
                         && mask.rows.len() != collected.token_ids.len()
                     {
