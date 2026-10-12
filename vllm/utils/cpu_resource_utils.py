@@ -370,13 +370,13 @@ def _get_cpu_list() -> list[LogicalCPUInfo]:
         lscpu_output, object_hook=LogicalCPUInfo.json_decoder
     )["cpus"]
 
-    # Using lstopo output instead when memory nodes are specified by the env var CPU_VISIBLE_MEMORY_NODES
+    # Using hwloc output instead when memory nodes are specified by the env var CPU_VISIBLE_MEMORY_NODES
     if (
         "VLLM_CPU_SIM_MULTI_NUMA" not in os.environ
         and os.environ.get(DEVICE_CONTROL_ENV_VAR)
-        and shutil.which("lstopo") is not None
+        and shutil.which("hwloc-ls") is not None
     ):
-        lstopo_output = subprocess.check_output(["lstopo", "--of", "xml"], text=True)
+        lstopo_output = subprocess.check_output(["hwloc-ls", "--of", "xml"], text=True)
         root = ET.fromstring(lstopo_output)
         cpu_list = parse_hwloc_to_cpu_list(root)
         if cpu_list["cpus"]:
