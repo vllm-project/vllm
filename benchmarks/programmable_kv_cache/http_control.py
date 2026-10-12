@@ -209,6 +209,13 @@ def main():
         tokens,
         SamplingParams(max_tokens=16),
         None,
+        cache_salt=json.dumps(
+            [profile["request_cache_salt_prefix"], None],
+            separators=(",", ":"),
+            ensure_ascii=False,
+        )
+        if profile.get("request_cache_salt_prefix") is not None
+        else None,
         block_hasher=get_request_block_hasher(profile["hash_block_size"], hash_fn),
     )
     block_hash = request.block_hashes[end // profile["hash_block_size"] - 1].hex()
