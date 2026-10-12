@@ -957,6 +957,8 @@ def unified_attention(
     # more query rows per block + 8 warps is ~2x faster on B200.
     tuned_large_head = (
         head_size == 256
+        # Preserve batch invariance between single- and multi-query calls.
+        and not is_batch_invariant
         and max_seqlen_q > 1
         and num_queries_per_kv <= 16
         and current_platform.is_device_capability_family(100)
