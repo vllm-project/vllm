@@ -380,6 +380,9 @@ class ChunkGatedDeltaRule(CustomOp):
         vllm_config = get_current_vllm_config()
         backend, active_backend = _resolve_gdn_prefill_backend(vllm_config)
         self.gdn_prefill_backend = active_backend
+        # Whether the prefill kernel writes straight into a passed
+        # core_attn_out rather than copying its own output into it.
+        self.writes_output_in_place = active_backend in ("triton", "aiter_flydsl")
 
         if backend in ("flashinfer", "cutedsl") and active_backend != backend:
             logger.warning_once(
@@ -539,10 +542,8 @@ class ChunkGatedDeltaRule(CustomOp):
             cu_seqlens=cu_seqlens,
             aiter_prefill_metadata=aiter_prefill_metadata,
             use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
+            o=None if core_attn_out is None else core_attn_out.view(v.shape),
         )
-        if core_attn_out is not None:
-            o_flat = o.reshape(-1)
-            core_attn_out.reshape(-1)[: o_flat.numel()].copy_(o_flat)
         return o, final_state
 
 
@@ -1739,6 +1740,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             and attn_metadata.num_decodes > 0
         )
         num_decode_tokens = attn_metadata.num_decode_tokens
+        prefill_out: torch.Tensor | None = None
 
         if attn_metadata.num_prefills > 0:
             assert mixed_qkv_non_spec is not None, (
@@ -1842,7 +1844,6 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             core_attn_out_decode = None
 
         # 2.3: Process the remaining part (prefill chunk, or non-spec decode-only)
-        prefill_in_place = False
         if attn_metadata.num_prefills > 0:
             # State indices, initial-state mask and cu_seqlens for the chunk
             # kernel are precomputed by the metadata builder (the prefill tail
@@ -1873,10 +1874,17 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                         output=prefill_out,
                     )
                 )
-                prefill_in_place = prefill_out is not None
             else:
                 initial_state = ssm_state[prefill_state_indices]
                 initial_state[~prefill_has_initial_state, ...] = 0
+                # Without spec decode the prefill tokens are a contiguous range
+                # of core_attn_out, so the prefill kernel can write them in place.
+                if (
+                    spec_sequence_masks is None
+                    and self.chunk_gated_delta_rule.writes_output_in_place
+                ):
+                    prefill_start = num_decode_tokens if split_non_spec else 0
+                    prefill_out = core_attn_out[prefill_start:num_actual_tokens]
                 (
                     core_attn_out_non_spec,
                     last_recurrent_state,
@@ -1892,12 +1900,13 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                     chunk_indices=attn_metadata.chunk_indices,
                     chunk_offsets=attn_metadata.chunk_offsets,
                     use_qk_l2norm_in_kernel=False,
+                    core_attn_out=prefill_out,
                     aiter_prefill_metadata=attn_metadata.aiter_prefill_metadata,
                 )
             # Init cache
             ssm_state[prefill_state_indices] = last_recurrent_state.to(ssm_state.dtype)
 
-            if split_non_spec and prefill_in_place:
+            if split_non_spec and prefill_out is not None:
                 core_attn_out[:num_decode_tokens] = core_attn_out_decode.squeeze(0)
             elif split_non_spec:
                 # Stitch the peeled decode outputs in front of the prefill
@@ -1936,7 +1945,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             )
         elif spec_sequence_masks is not None:
             core_attn_out[:num_actual_tokens] = core_attn_out_spec.squeeze(0)
-        elif not prefill_in_place:
+        elif prefill_out is None:
             core_attn_out[:num_actual_tokens] = core_attn_out_non_spec.squeeze(0)
 
     def _forward_flashinfer_prefill(
