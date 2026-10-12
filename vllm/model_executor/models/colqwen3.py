@@ -134,6 +134,8 @@ class ColQwen3Model(Qwen3VLForConditionalGeneration, SupportsLateInteraction):
 
     # Mark this as a pooling model so vLLM routes to pooler path
     is_pooling_model = True
+    # Mark as false to avoid collision with the checkpoint's custom code path
+    supports_mm_device_do_normalize = False
 
     # Override hf_to_vllm_mapper to handle ColQwen3 weight naming.
     # NOTE: WeightsMapper applies ALL matching prefix rules sequentially

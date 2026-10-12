@@ -22,7 +22,11 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.sequence import IntermediateTensors
 
 from .step3p5 import Step3p5DecoderLayer
-from .utils import get_spec_layer_idx_from_weight_name, maybe_prefix
+from .utils import (
+    get_draft_quant_config,
+    get_spec_layer_idx_from_weight_name,
+    maybe_prefix,
+)
 
 logger = init_logger(__name__)
 
@@ -152,8 +156,19 @@ class Step3p5AMultiTokenPredictor(nn.Module):
 
 
 class Step3p5MTP(nn.Module):
+    # Each MTP layer's shared_head carries its own LM head weights.
+    has_own_lm_head = True
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+        # The target config may be a multimodal wrapper (Step3.7); build the
+        # draft from its own text and quant configs.
+        assert vllm_config.speculative_config is not None
+        draft_quant_config = get_draft_quant_config(vllm_config)
+        vllm_config = vllm_config.with_hf_config(
+            vllm_config.speculative_config.draft_model_config.hf_config
+        )
+        vllm_config.quant_config = draft_quant_config
         self.config = vllm_config.model_config.hf_config
         self.vllm_config = vllm_config
         self.model = Step3p5AMultiTokenPredictor(

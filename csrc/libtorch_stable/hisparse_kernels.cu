@@ -30,9 +30,7 @@
 namespace {
 
 constexpr int kWarpSize = 32;
-// Sentinel in the shared top-k scratch: entry already resolved (hit /
-// newest / invalid), no miss handling needed.
-constexpr int32_t kTokenDone = -1;
+// Empty key in the shared open-addressing table of host rows.
 constexpr int32_t kHashEmpty = -1;
 
 bool is_pinned_cpu_tensor(const torch::stable::Tensor& tensor) {
@@ -46,10 +44,15 @@ bool is_pinned_cpu_tensor(const torch::stable::Tensor& tensor) {
   return attributes.type == cudaMemoryTypeHost;
 }
 
-__device__ __forceinline__ int32_t hash_slot(int32_t key, int32_t hash_size) {
-  // Knuth multiplicative hash for the open-addressing table.
-  return static_cast<int32_t>((static_cast<uint32_t>(key) * 2654435761u) %
-                              static_cast<uint32_t>(hash_size));
+__device__ __forceinline__ int32_t hash_slot(int32_t key, int size) {
+  // Knuth multiplicative hash scaled onto [0, size) by a multiply-high, so
+  // the table can take any size without a division.
+  return static_cast<int32_t>(
+      __umulhi(static_cast<uint32_t>(key) * 2654435761u, size));
+}
+
+__device__ __forceinline__ int next_slot(int h, int size) {
+  return h + 1 == size ? 0 : h + 1;
 }
 
 // Copy one row of `row_bytes` bytes with a single warp. MLA rows take the
@@ -176,16 +179,117 @@ __device__ __forceinline__ void store_hot_index(
   }
 }
 
-// One block per batch row.
+// A union entry's value holds its first (row, top-k) position until phase 2
+// or 3 resolves it to a hot slot tagged with how it was resolved.
+constexpr int32_t kEntryHit = 1 << 30;
+constexpr int32_t kEntryMiss = 1 << 29;
+constexpr int32_t kEntryInvalid = 1 << 28;
+constexpr int32_t kEntrySlotMask = 0xFFFF;
+constexpr int kResidencyCounters = 5;
+// Per-request table entries per referenced top-k position (load <= 1/4
+// until the hash_size cap).
+constexpr int kHashLoadInverse = 4;
+
+// Translate a request-relative top-k position to its resident GPU row (-1 when
+// the page is not resident) and returns its host row (-1 when not host-backed).
+__device__ __forceinline__ int32_t translate_topk_entry(
+    const int32_t token_index, const int32_t request_row,
+    const int32_t state_row, const int32_t* __restrict__ source_block_table,
+    const int32_t* __restrict__ resident_block_table, const int64_t host_rows,
+    const int64_t source_bt_stride, const int32_t source_num_reqs,
+    const int32_t source_num_blocks, const int32_t source_block_size,
+    const int64_t resident_bt_stride, const int32_t resident_num_reqs,
+    const int32_t resident_num_blocks, const int32_t resident_block_size,
+    const int32_t resident_null_block, int32_t& resident_row) {
+  int32_t g = token_index;
+  resident_row = -1;
+  if (source_block_table != nullptr) {
+    const int32_t source_block =
+        token_index >= 0 ? token_index / source_block_size : -1;
+    if (request_row >= 0 && request_row < source_num_reqs &&
+        source_block >= 0 && source_block < source_num_blocks) {
+      const int32_t physical_block =
+          source_block_table[static_cast<int64_t>(request_row) *
+                                 source_bt_stride +
+                             source_block];
+      g = physical_block > 0 ? physical_block * source_block_size +
+                                   token_index % source_block_size
+                             : -1;
+    } else {
+      g = -1;
+    }
+    if (resident_block_table != nullptr) {
+      const int32_t resident_block =
+          token_index >= 0 ? token_index / resident_block_size : -1;
+      if (state_row >= 0 && state_row < resident_num_reqs &&
+          resident_block >= 0 && resident_block < resident_num_blocks) {
+        const int32_t physical_block =
+            resident_block_table[static_cast<int64_t>(state_row) *
+                                     resident_bt_stride +
+                                 resident_block];
+        if (physical_block != resident_null_block && physical_block >= 0) {
+          resident_row = physical_block * resident_block_size +
+                         token_index % resident_block_size;
+        }
+      }
+    }
+  }
+  return g >= host_rows ? -1 : g;
+}
+
+// Write the hot index of one reference to a resolved union entry and tally it.
+__device__ __forceinline__ void write_entry_index(
+    const int32_t entry, const int row, const int i, const int32_t top_k,
+    int32_t* __restrict__ hot_indices, int32_t* __restrict__ attention_indices,
+    const int64_t attention_row_stride, int32_t* __restrict__ miss_mask,
+    const int32_t* __restrict__ hot_block_table, const int request_row,
+    const int64_t hot_table_stride, const int32_t hot_block_size,
+    const int64_t attention_block_stride, const bool first_reference, int& hits,
+    int& misses) {
+  int32_t* row_out = hot_indices + static_cast<int64_t>(row) * top_k;
+  int32_t* row_attention =
+      attention_indices != nullptr
+          ? attention_indices + static_cast<int64_t>(row) * attention_row_stride
+          : nullptr;
+  if (entry & kEntryInvalid) {
+    store_hot_index(row_out, row_attention, i, -1, hot_block_size,
+                    attention_block_stride);
+    return;
+  }
+  store_hot_index(row_out, row_attention, i,
+                  static_cast<int32_t>(get_physical_hot_row(
+                      hot_block_table, request_row, hot_table_stride,
+                      hot_block_size, entry & kEntrySlotMask)),
+                  hot_block_size, attention_block_stride);
+  // Only an entry's first reference loads it; later references reuse the
+  // slot like a hit.
+  if ((entry & kEntryMiss) && first_reference) {
+    if (miss_mask != nullptr) {
+      miss_mask[static_cast<int64_t>(row) * top_k + i] = 1;
+    }
+    ++misses;
+  } else {
+    ++hits;
+  }
+}
+
+// One block per request, launched per batch row. A request's rows (several
+// with speculative decoding) are contiguous and share its hot-buffer state, so
+// the block of its first row resolves the union of their host misses once and
+// maps every row onto it; the other blocks exit. The union is bounded by the
+// caller's max_union_rows (every decode query's top-k), which
+// device_buffer_size covers; a larger union traps. Misses take eviction slots
+// in (row, top-k) order of first reference, so the plan is deterministic.
 //
 // Shared memory layout (int32 region followed by int16 region):
-//   s_topk[top_k]            top-k global ids; reused as miss scratch
-//   s_chunk_off[nbc + 1]     prefix sums for hit (then miss) compaction
+//   s_hash_keys[hash_size]   open addressing: union of the rows' host ids
+//   s_hash_vals[hash_size]   first position, then slot | kEntry* tag
+//   s_chunk_off[nbc + 1]     prefix sums for hit, then miss, compaction
 //   s_evict_off[nbc + 1]     prefix sums for evictable compaction
-//   s_hash_keys[hash_size]   open addressing: global id -> top-k index
-//   s_counters[3]            hits, phase-1 resolved, valid count
+//   s_counters[5]            distinct hits, union size, per-row valid count,
+//                            misses, per-entry hits
+//   s_done[nbc]              positions phase 3 resolved, one word per chunk
 //   s_lru_out[hot_size]      int16, compacted slots: [hits fwd | evict bwd]
-//   s_hash_vals[hash_size]   int16 hash values (top-k index)
 // Valid global ids must be unique within each row.
 __global__ __launch_bounds__(1024) void hisparse_resolve_residency_kernel(
     const int32_t* __restrict__ hot_block_table,  // [max_rows, hot_blocks]
@@ -218,11 +322,25 @@ __global__ __launch_bounds__(1024) void hisparse_resolve_residency_kernel(
     const int64_t attention_row_stride, const int64_t valid_count_stride) {
   const int NUM_WARPS = blockDim.x / kWarpSize;
   const int num_buffer_chunks = (hot_size + kWarpSize - 1) / kWarpSize;
-  const int num_token_chunks = (top_k + kWarpSize - 1) / kWarpSize;
 
-  const int batch_row = blockIdx.x;
+  // The first row of each contiguous run of a request's rows leads it. FULL
+  // CUDA-graph padding rows map to request 0 after the real rows, forming a
+  // second run, but carry no valid top-k: that run returns before phase 2
+  // touches the request's shared state.
+  const int first_row = blockIdx.x;
   const int request_row =
-      request_ids != nullptr ? request_ids[batch_row] : batch_row;
+      request_ids != nullptr ? request_ids[first_row] : first_row;
+  if (request_ids != nullptr && first_row > 0 &&
+      request_ids[first_row - 1] == request_row) {
+    return;
+  }
+  int end_row = first_row + 1;
+  if (request_ids != nullptr) {
+    while (end_row < static_cast<int>(gridDim.x) &&
+           request_ids[end_row] == request_row) {
+      ++end_row;
+    }
+  }
   const int state_row =
       request_state_indices != nullptr && request_row >= 0 &&
               request_row < request_state_count
@@ -230,23 +348,24 @@ __global__ __launch_bounds__(1024) void hisparse_resolve_residency_kernel(
           : (request_state_indices == nullptr ? request_row : -1);
   // V2 publishes -1 for CUDA-graph padding rows.
   if (state_row < 0) {
-    for (int i = threadIdx.x; i < top_k; i += blockDim.x) {
-      const int64_t index = static_cast<int64_t>(batch_row) * top_k + i;
-      hot_indices[index] = -1;
-      if (attention_indices != nullptr) {
-        attention_indices[static_cast<int64_t>(batch_row) *
-                              attention_row_stride +
-                          i] = -1;
+    for (int row = first_row; row < end_row; ++row) {
+      for (int i = threadIdx.x; i < top_k; i += blockDim.x) {
+        const int64_t index = static_cast<int64_t>(row) * top_k + i;
+        hot_indices[index] = -1;
+        if (attention_indices != nullptr) {
+          attention_indices[static_cast<int64_t>(row) * attention_row_stride +
+                            i] = -1;
+        }
+        if (resolved_global_indices != nullptr) {
+          resolved_global_indices[index] = -1;
+        }
       }
-      if (resolved_global_indices != nullptr) {
-        resolved_global_indices[index] = -1;
+      if (valid_counts != nullptr && threadIdx.x == 0) {
+        valid_counts[static_cast<int64_t>(row) * valid_count_stride] = 0;
       }
-    }
-    if (valid_counts != nullptr && threadIdx.x == 0) {
-      valid_counts[static_cast<int64_t>(batch_row) * valid_count_stride] = 0;
-    }
-    if (swap_counts != nullptr && threadIdx.x == 0) {
-      swap_counts[batch_row] = 0;
+      if (swap_counts != nullptr && threadIdx.x == 0) {
+        swap_counts[row] = 0;
+      }
     }
     return;
   }
@@ -255,136 +374,130 @@ __global__ __launch_bounds__(1024) void hisparse_resolve_residency_kernel(
   const int lane_id = tid % kWarpSize;
   const unsigned int lanes_before = ((unsigned int)1 << lane_id) - 1;
 
-  const int32_t* row_topk =
-      global_indices + static_cast<int64_t>(batch_row) * input_row_stride;
-  int32_t* row_out = hot_indices + static_cast<int64_t>(batch_row) * top_k;
-  int32_t* row_attention =
-      attention_indices != nullptr
-          ? attention_indices +
-                static_cast<int64_t>(batch_row) * attention_row_stride
-          : nullptr;
-  int32_t* row_miss = (miss_mask != nullptr)
-                          ? miss_mask + static_cast<int64_t>(batch_row) * top_k
-                          : nullptr;
   int32_t* row_dgi =
       device_global_indices + static_cast<int64_t>(state_row) * region_stride;
   int16_t* row_lru = lru_slots + static_cast<int64_t>(state_row) * hot_size;
 
+  // A union within max_union_rows (hash_size - 1) and within the rows' top-k
+  // leaves an empty slot, so every probe sequence ends. Use a slice sized to
+  // this request's rows so single-row requests initialize a small table.
+  const int table_size =
+      min(hash_size, kHashLoadInverse * (end_row - first_row) * top_k);
+
   extern __shared__ char smem_raw[];
-  int32_t* s_topk = reinterpret_cast<int32_t*>(smem_raw);
-  int32_t* s_chunk_off = s_topk + top_k;
+  int32_t* s_hash_keys = reinterpret_cast<int32_t*>(smem_raw);
+  int32_t* s_hash_vals = s_hash_keys + hash_size;
+  int32_t* s_chunk_off = s_hash_vals + hash_size;
   int32_t* s_evict_off = s_chunk_off + (num_buffer_chunks + 1);
-  int32_t* s_hash_keys = s_evict_off + (num_buffer_chunks + 1);
-  int32_t* s_counters = s_hash_keys + hash_size;
-  int16_t* s_lru_out = reinterpret_cast<int16_t*>(s_counters + 3);
-  int16_t* s_hash_vals = s_lru_out + hot_size;
+  int32_t* s_counters = s_evict_off + (num_buffer_chunks + 1);
+  unsigned int* s_done =
+      reinterpret_cast<unsigned int*>(s_counters + kResidencyCounters);
+  int16_t* s_lru_out = reinterpret_cast<int16_t*>(s_done + num_buffer_chunks);
 
-  if (tid < 3) {
-    s_counters[tid] = 0;
-  }
-  __syncthreads();
-
-  // Phase 1: translate request-relative positions and resolve resident rows.
-  for (int i = tid; i < top_k; i += blockDim.x) {
-    const int32_t token_index = row_topk[i];
-    int32_t g = token_index;
-    int32_t resident_row = -1;
-    if (source_block_table != nullptr) {
-      const int32_t request_id = request_ids[batch_row];
-      const int32_t source_block =
-          token_index >= 0 ? token_index / source_block_size : -1;
-      if (request_id >= 0 && request_id < source_num_reqs &&
-          source_block >= 0 && source_block < source_num_blocks) {
-        const int32_t physical_block =
-            source_block_table[static_cast<int64_t>(request_id) *
-                                   source_bt_stride +
-                               source_block];
-        g = physical_block > 0 ? physical_block * source_block_size +
-                                     token_index % source_block_size
-                               : -1;
-      } else {
-        g = -1;
-      }
-      if (resident_block_table != nullptr) {
-        const int32_t resident_block =
-            token_index >= 0 ? token_index / resident_block_size : -1;
-        if (request_id >= 0 && request_id < resident_num_reqs &&
-            resident_block >= 0 && resident_block < resident_num_blocks) {
-          const int32_t physical_block =
-              resident_block_table[static_cast<int64_t>(request_id) *
-                                       resident_bt_stride +
-                                   resident_block];
-          if (physical_block != resident_null_block && physical_block >= 0) {
-            resident_row = physical_block * resident_block_size +
-                           token_index % resident_block_size;
-          }
-        }
-      }
-    }
-    if (g >= host_rows) {
-      g = -1;
-    }
-    if (resolved_global_indices != nullptr) {
-      resolved_global_indices[static_cast<int64_t>(batch_row) * top_k + i] = g;
-    }
-    if (resident_row >= 0 || g >= 0) atomicAdd(&s_counters[2], 1);
-    if (row_miss != nullptr) row_miss[i] = 0;
-    if (resident_row >= 0) {
-      store_hot_index(row_out, row_attention, i, resident_row, hot_block_size,
-                      attention_block_stride);
-      s_topk[i] = kTokenDone;
-      atomicAdd(&s_counters[1], 1);
-    } else if (g < 0) {
-      store_hot_index(row_out, row_attention, i, -1, hot_block_size,
-                      attention_block_stride);
-      s_topk[i] = kTokenDone;
-      atomicAdd(&s_counters[1], 1);
-    } else {
-      s_topk[i] = g;
-    }
-  }
-  __syncthreads();
-  if (valid_counts != nullptr && tid == 0) {
-    valid_counts[static_cast<int64_t>(batch_row) * valid_count_stride] =
-        s_counters[2];
-  }
-  // Fully resident rows need only request-relative page translation. Avoid
-  // scanning or rewriting the hot LRU when no selected row can consult it.
-  if (s_counters[1] == top_k) {
-    if (tid == 0 && swap_counts != nullptr) {
-      swap_counts[batch_row] = 0;
-    }
-    return;
-  }
-
-  for (int i = tid; i < hash_size; i += blockDim.x) {
+  for (int i = tid; i < table_size; i += blockDim.x) {
     s_hash_keys[i] = kHashEmpty;
+    s_hash_vals[i] = INT32_MAX;
   }
   for (int i = tid; i < num_buffer_chunks + 1; i += blockDim.x) {
     s_chunk_off[i] = 0;
     s_evict_off[i] = 0;
   }
-  __syncthreads();
-
-  for (int i = tid; i < top_k; i += blockDim.x) {
-    const int32_t g = s_topk[i];
-    if (g == kTokenDone) {
-      continue;
-    }
-    int slot = hash_slot(g, hash_size);
-    while (true) {
-      const int32_t old = atomicCAS(&s_hash_keys[slot], kHashEmpty, g);
-      if (old == kHashEmpty || old == g) {
-        s_hash_vals[slot] = static_cast<int16_t>(i);
-        break;
-      }
-      slot = (slot + 1) % hash_size;
-    }
+  if (tid < kResidencyCounters) {
+    s_counters[tid] = 0;
   }
   __syncthreads();
 
+  // Phase 1: translate every row's request-relative positions, resolve
+  // resident rows directly, and collect the union of host rows.
+  for (int row = first_row; row < end_row; ++row) {
+    const int32_t* row_topk =
+        global_indices + static_cast<int64_t>(row) * input_row_stride;
+    int32_t* row_out = hot_indices + static_cast<int64_t>(row) * top_k;
+    int32_t* row_attention =
+        attention_indices != nullptr
+            ? attention_indices +
+                  static_cast<int64_t>(row) * attention_row_stride
+            : nullptr;
+    int32_t* row_miss = miss_mask != nullptr
+                            ? miss_mask + static_cast<int64_t>(row) * top_k
+                            : nullptr;
+    for (int i = tid; i < top_k; i += blockDim.x) {
+      int32_t resident_row;
+      const int32_t g = translate_topk_entry(
+          row_topk[i], request_row, state_row, source_block_table,
+          resident_block_table, host_rows, source_bt_stride, source_num_reqs,
+          source_num_blocks, source_block_size, resident_bt_stride,
+          resident_num_reqs, resident_num_blocks, resident_block_size,
+          resident_null_block, resident_row);
+      if (resolved_global_indices != nullptr) {
+        resolved_global_indices[static_cast<int64_t>(row) * top_k + i] = g;
+      }
+      if (resident_row >= 0 || g >= 0) atomicAdd(&s_counters[2], 1);
+      if (row_miss != nullptr) row_miss[i] = 0;
+      if (resident_row >= 0) {
+        store_hot_index(row_out, row_attention, i, resident_row, hot_block_size,
+                        attention_block_stride);
+      } else if (g < 0) {
+        store_hot_index(row_out, row_attention, i, -1, hot_block_size,
+                        attention_block_stride);
+      } else {
+        int h = hash_slot(g, table_size);
+        bool inserted = false;
+        for (int probe = 0; probe < table_size; ++probe) {
+          const int32_t old = atomicCAS(&s_hash_keys[h], kHashEmpty, g);
+          if (old == kHashEmpty) {
+            atomicAdd(&s_counters[1], 1);
+            inserted = true;
+            break;
+          }
+          if (old == g) {
+            inserted = true;
+            break;
+          }
+          h = next_slot(h, table_size);
+        }
+        if (inserted) {
+          atomicMin(&s_hash_vals[h], (row - first_row) * top_k + i);
+        } else {
+          // A full table: push the union count past the cap so the check
+          // below traps.
+          atomicAdd(&s_counters[1], hash_size);
+        }
+      }
+    }
+    __syncthreads();
+    if (tid == 0) {
+      if (valid_counts != nullptr) {
+        valid_counts[static_cast<int64_t>(row) * valid_count_stride] =
+            s_counters[2];
+      }
+      s_counters[2] = 0;
+    }
+    __syncthreads();
+  }
+  // The table and eviction slots are sized for max_union_rows (hash_size - 1);
+  // a larger union would never reach an empty probe slot or run past s_lru_out.
+  if (s_counters[1] >= hash_size) {
+    if (tid == 0) {
+      printf(
+          "HiSparse residency: request %d resolves %d host rows, above the "
+          "configured bound of %d\n",
+          request_row, s_counters[1], hash_size - 1);
+    }
+    __trap();
+  }
+  // Fully resident rows need only request-relative page translation. Avoid
+  // scanning or rewriting the hot LRU when no selected row can consult it.
+  if (s_counters[1] == 0) {
+    for (int row = first_row + tid; row < end_row; row += blockDim.x) {
+      if (swap_counts != nullptr) swap_counts[row] = 0;
+    }
+    return;
+  }
+
   // Phase 2: walk hot slots in LRU order, classify hit / evictable, and
-  // compact them (hits forward, evictables backward) into s_lru_out.
+  // compact them (hits forward, evictables backward) into s_lru_out. A hit
+  // records its slot on the union entry.
   const int iters_buffer = (num_buffer_chunks + NUM_WARPS - 1) / NUM_WARPS;
   int total_hit_count = 0;
   int total_evict_count = 0;
@@ -397,35 +510,27 @@ __global__ __launch_bounds__(1024) void hisparse_resolve_residency_kernel(
     const int16_t slot = has_valid_pos ? row_lru[pos] : int16_t(-1);
     // Corruption tripwire: lru/dgi are long-lived device state; if some
     // external writer (e.g. stray RDMA into reused VRAM) corrupts a slot
-    // out of [0, region_stride), treat it as no-hit so it degrades to a re-miss
-    // instead of an unbounded dgi read (phases 3/5 bound the write side).
+    // out of [0, region_stride), treat it as no-hit so it degrades to a
+    // re-miss instead of an unbounded dgi read (phase 3 bounds the write
+    // side).
     const int32_t cached_g =
         (slot >= 0 && slot < region_stride) ? row_dgi[slot] : -1;
 
-    int found_topk_idx = -1;
+    bool is_hit = false;
     if (cached_g >= 0) {
-      int h = hash_slot(cached_g, hash_size);
+      int h = hash_slot(cached_g, table_size);
       while (true) {
         const int32_t k = s_hash_keys[h];
         if (k == cached_g) {
-          found_topk_idx = static_cast<int32_t>(s_hash_vals[h]);
+          s_hash_vals[h] = kEntryHit | slot;
+          is_hit = true;
           break;
         }
         if (k == kHashEmpty) break;
-        h = (h + 1) % hash_size;
+        h = next_slot(h, table_size);
       }
     }
-    const bool is_hit = found_topk_idx >= 0;
     const bool is_evictable = has_valid_pos && !is_hit;
-
-    if (is_hit) {
-      s_topk[found_topk_idx] = kTokenDone;
-      store_hot_index(row_out, row_attention, found_topk_idx,
-                      static_cast<int32_t>(get_physical_hot_row(
-                          hot_block_table, request_row, hot_table_stride,
-                          hot_block_size, slot)),
-                      hot_block_size, attention_block_stride);
-    }
 
     int local_hit_off = 0;
     int local_evict_off = 0;
@@ -465,39 +570,59 @@ __global__ __launch_bounds__(1024) void hisparse_resolve_residency_kernel(
   }
   __syncthreads();
 
-  // Reset prefix sums for the miss compaction (token chunks <= buffer
-  // chunks because hot_size >= top_k).
-  for (int i = tid; i < num_token_chunks + 1; i += blockDim.x) {
+  for (int i = tid; i < num_buffer_chunks + 1; i += blockDim.x) {
     s_chunk_off[i] = 0;
   }
   __syncthreads();
 
-  // Phase 3: compact misses, assign them eviction slots (oldest first) and
-  // record the new ownership in device_global_indices.
-  const int iters_token = (num_token_chunks + NUM_WARPS - 1) / NUM_WARPS;
+  // Phase 3: walk the rows' positions in (row, top-k) order; the first
+  // reference to a union entry no slot holds is a miss. Assign misses
+  // eviction slots (oldest first) and record the new ownership in
+  // device_global_indices. Swaps fill the rows' swap segments in order; the
+  // union never exceeds their combined capacity, and position chunks never
+  // exceed buffer chunks because hot_size covers every row's top-k.
+  const int num_positions = (end_row - first_row) * top_k;
+  const int num_position_chunks = (num_positions + kWarpSize - 1) / kWarpSize;
+  const int iters_position = (num_position_chunks + NUM_WARPS - 1) / NUM_WARPS;
   int miss_running_total = 0;
-  for (int iter = 0; iter < iters_token; iter++) {
+  int entry_hits = 0;
+  int entry_misses = 0;
+  for (int iter = 0; iter < iters_position; iter++) {
     const int chunk_idx = warp_id + iter * NUM_WARPS;
-    const bool has_valid_chunk = chunk_idx < num_token_chunks;
+    const bool has_valid_chunk = chunk_idx < num_position_chunks;
 
-    const int i = chunk_idx * kWarpSize + lane_id;
-    const bool has_valid_token = has_valid_chunk && (i < top_k);
-
-    int32_t g = 0;
+    const int position = chunk_idx * kWarpSize + lane_id;
+    int32_t g = -1;
+    int h = -1;
+    int32_t entry = 0;
     bool is_miss = false;
-    if (has_valid_token) {
-      is_miss = s_topk[i] != kTokenDone;
-      if (is_miss) {
-        g = s_topk[i];
+    if (has_valid_chunk && position < num_positions) {
+      const int row = first_row + position / top_k;
+      int32_t resident_row;
+      g = translate_topk_entry(
+          global_indices[static_cast<int64_t>(row) * input_row_stride +
+                         position % top_k],
+          request_row, state_row, source_block_table, resident_block_table,
+          host_rows, source_bt_stride, source_num_reqs, source_num_blocks,
+          source_block_size, resident_bt_stride, resident_num_reqs,
+          resident_num_blocks, resident_block_size, resident_null_block,
+          resident_row);
+      if (resident_row < 0 && g >= 0) {
+        h = hash_slot(g, table_size);
+        while (s_hash_keys[h] != g) {
+          h = next_slot(h, table_size);
+        }
+        entry = s_hash_vals[h];
+        is_miss = entry == position;
       }
     }
 
     int local_miss_off = 0;
     if (has_valid_chunk) {
-      const unsigned int miss_mask = __ballot_sync(0xFFFFFFFF, is_miss);
-      local_miss_off = __popc(miss_mask & lanes_before);
+      const unsigned int miss_mask_bits = __ballot_sync(0xFFFFFFFF, is_miss);
+      local_miss_off = __popc(miss_mask_bits & lanes_before);
       if (lane_id == 0) {
-        s_chunk_off[chunk_idx + 1] = __popc(miss_mask);
+        s_chunk_off[chunk_idx + 1] = __popc(miss_mask_bits);
       }
     }
     __syncthreads();
@@ -505,60 +630,112 @@ __global__ __launch_bounds__(1024) void hisparse_resolve_residency_kernel(
     if (warp_id == 0) {
       miss_running_total =
           warp_inclusive_scan(s_chunk_off, lane_id, chunk_idx + 1,
-                              num_token_chunks + 1, miss_running_total);
+                              num_position_chunks + 1, miss_running_total);
+      if (tid == 0) {
+        s_counters[3] = miss_running_total;
+      }
     }
     __syncthreads();
 
     if (is_miss) {
       const int m = s_chunk_off[chunk_idx] + local_miss_off;
       const int16_t evict_slot = s_lru_out[hot_size - 1 - m];
+      const int64_t compact_index = static_cast<int64_t>(first_row) * top_k + m;
       if (evict_slot < 0 || evict_slot >= region_stride) {
         // Corruption tripwire: an out-of-range slot (corrupted lru state,
         // see phase 2) must not become a hot-cache/dgi write. Resolve the
-        // entry as invalid (-1, masked by attention, not in the miss set);
-        // it re-misses on a later step. Phase 5 re-checks the same
-        // s_lru_out value, so its copy is skipped consistently.
-        store_hot_index(row_out, row_attention, i, -1, hot_block_size,
-                        attention_block_stride);
+        // entry as invalid (-1, masked by attention); it re-misses on a later
+        // step, and its copy is skipped.
+        s_hash_vals[h] = kEntryInvalid;
         if (swap_host_physical_rows != nullptr) {
-          const int64_t compact_index =
-              static_cast<int64_t>(batch_row) * top_k + m;
           swap_host_physical_rows[compact_index] = g;
           swap_device_physical_rows[compact_index] = -1;
         }
       } else {
-        // Reuse s_topk as compacted miss scratch: m < i always holds (done
-        // entries are skipped), so writes never overrun pending reads.
-        s_topk[m] = g;
-        const int32_t physical_row = static_cast<int32_t>(
-            get_physical_hot_row(hot_block_table, request_row, hot_table_stride,
-                                 hot_block_size, evict_slot));
-        store_hot_index(row_out, row_attention, i, physical_row, hot_block_size,
-                        attention_block_stride);
+        s_hash_vals[h] = kEntryMiss | evict_slot;
         if (swap_host_physical_rows != nullptr) {
-          const int64_t compact_index =
-              static_cast<int64_t>(batch_row) * top_k + m;
           swap_host_physical_rows[compact_index] = g;
-          swap_device_physical_rows[compact_index] = physical_row;
+          swap_device_physical_rows[compact_index] =
+              static_cast<int32_t>(get_physical_hot_row(
+                  hot_block_table, request_row, hot_table_stride,
+                  hot_block_size, evict_slot));
         }
-        if (row_miss != nullptr) row_miss[i] = 1;
         row_dgi[evict_slot] = g;
+      }
+      entry = s_hash_vals[h];
+    }
+
+    // Hits, first references and references to entries resolved in an
+    // earlier chunk write their hot index now; later references to an entry
+    // resolved in this same chunk pass (only across rows) are left to phase 4.
+    const bool resolved =
+        h >= 0 && (entry & (kEntryHit | kEntryMiss | kEntryInvalid));
+    if (resolved) {
+      write_entry_index(
+          entry, first_row + position / top_k, position % top_k, top_k,
+          hot_indices, attention_indices, attention_row_stride, miss_mask,
+          hot_block_table, request_row, hot_table_stride, hot_block_size,
+          attention_block_stride, is_miss, entry_hits, entry_misses);
+    }
+    if (has_valid_chunk) {
+      const unsigned int done_bits = __ballot_sync(0xFFFFFFFF, resolved);
+      if (lane_id == 0) {
+        s_done[chunk_idx] = done_bits;
       }
     }
   }
   __syncthreads();
 
   const int total_hits = s_counters[0];
-  const int total_misses = top_k - total_hits - s_counters[1];
-  if (swap_counts != nullptr && tid == 0) {
-    swap_counts[batch_row] = total_misses;
-  }
-  if (stats != nullptr && tid == 0) {
-    atomicAdd(&stats[0], static_cast<unsigned long long>(total_hits));
-    atomicAdd(&stats[1], static_cast<unsigned long long>(total_misses));
+  const int total_misses = s_counters[3];
+  if (swap_counts != nullptr) {
+    for (int row = first_row + tid; row < end_row; row += blockDim.x) {
+      const int remaining = total_misses - (row - first_row) * top_k;
+      swap_counts[row] = max(0, min(top_k, remaining));
+    }
   }
 
-  // Phase 4: write back the LRU order: stale evictables at the front,
+  // Phase 4: references phase 3 left unresolved (later references across rows
+  // to entries loaded in the same chunk pass) map onto the union's slots.
+  // Single-row requests resolve everything in phase 3.
+  if (end_row - first_row > 1) {
+    for (int position = tid; position < num_positions; position += blockDim.x) {
+      if (s_done[position / kWarpSize] & (1u << (position % kWarpSize))) {
+        continue;
+      }
+      const int row = first_row + position / top_k;
+      int32_t resident_row;
+      const int32_t g = translate_topk_entry(
+          global_indices[static_cast<int64_t>(row) * input_row_stride +
+                         position % top_k],
+          request_row, state_row, source_block_table, resident_block_table,
+          host_rows, source_bt_stride, source_num_reqs, source_num_blocks,
+          source_block_size, resident_bt_stride, resident_num_reqs,
+          resident_num_blocks, resident_block_size, resident_null_block,
+          resident_row);
+      if (resident_row >= 0 || g < 0) continue;
+      int h = hash_slot(g, table_size);
+      while (s_hash_keys[h] != g) {
+        h = next_slot(h, table_size);
+      }
+      write_entry_index(
+          s_hash_vals[h], row, position % top_k, top_k, hot_indices,
+          attention_indices, attention_row_stride, miss_mask, hot_block_table,
+          request_row, hot_table_stride, hot_block_size, attention_block_stride,
+          false, entry_hits, entry_misses);
+    }
+  }
+  if (stats != nullptr) {
+    atomicAdd(&s_counters[4], entry_hits);
+    atomicAdd(&s_counters[2], entry_misses);
+    __syncthreads();
+    if (tid == 0) {
+      atomicAdd(&stats[0], static_cast<unsigned long long>(s_counters[4]));
+      atomicAdd(&stats[1], static_cast<unsigned long long>(s_counters[2]));
+    }
+  }
+
+  // Phase 5: write back the LRU order: stale evictables at the front,
   // freshly loaded misses next, then hits at MRU.
   const int total_evictable = hot_size - total_hits;
   const int remaining_evictable = total_evictable - total_misses;
@@ -783,7 +960,7 @@ void hisparse_resolve_residency(
     torch::stable::Tensor& device_global_indices,
     torch::stable::Tensor& lru_slots,
     std::optional<torch::stable::Tensor> const& request_state_indices,
-    int64_t region_stride,
+    int64_t region_stride, int64_t max_union_rows,
     std::optional<torch::stable::Tensor> const& miss_mask,
     std::optional<torch::stable::Tensor> const& stats,
     std::optional<torch::stable::Tensor> const& attention_indices,
@@ -1034,14 +1211,32 @@ void hisparse_resolve_residency(
   }
 
   constexpr int kBlockSize = 1024;
-  const int hash_size = 2 * top_k;
+  STD_TORCH_CHECK(max_union_rows > 0 && max_union_rows <= hot_size,
+                  "max_union_rows must be in [1, hot_size], got ",
+                  max_union_rows);
+  // One spare entry above the union bound keeps every probe sequence finite.
+  const int hash_size = static_cast<int>(max_union_rows) + 1;
   const int num_buffer_chunks = (hot_size + kWarpSize - 1) / kWarpSize;
   const size_t smem_bytes =
-      sizeof(int32_t) * (top_k + 2 * (num_buffer_chunks + 1) + hash_size + 3) +
-      sizeof(int16_t) * (hot_size + hash_size);
+      sizeof(int32_t) * (2 * hash_size + 2 * (num_buffer_chunks + 1) +
+                         kResidencyCounters + num_buffer_chunks) +
+      sizeof(int16_t) * hot_size;
 
   const torch::stable::accelerator::DeviceGuard device_guard(
       hot_cache.get_device_index());
+  int max_smem_bytes = 0;
+  STD_TORCH_CHECK(cudaDeviceGetAttribute(
+                      &max_smem_bytes, cudaDevAttrMaxSharedMemoryPerBlockOptin,
+                      hot_cache.get_device_index()) == cudaSuccess,
+                  "failed to query shared memory per block");
+  STD_TORCH_CHECK(smem_bytes <= static_cast<size_t>(max_smem_bytes),
+                  "HiSparse device_buffer_size=", hot_size, " needs ",
+                  smem_bytes,
+                  " bytes of shared memory to resolve residency, "
+                  "but the device allows ",
+                  max_smem_bytes,
+                  "; lower device_buffer_size or the number of speculative "
+                  "tokens.");
   const cudaStream_t stream = get_current_cuda_stream();
   const int64_t attention_row_stride =
       attention_indices.has_value() ? attention_indices.value().stride(0) : 0;

@@ -27,6 +27,7 @@ class MoriPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         self.num_dispatchers_ = num_dispatchers
         self.max_tokens_per_rank = max_tokens_per_rank
         self.use_fp8_dispatch = use_fp8_dispatch
+        self._dispatch_topk_ids: torch.Tensor | None = None
 
     @property
     def activation_format(self) -> mk.FusedMoEActivationFormat:
@@ -92,6 +93,12 @@ class MoriPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
                 # mori expects one scale slot per token; broadcast.
                 scale = scale.expand(a1.shape[0], 1).contiguous()
 
+        # mori's combine() reduces over this rank's own [num_tokens, topk]
+        # routing. The modular kernel rebinds topk_ids to the dispatched ids
+        # returned below before it calls finalize(), so hold a reference to
+        # the pre-dispatch tensor (ROCm/mori#475).
+        self._dispatch_topk_ids = topk_ids
+
         (
             dispatch_a1,
             dispatch_weights,
@@ -122,9 +129,13 @@ class MoriPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         weight_and_reduce_impl: mk.TopKWeightAndReduce,
     ) -> None:
         num_token = output.shape[0]
+        assert self._dispatch_topk_ids is not None, (
+            "finalize() called before prepare(); mori combine() needs the "
+            "routing tensor that dispatch() was given"
+        )
         result = self.mori_op.combine(
             fused_expert_output,
             None,
-            topk_ids,
+            self._dispatch_topk_ids,
         )[0]
         output.copy_(result[:num_token])
