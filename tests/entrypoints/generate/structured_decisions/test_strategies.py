@@ -26,6 +26,7 @@ from vllm.entrypoints.generate.structured_decisions.protocol import (
 from vllm.entrypoints.generate.structured_decisions.question_types import (
     LABELS,
     StructuredDecisionError,
+    build_question,
 )
 from vllm.entrypoints.generate.structured_decisions.serving import (
     ServingStructuredDecisions,
@@ -34,8 +35,10 @@ from vllm.entrypoints.generate.structured_decisions.serving import (
 from vllm.entrypoints.generate.structured_decisions.strategies import (
     DiffusionGemmaCanvasStrategy,
     JointSchemaStrategy,
+    LiquidStrategy,
     NextTokenStrategy,
     ReadContext,
+    cap_pixels,
     reply_label_ids,
     select_read_strategy,
     state_text,
@@ -79,6 +82,8 @@ def test_strategy_selection():
         select_read_strategy(model("DiffusionGemmaForBlockDiffusion"), generate)
         is DiffusionGemmaCanvasStrategy
     )
+    lfm = "Lfm2VlForConditionalGeneration"
+    assert select_read_strategy(model(lfm), generate) is LiquidStrategy
     with pytest.raises(ValueError, match="does not support LlamaForCausalLM"):
         select_read_strategy(model("LlamaForCausalLM"), generate)
     with pytest.raises(ValueError, match="not raw_logits"):
@@ -573,3 +578,50 @@ async def test_joint_schema_hears_video_soundtracks(joint_schema, monkeypatch):
     )
     assert isinstance(response, ErrorResponse)
     assert response.error.code == 400
+
+
+@pytest.mark.parametrize(
+    "type_name,criteria,ask",
+    [
+        (
+            "choice",
+            {"billing": "Charges", "app_fault": None},
+            "Which?\n\nOptions:\nA Charges\nB app fault\n\n"
+            "Reply with the option code only.",
+        ),
+        (
+            "choice",
+            {"a": "Berlin", "b": "Paris"},
+            "Which?\n\nOptions:\na Berlin\nb Paris\n\nReply with the option code only.",
+        ),
+        (
+            "noul",
+            {"true": "asks to cancel", "false": "anything else"},
+            "Which?\nYes: asks to cancel\nNo: anything else\n\n"
+            "Reply with yes or no only.",
+        ),
+        (
+            "score",
+            ["low", "high"],
+            "Which?\n\n0 low\n1 high\n\nReply with a single digit 0-1 only.",
+        ),
+    ],
+)
+def test_liquid_prompt_matches_the_checkpoint(type_name, criteria, ask):
+    # The wording of prompt.py in LiquidAI/d1-3B, which the model was trained on.
+    strategy = object.__new__(LiquidStrategy)
+    q = build_question("q", type_name, "Which?", criteria, 26)
+    assert strategy._content(strategy.render_state(None), q) == ask
+    assert strategy._content("Hi.", q) == f"Hi.\n\n\nQUESTION:\n{ask}"
+    state = strategy.render_state({"k": "é"})
+    assert strategy._content(state, q).startswith('{\n  "k": "é"\n}\n\n\nQUEST')
+
+
+def test_liquid_caps_images_like_the_checkpoint():
+    # runner.cap_pixels in LiquidAI/d1-3B: 1600x1598 becomes 1024x1023.
+    cap = LiquidStrategy.max_image_pixels
+    assert cap is not None
+    assert cap_pixels(Image.new("RGB", (1600, 1598)), cap).size == (1024, 1023)
+    small = Image.new("RGB", (640, 480))
+    assert cap_pixels(small, cap) is small
+    assert NextTokenStrategy.max_image_pixels is None
