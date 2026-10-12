@@ -850,13 +850,18 @@ def test_hopper_mm_prefix_selects_triton_flash_attn(
 @blackwell_only
 @pytest.mark.parametrize("use_mm_prefix", [False, True])
 @pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8_e4m3", "nvfp4"])
-@pytest.mark.parametrize("native_mm_prefix", [False, True])
+@pytest.mark.parametrize(
+    "wrapper",
+    [None, object, lambda v_sf_swizzled=False: None],
+    ids=["none", "plain", "v_sf_swizzled"],
+)
 @pytest.mark.parametrize("selected", [None, AttentionBackendEnum.FLASHINFER])
 def test_mm_prefix_selects_composite_without_changing_causal_default(
-    use_mm_prefix, kv_cache_dtype, native_mm_prefix, selected, blackwell_selection
+    use_mm_prefix, kv_cache_dtype, wrapper, selected, blackwell_selection
 ):
     """The image-mask requirement must reach CUDA's automatic backend priority;
-    selecting FLASHINFER serves it natively, never over an NVFP4 cache."""
+    selecting FLASHINFER serves it natively, over an NVFP4 cache only when the
+    wrapper reads its swizzled V scales."""
     from vllm.engine.arg_utils import EngineArgs
 
     config = EngineArgs(
@@ -867,14 +872,16 @@ def test_mm_prefix_selects_composite_without_changing_causal_default(
     ).create_engine_config()
     if not use_mm_prefix:
         expected = "FLASHINFER"
-    elif kv_cache_dtype == "nvfp4" or (selected and not native_mm_prefix):
+    elif not selected:
+        expected = None if kv_cache_dtype == "nvfp4" else "TRITON_FLASHINFER"
+    elif wrapper is None or (kv_cache_dtype == "nvfp4" and wrapper is object):
         expected = None
     else:
-        expected = "FLASHINFER" if selected else "TRITON_FLASHINFER"
+        expected = "FLASHINFER"
     with (
         patch(
             "vllm.v1.attention.backends.flashinfer._mm_prefix_wrapper_cls",
-            return_value=object if native_mm_prefix else None,
+            return_value=wrapper,
         ),
         set_current_vllm_config(config),
         pytest.raises(ValueError) if expected is None else nullcontext(),

@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention layer with FlashInfer."""
 
+import inspect
 from dataclasses import dataclass, replace
 from enum import Enum
 from functools import partial
@@ -151,11 +152,13 @@ def _native_mm_prefix(vllm_config: VllmConfig | None) -> bool:
         and vllm_config.model_config is not None
         and vllm_config.model_config.is_mm_prefix_lm
         and vllm_config.cache_config.cache_dtype in _MM_PREFIX_KV_CACHE_DTYPES
+        and (wrapper_cls := _mm_prefix_wrapper_cls()) is not None
         and (
             not vllm_config.cache_config.cache_dtype.startswith("nvfp4")
             or _nvfp4_kv_on_fa2()
+            # An SM100 cache keeps its V scales in the trtllm-gen swizzle.
+            or "v_sf_swizzled" in inspect.signature(wrapper_cls).parameters
         )
-        and _mm_prefix_wrapper_cls() is not None
         and (
             not current_platform.is_device_capability_family(100)
             or vllm_config.attention_config.backend == AttentionBackendEnum.FLASHINFER
@@ -1514,10 +1517,13 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 self._get_workspace_buffer(),
                 get_flashinfer_layout_string(self.kv_cache_layout),
                 q_data_type=_mm_prefix_q_dtype(self.cache_dtype, dtype),
-                kv_data_type=self.kv_cache_dtype,
+                kv_data_type=torch.uint8
+                if self.is_kvcache_nvfp4
+                else self.kv_cache_dtype,
                 o_data_type=dtype,
                 head_dim_qk=self.head_dim,
                 head_dim_vo=self.head_dim,
+                **({"v_sf_swizzled": True} if self.nvfp4_trtllm else {}),
             )
         return self._mm_prefill_wrapper
 
@@ -2095,11 +2101,6 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                     causal=False,
                     sm_scale=self.sm_scale,
                     window_left=-1,
-                    q_data_type=_mm_prefix_q_dtype(
-                        self.cache_dtype, self.model_config.dtype
-                    ),
-                    kv_data_type=self.kv_cache_dtype,
-                    o_data_type=self.model_config.dtype,
                     fixed_split_size=self.prefill_fixed_split_size,
                     disable_split_kv=self.disable_split_kv,
                 )
