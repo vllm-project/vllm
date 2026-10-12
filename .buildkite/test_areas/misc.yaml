@@ -653,6 +653,7 @@ steps:
 
 - label: ":nvidia: (H100) Batch Invariance"
   key: batch-invariance-h100
+  automatic_shard: true
   timeout_in_minutes: 60
   device: h100
   source_file_dependencies:
