@@ -83,6 +83,28 @@ def test_with_bool_flag(parser):
     assert args.enable_feature is True
 
 
+def test_disable_alias_for_enable_flag():
+    """`--disable-x` is accepted wherever `--no-enable-x` exists, including in
+    subcommands, but never shadows a real `--disable-x` option."""
+    parser = FlexibleArgumentParser()
+    serve = parser.add_subparsers().add_parser("serve")
+    serve.add_argument("--enable-feature", action=BooleanOptionalAction)
+    serve.add_argument("--enable-logs", action=BooleanOptionalAction, default=True)
+    serve.add_argument("--disable-logs", action="store_true")
+    serve.add_argument("--enable-legacy", action="store_true")
+
+    assert parser.parse_args(["serve"]).enable_feature is None
+    assert parser.parse_args(["serve", "--disable-feature"]).enable_feature is False
+    assert parser.parse_args(["serve", "--disable_feature"]).enable_feature is False
+
+    args = parser.parse_args(["serve", "--disable-logs"])
+    assert args.disable_logs is True
+    assert args.enable_logs is True
+
+    with pytest.raises(SystemExit):
+        parser.parse_args(["serve", "--disable-legacy"])
+
+
 def test_invalid_choice(parser):
     with pytest.raises(SystemExit):
         parser.parse_args(["--image_input_type", "invalid_choice"])

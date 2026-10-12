@@ -156,18 +156,35 @@ class FlexibleArgumentParser(ArgumentParser):
             )
         super().error(message)
 
-    if sys.version_info < (3, 13):
-        # Enable the deprecated kwarg for Python 3.12 and below
+    def _resolve_disable_aliases(self, args: list[str]) -> list[str]:
+        """Accept `--disable-x` as an alias of `--no-enable-x`."""
+        options = self._option_string_actions
+        resolved = list(args)
+        for i, arg in enumerate(resolved):
+            if arg == "--":
+                break
+            if arg.startswith("--disable-") and arg not in options:
+                no_enable = "--no-enable-" + arg.removeprefix("--disable-")
+                if no_enable in options:
+                    resolved[i] = no_enable
+        return resolved
 
-        def parse_known_args(self, args=None, namespace=None):
-            namespace, args = super().parse_known_args(args, namespace)
+    def parse_known_args(self, args=None, namespace=None):
+        if args is None:
+            args = sys.argv[1:]
+        args = self._resolve_disable_aliases(args)
+        namespace, args = super().parse_known_args(args, namespace)
+        # Enable the deprecated kwarg for Python 3.12 and below
+        if sys.version_info < (3, 13):
             for action in self._deprecated:
                 if (
                     hasattr(namespace, dest := action.dest)
                     and getattr(namespace, dest) != action.default
                 ):
                     logger.warning_once("argument '%s' is deprecated", dest)
-            return namespace, args
+        return namespace, args
+
+    if sys.version_info < (3, 13):
 
         def add_argument(self, *args, **kwargs):
             deprecated = kwargs.pop("deprecated", False)
