@@ -23,20 +23,16 @@ from vllm.multimodal.utils import (
     encode_video_url,
 )
 from vllm.renderers.chat_utils import (
+    AsyncMultiModalItemTracker,
+    ChatCompletionMessageParam,
+    ConversationMessage,
     parse_chat_messages,
     parse_chat_messages_async,
     validate_chat_template,
 )
 from vllm.renderers.chat_utils.chat_message import _postprocess_messages
 from vllm.renderers.chat_utils.content_parser import _load_embeds_dict
-from vllm.renderers.chat_utils.item_tracker import (
-    AsyncMultiModalItemTracker,
-    _parse_metadata_array,
-)
-from vllm.renderers.chat_utils.types import (
-    ChatCompletionMessageParam,
-    ConversationMessage,
-)
+from vllm.renderers.chat_utils.item_tracker import _parse_metadata_array
 from vllm.utils.serial_utils import tensor2base64
 
 KIMI_K2_5_MODEL_ID = "moonshotai/Kimi-K2.5"
