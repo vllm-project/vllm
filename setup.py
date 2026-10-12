@@ -1686,44 +1686,6 @@ setup(
     ext_modules=ext_modules,
     rust_extensions=rust_extensions,
     install_requires=get_requirements(),
-    extras_require={
-        # AMD Zen CPU optimizations via zentorch
-        "zen": ["zentorch==2.13.0.1"],
-        "bench": ["pandas", "matplotlib", "seaborn", "datasets", "scipy", "plotly"],
-        "tensorizer": ["tensorizer==2.10.1"],
-        "fastsafetensors": ["fastsafetensors >= 0.3.3"],
-        "instanttensor": ["instanttensor >= 0.1.9"],
-        "runai": ["runai-model-streamer[s3,gcs,azure] >= 0.15.7"],
-        "audio": [
-            "av",
-            "scipy",
-            "soundfile",
-            "soxr",
-            "mistral_common[audio]",
-        ],  # Required for audio processing
-        "video": [],  # Kept for backwards compatibility
-        # NVIDIA DeepStream (NVDEC) GPU video-decode backend. Linux x86-64
-        # only; also needs system GStreamer + libv4l (see docs).
-        "deepstream": ["nvidia-deepstream-videodecode-cu13>=9.0.2"],
-        "flashinfer": [],  # Kept for backwards compatibility
-        "b12x": ["b12x==1.3.0"],
-        # Optional deps for Helion kernel development
-        # NOTE: When updating helion version, also update CI files:
-        #   - .buildkite/test_areas/kernels.yaml
-        #   - .buildkite/test-amd.yaml
-        "helion": ["helion==1.4.0"],
-        # Optional deps for gRPC server (vllm serve --grpc)
-        "grpc": ["smg-grpc-servicer[vllm] >= 0.5.2"],
-        # Optional deps for OpenTelemetry tracing
-        "otel": [
-            "opentelemetry-sdk>=1.26.0",
-            "opentelemetry-api>=1.26.0",
-            "opentelemetry-exporter-otlp>=1.26.0",
-            "opentelemetry-semantic-conventions-ai>=0.4.1",
-        ],
-        # extra quantization plugin
-        "extra-quant": ["vllm-gguf-plugin>=0.0.2"],
-    },
     cmdclass=cmdclass,
     package_data=package_data,
 )

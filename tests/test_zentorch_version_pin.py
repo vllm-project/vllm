@@ -6,7 +6,7 @@ zentorch (the AMD Zen CPU optimization extra) tracks the torch release that
 vLLM depends on, differing only by an extra trailing "patch level" segment.
 Concretely, torch ``X.Y.Z`` corresponds to zentorch ``X.Y.Z.W``.
 
-This test parses the raw text of ``setup.py`` and ``requirements/cpu.txt`` and
+This test parses the raw text of ``pyproject.toml`` and ``requirements/cpu.txt`` and
 string-matches the versions.
 """
 
@@ -18,19 +18,19 @@ import regex as re
 pytestmark = [pytest.mark.cpu_test, pytest.mark.skip_global_cleanup]
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-SETUP_PY = REPO_ROOT / "setup.py"
+PYPROJECT = REPO_ROOT / "pyproject.toml"
 # zentorch is the AMD Zen *CPU* extra, so the CPU requirement file is the
 # authoritative source for the torch version it must track.
 CPU_REQUIREMENTS = REPO_ROOT / "requirements" / "cpu.txt"
 
 
 def _extract_zentorch_version() -> str:
-    """Pull the pinned zentorch version out of setup.py's extras_require."""
-    text = SETUP_PY.read_text()
+    """Pull the pinned zentorch version out of pyproject.toml's `zen` extra."""
+    text = PYPROJECT.read_text()
     matches = re.findall(r"zentorch==([0-9][0-9A-Za-z.\-+]*)", text)
-    assert matches, f"No 'zentorch==<version>' pin found in {SETUP_PY}"
+    assert matches, f"No 'zentorch==<version>' pin found in {PYPROJECT}"
     assert len(set(matches)) == 1, (
-        f"Multiple conflicting zentorch pins found in {SETUP_PY}: {matches}"
+        f"Multiple conflicting zentorch pins found in {PYPROJECT}: {matches}"
     )
     return matches[0]
 
@@ -72,8 +72,8 @@ def test_zentorch_pin_tracks_torch_release():
     )
     assert zentorch_parts[:3] == torch_parts, (
         "zentorch version is out of sync with torch. "
-        f"setup.py pins zentorch=={zentorch_version} (base "
+        f"pyproject.toml pins zentorch=={zentorch_version} (base "
         f"{'.'.join(zentorch_parts[:3])}) but requirements/cpu.txt pins "
         f"torch=={torch_version}. When bumping torch, bump the first three "
-        "components of the zentorch pin in setup.py to match."
+        "components of the zentorch pin in pyproject.toml to match."
     )
