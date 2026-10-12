@@ -1017,10 +1017,9 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             layer.w13_input_scale.data.fill_(1.0)
             layer.w2_input_scale.data.fill_(1.0)
 
-        if envs.VLLM_META_MODE:
-            # Meta CI: the NVFP4 MoE weight conversion + kernel build are GPU-only
-            # + data-dependent; expert compute runs through the faked moe_forward
-            # op, so none of it is needed on meta.
+        if layer.w13_weight.is_meta:
+            # Weight conversion and backend setup require real values; expert
+            # compute is represented by the meta-capable moe_forward op.
             return
 
         # Use a single gscale for w13.
@@ -2577,6 +2576,11 @@ class ModelOptLinearMethod(LinearMethodBase):
         expose_input_quant_key(layer, self.kernel)
 
     def process_weights_after_loading(self, layer) -> None:
+        if self.spec.weight == kNvfp4Static and layer.weight.is_meta:
+            # NVFP4 scale checks and kernel repacking need real values; meta
+            # weights keep their logical layout and apply() propagates the
+            # output shape.
+            return
         if self.spec.weight == kMxfp8Static and getattr(layer, "is_bmm", False):
             self.kernel = init_mxfp8_linear_kernel(
                 weight_shape=(layer.weight.shape[-2], layer.weight.shape[-1]),
@@ -2632,6 +2636,12 @@ class ModelOptLinearMethod(LinearMethodBase):
             )
 
     def apply(self, layer, x, bias=None):
+        if self.spec.weight == kNvfp4Static and x.is_meta:
+            # The NVFP4 backend GEMM requires real storage; propagate its output
+            # shape for meta tensors.
+            return x.new_empty(
+                (*x.shape[:-1], layer.output_size_per_partition), dtype=x.dtype
+            )
         return self.fmt.apply(
             layer,
             x,

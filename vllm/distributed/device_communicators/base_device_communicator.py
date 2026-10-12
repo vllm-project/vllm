@@ -245,6 +245,12 @@ class DeviceCommunicatorBase:
         self.use_all2all = self.is_ep_communicator and use_all2all
         self.all2all_backend = all2all_backend
         self.all2all_manager: All2AllManagerBase | None = None
+        if self.device.type == "meta" and self.use_all2all:
+            # Use the portable all-gather/reduce-scatter path so the real EP
+            # group and collective control flow run without a device backend.
+            from .all2all import AgRsAll2AllManager
+
+            self.all2all_manager = AgRsAll2AllManager(self.cpu_group)
 
     def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
         dist.all_reduce(input_, group=self.device_group)

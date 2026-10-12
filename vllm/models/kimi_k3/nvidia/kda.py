@@ -10,7 +10,6 @@ from torch import nn
 from torch.nn.parameter import Parameter
 
 from vllm import _custom_ops as ops
-import vllm.envs as envs
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import VllmConfig
 from vllm.distributed import divide, get_tensor_model_parallel_rank
@@ -910,11 +909,6 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         beta: torch.Tensor,
         core_attn_out: torch.Tensor,
     ) -> None:
-        if envs.VLLM_META_MODE:
-            # Meta CI: the KDA (Kimi Delta Attention) recurrent/chunked kernels
-            # write into the pre-allocated `core_attn_out`; skip them (it is a
-            # shape-correct meta tensor already).
-            return
         forward_context = get_forward_context()
         attn_metadata_raw = forward_context.attn_metadata
         if attn_metadata_raw is None:

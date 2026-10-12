@@ -317,8 +317,6 @@ def __getattr__(name: str):
         if _current_platform is None:
             platform_cls_qualname = resolve_current_platform_cls_qualname()
             platform_cls = resolve_obj_by_qualname(platform_cls_qualname)
-            # Meta CI: mix meta-capability overrides over the detected platform
-            # class, leaving the concrete platform untouched.
             if envs.VLLM_META_MODE:
                 from vllm.platforms.meta import wrap_meta_platform
 

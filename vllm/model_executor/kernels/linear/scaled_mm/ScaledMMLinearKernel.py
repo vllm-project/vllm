@@ -8,7 +8,6 @@ from typing import Generic, TypeVar
 
 import torch
 
-import vllm.envs as envs
 from vllm.model_executor.layers.fusion.quant_activation import (
     QuantizedActivation,
     as_quantized_activation,
@@ -156,14 +155,6 @@ class FP8ScaledMMLinearKernel(
         x_2d = x_data.view(-1, x_data.shape[-1])
         output_shape = [*orig_shape[:-1], w.shape[1]]
         out_dtype = orig_dtype if maybe_out_dtype is None else maybe_out_dtype
-
-        if envs.VLLM_META_MODE:
-            # Meta CI: the scaled-mm GEMM leaf (cutlass / flashinfer / torch /
-            # marlin / deepgemm ...) is GPU/cuBLASLt-layout-specific and computes
-            # nothing on meta. The validated apply wiring (fp8 param fetch,
-            # activation-quant, output-shape derivation) is all above; return a
-            # shape-correct meta output instead of launching the backend GEMM.
-            return x_2d.new_empty(output_shape, dtype=out_dtype)
 
         x_2d_q = x_2d
         if qa is None:

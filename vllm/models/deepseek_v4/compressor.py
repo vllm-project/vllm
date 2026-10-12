@@ -20,7 +20,6 @@ from vllm.models.deepseek_v4.common.ops.fused_indexer_q import MXFP4_BLOCK_SIZE
 from vllm.models.deepseek_v4.common.ops.save_partial_states import (
     _SAVE_PARTIAL_STATES_KERNEL,
 )
-import vllm.envs as envs
 from vllm.platforms import current_platform
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -233,11 +232,7 @@ class DeepseekCompressor(nn.Module):
         self.rope_head_dim = config.qk_rope_head_dim
         self.nope_head_dim = self.head_dim - self.rope_head_dim
         self.rms_norm_eps = config.rms_norm_eps
-        # Buffer-placement device: the accelerator (device_type) in production;
-        # meta (zero memory) under meta CI, which has no accelerator.
-        self.device = (
-            current_platform.device_type if not envs.VLLM_META_MODE else "meta"
-        )
+        self.device = current_platform.device_type
         self.max_num_reqs = vllm_config.scheduler_config.max_num_seqs
         self.max_model_len = vllm_config.model_config.max_model_len
 

@@ -5,7 +5,6 @@ from typing import TYPE_CHECKING, ClassVar, cast
 
 import torch
 
-import vllm.envs as envs
 from vllm.forward_context import get_forward_context
 from vllm.models.deepseek_v4.attention import DeepseekV4Attention
 from vllm.models.deepseek_v4.common.ops import (
@@ -98,12 +97,6 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
         assert output.dtype == q.dtype, (
             f"output buffer dtype {output.dtype} must match q dtype {q.dtype}"
         )
-
-        if envs.VLLM_META_MODE:
-            # Meta CI: the sparse-MLA prefill/decode kernels write into the
-            # pre-allocated `output` buffer; skip them (output is a shape-correct
-            # meta tensor already).
-            return
 
         # Get SWA and indexer metadata from forward context
         forward_context = get_forward_context()

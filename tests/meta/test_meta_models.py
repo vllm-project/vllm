@@ -10,8 +10,7 @@ construct + run (config, TP/EP, attention/MoE, quant, sampling), not numerics.
 Entries (single ``test_meta_model_e2e`` parametrization):
 * Real families by hub ID.
 * Quant variants: ``quantization_config`` layered via ``hf_overrides`` +
-  ``expected_quantization``, asserted to stay live on meta (not neutralized to
-  bf16).
+  ``expected_quantization``, asserted to remain the requested scheme.
 
 All cases enable ``SimpleCPUOffloadConnector``; the prompt clears the scheduler
 block size (LCM of KV groups, inflated by hybrid GDN/mamba) so a full KV block
@@ -20,9 +19,9 @@ two-tier round-trip via ``num_cached_tokens`` + the connector load counter:
 cold miss -> L1 (GPU) hit -> [drop L1] L2 (CPU) load hit -> [drop L1+L2] miss.
 Other cases only assert the connector is wired.
 
-``load_format="dummy"`` + ``skip_tokenizer_init=True`` avoid all downloads
-except ``config.json`` (hub cache / ``HF_HUB_OFFLINE`` / ``VLLM_USE_MODELSCOPE``
-for offline CI).
+``VLLM_META_MODE`` forces ``load_format="meta"`` and eager execution; with
+``skip_tokenizer_init=True`` this avoids all downloads except ``config.json``
+(hub cache / ``HF_HUB_OFFLINE`` / ``VLLM_USE_MODELSCOPE`` for offline CI).
 
 Run: ``VLLM_META_MODE=1 CUDA_VISIBLE_DEVICES="" python -m pytest <this file>``.
 The env vars below are also set at import so the file can run directly.
@@ -31,18 +30,19 @@ The env vars below are also set at import so the file can run directly.
 import os
 
 # Must precede the vllm import: VLLM_META_MODE gates the meta branches, empty
-# CUDA_VISIBLE_DEVICES keeps torch off any GPU, and in-process engine
-# (multiprocessing off) lets the test reach the offload scheduler.
+# CUDA_VISIBLE_DEVICES keeps torch off any GPU, and the in-process EngineCore
+# keeps its scheduler inspectable while model ranks use MultiprocExecutor.
 os.environ.setdefault("VLLM_META_MODE", "1")
 os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
 os.environ.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+os.environ.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
 
 import pytest  # noqa: E402
 
 from vllm import LLM, SamplingParams  # noqa: E402
 from vllm.inputs import TokensPrompt  # noqa: E402
+from vllm.meta_mode import META_TOKEN_ID  # noqa: E402
 
-_META_TOKEN_ID = 100  # constant fake token from the meta sampler
 _MAX_TOKENS = 8
 # > LCM scheduler block size so offload stores >=1 block. Hybrid GDN/mamba
 # inflates it (Qwen3.8: 8320); 8704 clears that, plain MoEs offload far below.
@@ -61,11 +61,9 @@ _OFFLOAD_KV_TRANSFER = {
     },
 }
 
-# Per-run kwargs. Flags mirror production recipes (TP=8 + EP), single-process
-# under meta.
+# Per-run kwargs. Flags mirror production recipes; parallel ranks are real
+# processes using Gloo, while weights and KV remain on meta.
 _MODELS = [
-    # Kimi-K3 first as a precaution: its KDA/mamba builder was historically
-    # sensitive to global state from a prior in-process build (e.g. DeepSeek-V4).
     pytest.param(
         dict(
             model="moonshotai/Kimi-K3",
@@ -73,8 +71,8 @@ _MODELS = [
             enable_expert_parallel=True,
             language_model_only=True,  # native multimodal; text LM only
             # KDA "align" mode needs aligned Mamba state indices (normally a
-            # triton/CUDA kernel, no-op on meta); a meta branch in kda_metadata.py
-            # computes them via pure-torch gather, enabling full offload.
+            # triton/CUDA kernel, no-op on meta); the V1 runner precomputes them
+            # host-side in meta mode, enabling full offload.
             expected_offload=True,
         ),
         id="Kimi-K3",
@@ -97,8 +95,8 @@ _MODELS = [
             tensor_parallel_size=8,
             enable_expert_parallel=True,
             # fp8_ds_mla KV layout needs an fp8 kv-cache dtype; fp8 checkpoint
-            # runs the native deepseek_v4_fp8 path. Sparse-MLA CuteDSL indexer +
-            # CuteDSL/FA4 forward are meta-gated, so the full prompt runs.
+            # runs the native deepseek_v4_fp8 path. CuteDSL/FA4 launches are
+            # intercepted below the model, so the full prompt runs.
             kv_cache_dtype="fp8",
             expected_quantization="deepseek_v4_fp8",
         ),
@@ -150,13 +148,46 @@ _MODELS = [
         ),
         id="quant-nvfp4",
     ),
+    pytest.param(
+        dict(
+            model="Qwen/Qwen3-30B-A3B",
+            pipeline_parallel_size=2,
+            hf_overrides={"num_hidden_layers": 2},
+            prompt_len=16,
+            offload=False,
+        ),
+        id="parallel-pp",
+    ),
+    pytest.param(
+        dict(
+            model="deepseek-ai/DeepSeek-V2-Lite",
+            prefill_context_parallel_size=2,
+            hf_overrides={"num_hidden_layers": 1},
+            prompt_len=16,
+            offload=False,
+        ),
+        id="parallel-pcp",
+    ),
+    pytest.param(
+        dict(
+            model="Qwen/Qwen3-30B-A3B",
+            tensor_parallel_size=2,
+            decode_context_parallel_size=2,
+            hf_overrides={
+                "num_hidden_layers": 1,
+                "num_key_value_heads": 1,
+            },
+            prompt_len=16,
+            offload=False,
+        ),
+        id="parallel-dcp",
+    ),
 ]
 
 
 @pytest.fixture(autouse=True)
 def _cleanup_dist_env():
-    """Tear down the in-process fake-TP group after each case, else the next
-    LLM build trips the "tp group already initialized" assert."""
+    """Clear any process groups retained in the parent process."""
     yield
     from vllm.distributed.parallel_state import cleanup_dist_env_and_memory
 
@@ -168,12 +199,12 @@ def _generate(llm: LLM, prompt: TokensPrompt, sampling: SamplingParams) -> int:
     (local L1 + external L2 prefix hits)."""
     outputs = llm.generate(prompt, sampling)
     token_ids = list(outputs[0].outputs[0].token_ids)
-    assert token_ids == [_META_TOKEN_ID] * _MAX_TOKENS
+    assert token_ids == [META_TOKEN_ID] * _MAX_TOKENS
     return outputs[0].num_cached_tokens
 
 
 @pytest.mark.parametrize("llm_kwargs", _MODELS)
-def test_meta_model_e2e(llm_kwargs: dict) -> None:
+def test_meta_model_e2e(llm_kwargs: dict, request: pytest.FixtureRequest) -> None:
     """Build + generate on meta with CPU KV-offload triggered."""
     assert os.environ.get("VLLM_META_MODE") == "1", (
         "VLLM_META_MODE=1 must be set before importing vllm for this test."
@@ -181,6 +212,16 @@ def test_meta_model_e2e(llm_kwargs: dict) -> None:
 
     # Copy, then peel off the test-only keys.
     llm_kwargs = dict(llm_kwargs)
+    requested_parallel = {
+        name: llm_kwargs.get(name, 1)
+        for name in (
+            "tensor_parallel_size",
+            "pipeline_parallel_size",
+            "prefill_context_parallel_size",
+            "decode_context_parallel_size",
+            "data_parallel_size",
+        )
+    }
     expected_quantization = llm_kwargs.pop("expected_quantization", None)
     expected_offload = llm_kwargs.pop("expected_offload", False)
     prompt_len = llm_kwargs.pop("prompt_len", _PROMPT_LEN)
@@ -194,16 +235,26 @@ def test_meta_model_e2e(llm_kwargs: dict) -> None:
         llm_kwargs.setdefault("enable_prefix_caching", False)
 
     llm = LLM(
-        load_format="dummy",  # no weight download; synthesized on meta
         trust_remote_code=True,
         skip_tokenizer_init=True,  # no tokenizer download; pass token ids
-        enforce_eager=True,
         max_model_len=_MAX_MODEL_LEN,
         **llm_kwargs,
     )
+    request.addfinalizer(llm.llm_engine.engine_core.shutdown)
+
+    parallel_config = llm.llm_engine.vllm_config.parallel_config
+    for name, expected in requested_parallel.items():
+        assert getattr(parallel_config, name) == expected
+    model_world_size = (
+        parallel_config.tensor_parallel_size
+        * parallel_config.pipeline_parallel_size
+        * parallel_config.prefill_context_parallel_size
+    )
+    expected_backend = "mp" if model_world_size > 1 else "uni"
+    assert parallel_config.distributed_executor_backend == expected_backend
 
     if expected_quantization is not None:
-        # Scheme must stay live (not neutralized to bf16).
+        # The configured scheme must remain unchanged.
         model_config = llm.llm_engine.vllm_config.model_config
         assert model_config.quantization == expected_quantization
 

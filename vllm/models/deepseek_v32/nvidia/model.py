@@ -177,13 +177,7 @@ class DeepseekV32Model(torch.nn.Module):
         self.config = config
         from vllm.platforms import current_platform
 
-        import vllm.envs as envs
-
-        # Buffer-placement device: the accelerator (device_type) in production;
-        # meta (zero memory) under meta CI, which has no accelerator.
-        self.device = (
-            current_platform.device_type if not envs.VLLM_META_MODE else "meta"
-        )
+        self.device = current_platform.device_type
 
         self.vocab_size = config.vocab_size
         parallel_config = vllm_config.parallel_config

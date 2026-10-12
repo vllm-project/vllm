@@ -128,51 +128,6 @@ def _resolve_dsv4_kv_cache_dtype(
     return kv_cache_dtype, torch.bfloat16
 
 
-def _register_meta_fakes() -> None:
-    """Register meta (fake) kernels for the fused DeepSeek-V4 qnorm+rope+KV-insert
-    C++ ops so the attention forward runs on meta tensors (CI, no GPU).
-
-    The kernels do GPT-J RoPE + per-head RMSNorm + paged KV-cache insert. On meta
-    the KV insert is a no-op (zero-memory cache); only a shape-correct q is
-    needed:
-    - quant_insert (fp8_ds_mla / uint8 path) allocates + returns the *padded* q
-      ``[num_tokens, padded_heads, head_dim]``.
-    - the bf16 / per-tensor-fp8 variants write q in place and return nothing.
-    """
-    from torch.library import register_fake
-
-    specs = {
-        "_C::fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert": "quant",
-        "_C::fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_bf16_insert": "inplace",
-        "_C::fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_fp8_insert": "inplace",
-    }
-    for opname, kind in specs.items():
-        try:
-            if kind == "quant":
-
-                def _quant_fake(
-                    q, kv, kv_cache, slot_mapping, positions, cos_sin_cache,
-                    padded_heads, eps, block_size,
-                ):
-                    # q is [num_tokens, n_local_heads, head_dim]; return padded q.
-                    return q.new_empty((q.shape[0], padded_heads, q.shape[-1]))
-
-                register_fake(opname, _quant_fake)
-            else:
-
-                def _inplace_fake(*args, **kwargs):
-                    return None
-
-                register_fake(opname, _inplace_fake)
-        except (RuntimeError, AttributeError):
-            # Op missing or fake already registered; ignore.
-            pass
-
-
-if envs.VLLM_META_MODE:
-    _register_meta_fakes()
-
-
 class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
     """DeepseekV4 MLA attention layer.
 
@@ -1129,10 +1084,7 @@ class DeepseekV4Indexer(nn.Module):
             indexer_metadata = cast(Any, attn_metadata[self.k_cache.prefix])
             if (
                 indexer_metadata.max_seq_len // self.compress_ratio <= self.topk_tokens
-                and (
-                    envs.VLLM_META_MODE
-                    or not torch.cuda.is_current_stream_capturing()
-                )
+                and not torch.cuda.is_current_stream_capturing()
             ):
                 # candidates num smaller than topk, every candidate is selected
                 # but we still need to build k cache

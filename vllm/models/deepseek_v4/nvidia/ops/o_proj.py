@@ -5,7 +5,6 @@ from collections.abc import Callable
 import torch
 import torch.nn as nn
 
-import vllm.envs as envs
 from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8Dynamic128Sym,
@@ -59,16 +58,6 @@ def deep_gemm_fp8_o_proj(
     kernel, one ``wo_a`` group per slot with the live groups first, so only
     the padding groups are sliced off.
     """
-    if envs.VLLM_META_MODE:
-        # Meta CI: the inverse-RoPE + fp8-quant kernel and the DeepGEMM einsum
-        # are GPU-only. Skip them and run the real output projection (``wo_b``, a
-        # native Linear) on a shape-correct meta latent, matching production.
-        z = torch.empty(
-            (o.shape[0], n_groups, o_lora_rank),
-            device=o.device,
-            dtype=torch.bfloat16,
-        )
-        return wo_b(z.flatten(1))
     use_fp8 = wo_a.weight.dtype == torch.float8_e4m3fn
     if isinstance(o, QuantizedActivation):
         assert use_fp8

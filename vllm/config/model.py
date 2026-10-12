@@ -83,14 +83,6 @@ logger = init_logger(__name__)
 # while the worker's own global ModelRegistry is still untouched.
 _REGISTERED_MODEL_CLASS_OVERRIDES: set[tuple[str, str]] = set()
 
-# Quant schemes run for real under meta CI (VLLM_META_MODE); every other scheme
-# is neutralized to bf16. FP8 (per-tensor + block-wise), ModelOpt NVFP4, and
-# deepseek_v4_fp8 (an Fp8Config subclass reusing the FP8-block + NVFP4-MoE
-# paths); their forwards short-circuit at the apply chokepoints (no GPU kernels).
-_META_QUANT_ALLOWLIST: frozenset[str] = frozenset(
-    {"fp8", "modelopt_fp4", "deepseek_v4_fp8"}
-)
-
 RunnerOption = Literal["auto", RunnerType]
 ConvertType = Literal["none", "embed", "classify"]
 ConvertOption = Literal["auto", ConvertType]
@@ -1456,9 +1448,6 @@ class ModelConfig:
                     f"({self.quantization})."
                 )
 
-        if envs.VLLM_META_MODE:
-            self._meta_neutralize_quantization()
-
         if self.quantization is not None:
             if self.quantization not in supported_quantization:
                 raise ValueError(
@@ -1481,18 +1470,6 @@ class ModelConfig:
                     "set `--allow-deprecated-quantization`.",
                     self.quantization,
                 )
-
-    def _meta_neutralize_quantization(self) -> None:
-        # Meta CI: allowlisted schemes (see _META_QUANT_ALLOWLIST) run for real
-        # -- create_weights, process_weights_after_loading and the forced
-        # pure-torch apply validate the integration path (shapes/flow, not
-        # numerics). Others are GPU-kernel-only with no meta path, so neutralize
-        # to bf16 (shape-equivalent at the logical layer level).
-        if self.quantization in _META_QUANT_ALLOWLIST:
-            return
-        self.quantization = None
-        if self.model_arch_config.quantization_config is not None:
-            self.model_arch_config.quantization_config = None
 
     def _verify_cuda_graph(self) -> None:
         # CUDAGraph capture not supported for encoder-decoder models on ROCm

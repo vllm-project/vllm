@@ -527,7 +527,9 @@ class GroupCoordinator:
 
         from vllm.platforms import current_platform
 
-        if current_platform.is_cuda_alike():
+        if envs.VLLM_META_MODE:
+            self.device = torch.device("meta")
+        elif current_platform.is_cuda_alike():
             visible_device_index = (
                 current_platform.logical_device_id_to_visible_device_id(
                     self.device_index
@@ -546,8 +548,12 @@ class GroupCoordinator:
         self.use_device_communicator = use_device_communicator
         self.device_communicator = None
         if use_device_communicator and self.world_size > 1:
-            device_comm_cls = resolve_obj_by_qualname(
-                current_platform.get_device_communicator_cls()
+            device_comm_cls = (
+                DeviceCommunicatorBase
+                if envs.VLLM_META_MODE
+                else resolve_obj_by_qualname(
+                    current_platform.get_device_communicator_cls()
+                )
             )
             self.device_communicator = device_comm_cls(
                 cpu_group=self.cpu_group,

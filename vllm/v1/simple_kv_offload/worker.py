@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Worker-side handler for SimpleCPUOffloadConnector."""
 
+import sys
 from typing import TYPE_CHECKING
 
 import torch
@@ -49,6 +50,7 @@ class SimpleCPUOffloadWorker:
         self.gpu_kv_caches: dict[str, torch.Tensor] | None = None
         self.cpu_kv_caches: dict[str, torch.Tensor] | None = None
         self.device: torch.device | None = None
+        self._is_meta = False
         self.num_cpu_blocks: int = 0
 
         # CUDA streams for the async transfers
@@ -96,21 +98,11 @@ class SimpleCPUOffloadWorker:
             logger.warning("No KV caches to offload.")
             return
 
-        # Meta CI: GPU KV caches are meta (no storage) and the transfer machinery
-        # is CUDA/DMA-bound, so record bookkeeping state and skip streams/DMA;
-        # transfers are marked instantly complete in get_finished.
-        import vllm.envs as envs
-
-        if envs.VLLM_META_MODE:
-            self.device = next(iter(kv_caches.values())).device
-            self.gpu_kv_caches = dict(kv_caches)
-            self.cpu_kv_caches = {}
-            self.num_cpu_blocks = max(
-                1, getattr(self.kv_cache_config, "num_blocks", 1) or 1
-            )
-            return
-
         self.device = next(iter(kv_caches.values())).device
+        self._is_meta = self.device.type == "meta"
+        if self._is_meta:
+            # Meta KV has no storage; transfers reduce to event bookkeeping.
+            return
 
         assert self.kv_cache_config is not None
         num_blocks = self.kv_cache_config.num_blocks
@@ -268,10 +260,7 @@ class SimpleCPUOffloadWorker:
         self._connector_metadata = None
 
     def start_load_kv(self) -> None:
-        # Meta CI: no real DMA (meta KV); loads complete in get_finished.
-        import vllm.envs as envs
-
-        if envs.VLLM_META_MODE:
+        if self._is_meta:
             return
         # Invoked after the forward launch on steps without sync loads
         # (SchedulerOutput.has_sync_kv_loads), so the CPU-side block copy
@@ -297,10 +286,7 @@ class SimpleCPUOffloadWorker:
         after a compute-done event recorded on the current stream. See
         #45704 for the bug and #39306 for the srcAccessOrder rationale.
         """
-        # Meta CI: no real DMA (meta KV); stores complete in get_finished.
-        import vllm.envs as envs
-
-        if envs.VLLM_META_MODE:
+        if self._is_meta:
             return
         metadata = self._connector_metadata
         if metadata is not None and metadata.store_gpu_blocks:
@@ -333,23 +319,6 @@ class SimpleCPUOffloadWorker:
         """
         metadata = self._connector_metadata
         finished_recving: set[str] = set()
-
-        # Meta CI: no real transfers, so mark all pending loads/stores instantly
-        # complete (no stream polling).
-        import vllm.envs as envs
-
-        if envs.VLLM_META_MODE:
-            for j in list(self._pending_load_event_indices):
-                self._pending_load_event_indices.discard(j)
-                req_ids = (
-                    metadata.load_event_to_reqs.get(j) if metadata is not None else None
-                )
-                if req_ids:
-                    finished_recving.update(req_ids)
-            for j in list(self._pending_store_event_indices):
-                self._pending_store_event_indices.discard(j)
-                self._completed_store_events[j] = 1
-            return None, finished_recving or None
 
         if self._pending_load_event_indices:
             load_wm = self._poll_stream_events(is_store=False)
@@ -389,11 +358,6 @@ class SimpleCPUOffloadWorker:
 
     def _flush_and_sync_all(self) -> None:
         """Synchronize all in-flight transfer events."""
-        import vllm.envs as envs
-
-        # Meta CI: no in-flight transfers to sync.
-        if envs.VLLM_META_MODE:
-            return
         for event_idx, event in self._load_events:
             event.synchronize()
             self._load_hwm = event_idx
@@ -406,6 +370,9 @@ class SimpleCPUOffloadWorker:
 
     def _poll_stream_events(self, is_store: bool) -> int:
         """Non-blocking poll for completed events and return the high-water mark."""
+        if self._is_meta:
+            # Meta transfers carry no payload, so every pending event is done.
+            return sys.maxsize
         events = self._store_events if is_store else self._load_events
         hwm = self._store_hwm if is_store else self._load_hwm
         while events:
