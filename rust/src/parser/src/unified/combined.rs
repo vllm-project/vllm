@@ -176,7 +176,7 @@ mod tests {
     use crate::tool::{
         DeepSeekV3ToolParser, DeepSeekV4ToolParser, DeepSeekV31ToolParser, DeepSeekV32ToolParser,
         Glm47MoeToolParser, KimiK2ToolParser, MinimaxM2ToolParser, Qwen3CoderToolParser,
-        Qwen3XmlToolParser, Tool, ToolParser,
+        Qwen3JsonToolParser, Tool, ToolParser,
     };
     use crate::unified::{UnifiedParser, UnifiedParserEvent, UnifiedParserOutput};
 
@@ -452,25 +452,30 @@ mod tests {
 
     #[test]
     fn combined_parser_emits_tool_calls_from_visible_content() {
-        let tool = Qwen3XmlToolParser::create(&test_tools()).unwrap();
+        let tool = Qwen3JsonToolParser::create(&test_tools()).unwrap();
         let mut parser = CombinedParser::new(None, Some(tool));
 
         let output = collect(
             &mut parser,
             &[r#"<tool_call>
-<function=get_weather>
-<parameter=location>Paris</parameter>
-</function>
+{"name":"get_weather","arguments":{"location":"Paris"}}
 </tool_call>"#],
         );
 
         assert_eq!(
             output.events,
-            vec![UnifiedParserEvent::ToolCall(crate::tool::ToolCallDelta {
-                tool_index: 0,
-                name: Some("get_weather".to_string()),
-                arguments: r#"{"location":"Paris"}"#.to_string(),
-            })]
+            vec![
+                UnifiedParserEvent::ToolCall(crate::tool::ToolCallDelta {
+                    tool_index: 0,
+                    name: Some("get_weather".to_string()),
+                    arguments: String::new(),
+                }),
+                UnifiedParserEvent::ToolCall(crate::tool::ToolCallDelta {
+                    tool_index: 0,
+                    name: None,
+                    arguments: r#"{"location":"Paris"}"#.to_string(),
+                }),
+            ]
         );
     }
 
@@ -499,7 +504,7 @@ mod tests {
 
     #[test]
     fn split_parser_wrappers_match_builder_full_formats() {
-        assert_builder_parity::<Qwen3ReasoningParser, Qwen3XmlToolParser>("qwen3");
+        assert_builder_parity::<Qwen3ReasoningParser, Qwen3JsonToolParser>("qwen3");
         assert_builder_parity::<Qwen3ReasoningParser, Qwen3CoderToolParser>("qwen3.5");
         assert_builder_parity::<DeepSeekR1ReasoningParser, DeepSeekV3ToolParser>("deepseek-r1");
         assert_builder_parity::<DeepSeekV3ReasoningParser, DeepSeekV31ToolParser>("deepseek-v3.1");
@@ -521,7 +526,7 @@ mod tests {
             parallel_tool_calls: true,
         };
         let reasoning = Qwen3ReasoningParser::create(Arc::new(tokenizer())).unwrap();
-        let tool = Qwen3XmlToolParser::create(&tools).unwrap();
+        let tool = Qwen3JsonToolParser::create(&tools).unwrap();
         let visible = tool.build_visible_format(&ctx).unwrap().unwrap();
         let mut parser = CombinedParser::new(Some(reasoning), Some(tool));
         parser.initialize(&[]).unwrap();
@@ -620,7 +625,7 @@ mod tests {
         };
         let tokenizer = Arc::new(tokenizer());
         let reasoning = Qwen3ReasoningParser::create(tokenizer.clone()).unwrap();
-        let tool = Qwen3XmlToolParser::create(&tools).unwrap();
+        let tool = Qwen3JsonToolParser::create(&tools).unwrap();
         let mut parser = CombinedParser::new(Some(reasoning), Some(tool));
         parser.initialize(&[]).unwrap();
         let outside = parser.build_output_grammar(&ctx).unwrap().unwrap().format;

@@ -9,7 +9,7 @@ pub use internlm2::Internlm2ToolParser;
 pub use llama::Llama3JsonToolParser;
 pub use mistral::MistralToolParser;
 pub use phi4mini::Phi4MiniJsonToolParser;
-pub use qwen::Qwen3XmlToolParser;
+pub use qwen::Qwen3JsonToolParser;
 
 mod granite4;
 mod hermes;
@@ -56,6 +56,7 @@ pub(crate) struct JsonToolCallConfig {
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum JsonToolCallWhitespace {
     Optional,
+    Exact(&'static str),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -368,6 +369,7 @@ fn tool_call_delimiter_event(
 fn marker_whitespace(input: &mut JsonToolInput<'_>, config: JsonToolCallConfig) -> ModalResult<()> {
     match config.marker_whitespace {
         JsonToolCallWhitespace::Optional => ws0.void().parse_next(input),
+        JsonToolCallWhitespace::Exact(whitespace) => literal(whitespace).void().parse_next(input),
     }
 }
 
