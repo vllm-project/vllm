@@ -4,7 +4,7 @@ import functools
 from collections.abc import Callable
 from typing import Any, ParamSpec, TypeVar
 
-import torch
+from torch import bfloat16
 from torch import fx as fx
 
 from vllm import envs
@@ -207,7 +207,7 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
                 and rocm_aiter_ops.is_enabled()
                 and on_gfx950()
                 and model_config is not None
-                and model_config.dtype == torch.bfloat16
+                and model_config.dtype == bfloat16
                 and model_config.architecture
                 in {
                     "MuseGlimmerForCausalLM",
