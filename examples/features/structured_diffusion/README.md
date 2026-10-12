@@ -107,4 +107,5 @@ python examples/features/structured_diffusion/nemotron_smoke.py --url http://loc
 ```
 
 The smoke check validates answer shapes and finite, normalized probabilities for
-all three primitives and a 12-question request. It is not an accuracy benchmark.
+all three primitives, a 100-alternative choice and a 12-question request. It is
+not an accuracy benchmark.

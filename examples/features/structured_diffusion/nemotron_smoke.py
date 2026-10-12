@@ -42,6 +42,19 @@ def main():
                 ],
             }
         },
+        "wide_choice": {
+            "intent": {
+                "type": "choice",
+                "instructions": "Which intent matches this message?",
+                "criteria": {
+                    "payout_delay": "Payouts have been delayed or failed",
+                    **{
+                        f"intent_{i}": f"Unrelated request number {i}"
+                        for i in range(99)
+                    },
+                },
+            }
+        },
         "twelve_questions": {
             f"q{i}": {
                 "type": "noul",
