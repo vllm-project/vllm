@@ -497,7 +497,7 @@ set(VLLM_EXT_SRC
     "csrc/cpu/mla_decode.cpp"
     "csrc/cpu/pos_encoding.cpp"
     "csrc/cpu/mamba_cpu.cpp"
-    "csrc/moe/dynamic_4bit_int_moe_cpu.cpp"
+    "csrc/cpu/dynamic_4bit_int_moe_cpu.cpp"
     "csrc/cpu/cpu_fused_moe.cpp"
     "csrc/cpu/cpu_attn.cpp"
     "csrc/cpu/cpu_isa.cpp"
@@ -599,7 +599,7 @@ if (ENABLE_X86_ISA)
         "csrc/cpu/layernorm.cpp"
         "csrc/cpu/mla_decode.cpp"
         "csrc/cpu/pos_encoding.cpp"
-        "csrc/moe/dynamic_4bit_int_moe_cpu.cpp") 
+        "csrc/cpu/dynamic_4bit_int_moe_cpu.cpp") 
 
     set(VLLM_EXT_SRC_AVX2
         "csrc/cpu/sgl-kernels/fla.cpp"
@@ -617,7 +617,7 @@ if (ENABLE_X86_ISA)
         "csrc/cpu/layernorm.cpp"
         "csrc/cpu/mla_decode.cpp"
         "csrc/cpu/pos_encoding.cpp"
-        "csrc/moe/dynamic_4bit_int_moe_cpu.cpp") 
+        "csrc/cpu/dynamic_4bit_int_moe_cpu.cpp") 
 
     message(STATUS "CPU extension (AVX512F + BF16 + VNNI + AMX) source files: ${VLLM_EXT_SRC_AVX512} ${VLLM_EXT_SRC_SGL}")
     message(STATUS "CPU extension (AVX512F) source files: ${VLLM_EXT_SRC_AVX512}")

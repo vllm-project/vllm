@@ -51,7 +51,7 @@ from vllm.sequence import IntermediateTensors
 from .hyperconnection import GatedResidual, HyperConnectionConfig
 from .low_latency_gemm import enable_qwen4_exp_low_latency_gemm
 from .model import (
-    _HC_WEIGHTS_MAPPER,
+    _EXTRA_WEIGHTS_MAPPER,
     _QWEN4_EXP_IGNORED_MISSING_SUFFIXES,
     Qwen4ExpDecoderLayer,
     Qwen4ExpMixtureOfExperts,
@@ -173,7 +173,7 @@ def _make_draft_vllm_config(
     }
 )
 class Qwen4ExpMultiTokenPredictor(nn.Module):
-    hf_to_vllm_mapper = Qwen3_5Model.hf_to_vllm_mapper | _HC_WEIGHTS_MAPPER
+    hf_to_vllm_mapper = Qwen3_5Model.hf_to_vllm_mapper | _EXTRA_WEIGHTS_MAPPER
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()

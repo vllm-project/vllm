@@ -14,6 +14,7 @@ from vllm.v1.hisparse.runtime import (
     get_hisparse_host_block_stride,
     use_shared_hisparse_host_pool,
 )
+from vllm.v1.hisparse.types import ACTIVE_TAIL_PAGES
 from vllm.v1.kv_cache_interface import (
     HiSparseHotSpec,
     HiSparseResidentSpec,
@@ -332,7 +333,7 @@ def get_hisparse_kv_cache_config(
     device_groups = hisparse_layout.device_groups
     layout = vllm_config.cache_config.get_resolved_kv_cache_layout()
     validate_kv_cache_layout(layout, device_groups)
-    bytes_per_block = _get_kv_cache_bytes_per_block(device_groups)
+    bytes_per_block = _get_kv_cache_bytes_per_block(device_groups, layout)
     num_blocks = may_override_num_blocks(
         vllm_config, available_memory // bytes_per_block
     )
@@ -344,7 +345,7 @@ def get_hisparse_kv_cache_config(
     host_groups = [hisparse_layout.source_group]
     host_layout = KVCacheLayout.LBNHC
     validate_kv_cache_layout(host_layout, host_groups)
-    host_bytes_per_block = _get_kv_cache_bytes_per_block(host_groups)
+    host_bytes_per_block = _get_kv_cache_bytes_per_block(host_groups, host_layout)
     host_size = host_bytes_per_block * hisparse_layout.host_num_blocks
     kv_cache_tensors[:0] = _build_hisparse_kv_cache_tensors(
         host_groups,
@@ -373,3 +374,34 @@ def get_hisparse_kv_cache_config(
             vllm_config.cache_config.prefix_cache_retention_interval
         ),
     )
+
+
+def get_hisparse_steady_state_concurrency(
+    vllm_config: VllmConfig, kv_cache_config: KVCacheConfig
+) -> float:
+    """Max concurrency at max_model_len once running requests read from host.
+
+    A request reading from host pins only its active tail of each resident
+    group, but admitting one still takes its full in-flight window, so the
+    bound is all-but-one requests at steady state plus one being admitted.
+    """
+    admission_blocks = 0
+    steady_blocks = 0
+    host_blocks = 0
+    for group in kv_cache_config.kv_cache_groups:
+        spec = group.kv_cache_spec
+        required = cdiv(spec.max_memory_usage_bytes(vllm_config), spec.page_size_bytes)
+        if group.host_resident:
+            host_blocks += required
+            continue
+        admission_blocks += required
+        if isinstance(spec, HiSparseResidentSpec):
+            required = min(required, ACTIVE_TAIL_PAGES)
+        steady_blocks += required
+    assert kv_cache_config.hisparse_host_num_blocks is not None
+    num_blocks = kv_cache_config.num_blocks
+    if num_blocks < admission_blocks:
+        gpu_concurrency = num_blocks / admission_blocks
+    else:
+        gpu_concurrency = 1 + (num_blocks - admission_blocks) / steady_blocks
+    return min(gpu_concurrency, kv_cache_config.hisparse_host_num_blocks / host_blocks)
