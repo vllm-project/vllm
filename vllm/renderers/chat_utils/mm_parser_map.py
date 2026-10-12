@@ -2,9 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections import Counter
 from collections.abc import Callable
-from ctypes import cast
 from functools import partial
-from typing import TypeAlias
+from typing import TypeAlias, cast
 
 from openai.types.chat import (
     ChatCompletionAssistantMessageParam,
