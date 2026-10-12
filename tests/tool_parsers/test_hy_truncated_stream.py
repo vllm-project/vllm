@@ -23,9 +23,9 @@ vocab, so an unsuffixed test vocab exercises a different code path).
 """
 
 import json
-import re
 
 import pytest
+import regex as re
 
 from tests.parser.engine.replay_harness import (
     MockTokenizer,
