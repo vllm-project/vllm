@@ -7,7 +7,7 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
-from openai.types.responses import ToolChoiceFunction
+from openai.types.responses import CustomTool, ToolChoiceFunction
 from openai.types.responses.tool_choice_allowed import ToolChoiceAllowed
 from xgrammar import Grammar, StructuralTag
 from xgrammar import get_model_structural_tag as get_xgrammar_builtin_structural_tag
@@ -785,6 +785,19 @@ def test_get_model_structural_tag_supports_named_tool_choice(
     )
 
     assert isinstance(tag, StructuralTag)
+
+
+def test_glm_4_7_forced_custom_tool_uses_function_shim():
+    tools = [CustomTool(type="custom", name="emit_command", description="Emit.")]
+    tag = get_model_structural_tag(
+        model="glm_4_7",
+        tools=tools,
+        tool_choice="required",
+        reasoning=False,
+    )
+
+    assert isinstance(tag, StructuralTag)
+    assert "emit_command" in tag.model_dump_json()
 
 
 @pytest.mark.parametrize(
