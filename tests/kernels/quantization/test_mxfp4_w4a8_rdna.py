@@ -10,8 +10,10 @@ from unittest.mock import patch
 import pytest
 import torch
 
-import vllm.envs as envs
+import vllm.model_executor.kernels.linear as linear_kernels
+from vllm.config.quantization import QuantizationConfigArgs
 from vllm.model_executor.kernels.linear import (
+    EmulationMxfp4LinearKernel,
     MxFp4LinearLayerConfig,
     RdnaW4A8MxFp4LinearKernel,
     init_mxfp4_linear_kernel,
@@ -20,7 +22,9 @@ from vllm.model_executor.kernels.linear.mxfp4.rdna_w4a8 import (
     MAX_W4A8_BATCH_SIZE,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kInt8Dynamic32Sym,
     kMxfp4Dynamic,
+    kMxfp4Static,
     kMxfp6E3M2Dynamic,
 )
 from vllm.platforms import current_platform
@@ -156,17 +160,15 @@ def _make_layer(N: int, K: int):
 
 
 @gfx11_only
-@pytest.mark.parametrize("activation_quant_key", [None, kMxfp4Dynamic])
 @pytest.mark.parametrize("M", [1, 8, 9, 64])
-def test_linear_kernel_dispatch(activation_quant_key, M, monkeypatch):
+def test_linear_kernel_dispatch(M):
     """M <= 8 takes the W4A8 GEMV, larger M the weight-only dequant + GEMM
-    fallback, for both W4A16 and W4A4 checkpoints."""
+    fallback."""
     pytest.importorskip("quark")
-    monkeypatch.setattr(envs, "VLLM_ROCM_MXFP4_W4A8", True)
     torch.manual_seed(0)
     N, K = 256, 512
     kernel = RdnaW4A8MxFp4LinearKernel(
-        MxFp4LinearLayerConfig(activation_quant_key=activation_quant_key)
+        MxFp4LinearLayerConfig(activation_quant_key=kInt8Dynamic32Sym)
     )
     layer = _make_layer(N, K)
     kernel.process_weights_after_loading(layer)
@@ -187,20 +189,69 @@ def test_linear_kernel_dispatch(activation_quant_key, M, monkeypatch):
 
 
 @gfx11_only
-def test_init_selects_w4a8_only_when_enabled(monkeypatch):
+def test_init_selects_w4a8_only_for_int8_activations(monkeypatch):
     pytest.importorskip("quark")
-    monkeypatch.setattr(envs, "VLLM_ROCM_MXFP4_W4A8", True)
+    monkeypatch.setattr(
+        linear_kernels, "_user_linear_activation_override", lambda: None
+    )
+    kernel = init_mxfp4_linear_kernel(activation_quant_key=kInt8Dynamic32Sym)
+    assert isinstance(kernel, RdnaW4A8MxFp4LinearKernel)
+
+    for key in (None, kMxfp4Dynamic):
+        kernel = init_mxfp4_linear_kernel(activation_quant_key=key)
+        assert not isinstance(kernel, RdnaW4A8MxFp4LinearKernel)
+
+
+@gfx11_only
+def test_init_selects_w4a8_from_user_override(monkeypatch):
+    """--quantization-config.linear.activation int8_per_group_32 on a W4A4
+    checkpoint selects the W4A8 kernel."""
+    pytest.importorskip("quark")
+    monkeypatch.setattr(
+        linear_kernels, "_user_linear_activation_override", lambda: kInt8Dynamic32Sym
+    )
     kernel = init_mxfp4_linear_kernel(activation_quant_key=kMxfp4Dynamic)
     assert isinstance(kernel, RdnaW4A8MxFp4LinearKernel)
 
-    monkeypatch.setattr(envs, "VLLM_ROCM_MXFP4_W4A8", False)
-    kernel = init_mxfp4_linear_kernel(activation_quant_key=kMxfp4Dynamic)
-    assert not isinstance(kernel, RdnaW4A8MxFp4LinearKernel)
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("override", [None, kMxfp4Dynamic, kInt8Dynamic32Sym])
+@pytest.mark.parametrize("checkpoint", [None, kMxfp4Dynamic])
+def test_resolve_linear_activation_key(override, checkpoint, monkeypatch):
+    monkeypatch.setattr(
+        linear_kernels, "_user_linear_activation_override", lambda: override
+    )
+    resolved = linear_kernels._resolve_linear_activation_key(checkpoint)
+    assert resolved == (override if override is not None else checkpoint)
 
 
 @pytest.mark.cpu_test
-def test_can_implement_rejects_non_mxfp4_activation():
-    config = MxFp4LinearLayerConfig(activation_quant_key=kMxfp6E3M2Dynamic)
+def test_quantization_config_parses_int8_activation():
+    args = QuantizationConfigArgs(linear={"activation": "int8_per_group_32"})
+    assert args.linear is not None
+    assert args.linear.weight is None
+    assert args.linear.activation == kInt8Dynamic32Sym
+
+
+@pytest.mark.cpu_test
+def test_supports_quant_scheme_dispatches_on_activation():
+    assert RdnaW4A8MxFp4LinearKernel._supports_quant_scheme(
+        kMxfp4Static, kInt8Dynamic32Sym
+    )
+    for key in (None, kMxfp4Dynamic, kMxfp6E3M2Dynamic):
+        assert not RdnaW4A8MxFp4LinearKernel._supports_quant_scheme(kMxfp4Static, key)
+    # Kernels without an int8 path keep their previous activation formats.
+    assert not EmulationMxfp4LinearKernel._supports_quant_scheme(
+        kMxfp4Static, kInt8Dynamic32Sym
+    )
+    for key in (None, kMxfp4Dynamic, kMxfp6E3M2Dynamic):
+        assert EmulationMxfp4LinearKernel._supports_quant_scheme(kMxfp4Static, key)
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("key", [None, kMxfp4Dynamic, kMxfp6E3M2Dynamic])
+def test_can_implement_rejects_non_int8_activation(key):
+    config = MxFp4LinearLayerConfig(activation_quant_key=key)
     can_implement, reason = RdnaW4A8MxFp4LinearKernel.can_implement(config)
     assert not can_implement
     assert reason
