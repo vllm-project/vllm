@@ -77,6 +77,7 @@ steps:
 
 - label: ":nvidia: (L4) Distributed DP Basic"
   key: distributed-dp-tests-2-gpus
+  automatic_shard: true
   timeout_in_minutes: 45
   working_dir: "/vllm-workspace/tests"
   device: l4
@@ -300,6 +301,7 @@ steps:
 
 - label: ":nvidia: (L4) Distributed DP Extended"
   key: distributed-dp-tests-4-gpus
+  automatic_shard: true
   timeout_in_minutes: 45
   working_dir: "/vllm-workspace/tests"
   device: l4
@@ -508,9 +510,7 @@ steps:
       - examples/features/data_parallel/data_parallel_offline.py
       - vllm/_aiter_ops.py
       - vllm/platforms/rocm.py
-      - csrc/custom_quickreduce.cu
-      - csrc/ops.h
-      - csrc/torch_bindings.cpp
+      - csrc/rocm/quickreduce/
       - vllm/model_executor/layers/
       - vllm/entrypoints/llm.py
       - vllm/config/parallel.py
@@ -677,6 +677,7 @@ steps:
 
 - label: ":nvidia: (L4) RayExecutorV2"
   key: rayexecutorv2-4-gpus
+  automatic_shard: true
   timeout_in_minutes: 45
   working_dir: "/vllm-workspace/tests"
   device: l4
