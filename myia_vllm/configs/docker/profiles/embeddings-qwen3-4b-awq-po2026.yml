@@ -57,6 +57,16 @@ services:
       - HUGGING_FACE_HUB_TOKEN=${HUGGING_FACE_HUB_TOKEN}
       - VLLM_API_KEY=${VLLM_API_KEY}
       - VLLM_WORKER_MULTIPROC_METHOD=spawn
+      # GPU pinning — ATTENTION siège bi-GPU (po-2023, WARN Maintenance 12/10) :
+      # CUDA énumère par défaut en FASTEST_FIRST, donc CUDA index 0 = le GPU le
+      # plus RAPIDE, pas le bus PCI le plus bas. Écrit pour po-2026 (mono-GPU,
+      # index 0 sans ambiguïté). Sur po-2023, le device_ids ['0'] ci-dessous
+      # sélectionne en ordre nvidia-smi (PCI) — VÉRIFIER au déploiement que
+      # l'index 0 est bien le 3080 Ti interne LIBRE (et pas le 3090 externe
+      # occupé par une autre lane) : nvidia-smi --query-gpu=index,name,pci.bus_id,memory.used
+      # Ajuster le chiffre si non. Précédent même mécanisme : incident AnimateDiff
+      # 22/06/2026 (CUDA_DEVICE_ORDER=PCI_BUS_ID = correctif).
+      - CUDA_DEVICE_ORDER=PCI_BUS_ID
       - CUDA_VISIBLE_DEVICES=0
 
     volumes:
@@ -89,8 +99,13 @@ services:
       resources:
         reservations:
           devices:
+            # device_ids (remplace count:all, 12/10) : n'expose QUE le GPU visé —
+            # sur un siège bi-GPU, count:all exposait les deux et laissait
+            # l'énumération CUDA FASTEST_FIRST choisir le mauvais (le plus rapide
+            # = 3090 externe occupé sur po-2023). Ordre = nvidia-smi (PCI) ;
+            # vérifier l'index 0 au déploiement (cf. commentaire environment).
             - driver: nvidia
-              count: all
+              device_ids: ['0']
               capabilities: [gpu]
 
     restart: unless-stopped
