@@ -4,10 +4,11 @@ import functools
 from collections.abc import Callable
 from typing import Any, ParamSpec, TypeVar
 
+import torch
 from torch import fx as fx
 
 from vllm import envs
-from vllm._aiter_ops import rocm_aiter_ops
+from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
 from vllm.compilation.passes.utility.post_cleanup import PostCleanupPass
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.logger import init_logger
@@ -51,6 +52,11 @@ if current_platform.is_rocm() and rocm_aiter_ops.is_enabled():
     from .fusion.muse_glimmer_qk_rope_cache_fusion import (
         MuseGlimmerQkRopeCacheFusionPass,
     )
+
+if current_platform.is_rocm():
+    from vllm.platforms.rocm import on_gfx950
+
+    from .fusion.muse_glimmer_sandwich_norm_fusion import MuseSandwichNormFusionPass
 
 if current_platform.is_cuda():
     from .fusion.allreduce_rms_fusion import AllReduceFusionPass
@@ -197,6 +203,21 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
                     or rocm_aiter_ops.is_rdna_aiter_enabled()
                 ):
                     self.passes += [RocmAiterSiluMulFp8GroupQuantFusionPass(config)]
+
+            muse_sandwich_norm = (
+                current_platform.is_rocm()
+                and on_gfx950()
+                and is_aiter_found_and_supported()
+                and model_config is not None
+                and model_config.dtype == torch.bfloat16
+                and model_config.architecture
+                in {
+                    "MuseGlimmerForCausalLM",
+                    "MuseGlimmerForConditionalGeneration",
+                }
+            )
+            if muse_sandwich_norm:
+                self.passes += [MuseSandwichNormFusionPass(config)]
 
             muse_qk_rope_cache = (
                 current_platform.is_rocm()

@@ -1036,20 +1036,6 @@ class MuseGlimmerDecoderLayer(nn.Module):
         # Sandwich norms with baked +1 offset. Pre-norms use rms_norm_eps; the
         # post-norms use the (typically smaller) post_norm_eps.
         self.use_amd_fused_norm = current_platform.is_rocm()
-        self.use_aiter_sandwich_norm = False
-        if self.use_amd_fused_norm:
-            from vllm._aiter_ops import is_aiter_found_and_supported
-            from vllm.platforms.rocm import on_gfx950
-
-            self.use_aiter_sandwich_norm = (
-                on_gfx950() and is_aiter_found_and_supported()
-            )
-            if self.use_aiter_sandwich_norm:
-                from aiter.ops.triton.normalization.fused_rmsnorm_add_rmsnorm import (
-                    fused_rmsnorm_add_rmsnorm,
-                )
-
-                self.fused_rmsnorm_add_rmsnorm = fused_rmsnorm_add_rmsnorm
 
         def make_sandwich_norm(eps: float) -> nn.Module:
             if self.use_amd_fused_norm:
@@ -1066,30 +1052,12 @@ class MuseGlimmerDecoderLayer(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None,
-        next_input_layernorm: GemmaRMSNorm | None = None,
-        input_pre_normalized: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # Gemma2-style sandwich, replicated explicitly (matches HF MuseGlimmer).
-        use_aiter_sandwich_norm = (
-            self.use_aiter_sandwich_norm and hidden_states.dtype == torch.bfloat16
-        )
-        if not input_pre_normalized:
-            residual = hidden_states
-            hidden_states = self.input_layernorm(hidden_states)
+        residual = hidden_states
+        hidden_states = self.input_layernorm(hidden_states)
         hidden_states = self.self_attn(positions=positions, hidden_states=hidden_states)
-        if use_aiter_sandwich_norm:
-            residual_out = torch.empty_like(hidden_states)
-            hidden_states = self.fused_rmsnorm_add_rmsnorm(
-                hidden_states,
-                residual,
-                self.post_attention_layernorm.weight,
-                self.pre_feedforward_layernorm.weight,
-                self.post_attention_layernorm.variance_epsilon,
-                self.pre_feedforward_layernorm.variance_epsilon,
-                residual_out,
-            )
-            residual = residual_out
-        elif self.use_amd_fused_norm:
+        if self.use_amd_fused_norm:
             hidden_states = self.post_attention_layernorm(hidden_states)
             hidden_states, residual = self.pre_feedforward_layernorm(
                 hidden_states, residual
@@ -1100,21 +1068,8 @@ class MuseGlimmerDecoderLayer(nn.Module):
             residual = hidden_states
             hidden_states = self.pre_feedforward_layernorm(hidden_states)
         hidden_states = self.mlp(hidden_states)
-        if use_aiter_sandwich_norm and next_input_layernorm is not None:
-            residual_out = torch.empty_like(hidden_states)
-            hidden_states = self.fused_rmsnorm_add_rmsnorm(
-                hidden_states,
-                residual,
-                self.post_feedforward_layernorm.weight,
-                next_input_layernorm.weight,
-                self.post_feedforward_layernorm.variance_epsilon,
-                next_input_layernorm.variance_epsilon,
-                residual_out,
-            )
-            residual = residual_out
-        else:
-            hidden_states = self.post_feedforward_layernorm(hidden_states)
-            hidden_states = residual + hidden_states
+        hidden_states = self.post_feedforward_layernorm(hidden_states)
+        hidden_states = residual + hidden_states
         return hidden_states, residual
 
 
@@ -1172,32 +1127,19 @@ class MuseGlimmerModel(nn.Module, EagleModelMixin):
         aux_hidden_states = self._maybe_add_hidden_state(
             [], self.start_layer, hidden_states, None
         )
-        input_pre_normalized = False
         for layer_idx, layer in enumerate(
             islice(self.layers, self.start_layer, self.end_layer),
             start=self.start_layer,
         ):
-            next_input_layernorm = None
-            if (
-                layer.use_aiter_sandwich_norm
-                and hidden_states.dtype == torch.bfloat16
-                and layer_idx + 1 < self.end_layer
-            ):
-                next_input_layernorm = self.layers[
-                    layer_idx + 1
-                ].input_layernorm
             hidden_states, residual = layer(
                 positions,
                 hidden_states,
                 residual,
-                next_input_layernorm,
-                input_pre_normalized,
             )
-            input_pre_normalized = next_input_layernorm is not None
             self._maybe_add_hidden_state(
                 aux_hidden_states,
                 layer_idx + 1,
-                residual if input_pre_normalized else hidden_states,
+                hidden_states,
                 None,
             )
         if not get_pp_group().is_last_rank:
