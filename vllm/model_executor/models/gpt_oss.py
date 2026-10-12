@@ -43,7 +43,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
-    load_padded_attention_sink,
+    load_attention_sink,
     maybe_remap_kv_scale_name,
     remap_moe_expert_weights,
 )
@@ -131,7 +131,7 @@ class OAIAttention(nn.Module):
         self.sinks = torch.nn.Parameter(
             torch.empty(config.num_attention_heads // tp_size, requires_grad=False)
         )
-        self.sinks.weight_loader = load_padded_attention_sink
+        self.sinks.weight_loader = load_attention_sink
 
         self.q_size = self.num_attention_heads * self.head_dim // tp_size
         self.kv_size = self.num_key_value_heads * self.head_dim // tp_size

@@ -1497,13 +1497,13 @@ def row_parallel_weight_loader(
 LoaderFunction = Callable[[torch.Tensor, torch.Tensor], None]
 
 
-def load_padded_attention_sink(
-    param: torch.Tensor, loaded_weight: torch.Tensor
-) -> None:
+def load_attention_sink(param: torch.Tensor, loaded_weight: torch.Tensor) -> None:
     """Load global sink heads into a TP-local parameter, padding with -inf.
 
-    Register this as the parameter's weight_loader so layerwise reload can
-    replay both sharding and padding onto the restored parameter.
+    Attention sinks are checkpoint-backed parameters and must participate in
+    the standard weight_loader pipeline. Register this on the parameter so
+    layerwise reload can replay sharding and shape adaptation during RL weight
+    updates. Model-specific load_weights copies bypass that lifecycle.
 
     Args:
         param: One-dimensional runtime sink, optionally padded.
@@ -1514,6 +1514,8 @@ def load_padded_attention_sink(
     tp_rank = get_tensor_model_parallel_rank()
     if param.ndim != 1 or loaded_weight.ndim != 1:
         raise ValueError("Attention sinks must be one-dimensional")
+    # Current sink checkpoints use evenly partitioned attention heads. Models
+    # with uneven TP partitions will need explicit head ranges here.
     if loaded_weight.numel() == 0 or loaded_weight.numel() % tp_size:
         raise ValueError("Attention sink heads must be divisible by TP size")
     local_heads = loaded_weight.numel() // tp_size

@@ -39,7 +39,7 @@ from vllm.model_executor.model_loader.reload.utils import get_layer_tensors
 from vllm.model_executor.model_loader.weight_utils import (
     composed_weight_loader,
     default_weight_loader,
-    load_padded_attention_sink,
+    load_attention_sink,
 )
 from vllm.platforms import current_platform
 
@@ -64,7 +64,7 @@ def test_attention_sink_layerwise_reload(monkeypatch, tp_rank, padding):
             self.sink = torch.nn.Parameter(
                 torch.empty(4 + padding), requires_grad=False
             )
-            self.sink.weight_loader = load_padded_attention_sink
+            self.sink.weight_loader = load_attention_sink
             self.proj = torch.nn.Parameter(torch.zeros(16), requires_grad=False)
             self.proj.weight_loader = default_weight_loader
 

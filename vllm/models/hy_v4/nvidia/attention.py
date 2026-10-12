@@ -40,7 +40,7 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
 )
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sparse_attn_indexer import SparseAttnIndexer
-from vllm.model_executor.model_loader.weight_utils import load_padded_attention_sink
+from vllm.model_executor.model_loader.weight_utils import load_attention_sink
 from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 from vllm.platforms import current_platform
 from vllm.v1.attention.backend import AttentionBackend, AttentionType
@@ -502,7 +502,7 @@ class HYV4MLAAttention(nn.Module):
                     dtype=torch.float32 if enable_sink else torch.bfloat16,
                 )
             )
-            self.learnable_sink_param.weight_loader = load_padded_attention_sink
+            self.learnable_sink_param.weight_loader = load_attention_sink
             if enable_sink:
                 sinks = self.learnable_sink_param
                 self._force_sparse_mqa()

@@ -47,7 +47,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
-    load_padded_attention_sink,
+    load_attention_sink,
     maybe_remap_kv_scale_name,
 )
 from vllm.model_executor.models.utils import sequence_parallel_chunk
@@ -296,7 +296,7 @@ class MiMoV2Attention(nn.Module):
             else None
         )
         if self.attention_sink_bias is not None:
-            self.attention_sink_bias.weight_loader = load_padded_attention_sink
+            self.attention_sink_bias.weight_loader = load_attention_sink
 
         sliding_window = sliding_window_size if sliding_window_size > -1 else None
 

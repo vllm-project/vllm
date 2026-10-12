@@ -9,13 +9,59 @@ import pytest
 import torch
 from huggingface_hub.utils import LocalEntryNotFoundError
 
+import vllm.model_executor.model_loader.weight_utils as weight_utils
 from vllm.model_executor.model_loader.weight_utils import (
     download_weights_from_hf,
     drop_checkpoint_cache,
     initialize_single_dummy_weight,
+    load_attention_sink,
     maybe_remap_kv_scale_name,
 )
 from vllm.platforms import current_platform
+
+
+@pytest.mark.parametrize(
+    "checkpoint_heads,runtime_heads,tp_size",
+    [(8, 4, 2), (8, 8, 1), (8, 6, 2), (16, 12, 4)],
+)
+def test_attention_sink_loader_shapes(
+    monkeypatch, checkpoint_heads, runtime_heads, tp_size
+):
+    """Each rank loads its checkpoint heads and disables only padded heads."""
+    monkeypatch.setattr(
+        weight_utils, "get_tensor_model_parallel_world_size", lambda: tp_size
+    )
+    checkpoint = torch.arange(checkpoint_heads, dtype=torch.float32)
+    for tp_rank in range(tp_size):
+        monkeypatch.setattr(
+            weight_utils, "get_tensor_model_parallel_rank", lambda rank=tp_rank: rank
+        )
+        param = torch.nn.Parameter(torch.zeros(runtime_heads), requires_grad=False)
+        load_attention_sink(param, checkpoint)
+        local_heads = checkpoint.chunk(tp_size)[tp_rank]
+        expected = torch.cat(
+            (
+                local_heads,
+                torch.full((runtime_heads - local_heads.numel(),), -torch.inf),
+            )
+        )
+        assert torch.equal(param, expected)
+
+
+@pytest.mark.parametrize(
+    "checkpoint_shape,runtime_shape",
+    [((2, 4), (4,)), ((8,), (2, 2)), ((0,), (4,)), ((7,), (4,)), ((8,), (3,))],
+)
+def test_attention_sink_loader_rejects_invalid_shapes(
+    monkeypatch, checkpoint_shape, runtime_shape
+):
+    """Invalid sink shapes fail before changing the runtime parameter."""
+    monkeypatch.setattr(weight_utils, "get_tensor_model_parallel_world_size", lambda: 2)
+    monkeypatch.setattr(weight_utils, "get_tensor_model_parallel_rank", lambda: 0)
+    param = torch.nn.Parameter(torch.ones(runtime_shape), requires_grad=False)
+    with pytest.raises(ValueError):
+        load_attention_sink(param, torch.zeros(checkpoint_shape))
+    assert torch.equal(param, torch.ones(runtime_shape))
 
 
 def test_download_weights_from_hf():
