@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import Any
 
-import torch
 from typing_extensions import override
 
 from vllm.platforms import current_platform
@@ -162,24 +161,26 @@ class CPUOffloadingSpec(OffloadingSpec):
     def _uses_shared_region(self) -> bool:
         """Whether the worker CPU buffer is the shared mmap region (vs a private
         per-rank tensor); replicated-layout dedup is gated on this being True."""
-        return current_platform.is_cuda_alike() and not current_platform.is_rocm()
+        return (
+            current_platform.is_cuda_alike() and not current_platform.is_rocm()
+        ) or current_platform.is_xpu()
 
     def create_worker(self, kv_caches: CanonicalKVCaches) -> CPUOffloadingWorker:
         mmap_region: SharedOffloadRegion | None = None
         # num_chunks == 0 would size the region to zero bytes, which cannot be
         # mmap'd; fall back to the tensor path (empty tensors) as before.
         if self._uses_shared_region() and self.num_chunks > 0:
-            # Replicated layout puts all ranks on slot 0 (single MLA copy) of one
-            # region. Otherwise ranks never read each other's slots, so each gets
-            # its own region, with no peers to wait for before unlinking it.
+            # Replicated layout shares one region. Otherwise workers use
+            # independent regions keyed by their logical rank.
             engine_id = self.config.engine_id
             row_bytes = self.kv_bytes_per_chunk
             if not self.replicated_layout:
-                world_size = self.config.parallel.world_size
-                engine_id += f"_{torch.accelerator.current_device_index() % world_size}"
+                rank = self.config.parallel.rank
+                engine_id += f"_{rank}"
                 row_bytes = round_up(
                     self.cpu_page_size_per_worker, self.BLOCK_SIZE_ALIGNMENT
                 )
+
             mmap_region = SharedOffloadRegion(
                 engine_id=engine_id,
                 num_chunks=self.num_chunks,
