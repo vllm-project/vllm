@@ -133,10 +133,9 @@ fused_add_rms_norm_kernel(
   for (int idx = threadIdx.x; idx < vec_hidden_size; idx += blockDim.x) {
     int64_t id = blockIdx.x * residual_stride / width + idx;
     int64_t strided_id = blockIdx.x * vec_input_stride + idx;
-    _f16Vec<scalar_t, width> temp = input_v[strided_id];
-    temp += residual_v[id];
-    variance += temp.sum_squares();
-    residual_v[id] = temp;
+    /* Match the native IR: compute the variance from the unrounded FP32
+       sum (x.float() + residual.float()) before the residual is rounded. */
+    variance += input_v[strided_id].sum_squares(residual_v[id]);
   }
 
   using BlockReduce = cub::BlockReduce<float, 1024>;
@@ -151,24 +150,25 @@ fused_add_rms_norm_kernel(
   for (int idx = threadIdx.x; idx < vec_hidden_size; idx += blockDim.x) {
     int64_t id = blockIdx.x * residual_stride / width + idx;
     int64_t strided_id = blockIdx.x * vec_input_stride + idx;
-    _f16Vec<scalar_t, width> res = residual_v[id];
-    _f16Vec<scalar_t, width> out;
     using Converter = _typeConvert<scalar_t>;
-    if constexpr (HasWeight) {
-      _f16Vec<scalar_t, width> w = weight_v[idx];
+    _f16Vec<scalar_t, width> sum;
+    _f16Vec<scalar_t, width> out;
 #pragma unroll
-      for (int j = 0; j < width; ++j) {
-        float x = Converter::convert(res.data[j]);
-        float wf = Converter::convert(w.data[j]);
-        out.data[j] = Converter::convert(x * s_variance * wf);
-      }
-    } else {
-#pragma unroll
-      for (int j = 0; j < width; ++j) {
-        float x = Converter::convert(res.data[j]);
-        out.data[j] = Converter::convert(x * s_variance);
+    for (int j = 0; j < width; ++j) {
+      float s = Converter::convert(input_v[strided_id].data[j]) +
+                Converter::convert(residual_v[id].data[j]);
+      sum.data[j] = Converter::convert(s);
+      float x_norm = s * s_variance;
+      if constexpr (HasWeight) {
+        /* Match the native IR, which rounds to the weight dtype before
+           multiplying: (x * rsqrt).to(weight.dtype) * weight. */
+        out.data[j] =
+            Converter::convert(x_norm) * weight_v[idx].data[j];
+      } else {
+        out.data[j] = Converter::convert(x_norm);
       }
     }
+    residual_v[id] = sum;
     input_v[strided_id] = out;
   }
 }
@@ -189,11 +189,11 @@ fused_add_rms_norm_kernel(
   float variance = 0.0f;
 
   for (int idx = threadIdx.x; idx < hidden_size; idx += blockDim.x) {
-    scalar_t z = input[blockIdx.x * input_stride + idx];
-    z += residual[blockIdx.x * residual_stride + idx];
-    float x = (float)z;
-    variance += x * x;
-    residual[blockIdx.x * residual_stride + idx] = z;
+    /* Match the native IR: compute the variance from the unrounded FP32
+       sum (x.float() + residual.float()) before the residual is rounded. */
+    float s = (float)input[blockIdx.x * input_stride + idx];
+    s += (float)residual[blockIdx.x * residual_stride + idx];
+    variance += s * s;
   }
 
   using BlockReduce = cub::BlockReduce<float, 1024>;
@@ -206,12 +206,17 @@ fused_add_rms_norm_kernel(
   __syncthreads();
 
   for (int idx = threadIdx.x; idx < hidden_size; idx += blockDim.x) {
-    float x = (float)residual[blockIdx.x * residual_stride + idx];
+    int64_t idx_input = blockIdx.x * input_stride + idx;
+    int64_t idx_residual = blockIdx.x * residual_stride + idx;
+    float s = (float)input[idx_input] + (float)residual[idx_residual];
+    residual[idx_residual] = (scalar_t)s;
+    float x_norm = s * s_variance;
     if constexpr (HasWeight) {
-      float w = (float)weight[idx];
-      input[blockIdx.x * input_stride + idx] = (scalar_t)(x * s_variance * w);
+      /* Match the native IR, which rounds to the weight dtype before
+         multiplying: (x * rsqrt).to(weight.dtype) * weight. */
+      input[idx_input] = (scalar_t)((scalar_t)x_norm * (scalar_t)weight[idx]);
     } else {
-      input[blockIdx.x * input_stride + idx] = (scalar_t)(x * s_variance);
+      input[idx_input] = (scalar_t)x_norm;
     }
   }
 }
