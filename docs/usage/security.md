@@ -645,7 +645,7 @@ TLS encrypts the content of a streamed response but not the size or timing of ea
 
 ### Stream Obfuscation
 
-When stream obfuscation is enabled, vLLM adds an `obfuscation` field of random characters to each streamed chunk, rounding the size of its JSON payload up to a multiple of 128 bytes. Most chunks in a stream then have the same size, regardless of token length. This follows the OpenAI API's `stream_options.include_obfuscation` option and applies to `/v1/chat/completions`, `/v1/completions`, and the delta events of `/v1/responses`. Clients that parse chunks as JSON can ignore the field.
+When stream obfuscation is enabled, vLLM adds an `obfuscation` field of random characters to each streamed chunk, rounding the size of its JSON payload up to a multiple of 128 bytes. Most chunks in a stream then have the same size, regardless of token length. This follows the OpenAI API's `stream_options.include_obfuscation` option and applies to `/v1/chat/completions`, `/v1/completions`, and the delta events of `/v1/responses`. Clients that parse chunks as JSON can ignore the field. It does not apply to the token-level `/inference/v1/generate` endpoint or to the Rust frontend.
 
 Stream obfuscation is disabled by default. Start the server with `--enable-stream-obfuscation` to enable it for all streaming requests. Individual requests can override the server default:
 
@@ -665,7 +665,7 @@ For `GET /v1/responses/{response_id}?stream=true`, pass `include_obfuscation` as
 - **Clients streaming directly from vLLM over untrusted networks**: Start the server with `--enable-stream-obfuscation`.
 - **vLLM behind a gateway**: The client-facing stream is produced by the gateway. Make sure the gateway forwards the `obfuscation` field unchanged or applies its own padding.
 - Obfuscation hides token lengths but not token timing. `--stream-interval` sends several tokens per chunk, which further reduces the information exposed at the cost of streaming granularity.
-- Obfuscation adds up to 127 bytes per chunk. Leave it disabled when clients and server communicate over a trusted network.
+- Obfuscation adds 17 to 144 bytes per chunk. Leave it disabled when clients and server communicate over a trusted network.
 
 ## Multimodal Media UUID Security
 
