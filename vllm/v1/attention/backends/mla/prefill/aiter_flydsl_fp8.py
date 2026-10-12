@@ -47,7 +47,10 @@ class AiterFlyDSLFP8PrefillBackend(AiterFlashAttnPrefillBackend):
         return "ROCM_AITER_FLYDSL_FP8"
 
     @classmethod
-    def supports_compute_capability(cls, device_capability: "DeviceCapability") -> bool:
+    def supports_compute_capability(
+        cls,
+        device_capability: "DeviceCapability | None",
+    ) -> bool:
         if not current_platform.is_rocm():
             return False
         from vllm.platforms.rocm import on_gfx950
@@ -70,7 +73,7 @@ class AiterFlyDSLFP8PrefillBackend(AiterFlashAttnPrefillBackend):
     @classmethod
     def validate_configuration(
         cls,
-        device_capability: "DeviceCapability",
+        device_capability: "DeviceCapability | None",
         selector_config: "MLAPrefillSelectorConfig",
     ) -> list[str]:
         invalid_reasons = super().validate_configuration(
