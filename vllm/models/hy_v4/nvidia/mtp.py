@@ -8,7 +8,7 @@ from collections.abc import Callable, Iterable
 
 import torch
 from torch import nn
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.distributed import (
@@ -59,7 +59,7 @@ _MTP_QUANT_EXCLUSION_ATTRS = ("ignored_layers", "exclude_modules")
 
 
 def _get_spec_layer_idx_from_weight_name(
-    config: PretrainedConfig, weight_name: str
+    config: PreTrainedConfig, weight_name: str
 ) -> int | None:
     """Return the MTP layer index a checkpoint weight belongs to, or None.
 
@@ -147,7 +147,7 @@ def _prepare_mtp_fp8_expert_scale(
 
 
 def _create_mtp_quant_config(
-    hf_config: PretrainedConfig,
+    hf_config: PreTrainedConfig,
     backbone_quant_config: QuantizationConfig | None = None,
 ) -> QuantizationConfig | None:
     """Create the quantization config for the MTP layers.
@@ -303,7 +303,7 @@ class HYV4SharedHead(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None = None,
     ) -> None:
         super().__init__()
@@ -329,7 +329,7 @@ class HYV4MultiTokenPredictorLayer(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         prefix: str,
         vllm_config: VllmConfig,
         model_config: ModelConfig,

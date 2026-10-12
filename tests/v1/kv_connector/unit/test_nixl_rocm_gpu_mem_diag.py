@@ -12,12 +12,15 @@ import gc
 import pytest
 import torch
 
+from tests.utils import wait_for_gpu_memory_to_clear
 from vllm.platforms import current_platform
 
 pytestmark = pytest.mark.skipif(
     not current_platform.is_rocm(),
     reason="ROCm platform required",
 )
+
+MAX_LEAK_PCT = 10
 
 
 def _mb(b: int) -> float:
@@ -59,6 +62,18 @@ def _full_gpu_cleanup():
         if gc.collect() == 0:
             break
     torch.accelerator.empty_cache()
+
+
+def _wait_for_driver_memory_release(baseline: dict, peak: dict) -> None:
+    # Process exit can precede ROCm's release of the backing allocation.
+    peak_delta_mb = max(0.0, peak["drv_used_mb"] - baseline["drv_used_mb"])
+    target_mb = baseline["drv_used_mb"] + peak_delta_mb * MAX_LEAK_PCT / 100
+    wait_for_gpu_memory_to_clear(
+        devices=[torch.accelerator.current_device_index()],
+        threshold_bytes=int(target_mb * 1024**2),
+        timeout_s=120,
+        poll_interval_s=1,
+    )
 
 
 @pytest.mark.parametrize("model_name, sw_size", [("google/gemma-3-1b-it", 512)])
@@ -116,7 +131,7 @@ def test_gpu_memory_nixl_hma(model_name, sw_size):
 
     # shutdown + cleanup
     print("\n--- shutdown ---")
-    llm.llm_engine.engine_core.shutdown()
+    llm.llm_engine.engine_core.shutdown(timeout=60)
     _gpu_snapshot("3. after shutdown()", snap2["alloc_mb"])
 
     del llm
@@ -126,6 +141,7 @@ def test_gpu_memory_nixl_hma(model_name, sw_size):
     torch._dynamo.reset()
     gc.collect()
     torch.accelerator.empty_cache()
+    _wait_for_driver_memory_release(snap0, snap2)
     snap_final = _gpu_snapshot("4. final", snap2["alloc_mb"])
 
     # summary
@@ -160,7 +176,7 @@ def test_gpu_memory_nixl_hma(model_name, sw_size):
     # Peak driver memory used above baseline
     drv_peak = snap2["drv_used_mb"] - drv_base
     leak_pct = (drv_leaked / drv_peak * 100) if drv_peak > 0 else 0
-    max_leak_pct = 10
+    max_leak_pct = MAX_LEAK_PCT
     assert leak_pct <= max_leak_pct, (
         f"{drv_leaked:.0f} MB ({leak_pct:.1f}%) of driver-level GPU memory "
         f"not freed after NixlConnector shutdown "
@@ -196,7 +212,7 @@ def test_gpu_memory_no_nixl_baseline(model_name):
     llm.generate(["hi " * 500], SamplingParams(max_tokens=1))
     snap_peak = _gpu_snapshot("after generate()", snap0["alloc_mb"])
 
-    llm.llm_engine.engine_core.shutdown()
+    llm.llm_engine.engine_core.shutdown(timeout=60)
     del llm
     _full_gpu_cleanup()
     cleanup_dist_env_and_memory()
@@ -204,6 +220,7 @@ def test_gpu_memory_no_nixl_baseline(model_name):
     torch._dynamo.reset()
     gc.collect()
     torch.accelerator.empty_cache()
+    _wait_for_driver_memory_release(snap0, snap_peak)
     snap_final = _gpu_snapshot("final", snap0["alloc_mb"])
 
     drv_base = snap0["drv_used_mb"]
@@ -213,7 +230,7 @@ def test_gpu_memory_no_nixl_baseline(model_name):
     print("=" * 90)
 
     leak_pct = (drv_leaked / drv_peak * 100) if drv_peak > 0 else 0
-    max_leak_pct = 10
+    max_leak_pct = MAX_LEAK_PCT
     assert leak_pct <= max_leak_pct, (
         f"{drv_leaked:.0f} MB ({leak_pct:.1f}%) of driver-level GPU memory "
         f"not freed after baseline shutdown "

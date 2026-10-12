@@ -132,7 +132,8 @@ M_FACTORS_WVSPLITKRC = [128, 128 + 16, 256, 256 + 16, 640, 640 + 16]
 NKM_FACTORS_WVSPLITKRC_LARGE_K = [
     (128, 6144, 128),
     (96, 8192, 128),
-    (128, 12288, 128),
+    # Keep 24 K-shards (batched readback) within the DPX budget of 128 CUs.
+    (128, 12288, 64),
     (32, 12288, 128),
 ]
 

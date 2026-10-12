@@ -83,10 +83,7 @@ directly from the Triton kernel through unified virtual addressing (UVA),
 prefetching on a side CUDA stream so transfers overlap with the compute of
 preceding layers. The freed GPU memory goes to the KV cache.
 
-`cpu_offload` defaults to `true` (on): it follows the
-`VLLM_PLE_CPU_OFFLOAD` environment variable, which also defaults to `true`.
-An explicit `--engram-config` value takes precedence over the environment
-variable.
+`cpu_offload` defaults to `true` (on)
 
 To keep the tables resident on GPU instead (e.g. when host memory is
 scarce):
@@ -96,8 +93,8 @@ vllm serve deepseek-ai/DeepSeek-V4.1-Flash \
   --engram-config.cpu_offload false
 ```
 
-or equivalently `VLLM_PLE_CPU_OFFLOAD=0`. CPU offload requires a GPU with UVA
-support; vLLM fails fast when it is unavailable.
+CPU offload requires a GPU with UVA support;
+vLLM fails fast when it is unavailable.
 
 ## Data-parallel topologies (DeepSeek V4.1)
 

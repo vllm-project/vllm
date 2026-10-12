@@ -254,6 +254,7 @@ class TrtLlmBf16ExpertsMonolithic(TrtLlmBf16ExpertsBase, mk.FusedMoEExpertsMonol
             RoutingMethodType.Renormalize,
             RoutingMethodType.RenormalizeNaive,
             RoutingMethodType.SigmoidRenorm,
+            RoutingMethodType.MiniMax2,
             RoutingMethodType.Sigmoid,
         ]
 
@@ -272,6 +273,7 @@ class TrtLlmBf16ExpertsMonolithic(TrtLlmBf16ExpertsBase, mk.FusedMoEExpertsMonol
         e_score_correction_bias: torch.Tensor | None = None,
         routed_scaling_factor: float | None = None,
         topk_group: int | None = None,
+        routing_replay_out: torch.Tensor | None = None,
     ) -> torch.Tensor | UnfinalizedMoEOutput:
         import flashinfer
 
@@ -282,10 +284,6 @@ class TrtLlmBf16ExpertsMonolithic(TrtLlmBf16ExpertsBase, mk.FusedMoEExpertsMonol
         # dummy 0-token forward has to keep the finalized (empty) form.
         defer = self.moe_config.should_defer_moe_finalize(num_tokens)
 
-        routing_replay_out = self._maybe_make_routing_replay_buffer(
-            num_tokens=num_tokens,
-            device=hidden_states.device,
-        )
         flashinfer_output = flashinfer.fused_moe.trtllm_bf16_moe(
             routing_logits=router_logits,
             routing_bias=e_score_correction_bias,
@@ -312,5 +310,4 @@ class TrtLlmBf16ExpertsMonolithic(TrtLlmBf16ExpertsBase, mk.FusedMoEExpertsMonol
             num_tokens=num_tokens,
             top_k=self.topk,
         )
-        self._maybe_dispatch_routing_replay(routing_replay_out, num_tokens=num_tokens)
         return routed_output
