@@ -25,7 +25,7 @@ from aiter.ops.flydsl.kernels import buffer_ops as bo
 from flydsl.expr import gpu, range_constexpr
 from flydsl.expr.typing import T
 
-from vllm.models.kimi_k3.amd.mono.attention.kda import (
+from vllm.models.kimi_k3.amd.ops.mono.attention.kda import (
     COLS,
     HIDDEN,
     LDS_PAD,
@@ -33,7 +33,7 @@ from vllm.models.kimi_k3.amd.mono.attention.kda import (
     PROJ,
     ROWS,
 )
-from vllm.models.kimi_k3.amd.mono.common.ops import (
+from vllm.models.kimi_k3.amd.ops.mono.common.ops import (
     CM_NT,
     bf16_round,
     mfma_bf16,
@@ -41,13 +41,13 @@ from vllm.models.kimi_k3.amd.mono.common.ops import (
     rsrc,
     traced,
 )
-from vllm.models.kimi_k3.amd.mono.common.plan import (
+from vllm.models.kimi_k3.amd.ops.mono.common.plan import (
     BLOCKS,
     THREADS,
     WAVES,
     pair_layout,
 )
-from vllm.models.kimi_k3.amd.mono.common.ranks import sum_partials
+from vllm.models.kimi_k3.amd.ops.mono.common.ranks import sum_partials
 
 TP = 8
 OROWS = HIDDEN  # o_proj rows (full hidden, a rank's K slice)

@@ -73,7 +73,7 @@ from vllm.model_executor.models.utils import (
 from vllm.models.kimi_k3.amd.kda import KimiK3DeltaAttention
 from vllm.models.kimi_k3.amd.latent_moe_runner import ROCmLatentMoERunner
 from vllm.models.kimi_k3.amd.mla import KimiK3MultiHeadLatentAttentionWrapper
-from vllm.models.kimi_k3.amd.mono import routing as mono
+from vllm.models.kimi_k3.amd.mono import runtime as mono
 from vllm.models.kimi_k3.amd.ops.attn_res import attn_res
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
@@ -883,8 +883,6 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
             block_residual[:, : residual.size(1), :].copy_(residual)
         residual = block_residual
         prefix_delta = None
-        if self.mono is not None:
-            self.mono.begin_step(hidden_states.size(0))
 
         for layer_idx, layer in enumerate(
             self.layers[self.start_layer : self.end_layer],
@@ -1067,12 +1065,14 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
 class KimiLinearForCausalLM(
     nn.Module, HasInnerState, SupportsPP, MixtureOfExperts, IsHybrid
 ):
+    mono_spec = "vllm.models.kimi_k3.amd.mono.spec:MONO_SPEC"
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         self.model_config = vllm_config.model_config
         self.vllm_config = vllm_config
-        if mono.enabled():
-            mono.configure(vllm_config)
+        if mono.enabled(vllm_config):
+            mono.configure(vllm_config, self.mono_spec)
         self.config = self.model_config.hf_config
         quant_config = vllm_config.quant_config
         self.quant_config = quant_config
@@ -1097,10 +1097,11 @@ class KimiLinearForCausalLM(
         return self.model.embed_input_ids(input_ids)
 
     def process_weights_after_loading(self) -> None:
-        self.model.mono = mono.attach(self.model, self.vllm_config)
+        # the MonoKernels for this rank's layers; None when the switch is off
+        self.model.mono = mono.attach(self.model, self.vllm_config, self.mono_spec)
 
     def step_health(self) -> torch.Tensor | None:
-        return None if self.model.mono is None else self.model.mono.health()
+        return mono.health(self.model.mono)
 
     def make_empty_intermediate_tensors(
         self,

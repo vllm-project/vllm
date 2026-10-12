@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The layer kernels: each takes and returns what ``KimiDecoderLayer.forward``
-does with AttnRes, ``(prefix_sum, block_residual, prefix_delta)``.
+"""The layer kernels (``MONO_SPEC.build``): each takes and returns what
+``KimiDecoderLayer.forward`` does with AttnRes, ``(prefix_sum, block_residual,
+prefix_delta)``.
 
 - ``WholeLayer`` (KDA layers): K1 (AttnRes, in_proj, f_b, spec conv, the KDA
   recurrence, the gated norm) writes o_proj's input; K2 runs o_proj, its
@@ -16,17 +17,17 @@ from typing import Any
 
 import torch
 
-from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
 from vllm.models.kimi_k3.amd.mono.runner import MonoRunner
+from vllm.models.kimi_k3.amd.mono.runtime import MonoStep
 
 
 def _k2(layer, runner: MonoRunner, core, prefix, blocks, reset=False):
     """K2 from ``core`` (o_proj's input): ``prefix`` updated in place (written,
     when ``reset``), the MoE output returned."""
-    from vllm.models.kimi_k3.amd.mono import layer as k2
-    from vllm.models.kimi_k3.amd.mono.attention.kda import HIDDEN
-    from vllm.models.kimi_k3.amd.mono.stages import moe
+    from vllm.models.kimi_k3.amd.ops.mono import layer as k2
+    from vllm.models.kimi_k3.amd.ops.mono.attention.kda import HIDDEN
+    from vllm.models.kimi_k3.amd.ops.mono.stages import moe
 
     m = layer.mlp
     ex = getattr(m.experts, "routed_experts", m.experts)
@@ -70,10 +71,24 @@ def _k2(layer, runner: MonoRunner, core, prefix, blocks, reset=False):
     return out
 
 
-class WholeLayer:
+class _Layer:
+    cache_layers: tuple[str, ...] = ()
+
     def __init__(self, layer, runner: MonoRunner):
         self.layer = layer
         self.runner = runner
+        # the step's first launch bumps the epoch (a graph captures it)
+        self.first = layer.layer_idx == runner.first_layer
+
+    def health(self) -> torch.Tensor:
+        """The output rank's flags, a word a TP rank."""
+        return self.runner.flags
+
+
+class WholeLayer(_Layer):
+    def __init__(self, layer, runner: MonoRunner):
+        super().__init__(layer, runner)
+        self.cache_layers = (layer.self_attn.prefix,)
 
     def caches(self) -> tuple[torch.Tensor, torch.Tensor]:
         """The conv state as [slots, dim, state_len] (a view) and the recurrent
@@ -83,12 +98,16 @@ class WholeLayer:
             conv_state = conv_state.transpose(-1, -2)
         return conv_state, rstate
 
-    def launch(self, positions, prefix_sum, block_residual, prefix_delta):
-        from vllm.models.kimi_k3.amd.mono.attention import kda
+    def launch(
+        self, step: MonoStep, positions, prefix_sum, block_residual, prefix_delta
+    ):
+        from vllm.models.kimi_k3.amd.ops.mono.attention import kda
 
         layer, runner = self.layer, self.runner
         attn = layer.self_attn
-        m: Any = get_forward_context().attn_metadata[attn.prefix]
+        m: Any = step.attn_metadata[attn.prefix]
+        if self.first:
+            runner.step_begin()
         conv_state, rstate = self.caches()
         s = prefix_sum.size(0)
         core = prefix_sum.new_empty(s, kda.PROJ)
@@ -134,15 +153,15 @@ class WholeLayer:
         return prefix_sum, block_residual, out
 
 
-class FfnLayer:
-    def __init__(self, layer, runner: MonoRunner):
-        self.layer = layer
-        self.runner = runner
-
-    def launch(self, positions, prefix_sum, block_residual, prefix_delta):
+class FfnLayer(_Layer):
+    def launch(
+        self, step: MonoStep, positions, prefix_sum, block_residual, prefix_delta
+    ):
         from vllm.models.kimi_k3.amd.linear import _apply_attn_res
 
         layer = self.layer
+        if self.first:
+            self.runner.step_begin()
         hidden_states = _apply_attn_res(
             prefix_sum,
             block_residual,

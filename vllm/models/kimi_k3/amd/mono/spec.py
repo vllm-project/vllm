@@ -1,45 +1,47 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The Kimi-K3 MI355X mono decode's spec, by the fields of RFC #60904's
-``MonoSpec``: the kernel layers, the widths, the supported features and the
-refusals at config time (``refuse_config``), after load (``refuse_model``) and
-at every cache bind (``refuse_caches``). A refusal lists every reason."""
+"""Kimi-K3's ``MonoSpec`` on MI355X (``MONO_SPEC``, RFC #60904).
 
-from typing import TYPE_CHECKING
+- Whole layers (KDA): K1 (AttnRes, in_proj, f_b, spec conv, the KDA recurrence,
+  the gated norm), then K2.
+- FFN layers (MLA): vLLM's AttnRes and MLA up to o_proj's input, then K2 (o_proj,
+  its all-reduce, the MLP AttnRes and the latent MoE).
+
+A launch serves whole spec-verify requests, at most 8 rows. Weights are views
+of the loaded parameters (``weight_source="views"``), pinned by the MoE
+backend; every refusal stage reports every reason.
+"""
+
+from collections.abc import Mapping
+from typing import TYPE_CHECKING, Any
 
 import torch
 
-from vllm.config import CUDAGraphMode
-from vllm.models.kimi_k3.amd.mono.common.plan import BLOCKS
+from vllm.models.kimi_k3.amd.mono.runtime import (
+    CacheReq,
+    MonoContext,
+    MonoSpec,
+    MonoStep,
+)
+from vllm.models.kimi_k3.amd.ops.mono.common.plan import BLOCKS
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
-NAME = "kimi_k3_mi355x"
 TP = 8
 MAX_TOKENS = 8  # a launch's x rows fit one CTA's LDS
-
-
-class MonoUnsupported(Exception):
-    """The configuration or the loaded model is outside what the kernels serve."""
-
-
-# Whole layer: K1 (KDA) + K2. FFN layer: vLLM's MLA up to o_proj's input, then
-# K2 (o_proj, its all-reduce, the MLP AttnRes and the MoE).
 WHOLE, FFN = "whole", "ffn"
 
-# Features beyond plain TP8 decode that the kernels serve.
-SUPPORTS = frozenset({"speculative_decoding", "dcp", "eagle_aux_layers"})
 
-
-def widths(num_spec: int) -> tuple[int, ...]:
-    """Rows a launch serves: whole spec-verify requests of ``num_spec + 1``
-    tokens, at most MAX_TOKENS rows."""
-    q = num_spec + 1
+def widths(vllm_config: "VllmConfig") -> tuple[int, ...]:
+    """Whole spec-verify requests of ``num_speculative_tokens + 1`` rows, at most
+    MAX_TOKENS rows."""
+    spec = vllm_config.speculative_config
+    q = 1 if spec is None else spec.num_speculative_tokens + 1
     return tuple(range(q, MAX_TOKENS + 1, q))
 
 
-def layers(config) -> dict[int, str]:
+def layer_kinds(config) -> dict[int, str]:
     """Decoder layer -> kind, for every layer a kernel serves: the MoE layers
     with AttnRes and at least one block before them, minus the MLA block-write
     layers (none in Kimi-K3)."""
@@ -74,37 +76,9 @@ def refuse_platform() -> list[str]:
 
 def refuse_config(vllm_config: "VllmConfig") -> list[str]:
     reasons = refuse_platform()
-    pc = vllm_config.parallel_config
-    if pc.tensor_parallel_size != TP:
-        reasons.append(f"needs TP{TP}, got TP{pc.tensor_parallel_size}")
-    if pc.pipeline_parallel_size > 1:
-        reasons.append("pipeline parallelism")
-    if pc.data_parallel_size > 1:
-        reasons.append("data parallelism")
-    if pc.enable_expert_parallel:
-        reasons.append("expert parallelism")
-    if pc.enable_eplb:
-        reasons.append("EPLB")
-    if pc.prefill_context_parallel_size > 1:
-        reasons.append("prefill context parallelism")
-    if vllm_config.lora_config is not None:
-        reasons.append("LoRA")
-    if vllm_config.kv_transfer_config is not None:
-        # a connector's copy kernels on another stream can hold the CUs the
-        # resident grid spin-waits on
-        reasons.append("KV connectors")
-    if vllm_config.aux_output_config.enable_return_routed_experts:
-        reasons.append("routed-expert capture")
-    if vllm_config.model_config.enable_sleep_mode:
-        reasons.append("sleep mode")
-    oc = vllm_config.offload_config
-    if oc.uva.cpu_offload_gb > 0 or oc.prefetch.offload_group_size > 0:
-        reasons.append("CPU weight offload")
-    if vllm_config.weight_transfer_config is not None:
-        reasons.append("weight updates")
-    if not vllm_config.use_v2_model_runner:
-        reasons.append("needs Model Runner V2")
-
+    tp = vllm_config.parallel_config.tensor_parallel_size
+    if tp != TP:
+        reasons.append(f"needs TP{TP}, got TP{tp}")
     spec = vllm_config.speculative_config
     if spec is None:
         reasons.append("needs speculative decoding (spec-verify steps)")
@@ -113,17 +87,6 @@ def refuse_config(vllm_config: "VllmConfig") -> list[str]:
             f"{spec.num_speculative_tokens} speculative tokens: a request's "
             f"{spec.num_speculative_tokens + 1} rows exceed {MAX_TOKENS}"
         )
-    else:
-        cc = vllm_config.compilation_config
-        mode = cc.cudagraph_mode
-        if mode != CUDAGraphMode.NONE and mode.decode_mode() != CUDAGraphMode.FULL:
-            reasons.append(f"CUDA graph mode {mode.name}: decode needs FULL graphs")
-        elif mode != CUDAGraphMode.NONE:
-            # a width captured as is, so no replay pads a request's rows
-            sizes = set(cc.cudagraph_capture_sizes or ())
-            missing = [w for w in widths(spec.num_speculative_tokens) if w not in sizes]
-            if missing:
-                reasons.append(f"CUDA graph capture sizes miss widths {missing}")
     return reasons
 
 
@@ -131,8 +94,8 @@ def refuse_model(model) -> list[str]:
     """``model``: the loaded ``KimiLinearModel``; every kernel layer's weights
     as the kernels read them, and the MoE backend that lays them out."""
     from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import Mxfp4MoeBackend
-    from vllm.models.kimi_k3.amd.mono.attention import back, kda
-    from vllm.models.kimi_k3.amd.mono.stages import moe
+    from vllm.models.kimi_k3.amd.ops.mono.attention import back, kda
+    from vllm.models.kimi_k3.amd.ops.mono.stages import moe
 
     reasons: list[str] = []
     bf, f32 = torch.bfloat16, torch.float32
@@ -147,7 +110,7 @@ def refuse_model(model) -> list[str]:
                 f" kernel reads contiguous {shape} {dtype}"
             )
 
-    kinds = layers(model.config)
+    kinds = layer_kinds(model.config)
     if not kinds:
         return ["no layer has an AttnRes latent MoE"]
     for i, kind in kinds.items():
@@ -207,15 +170,92 @@ def refuse_model(model) -> list[str]:
     return reasons
 
 
-def refuse_caches(i: int, conv_state: torch.Tensor, rstate: torch.Tensor) -> list[str]:
-    """A KDA layer's conv / recurrent state as K1 reads them."""
-    from vllm.models.kimi_k3.amd.mono.attention import kda
+def pack(model, ctx: MonoContext) -> Any:
+    """Views need no weight copy: the per-rank launch state (scratch, epoch,
+    health words, peer memory). Collective."""
+    from vllm import envs
+    from vllm.models.kimi_k3.amd.mono.runner import MonoRunner
+
+    runner = MonoRunner(ctx.device)
+    if envs.VLLM_MONO_FAULT_INJECT:
+        # tests only: "rank:epoch:us"
+        rank, epoch, us = (int(x) for x in envs.VLLM_MONO_FAULT_INJECT.split(":"))
+        runner.fault = {
+            "fault_rank": rank,
+            "fault_epoch": epoch,
+            "fault_ticks": us * 100,  # 100 MHz ticks
+        }
+    kinds = layer_kinds(model.config)
+    runner.first_layer = min(i for i in kinds if i >= model.start_layer)
+    runner.kda_prefix = next(
+        model.layers[i].self_attn.prefix for i, k in kinds.items() if k == WHOLE
+    )
+    ctx.state = runner
+    return runner
+
+
+def bind(ctx: MonoContext, caches: Mapping[str, Any]) -> list[str]:
+    """Every KDA layer's conv / recurrent state as K1 reads them."""
+    from vllm.models.kimi_k3.amd.ops.mono.attention import kda
 
     reasons = []
-    if conv_state.dtype != torch.bfloat16:
-        reasons.append(f"layer {i}: conv state {conv_state.dtype}, needs bf16")
-    if rstate.dtype != torch.float32:
-        reasons.append(f"layer {i}: recurrent state {rstate.dtype}, needs fp32")
-    elif rstate[0].numel() != kda.NH * kda.HD * kda.HD or not rstate[0].is_contiguous():
-        reasons.append(f"layer {i}: a slot's recurrent state must be dense")
+    for name, (conv_state, rstate) in caches.items():
+        if conv_state.dtype != torch.bfloat16:
+            reasons.append(f"{name}: conv state {conv_state.dtype}, needs bf16")
+        if rstate.dtype != torch.float32:
+            reasons.append(f"{name}: recurrent state {rstate.dtype}, needs fp32")
+        elif (
+            rstate[0].numel() != kda.NH * kda.HD * kda.HD
+            or not rstate[0].is_contiguous()
+        ):
+            reasons.append(f"{name}: a slot's recurrent state must be dense")
     return reasons
+
+
+def eligible(ctx: MonoContext, step: MonoStep) -> str | None:
+    """A pure spec-verify step of whole uniform requests, by the KDA metadata
+    (the same on every rank)."""
+    md = step.attn_metadata
+    if not isinstance(md, dict):
+        return "no metadata"
+    m: Any = md.get(ctx.state.kda_prefix)
+    if m is None or m.spec_sequence_masks is None:
+        return "not spec-verify"
+    if m.num_prefills or m.num_decodes or m.num_spec_decodes < 1:
+        return "not pure decode"
+    q = m.spec_state_indices_tensor.size(-1)
+    if m.uniform_spec_sequence_length != q or m.num_spec_decodes * q != step.width:
+        return "not uniform"
+    return None
+
+
+def build(ctx: MonoContext, packed, layer, width: int):
+    from vllm.models.kimi_k3.amd.kda import KimiK3DeltaAttention
+    from vllm.models.kimi_k3.amd.mono.kernel import FfnLayer, WholeLayer
+
+    whole = isinstance(layer.self_attn, KimiK3DeltaAttention)
+    return (WholeLayer if whole else FfnLayer)(layer, packed)
+
+
+MONO_SPEC = MonoSpec(
+    name="kimi_k3_mi355x",
+    layers=lambda config: list(layer_kinds(config)),
+    widths=widths,
+    supports=frozenset({"speculative_decoding", "dcp"}),
+    caches={
+        "kda": CacheReq(
+            group="mamba",
+            dtype="conv bf16, recurrent fp32",
+            layout="conv [slots, dim, state_len] (either order), "
+            "recurrent [slots, 12, 128, 128] dense a slot",
+        )
+    },
+    weight_source="views",
+    options={},
+    refuse_config=refuse_config,
+    refuse_model=refuse_model,
+    pack=pack,
+    bind=bind,
+    eligible=eligible,
+    build=build,
+)

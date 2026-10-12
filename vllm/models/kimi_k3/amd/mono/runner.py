@@ -15,9 +15,9 @@ stores anything else. The kernels see the buffer past the head.
 import torch
 
 from vllm.distributed import get_tp_group
-from vllm.models.kimi_k3.amd.mono.common.peer_memory import PeerBuffer
-from vllm.models.kimi_k3.amd.mono.common.plan import HEALTH_WORDS
 from vllm.models.kimi_k3.amd.mono.spec import MAX_TOKENS
+from vllm.models.kimi_k3.amd.ops.mono.common.peer_memory import PeerBuffer
+from vllm.models.kimi_k3.amd.ops.mono.common.plan import HEALTH_WORDS
 
 PEER_HEAD = 256
 
@@ -26,8 +26,8 @@ class MonoRunner:
     """Collective: every TP rank builds it at the same point."""
 
     def __init__(self, device: torch.device):
-        from vllm.models.kimi_k3.amd.mono import layer
-        from vllm.models.kimi_k3.amd.mono.attention import kda
+        from vllm.models.kimi_k3.amd.ops.mono import layer
+        from vllm.models.kimi_k3.amd.ops.mono.attention import kda
 
         self.scratch = torch.zeros(
             max(
@@ -57,6 +57,8 @@ class MonoRunner:
         self.alarm = int(self.peers.addresses[0].item()) + 4 * self.rank
         self.flags = self.peers.bytes[: 4 * tp.world_size].view(torch.int32)
         self.fault: dict = {}  # K2Build's fault_* fields (tests only)
+        self.first_layer = -1  # the step's first kernel layer: bumps the epoch
+        self.kda_prefix = ""  # a KDA layer's name: the step's metadata
 
     def step_begin(self) -> None:
         """Once a forward, before its first mono launch (a graph captures it)."""

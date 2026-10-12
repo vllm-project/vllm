@@ -40,14 +40,14 @@ from aiter.ops.flydsl.kernels import buffer_ops as bo
 from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr.typing import T, as_ir_value
 
-from vllm.models.kimi_k3.amd.mono.common.mx import (
+from vllm.models.kimi_k3.amd.ops.mono.common.mx import (
     FP4,
     UNIT_SCALE,
     fp4_tile_load,
     mfma_scaled,
     scale_index,
 )
-from vllm.models.kimi_k3.amd.mono.common.ops import (
+from vllm.models.kimi_k3.amd.ops.mono.common.ops import (
     CM_DEV,
     ballot,
     bf16_round,
@@ -66,15 +66,15 @@ from vllm.models.kimi_k3.amd.mono.common.ops import (
     uniform,
     wave_sum,
 )
-from vllm.models.kimi_k3.amd.mono.common.plan import (
+from vllm.models.kimi_k3.amd.ops.mono.common.plan import (
     BLOCKS,
     THREADS,
     WAVES,
     pair_layout,
 )
-from vllm.models.kimi_k3.amd.mono.common.ranks import sum_partials
-from vllm.models.kimi_k3.amd.mono.common.sync import publish
-from vllm.models.kimi_k3.amd.mono.stages import gemv as gemv
+from vllm.models.kimi_k3.amd.ops.mono.common.ranks import sum_partials
+from vllm.models.kimi_k3.amd.ops.mono.common.sync import publish
+from vllm.models.kimi_k3.amd.ops.mono.stages import gemv as gemv
 
 REGIONS = (
     "sgu",

@@ -69,7 +69,7 @@ def _randn(g, *shape, scale=1.0, dtype=bf):
 
 
 def _kda_inputs(nb: int, nacc: int, dim_first: bool, S: int, slots: int = 16):
-    from vllm.models.kimi_k3.amd.mono.attention.kda import (
+    from vllm.models.kimi_k3.amd.ops.mono.attention.kda import (
         HD,
         HIDDEN,
         NH,
@@ -113,8 +113,8 @@ def _kda_reference(w, nb: int, S: int, write_idx: int):
     from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
         causal_conv1d_update,
     )
-    from vllm.models.kimi_k3.amd.mono.attention.kda import HD, NH, PROJ, QKV
     from vllm.models.kimi_k3.amd.ops.attn_res import attn_res
+    from vllm.models.kimi_k3.amd.ops.mono.attention.kda import HD, NH, PROJ, QKV
     from vllm.models.kimi_k3.amd.ops.third_party.kda import fused_recurrent_kda
     from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
 
@@ -190,13 +190,13 @@ def test_k1_matches_vllm_ops(dim_first: bool, nacc: int, write: bool) -> None:
     """K1 against attn_res -> in_proj -> f_b -> causal_conv1d_update ->
     fused_recurrent_kda -> FusedRMSNormGated on one spec-verify step (one
     request, 8 tokens), including the state each step leaves behind."""
-    from vllm.models.kimi_k3.amd.mono.attention.kda import (
+    from vllm.models.kimi_k3.amd.ops.mono.attention.kda import (
         PROJ,
         KdaPreBuild,
         kda_pre,
         scratch_bytes,
     )
-    from vllm.models.kimi_k3.amd.mono.common.plan import HEALTH_WORDS
+    from vllm.models.kimi_k3.amd.ops.mono.common.plan import HEALTH_WORDS
 
     S, nb = 8, 4
     # a block-write layer appends block nb (block_write_idx == prev_valid_blocks)
@@ -280,7 +280,7 @@ def _moe_reference(x, mw, rank: int):
     from aiter import ActivationType, QuantType
     from aiter.fused_moe import fused_moe
 
-    from vllm.models.kimi_k3.amd.mono.stages.moe import SI, TOPK, UP_N
+    from vllm.models.kimi_k3.amd.ops.mono.stages.moe import SI, TOPK, UP_N
 
     sig = torch.sigmoid(torch.mm(x.float(), mw["w_gate"].float().t()))
     ids = torch.topk(sig + mw["bias"], TOPK, dim=-1, sorted=True).indices
@@ -319,7 +319,7 @@ def _moe_weights(rank: int, device):
     from aiter.utility.fp4_utils import e8m0_shuffle
 
     from vllm._aiter_ops import rocm_aiter_ops
-    from vllm.models.kimi_k3.amd.mono.stages.moe import HIDDEN, LAT, RI, SI, UP_N, E
+    from vllm.models.kimi_k3.amd.ops.mono.stages.moe import HIDDEN, LAT, RI, SI, UP_N, E
 
     gc = torch.Generator(device=device).manual_seed(7)  # replicated weights
     gr = torch.Generator(device=device).manual_seed(100 + rank)  # TP shards
@@ -371,7 +371,7 @@ def _moe_args(mw):
 
 
 def _k2_inputs(rank: int, device):
-    from vllm.models.kimi_k3.amd.mono.attention.kda import HIDDEN, PROJ
+    from vllm.models.kimi_k3.amd.ops.mono.attention.kda import HIDDEN, PROJ
 
     gc = torch.Generator(device=device).manual_seed(11)
     gr = torch.Generator(device=device).manual_seed(200 + rank)
@@ -387,7 +387,7 @@ def _k2_inputs(rank: int, device):
 
 
 def _k2_launch(runner, w, mw, prefix, out, reset: bool, nb: int = 4):
-    from vllm.models.kimi_k3.amd.mono import layer as k2
+    from vllm.models.kimi_k3.amd.ops.mono import layer as k2
 
     key = k2.K2Build(tokens=8, nblocks=nb + int(reset), reset=reset, **runner.fault)
     k2.k2_launch(
@@ -426,10 +426,10 @@ def _k2_worker(
 ) -> None:
     device = _init_worker(monkeypatch, tp_size, pp_size, rank, distributed_init_port)
 
-    from vllm.models.kimi_k3.amd.mono import layer as k2
-    from vllm.models.kimi_k3.amd.mono.attention.kda import HIDDEN
     from vllm.models.kimi_k3.amd.mono.runner import MonoRunner
     from vllm.models.kimi_k3.amd.ops.attn_res import attn_res
+    from vllm.models.kimi_k3.amd.ops.mono import layer as k2
+    from vllm.models.kimi_k3.amd.ops.mono.attention.kda import HIDDEN
 
     S, nb = 8, 4
     runner = MonoRunner(device)
@@ -506,11 +506,11 @@ def _fault_worker(
 ) -> None:
     device = _init_worker(monkeypatch, tp_size, pp_size, rank, distributed_init_port)
 
-    from vllm.models.kimi_k3.amd.mono import layer as k2
-    from vllm.models.kimi_k3.amd.mono.attention.kda import HIDDEN
-    from vllm.models.kimi_k3.amd.mono.common.debug import given_up_waits
-    from vllm.models.kimi_k3.amd.mono.common.sync import WAIT_TICKS
     from vllm.models.kimi_k3.amd.mono.runner import MonoRunner
+    from vllm.models.kimi_k3.amd.ops.mono import layer as k2
+    from vllm.models.kimi_k3.amd.ops.mono.attention.kda import HIDDEN
+    from vllm.models.kimi_k3.amd.ops.mono.common.debug import given_up_waits
+    from vllm.models.kimi_k3.amd.ops.mono.common.sync import WAIT_TICKS
 
     runner = MonoRunner(device)
     # rank STALLED's CTA 0 stalls past every wait's bound from epoch 2 on
@@ -549,37 +549,6 @@ def test_stalled_rank_fails_the_step_without_a_hang(
 # ---------------------------------------------------------------- CPU
 
 
-def test_widths_are_whole_requests_up_to_eight_rows() -> None:
-    from vllm.models.kimi_k3.amd.mono.spec import widths
-
-    assert widths(7) == (8,)
-    assert widths(3) == (4, 8)
-    assert widths(1) == (2, 4, 6, 8)
-
-
-def _k3_text_config():
-    """Kimi-K3's layer pattern: 93 layers, MLA every 4th, AttnRes blocks of 12,
-    layer 0 dense."""
-    mla = {i for i in range(93) if i % 4 == 3} | {92}
-    return SimpleNamespace(
-        num_hidden_layers=93,
-        attn_res_block_size=12,
-        num_experts=896,
-        first_k_dense_replace=1,
-        moe_layer_freq=1,
-        is_kda_layer=lambda i: i not in mla,
-    )
-
-
-def test_kernel_layers_follow_the_k3_pattern() -> None:
-    from vllm.models.kimi_k3.amd.mono.spec import FFN, WHOLE, layers
-
-    kinds = layers(_k3_text_config())
-    assert sorted(kinds) == list(range(1, 93))
-    assert kinds[1] == WHOLE and kinds[12] == WHOLE
-    assert kinds[3] == FFN and kinds[92] == FFN
-
-
 def _vllm_config(**over):
     from vllm.config import CUDAGraphMode
 
@@ -590,6 +559,7 @@ def _vllm_config(**over):
             data_parallel_size=1,
             enable_expert_parallel=False,
             enable_eplb=False,
+            decode_context_parallel_size=8,
             prefill_context_parallel_size=1,
         ),
         lora_config=None,
@@ -617,37 +587,72 @@ def _vllm_config(**over):
     return c
 
 
-def test_supported_config_is_accepted(monkeypatch: pytest.MonkeyPatch) -> None:
-    from vllm.models.kimi_k3.amd.mono import spec
+@pytest.mark.parametrize("k, want", [(7, (8,)), (3, (4, 8)), (1, (2, 4, 6, 8))])
+def test_widths_are_whole_requests_up_to_eight_rows(k, want) -> None:
+    from vllm.models.kimi_k3.amd.mono.spec import MONO_SPEC
 
-    monkeypatch.setattr(spec, "refuse_platform", lambda: [])
-    assert spec.refuse_config(_vllm_config()) == []
+    cfg = _vllm_config(**{"speculative_config.num_speculative_tokens": k})
+    assert MONO_SPEC.widths(cfg) == want
+
+
+def _k3_text_config():
+    """Kimi-K3's layer pattern: 93 layers, MLA every 4th, AttnRes blocks of 12,
+    layer 0 dense."""
+    mla = {i for i in range(93) if i % 4 == 3} | {92}
+    return SimpleNamespace(
+        num_hidden_layers=93,
+        attn_res_block_size=12,
+        num_experts=896,
+        first_k_dense_replace=1,
+        moe_layer_freq=1,
+        is_kda_layer=lambda i: i not in mla,
+    )
+
+
+def test_kernel_layers_follow_the_k3_pattern() -> None:
+    from vllm.models.kimi_k3.amd.mono.spec import FFN, MONO_SPEC, WHOLE, layer_kinds
+
+    assert MONO_SPEC.layers(_k3_text_config()) == list(range(1, 93))
+    kinds = layer_kinds(_k3_text_config())
+    assert kinds[1] == WHOLE and kinds[12] == WHOLE
+    assert kinds[3] == FFN and kinds[92] == FFN
+
+
+def _refuse(monkeypatch, platform=(), **over) -> list[str]:
+    from vllm.models.kimi_k3.amd.mono import runtime, spec
+
+    monkeypatch.setattr(spec, "refuse_platform", lambda: list(platform))
+    return runtime.refuse_config(spec.MONO_SPEC, _vllm_config(**over))
+
+
+def test_supported_config_is_accepted(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert _refuse(monkeypatch) == []
 
 
 def test_every_refusal_is_reported_at_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Default-deny over every feature the spec does not list, the runner, the
+    graph mode and the spec's own checks, all in one error."""
     from vllm.config import CUDAGraphMode
-    from vllm.models.kimi_k3.amd.mono import spec
 
-    monkeypatch.setattr(spec, "refuse_platform", lambda: ["needs gfx950 (MI355X)"])
-    reasons = spec.refuse_config(
-        _vllm_config(
-            **{
-                "parallel_config.tensor_parallel_size": 4,
-                "parallel_config.pipeline_parallel_size": 2,
-                "parallel_config.data_parallel_size": 2,
-                "parallel_config.enable_expert_parallel": True,
-                "parallel_config.enable_eplb": True,
-                "parallel_config.prefill_context_parallel_size": 2,
-                "lora_config": object(),
-                "kv_transfer_config": object(),
-                "aux_output_config.enable_return_routed_experts": True,
-                "model_config.enable_sleep_mode": True,
-                "offload_config.uva.cpu_offload_gb": 4,
-                "weight_transfer_config": object(),
-                "use_v2_model_runner": False,
-                "compilation_config.cudagraph_mode": CUDAGraphMode.PIECEWISE,
-            }
-        )
+    reasons = _refuse(
+        monkeypatch,
+        platform=["needs gfx950 (MI355X)"],
+        **{
+            "parallel_config.tensor_parallel_size": 4,
+            "parallel_config.pipeline_parallel_size": 2,
+            "parallel_config.data_parallel_size": 2,
+            "parallel_config.enable_expert_parallel": True,
+            "parallel_config.enable_eplb": True,
+            "parallel_config.prefill_context_parallel_size": 2,
+            "lora_config": object(),
+            "kv_transfer_config": object(),
+            "aux_output_config.enable_return_routed_experts": True,
+            "model_config.enable_sleep_mode": True,
+            "offload_config.uva.cpu_offload_gb": 4,
+            "weight_transfer_config": object(),
+            "use_v2_model_runner": False,
+            "compilation_config.cudagraph_mode": CUDAGraphMode.PIECEWISE,
+        },
     )
     assert len(reasons) == 15, reasons
 
@@ -663,25 +668,25 @@ def test_every_refusal_is_reported_at_once(monkeypatch: pytest.MonkeyPatch) -> N
 def test_spec_decode_and_capture_size_refusals(
     monkeypatch: pytest.MonkeyPatch, over, reason
 ) -> None:
-    from vllm.models.kimi_k3.amd.mono import spec
-
-    monkeypatch.setattr(spec, "refuse_platform", lambda: [])
-    reasons = spec.refuse_config(_vllm_config(**over))
+    reasons = _refuse(monkeypatch, **over)
     assert len(reasons) == 1 and reason in reasons[0], reasons
 
 
-def test_refuse_caches_names_the_layer() -> None:
-    from vllm.models.kimi_k3.amd.mono.spec import refuse_caches
+def test_bind_names_the_cache() -> None:
+    from vllm.models.kimi_k3.amd.mono.spec import MONO_SPEC
 
     conv = torch.zeros(2, 4, 3, dtype=torch.float32)
     rstate = torch.zeros(2, 12, 128, 128, dtype=torch.bfloat16)
-    reasons = refuse_caches(5, conv, rstate)
-    assert len(reasons) == 2 and all(r.startswith("layer 5:") for r in reasons)
+    reasons = MONO_SPEC.bind(Mock(), {"layers.5.attn": (conv, rstate)})
+    assert len(reasons) == 2 and all(r.startswith("layers.5.attn:") for r in reasons)
 
 
-def _routing(monkeypatch, mode, **md):
+def _mono(monkeypatch, mode: str, **md):
+    """A ``Mono`` on MONO_SPEC's decision, widths (4, 8), with this step's KDA
+    metadata (one request of 4 tokens unless overridden)."""
     from vllm.config import CUDAGraphMode
-    from vllm.models.kimi_k3.amd.mono import routing
+    from vllm.models.kimi_k3.amd.mono import runtime
+    from vllm.models.kimi_k3.amd.mono.spec import MONO_SPEC
 
     m = SimpleNamespace(
         spec_sequence_masks=torch.ones(1, dtype=torch.bool),
@@ -697,11 +702,12 @@ def _routing(monkeypatch, mode, **md):
         cudagraph_runtime_mode=getattr(CUDAGraphMode, mode),
         attn_metadata={"kda": m},
     )
-    monkeypatch.setattr(routing, "get_forward_context", lambda: fc)
-    mono = object.__new__(routing.Mono)
+    monkeypatch.setattr(runtime, "get_forward_context", lambda: fc)
+    mono = object.__new__(runtime.Mono)
+    mono.spec = MONO_SPEC
     mono.widths = (4, 8)
-    attn = SimpleNamespace(prefix="kda")
-    mono.whole = [SimpleNamespace(layer=SimpleNamespace(self_attn=attn))]
+    mono.ctx = SimpleNamespace(state=SimpleNamespace(kda_prefix="kda"))
+    mono._bind = lambda: None
     return mono
 
 
@@ -722,17 +728,28 @@ def _routing(monkeypatch, mode, **md):
 def test_routing_runs_pure_decode_widths_only(
     monkeypatch: pytest.MonkeyPatch, mode, tokens, md, why
 ) -> None:
-    assert _routing(monkeypatch, mode, **md).no_go(tokens) == why
+    mono = _mono(monkeypatch, mode, **md)
+    assert mono.begin_step(torch.zeros(tokens)) == why
+    assert (mono.step is None) == (why is not None)
 
 
-@pytest.mark.parametrize("active", [False, True])
-def test_forward_layer_routes_by_the_step_decision(active: bool) -> None:
-    from vllm.models.kimi_k3.amd.mono import routing
+@pytest.mark.parametrize("eligible", [False, True])
+def test_forward_layer_decides_once_a_forward(
+    monkeypatch: pytest.MonkeyPatch, eligible: bool
+) -> None:
+    """The first layer under a forward context decides for every layer; a layer
+    without a kernel always runs vLLM's."""
+    from vllm.models.kimi_k3.amd.mono import runtime
 
-    layer, kernel = Mock(return_value="vllm"), Mock()
+    mono = _mono(monkeypatch, "FULL", num_prefills=0 if eligible else 1)
+    kernel = Mock()
     kernel.launch.return_value = "mono"
-    mono = SimpleNamespace(active=active, kernels={7: kernel})
-    got = routing.forward_layer(mono, 7, layer, "pos", "h", "r", "d")
-    assert got == ("mono" if active else "vllm")
-    # a layer without a kernel always runs vLLM's
-    assert routing.forward_layer(mono, 8, layer, "pos", "h", "r", "d") == "vllm"
+    mono.kernels = {(7, 4): kernel}
+    mono._fc = None
+    layer = Mock(return_value="vllm")
+    pos = torch.zeros(4)
+    got = runtime.forward_layer(mono, 7, layer, pos, "h", "r", "d")
+    assert got == ("mono" if eligible else "vllm")
+    assert runtime.forward_layer(mono, 8, layer, pos, "h", "r", "d") == "vllm"
+    if eligible:
+        kernel.launch.assert_called_once_with(mono.step, pos, "h", "r", "d")

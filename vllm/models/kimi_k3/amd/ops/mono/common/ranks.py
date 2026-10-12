@@ -8,7 +8,7 @@ all-reduce's sum of the ranks' partials. ``tp`` is a build-time constant."""
 
 from flydsl.expr import range_constexpr
 
-from vllm.models.kimi_k3.amd.mono.common.ops import bf2_f32, load_ptr64
+from vllm.models.kimi_k3.amd.ops.mono.common.ops import bf2_f32, load_ptr64
 
 
 def peer_bases(peers, tp):

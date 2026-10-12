@@ -10,7 +10,7 @@ import torch
 import torch.distributed as dist
 from aiter.ops.flydsl.quick_allreduce_int4_ipc import UncachedIpcHeap
 
-from vllm.models.kimi_k3.amd.mono.spec import MonoUnsupported
+from vllm.models.kimi_k3.amd.mono.runtime import MonoUnsupported
 
 
 class _DeviceBytes:

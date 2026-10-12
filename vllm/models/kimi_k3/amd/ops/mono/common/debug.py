@@ -18,8 +18,8 @@ import flydsl.expr as fx
 import torch
 from flydsl.expr import const_expr
 
-from vllm.models.kimi_k3.amd.mono.common.ops import memrealtime, traced
-from vllm.models.kimi_k3.amd.mono.common.plan import BLOCKS, DIAG_WORDS
+from vllm.models.kimi_k3.amd.ops.mono.common.ops import memrealtime, traced
+from vllm.models.kimi_k3.amd.ops.mono.common.plan import BLOCKS, DIAG_WORDS
 
 
 @traced

@@ -26,8 +26,8 @@ import torch
 from flydsl.expr import const_expr, range_constexpr
 from flydsl.expr.typing import Int32, Int64
 
-from vllm.models.kimi_k3.amd.mono.attention import back as k2a
-from vllm.models.kimi_k3.amd.mono.attention.kda import (
+from vllm.models.kimi_k3.amd.ops.mono.attention import back as k2a
+from vllm.models.kimi_k3.amd.ops.mono.attention.kda import (
     _SOURCES,
     COLS,
     HIDDEN,
@@ -37,14 +37,19 @@ from vllm.models.kimi_k3.amd.mono.attention.kda import (
     stage_slice,
     step_tag,
 )
-from vllm.models.kimi_k3.amd.mono.common.debug import (
+from vllm.models.kimi_k3.amd.ops.mono.common.debug import (
     region_ids,
     stamp,
     stamp_begin,
     stamp_flush,
 )
-from vllm.models.kimi_k3.amd.mono.common.ops import ld_i32, load_ptr64, traced, uniform
-from vllm.models.kimi_k3.amd.mono.common.plan import (
+from vllm.models.kimi_k3.amd.ops.mono.common.ops import (
+    ld_i32,
+    load_ptr64,
+    traced,
+    uniform,
+)
+from vllm.models.kimi_k3.amd.ops.mono.common.plan import (
     BLOCKS,
     THREADS,
     WAVES,
@@ -52,10 +57,16 @@ from vllm.models.kimi_k3.amd.mono.common.plan import (
     key_tuple,
     pair_layout,
 )
-from vllm.models.kimi_k3.amd.mono.common.ranks import peer_bases
-from vllm.models.kimi_k3.amd.mono.common.sync import Mailbox, preg, shift, sreg, stall
-from vllm.models.kimi_k3.amd.mono.stages import gemv as gemv
-from vllm.models.kimi_k3.amd.mono.stages import moe as k2b
+from vllm.models.kimi_k3.amd.ops.mono.common.ranks import peer_bases
+from vllm.models.kimi_k3.amd.ops.mono.common.sync import (
+    Mailbox,
+    preg,
+    shift,
+    sreg,
+    stall,
+)
+from vllm.models.kimi_k3.amd.ops.mono.stages import gemv as gemv
+from vllm.models.kimi_k3.amd.ops.mono.stages import moe as k2b
 
 O0, O1 = NA, BLOCKS  # o_proj CTAs: every CTA past AttnRes's
 O_N = O1 - O0  # 200
