@@ -85,12 +85,13 @@ def test_late_chunk_render_requests_offsets_once(late_chunk_processor):
         "tok_params"
     ].return_token_offsets
     assert not render_params["tok_params"].return_token_offsets
-    assert ctx.pooling_params.late_chunking_params.metadata is None
     assert "prompt_token_offsets" not in result["prompts"]
-    assert [
-        c.char_range for c in result["params"].late_chunking_params.metadata.chunks
-    ] == [(0, 1), (2, 3)]
-    assert result["params"].late_chunking_params.metadata.input_tokens == 4
+    assert "late_chunking" not in result
+    assert [c.char_range for c in ctx.late_chunking[0].metadata.chunks] == [
+        (0, 1),
+        (2, 3),
+    ]
+    assert ctx.late_chunking[0].metadata.input_tokens == 4
 
 
 @pytest.mark.parametrize("as_sequence", [False, True])
@@ -274,7 +275,7 @@ def test_late_chunk_contexts_remain_isolated_when_rendering_interleaves(
     late_chunk_processor,
 ):
     processor = late_chunk_processor
-    first, second = _late_chunk_context(), _late_chunk_context()
+    first, second = _late_chunk_context("xy z"), _late_chunk_context()
     shared = PoolingParams(late_chunking_params=LateChunkingParams(2))
     first.pooling_params = second.pooling_params = shared
     first_factory, _ = processor.get_request_factory_offline(first)
@@ -282,6 +283,13 @@ def test_late_chunk_contexts_remain_isolated_when_rendering_interleaves(
     first_request, second_request = next(first_factory()), next(second_factory())
     processor.render(second_request)
     assert first.late_chunking[0].metadata is None
+    processor.renderer.render_cmpl.side_effect = lambda **_: [
+        {
+            "type": "token",
+            "prompt_token_ids": [101, 1, 2, 102],
+            "prompt_token_offsets": [(0, 0), (0, 2), (3, 4), (0, 0)],
+        }
+    ]
     processor.render(first_request)
     first_output = processor.post_process_offline(
         OfflineOutputsContext([_chunk_output(0)], late_chunking=first.late_chunking)
@@ -289,10 +297,8 @@ def test_late_chunk_contexts_remain_isolated_when_rendering_interleaves(
     second_output = processor.post_process_offline(
         OfflineOutputsContext([_chunk_output(0)], late_chunking=second.late_chunking)
     )[0]
-    assert first_output.late_chunking == second_output.late_chunking
-    assert first_output.late_chunking is not second_output.late_chunking
-    assert shared.late_chunking_params is not None
-    assert shared.late_chunking_params.metadata is None
+    assert first_output.late_chunking.chunks[0].char_range == (0, 2)
+    assert second_output.late_chunking.chunks[0].char_range == (0, 1)
 
 
 def test_plain_token_embed_skips_chunk_metadata(late_chunk_processor):

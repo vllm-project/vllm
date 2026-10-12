@@ -15,7 +15,6 @@ from vllm.entrypoints.pooling.classify.protocol import ClassificationRequest
 from vllm.entrypoints.pooling.embed.protocol import EmbeddingRequest
 from vllm.entrypoints.pooling.pooling.protocol import PoolingRequest
 from vllm.exceptions import VLLMValidationError
-from vllm.outputs import LateChunk, LateChunkingMetadata
 from vllm.pooling_params import LateChunkingParams
 
 EMBEDDING_MODELS = [
@@ -249,16 +248,15 @@ def test_late_chunking_params_preserve_defaults_clone_and_wire_format():
     )
     explicit_cache_flag.verify(model_config)
     assert explicit_cache_flag.skip_reading_prefix_cache is True
-    params.late_chunking_params.metadata = LateChunkingMetadata(
-        chunk_size=3, input_tokens=3, chunks=[LateChunk((0, 3), (0, 2))]
-    )
     clone = params.clone()
     assert clone.late_chunking_params is not None
     clone.late_chunking_params.chunk_size = 7
     assert params.late_chunking_params is not None
     assert params.late_chunking_params.chunk_size == 3
-    clone.late_chunking_params.metadata.chunks.clear()
-    assert len(params.late_chunking_params.metadata.chunks) == 1
+    # Workers receive only the fixed chunk size, never source ranges.
+    assert msgspec.msgpack.decode(
+        msgspec.msgpack.encode(params.late_chunking_params)
+    ) == [3]
     assert (
         msgspec.msgpack.decode(msgspec.msgpack.encode(params), type=PoolingParams)
         == params

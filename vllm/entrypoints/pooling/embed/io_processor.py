@@ -38,6 +38,7 @@ from ..typing import (
     AnyRenderParam,
     ChunkedEmbeddingMetadata,
     EncodeChatRenderParams,
+    LateChunkingSlot,
     OfflineEncodeInputsContext,
     OfflineOutputsContext,
     PoolingChatLikeRequest,
@@ -685,7 +686,11 @@ class TokenEmbedIOProcessor(PoolingIOProcessor):
 
         def request_factory() -> RequestGenerator:
             for request in factory():
-                ctx.late_chunking.append(request["params"].late_chunking_params)
+                slot = None
+                if request["params"].late_chunking_params is not None:
+                    slot = LateChunkingSlot()
+                    request["late_chunking"] = slot
+                ctx.late_chunking.append(slot)
                 yield request
 
         return request_factory, num_requests
@@ -702,7 +707,7 @@ class TokenEmbedIOProcessor(PoolingIOProcessor):
         prompt = result["prompts"]
         if prompt["type"] != "token":
             raise VLLMValidationError("Late chunking requires tokenized text")
-        late_chunking.metadata = build_late_chunking_metadata(
+        render_params["late_chunking"].metadata = build_late_chunking_metadata(
             text,
             len(prompt["prompt_token_ids"]),
             prompt.pop("prompt_token_offsets", None),
@@ -712,10 +717,10 @@ class TokenEmbedIOProcessor(PoolingIOProcessor):
 
     def post_process_offline(self, ctx: OfflineOutputsContext):
         if ctx.late_chunking:
-            for output, params in zip(ctx.outputs, ctx.late_chunking, strict=True):
-                if params is not None:
-                    assert params.metadata is not None
-                    attach_late_chunking_metadata(output, params.metadata)
+            for output, slot in zip(ctx.outputs, ctx.late_chunking, strict=True):
+                if slot is not None:
+                    assert slot.metadata is not None
+                    attach_late_chunking_metadata(output, slot.metadata)
         return ctx.outputs
 
 

@@ -9,7 +9,6 @@ import msgspec
 from vllm.config import ModelConfig, PoolerConfig
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
-from vllm.outputs import LateChunkingMetadata
 from vllm.sampling_params import RequestOutputKind
 from vllm.tasks import PoolingTask, check_removed_pooling_task
 
@@ -50,8 +49,6 @@ class LateChunkingParams(
     """
 
     chunk_size: int
-    metadata: LateChunkingMetadata | None = None
-    """Source ranges populated by the IO processor after tokenization."""
 
     def __post_init__(self) -> None:
         self.verify()
