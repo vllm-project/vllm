@@ -140,6 +140,7 @@ def test_indexer_draft_decode_metadata_update_is_capture_safe():
             requires_padding=False,
             schedule_metadata=schedule_metadata,
         ),
+        block_table=block_table,
     )
 
     builder.update_draft_decode_metadata(metadata)
@@ -165,6 +166,58 @@ def test_indexer_draft_decode_metadata_update_is_capture_safe():
         [1, 2, 4], dtype=torch.int64, device=device
     )
     torch.testing.assert_close(metadata.slot_mapping, expected_slot_mapping)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@pytest.mark.parametrize("compress_ratio", [1, 4])
+def test_indexer_draft_decode_refresh_follows_new_batch(monkeypatch, compress_ratio):
+    """Without a prior build(), the refresh must not keep the last batch's state."""
+    monkeypatch.setattr(indexer_module, "has_deep_gemm", lambda: False)
+    device = torch.device("cuda")
+    num_reqs, width = 3, 8
+
+    builder = object.__new__(DeepseekV32IndexerMetadataBuilder)
+    builder.dcp_world_size = 1
+    builder.compress_ratio = compress_ratio
+    builder.arange_buffer = torch.arange(num_reqs + 1, dtype=torch.int32, device=device)
+    builder.kv_cache_spec = SimpleNamespace(block_size=64, num_states=64)
+
+    def stale(*shape: int) -> torch.Tensor:
+        return torch.full(shape, -7, dtype=torch.int32, device=device)
+
+    decode = DeepSeekV32IndexerDecodeMetadata(
+        block_table=stale(num_reqs, width),
+        seq_lens=stale(num_reqs, 1),
+        decode_lens=stale(num_reqs),
+        requires_padding=False,
+        schedule_metadata=stale(1),
+        indices=stale(num_reqs),
+        per_req_decode_lens=stale(num_reqs),
+    )
+    request_block_table = torch.randint(
+        0, 1000, (num_reqs, width), dtype=torch.int32, device=device
+    )
+    seq_lens = torch.tensor([17, 33, 65], dtype=torch.int32, device=device)
+    metadata = DeepseekV32IndexerMetadata(
+        seq_lens=seq_lens,
+        max_seq_len=128,
+        slot_mapping=torch.zeros(num_reqs, dtype=torch.int64, device=device),
+        num_decodes=num_reqs,
+        num_decode_tokens=num_reqs,
+        num_prefills=0,
+        num_prefill_tokens=0,
+        decode=decode,
+        block_table=request_block_table,
+    )
+
+    builder.update_draft_decode_metadata(metadata)
+
+    torch.testing.assert_close(decode.block_table, request_block_table)
+    torch.testing.assert_close(decode.indices, builder.arange_buffer[:num_reqs])
+    assert torch.all(decode.per_req_decode_lens == 1)
+    assert torch.all(decode.decode_lens == 1)
+    expected_seq_lens = torch.div(seq_lens, compress_ratio, rounding_mode="floor")
+    torch.testing.assert_close(decode.seq_lens.flatten(), expected_seq_lens)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
@@ -410,7 +463,6 @@ def test_zero_token_pcp_rank_participates_in_compressed_mapping_gather(monkeypat
     builder.pcp_rank = 0
     builder.dcp_world_size = 1
     builder.cp_kv_cache_interleave_size = 1
-    builder.kernel_block_size = None
     builder.kv_cache_spec = SimpleNamespace(block_size=64, num_states=64)
     builder.compressed_slot_mapping_buffer = torch.zeros(8, dtype=torch.int64)
 
