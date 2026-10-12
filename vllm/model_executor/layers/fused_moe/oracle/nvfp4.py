@@ -36,6 +36,7 @@ from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import 
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
 )
+from vllm.model_executor.utils import replace_parameter
 
 logger = init_logger(__name__)
 
@@ -584,11 +585,17 @@ def make_nvfp4_moe_quant_config(
     # The expert's process_weights_after_loading will fuse activation
     # scales in-place. Since the quant config references the same tensor
     # as the registered parameter, EPLB rearrangement stays in sync.
+    a1_gscale, a2_gscale = 1.0 / a13_scale, 1.0 / a2_scale
+    if layer is not None:
+        # Graph-visible: keep them as layer parameters so reload restores them in place.
+        replace_parameter(layer, "moe_a1_gscale", a1_gscale, prefer_copy=True)
+        replace_parameter(layer, "moe_a2_gscale", a2_gscale, prefer_copy=True)
+        a1_gscale, a2_gscale = layer.moe_a1_gscale, layer.moe_a2_gscale
     return nvfp4_moe_quant_config(
         g1_alphas=w13_scale_2,
         g2_alphas=w2_scale_2,
-        a1_gscale=(1.0 / a13_scale),
-        a2_gscale=(1.0 / a2_scale),
+        a1_gscale=a1_gscale,
+        a2_gscale=a2_gscale,
         w1_scale=w13_scale,
         w2_scale=w2_scale,
         # NOTE(rob): this is a hack until the MoE kernels
