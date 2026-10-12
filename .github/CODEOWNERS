@@ -34,7 +34,7 @@
 /vllm/utils/argparse_utils.py
 
 # Entrypoints
-/vllm/entrypoints/anthropic @mgoin @DarkLight1337
+/vllm/entrypoints/anthropic @chaunceyjiang @mgoin @DarkLight1337
 /vllm/entrypoints/cohere @DarkLight1337
 /vllm/entrypoints/cli @hmellor @mgoin @DarkLight1337
 /vllm/entrypoints/mcp @heheda12345
@@ -77,7 +77,7 @@
 # Rust Frontend
 /rust/ @BugenZhao @njhill
 /rust/src/bench @esmeetu
-/rust/src/server/src/routes/inference @aoshen02
+/rust/src/server/src/routes/inference @aoshen02 @BugenZhao @njhill
 /tools/build_rust.sh @BugenZhao @njhill
 /rust-toolchain.toml @BugenZhao @njhill
 /.buildkite/test_areas/rust* @BugenZhao @njhill
