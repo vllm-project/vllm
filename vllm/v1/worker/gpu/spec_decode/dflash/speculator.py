@@ -94,10 +94,18 @@ class DFlashSpeculator(DraftModelSpeculator):
         )
 
         # Fixed-address inputs of the FULL graph's context step: the target's aux
-        # hidden states (allocated at capture) and, for an anchor that reads
-        # them, the rejected counts.
+        # hidden states and, for an anchor that reads them, the rejected counts.
         self._aux_staging: torch.Tensor | None = None
         self._num_rejected: torch.Tensor | None = None
+        aux_layers = get_eagle3_aux_layers_from_config(speculative_config)
+        cudagraph_mode = vllm_config.compilation_config.cudagraph_mode
+        if aux_layers and cudagraph_mode.decode_mode() == CUDAGraphMode.FULL:
+            self._aux_staging = torch.zeros(
+                self._num_graph_context_tokens(self.max_num_reqs),
+                len(aux_layers) * vllm_config.model_config.get_hidden_size(),
+                dtype=self.dtype,
+                device=device,
+            )
 
         # Per-mask-token sampling buffers. Flattened from (num_reqs, num_spec_tokens).
         max_num_sampled_tokens = self.max_num_reqs * self.num_speculative_steps
@@ -159,9 +167,6 @@ class DFlashSpeculator(DraftModelSpeculator):
         )
 
     def capture(self) -> None:
-        assert self.query_cudagraph_manager is not None
-        if not self.query_cudagraph_manager.needs_capture():
-            return
         logger.info("Capturing model for %s speculator...", self._speculator_name)
         # Padded sample rows must not scatter into a live request during capture.
         self.sample_indices.zero_()
@@ -169,14 +174,7 @@ class DFlashSpeculator(DraftModelSpeculator):
         self.sample_idx_mapping.fill_(-1)
         # Capture must not write context K/V.
         self._context_slot_mappings.fill_(PAD_SLOT_ID)
-        aux_layers = get_eagle3_aux_layers_from_config(self.speculative_config)
-        if aux_layers and self._aux_staging is None:
-            self._aux_staging = torch.zeros(
-                self._num_graph_context_tokens(self.max_num_reqs),
-                len(aux_layers) * self.vllm_config.model_config.get_hidden_size(),
-                dtype=self.dtype,
-                device=self.device,
-            )
+        assert self.query_cudagraph_manager is not None
         self.query_cudagraph_manager.capture(
             self._generate_draft,
             self.input_buffers,
@@ -206,6 +204,37 @@ class DFlashSpeculator(DraftModelSpeculator):
         # Recorded in the FULL graph so replays skip the eager metadata build.
         if attn_metadata is not None and self.supports_decode_metadata_update:
             self._update_draft_decode_metadata(attn_metadata, num_reqs)
+
+    def _prepare_graph_replay(
+        self,
+        input_batch: InputBatch,
+        num_graph_reqs: int,
+        last_hidden_states: torch.Tensor,
+        aux_hidden_states: list[torch.Tensor] | None,
+        num_rejected: torch.Tensor,
+        dummy_run: bool,
+    ) -> None:
+        """Eager work before a FULL replay: stage the inputs _prepare_graph_forward
+        reads and store the context rows past the graph's num_context rows."""
+        num_reqs = input_batch.num_reqs
+        num_target_tokens = input_batch.num_tokens
+        num_context = self._num_graph_context_tokens(num_graph_reqs)
+        self._store_hidden_states(
+            num_target_tokens, last_hidden_states, aux_hidden_states, num_context
+        )
+        if self._num_rejected is not None:
+            self._num_rejected[:num_reqs].copy_(num_rejected[:num_reqs])
+        if dummy_run:
+            # Dummy block tables are placeholders: write no context K/V.
+            self._context_slot_mappings[:, :num_context].fill_(PAD_SLOT_ID)
+        elif num_target_tokens <= num_context:
+            # Rows past the batch keep stale positions but write no K/V.
+            self._context_slot_mappings[:, num_target_tokens:num_context].fill_(
+                PAD_SLOT_ID
+            )
+        else:
+            # Prefill context beyond the graph's rows is stored before replay.
+            self._precompute_context_kv(num_context, num_target_tokens)
 
     def load_draft_model(
         self,
@@ -365,20 +394,31 @@ class DFlashSpeculator(DraftModelSpeculator):
 
     def _store_hidden_states(
         self,
-        start: int,
-        end: int,
+        num_tokens: int,
         last_hidden_states: torch.Tensor,
         aux_hidden_states: list[torch.Tensor] | None,
+        num_graph_tokens: int = 0,
     ) -> None:
-        if start >= end:
+        # A FULL graph combines its first num_graph_tokens rows from the staged
+        # aux hidden states; the remaining rows are combined here.
+        start = 0
+        if num_graph_tokens and self._aux_staging is not None:
+            assert aux_hidden_states
+            start = min(num_tokens, num_graph_tokens)
+            torch.cat(
+                [h[:start] for h in aux_hidden_states],
+                dim=-1,
+                out=self._aux_staging[:start],
+            )
+        if start == num_tokens:
             return
         if aux_hidden_states:
             hidden_states = self.model.combine_hidden_states(
-                torch.cat([h[start:end] for h in aux_hidden_states], dim=-1)
+                torch.cat([h[start:num_tokens] for h in aux_hidden_states], dim=-1)
             )
         else:
-            hidden_states = last_hidden_states[start:end]
-        self.hidden_states[start:end].copy_(hidden_states)
+            hidden_states = last_hidden_states[start:num_tokens]
+        self.hidden_states[start:num_tokens].copy_(hidden_states)
 
     def prepare_context_anchor(
         self,
@@ -435,7 +475,7 @@ class DFlashSpeculator(DraftModelSpeculator):
             # Since DFlash needs to build its own attention metadata, we must skip the
             # preparation in this path and run a minimal forward pass.
             self._store_hidden_states(
-                0, num_target_tokens, last_hidden_states, aux_hidden_states
+                num_target_tokens, last_hidden_states, aux_hidden_states
             )
             self.prepare_context_anchor(
                 num_reqs, input_batch.query_start_loc, num_rejected
@@ -522,37 +562,18 @@ class DFlashSpeculator(DraftModelSpeculator):
         )
 
         if batch_desc.cg_mode == CUDAGraphMode.FULL:
-            # The graph prepares the first num_context context rows.
             assert batch_desc.num_reqs is not None
-            num_context = self._num_graph_context_tokens(batch_desc.num_reqs)
-            num_staged = 0
-            if self._aux_staging is not None:
-                assert aux_hidden_states
-                num_staged = min(num_target_tokens, num_context)
-                torch.cat(
-                    [h[:num_staged] for h in aux_hidden_states],
-                    dim=-1,
-                    out=self._aux_staging[:num_staged],
-                )
-            self._store_hidden_states(
-                num_staged, num_target_tokens, last_hidden_states, aux_hidden_states
+            self._prepare_graph_replay(
+                input_batch,
+                batch_desc.num_reqs,
+                last_hidden_states,
+                aux_hidden_states,
+                num_rejected,
+                dummy_run,
             )
-            if self._num_rejected is not None:
-                self._num_rejected[:num_reqs].copy_(num_rejected[:num_reqs])
-            if dummy_run:
-                # Dummy block tables are placeholders: write no context K/V.
-                self._context_slot_mappings[:, :num_context].fill_(PAD_SLOT_ID)
-            elif num_target_tokens <= num_context:
-                # Rows past the batch keep stale positions but write no K/V.
-                self._context_slot_mappings[:, num_target_tokens:num_context].fill_(
-                    PAD_SLOT_ID
-                )
-            else:
-                # Prefill context beyond the graph's rows is stored before replay.
-                self._precompute_context_kv(num_context, num_target_tokens)
         else:
             self._store_hidden_states(
-                0, num_target_tokens, last_hidden_states, aux_hidden_states
+                num_target_tokens, last_hidden_states, aux_hidden_states
             )
             self.prepare_context_anchor(
                 num_reqs, input_batch.query_start_loc, num_rejected
