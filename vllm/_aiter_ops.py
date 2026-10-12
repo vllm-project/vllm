@@ -239,8 +239,6 @@ def is_aiter_found_and_supported_on_rdna4() -> bool:
 
 def _aiter_w8a8_uses_triton() -> bool:
     if current_platform.is_rocm() and IS_AITER_FOUND:
-        if os.getenv("AITER_TRITON_ONLY", "0") == "1":
-            return True
         from vllm.platforms.rocm import on_rdna4
 
         return on_rdna4()
