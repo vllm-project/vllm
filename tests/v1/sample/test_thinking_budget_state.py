@@ -92,51 +92,27 @@ def test_swap_exchanges_two_budgeted_states():
     assert h._state[1]["thinking_token_budget"] == b0
 
 
-THINK_START, THINK_END, FILLER, ANSWER = 100, 101, 5, 7
+THINK_START, FILLER, ANSWER, MISS = 100, 5, 7, 9
 VOCAB = 128
 NUM_SPEC = 3
 
 
-def _natural(prefix: list[int], think_len: int) -> int:
-    """Greedy target: ``think_len`` FILLER tokens, THINK_END, then ANSWER."""
-    if THINK_END in prefix:
-        return ANSWER
-    return THINK_END if len(prefix) - 1 >= think_len else FILLER
+def _natural(prefix: list[int], think_len: int, end: list[int]) -> int:
+    """Greedy target: ``think_len`` FILLER tokens, ``end``, then ANSWER. Once
+    ``end[0]`` is emitted (naturally or forced), it completes ``end``."""
+    if end[0] in prefix:
+        emitted = len(prefix) - prefix.index(end[0])
+        return end[emitted] if emitted < len(end) else ANSWER
+    return FILLER if len(prefix) - 1 < think_len else end[0]
 
 
-def _step(holder, output, drafts, think_len):
-    """One V1 verification step with greedy acceptance: ``update_state``, the
+def _run_spec(think_len, budget, end, miss_end_start=False):
+    """Decode with V1's call order and greedy acceptance: ``update_state``, the
     bonus-row call in ``Sampler``, then the target-row call in
-    ``RejectionSampler``."""
-    holder.update_state([output], [drafts])
-    bonus = torch.zeros(1, VOCAB)
-    bonus[0, _natural(output + drafts, think_len)] = 1.0
-    bonus = holder.apply_to_logits(bonus, True, [drafts])
-    target = torch.zeros(len(drafts), VOCAB)
-    for j in range(len(drafts)):
-        target[j, _natural(output + drafts[:j], think_len)] = 1.0
-    target = holder.apply_to_logits(target, False, [drafts])
-    for j, d in enumerate(drafts):
-        output.append(int(torch.argmax(target[j])))
-        if output[-1] != d:
-            return
-    output.append(int(torch.argmax(bonus[0])))
-
-
-@pytest.mark.parametrize(
-    "think_len,budget",
-    [
-        (2, 3),  # natural end in drafts, budget expires in the same window
-        (5, 6),  # same, natural end at a later draft position
-        (2, 8),  # natural end well within budget
-        (7, 3),  # budget reached first: end is forced
-    ],
-)
-def test_spec_decode_natural_end_matches_non_spec(think_len, budget):
-    """With a drafter proposing the target's own tokens, the output must match
-    non-spec decoding: one THINK_END after min(think_len, budget) tokens."""
+    ``RejectionSampler``. Drafts are the target's own tokens, except ``end[0]``
+    is mispredicted if ``miss_end_start``, so a step ends with it committed."""
     holder = ThinkingBudgetStateHolder(
-        create_mock_reasoning_config([THINK_START], [THINK_END]),
+        create_mock_reasoning_config([THINK_START], end),
         8,
         NUM_SPEC,
         torch.device("cpu"),
@@ -150,12 +126,54 @@ def test_spec_decode_natural_end_matches_non_spec(think_len, budget):
         )
     )
     output.append(THINK_START)
-    while len(output) < think_len + 6:
+    while len(output) < think_len + len(end) + 6:
         drafts: list[int] = []
         for _ in range(NUM_SPEC):
-            drafts.append(_natural(output + drafts, think_len))
-        _step(holder, output, drafts, think_len)
+            token = _natural(output + drafts, think_len, end)
+            drafts.append(MISS if miss_end_start and token == end[0] else token)
+        holder.update_state([output], [drafts])
+        bonus = torch.zeros(1, VOCAB)
+        bonus[0, _natural(output + drafts, think_len, end)] = 1.0
+        bonus = holder.apply_to_logits(bonus, True, [drafts])
+        target = torch.zeros(NUM_SPEC, VOCAB)
+        for j in range(NUM_SPEC):
+            target[j, _natural(output + drafts[:j], think_len, end)] = 1.0
+        target = holder.apply_to_logits(target, False, [drafts])
+        for j, d in enumerate(drafts):
+            output.append(int(torch.argmax(target[j])))
+            if output[-1] != d:
+                break
+        else:
+            output.append(int(torch.argmax(bonus[0])))
+    return output
 
-    n = min(think_len, budget)
-    assert output[: n + 2] == [THINK_START] + [FILLER] * n + [THINK_END], output
-    assert set(output[n + 2 :]) == {ANSWER}, output
+
+def _assert_single_end(output, n, end):
+    assert output[: n + 1 + len(end)] == [THINK_START] + [FILLER] * n + end, output
+    assert set(output[n + 1 + len(end) :]) == {ANSWER}, output
+
+
+@pytest.mark.parametrize(
+    "think_len,budget",
+    [
+        (2, 3),  # natural end in drafts, budget expires in the same window
+        (5, 6),  # same, natural end at a later draft position
+        (2, 8),  # natural end well within budget
+        (7, 3),  # budget reached first: end is forced
+    ],
+)
+def test_spec_decode_natural_end_matches_non_spec(think_len, budget):
+    """Output must match non-spec decoding: one end after
+    min(think_len, budget) thinking tokens."""
+    end = [101]
+    output = _run_spec(think_len, budget, end)
+    _assert_single_end(output, min(think_len, budget), end)
+
+
+@pytest.mark.parametrize("think_len,budget", [(3, 5), (6, 8)])
+def test_spec_decode_natural_end_started_in_committed_output(think_len, budget):
+    """A multi-token end whose first token is already committed and whose rest
+    is in the drafts is a natural end, not followed by a forced one."""
+    end = [101, 102]
+    output = _run_spec(think_len, budget, end, miss_end_start=True)
+    _assert_single_end(output, think_len, end)

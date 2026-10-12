@@ -438,10 +438,13 @@ class ThinkingBudgetStateHolder:
                     # budget; force the bonus token position
                     force_index = spec_len
                 # Drafts ending thinking within budget are a natural end if
-                # accepted; forcing would emit a second end after them.
+                # accepted; forcing would emit a second end after them. The end
+                # sequence may start in the committed output.
+                end_len = len(self.think_end_token_ids)
+                recent = output[max(0, len(output) - end_len + 1) :]
                 if (
                     self._find_last_sequence_index(
-                        state["spec_token_ids"][:force_index],
+                        recent + state["spec_token_ids"][:force_index],
                         self.think_end_token_ids,
                     )
                     >= 0
