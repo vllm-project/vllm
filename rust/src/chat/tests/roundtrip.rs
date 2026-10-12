@@ -204,7 +204,7 @@ impl ToolCallMixVariant {
 }
 
 impl RoundtripCase {
-    /// Qwen3 XML tool-call format with `qwen3` reasoning tags.
+    /// Qwen3 JSON tool-call format with `qwen3` reasoning tags.
     fn qwen3() -> Self {
         Self {
             model_id: "Qwen/Qwen3-0.6B",
