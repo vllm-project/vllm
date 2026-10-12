@@ -9,7 +9,6 @@ import pytest
 import torch
 
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import set_default_torch_num_threads
 from vllm.v1.attention.backends.cpu_attn import (
     CPUAttentionBackendImpl,
     CPUAttentionMetadataBuilder,
@@ -142,7 +141,6 @@ def _request_group(
 
 
 @requires_cpu
-@set_default_torch_num_threads(32)
 @pytest.mark.parametrize(
     ("query_len", "seq_len", "scheduler_options", "expected_group"),
     [
