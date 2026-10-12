@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 from contextlib import contextmanager
+from datetime import timedelta
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -315,6 +316,68 @@ def test_force_aot_load_fails_uniformly_across_ranks(tmp_path: Path):
         nprocs=2,
         join=True,
     )
+
+
+def _staged_aot_load_worker(rank: int, port: int, cache_root: str) -> None:
+    """Each rank is its own decision group, like PP stages with TP=1."""
+    torch.distributed.init_process_group(
+        "gloo",
+        init_method=f"tcp://127.0.0.1:{port}",
+        rank=rank,
+        world_size=2,
+        timeout=timedelta(seconds=15),
+    )
+    try:
+        own_groups = {r: torch.distributed.new_group([r]) for r in (0, 1)}
+        compile_decorators._aot_decision_group = lambda: own_groups[rank]
+
+        attempts = {"n": 0}
+        real_try_load = compile_decorators._try_load_aot_compiled_fn
+
+        def counting_try_load(*a, **k):
+            attempts["n"] += 1
+            return real_try_load(*a, **k)
+
+        compile_decorators._try_load_aot_compiled_fn = counting_try_load
+
+        # Cold cache for the target: the existence gate returns the compile
+        # path scoped to the caller's own group.
+        target_path = str(Path(cache_root, f"target_rank{rank}"))
+        assert compile_decorators._load_aot_fn_uniform(None, target_path) is None
+
+        # A drafter built only on the last PP stage: a world gather would
+        # find no partner and block until the process-group timeout.
+        if rank == 1:
+            drafter_path = Path(cache_root, "drafter")
+            drafter_path.write_bytes(b"not a pickle")
+            assert (
+                compile_decorators._load_aot_fn_uniform(None, str(drafter_path)) is None
+            )
+
+        Path(cache_root, f"staged_outcome_{rank}.json").write_text(
+            json.dumps({"attempts": attempts["n"], "done": True})
+        )
+    finally:
+        torch.distributed.destroy_process_group()
+
+
+def test_aot_load_decision_scoped_to_own_stage_group(tmp_path: Path):
+    """A module built on one pipeline stage never gathers with other stages."""
+    torch.multiprocessing.spawn(
+        _staged_aot_load_worker,
+        args=(get_open_port(), str(tmp_path)),
+        nprocs=2,
+        join=True,
+    )
+    rank0, rank1 = (
+        json.loads((tmp_path / f"staged_outcome_{rank}.json").read_text())
+        for rank in (0, 1)
+    )
+    # Both ranks completed instead of rank 1 dying in a partner-less gather.
+    assert rank0["done"] is True and rank1["done"] is True
+    # Every call is local to the caller's own group: rank 0 attempts its
+    # missing target once, rank 1 attempts its target and then the drafter.
+    assert rank0["attempts"] == 1 and rank1["attempts"] == 2
 
 
 @pytest.mark.skipif(

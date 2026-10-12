@@ -348,16 +348,35 @@ def _try_load_aot_compiled_fn(
         return None
 
 
+def _aot_decision_group() -> "torch.distributed.ProcessGroup":
+    """Ranks that must agree on load-or-compile for one compiled module.
+
+    Compiled graphs issue TP collectives, and the set of compiled modules
+    differs across pipeline stages (a drafter is only built on the last PP
+    rank), so the caller's TP group is the largest safe scope: a
+    world-wide gather would leave a stage-local call without partners.
+    Falls back to the world group where TP state is not initialized
+    (minimal drivers and tests).
+    """
+    try:
+        from vllm.distributed.parallel_state import get_tp_group
+
+        return get_tp_group().cpu_group
+    except (ImportError, AssertionError):
+        return torch.distributed.group.WORLD
+
+
 def _load_aot_fn_uniform(model: Any, aot_compilation_path: str) -> Any | None:
-    """Load the AOT-compiled function, keeping the decision uniform across ranks.
+    """Load the AOT-compiled function, keeping the decision uniform.
 
     A rank that compiles while its peers run loaded artifacts can issue
     collectives the others never join (#60391), so when the model runs on
-    more than one rank the load-or-compile decision is made collectively:
-    every rank loads iff every rank has a usable artifact, and any
-    disagreement sends every rank to the compile path. Under
-    ``VLLM_FORCE_AOT_LOAD`` a failure raises on every rank instead of one
-    rank dying while its peers hang in a later collective.
+    more than one rank the load-or-compile decision is made collectively
+    across the ranks that run the same compiled graph: every rank loads
+    iff every rank has a usable artifact, and any disagreement sends every
+    rank to the compile path. Under ``VLLM_FORCE_AOT_LOAD`` a failure
+    raises on every rank instead of one rank dying while its peers hang in
+    a later collective.
     """
     if not (
         torch.distributed.is_available()
@@ -366,11 +385,14 @@ def _load_aot_fn_uniform(model: Any, aot_compilation_path: str) -> Any | None:
     ):
         return _try_load_aot_compiled_fn(model, aot_compilation_path)
 
-    world_size = torch.distributed.get_world_size()
+    group = _aot_decision_group()
+    group_size = group.size()
+    if group_size <= 1:
+        return _try_load_aot_compiled_fn(model, aot_compilation_path)
 
     def every_rank(ok: bool) -> bool:
-        reports: list[bool] = [False] * world_size
-        torch.distributed.all_gather_object(reports, ok)
+        reports: list[bool] = [False] * group_size
+        torch.distributed.all_gather_object(reports, ok, group=group)
         return all(reports)
 
     has_artifact = (
