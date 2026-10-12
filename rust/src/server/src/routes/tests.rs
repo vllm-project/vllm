@@ -3069,7 +3069,7 @@ async fn selected_logprobs_reach_engine_and_both_openai_response_modes() {
                         let add = recv_engine_message(dealer).await;
                         let request: EngineCoreRequest = rmp_serde::from_slice(&add[1]).unwrap();
                         let params = request.sampling_params.as_ref().unwrap();
-                        assert_eq!(params.logprob_token_ids, Some(vec![65, 66]));
+                        assert_eq!(params.logprob_token_ids, Some(vec![65, 104, 66]));
                         assert_eq!(params.logprobs, None);
                         send_outputs(
                             push,
@@ -3091,6 +3091,11 @@ async fn selected_logprobs_reach_engine_and_both_openai_response_modes() {
                                                     token_id: 65,
                                                     logprob: -4.0,
                                                     rank: 20,
+                                                },
+                                                TokenLogprob {
+                                                    token_id: 104,
+                                                    logprob: -0.5,
+                                                    rank: 1,
                                                 },
                                                 TokenLogprob {
                                                     token_id: 66,
@@ -3127,7 +3132,8 @@ async fn selected_logprobs_reach_engine_and_both_openai_response_modes() {
                 json!({"prompt": "hello", "logprobs": 0})
             };
             body["stream"] = json!(stream);
-            body["logprob_token_ids"] = json!([65, 66]);
+            // The sampled token `h` (104) is also requested.
+            body["logprob_token_ids"] = json!([65, 104, 66]);
             let response = app
                 .call(
                     Request::builder()
@@ -3156,25 +3162,23 @@ async fn selected_logprobs_reach_engine_and_both_openai_response_modes() {
                 .map(|payload| &payload["choices"][0]["logprobs"])
                 .find(|value| value.is_object())
                 .unwrap();
-            let actual = if chat_route {
-                logprobs["content"][0]["top_logprobs"]
+            if chat_route {
+                let actual = logprobs["content"][0]["top_logprobs"]
                     .as_array()
                     .unwrap()
                     .iter()
-                    .map(|entry| {
-                        (
-                            entry["token"].as_str().unwrap().to_string(),
-                            entry["logprob"].clone(),
-                        )
-                    })
-                    .collect::<serde_json::Map<_, _>>()
+                    .map(|entry| json!([entry["token"], entry["logprob"]]))
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    actual,
+                    [json!(["h", -0.5]), json!(["A", -4.0]), json!(["B", -5.0])]
+                );
             } else {
-                logprobs["top_logprobs"][0].as_object().unwrap().clone()
-            };
-            assert_eq!(
-                serde_json::Value::Object(actual),
-                json!({"h": -0.5, "A": -4.0, "B": -5.0})
-            );
+                assert_eq!(
+                    logprobs["top_logprobs"][0],
+                    json!({"h": -0.5, "A": -4.0, "B": -5.0})
+                );
+            }
         }
     }
 }
