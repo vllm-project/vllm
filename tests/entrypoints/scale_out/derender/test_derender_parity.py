@@ -126,7 +126,7 @@ async def _disagg(
                 ],
             },
             "prompt_tokens": prompt_tokens,
-            "chat_request": chat_request,
+            "chat_request": {"return_token_ids": True, **chat_request},
         },
     )
     assert resp.status_code == 200, resp.text
@@ -149,6 +149,7 @@ def _assert_parity(coupled: dict, disagg: dict) -> None:
     assert d["message"].get("reasoning") == c["message"].get("reasoning")
     assert _tool_sig(d) == _tool_sig(c)
     assert d["finish_reason"] == c["finish_reason"]
+    assert d["token_ids"] == c["token_ids"]
     assert disagg["usage"]["prompt_tokens"] == coupled["usage"]["prompt_tokens"]
     assert disagg["usage"]["completion_tokens"] == len(c["token_ids"])
 
@@ -237,21 +238,47 @@ async def test_parity_reasoning_and_tool_call(client):
     assert _tool_sig(disagg["choices"][0])
 
 
+def _to_generate_logprobs(openai_logprobs: dict) -> dict:
+    """Turn a coupled response's `token_id:N` logprobs into `GenerateLogProbs`.
+
+    A real GPU-less worker emits integer ids directly; here the coupled server
+    with `return_tokens_as_token_ids=True` is the only source of the same ids,
+    so the placeholders are parsed back out to build the generate-shaped
+    payload that `/derender` now consumes.
+    """
+
+    def _id(token: str) -> int:
+        assert token.startswith("token_id:"), token
+        return int(token.removeprefix("token_id:"))
+
+    return {
+        "content": [
+            {
+                "token_id": _id(entry["token"]),
+                "logprob": entry["logprob"],
+                "top_logprobs": [
+                    {"token_id": _id(top["token"]), "logprob": top["logprob"]}
+                    for top in entry["top_logprobs"]
+                ],
+            }
+            for entry in openai_logprobs["content"]
+        ]
+    }
+
+
 @pytest.mark.asyncio
 async def test_parity_logprobs(client):
-    """token_id:N resolution parity vs. the coupled server's real strings.
+    """Integer-id logprob decoding parity vs. the coupled server's strings.
 
-    A real disaggregated worker only has token IDs so it emits logprobs
-    with `token_id:N` placeholders (`return_tokens_as_token_ids=True`
-    reproduces that shape here). `/derender` must resolve those
-    placeholders to the same token strings/bytes the coupled server
-    resolves them to directly.
+    A real disaggregated worker only has token IDs, so it emits
+    `GenerateLogProbs` with integer `token_id`s. `/derender` must decode those
+    to the same token strings/bytes the coupled server produces directly.
     """
     messages = [{"role": "user", "content": "What is 2+2?"}]
     extra = {"logprobs": True, "top_logprobs": 3}
 
-    # What a real GPU less worker would hand to /derender is token IDs plus
-    # logprobs still in token_id:N placeholder form
+    # The coupled server with placeholders is used only as a source of the
+    # token ids a GPU-less worker would have had.
     placeholder = await _coupled(
         client, messages, return_tokens_as_token_ids=True, **extra
     )
@@ -263,7 +290,7 @@ async def test_parity_logprobs(client):
         placeholder["usage"]["prompt_tokens"],
         ch["finish_reason"],
         chat_request,
-        logprobs=ch["logprobs"],
+        logprobs=_to_generate_logprobs(ch["logprobs"]),
     )
 
     # The coupled server resolving the same greedy generation
@@ -360,7 +387,7 @@ async def _run_stream_parity_case(
         [tid for ch in coupled_choices for tid in ch["token_ids"]],
         [len(ch["token_ids"]) for ch in coupled_choices]
         + ([0] if finish_only_tail else []),
-        {"model": MODEL, "messages": messages, **extra},
+        {"model": MODEL, "messages": messages, "return_token_ids": True, **extra},
         len(prompt_token_ids),
         prompt_token_ids,
         finish_reason="stop" if finish_reason == "tool_calls" else finish_reason,
