@@ -326,7 +326,10 @@ def test_packed_span_builder_rejects_incompatible_geometry(views):
 def test_packed_mla_pp1_push_peer_transfers_whole_rows(num_layers):
     layouts = {f"L{i}": (i * 128, 128) for i in range(num_layers)}
     stride = num_layers * 128
-    worker, raw = _make_packed_mla_view_worker(layouts, stride)
+    worker, raw = _make_packed_mla_view_worker(
+        layouts, stride, force_cuda_span_eligibility=True
+    )
+    assert not worker._nixl_packed_cache_span_active
     assert worker._registered_descs == [[(raw.data_ptr(), raw.nbytes, 0, "")]]
     assert worker.src_blocks_data.tolist() == [
         [raw.data_ptr() + block * stride, stride, 0] for block in range(4)
@@ -457,6 +460,69 @@ def test_packed_mla_handshake_allows_group_remapping_and_endpoint_strides():
         for address in metadata.kv_caches_base_addr
         for block in range(metadata.num_blocks)
     ]
+
+
+@pytest.mark.cpu_test
+def test_packed_mla_handshake_allows_different_endpoint_memory_types():
+    worker, _ = _make_packed_mla_view_worker(
+        {"L0": (0, 64), "L1": (64, 64), "L2": (128, 64), "L3": (192, 64)},
+        256,
+        worker_cls=NixlPullConnectorWorker,
+        transfer_group_ids={"L0": 0, "L1": 0, "L2": 1, "L3": 1},
+        force_cuda_span_eligibility=True,
+    )
+    worker.region_mem_types = ["VRAM", "DRAM"]
+    worker._mixed_mem_types = True
+
+    metadata = msgspec.msgpack.decode(
+        worker.xfer_handshake_metadata.agent_metadata_bytes,
+        type=NixlAgentMetadata,
+    )
+    metadata.engine_id = "different-memory-types-peer"
+    metadata.region_mem_types = ["VRAM", "VRAM"]
+
+    worker.transfer_topo = MagicMock()
+    worker.transfer_topo.get_engine_info.return_value = SimpleNamespace(
+        remote_tp_size=1, remote_dcp_size=1
+    )
+    worker.transfer_topo.tp_ratio.return_value = 1
+    worker.transfer_topo.block_size_ratio.return_value = 1
+    worker.transfer_topo.total_num_kv_heads = 1
+    worker.dst_num_blocks[metadata.engine_id] = metadata.num_blocks
+
+    worker._validate_remote_agent_handshake(
+        metadata, remote_tp_size=1, remote_packed_span_active=True
+    )
+
+
+@pytest.mark.cpu_test
+def test_peer_tail_zeroing_uses_device_cache_with_host_staging():
+    worker = object.__new__(NixlPullConnectorWorker)
+    host_buffer = torch.empty((4, 64), dtype=torch.uint8)
+    device_cache = torch.full((4, 64), 7, dtype=torch.uint8)
+    worker.device_kv_caches = {"L0": device_cache}
+    worker._skip_dram_xfer = False
+    view = bw._NixlLayerTransferView(
+        "L0", host_buffer.data_ptr(), 64, 64, 4, 0, "VRAM", 0, True
+    )
+    peer_plan = bw._NixlPeerTransferPlan(
+        local_views=(view,),
+        local_region_num_blocks=(4,),
+        remote_group_ids=(0,),
+        remote_region_num_blocks=(4,),
+        remote_region_mem_types=("VRAM",),
+        local_xfer_handles_by_block_size={},
+        local_dram_xfer_handles_by_block_size={},
+        local_desc_is_dram_by_block_size={},
+        local_desc_pos_by_block_size={},
+    )
+
+    worker._zero_peer_region_blocks(peer_plan, [[1, 3]])
+
+    assert torch.all(device_cache[1] == 0)
+    assert torch.all(device_cache[3] == 0)
+    assert torch.all(device_cache[0] == 7)
+    assert torch.all(device_cache[2] == 7)
 
 
 @pytest.mark.cpu_test

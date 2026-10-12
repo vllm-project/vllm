@@ -1665,7 +1665,8 @@ class NixlBaseConnectorWorker:
         packed_member_layouts: dict[str, tuple[int, int]] = {}
 
         can_coalesce_packed_spans = (
-            self._has_packed_cache is not False
+            self._TRANSFER_MODE == "pull"
+            and self._has_packed_cache is not False
             and not (track_region_layers and packed_storage)
             and self.pp_size == 1
             and not route_packed_layers
@@ -1675,8 +1676,7 @@ class NixlBaseConnectorWorker:
             and self.kv_buffer_device == "cuda"
             and self.nixl_memory_type == "VRAM"
         )
-        # Keep coalescing on the simple local-VRAM path. Other modes may need
-        # per-layer region identity or different address routing.
+        # Span coalescing is pull-only; push retains its existing packed-row routing.
         packed_span_views: list[_NixlPackedCacheView] = []
         if can_coalesce_packed_spans:
             for layer_name, cache in xfer_buffers.items():
@@ -3366,16 +3366,11 @@ class NixlBaseConnectorWorker:
                 if self._transfer_layer_names
                 else self.region_members
             )
-            expected_mem_types = [
-                self.region_mem_types[index] for index in local_regions
-            ]
             expected_layouts = getattr(self, "_packed_member_layouts", {})
             if nixl_agent_meta.region_members != expected_members:
                 raise RuntimeError(
                     "NIXL packed-cache region membership/order differs between P/D"
                 )
-            if nixl_agent_meta.region_mem_types != expected_mem_types:
-                raise RuntimeError("NIXL packed-cache memory types differ between P/D")
             if nixl_agent_meta.packed_member_layouts != expected_layouts:
                 raise RuntimeError(
                     "NIXL packed-cache member offsets differ between P/D"
@@ -3602,15 +3597,8 @@ class NixlBaseConnectorWorker:
             if not blocks or (self._skip_dram_xfer and view.memory_type == "DRAM"):
                 continue
             cache = self.device_kv_caches[view.layer_name]
-            storage = cache.untyped_storage()
-            pages = torch.empty(0, dtype=torch.uint8, device=cache.device).set_(
-                storage,
-                view.base_addr - storage.data_ptr(),
-                (view.num_blocks, view.page_size),
-                (view.block_stride, 1),
-            )
             for block in blocks:
-                pages[block].zero_()
+                cache[block].zero_()
 
     def get_transfer_results(self) -> KVConnectorTransferResults:
         """Get transfers that completed on this specific worker.
