@@ -200,8 +200,9 @@ class MonoDecode:
         self.k1_scratch = {
             s: buf(
                 max(
-                    gdn.scratch_bytes(gdn.K1Build(tokens=s, first=f))
+                    gdn.scratch_bytes(gdn.K1Build(tokens=s, first=f, qq=q))
                     for f in (False, True)
+                    for q in (False, True)
                 )
             )
             for s in widths
@@ -209,9 +210,7 @@ class MonoDecode:
         self.k2_scratch = {
             s: buf(
                 max(
-                    layer.scratch_bytes(
-                        layer.K2Build(tokens=s, fse=f, **layer.tuned(s, f))
-                    )
+                    layer.scratch_bytes(layer.K2Build(tokens=s, fse=f))
                     for f in (False, True)
                 )
             )
@@ -369,7 +368,6 @@ class MonoDecode:
                 eps=layer.input_layernorm.variance_epsilon,
                 norm_eps=a.norm.eps,
                 qq=qq,
-                **gdn.tuned(s, qq),
             ),
             hidden=h,
             residual=residual,
@@ -409,7 +407,6 @@ class MonoDecode:
                 fse=fused,
                 oq=oq,
                 og=gate is not None,
-                **k2.tuned(s, fused),
             ),
             core=core,
             gate=gate,

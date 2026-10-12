@@ -7,12 +7,14 @@ rows, one token a request.
 One launch a layer and rank, ``BLOCKS`` x ``THREADS``:
 
     front    (CTAs 0 .. 63, 128 columns each): hidden + residual (bf16) ->
-             ``res_out``; every task's sum of squares -> input_layernorm
-             (Gemma, 1 + w) -> x rows (plain, XRDY a task)
+             ``res_out``; the columns' sums of squares -> MSQ
     in_proj  (290 x 16 rows: 288 of in_proj_qkvz, 2 of in_proj_ba; task j on
-             CTA 255 - j, the round's 34 leftovers past the front CTAs): bf16
-             GEMV against the x rows -> bf16 PROJ
-    gdn      (S x 16 value heads x 8 chunks of 16 state rows, on CTAs 0 ..):
+             CTA 255 - j, the round's 34 leftovers past the front CTAs): every
+             in_proj CTA builds the x rows itself (input_layernorm, Gemma,
+             1 + w, from MSQ), bf16 GEMV against them -> bf16 PROJ
+    gdn      (S x 16 value heads x 8 chunks of 16 state rows, on CTAs 64 ..
+             when a single round fits there, else 0 ..; a CTA runs its tasks
+             phase by phase, so the rounds' hand-offs overlap):
              the conv update of the owned channels (a key head's q / k by its
              first value head's tasks, out through QK), the gates, q / k
              l2norm, the recurrence on 16 state rows (fp32, in place), partial
@@ -21,8 +23,9 @@ One launch a layer and rank, ``BLOCKS`` x ``THREADS``:
 With ``qq`` (an online-MXFP4 in_proj_qkvz on the ASM FP4 GEMM, its weight and
 scales shuffled as K2's fp4 o_proj's), the in_proj_qkvz tasks read the x rows
 through MXFP4 (RCEIL), as ``per_1x32_f4_quant_hip`` quantizes the GEMM's input;
-in_proj_ba stays bf16 on the unquantized rows, so a CTA runs its in_proj_ba
-task before it quantizes x in place.
+in_proj_ba stays bf16 on the unquantized rows, as 16 tasks (2 row groups x 8
+K parts) on CTAs 0 .. 15 whose weights go out at the start; the gates sum the
+parts.
 
 Rounding follows the stock decode path (AITER's Triton conv update and fused
 gated delta rule, RMSNormGated) where it is elementwise: every conv product
@@ -49,14 +52,7 @@ from flydsl._mlir.dialects import llvm
 from flydsl.expr import const_expr, gpu, range_constexpr
 from flydsl.expr.typing import Int32, Int64, T
 
-from vllm.models.kimi_k3.amd.mono.common.debug import (
-    region_ids,
-    stamp,
-    stamp_begin,
-    stamp_flush,
-)
 from vllm.models.kimi_k3.amd.mono.common.ops import (
-    CM_DEV,
     bf16_round,
     bf_hi,
     bf_lo,
@@ -77,7 +73,7 @@ from vllm.models.kimi_k3.amd.mono.common.plan import (
     key_tuple,
     pair_layout,
 )
-from vllm.models.kimi_k3.amd.mono.common.sync import Mailbox, publish, sreg
+from vllm.models.kimi_k3.amd.mono.common.sync import Mailbox, sreg
 from vllm.models.kimi_k3.amd.mono.stages import gemv
 from vllm.models.qwen3_5.amd.mono import layout as L
 from vllm.models.qwen3_5.amd.mono.layer import fp4_gemv, fp4_gemv_loads, quant_x
@@ -101,7 +97,7 @@ HPK = NV // NK  # value heads a key head: 8
 GTASKS = NV * NVCH  # GDN tasks a token: 128
 SL = L.CONV_W - 1  # conv state entries (no spec decode)
 SOFTPLUS_THRESHOLD = 20.0
-BA_PARTS = 8  # ``bs``: in_proj_ba's K split
+BA_PARTS = 8  # ``qq``: in_proj_ba's K split
 BA_K = HIDDEN // BA_PARTS
 BA_TASKS = L.BA // ROWS * BA_PARTS  # 16, on CTAs 0 ..
 LOG2E = 1.0 / math.log(2.0)
@@ -113,7 +109,7 @@ assert BLOCKS < PTASKS <= 2 * BLOCKS and NRED <= 2 * BLOCKS - PTASKS
 assert BLOCKS % (HPK * NVCH) == 0, "a key head's GDN tasks must share a round"
 assert BA_TASKS <= 2 * BLOCKS - QKVZ_TASKS
 
-REGIONS = ("msq", "xrdy", "proj", "qk", "onrm", "bapart")
+REGIONS = ("msq", "proj", "qk", "onrm", "bapart")
 
 _STREAM = fx.Stream(None)
 
@@ -124,26 +120,7 @@ class K1Build:
     first: bool = False  # the model's first layer: no residual (residual := hidden)
     eps: float = 1e-6  # input_layernorm
     norm_eps: float = 1e-6  # the gated norm
-    diag: bool = False  # bounded waits recording into ``diag`` (debug)
-    # debug: run phases < stop only (1 front, 2 in_proj, 3 gdn)
-    stop: int = 99
     qq: bool = False  # in_proj_qkvz MXFP4 (ASM FP4 GEMM layout)
-    # debug: each CTA's TL_POINTS phase stamps -> ``diag`` [CTA][point] int64
-    timeline: bool = False
-    # a CTA's GDN tasks phase by phase (every task's conv, then every task's
-    # gates, ...): the rounds' hand-offs overlap
-    pm: bool = False
-    # the in_proj CTAs build x (hidden + residual, rstd from the front tasks'
-    # sums of squares): no x hand-off
-    cx: bool = False
-    # (``qq``) in_proj_ba as K-split parts whose weights go out at the start,
-    # summed by the gates; the second in_proj_qkvz tasks' weights prefetched
-    bs: bool = False
-    # (``qq``) x's MXFP4 quantization on v_cvt_scalef32_pk_fp4
-    hq: bool = False
-    # a single GDN round on CTAs 64 .. (past the front CTAs, whose in_proj
-    # weights go out late, and short of the two-task in_proj ones) if it fits
-    go: bool = False
 
 
 ABI = KernelAbi(
@@ -170,19 +147,10 @@ ABI = KernelAbi(
         "scratch",
         "epoch",
         "layer",
-        "diag",
     )
 )
 
 
-def tuned(s: int, qq: bool) -> dict:
-    """The fastest variant flags at width s (K1 stage benchmark)."""
-    return {"pm": True, "cx": True, "bs": qq, "hq": qq, "go": True}
-
-
-# timeline points: 0 start, 1 front, 2 x in LDS, 3 in_proj, 4 .. 7 GDN rounds
-# (``pm``: 4 conv, 5 gates, 6 recurrence, 7 norm), 8 end
-TL_POINTS = 10
 ROUNDS = -(-L.MAX_TOKENS * GTASKS // BLOCKS)  # 4: GDN rounds at the widest
 
 
@@ -190,16 +158,12 @@ def scratch_layout(key: K1Build) -> dict:
     s = key.tokens
     pairs = {
         "msq": NRED * s,
-        "xrdy": NRED,
         "proj": s * NPROJ,
         "qk": s * NK * 2 * HD,
         "onrm": s * NV * NVCH,
-        "bapart": BA_TASKS * s * ROWS if key.bs else 0,
+        "bapart": BA_TASKS * s * ROWS if key.qq else 0,
     }
-    lay = pair_layout(pairs.items())
-    end = max(o + n for o, n in lay.values())
-    lay["xrow"] = ((end + 15) // 16 * 16, s * HIDDEN * 2)
-    return lay
+    return pair_layout(pairs.items())
 
 
 def scratch_bytes(key: K1Build) -> int:
@@ -261,10 +225,8 @@ def pack_bf(v0, v1):
 # ---------------------------------------------------------------- front
 @traced
 def stage_front(c, j):
-    """Columns 128 j ..: hidden + residual (fp32; bf16 -> ``res_out``); every
-    task's sum of squares -> rstd -> bf16(v rstd (1 + w)) -> the x rows, XRDY j.
-    The norm reads the unrounded sum, as ``fused_add_rms_norm`` does (``cx``:
-    up to the sums of squares)."""
+    """Columns 128 j ..: hidden + residual (fp32; bf16 -> ``res_out``); the
+    columns' sums of squares -> MSQ (the in_proj CTAs build x: ``local_x``)."""
     s, tid, lane = c["S"], c["tid"], c["lane"]
     a = c["args"]
     mine = tid < s * 64
@@ -283,31 +245,6 @@ def stage_front(c, j):
     sq = wave_sum(z0 * z0 + z1 * z1)
     if mine & (lane == 0):
         c["put"](c["msq"], j * s + t, sq)
-    if const_expr(not c["cx"]):
-        stage_front_x(c, j, z0, z1, mine, t, col, at)
-
-
-@traced
-def stage_front_x(c, j, z0, z1, mine, t, col, at):
-    """The front task's x columns -> XRDY j."""
-    s, tid, lane, red = c["S"], c["tid"], c["lane"], c["red"]
-    a = c["args"]
-    gpu.barrier()
-    if mine:
-        v = c["poll"]([(c["msq"], lane * s + t, 1)])[0][0]
-        fx.ptr_store(f32_of(v), red + (t * 64 + lane))
-    gpu.barrier()
-    tot = fx.ptr_load(red + t * 64)
-    for q in range_constexpr(1, NRED):
-        tot = tot + fx.ptr_load(red + (t * 64 + q))
-    r = hw_rsq(tot * fx.Float32(1.0 / HIDDEN) + fx.Float32(c["eps"]))
-    w0 = fx.Float32(1.0) + ld_bf(a["ln_w"], col)
-    w1 = fx.Float32(1.0) + ld_bf(a["ln_w"], col + 1)
-    y = pack_bf(z0 * r * w0, z1 * r * w1)
-    if mine:
-        bo.buffer_store(y, rsrc(c["xbuf"]), at, cache_modifier=CM_DEV)
-    publish(c["put"], c["xrdy"], j, fx.Int32(1), tid == 0)
-    gpu.barrier()
 
 
 # ---------------------------------------------------------------- in_proj
@@ -328,25 +265,11 @@ def qkvz_fp4_loads(c, rg):
 
 
 @traced
-def wait_x(c):
-    """Every front task's x columns ready -> the x rows into LDS."""
-    tid = c["tid"]
-    if const_expr(c["cx"]):
-        local_x(c)
-    else:
-        if tid < NRED:
-            c["poll"]([(c["xrdy"], tid, 1)])
-        gpu.barrier()
-        gemv.rows_to_lds(
-            tid, c["xbuf"], HIDDEN, c["S"], c["xl"], HIDDEN + gemv.LDS_PAD, CM_DEV
-        )
-
-
-@traced
 def local_x(c):
-    """``cx``: every front task's sums of squares -> each token's rstd (the
-    front tasks' order and arithmetic) -> x = bf16((hidden + residual) rstd
-    (1 + w)) rows into LDS, 8 columns a lane."""
+    """Every front task's sums of squares -> each token's rstd (fp32 sum in task
+    order) -> x = bf16((hidden + residual) rstd (1 + w)) rows into LDS, 8
+    columns a lane. The norm reads the unrounded sum, as ``fused_add_rms_norm``
+    does."""
     s, tid, lane, red = c["S"], c["tid"], c["lane"], c["red"]
     a = c["args"]
     if tid < 64 * s:
@@ -395,7 +318,7 @@ def local_x(c):
 
 
 def ba_loads(c, i):
-    """``bs``: in_proj_ba part i's weights for this wave (rows 16 (i / 8) ..,
+    """in_proj_ba part i's weights for this wave (rows 16 (i / 8) ..,
     K columns ``BA_K`` (i % 8) ..)."""
     g, q = i // BA_PARTS, i % BA_PARTS
     return gemv.loads(
@@ -405,7 +328,7 @@ def ba_loads(c, i):
 
 @traced
 def stage_ba(c, i, ops):
-    """``bs``: in_proj_ba part i on the unquantized x rows -> fp32 BAPART."""
+    """in_proj_ba part i on the unquantized x rows -> fp32 BAPART."""
     s, tid, lane, wave, red = c["S"], c["tid"], c["lane"], c["wave"], c["red"]
     xrow = HIDDEN + gemv.LDS_PAD
     xl = c["xl"] + (i % BA_PARTS) * BA_K // 2
@@ -522,7 +445,7 @@ def gdn_gates(c, k, t, h):
         v = c["poll"]([(c["qk"], (t * NK + kh) * 2 * HD + tid, 1)])[0][0]
         fx.ptr_store(f32_of(v), c["qkl"] + tid)
     if tid == 2 * HD:
-        if const_expr(c["bs"]):
+        if const_expr(c["qq"]):
             s = c["S"]
             parts = c["poll"](
                 [
@@ -626,9 +549,10 @@ def gdn_norm(c, k, t, h, ch):
 
 
 def gdn_offset(key) -> int:
-    """``go``: the first GDN CTA."""
+    """The first GDN CTA: past the front CTAs (whose in_proj weights go out
+    late) and short of the two-task in_proj ones, if a single round fits."""
     fits = key.tokens * GTASKS <= 2 * BLOCKS - QKVZ_TASKS - NRED
-    return NRED if key.go and fits else 0
+    return NRED if fits else 0
 
 
 def gdn_round(c, r):
@@ -639,39 +563,28 @@ def gdn_round(c, r):
     tc = fx.min(task, n - 1)
     cr = dict(c)
     for name, m in (("qkl", 2 * HD), ("vloc", VCH), ("ol", VCH), ("scal", 4)):
-        cr[name] = c[name] + r * m if c["pm"] else c[name]
+        cr[name] = c[name] + r * m
     return cr, task < n, tc // GTASKS, (tc // NVCH) % NV, tc % NVCH
 
 
 @traced
 def gdn_tasks(c):
+    """This CTA's GDN tasks phase by phase: a task waits only on earlier phases
+    of other CTAs' tasks, and every CTA finishes a phase's work before it
+    waits in the next."""
     rounds = -(-c["S"] * GTASKS // BLOCKS)
-    if const_expr(not c["pm"]):
-        for r in range_constexpr(rounds):
-            cr, live, t, h, ch = gdn_round(c, r)
+    tasks = [gdn_round(c, r) for r in range(rounds)]
+    ks = [gdn_stage(cr, t, h, ch) for cr, _, t, h, ch in tasks]
+    phases = (
+        lambda cr, k, t, h, ch: gdn_conv(cr, k, t, h, ch),
+        lambda cr, k, t, h, ch: gdn_gates(cr, k, t, h),
+        lambda cr, k, t, h, ch: gdn_recur(cr, k, t, h, ch),
+        lambda cr, k, t, h, ch: gdn_norm(cr, k, t, h, ch),
+    )
+    for phase in phases:
+        for (cr, live, t, h, ch), k in zip(tasks, ks):
             if live:
-                k = gdn_stage(cr, t, h, ch)
-                gdn_conv(cr, k, t, h, ch)
-                gdn_gates(cr, k, t, h)
-                gdn_recur(cr, k, t, h, ch)
-                gdn_norm(cr, k, t, h, ch)
-            c["st"](4 + r)
-    else:
-        # a task waits only on earlier phases of other CTAs' tasks, and every
-        # CTA finishes a phase's work before it waits in the next
-        tasks = [gdn_round(c, r) for r in range(rounds)]
-        ks = [gdn_stage(cr, t, h, ch) for cr, _, t, h, ch in tasks]
-        phases = (
-            lambda cr, k, t, h, ch: gdn_conv(cr, k, t, h, ch),
-            lambda cr, k, t, h, ch: gdn_gates(cr, k, t, h),
-            lambda cr, k, t, h, ch: gdn_recur(cr, k, t, h, ch),
-            lambda cr, k, t, h, ch: gdn_norm(cr, k, t, h, ch),
-        )
-        for p, phase in enumerate(phases):
-            for (cr, live, t, h, ch), k in zip(tasks, ks):
-                if live:
-                    phase(cr, k, t, h, ch)
-            c["st"](4 + p)
+                phase(cr, k, t, h, ch)
 
 
 # ---------------------------------------------------------------- kernel
@@ -684,7 +597,7 @@ def build(key: K1Build):
     s = key.tokens
     need(1 <= s <= L.MAX_TOKENS, f"{s} rows, the kernels take 1..{L.MAX_TOKENS}")
     lay = scratch_layout(key)
-    nr = -(-s * GTASKS // BLOCKS) if key.pm else 1
+    nr = -(-s * GTASKS // BLOCKS)  # GDN rounds: each its own LDS
 
     @fx.struct
     class XLds:
@@ -705,15 +618,10 @@ def build(key: K1Build):
     @fx.struct
     class Smem:
         red: fx.Array[fx.Float32, THREADS * 4, 16]
-        tls: fx.Array[fx.Int64, TL_POINTS, 16]
         rs: fx.Array[fx.Float32, 16, 16]
 
     keyed = key_tuple(key, digest())
-    name = (
-        f"qwen38_mono_k1_s{s}_f{int(key.first)}_g{int(key.diag)}_p{key.stop}"
-        f"_q{int(key.qq)}_t{int(key.timeline)}_m{int(key.pm)}_x{int(key.cx)}_b{int(key.bs)}"
-        f"_h{int(key.hq)}_o{int(key.go)}"
-    )
+    name = f"qwen38_mono_k1_s{s}_f{int(key.first)}_q{int(key.qq)}"
 
     @flyc.kernel(name=name, known_block_size=[THREADS, 1, 1])
     def k1(
@@ -739,7 +647,6 @@ def build(key: K1Build):
         scratch: Int64,
         epoch: Int64,
         layer: Int32,
-        diag: Int64,
     ):
         _ = keyed
         tid = fx.thread_idx.x
@@ -748,18 +655,9 @@ def build(key: K1Build):
         lds = alloc.allocate(Smem).peek()
         st_lds = alloc.allocate(StageLds)
         xl, gl = st_lds.x.peek(), st_lds.gdn.peek()
-        if const_expr(key.diag):
-            mb = Mailbox(step_tag(epoch, layer) - 1, diag, region_ids(REGIONS))
-        else:
-            mb = Mailbox(step_tag(epoch, layer) - 1)
-        on, tls = key.timeline, lds.tls.ptr
-        stamp_begin(on, tls, tid, TL_POINTS)
+        mb = Mailbox(step_tag(epoch, layer) - 1)
         c = {
-            "st": lambda k: stamp(on, tls, tid, k),
-            "pm": key.pm,
-            "cx": key.cx,
-            "bs": key.bs,
-            "hq": key.hq,
+            "qq": key.qq,
             "goff": gdn_offset(key),
             "rs": lds.rs.ptr,
             "S": s,
@@ -778,7 +676,6 @@ def build(key: K1Build):
             "vloc": gl.vloc.ptr,
             "ol": gl.ol.ptr,
             "scal": gl.scal.ptr,
-            "xbuf": scratch + fx.Int64(lay["xrow"][0]),
             "args": {
                 "hidden": hidden,
                 "residual": residual,
@@ -807,17 +704,15 @@ def build(key: K1Build):
         # poll's load retires behind every earlier load)
         if bid < NRED:
             stage_front(c, bid)
-            stamp(on, tls, tid, 1)
-        if const_expr(key.stop > 2 and not key.qq):
+        if const_expr(not key.qq):
             rg = BLOCKS - 1 - bid
             ops = proj_loads(c, rg)
-            wait_x(c)
-            stamp(on, tls, tid, 2)
+            local_x(c)
             stage_proj(c, rg, ops)
             if bid >= 2 * BLOCKS - PTASKS:
                 rg2 = 2 * BLOCKS - 1 - bid
                 stage_proj(c, rg2, proj_loads(c, rg2))
-        if const_expr(key.stop > 2 and key.qq and key.bs):
+        else:
             # rg < 256 is in_proj_qkvz; the second tasks 256 .. 287 on CTAs
             # 224 .. 255, their weights with the first's; in_proj_ba's parts
             # on CTAs 0 .. 15 (unquantized x: before quant_x)
@@ -826,42 +721,21 @@ def build(key: K1Build):
             if bid >= 2 * BLOCKS - QKVZ_TASKS:
                 rg2 = 2 * BLOCKS - 1 - bid
                 ops2 = qkvz_fp4_loads(c, rg2)
-                wait_x(c)
-                stamp(on, tls, tid, 2)
+                local_x(c)
                 quant_x(c)
                 stage_proj(c, rg, ops, fp4=True)
                 stage_proj(c, rg2, ops2, fp4=True)
             if bid < BA_TASKS:
                 bops = ba_loads(c, bid)
-                wait_x(c)
-                stamp(on, tls, tid, 2)
+                local_x(c)
                 stage_ba(c, bid, bops)
                 quant_x(c)
                 stage_proj(c, rg, ops, fp4=True)
             if (bid >= BA_TASKS) & (bid < 2 * BLOCKS - QKVZ_TASKS):
-                wait_x(c)
-                stamp(on, tls, tid, 2)
+                local_x(c)
                 quant_x(c)
                 stage_proj(c, rg, ops, fp4=True)
-        if const_expr(key.stop > 2 and key.qq and not key.bs):
-            # rg < 256 is in_proj_qkvz; the second tasks 256 .. 289 of CTAs
-            # 222 .. 255, in_proj_ba's (288, 289) on CTAs 223, 222
-            rg = BLOCKS - 1 - bid
-            rg2 = 2 * BLOCKS - 1 - bid
-            ops = qkvz_fp4_loads(c, rg)
-            wait_x(c)
-            stamp(on, tls, tid, 2)
-            if (bid >= 2 * BLOCKS - PTASKS) & (rg2 >= QKVZ_TASKS):
-                stage_proj(c, rg2, proj_loads(c, rg2))
-            quant_x(c)
-            stage_proj(c, rg, ops, fp4=True)
-            if (bid >= 2 * BLOCKS - PTASKS) & (rg2 < QKVZ_TASKS):
-                stage_proj(c, rg2, qkvz_fp4_loads(c, rg2), fp4=True)
-        stamp(on, tls, tid, 3)
-        if const_expr(key.stop > 3):
-            gdn_tasks(c)
-        stamp(on, tls, tid, 8)
-        stamp_flush(on, tls, diag, tid, bid, TL_POINTS)
+        gdn_tasks(c)
 
     @flyc.jit
     def launch(
@@ -887,7 +761,6 @@ def build(key: K1Build):
         scratch: Int64,
         epoch: Int64,
         layer: Int32,
-        diag: Int64,
         stream: fx.Stream = _STREAM,
     ):
         _ = keyed
@@ -914,7 +787,6 @@ def build(key: K1Build):
             scratch,
             epoch,
             layer,
-            diag,
         ).launch(grid=(BLOCKS,), block=(THREADS,), stream=stream)
 
     ABI.check(k1, launch)
@@ -943,7 +815,6 @@ def gdn_pre(
     epoch,
     layer,
     w_qkvzs=None,
-    diag=None,
 ):
     """Host launcher; every weight as vLLM holds it after loading (``w_qkvzs``:
     an fp4 in_proj_qkvz's scales, ``key.qq``). ``residual``
@@ -955,7 +826,6 @@ def gdn_pre(
     s = key.tokens
     bf = torch.bfloat16
     need((residual is None) == key.first, "residual given iff not the first layer")
-    need(key.qq or not key.bs, "bs splits the fp4 path's in_proj_ba")
     need(
         hidden.shape == (s, HIDDEN) and res_out.shape == (s, HIDDEN),
         "hidden / res_out shape",
@@ -999,13 +869,6 @@ def gdn_pre(
         all(t.dtype == bf for t in (hidden, res_out, ln_w, w_ba, core)),
         "activations and dense weights must be bf16",
     )
-    need(not (key.diag and key.timeline), "diag and timeline share ``diag``")
-    if key.timeline:
-        need(
-            diag is not None
-            and diag.numel() * diag.element_size() >= BLOCKS * TL_POINTS * 8,
-            "timeline: diag holds [BLOCKS][TL_POINTS] int64",
-        )
     f = build(key)
     f(
         *ABI.pack(
@@ -1034,7 +897,6 @@ def gdn_pre(
                 "scratch": scratch.data_ptr(),
                 "epoch": epoch.data_ptr(),
                 "layer": layer,
-                "diag": 0 if diag is None else diag.data_ptr(),
             }
         ),
         stream=torch.cuda.current_stream(),

@@ -270,16 +270,6 @@ def _attention_front(s: int) -> None:
     torch.testing.assert_close(got, want, atol=3e-2, rtol=2e-2)
 
 
-@pytest.mark.parametrize(
-    "pm,cx,bs,hq,go",
-    [
-        (False, False, False, False, False),
-        (True, True, False, False, False),
-        (True, True, True, False, False),
-        (True, True, True, True, False),
-        (True, True, True, True, True),
-    ],
-)
 @pytest.mark.parametrize("qq", [False, True])
 @pytest.mark.parametrize(
     "s,n_real,first", [(1, 1, False), (5, 4, False), (8, 8, False), (8, 7, True)]
@@ -289,22 +279,13 @@ def test_k1_matches_vllm_ops(
     n_real: int,
     first: bool,
     qq: bool,
-    pm: bool,
-    cx: bool,
-    bs: bool,
-    hq: bool,
-    go: bool,
 ) -> None:
     """K1 against GemmaRMSNorm -> in_proj -> AITER's conv update + fused gated
     delta rule -> RMSNormGated on one decode step, the states it leaves behind,
     and the pad rows (null block: no state written, zero core). The conv state
     is in the (slots, 3, dim) layout AITER's conv update takes. ``qq``: an
-    online-MXFP4 in_proj_qkvz on the ASM FP4 GEMM; ``pm`` / ``cx``: the GDN
-    tasks phase by phase, x built by the in_proj CTAs; ``bs``: in_proj_ba as
-    K-split parts the gates sum; ``hq``: x's MXFP4 on the hardware converts;
-    ``go``: one GDN round past the front CTAs."""
-    if bs and not qq:
-        pytest.skip("bs splits the fp4 path's in_proj_ba")
+    online-MXFP4 in_proj_qkvz on the ASM FP4 GEMM (in_proj_ba as K-split parts
+    the gates sum)."""
     from vllm.models.qwen3_5.amd.mono import gdn
     from vllm.models.qwen3_5.amd.mono.layout import CORE, HIDDEN, QKVZ
 
@@ -317,7 +298,7 @@ def test_k1_matches_vllm_ops(
     if qq:
         stock = _mxfp4_linear_stock(ref["x"], w["w_qkvz"], w["w_qkvzs"])
         assert _cos(stock, ref["proj"][:, :QKVZ]) > STOCK_COS_MIN
-    key = gdn.K1Build(tokens=s, first=first, qq=qq, pm=pm, cx=cx, bs=bs, hq=hq, go=go)
+    key = gdn.K1Build(tokens=s, first=first, qq=qq)
     conv_state, rstate = w["conv_state"].clone(), w["rstate"].clone()
     res_out = torch.empty(s, HIDDEN, dtype=bf, device="cuda")
     core = torch.full((s, CORE), float("nan"), dtype=bf, device="cuda")
@@ -347,11 +328,9 @@ def test_k1_matches_vllm_ops(
 
     lay = gdn.scratch_layout(key)
     torch.testing.assert_close(res_out, ref["residual"], atol=0, rtol=0)
-    if not cx:  # cx: x stays in the CTAs' LDS (in_proj's output checks it)
-        x = scratch[lay["xrow"][0] : lay["xrow"][0] + s * HIDDEN * 2].view(bf)
-        assert _cos(x, ref["x"]) > COS_MIN
+    # x stays in the CTAs' LDS: in_proj's output checks it
     proj = _pairs(scratch, lay["proj"], s * gdn.NPROJ).view(s, gdn.NPROJ)
-    if bs:  # b and a: the parts summed in part order, as the gates do
+    if qq:  # b and a: the parts summed in part order, as the gates do
         parts = _pairs(scratch, lay["bapart"], gdn.BA_TASKS * s * 16)
         parts = parts.view(2, gdn.BA_PARTS, s, 16)
         ba = parts[:, 0]
@@ -604,7 +583,6 @@ def _k2_worker(
     peers.bytes.zero_()
     epoch = torch.zeros(1, dtype=torch.int32, device=device)
     step = 0
-    seen: dict[tuple, torch.Tensor] = {}
     for flags in K2_MODES:
         fse, oq = flags.get("fse", False), flags.get("oq", False)
         mw = _moe_weights(rank, device, fse=fse)
@@ -618,8 +596,9 @@ def _k2_worker(
             w_o, w_os = _randn(gr, HIDDEN, CORE, scale=0.02), None
         mode = str(flags)
 
-        # both epoch parities, a layer slot each; every decode width's build
-        for si, s in enumerate((1, 3, 8, 8)):
+        # both epoch parities, a layer slot each; 1 row (the picks as the union),
+        # 4 and 8 (the fused shared expert's tasks before the route)
+        for s in (1, 3, 4, 8, 8):
             step += 1
             epoch.add_(1)
             key = k2.K2Build(tokens=s, **flags)
@@ -666,11 +645,10 @@ def _k2_worker(
             x_ref = (x_ref * (1.0 + ln_w.float())).to(bf)
             lay = k2.scratch_layout(key)["xrow"][0]
             x = scratch[lay : lay + s * HIDDEN * 2].view(bf).view(s, HIDDEN)
-            if key.cx:
-                # the AR sums: x is the consumers' (stage_norm's arithmetic)
-                v = x.float() + residual.float()
-                x = v * torch.rsqrt(v.pow(2).mean(-1, keepdim=True) + 1e-6)
-                x = (x * (1.0 + ln_w.float())).to(bf)
+            # the AR sums: x is the consumers' (stage_norm's arithmetic)
+            v = x.float() + residual.float()
+            x = v * torch.rsqrt(v.pow(2).mean(-1, keepdim=True) + 1e-6)
+            x = (x * (1.0 + ln_w.float())).to(bf)
             assert _cos(x, x_ref) > COS_MIN, (mode, s)
             ids = _check_route(scratch, k2.scratch_layout(key)["route"], x, mw)
             emu = _cos(out, _moe_emulation(x.clone(), mw, ids))
@@ -681,119 +659,19 @@ def _k2_worker(
             outs = [torch.empty_like(out) for _ in range(tp_size)]
             dist.all_gather(outs, out)
             assert all(torch.equal(outs[0], o) for o in outs), (mode, "ranks disagree")
-            # the same x codes another way: bitwise its twin's output
-            base = {k: v for k, v in flags.items() if k not in _SAME_MATH}
-            if flags.get("xq"):
-                base["cx"] = True
-            twin, me = tuple(sorted(base.items())), tuple(sorted(flags.items()))
-            if twin != me and (twin, si) in seen:
-                same = torch.equal(seen[twin, si], out)
-                if rank == 0:
-                    print(f"HQ-EQUAL {mode} s={s}: {same}")
-                assert same, (mode, s, "not bitwise its twin")
-            seen[me, si] = out.clone()
         del mw
         torch.accelerator.empty_cache()
     peers.close()
 
 
 # the bf16 shared expert and o_proj; the stock weekly flags' fused shared
-# expert, with the bf16 o_proj (attention) and the MXFP4 out_proj; the latter
-# routed in every CTA, x built by its consumers; its ug and down on the fp4 MFMA
-# flags that change how, not what, K2 computes: bitwise the run without them
-_SAME_MATH = ("hq", "xq", "ps", "dp", "u1", "mp", "ls", "ul")
-_OG = {
-    "fse": True,
-    "lr": True,
-    "cx": True,
-    "sp": True,
-    "f4m": True,
-    "f4d": True,
-    "hq": True,
-}
+# expert, with the bf16 o_proj (attention, with and without its output gate)
+# and the MXFP4 out_proj
 K2_MODES: tuple[dict[str, bool], ...] = (
     {},
     {"fse": True},
+    {"fse": True, "og": True},
     {"fse": True, "oq": True},
-    {"fse": True, "oq": True, "lr": True, "cx": True},
-    {
-        "fse": True,
-        "oq": True,
-        "lr": True,
-        "cx": True,
-        "sp": True,
-        "f4m": True,
-        "f4d": True,
-    },
-    {"fse": True, "oq": True, "cx": True, "sp": True, "f4m": True, "f4d": True},
-    {
-        "fse": True,
-        "oq": True,
-        "cx": True,
-        "sp": True,
-        "f4m": True,
-        "f4d": True,
-        "hq": True,
-    },
-    {
-        "fse": True,
-        "oq": True,
-        "lr": True,
-        "cx": True,
-        "sp": True,
-        "f4m": True,
-        "f4d": True,
-        "hq": True,
-    },
-    {"fse": True, "oq": True, "sp": True, "f4m": True, "f4d": True, "xq": True},
-    {
-        "fse": True,
-        "oq": True,
-        "lr": True,
-        "sp": True,
-        "f4m": True,
-        "f4d": True,
-        "xq": True,
-        "hq": True,
-    },
-    {
-        "fse": True,
-        "oq": True,
-        "lr": True,
-        "cx": True,
-        "sp": True,
-        "f4m": True,
-        "f4d": True,
-        "hq": True,
-        "ps": True,
-        "dp": True,
-        "u1": True,
-        "mp": True,
-    },
-    {
-        "fse": True,
-        "oq": True,
-        "lr": True,
-        "sp": True,
-        "f4m": True,
-        "f4d": True,
-        "xq": True,
-        "hq": True,
-        "ps": True,
-        "dp": True,
-        "u1": True,
-    },
-    _OG,
-    {**_OG, "og": True},
-    {**_OG, "oq": True, "ls": True, "mp": True},
-    {**_OG, "oq": True, "ps": True, "u1": True},
-    {**_OG, "oq": True, "ls": True, "u1": True},
-    {**_OG, "oq": True, "ls": True, "ps": True},
-    {**_OG, "oq": True, "ls": True, "ps": True, "u1": True},
-    {**_OG, "oq": True, "og": True, "ps": True, "mp": True},
-    {**_OG, "oq": True, "mp": True, "u1": True, "ul": True},
-    {**_OG, "oq": True, "ps": True, "mp": True, "ul": True},
-    {"fse": True, "oq": True, "sp": True, "f4m": True, "f4d": True, "ul": True},
 )
 
 
@@ -856,10 +734,7 @@ def _replay_worker(
     }
     k2_scr = {
         s: torch.zeros(
-            max(
-                k2.scratch_bytes(k2.K2Build(tokens=s, fse=f, **k2.tuned(s, f)))
-                for f in (False, True)
-            ),
+            max(k2.scratch_bytes(k2.K2Build(tokens=s, fse=f)) for f in (False, True)),
             dtype=torch.uint8,
             device=device,
         )
@@ -886,9 +761,7 @@ def _replay_worker(
                 core = torch.empty(s, CORE, dtype=bf, device=device)
                 res_attn = torch.empty_like(h)
                 gdn.gdn_pre(
-                    gdn.K1Build(
-                        tokens=s, qq=fp4, **(gdn.tuned(s, True) if fp4 else {})
-                    ),
+                    gdn.K1Build(tokens=s, qq=fp4),
                     hidden=h,
                     residual=res,
                     res_out=res_attn,
@@ -912,9 +785,7 @@ def _replay_worker(
                 res = torch.empty_like(h)
                 k2.layer_post(
                     # the second layer: production's flags
-                    k2.K2Build(
-                        tokens=s, fse=fp4, oq=fp4, **(k2.tuned(s, fp4) if fp4 else {})
-                    ),
+                    k2.K2Build(tokens=s, fse=fp4, oq=fp4),
                     core=core,
                     residual=res_attn,
                     w_o=lw["w_o"],
