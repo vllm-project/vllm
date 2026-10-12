@@ -507,6 +507,11 @@ class OmniASRProcessingInfo(BaseProcessingInfo):
         return super().get_default_tok_params().with_kwargs(add_special_tokens=False)
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
+        config = self.get_hf_config()
+        # Unlimited: previous segment + current segment
+        # (1 + n_context_segments, n_context_segments = 1 in Meta's streaming config)
+        if getattr(config, "is_streaming", False):
+            return {"audio": 2}
         return {"audio": 1}
 
     def get_num_audio_tokens(self, num_samples: int) -> int:
