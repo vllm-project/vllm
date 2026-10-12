@@ -1134,6 +1134,43 @@ mod tests {
     }
 
     #[test]
+    fn registry_removal_keeps_admissions_counted_after_a_newer_snapshot() {
+        let engine = EngineId::from_engine_index(0);
+        let mut registry = RequestRegistry::new(&[connected_engine(engine.clone())]);
+        registry.apply_scheduler_counts(
+            0,
+            EngineLoadSnapshot {
+                waiting: 0,
+                running: 0,
+            },
+        );
+
+        // `old` is admitted before the next snapshot, which already counts it.
+        registry.register("old".into(), None, None, NonZeroU32::MIN).unwrap();
+        registry.apply_scheduler_counts(
+            0,
+            EngineLoadSnapshot {
+                waiting: 0,
+                running: 1,
+            },
+        );
+        // `new` is admitted after that snapshot, so only it is counted on top.
+        registry.register("new".into(), None, None, NonZeroU32::MIN).unwrap();
+
+        // Removing `old` must not take back the admission counted for `new`.
+        drop(registry.remove("old"));
+        let state = &registry.routing_per_engine[&engine];
+        expect_test::expect!["(1, 1, 2)"].assert_eq(&format!(
+            "{:?}",
+            (
+                state.inflight,
+                state.admitted_since_stats,
+                state.routing_score()
+            )
+        ));
+    }
+
+    #[test]
     fn register_with_data_parallel_rank_routes_to_specified_engine() {
         let engine_0 = EngineId::from_engine_index(0);
         let engine_1 = EngineId::from_engine_index(1);
