@@ -17,7 +17,10 @@ from vllm.transformers_utils.config import (
     ConfigFormat,
     get_safetensors_params_metadata,
 )
-from vllm.transformers_utils.configs.gemma4 import gemma4_layer_config
+from vllm.transformers_utils.repo_utils import (
+    file_or_path_exists,
+    get_hf_file_to_dict,
+)
 from vllm.utils.torch_utils import common_broadcastable_dtype
 
 logger = init_logger(__name__)
@@ -41,7 +44,7 @@ class ModelArchConfigConvertorBase:
 
         This is the only place that decides whether a checkpoint is heterogeneous
         and how many layers it has, so a convertor can declare variation that
-        Transformers does not express (see `Gemma4ModelArchConfigConvertor`).
+        Transformers does not express.
 
         Each pair is converted independently and the results are diffed, so a
         convertor that overrides this must not also collapse a varying field in
@@ -329,7 +332,6 @@ class ModelArchConfigConvertorBase:
             "kimi_k2",
             "kimi_linear",
             "longcat_flash",
-            "longcat_flash_ngram",
             "pangu_ultra_moe",
             "pangu_ultra_moe_mtp",
             "bailing_hybrid",
@@ -645,6 +647,31 @@ class MimoV2ModelArchConfigConvertor(ModelArchConfigConvertorBase):
         _strip_mimo_v2_attention_chunk_size(hf_config, hf_text_config)
 
 
+class Qwen3OmniMoeModelArchConfigConvertor(ModelArchConfigConvertorBase):
+    def __init__(
+        self,
+        hf_config: PreTrainedConfig,
+        hf_text_config: PreTrainedConfig,
+        revision: str | None = None,
+    ):
+        # Clef-Omni keeps Qwen3-Omni's config and adds a joint schema head;
+        # route to its wrapper class when the head's config file is present.
+        # Mutate hf_config (like the deepseek_v4/mimo_v2 rewrites above)
+        # because model-class resolution reads hf_config.architectures.
+        if getattr(hf_config, "architectures", None) == [
+            "Qwen3OmniMoeForConditionalGeneration"
+        ]:
+            model_path = hf_config.name_or_path
+            if model_path and file_or_path_exists(
+                model_path, "joint_head_config.json", revision
+            ):
+                hf_config.architectures = ["ClefOmniForJointSchema"]
+                hf_config.joint_head_config = get_hf_file_to_dict(
+                    "joint_head_config.json", model_path, revision
+                )
+        super().__init__(hf_config, hf_text_config, revision)
+
+
 class MimoV2MTPModelArchConfigConvertor(ModelArchConfigConvertorBase):
     def __init__(
         self,
@@ -714,6 +741,12 @@ class PanguUltraMoeMTPModelArchConfigConvertor(ModelArchConfigConvertorBase):
         return getattr(self.hf_text_config, "num_nextn_predict_layers", 0)
 
 
+class LongCatFlashModelArchConfigConvertor(ModelArchConfigConvertorBase):
+    def get_num_hidden_layers(self) -> int:
+        # `num_hidden_layers` counts attention sublayers, two per decoder layer
+        return self.hf_text_config.num_layers
+
+
 class LongCatFlashMTPModelArchConfigConvertor(ModelArchConfigConvertorBase):
     def get_num_hidden_layers(self) -> int:
         return getattr(self.hf_text_config, "num_nextn_predict_layers", 1)
@@ -739,27 +772,6 @@ class Gemma4ModelArchConfigConvertor(ModelArchConfigConvertorBase):
             getattr(self.hf_text_config, "use_bidirectional_attention", None)
             == "vision"
         )
-
-    def get_per_layer_hf_configs(
-        self,
-    ) -> list[tuple[PreTrainedConfig, PreTrainedConfig]] | None:
-        # Gemma4 uses a larger head dimension, and sometimes more KV heads, on its
-        # full attention layers than on its sliding ones. Transformers >= 5.15.0
-        # says so in the config; before that the values are flat attributes picked
-        # apart by `layer_types`, so build the per-layer configs here instead. Both
-        # then reach the base convertor as ordinary homogeneous configs.
-        if getattr(self.hf_text_config, "is_heterogeneous", False):
-            return super().get_per_layer_hf_configs()
-        text_config = self.hf_text_config
-        if not getattr(text_config, "layer_types", None):
-            return None
-        # `num_hidden_layers` is what the stack is built from, and it is what
-        # Transformers sizes `per_layer_config` by. `layer_types` can be longer,
-        # e.g. when a test truncates the layer count to build a small model.
-        return [
-            (self.hf_config, gemma4_layer_config(text_config, layer_idx))
-            for layer_idx in range(self.get_num_hidden_layers())
-        ]
 
 
 class MossAudioModelArchConfigConvertor(ModelArchConfigConvertorBase):
@@ -825,6 +837,7 @@ MODEL_ARCH_CONFIG_CONVERTORS = {
     "gemma4_unified_text": Gemma4ModelArchConfigConvertor,
     "glm4_moe_mtp": GLM4MoeMTPModelArchConfigConvertor,
     "glm_ocr_mtp": GLM4MoeMTPModelArchConfigConvertor,
+    "longcat_flash": LongCatFlashModelArchConfigConvertor,
     "longcat_flash_mtp": LongCatFlashMTPModelArchConfigConvertor,
     "mamba": MambaModelArchConfigConvertor,
     "medusa": MedusaModelArchConfigConvertor,
@@ -838,6 +851,7 @@ MODEL_ARCH_CONFIG_CONVERTORS = {
     "bailing_hybrid_v3_mtp": BailingHybridV3MTPModelArchConfigConvertor,
     "pangu_ultra_moe_mtp": PanguUltraMoeMTPModelArchConfigConvertor,
     "qwen3_5_mtp": Qwen3_5MTPModelArchConfigConvertor,
+    "qwen3_omni_moe": Qwen3OmniMoeModelArchConfigConvertor,
     "qwen3_next_mtp": Qwen3NextMTPModelArchConfigConvertor,
     "qwen4_exp_mtp": Qwen4ExpMTPModelArchConfigConvertor,
     "RefinedWeb": FalconModelArchConfigConvertor,

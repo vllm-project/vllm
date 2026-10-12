@@ -39,8 +39,6 @@ class SparseMLAIndexGroup:
     logical_topk_indices: torch.Tensor
     physical_topk_indices: torch.Tensor
     valid_topk_counts: torch.Tensor
-    row_indices: torch.Tensor
-    request_ids: torch.Tensor
     side_stream: torch.Stream
     logical_topk_ready: torch.Event
     physical_topk_ready: torch.Event
@@ -235,7 +233,7 @@ class HiSparseMLAIndexGroup(SparseMLAIndexGroup):
         cache = self.cache(layer_index)
         num_tokens = logical_topk_indices.shape[0]
         req_id_per_token = attn_metadata.req_id_per_token[:num_tokens]
-        if num_tokens > self.physical_topk_indices.shape[0]:
+        if num_tokens > cache.runtime.max_swap_rows:
             # Prefill-sized batches do not fit the decode residency workspace.
             # Non-resident prefills are staged before reaching this path.
             assert cache.all_context_pages_resident
@@ -245,26 +243,20 @@ class HiSparseMLAIndexGroup(SparseMLAIndexGroup):
                 layer_index,
                 logical_topk_indices,
                 req_id_per_token,
-                leader.block_table,
+                leader.batch_block_table(),
                 leader.view.block_size,
                 block_stride_rows=leader.view.attention_block_stride,
                 return_valid_counts=return_valid_counts,
             )
         source_block_table = cache.source_block_table
         assert source_block_table is not None
-        # CUDA-graph padding rows past the batch's tokens map to request 0;
-        # mark them -1 so residency resolution skips them.
-        request_ids = self.request_ids[:num_tokens]
-        request_ids.copy_(req_id_per_token)
-        request_ids.masked_fill_(
-            self.row_indices[:num_tokens] >= attn_metadata.query_start_loc[-1], -1
-        )
         return cache.swap_in(
-            request_ids,
+            req_id_per_token,
             block_table=source_block_table,
             logical_topk_indices=logical_topk_indices,
             block_size=attn_metadata.block_size,
             return_valid_counts=return_valid_counts,
+            num_valid_rows=attn_metadata.query_start_loc[-1:],
         )
 
     def stage_prefill_rows(
@@ -276,8 +268,11 @@ class HiSparseMLAIndexGroup(SparseMLAIndexGroup):
         assert staging_plan is not None
         resident_cache = None
         if cache.view is not None and cache.block_table is not None:
+            state_indices = cache.runtime.request_state_indices
+            assert state_indices is not None
             staging_plan.ensure_gpu_sources(
-                cache.block_table[attn_metadata.num_decodes :],
+                cache.block_table,
+                state_indices[attn_metadata.num_decodes :],
                 cache.view.block_size,
             )
             resident_cache = cache.view.cache
@@ -299,8 +294,11 @@ class HiSparseMLAIndexGroup(SparseMLAIndexGroup):
         plan = prefill.host_staging_plan if prefill is not None else None
         assert plan is not None
         assert cache.view is not None and cache.block_table is not None
+        state_indices = cache.runtime.request_state_indices
+        assert state_indices is not None
         plan.ensure_gpu_sources(
-            cache.block_table[attn_metadata.num_decodes :],
+            cache.block_table,
+            state_indices[attn_metadata.num_decodes :],
             cache.view.block_size,
         )
         assert plan.gpu_row_ids is not None
@@ -381,16 +379,6 @@ class SparseMLAIndexGroupBuilder:
                 physical_topk_indices=physical_topk_indices,
                 valid_topk_counts=torch.empty(
                     workspace_rows + 1,
-                    dtype=torch.int32,
-                    device=self.logical_topk_indices.device,
-                ),
-                row_indices=torch.arange(
-                    workspace_rows,
-                    dtype=torch.int32,
-                    device=self.logical_topk_indices.device,
-                ),
-                request_ids=torch.empty(
-                    workspace_rows,
                     dtype=torch.int32,
                     device=self.logical_topk_indices.device,
                 ),
