@@ -95,9 +95,8 @@ def check(output, ref, rows, cols):
         if not torch.isfinite(chunk).all().item():
             raise ValueError("Non-finite output")
     sample = output[rows[:, None], cols[None, :]].float()
+    torch.testing.assert_close(sample, ref, rtol=1e-2, atol=1e-2)
     error = ((sample - ref).square().mean() / ref.square().mean()).sqrt().item()
-    if error >= 0.01:
-        raise ValueError(f"Relative RMS error {error} >= 0.01")
     return error
 
 
