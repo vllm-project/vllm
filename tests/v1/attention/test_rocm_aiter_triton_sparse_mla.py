@@ -233,7 +233,7 @@ def test_paged_prefill_indices_match_gathered_prefill(
         )
         return rocm.DeepseekV4ROCMAiterSparseSWAMetadataBuilder(
             swa_spec, ["swa"], vllm_config, device
-        ).build(0, common)
+        ).build(common)
 
     assert build(enabled=False).prefill_swa_ragged_indices is None
     md = build(enabled=True)

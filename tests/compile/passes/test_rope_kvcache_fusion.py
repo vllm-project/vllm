@@ -209,9 +209,7 @@ class QKRoPEKVCacheTestModel(torch.nn.Module):
         )[0]
 
         # Build attn metadata
-        attn_metadata = self.builder.build(
-            common_prefix_len=0, common_attn_metadata=common_attn_metadata
-        )
+        attn_metadata = self.builder.build(common_attn_metadata=common_attn_metadata)
 
         return attn_metadata
 

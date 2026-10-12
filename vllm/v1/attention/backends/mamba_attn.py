@@ -212,11 +212,10 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         if self.num_spec_tokens > 0:
             num_accepted_tokens = torch.diff(m.query_start_loc)
 
-        return self.build(0, m, num_accepted_tokens=num_accepted_tokens)
+        return self.build(m, num_accepted_tokens=num_accepted_tokens)
 
     def build(
         self,
-        common_prefix_len: int,
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
         *,

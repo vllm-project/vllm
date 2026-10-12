@@ -88,7 +88,6 @@ def test_linear_attention_spec_decode_full_graph_metadata_pads_cache_slots():
     common.block_table_tensor[2].fill_(-1)
 
     metadata = builder.build(
-        common_prefix_len=0,
         common_attn_metadata=common,
         num_accepted_tokens=torch.tensor([1, 2, 1], dtype=torch.int32),
     )
@@ -145,7 +144,6 @@ def test_linear_attention_full_graph_metadata_uses_stable_decode_buffers():
     )
 
     first = builder.build(
-        common_prefix_len=0,
         common_attn_metadata=common,
         num_accepted_tokens=torch.tensor([1, 2, 1], dtype=torch.int32),
     )
@@ -168,7 +166,6 @@ def test_linear_attention_full_graph_metadata_uses_stable_decode_buffers():
         device=DEVICE,
     )
     second = builder.build(
-        common_prefix_len=0,
         common_attn_metadata=common2,
         num_accepted_tokens=torch.tensor([2, 1, 1], dtype=torch.int32),
     )

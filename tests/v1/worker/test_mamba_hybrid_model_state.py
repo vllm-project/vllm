@@ -144,7 +144,6 @@ def test_padded_prompt_tail_builds_as_spec_decode(
         BatchSpec(seq_lens=seq_lens, query_lens=query_lens), BLOCK_SIZE, DEVICE
     ).replace(**mamba_metadata.get_extra_common_attn_kwargs(0, 3))
     meta = builder.build(
-        common_prefix_len=0,
         common_attn_metadata=common,
         num_accepted_tokens=mamba_metadata.num_accepted_tokens,
         num_decode_draft_tokens_cpu=mamba_metadata.num_decode_draft_tokens_cpu,

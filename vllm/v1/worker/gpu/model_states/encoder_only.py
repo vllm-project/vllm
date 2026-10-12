@@ -223,9 +223,7 @@ class EncoderOnlyModelState(DefaultModelState):
             if for_capture:
                 metadata = builder.build_for_cudagraph_capture(common_attn_metadata)
             else:
-                metadata = builder.build(
-                    common_prefix_len=0, common_attn_metadata=common_attn_metadata
-                )
+                metadata = builder.build(common_attn_metadata=common_attn_metadata)
             for name in group.layer_names:
                 attn_metadata[name] = metadata
         return attn_metadata

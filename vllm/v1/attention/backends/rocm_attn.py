@@ -58,16 +58,8 @@ class RocmAttentionMetadata:
     block_table: torch.Tensor
     slot_mapping: torch.Tensor
 
-    # For cascade attention.
-    use_cascade: bool
-    common_prefix_len: int
-    cu_prefix_query_lens: torch.Tensor | None
-    prefix_kv_lens: torch.Tensor | None
-    suffix_kv_lens: torch.Tensor | None
-
     # Optional aot scheduling
     scheduler_metadata: torch.Tensor | None = None
-    prefix_scheduler_metadata: torch.Tensor | None = None
 
     # DFlash drafting sets this to False via CommonAttentionMetadata.
     causal: bool = True
@@ -97,7 +89,7 @@ class RocmAttentionMetadataBuilder(AttentionMetadataBuilder[RocmAttentionMetadat
     def build_for_cudagraph_capture(
         self, common_attn_metadata: CommonAttentionMetadata
     ) -> RocmAttentionMetadata:
-        attn_metadata = self.build(0, common_attn_metadata)
+        attn_metadata = self.build(common_attn_metadata)
         # When doing full graph capture, setting seq_lens to
         # max_model_len will cause graph capture to be extremely
         # slow, so here we set it to 1.
@@ -111,7 +103,6 @@ class RocmAttentionMetadataBuilder(AttentionMetadataBuilder[RocmAttentionMetadat
 
     def build(
         self,
-        common_prefix_len: int,
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
     ) -> RocmAttentionMetadata:
@@ -124,23 +115,6 @@ class RocmAttentionMetadataBuilder(AttentionMetadataBuilder[RocmAttentionMetadat
         block_table_tensor = common_attn_metadata.block_table_tensor
         slot_mapping = common_attn_metadata.slot_mapping
 
-        use_cascade = common_prefix_len > 0
-
-        if use_cascade:
-            cu_prefix_query_lens = torch.tensor(
-                [0, num_actual_tokens], dtype=torch.int32, device=self.device
-            )
-            prefix_kv_lens = torch.tensor(
-                [common_prefix_len], dtype=torch.int32, device=self.device
-            )
-            suffix_kv_lens = common_attn_metadata.seq_lens.cpu() - common_prefix_len
-            suffix_kv_lens = suffix_kv_lens.to(self.device)
-        else:
-            cu_prefix_query_lens = None
-            prefix_kv_lens = None
-            suffix_kv_lens = None
-            prefix_scheduler_metadata = None
-
         attn_metadata = RocmAttentionMetadata(
             num_actual_tokens=num_actual_tokens,
             max_query_len=max_query_len,
@@ -149,12 +123,6 @@ class RocmAttentionMetadataBuilder(AttentionMetadataBuilder[RocmAttentionMetadat
             seq_lens=seq_lens,
             block_table=block_table_tensor,
             slot_mapping=slot_mapping,
-            use_cascade=use_cascade,
-            common_prefix_len=common_prefix_len,
-            cu_prefix_query_lens=cu_prefix_query_lens,
-            prefix_kv_lens=prefix_kv_lens,
-            suffix_kv_lens=suffix_kv_lens,
-            prefix_scheduler_metadata=prefix_scheduler_metadata,
             causal=common_attn_metadata.causal,
         )
         return attn_metadata
@@ -266,10 +234,6 @@ class RocmAttentionBackend(AttentionBackend):
         # The Triton fallbacks are stride-aware, so block-interior LBHNC is also
         # supported, just without the native kernels.
         return (KVCacheLayout.LHBNC, KVCacheLayout.LBHNC)
-
-    @staticmethod
-    def use_cascade_attention(*args, **kwargs) -> bool:
-        return False
 
     @staticmethod
     def get_builder_cls() -> type["RocmAttentionMetadataBuilder"]:
@@ -417,8 +381,6 @@ class RocmAttentionImpl(AttentionImpl):
         if attn_metadata is None:
             # Profiling run.
             return output.fill_(0)
-
-        assert attn_metadata.use_cascade is False
 
         # IMPORTANT!
         # NOTE(woosuk): With piece-wise CUDA graphs, this method is executed in

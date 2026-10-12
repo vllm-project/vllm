@@ -318,13 +318,9 @@ def test_block_mask_direct_vs_slow_path():
 
     builder = FlexAttentionMetadataBuilder(kv_cache_spec, [], vllm_config, device)
 
-    metadata_direct = builder.build(
-        common_prefix_len=0, common_attn_metadata=common_attn_metadata
-    )
+    metadata_direct = builder.build(common_attn_metadata=common_attn_metadata)
     builder.direct_build = False
-    metadata_slow = builder.build(
-        common_prefix_len=0, common_attn_metadata=common_attn_metadata
-    )
+    metadata_slow = builder.build(common_attn_metadata=common_attn_metadata)
 
     assert metadata_direct.block_mask is not None
     assert metadata_slow.block_mask is not None
@@ -401,7 +397,7 @@ def test_flex_attention_request_count_changes_reuse_compiled_graph(direct_build)
         common.block_table_tensor.copy_(
             torch.arange(1, num_reqs * 4 + 1, device=device).view(num_reqs, 4)
         )
-        return builder.build(0, common)
+        return builder.build(common)
 
     def attend(metadata):
         return compiled_attention(
@@ -501,18 +497,14 @@ def test_block_sparsity_hint_prunes_blocks():
 
     builder = FlexAttentionMetadataBuilder(kv_cache_spec, [], vllm_config, device)
 
-    metadata_no_hint = builder.build(
-        common_prefix_len=0, common_attn_metadata=common_attn_metadata
-    )
+    metadata_no_hint = builder.build(common_attn_metadata=common_attn_metadata)
     metadata_no_hint.block_mask = metadata_no_hint._build_block_mask_direct()
     assert metadata_no_hint.block_mask.kv_num_blocks.max().item() > 1
 
     def diagonal_hint(q_block_idx, kv_block_idx, block_size):
         return q_block_idx == kv_block_idx
 
-    metadata_with_hint = builder.build(
-        common_prefix_len=0, common_attn_metadata=common_attn_metadata
-    )
+    metadata_with_hint = builder.build(common_attn_metadata=common_attn_metadata)
     metadata_with_hint.block_sparsity_hint = BlockSparsityHint(
         hint_fn=diagonal_hint,
     )

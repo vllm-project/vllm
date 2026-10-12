@@ -79,7 +79,6 @@ def create_static_sink_attention_backend(
 
         def build(
             self,
-            common_prefix_len: int,
             common_attn_metadata: CommonAttentionMetadata,
             fast_build: bool = False,
         ) -> AttentionMetadata:
@@ -101,7 +100,7 @@ def create_static_sink_attention_backend(
                 :num_reqs
             ]
 
-            return super().build(common_prefix_len, common_attn_metadata, fast_build)
+            return super().build(common_attn_metadata, fast_build)
 
     attn_backend = subclass_attention_backend(
         name_prefix=prefix,

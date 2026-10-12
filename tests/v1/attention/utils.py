@@ -392,7 +392,7 @@ class MockMambaBuilder(BaseMambaAttentionMetadataBuilder[BaseMambaAttentionMetad
         common_metadata = common_metadata.replace(
             is_prefilling=torch.tensor(is_prefilling, dtype=torch.bool)
         )
-        return builder.build(0, common_metadata)
+        return builder.build(common_metadata)
 
 
 def dense_kv_cache_tensor(

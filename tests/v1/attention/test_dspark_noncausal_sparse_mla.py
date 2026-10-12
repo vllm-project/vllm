@@ -338,9 +338,7 @@ def _run_sparse_backend_vs_sdpa(
     builder = backend_cls.get_builder_cls()(
         kv_cache_spec, ["placeholder"], vllm_config, device
     )
-    metadata = builder.build(
-        common_prefix_len=0, common_attn_metadata=common_attn_metadata
-    )
+    metadata = builder.build(common_attn_metadata=common_attn_metadata)
 
     mock_indexer = SimpleNamespace(topk_indices_buffer=sparse_indices)
 
@@ -403,7 +401,7 @@ def _run_sparse_backend_vs_sdpa(
             common_attn_metadata.query_start_loc.copy_(
                 common_attn_metadata.query_start_loc_cpu
             )
-            metadata = builder.build(0, common_attn_metadata)
+            metadata = builder.build(common_attn_metadata)
             graph = torch.cuda.CUDAGraph()
             with torch.cuda.graph(graph):
                 impl.record_logical_topk_ready()
@@ -411,7 +409,7 @@ def _run_sparse_backend_vs_sdpa(
                     query_vllm, kv_c_vllm, k_pe_vllm, kv_cache, metadata, out_buffer
                 )
             common_attn_metadata.query_start_loc.copy_(device_boundaries)
-            builder.build(0, common_attn_metadata)
+            builder.build(common_attn_metadata)
             graph.replay()
     return backend_output, sdpa_reference, causal_reference
 
@@ -702,7 +700,7 @@ def test_dsv41_flashinfer_dspark_window_matches_reference(
     )
     builder = DeepseekSparseSWAFlashInferMetadataBuilder()
     common_metadata = SimpleNamespace(causal=False)
-    builder.build(0, common_metadata)
+    builder.build(common_metadata)
     prepared = (
         metadata.flashinfer_decode_topk_lens,
         metadata.flashinfer_decode_seq_lens,
@@ -760,7 +758,7 @@ def test_dsv41_flashinfer_dspark_window_matches_reference(
     for token, visible in enumerate(visible_indices):
         indices[token, visible.numel() - 1] = -1
         visible_indices[token] = visible[:-1]
-    builder.build(0, common_metadata)
+    builder.build(common_metadata)
     assert metadata.flashinfer_decode_topk_lens.data_ptr() == prepared[0].data_ptr()
     assert metadata.flashinfer_decode_seq_lens.data_ptr() == prepared[1].data_ptr()
     torch.testing.assert_close(prepared[0], metadata.decode_swa_lens.clamp_min(128))

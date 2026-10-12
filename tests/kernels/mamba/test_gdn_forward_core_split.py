@@ -187,7 +187,7 @@ def test_forward_core_split_matches_unified(
         batch, BLOCK_SIZE, device, arange_block_indices=True
     )
     with set_current_vllm_config(vllm_config):
-        meta_split = builder.build(common_prefix_len=0, common_attn_metadata=common)
+        meta_split = builder.build(common_attn_metadata=common)
 
     assert meta_split.spec_sequence_masks is None
     assert meta_split.num_decodes == num_decodes

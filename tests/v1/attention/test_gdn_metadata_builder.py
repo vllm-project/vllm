@@ -194,7 +194,7 @@ def _build(
         kwargs["num_accepted_tokens"] = torch.ones(
             batch_spec.batch_size, dtype=torch.int32, device=DEVICE
         )
-    return builder.build(common_prefix_len=0, common_attn_metadata=common, **kwargs)
+    return builder.build(common_attn_metadata=common, **kwargs)
 
 
 @pytest.mark.parametrize(
@@ -314,7 +314,7 @@ def _build_non_spec(
         else torch.tensor(is_prefilling, dtype=torch.bool)
     )
     builder = _create_gdn_builder(full_cuda_graph=full_cuda_graph)
-    return builder, common_attn_metadata, builder.build(0, common_attn_metadata)
+    return builder, common_attn_metadata, builder.build(common_attn_metadata)
 
 
 @pytest.mark.parametrize(
@@ -359,7 +359,7 @@ def test_one_token_first_chunk_excludes_padding():
         is_prefilling=torch.tensor([False, True, False, False], dtype=torch.bool),
         num_actual_tokens=4,
     )
-    meta = _create_gdn_builder().build(0, common)
+    meta = _create_gdn_builder().build(common)
 
     assert meta.num_decodes == 1
     assert meta.num_prefills == 1
@@ -445,7 +445,7 @@ def test_checkpoint_metadata_preserves_non_spec_order(
     builder, common, kwargs = _create_checkpoint_builder_and_batch(
         num_spec, prefix_match_unit
     )
-    actual = builder.build(0, common, **kwargs)
+    actual = builder.build(common, **kwargs)
     assert actual.checkpoint is not None
     offsets = [expected_offset, 0] if num_spec else [0, expected_offset, 0]
     slots = [common.block_table_tensor[1, 0].item(), NULL_BLOCK_ID]
@@ -473,8 +473,8 @@ def test_update_block_table_regathers_checkpoint(num_spec):
         other_table, other.seq_lens, dst.kv_cache_spec, "align"
     )
 
-    source = src.build(0, common, **kwargs)
-    expected = ref.build(0, other, **kwargs)
+    source = src.build(common, **kwargs)
+    expected = ref.build(other, **kwargs)
     actual = dst.update_block_table(source, other_table, other.slot_mapping)
 
     assert source.checkpoint is not None and expected.checkpoint is not None

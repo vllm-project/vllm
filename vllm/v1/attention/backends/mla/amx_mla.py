@@ -153,10 +153,8 @@ class AMXMLABackend(MLACommonBackend):
 
 
 class AMXMLAMetadataBuilder(MLACommonMetadataBuilder[MLACommonMetadata]):
-    def build(self, common_prefix_len, common_attn_metadata, fast_build: bool = False):
-        attn_metadata = super().build(
-            common_prefix_len, common_attn_metadata, fast_build
-        )
+    def build(self, common_attn_metadata, fast_build: bool = False):
+        attn_metadata = super().build(common_attn_metadata, fast_build)
         block_size = self.kv_cache_spec.block_size
         if attn_metadata.decode is not None:
             # Built once per step and reused by every layer, instead of

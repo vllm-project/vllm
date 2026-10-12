@@ -1566,7 +1566,6 @@ def run_attention_backend(
                 )
             )
         attn_metadata = builder.build(
-            common_prefix_len=0,
             common_attn_metadata=common_attn_metadata,
         )
 

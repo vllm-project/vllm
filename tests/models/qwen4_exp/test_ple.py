@@ -111,7 +111,6 @@ def test_ple_metadata_preserves_request_and_token_order(
         torch.cuda.set_sync_debug_mode("error")
     try:
         metadata = builder.build(
-            0,
             common,
             num_accepted_tokens=accepted,
             num_decode_draft_tokens_cpu=drafts_cpu,

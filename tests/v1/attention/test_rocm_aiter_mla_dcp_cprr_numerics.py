@@ -367,7 +367,7 @@ def _run_shard(
 
     _install_fake_groups(dcp, kern_rank)
     builder = AiterMLAMetadataBuilder(spec, [layer_name], vllm_config, device)
-    md = builder.build(0, common)
+    md = builder.build(common)
 
     impl = _build_impl(builder.num_heads, dcp, kern_rank)
     o, lse = impl.forward_mqa(q_flat, kv_flat, md, _Layer(device))

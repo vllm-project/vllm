@@ -1552,7 +1552,6 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
 
     def build(
         self,
-        common_prefix_len: int,
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
     ) -> AiterMLAMetadata:
@@ -1561,9 +1560,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         # on the per-ubatch Aiter builder instead of changing that shared API;
         # super().build invokes _build_decode synchronously.
         self._decode_causal = common_attn_metadata.causal
-        attn_metadata = super().build(
-            common_prefix_len, common_attn_metadata, fast_build
-        )
+        attn_metadata = super().build(common_attn_metadata, fast_build)
         if (
             attn_metadata.decode is not None
             and attn_metadata.decode.has_persistent_metadata

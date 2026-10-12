@@ -458,7 +458,6 @@ def _build_attention_metadata(
 
     # Use the production build() method
     metadata = builder_instance.build(
-        common_prefix_len=0,
         common_attn_metadata=common_attn_metadata,
         fast_build=False,
     )

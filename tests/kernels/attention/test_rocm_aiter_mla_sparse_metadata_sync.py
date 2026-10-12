@@ -139,9 +139,7 @@ def test_build_populates_decode_only_split_fields(monkeypatch):
     builder = _make_builder()
     _patch_build_deps(monkeypatch)
 
-    md = builder.build(
-        common_prefix_len=0, common_attn_metadata=_make_common_metadata()
-    )
+    md = builder.build(common_attn_metadata=_make_common_metadata())
 
     assert md.num_decodes == 2
     assert md.num_prefills == 0
@@ -156,9 +154,7 @@ def test_build_populates_mixed_split_fields(monkeypatch):
     builder = _make_builder()
     _patch_build_deps(monkeypatch)
 
-    md = builder.build(
-        common_prefix_len=0, common_attn_metadata=_make_mixed_common_metadata()
-    )
+    md = builder.build(common_attn_metadata=_make_mixed_common_metadata())
 
     assert md.num_decodes == 1
     assert md.num_prefills == 1
@@ -172,9 +168,7 @@ def test_sink_build_skips_persistent_metadata(monkeypatch):
     builder._use_persistent_metadata = False
     fake_aiter = _patch_build_deps(monkeypatch)
 
-    md = builder.build(
-        common_prefix_len=0, common_attn_metadata=_make_common_metadata()
-    )
+    md = builder.build(common_attn_metadata=_make_common_metadata())
 
     fake_aiter.get_mla_metadata_v1.assert_not_called()
     assert md.work_meta_data is None
@@ -211,7 +205,7 @@ def test_sparse_persistent_metadata_syncs_only_after_recompute(monkeypatch):
         lambda device=None: SimpleNamespace(synchronize=lambda: events.append("sync")),
     )
 
-    builder.build(common_prefix_len=0, common_attn_metadata=common_metadata)
+    builder.build(common_attn_metadata=common_metadata)
 
     assert events == ["metadata", "sync"]
     assert fake_get_mla_metadata_v1_mock.call_count == 1
@@ -219,7 +213,7 @@ def test_sparse_persistent_metadata_syncs_only_after_recompute(monkeypatch):
 
     events.clear()
 
-    builder.build(common_prefix_len=0, common_attn_metadata=common_metadata)
+    builder.build(common_attn_metadata=common_metadata)
 
     assert events == []
     assert fake_get_mla_metadata_v1_mock.call_count == 1

@@ -388,11 +388,10 @@ class RocmMxfp4IndexerMetadataBuilder(DeepseekV32IndexerMetadataBuilder):
 
     def build(
         self,
-        common_prefix_len: int,
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
     ) -> RocmMxfp4IndexerMetadata:
-        base = super().build(common_prefix_len, common_attn_metadata, fast_build)
+        base = super().build(common_attn_metadata, fast_build)
         metadata = RocmMxfp4IndexerMetadata(
             **{f.name: getattr(base, f.name) for f in fields(base)}
         )
@@ -497,11 +496,10 @@ class DeepseekV41RocmMxfp4IndexerMetadataBuilder(RocmMxfp4IndexerMetadataBuilder
 
     def build(
         self,
-        common_prefix_len: int,
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
     ) -> RocmMxfp4IndexerMetadata:
-        metadata = super().build(common_prefix_len, common_attn_metadata, fast_build)
+        metadata = super().build(common_attn_metadata, fast_build)
         if metadata.decode is not None:
             metadata.decode_use_gather = self._gather_pays(
                 metadata.max_seq_len // self.compress_ratio, _GATHER_MIN_CUT_DECODE

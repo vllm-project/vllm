@@ -587,7 +587,6 @@ def build_metadata(
         else torch.tensor(replay_starts, dtype=torch.int32, device=device)
     )
     return builder.build(
-        0,
         CommonAttentionMetadata(
             query_start_loc=query_start_loc,
             query_start_loc_cpu=query_start_loc.cpu(),

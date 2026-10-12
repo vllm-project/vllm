@@ -198,7 +198,7 @@ def test_builder_plans_only_rows_dispatched_to_mqa(monkeypatch, use_mha, num_dec
         positions=None,
     )
 
-    result = builder.build(0, cam)
+    result = builder.build(cam)
 
     assert result.state is builder.state
     expected_lens = [1402] if num_decodes else []

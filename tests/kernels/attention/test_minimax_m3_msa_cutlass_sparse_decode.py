@@ -293,7 +293,6 @@ def test_msa_metadata_builder_prepares_cutlass_for_regular_decode(
     builder.msa_cutlass_plan_cache = object()
 
     metadata = builder.build(
-        0,
         SimpleNamespace(
             seq_lens_cpu_upper_bound=torch.full((batch,), 257, dtype=torch.int32)
         ),

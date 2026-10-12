@@ -176,9 +176,7 @@ class MLARoPEKVCacheCatTestModel(torch.nn.Module):
         self.mla_attn.bind_kv_cache(kv_cache)
 
         # Build attn metadata
-        attn_metadata = self.builder.build(
-            common_prefix_len=0, common_attn_metadata=common_attn_metadata
-        )
+        attn_metadata = self.builder.build(common_attn_metadata=common_attn_metadata)
 
         return attn_metadata
 

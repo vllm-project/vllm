@@ -112,7 +112,7 @@ def _build(builder, seq_lens, query_lens):
     # create_common_attn_metadata leaves is_prefilling unset; the builder
     # asserts on it. Every row here is a full prefill.
     common = common.replace(is_prefilling=torch.ones(len(seq_lens), dtype=torch.bool))
-    return builder.build(common_prefix_len=0, common_attn_metadata=common)
+    return builder.build(common_attn_metadata=common)
 
 
 def test_builder_emits_one_checkpoint_entry_per_prefill_row():

@@ -136,12 +136,10 @@ class MiniMaxM3SparseMSAMetadataBuilder(MiniMaxM3SparseMetadataBuilder):
 
     def build(
         self,
-        common_prefix_len: int,
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
     ) -> MiniMaxM3SparseMetadata:
         metadata = super().build(
-            common_prefix_len,
             common_attn_metadata,
             fast_build,
         )

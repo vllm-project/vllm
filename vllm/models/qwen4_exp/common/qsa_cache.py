@@ -650,11 +650,10 @@ class QSAMetadataBuilder(AttentionMetadataBuilder[QSAForwardMetadata]):
 
     def build(
         self,
-        common_prefix_len: int,
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
     ) -> QSAForwardMetadata:
-        del common_prefix_len, fast_build
+        del fast_build
         num_tokens = common_attn_metadata.num_actual_tokens
         decode_threshold = self.reorder_batch_threshold
         assert decode_threshold is not None

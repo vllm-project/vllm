@@ -264,13 +264,13 @@ class TurboQuantMetadataBuilder(AttentionMetadataBuilder[TurboQuantMetadata]):
     def build_for_cudagraph_capture(
         self, common_attn_metadata: CommonAttentionMetadata
     ) -> TurboQuantMetadata:
-        attn_metadata = self.build(0, common_attn_metadata)
+        attn_metadata = self.build(common_attn_metadata)
         # Set seq_lens to 1 so CUDA graph capture is fast
         # (real seq_lens are filled at replay time).
         attn_metadata.seq_lens.fill_(1)
         return attn_metadata
 
-    def build(self, common_prefix_len, common_attn_metadata, fast_build=False):
+    def build(self, common_attn_metadata, fast_build=False):
         """Build TurboQuantMetadata from common attention metadata."""
         cam = common_attn_metadata
 

@@ -29,15 +29,12 @@ def create_encoder_only_attention_backend(
     class EncoderOnlyAttentionBuilder(underlying_builder):  # type: ignore
         def build(
             self,
-            common_prefix_len: int,
             common_attn_metadata: CommonAttentionMetadata,
             fast_build: bool = False,
         ) -> AttentionMetadata:
             new_common_attn_metadata = copy(common_attn_metadata)
             new_common_attn_metadata.causal = False
-            return super().build(
-                common_prefix_len, new_common_attn_metadata, fast_build
-            )
+            return super().build(new_common_attn_metadata, fast_build)
 
     attn_backend = subclass_attention_backend(
         name_prefix=prefix,

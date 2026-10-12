@@ -254,7 +254,7 @@ def test_builder_build_uses_circular_mapping():
     per_req = [list(range(10)), list(range(12))]
     own_blocks = [5, 9]
     cam = make_common_metadata(per_req, own_blocks)
-    meta = KpoolTailMetadataBuilder.build(make_tail_builder(), 0, cam)
+    meta = KpoolTailMetadataBuilder.build(make_tail_builder(), cam)
 
     out = meta.slot_mapping
     off = 0
@@ -274,14 +274,14 @@ def test_builder_build_falls_back_without_positions():
     """Capture / dummy builds without positions keep the generic mapping."""
     per_req = [list(range(10))]
     cam = make_common_metadata(per_req, [5], with_positions=False)
-    meta = KpoolTailMetadataBuilder.build(make_tail_builder(), 0, cam)
+    meta = KpoolTailMetadataBuilder.build(make_tail_builder(), cam)
     assert meta.slot_mapping is cam.slot_mapping
 
 
 def test_builder_updates_draft_mapping():
     builder = make_tail_builder()
     cam = make_common_metadata([[15], [16]], [5, 9])
-    meta = KpoolTailMetadataBuilder.build(builder, 0, cam)
+    meta = KpoolTailMetadataBuilder.build(builder, cam)
     assert cam.positions is not None
     cam.positions.add_(1)
     builder.update_draft_decode_metadata(meta)
@@ -291,11 +291,11 @@ def test_builder_updates_draft_mapping():
 def test_builder_reuses_slot_mapping_storage():
     builder = make_tail_builder()
     first = make_common_metadata([list(range(10))], [5])
-    first_meta = KpoolTailMetadataBuilder.build(builder, 0, first)
+    first_meta = KpoolTailMetadataBuilder.build(builder, first)
     data_ptr = first_meta.slot_mapping.data_ptr()
 
     second = make_common_metadata([list(range(12))], [9])
-    second_meta = KpoolTailMetadataBuilder.build(builder, 0, second)
+    second_meta = KpoolTailMetadataBuilder.build(builder, second)
 
     assert second_meta.slot_mapping.data_ptr() == data_ptr
     assert second_meta.slot_mapping[:12].tolist() == [

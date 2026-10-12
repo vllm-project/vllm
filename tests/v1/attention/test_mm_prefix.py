@@ -491,7 +491,7 @@ def test_decode_only_batch_reports_no_ranges():
         vllm_config,
         DEVICE,
     )
-    md = builder.build(common_prefix_len=0, common_attn_metadata=common)
+    md = builder.build(common_attn_metadata=common)
     assert md.mm_prefix_query_range_tensor is None
 
 
@@ -600,7 +600,7 @@ def test_mm_prefix_kv_cache_path(head_size: int):
         builder = FlashAttentionMetadataBuilder(
             kv_cache_spec, layer_names, vllm_config, DEVICE
         )
-        attn_metadata = builder.build(common_prefix_len=0, common_attn_metadata=common)
+        attn_metadata = builder.build(common_attn_metadata=common)
         # head_size=128 keeps FA4 under local attention on Blackwell (the
         # FA4→FA2 demotion is only for local+256). Window is still encoded in
         # mask_mod at forward; FA's built-in window is cleared there.
@@ -843,7 +843,7 @@ def test_composite_shared_cache_across_image_and_causal_steps(
                 slot_mapping=torch.arange(previous, end, device=DEVICE),
                 mm_req_doc_ranges={0: spans},
             )
-            metadata = builder.build(0, common)
+            metadata = builder.build(common)
             assert isinstance(metadata, metadata_type)
             if isinstance(metadata, FlashInferMetadata):
                 if qlen == 1:

@@ -522,7 +522,6 @@ def run_attention_benchmark(config: BenchmarkConfig) -> BenchmarkResult:
             )
 
             attn_metadata = builder.build(
-                common_prefix_len=0,
                 common_attn_metadata=common_metadata,
             )
 

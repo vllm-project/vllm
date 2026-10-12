@@ -126,10 +126,6 @@ class CacheOnlyAttentionBackend(AttentionBackend):
     def get_builder_cls() -> type["CacheOnlyAttentionMetadataBuilder"]:
         return CacheOnlyAttentionMetadataBuilder
 
-    @staticmethod
-    def use_cascade_attention(*args, **kwargs) -> bool:
-        return False
-
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
         return []
@@ -154,15 +150,9 @@ class CacheOnlyAttentionMetadataBuilder(
 
     def build(
         self,
-        common_prefix_len: int,
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
     ) -> CacheOnlyAttentionMetadata:
-        use_cascade = common_prefix_len > 0
-        if use_cascade:
-            raise NotImplementedError(
-                "Cascade attention not supported by CacheOnlyAttention"
-            )
         causal = common_attn_metadata.causal
         if not causal:
             raise NotImplementedError(

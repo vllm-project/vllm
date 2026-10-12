@@ -756,7 +756,7 @@ class _TableBuilder:
     def __init__(self, kv_cache_spec, layer_names, vllm_config, device):
         self.kv_cache_spec = kv_cache_spec
 
-    def build(self, common_prefix_len, common_attn_metadata, fast_build=False):
+    def build(self, common_attn_metadata, fast_build=False):
         return common_attn_metadata.block_table_tensor
 
 

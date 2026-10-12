@@ -275,7 +275,7 @@ def test_qsa_side_metadata_marks_cudagraph_padding_inert() -> None:
         token_to_req_indices=lambda buffer: buffer.copy_(token_to_req),
     )
 
-    metadata = builder.build(0, common)
+    metadata = builder.build(common)
 
     assert metadata.logical_positions.tolist() == [
         64,
@@ -329,7 +329,7 @@ def test_qsa_circular_buffer_metadata_keeps_only_each_requests_suffix() -> None:
         token_to_req_indices=lambda buffer: buffer.copy_(token_to_req),
     )
 
-    metadata = builder.build(0, common)
+    metadata = builder.build(common)
     expected = [
         -1,
         -1,
@@ -353,7 +353,7 @@ def test_qsa_circular_buffer_metadata_keeps_only_each_requests_suffix() -> None:
 
     # A dummy batch puts every request on the null block, which owns no ring.
     block_table.zero_()
-    assert builder.build(0, common).slot_mapping.tolist() == [-1] * 16
+    assert builder.build(common).slot_mapping.tolist() == [-1] * 16
 
 
 @pytest.mark.parametrize("chunk_start", list(range(8)))
@@ -498,7 +498,7 @@ def test_qsa_compressed_metadata_keeps_dummy_slots_inert() -> None:
         token_to_req_indices=lambda buffer: buffer.copy_(token_to_req),
     )
 
-    metadata = builder.build(0, common)
+    metadata = builder.build(common)
 
     assert metadata.slot_mapping.tolist() == [-1] * 8
     assert metadata.visible_blocks.tolist() == [1, 1, 1, 2, 2, 2, 2, 3]

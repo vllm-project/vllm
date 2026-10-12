@@ -327,7 +327,6 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
 
     def build(
         self,
-        common_prefix_len: int,
         common_attn_metadata: "CommonAttentionMetadata",
         fast_build: bool = False,
     ) -> T:

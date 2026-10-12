@@ -866,7 +866,6 @@ class KpoolTailMetadataBuilder(AttentionMetadataBuilder):
 
     def build(
         self,
-        common_prefix_len: int,
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
     ) -> DeepseekV32IndexerMetadata:
@@ -1412,7 +1411,6 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
 
     def build(
         self,
-        common_prefix_len: int,
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
     ) -> DeepseekV32IndexerMetadata:

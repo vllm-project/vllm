@@ -357,7 +357,6 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
 
     def build(  # type: ignore[override]
         self,
-        common_prefix_len: int,
         common_attn_metadata: CommonAttentionMetadata,
         num_accepted_tokens: torch.Tensor | None = None,
         num_decode_draft_tokens_cpu: torch.Tensor | None = None,

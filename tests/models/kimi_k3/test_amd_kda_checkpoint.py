@@ -102,7 +102,7 @@ def _build(batch: BatchSpec, block_size: int = BLOCK_SIZE, **kw):
     common = create_common_attn_metadata(
         batch, block_size, torch.device("cuda"), arange_block_indices=True
     )
-    return _builder(block_size=block_size, **kw).build(0, common)
+    return _builder(block_size=block_size, **kw).build(common)
 
 
 def _i32(values: list[int]) -> torch.Tensor:
@@ -159,7 +159,7 @@ def test_checkpoint_metadata_skips_null_reservation() -> None:
     # cdiv(200, 64) - 2 = 2 is the checkpoint slot.
     common.block_table_tensor[0, 2] = NULL_BLOCK_ID
 
-    md = _builder().build(0, common)
+    md = _builder().build(common)
 
     assert md.checkpoint is not None
     torch.testing.assert_close(md.checkpoint.state_indices, _i32([NULL_BLOCK_ID]))
@@ -193,7 +193,6 @@ def test_spec_checkpoint_metadata_gathers_non_spec_rows_by_index() -> None:
     ).view(rows, width)
 
     md = _builder(num_spec=num_spec).build(
-        0,
         common,
         num_accepted_tokens=torch.ones(rows, dtype=torch.int32, device="cuda"),
         num_decode_draft_tokens_cpu=torch.tensor(

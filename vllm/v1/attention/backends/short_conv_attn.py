@@ -153,14 +153,12 @@ class PleShortConvAttentionMetadataBuilder(ShortConvAttentionMetadataBuilder):
 
     def _build_non_spec_metadata(
         self,
-        common_prefix_len: int,
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool,
         num_decode_draft_tokens_cpu: torch.Tensor | None,
         **kwargs: Any,
     ) -> PleShortConvAttentionMetadata:
         metadata = super().build(
-            common_prefix_len,
             common_attn_metadata,
             fast_build,
             num_accepted_tokens=None,
@@ -236,7 +234,6 @@ class PleShortConvAttentionMetadataBuilder(ShortConvAttentionMetadataBuilder):
 
     def build(  # type: ignore[override]
         self,
-        common_prefix_len: int,
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
         *,
@@ -256,14 +253,13 @@ class PleShortConvAttentionMetadataBuilder(ShortConvAttentionMetadataBuilder):
 
         if spec_sequence_masks_cpu is None:
             return self._build_non_spec_metadata(
-                common_prefix_len,
                 common_attn_metadata,
                 fast_build,
                 num_decode_draft_tokens_cpu,
                 **kwargs,
             )
 
-        del common_prefix_len, fast_build, kwargs
+        del fast_build, kwargs
         query_start_loc = m.query_start_loc
         query_start_loc_cpu = m.query_start_loc_cpu
         query_lens_cpu = torch.diff(query_start_loc_cpu)
@@ -505,9 +501,8 @@ class PleShortConvAttentionMetadataBuilder(ShortConvAttentionMetadataBuilder):
             num_decode_draft_tokens_cpu = torch.diff(m.query_start_loc_cpu).sub_(1)
             assert num_decode_draft_tokens_cpu.shape == num_accepted_tokens.shape
             return self.build(
-                0,
                 m,
                 num_accepted_tokens=num_accepted_tokens,
                 num_decode_draft_tokens_cpu=num_decode_draft_tokens_cpu,
             )
-        return self.build(0, m)
+        return self.build(m)

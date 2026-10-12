@@ -250,7 +250,6 @@ def test_segmented_attention_forward_uses_dedicated_dispatch(monkeypatch):
     output = torch.empty_like(query)
     kv_cache = torch.empty(2, 2, 16, 256, dtype=torch.bfloat16)
     metadata = SimpleNamespace(
-        use_cascade=False,
         num_actual_tokens=3,
         block_table=torch.zeros(1, 1, dtype=torch.int32),
         query_start_loc=torch.tensor([0, 3], dtype=torch.int32),
@@ -287,7 +286,7 @@ def test_aiter_unified_attention_capture_preserves_query_start_locations():
 
     actual = builder.build_for_cudagraph_capture(common)
 
-    builder.build.assert_called_once_with(0, common)
+    builder.build.assert_called_once_with(common)
     assert actual is metadata
     assert torch.equal(actual.seq_lens, torch.ones_like(actual.seq_lens))
     assert actual.query_start_loc is common.query_start_loc

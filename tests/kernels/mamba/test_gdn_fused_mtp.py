@@ -282,7 +282,6 @@ def test_fused_model_path_matches_reference(
     common.block_table_tensor.add_(1)
     with set_current_vllm_config(vllm_config):
         metadata = builder.build(
-            common_prefix_len=0,
             common_attn_metadata=common,
             num_accepted_tokens=torch.ones(
                 batch.batch_size, dtype=torch.int32, device=device

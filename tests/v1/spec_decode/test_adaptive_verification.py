@@ -112,7 +112,7 @@ def test_manager_checks_target_varlen_cudagraph_bound(
             def __init__(self):
                 pass
 
-            def build(self, common_prefix_len, common_attn_metadata, fast_build=False):
+            def build(self, common_attn_metadata, fast_build=False):
                 raise NotImplementedError
 
             if bound is not None:

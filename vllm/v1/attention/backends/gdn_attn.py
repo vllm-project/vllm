@@ -261,7 +261,6 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
 
     def build(  # type: ignore[override]
         self,
-        common_prefix_len: int,
         common_attn_metadata: CommonAttentionMetadata,
         num_accepted_tokens: torch.Tensor | None = None,
         num_decode_draft_tokens_cpu: torch.Tensor | None = None,
@@ -737,4 +736,4 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         num_decode_draft_tokens_cpu = torch.diff(m.query_start_loc_cpu).sub_(1)
         assert num_decode_draft_tokens_cpu.shape == num_accepted_tokens.shape
 
-        return self.build(0, m, num_accepted_tokens, num_decode_draft_tokens_cpu)
+        return self.build(m, num_accepted_tokens, num_decode_draft_tokens_cpu)

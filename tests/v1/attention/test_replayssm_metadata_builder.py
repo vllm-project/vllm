@@ -255,7 +255,7 @@ def _build(
         is_prefilling=torch.tensor(case.is_prefilling, dtype=torch.bool),
         replayssm_decode_base_cpu=torch.tensor(case.decode_base, dtype=torch.int32),
     )
-    return builder.build(0, common, num_accepted_tokens=num_accepted_tokens)
+    return builder.build(common, num_accepted_tokens=num_accepted_tokens)
 
 
 @pytest.mark.parametrize(
@@ -281,7 +281,7 @@ def test_resumed_request_differs_from_fresh():
         is_prefilling=torch.tensor([False, False]),
         replayssm_decode_base_cpu=torch.tensor([100, 105], dtype=torch.int32),
     )
-    meta = builder.build(0, common)
+    meta = builder.build(common)
 
     assert meta.write_pos_d.tolist()[:2] == [5, 0]
     assert meta.is_flush_d.tolist()[:2] == [0, 0]

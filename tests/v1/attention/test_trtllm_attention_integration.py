@@ -138,7 +138,7 @@ def test_prefill_dequant_scratch_ignores_unused_capacity(
             common.block_table_tensor = torch.randint(
                 1, 32, (batch.batch_size, capacity), dtype=torch.int32, device=device
             )
-            metadata = builder.build(0, common)
+            metadata = builder.build(common)
             assert isinstance(metadata.prefill, TRTLLMPrefill)
             table = metadata.prefill.block_tables
             assert is_strictly_contiguous(table)
@@ -409,7 +409,6 @@ def _run_trtllm_integration(batch_spec, kv_cache_dtype="auto", model_name=MODEL)
             kv_cache_spec, layer_names, vllm_config, device
         )
         attn_metadata = builder.build(
-            common_prefix_len=0,
             common_attn_metadata=common_attn_metadata,
         )
 
@@ -548,10 +547,10 @@ def test_trtllm_gen_draft_decode_metadata_tracks_in_place_seq_lens(
     assert builder.supports_draft_decode_metadata_update
 
     step1 = create_common_attn_metadata(BATCH_SPECS["decode_only"], BLOCK_SIZE, device)
-    reused = builder.build(common_prefix_len=0, common_attn_metadata=step1)
+    reused = builder.build(common_attn_metadata=step1)
     step1.seq_lens.add_(1)
     step2 = dataclasses.replace(step1, seq_lens_cpu_upper_bound=step1.seq_lens.cpu())
-    rebuilt = builder.build(common_prefix_len=0, common_attn_metadata=step2)
+    rebuilt = builder.build(common_attn_metadata=step2)
 
     assert isinstance(reused.decode, FlashInferTrtllmAPIDecode)
     for field in dataclasses.fields(reused.decode):

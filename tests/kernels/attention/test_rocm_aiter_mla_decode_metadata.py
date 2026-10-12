@@ -153,7 +153,6 @@ def _build_decode_metadata():
 
         with patch("aiter.get_mla_metadata_v1", spy):
             metadata = builder.build(
-                common_prefix_len=0,
                 common_attn_metadata=common_attn_metadata,
             )
 

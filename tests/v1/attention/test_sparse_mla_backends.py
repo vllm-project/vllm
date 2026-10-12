@@ -742,9 +742,7 @@ def test_sparse_backend_decode_correctness(
 
     builder_cls = backend_cls.get_builder_cls()
     builder = builder_cls(kv_cache_spec, ["placeholder"], vllm_config, device)
-    metadata = builder.build(
-        common_prefix_len=0, common_attn_metadata=common_attn_metadata
-    )
+    metadata = builder.build(common_attn_metadata=common_attn_metadata)
 
     # Use the pre-computed sparse_indices for the mock indexer
     mock_indexer = SimpleNamespace(topk_indices_buffer=sparse_indices)
@@ -1594,9 +1592,7 @@ def test_sparse_backend_prefill_correctness(
     # Drive the queries through the dense-MHA prefill path directly (the routing
     # threshold would otherwise classify these short queries as MQA decodes).
     builder.reorder_batch_threshold = 1
-    metadata = builder.build(
-        common_prefix_len=0, common_attn_metadata=common_attn_metadata
-    )
+    metadata = builder.build(common_attn_metadata=common_attn_metadata)
 
     mock_indexer = SimpleNamespace(topk_indices_buffer=sparse_indices)
 
@@ -3062,9 +3058,7 @@ def test_hisparse_mixed_batch_bf16_row_split(
 
     builder_cls = FlashMLASparseBackend.get_builder_cls()
     builder = builder_cls(kv_cache_spec, ["placeholder"], vllm_config, device)
-    metadata = builder.build(
-        common_prefix_len=0, common_attn_metadata=common_attn_metadata
-    )
+    metadata = builder.build(common_attn_metadata=common_attn_metadata)
     assert isinstance(metadata.prefill, SparseMLAPrefillMetadata)
 
     # Per-token sparse indices bounded by each token's position, with unique

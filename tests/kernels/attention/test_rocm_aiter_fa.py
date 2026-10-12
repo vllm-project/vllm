@@ -800,7 +800,7 @@ def test_aiter_fa_shared_kv_matches_reference(
             (value / v_scale).to(cache_dtype).to(value.dtype) * v_scale
         ).reshape(32, BLOCK_SIZE, num_kv_heads, head_size)
         with torch.device("cpu"):
-            metadata = builder.build(0, common)
+            metadata = builder.build(common)
         cache_before = kv_cache.view(torch.uint8).clone()
         query = torch.randn(
             batch_spec.compute_num_tokens(),

@@ -207,7 +207,7 @@ def test_build_hands_common_causal_flag_to_aiter_builder(monkeypatch, causal):
     builder = object.__new__(AiterMLAMetadataBuilder)
     builder._fp8_prefill_enabled = False
 
-    builder.build(0, SimpleNamespace(causal=causal))
+    builder.build(SimpleNamespace(causal=causal))
 
     assert seen == [causal]
 

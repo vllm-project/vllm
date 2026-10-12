@@ -936,8 +936,8 @@ def test_msa_indexer_impl_matches_triton(topk, index_dtype, monkeypatch):
     )
 
     attn_metadata = {
-        msa_impl.index_cache.prefix: msa_builder.build(0, common),
-        triton_impl.index_cache.prefix: triton_builder.build(0, common),
+        msa_impl.index_cache.prefix: msa_builder.build(common),
+        triton_impl.index_cache.prefix: triton_builder.build(common),
     }
     with set_forward_context(attn_metadata, vllm_config):
         msa_decode, msa_prefill = msa_impl(index_q)

@@ -45,7 +45,7 @@ class RocmAiterUnifiedAttentionMetadataBuilder(RocmAttentionMetadataBuilder):
     def build_for_cudagraph_capture(
         self, common_attn_metadata: CommonAttentionMetadata
     ) -> RocmAttentionMetadata:
-        attn_metadata = self.build(0, common_attn_metadata)
+        attn_metadata = self.build(common_attn_metadata)
         # Avoid capturing the real maximum sequence length while preserving
         # query_start_loc, which unified attention consumes during replay.
         attn_metadata.seq_lens.fill_(1)
@@ -128,10 +128,6 @@ class RocmAiterUnifiedAttentionBackend(RocmAttentionBackend):
             # Connectors like MoRI assume contiguous blocks
             return (KVCacheLayout.LBHNC,)
         return (KVCacheLayout.LBHNC, KVCacheLayout.LHBNC)
-
-    @staticmethod
-    def use_cascade_attention(*args, **kwargs) -> bool:
-        return False
 
     @staticmethod
     def get_builder_cls() -> type["RocmAiterUnifiedAttentionMetadataBuilder"]:
@@ -236,8 +232,6 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
         if attn_metadata is None:
             # Profiling run.
             return output.fill_(0)
-
-        assert attn_metadata.use_cascade is False
 
         # IMPORTANT!
         # NOTE(woosuk): With piece-wise CUDA graphs, this method is executed in

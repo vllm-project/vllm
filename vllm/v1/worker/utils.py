@@ -342,11 +342,9 @@ class AttentionGroup:
         self,
         common_attn_metadata: CommonAttentionMetadata,
         ubatch_idx: int = 0,
-        common_prefix_len: int = 0,
         **kwargs,
     ) -> Any:
         return self.get_metadata_builder(ubatch_idx).build(
-            common_prefix_len,
             self._with_kernel_block_table(common_attn_metadata, ubatch_idx),
             **kwargs,
         )

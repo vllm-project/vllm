@@ -61,7 +61,7 @@ def test_split_k_segments_follow_sm_occupancy(
     )
     builder = builder_cls(spec, ["layer.0"], config, "cpu")
     batch = BatchSpec(seq_lens=[128] * num_seqs, query_lens=[query_len] * num_seqs)
-    metadata = builder.build(0, create_common_attn_metadata(batch, 16, "cpu"))
+    metadata = builder.build(create_common_attn_metadata(batch, 16, "cpu"))
     assert metadata.num_par_softmax_segments == segments
     assert metadata.softmax_segm_output.shape[2] == segments
     assert metadata.softmax_segm_max.shape[0] >= num_seqs * query_len

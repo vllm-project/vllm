@@ -552,9 +552,7 @@ M = TypeVar("M")
 
 
 class AttentionCGSupport(Enum):
-    """Constants for the cudagraph support of the attention backend
-    Here we do not consider the cascade attention, as currently
-    it is never cudagraph supported."""
+    """Constants for the cudagraph support of the attention backend"""
 
     ALWAYS = 3
     """Cudagraph always supported; supports mixed-prefill-decode"""
@@ -684,7 +682,6 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
     @abstractmethod
     def build(
         self,
-        common_prefix_len: int,
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
     ) -> M:
@@ -692,7 +689,6 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
         Some builders (MLA) require reorder_batch to be called prior to build.
 
         Args:
-            common_prefix_len: The length of the common prefix of the batch.
             common_attn_metadata: The common attention metadata.
             fast_build: The meta-data will prioritize speed of building over
                 then speed at execution. Can be used for spec-decode where the
@@ -722,9 +718,7 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
         Subclasses that override this method should call self.build or
         super().build_for_cudagraph_capture.
         """
-        return self.build(
-            common_prefix_len=0, common_attn_metadata=common_attn_metadata
-        )
+        return self.build(common_attn_metadata=common_attn_metadata)
 
     def build_for_drafting(
         self,
@@ -743,7 +737,6 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
 
         """
         return self.build(
-            common_prefix_len=0,
             common_attn_metadata=common_attn_metadata,
             fast_build=True,
         )
@@ -757,20 +750,6 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
         tensors that ``metadata`` already references.
         """
         raise NotImplementedError
-
-    def use_cascade_attention(
-        self,
-        common_prefix_len: int,
-        query_lens: np.ndarray,
-        num_query_heads: int,
-        num_kv_heads: int,
-        use_alibi: bool,
-        use_sliding_window: bool,
-        use_local_attention: bool,
-        num_sms: int,
-        dcp_world_size: int,
-    ) -> bool:
-        return False
 
 
 class AttentionLayer(Protocol):

@@ -824,7 +824,7 @@ def test_v41_compressor_metadata_maps_tokens_to_their_ring():
         slot_mapping=torch.full((10,), -1, dtype=torch.int64, device=device),
         positions=positions,
     )
-    metadata = builder.build(0, common)
+    metadata = builder.build(common)
 
     ring = [5 * 8 + 5, 5 * 8 + 6, 5 * 8 + 7, 2 * 8 + 7, 2 * 8 + 0]
     assert metadata.slot_mapping.tolist() == ring + [-1] * 5

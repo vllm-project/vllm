@@ -367,12 +367,10 @@ class Dots3NoteMLAMetadataBuilder(TritonMLAMetadataBuilder):
 
     def build(
         self,
-        common_prefix_len: int,
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
     ) -> MLACommonMetadata:
         metadata = super().build(
-            common_prefix_len,
             common_attn_metadata,
             fast_build=fast_build,
         )

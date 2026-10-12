@@ -319,11 +319,10 @@ def create_composite_attention_backend(
             metadata._attention_backend_variant = backend_variant
             return metadata
 
-        def build(self, common_prefix_len, common_attn_metadata, fast_build=False):
+        def build(self, common_attn_metadata, fast_build=False):
             return self._build(
                 "build",
                 common_attn_metadata,
-                common_prefix_len=common_prefix_len,
                 fast_build=fast_build,
             )
 

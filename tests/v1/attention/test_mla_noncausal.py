@@ -126,7 +126,7 @@ def _dspark_dcp_vllm_config(
 def test_group_capability_keeps_runtime_causality_per_step():
     builder = _builder()
 
-    target_metadata = builder.build(0, _metadata([0, 1, 2], causal=True))
+    target_metadata = builder.build(_metadata([0, 1, 2], causal=True))
     assert (
         target_metadata.num_decodes,
         target_metadata.num_decode_tokens,
@@ -135,7 +135,7 @@ def test_group_capability_keeps_runtime_causality_per_step():
     ) == (2, 2, 0, True)
 
     common_metadata = _metadata([0, 8, 16])
-    metadata = builder.build(0, common_metadata)
+    metadata = builder.build(common_metadata)
 
     assert metadata.num_decodes == 2
     assert metadata.num_decode_tokens == 16
@@ -151,16 +151,16 @@ def test_group_capability_keeps_runtime_causality_per_step():
 
 def test_noncausal_support_is_explicit_and_uniform():
     with pytest.raises(ValueError, match="explicitly supported"):
-        _builder(marked=False).build(0, _metadata([0, 8, 16]))
+        _builder(marked=False).build(_metadata([0, 8, 16]))
     with pytest.raises(ValueError, match="uniform query block"):
-        _builder().build(0, _metadata([0, 3, 8]))
+        _builder().build(_metadata([0, 3, 8]))
 
 
 def test_noncausal_block_allows_trailing_cudagraph_padding():
     common_metadata = _metadata([0, 8, 16, 16], num_tokens=24)
     common_metadata.seq_lens[-1] = 0
 
-    metadata = _builder().build(0, common_metadata)
+    metadata = _builder().build(common_metadata)
 
     assert metadata.num_decodes == 3
     assert metadata.num_decode_tokens == 24
@@ -170,12 +170,12 @@ def test_noncausal_block_allows_trailing_cudagraph_padding():
 
 def test_noncausal_block_rejects_non_trailing_padding():
     with pytest.raises(ValueError, match="uniform query block"):
-        _builder().build(0, _metadata([0, 8, 8, 16], num_tokens=24))
+        _builder().build(_metadata([0, 8, 8, 16], num_tokens=24))
 
 
 def test_noncausal_decode_metadata_keeps_live_request_buffers():
     common_metadata = _metadata([0, 8, 16])
-    metadata = _builder().build(0, common_metadata)
+    metadata = _builder().build(common_metadata)
 
     assert metadata.decode is not None
     assert metadata.decode.seq_lens.data_ptr() == common_metadata.seq_lens.data_ptr()

@@ -696,11 +696,10 @@ class FlashMLASparseMetadataBuilder(
 
     def build(
         self,
-        common_prefix_len: int,
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
     ) -> FlashMLASparseMetadata:
-        metadata = super().build(common_prefix_len, common_attn_metadata, fast_build)
+        metadata = super().build(common_attn_metadata, fast_build)
 
         metadata.fp8_use_mixed_batch = self.fp8_use_mixed_batch
         if self.use_fp8_kv_cache:

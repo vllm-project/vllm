@@ -1024,16 +1024,13 @@ def create_fast_prefill_custom_backend(
     class FastPrefillAttentionBuilder(underlying_builder):  # type: ignore
         def build(
             self,
-            common_prefix_len: int,
             common_attn_metadata: CommonAttentionMetadata,
             fast_build: bool = False,
         ) -> AttentionMetadata:
             new_common_attn_metadata = (
                 make_kv_sharing_fast_prefill_common_attn_metadata(common_attn_metadata)
             )
-            metadata = super().build(
-                common_prefix_len, new_common_attn_metadata, fast_build
-            )
+            metadata = super().build(new_common_attn_metadata, fast_build)
 
             class KVSharingFastPrefillAttentionMetadata(
                 metadata.__class__,  #  type: ignore

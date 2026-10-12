@@ -194,11 +194,10 @@ class DeepseekV41SparseIndexerMetadataBuilder(DeepseekV32IndexerMetadataBuilder)
 
     def build(
         self,
-        common_prefix_len: int,
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
     ) -> DeepseekV41SparseIndexerMetadata:
-        base = super().build(common_prefix_len, common_attn_metadata, fast_build)
+        base = super().build(common_attn_metadata, fast_build)
         metadata = DeepseekV41SparseIndexerMetadata(
             **{f.name: getattr(base, f.name) for f in fields(base)},
             sparse_block_kv=self.sparse_block_kv,

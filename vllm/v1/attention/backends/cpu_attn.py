@@ -105,10 +105,6 @@ class CPUAttentionBackend(AttentionBackend):
     def get_builder_cls() -> type["CPUAttentionMetadataBuilder"]:
         return CPUAttentionMetadataBuilder
 
-    @staticmethod
-    def use_cascade_attention(*args, **kwargs) -> bool:
-        return False
-
 
 @dataclass
 class CPUAttentionMetadata:
@@ -202,7 +198,6 @@ class CPUAttentionMetadataBuilder(AttentionMetadataBuilder[CPUAttentionMetadata]
 
     def build(
         self,
-        common_prefix_len: int,
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
     ) -> CPUAttentionMetadata:

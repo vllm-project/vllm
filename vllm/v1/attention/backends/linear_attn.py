@@ -62,7 +62,6 @@ class LinearAttentionMetadataBuilder(AttentionMetadataBuilder[LinearAttentionMet
 
     def build(
         self,
-        common_prefix_len: int,
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
     ) -> LinearAttentionMetadata:
@@ -175,14 +174,12 @@ class BailingLinearAttentionMetadataBuilder(LinearAttentionMetadataBuilder):
             )
             num_accepted_tokens = torch.diff(common_attn_metadata.query_start_loc)
         return self.build(
-            common_prefix_len=0,
             common_attn_metadata=common_attn_metadata,
             num_accepted_tokens=num_accepted_tokens,
         )
 
     def build(  # type: ignore[override]
         self,
-        common_prefix_len: int,
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
         *,

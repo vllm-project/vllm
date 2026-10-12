@@ -521,7 +521,7 @@ def test_zero_token_pcp_rank_participates_in_compressed_mapping_gather(monkeypat
         causal=True,
     )
 
-    metadata = builder.build(common_prefix_len=0, common_attn_metadata=common)
+    metadata = builder.build(common_attn_metadata=common)
 
     assert fake_pcp_group.calls == 1
     assert metadata.num_decodes == 0
@@ -585,7 +585,7 @@ def test_indexer_builder_deepseek_v4_compressed_slot_mapping_uses_num_states():
         causal=True,
     )
 
-    md = builder.build(common_prefix_len=0, common_attn_metadata=common)
+    md = builder.build(common_attn_metadata=common)
 
     # The compressed slot_mapping retains the original uncompressed size (40).
     # Only every compress_ratio-th position gets a valid slot; the rest are -1.

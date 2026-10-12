@@ -523,11 +523,10 @@ class FlashInferMLASparseSM90Builder(FlashInferMLASparseMetadataBuilder):
 
     def build(
         self,
-        common_prefix_len: int,
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
     ) -> FlashInferMLASparseSM90Metadata:
-        metadata = super().build(common_prefix_len, common_attn_metadata, fast_build)
+        metadata = super().build(common_attn_metadata, fast_build)
         assert isinstance(metadata, FlashInferMLASparseSM90Metadata)
         # Plan outside any CUDA graph capture; captured runs read the
         # refreshed buffers.

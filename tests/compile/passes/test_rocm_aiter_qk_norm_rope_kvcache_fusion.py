@@ -212,9 +212,7 @@ class QKNormRoPEKVCacheTestModel(torch.nn.Module):
         # which call `kv_cache.unbind(0)` and therefore require a tensor.
         self.attn.kv_cache = kv_cache
 
-        attn_metadata = self.builder.build(
-            common_prefix_len=0, common_attn_metadata=common_attn_metadata
-        )
+        attn_metadata = self.builder.build(common_attn_metadata=common_attn_metadata)
 
         return attn_metadata
 

@@ -76,7 +76,6 @@ class MiniMaxM3SparseAiterPAMetadataBuilder(MiniMaxM3SparseMetadataBuilder):
 
     def build(
         self,
-        common_prefix_len: int,
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
     ) -> MiniMaxM3SparseMetadata:
@@ -84,7 +83,7 @@ class MiniMaxM3SparseAiterPAMetadataBuilder(MiniMaxM3SparseMetadataBuilder):
             minimax_m3_rebase_block_table_to_page16,
         )
 
-        metadata = super().build(common_prefix_len, common_attn_metadata, fast_build)
+        metadata = super().build(common_attn_metadata, fast_build)
         block_table = common_attn_metadata.block_table_tensor
         num_reqs, cols = block_table.shape
         assert (

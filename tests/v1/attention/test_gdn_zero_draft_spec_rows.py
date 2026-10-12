@@ -104,7 +104,7 @@ def _decode_metadata(builder, num_accepted: list[int], seq_len: int = 64):
         common.block_table_tensor = torch.cat([common.block_table_tensor, extra], dim=1)
     accepted = torch.tensor(num_accepted, dtype=torch.int32, device=DEVICE)
     num_decode_draft_tokens_cpu = torch.zeros(len(num_accepted), dtype=torch.int32)
-    return builder.build(0, common, accepted, num_decode_draft_tokens_cpu)
+    return builder.build(common, accepted, num_decode_draft_tokens_cpu)
 
 
 def test_zero_draft_capture_shape_routes_through_the_speculative_path():

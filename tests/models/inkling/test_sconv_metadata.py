@@ -86,7 +86,7 @@ def test_sconv_metadata_reuses_padded_static_buffers():
         )
 
     common = CommonMetadata()
-    first = builder.build(0, common)
+    first = builder.build(common)
     pointers = tuple(
         tensor.data_ptr()
         for tensor in (
@@ -100,7 +100,7 @@ def test_sconv_metadata_reuses_padded_static_buffers():
     common.query_start_loc[1] = 5
     common.query_start_loc_cpu[1] = 5
     common.slot_mapping[:5] = torch.arange(5, dtype=torch.int64, device=device)
-    second = builder.build(0, common)
+    second = builder.build(common)
 
     assert second.slot_mapping.shape == (8,)
     assert second.seq_idx.shape == (8,)

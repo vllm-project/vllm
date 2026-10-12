@@ -2505,11 +2505,10 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
 
         assert m.max_query_len <= self.reorder_batch_threshold  # decode only
 
-        return self.build(0, m)
+        return self.build(m)
 
     def build(
         self,
-        common_prefix_len: int,
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
     ) -> M:

@@ -198,14 +198,11 @@ class DeepseekSparseSWAFlashInferMetadataBuilder(DeepseekV41SparseSWAMetadataBui
 
     def build(
         self,
-        common_prefix_len: int,
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
         replay_start: torch.Tensor | None = None,
     ) -> "DeepseekSparseSWAMetadata":
-        metadata = super().build(
-            common_prefix_len, common_attn_metadata, fast_build, replay_start
-        )
+        metadata = super().build(common_attn_metadata, fast_build, replay_start)
         num_tokens = metadata.num_decode_tokens
         if not common_attn_metadata.causal and num_tokens > 0:
             assert metadata.decode_swa_lens is not None
