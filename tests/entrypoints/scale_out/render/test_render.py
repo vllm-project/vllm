@@ -12,6 +12,7 @@ import pytest
 import pytest_asyncio
 
 from tests.utils import RemoteLaunchRenderServer
+from vllm.entrypoints.openai.completion.protocol import CompletionRequest
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.entrypoints.scale_out.render.api_router import router
 from vllm.entrypoints.scale_out.render.serving import ServingRender
@@ -21,7 +22,7 @@ from vllm.renderers.online_renderer import OnlineRenderer
 MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
 
 
-def _build_responses_serving_render() -> ServingRender:
+def _build_serving_render() -> ServingRender:
     serving = ServingRender.__new__(ServingRender)
     serving.model_config = SimpleNamespace(
         max_model_len=100,
@@ -43,6 +44,31 @@ def _build_responses_serving_render() -> ServingRender:
     return serving
 
 
+@pytest.mark.asyncio
+@pytest.mark.skip_global_cleanup
+async def test_render_completion_rejects_beam_search():
+    serving = _build_serving_render()
+    serving.online_renderer.render_completion = AsyncMock(
+        return_value=[{"prompt_token_ids": [7, 8, 9]}]
+    )
+    request = CompletionRequest(
+        model=MODEL_NAME,
+        prompt="Test prompt",
+        use_beam_search=True,
+        n=2,
+        length_penalty=0.7,
+    )
+
+    response = await serving.render_completion_request(request)
+
+    assert isinstance(response, ErrorResponse)
+    assert response.error.code == 400
+    assert (
+        response.error.message == "Beam search is not supported by the render endpoint"
+    )
+    serving.online_renderer.render_completion.assert_not_awaited()
+
+
 @pytest.mark.skip_global_cleanup
 def test_responses_render_route_is_registered():
     assert any(route.path == "/v1/responses/render" for route in router.routes)
@@ -60,7 +86,7 @@ def test_responses_render_route_documents_not_implemented():
 @pytest.mark.asyncio
 @pytest.mark.skip_global_cleanup
 async def test_render_responses_returns_generate_request_without_stored_state():
-    serving = _build_responses_serving_render()
+    serving = _build_serving_render()
     serving.online_renderer.render_responses = AsyncMock(
         return_value=MagicMock(
             messages=[{"role": "user", "content": "Test prompt"}],
@@ -101,7 +127,7 @@ async def test_render_responses_returns_generate_request_without_stored_state():
 @pytest.mark.asyncio
 @pytest.mark.skip_global_cleanup
 async def test_render_responses_rejects_previous_response_id():
-    serving = _build_responses_serving_render()
+    serving = _build_serving_render()
     serving.online_renderer.render_responses = AsyncMock()
     request = ResponsesRequest(
         model=MODEL_NAME,
@@ -120,7 +146,7 @@ async def test_render_responses_rejects_previous_response_id():
 @pytest.mark.asyncio
 @pytest.mark.skip_global_cleanup
 async def test_render_responses_rejects_empty_token_ids():
-    serving = _build_responses_serving_render()
+    serving = _build_serving_render()
     serving.online_renderer.render_responses = AsyncMock(
         return_value=MagicMock(
             messages=[],
@@ -141,7 +167,7 @@ async def test_render_responses_rejects_empty_token_ids():
 async def test_render_responses_carries_reasoning_parser_kwargs():
     """/v1/responses gives the engine's reasoning parser the effective template
     kwargs, so the rendered request must carry them to generate."""
-    serving = _build_responses_serving_render()
+    serving = _build_serving_render()
     online = serving.online_renderer
     online.parser = MagicMock(reasoning_parser_cls=object)
     online.chat_template = None
