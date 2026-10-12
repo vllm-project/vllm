@@ -151,6 +151,24 @@ vllm serve <target-model> \
   }'
 ```
 
+#### DFlash and DSpark
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `draft_context_window` | `integer >= 1` | `None` | Limit the draft's attention to at least the most recent N context tokens, dropping older ones in whole KV cache blocks (times the DCP size). Helps drafters whose acceptance drops beyond the context they were trained on. Target verification is unchanged. Model Runner V2 only. |
+
+Example:
+
+```bash
+vllm serve <target-model> \
+  --speculative-config '{
+    "method": "dspark",
+    "model": "<dspark-draft-model>",
+    "num_speculative_tokens": 3,
+    "draft_context_window": 32768
+  }'
+```
+
 #### Cross-Vocabulary Draft Models (TLI)
 
   By default, vLLM requires the draft and target models to share the same
