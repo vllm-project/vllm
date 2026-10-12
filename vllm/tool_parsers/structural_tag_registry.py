@@ -285,7 +285,9 @@ def _dump_tool_for_xgrammar(
         if tool.parameters is not None:
             function["parameters"] = tool.parameters
         if tool.strict is not None:
-            function["strict"] = tool.strict
+            params = tool.parameters or {}
+            if not (isinstance(params, dict) and _has_no_properties(params)):
+                function["strict"] = tool.strict
         return {"type": "function", "function": function}
     dumped_tool = tool.model_dump(mode="json", exclude_none=True)
     if isinstance(tool, ChatCompletionToolsParam):
@@ -340,10 +342,23 @@ def _dump_allowed_tool_ref_for_xgrammar(tool_ref: AllowedToolRef) -> AllowedTool
     return tool_ref
 
 
+def _has_no_properties(params: dict[str, Any]) -> bool:
+    return (
+        params.get("type") == "object"
+        and not params.get("properties")
+        and not params.get("additionalProperties")
+    )
+
+
 def get_function_parameters(function) -> dict[str, Any] | bool:
     if getattr(function, "strict", None) is False:
         return True
-    return function.parameters if function.parameters is not None else True
+    params = function.parameters
+    if params is None:
+        return True
+    if isinstance(params, dict) and _has_no_properties(params):
+        return True
+    return params
 
 
 def _hermes_tool_tags(
