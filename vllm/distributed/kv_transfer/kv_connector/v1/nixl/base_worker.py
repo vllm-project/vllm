@@ -511,7 +511,22 @@ class NixlBaseConnectorWorker:
         nixl_agent_meta.region_members = [[name] for name in self._transfer_layer_names]
 
     def _split_remote_packed_rows(self, nixl_agent_meta: NixlAgentMetadata) -> None:
-        """Address the remote's packed block rows through our per-layer regions."""
+        """Map the remote's whole-row region onto our per-layer regions.
+
+        E.g. a BLHNC prefiller registers one region whose block is a full row
+        holding every layer's page, while a HiSparse decoder registers one
+        region per layer. Using the advertised `packed_member_layouts`, the
+        remote row is rewritten in place as one virtual region per local layer:
+
+            remote row b:  [ L0 page | L1 page | ... ]   base=B, stride=S
+                             ^off0     ^off1
+
+            remote metadata, before:  [(B, S, S)]               # (base, len, stride)
+            remote metadata, after:   [(B + off0, page0, S),    # L0
+                                       (B + off1, page1, S)]    # L1
+
+        Remote regions outside the row (e.g. a separate indexer) pass through.
+        """
         layouts = nixl_agent_meta.packed_member_layouts
         remote_names = nixl_agent_meta.region_names
         assert remote_names is not None, "Remote advertised no region_names"
@@ -1615,9 +1630,9 @@ class NixlBaseConnectorWorker:
                         (cache.data_ptr(), physical_page_size, block_stride)
                     ]
                 elif packed_mla and (self.pp_size == 1 or not page_contiguous):
-                    # Register whole rows so a block is a single descriptor, and
-                    # advertise where this layer's page sits so a peer with
-                    # per-layer regions can still address it.
+                    # Register whole rows so a block is a single descriptor. Also,
+                    # advertise where this layer's page sits so a remote with
+                    # LB* can still address it (HiSparse).
                     storage_block_len = block_stride
                     region_specs = [
                         (registration_base, storage_block_len, storage_block_len)
@@ -2302,6 +2317,9 @@ class NixlBaseConnectorWorker:
                 )
             self._align_remote_regions_by_layer(nixl_agent_meta)
         elif nixl_agent_meta.packed_member_layouts and not self._packed_member_layouts:
+            # With HiSparse, P may be on BL* while D is LB*, as only indexer is on HBM.
+            # TODO (NickLucche) we may consider not allowing this case at all (P BL*)
+            # and just clear this function.
             self._split_remote_packed_rows(nixl_agent_meta)
         elif (
             self.pp_size > 1
