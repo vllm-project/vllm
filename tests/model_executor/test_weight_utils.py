@@ -335,7 +335,8 @@ def test_dummy_e8m0_scale_is_fixed_exponent(dtype, name):
 @pytest.mark.parametrize("dtype", [torch.uint8, torch.int8, torch.float4_e2m1fn_x2])
 def test_dummy_packed_weight_gets_random_bytes(dtype):
     """Packed weights are filled deterministically instead of left uninitialized."""
-    params = [torch.zeros(4096, dtype=dtype) for _ in range(2)]
+    # Some backends can't fill packed FP4 directly, so view zeroed bytes.
+    params = [torch.zeros(4096, dtype=torch.uint8).view(dtype) for _ in range(2)]
     for param in params:
         initialize_single_dummy_weight(param, name="w13_weight")
     raw = params[0].view(torch.uint8)
