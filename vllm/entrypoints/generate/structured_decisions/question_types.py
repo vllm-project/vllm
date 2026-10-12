@@ -13,14 +13,19 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any, ClassVar
 
+import regex as re
+
 
 class StructuredDecisionError(ValueError):
     """An invalid request. Returned as a 400."""
 
 
-#: A choice labels its options A to Z in order. A single capital letter is one
+#: Letter labels by option position. A single capital letter is one
 #: token at the start of a reply for the tokenizers tested. Every read checks it.
 LABELS = tuple(string.ascii_uppercase)
+
+_OWN_DIGIT = re.compile(r"\s*([0-9])(?![0-9])")
+_ANY_DIGIT = re.compile(r"\d")
 
 
 @dataclass(frozen=True)
@@ -40,12 +45,15 @@ class Question:
 
 class QuestionType(ABC):
     name: ClassVar[str]
-    #: The labels of a question's options, in option order.
+    #: The default labels of a question's options, in option order.
     label_set: ClassVar[tuple[str, ...]] = LABELS
     reply_instruction: ClassVar[str] = "Answer with the letter of one option only."
 
     @abstractmethod
     def parse_options(self, qid: str, criteria: Any) -> list[Option]: ...
+
+    def labels(self, names: list[str]) -> tuple[str, ...]:
+        return self.label_set[: len(names)]
 
     @abstractmethod
     def answer(
@@ -62,12 +70,15 @@ class QuestionType(ABC):
             else f"{label}: {option.name}"
         )
 
+    def instruction(self, question: Question) -> str:
+        return self.reply_instruction
+
     def prompt(self, question: Question) -> str:
         """The question as the model reads it, after the state."""
         lines = [f"Question: {question.instructions}"] if question.instructions else []
         for label, o in zip(question.labels, question.options):
             lines.append(self.reply_line(label, o))
-        lines.append(self.reply_instruction)
+        lines.append(self.instruction(question))
         return "\n".join(lines)
 
 
@@ -118,7 +129,7 @@ def build_question(
         type=qtype,
         instructions=instructions,
         options=tuple(options),
-        labels=qtype.label_set[: len(options)],
+        labels=qtype.labels(names),
     )
 
 
@@ -151,6 +162,13 @@ class ChoiceQuestion(QuestionType):
             Option(str(name), None if desc is None else str(desc))
             for name, desc in criteria.items()
         ]
+
+    def labels(self, names: list[str]) -> tuple[str, ...]:
+        # Options named with distinct capital letters keep them.
+        own = tuple(n.strip() for n in names)
+        if all(n in LABELS for n in own) and len(set(own)) == len(own):
+            return own
+        return super().labels(names)
 
     def answer(
         self, question: Question, probs: list[float], label_mass: float
@@ -213,7 +231,7 @@ class ScoreQuestion(QuestionType):
     level names, from the first to the last level of the scale."""
 
     name = "score"
-    # 0-indexed like the answer, so a level's label is its score.
+    # Positional labels, 0-indexed like the answer.
     label_set = tuple(string.digits)
     reply_instruction = "Answer with the number of one level only."
 
@@ -223,6 +241,26 @@ class ScoreQuestion(QuestionType):
                 f"question {qid!r}: score criteria must be an ordered list of levels"
             )
         return [Option(str(level)) for level in criteria]
+
+    def labels(self, names: list[str]) -> tuple[str, ...]:
+        # Letter labels take their token ids from the choice type's label_set.
+        if not _ANY_DIGIT.search("".join(names)):
+            return super().labels(names)
+        own = tuple(m.group(1) for n in names if (m := _OWN_DIGIT.match(n)))
+        if len(own) == len(names) and len(set(own)) == len(own):
+            return own
+        return LABELS[: len(names)]
+
+    def reply_line(self, label: str, option: Option) -> str:
+        # A level numbered with its own digit reads as its name alone.
+        if label.isdigit() and option.name.lstrip().startswith(label):
+            return option.name
+        return f"{label}: {option.name}"
+
+    def instruction(self, question: Question) -> str:
+        if question.labels[0].isdigit():
+            return self.reply_instruction
+        return "Answer with the letter of one level only."
 
     def answer(
         self, question: Question, probs: list[float], label_mass: float

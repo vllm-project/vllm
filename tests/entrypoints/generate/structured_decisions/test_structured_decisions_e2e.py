@@ -139,6 +139,11 @@ def test_one_option_coin_flip(server):
             },
             {"sky": "blue"},
         ),
+        (
+            "Quiz key: the correct answer is B.",
+            {"key": choice("Which letter is the correct answer?", "C", "A", "D", "B")},
+            {"key": "B"},
+        ),
     ],
 )
 def test_single_read_answers(server, state, questions, expected):

@@ -84,6 +84,7 @@ import math
 import os
 import random
 import ssl
+import string
 import subprocess
 import threading
 import time
@@ -93,6 +94,7 @@ from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pybase64 as base64
+import regex as re
 from transformers import AutoTokenizer
 
 ARGS = None
@@ -123,6 +125,31 @@ THOUGHT_CLOSE = None
 
 class SchemaError(ValueError):
     pass
+
+
+# The label rules of vllm's question_types, pinned to it by a shared test table.
+LABELS = tuple(string.ascii_uppercase)
+OWN_DIGIT = re.compile(r"\s*([0-9])(?![0-9])")
+ANY_DIGIT = re.compile(r"\d")
+
+
+def choice_labels(names):
+    """Options named with distinct capital letters keep them, else A to Z."""
+    own = [n.strip() for n in names]
+    if all(n in LABELS for n in own) and len(set(own)) == len(own):
+        return tuple(own)
+    return LABELS[: len(names)]
+
+
+def score_labels(names):
+    """Own digits, else letters if a name has a digit, else positions from 1."""
+    if ANY_DIGIT.search("".join(names)):
+        own = [m.group(1) for n in names if (m := OWN_DIGIT.match(n))]
+        if len(own) == len(names) and len(set(own)) == len(own):
+            return tuple(own)
+    elif len(names) <= 9:
+        return tuple(string.digits[1 : len(names) + 1])
+    return LABELS[: len(names)]
 
 
 def parse_schema(value):
@@ -159,14 +186,10 @@ def parse_schema(value):
                 else (str(o), None)
                 for o in opts
             ]
-            labels = [chr(ord("A") + i) for i in range(len(choices))]
+            labels = choice_labels([str(c[0]) for c in choices])
         elif kind == "score":
             choices = [(str(level), None) for level in (q.get("levels") or [])]
-            labels = (
-                [str(i + 1) for i in range(len(choices))]
-                if len(choices) <= 9
-                else [chr(ord("A") + i) for i in range(len(choices))]
-            )
+            labels = score_labels([c[0] for c in choices])
         else:
             raise SchemaError(f"question {qid!r}: unknown type {kind!r}")
         if len(choices) < 2:
