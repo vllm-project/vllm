@@ -54,10 +54,13 @@ As of now, vLLM's binaries are compiled with CUDA 12.9 and public PyTorch releas
 
 ```bash
 # Install vLLM with a specific CUDA version (e.g., 13.0).
-export VLLM_VERSION=$(curl -s https://api.github.com/repos/vllm-project/vllm/releases/latest | jq -r .tag_name | sed 's/^v//')
 export CUDA_VERSION=130 # or other
 export CPU_ARCH=$(uname -m) # x86_64 or aarch64
-uv pip install "https://github.com/vllm-project/vllm/releases/download/v${VLLM_VERSION}/vllm-${VLLM_VERSION}+cu${CUDA_VERSION}-cp38-abi3-manylinux_2_28_${CPU_ARCH}.whl" --extra-index-url "https://download.pytorch.org/whl/cu${CUDA_VERSION}"
+# For a specific release, replace `latest` with `tags/v<version>`.
+export VLLM_WHEEL=$(curl -s https://api.github.com/repos/vllm-project/vllm/releases/latest | \
+    jq -r --arg cu "+cu${CUDA_VERSION}-" --arg arch "_${CPU_ARCH}.whl" \
+    '.assets[] | select(.name | contains($cu) and endswith($arch)) | .browser_download_url')
+uv pip install "${VLLM_WHEEL}" --extra-index-url "https://download.pytorch.org/whl/cu${CUDA_VERSION}"
 ```
 
 #### Install the latest code

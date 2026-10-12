@@ -5,7 +5,7 @@
 #
 # Usage:
 #   export DEEPGEMM_PYTHON_INTERPRETERS=$(tools/setup_deepgemm_pythons.sh)
-#   python setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38
+#   python setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp311
 #
 # Optional: DEEPGEMM_VENV_PREFIX (default: /tmp/dgenv).
 set -euo pipefail

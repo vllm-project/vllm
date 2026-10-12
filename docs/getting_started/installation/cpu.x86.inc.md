@@ -21,16 +21,18 @@ vLLM supports basic model inferencing and serving on x86 CPU platform, with data
 Pre-built vLLM wheels for x86 with AVX512/AVX2 are available since version 0.17.0. To install release wheels:
 
 ```bash
-export VLLM_VERSION=$(curl -s https://api.github.com/repos/vllm-project/vllm/releases/latest | jq -r .tag_name | sed 's/^v//')
+# For a specific release, replace `latest` with `tags/v<version>`.
+export VLLM_WHEEL=$(curl -s https://api.github.com/repos/vllm-project/vllm/releases/latest | \
+    jq -r '.assets[] | select(.name | contains("+cpu-") and endswith("_x86_64.whl")) | .browser_download_url')
 
 # use uv
-uv pip install "https://github.com/vllm-project/vllm/releases/download/v${VLLM_VERSION}/vllm-${VLLM_VERSION}+cpu-cp38-abi3-manylinux_2_34_x86_64.whl" --torch-backend cpu
+uv pip install "${VLLM_WHEEL}" --torch-backend cpu
 ```
 
 ??? console "pip"
     ```bash
     # use pip
-    pip install "https://github.com/vllm-project/vllm/releases/download/v${VLLM_VERSION}/vllm-${VLLM_VERSION}+cpu-cp38-abi3-manylinux_2_34_x86_64.whl" --extra-index-url https://download.pytorch.org/whl/cpu
+    pip install "${VLLM_WHEEL}" --extra-index-url https://download.pytorch.org/whl/cpu
     ```
 !!! warning "set `LD_PRELOAD`"
     Before use vLLM CPU installed via wheels, make sure Intel OpenMP is added to `LD_PRELOAD`:
