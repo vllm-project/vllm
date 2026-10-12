@@ -746,7 +746,6 @@ void gather_and_maybe_dequant_cache(
     torch::stable::Tensor const& scale,
     std::optional<torch::stable::Tensor> seq_starts = std::nullopt);
 
-// TODO(hc): cp_gather_cache need support scaled kvcahe in the future.
 void cp_gather_cache(
     torch::stable::Tensor const& src_cache,    // [NUM_BLOCKS, BLOCK_SIZE,
                                                // ENTRIES...]
