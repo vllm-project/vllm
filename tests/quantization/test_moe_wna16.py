@@ -222,7 +222,9 @@ def test_moe_wna16_setup_forwards_selected_backend(monkeypatch):
     method.wna16_backend = WNA16MoEBackend.HUMMING
     method.moe = object()
     quant_config = object()
-    method.get_fused_moe_quant_config = lambda layer: quant_config
+    monkeypatch.setattr(
+        method, "get_fused_moe_quant_config", lambda layer: quant_config
+    )
     layer = SimpleNamespace(_expert_routing_tables=lambda: (None, None, None))
     captured = {}
     kernel = object()
@@ -546,3 +548,77 @@ def test_compressed_tensors_wna16_moe_marlin_prep_with_unset_group_size():
     )
     assert layer.w13_weight_scale.shape == (num_experts, 1, 2 * intermediate_size)
     assert layer.w2_weight_scale.shape == (num_experts, 1, hidden_size)
+
+
+def test_moe_wna16_w13_qzeros_shard_split_int8_asym_gptq(monkeypatch):
+    """8-bit asymmetric GPTQ MoE must split w13 zero-points by pack factor.
+
+    ``w13_qzeros`` is packed along the intermediate dim by ``bit8_pack_factor``,
+    so the gate/up (w1/w3) boundary in the weight loader is
+    ``shard_size // bit8_pack_factor``. Hardcoding ``shard_size // 2`` only
+    holds for 4-bit and raises a shape mismatch when loading an 8-bit
+    (unpacked) checkpoint.
+    """
+    from tests.kernels.moe.utils import make_dummy_moe_config
+
+    monkeypatch.setattr(
+        moe_wna16, "get_tp_group", lambda: SimpleNamespace(device="cpu")
+    )
+    monkeypatch.setattr(moe_wna16, "get_tensor_model_parallel_rank", lambda: 0)
+
+    num_experts, hidden, intermediate, group_size = 2, 256, 512, 128
+    moe_config = make_dummy_moe_config(
+        num_experts=num_experts,
+        hidden_dim=hidden,
+        intermediate_size=intermediate,
+    )
+    quant_config = MoeWNA16Config(
+        linear_quant_method="gptq",
+        weight_bits=8,
+        group_size=group_size,
+        has_zp=True,
+        lm_head_quantized=False,
+        modules_to_not_convert=[],
+        full_config={},
+    )
+    method = object.__new__(MoeWNA16Method)
+    method.quant_config = quant_config
+    method.moe = moe_config
+
+    layer = torch.nn.Module()
+    layer.intermediate_size_per_partition = intermediate
+    layer.moe_config = moe_config
+    method.create_weights(
+        layer,
+        num_experts=num_experts,
+        hidden_size=hidden,
+        intermediate_size_per_partition=intermediate,
+        params_dtype=torch.float16,
+        weight_loader=lambda *a, **k: True,
+    )
+
+    # 8-bit is unpacked along the intermediate dim: dim1 == 2 * intermediate.
+    assert layer.w13_qzeros.shape == (
+        num_experts,
+        2 * intermediate,
+        hidden // group_size,
+    )
+    loader = layer.w13_qzeros.weight_loader
+
+    # Raw GPTQ 8-bit qzeros per shard: int32 (num_groups, intermediate // 4);
+    # the loader views them as uint8 -> (num_groups, intermediate), then
+    # transposes and offsets by 1.
+    num_groups = hidden // group_size
+    raw_w1 = torch.arange(num_groups * (intermediate // 4), dtype=torch.int32).reshape(
+        num_groups, intermediate // 4
+    )
+    raw_w3 = raw_w1 + 1000
+
+    # Must not raise (old code raised a shape mismatch here for 8-bit).
+    loader(layer.w13_qzeros, raw_w1, "w13_qzeros", "w1", 0, False)
+    loader(layer.w13_qzeros, raw_w3, "w13_qzeros", "w3", 0, False)
+
+    expected_w1 = raw_w1.view(torch.uint8).T + 1
+    expected_w3 = raw_w3.view(torch.uint8).T + 1
+    assert torch.equal(layer.w13_qzeros[0, :intermediate].cpu(), expected_w1)
+    assert torch.equal(layer.w13_qzeros[0, intermediate:].cpu(), expected_w3)

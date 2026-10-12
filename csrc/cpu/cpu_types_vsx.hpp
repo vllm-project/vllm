@@ -417,7 +417,7 @@ struct FP32Vec8 : public Vec<FP32Vec8> {
       tmp.val[1] = two_x;
       FP32Vec8 temp_vec(tmp);
       FP32Vec8 exp_vec = temp_vec.exp();
-      vector float e = temp_vec.exp().reg.val[0];
+      vector float e = exp_vec.reg.val[0];
 
       vector float num = vec_sub(e, one);
       vector float den = vec_add(e, one);
@@ -623,6 +623,24 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
   }
 
   explicit FP32Vec16(const BF16Vec8& v) : FP32Vec16(FP32Vec8(v)) {}
+
+  // De-pack 16 x 4-bit nibbles from a 64-bit value and convert with offset.
+  // Used by WNA16 (AWQ/GPTQ) dequantization.
+  // Fully vectorized using VSX / AltiVec intrinsics with zero stack stores.
+  FORCE_INLINE explicit FP32Vec16(int64_t value, const FP32Vec16& lut) {
+    uint64_t u = static_cast<uint64_t>(value);
+    float f[16];
+#pragma GCC unroll 16
+    for (int i = 0; i < 16; i++) {
+      f[i] = static_cast<float>((u >> (i * 4)) & 0xF);
+    }
+    // Extract base offset from LUT[0] (0.0f for AWQ, -8.0f for GPTQ)
+    __vector float offset = vec_splats(vec_extract(lut.reg.val[0], 0));
+    reg.val[0] = vec_add(vec_xl(0, f), offset);
+    reg.val[1] = vec_add(vec_xl(16, f), offset);
+    reg.val[2] = vec_add(vec_xl(32, f), offset);
+    reg.val[3] = vec_add(vec_xl(48, f), offset);
+  }
 
   // FP8 stub: dead code on PowerPC (fp8 KV cache is x86-only), needed for
   // load_b_pair_vec template to compile on all platforms.
@@ -1100,6 +1118,32 @@ inline BF16Vec16::BF16Vec16(const FP32Vec16& v) {
 
 inline void prefetch(const void* addr) {
   __asm__ __volatile__("dcbt 0, %0" : : "r"(addr) : "memory");
+}
+
+static void interleave_save(const BF16Vec16& vec0, const BF16Vec16& vec1,
+                            void* ptr) {
+  __vector signed short h0 = vec_mergeh(vec0.reg.val[0], vec1.reg.val[0]);
+  __vector signed short l0 = vec_mergel(vec0.reg.val[0], vec1.reg.val[0]);
+  __vector signed short h1 = vec_mergeh(vec0.reg.val[1], vec1.reg.val[1]);
+  __vector signed short l1 = vec_mergel(vec0.reg.val[1], vec1.reg.val[1]);
+
+  vec_xst(h0, 0, reinterpret_cast<signed short*>(ptr));
+  vec_xst(l0, 16, reinterpret_cast<signed short*>(ptr));
+  vec_xst(h1, 32, reinterpret_cast<signed short*>(ptr));
+  vec_xst(l1, 48, reinterpret_cast<signed short*>(ptr));
+}
+
+static void interleave_save(const FP16Vec16& vec0, const FP16Vec16& vec1,
+                            void* ptr) {
+  __vector signed short h0 = vec_mergeh(vec0.reg.val[0], vec1.reg.val[0]);
+  __vector signed short l0 = vec_mergel(vec0.reg.val[0], vec1.reg.val[0]);
+  __vector signed short h1 = vec_mergeh(vec0.reg.val[1], vec1.reg.val[1]);
+  __vector signed short l1 = vec_mergel(vec0.reg.val[1], vec1.reg.val[1]);
+
+  vec_xst(h0, 0, reinterpret_cast<signed short*>(ptr));
+  vec_xst(l0, 16, reinterpret_cast<signed short*>(ptr));
+  vec_xst(h1, 32, reinterpret_cast<signed short*>(ptr));
+  vec_xst(l1, 48, reinterpret_cast<signed short*>(ptr));
 }
 
 struct INT8Vec64 {

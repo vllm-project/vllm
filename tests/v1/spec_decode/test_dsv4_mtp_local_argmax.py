@@ -56,6 +56,7 @@ def _make_predictor(vocab_size: int) -> DeepSeekV4MultiTokenPredictor:
     ):
         shared_head = SharedHead(config=config, prefix="shared_head")
 
+    assert shared_head.head is not None
     generator = torch.Generator().manual_seed(7)
     with torch.no_grad():
         shared_head.head.weight.normal_(0.0, 0.02, generator=generator)
