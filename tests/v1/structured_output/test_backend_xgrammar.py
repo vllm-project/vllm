@@ -32,21 +32,6 @@ def grammar_accepts(schema: dict, text: str) -> bool:
 
 
 @pytest.fixture
-def unsupported_string_schemas():
-    return [
-        {"type": "string", "format": "non_existing_format"},
-        # TODO(arpera):
-        # pattern/format is compiled but length bounds are silently dropped,
-        # so the combination must be rejected instead of producing quietly
-        # wrong output
-        # https://github.com/mlc-ai/xgrammar/issues/749
-        {"type": "string", "pattern": "^a+$", "maxLength": 2},
-        {"type": "string", "pattern": "^a+$", "minLength": 3},
-        {"type": "string", "format": "email", "maxLength": 10},
-    ]
-
-
-@pytest.fixture
 def unsupported_multipleOf_schemas():
     return [
         {"type": "number", "multipleOf": 120},
@@ -59,6 +44,8 @@ def unsupported_multipleOf_schemas():
 @pytest.fixture
 def unsupported_array_schemas():
     return [
+        # array + some constraints is unsupported by xgrammar
+        # Tracking issue: https://github.com/mlc-ai/xgrammar/issues/968
         {"type": "array", "uniqueItems": True},
         {"type": "array", "contains": {"type": "string"}},
         {"type": "array", "minContains": 1},
@@ -67,74 +54,113 @@ def unsupported_array_schemas():
 
 
 @pytest.fixture
-def unsupported_property_names_combinations():
+def unsupported_string_schemas():
     return [
-        # TODO(arpera):
-        # this case is not covered by xgrammar, so we should report this bug to xgrammar
+        # ========================================================
+        # string + format is unsupported by xgrammar
+        # Tracking issue: https://github.com/mlc-ai/xgrammar/issues/967
+        {"type": "string", "format": "non_existing_format"},
+        # ========================================================
+        #
+        # ========================================================
+        # string + format/pattern + length constraint is unsupported by xgrammar
+        # Tracking issue: https://github.com/mlc-ai/xgrammar/issues/966
+        #
+        # pattern/format is compiled but length bounds are silently dropped,
+        # so the combination must be rejected instead of producing quietly
+        # wrong output
+        {"type": "string", "pattern": "^a+$", "maxLength": 2},
+        {"type": "string", "pattern": "^a+$", "minLength": 3},
+        {"type": "string", "format": "email", "maxLength": 10},
+        # ========================================================
+    ]
+
+
+@pytest.fixture
+def unsupported_propertyNames_combinations():
+    return [
+        # ========================================================
+        # propertyNames + patternProperties is unsupported by xgrammar
+        # Tracking issue: https://github.com/mlc-ai/xgrammar/issues/959
+        #
         # xgrammar drops propertyNames whenever patternProperties is present,
         # so "grade_12" matches the pattern and escapes the name constraint
         {
             "type": "object",
-            "patternProperties": {"^grade_[0-9]+$": {"type": "integer"}},
             "propertyNames": {"pattern": "^grade_[0-9]$"},  # does NOT match "grade_12"
+            "patternProperties": {"^grade_[0-9]+$": {"type": "integer"}},
         },
-        # propertyNames makes xgrammar discard the sibling additionalProperties
-        # value schema: https://github.com/mlc-ai/xgrammar/issues/826
-        {
-            "type": "object",
-            "propertyNames": {"pattern": "^[a-z]+$"},
-            "additionalProperties": {"type": "integer"},
-        },
-        # propertyNames is a string schema that conventionally omits "type", so
-        # it escapes the string check while xgrammar drops its length bound all
-        # the same: https://github.com/mlc-ai/xgrammar/issues/749
+        # ========================================================
+        #
+        # ========================================================
+        # propertyNames + maxLength is unsupported by xgrammar
+        # Tracking issue: https://github.com/mlc-ai/xgrammar/issues/960
         {
             "type": "object",
             "propertyNames": {"pattern": "^a+$", "maxLength": 2},
         },
-        # xgrammar emits named `properties` separately from `propertyNames` and
-        # only applies `propertyNames` in its additional-properties branch, so a
-        # key declared in `properties` escapes the name constraint regardless of
-        # what `propertyNames` contains.
+        # ========================================================
+        #
+        # ========================================================
+        # propertyNames + properties is unsupported by xgrammar
+        # Tracking issue: https://github.com/mlc-ai/xgrammar/issues/958
         {
             "type": "object",
+            "propertyNames": {"pattern": "^[a-z]+$"},
             "properties": {"Bad": {"type": "integer"}},
             "required": ["Bad"],
-            "propertyNames": {"pattern": "^[a-z]+$"},
         },
         {
             "type": "object",
-            "properties": {"Bad": {"type": "integer"}},
             "propertyNames": {"enum": ["good"]},
+            "properties": {"Bad": {"type": "integer"}},
         },
+        # ========================================================
+        #
+        # ========================================================
+        # propertyNames + unevaluatedProperties is unsupported by xgrammar
+        # Tracking issue: https://github.com/mlc-ai/xgrammar/issues/961
+        #
         # xgrammar's propertyNames-only branch falls back to an unconstrained
         # value type, so it drops unevaluatedProperties whether it restricts
         # values (a schema) or forbids them (false).
         {
             "type": "object",
             "propertyNames": {"pattern": "^[a-z]+$"},
-            "unevaluatedProperties": {"type": "integer"},
+            "unevaluatedProperties": False,
         },
+        # also keep in mind that unevaluatedProperties can be a schema
         {
             "type": "object",
             "propertyNames": {"pattern": "^[a-z]+$"},
-            "unevaluatedProperties": False,
+            "unevaluatedProperties": {"type": "integer"},
         },
+        # ========================================================
     ]
 
 
 @pytest.fixture
-def unsupported_pattern_properties_combinations():
+def unsupported_patternProperties_combinations():
     return [
+        # ========================================================
+        # patternProperties + properties is unsupported by xgrammar
+        # Tracking issue: https://github.com/mlc-ai/xgrammar/issues/964
+        #
         # JSON Schema requires a property matched by both `properties` and
         # `patternProperties` to satisfy both (conjunction), but xgrammar
         # compiles them as alternative branches, so satisfying either one is
         # enough.
         {
             "type": "object",
-            "properties": {"x": {"type": "string"}},
             "patternProperties": {"^x$": {"type": "integer"}},
+            "properties": {"x": {"type": "string"}},
         },
+        # ========================================================
+        #
+        # ========================================================
+        # patternProperties + patternProperties is unsupported by xgrammar
+        # Tracking issue: https://github.com/mlc-ai/xgrammar/issues/965
+        #
         # The same alternative-branches problem applies to overlapping
         # patternProperties patterns: a key matching both patterns only has to
         # satisfy one of them.
@@ -145,6 +171,7 @@ def unsupported_pattern_properties_combinations():
                 "^[a-z]*z$": {"type": "integer"},
             },
         },
+        # ========================================================
     ]
 
 
@@ -274,6 +301,24 @@ def property_names_schema():
 
 
 @pytest.fixture
+def property_names_with_additional_properties_schema():
+    """This combination propertyNames + additionalProperties
+    was unsupported some time ago by xgrammar.
+    So, this test case was in unsupported category before.
+    But this xgrammar's PR
+    https://github.com/mlc-ai/xgrammar/pull/836
+    added support of propertyNames + additionalProperties
+    This fix was released in xgrammar v0.2.7
+    which vLLM pins in PR #57272
+    """
+    return {
+        "type": "object",
+        "propertyNames": {"pattern": "^[a-z_]+$"},
+        "additionalProperties": {"type": "integer"},
+    }
+
+
+@pytest.fixture
 def supported_allof_anyof_and_oneof():
     """Xgrammar DO support some variants of anyOf, allOf, oneOf
     This test case was made during working on covering
@@ -334,8 +379,8 @@ class TestHasXGrammarUnsupportedJsonFeatures:
             "unsupported_string_schemas",
             "unsupported_multipleOf_schemas",
             "unsupported_array_schemas",
-            "unsupported_property_names_combinations",
-            "unsupported_pattern_properties_combinations",
+            "unsupported_propertyNames_combinations",
+            "unsupported_patternProperties_combinations",
             # vLLM issue #56556
             "unsupported_multibranch_allof",
             "unsupported_vllm_issue_56556_schema",
@@ -354,6 +399,7 @@ class TestHasXGrammarUnsupportedJsonFeatures:
             "supported_frankenstein_schema",
             "pattern_properties_schema",
             "property_names_schema",
+            "property_names_with_additional_properties_schema",
             # Additional test cases implemented during work on
             # vLLM issue #56556
             "supported_allof_anyof_and_oneof",
@@ -420,6 +466,14 @@ class TestIsGrammarAcceptString:
             assert grammar_accepts(property_names_schema, '{"score": "seven"}')
             assert not grammar_accepts(property_names_schema, '{"Score": 5}')
             assert not grammar_accepts(property_names_schema, '{"score_1": 5}')
+
+        def test_property_names_keeps_additional_properties_value_schema(
+            self, property_names_with_additional_properties_schema
+        ):
+            schema = property_names_with_additional_properties_schema
+            assert grammar_accepts(schema, '{"score": 5}')
+            assert not grammar_accepts(schema, '{"Score": 5}')
+            assert not grammar_accepts(schema, '{"score": "seven"}')
 
         def test_pattern_properties_constrains_keys_and_values(
             self, pattern_properties_schema
