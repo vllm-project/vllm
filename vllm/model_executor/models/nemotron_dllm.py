@@ -161,6 +161,13 @@ class NemotronLabsDiffusionForBlockDiffusion(nn.Module, SupportsPP, SupportsQuan
 
     def get_model_state_cls(self):
         if self.ar_mode:
+            if not getattr(self.config, "is_causal", True):
+                # Bidirectional reads: encoder-only attention, no KV cache.
+                from vllm.v1.worker.gpu.model_states.encoder_only import (
+                    EncoderOnlyModelState,
+                )
+
+                return EncoderOnlyModelState
             from vllm.v1.worker.gpu.model_states.default import DefaultModelState
 
             return DefaultModelState

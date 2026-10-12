@@ -390,7 +390,9 @@ def test_ar_mode_config(explicit_diffusion_config):
         SimpleNamespace(
             attention_config=attention,
             model_config=SimpleNamespace(
-                is_diffusion=False, override_generation_config={}
+                is_diffusion=False,
+                override_generation_config={},
+                hf_config=SimpleNamespace(),
             ),
             diffusion_config=(
                 DiffusionConfig(canvas_length=32) if explicit_diffusion_config else None
@@ -409,6 +411,84 @@ def test_ar_mode_config(explicit_diffusion_config):
         assert attention.flash_attn_version == 3
         assert scheduler.max_num_seqs == SchedulerConfig.DEFAULT_MAX_NUM_SEQS
         assert config.model_config.override_generation_config["max_new_tokens"] is None
+
+
+@pytest.mark.parametrize("is_diffusion", [False, True])
+def test_bidirectional_reads_config(is_diffusion):
+    from types import SimpleNamespace
+    from typing import cast
+
+    from vllm.config import VllmConfig
+    from vllm.config.attention import AttentionConfig
+    from vllm.config.scheduler import SchedulerConfig
+    from vllm.model_executor.models.config import (
+        NemotronLabsDiffusionForBlockDiffusionConfig,
+    )
+
+    cache = SimpleNamespace(enable_prefix_caching=True)
+    config = cast(
+        VllmConfig,
+        SimpleNamespace(
+            attention_config=AttentionConfig(),
+            model_config=SimpleNamespace(
+                is_diffusion=is_diffusion,
+                override_generation_config={},
+                hf_config=SimpleNamespace(is_causal=False),
+            ),
+            diffusion_config=None,
+            cache_config=cache,
+            parallel_config=SimpleNamespace(pipeline_parallel_size=1),
+            scheduler_config=SimpleNamespace(
+                max_num_seqs=SchedulerConfig.DEFAULT_MAX_NUM_SEQS,
+                max_num_batched_tokens=8192,
+            ),
+        ),
+    )
+    if is_diffusion:
+        # Masked diffusion needs a causal prompt KV cache.
+        with pytest.raises(ValueError, match="ar_mode=True"):
+            NemotronLabsDiffusionForBlockDiffusionConfig.verify_and_update_config(
+                config
+            )
+    else:
+        NemotronLabsDiffusionForBlockDiffusionConfig.verify_and_update_config(config)
+        # A bidirectional prompt's keys depend on later tokens.
+        assert not cache.enable_prefix_caching
+
+
+@pytest.mark.parametrize(
+    "architecture,is_causal,max_tokens,valid",
+    [
+        ("NemotronLabsDiffusionModel", False, 1, True),
+        ("NemotronLabsDiffusionModel", False, 2, False),
+        ("NemotronLabsDiffusionModel", False, None, False),
+        ("NemotronLabsDiffusionForCausalLM", False, 4, False),
+        ("NemotronLabsDiffusionModel", True, 4, True),
+        ("LlamaForCausalLM", False, 4, True),
+    ],
+)
+def test_bidirectional_reads_require_one_token(
+    architecture, is_causal, max_tokens, valid
+):
+    from types import SimpleNamespace
+
+    from vllm import SamplingParams
+    from vllm.exceptions import VLLMValidationError
+    from vllm.transformers_utils.configs import NemotronLabsDiffusionConfig
+
+    if architecture.startswith("NemotronLabsDiffusion"):
+        hf_config = NemotronLabsDiffusionConfig(
+            architectures=[architecture], ar_mode=True
+        )
+        hf_config.is_causal = is_causal
+    else:
+        hf_config = SimpleNamespace(is_causal=is_causal)
+    params = SamplingParams(temperature=0, max_tokens=max_tokens)
+    if valid:
+        _admit(params, hf_config, is_diffusion=False)
+    else:
+        with pytest.raises(VLLMValidationError, match="max_tokens=1"):
+            _admit(params, hf_config, is_diffusion=False)
 
 
 def test_diffusion_model_options_are_model_specific():
@@ -1127,3 +1207,71 @@ def test_mixed_temperature_distribution_and_logprobs(eager_sampler):
         if temperature > 0:
             frequency = (canvas[row] == 1).float().mean()
             assert abs(frequency - distribution.probs[1]) < 0.03
+
+
+@requires_gpu
+@requires_weights
+def test_bidirectional_read_matches_hf(monkeypatch, fp32_reference):
+    """``is_causal=False`` reads a trailing mask after one bidirectional pass
+    over the whole prompt, matching the HF model's bidirectional logits."""
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    from vllm import LLM, SamplingParams
+    from vllm.distributed import cleanup_dist_env_and_memory
+    from vllm.exceptions import VLLMValidationError
+    from vllm.inputs import TokensPrompt
+
+    tok, hf = _load_hf(dtype=torch.float32)
+    prompt_ids = _prompt_ids(tok)[0].tolist() + [MASK_TOKEN_ID]
+    candidates = sorted(
+        {tok.encode(c, add_special_tokens=False)[0] for c in "ABCD0123456789"}
+    )
+    with torch.inference_mode():
+        for layer in hf.encoder.layers:
+            layer.self_attn.diffusion_lm = True  # no causal mask anywhere
+        logits = hf(torch.tensor([prompt_ids], device="cuda")).logits[0, -1]
+        bidirectional = logits.float().log_softmax(-1).cpu()
+        for layer in hf.encoder.layers:
+            layer.self_attn.diffusion_lm = False
+        causal_logits = hf(
+            torch.tensor([prompt_ids], device="cuda"), use_causal_mask=True
+        ).logits[0, -1]
+        causal = causal_logits.float().log_softmax(-1).cpu()
+    del hf
+    torch.accelerator.empty_cache()
+    # The prompt tokens attend to later tokens, so the read must differ from
+    # a causal pass; otherwise this test could not detect a causal prefill.
+    assert (bidirectional[candidates] - causal[candidates]).abs().max() > 0.05
+
+    llm = LLM(
+        model=MODEL_PATH,
+        dtype="float32",
+        hf_overrides={"ar_mode": True, "is_causal": False},
+        max_num_batched_tokens=MAX_MODEL_LEN,
+        max_num_seqs=4,
+        trust_remote_code=True,
+        enforce_eager=True,
+        max_model_len=MAX_MODEL_LEN,
+        gpu_memory_utilization=0.6,
+    )
+    try:
+        config = llm.llm_engine.vllm_config
+        assert not config.model_config.is_diffusion
+        assert not config.cache_config.enable_prefix_caching
+        params = SamplingParams(
+            temperature=0.0, max_tokens=1, logprob_token_ids=candidates
+        )
+        prompts = [TokensPrompt(prompt_token_ids=prompt_ids)] * 2
+        for output in llm.generate(prompts, params):
+            logprobs = output.outputs[0].logprobs
+            assert logprobs is not None and len(logprobs) == 1
+            for token in candidates:
+                assert logprobs[0][token].logprob == pytest.approx(
+                    bidirectional[token].item(), abs=2e-3
+                )
+        with pytest.raises(VLLMValidationError, match="max_tokens=1"):
+            llm.generate(prompts[0], SamplingParams(temperature=0.0, max_tokens=2))
+    finally:
+        llm.llm_engine.engine_core.shutdown()
+        del llm
+        cleanup_dist_env_and_memory()

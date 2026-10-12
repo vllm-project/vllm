@@ -61,6 +61,15 @@ def validate_read_params(
         raise VLLMValidationError("Nemotron read-only scoring uses one masked forward")
 
 
+def validate_bidirectional_read_params(params: Any) -> None:
+    """Bidirectional reads keep no KV cache, so only the prompt pass is valid."""
+    if params.max_tokens != 1:
+        raise VLLMValidationError(
+            "Nemotron with is_causal=False scores the last prompt position in "
+            "one bidirectional forward and keeps no KV cache; set max_tokens=1."
+        )
+
+
 class NemotronLabsDiffusionConfig(PreTrainedConfig):
     model_type = "nemotron_labs_diffusion"
 
@@ -137,6 +146,12 @@ class NemotronLabsDiffusionConfig(PreTrainedConfig):
         validate_read_params(
             params, canvas_length or self.block_size, vocab_size, self.mask_token_id
         )
+
+    def validate_ar_request(self, params: Any) -> None:
+        """In AR mode with ``is_causal=False`` (bidirectional reads), only the
+        single prompt pass is valid."""
+        if not getattr(self, "is_causal", True):
+            validate_bidirectional_read_params(params)
 
     @property
     def canvas_length(self) -> int | None:

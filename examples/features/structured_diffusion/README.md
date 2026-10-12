@@ -109,3 +109,14 @@ python examples/features/structured_diffusion/nemotron_smoke.py --url http://loc
 The smoke check validates answer shapes and finite, normalized probabilities for
 all three primitives, a 100-alternative choice and a 12-question request. It is
 not an accuracy benchmark.
+
+Checkpoints fine-tuned with bidirectional attention over the whole prompt can
+instead be read in one forward over prompt + mask, without a KV cache. Serve
+them in autoregressive mode with
+`--hf-overrides '{"ar_mode": true, "is_causal": false}'` and a
+`--max-num-batched-tokens` of at least the longest prompt, since prompts are not
+chunked; prefix caching is disabled automatically. Append the mask token to the
+prompt and request the candidates with `logprob_token_ids`, `temperature=0` and
+`max_tokens=1`; other `max_tokens` values are rejected. The base checkpoints
+were trained with causal prompts, so use this mode only with checkpoints
+fine-tuned for it.
