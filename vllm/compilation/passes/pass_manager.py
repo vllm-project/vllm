@@ -4,8 +4,7 @@ import functools
 from collections.abc import Callable
 from typing import Any, ParamSpec, TypeVar
 
-from torch import bfloat16
-from torch import fx as fx
+import torch
 
 from vllm import envs
 from vllm._aiter_ops import rocm_aiter_ops
@@ -112,7 +111,7 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
         self.passes: list[InductorPass] = []
 
     @with_pattern_match_debug
-    def __call__(self, graph: fx.Graph) -> None:
+    def __call__(self, graph: torch.fx.Graph) -> None:
         VllmInductorPass.dump_prefix = 0  # reset dump index
 
         compile_range = get_pass_context().compile_range
@@ -207,7 +206,7 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
                 and rocm_aiter_ops.is_enabled()
                 and on_gfx950()
                 and model_config is not None
-                and model_config.dtype == bfloat16
+                and model_config.dtype == torch.bfloat16
                 and model_config.architecture
                 in {
                     "MuseGlimmerForCausalLM",
