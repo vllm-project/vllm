@@ -289,6 +289,7 @@ def test_dsv4_dspark_fused_moe_expert_mapping_includes_redundant_experts(
             layers=[
                 SimpleNamespace(
                     ffn=SimpleNamespace(
+                        use_native_mega_moe=False,
                         use_mega_moe=False,
                         n_redundant_experts=4,
                     )
