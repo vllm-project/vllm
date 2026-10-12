@@ -176,7 +176,12 @@ def maybe_create_ubatch_slices(
     if split_point is None:
         split_point = int(num_tokens_padded) // num_ubatches
 
-    token_split_points = [split_point * i for i in range(1, num_ubatches)]
+    if isinstance(split_point, int):
+        token_split_points = [split_point * i for i in range(1, num_ubatches)]
+    else:
+        # Explicit split points, one per ubatch boundary.
+        assert len(split_point) == num_ubatches - 1
+        token_split_points = [int(p) for p in split_point]
 
     # TODO(lucas): Refactor the gpu_model_runner.py so we can pass
     # in cu_num_tokens directly (i.e. query_start_loc)
@@ -187,7 +192,7 @@ def maybe_create_ubatch_slices(
     start_token = 0
 
     # Add the end point to the split points to make iteration easier
-    all_points = token_split_points + [cu_num_tokens[-1]]
+    all_points = token_split_points + [int(cu_num_tokens[-1])]
 
     for end_token in all_points:
         token_slice = slice(start_token, end_token)
@@ -302,10 +307,8 @@ def _make_metadata_with_slice(
     # the attention backend selects the correct kernel for SWA layers.
     max_seq_len = max(int(seq_lens_cpu_upper_bound.max()), attn_metadata.max_seq_len)
 
-    num_requests = int(request_slice.stop) - int(request_slice.start)
-    # The last ubatch's bounds come from np.cumsum and are numpy ints; keep
-    # the metadata fields plain ints so builders can pass them to Triton.
-    num_actual_tokens = int(token_slice.stop) - int(token_slice.start)
+    num_requests = request_slice.stop - request_slice.start
+    num_actual_tokens = token_slice.stop - token_slice.start
     max_query_len = int(
         torch.max(torch.abs(query_start_loc_cpu[1:] - query_start_loc_cpu[:-1])).item()
     )

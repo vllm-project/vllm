@@ -213,6 +213,7 @@ class UBatchWrapper:
     def _run_ubatches(self, ubatch_metadata, model) -> torch.Tensor:
         @torch.inference_mode()
         def _ubatch_thread(results, model, ubatch_metadata):
+            torch.accelerator.set_device_index(self.device)
             with ubatch_metadata.context:
                 model_output = model(
                     input_ids=ubatch_metadata.input_ids,

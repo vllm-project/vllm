@@ -129,38 +129,22 @@ def test_comm_overlap_active_requires_dbo_and_eager():
         assert not _comm_overlap_active()
 
 
-def test_modular_subclass_async_wrappers_are_synchronous():
+def test_modular_subclass_supports_dbo_without_async():
     inst = MoEPrepareAndFinalizeNaiveDPEPModularROCmDBO()
-    assert not inst.supports_async()
-    with patch.object(naive_dp_ep_rocm, "dbo_enabled", return_value=True):
-        assert inst.supports_async()
+    # supports_async() also drives MK-internal shared-expert overlap, so it
+    # must not change with the DBO state.
+    for dbo_active in (False, True):
+        with patch.object(naive_dp_ep_rocm, "dbo_enabled", return_value=dbo_active):
+            assert not inst.supports_async()
+            assert inst.supports_dbo()
 
-    sentinel = SimpleNamespace()
-    with patch.object(inst, "prepare", return_value=sentinel) as prepare_mock:
-        receiver = inst.prepare_async(
-            a1=torch.empty(0),
-            topk_weights=torch.empty(0),
-            topk_ids=torch.empty(0, dtype=torch.long),
-            num_experts=8,
-            expert_map=None,
-            apply_router_weight_on_input=False,
-            quant_config=None,  # type: ignore[arg-type]
-            defer_input_quant=False,
-        )
-        assert receiver() is sentinel
-        assert prepare_mock.called
 
-    with patch.object(inst, "finalize") as finalize_mock:
-        receiver = inst.finalize_async(
-            output=torch.empty(0),
-            fused_expert_output=torch.empty(0),
-            topk_weights=torch.empty(0),
-            topk_ids=torch.empty(0, dtype=torch.long),
-            apply_router_weight_on_input=False,
-            weight_and_reduce_impl=None,  # type: ignore[arg-type]
-        )
-        assert receiver() is None
-        assert finalize_mock.called
+def test_base_supports_dbo_follows_supports_async():
+    base = naive_dp_ep.MoEPrepareAndFinalizeNaiveDPEPModular()
+    assert not base.supports_async()
+    assert not base.supports_dbo()
+    with patch.object(type(base), "supports_async", return_value=True):
+        assert base.supports_dbo()
 
 
 def test_factory_returns_rocm_subclass_on_rocm():
