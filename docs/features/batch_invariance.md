@@ -162,25 +162,25 @@ When batch invariance is enabled, vLLM:
 
 ## Cross-Mode Numerical Variance
 
-Batch invariance makes the output deterministic inside one execution configuration. It does not make different configurations agree. Eager execution, `torch.compile` without CUDA graphs, and the default path with CUDA graphs use different kernels. Their outputs differ by a small amount for the same input.
+Batch invariance targets repeatable output within a fixed execution configuration. It does not guarantee agreement between different configurations. Changes to compilation or CUDA graph settings can change kernel selection and numerical rounding.
 
-Three configurations matter:
+Useful execution settings to compare include:
 
 - `--enforce-eager`: turns off `torch.compile` and CUDA graphs.
-- `compilation_config=CompilationConfig(cudagraph_mode="NONE")`: keeps `torch.compile`, turns off CUDA graphs.
-- default: `torch.compile` with CUDA graphs.
+- `compilation_config=CompilationConfig(cudagraph_mode="NONE")`: turns off CUDA graphs while keeping the configured compilation mode.
+- The default configuration for the tested model and platform. Record its effective compilation and CUDA graph settings.
 
-Each configuration gives the same output when you run it again. But two configurations do not give the same output as each other. For BF16 models, the top-1 logprob differs by about 0.1 to 0.5 between configurations. Tokens far down the list can differ more.
+Check repeatability within each configuration separately from agreement across configurations. The size of a logprob difference depends on the model, prompt, hardware, and execution settings. [#55238](https://github.com/vllm-project/vllm/issues/55238) records an investigation across several configurations.
 
 ### Greedy sampling at a near tie
 
-Sometimes the two best tokens are almost equal. The gap between them is then very small. A small cross-mode difference can change the selected token. If this happens at the sampled position, greedy decoding returns a different token in each configuration. This is normal variance between valid kernels. It is not a kernel bug. See [#55238](https://github.com/vllm-project/vllm/issues/55238) for a measured example.
+Sometimes the two best tokens have similar logprobs. A small numerical difference can then change the selected token. This can occur with valid kernels, but a small token gap alone does not rule out a kernel bug.
 
 When you debug a report about different outputs across configurations:
 
-- Compare the top-1 logprob and the gap between the top two tokens at each position. Do not use the largest difference over the top-k logprobs. Tokens far down the list make that number large without any effect on the output.
+- Compare logprobs at the same input prefix. Check the top-1 logprob and the gap between the top two tokens at each position. The largest difference over the top-k logprobs alone does not explain a change in the selected token.
 - Set the configuration explicitly on both sides of the comparison. Use `--enforce-eager` or `-cc.cudagraph_mode=NONE`. See [debugging vLLM compile](../design/debug_vllm_compile.md) for the exact flags.
-- `VLLM_BATCH_INVARIANT=1` removes variance from the batch shape. It does not make eager and compiled kernels agree.
+- `VLLM_BATCH_INVARIANT=1` targets variance from the batch shape. It does not guarantee agreement between eager and compiled kernels.
 
 ## Future Improvements
 
