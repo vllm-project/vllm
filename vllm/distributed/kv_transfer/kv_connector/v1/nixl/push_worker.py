@@ -205,8 +205,8 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
 
         # --- P-side: newly finished blocks awaiting a D registration match ---
         if metadata.push_finished_blocks:
-            for req_id, (block_ids, tid) in metadata.push_finished_blocks.items():
-                self._finished_blocks_inbox.put((req_id, block_ids, tid))
+            for req_id, (blocks, transfer_id) in metadata.push_finished_blocks.items():
+                self._finished_blocks_inbox.put((req_id, blocks, transfer_id))
             self._push_writer_wake.set()
 
         # Batch + lease tracking (same as pull).
@@ -255,10 +255,12 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                 # 3. P-side finished blocks; match against pending regs.
                 while True:
                     try:
-                        rid, blocks, tid = self._finished_blocks_inbox.get_nowait()
+                        rid, blocks, transfer_id = (
+                            self._finished_blocks_inbox.get_nowait()
+                        )
                     except queue.Empty:
                         break
-                    self._handle_finished_blocks(rid, blocks, tid)
+                    self._handle_finished_blocks(rid, blocks, transfer_id)
 
                 # 3b. Evict finished blocks for requests that have either
                 # completed (WRITE acknowledged) or whose lease expired

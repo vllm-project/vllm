@@ -65,7 +65,7 @@ def get_transfer_id(kv_transfer_params: dict[str, Any]) -> TransferId | None:
     transfer_id = kv_transfer_params.get("transfer_id")
     if isinstance(transfer_id, str) and transfer_id:
         return transfer_id
-    logger.warning_once(
+    logger.warning(
         "Missing transfer_id in kv_transfer_params from router. "
         "This request will not utilize KVTransfer."
     )
