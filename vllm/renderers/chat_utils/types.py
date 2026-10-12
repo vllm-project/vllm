@@ -3,8 +3,10 @@
 from typing import Literal, Required, TypeAlias, TypedDict
 
 from openai.types.chat import (
+    ChatCompletionContentPartImageParam,
     ChatCompletionContentPartInputAudioParam,
     ChatCompletionContentPartRefusalParam,
+    ChatCompletionContentPartTextParam,
     ChatCompletionFunctionToolParam,
     ChatCompletionMessageToolCallParam,
 )
@@ -17,6 +19,29 @@ from openai.types.chat import (
 from openai_harmony import Message as OpenAIHarmonyMessage
 from PIL import Image
 from pydantic import BaseModel, ConfigDict
+
+__all__ = [
+    "ChatCompletionContentPartAudioEmbedsParam",
+    "ChatCompletionContentPartAudioParam",
+    "ChatCompletionContentPartImageEmbedsParam",
+    "ChatCompletionContentPartParam",
+    "ChatCompletionContentPartPromptEmbedsParam",
+    "ChatCompletionContentPartVideoEmbedsParam",
+    "ChatCompletionContentPartVideoParam",
+    "CustomChatCompletionContentPILImageParam",
+    "CustomChatCompletionContentToolReferenceParam",
+    "CustomThinkCompletionContentParam",
+    "MultiModalEmbedsPayload",
+    "PILImage",
+    "ChatCompletionContentPartTextParam",
+    "ChatCompletionContentPartImageParam",
+    "ChatCompletionContentPartImageEmbedsParam",
+    "ChatCompletionContentPartVideoParam",
+    "ChatCompletionContentPartParam",
+    "ChatCompletionMessageParam",
+    "CustomChatCompletionMessageParam",
+    "ConversationMessage",
+]
 
 
 class AudioURL(TypedDict, total=False):

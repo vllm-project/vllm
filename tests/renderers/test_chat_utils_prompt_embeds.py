@@ -18,15 +18,19 @@ from transformers import AutoTokenizer
 
 from vllm.exceptions import VLLMValidationError
 from vllm.renderers import TokenizeParams
-from vllm.renderers.chat_utils import (
+from vllm.renderers.chat_utils.content_parser import (
     _ENABLE_PROMPT_EMBEDS_ERROR,
-    _PROMPT_EMBEDS_MISSING_DATA_ERROR,
-    _RESERVED_PLACEHOLDER_IN_TEXT_ERROR,
-    MM_PARSER_MAP,
     MODALITY_PLACEHOLDERS_MAP,
     PROMPT_EMBEDS_PLACEHOLDER_TOKEN,
+)
+from vllm.renderers.chat_utils.mm_parser_map import MM_PARSER_MAP
+from vllm.renderers.chat_utils.parse_chat_message import (
     parse_chat_messages,
     parse_chat_messages_async,
+)
+from vllm.renderers.chat_utils.parse_chat_message_content import (
+    _PROMPT_EMBEDS_MISSING_DATA_ERROR,
+    _RESERVED_PLACEHOLDER_IN_TEXT_ERROR,
 )
 from vllm.renderers.hf import (
     _PROMPT_EMBEDS_PLACEHOLDER_SPAN_MISMATCH_ERROR,

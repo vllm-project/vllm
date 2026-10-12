@@ -15,6 +15,8 @@ from vllm.renderers.chat_utils import (
     ChatCompletionContentPartTextParam,
     ConversationMessage,
     MultiModalItemTracker,
+)
+from vllm.renderers.chat_utils.parse_chat_message_content import (
     _parse_chat_message_content_parts,
 )
 

@@ -38,9 +38,7 @@ from vllm.entrypoints.serve.utils.tool_calls_utils import (
 )
 from vllm.outputs import RequestOutput
 from vllm.parser.abstract_parser import Parser
-from vllm.renderers.chat_utils import (
-    ChatTemplateContentFormatOption,
-)
+from vllm.renderers.chat_utils import ChatTemplateContentFormatOption
 from vllm.tokenizers import TokenizerLike
 from vllm.utils import random_uuid
 
