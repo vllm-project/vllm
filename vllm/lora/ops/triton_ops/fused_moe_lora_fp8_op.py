@@ -10,6 +10,7 @@ from vllm.distributed import (
     tensor_model_parallel_all_gather,
     tensor_model_parallel_all_reduce,
 )
+from vllm.lora.ops.triton_ops.fused_moe_lora_op import _token_mapping_factor
 from vllm.lora.ops.triton_ops.utils import supports_pdl
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import direct_register_custom_op
@@ -487,7 +488,7 @@ def _fused_moe_lora_shrink_fp8(
         slice_c_size=a_intermediate_cache1.numel() // num_slices,
         num_slice_a=1,
         num_slice_c=num_slices,
-        token_mapping_factor=1 if mul_routed_weight else top_k_num,
+        token_mapping_factor=_token_mapping_factor(qcurr_hidden_states, topk_weights),
         naive_block_assignment=sorted_token_ids is None,
         MUL_ROUTED_WEIGHT=False,
         ADD_INPUTS=False,

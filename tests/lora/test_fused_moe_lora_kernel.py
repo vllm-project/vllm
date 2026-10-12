@@ -146,6 +146,7 @@ def use_fused_moe_lora_kernel(
     fully_sharded=False,
     offset=0,
     add_inputs=True,
+    mul_routed_weight=False,
 ):
     max_num_tokens_padded = topk_ids.numel() + num_experts * (block_size - 1)
     max_num_tokens_padded = round_up(max_num_tokens_padded, block_size)
@@ -186,7 +187,6 @@ def use_fused_moe_lora_kernel(
         "SPLIT_K": 1,
     }
 
-    mul_routed_weight = False
     expert_ids = expert_ids.view(max_loras, -1)
     sorted_token_ids = sorted_token_ids.view(max_loras, -1)
 
@@ -1319,3 +1319,42 @@ def test_fused_moe_lora_kernel_rejects_bad_block_size_m(device):
             adapter_enabled,
             block_size,
         )
+
+
+@pytest.mark.parametrize("mul_routed_weight", [False, True])
+@pytest.mark.parametrize("device", [f"{current_platform.device_type}:0"])
+def test_fused_moe_lora_kernel_per_route_input(mul_routed_weight, device):
+    """w2 reads one input row per route, also without the routing weight."""
+    torch.set_default_device(device)
+    set_random_seed(0)
+    num_tokens, top_k, num_experts, max_loras, rank, N, K = 64, 4, 16, 2, 16, 256, 128
+    topk_ids, topk_weights, token_lora_mapping, lora_ids = sample_data(
+        num_tokens, 4, max_loras, num_experts, top_k
+    )
+    lora_a = torch.rand((max_loras, num_experts, rank, K), dtype=torch.bfloat16) / K
+    lora_b = torch.rand((max_loras, num_experts, N, rank), dtype=torch.bfloat16) / rank
+    x = torch.rand((num_tokens * top_k, K), dtype=torch.bfloat16)
+    output = torch.zeros((num_tokens, top_k, N), dtype=torch.bfloat16)
+    use_fused_moe_lora_kernel(
+        topk_ids,
+        topk_weights,
+        token_lora_mapping,
+        rank,
+        top_k,
+        lora_ids,
+        [lora_a],
+        [lora_b],
+        x,
+        output,
+        max_loras,
+        num_experts,
+        16,
+        mul_routed_weight=mul_routed_weight,
+    )
+    lora = token_lora_mapping[:, None]
+    a, b = lora_a[lora, topk_ids].float(), lora_b[lora, topk_ids].float()
+    shrunk = torch.einsum("tkh,tkrh->tkr", x.view(num_tokens, top_k, K).float(), a)
+    expected = torch.einsum("tkr,tknr->tkn", shrunk, b)
+    if mul_routed_weight:
+        expected *= topk_weights[..., None]
+    torch.testing.assert_close(output.float(), expected, atol=2e-2, rtol=2e-2)
