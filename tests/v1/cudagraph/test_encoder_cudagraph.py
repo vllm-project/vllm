@@ -32,6 +32,15 @@ from vllm.v1.worker.encoder_cudagraph_defs import (
     EncoderItemSpec,
 )
 
+HAS_DEVICE_GRAPH = current_platform.is_cuda_alike() or current_platform.is_xpu()
+
+if current_platform.is_xpu():
+    from vllm.v1.worker.xpu_model_runner import _torch_cuda_wrapper
+
+    # Route torch.cuda graph/stream APIs to torch.xpu, as XPUModelRunner does.
+    with _torch_cuda_wrapper():
+        pass
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -662,12 +671,10 @@ def _make_video_mm_kwargs(
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.skipif(
-    not current_platform.is_cuda_alike(), reason="Skip if not cuda or rocm"
-)
+@pytest.mark.skipif(not HAS_DEVICE_GRAPH, reason="Requires CUDA, ROCm or XPU graph")
 class TestEncoderCudaGraphCaptureReplay:
     def setup_method(self):
-        self.device = torch.device("cuda:0")
+        self.device = torch.device(current_platform.device_type, 0)
         self.dtype = torch.float16
         self.model = SimpleMockViTModel().to(self.device).half()
         self.mgr = _make_manager_for_gpu(
@@ -758,9 +765,7 @@ class TestEncoderCudaGraphCaptureReplay:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.skipif(
-    not current_platform.is_cuda_alike(), reason="Skip if not cuda or rocm"
-)
+@pytest.mark.skipif(not HAS_DEVICE_GRAPH, reason="Requires CUDA, ROCm or XPU graph")
 @pytest.mark.usefixtures("dist_init", "workspace_init")
 @pytest.mark.parametrize("profile_only", [False, True])
 @torch.inference_mode()
@@ -776,7 +781,7 @@ def test_eonly_capture_preserves_outputs_across_replay_and_fallback(profile_only
     from vllm.v1.worker.mm_encoder_model_runner import MMEncoderModelRunner
     from vllm.v1.worker.workspace import lock_workspace
 
-    device = torch.device("cuda:0")
+    device = torch.device(current_platform.device_type, 0)
     dtype = torch.float16
     model = SimpleMockViTModel().to(device).half()
     manager = _make_manager_for_gpu(model, _BUDGETS, _MAX_BATCH, device, dtype)
@@ -1047,12 +1052,10 @@ _VIDEO_MAX_BATCH = 4
 _VIDEO_MAX_FRAMES = 8  # 2 frames per item at max_batch_size=4
 
 
-@pytest.mark.skipif(
-    not current_platform.is_cuda_alike(), reason="Skip if not cuda or rocm"
-)
+@pytest.mark.skipif(not HAS_DEVICE_GRAPH, reason="Requires CUDA, ROCm or XPU graph")
 class TestEncoderCudaGraphVideoReplay:
     def setup_method(self):
-        self.device = torch.device("cuda:0")
+        self.device = torch.device(current_platform.device_type, 0)
         self.dtype = torch.float16
         self.model = SimpleMockViTVideoModel().to(self.device).half()
         self.mgr = _make_manager_for_gpu(
