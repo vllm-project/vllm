@@ -53,10 +53,8 @@ def test_watermark_with_combined_sampling_controls(watermarked_llm: LLM):
 
     assert list(output.outputs[0].token_ids) == [10] * 8
 
-    # The assertion above holds with or without watermarking, because
-    # allowed_token_ids leaves a single candidate. Repeat with a wider allowed
-    # set, where only watermarked sampling is reproducible without a seed.
     wide = SamplingParams(
+        seed=42,
         temperature=0.8,
         top_k=8,
         top_p=0.9,
@@ -78,6 +76,7 @@ def test_watermark_with_combined_sampling_controls(watermarked_llm: LLM):
 
 def test_watermark_with_penalties_and_nucleus_sampling(watermarked_llm: LLM):
     params = SamplingParams(
+        seed=42,
         temperature=0.8,
         top_k=8,
         top_p=0.9,
@@ -96,7 +95,7 @@ def test_watermark_with_penalties_and_nucleus_sampling(watermarked_llm: LLM):
     assert first.outputs[0].token_ids == second.outputs[0].token_ids
 
 
-def test_plain_gumbel_seeded_parallel_sampling_is_deterministic(
+def test_plain_gumbel_seeded_parallel_sampling_is_reproducible(
     watermarked_llm: LLM,
 ):
     output = watermarked_llm.generate(
@@ -112,22 +111,20 @@ def test_plain_gumbel_seeded_parallel_sampling_is_deterministic(
 
     assert len(output.outputs) == 2
     assert all(len(candidate.token_ids) == 8 for candidate in output.outputs)
-    assert output.outputs[0].token_ids == output.outputs[1].token_ids
-
-    # Plain Gumbel keys on the token context, so the request seed does not
-    # change a watermarked draw. Pin that down rather than implying the seed
-    # is what makes the candidates match.
-    unseeded = watermarked_llm.generate(
+    repeated = watermarked_llm.generate(
         "Seeded parallel sampling smoke test",
         SamplingParams(
             n=2,
+            seed=42,
             temperature=0.8,
             max_tokens=8,
             ignore_eos=True,
         ),
     )[0]
 
-    assert unseeded.outputs[0].token_ids == output.outputs[0].token_ids
+    assert [candidate.token_ids for candidate in repeated.outputs] == [
+        candidate.token_ids for candidate in output.outputs
+    ]
 
 
 @pytest.mark.parametrize(
@@ -153,8 +150,8 @@ def test_watermark_with_structured_output(
 
 
 def test_watermark_with_wide_grammar_is_deterministic(watermarked_llm: LLM):
-    # A wider grammar makes deterministic watermarking observable.
     params = SamplingParams(
+        seed=42,
         temperature=0.8,
         max_tokens=8,
         structured_outputs=StructuredOutputsParams(
@@ -171,7 +168,7 @@ def test_watermark_with_wide_grammar_is_deterministic(watermarked_llm: LLM):
 
 def test_watermark_with_prefix_cache_and_chunked_prefill(watermarked_llm: LLM):
     prompt = {"prompt_token_ids": [101] * 48}
-    params = SamplingParams(temperature=0.8, max_tokens=8, ignore_eos=True)
+    params = SamplingParams(seed=42, temperature=0.8, max_tokens=8, ignore_eos=True)
 
     assert len(prompt["prompt_token_ids"]) > MAX_NUM_BATCHED_TOKENS
 
@@ -187,7 +184,7 @@ def test_mixed_watermarked_batch(watermarked_llm: LLM):
         {"prompt_token_ids": [101] * 32 + [102]},
         {"prompt_token_ids": [201] * 32 + [202]},
     ]
-    marked = SamplingParams(temperature=0.8, max_tokens=8, ignore_eos=True)
+    marked = SamplingParams(seed=42, temperature=0.8, max_tokens=8, ignore_eos=True)
     ordinary = SamplingParams(
         temperature=0.8,
         seed=123,

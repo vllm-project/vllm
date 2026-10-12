@@ -78,7 +78,11 @@ class DraftWatermarker:
         if steps.ndim == 0:
             steps = steps.expand(num_rows)
         state = self.state
-        enabled = state.enabled[:num_rows] & (request_temperatures != 0)
+        enabled = (
+            state.enabled[:num_rows]
+            & (request_temperatures != 0)
+            & (contexts >= 0).all(dim=-1)
+        )
         if state.deduplicate_contexts == "none":
             return steps, enabled
         assert state.all_token_ids is not None

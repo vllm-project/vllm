@@ -50,6 +50,10 @@ and defaults to 4. Larger values make the watermark less robust to
 edits because an insertion, deletion, or substitution changes more subsequent
 contexts. Values above 16 are allowed but emit a warning.
 
+Watermark contexts use generated tokens only. The first `context_width` tokens
+use ordinary sampling, and detection skips these positions, independently of
+context deduplication. Prompt tokens are not needed for detection.
+
 `allow_target_only_watermarking` defaults to false and only has an effect when
 speculative decoding is enabled. It permits speculative decoding with a
 watermarking algorithm that does not support it natively, at the cost of
@@ -276,6 +280,11 @@ Gumbel-max detection scores repeated contexts once by default so identical PRF
 random vectors are not treated as independent evidence. Keep
 `deduplicate_contexts=True` unless the detector's calibration has been adjusted
 for correlated scores.
+
+Detection skips the first `context_width` tokens by default. To reproduce
+legacy scores for responses generated with watermarked opening contexts, pass
+`skip_partial_contexts=False` to the detector. Skipping these positions can
+change detection decisions for short responses near the threshold.
 
 The reported p-value is calibrated under the assumption that scored PRF inputs
 are independent. A deployment uses one fixed key, so repeated structures across

@@ -229,9 +229,9 @@ class RejectionSampler:
         contexts = self.sampler._get_contexts(
             expanded_idx_mapping, expanded_local_pos, draft_sampled
         )
-        watermarking_skip_mask = None
+        watermarking_skip_mask = (contexts < 0).any(dim=-1)
         if self.sampler.deduplicate_contexts != "none":
-            watermarking_skip_mask = self.sampler._get_repeated_contexts(
+            watermarking_skip_mask |= self.sampler._get_repeated_contexts(
                 expanded_idx_mapping, contexts, expanded_local_pos
             )
         return {

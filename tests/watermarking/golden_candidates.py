@@ -246,6 +246,7 @@ class WatermarkingCandidate:
                 "context_width": detector.context_width,
                 "p_value_threshold": detector.p_value_threshold,
                 "deduplicate_contexts": detector.deduplicate_contexts,
+                "skip_partial_contexts": detector.skip_partial_contexts,
                 "alpha": getattr(detector, "alpha", None),
                 "prf_key": str(detector.prf.key),
                 "key_b_prf_key": None if key_b_prf is None else str(key_b_prf.key),
@@ -354,6 +355,8 @@ class WatermarkingCandidate:
         self, generated: list[int], context: torch.Tensor
     ) -> torch.Tensor | None:
         scope = self.scheme_config.generation_deduplicate_contexts
+        if len(generated) < self.scheme_config.context_width:
+            return torch.tensor([True])
         if scope == "none":
             return None
 
@@ -409,7 +412,7 @@ MIDDLE_FIXTURE = DeterministicGenerationFixture(
     dominant_bias=16,
 )
 
-# Few enough scored tokens that the p_value lands just under its threshold.
+# These short sequences expose the detection cost of skipping opening contexts.
 NEAR_THRESHOLD_FIXTURE = DeterministicGenerationFixture(
     vocabulary_size=16,
     num_tokens=8,
@@ -728,7 +731,10 @@ def validate_golden_guards(entries: Mapping[str, dict]) -> None:
         disabled_entry = entries[disabled_id]
         if enabled_entry["trace"]["dedup_skips"] < 1:
             raise GoldenGuardError(f"{enabled_id}: expected at least one dedup skip")
-        if disabled_entry["trace"]["dedup_skips"] != 0:
+        if (
+            disabled_entry["trace"]["dedup_skips"]
+            != disabled_entry["trace"]["partial_context_skips"]
+        ):
             raise GoldenGuardError(f"{disabled_id}: expected zero dedup skips")
         if enabled_entry["generation"] == disabled_entry["generation"]:
             raise GoldenGuardError(
