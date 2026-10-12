@@ -164,8 +164,6 @@ qwen2_fp8 = ModelFusionInfo(
         manual_act_quant_fusion=n_layers,
         attn_quant_fusion=n_layers,
         ar_rms_fusion=n_layers * 2 + 1,
-        sequence_parallel=n_layers * 2 + 1,
-        async_tp=n_layers * 4,
     ),
 )
 
