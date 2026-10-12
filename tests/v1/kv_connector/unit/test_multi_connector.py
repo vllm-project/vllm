@@ -11,7 +11,7 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 
-from tests.v1.kv_connector.unit.utils import create_vllm_config
+from tests.v1.kv_connector.unit.utils import create_vllm_config, maybe_update_block_size
 from vllm import LLM, SamplingParams
 from vllm.config import KVTransferConfig
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
@@ -370,10 +370,13 @@ def test_multi_example_connector_consistency():
         },
     )
 
+    block_size = maybe_update_block_size(16)
+    expected_num_blocks = 2 if block_size == 64 else 7
+    expected_num_matched_tokens = (expected_num_blocks - 1) * block_size
     llm = LLM(
         model=MODEL_NAME,
         enforce_eager=True,
-        block_size=16,
+        block_size=block_size,
         gpu_memory_utilization=0.5,
         kv_transfer_config=kv_transfer_config,
         async_scheduling=False,
@@ -430,7 +433,7 @@ def test_multi_example_connector_consistency():
         "set_xfer_handshake_metadata_pp_aware",
         "on_new_request",
         "get_num_new_matched_tokens 0",
-        "update_state_after_alloc num_blocks=[7] 0",
+        f"update_state_after_alloc num_blocks=[{expected_num_blocks}] 0",
         "build_connector_meta",
     ]
     # Prefix-hash mode is propagated before the connector is initialized. Layer
@@ -459,7 +462,7 @@ def test_multi_example_connector_consistency():
         "set_xfer_handshake_metadata_pp_aware",
         "on_new_request",
         "get_num_new_matched_tokens 0",
-        "update_state_after_alloc num_blocks=[7] 0",
+        f"update_state_after_alloc num_blocks=[{expected_num_blocks}] 0",
         "build_connector_meta",
     ]
     # Reset prefix cache or else we'll just get the tokens back from there.
@@ -483,13 +486,14 @@ def test_multi_example_connector_consistency():
     assert storage1_scheduler_events[:4] == [
         "on_new_request",
         "get_num_new_matched_tokens 0",
-        "update_state_after_alloc num_blocks=[7] 96",
+        "update_state_after_alloc "
+        f"num_blocks=[{expected_num_blocks}] {expected_num_matched_tokens}",
         "build_connector_meta",
     ]
     assert storage2_scheduler_events[:4] == [
         "on_new_request",
         "get_num_new_matched_tokens 0",
-        "update_state_after_alloc num_blocks=[7] 0",
+        f"update_state_after_alloc num_blocks=[{expected_num_blocks}] 0",
         "build_connector_meta",
     ]
 
@@ -517,13 +521,14 @@ def test_multi_example_connector_consistency():
     assert storage1_scheduler_events[:4] == [
         "on_new_request",
         "get_num_new_matched_tokens 0",
-        "update_state_after_alloc num_blocks=[7] 0",
+        f"update_state_after_alloc num_blocks=[{expected_num_blocks}] 0",
         "build_connector_meta",
     ]
     assert storage2_scheduler_events[:4] == [
         "on_new_request",
         "get_num_new_matched_tokens 0",
-        "update_state_after_alloc num_blocks=[7] 96",
+        "update_state_after_alloc "
+        f"num_blocks=[{expected_num_blocks}] {expected_num_matched_tokens}",
         "build_connector_meta",
     ]
 
