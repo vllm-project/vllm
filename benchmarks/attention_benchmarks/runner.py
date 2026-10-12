@@ -399,7 +399,7 @@ def _create_kv_cache(
 
 def _run_single_benchmark(
     config: BenchmarkConfig,
-    impl,
+    impls: list,
     layer,
     q_list: list,
     k_list: list,
@@ -422,7 +422,7 @@ def _run_single_benchmark(
 
     def benchmark_fn():
         for i in range(config.num_layers):
-            impl.forward(
+            impls[i].forward(
                 layer,
                 q_list[i],
                 k_list[i],
@@ -507,6 +507,12 @@ def run_attention_benchmark(config: BenchmarkConfig) -> BenchmarkResult:
             backend_class, impl, layer = _create_backend_impl(
                 backend_cfg, config, device, dtype
             )
+            # One impl per layer, as in a model: an impl may bind state to its
+            # layer's cache (TRITON_ATTN's per-token-head scale views).
+            impls = [impl] + [
+                _create_backend_impl(backend_cfg, config, device, dtype)[1]
+                for _ in range(config.num_layers - 1)
+            ]
             # Set KV cache layout if the backend requires a specific one
             # (e.g., FlashInfer requires LBHNC on SM100/Blackwell for TRTLLM attention)
             supported = get_supported_kv_cache_layouts([backend_class])
@@ -552,7 +558,7 @@ def run_attention_benchmark(config: BenchmarkConfig) -> BenchmarkResult:
 
             timing_stats, mem_stats = _run_single_benchmark(
                 config,
-                impl,
+                impls,
                 layer,
                 q_list,
                 k_list,
