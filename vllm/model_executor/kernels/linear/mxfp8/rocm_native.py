@@ -12,6 +12,7 @@ instead, since ``can_implement`` does not filter on K.
 import torch
 from torch.nn.parameter import Parameter
 
+import vllm.envs as envs
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     MXFP8_BLOCK_SIZE,
     MXFP8_SCALE_DTYPE,
@@ -246,7 +247,10 @@ class RocmDotScaledMxfp8LinearKernel(Mxfp8LinearKernel):
         N, K = weight.shape
         scale_k = K // MXFP8_BLOCK_SIZE
         weight_scale = layer.weight_scale.data[:N, :scale_k].contiguous()
-        block_scale = _as_block32_scale(weight_scale)
+        # rocm_mxfp8_block32_gemm's split-K varies with M.
+        block_scale = (
+            None if envs.VLLM_BATCH_INVARIANT else _as_block32_scale(weight_scale)
+        )
         if block_scale is not None:
             # Checkpoints with 32x32 scale blocks (DeepSeek V4/V4.1) get them
             # back from the loader expanded per row; keep the blocks and use

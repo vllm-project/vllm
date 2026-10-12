@@ -150,16 +150,16 @@ def scaled_mm_kernel(
     scale_b = scale_b.broadcast_to((BLOCK_SIZE_N, 1))
     accumulator = scale_b.T * accumulator.to(tl.float32)
 
-    # Convert to output format.
-    c = accumulator.to(c_ptr.type.element_ty)
-
-    # Add bias, it's already in output format, so add it after conversion.
+    # Add bias in accumulator dtype for less rounding error.
     if bias_ptr:
         offsets_bias = offsets_bn
         bias_ptrs = bias_ptr + offsets_bias
         bias_mask = offsets_bias < N
         bias = tl.load(bias_ptrs, bias_mask)
-        c += bias
+        accumulator += bias
+
+    # Convert to output format.
+    c = accumulator.to(c_ptr.type.element_ty)
 
     # Save output
     offs_cm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M).to(tl.int64)
@@ -224,6 +224,8 @@ def triton_scaled_mm(
             tile_shape = (64, 128, 128)
         else:
             tile_shape = (128, 128, 128)
+    else:
+        tile_shape = (block_size_m, block_size_n, block_size_k)
 
     block_size_m, block_size_n, block_size_k = tile_shape
 

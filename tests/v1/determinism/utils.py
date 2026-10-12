@@ -34,12 +34,16 @@ DEVICE_BACKENDS: dict[str, DeviceConfig] = {
         available=current_platform.is_xpu() and HAS_TRITON,
         backends=["TRITON_ATTN"],
     ),
+    "rocm": DeviceConfig(
+        available=current_platform.is_rocm() and HAS_TRITON,
+        backends=["TRITON_ATTN"],
+    ),
 }
 
 DEFAULT_MODEL = "Qwen/Qwen3-1.7B"
 TEST_MODEL = os.getenv("VLLM_TEST_MODEL", DEFAULT_MODEL)
 
-# Override backends for MLA models (MLA only supported on CUDA).
+# Override backends for MLA models.
 if os.getenv("VLLM_TEST_MODEL"):
     config = get_config(TEST_MODEL, trust_remote_code=False)
     if ModelArchConfigConvertorBase(config, config.get_text_config()).is_deepseek_mla():
@@ -52,6 +56,10 @@ if os.getenv("VLLM_TEST_MODEL"):
             available=DEVICE_BACKENDS["xpu"].available,
             backends=[],
         )
+        DEVICE_BACKENDS["rocm"] = DeviceConfig(
+            available=DEVICE_BACKENDS["rocm"].available,
+            backends=["TRITON_MLA"],
+        )
 
 # Only include backends for devices that are actually available.
 BACKENDS: list[str] = sorted(
@@ -60,12 +68,22 @@ BACKENDS: list[str] = sorted(
 
 skip_unsupported = pytest.mark.skipif(
     not any(cfg.available for cfg in DEVICE_BACKENDS.values()),
-    reason="Requires CUDA >= Ampere (SM80) or Intel XPU with Triton",
+    reason="Requires CUDA >= Ampere (SM80), ROCm, or Intel XPU with Triton",
 )
 
 skip_if_not_cuda = pytest.mark.skipif(
     not DEVICE_BACKENDS["cuda"].available,
     reason="Requires CUDA >= Ampere (SM80)",
+)
+
+skip_if_not_cuda_alike = pytest.mark.skipif(
+    not (DEVICE_BACKENDS["cuda"].available or DEVICE_BACKENDS["rocm"].available),
+    reason="Requires CUDA >= Ampere (SM80) or ROCm",
+)
+
+requires_mx = pytest.mark.skipif(
+    not (current_platform.is_rocm() and current_platform.supports_mx()),
+    reason="requires a ROCm device with native MX support (gfx95x)",
 )
 
 

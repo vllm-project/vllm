@@ -1068,6 +1068,15 @@ class RocmPlatform(Platform):
         if use_aiter_fp8_linear and "-quant_fp8" not in compilation_config.custom_ops:
             compilation_config.custom_ops.append("+quant_fp8")
 
+        # Only RMSNorm's custom op reaches rms_norm_batch_invariant. Inductor
+        # lowers the native one to a reduction whose block size it picks by
+        # benchmarking, so the summation order varies with the batch and run.
+        if (
+            envs.VLLM_BATCH_INVARIANT
+            and "-rms_norm" not in compilation_config.custom_ops
+        ):
+            compilation_config.custom_ops.append("+rms_norm")
+
         if use_aiter_fused_se and "-grouped_topk" in compilation_config.custom_ops:
             logger.warning_once(
                 "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS is enabled, which "

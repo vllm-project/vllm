@@ -19,8 +19,10 @@ from tests.kernels.moe.utils import make_dummy_moe_config, make_test_quant_confi
 from tests.kernels.quantization.nvfp4_utils import get_nvfp4_global_scale
 from tests.utils import TestFP8Layer, requires_fp8
 from vllm import _custom_ops as ops
-from vllm.model_executor.kernels.linear.scaled_mm.cutlass import (
+from vllm.model_executor.kernels.linear import fp8_scaled_mm_is_batch_invariant
+from vllm.model_executor.kernels.linear.scaled_mm import (
     CutlassFP8ScaledMMLinearKernel,
+    TritonFP8ScaledMMLinearKernel,
 )
 from vllm.model_executor.layers.fused_moe import fused_topk
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
@@ -31,8 +33,11 @@ from vllm.model_executor.layers.fused_moe.experts.cutlass_moe import (
     CutlassExpertsFp4,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kFp8DynamicTensorSym,
     kFp8DynamicTokenSym,
+    kFp8StaticChannelSym,
     kFp8StaticTensorSym,
+    kFp8StaticTokenSym,
 )
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
@@ -87,16 +92,42 @@ _NVFP4_MOE_BATCH_INVARIANT_CASES = (
 
 @pytest.fixture(autouse=True)
 def setup_cuda():
-    if not current_platform.is_cuda():
-        pytest.skip("CUTLASS FP8 kernels require CUDA.")
+    if not current_platform.is_cuda_alike():
+        pytest.skip("Requires CUDA or ROCm.")
     torch.set_default_device("cuda")
 
 
 @requires_fp8
+@pytest.mark.parametrize(
+    "kernel",
+    [
+        pytest.param(
+            CutlassFP8ScaledMMLinearKernel,
+            marks=pytest.mark.skipif(
+                not current_platform.is_cuda(), reason="CUTLASS requires CUDA."
+            ),
+        ),
+        TritonFP8ScaledMMLinearKernel,
+    ],
+)
+@pytest.mark.parametrize(
+    "act_key,weight_key",
+    [
+        (kFp8DynamicTokenSym, kFp8StaticTensorSym),
+        (kFp8DynamicTokenSym, kFp8StaticChannelSym),
+        (kFp8DynamicTokenSym, kFp8StaticTokenSym),
+        (kFp8StaticTensorSym, kFp8StaticTensorSym),
+        # An amax over the whole batch: the GEMM is invariant, the layer is not.
+        (kFp8DynamicTensorSym, kFp8StaticTensorSym),
+    ],
+)
 @pytest.mark.parametrize("weight_shape", [(1024, 2048), (4608, 4096)])
 @pytest.mark.parametrize("batch_size", [1, 16, 17, 32, 64, 65, 256, 257])
 @torch.inference_mode()
-def test_cutlass_fp8_batch_invariant_fixed_config(
+def test_fp8_scaled_mm_batch_invariant_fixed_config(
+    kernel: type,
+    act_key,
+    weight_key,
     weight_shape: tuple[int, int],
     batch_size: int,
     default_vllm_config,
@@ -108,14 +139,16 @@ def test_cutlass_fp8_batch_invariant_fixed_config(
     torch.manual_seed(0)
     layer = TestFP8Layer(
         weight_shape=weight_shape,
-        activation_quant_key=kFp8DynamicTokenSym,
-        weight_quant_key=kFp8StaticTensorSym,
+        activation_quant_key=act_key,
+        weight_quant_key=weight_key,
         input_dtype=torch.bfloat16,
         out_dtype=torch.bfloat16,
         device=torch.device("cuda"),
-        force_kernel=CutlassFP8ScaledMMLinearKernel,
+        force_kernel=kernel,
     )
-    assert isinstance(layer.kernel, CutlassFP8ScaledMMLinearKernel)
+    assert isinstance(layer.kernel, kernel)
+    dynamic_per_tensor = act_key == kFp8DynamicTensorSym
+    assert fp8_scaled_mm_is_batch_invariant(layer.kernel) != dynamic_per_tensor
 
     in_features = weight_shape[1]
     needle = torch.randn((1, in_features), device="cuda", dtype=torch.bfloat16)
@@ -124,6 +157,12 @@ def test_cutlass_fp8_batch_invariant_fixed_config(
     filler = torch.randn(
         (max(batch_size - 1, 0), in_features), device="cuda", dtype=torch.bfloat16
     )
+    if dynamic_per_tensor:
+        if batch_size == 1:
+            pytest.skip("no other rows to move the scale")
+        front_output = layer(torch.cat([needle, 100 * filler], dim=0))[0]
+        assert not torch.equal(front_output, baseline)
+        return
 
     front_batch = torch.cat([needle, filler], dim=0)
     back_batch = torch.cat([filler, needle], dim=0)
@@ -133,6 +172,69 @@ def test_cutlass_fp8_batch_invariant_fixed_config(
 
     torch.testing.assert_close(front_output, baseline, rtol=0, atol=0)
     torch.testing.assert_close(back_output, baseline, rtol=0, atol=0)
+
+
+@requires_fp8
+@pytest.mark.parametrize("scheme", ["fp8_per_tensor", "fp8_per_channel"])
+@torch.inference_mode()
+def test_online_fp8_linear_batch_invariant(
+    scheme, monkeypatch, default_vllm_config, dist_init
+):
+    from vllm.config.model import ModelConfig
+    from vllm.config.quantization import resolve_quantization_config
+    from vllm.model_executor.layers.linear import ReplicatedLinear
+    from vllm.model_executor.layers.quantization.online.base import (
+        OnlineQuantizationConfig,
+    )
+    from vllm.utils.torch_utils import set_default_torch_dtype
+
+    monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", True)
+    default_vllm_config.model_config = ModelConfig(dtype="bfloat16")
+    quant_config = OnlineQuantizationConfig(resolve_quantization_config(scheme, None))
+    set_random_seed(0)
+    with set_default_torch_dtype(torch.bfloat16), torch.device("cuda"):
+        layer = ReplicatedLinear(
+            1024, 768, bias=False, quant_config=quant_config, prefix="mlp.down_proj"
+        )
+        layer.weight.weight_loader(layer.weight, torch.randn(768, 1024))
+
+        needle = torch.randn(1, 1024)
+        filler = 100 * torch.randn(63, 1024)
+        baseline = layer(needle)[0]
+        assert torch.equal(layer(torch.cat([needle, filler]))[0][:1], baseline)
+        assert torch.equal(layer(torch.cat([filler, needle]))[0][-1:], baseline)
+
+
+@requires_fp8
+@torch.inference_mode()
+def test_block_fp8_batch_invariant_across_tuned_block_size_k(monkeypatch):
+    """The block-FP8 kernel applies the block scales once per K tile, so a tuned
+    BLOCK_SIZE_K below the scale group size reorders the sum."""
+    from vllm.model_executor.layers.quantization.utils import fp8_utils
+
+    base = dict(
+        BLOCK_SIZE_M=64, BLOCK_SIZE_N=128, GROUP_SIZE_M=1, num_warps=4, num_stages=2
+    )
+    table = {256: {**base, "BLOCK_SIZE_K": 128}, 512: {**base, "BLOCK_SIZE_K": 64}}
+    monkeypatch.setattr(fp8_utils, "get_w8a8_block_fp8_configs", lambda *_: table)
+    monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", True)
+    N, K, block = 12288, 2048, [128, 128]
+
+    set_random_seed(0)
+    fp8 = current_platform.fp8_dtype()
+    A = torch.randn(512, K).to(fp8)
+    B = torch.randn(N, K).to(fp8)
+    As = torch.rand(512, K // 128) / 100
+    Bs = torch.rand(N // 128, K // 128) / 100
+
+    def run(m):
+        return fp8_utils.w8a8_triton_block_scaled_mm(
+            A[:m], B, As[:m], Bs, block, torch.bfloat16
+        )[:256]
+
+    assert torch.equal(run(256), run(512))
+    monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", False)
+    assert not torch.equal(run(256), run(512))
 
 
 @_NVFP4_REQUIRES_SM100
