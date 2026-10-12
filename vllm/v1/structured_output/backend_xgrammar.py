@@ -502,3 +502,15 @@ def validate_xgrammar_grammar(sampling_params: SamplingParams) -> None:
                 xgr.Grammar.from_structural_tag(so_params.structural_tag)
         except Exception as e:
             raise VLLMValidationError("Invalid structural tag specification.") from e
+
+    # regex (even ""), json={}, json_object and structural_tag reach here.
+    if (
+        so_params.regex is None
+        and so_params.json is None
+        and not so_params.json_object
+        and not so_params.structural_tag
+    ):
+        raise VLLMValidationError(
+            "XGrammar structured outputs backend "
+            "does not support this structured outputs specification"
+        )
