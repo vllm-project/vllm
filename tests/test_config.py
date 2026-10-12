@@ -375,6 +375,38 @@ def test_nvfp4_ds_mla_rejects_decode_context_parallelism(dcp_size):
         VllmConfig(**kwargs)
 
 
+def test_align_mode_warns_when_discarding_a_user_mamba_block_size(caplog):
+    """Align mode derives the mamba block size, so say so instead of
+    silently discarding --mamba-block-size."""
+    cache_config = CacheConfig(mamba_block_size=64, enable_prefix_caching=True)
+    assert cache_config.user_specified_mamba_block_size
+    # The size hybrid alignment lands on, e.g. Qwen3.8-27B's 784.
+    cache_config.block_size = 784
+
+    with caplog.at_level(logging.WARNING):
+        cache_config.apply_align_mode_mamba_block_size()
+
+    assert cache_config.mamba_block_size == 784
+    assert "Ignoring --mamba-block-size=64" in caplog.text
+
+
+def test_align_mode_is_quiet_when_the_mamba_block_size_was_derived(caplog):
+    """A value vLLM defaulted in itself is not a user override; warning on it
+    would fire on configurations the user never touched."""
+    cache_config = CacheConfig(enable_prefix_caching=True)
+    assert not cache_config.user_specified_mamba_block_size
+    # What MambaModelConfig fills in when the user passes nothing, before
+    # alignment raises block_size any further.
+    cache_config.mamba_block_size = cache_config.block_size
+    cache_config.block_size = 784
+
+    with caplog.at_level(logging.WARNING):
+        cache_config.apply_align_mode_mamba_block_size()
+
+    assert cache_config.mamba_block_size == 784
+    assert "Ignoring --mamba-block-size" not in caplog.text
+
+
 def test_per_request_spec_decode_metrics_requires_spec_decode():
     # The flag only makes sense with speculative decoding configured; enabling
     # it without --speculative-config should fail fast rather than silently
