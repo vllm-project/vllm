@@ -71,6 +71,9 @@ from vllm.utils.torch_utils import current_stream
 from vllm.v1.attention.backends.mla import index_group as index_group_module
 
 if current_platform.is_cuda():
+    from vllm.v1.attention.backends.mla import (
+        flashattn_mla_sparse as flashattn_sparse_module,
+    )
     from vllm.v1.attention.backends.mla.flashattn_mla_sparse import (
         FlashAttnMLASparseFA4Backend,
         FlashAttnMLASparseFA4Impl,
@@ -4009,8 +4012,6 @@ def _record_fa4_kernels(monkeypatch, num_heads, *, device):
     """Replace both lanes with recorders whose outputs identify the lane."""
     import flashinfer.decode
 
-    import vllm.v1.attention.backends.mla.flashattn_mla_sparse as fa4_sparse
-
     fa4_calls: list[dict] = []
     trtllm_calls: list[dict] = []
 
@@ -4033,7 +4034,7 @@ def _record_fa4_kernels(monkeypatch, num_heads, *, device):
         )
         return (out, lse(rows)) if kwargs.get("return_lse") else out
 
-    monkeypatch.setattr(fa4_sparse, "flash_attn_varlen_func", fake_fa4)
+    monkeypatch.setattr(flashattn_sparse_module, "flash_attn_varlen_func", fake_fa4)
     monkeypatch.setattr(
         flashinfer.decode, "trtllm_batch_decode_with_kv_cache_mla", fake_trtllm
     )
@@ -4151,11 +4152,11 @@ def test_fa4_sparse_hook_routes_lanes(monkeypatch, is_decode):
 )
 def test_fa4_sparse_gate(monkeypatch, config, expected):
     """``validate_configuration`` on a fixed SM100: one row per gate reason."""
-    import vllm.v1.attention.backends.mla.flashattn_mla_sparse as fa4_sparse
-
     has_flashinfer = config.get("flashinfer", True)
     monkeypatch.setattr("vllm.utils.flashinfer.has_flashinfer", lambda: has_flashinfer)
-    monkeypatch.setattr(fa4_sparse, "_fa4_cute_mla_available", lambda: None)
+    monkeypatch.setattr(
+        flashattn_sparse_module, "_fa4_cute_mla_available", lambda: None
+    )
     dcp = config.get("dcp", 1)
     vllm_config = _build_sparse_dcp_vllm_config(config.get("heads", 16), dcp)
     hf_text_config = vllm_config.model_config.hf_text_config
