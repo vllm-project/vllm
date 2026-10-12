@@ -426,7 +426,7 @@ def test_async_output_fails_a_step_the_model_reports_unhealthy(monkeypatch, word
         step_health=torch.tensor(words, dtype=torch.int32),
     )
     if any(words):
-        with pytest.raises(RuntimeError, match="failed step"):
+        with pytest.raises(RuntimeError, match="MonoKernel step failed"):
             output.get_output()
     else:
         assert output.get_output().sampled_token_ids == [[7]]

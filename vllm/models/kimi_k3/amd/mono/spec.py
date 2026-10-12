@@ -17,8 +17,10 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 
-from vllm.models.kimi_k3.amd.mono.runtime import (
+from vllm.models.common.mono.abi import fault_inject
+from vllm.models.common.mono.spec import (
     CacheReq,
+    Feature,
     MonoContext,
     MonoSpec,
     MonoStep,
@@ -173,13 +175,11 @@ def refuse_model(model) -> list[str]:
 def pack(model, ctx: MonoContext) -> Any:
     """Views need no weight copy: the per-rank launch state (scratch, epoch,
     health words, peer memory). Collective."""
-    from vllm import envs
     from vllm.models.kimi_k3.amd.mono.runner import MonoRunner
 
     runner = MonoRunner(ctx.device)
-    if envs.VLLM_MONO_FAULT_INJECT:
-        # tests only: "rank:epoch:us"
-        rank, epoch, us = (int(x) for x in envs.VLLM_MONO_FAULT_INJECT.split(":"))
+    if (fault := fault_inject()) is not None:
+        rank, epoch, us = fault
         runner.fault = {
             "fault_rank": rank,
             "fault_epoch": epoch,
@@ -241,7 +241,7 @@ MONO_SPEC = MonoSpec(
     name="kimi_k3_mi355x",
     layers=lambda config: list(layer_kinds(config)),
     widths=widths,
-    supports=frozenset({"speculative_decoding", "dcp"}),
+    supports=frozenset({Feature.SPECULATIVE_DECODING, Feature.DECODE_CONTEXT_PARALLEL}),
     caches={
         "kda": CacheReq(
             group="mamba",

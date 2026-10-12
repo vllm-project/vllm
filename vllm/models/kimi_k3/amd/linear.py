@@ -70,10 +70,11 @@ from vllm.model_executor.models.utils import (
     make_layers,
     maybe_prefix,
 )
+from vllm.models.common import mono
+from vllm.models.common.mono.routing import Mono
 from vllm.models.kimi_k3.amd.kda import KimiK3DeltaAttention
 from vllm.models.kimi_k3.amd.latent_moe_runner import ROCmLatentMoERunner
 from vllm.models.kimi_k3.amd.mla import KimiK3MultiHeadLatentAttentionWrapper
-from vllm.models.kimi_k3.amd.mono import runtime as mono
 from vllm.models.kimi_k3.amd.ops.attn_res import attn_res
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
@@ -783,7 +784,7 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
             "num_attention_heads must be divisible by world_size"
         )
         # the mono decode's layer kernels, attached after load
-        self.mono: mono.Mono | None = None
+        self.mono: Mono | None = None
 
     def make_empty_intermediate_tensors(
         self,
@@ -1071,8 +1072,6 @@ class KimiLinearForCausalLM(
         super().__init__()
         self.model_config = vllm_config.model_config
         self.vllm_config = vllm_config
-        if mono.enabled(vllm_config):
-            mono.configure(vllm_config, self.mono_spec)
         self.config = self.model_config.hf_config
         quant_config = vllm_config.quant_config
         self.quant_config = quant_config

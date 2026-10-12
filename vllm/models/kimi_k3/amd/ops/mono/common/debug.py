@@ -18,8 +18,9 @@ import flydsl.expr as fx
 import torch
 from flydsl.expr import const_expr
 
+from vllm.models.common.mono.abi import RECORD_WORDS
 from vllm.models.kimi_k3.amd.ops.mono.common.ops import memrealtime, traced
-from vllm.models.kimi_k3.amd.ops.mono.common.plan import BLOCKS, DIAG_WORDS
+from vllm.models.kimi_k3.amd.ops.mono.common.plan import BLOCKS
 
 
 @traced
@@ -68,7 +69,7 @@ def given_up_waits(health: torch.Tensor, names) -> list[str]:
     """Each CTA's first wait that gave up, the earliest first, from a rank's
     ``health`` words; ``names`` the regions a record may name."""
     by_id = {region_id(n): n for n in names}
-    records = health.view(BLOCKS + 1, DIAG_WORDS)[1:]
+    records = health.view(BLOCKS + 1, RECORD_WORDS)[1:]
     records = records[records[:, 0] != 0].tolist()
     t0 = min((r[6] for r in records), default=0)
     return [

@@ -33,6 +33,8 @@ from dataclasses import dataclass, field, fields
 from enum import Enum
 from pathlib import Path
 
+from vllm.models.common.mono.abi import health_words
+
 _SCALARS = (int, float, bool, str, enum.Enum)
 _ROOT = Path(__file__).resolve().parents[1]
 
@@ -103,13 +105,8 @@ def first_task(bid, base):
 # A kernel's mailbox regions laid out in its scratch or peer buffer.
 
 PAIR_BYTES = 8  # a (value, tag) pair
-# A rank's health words (``vllm.models.kimi_k3.amd.ops.mono.common.sync._spin``): a
-# header whose word FAILED is set once any wait gave up, then a record a CTA of
-# the first wait it gave up on: flag, region id, pair index, tag, seen tag, CTA,
-# clock, pad. Never zeroed: a failed rank stays failed.
-DIAG_WORDS = 8
-FAILED = 0
-HEALTH_WORDS = (BLOCKS + 1) * DIAG_WORDS
+# A rank's health words (``vllm.models.common.mono.abi``), for this grid.
+HEALTH_WORDS = health_words(BLOCKS)
 
 
 def pair_layout(items, align: int = PAIR_BYTES, start: int = 0) -> dict:

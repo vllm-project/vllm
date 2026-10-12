@@ -16,6 +16,7 @@ from aiter.ops.flydsl.kernels import buffer_ops as bo
 from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr.typing import T
 
+from vllm.models.common.mono.abi import FAILED, RECORD_WORDS, WAIT_SECONDS
 from vllm.models.kimi_k3.amd.ops.mono.common.ops import (
     CM_DEV,
     CM_SYS,
@@ -26,18 +27,11 @@ from vllm.models.kimi_k3.amd.ops.mono.common.ops import (
     traced,
     uniform,
 )
-from vllm.models.kimi_k3.amd.ops.mono.common.plan import (
-    DIAG_WORDS,
-    FAILED,
-    Space,
-    note,
-)
+from vllm.models.kimi_k3.amd.ops.mono.common.plan import Space, note
 
 POLL_MAX = 12  # mailbox specs polled per batch (bounds live registers)
 
-
-# a wait gives up after this long (100 MHz ticks: 10 s)
-WAIT_TICKS = 10 * 100_000_000
+WAIT_TICKS = WAIT_SECONDS * 100_000_000  # s_memrealtime ticks at 100 MHz
 
 
 @traced
@@ -61,7 +55,7 @@ def _spin(load_all, pending, health, alarm, region_id, index, tag):
         why = failed.select(fx.Int32(2), late.select(fx.Int32(1), fx.Int32(0)))
     if why == 1:
         bid = fx.block_idx.x
-        rec = (bid + 1) * DIAG_WORDS
+        rec = (bid + 1) * RECORD_WORDS
         if ld_health(health, rec) == 0:
             at = fx.Int32(memrealtime() & 0x7FFFFFFF)
             record = [1, region_id, index, tag, v[1], bid, at, 0]

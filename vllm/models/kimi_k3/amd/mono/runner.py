@@ -15,11 +15,10 @@ stores anything else. The kernels see the buffer past the head.
 import torch
 
 from vllm.distributed import get_tp_group
+from vllm.models.common.mono.abi import PEER_HEAD
+from vllm.models.common.mono.peer import PeerBuffer
 from vllm.models.kimi_k3.amd.mono.spec import MAX_TOKENS
-from vllm.models.kimi_k3.amd.ops.mono.common.peer_memory import PeerBuffer
 from vllm.models.kimi_k3.amd.ops.mono.common.plan import HEALTH_WORDS
-
-PEER_HEAD = 256
 
 
 class MonoRunner:

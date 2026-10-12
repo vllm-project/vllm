@@ -4,13 +4,14 @@
 # Copyright (C) 2026, Advanced Micro Devices, Inc.:
 # atom/mono/runtime/peer_memory.py
 # atom/mono/runtime/consensus.py
-"""Symmetric peer memory for in-kernel TP reductions."""
+"""Peer memory for in-kernel TP collectives: one uncached buffer a rank, every
+rank holding every peer's address, and the TP agreements that must precede
+anything collective."""
 
 import torch
 import torch.distributed as dist
-from aiter.ops.flydsl.quick_allreduce_int4_ipc import UncachedIpcHeap
 
-from vllm.models.kimi_k3.amd.mono.runtime import MonoUnsupported
+from vllm.models.common.mono.spec import MonoUnsupported
 
 
 class _DeviceBytes:
@@ -48,6 +49,9 @@ class PeerBuffer:
         npes: int,
         device: torch.device,
     ):
+        from aiter.ops.flydsl.quick_allreduce_int4_ipc import UncachedIpcHeap
+
+        self._heap = UncachedIpcHeap
         self.local = UncachedIpcHeap.alloc_uncached(nbytes)
         # a view, not an owner: close() frees the memory under it
         self.bytes = torch.as_tensor(_DeviceBytes(self.local, nbytes), device=device)
@@ -78,24 +82,15 @@ class PeerBuffer:
                 ) from failure
         self.addresses = torch.tensor(addresses, dtype=torch.int64, device=device)
 
-    def kernel_args(self) -> dict:
-        """A kernel's view of the group, by ABI name: this rank's buffer
-        (``sym``), the table of every rank's (``peers``) and the TP ``rank``."""
-        return {
-            "sym": self.local,
-            "peers": self.addresses.data_ptr(),
-            "rank": self.rank,
-        }
-
     def close(self) -> None:
         """Close the peer mappings and free the local buffer; idempotent. Only once no
         kernel of any rank can still touch it (the runner is being dropped)."""
         opened, self._opened = self._opened, []
         for base in opened:
-            UncachedIpcHeap.close_mem_handle(base)
+            self._heap.close_mem_handle(base)
         if self.local:
             self.bytes = None
-            UncachedIpcHeap.free_device_mem(self.local)
+            self._heap.free_device_mem(self.local)
             self.local = 0
 
 

@@ -18,8 +18,8 @@ from typing import Any
 import torch
 
 from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
+from vllm.models.common.mono.spec import MonoStep
 from vllm.models.kimi_k3.amd.mono.runner import MonoRunner
-from vllm.models.kimi_k3.amd.mono.runtime import MonoStep
 
 
 def _k2(layer, runner: MonoRunner, core, prefix, blocks, reset=False):
