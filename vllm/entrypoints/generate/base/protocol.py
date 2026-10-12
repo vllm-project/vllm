@@ -20,7 +20,6 @@ from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.sampling_params import StructuredOutputsParams
 
-
 logger = init_logger(__name__)
 
 StopParam: TypeAlias = (
