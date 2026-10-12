@@ -220,7 +220,7 @@ def test_deepseek_v41_vl_mapper_routes_linear_scales(
         quant_config=SimpleNamespace(weight_block_size=weight_block_size)
     )
     resolved = model_module._linear_scale_param_name(
-        vllm_config,  # type: ignore[arg-type]
+        vllm_config,
         expert_dtype,
     )
     assert resolved == scale_name
@@ -316,6 +316,82 @@ def test_deepseek_v41_declines_quark_configs():
         )
         is None
     )
+
+
+_DSV41_NVFP4 = {
+    "moe_quant_algo": "NVFP4",
+    "ignore": ["*.attn.*", "*.ffn.shared_experts.*", "head", "mtp.*"],
+}
+_DSV4_NVFP4_DSPARK = {
+    "moe_quant_algo": "NVFP4",
+    "ignore": ["*.attn.*", "*.ffn.shared_experts.*", "head"],
+}
+
+
+@pytest.mark.parametrize(
+    ("ckpt_quant_cfg", "prefix", "expected"),
+    [
+        pytest.param(_DSV41_NVFP4, "model.layers.1.ffn.experts", "nvfp4", id="target"),
+        pytest.param(
+            _DSV41_NVFP4,
+            "language_model.model.layers.0.ffn.experts",
+            "nvfp4",
+            id="target-vl-prefix",
+        ),
+        pytest.param(
+            _DSV41_NVFP4, "model.layers.40.ffn.experts", "mxfp4", id="ignored-mtp0"
+        ),
+        pytest.param(
+            _DSV41_NVFP4, "model.layers.42.ffn.experts", "mxfp4", id="ignored-mtp2"
+        ),
+        pytest.param(
+            _DSV4_NVFP4_DSPARK,
+            "model.layers.41.ffn.experts",
+            "nvfp4",
+            id="quantized-mtp1",
+        ),
+        pytest.param(
+            {"moe_quant_algo": "NVFP4"},
+            "model.layers.40.ffn.experts",
+            "nvfp4",
+            id="no-ignore-list",
+        ),
+        pytest.param({}, "model.layers.1.ffn.experts", "mxfp4", id="not-nvfp4"),
+    ],
+)
+def test_deepseek_v41_nvfp4_export_keeps_ignored_experts_mxfp4(
+    monkeypatch, ckpt_quant_cfg, prefix, expected
+):
+    """NVFP4 exports keep the routed experts they ``ignore`` in MXFP4, e.g. the
+    bundled DSpark draft (``mtp.*``, built as ``layers.{40 + k}``) of
+    DeepSeek-V4.1-Flash-NVFP4. The ignore list is read from the checkpoint
+    passed to ``from_config``: the current hf_config below carries none."""
+    import vllm.model_executor.layers.quantization.modelopt as modelopt
+    import vllm.models.deepseek_v41.quant_config as dsv41_qc
+    from vllm.model_executor.layers.fused_moe import RoutedExperts
+
+    hf_config = SimpleNamespace(
+        expert_dtype="fp4",
+        quantization_config={"moe_quant_algo": ckpt_quant_cfg.get("moe_quant_algo")},
+    )
+    model_config = SimpleNamespace(
+        hf_config=hf_config, hf_text_config=SimpleNamespace(num_hidden_layers=40)
+    )
+    monkeypatch.setattr(
+        dsv41_qc,
+        "get_current_vllm_config",
+        lambda: SimpleNamespace(model_config=model_config),
+    )
+    monkeypatch.setattr(dsv41_qc, "Mxfp4MoEMethod", lambda moe_config: "mxfp4")
+    monkeypatch.setattr(modelopt, "ModelOptNvFp4FusedMoE", lambda **kwargs: "nvfp4")
+
+    config = dsv41_qc.DeepseekV4FP8Config.from_config(
+        {"quant_method": "fp8", "activation_scheme": "dynamic", **ckpt_quant_cfg}
+    )
+    monkeypatch.setattr(config, "_get_nvfp4_config", lambda: None)
+    layer = RoutedExperts.__new__(RoutedExperts)
+    layer.moe_config = None
+    assert config.get_quant_method(layer, prefix) == expected
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="DeepGEMM requires CUDA")
@@ -798,7 +874,7 @@ def test_kv_cache_scale_sync_to_host_copies():
     set_default_quant_scales(layer, register_buffer=True)
     layer.kv_cache_dtype = "fp8"
 
-    method = BaseKVCacheMethod(quant_config=None)  # type: ignore[arg-type]  # Scale synchronization does not use quant_config.
+    method = BaseKVCacheMethod(quant_config=None)
     method.create_weights(layer)
     # 0.3 stays != 1.0 even after the fp8_fnuz x2 rescale.
     checkpoint_scale = torch.tensor(0.3, dtype=torch.float32)

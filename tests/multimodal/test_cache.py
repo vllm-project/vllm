@@ -276,14 +276,14 @@ def test_oversized_item_is_served_uncached():
     item = MultiModalKwargsItem.dummy(nbytes=4096)
     small = MultiModalKwargsItem.dummy(nbytes=64)
 
-    p0_only = MultiModalProcessorOnlyCache(model_config)  # type: ignore[arg-type]
+    p0_only = MultiModalProcessorOnlyCache(model_config)
     assert p0_only.get_and_update_item((item, []), "big")[0] is item
     assert not p0_only.is_cached_item("big")
     assert p0_only.get_and_update_item((small, []), "small")[0] is small
     assert p0_only.is_cached_item("small")
 
-    p0 = LruKeyReplicatedSenderCache(model_config)  # type: ignore[arg-type]
-    p1 = LruKeyReplicatedReceiverCache(model_config)  # type: ignore[arg-type]
+    p0 = LruKeyReplicatedSenderCache(model_config)
+    p1 = LruKeyReplicatedReceiverCache(model_config)
     assert item is not None
     assert p0.get_and_update_item((item, []), "big")[0] is item
     assert not p0.is_cached_item("big")
@@ -304,8 +304,8 @@ def test_mm_cache_miss_raises_and_recovers():
     model or network.
     """
     model_config = _StubModelConfig(mm_processor_cache_gb=1)
-    p0 = LruKeyReplicatedSenderCache(model_config)  # type: ignore[arg-type]
-    p1 = LruKeyReplicatedReceiverCache(model_config)  # type: ignore[arg-type]
+    p0 = LruKeyReplicatedSenderCache(model_config)
+    p1 = LruKeyReplicatedReceiverCache(model_config)
 
     mm_hash = "image_A"
     item = MultiModalKwargsItem.dummy(nbytes=64)
@@ -348,7 +348,7 @@ def test_receiver_cache_replaces_stale_item_when_payload_resent():
     and kills EngineCore. Prefer the fresh payload and keep it for later hits.
     """
     model_config = _StubModelConfig(mm_processor_cache_gb=1)
-    p1 = LruKeyReplicatedReceiverCache(model_config)  # type: ignore[arg-type]
+    p1 = LruKeyReplicatedReceiverCache(model_config)
     small = MultiModalKwargsItem.dummy(nbytes=64)
     large = MultiModalKwargsItem.dummy(nbytes=256)
     mm_hash = "shared-id"
@@ -361,7 +361,7 @@ def test_receiver_cache_replaces_stale_item_when_payload_resent():
 def test_receiver_cache_features_keep_resent_payload():
     """EngineCore updates features through get_and_update_features."""
     model_config = _StubModelConfig(mm_processor_cache_gb=1)
-    p1 = LruKeyReplicatedReceiverCache(model_config)  # type: ignore[arg-type]
+    p1 = LruKeyReplicatedReceiverCache(model_config)
     small = MultiModalKwargsItem.dummy(nbytes=64)
     large = MultiModalKwargsItem.dummy(nbytes=256)
     mm_hash = "shared-id"
@@ -394,7 +394,7 @@ def test_mm_cache_miss_batches_all_drifted_hashes():
     non-drifted items in the same request are still ingested.
     """
     model_config = _StubModelConfig(mm_processor_cache_gb=1)
-    p1 = LruKeyReplicatedReceiverCache(model_config)  # type: ignore[arg-type]
+    p1 = LruKeyReplicatedReceiverCache(model_config)
     item = MultiModalKwargsItem.dummy(nbytes=64)
 
     def _feature(
@@ -442,8 +442,8 @@ def test_shm_receiver_handles_prefix_covered_items(monkeypatch):
         parallel_config=SimpleNamespace(world_size=1),
         model_config=_StubModelConfig(mm_processor_cache_gb=4 * MiB_bytes / GiB_bytes),
     )
-    p0 = ShmObjectStoreSenderCache(vllm_config)  # type: ignore[arg-type]
-    p1 = ShmObjectStoreReceiverCache(vllm_config, mp.Lock())  # type: ignore[arg-type]
+    p0 = ShmObjectStoreSenderCache(vllm_config)
+    p1 = ShmObjectStoreReceiverCache(vllm_config, mp.Lock())
 
     def _feature(
         mm_hash: str, data: MultiModalKwargsItem | None
@@ -1082,9 +1082,9 @@ async def test_release_kv_cache_resends_mm_payload(use_async, release_error):
 
     async def call_release():
         if use_async:
-            await AsyncLLM.release_kv_cache_memory(engine)  # type: ignore[arg-type]
+            await AsyncLLM.release_kv_cache_memory(engine)
         else:
-            LLMEngine.release_kv_cache_memory(engine)  # type: ignore[arg-type]
+            LLMEngine.release_kv_cache_memory(engine)
 
     if release_error:
         with pytest.raises(RuntimeError, match=release_error):

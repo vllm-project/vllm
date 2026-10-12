@@ -27,7 +27,7 @@ def make_manager(
     manager.num_speculative_steps = num_steps
     manager._stale_confidences = [SimpleNamespace(np=confidences)]  # type: ignore[list-item]  # CPU-only confidence buffer.
     manager._stale_idx = 0
-    manager.req_states = SimpleNamespace(  # type: ignore[assignment]  # CPU-only request fixture.
+    manager.req_states = SimpleNamespace(
         req_id_to_index={"low": 0, "high": 1},
         num_computed_tokens_np=np.ones(num_reqs, dtype=np.int32),
         prefill_len=SimpleNamespace(np=np.ones(num_reqs, dtype=np.int32)),
@@ -153,11 +153,11 @@ def test_manager_checks_target_varlen_cudagraph_bound(
         manager = maybe_create_adaptive_verification_manager(
             enable_adaptive_verification=True,
             attn_groups=groups,
-            req_states=SimpleNamespace(num_speculative_steps=7),  # type: ignore[arg-type]
+            req_states=SimpleNamespace(num_speculative_steps=7),
             query_start_loc=object(),
             num_bonus_tokens=1,
             max_total_logits=1,
-            vllm_config=None,  # type: ignore[arg-type]
+            vllm_config=None,
             target_layer_names={"target"},
             additional_attn_cg_support=additional,
         )
@@ -186,9 +186,7 @@ def test_budget_stops_where_marginal_drafts_stop_paying_for_themselves():
 
 def test_profiled_batches_seed_cost_curves_via_consumer(monkeypatch):
     manager = AdaptiveVerificationManager.__new__(AdaptiveVerificationManager)
-    manager.req_states = SimpleNamespace(  # type: ignore[assignment]  # CPU-only request fixture.
-        max_num_batched_tokens=4096, max_num_reqs=64
-    )
+    manager.req_states = SimpleNamespace(max_num_batched_tokens=4096, max_num_reqs=64)
     manager.num_speculative_steps = 7
     manager.num_bonus_tokens = 1
     curves: dict[str, list[tuple[int, float]]] = {}

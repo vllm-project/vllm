@@ -377,6 +377,10 @@ class BaseMultiModalProcessorCache(
         """
         raise NotImplementedError
 
+    def release_sender_touches(self) -> None:
+        """Release the items that were touched but not updated afterwards."""
+        return None
+
     @abstractmethod
     def make_stats(self, *, delta: bool = False) -> CacheInfo:
         """Get (and reset) the multi-modal cache stats.

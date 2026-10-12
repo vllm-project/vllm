@@ -20,7 +20,7 @@ nltk>=3.10.3 # pin transitive rouge-score/lm-eval dep for known GHSAs
 modelscope<1.38
 runai-model-streamer[s3,gcs,azure]>=0.15.7
 tensorizer==2.10.1
-transformers==5.17.0
+transformers==5.19.0
 
 # --- Audio Processing ---
 av
@@ -65,7 +65,7 @@ cohere>=7.0.0 # required for cohere chat v2 api tests (protocol/serving import c
 # Dependabot GHSA floors for transitive test deps (excl. dependabot.yml ignores).
 urllib3>=2.7.0
 cryptography>=50.0.0
-pyjwt>=2.13.0
+pyjwt>=2.14.0
 pyasn1>=0.6.4
 python-multipart>=0.0.31
 anyio>=4.14.2
