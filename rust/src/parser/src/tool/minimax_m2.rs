@@ -122,7 +122,7 @@ impl ToolParser for MinimaxM2ToolParser {
         Some(xgrammar_structural_tag::Model::Minimax.builder())
     }
 
-    fn build_visible_format(
+    fn build_call_format(
         &self,
         ctx: &OutputGrammarContext<'_>,
     ) -> output_grammar::Result<Option<Format>> {

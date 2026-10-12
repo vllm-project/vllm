@@ -178,6 +178,7 @@ mod tests {
                 tools: &tools,
                 tool_strict_level: Default::default(),
                 parallel_tool_calls: true,
+                answer: None,
                 tool_choice: &ToolChoice::required(),
             })
             .unwrap()
