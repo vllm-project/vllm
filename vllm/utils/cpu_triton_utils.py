@@ -352,6 +352,7 @@ def _rejection_random_sample_kernel_impl(
     cu_num_draft_tokens,
     draft_token_ids,
     draft_probs,
+    draft_probs_stride,
     target_probs,
     bonus_token_ids,
     recovered_token_ids,
@@ -359,6 +360,7 @@ def _rejection_random_sample_kernel_impl(
     is_greedy,
     max_spec_len,
     vocab_size,
+    draft_vocab_size,
     synthetic_conditional_rates=None,
     NO_DRAFT_PROBS=False,
     SYNTHETIC_MODE=False,
@@ -385,6 +387,8 @@ def _rejection_random_sample_kernel_impl(
         is_greedy,
         max_spec_len,
         vocab_size,
+        draft_probs_stride,
+        draft_vocab_size,
         NO_DRAFT_PROBS,
     )
     if orig_dtype != torch.int64:
@@ -413,9 +417,11 @@ def _sample_recovered_tokens_kernel_impl(
     cu_num_draft_tokens,
     draft_token_ids,
     draft_probs,
+    draft_probs_stride,
     target_probs,
     inv_q,
     vocab_size,
+    draft_vocab_size,
     BLOCK_SIZE=None,
     NO_DRAFT_PROBS=False,
     USE_FP64_GUMBEL=False,
@@ -436,6 +442,8 @@ def _sample_recovered_tokens_kernel_impl(
         # C++ kernel reads inv_q as float32.
         inv_q.to(torch.float32),
         vocab_size,
+        draft_probs_stride,
+        draft_vocab_size,
         NO_DRAFT_PROBS,
     )
     if orig_dtype != torch.int64:
