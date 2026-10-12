@@ -1901,9 +1901,9 @@ class PCPOProjRowParallelLinear(RowParallelLinear):
         return_bias: bool = True,
     ) -> None:
         if bias:
-            raise ValueError("PCP O-Proj TP MVP requires bias=False.")
+            raise ValueError("PCP O-Proj TP requires bias=False.")
         if not input_is_parallel:
-            raise ValueError("PCP O-Proj TP MVP requires input_is_parallel=True.")
+            raise ValueError("PCP O-Proj TP requires input_is_parallel=True.")
 
         self.pcp_group = get_pcp_group()
         self.pcp_rank = self.pcp_group.rank_in_group

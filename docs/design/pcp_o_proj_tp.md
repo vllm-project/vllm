@@ -1,6 +1,6 @@
-# PCP O-Proj TP MVP Design
+# PCP O-Proj Tensor Parallelism
 
-Implementation baseline: `vllm-project/vllm upstream/main@b26039b09f`.
+Implementation baseline: `vllm-project/vllm upstream/main@bfa7e5b7af`.
 
 ## Background
 
@@ -12,11 +12,11 @@ partial sums, while a batch containing prefill first gathers the original
 TP-sized weight shard and then runs the standard O-Proj computation.
 
 vLLM already has independent TP, PCP, and DCP process groups, but the generic
-`RowParallelLinear` shards weights only across TP ranks. This MVP uses PCP as a
+`RowParallelLinear` shards weights only across TP ranks. PCP O-Proj tensor parallelism uses PCP as a
 second O-Proj weight-sharding axis and provides an equivalent dynamic path under
 the name `pcp_o_proj_tp`.
 
-## MVP limitations
+## Supported configurations
 
 - `prefill_context_parallel_size > 1`.
 - `decode_context_parallel_size = 1`.
@@ -51,7 +51,7 @@ Standard row parallelism keeps the following shard on TP rank `t`:
 W_tp[t] = W[:, t*K/T : (t+1)*K/T]
 ```
 
-The MVP further shards each TP shard across PCP rank `p`:
+The feature further shards each TP shard across PCP rank `p`:
 
 ```text
 W_local[t,p] = W[:, (t*P+p)*K/(T*P) : (t*P+p+1)*K/(T*P)]
@@ -173,7 +173,7 @@ the batch type. This guarantees that:
 
 ## Configuration
 
-The MVP adds the following CLI/configuration option:
+The feature adds the following CLI/configuration option:
 
 ```text
 --enable-pcp-o-proj-tp
@@ -191,7 +191,7 @@ vllm serve <model> \
   --dtype bfloat16
 ```
 
-## MVP validation results
+## Validation results
 
 The following end-to-end results cover the unquantized O-Proj path. The unit
 tests additionally cover ModelOpt NVFP4 packed-weight gathering, logical scale

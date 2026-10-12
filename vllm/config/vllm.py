@@ -1419,9 +1419,9 @@ class VllmConfig:
         if model_config is None:
             raise ValueError("PCP O-Proj TP requires a model config.")
         if not model_config.enforce_eager:
-            raise ValueError("PCP O-Proj TP MVP requires enforce_eager=True.")
+            raise ValueError("PCP O-Proj TP requires enforce_eager=True.")
         if model_config.dtype not in (torch.float16, torch.bfloat16):
-            raise ValueError("PCP O-Proj TP MVP supports only float16 and bfloat16.")
+            raise ValueError("PCP O-Proj TP supports only float16 and bfloat16.")
         if not model_config.use_mla:
             raise ValueError("PCP O-Proj TP requires an MLA model.")
 
@@ -1434,18 +1434,18 @@ class VllmConfig:
         }
         if supported_architectures.isdisjoint(model_config.architectures):
             raise ValueError(
-                "PCP O-Proj TP MVP supports only DeepSeek V2/V3/V3.2, "
+                "PCP O-Proj TP supports only DeepSeek V2/V3/V3.2, "
                 "GLM-4 MoE Lite, and GLM-5 family MLA architectures."
             )
         if self.parallel_config.enable_dbo:
-            raise ValueError("PCP O-Proj TP MVP does not support DBO.")
+            raise ValueError("PCP O-Proj TP does not support DBO.")
         if self.lora_config is not None:
-            raise ValueError("PCP O-Proj TP MVP does not support LoRA.")
+            raise ValueError("PCP O-Proj TP does not support LoRA.")
         if (
             self.offload_config.uva.cpu_offload_gb > 0
             or self.offload_config.prefetch.offload_group_size > 0
         ):
-            raise ValueError("PCP O-Proj TP MVP does not support weight offloading.")
+            raise ValueError("PCP O-Proj TP does not support weight offloading.")
 
     def __post_init__(self):
         """Verify configs are valid & consistent with each other."""

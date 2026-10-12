@@ -144,7 +144,7 @@ class ParallelConfig:
     """Number of ranks that split prefill sequence computation. PCP expands
     the process world size but does not increase the KV-cache shard count."""
     enable_pcp_o_proj_tp: bool = False
-    """Shard MLA O-Proj weights over TP x PCP. This experimental MVP supports
+    """Shard MLA O-Proj weights over TP x PCP. This feature supports
     eager execution with DCP disabled and a compatible O-Proj weight layout."""
     data_parallel_size: int = Field(default=1, ge=1)
     """Number of data parallel groups. MoE layers will be sharded according to
@@ -592,7 +592,7 @@ class ParallelConfig:
             if pcp <= 1:
                 raise ValueError("PCP O-Proj TP requires PCP > 1.")
             if dcp != 1:
-                raise ValueError("PCP O-Proj TP MVP requires DCP = 1.")
+                raise ValueError("PCP O-Proj TP requires DCP = 1.")
         if pcp == 1:
             # DCP reuses the TP ranks when PCP is disabled.
             if tp % dcp != 0:
