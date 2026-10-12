@@ -150,8 +150,8 @@ impl StructuredEventState {
         &mut self,
         usage: ChatTokenUsage,
         finish_reason: FinishReason,
-        kv_transfer_params: Option<serde_json::Value>,
-        ec_transfer_params: Option<serde_json::Value>,
+        kv_transfer_params: Option<Box<serde_json::Value>>,
+        ec_transfer_params: Option<Box<serde_json::Value>>,
     ) -> Result<Vec<ChatEvent>> {
         let mut events = Vec::new();
         self.close_open_text_block(&mut events);

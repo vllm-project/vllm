@@ -271,6 +271,13 @@ async fn completion_chunk_stream(
     macro_rules! yield_chunk {
         ($chunk:expr) => {{
             let mut chunk = $chunk;
+            if return_token_ids {
+                for choice in &mut chunk.choices {
+                    if choice.token_ids.is_none() {
+                        choice.token_ids = Some(Vec::new());
+                    }
+                }
+            }
             if include_continuous_usage {
                 chunk.usage = Some(continuous_usage.to_usage());
             }
@@ -785,6 +792,70 @@ mod tests {
             }
             CompletionSseChunk::Chunk(_) => panic!("expected usage chunk"),
         }
+    }
+
+    #[tokio::test]
+    async fn completion_stream_serializes_requested_token_ids_on_every_choice() {
+        let stream = stream::iter(vec![
+            Ok(DecodedTextEvent::Start {
+                prompt_token_ids: vec![1, 2].into(),
+                prompt_logprobs: None,
+            }),
+            Ok(decoded_delta(
+                "ok",
+                vec![7, 8],
+                None,
+                Some(Finished {
+                    usage: vllm_llm::TokenUsage {
+                        prompt_token_count: 2,
+                        output_token_count: 2,
+                        cached_token_count: 0,
+                    },
+                    finish_reason: FinishReason::Length,
+                    kv_transfer_params: None,
+                    ec_transfer_params: None,
+                    sampling_mask: None,
+                }),
+            )),
+        ]);
+
+        let chunks = completion_chunk_stream(
+            stream,
+            "cmpl-1".to_string(),
+            "model".to_string(),
+            1,
+            ApiServerOptions::default(),
+            ResponseOptions {
+                return_token_ids: true,
+                ..Default::default()
+            },
+        )
+        .collect::<Vec<_>>()
+        .await;
+
+        let chunks: Vec<_> = chunks.into_iter().try_collect().expect("stream should succeed");
+        let payloads: Vec<_> = chunks
+            .iter()
+            .map(|chunk| serde_json::to_value(chunk).expect("chunk should serialize"))
+            .collect();
+
+        assert_eq!(payloads.len(), 3);
+        assert_eq!(
+            payloads[0]["choices"][0]["prompt_token_ids"],
+            serde_json::json!([1, 2])
+        );
+        assert_eq!(
+            payloads[0]["choices"][0]["token_ids"],
+            serde_json::json!([])
+        );
+        assert_eq!(
+            payloads[1]["choices"][0]["token_ids"],
+            serde_json::json!([7, 8])
+        );
+        assert_eq!(
+            payloads[2]["choices"][0]["token_ids"],
+            serde_json::json!([])
+        );
     }
 
     #[tokio::test]

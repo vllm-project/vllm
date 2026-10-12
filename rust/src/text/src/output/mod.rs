@@ -101,8 +101,10 @@ impl<T: TextOutputStream> T {
                             let mut collected = collected.unwrap();
                             collected.finish_reason = finished.finish_reason;
                             collected.usage = finished.usage;
-                            collected.kv_transfer_params = finished.kv_transfer_params;
-                            collected.ec_transfer_params = finished.ec_transfer_params;
+                            collected.kv_transfer_params =
+                                finished.kv_transfer_params.map(|value| *value);
+                            collected.ec_transfer_params =
+                                finished.ec_transfer_params.map(|value| *value);
                             collected.sampling_mask = finished.sampling_mask;
                             return Ok(collected);
                         }

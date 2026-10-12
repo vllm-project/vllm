@@ -21,6 +21,7 @@ from typing import (
     ClassVar,
     Literal,
     Protocol,
+    Self,
     TypeAlias,
     overload,
     runtime_checkable,
@@ -31,7 +32,7 @@ import torch
 import torch.nn as nn
 from torch import Tensor
 from transformers.models.whisper.tokenization_whisper import LANGUAGES
-from typing_extensions import Self, TypeIs
+from typing_extensions import TypeIs
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -855,6 +856,27 @@ def _supports_pp_inspect(model: type[object] | object) -> bool:
         return False
 
     return supports_kw(model_forward, "intermediate_tensors")
+
+
+@runtime_checkable
+class SupportsHCSP(Protocol):
+    """Support sequence-parallel HC without changing MoE parallelism."""
+
+    supports_hc_sp: ClassVar[Literal[True]] = True
+
+
+@overload
+def supports_hc_sp(model: type[object]) -> TypeIs[type[SupportsHCSP]]: ...
+
+
+@overload
+def supports_hc_sp(model: object) -> TypeIs[SupportsHCSP]: ...
+
+
+def supports_hc_sp(
+    model: type[object] | object,
+) -> TypeIs[type[SupportsHCSP]] | TypeIs[SupportsHCSP]:
+    return getattr(model, "supports_hc_sp", False)
 
 
 @runtime_checkable

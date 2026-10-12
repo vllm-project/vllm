@@ -238,7 +238,7 @@ def create_scheduler(
         structured_output_manager=StructuredOutputManager(vllm_config),
     )
     if use_v2_model_runner is None:
-        use_v2_model_runner = bool(envs.VLLM_USE_V2_MODEL_RUNNER)
+        use_v2_model_runner = envs.VLLM_USE_V2_MODEL_RUNNER is not False
     scheduler.use_v2_model_runner = use_v2_model_runner
     return scheduler
 

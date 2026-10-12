@@ -1086,7 +1086,10 @@ def _rocm_aiter_fused_allreduce_rmsnorm_impl(
         hidden_dim = input_.shape[-1]
         row_size = hidden_dim * input_.element_size()
         fused_qr_rmsnorm_ok = (
-            qr_comm is not None
+            # aiter.qr_all_reduce_rmsnorm does not implement Gemma's
+            # (1 + weight) scaling.
+            not gemma_norm
+            and qr_comm is not None
             and not getattr(qr_comm, "disabled", True)
             and hasattr(qr_comm, "should_quick_allreduce")
             and qr_comm.should_quick_allreduce(input_)
@@ -1133,7 +1136,16 @@ def _rocm_aiter_fused_allreduce_rmsnorm_impl(
         use_1stage=use_1stage,
         gemma_norm=gemma_norm,
     )
-    assert result is not None
+    if result is None:
+        from vllm.distributed import tensor_model_parallel_all_reduce
+
+        return torch.ops.vllm_aiter.fused_add_rms_norm(
+            tensor_model_parallel_all_reduce(input_),
+            residual,
+            weight,
+            epsilon,
+            gemma_norm,
+        )
     return result[0], result[1]
 
 
@@ -1167,7 +1179,8 @@ def _rocm_aiter_fused_allreduce_rmsnorm_quant_per_group_impl(
         w=weight,
         eps=epsilon,
         group_size=group_size,
-        registered=torch.cuda.is_current_stream_capturing(),
+        registered=torch.cuda.is_current_stream_capturing()
+        and ca.enable_register_for_capturing,
         use_1stage=use_1stage,
     )
     assert result is not None
@@ -1219,7 +1232,8 @@ def _rocm_aiter_fused_allreduce_rmsnorm_quant_per_group_with_bf16_norm_impl(
         w=weight,
         eps=epsilon,
         group_size=group_size,
-        registered=torch.cuda.is_current_stream_capturing(),
+        registered=torch.cuda.is_current_stream_capturing()
+        and ca.enable_register_for_capturing,
         use_1stage=use_1stage,
         emit_bf16=True,
     )

@@ -181,6 +181,53 @@ def ref_paged_attn(
     return torch.cat(outputs, dim=0)
 
 
+@torch.inference_mode()
+def test_fp8_softmax_preserves_small_probabilities() -> None:
+    """Keep exp(-8) contributions that underflow when cast directly to E4M3."""
+    device = torch.device(DEVICE_TYPE)
+    num_tokens = block_size = 32
+    head_size = 128
+
+    query = torch.zeros(1, 1, head_size, dtype=FP8_DTYPE, device=device)
+    query[..., 0] = 1
+    key_cache = torch.zeros(1, block_size, 1, head_size, dtype=FP8_DTYPE, device=device)
+    key_cache[:, 1:, :, 0] = -8
+    value_cache = torch.ones_like(key_cache)
+    value_cache[:, 0] = 0
+    output = torch.empty(1, 1, head_size, dtype=torch.bfloat16, device=device)
+
+    cu_seqlens_q = torch.tensor([0, 1], dtype=torch.int32, device=device)
+    seqused_k = torch.tensor([num_tokens], dtype=torch.int32, device=device)
+    block_table = torch.tensor([[0]], dtype=torch.int32, device=device)
+    scale = torch.ones(1, dtype=torch.float32, device=device)
+
+    unified_attention(
+        q=query,
+        k=key_cache,
+        v=value_cache,
+        out=output,
+        cu_seqlens_q=cu_seqlens_q,
+        max_seqlen_q=1,
+        seqused_k=seqused_k,
+        max_seqlen_k=num_tokens,
+        softmax_scale=1.0,
+        causal=True,
+        window_size=(-1, -1),
+        block_table=block_table,
+        softcap=0,
+        q_descale=scale,
+        k_descale=scale,
+        v_descale=scale,
+        kv_quant_mode=KVQuantMode.FP8_PER_TENSOR,
+    )
+
+    scores = torch.einsum("qhd,thd->qht", query.float(), key_cache[0].float())
+    probabilities = torch.softmax(scores, dim=-1)
+    expected = torch.einsum("qht,thd->qhd", probabilities, value_cache[0].float())
+
+    torch.testing.assert_close(output.float(), expected, atol=5e-5, rtol=1e-2)
+
+
 def ref_paged_clamped_mm_attn(
     query: torch.Tensor,
     key_cache: torch.Tensor,
