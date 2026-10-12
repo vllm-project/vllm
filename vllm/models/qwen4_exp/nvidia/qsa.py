@@ -29,6 +29,7 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding, get_rope
 from vllm.model_executor.models.qwen3_next import Qwen3NextAttention
+from vllm.model_executor.models.qwen3_vl import mrope_positions_factor
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     WeightsMapper,
@@ -393,7 +394,7 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
         elif tp_size % self.total_num_kv_heads:
             raise ValueError("TP size must be divisible by replicated QSA KV heads")
         self.num_kv_heads = max(1, self.total_num_kv_heads // tp_size)
-        self.head_dim = int(config.head_dim or self.hidden_size // self.num_heads)
+        self.head_dim = int(config.head_dim or self.hidden_size // self.total_num_heads)
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
@@ -427,6 +428,7 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
             head_size=self.head_dim,
             max_position=config.max_position_embeddings,
             rope_parameters=config.rope_parameters,
+            mrope_positions_factor=mrope_positions_factor(vllm_config),
         )
         self.q_norm = GemmaRMSNorm(self.head_dim, eps=config.rms_norm_eps)
         self.k_norm = GemmaRMSNorm(self.head_dim, eps=config.rms_norm_eps)
