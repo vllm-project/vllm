@@ -5,10 +5,11 @@ from abc import ABC, abstractmethod
 from collections import defaultdict
 from collections.abc import Awaitable, Callable
 from functools import cached_property, partial
-from typing import TYPE_CHECKING, Any, Final, override
+from typing import TYPE_CHECKING, Any, Final
 
 import torch
 from PIL import Image
+from typing_extensions import override
 
 from vllm import envs
 from vllm.config import ModelConfig

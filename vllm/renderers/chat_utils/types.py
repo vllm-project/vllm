@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Literal, Required, TypeAlias, TypedDict
+from typing import Literal, Required, TypeAlias
 
 from openai.types.chat import (
     ChatCompletionContentPartImageParam,
@@ -21,6 +21,9 @@ from openai.types.chat.chat_completion_content_part_input_audio_param import Inp
 from openai_harmony import Message as OpenAIHarmonyMessage
 from PIL import Image
 from pydantic import BaseModel, ConfigDict
+
+# pydantic needs the TypedDict from typing_extensions
+from typing_extensions import TypedDict
 
 __all__ = [
     "ChatCompletionContentPartAudioEmbedsParam",
