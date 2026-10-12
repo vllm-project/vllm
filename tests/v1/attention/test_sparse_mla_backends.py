@@ -3554,7 +3554,9 @@ def test_flashinfer_hisparse_decode_runs_batched_attention():
     def prepare_kernel(self, *args, **kwargs):  # noqa: ARG001
         pass
 
-    def run_kernel(self, q, cache, indices, counts):  # noqa: ARG001
+    def run_kernel(self, q, cache, indices, counts, out=None):  # noqa: ARG001
+        # Decode-only batches keep the kernel's own output (CUDA-graph path).
+        assert out is None
         kernel_shapes.append(q.shape)
         return q[..., :1], None
 
@@ -3587,6 +3589,62 @@ def test_flashinfer_hisparse_decode_runs_batched_attention():
     assert kernel_shapes == [q.shape]
     assert output.shape == (num_tokens, 2, 1)
     assert lse is None
+
+
+def test_flashinfer_hisparse_mixed_batch_writes_one_output():
+    """Decode rows and each staged prefill group of a mixed batch are written
+    straight into one preallocated output, not joined with torch.cat."""
+    device = torch.device("cpu")
+    num_decode_tokens, num_tokens = 2, 6
+    groups = [slice(2, 3), slice(3, 6)]
+    q = torch.randn(num_tokens, 2, 4, device=device)
+    topk = torch.zeros(num_tokens, 4, dtype=torch.int32, device=device)
+    counts = torch.full((num_tokens,), 4, dtype=torch.int32, device=device)
+    kernel_outs: list[torch.Tensor] = []
+
+    def run_kernel(self, q, cache, indices, counts, out=None):  # noqa: ARG001
+        assert out is not None
+        out.fill_(q.shape[0])
+        kernel_outs.append(out)
+        return out, None
+
+    index_group = object.__new__(HiSparseMLAIndexGroup)
+    index_group.caches = [
+        SimpleNamespace(
+            all_context_pages_resident=False,
+            runtime=SimpleNamespace(
+                hot=SimpleNamespace(attention_cache=torch.empty(1, device=device))
+            ),
+        )
+    ]
+    index_group.convert_logical_to_physical_topk = MagicMock(
+        return_value=(topk[:num_decode_tokens], counts[:num_decode_tokens])
+    )
+    index_group.staged_prefills = MagicMock(
+        return_value=iter(
+            (tokens, torch.empty(1, device=device), topk[tokens], counts[tokens])
+            for tokens in groups
+        )
+    )
+    impl = object.__new__(FlashInferMLASparseImpl)
+    impl.topk_indices_buffer = topk
+    impl.index_group = index_group
+    impl.index_group_index = 0
+    impl.kv_lora_rank = 1
+    impl._prepare_mqa_kernel = MethodType(lambda self, *args: None, impl)
+    impl._run_mqa_kernel = MethodType(run_kernel, impl)
+    metadata = SimpleNamespace(num_decode_tokens=num_decode_tokens, block_size=64)
+
+    output, _ = FlashInferMLASparseImpl.forward_mqa(
+        impl, q, torch.empty(1, device=device), metadata, SimpleNamespace()
+    )
+
+    pieces = [slice(0, num_decode_tokens), *groups]
+    assert [out.data_ptr() for out in kernel_outs] == [
+        output[piece].data_ptr() for piece in pieces
+    ]
+    for piece in pieces:
+        assert output[piece].eq(piece.stop - piece.start).all()
 
 
 @pytest.mark.skipif(

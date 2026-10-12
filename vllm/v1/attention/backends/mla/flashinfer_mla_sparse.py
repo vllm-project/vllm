@@ -517,7 +517,10 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
             num_decode_tokens = attn_metadata.num_decode_tokens
             decode_out: torch.Tensor | None = None
             decode_lse: torch.Tensor | None = None
+            output: torch.Tensor | None = None
             if num_decode_tokens > 0:
+                if num_decode_tokens < num_actual_toks:
+                    output = self._new_mqa_output(q)
                 physical_topk, valid_counts = (
                     index_group.convert_logical_to_physical_topk(
                         self.index_group_index,
@@ -534,6 +537,7 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
                     ),
                     physical_topk,
                     valid_counts,
+                    out=None if output is None else output[:num_decode_tokens],
                 )
                 if num_decode_tokens == num_actual_toks:
                     return decode_out, decode_lse
@@ -558,7 +562,8 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
                     valid_counts,
                 )
 
-            outputs = [] if decode_out is None else [decode_out]
+            if output is None:
+                output = self._new_mqa_output(q)
             lses = [] if decode_lse is None else [decode_lse]
             for (
                 tokens,
@@ -571,13 +576,15 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
                 attn_metadata,
                 topk_indices,
             ):
-                plan_out, plan_lse = self._run_mqa_kernel(
-                    q[tokens], prefill_cache, prefill_indices, prefill_lens
+                _, plan_lse = self._run_mqa_kernel(
+                    q[tokens],
+                    prefill_cache,
+                    prefill_indices,
+                    prefill_lens,
+                    out=output[tokens],
                 )
-                outputs.append(plan_out)
                 if plan_lse is not None:
                     lses.append(plan_lse)
-            output = torch.cat(outputs) if len(outputs) > 1 else outputs[0]
             if not lses:
                 return output, None
             return output, torch.cat(lses) if len(lses) > 1 else lses[0]
@@ -679,12 +686,19 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
         )
         self._run_mqa_kernel(q, kv_cache, topk_indices, seq_lens)
 
+    def _new_mqa_output(self, q: torch.Tensor) -> torch.Tensor:
+        # trtllm-gen MLA always writes BF16 output.
+        return q.new_empty(
+            (q.shape[0], q.shape[1], self.kv_lora_rank), dtype=torch.bfloat16
+        )
+
     def _run_mqa_kernel(
         self,
         q: torch.Tensor,
         kv_cache: torch.Tensor,
         topk_indices: torch.Tensor,
         seq_lens: torch.Tensor,
+        out: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         assert self._workspace_buffer is not None
         assert self.bmm1_scale is not None
@@ -737,6 +751,7 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
             bmm1_scale=self.bmm1_scale,
             bmm2_scale=self.bmm2_scale,
             sparse_mla_top_k=sparse_topk_capacity,
+            out=None if out is None else out.unsqueeze(1),
             return_lse=self.need_to_return_lse_for_decode,
             **extra_kwargs,
         )
