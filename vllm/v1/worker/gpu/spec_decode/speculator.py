@@ -207,6 +207,9 @@ class DraftModelSpeculator(BaseSpeculator):
 
         self.supports_mm_inputs = False
         self.pcp_manager: PCPManager | None = None
+        # Whether every draft attention builder can refresh its decode metadata
+        # in place, so the refresh can be recorded in the draft CUDA graph.
+        self.supports_decode_metadata_update = False
 
     @abstractmethod
     def load_draft_model(
@@ -299,6 +302,24 @@ class DraftModelSpeculator(BaseSpeculator):
         # builders and buffers.
         self.target_input_buffers = target_input_buffers
         self.target_attn_groups = target_attn_groups
+        self._configure_decode_metadata_update()
+
+    def _configure_decode_metadata_update(self) -> None:
+        unsupported_backends = sorted(
+            {
+                attn_group.backend.get_name()
+                for attn_groups in self.attn_groups
+                for attn_group in attn_groups
+                if not attn_group.supports_draft_decode_metadata_update
+            }
+        )
+        self.supports_decode_metadata_update = not unsupported_backends
+        if unsupported_backends:
+            logger.info_once(
+                "Attention backend(s) %s cannot update draft decode metadata in "
+                "place; falling back to rebuilding attention metadata eagerly.",
+                ", ".join(unsupported_backends),
+            )
 
     def _build_attn_metadata(
         self,
