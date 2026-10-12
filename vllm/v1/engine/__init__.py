@@ -178,6 +178,9 @@ class EngineCoreReadyResponse:
     # total, for frontends without a VllmConfig (the Rust frontend). Set
     # without chunked prefill, when they are all encoded in one step.
     max_mm_embeds_per_request: int | None = None
+    # False when the engine disabled chunked prefill during initialization,
+    # e.g. for a model without KV cache.
+    enable_chunked_prefill: bool = True
 
 
 class EngineCoreRequest(
