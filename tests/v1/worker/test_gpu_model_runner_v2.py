@@ -172,8 +172,8 @@ def test_qsa_circular_group_uses_custom_slot_mapping(monkeypatch):
 
 
 @pytest.mark.skip_global_cleanup
-@pytest.mark.parametrize("replace_block_table", [False, True])
-def test_update_requests_rewinds_all_explicit_device_state(replace_block_table: bool):
+@pytest.mark.parametrize("append_blocks", [False, True])
+def test_update_requests_rewinds_all_explicit_device_state(append_blocks: bool):
     class StagedOffsets:
         def __init__(self):
             self.gpu = np.asarray([19, 18, 7], dtype=np.int32)
@@ -239,7 +239,7 @@ def test_update_requests_rewinds_all_explicit_device_state(replace_block_table: 
         new_token_ids=[],
         all_token_ids={},
         new_block_ids=(
-            [([11],), None, ([31],)] if replace_block_table else [None, None, None]
+            [([11],), None, ([31],)] if append_blocks else [None, None, None]
         ),
         num_computed_tokens=[0, 18, 7],
         num_output_tokens=[4, 5, 6],
@@ -247,11 +247,6 @@ def test_update_requests_rewinds_all_explicit_device_state(replace_block_table: 
     )
     scheduler_output = SimpleNamespace(
         scheduled_cached_reqs=cached,
-        block_table_updates=(
-            {"rewound": ([11],), "not_resident": ([99],)}
-            if replace_block_table
-            else None
-        ),
         new_block_ids_to_zero=None,
         kv_cache_block_copies=None,
     )
@@ -266,10 +261,10 @@ def test_update_requests_rewinds_all_explicit_device_state(replace_block_table: 
     assert sampled_state_rewinds == [([0], [4], output_bin_counts)]
     assert sampler_rewinds == [[0]]
     assert model_state_rewinds == [([0], [0])]
-    # An authoritative replacement must not be appended again during rewind.
+    # Rewinding sampled state preserves and extends the existing block rows.
     assert block_rows == (
-        {0: [11], 1: [20], 2: [30, 31]}
-        if replace_block_table
+        {0: [10, 11], 1: [20], 2: [30, 31]}
+        if append_blocks
         else {0: [10], 1: [20], 2: [30]}
     )
 
@@ -350,7 +345,6 @@ def test_rewind_converges_emulated_worker_ranks() -> None:
     )
     scheduler_output = SimpleNamespace(
         scheduled_cached_reqs=cached,
-        block_table_updates=None,
         new_block_ids_to_zero=None,
         kv_cache_block_copies=None,
     )
@@ -551,7 +545,6 @@ def test_emulated_pp_delayed_sample_is_rewound_before_recompute() -> None:
     scheduler_output = SimpleNamespace(
         scheduled_new_reqs=[],
         scheduled_cached_reqs=cached,
-        block_table_updates=None,
         finished_req_ids=set(),
         preempted_req_ids=set(),
         free_encoder_mm_hashes=[],

@@ -21,6 +21,7 @@ from vllm.v1.worker.gpu.buffer_utils import StagedWriteTensor
 from vllm.v1.worker.gpu.input_batch import post_update
 from vllm.v1.worker.gpu.mm.rope import RopeState
 from vllm.v1.worker.gpu.sample.penalties import bincount
+from vllm.v1.worker.gpu.states import RequestState
 
 STRIDE = 1_000_000  # max_model_len
 ROW = 2559  # ROW * STRIDE > 2**31 (first overflowing row at 1M: 2148)
@@ -147,6 +148,51 @@ def test_post_update_high_row():
     assert int(total_len[ROW]) == 101
     assert int(num_computed[0]) == 1
     assert int(num_computed[ROW]) == 1
+
+
+@pytest.mark.parametrize("large_buffer", ["token_ids", "penalty_counts"])
+def test_rewind_sampled_state_high_row(large_buffer: str):
+    """Recovery must clear only stale tokens/counts beyond the int32 row limit."""
+    device = torch.device("cuda:0")
+    token_stride = STRIDE if large_buffer == "token_ids" else 16
+    count_stride = STRIDE if large_buffer == "penalty_counts" else 64
+    token_ids = torch.zeros(NUM_ROWS, token_stride, dtype=torch.int32, device=device)
+    counts = torch.zeros(NUM_ROWS, count_stride, dtype=torch.int32, device=device)
+    for row in (0, 1, ROW):
+        token_ids[row, :5] = torch.tensor([7, 8, 11, 11, 12], device=device)
+        counts[row, 11] = 2
+        counts[row, 12] = 1
+
+    state = object.__new__(RequestState)
+    state.device = device
+    state.all_token_ids = SimpleNamespace(gpu=token_ids)
+    state.prompt_len = SimpleNamespace(
+        gpu=torch.full((NUM_ROWS,), 2, dtype=torch.int32, device=device)
+    )
+    state.total_len = SimpleNamespace(
+        gpu=torch.full((NUM_ROWS,), 5, dtype=torch.int32, device=device)
+    )
+    state.last_sampled_tokens = torch.full(
+        (NUM_ROWS, 1), 12, dtype=torch.int64, device=device
+    )
+    state.draft_tokens = torch.full((NUM_ROWS, 2), 13, dtype=torch.int64, device=device)
+    state.next_prefill_tokens = torch.full(
+        (2, NUM_ROWS), 14, dtype=torch.int32, device=device
+    )
+
+    state.rewind_sampled_state([0, ROW], [1, 0], counts)
+    torch.accelerator.synchronize()
+
+    assert token_ids[[0, 1, ROW], :5].tolist() == [
+        [7, 8, 11, 0, 0],
+        [7, 8, 11, 11, 12],
+        [7, 8, 0, 0, 0],
+    ]
+    assert counts[[0, 1, ROW], 11:13].tolist() == [[1, 0], [2, 1], [0, 0]]
+    assert state.total_len.gpu[[0, 1, ROW]].tolist() == [3, 5, 2]
+    assert state.last_sampled_tokens[[0, 1, ROW], 0].tolist() == [11, 12, 0]
+    assert state.draft_tokens[[0, 1, ROW]].tolist() == [[0, 0], [13, 13], [0, 0]]
+    assert state.next_prefill_tokens[:, [0, 1, ROW]].tolist() == [[0, 14, 0]] * 2
 
 
 def test_rope_positions_high_row():
