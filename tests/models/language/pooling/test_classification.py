@@ -8,15 +8,22 @@ from vllm.platforms import current_platform
 
 
 @pytest.mark.parametrize(
-    "model",
+    "model, float_atol",
     [
         pytest.param(
+            "distilbert/distilbert-base-uncased-finetuned-sst-2-english",
+            5e-4,
+            id="distilbert/distilbert-base-uncased-finetuned-sst-2-english",
+        ),
+        pytest.param(
             "jason9693/Qwen2.5-1.5B-apeach",
+            1e-8,
             marks=[
                 pytest.mark.core_model,
                 pytest.mark.cpu_model,
                 pytest.mark.slow_test,
             ],
+            id="jason9693/Qwen2.5-1.5B-apeach",
         ),
     ],
 )
@@ -26,6 +33,7 @@ def test_models(
     vllm_runner,
     example_prompts,
     model: str,
+    float_atol: float,
     dtype: str,
 ) -> None:
     with vllm_runner(model, max_model_len=512, dtype=dtype) as vllm_model:
@@ -36,7 +44,7 @@ def test_models(
     ) as hf_model:
         hf_outputs = hf_model.classify(example_prompts)
 
-    # check logits difference
+    # check probability difference
     for hf_output, vllm_output in zip(hf_outputs, vllm_outputs):
         hf_output = torch.tensor(hf_output)
         vllm_output = torch.tensor(vllm_output)
@@ -44,11 +52,31 @@ def test_models(
         # the tolerance value of 1e-2 is selected based on the
         # half datatype tests in
         # tests/models/language/pooling/test_embedding.py
-        assert torch.allclose(
-            hf_output,
+        torch.testing.assert_close(
             vllm_output,
+            hf_output,
             rtol=2e-3 if dtype == "float" else 1e-2,
+            atol=float_atol if dtype == "float" else 1e-8,
         )
+
+
+def test_distilbert_sentiment_direction(vllm_runner) -> None:
+    """Verify that the SST-2 model assigns higher probability to the correct
+    sentiment label: label 1 = POSITIVE, label 0 = NEGATIVE."""
+    model = "distilbert/distilbert-base-uncased-finetuned-sst-2-english"
+    positive = "I love this movie, it was absolutely fantastic!"
+    negative = "This was a terrible experience, completely disappointing."
+
+    with vllm_runner(model, max_model_len=512, dtype="float") as vllm_model:
+        outputs = vllm_model.classify([positive, negative])
+
+    pos_probs = torch.tensor(outputs[0])
+    neg_probs = torch.tensor(outputs[1])
+
+    # label 1 = POSITIVE: positive sentence must score higher on label 1
+    assert pos_probs[1] > pos_probs[0], "Expected POSITIVE label for positive sentence"
+    # label 0 = NEGATIVE: negative sentence must score higher on label 0
+    assert neg_probs[0] > neg_probs[1], "Expected NEGATIVE label for negative sentence"
 
 
 @pytest.mark.core_model

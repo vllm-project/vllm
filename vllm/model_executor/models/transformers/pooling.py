@@ -16,8 +16,10 @@
 # limitations under the License.
 """Transformers modeling backend mixins for pooling models."""
 
-from typing import TYPE_CHECKING
+from collections.abc import Callable
+from typing import TYPE_CHECKING, TypeAlias
 
+import regex as re
 import torch
 import torch.nn as nn
 from transformers import AutoModelForSequenceClassification
@@ -26,6 +28,7 @@ from vllm.config.utils import getattr_iter
 from vllm.model_executor.layers.pooler import DispatchPooler
 from vllm.model_executor.models.interfaces import SupportsCrossEncoding
 from vllm.model_executor.models.interfaces_base import VllmModelForPooling
+from vllm.model_executor.models.utils import WeightsMapper
 
 from .base import Base
 
@@ -43,6 +46,46 @@ class ClassifierWithReshape(nn.Module):
         if len(args) > 0:
             args = (args[0].unsqueeze(1), *args[1:])
         return super().forward(*args, **kwargs)
+
+
+class _PreClassifierHead(nn.Module):
+    """Classifier head for models that apply an activation between
+    pre_classifier and classifier outside any nn.Module (e.g. DistilBERT).
+
+    Accepts/returns [B, H] → [B, C] directly, bypassing ClassifierWithReshape.
+    """
+
+    def __init__(self, pre_classifier: nn.Linear, classifier: nn.Linear) -> None:
+        super().__init__()
+        self.pre_classifier = pre_classifier
+        self.classifier = classifier
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.pre_classifier(x)
+        x = torch.relu(x)
+        return self.classifier(x)
+
+
+# Classifier heads keyed by `model_type`. Values are a factory, which accepts
+# the HF ForSequenceClassification model and returns an nn.Module implementing
+# the full head, and a mapper from checkpoint names to the head's module layout.
+# Models whose heads apply operations outside any nn.Module (e.g. DistilBERT's
+# ReLU) must be registered here rather than relying on generic discovery.
+_ClassifierHead: TypeAlias = tuple[Callable[[nn.Module], nn.Module], WeightsMapper]
+_CLASSIFIER_HEADS: dict[str, _ClassifierHead] = {
+    "distilbert": (
+        lambda m: _PreClassifierHead(
+            pre_classifier=m.pre_classifier,
+            classifier=m.classifier,
+        ),
+        # A single pattern, as separate prefixes would be applied in sequence
+        WeightsMapper(
+            orig_to_new_regex={
+                re.compile(r"^(pre_classifier|classifier)\."): r"classifier.\1."
+            }
+        ),
+    ),
+}
 
 
 class EmbeddingMixin(VllmModelForPooling, Base):
@@ -90,21 +133,30 @@ class SequenceClassificationMixin(SupportsCrossEncoding, VllmModelForPooling, Ba
                 break
 
         # Unlike `lm_head`, `classifier` is not always `nn.Linear`.
-        self.classifier = getattr_iter(seq_cls_model, ["classifier", "score"], None)
-        if self.classifier is None:
-            raise ValueError(
-                "Could not find `classifier` or `score` layer in the "
-                "`AutoModelForSequenceClassification` instance."
-            )
-        self.init_parameters(self.classifier, dtype=self.model_config.head_dtype)
+        head_entry = _CLASSIFIER_HEADS.get(self.config.model_type)
+        if head_entry is not None:
+            # Model-specific head: builds the full classification chain,
+            # returns [B, C] directly, bypassing ClassifierWithReshape.
+            factory, weights_mapper = head_entry
+            self.classifier = factory(seq_cls_model)
+            self.init_parameters(self.classifier, dtype=self.model_config.head_dtype)
+            self.hf_to_vllm_mapper |= weights_mapper
+        else:
+            self.classifier = getattr_iter(seq_cls_model, ["classifier", "score"], None)
+            if self.classifier is None:
+                raise ValueError(
+                    "Could not find `classifier` or `score` layer in the "
+                    "`AutoModelForSequenceClassification` instance."
+                )
+            self.init_parameters(self.classifier, dtype=self.model_config.head_dtype)
 
-        # Order `ClassifierWithReshape` ahead of the classifier's own class so that
-        # its `super().forward(...)` reaches the original implementation.
-        self.classifier.__class__ = type(
-            "ClassifierWithReshape",
-            (ClassifierWithReshape, type(self.classifier)),
-            {},
-        )
+            # Order `ClassifierWithReshape` ahead of the classifier's own class so that
+            # its `super().forward(...)` reaches the original implementation.
+            self.classifier.__class__ = type(
+                "ClassifierWithReshape",
+                (ClassifierWithReshape, type(self.classifier)),
+                {},
+            )
 
         self.pooler = DispatchPooler.for_seq_cls(
             pooler_config,

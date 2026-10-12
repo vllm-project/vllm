@@ -730,6 +730,9 @@ _SEQUENCE_CLASSIFICATION_EXAMPLE_MODELS = {
         extras={"d3": "vllm-sr/d3", "d3-mini": "vllm-sr/d3-mini"},
         max_model_len=4096,
     ),
+    "DistilBertForSequenceClassification": _HfExamplesInfo(
+        "distilbert/distilbert-base-uncased-finetuned-sst-2-english"
+    ),
     "GPT2ForSequenceClassification": _HfExamplesInfo(
         "nie3e/sentiment-polish-gpt2-small"
     ),
