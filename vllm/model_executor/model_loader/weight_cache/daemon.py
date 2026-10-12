@@ -112,11 +112,14 @@ from vllm.model_executor.model_loader.weight_cache.protocol import (
     verify_peer_is_owner,
 )
 from vllm.model_executor.model_loader.weight_cache.utils import (
+    build_warmup_runner,
     export_model_attrs,
     format_daemon_role,
     is_draft_model_cacheable,
 )
+from vllm.model_executor.warmup.kernel_warmup import flashinfer_autotune
 from vllm.platforms import current_platform
+from vllm.utils.flashinfer import has_flashinfer
 from vllm.utils.mem_utils import format_gib
 from vllm.utils.torch_utils import set_default_torch_dtype
 from vllm.v1.worker.workspace import init_workspace_manager
@@ -235,6 +238,41 @@ class WeightCacheDaemon:
             dp_rank=dp_rank,
             is_draft=is_draft,
         )
+
+    def warmup(self) -> None:
+        """Run the FlashInfer autotune pass against the cached model."""
+        vllm_config = self.vllm_config
+        # Mirrors the gate in the engine's kernel warmup.
+        if (
+            vllm_config.kernel_config.enable_flashinfer_autotune is False
+            or not has_flashinfer()
+            or not current_platform.has_device_capability(90)
+            or is_draft_model_cacheable(vllm_config.speculative_config)
+        ):
+            return
+        try:
+            current_platform.update_block_size_for_backend(vllm_config)
+            runner = build_warmup_runner(
+                vllm_config,
+                self.local_rank,
+                is_draft=self.is_draft,
+                model_config=self.model_config,
+            )
+            assert self.model is not None, "warmup ran before load_model"
+            runner.load_model(model=self.model)
+            # The V2 runner requires skip_attn when no KV cache exists
+            flashinfer_autotune(runner, skip_attn=vllm_config.use_v2_model_runner)
+            logger.info(
+                "Weight cache %s daemon rank %d tuned FlashInfer; the tuned "
+                "configs are in the on-disk autotune cache",
+                self.role,
+                self.global_rank,
+            )
+        finally:
+            # Free the runner and the dummy-run activations; the daemon's
+            # weights are untouched.
+            gc.collect()
+            torch.accelerator.empty_cache()
 
     def load_model(self) -> None:
         torch.accelerator.set_device_index(self.local_rank)
@@ -457,6 +495,7 @@ def _run_daemon(
         pp_rank,
     )
     daemon.load_model()
+    daemon.warmup()
     daemon.serve_forever(
         ready_callback=lambda: ready_queue.put((daemon.role, daemon.global_rank))
     )
