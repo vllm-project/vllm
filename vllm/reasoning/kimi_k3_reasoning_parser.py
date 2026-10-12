@@ -291,12 +291,22 @@ class KimiK3ReasoningParser(ReasoningParser):
             return text or None
         return self._strip_content_wrapper(text) or None
 
+    def is_response_only(self, token_ids: Sequence[int]) -> bool:
+        """Whether generated tokens begin with the response control marker."""
+        return len(token_ids) >= len(self._response_open_ids) and _match_at(
+            token_ids, 0, self._response_open_ids
+        )
+
     def extract_reasoning(
-        self, model_output: str, request: "ChatCompletionRequest | ResponsesRequest"
+        self,
+        model_output: str,
+        request: "ChatCompletionRequest | ResponsesRequest",
+        model_output_token_ids: Sequence[int] = (),
     ) -> tuple[str | None, str | None]:
         """Split full text into ``(reasoning, rest)`` for the non-streaming path.
 
-        Handles four shapes:
+        A leading response control prefix takes precedence over quoted think
+        markers in its body. Otherwise, handles four shapes:
           * response opener without think markers -> no think channel; all content
           * open marker present       -> reasoning starts after ``<|open|>think<|sep|>``
           * open marker absent but a   close marker exists (gen-prefix consumed
@@ -305,7 +315,7 @@ class KimiK3ReasoningParser(ReasoningParser):
             generation prefix
         ``rest`` is whatever follows the close marker, fed on to the tool parser.
         """
-        if not self._thinking_enabled:
+        if not self._thinking_enabled or self.is_response_only(model_output_token_ids):
             return None, self._content_after_reasoning(model_output, request)
 
         m_open = self._think_open_re.search(model_output)
@@ -317,7 +327,11 @@ class KimiK3ReasoningParser(ReasoningParser):
         if (
             m_open is None
             and m_close is None
-            and self._response_open_re.search(model_output) is not None
+            and (
+                _subseq_index(model_output_token_ids, self._response_open_ids) != -1
+                if model_output_token_ids
+                else self._response_open_re.search(model_output) is not None
+            )
         ):
             return None, self._content_after_reasoning(model_output, request)
         if m_close is not None:

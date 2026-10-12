@@ -127,25 +127,36 @@ def test_response_only_json_preserves_quoted_think_marker(marker):
     assert tool_calls == []
 
 
-def test_consumed_think_prefix_preserves_literal_response_marker():
+@pytest.mark.parametrize("finished_reasoning", [False, True])
+def test_consumed_think_prefix_preserves_literal_response_marker(finished_reasoning):
     parser = ReasoningOnlyParser(_dummy_tokenizer())
     request = ChatCompletionRequest(model="test-model", messages=[])
-    reasoning = RESPONSE_OPEN + " is the response opener."
+    reasoning = "Consider the marker " + RESPONSE_OPEN + " here"
     body = '{"ok":true}'
     # The prompt already opened thinking. The generated opener below is ordinary
     # text; only the later response opener is made of control tokens.
-    token_ids = [
-        *map(ord, reasoning),
-        *CLOSE_IDS,
-        *RESPONSE_OPEN_IDS,
-        *map(ord, body),
-    ]
+    text = reasoning
+    token_ids = list(map(ord, reasoning))
+    if finished_reasoning:
+        text += THINK_CLOSE + RESPONSE_OPEN + body
+        token_ids += [*CLOSE_IDS, *RESPONSE_OPEN_IDS, *map(ord, body)]
 
     assert parser.parse(
-        reasoning + THINK_CLOSE + RESPONSE_OPEN + body,
+        text,
         request,
         model_output_token_ids=token_ids,
-    ) == (reasoning, body, [])
+    ) == (reasoning, body if finished_reasoning else None, [])
+
+
+def test_response_control_after_whitespace_preserves_content():
+    parser = ReasoningOnlyParser(_dummy_tokenizer())
+    request = ChatCompletionRequest(model="test-model", messages=[])
+    body = '{"ok":true}'
+    assert parser.parse(
+        "\n" + RESPONSE_OPEN + body,
+        request,
+        model_output_token_ids=[ord("\n"), *RESPONSE_OPEN_IDS, *map(ord, body)],
+    ) == (None, body, [])
 
 
 def test_is_reasoning_end_uses_full_input_ids():
