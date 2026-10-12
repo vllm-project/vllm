@@ -23,6 +23,8 @@ GLM5_MONO = MonoSpec(
     tp_sizes=(8,),
     cdna_versions=(4,),
     widths=KERNEL_WIDTHS,
+    kernel_module="vllm.models.deepseek_v32.amd.mono.kernel.glm.kernel",
+    resident_blocks="BLOCKS",
     opt_in=lambda c: bool(envs.VLLM_ROCM_USE_GLM5_MONOKERNEL),
     on_refusal="raise",
 )

@@ -19,10 +19,11 @@ from vllm.models.common.mono.op import (
     register_mono_layer_op,
 )
 from vllm.models.common.mono.runtime import MonoRuntime, StepDecision
-from vllm.models.common.mono.spec import Feature, MonoSpec
+from vllm.models.common.mono.spec import Constraint, Feature, MonoSpec
 from vllm.models.common.mono.weights import check_tensors
 
 __all__ = [
+    "Constraint",
     "Feature",
     "MonoOp",
     "MonoRuntime",

@@ -42,10 +42,12 @@ def mono_env(monkeypatch):
 
 @pytest.fixture
 def no_platform_check(monkeypatch):
-    """The spec's ROCm probe passes: these are CPU tests of everything around it."""
+    """The spec's device and kernel-package checks pass: these are CPU tests of
+    everything around them."""
     from vllm.models.common.mono import MonoSpec
 
     monkeypatch.setattr(MonoSpec, "_platform", lambda self: [])
+    monkeypatch.setattr(MonoSpec, "_kernel", lambda self: [])
 
 
 @pytest.fixture

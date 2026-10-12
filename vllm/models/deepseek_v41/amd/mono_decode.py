@@ -29,7 +29,6 @@ from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
 from vllm.models.common.mono import Feature, MonoOp, MonoRuntime, MonoSpec, StepDecision
-from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
     from vllm.models.deepseek_v41.amd.model import DeepseekV4DecoderLayer
@@ -49,18 +48,6 @@ MAX_ROWS = 48  # the kernels' step rows at most: 8 requests x (1 + 5 DSpark draf
 _rt: MonoRuntime | None = None
 
 
-def _needs_flydsl(vllm_config) -> str | None:
-    try:
-        from vllm.models.deepseek_v41.amd.mono.runner import BLOCKS
-    except ImportError as err:
-        return f"needs FlyDSL and AITER's FlyDSL helpers ({err})"
-    # every CTA of a launch stays resident: a partitioned GPU deadlocks
-    cus = current_platform.num_compute_units(torch.accelerator.current_device_index())
-    if cus < BLOCKS:
-        return f"needs {BLOCKS} compute units, the GPU has {cus}"
-    return None
-
-
 def _needs_a8w4_moe(vllm_config) -> str | None:
     if envs.VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4:
         return "needs AITER's A8W4 MoE (VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4 unset)"
@@ -73,7 +60,9 @@ DSV41_MONO = MonoSpec(
     tp_sizes=(2, 4),
     cdna_versions=(4,),  # the kernels' ISA: gfx950 scaled MFMA and MX formats
     widths=tuple(range(1, MAX_ROWS + 1)),
-    constraints=(_needs_flydsl, _needs_a8w4_moe),
+    kernel_module="vllm.models.deepseek_v41.amd.mono.runner",
+    resident_blocks="BLOCKS",
+    constraints=(_needs_a8w4_moe,),
     opt_in=lambda c: bool(envs.VLLM_ROCM_MONO_DECODE),
     on_refusal="raise",  # the opt-in was explicit: say why it cannot be served
 )

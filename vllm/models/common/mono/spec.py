@@ -38,15 +38,19 @@ class Feature(Enum):
     SLEEP_MODE = "sleep mode (weights are reloaded on wake)"
 
 
-def _parallel(name: str) -> Callable[[VllmConfig], bool]:
+InUseCheck = Callable[[VllmConfig], bool]
+"""Whether a :class:`Feature` is on in this configuration."""
+
+
+def _parallel(name: str) -> InUseCheck:
     return lambda c: bool(getattr(c.parallel_config, name))
 
 
-def _aux(name: str) -> Callable[[VllmConfig], bool]:
+def _aux(name: str) -> InUseCheck:
     return lambda c: bool(getattr(getattr(c, "aux_output_config", None), name, False))
 
 
-_PROBES: dict[Feature, Callable[[VllmConfig], bool]] = {
+_FEATURE_IN_USE: dict[Feature, InUseCheck] = {
     Feature.EXPERT_PARALLEL: _parallel("enable_expert_parallel"),
     Feature.EXPERT_LOAD_BALANCING: _parallel("enable_eplb"),
     Feature.DATA_PARALLEL: lambda c: c.parallel_config.data_parallel_size > 1,
@@ -62,6 +66,10 @@ _PROBES: dict[Feature, Callable[[VllmConfig], bool]] = {
 }
 
 
+Constraint = Callable[[VllmConfig], str | None]
+"""A model-specific gate, returning a refusal reason or None."""
+
+
 @dataclass(frozen=True)
 class MonoSpec:
     """What a MonoKernel can run.
@@ -74,8 +82,16 @@ class MonoSpec:
         dtypes: Model dtypes, empty for any.
         kv_cache_dtypes: ``cache_config.cache_dtype`` values, empty for any.
         tp_sizes: Tensor-parallel sizes, empty for any.
-        cdna_versions: ROCm CDNA ISA versions, empty for any (and for non-ROCm).
+        cdna_versions: ROCm CDNA ISA versions, empty for any. Ignored off ROCm.
         min_compute_units: Compute units the persistent launch needs resident.
+            Ignored off ROCm.
+        kernel_module: Import path of the kernel package, empty to not check.
+            Importing it pulls in FlyDSL and AITER's FlyDSL helpers, so a
+            deployment without them refuses here instead of failing in
+            ``build``.
+        resident_blocks: Name of an int in ``kernel_module`` holding the CTAs
+            the launch keeps resident, empty to not check. Every one stays
+            resident for the whole launch, so too few compute units deadlock.
         graph_modes: CUDA-graph runtime modes a step may be taken in.
         widths: Step widths the kernel builds, ascending. A step's rows are
             padded up to the smallest width that fits.
@@ -97,9 +113,11 @@ class MonoSpec:
     tp_sizes: tuple[int, ...] = ()
     cdna_versions: tuple[int, ...] = ()
     min_compute_units: int = 0
+    kernel_module: str = ""
+    resident_blocks: str = ""
     graph_modes: tuple[CUDAGraphMode, ...] = (CUDAGraphMode.NONE, CUDAGraphMode.FULL)
     widths: tuple[int, ...] = ()
-    constraints: tuple[Callable[[VllmConfig], str | None], ...] = field(default=())
+    constraints: tuple[Constraint, ...] = field(default=())
     opt_in: Callable[[VllmConfig], bool] | None = None
     on_refusal: str = "degrade"
 
@@ -118,8 +136,8 @@ class MonoSpec:
         """
         why = [
             f"{feature.value} is on and {self.name} does not support it"
-            for feature, probe in _PROBES.items()
-            if feature not in self.supports and _probe(probe, vllm_config)
+            for feature, check in _FEATURE_IN_USE.items()
+            if feature not in self.supports and _in_use(check, vllm_config)
         ]
         mc, pc = vllm_config.model_config, vllm_config.parallel_config
         arch = getattr(mc.hf_config, "model_type", None)
@@ -134,14 +152,43 @@ class MonoSpec:
             sizes = "/".join(map(str, self.tp_sizes))
             why.append(f"tensor parallel size {pc.tensor_parallel_size} (want {sizes})")
         why += self._platform()
+        why += self._kernel()
         why += [r for c in self.constraints if (r := c(vllm_config))]
         return why
 
+    def _kernel(self) -> list[str]:
+        """The kernel package imports and the GPU can hold its launch."""
+        if not self.kernel_module:
+            return []
+        from importlib import import_module
+
+        try:
+            module = import_module(self.kernel_module)
+        except ImportError as e:
+            return [f"needs FlyDSL and AITER's FlyDSL helpers ({e})"]
+        if not self.resident_blocks:
+            return []
+        from vllm.platforms import current_platform
+
+        blocks = getattr(module, self.resident_blocks)
+        units = current_platform.num_compute_units(
+            torch.accelerator.current_device_index()
+        )
+        if units < blocks:
+            return [f"needs {blocks} compute units, the GPU has {units}"]
+        return []
+
     def _platform(self) -> list[str]:
+        """ROCm device checks. Off ROCm these fields hold no opinion: both ask
+        about CDNA hardware, so a CUDA MonoKernel will want its own fields and
+        should not be refused by ones it cannot answer."""
         if not self.cdna_versions and not self.min_compute_units:
             return []
         try:
             from vllm.platforms import current_platform
+
+            if not current_platform.is_rocm():
+                return []
             from vllm.platforms.rocm import get_cdna_version
 
             cdna = get_cdna_version()
@@ -169,8 +216,8 @@ class MonoSpec:
         return mode in self.graph_modes
 
 
-def _probe(probe: Callable[[VllmConfig], bool], vllm_config: VllmConfig) -> bool:
+def _in_use(check: InUseCheck, vllm_config: VllmConfig) -> bool:
     try:
-        return probe(vllm_config)
+        return check(vllm_config)
     except Exception:  # noqa: BLE001
         return False
