@@ -277,6 +277,7 @@ class NixlBaseConnectorWorker:
         src_blocks_data: np.ndarray,
         num_fa_descs: int,
         block_size_ratio: int = 1,
+        remote_page_lens: list[int] | None = None,
     ) -> Iterator[list[tuple[int, int, int]]]:
         """Build split handle data for P_TP > D_TP scenario.
 
@@ -302,7 +303,9 @@ class NixlBaseConnectorWorker:
         )
 
         # Per-FA-descriptor replicate flag, in _build_fa_local emission order.
-        fa_desc_replicated = self._fa_desc_replicated(num_fa_descs, block_size_ratio)
+        fa_desc_replicated = self._fa_desc_replicated(
+            num_fa_descs, block_size_ratio, remote_page_lens
+        )
         sharded_desc_end = len(src_blocks_data) - (
             self._logical_num_blocks if self._ple_region_index is not None else 0
         )
@@ -346,11 +349,17 @@ class NixlBaseConnectorWorker:
         return tp_ratio < 0 and (not self.use_mla or len(plan.all_source_ranks) > 1)
 
     def _fa_desc_replicated(
-        self, num_fa_descs: int, block_size_ratio: int = 1
+        self,
+        num_fa_descs: int,
+        block_size_ratio: int = 1,
+        remote_page_lens: list[int] | None = None,
     ) -> list[bool]:
         """Per-FA-descriptor replicate flag, in _build_fa_local emission order:
         region-major, ``region_num_blocks[i] * block_size_ratio`` descs per
         region. Length ``num_fa_descs``.
+
+        ``remote_page_lens`` (per-region remote page sizes from the handshake
+        metadata) demotes head-scaled replicated regions to split granularity.
         """
         assert self.transfer_topo is not None
         n_regions = len(self.block_len_per_layer)
@@ -359,8 +368,18 @@ class NixlBaseConnectorWorker:
         region_indices = self._transfer_layer_region_indices or range(n_regions)
         flags: list[bool] = []
         for i in region_indices:
+            replicated = self._is_region_replicated(i)
+            if (
+                replicated
+                and remote_page_lens is not None
+                and i < len(remote_page_lens)
+            ):
+                # Mirror _build_fa_remote: head-scaled replicated regions
+                # (local page > remote page, e.g. sparse_mla_force_mqa under
+                # D<P) transfer at split granularity.
+                replicated = self.block_len_per_layer[i] <= remote_page_lens[i]
             num_descs = self.region_num_blocks[i] * block_size_ratio
-            flags.extend([self._is_region_replicated(i)] * num_descs)
+            flags.extend([replicated] * num_descs)
         assert len(flags) == num_fa_descs, (
             f"FA desc flags {len(flags)} != num_fa_descs {num_fa_descs}"
         )
@@ -2030,9 +2049,19 @@ class NixlBaseConnectorWorker:
             local_region = (
                 self._transfer_layer_region_indices[i] if use_layer_name_routing else i
             )
-            replicated = self._is_region_replicated(local_region)
             # Read our whole local region size from remote..
             local_block_len = self.block_len_per_layer[local_region]
+            # Head-scaled replicated storage (e.g. sparse_mla_force_mqa stores
+            # the MLA latent per head): under D<P the local page is a multiple
+            # of the remote page, and a whole-local-page descriptor overruns
+            # the remote registration (NIXL_ERR_NOT_FOUND). Content is
+            # identical across per-head copies (MQA), so transfer such
+            # regions at SPLIT granularity instead: num_reads chunks of
+            # local_page/num_reads == remote_page.
+            replicated = (
+                self._is_region_replicated(local_region)
+                and local_block_len <= nixl_agent_meta.block_lens[i]
+            )
             remote_kv_block_len = local_block_len // block_size_ratio
             if block_size_ratio > 1:
                 # ..using remote kv_block_len as transfer unit
@@ -2048,6 +2077,26 @@ class NixlBaseConnectorWorker:
 
             block_arange = np.arange(region_num_blocks[i], dtype=np.uint64)
             addrs = base_addr + rank_offset + block_arange * block_strides[i]
+            logger.debug(
+                "V5REGION i=%s local_region=%s replicated=%s local_page=%s "
+                "remote_page=%s bsr=%s num_reads=%s rank_offset=%s "
+                "desc_len=%s remote_stride=%s remote_blocks=%s "
+                "desc_end_over_last=%s",
+                i,
+                local_region,
+                replicated,
+                self.block_len_per_layer[local_region],
+                nixl_agent_meta.block_lens[i],
+                block_size_ratio,
+                num_reads,
+                rank_offset,
+                local_block_len,
+                block_strides[i],
+                region_num_blocks[i],
+                (region_num_blocks[i] - 1) * block_strides[i] + local_block_len
+                if region_num_blocks[i]
+                else 0,
+            )
             parts.append(self._stack_descs(addrs, local_block_len, device_id))
         return np.concatenate(parts)
 
@@ -2254,11 +2303,55 @@ class NixlBaseConnectorWorker:
         transfer_topo.register_remote_engine(engine_id, transfer_info)
         logger.info("Transfer plan: %s", transfer_topo.describe(engine_id))
 
+        _v8_routing = bool(self._transfer_layer_region_indices)
+        _v8_lens_match = len(nixl_agent_meta.block_lens) == len(
+            self.block_len_per_layer
+        )
+        _v8_has_split = _v8_lens_match and any(
+            (
+                not self._is_region_replicated(
+                    self._transfer_layer_region_indices[i] if _v8_routing else i
+                )
+            )
+            or (
+                self._is_region_replicated(
+                    self._transfer_layer_region_indices[i] if _v8_routing else i
+                )
+                and self.block_len_per_layer[
+                    self._transfer_layer_region_indices[i] if _v8_routing else i
+                ]
+                > nixl_agent_meta.block_lens[i]
+            )
+            for i in range(len(nixl_agent_meta.block_lens))
+        )
+        _v8_sig = []
+        _n = min(len(nixl_agent_meta.block_lens), len(self.block_len_per_layer))
+        for _i in range(_n):
+            _lr = self._transfer_layer_region_indices[_i] if _v8_routing else _i
+            _rep = self._is_region_replicated(_lr)
+            _local_len = self.block_len_per_layer[_lr]
+            _remote_len = nixl_agent_meta.block_lens[_i]
+            if (not _rep) or (_rep and _local_len > _remote_len):
+                _v8_sig.append((_i, _lr, _rep, _local_len, _remote_len))
+        logger.debug(
+            "V8MAP engine=%s has_split=%s routing=%s lens_match=%s "
+            "n_remote=%s n_local=%s pp=%s mla_true=%s signal_regions=%s",
+            engine_id,
+            _v8_has_split,
+            _v8_routing,
+            _v8_lens_match,
+            len(nixl_agent_meta.block_lens),
+            len(self.block_len_per_layer),
+            getattr(self, "pp_size", -1),
+            sum(1 for _f in self._region_is_mla if _f),
+            _v8_sig[:8],
+        )
         self.tp_mappings[engine_id] = compute_tp_mapping(
             transfer_topology=transfer_topo,
             remote_tp_size=remote_tp_size,
             group_spec_types=self._group_spec_types,
             remote_dcp_size=remote_dcp_size,
+            has_split_attn_regions=_v8_has_split,
         )
 
         remote_agent_name = self.nixl_wrapper.add_remote_agent(
@@ -2343,11 +2436,19 @@ class NixlBaseConnectorWorker:
             if self._mixed_mem_types:
                 self._dram_src_handles_by_tp_ratio[split_key] = []
 
+            # Remote page lens (identity region mapping; layer-name routing
+            # keeps the legacy whole-page behavior).
+            remote_page_lens = (
+                list(nixl_agent_meta.block_lens)
+                if not self._transfer_layer_region_indices
+                else None
+            )
             for handle_data in self._build_local_splits_from_plan(
                 plan,
                 src_blocks_data,
                 self.num_descs * block_size_ratio,
                 block_size_ratio,
+                remote_page_lens,
             ):
                 if self._mixed_mem_types:
                     handle_data = np.asarray(handle_data, dtype=np.uint64)
@@ -2403,6 +2504,20 @@ class NixlBaseConnectorWorker:
                 "NIXL pull does not yet support a mixed-memory producer"
             )
         descs = self.nixl_wrapper.get_xfer_descs(blocks_data, remote_mem_types.pop())
+        try:
+            _bd = np.asarray(blocks_data)
+            logger.debug(
+                "V5DESCS engine=%s rank=%s n_descs=%s min_len=%s max_len=%s "
+                "max_end_addr=%s",
+                engine_id,
+                remote_tp_rank,
+                len(_bd),
+                int(_bd[:, 1].min()) if len(_bd) else -1,
+                int(_bd[:, 1].max()) if len(_bd) else -1,
+                int((_bd[:, 0] + _bd[:, 1]).max()) if len(_bd) else -1,
+            )
+        except Exception:
+            pass
         self.dst_xfer_side_handles[engine_id][remote_tp_rank] = (
             self.nixl_wrapper.prep_xfer_dlist(remote_agent_name, descs)
         )
@@ -2441,6 +2556,22 @@ class NixlBaseConnectorWorker:
         tp_ratio = self.transfer_topo.tp_ratio(remote_tp_size)
         block_size_ratio = self.transfer_topo.block_size_ratio(
             nixl_agent_meta.block_size
+        )
+        logger.debug(
+            "NIXL handshake geometry: local_tp=%s remote_tp=%s tp_ratio=%s "
+            "bsr=%s local_num_blocks=%s remote_num_blocks=%s "
+            "local_regions=%s remote_regions=%s local_block_lens[:8]=%s "
+            "remote_block_lens[:8]=%s",
+            self.transfer_topo.tp_size,
+            remote_tp_size,
+            tp_ratio,
+            block_size_ratio,
+            self.num_blocks,
+            nixl_agent_meta.num_blocks,
+            len(self.block_len_per_layer),
+            len(nixl_agent_meta.block_lens),
+            self.block_len_per_layer[:8],
+            nixl_agent_meta.block_lens[:8],
         )
         # num_kv_heads > tp_size with P_TP > D_TP not supported for non-mamba.
         # Mamba models can have replicated FA KV with tp_ratio < 0.
@@ -2573,9 +2704,13 @@ class NixlBaseConnectorWorker:
             assert len(local_regions) == len(nixl_agent_meta.block_lens), (
                 "Number of KV layers must match between prefill and decode"
             )
-            model_replicated = self.use_mla or self.transfer_topo.is_kv_replicated(
-                remote_engine_id
-            )
+            # Per-region spec classification decides REPLICATE vs SPLIT. The
+            # previous `self.use_mla or ...` override forced replicated
+            # treatment onto the head-sharded attention regions of mixed
+            # models (e.g. GLM DSA: replicated MLA latent + head-sharded
+            # indexer K), whose page lengths scale with heads/TP — breaking
+            # heterogeneous P/D TP in both validation and descriptor prep.
+            model_replicated = self.transfer_topo.is_kv_replicated(remote_engine_id)
             total_kv_heads = self.transfer_topo.total_num_kv_heads
             local_heads = self.transfer_topo.local_physical_heads
             remote_heads = max(1, total_kv_heads // remote_tp_size)
@@ -2584,11 +2719,27 @@ class NixlBaseConnectorWorker:
                 replicated = model_replicated or self._is_region_replicated(region_idx)
                 remote_len = nixl_agent_meta.block_lens[i]
                 if replicated:
-                    assert local_len // block_size_ratio == remote_len, (
-                        "KV cache sizes must match between P and D when "
-                        f"replicated (region {i}: local={local_len}, "
-                        f"remote={remote_len}, bsr={block_size_ratio})."
-                    )
+                    if tp_ratio != 1:
+                        # Heterogeneous TP with replicated (MLA) KV: per-region
+                        # transfer geometry (page/segment sizes) scales with
+                        # the per-rank cache layout. The transfer maps
+                        # per-request block IDs explicitly, so unequal region
+                        # lengths are allowed (see ServeIt Studio GLM-5.3
+                        # investigation). One aggregate notice per handshake.
+                        if not getattr(self, "_relax_logged", False):
+                            self._relax_logged = True
+                            logger.warning(
+                                "Heterogeneous TP (tp_ratio=%s): replicated "
+                                "KV region lengths differ between P and D "
+                                "and are allowed (head-scaled storage)",
+                                tp_ratio,
+                            )
+                    else:
+                        assert local_len // block_size_ratio == remote_len, (
+                            "KV cache sizes must match between P and D when "
+                            f"replicated (region {i}: local={local_len}, "
+                            f"remote={remote_len}, bsr={block_size_ratio})."
+                        )
                 elif tp_ratio > 0:
                     assert (
                         remote_len

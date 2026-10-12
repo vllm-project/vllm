@@ -103,6 +103,71 @@ def test_mla_dcp_source_ranks(
     assert mapping.all_source_ranks == expected_ranks
 
 
+class TestMixedMLAHeterogeneousTP:
+    """Mixed MLA models (replicated MLA latent + head-sharded regions, e.g.
+    GLM DSA / sparse_mla_force_mqa) under heterogeneous P/D TP.
+
+    MLA topologies report total_num_kv_heads=1 (MQA semantics), which
+    collapses the GQA head-dedup to a single source. With
+    has_split_attn_regions=True (region-level signal from the caller),
+    the dedup is bypassed so each remote rank's head-scaled data is read.
+    """
+
+    def test_mixed_mla_d_less_than_p_keeps_all_sources(self):
+        """D TP8 <- P TP16: both abs_tp sources kept with positional slots."""
+        transfer_topology = object.__new__(TransferTopology)
+        transfer_topology.tp_rank = 0
+        transfer_topology.tp_size = 8
+        transfer_topology.is_mla = True
+        transfer_topology.total_num_kv_heads = 1
+        transfer_topology.dcp_size = 1
+        mapping = compute_tp_mapping(
+            transfer_topology=transfer_topology,
+            remote_tp_size=16,
+            group_spec_types=(FullAttentionSpec,),
+            remote_dcp_size=1,
+            has_split_attn_regions=True,
+        )
+        # abs_tp = 16 // 8 = 2; the MQA head-dedup would collapse this to
+        # one source, but head-scaled regions hold different data per rank.
+        assert mapping.all_source_ranks == (0, 1)
+        assert mapping.rank_to_attention_slot == {0: 0, 1: 1}
+
+    def test_mixed_mla_d_greater_than_p_single_source(self):
+        """D TP16 <- P TP8: one remote rank holds all local head slots."""
+        transfer_topology = object.__new__(TransferTopology)
+        transfer_topology.tp_rank = 0
+        transfer_topology.tp_size = 16
+        transfer_topology.is_mla = True
+        transfer_topology.total_num_kv_heads = 1
+        transfer_topology.dcp_size = 1
+        mapping = compute_tp_mapping(
+            transfer_topology=transfer_topology,
+            remote_tp_size=8,
+            group_spec_types=(FullAttentionSpec,),
+            remote_dcp_size=1,
+            has_split_attn_regions=True,
+        )
+        assert mapping.all_source_ranks == (0,)
+
+    def test_pure_mla_without_signal_keeps_single_source(self):
+        """No region-level signal: pure MLA keeps the legacy single-source
+        branch (group-representative specs cannot detect mixed regions)."""
+        transfer_topology = object.__new__(TransferTopology)
+        transfer_topology.tp_rank = 0
+        transfer_topology.tp_size = 8
+        transfer_topology.is_mla = True
+        transfer_topology.total_num_kv_heads = 1
+        transfer_topology.dcp_size = 1
+        mapping = compute_tp_mapping(
+            transfer_topology=transfer_topology,
+            remote_tp_size=16,
+            group_spec_types=(FullAttentionSpec,),
+            remote_dcp_size=1,
+        )
+        assert mapping.all_source_ranks == (0,)
+
+
 @pytest.mark.parametrize(
     "tp_size,remote_tp_size,dcp_size,remote_dcp_size",
     [

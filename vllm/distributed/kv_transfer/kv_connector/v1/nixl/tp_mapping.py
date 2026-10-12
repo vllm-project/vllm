@@ -72,6 +72,7 @@ def compute_tp_mapping(
     remote_tp_size: int,
     group_spec_types: tuple[type[KVCacheSpec], ...],
     remote_dcp_size: int = 1,
+    has_split_attn_regions: bool | None = None,
 ) -> TPMapping:
     """Build the complete local-to-remote TP mapping.
 
@@ -85,7 +86,26 @@ def compute_tp_mapping(
     tp_size = transfer_topology.tp_size
     total_num_kv_heads = transfer_topology.total_num_kv_heads
     # --- Attention source ranks ---
-    if transfer_topology.is_mla or tp_size >= remote_tp_size:
+    # Mixed models (replicated MLA latent + head-sharded attention regions,
+    # e.g. GLM DSA) must route ALL attention groups through the head-mapping
+    # branch: the sharded regions need multi-source GQA reads, and the
+    # replicated regions tolerate the extra source (identical data). Pure
+    # MLA models keep the single-source branch.
+    if has_split_attn_regions is not None:
+        # Region-level truth from the caller: a mixed model whose GROUP
+        # representative specs are all MLA (e.g. GLM DSA: the indexer's
+        # group representative is an MLA spec while its layer spec is not)
+        # is detected correctly by the per-region replicated flags.
+        has_split_attn = has_split_attn_regions
+    else:
+        # Group-representative specs cannot detect head-scaled regions
+        # (a mixed model's group specs can all look MLA while individual
+        # layer specs are head-sharded). Default to legacy behavior:
+        # pure MLA takes the single-source branch, GQA keeps its head
+        # dedup. Mixed models must pass has_split_attn_regions=True.
+        has_split_attn = False
+    positional_slots = False
+    if (transfer_topology.is_mla and not has_split_attn) or tp_size >= remote_tp_size:
         if transfer_topology.is_mla and remote_dcp_size > 1:
             attn_ranks = transfer_topology.dcp_source_ranks(
                 remote_tp_size, remote_dcp_size
@@ -107,6 +127,14 @@ def compute_tp_mapping(
         heads = np.arange(start, start + abs_tp) * total_num_kv_heads // remote_tp_size
         _, unique_idx = np.unique(heads, return_index=True)
         attn_ranks = (start + np.sort(unique_idx)).tolist()
+        if has_split_attn and len(attn_ranks) < abs_tp:
+            # Head-scaled storage (e.g. sparse_mla_force_mqa): the topology
+            # reports total_num_kv_heads=1 for MLA (MQA semantics), which
+            # collapses the head-based dedup to one source — but each remote
+            # rank holds DIFFERENT head-scaled data. Keep all abs_tp sources
+            # with positional slots. Genuine GQA replication keeps the dedup.
+            attn_ranks = list(range(start, start + abs_tp))
+            positional_slots = True
 
     # --- SSM source ranks ---
     has_ssm = any(_is_ssm_spec(t) for t in group_spec_types)
@@ -128,13 +156,16 @@ def compute_tp_mapping(
     )
 
     # --- Attention head slots ---
-    head_to_slot: dict[int, int] = {}
-    for i, r in enumerate(attn_ranks):
-        head_to_slot[r * total_num_kv_heads // remote_tp_size] = i
-    rank_to_attention_slot = {
-        r: head_to_slot.get(r * total_num_kv_heads // remote_tp_size, 0)
-        for r in all_ranks
-    }
+    if positional_slots:
+        rank_to_attention_slot = {r: i for i, r in enumerate(attn_ranks)}
+    else:
+        head_to_slot: dict[int, int] = {}
+        for i, r in enumerate(attn_ranks):
+            head_to_slot[r * total_num_kv_heads // remote_tp_size] = i
+        rank_to_attention_slot = {
+            r: head_to_slot.get(r * total_num_kv_heads // remote_tp_size, 0)
+            for r in all_ranks
+        }
 
     # --- Rank offset factor ---
     if transfer_topology.is_mla or tp_size <= remote_tp_size:
