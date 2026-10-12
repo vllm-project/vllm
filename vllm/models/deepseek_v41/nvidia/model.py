@@ -850,6 +850,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             cut < self.end_layer - 1
             and self._decoder_replay_supported(vllm_config, cut)
             and self.layers[cut].attn.swa_cache_layer.bounded_replay
+            and vllm_config.lora_config is None
         ):
             assert self.layers[cut].attn.compress_ratio <= 1
             # The last KV source writes every row's KV, then replays.
