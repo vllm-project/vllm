@@ -11,7 +11,7 @@ import torch.distributed as dist
 
 from vllm.distributed.communication_op import tensor_model_parallel_all_reduce
 from vllm.distributed.device_communicators.island_all_reduce import (
-    is_two_island_topology,
+    find_two_islands,
 )
 from vllm.distributed.parallel_state import get_tp_group, graph_capture
 from vllm.platforms import current_platform
@@ -23,6 +23,8 @@ WORLD_SIZE = 8
 HIDDEN = 6144
 # Exit code of a worker whose GPUs are not two 4-GPU XGMI islands.
 NOT_TWO_ISLANDS = 77
+# Rank -> GPU mapping that alternates between the islands of an 8x MI210 node.
+INTERLEAVED_GPUS = [0, 4, 1, 5, 2, 6, 3, 7]
 
 
 def _fully_connected_within_islands(ids: list[int]) -> bool:
@@ -32,21 +34,29 @@ def _fully_connected_within_islands(ids: list[int]) -> bool:
 @pytest.mark.parametrize(
     "ids,connected,expected",
     [
-        (list(range(8)), _fully_connected_within_islands, True),
+        (
+            list(range(8)),
+            _fully_connected_within_islands,
+            ([0, 1, 2, 3], [4, 5, 6, 7]),
+        ),
         # A fully connected node (e.g. 8x MI300X) uses the flat custom all-reduce.
-        (list(range(8)), lambda ids: True, False),
+        (list(range(8)), lambda ids: True, None),
         # PCIe-only GPUs have no islands.
-        (list(range(8)), lambda ids: len(ids) == 1, False),
-        (list(range(4)), _fully_connected_within_islands, False),
-        # The TP rank order must follow the islands.
-        ([0, 4, 1, 5, 2, 6, 3, 7], _fully_connected_within_islands, False),
+        (list(range(8)), lambda ids: len(ids) == 1, None),
+        (list(range(4)), _fully_connected_within_islands, None),
+        # The TP rank order need not follow the islands.
+        (
+            INTERLEAVED_GPUS,
+            _fully_connected_within_islands,
+            ([0, 2, 4, 6], [1, 3, 5, 7]),
+        ),
     ],
 )
-def test_two_island_topology_detection(ids, connected, expected):
+def test_find_two_islands(ids, connected, expected):
     with patch.object(
         current_platform, "is_fully_connected", side_effect=connected, create=True
     ):
-        assert is_two_island_topology(ids) is expected
+        assert find_two_islands(ids) == expected
 
 
 def _rank_input(rank: int, tokens: int, dtype: torch.dtype, seed: int) -> torch.Tensor:
@@ -69,7 +79,8 @@ def _island_worker(rank: int, port: int, case: str, dtype_name: str) -> None:
         IslandAllReduce,
     )
 
-    device = torch.device(f"cuda:{rank}")
+    gpu = INTERLEAVED_GPUS[rank] if case == "interleaved" else rank
+    device = torch.device(f"cuda:{gpu}")
     torch.accelerator.set_device_index(device)
     dist.init_process_group(
         backend="gloo",
@@ -96,6 +107,14 @@ def _island_worker(rank: int, port: int, case: str, dtype_name: str) -> None:
         elif case == "large":
             assert iar.hierarchical
             for tokens in (256, 1024, 4096):
+                check(
+                    iar.all_reduce(_rank_input(rank, tokens, dtype, 0).to(device)),
+                    tokens,
+                )
+        elif case == "interleaved":
+            # One size per path; the hierarchical one depends on the pairing.
+            assert iar.ca_island is not None and iar.hierarchical
+            for tokens in (3, 256):
                 check(
                     iar.all_reduce(_rank_input(rank, tokens, dtype, 0).to(device)),
                     tokens,
@@ -180,6 +199,11 @@ def test_island_all_reduce_small_tensors_match_fp32_sum(dtype_name):
 @pytest.mark.parametrize("dtype_name", ["bfloat16", "float16"])
 def test_island_all_reduce_large_tensors_match_fp32_sum(dtype_name):
     _run_workers(_island_worker, "large", dtype_name)
+
+
+@requires_8_rocm_gpus
+def test_island_all_reduce_rank_order_interleaving_islands():
+    _run_workers(_island_worker, "interleaved", "bfloat16")
 
 
 @requires_8_rocm_gpus

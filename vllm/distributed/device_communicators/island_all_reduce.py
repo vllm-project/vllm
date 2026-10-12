@@ -12,6 +12,9 @@ step. Instead:
 * smaller tensors, and CUDA graphs: vLLM's custom all-reduce inside each
   island, then across the GPU pair at the same island position.
 
+The islands are found from the link topology, so the TP ranks need not be
+ordered by island.
+
 The custom kernels always copy the input into the pre-registered IPC buffer,
 also inside CUDA graphs: registered graph buffers return wrong sums on MI210
 with ROCm 7.
@@ -32,16 +35,30 @@ logger = init_logger(__name__)
 _ISLAND_WORLD_SIZE = 8
 
 
-def is_two_island_topology(physical_device_ids: list[int]) -> bool:
-    """Whether the GPUs split into two fully connected halves that are not
-    fully connected to each other."""
-    half = len(physical_device_ids) // 2
-    return (
-        len(physical_device_ids) == _ISLAND_WORLD_SIZE
-        and not current_platform.is_fully_connected(physical_device_ids)
-        and current_platform.is_fully_connected(physical_device_ids[:half])
-        and current_platform.is_fully_connected(physical_device_ids[half:])
-    )
+def find_two_islands(
+    physical_device_ids: list[int],
+) -> tuple[list[int], list[int]] | None:
+    """Split the GPUs into two fully connected halves.
+
+    Returns the positions in ``physical_device_ids`` of each half, in
+    ascending order, or None if the GPUs are fully connected or do not split
+    into two equal fully connected groups.
+    """
+    ids = physical_device_ids
+    if len(ids) != _ISLAND_WORLD_SIZE or current_platform.is_fully_connected(ids):
+        return None
+    first = [0] + [
+        i
+        for i in range(1, len(ids))
+        if current_platform.is_fully_connected([ids[0], ids[i]])
+    ]
+    second = [i for i in range(len(ids)) if i not in first]
+    if len(first) != len(second):
+        return None
+    for island in (first, second):
+        if not current_platform.is_fully_connected([ids[i] for i in island]):
+            return None
+    return first, second
 
 
 class IslandAllReduce:
@@ -76,20 +93,22 @@ class IslandAllReduce:
         gathered = [torch.zeros_like(phys) for _ in range(world_size)]
         dist.all_gather(gathered, phys, group=cpu_group)
         ids = [int(t.item()) for t in gathered]
-        if not is_two_island_topology(ids):
+        positions = find_two_islands(ids)
+        if positions is None:
             return
 
-        half = world_size // 2
-        r = global_ranks
-        islands = [
-            dist.new_group(r[:half], backend="gloo"),
-            dist.new_group(r[half:], backend="gloo"),
-        ]
+        # A group ranks its members by ascending global rank, so the k-th GPU
+        # of one island pairs with the k-th GPU of the other: the hierarchical
+        # path needs both ends of a pair to hold the same shard.
+        members = [sorted(global_ranks[i] for i in island) for island in positions]
+        islands = [dist.new_group(ranks, backend="gloo") for ranks in members]
         pairs = [
-            dist.new_group([r[i], r[i + half]], backend="gloo") for i in range(half)
+            dist.new_group([a, b], backend="gloo")
+            for a, b in zip(members[0], members[1])
         ]
-        me = dist.get_rank(cpu_group)
-        island, pair = islands[me // half], pairs[me % half]
+        my_rank = global_ranks[dist.get_rank(cpu_group)]
+        side = 0 if my_rank in members[0] else 1
+        island, pair = islands[side], pairs[members[side].index(my_rank)]
 
         self.max_custom_bytes = envs.VLLM_ROCM_ISLAND_AR_CUSTOM_MAX_BYTES
         self.min_hier_bytes = envs.VLLM_ROCM_ISLAND_AR_HIER_MIN_BYTES
@@ -117,9 +136,9 @@ class IslandAllReduce:
             return
         self.disabled = False
         logger.info_once(
-            "Island all-reduce enabled for GPUs %s: two-level custom < %d B (%s), "
-            "hierarchical RCCL >= %d B (%s).",
-            str(ids),
+            "Island all-reduce enabled for GPU islands %s: two-level custom < %d B "
+            "(%s), hierarchical RCCL >= %d B (%s).",
+            str([[ids[i] for i in island] for island in positions]),
             self.max_custom_bytes,
             "on" if self.ca_island is not None else "off",
             self.min_hier_bytes,
