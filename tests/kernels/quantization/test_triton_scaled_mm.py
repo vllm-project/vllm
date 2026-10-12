@@ -185,7 +185,9 @@ def test_scaled_mm_td_matches_plain(M, N, K, in_dtype, use_scalar_scale_a, use_b
     reason="Triton scaled_mm runs on CUDA-alike or XPU.",
 )
 @pytest.mark.parametrize("M", [1, 64])
-def test_scaled_mm_custom_op_under_compile(M):
+@pytest.mark.parametrize("use_bias", [True, False])
+@pytest.mark.parametrize("scalar_scales", [True, False])
+def test_scaled_mm_custom_op_under_compile(M, use_bias, scalar_scales):
     import vllm.model_executor.kernels.linear.scaled_mm.triton  # noqa: F401
 
     N, K = 2048, 4096
@@ -194,9 +196,9 @@ def test_scaled_mm_custom_op_under_compile(M):
     a = torch.randint(-32, 32, (M, K), dtype=torch.int8, device=device)
     # Checkpoint layout: a transposed [N, K] view.
     b = torch.randint(-32, 32, (N, K), dtype=torch.int8, device=device).t()
-    scale_a = 0.25 * torch.rand((M, 1), device=device)
-    scale_b = 0.25 * torch.rand((N, 1), device=device)
-    bias = torch.rand((N,), device=device, dtype=out_dtype)
+    scale_a = 0.25 * torch.rand((1 if scalar_scales else M, 1), device=device)
+    scale_b = 0.25 * torch.rand((1 if scalar_scales else N, 1), device=device)
+    bias = torch.rand((N,), device=device, dtype=out_dtype) if use_bias else None
 
     def fn(a, b, scale_a, scale_b, bias):
         return torch.ops.vllm.triton_scaled_mm_func(
@@ -206,3 +208,89 @@ def test_scaled_mm_custom_op_under_compile(M):
     expected = triton_scaled_mm(a, b, scale_a, scale_b, out_dtype, bias)
     compiled = torch.compile(fn, fullgraph=True)(a, b, scale_a, scale_b, bias)
     torch.testing.assert_close(compiled, expected, rtol=0, atol=0)
+
+
+# The fake impl must match the real output without touching a device.
+@pytest.mark.parametrize("M,N,K", [(1, 32, 64), (7, 128, 256)])
+@pytest.mark.parametrize("out_dtype", [torch.bfloat16, torch.float16])
+def test_scaled_mm_fake_impl_meta(M, N, K, out_dtype):
+    import vllm.model_executor.kernels.linear.scaled_mm.triton  # noqa: F401
+
+    a = torch.empty((M, K), dtype=torch.int8, device="meta")
+    b = torch.empty((N, K), dtype=torch.int8, device="meta").t()
+    scale_a = torch.empty((M, 1), device="meta")
+    scale_b = torch.empty((N, 1), device="meta")
+    out = torch.ops.vllm.triton_scaled_mm_func(a, b, scale_a, scale_b, out_dtype, None)
+    assert out.shape == (M, N)
+    assert out.dtype == out_dtype
+    assert out.device.type == "meta"
+
+
+# The regression itself: apply_weights must reach the opaque op under compile.
+@pytest.mark.skipif(
+    not (current_platform.is_cuda_alike() or current_platform.is_xpu()),
+    reason="Triton scaled_mm runs on CUDA-alike or XPU.",
+)
+@pytest.mark.parametrize("M", [1, 64])
+@pytest.mark.parametrize("use_bias", [True, False])
+@pytest.mark.parametrize("is_static", [True, False])
+def test_int8_kernel_apply_weights_opaque_under_compile(M, use_bias, is_static):
+    from vllm.model_executor.kernels.linear.scaled_mm import (
+        Int8ScaledMMLinearLayerConfig,
+    )
+    from vllm.model_executor.kernels.linear.scaled_mm.triton import (
+        TritonInt8ScaledMMLinearKernel,
+    )
+
+    N, K = 2048, 4096
+    dtype = torch.bfloat16
+    set_random_seed(0)
+    config = Int8ScaledMMLinearLayerConfig(
+        is_static_input_scheme=is_static, is_channelwise=True, input_symmetric=True
+    )
+    kernel = TritonInt8ScaledMMLinearKernel(
+        config, ("weight", "weight_scale", "input_scale", "input_zero_point", "azp_adj")
+    )
+    layer = torch.nn.Module()
+    layer.logical_widths = [N]
+    layer.weight = torch.nn.Parameter(
+        torch.randint(-32, 32, (N, K), dtype=torch.int8, device=device),
+        requires_grad=False,
+    )
+    layer.weight_scale = torch.nn.Parameter(
+        0.01 * torch.rand((N, 1), device=device), requires_grad=False
+    )
+    layer.input_scale = (
+        torch.nn.Parameter(torch.full((1,), 0.02, device=device), requires_grad=False)
+        if is_static
+        else None
+    )
+    layer.input_zero_point = None
+    kernel.process_weights_after_loading(layer)
+
+    x = torch.randn((M, K), device=device, dtype=dtype)
+    bias = torch.rand((N,), device=device, dtype=dtype) if use_bias else None
+
+    expected = kernel.apply_weights(layer, x, bias)
+
+    graphs = []
+
+    def backend(gm, example_inputs):
+        graphs.append(gm)
+        return gm.forward
+
+    compiled = torch.compile(
+        lambda x, bias: kernel.apply_weights(layer, x, bias),
+        backend=backend,
+        fullgraph=True,
+    )(x, bias)
+
+    targets = [str(n.target) for g in graphs for n in g.graph.nodes]
+    assert any("triton_scaled_mm_func" in t for t in targets), targets
+    if is_static:
+        torch.testing.assert_close(compiled, expected, rtol=0, atol=0)
+    else:
+        # Compiled dynamic quant keeps the per-token scale in fp32; eager rounds
+        # it to the activation dtype. Quantized values match, outputs differ ~1e-3.
+        atol = 2e-2 * expected.abs().max().item()
+        torch.testing.assert_close(compiled, expected, rtol=2e-2, atol=atol)
