@@ -1032,3 +1032,37 @@ def test_compile_opt_out_preserves_native_aot_roundtrip(graph_cache_probe):
     """Native AOT survives an opt-out module compiled first under the same config."""
     graph_cache_probe(0, native="cold")
     graph_cache_probe(0, native="warm")
+
+
+@pytest.mark.skipif(not is_torch_equal_or_newer("2.10.0"), reason="requires torch 2.10")
+def test_compile_opt_out_respected_in_dynamo_trace_once(monkeypatch, fresh_vllm_cache):
+    """Opt-out skips model AOT without disabling tracing or causing retracing."""
+    monkeypatch.setenv("VLLM_USE_AOT_COMPILE", "1")
+    monkeypatch.setenv("VLLM_FORCE_AOT_LOAD", "0")
+    monkeypatch.setenv("VLLM_USE_BYTECODE_HOOK", "0")
+    disable_envs_cache()
+
+    @support_torch_compile(dynamic_arg_dims={"x": 0}, use_aot_compile=False)
+    class OptOutMod(torch.nn.Module):
+        def forward(self, x):
+            return x * 2 + 1
+
+    config = VllmConfig(
+        compilation_config=CompilationConfig(
+            mode=CompilationMode.DYNAMO_TRACE_ONCE, backend="inductor"
+        )
+    )
+    x = torch.arange(64, device=current_platform.device_type).reshape(8, 8).float()
+    counters = torch._dynamo.utils.counters["stats"]
+    with (
+        use_vllm_config(config),
+        patch.object(OptOutMod, "aot_compile", side_effect=AssertionError("Model AOT")),
+    ):
+        assert envs.VLLM_USE_AOT_COMPILE
+        mod = OptOutMod(vllm_config=config)
+        before = counters["unique_graphs"]
+        assert torch.equal(mod(x), x * 2 + 1)
+        traced = counters["unique_graphs"]
+        assert traced > before
+        assert torch.equal(mod(x + 10), (x + 10) * 2 + 1)
+        assert counters["unique_graphs"] == traced

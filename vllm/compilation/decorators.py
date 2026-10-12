@@ -177,8 +177,9 @@ def support_torch_compile(
     the lifetime of the model, otherwise, it cannot be captured as a single
     computation graph.
 
-    `use_aot_compile=False` skips model and direct compiled artifacts in
-    VLLM_COMPILE mode while retaining the underlying PyTorch graph caches.
+    `use_aot_compile=False` disables model AOT in DYNAMO_TRACE_ONCE and
+    VLLM_COMPILE modes. In VLLM_COMPILE mode, it also skips mega and direct
+    compiled artifacts while retaining the underlying PyTorch graph caches.
 
     `enable_if` is a function that takes a `VllmConfig` object as input and
     returns a boolean value indicating whether to compile the model or not.
@@ -403,10 +404,7 @@ def _support_torch_compile(
 
         self.vllm_config = vllm_config
         self.compilation_config = self.vllm_config.compilation_config
-        self._allow_aot_compile = (
-            use_aot_compile
-            or self.compilation_config.mode != CompilationMode.VLLM_COMPILE
-        )
+        self._allow_aot_compile = use_aot_compile
         enable_compile = enable_if is None or enable_if(vllm_config)
         # for CompilationMode.STOCK_TORCH_COMPILE , the upper level model runner
         # will handle the compilation, so we don't need to do anything here.
