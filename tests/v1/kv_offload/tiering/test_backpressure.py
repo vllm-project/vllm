@@ -129,31 +129,26 @@ class DelayedSecondaryTierManager(SecondaryTierManager):
 class TestDefaultConfig:
     def test_fs_gets_local_watermarks(self):
         cfg = EMABackpressureDetector.default_config("fs")
-        assert cfg is not None
         assert cfg["high_water_s"] == EMABackpressureDetector.LOCAL_HIGH_WATER_S
         assert cfg["low_water_s"] == EMABackpressureDetector.LOCAL_LOW_WATER_S
 
     def test_obj_gets_network_watermarks(self):
         cfg = EMABackpressureDetector.default_config("obj")
-        assert cfg is not None
         assert cfg["high_water_s"] == EMABackpressureDetector.NETWORK_HIGH_WATER_S
         assert cfg["low_water_s"] == EMABackpressureDetector.NETWORK_LOW_WATER_S
 
     def test_p2p_gets_local_watermarks(self):
         cfg = EMABackpressureDetector.default_config("p2p")
-        assert cfg is not None
         assert cfg["high_water_s"] == EMABackpressureDetector.LOCAL_HIGH_WATER_S
         assert cfg["low_water_s"] == EMABackpressureDetector.LOCAL_LOW_WATER_S
 
     def test_fs_with_remote_locality_gets_network_watermarks(self):
         cfg = EMABackpressureDetector.default_config("fs", locality="REMOTE")
-        assert cfg is not None
         assert cfg["high_water_s"] == EMABackpressureDetector.NETWORK_HIGH_WATER_S
         assert cfg["low_water_s"] == EMABackpressureDetector.NETWORK_LOW_WATER_S
 
     def test_fs_with_local_locality_gets_local_watermarks(self):
         cfg = EMABackpressureDetector.default_config("fs", locality="LOCAL")
-        assert cfg is not None
         assert cfg["high_water_s"] == EMABackpressureDetector.LOCAL_HIGH_WATER_S
         assert cfg["low_water_s"] == EMABackpressureDetector.LOCAL_LOW_WATER_S
 

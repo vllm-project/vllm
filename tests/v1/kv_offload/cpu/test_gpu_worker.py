@@ -340,9 +340,7 @@ def test_transfer(
         gpu_blocks = gpu_blocks[blocks_to_skip:]
         cpu_chunks_expanded = cpu_chunks_expanded[blocks_to_skip:]
 
-    # set transfer direction. The specs are named by medium rather than by
-    # src/dst: submit_store is always GPU -> CPU and submit_load is always
-    # CPU -> GPU, and each API pins the GPU side to GPULoadStoreSpec.
+    # set transfer direction
     if gpu_to_cpu:
         handler = worker._store_handler
         gpu_spec = GPULoadStoreSpec(
@@ -549,8 +547,6 @@ def test_transfer_multi_group(
     # block_indices: only relevant for unaligned transfers
     block_indices: list[int] = [0, 0, sub_blocks_to_skip]
 
-    # as in test_transfer, the specs are named by medium so that each one
-    # keeps the concrete type its submit_store / submit_load slot requires.
     if gpu_to_cpu:
         handler = worker._store_handler
         gpu_spec = GPULoadStoreSpec(

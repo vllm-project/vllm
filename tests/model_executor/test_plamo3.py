@@ -51,8 +51,7 @@ def test_plamo3_returns_dflash_selected_auxiliary_hidden_states(monkeypatch):
         lambda: SimpleNamespace(is_first_rank=True, is_last_rank=True),
     )
 
-    # Same check as supports_eagle3(), which mypy resolves to its
-    # type[object] overload here and so narrows target to a class.
+    # supports_eagle3() would narrow to a class: nn.Module is Any to mypy
     assert isinstance(target, SupportsEagle3)
     assert target.get_eagle3_default_aux_hidden_state_layers() == (2, 4, 5)
 

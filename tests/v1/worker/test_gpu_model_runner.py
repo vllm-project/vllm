@@ -339,8 +339,6 @@ def test_select_common_block_size_accepts_rocm_sparse_block_size_16(monkeypatch)
 
     selected_size = select_common_block_size(
         16,
-        # Only the static block-size hooks are read; neither class is
-        # instantiated, so the indexer's missing get_impl_cls is irrelevant.
         [DeepseekV32IndexerBackend, ROCMAiterMLASparseBackend],  # type: ignore[type-abstract]  # not instantiated
     )
     assert selected_size == 16

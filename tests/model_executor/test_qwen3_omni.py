@@ -258,8 +258,7 @@ def test_qwen3_omni_exposes_eagle3_to_its_text_backbone():
     nn.Module.__init__(model)
     model.language_model = DummyLanguageModel()
 
-    # Same check as supports_eagle3(), which mypy resolves to its
-    # type[object] overload here and so narrows model to a class.
+    # supports_eagle3() would narrow to a class: nn.Module is Any to mypy
     assert isinstance(model, SupportsEagle3)
     model.set_aux_hidden_state_layers((1, 2))
     assert model.language_model.model.aux_hidden_state_layers == (1, 2)

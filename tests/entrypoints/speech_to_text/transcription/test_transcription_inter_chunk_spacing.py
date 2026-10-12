@@ -212,8 +212,7 @@ async def test_transcription_stream_generator_english_inserts_space_between_chun
     serving.streaming_post_processor_cls = (
         _StubTranscriptionModel.get_streaming_post_processor_cls()
     )
-    # task_type is Final on the real class; this instance is built with __new__.
-    serving.task_type = "transcribe"  # type: ignore[misc]
+    serving.task_type = "transcribe"  # type: ignore[misc]  # Final, set in __init__
     request = SimpleNamespace(
         model="stub-model",
         stream_include_usage=False,
@@ -253,8 +252,7 @@ async def test_transcription_stream_generator_chinese_no_space_between_chunks():
     serving.streaming_post_processor_cls = (
         _StubTranscriptionModel.get_streaming_post_processor_cls()
     )
-    # task_type is Final on the real class; this instance is built with __new__.
-    serving.task_type = "transcribe"  # type: ignore[misc]
+    serving.task_type = "transcribe"  # type: ignore[misc]  # Final, set in __init__
     request = SimpleNamespace(
         model="stub-model",
         stream_include_usage=False,
@@ -299,8 +297,7 @@ async def test_transcription_stream_generator_strips_qwen3_asr_prefix_per_chunk(
     serving.streaming_post_processor_cls = (
         Qwen3ASRForConditionalGeneration.get_streaming_post_processor_cls()
     )
-    # task_type is Final on the real class; this instance is built with __new__.
-    serving.task_type = "transcribe"  # type: ignore[misc]
+    serving.task_type = "transcribe"  # type: ignore[misc]  # Final, set in __init__
     request = SimpleNamespace(
         model="stub-qwen3-asr",
         stream_include_usage=False,

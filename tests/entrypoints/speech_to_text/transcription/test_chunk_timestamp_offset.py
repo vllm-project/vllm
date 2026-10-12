@@ -46,8 +46,7 @@ async def test_chunk_offsets_are_cumulative_not_nominal():
     model_cls.get_generation_prompt.return_value = {}
     serving.model_cls = model_cls
     serving.model_config = MagicMock()
-    # task_type is Final on the real class; this instance is built with __new__.
-    serving.task_type = "transcribe"  # type: ignore[misc]
+    serving.task_type = "transcribe"  # type: ignore[misc]  # Final, set in __init__
     serving.renderer = MagicMock()
     serving.renderer.render_cmpl_async = AsyncMock(
         return_value=[MagicMock()] * len(chunks)

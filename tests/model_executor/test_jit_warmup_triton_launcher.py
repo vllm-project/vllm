@@ -19,7 +19,6 @@ from vllm.model_executor.warmup.jit_warmup import (
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     LaunchSpec,
     TritonJitKey,
-    TritonKernelDispatcher,
     TritonWarmupTensor,
     VllmTritonJitKernel,
     triton_kernel_dispatcher_with_warmup,
@@ -70,15 +69,6 @@ def _patch_key_deriver(
         "_triton_key_deriver",
         lambda kernel: lambda kwargs: derive(kernel, kwargs),
     )
-
-
-def _decorated(
-    dispatcher: TritonKernelDispatcher[...],
-) -> jit_warmup_triton_helper._DecoratedTritonJitKernel:
-    # The decorator is annotated with the dispatcher protocol, which omits
-    # the warmup API of the _DecoratedTritonJitKernel it actually returns.
-    assert isinstance(dispatcher, jit_warmup_triton_helper._DecoratedTritonJitKernel)
-    return dispatcher
 
 
 class _TestTritonKernel(VllmTritonJitKernel["_TestTritonKernel.CompileKey"]):
@@ -278,12 +268,11 @@ def test_triton_kernel_decorator_returns_launcher(
 
     _patch_key_deriver(monkeypatch, fake_keys)
 
-    dispatcher = _decorated(launch)
-    keys = dispatcher.get_warmup_keys()
-    keys_with_config = dispatcher.get_warmup_keys(vllm_config=object())
+    keys = launch.get_warmup_keys()
+    keys_with_config = launch.get_warmup_keys(vllm_config=object())
     assert keys_with_config == keys
     assert [dict(key.inputs)["second"] for key in keys] == [1, 2]
-    dispatcher.compile(keys[0])
+    launch.compile(keys[0])
     assert kernel.warmup_calls == [
         {
             "grid": (1,),
@@ -315,7 +304,7 @@ def test_triton_kernel_decorator_returns_launcher(
             },
         )
     ]
-    assert dispatcher.__name__ == "launch"
+    assert launch.__name__ == "launch"
     with pytest.raises(TypeError, match="unexpected keyword"):
         launch(first, 1, 7, stale_constexpr=True)  # type: ignore[call-arg]  # invalid on purpose
 
@@ -363,7 +352,7 @@ def test_triton_kernel_decorator_exhausts_large_ranges_before_deduplication(
 
     _patch_key_deriver(monkeypatch, fake_keys)
 
-    keys = _decorated(dispatch).get_warmup_keys()
+    keys = dispatch.get_warmup_keys()
     assert dispatched == list(range(1, 8193))
     assert len(keys) == 2
     assert {specialization(dict(key.inputs)["second"]) for key in keys} == {7, 8}
@@ -387,9 +376,8 @@ def test_triton_kernel_decorator_propagates_dispatch_assertions(
         lambda kernel, kwargs: {TritonJitKey(id(kernel), "fake", 0, kwargs["CONST"])},
     )
 
-    dispatcher = _decorated(dispatch)
     with pytest.raises(AssertionError, match="broken dispatch"):
-        dispatcher.get_warmup_keys()
+        dispatch.get_warmup_keys()
 
 
 def test_triton_kernel_dispatch_uses_device_fake_tensors(
@@ -416,7 +404,7 @@ def test_triton_kernel_dispatch_uses_device_fake_tensors(
         lambda kernel, kwargs: {TritonJitKey(id(kernel), "fake", 0, kwargs["CONST"])},
     )
 
-    keys = _decorated(dispatch).get_warmup_keys()
+    keys = dispatch.get_warmup_keys()
     assert len(keys) == 1
     assert dict(keys[0].inputs)["first"].device.type == device_type
 

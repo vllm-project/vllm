@@ -1176,7 +1176,7 @@ class TestServerLookupHandling:
         assert _lookup_resps(conn, sent_before) == []
 
         # Promote hB.
-        cb.pending.discard(b"hB")
+        cb.pending.discard(OffloadKey(b"hB"))
         cb.stored[OffloadKey(b"hB")] = 2
 
         # Drive resolver via a second serve_external_requests.

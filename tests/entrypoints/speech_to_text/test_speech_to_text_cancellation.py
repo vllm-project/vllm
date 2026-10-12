@@ -46,8 +46,7 @@ async def test_non_streaming_cancel_aborts_engine_requests(
 
     server = SpeechToTextBaseServing.__new__(SpeechToTextBaseServing)
     server.engine_client = engine_client
-    # task_type is Final on the real class; this instance is built with __new__.
-    server.task_type = "transcribe"  # type: ignore[misc]
+    server.task_type = "transcribe"  # type: ignore[misc]  # Final, set in __init__
     server.models = SimpleNamespace(model_name=lambda: "audio")
     server.model_config = SimpleNamespace(max_model_len=1024)
     server.model_cls = SimpleNamespace(no_space_languages=set())
@@ -127,8 +126,7 @@ async def test_non_streaming_cancel_advances_all_chunk_generators(monkeypatch):
     ]
     server = SpeechToTextBaseServing.__new__(SpeechToTextBaseServing)
     server.engine_client = engine_client
-    # task_type is Final on the real class; this instance is built with __new__.
-    server.task_type = "transcribe"  # type: ignore[misc]
+    server.task_type = "transcribe"  # type: ignore[misc]  # Final, set in __init__
     server.models = SimpleNamespace(model_name=lambda: "audio")
     server.model_config = SimpleNamespace(max_model_len=1024)
     server.model_cls = SimpleNamespace(no_space_languages=set())
