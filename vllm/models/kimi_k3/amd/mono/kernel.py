@@ -88,15 +88,16 @@ def compile_build(key) -> None:
 
     mod = kda if isinstance(key, kda.KdaPreBuild) else k2
     launch = mod.build(key)
-    old = os.environ.get("FLYDSL_COMPILE_ONLY")
-    os.environ["FLYDSL_COMPILE_ONLY"] = "1"
+    # FlyDSL's compile-only switch has no FLYDSL_ prefix
+    old = os.environ.get("COMPILE_ONLY")
+    os.environ["COMPILE_ONLY"] = "1"
     try:
         launch(*[0] * len(mod.ABI.names), stream=torch.cuda.current_stream())
     finally:
         if old is None:
-            del os.environ["FLYDSL_COMPILE_ONLY"]
+            del os.environ["COMPILE_ONLY"]
         else:
-            os.environ["FLYDSL_COMPILE_ONLY"] = old
+            os.environ["COMPILE_ONLY"] = old
 
 
 class _Layer:
