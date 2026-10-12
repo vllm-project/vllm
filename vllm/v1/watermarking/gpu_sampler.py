@@ -119,8 +119,9 @@ class GPUWatermarkSampler(Sampler):
         self,
         expanded_idx_mapping: torch.Tensor,
         contexts: torch.Tensor,
+        expanded_local_pos: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        return repeated_context_mask(
+        repeated = repeated_context_mask(
             self.req_states.all_token_ids.gpu,
             expanded_idx_mapping,
             self.req_states.prompt_len.gpu,
@@ -128,8 +129,16 @@ class GPUWatermarkSampler(Sampler):
             contexts,
             self.deduplicate_contexts_max_history,
             include_prompt=self.deduplicate_contexts == "all",
-            skip_partial_context=self.deduplicate_contexts == "all",
+            skip_partial_context=(
+                self.deduplicate_contexts == "all" and expanded_local_pos is None
+            ),
+            history_offsets=expanded_local_pos,
+            local_positions=expanded_local_pos,
+            num_speculative_steps=(
+                self.num_speculative_tokens if expanded_local_pos is not None else 0
+            ),
         )
+        return repeated
 
     def _get_contexts(
         self,
