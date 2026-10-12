@@ -140,9 +140,9 @@ _QWEN4_EXP_IGNORED_MISSING_SUFFIXES = [
     "_input_scale",
 ]
 
-# The checkpoint keeps down and injection projections separate; runtime packs
-# them into adjacent logical shards of one MergedColumnParallelLinear.
-_HC_WEIGHTS_MAPPER = WeightsMapper(
+# The checkpoint stores these projections separately; runtime packs each group
+# into adjacent logical shards of a MergedColumnParallelLinear.
+_EXTRA_WEIGHTS_MAPPER = WeightsMapper(
     orig_to_new_stacked={
         "hyper_connection.input_mix_weight_down.weight": (
             "hyper_connection.input_mix_weight_down_block_inject.weight",
@@ -152,6 +152,8 @@ _HC_WEIGHTS_MAPPER = WeightsMapper(
             "hyper_connection.input_mix_weight_down_block_inject.weight",
             1,
         ),
+        "ple.key_proj": ("ple.kv_proj", 0),
+        "ple.value_proj": ("ple.kv_proj", 1),
     }
 )
 
@@ -276,7 +278,7 @@ class Qwen4ExpDecoderLayer(nn.Module):
 
             if input_ids is None or query_start_loc is None or ngram_context is None:
                 raise RuntimeError("PLE inputs were not prepared")
-            hidden_states = hidden_states + self.ple(
+            hidden_states = self.ple(
                 hidden_states,
                 input_ids,
                 query_start_loc,
@@ -371,7 +373,7 @@ class Qwen4ExpMixtureOfExperts(MixtureOfExperts):
     }
 )
 class Qwen4ExpModel(nn.Module):
-    hf_to_vllm_mapper = Qwen3_5Model.hf_to_vllm_mapper | _HC_WEIGHTS_MAPPER
+    hf_to_vllm_mapper = Qwen3_5Model.hf_to_vllm_mapper | _EXTRA_WEIGHTS_MAPPER
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
@@ -594,6 +596,7 @@ class Qwen4ExpForCausalLM(
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],
+        "kv_proj": ["key_proj", "value_proj"],
         "in_proj_qkvz": ["in_proj_qkv", "in_proj_z"],
         "in_proj_ba": ["in_proj_b", "in_proj_a"],
         "input_mix_weight_down_block_inject": [
@@ -644,8 +647,6 @@ class Qwen4ExpForCausalLM(
         inputs_embeds: torch.Tensor | None = None,
         **kwargs: object,
     ) -> torch.Tensor | IntermediateTensors:
-        # Forward kwargs unchanged so the runner's _maybe_add_ngram_kwargs
-        # path (query_start_loc / ngram_context) reaches Qwen4ExpModel.
         return self.model(
             input_ids,
             positions,
@@ -825,11 +826,12 @@ class Qwen4ExpForConditionalGeneration(
     requires_raw_input_tokens = True
 
     packed_modules_mapping = Qwen3_5ForConditionalGeneration.packed_modules_mapping | {
+        "kv_proj": ["key_proj", "value_proj"],
         "input_mix_weight_down_block_inject": [
             "input_mix_weight_down",
             "block_inject_weight",
             "_input_mix_padding",
-        ]
+        ],
     }
 
     @staticmethod
