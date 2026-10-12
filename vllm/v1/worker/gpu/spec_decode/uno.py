@@ -41,6 +41,12 @@ from vllm.v1.worker.utils import AttentionGroup
 
 logger = init_logger(__name__)
 UNO_LORA_ID = 1_000_003
+# Attention backends Uno's tests run it on, per platform. A backend must be
+# listed here AND pass the capability checks in set_attn and
+# init_cudagraph_manager; one that passes them but was never run with Uno
+# (FlashInfer's trtllm-gen decode, for example) is refused at startup.
+UNO_CUDA_ATTN_BACKENDS: tuple[str, ...] = ("FLASH_ATTN", "TRITON_ATTN")
+UNO_ROCM_ATTN_BACKENDS: tuple[str, ...] = ("TRITON_ATTN",)
 UNO_USER_LORA_ERROR = (
     "Uno does not support user LoRA adapters yet: --enable-lora serves only "
     "Uno's own adapter, so runtime LoRA loading and default multimodal LoRAs "
@@ -133,6 +139,59 @@ def validate_uno_config(vllm_config: VllmConfig) -> None:
             "Uno requires max_num_batched_tokens >= max_num_seqs * "
             f"num_speculative_tokens ({required_tokens}) for draft LoRA routing"
         )
+    # An explicitly requested attention backend is checked here, before any
+    # weights load; load_model checks the backend every layer actually built.
+    attention_config = vllm_config.attention_config
+    requested = (attention_config.backend, *attention_config.backend_per_kind.values())
+    for backend in requested:
+        if backend is not None:
+            refusal = uno_attention_backend_refusal(backend.name)
+            if refusal is not None:
+                raise ValueError(refusal)
+    if (
+        current_platform.is_rocm()
+        and attention_config.backend is None
+        and not attention_config.backend_per_kind
+    ):
+        # ROCm's default is not a backend Uno's tests run.
+        raise ValueError(
+            "Uno on ROCm requires an explicit tested attention backend: pass "
+            '--attention-config \'{"backend":"TRITON_ATTN"}\''
+        )
+
+
+def uno_device_refusal(device: torch.device) -> str | None:
+    """Why Uno cannot run on ``device``, or None when it can.
+
+    NVIDIA CUDA or AMD ROCm. HIP devices report the type "cuda", so the
+    platform decides between the two. The attention backend, not the card,
+    is what Uno restricts (``uno_attention_backend_refusal``).
+    """
+    if device.type != "cuda":
+        return "Uno requires a CUDA or ROCm GPU device"
+    if current_platform.is_cuda() or current_platform.is_rocm():
+        return None
+    return "Uno currently requires an NVIDIA CUDA or AMD ROCm device"
+
+
+def uno_attention_backend_refusal(backend_name: str) -> str | None:
+    """Why Uno cannot run on the attention backend ``backend_name``, or None.
+
+    The tested backends of the current platform (``UNO_CUDA_ATTN_BACKENDS``,
+    ``UNO_ROCM_ATTN_BACKENDS``) pass; every other backend is refused, even
+    when its metadata builder has the capabilities Uno checks later.
+    """
+    if current_platform.is_rocm():
+        platform, tested = "ROCm", UNO_ROCM_ATTN_BACKENDS
+    else:
+        platform, tested = "CUDA", UNO_CUDA_ATTN_BACKENDS
+    if backend_name in tested:
+        return None
+    return (
+        f"Uno on {platform} is tested only with the {' and '.join(tested)} "
+        f"attention backend{'s' if len(tested) > 1 else ''}, not "
+        f"{backend_name}. Select a tested backend with --attention-config."
+    )
 
 
 def uncovered_draft_request_counts(
@@ -160,8 +219,9 @@ def uncovered_draft_request_counts(
 
 class UnoSpeculator(DraftModelSpeculator):
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
-        if device.type != "cuda" or not current_platform.is_cuda():
-            raise ValueError("Uno currently requires an NVIDIA CUDA device")
+        refusal = uno_device_refusal(device)
+        if refusal is not None:
+            raise ValueError(refusal)
         validate_uno_config(vllm_config)
         super().__init__(vllm_config, device)
         self.k = self.num_speculative_steps
@@ -288,9 +348,15 @@ class UnoSpeculator(DraftModelSpeculator):
         }
         if not self.draft_attn_layer_names:
             raise ValueError("Uno requires shared target attention with a KV cache")
+        # The backend must be a tested one for this platform; its metadata
+        # builder's capabilities are checked as well, in set_attn (native
+        # draft decode updates) and init_cudagraph_manager (graph support).
         for name in self.draft_attn_layer_names:
-            if layers[name].get_attn_backend().get_name() != "FLASH_ATTN":
-                raise ValueError("Uno currently requires the FLASH_ATTN backend")
+            refusal = uno_attention_backend_refusal(
+                layers[name].get_attn_backend().get_name()
+            )
+            if refusal is not None:
+                raise ValueError(refusal)
         self.supports_mm_inputs = False
 
     def set_attn(
