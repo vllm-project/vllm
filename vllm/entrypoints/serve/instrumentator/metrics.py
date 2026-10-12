@@ -95,7 +95,7 @@ def attach_router(app: FastAPI):
         if client and client.vllm_config.parallel_config.enable_fault_tolerance:
             status = await client.get_status()
             # Keep rank health local to this scrape, outside shared metric files.
-            scrape_registry = CollectorRegistry(auto_describe=True)
+            scrape_registry = CollectorRegistry(support_collectors_without_names=True)
             scrape_registry.register(registry)
             scrape_registry.register(
                 _EngineHealthCollector(status["engines"], client.errored)
