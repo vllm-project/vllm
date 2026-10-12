@@ -373,6 +373,36 @@ def test_checksums_add_up_across_block_sizes():
     )
 
 
+def _check_requests_and_groups_of_one_step(device: str) -> None:
+    first, second = _logical_kv(heads=2, seed=1), _logical_kv(heads=2, seed=2)
+    worker = _worker(
+        _config(_group(_spec(2), _name(0)), _group(_spec(2), _name(1))),
+        {_name(0): _cache(first).to(device), _name(1): _cache(second).to(device)},
+    )
+    reqs = {
+        "a": KVChecksumBlocks(
+            num_tokens=40, groups={0: (1, [3, 1]), 1: (0, [2, 5, 0])}
+        ),
+        "b": KVChecksumBlocks(num_tokens=21, groups={0: (1, [2])}),
+    }
+    worker.bind(KVChecksumScheduled(reqs_to_recv=reqs))
+    [record] = worker.post_forward(set(reqs), set(), set()).finalize()
+    for req_id, blocks in reqs.items():
+        for group_id, (start, block_ids) in blocks.groups.items():
+            kv = first if group_id == 0 else second
+            group_blocks = KVChecksumBlocks(blocks.num_tokens, {0: (start, block_ids)})
+            np.testing.assert_array_equal(
+                record.checksums[req_id][group_id].values[:, 0],
+                _reference({group_id: kv}, group_blocks),
+            )
+
+
+def test_requests_and_groups_of_one_step_are_checksummed_together():
+    """Loads of several requests and groups finishing in one step, starting
+    past the first block and ending in partial blocks, match the definition."""
+    _check_requests_and_groups_of_one_step("cpu")
+
+
 def test_kv_sharing_layers_counted_once():
     """A KV-sharing layer aliasing its target's cache is counted once, under
     the target's layer number."""

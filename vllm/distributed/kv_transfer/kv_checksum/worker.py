@@ -30,7 +30,6 @@ from vllm.distributed.kv_transfer.kv_checksum.checksum import (
     KVChecksumScheduled,
     ReplicaKey,
     kv_checksum_enabled,
-    num_valid_tokens,
 )
 from vllm.distributed.kv_transfer.kv_checksum.kernels import layer_checksum
 from vllm.distributed.parallel_state import (
@@ -480,8 +479,21 @@ class _GroupBatch:
     segments: list[tuple[str, int, int]] = field(default_factory=list)
     """``(req_id, start_position, num_rows)`` per request, in row order."""
     block_ids: list[int] = field(default_factory=list)
-    first_tokens: list[int] = field(default_factory=list)
-    valid_tokens: list[int] = field(default_factory=list)
+    num_tokens: list[int] = field(default_factory=list)
+    """The request's number of tokens, per segment."""
+
+    def rows(self, block_size: int) -> np.ndarray:
+        """The ``[block_ids, first_tokens, valid_tokens]`` of the rows."""
+        starts = np.array([start for _, start, _ in self.segments], dtype=np.int64)
+        lengths = np.array([n for _, _, n in self.segments], dtype=np.int64)
+        first_rows = np.cumsum(lengths) - lengths
+        positions = np.arange(len(self.block_ids), dtype=np.int64)
+        positions += np.repeat(starts - first_rows, lengths)
+        first_tokens = positions * block_size
+        num_tokens = np.repeat(np.array(self.num_tokens, dtype=np.int64), lengths)
+        valid_tokens = np.clip(num_tokens - first_tokens, 0, block_size)
+        block_ids = np.array(self.block_ids, dtype=np.int64)
+        return np.stack([block_ids, first_tokens, valid_tokens])
 
 
 class KVChecksumOutput:
@@ -745,33 +757,46 @@ class KVChecksumWorker:
             for group_id, (start, block_ids) in blocks.groups.items():
                 if group_id not in self._layer_views or not block_ids:
                     continue
-                block_size = self._block_sizes[group_id]
                 batch = batches[group_id]
                 batch.segments.append((req_id, start, len(block_ids)))
                 batch.block_ids.extend(block_ids)
-                batch.first_tokens.extend(
-                    pos * block_size for pos in range(start, start + len(block_ids))
-                )
-                batch.valid_tokens.extend(
-                    num_valid_tokens(pos, block_size, blocks.num_tokens)
-                    for pos in range(start, start + len(block_ids))
-                )
+                batch.num_tokens.append(blocks.num_tokens)
 
+        device = None
+        groups = []
         for group_id, batch in batches.items():
             layers = [
                 layer
                 for layer in self._layer_views[group_id]
                 if not replica_zero_only or layer.replica_key[1] == 0
             ]
-            if not layers:
-                continue
-            device = layers[0].pieces.device
+            if layers:
+                device = layers[0].pieces.device
+                groups.append((group_id, batch, layers))
+        if device is None:
+            return
+
+        # One copy for every group. Each group starts at an even column, so
+        # the slices are 16-byte aligned like those the kernel was warmed up on.
+        columns = []
+        width = 0
+        for _, batch, _ in groups:
+            columns.append(width)
+            width += len(batch.block_ids) + len(batch.block_ids) % 2
+        host = np.zeros((3, width), dtype=np.int64)
+        for (group_id, batch, _), column in zip(groups, columns):
+            rows = batch.rows(self._block_sizes[group_id])
+            host[:, column : column + rows.shape[1]] = rows
+        device_rows = _to_device(host, device)
+
+        for (group_id, batch, layers), column in zip(groups, columns):
+            num_rows = len(batch.block_ids)
+            block_ids, first_tokens, valid_tokens = device_rows[
+                :, column : column + num_rows
+            ]
             replica_keys = list(dict.fromkeys(layer.replica_key for layer in layers))
-            block_ids = _to_device(batch.block_ids, device)
-            first_tokens = _to_device(batch.first_tokens, device)
-            valid_tokens = _to_device(batch.valid_tokens, device)
             values = torch.zeros(
-                (len(batch.block_ids), len(replica_keys)),
+                (num_rows, len(replica_keys)),
                 dtype=torch.int64,
                 device=device,
             )
@@ -785,9 +810,9 @@ class KVChecksumWorker:
             output.add_group(group_id, batch.segments, replica_keys, values)
 
 
-def _to_device(values: list[int], device: torch.device) -> torch.Tensor:
-    """Copy host ints to ``device`` without blocking the host."""
-    host = torch.tensor(values, dtype=torch.int64)
+def _to_device(values: np.ndarray, device: torch.device) -> torch.Tensor:
+    """Copy ``values`` to ``device`` without blocking the host."""
+    host = torch.from_numpy(values)
     if device.type == "cpu":
         return host
     if PIN_MEMORY:
