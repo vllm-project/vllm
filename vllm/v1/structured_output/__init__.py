@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import multiprocessing
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from functools import partial
 from itertools import chain
@@ -14,8 +14,8 @@ from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.parser.engine.adapters import ParserEngineReasoningAdapter
 from vllm.reasoning import ReasoningParserManager
-from vllm.reasoning.kimi_k3_reasoning_parser import KimiK3ReasoningParser
 from vllm.tokenizers import cached_tokenizer_from_config
+from vllm.utils.func_utils import supports_kw
 from vllm.utils.import_utils import LazyLoader
 from vllm.v1.structured_output.backend_guidance import GuidanceBackend
 from vllm.v1.structured_output.backend_types import (
@@ -338,15 +338,19 @@ class StructuredOutputManager:
                 return ConstraintBounds(constraint_start, constraint_start)
 
         # Fallback: the grammar starts after the end token.
-        # Locate K3 response-only output without discarding prompt-tail markers.
-        is_reasoning_end_streaming = (
-            partial(
-                reasoner.is_reasoning_end_streaming,
-                prompt_len=request.num_prompt_tokens,
-            )
-            if isinstance(reasoner, KimiK3ReasoningParser)
-            else reasoner.is_reasoning_end_streaming
+        # Supply the output boundary only when the parser explicitly accepts it.
+        is_reasoning_end_streaming: Callable[..., bool] = (
+            reasoner.is_reasoning_end_streaming
         )
+        if supports_kw(
+            is_reasoning_end_streaming,
+            "prompt_len",
+            requires_kw_only=True,
+            allow_var_kwargs=False,
+        ):
+            is_reasoning_end_streaming = partial(
+                is_reasoning_end_streaming, prompt_len=request.num_prompt_tokens
+            )
         # TODO: Build a read-only Sequence view over all_token_ids
         # instead of copying the entire all_token_ids into input_ids.
         if spec_tokens_committed:
