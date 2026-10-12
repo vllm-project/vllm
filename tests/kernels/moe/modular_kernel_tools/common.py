@@ -2,9 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass, replace
 from types import SimpleNamespace
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
+
+if TYPE_CHECKING:
+    from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import Mxfp4MoeBackend
 
 import vllm._custom_ops as ops
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
@@ -214,7 +217,7 @@ class Config:
             else kFp8StaticTensorSym,
         )
 
-    def mxfp4_quant_key_pair(self) -> tuple[QuantKey, QuantKey]:
+    def mxfp4_quant_key_pair(self) -> tuple[QuantKey, QuantKey | None]:
         """Derive the (weight_quant_key, activation_quant_key) pair an mxfp4
         quant config of this shape corresponds to (W4A16 when activations
         are unquantized, W4A4 when they are also mxfp4)."""
@@ -816,6 +819,9 @@ def _maybe_convert_weights_for_experts(
         from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
             convert_gpt_oss_weight_to_mxfp4_moe_kernel_format,
         )
+
+        assert rank_weights.w1_scale is not None
+        assert rank_weights.w2_scale is not None
 
         # The converter mutates its w13/w2 weight and scale args in place, and
         # rank_weights is a view into the shared master WeightTensors, so
