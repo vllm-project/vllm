@@ -137,11 +137,13 @@ class KimiRoutedOutputTransform(nn.Module):
     def __init__(
         self,
         norm: RMSNorm | None,
-        up_proj: ReplicatedLinear,
+        up_proj: ReplicatedLinear | ColumnParallelLinear,
+        row_sharded: bool = False,
     ) -> None:
         super().__init__()
         self.norm = norm
         self.up_proj = up_proj
+        self.row_sharded = row_sharded
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         if self.norm is not None:
@@ -265,7 +267,7 @@ class KimiMoE(nn.Module):
 
         self.routed_expert_down_proj: ReplicatedLinear | None
         self.routed_expert_norm: RMSNorm | None
-        self.routed_expert_up_proj: ReplicatedLinear | None
+        self.routed_expert_up_proj: ReplicatedLinear | ColumnParallelLinear | None
         self.routed_output_transform: KimiRoutedOutputTransform | None
         if self.use_latent_moe:
             self.routed_expert_down_proj = ReplicatedLinear(
@@ -280,15 +282,36 @@ class KimiMoE(nn.Module):
                 if self.latent_moe_use_norm
                 else None
             )
-            self.routed_expert_up_proj = ReplicatedLinear(
-                self.moe_hidden_size,
-                hidden_size,
-                bias=False,
-                quant_config=None,
-                prefix=f"{prefix}.routed_expert_up_proj",
+            shard_up_proj = (
+                self.tp_size > 1
+                and hidden_size % self.tp_size == 0
+                and self.num_shared_experts is not None
+                and self.routed_scaling_factor == 1.0
             )
+            if shard_up_proj:
+                # gather_output is a fallback restoring the full hidden dim for
+                # the unfused tail. The fused tail reads from .weight directly
+                # so it is not triggered
+                self.routed_expert_up_proj = ColumnParallelLinear(
+                    self.moe_hidden_size,
+                    hidden_size,
+                    bias=False,
+                    gather_output=True,
+                    quant_config=None,
+                    prefix=f"{prefix}.routed_expert_up_proj",
+                )
+            else:
+                self.routed_expert_up_proj = ReplicatedLinear(
+                    self.moe_hidden_size,
+                    hidden_size,
+                    bias=False,
+                    quant_config=None,
+                    prefix=f"{prefix}.routed_expert_up_proj",
+                )
             self.routed_output_transform = KimiRoutedOutputTransform(
-                self.routed_expert_norm, self.routed_expert_up_proj
+                self.routed_expert_norm,
+                self.routed_expert_up_proj,
+                row_sharded=shard_up_proj,
             )
         else:
             self.routed_expert_down_proj = None
