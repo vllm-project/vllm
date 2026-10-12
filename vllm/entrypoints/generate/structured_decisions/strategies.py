@@ -18,6 +18,7 @@ from functools import cached_property
 from typing import Any, ClassVar, TypeVar
 
 import numpy as np
+from PIL import Image
 
 import vllm.envs as envs
 from vllm.config import ModelConfig
@@ -92,6 +93,16 @@ class ReadStrategy(ABC):
     def __init__(self, context: ReadContext):
         self.context = context
 
+    @cached_property
+    def _connector(self) -> MediaConnector:
+        model_config = self.context.engine_client.model_config
+        return MEDIA_CONNECTOR_REGISTRY.load(
+            envs.VLLM_MEDIA_CONNECTOR,
+            media_io_kwargs=model_config.get_multimodal_config().media_io_kwargs,
+            allowed_local_media_path=model_config.allowed_local_media_path,
+            allowed_media_domains=model_config.allowed_media_domains,
+        )
+
     @abstractmethod
     def limits(self) -> DecisionLimits: ...
 
@@ -162,11 +173,24 @@ def type_label_ids(
     return label_ids
 
 
+def cap_pixels(image: Image.Image, max_pixels: int) -> Image.Image:
+    """Shrink ``image`` to at most ``max_pixels`` pixels (bicubic)."""
+    w, h = image.size
+    if w * h <= max_pixels:
+        return image
+    scale = math.sqrt(max_pixels / (w * h))
+    size = (max(1, int(w * scale)), max(1, int(h * scale)))
+    return image.resize(size, Image.Resampling.BICUBIC)
+
+
 class NextTokenStrategy(ReadStrategy):
     """Autoregressive models. Each question is one request: the state, then the
     question with its labeled options, and the logprobs of the label tokens as
     the reply's first token. The requests share the state. With prefix caching,
     it is prefilled once."""
+
+    #: Images are shrunk to at most this many pixels before the processor.
+    max_image_pixels: ClassVar[int | None] = None
 
     def __init__(self, context: ReadContext):
         super().__init__(context)
@@ -210,6 +234,27 @@ class NextTokenStrategy(ReadStrategy):
         """The engine input for a read of the rendered prompt."""
         return engine_input
 
+    def _label_groups(self, question: Question) -> list[list[int]]:
+        """The tokens that count for each label. A label scores its best one."""
+        return [[self.label_ids[label]] for label in question.labels]
+
+    def _content(self, state: str, question: Question) -> str:
+        """The user turn: the state, then the question."""
+        return f"{state}\n\n{question.type.prompt(question)}"
+
+    async def _image_parts(self, urls: Sequence[str]) -> list[dict[str, Any]]:
+        """The images as chat content parts, fetched once so that every
+        question reads the same pictures."""
+        if not urls:
+            return []
+        try:
+            images = await asyncio.gather(*map(self._connector.fetch_image_async, urls))
+        except ValueError as e:
+            raise StructuredDecisionError(f"media: {e}") from e
+        if self.max_image_pixels is not None:
+            images = [cap_pixels(image, self.max_image_pixels) for image in images]
+        return [{"type": "image_pil", "image_pil": image} for image in images]
+
     def limits(self) -> DecisionLimits:
         return DecisionLimits(max_questions=64, max_options=len(LABELS))
 
@@ -234,6 +279,9 @@ class NextTokenStrategy(ReadStrategy):
             default_template=ctx.chat_template,
             default_template_content_format=ctx.chat_template_content_format,
             default_template_kwargs=ctx.default_chat_template_kwargs,
+            # A read that fails before it reaches the engine must not leave the
+            # sender cache believing the engine has the images.
+            skip_mm_cache=True,
         )
         prompt_ids = extract_prompt_components(
             ctx.engine_client.model_config, engine_input
@@ -256,10 +304,14 @@ class NextTokenStrategy(ReadStrategy):
     ) -> list[QuestionRead]:
         ctx = self.context
         read_request = self._read_request(chat_template_kwargs, cache_salt)
+        image_parts = await self._image_parts((media or {}).get("image", ()))
 
         slots, engine_inputs, params = [], [], []
         for q in questions:
-            messages = [{"role": "user", "content": f"{state}\n\n{q.type.prompt(q)}"}]
+            content: Any = self._content(state, q)
+            if image_parts:
+                content = [*image_parts, {"type": "text", "text": content}]
+            messages = [{"role": "user", "content": content}]
             if instructions:
                 messages.insert(0, {"role": "system", "content": instructions})
             engine_input, prompt_ids = await self._render(read_request, messages)
@@ -268,9 +320,11 @@ class NextTokenStrategy(ReadStrategy):
                     "these chat options end the prompt differently, so the "
                     "labels' tokens are unknown"
                 )
-            slots.append([self.label_ids[label] for label in q.labels])
+            slots.append(self._label_groups(q))
             engine_inputs.append(self._read_input(engine_input, prompt_ids))
-            params.append(self._sampling_params(slots[-1], prompt_ids))
+            params.append(
+                self._sampling_params([i for ids in slots[-1] for i in ids], prompt_ids)
+            )
 
         label_reads = await next_token_label_reads(
             ctx.engine_client,
@@ -283,14 +337,17 @@ class NextTokenStrategy(ReadStrategy):
         )
 
         reads = []
-        for ids, label_read in zip(slots, label_reads):
+        for groups, label_read in zip(slots, label_reads):
             output = label_read.result.outputs[0]
+            logprobs = iter(label_read.logprobs)
             reads.append(
                 QuestionRead(
-                    probs=label_softmax(label_read.logprobs),
+                    probs=label_softmax(
+                        [max(next(logprobs) for _ in g) for g in groups]
+                    ),
                     label_mass=sum(math.exp(lp) for lp in label_read.logprobs),
                     argmax_is_label=bool(output.token_ids)
-                    and output.token_ids[0] in ids,
+                    and any(output.token_ids[0] in ids for ids in groups),
                     input_tokens=len(label_read.result.prompt_token_ids or ()),
                     output_tokens=len(output.token_ids),
                 )
@@ -373,6 +430,88 @@ class DiffusionGemmaCanvasStrategy(NextTokenStrategy):
         )
 
 
+class LiquidStrategy(NextTokenStrategy):
+    """Liquid decision models (d1). The prompt and the label tokens are the
+    ones the checkpoint was trained with, from the `prompt.py` it ships."""
+
+    modalities = frozenset({"image"})
+    # runner.py bounds every picture at 1024 x 1024 pixels before the processor.
+    max_image_pixels = 1024 * 1024
+
+    def render_state(self, state: Any) -> str:
+        if state is None:
+            return ""
+        if isinstance(state, str):
+            return state
+        return json.dumps(state, ensure_ascii=False, indent=2)
+
+    def _single_tokens(self, texts: Sequence[str]) -> list[int]:
+        ids: list[int] = []
+        for text in texts:
+            encoded = self._tokenizer().encode(text, add_special_tokens=False)
+            if len(encoded) == 1 and encoded[0] not in ids:
+                ids.append(encoded[0])
+        return ids
+
+    @staticmethod
+    def _codes(question: Question) -> list[str]:
+        """A choice's codes are A to Z, or the option names when those are
+        already single letters."""
+        names = [o.name.strip() for o in question.options]
+        if all(len(n) == 1 and n.isalpha() for n in names):
+            return names
+        return list(question.labels)
+
+    def _label_groups(self, question: Question) -> list[list[int]]:
+        if question.type.name == "noul":
+            forms: list[Sequence[str]] = [("yes", "Yes", "YES"), ("no", "No", "NO")]
+        elif question.type.name == "choice":
+            forms = [(code, f" {code}") for code in self._codes(question)]
+        else:
+            forms = [(label,) for label in question.labels]
+        groups = [self._single_tokens(f) for f in forms]
+        seen: set[int] = set()
+        for (label, *_), ids in zip(forms, groups):
+            if not ids or self._single_tokens([label]) != ids[:1] or seen & set(ids):
+                raise StructuredDecisionError(
+                    f"question {question.id!r}: label {label!r} is not one "
+                    "distinct token for this model"
+                )
+            seen.update(ids)
+        return groups
+
+    def _content(self, state: str, question: Question) -> str:
+        q = question
+        if q.type.name == "choice":
+            lines = "\n".join(
+                f"{code} {o.description or o.name.replace('_', ' ')}"
+                for code, o in zip(self._codes(q), q.options)
+            )
+            ask = (
+                f"{q.instructions}\n\nOptions:\n{lines}\n\n"
+                "Reply with the option code only."
+            )
+        elif q.type.name == "noul":
+            yes, no = (o.description for o in q.options)
+            sides = f"\nYes: {yes}\nNo: {no}" if yes or no else ""
+            ask = f"{q.instructions}{sides}\n\nReply with yes or no only."
+        elif q.type.name == "score":
+            legend = "\n".join(
+                f"{label} {o.name}" for label, o in zip(q.labels, q.options)
+            )
+            ask = (
+                f"{q.instructions}\n\n{legend}\n\n"
+                f"Reply with a single digit 0-{len(q.options) - 1} only."
+            )
+        else:
+            raise StructuredDecisionError(
+                f"question {q.id!r}: this model does not answer {q.type.name!r} "
+                "questions"
+            )
+        # A null state leaves the images, or the question alone, as the prompt.
+        return f"{state}\n\n\nQUESTION:\n{ask}" if state else ask
+
+
 class JointSchemaStrategy(ReadStrategy):
     """Clef-Omni. The whole request is one pooling read: the state, then every
     question with its options, as the model was trained to read them. The
@@ -441,16 +580,6 @@ class JointSchemaStrategy(ReadStrategy):
 
     def _tokens(self, text: str) -> list[int]:
         return self.tokenizer.encode(text, add_special_tokens=False)
-
-    @cached_property
-    def _connector(self) -> MediaConnector:
-        model_config = self.context.engine_client.model_config
-        return MEDIA_CONNECTOR_REGISTRY.load(
-            envs.VLLM_MEDIA_CONNECTOR,
-            media_io_kwargs=model_config.get_multimodal_config().media_io_kwargs,
-            allowed_local_media_path=model_config.allowed_local_media_path,
-            allowed_media_domains=model_config.allowed_media_domains,
-        )
 
     async def _fetch(
         self, urls: Sequence[str], media_io: MediaIO[_M], timeout: int
@@ -682,6 +811,7 @@ class JointSchemaStrategy(ReadStrategy):
 
 READ_STRATEGIES: dict[str, type[ReadStrategy]] = {
     "ClefOmniForJointSchema": JointSchemaStrategy,
+    "Lfm2VlForConditionalGeneration": LiquidStrategy,
     "Qwen3ForCausalLM": NextTokenStrategy,
     "Qwen3_5ForConditionalGeneration": NextTokenStrategy,
     "Qwen3_5MoeForConditionalGeneration": NextTokenStrategy,
