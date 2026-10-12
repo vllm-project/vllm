@@ -233,6 +233,9 @@ hip_compat.h
 # Benchmark dataset
 benchmarks/**/*.json
 
+# Local programmable KV cache experiment outputs
+/benchmarks/programmable_kv_cache/results/
+
 # Linting
 actionlint
 shellcheck*/
