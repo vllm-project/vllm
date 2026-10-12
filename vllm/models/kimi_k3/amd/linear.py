@@ -60,6 +60,7 @@ from vllm.model_executor.models.interfaces import (
     HasInnerState,
     IsHybrid,
     MixtureOfExperts,
+    SupportsMonoKernel,
     SupportsPP,
 )
 from vllm.model_executor.models.utils import (
@@ -1064,7 +1065,7 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
 
 
 class KimiLinearForCausalLM(
-    nn.Module, HasInnerState, SupportsPP, MixtureOfExperts, IsHybrid
+    nn.Module, HasInnerState, SupportsPP, MixtureOfExperts, IsHybrid, SupportsMonoKernel
 ):
     mono_spec = "vllm.models.kimi_k3.amd.mono.spec:MONO_SPEC"
 

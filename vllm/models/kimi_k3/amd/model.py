@@ -18,6 +18,7 @@ from vllm.model_executor.models.interfaces import (
     HasInnerState,
     IsHybrid,
     SupportsEagle3,
+    SupportsMonoKernel,
     SupportsMultiModal,
     SupportsPP,
     SupportsQuant,
@@ -62,8 +63,11 @@ class KimiK3ForConditionalGeneration(
     SupportsEagle3,
     HasInnerState,
     IsHybrid,
+    SupportsMonoKernel,
 ):
     """Kimi-K3 model with Kimi-K2.5 vision and KimiLinear text."""
+
+    mono_spec = "vllm.models.kimi_k3.amd.mono.spec:MONO_SPEC"
 
     supports_encoder_tp_data = True
     supports_mm_device_do_normalize = True
