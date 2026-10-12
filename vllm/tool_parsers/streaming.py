@@ -10,7 +10,7 @@ from vllm.entrypoints.generate.base.protocol import (
     DeltaMessage,
     DeltaToolCall,
 )
-from vllm.renderers.chat_utils import make_tool_call_id
+from vllm.tool_parsers.utils import make_tool_call_id
 from vllm.utils.mistral import is_mistral_tokenizer
 
 if TYPE_CHECKING:

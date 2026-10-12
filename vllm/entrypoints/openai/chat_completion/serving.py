@@ -59,11 +59,11 @@ from vllm.parser.abstract_parser import Parser
 from vllm.renderers.chat_utils import (
     ChatTemplateContentFormatOption,
     ConversationMessage,
-    make_tool_call_id,
 )
 from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import TokenizerLike
+from vllm.tool_parsers.utils import make_tool_call_id
 from vllm.utils.collection_utils import as_list
 from vllm.utils.serial_utils import numpy2base64
 

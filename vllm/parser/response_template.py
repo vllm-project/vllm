@@ -29,9 +29,9 @@ from vllm.parser.chat_parsing.response_templates import (
     load_response_template,
 )
 from vllm.reasoning.abs_reasoning_parsers import ReasoningParser
-from vllm.renderers.chat_utils import make_tool_call_id
 from vllm.tool_parsers.abstract_tool_parser import ToolParser
-from vllm.tool_parsers.utils import iter_response_function_tool_dicts
+from vllm.tool_parsers.utils import iter_response_function_tool_dicts, \
+    make_tool_call_id
 
 if TYPE_CHECKING:
     from vllm.entrypoints.openai.chat_completion.protocol import (

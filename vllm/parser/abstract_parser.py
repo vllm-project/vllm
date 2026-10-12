@@ -38,10 +38,6 @@ from vllm.parser.engine.adapters import ParserEngineToolAdapter
 from vllm.parser.metrics import record_tool_parser_invocation
 from vllm.parser.utils import count_history_tool_calls
 from vllm.reasoning.abs_reasoning_parsers import ReasoningParser
-from vllm.renderers.chat_utils import (
-    get_tool_call_id_type,
-    make_tool_call_id,
-)
 from vllm.sampling_params import (
     SamplingParams,
     StructuredOutputsParams,
@@ -59,6 +55,7 @@ from vllm.tool_parsers.structural_tag_registry import (
     resolve_tool_strictness,
 )
 from vllm.tool_parsers.tool_strict_level import ToolStrictLevel
+from vllm.tool_parsers.utils import get_tool_call_id_type, make_tool_call_id
 
 logger = init_logger(__name__)
 

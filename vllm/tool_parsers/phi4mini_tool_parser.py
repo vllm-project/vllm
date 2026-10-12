@@ -18,7 +18,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
 )
 from vllm.logger import init_logger
-from vllm.renderers.chat_utils import make_tool_call_id
+from vllm.tool_parsers.utils import make_tool_call_id
 from vllm.tool_parsers.abstract_tool_parser import (
     Tool,
     ToolParser,
