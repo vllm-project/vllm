@@ -24,6 +24,7 @@ class WatermarkDetector(ABC):
         context_width: int,
         p_value_threshold: float,
         deduplicate_contexts: bool = False,
+        skip_partial_contexts: bool = True,
     ) -> None:
         if context_width < 1:
             raise ValueError("context_width must be positive")
@@ -32,6 +33,7 @@ class WatermarkDetector(ABC):
         self.context_width = context_width
         self.p_value_threshold = p_value_threshold
         self.deduplicate_contexts = deduplicate_contexts
+        self.skip_partial_contexts = skip_partial_contexts
 
     def detect(self, token_ids: list[int]) -> WatermarkDetection:
         contexts, targets = self._prepare_inputs(token_ids)
@@ -56,7 +58,10 @@ class WatermarkDetector(ABC):
         targets = []
         seen_contexts: set[Context] = set()
         prefix = [-1] * self.context_width
-        for token_id in token_ids:
+        for position, token_id in enumerate(token_ids):
+            if self.skip_partial_contexts and position < self.context_width:
+                prefix.append(token_id)
+                continue
             context = tuple(prefix[-self.context_width :])
             # Reusing a context reuses one keyed random vector, so the resulting
             # token scores are not independent evidence.
