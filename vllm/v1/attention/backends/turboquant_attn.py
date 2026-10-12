@@ -846,11 +846,25 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
                         # (APC) request. Continuation stays on the Triton SoA
                         # path even when FlyDSL is the main decode kernel
                         # (FlyDSL is decode-batch only).
+                        # Preserve the query block so the unified kernel can
+                        # share its history and mask causality per query row.
+                        short_query = q_len <= 32
+                        self._cu_2[1:2] = q_len
                         out = self._dispatch_decode_soa(
                             query=q_seq,
                             kv_cache=kv_cache,
-                            block_table=synth_bt,
-                            seq_lens=synth_seq_lens,
+                            block_table=(
+                                attn_metadata.block_table[i : i + 1]
+                                if short_query
+                                else synth_bt
+                            ),
+                            seq_lens=(
+                                attn_metadata.seq_lens[i : i + 1]
+                                if short_query
+                                else synth_seq_lens
+                            ),
+                            query_start_loc=self._cu_2 if short_query else None,
+                            max_query_len=q_len if short_query else 1,
                             Pi=Pi,
                             centroids=centroids,
                             scale=self.scale,

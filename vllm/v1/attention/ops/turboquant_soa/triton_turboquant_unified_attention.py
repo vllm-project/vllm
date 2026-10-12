@@ -924,13 +924,12 @@ def triton_turboquant_unified_attention(
     few ulp of fp32 round-off. The FP8-key path never rotates Q regardless
     of this flag.
 
-    ``tile_size`` defaults to ``32`` for prefill (``max_query_len > 1``) and
-    ``16`` for pure decode (``max_query_len == 1``). Callers may override.
+    ``tile_size`` defaults to ``32`` for long query blocks and ``16`` for
+    decode or verification blocks of at most 32 rows. Callers may override.
 
     Dispatch rule:
-      * Prefill / chunked-prefill (any query block with ``BLOCK_Q > 1``) and
-        ``num_tokens > num_seqs``: 2D kernel (plenty of CTAs already).
-      * Pure decode with long KV: 3D split-KV kernel + ``reduce_segments``
+      * Long prefill / chunked-prefill query blocks: 2D kernel.
+      * Decode or short verification with long KV: 3D + ``reduce_segments``
         for extra parallelism; this is the same pattern v2 uses.
       * ``force_2d=True``: force the 2D path regardless (used by the
         apples-to-apples bench to isolate pure TQ dequant overhead).
@@ -969,7 +968,9 @@ def triton_turboquant_unified_attention(
     else:
         if PiT is None:
             PiT = Pi.T.contiguous()
-        apply_fuse_q_rot = bool(fuse_q_rot)
+        # The D256 fp32 rotation exceeds LDS capacity on ROCm. Rotate with
+        # the existing launcher path instead of compiling an invalid kernel.
+        apply_fuse_q_rot = bool(fuse_q_rot) and not (_is_hip and D > 128)
         if apply_fuse_q_rot:
             q_rot = query.contiguous()
         else:
@@ -1301,11 +1302,14 @@ def triton_turboquant_decode_attention_soa(
     buf_holder: Any = None,
     max_num_kv_splits: int = 32,
     sinks: torch.Tensor | None = None,
+    query_start_loc: torch.Tensor | None = None,
+    max_query_len: int = 1,
 ) -> torch.Tensor:
-    """Decode-only convenience wrapper around ``triton_turboquant_unified_attention``.
+    """Decode/continuation wrapper for ``triton_turboquant_unified_attention``.
 
     Treats a rank-3 ``[B, Hq, D]`` query as one token per request (query_len = 1)
     and synthesizes a ``query_start_loc`` of ``[0, 1, 2, ..., B]``.
+    Continuations may provide their actual query offsets and maximum length.
     ``max_num_kv_splits`` is forwarded to the unified launcher as the 3D
     split-KV segment count (capped per-call against ``max_seq_len``).
     ``sinks`` (optional ``[Hq]`` fp32) are forwarded to the kernel which
@@ -1313,14 +1317,15 @@ def triton_turboquant_decode_attention_soa(
     """
     del mid_o_buf, lse_buf, buf_holder
     B = query.shape[0]
-    cu_seqlens_q = torch.arange(B + 1, device=query.device, dtype=seq_lens.dtype)
+    if query_start_loc is None:
+        query_start_loc = torch.arange(B + 1, device=query.device, dtype=seq_lens.dtype)
 
     out = triton_turboquant_unified_attention(
         query=query.contiguous(),
         kv_cache=kv_cache,
         block_table=block_table,
         seq_lens=seq_lens,
-        query_start_loc=cu_seqlens_q,
+        query_start_loc=query_start_loc,
         Pi=Pi,
         centroids=centroids,
         scale=scale,
@@ -1332,7 +1337,7 @@ def triton_turboquant_decode_attention_soa(
         norm_correction=norm_correction,
         PiT=PiT,
         output=output_buf[:B] if output_buf is not None else None,
-        max_query_len=1,
+        max_query_len=max_query_len,
         max_seq_len=max_seq_len if max_seq_len > 0 else None,
         num_kv_splits=max_num_kv_splits,
         sinks=sinks,
