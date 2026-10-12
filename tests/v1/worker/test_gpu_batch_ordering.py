@@ -21,7 +21,6 @@ from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
-import pytest
 import torch
 
 from vllm.v1.attention.backend import CommonAttentionMetadata
@@ -288,9 +287,8 @@ def test_extends_precede_prefills_through_the_splitter():
     assert classify(req_ids) == (1, 1, 1)
 
     # Misordered, "resumed" falls on the prefill side and loses its KV history.
-    # The splitter raises rather than returning a well-formed but wrong answer.
-    with pytest.raises(AssertionError, match="extends-before-prefills"):
-        classify(["d0", "fresh", "resumed"])
+    # Nothing raises: the split is well formed and only the logits are wrong.
+    assert classify(["d0", "fresh", "resumed"]) == (1, 0, 2)
 
 
 def test_ordering_holds_for_the_dcp_splitter_threshold():
@@ -328,6 +326,78 @@ def test_ordering_holds_for_the_dcp_splitter_threshold():
 
     # The request carrying 100k of context must not be on the prefill side.
     assert req_ids[len(req_ids) - num_prefills :] == ["fresh"]
+
+
+def test_sorted_batches_never_put_context_on_the_prefill_side():
+    """Random batches through the real sort and the real splitter.
+
+    The splitter counts every request from the first context-less one onward as
+    a prefill without re-checking them, so nothing carrying context may land at
+    or after that boundary. Asserted over every threshold the splitter can be
+    called with, from 1 (cp_utils) to decode_query_len (the model runner).
+
+    Note the boundary is the first context-less request the splitter classifies
+    as a prefill, which needs query_len > decode_threshold. A context-less
+    1-token request stays in the decode group by design, so it may precede a
+    request with context without putting it on the prefill side.
+    """
+    rng = np.random.default_rng(0)
+    for decode_query_len in (1, 2, 4, 8):
+        for _ in range(250):
+            req_ids = [f"r{i}" for i in range(int(rng.integers(2, 7)))]
+            req_id_to_index = {r: i for i, r in enumerate(req_ids)}
+            # Decode-shaped, short-chunk and long-chunk requests, each of which
+            # may or may not already have computed context.
+            num_tokens_per_req = {
+                r: int(rng.choice([1, decode_query_len, rng.integers(2, 16), 4096]))
+                for r in req_ids
+            }
+            num_computed = np.array(
+                [int(rng.choice([0, rng.integers(1, 100_000)])) for _ in req_ids],
+                dtype=np.int32,
+            )
+            # Only verifying rows carry drafts, which is what the scheduler
+            # does. Handing them to every request with context would make the
+            # draft term sort context first on its own, which is the property
+            # under test, and no batch would exercise the context term.
+            draft_tokens = {
+                r: [0] * (decode_query_len - 1)
+                for i, r in enumerate(req_ids)
+                if decode_query_len > 1
+                and num_computed[i]
+                and num_tokens_per_req[r] == decode_query_len
+            }
+
+            order = sort_batch_req_ids(
+                num_tokens_per_req,
+                draft_tokens,
+                decode_query_len,
+                num_computed,
+                req_id_to_index,
+            )
+            metadata = _make_common_attn_metadata(
+                [num_tokens_per_req[r] for r in order],
+                [int(num_computed[req_id_to_index[r]]) for r in order],
+            )
+            for decode_threshold in range(1, decode_query_len + 1):
+                *_, num_prefills, _, _, num_prefill_tokens = (
+                    split_decodes_prefills_and_extends(metadata, decode_threshold)
+                )
+                prefill_side = (
+                    order[len(order) - num_prefills :] if num_prefills else []
+                )
+                stray = [r for r in prefill_side if num_computed[req_id_to_index[r]]]
+                assert not stray, (
+                    f"{stray} carry computed context but fall on the prefill "
+                    f"side, which never reads the KV cache: "
+                    f"decode_query_len={decode_query_len} "
+                    f"decode_threshold={decode_threshold} order={order} "
+                    f"computed={[int(num_computed[req_id_to_index[r]]) for r in order]}"
+                )
+                # The token count must agree with the request split.
+                assert num_prefill_tokens == sum(
+                    num_tokens_per_req[r] for r in prefill_side
+                )
 
 
 def test_uniform_decode_uses_state_index_not_batch_position():
