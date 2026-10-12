@@ -146,6 +146,7 @@ class XpuMemAllocator:
         self.pointer_to_data: dict[int, AllocationData] = {}
         self.current_tag: str = XpuMemAllocator.default_tag
         self.allocator_and_pools: dict[str, list[Any]] = {}
+        self._pending_allocators: list[Any] = []
         self.python_malloc_callback = self._python_malloc_callback
         self.python_free_callback = self._python_free_callback
 
@@ -291,24 +292,17 @@ class XpuMemAllocator:
             data.cpu_backup_tensor = None
 
     def release_pools(self) -> None:
-        """Drop Python references to MemPool/pluggable allocators eagerly.
-
-        This prevents pool destruction from being deferred to interpreter
-        finalization, which can happen after parts of XPU runtime are already
-        torn down.
-        """
-        if not self.allocator_and_pools:
+        """Release pools, retaining allocators until their allocations are freed."""
+        if not self.allocator_and_pools and not self._pending_allocators:
             return
 
-        # Note: keep allocators alive while MemPool objects are destroyed.
-        # MemPool teardown may invoke allocator virtual methods (e.g. raw_delete)
-        # when releasing cached blocks. If allocator wrappers are dropped first,
-        # C++ can hit "pure virtual method called" during shutdown.
         pool_entries = [e for es in self.allocator_and_pools.values() for e in es]
         self.allocator_and_pools.clear()
 
         mem_pools = [entry[0] for entry in pool_entries]
-        allocators = [entry[1] for entry in pool_entries]
+        # Live tensors can outlast their MemPool wrappers. Keep allocators alive
+        # across calls so deferred frees cannot invoke a destroyed allocator.
+        self._pending_allocators.extend(entry[1] for entry in pool_entries)
         pool_entries.clear()
 
         xpu_sync = getattr(torch.xpu, "synchronize", None)
@@ -318,12 +312,14 @@ class XpuMemAllocator:
             except Exception:
                 logger.debug("torch.xpu.synchronize() failed during release_pools")
 
-        # Phase 1: drop MemPool refs while allocators are still strongly held.
         mem_pools.clear()
         gc.collect()
+        torch.xpu.empty_cache()
 
-        # Phase 2: now it is safe to release allocator wrappers.
-        allocators.clear()
+        # Free callbacks remove allocation records, including cached blocks.
+        # If any remain, a later release_pools() call must retry this cleanup.
+        if not self.pointer_to_data:
+            self._pending_allocators.clear()
 
     @contextmanager
     def use_memory_pool(self, tag: str | None = None):

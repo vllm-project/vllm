@@ -211,12 +211,7 @@ class ShardedStateLoader(BaseModelLoader):
             # TODO: support un-sharded checkpoints too
             raise ValueError(
                 f"Could not find checkpoint files "
-                f"'{
-                    os.path.join(
-                        local_model_path,
-                        rendered_pattern,
-                    )
-                }', "
+                f"'{os.path.join(local_model_path, rendered_pattern)}', "
                 f"only pre-sharded checkpoints are currently supported!"
             )
         state_dict = self._filter_subtensors(model.state_dict())
