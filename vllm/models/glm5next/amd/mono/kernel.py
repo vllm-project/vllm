@@ -73,7 +73,7 @@ def pack(model: nn.Module, ctx: MonoContext) -> dict[int, Any]:
             "VLLM_ROCM_MONO_DECODE cannot run GLM-5.3-Flash: " + "; ".join(reasons)
         )
     kda = [_kda_name(model.layers[i]) for i in sorted(packed) if packed[i][1]]
-    ctx.state["kda_names"] = kda[:1]
+    ctx.state["kda_names"] = kda
     return packed
 
 
@@ -136,7 +136,7 @@ def _kda_name(layer: nn.Module) -> str:
 
 class _Width:
     """Per-width state of one launch kind: the runtime, padding inputs and, for
-    KDA, the step's state indices."""
+    KDA, padded copies of the step's state indices."""
 
     def __init__(self, runtime, width: int, device: torch.device) -> None:
         self.rt = runtime
@@ -146,7 +146,32 @@ class _Width:
             torch.zeros(width, HC_MULT, 1, dtype=torch.float32, device=device),
             torch.zeros(width, HC_MULT, HC_MULT, dtype=torch.float32, device=device),
         )
-        self.idx = torch.full((width,), -1, dtype=torch.int32, device=device)
+        self.width, self.device = width, device
+        self.idx_pool: list[torch.Tensor] = []
+        self.step: MonoStep | None = None
+        self.idx_of: dict[int, torch.Tensor] = {}
+
+    def state_idx(self, step: MonoStep, src: torch.Tensor) -> torch.Tensor:
+        """KDA layers of one cache group share ``src``; vLLM pads graph rows with
+        the null block 0. A step narrower than the width gets one padded copy per
+        group (padding -1), in the same order every step."""
+        n = step.tokens
+        if n == self.width and src.dtype == torch.int32 and src.is_contiguous():
+            return src[:n]
+        if self.step is not step:
+            self.step, self.idx_of = step, {}
+        key = src.data_ptr()
+        if key not in self.idx_of:
+            k = len(self.idx_of)
+            if k == len(self.idx_pool):
+                self.idx_pool.append(
+                    torch.full((self.width,), -1, dtype=torch.int32, device=self.device)
+                )
+            buf = self.idx_pool[k]
+            buf[:n].copy_(src[:n])
+            buf[n:].fill_(-1)
+            self.idx_of[key] = buf
+        return self.idx_of[key]
 
 
 def _runtime(ctx: MonoContext, width: int, launches: int, kda: bool):
@@ -226,28 +251,24 @@ class FlashFfnLayer:
 
 
 class FlashKdaLayer(FlashFfnLayer):
-    """One whole KDA decoder layer at one width; the step's first KDA layer
-    copies the step's state indices. vLLM pads graph rows with the null block 0
-    and this width's own padding rows are -1: the kernel skips both."""
+    """One whole KDA decoder layer at one width, on its own cache group's state
+    indices (rows whose index is not positive are skipped)."""
 
-    def __init__(self, ctx, layer, op, w, ends, idx: int, first: bool) -> None:
+    def __init__(self, ctx, layer, op, w, ends, idx: int) -> None:
         super().__init__(ctx, layer, op, w, ends)
-        self.ctx, self.idx, self.first = ctx, idx, first
+        self.ctx, self.idx, self.name = ctx, idx, _kda_name(layer)
 
     def launch(self, step: MonoStep, hidden_states, residual, post, comb):
         if post is None:
             raise RuntimeError("a Flash kernel layer needs the previous mHC state")
         n = step.tokens
-        if self.first:
-            meta = step.attn_metadata[_kda_name(self.layer)]
-            self.w.idx[:n].copy_(meta.non_spec_state_indices_tensor[:n])
-            if n < step.width:
-                self.w.idx[n:].fill_(-1)
+        meta = step.attn_metadata[self.name]
+        idx = self.w.state_idx(step, meta.non_spec_state_indices_tensor)
         state = self.ctx.state["kda_states"][self.idx]
         ins = _pad(
             self.w, step, (hidden_states, residual, post.view(n, HC_MULT, 1), comb)
         )
-        return self.finish(step, self.op.launch(*ins, state, self.w.idx))
+        return self.finish(step, self.op.launch(*ins, state, idx))
 
 
 def build(ctx: MonoContext, packed: dict, layer: nn.Module, idx: int, width: int):
@@ -266,4 +287,4 @@ def build(ctx: MonoContext, packed: dict, layer: nn.Module, idx: int, width: int
                 ends.append(_runtime(ctx, width, n, k).rt)
     if not kda:
         return FlashFfnLayer(ctx, layer, op, w, ends)
-    return FlashKdaLayer(ctx, layer, op, w, ends, idx, idx == order[0])
+    return FlashKdaLayer(ctx, layer, op, w, ends, idx)
