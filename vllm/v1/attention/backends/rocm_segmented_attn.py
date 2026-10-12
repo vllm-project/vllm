@@ -271,7 +271,6 @@ class RocmSegmentedAttentionImpl(RocmAttentionImpl):
         workspace = self._get_workspace(query.device)
         if attn_metadata is None:
             return output.fill_(0)
-        assert not attn_metadata.use_cascade
 
         num_actual_tokens = attn_metadata.num_actual_tokens
         key_cache, value_cache = self._split_kv_cache(kv_cache)
