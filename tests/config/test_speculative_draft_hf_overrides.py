@@ -15,7 +15,7 @@ import functools
 from unittest.mock import MagicMock, patch
 
 import pytest
-from transformers import PreTrainedConfig
+from transformers import Glm5NextConfig, PreTrainedConfig
 
 from vllm.config.parallel import ParallelConfig
 from vllm.config.speculative import SpeculativeConfig
@@ -270,3 +270,21 @@ def test_mtp_index_share_override(
         speculative_config.draft_model_config.hf_config.index_share_for_mtp_iteration
         is expected
     )
+
+
+@pytest.mark.cpu_test
+def test_glm5_next_mtp_override_promotes_index_share():
+    """The flag lives on text_config, but the MTP proposers read the draft config."""
+    config = Glm5NextConfig(
+        architectures=["Glm5NextForConditionalGeneration"],
+        text_config={
+            "num_nextn_predict_layers": 1,
+            "index_share_for_mtp_iteration": True,
+        },
+    )
+
+    draft_config = SpeculativeConfig.hf_config_override(config)
+
+    assert draft_config.architectures == ["Glm5NextMTPModel"]
+    assert draft_config.n_predict == 1
+    assert draft_config.index_share_for_mtp_iteration is True
