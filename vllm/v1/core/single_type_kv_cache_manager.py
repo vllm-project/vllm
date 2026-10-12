@@ -498,7 +498,12 @@ class SingleTypeKVCacheManager(ABC):
         if not self.kv_cache_spec.prefix_cacheable:
             return
         num_cached_blocks = self.num_cached_block.get(request.request_id, 0)
-        num_full_blocks = num_tokens // self.block_size
+        resolved_block_hashes = resolve_block_hashes(
+            request.block_hashes,
+            self.block_pool.hash_block_size,
+            self.block_size,
+        )
+        num_full_blocks = min(num_tokens // self.block_size, len(resolved_block_hashes))
 
         if num_cached_blocks >= num_full_blocks:
             return

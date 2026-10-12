@@ -769,17 +769,20 @@ def get_mamba_prefix_cache_step_configs(
                 ),
             ],
         ),
+        # Lookahead hashes reuse the last aligned boundary below the logits
+        # token, so prompts with a partial tail no longer stop one Mamba
+        # page early.
         "prompt_2_block_size_10": TestConfig(
             num_prompt_tokens=B * 2 + 10,
             num_generated_tokens=10,
             num_accepted_tokens=4,
             step_actions=[
-                StepAction(0, B, [1, 1, 1, 1], (-1, -1), (-1, -1)),
-                StepAction(B, B + 10, [1, 0, 1, 1, 1, 1], (0, 2), (-1, -1)),
+                StepAction(0, B * 2, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(B * 2, 10, [0, 1, 1, 1, 1, 1], (1, 2), (-1, -1)),
                 StepAction(
                     B * 2 + 10,
                     4,
-                    [1, 0, 1, 1, 1, 1] if a else [0, 0, 1, 1, 1, 1],
+                    [0, 1, 1, 1, 1, 1] if a else [0, 0, 1, 1, 1, 1],
                     (-1, -1),
                     (-1, -1),
                 ),
@@ -806,12 +809,18 @@ def get_mamba_prefix_cache_step_configs(
             num_generated_tokens=10,
             num_accepted_tokens=4,
             step_actions=[
-                StepAction(0, B * 2, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
-                StepAction(B * 2, B + 10, [0, 1, 0, 1, 1, 1, 1], (1, 3), (-1, -1)),
+                StepAction(0, B * 3, [0, 0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(
+                    B * 3,
+                    10,
+                    [0, 0, 1, 1, 1, 1, 1],
+                    (2, 3),
+                    (-1, -1),
+                ),
                 StepAction(
                     B * 3 + 10,
                     4,
-                    [0, 1, 0, 1, 1, 1, 1] if a else [0, 0, 0, 1, 1, 1, 1],
+                    [0, 0, 1, 1, 1, 1, 1] if a else [0, 0, 0, 1, 1, 1, 1],
                     (-1, -1),
                     (-1, -1),
                 ),
@@ -858,18 +867,18 @@ def get_mamba_prefix_cache_step_configs(
                 StepAction(0, B * 5, [0, 0, 0, 0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
                 StepAction(
                     B * 5,
-                    B * 4,
-                    [0, 0, 0, 0, 1, 0, 0, 0, 1, 1, 1, 1],
-                    (4, 8),
+                    B * 5,
+                    [0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 1, 1, 1],
+                    (4, 9),
                     (-1, -1),
                 ),
                 StepAction(
-                    B * 9,
-                    B + 10,
-                    [0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 1, 1, 1]
+                    B * 10,
+                    10,
+                    [0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 1, 1, 1, 1]
                     if a
-                    else [0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 1, 1, 1, 1],
-                    (8, 10),
+                    else [0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1],
+                    (9, 10),
                     (-1, -1),
                 ),
             ],
@@ -1223,11 +1232,11 @@ def _run_mamba_prefix_cache_mrv2(
         cleanup_dist_env_and_memory()
 
 
-@create_new_process_for_each_test()
+@create_new_process_for_each_test("spawn")
 def test_mamba_prefix_cache_mrv2(monkeypatch: pytest.MonkeyPatch):
     _run_mamba_prefix_cache_mrv2(monkeypatch, async_scheduling=False)
 
 
-@create_new_process_for_each_test()
+@create_new_process_for_each_test("spawn")
 def test_mamba_prefix_cache_mrv2_async(monkeypatch: pytest.MonkeyPatch):
     _run_mamba_prefix_cache_mrv2(monkeypatch, async_scheduling=True)

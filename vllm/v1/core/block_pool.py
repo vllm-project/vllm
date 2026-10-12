@@ -19,13 +19,13 @@ from vllm.v1.core.kv_cache_utils import (
     ExternalBlockHash,
     FreeKVCacheBlockQueue,
     KVCacheBlock,
-    generate_block_hash_extra_keys,
+    generate_request_block_hash_extra_keys,
     get_block_hash,
     get_group_id,
     make_block_hash_with_group_id,
     maybe_convert_block_hash,
     resolve_block_hashes,
-    to_event_extra_keys,
+    to_request_event_extra_keys,
 )
 from vllm.v1.request import Request
 
@@ -161,6 +161,7 @@ class BlockPool:
         hash_block_size: int,
         enable_kv_cache_events: bool = False,
         metrics_collector: KVCacheMetricsCollector | None = None,
+        use_lookahead_block_hashes: bool = False,
         medium: str = MEDIUM_GPU,
     ):
         assert isinstance(num_gpu_blocks, int) and num_gpu_blocks > 0
@@ -168,6 +169,7 @@ class BlockPool:
         self.medium = medium
         self.enable_caching = enable_caching
         self.hash_block_size = hash_block_size
+        self.use_lookahead_block_hashes = use_lookahead_block_hashes
         # All kv-cache blocks.
         self.blocks: list[KVCacheBlock] = [
             KVCacheBlock(idx, pool=self) for idx in range(num_gpu_blocks)
@@ -325,8 +327,12 @@ class BlockPool:
                     continue
                 block_start = i * block_size
                 block_end = block_start + block_size
-                extra_keys, curr_mm_idx = generate_block_hash_extra_keys(
-                    request, block_start, block_end, curr_mm_idx
+                extra_keys, curr_mm_idx = generate_request_block_hash_extra_keys(
+                    request,
+                    block_start,
+                    block_end,
+                    curr_mm_idx,
+                    self.use_lookahead_block_hashes,
                 )
                 extra_keys_list.append(extra_keys)
 
@@ -368,7 +374,9 @@ class BlockPool:
             lora_id=request.lora_request.adapter_id if request.lora_request else None,
             medium=self.medium,
             lora_name=request.lora_request.name if request.lora_request else None,
-            extra_keys=to_event_extra_keys(extra_keys_list),
+            extra_keys=to_request_event_extra_keys(
+                extra_keys_list, self.use_lookahead_block_hashes
+            ),
             group_idx=kv_cache_group_id,
             session_id=request.session_id,
         )
@@ -408,8 +416,12 @@ class BlockPool:
             block_start = i * block_size
             block_end = block_start + block_size
             cached_hashes.append(maybe_convert_block_hash(block_hashes[i]))
-            extra_keys, curr_mm_idx = generate_block_hash_extra_keys(
-                request, block_start, block_end, curr_mm_idx
+            extra_keys, curr_mm_idx = generate_request_block_hash_extra_keys(
+                request,
+                block_start,
+                block_end,
+                curr_mm_idx,
+                self.use_lookahead_block_hashes,
             )
             extra_keys_list.append(extra_keys)
 
@@ -539,8 +551,12 @@ class BlockPool:
                     curr_mm_idx, _ = get_mm_features_in_window(
                         mm_features, block_start, block_end
                     )
-            extra_keys, _ = generate_block_hash_extra_keys(
-                request, block_start, block_end, curr_mm_idx
+            extra_keys, _ = generate_request_block_hash_extra_keys(
+                request,
+                block_start,
+                block_end,
+                curr_mm_idx,
+                self.use_lookahead_block_hashes,
             )
             self.kv_event_queue.append(
                 BlockStored(
@@ -555,7 +571,9 @@ class BlockPool:
                     lora_name=request.lora_request.name
                     if request.lora_request
                     else None,
-                    extra_keys=to_event_extra_keys([extra_keys]),
+                    extra_keys=to_request_event_extra_keys(
+                        [extra_keys], self.use_lookahead_block_hashes
+                    ),
                     group_idx=kv_cache_group_id,
                     session_id=request.session_id,
                 )
