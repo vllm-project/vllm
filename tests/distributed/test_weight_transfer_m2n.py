@@ -30,7 +30,6 @@ from vllm.distributed.weight_transfer.m2n_common import (
     REPLICATED,
     M2NLayout,
     M2NMesh,
-    M2NNcclRuntime,
     M2NParamMeta,
     M2NWireParam,
     check_data_plane_agreement,
@@ -38,6 +37,7 @@ from vllm.distributed.weight_transfer.m2n_common import (
     check_runtime_ready_agreement,
     check_source_plan_agreement,
     check_transferable,
+    create_m2n_communicator,
     publish_destination_placements,
     resolve_layout,
     source_plan_digest,
@@ -267,9 +267,9 @@ class TestPreflightAgreement:
 
         group.all_gather_obj.side_effect = gather
         with pytest.raises(RuntimeError, match="data-plane identity disagrees"):
-            check_data_plane_agreement(group, None, max_cta=None)
+            check_data_plane_agreement(group, None)
 
-    def test_runtime_error_is_shared_before_pynccl(self):
+    def test_runtime_error_is_shared_before_nccl4py(self):
         group = Mock(world_size=2)
         group.all_gather_obj.return_value = [
             {"phase": "runtime_ready", "error": None},
@@ -326,17 +326,56 @@ class TestWireTypes:
         assert VALID_UID_B64 not in repr(info)
 
     def test_destination_plan_uses_uid_communicator_without_group(self):
-        comm = Mock(rank=0, device=torch.device("cpu"), group=None)
+        comm = Mock()
 
-        def receive_plan(tensor, src):
-            assert src == 1
-            tensor.copy_(torch.tensor([[-1, 0], [-2, -2]], dtype=torch.int8))
+        expected_stream = Mock()
+
+        def receive_plan(sendbuf, recvbuf, root, *, stream):
+            assert sendbuf is recvbuf
+            assert root == 1
+            assert stream is expected_stream
+            recvbuf.copy_(torch.tensor([[-1, 0], [-2, -2]], dtype=torch.int8))
 
         comm.broadcast.side_effect = receive_plan
 
-        placements = publish_destination_placements(comm, 1, None, 2)
+        placements = publish_destination_placements(
+            comm, torch.device("cpu"), expected_stream, 1, None, 2
+        )
 
         assert placements == [(REPLICATE, 0), REPLICATED]
+
+    def test_m2n_communicator_uses_nccl4py_uid(self):
+        nccl = Mock()
+        group = Mock(rank=1, world_size=3)
+        unique_id = object()
+        communicator = object()
+        nccl.UniqueId.from_bytes.return_value = unique_id
+        nccl.Communicator.init.return_value = communicator
+
+        result = create_m2n_communicator(nccl, group, b"shared-id")
+
+        assert result is communicator
+        nccl.UniqueId.from_bytes.assert_called_once_with(b"shared-id")
+        nccl.Communicator.init.assert_called_once_with(
+            nranks=3, rank=1, unique_id=unique_id
+        )
+        group.broadcast_obj.assert_not_called()
+
+    def test_m2n_communicator_generates_uid_on_rank_zero(self):
+        nccl = Mock()
+        group = Mock(rank=0, world_size=3)
+        group.broadcast_obj.side_effect = lambda envelope, src: envelope
+        generated = Mock(as_bytes=b"generated-id")
+        unique_id = object()
+        nccl.get_unique_id.return_value = generated
+        nccl.UniqueId.from_bytes.return_value = unique_id
+
+        create_m2n_communicator(nccl, group, None)
+
+        group.broadcast_obj.assert_called_once_with(
+            {"unique_id": b"generated-id", "error": None}, src=0
+        )
+        nccl.UniqueId.from_bytes.assert_called_once_with(b"generated-id")
 
     def test_metadata_rendezvous_is_required_with_uid(self):
         with pytest.raises(ValueError, match="master_address"):
@@ -378,7 +417,7 @@ class TestWireTypes:
         with pytest.raises(ValueError, match="source digest"):
             info.parse_wire_params()
 
-    def test_trainer_disagreement_is_rejected_before_pynccl(self, monkeypatch):
+    def test_trainer_disagreement_is_rejected_before_nccl4py(self, monkeypatch):
         group = Mock(rank=1, world_size=3)
 
         def gather(envelope):
@@ -388,7 +427,7 @@ class TestWireTypes:
 
         group.all_gather_obj.side_effect = gather
         init_metadata = Mock(return_value=group)
-        make_pynccl = Mock()
+        make_communicator = Mock()
         monkeypatch.setattr(
             "vllm.distributed.weight_transfer.m2n_engine.worker_init_metadata_group",
             init_metadata,
@@ -397,8 +436,8 @@ class TestWireTypes:
             "vllm.distributed.weight_transfer.m2n_engine.import_m2n", Mock()
         )
         monkeypatch.setattr(
-            "vllm.distributed.weight_transfer.m2n_engine.pynccl_from_metadata_group",
-            make_pynccl,
+            "vllm.distributed.weight_transfer.m2n_engine.create_m2n_communicator",
+            make_communicator,
         )
         vllm_config = SimpleNamespace(
             parallel_config=Mock(), model_config=SimpleNamespace(quantization=None)
@@ -413,7 +452,7 @@ class TestWireTypes:
         with pytest.raises(RuntimeError, match="source digest disagrees"):
             engine.init_transfer_engine(self._init_info())
 
-        make_pynccl.assert_not_called()
+        make_communicator.assert_not_called()
 
     def test_worker_rank_offset_selects_deployment_global_ranks(self, monkeypatch):
         group = Mock(rank=2, world_size=3)
@@ -431,21 +470,16 @@ class TestWireTypes:
             "_prepare_destination_plan",
             lambda engine, info: setattr(engine, "_parameter_destinations", []),
         )
-        runtime = M2NNcclRuntime("/canonical/libnccl.so.2", 1, object())
+        nccl = Mock()
         monkeypatch.setattr(
             "vllm.distributed.weight_transfer.m2n_engine.prepare_m2n_local_runtime",
-            Mock(return_value=(runtime, 0, Mock())),
+            Mock(return_value=(nccl, 0, Mock())),
         )
         comm = Mock()
-        make_pynccl = Mock(return_value=comm)
+        make_communicator = Mock(return_value=comm)
         monkeypatch.setattr(
-            "vllm.distributed.weight_transfer.m2n_engine.pynccl_from_metadata_group",
-            make_pynccl,
-        )
-        monkeypatch.setattr(
-            "vllm.distributed.weight_transfer.m2n_engine."
-            "validate_m2n_nccl_communicator",
-            Mock(),
+            "vllm.distributed.weight_transfer.m2n_engine.create_m2n_communicator",
+            make_communicator,
         )
         monkeypatch.setattr(
             "vllm.distributed.weight_transfer.m2n_engine."
@@ -467,7 +501,7 @@ class TestWireTypes:
 
         assert init_metadata.call_args.args[0].rank_offset == 2
         assert info.rank_offset == 1
-        make_pynccl.assert_called_once_with(group, 0, library_path=runtime.library_path)
+        make_communicator.assert_called_once_with(nccl, group, None)
 
     def test_uid_data_plane_still_uses_tcp_metadata(self, monkeypatch):
         group = Mock(rank=1, world_size=3)
@@ -485,25 +519,15 @@ class TestWireTypes:
             "_prepare_destination_plan",
             lambda engine, info: setattr(engine, "_parameter_destinations", []),
         )
-        runtime = M2NNcclRuntime("/canonical/libnccl.so.2", 1, object())
+        nccl = Mock()
         monkeypatch.setattr(
             "vllm.distributed.weight_transfer.m2n_engine.prepare_m2n_local_runtime",
-            Mock(return_value=(runtime, 0, Mock())),
+            Mock(return_value=(nccl, 0, Mock())),
         )
-        uid_init = Mock(return_value=Mock())
-        tcp_init = Mock()
+        make_communicator = Mock(return_value=Mock())
         monkeypatch.setattr(
-            "vllm.distributed.weight_transfer.m2n_engine.uid_init_process_group",
-            uid_init,
-        )
-        monkeypatch.setattr(
-            "vllm.distributed.weight_transfer.m2n_engine.pynccl_from_metadata_group",
-            tcp_init,
-        )
-        monkeypatch.setattr(
-            "vllm.distributed.weight_transfer.m2n_engine."
-            "validate_m2n_nccl_communicator",
-            Mock(),
+            "vllm.distributed.weight_transfer.m2n_engine.create_m2n_communicator",
+            make_communicator,
         )
         monkeypatch.setattr(
             "vllm.distributed.weight_transfer.m2n_engine."
@@ -525,14 +549,7 @@ class TestWireTypes:
         )
 
         init_metadata.assert_called_once()
-        uid_init.assert_called_once_with(
-            b"\x00" * 128,
-            rank=1,
-            world_size=3,
-            device=0,
-            library_path=runtime.library_path,
-        )
-        tcp_init.assert_not_called()
+        make_communicator.assert_called_once_with(nccl, group, b"\x00" * 128)
 
     def test_partial_worker_initialization_aborts_owned_resources(self):
         vllm_config = SimpleNamespace(
@@ -689,9 +706,6 @@ class TestWireTypes:
 
         engine._reshard = reshard
         stream = Mock()
-        monkeypatch.setattr(
-            "vllm.distributed.weight_transfer.m2n_engine.comm_ptr", lambda group: 0
-        )
         monkeypatch.setattr(torch.cuda, "current_stream", lambda: stream)
 
         engine._receive_weights(
@@ -722,9 +736,6 @@ class TestWireTypes:
             M2NDestination("b", REPLICATED, torch.zeros(1)),
         ]
         engine._reshard = Mock()
-        monkeypatch.setattr(
-            "vllm.distributed.weight_transfer.m2n_engine.comm_ptr", lambda group: 0
-        )
         monkeypatch.setattr(torch.cuda, "current_stream", Mock())
 
         update = M2NWeightTransferUpdateInfo(names=["b"])
@@ -1287,10 +1298,10 @@ def test_m2n_weight_transfer_between_processes(data_plane):
     world_size = 2  # 1 trainer + 1 inference worker
     nccl_unique_id_b64 = None
     if data_plane == "uid":
-        from vllm.distributed.device_communicators.pynccl_wrapper import NCCLLibrary
+        import nccl.core as nccl
 
         nccl_unique_id_b64 = base64.b64encode(
-            bytes(NCCLLibrary().ncclGetUniqueId().internal)
+            bytes(nccl.get_unique_id().as_bytes)
         ).decode()
 
     worker = _m2n_worker_receive.remote(

@@ -10,18 +10,14 @@ The `nccl_m2n` weight transfer engine uses [NCCL M2N](https://github.com/NVIDIA/
 
 ## Requirements
 
-This backend depends on the `nccl-extensions` Python package (and its `nccl4py` dependency), which vLLM does not install. It needs NCCL 2.30.5 or newer, and `libnccl_m2n.so` is linked against a specific NCCL build, so vLLM must load the same library:
-
-```bash
-export VLLM_NCCL_SO_PATH=/path/to/the/same/libnccl.so
-```
+This backend depends on the `nccl-extensions` Python package (and its `nccl4py` dependency), which vLLM does not install. Install both against a compatible NCCL 2.30.5 or newer runtime. The backend creates its data-plane communicator through `nccl4py` and passes that communicator directly to `nccl.m2n`.
 
 The backend imports the runtime lazily, so vLLM is unaffected unless you select it.
 
 ## How It Works
 
-1. The trainer ranks and all inference workers join **one** NCCL communicator via `StatelessProcessGroup`. Trainer ranks occupy `[0, T)` and workers `[T, T + N)` — m2n meshes are contiguous rank intervals, which is exactly what vLLM's existing `rank_offset` convention produces.
-2. At the init handshake the trainer ships the full transfer plan: both meshes — one per side, shared by every parameter — then each parameter's name, dtype, shape and placement. The workers resolve the matching **destination placements** and publish them back over the shared group; the meshes themselves are declared, not negotiated.
+1. A `StatelessProcessGroup` exchanges metadata and the NCCL unique ID. The trainer ranks and all inference workers then create **one** `nccl.core.Communicator`: trainer ranks occupy `[0, T)` and workers `[T, T + N)`. The communicator is passed directly to each M2N collective.
+2. At the init handshake the trainer ships the full transfer plan: the session-wide destination mesh, then each parameter's name, dtype, shape, source mesh, and source placements. The workers resolve the matching **destination placements** and publish them over the data-plane communicator; the meshes themselves are declared, not negotiated.
 3. Each round, both sides issue one `reshard` per parameter in the same order. Every rank in the communicator participates in every reshard, so — as with the NCCL engine — the worker must be inside `update_weights` while the trainer sends. The trainer engine handles that concurrency itself.
 
 ### Destination resolution
@@ -91,7 +87,7 @@ See [`examples/rl/rlhf_m2n.py`](../../../examples/rl/rlhf_m2n.py) for a runnable
 
 - Tensor rank 1..3; 4-D parameters are rejected.
 - dtypes: int8/uint8, fp8 e4m3/e5m2, fp16, bf16, int32/uint32, fp32, int64/uint64, fp64. No fp4.
-- The trainer's device mesh must cover a contiguous rank interval starting at 0, and be 1-D or 2-D.
+- Each parameter's source mesh must cover the same contiguous trainer-rank interval starting at 0, and be 1-D or 2-D.
 - `Partial` placements are not supported.
 - Models with known model-level checkpoint preprocessing use the full-tensor
   fallback for the affected module.

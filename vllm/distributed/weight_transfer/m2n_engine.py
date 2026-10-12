@@ -47,7 +47,7 @@ from vllm.distributed.weight_transfer.m2n_common import (
     check_runtime_ready_agreement,
     check_source_plan_agreement,
     check_transferable,
-    comm_ptr,
+    create_m2n_communicator,
     import_m2n,
     prepare_m2n_local_runtime,
     publish_destination_placements,
@@ -56,7 +56,6 @@ from vllm.distributed.weight_transfer.m2n_common import (
     to_mesh,
     to_placements,
     validate_layout,
-    validate_m2n_nccl_communicator,
 )
 from vllm.distributed.weight_transfer.m2n_layout import (
     M2NDestination,
@@ -65,15 +64,12 @@ from vllm.distributed.weight_transfer.m2n_layout import (
 from vllm.distributed.weight_transfer.nccl_common import (
     NCCLWeightTransferInitInfo,
     decode_nccl_unique_id,
-    pynccl_from_metadata_group,
-    uid_init_process_group,
     worker_init_metadata_group,
 )
 from vllm.logger import init_logger
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
-    from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
 
 logger = init_logger(__name__)
 
@@ -261,7 +257,7 @@ class M2NWeightTransferEngine(
         model: torch.nn.Module,
     ) -> None:
         super().__init__(config, vllm_config, device, model)
-        self.model_update_group: PyNcclCommunicator | None = None
+        self.model_update_group: Any = None
         self._m2n: Any = None
         self._handle: Any = None
         self._metas: list[M2NParamMeta] = []
@@ -329,43 +325,35 @@ class M2NWeightTransferEngine(
         check_data_plane_agreement(
             metadata_group,
             unique_id_bytes,
-            init_info.max_cta,
             data_plane_error,
         )
 
         runtime_error = destination_error
-        nccl_runtime = None
+        nccl = None
         device = None
         if runtime_error is None:
             try:
-                nccl_runtime, device, self._handle = prepare_m2n_local_runtime(
+                nccl, device, self._handle = prepare_m2n_local_runtime(
                     self._m2n, init_info.max_cta
                 )
             except Exception as exc:
                 runtime_error = f"{type(exc).__name__}: {exc}"
         check_runtime_ready_agreement(metadata_group, runtime_error)
-        assert nccl_runtime is not None and device is not None
-        if unique_id_bytes is None:
-            self.model_update_group = pynccl_from_metadata_group(
-                metadata_group,
-                device,
-                library_path=nccl_runtime.library_path,
-            )
-        else:
-            self.model_update_group = uid_init_process_group(
-                unique_id_bytes,
-                rank=metadata_group.rank,
-                world_size=metadata_group.world_size,
-                device=device,
-                library_path=nccl_runtime.library_path,
-            )
-        validate_m2n_nccl_communicator(self.model_update_group, nccl_runtime)
+        assert nccl is not None and device is not None
+        self.model_update_group = create_m2n_communicator(
+            nccl, metadata_group, unique_id_bytes
+        )
 
         # Keep the merged destination-placement publication unchanged: source
         # agreement is independent of worker-side destination selection.
         mine = [destination.placements for destination in self._parameter_destinations]
         agreed = publish_destination_placements(
-            self.model_update_group, init_info.rank_offset, mine, len(self._metas)
+            self.model_update_group,
+            self.device,
+            torch.cuda.current_stream(),
+            init_info.rank_offset,
+            mine,
+            len(self._metas),
         )
         if agreed != mine:
             mismatched = next(
@@ -542,7 +530,6 @@ class M2NWeightTransferEngine(
             disable_mtp_completeness_check,
         )
 
-        comm = comm_ptr(self.model_update_group)
         stream = torch.cuda.current_stream()
 
         # Reshard lazily so one `load_weights` invocation sees the complete
@@ -558,7 +545,13 @@ class M2NWeightTransferEngine(
                         meta.shape, dtype=meta.dtype, device=self.device
                     )
 
-                self._reshard(comm, stream, meta, destination.placements, buffer)
+                self._reshard(
+                    self.model_update_group,
+                    stream,
+                    meta,
+                    destination.placements,
+                    buffer,
+                )
 
                 if destination.tensor is None:
                     # `load_weights` reads on the host stream, so the transfer
@@ -583,7 +576,7 @@ class M2NWeightTransferEngine(
 
     def _reshard(
         self,
-        comm: int,
+        comm: Any,
         stream: torch.cuda.Stream,
         src_meta: M2NParamMeta,
         dst_placements: Placements | None,

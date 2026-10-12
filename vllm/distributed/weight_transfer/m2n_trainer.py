@@ -38,7 +38,7 @@ from vllm.distributed.weight_transfer.m2n_common import (
     check_runtime_ready_agreement,
     check_source_plan_agreement,
     check_transferable,
-    comm_ptr,
+    create_m2n_communicator,
     import_m2n,
     prepare_m2n_local_runtime,
     publish_destination_placements,
@@ -48,19 +48,15 @@ from vllm.distributed.weight_transfer.m2n_common import (
     to_placements,
     validate_layout,
     validate_local_tensor,
-    validate_m2n_nccl_communicator,
 )
 from vllm.distributed.weight_transfer.m2n_source import M2NWeightSource
 from vllm.distributed.weight_transfer.nccl_common import (
     decode_nccl_unique_id,
-    pynccl_from_metadata_group,
     stateless_init_metadata_group,
-    uid_init_process_group,
 )
 from vllm.logger import init_logger
 
 if TYPE_CHECKING:
-    from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
     from vllm.distributed.utils import StatelessProcessGroup
 
 logger = init_logger(__name__)
@@ -176,7 +172,7 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
     ) -> None:
         """Hold the client and source; `trainer_init` fills in the group."""
         super().__init__(client=client, source=source, is_sender=is_sender)
-        self.group: PyNcclCommunicator | None = None
+        self.group: Any = None
         self._m2n: Any = None
         self._handle: Any = None
         self._metas: list[M2NParamMeta] = []
@@ -290,38 +286,23 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
         check_data_plane_agreement(
             metadata_group,
             unique_id_bytes,
-            init_info.max_cta,
             data_plane_error,
         )
 
         runtime_error: str | None = None
-        nccl_runtime = None
+        nccl = None
         device = None
         try:
-            nccl_runtime, device, self._handle = prepare_m2n_local_runtime(
+            nccl, device, self._handle = prepare_m2n_local_runtime(
                 self._m2n, init_info.max_cta
             )
         except Exception as exc:
             runtime_error = f"{type(exc).__name__}: {exc}"
         check_runtime_ready_agreement(metadata_group, runtime_error)
-        assert nccl_runtime is not None and device is not None
-        if unique_id_bytes is None:
-            self.group = pynccl_from_metadata_group(
-                metadata_group,
-                device,
-                library_path=nccl_runtime.library_path,
-            )
-        else:
-            self.group = uid_init_process_group(
-                unique_id_bytes,
-                rank=metadata_group.rank,
-                world_size=metadata_group.world_size,
-                device=device,
-                library_path=nccl_runtime.library_path,
-            )
-        validate_m2n_nccl_communicator(self.group, nccl_runtime)
+        assert nccl is not None and device is not None
+        self.group = create_m2n_communicator(nccl, metadata_group, unique_id_bytes)
         self._dst_placements = self._receive_destination_plan(
-            init_info.num_trainer_ranks
+            init_info.num_trainer_ranks, torch.device("cuda", device)
         )
         logger.info(
             "nccl_m2n trainer ready: %d parameters, trainer ranks [0, %d), "
@@ -338,7 +319,7 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
             self._init_future = None
 
     def _receive_destination_plan(
-        self, first_worker_rank: int
+        self, first_worker_rank: int, device: torch.device
     ) -> list[Placements | None]:
         """Receive and validate the inference-side per-parameter placements."""
         if self.group is None or self._dst_mesh is None:
@@ -350,7 +331,12 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
         # Every trainer rank receives the complete plan in this single,
         # initialization-time broadcast.
         placements = publish_destination_placements(
-            self.group, first_worker_rank, None, len(self._metas)
+            self.group,
+            device,
+            torch.cuda.current_stream(),
+            first_worker_rank,
+            None,
+            len(self._metas),
         )
         # The send loop matches placements to metadata by position, so reject
         # an incomplete or oversized plan before entering any M2N collective.
@@ -563,7 +549,6 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
         assert self._dst_mesh is not None
         assert self.source is not None
         m2n = self._m2n
-        comm = comm_ptr(self.group)
         stream = torch.cuda.current_stream()
 
         expected_device = torch.device("cuda", torch.accelerator.current_device_index())
@@ -595,7 +580,7 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
             m2n.reshard(
                 shard,
                 None,
-                comm,
+                self.group,
                 stream,
                 src_mesh=to_mesh(m2n, src_mesh),
                 src_placements=to_placements(m2n, src_placements),
