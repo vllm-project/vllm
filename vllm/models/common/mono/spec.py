@@ -42,11 +42,14 @@ class Feature(enum.Enum):
 
 @dataclass(frozen=True)
 class CacheReq:
-    """One cache a kernel layer reads, found on the vLLM layer at ``path``."""
+    """One cache a kernel layer reads, found on the vLLM layer at ``path``
+    (attributes, then an optional ``[i]`` into a list or tuple); ``when`` limits it
+    to the layers it is true for."""
 
     path: str
     dtypes: tuple[torch.dtype, ...] = ()
     contiguous_last_dim: bool = True
+    when: Callable[[Any], bool] | None = None
 
 
 @dataclass

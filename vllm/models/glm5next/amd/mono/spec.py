@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The GLM-5.3-Flash MonoKernel spec: FFN-layer launches for the MoE layers.
+"""The GLM-5.3-Flash MonoKernel spec: whole-layer launches for the KDA MoE layers,
+FFN-layer launches for the sparse-attention ones.
 
 Config-time code imports only this module; the model-side callbacks import the
 kernel lazily."""
@@ -9,7 +10,9 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from vllm.models.common.mono.spec import MonoSpec
+import torch
+
+from vllm.models.common.mono.spec import CacheReq, MonoSpec
 from vllm.models.glm5next.amd.ops.mono.ffn.layout import POLL_STAGES
 
 if TYPE_CHECKING:
@@ -24,6 +27,7 @@ GRID = 256
 NUMERICS = (
     "expert inputs quantized to MXFP8 (vLLM: MXFP4)",
     "attention TP reduce summed in BF16 inside the launch",
+    "KDA conv taps, L2 norms, gates and recurrence in FP32, as vLLM's kernels",
 )
 GEOMETRY = {
     "hidden_size": 4096,
@@ -40,6 +44,10 @@ GEOMETRY = {
     "topk_group": 1,
     "norm_topk_prob": True,
     "mhc": True,
+    "linear_num_heads": 64,
+    "linear_head_dim": 128,
+    "linear_conv_kernel_dim": 4,
+    "linear_lower_bound": -5.0,
 }
 
 
@@ -48,6 +56,10 @@ def kernel_layers(hf: Any) -> list[int]:
     types = getattr(hf, "mlp_layer_types", None) or []
     last = hf.num_hidden_layers - 1
     return [i for i, t in enumerate(types[:last]) if t == "sparse"]
+
+
+def is_kda(layer: Any) -> bool:
+    return getattr(layer, "layer_kind", None) == "kda"
 
 
 def refuse_config(vllm_config: VllmConfig) -> list[str]:
@@ -89,7 +101,10 @@ MONO_SPEC = MonoSpec(
     layers=kernel_layers,
     widths=WIDTHS,
     supports=frozenset(),
-    caches={},
+    caches={
+        "conv": CacheReq("self_attn.kv_cache[0]", (torch.bfloat16,), when=is_kda),
+        "rec": CacheReq("self_attn.kv_cache[1]", (torch.float32,), when=is_kda),
+    },
     weight_source="views",
     grid=GRID,
     stages=POLL_STAGES,
@@ -103,7 +118,7 @@ MONO_SPEC = MonoSpec(
     options={
         "tokens": STEP_TOKENS,
         "tp_max_width": TP_MAX_WIDTH,
-        "mode": "ffn layer",
+        "mode": "whole layer (KDA), ffn layer (sparse attention)",
         "numerics": NUMERICS,
     },
 )

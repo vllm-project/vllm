@@ -123,6 +123,7 @@ def build_flash_ffn_kernel(
     poll_limit: int | None = None,
     poll_early_out: bool = False,
     kda: bool = False,
+    conv_dim_first: bool = True,
 ):
     """Return the ``@flyc.jit`` launcher of one rank's FFN layer for S rows; with
     ``kda`` the whole KDA decoder layer (attention-side mHC, projections, short conv,
@@ -1202,6 +1203,13 @@ def build_flash_ffn_kernel(
         # writes no state and outputs zeros.
         QO, KO, VO, G1O, G2O, OO = 0, KD, 2 * KD, 3 * KD, 4 * KD, 5 * KD
 
+        def conv_at(ch, j):
+            """Element of channel ``ch``, tap ``j`` in a conv state slot, laid out
+            [3P, taps] (dim first) or [taps, 3P]."""
+            if const_expr(conv_dim_first):
+                return ch * (CONV_TAPS - 1) + j
+            return j * (3 * P) + ch
+
         def run_kda():
             r_cw = _rsrc(conv_w)
             r_alog = _rsrc(a_log)
@@ -1222,10 +1230,7 @@ def build_flash_ffn_kernel(
                 if tid < 3 * KD:
                     ch = (tid // KD) * P + h * KD + tid % KD
                     x = getf_many([(mb("proj"), s * NIN + ch)])[0]
-                    st = [
-                        ld_bf16(r_cs, ch * (CONV_TAPS - 1) + j)
-                        for j in range(CONV_TAPS - 1)
-                    ]
+                    st = [ld_bf16(r_cs, conv_at(ch, j)) for j in range(CONV_TAPS - 1)]
                     cw = [ld_f32(r_cw, ch * CONV_TAPS + j) for j in range(CONV_TAPS)]
                     a = cw[CONV_TAPS - 1] * x
                     for j in range_constexpr(CONV_TAPS - 1):
@@ -1235,9 +1240,7 @@ def build_flash_ffn_kernel(
                         for j in range_constexpr(CONV_TAPS - 1):
                             nxt = st[j + 1] if j + 1 < CONV_TAPS - 1 else x
                             bo.buffer_store(
-                                fx.Float32(nxt).to(fx.BFloat16),
-                                r_cs,
-                                ch * (CONV_TAPS - 1) + j,
+                                fx.Float32(nxt).to(fx.BFloat16), r_cs, conv_at(ch, j)
                             )
                 if tid < 2 * KD:
                     g = getf_many(
