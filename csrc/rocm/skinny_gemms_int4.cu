@@ -10,8 +10,7 @@
 #include <algorithm>
 #include <utility>  // std::in_range
 
-#include "../cuda_compat.h"
-#include "dispatch_utils.h"
+#include "core/cuda_compat.h"
 
 // Combined RDNA macro (gfx11 + gfx12) - both use 32-wide wavefronts
 #if defined(__GFX11__) || defined(__GFX12__)

@@ -12,10 +12,10 @@
 #include <mutex>
 #include <utility>
 
-#include "../cuda_compat.h"
+#include "core/cuda_compat.h"
 #include "dispatch_utils.h"
 #include "quantization/w8a8/fp8/common.cuh"
-#include "core/batch_invariant.hpp"
+#include "core/utils.hpp"
 
 // Number of streams the pre-allocated split-K pool covers. ~7.5 MiB per slot.
 static constexpr int64_t kWvSlots = 8;
