@@ -50,7 +50,7 @@ SKINNY_GEMM_PASS_RATES = {
 }
 PRESHUFFLED_SHAPES = [
     (64, 4096, 8192),
-    (32, 8192, 16384),
+    (32, 16384, 16384),
 ]
 
 
@@ -147,7 +147,7 @@ def test_fp4_env_defaults():
     """ROCm FP4 env defaults should stay stable for the AITER gates."""
     import vllm.envs as envs
 
-    assert envs.VLLM_ROCM_USE_AITER_FP4_ASM_GEMM is False
+    assert envs.VLLM_ROCM_USE_AITER_FP4_ASM_GEMM is None
     assert envs.VLLM_ROCM_USE_AITER_FP4BMM is True
 
 
@@ -687,6 +687,7 @@ def test_aiter_mxfp4_process_weights_falls_back_to_triton_for_misaligned_scale()
 
     kernel = object.__new__(AiterMxfp4LinearKernel)
     kernel.use_asm_gemm = True
+    kernel.use_tuned_dispatch = False
     kernel.out_dtype = torch.bfloat16
 
     layer = torch.nn.Module()
@@ -700,3 +701,69 @@ def test_aiter_mxfp4_process_weights_falls_back_to_triton_for_misaligned_scale()
     # Triton path stores the transposed, contiguous scale.
     assert tuple(layer.weight_scale.shape) == (10, 2560)
     assert layer.weight_scale.is_contiguous()
+
+
+@pytest.mark.parametrize(
+    ("env_value", "forced_on", "table"),
+    [(None, False, True), ("1", True, False), ("0", False, False)],
+)
+def test_rocm_aiter_fp4_asm_gemm_tuned_dispatch_gate(
+    env_value, forced_on, table, monkeypatch
+):
+    """Unset chooses per shape from aiter's tuned configs; 1/0 force ASM on/off."""
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    _assert_aiter_supported()
+    with monkeypatch.context() as mp:
+        mp.setenv("VLLM_ROCM_USE_AITER", "1")
+        if env_value is None:
+            mp.delenv("VLLM_ROCM_USE_AITER_FP4_ASM_GEMM", raising=False)
+        else:
+            mp.setenv("VLLM_ROCM_USE_AITER_FP4_ASM_GEMM", env_value)
+        _reload_envs()
+        rocm_aiter_ops.refresh_env_variables()
+
+        assert rocm_aiter_ops.is_asm_fp4_gemm_dynamic_quant_enabled() is (
+            forced_on and on_gfx950()
+        )
+        assert rocm_aiter_ops.is_asm_fp4_gemm_tuned_dispatch_enabled() is (
+            table and on_gfx950()
+        )
+
+
+@pytest.mark.skipif(not on_gfx950(), reason="gfx950 ROCm only")
+@pytest.mark.parametrize(
+    ("asm_tuned", "preshuffle_tuned", "expected"),
+    [(True, True, True), (True, False, False), (False, True, False)],
+)
+def test_aiter_mxfp4_tuned_dispatch_picks_layout(
+    asm_tuned, preshuffle_tuned, expected, monkeypatch
+):
+    """With tuned dispatch, a layer takes the ASM layout only when aiter has
+    tuned configs for both the ASM GEMM and the preshuffled Triton GEMM."""
+    from torch.nn.parameter import Parameter
+
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.model_executor.kernels.linear.mxfp4.aiter import AiterMxfp4LinearKernel
+
+    monkeypatch.setattr(rocm_aiter_ops, "is_asm_fp4_gemm_tuned", lambda n, k: asm_tuned)
+    monkeypatch.setattr(
+        rocm_aiter_ops,
+        "is_triton_gemm_afp4wfp4_presh_ws_tuned",
+        lambda n, k: preshuffle_tuned,
+    )
+    kernel = object.__new__(AiterMxfp4LinearKernel)
+    kernel.use_asm_gemm = False
+    kernel.use_tuned_dispatch = True
+    kernel.out_dtype = torch.bfloat16
+
+    layer = torch.nn.Module()
+    layer.weight = Parameter(
+        torch.zeros(1280, 4096, dtype=torch.uint8, device="cuda"), requires_grad=False
+    )
+    layer.weight_scale = Parameter(
+        torch.zeros(1280, 256, dtype=torch.uint8, device="cuda"), requires_grad=False
+    )
+    kernel.process_weights_after_loading(layer)
+
+    assert kernel.use_asm_gemm is expected

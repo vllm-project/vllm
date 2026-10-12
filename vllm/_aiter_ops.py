@@ -2404,7 +2404,24 @@ class rocm_aiter_ops:
     def is_asm_fp4_gemm_dynamic_quant_enabled(cls) -> bool:
         from vllm.platforms.rocm import on_gfx950
 
-        return cls._AITER_ENABLED and cls._FP4_GEMM_DYNAMIC_QUANT_ASM and on_gfx950()
+        return (
+            cls._AITER_ENABLED
+            and cls._FP4_GEMM_DYNAMIC_QUANT_ASM is True
+            and on_gfx950()
+        )
+
+    @classmethod
+    @if_aiter_supported
+    def is_asm_fp4_gemm_tuned_dispatch_enabled(cls) -> bool:
+        """ASM FP4 GEMM not forced on or off: choose per shape from aiter's
+        tuned configs."""
+        from vllm.platforms.rocm import on_gfx950
+
+        return (
+            cls._AITER_ENABLED
+            and cls._FP4_GEMM_DYNAMIC_QUANT_ASM is None
+            and on_gfx950()
+        )
 
     @classmethod
     @if_aiter_supported
@@ -3935,12 +3952,28 @@ class rocm_aiter_ops:
     def is_triton_gemm_afp4wfp4_presh_ws_tuned(n: int, k_bytes: int) -> bool:
         if not current_platform.is_rocm():
             return False
-        # Input = weight.shape[1] (bytes); *4 for fp4 and aiter config 2*k
+        # k_bytes = weight.shape[1] (two fp4 per byte); aiter names the
+        # config by the logical K.
         try:
             return _triton_gemm_config_is_tuned(
-                "GEMM-AFP4WFP4_PRESHUFFLED", n, 4 * k_bytes
+                "GEMM-AFP4WFP4_PRESHUFFLED", n, 2 * k_bytes
             )
         except (AssertionError, ImportError):
+            return False
+
+    @staticmethod
+    @functools.cache
+    def is_asm_fp4_gemm_tuned(n: int, k_bytes: int) -> bool:
+        """Aiter has a tuned a4w4 (ASM/CK) config for prefill-sized M."""
+        if not current_platform.is_rocm():
+            return False
+        try:
+            from aiter.ops.gemm_op_a4w4 import get_GEMM_config
+
+            return all(
+                get_GEMM_config(m, n, 2 * k_bytes) is not None for m in (1024, 8192)
+            )
+        except ImportError:
             return False
 
     @staticmethod
