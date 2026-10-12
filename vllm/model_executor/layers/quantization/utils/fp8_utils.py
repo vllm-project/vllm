@@ -6,6 +6,7 @@ import functools
 import json
 import os
 from collections.abc import Callable, Sequence
+from pathlib import Path
 from typing import Any
 
 import torch
@@ -921,9 +922,6 @@ def _w8a8_triton_block_scaled_mm(
     tl.store(c_ptrs, c, mask=c_mask)
 
 
-_W8A8_PER_TOKEN_FP8_CONFIG_DIR = os.path.join(os.path.dirname(__file__), "configs")
-
-
 def get_w8a8_per_token_fp8_config_filename(
     N: int, K: int, device_name: str, input_dtype: torch.dtype, out_dtype: torch.dtype
 ) -> str:
@@ -939,16 +937,17 @@ def get_w8a8_per_token_fp8_configs(
     N: int, K: int, device_name: str, input_dtype: torch.dtype, out_dtype: torch.dtype
 ) -> dict[int, dict[str, int]] | None:
     """Load measured W8A8 per-token configs from the shared tuning directory."""
-    path = os.path.join(
-        _W8A8_PER_TOKEN_FP8_CONFIG_DIR,
-        get_w8a8_per_token_fp8_config_filename(
-            N, K, device_name, input_dtype, out_dtype
-        ),
+    json_file_name = get_w8a8_per_token_fp8_config_filename(
+        N, K, device_name, input_dtype, out_dtype
     )
-    if not os.path.exists(path):
+    config_file_path = Path(__file__).resolve().parent / "configs" / json_file_name
+    if not config_file_path.exists():
         return None
-    with open(path) as f:
-        logger.info("Using configuration from %s for W8A8 per-token FP8 kernel.", path)
+    with config_file_path.open() as f:
+        logger.info(
+            "Using configuration from %s for W8A8 per-token FP8 kernel.",
+            config_file_path,
+        )
         return {int(m): config for m, config in json.load(f).items()}
 
 

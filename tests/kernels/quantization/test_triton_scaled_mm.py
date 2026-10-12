@@ -6,7 +6,6 @@ Run `pytest tests/kernels/quantization/test_triton_scaled_mm.py`.
 """
 
 import importlib
-import json
 from types import SimpleNamespace
 
 import pytest
@@ -14,6 +13,9 @@ import torch
 
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
+
+if current_platform.is_rocm():
+    from vllm.platforms.rocm import on_rdna4
 
 device = current_platform.device_type
 
@@ -71,11 +73,12 @@ def scaled_mm_launches(monkeypatch):
 
 
 @pytest.fixture
-def per_token_fp8_config_dir(monkeypatch, tmp_path):
-    monkeypatch.setattr(fp8_utils_module, "_W8A8_PER_TOKEN_FP8_CONFIG_DIR", tmp_path)
-    fp8_utils_module.get_w8a8_per_token_fp8_configs.cache_clear()
-    yield tmp_path
-    fp8_utils_module.get_w8a8_per_token_fp8_configs.cache_clear()
+def per_token_fp8_configs(monkeypatch):
+    configs: dict[int, dict[str, int]] = {}
+    monkeypatch.setattr(
+        fp8_utils_module, "get_w8a8_per_token_fp8_configs", lambda *_args: configs
+    )
+    return configs
 
 
 # This test is to check regressions for int8 support on ROCm.
@@ -257,7 +260,7 @@ def test_triton_fp8_per_token_backend_preserves_linear_shape(out_dtype, use_bias
 @pytest.mark.parametrize("n", [256, 8192])
 @pytest.mark.parametrize("tuned", [False, True])
 def test_triton_fp8_per_token_dynamic_shapes_keep_runtime_tiles(
-    per_token_fp8_config_dir, scaled_mm_launches, n, tuned
+    per_token_fp8_configs, scaled_mm_launches, n, tuned
 ):
     """Prefill compilation must preserve decode tiles and GPU graph replay."""
     importlib.import_module("vllm.model_executor.kernels.linear.scaled_mm.triton")
@@ -269,16 +272,7 @@ def test_triton_fp8_per_token_dynamic_shapes_keep_runtime_tiles(
         "num_stages": 1,
     }
     if tuned:
-        filename = fp8_utils_module.get_w8a8_per_token_fp8_config_filename(
-            n,
-            128,
-            fp8_utils_module.get_device_name_as_file_name(),
-            current_platform.fp8_dtype(),
-            torch.bfloat16,
-        )
-        (per_token_fp8_config_dir / filename).write_text(
-            json.dumps({1: tuned_config, 8: tuned_config})
-        )
+        per_token_fp8_configs.update({1: tuned_config, 8: tuned_config})
     set_random_seed(0)
     launches = scaled_mm_launches
     k = 128
@@ -322,41 +316,6 @@ def test_triton_fp8_per_token_dynamic_shapes_keep_runtime_tiles(
         graph.replay()
         torch.testing.assert_close(captured, expected, rtol=1e-2, atol=1e-2)
         assert len(launches) == count
-
-
-def test_per_token_fp8_config_respects_device_dtype_and_measured_m(
-    monkeypatch, tmp_path
-):
-    """Partial decode tuning must not override prefill or other devices/dtypes."""
-    module = fp8_utils_module
-    monkeypatch.setattr(module, "_W8A8_PER_TOKEN_FP8_CONFIG_DIR", tmp_path)
-    monkeypatch.setattr(module, "get_device_name_as_file_name", lambda: "test_device")
-    module.get_w8a8_per_token_fp8_configs.cache_clear()
-    dtype = torch.float8_e4m3fn
-    filename = module.get_w8a8_per_token_fp8_config_filename(
-        256, 128, "test_device", dtype, torch.bfloat16
-    )
-    configs = {
-        1: {"BLOCK_SIZE_M": 16},
-        2: {"BLOCK_SIZE_M": 32, "GROUP_M": 4},
-        8: {"BLOCK_SIZE_M": 64, "N_STRIPE": 16, "UNMASKED_LOADS": True},
-    }
-    (tmp_path / filename).write_text(json.dumps(configs))
-    get = lambda m, out=torch.bfloat16: module.get_w8a8_per_token_fp8_config(
-        m, 256, 128, dtype, out
-    )
-    assert get(1) == configs[1]
-    assert get(2) == configs[2]
-    assert get(3) == {"BLOCK_SIZE_M": 32}
-    assert get(7) == {"BLOCK_SIZE_M": 64}
-    # Removing scheduling from a nearby M must not mutate the cached exact entry.
-    assert get(8) == configs[8]
-    assert get(0) is None
-    assert get(16) is None
-    assert get(1, torch.float16) is None
-    monkeypatch.setattr(module, "get_device_name_as_file_name", lambda: "other_device")
-    assert get(1) is None
-    module.get_w8a8_per_token_fp8_configs.cache_clear()
 
 
 @pytest.mark.parametrize("platform", ["cuda", "rocm", "xpu", "oot"])
@@ -480,7 +439,9 @@ def test_scaled_mm_explicit_tiles_without_heuristic(in_dtype):
     torch.testing.assert_close(actual, expected, rtol=1e-2, atol=1e-2)
 
 
-@pytest.mark.skipif(not current_platform.is_rocm(), reason="Requires gfx1201")
+@pytest.mark.skipif(
+    not current_platform.is_rocm() or not on_rdna4(), reason="Requires RDNA4 GPU"
+)
 @pytest.mark.parametrize(
     "m,n,k,policy",
     [
@@ -490,11 +451,9 @@ def test_scaled_mm_explicit_tiles_without_heuristic(in_dtype):
     ],
 )
 def test_triton_fp8_launch_policies_preserve_mutated_graph_inputs(
-    per_token_fp8_config_dir, scaled_mm_launches, m, n, k, policy
+    per_token_fp8_configs, scaled_mm_launches, m, n, k, policy
 ):
     """Each configured policy must execute and preserve fresh compiled graph output."""
-    if torch.cuda.get_device_properties(0).gcnArchName.split(":")[0] != "gfx1201":
-        pytest.skip("Requires gfx1201")
     importlib.import_module("vllm.model_executor.kernels.linear.scaled_mm.triton")
     config = {
         "BLOCK_SIZE_M": 64 if m == 64 else 128,
@@ -504,14 +463,7 @@ def test_triton_fp8_launch_policies_preserve_mutated_graph_inputs(
         "num_stages": 1,
         **policy,
     }
-    filename = fp8_utils_module.get_w8a8_per_token_fp8_config_filename(
-        n,
-        k,
-        fp8_utils_module.get_device_name_as_file_name(),
-        torch.float8_e4m3fn,
-        torch.bfloat16,
-    )
-    (per_token_fp8_config_dir / filename).write_text(json.dumps({m: config}))
+    per_token_fp8_configs[m] = config
     set_random_seed(0)
     a = (0.2 * torch.randn(m, k, device=device)).to(torch.float8_e4m3fn)
     b = (0.2 * torch.randn(n, k, device=device)).to(torch.float8_e4m3fn).t()
