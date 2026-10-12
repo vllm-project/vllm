@@ -47,10 +47,12 @@ pub struct Finished {
     pub usage: TokenUsage,
     pub finish_reason: FinishReason,
     /// Connector-specific KV transfer parameters for disaggregated serving.
-    pub kv_transfer_params: Option<serde_json::Value>,
+    /// Kept boxed as received from `vllm-llm`, so the chat events built from
+    /// this stay small without boxing again.
+    pub kv_transfer_params: Option<Box<serde_json::Value>>,
     /// Connector-specific encoder cache transfer parameters for disaggregated
     /// serving.
-    pub ec_transfer_params: Option<serde_json::Value>,
+    pub ec_transfer_params: Option<Box<serde_json::Value>>,
     /// Sampling support sets aligned with all generated token positions.
     pub sampling_mask: Option<SamplingMask>,
 }
