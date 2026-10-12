@@ -4,6 +4,7 @@ vLLM applies a set of kernel/operator fusions at compile time (via custom [`torc
 to separate optimizations from model definitions and avoid breaking layer abstractions in model code.
 These fusions are controlled by fields in [`PassConfig`][vllm.config.compilation.PassConfig] and are automatically enabled
 at appropriate [optimization levels](optimization_levels.md).
+Fusions listed as off by default must be enabled explicitly.
 
 ## Quick Reference
 
@@ -29,6 +30,7 @@ or just on the low or high end.
 | [SiLU+Mul + Quant](#silumul--quantization-fuse_act_quant)                      | `fuse_act_quant`             | SiLU+Mul activation → FP8/FP4 quant            | O1 (conditional)               | 1-4%               | No        | Always       |
 | [RMSNorm + Padding](#rmsnorm--padding-fuse_act_padding)                        | `fuse_act_padding`           | Residual add + RMSNorm → padding               | O1 (ROCm/AITER only)           | TBD                | No        | Always       |
 | [MLA Dual RMSNorm](#mla-dual-rmsnorm-fuse_mla_dual_rms_norm)                   | `fuse_mla_dual_rms_norm`     | Paired Q + KV RMSNorm (+ FP8 quant) → 1 kernel | O1 (ROCm/AITER only)           | 1-2%               | No        | Always       |
+| [XPU MoE + Shared Expert](#xpu-moe--shared-expert-fuse_xpu_moe_shared)         | `fuse_xpu_moe_shared`        | Routed + shared MoE → fused decode op          | Off by default (XPU only)      | Workload-dependent | No        | Low          |
 
 ## Support Matrix
 
@@ -51,6 +53,8 @@ The table below lists the quantization schemes supported by each fusion on each 
 \* `fuse_attn_quant` support depends on the attention backend in use; not all backends support
 fused quantization output. See the [`fuse_attn_quant` section](#attention--quantization-fuse_attn_quant)
 for per-backend details.
+
+For the XPU-specific MoE fusion, see the [XPU MoE + Shared Expert section](#xpu-moe--shared-expert-fuse_xpu_moe_shared).
 
 ## Enabling / Disabling Fusions
 
@@ -333,6 +337,79 @@ q_fp8, q_scale, kv_normed = fused_mla_dual_rms_norm_per_token_quant(
 - Pass: [`vllm/compilation/passes/fusion/rocm_aiter_fusion.py`](https://github.com/vllm-project/vllm/blob/main/vllm/compilation/passes/fusion/rocm_aiter_fusion.py) (`MLADualRMSNormFusionPass`, `MLADualRMSPerTokenQuantPattern`)
 - Custom op: [`vllm/_aiter_ops.py`](https://github.com/vllm-project/vllm/blob/main/vllm/_aiter_ops.py) (`fused_mla_dual_rms_norm`, `fused_mla_dual_rms_norm_per_token_quant`)
 - AITER kernels: [`fused_qk_rmsnorm`](https://github.com/ROCm/aiter/pull/2442), `fused_qk_rmsnorm_per_token_quant`
+
+### XPU MoE + Shared Expert (`fuse_xpu_moe_shared`)
+
+**What it fuses.** Combines the routed experts and one sigmoid-gated shared
+expert into one custom op: gate-up projections, SiLU-and-mul, down projections,
+routing-weight combine and the gated shared output. The op submits six kernels;
+router/top-k selection and the tensor-parallel all-reduce remain outside it.
+
+**Requirements.** Intel Xe2/Xe3 and a `vllm-xpu-kernels` build providing
+`_xpu_C.moe_shared_fused_decode_interface`. Activations must be FP16 or BF16;
+routed and shared weights must be FP8 E4M3 with per-tensor FP32 scales
+(one scale per routed expert and one per shared projection).
+The current pass targets Qwen MoE configurations with hidden size 2048,
+256 experts, top-k 8, and matching routed/shared intermediate sizes, using
+SiLU without bias. It was validated on Qwen3.6-35B-A3B with TP2.
+LoRA, expert parallelism, EPLB, data parallelism, prefill context parallelism
+and sequence parallelism are not supported by this pass.
+
+**Default and token range.** Disabled at every optimization level unless
+`pass_config.fuse_xpu_moe_shared=true`. The pass applies only to compile ranges
+ending at or below `pass_config.xpu_moe_shared_fusion_max_token_num`
+(default: 8 tokens). Larger ranges keep the original MoE path. If the native
+op is unavailable, a MoE layer is unsupported, or the graph pattern does not
+match, the original operations are kept.
+
+**Compile without graph.** This enables the fusion through vLLM's Inductor
+pipeline, while disabling graph capture/replay:
+
+```bash
+vllm serve /path/to/Qwen3.6-35B-A3B \
+    --tensor-parallel-size 2 --dtype bfloat16 --quantization fp8 \
+    --max-num-seqs 8 \
+    --compilation-config '{
+        "mode": 3,
+        "backend": "inductor",
+        "splitting_ops": [],
+        "cudagraph_mode": "NONE",
+        "compile_ranges_endpoints": [8],
+        "pass_config": {"fuse_xpu_moe_shared": true}
+    }'
+```
+
+**Compile with graph.** Use the same compile setup with decode-only graph
+capture for token counts 1, 2, 4 and 8:
+
+```bash
+vllm serve /path/to/Qwen3.6-35B-A3B \
+    --tensor-parallel-size 2 --dtype bfloat16 --quantization fp8 \
+    --max-num-seqs 8 \
+    --compilation-config '{
+        "mode": 3,
+        "backend": "inductor",
+        "splitting_ops": [],
+        "cudagraph_mode": "FULL_DECODE_ONLY",
+        "cudagraph_capture_sizes": [1, 2, 4, 8],
+        "compile_ranges_endpoints": [8],
+        "pass_config": {"fuse_xpu_moe_shared": true}
+    }'
+```
+
+The `cudagraph_mode` field controls XPU graphs on Intel GPUs. Use
+`--dtype float16` for FP16 activations, or set `fuse_xpu_moe_shared` to `false`
+for an unfused baseline with the same compile/graph settings.
+
+**Eager mode.** `--enforce-eager` disables both compilation and graph replay,
+so this pass does not run, even if its flag is set to `true`. Remove
+`--enforce-eager` when using either compile configuration above.
+
+**Code locations.**
+
+- Pass: [`vllm/compilation/passes/fusion/xpu_fusion.py`](https://github.com/vllm-project/vllm/blob/main/vllm/compilation/passes/fusion/xpu_fusion.py) (`XpuMoESharedFusionPass`)
+- Custom op adapter: [`vllm/_xpu_ops.py`](https://github.com/vllm-project/vllm/blob/main/vllm/_xpu_ops.py)
+- Kernel interface: [`vllm_xpu_kernels/moe_shared_fused_interface.py`](https://github.com/vllm-project/vllm-xpu-kernels/blob/main/vllm_xpu_kernels/moe_shared_fused_interface.py)
 
 ## See Also
 
