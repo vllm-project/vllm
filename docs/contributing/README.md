@@ -41,6 +41,7 @@ If you are only developing vLLM's Python code, install vLLM using:
 
 ```bash
 VLLM_USE_PRECOMPILED=1 uv pip install -e .
+vllm download-kernels
 ```
 
 To rebuild only the Rust frontend binary:
@@ -74,7 +75,7 @@ For an optimized workflow when iterating on C++/CUDA kernels, see the [Increment
 For JIT kernel warmup conventions, see [JIT Kernel Warmup](./jit_kernel_warmup.md).
 
 !!! tip
-    vLLM is compatible with Python versions 3.10 to 3.13. However, vLLM's default [Dockerfile](../../docker/Dockerfile) ships with Python 3.12 and tests in CI (except `mypy`) are run with Python 3.12.
+    vLLM is compatible with Python versions 3.11 to 3.14. However, vLLM's default [Dockerfile](../../docker/Dockerfile) ships with Python 3.12 and tests in CI (except `mypy`) are run with Python 3.12.
 
     Therefore, we recommend developing with Python 3.12 to minimise the chance of your local environment clashing with our CI environment.
 
@@ -100,14 +101,6 @@ integration, use the configuration files in `tools/pre_commit/`:
     ```bash
     pre-commit run     # runs on staged files
     pre-commit run -a  # runs on all files (short for --all-files)
-    ```
-
-    ---
-
-    Some `pre-commit` hooks only run in CI. If you need to, you can run them locally with:
-
-    ```bash
-    pre-commit run --hook-stage manual mypy-3.11
     ```
 
 ### Documentation

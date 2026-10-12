@@ -385,7 +385,7 @@ def test_cudagraph_capture_batch_stays_decode_only():
 
 
 def _create_checkpoint_builder_and_batch(
-    num_spec: int, prefix_match_unit: int = 16
+    num_spec: int, prefix_match_unit: int | None = 16
 ) -> tuple[GDNAttentionMetadataBuilder, CommonAttentionMetadata, dict]:
     vllm_config = create_vllm_config(
         model_name="Qwen/Qwen3.5-0.8B",
@@ -413,6 +413,8 @@ def _create_checkpoint_builder_and_batch(
         vllm_config=vllm_config,
         device=DEVICE,
     )
+    vllm_config.cache_config.hash_block_size = prefix_match_unit or 64
+    vllm_config.cache_config.cache_hit_alignment_tokens = prefix_match_unit or 64
     batch = BatchSpec(
         seq_lens=[65, 100, 100], query_lens=[3 if num_spec else 1, 100, 99]
     )
@@ -431,7 +433,9 @@ def _create_checkpoint_builder_and_batch(
 
 
 @pytest.mark.parametrize("num_spec", [0, 3])
-@pytest.mark.parametrize("prefix_match_unit, expected_offset", [(16, 96), (8, 96)])
+@pytest.mark.parametrize(
+    "prefix_match_unit, expected_offset", [(None, 64), (16, 96), (8, 96)]
+)
 def test_checkpoint_metadata_preserves_non_spec_order(
     num_spec, prefix_match_unit, expected_offset
 ):

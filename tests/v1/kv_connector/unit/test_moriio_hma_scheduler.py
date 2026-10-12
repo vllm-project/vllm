@@ -7,31 +7,19 @@ These exercise the highest-risk, otherwise-untested scheduler logic without a
 GPU or the ``mori`` runtime: per-group block-id splitting, the READ/WRITE
 ``N-1`` token accounting, P-side prompt truncation, and offset-template cache
 wiring.
-
-Like ``test_moriio_kv_layout.py`` the whole module is skipped unless it is
-running on ROCm with ``mori`` installed (importing the connector pulls in
-``mori``). The authoritative run happens on the MIA recipe image.
 """
 
 import importlib
-import importlib.util
+from dataclasses import asdict
 from types import SimpleNamespace
 
 import pytest
 import torch
 
-from vllm.platforms import current_platform
 from vllm.v1.core.block_pool import BlockPool
+from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
 from vllm.v1.kv_cache_interface import FullAttentionSpec, UniformTypeKVCacheSpecs
-
-mori_available = importlib.util.find_spec("mori") is not None
-
-if not (current_platform.is_rocm() and mori_available):
-    pytest.skip(
-        "MoRIIOs are only available on ROCm with mori package installed",
-        allow_module_level=True,
-    )
 
 moriio_connector = importlib.import_module(
     "vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_connector"
@@ -525,6 +513,8 @@ def _make_read_scheduler():
         request_id_to_transfer_id={},
         transfer_id_to_request_id={},
         _reqs_need_recv={},
+        _reqs_need_save={},
+        _reqs_need_send={},
         _req_kv_params={},
         _max_decode_tail_blocks=1,
     )
@@ -538,24 +528,52 @@ def _make_read_request(remote_block_ids):
             "transfer_id": "tx",
             "remote_engine_id": "prefill",
             "remote_block_ids": remote_block_ids,
+            "remote_host": "127.0.0.1",
+            "remote_handshake_port": 6000,
+            "remote_notify_port": 6001,
         },
     )
 
 
-def test_update_state_drops_decode_recompute_tail_block():
+@pytest.mark.parametrize("external_tokens", [0, 256])
+@pytest.mark.parametrize("has_mamba", [False, True])
+@pytest.mark.parametrize("zero_ids", [None, [], [101], [101, 102, 202, 999]])
+def test_update_state_drops_decode_recompute_tail_block(
+    external_tokens, has_mamba, zero_ids
+):
+    """Only full hybrid READ destinations skip zeroing; local tails still zero."""
     sched = _make_read_scheduler()
-    request = _make_read_request([[10, 11], [91]])
+    sched._has_mamba = has_mamba
+    remote_blocks = [[10, 11], [91]] if has_mamba else [[10, 11]]
+    request = _make_read_request(remote_blocks)
     blocks = _FakeBlocks(
-        all_groups=([100, 101, 102], [200, 201, 202]),
+        all_groups=([100, 101, 102], [200, 201, 202])
+        if has_mamba
+        else ([100, 101, 102],),
     )
 
-    sched.update_state_after_alloc(request, blocks, num_external_tokens=256)
+    sched.update_state_after_alloc(request, blocks, num_external_tokens=external_tokens)
 
-    assert sched._reqs_need_recv["req"][1] == [[100, 101], [202]]
-    assert sched._req_kv_params["req"]["remote_block_ids"] == [
-        [10, 11],
-        [91],
-    ]
+    expected_blocks = [[100, 101] if external_tokens else []]
+    if has_mamba:
+        expected_blocks.append([202])
+    assert sched._reqs_need_recv["req"][1] == expected_blocks
+    assert sched._req_kv_params["req"]["remote_block_ids"] == remote_blocks
+
+    output = SchedulerOutput.make_empty()
+    output.new_block_ids_to_zero = None if zero_ids is None else list(zero_ids)
+    before = asdict(output)
+    meta = sched.build_connector_meta(output)
+    assert meta.reqs_to_recv["req"].local_block_ids == expected_blocks
+    if zero_ids and has_mamba and external_tokens:
+        before["new_block_ids_to_zero"] = zero_ids[1:]
+    assert asdict(output) == before
+
+    # A later local allocation of the same pages must still be zeroed.
+    output.new_block_ids_to_zero = [100, 101, 102]
+    meta = sched.build_connector_meta(output)
+    assert not meta.reqs_to_recv
+    assert output.new_block_ids_to_zero == [100, 101, 102]
 
 
 def test_update_state_pairs_shorter_local_blocks_with_remote_suffix():
@@ -806,7 +824,7 @@ def test_get_num_new_matched_tokens_write_plain_keeps_all_tokens():
     req = SimpleNamespace(
         num_prompt_tokens=10,
         prompt_token_ids=list(range(10)),
-        kv_transfer_params=None,
+        kv_transfer_params={"do_remote_prefill": True},
     )
     n, is_async = sched.get_num_new_matched_tokens(req, num_computed_tokens=2)
     # Pure-attention WRITE: no N-1 drop; full length minus already-computed.
@@ -830,7 +848,7 @@ def test_get_num_new_matched_tokens_supports_embeds_only_prompts(
         num_prompt_tokens=10,
         prompt_token_ids=None,
         prompt_embeds=object(),
-        kv_transfer_params=None,
+        kv_transfer_params={"do_remote_prefill": True},
     )
 
     assert sched.get_num_new_matched_tokens(req, num_computed_tokens) == (

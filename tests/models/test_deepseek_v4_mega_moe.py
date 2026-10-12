@@ -6,8 +6,14 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from vllm.model_executor.layers.fused_moe.deep_gemm_mega_moe import (
+    DeepGemmSm100MegaMoEBackend,
+)
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
     bind_routed_experts_capturer,
+)
+from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    deepgemm_post_process_weight_scale_block,
 )
 from vllm.models.deepseek_v4.nvidia.dspark import DSparkDeepseekV4ForCausalLM
 from vllm.models.deepseek_v4.nvidia.model import (
@@ -23,6 +29,7 @@ from vllm.models.deepseek_v41.common.mm_preprocess import IMAGE_SENTINEL_BASE_ID
 from vllm.models.deepseek_v41.nvidia.model import DeepseekV4MoE as DeepseekV41MoE
 from vllm.platforms import current_platform
 from vllm.transformers_utils.configs.deepseek_v41 import DeepseekV41Config
+from vllm.utils.deep_gemm import is_deep_gemm_supported
 from vllm.utils.torch_utils import set_default_torch_dtype
 
 pytestmark = pytest.mark.skipif(
@@ -447,7 +454,9 @@ def test_deepseek_v4_mega_moe_preserves_checkpoint_dimensions(
     ):
         param.data.random_(1, 128)
         originals.append(param.data.clone())
-    monkeypatch.setattr(experts, "_check_runtime_supported", lambda: None)
+    monkeypatch.setattr(
+        experts, "_ensure_backend", lambda: DeepGemmSm100MegaMoEBackend()
+    )
     monkeypatch.setattr(
         "vllm.utils.deep_gemm._import_deep_gemm",
         lambda: SimpleNamespace(
@@ -473,19 +482,23 @@ def test_deepseek_v4_mega_moe_preserves_checkpoint_dimensions(
 
 
 @pytest.mark.parametrize(
-    "hidden_size,intermediate_size,block_size,mxfp8",
+    "hidden_size,intermediate_size,block_size,mxfp8,packed",
     [
-        pytest.param(128, 512, 128, False, id="aligned-block128"),
-        pytest.param(128, 512, 128, True, id="aligned-block128-mxfp8"),
-        pytest.param(5120, 2304, 32, False, id="deepseek-v41-flash"),
-        pytest.param(128, 2304, 128, False, id="native-block128"),
-        pytest.param(5120, 2304, 32, True, id="deepseek-v41-flash-mxfp8"),
+        pytest.param(128, 512, 128, False, False, id="aligned-block128"),
+        pytest.param(128, 512, 128, False, True, id="aligned-block128-packed"),
+        pytest.param(128, 512, 128, True, False, id="aligned-block128-mxfp8"),
+        pytest.param(5120, 2304, 32, False, False, id="deepseek-v41-flash"),
+        pytest.param(128, 2304, 128, False, False, id="native-block128"),
+        pytest.param(128, 2304, 128, False, True, id="native-block128-packed"),
+        pytest.param(5120, 2304, 32, True, False, id="deepseek-v41-flash-mxfp8"),
     ],
 )
 def test_deepseek_v4_mega_moe_finalizes_native_shared_expert_weights(
-    monkeypatch, hidden_size, intermediate_size, block_size, mxfp8
+    monkeypatch, hidden_size, intermediate_size, block_size, mxfp8, packed
 ):
     """Shared fusion preserves checkpoint weights and scales at native widths."""
+    if packed and not is_deep_gemm_supported():
+        pytest.skip("Packing the shared scales requires DeepGEMM")
 
     class FakeDeepGemm:
         transformed_dims: list[tuple[int, int]] = []
@@ -539,7 +552,9 @@ def test_deepseek_v4_mega_moe_finalizes_native_shared_expert_weights(
         intermediate_size=intermediate_size,
         num_shared_experts=1,
     )
-    experts._check_runtime_supported = lambda: None
+    monkeypatch.setattr(
+        experts, "_ensure_backend", lambda: DeepGemmSm100MegaMoEBackend()
+    )
 
     def fp8_parameter(*shape):
         return torch.nn.Parameter(
@@ -593,6 +608,18 @@ def test_deepseek_v4_mega_moe_finalizes_native_shared_expert_weights(
             .repeat_interleave(block_k // 32, dim=1)
         )
         originals.append((linear.weight.view(torch.uint8).clone(), scale_1x32))
+        if packed:
+            linear.weight_scale_inv = torch.nn.Parameter(
+                deepgemm_post_process_weight_scale_block(
+                    scale.data.cuda().unsqueeze(0),
+                    *linear.weight.shape,
+                    quant_block_shape=linear.weight_block_size,
+                    num_groups=1,
+                )
+                .squeeze(0)
+                .cpu(),
+                requires_grad=False,
+            )
     monkeypatch.setattr("vllm.utils.deep_gemm._import_deep_gemm", lambda: FakeDeepGemm)
 
     original_gate_up_ptr = shared_experts.gate_up_proj.weight.data_ptr()
@@ -644,6 +671,10 @@ def test_deepseek_v4_mega_moe_does_not_double_add_fused_shared_expert(
 
     class FakeExperts(torch.nn.Module):
         has_fused_shared_experts = fused
+        _backend = DeepGemmSm100MegaMoEBackend()
+
+        def _ensure_backend(self):
+            return self._backend
 
         def forward(self, hidden_states, *args, **kwargs):
             return torch.ones_like(hidden_states)
