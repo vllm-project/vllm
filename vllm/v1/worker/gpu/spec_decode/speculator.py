@@ -92,7 +92,7 @@ class BaseSpeculator(ABC):
         temperature: torch.Tensor,
         # [max_num_reqs]
         seeds: torch.Tensor,
-        dp_sync: DPSyncState | None = None,
+        dp_sync_state: DPSyncState | None = None,
         dummy_run: bool = False,
         skip_attn_for_dummy_run: bool = False,
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
@@ -207,6 +207,9 @@ class DraftModelSpeculator(BaseSpeculator):
 
         self.supports_mm_inputs = False
         self.pcp_manager: PCPManager | None = None
+        # Whether every draft attention builder can refresh its decode metadata
+        # in place, so the refresh can be recorded in the draft CUDA graph.
+        self.supports_decode_metadata_update = False
 
     @abstractmethod
     def load_draft_model(
@@ -299,6 +302,24 @@ class DraftModelSpeculator(BaseSpeculator):
         # builders and buffers.
         self.target_input_buffers = target_input_buffers
         self.target_attn_groups = target_attn_groups
+        self._configure_decode_metadata_update()
+
+    def _configure_decode_metadata_update(self) -> None:
+        unsupported_backends = sorted(
+            {
+                attn_group.backend.get_name()
+                for attn_groups in self.attn_groups
+                for attn_group in attn_groups
+                if not attn_group.supports_draft_decode_metadata_update
+            }
+        )
+        self.supports_decode_metadata_update = not unsupported_backends
+        if unsupported_backends:
+            logger.info_once(
+                "Attention backend(s) %s cannot update draft decode metadata in "
+                "place; falling back to rebuilding attention metadata eagerly.",
+                ", ".join(unsupported_backends),
+            )
 
     def _build_attn_metadata(
         self,
@@ -525,18 +546,18 @@ class DraftModelSpeculator(BaseSpeculator):
 
     def _build_uniform_batch_dp_sync(
         self,
-        target_dp_sync: DPSyncState,
+        target_dp_sync_state: DPSyncState,
         num_reqs: int,
         num_query_per_req: int = 1,
     ) -> tuple[DPSyncState, int]:
-        num_batch_tokens = target_dp_sync.num_reqs * num_query_per_req
+        num_batch_tokens = target_dp_sync_state.num_reqs * num_query_per_req
         assert num_reqs * num_query_per_req <= num_batch_tokens, (
             "reusing a DP sync that does not cover this batch's requests"
         )
         return replace(
-            target_dp_sync,
+            target_dp_sync_state,
             num_tokens_across_dp=torch.full_like(
-                target_dp_sync.num_tokens_across_dp, num_batch_tokens
+                target_dp_sync_state.num_tokens_across_dp, num_batch_tokens
             ),
             uniform_token_count=num_query_per_req,
             eager=False,

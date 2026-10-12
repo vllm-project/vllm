@@ -166,11 +166,17 @@ class DFlashSpeculator(DraftModelSpeculator):
             self.kv_cache_config,
             self.max_model_len,
             causal=self._group_causal,
-            precompute_context_kv=lambda num_reqs: self._precompute_context_kv(
-                0, self._num_graph_context_tokens(num_reqs)
-            ),
+            prepare_forward=self._prepare_graph_forward,
             progress_bar_desc=f"Capturing {self._speculator_name.lower()} CUDA graphs",
         )
+
+    def _prepare_graph_forward(
+        self, num_reqs: int, attn_metadata: dict[str, Any] | None
+    ) -> None:
+        self._precompute_context_kv(0, self._num_graph_context_tokens(num_reqs))
+        # Recorded in the FULL graph so replays skip the eager metadata build.
+        if attn_metadata is not None and self.supports_decode_metadata_update:
+            self._update_draft_decode_metadata(attn_metadata, num_reqs)
 
     def load_draft_model(
         self,
@@ -355,7 +361,7 @@ class DFlashSpeculator(DraftModelSpeculator):
         temperature: torch.Tensor,
         # [max_num_reqs]
         seeds: torch.Tensor,
-        dp_sync: DPSyncState | None = None,
+        dp_sync_state: DPSyncState | None = None,
         dummy_run: bool = False,
         skip_attn_for_dummy_run: bool = False,
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
@@ -446,8 +452,10 @@ class DFlashSpeculator(DraftModelSpeculator):
             )
 
         batch_sync, num_batch_tokens = (
-            self._build_uniform_batch_dp_sync(dp_sync, num_reqs, self.num_query_per_req)
-            if dp_sync is not None
+            self._build_uniform_batch_dp_sync(
+                dp_sync_state, num_reqs, self.num_query_per_req
+            )
+            if dp_sync_state is not None
             else (None, num_query_tokens)
         )
         # Every DFlash step has exactly num_query_per_req tokens, so we can use FULL CGs
@@ -459,7 +467,7 @@ class DFlashSpeculator(DraftModelSpeculator):
             dp_size=self.dp_size,
             dp_rank=self.dp_rank,
             need_eager=is_profile,
-            dp_sync=batch_sync,
+            dp_sync_state=batch_sync,
         )
         num_tokens_padded = batch_desc.num_tokens
         num_tokens_across_dp = (
@@ -484,29 +492,32 @@ class DFlashSpeculator(DraftModelSpeculator):
         else:
             self._precompute_context_kv(0, num_target_tokens, dummy_run)
 
-        # Rebuild the draft attention metadata even when replaying the FULL
-        # graph so that any attention metadata builder state is updated.
-        draft_attn_metadata = self._build_uniform_attn_metadata(
-            num_reqs=num_reqs,
-            batch_desc=batch_desc,
-            num_query_per_req=self.num_query_per_req,
-            seq_lens_cpu_upper_bound=input_batch.seq_lens_cpu_upper_bound,
-            step=self.num_query_per_req,
-            causal=self._group_causal,
-        )
-        draft_slot_mappings_by_layer = build_slot_mappings_by_layer(
-            self.block_tables.slot_mappings[:, :num_tokens_padded],
-            self.kv_cache_config,
-        )
+        is_full_cudagraph = batch_desc.cg_mode == CUDAGraphMode.FULL
+        # During FULL cudagraph with a model that supports decode metadata updates,
+        # the metadata update is captured in the graph, and we can skip the full
+        # build below.
+        if not (is_full_cudagraph and self.supports_decode_metadata_update):
+            draft_attn_metadata = self._build_uniform_attn_metadata(
+                num_reqs=num_reqs,
+                batch_desc=batch_desc,
+                num_query_per_req=self.num_query_per_req,
+                seq_lens_cpu_upper_bound=input_batch.seq_lens_cpu_upper_bound,
+                step=self.num_query_per_req,
+                causal=self._group_causal,
+            )
 
         # DFlash processes all speculative tokens in one forward pass,
         # so the real token count is num_query_tokens.
         self._prepare_eplb_forward(num_query_tokens)
 
-        if batch_desc.cg_mode == CUDAGraphMode.FULL:
+        if is_full_cudagraph:
             assert self.query_cudagraph_manager is not None
             self.query_cudagraph_manager.run_fullgraph(batch_desc)
         else:
+            draft_slot_mappings_by_layer = build_slot_mappings_by_layer(
+                self.block_tables.slot_mappings[:, :num_tokens_padded],
+                self.kv_cache_config,
+            )
             self._generate_draft(
                 num_reqs,
                 num_tokens_padded,
