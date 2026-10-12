@@ -1982,4 +1982,3 @@ def test_get_qwen3_vl_video_resize_config_from_config():
     assert cfg["longest_edge"] == 25165824
     assert cfg["factor"] == 32
     assert cfg["temporal_factor"] == 2
-
