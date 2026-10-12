@@ -250,10 +250,14 @@ class WorkerWrapperBase:
         worker = self.__dict__.get("worker")
         if worker is None:
             return
+        hook = getattr(self._worker_extension_cls, "destroy_worker_extension", None)
         try:
-            hook = getattr(self._worker_extension_cls, "destroy_worker_extension", None)
             if callable(hook):
                 hook(worker)
+        except Exception:
+            # Log instead of raising so that callers still run their own
+            # teardown (e.g. destroying the distributed environment).
+            logger.exception("Worker extension destroy hook failed.")
         finally:
             worker.shutdown()
 
