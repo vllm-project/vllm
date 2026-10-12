@@ -21,10 +21,6 @@ from xgrammar.structural_tag import (
     TriggeredTagsFormat,
 )
 
-from vllm.entrypoints.chat_utils import (
-    get_tool_call_id_type,
-    make_tool_call_id,
-)
 from vllm.entrypoints.generate.base.protocol import (
     DeltaMessage,
     ExtractedToolCallInformation,
@@ -42,6 +38,10 @@ from vllm.parser.engine.adapters import ParserEngineToolAdapter
 from vllm.parser.metrics import record_tool_parser_invocation
 from vllm.parser.utils import count_history_tool_calls
 from vllm.reasoning.abs_reasoning_parsers import ReasoningParser
+from vllm.renderers.chat_utils import (
+    get_tool_call_id_type,
+    make_tool_call_id,
+)
 from vllm.sampling_params import (
     SamplingParams,
     StructuredOutputsParams,
