@@ -177,9 +177,12 @@ elif [[ ! -d vllm ]]; then
     exit 1
 fi
 
-# remove all compilers
-apt remove --purge build-essential -y
-apt autoremove -y
+# remove all compilers, except for the smoke test, whose generation needs a
+# C compiler at runtime for torch.compile and Triton
+if [[ -z "${PYTHON_ONLY_COMPILE_PYTHON:-}" ]]; then
+    apt remove --purge build-essential -y
+    apt autoremove -y
+fi
 
 rm -f /tmp/changed.file
 echo 'import os; os.system("touch /tmp/changed.file")' >> vllm/__init__.py
