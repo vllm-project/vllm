@@ -705,9 +705,10 @@ class Platform:
     ) -> int:
         """Block size every backend accepts.
 
-        One backend keeps its preferred size. Several backends use the largest
-        preferred size when every backend accepts it. Otherwise they keep the
-        smaller shared size: the default when they all accept it, else an LCM.
+        One backend keeps its preferred size. When every backend accepts the
+        default, several backends use the largest preferred size if they all
+        accept it, and otherwise keep the default. If any backend rejects the
+        default, the LCM search is unchanged.
 
         ``supports_block_size`` may be overridden to accept exact sizes only
         (CPU_MLA takes 16 and no multiple of it), so candidates are the LCMs of
@@ -724,14 +725,17 @@ class Platform:
         with set_current_vllm_config(vllm_config):
             if len(backend_classes) == 1:
                 return backend_classes[0].get_preferred_block_size(default_block_size)
-            # Each backend can prefer a different size. Use the largest only
-            # when every backend accepts it; otherwise keep the old path.
-            largest_preferred = max(
-                b.get_preferred_block_size(default_block_size) for b in backend_classes
-            )
-            if all(b.supports_block_size(largest_preferred) for b in backend_classes):
-                return largest_preferred
             if all(b.supports_block_size(default_block_size) for b in backend_classes):
+                # Each backend can prefer a different size. Use the largest
+                # only when every backend accepts it; otherwise the default.
+                largest_preferred = max(
+                    b.get_preferred_block_size(default_block_size)
+                    for b in backend_classes
+                )
+                if all(
+                    b.supports_block_size(largest_preferred) for b in backend_classes
+                ):
+                    return largest_preferred
                 return default_block_size
             # A backend declaring no sizes accepts any, so it contributes 1.
             per_backend_sizes = [

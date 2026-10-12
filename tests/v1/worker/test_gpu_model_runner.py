@@ -478,6 +478,9 @@ def _mock_backend(
         # Both accept the default 16 and prefer 64, so the largest shared
         # preference wins over 16.
         ([([MultipleOf(16)], 64), ([MultipleOf(16)], 64)], 64),
+        # A backend that rejects 16 stays on the LCM path. Preferring 256
+        # must not replace lcm(64, 32).
+        ([[64], ([MultipleOf(32)], 256)], 64),
     ],
 )
 def test_preferred_block_size_satisfies_every_backend(backends, expected):
