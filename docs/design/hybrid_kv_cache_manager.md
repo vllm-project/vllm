@@ -206,6 +206,19 @@ The second question is the cache eviction policy. For now, we use one LRU queue 
 
 Models with mamba layers + full attention layers support prefix caching via the full attention + X algorithm in case 2, with the Mamba state cached at block boundaries. See [Automatic Prefix Caching](../features/automatic_prefix_caching.md).
 
+### Group metadata for external consumers
+
+[EngineCore.get_kv_cache_group_metadata][vllm.v1.engine.core.EngineCore.get_kv_cache_group_metadata] includes the resolved prefix reuse policy in every group's metadata:
+
+| Field | Meaning |
+| --- | --- |
+| `prefix_cacheable` | Whether the group's spec allows participation in shared prefix lookup. |
+| `prefix_replay_tokens` | The number of cached tail tokens that must be replayed to reconstruct the group's state; zero when replay is not required. |
+
+External prefix-cache-aware routers can use these fields to identify participating groups and estimate reuse benefits. Ordinary cacheable groups report `True` and `0`. Auxiliary circular-buffer groups report `prefix_cacheable=False`, even though they allocate KV memory. Bounded-replay Sliding MLA groups also report `False`, with a positive replay window that consumers must account for when estimating saved computation.
+
+These fields describe each group's policy. Enabling prefix caching globally is controlled separately by `enable_prefix_caching`.
+
 ## Implementation
 
 ### Overview
