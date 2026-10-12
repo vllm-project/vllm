@@ -172,7 +172,11 @@ DEVICE_TYPE = current_platform.device_type
 
 @pytest.mark.parametrize(
     ("batch_name", "tensor_parallel_size"),
-    [("large_q_prefill", 2), ("large_q_pure_prefill", 4)],
+    [
+        ("large_q_prefill", 2),
+        ("large_q_pure_prefill", 4),
+        ("large_q_pure_prefill", 1),
+    ],
 )
 def test_rocm_long_bf16_prefill_avoids_nonpersistent_aiter(
     default_vllm_config,
