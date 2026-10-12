@@ -11,6 +11,7 @@ annotation naming it.
 import argparse
 import datetime
 import importlib.metadata
+import os
 import sys
 import urllib.request
 from dataclasses import dataclass
@@ -22,7 +23,6 @@ import regex as re
 
 INDEX_URL = "https://rocm.frameworks-nightlies.amd.com/whl-multi-arch/amd-aiter/"
 AITER_COMMIT_URL = "https://github.com/ROCm/aiter/commit/"
-ROCM_VERSION_FILE = Path("/opt/rocm/.info/version")
 # Older than yesterday's means a night was missed. Only a warning: the build
 # still passes. Yesterday's is fresh: this can run before today's is published.
 STALE_AFTER = datetime.timedelta(days=1)
@@ -106,11 +106,22 @@ def parse_index(html: str, index_url: str) -> list[Wheel]:
     return [wheel for wheel in wheels if wheel]
 
 
-def rocm_release(version_file_text: str) -> str:
-    """/opt/rocm/.info/version (`7.2.3-49`) -> `7.2.3`, as wheel names spell it."""
-    match = re.match(r"\d+(?:\.\d+)*", version_file_text.strip())
+def rocm_version() -> str:
+    """This image's ROCm version; ROCm 10+ ships as the `rocm` pip SDK."""
+    try:
+        return importlib.metadata.version("rocm")
+    except importlib.metadata.PackageNotFoundError:
+        # No pip SDK: fall back to older ROCm releases, which install to ROCM_PATH.
+        rocm_path = Path(os.environ.get("ROCM_PATH", "/opt/rocm"))
+        return (rocm_path / ".info" / "version").read_text()
+
+
+def rocm_release(version: str) -> str:
+    """`7.2.3-49` or `10.0.0a20261001` -> `7.2.3` or `10.0.0`, as wheel names
+    spell it."""
+    match = re.match(r"\d+(?:\.\d+)*", version.strip())
     if not match:
-        raise ValueError(f"Unrecognised ROCm version: {version_file_text!r}")
+        raise ValueError(f"Unrecognised ROCm version: {version!r}")
     return match.group(0)
 
 
@@ -196,7 +207,7 @@ def _image_wheel(wheel_url: str) -> Wheel:
 def _image() -> tuple[str, str, str]:
     """This image's ROCm, torch and Python, as wheel names spell them."""
     try:
-        rocm = rocm_release(ROCM_VERSION_FILE.read_text())
+        rocm = rocm_release(rocm_version())
     except (OSError, ValueError) as error:
         raise NoWheel(f"Cannot read this image's ROCm version: {error}") from error
     try:
