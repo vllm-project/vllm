@@ -721,36 +721,53 @@ class OpenAIServingChat(GenerateBaseServing):
 
                         finish_reason_sent[i] = True
 
-                    choice_data = maybe_filter_parallel_tool_calls(choice_data, request)
-                    chunk = ChatCompletionStreamResponse(
-                        id=request_id,
-                        object=chunk_object_type,
-                        created=created_time,
-                        choices=[choice_data],
-                        model=model_name,
+                    split_choice_data = self._split_reasoning_boundary_delta(
+                        choice_data
                     )
-                    # Stamp the fingerprint on terminal chunks only (those with
-                    # finish_reason set). When ``include_usage`` is on, the
-                    # trailing usage chunk below overrides this as the true
-                    # final message.
-                    if (
-                        not include_usage
-                        and self.system_fingerprint is not None
-                        and choice_data.finish_reason is not None
-                    ):
-                        chunk.system_fingerprint = self.system_fingerprint
-
-                    # handle usage stats if requested & if continuous
-                    if include_continuous_usage:
-                        completion_tokens = previous_num_tokens[i]
-                        chunk.usage = UsageInfo(
-                            prompt_tokens=num_prompt_tokens,
-                            completion_tokens=completion_tokens,
-                            total_tokens=num_prompt_tokens + completion_tokens,
+                    for choice_index, split_choice in enumerate(split_choice_data):
+                        split_choice = maybe_filter_parallel_tool_calls(
+                            split_choice, request
+                        )
+                        chunk = ChatCompletionStreamResponse(
+                            id=request_id,
+                            object=chunk_object_type,
+                            created=created_time,
+                            choices=[split_choice],
+                            model=model_name,
                         )
 
-                    data = chunk.model_dump_json(exclude_unset=True)
-                    yield f"data: {data}\n\n"
+                        # Stamp the fingerprint on terminal chunks only (those with
+                        # finish_reason set). When ``include_usage`` is on, the
+                        # trailing usage chunk below overrides this as the true
+                        # final message.
+                        if (
+                                not include_usage
+                                and self.system_fingerprint is not None
+                                and split_choice.finish_reason is not None
+                        ):
+                            chunk.system_fingerprint = self.system_fingerprint
+
+                        # handle usage stats if requested & if continuous
+                        if (
+                                include_continuous_usage
+                                and choice_index == len(split_choice_data) - 1
+                        ):
+                            completion_tokens = previous_num_tokens[i]
+                            chunk.usage = UsageInfo(
+                                prompt_tokens=num_prompt_tokens,
+                                completion_tokens=completion_tokens,
+                                total_tokens=num_prompt_tokens + completion_tokens,
+                                completion_tokens_details=(
+                                    _make_completion_tokens_details(
+                                        previous_reasoning_tokens[i]
+                                    )
+                                    if self._include_reasoning_tokens_details
+                                    else None
+                                ),
+                            )
+
+                        data = chunk.model_dump_json(exclude_unset=True)
+                        yield f"data: {data}\n\n"
 
             # once the final token is handled, if stream_options.include_usage
             # is sent, send the usage
