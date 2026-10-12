@@ -1352,6 +1352,7 @@ def fastsafetensors_weights_iterator(
 def instanttensor_weights_iterator(
     hf_weights_files: list[str],
     use_tqdm_on_load: bool,
+    local_expert_ids: set[int] | None = None,
 ) -> Generator[tuple[str, torch.Tensor], None, None]:
     """Iterate over the weights in the model safetensor files
     using instanttensor library."""
@@ -1375,6 +1376,14 @@ def instanttensor_weights_iterator(
 
     device = current_platform.current_device()
 
+    extra_kwargs: dict[str, Any] = {}
+    if local_expert_ids is not None:
+        # NCCL loading requires identical tensor layouts across ranks.
+        process_group = None
+        extra_kwargs["tensor_filter"] = lambda name: (
+            not should_skip_weight(name, local_expert_ids)
+        )
+
     # copy=True yields tensors that own their memory, staying valid after the
     # context exits or InstantTensor reuses its buffer.
     with instanttensor.safe_open(
@@ -1383,6 +1392,7 @@ def instanttensor_weights_iterator(
         device=device,
         process_group=process_group,
         copy=True,
+        **extra_kwargs,
     ) as f:
         # Track bytes so the bar reports load throughput (GB/s).
         pbar = tqdm(
