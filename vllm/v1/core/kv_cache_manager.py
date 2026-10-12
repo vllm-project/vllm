@@ -265,12 +265,15 @@ class KVCacheManager:
             preempted=request.num_preemptions > 0,
         )
 
-    def get_computed_blocks(self, request: Request) -> tuple[KVCacheBlocks, int, int]:
+    def get_computed_blocks(
+        self, request: Request, *, emit_events: bool = True
+    ) -> tuple[KVCacheBlocks, int, int]:
         """Get the computed (cached) blocks for the request.
         Note that the computed blocks must be full.
 
         Args:
             request: The request to get the computed blocks.
+            emit_events: Report actual reuse; disable for advisory observations.
 
         Returns:
             A tuple containing:
@@ -307,7 +310,8 @@ class KVCacheManager:
         # for the reused prefix cache blocks so that external consumers
         # (e.g. gateway) can learn about them.
         if (
-            num_new_computed_tokens > 0
+            emit_events
+            and num_new_computed_tokens > 0
             and self.enable_kv_cache_events
             and getattr(request, "kv_cache_report_mode", "incremental") == "full"
         ):

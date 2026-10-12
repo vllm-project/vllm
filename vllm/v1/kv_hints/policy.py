@@ -3,6 +3,7 @@
 """Read-only policy observations and proposal-only startup extension points."""
 
 import math
+from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Literal, TypeAlias
 
@@ -13,9 +14,12 @@ from vllm.v1.kv_hints.actions import (
     Primitive,
     SetPriority,
 )
+from vllm.v1.kv_hints.control import OperationResult
 from vllm.v1.kv_hints.native import (
+    ContentSpan,
     DemotePayload,
     EvictPayload,
+    HashTarget,
     PrefetchPayload,
     ReleasePayload,
     RequestTarget,
@@ -46,6 +50,8 @@ class RequestDemand:
     waiting: bool
     held_blocks: int
     estimated_blocks: int
+    remaining_output_tokens: int = 0
+    cached_tokens: int = 0
 
 
 @dataclass(frozen=True)
@@ -111,6 +117,18 @@ class KVPolicy:
     def cleanup(self, owners: tuple[str, ...]) -> None:
         pass
 
+    def on_result(
+        self,
+        action: PolicyAction,
+        result: OperationResult,
+        *,
+        owner_id: str,
+        owners: tuple[str, ...],
+        elapsed_seconds: float,
+    ) -> None:
+        """Observe completed proposals without obtaining allocator access."""
+        pass
+
 
 def _positive(value: float, name: str) -> None:
     if not math.isfinite(value) or value <= 0:
@@ -154,20 +172,94 @@ class RetentionPolicy(KVPolicy):
 
 class ToolWaitPolicy(KVPolicy):
     def __init__(
-        self, tier: Literal["cpu", "mooncake"] = "mooncake", lead_seconds: float = 0.1
+        self,
+        tier: Literal["cpu", "mooncake"] = "mooncake",
+        lead_seconds: float = 0.1,
+        min_pressure: float = 0.0,
+        max_stored_blocks: int = 16384,
     ):
         if tier not in ("cpu", "mooncake"):
             raise ValueError("Movement policy requires CPU or Mooncake")
         if not math.isfinite(lead_seconds) or lead_seconds < 0:
             raise ValueError("lead_seconds must be nonnegative and finite")
+        if not math.isfinite(min_pressure) or not 0 <= min_pressure <= 1:
+            raise ValueError("min_pressure must be between zero and one")
         self.tier = tier
         self.lead_seconds = lead_seconds
+        self.min_pressure = min_pressure
+        if type(max_stored_blocks) is not int or max_stored_blocks < 1:
+            raise ValueError("max_stored_blocks must be positive")
+        self.max_stored_blocks = max_stored_blocks
+        self._stored: OrderedDict[str, tuple[HashTarget, tuple[str, ...], int]] = (
+            OrderedDict()
+        )
+        self._stored_blocks = 0
+        self._copy_seconds_per_byte: float | None = None
+
+    def on_result(
+        self,
+        action: PolicyAction,
+        result: OperationResult,
+        *,
+        owner_id: str,
+        owners: tuple[str, ...],
+        elapsed_seconds: float,
+    ) -> None:
+        if (
+            isinstance(action, CopyTo)
+            and action.dst.tier == "gpu"
+            and result.transferred_bytes
+            and "gpu_content_registered" in result.completed_steps
+            and elapsed_seconds > 0
+        ):
+            observed = elapsed_seconds / result.transferred_bytes
+            previous = self._copy_seconds_per_byte
+            self._copy_seconds_per_byte = (
+                observed if previous is None else 0.75 * previous + 0.25 * observed
+            )
+        if not isinstance(action, MoveTo) or result.namespace is None:
+            return
+        blocks = tuple(
+            ContentSpan(o.block_hash, o.group_id, o.start_token, o.end_token)
+            for o in result.target_outcomes
+            if (
+                o.block_hash is not None
+                and o.group_id is not None
+                and "cold_copy_stored" in o.completed_steps
+            )
+        )
+        if not blocks or len(blocks) > self.max_stored_blocks:
+            return
+        key = owner_id
+        previous_stored = self._stored.pop(key, None)
+        if previous_stored is not None:
+            self._stored_blocks -= len(previous_stored[0].blocks)
+        while self._stored_blocks + len(blocks) > self.max_stored_blocks:
+            _, entry = self._stored.popitem(last=False)
+            self._stored_blocks -= len(entry[0].blocks)
+        self._stored[key] = (
+            HashTarget(result.namespace, blocks),
+            owners,
+            result.transferred_bytes,
+        )
+        self._stored_blocks += len(blocks)
+
+    def cleanup(self, owners: tuple[str, ...]) -> None:
+        for key, entry in tuple(self._stored.items()):
+            if set(owners).intersection(entry[1]):
+                del self._stored[key]
+                self._stored_blocks -= len(entry[0].blocks)
 
     def on_signal(
         self, signal: PolicySignal, view: CacheObservation
     ) -> PolicyDecision | None:
         payload = signal.payload
         if payload.signal == "tool_wait":
+            projected = view.referenced_blocks + sum(
+                max(0, r.estimated_blocks - r.held_blocks) for r in view.requests
+            )
+            if projected < self.min_pressure * view.total_blocks:
+                return PolicyDecision()
             return PolicyDecision(
                 (
                     PolicyProposal(
@@ -179,12 +271,17 @@ class ToolWaitPolicy(KVPolicy):
                     ),
                 )
             )
+        stored = self._stored.get(signal.owner_id)
+        load_target = signal.target if stored is None else stored[0]
+        lead = self.lead_seconds
+        if stored is not None and self._copy_seconds_per_byte is not None:
+            lead = max(lead, stored[2] * self._copy_seconds_per_byte)
         if payload.signal == "resume":
             return PolicyDecision(
                 (
                     PolicyProposal(
                         CopyTo(
-                            signal.target,
+                            load_target,
                             CacheLocation(self.tier),
                             CacheLocation("gpu"),
                         )
@@ -199,12 +296,11 @@ class ToolWaitPolicy(KVPolicy):
                 (
                     PolicyProposal(
                         CopyTo(
-                            signal.target,
+                            load_target,
                             CacheLocation(self.tier),
                             CacheLocation("gpu"),
                         ),
-                        view.now
-                        + max(0.0, payload.resume_after_seconds - self.lead_seconds),
+                        view.now + max(0.0, payload.resume_after_seconds - lead),
                     ),
                 )
             )
@@ -221,6 +317,9 @@ class QuotaPolicy(KVPolicy):
         aging_seconds: float = 1.0,
         importance_ttl: float = 60.0,
         max_states: int = 4096,
+        reserve_running_growth: bool = False,
+        borrow_idle_capacity: bool = False,
+        reuse_score_weight: float = 0.0,
     ):
         self.shares = dict(shares or {})
         for share in self.shares.values():
@@ -237,6 +336,11 @@ class QuotaPolicy(KVPolicy):
         self.aging_seconds = aging_seconds
         self.importance_ttl = importance_ttl
         self.max_states = max_states
+        self.reserve_running_growth = reserve_running_growth
+        self.borrow_idle_capacity = borrow_idle_capacity
+        if not math.isfinite(reuse_score_weight) or reuse_score_weight < 0:
+            raise ValueError("reuse_score_weight must be nonnegative and finite")
+        self.reuse_score_weight = reuse_score_weight
         self._importance: dict[tuple[str, str], tuple[int, float]] = {}
 
     def _expire(self, now: float) -> None:
@@ -272,6 +376,11 @@ class QuotaPolicy(KVPolicy):
             weights.setdefault(request.session_id or "", 1.0)
         total_weight = sum(weights.values()) or 1.0
         occupied = dict(view.session_blocks)
+        growth = sum(
+            max(0, r.estimated_blocks - r.held_blocks)
+            for r in view.requests
+            if not r.waiting
+        )
         result = []
         for request in view.requests:
             if not request.waiting:
@@ -283,11 +392,22 @@ class QuotaPolicy(KVPolicy):
             admit = request.waiting_seconds >= self.max_wait_seconds or demand <= max(
                 1, int(view.total_blocks * share)
             )
+            available = max(0, view.free_blocks - growth)
+            additional = max(0, request.estimated_blocks - request.held_blocks)
+            if (
+                self.borrow_idle_capacity
+                and not occupied.get(request.session_id, 0)
+                and additional <= available
+            ):
+                admit = True
+            if self.reserve_running_growth:
+                admit = admit and additional <= available
             importance = max(
                 self._importance.get(("request", request.request_id), (0, 0))[0],
                 self._importance.get(("session", request.session_id or ""), (0, 0))[0],
             )
             score = importance / 100 + request.waiting_seconds / self.aging_seconds
+            score += self.reuse_score_weight * request.cached_tokens / 1024
             result.append(
                 RequestGuidance(
                     request.request_id,

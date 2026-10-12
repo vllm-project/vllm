@@ -69,7 +69,10 @@ class MooncakeStoreScheduler:
         self.lookup_async = kvc_extra_config.get("lookup_async", False)
         # Skips lookup CPU cost on instances that never load KV from the store.
         self.enable_lookup = kvc_extra_config.get("enable_lookup", True)
-        self.save_decode_cache = kvc_extra_config.get("save_decode_cache", False)
+        self.enable_save = kvc_extra_config.get("enable_save", True)
+        self.save_decode_cache = self.enable_save and kvc_extra_config.get(
+            "save_decode_cache", False
+        )
         kv_event_config = vllm_config.kv_events_config
         self.enable_kv_events = bool(
             kv_event_config and kv_event_config.enable_kv_cache_events
@@ -220,7 +223,7 @@ class MooncakeStoreScheduler:
         self, scheduler_output: SchedulerOutput
     ) -> KVConnectorMetadata:
         """Build connector metadata for this scheduler step."""
-        is_consumer = self.kv_role == "kv_consumer"
+        is_consumer = self.kv_role == "kv_consumer" or not self.enable_save
         can_process_cached = not is_consumer or self.save_decode_cache
 
         for finished_req_id in scheduler_output.finished_req_ids:

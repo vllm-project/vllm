@@ -70,3 +70,7 @@ class KVControlConfig:
     """Maximum additional admission/order deferral imposed by local policies."""
     max_policy_delay_seconds: float = Field(default=300.0, gt=0, allow_inf_nan=False)
     """Maximum time a policy may defer execution of a predicted operation."""
+    policy_decode_lookahead_tokens: int = Field(default=0, ge=0)
+    """Additional remaining output tokens included in quota demand estimates."""
+    max_inflight_load_blocks: int = Field(default=0, ge=0)
+    """Cap speculative load reservations; zero uses existing physical limits."""

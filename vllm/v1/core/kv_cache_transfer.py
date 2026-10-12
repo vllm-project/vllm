@@ -56,6 +56,7 @@ class KVCacheTransferManager:
         self._transfers: dict[int, _Transfer] = {}
         self._by_key: dict[tuple[str, str, BlockHashWithGroupId], int] = {}
         self._loads: dict[BlockHashWithGroupId, int] = {}
+        self.max_load_blocks = 0
 
     @property
     def has_pending(self) -> bool:
@@ -148,6 +149,10 @@ class KVCacheTransferManager:
                 raise KVCacheTransferError("busy", "Another source is loading this key")
             if source is not None:
                 return None, False
+            if self.max_load_blocks and len(self._loads) >= self.max_load_blocks:
+                raise KVCacheTransferError(
+                    "capacity", "In-flight load budget exhausted"
+                )
             if self.pool.get_num_free_blocks() <= self.manager.watermark_blocks:
                 raise KVCacheTransferError("capacity", "No destination capacity")
             block = self.pool.get_new_blocks(1)[0]

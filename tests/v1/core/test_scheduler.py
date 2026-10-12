@@ -261,6 +261,30 @@ def test_quota_scores_respect_priority_and_bounded_waiting(
     assert all(r.num_preemptions == 0 for r in scheduler.requests.values())
 
 
+def test_quota_demand_includes_bounded_remaining_generation():
+    scheduler, _, _ = quota_scheduler()
+    runtime = scheduler.kv_policy_runtime
+    runtime.settings.policy_decode_lookahead_tokens = 64
+    scheduler.requests["a"].max_tokens = 128
+    scheduler.requests["b"].max_tokens = 8
+    demands = {r.request_id: r for r in runtime.observation().requests}
+    assert demands["a"].remaining_output_tokens == 128
+    assert demands["b"].remaining_output_tokens == 8
+    assert demands["a"].estimated_blocks > demands["b"].estimated_blocks
+    scheduler.requests["a"].append_output_token_ids([1] * 120)
+    demands = {r.request_id: r for r in runtime.observation().requests}
+    assert demands["a"].remaining_output_tokens == 8
+
+
+def test_quota_can_borrow_idle_capacity_for_a_first_long_request():
+    scheduler, _, _ = quota_scheduler(shares={"a": 1, "b": 7})
+    policy = scheduler.kv_policy_runtime.policies["quota"]
+    policy.borrow_idle_capacity = True
+    policy.reserve_running_growth = True
+    output = scheduler.schedule()
+    assert [r.req_id for r in output.scheduled_new_reqs] == ["a"]
+
+
 def test_quota_observation_overflow_falls_back_to_scheduler_order():
     scheduler, _, now = quota_scheduler(
         shares={"a": 1, "b": 7}, interval=0.05, max_policy_requests=2

@@ -49,10 +49,12 @@ def _make_bare_scheduler(
     enable_partial_hash_hits: bool = False,
     kv_role: str = "kv_both",
     save_decode_cache: bool = False,
+    enable_save: bool = True,
 ) -> MooncakeStoreScheduler:
     scheduler = object.__new__(MooncakeStoreScheduler)
     scheduler.kv_role = kv_role
-    scheduler.save_decode_cache = save_decode_cache
+    scheduler.save_decode_cache = save_decode_cache and enable_save
+    scheduler.enable_save = enable_save
     scheduler.enable_kv_events = False
     scheduler.lookup_async = False
     scheduler.enable_lookup = True
@@ -380,8 +382,11 @@ def test_cached_request_with_spec_decode_does_not_save_scheduled_drafts():
     assert tracker.allocated_block_ids == ([0, 1, 2],)
 
 
-def test_cached_request_without_spec_decode_keeps_current_step_save_overlap():
-    scheduler = _make_bare_scheduler()
+@pytest.mark.parametrize("enable_save", [True, False])
+def test_cached_request_without_spec_decode_keeps_current_step_save_overlap(
+    enable_save,
+):
+    scheduler = _make_bare_scheduler(enable_save=enable_save)
     _add_unfinished_request(
         scheduler,
         token_ids=list(range(48)),
@@ -393,6 +398,9 @@ def test_cached_request_without_spec_decode_keeps_current_step_save_overlap():
         _make_scheduler_output(scheduled_spec_tokens=None)
     )
 
+    if not enable_save:
+        assert meta.requests == []
+        return
     assert len(meta.requests) == 1
     req_meta = meta.requests[0]
     assert req_meta.req_id == "req-0"

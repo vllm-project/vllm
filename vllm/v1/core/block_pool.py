@@ -197,6 +197,7 @@ class BlockPool:
         assert isinstance(num_gpu_blocks, int) and num_gpu_blocks > 0
         self.num_gpu_blocks = num_gpu_blocks
         self.medium = medium
+        self._cache_counts: list[int] | None = None
         self.enable_caching = enable_caching
         self.hash_block_size = hash_block_size
         # All kv-cache blocks.
@@ -678,6 +679,9 @@ class BlockPool:
             self._forget_priority(block)
         block_hashes: list[BlockHashWithGroupId] = []
         if block.block_hash is not None:
+            if self._cache_counts is not None:
+                self._cache_counts[0] -= 1
+                self._cache_counts[1] -= block.ref_cnt == 0
             block_hashes.append(block.block_hash)
         block_hashes.extend(self.cached_block_hashes_by_block.pop(block.block_id, ()))
         if not block_hashes:
@@ -726,6 +730,9 @@ class BlockPool:
 
         if block.block_hash is None:
             block.set_block_hash(block_hash_with_group_id, num_tokens=num_tokens)
+            if self._cache_counts is not None:
+                self._cache_counts[0] += 1
+                self._cache_counts[1] += block.ref_cnt == 0
         else:
             self.cached_block_hashes_by_block.setdefault(block.block_id, set()).add(
                 block_hash_with_group_id
@@ -825,6 +832,8 @@ class BlockPool:
             block.ref_cnt -= 1
             self._reuse_watchers[block.block_id] = on_reuse
             if block.ref_cnt == 0:
+                if self._cache_counts is not None:
+                    self._cache_counts[1] += block.block_hash is not None
                 released.append(block)
         self.free_block_queue.append_n(released)
 
@@ -865,6 +874,8 @@ class BlockPool:
             # candidate), so remove it.
             if block.ref_cnt == 0 and not block.is_null:
                 self.free_block_queue.remove(block)
+                if self._cache_counts is not None:
+                    self._cache_counts[1] -= block.block_hash is not None
             block.ref_cnt += 1
             if self.metrics_collector:
                 self.metrics_collector.on_block_accessed(block)
@@ -897,6 +908,8 @@ class BlockPool:
                     blocks_to_evict_first.append(block)
                 else:
                     # FIFO reuse of cached blocks for LRU eviction behavior.
+                    if self._cache_counts is not None:
+                        self._cache_counts[1] += 1
                     blocks_to_evict_last.append(block)
 
         # Blocks to reuse first are prepended to the front of the free queue.
@@ -999,6 +1012,8 @@ class BlockPool:
         # Remove all hashes so that no new blocks will hit.
         self.cached_block_hash_to_block = BlockHashToBlockMap()
         self.cached_block_hashes_by_block.clear()
+        if self._cache_counts is not None:
+            self._cache_counts[:] = [0, 0]
         if self._reuse_watchers:
             self._notify_reuse(
                 [self.blocks[block_id] for block_id in list(self._reuse_watchers)]
@@ -1034,6 +1049,8 @@ class BlockPool:
 
     def get_cached_block_counts(self) -> tuple[int, int]:
         """Count resident and reclaimable copies without double-counting aliases."""
+        if self._cache_counts is not None:
+            return self._cache_counts[0], self._cache_counts[1]
         # Sparse caches benefit from traversing only hash entries. At higher
         # occupancy a pool scan avoids per-key dispatch and alias traversal.
         if len(self.cached_block_hash_to_block) * 4 < self.num_gpu_blocks:
@@ -1042,6 +1059,11 @@ class BlockPool:
             sum(b.block_hash is not None for b in self.blocks),
             sum(b.block_hash is not None and b.ref_cnt == 0 for b in self.blocks),
         )
+
+    def track_cached_block_counts(self) -> None:
+        """Enable incremental observations for the opt-in control runtime."""
+        if self._cache_counts is None:
+            self._cache_counts = list(self.get_cached_block_counts())
 
     def eviction_priority(self, block: KVCacheBlock) -> int:
         return self._retention_queue.priority(block) if self._retention_queue else 0

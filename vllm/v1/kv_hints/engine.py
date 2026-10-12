@@ -37,6 +37,8 @@ def create_control_service(
 ) -> KVControlService:
     settings = config.kv_control_config
     assert settings is not None
+    manager.block_pool.track_cached_block_counts()
+    manager.get_transfer_manager().max_load_blocks = settings.max_inflight_load_blocks
     if not manager.enable_caching:
         raise ValueError("Programmable KV control requires prefix caching")
     engine_id = settings.engine_id or uuid.uuid4().hex

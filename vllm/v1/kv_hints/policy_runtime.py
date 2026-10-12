@@ -104,6 +104,7 @@ class _Work:
     owners: tuple[str, ...]
     generation: int
     entries: int
+    started_at: float = 0.0
 
 
 class KVPolicyRuntime:
@@ -120,6 +121,7 @@ class KVPolicyRuntime:
         self.settings = settings
         self.controller = controller
         self.manager = manager
+        manager.block_pool.track_cached_block_counts()
         self.requests = requests
         self.clock = clock
         self.wall_clock = wall_clock
@@ -202,12 +204,36 @@ class KVPolicyRuntime:
                 if not b.is_null and b.pool is self.manager.block_pool
             }
             session_blocks.setdefault(request.session_id, set()).update(blocks)
-            estimated = sum(
-                math.ceil(request.num_tokens / group.block_size)
-                for group in self.manager.coordinator.single_type_managers
+            waiting = request.status != RequestStatus.RUNNING
+            computed = self.manager.empty_kv_cache_blocks
+            computed_tokens = request.num_computed_tokens
+            cache_hits = 0
+            if waiting and not blocks:
+                computed, cache_hits, _ = self.manager.get_computed_blocks(
+                    request, emit_events=False
+                )
+                computed_tokens = cache_hits
+            remaining = max(0, request.max_tokens - request.num_output_tokens)
+            estimate_tokens = min(
+                self.manager.max_model_len,
+                request.num_tokens
+                + min(remaining, self.settings.policy_decode_lookahead_tokens),
+            )
+            estimated = len(blocks) + sum(
+                group.get_num_blocks_to_allocate(
+                    request.request_id,
+                    estimate_tokens,
+                    computed.blocks[group_id],
+                    computed_tokens,
+                    computed_tokens,
+                    estimate_tokens,
+                    apply_admission_cap=True,
+                )
+                for group_id, group in enumerate(
+                    self.manager.coordinator.single_type_managers
+                )
                 if group.block_pool is self.manager.block_pool
             )
-            waiting = request.status != RequestStatus.RUNNING
             if waiting:
                 since = self._waiting_since.setdefault(
                     request.request_id, arrival if new_request else now
@@ -225,6 +251,8 @@ class KVPolicyRuntime:
                     waiting,
                     len(blocks),
                     estimated,
+                    remaining,
+                    cache_hits,
                 )
             )
         resources = self.manager.transfer_manager
@@ -381,10 +409,11 @@ class KVPolicyRuntime:
                     OperationStatus.ACCEPTED,
                     completed_steps=("policy_context_updated",),
                 )
-            self._supersede(name, identity)
-            for proposal in islice(
-                decision.proposals, self.settings.max_pending_policy_actions + 1
-            ):
+            offered = tuple(
+                islice(decision.proposals, self.settings.max_pending_policy_actions + 1)
+            )
+            self._supersede(name, identity, offered)
+            for proposal in offered:
                 if not isinstance(proposal, PolicyProposal) or not math.isfinite(
                     proposal.not_before
                 ):
@@ -610,9 +639,18 @@ class KVPolicyRuntime:
         self._running.pop(work.operation.operation_id, None)
         self._target_entries -= work.entries
 
-    def _supersede(self, name: str, identity: str) -> None:
+    def _supersede(
+        self, name: str, identity: str, proposals: tuple[PolicyProposal, ...]
+    ) -> None:
         for work in (*self._pending.values(), *self._running.values()):
             if work.policy_name == name and work.identity == identity:
+                if (
+                    work.operation.operation_id in self._running
+                    and isinstance(work.proposal.action, CopyTo)
+                    and work.generation == self._generation()
+                    and any(p.action == work.proposal.action for p in proposals)
+                ):
+                    continue
                 self._cancel(work, "Newer policy observation")
 
     def before_explicit(
@@ -693,6 +731,7 @@ class KVPolicyRuntime:
                     continue
             del self._pending[work.operation.operation_id]
             executed += 1
+            work.started_at = now
             conflict = False
             if work.scope is not None:
                 executor = self.controller.executor
@@ -739,7 +778,22 @@ class KVPolicyRuntime:
             if result is not None and not result.status.terminal:
                 self._running[work.operation.operation_id] = work
             else:
+                if result is not None:
+                    self._notify_result(work, result)
                 self._target_entries -= work.entries
+
+    def _notify_result(self, work: _Work, result: OperationResult) -> None:
+        try:
+            self.policies[work.policy_name].on_result(
+                work.proposal.action,
+                result,
+                owner_id=f"policy:{work.policy_name}:{work.identity}",
+                owners=work.owners,
+                elapsed_seconds=max(0.0, self.clock() - work.started_at),
+            )
+        except Exception as error:
+            self.errors[work.policy_name] = str(error)[:512]
+            logger.exception("KV policy %s result observation failed", work.policy_name)
 
     def before_acknowledge(self) -> None:
         """Consume final outcomes before a caller releases their detailed records."""
@@ -755,6 +809,8 @@ class KVPolicyRuntime:
         for identifier, work in tuple(self._running.items()):
             current = registry.get(work.operation.message_id, work.operation.action_id)
             if current is None or current.status.terminal:
+                if current is not None:
+                    self._notify_result(work, current)
                 del self._running[identifier]
                 self._target_entries -= work.entries
         if self._declaration_owners:

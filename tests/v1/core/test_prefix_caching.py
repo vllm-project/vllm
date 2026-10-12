@@ -3786,6 +3786,27 @@ def test_emit_cached_block_events():
     assert event.session_id == "agent-session-reuse"
 
 
+def test_advisory_lookup_preserves_hits_without_reporting_application_reuse():
+    manager = make_kv_cache_manager(
+        make_kv_cache_config(16, num_blocks=10),
+        max_model_len=128,
+        enable_caching=True,
+        hash_block_size=16,
+        enable_kv_cache_events=True,
+    )
+    source = make_request("source", list(range(32)), 16, sha256)
+    assert manager.allocate_slots(source, 32) is not None
+    manager.free(source)
+    list(manager.take_events())
+
+    resumed = make_request("resumed", list(range(33)), 16, sha256)
+    resumed.kv_cache_report_mode = "full"
+    assert manager.get_computed_blocks(resumed, emit_events=False)[1] == 32
+    assert not list(manager.take_events())
+    assert manager.get_computed_blocks(resumed)[1] == 32
+    assert any(isinstance(event, BlockStored) for event in manager.take_events())
+
+
 def test_emit_cached_block_events_disabled():
     """No events are emitted when enable_kv_cache_events is False."""
     block_size = 4
@@ -6069,12 +6090,16 @@ def test_retention_applies_to_a_new_partial_alias_on_an_idle_cached_copy():
 
 
 @pytest.mark.parametrize("extra_free", [1, 100])
+@pytest.mark.parametrize("incremental", [False, True])
 def test_policy_occupancy_counts_shared_copies_once_per_block_and_excludes_aliases(
     extra_free,
+    incremental,
 ):
     pool, _, _, request, blocks = make_retention_pool(
         num_blocks=1, extra_free=extra_free, block_size=8
     )
+    if incremental:
+        pool.track_cached_block_counts()
     copy = pool.get_new_blocks(1)[0]
     pool.cache_full_blocks(request, [copy], 0, 1, 8, 0)
     pool.cache_partial_block(
@@ -6085,6 +6110,12 @@ def test_policy_occupancy_counts_shared_copies_once_per_block_and_excludes_alias
     assert pool.get_cached_block_counts() == (2, 2)
     pool.evict_blocks({copy.block_id})
     assert pool.get_cached_block_counts() == (1, 1)
+    pool.touch([blocks[0]])
+    assert pool.get_cached_block_counts() == (1, 0)
+    pool.unpin_blocks([blocks[0]], lambda block: None)
+    assert pool.get_cached_block_counts() == (1, 1)
+    assert pool.reset_prefix_cache()
+    assert pool.get_cached_block_counts() == (0, 0)
 
 
 def test_cache_reset_cannot_leave_priority_on_a_reused_physical_block():
@@ -6413,6 +6444,22 @@ def test_reset_invalidates_transfer_but_does_not_reuse_its_buffer():
     assert manager.block_pool.get_num_free_blocks() == 1
 
 
+def test_load_budget_counts_shared_work_once_and_preserves_inference_capacity():
+    manager, transfers, request, keys = make_transfer_manager(num_blocks=4)
+    transfers.max_load_blocks = 1
+    first, created = transfers.acquire("load", keys[0], 4, 10, scope="cpu")
+    assert first is not None and created
+    shared, created = transfers.acquire("load", keys[0], 4, 11, scope="cpu")
+    assert shared == first and not created
+    with pytest.raises(KVCacheTransferError, match="load budget"):
+        transfers.acquire("load", keys[1], 8, 12, scope="cpu")
+    assert manager.block_pool.get_num_free_blocks() == 2
+    assert transfers.start(first)
+    assert transfers.complete(first, success=True)
+    second, created = transfers.acquire("load", keys[1], 8, 12, scope="cpu")
+    assert second is not None and created
+
+
 def test_transfer_sources_keep_request_references_and_independent_destinations():
     manager, transfers, request, keys = make_transfer_manager()
     blocks = manager.allocate_slots(request, 4)
@@ -6577,7 +6624,8 @@ def submit_movement(controller, message_id, action, payload):
     ).results[0]
 
 
-def test_native_shared_prefetch_survives_independent_task_cleanup():
+@pytest.mark.parametrize("cancel_action", [False, True])
+def test_native_shared_prefetch_survives_independent_task_cleanup(cancel_action):
     manager, request, controller, adapter, target = make_movement_controller()
     for session in ("a", "b"):
         submit_movement(
@@ -6604,15 +6652,19 @@ def test_native_shared_prefetch_survives_independent_task_cleanup():
     assert len(adapter.jobs) == 1
     block = manager.block_pool.blocks[adapter.jobs[0].block_id]
     assert manager.get_computed_blocks(request)[1] == 0 and block.ref_cnt == 1
-    submit_movement(
-        controller,
-        "finish-a",
-        "finish_task",
-        {
-            "session_id": "a",
-            "expected_revision": controller.index.session_revision("a"),
-        },
-    )
+    if cancel_action:
+        operation = controller.registry.get("a", "a")
+        controller.cancel("a", "a", operation.operation_id)
+    else:
+        submit_movement(
+            controller,
+            "finish-a",
+            "finish_task",
+            {
+                "session_id": "a",
+                "expected_revision": controller.index.session_revision("a"),
+            },
+        )
     assert controller.registry.get("a", "a").status == OperationStatus.CANCELLED
     assert controller.registry.get("b", "a").status == OperationStatus.RUNNING
     assert block.ref_cnt == 1
@@ -6866,6 +6918,110 @@ def test_policy_predictions_capture_scope_and_do_not_retarget_new_growth():
     adapter.finish()
     controller.executor.progress()
     assert derived_results(controller, parent)[0].affected_blocks == 1
+
+
+def test_resume_joins_a_running_prediction_without_cancelling_its_publication():
+    manager, request, controller, adapter, target = make_movement_controller()
+    install_movement_policies(manager, controller, "movement")
+    prediction = submit_movement(
+        controller,
+        "prediction",
+        "signal",
+        {
+            "target": target,
+            "signal": "resume_prediction",
+            "resume_after_seconds": 0.05,
+        },
+    )
+    resumed = submit_movement(
+        controller,
+        "resume",
+        "signal",
+        {
+            "target": target,
+            "signal": "resume",
+        },
+    )
+    assert len(adapter.jobs) == 1
+    assert derived_results(controller, prediction)[0].status == OperationStatus.RUNNING
+    assert derived_results(controller, resumed)[0].status == OperationStatus.RUNNING
+    adapter.finish()
+    controller.executor.progress()
+    assert (
+        derived_results(controller, prediction)[0].status == OperationStatus.COMPLETED
+    )
+    assert derived_results(controller, resumed)[0].status == OperationStatus.COMPLETED
+    assert manager.get_computed_blocks(request)[1] == 4
+
+
+def test_policy_remembers_only_stored_targets_before_acknowledgement_releases_results():
+    from vllm.v1.kv_hints.api import KVControlService
+
+    manager, request, controller, adapter, target = make_movement_controller()
+    assert manager.allocate_slots(request, 4) is not None
+    manager.cache_blocks(request, 4)
+    manager.free(request)
+    target = dict(
+        target,
+        blocks=[
+            *target["blocks"],
+            {
+                "block_hash": "abcd",
+                "group_id": 0,
+                "start_token": 4,
+                "end_token": 8,
+            },
+        ],
+    )
+    submit_movement(
+        controller,
+        "associate",
+        "associate",
+        {
+            "session_id": "s",
+            "continuation_id": "c",
+            "expected_revision": 0,
+            "target": target,
+        },
+    )
+    install_movement_policies(manager, controller, "movement")
+    selector = {"kind": "session", "session_id": "s", "continuation_id": "c"}
+    saved = submit_movement(
+        controller,
+        "save",
+        "signal",
+        {
+            "target": selector,
+            "signal": "tool_wait",
+        },
+    )
+    adapter.finish()
+    controller.executor.progress()
+    child = derived_results(controller, saved)[0]
+    assert child.status == OperationStatus.PARTIAL
+    reply = KVControlService(controller).call(
+        "acknowledge",
+        {
+            "engine_id": "engine",
+            "engine_epoch": "epoch",
+        },
+        {"message_id": child.message_id},
+    )
+    assert reply["ok"]
+    resumed = submit_movement(
+        controller,
+        "resume",
+        "signal",
+        {
+            "target": selector,
+            "signal": "resume",
+        },
+    )
+    assert len(adapter.jobs) == 1
+    adapter.finish()
+    controller.executor.progress()
+    assert derived_results(controller, resumed)[0].status == OperationStatus.COMPLETED
+    assert manager.get_computed_blocks(request)[1] == 4
 
 
 @pytest.mark.parametrize("invalidate", ["reset", "cleanup", "explicit"])
