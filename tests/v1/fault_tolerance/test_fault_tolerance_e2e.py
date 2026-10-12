@@ -19,6 +19,7 @@ import requests
 
 from tests.utils import RemoteOpenAIServer, multi_gpu_test
 from vllm.utils.import_utils import has_nixl_ep
+from vllm.utils.network_utils import get_open_port
 
 MODEL_NAME = os.getenv("MODEL_NAME", "deepseek-ai/DeepSeek-V2-Lite-Chat")
 
@@ -436,9 +437,9 @@ def test_scale_down_removes_dead_rank_and_recovers():
     """scale_down removes a dead DP rank; survivors keep serving with a smaller
     DP group.
 
-    SIGKILLing rank 1's worker leaves its EngineCore DEAD while the other ranks
+    SIGKILLing rank 0's worker leaves its EngineCore DEAD while the other ranks
     detect the peer fault and go UNHEALTHY. The orchestrator then sends
-    ``scale_down`` with ``removed_dp_ranks=[1]`` to every survivor.
+    ``scale_down`` with ``removed_dp_ranks=[0]`` to every survivor.
 
 
     Also verifies that a DEAD engine rejects ``retry``: recovery is gated on
@@ -453,7 +454,7 @@ def test_scale_down_removes_dead_rank_and_recovers():
         str(NUM_REDUNDANT_EXPERTS),
     ]
     dp_size = 4
-    victim_rank = 1
+    victim_rank = 0
     with _ft_manager(eplb_args, dp_size=dp_size) as servers:
         assert len(servers) == dp_size
         servers_by_rank = _servers_by_rank(servers, dp_size)
@@ -482,11 +483,16 @@ def test_scale_down_removes_dead_rank_and_recovers():
 
         # 5. scale_down sent to every survivor: remove the dead rank.
         round_id = str(uuid.uuid4())
+        store_port = get_open_port()
         for server in survivors:
             _apply_ft(
                 server,
                 "scale_down",
-                {"removed_dp_ranks": [victim_rank]},
+                {
+                    "removed_dp_ranks": [victim_rank],
+                    "dp_store_port": store_port,
+                    "dp_master_ip": "127.0.0.1",
+                },
                 request_id=round_id,
             )
 
