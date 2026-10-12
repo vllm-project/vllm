@@ -37,6 +37,29 @@ use crate::error::{Error, Result, bail_multimodal, multimodal};
 use crate::renderer::{MediaPartSource, RenderedPrompt};
 use crate::request::{ChatContent, ChatContentPart, ChatMessage, ChatRequest};
 
+/// Sum the placeholder token spans of engine-ready features, keyed by modality.
+///
+/// Mirrors the Python frontend's `_get_mm_token_counts`: each modality maps to
+/// the total `length` of its placeholder ranges, so the sum counts exactly the
+/// multimodal tokens that are already part of `usage.prompt_tokens`. `None`
+/// means no modality contributed a placeholder, matching the Python helper
+/// returning an empty mapping there.
+pub fn count_multimodal_tokens(
+    features: Option<&[MmFeatureSpec]>,
+) -> Option<BTreeMap<String, usize>> {
+    let features = features?;
+    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+    for feature in features {
+        *counts.entry(feature.modality.as_str().to_string()).or_default() +=
+            feature.mm_position.length;
+    }
+    if counts.is_empty() {
+        None
+    } else {
+        Some(counts)
+    }
+}
+
 mod audio;
 mod expand;
 mod image;
@@ -982,6 +1005,7 @@ impl TokenResolver for TokenizerResolver {
 mod tests {
     use std::sync::Arc;
 
+    use vllm_engine_core_client::protocol::multimodal::{MmModality, PlaceholderRange};
     use vllm_tokenizer::test_utils::TestTokenizer;
 
     use super::*;
@@ -1432,5 +1456,40 @@ mod tests {
         let encoded = serde_json::to_string(&parse_limits(source)).expect("map should serialize");
 
         assert_eq!(encoded, source);
+    }
+
+    fn placeholder_feature(modality: MmModality, offset: usize, length: usize) -> MmFeatureSpec {
+        MmFeatureSpec {
+            data: None,
+            modality,
+            identifier: format!("{}-{offset}", modality.as_str()),
+            mm_position: PlaceholderRange {
+                offset,
+                length,
+                is_embed: None,
+            },
+            mm_hash: None,
+        }
+    }
+
+    #[test]
+    fn count_multimodal_tokens_sums_placeholder_lengths_per_modality() {
+        let features = vec![
+            placeholder_feature(MmModality::Image, 2, 336),
+            placeholder_feature(MmModality::Image, 400, 336),
+            placeholder_feature(MmModality::Audio, 800, 4),
+        ];
+
+        let counts = count_multimodal_tokens(Some(features.as_slice())).expect("counts");
+
+        assert_eq!(counts.get("image"), Some(&672));
+        assert_eq!(counts.get("audio"), Some(&4));
+        assert!(!counts.contains_key("video"));
+    }
+
+    #[test]
+    fn count_multimodal_tokens_reports_nothing_without_placeholders() {
+        assert_eq!(count_multimodal_tokens(None), None);
+        assert_eq!(count_multimodal_tokens(Some(&[])), None);
     }
 }
