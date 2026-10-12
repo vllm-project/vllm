@@ -318,9 +318,7 @@ pub async fn decoded_text_event_stream(
                     kv_transfer_params,
                     ec_transfer_params,
                     sampling_mask,
-                    timestamps: output
-                        .timestamps
-                        .expect("terminal output must carry request timestamps"),
+                    timestamps: output.timestamps,
                 })),
             })
             .await;
@@ -548,12 +546,12 @@ mod tests {
                 outputs: vec![
                     GenerateOutput::for_test(Some(Arc::clone(&prompt)), vec![0xe4], None),
                     GenerateOutput {
-                        timestamps: Some(RequestTimestamps {
+                        timestamps: RequestTimestamps {
                             queued_ts: 8.0,
                             scheduled_ts: 9.0,
                             first_token_ts: 10.0,
                             last_token_ts: 11.5,
-                        }),
+                        },
                         ..GenerateOutput::for_test(
                             None,
                             vec![0xbd, 0xa0],
@@ -657,12 +655,19 @@ mod tests {
     async fn stream_stop_string_sets_task_local_abort_cause_on_raw_stream_drop() {
         let prompt: Arc<[u32]> = Arc::from([]);
         let dropped_cause = Arc::new(Mutex::new(None));
+        let timestamps = RequestTimestamps {
+            queued_ts: 1.0,
+            scheduled_ts: 2.0,
+            first_token_ts: 3.0,
+            last_token_ts: 4.0,
+        };
         let raw_stream = DropRecordingStream {
-            next: Some(Ok(GenerateOutput::for_test(
-                Some(prompt),
-                ascii_tokens("hello"),
-                Some(FinishReason::Length),
-            ))),
+            // The engine output is not terminal. The frontend terminates the
+            // request after decoding the configured stop string.
+            next: Some(Ok(GenerateOutput {
+                timestamps,
+                ..GenerateOutput::for_test(Some(prompt), ascii_tokens("hello"), None)
+            })),
             dropped_cause: Arc::clone(&dropped_cause),
         };
         let tokenizer: DynTokenizer = Arc::new(TestTokenizer::new());
@@ -680,6 +685,7 @@ mod tests {
 
         assert_eq!(output.text, "he");
         assert!(output.finish_reason.is_stop());
+        assert_eq!(output.timestamps, timestamps);
         assert_eq!(
             *dropped_cause.lock().unwrap(),
             Some(AbortCause::StopStringMatched)

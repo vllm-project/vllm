@@ -184,8 +184,12 @@ pub struct GenerateOutput {
     pub spec_decode_metrics: Option<Box<RequestSpecDecodeMetrics>>,
     /// Weight-version spans over all output tokens, set on terminal outputs only.
     pub weight_versions: Option<Vec<WeightVersionSpan>>,
-    /// Engine lifecycle timestamps, present on terminal outputs.
-    pub timestamps: Option<RequestTimestamps>,
+    /// Snapshot of engine lifecycle timestamps after this output.
+    ///
+    /// Every output carries a snapshot because text decoding may finish the
+    /// request locally after matching a stop string, before the engine emits a
+    /// terminal output.
+    pub timestamps: RequestTimestamps,
 }
 
 impl GenerateOutput {
@@ -252,7 +256,6 @@ impl GenerateOutput {
         token_ids: Vec<u32>,
         finish_reason: Option<FinishReason>,
     ) -> Self {
-        let timestamps = finish_reason.is_some().then(RequestTimestamps::default);
         Self {
             request_id: String::new(),
             prompt_info: prompt_token_ids.map(|ids| {
@@ -271,7 +274,7 @@ impl GenerateOutput {
             sampling_mask: None,
             spec_decode_metrics: None,
             weight_versions: None,
-            timestamps,
+            timestamps: RequestTimestamps::default(),
         }
     }
 }
@@ -396,7 +399,6 @@ impl GenerateOutputStream {
             None
         };
 
-        let timestamps = finish_reason.is_some().then(|| self.request_metrics.timestamps());
         let output = GenerateOutput {
             request_id: raw.request_id,
             prompt_info: self.pending_prompt_info.take(),
@@ -409,7 +411,7 @@ impl GenerateOutputStream {
             sampling_mask,
             spec_decode_metrics: raw.spec_decode_metrics,
             weight_versions,
-            timestamps,
+            timestamps: self.request_metrics.timestamps(),
         };
 
         Ok(output)
