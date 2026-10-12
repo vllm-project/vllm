@@ -532,7 +532,7 @@ class PydanticMsgspecMixin:
         called on every validation.
         """
         msgspec_fields = {f.name: f for f in msgspec.structs.fields(source_type)}
-        type_hints = get_type_hints(source_type)
+        type_hints = get_type_hints(source_type, include_extras=True)
 
         # Build the Pydantic typed_dict_field for each msgspec field
         fields = {}

@@ -434,7 +434,9 @@ def test_context_kv_uses_quantized_projection_fallback(monkeypatch):
         for projection in projections
     ]
     qwen3_dflash.DFlashQwen3Model._build_context_kv_buffers(
-        model, layers_attn, has_bias=False
+        model,
+        layers_attn,
+        has_bias=False,
     )
     assert model._fused_kv_weight is None
     assert all(not hasattr(projection, "weight") for projection in projections)

@@ -99,6 +99,7 @@ fn request_with_tools() -> ChatRequest {
             "required": ["city"]
         }),
         strict: None,
+        defer_loading: None,
     }];
     ChatRequest {
         tool_context: ResolvedToolContext::new(&[], tools, Some(ChatToolChoice::Auto), true)

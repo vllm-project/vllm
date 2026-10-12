@@ -34,6 +34,7 @@ from openai_harmony import Message as OpenAIHarmonyMessage
 from openai_harmony import Role
 
 import vllm.envs as envs
+from tests.entrypoints.openai.chat_completion.test_serving_chat import MockModelConfig
 from vllm.entrypoints.generate.base.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
@@ -66,7 +67,7 @@ from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.inputs import tokens_input
 from vllm.logprobs import Logprob as SampleLogprob
 from vllm.outputs import CompletionOutput, RequestOutput
-from vllm.parser.harmony import Segment
+from vllm.parser.harmony import ChunkResult, HarmonyParser, Segment
 from vllm.renderers import TokenizeParams
 from vllm.renderers.online_renderer import (
     OnlineRenderer,
@@ -294,6 +295,102 @@ async def test_online_renderer_renders_non_harmony_responses_with_explicit_histo
     assert preprocess_kwargs["default_template_kwargs"]["request_default"] == "kept"
 
 
+_REUSED_IDS = [10, 20, 30]
+_IMAGE_PART = {
+    "type": "input_image",
+    "image_url": "https://example.com/a.png",
+    "detail": "auto",
+}
+
+
+async def _render_responses_with_reuse(request, previous_messages=None):
+    online_renderer = OnlineRenderer(
+        model_config=MockModelConfig(),
+        renderer=MagicMock(),
+        request_logger=None,
+        chat_template=None,
+        chat_template_content_format="auto",
+    )
+    render_chat = AsyncMock(return_value=([[]], [tokens_input([1, 2])]))
+    online_renderer.renderer.render_chat_async = render_chat
+
+    result = await online_renderer.render_responses(
+        request, previous_messages=previous_messages
+    )
+
+    assert not isinstance(result, ErrorResponse)
+    return render_chat, result.engine_input
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ids", [_REUSED_IDS, [1.5]])
+@pytest.mark.parametrize(
+    "request_input",
+    [
+        [
+            {
+                "role": "user",
+                "content": [{"type": "input_text", "text": "look"}, _IMAGE_PART],
+            }
+        ],
+        [
+            {
+                "type": "function_call",
+                "call_id": "call_1",
+                "name": "shot",
+                "arguments": "{}",
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "call_1",
+                "output": [_IMAGE_PART],
+            },
+        ],
+    ],
+    ids=["input_image", "tool_output_image"],
+)
+async def test_responses_kv_transfer_prompt_token_ids_ignored_with_non_text_input(
+    request_input, ids
+):
+    request = ResponsesRequest(
+        input=request_input,
+        kv_transfer_params={"do_remote_prefill": True, "prompt_token_ids": ids},
+    )
+
+    render_chat, _ = await _render_responses_with_reuse(request)
+
+    render_chat.assert_awaited_once()
+    assert request.kv_transfer_params == {"do_remote_prefill": True}
+
+
+@pytest.mark.asyncio
+async def test_responses_kv_transfer_prompt_token_ids_ignored_with_media_in_history():
+    request = ResponsesRequest(
+        input="next", kv_transfer_params={"prompt_token_ids": _REUSED_IDS}
+    )
+
+    render_chat, _ = await _render_responses_with_reuse(
+        request, previous_messages=[{"role": "user", "content": [_IMAGE_PART]}]
+    )
+
+    render_chat.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_responses_kv_transfer_prompt_token_ids_kept_with_text_input():
+    request = ResponsesRequest(
+        input=[
+            {"role": "user", "content": [{"type": "input_text", "text": "hi"}]},
+            {"role": "assistant", "content": "ok"},
+        ],
+        kv_transfer_params={"prompt_token_ids": _REUSED_IDS},
+    )
+
+    _, engine_input = await _render_responses_with_reuse(request)
+
+    assert engine_input["prompt_token_ids"] == _REUSED_IDS
+
+
 @pytest.mark.asyncio
 async def test_online_renderer_rejects_untrusted_responses_chat_template():
     renderer = _new_online_renderer()
@@ -418,7 +515,11 @@ async def test_online_renderer_applies_responses_token_budget_to_harmony_prompt(
     result = await renderer.render_responses(request)
 
     assert not isinstance(result, ErrorResponse)
-    assert result.engine_input["prompt_token_ids"] == [4, 5, 6]
+    # `max_tokens` is an output upper bound rather than a reservation off the
+    # context window, so the prompt budget is the full max_model_len minus the
+    # one token held back for output: 6 tokens truncate to 4, not to
+    # max_model_len - max_output_tokens.
+    assert result.engine_input["prompt_token_ids"] == [3, 4, 5, 6]
 
 
 @pytest.mark.asyncio
@@ -2030,6 +2131,87 @@ async def test_stream_completed_response_reuses_streamed_items(monkeypatch):
     _, message, function_call = streamed
     assert [lp.token for lp in message.content[0].logprobs] == ["Hi"]
     assert function_call.call_id == "chatcmpl-tool-parser-id"
+
+
+def _harmony_msg(channel: str, text: str, recipient: str | None = None):
+    msg = OpenAIHarmonyMessage.from_role_and_content(Role.ASSISTANT, text)
+    msg = msg.with_channel(channel)
+    return msg.with_recipient(recipient) if recipient else msg
+
+
+def _harmony_segments(msg, *, streamed: bool = True) -> list[Segment]:
+    """Segments the parser yields for one message: a content delta (absent
+    for a zero-delta message), then the completed message."""
+    delta = [Segment(msg.channel, msg.recipient, msg.content[0].text)]
+    completed = Segment(msg.channel, msg.recipient, "", completed_message=msg)
+    return (delta if streamed else []) + [completed]
+
+
+async def _harmony_stream_events(segment_chunks: list[list[Segment]]):
+    serving = _make_serving_instance()
+    serving.use_harmony = True
+    parser = MagicMock(spec=HarmonyParser)
+    parser.process_chunk.side_effect = [
+        ChunkResult(segments=segments, reasoning_token_count=0)
+        for segments in segment_chunks
+    ]
+    context = HarmonyContext([], [], frozenset({"get_weather"}), parser)
+
+    async def result_generator():
+        for token_id in range(len(segment_chunks)):
+            context.append_output(_make_request_output("", [token_id]))
+            yield context
+
+    return [
+        event
+        async for event in serving.responses_stream_generator(
+            request=ResponsesRequest(input="hi", stream=True, store=False),
+            sampling_params=SamplingParams(max_tokens=16),
+            result_generator=result_generator(),
+            context=context,
+            model_name="test-model",
+            tokenizer=MagicMock(),
+            request_metadata=RequestResponseMetadata(request_id="req"),
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_harmony_stream_completed_response_reuses_streamed_ids():
+    """response.completed must carry the id and call_id each item was streamed
+    with, not ones minted when the harmony messages are converted again."""
+    messages = [
+        _harmony_msg("analysis", "think"),
+        _harmony_msg("commentary", '{"city": "Paris"}', "functions.get_weather"),
+        _harmony_msg("final", "Sunny"),
+    ]
+
+    events = await _harmony_stream_events([_harmony_segments(msg) for msg in messages])
+
+    streamed = [e.item for e in events if e.type == "response.output_item.done"]
+    output = events[-1].response.output
+    assert [item.type for item in output] == ["reasoning", "function_call", "message"]
+    assert [item.id for item in output] == [item.id for item in streamed]
+    assert output[1].call_id == streamed[1].call_id
+    assert output[2].content[0].text == "Sunny"
+
+
+@pytest.mark.asyncio
+async def test_harmony_stream_unstreamed_item_keeps_own_id():
+    """An item with no done event (zero-delta) must not take the streamed id
+    of a later item of the same type."""
+    unstreamed = _harmony_msg("analysis", "skipped")
+    reasoning = _harmony_msg("analysis", "think")
+
+    events = await _harmony_stream_events(
+        [_harmony_segments(unstreamed, streamed=False), _harmony_segments(reasoning)]
+    )
+
+    (streamed,) = [e.item for e in events if e.type == "response.output_item.done"]
+    first, second = events[-1].response.output
+    assert first.content[0].text == "skipped"
+    assert first.id != streamed.id
+    assert second.id == streamed.id
 
 
 @pytest.mark.asyncio

@@ -107,3 +107,37 @@ def test_fp8_index_query_and_cache_prefill_topk_matches_bf16() -> None:
         return {int(b) for b in idx[0, 0].tolist() if b >= 0}
 
     _check_selection(select(keys), select(keys.to(torch.float8_e4m3fn)))
+
+
+@pytest.mark.skipif(not FP8_CUDA_SUPPORTED, reason="CUDA FP8 support required")
+@torch.inference_mode()
+def test_bf16_query_against_fp8_cache_decode_topk_matches_bf16() -> None:
+    """A mixed pair must upcast rather than emit a mixed-dtype fp8 dot.
+
+    Production allocates index_q with the index-K cache dtype, so the scorers
+    normally see a matched pair and keep the native FP8 MMA. This pins the
+    other branch: a bf16 query against an e4m3 cache still compiles and still
+    ranks the planted blocks.
+    """
+    dev = "cuda"
+    q, keys = _make_inputs(dev)
+    block_table = torch.arange(NUM_PAGES, dtype=torch.int32, device=dev).unsqueeze(0)
+    seq_lens = torch.tensor([SEQ_LEN], dtype=torch.int32, device=dev)
+
+    def select(cache: torch.Tensor) -> set[int]:
+        idx = minimax_m3_index_decode(
+            q,  # bf16 query, deliberately not cast to the cache dtype
+            cache.view(NUM_PAGES, PAGE, HEAD_DIM).contiguous(),
+            block_table,
+            seq_lens,
+            SEQ_LEN,
+            TOPK,
+            0,
+            0,
+            HEADS,
+            1,
+            1,
+        )
+        return {int(b) for b in idx[0, 0].tolist() if b >= 0}
+
+    _check_selection(select(keys), select(keys.to(torch.float8_e4m3fn)))
