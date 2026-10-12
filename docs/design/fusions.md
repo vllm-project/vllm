@@ -230,6 +230,9 @@ Supported quantization scheme/hardware combinations:
 - MXFP4 dynamic (Gemma post-attention `fused_add_rms_norm` → asm MXFP4 GEMM): ROCm AITER on gfx950 only,
   opt-in with `VLLM_ROCM_AITER_FP4_POSTNORM_QUANT_FUSION=1` (needs `VLLM_ROCM_USE_AITER=1` and `VLLM_ROCM_USE_AITER_FP4_ASM_GEMM=1`,
   tensor parallel size 1 and a graph split at the attention ops)
+- MXFP4 dynamic (Gemma input `fused_add_rms_norm` that starts a decoder layer → asm MXFP4 GEMM): same hardware and requirements,
+  opt-in with `VLLM_ROCM_AITER_FP4_INPUTNORM_QUANT_FUSION=1`; a norm that feeds two GEMMs (a gated delta net layer)
+  is quantized once and both GEMMs take its output
 
 **Code locations.**
 
@@ -258,7 +261,7 @@ Supported quantization scheme/hardware combinations:
 - MXFP4 dynamic (SiLU/GELU+Mul → asm MXFP4 GEMM): ROCm AITER on gfx950 only,
   opt-in with `VLLM_ROCM_AITER_FP4_ACT_QUANT_FUSION=1` (needs `VLLM_ROCM_USE_AITER=1` and `VLLM_ROCM_USE_AITER_FP4_ASM_GEMM=1`)
 
-The MXFP4 fusions (this one and the RMSNorm one above) fail the start when their flag is on and
+The MXFP4 fusions (this one and the RMSNorm ones above) fail the start when their flag is on and
 the target model graph gets no rewrite in a compile range; the graphs of speculative decoding are
 only logged. The startup log has one line per compile range, `Fused ... at N sites (graph=...)`.
 
