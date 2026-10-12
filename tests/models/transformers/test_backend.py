@@ -784,3 +784,82 @@ def test_get_mrope_input_positions_omits_unsupported_grid_kwargs():
 
     assert positions.shape == (4, 3)
     assert delta == 0
+
+
+def test_mtp_draft_loads_mtp_weights(tmp_path, tp_init, monkeypatch):
+    """An MTP draft for a model following the Transformers MTP standard loads each
+    MTP layer appended to the target's checkpoint into `MtpModel`'s layout."""
+    from safetensors.torch import load_file, save_file
+    from transformers import Glm4MoeConfig, Glm4MoeForCausalLM
+
+    from vllm.config import ParallelConfig, SpeculativeConfig, set_current_vllm_config
+    from vllm.model_executor.model_loader import get_model
+
+    # Real layer count, since GLM-4.5-Air's MTP weight pattern hard-codes it
+    num_hidden_layers = 46
+    num_mtp_layers = 2
+    # GLM has one MTP layer, so register the second like Step-3.7 registers its own
+    monkeypatch.setattr(
+        Glm4MoeForCausalLM,
+        "_keys_to_ignore_on_load_unexpected",
+        [rf"model\.layers\.{num_hidden_layers + 1}.*"]
+        + Glm4MoeForCausalLM._keys_to_ignore_on_load_unexpected,
+    )
+    # The smallest sizes the fused MoE kernels accept
+    hidden_size = 128
+    config = Glm4MoeConfig(
+        vocab_size=128,
+        hidden_size=hidden_size,
+        intermediate_size=256,
+        moe_intermediate_size=128,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        head_dim=64,
+        n_routed_experts=4,
+        num_experts_per_tok=2,
+        num_hidden_layers=num_hidden_layers + num_mtp_layers,
+        architectures=["Glm4MoeForCausalLM"],
+    )
+    # Save the MTP layers as the last decoder layers, then add their MTP modules
+    Glm4MoeForCausalLM(config).save_pretrained(tmp_path)
+    weights = load_file(tmp_path / "model.safetensors")
+    for i in range(num_hidden_layers, num_hidden_layers + num_mtp_layers):
+        for name, shape in {
+            "enorm.weight": (hidden_size,),
+            "hnorm.weight": (hidden_size,),
+            "eh_proj.weight": (hidden_size, 2 * hidden_size),
+            "shared_head.norm.weight": (hidden_size,),
+        }.items():
+            weights[f"model.layers.{i}.{name}"] = torch.randn(shape)
+    save_file(weights, tmp_path / "model.safetensors", metadata={"format": "pt"})
+    config.num_hidden_layers = num_hidden_layers
+    config.num_nextn_predict_layers = num_mtp_layers
+    config.save_pretrained(tmp_path)
+
+    target = ModelConfig(str(tmp_path), model_impl="transformers", dtype="bfloat16")
+    draft = SpeculativeConfig(
+        method="mtp",
+        num_speculative_tokens=num_mtp_layers,
+        target_model_config=target,
+        target_parallel_config=ParallelConfig(),
+    ).draft_model_config
+    assert draft.architecture == "TransformersMoEForMTP"
+    vllm_config = VllmConfig(model_config=draft)
+    with set_current_vllm_config(vllm_config):
+        model = get_model(vllm_config=vllm_config, model_config=draft)
+
+    assert len(model.model.layers) == num_mtp_layers
+    for k, layer in enumerate(model.model.layers):
+        mtp = f"model.layers.{num_hidden_layers + k}"
+        for ckpt_name, param_name in {
+            "enorm.weight": "enorm.weight",
+            "hnorm.weight": "hnorm.weight",
+            "eh_proj.weight": "eh_proj.weight",
+            "shared_head.norm.weight": "post_norm.weight",
+            "input_layernorm.weight": "mtp_block.input_layernorm.weight",
+            "self_attn.o_proj.weight": "mtp_block.self_attn.o_proj.weight",
+        }.items():
+            torch.testing.assert_close(
+                layer.get_parameter(param_name).cpu(),
+                weights[f"{mtp}.{ckpt_name}"].to(torch.bfloat16),
+            )

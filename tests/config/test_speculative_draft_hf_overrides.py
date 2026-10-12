@@ -38,13 +38,16 @@ def test_dict_overrides_are_not_forwarded_to_draft():
     composed = SpeculativeConfig.compose_draft_hf_overrides(
         {"max_position_embeddings": 1234}
     )
-    assert composed is SpeculativeConfig.hf_config_override
+    hf_config = composed(_make_hf_config(model_type="deepseek_v3"))
+    assert hf_config.architectures == ["DeepSeekMTPModel"]
+    assert getattr(hf_config, "max_position_embeddings", None) != 1234
 
 
 @pytest.mark.cpu_test
 def test_none_overrides_fall_back_to_arch_mapping():
     composed = SpeculativeConfig.compose_draft_hf_overrides(None)
-    assert composed is SpeculativeConfig.hf_config_override
+    hf_config = composed(_make_hf_config(model_type="deepseek_v3"))
+    assert hf_config.architectures == ["DeepSeekMTPModel"]
 
 
 def _make_speculative_config(
@@ -57,6 +60,7 @@ def _make_speculative_config(
     draft.registry.inspect_model_cls.return_value = (None, architecture)
     target = MagicMock(max_model_len=128, quantization=None, hf_overrides={})
     target.hf_config.model_type = hf_kwargs["model_type"]
+    target.using_transformers_backend.return_value = False
 
     with patch("vllm.config.speculative.ModelConfig", return_value=draft):
         return SpeculativeConfig(
@@ -245,6 +249,7 @@ def _make_mtp_speculative_config(
         quantization=None,
         hf_overrides={},
     )
+    target_model_config.using_transformers_backend.return_value = False
 
     with patch("vllm.config.speculative.ModelConfig", return_value=draft_model_config):
         return SpeculativeConfig(
