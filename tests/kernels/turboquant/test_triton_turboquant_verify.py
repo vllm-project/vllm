@@ -155,7 +155,9 @@ def test_verify_wrapper_graph_and_poisoned_future(d):
     assert not torch.equal(captured[3], output[3])
 
 
-def test_backend_keeps_short_query_blocks(monkeypatch):
+@pytest.mark.parametrize("d", [128, 256])
+@pytest.mark.parametrize("rows", [[1, 4, 33], [1, 4, 3], [0, 4, 2], [32, 2]])
+def test_backend_keeps_short_query_blocks(monkeypatch, d, rows):
     from types import SimpleNamespace
 
     from vllm.v1.attention.backends.turboquant_attn import (
@@ -163,7 +165,7 @@ def test_backend_keeps_short_query_blocks(monkeypatch):
         TurboQuantMetadata,
     )
 
-    args, reference = _make_case(128, [1, 4, 33], [4096] * 3)
+    args, reference = _make_case(d, rows, [4096] * len(rows))
     impl = object.__new__(TurboQuantAttentionImpl)
     impl._soa_store = True
     impl.sliding_window = None
@@ -171,18 +173,18 @@ def test_backend_keeps_short_query_blocks(monkeypatch):
     impl.scale = args["scale"]
     impl.tq_config = SimpleNamespace(
         key_mse_bits=4,
-        key_packed_size=66,
+        key_packed_size=d // 2 + 2,
         effective_value_quant_bits=4,
-        value_packed_size=68,
+        value_packed_size=d // 2 + 4,
         key_fp8=False,
         norm_correction=False,
     )
     metadata = TurboQuantMetadata(
         seq_lens=args["seq_lens"],
-        slot_mapping=torch.empty(38, dtype=torch.int64, device="cuda"),
+        slot_mapping=torch.empty(sum(rows), dtype=torch.int64, device="cuda"),
         block_table=args["block_table"],
         query_start_loc=args["query_start_loc"],
-        max_query_len=33,
+        max_query_len=max(rows),
         max_seq_len=4096,
         query_start_loc_cpu=args["query_start_loc"].cpu(),
         seq_lens_cpu=args["seq_lens"].cpu(),
@@ -195,7 +197,7 @@ def test_backend_keeps_short_query_blocks(monkeypatch):
         return original(**kwargs)
 
     monkeypatch.setattr(impl, "_dispatch_decode_soa", record)
-    raw_kv = torch.empty((38, 1, 128), dtype=torch.bfloat16, device="cuda")
+    raw_kv = torch.empty((sum(rows), 1, d), dtype=torch.bfloat16, device="cuda")
     output = impl._prefill_attention(
         args["query"],
         raw_kv,
@@ -206,5 +208,8 @@ def test_backend_keeps_short_query_blocks(monkeypatch):
         args["centroids"],
         args["PiT"],
     )
-    assert dispatches == [(1, 1), (4, 1), (1, 33)]
+    if max(rows) <= 32:
+        assert dispatches == [(max(rows), len(rows))]
+    else:
+        assert dispatches == [(1, 1), (4, 1), (1, 33)]
     torch.testing.assert_close(output.float(), reference, atol=5e-3, rtol=3e-2)
