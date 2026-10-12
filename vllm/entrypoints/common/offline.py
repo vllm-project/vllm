@@ -54,6 +54,7 @@ class OfflineInferenceMixin:
     renderer: BaseRenderer
     llm_engine: "LLMEngine"
     model_config: ModelConfig
+    chat_template: str | None
 
     def _resolve_mm_lora(
         self,
@@ -180,7 +181,9 @@ class OfflineInferenceMixin:
         renderer = self.renderer
 
         chat_params = ChatParams(
-            chat_template=chat_template,
+            chat_template=(
+                self.chat_template if chat_template is None else chat_template
+            ),
             chat_template_content_format=chat_template_content_format,
             chat_template_kwargs=merge_kwargs(
                 chat_template_kwargs,
