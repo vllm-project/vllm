@@ -35,7 +35,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.model_loader.weight_utils import load_attention_sink
+from vllm.model_executor.model_loader.weight_utils import make_attention_sink
 from vllm.model_executor.models.interfaces import (
     EagleModelMixin,
     SupportsEagle3,
@@ -354,10 +354,7 @@ class LagunaAttention(nn.Module):
         # Attention sinks (learnable per-head bias for SWA layers)
         sinks = None
         if attention_sink:
-            self.sink = torch.nn.Parameter(
-                torch.empty(self.total_num_heads // tp_size, requires_grad=False)
-            )
-            self.sink.weight_loader = load_attention_sink
+            self.sink = make_attention_sink(self.total_num_heads // tp_size)
             sinks = self.sink
 
         # Resolve rope params per-layer-type. ``config.rope_parameters`` is

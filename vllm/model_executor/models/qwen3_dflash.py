@@ -32,7 +32,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.model_loader.weight_utils import load_attention_sink
+from vllm.model_executor.model_loader.weight_utils import make_attention_sink
 from vllm.multimodal.inputs import NestedTensors
 from vllm.platforms import current_platform
 from vllm.transformers_utils.config import set_default_rope_theta
@@ -251,12 +251,8 @@ class DFlashQwen3Attention(nn.Module):
         )
 
         self.attention_sink_bias = (
-            torch.nn.Parameter(torch.empty(self.num_heads), requires_grad=False)
-            if add_swa_attention_sink_bias
-            else None
+            make_attention_sink(self.num_heads) if add_swa_attention_sink_bias else None
         )
-        if self.attention_sink_bias is not None:
-            self.attention_sink_bias.weight_loader = load_attention_sink
 
         self.sliding_window = sliding_window
         self.attn = Attention(
