@@ -178,7 +178,11 @@ def _make_packed_mla_view_worker(
     config.kv_transfer_config.kv_role = (
         "kv_producer" if worker_cls is NixlPushConnectorWorker else "kv_consumer"
     )
+    config.kv_transfer_config.kv_buffer_device = "cuda"
     config.cache_config.kv_cache_layout = "BLHNC"
+    fake_platform = MagicMock()
+    fake_platform.device_type = "cuda"
+    fake_platform.get_nixl_memory_type.return_value = "VRAM"
     backends = []
     for name in backend_names:
         backend = MagicMock()
@@ -191,6 +195,7 @@ def _make_packed_mla_view_worker(
         patch.object(bw, "get_tensor_model_parallel_rank", return_value=0),
         patch.object(bw, "get_tensor_model_parallel_world_size", return_value=1),
         patch.object(bw, "get_current_attn_backends", return_value=backends),
+        patch.object(bw, "current_platform", fake_platform),
         patch("threading.Thread"),
     ):
         worker = worker_cls(
@@ -423,6 +428,7 @@ def test_packed_mla_handshake_allows_group_remapping_and_endpoint_strides():
     )
     worker.transfer_topo.tp_ratio.return_value = 1
     worker.transfer_topo.block_size_ratio.return_value = 1
+    worker.transfer_topo.total_num_kv_heads = 1
     worker.dst_num_blocks[metadata.engine_id] = metadata.num_blocks
 
     worker._validate_remote_agent_handshake(
@@ -451,6 +457,185 @@ def test_packed_mla_handshake_allows_group_remapping_and_endpoint_strides():
         for address in metadata.kv_caches_base_addr
         for block in range(metadata.num_blocks)
     ]
+
+
+@pytest.mark.cpu_test
+def test_mixed_packed_layout_uses_cached_per_layer_peer_descriptors():
+    worker, _ = _make_packed_mla_view_worker(
+        {"L0": (0, 64), "L1": (64, 64)},
+        256,
+        worker_cls=NixlPullConnectorWorker,
+        shared_transfer_group=True,
+        force_cuda_span_eligibility=True,
+    )
+    assert worker._nixl_packed_cache_span_active
+    assert len(worker.src_blocks_data) == 4
+
+    matching_metadata = msgspec.msgpack.decode(
+        worker.xfer_handshake_metadata.agent_metadata_bytes,
+        type=NixlAgentMetadata,
+    )
+    matching_metadata.engine_id = "matching-layout-peer"
+    assert (
+        worker._prepare_peer_transfer_plan(
+            matching_metadata, remote_packed_span_active=True
+        )
+        is None
+    )
+
+    metadata = msgspec.msgpack.decode(
+        worker.xfer_handshake_metadata.agent_metadata_bytes,
+        type=NixlAgentMetadata,
+    )
+    metadata.engine_id = "mixed-layout-peer"
+    metadata.kv_caches_base_addr = [0x20_000, 0x10_000]
+    metadata.block_lens = [64, 64]
+    metadata.block_strides = [512, 512]
+    metadata.region_num_blocks = [4, 4]
+    metadata.region_group_ids = [1, 0]
+    metadata.region_names = ["L1", "L0"]
+    metadata.region_members = [["L1"], ["L0"]]
+    metadata.region_mem_types = ["DRAM", "DRAM"]
+    metadata.packed_member_layouts = {}
+
+    peer_plan = worker._prepare_peer_transfer_plan(
+        metadata, remote_packed_span_active=False
+    )
+    assert peer_plan is not None
+    assert metadata.region_names == ["L0", "L1"]
+    assert metadata.region_group_ids == [0, 1]
+    assert metadata.kv_caches_base_addr == [0x10_000, 0x20_000]
+    assert peer_plan.local_region_num_blocks == (4, 4)
+
+    local_handle = worker._register_peer_local_xfer_handler(
+        peer_plan, metadata.block_size
+    )
+    local_descs = worker.nixl_wrapper.dlists[local_handle]
+    assert len(local_descs) == 8
+    assert local_descs[:, 0].tolist() == [
+        view.base_addr + block * view.block_stride
+        for view in peer_plan.local_views
+        for block in range(view.num_blocks)
+    ]
+
+    remote_descs = worker._build_peer_fa_remote(metadata)
+    assert remote_descs[:, 0].tolist() == [
+        address + block * 512
+        for address in metadata.kv_caches_base_addr
+        for block in range(metadata.num_blocks)
+    ]
+
+    worker._peer_transfer_plans[metadata.engine_id] = peer_plan
+    local_by_region = worker._block_ids_by_region(
+        ([2],), [view.group_id for view in peer_plan.local_views]
+    )
+    remote_by_region = worker._block_ids_by_region(
+        ([1], [3]), metadata.region_group_ids
+    )
+    local_desc_ids = worker._compute_desc_ids(
+        local_by_region,
+        worker.num_blocks,
+        None,
+        1,
+        region_num_blocks=list(peer_plan.local_region_num_blocks),
+        region_group_ids=[0, 1],
+        uses_region_group_mapping=True,
+    )
+    remote_desc_ids = worker._compute_desc_ids(
+        remote_by_region,
+        metadata.num_blocks,
+        None,
+        1,
+        region_num_blocks=list(peer_plan.remote_region_num_blocks),
+        region_group_ids=[0, 1],
+        uses_region_group_mapping=True,
+    )
+    np.testing.assert_array_equal(local_desc_ids, [2, 6])
+    np.testing.assert_array_equal(remote_desc_ids, [1, 7])
+
+    second_rank_metadata = msgspec.msgpack.decode(
+        worker.xfer_handshake_metadata.agent_metadata_bytes,
+        type=NixlAgentMetadata,
+    )
+    second_rank_metadata.engine_id = "mixed-layout-peer"
+    second_rank_metadata.kv_caches_base_addr = [0x40_000, 0x30_000]
+    second_rank_metadata.block_lens = [64, 64]
+    second_rank_metadata.block_strides = [512, 512]
+    second_rank_metadata.region_num_blocks = [4, 4]
+    second_rank_metadata.region_group_ids = [1, 0]
+    second_rank_metadata.region_names = ["L1", "L0"]
+    second_rank_metadata.region_members = [["L1"], ["L0"]]
+    second_rank_metadata.region_mem_types = ["DRAM", "DRAM"]
+    second_rank_metadata.packed_member_layouts = {}
+    cached_plan = worker._prepare_peer_transfer_plan(
+        second_rank_metadata, remote_packed_span_active=False
+    )
+    assert cached_plan is peer_plan
+    assert (
+        worker._register_peer_local_xfer_handler(cached_plan, metadata.block_size)
+        == local_handle
+    )
+
+    worker.add_remote_agent(metadata, remote_tp_size=1)
+    assert worker._peer_transfer_plans[metadata.engine_id] is peer_plan
+    remote_handle = worker.dst_xfer_side_handles[metadata.engine_id][0]
+    assert len(worker.nixl_wrapper.dlists[remote_handle]) == 8
+
+
+@pytest.mark.cpu_test
+def test_mixed_layout_fallback_splits_local_memory_type_descriptors():
+    worker = object.__new__(NixlPullConnectorWorker)
+    worker._nixl_packed_cache_span_active = True
+    worker._packed_member_layouts = {"L0": (0, 64), "L1": (64, 64)}
+    worker.region_members = [["L0", "L1"]]
+    worker._nixl_layer_transfer_views = {
+        "L0": bw._NixlLayerTransferView("L0", 0x1000, 64, 256, 4, 0, "VRAM", 0, True),
+        "L1": bw._NixlLayerTransferView("L1", 0x2000, 64, 256, 4, 1, "DRAM", 0, True),
+    }
+    worker._peer_transfer_plans = {}
+    worker.use_mla = True
+    worker._has_mamba = False
+    worker.block_size = 16
+    worker.nixl_memory_type = "VRAM"
+    worker._skip_dram_xfer = False
+    worker.nixl_wrapper = _RecordingNixl()
+
+    metadata = NixlAgentMetadata(
+        engine_id="mixed-memory-peer",
+        agent_metadata=b"remote-agent",
+        kv_caches_base_addr=[0x30_000, 0x40_000],
+        device_id=0,
+        num_blocks=4,
+        block_lens=[64, 64],
+        block_strides=[256, 256],
+        kv_cache_layout="BLHNC",
+        block_size=16,
+        ssm_sizes=(0, 0),
+        attn_backend_name="FLASHMLA",
+        physical_blocks_per_logical_kv_block=1,
+        region_num_blocks=[4, 4],
+        region_group_ids=[0, 1],
+        region_mem_types=["DRAM", "DRAM"],
+        region_members=[["L0"], ["L1"]],
+        region_names=["L0", "L1"],
+        packed_member_layouts={},
+    )
+
+    peer_plan = worker._prepare_peer_transfer_plan(
+        metadata, remote_packed_span_active=False
+    )
+    assert peer_plan is not None
+
+    device_handle = worker._register_peer_local_xfer_handler(
+        peer_plan, metadata.block_size
+    )
+    dram_handle = peer_plan.local_dram_xfer_handles_by_block_size[metadata.block_size]
+    assert dram_handle is not None
+    assert len(worker.nixl_wrapper.dlists[device_handle]) == 4
+    assert len(worker.nixl_wrapper.dlists[dram_handle]) == 4
+    assert peer_plan.local_desc_is_dram_by_block_size[metadata.block_size].tolist() == (
+        [False] * 4 + [True] * 4
+    )
 
 
 @pytest.mark.cpu_test
@@ -767,7 +952,7 @@ def test_overlaid_transfer_groups_share_region_geometry(push_pp):
     )
     assert metadata.region_group_ids == [-1]
     assert metadata.region_num_blocks == [num_blocks]
-    assert metadata.region_members == ([["layer.0", "layer.1"]] if push_pp else [])
+    assert metadata.region_members == [["layer.0", "layer.1"]]
     assert worker._block_ids_by_region(([0], [2]), worker.region_group_ids) == [[0, 2]]
 
 
@@ -858,6 +1043,7 @@ def _make_mla_hybrid_worker(local_block_size, kernel_block_size, num_logical_blo
 
     vllm_config = create_vllm_config(block_size=local_block_size)
     vllm_config.cache_config.enable_prefix_caching = False
+    vllm_config.scheduler_config.disable_hybrid_kv_cache_manager = False
     # kv_buffer_device defaults to the *real* platform's device type, which on
     # a CPU-only test host would make this a host-buffer worker: host xfer
     # buffers are per-layer, so the HMA shared-tensor regions this test builds
