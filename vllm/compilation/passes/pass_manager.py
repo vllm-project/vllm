@@ -47,6 +47,11 @@ if current_platform.is_cuda_alike():
     from .fusion.rope_kvcache_fusion import RopeKVCacheFusionPass
     from .utility.scatter_split_replace import ScatterSplitReplacementPass
 
+if current_platform.is_rocm() and rocm_aiter_ops.is_enabled():
+    from .fusion.muse_glimmer_qk_rope_cache_fusion import (
+        MuseGlimmerQkRopeCacheFusionPass,
+    )
+
 if current_platform.is_cuda():
     from .fusion.allreduce_rms_fusion import AllReduceFusionPass
 
@@ -193,10 +198,23 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
                 ):
                     self.passes += [RocmAiterSiluMulFp8GroupQuantFusionPass(config)]
 
-            if self.pass_config.fuse_qk_norm_rope_kvcache:
+            muse_qk_rope_cache = (
+                current_platform.is_rocm()
+                and rocm_aiter_ops.is_enabled()
+                and model_config is not None
+                and model_config.architecture
+                in {
+                    "MuseGlimmerForCausalLM",
+                    "MuseGlimmerForConditionalGeneration",
+                }
+            )
+            if self.pass_config.fuse_qk_norm_rope_kvcache or muse_qk_rope_cache:
                 self.passes += [SplitCoalescingPass(config)]
                 self.passes += [ScatterSplitReplacementPass(config)]
-                self.passes += [QkNormRopeKvCacheFusionPass(config)]
+                if muse_qk_rope_cache:
+                    self.passes += [MuseGlimmerQkRopeCacheFusionPass(config)]
+                if self.pass_config.fuse_qk_norm_rope_kvcache:
+                    self.passes += [QkNormRopeKvCacheFusionPass(config)]
 
             if self.pass_config.fuse_mla_dual_rms_norm and rocm_aiter_ops.is_enabled():
                 self.passes += [MLADualRMSNormFusionPass(config)]

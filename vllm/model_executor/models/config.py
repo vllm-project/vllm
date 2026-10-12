@@ -175,6 +175,20 @@ class MuseGlimmerAttentionConfig(VerifyAndUpdateConfig):
         ):
             attention_config.backend = AttentionBackendEnum.ROCM_AITER_FA
 
+        if rocm_aiter_ops.is_enabled() and (
+            attention_config.backend == AttentionBackendEnum.ROCM_AITER_FA
+            or AttentionBackendEnum.ROCM_AITER_FA
+            in attention_config.backend_per_kind.values()
+        ):
+            # Keep QK norm, RoPE and the KV write in one Inductor graph.
+            compilation_config = vllm_config.compilation_config
+            compilation_config.use_inductor_graph_partition = True
+            if (
+                "-rotary_embedding" not in compilation_config.custom_ops
+                and "+rotary_embedding" not in compilation_config.custom_ops
+            ):
+                compilation_config.custom_ops.append("+rotary_embedding")
+
 
 class UnlimitedOCRForCausalLMConfig(VerifyAndUpdateConfig):
     @staticmethod

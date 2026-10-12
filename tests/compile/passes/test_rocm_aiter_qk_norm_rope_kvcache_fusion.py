@@ -3,6 +3,7 @@
 
 import os
 from importlib.metadata import version
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -22,6 +23,9 @@ from vllm._aiter_ops import (
     rocm_aiter_ops,
 )
 from vllm.compilation.passes.fusion.matcher_utils import MROPE_OP, ROTARY_OP
+from vllm.compilation.passes.fusion.muse_glimmer_qk_rope_cache_fusion import (
+    MuseGlimmerQkRopeCacheFusionPass,
+)
 from vllm.compilation.passes.fusion.qk_norm_rope_kvcache_fusion import (
     QkNormRopeKvCacheFusionPass,
 )
@@ -334,6 +338,130 @@ class QKNormMRoPEObservableKTestModel(QKNormMRoPEKVCacheTestModel):
         self, qkv: torch.Tensor, positions: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         return QKNormRoPEKVCacheTestModel.forward(self, qkv, positions)
+
+
+class MuseQKNormRoPEKVCacheTestModel(QKNormRoPEKVCacheTestModel):
+    q_scale = 3.875
+
+    def forward(
+        self, qkv: torch.Tensor, positions: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+        q = q.reshape(-1, self.head_size)
+        q_fp32 = q.float()
+        q = (
+            q_fp32
+            * torch.rsqrt(
+                q_fp32.pow(2).mean(-1, keepdim=True) + self.q_norm.variance_epsilon
+            )
+        ).type_as(q)
+        q = q.reshape(-1, self.q_size) * self.q_scale
+        k = k.reshape(-1, self.head_size)
+        k_fp32 = k.float()
+        k = (
+            k_fp32
+            * torch.rsqrt(
+                k_fp32.pow(2).mean(-1, keepdim=True) + self.k_norm.variance_epsilon
+            )
+        ).type_as(k)
+        k = k.reshape(-1, self.kv_size)
+        q = q.to(v.dtype)
+        k = k.to(v.dtype)
+        q, k = self.rotary_emb(positions, q, k)
+        q = q.view(-1, self.num_heads, self.head_size)
+        k = k.view(-1, self.num_kv_heads, self.head_size)
+        v = v.view(-1, self.num_kv_heads, self.head_size)
+        dummy = torch.ops.vllm.unified_kv_cache_update(
+            k, v, _encode_layer_name(self.layer_name)
+        )
+        return q, k, v, dummy
+
+
+@pytest.mark.parametrize("num_tokens", [5, 512])
+def test_muse_qk_norm_rope_cache_fuses_all_token_counts(
+    num_tokens: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    torch.manual_seed(0)
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER_TRITON_ROPE", "0")
+    monkeypatch.setenv("VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT", "0")
+    rocm_aiter_ops.refresh_env_variables()
+
+    device = torch.device(os.environ.get("VLLM_TEST_CUDA_DEVICE", "cuda"))
+    vllm_config = VllmConfig(
+        model_config=ModelConfig(
+            model=os.environ.get("VLLM_TEST_MODEL", "Qwen/Qwen3-0.6B"),
+            dtype=torch.bfloat16,
+        ),
+        cache_config=CacheConfig(block_size=16, cache_dtype="auto"),
+        compilation_config=CompilationConfig(
+            mode=CompilationMode.VLLM_COMPILE,
+            custom_ops=["+rotary_embedding"],
+            use_inductor_graph_partition=True,
+        ),
+    )
+    with vllm.config.set_current_vllm_config(vllm_config):
+        model = MuseQKNormRoPEKVCacheTestModel(
+            vllm_config=vllm_config,
+            attn_backend=AttentionBackendEnum.ROCM_AITER_FA,
+            num_heads=32,
+            num_kv_heads=8,
+            head_size=128,
+            is_neox=True,
+            rms_norm_eps=1e-6,
+            dtype=torch.bfloat16,
+            device=device,
+        ).to(device)
+        import vllm.model_executor.models.muse_glimmer as muse_module
+
+        text_config = SimpleNamespace(
+            head_dim=128,
+            no_rope_layers=[1],
+            rms_norm_eps=1e-6,
+            qk_scale_factor=model.q_scale,
+            use_qk_norm=True,
+        )
+        monkeypatch.setattr(muse_module, "_text_config", lambda _: text_config)
+        fusion_pass = MuseGlimmerQkRopeCacheFusionPass(vllm_config)
+        backend = TestBackend(
+            NoOpEliminationPass(vllm_config),
+            SplitCoalescingPass(vllm_config),
+            ScatterSplitReplacementPass(vllm_config),
+            fusion_pass,
+            PostCleanupPass(vllm_config),
+        )
+        qkv = torch.randn(
+            num_tokens,
+            model.q_size + 2 * model.kv_size,
+            device=device,
+            dtype=torch.bfloat16,
+        )
+        positions = torch.arange(num_tokens, device=device)
+
+        with set_forward_context(None, vllm_config):
+            context = get_forward_context()
+            metadata = model.build_attn_metadata(num_tokens, KVCacheLayout.LBHNC)
+            context.slot_mapping = {model.layer_name: metadata.slot_mapping}
+            expected = model(qkv, positions)
+            expected_cache = model.attn.kv_cache.clone()
+
+        torch._dynamo.mark_dynamic(qkv, 0)
+        torch._dynamo.mark_dynamic(positions, 0)
+        with set_forward_context(None, vllm_config):
+            context = get_forward_context()
+            metadata = model.build_attn_metadata(num_tokens, KVCacheLayout.LBHNC)
+            context.slot_mapping = {model.layer_name: metadata.slot_mapping}
+            actual = torch.compile(model, backend=backend)(qkv, positions)
+            actual_cache = model.attn.kv_cache.clone()
+
+        assert fusion_pass.matched_count == 1
+        backend.check_before_ops([torch.ops.vllm.unified_kv_cache_update.default])
+        backend.check_after_ops([torch.ops.vllm.fused_muse_qk_rope_cache.default])
+        for expected_tensor, actual_tensor in zip(expected[:3], actual[:3]):
+            torch.testing.assert_close(
+                expected_tensor, actual_tensor, atol=4e-2, rtol=2e-2
+            )
+        torch.testing.assert_close(expected_cache, actual_cache, atol=4e-2, rtol=2e-2)
 
 
 def _run_qk_norm_rope_kvcache_fusion_test(
