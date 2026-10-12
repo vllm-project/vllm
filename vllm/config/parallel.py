@@ -334,10 +334,12 @@ class ParallelConfig:
     PCT priority cores.
 
     If None (default), vLLM binds only when the environment supports it
-    (e.g. multiple NUMA nodes, `numactl` installed, and the `spawn` start
-    method) and starts unbound otherwise. With `True`, a missing `numactl`
-    or undetectable GPU-to-NUMA topology is a startup error; `False`
-    disables binding.
+    (multiple NUMA nodes, `numactl` installed, unrestricted CPU affinity,
+    and the `spawn` start method with an mp/uni executor and mp DP).
+    Ray, external launchers, device-ID remapping, and PCP are excluded
+    from automatic binding. Unsupported environments start unbound.
+    With `True`, a missing `numactl` or undetectable GPU-to-NUMA topology
+    is a startup error; `False` disables binding.
     """
     numa_bind_nodes: list[int] | None = None
     """NUMA node to bind each GPU worker to.

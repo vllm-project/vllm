@@ -2,8 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
+from copy import deepcopy
 from functools import partial
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -39,7 +41,7 @@ def _disable_pct_by_default(monkeypatch):
 
 
 def _make_config(**parallel_kwargs):
-    parallel_defaults = dict(
+    parallel_defaults: dict[str, Any] = dict(
         numa_bind=False,
         numa_bind_nodes=None,
         numa_bind_cpus=None,
@@ -49,11 +51,19 @@ def _make_config(**parallel_kwargs):
         nnodes_within_dp=1,
         data_parallel_rank_local=0,
         data_parallel_index=0,
+        data_parallel_size_local=1,
         pipeline_parallel_size=1,
         tensor_parallel_size=1,
         prefill_context_parallel_size=1,
     )
     parallel_defaults.update(parallel_kwargs)
+    parallel_defaults.setdefault(
+        "local_world_size",
+        parallel_defaults["pipeline_parallel_size"]
+        * parallel_defaults["tensor_parallel_size"]
+        * parallel_defaults["prefill_context_parallel_size"]
+        // parallel_defaults["nnodes_within_dp"],
+    )
     parallel_config = SimpleNamespace(**parallel_defaults)
     parallel_config.world_size = (
         parallel_config.tensor_parallel_size
@@ -604,13 +614,24 @@ def test_configure_subprocess_numa_fallback(monkeypatch):
         assert numa_utils._NUMACTL_ARGS_ENV not in os.environ
 
 
-def _patch_auto_numa(monkeypatch, start_method, detect):
+def _patch_auto_numa(
+    monkeypatch, start_method, detect, visible_gpus=1, node_cpus="0-7"
+):
     monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/numactl")
     monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", start_method)
-    monkeypatch.setattr(
-        numa_utils, "_is_auto_numa_available", lambda verbose=True: True
-    )
+    monkeypatch.setattr(numa_utils, "_is_auto_numa_available", lambda **kwargs: True)
     monkeypatch.setattr(numa_utils, "get_auto_numa_nodes", detect)
+    monkeypatch.setattr(
+        "vllm.platforms.current_platform.device_count", lambda: visible_gpus
+    )
+    real_read_text = numa_utils.Path.read_text
+
+    def read_text(path, *args, **kwargs):
+        if str(path).startswith("/sys/devices/system/node/node"):
+            return node_cpus
+        return real_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(numa_utils.Path, "read_text", read_text)
 
 
 def test_configure_subprocess_auto_binds_and_records_result(monkeypatch):
@@ -620,9 +641,18 @@ def test_configure_subprocess_auto_binds_and_records_result(monkeypatch):
     monkeypatch.setattr(numa_utils.subprocess, "run", _fake_numactl_run([]))
 
     vllm_config = _make_config(numa_bind=None)
-    with numa_utils.configure_subprocess(vllm_config, local_rank=0):
+    with numa_utils.configure_subprocess(
+        vllm_config, local_rank=0, process_kind="EngineCore"
+    ):
         assert os.environ[numa_utils._NUMACTL_ARGS_ENV] == "--cpunodebind=0 --membind=0"
+        child_config = deepcopy(vllm_config)
     assert vllm_config.parallel_config.numa_bind is True
+    assert child_config.parallel_config.numa_bind_nodes == [0]
+
+    monkeypatch.setattr(numa_utils, "get_auto_numa_nodes", _raise_probe_error)
+    monkeypatch.setattr(numa_utils, "_is_auto_numa_available", lambda **kwargs: False)
+    with numa_utils.configure_subprocess(child_config, local_rank=0):
+        assert os.environ[numa_utils._NUMACTL_ARGS_ENV] == "--cpunodebind=0 --membind=0"
 
 
 def _raise_probe_error():
@@ -654,3 +684,187 @@ def test_configure_subprocess_auto_falls_back_to_unbound(
     with numa_utils.configure_subprocess(vllm_config, local_rank=0):
         assert multiprocessing.spawn.get_executable() == before
     assert vllm_config.parallel_config.numa_bind is False
+
+
+@pytest.mark.parametrize(
+    "parallel_kwargs",
+    [
+        {"distributed_executor_backend": "ray"},
+        {"data_parallel_backend": "ray"},
+        {"distributed_executor_backend": "external_launcher"},
+        {"prefill_context_parallel_size": 2},
+    ],
+    ids=["ray-executor", "ray-dp", "external-launcher", "pcp"],
+)
+def test_auto_numa_skips_unsupported_launchers(monkeypatch, parallel_kwargs):
+    detections = []
+
+    def detect():
+        detections.append(True)
+        return [0, 1]
+
+    _patch_auto_numa(monkeypatch, "spawn", detect, visible_gpus=2)
+    vllm_config = _make_config(numa_bind=None, **parallel_kwargs)
+    with numa_utils.configure_subprocess(vllm_config, local_rank=0):
+        assert numa_utils._NUMACTL_ARGS_ENV not in os.environ
+    assert vllm_config.parallel_config.numa_bind is False
+    assert detections == []
+
+
+@pytest.mark.parametrize("nodes", [[0], [0, 1, 2], [0, -1], [0, None]])
+def test_auto_numa_rejects_incomplete_or_invalid_topology(monkeypatch, nodes):
+    _patch_auto_numa(monkeypatch, "spawn", lambda: nodes, visible_gpus=2)
+    vllm_config = _make_config(numa_bind=None, tensor_parallel_size=2)
+    with numa_utils.configure_subprocess(vllm_config, local_rank=0):
+        assert numa_utils._NUMACTL_ARGS_ENV not in os.environ
+    assert vllm_config.parallel_config.numa_bind is False
+    assert vllm_config.parallel_config.numa_bind_nodes is None
+
+
+def test_auto_numa_checks_all_local_dp_workers_before_first_engine(monkeypatch):
+    _patch_auto_numa(monkeypatch, "spawn", lambda: [0, 1], visible_gpus=2)
+    vllm_config = _make_config(
+        numa_bind=None, tensor_parallel_size=2, data_parallel_size_local=2
+    )
+    with numa_utils.configure_subprocess(
+        vllm_config, local_rank=0, dp_local_rank=0, process_kind="EngineCore"
+    ):
+        assert numa_utils._NUMACTL_ARGS_ENV not in os.environ
+    assert vllm_config.parallel_config.numa_bind is False
+
+
+def test_auto_numa_multi_node_topology_is_local(monkeypatch):
+    _patch_auto_numa(monkeypatch, "spawn", lambda: [2, 3], visible_gpus=2)
+    monkeypatch.setattr(numa_utils.subprocess, "run", _fake_numactl_run([]))
+    vllm_config = _make_config(
+        numa_bind=None, tensor_parallel_size=4, nnodes_within_dp=2
+    )
+    with numa_utils.configure_subprocess(
+        vllm_config, local_rank=0, process_kind="EngineCore"
+    ):
+        assert os.environ[numa_utils._NUMACTL_ARGS_ENV] == (
+            "--cpunodebind=2,3 --membind=2,3"
+        )
+        child_config = deepcopy(vllm_config)
+    with numa_utils.configure_subprocess(child_config, local_rank=1):
+        assert os.environ[numa_utils._NUMACTL_ARGS_ENV] == "--cpunodebind=3 --membind=3"
+
+
+@pytest.mark.parametrize("node_cpus", [None, "", "invalid"])
+def test_auto_numa_skips_nodes_without_usable_cpus(monkeypatch, node_cpus):
+    _patch_auto_numa(monkeypatch, "spawn", lambda: [0], node_cpus=node_cpus)
+    vllm_config = _make_config(numa_bind=None)
+    with numa_utils.configure_subprocess(vllm_config, local_rank=0):
+        assert numa_utils._NUMACTL_ARGS_ENV not in os.environ
+    assert vllm_config.parallel_config.numa_bind is False
+
+
+@pytest.mark.parametrize(
+    "rejected_args, expected_args",
+    [("--membind=", "--cpunodebind=0"), ("--cpunodebind=", None)],
+)
+def test_auto_numa_records_effective_policy(
+    monkeypatch, caplog, rejected_args, expected_args
+):
+    caplog.set_level("INFO", logger=numa_utils.logger.name)
+    _patch_auto_numa(monkeypatch, "spawn", lambda: [0])
+    monkeypatch.setattr(
+        numa_utils.subprocess, "run", _fake_numactl_run([rejected_args])
+    )
+    vllm_config = _make_config(numa_bind=None)
+    with numa_utils.configure_subprocess(vllm_config, local_rank=0):
+        assert os.environ.get(numa_utils._NUMACTL_ARGS_ENV) == expected_args
+        assert vllm_config.parallel_config.numa_bind is (expected_args is not None)
+    launch_logs = [r.getMessage() for r in caplog.records if "Launching" in r.message]
+    if expected_args is None:
+        assert launch_logs == []
+        assert vllm_config.parallel_config.numa_bind_nodes is None
+    else:
+        assert len(launch_logs) == 1
+        assert launch_logs[0].endswith(f"numactl {expected_args}")
+
+
+def test_auto_numa_does_not_swallow_launch_errors(monkeypatch):
+    import multiprocessing
+
+    _patch_auto_numa(monkeypatch, "spawn", lambda: [0])
+    monkeypatch.setattr(numa_utils.subprocess, "run", _fake_numactl_run([]))
+    monkeypatch.delenv(numa_utils._NUMACTL_ARGS_ENV, raising=False)
+    monkeypatch.delenv(numa_utils._NUMACTL_PYTHON_EXECUTABLE_ENV, raising=False)
+    original_executable = multiprocessing.spawn.get_executable()
+    with (
+        pytest.raises(RuntimeError, match="worker startup failed"),
+        numa_utils.configure_subprocess(_make_config(numa_bind=None), local_rank=0),
+    ):
+        raise RuntimeError("worker startup failed")
+    assert multiprocessing.spawn.get_executable() == original_executable
+    assert numa_utils._NUMACTL_ARGS_ENV not in os.environ
+    assert numa_utils._NUMACTL_PYTHON_EXECUTABLE_ENV not in os.environ
+
+
+@pytest.mark.parametrize("missing_numactl", [False, True])
+def test_auto_numa_skips_unavailable_environment(monkeypatch, missing_numactl):
+    _patch_auto_numa(monkeypatch, "spawn", lambda: [0])
+    if missing_numactl:
+        monkeypatch.setattr("shutil.which", lambda name: None)
+    else:
+        monkeypatch.setattr(
+            numa_utils, "_is_auto_numa_available", lambda **kwargs: False
+        )
+    vllm_config = _make_config(numa_bind=None)
+    with numa_utils.configure_subprocess(vllm_config, local_rank=0):
+        assert numa_utils._NUMACTL_ARGS_ENV not in os.environ
+    assert vllm_config.parallel_config.numa_bind is False
+
+
+def test_explicit_numa_nodes_bypass_auto_eligibility(monkeypatch):
+    _patch_auto_numa(monkeypatch, "spawn", _raise_probe_error)
+    monkeypatch.setattr(numa_utils, "_is_auto_numa_available", lambda **kwargs: False)
+    monkeypatch.setattr(numa_utils.subprocess, "run", _fake_numactl_run([]))
+    vllm_config = _make_config(numa_bind=True, numa_bind_nodes=[7])
+    with numa_utils.configure_subprocess(vllm_config, local_rank=0):
+        assert os.environ[numa_utils._NUMACTL_ARGS_ENV] == "--cpunodebind=7 --membind=7"
+
+
+def test_explicit_numa_requires_detectable_topology(monkeypatch):
+    _patch_auto_numa(monkeypatch, "spawn", lambda: None)
+    with (
+        pytest.raises(RuntimeError, match="could not detect"),
+        numa_utils.configure_subprocess(_make_config(numa_bind=True), local_rank=0),
+    ):
+        pass
+
+
+@pytest.mark.parametrize("numa_bind", [False, True])
+def test_explicit_numa_handles_missing_numactl(monkeypatch, numa_bind):
+    monkeypatch.setattr("shutil.which", lambda name: None)
+    vllm_config = _make_config(numa_bind=numa_bind, numa_bind_nodes=[0])
+    if numa_bind:
+        with (
+            pytest.raises(RuntimeError, match="numactl is required"),
+            numa_utils.configure_subprocess(vllm_config, local_rank=0),
+        ):
+            pass
+    else:
+        with numa_utils.configure_subprocess(vllm_config, local_rank=0):
+            assert numa_utils._NUMACTL_ARGS_ENV not in os.environ
+
+
+@pytest.mark.parametrize("affinity", [[0, 1], None, [3, 2, 1, 0]])
+def test_auto_numa_checks_cpu_affinity(monkeypatch, affinity):
+    monkeypatch.setattr("vllm.platforms.current_platform.is_cuda_alike", lambda: True)
+    monkeypatch.setattr(numa_utils.os.path, "isdir", lambda path: True)
+    monkeypatch.setattr(numa_utils.psutil, "cpu_count", lambda: 4)
+    process = SimpleNamespace()
+    if affinity is not None:
+        process.cpu_affinity = lambda: affinity
+    monkeypatch.setattr(numa_utils.psutil, "Process", lambda pid: process)
+    monkeypatch.setattr(numa_utils, "_can_set_mempolicy", lambda: True)
+    monkeypatch.setattr(
+        "vllm.platforms.current_platform.get_all_device_numa_nodes",
+        lambda: [0, 1],
+        raising=False,
+    )
+    assert numa_utils._is_auto_numa_available(verbose=False, strict_affinity=True) is (
+        affinity == [3, 2, 1, 0]
+    )
