@@ -1855,6 +1855,16 @@ def _doubled_padding_mask(m: int):
     ``i`` is the same token as base row ``i``, so it is padding exactly when the
     base row is.
 
+    MUST be entered OUTSIDE the ``@support_torch_compile`` region, which is why
+    the caller is ``GraniteSwitchForCausalLM.forward`` and not the SR decoder
+    layer that actually calls the experts. Rebinding ``ctx.is_padding`` is a plain
+    Python attribute write on a global object: Dynamo replays such side effects
+    only after the traced graph has run, so from inside the region the expert op
+    still reads the undoubled mask and the top-k kernel aborts on the length
+    mismatch. Entering it around the whole compiled call also means
+    ``support_torch_compile`` marks the already-doubled mask dynamic on dim 0
+    (``vllm/compilation/decorators.py``), so no recompile is triggered.
+
     Inert where there is nothing to match: no forward context, no mask, or a mask
     whose length is not ``m``. In that last case the premise of the doubling does
     not hold, and failing loudly in the kernel beats silently masking the wrong
@@ -2128,9 +2138,11 @@ class ShadowResidualDecoderLayer(nn.Module):
             logits, _ = self.block_sparse_moe.gate(normed[:m])  # [M, E]
             logits = torch.cat([logits, logits], dim=0)  # [2M, E]
             # FusedMoE modifies its input in place, hence the clone. The doubled
-            # rows also need a doubled padding mask.
-            with _doubled_padding_mask(m):
-                mlp_out = self.block_sparse_moe.experts(normed.clone(), logits)
+            # rows also need a doubled padding mask; that is set up outside the
+            # compiled region by GraniteSwitchForCausalLM.forward, because a
+            # forward-context mutation made here would not be visible to the
+            # traced expert op. See _doubled_padding_mask.
+            mlp_out = self.block_sparse_moe.experts(normed.clone(), logits)
 
         if self.shared_mlp is not None:
             # Only ROUTING is shared. The dense shared MLP still runs per-stream
@@ -3000,6 +3012,13 @@ class GraniteSwitchForCausalLM(nn.Module, SupportsPP):
         self.config = config
         self.quant_config = quant_config
 
+        # Shadow Residual routes a [2M, H] stack through one expert call, so the
+        # MoE padding mask has to be doubled to match - and only an SR checkpoint
+        # on a sparse base reaches the router at all.
+        self.sr_doubles_moe_batch = is_shadow_residual(config) and (
+            config.num_local_experts > 0
+        )
+
         self.model = GraniteSwitchModel(
             vllm_config=vllm_config,
             prefix=maybe_prefix(prefix, "model"),
@@ -3048,12 +3067,23 @@ class GraniteSwitchForCausalLM(nn.Module, SupportsPP):
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor | IntermediateTensors:
-        return self.model(
-            input_ids=input_ids,
-            positions=positions,
-            intermediate_tensors=intermediate_tensors,
-            inputs_embeds=inputs_embeds,
+        if not self.sr_doubles_moe_batch:
+            return self.model(
+                input_ids=input_ids,
+                positions=positions,
+                intermediate_tensors=intermediate_tensors,
+                inputs_embeds=inputs_embeds,
+            )
+        num_tokens = (
+            inputs_embeds.shape[0] if inputs_embeds is not None else input_ids.shape[0]
         )
+        with _doubled_padding_mask(num_tokens):
+            return self.model(
+                input_ids=input_ids,
+                positions=positions,
+                intermediate_tensors=intermediate_tensors,
+                inputs_embeds=inputs_embeds,
+            )
 
     def compute_logits(
         self,
