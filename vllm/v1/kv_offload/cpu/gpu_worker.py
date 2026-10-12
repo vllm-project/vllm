@@ -11,7 +11,6 @@ import numpy as np
 import torch
 
 from vllm import _custom_ops as ops
-from vllm.distributed.device_communicators.cuda_wrapper import CudaRTLibrary
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON, triton
@@ -27,6 +26,7 @@ from vllm.v1.kv_offload.base import (
     OffloadingWorker,
     TransferResult,
 )
+from vllm.v1.kv_offload.cpu.host_register import host_register, host_unregister
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 from vllm.v1.kv_offload.cpu.swap_blocks_triton import (
     THRESHOLD_BYTES,
@@ -203,28 +203,8 @@ MAX_HOST_REGISTER_SLOTS = 1 << 16
 def pin_mmap_region(
     region: SharedOffloadRegion, worker_slot_only: bool = False
 ) -> None:
-    """Register row-aligned chunks, or just this worker's slot of each row,
-    rolling back on failure."""
-    if not current_platform.is_cuda_alike():
-        logger.info(
-            "Skipping mmap host registration on %s; cudaHostRegister is only "
-            "available on CUDA/ROCm.",
-            current_platform.device_name,
-        )
-        return
-
+    """Register row-aligned chunks or this worker's slots, rolling back on failure."""
     rank = region.rank
-    try:
-        cudart = CudaRTLibrary()
-    except (AssertionError, AttributeError, OSError):
-        logger.warning(
-            "Could not load the CUDA runtime for host registration on rank=%d; "
-            "the offload region stays pageable",
-            rank,
-            exc_info=True,
-        )
-        return
-
     base_ptr = region._base.data_ptr()
     total_size = region.total_size_bytes
     # Chunks end on block-row boundaries, which are page aligned, so neither the
@@ -250,41 +230,29 @@ def pin_mmap_region(
             aligned = start - start % page
             ranges.append((aligned, round_up(start + slot, page) - aligned))
 
-    # Register, drain and roll back through the same runtime handle, so a
-    # failed chunk leaves neither a pending error nor a partly pinned region.
+    # Register, drain and roll back through the same helper, so a failed
+    # chunk leaves neither a pending error nor a partly pinned region.
     addresses: list[int] = []
     for offset, size in ranges:
         address = base_ptr + offset
-        result = cudart.cudaHostRegister(address, size)
-        if result == 0:
+        if host_register(address, size):
             addresses.append(address)
             continue
-        cudart.cudaGetLastError()
         logger.warning(
-            "cudaHostRegister failed for rank=%d at %.2f of %.2f GB (code=%d); "
+            "host_register failed for rank=%d at %.2f of %.2f GB; "
             "the offload region stays pageable",
             rank,
             offset / 1e9,
             total_size / 1e9,
-            result,
         )
         for registered in reversed(addresses):
-            unregister_result = cudart.cudaHostUnregister(registered)
-            if unregister_result != 0:
-                cudart.cudaGetLastError()
-                logger.warning(
-                    "cudaHostUnregister failed for rank=%d at %#x (code=%d); "
-                    "that chunk stays registered until the process exits",
-                    rank,
-                    registered,
-                    unregister_result,
-                )
+            host_unregister(registered)
         return
 
     region.pinned_addresses.extend(addresses)
     region.is_pinned = True
     logger.debug(
-        "cudaHostRegister rank=%d %.2f GB in %d chunk(s)",
+        "Host-registered mmap region rank=%d %.2f GB in %d chunk(s)",
         rank,
         sum(size for _, size in ranges) / 1e9,
         len(addresses),
