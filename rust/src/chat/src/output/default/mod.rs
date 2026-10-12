@@ -13,8 +13,10 @@ use vllm_parser::output_grammar::{BuiltOutputGrammar, OutputGrammarContext};
 use vllm_parser::unified::{CombinedParser, UnifiedParser};
 use vllm_text::tokenizer::DynTokenizer;
 use xgrammar_structural_tag::ToolChoice;
+use xgrammar_structural_tag::format::Format;
 
 use self::unified::unified_event_stream;
+use super::structural_tag::answer_format;
 use super::structured::structured_chat_event_stream;
 use crate::error::Result;
 use crate::output::{ChatOutputProcessor, DynChatEventStream, DynDecodedTextEventStream};
@@ -48,6 +50,10 @@ struct GrammarInputs {
     tools: Vec<ChatTool>,
     tool_choice: ToolChoice,
     tool_strict_level: ToolStrictLevel,
+    /// The request's structured-output constraint, normalized for composition
+    /// into the output grammar. The original stays on the request until an
+    /// output grammar replaces it.
+    answer: Option<Format>,
 }
 
 impl DefaultChatOutputProcessor {
@@ -137,6 +143,7 @@ impl DefaultChatOutputProcessor {
                 tools: request.tools().to_vec(),
                 tool_choice: request.tool_choice().into(),
                 tool_strict_level,
+                answer: request.sampling_params.structured_outputs.as_ref().and_then(answer_format),
             }),
         })
     }
@@ -258,6 +265,7 @@ impl ChatOutputProcessor for DefaultChatOutputProcessor {
                 tool_choice: &inputs.tool_choice,
                 tool_strict_level: inputs.tool_strict_level,
                 parallel_tool_calls: self.parallel_tool_calls,
+                answer: inputs.answer.as_ref(),
             })
             .map_err(|error| Error::OutputGrammar {
                 error: Box::new(error),
@@ -283,7 +291,9 @@ mod tests {
     use std::sync::Arc;
 
     use thiserror_ext::AsReport as _;
+    use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputsParams;
     use vllm_tokenizer::test_utils::TestTokenizer;
+    use xgrammar_structural_tag::format::Format;
 
     use super::DefaultChatOutputProcessor;
     use crate::output::ChatOutputProcessor;
@@ -337,6 +347,51 @@ mod tests {
         assert_eq!(parameters, strict);
         assert_ne!(envelope, parameters);
         assert!(build(ToolStrictLevel::Parameter, None, ChatToolChoice::None).is_none());
+    }
+
+    #[test]
+    fn answer_constraint_keeps_optional_tool_calls() {
+        let tools = vec![ChatTool {
+            name: "search".to_string(),
+            description: None,
+            parameters: serde_json::json!({"type": "object"}),
+            strict: None,
+            defer_loading: None,
+        }];
+        let schema = serde_json::json!({"type": "object"});
+        let build = |structured_outputs| {
+            let mut request = ChatRequest {
+                tool_context: ResolvedToolContext::new(
+                    &[],
+                    tools.clone(),
+                    Some(ChatToolChoice::Auto),
+                    true,
+                )
+                .unwrap(),
+                ..ChatRequest::for_test()
+            };
+            request.sampling_params.structured_outputs = structured_outputs;
+            let mut processor = DefaultChatOutputProcessor::new(
+                &mut request,
+                "other-model",
+                tokenizer(),
+                &ParserSelection::Explicit("qwen3_coder".to_string()),
+                &ParserSelection::None,
+                ToolStrictLevel::Auto,
+            )
+            .unwrap();
+            processor.initialize(&[]).unwrap();
+            processor.build_output_grammar().unwrap()
+        };
+
+        // Non-strict `auto` alone needs no grammar; with an answer constraint
+        // the grammar holds the answer or a call.
+        assert!(build(None).is_none());
+        let built = build(Some(StructuredOutputsParams::json(schema.clone()))).unwrap();
+        let Format::Or(branches) = built.format else {
+            panic!("expected the calls or the answer, got {:?}", built.format);
+        };
+        assert_eq!(branches.elements.last(), Some(&Format::json_schema(schema)));
     }
 
     #[test]
