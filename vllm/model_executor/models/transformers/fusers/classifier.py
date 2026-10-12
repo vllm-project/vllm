@@ -215,4 +215,19 @@ class ClassifierFuser(BaseFuser):
     def fuse(
         self, module: nn.Module, prefix: str, vllm_config: "VllmConfig"
     ) -> nn.Module:
-        return fx.GraphModule(module, self.head, class_name="ClassificationHead")
+        """Run the head in the model dtype and only the classifier in `head_dtype`."""
+        model_config = vllm_config.model_config
+        graph = self.head
+        hidden_states = next(iter(graph.nodes))
+        classifier = next(n for n in reversed(graph.nodes) if n.op == "output").args[0]
+        with graph.inserting_after(hidden_states):
+            to_model = graph.call_method("to", (hidden_states, model_config.dtype))
+        hidden_states.replace_all_uses_with(
+            to_model, delete_user_cb=lambda user: user is not to_model
+        )
+        with graph.inserting_before(classifier):
+            to_head = graph.call_method(
+                "to", (classifier.args[0], model_config.head_dtype)
+            )
+        classifier.replace_input_with(classifier.args[0], to_head)
+        return fx.GraphModule(module, graph, class_name="ClassificationHead")

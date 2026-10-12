@@ -122,7 +122,8 @@ class ClassificationMixin(VllmModelForPooling, Base):
                         f"Classification head module {name!r} would overwrite an "
                         "existing attribute."
                     )
-                self.init_parameters(module, dtype=self.model_config.head_dtype)
+                dtype = self.model_config.head_dtype if module is classifier else None
+                self.init_parameters(module, dtype=dtype)
                 setattr(self, name, module)
             return fuser.fuse(cls_model, "", self.vllm_config)
 

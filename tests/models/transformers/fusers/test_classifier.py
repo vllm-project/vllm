@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Unit tests for the Transformers modeling backend's classifier fuser."""
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 from transformers import (
@@ -17,6 +19,12 @@ def build(auto_cls, model_type: str, device: str = "meta", **overrides):
     config = AutoConfig.for_model(model_type, **overrides)
     with torch.device(device):
         return auto_cls.from_config(config).eval()
+
+
+def vllm_config(dtype=torch.float32, head_dtype=torch.float32):
+    return SimpleNamespace(
+        model_config=SimpleNamespace(dtype=dtype, head_dtype=head_dtype)
+    )
 
 
 @pytest.mark.parametrize(
@@ -43,7 +51,7 @@ def test_modernbert_head_matches_hf(auto_cls, pooling):
     pooled = pooling is not None
     fuser = ClassifierFuser.match_model(model, pooled=pooled)
     assert fuser is not None
-    head = fuser.fuse(model, "", None)
+    head = fuser.fuse(model, "", vllm_config())
 
     input_ids = torch.randint(0, model.config.vocab_size, (1, 6))
     with torch.no_grad():
@@ -89,3 +97,22 @@ def test_unsupported_heads_are_not_matched(model_type, reason):
     """Heads vLLM's pooler can't replace fall back to the classifier alone."""
     model = build(AutoModelForSequenceClassification, model_type)
     assert ClassifierFuser.match_model(model, pooled=True) is None, reason
+
+
+def test_only_classifier_runs_in_head_dtype():
+    """Like native models, the head runs in the model dtype, the classifier doesn't."""
+    model = build(
+        AutoModelForTokenClassification,
+        "modernbert",
+        device="cpu",
+        hidden_size=32,
+        intermediate_size=64,
+        num_hidden_layers=1,
+        num_attention_heads=2,
+    ).to(torch.bfloat16)
+    model.classifier.float()
+    fuser = ClassifierFuser.match_model(model, pooled=False)
+    head = fuser.fuse(model, "", vllm_config(torch.bfloat16, torch.float32))
+    with torch.no_grad():
+        logits = head(torch.randn(6, 32, dtype=torch.float32))
+    assert logits.dtype == torch.float32
