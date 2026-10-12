@@ -64,6 +64,68 @@ def test_attention_sink_loader_rejects_invalid_shapes(
     assert torch.equal(param, torch.ones(runtime_shape))
 
 
+def test_attention_sink_loader_rejects_empty_checkpoint(monkeypatch):
+    """An empty sink checkpoint must not silently disable the sink."""
+    monkeypatch.setattr(weight_utils, "get_tensor_model_parallel_world_size", lambda: 2)
+    monkeypatch.setattr(weight_utils, "get_tensor_model_parallel_rank", lambda: 0)
+    param = torch.nn.Parameter(torch.ones(4), requires_grad=False)
+    with pytest.raises(ValueError, match="empty"):
+        load_attention_sink(param, torch.zeros(0))
+    assert torch.equal(param, torch.ones(4))
+
+
+@pytest.mark.parametrize("tp_rank", [0, 1])
+def test_attention_sink_loader_restores_padding(monkeypatch, tp_rank):
+    """Padded heads are set back to -inf even if they held other values."""
+    monkeypatch.setattr(weight_utils, "get_tensor_model_parallel_world_size", lambda: 2)
+    monkeypatch.setattr(
+        weight_utils, "get_tensor_model_parallel_rank", lambda rank=tp_rank: rank
+    )
+    param = torch.nn.Parameter(torch.full((6,), 123.0), requires_grad=False)
+    load_attention_sink(param, torch.arange(8, dtype=torch.float32))
+    local = torch.arange(8, dtype=torch.float32).chunk(2)[tp_rank]
+    assert torch.equal(param[:4], local)
+    assert torch.isinf(param[4:]).all() and (param[4:] < 0).all()
+
+
+@pytest.mark.parametrize("param_dtype", [torch.bfloat16, torch.float32])
+def test_attention_sink_loader_keeps_param_dtype(monkeypatch, param_dtype):
+    """A checkpoint dtype different from the runtime parameter is cast, not copied."""
+    monkeypatch.setattr(weight_utils, "get_tensor_model_parallel_world_size", lambda: 1)
+    monkeypatch.setattr(weight_utils, "get_tensor_model_parallel_rank", lambda: 0)
+    param = torch.nn.Parameter(torch.zeros(4, dtype=param_dtype), requires_grad=False)
+    load_attention_sink(param, torch.arange(4, dtype=torch.float32))
+    assert param.dtype == param_dtype
+    assert torch.equal(param.float(), torch.arange(4, dtype=torch.float32))
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires a GPU")
+def test_attention_sink_loader_accepts_cpu_checkpoint(monkeypatch):
+    """Sinks are normally loaded from CPU checkpoints into device parameters."""
+    monkeypatch.setattr(weight_utils, "get_tensor_model_parallel_world_size", lambda: 2)
+    monkeypatch.setattr(weight_utils, "get_tensor_model_parallel_rank", lambda: 1)
+    param = torch.nn.Parameter(
+        torch.full((6,), 123.0, device="cuda"), requires_grad=False
+    )
+    load_attention_sink(param, torch.arange(8, dtype=torch.float32))
+    assert param.device.type == "cuda"
+    assert torch.equal(param[:4].cpu(), torch.arange(4, 8, dtype=torch.float32))
+    assert torch.isinf(param[4:]).all() and (param[4:] < 0).all()
+
+
+@pytest.mark.parametrize(
+    "num_heads,dtype", [(4, torch.float32), (8, torch.bfloat16), (6, None)]
+)
+def test_make_attention_sink_registers_loader_and_padding(num_heads, dtype):
+    """The factory is the single place that creates and registers a sink."""
+    sink = weight_utils.make_attention_sink(num_heads, dtype)
+    assert sink.shape == (num_heads,)
+    assert sink.dtype == (dtype or torch.get_default_dtype())
+    assert sink.requires_grad is False
+    assert torch.isinf(sink).all() and (sink < 0).all()
+    assert sink.weight_loader is load_attention_sink
+
+
 def test_download_weights_from_hf():
     with tempfile.TemporaryDirectory() as tmpdir:
         # assert LocalEntryNotFoundError error is thrown
