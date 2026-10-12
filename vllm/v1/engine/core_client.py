@@ -1759,16 +1759,25 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         if not request_ids or self.resources.engine_dead:
             return
 
-        if len(request_ids) == 1:
+        if len(request_ids) == 1 and (
+            engine := self.reqs_in_flight.get(request_ids[0])
+        ):
             # Fast-path common case.
-            if engine := self.reqs_in_flight.get(request_ids[0]):
-                await self._abort_requests(request_ids, engine)
+            await self._abort_requests(request_ids, engine)
             return
 
         by_engine = defaultdict[EngineIdentity, list[str]](list)
+        unrouted = []
         for req_id in request_ids:
             if engine := self.reqs_in_flight.get(req_id):
                 by_engine[engine].append(req_id)
+            else:
+                unrouted.append(req_id)
+        if unrouted:
+            # Already reported finished, but a streaming-input chunk sent
+            # before that was seen may have re-created the request.
+            for engine in self.core_engines:
+                by_engine[engine].extend(unrouted)
         for engine, req_ids in by_engine.items():
             await self._abort_requests(req_ids, engine)
 

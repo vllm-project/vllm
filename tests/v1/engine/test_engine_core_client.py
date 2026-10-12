@@ -407,6 +407,30 @@ def test_dplb_finished_requests_release_inflight():
     assert req.request_id not in client.reqs_in_flight
 
 
+@pytest.mark.parametrize("num_aborts", [1, 2])
+def test_dplb_abort_of_finished_request_goes_to_all_engines(num_aborts: int):
+    """The routing entry is dropped when a request finishes, but a
+    streaming-input chunk sent before the finish was seen may re-create it on
+    an engine, so its abort must still reach every engine."""
+    client = _make_dplb_client(num_engines=3)
+    client.resources = SimpleNamespace(engine_dead=False)
+    sent: dict[bytes, list[str]] = {}
+
+    async def abort_requests(request_ids, engine):
+        sent[engine] = request_ids
+
+    client._abort_requests = abort_requests
+    client.reqs_in_flight["live"] = client.core_engines[1]
+
+    request_ids = ["finished", "live"][:num_aborts]
+    asyncio.run(client.abort_requests_async(request_ids))
+
+    expected = {engine: ["finished"] for engine in client.core_engines}
+    if num_aborts == 2:
+        expected[client.core_engines[1]] = ["live", "finished"]
+    assert sent == expected
+
+
 @pytest.mark.parametrize(
     ("effective_size", "other_size"),
     [(None, None), (4224, 4224), (4224, 1056), (4224, None)],

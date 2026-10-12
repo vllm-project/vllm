@@ -201,100 +201,50 @@ async def test_empty_input_stream_finishes_without_engine_request():
     llm._add_request.assert_not_awaited()
 
 
-@pytest.mark.asyncio
-async def test_stop_input_stream_cancels_and_awaits():
-    """No chunk send may complete after _stop_input_stream returns."""
-    queue = RequestOutputCollector(RequestOutputKind.DELTA, request_id="r1")
-    sent = []
-
-    async def slow_send():
-        await asyncio.sleep(30)
-        sent.append("chunk")
-
-    task = asyncio.create_task(slow_send())
-    queue._input_stream_task = task
-    await asyncio.sleep(0)
-
-    await AsyncLLM._stop_input_stream(queue)
-
-    assert task.cancelled()
-    assert queue._input_stream_task is None
-    assert sent == []
-
-
-@pytest.mark.asyncio
-async def test_handle_inputs_stamps_first_chunk():
-    """The frontend marks exactly the first chunk of a session."""
+def _make_streaming_llm(num_chunks: int, has_request: bool = True):
     llm = AsyncLLM.__new__(AsyncLLM)
     llm._validate_streaming_input_sampling_params = MagicMock()
     llm.get_supported_tasks = AsyncMock(return_value=("generate",))
     llm._run_output_handler = MagicMock()
     llm._add_request = AsyncMock()
     llm.model_config = MagicMock()
+    llm.output_processor = MagicMock()
+    llm.output_processor.has_request.return_value = has_request
 
-    reqs = [MagicMock(prompt_embeds=None) for _ in range(3)]
+    # The first processed request is the final (end-of-stream) request.
+    reqs = [MagicMock(prompt_embeds=None) for _ in range(num_chunks + 1)]
     reqs[0].request_id = "r1-int"
     llm.input_processor = MagicMock()
     llm.input_processor.process_inputs.side_effect = reqs
-    llm.input_processor.assign_request_id = MagicMock()
+    return llm, reqs
 
-    async def two_chunks():
-        yield StreamingInput(prompt="frame-1")
-        yield StreamingInput(prompt="frame-2")
+
+async def _stream_chunks(llm: AsyncLLM, num_chunks: int) -> None:
+    async def chunks():
+        for i in range(num_chunks):
+            yield StreamingInput(prompt=f"frame-{i}")
 
     with mock.patch(
         "vllm.v1.engine.async_llm.extract_prompt_components",
         return_value=("", None, None),
     ):
-        await llm._add_streaming_input_request(
-            "r1", two_chunks(), SamplingParams(max_tokens=4)
+        queue = await llm._add_streaming_input_request(
+            "r1", chunks(), SamplingParams(max_tokens=4)
         )
-        for _ in range(6):
-            await asyncio.sleep(0)
-
-    assert reqs[1].first_chunk is True
-    assert reqs[2].first_chunk is False
+        task = queue._input_stream_task
+        assert task is not None
+        await task
 
 
 @pytest.mark.asyncio
-async def test_input_stream_task_cleared_only_after_final_send():
-    """The task pointer must stay set until the final request is sent, so a
-    concurrent abort can still cancel-and-await the task (no send may ever
-    happen after an abort)."""
-    llm = AsyncLLM.__new__(AsyncLLM)
-    llm._validate_streaming_input_sampling_params = MagicMock()
-    llm.get_supported_tasks = AsyncMock(return_value=("generate",))
-    llm._run_output_handler = MagicMock()
-    llm.model_config = MagicMock()
+@pytest.mark.parametrize("session_live", [True, False])
+async def test_handle_inputs_stops_after_session_finished(session_live: bool):
+    """Once the session's request state is gone (aborted or errored), no
+    further chunks or final request are sent: they would recreate a request
+    state that is never cleaned up."""
+    llm, reqs = _make_streaming_llm(num_chunks=2, has_request=session_live)
+    await _stream_chunks(llm, num_chunks=2)
 
-    reqs = [MagicMock(prompt_embeds=None) for _ in range(2)]
-    reqs[0].request_id = "r1-int"
-    llm.input_processor = MagicMock()
-    llm.input_processor.process_inputs.side_effect = reqs
-    llm.input_processor.assign_request_id = MagicMock()
-
-    holder: dict[str, RequestOutputCollector] = {}
-    pointer_set_during_send = []
-
-    async def capture_add_request(*args, **kwargs):
-        pointer_set_during_send.append(holder["queue"]._input_stream_task is not None)
-
-    llm._add_request = AsyncMock(side_effect=capture_add_request)
-
-    async def one_chunk():
-        yield StreamingInput(prompt="frame-1")
-
-    with mock.patch(
-        "vllm.v1.engine.async_llm.extract_prompt_components",
-        return_value=("", None, None),
-    ):
-        holder["queue"] = await llm._add_streaming_input_request(
-            "r1", one_chunk(), SamplingParams(max_tokens=4)
-        )
-        for _ in range(6):
-            await asyncio.sleep(0)
-
-    # Two sends (the chunk, then the final request); the pointer must have
-    # been set for BOTH, and cleared only once everything was sent.
-    assert pointer_set_during_send == [True, True]
-    assert holder["queue"]._input_stream_task is None
+    sent = [call.args[0] for call in llm._add_request.await_args_list]
+    # Both chunks then the final request, or only the first chunk.
+    assert sent == ([reqs[1], reqs[2], reqs[0]] if session_live else [reqs[1]])

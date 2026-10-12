@@ -820,8 +820,10 @@ class OutputProcessor:
                     streaming_input = req_state.streaming_input
                     self._finish_request(req_state)
                     if streaming_input or not engine_core_output.finished:
-                        # EngineCore may still have the request live (stop
-                        # string detected, streaming abort/error); abort it.
+                        # EngineCore may still have the request live: a stop
+                        # string was detected here, or for streaming input, a
+                        # rejected chunk left the session running or a chunk
+                        # sent before this finish was seen re-created it.
                         reqs_to_abort.append(req_id)
 
                     # Track per-request stats
