@@ -2631,6 +2631,13 @@ class VllmConfig:
                         compile_range_end,
                     )
 
+        if self.kernel_config.use_flashinfer_cutedsl_bf16_gemm:
+            from vllm.model_executor.layers.utils import FLASHINFER_CUTEDSL_BF16_MAX_M
+
+            # FlashInferBF16GemmFallbackPass applies to the ranges above this split.
+            if compile_range_end > FLASHINFER_CUTEDSL_BF16_MAX_M:
+                computed_compile_ranges_endpoints.append(FLASHINFER_CUTEDSL_BF16_MAX_M)
+
         if compilation_config.compile_ranges_endpoints is not None:
             for x in compilation_config.compile_ranges_endpoints:
                 assert isinstance(x, int)

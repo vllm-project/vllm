@@ -410,6 +410,11 @@ class KernelConfig:
             return value.lower().replace("-", "_")
         return value
 
+    @property
+    def use_flashinfer_cutedsl_bf16_gemm(self) -> bool:
+        """Whether unquantized BF16 linears request the FlashInfer CuTeDSL GEMM."""
+        return self.linear_backend == "flashinfer_cutedsl"
+
     def compute_hash(self) -> str:
         """Produces a hash unique to the pass configuration.
         Any new fields that affect compilation should be added to the hash.

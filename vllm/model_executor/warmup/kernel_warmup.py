@@ -15,6 +15,7 @@ import torch
 
 import vllm.envs as envs
 from vllm.logger import init_logger
+from vllm.model_executor.layers.utils import FLASHINFER_CUTEDSL_BF16_MAX_M
 from vllm.model_executor.warmup.attention_warmup import (
     mixed_batch_attention_warmup,
 )
@@ -335,6 +336,10 @@ def _flashinfer_autotune_token_counts(runner: "GPUModelRunner") -> tuple[int, ..
     max_tokens = runner.scheduler_config.max_num_batched_tokens
     # Tune the widest bucket set first so bounded passes reuse its configs.
     token_counts = [max_tokens]
+    if runner.vllm_config.kernel_config.use_flashinfer_cutedsl_bf16_gemm:
+        # Above this M the CuTeDSL BF16 GEMM goes to aten linear (see
+        # FlashInferBF16GemmFallbackPass), so tune it in its own pass.
+        token_counts.append(min(max_tokens, FLASHINFER_CUTEDSL_BF16_MAX_M))
     token_counts.extend(_flashinfer_deferred_moe_token_counts(runner))
     return tuple(dict.fromkeys(token_counts))
 

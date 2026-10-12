@@ -101,6 +101,11 @@ class _FlashInferBf16Backend:
     can_implement: _FlashInferBf16RuntimeCheck
 
 
+# Mirrors flashinfer.gemm.gemm_base._CUTE_DSL_BF16_MAX_M: FlashInfer's CuTeDSL BF16
+# GEMM runs cuBLASLt above this M, so larger M goes to aten linear instead.
+FLASHINFER_CUTEDSL_BF16_MAX_M = 32
+
+
 def _can_use_flashinfer_cutedsl_bf16(
     x: torch.Tensor,
     weight: torch.Tensor,
@@ -208,6 +213,13 @@ def cuda_flashinfer_bf16_gemm(
     vllm_backend: str,
     pdl: bool,
 ) -> torch.Tensor:
+    # Linears outside the compiled graph (enforce_eager, opaque ops such as
+    # moe_forward_shared) get the same M split as FlashInferBF16GemmFallbackPass.
+    if (
+        not torch.compiler.is_compiling()
+        and x.numel() // x.shape[-1] > FLASHINFER_CUTEDSL_BF16_MAX_M
+    ):
+        return torch.nn.functional.linear(x, weight, bias)
     return torch.ops.vllm.cuda_flashinfer_bf16_gemm(
         x,
         weight,

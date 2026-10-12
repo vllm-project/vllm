@@ -60,6 +60,7 @@ from .inductor_pass import (
     get_pass_context,
 )
 from .utility.fix_functionalization import FixFunctionalizationPass
+from .utility.flashinfer_bf16_gemm_fallback import FlashInferBF16GemmFallbackPass
 from .utility.noop_elimination import NoOpEliminationPass
 
 logger = init_logger(__name__)
@@ -151,6 +152,9 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
 
         # Set the current vllm config to allow tracing CustomOp instances
         with set_current_vllm_config(config, check_compile=False):
+            if config.kernel_config.use_flashinfer_cutedsl_bf16_gemm:
+                self.passes += [FlashInferBF16GemmFallbackPass(config)]
+
             if self.pass_config.eliminate_noops:
                 self.passes += [NoOpEliminationPass(config)]
 
