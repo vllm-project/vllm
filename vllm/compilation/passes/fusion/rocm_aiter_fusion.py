@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import importlib
+import operator
 import os
 from collections.abc import Callable
-from typing import Any
+from typing import Any, Literal
 
 import torch
 import torch._inductor.pattern_matcher as pm
@@ -13,7 +15,10 @@ from torch._inductor.pattern_matcher import PatternMatcherPass
 import vllm.envs as envs
 import vllm.ir.ops
 import vllm.model_executor.layers.quantization.utils.fp8_utils  # noqa: F401
-from vllm._aiter_ops import rocm_aiter_ops
+from vllm._aiter_ops import (
+    rocm_aiter_ops,
+    rocm_aiter_rmsnorm_mxfp4_quant_args_error,
+)
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -862,8 +867,9 @@ def _mxfp4_pass_gate(fuse_in_pass_config: bool, opt_in_flag: bool) -> bool:
 
     The pass config asks for the fusion AND the opt-in env flag is set AND the GPU
     is a gfx950, the only architecture with the asm MXFP4 GEMM these passes rewrite
-    the input of. The default optimization level turns ``fuse_act_quant`` on, so the
-    env flag is what keeps a default start unchanged.
+    the input of. The default optimization level turns the pass config switches
+    (``fuse_act_quant``, ``fuse_norm_quant``) on, so the env flag is what keeps a
+    default start unchanged.
     """
     from vllm.platforms.rocm import on_gfx950
 
@@ -977,6 +983,230 @@ class RocmAiterActMulMxfp4GemmFusionPass(
             self.register(AiterActMulMxfp4GemmPattern(matcher, activation, out_dtype))
 
         self.dump_patterns(config, self.pm_pass)
+
+
+def norm_mxfp4_pass_enabled(fuse_norm_quant: bool) -> bool:
+    """The post-attention norm + MXFP4 quant pass only under the shared MXFP4 gate (see
+    _mxfp4_pass_gate), with fuse_norm_quant and
+    VLLM_ROCM_AITER_FP4_POSTNORM_QUANT_FUSION.
+
+    The caller only asks inside `if fuse_norm_quant`; the parameter keeps this helper
+    parallel to act_mxfp4_pass_enabled and safe to call from anywhere.
+    """
+    return _mxfp4_pass_gate(
+        fuse_norm_quant, envs.VLLM_ROCM_AITER_FP4_POSTNORM_QUANT_FUSION
+    )
+
+
+class AiterAddRMSNormMxfp4GemmPattern(VllmPatternReplacement):
+    """Folds a Gemma add+RMSNorm into the AITER MXFP4 GEMM that consumes its output.
+
+    The ASM MXFP4 linear quantizes its input inside gemm_with_dynamic_quant, a custom op
+    Inductor cannot fuse into. This pattern replaces the IR norm and the GEMM's own
+    quantization by rocm_aiter_rmsnorm_mxfp4_quant (one AITER HIP kernel: residual add,
+    Gemma norm, MXFP4 quant) and hands the GEMM its codes and scales through x_scales.
+
+    Matches `fused_add_rms_norm(x, residual, weight.float() + 1.0, eps)` followed by ONE
+    asm gemm_with_dynamic_quant on its normed output. The replacement passes the RAW
+    bf16 weight, because the kernel adds 1 itself, and wires the norm's residual output
+    to the op's third result. Only post-attention norms are sites: see _norm_site_kind.
+    """
+
+    def __init__(self, epsilon: float, out_dtype: torch.dtype, tp_size: int) -> None:
+        # gemm_with_dynamic_quant is registered when the MXFP4 kernel module is
+        # imported, so resolve it here rather than at class definition.
+        importlib.import_module("vllm.model_executor.kernels.linear.mxfp4.aiter")
+        self.gemm_op = torch.ops.vllm.gemm_with_dynamic_quant.default
+        self.norm_op = torch.ops.vllm_ir.fused_add_rms_norm.default
+        self.norm_quant_op = torch.ops.vllm.rocm_aiter_rmsnorm_mxfp4_quant.default
+        self.norm_targets = (self.norm_op, self.norm_quant_op)
+        self.epsilon = epsilon
+        self.out_dtype = out_dtype
+        self.tp_size = tp_size
+
+    def get_inputs(self) -> list[torch.Tensor]:
+        # The hidden size is 64, a multiple of 32: the op's fake raises for any other,
+        # so vLLM's usual empty(5, 16) example cannot be used. The GEMM weight holds
+        # K / 2 packed bytes per row and its scale one byte per 32 values.
+        hidden = 64
+        return [
+            self.empty_bf16(5, hidden),  # x
+            self.empty_bf16(5, hidden),  # residual
+            self.empty_bf16(hidden),  # norm weight, the raw parameter
+            self.empty(8, hidden // 2, dtype=torch.uint8),  # gemm weight
+            self.empty(8, hidden // 32, dtype=torch.uint8),  # gemm weight scale
+        ]
+
+    @property
+    def pattern(self):
+        # The parameter names are an interface: extra_check reads the matched nodes back
+        # by these names through match.kwargs. Rename them in both places.
+        def _pattern(
+            x: torch.Tensor,
+            residual: torch.Tensor,
+            weight: torch.Tensor,
+            gemm_weight: torch.Tensor,
+            gemm_weight_scale: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            # GemmaRMSNorm.forward_native: the weight reaches the IR op as fp32 w + 1.
+            y, residual_out = self.norm_op(
+                x, residual, weight.float() + 1.0, self.epsilon
+            )
+            # use_asm_gemm is the literal True: a GEMM on the Triton path never matches.
+            out = self.gemm_op(y, gemm_weight, gemm_weight_scale, True, self.out_dtype)
+            return out, residual_out
+
+        return _pattern
+
+    @property
+    def replacement(self):
+        def _replacement(
+            x: torch.Tensor,
+            residual: torch.Tensor,
+            weight: torch.Tensor,
+            gemm_weight: torch.Tensor,
+            gemm_weight_scale: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            x_q, x_scales, residual_out = self.norm_quant_op(
+                x, residual, weight, self.epsilon
+            )
+            out = self.gemm_op(
+                x_q, gemm_weight, gemm_weight_scale, True, self.out_dtype, x_scales
+            )
+            return out, residual_out
+
+        return _replacement
+
+    @staticmethod
+    def norm_args_supported(
+        x: torch.Tensor, residual: torch.Tensor, weight: torch.Tensor
+    ) -> bool:
+        """Whether rocm_aiter_rmsnorm_mxfp4_quant takes these arguments.
+
+        The op's fake raises ValueError for anything else, which would crash the compile
+        when the replacement is traced, so the site must be filtered here. The rules are
+        the op's own (rocm_aiter_rmsnorm_mxfp4_quant_args_error); this adds only that a
+        symbolic hidden size is refused, because testing it would add a shape guard.
+        """
+        if x.dim() == 2 and not isinstance(x.shape[1], int):
+            return False
+        return rocm_aiter_rmsnorm_mxfp4_quant_args_error(x, residual, weight) is None
+
+    @staticmethod
+    def _norm_site_kind(
+        residual: fx.Node, norm_targets: tuple
+    ) -> Literal["post", "input"]:
+        """Whether a norm is a post-attention norm ("post") or the next layer's input
+        norm ("input"), by where its residual operand comes from.
+
+        The two are the same site by shape (one norm, one GEMM consumer). The input norm
+        takes the residual that the post-attention norm returned, an item of a norm in
+        `norm_targets` (the IR norm, or this pass's op once an earlier site was
+        rewritten); the post-attention norm takes the residual that came in with the
+        piece. The item index is not checked: classifying a residual as "input" only
+        leaves a site unfused, it never rewrites a wrong one.
+
+        Needs the graph split at every attention op, so that a post-attention norm comes
+        first in its piece; the pass refuses a config without that split.
+        """
+        producer = residual.args[0] if residual.target is operator.getitem else None
+        if isinstance(producer, fx.Node) and producer.target in norm_targets:
+            return "input"
+        return "post"
+
+    @staticmethod
+    def _gemm_weight_is_untuned(gemm_weight: torch.Tensor) -> bool:
+        """Whether the GEMM has no tuned Triton preshuffle config for its weight shape.
+
+        With M <= 64 and such a config, gemm_with_dynamic_quant takes a small-M Triton
+        branch that wants unshuffled scales, while the fused op writes the asm
+        (shuffled) layout. M is unknown at compile time, so every tuned shape is
+        refused, also for the larger M that would take the asm branch.
+        """
+        if gemm_weight.dim() != 2:
+            return False
+        n, k_bytes = gemm_weight.shape
+        if not (isinstance(n, int) and isinstance(k_bytes, int)):
+            return False
+        return not rocm_aiter_ops.is_triton_gemm_afp4wfp4_presh_ws_tuned(n, k_bytes)
+
+    def extra_check(self, match: pm.Match) -> bool:
+        """Whether this match is a site the fused op and the asm GEMM can take.
+
+        Checked at match time, because the op's fake raises on what it cannot take:
+        tensor parallel size 1 (otherwise an all-reduce sits in front of the norm), a
+        post-attention norm, arguments the op takes, and a GEMM without a tuned
+        preshuffle config.
+        """
+        if self.tp_size != 1:
+            return False
+        kwargs = match.kwargs  # keyed by the parameter names of _pattern
+        if self._norm_site_kind(kwargs["residual"], self.norm_targets) != "post":
+            return False
+        x, residual, weight, gemm_weight = (
+            kwargs[name].meta.get("val")
+            for name in ("x", "residual", "weight", "gemm_weight")
+        )
+        if any(t is None for t in (x, residual, weight, gemm_weight)):
+            return False  # no shapes and dtypes to judge by
+        return self.norm_args_supported(
+            x, residual, weight
+        ) and self._gemm_weight_is_untuned(gemm_weight)
+
+
+class RocmAiterRMSNormMxfp4GemmFusionPass(
+    TargetGraphSiteCheckMixin, VllmFusionPatternMatcherPass
+):
+    """Fuses a post-attention Gemma add+RMSNorm into the AITER ASM MXFP4 GEMM after it.
+
+    One site per decoder layer: the norm that feeds the MLP's gate_up projection. The
+    input norms (the next layer's norm before the attention projections) are not
+    rewritten. The model graph must be split at the attention ops (see
+    AiterAddRMSNormMxfp4GemmPattern._norm_site_kind), which __init__ checks.
+    """
+
+    flag_name = "VLLM_ROCM_AITER_FP4_POSTNORM_QUANT_FUSION"
+    site_label = "post-attention add+rmsnorm+mxfp4 quant"
+    # The epsilon is a constant inside the traced pattern: one pattern per value, the
+    # same two the FP8 norm passes register.
+    EPSILONS = (1e-5, 1e-6)
+
+    def __init__(self, config: VllmConfig, compile_prefix: str | None = None) -> None:
+        self._require_split_graph(config)
+        super().__init__(
+            config,
+            "rocm_aiter_rmsnorm_mxfp4_gemm_fusion_pass",
+            compile_prefix=compile_prefix,
+        )
+        out_dtype = _model_dtype(config)
+        tp_size = config.parallel_config.tensor_parallel_size
+        for epsilon in self.EPSILONS:
+            self.register(AiterAddRMSNormMxfp4GemmPattern(epsilon, out_dtype, tp_size))
+
+        self.dump_patterns(config, self.pm_pass)
+
+    @classmethod
+    def _require_split_graph(cls, config: VllmConfig) -> None:
+        """Refuse a config under which the site classifier would misjudge every norm.
+
+        The classifier needs the graph split into pieces at the attention ops. With
+        Inductor graph partition, or with no splitting ops, the whole model is one
+        graph: only the first norm would count as a site, the start-up check would
+        pass, and the rest would silently stay unfused.
+        """
+        compilation = config.compilation_config
+        if compilation.use_inductor_graph_partition:
+            reason = "use_inductor_graph_partition is on"
+        elif not compilation.splitting_ops:
+            reason = "compilation_config.splitting_ops is empty"
+        else:
+            return
+        raise RuntimeError(
+            f"{cls.flag_name} is on but {reason}, so the model graph is not split at "
+            "the attention ops and the pass cannot tell a post-attention norm from the "
+            "next layer's input norm. Turn the flag off, or compile with the default "
+            "splitting."
+        )
 
 
 class AddAiterRMSNormPadPattern:

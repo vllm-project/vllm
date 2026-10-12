@@ -3,6 +3,8 @@
 
 import pytest
 import torch
+from torch._inductor import pattern_matcher as pm
+from torch.fx.experimental.proxy_tensor import make_fx
 
 import vllm.config
 from tests.compile.backend import TestBackend
@@ -124,3 +126,51 @@ def test_matched_count_and_match_table(vllm_config, N):
 
     assert fusion_pass.matched_count == N
     assert VllmPatternMatcherPass.match_table["test_relu_fusion"] >= N
+
+
+class SelectiveReluToAbsPattern(ReluToAbsPattern):
+    """Replaces relu(x) with abs(x) where `accept` allows, and records the matches."""
+
+    def __init__(self, accept: bool) -> None:
+        self.accept = accept
+        self.seen: list[pm.Match] = []
+
+    def extra_check(self, match: pm.Match) -> bool:
+        self.seen.append(match)
+        return self.accept
+
+
+def _apply_to_two_relus(vllm_config, replacement) -> tuple[int, torch.fx.GraphModule]:
+    """Registers the replacement in a pass and applies it to a graph with two relus."""
+    with vllm.config.set_current_vllm_config(vllm_config):
+        fusion_pass = VllmFusionPatternMatcherPass(vllm_config, "test_extra_check")
+        fusion_pass.register(replacement)
+    gm = make_fx(lambda x: torch.relu(torch.relu(x) + 1))(torch.randn(4))
+    return fusion_pass.pm_pass.apply(gm.graph), gm
+
+
+@pytest.mark.parametrize("accept", [True, False])
+def test_extra_check_decides_which_matches_are_replaced(vllm_config, accept):
+    """The pattern matcher asks a replacement's extra_check about every match, and
+    replaces the matches it accepts.
+
+    The nodes of a match are in `match.kwargs`, keyed by the pattern's parameter names.
+    """
+    replacement = SelectiveReluToAbsPattern(accept)
+    replaced, gm = _apply_to_two_relus(vllm_config, replacement)
+
+    assert len(replacement.seen) == 2
+    assert {m.kwargs["x"].op for m in replacement.seen} == {
+        "placeholder",
+        "call_function",
+    }
+    assert replaced == (2 if accept else 0)
+    ops = [node.target for node in gm.graph.nodes]
+    assert ops.count(torch.ops.aten.abs.default) == replaced
+    assert ops.count(torch.ops.aten.relu.default) == 2 - replaced
+
+
+def test_default_extra_check_accepts_every_match(vllm_config):
+    """A replacement without an extra_check override is replaced everywhere."""
+    replaced, gm = _apply_to_two_relus(vllm_config, ReluToAbsPattern())
+    assert replaced == 2

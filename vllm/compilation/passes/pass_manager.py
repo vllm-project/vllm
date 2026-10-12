@@ -25,10 +25,12 @@ if rocm_aiter_ops.is_enabled() or rocm_aiter_ops.is_rdna_aiter_enabled():
     from .fusion.rocm_aiter_fusion import (
         MLADualRMSNormFusionPass,
         RocmAiterActMulMxfp4GemmFusionPass,
+        RocmAiterRMSNormMxfp4GemmFusionPass,
         RocmAiterRMSNormQuantFusionPass,
         RocmAiterSiluMulFp8GroupQuantFusionPass,
         RocmAiterTritonAddRMSNormPadFusionPass,
         act_mxfp4_pass_enabled,
+        norm_mxfp4_pass_enabled,
     )
 
 if current_platform.is_cuda_alike() or current_platform.is_xpu():
@@ -188,6 +190,14 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
                         RocmAiterRMSNormQuantFusionPass(config),
                     ]
                 self.passes += [RMSNormQuantFusionPass(config)]
+                if rocm_aiter_ops.is_enabled() and norm_mxfp4_pass_enabled(
+                    self.pass_config.fuse_norm_quant
+                ):
+                    self.passes += [
+                        RocmAiterRMSNormMxfp4GemmFusionPass(
+                            config, compile_prefix=self.compile_prefix
+                        )
+                    ]
 
             if self.pass_config.fuse_act_quant:
                 self.passes += [ActivationQuantFusionPass(config)]

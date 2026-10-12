@@ -15,6 +15,7 @@ real act+quant pass on a small graph and need a gfx950.
 
 import types
 from pathlib import Path
+from typing import Any
 
 import pytest
 import regex as re
@@ -44,7 +45,8 @@ from vllm.forward_context import set_forward_context
 from vllm.platforms import current_platform
 
 ACT_FLAG = "VLLM_ROCM_AITER_FP4_ACT_QUANT_FUSION"
-FLAGS = [ACT_FLAG]
+POSTNORM_FLAG = "VLLM_ROCM_AITER_FP4_POSTNORM_QUANT_FUSION"
+FLAGS = [ACT_FLAG, POSTNORM_FLAG]
 
 RANGE_A = Range(1, 8)
 RANGE_B = Range(9, 64)
@@ -103,7 +105,10 @@ def test_flag_changes_the_compile_cache_key(flag, monkeypatch):
 
 # --- when a pass is registered ------------------------------------------------
 
-GATES = [pytest.param("act_mxfp4_pass_enabled", ACT_FLAG, id="act")]
+GATES = [
+    pytest.param("act_mxfp4_pass_enabled", ACT_FLAG, id="act"),
+    pytest.param("norm_mxfp4_pass_enabled", POSTNORM_FLAG, id="norm"),
+]
 
 
 @pytest.mark.parametrize(("gate", "flag"), GATES)
@@ -289,10 +294,11 @@ def test_pass_manager_finish_compile_calls_the_passes_that_have_it():
     # Expected: the first is called once, the second is skipped without an error.
     calls = []
     manager = PostGradPassManager()
-    manager.passes = [  # type: ignore[list-item]
+    passes: list[Any] = [
         types.SimpleNamespace(finish_compile=lambda: calls.append("called")),
         types.SimpleNamespace(),
     ]
+    manager.passes = passes
     manager.finish_compile()
     assert calls == ["called"]
 
@@ -329,6 +335,10 @@ class _ActMulMxfp4Pass(_StandInPass):
     pass
 
 
+class _NormMxfp4Pass(_StandInPass):
+    pass
+
+
 @pytest.fixture
 def configure_manager(monkeypatch, gfx950, rocm_aiter_fusion):
     """Returns configure(prefix, **switches) -> the passes the manager registers.
@@ -338,16 +348,17 @@ def configure_manager(monkeypatch, gfx950, rocm_aiter_fusion):
     """
     from vllm.compilation.passes import pass_manager
 
-    monkeypatch.setattr(
-        pass_manager,
-        "act_mxfp4_pass_enabled",
-        rocm_aiter_fusion.act_mxfp4_pass_enabled,
-        raising=False,
-    )
+    for name in ("act_mxfp4_pass_enabled", "norm_mxfp4_pass_enabled"):
+        monkeypatch.setattr(
+            pass_manager, name, getattr(rocm_aiter_fusion, name), raising=False
+        )
     for name, stand_in in (
         ("RocmAiterActMulMxfp4GemmFusionPass", _ActMulMxfp4Pass),
+        ("RocmAiterRMSNormMxfp4GemmFusionPass", _NormMxfp4Pass),
         ("ActivationQuantFusionPass", _StandInPass),
         ("RocmAiterSiluMulFp8GroupQuantFusionPass", _StandInPass),
+        ("RMSNormQuantFusionPass", _StandInPass),
+        ("RocmAiterRMSNormQuantFusionPass", _StandInPass),
     ):
         monkeypatch.setattr(pass_manager, name, stand_in, raising=False)
     monkeypatch.setattr(
@@ -376,8 +387,11 @@ def configure_manager(monkeypatch, gfx950, rocm_aiter_fusion):
 
 @pytest.mark.parametrize(
     ("flag", "switch", "pass_cls"),
-    [(ACT_FLAG, "fuse_act_quant", _ActMulMxfp4Pass)],
-    ids=["act"],
+    [
+        (ACT_FLAG, "fuse_act_quant", _ActMulMxfp4Pass),
+        (POSTNORM_FLAG, "fuse_norm_quant", _NormMxfp4Pass),
+    ],
+    ids=["act", "norm"],
 )
 def test_pass_manager_registers_a_pass_only_for_its_flag_and_switch(
     configure_manager, monkeypatch, flag, switch, pass_cls
@@ -392,7 +406,7 @@ def test_pass_manager_registers_a_pass_only_for_its_flag_and_switch(
 
     def mxfp4_passes(prefix=None, **switches):
         passes = configure_manager(prefix, **switches)
-        return [p for p in passes if isinstance(p, _ActMulMxfp4Pass)]
+        return [p for p in passes if isinstance(p, (_ActMulMxfp4Pass, _NormMxfp4Pass))]
 
     assert mxfp4_passes(**{switch: True}) == []
     monkeypatch.setenv(flag, "1")
