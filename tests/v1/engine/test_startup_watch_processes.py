@@ -281,6 +281,7 @@ class _FinishedProcess:
 
 
 def test_wait_for_engine_startup_reports_watched_process_exit():
+    """Update the startup test argument so it reaches frontend failure handling."""
     ctx = zmq.Context()
     handshake_socket = ctx.socket(zmq.ROUTER)
     recv, send = connection.Pipe(duplex=False)
@@ -306,6 +307,7 @@ def test_wait_for_engine_startup_reports_watched_process_exit():
                 [CoreEngine()],
                 parallel_config,
                 coordinated_dp=False,
+                send_parallel_config=False,
                 cache_config=None,
                 launch=launch,
             )
