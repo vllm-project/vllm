@@ -403,10 +403,9 @@ class JointSchemaStrategy(ReadStrategy):
         "video": "<|vision_start|><|video_pad|><|vision_end|>\n",
     }
     IMAGE_SIZE = {"shortest_edge": 65_536, "longest_edge": 1_048_576}
-    #: The reference samples videos at 2 fps, up to its processor's
-    #: ``max_frames``.
-    VIDEO_FPS = 2.0
-    MAX_VIDEO_FRAMES = 768
+    #: The reference samples videos at 2 fps; the "clef_omni" video backend
+    #: reproduces the reference's sampling, pixel cap and frame count cap.
+    VIDEO_FPS = 2
 
     def __init__(self, context: ReadContext):
         super().__init__(context)
@@ -482,7 +481,12 @@ class JointSchemaStrategy(ReadStrategy):
         expanded. A video's soundtrack is heard with it when every video has
         one."""
         connector = self._connector
-        video_io = VideoMediaIO(ImageMediaIO(), num_frames=-1, fps=self.VIDEO_FPS)
+        video_io = VideoMediaIO(
+            ImageMediaIO(),
+            num_frames=-1,
+            fps=self.VIDEO_FPS,
+            video_backend="clef_omni",
+        )
         try:
             images, audio, videos, tracks = await asyncio.gather(
                 asyncio.gather(
@@ -498,12 +502,6 @@ class JointSchemaStrategy(ReadStrategy):
             )
         except ValueError as e:
             raise StructuredDecisionError(f"media: {e}") from e
-        for frames, _ in videos:
-            if frames.shape[0] > self.MAX_VIDEO_FRAMES:
-                raise StructuredDecisionError(
-                    "media: video is longer than "
-                    f"{self.MAX_VIDEO_FRAMES / self.VIDEO_FPS:.0f} seconds"
-                )
 
         audio_in_video = bool(videos) and all(t is not None for t in tracks)
         if audio_in_video and audio:

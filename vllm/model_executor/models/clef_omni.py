@@ -21,13 +21,15 @@ question, or its logit with ``use_activation=False``.
 """
 
 import math
-from collections.abc import Callable, Set
+from collections.abc import Callable, Mapping, Set
 from dataclasses import dataclass
 from typing import Any
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 from torch import nn
+from transformers.feature_extraction_utils import BatchFeature
 
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.pooler import Pooler, PoolingParamsUpdate
@@ -356,9 +358,56 @@ class JointSchemaPooler(Pooler):
         return schema, positions[num_question_tokens:], lexical_span_ids
 
 
+MAX_FRAME_PIXELS = 256 * 32 * 32
+
+
+def cap_frame_pixels(frames: np.ndarray | torch.Tensor) -> np.ndarray | torch.Tensor:
+    """The reference reads each video frame at at most 256 * 32 * 32 pixels,
+    in even sizes. Frames are NHWC uint8, numpy or tensor; tensors stay on
+    their device (a CUDA tensor from torchcodec must not round-trip)."""
+    height, width = frames.shape[1:3]
+    if height * width <= MAX_FRAME_PIXELS:
+        return frames
+    scale = math.sqrt(MAX_FRAME_PIXELS / (width * height))
+    new_width = max(2, round(width * scale / 2) * 2)
+    new_height = max(2, round(height * scale / 2) * 2)
+    is_tensor = isinstance(frames, torch.Tensor)
+    tensor = frames if is_tensor else torch.from_numpy(frames)
+    resized = F.interpolate(
+        tensor.permute(0, 3, 1, 2).float(),
+        size=(new_height, new_width),
+        mode="bilinear",
+    )
+    if tensor.dtype == torch.uint8:
+        resized = resized.round()
+    resized = resized.to(tensor.dtype).permute(0, 2, 3, 1).contiguous()
+    return resized if is_tensor else resized.numpy()
+
+
+def _cap_video(item: Any) -> Any:
+    if isinstance(item, tuple):
+        frames, metadata = item
+        return cap_frame_pixels(frames), metadata
+    return cap_frame_pixels(item)
+
+
+class ClefOmniMultiModalProcessor(Qwen3OmniMoeThinkerMultiModalProcessor):
+    """Caps video frames at the reference's per-frame pixel count."""
+
+    def _call_hf_processor(
+        self,
+        hf_data: Mapping[str, object],
+        hf_kwargs: Mapping[str, object],
+    ) -> BatchFeature:
+        if videos := hf_data.get("videos"):
+            assert isinstance(videos, list)
+            hf_data = {**hf_data, "videos": [_cap_video(v) for v in videos]}
+        return super()._call_hf_processor(hf_data, hf_kwargs)
+
+
 @default_pooling_type(tok_pooling_type="ALL")
 @MULTIMODAL_REGISTRY.register_processor(
-    Qwen3OmniMoeThinkerMultiModalProcessor,
+    ClefOmniMultiModalProcessor,
     info=Qwen3OmniMoeThinkerProcessingInfo,
     dummy_inputs=Qwen3OmniMoeThinkerDummyInputsBuilder,
 )
