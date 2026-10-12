@@ -643,6 +643,7 @@ These models primarily accept the [`LLM.generate`](./generative_models.md#llmgen
 | `StepVLForConditionalGeneration` | Step3-VL-10B | T + I<sup>+</sup> | `stepfun-ai/Step3-VL-10B` | | ✅︎ |
 | `Step3p7ForConditionalGeneration` | Step-3.7-Flash | T + I<sup>+</sup> | `stepfun-ai/Step-3.7-Flash` | | ✅︎ |
 | `Step5ForConditionalGeneration` | Step-5-Preview | T + I<sup>+</sup> | `stepfun-ai/Step-5-Preview`, etc. | ✅︎ | ✅︎ |
+| `TeleOCRForConditionalGeneration` | TeleOCR | T + I | `XingChen-AGI/TeleOCR` | | |
 | `UltravoxModel` | Ultravox | T + A<sup>E+</sup> | `fixie-ai/ultravox-v0_5-llama-3_2-1b` | ✅︎ | ✅︎ |
 | `UnlimitedOCRForCausalLM` | Unlimited-OCR | T + I<sup>+</sup> | `baidu/Unlimited-OCR`, etc. | ✅︎ | ✅︎ |
 
@@ -730,6 +731,13 @@ Some models are supported only via the [Transformers modeling backend](#transfor
 !!! note
     The official `openbmb/MiniCPM-V-2` doesn't work yet, so we need to use a fork (`HwwwH/MiniCPM-V-2`) for now.
     For more details, please see: <https://github.com/vllm-project/vllm/pull/4087#issuecomment-2250397630>
+
+!!! note
+    TeleOCR's published configuration uses the Qwen2.5-VL architecture name,
+    but its text decoder uses Qwen3 attention, including Q/K normalization.
+    Select the TeleOCR implementation with
+    `--hf-overrides '{"architectures": ["TeleOCRForConditionalGeneration"]}'`.
+    The official model-specific vLLM plugin is not required for this implementation.
 
 #### Transcription
 

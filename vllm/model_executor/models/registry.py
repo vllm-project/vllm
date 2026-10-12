@@ -635,6 +635,7 @@ _MULTIMODAL_MODELS = {
         "vllm.models.step5",
         "Step5ForConditionalGeneration",
     ),
+    "TeleOCRForConditionalGeneration": ("teleocr", "TeleOCRForConditionalGeneration"),
     "UltravoxModel": ("ultravox", "UltravoxModel"),
     "VoxtralForConditionalGeneration": ("voxtral", "VoxtralForConditionalGeneration"),
     "VoxtralRealtimeGeneration": ("voxtral_realtime", "VoxtralRealtimeGeneration"),

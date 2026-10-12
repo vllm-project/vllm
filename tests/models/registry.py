@@ -1463,6 +1463,11 @@ _MULTIMODAL_EXAMPLE_MODELS = {
             },
         },
     ),
+    "TeleOCRForConditionalGeneration": _HfExamplesInfo(
+        "XingChen-AGI/TeleOCR",
+        hf_overrides={"architectures": ["TeleOCRForConditionalGeneration"]},
+        max_model_len=4096,
+    ),
     "UltravoxModel": _HfExamplesInfo(
         "fixie-ai/ultravox-v0_5-llama-3_2-1b",
         trust_remote_code=True,
