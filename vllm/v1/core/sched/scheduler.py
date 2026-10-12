@@ -325,7 +325,7 @@ class Scheduler(SchedulerInterface):
                 )
 
         self.use_lookahead_block_hashes = is_lookahead_block_hashing_enabled(
-            vllm_config
+            vllm_config, self.connector
         )
         if self.use_lookahead_block_hashes:
             # Lookahead hashes prove the boundary token, so EAGLE needs no drop.
@@ -3066,6 +3066,8 @@ class Scheduler(SchedulerInterface):
             num_prompt_tokens=request.num_prompt_tokens,
         )
 
+        # Direct-transfer connectors need the partial physical tail. Store-style
+        # connectors save only blocks covered by ``request.block_hashes``.
         block_ids = self.kv_cache_manager.get_block_ids_for_computed_tokens(
             request_id=request.request_id,
             num_computed_tokens=request.num_computed_tokens,

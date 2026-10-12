@@ -7,6 +7,7 @@ from dataclasses import dataclass, replace
 import torch
 
 from vllm.config import VllmConfig
+from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
 from vllm.distributed.kv_transfer.kv_connector.v1.prefix_cache import (
     is_lookahead_block_hashing_enabled,
 )
@@ -106,7 +107,10 @@ class MambaPrefillCheckpointBuilder:
         self._drop_eagle_block = (
             speculative_config is not None
             and speculative_config.use_eagle_block_drop()
-            and not is_lookahead_block_hashing_enabled(vllm_config)
+            and not is_lookahead_block_hashing_enabled(
+                vllm_config,
+                get_kv_transfer_group() if has_kv_transfer_group() else None,
+            )
         )
 
     def build(

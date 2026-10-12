@@ -350,7 +350,12 @@ class RequestRunner:
         self.gpu_blocks: dict[int, GPUBlock] = {}
 
         init_none_hash(sha256)
-        self._block_hasher = get_request_block_hasher(block_size, sha256)
+        # Mirror EngineCore's choice of hash protocol.
+        self._block_hasher = (
+            get_request_block_hasher(block_size, sha256, True)
+            if self.scheduler.use_lookahead_block_hashes
+            else get_request_block_hasher(block_size, sha256)
+        )
 
         self._dummy_ctx: ForwardContext = ForwardContext(
             no_compile_layers={},
@@ -369,7 +374,7 @@ class RequestRunner:
         token_ids: list[int],
         kv_transfer_params: dict | None = None,
         skip_reading_prefix_cache: bool = False,
-    ):
+    ) -> Request:
         self.req_id += 1
 
         sampling_params = SamplingParams(
@@ -389,6 +394,7 @@ class RequestRunner:
             req.kv_transfer_params = kv_transfer_params
 
         self.scheduler.add_request(req)
+        return req
 
     def _parse_transfers(self):
         for src_spec, dst_spec in self.offloading_spec.get_flushed_transfers():

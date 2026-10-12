@@ -81,6 +81,12 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
     _cache_hit_source = CacheHitSource.P2P
 
     @property
+    def supports_lookahead_block_hashes(self) -> bool:
+        # Capability must not depend on a node-local APC setting: P and D must
+        # select the same protocol when another connector shares hashes.
+        return True
+
+    @property
     def supports_divergent_local_hybrid_hits(self) -> bool:
         return True
 

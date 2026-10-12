@@ -420,6 +420,52 @@ def test_finished_request_publishes_block_ending_at_last_sampled_token():
     assert num_tokens == 4
 
 
+def test_connector_finish_includes_partial_eagle_block(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    block_size = 16
+    init_none_hash(sha256)
+    scheduler = create_scheduler(
+        enable_prefix_caching=True,
+        block_size=block_size,
+        max_num_batched_tokens=64,
+        use_kv_connector=mock_kv(matched_tokens=0, is_async=False),
+    )
+    _enable_lookahead_block_hashes(scheduler)
+    request = Request(
+        request_id="request",
+        prompt_token_ids=list(range(33)),
+        sampling_params=SamplingParams(max_tokens=2),
+        pooling_params=None,
+        block_hasher=get_request_block_hasher(block_size, sha256, True),
+    )
+    scheduler.add_request(request)
+    scheduler_output = scheduler.schedule()
+    scheduler.update_from_output(
+        scheduler_output,
+        ModelRunnerOutput(
+            req_ids=[request.request_id],
+            req_id_to_index={request.request_id: 0},
+            sampled_token_ids=[[33]],
+        ),
+    )
+    assert request.num_computed_tokens == 33
+
+    captured_block_ids = None
+
+    def request_finished(_request, block_ids):
+        nonlocal captured_block_ids
+        captured_block_ids = block_ids
+        return False, None
+
+    assert scheduler.connector is not None
+    monkeypatch.setattr(scheduler.connector, "request_finished", request_finished)
+    scheduler._connector_finished(request)
+
+    assert captured_block_ids is not None
+    assert len(captured_block_ids) == 3
+
+
 def test_schedule_multimodal_requests():
     scheduler = create_scheduler(model="llava-hf/llava-1.5-7b-hf")
     mm_positions = [[PlaceholderRange(offset=i, length=100)] for i in range(10)]

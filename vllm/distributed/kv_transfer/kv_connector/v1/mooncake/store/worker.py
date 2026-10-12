@@ -412,6 +412,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
         enable_group_semantics: bool = False,
         supports_group_ids: bool = False,
         record_operation: Callable[..., None] | None = None,
+        use_lookahead_block_hashes: bool = False,
         group_participates: Sequence[bool] | None = None,
     ):
         super().__init__(
@@ -427,6 +428,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
         self.group_put_steps = group_put_steps
         self.coord = coord
         self.kv_role = kv_role
+        self.use_lookahead_block_hashes = use_lookahead_block_hashes
         self.group_participates = (
             list(group_participates)
             if group_participates is not None
@@ -776,6 +778,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 token_len,
                 save_start,
                 num_prompt_tokens=req_meta.prefill_end_tokens,
+                apply_eagle=not self.use_lookahead_block_hashes,
             )
 
             starts: list[int] = []
@@ -1402,6 +1405,7 @@ class MooncakeStoreWorker:
             and not self.can_put
         )
         self.cache_config = vllm_config.cache_config
+        self.use_lookahead_block_hashes = False
         self._is_hma_required = len(kv_cache_config.kv_cache_groups) > 1
         self.block_size, self.hash_block_size = resolve_kv_cache_block_sizes(
             kv_cache_config, vllm_config
@@ -1897,6 +1901,7 @@ class MooncakeStoreWorker:
                 enable_group_semantics=self.enable_group_semantics,
                 supports_group_ids=self._supports_group_ids,
                 record_operation=self._record_kv_connector_operation,
+                use_lookahead_block_hashes=self.use_lookahead_block_hashes,
                 group_participates=[
                     group.kv_cache_spec.prefix_cacheable
                     for group in self._kv_cache_groups
@@ -2108,12 +2113,18 @@ class MooncakeStoreWorker:
         if not block_hashes or token_len <= 0:
             return MooncakeLookupResult(0)
 
+        apply_eagle = not self.use_lookahead_block_hashes
+
         # Build per-(group, hash) candidate keys expanded across rank namespaces.
         # candidate_meta stores the (group, hash_bytes) for key slice.
         candidate_keys: list[str] = []
         candidate_meta: list[tuple[int, bytes]] = []
         fine_grained = self.coord.enable_partial_hash_hits
-        lookup_masks = None if fine_grained else self.coord.lookup_mask(token_len)
+        lookup_masks = (
+            None
+            if fine_grained
+            else self.coord.lookup_mask(token_len, apply_eagle=apply_eagle)
+        )
         for g_idx, db in enumerate(self.token_dbs):
             if not self._kv_cache_groups[g_idx].kv_cache_spec.prefix_cacheable:
                 continue
@@ -2189,6 +2200,7 @@ class MooncakeStoreWorker:
             block_hashes,
             token_len,
             cached_block_pool,
+            apply_eagle=apply_eagle,
         )
         if hit_length >= num_tokens:
             usable_length = self.coord.align_lookup_length(num_tokens - 1)
@@ -2198,6 +2210,7 @@ class MooncakeStoreWorker:
                 block_hashes,
                 usable_length,
                 cached_block_pool,
+                apply_eagle=apply_eagle,
             )
         return MooncakeLookupResult(
             hit_length,

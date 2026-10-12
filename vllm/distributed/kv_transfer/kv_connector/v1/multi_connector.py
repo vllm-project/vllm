@@ -219,6 +219,17 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         )
 
     @property
+    def supports_lookahead_block_hashes(self) -> bool:
+        return bool(self._connectors) and all(
+            c.supports_lookahead_block_hashes for c in self._connectors
+        )
+
+    def set_lookahead_block_hashes(self, enabled: bool) -> None:
+        super().set_lookahead_block_hashes(enabled)
+        for connector in self._connectors:
+            connector.set_lookahead_block_hashes(enabled)
+
+    @property
     def requires_kv_delivery(self) -> bool:
         return any(c.requires_kv_delivery for c in self._connectors)
 

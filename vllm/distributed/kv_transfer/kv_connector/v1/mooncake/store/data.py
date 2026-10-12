@@ -792,6 +792,7 @@ class ReqMeta:
         load_spec: LoadSpec | None = None,
         skip_save: bool | None = False,
         block_hashes: list[BlockHash] | None = None,
+        max_save_tokens: int | None = None,
         save_partial_tail: bool = False,
         num_prompt_tokens: int | None = None,
     ) -> "ReqMeta | None":
@@ -805,6 +806,11 @@ class ReqMeta:
         token_ids_start = tracker.num_saved_tokens
         chunk_boundary = cdiv(token_ids_start + 1, block_size) * block_size
         num_tokens_to_save = input_token_len // block_size * block_size
+        if max_save_tokens is not None:
+            num_tokens_to_save = min(
+                num_tokens_to_save,
+                max_save_tokens // block_size * block_size,
+            )
 
         publish_tail = (
             save_partial_tail
