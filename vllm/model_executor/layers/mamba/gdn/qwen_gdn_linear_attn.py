@@ -203,10 +203,13 @@ def _resolve_gdn_prefill_backend(
 
 
 def qwen_gdn_prefill_checkpoint_alignment(vllm_config: VllmConfig) -> int | None:
-    """Token alignment of internal prefill checkpoints, if the backend has them.
+    """Token alignment of internal prefill checkpoints, if they are taken.
 
-    Only FlashInfer's GDN prefill emits mid-prefill states.
+    Only align mode checkpoints, and only FlashInfer's GDN prefill emits
+    mid-prefill states.
     """
+    if vllm_config.cache_config.mamba_cache_mode != "align":
+        return None
     _, active_backend = _resolve_gdn_prefill_backend(vllm_config)
     if active_backend != "flashinfer":
         return None
