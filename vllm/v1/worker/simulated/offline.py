@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from vllm.logger import init_logger
+from vllm.outputs import RequestOutput
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.v1.worker.simulated.timing import (
     VirtualClock,
@@ -187,6 +188,7 @@ def run(
         outputs = engine.step()
         t = clock.now() - t0
         for out in outputs:
+            assert isinstance(out, RequestOutput)
             timing = timings[out.request_id]
             n = sum(len(c.token_ids) for c in out.outputs)
             if n:

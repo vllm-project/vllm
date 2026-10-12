@@ -317,9 +317,9 @@ def test_simulate_offline_speculative_decoding(
     )
     params = SamplingParams(max_tokens=16, ignore_eos=True)
     result = simulate(args, [TimedRequest(list(range(16)), params) for _ in range(4)])
-    for timing in result.requests:
-        assert timing.num_output_tokens == 16
-        assert len(timing.token_times) == chunks
+    for request in result.requests:
+        assert request.num_output_tokens == 16
+        assert len(request.token_times) == chunks
 
 
 @pytest.mark.parametrize(("tp", "pp"), [(2, 1), (1, 2)])

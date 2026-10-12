@@ -74,7 +74,7 @@ and preemption behavior depend strongly on it.
 ### Timing providers
 
 | `timing` | behavior | `timing_args` |
-|---|---|---|
+| --- | --- | --- |
 | `zero` | every step takes no device time (default; KV/scheduler-only simulation) | none |
 | `constant` | `fixed_us + prefill_us_per_token * P + decode_us_per_req * D + decode_us_per_kv_token * K` | those four, plus `host_us` |
 | `table` | nearest-neighbour interpolation over recorded steps | `path`, `k` |
@@ -151,7 +151,7 @@ print(result.summary())  # TTFT/TPOT/ITL/E2E percentiles, as vllm bench serve
 `simulation_config.clock` selects the time base:
 
 | `clock` | waits (device time, idle gaps between arrivals) | engine host loop (scheduling, output processing) | use |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `real` (default) | slept | real time | serving; the wall-clock baseline |
 | `fast_forward` | skipped | real time | sweeps: same latencies as `real` in a fraction of the time |
 | `virtual` | skipped | free | deterministic runs (CI, scheduler research); underestimates host-bound workloads |
@@ -239,7 +239,7 @@ requests), replaying a recording of the same configuration through the
 offline driver on the real clock gives:
 
 | | TTFT mean | TPOT mean | E2E mean |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | TP=2, real / simulated (ms) | 19.94 / 20.09 | 3.990 / 3.996 | 271.3 / 271.9 |
 | PP=2, real / simulated (ms) | 18.81 / 18.30 | 5.881 / 5.915 | 389.3 / 391.0 |
 

@@ -95,6 +95,7 @@ class SimulatedWorker(Worker):
         `gpu_memory_utilization` when that is unset."""
         kv_bytes = self.cache_config.kv_cache_memory_bytes
         if kv_bytes is None:
+            assert self.device is not None
             if self.device.type == "cpu":
                 import psutil
 
@@ -114,6 +115,7 @@ class SimulatedWorker(Worker):
         return kv_bytes
 
     def compile_or_warm_up_model(self) -> CompilationTimes:
+        assert isinstance(self.model_runner, SimulatedModelRunner)
         try:
             self.model_runner.warm_up_step_kernels()
         except Exception:
