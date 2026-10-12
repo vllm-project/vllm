@@ -291,6 +291,13 @@ class KernelConfig:
     enable_jit_warmup: bool = True
     """If True, run JIT compile warmup during kernel warmup."""
 
+    enable_batch_size_warmup: bool = False
+    """If True (Model Runner V2 only), run every decode batch size, logits row
+    count and CUDA graph capture size once after graph capture, so that their
+    first use (kernel selection, lazy module loading, graph upload) happens at
+    startup instead of on a live request. Adds startup time that grows with
+    `max_num_seqs` and the number of speculative tokens."""
+
     moe_backend: MoEBackend = "auto"
     """Backend for MoE expert computation kernels. Available options:
 
@@ -412,6 +419,7 @@ class KernelConfig:
         ignored_factors = {
             "enable_cutedsl_warmup",
             "enable_jit_warmup",
+            "enable_batch_size_warmup",
             "enable_flashinfer_autotune",
             "enable_rocm_segmented_attn_autotune",
             "ir_op_priority",  # handled separately below
