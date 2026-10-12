@@ -78,8 +78,9 @@ def test_flashinfer_fp8_gemm(
     reason="SM12x small-M CUTLASS dispatch",
 )
 @pytest.mark.parametrize("m_offset", [None, 0, 1])
+@pytest.mark.parametrize("use_bias", [True, False])
 @torch.inference_mode()
-def test_sm12x_fp8_scaled_mm_dispatch(m_offset: int | None) -> None:
+def test_sm12x_fp8_scaled_mm_dispatch(m_offset: int | None, use_bias: bool) -> None:
     """Both branches of the SM12x dispatch (CUTLASS up to the threshold M,
     FlashInfer bmm_fp8 above it) match the reference."""
     from vllm.model_executor.kernels.linear.scaled_mm.flashinfer import (
@@ -93,13 +94,22 @@ def test_sm12x_fp8_scaled_mm_dispatch(m_offset: int | None) -> None:
     b = torch.randn((n, k), dtype=torch.bfloat16, device="cuda") / k
     a_fp8, a_scale = ops.scaled_fp8_quant(a)
     b_fp8, b_scale = ops.scaled_fp8_quant(b)
+    bias = torch.randn((n,), dtype=torch.bfloat16, device="cuda") if use_bias else None
     expected_out = torch.mm(
         a_scale * a_fp8.to(dtype=torch.float32),
         b_scale * b_fp8.to(dtype=torch.float32).t(),
     ).to(dtype=torch.bfloat16)
+    if bias is not None:
+        expected_out = expected_out + bias
 
-    out = torch.ops.vllm.sm12x_fp8_scaled_mm(
-        a_fp8, b_fp8.t(), a_scale, b_scale, torch.bfloat16
+    out = flashinfer_scaled_fp8_mm(
+        a_fp8,
+        b_fp8.t(),
+        a_scale,
+        b_scale,
+        torch.bfloat16,
+        bias,
+        cutlass_max_m=SM12X_FP8_CUTLASS_MAX_M,
     )
 
     torch.testing.assert_close(out, expected_out, atol=1e-2, rtol=1e-2)
