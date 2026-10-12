@@ -29,6 +29,7 @@ from vllm.distributed.kv_transfer.kv_connector.utils import (
     EngineTransferInfo,
     TransferTopology,
     get_current_attn_backends,
+    get_current_attn_backends_and_specs,
     kv_postprocess_blksize_and_layout_on_receive,
     kv_postprocess_blksize_on_receive,
 )
@@ -80,7 +81,6 @@ from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
     FullAttentionSpec,
-    KpoolTailSpec,
     KVCacheLayout,
     KVCacheSpec,
     MambaSpec,
@@ -89,7 +89,6 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
     iter_layer_specs,
 )
-from vllm.v1.worker.block_table import BlockTable
 from vllm.v1.worker.utils import select_common_block_size
 
 if TYPE_CHECKING:
@@ -119,18 +118,6 @@ def _share_storage_and_block_stride(caches: list[torch.Tensor]) -> bool:
     block_strides = {cache.stride(0) * cache.element_size() for cache in caches}
     storage_ptrs = {cache.untyped_storage().data_ptr() for cache in caches}
     return len(block_strides) == len(storage_ptrs) == 1
-
-
-def _tensor_byte_span_end(cache: torch.Tensor) -> int:
-    """Return the exclusive end address touched by a nonnegative-stride view."""
-    if cache.numel() == 0:
-        return cache.data_ptr()
-    if any(stride < 0 for stride in cache.stride()):
-        raise ValueError("NIXL cache views must have nonnegative strides")
-    max_element_offset = sum(
-        (size - 1) * stride for size, stride in zip(cache.shape, cache.stride())
-    )
-    return cache.data_ptr() + (max_element_offset + 1) * cache.element_size()
 
 
 def _uses_dense_virtual_transfer_pages(
@@ -1178,8 +1165,10 @@ class NixlBaseConnectorWorker:
             )
 
     def _sync_block_size_with_kernel(self) -> None:
-        backends = get_current_attn_backends(self.vllm_config)
-        kernel_block_size = select_common_block_size(self.block_size, backends)
+        backends, specs = get_current_attn_backends_and_specs(
+            self.vllm_config, self.kv_cache_config, self.attn_backends
+        )
+        kernel_block_size = select_common_block_size(self.block_size, backends, specs)
         # Number of blocks not accounting for kernel block mismatches
         self._logical_num_blocks = self.num_blocks
         if self.block_size != kernel_block_size:
@@ -1618,7 +1607,7 @@ class NixlBaseConnectorWorker:
         if self._supports_pp_hma and self._has_packed_cache:
             # PP can reorder the same backends across stages of a packed model.
             backend_name = ",".join(
-                sorted(backend.get_name() for backend in self.attn_backends)
+                sorted({backend.get_name() for backend in self.attn_backends})
             )
         self.compat_hash = compute_nixl_compatibility_hash(
             self.vllm_config,
@@ -1671,31 +1660,6 @@ class NixlBaseConnectorWorker:
         ):
             raise NotImplementedError("PP push with packed KV caches requires MLA")
 
-        layer_specs: dict[str, KVCacheSpec] = {}
-        compressed_region_owners: dict[int, torch.Tensor] = {}
-        for layer_name, cache in xfer_buffers.items():
-            layer_spec = self._layer_specs.get(layer_name)
-            if isinstance(layer_spec, UniformTypeKVCacheSpecs):
-                layer_spec = layer_spec.kv_cache_specs[layer_name]
-            if layer_spec is None:
-                continue
-            layer_specs[layer_name] = layer_spec
-            physical_page_size = (
-                layer_spec.page_size_bytes
-                if isinstance(layer_spec, MambaSpec)
-                else layer_spec.page_size_bytes
-                // self._physical_blocks_per_logical_kv_block
-            )
-            num_blocks = (
-                self._logical_num_blocks
-                if isinstance(layer_spec, MambaSpec)
-                else self.num_blocks
-            )
-            if _uses_dense_virtual_transfer_pages(
-                layer_spec, cache, physical_page_size, num_blocks
-            ):
-                compressed_region_owners.setdefault(cache.data_ptr(), cache)
-
         track_region_layers = self._tracks_region_layers()
         region_layers: list[list[str]] = []
         packed_member_layouts: dict[str, tuple[int, int]] = {}
@@ -1716,7 +1680,7 @@ class NixlBaseConnectorWorker:
         packed_span_views: list[_NixlPackedCacheView] = []
         if can_coalesce_packed_spans:
             for layer_name, cache in xfer_buffers.items():
-                layer_spec = layer_specs.get(layer_name)
+                layer_spec = self._layer_specs.get(layer_name)
                 group_id = self.kv_cache_config.transfer_group_index_by_layer.get(
                     layer_name
                 )
@@ -1836,7 +1800,7 @@ class NixlBaseConnectorWorker:
             # kernel requires a specific block size. This leads to SSM and FA layers
             # having different num_blocks.
             # `_physical_blocks_per_logical_kv_block` ratio is used to adjust for this.
-            layer_spec = layer_specs.get(layer_name)
+            layer_spec = self._layer_specs.get(layer_name)
             if layer_spec is None:
                 logger.debug(
                     "Skipping layer %s as no KVCache spec is present. "
@@ -1895,32 +1859,6 @@ class NixlBaseConnectorWorker:
                     registration_base + registration_len,
                     region_device_id,
                 )
-
-            if isinstance(layer_spec, KpoolTailSpec):
-                compressed_owner = compressed_region_owners.get(cache.data_ptr())
-                if compressed_owner is not None:
-                    owner_storage = compressed_owner.untyped_storage()
-                    owner_end = compressed_owner.data_ptr() + compressed_owner.nbytes
-                    tail_is_covered = (
-                        compressed_owner.is_contiguous()
-                        and owner_storage.data_ptr() == storage_addr
-                        and _tensor_byte_span_end(cache) <= owner_end
-                    )
-                    if not tail_is_covered:
-                        raise AssertionError(
-                            "Kpool tail cache is not fully covered by its compressed "
-                            f"indexer region: layer={layer_name}, "
-                            f"tail_shape={tuple(cache.shape)}, "
-                            f"tail_stride={tuple(cache.stride())}, "
-                            f"owner_shape={tuple(compressed_owner.shape)}, "
-                            f"owner_stride={tuple(compressed_owner.stride())}"
-                        )
-                    logger.debug(
-                        "Skipping layer %s because its compressed indexer region "
-                        "covers the same storage",
-                        layer_name,
-                    )
-                    continue
 
             nixl_packed_span = packed_spans_by_layer.get(layer_name)
             if isinstance(layer_spec, MambaSpec):
@@ -2006,7 +1944,7 @@ class NixlBaseConnectorWorker:
                 elif packed_mla_push:
                     # PP=1 decode or prefill: register whole rows, and advertise where
                     # this layer's page sits so a PP>1 prefill can write into it.
-                    storage_block_len = registration_len // num_blocks
+                    storage_block_len = block_stride
                     region_specs = [
                         (registration_base, storage_block_len, storage_block_len)
                     ]
@@ -4118,11 +4056,9 @@ class NixlBaseConnectorWorker:
                 physical_block_ids.append(group)
             else:
                 physical_block_ids.append(
-                    BlockTable.map_to_kernel_blocks(
-                        np.array(group),
-                        ratio,
-                        block_arange,
-                    ).tolist()
+                    (np.array(group)[:, None] * ratio + block_arange)
+                    .reshape(-1)
+                    .tolist()
                 )
         return physical_block_ids
 
