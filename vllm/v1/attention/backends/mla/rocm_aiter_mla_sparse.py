@@ -73,16 +73,13 @@ def _use_rocm_sparse_triton(
 
 def _is_long_bf16_prefill(
     kv_dtype: torch.dtype,
-    num_decodes: int,
-    num_prefills: int,
-    prefill_max_seq_len: int,
-    topk_tokens: int,
+    metadata: "ROCMAiterMLASparseMetadata",
 ) -> bool:
     return (
         kv_dtype == torch.bfloat16
-        and num_decodes == 0
-        and num_prefills > 0
-        and prefill_max_seq_len > topk_tokens
+        and metadata.num_decodes == 0
+        and metadata.num_prefills > 0
+        and metadata.prefill_max_seq_len > metadata.topk_tokens
     )
 
 
@@ -658,13 +655,7 @@ class ROCMAiterMLASparseMetadataBuilder(
         reduce_indptr = None
         reduce_final_map = None
         reduce_partial_map = None
-        is_long_pure_bf16_prefill = _is_long_bf16_prefill(
-            self._mla_kv_dtype,
-            num_decodes,
-            num_prefills,
-            metadata.prefill_max_seq_len,
-            metadata.topk_tokens,
-        )
+        is_long_pure_bf16_prefill = _is_long_bf16_prefill(self._mla_kv_dtype, metadata)
         if (
             self._use_persistent_metadata
             and not use_triton_sparse
@@ -896,12 +887,11 @@ class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
 
         # Long BF16 prefills omit persistent metadata. gfx942's
         # nonpersistent ASM path is unsupported or unsafe for these shapes.
-        triton_prefill_fallback = on_gfx942() and _is_long_bf16_prefill(
-            kv_c_and_k_pe_cache.dtype,
-            attn_metadata.num_decodes,
-            attn_metadata.num_prefills,
-            attn_metadata.prefill_max_seq_len,
-            attn_metadata.topk_tokens,
+        # Sink attention has its own Triton/LSE dispatch below.
+        triton_prefill_fallback = (
+            not need_lse
+            and on_gfx942()
+            and _is_long_bf16_prefill(kv_c_and_k_pe_cache.dtype, attn_metadata)
         )
         if (
             triton_sink_fallback

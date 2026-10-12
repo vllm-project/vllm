@@ -165,6 +165,10 @@ def test_rocm_sparse_triton_route(
         pytest.param(True, False, 1, 1, 129, "aiter", id="mixed"),
         pytest.param(True, False, 1, 0, 128, "aiter", id="equal-topk"),
         pytest.param(True, False, 1, 0, 127, "aiter", id="below-topk"),
+        pytest.param(True, False, 0, 0, 129, "aiter", id="empty"),
+        pytest.param(
+            True, False, 1, 0, None, "missing", id="required-prefill-metadata"
+        ),
     ],
 )
 def test_rocm_long_bf16_prefill_dispatch(
@@ -208,13 +212,29 @@ def test_rocm_long_bf16_prefill_dispatch(
         paged_kv_indptr=torch.zeros(3, dtype=torch.int32),
         paged_kv_last_page_len=torch.ones(2, dtype=torch.int32),
     )
+    # Irrelevant routes must not inspect prefill-only metadata.
+    if (
+        not gfx942
+        or fp8
+        or num_decodes
+        or not num_prefills
+        or prefill_max_seq_len is None
+    ):
+        del metadata.prefill_max_seq_len
+        del metadata.topk_tokens
     layer = SimpleNamespace(_q_scale=1.0, _k_scale=1.0)
-    with pytest.raises(KernelSelected, match=f"^{route}$"):
+    error = AttributeError if route == "missing" else KernelSelected
+    match = "prefill_max_seq_len" if route == "missing" else f"^{route}$"
+    with pytest.raises(error, match=match):
         impl._forward_mla(layer, q, kv, metadata)
 
 
+@pytest.mark.parametrize("gfx942", [False, True])
 @pytest.mark.parametrize("num_heads", [8, 12])
-def test_rocm_sparse_triton_route_preserves_padded_sinks(monkeypatch, num_heads):
+def test_rocm_sparse_triton_route_preserves_padded_sinks(
+    monkeypatch, num_heads, gfx942
+):
+    monkeypatch.setattr("vllm.platforms.rocm.on_gfx942", lambda: gfx942)
     captured = {}
 
     def fake_rocm_sparse_attn_prefill(**kwargs):
