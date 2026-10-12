@@ -6,6 +6,7 @@ import importlib.machinery
 import inspect
 import sys
 import types
+from importlib import import_module
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -58,6 +59,12 @@ from vllm.platforms import current_platform
         ),
         ("model_executor/models/mimo_v2.py", "MiMoV2Attention", "attention_sink_bias"),
         ("model_executor/models/gpt_oss.py", "OAIAttention", "sinks"),
+        ("model_executor/models/laguna.py", "LagunaAttention", "sink"),
+        (
+            "model_executor/models/qwen3_dflash.py",
+            "DFlashQwen3Attention",
+            "attention_sink_bias",
+        ),
     ],
 )
 def test_attention_sink_weight_loader_registration(path, class_name, sink_name):
@@ -78,6 +85,7 @@ def test_attention_sink_weight_loader_registration(path, class_name, sink_name):
     )
     model = torch.nn.Module()
     model.padded_heads = model.num_local_heads = model.num_heads = 4
+    model.total_num_heads = 8
     namespace = dict(
         self=model,
         torch=torch,
@@ -105,6 +113,55 @@ def test_attention_sink_weight_loader_registration(path, class_name, sink_name):
                 assert inspect.unwrap(param.weight_loader) is load_attention_sink
                 return
     pytest.fail(f"No sink parameter declaration found in {class_name}")
+
+
+@pytest.mark.parametrize("tp_rank", [0, 1])
+@pytest.mark.parametrize(
+    "module_name,class_name,sink_name",
+    [
+        ("mimo_v2_mtp", "MiMoV2MTP", "attention_sink_bias"),
+        ("mimo_v2_mtp", "MiMoV2OmniMTP", "attention_sink_bias"),
+        ("laguna", "LagunaModel", "sink"),
+        ("qwen3_dflash", "DFlashQwen3Model", "attention_sink_bias"),
+    ],
+)
+def test_attention_sink_model_loading_shards_once(
+    monkeypatch, tp_rank, module_name, class_name, sink_name
+):
+    """Model loading must pass global sinks to the loader on cold load and reload."""
+    module = import_module(f"vllm.model_executor.models.{module_name}")
+    from vllm.model_executor.model_loader import weight_utils
+    from vllm.model_executor.models.utils import WeightsMapper
+
+    for target in (module, weight_utils):
+        monkeypatch.setattr(
+            target, "get_tensor_model_parallel_rank", lambda: tp_rank, raising=False
+        )
+        monkeypatch.setattr(target, "get_tensor_model_parallel_world_size", lambda: 2)
+    cls = getattr(module, class_name)
+    model = cls.__new__(cls)
+    torch.nn.Module.__init__(model)
+    model.hf_to_vllm_mapper = WeightsMapper()
+    model.model = torch.nn.Module()
+    model.model.mtp = torch.nn.Module()
+    sink = torch.nn.Parameter(torch.zeros(4), requires_grad=False)
+
+    def sink_loader(param, loaded_weight):
+        assert loaded_weight.shape == (8,), "Sink was sharded before weight_loader"
+        load_attention_sink(param, loaded_weight)
+
+    sink.weight_loader = sink_loader
+    model.model.mtp.register_parameter(sink_name, sink)
+    name = f"model.mtp.{sink_name}"
+    checkpoint = torch.arange(8, dtype=torch.float32)
+    assert model.load_weights([(name, checkpoint)]) == {name}
+    assert torch.equal(sink, checkpoint.chunk(2)[tp_rank])
+    record_metadata_for_reloading(model)
+    initialize_layerwise_reload(model)
+    model.load_weights([(name, checkpoint + 10)])
+    finalize_layerwise_reload(model, SimpleNamespace(dtype=torch.float32))
+    assert torch.equal(sink, (checkpoint + 10).chunk(2)[tp_rank])
+    assert getattr(model.model.mtp, sink_name).data_ptr() == sink.data_ptr()
 
 
 @pytest.mark.parametrize("quant_method", ["mxfp4", "quark", None])
