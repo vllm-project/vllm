@@ -3,16 +3,20 @@
 
 from types import SimpleNamespace
 
+import msgspec
 import pytest
 import torch
 
 from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.engine.core import EngineCore
 from vllm.v1.kv_cache_interface import (
+    KpoolTailSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
     MambaSpec,
     MLAAttentionSpec,
+    SlidingWindowMLASpec,
+    UniformTypeKVCacheSpecs,
 )
 
 pytestmark = pytest.mark.cpu_test
@@ -63,8 +67,55 @@ def test_kv_cache_group_metadata_uses_effective_dcp_block_sizes() -> None:
     # DCP scales attention blocks but does not scale replicated Mamba state.
     assert [item["block_size"] for item in metadata] == [12288, 1536]
     assert [item["kind"] for item in metadata] == ["mla_attention", "mamba"]
+    assert [item["prefix_cacheable"] for item in metadata] == [True, True]
+    assert [item["prefix_replay_tokens"] for item in metadata] == [0, 0]
 
     managers = engine_core.scheduler.kv_cache_manager.coordinator.single_type_managers
     assert [item["block_size"] for item in metadata] == [
         manager.block_size for manager in managers
     ]
+
+
+@pytest.mark.parametrize(
+    "spec_type,bounded_replay,wrapped,cacheable,replay_tokens",
+    [
+        pytest.param(KpoolTailSpec, False, False, False, 0, id="kpool-tail"),
+        pytest.param(SlidingWindowMLASpec, False, False, True, 0, id="sliding-mla"),
+        pytest.param(SlidingWindowMLASpec, True, False, False, 128, id="replay"),
+        pytest.param(SlidingWindowMLASpec, True, True, False, 128, id="wrapped-replay"),
+    ],
+)
+def test_kv_cache_group_metadata_reports_prefix_policy(
+    spec_type, bounded_replay, wrapped, cacheable, replay_tokens
+) -> None:
+    """The same attention kind can require a different prefix reuse policy."""
+    kwargs = dict(
+        block_size=16,
+        num_kv_heads=1,
+        head_size=64,
+        dtype=torch.bfloat16,
+        sliding_window=128,
+    )
+    if spec_type is SlidingWindowMLASpec:
+        kwargs["bounded_replay"] = bounded_replay
+    spec = spec_type(**kwargs)
+    if wrapped:
+        spec = UniformTypeKVCacheSpecs(block_size=16, kv_cache_specs={"layer": spec})
+    engine_core = object.__new__(EngineCore)
+    engine_core.scheduler = SimpleNamespace(
+        kv_cache_config=SimpleNamespace(
+            kv_cache_groups=[KVCacheGroupSpec(["layer"], spec)]
+        ),
+        kv_cache_manager=SimpleNamespace(
+            coordinator=SimpleNamespace(
+                single_type_managers=[SimpleNamespace(block_size=16)]
+            )
+        ),
+    )
+
+    metadata = msgspec.msgpack.decode(
+        msgspec.msgpack.encode(engine_core.get_kv_cache_group_metadata())
+    )
+
+    assert metadata[0]["prefix_cacheable"] is cacheable
+    assert metadata[0]["prefix_replay_tokens"] == replay_tokens
