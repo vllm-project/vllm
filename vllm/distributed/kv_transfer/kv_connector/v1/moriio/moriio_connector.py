@@ -704,6 +704,19 @@ class MoRIIOConnectorScheduler:
                 "write_recv_timeout", MoRIIOConstants.DEFAULT_WRITE_RECV_TIMEOUT
             ),
         )
+        if (
+            self.mode == MoRIIOMode.WRITE
+            and not self.is_producer
+            and self.kv_transfer_config.kv_load_failure_policy == "recompute"
+        ):
+            # A timed-out WRITE request is marked failed but cannot leave
+            # WAITING_FOR_REMOTE_KVS for recompute, so only "fail" is useful.
+            logger.warning(
+                "MoRI-IO WRITE-mode consumer: kv_load_failure_policy="
+                "'recompute' does not unblock a request whose producer "
+                "write_done never arrives; write_recv_timeout only takes "
+                "effect with the default 'fail' policy."
+            )
 
         if self.is_producer:
             set_role(ROLE.PRODUCER)
@@ -1218,27 +1231,6 @@ class MoRIIOConnectorScheduler:
                         )
                     else:
                         block_notify_list = blocks.get_block_ids()[0]
-                    # Arm the WRITE-consumer receive timer (ROCm/mori#655): if
-                    # the producer's write_done never arrives, fail the request
-                    # instead of wedging in WAITING_FOR_REMOTE_KVS.
-                    watched_block_ids = blocks.get_block_ids()[0]
-                    if (
-                        watched_block_ids
-                        and request.request_id not in self._write_recv_deadline
-                    ):
-                        # Record only the blocks this request owns.
-                        # get_block_ids() also returns prefix-cache hits shared
-                        # with other requests; reporting those at the deadline
-                        # would fail those requests too. NIXL and Mooncake use
-                        # the unhashed ids for the same reason.
-                        own_block_ids = blocks.get_unhashed_block_ids_all_groups()[0]
-                        if own_block_ids:
-                            self._write_recv_deadline[request.request_id] = (
-                                time.monotonic() + self._write_recv_timeout
-                            )
-                            self._write_recv_block_ids[request.request_id] = (
-                                own_block_ids
-                            )
 
                     # Wide-EP multi-pod: a pod binds notify sockets only for
                     # its LOCAL ranks, so the port offset must use the per-pod
@@ -1270,6 +1262,14 @@ class MoRIIOConnectorScheduler:
                             host=_notify_host,
                             port=target_port,
                         )
+
+                # Arm the receive timer on every consumer scheduler that holds
+                # the request, not only the one that sends the notify: with a
+                # non-notifying DP rank the request still waits in
+                # WAITING_FOR_REMOTE_KVS for the producer's write_done.
+                self._arm_write_recv_timer(
+                    request.request_id, blocks, num_external_tokens
+                )
 
             # Only trigger 1 KV transfer per request.
 
@@ -1455,6 +1455,28 @@ class MoRIIOConnectorScheduler:
             self._write_load_failed_block_ids = []
 
         return meta
+
+    def _arm_write_recv_timer(
+        self, req_id: ReqId, blocks: "KVCacheBlocks", num_external_tokens: int
+    ) -> None:
+        """Start the WRITE-consumer receive timer (ROCm/mori#655).
+
+        If the producer's write_done never arrives, the request is failed at
+        the deadline instead of wedging in WAITING_FOR_REMOTE_KVS.
+        """
+        # num_external_tokens == 0: the producer pushes nothing, so there is
+        # nothing to wait for.
+        if num_external_tokens <= 0 or req_id in self._write_recv_deadline:
+            return
+        # Record only the blocks this request owns. get_block_ids() also
+        # returns prefix-cache hits shared with other requests; reporting those
+        # at the deadline would fail those requests too. NIXL and Mooncake use
+        # the unhashed ids for the same reason.
+        own_block_ids = blocks.get_unhashed_block_ids_all_groups()[0]
+        if not own_block_ids:
+            return
+        self._write_recv_deadline[req_id] = time.monotonic() + self._write_recv_timeout
+        self._write_recv_block_ids[req_id] = own_block_ids
 
     def _reap_stale_write_recvs(self) -> None:
         """Time out WRITE-consumer requests whose write_done never arrived.
@@ -3314,7 +3336,7 @@ class MoRIIOConnectorWorker:
         # WRITE-consumer blocks the scheduler watchdog timed out. Feed them into
         # the existing invalid-block set rather than a parallel one, so they
         # drain through get_block_ids_with_load_errors like READ failures do.
-        if getattr(metadata, "write_load_failed_block_ids", None):
+        if metadata.write_load_failed_block_ids:
             self._invalid_block_ids.update(metadata.write_load_failed_block_ids)
         self.transfer_id_to_request_id = metadata.transfer_id_to_request_id
         if self.is_producer:
