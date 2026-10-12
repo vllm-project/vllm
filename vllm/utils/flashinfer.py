@@ -83,7 +83,10 @@ def is_flashinfer_jit_usable() -> bool:
     """
     if importlib.util.find_spec("flashinfer") is None:
         return False
-    if importlib.util.find_spec("flashinfer_jit_cache") is not None:
+    # flashinfer-jit-cache ships no SM75 kernels, so SM75 needs the JIT.
+    if importlib.util.find_spec(
+        "flashinfer_jit_cache"
+    ) is not None and not current_platform.is_device_capability(75):
         return True
     return _flashinfer_nvcc_path() is not None and shutil.which("ninja") is not None
 

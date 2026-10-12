@@ -61,14 +61,15 @@ def test_has_flashinfer_requires_ninja(
 
 
 @pytest.mark.parametrize(
-    ("flashinfer", "jit_cache", "cubin", "nvcc", "ninja", "expected"),
+    ("flashinfer", "jit_cache", "cubin", "nvcc", "ninja", "sm75", "expected"),
     [
-        (True, True, False, False, False, True),
-        (True, False, False, True, True, True),
-        (True, False, False, True, False, False),
-        (True, False, False, False, True, False),
-        (True, False, True, False, False, False),
-        (False, True, False, False, False, False),
+        (True, True, False, False, False, False, True),
+        (True, True, False, False, False, True, False),
+        (True, False, False, True, True, False, True),
+        (True, False, False, True, False, False, False),
+        (True, False, False, False, True, False, False),
+        (True, False, True, False, False, False, False),
+        (False, True, False, False, False, False, False),
     ],
 )
 def test_is_flashinfer_jit_usable(
@@ -78,6 +79,7 @@ def test_is_flashinfer_jit_usable(
     cubin: bool,
     nvcc: bool,
     ninja: bool,
+    sm75: bool,
     expected: bool,
 ):
     monkeypatch.setattr(
@@ -93,6 +95,11 @@ def test_is_flashinfer_jit_usable(
             )
             else None
         ),
+    )
+    monkeypatch.setattr(
+        fi.current_platform,
+        "is_device_capability",
+        lambda capability: sm75 and capability == 75,
     )
     monkeypatch.setattr(
         fi,
