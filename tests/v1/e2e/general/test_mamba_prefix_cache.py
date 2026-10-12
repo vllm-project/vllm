@@ -59,6 +59,9 @@ MODEL = "Qwen/Qwen3-Next-80B-A3B-Instruct-FP8"
 # where block boundaries fall. XPU rounds GDN block sizes up to a multiple of 64
 # (XPUPlatform.update_block_size_for_backend), so use one.
 BLOCK_SIZE = 576
+# The step actions also encode the split at the prompt's last block boundary,
+# which a GDN prefill backend with internal checkpoints (FlashInfer) skips.
+GDN_PREFILL_CONFIG = {"gdn_prefill_backend": "triton"}
 DEVICE_TYPE = current_platform.device_type
 NUM_HIDDEN_LAYERS = 1
 cur_step_action_idx = 0
@@ -899,6 +902,7 @@ def _run_mamba_prefix_cache_mrv1(
         enable_prefix_caching=True,
         block_size=BLOCK_SIZE,
         mamba_cache_mode="align",
+        additional_config=GDN_PREFILL_CONFIG,
         speculative_config={
             "method": "qwen3_next_mtp",
             "num_speculative_tokens": num_speculative_tokens,
@@ -1159,6 +1163,7 @@ def _run_mamba_prefix_cache_mrv2(
         enable_prefix_caching=True,
         block_size=BLOCK_SIZE,
         mamba_cache_mode="align",
+        additional_config=GDN_PREFILL_CONFIG,
         speculative_config={
             "method": "qwen3_next_mtp",
             "num_speculative_tokens": num_speculative_tokens,
