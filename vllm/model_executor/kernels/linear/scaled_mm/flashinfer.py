@@ -2,11 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+from collections.abc import Sequence
 from typing import ClassVar
 
 import torch
 
 import vllm.envs as envs
+from vllm import _custom_ops as ops
+from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8,
 )
@@ -14,6 +17,9 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     QuantKey,
     kFp8StaticTensorSym,
+)
+from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
+    cutlass_fp8_supported,
 )
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import (
@@ -35,8 +41,22 @@ from .ScaledMMLinearKernel import (
     FP8ScaledMMLinearLayerConfig,
 )
 
+logger = init_logger(__name__)
+
 
 class FlashInferFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
+    def __init__(
+        self, c: FP8ScaledMMLinearLayerConfig, layer_param_names: Sequence[str]
+    ) -> None:
+        super().__init__(c, layer_param_names)
+        self.cutlass_for_small_m = _use_sm12x_small_m_dispatch(c)
+        if self.cutlass_for_small_m:
+            logger.info_once(
+                "Using CUTLASS for per-tensor FP8 GEMMs with M <= %d on SM12x.",
+                SM12X_FP8_CUTLASS_MAX_M,
+                scope="global",
+            )
+
     @classmethod
     def is_supported(
         cls, compute_capability: int | None = None
@@ -80,9 +100,63 @@ class FlashInferFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         bias: torch.Tensor | None,
         output_shape: list,
     ) -> torch.Tensor:
+        if self.cutlass_for_small_m:
+            output = torch.ops.vllm.sm12x_fp8_scaled_mm(A, B, As, Bs, out_dtype)
+            return output if bias is None else output + bias
         return flashinfer_scaled_fp8_mm(
             A, B, out_dtype=out_dtype, scale_a=As, scale_b=Bs, bias=bias
         )
+
+
+# Largest M for which CUTLASS beats FlashInfer bmm_fp8 on SM12x. At decode sizes
+# bmm_fp8 picks cuBLASLt split-K, which needs a memset before every GEMM (a
+# separate node in CUDA graphs); CUTLASS has no split-K. At prefill sizes the
+# cuBLASLt kernels are faster.
+SM12X_FP8_CUTLASS_MAX_M = 32
+
+
+def _use_sm12x_small_m_dispatch(c: FP8ScaledMMLinearLayerConfig) -> bool:
+    # Picking the kernel by M would make results depend on the batch size.
+    if envs.VLLM_BATCH_INVARIANT:
+        return False
+    n, k = c.weight_shape
+    return (
+        current_platform.is_device_capability_family(120)
+        and n % 16 == 0
+        and k % 16 == 0
+        and cutlass_fp8_supported()
+    )
+
+
+def _sm12x_fp8_scaled_mm_impl(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    scale_a: torch.Tensor,
+    scale_b: torch.Tensor,
+    out_dtype: torch.dtype,
+) -> torch.Tensor:
+    # Runs eagerly with a concrete M, so each captured CUDA graph size takes the
+    # branch for its own M.
+    if a.shape[0] <= SM12X_FP8_CUTLASS_MAX_M:
+        return ops.cutlass_scaled_mm(a, b, scale_a, scale_b, out_dtype)
+    return flashinfer_scaled_fp8_mm(a, b, scale_a, scale_b, out_dtype)
+
+
+def _sm12x_fp8_scaled_mm_fake(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    scale_a: torch.Tensor,
+    scale_b: torch.Tensor,
+    out_dtype: torch.dtype,
+) -> torch.Tensor:
+    return torch.empty(a.shape[0], b.shape[1], dtype=out_dtype, device=a.device)
+
+
+direct_register_custom_op(
+    "sm12x_fp8_scaled_mm",
+    _sm12x_fp8_scaled_mm_impl,
+    fake_impl=_sm12x_fp8_scaled_mm_fake,
+)
 
 
 class FlashInferFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):

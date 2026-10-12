@@ -71,3 +71,35 @@ def test_flashinfer_fp8_gemm(
         )
 
     torch.testing.assert_close(out, expected_out, atol=1e-2, rtol=1e-2)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(120),
+    reason="SM12x small-M CUTLASS dispatch",
+)
+@pytest.mark.parametrize("m_offset", [None, 0, 1])
+@torch.inference_mode()
+def test_sm12x_fp8_scaled_mm_dispatch(m_offset: int | None) -> None:
+    """Both branches of the SM12x dispatch (CUTLASS up to the threshold M,
+    FlashInfer bmm_fp8 above it) match the reference."""
+    from vllm.model_executor.kernels.linear.scaled_mm.flashinfer import (
+        SM12X_FP8_CUTLASS_MAX_M,
+    )
+
+    set_random_seed(42)
+    m = 1 if m_offset is None else SM12X_FP8_CUTLASS_MAX_M + m_offset
+    n, k = 256, 128
+    a = torch.randn((m, k), dtype=torch.bfloat16, device="cuda")
+    b = torch.randn((n, k), dtype=torch.bfloat16, device="cuda") / k
+    a_fp8, a_scale = ops.scaled_fp8_quant(a)
+    b_fp8, b_scale = ops.scaled_fp8_quant(b)
+    expected_out = torch.mm(
+        a_scale * a_fp8.to(dtype=torch.float32),
+        b_scale * b_fp8.to(dtype=torch.float32).t(),
+    ).to(dtype=torch.bfloat16)
+
+    out = torch.ops.vllm.sm12x_fp8_scaled_mm(
+        a_fp8, b_fp8.t(), a_scale, b_scale, torch.bfloat16
+    )
+
+    torch.testing.assert_close(out, expected_out, atol=1e-2, rtol=1e-2)
