@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""KV cache planning: grouping, sizing, and capacity logic."""
+"""KV cache planning: grouping, sizing, and memory-fit logic."""
 
 import math
 from collections import defaultdict
