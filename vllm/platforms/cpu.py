@@ -341,7 +341,7 @@ class CpuPlatform(Platform):
             parallel_config.distributed_executor_backend = "mp"
 
         if parallel_config.worker_cls == "auto":
-            if cache_config.simulate_forward:
+            if vllm_config.simulation_config.simulate_forward:
                 parallel_config.worker_cls = (
                     "vllm.v1.worker.simulated.worker.SimulatedWorker"
                 )

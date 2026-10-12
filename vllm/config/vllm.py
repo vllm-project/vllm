@@ -50,6 +50,7 @@ from .parallel import ParallelConfig
 from .profiler import ProfilerConfig
 from .reasoning import ReasoningConfig
 from .scheduler import SchedulerConfig
+from .simulation import SimulationConfig
 from .speculative import EagleModelTypes, NgramGPUTypes, SpeculativeConfig
 from .structured_outputs import StructuredOutputsConfig
 from .utils import SupportsHash, config, get_field, replace
@@ -365,6 +366,8 @@ class VllmConfig:
     """Attention configuration."""
     aux_output_config: AuxOutputConfig = Field(default_factory=AuxOutputConfig)
     """Execution auxiliary output configuration."""
+    simulation_config: SimulationConfig = Field(default_factory=SimulationConfig)
+    """Simulated execution configuration."""
     engram_config: EngramConfig | None = None
     """N-gram embedding storage and sharding settings."""
     mamba_config: MambaConfig = Field(default_factory=MambaConfig)
@@ -546,6 +549,7 @@ class VllmConfig:
         else:
             vllm_factors.append("None")
         vllm_factors.append(self.aux_output_config.compute_hash())
+        vllm_factors.append(self.simulation_config.compute_hash())
         if self.additional_config:
             if isinstance(additional_config := self.additional_config, dict):
                 additional_config_hash = safe_hash(
@@ -701,7 +705,7 @@ class VllmConfig:
 
     @property
     def use_v2_model_runner(self) -> bool:
-        if self.cache_config.simulate_forward:
+        if self.simulation_config.simulate_forward:
             return True
 
         if self.attention_config.hisparse_config is not None:
@@ -2663,7 +2667,7 @@ class VllmConfig:
         if self.model_config.is_hybrid:
             HybridAttentionMambaModelConfig.verify_and_update_config(self)
 
-        if self.cache_config.simulate_forward:
+        if self.simulation_config.simulate_forward:
             self.load_config.load_format = "dummy"
             self.load_config.device = "meta"
 
@@ -2738,6 +2742,7 @@ class VllmConfig:
             f"quantization_config={self.model_config.quantization_config}, "  # noqa
             f"enforce_eager={self.model_config.enforce_eager}, "
             f"aux_output_config={self.aux_output_config!r}, "
+            f"simulation_config={self.simulation_config!r}, "
             f"kv_cache_dtype={self.cache_config.cache_dtype}, "
             f"device_config={self.device_config.device}, "
             f"structured_outputs_config={self.structured_outputs_config!r}, "

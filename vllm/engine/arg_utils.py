@@ -64,6 +64,7 @@ from vllm.config import (
     ProfilerConfig,
     ReasoningConfig,
     SchedulerConfig,
+    SimulationConfig,
     SpeculativeConfig,
     StructuredOutputsConfig,
     UVAOffloadConfig,
@@ -595,7 +596,7 @@ class EngineArgs:
     offload_params: set[str] = get_field(PrefetchOffloadConfig, "offload_params")
     gpu_memory_utilization: float = CacheConfig.gpu_memory_utilization
     kv_cache_memory_bytes: int | None = CacheConfig.kv_cache_memory_bytes
-    simulate_forward: bool = CacheConfig.simulate_forward
+    simulate_forward: bool = SimulationConfig.simulate_forward
     max_num_batched_tokens: int | None = None
     max_num_scheduled_tokens: int | None = None
     long_prefill_token_threshold: int = SchedulerConfig.long_prefill_token_threshold
@@ -709,6 +710,7 @@ class EngineArgs:
         VllmConfig, "structured_outputs_config"
     )
     aux_output_config: AuxOutputConfig = get_field(VllmConfig, "aux_output_config")
+    simulation_config: SimulationConfig = get_field(VllmConfig, "simulation_config")
     reasoning_parser: str = StructuredOutputsConfig.reasoning_parser
     reasoning_parser_plugin: str | None = None
 
@@ -869,6 +871,11 @@ class EngineArgs:
             self.aux_output_config = AuxOutputConfig(**self.aux_output_config)
         if self.enable_return_routed_experts:
             self.aux_output_config.enable_return_routed_experts = True
+        if isinstance(self.simulation_config, dict):
+            self.simulation_config = SimulationConfig(**self.simulation_config)
+        if self.simulate_forward:
+            self.simulation_config.simulate_forward = True
+        self.simulate_forward = self.simulation_config.simulate_forward
         if isinstance(self.engram_config, dict):
             self.engram_config = EngramConfig(**self.engram_config)
         if isinstance(self.mamba_config, dict):
@@ -938,6 +945,7 @@ class EngineArgs:
         # Model arguments
         model_kwargs = get_kwargs(ModelConfig)
         aux_output_kwargs = get_kwargs(AuxOutputConfig)
+        simulation_kwargs = get_kwargs(SimulationConfig)
         model_group = parser.add_argument_group(
             title="ModelConfig",
             description=ModelConfig.__doc__,
@@ -1363,9 +1371,6 @@ class EngineArgs:
         )
         cache_group.add_argument(
             "--kv-cache-memory-bytes", **cache_kwargs["kv_cache_memory_bytes"]
-        )
-        cache_group.add_argument(
-            "--simulate-forward", **cache_kwargs["simulate_forward"]
         )
         cache_group.add_argument("--kv-cache-dtype", **cache_kwargs["cache_dtype"])
         cache_group.add_argument(
@@ -1873,6 +1878,12 @@ class EngineArgs:
         vllm_group.add_argument(
             "--aux-output-config", **vllm_kwargs["aux_output_config"]
         )
+        vllm_group.add_argument(
+            "--simulation-config", **vllm_kwargs["simulation_config"]
+        )
+        vllm_group.add_argument(
+            "--simulate-forward", **simulation_kwargs["simulate_forward"]
+        )
         vllm_group.add_argument("--profiler-config", **vllm_kwargs["profiler_config"])
         vllm_group.add_argument(
             "--optimization-level", **vllm_kwargs["optimization_level"]
@@ -2284,7 +2295,6 @@ class EngineArgs:
             block_size=self.block_size,  # type: ignore[arg-type]
             gpu_memory_utilization=self.gpu_memory_utilization,
             kv_cache_memory_bytes=self.kv_cache_memory_bytes,
-            simulate_forward=self.simulate_forward,
             cache_dtype=resolved_cache_dtype,  # type: ignore[arg-type]
             is_attention_free=model_config.is_attention_free,
             num_gpu_blocks_override=self.num_gpu_blocks_override,
@@ -2867,6 +2877,7 @@ class EngineArgs:
             offload_config=offload_config,
             attention_config=attention_config,
             aux_output_config=self.aux_output_config,
+            simulation_config=self.simulation_config,
             engram_config=self.engram_config,
             mamba_config=mamba_config,
             kernel_config=kernel_config,

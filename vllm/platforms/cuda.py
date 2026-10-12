@@ -326,7 +326,7 @@ class CudaPlatformBase(Platform):
         model_config = vllm_config.model_config
 
         if parallel_config.worker_cls == "auto":
-            if vllm_config.cache_config.simulate_forward:
+            if vllm_config.simulation_config.simulate_forward:
                 parallel_config.worker_cls = (
                     "vllm.v1.worker.simulated.worker.SimulatedWorker"
                 )

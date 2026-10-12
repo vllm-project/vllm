@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Worker for simulated forward: no weights, no KV tensors, no forward pass."""
+"""Worker for simulated execution: no weights, no KV tensors, no forward."""
 
 # ruff: noqa: E402
 import os
@@ -26,14 +26,14 @@ logger = init_logger(__name__)
 
 
 class SimulatedWorker(Worker):
-    """Runs the V2 model runner's request bookkeeping while skipping weight
-    loading, KV-cache allocation and the forward pass.
+    """Runs the real request bookkeeping of the V2 model runner while skipping
+    weight loading, KV-cache allocation and the forward pass.
 
-    On a CUDA-alike host the worker still binds a device: the runner keeps its
-    small request-state and block-table buffers there and uses the stock
-    Triton input-preparation kernels. On the CPU platform the same kernels run
-    through Triton's CPU backend. The model lives on the meta device either
-    way."""
+    On a CUDA host the worker still binds a device: the runner keeps its small
+    request-state and block-table buffers there and uses the stock Triton
+    input-preparation kernels. On the CPU platform it needs Triton's CPU
+    backend for the same kernels. The model itself lives on the meta device
+    either way."""
 
     def init_device(self) -> None:
         # Nothing to reduce across ranks; the custom all-reduce needs P2P probes.
@@ -66,14 +66,18 @@ class SimulatedWorker(Worker):
             current_platform.dist_backend,
         )
         set_random_seed(self.model_config.seed)
-        logger.info("Simulated forward on %s", self.device)
+        logger.info(
+            "Simulated execution on %s (timing=%s)",
+            self.device,
+            self.vllm_config.simulation_config.timing,
+        )
         self._init_workspace_and_model_runner()
 
     def _make_model_runner(self) -> SimulatedModelRunner:  # type: ignore[override]
         return SimulatedModelRunner(self.vllm_config, self.device)
 
     def determine_available_memory(self) -> int:
-        """Virtual KV capacity: nothing is profiled. The KV cache is sized from
+        """Virtual KV capacity. Nothing is profiled: the KV cache is sized from
         `kv_cache_memory_bytes`, or from the device's total memory and
         `gpu_memory_utilization` when that is unset."""
         kv_bytes = self.cache_config.kv_cache_memory_bytes
@@ -97,13 +101,21 @@ class SimulatedWorker(Worker):
         return kv_bytes
 
     def compile_or_warm_up_model(self) -> CompilationTimes:
+        try:
+            self.model_runner.warm_up_step_kernels()
+        except Exception:
+            logger.warning(
+                "Simulated-step warmup failed; the first scheduled step will "
+                "compile the Triton kernels instead.",
+                exc_info=True,
+            )
         return CompilationTimes(
             language_model=self.compilation_config.compilation_time,
             encoder=self.compilation_config.encoder_compilation_time,
         )
 
     def sleep(self, level: int = 1) -> None:
-        logger.warning("Sleep mode is a no-op under simulated forward.")
+        logger.warning("Sleep mode is a no-op under simulated execution.")
 
     def wake_up(self, tags: list[str] | None = None) -> None:
-        logger.warning("Wake-up is a no-op under simulated forward.")
+        logger.warning("Wake-up is a no-op under simulated execution.")
