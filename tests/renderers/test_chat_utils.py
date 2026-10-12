@@ -16,6 +16,7 @@ from vllm.assets.video import VideoAsset
 from vllm.config import ModelConfig
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs import MultiModalDataDict, MultiModalUUIDDict
+from vllm.multimodal.media import MEDIA_CONNECTOR_REGISTRY
 from vllm.multimodal.utils import (
     encode_audio_url,
     encode_image_url,
@@ -23,6 +24,7 @@ from vllm.multimodal.utils import (
 )
 from vllm.renderers.chat_utils import ChatCompletionMessageParam
 from vllm.renderers.chat_utils.chat_template import validate_chat_template
+from vllm.renderers.chat_utils.content_parser import _load_embeds_dict
 from vllm.renderers.chat_utils.item_tracker import (
     AsyncMultiModalItemTracker,
     _parse_metadata_array,
