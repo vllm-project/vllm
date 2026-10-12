@@ -212,38 +212,47 @@ def test_rdna_hybrid_w4a16_apply_with_bias(dtype, M):
 
 
 @pytest.mark.skipif(not on_gfx1x(), reason="Hybrid path is gfx11/gfx12 only")
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize(
-    "M",
-    [MAX_SKINNY_BATCH_SIZE, MIN_DENSE_BATCH_SIZE - 1],
-    ids=["skinny_past_lds", "below_dense_threshold"],
+    "M,has_dense,expected_path",
+    [
+        (MAX_SKINNY_BATCH_SIZE, True, "triton"),
+        (MIN_DENSE_BATCH_SIZE - 1, True, "triton"),
+        (MIN_DENSE_BATCH_SIZE, True, "dense"),
+        (MIN_DENSE_BATCH_SIZE, False, "triton"),
+    ],
+    ids=["skinny_past_lds", "below_dense_threshold", "at_dense_threshold", "off"],
 )
-def test_rdna_hybrid_w4a16_dense_copy_unused_below_threshold(dtype, M):
+def test_rdna_hybrid_w4a16_dense_dispatch(M, has_dense, expected_path, monkeypatch):
     """Memory-bound batches must stay on int4, including decode batches that
     miss the skinny path on the LDS limit (e.g. spec-decode verify).
     """
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA/HIP device not available")
+    import vllm._custom_ops as ops
 
-    set_random_seed(0)
-    K, N, G = 16384, 128, 128
-    assert M > MAX_SKINNY_BATCH_SIZE or K * M > hybrid_module.LDS_CAPACITY_ELEMENTS
+    N, K, G = 16, 16384, 128
+    assert M > MAX_SKINNY_BATCH_SIZE or K * M > MEDIUM_SKINNY_LIMIT_ELEMENTS
 
-    x_mk = (0.25 * torch.randn((M, K), device=device, dtype=torch.float32)).to(dtype)
-    w_int4_nk = torch.randint(0, 16, (N, K), device=device, dtype=torch.int32)
-    w_q = pack_int4_exllama_shuffle(w_int4_nk).contiguous().view(torch.int8)
-    scales_nkg = (
-        0.05 * torch.rand((N, K // G), device=device, dtype=torch.float32)
-    ).to(dtype)
-    w_dequant = torch.zeros((N, K), device=device, dtype=dtype)
+    x_mk = torch.empty((M, K), dtype=torch.float16)
+    w_q = torch.empty((N, K // 2), dtype=torch.int8)
+    scales = torch.empty((N, K // G), dtype=torch.float16)
+    w_dequant = torch.empty((N, K), dtype=torch.float16) if has_dense else None
+    called = []
 
-    from vllm.utils.platform_utils import num_compute_units
+    def fake(path):
+        def record(*args, **kwargs):
+            called.append(path)
+            return torch.empty((M, N), dtype=x_mk.dtype)
 
-    args = (x_mk, w_q, scales_nkg, None, None, num_compute_units(), G)
-    out_int4 = torch.ops.vllm.rdna_hybrid_w4a16_apply(*args)
-    out_with_dense = torch.ops.vllm.rdna_hybrid_w4a16_apply(*args, w_dequant)
+        return record
 
-    torch.testing.assert_close(out_with_dense, out_int4)
+    monkeypatch.setattr(ops, "wvSplitK_int4_g", fake("hip"))
+    monkeypatch.setattr(hybrid_module, "triton_w4a16_skinny_fmt_gemm", fake("triton"))
+    monkeypatch.setattr(hybrid_module, "rocm_unquantized_gemm_impl", fake("dense"))
+
+    hybrid_module._rdna_hybrid_w4a16_apply_impl(
+        x_mk, w_q, scales, None, None, 40, G, w_dequant
+    )
+
+    assert called == [expected_path]
 
 
 # ---------------------------------------------------------------------------

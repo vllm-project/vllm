@@ -23,9 +23,11 @@ import torch
 from vllm.config import get_current_vllm_config
 from vllm.config.kernel import W4A16PrefillDequantMode
 from vllm.logger import init_logger
+from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     unpack_quantized_values_into_int32,
 )
+from vllm.model_executor.layers.utils import rocm_unquantized_gemm_impl
 from vllm.model_executor.parameter import (
     permute_param_layout_,
 )
@@ -537,7 +539,7 @@ def _rdna_hybrid_w4a16_apply_impl(
 
     if w_dequant is not None and M >= MIN_DENSE_BATCH_SIZE:
         with _profile_scope(f"hybrid_dequant_w4a16 {M}x{N}x{K}"):
-            return torch.nn.functional.linear(x_2d, w_dequant, bias)
+            return rocm_unquantized_gemm_impl(x_2d, w_dequant, bias)
 
     with _profile_scope(f"hybrid_triton_w4a16 {M}x{N}x{K}"):
         output = triton_w4a16_skinny_fmt_gemm(
@@ -678,8 +680,15 @@ class RDNAHybridW4A16LinearKernel(MPLinearKernel):
         w_dequant = dequantize_w4a16(
             unpacked, w_s, zp, c.group_size, c.weight_type.bias, c.act_type
         )
+        # Let UnquantizedLinearMethod apply its dense-weight layout (e.g. gfx11
+        # row-stride padding) so the copy matches what an fp16 checkpoint gets.
+        dense = torch.nn.Module()
+        dense.weight = torch.nn.Parameter(w_dequant, requires_grad=False)
+        UnquantizedLinearMethod().process_weights_after_loading(dense)
         # Derived from the int4 weight, so keep it out of state_dict.
-        layer.register_buffer(self.DEQUANT_WEIGHT_NAME, w_dequant, persistent=False)
+        layer.register_buffer(
+            self.DEQUANT_WEIGHT_NAME, dense.weight.data, persistent=False
+        )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         c = self.config

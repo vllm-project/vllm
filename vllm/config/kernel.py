@@ -388,10 +388,13 @@ class KernelConfig:
 
     w4a16_prefill_dequant: W4A16PrefillDequantMode = "off"
     """Cache a dense dequantized copy of each weight for the RDNA hybrid
-    W4A16 linear kernel's prefill GEMM (no-op for every other kernel). The
-    copy is ~4x the size of the int4 weight and comes out of the
-    gpu_memory_utilization budget, leaving less room for KV cache. Available
-    options:
+    W4A16 linear kernel's prefill GEMM (no-op for every other kernel).
+    Prefill GEMMs then run on the dense copy instead of dequantizing int4
+    every step, cutting TTFT by 21-26% on gfx1151 for Qwen3 and Gemma-4.
+    Decode stays on int4, so TPOT is unchanged. The copy is ~4x the size of
+    the int4 weight and comes out of the gpu_memory_utilization budget,
+    leaving less room for KV cache, so it suits unified-memory parts where
+    TTFT matters more than KV capacity. Available options:
 
     - "off": No caching (default)
     - "soft": Cache until the budget is exhausted, then warn and fall back
