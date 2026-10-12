@@ -271,20 +271,27 @@ def test_gqa_replicas_are_checked_per_replica():
         )
 
 
-def test_mla_replicas_are_checked_per_replica():
-    """A cache with one TP shard (MLA) is replicated on every rank."""
+@pytest.mark.parametrize("declared", [True, False])
+def test_mla_replicas_are_checked_per_replica(declared):
+    """A cache with one TP shard (MLA) is replicated on every rank, as its
+    spec declares (max_tp_shards=1) or its type implies, whatever the model's
+    KV head count (above 1 in Kimi-K3's config)."""
     spec = MLAAttentionSpec(
         block_size=BLOCK_SIZE,
         num_kv_heads=1,
         head_size=2 * HEAD_SIZE,
         head_size_v=0,
         dtype=torch.bfloat16,
-        max_tp_shards=1,
+        max_tp_shards=1 if declared else None,
     )
     logical = _logical_kv(heads=1)
     workers = [
         _worker(
-            _config(_group(spec)), {_name(0): _cache(logical)}, tp_rank=r, tp_size=2
+            _config(_group(spec)),
+            {_name(0): _cache(logical)},
+            tp_rank=r,
+            tp_size=2,
+            uniform_kv_heads=8,
         )
         for r in range(2)
     ]
@@ -395,12 +402,14 @@ def test_caches_of_one_layer_take_consecutive_slices():
     )
 
 
+@pytest.mark.parametrize("declared", [True, False])
 @pytest.mark.parametrize("tp_size", [2, 4])
-def test_replicated_indexer_cache_sums_across_tp(tp_size):
+def test_replicated_indexer_cache_sums_across_tp(tp_size, declared):
     """As in MiniMax-M3: per layer, attention KV of 2 heads (sharded at TP2,
     replicated at TP4) and an indexer cache of one head held whole by every
-    rank (max_tp_shards=1). Producer shards sum to the definition with each
-    head counted once, and every consumer replica check equals it."""
+    rank, as its spec declares (max_tp_shards=1) or its MLA spec type
+    implies. Producer shards sum to the definition with each head counted
+    once, and every consumer replica check equals it."""
     kv, index = _logical_kv(heads=2, seed=1), _logical_kv(heads=1, seed=2)
     index_name = "model.layers.0.self_attn.indexer.k_cache"
     index_spec = MLAAttentionSpec(
@@ -408,7 +417,7 @@ def test_replicated_indexer_cache_sums_across_tp(tp_size):
         num_kv_heads=1,
         head_size=HEAD_SIZE,
         dtype=torch.bfloat16,
-        max_tp_shards=1,
+        max_tp_shards=1 if declared else None,
     )
     group = KVCacheGroupSpec(
         [_name(0), index_name],

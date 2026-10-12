@@ -48,6 +48,8 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     KVCacheSpec,
     MambaSpec,
+    MLAAttentionSpec,
+    SlidingWindowMLASpec,
     UniformTypeKVCacheSpecs,
 )
 
@@ -202,14 +204,17 @@ def _tp_replicas(
 ) -> int:
     """Consecutive TP ranks holding the same KV heads of a layer.
 
-    Specs that declare ``max_tp_shards`` (MLA) say how they shard. Other
-    attention layers shard their KV heads across TP and, once TP exceeds them,
+    Specs that declare ``max_tp_shards`` say how they shard, and MLA-type
+    caches that do not are held whole by every rank, as NIXL transfers them.
+    Other attention layers shard their KV heads across TP and, once TP exceeds them,
     replicate one head on consecutive ranks. More than one head per rank thus
     means no replicas, while one head per rank is ambiguous and is resolved
     with the model's KV head count when every layer shares it.
     """
     if spec.max_tp_shards is not None:
         return layer_tp_replicas(spec, tp_size, dcp_size=1)
+    if isinstance(spec, (MLAAttentionSpec, SlidingWindowMLASpec)):
+        return tp_size
     if spec.num_kv_heads > 1 or tp_size == 1:
         return 1
     if uniform_kv_heads is None or tp_size % uniform_kv_heads:
