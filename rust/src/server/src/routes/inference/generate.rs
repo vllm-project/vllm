@@ -1177,6 +1177,7 @@ mod tests {
             prompt_token_ids: vec![10, 20],
             sampling_mask: None,
             spec_decode_metrics: None,
+            weight_versions: None,
         };
 
         let response = collect_generate(
