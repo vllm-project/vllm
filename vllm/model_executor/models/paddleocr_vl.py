@@ -934,7 +934,9 @@ class SiglipVisionModel(nn.Module):
 class PaddleOCRVLForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsMRoPE):
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
-            "model.": "language_model.model.",
+            "model.visual.": "visual.",
+            "model.projector.": "projector.",
+            "model.language_model.": "language_model.model.",
             "lm_head.": "language_model.lm_head.",
         }
     )
@@ -966,7 +968,7 @@ class PaddleOCRVLForConditionalGeneration(nn.Module, SupportsMultiModal, Support
                 quant_config=quant_config,
                 prefix=maybe_prefix(prefix, "visual"),
             )
-            self.mlp_AR = Projector(config, config.vision_config)
+            self.projector = Projector(config, config.vision_config)
 
         with self._mark_language_model(vllm_config):
             self.language_model = Ernie4_5ForCausalLM(
@@ -1151,7 +1153,7 @@ class PaddleOCRVLForConditionalGeneration(nn.Module, SupportsMultiModal, Support
             self.encode_image(pixel, grid).squeeze(0)
             for pixel, grid in zip(pixel_values, image_grid_thw)
         )
-        image_embeds = self.mlp_AR(vision_outputs, image_grid_thw)
+        image_embeds = self.projector(vision_outputs, image_grid_thw)
         return image_embeds
 
     def embed_multimodal(self, **kwargs) -> MultiModalEmbeddings:

@@ -268,21 +268,21 @@ def test_v41_dspark_loads_linear_scales(
 
 def test_dsv4_context_wkv_weights_are_duplicated_by_draft_layer():
     weights = [
-        ("mtp.0.attn.wkv.weight", torch.arange(4)),
-        ("mtp.1.attn.wq_a.weight", torch.arange(3)),
-        ("mtp.2.attn.wkv.scale", torch.tensor(0.5)),
-        ("mtp.3.attn.wkv.weight", torch.arange(2)),
+        ("mtp.0.self_attn.kv_proj.weight", torch.arange(4)),
+        ("mtp.1.self_attn.q_a_proj.weight", torch.arange(3)),
+        ("mtp.2.self_attn.kv_proj.scale", torch.tensor(0.5)),
+        ("mtp.3.self_attn.kv_proj.weight", torch.arange(2)),
     ]
 
     duplicated = list(dsv4_dspark._duplicate_context_wkv_weights(weights, 3))
 
     assert [name for name, _ in duplicated] == [
-        "mtp.0.attn.wkv.weight",
+        "mtp.0.self_attn.kv_proj.weight",
         "context_wkv_proj.weight",
-        "mtp.1.attn.wq_a.weight",
-        "mtp.2.attn.wkv.scale",
+        "mtp.1.self_attn.q_a_proj.weight",
+        "mtp.2.self_attn.kv_proj.scale",
         "context_wkv_proj.scale",
-        "mtp.3.attn.wkv.weight",
+        "mtp.3.self_attn.kv_proj.weight",
     ]
     assert duplicated[1][1].shard_id == 0
     assert duplicated[4][1].shard_id == 2
@@ -305,7 +305,9 @@ def test_dsv4_context_kv_uses_one_stacked_wkv_projection(monkeypatch):
 
     projection = StackedProjection()
     layers = [
-        SimpleNamespace(attn=SimpleNamespace(kv_norm=lambda kv, offset=i: kv + offset))
+        SimpleNamespace(
+            self_attn=SimpleNamespace(kv_norm=lambda kv, offset=i: kv + offset)
+        )
         for i in range(3)
     ]
     model = SimpleNamespace(

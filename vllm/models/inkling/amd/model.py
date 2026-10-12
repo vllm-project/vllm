@@ -110,8 +110,10 @@ class InklingDecoderLayer(nn.Module):
             kernel_size=config.sconv_kernel_size,
             prefix=f"{prefix}.conv_state",
         )
-        self.attn_norm = InklingRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.attn = InklingAttention(
+        self.input_layernorm = InklingRMSNorm(
+            config.hidden_size, eps=config.rms_norm_eps
+        )
+        self.self_attn = InklingAttention(
             config,
             num_heads=(
                 config.swa_num_attention_heads
@@ -127,11 +129,13 @@ class InklingDecoderLayer(nn.Module):
             rel_extent=config.rel_extent,
             local_extent=config.sliding_window_size,
             is_local=is_local,
-            prefix=f"{prefix}.attn",
+            prefix=f"{prefix}.self_attn",
             quant_config=quant_config,
             conv_owner=self.conv_state,
         )
-        self.mlp_norm = InklingRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.post_attention_layernorm = InklingRMSNorm(
+            config.hidden_size, eps=config.rms_norm_eps
+        )
         if force_dense_mlp or layer_id < config.dense_mlp_idx:
             self.mlp: nn.Module = InklingDenseMLP(
                 hidden_size=config.hidden_size,
@@ -180,16 +184,20 @@ class InklingDecoderLayer(nn.Module):
         # A None delta means the partials sit in the NVLS symm buffer.
         if pending is None:
             if attn_in is None:
-                # First layer; on the text path attn_norm comes fused with
+                # First layer; on the text path input_layernorm comes fused with
                 # the embedding gather (chain_weight in embed_rmsnorm).
-                attn_in = self.attn_norm(hidden_states)
+                attn_in = self.input_layernorm(hidden_states)
         else:
             attn_in, hidden_states = _sconv_add_norm(
-                pending[0], hidden_states, pending[1], self.attn_norm, positions
+                pending[0], hidden_states, pending[1], self.input_layernorm, positions
             )
-        attn_output = self.attn(positions, attn_in, log_scaling)
+        attn_output = self.self_attn(positions, attn_in, log_scaling)
         mlp_in, hidden_states = _sconv_add_norm(
-            attn_output, hidden_states, self.attn_sconv, self.mlp_norm, positions
+            attn_output,
+            hidden_states,
+            self.attn_sconv,
+            self.post_attention_layernorm,
+            positions,
         )
         mlp_output = self.mlp(mlp_in)
         if defer_mlp_add:
@@ -282,14 +290,14 @@ class InklingModel(nn.Module):
                 # embed_norm was already applied when producing inputs_embeds.
                 hidden_states = inputs_embeds
             else:
-                # Gather + embed_norm + the first layer's attn_norm, one launch.
+                # Gather + embed_norm + the first layer's input_layernorm, one launch.
                 norm = self.embed_norm
                 hidden_states, attn_in0 = embed_rmsnorm(
                     input_ids,
                     self.embed_tokens.weight,
                     norm.weight if norm is not None else None,
                     self.config.rms_norm_eps,
-                    chain_weight=self.layers[self.start_layer].attn_norm.weight,
+                    chain_weight=self.layers[self.start_layer].input_layernorm.weight,
                 )
         else:
             assert intermediate_tensors is not None
@@ -336,16 +344,36 @@ class _TmlForCausalLMBase(nn.Module, SupportsPP, SupportsLoRA):
 
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_substr={
-            ".w13_dn": ".gate_up_proj",
+            # Original names, which Transformers doesn't rename in `inkling_model`
+            # checkpoints, LoRA adapters or quantization exclusions (no `.weight`)
+            ".attn.wq_du": ".self_attn.q_proj",
+            ".attn.wk_dv": ".self_attn.k_proj",
+            ".attn.wv_dv": ".self_attn.v_proj",
+            ".attn.wr_du": ".self_attn.r_proj",
+            ".attn.wo_ud": ".self_attn.o_proj",
+            ".attn.": ".self_attn.",
+            "_sconv.weight": "_sconv.conv1d.weight",
+            ".attn_norm": ".input_layernorm",
+            ".mlp_norm": ".post_attention_layernorm",
             ".w2_md": ".down_proj",
+            ".gate.bias": ".gate.e_score_correction_bias",
+            ".shared_experts.shared_w2_weight": ".shared_experts.down_proj",
+            # Fused gate/up projection
+            ".w13_dn": ".gate_up_proj",
+            # FusedMoE parameter name
+            ".experts.down_proj": ".experts.w2_weight",
         },
         orig_to_new_stacked={
-            ".attn.wq_du.": (".attn.qkvr.", 0),
-            ".attn.wk_dv.": (".attn.qkvr.", 1),
-            ".attn.wv_dv.": (".attn.qkvr.", 2),
-            ".attn.wr_du.": (".attn.qkvr.", 3),
+            ".self_attn.q_proj.": (".self_attn.qkvr.", 0),
+            ".self_attn.k_proj.": (".self_attn.qkvr.", 1),
+            ".self_attn.v_proj.": (".self_attn.qkvr.", 2),
+            ".self_attn.r_proj.": (".self_attn.qkvr.", 3),
         },
         orig_to_new_prefix={
+            "model.language_model.layers.": "model.layers.",
+            "model.language_model.embed_tokens.embed_norm": "model.embed_norm",
+            "model.language_model.embed_tokens": "model.embed_tokens",
+            "model.language_model.norm": "model.norm",
             "model.llm.layers.": "model.layers.",
             "model.llm.embed_norm": "model.embed_norm",
             "model.llm.embed": "model.embed_tokens",
@@ -355,6 +383,7 @@ class _TmlForCausalLMBase(nn.Module, SupportsPP, SupportsLoRA):
             "language_model.lm_head.": "lm_head.",
         },
         orig_to_new_suffix={
+            ".attn": ".self_attn",
             # NVFP4 scale
             ".w13_weight.scale": ".w13_weight_scale",
             ".w13_weight.scale2": ".w13_weight_scale_2",
@@ -365,7 +394,7 @@ class _TmlForCausalLMBase(nn.Module, SupportsPP, SupportsLoRA):
     # Quark uses this mapping when resolving quantization exclusions for the
     # four checkpoint attention projections fused into qkvr.
     packed_modules_mapping = {
-        "qkvr": ["wq_du", "wk_dv", "wv_dv", "wr_du"],
+        "qkvr": ["q_proj", "k_proj", "v_proj", "r_proj"],
         "w13": ["w1", "w3"],
     }
     embedding_modules = {
@@ -458,8 +487,8 @@ class InklingForConditionalGeneration(_TmlForCausalLMBase, SupportsMultiModal):
 
     hf_to_vllm_mapper = _TmlForCausalLMBase.hf_to_vllm_mapper | WeightsMapper(
         orig_to_new_prefix={
-            "model.audio.": "audio.",
-            "model.visual.": "visual.vision_encoder.",
+            "model.audio_tower.": "audio_tower.",
+            "model.vision_tower.": "vision_tower.",
         },
     )
 
@@ -475,13 +504,17 @@ class InklingForConditionalGeneration(_TmlForCausalLMBase, SupportsMultiModal):
         super().__init__()
         config: InklingMMConfig = vllm_config.model_config.hf_config
 
-        self.visual = (
-            InklingVision(config.vision_config, prefix=maybe_prefix(prefix, "visual"))
+        self.vision_tower = (
+            InklingVision(
+                config.vision_config, prefix=maybe_prefix(prefix, "vision_tower")
+            )
             if inkling_vision_enabled(config)
             else None
         )
-        self.audio = (
-            InklingAudio(config.audio_config, prefix=maybe_prefix(prefix, "audio"))
+        self.audio_tower = (
+            InklingAudio(
+                config.audio_config, prefix=maybe_prefix(prefix, "audio_tower")
+            )
             if inkling_audio_enabled(config)
             else None
         )
@@ -493,7 +526,7 @@ class InklingForConditionalGeneration(_TmlForCausalLMBase, SupportsMultiModal):
     def _process_image_input(
         self, pixel_values: Any, num_patches: Any
     ) -> tuple[torch.Tensor, ...]:
-        assert self.visual is not None
+        assert self.vision_tower is not None
         # pixel_values is a list (per item) of [P_i, 2, P, P, 3] tensors,
         # or a single concatenated tensor. Normalize to a flat batch, run the
         # tower once, then split back per item.
@@ -506,14 +539,16 @@ class InklingForConditionalGeneration(_TmlForCausalLMBase, SupportsMultiModal):
             patches = pixel_values
             sizes = self._sizes_from(num_patches, patches.shape[0])
 
-        patches = patches.to(device=self.visual.device, dtype=self.visual.dtype)
-        embeds = self.visual(patches)  # [total_patches, D]
+        patches = patches.to(
+            device=self.vision_tower.device, dtype=self.vision_tower.dtype
+        )
+        embeds = self.vision_tower(patches)  # [total_patches, D]
         return tuple(embeds.split(sizes))
 
     def _process_audio_input(
         self, input_audio_features: Any, num_audio_tokens: Any
     ) -> tuple[torch.Tensor, ...]:
-        assert self.audio is not None
+        assert self.audio_tower is not None
         if isinstance(input_audio_features, (list, tuple)):
             if not input_audio_features:
                 return ()
@@ -523,8 +558,8 @@ class InklingForConditionalGeneration(_TmlForCausalLMBase, SupportsMultiModal):
             dmel = input_audio_features
             sizes = self._sizes_from(num_audio_tokens, dmel.shape[0])
 
-        dmel = dmel.to(device=self.audio.device)
-        embeds = self.audio(dmel)  # [total_frames, D]
+        dmel = dmel.to(device=self.audio_tower.device)
+        embeds = self.audio_tower(dmel)  # [total_frames, D]
         return tuple(embeds.split(sizes))
 
     @staticmethod
@@ -550,9 +585,9 @@ class InklingForConditionalGeneration(_TmlForCausalLMBase, SupportsMultiModal):
         num_audio_tokens = kwargs.get("num_audio_tokens")
 
         embeddings: tuple[torch.Tensor, ...] = ()
-        if pixel_values is not None and self.visual is not None:
+        if pixel_values is not None and self.vision_tower is not None:
             embeddings += self._process_image_input(pixel_values, num_patches)
-        if input_audio_features is not None and self.audio is not None:
+        if input_audio_features is not None and self.audio_tower is not None:
             embeddings += self._process_audio_input(
                 input_audio_features, num_audio_tokens
             )
@@ -628,7 +663,7 @@ def _load_inkling_weights(
             # Replicate K/V conv-free GQA heads when tp_size > num_kv_heads.
             if (
                 shard_id in (1, 2)
-                and name.endswith(".attn.qkvr.weight")
+                and name.endswith(".self_attn.qkvr.weight")
                 and weight.shape[0] > 0
             ):
                 lid = _layer_id(name)

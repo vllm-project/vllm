@@ -19,6 +19,7 @@ from vllm.lora.model_manager import (
 from vllm.lora.peft_helper import PEFTHelper
 from vllm.lora.request import LoRARequest
 from vllm.lora.utils import get_adapter_absolute_path
+from vllm.model_executor.models.utils import WeightsMapper
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 
 logger = init_logger(__name__)
@@ -126,13 +127,15 @@ class WorkerLoRAManager:
             # loading weights, throwing an exception if validation fails.
             peft_helper.validate_legal(self.lora_config)
 
-            # For some models like Qwen2VL, we need to use hf_to_vllm_mapper to ensure
-            # correct loading of lora weights. We only need to know about renames for
-            # this, so we use get_rename_mapper() to ignore stacking and deletions.
+            # Adapter names follow the checkpoint, so they need the same renaming as
+            # the base weights. We only need to know about renames for this, so we use
+            # get_rename_mapper() to ignore stacking and deletions.
             model = self._adapter_manager.model
-            hf_to_vllm_mapper = getattr(model, "hf_to_vllm_mapper", None)
-            if hf_to_vllm_mapper is not None:
-                hf_to_vllm_mapper = hf_to_vllm_mapper.get_rename_mapper()
+            hf_to_vllm_mapper = getattr(
+                model, "checkpoint_renaming_mapper", WeightsMapper()
+            )
+            if model_mapper := getattr(model, "hf_to_vllm_mapper", None):
+                hf_to_vllm_mapper |= model_mapper.get_rename_mapper()
 
             # Get model-defined prefixes to skip during LoRA loading.
             lora_skip_prefixes = getattr(model, "lora_skip_prefixes", None)

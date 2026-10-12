@@ -264,11 +264,11 @@ class PhiMoE(nn.Module):
         self.hidden_size = hidden_size
 
         # Gate always runs at half / full precision for now.
-        self.gate = GateLinear(
+        self.router = GateLinear(
             hidden_size,
             num_experts,
             params_dtype=params_dtype,
-            prefix=f"{prefix}.gate",
+            prefix=f"{prefix}.router",
         )
 
         self.experts = FusedMoEFactory(
@@ -290,7 +290,7 @@ class PhiMoE(nn.Module):
         orig_shape = hidden_states.shape
         hidden_states = hidden_states.view(-1, self.hidden_size)
         # router_logits: (num_tokens, n_experts)
-        router_logits, _ = self.gate(hidden_states)
+        router_logits, _ = self.router(hidden_states)
         final_hidden_states = self.experts(hidden_states, router_logits)
         return final_hidden_states.view(orig_shape)
 
@@ -400,13 +400,13 @@ class PhiMoEDecoderLayer(nn.Module):
             rope_parameters=config.rope_parameters,
             prefix=f"{prefix}.self_attn",
         )
-        self.block_sparse_moe = PhiMoE(
+        self.mlp = PhiMoE(
             num_experts=config.num_local_experts,
             top_k=config.num_experts_per_tok,
             hidden_size=config.hidden_size,
             intermediate_size=config.intermediate_size,
             quant_config=quant_config,
-            prefix=f"{prefix}.block_sparse_moe",
+            prefix=f"{prefix}.mlp",
         )
         self.input_layernorm = nn.LayerNorm(
             config.hidden_size, eps=config.rms_norm_eps, elementwise_affine=True
@@ -435,7 +435,7 @@ class PhiMoEDecoderLayer(nn.Module):
         # Fully Connected
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
-        hidden_states = self.block_sparse_moe(hidden_states)
+        hidden_states = self.mlp(hidden_states)
 
         hidden_states = hidden_states + residual
         return hidden_states, residual

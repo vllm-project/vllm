@@ -104,10 +104,8 @@ class ColPaliModel(
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             # HF transformers checkpoint (vidore/colpali-v1.3-hf)
-            # Weights: vlm.vision_tower.*, vlm.language_model.*,
-            # vlm.multi_modal_projector.*
-            "vlm.vision_tower.": "vision_tower.",
-            "vlm.language_model.": "language_model.",
+            "vlm.vision_tower.": "vision_tower.vision_model.",
+            "vlm.language_model.": "language_model.model.",
             "vlm.multi_modal_projector.": "multi_modal_projector.",
             # colpali-engine checkpoint naming
             "model.vision_tower.": "vision_tower.",

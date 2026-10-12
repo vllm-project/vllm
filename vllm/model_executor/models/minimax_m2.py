@@ -282,7 +282,7 @@ class MiniMaxM2DecoderLayer(nn.Module):
             prefix=f"{prefix}.self_attn",
         )
 
-        self.block_sparse_moe = MiniMaxM2MoE(
+        self.mlp = MiniMaxM2MoE(
             config=config,
             quant_config=quant_config,
             prefix=f"{prefix}.mlp",
@@ -312,7 +312,7 @@ class MiniMaxM2DecoderLayer(nn.Module):
         # Fully Connected
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
 
-        hidden_states = self.block_sparse_moe(hidden_states)
+        hidden_states = self.mlp(hidden_states)
 
         return hidden_states, residual
 

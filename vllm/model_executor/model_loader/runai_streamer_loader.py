@@ -142,7 +142,10 @@ class RunaiModelStreamerLoader(BaseModelLoader):
         model_weights = model_config.model
         if model_weights_override := model_config.model_weights:
             model_weights = model_weights_override
-        yield from self._get_weights_iterator(model_weights, model_config.revision)
+        weights = self._get_weights_iterator(model_weights, model_config.revision)
+        if (mapper := getattr(model, "checkpoint_renaming_mapper", None)) is not None:
+            weights = mapper.apply(weights)
+        yield from weights
 
     def load_weights(self, model: nn.Module, model_config: ModelConfig) -> None:
         """Load weights into a model."""

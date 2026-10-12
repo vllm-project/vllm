@@ -118,7 +118,7 @@ class InklingAttention(nn.Module, AttentionLayerBase):
             quant_config=quant_config,
             prefix=f"{prefix}.qkvr",
         )
-        self.wo_ud = RowParallelLinear(
+        self.o_proj = RowParallelLinear(
             input_size=head_dim * self.num_total_heads,
             output_size=config.hidden_size,
             bias=config.o_bias,
@@ -127,7 +127,7 @@ class InklingAttention(nn.Module, AttentionLayerBase):
             # (one-shot custom AR) so the attention-output sconv can run on the
             # full hidden width fused with the residual add + rmsnorm.
             reduce_results=False,
-            prefix=f"{prefix}.wo_ud",
+            prefix=f"{prefix}.o_proj",
         )
         self.rel_extent = local_extent if is_local else rel_extent
         self.local_extent = local_extent if is_local else None
@@ -256,8 +256,8 @@ class InklingAttention(nn.Module, AttentionLayerBase):
             off_v, _ = self.conv_owner.stream_ranges[_V]
             q, rel_logits = fused_qkvr_prep(
                 qkvr,
-                self.k_sconv.weight.squeeze(1),
-                self.v_sconv.weight.squeeze(1),
+                self.k_sconv.conv1d.weight.squeeze(1),
+                self.v_sconv.conv1d.weight.squeeze(1),
                 self.q_norm.weight,
                 self.k_norm.weight,
                 self.rel_logits_proj.proj,
@@ -284,7 +284,7 @@ class InklingAttention(nn.Module, AttentionLayerBase):
             self._attention(q, rel_logits, attn_output)
 
         flat = attn_output.view(num_tokens, -1)
-        output, _ = self.wo_ud(flat)
+        output, _ = self.o_proj(flat)
         return output
 
     @eager_break_during_capture

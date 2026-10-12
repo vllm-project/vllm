@@ -144,12 +144,12 @@ class BertWithRopeAttention(nn.Module):
             prefix=f"{prefix}.attn",
         )
 
-        self.out_proj = RowParallelLinear(
+        self.o_proj = RowParallelLinear(
             input_size=hidden_size,
             output_size=hidden_size,
             bias=bias,
             quant_config=quant_config,
-            prefix=f"{prefix}.dense",
+            prefix=f"{prefix}.o_proj",
         )
 
     def forward(
@@ -161,7 +161,7 @@ class BertWithRopeAttention(nn.Module):
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v)
-        output, _ = self.out_proj(attn_output)
+        output, _ = self.o_proj(attn_output)
         return output
 
 
@@ -356,14 +356,14 @@ class BertWithRopeBlock(nn.Module):
         prefix: str = "",
     ):
         super().__init__()
-        self.attn = BertWithRopeAttention(
+        self.self_attn = BertWithRopeAttention(
             hidden_size=config.hidden_size,
             num_attention_heads=config.num_attention_heads,
             cache_config=cache_config,
             quant_config=quant_config,
             bias=bias,
             rotary_kwargs=rotary_kwargs,
-            prefix=f"{prefix}.attention",
+            prefix=f"{prefix}.self_attn",
         )
 
         if moe:
@@ -394,52 +394,18 @@ class BertWithRopeBlock(nn.Module):
                     prefix=f"{prefix}.mlp",
                 )
 
-        self.attn_ln = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
-        self.mlp_ln = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
-
-    def forward(self, positions: torch.Tensor, hidden_states: torch.Tensor):
-        attn_output = self.attn(positions, hidden_states)
-        hidden_states = self.attn_ln(hidden_states + attn_output)
-        mlp_out = self.mlp(hidden_states)
-        hidden_states = self.mlp_ln(hidden_states + mlp_out)
-        return hidden_states
-
-
-class BertWithRopeEncoder(nn.Module):
-    def __init__(
-        self,
-        vllm_config: VllmConfig,
-        bias: bool = True,
-        rotary_kwargs: dict | None = None,
-        prefix: str = "",
-    ):
-        super().__init__()
-        config = vllm_config.model_config.hf_config
-        cache_config = vllm_config.cache_config
-        quant_config = vllm_config.quant_config
-        every_n = getattr(config, "moe_every_n_layers", 0)
-        self.layers = nn.ModuleList(
-            [
-                BertWithRopeBlock(
-                    config=config,
-                    cache_config=cache_config,
-                    quant_config=quant_config,
-                    bias=bias,
-                    moe=every_n > 0 and (layer_idx % every_n == 1),
-                    rotary_kwargs=rotary_kwargs,
-                    prefix=f"{prefix}.layer.{layer_idx}",
-                )
-                for layer_idx in range(config.num_hidden_layers)
-            ]
+        self.post_attention_layernorm = nn.LayerNorm(
+            config.hidden_size, eps=config.layer_norm_eps
+        )
+        self.post_mlp_layernorm = nn.LayerNorm(
+            config.hidden_size, eps=config.layer_norm_eps
         )
 
-    def forward(
-        self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor:
-        for layer in self.layers:
-            hidden_states = layer(positions, hidden_states)
+    def forward(self, positions: torch.Tensor, hidden_states: torch.Tensor):
+        attn_output = self.self_attn(positions, hidden_states)
+        hidden_states = self.post_attention_layernorm(hidden_states + attn_output)
+        mlp_out = self.mlp(hidden_states)
+        hidden_states = self.post_mlp_layernorm(hidden_states + mlp_out)
         return hidden_states
 
 
@@ -459,13 +425,22 @@ class BertWithRope(nn.Module, SupportsQuant):
 
         self.vllm_config = vllm_config
         self.add_pooling_layer = add_pooling_layer
-        self.config = vllm_config.model_config.hf_config
-        self.embeddings = BertWithRopeEmbedding(self.config)
-        self.encoder = BertWithRopeEncoder(
-            vllm_config=vllm_config,
-            bias=getattr(self.config, "bias", True),
-            rotary_kwargs=self.config.rotary_kwargs,
-            prefix=f"{prefix}.encoder",
+        self.config = config = vllm_config.model_config.hf_config
+        self.embeddings = BertWithRopeEmbedding(config)
+        every_n = getattr(config, "moe_every_n_layers", 0)
+        self.layers = nn.ModuleList(
+            [
+                BertWithRopeBlock(
+                    config=config,
+                    cache_config=vllm_config.cache_config,
+                    quant_config=vllm_config.quant_config,
+                    bias=getattr(config, "bias", True),
+                    moe=every_n > 0 and (layer_idx % every_n == 1),
+                    rotary_kwargs=config.rotary_kwargs,
+                    prefix=maybe_prefix(prefix, f"layers.{layer_idx}"),
+                )
+                for layer_idx in range(config.num_hidden_layers)
+            ]
         )
 
         if add_pooling_layer:
@@ -490,7 +465,9 @@ class BertWithRope(nn.Module, SupportsQuant):
             hidden_states = self.embeddings(
                 input_ids=input_ids, token_type_ids=token_type_ids
             )
-        return self.encoder(positions, hidden_states)
+        for layer in self.layers:
+            hidden_states = layer(positions, hidden_states)
+        return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         weights = self.hf_to_vllm_mapper.apply(weights)
@@ -540,14 +517,8 @@ class NomicBertModel(BertWithRope):
 
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_substr={
-            "emb_ln": "embeddings.LayerNorm",
-            "attn.Wqkv": "attn.qkv_proj",
-            "norm1": "attn_ln",
-            "mlp.fc1.": "mlp.up_proj.",
-            "mlp.fc11": "mlp.up_proj",
-            "mlp.fc12": "mlp.gate_proj",
-            "mlp.fc2": "mlp.down_proj",
-            "norm2": "mlp_ln",
+            ".attn.Wqkv.": ".self_attn.qkv_proj.",
+            ".mlp.fc1.": ".mlp.up_proj.",
             # MoE mapping
             "experts.mlp.": "",
             "experts.": "",
@@ -559,20 +530,22 @@ class NomicBertModel(BertWithRope):
 class GteNewModel(BertWithRope):
     # for https://huggingface.co/Alibaba-NLP/new-impl
 
+    # The "new" model type is not in Transformers, so its checkpoints are not renamed
     hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_prefix={"new.": "", "encoder.layer.": "layers."},
         orig_to_new_substr={
-            "new.": "",
-            "layer": "layers",
-            "attention.qkv_proj": "attn.qkv_proj",
-            "attention.o_proj": "attn.out_proj",
-        }
+            ".attention.qkv_proj.": ".self_attn.qkv_proj.",
+            ".attention.o_proj.": ".self_attn.o_proj.",
+            ".attn_ln.": ".post_attention_layernorm.",
+            ".mlp_ln.": ".post_mlp_layernorm.",
+        },
     )
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "", **kwargs):
         super().__init__(vllm_config=vllm_config, prefix=prefix, **kwargs)
 
         # GteNewModel only gate_up_proj does not have bias.
-        for layer in self.encoder.layers:
+        for layer in self.layers:
             layer.mlp.gate_up_proj.bias = None
             layer.mlp.gate_up_proj.skip_bias_add = True
 
@@ -602,27 +575,24 @@ class SnowflakeGteNewModel(GteNewModel):
     # for Snowflake/snowflake-arctic-embed-m-v2.0
 
     hf_to_vllm_mapper = WeightsMapper(
-        orig_to_new_substr={
-            "layer": "layers",
-            "attention.qkv_proj": "attn.qkv_proj",
-            "attention.o_proj": "attn.out_proj",
-        }
+        orig_to_new_substr={".attention.qkv_proj.": ".self_attn.qkv_proj."}
     )
 
 
 class JinaRobertaModel(BertWithRope):
     # for https://huggingface.co/jinaai/jina-embeddings-v3
 
+    # Jina checkpoints use the "xlm-roberta" model type, so they are not renamed
     hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_prefix={"emb_ln.": "embeddings.LayerNorm.", "encoder.": ""},
         orig_to_new_substr={
-            "emb_ln": "embeddings.LayerNorm",
-            "mixer.Wqkv": "attn.qkv_proj",
-            "mixer.out_proj": "attn.out_proj",
-            "norm1": "attn_ln",
-            "mlp.fc1.": "mlp.up_proj.",
-            "mlp.fc2": "mlp.down_proj",
-            "norm2": "mlp_ln",
-        }
+            ".mixer.Wqkv.": ".self_attn.qkv_proj.",
+            ".mixer.out_proj.": ".self_attn.o_proj.",
+            ".norm1.": ".post_attention_layernorm.",
+            ".mlp.fc1.": ".mlp.up_proj.",
+            ".mlp.fc2.": ".mlp.down_proj.",
+            ".norm2.": ".post_mlp_layernorm.",
+        },
     )
 
     @torch.inference_mode()

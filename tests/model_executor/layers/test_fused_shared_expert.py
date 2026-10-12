@@ -446,8 +446,8 @@ def test_deepseek_v4_shared_expert_fse_uses_mtp_quantization_config_prefix(
 
     compatible, reason = is_shared_expert_quant_fse_compatible(
         DeepseekV4Config(),
-        "model.layers.2.ffn.experts",
-        "model.layers.2.ffn.shared_experts",
+        "model.layers.2.mlp.experts",
+        "model.layers.2.mlp.shared_experts",
     )
 
     assert compatible
@@ -954,7 +954,7 @@ def test_models_fse_init(
         if mtp is not None:
             assert not mtp.model.layers[
                 "1"
-            ].mtp_block.ffn.is_fused_shared_expert_enabled
+            ].mtp_block.mlp.is_fused_shared_expert_enabled
             warning.assert_called_once()
             assert (
                 "DeepSeek-V4 shared experts at mtp.0.ffn.shared_experts"

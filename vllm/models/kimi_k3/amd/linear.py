@@ -4,6 +4,7 @@
 from collections.abc import Iterable
 from typing import Any, cast
 
+import regex as re
 import torch
 from torch import nn
 
@@ -65,6 +66,7 @@ from vllm.model_executor.models.interfaces import (
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     PPMissingLayer,
+    WeightsMapper,
     get_spec_layer_idx_from_weight_name,
     is_pp_missing_parameter,
     make_layers,
@@ -1059,6 +1061,17 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
 class KimiLinearForCausalLM(
     nn.Module, HasInnerState, SupportsPP, MixtureOfExperts, IsHybrid
 ):
+    # The decoder layers are shared with Kimi-K3, whose checkpoints Transformers
+    # does not rename, so the Transformers names are mapped back to vLLM's
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_regex={
+            re.compile(r"\.mlp\.(?=(experts|gate|shared_experts)(\.|$))"): (
+                ".block_sparse_moe."
+            ),
+        },
+        orig_to_new_substr={".self_attn.forget_gate.": ".self_attn."},
+    )
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         self.model_config = vllm_config.model_config
@@ -1153,4 +1166,4 @@ class KimiLinearForCausalLM(
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

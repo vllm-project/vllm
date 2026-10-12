@@ -136,12 +136,12 @@ class CohereASRAttention(nn.Module):
 
         self._init_qkv(embed_dim, bias, quant_config, prefix=prefix)
 
-        self.out_projection = RowParallelLinear(
+        self.o_proj = RowParallelLinear(
             input_size=embed_dim,
             output_size=embed_dim,
             bias=bias,
             quant_config=quant_config,
-            prefix=f"{prefix}.out_projection",
+            prefix=f"{prefix}.o_proj",
         )
         if attn_type == AttentionType.ENCODER:
             raise NotImplementedError(
@@ -198,7 +198,7 @@ class CohereASRAttention(nn.Module):
 
         attn_output = self.attn(q, k, v)
 
-        output, _ = self.out_projection(attn_output)
+        output, _ = self.o_proj(attn_output)
 
         return output
 
@@ -264,7 +264,7 @@ class CohereASRCrossAttention(CohereASRAttention):
 
         attn_output = self.attn(q, k, v)
 
-        output, _ = self.out_projection(attn_output)
+        output, _ = self.o_proj(attn_output)
 
         return output
 
@@ -282,13 +282,13 @@ class CohereASRMLP(nn.Module):
         super().__init__()
 
         self.activation_fn = get_act_fn(act_fn)
-        self.dense_in = ColumnParallelLinear(
+        self.fc1 = ColumnParallelLinear(
             input_size=embed_dim,
             output_size=ffn_dim,
             quant_config=quant_config,
             prefix=f"{prefix}.fc1",
         )
-        self.dense_out = RowParallelLinear(
+        self.fc2 = RowParallelLinear(
             input_size=ffn_dim,
             output_size=embed_dim,
             quant_config=quant_config,
@@ -296,9 +296,9 @@ class CohereASRMLP(nn.Module):
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        hidden_states, _ = self.dense_in(hidden_states)
+        hidden_states, _ = self.fc1(hidden_states)
         hidden_states = self.activation_fn(hidden_states)
-        hidden_states, _ = self.dense_out(hidden_states)
+        hidden_states, _ = self.fc2(hidden_states)
         return hidden_states
 
 
@@ -330,10 +330,10 @@ class FixedPositionalEncoding(nn.Module):
         pos_enc[:, 0::2] = torch.sin(position * div_term)
         pos_enc[:, 1::2] = torch.cos(position * div_term)
         pos_enc.div_(math.sqrt(hidden_size))
-        self.register_buffer("pos_enc", pos_enc)
+        self.register_buffer("weight", pos_enc)
 
     def forward(self, position_ids: torch.Tensor) -> torch.Tensor:
-        embeddings = torch.embedding(self.pos_enc, position_ids)
+        embeddings = torch.embedding(self.weight, position_ids)
         return embeddings
 
 
@@ -349,34 +349,33 @@ class CohereASRDecoderLayer(nn.Module):
         self.act_fn = config.get("hidden_act")
         self.num_heads = config.get("num_attention_heads")
 
-        # self_attn
-        self.layer_norm_1 = nn.LayerNorm(self.hidden_dim)
-        self.first_sub_layer = CohereASRAttention(
+        self.input_layernorm = nn.LayerNorm(self.hidden_dim)
+        self.self_attn = CohereASRAttention(
             embed_dim=self.hidden_dim,
             num_heads=self.num_heads,
             attn_type=AttentionType.DECODER,
             cache_config=cache_config,
             quant_config=quant_config,
-            prefix=f"{prefix}.first_sub_layer",
+            prefix=f"{prefix}.self_attn",
         )
 
         # cross attn to attend to encoder
-        self.layer_norm_2 = nn.LayerNorm(self.hidden_dim)
-        self.second_sub_layer = CohereASRCrossAttention(
+        self.post_attention_layernorm = nn.LayerNorm(self.hidden_dim)
+        self.encoder_attn = CohereASRCrossAttention(
             embed_dim=self.hidden_dim,
             num_heads=self.num_heads,
             cache_config=cache_config,
             quant_config=quant_config,
-            prefix=f"{prefix}.second_sub_layer",
+            prefix=f"{prefix}.encoder_attn",
         )
 
-        self.layer_norm_3 = nn.LayerNorm(self.hidden_dim)
-        self.third_sub_layer = CohereASRMLP(
+        self.final_layernorm = nn.LayerNorm(self.hidden_dim)
+        self.mlp = CohereASRMLP(
             embed_dim=self.hidden_dim,
             ffn_dim=self.ffn_dim,
             act_fn=self.act_fn,
             quant_config=quant_config,
-            prefix=f"{prefix}.third_sub_layer",
+            prefix=f"{prefix}.mlp",
         )
 
     def forward(
@@ -385,48 +384,24 @@ class CohereASRDecoderLayer(nn.Module):
         encoder_hidden_states: torch.Tensor | None,
     ) -> torch.Tensor:
         residual = hidden_states
-        hidden_states = self.layer_norm_1(hidden_states)
-        hidden_states = self.first_sub_layer(hidden_states=hidden_states)
+        hidden_states = self.input_layernorm(hidden_states)
+        hidden_states = self.self_attn(hidden_states=hidden_states)
 
         hidden_states = residual + hidden_states
         residual = hidden_states
-        hidden_states = self.layer_norm_2(hidden_states)
-        hidden_states = self.second_sub_layer(
+        hidden_states = self.post_attention_layernorm(hidden_states)
+        hidden_states = self.encoder_attn(
             hidden_states=hidden_states,
             encoder_hidden_states=encoder_hidden_states,
         )
 
         hidden_states = residual + hidden_states
         residual = hidden_states
-        hidden_states = self.layer_norm_3(hidden_states)
-        hidden_states = self.third_sub_layer(hidden_states)
+        hidden_states = self.final_layernorm(hidden_states)
+        hidden_states = self.mlp(hidden_states)
         hidden_states = residual + hidden_states
 
         return hidden_states
-
-
-class TransformerEmbedding(nn.Module):
-    def __init__(
-        self,
-        vocab_size: int,
-        hidden_size: int,
-        max_target_positions: int,
-        padding_idx: int,
-    ) -> None:
-        super().__init__()
-        self.token_embedding = nn.Embedding(vocab_size, hidden_size, padding_idx)
-        self.position_embedding = FixedPositionalEncoding(
-            hidden_size=hidden_size,
-            max_sequence_length=max_target_positions,
-        )
-        self.layer_norm = nn.LayerNorm(hidden_size)
-
-    def forward(self, input_ids: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
-        inputs_embeds = self.token_embedding(input_ids)
-        positions = self.position_embedding(positions)
-        embeddings = inputs_embeds + positions
-        embeddings = self.layer_norm(embeddings)
-        return embeddings
 
 
 @support_torch_compile(dynamic_arg_dims={"input_ids": 0, "positions": -1})
@@ -441,12 +416,14 @@ class CohereASRDecoder(nn.Module):
         self.num_decoder_layers = config_dict.get("num_layers")
         self.vocab_size = config.head["num_classes"]
 
-        self.embedding = TransformerEmbedding(
-            vocab_size=self.vocab_size,
-            hidden_size=self.hidden_size,
-            max_target_positions=self.max_target_positions,
-            padding_idx=self.padding_idx,
+        self.embed_tokens = nn.Embedding(
+            self.vocab_size, self.hidden_size, self.padding_idx
         )
+        self.pos_emb = FixedPositionalEncoding(
+            hidden_size=self.hidden_size,
+            max_sequence_length=self.max_target_positions,
+        )
+        self.embedding_layernorm = nn.LayerNorm(self.hidden_size)
 
         self.start_layer, self.end_layer, self.layers = make_layers(
             self.num_decoder_layers,
@@ -455,7 +432,7 @@ class CohereASRDecoder(nn.Module):
             ),
             prefix=f"{prefix}.layers",
         )
-        self.final_layer_norm = nn.LayerNorm(self.hidden_size)
+        self.norm = nn.LayerNorm(self.hidden_size)
 
     def forward(
         self,
@@ -470,13 +447,14 @@ class CohereASRDecoder(nn.Module):
                 encoder_hidden_states=encoder_hidden_states,
             )
 
-        hidden_states = self.final_layer_norm(hidden_states)
+        hidden_states = self.norm(hidden_states)
         return hidden_states
 
     def get_input_embeddings(
         self, input_ids: torch.Tensor, positions: torch.Tensor
     ) -> torch.Tensor:
-        return self.embedding(input_ids, positions)
+        embeddings = self.embed_tokens(input_ids) + self.pos_emb(positions)
+        return self.embedding_layernorm(embeddings)
 
 
 # ----- Decoder END -----
@@ -653,9 +631,9 @@ class ConvSubsampling(nn.Module):
         # mlp:
         # [T//sub_factor, conv_channels * (num_melspec//sub_factor)]
         # -> [T//sub_factor, feat_out]
-        self.out = torch.nn.Linear(conv_channels * int(out_length), feat_out)
+        self.linear = torch.nn.Linear(conv_channels * int(out_length), feat_out)
         self.conv2d_subsampling = True
-        self.conv = MaskedConvSequential(*layers)
+        self.layers = MaskedConvSequential(*layers)
 
     def calc_length(
         self,
@@ -678,11 +656,11 @@ class ConvSubsampling(nn.Module):
     def forward(
         self, x: torch.Tensor, lengths: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        x, lengths = self.conv(x, lengths)
+        x, lengths = self.layers(x, lengths)
 
         if self.conv2d_subsampling:
             b, c, t, f = x.size()
-            x = self.out(x.transpose(1, 2).reshape(b, t, -1))
+            x = self.linear(x.transpose(1, 2).reshape(b, t, -1))
         # Transpose to Channel Last mode
         else:
             x = x.transpose(1, 2)
@@ -951,7 +929,7 @@ class ConformerConvolution(nn.Module):
         )
 
         assert norm_type == "batch_norm"
-        self.batch_norm = nn.BatchNorm1d(dw_conv_input_dim)
+        self.norm = nn.BatchNorm1d(dw_conv_input_dim)
 
         self.activation = Swish()
         self.pointwise_conv2 = nn.Conv1d(
@@ -976,7 +954,7 @@ class ConformerConvolution(nn.Module):
 
         x = self.depthwise_conv(x)
 
-        x = self.batch_norm(x)
+        x = self.norm(x)
 
         x = self.activation(x)
         x = self.pointwise_conv2(x)
@@ -1007,10 +985,10 @@ class CohereASRMultiHeadAttention(nn.Module):
         self.d_k = n_feat // n_head
         self.s_d_k = math.sqrt(self.d_k)
         self.h = n_head
-        self.linear_q = nn.Linear(n_feat, n_feat, bias=use_bias)
-        self.linear_k = nn.Linear(n_feat, n_feat, bias=use_bias)
-        self.linear_v = nn.Linear(n_feat, n_feat, bias=use_bias)
-        self.linear_out = nn.Linear(n_feat, n_feat, bias=use_bias)
+        self.q_proj = nn.Linear(n_feat, n_feat, bias=use_bias)
+        self.k_proj = nn.Linear(n_feat, n_feat, bias=use_bias)
+        self.v_proj = nn.Linear(n_feat, n_feat, bias=use_bias)
+        self.o_proj = nn.Linear(n_feat, n_feat, bias=use_bias)
 
     def forward_qkv(
         self,
@@ -1031,9 +1009,9 @@ class CohereASRMultiHeadAttention(nn.Module):
 
         """
         n_batch = query.size(0)
-        q = self.linear_q(query).view(n_batch, -1, self.h, self.d_k)
-        k = self.linear_k(key).view(n_batch, -1, self.h, self.d_k)
-        v = self.linear_v(value).view(n_batch, -1, self.h, self.d_k)
+        q = self.q_proj(query).view(n_batch, -1, self.h, self.d_k)
+        k = self.k_proj(key).view(n_batch, -1, self.h, self.d_k)
+        v = self.v_proj(value).view(n_batch, -1, self.h, self.d_k)
         q = q.transpose(1, 2)
         k = k.transpose(1, 2)
         v = v.transpose(1, 2)
@@ -1073,7 +1051,7 @@ class CohereASRMultiHeadAttention(nn.Module):
             n_batch, -1, self.h * self.d_k
         )  # (batch, time1, d_model)
 
-        return self.linear_out(x)  # (batch, time1, d_model)
+        return self.o_proj(x)  # (batch, time1, d_model)
 
     def forward(
         self,
@@ -1130,19 +1108,19 @@ class RelPositionMultiHeadAttention(CohereASRMultiHeadAttention):
             use_bias=use_bias,
         )
         # linear transformation for positional encoding
-        self.linear_pos = nn.Linear(n_feat, n_feat, bias=False)
+        self.relative_k_proj = nn.Linear(n_feat, n_feat, bias=False)
         # these two learnable biases are used in matrix c and matrix d
         # as described in https://arxiv.org/abs/1901.02860 Section 3.3
         if pos_bias_u is None or pos_bias_v is None:
-            self.pos_bias_u = nn.Parameter(
+            self.bias_u = nn.Parameter(
                 torch.zeros(self.h, self.d_k), requires_grad=False
             )
-            self.pos_bias_v = nn.Parameter(
+            self.bias_v = nn.Parameter(
                 torch.zeros(self.h, self.d_k), requires_grad=False
             )
         else:
-            self.pos_bias_u = pos_bias_u
-            self.pos_bias_v = pos_bias_v
+            self.bias_u = pos_bias_u
+            self.bias_v = pos_bias_v
 
     def rel_shift(self, x: torch.Tensor) -> torch.Tensor:
         """Compute relative positional encoding.
@@ -1188,13 +1166,13 @@ class RelPositionMultiHeadAttention(CohereASRMultiHeadAttention):
 
         assert pos_emb is not None
         n_batch_pos = pos_emb.size(0)
-        p = self.linear_pos(pos_emb).view(n_batch_pos, -1, self.h, self.d_k)
+        p = self.relative_k_proj(pos_emb).view(n_batch_pos, -1, self.h, self.d_k)
         p = p.transpose(1, 2)  # (batch, head, time1, d_k)
 
         # (batch, head, time1, d_k)
-        q_with_bias_u = (q + self.pos_bias_u).transpose(1, 2)
+        q_with_bias_u = (q + self.bias_u).transpose(1, 2)
         # (batch, head, time1, d_k)
-        q_with_bias_v = (q + self.pos_bias_v).transpose(1, 2)
+        q_with_bias_v = (q + self.bias_v).transpose(1, 2)
 
         # compute attention score
         # first compute matrix a and matrix c
@@ -1430,7 +1408,7 @@ class ConformerEncoder(nn.Module):
             subsampling_conv_channels = d_model
         assert subsampling and subsampling_factor > 1 and subsampling == "dw_striding"
 
-        self.pre_encode = ConvSubsampling(
+        self.subsampling = ConvSubsampling(
             subsampling=subsampling,
             subsampling_factor=subsampling_factor,
             feat_in=feat_in,
@@ -1546,7 +1524,7 @@ class ConformerEncoder(nn.Module):
         cur_att_context_size = self.att_context_size
         audio_signal = torch.transpose(audio_signal, 1, 2)
 
-        audio_signal, length = self.pre_encode(x=audio_signal, lengths=length)
+        audio_signal, length = self.subsampling(x=audio_signal, lengths=length)
         length = length.to(torch.int64)
 
         max_audio_length = audio_signal.size(1)
@@ -1813,11 +1791,11 @@ class CohereASRModel(nn.Module):
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
-            (".first_sub_layer.qkv_proj", ".first_sub_layer.query_net", "q"),
-            (".first_sub_layer.qkv_proj", ".first_sub_layer.key_net", "k"),
-            (".first_sub_layer.qkv_proj", ".first_sub_layer.value_net", "v"),
-            (".second_sub_layer.kv_proj", ".second_sub_layer.key_net", "k"),
-            (".second_sub_layer.kv_proj", ".second_sub_layer.value_net", "v"),
+            (".self_attn.qkv_proj", ".self_attn.q_proj", "q"),
+            (".self_attn.qkv_proj", ".self_attn.k_proj", "k"),
+            (".self_attn.qkv_proj", ".self_attn.v_proj", "v"),
+            (".encoder_attn.kv_proj", ".encoder_attn.k_proj", "k"),
+            (".encoder_attn.kv_proj", ".encoder_attn.v_proj", "v"),
         ]
         params_dict = dict(self.named_parameters())
         buffers_dict = dict(self.named_buffers())
@@ -1826,12 +1804,10 @@ class CohereASRModel(nn.Module):
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
             for param_name, weight_name, shard_id in stacked_params_mapping:
-                if weight_name not in name:
+                # The encoder attention projections are not fused
+                if weight_name not in name or not name.startswith("decoder."):
                     continue
                 name = name.replace(weight_name, param_name)
-                # Skip loading extra bias for GPTQ models.
-                # if name.endswith(".bias") and name not in params_dict:
-                #     continue
 
                 param = params_dict[name]
                 weight_loader = param.weight_loader
@@ -1846,7 +1822,9 @@ class CohereASRModel(nn.Module):
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
 
                 # Convert buffer dtype to match loaded weight for pos_bias tensors
-                if "pos_bias" in name and param.dtype != loaded_weight.dtype:
+                if name.endswith(("bias_u", "bias_v")) and param.dtype != (
+                    loaded_weight.dtype
+                ):
                     logger.info(
                         "Converting buffer %s dtype from %s to %s for loading.",
                         name,
@@ -2054,14 +2032,12 @@ class CohereAsrForConditionalGeneration(
     }
 
     hf_to_vllm_mapper = WeightsMapper(
-        orig_to_new_substr={
-            ".fc1.": ".mlp.fc1.",
-            ".fc2.": ".mlp.fc2.",
-            "model.conv.batch_norm.num_batches_tracked": None,
-        },
         orig_to_new_prefix={
-            "model.preprocessor.featurizer.fb": None,
-            "model.preprocessor.featurizer.window": None,
+            "preprocessor.featurizer.": None,
+            # vLLM keeps the projector outside the decoder so it runs with the encoder
+            "decoder.proj.": "model.encoder_decoder_proj.",
+            "encoder.": "model.encoder.",
+            "decoder.": "model.decoder.",
         },
     )
 
@@ -2308,27 +2284,5 @@ class CohereAsrForConditionalGeneration(
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        def transform(inputs):
-            name, loaded_weight = inputs
-
-            if name.startswith("transf_decoder._decoder"):
-                name = name.replace("transf_decoder._decoder", "decoder")
-            if name.startswith("transf_decoder._embedding"):
-                name = name.replace("transf_decoder._embedding", "decoder.embedding")
-            if "second_sub_layer.query_net" in name:
-                name = name.replace(
-                    "second_sub_layer.query_net", "second_sub_layer.q_proj"
-                )
-
-            if name in ["log_softmax.mlp.layer0.weight", "log_softmax.mlp.layer0.bias"]:
-                name = name.replace("log_softmax.mlp.layer0", "proj_out")
-            else:
-                name = "model." + name
-
-            return name, loaded_weight
-
         loader = AutoWeightsLoader(self)
-
-        return loader.load_weights(
-            map(transform, weights), mapper=self.hf_to_vllm_mapper
-        )
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

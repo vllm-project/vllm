@@ -78,6 +78,7 @@ logger = init_logger(__name__)
 # ``.weight_scale_inv``. Mirrors the per-instance mapper built by
 # ``_make_deepseek_v4_weights_mapper`` in deepseek_v4.py.
 _EXPERT_SCALE_RE = re.compile(r"\.experts\.\d+\.w[123]\.scale$")
+_MTP_NORM_RE = re.compile(r"^(model\.layers\.\d+)\.kv_norm\.")
 
 
 class DeepSeekV4MultiTokenPredictorLayer(nn.Module):
@@ -366,7 +367,6 @@ class DeepSeekV4MTP(nn.Module):
         WEIGHT_NAME_REMAPPING: dict[str, str] = {
             ".emb.tok_emb.weight": ".embed_tokens.weight",
             ".head.weight": ".shared_head.head.weight",
-            ".norm.weight": ".shared_head.norm.weight",
         }
 
         def _remap_weight_name(name: str) -> str:
@@ -374,14 +374,15 @@ class DeepSeekV4MTP(nn.Module):
             for old_pattern, new_pattern in WEIGHT_NAME_REMAPPING.items():
                 if old_pattern in name:
                     name = name.replace(old_pattern, new_pattern)
-            return name
+            # Transformers renames the MTP output norm to `kv_norm`
+            return _MTP_NORM_RE.sub(r"\1.shared_head.norm.", name)
 
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
-            ("gate_up_proj", "w1", 0),
-            ("gate_up_proj", "w3", 1),
-            ("attn.fused_wqa_wkv", "attn.wq_a", 0),
-            ("attn.fused_wqa_wkv", "attn.wkv", 1),
+            ("shared_experts.gate_up_proj", "shared_experts.gate_proj", 0),
+            ("shared_experts.gate_up_proj", "shared_experts.up_proj", 1),
+            ("self_attn.fused_wqa_wkv", "self_attn.q_a_proj", 0),
+            ("self_attn.fused_wqa_wkv", "self_attn.kv_proj", 1),
         ]
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
@@ -396,7 +397,7 @@ class DeepSeekV4MTP(nn.Module):
 
         # Pre-compute expert mapping ONCE.
         first_layer = next(iter(self.model.layers.values()))
-        if first_layer.mtp_block.ffn.use_native_mega_moe:
+        if first_layer.mtp_block.mlp.use_native_mega_moe:
             expert_mapping = make_deepseek_v4_expert_params_mapping(
                 self.config.n_routed_experts
             )
@@ -429,15 +430,14 @@ class DeepSeekV4MTP(nn.Module):
 
             if spec_layer != self.model.mtp_start_layer_idx and ".layers" not in name:
                 continue
-            if name.endswith(".scale"):
+            # The hyper-connection `*_hc.scale` params are not quantization scales
+            if name.endswith(".scale") and not name.endswith("_hc.scale"):
                 suffix = (
                     expert_scale_suffix
                     if _EXPERT_SCALE_RE.search(name)
                     else ".weight_scale_inv"
                 )
                 name = name.removesuffix(".scale") + suffix
-            if ".shared_experts.w2" in name:
-                name = name.replace(".shared_experts.w2", ".shared_experts.down_proj")
             if self.pad_shared_expert and ".shared_experts." in name:
                 loaded_weight = DeepseekV4Model._pad_shared_expert_weight(
                     self.quant_config, name, loaded_weight
@@ -490,20 +490,13 @@ class DeepSeekV4MTP(nn.Module):
                             loaded_params.add(name_mapped)
                             break
                     continue
-                elif "attn_sink" in name:
+                elif name.endswith(".sinks"):
                     narrow_weight = loaded_weight[head_rank_start:head_rank_end]
                     n = narrow_weight.shape[0]
                     params_dict[name][:n].copy_(narrow_weight)
                     loaded_params.add(name)
                     continue
                 else:
-                    if name.endswith(".ffn.gate.bias"):
-                        # ``e_score_correction_bias`` lives on the gate
-                        # under a different attribute name.
-                        name = name.replace(
-                            ".ffn.gate.bias",
-                            ".ffn.gate.e_score_correction_bias",
-                        )
                     param = params_dict[name]
                     weight_loader = getattr(
                         param, "weight_loader", default_weight_loader
@@ -535,7 +528,7 @@ class DeepSeekV4MTP(nn.Module):
 
     def finalize_mega_moe_weights(self) -> None:
         for layer in self.model.layers.values():
-            layer.mtp_block.ffn.finalize_mega_moe_weights()
+            layer.mtp_block.mlp.finalize_mega_moe_weights()
 
     def process_weights_after_loading(self) -> None:
         self.finalize_mega_moe_weights()
@@ -560,7 +553,7 @@ class DeepSeekV4MTP(nn.Module):
         spec_layer_weight = False
         shared_weight = False
         for weight_name in spec_layer_weight_names:
-            if weight_name in name:
+            if name.startswith(f"model.layers.{spec_layer}.{weight_name}"):
                 spec_layer_weight = True
                 if weight_name in shared_weight_names:
                     shared_weight = True

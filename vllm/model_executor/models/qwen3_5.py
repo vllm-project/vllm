@@ -321,12 +321,7 @@ class Qwen3_5ForCausalLMBase(
         "lm_head": "output_embeddings",
     }
 
-    # Some community text-only checkpoints keep the extraneous
-    # `model.language_model.` prefix inherited from the VL training stack.
-    # Strip it so both prefixed and clean checkpoints load correctly.
-    hf_to_vllm_mapper = WeightsMapper(
-        orig_to_new_prefix={"model.language_model.": "model.", "mtp.": None},
-    )
+    hf_to_vllm_mapper = WeightsMapper(orig_to_new_prefix={"mtp.": None})
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         config = vllm_config.model_config.hf_text_config

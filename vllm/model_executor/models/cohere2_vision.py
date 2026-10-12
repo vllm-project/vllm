@@ -316,7 +316,7 @@ class Cohere2VisionForConditionalGeneration(
 ):
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
-            "model.vision_tower.": "vision_tower.",
+            "model.vision_tower.": "vision_tower.vision_model.",
             "model.multi_modal_projector.": "multi_modal_projector.",
             "model.language_model.": "language_model.model.",
         }

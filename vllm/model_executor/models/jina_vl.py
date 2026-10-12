@@ -108,7 +108,7 @@ class JinaVLForSequenceClassification(
     SupportsScoreTemplate,
 ):
     is_pooling_model = True
-    weight_mapper = WeightsMapper(
+    hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             "score.0.": "score.dense.",
             "score.2.": "score.out_proj.",
@@ -168,4 +168,4 @@ class JinaVLForSequenceClassification(
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights, mapper=self.weight_mapper)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

@@ -21,8 +21,9 @@ from vllm.model_executor.model_loader.mtp_validation import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.sequence import IntermediateTensors
 
-from .step3p5 import Step3p5DecoderLayer
+from .step3p5 import STEP3P7_TO_STEP3P5_MAPPER, Step3p5DecoderLayer
 from .utils import (
+    WeightsMapper,
     get_draft_quant_config,
     get_spec_layer_idx_from_weight_name,
     maybe_prefix,
@@ -159,6 +160,10 @@ class Step3p5MTP(nn.Module):
     # Each MTP layer's shared_head carries its own LM head weights.
     has_own_lm_head = True
 
+    hf_to_vllm_mapper = STEP3P7_TO_STEP3P5_MAPPER | WeightsMapper(
+        orig_to_new_prefix={"model.language_model.": "model."}
+    )
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         # The target config may be a multimodal wrapper (Step3.7); build the
@@ -200,6 +205,7 @@ class Step3p5MTP(nn.Module):
         return self.model.compute_logits(hidden_states, spec_step_idx)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        weights = self.hf_to_vllm_mapper.apply(weights)
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),

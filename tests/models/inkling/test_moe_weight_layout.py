@@ -219,7 +219,7 @@ def test_sink_down_projection_is_packed_during_load(monkeypatch) -> None:
     sink = moe.InklingSinkExperts(n_experts=2, d_model=3, d_mlp=8)
     loaded = torch.arange(48, dtype=sink.w2_weight.dtype).reshape(2, 3, 8)
 
-    sink.load_weight("w2_weight", loaded)
+    sink.load_weight("down_proj", loaded)
 
     expected = loaded[:, :, 4:].permute(1, 0, 2).reshape(3, 8)
     torch.testing.assert_close(sink.w2_weight, expected)
@@ -236,7 +236,7 @@ def test_sink_packed_weight_forward_matches_expert_sum(monkeypatch) -> None:
     w13 = torch.randn(2, 16, 3, dtype=torch.bfloat16)
     w2 = torch.randn(2, 3, 8, dtype=torch.bfloat16)
     sink.load_weight("w13_weight", w13)
-    sink.load_weight("w2_weight", w2)
+    sink.load_weight("down_proj", w2)
     x = torch.randn(5, 3, device="cuda", dtype=torch.bfloat16)
     gammas = torch.randn(5, 2, device="cuda")
 

@@ -30,11 +30,6 @@ import transformers
 from packaging.version import Version
 from torch import nn
 from transformers import AutoModel, PreTrainedConfig
-from transformers.conversion_mapping import (
-    WeightRenaming,
-    get_checkpoint_conversion_mapping,
-    get_model_conversion_mapping,
-)
 
 from vllm.compilation.decorators import DynamicArgDims, support_torch_compile
 from vllm.config.utils import getattr_iter
@@ -304,26 +299,11 @@ class Base(
 
         This handles:
 
-        - Transformers weight renaming from `WeightRenaming`
         - Checkpoints saved with a base model prefix that is not `model`
         - Checkpoints saved with no base model prefix
         - Any quantization config specific mappings
         """
-        orig_to_new_renaming: list[WeightRenaming] = []
         orig_to_new_regex: dict[re.Pattern, str | None] = {}
-
-        mappings = get_model_conversion_mapping(self.model)
-        # Ensure layers that are part of the model, but not AutoModel, get their mapping
-        instantiated = {type(m).__name__ for m in self.model.modules()}
-        for arch in self.config.architectures or []:
-            if arch not in instantiated:
-                mappings.extend(get_checkpoint_conversion_mapping(arch) or [])
-
-        for mapping in mappings:
-            # Handle weights which have been renamed in Transformers
-            if isinstance(mapping, WeightRenaming):
-                orig_to_new_renaming.append(mapping)
-            # TODO: Handle WeightConverter to enable layer merging
 
         # Handle unexpected weights which should be ignored
         if self.model._keys_to_ignore_on_load_unexpected is not None:
@@ -353,10 +333,7 @@ class Base(
         nested_lm_head_pattern = re.compile(r"^model\.(.+\.)*(lm_head.+)")
         orig_to_new_regex[nested_lm_head_pattern] = r"\2"
 
-        self.hf_to_vllm_mapper = WeightsMapper(
-            orig_to_new_renaming=orig_to_new_renaming,
-            orig_to_new_regex=orig_to_new_regex,
-        )
+        self.hf_to_vllm_mapper = WeightsMapper(orig_to_new_regex=orig_to_new_regex)
 
         # Apply mapping to quantization config if needed
         self._maybe_apply_model_mapping()

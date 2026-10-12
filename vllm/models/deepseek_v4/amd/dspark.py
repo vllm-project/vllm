@@ -159,7 +159,7 @@ class DSparkDeepseekV4Model(nn.Module):
 
         Mirrors the reference DSparkAttention: each layer derives its context KV
         from the SAME projected target hidden ``main_x``, via that layer's own
-        ``wkv`` + ``kv_norm`` + RoPE + quant, then writes it at the
+        ``kv_proj`` + ``kv_norm`` + RoPE + quant, then writes it at the
         layer's context slots.
 
         ``context_slot_mappings`` is a per-layer list (each entry is the context
@@ -171,9 +171,10 @@ class DSparkDeepseekV4Model(nn.Module):
             slot_mapping = (
                 None if context_slot_mappings is None else context_slot_mappings[i]
             )
-            attn = layer.attn
-            # Optimized DSV4 MLA path: wkv part of the fused wq_a|wkv projection
-            # (q_lora part discarded), then RoPE/quant/insert via the fused op.
+            attn = layer.self_attn
+            # Optimized DSV4 MLA path: kv_proj part of the fused q_a_proj|kv_proj
+            # projection (q_lora part discarded), then RoPE/quant/insert via the
+            # fused op.
             qr_kv, _ = attn.fused_wqa_wkv(main_x)
             kv = qr_kv[..., attn.q_lora_rank :]
             kv = attn.kv_norm(kv)
@@ -328,7 +329,7 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
     def get_draft_kv_cache_layer_names(self) -> list[str]:
         # DSV4 MLA path: each draft layer's sliding-window cache is a separate
         # layer, named by its prefix.
-        return [layer.attn.swa_cache_layer.prefix for layer in self.model.layers]
+        return [layer.self_attn.swa_cache_layer.prefix for layer in self.model.layers]
 
     def precompute_and_store_context_kv(
         self,
@@ -392,7 +393,7 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
             ckpt_up_proj_name="w3",
             num_experts=self.config.n_routed_experts,
             routed_experts_prefix=(
-                "" if self.model.layers[0].ffn.use_mega_moe else "routed_experts"
+                "" if self.model.layers[0].mlp.use_mega_moe else "routed_experts"
             ),
         )
         expert_scale_suffix = (
@@ -403,10 +404,10 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
 
         # (param_name, ckpt_shard_name, shard_id) for non-expert stacked params.
         stacked_params_mapping = [
-            ("gate_up_proj", "w1", 0),
-            ("gate_up_proj", "w3", 1),
-            ("attn.fused_wqa_wkv", "attn.wq_a", 0),
-            ("attn.fused_wqa_wkv", "attn.wkv", 1),
+            ("shared_experts.gate_up_proj", "shared_experts.gate_proj", 0),
+            ("shared_experts.gate_up_proj", "shared_experts.up_proj", 1),
+            ("self_attn.fused_wqa_wkv", "self_attn.q_a_proj", 0),
+            ("self_attn.fused_wqa_wkv", "self_attn.kv_proj", 1),
         ]
 
         params_dict = dict(self.named_parameters())
@@ -428,7 +429,8 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
                 loaded_confidence_head = True
 
             # ``.scale`` -> per-method scale suffix.
-            if name.endswith(".scale"):
+            # The hyper-connection `*_hc.scale` params are not quantization scales
+            if name.endswith(".scale") and not name.endswith("_hc.scale"):
                 suffix = (
                     expert_scale_suffix
                     if _EXPERT_SCALE_RE.search(name)
@@ -474,19 +476,11 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
                 loaded_params.add(name)
                 break
             else:
-                if "attn_sink" in name:
+                if name.endswith(".sinks"):
                     narrow = loaded_weight[head_start:head_end]
                     params_dict[name][: narrow.shape[0]].copy_(narrow)
                     loaded_params.add(name)
                     continue
-                if ".shared_experts.w2" in name:
-                    name = name.replace(
-                        ".shared_experts.w2", ".shared_experts.down_proj"
-                    )
-                if name.endswith(".ffn.gate.bias"):
-                    name = name.replace(
-                        ".ffn.gate.bias", ".ffn.gate.e_score_correction_bias"
-                    )
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight)
@@ -514,8 +508,10 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
             return None
         # Head-stack params live at model level (mtp.last), context combiner at
         # model level (mtp.0); everything else is a per-layer decoder block.
+        # Transformers renames the head-stack norm to `kv_norm`
+        if rest.startswith("kv_norm."):
+            return f"model.norm.{rest.removeprefix('kv_norm.')}"
         head_prefixes = (
-            "norm.",
             "hc_head_fn",
             "hc_head_base",
             "hc_head_scale",

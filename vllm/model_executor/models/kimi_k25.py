@@ -9,6 +9,7 @@ from collections.abc import Hashable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Literal
 
+import regex as re
 import torch
 from torch import nn
 from transformers import BatchFeature, Kimi_K25Config
@@ -308,15 +309,33 @@ class KimiK25ForConditionalGeneration(
     supports_encoder_cudagraph: ClassVar[Literal[True]] = True
     supports_mm_device_do_normalize = True
 
+    # The vision tower keeps its original names because Kimi-K3 shares it
     hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_regex={
+            re.compile(rf"^model\.vision_tower\.layers\.(\d+)\.{old}\b"): new
+            for old, new in {
+                "norm1": r"vision_tower.encoder.blocks.\1.norm0",
+                "norm2": r"vision_tower.encoder.blocks.\1.norm1",
+                r"mlp\.fc1": r"vision_tower.encoder.blocks.\1.mlp.fc0",
+                r"mlp\.fc2": r"vision_tower.encoder.blocks.\1.mlp.fc1",
+                r"attn\.proj": r"vision_tower.encoder.blocks.\1.wo",
+                "wqkv": r"vision_tower.encoder.blocks.\1.wqkv",
+            }.items()
+        }
+        | {
+            re.compile(r"^model\.vision_tower\.final_layernorm\b"): (
+                "vision_tower.encoder.final_layernorm"
+            ),
+            re.compile(r"\.pos_emb\.position_embeddings$"): ".pos_emb.weight",
+        },
         orig_to_new_prefix={
             # For legacy NVFP4 checkpoint compatibility:
             # see https://github.com/vllm-project/vllm/pull/33346#issuecomment-3851475033
             "language_model.layers.": "language_model.model.layers.",
-            # mm projector
-            "mm_projector.proj.0": "mm_projector.linear_1",
-            "mm_projector.proj.2": "mm_projector.linear_2",
-        }
+            "model.language_model.": "language_model.model.",
+            "lm_head.": "language_model.lm_head.",
+            "model.": "",
+        },
     )
 
     @classmethod

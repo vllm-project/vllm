@@ -366,6 +366,16 @@ class DefaultModelLoader(BaseModelLoader):
         model_config: ModelConfig,
         model: nn.Module,
     ) -> Generator[tuple[str, torch.Tensor], None, None]:
+        weights = self._get_all_checkpoint_weights(model_config, model)
+        if (mapper := getattr(model, "checkpoint_renaming_mapper", None)) is not None:
+            weights = mapper.apply(weights)
+        yield from weights
+
+    def _get_all_checkpoint_weights(
+        self,
+        model_config: ModelConfig,
+        model: nn.Module,
+    ) -> Generator[tuple[str, torch.Tensor], None, None]:
         primary_weights = DefaultModelLoader.Source(
             model_config.model,
             model_config.revision,
@@ -402,11 +412,13 @@ class DefaultModelLoader(BaseModelLoader):
             self._encoder_only_weights_mapper = None
             return
 
+        from vllm.model_executor.models.utils import WeightsMapper
+
         # Derive from _language_model_names; fail-closed on shared HF roots
         # (Molmo/Phi-4-MM/Muse). Qwen nested/flat keys classified via mapper.
-        weights_mapper = cast(
-            "WeightsMapper | None", getattr(model, "hf_to_vllm_mapper", None)
-        )
+        weights_mapper = getattr(model, "checkpoint_renaming_mapper", WeightsMapper())
+        if hf_to_vllm_mapper := getattr(model, "hf_to_vllm_mapper", None):
+            weights_mapper |= hf_to_vllm_mapper
         self._encoder_only_lm_prefixes = resolve_mm_encoder_only_lm_prefixes(
             getattr(model, "_language_model_names", None),
             weights_mapper=weights_mapper,

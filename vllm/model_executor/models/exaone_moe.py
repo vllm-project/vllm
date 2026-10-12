@@ -92,7 +92,7 @@ class ExaoneMoe(nn.Module):
             prefix=f"{prefix}.gate",
         )
 
-        self.e_score_correction_bias = nn.Parameter(
+        self.gate.e_score_correction_bias = nn.Parameter(
             torch.empty(config.num_experts, dtype=torch.float32)
         )
 
@@ -143,7 +143,7 @@ class ExaoneMoe(nn.Module):
             prefix=f"{prefix}.experts",
             scoring_func="sigmoid",
             routed_scaling_factor=self.routed_scaling_factor,
-            e_score_correction_bias=self.e_score_correction_bias,
+            e_score_correction_bias=self.gate.e_score_correction_bias,
             enable_eplb=self.enable_eplb,
             num_redundant_experts=self.n_redundant_experts,
         )

@@ -616,7 +616,8 @@ def test_flashinfer_sparse_forward_reads_packed_kv_rows(model, page_padding):
     attn.window_size = 128
     attn.scale = 512**-0.5
     attn.kv_cache_torch_dtype = torch.bfloat16
-    attn.attn_sink = torch.full((64,), -float("inf"), device=device)
+    sinks = torch.full((64,), -float("inf"), device=device)
+    setattr(attn, "sinks" if model == "deepseek_v4" else "attn_sink", sinks)
     attn.topk_indices_buffer = torch.empty((3, 0), dtype=torch.int32, device=device)
     decode_indices = torch.full((1, 128), -1, dtype=torch.int32, device=device)
     decode_indices[0, :4] = torch.arange(64, 68, dtype=torch.int32, device=device)
@@ -661,7 +662,7 @@ def _make_rope_quant_attn(mod, num_rows: int, device: str):
     attn.kv_cache_torch_dtype = torch.float8_e4m3fn
     attn._flashinfer_fp8_bmm1_scale = attn.scale
     attn._flashinfer_fp8_bmm2_scale = 1.0
-    attn.attn_sink = torch.linspace(-1, 1, heads, device=device)
+    attn.sinks = torch.linspace(-1, 1, heads, device=device)
     attn.padded_heads = heads
     attn.topk_indices_buffer = torch.empty(
         (num_rows, 0), dtype=torch.int32, device=device
@@ -672,13 +673,13 @@ def _make_rope_quant_attn(mod, num_rows: int, device: str):
     attn.n_local_heads, attn.n_local_groups, attn.o_lora_rank = heads, groups, rank
     attn.nope_head_dim, attn.rope_head_dim = 448, 64
     attn._einsum_recipe, attn._tma_aligned_scales = (1, 1, 128), True
-    attn.wo_a = SimpleNamespace(
+    attn.o_a_proj = SimpleNamespace(
         weight=(torch.randn((groups, rank, 4096), device=device) * 0.05).to(
             torch.float8_e4m3fn
         ),
         weight_scale=torch.ones((groups, rank, 32), device=device),
     )
-    attn.wo_b = lambda z: z
+    attn.o_b_proj = lambda z: z
     return attn
 
 
@@ -788,7 +789,7 @@ def test_flashinfer_dspark_noncausal_block_sees_future_tokens(context_len):
     cache = torch.randn((num_reqs * pages, block_size, 512), device=device)
     cache = cache.clamp_(-1, 1).to(torch.float8_e4m3fn)
     attn = _make_rope_quant_attn(mod, num_rows, device)
-    attn.attn_sink = torch.full((128,), -float("inf"), device=device)
+    attn.sinks = torch.full((128,), -float("inf"), device=device)
 
     # As the DSpark SWA builder lays them out: the trailing window of context
     # and the whole block, contiguous from column 0.

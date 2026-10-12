@@ -20,12 +20,12 @@ from vllm.model_executor.models.utils import AutoWeightsLoader
     "checkpoint_name,loaded_name,param_name",
     [
         (
-            "experts.fc1.weight",
+            "experts.gate_up_proj",
             "experts.w13_weight",
             "experts.routed_experts.w13_weight",
         ),
         (
-            "experts.fc2.weight",
+            "experts.down_proj",
             "experts.w2_weight",
             "experts.routed_experts.w2_weight",
         ),
@@ -39,7 +39,7 @@ from vllm.model_executor.models.utils import AutoWeightsLoader
 def test_aria_expert_weights_load_with_checkpoint_layout(
     checkpoint_name: str, loaded_name: str, param_name: str
 ):
-    """Real Aria checkpoint weights must reach the right parameter and layout."""
+    """Renamed Aria checkpoint weights must reach the right parameter and layout."""
     config = AriaTextConfig(
         hidden_size=32,
         intermediate_size=64,
