@@ -84,7 +84,7 @@ def decode_custom_tool_input_prefix(arguments: str) -> str:
     streamed ``custom_tool_call_input`` deltas stay a prefix of the final input."""
     try:
         parsed = partial_json_parser.loads(arguments, Allow.STR | Allow.OBJ)
-    except ValueError:
+    except (ValueError, IndexError, AssertionError):
         return ""
     payload = _custom_tool_payload(parsed) or ""
     if payload and "\ud800" <= payload[-1] <= "\udbff":

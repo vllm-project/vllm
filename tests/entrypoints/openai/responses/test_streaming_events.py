@@ -246,7 +246,7 @@ class TestCustomToolStreaming:
         assert events[0].item.type == "custom_tool_call"
         assert events[0].item.id == done.id
         assert done.id.startswith("ctc_")
-        assert done.call_id.startswith("call_")
+        assert events[0].item.call_id == done.call_id
 
     def test_unrelated_keys_are_not_streamed_as_payload(self):
         """Review repro: chunks of an object whose input key arrives last must
