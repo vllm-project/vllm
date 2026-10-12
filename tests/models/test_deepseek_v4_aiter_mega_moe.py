@@ -26,6 +26,7 @@ def _make_experts(
     ep_rank=0,
     ep_size=1,
     num_experts=2,
+    num_logical_experts=None,
     intermediate_size=INTER,
     max_num_batched_tokens=3000,
     swiglu_limit=None,
@@ -47,6 +48,7 @@ def _make_experts(
         hidden_size=HIDDEN,
         intermediate_size=intermediate_size,
         swiglu_limit=swiglu_limit,
+        num_logical_experts=num_logical_experts,
     )
 
 
@@ -184,3 +186,81 @@ def test_mega_moe_routing_matches_reference(monkeypatch, hash_routing, num_token
         atol=1e-4,
     )
     torch.testing.assert_close(out, 5 * x)
+
+
+@pytest.mark.cpu_test
+def test_redundant_expert_copies_into_local_slot(monkeypatch):
+    # EP=2, 4 logical + 2 redundant = 6 physical. Rank 1 owns physical 3,4,5
+    # which are logical 3, 0, 1.
+    experts = _make_experts(
+        monkeypatch,
+        ep_rank=1,
+        ep_size=2,
+        num_experts=6,
+        num_logical_experts=4,
+    )
+    weight = torch.full((INTER, HIDDEN // 2), 7, dtype=torch.uint8)
+    assert experts.weight_loader(
+        experts.w13_weight,
+        weight,
+        "w13_weight",
+        shard_id="w1",
+        expert_id=0,
+        return_success=True,
+    )
+    assert torch.all(experts.w13_weight[1, :INTER] == 7)
+    assert torch.all(experts.w13_weight[0, :INTER] == 0)
+    assert experts.weight_loader(
+        experts.w13_weight,
+        weight,
+        "w13_weight",
+        shard_id="w1",
+        expert_id=2,
+        return_success=True,
+    ) is False
+
+
+@pytest.mark.cpu_test
+def test_expert_weight_rows_match_local_slots(monkeypatch):
+    experts = _make_experts(monkeypatch, ep_rank=0, ep_size=2, num_experts=4)
+    rows = experts.get_expert_weights()
+    assert len(rows) == 4
+    assert all(row.shape[0] == experts.num_local_experts for row in rows)
+    rows[0][0].fill_(9)
+    assert torch.all(experts.w13_weight[0] == 9)
+
+
+@pytest.mark.cpu_test
+def test_physical_expert_count_must_divide_ep(monkeypatch):
+    with pytest.raises(ValueError, match="divide evenly"):
+        _make_experts(monkeypatch, ep_rank=0, ep_size=2, num_experts=3)
+
+
+@pytest.mark.cpu_test
+def test_eplb_maps_ids_before_megamoe(monkeypatch):
+    experts = _make_experts(monkeypatch, ep_rank=0, ep_size=1, num_experts=4)
+    seen = {}
+
+    class Runtime:
+        def forward(self, hidden, weights, ids):
+            seen["ids"] = ids.clone()
+            return hidden
+
+    experts._runtime = Runtime()
+    experts.eplb_state.logical_to_physical_map = torch.zeros(1)
+    experts.eplb_state.expert_load_view = torch.zeros(1)
+    experts.eplb_state.logical_replica_count = torch.zeros(1)
+    experts.eplb_state.should_record_tensor = torch.ones((), dtype=torch.bool)
+
+    def fake_map(topk_ids, **kwargs):
+        seen["called"] = True
+        return topk_ids + 10
+
+    monkeypatch.setattr(
+        mega_moe_module, "eplb_map_to_physical_and_record", fake_map
+    )
+    hidden = torch.zeros(2, HIDDEN)
+    ids = torch.zeros(2, 2, dtype=torch.int32)
+    experts(hidden, torch.ones(2, 2), ids)
+    assert seen["called"]
+    assert torch.equal(seen["ids"], ids + 10)

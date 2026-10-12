@@ -14,6 +14,7 @@ import vllm.envs as envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import ParallelConfig, VllmConfig
 from vllm.distributed import (
+    get_ep_group,
     get_pp_group,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
@@ -62,6 +63,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import (
     EagleModelMixin,
+    MixtureOfExperts,
     SupportsEagle3,
     SupportsPP,
 )
@@ -560,8 +562,6 @@ def _validate_aiter_mega_moe_config(vllm_config: VllmConfig) -> None:
             "AITER MegaMoE runs on MoRI shmem; add "
             "--all2all-backend mori_high_throughput."
         )
-    if parallel_config.enable_eplb:
-        raise NotImplementedError("AITER MegaMoE does not support EPLB.")
     if getattr(vllm_config.model_config.hf_config, "expert_dtype", "fp4") != "fp4":
         raise NotImplementedError("AITER MegaMoE only supports fp4 experts.")
 
@@ -683,15 +683,33 @@ class DeepseekV4MoE(nn.Module):
         self.use_mega_moe = vllm_config.kernel_config.moe_backend == "aiter_mega_moe"
         if self.use_mega_moe:
             _validate_aiter_mega_moe_config(vllm_config)
+            ep_size = get_ep_group().world_size
+            eplb_config = vllm_config.parallel_config.eplb_config
+            self.n_routed_experts = config.n_routed_experts
+            self.n_shared_experts = config.n_shared_experts or 0
+            self.n_redundant_experts = eplb_config.num_redundant_experts
+            self.n_logical_experts = self.n_routed_experts
+            self.n_physical_experts = self.n_logical_experts + self.n_redundant_experts
+            if ep_size < 1 or self.n_physical_experts % ep_size:
+                raise ValueError(
+                    f"n_physical_experts={self.n_physical_experts} must be "
+                    f"divisible by ep_size={ep_size}. Adjust "
+                    "num_redundant_experts."
+                )
+            self.n_local_physical_experts = self.n_physical_experts // ep_size
+            self.n_local_experts = self.n_local_physical_experts
             self.experts = DeepseekV4AiterMegaMoEExperts(
                 vllm_config,
-                num_experts=config.n_routed_experts,
+                num_experts=self.n_physical_experts,
+                num_logical_experts=self.n_logical_experts,
                 top_k=config.num_experts_per_tok,
                 hidden_size=config.hidden_size,
                 intermediate_size=config.moe_intermediate_size,
                 swiglu_limit=self.swiglu_limit,
                 prefix=f"{prefix}.experts",
             )
+            self.experts_start_idx = self.experts.experts_start_idx
+            self.experts_end_idx = self.experts.experts_end_idx
             return
 
         fuse_shared_into_routed = (
@@ -1449,7 +1467,46 @@ def _make_deepseek_v4_weights_mapper(
     )
 
 
-class DeepseekV4ForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
+class DeepseekV4MixtureOfExperts(MixtureOfExperts):
+    moe_mlp_layers: list[DeepseekV4MoE]
+
+    def extract_moe_parameters(self, example_moe: DeepseekV4MoE | None) -> None:
+        if example_moe is None:
+            self.num_moe_layers = 0
+            self.num_expert_groups = 0
+            self.num_logical_experts = 0
+            self.num_physical_experts = 0
+            self.num_local_physical_experts = 0
+            self.num_routed_experts = 0
+            self.num_shared_experts = 0
+            self.num_redundant_experts = 0
+            return
+        self.num_logical_experts = example_moe.n_logical_experts
+        self.num_physical_experts = example_moe.n_physical_experts
+        self.num_local_physical_experts = example_moe.n_local_physical_experts
+        self.num_routed_experts = example_moe.n_routed_experts
+        self.num_shared_experts = example_moe.n_shared_experts
+        self.num_redundant_experts = example_moe.n_redundant_experts
+
+    def update_physical_experts_metadata(
+        self,
+        num_physical_experts: int,
+        num_local_physical_experts: int,
+    ) -> None:
+        assert self.num_local_physical_experts == num_local_physical_experts
+        self.num_physical_experts = num_physical_experts
+        self.num_local_physical_experts = num_local_physical_experts
+        self.num_redundant_experts = num_physical_experts - self.num_logical_experts
+        for moe in self.moe_mlp_layers:
+            moe.n_local_physical_experts = num_local_physical_experts
+            moe.n_physical_experts = num_physical_experts
+            moe.n_redundant_experts = self.num_redundant_experts
+            moe.experts.update_expert_map()
+
+
+class DeepseekV4ForCausalLM(
+    nn.Module, SupportsPP, SupportsEagle3, DeepseekV4MixtureOfExperts
+):
     model_cls = DeepseekV4Model
     finalizes_weights_during_load = False
 
@@ -1487,6 +1544,25 @@ class DeepseekV4ForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
         self.make_empty_intermediate_tensors = (  # type: ignore[method-assign]
             self.model.make_empty_intermediate_tensors
         )
+        self.set_moe_parameters()
+
+    def set_moe_parameters(self) -> None:
+        self.num_expert_groups = getattr(self.config, "n_group", 1)
+        self.moe_layers: list[nn.Module] = []
+        self.moe_mlp_layers: list[DeepseekV4MoE] = []
+        example_moe: DeepseekV4MoE | None = None
+        if self.model.use_mega_moe:
+            for layer in self.model.layers:
+                if isinstance(layer, PPMissingLayer):
+                    continue
+                if not isinstance(layer, DeepseekV4DecoderLayer):
+                    continue
+                if isinstance(layer.ffn, DeepseekV4MoE) and layer.ffn.use_mega_moe:
+                    example_moe = layer.ffn
+                    self.moe_mlp_layers.append(layer.ffn)
+                    self.moe_layers.append(layer.ffn.experts)
+        self.num_moe_layers = len(self.moe_layers)
+        self.extract_moe_parameters(example_moe)
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
