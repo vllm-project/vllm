@@ -49,6 +49,7 @@ from .interfaces import (
     is_attention_free,
     is_hybrid,
     requires_raw_input_tokens,
+    supports_hc_sp,
     supports_mamba_prefix_caching,
     supports_multimodal,
     supports_multimodal_encoder_tp_data,
@@ -286,6 +287,7 @@ _REWARD_MODELS = {
 
 _TOKEN_CLASSIFICATION_MODELS = {
     "BertForTokenClassification": ("bert", "BertForTokenClassification"),
+    "ClefOmniForJointSchema": ("clef_omni", "ClefOmniForJointSchema"),
     "ModernBertForTokenClassification": (
         "modernbert",
         "ModernBertForTokenClassification",
@@ -513,6 +515,10 @@ _MULTIMODAL_MODELS = {
     "MiniCPMV4_6ForConditionalGeneration": (
         "minicpmv4_6",
         "MiniCPMV4_6ForConditionalGeneration",
+    ),
+    "MiniCPMV4_7ForConditionalGeneration": (
+        "minicpmv4_7",
+        "MiniCPMV4_7ForConditionalGeneration",
     ),
     "Mistral3ForConditionalGeneration": (
         "mistral3",
@@ -869,6 +875,7 @@ class _ModelInfo:
     requires_raw_input_tokens: bool
     supports_multimodal_encoder_tp_data: bool
     supports_pp: bool
+    supports_hc_sp: bool
     has_inner_state: bool
     is_attention_free: bool
     is_hybrid: bool
@@ -899,6 +906,7 @@ class _ModelInfo:
                 model
             ),
             supports_pp=supports_pp(model),
+            supports_hc_sp=supports_hc_sp(model),
             has_inner_state=has_inner_state(model),
             is_attention_free=is_attention_free(model),
             is_hybrid=is_hybrid(model),
@@ -1458,6 +1466,15 @@ class _ModelRegistry:
     ) -> bool:
         model_info, _ = self.inspect_model_cls(architectures, model_config)
         return model_info.supports_pp
+
+    def is_hc_sp_supported_model(
+        self,
+        architectures: str | list[str],
+        model_config: ModelConfig,
+    ) -> bool:
+        """Check support for HC SP without changing MoE parallelism."""
+        model_info, _ = self.inspect_model_cls(architectures, model_config)
+        return model_info.supports_hc_sp
 
     def model_has_inner_state(
         self,

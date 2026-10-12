@@ -34,7 +34,6 @@ from vllm.config import (
     VllmConfig,
     get_layers_from_vllm_config,
     set_current_vllm_config,
-    update_config,
 )
 from vllm.config.cache import CacheConfig
 from vllm.config.ec_manager_config import EncoderCacheManagerMetadata
@@ -57,7 +56,7 @@ from vllm.forward_context import (
     set_forward_context,
 )
 from vllm.logger import init_logger
-from vllm.lora.layers import BaseLayerWithLoRA, LoRAMapping, LoRAMappingType
+from vllm.lora.layers import LoRAMapping, LoRAMappingType
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.fused_moe.all2all_utils import get_ep_all2all_manager
@@ -67,10 +66,7 @@ from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
 )
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.model_executor.model_loader import get_model_loader
-from vllm.model_executor.model_loader.reload import (
-    finalize_layerwise_reload,
-    initialize_layerwise_reload,
-)
+from vllm.model_executor.model_loader.reload.inplace import reload_weights
 from vllm.model_executor.models.interfaces import (
     MixtureOfExperts,
     MultiModalEmbeddings,
@@ -210,6 +206,10 @@ from vllm.v1.worker.cp_utils import (
 )
 from vllm.v1.worker.dp_utils import coordinate_batch_across_dp
 from vllm.v1.worker.ec_connector_model_runner_mixin import ECConnectorModelRunnerMixin
+from vllm.v1.worker.gpu.eplb_utils import (
+    draft_model_supports_eplb,
+    eplb_draft_model_name,
+)
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.gpu_ubatch_wrapper import UBatchWrapper
 from vllm.v1.worker.kv_connector_model_runner_mixin import KVConnectorModelRunnerMixin
@@ -245,15 +245,6 @@ if TYPE_CHECKING:
     from vllm.v1.worker.encoder_cudagraph import EncoderCudaGraphManager
 
 logger = init_logger(__name__)
-
-
-def _get_parameter_for_reload(model: nn.Module, name: str) -> nn.Parameter:
-    """Resolve checkpoint names without changing the model's module tree."""
-    module_name, _, parameter_name = name.rpartition(".")
-    module = model.get_submodule(module_name)
-    if isinstance(module, BaseLayerWithLoRA):
-        module = module.base_layer
-    return module.get_parameter(parameter_name)
 
 
 AttnMetadataDict: TypeAlias = dict[str, AttentionMetadata]
@@ -5203,19 +5194,6 @@ class GPUModelRunner(
 
         return draft_token_ids
 
-    def update_config(self, overrides: dict[str, Any]) -> None:
-        allowed_config_names = {"load_config", "model_config"}
-        for config_name, config_overrides in overrides.items():
-            if config_name not in allowed_config_names:
-                allowed = ", ".join(sorted(allowed_config_names))
-                raise ValueError(
-                    f"Config override '{config_name}' is not supported. "
-                    f"Supported configs: {allowed}"
-                )
-            config = getattr(self, config_name)
-            new_config = update_config(config, config_overrides)
-            setattr(self, config_name, new_config)
-
     @instrument(span_name="Loading (GPU)")
     def load_model(
         self,
@@ -5263,25 +5241,34 @@ class GPUModelRunner(
                     logger.info_once("Loading drafter model...")
                     if hasattr(self.drafter, "load_model"):
                         self.drafter.load_model(self.model)
+                    drafter_moe_model = None
+                    if self.parallel_config.enable_eplb and hasattr(
+                        self.drafter, "model"
+                    ):
+                        drafter_moe_model = get_mixture_of_experts_model(
+                            self.drafter.model
+                        )
+                        if not draft_model_supports_eplb(
+                            self.vllm_config.speculative_config,
+                            drafter_moe_model,
+                        ):
+                            drafter_moe_model = None
+
                     if (
                         self.parallel_config.enable_eplb
                         and hasattr(self.drafter, "model")
-                        and (
-                            drafter_moe_model := get_mixture_of_experts_model(
-                                self.drafter.model
-                            )
-                        )
-                        is not None
+                        and drafter_moe_model is not None
                     ):
                         assert not self.parallel_config.enable_elastic_ep, (
                             "Elastic EP is not supported with drafter model."
                         )
                         spec_config = self.vllm_config.speculative_config
                         assert spec_config is not None
-                        assert spec_config.draft_model_config is not None
+                        draft_model_config = spec_config.draft_model_config
+                        assert draft_model_config is not None
                         logger.info_once(
                             "EPLB is enabled for MoE part of drafter model %s.",
-                            spec_config.draft_model_config.model,
+                            draft_model_config.model,
                         )
                         if self.eplb_state is None:
                             self.eplb_state = EplbState(
@@ -5289,7 +5276,8 @@ class GPUModelRunner(
                             )
                         self.eplb_state.add_model(
                             drafter_moe_model,
-                            spec_config.draft_model_config,
+                            draft_model_config,
+                            model_name=eplb_draft_model_name(draft_model_config),
                         )
                         assert hasattr(self.drafter, "set_eplb_state")
                         self.drafter.set_eplb_state(self.eplb_state)
@@ -5472,89 +5460,16 @@ class GPUModelRunner(
         weights_path: str | None = None,
         is_checkpoint_format: bool = True,
     ) -> None:
-        """Reload weights from a weights iterator or from disk
-
-        Args:
-            weights_iterator: weights to load into model
-            weights_path: path to load weights from if weights_iterator is not
-                provided. Use path of original model if neither is provided.
-            is_checkpoint_format: set to False if weights have already been
-                processed into kernel format (repacking, renaming, etc.)
-
-        """
-        # TODO(@kylesayrs): generalize to all runners and loaders
-        # argument validation
-        if weights_iterator is None and not is_checkpoint_format:
-            logger.warning(
-                "Reloading from disk means that weights will be in checkpoint format. "
-                "Please use `is_checkpoint_format=True` "
-                "to avoid weight reloading errors"
-            )
-
-        model = self.get_model()
-        weights_to_load = {
-            name.replace(".base_layer.", ".") if self.lora_config else name
-            for name, _ in model.named_parameters()
-        }
-        counter_before_reloading = time.perf_counter()
-
-        # load weights from disk if none are provided
-        if weights_iterator is None:
-            model_loader = get_model_loader(self.load_config)
-            if not hasattr(model_loader, "get_all_weights"):
-                raise NotImplementedError(
-                    f"Model reloading with `{self.load_config.load_format}` format"
-                )
-
-            if weights_path is not None:
-                # The revision and any object-storage `model_weights` source
-                # belong to the model we are reloading away from, so they must
-                # not be carried over to the new path.
-                self.model_config.model = weights_path
-                self.model_config.model_weights = ""
-                self.model_config.revision = None
-            weights_iterator = model_loader.get_all_weights(self.model_config, model)
-            weights_iterator = cast(
-                Iterable[tuple[str, torch.Tensor]], weights_iterator
-            )
-
-        # begin loading weights
-        logger.info_once("Reloading weights inplace...")
-        if is_checkpoint_format:
-            # load weights from checkpoint/ original model format
-            initialize_layerwise_reload(model)
-            loaded_weights = model.load_weights(weights_iterator)
-            finalize_layerwise_reload(model, self.model_config)
-
-        else:
-            # load weights from kernel format
-            logger.warning_once(
-                "Reloading with `is_checkpoint_format=True` requires that "
-                "weights be in kernel format and already sharded",
-            )
-            loaded_weights = set()
-            for name, loaded_weight in weights_iterator:
-                param = _get_parameter_for_reload(model, name)  # TODO: buffers?
-                param.copy_(loaded_weight)
-                loaded_weights.add(name)
-
-        self.reset_lora_state()
-
-        # logging and validation
-        counter_after_reloading = time.perf_counter()
-        diff_seconds = counter_after_reloading - counter_before_reloading
-        logger.info_once(
-            "Reloading and processing weights took %.2f seconds",
-            diff_seconds,
+        """Reload weights in place; see `reload_weights` in
+        `vllm.model_executor.model_loader.reload.inplace` for details."""
+        reload_weights(
+            self.vllm_config,
+            self.get_model(),
+            weights_iterator=weights_iterator,
+            weights_path=weights_path,
+            is_checkpoint_format=is_checkpoint_format,
         )
-        if self.model_config.quantization is None and loaded_weights is not None:
-            weights_not_loaded = weights_to_load - loaded_weights
-            if weights_not_loaded:
-                logger.warning(
-                    "Following weights were not loaded from checkpoint: %s",
-                    weights_not_loaded,
-                )
-
+        self.reset_lora_state()
         self.reset_encoder_cache()
         self.reset_mm_cache()
 
