@@ -102,6 +102,8 @@ impl EngineRoutingState {
         None
     }
 
+    /// Record one request removed from this engine. Its admission is dropped
+    /// from `admitted_since_stats` only if no newer snapshot has reset that count.
     fn record_removal(&mut self, admission_stats_generation: Option<u64>) {
         self.inflight -= 1;
         if admission_stats_generation == Some(self.stats_generation) {
@@ -1116,13 +1118,15 @@ mod tests {
 
         let mut finished_routes = Vec::new();
         for request_id in ["finished-1", "finished-2"].map(String::from) {
-            let (engine_id, _) = registry.register(request_id.clone(), None, None).unwrap();
+            let (engine_id, _) =
+                registry.register(request_id.clone(), None, None, NonZeroU32::MIN).unwrap();
 
             finished_routes.push(engine_id.engine_index());
             drop(registry.finish_many([&request_id]));
         }
 
-        let (live_engine, _) = registry.register("live-request".into(), None, None).unwrap();
+        let (live_engine, _) =
+            registry.register("live-request".into(), None, None, NonZeroU32::MIN).unwrap();
         expect_test::expect!["([Some(0), Some(0)], Some(0))"].assert_eq(&format!(
             "{:?}",
             (finished_routes, live_engine.engine_index())
