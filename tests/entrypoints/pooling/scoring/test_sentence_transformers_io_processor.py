@@ -7,7 +7,6 @@ import pytest
 from transformers import BertConfig, BertModel, BertTokenizer
 
 from vllm import PoolingParams
-from vllm.entrypoints import chat_utils
 from vllm.entrypoints.pooling.scoring.io_processor import (
     CrossEncoderIOProcessor,
     _validate_sentence_transformers_tokenizer,
@@ -19,7 +18,7 @@ from vllm.entrypoints.pooling.typing import (
     PoolingServeContext,
 )
 from vllm.exceptions import VLLMValidationError
-from vllm.renderers import TokenizeParams
+from vllm.renderers import TokenizeParams, chat_utils
 
 _CHAT_TEMPLATE = (
     "{% for message in messages %}{{ message['role'] }}:"

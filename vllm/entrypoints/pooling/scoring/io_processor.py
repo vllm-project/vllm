@@ -9,6 +9,12 @@ import torch.nn.functional as F
 from vllm import PoolingParams, PoolingRequestOutput, TokensPrompt
 from vllm.logger import init_logger
 from vllm.renderers import TokenizeParams
+from vllm.renderers.chat_utils import (
+    ChatCompletionMessageParam,
+    ChatTemplateResolutionError,
+    ConversationMessage,
+    parse_chat_messages,
+)
 from vllm.renderers.hf import safe_apply_chat_template
 from vllm.renderers.inputs.preprocess import (
     extract_target_prompt,
@@ -19,12 +25,6 @@ from vllm.tasks import PoolingTask
 from vllm.transformers_utils.config import SentenceTransformersCrossEncoderConfig
 from vllm.utils.mistral import is_mistral_tokenizer
 
-from ...chat_utils import (
-    ChatCompletionMessageParam,
-    ChatTemplateResolutionError,
-    ConversationMessage,
-    parse_chat_messages,
-)
 from ..base.io_processor import PoolingIOProcessor
 from ..pooling.protocol import PoolingCompletionRequest
 from ..typing import (

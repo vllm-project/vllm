@@ -95,7 +95,9 @@ class CompressedSlotMappingKernel(
                 block_table_ptr + batch_idx * block_table_stride + block_ids,
                 mask=mask & is_valid,
             )
-            slot_ids = block_numbers * block_size + pos_after_compress % block_size
+            slot_ids = block_numbers.to(tl.int64) * block_size + (
+                pos_after_compress % block_size
+            )
 
             # NOTE
             slot_ids = tl.where(is_valid, slot_ids, PAD_ID)
