@@ -189,6 +189,7 @@ fn serve_args_forward_python_flags_with_separator() {
                         renderer: Auto,
                         language_model_only: false,
                         max_logprobs: None,
+                        stream_interval: 1,
                         shutdown_timeout: 0,
                         http_timeout_keep_alive: None,
                         chat_template: None,
@@ -204,9 +205,7 @@ fn serve_args_forward_python_flags_with_separator() {
                         disable_log_stats: false,
                         served_model_name: [],
                         allowed_origins: JsonStringList(
-                            [
-                                "*",
-                            ],
+                            [],
                         ),
                         allowed_methods: JsonStringList(
                             [
@@ -371,6 +370,34 @@ fn serve_args_forward_profiler_config_to_managed_engine() {
             "torch_profiler_dir": "/tmp/profile",
         })
     );
+}
+
+#[test]
+fn serve_args_forward_stream_interval_to_frontend_config() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--stream-interval",
+        "4",
+    ])
+    .unwrap();
+
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    let frontend_config = args.to_frontend_config("tcp://127.0.0.1:62100".to_string());
+    assert_eq!(frontend_config.stream_interval.get(), 4);
+
+    let error = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--stream-interval",
+        "0",
+    ])
+    .unwrap_err();
+    assert_eq!(error.kind(), clap::error::ErrorKind::ValueValidation);
 }
 
 #[test]
@@ -668,10 +695,10 @@ fn frontend_args_json_passes_tls_into_config() {
         "frontend",
         "--listen-fd",
         "3",
-        "--input-address",
-        "ipc:///tmp/input.sock",
-        "--output-address",
-        "ipc:///tmp/output.sock",
+        "--input-listener-fd",
+        "999999",
+        "--output-listener-fd",
+        "999998",
         "--args-json",
         r#"{"model_tag":"Qwen/Qwen3-0.6B","ssl_certfile":"/tmp/cert.pem","ssl_keyfile":"/tmp/key.pem"}"#,
     ])
@@ -693,10 +720,10 @@ fn frontend_args_json_rejects_out_of_range_cert_reqs() {
         "frontend",
         "--listen-fd",
         "3",
-        "--input-address",
-        "ipc:///tmp/input.sock",
-        "--output-address",
-        "ipc:///tmp/output.sock",
+        "--input-listener-fd",
+        "999999",
+        "--output-listener-fd",
+        "999998",
         "--args-json",
         r#"{"model_tag":"Qwen/Qwen3-0.6B","ssl_certfile":"/tmp/cert.pem","ssl_cert_reqs":5}"#,
     ])
@@ -718,10 +745,10 @@ fn frontend_args_json_passes_enable_request_id_headers_into_config() {
         "frontend",
         "--listen-fd",
         "3",
-        "--input-address",
-        "ipc:///tmp/input.sock",
-        "--output-address",
-        "ipc:///tmp/output.sock",
+        "--input-listener-fd",
+        "999999",
+        "--output-listener-fd",
+        "999998",
         "--args-json",
         r#"{"model_tag":"Qwen/Qwen3-0.6B","enable_request_id_headers":true}"#,
     ])
@@ -807,10 +834,10 @@ fn frontend_args_json_passes_lora_modules_into_config() {
         "frontend",
         "--listen-fd",
         "3",
-        "--input-address",
-        "ipc:///tmp/input.sock",
-        "--output-address",
-        "ipc:///tmp/output.sock",
+        "--input-listener-fd",
+        "999999",
+        "--output-listener-fd",
+        "999998",
         "--args-json",
         r#"{"model_tag":"Qwen/Qwen3-0.6B","lora_modules":[{"name":"alice","path":"org/alice","base_model_name":null,"is_3d_lora_weight":true}]}"#,
     ])
@@ -862,10 +889,10 @@ fn frontend_args_json_accepts_api_key_string() {
         "frontend",
         "--listen-fd",
         "3",
-        "--input-address",
-        "ipc:///tmp/input.sock",
-        "--output-address",
-        "ipc:///tmp/output.sock",
+        "--input-listener-fd",
+        "999999",
+        "--output-listener-fd",
+        "999998",
         "--args-json",
         r#"{"model_tag":"Qwen/Qwen3-0.6B","api_key":"secret"}"#,
     ])
@@ -885,10 +912,10 @@ fn frontend_args_json_accepts_api_key_list() {
         "frontend",
         "--listen-fd",
         "3",
-        "--input-address",
-        "ipc:///tmp/input.sock",
-        "--output-address",
-        "ipc:///tmp/output.sock",
+        "--input-listener-fd",
+        "999999",
+        "--output-listener-fd",
+        "999998",
         "--args-json",
         r#"{"model_tag":"Qwen/Qwen3-0.6B","api_key":["secret-a","secret-b"]}"#,
     ])
@@ -991,10 +1018,10 @@ fn frontend_args_accept_json() {
         "frontend",
         "--listen-fd",
         "3",
-        "--input-address",
-        "ipc:///tmp/input.sock",
-        "--output-address",
-        "ipc:///tmp/output.sock",
+        "--input-listener-fd",
+        "999999",
+        "--output-listener-fd",
+        "999998",
         "--coordinator-address",
         "tcp://127.0.0.1:7000",
         "--args-json",
@@ -1008,8 +1035,8 @@ fn frontend_args_accept_json() {
                 FrontendArgs {
                     listen_fd: 3,
                     grpc_listen_fd: None,
-                    input_address: "ipc:///tmp/input.sock",
-                    output_address: "ipc:///tmp/output.sock",
+                    input_listener_fd: 999999,
+                    output_listener_fd: 999998,
                     coordinator_address: Some(
                         "tcp://127.0.0.1:7000",
                     ),
@@ -1030,6 +1057,7 @@ fn frontend_args_accept_json() {
                         renderer: Auto,
                         language_model_only: false,
                         max_logprobs: None,
+                        stream_interval: 1,
                         shutdown_timeout: 0,
                         http_timeout_keep_alive: None,
                         chat_template: None,
@@ -1045,9 +1073,7 @@ fn frontend_args_accept_json() {
                         disable_log_stats: false,
                         served_model_name: [],
                         allowed_origins: JsonStringList(
-                            [
-                                "*",
-                            ],
+                            [],
                         ),
                         allowed_methods: JsonStringList(
                             [
@@ -1083,10 +1109,10 @@ fn frontend_args_json_applies_defaults() {
         "frontend",
         "--listen-fd",
         "3",
-        "--input-address",
-        "ipc:///tmp/input.sock",
-        "--output-address",
-        "ipc:///tmp/output.sock",
+        "--input-listener-fd",
+        "999999",
+        "--output-listener-fd",
+        "999998",
         "--engine-count",
         "4",
         "--args-json",
@@ -1115,10 +1141,10 @@ fn frontend_args_json_ignores_engine_owned_max_model_len() {
         "frontend",
         "--listen-fd",
         "3",
-        "--input-address",
-        "ipc:///tmp/input.sock",
-        "--output-address",
-        "ipc:///tmp/output.sock",
+        "--input-listener-fd",
+        "999999",
+        "--output-listener-fd",
+        "999998",
         "--args-json",
         r#"{"model_tag":"Qwen/Qwen3-0.6B","max_model_len":-1}"#,
     ])
@@ -1165,10 +1191,10 @@ fn hf_overrides_preserve_merge_patch_in_cli_and_python_bootstrap() {
         "frontend",
         "--listen-fd",
         "3",
-        "--input-address",
-        "ipc:///tmp/input.sock",
-        "--output-address",
-        "ipc:///tmp/output.sock",
+        "--input-listener-fd",
+        "999999",
+        "--output-listener-fd",
+        "999998",
         "--args-json",
         &payload.to_string(),
     ])
@@ -1204,10 +1230,10 @@ fn frontend_args_json_accepts_supported_non_default_fields() {
         "frontend",
         "--listen-fd",
         "3",
-        "--input-address",
-        "ipc:///tmp/input.sock",
-        "--output-address",
-        "ipc:///tmp/output.sock",
+        "--input-listener-fd",
+        "999999",
+        "--output-listener-fd",
+        "999998",
         "--args-json",
         r#"{"model_tag":"Qwen/Qwen3-0.6B","generation_config":"vllm","revision":"release","engine_ready_timeout_secs":42,"tool_call_parser":"hermes","reasoning_parser":"qwen3_thinking","tokenizer_mode":"deepseek_v32","language_model_only":true,"max_logprobs":-1,"shutdown_timeout":3}"#,
     ])
@@ -1286,10 +1312,10 @@ fn frontend_args_json_ignores_unknown_fields() {
         "frontend",
         "--listen-fd",
         "3",
-        "--input-address",
-        "ipc:///tmp/input.sock",
-        "--output-address",
-        "ipc:///tmp/output.sock",
+        "--input-listener-fd",
+        "999999",
+        "--output-listener-fd",
+        "999998",
         "--args-json",
         r#"{"model_tag":"Qwen/Qwen3-0.6B","uds":"/tmp/vllm.sock","nested_unknown":{"x":1}}"#,
     ])
@@ -1308,10 +1334,10 @@ fn frontend_args_json_sets_prompt_tokens_details_flag() {
         "frontend",
         "--listen-fd",
         "3",
-        "--input-address",
-        "ipc:///tmp/input.sock",
-        "--output-address",
-        "ipc:///tmp/output.sock",
+        "--input-listener-fd",
+        "999999",
+        "--output-listener-fd",
+        "999998",
         "--args-json",
         r#"{"model_tag":"Qwen/Qwen3-0.6B","api_server_count":2,"enable_prompt_tokens_details":true}"#,
     ])
@@ -1352,13 +1378,13 @@ fn serve_args_parse_cors_flags() {
 }
 
 #[test]
-fn serve_args_cors_defaults_are_permissive() {
+fn serve_args_cors_defaults_restrict_origins() {
     let cli = Cli::try_parse_from(["vllm-rs", "serve", "Qwen/Qwen3-0.6B"]).unwrap();
 
     let Command::Serve(serve) = cli.command else {
         panic!("expected serve args");
     };
-    assert_eq!(serve.runtime.allowed_origins.0, ["*"]);
+    assert!(serve.runtime.allowed_origins.0.is_empty());
     assert_eq!(serve.runtime.allowed_methods.0, ["*"]);
     assert_eq!(serve.runtime.allowed_headers.0, ["*"]);
     assert!(!serve.runtime.allow_credentials);
@@ -1371,10 +1397,10 @@ fn frontend_args_json_parses_cors_fields() {
         "frontend",
         "--listen-fd",
         "3",
-        "--input-address",
-        "ipc:///tmp/input.sock",
-        "--output-address",
-        "ipc:///tmp/output.sock",
+        "--input-listener-fd",
+        "999999",
+        "--output-listener-fd",
+        "999998",
         "--args-json",
         r#"{"model_tag":"Qwen/Qwen3-0.6B","allowed_origins":["http://a.com"],"allow_credentials":true}"#,
     ])
@@ -1396,10 +1422,10 @@ fn frontend_args_json_rejects_unsupported_fields() {
         "frontend",
         "--listen-fd",
         "3",
-        "--input-address",
-        "ipc:///tmp/input.sock",
-        "--output-address",
-        "ipc:///tmp/output.sock",
+        "--input-listener-fd",
+        "999999",
+        "--output-listener-fd",
+        "999998",
         "--args-json",
         r#"{"model_tag":"Qwen/Qwen3-0.6B","root_path":"/prefix"}"#,
     ])
@@ -1423,10 +1449,10 @@ fn frontend_args_json_aggregates_multiple_unsupported_fields() {
         "frontend",
         "--listen-fd",
         "3",
-        "--input-address",
-        "ipc:///tmp/input.sock",
-        "--output-address",
-        "ipc:///tmp/output.sock",
+        "--input-listener-fd",
+        "999999",
+        "--output-listener-fd",
+        "999998",
         "--args-json",
         r#"{"model_tag":"Qwen/Qwen3-0.6B","response_role":"assistant","root_path":"/prefix"}"#,
     ])
@@ -1452,10 +1478,10 @@ fn frontend_args_json_rejects_malformed_json() {
         "frontend",
         "--listen-fd",
         "3",
-        "--input-address",
-        "ipc:///tmp/input.sock",
-        "--output-address",
-        "ipc:///tmp/output.sock",
+        "--input-listener-fd",
+        "999999",
+        "--output-listener-fd",
+        "999998",
         "--args-json",
         r#"{"model_tag":"Qwen/Qwen3-0.6B""#,
     ])
@@ -1702,6 +1728,7 @@ fn serve_args_accept_handshake_aliases() {
                         renderer: Auto,
                         language_model_only: false,
                         max_logprobs: None,
+                        stream_interval: 1,
                         shutdown_timeout: 0,
                         http_timeout_keep_alive: None,
                         chat_template: None,
@@ -1717,9 +1744,7 @@ fn serve_args_accept_handshake_aliases() {
                         disable_log_stats: false,
                         served_model_name: [],
                         allowed_origins: JsonStringList(
-                            [
-                                "*",
-                            ],
+                            [],
                         ),
                         allowed_methods: JsonStringList(
                             [
@@ -1866,6 +1891,7 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
             lora_modules: [],
             chat_template_content_format: Auto,
             max_logprobs: None,
+            stream_interval: 1,
             api_server_options: ApiServerOptions {
                 enable_log_requests: false,
                 enable_prompt_tokens_details: false,
@@ -1874,9 +1900,7 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
                 sse_keep_alive_interval: None,
             },
             cors: CorsConfig {
-                allow_origins: [
-                    "*",
-                ],
+                allow_origins: [],
                 allow_methods: [
                     "*",
                 ],
@@ -1961,6 +1985,7 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
             lora_modules: [],
             chat_template_content_format: Auto,
             max_logprobs: None,
+            stream_interval: 1,
             api_server_options: ApiServerOptions {
                 enable_log_requests: false,
                 enable_prompt_tokens_details: false,
@@ -1969,9 +1994,7 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
                 sse_keep_alive_interval: None,
             },
             cors: CorsConfig {
-                allow_origins: [
-                    "*",
-                ],
+                allow_origins: [],
                 allow_methods: [
                     "*",
                 ],
@@ -1999,10 +2022,10 @@ fn frontend_args_reject_legacy_handshake_flags() {
         "frontend",
         "--listen-fd",
         "3",
-        "--input-address",
-        "ipc:///tmp/input.sock",
-        "--output-address",
-        "ipc:///tmp/output.sock",
+        "--input-listener-fd",
+        "999999",
+        "--output-listener-fd",
+        "999998",
         "--args-json",
         r#"{"model_tag":"Qwen/Qwen3-0.6B"}"#,
         "--handshake-address",
@@ -2043,10 +2066,10 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
         "frontend",
         "--listen-fd",
         "3",
-        "--input-address",
-        "ipc:///tmp/input.sock",
-        "--output-address",
-        "ipc:///tmp/output.sock",
+        "--input-listener-fd",
+        "999999",
+        "--output-listener-fd",
+        "999998",
         "--coordinator-address",
         "tcp://127.0.0.1:7000",
         "--engine-start-index",
@@ -2068,8 +2091,8 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
     expect![[r#"
         Config {
             transport_mode: Bootstrapped {
-                input_address: "ipc:///tmp/input.sock",
-                output_address: "ipc:///tmp/output.sock",
+                input_listener_fd: 999999,
+                output_listener_fd: 999998,
                 engine_start_index: 3,
                 engine_count: 1,
                 data_parallel_size: 4,
@@ -2100,6 +2123,7 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
             lora_modules: [],
             chat_template_content_format: Auto,
             max_logprobs: None,
+            stream_interval: 1,
             api_server_options: ApiServerOptions {
                 enable_log_requests: false,
                 enable_prompt_tokens_details: false,
@@ -2108,9 +2132,7 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
                 sse_keep_alive_interval: None,
             },
             cors: CorsConfig {
-                allow_origins: [
-                    "*",
-                ],
+                allow_origins: [],
                 allow_methods: [
                     "*",
                 ],
@@ -2200,10 +2222,10 @@ fn frontend_config_adopts_inherited_grpc_listener() {
         "3",
         "--grpc-listen-fd",
         "4",
-        "--input-address",
-        "ipc:///tmp/input.sock",
-        "--output-address",
-        "ipc:///tmp/output.sock",
+        "--input-listener-fd",
+        "999999",
+        "--output-listener-fd",
+        "999998",
         "--args-json",
         r#"{"model_tag":"Qwen/Qwen3-0.6B","grpc_port":50051}"#,
     ])
@@ -2227,10 +2249,10 @@ fn frontend_args_json_enables_profiling_when_profiler_config_set() {
         "frontend",
         "--listen-fd",
         "3",
-        "--input-address",
-        "ipc:///tmp/input.sock",
-        "--output-address",
-        "ipc:///tmp/output.sock",
+        "--input-listener-fd",
+        "999999",
+        "--output-listener-fd",
+        "999998",
         "--args-json",
         r#"{"model_tag":"Qwen/Qwen3-0.6B","profiler_config":{"profiler":"torch","torch_profiler_dir":"/tmp/profile"}}"#,
     ])
@@ -2251,10 +2273,10 @@ fn frontend_args_json_disables_profiling_when_profiler_config_absent() {
         "frontend",
         "--listen-fd",
         "3",
-        "--input-address",
-        "ipc:///tmp/input.sock",
-        "--output-address",
-        "ipc:///tmp/output.sock",
+        "--input-listener-fd",
+        "999999",
+        "--output-listener-fd",
+        "999998",
         "--args-json",
         r#"{"model_tag":"Qwen/Qwen3-0.6B"}"#,
     ])
@@ -2275,10 +2297,10 @@ fn frontend_args_json_disables_profiling_when_profiler_type_is_null() {
         "frontend",
         "--listen-fd",
         "3",
-        "--input-address",
-        "ipc:///tmp/input.sock",
-        "--output-address",
-        "ipc:///tmp/output.sock",
+        "--input-listener-fd",
+        "999999",
+        "--output-listener-fd",
+        "999998",
         "--args-json",
         r#"{"model_tag":"Qwen/Qwen3-0.6B","profiler_config":{"profiler":null}}"#,
     ])

@@ -29,7 +29,7 @@ HEAD = 512
 TOPK = 128  # triton convert requires width % 128 == 0
 
 
-def ref_convert(req_id, block_table, token_indices, BLOCK_SIZE=64, **_):
+def ref_convert(req_id, block_table, token_indices, BLOCK_SIZE=64, **kw):
     out = torch.full_like(token_indices, -1)
     counts = torch.zeros(token_indices.shape[0], dtype=torch.int32)
     for t in range(token_indices.shape[0]):
@@ -41,7 +41,7 @@ def ref_convert(req_id, block_table, token_indices, BLOCK_SIZE=64, **_):
             blk = int(block_table[int(req_id[t]), pos // BLOCK_SIZE])
             if blk < 0:
                 continue
-            vals.append(blk * BLOCK_SIZE + pos % BLOCK_SIZE)
+            vals.append(blk * kw["BLOCK_STRIDE_ROWS"] + pos % BLOCK_SIZE)
         out[t, : len(vals)] = torch.tensor(vals, dtype=out.dtype)
         counts[t] = len(vals)
     return out, counts
@@ -133,11 +133,8 @@ def test_forward_wiring(monkeypatch, qk_rope, kv_dtype):
     meta.state = state
     q_nope = torch.randn(rows, impl.num_heads, HEAD)
     q_rope = torch.randn(rows, impl.num_heads, qk_rope)
-    cache = torch.zeros(
-        8 * BLOCK_SIZE,
-        impl.head_size,
-        dtype=torch.uint8 if impl.use_fp8_kv_cache else torch.bfloat16,
-    )
+    dtype = torch.uint8 if impl.use_fp8_kv_cache else torch.bfloat16
+    cache = torch.zeros(8, 2, BLOCK_SIZE, impl.head_size, dtype=dtype)[:, 0]
 
     out, lse = impl.forward_mqa(
         (q_nope, q_rope), cache, meta, SimpleNamespace(_k_scale_float=0.5)
@@ -147,7 +144,10 @@ def test_forward_wiring(monkeypatch, qk_rope, kv_dtype):
     # Reserved buffers carry this step's slots; lengths are NOT refreshed
     # here (the builder plans them host-side before capture/replay).
     ref_slots, ref_counts = ref_convert(
-        meta.req_id_per_token, meta.block_table, impl.topk_indices_buffer
+        meta.req_id_per_token,
+        meta.block_table,
+        impl.topk_indices_buffer,
+        BLOCK_STRIDE_ROWS=2 * BLOCK_SIZE,
     )
     offset = 0
     for t in range(rows):
@@ -161,7 +161,7 @@ def test_forward_wiring(monkeypatch, qk_rope, kv_dtype):
     assert state.wrapper.run_args is not None
     q_pe, ckv, kpe, kwargs = state.wrapper.run_args[1:]
     assert q_pe.shape == (rows, impl.num_heads, qk_rope)
-    assert ckv.shape == (8 * BLOCK_SIZE, 1, HEAD)
+    assert ckv.shape == ((8 - 1) * 2 * BLOCK_SIZE + BLOCK_SIZE, 1, HEAD)
     assert kpe.shape[-1] == qk_rope
     if impl.use_fp8_kv_cache:
         assert kwargs["ckv_scale"] == 0.5 and kwargs["kpe_scale"] == 1.0

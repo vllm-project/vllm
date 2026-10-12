@@ -146,7 +146,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_RMSNORM: bool = True
     VLLM_ROCM_USE_AITER_MLA: bool = True
     VLLM_ROCM_AITER_MLA_ASM_PADDING: Literal["auto", "gluon", "asm"] = "auto"
-    VLLM_ROCM_AITER_MLA_DCP_VERIFY: Literal["asm", "segmented"] = "segmented"
+    VLLM_ROCM_AITER_MLA_DCP_VERIFY: Literal["auto", "asm", "segmented"] = "auto"
     VLLM_ROCM_USE_AITER_MHA: bool = True
     VLLM_ROCM_USE_AITER_FP4_ASM_GEMM: bool = False
     VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA: bool = False
@@ -155,6 +155,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_FP4BMM: bool = True
     VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION: bool = False
     VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: bool = False
+    VLLM_ROCM_MONO_DECODE: bool = False
     VLLM_ROCM_USE_AITER_TRITON_GEMM: bool = True
     VLLM_ROCM_USE_SKINNY_GEMM: bool = True
     VLLM_ROCM_FP8_PADDING: bool = True
@@ -233,6 +234,9 @@ if TYPE_CHECKING:
     VLLM_NIXL_SIDE_CHANNEL_PORT: int = 5600
     VLLM_P2P_SIDE_CHANNEL_HOST: str = "localhost"
     VLLM_P2P_SIDE_CHANNEL_PORT: int = 5710
+    VLLM_P2P_MAX_PEERS: int = 128
+    VLLM_P2P_HANDSHAKE_TIMEOUT_S: int = 30
+    VLLM_P2P_IDLE_TIMEOUT_S: int = 300
     VLLM_EC_SIDE_CHANNEL_HOST: str = "localhost"
     VLLM_EC_SIDE_CHANNEL_PORT: int = 5601
     VLLM_MOONCAKE_BOOTSTRAP_PORT: int = 8998
@@ -1339,12 +1343,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
         os.getenv("VLLM_ROCM_USE_AITER_MLA", "True").lower() in ("true", "1")
     ),
     # Kernel for causal multi-token (spec-decode) verify steps under decode
-    # context parallelism on gfx950: "asm" uses AITER's round-robin ASM
-    # decode, "segmented" the Triton segmented MLA path.
+    # context parallelism: "asm" uses AITER's round-robin ASM decode (gfx950),
+    # "segmented" the Triton segmented MLA path. "auto" (default) takes "asm"
+    # wherever it can serve the shape and "segmented" otherwise.
     "VLLM_ROCM_AITER_MLA_DCP_VERIFY": env_with_choices(
         "VLLM_ROCM_AITER_MLA_DCP_VERIFY",
-        "segmented",
-        ["asm", "segmented"],
+        "auto",
+        ["auto", "asm", "segmented"],
         case_sensitive=False,
     ),
     # Small-head (<16) AITER MLA decode kernel selection. Small head counts
@@ -1404,6 +1409,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS", "False").lower()
         in ("true", "1")
+    ),
+    # Run the eligible layers of decode steps on the model's mono decode
+    # kernels: persistent launches a layer, the TP all-reduces in-kernel
+    # (DeepSeek-V4.1 on CDNA4). By default is disabled.
+    "VLLM_ROCM_MONO_DECODE": lambda: (
+        os.getenv("VLLM_ROCM_MONO_DECODE", "False").lower() in ("true", "1")
     ),
     # Whether to use aiter triton kernels for gemm ops.
     # By default is enabled.
@@ -1767,6 +1778,21 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_P2P_SIDE_CHANNEL_PORT": lambda: int(
         os.getenv("VLLM_P2P_SIDE_CHANNEL_PORT", "5710")
     ),
+    # Maximum number of concurrent P2P peer sessions. Limits ZMQ socket
+    # consumption to prevent denial-of-service via unbounded peer
+    # creation from client-supplied kv_transfer_params. Default: 128.
+    "VLLM_P2P_MAX_PEERS": lambda: int(os.getenv("VLLM_P2P_MAX_PEERS", "128")),
+    # Seconds to wait for a P2P peer handshake to complete (connected
+    # but not yet ready). Sessions exceeding this deadline are reaped.
+    # Prevents never-responding peers from accumulating indefinitely.
+    "VLLM_P2P_HANDSHAKE_TIMEOUT_S": lambda: int(
+        os.getenv("VLLM_P2P_HANDSHAKE_TIMEOUT_S", "30")
+    ),
+    # Seconds a P2P session may remain idle (no pending work, no
+    # messages) before it is eligible for eviction. Idle eviction runs
+    # only when remaining peer slots are within 8 of VLLM_P2P_MAX_PEERS.
+    # Default: 300. Set to 0 to disable.
+    "VLLM_P2P_IDLE_TIMEOUT_S": lambda: int(os.getenv("VLLM_P2P_IDLE_TIMEOUT_S", "300")),
     # IP address used for the EC connector's ZMQ side channel
     # (producer ROUTER bind, consumer DEALER dial).
     "VLLM_EC_SIDE_CHANNEL_HOST": lambda: os.getenv(

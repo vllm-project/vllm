@@ -450,6 +450,7 @@ class DeepseekV2MoE(nn.Module):
             )
             else None,
             fuse_shared_experts=self.is_fused_shared_expert_enabled,
+            shared_expert_prefix=f"{prefix}.shared_experts",
             router_logits_dtype=self.gate.out_dtype,
         )
 

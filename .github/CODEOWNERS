@@ -43,9 +43,7 @@
 /vllm/entrypoints/pooling @noooop
 /vllm/entrypoints/serve/sagemaker @DarkLight1337
 /vllm/entrypoints/serve @njhill
-/vllm/entrypoints/*.py @njhill
-/vllm/entrypoints/chat_utils.py @DarkLight1337
-/vllm/entrypoints/offline_utils.py @DarkLight1337
+/vllm/entrypoints/common @DarkLight1337
 /vllm/entrypoints/llm.py @DarkLight1337
 
 # Rust Frontend
@@ -229,13 +227,11 @@ mkdocs.yaml @hmellor
 
 # Reinforcement learning
 /vllm/distributed/weight_transfer @aoshen02
-/vllm/entrypoints/serve/dev/rlhf @njhill @aoshen02
+/vllm/entrypoints/rl @njhill @aoshen02
 /tests/distributed/test_weight_transfer.py @aoshen02
-/tests/entrypoints/weight_transfer @DarkLight1337 @robertgshaw2-redhat @aarnphm @NickLucche @AndreasKaratzas @aoshen02
-/tests/entrypoints/serve/dev/rlhf @DarkLight1337 @robertgshaw2-redhat @aarnphm @NickLucche @AndreasKaratzas @aoshen02
+/tests/entrypoints/rl @DarkLight1337 @robertgshaw2-redhat @njhill @aarnphm @NickLucche @AndreasKaratzas @aoshen02
 /tests/v1/worker/test_gpu_worker_weight_transfer.py @aoshen02
 /examples/rl @aoshen02
-/examples/features/pause_resume @aoshen02
 /docs/training/rlhf.md @aoshen02
 /docs/training/async_rl.md @aoshen02
 /docs/training/weight_transfer @aoshen02
