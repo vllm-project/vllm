@@ -3196,3 +3196,99 @@ def test_validate_chat_template_rejects_invalid_type():
     ) as exc_info:
         validate_chat_template(123)
     assert exc_info.value.parameter == "chat_template"
+
+
+# ============================================================================
+# Qwen3-VL Early Video Frame Resize Safety Check Tests (#60985, PR #61096)
+# ============================================================================
+
+
+@pytest.mark.parametrize(
+    ("mm_processor_kwargs", "expected"),
+    [
+        (None, True),
+        ({}, True),
+        ({"videos_kwargs": None}, True),
+        ({"videos_kwargs": {}}, True),
+        ({"videos_kwargs": {"fps": 2}}, True),
+        ({"use_audio_in_video": True}, True),
+        ({"images_kwargs": {"max_pixels": 2048}}, True),
+        # Top-level overrides
+        ({"min_pixels": 512}, False),
+        ({"max_pixels": 2048}, False),
+        ({"size": {"shortest_edge": 128}}, False),
+        ({"longest_edge": 1024}, False),
+        ({"shortest_edge": 128}, False),
+        ({"patch_size": 14}, False),
+        ({"merge_size": 2}, False),
+        ({"temporal_patch_size": 2}, False),
+        ({"do_resize": False}, False),
+        # Nested videos_kwargs overrides (Linze Shi review comment regression)
+        ({"videos_kwargs": {"min_pixels": 512}}, False),
+        ({"videos_kwargs": {"max_pixels": 2048}}, False),
+        ({"videos_kwargs": {"size": {"shortest_edge": 128}}}, False),
+        ({"videos_kwargs": {"longest_edge": 1024}}, False),
+        ({"videos_kwargs": {"shortest_edge": 128}}, False),
+        ({"videos_kwargs": {"patch_size": 14}}, False),
+        ({"videos_kwargs": {"merge_size": 2}}, False),
+        ({"videos_kwargs": {"temporal_patch_size": 2}}, False),
+        ({"videos_kwargs": {"do_resize": False}}, False),
+    ],
+)
+def test_should_pass_video_resize_config(mm_processor_kwargs, expected):
+    from vllm.renderers.chat_utils import BaseMultiModalContentParser
+
+    assert (
+        BaseMultiModalContentParser._should_pass_video_resize_config(
+            mm_processor_kwargs
+        )
+        == expected
+    )
+
+
+def test_parse_video_disables_early_resize_on_nested_override():
+    """Verify parse_video suppresses early resize config when nested
+    videos_kwargs contains sizing overrides, preserving full frames for HF."""
+    from unittest.mock import MagicMock
+
+    from vllm.renderers.chat_utils import MultiModalContentParser
+
+    tracker = MagicMock()
+    tracker.video_resize_size_config = {
+        "shortest_edge": 4096,
+        "longest_edge": 25165824,
+    }
+    tracker.video_processor_name = "Qwen/Qwen3-VL-4B-Instruct"
+
+    # Case 1: with nested videos_kwargs max_pixels override -> config must be None
+    parser_with_override = MultiModalContentParser(
+        tracker=tracker,
+        mm_processor_kwargs={"videos_kwargs": {"max_pixels": 2048}},
+    )
+    connector = MagicMock()
+    parser_with_override.__dict__["_connector"] = connector
+
+    parser_with_override.parse_video("http://example.com/video.mp4")
+    connector.fetch_video.assert_called_once_with(
+        video_url="http://example.com/video.mp4",
+        video_processor="Qwen/Qwen3-VL-4B-Instruct",
+        video_resize_size_config=None,
+    )
+
+    # Case 2: without sizing override (fps only) -> config must be passed
+    connector.reset_mock()
+    parser_default = MultiModalContentParser(
+        tracker=tracker,
+        mm_processor_kwargs={"videos_kwargs": {"fps": 2}},
+    )
+    parser_default.__dict__["_connector"] = connector
+
+    parser_default.parse_video("http://example.com/video.mp4")
+    connector.fetch_video.assert_called_once_with(
+        video_url="http://example.com/video.mp4",
+        video_processor="Qwen/Qwen3-VL-4B-Instruct",
+        video_resize_size_config={
+            "shortest_edge": 4096,
+            "longest_edge": 25165824,
+        },
+    )

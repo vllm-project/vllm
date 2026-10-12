@@ -6,7 +6,7 @@ import json
 import types
 from abc import ABC, abstractmethod
 from collections import Counter, defaultdict
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass
 from functools import cached_property, lru_cache, partial
 from itertools import accumulate
@@ -1028,7 +1028,7 @@ class BaseMultiModalContentParser(ABC):
 
     @staticmethod
     def _should_pass_video_resize_config(
-        mm_processor_kwargs: dict[str, Any] | None,
+        mm_processor_kwargs: Mapping[str, Any] | None,
     ) -> bool:
         if not mm_processor_kwargs:
             return True
@@ -1041,8 +1041,16 @@ class BaseMultiModalContentParser(ABC):
             "patch_size",
             "merge_size",
             "temporal_patch_size",
+            "do_resize",
         }
-        return not any(k in mm_processor_kwargs for k in override_keys)
+        if any(k in mm_processor_kwargs for k in override_keys):
+            return False
+
+        videos_kwargs = mm_processor_kwargs.get("videos_kwargs")
+        return not (
+            isinstance(videos_kwargs, Mapping)
+            and any(k in videos_kwargs for k in override_keys)
+        )
 
     @abstractmethod
     def parse_video(self, video_url: str | None, uuid: str | None = None) -> None:
