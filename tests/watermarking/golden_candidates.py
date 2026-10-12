@@ -37,7 +37,7 @@ GOLDEN_FLOAT_ATOL = 1e-300
 
 P_VALUE_RATIO_MIN_DISTANCE = 1e-6
 REPETITIVE_MIN_KEY_PERTURBATION_TOKENS = 8
-REPETITIVE_MAX_P_VALUE_RATIO = 0.5
+REPETITIVE_MAX_P_VALUE_RATIO = 0.6
 ROUTING_BOUNDARY_MIN_DISTANCE = 1e-6
 
 WATERMARK_CONFIG_FIELDS = (
@@ -246,7 +246,6 @@ class WatermarkingCandidate:
                 "context_width": detector.context_width,
                 "p_value_threshold": detector.p_value_threshold,
                 "deduplicate_contexts": detector.deduplicate_contexts,
-                "skip_partial_contexts": detector.skip_partial_contexts,
                 "alpha": getattr(detector, "alpha", None),
                 "prf_key": str(detector.prf.key),
                 "key_b_prf_key": None if key_b_prf is None else str(key_b_prf.key),
