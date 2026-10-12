@@ -223,6 +223,16 @@ class AsyncLookupManager(ABC):
                 state.result = False
                 state.phase = LookupPhase.RESOLVED
 
+    def invalidate(self, keys: Collection[OffloadKey]) -> None:
+        """Drop cached absent verdicts for ``keys`` after a successful store, so
+        the scheduler re-probes instead of serving a stale negative. Only
+        resolved-absent entries (result is False) are dropped; present,
+        in-flight, and unknown keys are left alone."""
+        for key in keys:
+            state = self._lookup_state.get(key)
+            if state is not None and state.result is False:
+                del self._lookup_state[key]
+
     def cleanup(self, req_id: str) -> None:
         """Release request references, retaining in-flight lookups.
 
@@ -230,7 +240,10 @@ class AsyncLookupManager(ABC):
         index to visit only keys associated with this request.
         """
         for key in self._req_keys.pop(req_id, ()):
-            state = self._lookup_state[key]
+            # Guard: invalidate() may have dropped a key this request still references.
+            state = self._lookup_state.get(key)
+            if state is None:
+                continue
             state.request_ids.discard(req_id)
             if not state.request_ids and state.phase is not LookupPhase.IN_FLIGHT:
                 del self._lookup_state[key]

@@ -324,3 +324,78 @@ class TestAsyncLookupManager:
         with pytest.raises(AssertionError):
             mgr.drain_results()
         mgr.shutdown()
+
+    def test_invalidate_drops_stale_absent_and_reprobes(self):
+        """Store-invalidation regression. After a block's absence was cached
+        (False), a successful store makes it present on disk; invalidate() must
+        drop that stale negative so the scheduler re-probes and sees it (True)
+        instead of serving the stale MISS."""
+        mgr = InMemoryLookupManager()
+        ctx = _ctx("reqA")
+        key = _key(1)
+        assert mgr.lookup(key, ctx) is None
+        mgr.flush()
+        mgr._results_ready.wait()
+        mgr._results_ready.clear()
+        assert mgr.lookup(key, ctx) is False  # absent, resolved & cached
+
+        # A successful store lands the block in the tier.
+        mgr._existing.add(key)
+        mgr.invalidate([key])
+
+        # The stale negative must be gone; the next lookup re-states and
+        # re-probes, then sees the block as present.
+        assert key not in mgr._lookup_state
+        assert mgr.lookup(key, ctx) is None
+        mgr.flush()
+        mgr._results_ready.wait()
+        mgr._results_ready.clear()
+        assert mgr.lookup(key, ctx) is True  # re-probed, now present
+
+        mgr.shutdown()
+
+    def test_invalidate_is_noop_for_present_and_unknown_keys(self):
+        """invalidate() is conservative: it drops only resolved-absent (False)
+        entries. A present (True) entry is left alone, and an unknown key is a
+        no-op (no entry is planted)."""
+        mgr = InMemoryLookupManager(existing_keys={_key(1)})
+        ctx = _ctx("reqA")
+        assert mgr.lookup(_key(1), ctx) is None
+        mgr.flush()
+        mgr._results_ready.wait()
+        mgr._results_ready.clear()
+        assert mgr.lookup(_key(1), ctx) is True  # present, resolved
+
+        # A present entry must survive invalidate().
+        mgr.invalidate([_key(1)])
+        assert _key(1) in mgr._lookup_state
+        assert mgr.lookup(_key(1), ctx) is True
+
+        # An unknown key is a no-op: no entry planted.
+        mgr.invalidate([_key(99)])
+        assert _key(99) not in mgr._lookup_state
+        mgr.shutdown()
+
+    def test_cleanup_is_safe_after_invalidate(self):
+        """cleanup() must not raise when a tracked key was dropped by
+        invalidate() (e.g. a block stored while its lookup was in flight). The
+        guard turns the would-be KeyError into a no-op for that key."""
+        mgr = InMemoryLookupManager()
+        ctx = _ctx("reqA")
+        key = _key(1)
+        assert mgr.lookup(key, ctx) is None
+        mgr.flush()
+        mgr._results_ready.wait()
+        mgr._results_ready.clear()
+        assert mgr.lookup(key, ctx) is False  # absent, resolved & cached
+        assert key in mgr._lookup_state and "reqA" in mgr._req_keys
+
+        # Drop the verdict (a successful store), then tear down the request.
+        mgr.invalidate([key])
+        assert key not in mgr._lookup_state
+
+        # Must not raise KeyError; reqA's reverse-index entry is cleared.
+        mgr.cleanup("reqA")
+        assert key not in mgr._lookup_state
+        assert "reqA" not in mgr._req_keys
+        mgr.shutdown()
