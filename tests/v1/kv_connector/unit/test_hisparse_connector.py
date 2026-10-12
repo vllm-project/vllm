@@ -436,7 +436,7 @@ def test_zero_token_step_holds_tp_ranks_after_host_write_wait(
         setattr(worker, name, MagicMock())
 
     worker.start_step(
-        HiSparseConnectorMetadata(None, (), (), {}, True),
+        HiSparseConnectorMetadata(None, (), (), {}, True, {}),
         None,
         [],
         num_tokens=num_tokens,
