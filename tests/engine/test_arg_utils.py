@@ -16,6 +16,7 @@ from vllm.config import (
     ModelConfig,
     config,
 )
+from vllm.config.mamba import MambaBackendEnum
 from vllm.engine.arg_utils import (
     EngineArgs,
     _expand_json_human_readable_numbers,
@@ -609,6 +610,31 @@ def test_attention_config():
     engine_args = EngineArgs.from_cli_args(args)
     with pytest.raises(ValueError, match="mutually exclusive"):
         engine_args.create_engine_config()
+
+
+@pytest.mark.parametrize(
+    ("cli_args", "expected"),
+    [
+        ([], MambaBackendEnum.TRITON),
+        (["--mamba-backend", "flashinfer"], MambaBackendEnum.FLASHINFER),
+    ],
+)
+def test_mamba_backend_cli(cli_args, expected):
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    args = parser.parse_args(["--model", "facebook/opt-125m", *cli_args])
+    vllm_config = EngineArgs.from_cli_args(args).create_engine_config()
+    assert vllm_config.mamba_config.backend == expected
+
+
+def test_mamba_config_backend_not_overridden_by_default():
+    """`mamba_config.backend` is kept unless `--mamba-backend` is set."""
+    engine_args = EngineArgs(
+        model="facebook/opt-125m",
+        mamba_config={"backend": "flashinfer", "ssu_algorithm": "vertical"},
+    )
+    vllm_config = engine_args.create_engine_config()
+    assert vllm_config.mamba_config.backend == MambaBackendEnum.FLASHINFER
+    assert vllm_config.mamba_config.ssu_algorithm == "vertical"
 
 
 def test_multi_node_world_size_includes_pcp(monkeypatch):
