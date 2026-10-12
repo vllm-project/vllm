@@ -1547,8 +1547,16 @@ async def test_cumulative_output_collector_n():
 
 
 @pytest.mark.parametrize("runner", ["generate", "pooling"])
-@pytest.mark.parametrize("abort_by", ["internal", "external", "engine"])
-def test_abort_requests(runner: str, abort_by: str, dummy_test_vectors):
+@pytest.mark.parametrize(
+    ("abort_by", "finish_reason"),
+    [
+        ("internal", FinishReason.ABORT),
+        ("external", FinishReason.ABORT),
+        ("engine", FinishReason.ABORT),
+        ("engine", FinishReason.ERROR),
+    ],
+)
+def test_abort_requests(runner: str, abort_by: str, finish_reason, dummy_test_vectors):
     output_processor = OutputProcessor(dummy_test_vectors.tokenizer, log_stats=True)
     requests = [
         EngineCoreRequest(
@@ -1566,6 +1574,7 @@ def test_abort_requests(runner: str, abort_by: str, dummy_test_vectors):
         for idx, prompt_tokens in enumerate(dummy_test_vectors.prompt_tokens)
     ]
 
+    queues = []
     for request in requests:
         if runner == "generate":
             output_kind = request.sampling_params.output_kind
@@ -1575,15 +1584,12 @@ def test_abort_requests(runner: str, abort_by: str, dummy_test_vectors):
             output_kind=output_kind, request_id=request.request_id
         )
         output_processor.add_request(request, None, queue=queue)
+        queues.append(queue)
 
     for request in requests:
         if abort_by == "engine":
             output_processor.process_outputs(
-                [
-                    EngineCoreOutput(
-                        request.request_id, [], finish_reason=FinishReason.ABORT
-                    )
-                ]
+                [EngineCoreOutput(request.request_id, [], finish_reason=finish_reason)]
             )
         elif abort_by == "internal":
             output_processor.abort_requests([request.request_id], internal=True)
@@ -1591,6 +1597,18 @@ def test_abort_requests(runner: str, abort_by: str, dummy_test_vectors):
             output_processor.abort_requests([request.external_req_id], internal=False)
 
     assert not output_processor.has_unfinished_requests()
+
+    for request, queue in zip(requests, queues):
+        output = queue.get_nowait()
+        assert isinstance(
+            output, PoolingRequestOutput if runner == "pooling" else RequestOutput
+        )
+        assert output.request_id == request.external_req_id
+        assert output.finished
+        if runner == "pooling":
+            assert output.outputs.data.numel() == 0
+        else:
+            assert output.outputs[0].finish_reason == str(finish_reason)
 
 
 @pytest.mark.parametrize("output_kind", list(RequestOutputKind))

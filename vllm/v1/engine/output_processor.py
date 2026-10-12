@@ -736,7 +736,7 @@ class OutputProcessor:
             if (
                 pooling_output is None
                 and req_state.detokenizer is None
-                and finish_reason == FinishReason.ABORT
+                and finish_reason in (FinishReason.ABORT, FinishReason.ERROR)
             ):
                 pooling_output = EMPTY_CPU_TENSOR
 
