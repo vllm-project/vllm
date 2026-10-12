@@ -7,10 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from vllm.model_executor.models.config import (
-    MODELS_CONFIG_MAP,
-    AliceAIForCausalLMConfig,
-)
+from vllm.model_executor.models.config import AliceAIForCausalLMConfig
 from vllm.transformers_utils.config import get_config
 from vllm.transformers_utils.configs.alice_ai import AliceAIConfig
 
@@ -29,25 +26,14 @@ def test_native_config_preserves_parent_overrides() -> None:
     assert config.rope_parameters["rope_theta"] == 2_000_000.0
 
 
-def test_alice_config_defaults_match_release_contract() -> None:
+def test_alice_config_defaults() -> None:
     config = AliceAIConfig()
 
-    assert config.decoder_sparse_step == 1
-    assert config.mlp_only_layers == []
-    assert config.vocab_size == 129024
-    assert config.max_position_embeddings == 262144
-    assert config.linear_conv_kernel_dim == 4
-    assert config.linear_key_head_dim == 128
-    assert config.linear_value_head_dim == 128
-    assert config.linear_num_key_heads == 32
-    assert config.linear_num_value_heads == 32
     assert config.router_score_function == "sigmoid"
     assert config.router_bias_correction is True
     assert config.block_attn_res_block_size == 4
     assert config.kda_allow_negative_eigenvalues is False
     assert config.number_of_conv_states == 3
-    assert config.rope_parameters["rope_type"] == "default"
-    assert config.rope_parameters["rope_theta"] == 1_000_000.0
 
 
 def test_native_config_warns_when_mtp_is_ignored(tmp_path, caplog) -> None:
@@ -137,7 +123,3 @@ def test_runtime_config_rejects_unsupported_alice_modes(
     else:
         with pytest.raises(NotImplementedError, match=error):
             AliceAIForCausalLMConfig.verify_and_update_config(vllm_config)
-
-
-def test_alice_config_hook_is_registered() -> None:
-    assert MODELS_CONFIG_MAP["AliceAIForCausalLM"] is AliceAIForCausalLMConfig

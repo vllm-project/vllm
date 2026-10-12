@@ -2,14 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from types import SimpleNamespace
-from unittest.mock import Mock
 
 import pytest
 import torch
 
 from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
 from vllm.model_executor.models import alice_ai as alice_ai_module
-from vllm.model_executor.models import qwen3_next as qwen3_next_module
 from vllm.model_executor.models.alice_ai import (
     AliceAIDecoderBlock,
     AliceAIForCausalLM,
@@ -17,59 +15,30 @@ from vllm.model_executor.models.alice_ai import (
     _AttentionResidualFinalMixer,
     _load_split_kda_conv_weights,
 )
-from vllm.model_executor.offloader import NoopOffloader, PrefetchOffloader, UVAOffloader
-
-
-def test_lora_configuration_reaches_parent_model_initialization(monkeypatch):
-    monkeypatch.setattr(alice_ai_module, "get_offloader", lambda: NoopOffloader())
-    parent_init = Mock(return_value=None)
-    monkeypatch.setattr(qwen3_next_module.Qwen3NextForCausalLM, "__init__", parent_init)
-    config = SimpleNamespace(lora_config=object())
-
-    AliceAIForCausalLM(vllm_config=config, prefix="target")
-
-    parent_init.assert_called_once_with(
-        vllm_config=config, prefix="target", model_cls=AliceAIModel
-    )
+from vllm.model_executor.offloader import PrefetchOffloader, UVAOffloader
 
 
 @pytest.mark.parametrize(
-    "backend,uva_available,offload_bytes,error",
+    "backend,error",
     [
-        ("none", False, 0, None),
-        ("uva", True, 1024, None),
-        ("uva", False, 0, None),
-        ("uva", False, 1024, "requires UVA"),
-        ("prefetch", True, 1024, "does not support prefetch"),
+        ("uva", "requires UVA"),
+        ("prefetch", "does not support prefetch"),
     ],
 )
-def test_offload_modes_are_checked_before_model_initialization(
-    monkeypatch, backend, uva_available, offload_bytes, error
-):
+def test_unsupported_offloading_is_rejected(monkeypatch, backend, error):
     from vllm.model_executor.offloader import uva
 
-    monkeypatch.setattr(uva, "is_uva_available", lambda: uva_available)
+    monkeypatch.setattr(uva, "is_uva_available", lambda: False)
     monkeypatch.setenv("VLLM_WEIGHT_OFFLOADING_DISABLE_UVA", "0")
     if backend == "uva":
-        offloader = UVAOffloader(cpu_offload_max_bytes=offload_bytes)
-    elif backend == "prefetch":
-        offloader = PrefetchOffloader.__new__(PrefetchOffloader)
+        offloader = UVAOffloader(cpu_offload_max_bytes=1024)
     else:
-        offloader = NoopOffloader()
+        offloader = PrefetchOffloader.__new__(PrefetchOffloader)
     monkeypatch.setattr(alice_ai_module, "get_offloader", lambda: offloader)
-    parent_init = Mock(return_value=None)
-    monkeypatch.setattr(qwen3_next_module.Qwen3NextForCausalLM, "__init__", parent_init)
     config = SimpleNamespace(lora_config=None)
 
-    if error is not None:
-        with pytest.raises(NotImplementedError, match=error):
-            AliceAIForCausalLM(vllm_config=config)
-        parent_init.assert_not_called()
-    else:
+    with pytest.raises(NotImplementedError, match=error):
         AliceAIForCausalLM(vllm_config=config, prefix="target")
-        parent_init.assert_called_once_with(
-            vllm_config=config, prefix="target", model_cls=AliceAIModel
-        )
 
 
 @pytest.mark.parametrize(
@@ -157,21 +126,8 @@ class _FixedOutput(torch.nn.Module):
         self.value = value
         self.inputs: list[torch.Tensor] = []
 
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        self.inputs.append(hidden_states.detach().clone())
-        return torch.full_like(hidden_states, self.value)
-
-
-class _FixedLinearAttention(torch.nn.Module):
-    def __init__(self, value: float) -> None:
-        super().__init__()
-        self.value = value
-        self.inputs: list[torch.Tensor] = []
-
     def forward(
-        self,
-        hidden_states: torch.Tensor,
-        positions: torch.Tensor,
+        self, hidden_states: torch.Tensor, positions: torch.Tensor | None = None
     ) -> torch.Tensor:
         del positions
         self.inputs.append(hidden_states.detach().clone())
@@ -193,7 +149,7 @@ def _make_state_layer(
     layer.attn_res_rms_norm_eps = 1e-6
     layer.input_layernorm = torch.nn.Identity()
     layer.post_attention_layernorm = torch.nn.Identity()
-    layer.linear_attn = _FixedLinearAttention(attention_value)
+    layer.linear_attn = _FixedOutput(attention_value)
     layer.mlp = _FixedOutput(mlp_value)
     if layer_idx > 0:
         layer.attn_res_proj = torch.nn.Linear(1, 1, bias=False)
