@@ -25,8 +25,11 @@ from vllm.model_executor.layers.fused_moe.experts.lora_experts_mixin import (
     LoRAExpertsMixin,
 )
 from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
+    RADIX_SORT_MIN_ROUTED_ENTRIES,
+    MoEAlignRadixScratch,
     batched_moe_align_block_size,
-    moe_align_block_size,
+    moe_align_block_size_radix,
+    moe_align_block_size_stable_small,
 )
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate,
@@ -250,6 +253,7 @@ def fused_marlin_moe(
     output: torch.Tensor | None = None,
     input_dtype: torch.dtype | None = None,
     activation_config: ApplyMoEActivationConfig | None = None,
+    align_radix_scratch: MoEAlignRadixScratch | None = None,
 ) -> torch.Tensor:
     """This function computes a Mixture of Experts (MoE) layer using two sets of
     weights, w1 and w2, and top-k gating mechanism.
@@ -296,6 +300,9 @@ def fused_marlin_moe(
             to. A 1-byte dtype raises the M block size to at least 16.
         activation_config (ApplyMoEActivationConfig|None): Extra
             configuration forwarded to the activation.
+        align_radix_scratch (MoEAlignRadixScratch|None): Persistent scratch
+            buffers for the radix alignment path. Allocated call-locally
+            when omitted.
 
     Returns:
         torch.Tensor: The output tensor after applying the MoE layer.
@@ -346,13 +353,35 @@ def fused_marlin_moe(
     if input_dtype is not None and input_dtype.itemsize == 1:
         block_size_m = max(block_size_m, 16)
 
-    sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
-        topk_ids,
-        block_size_m,
-        global_num_experts,
-        expert_map,
-        ignore_invalid_experts=True,
-    )
+    if topk_ids.numel() >= RADIX_SORT_MIN_ROUTED_ENTRIES:
+        if align_radix_scratch is None:
+            # The functional API permits call-local output and GEMM workspaces.
+            # Production modular-kernel callers pass persistent scratch so
+            # serving and graph replay do not allocate here.
+            align_radix_scratch = MoEAlignRadixScratch(
+                max_num_tokens=topk_ids.size(0),
+                topk=topk,
+                num_experts=global_num_experts,
+                device=topk_ids.device,
+            )
+        sorted_token_ids, expert_ids, num_tokens_post_padded = (
+            moe_align_block_size_radix(
+                topk_ids,
+                block_size_m,
+                global_num_experts,
+                align_radix_scratch,
+                expert_map,
+            )
+        )
+    else:
+        sorted_token_ids, expert_ids, num_tokens_post_padded = (
+            moe_align_block_size_stable_small(
+                topk_ids,
+                block_size_m,
+                global_num_experts,
+                expert_map,
+            )
+        )
 
     assert activation is not None
     moe_output = _fused_marlin_moe(
@@ -676,6 +705,28 @@ class MarlinExpertsBase(mk.FusedMoEExpertsModular):
 class MarlinExperts(LoRAExpertsMixin, MarlinExpertsBase):
     """Marlin-based fused MoE expert implementation."""
 
+    def __init__(
+        self,
+        moe_config: FusedMoEConfig,
+        quant_config: FusedMoEQuantConfig,
+        max_num_tokens: int | None = None,
+        num_dispatchers: int | None = None,
+    ):
+        super().__init__(
+            moe_config=moe_config,
+            quant_config=quant_config,
+            max_num_tokens=max_num_tokens,
+            num_dispatchers=num_dispatchers,
+        )
+        # Only the standard (non-batched) path consumes moe_align_block_size
+        # radix alignment, so only this class owns the reusable scratch.
+        self._align_radix_scratch = MoEAlignRadixScratch(
+            max_num_tokens=self.moe_config.max_num_tokens,
+            topk=self.moe_config.experts_per_token,
+            num_experts=self.moe_config.num_experts,
+            device=torch.device(self.moe_config.device),
+        )
+
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
         return TopKWeightAndReduceNoOP()
 
@@ -768,6 +819,7 @@ class MarlinExperts(LoRAExpertsMixin, MarlinExpertsBase):
                 intermediate_cache13=workspace2,
                 intermediate_cache2=workspace13,
                 input_dtype=self.input_dtype,
+                align_radix_scratch=self._align_radix_scratch,
             )
             return
 
@@ -878,6 +930,7 @@ class MarlinExperts(LoRAExpertsMixin, MarlinExpertsBase):
             intermediate_cache13=workspace2,
             intermediate_cache2=workspace13,
             input_dtype=self.input_dtype,
+            align_radix_scratch=self._align_radix_scratch,
         )
 
     def moe_sum(
