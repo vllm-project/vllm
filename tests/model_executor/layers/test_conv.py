@@ -5,7 +5,32 @@ import pytest
 import torch
 from torch import nn
 
-from vllm.model_executor.layers.conv import Conv3dLayer
+from vllm.model_executor.layers.conv import Conv2dLayer, Conv3dLayer
+
+
+@pytest.mark.parametrize(
+    "input_shape,bias",
+    [
+        pytest.param((256, 3, 14, 14), False, id="packed_patches"),
+        pytest.param((2, 3, 28, 28), True, id="multiple_spatial_patches"),
+    ],
+)
+def test_conv2d_patch_embedding_correctness(default_vllm_config, input_shape, bias):
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    dtype = torch.bfloat16 if device == "cuda" else torch.float32
+    reference = nn.Conv2d(3, 1024, 14, stride=14, bias=bias).to(
+        device=device, dtype=dtype
+    )
+    layer = Conv2dLayer(3, 1024, 14, stride=14, bias=bias, params_dtype=dtype).to(
+        device
+    )
+    layer.load_state_dict(reference.state_dict(), strict=True)
+    assert layer.enable_linear
+
+    x = torch.randn(input_shape, device=device, dtype=dtype)
+    expected = reference(x)
+    atol = rtol = 0.02 if dtype == torch.bfloat16 else 1e-5
+    torch.testing.assert_close(layer.forward_native(x), expected, atol=atol, rtol=rtol)
 
 
 @pytest.mark.parametrize(
