@@ -9,6 +9,7 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm.config.cache import CacheDType
+from vllm.models.deepseek_v41.swa_metadata import split_batch_counts
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
 from vllm.v1.attention.backend import (
@@ -23,7 +24,10 @@ from vllm.v1.attention.backends.mla.compressor_utils import get_compressed_slot_
 from vllm.v1.attention.backends.mla.sparse_swa import (
     _LAYER_TYPE_C1A,
     _LAYER_TYPE_C2A,
+    _LAYER_TYPE_C4A,
+    _LAYER_TYPE_C128A,
     _LAYER_TYPE_SWAONLY,
+    DeepseekSparseSWAMetadata,
     DeepseekSparseSWAMetadataBuilder,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
@@ -66,6 +70,70 @@ class DeepseekV41SparseSWAMetadataBuilder(DeepseekSparseSWAMetadataBuilder):
         self._layer_types = {
             deepseek_v41_layer_type(int(ratio)) for ratio in compress_ratios
         }
+
+    def build(
+        self,
+        common_prefix_len: int,
+        common_attn_metadata: CommonAttentionMetadata,
+        fast_build: bool = False,
+        replay_start: "torch.Tensor | None" = None,
+    ) -> DeepseekSparseSWAMetadata:
+        """Build from the step's shared window rows when the model state has them.
+
+        Every sliding-window group shares the batch's inputs, so the model state
+        refreshes one set of window rows for all of them and this returns the
+        group's view instead of launching its own kernels. Batches the shared
+        rows do not describe (the non-causal DSpark draft, image spans, missing
+        state) fall back to the per-group build.
+        """
+        state = getattr(self, "_swa_window_state", None)
+        slot = getattr(self, "_swa_window_slot", None)
+        if (
+            state is not None
+            and slot is not None
+            and self.max_image_tokens == 0
+            and common_attn_metadata.causal
+        ):
+            if state.pending:
+                num_decodes, num_prefiles = split_batch_counts(
+                    common_attn_metadata, self.decode_threshold
+                )[:2]
+                state.prepare(
+                    common_attn_metadata,
+                    self.block_size,
+                    self.decode_threshold,
+                    self._build_deepseek_v4_metadata(
+                        num_decodes,
+                        num_prefiles,
+                        common_attn_metadata.seq_lens,
+                        common_attn_metadata.seq_lens_cpu_upper_bound,
+                        common_attn_metadata.query_start_loc,
+                        common_attn_metadata.query_start_loc_cpu,
+                        state.replay_start,
+                    ),
+                )
+            if state.ready:
+                # `replay_start` reached the shared rows through the model state,
+                # so the keyword it passes is intentionally ignored here.
+                rows = state.rows_for_slot(slot)
+                tile_sched = self.build_tile_scheduler(rows["num_decode_tokens"])
+                return DeepseekSparseSWAMetadata(
+                    block_table=common_attn_metadata.block_table_tensor,
+                    slot_mapping=common_attn_metadata.slot_mapping,
+                    block_size=self.block_size,
+                    tile_sched_swaonly=tile_sched[_LAYER_TYPE_SWAONLY],
+                    tile_sched_c4a=tile_sched[_LAYER_TYPE_C4A],
+                    tile_sched_c128a=tile_sched[_LAYER_TYPE_C128A],
+                    tile_sched_c1a=tile_sched[_LAYER_TYPE_C1A],
+                    tile_sched_c2a=tile_sched[_LAYER_TYPE_C2A],
+                    **rows,  # type: ignore[arg-type]
+                )
+        return super().build(
+            common_prefix_len,
+            common_attn_metadata,
+            fast_build=fast_build,
+            replay_start=replay_start,
+        )
 
 
 class DeepseekV4SparseMLABackend(AttentionBackend):
