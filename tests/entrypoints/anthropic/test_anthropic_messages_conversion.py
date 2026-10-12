@@ -475,6 +475,68 @@ class TestAttributionHeaderStripping:
         assert system_msg["content"] == "You are a helpful assistant."
 
 
+class TestUnsupportedSystemContentWarning:
+    """Unsupported (non-text) Anthropic system content blocks are dropped
+    for backward compatibility, but must not be dropped silently."""
+
+    def test_top_level_image_block_warns_and_ignored(self, caplog):
+        """An image block in the top-level system field is ignored with a
+        warning, while text blocks are preserved."""
+        request = _make_request(
+            [{"role": "user", "content": "Hello"}],
+            system=[
+                {"type": "text", "text": "You are a helpful assistant."},
+                {
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": "image/jpeg",
+                        "data": "iVBORw0KGgo=",
+                    },
+                },
+            ],
+        )
+        result = _convert(request)
+        system_msg = result.messages[0]
+        assert system_msg["role"] == "system"
+        assert system_msg["content"] == "You are a helpful assistant."
+        assert any(
+            "should only contain text content" in r.message and "image" in r.message
+            for r in caplog.records
+        )
+
+    def test_inline_system_image_block_warns_and_ignored(self, caplog):
+        """An image block in an inline system message is ignored with a
+        warning instead of being silently dropped."""
+        request = _make_request(
+            [
+                {
+                    "role": "system",
+                    "content": [
+                        {"type": "text", "text": "Be concise."},
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "image/png",
+                                "data": "aGVsbG8=",
+                            },
+                        },
+                    ],
+                },
+                {"role": "user", "content": "Hello"},
+            ],
+        )
+        result = _convert(request)
+        system_msgs = [m for m in result.messages if m["role"] == "system"]
+        assert system_msgs
+        assert all(m["content"] == "Be concise." for m in system_msgs)
+        assert any(
+            "should only contain text content" in r.message and "image" in r.message
+            for r in caplog.records
+        )
+
+
 # ======================================================================
 # Thinking block conversion (Anthropic → OpenAI)
 # ======================================================================
