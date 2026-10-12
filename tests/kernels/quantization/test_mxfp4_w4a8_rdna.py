@@ -147,7 +147,7 @@ def test_w4a8_gemv_cuda_graph():
     with torch.cuda.graph(graph):
         captured = torch.ops._rocm_C.mxfp4_w4a8_gemv(x, w_q, w_s)
     graph.replay()
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
     torch.testing.assert_close(captured, eager, rtol=0, atol=0)
 
 
