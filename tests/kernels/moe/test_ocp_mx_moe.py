@@ -2114,6 +2114,117 @@ def test_aiter_mxfp4_monolithic_rejects_expert_parallel(
         assert "parallel config" in reason
 
 
+@pytest.mark.parametrize(
+    "all2all_backend",
+    [
+        "deepep_high_throughput",
+        "flashinfer_nvlink_two_sided",
+        "flashinfer_nvlink_one_sided",
+    ],
+)
+def test_make_mxfp4_moe_kernel_rejects_cutlass_unsupported_expert_parallel(
+    monkeypatch: pytest.MonkeyPatch,
+    all2all_backend: str,
+):
+    """Compressed-tensors CUTLASS W4A4 bypasses the oracle; guard at assembly."""
+    from tests.kernels.moe.utils import make_dummy_moe_config
+    from vllm.model_executor.layers.fused_moe.config import (
+        FusedMoEParallelConfig,
+        mxfp4_moe_quant_config,
+    )
+    from vllm.model_executor.layers.fused_moe.experts.cutlass_moe import (
+        CutlassExpertsMxfp4,
+    )
+    from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
+        Mxfp4MoeBackend,
+        make_mxfp4_moe_kernel,
+    )
+
+    monkeypatch.setattr(
+        CutlassExpertsMxfp4, "_supports_current_device", staticmethod(lambda: True)
+    )
+
+    moe_config = replace(
+        make_dummy_moe_config(
+            num_experts=256,
+            num_local_experts=32,
+            hidden_dim=4096,
+            intermediate_size=2048,
+        ),
+        moe_parallel_config=FusedMoEParallelConfig(
+            tp_size=1,
+            tp_rank=0,
+            pcp_size=1,
+            pcp_rank=0,
+            dp_size=8,
+            dp_rank=0,
+            ep_size=8,
+            ep_rank=0,
+            sp_size=1,
+            use_ep=True,
+            all2all_backend=all2all_backend,
+            enable_eplb=False,
+        ),
+    )
+    w1_scale = torch.empty(32, 64, 128, dtype=torch.uint8)
+    w2_scale = torch.empty(32, 4096, 64, dtype=torch.uint8)
+    quant_config = mxfp4_moe_quant_config(w1_scale=w1_scale, w2_scale=w2_scale)
+
+    with pytest.raises(ValueError, match="parallel config"):
+        make_mxfp4_moe_kernel(
+            quant_config,
+            moe_config,
+            CutlassExpertsMxfp4,
+            Mxfp4MoeBackend.MARLIN,
+        )
+
+
+def test_make_mxfp4_moe_kernel_validates_cutlass_expert_parallel(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """CUTLASS MXFP4 supports EP with allgather_reducescatter after expert_map."""
+    from tests.kernels.moe.utils import make_dummy_moe_config
+    from vllm.model_executor.layers.fused_moe.config import FusedMoEParallelConfig
+    from vllm.model_executor.layers.fused_moe.experts.cutlass_moe import (
+        CutlassExpertsMxfp4,
+    )
+    from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
+        Mxfp4MoeBackend,
+        _validate_mxfp4_experts_config,
+    )
+
+    monkeypatch.setattr(
+        CutlassExpertsMxfp4, "_supports_current_device", staticmethod(lambda: True)
+    )
+
+    moe_config = replace(
+        make_dummy_moe_config(
+            num_experts=256,
+            num_local_experts=32,
+            hidden_dim=4096,
+            intermediate_size=2048,
+        ),
+        moe_parallel_config=FusedMoEParallelConfig(
+            tp_size=1,
+            tp_rank=0,
+            pcp_size=1,
+            pcp_rank=0,
+            dp_size=8,
+            dp_rank=0,
+            ep_size=8,
+            ep_rank=0,
+            sp_size=1,
+            use_ep=True,
+            all2all_backend="allgather_reducescatter",
+            enable_eplb=False,
+        ),
+    )
+
+    _validate_mxfp4_experts_config(
+        CutlassExpertsMxfp4, moe_config, Mxfp4MoeBackend.MARLIN
+    )
+
+
 # Every activation-quantizing OCP MX scheme must map to a `quant_dtype` that
 # `moe_kernel_quantize_input` actually dispatches on. Its final `else` returns
 # the activation untouched, so a name it does not know (e.g. "mxfp6" instead of
