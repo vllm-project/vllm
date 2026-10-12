@@ -34,7 +34,6 @@ from openai.types.responses.tool import Tool
 from partial_json_parser.core.options import Allow
 
 from vllm import envs
-from vllm.entrypoints.chat_utils import make_tool_call_id
 from vllm.entrypoints.generate.base.protocol import FunctionCall, FunctionDefinition
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionMessageParam,
@@ -43,6 +42,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 from vllm.entrypoints.openai.responses.protocol import ResponseInputOutputItem
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
+from vllm.renderers.chat_utils import make_tool_call_id
 from vllm.tool_parsers.utils import (
     CUSTOM_TOOL_INPUT_KEY,
     build_responses_tool_call_name_map,
