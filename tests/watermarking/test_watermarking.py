@@ -255,8 +255,8 @@ def test_speculative_decoding_uses_fixed_dual_key_roles():
     assert draft is not None
     assert draft.watermarker.prf.key == derive_watermark_key(42, b"key_a")
     assert draft.num_speculative_steps == 3
-    assert draft.deduplicate_contexts == "all"
-    assert draft.deduplicate_contexts_max_history is None
+    assert draft.state.deduplicate_contexts == "all"
+    assert draft.state.deduplicate_contexts_max_history is None
 
 
 def test_recovery_key_rejects_the_unsplit_dual_key_watermarker():
@@ -1325,8 +1325,8 @@ def test_draft_sampler_uses_draft_key_and_advances_context(monkeypatch):
         deduplicate_contexts="none",
         deduplicate_contexts_max_history=None,
     )
-    draft_watermarker.contexts.copy_(torch.tensor([[1, 2], [3, 4]]))
-    draft_watermarker.enabled = torch.tensor([True, False])
+    draft_watermarker.state.contexts.copy_(torch.tensor([[1, 2], [3, 4]]))
+    draft_watermarker.state.enabled = torch.tensor([True, False])
     speculator.draft_watermarker = draft_watermarker
     monkeypatch.setattr(
         "vllm.v1.watermarking.watermarker.gumbel_sample",
@@ -1344,7 +1344,7 @@ def test_draft_sampler_uses_draft_key_and_advances_context(monkeypatch):
     )
 
     assert torch.equal(sampled, torch.tensor([7, 4]))
-    assert torch.equal(draft_watermarker.contexts, torch.tensor([[2, 7], [4, 4]]))
+    assert torch.equal(draft_watermarker.state.contexts, torch.tensor([[2, 7], [4, 4]]))
 
 
 def test_draft_sampler_uses_ordinary_samples_for_repeated_contexts(monkeypatch):
@@ -1603,11 +1603,12 @@ def test_draft_watermarker_deduplicates_across_a_block_on_cuda(
         [True, True],
     ]
     assert torch.equal(
-        draft_watermarker.prior_contexts[:num_reqs].cpu(),
+        draft_watermarker.state.prior_contexts[:num_reqs].cpu(),
         torch.tensor([[[5, 6], [6, 6], [6, 6]], [[6, 3], [3, 6], [6, 6]]]),
     )
     assert torch.equal(
-        draft_watermarker.contexts[:num_reqs].cpu(), torch.tensor([[6, 6], [6, 6]])
+        draft_watermarker.state.contexts[:num_reqs].cpu(),
+        torch.tensor([[6, 6], [6, 6]]),
     )
     for step, logits in enumerate(step_logits):
         # The 0-d draft step selects the logits cache column.
@@ -1696,8 +1697,8 @@ def test_dflash_draft_sampler_watermarks_drafts_in_step_order(monkeypatch):
         deduplicate_contexts_max_history=None,
     )
     # Batch rows hold request slots 2, 0, 1. Slot 0 is greedy and row 2 opted out.
-    draft_watermarker.contexts[:num_reqs] = torch.tensor([[1, 2], [3, 4], [5, 6]])
-    draft_watermarker.enabled[:num_reqs] = torch.tensor([True, True, False])
+    draft_watermarker.state.contexts[:num_reqs] = torch.tensor([[1, 2], [3, 4], [5, 6]])
+    draft_watermarker.state.enabled[:num_reqs] = torch.tensor([True, True, False])
     speculator = object.__new__(DFlashSpeculator)
     speculator.model = SimpleNamespace(
         compute_logits=lambda hidden_states: hidden_states
@@ -1800,8 +1801,8 @@ def test_dflash_draft_sampler_matches_step_loop_on_cuda(deduplicate_contexts, dt
             ).view(-1)
         return (
             sampled,
-            draft_watermarker.contexts,
-            draft_watermarker.prior_contexts,
+            draft_watermarker.state.contexts,
+            draft_watermarker.state.prior_contexts,
             draft_logits,
         )
 

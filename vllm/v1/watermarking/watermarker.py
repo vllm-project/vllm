@@ -45,6 +45,18 @@ class RandomSampler:
         )
 
 
+@dataclass
+class DraftContextState:
+    contexts: torch.Tensor
+    enabled: torch.Tensor
+    prior_contexts: torch.Tensor
+    prompt_lens: torch.Tensor
+    deduplicate_contexts: WatermarkContextScope
+    deduplicate_contexts_max_history: int | None
+    all_token_ids: torch.Tensor | None = None
+    total_lens: torch.Tensor | None = None
+
+
 class Watermarker(ABC):
     @property
     @abstractmethod
@@ -98,17 +110,9 @@ class Watermarker(ABC):
     def _try_sample_block(
         self,
         logits: torch.Tensor,
-        contexts: torch.Tensor,
         num_steps: int,
         random_sampler: RandomSampler,
-        *,
-        enabled: torch.Tensor,
-        prior_contexts: torch.Tensor,
-        all_token_ids: torch.Tensor | None,
-        prompt_lens: torch.Tensor,
-        total_lens: torch.Tensor | None,
-        deduplicate_contexts: WatermarkContextScope,
-        deduplicate_contexts_max_history: int | None,
+        state: DraftContextState,
     ) -> torch.Tensor | None:
         """Sample a (request, step) draft block in one fused pass.
 
