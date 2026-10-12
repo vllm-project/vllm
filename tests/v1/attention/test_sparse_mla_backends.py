@@ -3349,6 +3349,8 @@ def test_hisparse_prefill_resident_sources_follow_each_resident_group():
         torch.tensor([8], dtype=torch.int32),
         block_size,
         staging_block_capacity=2,
+        request_start=0,
+        tokens=slice(0, 8),
     )
     # The prefill runs in request state row 1; one table holds both groups.
     # Rows are wide so that a cache keyed on a freed per-call gather of a row
