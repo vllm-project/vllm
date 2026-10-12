@@ -330,8 +330,8 @@ def _load_marlin_checkpoint_format_weights(layer):
     )
 
 
-def test_marlin_post_load_preserves_runtime_tensor_addresses(monkeypatch, dist_init):
-    """Marlin must reuse the workspace storage captured by CUDA graphs."""
+def test_marlin_post_load_does_not_own_workspace(monkeypatch, dist_init):
+    """Weight reload must not create layer-owned Marlin lock storage."""
     _stub_marlin_ops(monkeypatch)
     kernel = _make_marlin_kernel()
 
@@ -339,19 +339,17 @@ def test_marlin_post_load_preserves_runtime_tensor_addresses(monkeypatch, dist_i
     _load_marlin_checkpoint_format_weights(layer)
     kernel.process_weights_after_loading(layer)
 
-    workspace_ptr = kernel.workspace.data_ptr()
+    assert not hasattr(kernel, "workspace")
 
     _load_marlin_checkpoint_format_weights(layer)
     kernel.process_weights_after_loading(layer)
 
-    assert kernel.workspace.data_ptr() == workspace_ptr
-    assert torch.all(kernel.workspace == 0)
+    assert not hasattr(kernel, "workspace")
 
 
 @pytest.mark.parametrize("variant", ["fp8", "mxfp8", "nvfp4"])
-def test_marlin_prepare_layer_preserves_workspace_address(monkeypatch, variant):
-    """The Marlin fallback prepare_* functions rerun on weight reload and must
-    reuse the workspace storage whose address captured CUDA graphs hold."""
+def test_marlin_prepare_layer_does_not_own_workspace(monkeypatch, variant):
+    """Weight preparation must not attach runtime workspace to model layers."""
     from vllm import _custom_ops as ops
     from vllm.model_executor.layers.quantization.utils import (
         marlin_utils,
@@ -417,34 +415,57 @@ def test_marlin_prepare_layer_preserves_workspace_address(monkeypatch, variant):
 
     load_checkpoint_format_weights()
     prepare(layer)
-    workspace_ptr = layer.workspace.data_ptr()
+    assert not hasattr(layer, "workspace")
 
     # Reload: fresh checkpoint-format tensors, prepare runs again
     load_checkpoint_format_weights()
     prepare(layer)
 
-    assert layer.workspace.data_ptr() == workspace_ptr
-    assert torch.all(layer.workspace == 0)
+    assert not hasattr(layer, "workspace")
 
 
-def test_marlin_make_workspace_new_rejects_incompatible_existing(monkeypatch):
-    """An incompatible existing workspace means the address captured by CUDA
-    graphs is already unusable; allocating a replacement would hide that."""
+def test_marlin_workspace_uses_persistent_workspace_manager(monkeypatch):
+    """Calls reuse initialized locks; independent streams get separate storage."""
     from vllm.model_executor.layers.quantization.utils import marlin_utils
+    from vllm.utils import torch_utils
+    from vllm.v1.worker import workspace as workspace_module
 
     monkeypatch.setattr(marlin_utils, "num_compute_units", lambda _: 4)
     device = torch.device("cpu")
+    manager = workspace_module.WorkspaceManager(device)
+    monkeypatch.setattr(workspace_module, "_manager", manager)
+    stream = "main"
+    monkeypatch.setattr(torch_utils, "current_stream", lambda: stream)
 
-    workspace = marlin_utils.marlin_make_workspace_new(device)
-    reused = marlin_utils.marlin_make_workspace_new(device, existing=workspace)
-    assert reused is workspace
+    workspace = marlin_utils.get_marlin_workspace(device)
+    assert workspace.shape == (4 * marlin_utils.MARLIN_MAX_BLOCKS_PER_SM,)
+    assert workspace.dtype == torch.int32
+    assert torch.count_nonzero(workspace) == 0
 
-    with pytest.raises(ValueError, match="incompatible"):
-        marlin_utils.marlin_make_workspace_new(device, 4, existing=workspace)
-    with pytest.raises(ValueError, match="incompatible"):
-        marlin_utils.marlin_make_workspace_new(
-            device, existing=workspace.to(torch.int64)
-        )
+    workspace.fill_(1)
+    assert marlin_utils.get_marlin_workspace(device) is workspace
+    assert torch.all(workspace == 1)
+
+    stream = "aux"
+    aux_workspace = marlin_utils.get_marlin_workspace(device)
+    assert aux_workspace.data_ptr() != workspace.data_ptr()
+    assert torch.count_nonzero(aux_workspace) == 0
+
+    manager.lock()
+    assert marlin_utils.get_marlin_workspace(device) is aux_workspace
+
+
+def test_marlin_workspace_without_manager(monkeypatch):
+    from vllm.model_executor.layers.quantization.utils import marlin_utils
+    from vllm.v1.worker import workspace as workspace_module
+
+    monkeypatch.setattr(workspace_module, "_manager", None)
+    monkeypatch.setattr(marlin_utils, "num_compute_units", lambda _: 4)
+    first = marlin_utils.get_marlin_workspace(torch.device("cpu"))
+    second = marlin_utils.get_marlin_workspace(torch.device("cpu"))
+    assert first.data_ptr() != second.data_ptr()
+    assert first.shape == (4 * marlin_utils.MARLIN_MAX_BLOCKS_PER_SM,)
+    assert torch.count_nonzero(first) == 0
 
 
 def test_model_cleanup(dist_init, default_vllm_config):
@@ -489,6 +510,7 @@ def test_padded_moe_reload_releases_each_layer(
         is_act_and_mul=is_gated,
         has_bias=has_bias,
         tp_rank=tp_rank,
+        tp_shard_with_padding=False,
         moe_parallel_config=SimpleNamespace(tp_size=2),
     )
     model = torch.nn.ModuleList()
@@ -506,6 +528,7 @@ def test_padded_moe_reload_releases_each_layer(
         layer.quant_method = method
         layer.expert_map_manager = SimpleNamespace(map_global_to_local=lambda i: i)
         layer._loaded_expert_biases = set()
+        layer._fused_shared_expert_quantizer = None
         method.create_weights(
             layer,
             experts,
@@ -1029,6 +1052,37 @@ def test_hpc_rope_norm_kernel_sees_refit_norm_weights(monkeypatch, hpc_rope_norm
     assert not hasattr(rnorm, "qnorm_weight")
 
 
+def _device_tensor_ptrs(worker) -> dict[str, int]:
+    """Addresses of every device tensor held by a module; graphs capture them."""
+    ptrs = {}
+    for name, module in worker.get_model().named_modules():
+        tensors = {**vars(module), **module._parameters, **module._buffers}
+        for attr, tensor in tensors.items():
+            if isinstance(tensor, torch.Tensor) and tensor.device.type != "cpu":
+                ptrs[f"{name}.{attr}"] = tensor.data_ptr()
+    return ptrs
+
+
+def _moved_tensors(llm, ptrs: list[dict[str, int]]) -> list[list[str]]:
+    after = llm.collective_rpc(_device_tensor_ptrs)
+    return [
+        sorted(n for n, p in old.items() if new.get(n) != p)
+        for old, new in zip(ptrs, after)
+    ]
+
+
+@pytest.mark.parametrize(
+    "use_aiter",
+    [
+        False,
+        pytest.param(
+            True,
+            marks=pytest.mark.skipif(
+                not current_platform.is_rocm(), reason="AITER is ROCm-only"
+            ),
+        ),
+    ],
+)
 @pytest.mark.parametrize(
     "tp_size", [pytest.param(1), pytest.param(2, marks=[pytest.mark.slow_test])]
 )
@@ -1072,12 +1126,18 @@ def test_hpc_rope_norm_kernel_sees_refit_norm_weights(monkeypatch, hpc_rope_norm
         ),
     ],
 )
-def test_reload_weights(base_model, mul_model, add_model, tp_size, vllm_runner):
+def test_reload_weights(
+    base_model, mul_model, add_model, tp_size, use_aiter, vllm_runner, monkeypatch
+):
     if current_platform.device_count() < tp_size:
         pytest.skip(reason="Not enough CUDA devices")
 
     if "FP8" in base_model and _fp8_reload_unsupported():
         pytest.skip(reason="Requires FP8 support")
+
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+    if use_aiter:
+        monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
 
     with vllm_runner(
         model_name=base_model,
@@ -1087,12 +1147,16 @@ def test_reload_weights(base_model, mul_model, add_model, tp_size, vllm_runner):
         max_model_len=16,
         max_num_seqs=1,
     ) as llm:
+        # Reloading must update tensors in place: captured graphs keep pointers.
+        ptrs = llm.collective_rpc(_device_tensor_ptrs)
         llm.collective_rpc("reload_weights", kwargs={"weights_path": mul_model})
+        assert _moved_tensors(llm, ptrs) == [[]] * len(ptrs)
         mul_perp = llm.generate_prompt_perplexity(["3 4 = 12"], mask=["3 4 ="])[0]
         add_perp = llm.generate_prompt_perplexity(["3 4 = 7"], mask=["3 4 ="])[0]
         assert mul_perp < add_perp
 
         llm.collective_rpc("reload_weights", kwargs={"weights_path": add_model})
+        assert _moved_tensors(llm, ptrs) == [[]] * len(ptrs)
         mul_perp = llm.generate_prompt_perplexity(["3 4 = 12"], mask=["3 4 ="])[0]
         add_perp = llm.generate_prompt_perplexity(["3 4 = 7"], mask=["3 4 ="])[0]
         assert add_perp < mul_perp
@@ -1136,13 +1200,13 @@ def test_kv_scale_reload(vllm_runner):
             "Qwen/Qwen3-0.6B",
             "inference-optimization/Qwen3-0.6B-debug-multiply",
             "inference-optimization/Qwen3-0.6B-debug-add",
-            "fp8",
+            "fp8_per_tensor",
         ),
         pytest.param(
             "inference-optimization/DeepSeek-V3-debug-empty",
             "inference-optimization/DeepSeek-V3-debug-multiply",
             "inference-optimization/DeepSeek-V3-debug-add",
-            "fp8",
+            "fp8_per_tensor",
             marks=[pytest.mark.slow_test],
         ),
         pytest.param(
@@ -1170,7 +1234,7 @@ def test_online_quantize_reload(
     if current_platform.device_count() < tp_size:
         pytest.skip(reason="Not enough GPU devices")
 
-    if quantization == "fp8" and _fp8_reload_unsupported():
+    if quantization == "fp8_per_tensor" and _fp8_reload_unsupported():
         pytest.skip(reason="Requires FP8 support")
 
     with vllm_runner(

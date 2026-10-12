@@ -184,3 +184,100 @@ def test_rotary_embedding_dispatch(
     - forward_cuda/forward methods should call ApplyRotaryEmb.forward()
     """
     run_dispatch_test(test_case, device)
+
+
+@pytest.mark.skipif(not current_platform.is_xpu(), reason="XPU only test.")
+@pytest.mark.parametrize(
+    "num_tokens,num_heads,head_size,rot_dim,is_neox_style",
+    [
+        (128, 32, 128, 128, True),  # typical text shape
+        (4096, 16, 80, 80, False),  # GPT-J style (interleaved)
+        (4096, 32, 128, 64, True),  # partial rotary (rot_dim < head_size)
+    ],
+    ids=["text", "gptj_interleaved", "partial_rotary"],
+)
+def test_apply_rotary_emb_xpu_matches_native(
+    num_tokens: int,
+    num_heads: int,
+    head_size: int,
+    rot_dim: int,
+    is_neox_style: bool,
+):
+    """ApplyRotaryEmb.forward_xpu (vllm_xpu_kernels SYCL op) must match
+    forward_native (the CustomOp default fallback) exactly."""
+    from vllm.model_executor.layers.rotary_embedding.common import ApplyRotaryEmb
+
+    vllm_config = VllmConfig(
+        compilation_config=CompilationConfig(custom_ops=["all", "+apply_rotary_emb"])
+    )
+    get_cached_compilation_config.cache_clear()
+
+    with set_current_vllm_config(vllm_config):
+        op = ApplyRotaryEmb(enforce_enable=True, is_neox_style=is_neox_style)
+
+        x = torch.randn(
+            num_tokens, num_heads, head_size, device="xpu", dtype=torch.bfloat16
+        )
+        x = x[..., :rot_dim].contiguous()
+        cos = torch.randn(num_tokens, rot_dim // 2, device="xpu", dtype=torch.bfloat16)
+        sin = torch.randn(num_tokens, rot_dim // 2, device="xpu", dtype=torch.bfloat16)
+
+        expected = op.forward_native(x, cos, sin)
+        actual = op.forward_xpu(x, cos, sin)
+        torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+
+
+@pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="CUDA/ROCm only test.")
+@pytest.mark.parametrize("num_tokens", [257, 2304])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+def test_packed_qk_rope_correctness(
+    num_tokens: int, dtype: torch.dtype, default_vllm_config
+):
+    """packed_qk_rope_ must match the per-tensor ApplyRotaryEmb path with
+    enable_fp32_compute=True to within one ULP, and must leave the V slice
+    untouched.
+
+    Both sides compute in fp32 on identical inputs. The only gap is which
+    product the backend keeps exact inside the o1 multiply-add, and that
+    follows the register layout, so it is decided by codegen rather than by
+    the source and holds neither across backends nor across Triton versions.
+    """
+    from vllm.model_executor.layers.rotary_embedding.common import ApplyRotaryEmb
+    from vllm.model_executor.layers.rotary_embedding.packed_qk_rope import (
+        packed_qk_rope_,
+    )
+
+    num_heads, head_dim = 12, 128
+    rng = torch.Generator(device="cuda").manual_seed(0)
+
+    angles = (
+        torch.rand(num_tokens, head_dim // 2, device="cuda", generator=rng) * torch.pi
+    )
+    freqs_cis = torch.polar(torch.ones_like(angles), angles)
+    cos = freqs_cis.real.contiguous()
+    sin = freqs_cis.imag.contiguous()
+
+    xqkv = torch.randn(
+        num_tokens, 3, num_heads, head_dim, dtype=dtype, device="cuda", generator=rng
+    )
+    xqkv_ref = xqkv.clone()
+    xq, xk, xv = torch.unbind(xqkv_ref, dim=-3)
+
+    op = ApplyRotaryEmb(
+        enforce_enable=True, is_neox_style=False, enable_fp32_compute=True
+    )
+    # op() dispatches to forward_cuda / forward_hip per platform.
+    xq_ref = op(xq, cos, sin)
+    xk_ref = op(xk, cos, sin)
+
+    packed_qk_rope_(xqkv, freqs_cis)
+
+    # One ULP at the largest magnitude present, not relative: o1 can cancel,
+    # so the error scales with the inputs to the sum, not with the result.
+    eps = torch.finfo(dtype).eps
+    q_atol = eps * xq_ref.abs().max().item()
+    k_atol = eps * xk_ref.abs().max().item()
+    torch.testing.assert_close(xqkv[:, 0], xq_ref, atol=q_atol, rtol=0)
+    torch.testing.assert_close(xqkv[:, 1], xk_ref, atol=k_atol, rtol=0)
+    # V is never read or written by the kernel, so it stays exact.
+    torch.testing.assert_close(xqkv[:, 2], xv, atol=0, rtol=0)

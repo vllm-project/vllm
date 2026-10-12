@@ -5,7 +5,6 @@ import fnmatch
 from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
 import torch
-from transformers import PretrainedConfig
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
@@ -32,6 +31,7 @@ from vllm.model_executor.layers.quantization.quark.schemes import (
     QuarkOCP_MX,
     QuarkScheme,
     QuarkW4A8_MXFP4_FP8,
+    QuarkW4A16Int4,
     QuarkW8A8Fp8,
     QuarkW8A8Fp8PerBlock,
     QuarkW8A8Int8,
@@ -39,11 +39,14 @@ from vllm.model_executor.layers.quantization.quark.schemes import (
 from vllm.model_executor.layers.quantization.quark.utils import (
     QuarkQTensorHint,
     deep_compare,
+    parse_w4a16_int4_weight_config,
     should_ignore_layer,
 )
 from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
     _ACTIVATION_QUANT_KEY_MAP,
     _WEIGHT_QUANT_KEY_MAP,
+    OCP_MX_BLOCK_SIZE,
+    ocp_mx_weight_dtype_and_rows,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
@@ -54,6 +57,10 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8Static128BlockSym,
     kFp8StaticChannelSym,
     kFp8StaticTensorSym,
+    kInt4Static,
+    kInt4Static32,
+    kInt4Static32Asym,
+    kInt4StaticAsym,
     kInt4W4A8StaticChannelSym,
     kInt8DynamicTensorAsym,
     kInt8DynamicTensorSym,
@@ -75,10 +82,6 @@ if TYPE_CHECKING:
 __all__ = ["QuarkLinearMethod"]
 
 logger = init_logger(__name__)
-
-# model_type values that use dynamic MXFP4 re-quantization for
-# OCP MX fp4 Quark checkpoints
-_DEEPSEEK_V3_FAMILY_MODEL_TYPES = frozenset({"deepseek_v3", "deepseek_v32"})
 
 
 class QuantKeyMatch(NamedTuple):
@@ -113,37 +116,6 @@ class QuarkConfig(QuantizationConfig):
         self.kv_cache_group = kv_cache_group
         self.kv_cache_config = kv_cache_config
         self.pack_method = pack_method
-        # Note : this flag is kept disabled because the overhead of
-        # dynamic mxfp4 quantization negates the performance gains
-        # that come from shifting to mxfp4. It is left here in case
-        # we want to re-enable it in the future.
-        self.dynamic_mxfp4_quant = False
-
-    def maybe_update_config(
-        self,
-        model_name: str,
-        hf_config: PretrainedConfig | None = None,
-        revision: str | None = None,
-    ):
-        """Enable dynamic MXFP4 only for DeepSeek-V3-family fp4 checkpoints."""
-        if hf_config is None:
-            return
-
-        if (
-            getattr(hf_config, "model_type", None)
-            not in _DEEPSEEK_V3_FAMILY_MODEL_TYPES
-        ):
-            return
-
-        quant_config = getattr(hf_config, "quantization_config", None)
-        if isinstance(quant_config, dict):
-            quant_dtype = (
-                quant_config.get("global_quant_config", {})
-                .get("weight", {})
-                .get("dtype")
-            )
-            if quant_dtype == "fp4":
-                self.dynamic_mxfp4_quant = True
 
     def get_linear_method(self) -> "QuarkLinearMethod":
         return QuarkLinearMethod(self)
@@ -172,8 +144,10 @@ class QuarkConfig(QuantizationConfig):
         quant_config_with_hf_to_vllm_mapper: dict[str, Any] = {}
 
         for k, v in self.quant_config.items():
-            if isinstance(v, list):
+            if isinstance(v, list) and all(isinstance(item, str) for item in v):
                 quant_config_with_hf_to_vllm_mapper[k] = hf_to_vllm_mapper.apply_list(v)
+            elif isinstance(v, list):
+                quant_config_with_hf_to_vllm_mapper[k] = v
             elif isinstance(v, dict):
                 quant_config_with_hf_to_vllm_mapper[k] = hf_to_vllm_mapper.apply_dict(v)
             else:
@@ -186,22 +160,25 @@ class QuarkConfig(QuantizationConfig):
 
         self.quant_config = quant_config_with_hf_to_vllm_mapper
 
+    def _scale_block_rows(self, prefix: str, layer_type: type[torch.nn.Module]) -> int:
+        """How many weight rows one checkpoint scale row covers.
+
+        1 for the canonical 1-D per-group MX spelling; ``block_size[0]`` for
+        MXFP8 exports that spell the scale 2-D (DeepSeek-V4.1 uses 32). The
+        scheme cannot work this out itself: it has no handle on the layer name,
+        and tensor-parallel sharding narrows the loaded scale so the ratio is
+        not recoverable from shapes either.
+        """
+        config = self._find_matched_config(prefix, layer_type)
+        weight = self._unwrap_single_quant_config(config.get("weight"))
+        normalized = ocp_mx_weight_dtype_and_rows(weight)
+        return normalized[1] if normalized is not None else 1
+
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
     ) -> "QuantizeMethodBase | None":
         weight_quant_key, activation_quant_key, method_cls = (
             self.get_quant_method_target(prefix, type(layer))
-        )
-
-        exclude_layers = cast(list[str], self.quant_config.get("exclude"))
-        is_ignored = should_ignore_layer(
-            prefix,
-            ignore=exclude_layers,
-            fused_mapping=self.packed_modules_mapping,
-            check_children=isinstance(layer, RoutedExperts),
-        )
-        dynamic_mxfp4_quant = (
-            is_ignored and "self_attn" in prefix and self.dynamic_mxfp4_quant
         )
 
         if method_cls is UnquantizedFusedMoEMethod:
@@ -214,7 +191,14 @@ class QuarkConfig(QuantizationConfig):
                 scheme_cls,
                 weight_quant_key=weight_quant_key,
                 activation_quant_key=activation_quant_key,
-                dynamic_mxfp4_quant=dynamic_mxfp4_quant,
+                scale_block_rows=(
+                    self._scale_block_rows(prefix, type(layer))
+                    if scheme_cls is QuarkOCP_MX
+                    else 1
+                ),
+                weight_config=self._find_matched_config(prefix, type(layer)).get(
+                    "weight"
+                ),
             )
             layer.scheme = scheme
             return QuarkLinearMethod(self)
@@ -227,6 +211,7 @@ class QuarkConfig(QuantizationConfig):
                 method_cls=method_cls,
                 weight_quant_key=weight_quant_key,
                 activation_quant_key=activation_quant_key,
+                layer_name=prefix,
             )
 
         return None
@@ -262,11 +247,6 @@ class QuarkConfig(QuantizationConfig):
             if is_routed_experts:
                 return None, None, UnquantizedFusedMoEMethod
             if issubclass(layer_type, LinearBase):
-                if "self_attn" in prefix and self.dynamic_mxfp4_quant:
-                    weight_quant_key, activation_key, _ = self.get_scheme_cls(
-                        layer_type, prefix
-                    )
-                    return weight_quant_key, activation_key, QuarkLinearMethod
                 return None, None, UnquantizedLinearMethod
             return None, None, None
         if issubclass(layer_type, LinearBase):
@@ -572,6 +552,26 @@ class QuarkConfig(QuantizationConfig):
             )
         return QuantKeyMatch(True, activation_quant_key, weight_quant_key)
 
+    def _is_w4a16_int4(
+        self,
+        weight_quant: dict[str, Any] | None,
+        input_quant: dict[str, Any] | None,
+    ) -> QuantKeyMatch:
+        if weight_quant is None or input_quant is not None:
+            return QuantKeyMatch(False, None, None)
+
+        is_int4 = weight_quant.get("dtype") in ("int4", "uint4")
+        is_packed = self.pack_method in ("order", "reorder")
+        if not (is_int4 and is_packed):
+            return QuantKeyMatch(False, None, None)
+
+        group_size, is_symmetric = parse_w4a16_int4_weight_config(weight_quant)
+        if is_symmetric:
+            weight_key = kInt4Static32 if group_size == 32 else kInt4Static
+        else:
+            weight_key = kInt4Static32Asym if group_size == 32 else kInt4StaticAsym
+        return QuantKeyMatch(True, None, weight_key)
+
     def _is_w4a8_mxfp4_fp8(
         self,
         weight_quant: dict[str, Any] | None,
@@ -661,52 +661,18 @@ class QuarkConfig(QuantizationConfig):
         The rationale for checking only the weight type is that
         the model loading concept and process primarily concerns the weights themselves.
         """
-        # Confirm weights quantized.
-        if not isinstance(weight_quant, dict):
+        # Confirm weights quantized, and normalize the two OCP MX config
+        # dialects (1-D per_group, and MXFP8's 2-D per_block) to a dtype.
+        normalized = ocp_mx_weight_dtype_and_rows(weight_quant)
+        if normalized is None:
             logger.debug(
-                "Quark model's weight quantization is incompatible with OCP_MX format: "
-                "weight_quant is not a dictionary."
+                "Quark model's weight quantization is incompatible with OCP MX "
+                "format: %s",
+                weight_quant,
             )
             return QuantKeyMatch(False, None, None)
 
-        # Input and weight qscheme needs to be per group.
-        if weight_quant.get("qscheme") != "per_group":
-            logger.debug(
-                "Quark model's weight quantization is incompatible with OCP MX format: "
-                "weight is not per_group."
-            )
-            return QuantKeyMatch(False, None, None)
-
-        # Input and weight group size needs to be 32.
-        if weight_quant.get("group_size") != 32:
-            logger.debug(
-                "Quark model's weight quantization is incompatible with OCP MX format: "
-                "group_size of weight is not 32."
-            )
-            return QuantKeyMatch(False, None, None)
-
-        # Activations and weight scales need to be in e8m0 format.
-        if weight_quant.get("scale_format") != "e8m0":
-            logger.debug(
-                "Quark model's weight quantization is incompatible with OCP MX format: "
-                "scale_format of weight is not e8m0."
-            )
-            return QuantKeyMatch(False, None, None)
-
-        # Input and weight dtypes need to be any of fp4,
-        # fp6_e3m2 or fp6_e3m2, possibly mixed.
-        if weight_quant.get("dtype") not in {
-            "fp4",
-            "fp6_e3m2",
-            "fp6_e2m3",
-        }:
-            logger.debug(
-                "Quark model's weight quantization is incompatible with OCP MX format: "
-                "dtype is not in {fp4, fp6_e3m2, fp6_e2m3}."
-            )
-            return QuantKeyMatch(False, None, None)
-
-        weight_dtype = weight_quant["dtype"].replace("fp", "mxfp")
+        weight_dtype, _ = normalized
         weight_quant_key = _WEIGHT_QUANT_KEY_MAP[weight_dtype]
         if input_quant is None:
             activation_quant_key = None
@@ -724,6 +690,14 @@ class QuarkConfig(QuantizationConfig):
                     "input scales."
                 )
                 return QuantKeyMatch(False, None, None)
+        elif (
+            input_quant["dtype"] == "fp8_e4m3"
+            and input_quant.get("qscheme") == "per_group"
+            and input_quant.get("group_size") == OCP_MX_BLOCK_SIZE
+        ):
+            # MXFP8 activations. Must be checked before the per-tensor FP8
+            # branch below, which would otherwise claim them.
+            activation_quant_key = _ACTIVATION_QUANT_KEY_MAP["mxfp8_e4m3"]
         elif input_quant["dtype"] == "fp8_e4m3":
             activation_quant_key = kFp8DynamicTensorSym
         else:
@@ -890,6 +864,12 @@ class QuarkConfig(QuantizationConfig):
                 match.activation_quant_key,
                 QuarkW8A8Int8,
             )
+        elif match := self._is_w4a16_int4(weight_config, input_config):
+            return (
+                match.weight_quant_key,
+                match.activation_quant_key,
+                QuarkW4A16Int4,
+            )
         elif match := self._is_w4a8_mxfp4_fp8(weight_config, input_config):
             return (
                 match.weight_quant_key,
@@ -918,7 +898,8 @@ class QuarkConfig(QuantizationConfig):
         scheme_cls: type["QuarkScheme"],
         weight_quant_key: QuantKey | None,
         activation_quant_key: QuantKey | None,
-        dynamic_mxfp4_quant: bool = False,
+        scale_block_rows: int = 1,
+        weight_config: dict[str, Any] | None = None,
     ) -> "QuarkScheme":
         """Construct a Quark scheme selected by get_scheme_cls."""
         if scheme_cls not in (
@@ -928,8 +909,23 @@ class QuarkConfig(QuantizationConfig):
             QuarkOCP_MX,
             QuarkNVFP4,
             QuarkW4A8_MXFP4_FP8,
+            QuarkW4A16Int4,
         ):
             raise AssertionError(f"Unsupported Quark scheme class: {scheme_cls}")
+
+        scheme: QuarkScheme
+        if scheme_cls is QuarkW4A16Int4:
+            normalized_weight_config = self._unwrap_single_quant_config(weight_config)
+            assert normalized_weight_config is not None
+            assert weight_quant_key is not None
+            scheme = QuarkW4A16Int4(
+                weight_quant_key=weight_quant_key,
+                activation_quant_key=activation_quant_key,
+                pack_method=self.pack_method,
+                weight_config=normalized_weight_config,
+            )
+            self._check_scheme_supported(scheme.get_min_capability())
+            return scheme
 
         kwargs: dict[str, Any] = {"activation_quant_key": activation_quant_key}
 
@@ -943,7 +939,7 @@ class QuarkConfig(QuantizationConfig):
             kwargs["weight_quant_key"] = weight_quant_key
 
         if scheme_cls is QuarkOCP_MX:
-            kwargs["dynamic_mxfp4_quant"] = dynamic_mxfp4_quant
+            kwargs["scale_block_rows"] = scale_block_rows
 
         scheme = scheme_cls(**kwargs)
 

@@ -41,16 +41,17 @@ If you are only developing vLLM's Python code, install vLLM using:
 
 ```bash
 VLLM_USE_PRECOMPILED=1 uv pip install -e .
+vllm download-kernels
 ```
 
 To rebuild only the Rust frontend binary:
 
 ```bash
-./build_rust.sh          # release build
-./build_rust.sh --debug  # faster build for development
+./tools/build_rust.sh          # release build
+./tools/build_rust.sh --debug  # faster build for development
 ```
 
-If you are developing vLLM's Python and CUDA/C++ code, install Pytorch first:
+If you are developing vLLM's Python and CUDA/C++ code, install PyTorch first:
 
 ```bash
 uv pip install torch torchvision torchaudio --extra-index-url https://download.pytorch.org/whl/cu129
@@ -74,7 +75,7 @@ For an optimized workflow when iterating on C++/CUDA kernels, see the [Increment
 For JIT kernel warmup conventions, see [JIT Kernel Warmup](./jit_kernel_warmup.md).
 
 !!! tip
-    vLLM is compatible with Python versions 3.10 to 3.13. However, vLLM's default [Dockerfile](../../docker/Dockerfile) ships with Python 3.12 and tests in CI (except `mypy`) are run with Python 3.12.
+    vLLM is compatible with Python versions 3.11 to 3.14. However, vLLM's default [Dockerfile](../../docker/Dockerfile) ships with Python 3.12 and tests in CI (except `mypy`) are run with Python 3.12.
 
     Therefore, we recommend developing with Python 3.12 to minimise the chance of your local environment clashing with our CI environment.
 
@@ -89,20 +90,17 @@ pre-commit install
 
 vLLM's `pre-commit` hooks will now run automatically every time you commit.
 
+When running ShellCheck or markdownlint directly, or configuring an editor
+integration, use the configuration files in `tools/pre_commit/`:
+`--rcfile=tools/pre_commit/.shellcheckrc` for ShellCheck and
+`--config tools/pre_commit/.markdownlint.yaml` for markdownlint-cli2.
+
 !!! tip "Tips"
     You can manually run the `pre-commit` hooks using:
 
     ```bash
     pre-commit run     # runs on staged files
     pre-commit run -a  # runs on all files (short for --all-files)
-    ```
-
-    ---
-
-    Some `pre-commit` hooks only run in CI. If you need to, you can run them locally with:
-
-    ```bash
-    pre-commit run --hook-stage manual mypy-3.11
     ```
 
 ### Documentation
@@ -129,6 +127,9 @@ API_AUTONAV_EXCLUDE=vllm mkdocs serve  # API ref off (~15 seconds)
 
 Once you see a `Serving on http://<address>:<port>/` line in the logs, the live preview is ready!
 Open that address in your browser to see it — `http://127.0.0.1:8000/` by default, or whichever host/port you passed to `-a`.
+
+On pull requests, Read the Docs builds a documentation preview only if the PR changes files that affect the docs (e.g. `docs/`, `examples/` or `mkdocs.yaml`) and the `pre-commit` checks have not failed.
+Changes to `vllm/` alone do not trigger a build, so if your PR changes the API or CLI reference, add the `build-docs` label to force one.
 
 For additional features and advanced configurations, refer to the:
 
@@ -299,15 +300,23 @@ review process:
 
 - After the PR is submitted, the PR will be assigned to a reviewer. Every
   reviewer will pick up the PRs based on their expertise and availability.
+  Official reviews can be performed by any of the
+  [reviewers](../community/reviewers.md) or
+  [committers](../governance/committers.md); committers perform the final
+  merge. To find someone to review your PR, see the reviewers' and
+  committers' areas of expertise or ask in the `#pr-reviews` channel on
+  [Slack](https://slack.vllm.ai).
 - After the PR is assigned, the reviewer will provide status updates every 2-3
   days. If the PR is not reviewed within 7 days, please feel free to ping the
   reviewer or the vLLM team.
 - After the review, the reviewer will put an `action-required` label on the PR
   if there are changes required. The contributor should address the comments and
   ping the reviewer to re-review the PR.
-- Please respond to all comments within a reasonable time frame. If a comment
+- Please respond to all comments within a reasonable time frame. Address each
+  piece of reviewer feedback with a change or an explanation. If a comment
   isn't clear or you disagree with a suggestion, feel free to ask for
-  clarification or discuss the suggestion.
+  clarification or discuss the suggestion. If you and a reviewer can't reach
+  agreement, a committer can help decide.
 - Note that not all CI checks will be executed due to limited computational
   resources. Reviewers with write access and configured trusted contributors
   can comment `/ci run` for upstream CI or `/amd-ci run` for AMD CI only when

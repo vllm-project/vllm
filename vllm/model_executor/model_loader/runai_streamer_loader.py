@@ -15,6 +15,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     download_weights_from_hf,
     runai_safetensors_weights_iterator,
 )
+from vllm.transformers_utils.repo_utils import resolve_revision
 from vllm.transformers_utils.runai_utils import is_runai_obj_uri, list_safetensors
 
 
@@ -87,6 +88,11 @@ class RunaiModelStreamerLoader(BaseModelLoader):
         safetensors_pattern = "*.safetensors"
         index_file = SAFE_WEIGHTS_INDEX_NAME
 
+        if not is_local and not is_object_storage_path:
+            # `model_weights` can point to another repo than the one `revision` was
+            # resolved for, which does not pin this one.
+            revision = resolve_revision(model_name_or_path, revision)
+
         hf_folder = (
             model_name_or_path
             if (is_local or is_object_storage_path)
@@ -128,11 +134,16 @@ class RunaiModelStreamerLoader(BaseModelLoader):
         """Download model if necessary."""
         self._prepare_weights(model_config.model, model_config.revision)
 
-    def load_weights(self, model: nn.Module, model_config: ModelConfig) -> None:
-        """Load weights into a model."""
+    def get_all_weights(
+        self,
+        model_config: ModelConfig,
+        model: nn.Module,
+    ) -> Generator[tuple[str, torch.Tensor], None, None]:
         model_weights = model_config.model
         if model_weights_override := model_config.model_weights:
             model_weights = model_weights_override
-        model.load_weights(
-            self._get_weights_iterator(model_weights, model_config.revision)
-        )
+        yield from self._get_weights_iterator(model_weights, model_config.revision)
+
+    def load_weights(self, model: nn.Module, model_config: ModelConfig) -> None:
+        """Load weights into a model."""
+        model.load_weights(self.get_all_weights(model_config, model))
