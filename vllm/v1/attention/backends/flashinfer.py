@@ -14,7 +14,6 @@ from flashinfer import (
     BatchDecodeWithPagedKVCacheWrapper,
     BatchPrefillWithPagedKVCacheWrapper,
     BatchPrefillWithRaggedKVCacheWrapper,
-    MultiLevelCascadeAttentionWrapper,
     get_seq_lens,
     nvfp4_quantize_append_paged_kv_cache_with_slot_mapping,
 )
@@ -732,16 +731,6 @@ class FlashInferMetadata:
     Will be `None` if `num_decode_tokens == 0`.
     """
 
-    # --- Special Case: Cascade Attention ---
-
-    use_cascade: bool
-    """
-    If True, the entire batch is a cascade attention call, and the
-    `prefill` and `decode` fields will both be None.
-    """
-
-    cascade_wrapper: MultiLevelCascadeAttentionWrapper | None
-
 
 class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
     kv_cache_spec: AttentionSpec
@@ -878,12 +867,10 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
 
         # Prefer TRTLLM/XQA for decoding whenever supported. The decode kernel
         # must be selected statically for FULL cudagraph capture.
-        can_use_xqa_or_trtllm_gen_decode = (
-            can_use_trtllm_attention(
-                self.num_qo_heads, self.num_kv_heads, is_prefill=False
-            )
-            and not self.nvfp4_fa2
-        )
+        # XQA reads an NVFP4 cache only on SM12x; SM90 decodes it with fa2.
+        can_use_xqa_or_trtllm_gen_decode = can_use_trtllm_attention(
+            self.num_qo_heads, self.num_kv_heads, is_prefill=False
+        ) and (not self.nvfp4_fa2 or current_platform.is_device_capability_family(120))
         # Page sizes >= 128 require the trtllm-gen GQA/MQA path (guaranteed by
         # get_supported_kernel_block_sizes).
         assert self.page_size <= 64 or (
@@ -952,8 +939,6 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             # flash_attn_varlen_func's cp_world_size/cp_rank/cp_tot_seqused_k).
             supports_dcp_with_varlen=False,
         )
-
-        self._cascade_wrapper = None  # Wrapper for cascade attention
 
         # Global hyperparameters shared by all attention layers
         # TODO: discard this for trtllm-gen backend
@@ -1078,7 +1063,10 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             ) or (
                 is_xqa_arch
                 and (
-                    spec.kv_quant_mode.is_nvfp4
+                    (
+                        spec.kv_quant_mode.is_nvfp4
+                        and not current_platform.is_device_capability_family(120)
+                    )
                     or not _is_xqa_head_dim_supported(spec.head_size)
                 )
             ):
@@ -1359,15 +1347,6 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
 
         return decode_wrapper
 
-    def _get_cascade_wrapper(self):
-        if self._cascade_wrapper is None:
-            self._cascade_wrapper = MultiLevelCascadeAttentionWrapper(
-                2,
-                self._get_workspace_buffer(),
-                get_flashinfer_layout_string(self.kv_cache_layout),
-            )
-        return self._cascade_wrapper
-
     def _compute_flashinfer_kv_metadata(
         self,
         num_blocks_np: np.ndarray,
@@ -1444,10 +1423,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         qo_indptr_cpu = common_attn_metadata.query_start_loc_cpu
 
         # Step 1: Decide which dispatch modes to use:
-        # - Cascade attention (distinct mode)
         # - Prefill (FI native or TRTLLM)
         # - Decode (FI native, XQA, or trtllm-gen)
-        use_cascade = common_prefix_len > 0
         uses_spec_reorder = self.reorder_batch_threshold > 1
         # Page sizes >= 128 must use trtllm-gen; force it for prefill too.
         prefill_force_trtllm = (
@@ -1485,12 +1462,11 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         )
 
         if not all_uses_trtllm:
-            sinks_would_be_dropped = self.use_dcp or use_cascade
-            if self.has_sinks and sinks_would_be_dropped:
+            if self.has_sinks and self.use_dcp:
                 raise NotImplementedError(
-                    "FlashInfer BatchDCPPrefillWrapper and "
-                    "MultiLevelCascadeAttentionWrapper do not support attention sinks. "
-                    "Please use TRTLLM on Blackwell or FlashAttention on earlier GPUs."
+                    "FlashInfer BatchDCPPrefillWrapper does not support attention "
+                    "sinks. Please use TRTLLM on Blackwell or FlashAttention on "
+                    "earlier GPUs."
                 )
 
             if not self.global_hyperparameters.has_same_window_lefts:
@@ -1507,7 +1483,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             )
 
         # Step 2: Initialize the output metadata
-        # Leave prefill/decode/cascade_wrapper empty, to be populated
+        # Leave prefill/decode empty, to be populated
         # case by case depending on the batch contents and backend selection.
         attn_metadata = FlashInferMetadata(
             kv_cache_layout=self.kv_cache_layout,
@@ -1520,10 +1496,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             num_prefills=num_prefills,
             num_prefill_tokens=num_prefill_tokens,
             causal=causal,
-            use_cascade=use_cascade,
             prefill=None,
             decode=None,
-            cascade_wrapper=None,
         )
 
         # Guard access to seq_lens_cpu, which may not always be needed
@@ -1531,7 +1505,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         # When all attention (both prefill and decode) uses TRTLLM,
         # seq_lens_cpu is not needed since TRTLLM paths use GPU tensors
         # (block_tables, seq_lens) directly.
-        needs_seq_lens_cpu = self.use_dcp or use_cascade or not all_uses_trtllm
+        needs_seq_lens_cpu = self.use_dcp or not all_uses_trtllm
         if needs_seq_lens_cpu:
             if (
                 self._num_speculative_tokens == 0
@@ -1577,13 +1551,6 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             seq_lens_np = None
             num_blocks_np = None
 
-        # Adjust num_block_np for cascade attention
-        if use_cascade:
-            assert num_blocks_np is not None
-            assert common_prefix_len % page_size == 0
-            num_common_kv_blocks = common_prefix_len // page_size
-            num_blocks_np -= num_common_kv_blocks
-
         # Compute paged_kv_indices if necessary
         # paged_kv_indices is only needed for FlashInfer native paths;
         # XQA/trtllm-gen paths use block_tables directly on GPU.
@@ -1591,9 +1558,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         needs_native_paged_decode = (
             num_decodes > 0 and not decode_with_flashinfer_trtllm_api
         )
-        needs_paged_kv_indices = (
-            use_cascade or needs_native_paged_prefill or needs_native_paged_decode
-        )
+        needs_paged_kv_indices = needs_native_paged_prefill or needs_native_paged_decode
         if needs_paged_kv_indices:
             assert num_blocks_np is not None
             assert seq_lens_np is not None
@@ -1606,57 +1571,6 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             )
         else:
             paged_kv_indices = None
-
-        # Early-out for cascade attention
-        if use_cascade:
-            assert num_blocks_np is not None
-            # Grab the blocks of the shared prefix from the first request.
-            num_common_kv_blocks = common_prefix_len // page_size
-
-            # Create CPU versions directly for cascade (no GPU versions needed)
-            shared_qo_indptr_cpu = torch.tensor(
-                [0, num_actual_tokens], dtype=torch.int32, device="cpu"
-            )
-            shared_kv_page_indptr_cpu = torch.tensor(
-                [0, num_common_kv_blocks], dtype=torch.int32, device="cpu"
-            )
-            shared_kv_page_indices_cpu = block_table_tensor[0, :num_common_kv_blocks]
-            shared_kv_last_page_len_cpu = torch.tensor(
-                [page_size], dtype=torch.int32, device="cpu"
-            )
-
-            # Remove the blocks of the shared prefix from all requests.
-            block_table_tensor = block_table_tensor[:, num_common_kv_blocks:]
-            num_blocks_np -= num_common_kv_blocks
-
-            assert paged_kv_indices is not None
-            paged_kv_indptr_cpu = self.paged_kv_indptr.cpu[: 1 + num_reqs]
-            paged_kv_last_page_len_cpu = self.paged_kv_last_page_len.cpu[:num_reqs]
-
-            attn_metadata.cascade_wrapper = self._get_cascade_wrapper()
-            # Cascade attention must use the same q dtype for prefill and decode
-            # because it does not support FP8 kv-cache or FP8 query yet.
-            assert self.q_data_type_prefill == self.q_data_type_decode
-            attn_metadata.cascade_wrapper.plan(
-                qo_indptr_arr=[shared_qo_indptr_cpu, qo_indptr_cpu],
-                paged_kv_indptr_arr=[shared_kv_page_indptr_cpu, paged_kv_indptr_cpu],
-                paged_kv_indices_arr=[shared_kv_page_indices_cpu, paged_kv_indices],
-                paged_kv_last_page_len=[
-                    shared_kv_last_page_len_cpu,
-                    paged_kv_last_page_len_cpu,
-                ],
-                num_qo_heads=self.num_qo_heads,
-                num_kv_heads=self.num_kv_heads,
-                head_dim=self.head_dim,
-                page_size=self.page_size,
-                causal=True,
-                sm_scale=self.sm_scale,
-                window_left=self.window_left,
-                logits_soft_cap=self.logits_soft_cap,
-                q_data_type=self.q_data_type_prefill,
-                kv_data_type=self.kv_cache_dtype,
-            )
-            return attn_metadata
 
         # Step 3: Handle prefill and decode pathways case by case
         ## PREFILL PATHWAY
@@ -1923,15 +1837,6 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
 
     def update_draft_decode_metadata(self, _metadata: FlashInferMetadata) -> None:
         pass
-
-    def use_cascade_attention(self, *args, **kwargs) -> bool:
-        if self.kv_cache_spec.dtype != self.vllm_config.model_config.dtype:
-            # TODO: The cascade wrapper currently does not support setting
-            # kv cache dtype to something different from query dtype.
-            return False
-        # TODO: Cascade attention doesn't work, disable it for now
-        # return use_cascade_attention(*args, **kwargs)
-        return False
 
 
 class FlashInferImpl(AttentionImpl):
@@ -2222,24 +2127,6 @@ class FlashInferImpl(AttentionImpl):
         output_padded = output
         output = output[:num_actual_tokens]
 
-        if attn_metadata.use_cascade:
-            # Cascade attention (rare case).
-            assert attn_metadata.cascade_wrapper is not None
-            stride_order = kv_cache_layout.layer_view_order
-            if self.is_kvcache_nvfp4:
-                kv_cache_views = tuple(
-                    cache.permute(*stride_order)
-                    for cache in kv_cache.split(self.num_kv_heads, dim=1)
-                )
-            else:
-                kv_perm = kv_cache.permute(*stride_order)
-                kv_cache_views = kv_perm.split(self.head_size, dim=-1)
-            kv_tuple = tuple(
-                canonicalize_singleton_dim_strides(cache) for cache in kv_cache_views
-            )
-            output.copy_(attn_metadata.cascade_wrapper.run(query, kv_tuple))
-            return output
-
         # When using spec decoding, num_decodes can be < num_decode_tokens
         # because some decode requests may have more than one query token.
         num_decode_tokens = attn_metadata.num_decode_tokens
@@ -2283,7 +2170,6 @@ class FlashInferImpl(AttentionImpl):
         use_dcp = self.dcp_world_size > 1
         if decode_with_xqa:
             assert not use_dcp
-            assert not self.is_kvcache_nvfp4
             assert self.o_sf_scale is None
             assert output.dtype != FP4_DTYPE
 
@@ -2628,7 +2514,10 @@ class FlashInferImpl(AttentionImpl):
 
                     flashinfer_xqa_batch_decode_with_kv_cache(
                         query=decode_query,
-                        kv_cache=kv_cache_tuple,
+                        kv_cache=(
+                            nvfp4_kv_data if self.is_kvcache_nvfp4 else kv_cache_tuple
+                        ),
+                        kv_cache_sf=nvfp4_kv_block_scales,
                         workspace_buffer=workspace_buffer,
                         block_tables=block_tables_decode,
                         seq_lens=seq_lens_decode,
