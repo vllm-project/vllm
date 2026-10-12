@@ -19,9 +19,9 @@ steps:
   - pytest -v -s distributed/test_shm_storage.py
   mirror:
     amd:
-      label: ':amd: (MI300) Distributed Comm Ops'
+      label: ':amd: (MI355) Distributed Comm Ops'
       dind: false
-      device: mi300_2
+      device: mi355_2
       timeout_in_minutes: 30
       working_dir: /vllm-workspace/tests
       depends_on:
@@ -196,9 +196,9 @@ steps:
   - pytest -v -s v1/worker/test_worker_memory_snapshot.py
   mirror:
     amd:
-      label: ':amd: (MI300) Distributed Torchrun + Shutdown'
+      label: ':amd: (MI355) Distributed Torchrun + Shutdown'
       dind: false
-      device: mi300_2
+      device: mi355_2
       timeout_in_minutes: 35
       working_dir: /vllm-workspace/tests
       depends_on:

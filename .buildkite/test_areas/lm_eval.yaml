@@ -15,9 +15,9 @@ steps:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-small.txt
   mirror:
     amd:
-      label: ":amd: (MI300) LM Eval Small Models"
+      label: ":amd: (MI355) LM Eval Small Models"
       dind: false
-      device: mi300_1
+      device: mi355_dpx
       timeout_in_minutes: 45
       depends_on:
       - image-build-amd
@@ -697,17 +697,17 @@ steps:
       - export VLLM_WORKER_MULTIPROC_METHOD=spawn
       - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-mi355-nemotron-3-super.txt
 
-- label: ":amd: (MI300) LM Eval Large Models"
+- label: ":amd: (MI355) LM Eval Large Models"
   key: amd-lm-eval-large-models
   dind: false
-  device: mi300_8
+  device: mi355_8
   optional: true
   timeout_in_minutes: 65
   depends_on:
   - image-build-amd
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - export PYTORCH_ROCM_ARCH=gfx942 # Limit Quark compilation to save time
+  - export PYTORCH_ROCM_ARCH=gfx950 # Limit Quark compilation to save time
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-mi3xx.txt
   source_file_dependencies:
   - vllm/_aiter_ops.py
@@ -1288,9 +1288,9 @@ steps:
   - pytest -s -v evals/gsm8k/test_gsm8k_offloading.py -k "nemotron-h-8b or gemma-4-e4b-it"
   mirror:
     amd:
-      label: ":amd: (MI300) LM Eval KV-Offload"
+      label: ":amd: (MI355) LM Eval KV-Offload"
       dind: false
-      device: mi300_1
+      device: mi355_dpx
       timeout_in_minutes: 55
       depends_on:
       - image-build-amd
@@ -1318,9 +1318,9 @@ steps:
   - pytest -s -v evals/gsm8k/test_gsm8k_offloading.py -k "qwen3.5-35b or deepseek-v2-lite"
   mirror:
     amd:
-      label: ":amd: (MI300) LM Eval KV-Offload Medium"
+      label: ":amd: (MI355) LM Eval KV-Offload Medium"
       dind: false
-      device: mi300_2
+      device: mi355_2
       timeout_in_minutes: 70
       depends_on:
       - image-build-amd
@@ -1415,10 +1415,10 @@ steps:
   # Qwen2-57B has 28 attention heads and cannot run at TP8.
   - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large.txt --tp-size=4
 
-- label: ":amd: (MI300) LM Eval Large Models ROCm Harness"
+- label: ":amd: (MI355) LM Eval Large Models ROCm Harness"
   key: amd-lm-eval-large-models-rocm-harness
   dind: false
-  device: mi300_8
+  device: mi355_8
   optional: true
   timeout_in_minutes: 40
   depends_on:
