@@ -408,8 +408,8 @@ def _rebuild_tensor(buf: Any, shape: tuple[int, ...], dtype_str: str) -> torch.T
     Counterpart of `_reduce_tensor`. Note that pickle passes the original
     buffer-providing object from `loads(buffers=...)` straight to this
     function (no `PickleBuffer` wrapper on the receiving side), so `buf` is
-    a `zmq.Frame`, an owned `bytearray` from the shared-memory ring, or `bytes`
-    if the buffer was serialized in-band.
+    a `zmq.Frame`, an owned `bytearray` from the shared-memory ring, or
+    `bytes`/`bytearray` if the buffer was serialized in-band.
     """
     dtype = getattr(torch, dtype_str)
     assert isinstance(dtype, torch.dtype)
