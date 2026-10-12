@@ -2123,7 +2123,6 @@ class Scheduler(SchedulerInterface):
             scheduled_spec_token_ids = (
                 scheduler_output.scheduled_spec_decode_tokens.get(req_id)
             )
-            num_rejected = 0
             if scheduled_spec_token_ids and (
                 generated_token_ids or self.num_sampled_tokens_per_step == 0
             ):
@@ -2211,9 +2210,7 @@ class Scheduler(SchedulerInterface):
                 stopped = True
 
             capture_result = None
-            if (
-                capture_buffer := request.hidden_state_capture
-            ) is not None and not output_is_stale:
+            if (capture_buffer := request.hidden_state_capture) is not None:
                 accepted_end = request.num_prompt_tokens - 1 + request.num_output_tokens
                 accepted_start = accepted_end - len(new_token_ids)
                 capture_result, request.hidden_capture_skip_reason = (

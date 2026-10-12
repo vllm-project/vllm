@@ -14,7 +14,6 @@ import torch
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
-    from vllm.sampling_params import SamplingParams
     from vllm.v1.engine import EngineCoreRequest
 
 
@@ -59,16 +58,12 @@ class HiddenStateCapturePlan:
         aux_layer_ids: tuple[int, ...] = (),
         hidden_layout: str | None = None,
     ) -> HiddenStateCapturePlan:
-        if prompt_len < 1 or start < 0 or start >= end or min_rows < 1:
-            raise ValueError("Invalid hidden-state capture window or prompt length")
         if coordinate == "response":
             offset = prompt_len - 1
         elif coordinate == "absolute":
             offset = 0
         else:
             raise ValueError(f"Unknown hidden-state coordinate: {coordinate}")
-        if start + offset < prompt_len - 1:
-            raise ValueError("Hidden-state window cannot start before the response")
         return cls(
             request_id=request_id,
             prompt_len=prompt_len,
@@ -104,12 +99,13 @@ def hidden_state_capture_capability(vllm_config: VllmConfig) -> str | None:
 def validate_hidden_state_capture(
     plan: HiddenStateCapturePlan,
     request: EngineCoreRequest,
-    params: SamplingParams,
     vllm_config: VllmConfig,
 ) -> None:
     """Validate a capture plan before assigning the internal request ID."""
     from vllm.sampling_params import SamplingParams
     from vllm.utils import length_from_prompt_token_ids_or_embeds
+
+    params = request.params
 
     if not isinstance(params, SamplingParams) or params.n != 1:
         raise ValueError("Hidden-state capture requires a single completion")
@@ -263,12 +259,6 @@ class HiddenStateCaptureBuffer:
         if chunk.positions.size:
             self.chunks.append(chunk)
 
-    @property
-    def num_rows(self) -> int:
-        if not self.chunks:
-            return 0
-        return len(np.unique(np.concatenate([c.positions for c in self.chunks])))
-
     def finish(self) -> HiddenStateCaptureResult | None:
         if not self.chunks:
             return None
@@ -306,7 +296,7 @@ class HiddenStateCaptureBuffer:
         """Settle returned rows using accepted output progress."""
         if error is not None:
             return None, error
-        if chunk is not None and accepted_start < accepted_end:
+        if chunk is not None:
             self.add(chunk.accepted(accepted_start, accepted_end))
         if not stopped and accepted_end < self.plan.window_end_abs:
             return None, None

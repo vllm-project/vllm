@@ -313,11 +313,14 @@ def test_hidden_capture_rejects_unsupported_config_before_admission():
         speculative_config=None,
     )
     request = SimpleNamespace(
-        request_id="req", prompt_token_ids=[1, 2], prompt_embeds=None
+        request_id="req",
+        prompt_token_ids=[1, 2],
+        prompt_embeds=None,
+        params=SamplingParams(),
     )
     plan = HiddenStateCapturePlan.from_window("req", 2, 0, 1, "collection")
     with pytest.raises(ValueError, match="only the CUDA GPU"):
-        validate_hidden_state_capture(plan, request, SamplingParams(), config)
+        validate_hidden_state_capture(plan, request, config)
 
 
 @pytest.mark.parametrize("stop", ["stop", ["stop"]])
@@ -326,8 +329,31 @@ def test_hidden_capture_rejects_frontend_stop_strings(stop):
     from vllm.sampling_params import SamplingParams
 
     request = SimpleNamespace(
-        request_id="req", prompt_token_ids=[1, 2], prompt_embeds=None
+        request_id="req",
+        prompt_token_ids=[1, 2],
+        prompt_embeds=None,
+        params=SamplingParams(),
     )
     plan = HiddenStateCapturePlan.from_window("req", 2, 0, 4, "collection", min_rows=1)
+    request.params = SamplingParams(stop=stop)
     with pytest.raises(ValueError, match="stop strings"):
-        validate_hidden_state_capture(plan, request, SamplingParams(stop=stop), None)
+        validate_hidden_state_capture(plan, request, None)
+
+
+def test_hidden_capture_counts_replay_copies_without_new_tokens():
+    """Actual D2H bytes include replayed rows even when no token is newly accepted."""
+    from vllm.v1.hidden_state_capture import HiddenStateCaptureChunk
+
+    plan = HiddenStateCapturePlan.from_window("req", 1, 0, 4, "audit")
+    buffer = HiddenStateCaptureBuffer(plan)
+    first = HiddenStateCaptureChunk(np.array([0, 1]), torch.zeros(2, 2), 16, 1.0)
+    replay = HiddenStateCaptureChunk(np.array([0, 1]), torch.zeros(2, 2), 16, 1.0)
+    final = HiddenStateCaptureChunk(np.array([2, 3]), torch.zeros(2, 2), 16, 1.0)
+    assert buffer.update(first, 0, 2, stopped=False) == (None, None)
+    assert buffer.update(replay, 2, 2, stopped=False) == (None, None)
+    result, reason = buffer.update(final, 2, 4, stopped=False)
+    assert reason is None
+    assert result is not None
+    np.testing.assert_array_equal(result.hidden_positions, [0, 1, 2, 3])
+    assert result.copied_bytes == 48
+    assert result.copy_ms == 3.0

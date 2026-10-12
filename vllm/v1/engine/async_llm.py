@@ -517,7 +517,7 @@ class AsyncLLM(EngineClient):
                 raise ValueError("Hidden-state capture plan was supplied twice")
             request.hidden_state_capture = hidden_state_capture
         if (plan := request.hidden_state_capture) is not None:
-            validate_hidden_state_capture(plan, request, params, self.vllm_config)
+            validate_hidden_state_capture(plan, request, self.vllm_config)
 
         self.input_processor.assign_request_id(request)
         if request.hidden_state_capture is not None:

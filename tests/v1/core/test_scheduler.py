@@ -105,7 +105,10 @@ def _capture_model_output(requests, sampled, positions=None, errors=None):
     )
 
 
-def test_hidden_capture_waits_for_returned_prefill_with_two_chunks_in_flight():
+def test_hidden_capture_waits_for_returned_prefill_with_two_chunks_in_flight(
+    monkeypatch,
+):
+    monkeypatch.setattr("vllm.config.parallel.current_platform.device_count", lambda: 2)
     scheduler = create_scheduler(
         max_num_batched_tokens=64, max_model_len=256, pipeline_parallel_size=2
     )
@@ -172,6 +175,38 @@ def test_hidden_capture_aux_skip_waits_for_first_generated_token():
     assert output.hidden_capture_skip_reason == "aux_layers_unavailable"
     assert output.prefill_stats is prefill_stats
     assert request.hidden_capture_skip_reason is None
+
+
+@pytest.mark.parametrize("max_tokens", [1, 2])
+def test_hidden_capture_keeps_hidden_row_for_delivered_stale_pp_token(
+    monkeypatch, max_tokens
+):
+    """A delivered token needs its hidden row even when preemption resets KV."""
+    monkeypatch.setattr("vllm.config.parallel.current_platform.device_count", lambda: 2)
+    scheduler = create_scheduler(max_model_len=256, pipeline_parallel_size=2)
+    (request,) = create_requests(num_requests=1, num_tokens=2, max_tokens=max_tokens)
+    request.hidden_state_capture = HiddenStateCaptureBuffer(
+        HiddenStateCapturePlan.from_window(request.request_id, 2, 0, 1, "audit")
+    )
+    scheduler.add_request(request)
+    first = scheduler.schedule()
+    scheduler.running.remove(request)
+    scheduler._preempt_request(request, 0.0)
+    outputs = scheduler.update_from_output(
+        first, _capture_model_output([request], [[42]], {request.request_id: [1]})
+    )
+    first_output = outputs[0].outputs[0]
+    assert first_output.new_token_ids == [42]
+    assert first_output.hidden_capture_skip_reason is None
+    capture = first_output.hidden_state_capture
+    if max_tokens == 2:
+        second = scheduler.schedule()
+        outputs = scheduler.update_from_output(
+            second, _capture_model_output([request], [[43]], {request.request_id: [1]})
+        )
+        assert outputs[0].outputs[0].hidden_capture_skip_reason is None
+    assert capture is not None
+    np.testing.assert_array_equal(capture.hidden_positions, [1])
 
 
 @pytest.mark.parametrize("termination", ["max_tokens", "stop_token", "eos"])
