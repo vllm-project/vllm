@@ -105,6 +105,8 @@ def create_mooncake_embedding_store_client(
         raise ValueError(
             "cross_encoder_cache supports a RAM Store; disable enable_offload"
         )
+    if config.enable_dfs:
+        raise ValueError("cross_encoder_cache supports a RAM Store; disable enable_dfs")
     store = MooncakeDistributedStore()
     local_ip = get_ip()
     local_hostname = rdma_utils.get_requester_local_hostname(local_ip)
