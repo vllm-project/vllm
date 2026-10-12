@@ -790,6 +790,20 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
                    "(requires SM90+ and CUDA >= 12.0).")
   endif()
 
+  # HY V4 iHC boundary (mma.sync BF16). Requires SM90+.
+  cuda_archs_sm90plus(HY_V4_IHC_ARCHS "${CUDA_ARCHS}")
+  if(HY_V4_IHC_ARCHS)
+    set(HY_V4_IHC_SRCS "csrc/libtorch_stable/hy_v4_ihc_kernels.cu")
+    set_gencode_flags_for_srcs(
+      SRCS "${HY_V4_IHC_SRCS}"
+      CUDA_ARCHS "${HY_V4_IHC_ARCHS}")
+    list(APPEND VLLM_STABLE_EXT_SRC "${HY_V4_IHC_SRCS}")
+    message(STATUS "Building hy_v4_ihc_boundary for archs: ${HY_V4_IHC_ARCHS}")
+  else()
+    message(STATUS "Not building hy_v4_ihc_boundary as no compatible archs "
+                   "found (requires SM90+).")
+  endif()
+
   #
   # CUTLASS scaled_mm kernels (moved from _C to _C_stable_libtorch)
   #

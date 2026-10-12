@@ -8,17 +8,18 @@ channels to one hidden state (``HYV4HCPreLayer``), runs the sub-block, then
 scatters the result back over the channels (``HYV4HCPostLayer``). The final
 ``HYV4HCHeadLayer`` merges the channels before the model's output norm.
 
-NOTE: Each of the three steps has an optional single-kernel HPC replacement
-(``HpcIHCPre`` / ``HpcIHCPost`` / ``HpcIHCHead``). Pre and post fall back to
-in-tree Triton kernels on CUDA when HPC is unavailable, then to the eager path.
-TODO: port the cross-layer post+pre fusion (``HpcIHCPostPre``) as well; it
-requires restructuring the decoder-layer forward scheduling.
+Each of the three steps has an optional single-kernel HPC replacement
+(``HpcIHCPre`` / ``HpcIHCPost`` / ``HpcIHCHead``). The decoder can also fuse
+adjacent post and pre boundaries with ``HpcIHCPostPre``. Pre and post fall back
+to in-tree Triton kernels on CUDA when HPC is unavailable, then to the eager
+path.
 """
 
 import torch
 from torch import nn
 from transformers import PreTrainedConfig
 
+from vllm import _custom_ops as ops
 from vllm.model_executor.layers.hpc import HpcIHCHead, HpcIHCPost, HpcIHCPre
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.models.hy_v4.nvidia.triton_ihc import (
@@ -388,3 +389,66 @@ class HYV4HCLayer(nn.Module):
             return output_with_bias + residual
         assert post_gates is not None
         return self.hc_post(output_with_bias, residual, post_gates)
+
+
+class CudaIHCPostPre(nn.Module):
+    """CUDA iHC boundary: optional post step, then pre and RMSNorm.
+
+    Same interface as ``HpcIHCPre`` (``forward(x)``) when called with one
+    argument and ``HpcIHCPostPre`` (``forward(xa, residual, post_gates)``) when
+    called with three; preferred over the HPC library's fused ops. Owns no
+    parameters: it reads the weights of the eager pre layer and RMSNorm it
+    replaces.
+    """
+
+    def __init__(
+        self,
+        hc_mult: int,
+        hidden_size: int,
+        magnitude: float,
+        hc_eps: float,
+        norm_eps: float,
+        pre_owner: nn.Module,
+        norm_owner: nn.Module,
+    ) -> None:
+        super().__init__()
+        self.hc_mult = hc_mult
+        self.hidden_size = hidden_size
+        self.magnitude = magnitude
+        self.hc_eps = hc_eps
+        self.norm_eps = norm_eps
+        # Keep the owners out of the module tree (see HpcIHCPre).
+        object.__setattr__(self, "_pre_owner", pre_owner)
+        object.__setattr__(self, "_norm_owner", norm_owner)
+
+    @classmethod
+    def support(cls, hc_mult: int, hidden_size: int) -> bool:
+        return ops.hy_v4_ihc_boundary_supported(hc_mult, hidden_size)
+
+    def _run(
+        self,
+        xa: torch.Tensor | None,
+        residual: torch.Tensor,
+        post_gates: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        owner = self._pre_owner
+        return ops.hy_v4_ihc_boundary(
+            residual if residual.is_contiguous() else residual.contiguous(),
+            xa if xa is None or xa.is_contiguous() else xa.contiguous(),
+            post_gates,
+            owner.hc_fn.weight,
+            owner.hc_scale,
+            owner.hc_base,
+            self._norm_owner.weight,
+            self.magnitude,
+            self.hc_eps,
+            self.norm_eps,
+            self._norm_owner.variance_epsilon,
+        )
+
+    def forward(self, *args: torch.Tensor):
+        if len(args) == 1:
+            _, hidden_states, post_gates = self._run(None, args[0], None)
+            return hidden_states, post_gates
+        xa, residual, post_gates = args
+        return self._run(xa, residual, post_gates)

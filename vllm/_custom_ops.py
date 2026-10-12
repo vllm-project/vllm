@@ -2297,6 +2297,54 @@ def fp32_router_gemm(
     return output
 
 
+def hy_v4_ihc_boundary_supported(hc_mult: int, hidden_size: int) -> bool:
+    return (
+        hc_mult == 4
+        and hidden_size % 64 == 0
+        and hidden_size <= 8192
+        and hasattr(torch.ops._C, "hy_v4_ihc_boundary")
+    )
+
+
+def hy_v4_ihc_boundary(
+    residual: torch.Tensor,
+    x: torch.Tensor | None,
+    post: torch.Tensor | None,
+    weight: torch.Tensor,
+    hc_scale: torch.Tensor,
+    hc_base: torch.Tensor,
+    norm_weight: torch.Tensor | None,
+    magnitude: float,
+    hc_eps: float,
+    rms_eps: float,
+    variance_eps: float,
+    round_before_norm: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """HY V4 iHC boundary: optional post step, then pre and RMSNorm.
+
+    Returns ``(residual, hidden_states, post_gates)``. With ``x`` and ``post``
+    the residual is a new tensor holding ``post * x + residual``; otherwise it
+    is the input residual. All inputs must be contiguous. The gated reduction
+    enters the norm in FP32, as in the HPC library's fused kernel, unless
+    ``round_before_norm`` rounds it to BF16 first, as the unfused path does.
+    """
+    hidden, post_out, residual_out = torch.ops._C.hy_v4_ihc_boundary(
+        residual,
+        x,
+        post,
+        weight,
+        hc_scale,
+        hc_base,
+        norm_weight,
+        magnitude,
+        hc_eps,
+        rms_eps,
+        variance_eps,
+        round_before_norm,
+    )
+    return residual_out if x is not None else residual, hidden, post_out
+
+
 def topk_softmax(
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,
