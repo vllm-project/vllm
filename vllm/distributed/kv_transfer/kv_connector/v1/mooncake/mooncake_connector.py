@@ -2259,7 +2259,7 @@ class MooncakeConnectorWorker:
         self._kv_unregistered = True
 
     def restore_kv_caches(self) -> None:
-        """Register the released KV caches again: same addresses, new pages."""
+        """Register the unregistered KV caches again: same addresses, new pages."""
         if not self._kv_unregistered:
             return
         ret_value = self.engine.batch_register_memory(
