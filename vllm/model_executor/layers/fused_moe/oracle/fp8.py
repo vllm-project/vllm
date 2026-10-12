@@ -107,8 +107,7 @@ def maybe_round_up_hidden_size_and_intermediate_size(
     if backend == Fp8MoeBackend.AITER and (
         weight_key == kFp8StaticTensorSym
         or (
-            weight_key == kFp8StaticChannelSym
-            and activation == MoEActivation.GELU_TANH
+            weight_key == kFp8StaticChannelSym and activation == MoEActivation.GELU_TANH
         )
     ):
         return fp8_moe_round_up_sizes(activation, hidden_size, intermediate_size)

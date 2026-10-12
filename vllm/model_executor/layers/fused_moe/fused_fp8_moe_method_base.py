@@ -20,7 +20,7 @@ class FusedFp8MoEMethodBase(FusedMoEMethodBase):
     """
 
     fp8_backend: Fp8MoeBackend
-    weight_quant_key: QuantKey | None
+    weight_quant_key: QuantKey
 
     def maybe_roundup_sizes(
         self,
