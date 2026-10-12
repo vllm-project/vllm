@@ -416,6 +416,10 @@ class HiSparseConnectorWorker:
         self.host_write_event = self.host_write_events[self._next_host_write_event]
         self._next_host_write_event ^= 1
         current_stream().wait_event(previous_host_write_event)
+        if self.shared_host_region is not None and not num_tokens:
+            # Without a forward, no TP collective keeps rank 0 from recording
+            # a shared event again before every rank has issued its wait.
+            get_tp_group().barrier()
         self._release_completed_dma_descriptors()
         self._dma_submitted = False
         mirrors = _flatten_row_mirrors(metadata.row_mirrors, request_ids)
