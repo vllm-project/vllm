@@ -13,6 +13,7 @@ from torch import nn
 import vllm.envs as envs
 from vllm.model_executor.kernels.linear.cute_dsl.skinny_gemm import (
     SkinnyGemmConfig,
+    row_stride_ok,
     shape_dynamic_skinny_gemm,
 )
 from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
@@ -78,7 +79,7 @@ QWEN4_EXP_SM90_GEMM_PLANS: dict[tuple[int, int], dict[int, SkinnyGemmConfig]] = 
     (4224, 2560): {
         1: SkinnyGemmConfig(1, 128, 2, k_unroll=6, vector_width=2, static_k=2560),
         2: SkinnyGemmConfig(2, 128, 2, k_unroll=3, vector_width=2, static_k=2560),
-        4: SkinnyGemmConfig(4, 64, 4, k_unroll=2, vector_width=4),
+        4: SkinnyGemmConfig(4, 64, 4, k_unroll=1, vector_width=8),
     },
     # GDN and QSA output projections, TP=4.
     (2560, 1536): {
@@ -304,10 +305,13 @@ def _is_packed_row_major(tensor: torch.Tensor) -> bool:
     return tensor.dim() == 2 and tensor.stride() == (tensor.shape[1], 1)
 
 
-def _runtime_ok(x: torch.Tensor, weight: torch.Tensor) -> bool:
+def _runtime_ok(
+    x: torch.Tensor, weight: torch.Tensor, config: SkinnyGemmConfig
+) -> bool:
     return (
         not envs.VLLM_BATCH_INVARIANT
-        and _is_packed_row_major(x)
+        and x.dim() == 2
+        and row_stride_ok(x, config)
         and _is_packed_row_major(weight)
         and x.dtype == torch.bfloat16
         and weight.dtype == torch.bfloat16
@@ -348,7 +352,7 @@ def _qwen4_exp_low_latency_gemm(x: torch.Tensor, weight: torch.Tensor) -> torch.
     config = None if plan is None else plan.get(x.shape[0])
     if (
         config is not None
-        and _runtime_ok(x, weight)
+        and _runtime_ok(x, weight, config)
         and shape_dynamic_skinny_gemm.is_available()
     ):
         return shape_dynamic_skinny_gemm(x, weight, config)

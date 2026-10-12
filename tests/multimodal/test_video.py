@@ -13,7 +13,7 @@ import numpy as np
 import numpy.typing as npt
 import pytest
 import torch
-from transformers import AutoVideoProcessor
+from transformers import AutoVideoProcessor, Qwen3VLVideoProcessor
 from transformers.video_utils import VideoMetadata
 
 from vllm.assets.base import get_vllm_public_assets
@@ -21,6 +21,7 @@ from vllm.models.minimax_m3.common.mm_preprocess import MiniMaxM3VideoBackend
 from vllm.multimodal.video import (
     PYNVVIDEOCODEC_VIDEO_BACKEND,
     VIDEO_LOADER_REGISTRY,
+    ClefOmniVideoBackend,
     DynamicVideoBackend,
     Glm5NextVideoBackend,
     GLM46VVideoBackend,
@@ -35,6 +36,7 @@ from vllm.multimodal.video import (
     get_video_loader_backend_for_processor,
 )
 from vllm.multimodal.video_decoders import decode_video, resolve_video_backend_kwargs
+from vllm.multimodal.video_decoders.opencv import OpenCVVideoBackendMixin
 from vllm.multimodal.video_decoders.pynvvideocodec import (
     PYNVVIDEOCODEC_DECODER_CACHE_SIZE,
     PyNvVideoCodecDecoderSlot,
@@ -728,6 +730,36 @@ def test_cosmos3_edge_uses_qwen3_vl_video_backend():
 
     assert backend == "qwen3_vl"
     assert isinstance(VIDEO_LOADER_REGISTRY.load(backend), Qwen3VLVideoBackend)
+
+
+def test_qwen3_vl_unknown_source_fps_matches_hf(
+    dummy_video_path, monkeypatch: pytest.MonkeyPatch
+):
+    """An unknown source fps (reported as 0) samples like HF's fps=None, and
+    the metadata carries the fps HF assumes, which the frame timestamps use."""
+    get_video_metadata = OpenCVVideoBackendMixin.get_video_metadata
+
+    def unknown_fps(cap) -> VideoSourceMetadata:
+        return get_video_metadata(cap)._replace(original_fps=0.0, duration=0.0)
+
+    monkeypatch.setattr(
+        OpenCVVideoBackendMixin, "get_video_metadata", staticmethod(unknown_fps)
+    )
+    _, metadata = Qwen3VLVideoBackend.load_bytes(
+        dummy_video_path.read_bytes(), fps=2, backend="opencv"
+    )
+
+    total_frames = metadata["total_num_frames"]
+    hf_metadata = VideoMetadata(total_num_frames=total_frames, fps=None)
+    hf_indices = Qwen3VLVideoProcessor().sample_frames(hf_metadata, fps=2).tolist()
+    assert metadata["frames_indices"] == hf_indices
+    assert metadata["fps"] == hf_metadata.fps
+
+    source = VideoSourceMetadata(total_frames, original_fps=0.0, duration=0.0)
+    target = VideoTargetMetadata(num_frames=-1, fps=2, max_duration=300)
+    assert (
+        Qwen3VLVideoBackend.compute_frames_index_to_sample(source, target) == hf_indices
+    )
 
 
 @pytest.mark.parametrize(
@@ -1782,3 +1814,18 @@ def test_glm5next_read_frames_dense_walk_matches_stock(tmp_path):
         assert abs(round(float(np.asarray(frame).mean())) - idx) <= 1
     # One initial seek, then pure walking -- no re-seek churn.
     assert cap.seeks == 1
+
+
+def test_clef_omni_backend_samples_reference_frames(tmp_path):
+    """Clef-Omni samples the first frame at or after each 0.5 s boundary
+    (the reference's 2 fps timestamp sampling), not uniform strides."""
+    pytest.importorskip("cv2")
+
+    # 2 s at 30 fps: the reference reads frames 0, 15, 30 and 45, where
+    # uniform sampling would read 0, 19, 39 and 59.
+    path = _write_gray_video(tmp_path, total_frames=60, fps=30)
+    frames, metadata = ClefOmniVideoBackend.load_bytes(path.read_bytes())
+    assert metadata["frames_indices"] == [0, 15, 30, 45]
+    assert metadata["do_sample_frames"] is False
+    for frame, idx in zip(frames, [0, 15, 30, 45]):
+        assert abs(round(float(np.asarray(frame).mean())) - idx) <= 1
