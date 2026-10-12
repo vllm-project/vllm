@@ -230,7 +230,7 @@ steps:
   - vllm/v1/attention/backends/mla/
   - vllm/model_executor/layers/attention/sparse_mla_attention.py
   - vllm/v1/worker/gpu/
-  - csrc/libtorch_stable/hisparse_kernels.cu
+  - csrc/hisparse_kernels.cu
   commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-hisparse.txt
 
@@ -1185,7 +1185,7 @@ steps:
   optional: true
   num_devices: 4
   source_file_dependencies:
-  - csrc/libtorch_stable/gdn/
+  - csrc/gdn/
   - tests/evals/qwen4_exp/
   - vllm/model_executor/layers/mamba/
   - vllm/models/qwen4_exp/
@@ -1203,7 +1203,7 @@ steps:
   optional: true
   num_devices: 4
   source_file_dependencies:
-  - csrc/libtorch_stable/gdn/
+  - csrc/gdn/
   - tests/evals/qwen4_exp/
   - vllm/model_executor/layers/mamba/
   - vllm/models/qwen4_exp/
@@ -1224,7 +1224,7 @@ steps:
       depends_on:
       - image-build-amd
       source_file_dependencies:
-      - csrc/libtorch_stable/gdn/
+      - csrc/gdn/
       - tests/evals/qwen4_exp/
       - vllm/model_executor/layers/mamba/
       - vllm/models/qwen4_exp/
