@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import os
 from collections.abc import Callable
 from typing import Any
 
@@ -9,6 +10,7 @@ from torch import fx
 from torch._inductor.fx_passes.post_grad import view_to_reshape
 from torch._inductor.pattern_matcher import PatternMatcherPass
 
+import vllm.envs as envs
 import vllm.ir.ops
 import vllm.model_executor.layers.quantization.utils.fp8_utils  # noqa: F401
 from vllm._aiter_ops import rocm_aiter_ops
@@ -22,7 +24,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.platforms import current_platform
 
-from ..inductor_pass import enable_fake_mode
+from ..inductor_pass import enable_fake_mode, get_pass_context
 from ..vllm_inductor_pass import (
     VllmFusionPatternMatcherPass,
     VllmInductorPass,
@@ -812,12 +814,158 @@ class AiterActMulMxfp4GemmPattern(VllmPatternReplacement):
         return _replacement
 
 
-class RocmAiterActMulMxfp4GemmFusionPass(VllmFusionPatternMatcherPass):
+def _model_dtype(config: VllmConfig) -> torch.dtype:
+    """The dtype of the model's activations (bf16 when there is no model config)."""
+    if config.model_config is None:
+        return torch.bfloat16
+    dtype = config.model_config.dtype
+    assert isinstance(dtype, torch.dtype), dtype
+    return dtype
+
+
+# The compile prefix of a graph whose model tag was not set (`model_tag` in
+# compilation/backends.py).
+DEFAULT_COMPILE_PREFIX = "backbone"
+
+# Compile prefixes (VllmBackend.prefix) of the graphs that belong to speculative
+# decoding rather than to the target model, taken from the set_model_tag(...) calls
+# in v1/spec_decode, v1/worker/gpu/spec_decode and the draft parts of
+# models/qwen3_dflash2.py and models/lilicorr.py. The MTP head is bf16 and has no
+# MXFP4 GEMM to fuse into, so a fusion pass finding no site in these graphs is
+# expected. tests/compile/passes/test_rocm_aiter_mxfp4_fusion_gating.py checks this
+# set against every set_model_tag literal in the source tree.
+DRAFT_GRAPH_PREFIXES = frozenset(
+    {
+        "eagle_head",
+        "draft_model",
+        "medusa_head",
+        "dflash_head",
+        "dspark_head",
+        "extract_hidden_states",
+        "dflash2_candidate_selector",
+        "lilicorr_head",
+    }
+)
+
+
+def is_target_model_graph(prefix: str) -> bool:
+    """Whether a compile prefix names a graph of the target model.
+
+    False for the graphs of speculative decoding (DRAFT_GRAPH_PREFIXES), True for
+    everything else, including the model-internal tags such as ``self_decoder``.
+    """
+    return prefix not in DRAFT_GRAPH_PREFIXES
+
+
+def _mxfp4_pass_gate(fuse_in_pass_config: bool, opt_in_flag: bool) -> bool:
+    """The rule the MXFP4 activation-quant fusion passes share.
+
+    The pass config asks for the fusion AND the opt-in env flag is set AND the GPU
+    is a gfx950, the only architecture with the asm MXFP4 GEMM these passes rewrite
+    the input of. The default optimization level turns ``fuse_act_quant`` on, so the
+    env flag is what keeps a default start unchanged.
+    """
+    from vllm.platforms.rocm import on_gfx950
+
+    return bool(fuse_in_pass_config) and opt_in_flag and on_gfx950()
+
+
+def act_mxfp4_pass_enabled(fuse_act_quant: bool) -> bool:
+    """Whether RocmAiterActMulMxfp4GemmFusionPass is registered.
+
+    Needs ``fuse_act_quant`` and VLLM_ROCM_AITER_FP4_ACT_QUANT_FUSION on a gfx950.
+    """
+    return _mxfp4_pass_gate(fuse_act_quant, envs.VLLM_ROCM_AITER_FP4_ACT_QUANT_FUSION)
+
+
+class TargetGraphSiteCheckMixin:
+    """Counts the rewrites of a fusion pass and checks the target model got some.
+
+    Put it before VllmFusionPatternMatcherPass in the bases and set two class
+    attributes: ``flag_name``, the env flag that switches the pass on (quoted in the
+    error), and ``site_label``, what is fused (as the log line says it).
+
+    vLLM calls a pass once per compiled piece and per compile range, and a piece such
+    as the first one (embedding, layer 0) legitimately has no site, so ``__call__``
+    only tallies the rewrites and never raises. ``finish_compile`` judges the tally;
+    VllmBackend calls it, through PostGradPassManager.finish_compile, after the last
+    piece. N in the log line is the number of sites in the pieces the pass ran on:
+    vLLM compiles identical pieces once, so it can be lower than the layer count.
+    """
+
+    flag_name: str
+    site_label: str
+    # Set by the VllmPatternMatcherPass this mixin is combined with.
+    matched_count: int
+
+    def __init__(self, *args, compile_prefix: str | None = None, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        # The VllmBackend prefix of the graph being compiled: "backbone" for the
+        # model, "eagle_head" for an MTP head. It names the graph in the log and
+        # decides whether finding no site is an error.
+        self.compile_prefix = compile_prefix or DEFAULT_COMPILE_PREFIX
+        self.sites_by_range: dict[str, int] = {}
+
+    def __call__(self, graph: torch.fx.Graph) -> None:
+        super().__call__(graph)  # type: ignore[misc]
+        compile_range = str(get_pass_context().compile_range)
+        self.sites_by_range[compile_range] = (
+            self.sites_by_range.get(compile_range, 0) + self.matched_count
+        )
+
+    def finish_compile(self) -> None:
+        """Log the rewritten sites per compile range, and fail a start without any.
+
+        A target model graph fails when the pass ran for a compile range and
+        rewrote nothing there: the flag is on, so a start that leaves the model
+        unfused should not pass silently. A graph the pass never ran on is only
+        warned about: Inductor's FX graph cache can serve every piece without running
+        the passes, so nothing can be judged. Draft model graphs are only logged.
+        """
+        for compile_range, sites in self.sites_by_range.items():
+            logger.info(
+                "Fused %s at %d sites (graph=%s) for compile range %s",
+                self.site_label,
+                sites,
+                self.compile_prefix,
+                compile_range,
+            )
+        if not is_target_model_graph(self.compile_prefix):
+            return
+        if not self.sites_by_range:
+            cache_dir = os.path.join(envs.VLLM_CACHE_ROOT, "torch_compile_cache")
+            logger.warning(
+                "%s is on but the pass ran on no piece of the %s graph, so nothing "
+                "was rewritten or checked: Inductor's cache served every piece. "
+                "Clear %s to compile with the pass.",
+                self.flag_name,
+                self.compile_prefix,
+                cache_dir,
+            )
+            return
+        if any(sites == 0 for sites in self.sites_by_range.values()):
+            raise RuntimeError(
+                f"{self.flag_name} is on but 0 sites were rewritten in the "
+                f"{self.compile_prefix} graph for compile range(s) "
+                f"{[r for r, n in self.sites_by_range.items() if n == 0]}"
+            )
+
+
+class RocmAiterActMulMxfp4GemmFusionPass(
+    TargetGraphSiteCheckMixin, VllmFusionPatternMatcherPass
+):
     """Fuses SiLU/GELU-and-mul into the following AITER ASM MXFP4 GEMM."""
 
-    def __init__(self, config: VllmConfig) -> None:
-        super().__init__(config, "rocm_aiter_act_mul_mxfp4_gemm_fusion_pass")
-        out_dtype = config.model_config.dtype if config.model_config else torch.bfloat16
+    flag_name = "VLLM_ROCM_AITER_FP4_ACT_QUANT_FUSION"
+    site_label = "act+mxfp4 quant"
+
+    def __init__(self, config: VllmConfig, compile_prefix: str | None = None) -> None:
+        super().__init__(
+            config,
+            "rocm_aiter_act_mul_mxfp4_gemm_fusion_pass",
+            compile_prefix=compile_prefix,
+        )
+        out_dtype = _model_dtype(config)
         matchers: dict[tuple[bool, str], MatcherGeluAndMul | MatcherSiluAndMul] = {}
         silu = MatcherSiluAndMul()
         matchers[(silu.enabled, "silu")] = silu
