@@ -161,6 +161,15 @@ void cutlass_gemm_caller_blockwise(torch::stable::Tensor& out, torch::stable::Te
           StrideC{}, swap_ab ? cute::make_shape(n, m, 1)
                              : cute::make_shape(m, n, 1));
 
+  cute::get<0>(a_stride) = a.stride(0);
+  cute::get<0>(b_stride) = b.stride(1);
+  if constexpr (swap_ab) {
+    // The epilogue views the row-major output as a column-major transpose.
+    cute::get<1>(c_stride) = out.stride(0);
+  } else {
+    cute::get<0>(c_stride) = out.stride(0);
+  }
+
   LayoutSFA layout_SFA = swap_ab
       ? ScaleConfig::tile_atom_to_shape_SFA(make_shape(n, m, k, 1))
       : ScaleConfig::tile_atom_to_shape_SFA(make_shape(m, n, k, 1));
