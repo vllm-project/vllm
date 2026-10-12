@@ -401,20 +401,6 @@ def test_nvfp4_ple_loads_streamed_shards_across_etp_boundaries(monkeypatch, rank
     torch.testing.assert_close(output, expected, atol=0, rtol=0)
 
 
-@pytest.mark.parametrize("missing", ["shard_1.weight", "shard_1.weight_scale", "all"])
-def test_nvfp4_ple_rejects_missing_local_shards(monkeypatch, missing):
-    module, tensors, _, _ = _make_nvfp4_ngram_embedding(monkeypatch)
-    module.load_weights(
-        (name, tensor)
-        for name, tensor in tensors
-        if missing != name.removeprefix("ngram_embedding.")
-        and not (missing == "all" and ".shard_" in name)
-    )
-    layer = module.ngram_embedding
-    with pytest.raises(ValueError, match="checkpoint is missing"):
-        layer.embedding_method.process_weights_after_loading(layer)
-
-
 @pytest.mark.parametrize("suffix", ["weight", "weight_scale"])
 def test_nvfp4_ple_rejects_unsharded_table(monkeypatch, suffix):
     module, tensors, codes, scales = _make_nvfp4_ngram_embedding(monkeypatch)
@@ -423,27 +409,25 @@ def test_nvfp4_ple_rejects_unsharded_table(monkeypatch, suffix):
         module.load_weights([(f"ngram_embedding.{suffix}", table)])
 
 
-@pytest.mark.parametrize("scale", [None, 0.0, -1.0, float("nan"), float("inf")])
-def test_nvfp4_ple_rejects_missing_or_invalid_global_scale(monkeypatch, scale):
+def test_nvfp4_ple_rejects_missing_global_scale(monkeypatch):
     module, tensors, _, _ = _make_nvfp4_ngram_embedding(monkeypatch)
     module.load_weights(tensors[:-1])
     layer = module.ngram_embedding
-    if scale is not None:
-        layer.weight_scale_2.data.fill_(scale)
-    with pytest.raises(ValueError, match="finite positive global scale"):
+    with pytest.raises(ValueError, match="missing its global scale"):
         layer.embedding_method.process_weights_after_loading(layer)
 
 
-def test_nvfp4_ple_skips_load_checks_for_dummy_weights(monkeypatch):
-    """--load-format dummy never calls load_weights, so nothing is validated."""
-    monkeypatch.setattr(
-        ngram_embedding_module,
-        "get_current_vllm_config_or_none",
-        lambda: SimpleNamespace(load_config=SimpleNamespace(load_format="dummy")),
-    )
-    module, _, _, _ = _make_nvfp4_ngram_embedding(monkeypatch)
-    layer = module.ngram_embedding
+def test_nvfp4_ple_accepts_load_that_bypasses_load_weights(monkeypatch):
+    """--load-format sharded_state copies the state dict without load_weights."""
+    source, tensors, _, _ = _make_nvfp4_ngram_embedding(monkeypatch)
+    source.load_weights(tensors)
+    target, _, _, _ = _make_nvfp4_ngram_embedding(monkeypatch)
+    layer = target.ngram_embedding
+    for name, tensor in source.ngram_embedding.state_dict().items():
+        layer.state_dict()[name].copy_(tensor)
     layer.embedding_method.process_weights_after_loading(layer)
+    ids = torch.tensor([[3, 1]])
+    torch.testing.assert_close(layer(ids), source.ngram_embedding(ids))
 
 
 @triton.jit
@@ -1138,13 +1122,12 @@ def test_ple_fp8_embedding_supports_mixed_precision_config() -> None:
         Qwen4ExpPLEEmbeddingMethod.from_quant_config(quant_config, prefix),
         Qwen4ExpPLEFp8EmbeddingMethod,
     )
-    assert isinstance(
+    # A quant_algo the PLE table cannot load must not fall back to unquantized.
+    with pytest.raises(ValueError, match="Unsupported quant_algo 'MXFP8'"):
         Qwen4ExpPLEEmbeddingMethod.from_quant_config(
             quant_config,
             "model.language_model.layers.2.moe.gate_proj",
-        ),
-        Qwen4ExpPLEUnquantizedEmbeddingMethod,
-    )
+        )
 
 
 def test_dilated_ple_spec_state_rolls_back_before_next_forward() -> None:

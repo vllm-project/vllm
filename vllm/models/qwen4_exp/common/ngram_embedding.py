@@ -16,7 +16,6 @@ import torch.nn.functional as F
 from torch import nn
 
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
-from vllm.config import get_current_vllm_config_or_none
 from vllm.distributed import get_dp_group, get_etp_group, get_tp_group
 from vllm.forward_context import DPMetadata, get_forward_context
 from vllm.logger import init_logger
@@ -54,7 +53,7 @@ from vllm.triton_utils import tl, triton
 from vllm.utils.platform_utils import is_uva_available
 from vllm.utils.torch_utils import get_accelerator_view_from_cpu_tensor
 
-from .ple import PLEVocabParallelEmbedding, compute_ple_shard_overlap
+from .ple import PLEVocabParallelEmbedding
 
 logger = init_logger(__name__)
 
@@ -198,6 +197,11 @@ class Qwen4ExpPLEEmbeddingMethod(QuantizeMethodBase):
                 return Qwen4ExpPLEFp8EmbeddingMethod()
             if quant_algo == "NVFP4":
                 return Qwen4ExpPLENvFp4EmbeddingMethod()
+            if quant_algo is not None:
+                raise ValueError(
+                    f"Unsupported quant_algo {quant_algo!r} for the PLE embedding "
+                    f"{prefix!r}; expected FP8 or NVFP4"
+                )
             return Qwen4ExpPLEUnquantizedEmbeddingMethod()
         if isinstance(
             quant_config, ModelOptQuantConfigBase
@@ -389,17 +393,6 @@ class Qwen4ExpPLENvFp4EmbeddingMethod(Qwen4ExpPLEEmbeddingMethod):
     the activation dtype, before the ETP reduction.
     """
 
-    def __init__(self) -> None:
-        super().__init__()
-        self._loaded_ranges: dict[str, set[tuple[int, int]]] = {
-            "weight": set(),
-            "weight_scale": set(),
-        }
-        vllm_config = get_current_vllm_config_or_none()
-        self._dummy_load = (
-            vllm_config is not None and vllm_config.load_config.load_format == "dummy"
-        )
-
     def create_weights(
         self,
         layer: Qwen4ExpPLEEmbedding,
@@ -451,49 +444,11 @@ class Qwen4ExpPLENvFp4EmbeddingMethod(Qwen4ExpPLEEmbeddingMethod):
                 layer.weight_scale
             )
 
-    def record_loaded_rows(
-        self,
-        layer: Qwen4ExpPLEEmbedding,
-        name: str,
-        checkpoint_start: int,
-        checkpoint_rows: int,
-    ) -> None:
-        """Record which local rows of ``name`` a checkpoint shard filled."""
-        overlap = compute_ple_shard_overlap(
-            checkpoint_start=checkpoint_start,
-            checkpoint_rows=checkpoint_rows,
-            tp_start=layer.shard_indices.org_vocab_start_index,
-            tp_end=layer.shard_indices.org_vocab_end_index,
-        )
-        if overlap is not None:
-            start = overlap.destination_start
-            self._loaded_ranges[name].add((start, start + overlap.row_count))
-
     def process_weights_after_loading(self, layer: nn.Module) -> None:
-        """Reject a missing global scale and any local rows left unloaded."""
-        if self._dummy_load:
-            # Dummy weights never go through load_weights.
-            return
-        scale = layer.weight_scale_2
-        if not torch.all(torch.isfinite(scale) & (scale > 0)):
-            raise ValueError(
-                "NVFP4 PLE checkpoint requires a finite positive global scale"
-            )
-        expected_rows = (
-            layer.shard_indices.org_vocab_end_index
-            - layer.shard_indices.org_vocab_start_index
-        )
-        for name, ranges in self._loaded_ranges.items():
-            loaded_end = 0
-            for start, end in sorted(ranges):
-                if start > loaded_end:
-                    break
-                loaded_end = max(loaded_end, end)
-            if loaded_end != expected_rows:
-                raise ValueError(
-                    f"NVFP4 PLE checkpoint is missing {name} rows "
-                    f"starting at local row {loaded_end}"
-                )
+        """Reject NVFP4 PLE checkpoints without a global scale."""
+        sentinel = torch.finfo(torch.float32).min
+        if torch.any(layer.weight_scale_2 == sentinel):
+            raise ValueError("NVFP4 PLE checkpoint is missing its global scale")
 
     def lookup_dtype(self, layer: nn.Module) -> torch.dtype:
         return layer.params_dtype

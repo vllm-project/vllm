@@ -441,15 +441,11 @@ class Qwen4ExpNGramEmbedding(nn.Module):
                         f"{suffix}: expected {expected_shape}, got "
                         f"{tuple(loaded_weight.shape)}"
                     )
-                if nvfp4_method is not None:
-                    # A cast would silently reinterpret packed E2M1 bytes.
-                    if loaded_weight.dtype != parameter.dtype:
-                        raise ValueError(
-                            f"NVFP4 PLE shard {shard_index} {suffix} requires "
-                            f"{parameter.dtype}, got {loaded_weight.dtype}"
-                        )
-                    nvfp4_method.record_loaded_rows(
-                        embedding, suffix, checkpoint_start, expected_rows
+                # A cast would silently reinterpret packed E2M1 bytes.
+                if nvfp4_method is not None and loaded_weight.dtype != parameter.dtype:
+                    raise ValueError(
+                        f"NVFP4 PLE shard {shard_index} {suffix} requires "
+                        f"{parameter.dtype}, got {loaded_weight.dtype}"
                     )
                 parameter.weight_loader(
                     parameter,
