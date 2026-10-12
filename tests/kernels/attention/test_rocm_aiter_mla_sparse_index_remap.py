@@ -23,10 +23,12 @@ if not is_aiter_found_and_supported():
         allow_module_level=True,
     )
 
+from vllm.model_executor.layers.attention import sparse_mla_attention as sparse_mla_mod
 from vllm.v1.attention.backends.mla import rocm_aiter_mla_sparse as sparse_mod
 
 NUM_HEADS = 16
 KV_LORA_RANK = 512
+QK_NOPE_HEAD_DIM = 128
 QK_ROPE_HEAD_DIM = 64
 HEAD_SIZE = 576
 NUM_TOKENS = 2
@@ -64,14 +66,16 @@ def _patch_init_deps(monkeypatch, *, speculative: bool = False):
         "check_num_heads_validity",
         staticmethod(lambda num_heads: None),
     )
+    vllm_config = SimpleNamespace(
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=NUM_TOKENS),
+        model_config=SimpleNamespace(dtype=torch.bfloat16),
+        speculative_config=SimpleNamespace() if speculative else None,
+        attention_config=SimpleNamespace(hisparse_config=None),
+    )
+    monkeypatch.setattr(sparse_mod, "get_current_vllm_config", lambda: vllm_config)
+    monkeypatch.setattr(sparse_mla_mod, "get_current_vllm_config", lambda: vllm_config)
     monkeypatch.setattr(
-        sparse_mod,
-        "get_current_vllm_config",
-        lambda: SimpleNamespace(
-            scheduler_config=SimpleNamespace(max_num_batched_tokens=NUM_TOKENS),
-            model_config=SimpleNamespace(dtype=torch.bfloat16),
-            speculative_config=SimpleNamespace() if speculative else None,
-        ),
+        sparse_mla_mod, "get_tensor_model_parallel_world_size", lambda: 1
     )
     monkeypatch.setattr(
         sparse_mod,
@@ -98,8 +102,13 @@ def _build_impl(indexer, topk_indices_buffer):
         kv_sharing_target_layer_name=None,
         topk_indices_buffer=topk_indices_buffer,
         indexer=indexer,
+        q_lora_rank=None,
         kv_lora_rank=KV_LORA_RANK,
+        qk_nope_head_dim=QK_NOPE_HEAD_DIM,
         qk_rope_head_dim=QK_ROPE_HEAD_DIM,
+        qk_head_dim=QK_NOPE_HEAD_DIM + QK_ROPE_HEAD_DIM,
+        v_head_dim=QK_NOPE_HEAD_DIM,
+        kv_b_proj=None,
     )
 
 
