@@ -252,6 +252,16 @@ Supported quantization scheme/hardware combinations:
 - FP8 dynamic per-group (128/64): CUDA kernel (sm89+, not active when DeepGemm is used on sm100+)
 - NVFP4 dynamic: CUDA sm100+ only with FlashInfer
 - FP8 per-token-group (128): ROCm AITER only
+- MXFP4 dynamic (SiLU/GELU+Mul → asm MXFP4 GEMM): ROCm AITER on gfx950 only,
+  opt-in with `VLLM_ROCM_AITER_FP4_ACT_QUANT_FUSION=1` (needs `VLLM_ROCM_USE_AITER=1`); it applies to the layers
+  where AITER selects the asm GEMM from its tuned configs, and layers with untuned shapes are skipped (with a warning
+  when the flag is on and no layer qualifies)
+
+The MXFP4 fusion fails the start when its flag is on, the target model graph has layers on the asm GEMM
+that it could fuse into (the ones SiLU/GELU+Mul feeds) and a compile range gets no rewrite. When no layer of
+the target model qualifies (AITER selects the asm GEMM only for shapes it has tuned configs for) there is
+nothing to fuse: the start logs a warning and continues. The graphs of speculative decoding are only logged.
+The startup log has one line per compile range, `Fused ... at N sites (graph=...)`.
 
 **Code locations.**
 
