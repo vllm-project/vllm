@@ -2085,6 +2085,28 @@ def post_update_cpu(
     )
 
 
+def gumbel_sample_cpu(
+    logits: torch.Tensor,
+    expanded_idx_mapping: torch.Tensor,
+    temperature: torch.Tensor,
+    seeds: torch.Tensor,
+    positions: torch.Tensor,
+    apply_temperature: bool,
+    is_drafting: bool,
+    use_fp64: bool,
+) -> torch.Tensor:
+    return torch.ops._C.gumbel_sample_cpu(
+        logits,
+        expanded_idx_mapping,
+        temperature,
+        seeds,
+        positions,
+        apply_temperature,
+        is_drafting,
+        use_fp64,
+    )
+
+
 # mamba
 def selective_scan_fwd(
     u: torch.Tensor,

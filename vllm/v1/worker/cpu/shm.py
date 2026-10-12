@@ -95,8 +95,11 @@ torch_utils.async_tensor_h2d = async_tensor_h2d
 import vllm.v1.worker.gpu.buffer_utils as gpu_buffer_utils
 import vllm.v1.worker.gpu.block_table as gpu_block_table
 import vllm.v1.worker.gpu.input_batch as gpu_input_batch
+import vllm.v1.worker.gpu.sample.gumbel as gpu_gumbel
+import vllm.v1.worker.gpu.sample.sampler as gpu_sampler
 import vllm.v1.worker.cpu.block_table as cpu_block_table
 import vllm.v1.worker.cpu.buffer_utils as cpu_buffer_utils
+import vllm.v1.worker.cpu.gumbel as cpu_gumbel
 import vllm.v1.worker.cpu.input_batch as cpu_input_batch
 
 gpu_buffer_utils.UvaBuffer = cpu_buffer_utils.UvaBuffer
@@ -111,6 +114,8 @@ if not HAS_TRITON:
     gpu_block_table.BlockTables.compute_slot_mappings = (
         cpu_block_table.compute_slot_mappings
     )
+    gpu_gumbel.gumbel_sample = cpu_gumbel.gumbel_sample
+    gpu_sampler.gumbel_sample = cpu_gumbel.gumbel_sample
     gpu_input_batch.prepare_prefill_inputs = cpu_input_batch.prepare_prefill_inputs
     gpu_input_batch.prepare_pos_seq_lens = cpu_input_batch.prepare_pos_seq_lens
     gpu_input_batch.combine_sampled_and_draft_tokens = (
@@ -120,6 +125,9 @@ if not HAS_TRITON:
         cpu_input_batch.get_num_sampled_and_rejected
     )
     gpu_input_batch.post_update = cpu_input_batch.post_update
+    gpu_sampler.get_num_sampled_and_rejected = (
+        cpu_input_batch.get_num_sampled_and_rejected
+    )
     gpu_buffer_utils.StagedWriteTensor.apply_write = (
         cpu_buffer_utils._staged_write_tensor_apply_write
     )
