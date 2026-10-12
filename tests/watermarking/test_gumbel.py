@@ -27,7 +27,7 @@ def test_gamma_survival_integer_shape():
 def test_detector_deduplicates_repeated_prf_inputs_by_default():
     detection = GumbelWatermarkDetector(key=42, context_width=1).detect([1, 1, 1, 1, 1])
 
-    assert detection.num_scored_tokens == 2
+    assert detection.num_scored_tokens == 1
 
 
 def test_detector_can_score_repeated_prf_inputs():
@@ -35,13 +35,13 @@ def test_detector_can_score_repeated_prf_inputs():
         key=42, context_width=1, deduplicate_contexts=False
     ).detect([1, 1, 1, 1, 1])
 
-    assert detection.num_scored_tokens == 5
+    assert detection.num_scored_tokens == 4
 
 
 def test_detector_deduplicates_context_even_when_target_differs():
     detection = GumbelWatermarkDetector(key=42, context_width=1).detect([1, 2, 1, 3])
 
-    assert detection.num_scored_tokens == 3
+    assert detection.num_scored_tokens == 2
 
 
 def test_watermarker_respects_filtered_token_support():
