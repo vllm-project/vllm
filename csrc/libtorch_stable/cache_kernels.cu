@@ -105,6 +105,21 @@ int64_t resolve_max_batch_descriptors() {
   }();
   return cached;
 }
+
+constexpr const char* kDisableBatchMemcpyEnv =
+    "VLLM_KV_OFFLOAD_DISABLE_BATCH_MEMCPY";
+
+// cuMemcpyBatchAsync can be resolvable yet fault at runtime on some platforms
+// (e.g. NVIDIA vGPU guests: Xid 31 even for a single in-bounds descriptor,
+// while per-copy cudaMemcpyAsync on the same addresses works). A non-zero
+// value forces the per-copy fallback.
+bool batch_memcpy_disabled() {
+  static const bool cached = []() -> bool {
+    const char* val = std::getenv(kDisableBatchMemcpyEnv);
+    return val != nullptr && std::atoi(val) != 0;
+  }();
+  return cached;
+}
 }  // namespace
 
 void swap_blocks_batch(const torch::stable::Tensor& src_ptrs,
@@ -148,6 +163,9 @@ void swap_blocks_batch(const torch::stable::Tensor& src_ptrs,
       CUresult (*)(CUdeviceptr*, CUdeviceptr*, size_t*, size_t,
                    CUmemcpyAttributes*, size_t*, size_t, size_t*, CUstream);
   static BatchFn batch_fn = []() -> BatchFn {
+    if (batch_memcpy_disabled()) {
+      return nullptr;
+    }
     CUdriverProcAddressQueryResult sym_status;
     void* fn_ptr = nullptr;
     CUresult res = cuGetProcAddress("cuMemcpyBatchAsync", &fn_ptr, 12080,
