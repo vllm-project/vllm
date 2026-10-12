@@ -12,6 +12,14 @@ void topk_softmax(torch::stable::Tensor& topk_weights,
                   std::optional<torch::stable::Tensor> bias,
                   std::optional<torch::stable::Tensor> is_padding);
 
+#ifndef USE_ROCM
+void topk_softmax_a100(torch::stable::Tensor& topk_weights,
+                       torch::stable::Tensor& topk_indices,
+                       torch::stable::Tensor& token_expert_indices,
+                       torch::stable::Tensor& gating_output,
+                       std::optional<torch::stable::Tensor> is_padding);
+#endif
+
 void topk_sigmoid(torch::stable::Tensor& topk_weights,
                   torch::stable::Tensor& topk_indices,
                   torch::stable::Tensor& token_expert_indices,
