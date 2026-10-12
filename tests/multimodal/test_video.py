@@ -771,25 +771,25 @@ def _minimax_m3_indices(total_frames: int, video_fps: float, **kwargs) -> list[i
     )
 
 
-def test_minimax_m3_caps_frames_at_processor_max_frames():
+def test_minimax_m3_caps_frames_at_encoder_budget():
     # One hour at 30 fps sampled at the default 1 fps: 3,600 candidate frames.
     indices = _minimax_m3_indices(108_000, 30.0)
-    assert len(indices) == MiniMaxM3VideoBackend._MAX_FRAMES == 768
-    # Still spread over the whole video, not truncated to its first 768 s.
+    assert len(indices) == MiniMaxM3VideoBackend._MAX_FRAMES == 500
+    # Still spread over the whole video, not truncated to its first 500 s.
     assert indices[0] == 0
     assert indices[-1] == 107_970
     assert all(a < b for a, b in itertools.pairwise(indices))
 
 
 def test_minimax_m3_short_video_sampling_unchanged():
-    assert _minimax_m3_indices(18_000, 30.0) == list(range(0, 18_000, 30))
-    # 768 sampled frames is exactly the cap: still untouched. 769 is subsampled.
-    assert _minimax_m3_indices(768 * 30, 30.0) == list(range(0, 768 * 30, 30))
-    assert len(_minimax_m3_indices(769 * 30, 30.0)) == 768
+    assert _minimax_m3_indices(12_000, 30.0) == list(range(0, 12_000, 30))
+    # 500 sampled frames is exactly the cap: still untouched. 501 is subsampled.
+    assert _minimax_m3_indices(500 * 30, 30.0) == list(range(0, 500 * 30, 30))
+    assert len(_minimax_m3_indices(501 * 30, 30.0)) == 500
 
 
 @pytest.mark.parametrize(
-    ("max_frames", "expected"), [(1, 1), (32, 32), (768, 768), (5000, 768)]
+    ("max_frames", "expected"), [(1, 1), (32, 32), (500, 500), (768, 500), (5000, 500)]
 )
 def test_minimax_m3_max_frames_kwarg(max_frames: int, expected: int):
     indices = _minimax_m3_indices(108_000, 30.0, max_frames=max_frames)
@@ -916,6 +916,14 @@ def test_video_processor_from_model_repo(
             duration=vllm_meta["duration"],
         )
         hf_indices = processor.sample_frames(hf_metadata, **(hf_sample_kwargs or {}))
+        if expected_loader_cls is MiniMaxM3VideoBackend:
+            # vLLM caps MiniMax-M3 at the frame count its encoder budget is
+            # sized for, keeping frames evenly spread over the HF samples; HF
+            # samples at fps with no cap.
+            cap = MiniMaxM3VideoBackend._MAX_FRAMES
+            if len(hf_indices) > cap:
+                keep = np.linspace(0, len(hf_indices) - 1, cap).round().astype(int)
+                hf_indices = hf_indices[keep]
         vllm_indices = np.array(vllm_meta["frames_indices"])
         np.testing.assert_array_equal(
             hf_indices,

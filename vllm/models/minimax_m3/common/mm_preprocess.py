@@ -478,9 +478,12 @@ class MiniMaxM3VLMultiModalProcessor(
 class MiniMaxM3VideoBackend(VideoBackend):
     # Samples at ``fps`` over the whole video (``num_frames`` is not used), so
     # without a bound the frame count grows with duration: a one-hour video at
-    # the default 1 fps decodes 3,600 frames. Cap it at the video processor's
-    # declared ``max_frames``; ``max_frames`` in media_io_kwargs can lower it.
-    _MAX_FRAMES: ClassVar[int] = MiniMaxM3VLVideoProcessor.max_frames
+    # the default 1 fps decodes 3,600 frames. Cap it at _MAX_FRAMES_PER_VIDEO,
+    # the frame count the encoder budget is sized for at any aspect ratio. The
+    # processor's declared max_frames (768) exceeds that budget, so a video
+    # capped there is still rejected, after a full decode, once it passes ~500
+    # frames. ``max_frames`` in media_io_kwargs can lower the cap.
+    _MAX_FRAMES: ClassVar[int] = _MAX_FRAMES_PER_VIDEO
 
     @classmethod
     def load_bytes(
