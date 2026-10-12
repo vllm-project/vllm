@@ -62,6 +62,8 @@ class Mamba2SketchSSM(torch.nn.Module):
         n_groups: int,
         state_size: int,
         max_num_reqs: int,
+        tp_size: int = 1,
+        tp_rank: int = 0,
     ):
         super().__init__()
         # The kernels take state_size as a power-of-two block and use it and
@@ -86,6 +88,7 @@ class Mamba2SketchSSM(torch.nn.Module):
             raise ValueError(
                 f"SketchSSM ranks cover {ranks.numel()} of {num_heads} heads"
             )
+        frames, ranks = _tp_shard(frames, ranks, tp_size, tp_rank)
         self.register_buffer(
             "frames_t",
             frames.transpose(-1, -2)
@@ -205,8 +208,11 @@ class Mamba2SketchSSM(torch.nn.Module):
         n_groups: int,
         state_size: int,
         max_num_reqs: int,
+        tp_size: int = 1,
+        tp_rank: int = 0,
     ) -> "Mamba2SketchSSM":
-        """The SketchSSM of the model layer ``model_layer_idx``."""
+        """The SketchSSM of the model layer ``model_layer_idx``, holding the
+        heads and groups of tensor-parallel rank ``tp_rank``."""
         assert cache_config.sketchssm is not None
         calibration = load_sketchssm_calibration(
             cache_config.sketchssm,
@@ -219,7 +225,8 @@ class Mamba2SketchSSM(torch.nn.Module):
             math.prod(shape) * dtype.itemsize
             for ranks in calibration.ranks
             for shape, dtype in zip(
-                sketch_shapes(ranks, head_dim, state_size), SKETCH_DTYPES
+                sketch_shapes(ranks.chunk(tp_size)[tp_rank], head_dim, state_size),
+                SKETCH_DTYPES,
             )
         )
         logger.info_once(
@@ -237,4 +244,25 @@ class Mamba2SketchSSM(torch.nn.Module):
             n_groups,
             state_size,
             max_num_reqs,
+            tp_size,
+            tp_rank,
         )
+
+
+def _tp_shard(
+    frames: torch.Tensor, ranks: torch.Tensor, tp_size: int, tp_rank: int
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """The frames and head ranks of tensor-parallel rank ``tp_rank``.
+
+    Heads are split evenly; groups are split when ``tp_size`` divides them,
+    else (a single group) every rank holds it, as in ``MambaMixer2``.
+    """
+    num_heads, n_groups = ranks.numel(), frames.shape[0]
+    if num_heads % tp_size or (n_groups % tp_size and n_groups != 1):
+        raise ValueError(
+            f"SketchSSM cannot split {num_heads} heads in {n_groups} groups over "
+            f"{tp_size} tensor-parallel ranks"
+        )
+    if n_groups % tp_size == 0:
+        frames = frames.chunk(tp_size)[tp_rank]
+    return frames, ranks.chunk(tp_size)[tp_rank]

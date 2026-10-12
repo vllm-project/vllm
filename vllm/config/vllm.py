@@ -3476,8 +3476,6 @@ class VllmConfig:
             unsupported.append("a non-float32 --mamba-ssm-cache-dtype")
         if self.mamba_config.enable_stochastic_rounding:
             unsupported.append("stochastic rounding of the SSM state")
-        if self.parallel_config.tensor_parallel_size > 1:
-            unsupported.append("tensor parallelism")
         if unsupported:
             raise ValueError("--sketchssm does not support " + ", ".join(unsupported))
 

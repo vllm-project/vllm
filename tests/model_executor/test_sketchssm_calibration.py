@@ -126,3 +126,29 @@ def test_mamba2_sketchssm_dims(head_dim, state_size, match):
         return
     with pytest.raises(ValueError, match=match):
         Mamba2SketchSSM(*args)
+
+
+@pytest.mark.parametrize(("n_groups", "tp_rank"), [(2, 0), (2, 1), (1, 1)])
+def test_mamba2_sketchssm_tensor_parallel(n_groups, tp_rank):
+    """A TP rank holds its heads' ranks and its groups' frames (a single group
+    is held by every rank, as MambaMixer2 replicates it)."""
+    state_size = 16
+    frames = torch.randn(1, n_groups, state_size, state_size)
+    ranks = torch.tensor([[0, 1, 4, 5]], dtype=torch.int32)
+    calibration = SketchSSMCalibration(frames, ranks, (0,))
+    layer = Mamba2SketchSSM(
+        calibration, 0, 4, 32, n_groups, state_size, 3, tp_size=2, tp_rank=tp_rank
+    )
+    group = tp_rank if n_groups == 2 else 0
+    torch.testing.assert_close(layer.frames_t[0].T, frames[0, group])
+    assert layer.frames_t.shape[0] == 1
+    local_ranks = ranks[0, 2 * tp_rank : 2 * tp_rank + 2]
+    assert layer.tables.ranks.tolist() == local_ranks.tolist()
+
+
+def test_mamba2_sketchssm_tensor_parallel_uneven():
+    calibration = SketchSSMCalibration(
+        torch.randn(1, 3, 16, 16), torch.zeros(1, 6, dtype=torch.int32), (0,)
+    )
+    with pytest.raises(ValueError, match="tensor-parallel"):
+        Mamba2SketchSSM(calibration, 0, 6, 32, 3, 16, 3, tp_size=2)

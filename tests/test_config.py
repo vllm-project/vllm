@@ -334,7 +334,7 @@ def _sketchssm_gpu(monkeypatch, capability: int = 80):
         ({"cache_config.use_replayssm": True}, "drop --use-replayssm"),
         ({"num_speculative_tokens": 2}, "speculative decoding"),
         ({"use_v2_model_runner": False}, "Model Runner V1"),
-        ({"parallel_config.tensor_parallel_size": 2}, "tensor parallelism"),
+        ({"parallel_config.tensor_parallel_size": 2}, None),
     ],
 )
 def test_validate_sketchssm(monkeypatch, overrides, match):
