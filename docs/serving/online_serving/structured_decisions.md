@@ -20,7 +20,10 @@ log probabilities.
 
 Thinking is off unless `chat_template_kwargs` turns it on.
 
-This endpoint does not serve diffusion models yet.
+Probabilities can differ between identical requests. They depend on which
+requests share a batch and on whether a read hits the prefix cache. Set
+`VLLM_BATCH_INVARIANT=1` for reads that repeat exactly, at a cost in
+throughput.
 
 Every read of a request starts with the state, so with
 `--enable-prefix-caching` the state is prefilled once and each further
@@ -135,6 +138,11 @@ the request lists them, a `noul` labels its options `yes` and `no`, and a
 | `questions` | question id to `{type, instructions, criteria}`, asked in this order |
 | `instructions` | optional context placed ahead of the questions |
 | `chat_template_kwargs` | passed to the chat template, for example `{"enable_thinking": false}` |
+| `cache_salt` | optional [prefix-cache salt](../../usage/security.md#cache-salting) applied to every question |
 
 A question with any field other than `type`, `instructions` and `criteria` is
 rejected with a 400.
+
+When [tracing](../../../examples/observability/opentelemetry/README.md) is enabled
+with `--otlp-traces-endpoint`, the HTTP `traceparent` and `tracestate` headers are
+forwarded to every question's generation request.
