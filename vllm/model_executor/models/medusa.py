@@ -193,7 +193,7 @@ class Medusa(nn.Module):
             loaded_params.add(name)
 
         if self.token_map is not None:
-            self.token_map.to(device=self.lm_heads[0].weight.device)
+            self.token_map = self.token_map.to(device=self.lm_heads[0].weight.device)
 
         assert (self.truncated_vocab_size == self.orig_vocab_size) or (
             self.token_map is not None

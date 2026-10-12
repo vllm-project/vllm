@@ -167,7 +167,7 @@ def make_online_process_loader(layer: torch.nn.Module, param_name: str) -> Calla
             # For now, `load_numel_total` is still safe to use as long as
             # there's no way to reach `load_numel_total` without loading all
             # necessary weights. `weight_shape` is very small, so this is safe.
-            # see Limitations(4)
+            # see Limitations (3) in __init__.py
             logger.debug("%s: Excessive loading", layer.__class__.__name__)
             return
 
@@ -269,7 +269,7 @@ def finalize_layerwise_processing(model: torch.nn.Module, model_config: ModelCon
         # Process non-attention layers which did not load all elements. This can happen
         # if the created weight has extra padding elements which are not loaded
         # Having too many of these delayed layers can lead to excess memory usage
-        # see Limitations(4)
+        # see Limitations (3) in __init__.py
         elif info.load_numel > 0 and info.load_numel < info.load_numel_total:  # type: ignore[operator]
             logger.debug("%s: Delayed processing", layer.__class__.__name__)
             _layerwise_process(layer, info)

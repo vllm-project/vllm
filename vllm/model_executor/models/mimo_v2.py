@@ -925,7 +925,8 @@ class MiMoV2Model(nn.Module, EagleModelMixin):
             param = params_dict[param_name]
             if tensor.shape[0] > param.shape[0]:
                 tensor = tensor[: param.shape[0]]
-            default_weight_loader(param, tensor)
+            weight_loader = getattr(param, "weight_loader", default_weight_loader)
+            weight_loader(param, tensor)
             loaded_params.add(param_name)
         return True
 

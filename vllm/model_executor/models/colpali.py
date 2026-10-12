@@ -222,8 +222,10 @@ class ColPaliModel(
                     param_name = name.split(".")[-1]
                     param = getattr(self.custom_text_proj, param_name, None)
                     if param is not None:
-                        weight = weight.to(device=param.device, dtype=param.dtype)
-                        default_weight_loader(param, weight)
+                        weight_loader = getattr(
+                            param, "weight_loader", default_weight_loader
+                        )
+                        weight_loader(param, weight)
                         loaded.add(f"custom_text_proj.{param_name}")
 
             # Update pooler projector for the lazy-creation path

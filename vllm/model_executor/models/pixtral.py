@@ -613,7 +613,10 @@ class PixtralForConditionalGeneration(
                     trimmed_name = ".".join(name.split(".")[1:])
                     param = pre_mm_projector_norm_dict[trimmed_name]
                     with torch.no_grad():
-                        default_weight_loader(param, w)
+                        weight_loader = getattr(
+                            param, "weight_loader", default_weight_loader
+                        )
+                        weight_loader(param, w)
                 elif is_vision_lang_adapter_weights((name, w)):
                     if _is_layer_none_or_staged(self.vision_language_adapter):
                         continue

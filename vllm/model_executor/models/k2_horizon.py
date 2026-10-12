@@ -1304,7 +1304,8 @@ class K2HorizonModel(nn.Module, EagleModelMixin):
                             kv_rank
                         ]
 
-                default_weight_loader(param, loaded_weight)
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                weight_loader(param, loaded_weight)
                 loaded_params.add(name)
                 continue
 

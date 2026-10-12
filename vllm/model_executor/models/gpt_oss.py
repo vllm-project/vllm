@@ -739,7 +739,7 @@ class GptOssModel(nn.Module, EagleModelMixin):
                 else:
                     # (only load on rank 0 to avoid duplication)
                     if tp_rank != 0:
-                        weight.zero_()
+                        weight = torch.zeros_like(weight)
                 weight_loader(
                     param, weight, weight_name=name, shard_id=None, expert_id=None
                 )
@@ -1078,7 +1078,7 @@ class GptOssModel(nn.Module, EagleModelMixin):
                     else:
                         sliced_weight = loaded_weight
                         if tp_rank != 0:
-                            sliced_weight = sliced_weight.zero_()
+                            sliced_weight = torch.zeros_like(sliced_weight)
 
                 # NOTE(rob): because gpt-oss ckpt has "unique" structure with
                 # fused gate_up_proj fused on disk, we cannot use the existing
@@ -1263,7 +1263,7 @@ class GptOssModel(nn.Module, EagleModelMixin):
                 else:
                     # (only load on rank 0 to avoid duplication)
                     if tp_rank != 0:
-                        weight.zero_()
+                        weight = torch.zeros_like(weight)
                 param = params_dict[name]
                 _load_presliced_expert(param, weight, name, None)
                 loaded_params.add(name)
