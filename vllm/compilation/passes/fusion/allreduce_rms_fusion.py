@@ -1149,6 +1149,8 @@ class AllReduceFusionPass(VllmPatternMatcherPass):
 
 # TODO: make BasePattern to inherit from VllmPatternReplacement
 class AiterAllreduceFusedRMSNormPattern(BasePattern, VllmPatternReplacement):
+    gemma_norm = False
+
     def __init__(
         self,
         epsilon: float,
@@ -1170,7 +1172,8 @@ class AiterAllreduceFusedRMSNormPattern(BasePattern, VllmPatternReplacement):
             input: torch.Tensor, weight: torch.Tensor
         ) -> tuple[torch.Tensor, torch.Tensor]:
             allreduce_output = tensor_model_parallel_all_reduce(input)
-            rms = vllm.ir.ops.rms_norm(allreduce_output, weight, self.epsilon)
+            norm_weight = weight.float() + 1.0 if self.gemma_norm else weight
+            rms = vllm.ir.ops.rms_norm(allreduce_output, norm_weight, self.epsilon)
 
             return rms, allreduce_output
 
@@ -1187,13 +1190,22 @@ class AiterAllreduceFusedRMSNormPattern(BasePattern, VllmPatternReplacement):
                 residual=residual,
                 weight=weight.to(input.dtype),
                 epsilon=self.epsilon,
+                gemma_norm=self.gemma_norm,
             )
             return allreduce[0], allreduce[1]
 
         return _replacement
 
 
+class AiterAllreduceFusedGemmaRMSNormPattern(AiterAllreduceFusedRMSNormPattern):
+    """Match all-reduce followed by GemmaRMSNorm without a residual."""
+
+    gemma_norm = True
+
+
 class AiterAllreduceFusedAddRMSNormPattern(BasePattern, VllmPatternReplacement):
+    gemma_norm = False
+
     def __init__(
         self,
         epsilon: float,
@@ -1216,8 +1228,9 @@ class AiterAllreduceFusedAddRMSNormPattern(BasePattern, VllmPatternReplacement):
             residual: torch.Tensor, input: torch.Tensor, weight: torch.Tensor
         ) -> tuple[torch.Tensor, torch.Tensor]:
             allreduce_output = tensor_model_parallel_all_reduce(input)
+            norm_weight = weight.float() + 1.0 if self.gemma_norm else weight
             rms, residual = vllm.ir.ops.fused_add_rms_norm(
-                allreduce_output, residual, weight, self.epsilon
+                allreduce_output, residual, norm_weight, self.epsilon
             )
             return rms, residual
 
@@ -1233,10 +1246,17 @@ class AiterAllreduceFusedAddRMSNormPattern(BasePattern, VllmPatternReplacement):
                 residual=residual,
                 weight=weight.to(input.dtype),
                 epsilon=self.epsilon,
+                gemma_norm=self.gemma_norm,
             )
             return allreduce[0], allreduce[1]
 
         return _replacement
+
+
+class AiterAllreduceFusedAddGemmaRMSNormPattern(AiterAllreduceFusedAddRMSNormPattern):
+    """Match all-reduce followed by fused-add GemmaRMSNorm."""
+
+    gemma_norm = True
 
 
 class AiterAllreduceFusedAddRMSNormOutputOnlyPattern(
@@ -1265,6 +1285,14 @@ class AiterAllreduceFusedAddRMSNormOutputOnlyPattern(
             return replacement(residual, input, weight)[0]
 
         return _replacement
+
+
+class AiterAllreduceFusedAddGemmaRMSNormOutputOnlyPattern(
+    AiterAllreduceFusedAddRMSNormOutputOnlyPattern
+):
+    """Match fused-add GemmaRMSNorm when its residual output is dead."""
+
+    gemma_norm = True
 
 
 class AiterAllreduceFusedRMSNormGroupQuantFP8Pattern(
@@ -1539,6 +1567,96 @@ class AiterAllreduceFusedAddRMSNormGroupQuantWithIndexerPattern(
         return _replacement
 
 
+class AiterAllreduceFusedAddRMSNormMxfp4GemmPattern(
+    BasePattern, VllmPatternReplacement
+):
+    """AllReduce + fused-add RMSNorm feeding an MXFP4 dynamic-quant linear.
+
+    Matches ``all_reduce -> fused_add_rms_norm -> gemm_with_dynamic_quant``
+    (``AiterMxfp4LinearKernel`` with ``VLLM_ROCM_USE_AITER_FP4_ASM_GEMM=1``)
+    and lowers it to ``rocm_aiter_fused_allreduce_rmsnorm_mxfp4_gemm``, which
+    moves the per-1x32 activation quant into the all-reduce epilogue at
+    decode. The normed activation stays a pattern output, so bf16 consumers
+    of the same norm (e.g. Qwen3.5/3.8 GDN ``in_proj_ba`` next to the MXFP4
+    ``in_proj_qkvz``) keep working.
+    """
+
+    gemma_norm = False
+
+    def __init__(
+        self,
+        epsilon: float,
+        dtype: torch.dtype,
+        device: str | None,
+    ) -> None:
+        super().__init__(dtype, device)
+        self.epsilon = epsilon
+        self.FUSED_OP = rocm_aiter_ops.get_fused_allreduce_rmsnorm_mxfp4_gemm_op()
+
+    def get_inputs(self) -> list[torch.Tensor]:
+        hidden, out = 64, 32
+        return [
+            self.empty(5, hidden),
+            self.empty(5, hidden),
+            self.empty(hidden),
+            torch.empty(out, hidden // 2, dtype=torch.uint8, device=self.device),
+            torch.empty(out, hidden // 32, dtype=torch.uint8, device=self.device),
+        ]
+
+    @property
+    def pattern(self):
+        def _pattern(
+            residual: torch.Tensor,
+            input_: torch.Tensor,
+            norm_weight: torch.Tensor,
+            weight: torch.Tensor,
+            weight_scale: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+            ar_out = tensor_model_parallel_all_reduce(input_)
+            w = norm_weight.float() + 1.0 if self.gemma_norm else norm_weight
+            rms, residual_out = vllm.ir.ops.fused_add_rms_norm(
+                ar_out, residual, w, self.epsilon
+            )
+            out = torch.ops.vllm.gemm_with_dynamic_quant(
+                rms, weight, weight_scale, True, self.dtype
+            )
+            return out, rms, residual_out
+
+        return _pattern
+
+    @property
+    def replacement(self):
+        def _replacement(
+            residual: torch.Tensor,
+            input_: torch.Tensor,
+            norm_weight: torch.Tensor,
+            weight: torch.Tensor,
+            weight_scale: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+            w = norm_weight if self.gemma_norm else norm_weight.to(input_.dtype)
+            fused = self.FUSED_OP(
+                input_=input_,
+                residual=residual,
+                norm_weight=w,
+                epsilon=self.epsilon,
+                gemma_norm=self.gemma_norm,
+                weight=weight,
+                weight_scale=weight_scale,
+                out_dtype=self.dtype,
+            )
+            return fused[0], fused[1], fused[2]
+
+        return _replacement
+
+
+class AiterAllreduceFusedAddGemmaRMSNormMxfp4GemmPattern(
+    AiterAllreduceFusedAddRMSNormMxfp4GemmPattern
+):
+    """Gemma (1 + w) variant of ``AiterAllreduceFusedAddRMSNormMxfp4GemmPattern``."""
+
+    gemma_norm = True
+
+
 class RocmAiterAllReduceFusionPass(VllmFusionPatternMatcherPass):
     def __init__(self, config: VllmConfig) -> None:
         super().__init__(config, "rocm_aiter_allreduce_fusion_pass")
@@ -1601,14 +1719,31 @@ class RocmAiterAllReduceFusionPass(VllmFusionPatternMatcherPass):
                 "aiter past PR #2823 to enable the trailing per-group "
                 "FP8 quant fusion."
             )
+        supports_mxfp4_gemm = (
+            rocm_aiter_ops.is_asm_fp4_gemm_dynamic_quant_enabled()
+            and ca_comm.build_supports_gemma_mxfp4_quant()
+        )
 
         for epsilon in [1e-5, 1e-6]:
+            # The MXFP4 linear patterns span the AR+RMS subgraph plus the
+            # linear, so they must be tried before any AR+RMS-only pattern.
+            if supports_mxfp4_gemm:
+                self.register(
+                    AiterAllreduceFusedAddGemmaRMSNormMxfp4GemmPattern(
+                        epsilon, self.model_dtype, self.device
+                    )
+                )
+                self.register(
+                    AiterAllreduceFusedAddRMSNormMxfp4GemmPattern(
+                        epsilon, self.model_dtype, self.device
+                    )
+                )
             # Quant-fused variants must register first so the pattern matcher
             # tries them before the AR+RMS-only variants. Otherwise the
             # AR+RMS-only fusion runs first and consumes the all_reduce node,
             # leaving the trailing quant op stranded as an unfused kernel.
             # Register larger subgraphs first (DeepSeek indexer fan-out, then
-            # quant-only AR+RMS+quant, then AR+RMS-only).
+            # quant-only AR+RMS+quant, then Gemma AR+RMS, then AR+RMS-only).
             if supports_per_group_quant:
                 self.register(
                     AiterAllreduceFusedAddRMSNormGroupQuantWithIndexerPattern(
@@ -1631,6 +1766,39 @@ class RocmAiterAllReduceFusionPass(VllmFusionPatternMatcherPass):
                         self.device,
                     )
                 )
+
+            # Gemma variants keep the raw weight and apply (1 + weight) inside
+            # the kernel, so their pattern is the generic AR+RMS subgraph plus
+            # the weight-side add -- they must beat the generic AR+RMS-only
+            # variants below, which would otherwise match first and bake the
+            # pre-added weight in at the activation dtype.
+            #
+            # They still register after the quant-fused variants: the fused
+            # AR+RMS+quant op has no gemma_norm mode, so a Gemma graph with a
+            # trailing quant has to keep folding (1 + weight) outside the
+            # kernel. Registering Gemma first would let the AR+RMS-only match
+            # consume the all_reduce and strand that quant.
+            self.register(
+                AiterAllreduceFusedGemmaRMSNormPattern(
+                    epsilon,
+                    self.model_dtype,
+                    self.device,
+                )
+            )
+            self.register(
+                AiterAllreduceFusedAddGemmaRMSNormPattern(
+                    epsilon,
+                    self.model_dtype,
+                    self.device,
+                )
+            )
+            self.register(
+                AiterAllreduceFusedAddGemmaRMSNormOutputOnlyPattern(
+                    epsilon,
+                    self.model_dtype,
+                    self.device,
+                )
+            )
 
             self.register(
                 AiterAllreduceFusedRMSNormPattern(
