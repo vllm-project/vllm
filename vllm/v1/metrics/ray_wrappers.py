@@ -2,8 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import copy
 import time
-
-from typing_extensions import Self
+from typing import Self
 
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorProm
 from vllm.v1.metrics.loggers import PrometheusStatLogger

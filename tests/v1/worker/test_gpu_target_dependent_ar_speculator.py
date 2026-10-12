@@ -465,13 +465,14 @@ def test_fused_full_graph_maps_split_group_block_tables():
     spec = MLAAttentionSpec(
         block_size=1024, num_kv_heads=1, head_size=128, dtype=torch.uint8
     )
+    kernel_block_table = torch.zeros(1, 4, 32, dtype=torch.int32)
     group = AttentionGroup(
         SimpleNamespace(),
         ["layer.0"],
         spec,
         0,
         kernel_block_size=256,
-        kernel_block_table=torch.zeros(1, 4, 32, dtype=torch.int32),
+        kernel_block_table=kernel_block_table,
         kernel_block_offsets=torch.arange(4, dtype=torch.int32),
     )
     speculator = object.__new__(_TestSpeculator)
@@ -486,7 +487,7 @@ def test_fused_full_graph_maps_split_group_block_tables():
     replayed_tables = []
     speculator.decode_cudagraph_manager = SimpleNamespace(
         run_fullgraph=lambda _: replayed_tables.append(
-            group.kernel_block_table[0, :2, :8].tolist()
+            kernel_block_table[0, :2, :8].tolist()
         )
     )
 
@@ -626,7 +627,7 @@ def test_decode_metadata_update_needs_draft_decode_steps(
     speculator.num_speculative_steps = num_speculative_steps
     speculator.attn_groups = [
         [
-            SimpleNamespace(
+            SimpleNamespace(  # type: ignore[list-item]  # stand-in group
                 supports_draft_decode_metadata_update=True,
                 backend=SimpleNamespace(get_name=lambda: "CAPABLE"),
             )
