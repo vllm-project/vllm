@@ -195,14 +195,19 @@ class HiddenStateHandoff:
             self.tail_tokens * self.head_bytes
             >= self.record_bytes * RECORD_ENCODING_EXPANSION
         )
-        kernel_block_size = self.block_tables.kernel_block_sizes[group_id]
-        if any(v.shape[2] != kernel_block_size for v in layer_views):
+        # The views are in kernel blocks, which split the block table's.
+        block_size = self.block_tables.block_sizes[group_id]
+        kernel_block_size = runner.kernel_block_sizes[group_id]
+        if block_size % kernel_block_size or any(
+            v.shape[2] != kernel_block_size for v in layer_views
+        ):
             raise NotImplementedError(
                 "P/D hidden-state handoff needs one token per KV cache slot."
             )
         self._init_record_slots(
             layer_views,
             self.block_tables.block_tables[group_id].gpu,
+            block_size,
             kernel_block_size,
         )
         logger.info(
@@ -253,16 +258,18 @@ class HiddenStateHandoff:
         self,
         layer_views: list[torch.Tensor],
         block_table: torch.Tensor,
-        kernel_block_size: int,
+        block_size: int,
+        kernel_block_size: int | None = None,
     ) -> None:
         """What the record kernels need to find a record's token slots: the
-        carrier group's block table ``[max_num_reqs, max_num_blocks]`` (kernel
-        blocks) and, per layer, its byte view's address, block, head and token
-        strides, number of heads, bytes per head and their offset in a slot's
-        record bytes."""
+        carrier group's block table ``[max_num_reqs, max_num_blocks]``, its
+        block size and the layer views' (kernel) block size, and, per layer,
+        its byte view's address, block, head and token strides, number of
+        heads, bytes per head and their offset in a slot's record bytes."""
         self.layer_views = layer_views
         self.block_table = block_table
-        self.kernel_block_size = kernel_block_size
+        self.block_size = block_size
+        self.kernel_block_size = kernel_block_size or block_size
         info, start = [], 0
         for view in layer_views:
             assert view.dtype == torch.uint8 and view.dim() == 4
@@ -292,6 +299,7 @@ class HiddenStateHandoff:
             self.layer_info,
             self.record_bytes,
             self.head_bytes,
+            self.block_size,
             self.kernel_block_size,
             BLOCK=triton.next_power_of_2(self.max_layer_bytes),
         )
@@ -314,6 +322,7 @@ class HiddenStateHandoff:
             self.layer_info,
             self.record_bytes,
             self.head_bytes,
+            self.block_size,
             self.kernel_block_size,
             BLOCK=triton.next_power_of_2(max(self.max_layer_bytes // 2, 1)),
         )
@@ -527,7 +536,7 @@ class HiddenStateHandoff:
             self.block_tables.num_blocks.np[
                 self.group_id, input_batch.idx_mapping_np[:num_reqs]
             ]
-            * self.kernel_block_size
+            * self.block_size
         )
         completes_prompt[:num_reqs] &= (
             num_slots >= input_batch.prefill_len_np[:num_reqs] + self.tail_tokens
@@ -1045,15 +1054,19 @@ def _record_slot(
     block_table_stride,
     row,
     token,
+    block_size,
     kernel_block_size,
 ):
-    """The kernel block and in-block offset of a record's token slot."""
+    """The kernel block and in-block offset of a record's token slot: kernel
+    block j of block b is b * (block_size // kernel_block_size) + j."""
     req = tl.load(req_idx_ptr + row)
     pos = tl.load(prompt_len_ptr + row) + token
-    block = tl.load(
-        block_table_ptr + req * block_table_stride + pos // kernel_block_size
+    block = tl.load(block_table_ptr + req * block_table_stride + pos // block_size)
+    kernel_block = (
+        block.to(tl.int64) * (block_size // kernel_block_size)
+        + (pos % block_size) // kernel_block_size
     )
-    return block.to(tl.int64), pos % kernel_block_size
+    return kernel_block, pos % kernel_block_size
 
 
 @triton.jit
@@ -1097,6 +1110,7 @@ def _write_records_kernel(
     layer_info_ptr,  # [num_layers, 7]
     record_bytes,
     head_bytes,
+    block_size,
     kernel_block_size,
     BLOCK: tl.constexpr,
 ):
@@ -1112,6 +1126,7 @@ def _write_records_kernel(
         block_table_stride,
         row,
         token,
+        block_size,
         kernel_block_size,
     )
     info = layer_info_ptr + layer * 7
@@ -1148,6 +1163,7 @@ def _read_records_kernel(
     layer_info_ptr,  # [num_layers, 7]
     record_bytes,
     head_bytes,
+    block_size,
     kernel_block_size,
     BLOCK: tl.constexpr,
 ):
@@ -1162,6 +1178,7 @@ def _read_records_kernel(
         block_table_stride,
         row,
         token,
+        block_size,
         kernel_block_size,
     )
     info = layer_info_ptr + layer * 7

@@ -25,9 +25,12 @@ BLOCK_SIZE = 4
 MAX_REQS = 8
 
 
-def _handoff(layout: RecordLayout, num_blocks: int = 48, num_heads: int = 2):
+def _handoff(
+    layout: RecordLayout, num_blocks: int = 48, num_heads: int = 2, split: int = 1
+):
     """A handoff over two fp16 layers' [blocks, heads, tokens, K + V] caches
-    of different head sizes, with each request's blocks scattered."""
+    of different head sizes, with each request's blocks scattered. Each block
+    of the block table is ``split`` of the caches' (kernel) blocks."""
     caches = [
         torch.zeros(
             num_blocks,
@@ -47,20 +50,24 @@ def _handoff(layout: RecordLayout, num_blocks: int = 48, num_heads: int = 2):
     views = [cache.view(torch.uint8) for cache in caches]
     handoff.head_bytes = sum(v.shape[-1] for v in views)
     handoff.tail_tokens = cdiv(2 * handoff.record_bytes, handoff.head_bytes)
-    perm = torch.randperm(num_blocks, generator=torch.Generator().manual_seed(0))
+    perm = torch.randperm(
+        num_blocks // split, generator=torch.Generator().manual_seed(0)
+    )
     block_table = perm.view(MAX_REQS, -1).to(torch.int32).to(DEVICE)
-    handoff._init_record_slots(views, block_table, BLOCK_SIZE)
+    handoff._init_record_slots(views, block_table, split * BLOCK_SIZE, BLOCK_SIZE)
     return handoff, caches, block_table
 
 
+@pytest.mark.parametrize("split", [1, 2])
 @pytest.mark.parametrize("num_heads_read", [2, 1])
-def test_record_round_trip_through_kv_slots(num_heads_read):
+def test_record_round_trip_through_kv_slots(num_heads_read, split):
     """Records written past the prompt into every KV head read back whole,
     also from a head slice (a decoder at a different TP size), laid out one
-    nibble per byte, split over the layers of each token slot."""
+    nibble per byte, split over the layers of each token slot, also with the
+    block table's blocks split into kernel blocks."""
     torch.manual_seed(0)
     layout = RecordLayout(hidden_size=24, window=1, num_aux=2)
-    handoff, caches, block_table = _handoff(layout)
+    handoff, caches, block_table = _handoff(layout, split=split)
     # 192 bytes, stored as 384, at 48 per token slot.
     assert handoff.tail_tokens == 8
 
@@ -79,8 +86,10 @@ def test_record_round_trip_through_kv_slots(num_heads_read):
             view = cache.view(torch.uint8)
             size = view.shape[-1]
             for t in range(handoff.tail_tokens):
-                block = int(block_table[req, (n + t) // BLOCK_SIZE])
-                offset = (n + t) % BLOCK_SIZE
+                pos = n + t
+                block = int(block_table[req, pos // (split * BLOCK_SIZE)])
+                block = block * split + pos % (split * BLOCK_SIZE) // BLOCK_SIZE
+                offset = pos % BLOCK_SIZE
                 written[layer, block, :, offset] = True
                 want = expected[r, t, start : start + size]
                 assert torch.equal(view[block, :, offset], want.expand(2, -1))
@@ -93,6 +102,7 @@ def test_record_round_trip_through_kv_slots(num_heads_read):
         handoff._init_record_slots(
             [cache.view(torch.uint8)[:, 1:] for cache in caches],
             block_table,
+            split * BLOCK_SIZE,
             BLOCK_SIZE,
         )
     assert torch.equal(handoff._read_records(req_idx, prompt_len), records)
