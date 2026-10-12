@@ -163,6 +163,9 @@ class EngineCoreReadyResponse:
     # VllmConfig (the Rust frontend). False under --kv-sharing-fast-prefill,
     # which skips prompt tokens in some layers.
     supports_prompt_logprobs: bool = True
+    # False when the engine disabled chunked prefill during initialization,
+    # e.g. for a model without KV cache.
+    enable_chunked_prefill: bool = True
 
 
 class EngineCoreRequest(
