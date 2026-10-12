@@ -2513,46 +2513,16 @@ def _project_kv_cache_groups_to_worker(
     return projected_groups
 
 
-def get_kv_cache_configs(
+def get_kv_cache_groups_from_workers(
     vllm_config: VllmConfig,
     kv_cache_specs: list[dict[str, KVCacheSpec]],
-    available_memory: list[int],
-) -> list[KVCacheConfig]:
-    """Generates the KV cache configurations for a model.
-    Since we use a shared centralized controller for all workers, we need the
-    `kv_cache_config` to be consistent across all workers to make sure
-    the KV cache allocation can be applied to all workers. However, different
-    workers may have different memory available, and different type of layers
-    (when pipeline parallel is enabled). To handle the difference between
-    workers, the current implementation is:
-    1. Merge the KV cache specs of all workers to get the KVCacheSpecs for
-       the whole model.
-    2. Generate the KV cache groups based on the layer ratio of the whole model.
-       This also handles spec unification for hybrid models.
-    3. Handle auto-fit max_model_len and memory checks using per-worker
-       projected groups to account for PP sharding.
-    4. Generate the KV cache configs for each worker based on the KV cache
-       grouping strategy. (This is reasonable because the layer ratio of
-       different PP stages are similar.)
-    5. Change the num_blocks of each worker to the smallest among all workers
-       and shrink tensor sizes proportionally to avoid allocating unused memory.
-
-    Args:
-        vllm_config: The global VllmConfig
-        kv_cache_specs: List of dict[layer_name, KVCacheSpec] for each worker.
-        available_memory: Memory available for KV cache in bytes for each
-            worker.
-
-    Returns:
-        The generated KVCacheConfigs for each worker.
-
-    """
-    # Merge the KV cache specs of all workers. Different PP stages may have
-    # different layer names, and different TP ranks of the same PP stage should
-    # have the same KV cache spec.
+) -> list[KVCacheGroupSpec]:
+    """Generate global KV cache groups from all workers' layer specs."""
+    # Different PP stages may have different layer names, while TP ranks of
+    # the same PP stage must have identical specs for the same layer.
     merged_kv_cache_specs: dict[str, KVCacheSpec] = {}
-    for kv_cache_spec_one_worker in kv_cache_specs:
-        for layer_name, layer_spec in kv_cache_spec_one_worker.items():
+    for worker_spec in kv_cache_specs:
+        for layer_name, layer_spec in worker_spec.items():
             if layer_name not in merged_kv_cache_specs:
                 merged_kv_cache_specs[layer_name] = layer_spec
             else:
@@ -2561,12 +2531,9 @@ def get_kv_cache_configs(
                     "across workers. This is not supported yet."
                 )
 
-    # Check if the KV cache specs are registered correctly.
-    # This is to prevent that some layers are initialized with unregistered specs.
     KVCacheSpecRegistry.check_kv_cache_spec_registry(merged_kv_cache_specs)
 
-    # When speculating with more than 1 speculative module (e.g. multi-layered MTP)
-    # tag every SlidingWindowSpec with how many extra tokens to retain in the window.
+    # Multi-layer speculation needs extra sliding-window history for draft tokens.
     extra_retained_tokens = max(0, vllm_config.num_prefill_lookahead_tokens - 1)
     for layer_name, layer_spec in merged_kv_cache_specs.items():
         if isinstance(layer_spec, SlidingWindowSpec):
@@ -2574,11 +2541,58 @@ def get_kv_cache_configs(
                 layer_spec, extra_retained_tokens=extra_retained_tokens
             )
 
-    # Get global KV cache groups. This also handles spec unification for
-    # hybrid models when disable_hybrid_kv_cache_manager is enabled.
-    # After this call, merged_kv_cache_specs may be modified in-place.
-    global_kv_cache_groups = get_kv_cache_groups(vllm_config, merged_kv_cache_specs)
+    return get_kv_cache_groups(vllm_config, merged_kv_cache_specs)
 
+
+def get_kv_cache_configs(
+    vllm_config: VllmConfig,
+    kv_cache_specs: list[dict[str, KVCacheSpec]],
+    available_memory: list[int],
+) -> list[KVCacheConfig]:
+    """Generate KV cache groups and per-worker allocation configs."""
+    global_kv_cache_groups = get_kv_cache_groups_from_workers(
+        vllm_config, kv_cache_specs
+    )
+    return get_kv_cache_configs_from_groups(
+        vllm_config,
+        kv_cache_specs,
+        available_memory,
+        global_kv_cache_groups,
+    )
+
+
+def get_kv_cache_configs_from_groups(
+    vllm_config: VllmConfig,
+    kv_cache_specs: list[dict[str, KVCacheSpec]],
+    available_memory: list[int],
+    global_kv_cache_groups: list[KVCacheGroupSpec],
+) -> list[KVCacheConfig]:
+    """Generates the KV cache configurations for a model.
+    Since we use a shared centralized controller for all workers, we need the
+    `kv_cache_config` to be consistent across all workers to make sure
+    the KV cache allocation can be applied to all workers. However, different
+    workers may have different memory available, and different type of layers
+    (when pipeline parallel is enabled). To handle the difference between
+    workers, the current implementation is:
+    1. Handle auto-fit max_model_len and memory checks using per-worker
+       projected groups to account for PP sharding.
+    2. Generate the KV cache configs for each worker based on the KV cache
+       grouping strategy. (This is reasonable because the layer ratio of
+       different PP stages are similar.)
+    3. Change the num_blocks of each worker to the smallest among all workers
+       and shrink tensor sizes proportionally to avoid allocating unused memory.
+
+    Args:
+        vllm_config: The global VllmConfig
+        kv_cache_specs: List of dict[layer_name, KVCacheSpec] for each worker.
+        available_memory: Memory available for KV cache in bytes for each
+            worker.
+        global_kv_cache_groups: KV cache groups derived from all workers' specs.
+
+    Returns:
+        The generated KVCacheConfigs for each worker.
+
+    """
     # If original_max_model_len was -1, automatically
     # determine the maximum model length that fits in available GPU memory.
     # We use per-worker projected groups to account for PP sharding.

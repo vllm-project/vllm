@@ -45,7 +45,9 @@ from vllm.v1.core.kv_cache_utils import (
     generate_scheduler_kv_cache_config,
     get_kv_cache_capacity,
     get_kv_cache_configs,
+    get_kv_cache_configs_from_groups,
     get_kv_cache_groups,
+    get_kv_cache_groups_from_workers,
     get_max_concurrency_for_kv_cache_config,
     get_request_block_hasher,
     hash_block_tokens,
@@ -1460,13 +1462,17 @@ def test_get_kv_cache_configs_multiple_workers():
     ]
 
     # Basic case. All things are the same.
-    kv_cache_configs = get_kv_cache_configs(
+    global_kv_cache_groups = get_kv_cache_groups_from_workers(
+        vllm_config, same_kv_cache_specs
+    )
+    kv_cache_configs = get_kv_cache_configs_from_groups(
         vllm_config,
         same_kv_cache_specs,
         [
             ref_kv_cache_spec.page_size_bytes * 2 * 10,
             ref_kv_cache_spec.page_size_bytes * 2 * 10,
         ],
+        global_kv_cache_groups,
     )
     expected = KVCacheConfig(
         num_blocks=10,
