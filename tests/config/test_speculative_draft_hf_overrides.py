@@ -288,3 +288,134 @@ def test_glm5_next_mtp_override_promotes_index_share():
     assert draft_config.architectures == ["Glm5NextMTPModel"]
     assert draft_config.n_predict == 1
     assert draft_config.index_share_for_mtp_iteration is True
+
+
+def _make_config_capture_draft_kwargs(
+    *,
+    method: str = "mtp",
+    model: str | None = None,
+    revision: str | None = None,
+    code_revision: str | None = None,
+    target_revision: str | None = "pre-final",
+    target_code_revision: str | None = "abc123",
+    n_predict_override: int | None = None,
+    draft_hf_kwargs: dict | None = None,
+) -> tuple[SpeculativeConfig, dict]:
+    hf_kwargs = dict(
+        architectures=["DeepSeekMTPModel"],
+        model_type="deepseek_mtp",
+        num_nextn_predict_layers=1,
+    )
+    hf_kwargs.update(draft_hf_kwargs or {})
+    hf_config = SpeculativeConfig.hf_config_override(_make_hf_config(**hf_kwargs))
+    if n_predict_override is not None:
+        # Simulate a checkpoint that lacks `num_nextn_predict_layers`,
+        # which the arch-mapping override resolves to n_predict=0.
+        hf_config.update({"n_predict": n_predict_override})
+    draft = MagicMock(
+        hf_config=hf_config,
+        architectures=hf_config.architectures,
+        max_model_len=128,
+    )
+    draft.registry.inspect_model_cls.return_value = (None, "DeepSeekMTPModel")
+    draft.get_vocab_size.return_value = 32000
+    target = MagicMock(
+        model="meta-llama/Llama-3.2-1B",
+        model_weights="",
+        max_model_len=128,
+        quantization=None,
+        hf_overrides={},
+        revision=target_revision,
+        code_revision=target_code_revision,
+        tokenizer="meta-llama/Llama-3.2-1B",
+        tokenizer_mode="auto",
+        trust_remote_code=False,
+        allowed_local_media_path=None,
+        allowed_media_domains=None,
+        dtype="auto",
+        seed=0,
+        tokenizer_revision=target_revision,
+        enforce_eager=False,
+        max_logprobs=20,
+        config_format="hf",
+    )
+    target.hf_config.model_type = hf_kwargs["model_type"]
+    target.get_vocab_size.return_value = 32000
+
+    captured: dict = {}
+
+    def fake_model_config(**kwargs):
+        captured.update(kwargs)
+        return draft
+
+    spec_kwargs: dict = dict(
+        method=method,
+        num_speculative_tokens=1,
+        target_model_config=target,
+        target_parallel_config=ParallelConfig(),
+    )
+    if model is not None:
+        spec_kwargs["model"] = model
+    if revision is not None:
+        spec_kwargs["revision"] = revision
+    if code_revision is not None:
+        spec_kwargs["code_revision"] = code_revision
+
+    with patch("vllm.config.speculative.ModelConfig", side_effect=fake_model_config):
+        config = SpeculativeConfig(**spec_kwargs)
+    return config, captured
+
+
+@pytest.mark.cpu_test
+def test_mtp_draft_inherits_target_revision():
+    """With method="mtp" and no explicit draft model, the draft IS the target
+    checkpoint, so the draft config must resolve config/weights from the
+    target's revision (as it already does for model and quantization).
+    Regression test for https://github.com/vllm-project/vllm/issues/61197:
+    the draft previously fell back to the repo's default branch."""
+    config, captured = _make_config_capture_draft_kwargs()
+
+    assert captured["revision"] == "pre-final"
+    assert captured["code_revision"] == "abc123"
+    assert config.revision == "pre-final"
+    assert config.code_revision == "abc123"
+
+
+@pytest.mark.cpu_test
+def test_mtp_draft_explicit_revision_wins():
+    """An explicitly set speculative revision/code_revision is an override
+    and must not be clobbered by the target's revision."""
+    config, captured = _make_config_capture_draft_kwargs(
+        revision="explicit", code_revision="explicit-code"
+    )
+
+    assert captured["revision"] == "explicit"
+    assert captured["code_revision"] == "explicit-code"
+    assert config.revision == "explicit"
+    assert config.code_revision == "explicit-code"
+
+
+@pytest.mark.cpu_test
+def test_explicit_draft_model_does_not_inherit_revision():
+    """Revision inheritance only applies when the draft is the target
+    checkpoint. A separately provided draft checkpoint keeps its own
+    (unset) revision."""
+    _, captured = _make_config_capture_draft_kwargs(
+        method="draft_model",
+        model="some-draft",
+        draft_hf_kwargs=dict(
+            architectures=["LlamaForCausalLM"], model_type="llama"
+        ),
+    )
+
+    assert captured["revision"] is None
+    assert captured["code_revision"] is None
+
+
+@pytest.mark.cpu_test
+def test_mtp_zero_n_predict_raises_readable_error():
+    """A draft checkpoint lacking `num_nextn_predict_layers` resolves to
+    n_predict=0; this must raise a readable ValueError instead of
+    ZeroDivisionError."""
+    with pytest.raises(ValueError, match="n_predict=0"):
+        _make_config_capture_draft_kwargs(n_predict_override=0)
