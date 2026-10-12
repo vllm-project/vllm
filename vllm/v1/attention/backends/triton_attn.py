@@ -193,6 +193,9 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
             device=device,
         )
         self.rswa_window = model_config.rswa_window
+        # R-SWA restages prefix lengths in build(), which the no-op
+        # update_draft_decode_metadata() does not refresh.
+        self.supports_draft_decode_metadata_update = self.rswa_window is None
         self.persistent_rswa_prefix_lens: torch.Tensor | None = None
         if self.rswa_window is not None:
             self.persistent_rswa_prefix_lens = torch.empty(

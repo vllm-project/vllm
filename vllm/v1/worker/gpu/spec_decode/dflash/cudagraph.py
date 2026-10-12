@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Callable, Mapping
+from typing import Any
 
 import torch
 
@@ -84,11 +85,11 @@ class DFlashCudaGraphManager(CudaGraphManager):
         kv_cache_config: KVCacheConfig,
         max_model_len: int,
         causal: bool | Mapping[int, bool],
-        precompute_context_kv: Callable[[int], None],
+        prepare_forward: Callable[[int, dict[str, Any] | None], None],
         progress_bar_desc: str = "Capturing CUDA graphs",
     ) -> None:
-        """``precompute_context_kv(num_reqs)`` is captured ahead of the query
-        forward."""
+        """``prepare_forward(num_reqs, attn_metadata)`` is captured ahead of the
+        query forward."""
 
         def create_forward_fn(
             desc: BatchExecutionDescriptor,
@@ -115,7 +116,7 @@ class DFlashCudaGraphManager(CudaGraphManager):
             attn_metadata, slot_mappings = attn_state
 
             def forward(cg_mode: CUDAGraphMode) -> None:
-                precompute_context_kv(num_reqs)
+                prepare_forward(num_reqs, attn_metadata)
                 forward_fn(
                     num_reqs,
                     num_tokens,

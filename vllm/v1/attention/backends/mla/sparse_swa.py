@@ -852,23 +852,44 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
             num_tokens,
         )
 
-        _COMPUTE_SWA_INDICES_AND_LENS_KERNEL(
-            metadata.decode_swa_indices,
-            metadata.decode_swa_lens,
-            metadata.decode_swa_indices.shape[-1],
-            metadata.decode_swa_indices.shape[-1],
-            metadata.decode_swa_lens,  # unused (HAS_IMAGE=False)
-            metadata.decode_swa_lens,  # unused (HAS_IMAGE=False)
-            metadata.query_start_loc,
-            metadata.seq_lens,
-            metadata.token_to_req_indices,
-            metadata.is_valid_token,
-            metadata.block_table,
-            self.block_size,
-            metadata.replay_start,
-            num_tokens=metadata.num_decode_tokens,
-            token_offset=0,
-        )
+        # build() points non-causal (DSpark draft) metadata at its own buffer.
+        noncausal = self.decode_swa_indices_noncausal
+        if (
+            noncausal is not None
+            and metadata.decode_swa_indices.data_ptr() == noncausal.data_ptr()
+        ):
+            _COMPUTE_DSPARK_NONCAUSAL_SWA_INDICES_KERNEL(
+                metadata.decode_swa_indices,
+                metadata.decode_swa_lens,
+                self.window_size,
+                self.noncausal_index_width,
+                metadata.query_start_loc,
+                metadata.seq_lens,
+                metadata.token_to_req_indices,
+                metadata.is_valid_token,
+                metadata.block_table,
+                self.block_size,
+                num_tokens=num_tokens,
+                token_offset=0,
+            )
+        else:
+            _COMPUTE_SWA_INDICES_AND_LENS_KERNEL(
+                metadata.decode_swa_indices,
+                metadata.decode_swa_lens,
+                metadata.decode_swa_indices.shape[-1],
+                metadata.decode_swa_indices.shape[-1],
+                metadata.decode_swa_lens,  # unused (HAS_IMAGE=False)
+                metadata.decode_swa_lens,  # unused (HAS_IMAGE=False)
+                metadata.query_start_loc,
+                metadata.seq_lens,
+                metadata.token_to_req_indices,
+                metadata.is_valid_token,
+                metadata.block_table,
+                self.block_size,
+                metadata.replay_start,
+                num_tokens=metadata.num_decode_tokens,
+                token_offset=0,
+            )
         tile_sched = self.build_tile_scheduler(metadata.num_decode_tokens)
         metadata.tile_sched_swaonly = tile_sched[_LAYER_TYPE_SWAONLY]
         metadata.tile_sched_c4a = tile_sched[_LAYER_TYPE_C4A]
