@@ -10,7 +10,7 @@ from vllm.logger import init_logger
 from vllm.sequence import IntermediateTensors
 from vllm.tracing import instrument
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, ModelRunnerOutput
-from vllm.v1.worker.cpu.model_runner import CPUModelRunner
+from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 
 logger = init_logger(__name__)
@@ -19,10 +19,10 @@ if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
 
 
-class SimulatedCPUModelRunner(CPUModelRunner):
-    """CPU runner that simulates model execution while preserving scheduler/KV logic."""
+class SimulatedModelRunner(GPUModelRunner):
+    """Runner that simulates model execution while preserving scheduler/KV logic."""
 
-    @instrument(span_name="Warmup (Simulated CPU)")
+    @instrument(span_name="Warmup (Simulated)")
     def warming_up_model(self) -> None:
         logger.info("Skipping model warmup for simulated forward.")
 

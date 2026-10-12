@@ -61,8 +61,8 @@ def test_simulate_forward_model_matrix(
     model: str,
     min_kv_cache_groups: int,
 ) -> None:
-    if not current_platform.is_cpu():
-        pytest.skip("Simulated forward is currently supported on CPU only.")
+    if not (current_platform.is_cpu() or current_platform.is_cuda_alike()):
+        pytest.skip("Simulated forward needs the CPU or a CUDA-alike platform.")
 
     _check_model_available(model)
 
@@ -94,8 +94,8 @@ def test_simulate_forward_prefix_cache_hybrid_retention_zero(
     monkeypatch: pytest.MonkeyPatch,
     vllm_runner: type[VllmRunner],
 ) -> None:
-    if not current_platform.is_cpu():
-        pytest.skip("Simulated forward is currently supported on CPU only.")
+    if not (current_platform.is_cpu() or current_platform.is_cuda_alike()):
+        pytest.skip("Simulated forward needs the CPU or a CUDA-alike platform.")
 
     model = "openai/gpt-oss-120b"
     _check_model_available(model)

@@ -2879,9 +2879,9 @@ class EngineArgs:
     def _check_feature_supported(self):
         """Raise an error if the feature is not supported."""
         if self.simulate_forward:
-            if not current_platform.is_cpu():
+            if not (current_platform.is_cpu() or current_platform.is_cuda_alike()):
                 _raise_unsupported_error(
-                    feature_name="simulated forward on non-CPU platforms"
+                    feature_name="simulated forward on this platform"
                 )
             if self.pipeline_parallel_size != 1:
                 _raise_unsupported_error(

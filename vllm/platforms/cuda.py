@@ -326,7 +326,12 @@ class CudaPlatformBase(Platform):
         model_config = vllm_config.model_config
 
         if parallel_config.worker_cls == "auto":
-            parallel_config.worker_cls = "vllm.v1.worker.gpu_worker.Worker"
+            if vllm_config.cache_config.simulate_forward:
+                parallel_config.worker_cls = (
+                    "vllm.v1.worker.simulated.worker.SimulatedWorker"
+                )
+            else:
+                parallel_config.worker_cls = "vllm.v1.worker.gpu_worker.Worker"
 
         scheduler_config = vllm_config.scheduler_config
         # Note: model_config may be None during testing
