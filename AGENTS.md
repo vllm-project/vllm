@@ -125,6 +125,9 @@ Use [Google-style docstrings](https://google.github.io/styleguide/pyguide.html#3
 - Match existing code style
 - Minimize use of comments. Eliminate comments which are redundant, preferring legible and self-documenting code. When used, keep docstrings and comments brief and direct.
 - Assume the reader is familiar with vLLM.
+- Enable new ROCm AITER kernels and fusions automatically when
+  `VLLM_ROCM_USE_AITER` is enabled and their model, backend, and shape
+  requirements are met. Do not add a second environment variable to opt in.
 
 ### Commit messages
 
