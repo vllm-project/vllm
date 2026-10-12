@@ -2020,6 +2020,11 @@ class ModelConfig:
         return self._model_info.is_attention_free
 
     @property
+    def mono_spec(self) -> str | None:
+        """The model's MonoKernel spec, by import path (``SupportsMonoKernel``)."""
+        return self._model_info.mono_spec
+
+    @property
     def is_hybrid(self) -> bool:
         if not self._model_info.is_hybrid:
             return False
