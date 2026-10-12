@@ -18,8 +18,10 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     UniformTypeKVCacheSpecs,
 )
+from vllm.v1.worker.gpu.async_utils import async_copy_to_np
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.model_runner import ExecuteModelState, GPUModelRunner
+from vllm.v1.worker.gpu.spec_decode.utils import get_drafter_hidden_states
 
 
 def test_non_last_pp_rank_uses_global_batch_for_sample_feedback():
@@ -42,7 +44,7 @@ def test_non_last_pp_rank_uses_global_batch_for_sample_feedback():
         slot_mappings_by_layer=None,
         hidden_states=None,
         aux_hidden_states=None,
-        dp_sync=None,
+        dp_sync_state=None,
         finished_req_ids=set(),
         ec_connector_output=None,
         cudagraph_stats=None,
@@ -236,7 +238,6 @@ def test_append_block_ids_rejects_write_past_row_capacity():
 
     block_tables = BlockTables.__new__(BlockTables)
     block_tables.num_kv_cache_groups = 1
-    block_tables.blocks_per_kv_block = [1]
     block_tables.block_tables = [_BlockTable()]
     block_tables.num_blocks = SimpleNamespace(
         np=torch.tensor([[0, 3]], dtype=torch.int32)
@@ -342,18 +343,26 @@ def test_capture_model_profile_only_skips_lock(monkeypatch):
 @pytest.mark.parametrize("target_buffer", ["absent", "none", "tensor"])
 def test_get_drafter_hidden_states_tolerates_missing_target_buffer(target_buffer):
     """Targets allocate the MTP hidden buffer only for hidden-state drafters."""
-    runner = GPUModelRunner.__new__(GPUModelRunner)
     hidden_states = torch.zeros(4, 8)
     buffer = torch.arange(16 * 8, dtype=torch.float32).view(16, 8)
     if target_buffer == "absent":
-        runner.model = SimpleNamespace()
+        model = SimpleNamespace()
     else:
         returned = buffer if target_buffer == "tensor" else None
-        runner.model = SimpleNamespace(get_mtp_target_hidden_states=lambda: returned)
+        model = SimpleNamespace(get_mtp_target_hidden_states=lambda: returned)
 
-    out = runner._get_drafter_hidden_states(hidden_states)
+    out = get_drafter_hidden_states(model, hidden_states)
 
     if target_buffer == "tensor":
         assert torch.equal(out, buffer[:4])
     else:
         assert out is hidden_states
+
+
+def test_async_copy_to_np_does_not_alias_reused_buffer():
+    buffer = torch.zeros(4, dtype=torch.int64)
+
+    snapshot = async_copy_to_np(buffer)
+    buffer.fill_(1)
+
+    assert snapshot.tolist() == [0, 0, 0, 0]

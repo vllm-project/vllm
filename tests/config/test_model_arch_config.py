@@ -10,13 +10,11 @@ from typing import cast
 from unittest.mock import Mock
 
 import pytest
-from transformers import PreTrainedConfig
+from transformers import DiffusionGemmaConfig, PreTrainedConfig
 from transformers.models.gemma4.configuration_gemma4 import Gemma4TextConfig
 
 from vllm.config import ModelConfig, ParallelConfig, SpeculativeConfig
 from vllm.config.model_arch import ModelArchitectureConfig
-from vllm.transformers_utils.configs.diffusion_gemma import DiffusionGemmaConfig
-from vllm.transformers_utils.configs.gemma4 import gemma4_layer_config
 from vllm.transformers_utils.model_arch_config_convertor import (
     MODEL_ARCH_CONFIG_CONVERTORS,
     Gemma4ModelArchConfigConvertor,
@@ -318,11 +316,7 @@ def _gemma4_text_config(**overrides) -> Gemma4TextConfig:
 
 
 def test_gemma4_head_dims_vary_by_layer_type():
-    """Gemma4's full attention layers are wider than its sliding ones.
-
-    Transformers >= 5.15.0 says so in the config; this exercises the convertor
-    building the same per-layer view from the flat attributes used before that.
-    """
+    """Gemma4's full attention layers are wider than its sliding ones."""
     text_config = _gemma4_text_config(
         num_global_key_value_heads=8, attention_k_eq_v=True
     )
@@ -332,9 +326,9 @@ def test_gemma4_head_dims_vary_by_layer_type():
     assert (arch.head_size, arch.total_num_kv_heads) == (32, 8)
     assert [arch[i].head_size for i in range(6)] == [16] * 5 + [32]
     assert [arch[i].total_num_kv_heads for i in range(6)] == [4] * 5 + [8]
-    # The model files resolve each layer through the same helper, so the KV cache
-    # vLLM allocates and the projections the model builds cannot disagree.
-    assert [gemma4_layer_config(text_config, i).head_dim for i in range(6)] == [
+    # The model files read the same per-layer configs, so the KV cache vLLM
+    # allocates and the projections the model builds cannot disagree.
+    assert [text_config.per_layer_config[i].head_dim for i in range(6)] == [
         arch[i].head_size for i in range(6)
     ]
 

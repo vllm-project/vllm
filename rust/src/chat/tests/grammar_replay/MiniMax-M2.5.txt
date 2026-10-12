@@ -30,3 +30,24 @@ sequence
     `\n<minimax:tool_call>\n`
     tag `<invoke name="get_weather">\n` minimax_xml({ location: string }) `</invoke>\n`
     `</minimax:tool_call>`
+
+# none_schema (from_token_zero)
+sequence
+  sequence
+    tag `` text `</think>`
+    `\n\n`
+  json({ answer: string })
+
+# auto_schema_content, auto_schema_calls (from_token_zero)
+sequence
+  sequence
+    tag `` text `</think>`
+    `\n\n`
+  or
+    sequence
+      `\n<minimax:tool_call>\n`
+      tags_with_separator `` at_least_one
+        tag `<invoke name="get_weather">\n` minimax_xml({ location: string }) `</invoke>\n`
+        tag `<invoke name="add">\n` minimax_xml({ y: number, x: number, items: string[] }) `</invoke>\n`
+      `</minimax:tool_call>`
+    json({ answer: string })
