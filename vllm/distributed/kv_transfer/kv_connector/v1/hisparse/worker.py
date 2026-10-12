@@ -28,6 +28,7 @@ from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.hisparse.layout import HISPARSE_HOT_SUFFIX
 from vllm.v1.hisparse.runtime import (
     HiSparseCacheHandle,
+    hisparse_host_write_counter,
     release_pinned_state,
     update_hisparse_residency,
 )
@@ -158,32 +159,44 @@ def _is_hisparse_host_writer(
     return shared_host_region is None or get_tensor_model_parallel_rank() == 0
 
 
-def _create_hisparse_host_events(
-    shared_host_region: SharedOffloadRegion | None,
-    is_host_writer: bool,
-    device: torch.device,
-) -> tuple[torch.Event, torch.Event]:
-    if shared_host_region is None:
-        return torch.Event(), torch.Event()
+class _HostWriteCounter:
+    """Shared-pool step counter: TP rank 0's stream publishes each step's
+    host writes and the other ranks' streams wait for that exact step.
 
-    events: tuple[torch.Event, torch.Event] | None = None
-    ipc_handles = None
-    if is_host_writer:
-        events = (
-            torch.cuda.Event(interprocess=True),
-            torch.cuda.Event(interprocess=True),
+    A reused IPC event cannot do this: a wait binds to the event's latest
+    record, so a lagging rank can bind to a record queued behind a forward
+    that needs that rank.
+    """
+
+    def __init__(self, counter: torch.Tensor) -> None:
+        from cuda.bindings import driver
+
+        self._driver = driver
+        err, self._ptr = driver.cuMemHostGetDevicePointer(counter.data_ptr(), 0)
+        if err != driver.CUresult.CUDA_SUCCESS:
+            raise RuntimeError(f"cuMemHostGetDevicePointer failed: {err}")
+
+    def write(self, stream: torch.cuda.Stream, step: int) -> None:
+        driver = self._driver
+        (err,) = driver.cuStreamWriteValue64(
+            driver.CUstream(stream.cuda_stream),
+            self._ptr,
+            step,
+            driver.CUstreamWriteValue_flags.CU_STREAM_WRITE_VALUE_DEFAULT,
         )
-        stream = current_stream()
-        for event in events:
-            event.record(stream)
-        ipc_handles = tuple(event.ipc_handle() for event in events)
-    ipc_handles = get_tp_group().broadcast_object(ipc_handles, src=0)
-    if events is None:
-        events = (
-            torch.cuda.Event.from_ipc_handle(device, ipc_handles[0]),
-            torch.cuda.Event.from_ipc_handle(device, ipc_handles[1]),
+        if err != driver.CUresult.CUDA_SUCCESS:
+            raise RuntimeError(f"cuStreamWriteValue64 failed: {err}")
+
+    def wait(self, stream: torch.cuda.Stream, step: int) -> None:
+        driver = self._driver
+        (err,) = driver.cuStreamWaitValue64(
+            driver.CUstream(stream.cuda_stream),
+            self._ptr,
+            step,
+            driver.CUstreamWaitValue_flags.CU_STREAM_WAIT_VALUE_GEQ,
         )
-    return events
+        if err != driver.CUresult.CUDA_SUCCESS:
+            raise RuntimeError(f"cuStreamWaitValue64 failed: {err}")
 
 
 class HiSparseConnectorWorker:
@@ -316,11 +329,15 @@ class HiSparseConnectorWorker:
             for layer_name, cache in zip(cache_layer_names, cache_handles, strict=True)
             if cache.runtime.is_group_leader
         )
-        self.host_write_events = _create_hisparse_host_events(
-            shared_host_region, is_host_writer, device
-        )
+        self.host_write_events = (torch.Event(), torch.Event())
         self.host_write_event = self.host_write_events[1]
         self._next_host_write_event = 0
+        self._host_write_counter = (
+            _HostWriteCounter(hisparse_host_write_counter(shared_host_region))
+            if shared_host_region is not None
+            else None
+        )
+        self._host_write_step = 0
         self.cache_handles = cache_handles
         self.leader_runtimes = [cache.runtime for _, cache in self._group_leaders]
         request_state_indices = {
@@ -415,7 +432,14 @@ class HiSparseConnectorWorker:
         previous_host_write_event = self.host_write_event
         self.host_write_event = self.host_write_events[self._next_host_write_event]
         self._next_host_write_event ^= 1
-        current_stream().wait_event(previous_host_write_event)
+        stream = current_stream()
+        stream.wait_event(previous_host_write_event)
+        if self._host_write_counter is not None:
+            self._host_write_step += 1
+            if self.is_host_writer:
+                self._host_write_counter.write(stream, self._host_write_step)
+            else:
+                self._host_write_counter.wait(stream, self._host_write_step)
         self._release_completed_dma_descriptors()
         self._dma_submitted = False
         mirrors = _flatten_row_mirrors(metadata.row_mirrors, request_ids)

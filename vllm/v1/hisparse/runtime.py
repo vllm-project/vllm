@@ -367,6 +367,7 @@ def allocate_hisparse_host_pools(
             None,
         )
 
+    pool_bytes = num_blocks * host_block_stride
     region = SharedOffloadRegion(
         engine_id=(
             f"hisparse_{vllm_config.instance_id}_"
@@ -374,7 +375,7 @@ def allocate_hisparse_host_pools(
         ),
         num_chunks=1,
         rank=0,
-        kv_bytes_per_chunk=num_blocks * host_block_stride,
+        kv_bytes_per_chunk=pool_bytes + mmap.PAGESIZE,
         cpu_page_size=sum(tensor_sizes),
         barrier=get_tp_group().barrier,
         creator_memory_check=check_hisparse_host_memory,
@@ -388,6 +389,9 @@ def allocate_hisparse_host_pools(
             pin_tensor(tensor)
             region.pinned_addresses.append(tensor.data_ptr())
             region.is_pinned = True
+        counter_page = region.base_tensor[pool_bytes:]
+        pin_tensor(counter_page)
+        region.pinned_addresses.append(counter_page.data_ptr())
         pools = [
             region.create_next_canonical_view(size).view(-1) for size in tensor_sizes
         ]
@@ -395,6 +399,11 @@ def allocate_hisparse_host_pools(
         region.cleanup()
         raise
     return pools, [], region
+
+
+def hisparse_host_write_counter(region: SharedOffloadRegion) -> torch.Tensor:
+    """The step counter in the shared pool's trailing page."""
+    return region.base_tensor[-mmap.PAGESIZE :][:8].view(torch.int64)
 
 
 def release_pinned_state(
