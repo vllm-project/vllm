@@ -196,6 +196,11 @@ class TimingContext:
             self.stage_secs.setdefault(stage, 0.0)
             self.stage_secs[stage] += elapsed
 
+    def mark(self, stage: str) -> None:
+        """Record that a processing path was selected without adding latency."""
+        if self.enabled:
+            self.stage_secs.setdefault(stage, 0.0)
+
     def get_stats_dict(self):
         stats_dict = {
             f"{stage}_secs": time_s for stage, time_s in self.stage_secs.items()

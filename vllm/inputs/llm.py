@@ -126,6 +126,10 @@ class TokensPrompt(_PromptOptions):
     AND a Fast (Rust-backed) tokenizer was used AND no multimodal data
     was present. The list length equals the length of `prompt_token_ids`."""
 
+    routing_metadata_only: NotRequired[bool]
+    """Internal renderer option: produce exact routing metadata without
+    retaining generation-ready multimodal tensors when supported."""
+
 
 class EmbedsPrompt(_PromptOptions):
     """Schema for a prompt provided via token embeddings."""

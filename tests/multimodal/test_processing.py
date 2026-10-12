@@ -5,7 +5,7 @@ import time
 from collections.abc import Sequence
 from contextlib import nullcontext
 from copy import deepcopy
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 from typing import TypedDict
 
 import numpy as np
@@ -16,10 +16,12 @@ from vllm.config.multimodal import MultiModalConfig
 from vllm.exceptions import VLLMValidationError
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.hasher import MultiModalHasher
+from vllm.multimodal.inputs import MultiModalKwargsItems
 from vllm.multimodal.parse import MultiModalDataParser
 from vllm.multimodal.processing.context import (
     BaseProcessingInfo,
     InputProcessingContext,
+    TimingContext,
     _resolve_mm_processor_kwargs,
 )
 from vllm.multimodal.processing.inputs import ProcessorInputs
@@ -42,6 +44,148 @@ from ..models.utils import build_model_context
 from .utils import random_image
 
 pytestmark = pytest.mark.cpu_test
+
+
+class _RoutingTestItems:
+    def get_all_counts(self):
+        return {"image": 1}
+
+
+class _RoutingTestProcessor(BaseMultiModalProcessor):
+    def __init__(self, *, tensor_dependent: bool):
+        self.tensor_dependent = tensor_dependent
+        self.full_apply_called = False
+
+    def _get_mm_fields_config(self, hf_inputs, hf_processor_mm_kwargs):
+        return {}
+
+    def _get_mm_hashes(self, inputs):
+        return {"image": ["exact-hash"]}
+
+    def _get_prompt_updates(self, mm_items, hf_processor_mm_kwargs, out_mm_kwargs):
+        def replacement(_item_idx):
+            if self.tensor_dependent:
+                out_mm_kwargs["image"]
+            return [7, 7]
+
+        return [
+            PromptReplacement(
+                modality="image",
+                target=[99],
+                replacement=replacement,
+            )
+        ]
+
+
+def _routing_test_full_apply(self, inputs, timing_ctx):
+    self.full_apply_called = True
+    return {
+        "type": "multimodal",
+        "prompt_token_ids": [8, 8],
+        "mm_kwargs": MultiModalKwargsItems({"image": [None]}),
+        "mm_hashes": {"image": ["full-hash"]},
+        "mm_placeholders": {"image": []},
+    }
+
+
+class _RoutingCustomApplyProcessor(_RoutingTestProcessor):
+    apply = _routing_test_full_apply
+
+
+class _RoutingCustomPromptFinalizationProcessor(_RoutingTestProcessor):
+    def _maybe_apply_prompt_updates(self, mm_items, mm_res):
+        raise AssertionError("custom finalization must not be bypassed")
+
+
+class _RoutingDirectDataAccessProcessor(_RoutingTestProcessor):
+    def _get_prompt_updates(
+        self,
+        mm_items,
+        hf_processor_mm_kwargs,
+        out_mm_kwargs,
+    ):
+        _ = out_mm_kwargs.data
+        return super()._get_prompt_updates(
+            mm_items,
+            hf_processor_mm_kwargs,
+            out_mm_kwargs,
+        )
+
+
+def test_routing_metadata_uses_model_owned_prompt_updates_without_tensors():
+    processor = _RoutingTestProcessor(tensor_dependent=False)
+    inputs = ProcessorInputs(prompt=[99], mm_data_items=_RoutingTestItems())
+
+    result = processor.apply_routing_metadata(
+        inputs,
+        TimingContext(enabled=True),
+    )
+
+    assert not processor.full_apply_called
+    assert result["prompt_token_ids"] == [7, 7]
+    assert result["mm_hashes"] == {"image": ["exact-hash"]}
+    assert result["mm_kwargs"] == {}
+    assert result["mm_placeholders"]["image"][0].offset == 0
+    assert result["mm_placeholders"]["image"][0].length == 2
+
+
+def test_routing_metadata_falls_back_when_prompt_updates_need_tensors():
+    processor = _RoutingTestProcessor(tensor_dependent=True)
+    processor.apply = MethodType(_routing_test_full_apply, processor)
+    inputs = ProcessorInputs(prompt=[99], mm_data_items=_RoutingTestItems())
+
+    result = processor.apply_routing_metadata(
+        inputs,
+        TimingContext(enabled=True),
+    )
+
+    assert processor.full_apply_called
+    assert result["prompt_token_ids"] == [8, 8]
+    assert result["mm_hashes"] == {"image": ["full-hash"]}
+
+
+def test_routing_metadata_falls_back_for_unapproved_custom_apply():
+    processor = _RoutingCustomApplyProcessor(tensor_dependent=False)
+    inputs = ProcessorInputs(prompt=[99], mm_data_items=_RoutingTestItems())
+
+    result = processor.apply_routing_metadata(
+        inputs,
+        TimingContext(enabled=True),
+    )
+
+    assert processor.full_apply_called
+    assert result["prompt_token_ids"] == [8, 8]
+    assert result["mm_hashes"] == {"image": ["full-hash"]}
+
+
+def test_routing_metadata_falls_back_for_custom_prompt_finalization():
+    processor = _RoutingCustomPromptFinalizationProcessor(tensor_dependent=False)
+    processor.apply = MethodType(_routing_test_full_apply, processor)
+    inputs = ProcessorInputs(prompt=[99], mm_data_items=_RoutingTestItems())
+
+    result = processor.apply_routing_metadata(
+        inputs,
+        TimingContext(enabled=True),
+    )
+
+    assert processor.full_apply_called
+    assert result["prompt_token_ids"] == [8, 8]
+    assert result["mm_hashes"] == {"image": ["full-hash"]}
+
+
+def test_routing_metadata_falls_back_for_direct_kwargs_data_access():
+    processor = _RoutingDirectDataAccessProcessor(tensor_dependent=False)
+    processor.apply = MethodType(_routing_test_full_apply, processor)
+    inputs = ProcessorInputs(prompt=[99], mm_data_items=_RoutingTestItems())
+
+    result = processor.apply_routing_metadata(
+        inputs,
+        TimingContext(enabled=True),
+    )
+
+    assert processor.full_apply_called
+    assert result["prompt_token_ids"] == [8, 8]
+    assert result["mm_hashes"] == {"image": ["full-hash"]}
 
 
 @pytest.mark.parametrize(

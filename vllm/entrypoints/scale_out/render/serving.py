@@ -93,7 +93,11 @@ class ServingRender(BaseServing):
                 "Beam search is not supported by the render endpoint"
             )
 
-        result = await self.online_renderer.render_chat(request, skip_mm_cache=True)
+        result = await self.online_renderer.render_chat(
+            request,
+            skip_mm_cache=True,
+            routing_metadata_only=not request.return_mm_kwargs,
+        )
         if isinstance(result, ErrorResponse):
             return result
 
@@ -193,7 +197,9 @@ class ServingRender(BaseServing):
             )
 
         result = await self.online_renderer.render_completion(
-            request, skip_mm_cache=True
+            request,
+            skip_mm_cache=True,
+            routing_metadata_only=not request.return_mm_kwargs,
         )
         if isinstance(result, ErrorResponse):
             return result
@@ -264,6 +270,7 @@ class ServingRender(BaseServing):
             previous_response_outputs=None,
             tool_server=self.tool_server,
             skip_mm_cache=True,
+            routing_metadata_only=not request.return_mm_kwargs,
         )
         if isinstance(result, ErrorResponse):
             return result
