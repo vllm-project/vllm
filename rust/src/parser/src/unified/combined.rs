@@ -682,7 +682,7 @@ mod tests {
 
     fn qwen3_parser(tools: &[Tool], with_tool: bool) -> CombinedParser {
         let reasoning = Qwen3ReasoningParser::create(Arc::new(tokenizer())).unwrap();
-        let tool = with_tool.then(|| Qwen3XmlToolParser::create(tools).unwrap());
+        let tool = with_tool.then(|| Qwen3JsonToolParser::create(tools).unwrap());
         let mut parser = CombinedParser::new(Some(reasoning), tool);
         parser.initialize(&[]).unwrap();
         parser
@@ -702,7 +702,7 @@ mod tests {
             ])
         };
         let required = ToolChoice::required();
-        let required_calls = Qwen3XmlToolParser::create(&tools)
+        let required_calls = Qwen3JsonToolParser::create(&tools)
             .unwrap()
             .build_visible_format(&grammar_ctx(&tools, &required, None))
             .unwrap()
@@ -748,7 +748,7 @@ mod tests {
         let ctx = grammar_ctx(&tools, &auto, Some(&answer));
         assert!(parser.build_output_grammar(&ctx).unwrap().is_none());
 
-        let parser = CombinedParser::new(None, Some(Qwen3XmlToolParser::create(&tools).unwrap()));
+        let parser = CombinedParser::new(None, Some(Qwen3JsonToolParser::create(&tools).unwrap()));
         let ctx = grammar_ctx(&tools, &none, Some(&answer));
         let alone = parser.build_output_grammar(&ctx).unwrap().unwrap();
         assert_eq!(alone, BuiltOutputGrammar::final_output_only(answer.clone()));
