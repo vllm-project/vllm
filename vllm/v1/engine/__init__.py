@@ -151,6 +151,9 @@ class EngineCoreReadyResponse:
     # Set when the engine hashes request blocks (prefix caching or a KV
     # connector), so that a frontend can send prompt block hashes.
     prefix_hash_config: PrefixHashConfig | None = None
+    # False when the engine disabled chunked prefill during initialization,
+    # e.g. for non-causal attention or a model without KV cache.
+    enable_chunked_prefill: bool = True
 
 
 class EngineCoreRequest(
