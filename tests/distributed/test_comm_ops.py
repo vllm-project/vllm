@@ -325,6 +325,77 @@ def test_cuda_communicator_checkpoints_flashinfer_workspaces(
         workspace.checkpoint_restore.assert_called_once_with(group)
 
 
+def _fi_ar_communicator(
+    monkeypatch: pytest.MonkeyPatch, group: object, normal: Mock, quant: Mock
+) -> CudaCommunicator:
+    monkeypatch.setattr(flashinfer_all_reduce, "_fi_ar_workspace", normal)
+    monkeypatch.setattr(flashinfer_all_reduce, "_fi_ar_quant_workspace", quant)
+    monkeypatch.setattr(
+        flashinfer_all_reduce,
+        "_fi_ar_workspace_groups",
+        {id(normal): group, id(quant): group},
+    )
+    monkeypatch.setattr(
+        flashinfer_all_reduce, "TorchDistBackend", lambda group: group, raising=False
+    )
+    communicator = CudaCommunicator.__new__(CudaCommunicator)
+    communicator.cpu_group = group
+    communicator.pynccl_comm = Mock()
+    communicator.all2all_manager = None
+    return communicator
+
+
+def _symm_mem_workspace() -> Mock:
+    workspace = Mock()
+    workspace.checkpoint_prepare.side_effect = NotImplementedError
+    workspace.checkpoint_restore.side_effect = NotImplementedError
+    return workspace
+
+
+@pytest.mark.parametrize("symm_mem", [False, True], ids=["mnnvl", "symm-mem+mnnvl"])
+def test_cuda_communicator_suspend_detaches_flashinfer_workspaces(
+    monkeypatch: pytest.MonkeyPatch,
+    symm_mem: bool,
+) -> None:
+    group = object()
+    workspaces = (_symm_mem_workspace() if symm_mem else Mock(), Mock())
+    communicator = _fi_ar_communicator(monkeypatch, group, *workspaces)
+    communicator.suspend()
+    communicator.resume()
+
+    for workspace in workspaces:
+        workspace.checkpoint_prepare.assert_called_once_with()
+        workspace.checkpoint_restore.assert_called_once_with(group)
+    communicator.pynccl_comm.suspend.assert_called_once_with()
+    communicator.pynccl_comm.resume.assert_called_once_with()
+
+
+def test_cuda_communicator_checkpoint_rejects_symm_mem_workspace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    communicator = _fi_ar_communicator(
+        monkeypatch, object(), _symm_mem_workspace(), Mock()
+    )
+    with pytest.raises(NotImplementedError):
+        communicator.checkpoint_prepare()
+    with pytest.raises(NotImplementedError):
+        communicator.checkpoint_restore()
+
+
+def test_cuda_communicator_resume_retries_failed_restore(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = Mock()
+    workspace.checkpoint_restore.side_effect = [RuntimeError("cuMemCreate"), None]
+    communicator = _fi_ar_communicator(monkeypatch, object(), workspace, Mock())
+    communicator.suspend()
+    with pytest.raises(RuntimeError):
+        communicator.resume()
+    communicator.resume()
+
+    assert workspace.checkpoint_restore.call_count == 2
+
+
 @pytest.mark.parametrize(
     ("backend", "capability", "world_size", "nodes", "expected"),
     [

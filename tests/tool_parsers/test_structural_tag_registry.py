@@ -48,6 +48,7 @@ from vllm.tool_parsers.hermes_tool_parser import Hermes2ProToolParser
 from vllm.tool_parsers.kimi_k2_tool_parser import KimiK2ToolParser
 from vllm.tool_parsers.kimi_k3_tool_parser import KimiK3ToolParser
 from vllm.tool_parsers.llama_tool_parser import Llama3JsonToolParser
+from vllm.tool_parsers.longcat_tool_parser import LongcatFlashToolParser
 from vllm.tool_parsers.mimo_tool_parser import MiMoToolParser
 from vllm.tool_parsers.minimax_m2_tool_parser import MinimaxM2ToolParser
 from vllm.tool_parsers.plamo3_engine_tool_parser import Plamo3EngineToolParser
@@ -841,6 +842,44 @@ def test_step3p5_forced_tool_choice_round_trips_native_xml(
     )
     assert _is_grammar_accept_string(grammar, output)
     assert not _is_grammar_accept_string(grammar, "It is sunny in Dallas.")
+
+    _, content, tool_calls = parser.parse(output, request, enable_auto_tools=True)
+
+    assert not content
+    assert [(call.name, json.loads(call.arguments)) for call in tool_calls] == [
+        ("get_weather", {"city": "Dallas"})
+    ]
+
+
+@pytest.mark.parametrize(
+    "tool_choice",
+    ["required", {"type": "function", "function": {"name": "get_weather"}}],
+)
+def test_longcat_forced_tool_choice_round_trips_native_tags(
+    sample_tools: list[ChatCompletionToolsParam], tool_choice
+):
+    """Forced LongCat calls must use <longcat_tool_call>, not Hermes tags."""
+
+    class LongcatParser(DelegatingParser):
+        tool_parser_cls = LongcatFlashToolParser
+
+    request = ChatCompletionRequest(
+        messages=[],
+        model="m",
+        tools=[tool.model_dump(exclude_none=True) for tool in sample_tools],
+        tool_choice=tool_choice,
+    )
+    parser = LongcatParser(MagicMock(), tools=sample_tools)
+    request = parser.adjust_request(request)
+
+    grammar = Grammar.from_structural_tag(request.structured_outputs.structural_tag)
+    # Rendered exactly as the LongCat-Flash chat template renders tool calls.
+    output = (
+        '<longcat_tool_call>\n{"name": "get_weather", '
+        '"arguments": {"city": "Dallas"}}\n</longcat_tool_call>'
+    )
+    assert _is_grammar_accept_string(grammar, output)
+    assert not _is_grammar_accept_string(grammar, output.replace("longcat_", ""))
 
     _, content, tool_calls = parser.parse(output, request, enable_auto_tools=True)
 
