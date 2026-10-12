@@ -9,7 +9,7 @@ multi-kernel path of the same step:
     aiter.fused_moe (a4w4 SiTUv2, FlyDSL)        sort + quant, gemm1, gemm2
     KimiMLP (on vLLM's aux stream)               gate_up GEMM, situ_and_mul, down GEMM
 
-At M <= 16 each of those kernels runs for a few microseconds, so launch and
+At M <= 32 each of those kernels runs for a few microseconds, so launch and
 drain are a large share of the step; one launch keeps the GPU busy across
 the stage boundaries, and the shared expert fills the CUs that wait for
 routing.
@@ -25,8 +25,9 @@ routing.
   limit, and whose shared expert is KimiMLP as vLLM builds it (unquantized
   bf16, SiTU, unreduced down projection)
   (`mono_decode.MonoLatentMoE.layer_ok`).
-- Steps: M <= 16 tokens (`runner.M_MAX`, one m-block of the shared expert).
-  Larger steps take the multi-kernel path.
+- Steps: M <= 32 tokens (`runner.M_MAX`, two m-blocks of the shared expert;
+  each call compiles for its token count rounded up to 16). Larger steps take
+  the multi-kernel path.
 - Contract: the same tensors as the path it replaces: in `x` [M, H] bf16,
   router logits [M, E] f32 and the correction bias; out the routed output
   [M, H] bf16 (latent H, before the latent tail) and the shared output

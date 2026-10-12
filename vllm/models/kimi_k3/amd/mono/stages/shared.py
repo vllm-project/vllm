@@ -232,7 +232,7 @@ def shared_down(
         w_dw = (n0 + row) * fx.Int32(SH_INTER // 2) + kq * fx.Int32(4)
         acc = [_zero_f32x4() for _ in range_constexpr(N_MB)]
 
-        def chunk(c):
+        def chunk(c, w_dw=w_dw):
             ws = [
                 _bf16x8(w_rsrc, w_dw + fx.Int32(s * 16))
                 for s in range_constexpr(c * ck, (c + 1) * ck)
