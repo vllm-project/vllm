@@ -220,12 +220,19 @@ def _torch_reference(
     return kv_out, tail_cpu.to(torch.bfloat16).to(device="cuda")
 
 
-def _assert_eq(r_ref, r_kern):
+def _assert_eq(r_ref, r_kern, k_byte_tol=0):
     kv_ref, tail_ref = r_ref
     kv_kern, tail_kern = r_kern
-    assert torch.equal(kv_ref, kv_kern), (
-        "kv_cache differs: max diff "
-        f"{(kv_ref.int() - kv_kern.int()).abs().max().item()}"
+    # Each page holds the fp8 K bytes followed by the fp32 scales.
+    k_region = PAGE_SIZE * HEAD_DIM
+    pages_ref = kv_ref.view(kv_ref.shape[0], -1)
+    pages_kern = kv_kern.view(kv_kern.shape[0], -1)
+    k_diff = (pages_ref[:, :k_region].int() - pages_kern[:, :k_region].int()).abs()
+    assert k_diff.max().item() <= k_byte_tol, (
+        f"kv_cache K differs: max diff {k_diff.max().item()}"
+    )
+    assert torch.equal(pages_ref[:, k_region:], pages_kern[:, k_region:]), (
+        "kv_cache scales differ"
     )
     assert torch.equal(tail_ref, tail_kern), (
         "tail_kv_cache differs: max diff "
@@ -652,4 +659,6 @@ def test_batched_matches_reference_fuzz(seed):
 
     r_ref = _torch_reference(kv, tail, tail_slot, key, score, ape, slot_map, pos)
     r_kern = _run_kernel(kv, tail, tail_slot, key, score, ape, slot_map, pos)
-    _assert_eq(r_ref, r_kern)
+    # Random inputs can land the pooled value on a bf16 rounding midpoint,
+    # where the kernel and the CPU reference may round apart by one fp8 step.
+    _assert_eq(r_ref, r_kern, k_byte_tol=1)

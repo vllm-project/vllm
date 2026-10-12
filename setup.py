@@ -896,6 +896,93 @@ class precompiled_wheel_utils:
         print(f"Using ROCm precompiled wheel: {wheel_url}")
         return wheel_url, download_filename
 
+    # Publication lags main by roughly 5-10 commits; anything much older is
+    # unlikely to still match the checkout's compiled sources.
+    WHEEL_SEARCH_DEPTH = 20
+    # Changes here make an older wheel's extensions unusable.
+    WHEEL_BLOCKING_PATHS = (
+        "csrc",
+        "cmake",
+        "CMakeLists.txt",
+        "pyproject.toml",
+        "vllm/_custom_ops.py",
+    )
+    # Changes here are usually harmless for an older wheel.
+    WHEEL_WARNING_PATHS = ("rust", "setup.py")
+
+    @staticmethod
+    def find_published_wheel_commit(
+        base_commit: str, variant: str | None, arch: str
+    ) -> str:
+        """Find the nearest ancestor of base_commit that has a published wheel.
+
+        Raises:
+            ValueError: If no wheel is published within WHEEL_SEARCH_DEPTH
+                commits, or compiled sources changed since the nearest one.
+
+        """
+        from urllib.error import HTTPError
+
+        utils = precompiled_wheel_utils
+        candidates = subprocess.check_output(
+            [
+                "git",
+                "rev-list",
+                "--first-parent",
+                f"--max-count={utils.WHEEL_SEARCH_DEPTH}",
+                base_commit,
+            ],
+            text=True,
+        ).splitlines()
+        for distance, commit in enumerate(candidates):
+            try:
+                wheels, _ = utils.fetch_metadata_for_variant(commit, variant)
+            except HTTPError as err:
+                if err.code != 404:
+                    raise
+                continue
+            if not any(
+                wheel.get("package_name") == "vllm"
+                and arch in wheel.get("platform_tag", "")
+                for wheel in wheels
+            ):
+                continue
+            if distance == 0:
+                return commit
+
+            diff = ["git", "diff", "--name-only", commit, base_commit, "--"]
+            blocking, warning = (
+                subprocess.check_output([*diff, *paths], text=True).strip()
+                for paths in (utils.WHEEL_BLOCKING_PATHS, utils.WHEEL_WARNING_PATHS)
+            )
+            if blocking:
+                raise ValueError(
+                    f"No precompiled wheel is published yet for {base_commit}, and "
+                    f"the nearest one ({commit}, {distance} commits older) was "
+                    f"built from different compiled sources:\n{blocking}\n"
+                    "Wait for wheel publication, rebase onto a commit with a "
+                    "published wheel, build from source (unset "
+                    "VLLM_USE_PRECOMPILED), or set VLLM_PRECOMPILED_WHEEL_COMMIT "
+                    "to a full commit SHA to skip this check."
+                )
+            if warning:
+                logger.warning(
+                    "Precompiled wheel %s predates changes to:\n%s\n"
+                    "The Rust frontend and packaged files may be stale.",
+                    commit,
+                    warning,
+                )
+            print(
+                f"No precompiled wheel is published yet for {base_commit}; using "
+                f"{commit} ({distance} commits older)"
+            )
+            return commit
+        raise ValueError(
+            f"No published precompiled wheel for variant {variant} and "
+            f"architecture {arch} within {utils.WHEEL_SEARCH_DEPTH} commits of "
+            f"{base_commit}. Wait for wheel publication or build vLLM from source."
+        )
+
     @staticmethod
     def determine_wheel_url() -> tuple[str, str | None]:
         """Try to determine the precompiled wheel URL or path to use.
@@ -906,8 +993,8 @@ class precompiled_wheel_utils:
            or CUDA variant selected from VLLM_MAIN_CUDA_VERSION, torch, or nvidia-smi
 
         If downloading from the nightly repo, the commit can be specified via
-        VLLM_PRECOMPILED_WHEEL_COMMIT; otherwise, the head commit in the main branch
-        is used.
+        VLLM_PRECOMPILED_WHEEL_COMMIT; otherwise, local checkouts search backwards
+        from their merge-base with upstream main for a compatible published wheel.
         """
         wheel_location = os.getenv("VLLM_PRECOMPILED_WHEEL_LOCATION", None)
         if wheel_location is not None:
@@ -933,6 +1020,14 @@ class precompiled_wheel_utils:
                     ", trying to fetch base commit in main branch"
                 )
                 commit = precompiled_wheel_utils.get_base_commit_in_main_branch()
+                if (
+                    envs.VLLM_USE_PRECOMPILED
+                    and not envs.VLLM_DOCKER_BUILD_CONTEXT
+                    and commit != "nightly"
+                ):
+                    commit = precompiled_wheel_utils.find_published_wheel_commit(
+                        commit, variant, arch
+                    )
             print(f"Using precompiled wheel commit {commit} with variant {variant}")
             download_filename = None
             try:
@@ -1149,17 +1244,9 @@ class precompiled_wheel_utils:
                     ["git", "fetch", "https://github.com/vllm-project/vllm", "main"]
                 )
 
-            # Then get the commit hash of the current branch that is the same as
-            # the upstream main commit.
-            current_branch = (
-                subprocess.check_output(["git", "branch", "--show-current"])
-                .decode("utf-8")
-                .strip()
-            )
-
             base_commit = (
                 subprocess.check_output(
-                    ["git", "merge-base", f"{upstream_main_commit}", current_branch]
+                    ["git", "merge-base", upstream_main_commit, "HEAD"]
                 )
                 .decode("utf-8")
                 .strip()
