@@ -53,7 +53,8 @@ kernel_tests() {
     pytest -x -v -s tests/kernels/mamba/test_causal_conv1d.py
     pytest -x -v -s tests/kernels/mamba/test_mamba_ssm.py
     pytest -x -v -s tests/v1/worker/test_cpu_input_batch.py
-    pytest -x -v -s tests/v1/worker/test_cpu_block_table.py"
+    pytest -x -v -s tests/v1/worker/test_cpu_block_table.py
+    pytest -x -v -s tests/v1/worker/test_cpu_gumbel_sample.py"
 }
 
 model_tests() {

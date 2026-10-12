@@ -1,5 +1,19 @@
 #include "cpu_types.hpp"
 
+#if defined(__aarch64__)
+  #include "sampling/neon.h"
+
+template <typename scalar_t>
+using SelectedSamplingImpl =
+    cpu_sampling::SamplingImpl<cpu_utils::ISA::NEON, scalar_t>;
+#else
+  #include "sampling/vec.h"
+
+template <typename scalar_t>
+using SelectedSamplingImpl =
+    cpu_sampling::SamplingImpl<cpu_utils::ISA::VEC, scalar_t>;
+#endif
+
 #include <torch/all.h>
 
 #include <cmath>
@@ -164,5 +178,30 @@ torch::Tensor greedy_argmax(const torch::Tensor& logits) {
   greedy_argmax_kernel(output.data_ptr<int64_t>(),
                        logits_contig.data_ptr<float>(), logits_contig.size(0),
                        logits_contig.size(1));
+  return output;
+}
+
+torch::Tensor gumbel_sample_cpu(const torch::Tensor& logits,
+                                const torch::Tensor& expanded_idx_mapping,
+                                const torch::Tensor& temperature,
+                                const torch::Tensor& seeds,
+                                const torch::Tensor& positions,
+                                bool apply_temperature, bool is_drafting,
+                                bool use_fp64) {
+  TORCH_CHECK(logits.dim() == 2, "logits must be 2-D [num_tokens, vocab]");
+  TORCH_CHECK(logits.stride(1) == 1,
+              "the logits vocabulary dimension must be contiguous");
+
+  auto output =
+      torch::empty({logits.size(0)}, logits.options().dtype(torch::kInt64));
+  VLLM_DISPATCH_FLOATING_TYPES(logits.scalar_type(), "gumbel_sample_cpu", [&] {
+    using sampling_impl_t = SelectedSamplingImpl<scalar_t>;
+    cpu_sampling::SamplingMainLoop<sampling_impl_t> mainloop;
+    mainloop(output.data_ptr<int64_t>(), logits.data_ptr<scalar_t>(),
+             logits.stride(0), expanded_idx_mapping.data_ptr<int32_t>(),
+             temperature.data_ptr<float>(), seeds.data_ptr<int64_t>(),
+             positions.data_ptr<int64_t>(), logits.size(0), logits.size(1),
+             apply_temperature, is_drafting, use_fp64);
+  });
   return output;
 }

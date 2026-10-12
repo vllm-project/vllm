@@ -406,6 +406,14 @@ void dynamic_per_token_scaled_fp8_quant(
     torch::Tensor& out, const torch::Tensor& input, torch::Tensor& scale,
     const std::optional<torch::Tensor>& scale_ub);
 
+torch::Tensor gumbel_sample_cpu(const torch::Tensor& logits,
+                                const torch::Tensor& expanded_idx_mapping,
+                                const torch::Tensor& temperature,
+                                const torch::Tensor& seeds,
+                                const torch::Tensor& positions,
+                                bool apply_temperature, bool is_drafting,
+                                bool use_fp64);
+
 void init_cpu_memory_env(std::vector<int64_t> node_ids);
 
 namespace cpu_utils {
@@ -1087,6 +1095,12 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
 
   ops.def("greedy_argmax(Tensor logits) -> Tensor");
   ops.impl("greedy_argmax", torch::kCPU, &greedy_argmax);
+
+  ops.def(
+      "gumbel_sample_cpu(Tensor logits, Tensor expanded_idx_mapping, "
+      "Tensor temperature, Tensor seeds, Tensor positions, "
+      "bool apply_temperature, bool is_drafting, bool use_fp64) -> Tensor");
+  ops.impl("gumbel_sample_cpu", torch::kCPU, &gumbel_sample_cpu);
 
   // Speculative decoding kernels
   ops.def(
