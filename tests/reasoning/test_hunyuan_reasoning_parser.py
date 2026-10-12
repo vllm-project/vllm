@@ -6,6 +6,7 @@ from transformers import AutoTokenizer
 
 from tests.reasoning.utils import run_reasoning_extraction
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
+from vllm.reasoning.hunyuan_a13b_reasoning_parser import HunyuanA13BReasoningParser
 
 parser_name = "hunyuan_a13b"
 START_REASONING = "<think>\n"
@@ -206,6 +207,7 @@ def test_streaming_multi_token_delta_matches_single_token_feed(step: int):
     must produce exactly the same output as feeding them one at a time.
     """
     parser = ReasoningParserManager.get_reasoning_parser(parser_name)(tokenizer)
+    assert isinstance(parser, HunyuanA13BReasoningParser)
     token_ids = (
         list(parser.think_start_ids)
         + tokenizer.encode(" reasoning here")
@@ -262,6 +264,7 @@ def test_per_token_text_reconstructs_the_delta(payload: str):
     and astral-plane characters (emoji) come out corrupted.
     """
     parser = ReasoningParserManager.get_reasoning_parser(parser_name)(tokenizer)
+    assert isinstance(parser, HunyuanA13BReasoningParser)
     token_ids = (
         list(parser.think_start_ids)
         + tokenizer.encode(payload)
