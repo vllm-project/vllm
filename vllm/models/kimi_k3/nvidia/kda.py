@@ -1252,8 +1252,6 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                     else:
                         assert self.gate_lower_bound is not None
                         assert m.flashinfer_prefill_query_start_loc is not None
-                        if q_ns.shape[1] > initial_state.shape[0]:
-                            assert m.flashinfer_prefill_seq_order is not None
                         flashinfer_query_start_loc = (
                             m.flashinfer_prefill_query_start_loc
                         )

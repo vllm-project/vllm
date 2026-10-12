@@ -1,9 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from typing import get_args
+
 import torch
 
 from vllm import envs
+from vllm.config.mamba import FlashInferKdaBackend
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.third_party.flash_linear_attention.ops.chunk import l2norm_fwd
@@ -31,27 +34,29 @@ def validate_flashinfer_kda_prefill(
     lower_bound: float | None,
     backend: str = "auto",
 ) -> None:
-    if backend not in ("auto", "cudnn"):
+    if backend not in get_args(FlashInferKdaBackend):
         raise ValueError(f"Unsupported FlashInfer KDA backend: {backend}")
     _validate_gate(lower_bound, backend)
     capability = (
         current_platform.get_device_capability() if current_platform.is_cuda() else None
     )
+    state_dtypes: tuple[torch.dtype, ...]
+    if backend in ("cute-dsl-persistent", "tirx", "ptx"):
+        state_dtypes = (torch.float32,)
+    elif backend in ("cute-dsl", "cudnn"):
+        state_dtypes = (torch.bfloat16, torch.float32)
+    else:
+        state_dtypes = (torch.bfloat16,)
     if not (
         capability is not None
         and (capability.major, capability.minor) in ((10, 0), (10, 3))
         and head_dim == 128
         and input_dtype == torch.bfloat16
-        and (
-            state_dtype in (torch.bfloat16, torch.float32)
-            if backend == "cudnn"
-            else state_dtype == torch.bfloat16
-        )
+        and state_dtype in state_dtypes
     ):
         raise RuntimeError(
             f"FlashInfer KDA prefill (backend={backend}) requires SM100 or SM103, "
-            "bfloat16 input, and head_dim=128. Backend auto requires bfloat16 "
-            "state; cudnn also supports float32 state."
+            f"bfloat16 input, head_dim=128, and state dtype in {state_dtypes}."
         )
     logger.info_once("Using FlashInfer KDA prefill with backend=%s.", backend)
 
@@ -75,7 +80,7 @@ def flashinfer_kda_prefill(
     inplace_state: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Allow cuDNN to overwrite disposable gathered state when requested."""
-    if backend not in ("auto", "cudnn"):
+    if backend not in get_args(FlashInferKdaBackend):
         raise ValueError(f"Unsupported FlashInfer KDA backend: {backend}")
     lower_bound = _validate_gate(lower_bound, backend)
     if backend == "cudnn" and envs.VLLM_BATCH_INVARIANT:

@@ -681,7 +681,10 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
             )
         )
         flashinfer_prefill_seq_order = None
-        if flashinfer_prefill_query_start_loc is not None:
+        if (
+            flashinfer_prefill_query_start_loc is not None
+            and self.flashinfer_kda_backend in ("auto", "cute-dsl", "cake", "small-bh")
+        ):
             assert non_spec_query_start_loc is not None
             num_non_spec_requests = non_spec_query_start_loc.shape[0] - 1
             num_non_spec_tokens = num_prefill_tokens + num_decode_tokens

@@ -89,7 +89,7 @@ from vllm.config.kernel import (
 from vllm.config.load import SafetensorsLoadStrategy
 from vllm.config.logging import LogLevel
 from vllm.config.lora import MaxLoRARanks
-from vllm.config.mamba import MambaBackendEnum, MambaSSUAlgorithm
+from vllm.config.mamba import FlashInferKdaBackend, MambaBackendEnum, MambaSSUAlgorithm
 from vllm.config.model import (
     ConvertOption,
     HfOverrides,
@@ -848,7 +848,7 @@ class EngineArgs:
     kda_prefill_backend: (
         Literal["auto", "triton", "flashkda", "flashinfer", "fused"] | None
     ) = None
-    flashinfer_kda_backend: Literal["auto", "cudnn"] | None = None
+    flashinfer_kda_backend: FlashInferKdaBackend | None = None
     kda_decode_backend: Literal["auto", "native", "flashinfer", "triton"] | None = None
 
     def __post_init__(self):
@@ -1931,11 +1931,12 @@ class EngineArgs:
         parser.add_argument(
             "--flashinfer-kda-backend",
             dest="flashinfer_kda_backend",
-            choices=["auto", "cudnn"],
+            choices=get_args(FlashInferKdaBackend),
             default=None,
             help="Select the FlashInfer implementation with --kda-prefill-backend "
-            "flashinfer. 'auto' uses FlashInfer's default; 'cudnn' requires "
-            "SM100/SM103 and cudnn-frontend >= 1.30.0.",
+            "flashinfer. 'auto' uses FlashInfer's default. Explicit backends "
+            "must support the GPU, input shapes, and Mamba state dtype. "
+            "'cute-dsl-persistent', 'tirx', and 'ptx' require float32 state.",
         )
         parser.add_argument(
             "--kda-decode-backend",

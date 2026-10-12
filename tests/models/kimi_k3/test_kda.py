@@ -1541,9 +1541,12 @@ def _run_kda_prefill_backend(
     assert lower_bound is not None
     if backend == "flashinfer":
         seq_order = None
-        if flashinfer_backend == "auto":
+        if flashinfer_backend != "cudnn":
             cu_seqlens = cu_seqlens.to(torch.int64)
-            if q.shape[1] > initial_state.shape[0]:
+            if (
+                flashinfer_backend in ("auto", "cute-dsl", "cake", "small-bh")
+                and q.shape[1] > initial_state.shape[0]
+            ):
                 seq_order = torch.argsort(cu_seqlens.diff(), descending=True).to(
                     torch.int32
                 )
@@ -1763,7 +1766,53 @@ def test_cudnn_kda_prefill_rejects_unsupported_gate(lower_bound):
         )
 
 
-@pytest.mark.parametrize("backend", ["auto", "cudnn"])
+@pytest.mark.parametrize(
+    ("backend", "allowed_state_dtypes"),
+    [
+        ("auto", (torch.bfloat16,)),
+        ("cute-dsl", (torch.bfloat16, torch.float32)),
+        ("cute-dsl-persistent", (torch.float32,)),
+        ("tirx", (torch.float32,)),
+        ("ptx", (torch.float32,)),
+        ("cake", (torch.bfloat16,)),
+        ("small-bh", (torch.bfloat16,)),
+        ("cudnn", (torch.bfloat16, torch.float32)),
+    ],
+)
+@pytest.mark.parametrize("state_dtype", [torch.bfloat16, torch.float32])
+def test_flashinfer_kda_prefill_validates_backend_state_dtype(
+    monkeypatch, backend, allowed_state_dtypes, state_dtype
+):
+    from vllm.model_executor.layers.mamba.ops import flashinfer_kda
+
+    monkeypatch.setattr(flashinfer_kda.current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(
+        flashinfer_kda.current_platform,
+        "get_device_capability",
+        lambda: SimpleNamespace(major=10, minor=3),
+    )
+    if state_dtype in allowed_state_dtypes:
+        validate_flashinfer_kda_prefill(128, torch.bfloat16, state_dtype, -5.0, backend)
+    else:
+        with pytest.raises(RuntimeError, match="state dtype"):
+            validate_flashinfer_kda_prefill(
+                128, torch.bfloat16, state_dtype, -5.0, backend
+            )
+
+
+@pytest.mark.parametrize(
+    "backend",
+    [
+        "auto",
+        "cute-dsl",
+        "cute-dsl-persistent",
+        "tirx",
+        "ptx",
+        "cake",
+        "small-bh",
+        "cudnn",
+    ],
+)
 @pytest.mark.parametrize(
     ("inference_offsets", "strided_offsets"),
     [(False, False), (True, False), (False, True)],
@@ -1793,7 +1842,11 @@ def test_flashinfer_kda_prefill_preserves_backend_state_contract(
     monkeypatch.setattr(flashinfer_kda, "l2norm_fwd", lambda q: q)
     monkeypatch.setenv("VLLM_BATCH_INVARIANT", "0")
     q = torch.zeros(1, 2, 2, 256, dtype=torch.bfloat16)[..., ::2]
-    state_dtype = torch.bfloat16 if backend == "auto" else torch.float32
+    state_dtype = (
+        torch.float32
+        if backend in ("cudnn", "cute-dsl-persistent", "tirx", "ptx")
+        else torch.bfloat16
+    )
     state = torch.zeros(1, 2, 128, 128, dtype=state_dtype)
     lower_bound = -6.0 if backend == "auto" else -5.0
     with torch.inference_mode(inference_offsets):
@@ -1817,7 +1870,7 @@ def test_flashinfer_kda_prefill_preserves_backend_state_contract(
             backend=backend,
             inplace_state=inplace_state,
         )
-    if backend == "auto":
+    if backend != "cudnn":
         offsets = captured["cu_seqlens"]
         assert not offsets.is_inference()
         assert (offsets is cu_seqlens) == (
@@ -1827,24 +1880,26 @@ def test_flashinfer_kda_prefill_preserves_backend_state_contract(
         version = offsets._version
         offsets.add_(0)
         assert offsets._version == version + 1
+    assert captured["seq_order"] is None
+    assert captured["prefill_workspace"] is None
     assert captured["backend"] == backend
-    if backend == "auto":
+    if backend != "cudnn":
         assert all(
             captured[name].is_contiguous() for name in ("q", "k", "v", "g", "beta")
         )
     elif not default_fla_norm:
         assert captured["q"] is q and captured["k"] is q
     assert captured["lower_bound"] == lower_bound
-    normalize_in_kernel = backend == "auto" or not default_fla_norm
+    normalize_in_kernel = backend != "cudnn" or not default_fla_norm
     assert captured["use_qk_l2norm_in_kernel"] == normalize_in_kernel
     assert "qk_l2norm_additive_epsilon" not in captured
     assert captured["A_log"].shape == (2,)
-    assert captured["dt_bias"].shape == ((256,) if backend == "auto" else (2, 128))
+    assert captured["dt_bias"].shape == ((256,) if backend != "cudnn" else (2, 128))
     assert captured["initial_state"].dtype == state_dtype
     torch.testing.assert_close(final_state, torch.ones_like(state))
     expected_input = (
         torch.ones_like(state)
-        if backend == "auto" or inplace_state
+        if backend != "cudnn" or inplace_state
         else torch.zeros_like(state)
     )
     torch.testing.assert_close(state, expected_input)
@@ -1862,6 +1917,8 @@ def test_cudnn_kda_prefill_rejects_batch_invariant(monkeypatch):
     [
         ("flashkda", "auto", torch.bfloat16),
         ("flashinfer", "auto", torch.bfloat16),
+        ("flashinfer", "cute-dsl", torch.bfloat16),
+        ("flashinfer", "cute-dsl", torch.float32),
         ("flashinfer", "cudnn", torch.bfloat16),
         ("flashinfer", "cudnn", torch.float32),
     ],

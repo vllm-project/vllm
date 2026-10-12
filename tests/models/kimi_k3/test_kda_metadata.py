@@ -157,7 +157,19 @@ def _make_builder(
     return builder
 
 
-@pytest.mark.parametrize("backend", ["auto", "cudnn"])
+@pytest.mark.parametrize(
+    "backend",
+    [
+        "auto",
+        "cute-dsl",
+        "cute-dsl-persistent",
+        "tirx",
+        "ptx",
+        "cake",
+        "small-bh",
+        "cudnn",
+    ],
+)
 @pytest.mark.parametrize(
     "builder_cls", [KimiK3KDAMetadataBuilder, GDNAttentionMetadataBuilder]
 )
@@ -181,7 +193,7 @@ def test_flashinfer_prefill_metadata_tracks_inner_backend(
             arange_block_indices=True,
         )
         actual = builder.build(0, common)
-    if backend == "auto" and actual.num_prefills:
+    if backend != "cudnn" and actual.num_prefills:
         offsets = actual.flashinfer_prefill_query_start_loc
         assert not offsets.is_inference()
         torch.testing.assert_close(
@@ -192,10 +204,13 @@ def test_flashinfer_prefill_metadata_tracks_inner_backend(
         offsets.add_(0)
         assert offsets._version == version + 1
         if isinstance(actual, KimiK3KDAMetadata):
-            torch.testing.assert_close(
-                actual.flashinfer_prefill_seq_order,
-                torch.tensor([1, 0], dtype=torch.int32),
-            )
+            if backend in ("cute-dsl-persistent", "tirx", "ptx"):
+                assert actual.flashinfer_prefill_seq_order is None
+            else:
+                torch.testing.assert_close(
+                    actual.flashinfer_prefill_seq_order,
+                    torch.tensor([1, 0], dtype=torch.int32),
+                )
     else:
         assert actual.flashinfer_prefill_query_start_loc is None
         if isinstance(actual, KimiK3KDAMetadata):

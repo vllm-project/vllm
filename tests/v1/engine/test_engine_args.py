@@ -13,8 +13,23 @@ from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.hashing import _xxhash
 
 
-@pytest.mark.parametrize("family", ["gdn", "kda"])
-@pytest.mark.parametrize("backend", ["auto", "cudnn"])
+@pytest.mark.parametrize(
+    ("family", "backend"),
+    [("gdn", "auto"), ("gdn", "cudnn")]
+    + [
+        ("kda", backend)
+        for backend in [
+            "auto",
+            "cute-dsl",
+            "cute-dsl-persistent",
+            "tirx",
+            "ptx",
+            "cake",
+            "small-bh",
+            "cudnn",
+        ]
+    ],
+)
 def test_flashinfer_prefill_backend_from_cli(family, backend):
     parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
     args = parser.parse_args(

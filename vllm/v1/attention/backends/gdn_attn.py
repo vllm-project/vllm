@@ -120,10 +120,15 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         self._check_chunk_metadata_override(type(self), self.gdn_prefill_backend)
         self.flashinfer_gdn_backend = _get_flashinfer_gdn_backend(vllm_config)
         additional_config = vllm_config.additional_config
+        self.flashinfer_kda_backend = (
+            additional_config.get("flashinfer_kda_backend", "auto")
+            if isinstance(additional_config, dict)
+            else "auto"
+        )
         self.use_flashinfer_prefill = (
             isinstance(additional_config, dict)
             and additional_config.get("kda_prefill_backend") == "flashinfer"
-            and additional_config.get("flashinfer_kda_backend", "auto") == "auto"
+            and self.flashinfer_kda_backend != "cudnn"
         )
 
         if self.speculative_config:

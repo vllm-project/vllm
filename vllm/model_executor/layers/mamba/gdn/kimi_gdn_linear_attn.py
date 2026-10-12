@@ -593,7 +593,7 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
                         )
                     assert non_spec_query_start_loc is not None
                     prefill_query_start_loc = non_spec_query_start_loc
-                    if self.flashinfer_kda_backend == "auto":
+                    if self.flashinfer_kda_backend != "cudnn":
                         assert m.flashinfer_prefill_query_start_loc is not None
                         prefill_query_start_loc = m.flashinfer_prefill_query_start_loc
                     (
