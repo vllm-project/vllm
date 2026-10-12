@@ -24,6 +24,7 @@ from vllm.logger import init_logger
 from vllm.parser.engine.events import EventType
 from vllm.parser.engine.parser_engine import ParserEngine
 from vllm.parser.engine.parser_engine_config import (
+    ArgValueExtender,
     ParserEngineConfig,
     ParserState,
     Transition,
@@ -63,12 +64,16 @@ _PARTIAL_ARG_RE = re.compile(
 )
 
 
-def _glm47_arg_converter(raw_args: str, partial: bool) -> str:
+def _glm47_parse_args(
+    raw_args: str, partial: bool
+) -> tuple[dict[str, object], str | None]:
+    """Return the arguments and the key of the open trailing value, if any."""
     params: dict[str, object] = {}
 
     for match in _ARG_RE.finditer(raw_args):
         params[match.group("key").strip()] = match.group("value")
 
+    open_key = None
     if partial:
         remaining = _ARG_RE.sub("", raw_args)
         match = _PARTIAL_ARG_RE.search(remaining)
@@ -76,8 +81,34 @@ def _glm47_arg_converter(raw_args: str, partial: bool) -> str:
             key = match.group("key").strip()
             if key:
                 params[key] = match.group("value")
+                open_key = key
 
-    return json.dumps(params, ensure_ascii=False)
+    return params, open_key
+
+
+def _glm47_arg_converter(raw_args: str, partial: bool) -> str:
+    return json.dumps(_glm47_parse_args(raw_args, partial)[0], ensure_ascii=False)
+
+
+def _glm47_arg_value_extender(raw_args: str) -> ArgValueExtender | None:
+    # The open value runs to the end of raw_args and is the last JSON value,
+    # so a delta appends its JSON-escaped text unless it closes the value.
+    params, open_key = _glm47_parse_args(raw_args, partial=True)
+    if open_key is None or next(reversed(params)) != open_key:
+        return None
+
+    keep = len(ARG_VALUE_END) - 1
+    tail = raw_args[-keep:]
+
+    def extend(delta: str) -> str | None:
+        nonlocal tail
+        text = tail + delta
+        if ARG_VALUE_END in text:
+            return None
+        tail = text[-keep:]
+        return json.dumps(delta, ensure_ascii=False)[1:-1]
+
+    return extend
 
 
 def _glm53_always_thinks(tokenizer: TokenizerLike) -> bool:
@@ -194,6 +225,7 @@ def glm47_moe_config(thinking: bool = True) -> ParserEngineConfig:
         },
         turn_boundary_tokens=GLM_TURN_BOUNDARIES,
         arg_converter=_glm47_arg_converter,
+        arg_value_extender=_glm47_arg_value_extender,
         stream_arg_deltas=True,
         tool_args_json=False,
         validate_tool_names=True,
