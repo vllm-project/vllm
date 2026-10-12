@@ -8,7 +8,7 @@ import torch
 from torch import fx as fx
 
 from vllm import envs
-from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.passes.utility.post_cleanup import PostCleanupPass
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.logger import init_logger
@@ -49,13 +49,11 @@ if current_platform.is_cuda_alike():
     from .utility.scatter_split_replace import ScatterSplitReplacementPass
 
 if current_platform.is_rocm() and rocm_aiter_ops.is_enabled():
+    from vllm.platforms.rocm import on_gfx950
+
     from .fusion.muse_glimmer_qk_rope_cache_fusion import (
         MuseGlimmerQkRopeCacheFusionPass,
     )
-
-if current_platform.is_rocm():
-    from vllm.platforms.rocm import on_gfx950
-
     from .fusion.muse_glimmer_sandwich_norm_fusion import MuseSandwichNormFusionPass
 
 if current_platform.is_cuda():
@@ -206,8 +204,8 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
 
             muse_sandwich_norm = (
                 current_platform.is_rocm()
+                and rocm_aiter_ops.is_enabled()
                 and on_gfx950()
-                and is_aiter_found_and_supported()
                 and model_config is not None
                 and model_config.dtype == torch.bfloat16
                 and model_config.architecture

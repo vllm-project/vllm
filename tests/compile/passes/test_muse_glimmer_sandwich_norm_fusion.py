@@ -10,7 +10,7 @@ import torch
 from torch import nn
 
 from tests.compile.backend import TestBackend as CompileTestBackend
-from vllm._aiter_ops import is_aiter_found_and_supported
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.passes.fusion.muse_glimmer_sandwich_norm_fusion import (
     MuseSandwichNormFusionPass,
 )
@@ -28,8 +28,8 @@ from vllm.model_executor.models.muse_glimmer import MuseGlimmerDecoderLayer
 from vllm.platforms import current_platform
 
 pytestmark = pytest.mark.skipif(
-    not current_platform.is_rocm() or not is_aiter_found_and_supported(),
-    reason="Requires ROCm and AITER",
+    not current_platform.is_rocm() or not rocm_aiter_ops.is_enabled(),
+    reason="Requires ROCm with AITER enabled",
 )
 
 
@@ -61,7 +61,9 @@ class _TwoMuseLayers(nn.Module):
         return self.layers[1](positions, first, residual)
 
 
-def test_muse_sandwich_norm_pass_enabled_by_default() -> None:
+def test_muse_sandwich_norm_pass_follows_aiter_switch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     from vllm.platforms.rocm import on_gfx950
 
     if not on_gfx950():
@@ -82,6 +84,13 @@ def test_muse_sandwich_norm_pass_enabled_by_default() -> None:
     manager = PostGradPassManager()
     manager.configure(config)
     assert any(isinstance(p, MuseSandwichNormFusionPass) for p in manager.passes)
+
+    monkeypatch.setattr(rocm_aiter_ops, "is_enabled", lambda: False)
+    disabled_manager = PostGradPassManager()
+    disabled_manager.configure(config)
+    assert not any(
+        isinstance(p, MuseSandwichNormFusionPass) for p in disabled_manager.passes
+    )
 
 
 @pytest.mark.parametrize("rows", [1, 64, 257])
