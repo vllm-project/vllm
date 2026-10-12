@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from vllm.models.common.mono.spec import MonoSpec
+from vllm.models.glm5next.amd.ops.mono.ffn.layout import POLL_STAGES
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -20,7 +21,6 @@ WIDTHS = (2, 4, 8)
 TP_MAX_WIDTH = {2: 4}
 STEP_TOKENS = (1, 2, 4, 8)
 GRID = 256
-STAGES = ("seam", "gate", "router", "ug", "down")
 NUMERICS = (
     "expert inputs quantized to MXFP8 (vLLM: MXFP4)",
     "attention TP reduce summed in BF16 inside the launch",
@@ -92,7 +92,7 @@ MONO_SPEC = MonoSpec(
     caches={},
     weight_source="views",
     grid=GRID,
-    stages=STAGES,
+    stages=POLL_STAGES,
     refuse_config=refuse_config,
     refuse_model=_model_side("refuse_model"),
     pack=_model_side("pack"),
