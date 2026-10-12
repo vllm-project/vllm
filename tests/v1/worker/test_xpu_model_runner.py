@@ -7,7 +7,7 @@ import pytest
 import torch
 from torch._dynamo.variables.torch import TorchInGraphFunctionVariable
 
-from vllm.v1.worker.xpu_model_runner import _torch_cuda_wrapper
+from vllm.v1.worker.xpu_model_runner import torch_cuda_wrapper
 
 # XPU-only: needs distinct torch.cuda vs torch.xpu current_stream symbols.
 pytestmark = pytest.mark.skipif(
@@ -21,7 +21,7 @@ pytestmark = pytest.mark.skipif(
 def test_torch_cuda_wrapper_allows_dynamo_handler_registration() -> None:
     """Guard against XPU CUDA shim breaking Torch Dynamo during AOT compile.
 
-    Before the fix, ``_torch_cuda_wrapper`` assigned
+    Before the fix, ``torch_cuda_wrapper`` assigned
     ``torch.cuda.current_stream = torch.xpu.current_stream`` (same function object).
     On the first AOT/profile run, Dynamo builds its in-graph handler table and
     registers ``torch.cuda.current_stream`` and ``torch.xpu.current_stream``
@@ -36,7 +36,7 @@ def test_torch_cuda_wrapper_allows_dynamo_handler_registration() -> None:
     ``torch.cuda``) and checks that Dynamo's real ``_get_handlers()`` succeeds.
     """
     # Same entry point as XPUModelRunner.__init__ (patches persist after exit).
-    with _torch_cuda_wrapper():
+    with torch_cuda_wrapper():
         pass
 
     # Fresh handler table build, as on first torch.compile / AOT in the worker.

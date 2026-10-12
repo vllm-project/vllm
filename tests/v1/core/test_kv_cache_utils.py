@@ -53,6 +53,7 @@ from vllm.v1.core.kv_cache_utils import (
     is_kv_cache_spec_uniform,
     kv_cache_groups_tp_replicas,
     make_block_hash_with_group_id,
+    min_kv_cache_memory_bytes,
     tensor_data,
     to_event_extra_keys,
 )
@@ -4052,6 +4053,18 @@ def test_check_enough_kv_cache_memory_reserves_null_block():
     check_enough_kv_cache_memory(
         vllm_config, {"layer1": spec}, spec.page_size_bytes * 33
     )
+
+
+def test_min_kv_cache_memory_bytes_is_the_admission_threshold():
+    """The minimum is the smallest budget the admission check accepts."""
+    vllm_config = VllmConfig(model_config=ModelConfig(max_model_len=512))
+    specs = {"layer1": new_kv_cache_spec(block_size=16)}
+    minimum = min_kv_cache_memory_bytes(vllm_config, specs)
+
+    assert minimum == specs["layer1"].page_size_bytes * 33
+    check_enough_kv_cache_memory(vllm_config, specs, minimum)
+    with pytest.raises(ValueError, match="max seq len"):
+        check_enough_kv_cache_memory(vllm_config, specs, minimum - 1)
 
 
 def test_is_full_attention_spec_unwraps_uniform_type_specs():

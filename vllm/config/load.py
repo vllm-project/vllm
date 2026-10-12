@@ -45,6 +45,10 @@ class LoadConfig:
       to speed up the loading.
     - "dummy" will initialize the weights with random values, which is mainly
       for profiling.
+    - "meta" will build the model on the `meta` device and skip weight loading
+      entirely, so no checkpoint is read and no accelerator memory is
+      allocated. Parameter values are undefined; this is for shape-only uses
+      such as the operator capture in `vllm.profiler.op_capture`.
     - "tensorizer" will use CoreWeave's tensorizer library for fast weight
       loading. See the Tensorize vLLM Model script in the Examples section for
       more information.
