@@ -614,7 +614,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         index_slot_mapping = fwd_slot_mapping[self.indexer.index_cache.prefix]
         q = qkv.new_empty((num_tokens, self.q_size))
         # With query_fp8, q is emitted only in fp8; the attend dequantizes it
-        # into ``q`` for the tokens that run on bf16-query kernels.
+        # into ``q`` for the tokens that run on Triton decode.
         query_fp8 = self._allocate_query_fp8(qkv)
         # index_q matches the index-K cache dtype (e4m3 for the fp8 score path);
         # the fused kernel emits fp8 directly when this buffer is e4m3.

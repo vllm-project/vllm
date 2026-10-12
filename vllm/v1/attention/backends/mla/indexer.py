@@ -7,7 +7,7 @@ import numpy as np
 import torch
 
 import vllm.envs as envs
-from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.config import CUDAGraphMode, VllmConfig, get_current_vllm_config
 from vllm.distributed import get_dcp_group, get_pcp_group
 from vllm.logger import init_logger
 from vllm.model_executor.warmup.jit_warmup import kernel_launcher, zip_inputs
@@ -202,6 +202,64 @@ class PrepareUniformDecodeKernel(
             expanded_bt_stride=expanded_block_table.stride(0),
             BLOCK_SIZE=self.BLOCK_SIZE,
         )
+
+
+# Below this many rows per rank, stay replicated (TP4 engages at 64K rows).
+MIN_TP_SHARD_ROWS_PER_RANK = 16_384
+
+
+def balanced_prefill_row_shard(
+    seq_lens_cpu: torch.Tensor,
+    query_lens_cpu: torch.Tensor,
+    compress_ratio: int,
+    tp_size: int,
+) -> list[int] | None:
+    """Return contiguous TP row counts balanced by indexer MQA work."""
+    num_rows = int(query_lens_cpu.sum())
+    if tp_size < 2 or num_rows < MIN_TP_SHARD_ROWS_PER_RANK * tp_size:
+        return None
+
+    query_lens = query_lens_cpu.to(torch.int64)
+    first_key = torch.repeat_interleave(
+        seq_lens_cpu.to(torch.int64) - query_lens + 1, query_lens
+    )
+    row_in_request = torch.arange(num_rows) - torch.repeat_interleave(
+        torch.cumsum(query_lens, 0) - query_lens, query_lens
+    )
+    cost = torch.cumsum((first_key + row_in_request) // compress_ratio, 0)
+    total = int(cost[-1]) if cost.numel() else 0
+    if total <= 0:
+        return None
+
+    targets = torch.arange(1, tp_size) * total // tp_size
+    bounds = [0, *torch.searchsorted(cost, targets).tolist(), num_rows]
+    # Keep >= 1 row per rank (the floor above leaves ample room); this also
+    # handles repeated costs from pool compression.
+    for i in range(1, tp_size):
+        bounds[i] = max(bounds[i], bounds[i - 1] + 1)
+    for i in range(tp_size - 1, 0, -1):
+        bounds[i] = min(bounds[i], bounds[i + 1] - 1)
+    return [bounds[i + 1] - bounds[i] for i in range(tp_size)]
+
+
+def tp_prefill_row_sharding_supported(
+    vllm_config: VllmConfig,
+    dcp_world_size: int,
+    use_pcp: bool,
+    tp_size: int,
+) -> bool:
+    """Whether replicated prefill rows may be sharded across TP ranks."""
+    cudagraph_mode = vllm_config.compilation_config.cudagraph_mode or CUDAGraphMode.NONE
+    return (
+        current_platform.is_cuda()
+        and dcp_world_size == 1
+        and not use_pcp
+        and tp_size > 1
+        and not envs.VLLM_DISABLE_PYNCCL
+        and not envs.VLLM_USE_NCCL_SYMM_MEM
+        and not envs.VLLM_BATCH_INVARIANT
+        and cudagraph_mode.mixed_mode() != CUDAGraphMode.FULL
+    )
 
 
 class DeepseekV32IndexerBackend(AttentionBackend):
@@ -654,6 +712,8 @@ class BuildPrefillChunkMetadataKernel(
 class DeepseekV32IndexerPrefillMetadata:
     chunks: list[DeepseekV32IndexerPrefillChunkMetadata]
     max_prefill_seq_len: int = -1
+    # Per-TP-rank contiguous row counts, or None for the replicated path.
+    row_shard_sizes: list[int] | None = None
 
 
 @dataclass
@@ -857,15 +917,16 @@ class KpoolTailMetadataBuilder(AttentionMetadataBuilder):
 
 def get_max_prefill_buffer_size(vllm_config: VllmConfig):
     max_model_len = vllm_config.model_config.max_model_len
-    # NOTE(Chen): 40 is a magic number for controlling the prefill buffer size.
+    factor = vllm_config.attention_config.sparse_mla_prefill_workspace_factor
+    assert factor is not None
     # Each entry is 128 fp8 bytes and 4 scale bytes for a total of 132 bytes.
-    # The flashmla_sparse backend uses a workspace size of 5 * max_model_len.
+    # The flashmla_sparse backend uses a workspace size of factor * max_model_len.
     # The memory usage of the workspace there is 576 * 2 bytes; so we size this as
-    # (576 * 2 // 132) * 5 = 40 to maximize this workspace size while still fitting
-    # within the flashmla_sparse workspace.
+    # (576 * 2 // 132) * factor (40 at factor 5) to maximize this workspace
+    # size while still fitting within the flashmla_sparse workspace.
     # For DeepSeek-V3.2, the max_model_len is 163840.
     #   40 * 163840 * 132 = 865075200 bytes = 825 MB
-    return max_model_len * 40
+    return max_model_len * (576 * 2 // 132) * factor
 
 
 def _supports_varlen_paged_mqa_logits() -> bool:
@@ -941,6 +1002,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         scheduler_config = self.vllm_config.scheduler_config
         parallel_config = self.vllm_config.parallel_config
         self.dcp_world_size = parallel_config.decode_context_parallel_size
+        self.tp_size = parallel_config.tensor_parallel_size
         self.dcp_rank = get_dcp_group().rank_in_group if self.dcp_world_size > 1 else 0
         self.pcp_world_size = parallel_config.prefill_context_parallel_size
         self.use_pcp = self.pcp_world_size > 1
@@ -1512,6 +1574,16 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 # Skip when total_seq_lens is 0 (i.e., no compressed token).
                 if metadata is not None:
                     chunks.append(metadata)
+            row_shard_sizes = None
+            if tp_prefill_row_sharding_supported(
+                self.vllm_config, self.dcp_world_size, self.use_pcp, self.tp_size
+            ):
+                row_shard_sizes = balanced_prefill_row_shard(
+                    seq_lens_cpu[num_decodes:],
+                    prefill_query_lens_cpu,
+                    self.compress_ratio,
+                    self.tp_size,
+                )
             prefill_metadata = DeepseekV32IndexerPrefillMetadata(
                 chunks,
                 max_prefill_seq_len=(
@@ -1519,6 +1591,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                     if num_prefills > 0
                     else 0
                 ),
+                row_shard_sizes=row_shard_sizes,
             )
 
         decode_metadata = None
