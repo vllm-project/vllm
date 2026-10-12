@@ -20,7 +20,13 @@ from einops import rearrange
 from transformers.configuration_utils import PreTrainedConfig
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, ModelConfig, VllmConfig, get_current_vllm_config
+from vllm.config import (
+    CacheConfig,
+    ModelConfig,
+    VllmConfig,
+    get_current_vllm_config,
+    get_current_vllm_config_or_none,
+)
 from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_rank,
@@ -230,6 +236,12 @@ def _configure_ling_fp8_quant_config(
 
     quant_config.ignored_layers_match_mode = "suffix"
     hf_quant_config = getattr(config, "quantization_config", None)
+    if hf_quant_config is None:
+        vllm_config = get_current_vllm_config_or_none()
+        model_config = getattr(vllm_config, "model_config", None)
+        hf_quant_config = getattr(
+            getattr(model_config, "hf_config", None), "quantization_config", None
+        )
     if not isinstance(hf_quant_config, dict):
         return
 

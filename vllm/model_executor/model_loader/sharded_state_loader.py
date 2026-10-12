@@ -4,6 +4,7 @@
 import collections
 import glob
 import os
+import string
 import time
 from collections.abc import Generator
 from copy import copy
@@ -28,13 +29,14 @@ logger = init_logger(__name__)
 
 class ShardedStateLoader(BaseModelLoader):
     """Model loader that directly loads each worker's model state dict, which
-    enables a fast load path for large tensor-parallel models where each worker
-    only needs to read its own shard rather than the entire checkpoint. See
-    `examples/features/sharded_state/save_sharded_state_offline.py` for creating
-    a sharded checkpoint.
+    enables a fast load path for large tensor-parallel/pipeline-parallel models
+    where each worker only needs to read its own shard rather than the entire
+    checkpoint. See `examples/features/sharded_state/save_sharded_state_offline.py`
+    for creating a sharded checkpoint.
     """
 
-    DEFAULT_PATTERN = "model-rank-{rank}-part-{part}.safetensors"
+    TP_ONLY_PATTERN = "model-rank-{rank}-part-{part}.safetensors"
+    PP_AND_TP_PATTERN = "model-pp-{pp_rank}-tp-{tp_rank}-part-{part}.safetensors"
 
     def __init__(self, load_config: LoadConfig):
         super().__init__(load_config)
@@ -44,13 +46,93 @@ class ShardedStateLoader(BaseModelLoader):
             if load_config.model_loader_extra_config is None
             else copy(load_config.model_loader_extra_config)
         )
-        self.pattern = extra_config.pop("pattern", self.DEFAULT_PATTERN)
+        # A custom shard filename pattern can be supplied via
+        # model_loader_extra_config; when omitted (None), the default pattern
+        # is selected at render time based on the parallel configuration.
+        self.pattern = extra_config.pop("pattern", None)
         if extra_config:
             raise ValueError(
                 f"Unexpected extra config keys for load format "
-                f"{load_config.load_format}: "
-                f"{load_config.model_loader_extra_config.keys()}"
+                f"{load_config.load_format}: {extra_config.keys()}"
             )
+
+    @staticmethod
+    def _get_default_pattern() -> str:
+        from vllm.distributed import get_pp_group
+
+        return (
+            ShardedStateLoader.PP_AND_TP_PATTERN
+            if get_pp_group().world_size > 1
+            else ShardedStateLoader.TP_ONLY_PATTERN
+        )
+
+    @staticmethod
+    def _render_default_pattern(pattern: str | None = None, *, part: int | str) -> str:
+        from vllm.distributed import (
+            get_pipeline_model_parallel_rank,
+            get_pp_group,
+            get_tensor_model_parallel_rank,
+            get_tp_group,
+        )
+
+        # _get_default_pattern is called here because _render_default_pattern
+        # can be invoked from save_model without instantiating a
+        # ShardedStateLoader instance.
+        if pattern is None:
+            pattern = ShardedStateLoader._get_default_pattern()
+
+        # Parse the real format fields instead of matching placeholder
+        # text: escaped braces like {{pp_rank}} render as literal text
+        # and must not count as a rank field.
+        fields = {
+            field
+            for _, field, _, _ in string.Formatter().parse(pattern)
+            if field is not None
+        }
+        unsupported = fields - {"pp_rank", "tp_rank", "rank", "part"}
+        if unsupported:
+            raise ValueError(
+                f"Pattern '{pattern}' uses unsupported placeholder(s) "
+                f"{sorted(unsupported)}; supported fields are pp_rank, "
+                "tp_rank, rank and part"
+            )
+        tp_rank = get_tensor_model_parallel_rank()
+        pp_rank = get_pipeline_model_parallel_rank()
+        pp_world_size = get_pp_group().world_size
+        tp_world_size = get_tp_group().world_size
+        # The pattern must carry a rank field for every active
+        # parallelism dimension, otherwise shards from different ranks
+        # collide on the same filename and silently overwrite each other.
+        has_pp_field = "pp_rank" in fields
+        has_tp_field = "tp_rank" in fields or "rank" in fields
+        if pp_world_size > 1:
+            if not has_pp_field:
+                raise ValueError(
+                    f"Pattern '{pattern}' does not embed the pipeline parallel "
+                    "rank; with pipeline parallelism every stage would write the "
+                    f"same file. Use '{ShardedStateLoader.PP_AND_TP_PATTERN}' "
+                    "instead."
+                )
+            if tp_world_size > 1 and not has_tp_field:
+                raise ValueError(
+                    f"Pattern '{pattern}' does not embed the tensor parallel "
+                    "rank; TP workers would overwrite each other's shards."
+                )
+            # Supply both tp aliases so mixed-alias patterns render.
+            return pattern.format(
+                pp_rank=pp_rank, tp_rank=tp_rank, rank=tp_rank, part=part
+            )
+        if has_pp_field:
+            raise ValueError(
+                f"Pattern '{pattern}' requires pipeline parallelism, but the "
+                "pipeline parallel size is 1"
+            )
+        if tp_world_size > 1 and not has_tp_field:
+            raise ValueError(
+                f"Pattern '{pattern}' does not embed the tensor parallel rank; "
+                "TP workers would overwrite each other's shards."
+            )
+        return pattern.format(tp_rank=tp_rank, rank=tp_rank, part=part)
 
     @staticmethod
     def _filter_subtensors(
@@ -106,30 +188,36 @@ class ShardedStateLoader(BaseModelLoader):
         self._prepare_weights(model_config.model, model_config.revision)
 
     def load_weights(self, model: nn.Module, model_config: ModelConfig) -> None:
-        from vllm.distributed import get_tensor_model_parallel_rank
-
         model_weights = model_config.model
         if model_weights_override := model_config.model_weights:
             model_weights = model_weights_override
         local_model_path = model_weights
 
-        rank = get_tensor_model_parallel_rank()
-        pattern = os.path.join(
-            local_model_path,
-            self.pattern.format(rank=rank, part="*"),
+        rendered_pattern = ShardedStateLoader._render_default_pattern(
+            self.pattern, part="*"
         )
-
         filepaths = []
         if is_s3(local_model_path):
-            file_pattern = f"*{self.pattern.format(rank=rank, part='*')}"
+            file_pattern = f"*{rendered_pattern}"
             filepaths = s3_glob(path=local_model_path, allow_pattern=[file_pattern])
         else:
-            filepaths = glob.glob(pattern)
+            filepaths = glob.glob(
+                os.path.join(
+                    local_model_path,
+                    rendered_pattern,
+                )
+            )
         if not filepaths:
             # TODO: support un-sharded checkpoints too
             raise ValueError(
-                f"Could not find checkpoint files '{pattern}', only "
-                f"pre-sharded checkpoints are currently supported!"
+                f"Could not find checkpoint files "
+                f"'{
+                    os.path.join(
+                        local_model_path,
+                        rendered_pattern,
+                    )
+                }', "
+                f"only pre-sharded checkpoints are currently supported!"
             )
         state_dict = self._filter_subtensors(model.state_dict())
         counter_before_loading_weights = time.perf_counter()
@@ -137,8 +225,17 @@ class ShardedStateLoader(BaseModelLoader):
             # If loading with LoRA enabled, additional padding may
             # be added to certain parameters. We only load into a
             # narrowed view of the parameter data.
-            param_data = state_dict[key].data
-            param_shape = state_dict[key].shape
+            param = state_dict[key]
+            if param.dtype != tensor.dtype:
+                logger.warning(
+                    "Attempted to load weight %s with dtype %s into "
+                    "parameter with dtype %s",
+                    key,
+                    tensor.dtype,
+                    param.dtype,
+                )
+            param_data = param.data
+            param_shape = param.shape
             for dim, size in enumerate(tensor.shape):
                 if size < param_shape[dim]:
                     param_data = param_data.narrow(dim, 0, size)
@@ -182,11 +279,6 @@ class ShardedStateLoader(BaseModelLoader):
     ) -> None:
         from safetensors.torch import save_file
 
-        from vllm.distributed import get_tensor_model_parallel_rank
-
-        if pattern is None:
-            pattern = ShardedStateLoader.DEFAULT_PATTERN
-        rank = get_tensor_model_parallel_rank()
         part_idx = 0
         total_size = 0
         state_dict = ShardedStateLoader._filter_subtensors(model.state_dict())
@@ -194,7 +286,9 @@ class ShardedStateLoader(BaseModelLoader):
         for key, tensor in state_dict.items():
             param_size = tensor.nelement() * tensor.element_size()
             if max_size is not None and total_size + param_size > max_size:
-                filename = pattern.format(rank=rank, part=part_idx)
+                filename = ShardedStateLoader._render_default_pattern(
+                    pattern, part=part_idx
+                )
                 save_file(
                     state_dict_part,
                     os.path.join(path, filename),
@@ -205,7 +299,9 @@ class ShardedStateLoader(BaseModelLoader):
             state_dict_part[key] = tensor
             total_size += param_size
         if len(state_dict_part) > 0:
-            filename = pattern.format(rank=rank, part=part_idx)
+            filename = ShardedStateLoader._render_default_pattern(
+                pattern, part=part_idx
+            )
             save_file(
                 state_dict_part,
                 os.path.join(path, filename),
