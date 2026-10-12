@@ -2422,7 +2422,7 @@ class ExecuteModelState(NamedTuple):
     ec_connector_output: ECConnectorOutput | None
     cudagraph_stats: CUDAGraphStat | None
     num_spec_tokens_to_schedule: int
-    mono_kernel_stats: dict[str, int] | None
+    mono_kernel_stats: dict[str, int] | None = None
 
 
 class BatchReqState(NamedTuple):

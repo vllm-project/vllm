@@ -57,9 +57,9 @@ def fake_vllm_config(**over) -> SimpleNamespace:
 class FakeKernel:
     """A layer kernel that adds 1 to the hidden states and reports ``words``."""
 
-    def __init__(self, layer: int, width: int, words: torch.Tensor):
+    def __init__(self, layer: int, width: int, words: torch.Tensor, caches: bool):
         self.layer, self.width, self.words = layer, width, words
-        self.cache_layers = (f"layers.{layer}.attn",)
+        self.cache_layers = (f"layers.{layer}.attn",) if caches else ()
         self.compiled: list[Any] = []
 
     def launch(self, step: MonoStep, positions, hidden_states, residual):
@@ -85,7 +85,9 @@ def fake_spec(
     bind: Callable[[Any, Any], list[str]] = lambda ctx, caches: [],
     eligible: Callable[[Any, MonoStep], str | None] = lambda ctx, step: None,
     words: torch.Tensor | None = None,
+    caches: bool = False,
 ) -> MonoSpec:
+    """``caches``: every kernel checks its layer's cache, ``layers.<i>.attn``."""
     health = torch.zeros(8, dtype=torch.int32) if words is None else words
     return MonoSpec(
         name="fake",
@@ -101,7 +103,7 @@ def fake_spec(
         bind=bind,
         eligible=eligible,
         build=lambda ctx, packed, layer, width: FakeKernel(
-            layer.layer_idx, width, health
+            layer.layer_idx, width, health, caches
         ),
     )
 

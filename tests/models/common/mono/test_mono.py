@@ -193,7 +193,7 @@ def test_caches_are_rebound_when_they_move(monkeypatch, one_rank):
         binds.append(caches)
         return []
 
-    spec = fake_spec(bind=bind)
+    spec = fake_spec(bind=bind, caches=True)
     mono = _mono(spec)
     sfc = mono.ctx.vllm_config.compilation_config.static_forward_context
     for i in (1, 2):
@@ -208,7 +208,7 @@ def test_caches_are_rebound_when_they_move(monkeypatch, one_rank):
 
 def test_a_cache_refusal_raises(monkeypatch, one_rank):
     _forward_context(monkeypatch, "FULL")
-    mono = _mono(fake_spec(bind=lambda ctx, caches: ["bad layout"]))
+    mono = _mono(fake_spec(bind=lambda ctx, caches: ["bad layout"], caches=True))
     sfc = mono.ctx.vllm_config.compilation_config.static_forward_context
     for i in (1, 2):
         sfc[f"layers.{i}.attn"] = SimpleNamespace(kv_cache=torch.zeros(4))
@@ -225,7 +225,7 @@ def test_parameter_names_and_values_do_not_change(monkeypatch, one_rank):
     """Attach leaves the module tree, names and loaded values untouched."""
     model = _Model()
     before = {k: v.clone() for k, v in model.state_dict().items()}
-    monkeypatch.setattr(guards, "load_spec", lambda path: fake_spec())
+    monkeypatch.setattr(layer, "load_spec", lambda path: fake_spec())
     cfg = fake_vllm_config()
     model.mono = layer.attach(model, cfg, "x:SPEC")
     assert model.mono is not None
