@@ -522,6 +522,7 @@ steps:
       - tests/distributed/test_rocm_aiter_custom_ar.py
       - tests/distributed/test_rocm_quick_reduce.py
       - tests/distributed/test_quick_all_reduce.py
+      - tests/distributed/test_aiter_rms_fallback.py
       - tests/v1/e2e/general/test_rocm_aiter_custom_ar.py
       - tests/utils.py
       - examples/rl/rlhf_async_new_apis.py
@@ -539,6 +540,7 @@ steps:
       - pytest -v -s tests/v1/e2e/general/test_rocm_aiter_custom_ar.py
       - pytest -v -s tests/distributed/test_rocm_quick_reduce.py
       - pytest -v -s tests/distributed/test_quick_all_reduce.py
+      - pytest -v -s tests/distributed/test_aiter_rms_fallback.py
 
 - label: ":nvidia: (B200) Distributed"
   key: distributed-tests-2xb200
