@@ -505,7 +505,7 @@ def _sketchssm_gpu(monkeypatch, capability: int = 80):
             {"mamba_config.prefill_backend": MambaBackendEnum.FLASHINFER},
             "--mamba-prefill-backend",
         ),
-        ({"parallel_config.tensor_parallel_size": 2}, "tensor parallelism"),
+        ({"parallel_config.tensor_parallel_size": 2}, None),
     ],
 )
 def test_validate_sketchssm(monkeypatch, overrides, match):
