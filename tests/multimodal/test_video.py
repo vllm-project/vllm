@@ -697,7 +697,7 @@ def test_pynvvideocodec_rejects_unsupported_decoder_caps():
         )
 
 
-def test_pynvvideocodec_uses_source_dimensions_by_default():
+def test_pynvvideocodec_uses_bounded_orientation_envelope_by_default():
     class FakeDemuxer:
         def Width(self):
             return 1920
@@ -732,7 +732,45 @@ def test_pynvvideocodec_uses_source_dimensions_by_default():
 
     assert PyNvVideoCodecVideoBackendMixin._validate_decoder_caps(
         "valid.mp4", FakeNvc
-    ) == (1920, 1080)
+    ) == (1920, 1920)
+
+
+def test_pynvvideocodec_default_orientation_envelope_respects_decoder_caps():
+    class FakeDemuxer:
+        def Width(self):
+            return 4096
+
+        def Height(self):
+            return 2160
+
+        def GetNvCodecId(self):
+            return "h264"
+
+        def ChromaFormat(self):
+            return "420"
+
+        def BitDepth(self):
+            return 8
+
+    class FakeNvc:
+        @staticmethod
+        def CreateDemuxer(file_path):
+            return FakeDemuxer()
+
+        @staticmethod
+        def GetDecoderCaps(device_index, codec, chroma_format, bit_depth):
+            return {
+                "supported": 1,
+                "width_min": 48,
+                "width_max": 4096,
+                "height_min": 16,
+                "height_max": 4096,
+                "mb_num_max": 40000,
+            }
+
+    assert PyNvVideoCodecVideoBackendMixin._validate_decoder_caps(
+        "valid.mp4", FakeNvc
+    ) == (4096, 2160)
 
 
 def test_pynvvideocodec_validates_configured_decoder_bounds():

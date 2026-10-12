@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import gc
 import os
 import tempfile
 import threading
@@ -105,10 +104,12 @@ def get_pynvvideocodec_decoder_gpu_memory_bytes(
     if max_width is None or max_height is None:
         return PYNVVIDEOCODEC_DECODER_GPU_MEMORY_BYTES
 
-    configured_surface_bytes = (
-        max_width * max_height * 3 * PYNVVIDEOCODEC_DECODER_CACHE_SIZE
-    )
+    configured_surface_bytes = _decoder_surface_bytes(max_width, max_height)
     return max(PYNVVIDEOCODEC_DECODER_GPU_MEMORY_BYTES, configured_surface_bytes)
+
+
+def _decoder_surface_bytes(width: int, height: int) -> int:
+    return width * height * 3 * PYNVVIDEOCODEC_DECODER_CACHE_SIZE
 
 
 def _pynvvideocodec_exception_types(nvc) -> tuple[type[Exception], ...]:
@@ -167,7 +168,6 @@ class PyNvVideoCodecDecoderSlot:
     def recover(self) -> None:
         """Release decoder resources and drain work after a failed request."""
         self.reset()
-        gc.collect()
 
         with suppress(Exception):
             import torch
@@ -366,6 +366,16 @@ class PyNvVideoCodecVideoBackendMixin:
             raise ValueError("Invalid or unsupported video file.")
 
         if max_width is None or max_height is None:
+            max_dimension = max(width, height)
+            orientation_mb_count = ((max_dimension + 15) // 16) ** 2
+            if (
+                max_dimension <= width_max
+                and max_dimension <= height_max
+                and orientation_mb_count <= mb_num_max
+                and _decoder_surface_bytes(max_dimension, max_dimension)
+                <= PYNVVIDEOCODEC_DECODER_GPU_MEMORY_BYTES
+            ):
+                return max_dimension, max_dimension
             return width, height
 
         decoder_max_width = min(max_width, width_max)
