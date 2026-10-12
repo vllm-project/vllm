@@ -145,6 +145,7 @@ steps:
   soft_fail: true
   source_file_dependencies:
   - vllm/config/
+  - vllm/distributed/kv_transfer/
   - vllm/engine/arg_utils.py
   - vllm/platforms/cpu.py
   - vllm/sampling_params.py

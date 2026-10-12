@@ -62,6 +62,14 @@ class SimulationConfig:
     per request and step unless the timing provider sets
     `StepCost.num_accepted`."""
 
+    kv_offload_timing: dict[str, float] | str | None = None
+    """KV cache offloading (the `OffloadingConnector` with its CPU spec): a
+    transfer between device and host memory takes `latency + bytes /
+    bandwidth`, per direction, given as `load_gbps` and `store_gbps` (1e9
+    bytes/s) with optional `load_latency_us` and `store_latency_us`, or the
+    path of a step log recorded with offloading to fit them from. No data
+    moves; the connector's scheduler side is the real one."""
+
     fallback_token_id: int = Field(default=0, ge=0)
     """Token id emitted at every decode step for requests that carry no
     `trace_decode_token_ids`. Such requests end by `max_tokens` (or by this
@@ -75,6 +83,28 @@ class SimulationConfig:
         ):
             raise ValueError("spec_acceptance_rates must be probabilities in [0, 1].")
         return rates
+
+    @field_validator("kv_offload_timing")
+    @classmethod
+    def _check_kv_offload_timing(
+        cls, timing: dict[str, float] | str | None
+    ) -> dict[str, float] | str | None:
+        if isinstance(timing, dict):
+            required = {"load_gbps", "store_gbps"}
+            allowed = required | {"load_latency_us", "store_latency_us"}
+            if not required <= timing.keys() <= allowed:
+                raise ValueError(
+                    f"kv_offload_timing needs {sorted(required)} and accepts "
+                    f"{sorted(allowed - required)}; got {sorted(timing)}."
+                )
+            if any(timing[k] <= 0 for k in required) or any(
+                v < 0 for v in timing.values()
+            ):
+                raise ValueError(
+                    "kv_offload_timing bandwidths must be positive and "
+                    "latencies non-negative."
+                )
+        return timing
 
     @property
     def enabled(self) -> bool:

@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
+
 import pytest
 
 from tests.conftest import VllmRunner
@@ -201,6 +203,64 @@ def test_simulate_offline_host_time_holds_engine_thread() -> None:
     # is consumed. Nothing follows the last step, so its device time ends with
     # that host work and its token arrives together with the previous one.
     assert result.requests[0].itls == pytest.approx([3e-3] * 6 + [0.0])
+
+
+def test_simulate_offline_kv_offloading(tmp_path) -> None:
+    """A prompt evicted from the GPU KV cache is loaded back from the CPU
+    cache: its request waits exactly for the modeled load, then prefills only
+    its last token."""
+    if not (current_platform.is_cpu() or current_platform.is_cuda_alike()):
+        pytest.skip("Simulated forward needs the CPU or a CUDA-alike platform.")
+    from vllm.engine.arg_utils import EngineArgs
+    from vllm.v1.worker.simulated.offline import TimedRequest, simulate
+
+    step_s, load_gbps = 1e-3, 100
+    log = tmp_path / "steps.jsonl"
+    args = EngineArgs(
+        model="Qwen/Qwen3-0.6B",
+        max_model_len=1024,
+        # 1056 tokens of Qwen3-0.6B KV cache.
+        kv_cache_memory_bytes=1056 * 114688,
+        kv_transfer_config={
+            "kv_connector": "OffloadingConnector",
+            "kv_role": "kv_both",
+            "kv_connector_extra_config": {"cpu_bytes_to_use": 1 << 30},
+        },
+        simulation_config={
+            "simulate_forward": True,
+            "clock": "virtual",
+            "timing": "constant",
+            "timing_args": {"fixed_us": step_s * 1e6},
+            "kv_offload_timing": {"load_gbps": load_gbps, "store_gbps": load_gbps},
+            "log_path": str(log),
+        },
+    )
+    params = SamplingParams(max_tokens=4, ignore_eos=True)
+    a, b = list(range(1000, 1640)), list(range(5000, 5960))
+    # b evicts most of a from the GPU cache, but not from the CPU cache.
+    result = simulate(
+        args,
+        [TimedRequest(a, params, 0.0), TimedRequest(b, params, 1.0)]
+        + [TimedRequest(a, params, 2.0)],
+    )
+
+    records = [json.loads(line) for line in log.read_text().splitlines()]
+    [load] = [
+        r["kv_transfers"]["load"]
+        for r in records
+        if "load" in r.get("kv_transfers", {})
+    ]
+    # The third request's first step runs all of its prefill. Clock times are
+    # absolute, and the first step starts when the first request arrives.
+    steps = [r for r in records if "step" in r]
+    step = next(r for r in steps if r["t_start"] >= steps[0]["t_start"] + 2.0)
+    assert [
+        (r["num_scheduled_tokens"], r["num_computed_tokens"])
+        for r in step["step"]["requests"]
+    ] == [(1, 639)]
+    assert result.requests[2].ttft == pytest.approx(
+        load["bytes"] / (load_gbps * 1e9) + step_s
+    )
 
 
 class AcceptAllDrafts:

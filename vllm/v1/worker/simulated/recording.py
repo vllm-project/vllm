@@ -20,6 +20,7 @@ from vllm.logger import init_logger
 from vllm.v1.outputs import AsyncModelRunnerOutput, ModelRunnerOutput
 from vllm.v1.worker.dp_utils import should_skip_dp_coordination
 from vllm.v1.worker.gpu_worker import Worker
+from vllm.v1.worker.simulated.kv_offload import completed_transfers
 from vllm.v1.worker.simulated.timing import (
     StepCost,
     StepDescriptor,
@@ -57,6 +58,7 @@ class _RecordedOutput(AsyncModelRunnerOutput):
 
     def get_output(self) -> ModelRunnerOutput:
         output = self.inner.get_output()
+        _write_transfers(self.writer, output)
         # The inner output waited for its D2H copy, which was enqueued after
         # the sampler, so the end event is complete; this does not block.
         self.end.synchronize()
@@ -73,6 +75,16 @@ class _RecordedOutput(AsyncModelRunnerOutput):
             self.finished_req_ids,
         )
         return output
+
+
+def _write_transfers(
+    writer: StepLogWriter, output: ModelRunnerOutput | AsyncModelRunnerOutput | None
+) -> None:
+    """Log the KV offloading transfers this rank saw complete in the step."""
+    if isinstance(output, ModelRunnerOutput):
+        transfers = completed_transfers(output.kv_connector_output)
+        if transfers:
+            writer.write_transfers(transfers, time.perf_counter())
 
 
 def _num_accepted(
@@ -123,7 +135,10 @@ class RecordingWorker(Worker):
             scheduler_output, self._prompt_lens, self._step_index, self._parallel
         )
         if scheduler_output.total_num_scheduled_tokens == 0:
-            return super().execute_model(scheduler_output)
+            output = super().execute_model(scheduler_output)
+            if self._writer is not None:
+                _write_transfers(self._writer, output)
+            return output
         self._step_index += 1
         if self._joins_dp and not should_skip_dp_coordination():
             descriptor = gather_dp_step(descriptor)
@@ -150,16 +165,20 @@ class RecordingWorker(Worker):
         if pending is None or output is None:
             return output
         start, descriptor, t_start, finished = pending
+        # A step is pending only when this rank writes a log.
+        writer = self._writer
+        assert writer is not None
         end = torch.cuda.Event(enable_timing=True)
         end.record(torch.cuda.current_stream(self.device))
         host_s = time.perf_counter() - t_start
         if isinstance(output, AsyncModelRunnerOutput):
             return _RecordedOutput(
-                output, start, end, descriptor, host_s, t_start, finished, self._writer
+                output, start, end, descriptor, host_s, t_start, finished, writer
             )
         end.synchronize()
+        _write_transfers(writer, output)
         device_s = start.elapsed_time(end) * 1e-3
-        self._writer.write(
+        writer.write(
             descriptor,
             StepCost(
                 device_s=device_s,

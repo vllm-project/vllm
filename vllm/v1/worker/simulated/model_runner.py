@@ -23,19 +23,27 @@ import torch.distributed as dist
 
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
-from vllm.distributed.parallel_state import get_dp_group
+from vllm.distributed.kv_transfer import has_kv_transfer_group
+from vllm.distributed.parallel_state import get_dp_group, get_pp_group
 from vllm.logger import init_logger
 from vllm.sequence import IntermediateTensors
 from vllm.v1.outputs import (
     EMPTY_MODEL_RUNNER_OUTPUT,
     AsyncModelRunnerOutput,
+    KVConnectorOutput,
     ModelRunnerOutput,
 )
 from vllm.v1.worker.dp_utils import should_skip_dp_coordination
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
+from vllm.v1.worker.simulated.kv_offload import (
+    SimulatedOffloadingWorker,
+    completed_transfers,
+    simulated_kv_connector,
+)
 from vllm.v1.worker.simulated.timing import (
+    RealClock,
     SimulatedAsyncOutput,
     StepCost,
     StepDescriptor,
@@ -66,7 +74,7 @@ class _PendingStep:
     t_entry: float
     t_start: float
     t_deadline: float
-    finished_req_ids: list[str]
+    finished_req_ids: set[str]
     num_spec_tokens_to_schedule: int
 
 
@@ -96,6 +104,8 @@ class SimulatedModelRunner(GPUModelRunner):
         # becomes free. Every rank models the whole pipeline from the same
         # inputs, so all ranks agree on every deadline.
         self._stage_free_at = [0.0] * self.parallel_config.pipeline_parallel_size
+        self._kv_transfers: SimulatedOffloadingWorker | None = None
+        self._last_output: SimulatedAsyncOutput | None = None
         self._parallel = parallel_summary(vllm_config)
         self._prompt_lens: dict[str, int] = {}
         self._rng = np.random.default_rng(vllm_config.model_config.seed)
@@ -137,6 +147,17 @@ class SimulatedModelRunner(GPUModelRunner):
             len(self.kv_cache_config.kv_cache_groups),
             self.kv_cache_config.num_blocks,
         )
+        if not is_profiling and has_kv_transfer_group():
+            # This rank's copy streams wait for its own pipeline stage.
+            stage = get_pp_group().rank_in_group
+            connector = simulated_kv_connector(
+                self.vllm_config,
+                self.kv_cache_config,
+                self.clock,
+                device_free_at=lambda: self._stage_free_at[stage],
+            )
+            self.kv_connector = connector
+            self._kv_transfers = connector.transfers
 
     def _init_kv_zero_meta(self) -> None:
         """No KV tensors, nothing to zero."""
@@ -185,6 +206,7 @@ class SimulatedModelRunner(GPUModelRunner):
         self.timing_provider = ZeroTimingProvider(self.vllm_config)
         # Ranks warm up independently; keep DP ranks out of the step sync.
         self._warming_up = True
+        self.kv_connector.set_disabled(True)
         try:
             assert self.execute_model(step) is None
             out = self.sample_tokens(None)
@@ -198,10 +220,12 @@ class SimulatedModelRunner(GPUModelRunner):
             self.step_log = step_log
             self.timing_provider = provider
             self._pending_step = None
+            self._last_output = None
             self._prompt_lens.clear()
             self._step_index = 0
             self._stage_free_at = [0.0] * len(self._stage_free_at)
             self._warming_up = False
+            self.kv_connector.set_disabled(False)
 
     # ------------------------------------------------------------------ #
     # Execution
@@ -222,6 +246,8 @@ class SimulatedModelRunner(GPUModelRunner):
         if dummy_run:
             return EMPTY_MODEL_RUNNER_OUTPUT
 
+        # Blocks until any stores the scheduler must flush have completed.
+        self.kv_connector.pre_forward(scheduler_output)
         t_entry = self.clock.now()
         self.finish_requests(scheduler_output)
         self.free_states(scheduler_output)
@@ -232,7 +258,10 @@ class SimulatedModelRunner(GPUModelRunner):
         if not scheduler_output.total_num_scheduled_tokens:
             # Nothing to run; the engine core uses this output directly and
             # does not call sample_tokens().
-            return EMPTY_MODEL_RUNNER_OUTPUT
+            self.kv_connector.finish_forward()
+            kv_output = self._post_forward(scheduler_output.finished_req_ids)
+            self._skip_to_transfer()
+            return ModelRunnerOutput.with_kv_conn_output_only(kv_output)
 
         batch_req_state, _ = self.gather_batch_req_state(scheduler_output, dummy_run)
         assert batch_req_state is not None
@@ -263,7 +292,7 @@ class SimulatedModelRunner(GPUModelRunner):
             t_entry=t_entry,
             t_start=t_start,
             t_deadline=max(device_end, t_entry + cost.host_s),
-            finished_req_ids=list(scheduler_output.finished_req_ids),
+            finished_req_ids=scheduler_output.finished_req_ids,
             num_spec_tokens_to_schedule=scheduler_output.num_spec_tokens_to_schedule,
         )
         self._step_index += 1
@@ -363,11 +392,36 @@ class SimulatedModelRunner(GPUModelRunner):
                 pending.cost,
                 pending.t_start,
                 pending.t_deadline,
-                pending.finished_req_ids,
+                list(pending.finished_req_ids),
             )
         # Hold the engine thread for the rest of the step's host time.
         self.clock.sleep_until(pending.t_entry + pending.cost.host_s)
-        return SimulatedAsyncOutput(output, pending.t_deadline, self.clock)
+        self.kv_connector.finish_forward()
+        output.kv_connector_output = self._post_forward(pending.finished_req_ids)
+        self._last_output = SimulatedAsyncOutput(output, pending.t_deadline, self.clock)
+        return self._last_output
+
+    def _post_forward(self, finished_req_ids: set[str]) -> KVConnectorOutput | None:
+        """Run the KV connector's end-of-step hooks: submit this step's loads
+        and stores, and collect the transfers that have completed."""
+        kv_output = self.kv_connector.post_forward(finished_req_ids)
+        transfers = completed_transfers(kv_output)
+        if self.step_log is not None and transfers:
+            self.step_log.write_transfers(transfers, self.clock.now())
+        return kv_output
+
+    def _skip_to_transfer(self) -> None:
+        """With nothing to run and no step output pending, the engine core
+        only polls the KV connector until a transfer completes: skip to the
+        next completion (collected by the next step's poll), but not past the
+        driver's next request arrival."""
+        if self._kv_transfers is None or isinstance(self.clock, RealClock):
+            return
+        if self._last_output is not None and not self._last_output.resolved:
+            return
+        t = self._kv_transfers.next_completion()
+        if t is not None:
+            self.clock.sleep_until(min(t, self.clock.horizon))
 
     def _run_pipeline(self, t_start: float, device_s: float) -> float:
         """Push a step entering stage 0 at `t_start` through the pipeline;

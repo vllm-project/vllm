@@ -13,6 +13,7 @@ wall-clock baseline to compare against.
 
 from __future__ import annotations
 
+import math
 import time
 from collections import deque
 from collections.abc import Sequence
@@ -153,6 +154,8 @@ def run(
     if any(r.sampling_params.n != 1 for r in requests):
         raise ValueError("Timed runs support n=1 only.")
     clock = get_clock(sim.clock)
+    # The driven clocks are process-global; drop a horizon an aborted run left.
+    clock.horizon = math.inf
     wall_start = time.perf_counter()
     t0 = clock.now()
     pending = deque(sorted(enumerate(requests), key=lambda x: x[1].arrival_time))
@@ -178,6 +181,8 @@ def run(
             clock.sleep_until(t0 + pending[0][1].arrival_time)
             continue
 
+        # Lets an engine waiting only on its own transfers skip ahead.
+        clock.horizon = t0 + pending[0][1].arrival_time if pending else math.inf
         before = clock.now()
         outputs = engine.step()
         t = clock.now() - t0

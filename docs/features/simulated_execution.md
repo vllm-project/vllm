@@ -249,6 +249,66 @@ shrink (see above). Qwen3-VL-30B-A3B-Instruct-FP8 (MoE, text only) with DP=2
 and expert parallelism under `vllm serve` (ISL 512, OSL 64, 16 req/s, 128
 requests) reproduces mean TPOT within 2% and mean TTFT within 9%.
 
+### KV cache offloading
+
+CPU offloading by the `OffloadingConnector` (its default CPU spec) runs as in
+the real deployment, except that no data moves. The connector's scheduler side
+is unmodified: the CPU cache's lookups and evictions, and the load and store
+jobs it issues, are the real ones, so a simulation reproduces which prompts hit
+the CPU cache and how long their requests wait for loads. On the worker, a
+simulated transfer worker replaces the copy streams: each direction is a
+serial queue, a transfer starts only once the device has finished the step
+that was running when it was submitted, and it takes `latency + bytes /
+bandwidth` on the simulation clock. Under the `virtual` and `fast_forward`
+clocks an engine with nothing to run but a transfer in flight skips ahead to
+its completion (or the next request arrival).
+
+`kv_offload_timing` gives the bandwidths, in 1e9 bytes/s, with optional
+latencies:
+
+```python
+kv_transfer_config={
+    "kv_connector": "OffloadingConnector",
+    "kv_role": "kv_both",
+    "kv_connector_extra_config": {"cpu_bytes_to_use": 32 << 30},
+},
+simulation_config={
+    "simulate_forward": True,
+    "timing": "replay",
+    "timing_args": {"path": "/tmp/real_steps.jsonl"},
+    "kv_offload_timing": {"load_gbps": 25, "store_gbps": 25},
+},
+```
+
+A step log recorded with offloading also holds, for every step in which
+transfers completed, their count, bytes and measured duration per direction;
+passing its path as `kv_offload_timing` fits each direction's latency and
+bandwidth to them by least squares. The fit captures the copy kernels'
+effective throughput on that model's block layout, including any contention
+with the forward pass; the forward pass is not slowed by transfers otherwise.
+A transfer's size is its blocks' KV page size, which overstates layouts where
+the real copy moves less (padded hybrid pages, canonical-layout stores split
+across ranks); rates fitted to a recording of the same model absorb this. A
+step that waits for stores the scheduler must flush pays the wait in the
+simulation; its recorded host time includes it too, so replaying such a step
+counts the wait twice (flushes are rare: they follow preemption or reuse of a
+block still being stored).
+
+On Qwen3-8B / H200 with a 4 GiB GPU KV cache and a 32 GiB CPU cache, 240
+requests at 3 req/s whose prompts are one of 24 shared 4096-token documents
+plus a unique 64-token suffix (OSL 64), replayed from a recording of the same
+configuration under the `fast_forward` clock:
+
+| | TTFT mean | TTFT P99 | TPOT mean | E2E mean |
+| --- | --- | --- | --- | --- |
+| Real (ms) | 45.5 | 164.5 | 5.622 | 399.7 |
+| Simulated, rates fitted from the recording (ms) | 44.9 | 164.4 | 5.616 | 398.7 |
+| Simulated, 25 GB/s guessed (ms) | 52.4 | 164.6 | 5.613 | 406.0 |
+| Simulated without the CPU cache (ms) | 93.6 | 202.1 | 6.755 | 519.2 |
+
+The simulated run issues the same 164 loads (90.3 GB) and 304 stores as the
+real one and takes 11 s instead of 83 s.
+
 ### Running without a GPU
 
 A CPU build of vLLM (`VLLM_TARGET_DEVICE=cpu`, which installs Triton's CPU
@@ -281,8 +341,9 @@ Python 3.11 or newer for triton-cpu.
   has no such limit.
 * On the CPU platform the KV block size must be a multiple of 32.
 * Pipeline stages are assumed balanced.
-* No LoRA, KV transfer or pooling models. Speculative decoding without
-  adaptive verification only, and no diffusion models.
+* No LoRA or pooling models, and no KV transfer other than CPU offloading by
+  the `OffloadingConnector`. Speculative decoding without adaptive
+  verification only, and no diffusion models.
 * The `fast_forward` and `virtual` clocks are offline-only and need a single
   process (one rank); served and multi-rank simulations run in real time.
 * Prompt and output token ids are not meaningful; only their counts are.

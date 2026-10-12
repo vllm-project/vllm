@@ -15,6 +15,7 @@ from __future__ import annotations
 import contextlib
 import dataclasses
 import json
+import math
 import os
 import time
 from collections.abc import Iterator
@@ -352,15 +353,19 @@ class _KNNTable:
         return StepCost(device_s=float(device_s), host_s=float(host_s))
 
 
-def _load_json_or_jsonl(path: str) -> list[dict[str, Any]]:
+def load_step_log(path: str, kv_transfers: bool = False) -> list[dict[str, Any]]:
+    """The step records of a JSON/JSONL step log or hand-written table, or with
+    `kv_transfers` its KV offloading transfer records instead."""
     text = Path(path).read_text()
     stripped = text.lstrip()
     if stripped.startswith("["):
-        return json.loads(text)
-    if stripped.startswith("{") and "\n" not in stripped.strip():
+        records = json.loads(text)
+    elif stripped.startswith("{") and "\n" not in stripped.strip():
         obj = json.loads(text)
-        return obj.get("steps", [obj])
-    return [json.loads(line) for line in text.splitlines() if line.strip()]
+        records = obj.get("steps", [obj])
+    else:
+        records = [json.loads(line) for line in text.splitlines() if line.strip()]
+    return [rec for rec in records if ("kv_transfers" in rec) == kv_transfers]
 
 
 def _record_cost(rec: dict[str, Any]) -> tuple[float, float]:
@@ -400,7 +405,7 @@ def acceptance_rates_from_log(path: str) -> list[float]:
     position i was accepted too."""
     reached = np.zeros(0)
     accepted = np.zeros(0)
-    for rec in _load_json_or_jsonl(path):
+    for rec in load_step_log(path):
         num_accepted = rec.get("cost", {}).get("num_accepted")
         if not num_accepted:
             continue
@@ -425,7 +430,7 @@ class TableTimingProvider:
     `log_path`) or the features `num_reqs`, `num_tokens`, `sum_past_kv`."""
 
     def __init__(self, vllm_config: VllmConfig, *, path: str, k: int = 4) -> None:
-        records = _load_json_or_jsonl(path)
+        records = load_step_log(path)
         self.table = _KNNTable(
             [(_record_features(r), _record_cost(r)) for r in records], k
         )
@@ -454,7 +459,7 @@ class ReplayTimingProvider:
         k: int = 4,
         miss_fallback_s: float = 0.0,
     ) -> None:
-        records = _load_json_or_jsonl(path)
+        records = load_step_log(path)
         self.exact: dict[str, tuple[float, float]] = {}
         points = []
         for rec in records:
@@ -541,6 +546,10 @@ def get_timing_provider(
 
 
 class Clock(Protocol):
+    horizon: float
+    """When the driver of an in-process engine next has work for it (a
+    request arrival); an engine that is only waiting may skip ahead to it."""
+
     def now(self) -> float: ...
 
     def sleep_until(self, deadline: float) -> None: ...
@@ -549,6 +558,8 @@ class Clock(Protocol):
 class RealClock:
     """Wall clock: simulated steps take real time, so every existing metric,
     benchmark client and router sees realistic latencies."""
+
+    horizon = math.inf
 
     def now(self) -> float:
         return time.monotonic()
@@ -569,6 +580,7 @@ class VirtualClock:
 
     def __init__(self) -> None:
         self._now = 0.0
+        self.horizon = math.inf
 
     def now(self) -> float:
         return self._now
@@ -586,6 +598,7 @@ class FastForwardClock:
 
     def __init__(self) -> None:
         self._offset = 0.0
+        self.horizon = math.inf
 
     def now(self) -> float:
         return time.monotonic() + self._offset
@@ -639,9 +652,11 @@ class SimulatedAsyncOutput(AsyncModelRunnerOutput):
         self.output = output
         self.deadline = deadline
         self.clock = clock
+        self.resolved = False
 
     def get_output(self) -> ModelRunnerOutput:
         self.clock.sleep_until(self.deadline)
+        self.resolved = True
         return self.output
 
 
@@ -678,8 +693,9 @@ def step_log_path(vllm_config: VllmConfig) -> str | None:
 
 
 class StepLogWriter:
-    """Appends one JSON line per simulated step. The same records feed the
-    `table` and `replay` providers."""
+    """Appends one JSON line per simulated step, plus one per step in which
+    KV offloading transfers completed. The step records feed the `table` and
+    `replay` providers, the transfer records `kv_offload_timing`."""
 
     def __init__(self, path: str) -> None:
         self.path = Path(path)
@@ -701,6 +717,13 @@ class StepLogWriter:
             "t_deadline": t_deadline,
             "finished_req_ids": finished_req_ids,
         }
+        self._f.write(json.dumps(rec, separators=(",", ":")) + "\n")
+        self._f.flush()
+
+    def write_transfers(self, transfers: dict[str, dict[str, float]], t: float) -> None:
+        """Append the KV offloading transfers that completed in a step, per
+        direction: their count, bytes and summed duration."""
+        rec = {"kv_transfers": transfers, "t": t}
         self._f.write(json.dumps(rec, separators=(",", ":")) + "\n")
         self._f.flush()
 

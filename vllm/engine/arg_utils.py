@@ -2929,9 +2929,21 @@ class EngineArgs:
                         "with more than one rank"
                     )
                 )
-            if self.kv_transfer_config is not None:
+            kv_transfer = self.kv_transfer_config
+            if isinstance(kv_transfer, dict):
+                kv_transfer = KVTransferConfig(**kv_transfer)
+            if kv_transfer is not None and (
+                kv_transfer.kv_connector != "OffloadingConnector"
+                or kv_transfer.kv_connector_extra_config.get(
+                    "spec_name", "CPUOffloadingSpec"
+                )
+                != "CPUOffloadingSpec"
+            ):
                 _raise_unsupported_error(
-                    feature_name="simulated forward with KV transfer"
+                    feature_name=(
+                        "simulated forward with KV transfer other than "
+                        "CPU offloading by the OffloadingConnector"
+                    )
                 )
             if self.weight_transfer_config is not None:
                 _raise_unsupported_error(
