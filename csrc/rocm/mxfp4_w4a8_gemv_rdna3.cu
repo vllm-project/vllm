@@ -93,11 +93,10 @@ __global__ void mxfp4_w4a8_quant_act_kernel(const T* __restrict__ a,
 // One wave (32 lanes) per output column n. Lanes stride over the K groups;
 // each lane decodes its weight group once and reuses it for all M rows.
 template <int M, typename T>
-__global__ void mxfp4_w4a8_gemv_kernel(const int* __restrict__ a_q,
-                                       const float* __restrict__ a_s,
-                                       const uint8_t* __restrict__ b_q,
-                                       const uint8_t* __restrict__ b_scale,
-                                       T* __restrict__ out, int N, int K) {
+__global__ void mxfp4_w4a8_gemv_rdna3_kernel(
+    const int* __restrict__ a_q, const float* __restrict__ a_s,
+    const uint8_t* __restrict__ b_q, const uint8_t* __restrict__ b_scale,
+    T* __restrict__ out, int N, int K) {
   const int groups = K / kGroup;
   const int lane = threadIdx.x;
   const int n = blockIdx.x * blockDim.y + threadIdx.y;
@@ -153,8 +152,9 @@ __global__ void mxfp4_w4a8_quant_act_kernel(const T*, int8_t*, float*, int,
                                             int) {}
 
 template <int M, typename T>
-__global__ void mxfp4_w4a8_gemv_kernel(const int*, const float*, const uint8_t*,
-                                       const uint8_t*, T*, int, int) {}
+__global__ void mxfp4_w4a8_gemv_rdna3_kernel(const int*, const float*,
+                                             const uint8_t*, const uint8_t*, T*,
+                                             int, int) {}
 
 #endif  // __HIP__MXFP4_W4A8_GFX11__ || !__HIP_DEVICE_COMPILE__
 
@@ -190,10 +190,10 @@ void launch(const at::Tensor& a, const at::Tensor& b_q,
   const uint8_t* b_s_ptr = b_scale.data_ptr<uint8_t>();
   T* out_ptr = reinterpret_cast<T*>(out.data_ptr());
 
-#define MXFP4_W4A8_LAUNCH(MM)                                  \
-  case MM:                                                     \
-    mxfp4_w4a8_gemv_kernel<MM, T><<<grid, block, 0, stream>>>( \
-        a_q32, a_s_ptr, b_q_ptr, b_s_ptr, out_ptr, N, K);      \
+#define MXFP4_W4A8_LAUNCH(MM)                                        \
+  case MM:                                                           \
+    mxfp4_w4a8_gemv_rdna3_kernel<MM, T><<<grid, block, 0, stream>>>( \
+        a_q32, a_s_ptr, b_q_ptr, b_s_ptr, out_ptr, N, K);            \
     break;
 
   switch (M) {
@@ -211,32 +211,35 @@ void launch(const at::Tensor& a, const at::Tensor& b_q,
 
 }  // namespace
 
-torch::Tensor mxfp4_w4a8_gemv(const at::Tensor& a, const at::Tensor& b_q,
-                              const at::Tensor& b_scale) {
+torch::Tensor mxfp4_w4a8_gemv_rdna3(const at::Tensor& a, const at::Tensor& b_q,
+                                    const at::Tensor& b_scale) {
   TORCH_CHECK(a.is_cuda() && b_q.is_cuda() && b_scale.is_cuda(),
-              "mxfp4_w4a8_gemv: all inputs must be on the GPU");
+              "mxfp4_w4a8_gemv_rdna3: all inputs must be on the GPU");
   TORCH_CHECK(mxfp4_w4a8_on_gfx11(),
-              "mxfp4_w4a8_gemv requires an RDNA3/RDNA3.5 (gfx11) GPU");
+              "mxfp4_w4a8_gemv_rdna3 requires an RDNA3/RDNA3.5 (gfx11) GPU");
   TORCH_CHECK(a.scalar_type() == at::kHalf || a.scalar_type() == at::kBFloat16,
-              "mxfp4_w4a8_gemv: a must be float16 or bfloat16");
+              "mxfp4_w4a8_gemv_rdna3: a must be float16 or bfloat16");
   TORCH_CHECK(
       b_q.scalar_type() == at::kByte && b_scale.scalar_type() == at::kByte,
-      "mxfp4_w4a8_gemv: b_q and b_scale must be uint8");
+      "mxfp4_w4a8_gemv_rdna3: b_q and b_scale must be uint8");
   TORCH_CHECK(a.dim() == 2 && b_q.dim() == 2 && b_scale.dim() == 2,
-              "mxfp4_w4a8_gemv: inputs must be 2D");
+              "mxfp4_w4a8_gemv_rdna3: inputs must be 2D");
   TORCH_CHECK(
       a.is_contiguous() && b_q.is_contiguous() && b_scale.is_contiguous(),
-      "mxfp4_w4a8_gemv: inputs must be contiguous");
+      "mxfp4_w4a8_gemv_rdna3: inputs must be contiguous");
 
   const int M = a.size(0);
   const int K = a.size(1);
   const int N = b_q.size(0);
   TORCH_CHECK(M >= 1 && M <= kMaxM,
-              "mxfp4_w4a8_gemv supports 1 <= M <= ", kMaxM, ", got M=", M);
-  TORCH_CHECK(K % kGroup == 0, "mxfp4_w4a8_gemv: K must be a multiple of 32");
-  TORCH_CHECK(b_q.size(1) * 2 == K, "mxfp4_w4a8_gemv: b_q must be [N, K/2]");
+              "mxfp4_w4a8_gemv_rdna3 supports 1 <= M <= ", kMaxM,
+              ", got M=", M);
+  TORCH_CHECK(K % kGroup == 0,
+              "mxfp4_w4a8_gemv_rdna3: K must be a multiple of 32");
+  TORCH_CHECK(b_q.size(1) * 2 == K,
+              "mxfp4_w4a8_gemv_rdna3: b_q must be [N, K/2]");
   TORCH_CHECK(b_scale.size(0) == N && b_scale.size(1) == K / kGroup,
-              "mxfp4_w4a8_gemv: b_scale must be [N, K/32]");
+              "mxfp4_w4a8_gemv_rdna3: b_scale must be [N, K/32]");
 
   const at::cuda::OptionalCUDAGuard device_guard(device_of(a));
   auto out = torch::empty({M, N}, a.options());

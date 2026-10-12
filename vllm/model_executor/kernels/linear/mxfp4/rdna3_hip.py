@@ -5,7 +5,7 @@ path.
 
 Routes on the number of activation rows M:
   1 <= M <= MAX_W4A8_BATCH_SIZE (decode, speculative verify):
-      HIP W4A8 GEMV (``_rocm_C.mxfp4_w4a8_gemv``). Activations are quantized
+      HIP W4A8 GEMV (``_rocm_C.mxfp4_w4a8_gemv_rdna3``). Activations are quantized
       to int8 per 32-element group and reduced with int8 dot instructions.
   otherwise (prefill, profiling):
       dequantize the weight and run a high-precision GEMM on the unquantized
@@ -41,7 +41,7 @@ MAX_W4A8_BATCH_SIZE = 8
 _MXFP4_GROUP_SIZE = 32
 
 
-def _rdna_mxfp4_w4a8_apply_impl(
+def _rdna3_mxfp4_w4a8_apply_impl(
     x_2d: torch.Tensor,
     weight: torch.Tensor,
     weight_scale: torch.Tensor,
@@ -51,7 +51,7 @@ def _rdna_mxfp4_w4a8_apply_impl(
 
     M = x_2d.shape[0]
     if 0 < M <= MAX_W4A8_BATCH_SIZE and x_2d.dtype in (torch.float16, torch.bfloat16):
-        out = ops.mxfp4_w4a8_gemv(x_2d, weight, weight_scale)
+        out = ops.mxfp4_w4a8_gemv_rdna3(x_2d, weight, weight_scale)
         if bias is not None:
             out.add_(bias)
         return out
@@ -59,7 +59,7 @@ def _rdna_mxfp4_w4a8_apply_impl(
     return F.linear(x_2d, dequant_mxfp4(weight, weight_scale, x_2d.dtype), bias)
 
 
-def _rdna_mxfp4_w4a8_apply_fake(
+def _rdna3_mxfp4_w4a8_apply_fake(
     x_2d: torch.Tensor,
     weight: torch.Tensor,
     weight_scale: torch.Tensor,
@@ -71,14 +71,14 @@ def _rdna_mxfp4_w4a8_apply_fake(
 
 
 direct_register_custom_op(
-    op_name="rdna_mxfp4_w4a8_apply",
-    op_func=_rdna_mxfp4_w4a8_apply_impl,
+    op_name="rdna3_mxfp4_w4a8_apply",
+    op_func=_rdna3_mxfp4_w4a8_apply_impl,
     mutates_args=[],
-    fake_impl=_rdna_mxfp4_w4a8_apply_fake,
+    fake_impl=_rdna3_mxfp4_w4a8_apply_fake,
 )
 
 
-class RdnaW4A8MxFp4LinearKernel(MxFp4LinearKernel):
+class Rdna3W4A8MxFp4LinearKernel(MxFp4LinearKernel):
     """MXFP4 GEMM for RDNA3/RDNA3.5: W4A8 int8-dot GEMV for M <= 8, dequant +
     high-precision GEMM above."""
 
@@ -94,9 +94,9 @@ class RdnaW4A8MxFp4LinearKernel(MxFp4LinearKernel):
             return False, "requires RDNA3/RDNA3.5 (gfx11)"
         if not (
             hasattr(torch.ops, "_rocm_C")
-            and hasattr(torch.ops._rocm_C, "mxfp4_w4a8_gemv")
+            and hasattr(torch.ops._rocm_C, "mxfp4_w4a8_gemv_rdna3")
         ):
-            return False, "_rocm_C.mxfp4_w4a8_gemv is not built"
+            return False, "_rocm_C.mxfp4_w4a8_gemv_rdna3 is not built"
         return True, None
 
     @classmethod
@@ -120,7 +120,7 @@ class RdnaW4A8MxFp4LinearKernel(MxFp4LinearKernel):
         weight_scale = layer.weight_scale.data
         if weight.dtype != torch.uint8 or weight_scale.dtype != torch.uint8:
             raise ValueError(
-                "RdnaW4A8MxFp4LinearKernel expects uint8 packed weights and "
+                "Rdna3W4A8MxFp4LinearKernel expects uint8 packed weights and "
                 f"uint8 E8M0 scales, got {weight.dtype} and {weight_scale.dtype}"
             )
         N, k_half = weight.shape
@@ -130,7 +130,7 @@ class RdnaW4A8MxFp4LinearKernel(MxFp4LinearKernel):
             K // _MXFP4_GROUP_SIZE,
         ):
             raise ValueError(
-                "RdnaW4A8MxFp4LinearKernel expects weight [N, K/2] and "
+                "Rdna3W4A8MxFp4LinearKernel expects weight [N, K/2] and "
                 f"weight_scale [N, K/32] with K % 32 == 0, got "
                 f"{tuple(weight.shape)} and {tuple(weight_scale.shape)}"
             )
@@ -146,7 +146,7 @@ class RdnaW4A8MxFp4LinearKernel(MxFp4LinearKernel):
         x_2d = x.reshape(-1, x.shape[-1])
         if not x_2d.is_contiguous():
             x_2d = x_2d.contiguous()
-        out = torch.ops.vllm.rdna_mxfp4_w4a8_apply(
+        out = torch.ops.vllm.rdna3_mxfp4_w4a8_apply(
             x_2d, layer.weight, layer.weight_scale, bias
         )
         return out.reshape(*x.shape[:-1], out.shape[-1])
