@@ -1,0 +1,26 @@
+# auto (final_output_only)
+triggered_tags [`]<]minimax[>[<tool_call>`] excluding [`<mm:think>`, `</mm:think>`, `]<]minimax[>[</tool_call>`, `]<]minimax[>[<invoke`, `]<]minimax[>[</invoke>`]
+  tag `]<]minimax[>[<tool_call>\n` .. `]<]minimax[>[</tool_call>`
+    tags_with_separator `` at_least_one
+      tag `]<]minimax[>[<invoke name="get_weather">` tag `]<]minimax[>[<location>` text excluding [`]<]minimax[>[`] `]<]minimax[>[</location>` `]<]minimax[>[</invoke>\n`
+      tag `]<]minimax[>[<invoke name="add">` .. `]<]minimax[>[</invoke>\n`
+        sequence
+          tag `]<]minimax[>[<y>` json(number) `]<]minimax[>[</y>`
+          tag `]<]minimax[>[<x>` json(number) `]<]minimax[>[</x>`
+          tag `]<]minimax[>[<items>` .. `]<]minimax[>[</items>`
+            star tag `]<]minimax[>[<item>` text excluding [`]<]minimax[>[`] `]<]minimax[>[</item>`
+
+# required (final_output_only)
+triggered_tags [`]<]minimax[>[<tool_call>`] excluding [`<mm:think>`, `</mm:think>`, `]<]minimax[>[</tool_call>`, `]<]minimax[>[<invoke`, `]<]minimax[>[</invoke>`] at_least_one
+  tag `]<]minimax[>[<tool_call>\n` .. `]<]minimax[>[</tool_call>`
+    tags_with_separator `` at_least_one
+      tag `]<]minimax[>[<invoke name="get_weather">` tag `]<]minimax[>[<location>` text excluding [`]<]minimax[>[`] `]<]minimax[>[</location>` `]<]minimax[>[</invoke>\n`
+      tag `]<]minimax[>[<invoke name="add">` .. `]<]minimax[>[</invoke>\n`
+        sequence
+          tag `]<]minimax[>[<y>` json(number) `]<]minimax[>[</y>`
+          tag `]<]minimax[>[<x>` json(number) `]<]minimax[>[</x>`
+          tag `]<]minimax[>[<items>` .. `]<]minimax[>[</items>`
+            star tag `]<]minimax[>[<item>` text excluding [`]<]minimax[>[`] `]<]minimax[>[</item>`
+
+# named (final_output_only)
+tag `]<]minimax[>[<tool_call>\n` tag `]<]minimax[>[<invoke name="get_weather">` tag `]<]minimax[>[<location>` text excluding [`]<]minimax[>[`] `]<]minimax[>[</location>` `]<]minimax[>[</invoke>\n` `]<]minimax[>[</tool_call>`

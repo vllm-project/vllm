@@ -8,8 +8,8 @@ use super::{
     Result,
 };
 
-const M3_THINK_START: &str = "<mm:think>";
-const M3_THINK_END: &str = "</mm:think>";
+pub(crate) const M3_THINK_START: &str = "<mm:think>";
+pub(crate) const M3_THINK_END: &str = "</mm:think>";
 
 /// Reasoning parser for MiniMax M3 style outputs.
 ///

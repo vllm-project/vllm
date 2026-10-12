@@ -10,7 +10,9 @@
 //! and enums split per option. An [`ArgumentSyntax`], implemented next to each
 //! parser, decides how one parameter and its value options are rendered.
 //! Values nested below a parameter stay with XGrammar's JSON schema converter
-//! through [`ValueOption::json`].
+//! through [`ValueOption::json`], unless the syntax renders nested objects as
+//! keyed parameters too, through [`ValueOption::fields`] and
+//! [`ValueOption::items`].
 //!
 //! This is for protocols whose argument rendering XGrammar's per-model schema
 //! styles do not cover, or cover without matching the parser. Parameter lists
@@ -25,7 +27,7 @@
 //! - `minProperties` and `maxProperties` are not enforced.
 //! - `allOf` with more than one schema accepts any value.
 
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use xgrammar_structural_tag::format::{Format, JsonSchemaFormat};
 
 pub use crate::schema::JsonType;
@@ -34,6 +36,14 @@ use crate::schema::{self, OptionSource, SchemaOption, SchemaRoot};
 /// The schema accepting any value.
 static ANY_SCHEMA: Value = Value::Bool(true);
 
+/// Bound on the object and array levels a syntax renders through
+/// [`ValueOption::fields`] and [`ValueOption::items`], which keeps a deep schema
+/// from overflowing the stack.
+const MAX_NESTING_DEPTH: usize = 32;
+
+/// A schema object.
+type SchemaMap<'a> = &'a Map<String, Value>;
+
 /// How one protocol renders the parameters of a call.
 pub trait ArgumentSyntax {
     /// Text around and between parameters, or `None` when parameters are
@@ -41,7 +51,9 @@ pub trait ArgumentSyntax {
     fn separator(&self) -> Option<Format>;
 
     /// The grammar of one parameter whose value takes one of `options`, or
-    /// `None` when none of them can be rendered.
+    /// `None` when none of them can be rendered. A syntax that renders no
+    /// [`ParameterKey::Free`] parameter cannot render objects that admit
+    /// undeclared keys; see [`arguments`].
     fn parameter(&self, key: ParameterKey<'_>, options: &[ValueOption<'_>]) -> Option<Format>;
 }
 
@@ -81,9 +93,11 @@ pub struct ValueOption<'a> {
     pub ty: JsonType,
     source: OptionSource<'a>,
     cx: &'a ArgumentContext<'a>,
+    /// Object and array schemas rendered around this value, outermost first.
+    enclosing: Vec<SchemaMap<'a>>,
 }
 
-impl ValueOption<'_> {
+impl<'a> ValueOption<'a> {
     /// The option as JSON text.
     pub fn json(&self) -> Format {
         match &self.source {
@@ -126,6 +140,60 @@ impl ValueOption<'_> {
             OptionSource::Any => text(),
         })
     }
+
+    /// The fields of an object option as keyed parameters rendered by
+    /// `syntax`, like the root arguments.
+    ///
+    /// `None` for a non-object option, a constant, an object of any shape, an
+    /// object that admits keys `syntax` cannot render, or one that
+    /// [`Self::recurses`]; a syntax then needs a fallback for the value.
+    // TODO: render constant objects as fixed fields.
+    pub fn fields(&self, syntax: &dyn ArgumentSyntax) -> Option<Format> {
+        if self.ty != JsonType::Object {
+            return None;
+        }
+        let (schema, enclosing) = self.nested()?;
+        self.cx.parameters(schema, syntax, &enclosing)
+    }
+
+    /// The options of an array option's items.
+    ///
+    /// `None` for a non-array option, a constant, an array of any items, or one
+    /// that [`Self::recurses`]. Every item takes the same options.
+    // TODO: honor `prefixItems`.
+    pub fn items(&self) -> Option<Vec<ValueOption<'a>>> {
+        if self.ty != JsonType::Array {
+            return None;
+        }
+        let (schema, enclosing) = self.nested()?;
+        let items = schema.get("items").unwrap_or(&ANY_SCHEMA);
+        Some(self.cx.value_options(items, &enclosing))
+    }
+
+    /// Whether the option's children cannot be rendered by nesting: its
+    /// schema encloses itself through references, or sits
+    /// [`MAX_NESTING_DEPTH`] levels deep.
+    pub fn recurses(&self) -> bool {
+        let OptionSource::Schema(schema) = self.source else {
+            return false;
+        };
+        self.enclosing.len() >= MAX_NESTING_DEPTH
+            || self.enclosing.iter().any(|outer| std::ptr::eq(*outer, schema))
+    }
+
+    /// The option's schema and the enclosing schemas of its children, or
+    /// `None` when the option has no schema or [`Self::recurses`].
+    fn nested(&self) -> Option<(SchemaMap<'a>, Vec<SchemaMap<'a>>)> {
+        let OptionSource::Schema(schema) = self.source else {
+            return None;
+        };
+        if self.recurses() {
+            return None;
+        }
+        let mut enclosing = self.enclosing.clone();
+        enclosing.push(schema);
+        Some((schema, enclosing))
+    }
 }
 
 /// Request options that also apply to nested JSON schema regions.
@@ -146,7 +214,7 @@ struct ArgumentContext<'a> {
     root: SchemaRoot<'a>,
 }
 
-impl ArgumentContext<'_> {
+impl<'a> ArgumentContext<'a> {
     /// A JSON value under `schema`, which keeps the root's definitions so its
     /// local `$ref`s still resolve.
     fn json(&self, mut schema: Value) -> Format {
@@ -166,62 +234,98 @@ impl ArgumentContext<'_> {
         })
     }
 
-    /// Every option of a value under `schema`.
-    fn value_options<'s>(&'s self, schema: &'s Value) -> Vec<ValueOption<'s>> {
-        let root: SchemaRoot<'s> = self.root;
-        root.options(schema)
+    /// Every option of a value under `schema`, nested in `enclosing`.
+    fn value_options(
+        &'a self,
+        schema: &'a Value,
+        enclosing: &[SchemaMap<'a>],
+    ) -> Vec<ValueOption<'a>> {
+        self.root
+            .options(schema)
             .into_iter()
             .map(|SchemaOption { ty, source }| ValueOption {
                 ty,
                 source,
                 cx: self,
+                enclosing: enclosing.to_vec(),
             })
             .collect()
+    }
+
+    /// The keyed parameters of an object under `schema`, nested in
+    /// `enclosing`, or `None` when it admits undeclared keys that `syntax`
+    /// cannot render.
+    fn parameters(
+        &'a self,
+        schema: SchemaMap<'a>,
+        syntax: &dyn ArgumentSyntax,
+        enclosing: &[SchemaMap<'a>],
+    ) -> Option<Format> {
+        let parameter = |key: ParameterKey<'_>, schema: &'a Value| {
+            syntax.parameter(key, &self.value_options(schema, enclosing))
+        };
+        let undeclared = match schema.get("additionalProperties") {
+            Some(Value::Bool(false)) => None,
+            Some(additional) => Some(additional),
+            // Strict schemas allow no undeclared properties, and a schema
+            // without declared properties allows any.
+            None if schema.contains_key("properties") => None,
+            None => Some(&ANY_SCHEMA),
+        };
+        let additional = match undeclared {
+            Some(additional) => Some(parameter(ParameterKey::Free, additional)?),
+            None => None,
+        };
+        let required = schema
+            .get("required")
+            .and_then(Value::as_array)
+            .map(|required| required.iter().filter_map(Value::as_str).collect::<Vec<_>>())
+            .unwrap_or_default();
+        let properties = schema
+            .get("properties")
+            .and_then(Value::as_object)
+            .into_iter()
+            .flatten()
+            .filter_map(|(key, schema)| {
+                let parameter = parameter(ParameterKey::Declared(key), schema)?;
+                Some((parameter, required.contains(&key.as_str())))
+            })
+            .collect();
+        Some(parameter_list(
+            self.options,
+            syntax.separator(),
+            properties,
+            additional,
+        ))
     }
 }
 
 /// Build the grammar of one call's arguments under `schema`, the tool's
-/// parameters schema, rendering each parameter with `syntax`.
-pub fn arguments(schema: &Value, syntax: &dyn ArgumentSyntax, options: &ArgumentOptions) -> Format {
+/// parameters schema, rendering each parameter with `syntax`, or `None` when
+/// the arguments admit undeclared keys that `syntax` cannot render.
+pub fn arguments(
+    schema: &Value,
+    syntax: &dyn ArgumentSyntax,
+    options: &ArgumentOptions,
+) -> Option<Format> {
     let cx = ArgumentContext {
         options,
         root: SchemaRoot::new(schema),
     };
-    let parameter =
-        |key: ParameterKey<'_>, schema: &Value| syntax.parameter(key, &cx.value_options(schema));
-
-    let schema = cx.root.resolved();
-    let (properties, additional) = match schema {
-        Value::Object(schema) => {
-            let additional = match schema.get("additionalProperties") {
-                Some(Value::Bool(false)) => None,
-                Some(additional) => parameter(ParameterKey::Free, additional),
-                // Strict schemas allow no undeclared properties, and a schema
-                // without declared properties allows any.
-                None if schema.contains_key("properties") => None,
-                None => parameter(ParameterKey::Free, &ANY_SCHEMA),
-            };
-            let required = schema
-                .get("required")
-                .and_then(Value::as_array)
-                .map(|required| required.iter().filter_map(Value::as_str).collect::<Vec<_>>())
-                .unwrap_or_default();
-            let properties = schema
-                .get("properties")
-                .and_then(Value::as_object)
-                .into_iter()
-                .flatten()
-                .filter_map(|(key, schema)| {
-                    let parameter = parameter(ParameterKey::Declared(key), schema)?;
-                    Some((parameter, required.contains(&key.as_str())))
-                })
-                .collect();
-            (properties, additional)
+    match cx.root.resolved() {
+        Value::Object(schema) => cx.parameters(schema, syntax, &[]),
+        Value::Bool(false) => Some(parameter_list(options, syntax.separator(), vec![], None)),
+        _ => {
+            let options = cx.value_options(&ANY_SCHEMA, &[]);
+            let additional = syntax.parameter(ParameterKey::Free, &options)?;
+            Some(parameter_list(
+                cx.options,
+                syntax.separator(),
+                vec![],
+                Some(additional),
+            ))
         }
-        Value::Bool(false) => (vec![], None),
-        _ => (vec![], parameter(ParameterKey::Free, &ANY_SCHEMA)),
-    };
-    parameter_list(options, syntax.separator(), properties, additional)
+    }
 }
 
 /// Parameters in declared order, required ones mandatory, followed by any
@@ -359,6 +463,40 @@ mod tests {
         }
     }
 
+    /// M3-like: `<KEY>VALUE</KEY>` with objects as nested fields and arrays as
+    /// `<item>` elements, and JSON where a value cannot nest.
+    struct Nested;
+
+    impl ArgumentSyntax for Nested {
+        fn separator(&self) -> Option<Format> {
+            None
+        }
+
+        fn parameter(&self, key: ParameterKey<'_>, options: &[ValueOption<'_>]) -> Option<Format> {
+            let ParameterKey::Declared(key) = key else {
+                return None;
+            };
+            let values = options.iter().map(nested_value).collect();
+            Some(Format::tag(
+                format!("<{key}>"),
+                one_of(values),
+                format!("</{key}>"),
+            ))
+        }
+    }
+
+    fn nested_value(option: &ValueOption<'_>) -> Format {
+        let nested = match option.ty {
+            JsonType::Object => option.fields(&Nested),
+            JsonType::Array => option.items().map(|items| {
+                let values = items.iter().map(nested_value).collect();
+                Format::star(Format::tag("<item>", one_of(values), "</item>"))
+            }),
+            _ => None,
+        };
+        nested.unwrap_or_else(|| option.json())
+    }
+
     fn check(schema: Value, syntax: &dyn ArgumentSyntax, expected: Expect) {
         check_with(schema, syntax, &ArgumentOptions::default(), expected);
     }
@@ -369,7 +507,11 @@ mod tests {
         options: &ArgumentOptions,
         expected: Expect,
     ) {
-        expected.assert_eq(&outline(&arguments(&schema, syntax, options)));
+        let outline = match arguments(&schema, syntax, options) {
+            Some(arguments) => outline(&arguments),
+            None => "none\n".to_string(),
+        };
+        expected.assert_eq(&outline);
     }
 
     fn weather_schema() -> Value {
@@ -477,7 +619,7 @@ mod tests {
             },
             "required": ["place", "name"]
         });
-        let arguments = arguments(&schema, &Typed, &ArgumentOptions::default());
+        let arguments = arguments(&schema, &Typed, &ArgumentOptions::default()).unwrap();
         expect![[r#"
             sequence
               tag `<arg key="place" type="object">` json({ city?: string } where place = { city?: string }, name = string) `</arg>`
@@ -649,6 +791,104 @@ mod tests {
             },
             expect![[r#"
                 tag `<arg key="tag" type="string">` `ok` `</arg>`
+            "#]],
+        );
+    }
+
+    #[test]
+    fn nested_objects_and_arrays_render_through_the_syntax() {
+        check(
+            json!({
+                "type": "object",
+                "properties": {
+                    "place": {
+                        "type": "object",
+                        "properties": { "city": { "type": "string" }, "zip": { "type": "integer" } },
+                        "required": ["city"]
+                    },
+                    "stops": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": { "name": { "type": "string" } },
+                            "additionalProperties": false
+                        }
+                    }
+                },
+                "required": ["place"]
+            }),
+            &Nested,
+            expect![[r#"
+                sequence
+                  tag `<place>` .. `</place>`
+                    sequence
+                      tag `<city>` json(string) `</city>`
+                      optional tag `<zip>` json(integer) `</zip>`
+                  optional
+                    tag `<stops>` .. `</stops>`
+                      star
+                        tag `<item>` .. `</item>`
+                          optional tag `<name>` json(string) `</name>`
+            "#]],
+        );
+    }
+
+    #[test]
+    fn nesting_stops_at_recursion_and_undeclared_keys() {
+        check(
+            json!({
+                "$defs": {
+                    "node": {
+                        "type": "object",
+                        "properties": {
+                            "label": { "type": "string" },
+                            "children": { "type": "array", "items": { "$ref": "#/$defs/node" } }
+                        },
+                        "additionalProperties": false
+                    }
+                },
+                "type": "object",
+                "properties": {
+                    "tree": { "$ref": "#/$defs/node" },
+                    "labels": { "type": "object", "additionalProperties": { "type": "string" } },
+                    "extra": { "type": "object" }
+                },
+                "additionalProperties": false
+            }),
+            &Nested,
+            expect![[r#"
+                sequence
+                  optional
+                    tag `<tree>` .. `</tree>`
+                      sequence
+                        optional tag `<label>` json(string where node = { label?: string, children?: node[] }) `</label>`
+                        optional
+                          tag `<children>` .. `</children>`
+                            star tag `<item>` json({ label?: string, children?: node[] } where node = { label?: string, children?: node[] }) `</item>`
+                  optional tag `<labels>` json({ ...: string } where node = { label?: string, children?: node[] }) `</labels>`
+                  optional tag `<extra>` json(object where node = { label?: string, children?: node[] }) `</extra>`
+            "#]],
+        );
+    }
+
+    #[test]
+    fn undeclared_keys_without_free_parameters_cannot_render() {
+        check(
+            json!(true),
+            &Nested,
+            expect![[r#"
+            none
+        "#]],
+        );
+        check(
+            json!({
+                "type": "object",
+                "properties": { "path": { "type": "string" } },
+                "additionalProperties": { "type": "boolean" }
+            }),
+            &Nested,
+            expect![[r#"
+                none
             "#]],
         );
     }

@@ -1,0 +1,269 @@
+{
+  "model_id": "MiniMaxAI/MiniMax-M3",
+  "vocab_size": 200064,
+  "all_stop_token_ids": [200020],
+  "cases": {
+    "auto": {
+      "grammar": {
+        "format": {
+          "type": "triggered_tags",
+          "triggers": [
+            "]<]minimax[>[<tool_call>"
+          ],
+          "tags": [
+            {
+              "type": "tag",
+              "begin": "]<]minimax[>[<tool_call>\n",
+              "content": {
+                "type": "tags_with_separator",
+                "tags": [
+                  {
+                    "type": "tag",
+                    "begin": "]<]minimax[>[<invoke name=\"get_weather\">",
+                    "content": {
+                      "type": "tag",
+                      "begin": "]<]minimax[>[<location>",
+                      "content": {
+                        "type": "any_text",
+                        "excludes": [
+                          "]<]minimax[>["
+                        ],
+                        "max_tokens": null,
+                        "max_chars": null
+                      },
+                      "end": "]<]minimax[>[</location>"
+                    },
+                    "end": "]<]minimax[>[</invoke>\n"
+                  },
+                  {
+                    "type": "tag",
+                    "begin": "]<]minimax[>[<invoke name=\"add\">",
+                    "content": {
+                      "type": "sequence",
+                      "elements": [
+                        {
+                          "type": "tag",
+                          "begin": "]<]minimax[>[<y>",
+                          "content": {
+                            "type": "json_schema",
+                            "json_schema": {
+                              "type": "number"
+                            },
+                            "style": "json",
+                            "any_order": false,
+                            "max_whitespace_cnt": null,
+                            "excludes": []
+                          },
+                          "end": "]<]minimax[>[</y>"
+                        },
+                        {
+                          "type": "tag",
+                          "begin": "]<]minimax[>[<x>",
+                          "content": {
+                            "type": "json_schema",
+                            "json_schema": {
+                              "type": "number"
+                            },
+                            "style": "json",
+                            "any_order": false,
+                            "max_whitespace_cnt": null,
+                            "excludes": []
+                          },
+                          "end": "]<]minimax[>[</x>"
+                        },
+                        {
+                          "type": "tag",
+                          "begin": "]<]minimax[>[<items>",
+                          "content": {
+                            "type": "star",
+                            "content": {
+                              "type": "tag",
+                              "begin": "]<]minimax[>[<item>",
+                              "content": {
+                                "type": "any_text",
+                                "excludes": [
+                                  "]<]minimax[>["
+                                ],
+                                "max_tokens": null,
+                                "max_chars": null
+                              },
+                              "end": "]<]minimax[>[</item>"
+                            }
+                          },
+                          "end": "]<]minimax[>[</items>"
+                        }
+                      ]
+                    },
+                    "end": "]<]minimax[>[</invoke>\n"
+                  }
+                ],
+                "separator": "",
+                "at_least_one": true,
+                "stop_after_first": false
+              },
+              "end": "]<]minimax[>[</tool_call>"
+            }
+          ],
+          "at_least_one": false,
+          "stop_after_first": false,
+          "excludes": [
+            "<mm:think>",
+            "</mm:think>",
+            "]<]minimax[>[</tool_call>",
+            "]<]minimax[>[<invoke",
+            "]<]minimax[>[</invoke>"
+          ]
+        },
+        "coverage": "final_output_only"
+      },
+      "completion": "<mm:think>Need call the weather and add tools.</mm:think>I will call the tools.]<]minimax[>[<tool_call>\n]<]minimax[>[<invoke name=\"get_weather\">]<]minimax[>[<location>Shanghai]<]minimax[>[</location>]<]minimax[>[</invoke>\n]<]minimax[>[<invoke name=\"add\">]<]minimax[>[<y>1.0]<]minimax[>[</y>]<]minimax[>[<x>2]<]minimax[>[</x>]<]minimax[>[<items>]<]minimax[>[<item>left]<]minimax[>[</item>]<]minimax[>[<item>right]<]minimax[>[</item>]<]minimax[>[</items>]<]minimax[>[</invoke>\n]<]minimax[>[</tool_call>",
+      "generation_token_ids": [200059, 42478, 1728, 275, 12562, 306, 1187, 6629, 46, 200060, 73, 715, 1728, 275, 6629, 46, 200058, 200052, 10, 200058, 60, 88638, 1925, 1139, 848, 95, 51872, 3361, 200058, 60, 28415, 62, 165806, 200058, 1579, 28415, 62, 200058, 1579, 88638, 1100, 200058, 60, 88638, 1925, 1139, 2132, 3361, 200058, 60, 121, 62, 49, 46, 48, 200058, 1579, 121, 62, 200058, 161014, 62, 50, 200058, 1579, 120, 62, 200058, 60, 12405, 62, 200058, 60, 1896, 62, 2038, 200058, 1579, 1896, 62, 200058, 60, 1896, 62, 1581, 200058, 1579, 1896, 62, 200058, 1579, 12405, 62, 200058, 1579, 88638, 1100, 200058, 200053, 200020]
+    },
+    "required": {
+      "grammar": {
+        "format": {
+          "type": "triggered_tags",
+          "triggers": [
+            "]<]minimax[>[<tool_call>"
+          ],
+          "tags": [
+            {
+              "type": "tag",
+              "begin": "]<]minimax[>[<tool_call>\n",
+              "content": {
+                "type": "tags_with_separator",
+                "tags": [
+                  {
+                    "type": "tag",
+                    "begin": "]<]minimax[>[<invoke name=\"get_weather\">",
+                    "content": {
+                      "type": "tag",
+                      "begin": "]<]minimax[>[<location>",
+                      "content": {
+                        "type": "any_text",
+                        "excludes": [
+                          "]<]minimax[>["
+                        ],
+                        "max_tokens": null,
+                        "max_chars": null
+                      },
+                      "end": "]<]minimax[>[</location>"
+                    },
+                    "end": "]<]minimax[>[</invoke>\n"
+                  },
+                  {
+                    "type": "tag",
+                    "begin": "]<]minimax[>[<invoke name=\"add\">",
+                    "content": {
+                      "type": "sequence",
+                      "elements": [
+                        {
+                          "type": "tag",
+                          "begin": "]<]minimax[>[<y>",
+                          "content": {
+                            "type": "json_schema",
+                            "json_schema": {
+                              "type": "number"
+                            },
+                            "style": "json",
+                            "any_order": false,
+                            "max_whitespace_cnt": null,
+                            "excludes": []
+                          },
+                          "end": "]<]minimax[>[</y>"
+                        },
+                        {
+                          "type": "tag",
+                          "begin": "]<]minimax[>[<x>",
+                          "content": {
+                            "type": "json_schema",
+                            "json_schema": {
+                              "type": "number"
+                            },
+                            "style": "json",
+                            "any_order": false,
+                            "max_whitespace_cnt": null,
+                            "excludes": []
+                          },
+                          "end": "]<]minimax[>[</x>"
+                        },
+                        {
+                          "type": "tag",
+                          "begin": "]<]minimax[>[<items>",
+                          "content": {
+                            "type": "star",
+                            "content": {
+                              "type": "tag",
+                              "begin": "]<]minimax[>[<item>",
+                              "content": {
+                                "type": "any_text",
+                                "excludes": [
+                                  "]<]minimax[>["
+                                ],
+                                "max_tokens": null,
+                                "max_chars": null
+                              },
+                              "end": "]<]minimax[>[</item>"
+                            }
+                          },
+                          "end": "]<]minimax[>[</items>"
+                        }
+                      ]
+                    },
+                    "end": "]<]minimax[>[</invoke>\n"
+                  }
+                ],
+                "separator": "",
+                "at_least_one": true,
+                "stop_after_first": false
+              },
+              "end": "]<]minimax[>[</tool_call>"
+            }
+          ],
+          "at_least_one": true,
+          "stop_after_first": false,
+          "excludes": [
+            "<mm:think>",
+            "</mm:think>",
+            "]<]minimax[>[</tool_call>",
+            "]<]minimax[>[<invoke",
+            "]<]minimax[>[</invoke>"
+          ]
+        },
+        "coverage": "final_output_only"
+      },
+      "completion": "<mm:think>Need call the weather and add tools.</mm:think>]<]minimax[>[<tool_call>\n]<]minimax[>[<invoke name=\"get_weather\">]<]minimax[>[<location>Shanghai]<]minimax[>[</location>]<]minimax[>[</invoke>\n]<]minimax[>[<invoke name=\"add\">]<]minimax[>[<y>1.0]<]minimax[>[</y>]<]minimax[>[<x>2]<]minimax[>[</x>]<]minimax[>[<items>]<]minimax[>[<item>left]<]minimax[>[</item>]<]minimax[>[<item>right]<]minimax[>[</item>]<]minimax[>[</items>]<]minimax[>[</invoke>\n]<]minimax[>[</tool_call>",
+      "generation_token_ids": [200059, 42478, 1728, 275, 12562, 306, 1187, 6629, 46, 200060, 200058, 200052, 10, 200058, 60, 88638, 1925, 1139, 848, 95, 51872, 3361, 200058, 60, 28415, 62, 165806, 200058, 1579, 28415, 62, 200058, 1579, 88638, 1100, 200058, 60, 88638, 1925, 1139, 2132, 3361, 200058, 60, 121, 62, 49, 46, 48, 200058, 1579, 121, 62, 200058, 161014, 62, 50, 200058, 1579, 120, 62, 200058, 60, 12405, 62, 200058, 60, 1896, 62, 2038, 200058, 1579, 1896, 62, 200058, 60, 1896, 62, 1581, 200058, 1579, 1896, 62, 200058, 1579, 12405, 62, 200058, 1579, 88638, 1100, 200058, 200053, 200020]
+    },
+    "named": {
+      "grammar": {
+        "format": {
+          "type": "tag",
+          "begin": "]<]minimax[>[<tool_call>\n",
+          "content": {
+            "type": "tag",
+            "begin": "]<]minimax[>[<invoke name=\"get_weather\">",
+            "content": {
+              "type": "tag",
+              "begin": "]<]minimax[>[<location>",
+              "content": {
+                "type": "any_text",
+                "excludes": [
+                  "]<]minimax[>["
+                ],
+                "max_tokens": null,
+                "max_chars": null
+              },
+              "end": "]<]minimax[>[</location>"
+            },
+            "end": "]<]minimax[>[</invoke>\n"
+          },
+          "end": "]<]minimax[>[</tool_call>"
+        },
+        "coverage": "final_output_only"
+      },
+      "completion": "<mm:think>Need call the weather and add tools.</mm:think>]<]minimax[>[<tool_call>\n]<]minimax[>[<invoke name=\"get_weather\">]<]minimax[>[<location>Shanghai]<]minimax[>[</location>]<]minimax[>[</invoke>\n]<]minimax[>[</tool_call>",
+      "generation_token_ids": [200059, 42478, 1728, 275, 12562, 306, 1187, 6629, 46, 200060, 200058, 200052, 10, 200058, 60, 88638, 1925, 1139, 848, 95, 51872, 3361, 200058, 60, 28415, 62, 165806, 200058, 1579, 28415, 62, 200058, 1579, 88638, 1100, 200058, 200053, 200020]
+    }
+  }
+}
