@@ -1,101 +1,117 @@
-# Programmable KV cache validation
+# Programmable KV Cache 测试命令
 
-`evaluate.py` establishes a model baseline using downloaded GSM8K data. It runs
-the same seeded questions with forced prefix recomputation and with prefix-cache
-reads enabled, recording per-question outputs, numeric correctness, cache hits,
-truncation and output differences. The shared few-shot prefix must reach the
-model's actual cache-group boundaries.
+- [分支实现与验证结果](../../docs/programmable-kvc/testing.md)
+- [已执行实验报告](../../docs/programmable-kvc/rollout-report-2026-10-12.md)
+- [当前与历史证据索引](../../openspec/changes/programmable-kv-cache/validation.md)
+- [原语与生命周期契约](../../vllm/v1/kv_hints/README.md)
 
-```bash
-CUDA_VISIBLE_DEVICES=0,3 OMP_NUM_THREADS=4 \
-VLLM_WORKER_MULTIPROC_METHOD=spawn HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 \
-.venv/bin/python benchmarks/programmable_kv_cache/evaluate.py \
-  --model /home/youwei/bzh/model/Qwen/Qwen3.8-27B \
-  --dataset /home/youwei/bzh/dataset/openai/gsm8k \
-  --num-samples 128 --num-fewshot 8 --max-tokens 1024 \
-  --tensor-parallel-size 2 --kv-cache-memory-bytes 4294967296 \
-  --output /tmp/programmable-kv-gsm8k-baseline-results.json
-```
+以下命令从仓库根目录执行，Python 使用 `.venv/bin/python`。
+本地只使用 GPU 0、3；性能、模型正确性和其他回归安排在独立窗口。
+模型/数据路径可替换为对应本地副本。
+`results/` 保存本地实验输出，已加入 `.gitignore`，原始轨迹、日志和采样文件不随代码提交。
+复现命令中的 `--trace` 指向本地已有轨迹；新环境需用下面的在线采集命令生成轨迹，并替换该路径。
 
-The local baseline uses model revision
-`1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0` and dataset revision
-`740312add88f781978c0658806c59bc2815b9866`. Model and data preparation used the
-user-supplied download functions. Other environments can pass their own local
-paths.
+## 在线 rollout 与重复性能对照
 
-## Recorded local baseline
+`verl_rollout.py` 使用真实 verl ToolAgentLoop、题目查询与算术工具，保存 token 对数概率、响应掩码、奖励分数和控制结果。
+需要可导入的 verl 仓库及其 Agent Loop 依赖；本轮使用的提交为 `fbb4b3a8bf636f290c9c59fc346f756849e9c241`。
 
-The compressed JSON under `results/` contains the configuration and all 256
-generation records. Both modes score 125/128 (97.66%); neither truncates an answer.
-Forced recomputation has zero cached tokens; the cache-enabled run has 99,568.
-Final numeric answers match on all questions, while token sequences differ on 27.
+实验设置与计时说明见[实验报告](../../docs/programmable-kvc/rollout-report-2026-10-12.md)。
 
-This run leaves the new programmable controller disconnected from serving.
-It validates the existing model/cache baseline and does not demonstrate native
-hint execution, backend transfers, policy benefits or a serving speedup.
-The complete serving/backend/policy matrix remains in the OpenSpec task list.
-
-## Native control runtime
-
-Pass `--enable-kv-control` to the accuracy command to initialize the native control
-runtime and exercise request-free association, following retention, replay, query,
-events, stale-epoch rejection and explicit cleanup before the two 128-question
-runs. The enabled run scores 125/128 in each mode, with no truncation or final
-numeric-answer mismatches; token sequences differ on 33 questions. These are
-accuracy/transport checks, with no cold-tier transfer or policy comparison.
-
-`http_control.py` exercises a real serving process. Start it with:
+对已配置的服务采集在线轨迹：
 
 ```bash
-CUDA_VISIBLE_DEVICES=0,3 .venv/bin/python -m vllm.entrypoints.openai.api_server \
-  --model /home/youwei/bzh/model/Qwen/Qwen3.8-27B \
-  --served-model-name qwen-validation --tensor-parallel-size 2 \
-  --max-model-len 4096 --max-num-seqs 8 --max-num-batched-tokens 2048 \
-  --kv-cache-memory-bytes 4294967296 --mamba-cache-mode align \
-  --enforce-eager --disable-custom-all-reduce --dtype bfloat16 \
-  --enable-prefix-caching --enable-prompt-tokens-details \
-  --kv-control-config '{"engine_id":"http-validation"}' \
-  --host 127.0.0.1 --port 18083
-```
-
-Then run:
-
-```bash
-CUDA_VISIBLE_DEVICES=0,3 .venv/bin/python \
-  benchmarks/programmable_kv_cache/http_control.py \
+PYTHONPATH=../verl \
+  CUDA_VISIBLE_DEVICES=0,3 \
+  OMP_NUM_THREADS=1 \
+  .venv/bin/python -m benchmarks.programmable_kv_cache.verl_rollout \
   --base-url http://127.0.0.1:18083 \
+  --model /home/youwei/bzh/model/Qwen/Qwen3.8-27B \
   --dataset /home/youwei/bzh/dataset/openai/gsm8k \
-  --output /tmp/qwen-http-kv-control.json
+  --mode native \
+  --prompts 8 \
+  --samples 4 \
+  --families 8 \
+  --fewshot 48 \
+  --concurrency 16 \
+  --max-tokens 256 \
+  --temperature 0.6 \
+  --seed 0 \
+  --output /tmp/kv-live-trace.json.gz
 ```
 
-The workflow uses unique command IDs, the advertised hash/group profile and actual
-server tokenization. It validates cold/warm cache hits, Retain/Release, two logical
-branches, append-only rewrite rejection, physical Evict, completion/chat/streaming
-attached hints, correlated queries/events, unsupported actions/versions/movement,
-and engine/epoch/namespace errors. It checks identical greedy output token IDs
-across cold, warm and evicted runs. Local results are **0 → 784 → 0 cached tokens**
-and **4 GPU copies reclaimed**. Raw responses are saved under `results/`.
-
-Current execution supports local GPU operations and explicit request associations.
-Add `--validate-request-associations` to check request snapshot scope, generated
-growth, a resumed continuation with tool tokens, cache-hit membership and rejected
-rewrites through real serving. Request growth requires `associate.observe_growth`;
-completion alone never finishes a task. The recorded snapshot/hit prefixes contain
-1,302 tokens, while the resumed live continuation contains 1,344. Each tracked
-request hits 784 cached tokens. These checks use the common logical index and
-actual engine observations, rather than application-invented residency.
-
-Native Mooncake and CPU movement are validated below. Policy workload
-acceptance remains a separate gate. No serving speedup is inferred from these runs.
-
-## Native Mooncake movement and cross-engine preparation
-
-Start an isolated Store and write its client configuration:
+`run_rollout_matrix.py` 创建并清理本次测试的服务、Mooncake Store 和 GPU 采样进程；所需端口被占用时拒绝启动。
+它排除启动与显式预热时间，检查缓存重置成功，并记录配置、命令、源码摘要和逐轮数据。
+以下只复现已经记录的 8 GiB 容量充足点，不定义正常部署预算：
 
 ```bash
-.venv/bin/mooncake_master --rpc_address=127.0.0.1 --rpc_port=19151 \
-  --metrics_host=127.0.0.1 --metrics_port=19153 --enable_metric_reporting=false
+.venv/bin/python -m benchmarks.programmable_kv_cache.run_rollout_matrix \
+  --model /home/youwei/bzh/model/Qwen/Qwen3.8-27B \
+  --dataset /home/youwei/bzh/dataset/openai/gsm8k \
+  --trace benchmarks/programmable_kv_cache/results/rollout-2026-10-11/optimized-native-live.json.gz \
+  --gpus 0,3 \
+  --cache-gib 8 \
+  --concurrency 16 \
+  --arms native,policy \
+  --repeats 3 \
+  --output-dir /tmp/kv-fit-reproduce
 ```
+
+| 参数/模式 | 用途 |
+| --- | --- |
+| `native` / `noop` | 原生 APC；或启用控制器和连接器，但不发送 hint |
+| `priority` / `movement` / `composed` | 应用端显式保留、搬运、二者组合 |
+| `policy` | 信号驱动的本地策略与调度 |
+| `--policy-components quota` | 在 `policy` 配置中仅启用配额调度 |
+| `--cache-gib 2` | 历史人工配额压力诊断；不要当作正常资源主基线 |
+| `--live-after-replay` | 缓存重置后按 trace 的原在线配置运行真实工具循环，结果单列 |
+| `--trace` | 固定原输入、输出长度和暂停，重新生成；不执行工具或报告回放奖励分数 |
+| `--tool-delay` / `--replay-pause-floor` | 明确标记的人为工具等待；不能代替真实服务延迟 |
+| `--oracle` / `--prediction-seconds` | 回放预测诊断；检查实际信号及派生 COPY 覆盖 |
+| `--enforce-eager` / `--disable-custom-all-reduce` | 显式诊断选项；不与默认编译/图执行的速度混算 |
+
+矩阵当前 `--concurrency` 同时设置客户端并发与服务 `max_num_seqs`。
+扩大工作负载前，应分别设置客户端与服务并发，并按实际部署确定各对照配置共同使用的 KV 预算。
+
+## 功能测试的服务配置
+
+文本/Qwen TP=2 功能服务示例，固定 4 GiB KV/卡用于正确性检查：
+
+```bash
+CUDA_VISIBLE_DEVICES=0,3 \
+  OMP_NUM_THREADS=1 \
+  VLLM_WORKER_MULTIPROC_METHOD=spawn \
+  .venv/bin/python -m vllm.entrypoints.openai.api_server \
+  --model /home/youwei/bzh/model/Qwen/Qwen3.8-27B \
+  --served-model-name qwen-validation \
+  --tensor-parallel-size 2 \
+  --max-model-len 4096 \
+  --max-num-seqs 8 \
+  --max-num-batched-tokens 2048 \
+  --kv-cache-memory-bytes 4294967296 \
+  --mamba-cache-mode align \
+  --dtype bfloat16 \
+  --enable-prefix-caching \
+  --enable-prompt-tokens-details \
+  --enforce-eager \
+  --disable-custom-all-reduce \
+  --kv-control-config '{"engine_id":"kv-validation"}' \
+  --host 127.0.0.1 \
+  --port 18083
+```
+
+Mooncake 数据面另启动隔离 Store：
+
+```bash
+.venv/bin/mooncake_master \
+  --rpc_address=127.0.0.1 \
+  --rpc_port=19151 \
+  --metrics_host=127.0.0.1 \
+  --metrics_port=19153 \
+  --enable_metric_reporting=false
+```
+
+将客户端配置保存为 `/tmp/programmable-kv-mooncake-config.json`：
 
 ```json
 {
@@ -103,216 +119,114 @@ Start an isolated Store and write its client configuration:
   "master_server_address": "127.0.0.1:19151",
   "protocol": "tcp",
   "device_name": "",
-  "global_segment_size": "2GB",
+  "global_segment_size": "8GB",
   "local_buffer_size": "256MB"
 }
 ```
 
-Save the JSON as `/tmp/programmable-kv-mooncake-config.json`. Use the HTTP server
-command above with `MOONCAKE_CONFIG_PATH` pointing to it, `OMP_NUM_THREADS=4`,
-`VLLM_WORKER_MULTIPROC_METHOD=spawn`, and the following extra argument:
+启动功能服务时设置 `MOONCAKE_CONFIG_PATH` 为该文件，并增加：
 
 ```bash
---kv-transfer-config '{"kv_connector":"MooncakeStoreConnector","kv_role":"kv_both","kv_connector_extra_config":{"enable_lookup":false,"save_decode_cache":false}}'
+--kv-transfer-config '{"kv_connector":"MooncakeStoreConnector","kv_role":"kv_both","kv_connector_extra_config":{"enable_lookup":false,"enable_save":false,"save_decode_cache":false}}'
 ```
 
-Disabling ordinary request lookup makes subsequent hits evidence of the explicit
-Prefetch. Run the complete control workflow and movement accuracy comparison:
-
-```bash
-CUDA_VISIBLE_DEVICES=0,3 .venv/bin/python \
-  benchmarks/programmable_kv_cache/http_control.py \
-  --base-url http://127.0.0.1:18083 \
-  --dataset /home/youwei/bzh/dataset/openai/gsm8k \
-  --validate-movement mooncake --validate-request-associations \
-  --evaluation-samples 128 --output /tmp/qwen-http-mooncake-evaluation.json
-```
-
-The accuracy comparison uses identical questions and model-visible prompts.
-Unique per-question cache salts force recomputation in the baseline. The second
-pass performs Demote and request-free Prefetch before each eight-question batch.
-Both passes score **124/128 (96.875%)**, with no truncated answers and no numeric
-answer mismatches. Cached tokens are **0 / 100,352**. Driver durations include
-warmup and control operations; they are not a controlled speedup measurement.
-
-For cross-engine validation, start a second server with the same model/layout,
-Store configuration and TP=2, using `--port 18084`,
-`--kv-control-config '{"engine_id":"http-destination"}'`, and
-`--gpu-memory-utilization 0.45` when both instances share GPUs 0/3. Keep the fixed
-4 GiB cache per rank. Add `--destination-url http://127.0.0.1:18084` to the workflow
-command; `--evaluation-samples` can be omitted for this independent scenario.
-
-The sender checks engine IDs, epochs and compatibility namespaces, submits Share
-on A, prepares B through independent control, and then sends B its first inference
-request. B hits **784 tokens**, its greedy output matches A, and A retains its own
-warm prefix. The local Demote/Prefetch cycle moves and registers **four group
-copies**. Share reports Store availability; only B's Prefetch reports B's readiness.
-Compressed full responses and evaluation rows are saved under `results/`.
-
-The current native adapter accepts full group boundaries and exact primary cache
-entries with PCP=DCP=1; capability discovery reports these limits. Keys include
-the control compatibility namespace and are separate from ordinary offload keys.
-Paused/sleeping engines defer new physical work. In-process Python clients advance
-idle connector work cooperatively during control polling.
-
-## Native CPU movement
-
-Use the same Qwen HTTP server configuration, replacing the connector argument with:
+关闭普通请求的缓存查找与写入，使显式 COPY/MOVE 的效果可单独测量。
+CPU 功能检查则使用以下连接器，无需 Mooncake Store：
 
 ```bash
 --kv-transfer-config '{"kv_connector":"OffloadingConnector","kv_role":"kv_both","kv_connector_extra_config":{"cpu_bytes_to_use":8589934592,"blocks_per_chunk":1}}'
 ```
 
-Run `http_control.py` with `--validate-movement cpu`. The driver supplies the existing
-`kv_transfer_params.max_load_tokens=0` on measured inference requests, so automatic
-CPU lookup cannot substitute for the explicit Prefetch. The native adapter uses the
-existing CPUOffloadingManager capacity and CPUOffloadingWorker copies. It accepts
-full group boundaries and one block per CPU chunk, with PCP=DCP=1. Tiering/KVCR and
-SimpleCPU do not advertise this native CPU adapter; CPU Share remains unsupported.
+原生 Mooncake 路径要求目标与完整的主缓存项及各缓存组边界对齐，预填充和解码的上下文并行度均为 1（PCP=DCP=1）。
+通用 CPU 路径要求每个传输单元（chunk）包含一个缓存块，暂不支持 CPU Share。
+其他布局应通过 `capabilities` 查询实际支持范围。
 
-The recorded TP=2 workflow stores/reclaims and then restores **four group copies**,
-and resumed inference hits **784 tokens** with the same greedy output. With
-`--evaluation-samples 128`, recomputation scores **124/128 (96.875%)** and CPU
-Prefetch scores **125/128 (97.65625%)**; neither truncates an answer. There is one
-final numeric-answer difference. Cached tokens are **0 / 100,352**. Full outputs
-and control results are in the `cpu-*.json.gz` result files. These are correctness
-evaluations, not evidence that movement improves model accuracy or serving speed.
+## 功能测试驱动
 
-## Optional policy configuration
+请求完成时 MOVE、下次入口 COPY：
 
-Policies load at startup; changing them requires restart. An empty `policies`
-list leaves native signals unconsumed. Built-in implementations are `retention`,
-`tool_wait` and `quota`. Each instance has a unique name, an implementation name
-(or an importable `KVPolicy` subclass) and constructor `options`. `composer`
-selects `priority` or an importable `KVPlanComposer` subclass.
+```bash
+CUDA_VISIBLE_DEVICES=0,3 \
+  .venv/bin/python -m benchmarks.programmable_kv_cache.primitive_control \
+  --base-url http://127.0.0.1:18083 \
+  --engine-id kv-validation \
+  --dataset /home/youwei/bzh/dataset/openai/gsm8k \
+  --output /tmp/kv-attached.json
+```
+
+独立控制、真实复用与可选质量检查：
+
+```bash
+CUDA_VISIBLE_DEVICES=0,3 \
+  .venv/bin/python -m benchmarks.programmable_kv_cache.http_control \
+  --base-url http://127.0.0.1:18083 \
+  --dataset /home/youwei/bzh/dataset/openai/gsm8k \
+  --primitive-actions \
+  --validate-movement mooncake \
+  --validate-request-associations \
+  --output /tmp/kv-independent.json
+```
+
+使用 CPU 服务时将 `--validate-movement` 的值改成 `cpu`；该驱动在推理时禁用自动 CPU 加载。
+加 `--evaluation-samples 128` 做质量门槛，加 `--destination-url` 验证兼容目的引擎的实际命中。
+两个服务须采用相同模型、布局、Store 与并行设置，各有独立引擎 ID；同用 GPU 0/3 时两者均可采用 `--gpu-memory-utilization 0.45`，目的端口用 18084。
+
+| 入口 | 参数和前置条件 |
+| --- | --- |
+| `lifecycle.py` | `--base-url --trace --output`；原生控制与 Mooncake，检查共享分支、TTL、取消和恢复竞争 |
+| `weight_update.py` | `--base-url --model --trace --output`；同机 GPU、对应模型检查点、IPC 权重传输后端和 Store |
+| `evaluate.py` | `--model --dataset --output`，可加 `--enable-kv-control`；重算/APC 质量基线 |
+| `control_overhead.py` | `--output`；测量 CPU 元数据操作，不代表推理服务或 RL 吞吐 |
+| `run_recovery.py` | 自建服务/Store，`--model --dataset --trace --output-dir`，可加 `--evaluation-samples 128`；新组合测试驱动尚未执行 |
+
+IPC 权重检查要求服务额外启用 `--weight-transfer-config '{"backend":"ipc"}'`，设置 `VLLM_SERVER_DEV_MODE=1` 与既有同机 IPC 序列化配置 `VLLM_ALLOW_INSECURE_SERIALIZATION=1`，服务保持绑定本地地址。
+脚本修改真实 GPU 参数并回滚，未执行优化器更新。
+其他示例不需要这些权重更新设置。
+
+策略在启动时通过 `--kv-control-config` 配置，空 `policies` 使信号不产生策略动作。
+`primitive_control.py --policy` 的专用服务可用：
 
 ```json
 {
-  "engine_id": "policy-validation",
+  "engine_id": "kv-policy",
   "policies": [
-    {"name": "retain", "implementation": "retention", "options": {"ttl_seconds": 30}},
-    {"name": "movement", "implementation": "tool_wait", "options": {"tier": "mooncake"}},
-    {"name": "quota", "implementation": "quota", "options": {"max_wait_seconds": 1}}
-  ],
-  "composer": "priority"
+    {
+      "name": "retention",
+      "implementation": "retention"
+    },
+    {
+      "name": "movement",
+      "implementation": "tool_wait",
+      "options": {
+        "tier": "mooncake"
+      }
+    }
+  ]
 }
 ```
 
-Policies receive immutable observations and submit proposals through engine
-approval. Signal completion reports consumption; each entry in
-`derived_operations` must be queried to determine movement completion. The
-configured composer chooses compatible proposals in configuration order. Explicit
-retention or movement takes precedence over conflicting policy movement.
+对该服务使用 `--engine-id kv-policy --policy`。
+`http_control.py` 的协议检查使用无策略或不消费工具信号的配置。
+`signal` 完成表示策略处理了信号；派生 COPY 等操作必须分别查询，完成后才表示缓存准备就绪。
+收集同一消息中的全部动作及派生操作结果后再 ACK。
+`residency` 返回查询时的 GPU 状态快照，历史 COPY 成功不保证之后持续驻留。
+`client.py` 与 `rollout.py` 共享提示消息和结果协议。
 
-Quota observations/guidance refresh at `policy_interval_seconds` (default 0.05).
-Signals invalidate the cached guidance. The scheduler bypasses optional deferral
-at `max_policy_wait_seconds` even between observations; physical capacity checks
-still apply. Request scores respect explicit scheduler priorities and use arrival
-order to break ties. Observation overflow disables guidance until a complete
-bounded observation is available. These are advisory estimates; selection still
-scans the waiting queue and no end-to-end performance gain is established.
+## 回归检查
 
-## Protocol probes and remaining workload coverage
+测试范围与执行证据见[分支汇报](../../docs/programmable-kvc/testing.md)，分阶段回归结果见[实验报告](../../docs/programmable-kvc/rollout-report-2026-10-12.md)。
+删除的协议探针自测由直接 API 行为测试替代，实际事件缺口/路由/重放/ACK 测试继续保留。
 
 ```bash
-.venv/bin/python benchmarks/programmable_kv_cache/recovery.py \
-  --base-url http://127.0.0.1:18083 --engine-id http-validation \
-  --output /tmp/kv-protocol-checks.json
+.venv/bin/python -m pytest tests/entrypoints/serve/kv_control/test_api.py -q
+.venv/bin/pre-commit run \
+  --files tests/entrypoints/serve/kv_control/test_api.py
+.venv/bin/pre-commit run mypy-3.12 \
+  --all-files \
+  --hook-stage manual
+openspec validate programmable-kv-cache \
+  --strict
 ```
 
-The probe checks unknown-version rejection, exact duplicate replay, operation
-query agreement and invalid epoch/cursor errors. It uses fresh IDs and explicitly
-selects one engine. A stale epoch probe does not restart a server; a future cursor
-probe does not reproduce lost event history. Real bounded association-history
-loss and reconstruction are covered by the HTTP control tests.
-
-Association query pages include `engine_epoch`, `namespace`, `revision` and
-`event_sequence`. For recovery, paginate at the first page's revision and resume
-association events from the first page's event sequence. Restart pagination on
-`stale_revision`; take a fresh snapshot on `event_gap`. Association state does
-not establish GPU residency. Physical residency queries/events remain incomplete.
-Live weight-version changes are explicitly rejected with programmable control
-enabled; restart with the new weights/version until task 7.2 is implemented.
-
-The earlier `rollout.py`, `verl_agent_loop.py` and `coverage_check.py` were removed:
-empty-target commands, an unverified trace format and file-existence checks could
-not establish their claimed workload/coverage behavior. Multi-round pressure,
-application-directed rollout, real verl integration, weight-update invalidation,
-policy comparisons and restart/failure recovery remain in the OpenSpec task list.
-
-## CPU control overhead
-
-```bash
-.venv/bin/python benchmarks/programmable_kv_cache/control_overhead.py \
-  --output /tmp/control-overhead.json
-```
-
-This measures result polling and policy observations with a fixed clock, no
-inference requests, and empty/full CPU cache metadata. The October 6 comparison
-against `a41f867f69` records all five samples in
-`results/control-overhead-2026-10-06.json.gz`. Median polling with 4,096 retained
-results changes from 220.82 to 0.19 microseconds. Repeated guidance within one
-observation interval changes from 10.99 milliseconds to 0.15 microseconds for
-100,000 blocks. A fresh full-cache observation remains a scan (11.33 / 9.59 ms).
-These are CPU component measurements, not throughput, fairness or disabled-path
-serving measurements. No timing threshold is asserted in pytest.
-
-The October 6 quality check additionally enables the built-in `quota` policy on
-this CPU server. The 128-question recompute/prefetch runs both score 124/128 with
-zero final numeric-answer mismatches, no truncation and 0/100,352 cached tokens.
-`quality-quota-cpu.json.gz` records the long run; `quality-head-http.json.gz`
-records a fresh-server run of the final source and actual restart/epoch checks
-(both filenames carry the `qwen3.8-27b-tp2-` prefix). Process boundaries and exact
-commands are recorded in the OpenSpec validation log. These do not establish
-quota fairness or the complete policy/failure workload matrix.
-
-## RFC #59708 primitive reference workflow
-
-The `rfc-hint` branch adds `primitive_control.py`. Start the existing Qwen TP=2
-Mooncake server above with engine ID `primitive-source`, ordinary lookup disabled
-and no local policies. Use the isolated Store configuration described above.
-
-```bash
-CUDA_VISIBLE_DEVICES=0,3 .venv/bin/python \
-  benchmarks/programmable_kv_cache/primitive_control.py \
-  --base-url http://127.0.0.1:18083 --engine-id primitive-source \
-  --dataset /home/youwei/bzh/dataset/openai/gsm8k \
-  --output /tmp/rfc-hint-attached.json
-```
-
-R1 carries `vllm.move_to` and saves/reclaims the selected prefix at successful
-completion. R2 carries `vllm.copy_to` and waits for Store→GPU loading at admission.
-The driver uses a fresh cache salt, asserts every group was actually transferred
-(with transfer IDs), checks cold/GPU milestones, then verifies cached tokens and
-identical greedy outputs. Its request/range selector includes detached hybrid
-checkpoints. This is a real attached-command workflow, not a request-free hint
-sent after R1. COPY at R2 arrival has zero pre-arrival lead time.
-
-To exercise the optional policy producer, start an engine with:
-
-```json
-{"engine_id":"primitive-destination","policies":[{"name":"movement","implementation":"tool_wait","options":{"tier":"mooncake"}}]}
-```
-
-Run the driver against that engine with `--policy`. After the attached workflow,
-it submits explicit signals, follows each derived primitive result, then verifies
-actual reuse. This does not infer tool calls from output tokens. `client.py`
-provides shared envelope creation and queued-aware polling for both controllers.
-
-The existing direct controller now accepts `--primitive-actions`, translating its
-movement/priority recipes to the public primitive profile while retaining explicit
-state commands as compatibility extensions. Add `--destination-url` for two-engine
-COPY through the shared Store, and `--evaluation-samples 128` for the existing
-seeded GSM8K recomputation/movement comparison. Old command names remain available
-without the flag. New example failures preserve a partial JSON report.
-
-Detailed payloads, copy-versus-logical priority lifetimes, ownership restrictions,
-queued versus deferred status, and partial-scope reporting are documented in
-[`vllm/v1/kv_hints/README.md`](../../vllm/v1/kv_hints/README.md).
-
-The recorded `rfc59708-*.json.gz` results cover request-attached execution, the
-optional movement policy, two-engine COPY and the 128-question accuracy comparison.
-`rfc59708-composed.json.gz` additionally enables both `retention` and `tool_wait`:
-the cold COPY finishes before its companion SET_PRIORITY applies, so TTL begins
-on an actual cached copy. The resumed request again hits 784 tokens. These are
-functional reference examples; broader policy/pressure comparisons remain open.
+完整回归和模型门槛的执行状态以实验报告为准。
+命令展示不代表已执行；日志、源代码、工作量与质量必须一起归档。

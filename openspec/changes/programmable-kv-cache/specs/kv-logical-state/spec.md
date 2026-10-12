@@ -4,7 +4,8 @@
 
 ### Requirement: Independent logical identity and physical residency
 
-The engine SHALL distinguish logical content, session/continuation associations, residency, retention declarations, and active references. Session identity SHALL NOT replace the existing content hash or establish cache compatibility.
+The engine SHALL distinguish logical content, session/continuation associations, residency, retention declarations, and active references.
+Session identity SHALL NOT replace the existing content hash or establish cache compatibility.
 
 #### Scenario: Shared prefix cache hit
 
@@ -18,7 +19,8 @@ The engine SHALL distinguish logical content, session/continuation associations,
 
 ### Requirement: Logical target resolution
 
-Control SHALL support logical hashes, tracked sessions, explicit continuations and token ranges, and active request ranges within advertised capabilities. Resolution SHALL report actual group-specific coverage and missing or unsupported portions.
+Control SHALL support logical hashes, tracked sessions, explicit continuations and token ranges, and active request ranges within advertised capabilities.
+Resolution SHALL report actual group-specific coverage and missing or unsupported portions.
 
 #### Scenario: Historical branch selection
 
@@ -32,11 +34,10 @@ Control SHALL support logical hashes, tracked sessions, explicit continuations a
 
 ### Requirement: Append-only continuation identity
 
-A live continuation SHALL preserve its previously associated content while it
-grows. Rewriting or truncating existing content SHALL require a new continuation
-ID; the session ID may remain unchanged. Adding previously unobserved content or
-compatible shorter-prefix aliases SHALL NOT be treated as rewriting. Logical
-association alone SHALL NOT establish token ancestry or cache compatibility.
+A live continuation SHALL preserve its previously associated content while it grows.
+Rewriting or truncating existing content SHALL require a new continuation ID; the session ID may remain unchanged.
+Adding previously unobserved content or compatible shorter-prefix aliases SHALL NOT be treated as rewriting.
+Logical association alone SHALL NOT establish token ancestry or cache compatibility.
 
 #### Scenario: Rewrite rejected with a current revision
 
@@ -55,7 +56,10 @@ association alone SHALL NOT establish token ancestry or cache compatibility.
 
 ### Requirement: Independent retention lifetimes
 
-Retain SHALL bias eviction priority without guaranteeing residency. Shared content SHALL use the maximum valid declared priority while preserving each declaration's own lifetime. A cache hit SHALL NOT implicitly renew a declaration. Release SHALL remove only the addressed declaration.
+Retain SHALL bias eviction priority without guaranteeing residency.
+Shared content SHALL use the maximum valid declared priority while preserving each declaration's own lifetime.
+A cache hit SHALL NOT implicitly renew a declaration.
+Release SHALL remove only the addressed declaration.
 
 #### Scenario: High priority expires before a lower priority
 
@@ -64,7 +68,8 @@ Retain SHALL bias eviction priority without guaranteeing residency. Shared conte
 
 ### Requirement: Explicit task lifecycle cleanup
 
-Request completion SHALL NOT imply task completion. Explicit task-tree completion SHALL release the relevant logical associations and declarations while preserving unrelated shared state and active references.
+Request completion SHALL NOT imply task completion.
+Explicit task-tree completion SHALL release the relevant logical associations and declarations while preserving unrelated shared state and active references.
 
 #### Scenario: Parent finishes while another task shares an ancestor
 
@@ -73,7 +78,9 @@ Request completion SHALL NOT imply task completion. Explicit task-tree completio
 
 ### Requirement: Explicit state management independent of local policies
 
-Establishing/updating session and continuation associations and explicitly ending a task tree SHALL be supported management commands without requiring an opt-in local policy. Tool-wait, resume, and importance signals SHALL remain separate policy inputs. Association alone SHALL NOT allocate or guarantee resident KV.
+Establishing/updating session and continuation associations and explicitly ending a task tree SHALL be supported management commands without requiring an opt-in local policy.
+Tool-wait, resume, and importance signals SHALL remain separate policy inputs.
+Association alone SHALL NOT allocate or guarantee resident KV.
 
 #### Scenario: Session-addressed control in default mode
 
@@ -82,7 +89,10 @@ Establishing/updating session and continuation associations and explicitly endin
 
 ### Requirement: Incremental association events and state queries
 
-The engine SHALL publish incremental association changes and expose queryable association state. Each association event SHALL NOT require a complete session set. Association changes SHALL remain distinguishable from physical residency changes. Existing full-report behavior SHALL retain its current-request prefix-reporting meaning.
+The engine SHALL publish incremental association changes and expose queryable association state.
+Each association event SHALL NOT require a complete session set.
+Association changes SHALL remain distinguishable from physical residency changes.
+Existing full-report behavior SHALL retain its current-request prefix-reporting meaning.
 
 #### Scenario: Shared prefix gains a second session
 
@@ -96,7 +106,8 @@ The engine SHALL publish incremental association changes and expose queryable as
 
 ### Requirement: Shared index for engine consumers
 
-Session-addressable execution SHALL use an engine-local logical index available to scheduler observations and operation resolution. Policies and adapters SHALL NOT each require a separate authoritative session-to-physical-block ownership map.
+Session-addressable execution SHALL use an engine-local logical index available to scheduler observations and operation resolution.
+Policies and adapters SHALL NOT each require a separate authoritative session-to-physical-block ownership map.
 
 #### Scenario: Retention and movement target the same continuation
 
@@ -105,7 +116,8 @@ Session-addressable execution SHALL use an engine-local logical index available 
 
 ### Requirement: Bounded index behavior is observable
 
-Logical-state tracking SHALL have documented limits and reclamation behavior. Queries and resolution SHALL distinguish unknown or pruned associations from known empty targets and actual missing residency.
+Logical-state tracking SHALL have documented limits and reclamation behavior.
+Queries and resolution SHALL distinguish unknown or pruned associations from known empty targets and actual missing residency.
 
 #### Scenario: Historical association is no longer tracked
 
