@@ -284,7 +284,7 @@ class BenchmarkConfig:
     torch_profile_iters: int = 3
     warmup_ms: int | None = None
 
-    # "auto" or "fp8"
+    # "auto", "fp8" or "int8_per_token_head"
     kv_cache_dtype: str = "auto"
 
     # MLA-specific

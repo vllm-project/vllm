@@ -36,6 +36,7 @@ from vllm.config import (
     set_current_vllm_config,
 )
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.attention.backends.utils import (
     CommonAttentionMetadata,
     get_supported_kv_cache_layouts,
@@ -48,6 +49,7 @@ from vllm.v1.kv_cache_interface import (
     compute_layer_kv_cache_shape_bytes,
     compute_layout_strides,
     create_kv_cache_views,
+    get_kv_quant_mode,
 )
 
 # ============================================================================
@@ -351,7 +353,10 @@ def _create_kv_cache(
     layout: KVCacheLayout,
 ) -> list:
     """Create KV cache tensors for all layers using the standard allocator."""
-    if config.kv_cache_dtype.startswith("fp8"):
+    kv_quant_mode = get_kv_quant_mode(config.kv_cache_dtype)
+    if kv_quant_mode.is_per_token_head:
+        cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[config.kv_cache_dtype]
+    elif config.kv_cache_dtype.startswith("fp8"):
         cache_dtype = current_platform.fp8_dtype()
     else:
         cache_dtype = dtype
@@ -360,6 +365,7 @@ def _create_kv_cache(
         num_kv_heads=config.num_kv_heads,
         head_size=config.head_dim,
         dtype=cache_dtype,
+        kv_quant_mode=kv_quant_mode,
     )
     # Apply the backend's page customization, as the worker does for the real spec.
     spec = backend_class.customize_spec(spec)

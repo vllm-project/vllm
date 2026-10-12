@@ -561,8 +561,8 @@ def main():
     parser.add_argument(
         "--kv-cache-dtype",
         default="auto",
-        choices=["auto", "fp8"],
-        help="KV cache dtype: auto or fp8",
+        choices=["auto", "fp8", "int8_per_token_head"],
+        help="KV cache dtype: auto, fp8 or int8_per_token_head",
     )
     parser.add_argument(
         "--cuda-graphs",
