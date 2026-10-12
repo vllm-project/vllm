@@ -59,8 +59,9 @@ class FlashKdaWeights:
 
 @dataclass
 class FlashKdaState:
-    """One KDA layer's decode state: bf16 conv state [slots, 3P, 3] and fp32
-    recurrent state [slots, H, 128, 128], slot strides in elements."""
+    """One KDA layer's decode state: bf16 conv state [slots, 3P, 3] or
+    [slots, 3, 3P] (as the runtime was built) and fp32 recurrent state
+    [slots, H, 128, 128], slot strides in elements."""
 
     conv_state: torch.Tensor
     rec_state: torch.Tensor
@@ -90,6 +91,7 @@ class FlashFfnRuntime:
         poll_early_out: bool,
         flag_addr: int | None = None,
         kda: bool = False,
+        conv_dim_first: bool = True,
     ) -> None:
         self.width, self.rank, self.npes, self.kda = width, rank, npes, kda
         self.launch, self.sc, self.sy = build_flash_ffn_kernel(
@@ -101,6 +103,7 @@ class FlashFfnRuntime:
             poll_limit=poll_limit,
             poll_early_out=poll_early_out,
             kda=kda,
+            conv_dim_first=conv_dim_first,
         )
         dev = torch.device("cuda", torch.cuda.current_device())
         self.peer = PeerBuffers(self.sy["_bytes"], rank, npes, group)

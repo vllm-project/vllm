@@ -54,8 +54,11 @@ def capturing() -> bool:
 
 
 def resolve(module: nn.Module, path: str) -> torch.Tensor:
-    value = operator.attrgetter(path)(module)
-    if isinstance(value, (list, tuple)):
+    attrs, _, index = path.partition("[")
+    value = operator.attrgetter(attrs)(module)
+    if index:
+        value = value[int(index.rstrip("]"))]
+    elif isinstance(value, (list, tuple)):
         value = value[0]
     if not isinstance(value, torch.Tensor):
         raise ValueError(f"{path} is not a tensor")
@@ -100,7 +103,8 @@ class Router:
         out = {}
         for idx, layer in self.layers.items():
             for name, req in self.spec.caches.items():
-                out[f"{idx}.{name}"] = resolve(layer, req.path)
+                if req.when is None or req.when(layer):
+                    out[f"{idx}.{name}"] = resolve(layer, req.path)
         return out
 
     def bind(self) -> None:

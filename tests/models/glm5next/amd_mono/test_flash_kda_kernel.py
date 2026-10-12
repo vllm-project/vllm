@@ -102,7 +102,7 @@ def _seam(k: _Kda, x, res, post, comb):
     return _vllm_seam(lay, x, res, post, comb)
 
 
-def _kda_reference(k: _Kda, proj, gates, conv, rec, idx):
+def _kda_reference(k: _Kda, proj, gates, conv, rec, idx, dim_first):
     """The decode ops of vLLM on the kernel's own projection and gate rows; update
     ``conv`` and ``rec`` in place and return the gated-RMSNorm output [S, P]."""
     from vllm.config import VllmConfig, set_current_vllm_config
@@ -116,7 +116,7 @@ def _kda_reference(k: _Kda, proj, gates, conv, rec, idx):
     S, P, H, D = proj.shape[0], k.P, k.H, KDA_DIM
     qkv = causal_conv1d_update(
         proj[:, : 3 * P].contiguous(),
-        conv,
+        conv if dim_first else conv.transpose(-1, -2),
         k.conv_w,
         None,
         "silu",
@@ -157,7 +157,7 @@ def _box(rt, name, n, packed=False):
     return words[: 2 * n : 2].contiguous().view(torch.float32)
 
 
-def _check(rank: int, tp: int, device) -> None:
+def _check(rank: int, tp: int, device, dim_first: bool) -> None:
     import torch.distributed as dist
 
     from vllm.distributed import get_tp_group
@@ -174,11 +174,22 @@ def _check(rank: int, tp: int, device) -> None:
     )
 
     lay, kda = _Layer(rank, tp, device), _Kda(rank, tp, device)
+    if not dim_first:
+        kda.conv0 = kda.conv0.transpose(1, 2).contiguous()
     nin = FlashShard(tp).kda_in_rows
     group = get_tp_group().cpu_group
     for S in ROWS:
         rt = FlashFfnRuntime(
-            S, rank, tp, group, 2048 // tp, 1, 20_000_000, False, kda=True
+            S,
+            rank,
+            tp,
+            group,
+            2048 // tp,
+            1,
+            20_000_000,
+            False,
+            kda=True,
+            conv_dim_first=dim_first,
         )
         op = FlashFfnOp(rt, lay.weights(), 0, kda.weights())
         g = lay.g
@@ -220,7 +231,9 @@ def _check(rank: int, tp: int, device) -> None:
 
         # short conv + gated delta rule + gated RMSNorm, and both state updates
         conv, rec = kda.conv0.clone(), kda.rec0.clone()
-        o_ref = _kda_reference(kda, proj.bfloat16(), gates.bfloat16(), conv, rec, idx)
+        o_ref = _kda_reference(
+            kda, proj.bfloat16(), gates.bfloat16(), conv, rec, idx, dim_first
+        )
         o_in = _box(rt, "o_in", S * kda.P, packed=True).view(S, kda.P)
         assert _rel(o_in[:live], o_ref[:live]) < 2e-2, (
             f"S={S}: KDA output {_rel(o_in[:live], o_ref[:live])}"
@@ -283,11 +296,15 @@ def _check(rank: int, tp: int, device) -> None:
 
 
 @pytest.mark.skipif(not _on_cdna4(), reason="the Flash MonoKernel targets CDNA4")
-@pytest.mark.parametrize("tp", [2, 4, 8])
-def test_kda_layer_matches_vllm_ops(monkeypatch: pytest.MonkeyPatch, tp: int):
+@pytest.mark.parametrize(
+    "tp, dim_first", [(2, False), (4, False), (4, True), (8, False)]
+)
+def test_kda_layer_matches_vllm_ops(
+    monkeypatch: pytest.MonkeyPatch, tp: int, dim_first: bool
+):
     from ....utils import multi_process_parallel
 
     if torch.accelerator.device_count() < tp:
         pytest.skip(f"needs {tp} GPUs")
     pytest.importorskip("flydsl")
-    multi_process_parallel(monkeypatch, tp, 1, _worker(_check))
+    multi_process_parallel(monkeypatch, tp, 1, _worker(_check, dim_first))

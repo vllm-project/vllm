@@ -19,7 +19,10 @@ from vllm.models.glm5next.amd.ops.mono.config import (
 if TYPE_CHECKING:
     from torch import nn
 
-    from vllm.models.glm5next.amd.ops.mono.ffn.op import FlashFfnWeights
+    from vllm.models.glm5next.amd.ops.mono.ffn.op import (
+        FlashFfnWeights,
+        FlashKdaWeights,
+    )
 
 N_MIX = HC_MULT * (2 + HC_MULT)
 
@@ -149,4 +152,45 @@ def layer_weights(layer: nn.Module, inter: int) -> FlashFfnWeights:
             (HIDDEN,),
             (torch.bfloat16,),
         ),
+    )
+
+
+def kda_weights(layer: nn.Module, tp: int) -> FlashKdaWeights:
+    """A KDA layer's attention side, as views of vLLM's row-major bf16 projections;
+    the q | k | v conv taps are packed once into one [3P, 4] tensor."""
+    from vllm.models.glm5next.amd.ops.mono.config import KDA_DIM, FlashShard
+    from vllm.models.glm5next.amd.ops.mono.ffn.op import FlashKdaWeights
+
+    attn = layer.self_attn
+    shard = FlashShard(tp)
+    P, H, D = shard.kda_proj, shard.kda_heads, KDA_DIM
+    bf16, f32 = (torch.bfloat16,), (torch.float32,)
+
+    def linear(name, rows, cols):
+        return _need(f"{name}.weight", getattr(attn, name).weight, (rows, cols), bf16)
+
+    taps = []
+    for name in ("q_conv1d", "k_conv1d", "v_conv1d"):
+        conv = getattr(attn, name)
+        if conv.bias is not None:
+            raise ValueError(f"needs {name} without bias")
+        taps.append(_need(f"{name}.weight", conv.weight, (P, 1, 4), f32).view(P, 4))
+    w_on = attn.o_norm.weight
+    if w_on is None or tuple(w_on.shape) != (D,):
+        raise ValueError("needs o_norm with a weight")
+    return FlashKdaWeights(
+        hc_fn=_need("hc_attn_fn", layer.hc_attn_fn, (N_MIX, HC_MULT * HIDDEN), f32),
+        hc_scale=_need("hc_attn_scale", layer.hc_attn_scale, (3,), f32),
+        hc_base=_need("hc_attn_base", layer.hc_attn_base, (N_MIX,), f32),
+        g_norm=_need(
+            "input_layernorm.weight", layer.input_layernorm.weight, (HIDDEN,), bf16
+        ),
+        w_in=linear("in_proj_qkvbfg_a", shard.kda_in_rows, HIDDEN),
+        w_fb=linear("f_b_proj", P, D),
+        w_gb=linear("g_b_proj", P, D),
+        conv_w=torch.cat(taps).contiguous(),
+        a_log=_need("A_log", attn.A_log, (1, 1, H, 1), f32).view(H),
+        dt_bias=_need("dt_bias", attn.dt_bias, (P,), f32),
+        w_on=w_on.float().contiguous(),
+        w_o=linear("o_proj", HIDDEN, P),
     )

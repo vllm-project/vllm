@@ -175,6 +175,23 @@ def test_moved_caches_are_rebound_and_rechecked(monkeypatch):
         _run(monkeypatch, mono, model, kit.forward_context(md), 2)
 
 
+def test_caches_index_into_tuples_and_skip_other_layers(monkeypatch):
+    from dataclasses import replace
+
+    from vllm.models.common.mono import CacheReq
+
+    log = []
+    req = CacheReq("pair[1]", (torch.float32,), when=lambda layer: layer.idx != 2)
+    spec = replace(kit.make_spec(log=log), caches={"rec": req})
+    mono, model, _ = _mono(monkeypatch, spec)
+    for i in (1, 3):
+        model.layers[i].pair = (torch.zeros(2), torch.zeros(3))
+    names = [model.layers[i].attn_name for i in (1, 2, 3)]
+    _run(monkeypatch, mono, model, kit.forward_context(kit.decode_metadata(names)), 2)
+    assert ("bind", ("1.rec", "3.rec")) in log
+    assert mono.router.caches()["3.rec"].numel() == 3
+
+
 def test_bind_reasons_raise(monkeypatch):
     mono, model, _ = _mono(monkeypatch, kit.make_spec(bind_reasons=("bad layout",)))
     names = [model.layers[i].attn_name for i in (1, 2, 3)]
