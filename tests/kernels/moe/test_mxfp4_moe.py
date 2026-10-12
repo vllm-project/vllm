@@ -458,5 +458,68 @@ def test_mxfp4_experts_quant_no_saturation():
     )
 
 
+@pytest.mark.skipif(
+    not is_sm100_supported(),
+    reason="mxfp4_experts_quant requires CUDA SM100",
+)
+@pytest.mark.parametrize("num_experts", [20, 40])
+@pytest.mark.parametrize("fuse_silu_mul", [False, True])
+def test_mxfp4_experts_quant_ignores_memory_past_offsets(num_experts, fuse_silu_mul):
+    """The expert lookup must not read past offsets[num_experts] when
+    num_experts is not a multiple of 16 (low-latency path, small m_topk)."""
+    device = "cuda"
+    k = 256
+    tokens_per_expert = 2
+    m_topk = tokens_per_expert * num_experts
+    width = 2 * k if fuse_silu_mul else k
+    input_tensor = torch.randn(m_topk, width, device=device, dtype=torch.bfloat16)
+
+    def offsets_with_tail(offsets: list[int], poison: bool) -> torch.Tensor:
+        buf = torch.full((num_experts + 1 + 16,), offsets[-1], dtype=torch.int32)
+        buf[: num_experts + 1] = torch.tensor(offsets, dtype=torch.int32)
+        if poison:
+            # Any lookup reading past the end sees expert num_experts + 1
+            # owning every row, with its scale block at row 0.
+            buf[num_experts + 1 :] = 0
+            buf[num_experts + 2 :: 2] = 2**31 - 1
+        return buf.to(device)[: num_experts + 1]
+
+    expert_offsets = [i * tokens_per_expert for i in range(num_experts + 1)]
+    blockscale_offsets = [
+        i * align(tokens_per_expert, 128) for i in range(num_experts + 1)
+    ]
+    quant = (
+        ops.silu_and_mul_mxfp4_experts_quant
+        if fuse_silu_mul
+        else ops.mxfp4_experts_quant
+    )
+    row_bytes = (k // MXFP4_BLOCK_SIZE + 3) // 4 * 4
+
+    def valid_scales(output_sf: torch.Tensor) -> torch.Tensor:
+        sf = output_sf.flatten()
+        return torch.cat(
+            [
+                untile_cutlass_scale(
+                    sf[blockscale_offsets[e] * row_bytes :], tokens_per_expert, k
+                )
+                for e in range(num_experts)
+            ]
+        )
+
+    results = []
+    for poison in (False, True):
+        output, output_sf = quant(
+            input_tensor,
+            offsets_with_tail(expert_offsets, poison),
+            offsets_with_tail(blockscale_offsets, poison),
+            num_experts,
+            1,
+        )
+        results.append((output, valid_scales(output_sf)))
+
+    torch.testing.assert_close(results[1][0], results[0][0], atol=0, rtol=0)
+    torch.testing.assert_close(results[1][1], results[0][1], atol=0, rtol=0)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "-s"])
