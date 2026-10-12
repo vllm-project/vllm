@@ -2618,7 +2618,7 @@ class EngineArgs:
         assert model_config.max_model_len is not None, (
             "max_model_len must be set by this point"
         )
-        async_scheduling = False if self.simulate_forward else self.async_scheduling
+        async_scheduling = self.async_scheduling
         scheduler_config = SchedulerConfig(
             runner_type=model_config.runner_type,
             max_num_batched_tokens=self.max_num_batched_tokens,
@@ -2908,10 +2908,6 @@ class EngineArgs:
             if self.weight_transfer_config is not None:
                 _raise_unsupported_error(
                     feature_name="simulated forward with weight transfer"
-                )
-            if self.async_scheduling:
-                _raise_unsupported_error(
-                    feature_name="simulated forward with async scheduling"
                 )
             if self.runner not in ("auto", "generate"):
                 _raise_unsupported_error(

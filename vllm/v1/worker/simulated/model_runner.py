@@ -5,22 +5,28 @@ from typing import TYPE_CHECKING
 
 import torch
 
+from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.logger import init_logger
 from vllm.sequence import IntermediateTensors
 from vllm.tracing import instrument
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, ModelRunnerOutput
-from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
+from vllm.v1.worker.gpu.input_batch import InputBatch
+from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
 logger = init_logger(__name__)
 
 if TYPE_CHECKING:
-    from vllm.v1.core.sched.output import SchedulerOutput
+    from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 
 
 class SimulatedModelRunner(GPUModelRunner):
     """Runner that simulates model execution while preserving scheduler/KV logic."""
+
+    def __init__(self, vllm_config: VllmConfig, device: torch.device):
+        super().__init__(vllm_config, device)
+        self._pending_input_batch: InputBatch | None = None
 
     @instrument(span_name="Warmup (Simulated)")
     def warming_up_model(self) -> None:
@@ -36,7 +42,8 @@ class SimulatedModelRunner(GPUModelRunner):
         is_profile: bool = False,
         context_len: int = 0,
         valid_dummy_state_slots: bool = False,
-    ) -> ModelRunnerOutput:
+        randomize_inputs: bool = False,
+    ) -> ModelRunnerOutput | None:
         if dummy_run:
             return EMPTY_MODEL_RUNNER_OUTPUT
 
@@ -61,20 +68,36 @@ class SimulatedModelRunner(GPUModelRunner):
             ),
             num_active_loras=0,
         )
+        # As with the real runner, the step's output is produced by
+        # sample_tokens(); the engine core calls it right after execute_model()
+        # in the synchronous path and queues it under async scheduling.
+        self._pending_input_batch = input_batch
+        return None
+
+    @torch.inference_mode()
+    def sample_tokens(  # type: ignore[override]
+        self, grammar_output: "GrammarOutput | None"
+    ) -> ModelRunnerOutput | None:
+        input_batch = self._pending_input_batch
+        if input_batch is None:
+            # The prior execute_model call failed or scheduled no tokens.
+            return None
+        self._pending_input_batch = None
+        num_reqs = input_batch.num_reqs
         req_ids = input_batch.req_ids
         req_id_to_index = {req_id: i for i, req_id in enumerate(req_ids)}
 
         assert self.sampler is not None
         trace_replay_state = self.sampler.trace_replay_state
         assert trace_replay_state is not None
-        sampled = torch.zeros(
-            input_batch.num_reqs, dtype=torch.int64, device=self.device
-        )
+        sampled = torch.zeros(num_reqs, dtype=torch.int64, device=self.device)
         trace_replay_state.apply_trace(sampled, input_batch.idx_mapping)
         sampled_token_ids = sampled.view(-1, 1)
 
-        seq_lens = input_batch.seq_lens[: input_batch.num_reqs]
-        prefill_lens = torch.from_numpy(input_batch.prefill_len_np)
+        seq_lens = input_batch.seq_lens[:num_reqs]
+        prefill_lens = torch.from_numpy(input_batch.prefill_len_np).to(
+            seq_lens.device, non_blocking=True
+        )
         num_sampled = (seq_lens >= prefill_lens).to(torch.int32)
         num_rejected = torch.zeros_like(num_sampled)
 
@@ -91,7 +114,6 @@ class SimulatedModelRunner(GPUModelRunner):
                 sampled_token_ids.tolist(), num_sampled.tolist()
             )
         ]
-
         return ModelRunnerOutput(
             req_ids=req_ids,
             req_id_to_index=req_id_to_index,
