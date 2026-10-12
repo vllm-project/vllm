@@ -39,8 +39,66 @@ from vllm.model_executor.model_loader.reload.utils import get_layer_tensors
 from vllm.model_executor.model_loader.weight_utils import (
     composed_weight_loader,
     default_weight_loader,
+    load_padded_attention_sink,
 )
 from vllm.platforms import current_platform
+
+
+@pytest.mark.parametrize("tp_rank", [0, 1])
+@pytest.mark.parametrize("padding", [0, 4])
+def test_attention_sink_layerwise_reload(monkeypatch, tp_rank, padding):
+    """Reload must update the sink's kernel storage and restore its padding."""
+    monkeypatch.setattr(
+        "vllm.model_executor.model_loader.weight_utils.get_tensor_model_parallel_rank",
+        lambda: tp_rank,
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.model_loader.weight_utils."
+        "get_tensor_model_parallel_world_size",
+        lambda: 2,
+    )
+
+    class SinkModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.sink = torch.nn.Parameter(
+                torch.empty(4 + padding), requires_grad=False
+            )
+            self.sink.weight_loader = load_padded_attention_sink
+            self.proj = torch.nn.Parameter(torch.zeros(16), requires_grad=False)
+            self.proj.weight_loader = default_weight_loader
+
+        def load_weights(self, weights):
+            params = dict(self.named_parameters())
+            for name, weight in weights:
+                param = params[name]
+                param.weight_loader(param, weight)
+
+    model = SinkModel()
+    checkpoint_sink = torch.arange(8, dtype=torch.float32)
+    model.load_weights([("sink", checkpoint_sink), ("proj", torch.ones(16))])
+    kernel_sink = model.sink
+    expected = torch.cat(
+        (
+            checkpoint_sink[4 * tp_rank : 4 * (tp_rank + 1)],
+            torch.full((padding,), -torch.inf),
+        )
+    )
+    assert torch.equal(kernel_sink, expected)
+    record_metadata_for_reloading(model)
+
+    for offset in (10, 20):
+        kernel_sink.data.fill_(0)
+        initialize_layerwise_reload(model)
+        assert model.sink.is_meta
+        model.load_weights(
+            [("sink", checkpoint_sink + offset), ("proj", torch.full((16,), offset))]
+        )
+        finalize_layerwise_reload(model, SimpleNamespace(dtype=torch.float32))
+        expected[:4] = checkpoint_sink[4 * tp_rank : 4 * (tp_rank + 1)] + offset
+        assert torch.equal(kernel_sink, expected)
+        assert model.sink.data_ptr() == kernel_sink.data_ptr()
+        assert torch.equal(model.proj, torch.full((16,), offset))
 
 
 def _fp8_reload_unsupported() -> bool:

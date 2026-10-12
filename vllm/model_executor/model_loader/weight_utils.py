@@ -33,7 +33,11 @@ from vllm.config.load import (
     DEFAULT_SAFETENSORS_PREFETCH_NUM_THREADS,
     LoadConfig,
 )
-from vllm.distributed import get_tensor_model_parallel_rank, get_world_group
+from vllm.distributed import (
+    get_tensor_model_parallel_rank,
+    get_tensor_model_parallel_world_size,
+    get_world_group,
+)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import (
     QuantizationConfig,
@@ -1491,6 +1495,33 @@ def row_parallel_weight_loader(
 
 
 LoaderFunction = Callable[[torch.Tensor, torch.Tensor], None]
+
+
+def load_padded_attention_sink(
+    param: torch.Tensor, loaded_weight: torch.Tensor
+) -> None:
+    """Load global sink heads into a TP-local parameter, padding with -inf.
+
+    Register this as the parameter's weight_loader so layerwise reload can
+    replay both sharding and padding onto the restored parameter.
+
+    Args:
+        param: One-dimensional runtime sink, optionally padded.
+        loaded_weight: One-dimensional checkpoint sink containing all heads.
+
+    """
+    tp_size = get_tensor_model_parallel_world_size()
+    tp_rank = get_tensor_model_parallel_rank()
+    if param.ndim != 1 or loaded_weight.ndim != 1:
+        raise ValueError("Attention sinks must be one-dimensional")
+    if loaded_weight.numel() == 0 or loaded_weight.numel() % tp_size:
+        raise ValueError("Attention sink heads must be divisible by TP size")
+    local_heads = loaded_weight.numel() // tp_size
+    if local_heads > param.numel():
+        raise ValueError("Attention sink heads exceed the runtime parameter size")
+    local_weight = loaded_weight.narrow(0, tp_rank * local_heads, local_heads)
+    padding = local_weight.new_full((param.numel() - local_heads,), -float("inf"))
+    default_weight_loader(param, torch.cat((local_weight, padding)))
 
 
 def sharded_weight_loader(shard_axis: int) -> LoaderFunction:
