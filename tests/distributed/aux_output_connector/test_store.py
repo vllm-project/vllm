@@ -251,9 +251,6 @@ def test_next_step_does_not_consume_pending_output(monkeypatch):
     event = Mock()
     monkeypatch.setattr(torch.cuda, "Event", lambda **kwargs: event)
     monkeypatch.setattr(async_utils, "stream", lambda *args: nullcontext())
-    monkeypatch.setattr(
-        async_utils, "async_copy_to_np", lambda tensor: tensor.numpy().copy()
-    )
     worker = _make_worker(1)
     worker.begin_step(
         _metadata(0, [_request_metadata("request", 0, 1, 0, [])], {}).metadata

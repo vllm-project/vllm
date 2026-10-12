@@ -34,7 +34,6 @@ from vllm.config import (
     VllmConfig,
     get_layers_from_vllm_config,
     set_current_vllm_config,
-    update_config,
 )
 from vllm.config.cache import CacheConfig
 from vllm.config.ec_manager_config import EncoderCacheManagerMetadata
@@ -57,7 +56,7 @@ from vllm.forward_context import (
     set_forward_context,
 )
 from vllm.logger import init_logger
-from vllm.lora.layers import BaseLayerWithLoRA, LoRAMapping, LoRAMappingType
+from vllm.lora.layers import LoRAMapping, LoRAMappingType
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.fused_moe.all2all_utils import get_ep_all2all_manager
@@ -67,10 +66,7 @@ from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
 )
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.model_executor.model_loader import get_model_loader
-from vllm.model_executor.model_loader.reload import (
-    finalize_layerwise_reload,
-    initialize_layerwise_reload,
-)
+from vllm.model_executor.model_loader.reload.inplace import reload_weights
 from vllm.model_executor.models.interfaces import (
     MixtureOfExperts,
     MultiModalEmbeddings,
@@ -116,7 +112,7 @@ from vllm.tracing import instrument
 from vllm.utils import length_from_prompt_token_ids_or_embeds
 from vllm.utils.gc_utils import freeze_gc_for_cudagraph_capture
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
-from vllm.utils.math_utils import cdiv, round_up
+from vllm.utils.math_utils import cdiv
 from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.utils.nvtx_pytorch_hooks import PytHooks
 from vllm.utils.platform_utils import num_compute_units
@@ -222,7 +218,6 @@ from vllm.v1.worker.ubatch_utils import (
 )
 from vllm.v1.worker.utils import (
     EncoderTimingStats,
-    is_residual_scattered_for_sp,
     raise_if_nan_logits,
 )
 from vllm.v1.worker.workspace import lock_workspace
@@ -234,6 +229,8 @@ from .utils import (
     allocate_kv_cache,
     bind_kv_cache,
     copy_kv_cache_blocks_inplace,
+    customize_attention_spec,
+    map_kv_caches_to_kernel_blocks,
     prepare_kernel_block_sizes,
     sanity_check_mm_encoder_outputs,
 )
@@ -244,15 +241,6 @@ if TYPE_CHECKING:
     from vllm.v1.worker.encoder_cudagraph import EncoderCudaGraphManager
 
 logger = init_logger(__name__)
-
-
-def _get_parameter_for_reload(model: nn.Module, name: str) -> nn.Parameter:
-    """Resolve checkpoint names without changing the model's module tree."""
-    module_name, _, parameter_name = name.rpartition(".")
-    module = model.get_submodule(module_name)
-    if isinstance(module, BaseLayerWithLoRA):
-        module = module.base_layer
-    return module.get_parameter(parameter_name)
 
 
 AttnMetadataDict: TypeAlias = dict[str, AttentionMetadata]
@@ -719,7 +707,6 @@ class GPUModelRunner(
             max(self.max_model_len, self.max_encoder_len), placeholder_block_size
         )
         self._init_block_sizes = [placeholder_block_size]
-        self._init_kernel_block_sizes = [placeholder_block_size]
         self._init_max_num_blocks = [placeholder_max_num_blocks]
         self._init_slot_mapping_modes = [SlotMappingMode.TOKEN_TO_KV_SLOT]
         self.cp_kv_cache_interleave_size = (
@@ -735,7 +722,6 @@ class GPUModelRunner(
             device=self.device,
             vocab_size=self.model_config.get_vocab_size(),
             block_sizes=[placeholder_block_size],
-            kernel_block_sizes=[placeholder_block_size],
             max_num_blocks_per_req=[placeholder_max_num_blocks],
             num_spec_tokens=self.num_spec_tokens,
             logitsprocs=build_logitsprocs(
@@ -2509,8 +2495,8 @@ class GPUModelRunner(
                 )
 
             if for_cudagraph_capture:
-                attn_metadata_i = builder.build_for_cudagraph_capture(
-                    common_attn_metadata
+                attn_metadata_i = attn_group.build_metadata_for_cudagraph_capture(
+                    common_attn_metadata, ubid or 0
                 )
             elif (
                 cache_key in cached_attn_metadata
@@ -2518,13 +2504,16 @@ class GPUModelRunner(
             ):
                 attn_metadata_i = builder.update_block_table(
                     cached_attn_metadata[cache_key],
-                    common_attn_metadata.block_table_tensor,
+                    attn_group.map_to_kernel_block_table(
+                        common_attn_metadata.block_table_tensor, ubid or 0
+                    ),
                     common_attn_metadata.slot_mapping,
                 )
             else:
-                attn_metadata_i = builder.build(
+                attn_metadata_i = attn_group.build_metadata(
+                    common_attn_metadata,
+                    ubid or 0,
                     common_prefix_len=cascade_attn_prefix_len,
-                    common_attn_metadata=common_attn_metadata,
                     **extra_attn_metadata_args,
                 )
                 if builder.supports_update_block_table:
@@ -2930,7 +2919,14 @@ class GPUModelRunner(
                 mm_kwargs.append((mm_feature.modality, mm_feature.data))
                 mm_lora_refs.append((req_id, mm_feature.mm_position))
 
-        return mm_hashes, mm_kwargs, mm_lora_refs
+        # Stable-sort by modality so each modality is encoded in as few batches
+        # as possible. Encoder outputs are cached by mm_hash, so order is free.
+        order = sorted(range(len(mm_kwargs)), key=lambda i: mm_kwargs[i][0])
+        return (
+            [mm_hashes[i] for i in order],
+            [mm_kwargs[i] for i in order],
+            [mm_lora_refs[i] for i in order],
+        )
 
     def _cache_encoder_output(
         self,
@@ -2991,13 +2987,6 @@ class GPUModelRunner(
             and scheduler_output.scheduled_encoder_inputs
         )
 
-        # Batch mm inputs as much as we can: if a request in the batch has
-        # multiple modalities or a different modality than the previous one,
-        # we process it separately to preserve item order.
-        # FIXME(ywang96): This is a hacky way to deal with multiple modalities
-        # in the same batch while still being able to benefit from batching
-        # multimodal inputs. The proper solution should be reordering the
-        # encoder outputs.
         model = cast(SupportsMultiModal, self.model)
 
         if self.lora_config and self.lora_manager.supports_tower_connector_lora():
@@ -3340,20 +3329,9 @@ class GPUModelRunner(
     ) -> IntermediateTensors:
         assert self.intermediate_tensors is not None
 
-        tp = self.vllm_config.parallel_config.tensor_parallel_size
-        is_rs = is_residual_scattered_for_sp(self.vllm_config, num_tokens)
-
-        # When sequence parallelism is enabled, the "residual" tensor is
-        # sharded across TP ranks. All-gather it here because downstream
-        # QKV + Attention needs the full residual before the SP split point.
         if sync_self:
             assert intermediate_tensors is not None
             for k, v in intermediate_tensors.items():
-                is_scattered = k == "residual" and is_rs
-                if is_scattered:
-                    local_len = num_tokens // tp
-                    v = get_tp_group().all_gather(v[:local_len], dim=0)
-
                 self.intermediate_tensors[k][:num_tokens].copy_(
                     v[:num_tokens], non_blocking=True
                 )
@@ -3447,14 +3425,6 @@ class GPUModelRunner(
             finished_mask=finished_mask,
             async_output_copy_stream=self._get_or_create_async_output_copy_stream(),
         )
-
-    def _pad_for_sequence_parallelism(self, num_scheduled_tokens: int) -> int:
-        # Pad tokens to multiple of tensor_parallel_size when
-        # enabled collective fusion for SP
-        tp_size = self.vllm_config.parallel_config.tensor_parallel_size
-        if self.compilation_config.pass_config.enable_sp and tp_size > 1:
-            return round_up(num_scheduled_tokens, tp_size)
-        return num_scheduled_tokens
 
     def _prepare_padding_mask(
         self, num_tokens_unpadded: int, num_tokens_padded: int
@@ -3944,8 +3914,6 @@ class GPUModelRunner(
         )
         has_lora = num_active_loras > 0 if force_has_lora is None else force_has_lora
 
-        num_tokens_padded = self._pad_for_sequence_parallelism(num_tokens)
-
         def dispatch_cudagraph(num_tokens, disable_full=False, valid_modes=None):
             return self.cudagraph_dispatcher.dispatch(
                 num_tokens=num_tokens,
@@ -3957,18 +3925,9 @@ class GPUModelRunner(
             )
 
         cudagraph_mode, batch_descriptor = dispatch_cudagraph(
-            num_tokens_padded, disable_full=use_cascade_attn or has_encoder_output
+            num_tokens, disable_full=use_cascade_attn or has_encoder_output
         )
         num_tokens_padded = batch_descriptor.num_tokens
-        if self.compilation_config.pass_config.enable_sp:
-            assert (
-                batch_descriptor.num_tokens
-                % self.vllm_config.parallel_config.tensor_parallel_size
-                == 0
-            ), (
-                "Sequence parallelism requires num_tokens to be "
-                "a multiple of tensor parallel size"
-            )
 
         # Extra coordination when running data-parallel since we need to coordinate
         # across ranks
@@ -4453,15 +4412,9 @@ class GPUModelRunner(
 
                 sample_hidden_states = hidden_states[logits_indices]
                 if not get_pp_group().is_last_rank:
-                    all_gather_tensors = {
-                        "residual": not is_residual_scattered_for_sp(
-                            self.vllm_config, num_tokens_padded
-                        )
-                    }
                     get_pp_group().send_tensor_dict(
                         hidden_states.tensors,
                         all_gather_group=get_tp_group(),
-                        all_gather_tensors=all_gather_tensors,
                     )
                     logits = None
                 else:
@@ -5237,23 +5190,16 @@ class GPUModelRunner(
 
         return draft_token_ids
 
-    def update_config(self, overrides: dict[str, Any]) -> None:
-        allowed_config_names = {"load_config", "model_config"}
-        for config_name, config_overrides in overrides.items():
-            if config_name not in allowed_config_names:
-                allowed = ", ".join(sorted(allowed_config_names))
-                raise ValueError(
-                    f"Config override '{config_name}' is not supported. "
-                    f"Supported configs: {allowed}"
-                )
-            config = getattr(self, config_name)
-            new_config = update_config(config, config_overrides)
-            setattr(self, config_name, new_config)
-
     @instrument(span_name="Loading (GPU)")
-    def load_model(self, load_dummy_weights: bool = False) -> None:
+    def load_model(
+        self,
+        load_dummy_weights: bool = False,
+        *,
+        model: nn.Module | None = None,
+    ) -> None:
         """Args:
         load_dummy_weights: load dummy weights instead of real weights.
+        model: a pre-loaded model to skip the model loader.
 
         """
         logger.info_once(
@@ -5269,13 +5215,14 @@ class GPUModelRunner(
         try:
             with DeviceMemoryProfiler() as m:
                 time_before_load = time.perf_counter()
-                if load_dummy_weights:
+                if model is None and load_dummy_weights:
                     self.load_config.load_format = "dummy"
                 model_loader = get_model_loader(self.load_config)
                 # Capture warmup providers selected while constructing the model.
                 with self.jit_warmup_registry.activate():  # type: ignore[attr-defined]
-                    self.model = model_loader.load_model(
-                        vllm_config=self.vllm_config, model_config=self.model_config
+                    self.model = model or model_loader.load_model(
+                        vllm_config=self.vllm_config,
+                        model_config=self.model_config,
                     )
                 lookback_depth = getattr(self.model, "token_lookback_depth", 0)
                 if lookback_depth > 0:
@@ -5499,89 +5446,16 @@ class GPUModelRunner(
         weights_path: str | None = None,
         is_checkpoint_format: bool = True,
     ) -> None:
-        """Reload weights from a weights iterator or from disk
-
-        Args:
-            weights_iterator: weights to load into model
-            weights_path: path to load weights from if weights_iterator is not
-                provided. Use path of original model if neither is provided.
-            is_checkpoint_format: set to False if weights have already been
-                processed into kernel format (repacking, renaming, etc.)
-
-        """
-        # TODO(@kylesayrs): generalize to all runners and loaders
-        # argument validation
-        if weights_iterator is None and not is_checkpoint_format:
-            logger.warning(
-                "Reloading from disk means that weights will be in checkpoint format. "
-                "Please use `is_checkpoint_format=True` "
-                "to avoid weight reloading errors"
-            )
-
-        model = self.get_model()
-        weights_to_load = {
-            name.replace(".base_layer.", ".") if self.lora_config else name
-            for name, _ in model.named_parameters()
-        }
-        counter_before_reloading = time.perf_counter()
-
-        # load weights from disk if none are provided
-        if weights_iterator is None:
-            model_loader = get_model_loader(self.load_config)
-            if not hasattr(model_loader, "get_all_weights"):
-                raise NotImplementedError(
-                    f"Model reloading with `{self.load_config.load_format}` format"
-                )
-
-            if weights_path is not None:
-                # The revision and any object-storage `model_weights` source
-                # belong to the model we are reloading away from, so they must
-                # not be carried over to the new path.
-                self.model_config.model = weights_path
-                self.model_config.model_weights = ""
-                self.model_config.revision = None
-            weights_iterator = model_loader.get_all_weights(self.model_config, model)
-            weights_iterator = cast(
-                Iterable[tuple[str, torch.Tensor]], weights_iterator
-            )
-
-        # begin loading weights
-        logger.info_once("Reloading weights inplace...")
-        if is_checkpoint_format:
-            # load weights from checkpoint/ original model format
-            initialize_layerwise_reload(model)
-            loaded_weights = model.load_weights(weights_iterator)
-            finalize_layerwise_reload(model, self.model_config)
-
-        else:
-            # load weights from kernel format
-            logger.warning_once(
-                "Reloading with `is_checkpoint_format=True` requires that "
-                "weights be in kernel format and already sharded",
-            )
-            loaded_weights = set()
-            for name, loaded_weight in weights_iterator:
-                param = _get_parameter_for_reload(model, name)  # TODO: buffers?
-                param.copy_(loaded_weight)
-                loaded_weights.add(name)
-
-        self.reset_lora_state()
-
-        # logging and validation
-        counter_after_reloading = time.perf_counter()
-        diff_seconds = counter_after_reloading - counter_before_reloading
-        logger.info_once(
-            "Reloading and processing weights took %.2f seconds",
-            diff_seconds,
+        """Reload weights in place; see `reload_weights` in
+        `vllm.model_executor.model_loader.reload.inplace` for details."""
+        reload_weights(
+            self.vllm_config,
+            self.get_model(),
+            weights_iterator=weights_iterator,
+            weights_path=weights_path,
+            is_checkpoint_format=is_checkpoint_format,
         )
-        if self.model_config.quantization is None and loaded_weights is not None:
-            weights_not_loaded = weights_to_load - loaded_weights
-            if weights_not_loaded:
-                logger.warning(
-                    "Following weights were not loaded from checkpoint: %s",
-                    weights_not_loaded,
-                )
-
+        self.reset_lora_state()
         self.reset_encoder_cache()
         self.reset_mm_cache()
 
@@ -7135,7 +7009,6 @@ class GPUModelRunner(
             min_cg_attn_backend,
             self.uniform_decode_query_len,
             use_v2_model_runner=False,
-            tensor_parallel_size=self.parallel_config.tensor_parallel_size,
             kv_cache_config=self.kv_cache_config,
             max_num_reqs=self.max_num_reqs,
             is_profiling=is_profiling,
@@ -7181,9 +7054,7 @@ class GPUModelRunner(
             return
         self.reorder_batch_threshold = reduce(min_none_high, reorder_batch_thresholds)  # type: ignore[assignment]
 
-    def may_reinitialize_input_batch(
-        self, kv_cache_config: KVCacheConfig, kernel_block_sizes: list[int]
-    ) -> None:
+    def may_reinitialize_input_batch(self, kv_cache_config: KVCacheConfig) -> None:
         """Re-initialize the input batch if the block sizes are different from
         what it was originally created with. This happens when the final
         block size (determined after model loading) differs from the
@@ -7192,7 +7063,6 @@ class GPUModelRunner(
 
         Args:
             kv_cache_config: The KV cache configuration.
-            kernel_block_sizes: The kernel block sizes for each KV cache group.
 
         """
         block_sizes = []
@@ -7217,14 +7087,12 @@ class GPUModelRunner(
 
         if (
             block_sizes != self._init_block_sizes
-            or kernel_block_sizes != self._init_kernel_block_sizes
             or max_num_blocks != self._init_max_num_blocks
             or slot_mapping_modes != self._init_slot_mapping_modes
             or self.cp_kv_cache_interleave_size
             != self.parallel_config.cp_kv_cache_interleave_size
         ):
             self._init_block_sizes = block_sizes
-            self._init_kernel_block_sizes = kernel_block_sizes
             self._init_max_num_blocks = max_num_blocks
             self._init_slot_mapping_modes = slot_mapping_modes
             self.cp_kv_cache_interleave_size = (
@@ -7239,7 +7107,6 @@ class GPUModelRunner(
                     device=self.device,
                     vocab_size=self.model_config.get_vocab_size(),
                     block_sizes=block_sizes,
-                    kernel_block_sizes=kernel_block_sizes,
                     max_num_blocks_per_req=max_num_blocks,
                     num_spec_tokens=self.num_spec_tokens,
                     logitsprocs=self.input_batch.logitsprocs,
@@ -7254,10 +7121,6 @@ class GPUModelRunner(
         assert self._init_block_sizes == block_sizes, (
             f"InputBatch block_sizes {self._init_block_sizes} != "
             f"kv_cache block_sizes {block_sizes}"
-        )
-        assert self._init_kernel_block_sizes == kernel_block_sizes, (
-            f"InputBatch kernel_block_sizes {self._init_kernel_block_sizes} "
-            f"!= kv_cache kernel_block_sizes {kernel_block_sizes}"
         )
 
     def _attn_group_iterator(self) -> Iterator[AttentionGroup]:
@@ -7305,12 +7168,16 @@ class GPUModelRunner(
         num_attn_module = (
             2 if self.model_config.hf_config.model_type == "longcat_flash" else 1
         )
+        attn_groups = [g for groups in self.attn_groups for g in groups]
+        if self.speculative_config:
+            attn_groups += getattr(self.drafter, "draft_attn_groups", [])
         bind_kv_cache(
             kv_caches,
             self.compilation_config.static_forward_context,
             self.kv_caches,
             num_attn_module,
             kv_cache_groups=kv_cache_config.kv_cache_groups,
+            layer_kv_caches=map_kv_caches_to_kernel_blocks(kv_caches, attn_groups),
         )
         return kv_caches
 
@@ -7374,6 +7241,8 @@ class GPUModelRunner(
         # backends for that group only supports block_size 64, we will return
         # kernel_block_size 64 and split the 256-token-block to 4 blocks with 64
         # tokens each.
+        # Block-outermost packed groups are not split; their attention groups
+        # map kernel blocks themselves.
         kernel_block_sizes = prepare_kernel_block_sizes(
             kv_cache_config, self.attn_groups
         )
@@ -7383,7 +7252,7 @@ class GPUModelRunner(
         self.initialize_metadata_builders(kv_cache_config, kernel_block_sizes)
 
         # Reinitialize need to after initialize_attn_backend
-        self.may_reinitialize_input_batch(kv_cache_config, kernel_block_sizes)
+        self.may_reinitialize_input_batch(kv_cache_config)
         # Capture warmup providers that depend on allocated KV-cache strides.
         with self.jit_warmup_registry.activate():  # type: ignore[attr-defined]
             kv_caches = self.initialize_kv_cache_tensors(
@@ -7460,7 +7329,9 @@ class GPUModelRunner(
             # Skip modules that don't need KV cache (eg encoder-only attention)
             if spec := attn_module.get_kv_cache_spec(self.vllm_config):
                 if isinstance(spec, AttentionSpec):
-                    spec = attn_module.get_attn_backend().customize_spec(spec)
+                    spec = customize_attention_spec(
+                        attn_module.get_attn_backend(), spec
+                    )
                 kv_cache_spec[layer_name] = spec
 
         return kv_cache_spec
