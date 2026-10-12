@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 use std::collections::BTreeSet;
+use std::num::NonZeroU32;
 use std::sync::{Arc, Once};
 use std::time::Duration;
 
@@ -92,8 +93,8 @@ fn request_output_with_logprobs_and_kv(
         new_logprobs: new_logprobs.map(MaybeWireLogprobs::Direct),
         new_prompt_logprobs_tensors: prompt_logprobs.map(MaybeWireLogprobs::Direct),
         finish_reason,
-        kv_transfer_params,
-        ec_transfer_params,
+        kv_transfer_params: kv_transfer_params.map(Box::new),
+        ec_transfer_params: ec_transfer_params.map(Box::new),
         ..Default::default()
     }
 }
@@ -280,11 +281,11 @@ async fn generate_streams_outputs() {
     assert_eq!(first.request_id, internal_id);
     assert_eq!(
         first.prompt_info,
-        Some(GeneratePromptInfo {
+        Some(Box::new(GeneratePromptInfo {
             prompt_token_ids: vec![11, 22].into(),
             prompt_logprobs: Some(prompt_logprobs()),
             prompt_token_id_logprobs: None,
-        })
+        }))
     );
     assert_eq!(first.token_ids, vec![1, 2]);
     assert_eq!(
@@ -309,6 +310,111 @@ async fn generate_streams_outputs() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn generate_merges_outputs_by_stream_interval() {
+    init_tracing();
+    let ipc = IpcNamespace::new().unwrap();
+    let handshake_address = ipc.handshake_endpoint();
+    let engine_id = b"engine-stream-interval".to_vec();
+
+    // One logprobs position per token, so merged outputs can be checked
+    // against the logprobs of their concatenated tokens.
+    fn token_logprobs(token_ids: &[u32]) -> Logprobs {
+        Logprobs {
+            positions: token_ids
+                .iter()
+                .map(|&token_id| PositionLogprobs {
+                    entries: vec![TokenLogprob {
+                        token_id,
+                        logprob: -0.5,
+                        rank: 1,
+                    }],
+                })
+                .collect(),
+        }
+    }
+
+    let (shutdown_tx, engine_task) = spawn_mock_engine_task(
+        handshake_address.clone(),
+        engine_id.clone(),
+        |dealer, push| {
+            Box::pin(async move {
+                let add = recv_engine_message(dealer).await;
+                let request: EngineCoreRequest = rmp_serde::from_slice(&add[1]).unwrap();
+
+                // One engine step per batch.
+                let steps: [(&[u32], Option<EngineCoreFinishReason>); 6] = [
+                    (&[1], None),
+                    (&[2], None),
+                    (&[3], None),
+                    (&[4, 5], None),
+                    (&[6], None),
+                    (&[7], Some(EngineCoreFinishReason::Length)),
+                ];
+                for (token_ids, finish_reason) in steps {
+                    send_outputs(
+                        push,
+                        RequestBatchOutputs {
+                            outputs: vec![request_output_with_logprobs(
+                                &request.request_id,
+                                token_ids.to_vec(),
+                                finish_reason,
+                                Some(token_logprobs(token_ids)),
+                                None,
+                            )],
+                            ..Default::default()
+                        }
+                        .into(),
+                    )
+                    .await;
+                }
+            })
+        },
+    );
+
+    // The request's interval raises the frontend-level one.
+    let llm = connect_async_llm_with_ipc(handshake_address, 7, "test-model", &ipc)
+        .await
+        .with_stream_interval(NonZeroU32::new(2).unwrap());
+    let mut request = sample_generate_request("req-stream-interval", 7);
+    request.sampling_params.stream_interval = NonZeroU32::new(3);
+    let outputs: Vec<_> = llm
+        .generate(request)
+        .await
+        .unwrap()
+        .map(|output| output.unwrap())
+        .collect()
+        .await;
+
+    let _ = shutdown_tx.send(());
+    engine_task.await.unwrap();
+    llm.shutdown().await.unwrap();
+
+    // The first output is yielded immediately, later ones once they carry at
+    // least 3 tokens, and the terminal one flushes the rest.
+    let shapes: Vec<_> = outputs
+        .iter()
+        .map(|output| {
+            (
+                output.prompt_info.is_some(),
+                output.token_ids.clone(),
+                output.finish_reason.clone(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        shapes,
+        [
+            (true, vec![1], None),
+            (false, vec![2, 3, 4, 5], None),
+            (false, vec![6, 7], Some(FinishReason::Length)),
+        ]
+    );
+    for output in &outputs {
+        assert_eq!(output.logprobs, Some(token_logprobs(&output.token_ids)));
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn collect_output_aggregates_raw_tokens_logprobs_and_terminal_metadata() {
     init_tracing();
     let ipc = IpcNamespace::new().unwrap();
@@ -330,12 +436,12 @@ async fn collect_output_aggregates_raw_tokens_logprobs_and_terminal_metadata() {
                     RequestBatchOutputs {
                         outputs: vec![
                             EngineCoreOutput {
-                                prefill_stats: Some(PrefillStats {
+                                prefill_stats: Some(Box::new(PrefillStats {
                                     num_prompt_tokens: 2,
                                     num_cached_tokens: 1,
                                     num_local_cached_tokens: 1,
                                     ..Default::default()
-                                }),
+                                })),
                                 new_sampling_mask: Some(MaybeWireSamplingMask::Direct(
                                     SamplingMask {
                                         rows: vec![vec![1, 33, 99]],
@@ -409,11 +515,11 @@ async fn collect_output_aggregates_raw_tokens_logprobs_and_terminal_metadata() {
 async fn collect_output_rejects_partial_sampling_mask() {
     let output = vllm_llm::GenerateOutput {
         request_id: "req-partial-mask".to_string(),
-        prompt_info: Some(GeneratePromptInfo {
+        prompt_info: Some(Box::new(GeneratePromptInfo {
             prompt_token_ids: Arc::from([11_u32, 22]),
             prompt_logprobs: None,
             prompt_token_id_logprobs: None,
-        }),
+        })),
         token_ids: vec![33, 44],
         logprobs: None,
         finish_reason: Some(FinishReason::Length),
@@ -763,11 +869,11 @@ async fn generate_records_request_metrics_in_prometheus_output() {
                         engine_index: 4,
                         timestamp: 10.0,
                         outputs: vec![EngineCoreOutput {
-                            prefill_stats: Some(PrefillStats {
+                            prefill_stats: Some(Box::new(PrefillStats {
                                 num_prompt_tokens: 2,
                                 num_computed_tokens: 2,
                                 ..Default::default()
-                            }),
+                            })),
                             ..request_output_with_events(
                                 &request.request_id,
                                 vec![1],
