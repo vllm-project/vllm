@@ -582,7 +582,7 @@ class TrtLlmBf16LoRAExperts(_TrtLlmLoRAExpertsBase):
 # MXFP4 weights x BF16 activations trtllm MoE + LoRA
 class TrtLlmMxfp4LoRAExperts(_TrtLlmLoRAExpertsBase, TrtLlmMxfp4ExpertsBase):
     """MXFP4-weight, BF16-activation trtllm MoE + LoRA. Not MXFP8 activations:
-    the kernel then returns the FC1 activation as codes without block scales."""
+    the kernel then returns the FC1 activation quantized, without its scales."""
 
     def __init__(
         self,

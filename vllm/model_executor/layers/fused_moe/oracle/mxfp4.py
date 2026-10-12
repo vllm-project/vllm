@@ -550,8 +550,8 @@ def _requested_kernel_cls(
                 backend,
                 "expert LoRA is not supported with MXFP8 activations: the "
                 "down-projection delta is computed from the post-activation "
-                "FC1 output, which the kernel returns as MXFP8 codes without "
-                "their block scales. Use the BF16-activation variant "
+                "FC1 output, which the kernel returns quantized (uint8) without "
+                "its block scales. Use the BF16-activation variant "
                 "(moe_backend='flashinfer_trtllm')",
             )
         )
