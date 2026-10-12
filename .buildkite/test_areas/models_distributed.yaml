@@ -2,6 +2,23 @@ group: Models - Distributed
 depends_on: 
   - image-build
 steps:
+- label: ":nvidia: (L4) Qwen4 Exp SP"
+  key: qwen4-exp-sp-tests-4-gpus
+  timeout_in_minutes: 30
+  working_dir: "/vllm-workspace/tests"
+  device: l4
+  num_devices: 4
+  source_file_dependencies:
+  - vllm/config/parallel.py
+  - vllm/models/common/ops/sequence_parallel.py
+  - vllm/models/qwen4_exp/
+  - vllm/model_executor/layers/vocab_parallel_embedding.py
+  - vllm/model_executor/models/qwen3_next.py
+  - tests/models/qwen4_exp/test_ple.py
+  - tests/models/qwen4_exp/test_tpsp.py
+  commands:
+  - pytest -v -s models/qwen4_exp/test_tpsp.py
+
 - label: ":nvidia: (L4) Distributed Models Shard %N"
   key: distributed-model-tests-2-gpus
   timeout_in_minutes: 35
