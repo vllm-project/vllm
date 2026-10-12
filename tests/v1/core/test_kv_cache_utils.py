@@ -1341,6 +1341,9 @@ def test_request_block_hasher_incremental_append_with_multiple_mm_features(
         pytest.param({"enable_prefix_caching": False}, False, id="no-prefix-caching"),
         pytest.param({"num_prefill_lookahead_tokens": 2}, False, id="multi-module-mtp"),
         pytest.param(
+            {"disable_lookahead_block_hashes": True}, False, id="disabled-by-config"
+        ),
+        pytest.param(
             {"enable_prefix_caching": False, "connector_support": True},
             True,
             id="supporting-connector",
@@ -1351,6 +1354,11 @@ def test_request_block_hasher_incremental_append_with_multiple_mm_features(
 def test_lookahead_block_hashing_enabled(overrides: dict[str, Any], expected: bool):
     speculative_config = object.__new__(SpeculativeConfig)
     object.__setattr__(speculative_config, "method", overrides.get("method", "mtp"))
+    object.__setattr__(
+        speculative_config,
+        "disable_lookahead_block_hashes",
+        overrides.get("disable_lookahead_block_hashes", False),
+    )
     connector_support = overrides.get("connector_support")
     vllm_config = cast(
         VllmConfig,
