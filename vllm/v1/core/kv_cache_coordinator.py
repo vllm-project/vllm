@@ -175,6 +175,17 @@ class KVCacheCoordinator(ABC):
             for manager in self.single_type_managers:
                 if isinstance(manager, MambaManager):
                     manager.drop_eagle_checkpoint_block = True
+        # Order in which a finished request's groups return their blocks to
+        # the pool. A Mamba group's reusable state is a single block, and
+        # evicting it voids the hybrid hit for every attention block of that
+        # prefix, so attention groups go first (evicted first) and Mamba
+        # groups last; single-group models are unaffected.
+        self._free_order = tuple(
+            sorted(
+                self.single_type_managers,
+                key=lambda manager: isinstance(manager, MambaManager),
+            )
+        )
         self.group_block_sizes = tuple(
             manager.block_size for manager in self.single_type_managers
         )
@@ -398,13 +409,14 @@ class KVCacheCoordinator(ABC):
         return all([pool.reset_prefix_cache() for pool in pools])
 
     def free(self, request_id: str) -> None:
-        """Free the blocks for the request.
+        """Free the blocks for the request, one group at a time in
+        ``_free_order``.
 
         Args:
             request_id: The request ID.
 
         """
-        for manager in self.single_type_managers:
+        for manager in self._free_order:
             manager.free(request_id)
 
     def pop_blocks_for_free(self, request_id: str) -> list[KVCacheBlock]:
@@ -418,11 +430,13 @@ class KVCacheCoordinator(ABC):
             request_id: The request ID.
 
         Returns:
-            The request's blocks in allocation order.
+            Each group's blocks in allocation order, groups in reverse
+            ``_free_order``, so that freeing the list in reverse releases
+            the groups in the same order as ``free``.
 
         """
         blocks: list[KVCacheBlock] = []
-        for manager in self.single_type_managers:
+        for manager in reversed(self._free_order):
             blocks.extend(manager.pop_blocks_for_free(request_id))
         return blocks
 
