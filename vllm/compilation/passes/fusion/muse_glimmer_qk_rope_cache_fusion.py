@@ -234,6 +234,9 @@ class MuseGlimmerQkRopeCacheFusionPass(VllmPatternMatcherPass):
             _text_config,
         )
         from vllm.model_executor.models.utils import extract_layer_index
+        from vllm.v1.attention.backends.rocm_aiter_fa import (
+            AiterFlashAttentionBackend,
+        )
 
         text_config = _text_config(config.model_config.hf_config)
         if not _muse_glimmer_use_qk_norm(text_config):
@@ -243,7 +246,7 @@ class MuseGlimmerQkRopeCacheFusionPass(VllmPatternMatcherPass):
             layer_idx = extract_layer_index(layer.layer_name)
             if (
                 text_config.no_rope_layers[layer_idx] != 1
-                or layer.get_attn_backend().__name__ != "AiterFlashAttentionBackend"
+                or layer.get_attn_backend() is not AiterFlashAttentionBackend
                 or layer.kv_cache_dtype != "auto"
                 or layer.head_size != 128
                 or not layer.impl.fused_qk_norm_rope_kvcache_supported()
