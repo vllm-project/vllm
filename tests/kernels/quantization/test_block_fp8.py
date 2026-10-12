@@ -421,3 +421,142 @@ def test_w8a8_block_fp8_b12x_matmul(M, N, K):
     # ordering can flap an output between adjacent BF16 values one ULP apart.
     assert rel_diff < 0.003
     assert cosine >= 0.99999
+
+
+@pytest.mark.skipif(capability != (12, 0), reason="qualified SM120 n64 route")
+@pytest.mark.parametrize("M", [16, 32, 40, 64, 72, 128])
+@pytest.mark.parametrize("K", [4096, 9216])
+@torch.inference_mode()
+def test_cutlass_sm120_n64_preserves_block_fp8_bytes(M, K):
+    from vllm.model_executor.kernels.linear.scaled_mm.cutlass_sm120 import (
+        cutlass_block_fp8_sm120,
+        select_route,
+    )
+
+    torch.manual_seed(37)
+    a_fp32 = torch.randn((M, K), device="cuda")
+    a, sa = per_token_group_quant_fp8(a_fp32, 128, column_major_scales=True)
+    b = torch.randn((2560, K), device="cuda").to(torch.float8_e4m3fn)
+    sb = torch.rand((20, K // 128), device="cuda", dtype=torch.float32)
+    sb64 = sb.repeat_interleave(2, dim=0)
+    assert torch.equal(sb64[::2].view(torch.int32), sb.view(torch.int32))
+    assert torch.equal(sb64[1::2].view(torch.int32), sb.view(torch.int32))
+    assert select_route(a, b, sa, sb, sb64) == "n64"
+    expected = cutlass_scaled_mm(a, b, sa, sb, [128, 128], torch.bfloat16)
+    direct = torch.empty_like(expected)
+    torch.ops._C.cutlass_scaled_mm_sm120_n64(direct, a, b.T, sa, sb64.T)
+    actual = cutlass_block_fp8_sm120(a, b, sa, sb, sb64)
+    assert torch.equal(direct.view(torch.int16), expected.view(torch.int16))
+    assert torch.equal(actual.view(torch.int16), expected.view(torch.int16))
+
+
+@pytest.mark.skipif(capability != (12, 0), reason="qualified SM120 n64 scales")
+@torch.inference_mode()
+def test_cutlass_sm120_n64_scales_are_layer_owned_and_reloaded():
+    from vllm.model_executor.kernels.linear.scaled_mm.cutlass import (
+        CutlassFp8BlockScaledMMKernel,
+    )
+
+    kernel = CutlassFp8BlockScaledMMKernel.__new__(CutlassFp8BlockScaledMMKernel)
+    kernel.config = types.SimpleNamespace(out_dtype=torch.bfloat16)
+    layers = [torch.nn.Module(), torch.nn.Module()]
+    for layer in layers:
+        layer.weight = torch.nn.Parameter(
+            torch.randn((2560, 4096), device="cuda").to(torch.float8_e4m3fn),
+            requires_grad=False,
+        )
+        layer.weight_scale = torch.nn.Parameter(
+            torch.rand((20, 32), device="cuda"), requires_grad=False
+        )
+        kernel.process_weights_after_loading(layer)
+    assert (
+        layers[0]._cutlass_n64_scale.data_ptr()
+        != layers[1]._cutlass_n64_scale.data_ptr()
+    )
+    first = layers[0]
+    original_ptr = first._cutlass_n64_scale.data_ptr()
+    first.weight_scale.copy_(torch.rand_like(first.weight_scale))
+    kernel.process_weights_after_loading(first)
+    assert first._cutlass_n64_scale.data_ptr() == original_ptr
+    assert torch.equal(first._cutlass_n64_scale[::2], first.weight_scale)
+    assert torch.equal(first._cutlass_n64_scale[1::2], first.weight_scale)
+    assert "_cutlass_n64_scale" not in first.state_dict()
+
+    from vllm.model_executor.model_loader.reload.layerwise import (
+        _copy_and_restore_kernel_tensors,
+        get_layerwise_info,
+    )
+
+    info = get_layerwise_info(first)
+    info.kernel_tensors = (
+        dict(first.named_parameters(recurse=False)),
+        dict(first.named_buffers(recurse=False)),
+    )
+    info.kernel_non_persistent_buffers = set(first._non_persistent_buffers_set)
+    info.loaded_weights = []
+    original_scale_ptr = first.weight_scale.data_ptr()
+    new_scale = torch.rand_like(first.weight_scale)
+    first.weight_scale = torch.nn.Parameter(new_scale, requires_grad=False)
+    kernel.process_weights_after_loading(first)
+    _copy_and_restore_kernel_tensors(first, info)
+    assert first.weight_scale.data_ptr() == original_scale_ptr
+    assert first._cutlass_n64_scale.data_ptr() == original_ptr
+    assert torch.equal(first._cutlass_n64_scale[::2], new_scale)
+    assert torch.equal(first._cutlass_n64_scale[1::2], new_scale)
+
+
+@pytest.mark.skipif(capability != (12, 0), reason="qualified SM120 ordered route")
+@pytest.mark.parametrize("M", [1, 4, 8, 9])
+@pytest.mark.parametrize("K", [4096, 9216])
+@torch.inference_mode()
+def test_cutlass_sm120_ordered_bytes_and_m9_fallback(M, K):
+    from vllm.model_executor.kernels.linear.scaled_mm.cutlass_sm120 import (
+        cutlass_block_fp8_sm120,
+        select_route,
+    )
+
+    torch.manual_seed(91)
+    a, sa = per_token_group_quant_fp8(
+        torch.randn((M, K), device="cuda"), 128, column_major_scales=True
+    )
+    b = torch.randn((2560, K), device="cuda").to(torch.float8_e4m3fn)
+    sb = torch.rand((20, K // 128), device="cuda", dtype=torch.float32)
+    sb64 = sb.repeat_interleave(2, dim=0)
+    assert select_route(a, b, sa, sb, sb64) == ("ordered" if M <= 8 else "stock")
+    expected = cutlass_scaled_mm(a, b, sa, sb, [128, 128], torch.bfloat16)
+    actual = cutlass_block_fp8_sm120(a, b, sa, sb, sb64)
+    assert torch.equal(actual.view(torch.int16), expected.view(torch.int16))
+
+
+@pytest.mark.skipif(capability != (12, 0), reason="qualified SM120 ordered graphs")
+@torch.inference_mode()
+def test_cutlass_sm120_ordered_graph_owns_output_and_tracks_changing_inputs():
+    from vllm.model_executor.kernels.linear.scaled_mm.cutlass_sm120 import (
+        cutlass_block_fp8_sm120,
+    )
+
+    a, sa = per_token_group_quant_fp8(
+        torch.randn((4, 4096), device="cuda"), 128, column_major_scales=True
+    )
+    b = torch.randn((2560, 4096), device="cuda").to(torch.float8_e4m3fn)
+    sb = torch.rand((20, 32), device="cuda", dtype=torch.float32)
+    sb64 = sb.repeat_interleave(2, dim=0)
+    warmup = torch.cuda.Stream()
+    warmup.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(warmup):
+        for _ in range(3):
+            cutlass_block_fp8_sm120(a, b, sa, sb, sb64)
+    torch.cuda.current_stream().wait_stream(warmup)
+    graphs, outputs = [], []
+    for _ in range(2):
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            output = cutlass_block_fp8_sm120(a, b, sa, sb, sb64)
+        graphs.append(graph)
+        outputs.append(output)
+    assert outputs[0].data_ptr() != outputs[1].data_ptr()
+    a.copy_(a.float().roll(1, dims=0).to(a.dtype))
+    expected = cutlass_scaled_mm(a, b, sa, sb, [128, 128], torch.bfloat16)
+    for graph, output in zip(graphs, outputs):
+        graph.replay()
+        assert torch.equal(output.view(torch.int16), expected.view(torch.int16))

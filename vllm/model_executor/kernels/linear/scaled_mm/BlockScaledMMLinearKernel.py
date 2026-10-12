@@ -128,7 +128,8 @@ class Fp8BlockScaledMMLinearKernel(
                 input_scale if input_scale is not None else input_2d.new_empty(1)
             )
 
-        output = self.apply_block_scaled_mm(
+        output = self.apply_block_scaled_mm_with_layer(
+            layer,
             A=q_input,
             B=weight,
             As=input_scale,
@@ -138,6 +139,17 @@ class Fp8BlockScaledMMLinearKernel(
         if bias is not None:
             output = output + bias
         return output.to(dtype=out_dtype).view(*output_shape)
+
+    def apply_block_scaled_mm_with_layer(
+        self,
+        layer: torch.nn.Module,
+        *,
+        A: torch.Tensor,
+        B: torch.Tensor,
+        As: torch.Tensor,
+        Bs: torch.Tensor,
+    ) -> torch.Tensor:
+        return self.apply_block_scaled_mm(A=A, B=B, As=As, Bs=Bs)
 
     @abstractmethod
     def apply_block_scaled_mm(

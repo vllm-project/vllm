@@ -1,4 +1,7 @@
 #include "scaled_mm_kernels.hpp"
+#include "core/registration.h"
+#include "libtorch_stable/torch_utils.h"
+#include <torch/csrc/stable/library.h>
 #include "scaled_mm_blockwise_sm120_fp8_dispatch.cuh"
 #include "libtorch_stable/cutlass_extensions/epilogue/scaled_mm_epilogues_c3x.hpp"
 
@@ -46,4 +49,43 @@ void cutlass_scaled_mm_blockwise_sm120_fp8(
   }
 }
 
+void cutlass_scaled_mm_blockwise_sm120_n64(
+    torch::stable::Tensor& out, torch::stable::Tensor const& a,
+    torch::stable::Tensor const& b, torch::stable::Tensor const& a_scales,
+    torch::stable::Tensor const& b_scales) {
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      a.get_device_index());
+  const auto* device_prop = get_device_prop();
+  STD_TORCH_CHECK(device_prop->major == 12 && device_prop->minor == 0);
+  STD_TORCH_CHECK(a.dim() == 2 && b.dim() == 2 && out.dim() == 2 &&
+                  a_scales.dim() == 2 && b_scales.dim() == 2);
+  STD_TORCH_CHECK(a.get_device_index() == b.get_device_index() &&
+                  a.get_device_index() == out.get_device_index() &&
+                  a.get_device_index() == a_scales.get_device_index() &&
+                  a.get_device_index() == b_scales.get_device_index());
+  STD_TORCH_CHECK(
+      a.scalar_type() == torch::headeronly::ScalarType::Float8_e4m3fn &&
+      b.scalar_type() == torch::headeronly::ScalarType::Float8_e4m3fn &&
+      out.scalar_type() == torch::headeronly::ScalarType::BFloat16 &&
+      a_scales.scalar_type() == torch::headeronly::ScalarType::Float &&
+      b_scales.scalar_type() == torch::headeronly::ScalarType::Float);
+  const auto m = a.size(0), k = a.size(1);
+  STD_TORCH_CHECK(m >= 16 && m <= 128 && m % 8 == 0 &&
+                  (k == 4096 || k == 9216) && b.size(0) == k &&
+                  b.size(1) == 2560 && out.size(0) == m && out.size(1) == 2560);
+  STD_TORCH_CHECK(a.is_contiguous() && out.is_contiguous() &&
+                  b.stride(0) == 1 && b.stride(1) == k);
+  STD_TORCH_CHECK(a_scales.size(0) == m && a_scales.size(1) == k / 128 &&
+                  a_scales.stride(0) == 1 && a_scales.stride(1) == m &&
+                  b_scales.size(0) == k / 128 && b_scales.size(1) == 40 &&
+                  b_scales.stride(0) == 1 && b_scales.stride(1) == k / 128);
+  cutlass_gemm_caller_blockwise<sm120_blockwise_fp8_config_n64::Gemm>(
+      out, a, b, a_scales, b_scales, 1);
+}
+
 }  // namespace vllm
+
+STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
+  ops.impl("cutlass_scaled_mm_sm120_n64",
+           TORCH_BOX(&vllm::cutlass_scaled_mm_blockwise_sm120_n64));
+}
