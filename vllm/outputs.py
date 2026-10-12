@@ -39,6 +39,15 @@ class SamplingMask:
 
 
 @dataclass
+class WeightVersionSpan:
+    """Output tokens `[start, end)` were sampled by weights labelled `version`."""
+
+    version: str
+    start: int
+    end: int
+
+
+@dataclass
 class CompletionOutput:
     """The output data of one completion output of a request.
 
@@ -62,6 +71,8 @@ class CompletionOutput:
             ``--per-request-spec-decode-metrics`` is enabled; None otherwise.
             Surfaced in the response as ``metrics.speculative_decoding`` for
             single-sequence (``n == 1``) requests.
+        weight_versions: Contiguous weight version spans over output-token indexes.
+            Set on the final output only.
 
     """
 
@@ -76,6 +87,7 @@ class CompletionOutput:
     lora_request: LoRARequest | None = None
     sampling_mask: SamplingMask | None = None
     spec_decode_metrics: RequestSpecDecodeMetrics | None = None
+    weight_versions: list[WeightVersionSpan] | None = None
 
     def finished(self) -> bool:
         return self.finish_reason is not None
@@ -223,6 +235,8 @@ class RequestOutput:
                         # aggregation with earlier chunks that have no R3.
                         if next_completion.routed_experts is not None:
                             completion.routed_experts = next_completion.routed_experts
+                        # Like finish_reason, spans come only with the terminal output.
+                        completion.weight_versions = next_completion.weight_versions
                         completion.finish_reason = next_completion.finish_reason
                         completion.stop_reason = next_completion.stop_reason
                     else:

@@ -3,6 +3,7 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::num::NonZeroU32;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -170,6 +171,11 @@ pub struct ChatCompletionRequest {
     /// Number of prompt logprobs to return
     pub prompt_logprobs: Option<i32>,
 
+    /// Specific vocab token IDs to return logprobs for at each generated
+    /// position, in addition to the sampled token. Takes precedence over
+    /// `top_logprobs`. Requires `logprobs=true`.
+    pub logprob_token_ids: Option<Vec<u32>>,
+
     /// Restrict output to these token IDs only
     pub allowed_token_ids: Option<Vec<u32>>,
 
@@ -256,6 +262,12 @@ pub struct ChatCompletionRequest {
 
     /// Parameters for detecting repetitive N-gram patterns in output tokens
     pub repetition_detection: Option<RepetitionDetectionParams>,
+
+    /// Number of tokens to batch into each streamed chunk. Raises the server's
+    /// `--stream-interval` for this request. Values below the server setting
+    /// are clamped up to it. The first and last chunks are always sent
+    /// immediately. Ignored for non-streaming requests.
+    pub stream_interval: Option<NonZeroU32>,
 }
 
 impl Default for ChatCompletionRequest {
@@ -301,6 +313,7 @@ impl Default for ChatCompletionRequest {
             truncate_prompt_tokens: None,
             truncation_side: None,
             prompt_logprobs: None,
+            logprob_token_ids: None,
             allowed_token_ids: None,
             bad_words: None,
             echo: false,
@@ -323,6 +336,7 @@ impl Default for ChatCompletionRequest {
             ec_transfer_params: None,
             vllm_xargs: None,
             repetition_detection: None,
+            stream_interval: None,
         }
     }
 }
