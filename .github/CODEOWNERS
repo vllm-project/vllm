@@ -46,12 +46,12 @@
 /vllm/entrypoints/pooling @noooop @DarkLight1337
 /vllm/entrypoints/rl @aoshen02 @njhill
 /vllm/entrypoints/scale_out @noooop @DarkLight1337
-/vllm/entrypoints/scale_out/token_in_token_out @aoshen02
-/vllm/entrypoints/scale_out/factories.py @aoshen02
-/vllm/entrypoints/speech_to_text/realtime @njhill
+/vllm/entrypoints/scale_out/token_in_token_out @aoshen02 @noooop
+/vllm/entrypoints/scale_out/factories.py @aoshen02 @noooop
 /vllm/entrypoints/speech_to_text @NickLucche
-/vllm/entrypoints/serve/sagemaker @DarkLight1337
+/vllm/entrypoints/speech_to_text/realtime @njhill @NickLucche
 /vllm/entrypoints/serve @njhill
+/vllm/entrypoints/serve/sagemaker @DarkLight1337
 /vllm/entrypoints/common @DarkLight1337
 /vllm/entrypoints/llm.py @DarkLight1337
 
@@ -67,10 +67,10 @@
 /tests/entrypoints/pooling @noooop @DarkLight1337
 /tests/entrypoints/rl @aoshen02 @njhill
 /tests/entrypoints/scale_out @noooop @DarkLight1337
-/tests/entrypoints/speech_to_text/realtime @njhill
 /tests/entrypoints/speech_to_text @NickLucche
-/tests/entrypoints/serve/sagemaker @DarkLight1337
+/tests/entrypoints/speech_to_text/realtime @njhill @NickLucche
 /tests/entrypoints/serve @njhill
+/tests/entrypoints/serve/sagemaker @DarkLight1337
 /tests/entrypoints/llm @DarkLight1337
 /tests/entrypoints/llm/test_struct_output_generate.py @mgoin @aarnphm @arpera
 
