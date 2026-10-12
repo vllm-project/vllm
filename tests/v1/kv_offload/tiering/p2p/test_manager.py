@@ -180,6 +180,40 @@ class TestInitHashSeed:
         assert mgr._get_hash_seed() == "random-seed-abc"
 
 
+class TestBackpressureRejected:
+    def _patch_transports(self, monkeypatch) -> None:
+        monkeypatch.setattr(manager_module, "NixlTransport", lambda *a, **k: object())
+        monkeypatch.setattr(manager_module, "ZmqTransport", lambda *a, **k: object())
+        monkeypatch.setattr(
+            manager_module.FileMapper,
+            "from_offloading_spec",
+            lambda **k: SimpleNamespace(get_run_config=lambda: {}),
+        )
+
+    def test_explicit_backpressure_detector_rejected(self, monkeypatch):
+        """An explicitly configured detector must fail fast for P2P.
+
+        The generic store-latency detector cannot fail fast in PD mode and
+        rendezvous time makes store latency an unreliable pressure signal,
+        so P2P rejects it rather than degrading silently.
+        """
+        self._patch_transports(monkeypatch)
+        with pytest.raises(ValueError, match="not supported for the P2P"):
+            P2PSecondaryTierManager(
+                offloading_spec=_init_offloading_spec(),
+                primary_kv_view=memoryview(bytearray(16)),
+                backpressure_detector=object(),
+            )
+
+    def test_no_detector_constructs_normally(self, monkeypatch):
+        self._patch_transports(monkeypatch)
+        mgr = P2PSecondaryTierManager(
+            offloading_spec=_init_offloading_spec(),
+            primary_kv_view=memoryview(bytearray(16)),
+        )
+        assert mgr.bp_detector is None
+
+
 # ---------------------------------------------------------------------------
 # Tests for _peer_id_from_params
 # ---------------------------------------------------------------------------
@@ -315,10 +349,10 @@ class TestServeExternalRequests:
         mgr._failed_serve_ctxs = [ctx]
         sess_a = _RecordingSession()
         sess_b = _RecordingSession()
-        mgr._sessions = {"a": sess_a, "b": sess_b}  # type: ignore[assignment]
+        mgr._sessions = {"a": sess_a, "b": sess_b}
 
         parent = _RecordingParent()
-        mgr.serve_external_requests(parent)  # type: ignore[arg-type]
+        mgr.serve_external_requests(parent)
 
         # Failed serve released and queue cleared.
         assert parent.finished == ["p2p:peer:req-1:lu1"]
@@ -330,10 +364,10 @@ class TestServeExternalRequests:
     def test_no_failed_serves_still_serves_sessions(self):
         mgr = _make_manager()
         sess = _RecordingSession()
-        mgr._sessions = {"a": sess}  # type: ignore[assignment]
+        mgr._sessions = {"a": sess}
 
         parent = _RecordingParent()
-        mgr.serve_external_requests(parent)  # type: ignore[arg-type]
+        mgr.serve_external_requests(parent)
 
         assert parent.finished == []
         assert sess.served_with == [parent]
@@ -393,7 +427,7 @@ class TestSubmitStore:
         forwards directly to that session rather than re-buffering."""
         mgr = _make_manager()
         bound = _FakeSession(peer_id="10.0.0.1:8000", connected=True)
-        mgr._kv_to_session["req-1"] = bound  # type: ignore[assignment]
+        mgr._kv_to_session["req-1"] = bound
         # Note: _sessions is intentionally untouched — this test isolates
         # the kv_request_id → session fast path.
         job = _job_metadata(
@@ -461,7 +495,7 @@ class TestSubmitLoad:
         mgr = _make_manager()
         peer_id = "10.0.0.1:8000"
         existing = _FakeSession(peer_id=peer_id, connected=True)
-        mgr._sessions[peer_id] = existing  # type: ignore[assignment]
+        mgr._sessions[peer_id] = existing
         job = _job_metadata(
             job_id=42,
             keys=[b"k1", b"k2"],
@@ -547,7 +581,7 @@ class TestOnRequestFinished:
         (FetchMsg received) routes via _kv_to_session and pops the entry."""
         mgr = _make_manager()
         bound = _FakeSession(peer_id="some-peer:1", connected=True)
-        mgr._kv_to_session["req-1"] = bound  # type: ignore[assignment]
+        mgr._kv_to_session["req-1"] = bound
         ctx = _req_context(kv_params=_remote_decoder_kv_params(kv_request_id="req-1"))
         mgr.on_request_finished(ctx)
         assert bound.finishes == ["req-1"]
@@ -613,6 +647,7 @@ class _FakeSession:
         close_req_ids: list[str] | None = None,
         close_stores: list[int] | None = None,
         close_failed_serves: list[ReqContext] | None = None,
+        last_activity_at: float | None = None,
     ) -> None:
         self.peer_id = peer_id
         self.alive = alive
@@ -629,6 +664,9 @@ class _FakeSession:
         self.stores_added: list[tuple[str, list, object, int]] = []
         self.attached: list[object] = []
         self.finishes: list[str] = []
+        self.last_activity_at: float = (
+            last_activity_at if last_activity_at is not None else time.monotonic()
+        )
         # Mirror P2PSession._server._inflight (transfer_id → handle) and
         # P2PSession._client.has_active_loads for the shutdown-drain and
         # drain_jobs paths. Tests populate _server._inflight when needed.
@@ -684,8 +722,8 @@ class TestGetFinished:
             def poll(self):
                 return []
 
-        mgr._control = FakeControl()  # type: ignore[assignment]
-        mgr._data = None  # type: ignore[assignment]
+        mgr._control = FakeControl()
+        mgr._data = None
         return mgr
 
     def test_drains_finished_jobs(self):
@@ -706,7 +744,7 @@ class TestGetFinished:
                 pass
 
         mgr = self._make()
-        mgr._data = FakeData()  # type: ignore[assignment]
+        mgr._data = FakeData()
         dead = _FakeSession(
             peer_id="dead:1234",
             alive=False,
@@ -715,7 +753,7 @@ class TestGetFinished:
             close_req_ids=["req-load"],
             close_stores=[10, 11],
         )
-        mgr._sessions["dead:1234"] = dead  # type: ignore[assignment]
+        mgr._sessions["dead:1234"] = dead
 
         results = list(mgr.get_finished_jobs())
         # 2 baseline + 1 failed load + 2 failed stores
@@ -735,14 +773,14 @@ class TestGetFinished:
                 pass
 
         mgr = self._make()
-        mgr._data = FakeData()  # type: ignore[assignment]
+        mgr._data = FakeData()
         dead = _FakeSession(
             peer_id="dead:1234",
             alive=False,
             connected=True,
             close_req_ids=["req-probe-1", "req-probe-2"],
         )
-        mgr._sessions["dead:1234"] = dead  # type: ignore[assignment]
+        mgr._sessions["dead:1234"] = dead
 
         list(mgr.get_finished_jobs())
         assert "dead:1234" not in mgr._sessions
@@ -820,7 +858,7 @@ class TestHasPendingWork:
         """The result is the same regardless of session state — there is
         no 'idle' branch."""
         mgr = _make_manager()
-        mgr._sessions["peer:1"] = _FakeSession(peer_id="peer:1")  # type: ignore[assignment]
+        mgr._sessions["peer:1"] = _FakeSession(peer_id="peer:1")
         assert mgr.has_pending_work() is True
 
 
@@ -885,12 +923,12 @@ class TestShutdownDrain:
         mgr = _make_manager()
         data = _ShutdownFakeData(still_queue=still_queue)
         control = _ShutdownFakeControl()
-        mgr._data = data  # type: ignore[assignment]
-        mgr._control = control  # type: ignore[assignment]
+        mgr._data = data
+        mgr._control = control
         if inflight_ids:
             session = _FakeSession(peer_id="peer:1", connected=True)
             session._server._inflight = {tid: object() for tid in inflight_ids}
-            mgr._sessions["peer:1"] = session  # type: ignore[assignment]
+            mgr._sessions["peer:1"] = session
         return mgr, data, control
 
     def test_shutdown_drains_inflight_via_wait_cancel(self):
@@ -1114,10 +1152,10 @@ def _build_paired_managers() -> tuple[P2PSecondaryTierManager, P2PSecondaryTierM
     ctrl_b = _LoopbackControl(mgr_b._local_id)
     ctrl_a.pair(ctrl_b)
 
-    mgr_a._control = ctrl_a  # type: ignore[assignment]
-    mgr_b._control = ctrl_b  # type: ignore[assignment]
-    mgr_a._data = _FakeData(mgr_a._local_id)  # type: ignore[assignment]
-    mgr_b._data = _FakeData(mgr_b._local_id)  # type: ignore[assignment]
+    mgr_a._control = ctrl_a
+    mgr_b._control = ctrl_b
+    mgr_a._data = _FakeData(mgr_a._local_id)
+    mgr_b._data = _FakeData(mgr_b._local_id)
 
     return mgr_a, mgr_b
 
@@ -1300,7 +1338,7 @@ class TestAcceptNewPeers:
         mgr = _make_manager()
         peer_id = "10.0.0.1:8000"
         existing = _FakeSession(peer_id=peer_id, connected=True)
-        mgr._sessions[peer_id] = existing  # type: ignore[assignment]
+        mgr._sessions[peer_id] = existing
 
         new_conn = _RecordingConn(peer_id)
         mgr._accept_new_peers([new_conn])
@@ -1331,7 +1369,7 @@ class TestAcceptNewPeers:
                 pass
 
         mgr = _make_manager()
-        mgr._data = FakeData()  # type: ignore[assignment]
+        mgr._data = FakeData()
         peer_id = "10.0.0.1:8000"
 
         # Real ControlConnection-shaped fake: send/close/peer_id only.
@@ -1348,7 +1386,7 @@ class TestAcceptNewPeers:
             def close(self) -> None:
                 self.alive = False
 
-        mgr._accept_new_peers([_Conn(peer_id)])  # type: ignore[arg-type]
+        mgr._accept_new_peers([_Conn(peer_id)])
 
         assert peer_id in mgr._sessions
         assert mgr._sessions[peer_id].connected is True
@@ -1377,7 +1415,7 @@ class TestPollOnce:
             loads=[LoadResult(job_id=11, kv_request_id="req-11", success=True)],
             stores=[StoreResult(job_id=22, success=True)],
         )
-        mgr._sessions[peer_alive] = alive  # type: ignore[assignment]
+        mgr._sessions[peer_alive] = alive
 
         # Dead session whose pending close() jobs surface as failures.
         peer_dead = "10.0.0.3:9999"
@@ -1389,7 +1427,7 @@ class TestPollOnce:
             close_req_ids=["req-33"],
             close_stores=[44],
         )
-        mgr._sessions[peer_dead] = dead  # type: ignore[assignment]
+        mgr._sessions[peer_dead] = dead
 
         class _Ctrl:
             def poll(self_inner):
@@ -1399,8 +1437,8 @@ class TestPollOnce:
             def remove_remote_peer(self_inner, pid):
                 pass
 
-        mgr._control = _Ctrl()  # type: ignore[assignment]
-        mgr._data = _Data()  # type: ignore[assignment]
+        mgr._control = _Ctrl()
+        mgr._data = _Data()
 
         mgr._poll_once()
 
@@ -1430,7 +1468,7 @@ class TestPollOnce:
             connected=True,
             new_fetch_ids=["req-1"],
         )
-        mgr._sessions[peer] = sess  # type: ignore[assignment]
+        mgr._sessions[peer] = sess
         mgr._unbound_stores["req-1"] = [
             _UnboundStoreBatch(job_id=5, keys=[b"k1"], block_ids=[0]),
             _UnboundStoreBatch(job_id=6, keys=[b"k2"], block_ids=[1]),
@@ -1440,7 +1478,7 @@ class TestPollOnce:
             def poll(self_inner):
                 return []
 
-        mgr._control = _Ctrl()  # type: ignore[assignment]
+        mgr._control = _Ctrl()
         mgr._poll_once()
 
         assert mgr._kv_to_session["req-1"] is sess
@@ -1462,13 +1500,13 @@ class TestPollOnce:
             connected=True,
             new_fetch_ids=["req-fast"],
         )
-        mgr._sessions[peer] = sess  # type: ignore[assignment]
+        mgr._sessions[peer] = sess
 
         class _Ctrl:
             def poll(self_inner):
                 return []
 
-        mgr._control = _Ctrl()  # type: ignore[assignment]
+        mgr._control = _Ctrl()
         mgr._poll_once()
 
         assert mgr._kv_to_session["req-fast"] is sess
@@ -1485,13 +1523,13 @@ class TestPollOnce:
             connected=True,
             loads=[LoadResult(job_id=5, kv_request_id="req-5", success=False)],
         )
-        mgr._sessions[peer] = sess  # type: ignore[assignment]
+        mgr._sessions[peer] = sess
 
         class _Ctrl:
             def poll(self_inner):
                 return []
 
-        mgr._control = _Ctrl()  # type: ignore[assignment]
+        mgr._control = _Ctrl()
 
         mgr._poll_once()
 
@@ -1515,26 +1553,26 @@ class TestDrainJobs:
     def test_returns_immediately_when_quiescent(self):
         """No sessions and no inflight: drain_jobs returns without sleeping."""
         mgr = _make_manager()
-        mgr._control = _DrainCtrl()  # type: ignore[assignment]
+        mgr._control = _DrainCtrl()
 
         sleeps: list[float] = []
         # If drain_jobs sleeps when nothing is pending, that's a regression.
         import vllm.v1.kv_offload.tiering.p2p.manager as m
 
         original_sleep = m.time.sleep
-        m.time.sleep = lambda s: sleeps.append(s)  # type: ignore[assignment]
+        m.time.sleep = lambda s: sleeps.append(s)
         try:
             mgr.drain_jobs()
         finally:
-            m.time.sleep = original_sleep  # type: ignore[assignment]
+            m.time.sleep = original_sleep
 
         assert sleeps == []
 
     def test_returns_when_session_has_no_inflight_or_inbound(self):
         """A session with empty _inbound and _inflight does not block drain."""
         mgr = _make_manager()
-        mgr._control = _DrainCtrl()  # type: ignore[assignment]
-        mgr._sessions["peer:1"] = _FakeSession(peer_id="peer:1")  # type: ignore[assignment]
+        mgr._control = _DrainCtrl()
+        mgr._sessions["peer:1"] = _FakeSession(peer_id="peer:1")
         # Should return on the first iteration.
         mgr.drain_jobs()
 
@@ -1542,10 +1580,10 @@ class TestDrainJobs:
         """A session that stays inflight past 5s triggers the warning, and
         once it clears the loop returns."""
         mgr = _make_manager()
-        mgr._control = _DrainCtrl()  # type: ignore[assignment]
+        mgr._control = _DrainCtrl()
         sess = _FakeSession(peer_id="peer:1")
         sess._server._inflight = {1: object()}  # non-empty
-        mgr._sessions["peer:1"] = sess  # type: ignore[assignment]
+        mgr._sessions["peer:1"] = sess
 
         # Synthetic monotonic clock: 100.0 for the start stamp, then 106.0
         # for the first elapsed-check (past the 5s warning threshold), then
@@ -1810,3 +1848,272 @@ class TestBindHostPortDefaults:
         mgr_b = self._construct(monkeypatch, host="localhost", port=5710)
         assert mgr_a._local_id == mgr_b._local_id == "localhost:5710"
         assert mgr_a._nixl_agent_name != mgr_b._nixl_agent_name
+
+
+# ---------------------------------------------------------------------------
+# Tests for session capacity limit (VLLM_P2P_MAX_PEERS)
+# ---------------------------------------------------------------------------
+
+
+class TestSessionCapLimit:
+    """_get_or_create_session and _accept_new_peers reject new peers when
+    the session count reaches VLLM_P2P_MAX_PEERS."""
+
+    def _make_with_control(self):
+        mgr = _make_manager()
+        created = []
+
+        class FakeControl:
+            def connect(self, peer_id):
+                conn = _RecordingConn(peer_id)
+                created.append(conn)
+                return conn
+
+            def poll(self):
+                return []
+
+        class FakeData:
+            block_len = 4096
+            base_addr = 0x1000
+            num_blocks = 16
+            config_fingerprint = ""
+
+            def get_agent_metadata(self):
+                return b"meta"
+
+            def add_remote_peer(self, *a, **k):
+                pass
+
+            def remove_remote_peer(self, pid):
+                pass
+
+        mgr._control = FakeControl()  # type: ignore[assignment]
+        mgr._data = FakeData()  # type: ignore[assignment]
+        return mgr, created
+
+    def test_outbound_rejected_at_capacity(self, monkeypatch):
+        monkeypatch.setenv("VLLM_P2P_MAX_PEERS", "2")
+        import vllm.envs
+
+        vllm.envs.__dict__.pop("VLLM_P2P_MAX_PEERS", None)
+
+        mgr, created = self._make_with_control()
+        mgr._sessions["peer-a:1"] = _FakeSession(peer_id="peer-a:1")  # type: ignore[assignment]
+        mgr._sessions["peer-b:2"] = _FakeSession(peer_id="peer-b:2")  # type: ignore[assignment]
+
+        result = mgr._get_or_create_session("peer-c:3")
+        assert result is None
+        assert "peer-c:3" not in mgr._sessions
+        assert len(created) == 0
+
+    def test_on_new_request_records_failure_on_cap(self, monkeypatch):
+        monkeypatch.setenv("VLLM_P2P_MAX_PEERS", "1")
+        import vllm.envs
+
+        vllm.envs.__dict__.pop("VLLM_P2P_MAX_PEERS", None)
+
+        mgr, _ = self._make_with_control()
+        mgr._sessions["existing:1"] = _FakeSession(peer_id="existing:1")  # type: ignore[assignment]
+
+        ctx = _req_context(
+            kv_params=_remote_prefiller_kv_params(
+                remote_host="10.0.0.2", remote_port=9000, kv_request_id="req-cap"
+            )
+        )
+        mgr.on_new_request(ctx)
+        assert "req-cap" in mgr._failed_req_ids
+
+    def test_inbound_rejected_at_capacity(self, monkeypatch):
+        monkeypatch.setenv("VLLM_P2P_MAX_PEERS", "1")
+        import vllm.envs
+
+        vllm.envs.__dict__.pop("VLLM_P2P_MAX_PEERS", None)
+
+        mgr, _ = self._make_with_control()
+        mgr._sessions["existing:1"] = _FakeSession(peer_id="existing:1")  # type: ignore[assignment]
+
+        conn = _RecordingConn("new-peer:2")
+        mgr._accept_new_peers([conn])
+        assert conn.close_calls == 1
+        assert "new-peer:2" not in mgr._sessions
+
+    def test_existing_session_reused_below_cap(self, monkeypatch):
+        monkeypatch.setenv("VLLM_P2P_MAX_PEERS", "1")
+        import vllm.envs
+
+        vllm.envs.__dict__.pop("VLLM_P2P_MAX_PEERS", None)
+
+        mgr, _ = self._make_with_control()
+        existing = _FakeSession(peer_id="existing:1")
+        mgr._sessions["existing:1"] = existing  # type: ignore[assignment]
+
+        result = mgr._get_or_create_session("existing:1")
+        assert result is existing
+
+
+# ---------------------------------------------------------------------------
+# Tests for graceful error boundary in _get_or_create_session
+# ---------------------------------------------------------------------------
+
+
+class TestGetOrCreateSessionErrorBoundary:
+    def test_connect_failure_returns_none(self):
+        mgr = _make_manager()
+
+        class FailingControl:
+            def connect(self, peer_id):
+                raise RuntimeError("socket exhausted")
+
+            def poll(self):
+                return []
+
+        mgr._control = FailingControl()  # type: ignore[assignment]
+        result = mgr._get_or_create_session("bad:1")
+        assert result is None
+        assert "bad:1" not in mgr._sessions
+
+    def test_session_construction_failure_closes_conn(self):
+        """connect() succeeding but P2PSession construction failing must
+        close the conn so it is not left registered without a session."""
+        mgr = _make_manager()
+        created: list[_RecordingConn] = []
+
+        class RaisingConn(_RecordingConn):
+            def send(self, msg):
+                raise RuntimeError("send failed during connect")
+
+        class Control:
+            def connect(self, peer_id):
+                conn = RaisingConn(peer_id)
+                created.append(conn)
+                return conn
+
+            def poll(self):
+                return []
+
+        class FakeData:
+            block_len = 4096
+            base_addr = 0x1000
+            num_blocks = 16
+            config_fingerprint = ""
+
+            def get_agent_metadata(self):
+                return b"meta"
+
+        mgr._control = Control()  # type: ignore[assignment]
+        mgr._data = FakeData()  # type: ignore[assignment]
+        result = mgr._get_or_create_session("bad:2")
+        assert result is None
+        assert "bad:2" not in mgr._sessions
+        assert len(created) == 1
+        assert created[0].close_calls == 1
+
+
+# ---------------------------------------------------------------------------
+# Tests for idle session eviction
+# ---------------------------------------------------------------------------
+
+
+class TestIdleSessionEviction:
+    def _make_with_fake_data(self):
+        mgr = _make_manager()
+
+        class FakeControl:
+            def poll(self):
+                return []
+
+        class FakeData:
+            def remove_remote_peer(self, pid):
+                pass
+
+        mgr._control = FakeControl()  # type: ignore[assignment]
+        mgr._data = FakeData()  # type: ignore[assignment]
+        return mgr
+
+    def test_idle_session_evicted(self, monkeypatch):
+        monkeypatch.setenv("VLLM_P2P_IDLE_TIMEOUT_S", "10")
+        monkeypatch.setenv("VLLM_P2P_MAX_PEERS", "1")
+        import vllm.envs
+
+        vllm.envs.__dict__.pop("VLLM_P2P_IDLE_TIMEOUT_S", None)
+        vllm.envs.__dict__.pop("VLLM_P2P_MAX_PEERS", None)
+
+        mgr = self._make_with_fake_data()
+        idle_session = _FakeSession(
+            peer_id="idle:1",
+            last_activity_at=time.monotonic() - 20,
+        )
+        mgr._sessions["idle:1"] = idle_session  # type: ignore[assignment]
+
+        mgr._reap_idle_sessions()
+        assert "idle:1" not in mgr._sessions
+
+    def test_idle_session_kept_below_headroom(self, monkeypatch):
+        monkeypatch.setenv("VLLM_P2P_IDLE_TIMEOUT_S", "10")
+        import vllm.envs
+
+        vllm.envs.__dict__.pop("VLLM_P2P_IDLE_TIMEOUT_S", None)
+        vllm.envs.__dict__.pop("VLLM_P2P_MAX_PEERS", None)
+
+        mgr = self._make_with_fake_data()
+        idle_session = _FakeSession(
+            peer_id="idle:1",
+            last_activity_at=time.monotonic() - 20,
+        )
+        mgr._sessions["idle:1"] = idle_session  # type: ignore[assignment]
+
+        mgr._reap_idle_sessions()
+        assert "idle:1" in mgr._sessions
+
+    def test_active_session_kept(self, monkeypatch):
+        monkeypatch.setenv("VLLM_P2P_IDLE_TIMEOUT_S", "10")
+        monkeypatch.setenv("VLLM_P2P_MAX_PEERS", "1")
+        import vllm.envs
+
+        vllm.envs.__dict__.pop("VLLM_P2P_IDLE_TIMEOUT_S", None)
+        vllm.envs.__dict__.pop("VLLM_P2P_MAX_PEERS", None)
+
+        mgr = self._make_with_fake_data()
+        active = _FakeSession(
+            peer_id="active:1",
+            last_activity_at=time.monotonic(),
+        )
+        mgr._sessions["active:1"] = active  # type: ignore[assignment]
+
+        mgr._reap_idle_sessions()
+        assert "active:1" in mgr._sessions
+
+    def test_session_with_pending_work_not_evicted(self, monkeypatch):
+        monkeypatch.setenv("VLLM_P2P_IDLE_TIMEOUT_S", "1")
+        monkeypatch.setenv("VLLM_P2P_MAX_PEERS", "1")
+        import vllm.envs
+
+        vllm.envs.__dict__.pop("VLLM_P2P_IDLE_TIMEOUT_S", None)
+        vllm.envs.__dict__.pop("VLLM_P2P_MAX_PEERS", None)
+
+        mgr = self._make_with_fake_data()
+        busy = _FakeSession(
+            peer_id="busy:1",
+            last_activity_at=time.monotonic() - 100,
+        )
+        busy._server._inflight[1] = object()
+        mgr._sessions["busy:1"] = busy  # type: ignore[assignment]
+
+        mgr._reap_idle_sessions()
+        assert "busy:1" in mgr._sessions
+
+    def test_disabled_when_zero(self, monkeypatch):
+        monkeypatch.setenv("VLLM_P2P_IDLE_TIMEOUT_S", "0")
+        import vllm.envs
+
+        vllm.envs.__dict__.pop("VLLM_P2P_IDLE_TIMEOUT_S", None)
+
+        mgr = self._make_with_fake_data()
+        old = _FakeSession(
+            peer_id="old:1",
+            last_activity_at=time.monotonic() - 999999,
+        )
+        mgr._sessions["old:1"] = old  # type: ignore[assignment]
+
+        mgr._reap_idle_sessions()
+        assert "old:1" in mgr._sessions

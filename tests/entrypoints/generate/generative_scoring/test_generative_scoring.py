@@ -12,6 +12,7 @@ Tests cover:
 
 import math
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -60,7 +61,10 @@ class MockModelConfig:
     encoder_config = None
     generation_config: str = "auto"
     media_io_kwargs: dict[str, dict[str, Any]] = field(default_factory=dict)
-    skip_tokenizer_init = False
+    skip_tokenizer_init: bool = False
+    is_encoder_decoder: bool = False
+    is_multimodal_model: bool = False
+    supports_multimodal_inputs: bool = False
     vocab_size = 151936
 
     def get_diff_sampling_param(self):
@@ -135,6 +139,7 @@ class TestProtocolModels:
         assert req_str.apply_softmax is True  # default
         assert req_str.item_first is False  # default
         assert req_str.add_special_tokens is True  # default
+        assert req_str.cache_salt is None
 
         # Test request with pre-tokenized inputs and custom options
         req_tok = GenerativeScoringRequest(
@@ -292,28 +297,49 @@ class TestGeneration:
     """Tests for the full generation flow with mocked engine."""
 
     @pytest.mark.asyncio
-    async def test_successful_generation(self):
-        """Test successful score generation returns valid response."""
+    @pytest.mark.parametrize("cache_salt", [None, "tenant-a"])
+    @pytest.mark.parametrize(
+        "query,items",
+        [
+            ("Is this city the capital of France? ", ["Paris", "London"]),
+            ([100, 101], [[200, 201], [300, 301]]),
+        ],
+        ids=["text", "token_ids"],
+    )
+    async def test_successful_generation(self, cache_salt, query, items):
+        """Test scoring succeeds and preserves cache_salt for every item."""
         mock_engine = _create_mock_engine()
         serving = _create_serving(mock_engine)
 
         mock_logprobs = {1234: -0.5, 5678: -2.0, 100: -3.0}
         mock_output = _create_mock_request_output(mock_logprobs)
+        state = SimpleNamespace(sampling_params=None, prompts=[])
 
         async def mock_generate(*args, **kwargs):
+            state.prompts.append(args[0])
+            state.sampling_params = args[1]
             yield mock_output
 
         mock_engine.generate = mock_generate
 
         request = GenerativeScoringRequest(
             model=MODEL_NAME,
-            query="Is Paris the capital?",
-            items=["Yes", "No"],
+            query=query,
+            items=items,
             label_token_ids=[1234, 5678],
+            cache_salt=cache_salt,
         )
         result = await serving.create_generative_scoring(request, None)
 
         assert isinstance(result, GenerativeScoringResponse)
+        assert state.sampling_params is not None
+        assert state.sampling_params.watermarking is False
+        assert len(state.prompts) == len(items)
+        for prompt in state.prompts:
+            if cache_salt is None:
+                assert "cache_salt" not in prompt
+            else:
+                assert prompt["cache_salt"] == cache_salt
         assert len(result.data) == 2
         for item_result in result.data:
             assert 0.0 <= item_result.score <= 1.0

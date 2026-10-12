@@ -61,8 +61,41 @@ def _get_pass_configs() -> dict[Any, Any]:
     return pass_configs
 
 
+class _DeferredTileLangJitKernel:
+    """Stand-in for a `tilelang.jit` kernel that decorates on first use.
+
+    Both attribute access and calling apply the decoration. Required for
+    compile-only JIT warmup on platforms that defer import of tilelang.
+    """
+
+    _kernel_function: Callable[..., Any] | None = None
+    _jit_kernel: Any = None
+
+    def __init__(self, kernel_function: Callable[..., Any]) -> None:
+        self._kernel_function = kernel_function
+        functools.update_wrapper(self, kernel_function)
+
+    def _ensure_jit_kernel(self) -> Any:
+        if self._jit_kernel is None:
+            _ensure_tilelang_imported()
+            kernel_function = self._kernel_function
+            assert kernel_function is not None
+            kernel_function.__globals__["tilelang"] = tilelang
+            kernel_function.__globals__["T"] = T
+            self._jit_kernel = tilelang.jit(pass_configs=_get_pass_configs())(
+                kernel_function
+            )
+        return self._jit_kernel
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        return self._ensure_jit_kernel()(*args, **kwargs)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._ensure_jit_kernel(), name)
+
+
 def tilelang_jit(kernel_function: Callable[..., Any]) -> Callable[..., Any]:
-    """Apply `tilelang.jit`, deferring until first call on ROCm.
+    """Apply `tilelang.jit`, deferring until first use on ROCm.
 
     ROCm defers JIT decoration so importing the caller's module does not
     require TileLang immediately. CUDA keeps the eager decoration behavior.
@@ -75,18 +108,4 @@ def tilelang_jit(kernel_function: Callable[..., Any]) -> Callable[..., Any]:
         _ensure_tilelang_imported()
         return tilelang.jit(pass_configs=_get_pass_configs())(kernel_function)
 
-    compiled_kernel: Callable[..., Any] | None = None
-
-    @functools.wraps(kernel_function)
-    def wrapper(*args: Any, **kwargs: Any) -> Any:
-        nonlocal compiled_kernel
-        if compiled_kernel is None:
-            _ensure_tilelang_imported()
-            kernel_function.__globals__["tilelang"] = tilelang
-            kernel_function.__globals__["T"] = T
-            compiled_kernel = tilelang.jit(pass_configs=_get_pass_configs())(
-                kernel_function
-            )
-        return compiled_kernel(*args, **kwargs)
-
-    return wrapper
+    return _DeferredTileLangJitKernel(kernel_function)

@@ -79,6 +79,9 @@ def server(default_server_args, request, monkeypatch):
     """
     # Test that logitproc info is passed to workers
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "1")
+    # These tests exercise the V1-interface logits processor; Model Runner V2
+    # rejects V1-interface processors at load time by design.
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
 
     if request.param:
         # Launch server, append FQCN argument, inject dummy logitproc module

@@ -85,12 +85,12 @@ def test_multiproc_executor_worker_termination_timeout(
     monkeypatch.setattr(multiproc_executor_module.time, "sleep", clock.sleep)
     executor = MultiprocExecutor.__new__(MultiprocExecutor)
     proc = _FakeProcess(clock, exits_at=exits_at)
-    executor._ensure_worker_termination([proc])
+    executor._ensure_worker_termination([proc])  # type: ignore[list-item]
     assert proc.terminate_called is expected_terminate
 
 
 class CustomMultiprocExecutor(MultiprocExecutor):
-    def collective_rpc(
+    def collective_rpc(  # type: ignore[override]
         self,
         method: str | Callable,
         timeout: float | None = None,
@@ -98,7 +98,7 @@ class CustomMultiprocExecutor(MultiprocExecutor):
         kwargs: dict | None = None,
         non_block: bool = False,
         unique_reply_rank: int | None = None,
-        kv_output_aggregator: KVOutputAggregator = None,
+        kv_output_aggregator: KVOutputAggregator | None = None,
         ec_output_aggregator: ECOutputAggregator | None = None,
     ) -> Any | list[Any] | Future[Any | list[Any]]:
         # Drop marker to show that this was run

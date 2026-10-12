@@ -22,10 +22,15 @@ from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank,
     get_tp_group,
 )
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.torch_utils import current_stream
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.hisparse.layout import HISPARSE_HOT_SUFFIX
-from vllm.v1.hisparse.runtime import HiSparseCacheHandle, release_pinned_state
+from vllm.v1.hisparse.runtime import (
+    HiSparseCacheHandle,
+    release_pinned_state,
+    update_hisparse_residency,
+)
 from vllm.v1.hisparse.types import SparseKVPageTransfer, SparseKVRowMirror
 from vllm.v1.kv_cache_interface import (
     HiSparseHotSpec,
@@ -300,6 +305,10 @@ class HiSparseConnectorWorker:
         self._submitted_mirror_layers: set[int] = set()
         self._layer_ready_events = tuple(torch.Event() for _ in cache_handles)
         self._forward_ready_event = torch.Event()
+        self._draft_layers = tuple(
+            index for index, cache in enumerate(cache_handles) if cache.draft_layer
+        )
+        self._draft_mirror_pending = False
         self._set_row_mirrors(())
         self.cache_layer_names = cache_layer_names
         self._group_leaders = tuple(
@@ -329,6 +338,10 @@ class HiSparseConnectorWorker:
                 "HiSparse request-state mapping does not match max_num_seqs."
             )
         self.hot_backing = hot_backing
+        self.residency: torch.Tensor | None = next(
+            (cache.residency for cache in cache_handles if cache.residency is not None),
+            None,
+        )
         self._pending_invalid_block_ids: list[int] = []
         # Destination block ids of host copies this worker has run.
         self._completed_host_copy_dst_ids: list[int] = []
@@ -343,9 +356,11 @@ class HiSparseConnectorWorker:
         self._init_dma()
         if self.is_host_writer:
             for layer_index, handle in enumerate(cache_handles):
-                handle.submit_layer_mirror = partial(
-                    self._enqueue_layer_mirror, layer_index
-                )
+                # Draft layers are mirrored once in the next start_step instead.
+                if not handle.draft_layer:
+                    handle.submit_layer_mirror = partial(
+                        self._enqueue_layer_mirror, layer_index
+                    )
         self._initialized = True
 
     def set_request_state_indices(self, indices: torch.Tensor) -> None:
@@ -396,33 +411,49 @@ class HiSparseConnectorWorker:
         num_tokens: int = 0,
     ) -> None:
         self._stage_row_mirror_mapping(num_tokens)
+        self._finish_previous_step()
         previous_host_write_event = self.host_write_event
         self.host_write_event = self.host_write_events[self._next_host_write_event]
         self._next_host_write_event ^= 1
         current_stream().wait_event(previous_host_write_event)
         self._release_completed_dma_descriptors()
+        self._dma_submitted = False
         mirrors = _flatten_row_mirrors(metadata.row_mirrors, request_ids)
         if self._slot_mapping_staging is not None:
             self._slot_mapping_staging.candidates = mirrors
         self._set_row_mirrors(mirrors)
-        self._dma_submitted = False
         self._clear_forward_mirror_state()
         for handle in self.cache_handles:
             handle.all_context_pages_resident = metadata.all_context_pages_resident
-            handle.mirror_from_resident = True
         self._copy_host_blocks(metadata.host_block_copies, previous_host_write_event)
         transfers = (
             metadata.command.page_transfers if metadata.command is not None else []
         )
+        self._restore_pages([transfer for transfer in transfers if transfer.restore])
         self._post_forward_transfers = [
-            transfer for transfer in transfers if transfer.after_forward
+            transfer
+            for transfer in transfers
+            if not transfer.restore and transfer.after_forward
         ]
         self._submit_transfers(
-            [transfer for transfer in transfers if not transfer.after_forward]
+            [
+                transfer
+                for transfer in transfers
+                if not transfer.restore and not transfer.after_forward
+            ]
         )
         self._pending_invalid_block_ids.extend(metadata.source_block_ids)
         if request_state_indices is not None:
             self.set_request_state_indices(request_state_indices)
+        if metadata.residency_updates:
+            assert self.residency is not None
+            assert request_state_indices is not None and request_ids is not None
+            update_hisparse_residency(
+                self.residency,
+                metadata.residency_updates,
+                request_ids,
+                request_state_indices,
+            )
 
     def _clear_forward_mirror_state(self) -> None:
         self._per_layer_mirrored.clear()
@@ -708,17 +739,47 @@ class HiSparseConnectorWorker:
         self._submitted_mirror_layers.update(pending_layers)
 
     def _record_transfer_completion(
-        self, transfers: list[SparseKVPageTransfer]
+        self,
+        transfers: list[SparseKVPageTransfer],
+        *,
+        stream: torch.Stream | None = None,
     ) -> None:
-        if not transfers or not self.is_host_writer:
+        if not transfers:
             return
-        stream = self.dma_stream
+        if stream is None:
+            if not self.is_host_writer:
+                return
+            stream = self.dma_stream
         assert stream is not None
         completion_event = torch.Event()
         completion_event.record(stream)
         transfer_ids = tuple(transfer.transfer_id for transfer in transfers)
         self._pending_transfer_events.append((completion_event, transfer_ids))
         self._enqueued_transfer_ids.extend(transfer_ids)
+
+    def _restore_pages(self, transfers: list[SparseKVPageTransfer]) -> None:
+        """Restore imported tails on every rank before its forward or graph replay."""
+        if not transfers:
+            return
+        for layer_index, cache in enumerate(self.cache_handles):
+            source_index = cache.runtime.resident_source_index
+            source = self.host_caches[layer_index]
+            destination = self.resident_caches[layer_index]
+            for transfer in transfers:
+                host_start = transfer.host_block_id * self.kernel_block_size
+                resident_block = transfer.resident_block_ids[source_index]
+                # Each import pays one H2D page copy and enqueue per layer/rank
+                # instead of tail prefill on D. Restore the prompt rows before
+                # decode appends to this page; unused rows do not extend the
+                # logical sequence.
+                # cudaHostRegister pins this pool outside PyTorch's allocator,
+                # so the sync checker cannot recognize it via is_pinned().
+                with gpu_sync_allowed():
+                    destination[resident_block].copy_(
+                        source[host_start : host_start + self.kernel_block_size],
+                        non_blocking=True,
+                    )
+        self._record_transfer_completion(transfers, stream=current_stream())
 
     def _submit_transfers(self, transfers: list[SparseKVPageTransfer]) -> None:
         if self.cache_handles[0].runtime.eager_host_mirror:
@@ -733,15 +794,12 @@ class HiSparseConnectorWorker:
         descriptor_count = len(transfers) * num_layers
         descriptors = self._acquire_dma_descriptors(descriptor_count)
         destination_rows = np.fromiter(
-            (
-                transfer.destination_block_id * self.kernel_block_size
-                for transfer in transfers
-            ),
+            (transfer.host_block_id * self.kernel_block_size for transfer in transfers),
             dtype=np.int64,
             count=len(transfers),
         )
         source_blocks_by_transfer = np.asarray(
-            [transfer.source_block_ids for transfer in transfers], dtype=np.int64
+            [transfer.resident_block_ids for transfer in transfers], dtype=np.int64
         )
         if source_blocks_by_transfer.ndim != 2:
             raise RuntimeError(
@@ -814,7 +872,12 @@ class HiSparseConnectorWorker:
         if num_rows == 0:
             return
         if self.is_host_writer:
-            expected_layers = {index for index, _ in active}
+            # The drafter has not written its layers' rows yet; the next
+            # start_step mirrors them after it runs.
+            self._draft_mirror_pending = bool(self._draft_layers)
+            expected_layers = {index for index, _ in active}.difference(
+                self._draft_layers
+            )
             if self._per_layer_mirrored and self._per_layer_mirrored != expected_layers:
                 raise RuntimeError(
                     "HiSparse per-layer DMA did not mirror every active layer: "
@@ -849,9 +912,6 @@ class HiSparseConnectorWorker:
         compute_stream = current_stream()
         self._forward_ready_event.record()
         self._finish_mirror_phase(self._forward_ready_event)
-        transfers = self._post_forward_transfers
-        self._post_forward_transfers = []
-        self._submit_transfers(transfers)
         if self.is_host_writer:
             if self._dma_submitted:
                 compute_stream.wait_event(self.host_write_event)
@@ -859,6 +919,24 @@ class HiSparseConnectorWorker:
             else:
                 self.host_write_event.record(compute_stream)
         self._release_completed_dma_descriptors()
+
+    def _finish_previous_step(self) -> None:
+        """Mirror the previous step's draft-layer rows, then hand its pages over.
+
+        Runs before this step's work, so after the previous step's drafter.
+        Post-forward transfers are ordered behind the draft mirror, so a page is
+        never reported clean, and its resident block never released, before
+        its draft-layer rows reach the host. Both land in the previous step's
+        host write event, which this step waits on before its forward and its
+        host copies, since the scheduler may already have reused the
+        finished requests' blocks they read and write.
+        """
+        if self._draft_mirror_pending:
+            self._draft_mirror_pending = False
+            self._enqueue_row_dma(self._draft_layers)
+        transfers = self._post_forward_transfers
+        self._post_forward_transfers = []
+        self._submit_transfers(transfers)
 
     def take_completed_host_copies(self) -> list[int]:
         """Drain host copies this worker has enqueued for this step."""

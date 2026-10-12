@@ -3,10 +3,9 @@
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import ClassVar
+from typing import ClassVar, Self
 
 import torch
-from typing_extensions import Self
 
 from vllm.model_executor.layers.fusion.quant_activation import (
     QuantizedActivation,

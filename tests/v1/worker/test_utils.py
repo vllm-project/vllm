@@ -13,7 +13,7 @@ import torch
 
 import vllm.v1.attention.backends.mla.index_group as index_group_module
 import vllm.v1.hisparse.runtime as hisparse_runtime_module
-from vllm.config import CUDAGraphMode
+from vllm.config import CacheConfig, CUDAGraphMode
 from vllm.config.mamba import MambaBackendEnum, MambaConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.hisparse import (
     worker as hisparse_worker_module,
@@ -25,12 +25,15 @@ from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.worker import (
     _SlotMappingStaging,
 )
 from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
+from vllm.utils.mem_constants import GiB_bytes
+from vllm.utils.mem_utils import MemorySnapshot
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.hisparse.types import SparseKVPageTransfer, SparseKVRowMirror
 from vllm.v1.worker.utils import (
     bind_kv_cache,
     bind_kv_cache_to_layers,
     copy_kv_cache_blocks_inplace,
+    request_memory,
 )
 
 
@@ -41,6 +44,8 @@ def _make_hisparse_worker() -> HiSparseConnectorWorker:
     worker._row_mirror_num_rows = 0
     worker._per_layer_mirrored = set()
     worker._submitted_mirror_layers = set()
+    worker._draft_layers = ()
+    worker._draft_mirror_pending = False
     worker._pending_dma_descriptors = deque()
     worker._dma_free_descriptors = []
     worker.host_write_events = (MagicMock(), MagicMock())
@@ -87,6 +92,11 @@ def test_hisparse_worker_get_kv_connector_stats_reads_completed_snapshot(monkeyp
         "cache_hits": [12],
         "cache_misses": [4],
         "host_to_device_bytes": [64],
+        "host_cache_usage_perc": [],
+        "pending_page_transfers": [],
+        "host_block_lifetime_seconds": [],
+        "host_block_idle_before_evict_seconds": [],
+        "host_block_reuse_gap_seconds": [],
     }
 
 
@@ -436,6 +446,43 @@ def test_copy_cpu_kv_cache_logical_blocks_ignores_storage_padding():
     assert (backing[9] == -1).all()
 
 
+def test_bind_kv_cache_keeps_scheduler_block_views_for_runner():
+    """Block copies index scheduler blocks, so the runner keeps the unmapped
+    views while a packed layer is bound with kernel blocks."""
+
+    class _Layer:
+        def bind_kv_cache(self, kv_cache):
+            self.kv_cache = kv_cache
+
+    num_blocks, row = 4, 64
+    storage = torch.zeros(num_blocks * row)
+    # Two layers packed into one block row: an 8x4 page, then a 4x2 page
+    # split into two 2-row kernel blocks.
+    mla = storage.as_strided((num_blocks, 8, 4), (row, 4, 1))
+    indexer = storage.as_strided((num_blocks, 1, 4, 2), (row, 8, 2, 1), 40)
+    # The indexer in 2-row kernel blocks: block b's kernel block j is b * 16 + j.
+    mapped = indexer.as_strided((50, 1, 2, 2), (4, 8, 2, 1))
+    kv_caches = {"layers.0.attn": mla, "layers.1.indexer": indexer}
+    ctx = {name: _Layer() for name in kv_caches}
+    runner_kv_caches: list[torch.Tensor] = []
+
+    bind_kv_cache(
+        kv_caches,
+        ctx,
+        runner_kv_caches,
+        layer_kv_caches={**kv_caches, "layers.1.indexer": mapped},
+    )
+
+    assert ctx["layers.1.indexer"].kv_cache is mapped
+    assert runner_kv_caches == [mla, indexer]
+    copies = [KVCacheBlockCopy(1, 3)]
+    with pytest.raises(AssertionError, match="not divisible"):
+        copy_kv_cache_blocks_inplace([mapped], num_blocks, copies)
+    storage[row : 2 * row] = 7
+    copy_kv_cache_blocks_inplace(runner_kv_caches, num_blocks, copies)
+    assert (mla[3] == 7).all() and (indexer[3] == 7).all()
+
+
 @pytest.mark.parametrize("shared,rank", [(False, 0), (True, 0), (True, 1)])
 @pytest.mark.parametrize("has_copies", [False, True])
 def test_hisparse_host_copy_waits_for_writes_on_writer_only(
@@ -529,6 +576,71 @@ def test_hisparse_eager_mirror_records_transfer_without_page_copy():
 
     worker._record_transfer_completion.assert_called_once_with(transfers)
     worker._enqueue_transfers.assert_not_called()
+
+
+@pytest.mark.parametrize("is_host_writer", [False, True])
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_hisparse_tail_restore_preserves_imported_rows(
+    monkeypatch, request, is_host_writer, device
+):
+    """Restore externally pinned host rows on every rank under sync checking."""
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA is required for the device copy check")
+    worker = _make_hisparse_worker()
+    worker.is_host_writer = is_host_writer
+    worker.kernel_block_size = 4
+    worker.host_caches = tuple(
+        torch.arange(24, dtype=torch.float32).reshape(12, 2) + layer * 100
+        for layer in range(2)
+    )
+    if device == "cuda":
+        # Match production's cudaHostRegister pool, which torch.is_pinned()
+        # does not recognize, rather than torch's caching pinned allocator.
+        host_pool, registered = hisparse_runtime_module.allocate_pinned_host_pool(
+            sum(cache.nbytes for cache in worker.host_caches)
+        )
+        request.addfinalizer(
+            lambda: hisparse_runtime_module.release_pinned_state([], [registered])
+        )
+        host_caches = host_pool.view(torch.float32).view(2, 12, 2).unbind()
+        for destination, source in zip(host_caches, worker.host_caches):
+            destination.copy_(source)
+        worker.host_caches = host_caches
+    worker.resident_caches = tuple(
+        torch.full((4, 4, 2), -1.0, device=device) for _ in range(2)
+    )
+    worker.cache_handles = [
+        SimpleNamespace(
+            runtime=SimpleNamespace(resident_source_index=i, eager_host_mirror=True)
+        )
+        for i in range(2)
+    ]
+    worker._record_transfer_completion = MagicMock()
+    stream = torch.cuda.current_stream() if device == "cuda" else MagicMock()
+    monkeypatch.setattr(hisparse_worker_module, "current_stream", lambda: stream)
+    transfer = SparseKVPageTransfer(7, 2, (1, 3), False, restore=True)
+
+    restore_pages = worker._restore_pages
+    if device == "cuda":
+        import vllm.utils.gpu_sync_debug as gpu_sync_debug
+
+        monkeypatch.setattr(gpu_sync_debug, "_SYNC_CHECK_MODE", "error")
+        monkeypatch.setattr(gpu_sync_debug, "_sync_check_enabled", False)
+        gpu_sync_debug.enable_gpu_sync_check()
+        restore_pages = gpu_sync_debug.with_gpu_sync_check(restore_pages)
+    restore_pages([transfer])
+
+    # Appending into unused capacity must preserve every imported prompt row.
+    for cache, host, block in zip(
+        worker.resident_caches, worker.host_caches, transfer.resident_block_ids
+    ):
+        assert torch.equal(cache[block].cpu(), host[8:12])
+        cache[block, 2:] = 999
+        assert torch.equal(cache[block, :2].cpu(), host[8:10])
+        assert torch.all(cache[0] == -1)
+    worker._record_transfer_completion.assert_called_once_with(
+        [transfer], stream=stream
+    )
 
 
 def test_hisparse_lazy_mirror_copies_transfer_pages():
@@ -715,30 +827,6 @@ def test_hisparse_finish_forward_does_not_repeat_per_layer_mirrors():
     worker._enqueue_host_mirror()
 
     worker._enqueue_row_dma.assert_not_called()
-
-
-def test_hisparse_finish_forward_submits_lazy_post_forward_transfer(monkeypatch):
-    runtime = SimpleNamespace(eager_host_mirror=False)
-    worker = _make_hisparse_worker()
-    worker.is_host_writer = True
-    worker.cache_handles = [SimpleNamespace(runtime=runtime, num_actual_tokens=0)]
-    transfer = SparseKVPageTransfer(7, 2, (1,), after_forward=True)
-    worker._post_forward_transfers = [transfer]
-    worker._forward_ready_event = MagicMock()
-    worker._enqueue_host_mirror = MagicMock()
-    worker._submit_transfers = MagicMock()
-    worker._dma_submitted = False
-    worker._submitted_mirror_layers = set()
-    worker._finish_mirror_phase = MagicMock()
-    worker._release_completed_dma_descriptors = MagicMock()
-    stream = MagicMock()
-    monkeypatch.setattr(hisparse_worker_module, "current_stream", lambda: stream)
-
-    worker.finish_forward()
-
-    worker._finish_mirror_phase.assert_called_once_with(worker._forward_ready_event)
-    worker._submit_transfers.assert_called_once_with([transfer])
-    worker.host_write_event.record.assert_called_once_with(stream)
 
 
 def test_hisparse_prefill_mirrors_source_groups_and_flushes_partial_group():
@@ -980,6 +1068,7 @@ def test_hisparse_step_waits_for_previous_host_write(monkeypatch, is_host_writer
             row_mirrors={},
             all_context_pages_resident=True,
             row_mirrors_from_resident=False,
+            residency_updates={},
         ),
         None,
     )
@@ -991,6 +1080,7 @@ def test_hisparse_step_waits_for_previous_host_write(monkeypatch, is_host_writer
             row_mirrors={},
             all_context_pages_resident=True,
             row_mirrors_from_resident=False,
+            residency_updates={},
         ),
         None,
     )
@@ -1064,6 +1154,7 @@ def test_hisparse_empty_step_does_not_replay_stale_host_mirror(monkeypatch):
             row_mirrors={},
             all_context_pages_resident=True,
             row_mirrors_from_resident=False,
+            residency_updates={},
         ),
         None,
     )
@@ -1088,6 +1179,7 @@ def test_hisparse_cache_handles_join_index_groups_during_construction(monkeypatc
     resolved = hisparse_runtime_module.ResolvedHiSparseConfig(
         top_k=4,
         device_buffer_size=8,
+        max_union_rows=8,
     )
     monkeypatch.setattr(hisparse_runtime_module, "_has_hisparse_ops", lambda: True)
     monkeypatch.setattr(
@@ -1191,6 +1283,8 @@ class _TestReplaySSMMixer(MambaMixer2):
         self.mamba_config = MambaConfig(backend=MambaBackendEnum.FLASHINFER)
         self._replayssm_ring_start = torch.empty(0, dtype=torch.int32)
         self._replayssm_prev_num_accepted = torch.empty(0, dtype=torch.int32)
+        self._replayssm_prev_query_len = torch.empty(0, dtype=torch.int32)
+        self._commits_replayssm_trackers = True
         self._updates_replayssm_trackers = True
 
     def get_state_shape(self) -> tuple[tuple[int, ...], ...]:
@@ -1225,19 +1319,19 @@ def test_bind_kv_cache_shares_replayssm_trackers_by_cache_group(layers_only):
     else:
         bind_kv_cache(kv_cache, ctx, [], kv_cache_groups=kv_cache_groups)
 
-    assert (
-        mixers[0]._replayssm_ring_start.data_ptr()
-        == mixers[2]._replayssm_ring_start.data_ptr()
+    tracker_names = (
+        "_replayssm_ring_start",
+        "_replayssm_prev_num_accepted",
+        "_replayssm_prev_query_len",
     )
-    assert (
-        mixers[0]._replayssm_prev_num_accepted.data_ptr()
-        == mixers[2]._replayssm_prev_num_accepted.data_ptr()
-    )
-    assert (
-        mixers[1]._replayssm_ring_start.data_ptr()
-        != mixers[0]._replayssm_ring_start.data_ptr()
-    )
-    # Group {0, 2} shares trackers; layer 2 (not 0) updates after both run.
+    for tracker_name in tracker_names:
+        group_tracker = getattr(mixers[0], tracker_name)
+        assert group_tracker.data_ptr() == getattr(mixers[2], tracker_name).data_ptr()
+        assert group_tracker.data_ptr() != getattr(mixers[1], tracker_name).data_ptr()
+        assert group_tracker.shape == (4,)
+        assert torch.count_nonzero(group_tracker) == 0
+
+    assert [m._commits_replayssm_trackers for m in mixers] == [True, True, False]
     assert [m._updates_replayssm_trackers for m in mixers] == [False, True, True]
 
 
@@ -1325,3 +1419,36 @@ def test_bind_kv_cache_draft_model(default_vllm_config):
     assert runner_kv_caches[1] is kv_cache["draft_model.layers.0.attn"]
     assert runner_kv_caches[2] is kv_cache["model.layers.1.attn"]
     assert runner_kv_caches[3] is kv_cache["draft_model.layers.1.attn"]
+
+
+def _memory_snapshot(total_gib: int, free_gib: int) -> MemorySnapshot:
+    return MemorySnapshot(
+        free_memory=free_gib * GiB_bytes,
+        total_memory=total_gib * GiB_bytes,
+        device="cpu",
+        auto_measure=False,
+    )
+
+
+def test_request_memory_charges_external_weights():
+    """Externally held weights are charged against the utilization budget;
+    the engine is granted only the remainder."""
+    cache_config = CacheConfig(gpu_memory_utilization=0.9)
+    # 70 GiB of a 100 GiB device is held externally before the worker starts.
+    snapshot = _memory_snapshot(total_gib=100, free_gib=30)
+
+    with pytest.raises(ValueError, match="less than desired"):
+        request_memory(snapshot, cache_config)
+
+    # 90 GiB budget - 70 GiB external = 20 GiB for the engine.
+    assert request_memory(snapshot, cache_config, 70 * GiB_bytes) == 20 * GiB_bytes
+
+    # The external weights alone exceed the utilization budget.
+    with pytest.raises(ValueError, match="exceed the desired"):
+        request_memory(snapshot, cache_config, 95 * GiB_bytes)
+
+    # Other tenants squeeze free memory below the engine's remainder.
+    with pytest.raises(ValueError, match="less than the engine's budget"):
+        request_memory(
+            _memory_snapshot(total_gib=100, free_gib=10), cache_config, 70 * GiB_bytes
+        )

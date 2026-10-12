@@ -65,6 +65,7 @@ class WorkerSentinel:
                 self.dp_rank,
                 self.dp_size,
                 backend="gloo",
+                timeout=self.worker.parallel_config.cpu_distributed_timeout,
             )
 
     def _clean_worker_state(self):
