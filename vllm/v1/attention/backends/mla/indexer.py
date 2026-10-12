@@ -109,11 +109,9 @@ def aiter_mxfp4_available() -> bool:
         return False
 
 
-def _is_deepseek_v41(vllm_config: VllmConfig) -> bool:
+def _model_type(vllm_config: VllmConfig) -> str | None:
     model_config = getattr(vllm_config, "model_config", None)
-    return (
-        model_config is not None and model_config.hf_config.model_type == "deepseek_v41"
-    )
+    return None if model_config is None else model_config.hf_config.model_type
 
 
 def dsa_indexer_uses_fp4(vllm_config: VllmConfig) -> bool:
@@ -126,7 +124,8 @@ def dsa_indexer_uses_fp4(vllm_config: VllmConfig) -> bool:
         )
     use_fp4 = kv_dtype == "mxfp4"
     if use_fp4 and current_platform.is_rocm():
-        if _is_deepseek_v41(vllm_config):
+        model_type = _model_type(vllm_config)
+        if model_type == "deepseek_v41":
             from vllm._aiter_ops import rocm_aiter_ops
             from vllm.platforms.rocm import get_cdna_version
 
@@ -140,6 +139,11 @@ def dsa_indexer_uses_fp4(vllm_config: VllmConfig) -> bool:
                     "aiter with VLLM_ROCM_USE_AITER=1."
                 )
             return True
+        if model_type != "deepseek_v4":
+            raise ValueError(
+                "indexer_kv_dtype='mxfp4' on ROCm is only supported for "
+                f"DeepSeek-V4 and DeepSeek-V4.1, not model_type={model_type!r}."
+            )
         # DeepSeek-V4 uses AITER's FlyDSL paged MXFP4 scorers.
         from vllm.platforms.rocm import on_gfx950
 
@@ -171,12 +175,12 @@ def dsa_indexer_uses_fp4(vllm_config: VllmConfig) -> bool:
 def rocm_flydsl_indexer_uses_fp4(vllm_config: VllmConfig) -> bool:
     """Whether the indexer runs DeepSeek-V4's ROCm MXFP4 path on AITER FlyDSL.
 
-    DeepSeek-V4.1 has its own ROCm MXFP4 indexer (rocm_paged_mxfp4_indexer)
-    with a different cache layout, so the FlyDSL buffers, schedules and checks
-    must not apply to it."""
+    Only DeepSeek-V4 is wired to it. DeepSeek-V4.1 has its own ROCm MXFP4
+    indexer (rocm_paged_mxfp4_indexer) with a different cache layout, so the
+    FlyDSL buffers, schedules and checks must not apply to it."""
     return (
         current_platform.is_rocm()
-        and not _is_deepseek_v41(vllm_config)
+        and _model_type(vllm_config) == "deepseek_v4"
         and dsa_indexer_uses_fp4(vllm_config)
     )
 

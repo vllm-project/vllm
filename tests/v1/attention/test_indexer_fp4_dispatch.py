@@ -278,7 +278,7 @@ def test_fp4_prefill_planner_splits_large_request_only_by_logits_budget():
     ]
 
 
-def _config(dtype=None, *, dcp=1, pcp=1):
+def _config(dtype=None, *, dcp=1, pcp=1, model_type="deepseek_v4"):
     attention = (
         AttentionConfig() if dtype is None else AttentionConfig(indexer_kv_dtype=dtype)
     )
@@ -288,6 +288,7 @@ def _config(dtype=None, *, dcp=1, pcp=1):
             decode_context_parallel_size=dcp,
             prefill_context_parallel_size=pcp,
         ),
+        model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type=model_type)),
     )
 
 
@@ -348,10 +349,7 @@ def test_rocm_fp4_deepseek_v41_keeps_its_own_gate(monkeypatch, cdna):
     monkeypatch.setitem(sys.modules, "vllm._aiter_ops", aiter_ops)
     aiter_probe = Mock(side_effect=AssertionError("V4.1 must not probe FlyDSL"))
     monkeypatch.setattr(indexer, "aiter_mxfp4_available", aiter_probe)
-    config = _config("mxfp4", dcp=2)
-    config.model_config = SimpleNamespace(
-        hf_config=SimpleNamespace(model_type="deepseek_v41")
-    )
+    config = _config("mxfp4", dcp=2, model_type="deepseek_v41")
 
     if cdna == 4:
         assert indexer.dsa_indexer_uses_fp4(config) is True
@@ -360,6 +358,20 @@ def test_rocm_fp4_deepseek_v41_keeps_its_own_gate(monkeypatch, cdna):
     else:
         with pytest.raises(ValueError, match="requires CDNA4"):
             indexer.dsa_indexer_uses_fp4(config)
+    gfx_probe.assert_not_called()
+    aiter_probe.assert_not_called()
+
+
+@pytest.mark.parametrize("model_type", ["deepseek_v32", "glm_moe_dsa"])
+def test_rocm_fp4_rejects_models_other_than_deepseek_v4(monkeypatch, model_type):
+    _, gfx_probe = _platform(monkeypatch, rocm=True)
+    aiter_probe = Mock(side_effect=AssertionError("unsupported model must fail first"))
+    monkeypatch.setattr(indexer, "aiter_mxfp4_available", aiter_probe)
+    config = _config("mxfp4", model_type=model_type)
+
+    with pytest.raises(ValueError, match="only supported for DeepSeek-V4"):
+        indexer.dsa_indexer_uses_fp4(config)
+    assert indexer.rocm_flydsl_indexer_uses_fp4(config) is False
     gfx_probe.assert_not_called()
     aiter_probe.assert_not_called()
 
