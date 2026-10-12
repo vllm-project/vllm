@@ -345,7 +345,7 @@ steps:
       - ATTENTION_BACKEND=TRITON_ATTN bash v1/kv_connector/nixl_integration/run_multi_connector_edge_case_test.sh
 
 # P TP 4 - D DPEP 4 test case for DSv4-Flash
-- label: ":nvidia: (H200) DSv4-Flash Disaggregated DP EP"
+- label: ":nvidia: (H200) Nightly DSv4-Flash Disaggregated DP EP"
   key: dsv4-flash-disaggregated
   timeout_in_minutes: 60
   device: h200
@@ -408,7 +408,7 @@ steps:
           DECODER_KV_LAYOUT=
           bash v1/kv_connector/nixl_integration/run_accuracy_test.sh
 
-- label: ":nvidia: (H200) Kimi-Linear-48B-A3B Disaggregated DP EP"
+- label: ":nvidia: (H200) Nightly Kimi-Linear-48B-A3B Disaggregated DP EP"
   key: kimi-linear-disaggregated
   timeout_in_minutes: 60
   device: h200
