@@ -54,9 +54,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import (
     ReadSpec,
     TPMapping,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.nixl.utils import (
-    get_base_request_id,
-)
 from vllm.v1.kv_cache_interface import FullAttentionSpec
 from vllm.v1.outputs import KVConnectorOutput
 
@@ -77,7 +74,7 @@ def _make_request(
     remote_port: int = 5601,
     tp_size: int = 1,
     finished: bool = True,
-    transfer_id: str | None = None,
+    transfer_id: str | None = "xfer-0",
 ) -> MagicMock:
     """Build a minimal Request mock used by request_finished."""
     from vllm.v1.request import RequestStatus
@@ -211,9 +208,6 @@ class TestPushScheduler:
             _make_request(request_id="req-p-1", is_d_side=False, transfer_id="xfer-1"),
             ([4, 5],),
         )
-        sched.request_finished(
-            _make_request(request_id="req-p-2", is_d_side=False), ([6, 7],)
-        )
         scheduler_output = MagicMock()
         scheduler_output.scheduled_new_reqs = []
         scheduler_output.scheduled_cached_reqs = MagicMock(
@@ -230,6 +224,37 @@ class TestPushScheduler:
 
         # Then
         assert meta.push_transfer_ids == {"req-p-1": "xfer-1"}
+
+    def test_d_side_without_transfer_id_prefills_locally(self):
+        # Given
+        sched = make_nixl_push_scheduler()
+        _stub_sw_clipping(sched)
+        request = _make_request(request_id="req-d-1", transfer_id=None)
+        request.prompt_token_ids = list(range(64))
+
+        # When
+        matched = sched.get_num_new_matched_tokens(request, 0)
+        sched.update_state_after_alloc(request, _BlocksMock(([1],)), 0)
+        sched.request_finished(request, ([1],))
+
+        # Then
+        assert matched == (0, False)
+        assert sched._push_pending_registrations == {}
+        assert sched._reqs_need_recv == {}
+
+    def test_p_side_without_transfer_id_frees_blocks(self):
+        # Given
+        sched = make_nixl_push_scheduler()
+        _stub_sw_clipping(sched)
+        request = _make_request(request_id="req-p-1", is_d_side=False, transfer_id=None)
+
+        # When
+        result = sched.request_finished(request, ([4, 5],))
+
+        # Then
+        assert result == (False, None)
+        assert sched._newly_finished_push_blocks == {}
+        assert sched._reqs_not_processed == {"req-p-1"}
 
     def test_p_side_request_finished_stages_blocks(self):
         """P scheduler pushes blocks into both _finished_request_blocks (lease)
@@ -481,7 +506,7 @@ def _registration_data(
     remote_host: str = "10.0.0.1",
     remote_port: int = 5601,
     remote_tp_size: int = 1,
-    transfer_id: str | None = None,
+    transfer_id: str | None = "xfer-0",
 ) -> dict[str, Any]:
     data: dict[str, Any] = {
         "request_id": request_id,
@@ -585,7 +610,7 @@ class TestPushWriterMatching:
         """PUSH_REG arrives second (P finished first): match + fire."""
         w = _StubWriterWorker.fresh()
         # P had already finished; its blocks were stashed via metadata.
-        w._push_finished_blocks["req-A"] = (([200, 201, 202],), None)
+        w._push_finished_blocks["req-A"] = (([200, 201, 202],), "xfer-0")
 
         notif = PUSH_REG_NOTIF_PREFIX + msgspec.msgpack.encode(
             _registration_data("req-A")
@@ -612,29 +637,6 @@ class TestPushWriterMatching:
 
         assert len(w.start_push_calls) == 0
         assert "req-B" in w._pending_d_registrations
-
-    def test_handle_push_reg_matches_after_stripping_random_suffix(self):
-        """P and D assign the same logical request the same
-        ``cmpl-<uuid>-<index>`` but different per-engine random suffixes;
-        the writer should still match P's finished blocks via the
-        suffix-stripping fallback in ``_pop_matching_finished_blocks``.
-        """
-        w = _StubWriterWorker.fresh()
-        # Same base id + completion index; differ only in the trailing
-        # ``-<8 hex>`` randomization suffix.
-        p_id = "cmpl-12345678-aaaa-bbbb-cccc-1234567890ab-0-aaaaaaaa"
-        d_id = "cmpl-12345678-aaaa-bbbb-cccc-1234567890ab-0-bbbbbbbb"
-        # Sanity: same base id under the helper used by the connector.
-        assert get_base_request_id(p_id) == get_base_request_id(d_id)
-
-        w._push_finished_blocks[p_id] = (([1, 2, 3],), None)
-        notif = PUSH_REG_NOTIF_PREFIX + msgspec.msgpack.encode(_registration_data(d_id))
-        w._handle_push_reg_notif(notif)
-
-        # Suffix-stripped fallback matched and fired.
-        assert len(w.start_push_calls) == 1
-        assert w.start_push_calls[0][0] == p_id
-        assert p_id not in w._push_finished_blocks
 
     def test_handle_push_reg_drops_malformed(self, caplog):
         # The writer logs WARNING/ERROR when it sees these bad payloads;
@@ -721,31 +723,12 @@ class TestPushWriterTransferId:
         # Then
         assert w.start_push_calls == []
 
-    def test_transfer_id_match_wins_over_base_id_fallback(self):
+    def test_registration_without_transfer_id_is_dropped(self, caplog):
         # Given
-        d_1, d_2 = "cmpl-shared-0-bbbbbbbb", "cmpl-shared-0-dddddddd"
-        p_3 = "cmpl-shared-0-eeeeeeee"
-        w = _StubWriterWorker.fresh()
-        for d_id, transfer_id in ((d_1, None), (d_2, "xfer-2")):
-            w._handle_push_reg_notif(
-                PUSH_REG_NOTIF_PREFIX
-                + msgspec.msgpack.encode(
-                    _registration_data(d_id, transfer_id=transfer_id)
-                )
-            )
-
-        # When
-        w._handle_finished_blocks(p_3, ([3],), "xfer-2")
-
-        # Then
-        pushes = [
-            (p_id, blocks, reg["request_id"])
-            for p_id, blocks, reg in w.start_push_calls
-        ]
-        assert pushes == [(p_3, ([3],), d_2)]
-
-    def test_falls_back_to_base_id_when_one_side_has_no_transfer_id(self):
-        # Given
+        caplog.set_level(
+            logging.CRITICAL,
+            logger=("vllm.distributed.kv_transfer.kv_connector.v1.nixl.push_worker"),
+        )
         p_1 = "cmpl-shared-0-aaaaaaaa"
         d_1 = "cmpl-shared-0-bbbbbbbb"
         w = _StubWriterWorker.fresh()
@@ -753,15 +736,13 @@ class TestPushWriterTransferId:
 
         # When
         w._handle_push_reg_notif(
-            PUSH_REG_NOTIF_PREFIX + msgspec.msgpack.encode(_registration_data(d_1))
+            PUSH_REG_NOTIF_PREFIX
+            + msgspec.msgpack.encode(_registration_data(d_1, transfer_id=None))
         )
 
         # Then
-        pushes = [
-            (p_id, blocks, reg["request_id"])
-            for p_id, blocks, reg in w.start_push_calls
-        ]
-        assert pushes == [(p_1, ([1],), d_1)]
+        assert w.start_push_calls == []
+        assert w._pending_d_registrations == {}
 
 
 class TestPushWriterStartLoadKv:
@@ -805,6 +786,7 @@ class TestPushWriterStartLoadKv:
 
         meta = NixlConnectorMetadata()
         meta.push_finished_blocks["req"] = ([1, 2],)
+        meta.push_transfer_ids["req"] = "xfer-0"
         meta.reqs_in_batch.add("req")
         meta.reqs_to_send["req"] = time.perf_counter() + 10
 
@@ -1360,27 +1342,11 @@ class TestPushWriterNegative:
 
     def test_pop_matching_registration_returns_none_when_empty(self):
         w = _StubWriterWorker.fresh()
-        assert w._pop_matching_registration("nope", None) is None
+        assert w._pop_matching_registration("nope") is None
 
     def test_pop_matching_finished_blocks_returns_none_when_empty(self):
         w = _StubWriterWorker.fresh()
-        assert w._pop_matching_finished_blocks("nope", None) is None
-
-    def test_pop_matching_registration_no_match_when_base_ids_differ(self):
-        """A registration whose base id (after stripping the random suffix)
-        does NOT match the lookup request_id must not be popped."""
-        w = _StubWriterWorker.fresh()
-        # Two unrelated requests: different base UUIDs, so stripping the
-        # trailing ``-<8 hex>`` suffix still yields different base ids.
-        unrelated_d = "cmpl-aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa-0-11111111"
-        lookup = "cmpl-bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb-0-22222222"
-        assert get_base_request_id(unrelated_d) != get_base_request_id(lookup)
-
-        w._pending_d_registrations[unrelated_d] = _registration_data(unrelated_d)
-        result = w._pop_matching_registration(lookup, None)
-        assert result is None
-        # Original entry untouched.
-        assert unrelated_d in w._pending_d_registrations
+        assert w._pop_matching_finished_blocks("nope") is None
 
     def test_handle_push_reg_with_non_dict_payload_is_dropped(self, caplog):
         """msgpack-encoded non-dict payload (e.g. a list) should be

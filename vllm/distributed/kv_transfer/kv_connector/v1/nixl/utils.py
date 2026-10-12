@@ -6,7 +6,6 @@ import contextlib
 from collections.abc import Iterator
 from typing import Any
 
-import regex as re
 import zmq
 
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import TransferId
@@ -61,25 +60,14 @@ def get_representative_spec_type(spec: KVCacheSpec) -> type[KVCacheSpec]:
     return type(spec)
 
 
-# Trailing 8-hex randomization suffix appended by
-# ``input_processor.assign_request_id`` as ``-{random_uuid():.8}``.
-_RANDOM_SUFFIX_RE = re.compile(r"-[0-9a-f]{8}$", re.IGNORECASE)
-
-
-def get_base_request_id(request_id: str) -> str:
-    """Strip the per-request ``-<8 hex>`` randomization suffix, if present."""
-    return _RANDOM_SUFFIX_RE.sub("", request_id)
-
-
 def get_transfer_id(kv_transfer_params: dict[str, Any]) -> TransferId | None:
     """Id the router sets on the prefill and decode request of one dispatch."""
     transfer_id = kv_transfer_params.get("transfer_id")
     if isinstance(transfer_id, str) and transfer_id:
         return transfer_id
     logger.warning_once(
-        "No valid transfer_id in kv_transfer_params; pairing P and D by base "
-        "request id, which can pair the wrong requests if ids repeat. This "
-        "fallback is deprecated and will be removed in a future release. "
-        "Please use a router that sets transfer_id for NIXL push mode."
+        "NIXL push mode needs a transfer_id in kv_transfer_params, set by the "
+        "router on both the prefill and decode request. Requests without one "
+        "skip the KV transfer."
     )
     return None

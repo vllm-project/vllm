@@ -90,7 +90,7 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
         self._finished_request_blocks: dict[ReqId, BlockIds] = {}
         # P-side: newly finished blocks to ship to P workers on next step.
         self._newly_finished_push_blocks: dict[ReqId, BlockIds] = {}
-        # P-side: router transfer_id of those requests, if one was set.
+        # P-side: router transfer_id of those requests.
         self._newly_finished_transfer_ids: dict[ReqId, TransferId] = {}
 
         # Soft watchdog timeout (seconds) for D-side registrations that
@@ -120,13 +120,18 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
             params,
         )
 
-        if params is not None and params.get("do_remote_prefill"):
-            token_ids = request.prompt_token_ids or []
-            actual = self._get_remote_prefill_token_count(len(token_ids))
-            count = actual - num_computed_tokens
-            if count > 0:
-                return count, True
+        if params is None or not params.get("do_remote_prefill"):
+            return 0, False
+        if get_transfer_id(params) is None:
+            # P can't pair with this request, so prefill it locally.
+            params["do_remote_prefill"] = False
+            return 0, False
 
+        token_ids = request.prompt_token_ids or []
+        actual = self._get_remote_prefill_token_count(len(token_ids))
+        count = actual - num_computed_tokens
+        if count > 0:
+            return count, True
         return 0, False
 
     def update_state_after_alloc(
@@ -180,7 +185,7 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
         # reverse handshake before WRITE-ing.
         self._push_pending_registrations[request.request_id] = {
             "request_id": request.request_id,
-            "transfer_id": get_transfer_id(params),
+            "transfer_id": params["transfer_id"],
             "decode_engine_id": self.engine_id,
             "decode_host": self.side_channel_host,
             "decode_port": self.side_channel_port,
@@ -254,7 +259,9 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
         if not is_p_node:
             return False, None
 
-        if request.status not in (
+        # Without a transfer_id no D can pair with this request.
+        transfer_id = get_transfer_id(params)
+        if transfer_id is None or request.status not in (
             RequestStatus.FINISHED_LENGTH_CAPPED,
             RequestStatus.FINISHED_STOPPED,
         ):
@@ -282,8 +289,7 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
             # registrations (via NIXL notifications).
             self._finished_request_blocks[request.request_id] = block_ids
             self._newly_finished_push_blocks[request.request_id] = block_ids
-            if (transfer_id := get_transfer_id(params)) is not None:
-                self._newly_finished_transfer_ids[request.request_id] = transfer_id
+            self._newly_finished_transfer_ids[request.request_id] = transfer_id
 
         return delay_free_blocks, dict(
             do_remote_prefill=True,
