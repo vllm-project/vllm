@@ -370,7 +370,7 @@ steps:
       - vllm/_aiter_ops.py
       - vllm/platforms/rocm.py
 
-- label: ":nvidia: (H100) Nightly Spec Decode Speculators Correctness"
+- label: ":nvidia: (H100) Nightly Speculators Correctness"
   key: speculators-correctness
   timeout_in_minutes: 30
   device: h100
@@ -555,7 +555,7 @@ steps:
       - tests/v1/e2e/spec_decode/
       - vllm/platforms/rocm.py
 
-- label: ":nvidia: (H200 MIG 35GB) Nightly Spec Decode AL MTP + Other"
+- label: ":nvidia: (H200 MIG 35GB) Nightly Spec Decode AL MTP + Other Acceptance"
   key: spec-decode-mtp-other-acceptance-nightly
   timeout_in_minutes: 35
   device: h200_35gb

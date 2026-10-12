@@ -173,7 +173,7 @@ steps:
       commands:
       - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-gfx950-small.txt
 
-- label: ":nvidia: (B200) Nightly LM Eval Small Models TP"
+- label: ":nvidia: (B200) Nightly LM Eval Small Models Distributed"
   key: lm-eval-small-models-distributed-2xb200
   timeout_in_minutes: 120
   device: b200-k8s

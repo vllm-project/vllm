@@ -222,7 +222,7 @@ steps:
       depends_on:
       - image-build-amd
 
-- label: ":nvidia: (B200) Nightly Hybrid Model Chunked Prefill"
+- label: ":nvidia: (B200) Nightly V1 E2E Hybrid Chunked Prefill"
   key: v1-e2e-hybrid-chunked-prefill-b200
   timeout_in_minutes: 35
   device: b200-k8s
