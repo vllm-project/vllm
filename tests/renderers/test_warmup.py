@@ -28,9 +28,9 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from vllm.entrypoints.chat_utils import ChatTemplateResolutionError
 from vllm.multimodal.processing import BaseMultiModalProcessor
 from vllm.renderers.base import BaseRenderer
+from vllm.renderers.chat_utils import ChatTemplateResolutionError
 from vllm.renderers.params import ChatParams
 
 
