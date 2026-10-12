@@ -4,6 +4,7 @@ from typing import Annotated, Any, Literal, TypeAlias
 
 from pydantic import (
     BaseModel,
+    ConfigDict,
     Discriminator,
     Field,
     NonNegativeInt,
@@ -30,6 +31,7 @@ from vllm.entrypoints.openai.completion.protocol import (
 )
 from vllm.entrypoints.serve.engine.protocol import UsageInfo
 from vllm.logprobs import Logprob
+from vllm.outputs import WeightVersionSpan
 from vllm.renderers import TokenizeParams
 from vllm.sampling_params import SamplingParams
 from vllm.utils import random_uuid
@@ -147,6 +149,16 @@ class MultiModalFeatures(BaseModel):
         return self
 
 
+class ReasoningParserKwargs(BaseModel):
+    """Kwargs for the engine-side reasoning parser that gates structured
+    outputs. Typed so clients cannot pass arbitrary constructor kwargs."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    chat_template_kwargs: dict[str, Any] = Field(default_factory=dict)
+    """The effective chat template kwargs the prompt was rendered with."""
+
+
 class GenerateRequest(BaseModel):
     request_id: str = Field(
         default_factory=lambda: f"{random_uuid()}",
@@ -211,6 +223,15 @@ class GenerateRequest(BaseModel):
     """The sampling parameters for the model."""
 
     model: str | None = None
+
+    reasoning_ended: bool | None = None
+    """Whether reasoning has ended before the first generated token, as
+    resolved by /render. `True` applies structured outputs from the first
+    token; `None` lets the engine check the prompt with its reasoning parser."""
+
+    reasoning_parser_kwargs: ReasoningParserKwargs | None = None
+    """Set by /render when it has a reasoning parser, so the engine-side
+    parser agrees with the frontend on flags such as `enable_thinking`."""
 
     return_token_ids: bool | None = Field(
         default=None,
@@ -340,12 +361,48 @@ class GenerateRequest(BaseModel):
         )
 
 
+class GenerateLogProb(BaseModel):
+    """A single (token, logprob) candidate on the generate wire protocol.
+
+    Unlike the OpenAI logprob shapes this carries the integer token id: the
+    generate server has no tokenizer, so decoding to a string belongs in
+    derender (or the coupled chat/completions path), not here.
+    """
+
+    token_id: int
+    logprob: float
+    rank: int | None = None
+
+
+class GenerateLogProbsContent(GenerateLogProb):
+    """The sampled token at one position, plus its top-k candidates.
+
+    ``top_logprobs`` is a list, not a dict: JSON turns dict keys into strings
+    and the order would be implicit. It is in the engine's order: the sampled
+    token first, then the remaining candidates in rank order.
+    """
+
+    top_logprobs: list[GenerateLogProb] = []
+
+
+class GenerateLogProbs(BaseModel):
+    """Output logprobs for one choice.
+
+    ``content`` holds one entry per generated token.
+    """
+
+    content: list[GenerateLogProbsContent] | None = None
+
+
 class GenerateChoiceBase(BaseModel):
     """Fields shared by every `output_mode` of a non-streaming choice."""
 
     index: int
     # per OpenAI spec this is the default
     finish_reason: str | None = "stop"
+    # Stop string or token id that ended generation (repetition detection
+    # sets it too); None on EOS, length and abort.
+    stop_reason: int | str | None = None
     token_ids: list[int] | None = None
     # Per-token expert routing decisions, base64-encoded `.npy` bytes
     # (numpy serialization). Shape after decode:
@@ -358,6 +415,8 @@ class GenerateChoiceBase(BaseModel):
     # or (b) `enable_return_routed_experts` is off server-side.
     routed_experts: str | None = None
     sampling_mask: list[list[int]] | None = None
+    # Contiguous weight version spans over output-token indexes.
+    weight_versions: list[WeightVersionSpan] | None = None
 
     @field_validator("token_ids")
     @classmethod
@@ -368,8 +427,8 @@ class GenerateChoiceBase(BaseModel):
 
 
 class GenerateTokensChoice(GenerateChoiceBase):
-    logprobs: ChatCompletionLogProbs | None = None
-    """Logprobs whose tokens are `token_id:N` placeholders."""
+    logprobs: GenerateLogProbs | None = None
+    """Logprobs with integer token ids (no tokenizer on the generate server)."""
 
 
 class GenerateTextChoice(GenerateChoiceBase):
@@ -387,13 +446,18 @@ class GenerateStreamChoiceBase(BaseModel):
 
     index: int
     finish_reason: str | None = None
+    # Stop string or token id that ended generation (repetition detection
+    # sets it too); None on EOS, length and abort.
+    stop_reason: int | str | None = None
     token_ids: list[int] | None = None
     routed_experts: str | None = None
     sampling_mask: list[list[int]] | None = None
+    # Set on the final chunk only; covers the whole output.
+    weight_versions: list[WeightVersionSpan] | None = None
 
 
 class GenerateTokensStreamChoice(GenerateStreamChoiceBase):
-    logprobs: ChatCompletionLogProbs | None = None
+    logprobs: GenerateLogProbs | None = None
 
 
 class GenerateTextStreamChoice(GenerateStreamChoiceBase):

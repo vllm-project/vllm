@@ -280,10 +280,10 @@ curl -X POST http://localhost:8000/v1/load_lora_adapter \
 
 !!! warning "You must know your adapter's layout"
     Under `--enable-mixed-moe-lora-format`, vLLM trusts whatever
-    `is_3d_lora_weight` the caller declares — it does **not** inspect the
-    checkpoint to verify. A wrong declaration will load weights into the
-    wrong stacked buffers and silently produce garbage outputs, with no
-    error at load time. Confirm the layout before serving:
+    `is_3d_lora_weight` the caller declares. Loading checks reject fused 3D
+    expert weights routed to a 2D wrapper without the required flags, but
+    do not validate every layout mismatch. A wrong declaration can still
+    cause loading failures or incorrect outputs. Confirm the layout before serving:
 
     - **2D (per-expert, megatron-style)** → set `is_3d_lora_weight: false`.
       Adapter keys look like `...experts.{idx}.gate_proj.lora_A.weight`,
@@ -298,6 +298,11 @@ When `--enable-mixed-moe-lora-format` is **not** set, `is_3d_lora_weight`
 is ignored: vLLM picks the wrapper from the base model's
 `is_3d_moe_weight` and the adapter is required to match. The field is
 also ignored for non-MoE models.
+
+For a model using a 2D MoE wrapper (such as Qwen3-MoE), loading fused 3D
+expert adapter weights requires both `enable_mixed_moe_lora_format=True`
+on the engine and `is_3d_lora_weight=True` on the request. Otherwise, adapter
+loading raises a `ValueError` naming these settings before activation.
 
 ## LoRA model lineage in model card
 
