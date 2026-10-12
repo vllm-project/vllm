@@ -195,6 +195,44 @@ vllm serve <model> \
 
 ## Validation results
 
+### GLM-5.2 cropped execution
+
+On October 12, 2026, code commit `eb04a10709` was validated on two H20 GPUs
+using a four-layer crop of GLM-5.2-FP8, TP1/PCP2/DCP1/EP2, eager execution,
+FP8 KV cache, and a fixed 1 GiB KV cache. Original attention dimensions and
+all 256 routed experts were retained. Only O-Proj weights were dequantized to
+BF16 with the checkpoint's 128x128 block scales and excluded from FP8 weight
+quantization. Both feature settings used this same checkpoint.
+
+Each setting completed six requests: two 32-token prompts with eight output
+tokens, followed by 32/600/48/720-token prompts with twelve output tokens.
+Chunked prefill used a 128-token scheduler budget to exercise mixed batches.
+Every O-Proj call was compared with a full-weight BF16 GEMM on its actual input.
+The enabled arm produced the following worst-case errors across both ranks:
+
+| Phase | Calls across ranks | Relative L2 error | Max error / max reference magnitude |
+| --- | ---: | ---: | ---: |
+| prefill | 16 | 0.000000 | 0.000000 |
+| mixed | 96 | 0.000000 | 0.000000 |
+| decode | 160 | 0.003212 | 0.007752 |
+
+All outputs were finite. The predeclared bounds were 0.01 relative L2 and 0.02
+scaled maximum error. Five of six generated continuations matched the baseline
+exactly; the different BF16 reduction order can change an autoregressive path.
+The crop validates execution and per-layer numerical error, rather than
+full-model dataset accuracy or serving performance.
+
+Resident O-Proj parameters decreased from 768 MiB to 384 MiB per rank across
+four layers. Ready tensor allocations before installing the GEMM oracle were
+11.0743 GiB/rank with the feature disabled and 11.2618 GiB/rank with it enabled.
+The reconstruction/staging buffers therefore offset the parameter saving in
+this crop; parameter residency and total serving memory remain separate metrics.
+
+The run also covered dummy startup execution and the requirement to replicate
+decode queries when PCP O-Proj output reduction is enabled. Sixteen focused
+O-Proj and configuration tests passed, including the GLM-5 architecture gate
+and the feature-specific query-ownership assertion.
+
 The following end-to-end results cover the unquantized O-Proj path. The unit
 tests additionally cover ModelOpt NVFP4 packed-weight gathering, logical scale
 gathering and full CUTLASS-layout reassembly, preservation of replicated global
