@@ -53,6 +53,7 @@ from vllm.utils.torch_utils import (
 )
 from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerMetadata,
+    rocm_flydsl_indexer_uses_fp4,
     tp_prefill_row_sharding_supported,
 )
 from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
@@ -1181,10 +1182,12 @@ class SparseAttnIndexer(CustomOp):
         self.use_pcp = parallel_config.prefill_context_parallel_size > 1
         self.pcp_shard_decode_requests = parallel_config.pcp_shard_decode_requests
         self._cp_kv_cache_interleave_size: int | None = None
-        if use_fp4_cache and current_platform.is_rocm():
-            from vllm.v1.attention.backends.mla.indexer import dsa_indexer_uses_fp4
-
-            dsa_indexer_uses_fp4(vllm_config)
+        # DeepSeek-V4.1's RocmSparseAttnIndexer has its own ROCm MXFP4 checks.
+        if (
+            use_fp4_cache
+            and current_platform.is_rocm()
+            and rocm_flydsl_indexer_uses_fp4(vllm_config)
+        ):
             if head_dim != 128 or compress_ratio != 4 or not skip_k_cache_insert:
                 raise ValueError("ROCm MXFP4 indexer requires fused C4 K, D=128")
             if candidate_blocks is not None:

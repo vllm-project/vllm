@@ -329,6 +329,7 @@ def test_rocm_gfx950_fp4_is_explicit_opt_in(monkeypatch):
     assert indexer.dsa_indexer_uses_fp4(_config("mxfp4")) is True
     gfx_probe.assert_called_once_with()
     aiter_probe.assert_called_once_with()
+    assert indexer.rocm_flydsl_indexer_uses_fp4(_config("mxfp4")) is True
     platform.is_device_capability_family.assert_not_called()
 
 
@@ -354,6 +355,8 @@ def test_rocm_fp4_deepseek_v41_keeps_its_own_gate(monkeypatch, cdna):
 
     if cdna == 4:
         assert indexer.dsa_indexer_uses_fp4(config) is True
+        # Uses MXFP4, but never DeepSeek-V4's FlyDSL buffers, schedules or checks.
+        assert indexer.rocm_flydsl_indexer_uses_fp4(config) is False
     else:
         with pytest.raises(ValueError, match="requires CDNA4"):
             indexer.dsa_indexer_uses_fp4(config)

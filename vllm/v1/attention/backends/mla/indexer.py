@@ -109,6 +109,13 @@ def aiter_mxfp4_available() -> bool:
         return False
 
 
+def _is_deepseek_v41(vllm_config: VllmConfig) -> bool:
+    model_config = getattr(vllm_config, "model_config", None)
+    return (
+        model_config is not None and model_config.hf_config.model_type == "deepseek_v41"
+    )
+
+
 def dsa_indexer_uses_fp4(vllm_config: VllmConfig) -> bool:
     """Whether the DeepSeek sparse indexer should use the MXFP4 K cache."""
     kv_dtype = vllm_config.attention_config.resolve_indexer_kv_dtype("fp8")
@@ -119,11 +126,7 @@ def dsa_indexer_uses_fp4(vllm_config: VllmConfig) -> bool:
         )
     use_fp4 = kv_dtype == "mxfp4"
     if use_fp4 and current_platform.is_rocm():
-        model_config = getattr(vllm_config, "model_config", None)
-        if (
-            model_config is not None
-            and model_config.hf_config.model_type == "deepseek_v41"
-        ):
+        if _is_deepseek_v41(vllm_config):
             from vllm._aiter_ops import rocm_aiter_ops
             from vllm.platforms.rocm import get_cdna_version
 
@@ -163,6 +166,19 @@ def dsa_indexer_uses_fp4(vllm_config: VllmConfig) -> bool:
             "earlier architectures are not supported."
         )
     return use_fp4
+
+
+def rocm_flydsl_indexer_uses_fp4(vllm_config: VllmConfig) -> bool:
+    """Whether the indexer runs DeepSeek-V4's ROCm MXFP4 path on AITER FlyDSL.
+
+    DeepSeek-V4.1 has its own ROCm MXFP4 indexer (rocm_paged_mxfp4_indexer)
+    with a different cache layout, so the FlyDSL buffers, schedules and checks
+    must not apply to it."""
+    return (
+        current_platform.is_rocm()
+        and not _is_deepseek_v41(vllm_config)
+        and dsa_indexer_uses_fp4(vllm_config)
+    )
 
 
 class PrepareUniformDecodeKernel(
@@ -1169,7 +1185,9 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             else 0
         )
         self.indexer_uses_fp4 = dsa_indexer_uses_fp4(self.vllm_config)
-        self.use_rocm_fp4 = current_platform.is_rocm() and self.indexer_uses_fp4
+        self.use_rocm_fp4 = self.indexer_uses_fp4 and rocm_flydsl_indexer_uses_fp4(
+            self.vllm_config
+        )
         self.fp4_topk_tokens = int(
             getattr(self.vllm_config.model_config.hf_config, "index_topk", 0)
         )
