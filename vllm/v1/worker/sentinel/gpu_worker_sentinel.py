@@ -171,6 +171,7 @@ class WorkerSentinel:
                 self.worker.parallel_config.master_addr,
                 tp_group.rank_in_group,
                 tp_group.world_size,
+                timeout=self.worker.parallel_config.cpu_distributed_timeout,
             )
 
     def scale_down(self, ft_request: FaultToleranceRequest):
