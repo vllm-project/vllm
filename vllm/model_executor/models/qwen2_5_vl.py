@@ -1441,14 +1441,17 @@ class Qwen2_5_VLForConditionalGeneration(
             )
 
         with self._mark_language_model(vllm_config):
-            self.language_model = init_vllm_registered_model(
-                vllm_config=vllm_config,
-                prefix=maybe_prefix(prefix, "language_model"),
-                architectures=["Qwen2ForCausalLM"],
-            )
+            self.language_model = self._init_language_model(vllm_config, prefix)
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors
+        )
+
+    def _init_language_model(self, vllm_config: VllmConfig, prefix: str) -> nn.Module:
+        return init_vllm_registered_model(
+            vllm_config=vllm_config,
+            prefix=maybe_prefix(prefix, "language_model"),
+            architectures=["Qwen2ForCausalLM"],
         )
 
     def _parse_and_validate_image_input(
