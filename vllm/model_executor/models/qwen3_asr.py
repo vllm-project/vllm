@@ -40,6 +40,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import (
     MultiModalEmbeddings,
     StreamingTranscriptionPostProcessor,
+    SupportsEagle3,
     SupportsLoRA,
     SupportsMRoPE,
     SupportsMultiModal,
@@ -85,7 +86,6 @@ from vllm.multimodal.processing import (
     PromptUpdate,
     cached_encode,
 )
-from vllm.multimodal.processing.processor import HFMultiModalInputs
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers import cached_tokenizer_from_config
 from vllm.transformers_utils.configs.qwen3_asr import (
@@ -279,19 +279,6 @@ class Qwen3ASRMultiModalProcessor(
     def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
         return self.dummy_inputs.get_dummy_text(mm_counts)
 
-    def _get_hf_mm_inputs(
-        self,
-        mm_items: MultiModalDataItems,
-        hf_kwargs: Mapping[str, object],
-    ) -> HFMultiModalInputs:
-        hf_inputs = super()._get_hf_mm_inputs(mm_items, hf_kwargs)
-        kwargs = dict(hf_inputs.hf_kwargs)
-        if "truncation" not in hf_kwargs:
-            # HF already defaults to no truncation. The base's flat default
-            # would override config kwargs or conflict with nested audio kwargs.
-            kwargs.pop("truncation", None)
-        return hf_inputs._replace(hf_kwargs=kwargs)
-
     def _call_hf_processor(
         self,
         hf_data: Mapping[str, object],
@@ -410,6 +397,7 @@ class Qwen3ASRForConditionalGeneration(
     SupportsMRoPE,
     SupportsTranscription,
     SupportsLoRA,
+    SupportsEagle3,
 ):
     # LoRA support
     packed_modules_mapping = {

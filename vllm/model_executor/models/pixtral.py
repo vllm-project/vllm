@@ -10,6 +10,7 @@ from typing import Annotated, Literal
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from mistral_common.protocol.instruct.chunk import ImageChunk, TextChunk
 from mistral_common.protocol.instruct.messages import UserMessage
 from mistral_common.protocol.instruct.request import ChatCompletionRequest
@@ -20,6 +21,10 @@ from transformers.models.pixtral.image_processing_pixtral import (
 )
 from transformers.models.pixtral.modeling_pixtral import apply_rotary_pos_emb
 
+from vllm.compilation.decorators import (
+    should_torch_compile_mm_encoder,
+    support_torch_compile,
+)
 from vllm.config import VllmConfig
 from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
@@ -27,6 +32,7 @@ from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.activation import SiluAndMul, get_act_and_mul_fn
 from vllm.model_executor.layers.attention import MMEncoderAttention
 from vllm.model_executor.layers.conv import Conv2dLayer
+from vllm.model_executor.layers.fusion.fused_act_quant import maybe_fused_act_quant
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
@@ -753,7 +759,7 @@ class FeedForward(nn.Module):
 
     def forward(self, x):
         x, _ = self.gate_up_proj(x)
-        x = self.act_fn(x)
+        x = maybe_fused_act_quant(self.act_fn, x, self.down_proj)
         x, _ = self.down_proj(x)
         return x
 
@@ -828,6 +834,16 @@ class Attention(nn.Module):
         return out
 
 
+@support_torch_compile(
+    dynamic_arg_dims={
+        "x": 1,
+        "freqs_cis": 0,
+        "cu_seqlens": 0,
+        "sequence_lengths": 0,
+    },
+    enable_if=should_torch_compile_mm_encoder,
+    is_encoder=True,
+)
 class TransformerBlock(nn.Module):
     def __init__(
         self,
@@ -1244,7 +1260,7 @@ class PixtralHFMLP(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         gate_up, _ = self.gate_up_proj(x)
-        x = self.act_and_mul(gate_up)
+        x = maybe_fused_act_quant(self.act_and_mul, gate_up, self.down_proj)
         x, _ = self.down_proj(x)
         return x
 
@@ -1297,7 +1313,7 @@ class PixtralHFAttention(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        position_embeddings: torch.Tensor,
+        position_embeddings: tuple[torch.Tensor, torch.Tensor],
         cu_seqlens: torch.Tensor,
         max_seqlen: torch.Tensor,
         sequence_lengths: torch.Tensor | None,
@@ -1328,6 +1344,17 @@ class PixtralHFAttention(nn.Module):
         return attn_output, None
 
 
+@support_torch_compile(
+    dynamic_arg_dims={
+        "hidden_states": 1,
+        "rotary_pos_emb_cos": 0,
+        "rotary_pos_emb_sin": 0,
+        "cu_seqlens": 0,
+        "sequence_lengths": 0,
+    },
+    enable_if=should_torch_compile_mm_encoder,
+    is_encoder=True,
+)
 class PixtralHFTransformerBlock(nn.Module):
     def __init__(
         self,
@@ -1354,14 +1381,15 @@ class PixtralHFTransformerBlock(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        position_embeddings: torch.Tensor,
+        rotary_pos_emb_cos: torch.Tensor,
+        rotary_pos_emb_sin: torch.Tensor,
         cu_seqlens: torch.Tensor,
         max_seqlen: torch.Tensor,
         sequence_lengths: torch.Tensor | None,
     ) -> torch.Tensor:
         r, _ = self.attention.forward(
             self.attention_norm(hidden_states),
-            position_embeddings=position_embeddings,
+            position_embeddings=(rotary_pos_emb_cos, rotary_pos_emb_sin),
             cu_seqlens=cu_seqlens,
             max_seqlen=max_seqlen,
             sequence_lengths=sequence_lengths,
@@ -1402,18 +1430,20 @@ class PixtralHFTransformer(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        position_embeddings: torch.Tensor,
+        position_embeddings: tuple[torch.Tensor, torch.Tensor],
         cu_seqlens: torch.Tensor,
         max_seqlen: torch.Tensor,
         sequence_lengths: torch.Tensor | None,
         return_all_hidden_states: bool,
     ) -> torch.Tensor:
         hidden_states_pool = [x]
+        rotary_pos_emb_cos, rotary_pos_emb_sin = position_embeddings
 
         for layer in self.layers:
             x = layer(
                 x,
-                position_embeddings,
+                rotary_pos_emb_cos,
+                rotary_pos_emb_sin,
                 cu_seqlens,
                 max_seqlen,
                 sequence_lengths,
@@ -1427,12 +1457,55 @@ class PixtralHFTransformer(nn.Module):
         return x
 
 
+def pixtral_patch_embed(
+    images: list[torch.Tensor],
+    weight: torch.Tensor,
+    input_norm: nn.Module,
+) -> tuple[torch.Tensor, list[torch.Tensor]]:
+    """Normalize and project all CHW images in one matrix multiplication."""
+    out_channels, in_channels, patch_height, patch_width = weight.shape
+    grid_sizes = []
+    for image in images:
+        assert image.ndim == 3 and image.shape[0] == in_channels
+        _, height, width = image.shape
+        patch_rows = height // patch_height
+        patch_cols = width // patch_width
+        grid_sizes.append((patch_rows, patch_cols))
+
+    patch_counts = [rows * cols for rows, cols in grid_sizes]
+    packed = torch.empty(
+        (sum(patch_counts), in_channels * patch_height * patch_width),
+        dtype=images[0].dtype,
+        device=images[0].device,
+    )
+    offset = 0
+    for image, (rows, cols), count in zip(images, grid_sizes, patch_counts):
+        source = (
+            image[:, : rows * patch_height, : cols * patch_width]
+            .reshape(in_channels, rows, patch_height, cols, patch_width)
+            .permute(1, 3, 0, 2, 4)
+        )
+        packed[offset : offset + count].view(
+            rows, cols, in_channels, patch_height, patch_width
+        ).copy_(source)
+        offset += count
+
+    normalized = input_norm(packed, weight.dtype)
+    projected = F.linear(normalized, weight.reshape(out_channels, -1))
+    embeddings = [
+        tokens.transpose(0, 1).reshape(1, out_channels, rows, cols)
+        for tokens, (rows, cols) in zip(projected.split(patch_counts), grid_sizes)
+    ]
+    return projected.unsqueeze(0), embeddings
+
+
 class PixtralHFVisionModel(nn.Module):
     def __init__(
         self,
         config: PixtralVisionConfig,
         quant_config: QuantizationConfig | None = None,
         *,
+        input_norm: nn.Module | None = None,
         num_hidden_layers_override: int | None = None,
         require_post_norm: bool | None = None,
         prefix: str = "",
@@ -1440,6 +1513,7 @@ class PixtralHFVisionModel(nn.Module):
         super().__init__()
 
         self.config = config
+        self.input_norm = input_norm
 
         self.patch_conv = Conv2dLayer(
             in_channels=config.num_channels,
@@ -1495,16 +1569,24 @@ class PixtralHFVisionModel(nn.Module):
                 all tokens of all images of shape (N_toks, D)
 
         """
-        # pass images through initial convolution independently
-        patch_embeds_list = [
-            self.patch_conv(img.unsqueeze(0).to(self.dtype)) for img in pixel_values
-        ]
+        images = [image.to(device=self.device) for image in pixel_values]
+        if self.input_norm is not None:
+            patch_embeds, patch_embeds_list = pixtral_patch_embed(
+                images,
+                self.patch_conv.weight,
+                self.input_norm,
+            )
+        else:
+            patch_embeds_list = []
+            for image in images:
+                patch_embeds_list.append(
+                    self.patch_conv(image.unsqueeze(0).to(self.dtype))
+                )
+            patch_embeds = torch.cat(
+                [p.flatten(2).permute(0, 2, 1) for p in patch_embeds_list], dim=1
+            )
 
-        patch_embeds = [p.flatten(2).permute(0, 2, 1) for p in patch_embeds_list]
-        embed_sizes = [p.shape[1] for p in patch_embeds]
-
-        # flatten to a single sequence
-        patch_embeds = torch.cat(patch_embeds, dim=1)
+        embed_sizes = [p.shape[-2] * p.shape[-1] for p in patch_embeds_list]
         patch_embeds = self.ln_pre(patch_embeds)
 
         # positional embeddings
