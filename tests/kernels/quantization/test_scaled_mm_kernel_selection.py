@@ -103,27 +103,29 @@ def test_fp8_linear_backend_override(platform_mock, _):
 
 
 @pytest.mark.parametrize(
-    ("family", "weight_shape", "batch_invariant", "expected"),
+    ("family", "weight_shape", "batch_invariant", "out_dtype", "expected"),
     [
-        (120, (5120, 6144), False, True),
-        (100, (5120, 6144), False, False),
-        (120, (5120, 6144), True, False),
-        (120, (5120, 6152), False, False),
+        (120, (5120, 6144), False, torch.bfloat16, True),
+        (120, (5120, 6144), False, torch.float16, True),
+        (100, (5120, 6144), False, torch.bfloat16, False),
+        (120, (5120, 6144), True, torch.bfloat16, False),
+        (120, (5120, 6152), False, torch.bfloat16, False),
+        (120, (5120, 6144), False, torch.float32, False),
     ],
 )
 def test_sm12x_per_tensor_fp8_small_m_dispatch(
-    monkeypatch, family, weight_shape, batch_invariant, expected
+    monkeypatch, family, weight_shape, batch_invariant, out_dtype, expected
 ):
     """FlashInfer per-tensor FP8 sends small-M GEMMs to CUTLASS only on SM12x,
-    with 16-aligned N/K, and not in batch-invariant mode."""
+    with 16-aligned N/K, bf16/fp16 output, and not in batch-invariant mode."""
     from vllm.model_executor.kernels.linear.scaled_mm import flashinfer as fi
 
     config = FP8ScaledMMLinearLayerConfig(
         activation_quant_key=kFp8StaticTensorSym,
         weight_quant_key=kFp8StaticTensorSym,
         weight_shape=weight_shape,
-        input_dtype=torch.bfloat16,
-        out_dtype=torch.bfloat16,
+        input_dtype=out_dtype,
+        out_dtype=out_dtype,
     )
     monkeypatch.setattr(fi.envs, "VLLM_BATCH_INVARIANT", batch_invariant)
     with (

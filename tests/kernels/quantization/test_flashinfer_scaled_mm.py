@@ -113,3 +113,29 @@ def test_sm12x_fp8_scaled_mm_dispatch(m_offset: int | None, use_bias: bool) -> N
     )
 
     torch.testing.assert_close(out, expected_out, atol=1e-2, rtol=1e-2)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(120),
+    reason="SM12x small-M CUTLASS dispatch",
+)
+@torch.inference_mode()
+def test_sm12x_fp8_scaled_mm_dispatch_rejects_batched() -> None:
+    """cutlass_max_m is only valid for the unbatched call."""
+    from vllm.model_executor.kernels.linear.scaled_mm.flashinfer import (
+        SM12X_FP8_CUTLASS_MAX_M,
+    )
+
+    a = torch.zeros((2, 8, 128), device="cuda").to(torch.float8_e4m3fn)
+    b = torch.zeros((2, 256, 128), device="cuda").to(torch.float8_e4m3fn)
+    scale = torch.ones((1,), dtype=torch.float32, device="cuda")
+    with pytest.raises(AssertionError):
+        torch.ops.vllm.bmm_fp8(
+            a,
+            b.transpose(1, 2),
+            scale,
+            scale,
+            torch.bfloat16,
+            "auto",
+            SM12X_FP8_CUTLASS_MAX_M,
+        )

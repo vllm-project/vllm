@@ -953,8 +953,12 @@ if has_flashinfer():
         cutlass_max_m: int = 0,
     ) -> torch.Tensor:
         # Runs eagerly with a concrete M, so each captured CUDA graph size takes
-        # the branch for its own M.
-        if A.shape[1] <= cutlass_max_m:
+        # the branch for its own M. cutlass_scaled_mm is 2-D, so only the
+        # unbatched call from flashinfer_scaled_fp8_mm may enable it.
+        if cutlass_max_m > 0 and A.shape[1] <= cutlass_max_m:
+            assert A.shape[0] == 1 and B.shape[0] == 1, (
+                "cutlass_max_m requires an unbatched (1, M, K) x (1, K, N) call"
+            )
             from vllm import _custom_ops as ops
 
             return ops.cutlass_scaled_mm(A[0], B[0], A_scale, B_scale, dtype)[None]
