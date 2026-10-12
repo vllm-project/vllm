@@ -79,6 +79,8 @@ class KVOperationExecutor(Protocol):
 
     def validate_scope(self, target: LogicalResolution) -> None: ...
 
+    def residency(self, target: LogicalResolution, limit: int) -> dict[str, Any]: ...
+
     def submit(
         self,
         operation: OperationResult,
@@ -316,6 +318,35 @@ class NativeKVController:
             self.registry.max_envelope_bytes,
             self.cache_profile,
         )
+
+    def cancel(
+        self, message_id: str, action_id: str, operation_id: int
+    ) -> OperationResult:
+        current = self.registry.get(message_id, action_id)
+        if current is None:
+            raise ControlError("missing", "Operation is unknown or expired")
+        if current.operation_id != operation_id:
+            raise ControlError(
+                "stale_operation", "Cancellation targets an earlier action"
+            )
+        if current.status.terminal:
+            return current
+        self.dispatcher.cancel(operation_id)
+        if self.policies is not None:
+            self.policies.cancel_operation(operation_id)
+        if self.executor is not None:
+            self.executor.cancel_operations(
+                {operation_id}, "Caller cancelled the operation"
+            )
+        current = self.registry.get(message_id, action_id)
+        assert current is not None
+        if not current.status.terminal:
+            current = self.registry.update(
+                current,
+                OperationStatus.CANCELLED,
+                reason="Caller cancelled the operation",
+            )
+        return current
 
     def _target(
         self, target: Target, request_id: str | None

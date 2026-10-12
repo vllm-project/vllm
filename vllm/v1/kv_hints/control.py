@@ -108,6 +108,7 @@ class OperationResult:
     target_outcomes: tuple[TargetOutcome, ...] = ()
     action_type: str = ""
     action_version: str = ""
+    transferred_bytes: int = 0
 
 
 @dataclass(frozen=True)
@@ -120,10 +121,11 @@ class Submission:
 class _Message:
     fingerprint: bytes
     results: dict[str, OperationResult]
+    acknowledged: bool = False
 
     @property
     def size(self) -> int:
-        return max(1, len(self.results))
+        return 0 if self.acknowledged else max(1, len(self.results))
 
 
 def _validate_id(value: object, name: str) -> None:
@@ -236,6 +238,7 @@ class OperationRegistry:
         *,
         engine_epoch: str | None = None,
         max_records: int = 4096,
+        max_acknowledged_messages: int = 65536,
         max_actions: int = 128,
         max_envelope_bytes: int = 1 << 20,
         max_events: int = 4096,
@@ -248,6 +251,7 @@ class OperationRegistry:
             type(n) is not int or n < 1
             for n in (
                 max_records,
+                max_acknowledged_messages,
                 max_actions,
                 max_envelope_bytes,
                 max_events,
@@ -263,6 +267,8 @@ class OperationRegistry:
         )
         _validate_id(self.engine_epoch, "engine_epoch")
         self.max_records = max_records
+        self.max_acknowledged_messages = max_acknowledged_messages
+        self._acknowledged_count = 0
         self.max_actions = max_actions
         self.max_envelope_bytes = max_envelope_bytes
         self.result_ttl = result_ttl
@@ -313,6 +319,11 @@ class OperationRegistry:
                 raise ControlError(
                     "conflict", "Message ID already has different content"
                 )
+            if previous.acknowledged:
+                raise ControlError(
+                    "acknowledged",
+                    "Message completed and its results were acknowledged",
+                )
             return Submission(True, tuple(previous.results.values()))
         size = max(1, len(envelope.actions))
         if self._record_count + size > self.max_records:
@@ -354,6 +365,7 @@ class OperationRegistry:
         blocked_targets: int | None = None,
         missing_targets: int | None = None,
         displaced_blocks: int | None = None,
+        transferred_bytes: int | None = None,
         derived_operations: tuple[OperationReference, ...] | None = None,
         target_outcomes: tuple[TargetOutcome, ...] | None = None,
     ) -> OperationResult:
@@ -387,6 +399,7 @@ class OperationRegistry:
                 ("blocked_targets", blocked_targets),
                 ("missing_targets", missing_targets),
                 ("displaced_blocks", displaced_blocks),
+                ("transferred_bytes", transferred_bytes),
             )
         }
         if any(type(value) is not int or value < 0 for value in counts.values()):
@@ -475,6 +488,7 @@ class OperationRegistry:
             blocked_targets=counts["blocked_targets"],
             missing_targets=counts["missing_targets"],
             displaced_blocks=counts["displaced_blocks"],
+            transferred_bytes=counts["transferred_bytes"],
             derived_operations=derived,
             target_outcomes=outcomes,
         )
@@ -489,6 +503,34 @@ class OperationRegistry:
         self.prune()
         message = self._messages.get(message_id)
         return message.results.get(action_id) if message is not None else None
+
+    def acknowledge(self, message_id: str) -> None:
+        """Release terminal result details while keeping the original replay TTL."""
+        self.prune()
+        message = self._messages.get(message_id)
+        if message is None:
+            raise ControlError("missing", "Message is unknown or expired")
+        if message.acknowledged:
+            return
+        if any(not result.status.terminal for result in message.results.values()):
+            raise ControlError("busy", "Message still has active operations")
+        if self._acknowledged_count >= self.max_acknowledged_messages:
+            raise ControlError("capacity", "Acknowledged message capacity exhausted")
+        self._record_count -= message.size
+        message.results.clear()
+        message.acknowledged = True
+        self._acknowledged_count += 1
+
+    def capacity(self) -> dict[str, int | float]:
+        """Report both independently bounded result and replay storage."""
+        self.prune()
+        return {
+            "records": self._record_count,
+            "max_records": self.max_records,
+            "acknowledged_messages": self._acknowledged_count,
+            "max_acknowledged_messages": self.max_acknowledged_messages,
+            "result_ttl": self.result_ttl,
+        }
 
     def events(
         self, after: int, *, epoch: str, limit: int = 256
@@ -513,4 +555,6 @@ class OperationRegistry:
         now = self._clock()
         while self._expiry and self._expiry[0][0] <= now:
             _, key = heapq.heappop(self._expiry)
-            self._record_count -= self._messages.pop(key).size
+            message = self._messages.pop(key)
+            self._record_count -= message.size
+            self._acknowledged_count -= message.acknowledged

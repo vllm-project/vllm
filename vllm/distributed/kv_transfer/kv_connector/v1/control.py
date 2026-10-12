@@ -16,6 +16,7 @@ class KVTransferRankResult:
     success: bool
     reason: str = ""
     missing: bool = False
+    bytes_transferred: int = 0
 
 
 @dataclass
@@ -69,6 +70,7 @@ class KVTransferQueue:
                     not failures,
                     "; ".join(r.reason[:512] for r in failures[:3]),
                     bool(failures) and all(r.missing for r in failures),
+                    sum(r.bytes_transferred for r in pending.ranks.values()),
                 )
             )
             del self._pending[result.transfer_id]

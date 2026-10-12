@@ -298,7 +298,9 @@ class OffloadingConnectorWorker:
             job_id = transfer_result.job_id
             if self._control_jobs and job_id in self._control_jobs:
                 lease = self._control_jobs.pop(job_id)
-                self._record_control_result(lease, transfer_result.success)
+                self._record_control_result(
+                    lease, transfer_result.success, transfer_result.transfer_size or 0
+                )
                 continue
             # Request-scoped jobs currently do not support failures.
             assert transfer_result.success
@@ -335,7 +337,7 @@ class OffloadingConnectorWorker:
         return meta
 
     def _record_control_result(
-        self, lease: KVCacheTransferLease, success: bool
+        self, lease: KVCacheTransferLease, success: bool, bytes_transferred: int = 0
     ) -> None:
         parallel = self.spec.config.parallel
         self._connector_worker_meta.control_results.append(
@@ -345,6 +347,7 @@ class OffloadingConnectorWorker:
                 parallel.rank % parallel.world_size,
                 success,
                 "" if success else "CPU transfer failed",
+                bytes_transferred=bytes_transferred,
             )
         )
 

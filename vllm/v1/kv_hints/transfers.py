@@ -40,6 +40,7 @@ class KVTransferCompletion:
     success: bool
     reason: str = ""
     missing: bool = False
+    bytes_transferred: int = 0
 
 
 class KVTransferAdapter(Protocol):
@@ -75,6 +76,7 @@ class _Movement:
     reasons: list[str] = field(default_factory=list)
     outcomes: dict[BlockHashWithGroupId, TargetOutcome] = field(default_factory=dict)
     unresolved: tuple[TargetOutcome, ...] = ()
+    transferred_bytes: int = 0
 
 
 @dataclass
@@ -100,6 +102,14 @@ class KVTransferOperations:
         self.resources = manager.get_transfer_manager()
         self._operations: dict[int, _Movement] = {}
         self._jobs: dict[int, _Job] = {}
+        self.statistics = {
+            "load_bytes": 0,
+            "store_bytes": 0,
+            "completed_transfers": 0,
+            "failed_transfers": 0,
+            "missing_transfers": 0,
+            "discarded_transfers": 0,
+        }
 
     @property
     def has_pending(self) -> bool:
@@ -268,9 +278,23 @@ class KVTransferOperations:
                 ):
                     continue
                 valid = self.resources.complete(job.lease, success=completion.success)
+                self.statistics[f"{job.lease.direction}_bytes"] += (
+                    completion.bytes_transferred
+                )
+                outcome = (
+                    "completed_transfers"
+                    if valid
+                    else "missing_transfers"
+                    if completion.missing
+                    else "discarded_transfers"
+                    if completion.success
+                    else "failed_transfers"
+                )
+                self.statistics[outcome] += 1
                 del self._jobs[completion.transfer_id]
                 for caller in job.callers:
                     movement = self._operations[caller]
+                    movement.transferred_bytes += completion.bytes_transferred
                     movement.pending.remove(completion.transfer_id)
                     if valid:
                         movement.succeeded.add(job.lease.key)
@@ -336,6 +360,7 @@ class KVTransferOperations:
             reason=reason,
             completed_steps=self._completed_steps(movement),
             affected_blocks=len(movement.succeeded),
+            transferred_bytes=movement.transferred_bytes,
             target_outcomes=tuple(
                 replace(outcome, status=OperationStatus.CANCELLED, reason=reason)
                 if outcome.status == OperationStatus.RECEIVED
@@ -420,6 +445,7 @@ class KVTransferOperations:
             status,
             completed_steps=steps,
             affected_blocks=affected,
+            transferred_bytes=movement.transferred_bytes,
             blocked_targets=blocked,
             missing_targets=errors["missing"] + errors["unsupported"],
             target_outcomes=tuple(movement.outcomes.values()) + movement.unresolved,

@@ -75,6 +75,15 @@ class KVCacheTransferManager:
         }
         return len(loads), len(stores)
 
+    def is_loading(self, key: BlockHashWithGroupId) -> bool:
+        identifier = self._loads.get(key)
+        transfer = self._transfers.get(identifier) if identifier is not None else None
+        return bool(
+            transfer is not None
+            and transfer.lease.generation == self.generation
+            and transfer.interests
+        )
+
     def acquire(
         self,
         direction: Literal["load", "store"],

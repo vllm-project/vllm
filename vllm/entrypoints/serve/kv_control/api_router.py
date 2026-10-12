@@ -17,7 +17,16 @@ router = APIRouter()
 
 
 class ControlRequest(msgspec.Struct, forbid_unknown_fields=True):  # type: ignore[call-arg]
-    method: Literal["submit", "operation", "associations", "events"]
+    method: Literal[
+        "submit",
+        "operation",
+        "associations",
+        "events",
+        "acknowledge",
+        "capacity",
+        "residency",
+        "cancel",
+    ]
     invocation: ControlInvocation
     payload: dict[str, Any]
 
@@ -29,11 +38,14 @@ def error_response(code: str, message: str) -> JSONResponse:
         "missing_association": 404,
         "stale_epoch": 409,
         "stale_revision": 409,
+        "stale_operation": 409,
         "conflict": 409,
         "event_gap": 409,
         "unsupported": 501,
         "unsupported_consumer": 501,
         "capacity": 429,
+        "busy": 409,
+        "acknowledged": 409,
         "payload_too_large": 413,
     }.get(code, 400)
     return JSONResponse(

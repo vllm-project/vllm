@@ -28,6 +28,8 @@ class KVControlConfig:
     """Interpretation owner for the entire request-attached envelope."""
     max_records: int = Field(default=4096, gt=0)
     """Maximum retained operation records, including active operations."""
+    max_acknowledged_messages: int = Field(default=65536, gt=0)
+    """Maximum compact replay guards after callers acknowledge terminal results."""
     max_actions: int = Field(default=128, gt=0)
     """Maximum actions admitted in one envelope."""
     max_envelope_bytes: int = Field(default=1 << 20, gt=0)

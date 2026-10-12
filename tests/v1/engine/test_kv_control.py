@@ -13,7 +13,12 @@ from vllm.config import CacheConfig, KVControlConfig, ParallelConfig
 from vllm.sampling_params import SamplingParams
 from vllm.utils.hashing import sha256
 from vllm.v1.core.kv_cache_manager import KVCacheManager
-from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
+from vllm.v1.core.kv_cache_utils import (
+    BlockHash,
+    get_request_block_hasher,
+    init_none_hash,
+    make_block_hash_with_group_id,
+)
 from vllm.v1.engine.core import EngineCore
 from vllm.v1.engine.core_client import DPLBAsyncMPClient, InprocClient
 from vllm.v1.kv_cache_interface import (
@@ -69,19 +74,68 @@ def test_engine_epochs_differ_but_compatible_dp_ranks_share_namespace():
     )
 
 
-def test_live_weight_version_change_cannot_silently_preserve_control_namespace():
+def make_weight_update_engine():
     engine = object.__new__(EngineCore)
     engine._weight_version = "default"
     engine.kv_control_service = make_service()
+    manager = engine.kv_control_service.controller.executor.manager
+    engine.vllm_config = SimpleNamespace(
+        kv_control_config=KVControlConfig(engine_id="test"),
+        cache_config=CacheConfig(block_size=16),
+        model_config=SimpleNamespace(compute_hash=lambda: "model"),
+        parallel_config=ParallelConfig(data_parallel_size=2, data_parallel_rank=0),
+    )
+    engine.batch_queue = None
+    engine.reset_mm_cache = lambda: None
+    engine.reset_encoder_cache = lambda: None
+    engine.scheduler = SimpleNamespace(
+        kv_cache_manager=manager,
+        requests={},
+        connector=None,
+        reset_prefix_cache=lambda *args, **kwargs: manager.reset_prefix_cache(),
+    )
+    return engine
+
+
+def test_weight_version_transition_invalidates_old_namespace_and_epoch():
+    engine = make_weight_update_engine()
     before = engine.get_kv_control_capabilities()
     engine.set_weight_version("default")
-    with pytest.raises(RuntimeError, match="restart the engine"):
-        engine.set_weight_version("updated")
-    assert engine.get_weight_version() == "default"
     assert engine.get_kv_control_capabilities() == before
+    engine.set_weight_version("updated")
+    after = engine.get_kv_control_capabilities()
+    assert after["namespace"] != before["namespace"]
+    assert after["engine_epoch"] != before["engine_epoch"]
+    assert after["engine_id"] == before["engine_id"]
+    assert after["cache_profile"]["request_cache_salt_prefix"] == after["namespace"]
+    old_context = {k: before[k] for k in ("engine_id", "engine_epoch", "namespace")}
+    assert (
+        engine.kv_control("associations", old_context, {})["error"]["code"]
+        == "stale_epoch"
+    )
+    engine.set_weight_version("next")
+    assert engine.get_kv_control_capabilities()["namespace"] != after["namespace"]
     engine.kv_control_service = None
     engine.set_weight_version("updated")
     assert engine.get_weight_version() == "updated"
+
+
+def test_weight_transition_refuses_active_requests_and_uncommitted_tensors():
+    engine = make_weight_update_engine()
+    engine.scheduler.requests["running"] = object()
+    with pytest.raises(RuntimeError, match="Drain inference"):
+        engine.set_weight_version("updated")
+    assert engine.get_weight_version() == "default"
+    engine.scheduler.requests.clear()
+    engine._prepare_kv_weight_update()
+    with pytest.raises(RuntimeError, match="Finish transferring"):
+        engine.set_weight_version("updated")
+    assert engine.kv_control("submit", {}, {})["error"]["code"] == "busy"
+    engine._kv_weight_update_finished = True
+    with pytest.raises(RuntimeError, match="new weight version"):
+        engine.set_weight_version("default")
+    engine.set_weight_version("updated")
+    assert not engine._kv_weight_update_active
 
 
 @pytest.mark.parametrize(
@@ -109,6 +163,44 @@ def test_engine_utility_uses_safe_serialization_and_disabled_path_has_no_state()
     reply = engine.kv_control("associations", invocation, {})
     assert reply["result"]["items"] == []
     assert MsgpackDecoder().decode(MsgpackEncoder().encode(reply)) == reply
+
+
+def test_residency_query_observes_eviction_without_deleting_logical_content():
+    service = make_service()
+    controller = service.controller
+    pool = controller.executor.manager.block_pool
+    block = pool.get_new_blocks(1)[0]
+    key = make_block_hash_with_group_id(BlockHash(b"x" * 32), 0)
+    pool.cache_transferred_block(block, key, 16)
+    pool.free_blocks([block])
+    invocation = {
+        "engine_id": controller.registry.engine_id,
+        "engine_epoch": controller.registry.engine_epoch,
+        "namespace": controller.index.namespace,
+    }
+    payload = {
+        "target": {
+            "kind": "hashes",
+            "namespace": controller.index.namespace,
+            "blocks": [
+                {
+                    "block_hash": (b"x" * 32).hex(),
+                    "group_id": 0,
+                    "start_token": 0,
+                    "end_token": 16,
+                }
+            ],
+        }
+    }
+    before = service.call("residency", invocation, payload)
+    assert before["ok"]
+    assert before["result"]["items"][0]["resident_copies"] == 1
+    assert before["result"]["items"][0]["referenced_copies"] == 0
+    pool.evict_unreferenced([key])
+    after = service.call("residency", invocation, payload)
+    assert after["ok"]
+    assert after["result"]["items"][0]["resident_copies"] == 0
+    assert after["result"]["engine_epoch"] == invocation["engine_epoch"]
 
 
 def test_engine_liveness_includes_request_free_executor_progress():
@@ -254,6 +346,30 @@ def token_request(identity, tokens, **kwargs):
         block_hasher=get_request_block_hasher(16, sha256),
         **kwargs,
     )
+
+
+def test_weight_hashes_match_fresh_peer_and_rollback_without_merging_user_salts():
+    first, peer = make_weight_update_engine(), make_weight_update_engine()
+    for engine in (first, peer):
+        engine._kv_weight_hash_salt = (
+            engine.kv_control_service.controller.cache_profile[
+                "request_cache_salt_prefix"
+            ]
+        )
+        engine.scheduler.add_request = lambda request: None
+
+    def hashes(engine, salt):
+        request = token_request(uuid.uuid4().hex, list(range(32)), cache_salt=salt)
+        engine.add_request(request)
+        return request.block_hashes
+
+    original = hashes(first, None)
+    assert original == hashes(peer, None)
+    assert original != hashes(first, "tenant-a")
+    first.set_weight_version("next")
+    assert original != hashes(first, None)
+    first.set_weight_version("default")
+    assert original == hashes(first, None) == hashes(peer, None)
 
 
 def native_submit(service, kind, payload):
@@ -573,6 +689,9 @@ def primitive_scheduler(*, async_scheduling=False):
     engine.scheduler = scheduler
     engine.vllm_config = scheduler.vllm_config
     engine.kv_control_service = service
+    engine._kv_weight_hash_salt = service.controller.cache_profile[
+        "request_cache_salt_prefix"
+    ]
     return engine, controller, adapter
 
 

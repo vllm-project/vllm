@@ -183,7 +183,11 @@ class MooncakeControlWorker:
             ):
                 raise RuntimeError("Mooncake load returned an incomplete object")
             return KVTransferRankResult(
-                lease.transfer_id, lease.generation, self.rank, True
+                lease.transfer_id,
+                lease.generation,
+                self.rank,
+                True,
+                bytes_transferred=sum(sum(size) for size in sizes),
             )
         except Exception as error:
             return KVTransferRankResult(

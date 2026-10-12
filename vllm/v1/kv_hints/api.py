@@ -8,7 +8,7 @@ import msgspec
 
 from vllm.v1.kv_hints.control import ControlContext, ControlError
 from vllm.v1.kv_hints.controller import NativeKVController
-from vllm.v1.kv_hints.native import Identifier, TokenPosition
+from vllm.v1.kv_hints.native import Identifier, Target, TokenPosition, validate_target
 from vllm.v1.kv_hints.protocol import KvHintsEnvelope
 
 
@@ -24,6 +24,20 @@ class OperationQuery(msgspec.Struct, forbid_unknown_fields=True):  # type: ignor
     action_id: Identifier
 
 
+class MessageQuery(msgspec.Struct, forbid_unknown_fields=True):  # type: ignore[call-arg]
+    message_id: Identifier
+
+
+class CancellationQuery(msgspec.Struct, forbid_unknown_fields=True):  # type: ignore[call-arg]
+    message_id: Identifier
+    action_id: Identifier
+    operation_id: Annotated[int, msgspec.Meta(ge=1)]
+
+
+class EmptyQuery(msgspec.Struct, forbid_unknown_fields=True):  # type: ignore[call-arg]
+    pass
+
+
 class AssociationQuery(msgspec.Struct, forbid_unknown_fields=True):  # type: ignore[call-arg]
     session_id: Identifier | None = None
     after: tuple[Identifier, Identifier] | None = None
@@ -34,6 +48,11 @@ class AssociationQuery(msgspec.Struct, forbid_unknown_fields=True):  # type: ign
 class EventQuery(msgspec.Struct, forbid_unknown_fields=True):  # type: ignore[call-arg]
     stream: Literal["operation", "association"]
     after: TokenPosition = 0
+    limit: Annotated[int, msgspec.Meta(ge=1, le=4096)] = 256
+
+
+class ResidencyQuery(msgspec.Struct, forbid_unknown_fields=True):  # type: ignore[call-arg]
+    target: Target
     limit: Annotated[int, msgspec.Meta(ge=1, le=4096)] = 256
 
 
@@ -85,6 +104,20 @@ class KVControlService:
                 result = self.controller.registry.get(query.message_id, query.action_id)
                 if result is None:
                     raise ControlError("missing", "Operation is unknown or expired")
+            elif method == "acknowledge":
+                message_query = msgspec.convert(payload, type=MessageQuery)
+                if self.controller.policies is not None:
+                    self.controller.policies.before_acknowledge()
+                self.controller.registry.acknowledge(message_query.message_id)
+                result = {"acknowledged": True}
+            elif method == "capacity":
+                msgspec.convert(payload, type=EmptyQuery)
+                result = self.controller.registry.capacity()
+                transfers = getattr(self.controller.executor, "transfers", None)
+                if transfers is not None:
+                    result["transfers"] = dict(transfers.statistics)
+                if self.controller.policies is not None:
+                    result["policy_errors"] = dict(self.controller.policies.errors)
             elif route.consumer != "native":
                 raise ControlError(
                     "unsupported", "Backend path has no native state queries"
@@ -97,6 +130,25 @@ class KVControlService:
                     revision=association_query.revision,
                     limit=association_query.limit,
                 )
+            elif method == "cancel":
+                cancellation = msgspec.convert(payload, type=CancellationQuery)
+                result = self.controller.cancel(
+                    cancellation.message_id,
+                    cancellation.action_id,
+                    cancellation.operation_id,
+                )
+            elif method == "residency":
+                query_residency = msgspec.convert(payload, type=ResidencyQuery)
+                validate_target(query_residency.target)
+                executor = self.controller.executor
+                if executor is None:
+                    raise ControlError("unsupported", "Residency is unavailable")
+                target = self.controller._target(query_residency.target, None)
+                result = executor.residency(
+                    self.controller.index.resolve(target), query_residency.limit
+                )
+                result["engine_id"] = self.controller.registry.engine_id
+                result["engine_epoch"] = self.controller.registry.engine_epoch
             elif method == "events":
                 event_query = msgspec.convert(payload, type=EventQuery)
                 source = (

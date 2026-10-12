@@ -60,6 +60,7 @@ class AssociationPage:
     engine_epoch: str
     namespace: str
     event_sequence: int
+    session_revisions: tuple[tuple[str, int], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -459,6 +460,10 @@ class SessionPrefixIndex:
             self.engine_epoch,
             self.namespace,
             self._sequence,
+            tuple(
+                (name, self._sessions[name].revision)
+                for name in sorted({key[0] for key in selected})
+            ),
         )
 
     def task_tree(self, session_id: str) -> tuple[str, ...]:

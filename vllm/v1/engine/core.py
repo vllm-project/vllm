@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import gc
+import json
 import os
 import queue
 import signal
@@ -254,6 +255,9 @@ class EngineCore:
                 transfer_allowed=lambda: not self.is_sleeping(),
                 requests=lambda: cast(Any, self.scheduler).requests.values(),
             )
+            profile = self.kv_control_service.controller.cache_profile
+            assert profile is not None
+            self._kv_weight_hash_salt = profile["request_cache_salt_prefix"]
             policies = self.kv_control_service.controller.policies
             cast(
                 Any, self.scheduler
@@ -526,6 +530,11 @@ class EngineCore:
                     "message": "Programmable KV control is disabled",
                 },
             }
+        if method == "submit" and getattr(self, "_kv_weight_update_active", False):
+            return {
+                "ok": False,
+                "error": {"code": "busy", "message": "Weight update has not committed"},
+            }
         return self.kv_control_service.call(method, invocation, payload)
 
     def add_request(self, request: Request, request_wave: int = 0):
@@ -569,6 +578,18 @@ class EngineCore:
             )
 
         service = getattr(self, "kv_control_service", None)
+        if getattr(self, "_kv_weight_update_active", False):
+            request.kv_hints = None
+            request.abort_immediately = True
+        salt_prefix = getattr(self, "_kv_weight_hash_salt", None)
+        if salt_prefix is not None:
+            request.cache_salt = json.dumps(
+                [salt_prefix, request.cache_salt],
+                separators=(",", ":"),
+                ensure_ascii=False,
+            )
+            request.block_hashes.clear()
+            request.update_block_hashes()
         if service is not None and request.kv_hints is not None:
             from vllm.v1.kv_hints.control import ControlContext, ControlError
 
@@ -1131,17 +1152,70 @@ class EngineCore:
         args: tuple = (),
         kwargs: dict[str, Any] | None = None,
     ) -> list[_R]:
-        return self.model_executor.collective_rpc(method, timeout, args, kwargs)
+        if (
+            method == "start_weight_update"
+            and getattr(self, "kv_control_service", None) is not None
+        ):
+            self._prepare_kv_weight_update()
+        result = self.model_executor.collective_rpc(method, timeout, args, kwargs)
+        if method == "finish_weight_update" and getattr(
+            self, "_kv_weight_update_active", False
+        ):
+            self._kv_weight_update_finished = True
+        return result
+
+    def _prepare_kv_weight_update(self) -> None:
+        if getattr(self, "_kv_weight_update_active", False):
+            raise RuntimeError("A weight update is already active")
+        scheduler = cast(Any, self.scheduler)
+        if scheduler.requests or self.batch_queue:
+            raise RuntimeError("Drain inference requests before updating weights")
+        manager = scheduler.kv_cache_manager
+        if manager.get_transfer_manager().has_pending:
+            raise RuntimeError("Drain KV transfers before updating weights")
+        self._reset_caches(reset_running_requests=False, reset_connector=False)
+        service = self.kv_control_service
+        assert service is not None
+        if service.controller.policies is not None:
+            service.controller.policies.tick(force=True)
+        self._kv_weight_update_active = True
+        self._kv_weight_update_finished = False
 
     def set_weight_version(self, weight_version: str) -> None:
-        if (
-            getattr(self, "kv_control_service", None) is not None
-            and weight_version != self._weight_version
-        ):
-            raise RuntimeError(
-                "Live weight-version changes with programmable KV control are "
-                "not supported; restart the engine to establish a new cache namespace"
+        service = getattr(self, "kv_control_service", None)
+        if service is not None:
+            active = getattr(self, "_kv_weight_update_active", False)
+            if weight_version == self._weight_version:
+                if active:
+                    raise RuntimeError("Updated weights require a new weight version")
+                return
+            if active and not self._kv_weight_update_finished:
+                raise RuntimeError("Finish transferring weights before committing")
+            if not active:
+                self._prepare_kv_weight_update()
+            from vllm.v1.kv_hints.engine import create_control_service
+
+            scheduler = cast(Any, self.scheduler)
+            updated = create_control_service(
+                self.vllm_config,
+                scheduler.kv_cache_manager,
+                weight_version,
+                request_lookup=scheduler.requests.get,
+                connector=scheduler.connector,
+                transfer_allowed=lambda: not self.is_sleeping(),
+                requests=lambda: scheduler.requests.values(),
+                previous=service,
             )
+            self.kv_control_service = updated
+            profile = updated.controller.cache_profile
+            assert profile is not None
+            self._kv_weight_hash_salt = profile["request_cache_salt_prefix"]
+            scheduler.kv_hint_dispatcher = updated.controller.dispatcher
+            policies = updated.controller.policies
+            scheduler.kv_policy_runtime = (
+                policies if policies is not None and policies.has_guidance else None
+            )
+            self._kv_weight_update_active = False
         self._weight_version = weight_version
 
     def get_weight_version(self) -> str:

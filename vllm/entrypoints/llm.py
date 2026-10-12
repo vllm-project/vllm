@@ -4,6 +4,7 @@
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from uuid import uuid4
 
 import cloudpickle
 import torch.nn as nn
@@ -920,6 +921,8 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
     def finish_weight_update(self, weight_version: str | None = None) -> None:
         """Finish the weight update and set its version if provided."""
         self.llm_engine.collective_rpc("finish_weight_update")
+        if weight_version is None and self.llm_engine.vllm_config.kv_control_config:
+            weight_version = uuid4().hex
         if weight_version is not None:
             self.llm_engine.set_weight_version(weight_version)
 

@@ -212,6 +212,76 @@ def test_multi_action_message_expires_only_after_every_action_finishes(registry,
     assert registry.get("message", "b") is None
 
 
+def test_late_cancellation_cannot_cancel_a_reused_message_incarnation(registry, now):
+    index = SessionPrefixIndex("namespace", registry.engine_epoch)
+    service = KVControlService(
+        NativeKVController(registry, index, RetentionDeclarations(index))
+    )
+    original = registry.submit(envelope(), CONTEXT).results[0]
+    registry.update(original, OperationStatus.COMPLETED)
+    now[0] += 10
+    replacement = registry.submit(envelope(), CONTEXT).results[0]
+    context = {"engine_id": CONTEXT.engine_id, "engine_epoch": CONTEXT.engine_epoch}
+    payload = {
+        "message_id": "message",
+        "action_id": "action",
+        "operation_id": original.operation_id,
+    }
+    reply = service.call("cancel", context, payload)
+    assert reply["error"]["code"] == "stale_operation"
+    assert registry.get("message", "action").status == OperationStatus.RECEIVED
+    payload["operation_id"] = replacement.operation_id
+    assert service.call("cancel", context, payload)["result"]["status"] == "cancelled"
+
+
+def test_acknowledgement_frees_capacity_without_reexecuting_or_renewing(now):
+    registry = OperationRegistry(
+        "engine-a",
+        engine_epoch="epoch-a",
+        max_records=1,
+        result_ttl=10,
+        clock=lambda: now[0],
+    )
+    hint = envelope()
+    operation = registry.submit(hint, CONTEXT).results[0]
+    registry.update(operation, OperationStatus.COMPLETED)
+    now[0] += 9
+    registry.acknowledge("message")
+    registry.acknowledge("message")
+    assert registry.capacity()["records"] == 0
+    assert registry.capacity()["acknowledged_messages"] == 1
+    with pytest.raises(ControlError) as error:
+        registry.submit(hint, CONTEXT)
+    assert error.value.code == "acknowledged"
+    with pytest.raises(ControlError, match="different content"):
+        registry.submit(envelope(payload={"priority": 11}), CONTEXT)
+    registry.submit(envelope("next"), CONTEXT)
+    now[0] += 1
+    assert registry.capacity()["acknowledged_messages"] == 0
+    assert registry.capacity()["records"] == 1
+
+
+def test_acknowledgement_preserves_active_siblings_and_bounded_replay_storage(now):
+    registry = OperationRegistry(
+        "engine-a",
+        engine_epoch="epoch-a",
+        max_acknowledged_messages=1,
+        clock=lambda: now[0],
+    )
+    receipt = registry.submit(envelope(action_ids=("a", "b")), CONTEXT)
+    registry.update(receipt.results[0], OperationStatus.COMPLETED)
+    with pytest.raises(ControlError, match="active operations"):
+        registry.acknowledge("message")
+    assert registry.get("message", "a").status == OperationStatus.COMPLETED
+    registry.update(receipt.results[1], OperationStatus.CANCELLED)
+    registry.acknowledge("message")
+    next_result = registry.submit(envelope("next"), CONTEXT).results[0]
+    registry.update(next_result, OperationStatus.COMPLETED)
+    with pytest.raises(ControlError, match="capacity exhausted"):
+        registry.acknowledge("next")
+    assert registry.get("next", "action").status == OperationStatus.COMPLETED
+
+
 def test_result_expiry_follows_completion_order_and_reused_ids(registry, now):
     first = registry.submit(envelope("first"), CONTEXT).results[0]
     second = registry.submit(envelope("second"), CONTEXT).results[0]

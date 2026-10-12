@@ -2,7 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Engine-side resource integration for programmable cache operations."""
 
+import time
 from collections.abc import Callable
+from typing import Any
 
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_manager import KVCacheManager
@@ -108,6 +110,30 @@ class KVResourceController:
             else None
         )
 
+    def rebind(
+        self,
+        registry: OperationRegistry,
+        declarations: RetentionDeclarations,
+        adapters: tuple[KVTransferAdapter, ...],
+    ) -> None:
+        """Replace weight-scoped state after idle cache invalidation."""
+        if self.has_pending or self.manager.get_transfer_manager().has_pending:
+            raise ControlError("busy", "Transfers must drain before namespace change")
+        self.registry = registry
+        self.declarations = declarations
+        self.retention_priority.declarations = declarations
+        self.retention_priority._version = None
+        for block in self.pool.blocks:
+            self.retention_priority.copies.forget(block)
+        self.retention_priority.synchronize()
+        self.transfers = (
+            KVTransferOperations(
+                self.manager, registry, declarations.index.namespace, adapters
+            )
+            if adapters
+            else None
+        )
+
     def capabilities(self) -> tuple[ActionCapability, ...]:
         local = (
             ActionCapability(
@@ -184,6 +210,53 @@ class KVResourceController:
                             "invalid_payload",
                             "Content coordinates disagree with the cached copy",
                         )
+
+    def residency(self, target: LogicalResolution, limit: int) -> dict[str, Any]:
+        """Observe current GPU copies without acquiring a residency guarantee."""
+        self.validate_scope(target)
+        entries = sum(
+            len(p.blocks) + len(p.partial_blocks) + len(p.missing_ranges)
+            for p in target.prefixes
+        )
+        if entries > limit:
+            raise ControlError("capacity", "Residency scope exceeds query limit")
+        transfers = self.manager.transfer_manager
+        rows = []
+        for prefix in target.prefixes:
+            for block in prefix.blocks:
+                key = make_block_hash_with_group_id(
+                    BlockHash(bytes.fromhex(block.block_hash)), block.group_id
+                )
+                copies = self.pool.cached_block_hash_to_block.get_blocks(key)
+                rows.append(
+                    {
+                        "block_hash": block.block_hash,
+                        "group_id": block.group_id,
+                        "start_token": block.start_token,
+                        "end_token": block.end_token,
+                        "resident_copies": len(copies),
+                        "referenced_copies": sum(b.ref_cnt > 0 for b in copies),
+                        "eviction_priorities": tuple(
+                            self.pool.eviction_priority(b) for b in copies
+                        ),
+                        "loading": transfers is not None and transfers.is_loading(key),
+                    }
+                )
+        return {
+            "tier": "gpu",
+            "namespace": target.namespace,
+            "observed_at": time.monotonic(),
+            "cache_generation": transfers.generation if transfers is not None else 0,
+            "total_blocks": self.pool.num_gpu_blocks - 1,
+            "free_blocks": self.pool.get_num_free_blocks(),
+            "items": rows,
+            "partial_blocks": tuple(
+                b for p in target.prefixes for b in p.partial_blocks
+            ),
+            "missing_ranges": tuple(
+                g for p in target.prefixes for g in p.missing_ranges
+            ),
+        }
 
     def request_scope(
         self, request: Request, target: RequestTarget | str

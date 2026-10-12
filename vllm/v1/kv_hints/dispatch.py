@@ -291,6 +291,14 @@ class KvHintDispatcher:
                     work.operation, OperationStatus.FAILED, type(error).__name__
                 )
 
+    def cancel(self, operation_id: int) -> None:
+        for request_id, works in tuple(self._pending.items()):
+            remaining = [w for w in works if w.operation.operation_id != operation_id]
+            if remaining:
+                self._pending[request_id] = remaining
+            else:
+                del self._pending[request_id]
+
     def capabilities(self) -> tuple[ActionCapability, ...]:
         executor = self.controller.executor
         if executor is None:

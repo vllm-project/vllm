@@ -33,6 +33,7 @@ def create_control_service(
     connector: "KVConnectorBase_V1 | None" = None,
     transfer_allowed: Callable[[], bool] | None = None,
     requests: Callable[[], Iterable[Request]] | None = None,
+    previous: KVControlService | None = None,
 ) -> KVControlService:
     settings = config.kv_control_config
     assert settings is not None
@@ -41,6 +42,8 @@ def create_control_service(
     engine_id = settings.engine_id or uuid.uuid4().hex
     if config.parallel_config.data_parallel_size > 1:
         engine_id += f":dp{config.parallel_config.data_parallel_rank}"
+    if previous is not None:
+        engine_id = previous.controller.registry.engine_id
     profile = {
         "model": config.model_config.compute_hash(),
         "cache": config.cache_config.compute_hash(),
@@ -72,6 +75,7 @@ def create_control_service(
     registry = OperationRegistry(
         engine_id,
         max_records=settings.max_records,
+        max_acknowledged_messages=settings.max_acknowledged_messages,
         max_actions=settings.max_actions,
         max_envelope_bytes=settings.max_envelope_bytes,
         max_events=settings.max_events,
@@ -93,10 +97,23 @@ def create_control_service(
         max_snapshot_entries=settings.max_snapshot_entries,
     )
     adapters = connector.create_kv_control_adapters() if connector is not None else ()
-    executor = KVResourceController(
-        manager, registry, declarations, adapters, transfer_allowed
-    )
+    if previous is None:
+        executor = KVResourceController(
+            manager, registry, declarations, adapters, transfer_allowed
+        )
+    else:
+        previous_executor = previous.controller.executor
+        assert isinstance(previous_executor, KVResourceController)
+        executor = previous_executor
+        executor.rebind(registry, declarations, adapters)
     cache_profile = {
+        "weight_version": weight_version,
+        "request_cache_salt_prefix": None if weight_version == "default" else namespace,
+        "request_cache_salt_encoding": "compact UTF-8 JSON [prefix, original_salt]",
+        "queries": ("operation", "associations", "events", "residency", "capacity"),
+        "acknowledge": "Terminal messages only; replay guards keep original TTL",
+        "cancel": "One action incarnation; worker holds drain before reuse",
+        "residency_tiers": ("gpu",),
         "hash_algorithm": profile["hash_algorithm"],
         "hash_block_size": profile["hash_block_size"],
         "hash_seed": profile["hash_seed"],

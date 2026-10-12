@@ -741,6 +741,15 @@ class KVPolicyRuntime:
             else:
                 self._target_entries -= work.entries
 
+    def before_acknowledge(self) -> None:
+        """Consume final outcomes before a caller releases their detailed records."""
+        self._reap()
+
+    def cancel_operation(self, operation_id: int) -> None:
+        work = self._pending.get(operation_id) or self._running.get(operation_id)
+        if work is not None:
+            self._cancel(work, "Caller cancelled the operation")
+
     def _reap(self) -> None:
         registry = self.controller.registry
         for identifier, work in tuple(self._running.items()):

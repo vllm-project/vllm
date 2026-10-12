@@ -38,6 +38,10 @@ class RetentionFreeBlockQueue(FreeKVCacheBlockQueue):
         heapq.heapify(self._heap)
         self.last_displaced_cached_blocks = 0
 
+    def priority(self, block: KVCacheBlock) -> int:
+        self._synchronize()
+        return self._priority(block)
+
     def popleft(self) -> KVCacheBlock:
         return self.popleft_n(1)[0]
 

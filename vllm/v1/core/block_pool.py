@@ -1043,6 +1043,9 @@ class BlockPool:
             sum(b.block_hash is not None and b.ref_cnt == 0 for b in self.blocks),
         )
 
+    def eviction_priority(self, block: KVCacheBlock) -> int:
+        return self._retention_queue.priority(block) if self._retention_queue else 0
+
     def get_usage(self) -> float:
         """Get the KV cache usage.
 

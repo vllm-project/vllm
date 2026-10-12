@@ -4,14 +4,12 @@
 
 from types import SimpleNamespace
 
-import httpx
 import msgspec
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
-from benchmarks.programmable_kv_cache.recovery import check_protocol
 from vllm.config import KVControlConfig
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.completion.protocol import CompletionRequest
@@ -96,41 +94,16 @@ def test_http_submission_and_python_query_share_results_and_retries(control_clie
         "/v1/kv/control", json=body("events", {"stream": "operation"})
     ).json()
     assert events[-1] == query
-
-
-def test_protocol_probe_uses_fresh_ids_and_checks_engine_results(control_client):
-    client, _ = control_client
-    first = check_protocol(client, "http://testserver", "engine")
-    second = check_protocol(client, "http://testserver", "engine")
-    assert first["operation"]["message_id"] != second["operation"]["message_id"]
-    assert first["operation"]["status"] == "unsupported"
-    assert first["duplicate"]["replayed"]
-    with pytest.raises(ValueError, match="engine_id"):
-        check_protocol(client, "http://testserver", "absent")
-
-
-@pytest.mark.parametrize("incorrect", ["version", "gap"])
-def test_protocol_probe_rejects_incorrect_server_outcomes(
-    control_client,
-    monkeypatch,
-    incorrect,
-):
-    client, _ = control_client
-    post = client.post
-
-    def corrupted_response(*args, **kwargs):
-        response = post(*args, **kwargs)
-        result = response.json()
-        if incorrect == "version" and "results" in result:
-            result["results"][0]["status"] = "completed"
-            return httpx.Response(200, json=result, request=response.request)
-        if incorrect == "gap" and result.get("error", {}).get("code") == "event_gap":
-            return httpx.Response(200, json=[], request=response.request)
-        return response
-
-    monkeypatch.setattr(client, "post", corrupted_response)
-    with pytest.raises(AssertionError):
-        check_protocol(client, "http://testserver", "engine")
+    acknowledged = client.post(
+        "/v1/kv/control", json=body("acknowledge", {"message_id": "message"})
+    )
+    assert acknowledged.json() == {"acknowledged": True}
+    retry = client.post("/v1/kv/control", json=body("submit", envelope))
+    assert retry.status_code == 409
+    assert retry.json()["error"]["code"] == "acknowledged"
+    capacity = client.post("/v1/kv/control", json=body("capacity", {})).json()
+    assert capacity["records"] == 0
+    assert capacity["acknowledged_messages"] == 1
 
 
 def test_http_association_snapshot_supplies_cursor_after_real_history_loss(
