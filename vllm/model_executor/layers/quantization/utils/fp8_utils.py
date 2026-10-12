@@ -682,15 +682,18 @@ def per_token_group_quant_fp8(
             m = x.shape[-2]
             sf_k = x.shape[-1] // group_size
             tma_aligned_m = get_tma_aligned_size(m, 4)
+            # Allocate the complete physical [sf_k, tma_aligned_m] extent,
+            # including the trailing padding after the final scale column.
+            # empty_strided((m, sf_k), (1, tma_aligned_m)) only allocates up
+            # to the final logical element, but SM100 TMA reads the complete
+            # four-row scale-factor atom at the end of every column.
+            storage_shape = x.shape[:-2] + (sf_k, tma_aligned_m)
+            x_s_storage = torch.empty(
+                storage_shape, device=x.device, dtype=torch.float32
+            )
             shape = x.shape[:-2] + (m, sf_k)
-            stride = (
-                (1, tma_aligned_m)
-                if x.dim() == 2
-                else (tma_aligned_m * sf_k, 1, tma_aligned_m)
-            )
-            x_s = torch.empty_strided(
-                shape, stride, device=x.device, dtype=torch.float32
-            )
+            stride = x_s_storage.stride()[:-2] + (1, tma_aligned_m)
+            x_s = x_s_storage.as_strided(shape, stride)
         else:
             shape = x.shape[:-2] + (x.shape[-1] // group_size, x.shape[-2])
             x_s = torch.empty(shape, device=x.device, dtype=torch.float32).permute(

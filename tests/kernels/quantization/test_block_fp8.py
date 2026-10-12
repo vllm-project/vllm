@@ -127,6 +127,42 @@ def test_per_token_group_quant_fp8(
             assert scale.stride()[-1] == get_tma_aligned_size(num_tokens, 4)
 
 
+@pytest.mark.parametrize("m", [65, 66, 67])
+@torch.inference_mode()
+def test_per_token_group_quant_fp8_tma_storage(m):
+    """The backing storage must include the final TMA padding atom."""
+    group_size = 128
+    k = 256
+    x = torch.rand((m, k), dtype=torch.bfloat16)
+
+    ref_out, ref_scale = native_per_token_group_quant_fp8(x, group_size)
+    packed_out, packed_scale = per_token_group_quant_fp8(
+        x,
+        group_size,
+        column_major_scales=True,
+        tma_aligned_scales=False,
+    )
+    out, scale = per_token_group_quant_fp8(
+        x,
+        group_size,
+        column_major_scales=True,
+        tma_aligned_scales=True,
+    )
+
+    sf_k = k // group_size
+    aligned_m = get_tma_aligned_size(m, 4)
+    required_storage_bytes = aligned_m * sf_k * scale.element_size()
+
+    assert scale.shape == (m, sf_k)
+    assert scale.stride(-2) == 1
+    assert scale.stride(-1) == aligned_m
+    assert scale.untyped_storage().nbytes() >= required_storage_bytes
+    assert torch.equal(out, packed_out)
+    assert torch.equal(scale, packed_scale)
+    assert torch.allclose(out.float(), ref_out.float(), rtol=0.15)
+    assert torch.allclose(scale, ref_scale)
+
+
 @pytest.mark.parametrize(
     "M,N,K,block_size,out_dtype,seed",
     itertools.product(M, N, K, BLOCK_SIZE, OUT_DTYPES, SEEDS),
@@ -164,17 +200,28 @@ def test_w8a8_block_fp8_matmul(M, N, K, block_size, out_dtype, seed):
     not current_platform.is_cuda(), reason="CUTLASS only supported on CUDA platform."
 )
 @pytest.mark.parametrize(
-    # 65/66/67 cover all M%4 residue classes above the SM100 swapAB
-    # threshold (m <= 64); 1026 crosses multiple 128-row SF atoms.
-    "M",
-    [32, 65, 66, 67, 1026],
+    # Keep each case targeted: cover packed/aligned scales on the swap path,
+    # the M=64/65 dispatch boundary, all nonzero packed M%4 residues, and a
+    # larger aligned input spanning multiple 128-row scale-factor atoms.
+    "M,tma_aligned_scales",
+    [
+        (13, False),
+        (13, True),
+        (64, True),
+        (65, False),
+        (65, True),
+        (66, False),
+        (67, False),
+        (1026, True),
+    ],
 )
 @torch.inference_mode()
-def test_w8a8_block_fp8_cutlass_matmul(M):
-    # Test simple case where weight.shape % 128 != 0,
-    # like in DSV3 kv_a_proj_with_mqa
-    N = 576
-    K = 7168
+def test_w8a8_block_fp8_cutlass_matmul(M, tma_aligned_scales):
+    # Keep the correctness reference small while retaining a non-128-aligned
+    # weight dimension and multiple K scale groups. Model-sized shapes belong
+    # in the performance benchmark rather than this unit test.
+    N = 144
+    K = 256
     block_size = [128, 128]
     out_dtype = torch.bfloat16
     seed = 0
@@ -200,8 +247,16 @@ def test_w8a8_block_fp8_cutlass_matmul(M):
     )
     # CUTLASS uses column-major format for scales
     A_fp8_cutlass, As_cutlass = per_token_group_quant_fp8(
-        A_fp32, block_size[1], column_major_scales=True
+        A_fp32,
+        block_size[1],
+        column_major_scales=True,
+        tma_aligned_scales=tma_aligned_scales,
     )
+    assert As_cutlass.stride(-2) == 1
+    if tma_aligned_scales:
+        assert As_cutlass.stride(-1) % 4 == 0
+    else:
+        assert As_cutlass.stride(-1) == M
 
     ref_out = native_w8a8_block_matmul(A_fp8, B_fp8, As, Bs, block_size, out_dtype)
     out = cutlass_scaled_mm(A_fp8_cutlass, B_fp8, As_cutlass, Bs, block_size, out_dtype)
@@ -210,6 +265,28 @@ def test_w8a8_block_fp8_cutlass_matmul(M):
         torch.abs(out.to(torch.float32) - ref_out.to(torch.float32))
     ) / torch.mean(torch.abs(ref_out.to(torch.float32)))
     assert rel_diff < 0.001
+
+    if tma_aligned_scales and M % 4 != 0:
+        incomplete_scales = torch.empty_strided(
+            As_cutlass.shape,
+            As_cutlass.stride(),
+            device=As_cutlass.device,
+            dtype=As_cutlass.dtype,
+        )
+        incomplete_scales.copy_(As_cutlass)
+        required_storage_bytes = (
+            As_cutlass.stride(-1) * As_cutlass.shape[-1] * As_cutlass.element_size()
+        )
+        assert incomplete_scales.untyped_storage().nbytes() < required_storage_bytes
+        fallback_out = cutlass_scaled_mm(
+            A_fp8_cutlass,
+            B_fp8,
+            incomplete_scales,
+            Bs,
+            block_size,
+            out_dtype,
+        )
+        assert torch.equal(fallback_out, out)
 
 
 @pytest.mark.skipif(

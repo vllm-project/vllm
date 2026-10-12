@@ -151,28 +151,46 @@ void cutlass_gemm_caller_blockwise(torch::stable::Tensor& out, torch::stable::Te
   using ElementBlockScale = typename Gemm::ElementBlockScale;
 
   int32_t m = a.size(0), n = b.size(1), k = a.size(1);
+  int32_t scale_m = a_scales.stride(1);
 
-  // The SM100 blockwise SF copy requires the SFA M extent to be a multiple
-  // of 4 (4-row copy atom). For misaligned M on the non-swapAB path, pad only
-  // the per-token activation scales (column-major (m, k/128), 1/64 the size
-  // of the bf16 activation) and build layout_SFA from the padded extent.
-  int32_t m_sf = m;
+  // A padded stride alone does not guarantee that the tensor owns the tail
+  // padding after its final logical column. Such a view is valid, but cannot
+  // be consumed directly by TMA. Fall back to a padded copy below instead.
+  bool has_incomplete_tma_storage = false;
+  if (scale_m > m) {
+    int64_t storage_nbytes = 0;
+    STABLE_TORCH_ERROR_CODE_CHECK(
+        aoti_torch_get_storage_size(a_scales.get(), &storage_nbytes));
+    int64_t element_size = a_scales.element_size();
+    int64_t available_nbytes =
+        storage_nbytes - a_scales.storage_offset() * element_size;
+    int64_t required_nbytes =
+        scale_m * (a_scales.numel() / m) * element_size;
+    has_incomplete_tma_storage = available_nbytes < required_nbytes;
+  }
+
+  // SM100 TMA scale-factor copies require a leading dimension divisible by
+  // four. The vLLM linear path produces that layout directly, so it can use
+  // a_scales without an allocation or copy. Keep the padding fallback for
+  // direct custom-op callers that still provide packed column-major scales.
   std::optional<torch::stable::Tensor> a_scales_pad;
   void const* a_scales_data = a_scales.data_ptr();
+  bool needs_padded_copy = has_incomplete_tma_storage;
   if constexpr (!swap_ab) {
-    if (m % 4 != 0) {
-      m_sf = (m + 3) & ~3;
-      int64_t num_groups = a_scales.numel() / m;
-      a_scales_pad = torch::stable::new_empty(
-          a_scales, {num_groups * m_sf},
-          torch::headeronly::ScalarType::Float);
-      cudaMemcpy2DAsync(a_scales_pad->data_ptr(), m_sf * sizeof(float),
-                        a_scales.data_ptr(), m * sizeof(float),
-                        m * sizeof(float), num_groups,
-                        cudaMemcpyDeviceToDevice,
-                        get_current_cuda_stream(a.get_device()));
-      a_scales_data = a_scales_pad->data_ptr();
-    }
+    needs_padded_copy |= scale_m % 4 != 0;
+  }
+  if (needs_padded_copy) {
+    int32_t padded_scale_m = (m + 3) & ~3;
+    int64_t num_groups = a_scales.numel() / m;
+    a_scales_pad = torch::stable::new_empty(
+        a_scales, {num_groups * padded_scale_m},
+        torch::headeronly::ScalarType::Float);
+    cudaMemcpy2DAsync(a_scales_pad->data_ptr(), padded_scale_m * sizeof(float),
+                      a_scales.data_ptr(), scale_m * sizeof(float),
+                      m * sizeof(float), num_groups, cudaMemcpyDeviceToDevice,
+                      get_current_cuda_stream(a.get_device()));
+    a_scales_data = a_scales_pad->data_ptr();
+    scale_m = padded_scale_m;
   }
 
   StrideA a_stride;
@@ -187,10 +205,10 @@ void cutlass_gemm_caller_blockwise(torch::stable::Tensor& out, torch::stable::Te
 
   LayoutSFA layout_SFA = swap_ab ?
       ScaleConfig::tile_atom_to_shape_SFA(make_shape(n, m, k, 1)) :
-      ScaleConfig::tile_atom_to_shape_SFA(make_shape(m_sf, n, k, 1));
+      ScaleConfig::tile_atom_to_shape_SFA(make_shape(scale_m, n, k, 1));
   LayoutSFB layout_SFB = swap_ab ?
-      ScaleConfig::tile_atom_to_shape_SFB(make_shape(n, m, k, 1)) :
-      ScaleConfig::tile_atom_to_shape_SFB(make_shape(m, n, k, 1));
+      ScaleConfig::tile_atom_to_shape_SFB(make_shape(n, scale_m, k, 1)) :
+      ScaleConfig::tile_atom_to_shape_SFB(make_shape(scale_m, n, k, 1));
 
   auto a_ptr = static_cast<ElementAB const*>(a.data_ptr());
   auto b_ptr = static_cast<ElementAB const*>(b.data_ptr());
@@ -234,9 +252,9 @@ void cutlass_gemm_blockwise_sm100_fp8_dispatch(torch::stable::Tensor& out,
   cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, a.get_device());
 
   constexpr int TILE_K = 128;
-  // TODO: better heuristics
-  // swapAB only wins for small M; misaligned M >= 65 is faster on the
-  // non-swapAB path with padded activation scales (measured on GB300).
+  // Swapping reduces M-tile padding for tiny inputs. Larger inputs use the
+  // non-swap path; packed misaligned scales are padded by the caller above,
+  // while vLLM's aligned scales avoid that allocation and copy entirely.
   bool swap_ab = (m <= 64);
   bool use_tma_epilogue = (m * n) % 4 == 0;
   if (!swap_ab) {
