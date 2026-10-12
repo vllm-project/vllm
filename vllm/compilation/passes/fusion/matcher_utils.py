@@ -93,13 +93,10 @@ class MatcherRotaryEmbedding(MatcherCustomOp):
         num_heads: int,
         num_kv_heads: int,
         use_flashinfer: bool = False,
-        match_rocm_aiter: bool | None = None,
         enabled: bool | None = None,
     ) -> None:
         if enabled is None:
             enabled = RotaryEmbedding.enabled()
-        if match_rocm_aiter is None:
-            match_rocm_aiter = rocm_aiter_ops.is_triton_rotary_embed_enabled()
 
         super().__init__(enabled)
         self.is_neox = is_neox
@@ -109,15 +106,12 @@ class MatcherRotaryEmbedding(MatcherCustomOp):
         self.q_size = self.num_heads * self.head_size
         self.kv_size = self.num_kv_heads * self.head_size
         self.rotary_dim = head_size
-        # The base RoPE is a vLLM IR op emitted on every platform (incl. ROCm
-        # AITER, whose kernel is now an IR provider), so always match the IR
-        # node. Only flashinfer stays on its dedicated custom op.
-        self.use_ir_op = not use_flashinfer
+        self.use_ir_op = not use_flashinfer and (
+            current_platform.is_rocm() or not enabled
+        )
         if use_flashinfer:
             self.rotary_op = FLASHINFER_ROTARY_OP
-        elif match_rocm_aiter:
-            self.rotary_op = rocm_aiter_ops.get_triton_rotary_embedding_op()
-        else:
+        elif not self.use_ir_op:
             self.rotary_op = ROTARY_OP
         if self.use_ir_op:
             self.forward = self.forward_custom

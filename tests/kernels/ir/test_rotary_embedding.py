@@ -6,12 +6,11 @@ import torch
 import vllm.kernels  # noqa: F401
 from tests.ir.ir_test_utils import assert_close, clone_args, supported_providers
 from vllm import ir
+from vllm.kernels.aiter_ops import AITER_TRITON_ROTARY_SUPPORTED
 from vllm.model_executor.layers.rotary_embedding.base import RotaryEmbedding
 from vllm.platforms import current_platform
 
 rope_native = ir.ops.rotary_embedding.impls["native"].impl_fn
-
-IS_GPGPU_DEVICE = current_platform.is_cuda_alike() or current_platform.is_xpu()
 
 HEAD_SIZES = [64, 128, 256]
 N_TOKENS = [7, 83]
@@ -30,12 +29,12 @@ def _inputs(n_tokens, head_size, dtype, is_neox):
     )
 
 
-@pytest.mark.skipif(
-    not current_platform.is_cuda_alike(),
-    reason="vllm_c rotary kernel is CUDA/ROCm only",
-)
 def test_rotary_embedding_registration():
-    expected = {"native": True, "vllm_c": current_platform.is_cuda_alike()}
+    expected = {
+        "native": True,
+        "vllm_c": current_platform.is_rocm(),
+        "aiter": AITER_TRITON_ROTARY_SUPPORTED,
+    }
     actual = {
         provider: impl.supported
         for provider, impl in ir.ops.rotary_embedding.impls.items()
@@ -43,14 +42,46 @@ def test_rotary_embedding_registration():
     assert actual == expected
 
 
+@pytest.mark.skipif(
+    not current_platform.is_rocm(),
+    reason="RoPE providers in this PR are ROCm-only",
+)
+def test_partial_rotary_provider_dispatch():
+    args = ir.ops.rotary_embedding.generate_inputs(
+        num_tokens=7,
+        num_heads=8,
+        num_kv_heads=2,
+        head_size=128,
+        rotary_dim=64,
+        dtype=torch.bfloat16,
+        device=current_platform.device_type,
+    )
+    expected = rope_native(*clone_args(args))
+
+    impl = ir.ops.rotary_embedding.impls["vllm_c"]
+    assert impl.supports_args(*args)
+    dispatched_args = clone_args(args)
+    original_query = dispatched_args[1].clone()
+    original_key = dispatched_args[2].clone()
+    with ir.ops.rotary_embedding.set_priority(["vllm_c", "native"]):
+        actual = ir.ops.rotary_embedding(*dispatched_args)
+    assert_close(ir.ops.rotary_embedding, actual, expected)
+    torch.testing.assert_close(dispatched_args[1], original_query)
+    torch.testing.assert_close(dispatched_args[2], original_key)
+
+    impl = ir.ops.rotary_embedding.impls["aiter"]
+    if not impl.supported:
+        return
+    assert not impl.supports_args(*args)
+    with ir.ops.rotary_embedding.set_priority(["aiter", "native"]):
+        actual = ir.ops.rotary_embedding(*clone_args(args))
+    assert_close(ir.ops.rotary_embedding, actual, expected)
+
+
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("n_tokens", N_TOKENS)
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
 @pytest.mark.parametrize("is_neox", [True, False])
-@pytest.mark.skipif(
-    not IS_GPGPU_DEVICE,
-    reason="Currently only kernels on CUDA, ROCm and XPU",
-)
 class TestRotaryEmbedding:
     def test_native_matches_forward_static(self, dtype, n_tokens, head_size, is_neox):
         positions, query, key, hs, rotary_dim, cos_sin_cache, neox = _inputs(
@@ -67,9 +98,7 @@ class TestRotaryEmbedding:
         torch.testing.assert_close(q_ir, q_ref, rtol=1e-3, atol=1e-3)
         torch.testing.assert_close(k_ir, k_ref, rtol=1e-3, atol=1e-3)
 
-    @pytest.mark.parametrize(
-        "provider", supported_providers(ir.ops.rotary_embedding)
-    )
+    @pytest.mark.parametrize("provider", supported_providers(ir.ops.rotary_embedding))
     def test_impls_match_native(self, dtype, n_tokens, head_size, is_neox, provider):
         impl = ir.ops.rotary_embedding.impls[provider]
         args = _inputs(n_tokens, head_size, dtype, is_neox)
@@ -119,9 +148,7 @@ class TestRotaryEmbedding:
         torch.testing.assert_close(ip_q, out_q, rtol=0.0, atol=0.0)
         torch.testing.assert_close(ip_k, out_k, rtol=0.0, atol=0.0)
 
-    @pytest.mark.parametrize(
-        "provider", supported_providers(ir.ops.rotary_embedding)
-    )
+    @pytest.mark.parametrize("provider", supported_providers(ir.ops.rotary_embedding))
     def test_torch_opcheck(self, dtype, n_tokens, head_size, is_neox, provider):
         if not ir.ops.rotary_embedding.impls[provider].supported:
             pytest.skip(f"{provider} impl not supported on this platform")

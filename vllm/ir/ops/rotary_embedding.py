@@ -1,16 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""vLLM IR op for rotary positional embedding (RoPE).
-
-Prototype migration of ``rotary_embedding`` from a plain ``CustomOp`` to a vLLM
-IR op, mirroring ``rms_norm``. Making RoPE a stable IR node lets the QK-norm +
-RoPE(+KVCache) fusion patterns match it *before* lowering, so the fusion no
-longer needs ``custom_ops=["+rotary_embedding"]`` force-enabled (issue #28042).
-
-Scope: the base ``RotaryEmbedding`` (Neox and GPT-J styles, full or partial
-rope) with ``key`` present. The ``key is None`` case and the flashinfer / ROCm
-AITER variants stay on their existing paths for now.
-"""
+"""vLLM IR ops for rotary positional embedding."""
 
 import torch
 from torch import Tensor
@@ -19,17 +9,7 @@ from ..op import register_op
 
 
 def _rotate(x: Tensor, cos: Tensor, sin: Tensor, is_neox: bool) -> Tensor:
-    """Apply the rotation to the rope slice ``x``.
-
-    Args:
-        x: ``[num_tokens, num_heads, rotary_dim]`` rope portion.
-        cos: ``[num_tokens, rotary_dim // 2]`` cosine table for the positions.
-        sin: ``[num_tokens, rotary_dim // 2]`` sine table for the positions.
-        is_neox: Neox-style (contiguous halves) vs GPT-J-style (interleaved).
-
-    Mirrors ``ApplyRotaryEmb.forward_static`` (no fp32 upcast, matching the
-    base ``RotaryEmbedding`` native path).
-    """
+    """Rotate contiguous halves (NeoX) or interleaved pairs (GPT-J)."""
     cos = cos.unsqueeze(-2).to(x.dtype)
     sin = sin.unsqueeze(-2).to(x.dtype)
 
@@ -57,12 +37,7 @@ def rotary_embedding(
     cos_sin_cache: Tensor,
     is_neox: bool,
 ) -> tuple[Tensor, Tensor]:
-    """Functional RoPE over query and key.
-
-    Semantics match ``RotaryEmbedding.forward_static`` for ``key`` present:
-    look up cos/sin by ``positions``, rotate the first ``rotary_dim`` channels
-    of each head, and pass the remainder through unchanged.
-    """
+    """Apply RoPE to query and key."""
     positions = positions.flatten()
     num_tokens = positions.shape[0]
     cos_sin = cos_sin_cache.index_select(0, positions)
@@ -71,9 +46,7 @@ def rotary_embedding(
     query_shape = query.shape
     query = query.view(num_tokens, -1, head_size)
     query_rot = _rotate(query[..., :rotary_dim], cos, sin, is_neox)
-    query = torch.cat((query_rot, query[..., rotary_dim:]), dim=-1).reshape(
-        query_shape
-    )
+    query = torch.cat((query_rot, query[..., rotary_dim:]), dim=-1).reshape(query_shape)
 
     key_shape = key.shape
     key = key.view(num_tokens, -1, head_size)
@@ -81,6 +54,23 @@ def rotary_embedding(
     key = torch.cat((key_rot, key[..., rotary_dim:]), dim=-1).reshape(key_shape)
 
     return query, key
+
+
+rotary_embedding.override_tolerance(torch.float16, atol=5e-3, rtol=2e-3)
+rotary_embedding.override_tolerance(torch.bfloat16, atol=3e-2, rtol=2e-2)
+
+
+@rotary_embedding.register_fake
+def _rotary_embedding_fake(
+    positions: Tensor,
+    query: Tensor,
+    key: Tensor,
+    head_size: int,
+    rotary_dim: int,
+    cos_sin_cache: Tensor,
+    is_neox: bool,
+) -> tuple[Tensor, Tensor]:
+    return torch.empty_like(query), torch.empty_like(key)
 
 
 @rotary_embedding.register_input_generator

@@ -7,7 +7,7 @@ from torch import Tensor
 from torch.library import Library
 
 from vllm import ir
-from vllm._aiter_ops import rocm_aiter_ops
+from vllm._aiter_ops import is_aiter_found_and_supported
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import direct_register_custom_op
 
@@ -35,8 +35,19 @@ direct_register_aiter_op = functools.partial(
 AITER_SUPPORTED = is_aiter_found()
 """Most kernels in this file are supported if AITER is installed."""
 
-AITER_TRITON_ROTARY_SUPPORTED = rocm_aiter_ops.is_triton_rotary_embed_enabled()
-"""AITER Triton rotary is only available when its feature gate is enabled."""
+AITER_TRITON_ROTARY_SUPPORTED = is_aiter_found_and_supported()
+
+
+def aiter_rotary_supported_args(
+    positions: Tensor,
+    query: Tensor,
+    key: Tensor,
+    head_size: int,
+    rotary_dim: int,
+    cos_sin_cache: Tensor,
+    is_neox: bool,
+) -> bool:
+    return rotary_dim == head_size
 
 
 def flatten_to_2d_is_free(x: Tensor) -> bool:
@@ -61,8 +72,8 @@ def flatten_to_2d_is_free(x: Tensor) -> bool:
     return True
 
 
-rms_no_var_16bit_only = (
-    lambda x, weight, epsilon, variance_size=None: variance_size is None
+rms_no_var_16bit_only = lambda x, weight, epsilon, variance_size=None: (
+    variance_size is None
     and x.dtype in (torch.float16, torch.bfloat16)
     and (weight is None or weight.dtype == x.dtype)
     and flatten_to_2d_is_free(x)
@@ -104,8 +115,8 @@ def _rms_norm_fake(x: Tensor, weight: Tensor, variance_epsilon: float) -> Tensor
 direct_register_aiter_op(
     op_name="rms_norm", op_func=_rms_norm_impl, fake_impl=_rms_norm_fake
 )
-rms_add_no_var_16bit_only = (
-    lambda x, x_residual, weight, epsilon, variance_size=None: variance_size is None
+rms_add_no_var_16bit_only = lambda x, x_residual, weight, epsilon, variance_size=None: (
+    variance_size is None
     and x.dtype in (torch.float16, torch.bfloat16)
     and (weight is None or weight.dtype == x.dtype)
     and flatten_to_2d_is_free(x)
@@ -186,6 +197,7 @@ direct_register_aiter_op(
 @ir.ops.rotary_embedding.register_impl(
     "aiter",
     supported=AITER_TRITON_ROTARY_SUPPORTED,
+    supports_args=aiter_rotary_supported_args,
     inplace=True,
 )
 def rotary_embedding(

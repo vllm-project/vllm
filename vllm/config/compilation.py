@@ -973,12 +973,6 @@ class CompilationConfig:
                 func if isinstance(func, InductorPass) else CallableInductorPass(func)
             )
 
-        # RoPE is now a vLLM IR op (vllm.ir.ops.rotary_embedding), always emitted
-        # as a discrete node that the QK-norm/RoPE fusion patterns match before
-        # lowering. Forcing "+rotary_embedding" is therefore no longer required
-        # (resolves the TODOs on https://github.com/vllm-project/vllm/issues/28042).
-
-
         if (
             is_torch_equal_or_newer("2.9.0.dev")
             and "combo_kernels" not in self.inductor_compile_config
