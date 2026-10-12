@@ -113,6 +113,38 @@ async def test_derender_chat_roundtrip(client):
 
 
 @pytest.mark.asyncio
+async def test_derender_chat_passes_stop_reason_through(client):
+    """The coupled server reports the stop string or token id that ended
+    generation; derender must carry the generate value through unchanged."""
+    gen_req = await _render_chat(client)
+    generate_response = _make_generate_response(gen_req["token_ids"][:3])
+    generate_response["choices"][0]["stop_reason"] = "\n\n"
+
+    response = await client.post(
+        "/v1/chat/completions/derender",
+        json={"model": MODEL_NAME, "generate_response": generate_response},
+    )
+    assert response.status_code == 200
+    assert response.json()["choices"][0]["stop_reason"] == "\n\n"
+
+
+@pytest.mark.asyncio
+async def test_derender_completion_passes_stop_reason_through(client):
+    gen_req = await _render_completion(client, "Hello world")
+    generate_response = _make_completion_generate_response(
+        gen_req["token_ids"][:3], "gen-stop"
+    )
+    generate_response["choices"][0]["stop_reason"] = 151645
+
+    response = await client.post(
+        "/v1/completions/derender",
+        json={"model": MODEL_NAME, "generate_responses": [generate_response]},
+    )
+    assert response.status_code == 200
+    assert response.json()["choices"][0]["stop_reason"] == 151645
+
+
+@pytest.mark.asyncio
 async def test_derender_chat_usage(client):
     """Supplied prompt_tokens flows through into usage correctly."""
     gen_req = await _render_chat(client)
