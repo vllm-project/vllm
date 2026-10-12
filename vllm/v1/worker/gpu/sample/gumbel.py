@@ -17,6 +17,9 @@ _TL_RAND_MIN = tl.constexpr(4.6566127342e-10)
 # Positions are int64 and never approach 2**30, so the streams cannot collide.
 _DRAFT_NOISE_SALT = tl.constexpr(1 << 30)
 
+# An odd 64-bit multiplier makes each round position map to a distinct seed.
+_ROUND_SEED_MULTIPLIER = tl.constexpr(-7046029254386353131)
+
 
 @triton.jit
 def _temperature_kernel(
@@ -68,6 +71,11 @@ def tl_rand32(seed, offset, includes_zero: tl.constexpr):
     if not includes_zero:
         u = tl.maximum(u, _TL_RAND_MIN)
     return u
+
+
+@triton.jit
+def mix_seed_with_pos(seed, pos):
+    return seed.to(tl.int64) ^ pos.to(tl.int64) * _ROUND_SEED_MULTIPLIER
 
 
 @triton.jit
@@ -169,6 +177,7 @@ def gumbel_noised_argmax(
     seed,
     pos,
     temp,
+    round_pos,
     IS_DRAFTING: tl.constexpr,
     USE_FP64: tl.constexpr,
     APPLY_TEMPERATURE: tl.constexpr = True,
@@ -189,6 +198,8 @@ def gumbel_noised_argmax(
     if USE_FP64:
         logits = logits.to(tl.float64)
     if temp != 0.0:
+        if round_pos is not None:
+            seed = mix_seed_with_pos(seed, round_pos)
         if IS_DRAFTING:
             pos = pos + _DRAFT_NOISE_SALT
         if USE_FP64:
@@ -215,6 +226,7 @@ def gumbel_block_argmax(
     temp_ptr,
     seeds_ptr,
     pos_ptr,
+    round_pos_ptr,
     # [max_num_reqs, num_cols, vocab_size]
     logits_cache_ptr,
     logits_cache_stride_0,
@@ -257,6 +269,9 @@ def gumbel_block_argmax(
 
     seed = tl.load(seeds_ptr + req_state_idx, mask=is_valid_req, other=0)
     pos = tl.load(pos_ptr + token_idx)
+    round_pos = (
+        tl.load(round_pos_ptr + token_idx) if round_pos_ptr is not None else None
+    )
     return gumbel_noised_argmax(
         logits,
         block,
@@ -264,6 +279,7 @@ def gumbel_block_argmax(
         seed,
         pos,
         temp,
+        round_pos,
         IS_DRAFTING=IS_DRAFTING,
         USE_FP64=USE_FP64,
         APPLY_TEMPERATURE=APPLY_TEMPERATURE,
@@ -288,6 +304,7 @@ def _gumbel_sample_kernel(
     expanded_idx_mapping_ptr,
     seeds_ptr,
     pos_ptr,
+    round_pos_ptr,
     temp_ptr,
     vocab_size,
     BLOCK_SIZE: tl.constexpr,
@@ -316,6 +333,7 @@ def _gumbel_sample_kernel(
         temp_ptr,
         seeds_ptr,
         pos_ptr,
+        round_pos_ptr,
         logits_cache_ptr,
         logits_cache_stride_0,
         logits_cache_stride_1,
@@ -345,10 +363,13 @@ def gumbel_sample(
     logits_cache_col: torch.Tensor | None = None,  # scalar or [num_tokens]
     use_fp64: bool = False,
     logits_cache_source: torch.Tensor | None = None,
+    round_pos: torch.Tensor | None = None,  # [num_tokens]
 ) -> torch.Tensor:
     # Enforce contiguity on non-strided input tensors
     expanded_idx_mapping = expanded_idx_mapping.contiguous()
     pos = pos.contiguous()
+    if round_pos is not None:
+        round_pos = round_pos.contiguous()
     if logits_cache_col is not None:
         logits_cache_col = logits_cache_col.contiguous()
     num_tokens, vocab_size = logits.shape
@@ -395,6 +416,7 @@ def gumbel_sample(
         expanded_idx_mapping,
         seed,
         pos,
+        round_pos,
         temperature,
         vocab_size,
         BLOCK_SIZE=BLOCK_SIZE,

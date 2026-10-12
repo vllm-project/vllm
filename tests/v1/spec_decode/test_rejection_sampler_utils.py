@@ -772,6 +772,69 @@ def test_block_verification_placeholder_truncates_block(
         )
 
 
+def test_block_verification_is_unbiased_across_rounds():
+    """Reverified positions must not reuse conditioned acceptance uniforms."""
+    device = "cuda"
+    num_trials = 100_000
+    num_tokens = 5
+    num_speculative_steps = 2
+    rows = num_speculative_steps + 1
+
+    output = torch.empty(num_trials, num_tokens, dtype=torch.int64, device=device)
+    output[:, 0] = torch.randint(0, 2, (num_trials,), device=device)
+    lengths = torch.ones(num_trials, dtype=torch.int64, device=device)
+    seeds = torch.arange(num_trials, dtype=torch.int64, device=device) + 12345
+    target_row = torch.log(torch.tensor([0.5, 0.5], device=device))
+
+    while (lengths < num_tokens).any():
+        active = torch.where(lengths < num_tokens)[0]
+        num_active = active.numel()
+        active_lengths = lengths[active]
+        target_logits = target_row.expand(num_active * rows, -1).contiguous()
+        draft_sampled = torch.zeros(num_active * rows, dtype=torch.int64, device=device)
+        draft_sampled.view(num_active, rows)[:, 0] = output[active, active_lengths - 1]
+        cu_num_logits = (
+            torch.arange(num_active + 1, dtype=torch.int32, device=device) * rows
+        )
+        pos = (
+            active_lengths.unsqueeze(1) + torch.arange(rows, device=device).unsqueeze(0)
+        ).flatten()
+        idx_mapping = torch.arange(num_active, dtype=torch.int32, device=device)
+        expanded_idx_mapping = idx_mapping.repeat_interleave(rows)
+        expanded_local_pos = torch.arange(
+            rows, dtype=torch.int32, device=device
+        ).repeat(num_active)
+        temperature = torch.ones(num_active, dtype=torch.float32, device=device)
+
+        sampled, num_sampled = rejection_sample(
+            target_logits,
+            None,
+            draft_sampled,
+            cu_num_logits,
+            pos,
+            idx_mapping,
+            expanded_idx_mapping,
+            expanded_local_pos,
+            temperature,
+            seeds[active],
+            num_speculative_steps,
+            use_block_verification=True,
+        )
+        for step in range(rows):
+            emitted = (num_sampled > step) & (lengths[active] < num_tokens)
+            emitted_reqs = active[emitted]
+            output[emitted_reqs, lengths[emitted_reqs]] = sampled[emitted, step]
+            lengths[emitted_reqs] += 1
+
+    probabilities = (output == 0).float().mean(dim=0)
+    assert torch.allclose(
+        probabilities,
+        torch.full_like(probabilities, 0.5),
+        atol=0.01,
+        rtol=0,
+    ), probabilities
+
+
 def test_greedy_placeholder_emits_target_argmax():
     """Greedy sampling skips resampling and relies on the rejection kernel
     storing the target argmax at the rejected position. A placeholder must not

@@ -190,6 +190,7 @@ def test_philox_gumbel_sample_skip_mask_matches_separate_samplers(use_fp64: bool
     temperatures[2] = 0
     seeds = torch.arange(8, dtype=torch.int64, device="cuda") + 1000
     positions = torch.arange(8, dtype=torch.int64, device="cuda") + 100
+    round_positions = positions - 7
     watermark_mask = (
         watermarking[req_indices] & (temperatures[req_indices] != 0) & ~repeated_mask
     )
@@ -202,8 +203,9 @@ def test_philox_gumbel_sample_skip_mask_matches_separate_samplers(use_fp64: bool
         seeds,
         positions,
         apply_temperature=False,
-        is_drafting=False,
+        is_drafting=True,
         use_fp64=use_fp64,
+        round_pos=round_positions,
     )
     expected = torch.where(watermark_mask, watermarked, ordinary)
     actual = philox_gumbel_sample(
@@ -215,7 +217,9 @@ def test_philox_gumbel_sample_skip_mask_matches_separate_samplers(use_fp64: bool
         temperatures=temperatures,
         seeds=seeds,
         positions=positions,
+        round_positions=round_positions,
         use_fp64=use_fp64,
+        is_drafting=True,
     )
 
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
