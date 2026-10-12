@@ -3,8 +3,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Benchmark top-k/top-p filtering with Triton, FlashInfer, and optional PyTorch.
 
-All implementations return masked logits. Timings include a fresh-input copy;
-FlashInfer also includes softmax and mask reconstruction when its APIs require them.
+All implementations return masked logits. Timings include a fresh-input copy.
+FlashInfer timings include softmax and mask reconstruction when its APIs require them.
+L2 is flushed before each measured iteration, outside the timed region.
 
 Scenarios:
 - top_k only (whole batch, partial batch)
@@ -101,18 +102,6 @@ def create_logits(
     return logits
 
 
-def apply_top_k_top_p_flashinfer_renorm(logits, k, p):
-    """Filter probabilities, then restore vLLM's masked-logit output contract."""
-    # FI's renormalization kernels consume probabilities.
-    probs = logits.softmax(dim=-1)
-    if k is not None:
-        probs = fi_sampling.top_k_renorm_probs(probs, k)
-    if p is not None:
-        probs = fi_sampling.top_p_renorm_probs(probs, p, is_deterministic=True)
-    # Preserve original logit values; use probabilities only to recover support.
-    return logits.masked_fill(probs == 0, -float("inf"))
-
-
 def apply_top_k_top_p_flashinfer_mask(logits, k, p):
     """Keep top-k in logits; adapt probability-based top-p back to logits."""
     if k is not None:
@@ -128,7 +117,6 @@ def apply_top_k_top_p_flashinfer_mask(logits, k, p):
 
 IMPLEMENTATIONS = {
     "triton": apply_top_k_top_p_triton,
-    "flashinfer-renorm": apply_top_k_top_p_flashinfer_renorm,
     "flashinfer-mask": apply_top_k_top_p_flashinfer_mask,
     "pytorch": apply_top_k_top_p_pytorch,
 }
@@ -289,7 +277,6 @@ def run_benchmark(
     verbose: bool = True,
     num_finite_logits: int | None = None,
     check: bool = False,
-    use_cuda_graph: bool = False,
     output: Path | None = None,
 ):
     """Run selected implementations with identical inputs and masked-logit outputs."""
@@ -309,18 +296,18 @@ def run_benchmark(
         for name in implementations:
             func = IMPLEMENTATIONS[name]
             reset_memory_stats()
-            # Fresh inputs prevent repeated top-p filtering from shrinking support.
             times = bench_gpu_time_with_cupti(
+                # note: measured runtime includes logits.clone()
                 lambda func=func, logits=logits, k=k, p=p: func(logits.clone(), k, p),
                 dry_run_iters=warmup_iters,
                 repeat_iters=benchmark_iters,
-                use_cuda_graph=use_cuda_graph,
-                cold_l2_cache=False,
+                use_cuda_graph=False,  # sampling is outside cuda graph
+                cold_l2_cache=True,
             )
             elapsed = sum(times) / len(times)
             _, memory = measure_memory()
             timings[name] = dict(time_ms=elapsed, peak_memory=memory)
-        row = create_result_row(config, timings, checks, use_cuda_graph)
+        row = create_result_row(config, timings, checks)
         results.append(row)
         if output is not None:
             with output.open("a") as file:
@@ -361,14 +348,13 @@ def print_summary_table(results: list[dict]):
     print(pd.DataFrame(results).to_string(index=False, float_format="{:.3g}".format))
 
 
-def create_result_row(config, timings, checks, use_cuda_graph) -> dict:
+def create_result_row(config, timings, checks) -> dict:
     """Build a shared row for the summary table and JSONL output."""
     row = {
         "Scenario": config.name.split("_b")[0],
         "Batch": config.batch_size,
         "Vocab": config.vocab_size,
         "Ops%": f"{config.ops_pct:.0f}%",
-        "CUDA graph": use_cuda_graph,
     }
     row.update({f"{name} (ms)": data["time_ms"] for name, data in timings.items()})
     for name, data in timings.items():
@@ -424,8 +410,8 @@ def main():
     parser.add_argument(
         "--implementations",
         nargs="+",
-        choices=["triton", "flashinfer-renorm", "flashinfer-mask", "pytorch"],
-        default=["triton", "flashinfer-renorm", "flashinfer-mask"],
+        choices=list(IMPLEMENTATIONS),
+        default=["triton", "flashinfer-mask"],
         help="Implementations to compare (PyTorch is an optional reference)",
     )
 
@@ -435,7 +421,6 @@ def main():
         help="Check filtered distributions against PyTorch outside the timed region",
     )
 
-    parser.add_argument("--cuda-graph", action="store_true", help="Capture timed calls")
     parser.add_argument("--output", type=Path, help="Save incremental JSONL results")
 
     args = parser.parse_args()
@@ -465,7 +450,6 @@ def main():
         num_finite_logits=args.num_finite_logits,
         implementations=args.implementations,
         check=args.check,
-        use_cuda_graph=args.cuda_graph,
         output=args.output,
     )
 
