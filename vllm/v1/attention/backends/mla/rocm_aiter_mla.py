@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import functools
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar, Final
@@ -548,6 +548,11 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
     # A non-causal draft needs no cross-shard causal window: the ordinary
     # mask0 decode returns per-row LSE for the DCP merge.
     supports_non_causal_multi_token_dcp: ClassVar[bool] = True
+    # update_block_table() rebuilds the page indices and the segmented verify
+    # row view, which is everything this builder reads off the block table.
+    # The decode schedule it plans is batch-level and rides along on the
+    # metadata, so a later group replays the group it was derived from.
+    supports_update_block_table: bool = True
 
     @staticmethod
     def _uniform_padded_mtp_qo_len(
@@ -1229,6 +1234,39 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             per_req_page_table.unsqueeze(1)
         )
 
+    def _expand_page_indices(
+        self,
+        block_table_tensor: torch.Tensor,
+        paged_kv_indptr: torch.Tensor,
+        num_reqs: int,
+    ) -> torch.Tensor:
+        """Expand block_table entries into this builder's per-token index buffer.
+
+        When kernel_block_size=1, this degrades to a direct copy (identical
+        to the original _copy_page_indices_kernel). When kernel_block_size=K>1,
+        block table entry b covering K tokens gets expanded to flat indices
+        b*K, b*K+1, ..., b*K+(K-1).
+        """
+        if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
+            self.paged_kv_indices.fill_(-1)
+
+        # Chunk count comes from the block table width, an upper bound on
+        # tokens per request that is available host-side, so this adds no
+        # device synchronisation. Programs whose chunk lies past
+        # num_tokens mask out entirely.
+        max_tokens_per_req = block_table_tensor.shape[1] * self.kernel_block_size
+        num_chunks = max(1, cdiv(max_tokens_per_req, 1024))
+        _expand_page_indices_kernel[(num_reqs, num_chunks)](
+            self.paged_kv_indices,
+            block_table_tensor,
+            block_table_tensor.stride(0),
+            block_table_tensor.stride(1),
+            paged_kv_indptr,
+            KERNEL_BLOCK_SIZE=self.kernel_block_size,
+            BLOCK_SIZE=1024,
+        )
+        return self.paged_kv_indices
+
     def _build_decode(
         self,
         block_table_tensor: torch.Tensor,
@@ -1330,30 +1368,9 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         # the previous batch left behind.
         paged_kv_indices = None
         if dcp_route is not _DCPDecodeRoute.SEGMENTED:
-            if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
-                self.paged_kv_indices.fill_(-1)
-
-            # Expand block_table entries into per-token flat indices.
-            # When kernel_block_size=1, this degrades to a direct copy (identical
-            # to the original _copy_page_indices_kernel).
-            # When kernel_block_size=K>1, block_table entry b covering K tokens
-            # gets expanded to flat indices b*K, b*K+1, ..., b*K+(K-1).
-            # Chunk count comes from the block table width, an upper bound on
-            # tokens per request that is available host-side, so this adds no
-            # device synchronisation. Programs whose chunk lies past
-            # num_tokens mask out entirely.
-            max_tokens_per_req = block_table_tensor.shape[1] * self.kernel_block_size
-            num_chunks = max(1, cdiv(max_tokens_per_req, 1024))
-            _expand_page_indices_kernel[(num_reqs, num_chunks)](
-                self.paged_kv_indices,
-                block_table_tensor,
-                block_table_tensor.stride(0),
-                block_table_tensor.stride(1),
-                paged_kv_indptr,
-                KERNEL_BLOCK_SIZE=self.kernel_block_size,
-                BLOCK_SIZE=1024,
+            paged_kv_indices = self._expand_page_indices(
+                block_table_tensor, paged_kv_indptr, num_reqs
             )
-            paged_kv_indices = self.paged_kv_indices
 
         if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
             self.paged_kv_indptr[: 1 + num_kernel_reqs].copy_(
@@ -1581,6 +1598,59 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         ):
             self._build_fp8_prefill_ps_metadata(attn_metadata, common_attn_metadata)
         return attn_metadata
+
+    def update_block_table(
+        self,
+        metadata: AiterMLAMetadata,
+        blk_table: torch.Tensor,
+        slot_mapping: torch.Tensor,
+    ) -> AiterMLAMetadata:
+        """Point one built metadata at another KV cache group's blocks.
+
+        Everything build() derives from the batch -- the sequence lengths, the
+        indptrs, the decode schedule and the fp8 prefill work maps -- is the
+        same for every group holding the same requests, so only the fields
+        read off the block table are rebuilt here.
+        """
+        decode = metadata.decode
+        if decode is not None:
+            decode_blk_table = blk_table[: metadata.num_decodes, ...]
+            paged_kv_indices = decode.paged_kv_indices
+            if paged_kv_indices is not None:
+                paged_kv_indices = self._expand_page_indices(
+                    decode_blk_table, decode.paged_kv_indptr, metadata.num_decodes
+                )
+            dcp_verify = decode.dcp_verify
+            if dcp_verify is not None:
+                assert decode.dcp_tot_seq_lens is not None
+                assert decode.max_qo_len is not None
+                dcp_verify = self._build_dcp_verify_row_view(
+                    int(decode.max_qo_len),
+                    decode_blk_table,
+                    decode.dcp_tot_seq_lens,
+                )
+            decode = replace(
+                decode,
+                block_table=decode_blk_table,
+                paged_kv_indices=paged_kv_indices,
+                dcp_verify=dcp_verify,
+            )
+
+        prefill = metadata.prefill
+        if prefill is not None:
+            # The prefill backend keeps the metadata it was last prepared with
+            # and reads the block table off it, so this group needs its own
+            # backend prepared against its own blocks.
+            prefill = replace(
+                prefill,
+                block_table=blk_table[metadata.num_decodes :, ...],
+                prefill_backend=self._prefill_backend,
+            )
+            self._prefill_backend.prepare_metadata(prefill)
+
+        return replace(
+            metadata, decode=decode, prefill=prefill, slot_mapping=slot_mapping
+        )
 
 
 @triton.jit

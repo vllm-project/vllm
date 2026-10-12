@@ -177,6 +177,9 @@ def _builder(
     stub._fill_dcp_verify_page_table = (
         AiterMLAMetadataBuilder._fill_dcp_verify_page_table.__get__(stub)
     )
+    stub._expand_page_indices = AiterMLAMetadataBuilder._expand_page_indices.__get__(
+        stub
+    )
     return stub
 
 
