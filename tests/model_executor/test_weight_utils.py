@@ -107,9 +107,12 @@ def test_attention_sink_loader_accepts_cpu_checkpoint(monkeypatch):
     param = torch.nn.Parameter(
         torch.full((6,), 123.0, device="cuda"), requires_grad=False
     )
-    load_attention_sink(param, torch.arange(8, dtype=torch.float32))
+    # The test suite sets the default device, so pin the checkpoint to CPU.
+    checkpoint = torch.arange(8, dtype=torch.float32, device="cpu")
+    load_attention_sink(param, checkpoint)
     assert param.device.type == "cuda"
-    assert torch.equal(param[:4].cpu(), torch.arange(4, 8, dtype=torch.float32))
+    expected = torch.arange(4, 8, dtype=torch.float32, device="cpu")
+    assert torch.equal(param[:4].cpu(), expected)
     assert torch.isinf(param[4:]).all() and (param[4:] < 0).all()
 
 

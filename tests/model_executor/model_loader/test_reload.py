@@ -16,6 +16,7 @@ import pytest
 import torch
 from torch.nn.parameter import UninitializedParameter
 
+import vllm
 import vllm.model_executor.model_loader.reload.layerwise as reload_layerwise
 import vllm.model_executor.model_loader.reload.meta as reload_meta
 from vllm.config import ModelConfig
@@ -66,7 +67,9 @@ def test_attention_sink_uses_common_factory(path, class_name):
     padding, so a model that creates the parameter by hand bypasses the
     layerwise reload lifecycle this PR fixes.
     """
-    source = Path(__file__).resolve().parents[3] / "vllm" / path
+    # Relative to the imported package: CI runs the tests from a checkout while
+    # importing an installed vllm, so the test file's own path tells us nothing.
+    source = Path(vllm.__file__).resolve().parent / path
     tree = ast.parse(source.read_text(encoding="utf-8"))
     cls = next(
         n
