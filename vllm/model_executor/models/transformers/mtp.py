@@ -19,14 +19,9 @@
 from collections.abc import Iterable
 from typing import TYPE_CHECKING
 
-import regex as re
 import torch
 from transformers import AutoModelForCausalLM
-from transformers.conversion_mapping import (
-    WeightRenaming,
-    WeightTransform,
-    get_model_conversion_mapping,
-)
+from transformers.conversion_mapping import WeightTransform
 
 from vllm.model_executor.models.transformers.causal import CausalMixin
 from vllm.sequence import IntermediateTensors
@@ -44,44 +39,14 @@ class MTPMixin(CausalMixin):
     """
 
     def _create_model(self) -> "PreTrainedModel":
-        self.check_version("5.14.0", "MTP")
+        self.check_version("5.20.0", "MTP")
         from transformers.modeling_layers import MtpModel
 
-        if not getattr(self.text_config, "num_mtp_layers", None):
-            raise ValueError(
-                f"{self.config.model_type!r} does not set `num_mtp_layers`, so it has "
-                "no MTP layers that the Transformers modeling backend can find."
-            )
         main_model = AutoModelForCausalLM.from_config(**self._from_config_kwargs)
-        num_hidden_layers = self.text_config.num_hidden_layers
-        num_mtp_layers = self.text_config.num_mtp_layers
-
-        # Find the MTP weights the same way `MtpModel.from_pretrained` does
-        patterns = [
-            pattern
-            for pattern in main_model._keys_to_ignore_on_load_unexpected or []
-            if (match := re.search(r"\.(\d+)", pattern)) is None
-            or int(match.group(1)) >= num_hidden_layers
-        ]
-        if not patterns:
-            raise ValueError(
-                f"{type(main_model).__name__} does not register any MTP weight "
-                "patterns."
-            )
-        self.mtp_weights = re.compile("|".join(f"({p})" for p in patterns))
-
-        self.mtp_weight_conversions: list[WeightTransform] = [
-            WeightRenaming(
-                source_patterns=rf"layers\.{i}\.",
-                target_patterns=f"layers.{i - num_hidden_layers}.mtp_block.",
-            )
-            for i in range(num_hidden_layers, num_hidden_layers + num_mtp_layers)
-        ]
+        num_mtp_layers = getattr(self.text_config, "num_mtp_layers", None)
         mtp_model = MtpModel(main_model, num_mtp_layers)
-        self.mtp_weight_conversions.extend(
-            get_model_conversion_mapping(mtp_model, add_legacy=False)
-        )
-        self.mtp_weight_conversions.extend(get_model_conversion_mapping(main_model))
+        self.mtp_weights = MtpModel.get_mtp_weights_regex(main_model)
+        self.mtp_weight_conversions = mtp_model.get_weight_conversions(main_model)
 
         # The proposer shares the target's LM head with the draft
         del mtp_model.shared_head
@@ -125,13 +90,12 @@ class MTPMixin(CausalMixin):
         # Add batch dimension before entering Transformers modules
         inputs_embeds = inputs_embeds[None, ...]
         hidden_states = hidden_states[None, ...]
-        position_ids = positions[None, ...] if positions.ndim == 1 else positions
 
         hidden_states = self.model.forward_layer(
             spec_step_idx % len(self.model.layers),
             inputs_embeds,
             hidden_states,
-            position_ids,
+            positions[None, ...],
             attention_mask=None,
             past_key_values=None,
             **kwargs,
