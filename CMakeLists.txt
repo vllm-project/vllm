@@ -739,6 +739,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
       set(MARLIN_SRCS
          "csrc/libtorch_stable/quantization/marlin/marlin.cu"
          "csrc/libtorch_stable/quantization/marlin/marlin_int4_fp8_preprocess.cu"
+         "csrc/libtorch_stable/quantization/marlin/marlin_scales.cu"
          "csrc/libtorch_stable/quantization/marlin/gptq_marlin_repack.cu"
          "csrc/libtorch_stable/quantization/marlin/awq_marlin_repack.cu")
       set_gencode_flags_for_srcs(

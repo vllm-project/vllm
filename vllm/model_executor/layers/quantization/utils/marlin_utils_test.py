@@ -8,7 +8,7 @@ import torch
 from vllm import _custom_ops as ops
 from vllm.scalar_type import ScalarType, scalar_types
 
-from .marlin_utils import GPTQ_MARLIN_TILE, marlin_permute_scales, marlin_zero_points
+from .marlin_utils import GPTQ_MARLIN_TILE, marlin_zero_points
 from .quant_utils import (
     get_pack_factor,
     gptq_quantize_weights,
@@ -147,7 +147,9 @@ def marlin_quantize(
     marlin_q_w = marlin_weights(
         q_w, size_k, size_n, num_bits, weight_perm, is_a_8bit=is_a_8bit
     )
-    marlin_s = marlin_permute_scales(s, size_k, size_n, group_size, is_a_8bit=is_a_8bit)
+    marlin_s = ops.marlin_permute_scales(
+        s, size_k, size_n, group_size, is_a_8bit=is_a_8bit
+    )
 
     if input_dtype == torch.float8_e4m3fn and quant_type == scalar_types.uint4b8:
         ops.marlin_int4_fp8_preprocess(marlin_q_w, inplace=True)
@@ -194,7 +196,9 @@ def awq_marlin_quantize(
     marlin_q_w = marlin_weights(
         q_w, size_k, size_n, quant_type.size_bits, weight_perm, is_a_8bit=is_a_8bit
     )
-    marlin_s = marlin_permute_scales(s, size_k, size_n, group_size, is_a_8bit=is_a_8bit)
+    marlin_s = ops.marlin_permute_scales(
+        s, size_k, size_n, group_size, is_a_8bit=is_a_8bit
+    )
     marlin_zp = marlin_zero_points(
         zp, num_groups, size_n, quant_type.size_bits, is_a_8bit=is_a_8bit
     )

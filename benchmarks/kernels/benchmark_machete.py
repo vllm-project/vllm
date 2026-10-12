@@ -22,7 +22,6 @@ from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     GPTQ_MARLIN_MAX_PARALLEL,
     GPTQ_MARLIN_MIN_THREAD_N,
-    marlin_permute_scales,
     marlin_zero_points,
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils_test import (
@@ -216,7 +215,7 @@ def marlin_create_bench_fn(bt: BenchmarkTensors) -> Callable:
     if bt.group_size is None:
         w_s = torch.tensor([], device="cuda", dtype=torch.half)
     else:
-        w_s = marlin_permute_scales(
+        w_s = ops.marlin_permute_scales(
             bt.w_g_s, bt.w_ref.shape[0], bt.w_ref.shape[1], bt.group_size
         )
 

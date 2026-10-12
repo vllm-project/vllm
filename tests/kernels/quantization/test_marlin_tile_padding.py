@@ -22,7 +22,6 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     marlin_pad_qweight,
     marlin_pad_scales,
     marlin_padded_nk,
-    marlin_permute_scales,
     marlin_repacked_nk,
     marlin_zero_points,
 )
@@ -333,7 +332,7 @@ def test_gptq_marlin_padded_round_trip(shape, group_size):
         num_bits=quant_type.size_bits,
     )
     s = marlin_pad_scales(s, size_n, size_k, padded_n, padded_k, group_size)
-    marlin_s = marlin_permute_scales(
+    marlin_s = ops.marlin_permute_scales(
         s, size_k=padded_k, size_n=padded_n, group_size=group_size
     )
 
@@ -483,7 +482,7 @@ def test_awq_zp_marlin_padded_round_trip(shape):
         num_bits=quant_type.size_bits,
     )
     s = marlin_pad_scales(s, size_n, size_k, padded_n, padded_k, group_size)
-    marlin_s = marlin_permute_scales(
+    marlin_s = ops.marlin_permute_scales(
         s, size_k=padded_k, size_n=padded_n, group_size=group_size
     )
     zp = marlin_pad_scales(zp, size_n, size_k, padded_n, padded_k, group_size)

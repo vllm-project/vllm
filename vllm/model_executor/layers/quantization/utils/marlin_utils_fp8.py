@@ -15,7 +15,6 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     marlin_pad_scales,
     marlin_padded_nk,
     marlin_permute_bias,
-    marlin_permute_scales,
     marlin_repacked_nk,
     marlin_unpad_output,
     should_use_atomic_add_reduce,
@@ -190,7 +189,7 @@ def prepare_fp8_layer_for_marlin(
     scales = marlin_pad_scales(
         scales, part_size_n, part_size_k, padded_n, padded_k, group_size
     )
-    marlin_scales = marlin_permute_scales(
+    marlin_scales = ops.marlin_permute_scales(
         s=scales, size_k=padded_k, size_n=padded_n, group_size=group_size
     )
     if input_dtype != torch.float8_e4m3fn:
@@ -331,7 +330,7 @@ def prepare_fp8_moe_layer_for_marlin(
                 size_k = padded_n
 
         for i in range(e):
-            marlin_scales = marlin_permute_scales(
+            marlin_scales = ops.marlin_permute_scales(
                 s=scales[i], size_k=size_k, size_n=size_n, group_size=group_size
             )
             tensor_list.append(marlin_scales)
@@ -456,7 +455,7 @@ def prepare_mxfp8_layer_for_marlin(layer: torch.nn.Module) -> None:
     )
 
     # Permute scales to Marlin layout
-    marlin_scales = marlin_permute_scales(
+    marlin_scales = ops.marlin_permute_scales(
         s=scales,
         size_k=padded_k,
         size_n=padded_n,
@@ -546,7 +545,7 @@ def prepare_mxfp8_moe_layer_for_marlin(
             s = scales[i][:size_n, : size_k // group_size].contiguous()
             s = s.view(torch.float8_e8m0fnu).to(param_dtype)
             s = s.T.contiguous()
-            marlin_s = marlin_permute_scales(
+            marlin_s = ops.marlin_permute_scales(
                 s=s,
                 size_k=size_k,
                 size_n=size_n,
@@ -588,7 +587,7 @@ def marlin_quant_fp8_torch(weight, group_size, input_dtype=None):
         is_a_8bit=is_a_8bit,
     )
 
-    marlin_scales = marlin_permute_scales(
+    marlin_scales = ops.marlin_permute_scales(
         s=scales.T,
         size_k=size_k,
         size_n=size_n,
