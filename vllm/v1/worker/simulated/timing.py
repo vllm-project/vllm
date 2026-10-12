@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+import itertools
 import json
 import math
 import os
@@ -273,10 +274,70 @@ class ZeroTimingProvider:
         return StepCost(device_s=0.0)
 
 
+@dataclass(frozen=True)
+class HostTimeModel:
+    """A step's host time: ``fixed_us + per_req_us * R + per_prefill_token_us
+    * P`` for R scheduled requests and P prefill tokens.
+
+    Host work (input preparation, launches, sampling) barely depends on model
+    size, so a model fitted to a recording transfers to other models of the
+    same deployment shape: same host, parallelism and speculative decoding."""
+
+    fixed_us: float = 0.0
+    per_req_us: float = 0.0
+    per_prefill_token_us: float = 0.0
+
+    @classmethod
+    def from_log(cls, path: str) -> HostTimeModel:
+        """Non-negative least-squares fit to the steps of a recorded log
+        (recorded under async scheduling, so host time excludes device time).
+        A term the log cannot determine, because its feature does not vary
+        independently of the others, is left at zero."""
+        rows, host_us = [], []
+        for rec in load_step_log(path):
+            if "step" not in rec:
+                raise ValueError(f"{path}: host time needs a recorded step log")
+            step = rec["step"]
+            rows.append((1.0, len(step["requests"]), step["num_prefill_tokens"]))
+            host_us.append(_record_cost(rec)[1] * 1e6)
+        if not rows:
+            raise ValueError(f"{path} has no recorded steps")
+        a, y = np.asarray(rows, dtype=np.float64), np.asarray(host_us)
+        if not a[:, 2].any():
+            logger.warning("%s has no prefill steps: no per-token host time", path)
+        # Exhaustive NNLS over the subsets of terms whose features the log
+        # determines. Smaller subsets, and those with the fixed term, go first
+        # and win ties, so an undetermined split stays in the fixed term.
+        best, best_err = np.zeros(3), np.inf
+        subsets = sorted(
+            (c for k in (1, 2, 3) for c in itertools.combinations(range(3), k)),
+            key=lambda c: (len(c), c[0] != 0),
+        )
+        for cols in subsets:
+            if np.linalg.matrix_rank(a[:, cols]) < len(cols):
+                continue
+            fit, *_ = np.linalg.lstsq(a[:, cols], y, rcond=None)
+            err = float(np.sum((a[:, cols] @ fit - y) ** 2))
+            if (fit >= 0).all() and err < best_err * (1 - 1e-9):
+                best, best_err = np.zeros(3), err
+                best[list(cols)] = fit
+        model = cls(*(float(c) for c in best))
+        logger.info("Host time fitted to %s: %s", path, model)
+        return model
+
+    def host_s(self, step: StepDescriptor) -> float:
+        return 1e-6 * (
+            self.fixed_us
+            + self.per_req_us * step.num_reqs
+            + self.per_prefill_token_us * step.num_prefill_tokens
+        )
+
+
 class ConstantTimingProvider:
     """Linear model: ``fixed_us + prefill_us_per_token * P + decode_us_per_req * D
     + decode_us_per_kv_token * K`` where P is prefill tokens, D decode
-    requests and K the KV tokens read by decode requests."""
+    requests and K the KV tokens read by decode requests. Host time is
+    `host_us` per step, or fitted to the recorded log `host_fit_log`."""
 
     def __init__(
         self,
@@ -287,12 +348,19 @@ class ConstantTimingProvider:
         decode_us_per_req: float = 0.0,
         decode_us_per_kv_token: float = 0.0,
         host_us: float = 0.0,
+        host_fit_log: str | None = None,
     ) -> None:
         self.fixed_us = fixed_us
         self.prefill_us_per_token = prefill_us_per_token
         self.decode_us_per_req = decode_us_per_req
         self.decode_us_per_kv_token = decode_us_per_kv_token
-        self.host_us = host_us
+        if host_fit_log is not None and host_us:
+            raise ValueError("Pass host_us or host_fit_log, not both.")
+        self.host = (
+            HostTimeModel.from_log(host_fit_log)
+            if host_fit_log is not None
+            else HostTimeModel(fixed_us=host_us)
+        )
 
     def estimate(self, step: StepDescriptor) -> StepCost:
         decode_kv_tokens = sum(
@@ -308,7 +376,7 @@ class ConstantTimingProvider:
         device_us = self.fixed_us + prefill + decode
         return StepCost(
             device_s=device_us * 1e-6,
-            host_s=self.host_us * 1e-6,
+            host_s=self.host.host_s(step),
             breakdown={"prefill_us": prefill, "decode_us": decode},
         )
 

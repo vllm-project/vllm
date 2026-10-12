@@ -18,6 +18,7 @@ from vllm.v1.worker.simulated.timing import (
     BUILTIN_TIMING_PROVIDERS,
     ConstantTimingProvider,
     FastForwardClock,
+    HostTimeModel,
     RealClock,
     ReplayTimingProvider,
     SimRequestStep,
@@ -389,3 +390,55 @@ def test_kv_transfer_rates_fitted_from_log(tmp_path):
     assert fitted_store.bytes_per_s == pytest.approx((5 << 20) / 3e-3)
     # The step providers skip the transfer records.
     assert len(ReplayTimingProvider(_Cfg(), path=str(path)).exact) == 1
+
+
+def _host_log(path, host_us) -> str:
+    """A step log of prefill and decode steps whose host time is
+    `host_us(num_reqs, prefill_tokens)`."""
+    writer = StepLogWriter(str(path))
+    for i, (num_decode, prefill) in enumerate([(1, 0), (4, 0), (2, 512), (8, 128)]):
+        reqs = [_req(f"d{j}", 1, 100, 50) for j in range(num_decode)]
+        if prefill:
+            reqs.append(_req("p", prefill, 0, prefill))
+        host_s = host_us(len(reqs), prefill) * 1e-6
+        writer.write(_step(i, *reqs), StepCost(1e-3, host_s), 0.0, 1e-3, [])
+    writer.close()
+    return str(path)
+
+
+def test_host_time_model_fitted_from_log(tmp_path):
+    path = _host_log(
+        tmp_path / "a.jsonl", lambda reqs, prefill: 1000 + 30 * reqs + 2 * prefill
+    )
+    model = HostTimeModel.from_log(path)
+    assert model.fixed_us == pytest.approx(1000)
+    assert model.per_req_us == pytest.approx(30)
+    assert model.per_prefill_token_us == pytest.approx(2)
+
+    provider = ConstantTimingProvider(_Cfg(), fixed_us=500, host_fit_log=path)
+    step = _step(0, _req("a", 1, 10, 5), _req("b", 64, 0, 64))
+    assert provider.estimate(step).host_s == pytest.approx((1000 + 60 + 128) * 1e-6)
+
+    # A term that would fit negative is dropped and the rest refitted.
+    path = _host_log(
+        tmp_path / "b.jsonl", lambda reqs, prefill: 1000 - 10 * reqs + 2 * prefill
+    )
+    model = HostTimeModel.from_log(path)
+    assert model.per_req_us == 0.0
+    assert model.fixed_us > 0 and model.per_prefill_token_us > 0
+
+
+def test_host_time_model_leaves_undetermined_terms_at_zero(tmp_path):
+    # Every step schedules 4 requests: per-request time is indistinguishable
+    # from fixed time and stays in the fixed term.
+    path = tmp_path / "steps.jsonl"
+    writer = StepLogWriter(str(path))
+    for i, prefill in enumerate([0, 0, 256, 64]):
+        reqs = [_req(f"d{j}", 1, 100, 50) for j in range(4 - bool(prefill))]
+        if prefill:
+            reqs.append(_req("p", prefill, 0, prefill))
+        host_s = (1100 + 15 * prefill) * 1e-6
+        writer.write(_step(i, *reqs), StepCost(1e-3, host_s), 0.0, 1e-3, [])
+    writer.close()
+    model = HostTimeModel.from_log(str(path))
+    assert model == HostTimeModel(pytest.approx(1100), 0.0, pytest.approx(15))

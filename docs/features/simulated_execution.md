@@ -76,7 +76,7 @@ and preemption behavior depend strongly on it.
 | `timing` | behavior | `timing_args` |
 | --- | --- | --- |
 | `zero` | every step takes no device time (default; KV/scheduler-only simulation) | none |
-| `constant` | `fixed_us + prefill_us_per_token * P + decode_us_per_req * D + decode_us_per_kv_token * K` | those four, plus `host_us` |
+| `constant` | `fixed_us + prefill_us_per_token * P + decode_us_per_req * D + decode_us_per_kv_token * K` | those four, plus `host_us` or `host_fit_log` |
 | `table` | nearest-neighbour interpolation over recorded steps | `path`, `k` |
 | `replay` | exact match on the step's batch composition, nearest-neighbour fallback, reports the miss rate | `path`, `fallback` (`knn`/`zero`), `k`, `miss_fallback_s` |
 | `module.Class` | any class implementing `vllm.v1.worker.simulated.timing.TimingProvider` | passed as keyword arguments |
@@ -86,6 +86,25 @@ step, the KV length before it, prompt length, prefix-cache hits at admission,
 draft tokens and whether it is still prefilling; plus batch totals, the number
 of common-prefix blocks and the parallel configuration. It returns a
 `StepCost` with `device_s` and an optional `host_s`.
+
+`HostTimeModel` prices host time as `fixed_us + per_req_us * R +
+per_prefill_token_us * P` and fits it to a recorded step log
+(`HostTimeModel.from_log`, or `host_fit_log` for the `constant` provider), for
+providers that model only the device. Under async scheduling host time shows
+only where it exceeds the device's, mostly in prefill steps of small models,
+so it matters most for TTFT. Host work barely depends on model size: on H200
+with CUDA graphs, Qwen3-0.6B and Qwen3-8B both spend about 1.1 ms per step
+plus 12–16 µs per prefill token. With an analytical provider, Qwen3-0.6B's
+mean TTFT is 37% low without host time, 2% high with host time fitted to a
+0.6B recording, and 21% high fitted to a Qwen3-8B recording of a similar
+workload. Fit to a recording of the same deployment shape (parallelism,
+speculative decoding) whose prefills resemble the simulated workload's; a
+recording whose prompts mostly hit the cache leaves the per-token term
+poorly determined. The fit keeps terms non-negative and leaves a term the
+recording cannot determine at zero: per-request time needs a varying number
+of requests per step, per-token time needs prefill steps. Record under async
+scheduling (the default); without it the measured host time includes waiting
+for the device.
 
 ### Recording a real deployment
 
@@ -213,11 +232,12 @@ step; every rank derives the same timing from the same scheduler output.
   stages is busy for an equal share, so consecutive microbatches overlap as on
   the real pipeline. A step recorded under pipeline parallelism is timed on
   the last stage from its arrival there, which includes the wait for the
-  earlier stages, i.e. the same through-pipeline time. When the real
-  pipeline is saturated the last stage is still busy with the previous
-  microbatch as the next one arrives, so its recorded time shrinks toward one
-  stage's; record such workloads with a recording at lower load or a
-  per-stage model.
+  earlier stages, i.e. the same through-pipeline time. The last stage's host
+  time includes receiving each step's intermediate tensors, which blocks the
+  host (about 1.2 ms per step for Qwen3-8B on H200), and for prefills the
+  wait for the earlier stages to launch theirs; under load this host time,
+  not the device, bounds the step rate. A recording of the same pipeline
+  layout captures it, so fit host time (see `HostTimeModel`) to one.
 * **Data parallelism**: dense models run independent engines; DP rank
   i > 0 writes its step log to `<log_path>.dp<i>`. MoE models run their DP
   ranks in lockstep (their forward passes meet in all-to-all collectives), so
@@ -244,8 +264,10 @@ offline driver on the real clock gives:
 | PP=2, real / simulated (ms) | 18.81 / 18.30 | 5.881 / 5.915 | 389.3 / 391.0 |
 
 With PP=2 saturated (256 requests at 64 req/s) the simulation is about 10%
-optimistic (TPOT 10.06 vs 11.12 ms), as the recorded through-pipeline times
-shrink (see above). Qwen3-VL-30B-A3B-Instruct-FP8 (MoE, text only) with DP=2
+optimistic (TPOT 10.06 vs 11.12 ms): each step on the real deployment
+spends about 0.2 ms more between worker calls (engine loop and IPC) than the
+simulation's, and the simulated scheduler forms slightly smaller batches.
+Qwen3-VL-30B-A3B-Instruct-FP8 (MoE, text only) with DP=2
 and expert parallelism under `vllm serve` (ISL 512, OSL 64, 16 req/s, 128
 requests) reproduces mean TPOT within 2% and mean TTFT within 9%.
 
