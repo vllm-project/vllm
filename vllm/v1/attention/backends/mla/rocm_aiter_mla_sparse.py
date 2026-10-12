@@ -71,6 +71,21 @@ def _use_rocm_sparse_triton(
     )
 
 
+def _is_long_bf16_prefill(
+    kv_dtype: torch.dtype,
+    num_decodes: int,
+    num_prefills: int,
+    prefill_max_seq_len: int,
+    topk_tokens: int,
+) -> bool:
+    return (
+        kv_dtype == torch.bfloat16
+        and num_decodes == 0
+        and num_prefills > 0
+        and prefill_max_seq_len > topk_tokens
+    )
+
+
 @triton.jit
 def _fit_kpool_indices_kernel(
     token_indices_ptr,  # int32 [num_tokens, NUM_TOPK_TOKENS + TAIL_WIDTH]
@@ -643,11 +658,12 @@ class ROCMAiterMLASparseMetadataBuilder(
         reduce_indptr = None
         reduce_final_map = None
         reduce_partial_map = None
-        is_long_pure_bf16_prefill = (
-            self._mla_kv_dtype == torch.bfloat16
-            and num_decodes == 0
-            and num_prefills > 0
-            and metadata.prefill_max_seq_len > metadata.topk_tokens
+        is_long_pure_bf16_prefill = _is_long_bf16_prefill(
+            self._mla_kv_dtype,
+            num_decodes,
+            num_prefills,
+            metadata.prefill_max_seq_len,
+            metadata.topk_tokens,
         )
         if (
             self._use_persistent_metadata
@@ -878,14 +894,27 @@ class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
             )
         )
 
-        if triton_sink_fallback or _use_rocm_sparse_triton(
-            kv_cache_dtype=self.kv_cache_dtype,
-            head_size=q.shape[-1],
-            kv_lora_rank=self.kv_lora_rank,
-            num_prefills=attn_metadata.num_prefills,
-            num_decodes=attn_metadata.num_decodes,
-            num_decode_tokens=attn_metadata.num_decode_tokens,
-            max_query_len=attn_metadata.max_query_len,
+        # Long BF16 prefills omit persistent metadata. gfx942's
+        # nonpersistent ASM path is unsupported or unsafe for these shapes.
+        triton_prefill_fallback = on_gfx942() and _is_long_bf16_prefill(
+            kv_c_and_k_pe_cache.dtype,
+            attn_metadata.num_decodes,
+            attn_metadata.num_prefills,
+            attn_metadata.prefill_max_seq_len,
+            attn_metadata.topk_tokens,
+        )
+        if (
+            triton_sink_fallback
+            or triton_prefill_fallback
+            or _use_rocm_sparse_triton(
+                kv_cache_dtype=self.kv_cache_dtype,
+                head_size=q.shape[-1],
+                kv_lora_rank=self.kv_lora_rank,
+                num_prefills=attn_metadata.num_prefills,
+                num_decodes=attn_metadata.num_decodes,
+                num_decode_tokens=attn_metadata.num_decode_tokens,
+                max_query_len=attn_metadata.max_query_len,
+            )
         ):
             output = torch.empty(
                 [num_tokens, q.shape[1], self.kv_lora_rank],
