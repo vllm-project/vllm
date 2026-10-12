@@ -23,7 +23,7 @@ DEFAULT_CI_BASE_METADATA_VERSION="3"
 # local-source stages rather than unreachable remote-fetch alternatives.
 DEFAULT_ROCM_CSRC_CONTENT_FILES=".dockerignore requirements/common.txt requirements/rocm.txt pyproject.toml setup.py CMakeLists.txt cmake csrc vllm/envs.py vllm/__init__.py tools/build_rust.py"
 DEFAULT_ROCM_CSRC_DOCKERFILE_STAGES="base fetch_vllm_0 fetch_vllm build_vllm_dependencies rocm-triton-kernels csrc-build"
-DEFAULT_ROCM_RUST_CONTENT_FILES=".dockerignore .git_archival.txt pyproject.toml requirements/build/rust.txt rust/Cargo.lock rust/Cargo.toml rust/proto rust/src rust-toolchain.toml tools/build_rust.py build_rust.sh"
+DEFAULT_ROCM_RUST_CONTENT_FILES=".dockerignore .git_archival.txt pyproject.toml requirements/build/rust.txt rust/Cargo.lock rust/Cargo.toml rust/proto rust/src rust-toolchain.toml tools/build_rust.py tools/build_rust.sh"
 DEFAULT_ROCM_RUST_DOCKERFILE_STAGES="base fetch_vllm_0 fetch_vllm vllm-version rust_toolchain_input_0 rust-toolchain-input rust_input_0 rust-input rust-toolchain rust-build"
 # Docker's 128-character tag limit minus the longest cache prefix
 # ("csrc-rocm-branch-" and "rust-rocm-branch-", both 17 characters).
@@ -418,7 +418,7 @@ validate_ci_build_context_source() {
 
 describe_ci_revision() {
     git -C "$1" describe --tags --long --abbrev=10 \
-        --match '*[0-9]*' "$2" 2>/dev/null
+        --match 'v[0-9]*' "$2" 2>/dev/null
 }
 
 write_ci_git_archival_metadata() {

@@ -9,7 +9,7 @@ from typing import Any, cast
 import torch
 from transformers import BatchFeature
 
-from vllm.config.multimodal import BaseDummyOptions, ImageDummyOptions
+from vllm.config.multimodal import ImageDummyOptions, MultiModalDummyOptions
 from vllm.inputs import MultiModalDataDict
 from vllm.logger import init_logger
 from vllm.multimodal.inputs import (
@@ -30,6 +30,9 @@ from vllm.multimodal.processing import (
 from vllm.transformers_utils.configs.kimi_k3 import KimiK3Config
 from vllm.transformers_utils.processor import cached_get_image_processor
 from vllm.transformers_utils.processors.kimi_k3 import KimiK3Processor
+from vllm.transformers_utils.processors.kimi_k25_vision_fused import (
+    KimiK25FusedVisionProcessor,
+)
 
 logger = init_logger(__name__)
 
@@ -106,6 +109,7 @@ class KimiK3ProcessingInfo(BaseProcessingInfo):
             self.ctx.model_config.model,
             revision=self.ctx.model_config.revision,
             trust_remote_code=self.ctx.model_config.trust_remote_code,
+            processor_cls_overrides=KimiK25FusedVisionProcessor,
         )
 
         # Resolve token ID from the tokenizer because transformers v5
@@ -204,7 +208,7 @@ class KimiK3DummyInputsBuilder(BaseDummyInputsBuilder[KimiK3ProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions] | None = None,
+        mm_options: MultiModalDummyOptions | None = None,
     ) -> MultiModalDataDict:
         media_proc_cfg = self.info.image_processor.media_proc_cfg
         max_size = self.info.get_max_image_size(
@@ -214,7 +218,6 @@ class KimiK3DummyInputsBuilder(BaseDummyInputsBuilder[KimiK3ProcessingInfo]):
             media_proc_cfg["patch_limit_on_one_side"],
             media_proc_cfg["fixed_output_tokens"],
         )
-        num_images = mm_counts.get("image", 0)
         image_overrides = cast(
             ImageDummyOptions | None,
             mm_options.get("image") if mm_options else None,
@@ -223,7 +226,7 @@ class KimiK3DummyInputsBuilder(BaseDummyInputsBuilder[KimiK3ProcessingInfo]):
             "image": self._get_dummy_images(
                 width=max_size.width,
                 height=max_size.height,
-                num_images=num_images,
+                num_images=mm_counts.get("image", 0),
                 overrides=image_overrides,
             )
         }

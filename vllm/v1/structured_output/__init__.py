@@ -3,7 +3,7 @@
 import multiprocessing
 from collections.abc import Iterable, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
@@ -31,6 +31,17 @@ else:
 
 
 logger = init_logger(__name__)
+
+
+class ConstraintBounds(NamedTuple):
+    """Where tokens start being fed to the grammar and being masked."""
+
+    grammar_start: int
+    constraint_start: int
+
+
+_CONSTRAINED_FROM_START = ConstraintBounds(0, 0)
+_NO_SPEC_TOKENS = ConstraintBounds(1, 1)
 
 
 class StructuredOutputManager:
@@ -217,32 +228,34 @@ class StructuredOutputManager:
     ) -> Future:
         return self.executor_for_fillmask.submit(self._fill_bitmasks, batch)
 
-    def _get_constraint_start(
+    def _get_constraint_bounds(
         self,
         request: "Request",
         spec_tokens: Sequence[int],
         spec_tokens_committed: bool = False,
-    ) -> int:
+    ) -> ConstraintBounds:
         """Return the index into `spec_tokens` where tokens should start being
         constrained by the grammar.
         Assumes `spec_tokens` are stripped of -1 padding tokens.
         Returns `len(spec_tokens) + 1` if no token should be constrained after
         accepting all `spec_tokens`.
+        This is `constraint_start`; `grammar_start` is one less if reasoning ends
+        implicitly on a content token (e.g. a tool-call start).
 
         `spec_tokens_committed` is True if spec_tokens is already in
         `request.all_token_ids`.
         """
         if self.enable_in_reasoning:
-            return 0
+            return _CONSTRAINED_FROM_START
 
         structured_req = request.structured_output_request
         assert structured_req is not None
         if structured_req.reasoning_ended:
-            return 0
+            return _CONSTRAINED_FROM_START
 
         reasoner = self._get_reasoner(request)
         if reasoner is None:
-            return 0
+            return _CONSTRAINED_FROM_START
 
         if structured_req.reasoning_ended is None:
             # This should be removed here, but since `openai_gptoss`
@@ -250,30 +263,33 @@ class StructuredOutputManager:
             # After unifying the `openai_gptoss` and non-`openai_gptoss` styles,
             # it can be removed.
             if reasoner.is_reasoning_end(request.prompt_token_ids or []):
-                return 0
+                return _CONSTRAINED_FROM_START
             structured_req.reasoning_ended = False
 
         num_spec_tokens = len(spec_tokens)
         if num_spec_tokens <= 0:
-            return num_spec_tokens + 1
+            return _NO_SPEC_TOKENS
 
-        # Use `find_reasoning_end_offset` to find constraint start if supported
+        # Engine-based parsers also report whether the end token is content.
         if (
             isinstance(reasoner, ParserEngineReasoningAdapter)
             and reasoner.reasoning_end_token_ids
         ):
-            offset = reasoner.find_reasoning_end_offset(spec_tokens)
-            if offset is not None:
-                return offset + 1
+            end = reasoner.find_reasoning_end(spec_tokens)
+            if end is not None:
+                constraint_start = end.offset + 1
+                if end.implicit:
+                    return ConstraintBounds(end.offset, constraint_start)
+                return ConstraintBounds(constraint_start, constraint_start)
 
-        # Fallback to `find_reasoning_end_offset`
+        # Fallback: the grammar starts after the end token.
         # TODO: Build a read-only Sequence view over all_token_ids
         # instead of copying the entire all_token_ids into input_ids.
         if spec_tokens_committed:
             if not spec_tokens or not reasoner.is_reasoning_end_streaming(
                 request.all_token_ids, spec_tokens
             ):
-                return num_spec_tokens + 1
+                return ConstraintBounds(num_spec_tokens + 1, num_spec_tokens + 1)
 
             input_ids = request.all_token_ids.copy()
             delta_ids = list(spec_tokens)
@@ -281,15 +297,15 @@ class StructuredOutputManager:
             input_ids = request.all_token_ids.copy()
             input_ids.extend(spec_tokens)
             if not reasoner.is_reasoning_end_streaming(input_ids, spec_tokens):
-                return num_spec_tokens + 1
+                return ConstraintBounds(num_spec_tokens + 1, num_spec_tokens + 1)
             delta_ids = list(spec_tokens)
 
         for i in range(num_spec_tokens - 1, 0, -1):
             input_ids.pop()
             delta_ids.pop()
             if not reasoner.is_reasoning_end_streaming(input_ids, delta_ids):
-                return i + 1
-        return 1
+                return ConstraintBounds(i + 1, i + 1)
+        return ConstraintBounds(1, 1)
 
     def validate_tokens(self, request: "Request", spec_tokens: list[int]) -> list[int]:
         """Return the longest unconstrained or grammar-valid prefix of `spec_tokens`."""
@@ -297,8 +313,8 @@ class StructuredOutputManager:
             return spec_tokens
 
         spec_tokens = strip_speculative_padding(spec_tokens)
-        constraint_start = self._get_constraint_start(request, spec_tokens)
-        if constraint_start >= len(spec_tokens):
+        grammar_start, _ = self._get_constraint_bounds(request, spec_tokens)
+        if grammar_start >= len(spec_tokens):
             return spec_tokens
 
         structured_req = request.structured_output_request
@@ -307,8 +323,8 @@ class StructuredOutputManager:
         grammar = structured_req.grammar
         if TYPE_CHECKING:
             assert isinstance(grammar, StructuredOutputGrammar)
-        prefix = spec_tokens[:constraint_start]
-        validated = grammar.validate_tokens(spec_tokens[constraint_start:])
+        prefix = spec_tokens[:grammar_start]
+        validated = grammar.validate_tokens(spec_tokens[grammar_start:])
         return prefix + validated
 
     def grammar_bitmask(
@@ -358,7 +374,9 @@ class StructuredOutputManager:
                 if TYPE_CHECKING:
                     assert isinstance(grammar, StructuredOutputGrammar)
 
-                apply_bitmask = self._get_constraint_start(request, ()) == 0
+                apply_bitmask = (
+                    self._get_constraint_bounds(request, ()).constraint_start == 0
+                )
                 batch.append((grammar, cumulative_index, apply_bitmask))
                 if len(batch) == self.fill_bitmask_parallel_batch_size:
                     promises.append(self._async_submit_fill_bitmask(batch))
@@ -384,26 +402,31 @@ class StructuredOutputManager:
                     assert isinstance(grammar, StructuredOutputGrammar)
 
                 req_tokens = scheduled_spec_decode_tokens.get(req_id, list())
-                constraint_start = self._get_constraint_start(
+                grammar_start, constraint_start = self._get_constraint_bounds(
                     request, strip_speculative_padding(req_tokens)
                 )
                 state_advancements = 0
                 seen_padding = False
-                failed = False
+                # Row filled from the last valid grammar state before a draft
+                # was rejected; later rows reuse it rather than unconstraining.
+                failed_index: int | None = None
+                bitmask = self._grammar_bitmask
                 for i, token in enumerate(req_tokens):
-                    apply_bitmask = (
-                        not failed and not seen_padding and i >= constraint_start
-                    )
+                    if failed_index is not None:
+                        bitmask[cumulative_index].copy_(bitmask[failed_index])
+                        cumulative_index += 1
+                        continue
+                    apply_bitmask = not seen_padding and i >= constraint_start
                     self._fill_bitmasks(((grammar, cumulative_index, apply_bitmask),))
                     if token == -1:
                         seen_padding = True
-                    elif apply_bitmask:
+                    elif not seen_padding and i >= grammar_start:
                         if not grammar.is_terminated() and grammar.accept_tokens(
                             req_id, [token]
                         ):
                             state_advancements += 1
                         else:
-                            failed = True
+                            failed_index = cumulative_index
                             logger.error(
                                 "Unexpected: grammar terminated or rejected draft "
                                 "token %s for request %s during bitmask fill.",
@@ -415,12 +438,13 @@ class StructuredOutputManager:
                 # Diffusion LLMs don't sample a bonus token after the
                 # scheduled positions, so skip its bitmask in that case.
                 if not (self.vllm_config.model_config.is_diffusion and req_tokens):
-                    bonus_apply = (
-                        not failed
-                        and not seen_padding
-                        and constraint_start <= len(req_tokens)
-                    )
-                    self._fill_bitmasks(((grammar, cumulative_index, bonus_apply),))
+                    if failed_index is not None:
+                        bitmask[cumulative_index].copy_(bitmask[failed_index])
+                    else:
+                        bonus_apply = not seen_padding and constraint_start <= len(
+                            req_tokens
+                        )
+                        self._fill_bitmasks(((grammar, cumulative_index, bonus_apply),))
                     cumulative_index += 1
 
                 if state_advancements > 0:
@@ -447,17 +471,15 @@ class StructuredOutputManager:
         if TYPE_CHECKING:
             assert isinstance(grammar, StructuredOutputGrammar)
 
-        constraint_start = self._get_constraint_start(
+        grammar_start, _ = self._get_constraint_bounds(
             request, new_token_ids, spec_tokens_committed=True
         )
-        # Early return only when the constraint hasn't started.
+        # Early return only when no reasoning-end token is present.
         # Otherwise, latch structured_req.reasoning_ended.
-        if constraint_start > len(new_token_ids):
+        if grammar_start > len(new_token_ids):
             return True
         structured_req.reasoning_ended = True
-        return grammar.accept_tokens(
-            request.request_id, new_token_ids[constraint_start:]
-        )
+        return grammar.accept_tokens(request.request_id, new_token_ids[grammar_start:])
 
     def clear_backend(self) -> None:
         if self.backend is not None:

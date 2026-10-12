@@ -78,6 +78,20 @@ wait_for_server() {
     done" && return 0 || return 1
 }
 
+# b200-k8s pods use host networking, so a fixed port can already be taken by
+# another job on the node. Bind all the ports at once so they are distinct.
+free_ports() {
+  python3 - "$1" <<'EOF'
+import socket
+import sys
+
+socks = [socket.socket() for _ in range(int(sys.argv[1]))]
+for s in socks:
+    s.bind(("", 0))
+print(" ".join(str(s.getsockname()[1]) for s in socks))
+EOF
+}
+
 # Function to clean up previous instances
 cleanup_instances() {
   echo "Cleaning up any running vLLM instances..."
@@ -107,6 +121,9 @@ run_tests_for_model() {
 
   # Proxy args: repeated --prefill URL BOOTSTRAP_PORT and --decode URL.
   PROXY_ARGS=()
+  # Per prefiller: server and bootstrap. Per decoder: server. Then the proxy.
+  read -r -a PORTS <<< "$(free_ports $((2 * NUM_PREFILL_INSTANCES + NUM_DECODE_INSTANCES + 1)))"
+  PROXY_PORT=${PORTS[${#PORTS[@]} - 1]}
 
   # Start prefill instances
   for i in $(seq 0 $((NUM_PREFILL_INSTANCES-1))); do
@@ -119,10 +136,8 @@ run_tests_for_model() {
       GPU_ID="${GPU_ID},${NEXT_GPU}"
     done
 
-    # Calculate port number (base port + instance number)
-    PORT=$((8100 + i))
-    # Bootstrap server port for this prefiller. Avoid clash across instances.
-    BOOTSTRAP_PORT=$((8998 + i))
+    PORT=${PORTS[$((2 * i))]}
+    BOOTSTRAP_PORT=${PORTS[$((2 * i + 1))]}
 
     echo "Starting prefill instance $i on GPU $GPU_ID, port $PORT, bootstrap $BOOTSTRAP_PORT"
 
@@ -162,8 +177,7 @@ run_tests_for_model() {
       NEXT_GPU=$(((GPU_ID + j) % $(get_num_gpus)))
       GPU_ID="${GPU_ID},${NEXT_GPU}"
     done
-    # Calculate port number (base port + instance number)
-    PORT=$((8200 + i))
+    PORT=${PORTS[$((2 * NUM_PREFILL_INSTANCES + i))]}
 
     echo "Starting decode instance $i on GPU $GPU_ID, port $PORT"
 
@@ -205,16 +219,16 @@ run_tests_for_model() {
   done
 
   # Start the proxy server
-  echo "Starting proxy server on port 8192"
+  echo "Starting proxy server on port $PROXY_PORT"
   python3 "${GIT_ROOT}/examples/disaggregated/mooncake_connector/mooncake_connector_proxy.py" \
-    --port 8192 "${PROXY_ARGS[@]}" &
+    --port "$PROXY_PORT" "${PROXY_ARGS[@]}" &
 
   # Wait for the proxy to start
   sleep 5
 
   # Run lm eval for this model
   echo "Running tests for $model_name"
-  TEST_MODEL=$model_name python3 -m pytest -s -x \
+  TEST_MODEL=$model_name PROXY_PORT=$PROXY_PORT python3 -m pytest -s -x \
     "${GIT_ROOT}/tests/v1/kv_connector/mooncake_integration/test_accuracy.py"
 
   # Clean up before running next model

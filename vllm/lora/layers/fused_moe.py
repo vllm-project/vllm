@@ -3,7 +3,7 @@
 
 import torch
 import torch.nn as nn
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 from vllm import envs
 from vllm.config.lora import LoRAConfig
@@ -245,7 +245,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         self,
         max_loras: int,
         lora_config: LoRAConfig,
-        model_config: PretrainedConfig | None = None,
+        model_config: PreTrainedConfig | None = None,
     ) -> None:
         """Initializes lora matrices."""
         self._verify_ep_fs(lora_config)
@@ -465,7 +465,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         source_layer: nn.Module,
         lora_config: LoRAConfig,
         packed_modules_list: list,
-        model_config: PretrainedConfig | None = None,
+        model_config: PreTrainedConfig | None = None,
     ) -> bool:
         """Returns True if the layer can be replaced by this LoRA layer."""
         # source_layer is MoERunner
@@ -511,7 +511,7 @@ class FusedMoE3DWithLoRA(FusedMoEWithLoRA):
         self,
         max_loras: int,
         lora_config: LoRAConfig,
-        model_config: PretrainedConfig | None = None,
+        model_config: PreTrainedConfig | None = None,
     ) -> None:
         """Initializes lora matrices."""
         if model_config is None:
@@ -624,7 +624,7 @@ class FusedMoE3DWithLoRA(FusedMoEWithLoRA):
         source_layer: nn.Module,
         lora_config: LoRAConfig,
         packed_modules_list: list,
-        model_config: PretrainedConfig | None = None,
+        model_config: PreTrainedConfig | None = None,
     ) -> bool:
         """Returns True if the layer can be replaced by this LoRA layer."""
         # source_layer is MoERunner

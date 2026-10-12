@@ -34,6 +34,9 @@ from vllm.model_executor.layers.fused_moe.experts.lora_context import MoELoRACon
 from vllm.model_executor.layers.fused_moe.experts.lora_experts_mixin import (
     LoRAExpertsMixin,
 )
+from vllm.model_executor.layers.fused_moe.experts.trtllm_bf16_moe import (
+    view_as_block_major_k,
+)
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
@@ -527,8 +530,8 @@ class TrtLlmBf16LoRAExperts(_TrtLlmLoRAExpertsBase):
         ret = flashinfer.fused_moe.trtllm_bf16_routed_moe(
             topk_ids=topk_ids_and_weights,
             hidden_states=hidden_states,
-            gemm1_weights=w1,
-            gemm2_weights=w2,
+            gemm1_weights=view_as_block_major_k(w1),
+            gemm2_weights=view_as_block_major_k(w2),
             gemm1_lora_delta=gemm1_lora_delta,
             num_experts=global_num_experts,
             top_k=self.topk,

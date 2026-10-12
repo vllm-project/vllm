@@ -7,6 +7,7 @@ import torch
 import torch.nn.functional as F
 
 from vllm import LLM, EmbeddingRequestOutput, PoolingParams
+from vllm.inputs import PromptType
 from vllm.tasks import PoolingTask
 
 MODEL_NAME = "intfloat/multilingual-e5-small"
@@ -54,7 +55,8 @@ def test_token_ids_prompts(llm: LLM):
 
 @pytest.mark.skip_global_cleanup
 def test_list_prompts(llm: LLM):
-    outputs = llm.embed([prompt, prompt_token_ids], use_tqdm=False)
+    prompts: list[PromptType] = [prompt, prompt_token_ids]
+    outputs = llm.embed(prompts, use_tqdm=False)
     assert len(outputs) == 2
     for i in range(len(outputs)):
         assert isinstance(outputs[i], EmbeddingRequestOutput)

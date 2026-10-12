@@ -564,7 +564,6 @@ def _rejection_kernel(
             # stores the target argmax upon first rejection, so it rejects the
             # placeholder via `accepted` instead.
             verifying &= is_valid_draft
-
         if verifying:
             pos = tl.load(pos_ptr + logit_idx)
             u = tl_rand32(seed, pos, includes_zero=False)
@@ -719,6 +718,8 @@ def _seeded_resample_argmax(
         0,  # logits_cache_stride_0
         0,  # logits_cache_stride_1
         None,  # logits_cache_col_ptr
+        None,  # logits_cache_source_ptr
+        0,  # logits_cache_source_stride
         vocab_size,
         IS_DRAFTING=False,
         APPLY_TEMPERATURE=False,
@@ -766,6 +767,7 @@ def _resample_kernel(
     contexts_stride,
     # [max_num_reqs], uint8 view of a bool tensor
     watermarking_ptr,
+    watermarking_skip_mask_ptr,
     watermark_key_0,
     watermark_key_1,
     vocab_size,
@@ -775,6 +777,7 @@ def _resample_kernel(
     USE_BLOCK_VERIFICATION: tl.constexpr,
     CONTEXT_WIDTH: tl.constexpr,
     WATERMARK: tl.constexpr,
+    DEDUPLICATE_CONTEXTS: tl.constexpr,
 ):
     req_idx = tl.program_id(0)
     resample_idx = tl.load(rejected_step_ptr + req_idx)
@@ -806,7 +809,29 @@ def _resample_kernel(
         other=float("-inf"),
     ).to(tl.float32)
 
+    # Compute the residual logits to resample the rejected token from.
+    is_watermarked = False
+    if WATERMARK:
+        is_watermarked = (
+            tl.load(
+                watermarking_ptr + req_state_idx,
+                mask=req_state_idx >= 0,
+                other=0,
+            )
+            != 0
+        )
+
+    skip_watermarking = False
+    if DEDUPLICATE_CONTEXTS:
+        skip_watermarking = (
+            (tl.load(watermarking_skip_mask_ptr + resample_token_idx) != 0)
+            & is_watermarked
+            & (temp != 0.0)
+        )
+
     if is_bonus or not is_valid_rejected_draft:
+        # Bonus token (no rejections) or -1 placeholder token. In either case,
+        # directly use the target logits.
         residual_logits = target_logits
     elif HAS_DRAFT_LOGITS:
         # draft_logits is stored pre-temperature, so apply scale first.
@@ -836,7 +861,12 @@ def _resample_kernel(
                 )
             target_log_probs += log_p_tau
         draft_log_probs = draft_logits - draft_lse
-        # Compute log(max(p - q, 0)) without subtracting probabilities.
+        # Compute the residual:
+        #   r(x) = max(p(x) - q(x), 0)
+        # Gumbel sampling needs logits, so we compute it in log space:
+        #   log(r(x)) = log(max(exp(log_p(x)) - exp(log_q(x)), 0))
+        # The more numerically stable form is:
+        #   log(max(exp(a) - exp(b), 0)) = a + log(max(1 - exp(b - a), 0))
         ratio = tl.exp(draft_log_probs - target_log_probs)
         residual_logits = tl.where(
             ratio < 1.0,
@@ -844,24 +874,23 @@ def _resample_kernel(
             float("-inf"),
         ).to(tl.float32)
     else:
-        # The block-verification factor is constant and cancels on normalization.
+        # One-hot draft. The residual is just the target distribution with
+        # the rejected draft token probability zeroed out.
+        # NOTE: During block verification, the residual becomes:
+        #   0                   if x == rejected_draft_token
+        #   p_tau * M_b(x) / Z  otherwise
+        # Therefore p_tau is a constant that cancels under normalization,
+        # and does not need to be applied.
         residual_logits = tl.where(
             block != rejected_draft_token,
             target_logits,
             float("-inf"),
         ).to(tl.float32)
 
+    # Resample the rejected/bonus token.
     if WATERMARK:
         # Padded and greedy rows retain the stock draw.
-        is_watermarked = (
-            tl.load(
-                watermarking_ptr + req_state_idx,
-                mask=req_state_idx >= 0,
-                other=0,
-            )
-            != 0
-        )
-        if is_watermarked & (temp != 0.0):
+        if is_watermarked & (temp != 0.0) & ~skip_watermarking:
             watermark_value, idx = philox_gumbel_block_argmax(
                 residual_logits,
                 mask,
@@ -1008,6 +1037,7 @@ def rejection_sample(
     use_block_verification: bool = False,
     contexts: torch.Tensor | None = None,
     watermarking: torch.Tensor | None = None,
+    watermarking_skip_mask: torch.Tensor | None = None,
     watermark_key: int | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     assert target_logits.ndim == 2 and target_logits.stride(-1) == 1
@@ -1021,9 +1051,13 @@ def rejection_sample(
     assert watermark == (watermarking is not None) == (watermark_key is not None), (
         "contexts, watermarking and watermark_key must be set together."
     )
+    assert watermarking_skip_mask is None or watermark, (
+        "watermarking_skip_mask requires watermarking."
+    )
     contexts_stride = 0
     context_width = 1
     watermarking_bytes: torch.Tensor | None = None
+    watermarking_skip_mask_bytes: torch.Tensor | None = None
     watermark_key_0 = 0
     watermark_key_1 = 0
     if contexts is not None:
@@ -1038,6 +1072,12 @@ def rejection_sample(
         contexts_stride = contexts.stride(0)
         context_width = contexts.shape[-1]
         watermarking_bytes = watermarking.view(torch.uint8)
+        if watermarking_skip_mask is not None:
+            assert watermarking_skip_mask.shape == (num_logits,)
+            assert watermarking_skip_mask.dtype == torch.bool
+            if not watermarking_skip_mask.is_contiguous():
+                watermarking_skip_mask = watermarking_skip_mask.contiguous()
+            watermarking_skip_mask_bytes = watermarking_skip_mask.view(torch.uint8)
         watermark_key_0 = watermark_key & 0xFFFFFFFF
         watermark_key_1 = watermark_key >> 32
     draft_logits_stride_0 = 0
@@ -1254,6 +1294,7 @@ def rejection_sample(
         contexts,
         contexts_stride,
         watermarking_bytes,
+        watermarking_skip_mask_bytes,
         watermark_key_0,
         watermark_key_1,
         vocab_size,
@@ -1263,6 +1304,7 @@ def rejection_sample(
         USE_BLOCK_VERIFICATION=use_block_verification,
         CONTEXT_WIDTH=context_width,
         WATERMARK=watermark,
+        DEDUPLICATE_CONTEXTS=watermarking_skip_mask is not None,
     )
 
     # Insert the resampled tokens into the output sampled.

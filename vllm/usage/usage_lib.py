@@ -69,7 +69,7 @@ def is_usage_stats_enabled():
 
 
 def _get_current_timestamp_ns() -> int:
-    return int(datetime.datetime.now(datetime.timezone.utc).timestamp() * 1e9)
+    return int(datetime.datetime.now(datetime.UTC).timestamp() * 1e9)
 
 
 def _detect_cloud_provider() -> str:
