@@ -1112,6 +1112,14 @@ if hasattr(torch.ops._C, "gptq_marlin_repack"):
     ) -> torch.Tensor:
         pack_factor = 32 // num_bits
         marlin_tile_size = 16
+        target_tile_k_size = marlin_tile_size * (2 if is_a_8bit else 1)
+        torch._check(
+            size_k % target_tile_k_size == 0,
+            lambda: (
+                f"size_k = {size_k} is not divisible by "
+                f"tile_k_size = {target_tile_k_size}"
+            ),
+        )
         return torch.empty(
             (size_k // marlin_tile_size, size_n * marlin_tile_size // pack_factor),
             dtype=b_q_weight.dtype,
@@ -1144,6 +1152,14 @@ if hasattr(torch.ops._C, "awq_marlin_repack"):
     ) -> torch.Tensor:
         pack_factor = 32 // num_bits
         marlin_tile_size = 16
+        target_tile_k_size = marlin_tile_size * (2 if is_a_8bit else 1)
+        torch._check(
+            size_k % target_tile_k_size == 0,
+            lambda: (
+                f"size_k = {size_k} is not divisible by "
+                f"tile_k_size = {target_tile_k_size}"
+            ),
+        )
         return torch.empty(
             (size_k // marlin_tile_size, size_n * marlin_tile_size // pack_factor),
             dtype=b_q_weight.dtype,
@@ -1159,9 +1175,13 @@ def gptq_marlin_moe_repack(
     is_a_8bit: bool = False,
 ) -> torch.Tensor:
     num_experts = b_q_weight.shape[0]
-    assert size_k % 16 == 0
+    marlin_tile_size = 16
+    target_tile_k_size = marlin_tile_size * (2 if is_a_8bit else 1)
+    assert size_k % target_tile_k_size == 0, (
+        f"size_k = {size_k} is not divisible by tile_k_size = {target_tile_k_size}"
+    )
     output = torch.empty(
-        (num_experts, size_k // 16, size_n * (num_bits // 2)),
+        (num_experts, size_k // marlin_tile_size, size_n * (num_bits // 2)),
         device=b_q_weight.device,
         dtype=b_q_weight.dtype,
     )
@@ -1180,9 +1200,13 @@ def awq_marlin_moe_repack(
     is_a_8bit: bool = False,
 ) -> torch.Tensor:
     num_experts = b_q_weight.shape[0]
-    assert size_k % 16 == 0
+    marlin_tile_size = 16
+    target_tile_k_size = marlin_tile_size * (2 if is_a_8bit else 1)
+    assert size_k % target_tile_k_size == 0, (
+        f"size_k = {size_k} is not divisible by tile_k_size = {target_tile_k_size}"
+    )
     output = torch.empty(
-        (num_experts, size_k // 16, size_n * (num_bits // 2)),
+        (num_experts, size_k // marlin_tile_size, size_n * (num_bits // 2)),
         device=b_q_weight.device,
         dtype=b_q_weight.dtype,
     )
