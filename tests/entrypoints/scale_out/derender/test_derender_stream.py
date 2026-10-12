@@ -1311,7 +1311,7 @@ class TestDerenderChatStreamParsed:
     async def test_include_reasoning_false_suppresses_reasoning(
         self, parsed_derenderer
     ):
-        chat_request = _chat_request(include_reasoning=False)
+        chat_request = _chat_request(include_reasoning=False, return_token_ids=True)
         chunk, _ = await parsed_derenderer.derender_chat_stream(
             model=MODEL_NAME,
             generate_chunk=_make_stream_chunk(
@@ -1320,6 +1320,7 @@ class TestDerenderChatStreamParsed:
             chat_request=chat_request,
         )
         delta = chunk.choices[0].delta
+        assert chunk.choices[0].token_ids is None
         assert delta.reasoning is None
         assert delta.content == "c"
 
