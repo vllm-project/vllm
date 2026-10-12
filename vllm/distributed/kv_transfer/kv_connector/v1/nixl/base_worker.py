@@ -149,6 +149,58 @@ def _uses_dense_virtual_transfer_pages(
 
 
 @dataclass(frozen=True)
+class _NixlCacheLayerGeometry:
+    """Derived per-layer geometry shared by NIXL cache registration paths."""
+
+    physical_page_size: int
+    block_stride: int
+    num_blocks: int
+    memory_type: str
+    device_id: int
+    page_contiguous: bool
+    virtual_transfer_pages: bool
+
+
+def _get_nixl_cache_layer_geometry(
+    layer_spec: KVCacheSpec,
+    cache: torch.Tensor,
+    logical_num_blocks: int,
+    physical_blocks_per_logical_kv_block: int,
+    nixl_memory_type: str,
+) -> _NixlCacheLayerGeometry:
+    """Derive the transferable page geometry for one cache layer."""
+    physical_page_size = (
+        layer_spec.page_size_bytes
+        if isinstance(layer_spec, MambaSpec)
+        else layer_spec.page_size_bytes // physical_blocks_per_logical_kv_block
+    )
+    num_blocks = (
+        logical_num_blocks
+        if isinstance(layer_spec, MambaSpec)
+        else logical_num_blocks * physical_blocks_per_logical_kv_block
+    )
+    block_stride = (
+        cache.stride(0) * cache.element_size() if cache.ndim > 1 else physical_page_size
+    )
+    return _NixlCacheLayerGeometry(
+        physical_page_size=physical_page_size,
+        block_stride=block_stride,
+        num_blocks=num_blocks,
+        memory_type="DRAM" if cache.device.type == "cpu" else nixl_memory_type,
+        device_id=max(cache.get_device(), 0),
+        page_contiguous=(
+            isinstance(layer_spec, (MLAAttentionSpec, SlidingWindowMLASpec))
+            and cache.ndim > 1
+            and cache[0].is_contiguous()
+            and cache[0].nbytes == physical_page_size
+        ),
+        virtual_transfer_pages=_uses_dense_virtual_transfer_pages(
+            layer_spec, cache, physical_page_size, num_blocks
+        ),
+    )
+
+
+@dataclass(frozen=True)
 class _NixlPackedCacheView:
     """Per-layer storage geometry used to decide whether pages can be coalesced."""
 
@@ -1678,92 +1730,86 @@ class NixlBaseConnectorWorker:
         )
         # Span coalescing is pull-only; push retains its existing packed-row routing.
         packed_span_views: list[_NixlPackedCacheView] = []
-        if can_coalesce_packed_spans:
-            for layer_name, cache in xfer_buffers.items():
-                layer_spec = self._layer_specs.get(layer_name)
-                group_id = self.kv_cache_config.transfer_group_index_by_layer.get(
-                    layer_name
+        layer_geometries: dict[str, _NixlCacheLayerGeometry] = {}
+        for layer_name, cache in xfer_buffers.items():
+            layer_spec = self._layer_specs.get(layer_name)
+            group_id = self.kv_cache_config.transfer_group_index_by_layer.get(
+                layer_name
+            )
+            if layer_spec is None or group_id is None:
+                continue
+            group = self.kv_cache_config.transfer_groups[group_id]
+            logical_num_blocks = (
+                self.kv_cache_config.hisparse_host_num_blocks
+                if group.host_resident
+                else self.kv_cache_config.num_blocks
+            )
+            if logical_num_blocks is None:
+                continue
+            geometry = _get_nixl_cache_layer_geometry(
+                layer_spec,
+                cache,
+                logical_num_blocks,
+                self._physical_blocks_per_logical_kv_block,
+                self.nixl_memory_type,
+            )
+            layer_geometries[layer_name] = geometry
+            if not can_coalesce_packed_spans:
+                continue
+
+            physical_page_size = geometry.physical_page_size
+            num_blocks = geometry.num_blocks
+            if group.host_resident:
+                num_blocks = logical_num_blocks
+            elif isinstance(layer_spec, MambaSpec):
+                num_blocks = self._logical_num_blocks
+            block_stride = geometry.block_stride
+            memory_type = geometry.memory_type
+            device_id = geometry.device_id
+            page_contiguous = geometry.page_contiguous
+            virtual_pages = geometry.virtual_transfer_pages
+            storage = cache.untyped_storage()
+            storage_ptr = storage.data_ptr()
+            storage_nbytes = storage.nbytes()
+            data_offset = cache.data_ptr() - storage_ptr
+            storage_is_block_major = (
+                0 <= storage_nbytes - num_blocks * block_stride < block_stride
+            )
+            page_extent_fits = (
+                num_blocks > 0
+                and block_stride > 0
+                and physical_page_size > 0
+                and 0 <= data_offset < block_stride
+                and data_offset % block_stride + physical_page_size <= block_stride
+                and data_offset + (num_blocks - 1) * block_stride + physical_page_size
+                <= storage_nbytes
+            )
+            eligible = (
+                isinstance(layer_spec, (MLAAttentionSpec, SlidingWindowMLASpec))
+                and not group.host_resident
+                and cache.device.type == "cuda"
+                and memory_type == "VRAM"
+                and page_contiguous
+                and not virtual_pages
+                and storage_is_block_major
+                and page_extent_fits
+            )
+            packed_span_views.append(
+                _NixlPackedCacheView(
+                    layer_name=layer_name,
+                    storage_ptr=storage_ptr,
+                    storage_nbytes=storage_nbytes,
+                    data_offset=data_offset,
+                    page_size=physical_page_size,
+                    block_stride=block_stride,
+                    num_blocks=num_blocks,
+                    group_id=group_id,
+                    memory_type=memory_type,
+                    device_id=device_id,
+                    spec_type=type(layer_spec).__name__,
+                    eligible=eligible,
                 )
-                if layer_spec is None or group_id is None:
-                    continue
-                group = self.kv_cache_config.transfer_groups[group_id]
-                physical_page_size = (
-                    layer_spec.page_size_bytes
-                    if isinstance(layer_spec, MambaSpec)
-                    else layer_spec.page_size_bytes
-                    // self._physical_blocks_per_logical_kv_block
-                )
-                num_blocks = self.kv_cache_config.num_blocks
-                if isinstance(layer_spec, MambaSpec):
-                    num_blocks = self._logical_num_blocks
-                else:
-                    num_blocks *= self._physical_blocks_per_logical_kv_block
-                if group.host_resident:
-                    host_num_blocks = self.kv_cache_config.hisparse_host_num_blocks
-                    if host_num_blocks is None:
-                        continue
-                    num_blocks = host_num_blocks
-                block_stride = (
-                    cache.stride(0) * cache.element_size()
-                    if cache.ndim > 1
-                    else physical_page_size
-                )
-                storage = cache.untyped_storage()
-                storage_ptr = storage.data_ptr()
-                storage_nbytes = storage.nbytes()
-                data_offset = cache.data_ptr() - storage_ptr
-                memory_type = (
-                    "DRAM" if cache.device.type == "cpu" else self.nixl_memory_type
-                )
-                device_id = max(cache.get_device(), 0)
-                page_contiguous = (
-                    cache.ndim > 1
-                    and cache[0].is_contiguous()
-                    and cache[0].nbytes == physical_page_size
-                )
-                virtual_pages = _uses_dense_virtual_transfer_pages(
-                    layer_spec, cache, physical_page_size, num_blocks
-                )
-                storage_is_block_major = (
-                    0 <= storage_nbytes - num_blocks * block_stride < block_stride
-                )
-                page_extent_fits = (
-                    num_blocks > 0
-                    and block_stride > 0
-                    and physical_page_size > 0
-                    and 0 <= data_offset < block_stride
-                    and data_offset % block_stride + physical_page_size <= block_stride
-                    and data_offset
-                    + (num_blocks - 1) * block_stride
-                    + physical_page_size
-                    <= storage_nbytes
-                )
-                eligible = (
-                    isinstance(layer_spec, (MLAAttentionSpec, SlidingWindowMLASpec))
-                    and not group.host_resident
-                    and cache.device.type == "cuda"
-                    and memory_type == "VRAM"
-                    and page_contiguous
-                    and not virtual_pages
-                    and storage_is_block_major
-                    and page_extent_fits
-                )
-                packed_span_views.append(
-                    _NixlPackedCacheView(
-                        layer_name=layer_name,
-                        storage_ptr=storage_ptr,
-                        storage_nbytes=storage_nbytes,
-                        data_offset=data_offset,
-                        page_size=physical_page_size,
-                        block_stride=block_stride,
-                        num_blocks=num_blocks,
-                        group_id=group_id,
-                        memory_type=memory_type,
-                        device_id=device_id,
-                        spec_type=type(layer_spec).__name__,
-                        eligible=eligible,
-                    )
-                )
+            )
 
         packed_spans_by_layer = _build_nixl_packed_cache_spans(packed_span_views)
         packed_spans = {id(span): span for span in packed_spans_by_layer.values()}
@@ -1809,26 +1855,14 @@ class NixlBaseConnectorWorker:
                 )
                 continue
             group_index = self.kv_cache_config.transfer_group_index_by_layer[layer_name]
-            # `layer_spec.page_size_bytes` only accounts for logical page_size, that is
-            # the page_size assuming constant `self._logical_num_blocks`.
-            physical_page_size = (
-                layer_spec.page_size_bytes
-                if isinstance(layer_spec, MambaSpec)
-                else layer_spec.page_size_bytes
-                // self._physical_blocks_per_logical_kv_block
-            )
             group = self.kv_cache_config.transfer_groups[group_index]
             if group.host_resident:
                 logical_num_blocks = self.kv_cache_config.hisparse_host_num_blocks
                 assert logical_num_blocks is not None
-            else:
-                logical_num_blocks = self.kv_cache_config.num_blocks
             group_id = group_index
-            num_blocks = (
-                logical_num_blocks
-                if isinstance(layer_spec, MambaSpec)
-                else logical_num_blocks * self._physical_blocks_per_logical_kv_block
-            )
+            geometry = layer_geometries[layer_name]
+            physical_page_size = geometry.physical_page_size
+            num_blocks = geometry.num_blocks
             base_addr = cache.data_ptr()
             is_mla_region = isinstance(
                 layer_spec, (MLAAttentionSpec, SlidingWindowMLASpec)
@@ -1839,12 +1873,9 @@ class NixlBaseConnectorWorker:
             storage = cache.untyped_storage()
             storage_addr = storage.data_ptr()
             is_host_resident = group.host_resident
-            if cache.device.type == "cpu":
-                mem_type = "DRAM"
-                region_device_id = 0
-            else:
-                mem_type = self.nixl_memory_type
-                region_device_id = max(cache.get_device(), 0)
+            mem_type = geometry.memory_type
+            region_device_id = geometry.device_id
+            if cache.device.type != "cpu":
                 self.device_id = region_device_id
             if is_host_resident:
                 registration_base = cache.data_ptr()
@@ -1874,13 +1905,7 @@ class NixlBaseConnectorWorker:
                     (cache.data_ptr(), block_len, block_stride // physical_ratio)
                 ]
             else:
-                if cache.ndim == 1:
-                    # Flat byte view: HMA tensors shared between layer types carry
-                    # no block dimension, so stride(0) is 1 byte. Blocks abut, so
-                    # the stride is the page size.
-                    block_stride = physical_page_size
-                else:
-                    block_stride = cache.stride(0) * cache.element_size()
+                block_stride = geometry.block_stride
                 # A connector that registers the backing as one memory region
                 # may need its length rounded up to a page boundary. Such a tail
                 # is shorter than one block, so it cannot make the storage
@@ -1890,14 +1915,8 @@ class NixlBaseConnectorWorker:
                 )
                 # A view with a contiguous page can own a strided region even
                 # when sibling layers share the same backing allocation.
-                page_contiguous = (
-                    cache.ndim > 1
-                    and cache[0].is_contiguous()
-                    and cache[0].nbytes == physical_page_size
-                )
-                virtual_transfer_pages = _uses_dense_virtual_transfer_pages(
-                    layer_spec, cache, physical_page_size, num_blocks
-                )
+                page_contiguous = geometry.page_contiguous
+                virtual_transfer_pages = geometry.virtual_transfer_pages
                 if self._TRANSFER_MODE == "pull" and is_mla_region:
                     layer_transfer_views[layer_name] = _NixlLayerTransferView(
                         layer_name=layer_name,

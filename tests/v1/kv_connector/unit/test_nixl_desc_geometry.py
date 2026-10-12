@@ -11,6 +11,7 @@ incoming transfer can overwrite a co-resident request's KV or mamba state
 mid-decode (silent corruption of an unrelated request).
 """
 
+import ctypes
 from collections import defaultdict
 from dataclasses import replace
 from threading import Event, Lock
@@ -53,6 +54,8 @@ class _RecordingNixl:
     def __init__(self, *args, **kwargs):
         self.dlists: dict[int, np.ndarray] = {}
         self.xfers: list[tuple] = []
+        self.prepared_xfers: dict[int, tuple] = {}
+        self.completed_xfers: set[int] = set()
         self.registered: list[tuple[list[tuple], object]] = []
         self._next_handle = 1
 
@@ -85,22 +88,22 @@ class _RecordingNixl:
     ):
         handle = self._next_handle
         self._next_handle += 1
-        self.xfers.append(
-            (
-                op,
-                local_handle,
-                np.asarray(local_ids),
-                remote_handle,
-                np.asarray(remote_ids),
-            )
+        xfer = (
+            op,
+            local_handle,
+            np.asarray(local_ids),
+            remote_handle,
+            np.asarray(remote_ids),
         )
+        self.xfers.append(xfer)
+        self.prepared_xfers[handle] = xfer
         return handle
 
     def transfer(self, handle):
-        pass
+        self.completed_xfers.add(handle)
 
     def check_xfer_state(self, handle):
-        return "DONE"
+        return "DONE" if handle in self.completed_xfers else "PROC"
 
     def get_xfer_telemetry(self, handle):
         from types import SimpleNamespace
@@ -125,6 +128,22 @@ class _RecordingNixl:
         pass
 
 
+class _CopyingRecordingNixl(_RecordingNixl):
+    """CPU NIXL fake that copies the selected descriptors for READs."""
+
+    def transfer(self, handle):
+        op, local_handle, local_ids, remote_handle, remote_ids = self.prepared_xfers[
+            handle
+        ]
+        assert op == "READ"
+        for local_id, remote_id in zip(local_ids, remote_ids, strict=True):
+            local_desc = self.dlists[local_handle][int(local_id)]
+            remote_desc = self.dlists[remote_handle][int(remote_id)]
+            assert local_desc[1] == remote_desc[1]
+            ctypes.memmove(int(local_desc[0]), int(remote_desc[0]), int(local_desc[1]))
+        super().transfer(handle)
+
+
 def _make_packed_mla_view_worker(
     layouts,
     block_stride,
@@ -136,6 +155,7 @@ def _make_packed_mla_view_worker(
     shared_transfer_group=False,
     transfer_group_ids=None,
     force_cuda_span_eligibility=False,
+    nixl_wrapper_cls=_RecordingNixl,
 ):
     """Register real strided views; only NIXL and distributed runtime are fake."""
     block_size = 16
@@ -193,7 +213,7 @@ def _make_packed_mla_view_worker(
         backend.full_cls_name.return_value = f"fake.{name}"
         backends.append(backend)
     with (
-        patch.object(bw, "NixlWrapper", _RecordingNixl),
+        patch.object(bw, "NixlWrapper", nixl_wrapper_cls),
         patch.object(bw, "get_tensor_model_parallel_rank", return_value=0),
         patch.object(bw, "get_tensor_model_parallel_world_size", return_value=1),
         patch.object(bw, "get_current_attn_backends", return_value=backends),
@@ -528,35 +548,30 @@ def test_peer_tail_zeroing_uses_device_cache_with_host_staging():
 
 
 @pytest.mark.cpu_test
-def test_mixed_packed_layout_read_completes_with_per_layer_peer_descriptors():
-    worker, _ = _make_packed_mla_view_worker(
+def test_mixed_packed_layout_read_copies_and_completes_with_layer_descriptors():
+    worker, raw = _make_packed_mla_view_worker(
         {"L0": (0, 64), "L1": (64, 64)},
         256,
         worker_cls=NixlPullConnectorWorker,
         shared_transfer_group=True,
         force_cuda_span_eligibility=True,
+        nixl_wrapper_cls=_CopyingRecordingNixl,
     )
     assert worker._nixl_packed_cache_span_active
     assert len(worker.src_blocks_data) == 4
+    assert "mixed-layout-peer" not in worker._peer_transfer_plans
 
-    matching_metadata = msgspec.msgpack.decode(
-        worker.xfer_handshake_metadata.agent_metadata_bytes,
-        type=NixlAgentMetadata,
-    )
-    matching_metadata.engine_id = "matching-layout-peer"
-    assert (
-        worker._prepare_peer_transfer_plan(
-            matching_metadata, remote_packed_span_active=True
-        )
-        is None
-    )
+    remote_l0 = torch.zeros((4, 512), dtype=torch.uint8)
+    remote_l1 = torch.zeros((4, 512), dtype=torch.uint8)
+    remote_l0[1].fill_(0x11)
+    remote_l1[3].fill_(0x33)
 
     metadata = msgspec.msgpack.decode(
         worker.xfer_handshake_metadata.agent_metadata_bytes,
         type=NixlAgentMetadata,
     )
     metadata.engine_id = "mixed-layout-peer"
-    metadata.kv_caches_base_addr = [0x20_000, 0x10_000]
+    metadata.kv_caches_base_addr = [remote_l1.data_ptr(), remote_l0.data_ptr()]
     metadata.block_lens = [64, 64]
     metadata.block_strides = [512, 512]
     metadata.region_num_blocks = [4, 4]
@@ -566,18 +581,13 @@ def test_mixed_packed_layout_read_completes_with_per_layer_peer_descriptors():
     metadata.region_mem_types = ["DRAM", "DRAM"]
     metadata.packed_member_layouts = {}
 
-    peer_plan = worker._prepare_peer_transfer_plan(
-        metadata, remote_packed_span_active=False
-    )
-    assert peer_plan is not None
+    worker.add_remote_agent(metadata, remote_tp_size=1)
+    peer_plan = worker._peer_transfer_plans[metadata.engine_id]
     assert metadata.region_names == ["L0", "L1"]
     assert metadata.region_group_ids == [0, 1]
-    assert metadata.kv_caches_base_addr == [0x10_000, 0x20_000]
+    assert metadata.kv_caches_base_addr == [remote_l0.data_ptr(), remote_l1.data_ptr()]
     assert peer_plan.local_region_num_blocks == (4, 4)
-
-    local_handle = worker._register_peer_local_xfer_handler(
-        peer_plan, metadata.block_size
-    )
+    local_handle = peer_plan.local_xfer_handles_by_block_size[metadata.block_size]
     local_descs = worker.nixl_wrapper.dlists[local_handle]
     assert len(local_descs) == 8
     assert local_descs[:, 0].tolist() == [
@@ -585,67 +595,6 @@ def test_mixed_packed_layout_read_completes_with_per_layer_peer_descriptors():
         for view in peer_plan.local_views
         for block in range(view.num_blocks)
     ]
-
-    remote_descs = worker._build_peer_fa_remote(metadata)
-    assert remote_descs[:, 0].tolist() == [
-        address + block * 512
-        for address in metadata.kv_caches_base_addr
-        for block in range(metadata.num_blocks)
-    ]
-
-    worker._peer_transfer_plans[metadata.engine_id] = peer_plan
-    local_by_region = worker._block_ids_by_region(
-        ([2],), [view.group_id for view in peer_plan.local_views]
-    )
-    remote_by_region = worker._block_ids_by_region(
-        ([1], [3]), metadata.region_group_ids
-    )
-    local_desc_ids = worker._compute_desc_ids(
-        local_by_region,
-        worker.num_blocks,
-        None,
-        1,
-        region_num_blocks=list(peer_plan.local_region_num_blocks),
-        region_group_ids=[0, 1],
-        uses_region_group_mapping=True,
-    )
-    remote_desc_ids = worker._compute_desc_ids(
-        remote_by_region,
-        metadata.num_blocks,
-        None,
-        1,
-        region_num_blocks=list(peer_plan.remote_region_num_blocks),
-        region_group_ids=[0, 1],
-        uses_region_group_mapping=True,
-    )
-    np.testing.assert_array_equal(local_desc_ids, [2, 6])
-    np.testing.assert_array_equal(remote_desc_ids, [1, 7])
-
-    second_rank_metadata = msgspec.msgpack.decode(
-        worker.xfer_handshake_metadata.agent_metadata_bytes,
-        type=NixlAgentMetadata,
-    )
-    second_rank_metadata.engine_id = "mixed-layout-peer"
-    second_rank_metadata.kv_caches_base_addr = [0x40_000, 0x30_000]
-    second_rank_metadata.block_lens = [64, 64]
-    second_rank_metadata.block_strides = [512, 512]
-    second_rank_metadata.region_num_blocks = [4, 4]
-    second_rank_metadata.region_group_ids = [1, 0]
-    second_rank_metadata.region_names = ["L1", "L0"]
-    second_rank_metadata.region_members = [["L1"], ["L0"]]
-    second_rank_metadata.region_mem_types = ["DRAM", "DRAM"]
-    second_rank_metadata.packed_member_layouts = {}
-    cached_plan = worker._prepare_peer_transfer_plan(
-        second_rank_metadata, remote_packed_span_active=False
-    )
-    assert cached_plan is peer_plan
-    assert (
-        worker._register_peer_local_xfer_handler(cached_plan, metadata.block_size)
-        == local_handle
-    )
-
-    worker.add_remote_agent(metadata, remote_tp_size=1)
-    assert worker._peer_transfer_plans[metadata.engine_id] is peer_plan
     remote_handle = worker.dst_xfer_side_handles[metadata.engine_id][0]
     assert len(worker.nixl_wrapper.dlists[remote_handle]) == 8
 
@@ -666,10 +615,31 @@ def test_mixed_packed_layout_read_completes_with_per_layer_peer_descriptors():
     worker._recving_metadata[request_id] = req_meta
     worker._read_blocks_for_req(request_id, req_meta)
 
-    op, _, local_desc_ids, _, remote_desc_ids = worker.nixl_wrapper.xfers[-1]
+    op, used_local_handle, local_desc_ids, used_remote_handle, remote_desc_ids = (
+        worker.nixl_wrapper.xfers[-1]
+    )
     assert op == "READ"
+    assert used_local_handle == local_handle
+    assert used_remote_handle == remote_handle
     np.testing.assert_array_equal(local_desc_ids, [2, 6])
     np.testing.assert_array_equal(remote_desc_ids, [1, 7])
+    np.testing.assert_array_equal(
+        worker.nixl_wrapper.dlists[used_local_handle][local_desc_ids],
+        [
+            [view.base_addr + 2 * view.block_stride, view.page_size, view.device_id]
+            for view in peer_plan.local_views
+        ],
+    )
+    np.testing.assert_array_equal(
+        worker.nixl_wrapper.dlists[used_remote_handle][remote_desc_ids],
+        [
+            [metadata.kv_caches_base_addr[0] + 512, 64, metadata.device_id],
+            [metadata.kv_caches_base_addr[1] + 3 * 512, 64, metadata.device_id],
+        ],
+    )
+
+    assert torch.all(raw[2 * 256 : 2 * 256 + 64] == 0x11)
+    assert torch.all(raw[2 * 256 + 64 : 2 * 256 + 128] == 0x33)
 
     results = worker.get_transfer_results()
     assert results.finished_recving == {request_id}
