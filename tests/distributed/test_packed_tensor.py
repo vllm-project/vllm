@@ -618,6 +618,7 @@ class TestPackedIpcRoundtrip:
         """Test basic IPC producer -> consumer roundtrip."""
         params = [
             ("w1", torch.randn(10, 20, dtype=torch.float32).cuda()),
+            ("scale", torch.tensor(1.5, dtype=torch.float32).cuda()),
             ("w2", torch.randn(5, dtype=torch.float16).cuda()),
         ]
         gpu_uuid = self._get_gpu_uuid()
@@ -634,7 +635,7 @@ class TestPackedIpcRoundtrip:
         )
 
         assert num_chunks == 1
-        assert len(result) == 2
+        assert len(result) == len(params)
         for (orig_name, orig_tensor), (res_name, res_tensor) in zip(params, result):
             assert orig_name == res_name
             assert res_tensor.shape == orig_tensor.shape
@@ -746,3 +747,29 @@ class TestPackedIpcRoundtrip:
                 tensor_sizes=c.tensor_sizes,
                 device_index=torch.cuda.current_device(),
             )
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+def test_pack_unpack_scalar(dtype):
+    """Preserve scalar shape, dtype and value alongside a matrix on CPU."""
+    params = [
+        ("weight", torch.randn(2, 3, dtype=dtype)),
+        ("scale", torch.tensor(1.5, dtype=dtype)),
+    ]
+
+    chunk = pack_tensors(iter(params), lambda item: item[1], buffer_size_bytes=1024)
+    assert chunk is not None
+
+    result = unpack_tensor(
+        chunk.packed_tensor,
+        chunk.names,
+        chunk.shapes,
+        chunk.dtypes,
+        chunk.tensor_sizes,
+    )
+
+    for (expected_name, expected), (name, actual) in zip(params, result, strict=True):
+        assert name == expected_name
+        assert actual.shape == expected.shape
+        assert actual.dtype == expected.dtype
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
