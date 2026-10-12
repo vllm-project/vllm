@@ -368,8 +368,9 @@ def test_triton_fp8_per_token_selection_requires_fp8(
 
 
 @pytest.mark.parametrize("backend", ["auto", "triton", "torch"])
-def test_triton_fp8_per_token_default_precedes_rowwise(monkeypatch, backend):
-    """Auto prefers Triton; an explicit torch backend must still select RowWise."""
+@pytest.mark.parametrize("platform", ["cuda", "rocm", "xpu"])
+def test_triton_fp8_per_token_is_preferred_only_on_rocm(monkeypatch, backend, platform):
+    """Prefer Triton on ROCm and preserve the other platforms' FP8 backends."""
     from vllm.config import KernelConfig, VllmConfig, set_current_vllm_config
     from vllm.model_executor.kernels import linear
     from vllm.model_executor.kernels.linear.scaled_mm.ScaledMMLinearKernel import (
@@ -381,14 +382,16 @@ def test_triton_fp8_per_token_default_precedes_rowwise(monkeypatch, backend):
     )
     from vllm.platforms.interface import PlatformEnum
 
-    monkeypatch.setattr(linear.current_platform, "_enum", PlatformEnum.ROCM)
-    monkeypatch.setattr(linear.current_platform, "is_cuda_alike", lambda: True)
+    platform_enum = PlatformEnum[platform.upper()]
+    monkeypatch.setattr(linear.current_platform, "_enum", platform_enum)
     monkeypatch.setenv("VLLM_DISABLED_KERNELS", "")
     eligible = (
         linear.TritonFp8PerTokenScaledMMKernel,
         linear.RowWiseTorchFP8ScaledMMLinearKernel,
+        linear.ChannelWiseTorchFP8ScaledMMLinearKernel,
+        linear.XPUW8A8FP8LinearKernel,
     )
-    for kernel in linear._POSSIBLE_FP8_KERNELS[PlatformEnum.ROCM]:
+    for kernel in set(linear._POSSIBLE_FP8_KERNELS[platform_enum]) | set(eligible):
         monkeypatch.setattr(
             kernel,
             "is_supported",
@@ -410,7 +413,16 @@ def test_triton_fp8_per_token_default_precedes_rowwise(monkeypatch, backend):
             compute_capability=90,
             quantization="fp8_w8a8",
         )
-    expected = eligible[1] if backend == "torch" else eligible[0]
+    if platform == "rocm":
+        expected = (
+            linear.RowWiseTorchFP8ScaledMMLinearKernel
+            if backend == "torch"
+            else linear.TritonFp8PerTokenScaledMMKernel
+        )
+    elif platform == "cuda" or backend == "torch":
+        expected = linear.ChannelWiseTorchFP8ScaledMMLinearKernel
+    else:
+        expected = linear.XPUW8A8FP8LinearKernel
     assert selected is expected
 
 

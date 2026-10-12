@@ -431,7 +431,6 @@ _POSSIBLE_FP8_KERNELS: dict[PlatformEnum, list[type[FP8ScaledMMLinearKernel]]] =
         CutlassFP8ScaledMMLinearKernel,
         B12xTensorFP8ScaledMMLinearKernel,
         PerTensorTorchFP8ScaledMMLinearKernel,
-        TritonFp8PerTokenScaledMMKernel,
         ChannelWiseTorchFP8ScaledMMLinearKernel,
         MarlinFP8ScaledMMLinearKernel,
         HummingFP8ScaledMMLinearKernel,
@@ -456,7 +455,6 @@ _POSSIBLE_FP8_KERNELS: dict[PlatformEnum, list[type[FP8ScaledMMLinearKernel]]] =
         XPUW8A16FP8LinearKernel,
         XPUW8A8FP8LinearKernel,
         PerTensorTorchFP8ScaledMMLinearKernel,
-        TritonFp8PerTokenScaledMMKernel,
         ChannelWiseTorchFP8ScaledMMLinearKernel,
     ],
 }
