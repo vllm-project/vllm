@@ -14,7 +14,6 @@ from vllm.model_executor.model_loader.reload.meta import materialize_layer
 from vllm.model_executor.model_loader.reload.types import LayerReloadingInfo
 from vllm.model_executor.model_loader.reload.utils import get_layer_tensors
 from vllm.model_executor.model_loader.weight_utils import (
-    initialize_dummy_weights,
     initialize_single_dummy_weight,
 )
 
@@ -41,7 +40,12 @@ class DummyModelLoader(BaseModelLoader):
             else:
                 # NOTE(woosuk): For accurate performance evaluation, we assign
                 # random values to the weights.
-                initialize_dummy_weights(layer, model_config)
+                # Initialize only local tensors: state_dict() would recursively
+                # initialize descendants that model.modules() also visits.
+                # Exclude nonpersistent buffers, matching state_dict().
+                for name, tensor in get_layer_tensors(layer).items():
+                    if name not in layer._non_persistent_buffers_set:
+                        initialize_single_dummy_weight(tensor)
 
     def _process_online_quant_layer(
         self,

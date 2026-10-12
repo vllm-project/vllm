@@ -18,7 +18,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
-from vllm.utils.math_utils import next_power_of_2
+from vllm.utils.math_utils import cdiv, next_power_of_2
 from vllm.utils.torch_utils import get_dtype_size, is_quantized_kv_cache
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -32,7 +32,6 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.attention.backends.utils import (
     compute_mm_prefix_range_tensor,
-    get_kv_cache_layout,
     get_num_attention_heads_from_layers,
 )
 from vllm.v1.attention.ops.triton_prefill_attention import context_attention_fwd
@@ -45,7 +44,6 @@ from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVQuantMode,
     get_kv_quant_mode,
-    kv_cache_uses_per_token_head_scales,
 )
 
 logger = init_logger(__name__)
@@ -154,10 +152,29 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
             )
 
         self.num_par_softmax_segments = NUM_PAR_SOFTMAX_SEGMENTS
+        # On SM120, batches whose 16-segment grid under-fills the SMs use 64.
+        self.max_seqs_64_segments = 0
+        if current_platform.is_cuda() and current_platform.is_device_capability(
+            (12, 0)
+        ):
+            self.max_seqs_64_segments = (current_platform.num_compute_units() - 1) // (
+                NUM_PAR_SOFTMAX_SEGMENTS * self.num_heads_kv
+            )
+        max_num_tokens_3d = self.seq_threshold_3D
+        if self.max_seqs_64_segments > 0:
+            self.num_par_softmax_segments = 64
+            # build() reuses this scratch at 16 segments with proportionally more rows.
+            max_num_tokens_3d = max(
+                min(self.max_seqs_64_segments, max_num_tokens_3d),
+                cdiv(
+                    max_num_tokens_3d,
+                    self.num_par_softmax_segments // NUM_PAR_SOFTMAX_SEGMENTS,
+                ),
+            )
         headdim_padded = next_power_of_2(self.headdim)
         self.softmax_segm_output = torch.empty(
             (
-                self.seq_threshold_3D,
+                max_num_tokens_3d,
                 self.num_heads_q,
                 self.num_par_softmax_segments,
                 headdim_padded,
@@ -166,12 +183,12 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
             device=device,
         )
         self.softmax_segm_max = torch.empty(
-            (self.seq_threshold_3D, self.num_heads_q, self.num_par_softmax_segments),
+            (max_num_tokens_3d, self.num_heads_q, self.num_par_softmax_segments),
             dtype=torch.float32,
             device=device,
         )
         self.softmax_segm_expsum = torch.empty(
-            (self.seq_threshold_3D, self.num_heads_q, self.num_par_softmax_segments),
+            (max_num_tokens_3d, self.num_heads_q, self.num_par_softmax_segments),
             dtype=torch.float32,
             device=device,
         )
@@ -248,6 +265,23 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
             softmax_segm_max=self.softmax_segm_max,
             softmax_segm_expsum=self.softmax_segm_expsum,
         )
+        if self.max_seqs_64_segments > 0 and (
+            self.max_seqs_64_segments < seq_lens.shape[0]
+            or self.softmax_segm_max.shape[0] < num_actual_tokens
+        ):
+            # The 16-segment grid fills the SMs, or the 64-segment rows cannot
+            # hold every query token: same scratch, 16-segment layout.
+            segments = NUM_PAR_SOFTMAX_SEGMENTS
+            attn_metadata.num_par_softmax_segments = segments
+            attn_metadata.softmax_segm_output = self.softmax_segm_output.view(
+                -1, self.num_heads_q, segments, self.softmax_segm_output.shape[-1]
+            )
+            attn_metadata.softmax_segm_max = self.softmax_segm_max.view(
+                -1, self.num_heads_q, segments
+            )
+            attn_metadata.softmax_segm_expsum = self.softmax_segm_expsum.view(
+                -1, self.num_heads_q, segments
+            )
 
         mm_ranges = common_attn_metadata.mm_req_doc_ranges
         if mm_ranges is not None:
@@ -306,7 +340,7 @@ class TritonAttentionBackend(AttentionBackend):
     ]
 
     @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
         return [MultipleOf(16)]
 
     @classmethod
@@ -326,6 +360,10 @@ class TritonAttentionBackend(AttentionBackend):
         return "TRITON_ATTN"
 
     @classmethod
+    def supports_rswa(cls) -> bool:
+        return True
+
+    @classmethod
     def supports_sliding_window(cls) -> bool:
         return True
 
@@ -336,62 +374,6 @@ class TritonAttentionBackend(AttentionBackend):
     @staticmethod
     def get_impl_cls() -> type["TritonAttentionImpl"]:
         return TritonAttentionImpl
-
-    @staticmethod
-    def get_kv_cache_shape(
-        num_blocks: int,
-        block_size: int,
-        num_kv_heads: int,
-        head_size: int,
-        cache_dtype_str: str = "auto",
-    ) -> tuple[int, ...]:
-        if block_size % 16 != 0:
-            raise ValueError("Block size must be a multiple of 16.")
-        # K and V are packed into the content dim: logical (B, H, N, 2*hs).
-        if kv_cache_uses_per_token_head_scales(cache_dtype_str):
-            # Pad the head dim by sizeof(float32)/sizeof(cache_dtype) so the
-            # per-(token, head) scale fits inline after the quantized data;
-            # the backend extracts data[:head_size] and scale[head_size:] via
-            # typed views (see _ensure_scale_caches).  INT4 packs two values
-            # per byte, so the data occupies only head_size // 2 bytes.
-            from vllm.utils.torch_utils import (
-                STR_DTYPE_TO_TORCH_DTYPE,
-                get_dtype_size,
-            )
-
-            cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_dtype_str]
-            scale_pad = get_dtype_size(torch.float32) // get_dtype_size(cache_dtype)
-            if get_kv_quant_mode(cache_dtype_str) == KVQuantMode.INT4_PER_TOKEN_HEAD:
-                data_head_size = head_size // 2
-            else:
-                data_head_size = head_size
-            padded_hs = data_head_size + scale_pad
-            return (num_blocks, num_kv_heads, block_size, 2 * padded_hs)
-        return (num_blocks, num_kv_heads, block_size, 2 * head_size)
-
-    @staticmethod
-    def get_kv_cache_stride_order(
-        include_num_layers_dimension: bool = False,
-    ) -> tuple[int, ...]:
-        # `stride_order` indicates the permutation that gets us from
-        # `get_kv_cache_shape` (logical (B, H, N, 2*hs)) to the actual memory
-        # layout we want.
-        cache_layout = get_kv_cache_layout()
-        if cache_layout == "NHD" and include_num_layers_dimension:
-            # (num_blocks, num_layers, block_size, num_kv_heads, 2*head_size)
-            return (1, 0, 3, 2, 4)
-        elif cache_layout == "NHD":
-            # (num_blocks, block_size, num_kv_heads, 2*head_size)
-            stride_order = (0, 2, 1, 3)
-        elif cache_layout == "HND" and include_num_layers_dimension:
-            # (num_blocks, num_kv_heads, num_layers, block_size, 2*head_size)
-            return (1, 2, 0, 3, 4)
-        elif cache_layout == "HND":
-            # (num_blocks, num_kv_heads, block_size, 2*head_size)
-            stride_order = (0, 1, 2, 3)
-        else:
-            raise ValueError(f"Unknown cache layout: {cache_layout}")
-        return stride_order
 
     @staticmethod
     def use_cascade_attention(*args, **kwargs) -> bool:
@@ -611,14 +593,21 @@ class TritonAttentionImpl(AttentionImpl):
         """Forward pass with Paged Attention impl. in Triton.
 
         Args:
+            layer: The attention layer, providing the q/k/v quantization scales.
             query: shape = [num_tokens, num_heads, head_size]
             key: shape = [num_tokens, num_kv_heads, head_size]
             value: shape = [num_tokens, num_kv_heads, head_size]
             kv_cache: shape =
                 [num_blocks, num_kv_heads, block_size, 2 * head_size]
             attn_metadata: Metadata for attention.
+            output: Tensor that the attention result is written into.
+            output_scale: Scale for fused output quantization.
+            output_block_scale: Block scale for fused output quantization;
+                not supported by this backend.
+
         Returns:
             shape = [num_tokens, num_heads * head_size]
+
         """
         if output_block_scale is not None:
             raise NotImplementedError(
@@ -778,6 +767,7 @@ class TritonAttentionImpl(AttentionImpl):
             output: shape = [num_encoder_tokens, num_heads, head_size]
             attn_metadata: Encoder attention metadata
             layer: The attention layer
+
         """
         # Quantized KV cache is not supported for encoder attention.
         if is_quantized_kv_cache(self.kv_cache_dtype):

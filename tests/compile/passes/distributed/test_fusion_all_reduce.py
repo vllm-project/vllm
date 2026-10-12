@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from importlib.util import find_spec
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -13,6 +14,7 @@ from vllm._custom_ops import cutlass_scaled_fp4_mm, scaled_fp4_quant
 from vllm.compilation.passes.fusion.allreduce_rms_fusion import (
     AllReduceFusionPass,
     RocmAiterAllReduceFusionPass,
+    _fused_ar_workspace_hidden_dim,
     _select_flashinfer_allreduce_use_oneshot,
 )
 from vllm.compilation.passes.fx_utils import find_op_nodes
@@ -77,6 +79,48 @@ def test_select_flashinfer_allreduce_use_oneshot(
         )
         is expected
     )
+
+
+def _make_workspace_hidden_config(
+    target_hidden: int, draft_hidden: int | None
+) -> SimpleNamespace:
+    """Minimal stand-in exposing only what _fused_ar_workspace_hidden_dim reads."""
+    speculative_config = None
+    if draft_hidden is not None:
+        speculative_config = SimpleNamespace(
+            draft_model_config=SimpleNamespace(
+                get_hidden_size=lambda: draft_hidden,
+            )
+        )
+    return SimpleNamespace(
+        model_config=SimpleNamespace(get_hidden_size=lambda: target_hidden),
+        speculative_config=speculative_config,
+    )
+
+
+@pytest.mark.parametrize(
+    ("target_hidden", "draft_hidden", "expected"),
+    [
+        (2048, None, 2048),  # no speculative decoding -> target only
+        (2048, 2560, 2560),  # draft wider than target -> draft (issue #52023)
+        (2048, 1024, 2048),  # draft narrower than target -> target
+        (2048, 2048, 2048),  # equal -> target
+    ],
+)
+def test_fused_ar_workspace_hidden_dim(
+    target_hidden: int, draft_hidden: int | None, expected: int
+):
+    config = _make_workspace_hidden_config(target_hidden, draft_hidden)
+    assert _fused_ar_workspace_hidden_dim(config) == expected
+
+
+def test_fused_ar_workspace_hidden_dim_spec_without_draft():
+    # speculative_config present but no draft model (e.g. ngram) -> target only.
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(get_hidden_size=lambda: 2048),
+        speculative_config=SimpleNamespace(draft_model_config=None),
+    )
+    assert _fused_ar_workspace_hidden_dim(config) == 2048
 
 
 class TestAllReduceRMSNormModel(torch.nn.Module):

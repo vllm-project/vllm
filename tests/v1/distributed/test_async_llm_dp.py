@@ -132,6 +132,26 @@ async def test_load(
         )
         after.callback(engine.shutdown)
 
+        # The first request an engine serves pays a few hundred milliseconds of
+        # one-off setup, and while it does the engine holds the requests already
+        # routed to it while reporting itself idle, which is enough to skew the
+        # split asserted on below. Pay it on every engine first, then measure.
+        await asyncio.gather(
+            *(
+                generate(
+                    engine,
+                    f"warmup-{rank}",
+                    prompt,
+                    output_kind,
+                    max_tokens=1,
+                    data_parallel_rank=rank,
+                )
+                for rank in range(DP_SIZE)
+            )
+        )
+        for sl in stats_loggers.values():
+            sl.finished_req_count = 0
+
         NUM_REQUESTS = 100
         NUM_EXPECTED_TOKENS = 10
 
@@ -493,7 +513,6 @@ async def test_dp_pause_abort(expert_parallel: bool):
 @pytest.mark.parametrize("expert_parallel", [False, True])
 async def test_dp_pause_keep_then_resume(expert_parallel: bool):
     """Start generation, pause after a few tokens (keep mode), resume; verify gap."""
-
     pause_duration = 2.0
     min_tokens_before_pause = 3
 
@@ -607,8 +626,7 @@ async def test_dp_pause_keep_race_staggered_engines():
 
 @pytest.mark.asyncio
 async def test_dp_pause_barrier_request_deadlock():
-    """
-    Test that start_dp_wave is ignored while paused.
+    """Test that start_dp_wave is ignored while paused.
 
     Sequence:
       1. Pause all engines (PAUSED_ALL).
@@ -701,7 +719,7 @@ async def test_dp_pause_barrier_request_deadlock():
         # Drive the staggered barrier.  Old code deadlocks here.
         try:
             await asyncio.wait_for(client.call_utility_async("barrier"), timeout=30)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             for t in mid_barrier_tasks:
                 t.cancel()
             pytest.fail(
@@ -713,3 +731,114 @@ async def test_dp_pause_barrier_request_deadlock():
         assert not await engine.is_paused()
         # Let the two requests we sent mid-barrier complete.
         await asyncio.gather(*mid_barrier_tasks)
+
+
+@pytest.mark.asyncio
+async def test_dp_pause_wait_mode_drains_in_flight():
+    """mode="wait" through the DP consensus path: the pause lets the
+    in-flight request run to completion while the consensus is pending,
+    resolves only once drained, and the engine generates again on resume."""
+    with ExitStack() as after:
+        engine = AsyncLLM.from_engine_args(_get_dp_pause_engine_args(True))
+        after.callback(engine.shutdown)
+
+        collector = await engine.add_request(
+            request_id="inflight",
+            prompt=DP_PAUSE_PROMPT,
+            params=SamplingParams(max_tokens=64),
+        )
+        # Wait for the first output, so drain has something to observe: a
+        # request still queued holds no blocks and is not waited on.
+        out = await asyncio.wait_for(collector.get(), timeout=30)
+        await engine.pause_generation(mode="wait")
+        assert await engine.is_paused()
+        while not out.finished:
+            out = await asyncio.wait_for(collector.get(), timeout=30)
+
+        await engine.resume_generation()
+        async for out in engine.generate(
+            request_id="after-wait",
+            prompt=DP_PAUSE_PROMPT,
+            sampling_params=SamplingParams(max_tokens=5),
+        ):
+            pass
+        assert out.finished
+
+
+@pytest.mark.asyncio
+async def test_dp_pause_while_asleep():
+    """Pausing a sleeping DP engine: sleeping ranks skip dummy batches yet
+    must still reach the pause consensus, and the completion barrier must
+    be harmless on workers whose memory is unmapped."""
+    with ExitStack() as after:
+        engine = AsyncLLM.from_engine_args(_get_dp_pause_engine_args(True))
+        after.callback(engine.shutdown)
+
+        async for _ in engine.generate(
+            request_id="warmup",
+            prompt=DP_PAUSE_PROMPT,
+            sampling_params=SamplingParams(max_tokens=5),
+        ):
+            pass
+        await engine.sleep(level=1)
+        assert await engine.is_sleeping()
+
+        await asyncio.wait_for(engine.pause_generation(mode="abort"), timeout=30)
+        assert await engine.is_paused()
+
+        # A full wake makes the memory resident and resumes the scheduler.
+        await engine.wake_up()
+        assert not await engine.is_sleeping()
+        async for out in engine.generate(
+            request_id="after-wake",
+            prompt=DP_PAUSE_PROMPT,
+            sampling_params=SamplingParams(max_tokens=5),
+        ):
+            pass
+        assert out.finished
+
+
+@pytest.mark.asyncio
+async def test_dp_pause_completion_implies_device_idle(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A resolved pause future promises an idle device. Inflate the dummy
+    batches the pause consensus manufactures so any work the pause fails to
+    wait on stays visible, then require a quiet worker stream the moment
+    pause_generation() returns."""
+    with ExitStack() as after:
+        # The probes below ship functions through collective_rpc.
+        monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+        engine = AsyncLLM.from_engine_args(_get_dp_pause_engine_args(True))
+        after.callback(engine.shutdown)
+
+        async for _ in engine.generate(
+            request_id="warmup",
+            prompt=DP_PAUSE_PROMPT,
+            sampling_params=SamplingParams(max_tokens=5),
+        ):
+            pass
+
+        def inflate_dummy_batches(worker: Any) -> bool:
+            import torch
+
+            inner = worker.execute_dummy_batch
+
+            def slow_dummy_batch() -> None:
+                inner()
+                # Keep the stream busy after launch, like a large-MoE forward.
+                torch.cuda._sleep(200_000_000)
+
+            worker.execute_dummy_batch = slow_dummy_batch
+            return True
+
+        assert all(await engine.engine_core.collective_rpc_async(inflate_dummy_batches))
+
+        await asyncio.wait_for(engine.pause_generation(mode="abort"), timeout=60)
+
+        def device_idle(worker: Any) -> bool:
+            import torch
+
+            return bool(torch.cuda.current_stream().query())
+
+        assert all(await engine.engine_core.collective_rpc_async(device_idle))

@@ -547,7 +547,8 @@ __device__ void cooperative_topk_body(CooperativeTopKParams<TopK> params) {
         {};  // tracks the parity for mbarrier wait/arrive protocol
     large_topk<TopK, CS, FusedSmem, true>(in, out, sl, phases, row_tie_ws);
   } else {
-    // Two-pass: only CS=4 in practice (CS=8 always fits in singlepass)
+    // Streaming path for cluster sizes whose per-block input exceeds the
+    // single-pass staging capacity.
     auto* smem = reinterpret_cast<Smem4*>(sr);
     if (tx < 2 * kStreamingStagesCS4) {
       mbarrier_init(&smem->barrier[0][tx],
@@ -558,6 +559,13 @@ __device__ void cooperative_topk_body(CooperativeTopKParams<TopK> params) {
                                         0};  // histogram+scatter pass counters
     large_topk<TopK, CS, Smem4, false>(in, out, sl, hp, row_tie_ws);
   }
+}
+
+template <uint32_t TopK>
+__global__ void __launch_bounds__(hist4096::kBlockSize, 1)
+    __cluster_dims__(1, 2, 1)
+        cooperative_topk_cs2(CooperativeTopKParams<TopK> params) {
+  cooperative_topk_body<TopK, 2>(params);
 }
 
 template <uint32_t TopK>
@@ -586,6 +594,7 @@ constexpr size_t kSmemSize4_sp = sizeof(SmemSinglePass);
 constexpr size_t kSmemSize4 =
     (kSmemSize4_base > kSmemSize4_sp ? kSmemSize4_base : kSmemSize4_sp) +
     sizeof(int32_t) * 2048 + 128;
+constexpr size_t kSmemSize2 = kSmemSize4;
 constexpr size_t kSmemSize8 =
     sizeof(SmemFused<kFusedStagesCS8>) + sizeof(int32_t) * 2048 + 128;
 

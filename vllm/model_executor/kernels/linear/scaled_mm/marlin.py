@@ -27,8 +27,7 @@ from .ScaledMMLinearKernel import (
 
 
 class MarlinFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
-    """
-    FP8 Marlin kernel for GPUs that lack FP8 hardware support.
+    """FP8 Marlin kernel for GPUs that lack FP8 hardware support.
     Leverages the Marlin kernel for fast weight-only FP8 quantization.
     """
 
@@ -57,14 +56,21 @@ class MarlinFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         self.block_quant = self.config.weight_quant_key in {kFp8Static128BlockSym}
         self.size_k_first = not self.block_quant
 
+    @staticmethod
+    def _block_scale_name(layer: torch.nn.Module) -> str:
+        if getattr(layer, "weight_scale_inv", None) is not None:
+            return "weight_scale_inv"
+        return "weight_scale"
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         if self.block_quant:
-            weight, weight_scale_inv = process_fp8_weight_block_strategy(
-                layer.weight, layer.weight_scale_inv
+            scale_name = self._block_scale_name(layer)
+            weight, weight_scale = process_fp8_weight_block_strategy(
+                layer.weight, getattr(layer, scale_name)
             )
             # Update layer with new values
             replace_parameter(layer, "weight", weight.data)
-            replace_parameter(layer, "weight_scale_inv", weight_scale_inv.data)
+            replace_parameter(layer, scale_name, weight_scale.data)
         # Non-block: callers must pass weight in (K, N) layout.
 
         layer.input_scale = None
@@ -80,14 +86,14 @@ class MarlinFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if self.block_quant:
-            weight_scale = layer.weight_scale_inv
+            weight_scale = getattr(layer, self._block_scale_name(layer))
         else:
             weight_scale = layer.weight_scale
         return apply_fp8_marlin_linear(
             input=x,
             weight=layer.weight,
             weight_scale=weight_scale,
-            workspace=layer.workspace,
+            workspace=None,
             size_n=layer.output_size_per_partition,
             size_k=layer.input_size_per_partition,
             input_dtype=self.marlin_input_dtype,
