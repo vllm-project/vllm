@@ -238,6 +238,7 @@ async fn generate_chunk_stream(
                         stop_reason,
                         token_ids,
                         sampling_mask: output.sampling_mask.map(|mask| mask.rows),
+                        weight_versions: output.weight_versions,
                     }],
                     usage: include_continuous_usage
                         .then(|| Usage::from_token_usage(usage, enable_prompt_tokens_details)),
@@ -341,6 +342,7 @@ fn collect_generate(
             stop_reason,
             token_ids: collected.token_ids,
             sampling_mask: collected.sampling_mask.map(|mask| mask.rows),
+            weight_versions: collected.weight_versions,
         }],
         prompt_logprobs,
         prompt_token_id_logprobs: collected
@@ -634,6 +636,7 @@ mod tests {
                 ec_transfer_params: None,
                 sampling_mask: None,
                 spec_decode_metrics: None,
+                weight_versions: None,
             }),
             Ok(GenerateOutput {
                 request_id: String::new(),
@@ -650,6 +653,7 @@ mod tests {
                 ec_transfer_params: None,
                 sampling_mask: None,
                 spec_decode_metrics: None,
+                weight_versions: None,
             }),
         ]);
 
@@ -736,6 +740,7 @@ mod tests {
             ec_transfer_params: None,
             sampling_mask: None,
             spec_decode_metrics: None,
+            weight_versions: None,
         }
     }
 
@@ -910,6 +915,7 @@ mod tests {
                 rows: vec![vec![30, 40]],
             }),
             spec_decode_metrics: None,
+            weight_versions: None,
         };
 
         let response = collect_generate(
@@ -964,6 +970,7 @@ mod tests {
             prompt_token_ids: vec![10],
             sampling_mask: None,
             spec_decode_metrics: Some(metrics.clone()),
+            weight_versions: None,
         };
 
         let response = collect_generate(
@@ -1056,6 +1063,7 @@ mod tests {
             prompt_token_ids: vec![10, 20],
             sampling_mask: None,
             spec_decode_metrics: None,
+            weight_versions: None,
         };
 
         let response = collect_generate(
@@ -1091,6 +1099,7 @@ mod tests {
             ec_transfer_params: None,
             sampling_mask: None,
             spec_decode_metrics: None,
+            weight_versions: None,
             prompt_token_ids,
         };
 
