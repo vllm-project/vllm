@@ -11,6 +11,7 @@ use zeromq::prelude::{SocketRecv, SocketSend};
 use zeromq::{XPubSocket, ZmqError, ZmqMessage};
 
 use crate::client::imp::ClientInner;
+use crate::coordinator::bootstrap::is_engine_subscription;
 use crate::coordinator::handle::{CoordinatorCommand, CoordinatorState};
 use crate::error::{Error, Result, bail_unexpected_coordinator_output};
 use crate::protocol::encode_msgpack;
@@ -187,13 +188,15 @@ impl InProcCoordinatorRunner {
         let result: Result<()> = async {
             loop {
                 tokio::select! {
-                    // XPUB applies subscription changes only when they are received.
+                    // Keep receiving engine subscriptions: zmq.rs XPUB registers a
+                    // subscription only when `recv()` yields it (unlike libzmq), so an
+                    // engine whose XSUB reconnects gets no broadcasts until we read its
+                    // subscribe-all. If a wave is running, replay it so that engine does
+                    // not miss the `START_DP_WAVE` sent while it was disconnected.
                     subscription = self.coordinator_input.recv() => {
                         match subscription {
                             Ok(message) => {
-                                let is_subscribe_all = message.len() == 1
-                                    && message.get(0).is_some_and(|frame| frame.as_ref() == [0x01]);
-                                if is_subscribe_all {
+                                if is_engine_subscription(&message) {
                                     let state = *self.state.lock();
                                     if state.engines_running {
                                         debug!(
