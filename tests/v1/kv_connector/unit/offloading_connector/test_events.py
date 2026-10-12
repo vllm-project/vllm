@@ -3,6 +3,7 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import msgspec
 import pytest
 import torch
 
@@ -12,6 +13,7 @@ from vllm.distributed.kv_events import (
     MEDIUM_CPU,
     BlockRemoved,
     BlockStored,
+    KVEventBatch,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.config import (
     build_offloading_config,
@@ -410,6 +412,27 @@ def test_promotion_emits_full_cpu_stored_event():
     assert event.group_idx == 0
     assert event.kv_cache_spec_kind == KVCacheSpecKind.FULL_ATTENTION.value
     assert event.kv_cache_spec_sliding_window is None
+
+
+def test_cpu_stored_wire_distinguishes_unsalted_from_unknown():
+    tracker = _tracker()
+    req = _request(block_hashes=[_hash(0)], token_count=4)
+    [key] = _record_chunks(tracker, req, _group_config(), num_chunks=1)
+
+    [known] = tracker.take_events([_stored_event([key], req_context=req.req_context)])
+    unknown_tracker = _tracker()
+    [unknown] = unknown_tracker.take_events([_stored_event([key])])
+    payload = msgspec.msgpack.Encoder().encode(
+        KVEventBatch(ts=0.0, events=[known, unknown])
+    )
+
+    wire_events = msgspec.msgpack.decode(payload)[1]
+    assert wire_events[0]["extra_keys"] == [None]
+    assert "extra_keys" not in wire_events[1]
+
+    decoded = msgspec.msgpack.decode(payload, type=KVEventBatch)
+    assert decoded.events[0].extra_keys == [None]
+    assert decoded.events[1].extra_keys is None
 
 
 def test_request_event_context_builds_payload_lazily():
