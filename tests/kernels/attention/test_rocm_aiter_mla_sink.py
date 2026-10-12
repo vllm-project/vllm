@@ -156,6 +156,8 @@ def test_sparse_mla_sink_matches_ragged_reference(
         num_decodes=batch_size,
         num_decode_tokens=batch_size,
         max_query_len=1,
+        max_seq_len=max(seq_lens),
+        topk_tokens=max(seq_lens),
     )
     sinks = torch.linspace(-2.0, 6.0, real_heads, device=device)
 
@@ -367,12 +369,15 @@ def test_sparse_mla_sink_matches_dense_attention_with_empty_rows_and_paged_cache
         for page, offset in rows
     ]
     lengths = torch.tensor([0, *(len(rows) for rows in selected_rows)])
+    longest_row = max(len(rows) for rows in selected_rows)
     metadata = SimpleNamespace(
         block_size=block_size,
         num_prefills=0,
         num_decodes=len(selected_rows),
         num_decode_tokens=len(selected_rows),
         max_query_len=1,
+        max_seq_len=longest_row,
+        topk_tokens=longest_row,
         qo_indptr=torch.arange(
             len(selected_rows) + 1, dtype=torch.int32, device="cuda"
         ),
@@ -458,7 +463,7 @@ def test_sparse_mla_sink_forward_mqa_preserves_split_query(dtype):
     set_random_seed(412)
     num_tokens, num_heads, block_size = 2, 8, 16
     q = torch.randn(num_tokens, num_heads, Q_HEAD_DIM, device="cuda").to(dtype)
-    kv = torch.randn(2 * block_size, 1, Q_HEAD_DIM, device="cuda").to(dtype)
+    kv = torch.randn(2, 2, block_size, Q_HEAD_DIM, device="cuda").to(dtype)[:, 1]
     selected = torch.tensor([[1, 7, 18], [0, 3, 20]], dtype=torch.int32, device="cuda")
     sinks = torch.linspace(-3.0, 5.0, num_heads, device="cuda")
     impl = object.__new__(ROCMAiterMLASparseImpl)
@@ -479,6 +484,7 @@ def test_sparse_mla_sink_forward_mqa_preserves_split_query(dtype):
         num_decodes=num_tokens,
         num_decode_tokens=num_tokens,
         max_query_len=1,
+        max_seq_len=kv.shape[0],
         block_size=block_size,
         topk_tokens=impl.topk_indices_buffer.shape[1],
         req_id_per_token=torch.zeros(num_tokens, dtype=torch.int32, device="cuda"),
@@ -498,7 +504,7 @@ def test_sparse_mla_sink_forward_mqa_preserves_split_query(dtype):
         SimpleNamespace(_q_scale=None, _k_scale=None),
     )
     references = [
-        _sink_reference(q[i], kv[:, 0][selected[i].long()], sinks, SM_SCALE)
+        _sink_reference(q[i], kv.flatten(0, 1)[selected[i].long()], sinks, SM_SCALE)
         for i in range(num_tokens)
     ]
     expected, _, value_scale, score_error = (

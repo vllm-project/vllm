@@ -12,7 +12,7 @@ from torch.nn.parameter import Parameter
 
 import vllm.envs as envs
 from vllm.config import get_current_vllm_config_or_none
-from vllm.config.quantization import QuantSpec
+from vllm.config.quantization import QuantizationConfigArgs, QuantSpec
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear import (
     init_fp8_linear_kernel,
@@ -63,6 +63,9 @@ from vllm.model_executor.layers.quantization.base_config import (
 )
 from vllm.model_executor.layers.quantization.fp8 import Fp8Config, Fp8MoEMethod
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
+from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
+    trtllm_nvfp4_hidden_alignment,
+)
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     FP8_SCALE_SENTINEL,
     process_fp8_input_tensor_strategy_moe,
@@ -90,6 +93,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp8Dynamic,
     kMxfp8Static,
     kNvfp4Dynamic,
+    kNvfp4DynamicToken,
     kNvfp4Static,
 )
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
@@ -724,12 +728,18 @@ class ModelOptNvFp4Config(ModelOptQuantConfigBase):
         kv_cache_quant_algo: str | None = None,
         exclude_modules: list[str] | None = None,
         group_size: int = 16,
+        *,
+        quantization_args: QuantizationConfigArgs | None = None,
     ) -> None:
         if exclude_modules is None:
             exclude_modules = []
         super().__init__(exclude_modules)
         self.quant_method = quant_method
         self.is_checkpoint_nvfp4_serialized = is_checkpoint_nvfp4_serialized
+        moe_spec = quantization_args.moe if quantization_args is not None else None
+        self.moe_activation_override: QuantKey | None = (
+            moe_spec.activation if moe_spec is not None else None
+        )
         if is_checkpoint_nvfp4_serialized:
             self.group_size = group_size
             self.kv_cache_quant_algo = kv_cache_quant_algo
@@ -815,6 +825,7 @@ class ModelOptNvFp4Config(ModelOptQuantConfigBase):
             kv_cache_quant_method,
             exclude_modules,
             group_size,
+            quantization_args=original_config.get("_online_quantization_args"),
         )
 
 
@@ -835,18 +846,36 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
     ) -> None:
         super().__init__(moe_config)
         self.quant_config = quant_config
-        # W4A16 mode fires for W4A16_NVFP4 on-disk checkpoints. With
-        # activation_key=None every W4A4 backend's _supports_quant_scheme
-        # rejects itself (they all require (kNvfp4Static, kNvfp4Dynamic)
-        # exactly); only Marlin survives. Marlin's MoE path drops
-        # activation scales in convert_to_nvfp4_moe_kernel_format, so no
-        # other change is needed.
         self.use_a16 = quant_config.quant_method == "W4A16_NVFP4"
+        activation_key = None if self.use_a16 else kNvfp4Dynamic
+
+        if quant_config.moe_activation_override is not None:
+            if self.use_a16:
+                raise ValueError(
+                    "NVFP4 activation overrides require a W4A4 checkpoint."
+                )
+            activation_key = quant_config.moe_activation_override
+            if activation_key not in (kNvfp4Dynamic, kNvfp4DynamicToken):
+                raise ValueError(
+                    "Unsupported ModelOpt NVFP4 MoE activation override: "
+                    f"{activation_key}. Use quantization_config.moe.activation="
+                    "'nvfp4_per_token' or omit the override."
+                )
+        self.per_token_activation = activation_key == kNvfp4DynamicToken
+
         self.nvfp4_backend, self.experts_cls = select_nvfp4_moe_backend(
             config=self.moe,
             weight_key=kNvfp4Static,
-            activation_key=None if self.use_a16 else kNvfp4Dynamic,
+            activation_key=activation_key,
         )
+        if (
+            self.per_token_activation
+            and self.nvfp4_backend != NvFp4MoeBackend.FLASHINFER_TRTLLM
+        ):
+            raise ValueError(
+                "Per-token NVFP4 activation for pre-quantized weights "
+                "requires the FlashInfer TRTLLM MoE backend."
+            )
 
         self.use_global_sf = is_global_sf_supported_for_nvfp4_backend(
             self.nvfp4_backend
@@ -984,6 +1013,10 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             self._build_moe_kernel(layer)
             return
 
+        if self.per_token_activation:
+            layer.w13_input_scale.data.fill_(1.0)
+            layer.w2_input_scale.data.fill_(1.0)
+
         # Use a single gscale for w13.
         if self.moe.is_act_and_mul and not torch.allclose(
             layer.w13_weight_scale_2[:, 0], layer.w13_weight_scale_2[:, 1]
@@ -1016,6 +1049,10 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             a2_scale=layer.w2_input_scale,
             is_act_and_mul=self.moe.is_act_and_mul,
             use_a16=self.use_a16,
+            trtllm_hidden_alignment=trtllm_nvfp4_hidden_alignment(
+                per_token_activation=self.per_token_activation,
+                is_act_and_mul=self.moe.is_act_and_mul,
+            ),
         )
 
         replace_parameter(layer, "w13_weight", w13)
@@ -1039,6 +1076,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             experts_cls=self.experts_cls,
             backend=self.nvfp4_backend,
             routing_tables=layer._expert_routing_tables(),
+            per_token_activation=self.per_token_activation,
         )
         self.moe_kernel.fused_experts.process_weights_after_loading(layer)
 
@@ -1588,6 +1626,7 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
         group_size: int | None,
         **kwargs: Any,
     ) -> "ModelOptMixedPrecisionConfig":
+        quantization_args = original_config.get("_online_quantization_args")
         if "quantization" in original_config:
             quantized_layers = original_config["quantization"].get(
                 "quantized_layers", {}
@@ -1626,6 +1665,7 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
             kv_cache_quant_algo=kv_cache_quant_method,
             exclude_modules=[],
             group_size=group_size,
+            quantization_args=quantization_args,
         )
         # Sibling config for layers that declare quant_algo: "W4A16_NVFP4".
         # get_quant_method resolves this sub-config to the (kNvfp4Static, None)
@@ -1638,6 +1678,7 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
             kv_cache_quant_algo=kv_cache_quant_method,
             exclude_modules=[],
             group_size=group_size,
+            quantization_args=quantization_args,
         )
 
         mxfp8_config = ModelOptMxFp8Config(
