@@ -978,6 +978,8 @@ class VllmBackend:
         self.inductor_config["_cache_config_ignore_prefix"] = ignore
 
         # Configure the (nominally post-grad) pass manager
+        # The graph name lets the fusion passes tell the target model from a draft head.
+        self.pass_manager.compile_prefix = self.prefix
         self.pass_manager.configure(self.vllm_config)
 
         # Post-grad custom passes are run using the post_grad_custom_post_pass
@@ -1255,6 +1257,12 @@ class VllmBackend:
         PiecewiseCompileInterpreter(
             self.split_gm, submod_names_to_compile, self.vllm_config, self
         ).run(*fake_args)
+
+        # Every piece is compiled for every range: let passes judge the whole graph.
+        # A platform pass manager (get_pass_manager_cls) may not have the hook.
+        finish_compile = getattr(self.pass_manager, "finish_compile", None)
+        if finish_compile is not None:
+            finish_compile()
 
         # All compilation is done. Save the cache.
         time_before_saving = time.perf_counter()
