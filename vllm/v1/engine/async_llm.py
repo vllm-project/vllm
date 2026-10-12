@@ -4,7 +4,6 @@ import asyncio
 import os
 import socket
 import time
-import warnings
 from collections.abc import AsyncGenerator, Iterable, Mapping
 from copy import copy
 from typing import Any
@@ -44,7 +43,7 @@ from vllm.renderers.inputs.preprocess import extract_prompt_components
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.tasks import SupportedTask
 from vllm.tokenizers import TokenizerLike
-from vllm.tracing import init_tracer
+from vllm.tracing import init_tracer, log_tracing_disabled_warning
 from vllm.transformers_utils.config import maybe_register_config_serialize_by_value
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.async_utils import cancel_task_threadsafe
@@ -402,6 +401,10 @@ class AsyncLLM(EngineClient):
         """Add new request to the AsyncLLM."""
         if self.errored:
             raise EngineDeadError()
+
+        if trace_headers and self.observability_config.otlp_traces_endpoint is None:
+            log_tracing_disabled_warning()
+            trace_headers = None
 
         is_pooling = isinstance(params, PoolingParams)
 
@@ -852,7 +855,10 @@ class AsyncLLM(EngineClient):
                         outputs_slice = engine_core_outputs[start:end]
                         # 2) Process EngineCoreOutputs.
                         processed_outputs = output_processor.process_outputs(
-                            outputs_slice, outputs.timestamp, iteration_stats
+                            outputs_slice,
+                            outputs.timestamp,
+                            iteration_stats,
+                            weight_version=outputs.weight_version,
                         )
                         # NOTE: RequestOutputs are pushed to their queues.
                         assert not processed_outputs.request_outputs
@@ -940,7 +946,6 @@ class AsyncLLM(EngineClient):
         self,
         *,
         mode: PauseMode = "abort",
-        wait_for_inflight_requests: bool | None = None,
         clear_cache: bool = True,
     ) -> None:
         """Pause generation to allow model weight updates.
@@ -956,20 +961,10 @@ class AsyncLLM(EngineClient):
                 - ``"wait"``: Wait for in-flight requests to complete.
                 - ``"keep"``: Freeze requests in queue; they resume on
                   :meth:`resume_generation`.
-            wait_for_inflight_requests: DEPRECATED: use mode argument.
             clear_cache: Whether to clear KV cache and prefix cache after
                 draining. Set to ``False`` to preserve cache for faster resume.
 
         """
-        if wait_for_inflight_requests:
-            warnings.warn(
-                "The `wait_for_inflight_requests` parameter in "
-                "`AsyncLLM.pause_generation()` is deprecated. "
-                "Please use `mode` argument instead.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-            mode = "wait"
         if clear_cache:
             await self.renderer.clear_mm_cache_async()
         await self.engine_core.pause_scheduler_async(mode=mode, clear_cache=clear_cache)
@@ -1322,6 +1317,10 @@ class AsyncLLM(EngineClient):
         await self.collective_rpc(
             "init_weight_transfer_engine", kwargs={"init_info": request.init_info}
         )
+
+    async def shutdown_weight_transfer_engine(self) -> None:
+        """Release the trainer connection without shutting down inference."""
+        await self.collective_rpc("shutdown_weight_transfer_engine")
 
     async def start_weight_update(self) -> None:
         """Start a new weight update."""
