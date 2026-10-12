@@ -69,7 +69,7 @@ class StandaloneARSpeculator(DraftModelSpeculator):
         self.supports_mm_inputs = False
 
     def capture(self) -> None:
-        logger.info("Capturing model for plain draft-model speculator...")
+        logger.info("Capturing standalone AR speculator...")
         self.last_token_indices.zero_()
         self.idx_mapping.zero_()
         self.current_draft_step.zero_()
@@ -83,7 +83,7 @@ class StandaloneARSpeculator(DraftModelSpeculator):
             self.block_tables,
             self.attn_groups,
             self.kv_cache_config,
-            progress_bar_desc="Capturing plain draft prefill CUDA graphs",
+            progress_bar_desc="Capturing standalone AR prefill CUDA graphs",
         )
 
         if self.num_speculative_steps == 1:
@@ -97,7 +97,7 @@ class StandaloneARSpeculator(DraftModelSpeculator):
             self.block_tables,
             self.attn_groups,
             self.kv_cache_config,
-            progress_bar_desc="Capturing plain draft decode CUDA graphs",
+            progress_bar_desc="Capturing standalone AR decode CUDA graphs",
         )
 
     @property
@@ -440,8 +440,8 @@ class StandaloneARSpeculator(DraftModelSpeculator):
                 max_query_len + self.num_extra_query_per_req,
                 input_batch.decode_graph_eligible,
             )
-            # Plain prefill adds a correction-token slot per request, so it
-            # needs a separate DP sync for the expanded batch.
+            # Standalone AR prefill adds a correction-token slot per request,
+            # so it needs a separate DP sync for the expanded batch.
             prefill_batch_desc, prefill_batch_sync = dispatch_cg_and_sync_dp(
                 self.prefill_cudagraph_manager,
                 num_reqs,
@@ -503,8 +503,8 @@ class StandaloneARSpeculator(DraftModelSpeculator):
             return self.draft_tokens[:num_reqs, :1]
 
         decode_sync, num_batch_tokens = (
-            self._build_uniform_batch_dp_sync(dp_sync, num_reqs)
-            if dp_sync is not None
+            self._build_uniform_batch_dp_sync(dp_sync_state, num_reqs)
+            if dp_sync_state is not None
             else (None, num_reqs)
         )
         decode_batch_desc, decode_sync = dispatch_cg_and_sync_dp(
@@ -515,7 +515,7 @@ class StandaloneARSpeculator(DraftModelSpeculator):
             dp_size=self.dp_size,
             dp_rank=self.dp_rank,
             need_eager=is_profile,
-            dp_sync=decode_sync,
+            dp_sync_state=decode_sync,
         )
         decode_num_tokens_across_dp = (
             decode_sync.num_tokens_across_dp if decode_sync is not None else None
