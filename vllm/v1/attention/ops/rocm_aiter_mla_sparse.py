@@ -56,6 +56,15 @@ def _indexer_k_is_c4a_block_flat(compress_ratio: int) -> bool:
     return compress_ratio == 4
 
 
+def _indexer_cache_layout(block_size: int) -> str:
+    """Values layout of the persistent indexer KV cache for non-C4A models.
+
+    ``indexer_k_quant_and_cache_triton`` writes the 16x16 preshuffled (SHUFFLE)
+    layout for ``block_size > 1`` and plain pos-major (NORMAL) otherwise.
+    """
+    return "NORMAL" if block_size <= 1 else "SHUFFLE"
+
+
 @triton.jit
 def _localize_aiter_prefill_topk_kernel(
     indices_ptr,
@@ -565,6 +574,9 @@ def _fp8_paged_mqa_logits_decode_kernel(
     N_SPLITS: tl.constexpr,  # KV-tile parallelism factor (grid dim 1)
     NEXT_N: tl.constexpr,  # query positions per batch (1 = decode; >1 = MTP verify)
     CTX_PER_ROW: tl.constexpr,  # ctx_lens is already per-(b, n)
+    SHUFFLE: tl.constexpr,  # values region is 16x16 tiled, not plain pos-major
+    BLOCK_TILE_SIZE: tl.constexpr,  # positions per shuffle tile
+    HEAD_TILE_SIZE: tl.constexpr,  # head-dim elements per shuffle tile
 ):
     # scale_region_off = block_size*D//4 needs D % 4 == 0 (D=128).
     tl.static_assert(HEAD_SIZE % 4 == 0)
@@ -599,8 +611,25 @@ def _fp8_paged_mqa_logits_decode_kernel(
         ).to(tl.int64)
         pos_in_blk = pos - logical_blk * BLOCK_SIZE  # [BLOCK_KV] == pos % BLOCK_SIZE
 
-        # block-flat layout: values region, then scales region.
-        val_off = page * stride_kvblk_fp8 + pos_in_blk[:, None] * HEAD_SIZE + d[None, :]
+        # Values region, then scales region. The values are either plain
+        # pos-major (block-flat) or 16x16 tiled (SHUFFLE, what the in-tree
+        # Triton writer emits for block_size > 1). Only the values are tiled --
+        # the scales stay pos-major in both layouts, so the load below is
+        # unchanged. The SHUFFLE offset separates into a per-position and a
+        # per-dim term, and indexing by natural d keeps kv in natural dim order
+        # so the tl.dot is unchanged too.
+        if SHUFFLE:
+            pos_part = (pos_in_blk // BLOCK_TILE_SIZE) * (
+                BLOCK_TILE_SIZE * HEAD_SIZE
+            ) + (pos_in_blk % BLOCK_TILE_SIZE) * HEAD_TILE_SIZE
+            dim_part = (d // HEAD_TILE_SIZE) * (BLOCK_TILE_SIZE * HEAD_TILE_SIZE) + (
+                d % HEAD_TILE_SIZE
+            )
+            val_off = page * stride_kvblk_fp8 + pos_part[:, None] + dim_part[None, :]
+        else:
+            val_off = (
+                page * stride_kvblk_fp8 + pos_in_blk[:, None] * HEAD_SIZE + d[None, :]
+            )
         kv = tl.load(
             kv_val_ptr + val_off, mask=mask_pos[:, None], other=0.0
         )  # [BLOCK_KV, D] fp8
@@ -627,13 +656,42 @@ def rocm_fp8_paged_mqa_logits_triton(
     context_lens: torch.Tensor,
     block_tables: torch.Tensor,
     max_model_len: int,
+    cache_layout: str | None = None,
 ) -> torch.Tensor:
     """Triton paged MQA-logits for decode and MTP; matches the torch ref but
-    has no host sync, so it is safe to capture under a full CUDA graph."""
+    has no host sync, so it is safe to capture under a full CUDA graph.
+
+    Args:
+        q_fp8: Query tensor of shape [B, next_n, H, D], fp8.
+        kv_cache_fp8: Paged KV-cache in packed FP8+scale layout with shape
+            [num_blocks, block_size, 1, D+4], dtype `torch.uint8`.
+        weights: Tensor of shape [B * next_n, H], dtype `torch.float32`.
+        context_lens: Effective context length per query, int32; either [B] or
+            [B, next_n] (one row per query, as speculative decode passes it).
+        block_tables: Tensor of shape [B, max_blocks], dtype int32; maps logical
+            block indices to physical blocks in the paged cache.
+        max_model_len: Maximum sequence length used to size the logits output.
+        cache_layout: Values layout of the indexer cache -- ``"NORMAL"`` (plain
+            pos-major, the default; DeepSeek-V4's combined cache is pos-major
+            even at ``block_size > 1``) or ``"SHUFFLE"`` (16x16 tiled, what the
+            in-tree writer emits for DeepSeek-V3.2 / GLM-5.x).
+
+    Returns:
+        Logits tensor of shape [B * next_n, max_model_len], dtype
+        `torch.float32`.
+
+    """
     batch_size, next_n, num_heads, head_size = q_fp8.shape
     block_size = kv_cache_fp8.shape[1]
+    # A tile must not straddle pages: the kernel resolves one block-table entry
+    # per tile, so BLOCK_KV has to divide block_size. The backend advertises
+    # MultipleOf(16) and the default block size is 16, so step down to the
+    # largest power-of-2 divisor <= 64 rather than requiring 64-alignment.
+    # tl.dot needs >= 16, which any multiple of 16 satisfies.
     BLOCK_KV = 64
-    assert block_size % BLOCK_KV == 0
+    while block_size % BLOCK_KV:
+        BLOCK_KV //= 2
+    assert BLOCK_KV >= 16, f"block_size {block_size} is not a multiple of 16"
 
     fp8_dtype = current_platform.fp8_dtype()
     num_blocks = kv_cache_fp8.shape[0]
@@ -642,6 +700,8 @@ def rocm_fp8_paged_mqa_logits_triton(
     )  # uint8 [num_blocks, block_size*(D+4)]
     kv_val = kv_flat.view(fp8_dtype)  # [num_blocks, block_size*(D+4)] fp8
     kv_scale = kv_flat.view(torch.float32)  # [num_blocks, block_size*(D+4)//4] fp32
+
+    shuffle = (cache_layout or "NORMAL") == "SHUFFLE"
 
     cl = context_lens.reshape(-1)
     ctx_per_row = not (next_n > 1 and cl.numel() == batch_size)
@@ -684,6 +744,9 @@ def rocm_fp8_paged_mqa_logits_triton(
         N_SPLITS=N_SPLITS,
         NEXT_N=next_n,
         CTX_PER_ROW=ctx_per_row,
+        SHUFFLE=shuffle,
+        BLOCK_TILE_SIZE=16,
+        HEAD_TILE_SIZE=16 // kv_cache_fp8.element_size(),
         num_warps=4,
         num_stages=2,
     )
@@ -759,11 +822,57 @@ def rocm_fp8_paged_mqa_logits(
         and _indexer_k_is_c4a_block_flat(compress_ratio)
         and block_size > 1
     ):
-        if block_size % 64 == 0:
+        if block_size % 16 == 0:
             return rocm_fp8_paged_mqa_logits_triton(
                 q_fp8, kv_cache_fp8, weights, context_lens, block_tables, max_model_len
             )
-        # Non 64-aligned page size (not used in prod): eager torch ref.
+        # Page size the Triton kernel cannot tile (not a multiple of 16, e.g.
+        # block_size 1): eager torch ref, correct but slow.
+        logger.warning_once(
+            "rocm_fp8_paged_mqa_logits: falling back to the eager torch "
+            f"reference -- block size {block_size} is not a multiple of 16, so "
+            "the Triton kernel cannot be used. This is correct but slow."
+        )
+        return fp8_paged_mqa_logits_torch(
+            q_fp8, kv_cache_fp8, weights, context_lens, block_tables, max_model_len
+        )
+
+    # Speculative decode (MTP) verifies next_n > 1 positions per step and hands
+    # the indexer per-query context lengths: seq_lens is [B, next_n], one row per
+    # query. AITER's native decode does not consume that form -- it scores every
+    # row against a single context length, so the top-k is wrong and the model
+    # produces locally coherent text unrelated to the context. The Triton kernel
+    # reads both the 1-D and 2-D forms, so route speculative decode to it,
+    # passing the SHUFFLE values layout these non-C4A models were written with.
+    # The condition is the kernel's real constraint (its KV tile must divide the
+    # page, and tl.dot needs >= 16), NOT 64-alignment: the default block size is
+    # 16 and the backend advertises [1, MultipleOf(16)], so a 64-alignment gate
+    # would miss the default deployment and silently hand speculative decode
+    # back to AITER's native decode -- which is WRONG at next_n > 1. Falling
+    # back to the torch reference is slow but correct; warn, because the only
+    # other option here is wrong output.
+    if next_n > 1:
+        if block_size % 16 == 0:
+            logger.info_once(
+                "rocm_fp8_paged_mqa_logits: Triton (speculative decode, "
+                f"next_n > 1), block size {block_size}"
+            )
+            return rocm_fp8_paged_mqa_logits_triton(
+                q_fp8,
+                kv_cache_fp8,
+                weights,
+                context_lens,
+                block_tables,
+                max_model_len,
+                cache_layout=_indexer_cache_layout(block_size),
+            )
+        logger.warning_once(
+            "rocm_fp8_paged_mqa_logits: falling back to the eager torch "
+            f"reference for speculative decode -- block size {block_size} is "
+            "not a multiple of 16, so the Triton kernel cannot be used. This "
+            "is correct but slow; use a block size that is a multiple of 16 "
+            "(e.g. --block-size 64) to keep speculative decode on the fast path."
+        )
         return fp8_paged_mqa_logits_torch(
             q_fp8, kv_cache_fp8, weights, context_lens, block_tables, max_model_len
         )
