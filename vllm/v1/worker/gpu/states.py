@@ -177,7 +177,7 @@ class RequestState:
         assert all(num_tokens >= 0 for num_tokens in num_output_tokens)
 
         req_indices_gpu = async_tensor_h2d(
-            req_indices, dtype=torch.int32, device=self.device
+            req_indices, dtype=torch.int64, device=self.device
         )
         num_output_tokens_gpu = async_tensor_h2d(
             num_output_tokens, dtype=torch.int32, device=self.device
@@ -195,9 +195,8 @@ class RequestState:
             num_warps=1,
         )
 
-        req_indices_long = req_indices_gpu.long()
-        self.draft_tokens.index_fill_(0, req_indices_long, 0)
-        self.next_prefill_tokens.index_fill_(1, req_indices_long, 0)
+        self.draft_tokens.index_fill_(0, req_indices_gpu, 0)
+        self.next_prefill_tokens.index_fill_(1, req_indices_gpu, 0)
 
     def remove_request(self, req_id: str) -> int | None:
         """Return the freed slot index, or None if the request was not found."""
