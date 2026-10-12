@@ -603,7 +603,6 @@ def _philox_gumbel_kernel(
     key_0_value,
     key_1_value,
     vocab_size,
-    num_temperatures,
     CONTEXT_WIDTH: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
     USE_FP64: tl.constexpr,
@@ -625,11 +624,8 @@ def _philox_gumbel_kernel(
 
     row_temperature = None
     if APPLY_TEMPERATURE:
-        # Matches `logits / where(t == 0, 1, t)` for t = temperature[idx], where
-        # the -1 index of a padding row wraps like a torch index.
         row_temperature = tl.load(
-            temp_ptr
-            + tl.where(valid_req, req_state_idx, req_state_idx + num_temperatures)
+            temp_ptr + req_state_idx, mask=valid_req, other=0.0
         ).to(tl.float32)
         row_temperature = tl.where(row_temperature == 0, 1.0, row_temperature)
 
@@ -808,7 +804,6 @@ def philox_gumbel_sample(
         key & _UINT32_MASK_VALUE,
         key >> 32,
         vocab_size,
-        0,
         CONTEXT_WIDTH=contexts.shape[-1],
         BLOCK_SIZE=block_size,
         USE_FP64=use_fp64,
@@ -834,7 +829,6 @@ def _draft_step_kernel(
     next_req_indices_ptr,
     next_steps_ptr,
     temp_ptr,
-    num_temperatures,
     enabled_ptr,
     all_token_ids_ptr,
     all_token_ids_stride,
@@ -886,9 +880,7 @@ def _draft_step_kernel(
 
     if PREPARE_NEXT:
         req_idx = tl.load(next_req_indices_ptr + row).to(tl.int64)
-        temperature = tl.load(
-            temp_ptr + tl.where(req_idx >= 0, req_idx, req_idx + num_temperatures)
-        )
+        temperature = tl.load(temp_ptr + req_idx, mask=req_idx >= 0, other=0.0)
         active = tl.load(enabled_ptr + row) & (temperature != 0)
         if DEDUPLICATE:
             # The dedup kernel body runs in place on the skip mask buffer.
@@ -954,7 +946,8 @@ def draft_philox_gumbel_sample(
     Bit-exact with sampling each step by `DraftWatermarker.sample`, but with two
     kernel launches per step: the Philox block argmax (with the temperature
     divide and the logits cache write), then a per-row kernel that picks the
-    token, shifts `contexts` and builds the next step's skip mask.
+    token, shifts `contexts` and builds the next step's skip mask. Padding rows
+    (index -1) read temperature 0 and are never watermarked, so they may differ.
     """
     num_rows, vocab_size = logits.shape
     num_reqs = num_rows // num_steps
@@ -999,7 +992,6 @@ def draft_philox_gumbel_sample(
             expanded_idx_mapping[next_step],
             logits_cache_col[next_step],
             temperatures,
-            temperatures.shape[0],
             enabled,
             all_token_ids,
             0 if all_token_ids is None else all_token_ids.stride(0),
@@ -1043,7 +1035,6 @@ def draft_philox_gumbel_sample(
             key & _UINT32_MASK_VALUE,
             key >> 32,
             vocab_size,
-            temperatures.shape[0],
             CONTEXT_WIDTH=contexts.shape[-1],
             BLOCK_SIZE=block_size,
             USE_FP64=use_fp64,

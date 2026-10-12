@@ -1741,8 +1741,10 @@ def test_dflash_draft_sampler_matches_step_loop_on_cuda(deduplicate_contexts, dt
     logits[..., :3] += 6
     logits[0, 1, 5] = float("nan")
     logits = logits.to(dtype).cuda()
-    # Row 3 is a padding row; slot 2 is greedy and row 1 is opted out.
+    # Row 3 is a padding row, whose drafts are discarded, so only rows 0-2 are
+    # compared. Slot 2 is greedy and row 1 is opted out.
     idx_mapping = torch.tensor([4, 2, 0, -1], dtype=torch.int32)
+    valid = (idx_mapping >= 0).cuda()
     idx_mapping = idx_mapping.repeat_interleave(num_steps).cuda()
     temperature = torch.tensor([0.7, 1.0, 0.0, 1.3, 0.6, 0.9]).cuda()
     seeds = torch.arange(max_num_reqs).cuda() * 1000
@@ -1800,8 +1802,8 @@ def test_dflash_draft_sampler_matches_step_loop_on_cuda(deduplicate_contexts, dt
                 dim=1,
             ).view(-1)
         return (
-            sampled,
-            draft_watermarker.state.contexts,
+            sampled.view(num_reqs, num_steps)[valid],
+            draft_watermarker.state.contexts[:num_reqs][valid],
             draft_watermarker.state.prior_contexts,
             draft_logits,
         )
