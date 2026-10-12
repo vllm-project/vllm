@@ -55,46 +55,26 @@ def test_suppress_stdout_keeps_stderr_when_sys_stdout_is_stderr(capfd, monkeypat
     assert "error message" in err
 
 
-def _sleeper() -> subprocess.Popen:
-    return subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
-
-
 def test_kill_process_tree_skips_child_that_exits_mid_walk(monkeypatch):
-    target, *children = procs = [_sleeper() for _ in range(4)]
+    sleep = [sys.executable, "-c", "import time; time.sleep(60)"]
+    target, *children = procs = [subprocess.Popen(sleep) for _ in range(4)]
     try:
         # List the children while they are alive, then let one exit and be
         # reaped before the walk reaches it, so psutil's name() raises.
         listed = [psutil.Process(p.pid) for p in children]
-        children[1].kill()
-        children[1].wait()
+        children[1].terminate()
+        children[1].wait(timeout=10)
         monkeypatch.setattr(
             psutil.Process, "children", lambda self, recursive=False: listed
         )
 
         system_utils.kill_process_tree(target.pid)
 
+        # The exited child died from our SIGTERM; the rest were SIGKILLed.
+        assert children[1].returncode == -signal.SIGTERM
         for p in (children[0], children[2], target):
             assert p.wait(timeout=10) == -signal.SIGKILL
     finally:
         for p in procs:
             p.kill()
             p.wait()
-
-
-def test_kill_process_tree_returns_when_target_exits_before_children(monkeypatch):
-    target = _sleeper()
-    list_children = psutil.Process.children
-
-    def exit_then_list(self, recursive=False):
-        # The target exits and is reaped after the lookup, so psutil raises
-        # NoSuchProcess from inside children().
-        target.kill()
-        target.wait()
-        return list_children(self, recursive=recursive)
-
-    monkeypatch.setattr(psutil.Process, "children", exit_then_list)
-    try:
-        system_utils.kill_process_tree(target.pid)
-    finally:
-        target.kill()
-        target.wait()

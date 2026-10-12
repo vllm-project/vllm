@@ -213,10 +213,11 @@ def kill_process_tree(pid: int):
     """
     try:
         parent = psutil.Process(pid)
-        # Get all children recursively
-        children = parent.children(recursive=True)
     except psutil.NoSuchProcess:
         return
+
+    # Get all children recursively
+    children = parent.children(recursive=True)
 
     # Send SIGKILL to all children first
     for child in children:
