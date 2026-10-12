@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
 import tempfile
 from unittest.mock import Mock
 
@@ -11,6 +12,7 @@ from huggingface_hub.utils import LocalEntryNotFoundError
 from vllm.model_executor.model_loader.weight_utils import (
     download_weights_from_hf,
     drop_checkpoint_cache,
+    get_lock,
     maybe_remap_kv_scale_name,
 )
 
@@ -309,3 +311,33 @@ def test_drop_checkpoint_cache_releases_local_weight_files(
 
 if __name__ == "__main__":
     test_download_weights_from_hf()
+
+
+@pytest.mark.parametrize(
+    "model_name_or_path",
+    [
+        "facebook/opt-125m",
+        # A local checkpoint path flattened into the lock file name. 221
+        # characters here, which lands the name at 290 bytes once the 64-char
+        # digest and the ".lock" suffix are added.
+        (
+            "/mnt/shared-storage/models/team-inference/experiments/"
+            "2026-02-long-context-run-17/checkpoints/global_step_120000/"
+            "hf_export/Qwen3-235B-A22B-Instruct-FP8-blockwise/snapshot/"
+            "revision-2026-02-14-rc3-merged-lora-adapters/final"
+        ),
+    ],
+)
+def test_get_lock_handles_long_model_paths(model_name_or_path: str):
+    """The lock file name has to stay inside the filesystem's limit.
+
+    A single path component is capped at 255 bytes on the common Linux
+    filesystems (and on macOS), while the full path may be much longer, so a
+    long ``--model`` path used to raise ``OSError: File name too long`` before
+    any weights were touched.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        lock = get_lock(model_name_or_path, cache_dir=os.path.join(tmpdir, "locks"))
+        assert len(os.fsencode(os.path.basename(lock.lock_file))) <= 255
+        with lock:
+            assert os.path.exists(lock.lock_file)
