@@ -339,10 +339,9 @@ def get_prefill_workspace_size(vllm_config: VllmConfig) -> int:
     #   Example: DeepSeek-V3.2 with max_model_len=163840 and the default factor ->
     #            5 * 163840 * 576 * 2 = ~900 MB
     # This fits nicely below the typical MoE workspace size of >2GB so this is "free"
-    return (
-        vllm_config.model_config.max_model_len
-        * vllm_config.attention_config.sparse_mla_prefill_workspace_factor
-    )
+    factor = vllm_config.attention_config.sparse_mla_prefill_workspace_factor
+    assert factor is not None
+    return vllm_config.model_config.max_model_len * factor
 
 
 class FlashMLASparseMetadataBuilder(

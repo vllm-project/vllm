@@ -918,10 +918,11 @@ class KpoolTailMetadataBuilder(AttentionMetadataBuilder):
 def get_max_prefill_buffer_size(vllm_config: VllmConfig):
     max_model_len = vllm_config.model_config.max_model_len
     factor = vllm_config.attention_config.sparse_mla_prefill_workspace_factor
+    assert factor is not None
     # Each entry is 128 fp8 bytes and 4 scale bytes for a total of 132 bytes.
     # The flashmla_sparse backend uses a workspace size of factor * max_model_len.
     # The memory usage of the workspace there is 576 * 2 bytes; so we size this as
-    # (576 * 2 // 132) * factor (40 at the default 5) to maximize this workspace
+    # (576 * 2 // 132) * factor (40 at factor 5) to maximize this workspace
     # size while still fitting within the flashmla_sparse workspace.
     # For DeepSeek-V3.2, the max_model_len is 163840.
     #   40 * 163840 * 132 = 865075200 bytes = 825 MB
