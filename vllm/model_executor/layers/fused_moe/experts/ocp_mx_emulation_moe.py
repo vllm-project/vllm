@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-OCP MX quantization emulation for MoE.
+"""OCP MX quantization emulation for MoE.
 
 This file implements OCP MX (MXFP4/MXFP6) emulation for MoE in case the
 hardware used does not natively support OCP MX MoE.
@@ -35,9 +34,55 @@ from vllm.utils.import_utils import has_quark
 logger = init_logger(__name__)
 
 
-class OCP_MXQuantizationEmulationTritonExperts(TritonExperts):
+def activation_quant_dtype(
+    ocp_mx_scheme: OCP_MX_Scheme | str,
+) -> torch.dtype | str | None:
+    """Activation dtype `moe_kernel_quantize_input` should fake-quantize to.
+
+    Args:
+        ocp_mx_scheme: The OCP MX scheme the emulated experts run. Accepts the
+            enum member or its string value.
+
+    Returns:
+        A `quant_dtype` `moe_kernel_quantize_input` dispatches on, or None for
+        weight-only schemes, which leave activations untouched.
+
+    Raises:
+        NotImplementedError: If the scheme has no emulated activation dtype.
+
     """
-    Extension of TritonExperts to support emulated OCP MX MoE experts.
+    if ocp_mx_scheme in {
+        OCP_MX_Scheme.w_mxfp4,
+        OCP_MX_Scheme.w_mxfp6_e3m2,
+        OCP_MX_Scheme.w_mxfp6_e2m3,
+    }:
+        return None
+    elif ocp_mx_scheme == OCP_MX_Scheme.w_mxfp4_a_mxfp4:
+        return "mxfp4"
+    elif ocp_mx_scheme in {
+        OCP_MX_Scheme.w_mxfp4_a_mxfp6_e3m2,
+        OCP_MX_Scheme.w_mxfp6_e3m2_a_mxfp6_e3m2,
+    }:
+        return "mxfp6_e3m2"
+    elif ocp_mx_scheme in {
+        OCP_MX_Scheme.w_mxfp4_a_mxfp6_e2m3,
+        OCP_MX_Scheme.w_mxfp6_e2m3_a_mxfp6_e2m3,
+    }:
+        return "mxfp6_e2m3"
+    elif ocp_mx_scheme in {
+        OCP_MX_Scheme.w_mxfp4_a_fp8,
+        OCP_MX_Scheme.w_mxfp6_e3m2_a_fp8,
+        OCP_MX_Scheme.w_mxfp6_e2m3_a_fp8,
+    }:
+        return current_platform.fp8_dtype()
+    raise NotImplementedError(
+        f"No emulated activation dtype for OCP MX scheme {ocp_mx_scheme}."
+        " Please open an issue."
+    )
+
+
+class OCP_MXQuantizationEmulationTritonExperts(TritonExperts):
+    """Extension of TritonExperts to support emulated OCP MX MoE experts.
 
     It may be used for OCP MX (MXFP4/MXFP6) models when the device does not
     have native support for these dtypes.
@@ -72,29 +117,7 @@ class OCP_MXQuantizationEmulationTritonExperts(TritonExperts):
 
         self.quantization_emulation = True
 
-        if self.ocp_mx_scheme in {
-            OCP_MX_Scheme.w_mxfp4,
-            OCP_MX_Scheme.w_mxfp6_e3m2,
-            OCP_MX_Scheme.w_mxfp6_e2m3,
-        }:
-            # Weight-only schemes leave activations unquantized.
-            self._quant_dtype = None
-        elif self.ocp_mx_scheme in {
-            OCP_MX_Scheme.w_mxfp4_a_mxfp4,
-        }:
-            self._quant_dtype = "mxfp4"
-        elif self.ocp_mx_scheme in [
-            OCP_MX_Scheme.w_mxfp4_a_mxfp6_e3m2,
-            OCP_MX_Scheme.w_mxfp4_a_mxfp6_e2m3,
-            OCP_MX_Scheme.w_mxfp6_e3m2_a_mxfp6_e3m2,
-            OCP_MX_Scheme.w_mxfp6_e2m3_a_mxfp6_e2m3,
-        ]:
-            self._quant_dtype = "mxfp6"
-        elif self.ocp_mx_scheme in [
-            OCP_MX_Scheme.w_mxfp4_a_fp8,
-            OCP_MX_Scheme.w_mxfp6_e3m2_a_fp8,
-        ]:
-            self._quant_dtype = current_platform.fp8_dtype()
+        self._quant_dtype = activation_quant_dtype(self.ocp_mx_scheme)
 
     @staticmethod
     def is_supported_config(
@@ -166,8 +189,7 @@ class OCP_MXQuantizationEmulationTritonExperts(TritonExperts):
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
     ):
-        """
-        Apply emulated quantized MoE computation.
+        """Apply emulated quantized MoE computation.
 
         This dequantizes the weights on the fly and calls TritonExperts.apply
         with activation quantization support.

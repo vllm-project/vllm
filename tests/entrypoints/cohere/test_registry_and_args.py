@@ -18,7 +18,7 @@ import typing
 import pytest
 
 from vllm.config.model import TokenizerMode
-from vllm.entrypoints.openai.cli_args import BaseFrontendArgs, make_arg_parser
+from vllm.entrypoints.launchers.cli_args import BaseFrontendArgs, make_arg_parser
 from vllm.renderers.registry import RENDERER_REGISTRY
 from vllm.tokenizers.registry import TokenizerRegistry
 from vllm.utils.argparse_utils import FlexibleArgumentParser

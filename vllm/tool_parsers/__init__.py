@@ -22,6 +22,10 @@ Example:
 
 
 _TOOL_PARSERS_TO_REGISTER = {
+    "dots": (
+        "dots_tool_parser",
+        "DotsToolParser",
+    ),
     "deepseek_v3": (  # name
         "deepseekv3_tool_parser",  # filename
         "DeepSeekV3ToolParser",  # class_name
@@ -37,6 +41,10 @@ _TOOL_PARSERS_TO_REGISTER = {
     "deepseek_v4": (
         "deepseekv4_engine_tool_parser",
         "DeepSeekV4EngineToolParser",
+    ),
+    "deepseek_v41": (
+        "deepseekv41_engine_tool_parser",
+        "DeepSeekV41EngineToolParser",
     ),
     "cohere_command3": (
         "cohere_command_tool_parser",
@@ -67,8 +75,8 @@ _TOOL_PARSERS_TO_REGISTER = {
         "Granite20bFCToolParser",
     ),
     "granite": (
-        "granite_tool_parser",
-        "GraniteToolParser",
+        "granite_engine_tool_parser",
+        "GraniteEngineToolParser",
     ),
     "granite4": (
         "granite4_tool_parser",
@@ -77,6 +85,10 @@ _TOOL_PARSERS_TO_REGISTER = {
     "hermes": (
         "hermes_tool_parser",
         "Hermes2ProToolParser",
+    ),
+    "hf": (
+        "response_template_tool_parser",
+        "ResponseTemplateToolParser",
     ),
     "poolside_v1": (
         "poolside_v1_tool_parser",
@@ -89,6 +101,10 @@ _TOOL_PARSERS_TO_REGISTER = {
     "hy_v3": (
         "hy_v3_tool_parser",
         "HYV3ToolParser",
+    ),
+    "hy_v4": (
+        "hy_v4_tool_parser",
+        "HYV4ToolParser",
     ),
     "internlm": (
         "internlm2_tool_parser",
@@ -110,6 +126,10 @@ _TOOL_PARSERS_TO_REGISTER = {
         "kimi_k3_tool_parser",
         "KimiK3ToolParser",
     ),
+    "k2_horizon": (
+        "k2_horizon_tool_parser",
+        "K2HorizonToolParser",
+    ),
     "llama3_json": (
         "llama_tool_parser",
         "Llama3JsonToolParser",
@@ -127,8 +147,8 @@ _TOOL_PARSERS_TO_REGISTER = {
         "LongcatFlashToolParser",
     ),
     "mimo": (
-        "qwen3_engine_tool_parser",
-        "Qwen3EngineToolParser",
+        "mimo_tool_parser",
+        "MiMoToolParser",
     ),
     "minimax_m2": (
         "minimax_m2_tool_parser",
@@ -149,6 +169,14 @@ _TOOL_PARSERS_TO_REGISTER = {
     "olmo3": (
         "olmo3_tool_parser",
         "Olmo3PythonicToolParser",
+    ),
+    "plamo3": (
+        "plamo3_engine_tool_parser",
+        "Plamo3EngineToolParser",
+    ),
+    "muse_glimmer": (
+        "muse_glimmer_tool_parser",
+        "MuseGlimmerToolParser",
     ),
     "openai": (
         "gptoss_tool_parser",

@@ -7,7 +7,7 @@ use itertools::Itertools as _;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use validator::{Validate, ValidationErrors};
-use vllm_chat::{ChatOptions, ChatRequest, ChatToolChoice, SamplingParams};
+use vllm_chat::{ChatOptions, ChatRequest, ResolvedToolContext, SamplingParams};
 use vllm_text::output::TextDecodeOptions;
 use vllm_text::{Prompt, TextRequest};
 
@@ -50,10 +50,13 @@ impl TokenizeCompletionRequest {
             intermediate: false,
             priority: 0,
             cache_salt: None,
+            prompt_truncation: None,
             add_special_tokens: self.add_special_tokens,
             data_parallel_rank: None,
             session_id: None,
-            reasoning_parser_kwargs: None,
+            kv_hints: None,
+            reasoning_parser_kwargs: Default::default(),
+            reasoning_ended: None,
             lora_request: None,
             arrival_time: None,
         }
@@ -97,6 +100,11 @@ impl TokenizeChatRequest {
             &messages,
         )?;
 
+        let tool_context =
+            ResolvedToolContext::new(&messages, convert_tools(self.tools)?, None, true).map_err(
+                |error| crate::error::chat_submit_error("failed to resolve request tools", error),
+            )?;
+
         Ok(ChatRequest {
             request_id,
             messages,
@@ -108,11 +116,10 @@ impl TokenizeChatRequest {
                 response_format: None,
                 template_kwargs: self.chat_template_kwargs.unwrap_or_default(),
             },
-            tools: convert_tools(self.tools)?,
-            tool_choice: ChatToolChoice::Auto,
-            parallel_tool_calls: true,
+            tool_context,
             decode_options: TextDecodeOptions::default(),
             intermediate: false,
+            prompt_truncation: None,
             priority: 0,
             documents: None,
             cache_salt: None,
@@ -199,7 +206,7 @@ mod tests {
             req.into_chat_request("tokenize-test".to_string()).expect("request is valid");
 
         assert_eq!(
-            chat_request.tools,
+            chat_request.initial_tools(),
             vec![ChatTool {
                 name: "get_weather".to_string(),
                 description: Some("Get weather".to_string()),
@@ -208,6 +215,7 @@ mod tests {
                     "properties": {"city": {"type": "string"}},
                 }),
                 strict: None,
+                defer_loading: None,
             }]
         );
     }

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Attention backend registry"""
+"""Attention backend registry."""
 
 from collections.abc import Callable
 from enum import Enum, EnumMeta
@@ -49,7 +49,13 @@ class AttentionBackendEnum(Enum, metaclass=_AttentionBackendEnumMeta):
     TRITON_ATTN_DIFFKV = (
         "vllm.v1.attention.backends.triton_attn_diffkv.TritonAttentionDiffKVBackend"
     )
+    TRITON_FLASH_ATTN = (
+        "vllm.v1.attention.backends.triton_flash_attn.TritonFlashAttentionBackend"
+    )
     ROCM_ATTN = "vllm.v1.attention.backends.rocm_attn.RocmAttentionBackend"
+    ROCM_SEGMENTED_ATTN = (
+        "vllm.v1.attention.backends.rocm_segmented_attn.RocmSegmentedAttentionBackend"
+    )
     ROCM_AITER_MLA = "vllm.v1.attention.backends.mla.rocm_aiter_mla.AiterMLABackend"
     ROCM_AITER_TRITON_MLA = (
         "vllm.v1.attention.backends.mla.aiter_triton_mla.AiterTritonMLABackend"
@@ -63,6 +69,9 @@ class AttentionBackendEnum(Enum, metaclass=_AttentionBackendEnumMeta):
     XPU_MLA_SPARSE = "vllm.v1.attention.backends.mla.xpu_mla_sparse.XPUMLASparseBackend"
     TORCH_SDPA = ""  # this tag is only used for ViT
     FLASHINFER = "vllm.v1.attention.backends.flashinfer.FlashInferBackend"
+    TRITON_FLASHINFER = (
+        "vllm.v1.attention.backends.triton_flashinfer.TritonFlashInferBackend"
+    )
     FLASHINFER_MLA = (
         "vllm.v1.attention.backends.mla.flashinfer_mla.FlashInferMLABackend"
     )
@@ -76,6 +85,10 @@ class AttentionBackendEnum(Enum, metaclass=_AttentionBackendEnumMeta):
     FLASHINFER_MLA_SPARSE_SM120 = (
         "vllm.v1.attention.backends.mla.flashinfer_mla_sparse."
         "FlashInferMLASparseSM120Backend"
+    )
+    FLASHINFER_MLA_SPARSE_SM90 = (
+        "vllm.v1.attention.backends.mla.flashinfer_mla_sparse_sm90."
+        "FlashInferMLASparseSM90Backend"
     )
     TRITON_MLA = "vllm.v1.attention.backends.mla.triton_mla.TritonMLABackend"
     CUTLASS_MLA = "vllm.v1.attention.backends.mla.cutlass_mla.CutlassMLABackend"
@@ -94,6 +107,20 @@ class AttentionBackendEnum(Enum, metaclass=_AttentionBackendEnumMeta):
     ROCM_FLASHMLA_SPARSE_DSV4 = (
         "vllm.models.deepseek_v4.amd.rocm.DeepseekV4ROCMAiterMLASparseBackend"
     )
+    # DeepSeek V4.1 sparse MLA backends (model-driven; selected via the V4.1
+    # layer). Separate names from DSV4 so a V4.1 model never resolves the
+    # V4.0 backend classes through this enum.
+    FLASHMLA_SPARSE_DSV41 = (
+        "vllm.models.deepseek_v41.sparse_mla.DeepseekV4FlashMLABackend"
+    )
+    FLASHINFER_MLA_SPARSE_DSV41 = (
+        "vllm.models.deepseek_v41.nvidia.flashinfer_sparse."
+        "DeepseekV4FlashInferMLASparseBackend"
+    )
+    FLASHMLA_MEGA_ATTN_DSV41 = (
+        "vllm.models.deepseek_v41.sparse_mla.FlashMLAMegaAttnBackend"
+    )
+    B12X = "vllm.v1.attention.backends.b12x.B12xPagedAttentionBackend"
     FLASH_ATTN_MLA = "vllm.v1.attention.backends.mla.flashattn_mla.FlashAttnMLABackend"
     FLASH_ATTN_MLA_SPARSE = (
         "vllm.v1.attention.backends.mla.flashattn_mla_sparse.FlashAttnMLASparseBackend"
@@ -123,10 +150,44 @@ class AttentionBackendEnum(Enum, metaclass=_AttentionBackendEnumMeta):
     )
     CPU_ATTN = "vllm.v1.attention.backends.cpu_attn.CPUAttentionBackend"
     CPU_MLA = "vllm.v1.attention.backends.mla.cpu_mla.CPUMLABackend"
+    AMX_MLA = "vllm.v1.attention.backends.mla.amx_mla.AMXMLABackend"
     TURBOQUANT = "vllm.v1.attention.backends.turboquant_attn.TurboQuantAttentionBackend"
+    ULTRAQUANT = "vllm.v1.attention.backends.ultraquant_attn.UltraQuantAttentionBackend"
     # Placeholder for third-party/custom backends - must be registered before use
     # set to None to avoid alias with other backend, whose value is an empty string
     CUSTOM = None
+
+    @classmethod
+    def register(cls, name: str, value: str) -> "AttentionBackendEnum":
+        """Dynamically register a new backend enum member.
+
+        Args:
+            name: The name for the new enum member
+            value: The fully qualified class path string
+
+        Returns:
+            The newly created enum member
+
+        """
+        if name in cls._member_map_:
+            raise ValueError(
+                f"Backend {name} already exists in {cls.__name__}. "
+                f"Use register_backend({cls.__name__}.{name}, '{value}') "
+                f"to override."
+            )
+        if not name.isidentifier() or hasattr(cls, name):
+            raise ValueError(f"Invalid or reserved backend name: {name}")
+
+        # Create new enum member dynamically
+        member = object.__new__(cls)
+        member._name_ = name
+        member._value_ = value
+        setattr(cls, name, member)
+        cls._member_map_[name] = member
+        cls._value2member_map_[value] = member
+        cls._member_names_.append(name)
+        logger.info("Registered new attention backend: %s -> %s", name, value)
+        return member
 
     def get_path(self, include_classname: bool = True) -> str:
         """Get the class path for this backend (respects overrides).
@@ -136,6 +197,7 @@ class AttentionBackendEnum(Enum, metaclass=_AttentionBackendEnumMeta):
 
         Raises:
             ValueError: If Backend.CUSTOM is used without being registered
+
         """
         path = _ATTN_OVERRIDES.get(self, self.value)
         if not path:
@@ -156,6 +218,7 @@ class AttentionBackendEnum(Enum, metaclass=_AttentionBackendEnumMeta):
         Raises:
             ImportError: If the backend class cannot be imported
             ValueError: If Backend.CUSTOM is used without being registered
+
         """
         return resolve_obj_by_qualname(self.get_path())
 
@@ -164,6 +227,7 @@ class AttentionBackendEnum(Enum, metaclass=_AttentionBackendEnumMeta):
 
         Returns:
             True if the backend has a registered override
+
         """
         return self in _ATTN_OVERRIDES
 
@@ -182,6 +246,37 @@ class MambaAttentionBackendEnum(Enum, metaclass=_AttentionBackendEnumMeta):
         backend.get_class()
     """
 
+    @classmethod
+    def register(cls, name: str, value: str) -> "MambaAttentionBackendEnum":
+        """Dynamically register a new mamba backend enum member.
+
+        Args:
+            name: The name for the new enum member
+            value: The fully qualified class path string
+
+        Returns:
+            The newly created enum member
+
+        """
+        if name in cls._member_map_:
+            raise ValueError(
+                f"Backend {name} already exists in {cls.__name__}. "
+                f"Use register_backend({cls.__name__}.{name}, '{value}') "
+                f"to override."
+            )
+        if not name.isidentifier() or hasattr(cls, name):
+            raise ValueError(f"Invalid or reserved backend name: {name}")
+
+        member = object.__new__(cls)
+        member._name_ = name
+        member._value_ = value
+        setattr(cls, name, member)
+        cls._member_map_[name] = member
+        cls._value2member_map_[value] = member
+        cls._member_names_.append(name)
+        logger.info("Registered new attention backend: %s -> %s", name, value)
+        return member
+
     MAMBA1 = "vllm.v1.attention.backends.mamba1_attn.Mamba1AttentionBackend"
     MAMBA2 = "vllm.v1.attention.backends.mamba2_attn.Mamba2AttentionBackend"
     SHORT_CONV = "vllm.v1.attention.backends.short_conv_attn.ShortConvAttentionBackend"
@@ -199,6 +294,7 @@ class MambaAttentionBackendEnum(Enum, metaclass=_AttentionBackendEnumMeta):
 
         Raises:
             ValueError: If Backend.CUSTOM is used without being registered
+
         """
         path = _MAMBA_ATTN_OVERRIDES.get(self, self.value)
         if not path:
@@ -219,6 +315,7 @@ class MambaAttentionBackendEnum(Enum, metaclass=_AttentionBackendEnumMeta):
         Raises:
             ImportError: If the backend class cannot be imported
             ValueError: If Backend.CUSTOM is used without being registered
+
         """
         return resolve_obj_by_qualname(self.get_path())
 
@@ -227,6 +324,7 @@ class MambaAttentionBackendEnum(Enum, metaclass=_AttentionBackendEnumMeta):
 
         Returns:
             True if the backend has a registered override
+
         """
         return self in _MAMBA_ATTN_OVERRIDES
 
@@ -240,16 +338,18 @@ _MAMBA_ATTN_OVERRIDES: dict[MambaAttentionBackendEnum, str] = {}
 
 
 def register_backend(
-    backend: AttentionBackendEnum | MambaAttentionBackendEnum,
+    backend: AttentionBackendEnum | MambaAttentionBackendEnum | str,
     class_path: str | None = None,
     is_mamba: bool = False,
 ) -> Callable[[type], type]:
     """Register or override a backend implementation.
 
     Args:
-        backend: The AttentionBackendEnum member to register
+        backend: The AttentionBackendEnum/MambaAttentionBackendEnum member to register,
+                 or a string name for a new custom backend (e.g., "CUSTOM_MLA").
         class_path: Optional class path. If not provided and used as
             decorator, will be auto-generated from the class.
+        is_mamba: Whether the backend is a Mamba attention backend.
 
     Returns:
         Decorator function if class_path is None, otherwise a no-op
@@ -270,12 +370,30 @@ def register_backend(
         class MyCustomBackend:
             ...
 
+        # Register a new custom attention backend with a dynamic enum name
+        @register_backend("CUSTOM_MLA")
+        class CustomMLABackend:
+            ...
+
         # Direct registration
         register_backend(
             AttentionBackendEnum.CUSTOM,
             "my.module.MyCustomBackend"
         )
+
+        # Direct registration with string name
+        register_backend(
+            "CUSTOM_MLA",
+            "custom.attention.mla_v1.CustomMLAABackend"
+        )
+
     """
+    # Handle dynamic enum creation for string backend names
+    if isinstance(backend, str):
+        if is_mamba:
+            backend = MambaAttentionBackendEnum.register(backend, class_path or "")
+        else:
+            backend = AttentionBackendEnum.register(backend, class_path or "")
 
     def decorator(cls: type) -> type:
         if is_mamba:

@@ -4,6 +4,8 @@
 
 import json
 import os
+import sys
+from argparse import BooleanOptionalAction
 
 import pytest
 import yaml
@@ -251,6 +253,28 @@ def test_duplicate_dict_args(caplog_vllm, parser):
     assert "--optimization-level" in caplog_vllm.text
 
 
+@pytest.mark.skipif(
+    sys.version_info >= (3, 13), reason="argparse handles deprecated natively"
+)
+def test_deprecated_arg_scoped_to_subcommand(caplog_vllm, disable_log_dedup):
+    """A deprecated arg of one subcommand must not warn for a sibling
+    subcommand that defines a non-deprecated arg with the same dest."""
+    parser = FlexibleArgumentParser()
+    subparsers = parser.add_subparsers(dest="subcommand")
+    run_batch = subparsers.add_parser("run-batch")
+    run_batch.add_argument_group("Frontend").add_argument(
+        "--url", default="0.0.0.0", deprecated=True
+    )
+    chat = subparsers.add_parser("chat")
+    chat.add_argument("--url", default="http://localhost:8000/v1")
+
+    parser.parse_args(["chat", "--url", "http://localhost:9000/v1"])
+    assert "is deprecated" not in caplog_vllm.text
+
+    parser.parse_args(["run-batch", "--url", "1.2.3.4"])
+    assert caplog_vllm.text.count("argument 'url' is deprecated") == 1
+
+
 def test_model_specification(
     parser_with_config, cli_config_file, cli_config_file_with_model
 ):
@@ -379,6 +403,27 @@ def test_load_config_file(tmp_path):
     os.remove(str(config_file_path))
 
 
+def test_load_config_file_false_store_true_dropped(tmp_path):
+    """False values for store_true flags are silently dropped (correct)."""
+    config_data = {
+        "enable-feature": False,
+        "port": 8000,
+    }
+
+    config_file_path = tmp_path / "config.yaml"
+    with open(config_file_path, "w") as config_file:
+        yaml.dump(config_data, config_file)
+
+    parser = FlexibleArgumentParser()
+    parser.add_argument("--enable-feature", action=BooleanOptionalAction)
+    parser.add_argument("--port", type=int)
+
+    processed_args = parser.load_config_file(str(config_file_path))
+
+    assert "--enable-feature" not in processed_args
+    assert "--no-enable-feature" in processed_args
+
+
 def test_load_config_file_nested(tmp_path):
     """Test that nested dicts in YAML config are converted to JSON strings."""
     config_data = {
@@ -502,3 +547,20 @@ def test_flat_product():
         (3, 4, "a", 5, 6),
         (3, 4, "b", 5, 6),
     ]
+
+
+def test_group_description_is_summary_only():
+    """Group descriptions are config docstrings, too long for the terminal."""
+    parser = FlexibleArgumentParser()
+    group = parser.add_argument_group(
+        title="MyConfig",
+        description="Summary line.\n\nDetails which only belong in the docs.",
+    )
+    group.add_argument("--my-arg")
+
+    assert "Summary line." in parser.format_help()
+    assert "only belong in the docs" not in parser.format_help()
+
+    parser._search_keyword = "myconfig"
+    assert "Summary line." in parser.format_help()
+    assert "only belong in the docs" not in parser.format_help()
