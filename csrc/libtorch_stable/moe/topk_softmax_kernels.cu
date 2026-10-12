@@ -626,7 +626,7 @@ void topkGatingLauncherHelper(const InputType* input, const bool* finished, floa
     const int num_blocks = (num_warps + WARPS_PER_TB - 1) / WARPS_PER_TB;
 
     dim3 block_dim(WARP_SIZE_PARAM, WARPS_PER_TB);
-#if !defined(USE_ROCM)
+#ifndef USE_ROCM
     cudaLaunchConfig_t config{};
     config.gridDim = dim3(num_blocks);
     config.blockDim = block_dim;
