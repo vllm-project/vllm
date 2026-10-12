@@ -8,9 +8,10 @@ use std::sync::{Arc, LazyLock};
 pub use vllm_parser::tool::{
     DeepSeekV3ToolParser, DeepSeekV4ToolParser, DeepSeekV31ToolParser, DeepSeekV32ToolParser,
     DeepSeekV41ToolParser, Glm45MoeToolParser, Glm47MoeToolParser, Granite4ToolParser,
-    HermesToolParser, Internlm2ToolParser, KimiK2ToolParser, Llama3JsonToolParser, MiMoToolParser,
-    MinimaxM2ToolParser, MinimaxM3ToolParser, MistralToolParser, Phi4MiniJsonToolParser,
-    Qwen3CoderToolParser, Qwen3XmlToolParser, SeedOssToolParser, ToolParser, ToolParserError,
+    HermesToolParser, Internlm2ToolParser, KimiK2ToolParser, Llama3JsonToolParser,
+    MiMoToolParser, MiniCPM5ToolParser, MinimaxM2ToolParser, MinimaxM3ToolParser,
+    MistralToolParser, Phi4MiniJsonToolParser, Qwen3CoderToolParser, Qwen3XmlToolParser,
+    SeedOssToolParser, ToolParser, ToolParserError,
 };
 
 use crate::parser::ParserFactory;
@@ -33,6 +34,7 @@ pub mod names {
     pub const KIMI_K2: &str = "kimi_k2";
     pub const LLAMA3_JSON: &str = "llama3_json";
     pub const LLAMA4_JSON: &str = "llama4_json";
+    pub const MINICPM5: &str = "minicpm5";
     pub const MIMO: &str = "mimo";
     pub const MINIMAX_M2: &str = "minimax_m2";
     pub const MINIMAX_M3: &str = "minimax_m3";
@@ -77,6 +79,7 @@ impl ToolParserFactory {
             .register_parser::<KimiK2ToolParser>(names::KIMI_K2)
             .register_parser::<Llama3JsonToolParser>(names::LLAMA3_JSON)
             .register_parser::<Llama3JsonToolParser>(names::LLAMA4_JSON)
+            .register_parser::<MiniCPM5ToolParser>(names::MINICPM5)
             .register_parser::<MiMoToolParser>(names::MIMO)
             .register_parser::<MinimaxM2ToolParser>(names::MINIMAX_M2)
             .register_parser::<MinimaxM3ToolParser>(names::MINIMAX_M3)
@@ -105,6 +108,7 @@ impl ToolParserFactory {
             .register_pattern("llama-4", names::LLAMA4_JSON)
             .register_pattern("llama-3.2", names::LLAMA3_JSON)
             .register_pattern("llama-3.1", names::LLAMA3_JSON)
+            .register_pattern("minicpm5", names::MINICPM5)
             .register_pattern("deepseek-r1", names::DEEPSEEK_V3)
             .register_pattern("deepseek-v4.1", names::DEEPSEEK_V41)
             .register_pattern("deepseek-v4", names::DEEPSEEK_V4)
