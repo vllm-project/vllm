@@ -897,6 +897,69 @@ class TestSkipToolParsing:
         assert engine.skip_tool_parsing is True
 
 
+def _absorb_marker_tool_config() -> ParserEngineConfig:
+    """Qwen3-shaped grammar: duplicate ``</think>`` is absorbed in CONTENT,
+    and a tool span may legitimately quote the same marker as text."""
+    return ParserEngineConfig(
+        name="absorb_marker_tool_test",
+        initial_state=ParserState.REASONING,
+        terminals={
+            "THINK_END": "</think>",
+            "TOOL_START": "<tool_call>",
+            "TOOL_END": "</tool_call>",
+        },
+        transitions={
+            (ParserState.REASONING, "THINK_END"): Transition(
+                ParserState.CONTENT,
+                (EventType.REASONING_END,),
+            ),
+            (ParserState.CONTENT, "THINK_END"): Transition(
+                ParserState.CONTENT,
+                (),
+            ),
+            (ParserState.CONTENT, "TOOL_START"): Transition(
+                ParserState.TOOL_ARGS,
+                (EventType.TOOL_CALL_START,),
+            ),
+            (ParserState.TOOL_ARGS, "TOOL_END"): Transition(
+                ParserState.CONTENT,
+                (EventType.TOOL_CALL_END,),
+            ),
+        },
+        content_events={
+            ParserState.REASONING: EventType.REASONING_CHUNK,
+            ParserState.CONTENT: EventType.TEXT_CHUNK,
+            ParserState.TOOL_ARGS: EventType.ARG_VALUE_CHUNK,
+        },
+    )
+
+
+class TestSkipToolParsingMarkerPassthrough:
+    """A skipped tool span is forwarded to the tool pass verbatim; markers
+    with reasoning-channel transitions must not fire inside it."""
+
+    _TEXT = "reason</think><tool_call>alpha </think> omega</tool_call></think>"
+    _SPAN = "<tool_call>alpha </think> omega</tool_call>"
+
+    def test_marker_inside_skipped_span_forwarded_verbatim(self):
+        engine = StreamingParserEngine(_absorb_marker_tool_config(), tokenizer=None)
+        engine.skip_tool_parsing = True
+
+        events = engine.parse_complete(self._TEXT)
+
+        content = "".join(e.value for e in events if e.type == EventType.TEXT_CHUNK)
+        assert content == self._SPAN
+
+    def test_marker_inside_skipped_span_streaming(self):
+        engine = StreamingParserEngine(_absorb_marker_tool_config(), tokenizer=None)
+        engine.skip_tool_parsing = True
+
+        events = TestStreaming._feed_chars(engine, self._TEXT)
+
+        content = "".join(e.value for e in events if e.type == EventType.TEXT_CHUNK)
+        assert content == self._SPAN
+
+
 def _message_header_config(reasoning_end: bool) -> ParserEngineConfig:
     """MESSAGE_HEADER-based grammar whose tool opener optionally carries
     REASONING_END, mirroring the two shapes a transition table can take."""
