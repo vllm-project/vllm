@@ -135,20 +135,6 @@ def test_deepseek_fp8_block_moe_vllm_triton(monkeypatch: pytest.MonkeyPatch):
     )
 
 
-@pytest.mark.skip(
-    reason=(
-        "Known issue: lack of kernel support. "
-        "Expected failure: assert self.block_quant is None"
-    )
-)
-def test_deepseek_fp8_block_moe_flashinfer_cutlass(monkeypatch: pytest.MonkeyPatch):
-    can_initialize(
-        "deepseek-ai/DeepSeek-V3.1",
-        hf_overrides=HF_OVERRIDE_TEXT,
-        extra_args=["--moe-backend=flashinfer_cutlass"],
-    )
-
-
 def test_deepseek_fp8_block_moe_flashinfer_trtllm(monkeypatch: pytest.MonkeyPatch):
     can_initialize(
         "deepseek-ai/DeepSeek-V3.1",

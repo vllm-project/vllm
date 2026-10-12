@@ -19,7 +19,6 @@ ST_PROJECTOR_MODELS = [
         attn_type="encoder_only",
         is_prefix_caching_supported=False,
         is_chunked_prefill_supported=False,
-        enable_test=True,
     ),
     EmbedModelInfo(
         "google/embeddinggemma-300m",
@@ -30,7 +29,6 @@ ST_PROJECTOR_MODELS = [
         attn_type="encoder_only",
         is_prefix_caching_supported=False,
         is_chunked_prefill_supported=False,
-        enable_test=True,
     ),
 ]
 

@@ -9,16 +9,11 @@ from typing import TYPE_CHECKING, Any
 from vllm.envs import maybe_convert_bool
 
 if TYPE_CHECKING:
-    VLLM_CI_NO_SKIP: bool = False
     VLLM_CI_DTYPE: str | None = None
     VLLM_CI_HEAD_DTYPE: str | None = None
     VLLM_CI_HF_DTYPE: str | None = None
 
 environment_variables: dict[str, Callable[[], Any]] = {
-    # A model family has many models with the same architecture.
-    # By default, a model family tests only one model.
-    # Through this flag, all models can be tested.
-    "VLLM_CI_NO_SKIP": lambda: bool(int(os.getenv("VLLM_CI_NO_SKIP", "0"))),
     # Allow changing the dtype used by vllm in tests
     "VLLM_CI_DTYPE": lambda: os.getenv("VLLM_CI_DTYPE", None),
     # Allow changing the head dtype used by vllm in tests

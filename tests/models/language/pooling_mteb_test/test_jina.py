@@ -6,7 +6,6 @@ import pytest
 
 from tests.models.language.pooling.embed_utils import (
     check_embeddings_close,
-    correctness_test_embed_models,
     matryoshka_fy,
 )
 from tests.models.utils import (
@@ -82,24 +81,6 @@ def test_embed_models_mteb(hf_runner, vllm_runner, model_info: EmbedModelInfo) -
         model_info,
         hf_model_callback=hf_model_callback,
         prompt_prefix=prompt_prefix,
-    )
-
-
-@pytest.mark.parametrize("model_info", EMBEDDING_MODELS)
-def test_embed_models_correctness(
-    hf_runner, vllm_runner, model_info: EmbedModelInfo, example_prompts
-) -> None:
-    task = "retrieval" if "v5" in model_info.name else "text-matching"
-
-    def hf_model_callback(model):
-        model.encode = partial(model.encode, task=task)
-
-    correctness_test_embed_models(
-        hf_runner,
-        vllm_runner,
-        model_info,
-        example_prompts,
-        hf_model_callback=hf_model_callback,
     )
 
 

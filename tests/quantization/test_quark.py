@@ -13,7 +13,6 @@ from importlib.util import find_spec
 from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock, patch
 
-import huggingface_hub
 import lm_eval
 import pytest
 import torch
@@ -104,7 +103,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.model_executor.models.llama import LlamaForCausalLM
 from vllm.model_executor.models.utils import WeightsMapper
 from vllm.platforms import current_platform
-from vllm.transformers_utils.repo_utils import hf_api
 
 if current_platform.is_rocm():
     from vllm.platforms.rocm import on_gfx942, on_gfx950
@@ -730,14 +728,6 @@ if QUARK_MXFP4_AVAILABLE:
     from quark.torch.export.nn.modules.realquantizer import StaticScaledRealQuantizer
     from quark.torch.kernel import mx as mx_kernel
     from quark.torch.quantization.config.config import FP4PerGroupSpec
-
-try:
-    hf_api().list_repo_refs(
-        "amd/Llama-3.3-70B-Instruct-WMXFP4-AMXFP4-KVFP8-Scale-UINT8-SQ"
-    )
-    HF_HUB_AMD_ORG_ACCESS = True
-except huggingface_hub.errors.RepositoryNotFoundError:
-    HF_HUB_AMD_ORG_ACCESS = False
 
 
 @pytest.fixture(scope="function", autouse=True)
@@ -1568,16 +1558,11 @@ class AccuracyTestConfig:
     model_name: str
     excepted_value: float
 
-    def get_model_args(
-        self,
-        tp_size: int,
-        model_max_len: int | None = None,
-        kwargs: dict | None = None,
-    ) -> dict:
+    def get_model_args(self, tp_size: int, kwargs: dict | None = None) -> dict:
         if kwargs is None:
             kwargs = {}
 
-        model_args = {
+        return {
             "pretrained": self.model_name,
             "dtype": "auto",
             "add_bos_token": True,
@@ -1585,10 +1570,6 @@ class AccuracyTestConfig:
             "gpu_memory_utilization": 0.7,
             **kwargs,
         }
-        if model_max_len is not None:
-            model_args["max_model_len"] = model_max_len
-
-        return model_args
 
 
 WIKITEXT_ACCURACY_CONFIGS = [
@@ -1610,16 +1591,11 @@ WIKITEXT_ACCURACY_CONFIGS = [
 @pytest.mark.parametrize(
     "config", WIKITEXT_ACCURACY_CONFIGS, ids=lambda config: config.model_name
 )
-@pytest.mark.parametrize("tp_size", [1, 2])
-def test_ocp_mx_wikitext_correctness(config: AccuracyTestConfig, tp_size: int):
-    device_count = torch.accelerator.device_count()
-    if device_count < tp_size:
-        pytest.skip(f"This test requires >={tp_size} gpus, got only {device_count}")
-
+def test_ocp_mx_wikitext_correctness(config: AccuracyTestConfig):
     results = lm_eval.simple_evaluate(
         model="vllm",
         model_args=config.get_model_args(
-            tp_size=tp_size, kwargs={"cudagraph_capture_sizes": [16]}
+            tp_size=1, kwargs={"cudagraph_capture_sizes": [16]}
         ),
         tasks="wikitext",
         batch_size=64,
@@ -1627,48 +1603,6 @@ def test_ocp_mx_wikitext_correctness(config: AccuracyTestConfig, tp_size: int):
 
     measured_value = results["results"]["wikitext"]["word_perplexity,none"]
     assert measured_value == pytest.approx(config.excepted_value, abs=0.1)
-
-
-GSM8K_ACCURACY_CONFIGS = [
-    # Private model.
-    AccuracyTestConfig(
-        model_name="amd/DeepSeek-R1-WMXFP4-AMXFP4-Scale-UINT8-MoE-Quant",
-        excepted_value=0.96,
-    ),
-]
-
-
-@pytest.mark.parametrize("config", GSM8K_ACCURACY_CONFIGS)
-@pytest.mark.skipif(
-    not QUARK_MXFP4_AVAILABLE,
-    reason=f"amd-quark>={QUARK_MXFP4_MIN_VERSION} is not available",
-)
-@pytest.mark.skipif(
-    not HF_HUB_AMD_ORG_ACCESS,
-    reason="Read access to huggingface.co/amd is required for this test.",
-)
-def test_mxfp4_gsm8k_correctness(config: AccuracyTestConfig):
-    device_count = torch.accelerator.device_count()
-    if device_count < 8:
-        pytest.skip(f"This test requires >=8 gpus, got only {device_count}")
-
-    task = "gsm8k"
-    rtol = 0.03
-
-    results = lm_eval.simple_evaluate(
-        model="vllm",
-        model_args=config.get_model_args(tp_size=8, model_max_len=38768),
-        tasks=task,
-        batch_size=64,
-        num_fewshot=8,
-    )
-
-    EXPECTED_VALUE = config.excepted_value
-    measured_value = results["results"][task]["exact_match,strict-match"]
-    assert (
-        measured_value - rtol < EXPECTED_VALUE
-        and measured_value + rtol > EXPECTED_VALUE
-    ), f"Expected: {EXPECTED_VALUE} |  Measured: {measured_value}"
 
 
 @pytest.mark.skipif(

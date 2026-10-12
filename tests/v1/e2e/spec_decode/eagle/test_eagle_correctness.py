@@ -108,24 +108,6 @@ def test_eagle_correctness_light(
             "auto",
             0.8,
         ),
-        pytest.param(
-            (
-                "eagle3",
-                "Qwen/Qwen2.5-VL-7B-Instruct",
-                "Rayzl/qwen2.5-vl-7b-eagle3-sgl",
-                1,
-            ),
-            False,
-            False,
-            "auto",
-            0.7,
-            # TODO: Re-measure the reference threshold when re-enabling this case.
-            # Text-only mode starts but loses target correctness with ROCm/TRITON;
-            # full multimodal profiling currently fails during engine startup.
-            marks=pytest.mark.skip(
-                reason="Qwen2.5-VL Eagle3 is not yet reliable in this test setup"
-            ),
-        ),
         (
             (
                 "eagle3",
@@ -143,7 +125,6 @@ def test_eagle_correctness_light(
         "qwen3_eagle3",
         "qwen3_eagle3-transformers",
         "qwen3_vl_eagle3",
-        "qwen2_5_vl_eagle3",
         "llama3_eagle3",
     ],
 )
