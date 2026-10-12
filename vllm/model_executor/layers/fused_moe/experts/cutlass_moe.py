@@ -14,7 +14,7 @@ from vllm.model_executor.layers.fused_moe.activation import (
     apply_moe_activation,
     apply_moe_activation_supported,
 )
-from vllm.model_executor.layers.fused_moe.bf16_moe_reduce import (
+from vllm.model_executor.layers.fused_moe.bf16_decode_fusions import (
     bf16_moe_weighted_sum,
     supports_bf16_decode_fusion,
 )

@@ -79,7 +79,7 @@ vllm_config = VllmConfig(parallel_config=ParallelConfig(pipeline_parallel_size=1
 def test_bf16_decode_moe_reduce_preserves_cutlass_rounding(
     m, topk, width, weight_dtype, apply_on_input
 ):
-    from vllm.model_executor.layers.fused_moe.bf16_moe_reduce import (
+    from vllm.model_executor.layers.fused_moe.bf16_decode_fusions import (
         bf16_moe_weighted_sum,
     )
 

@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""CUTLASS FP4 finalization with the reference BF16 rounding points."""
+"""Experimental BF16 decode fusions, preserving materialized BF16 rounding."""
 
 import torch
 
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.utils.torch_utils import direct_register_custom_op
 
 
 def supports_bf16_decode_fusion(x: torch.Tensor) -> bool:
@@ -18,6 +19,86 @@ def supports_bf16_decode_fusion(x: torch.Tensor) -> bool:
         and x.is_contiguous()
         and current_platform.is_device_capability(120, x.device.index)
     )
+
+
+@triton.jit
+def _shared_gate_kernel(
+    X,
+    W,
+    SHARED,
+    OUT,
+    WIDTH: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    BLOCK_H: tl.constexpr,
+):
+    row = tl.program_id(0)
+    k = tl.arange(0, BLOCK_K)
+    x = tl.load(X + row * WIDTH + k, k < WIDTH, other=0).to(tl.float32)
+    w = tl.load(W + k, k < WIDTH, other=0).to(tl.float32)
+    # F.linear and sigmoid each materialize a BF16 tensor in the reference.
+    gate = tl.sum(x * w, 0).to(tl.bfloat16).to(tl.float32)
+    scale = (1.0 / (1.0 + tl.exp(-gate))).to(tl.bfloat16).to(tl.float32)
+    h = tl.program_id(1) * BLOCK_H + tl.arange(0, BLOCK_H)
+    shared = tl.load(SHARED + row * WIDTH + h, h < WIDTH, other=0)
+    tl.store(OUT + row * WIDTH + h, shared.to(tl.float32) * scale, h < WIDTH)
+
+
+def _shared_gate(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    shared: torch.Tensor,
+    block_h: int,
+) -> torch.Tensor:
+    assert x.is_cuda and x.ndim == 2 and 0 < x.shape[1] <= 8192
+    assert x.dtype == weight.dtype == shared.dtype == torch.bfloat16
+    assert x.device == weight.device == shared.device
+    assert x.is_contiguous() and weight.is_contiguous() and shared.is_contiguous()
+    assert weight.shape == (1, x.shape[1]) and shared.shape == x.shape
+    assert block_h in (256, 512, 1024, 4096)
+    out = torch.empty_like(shared)
+    with torch.accelerator.device_index(x.device.index):
+        _shared_gate_kernel[(x.shape[0], triton.cdiv(x.shape[1], block_h))](
+            x,
+            weight,
+            shared,
+            out,
+            x.shape[1],
+            triton.next_power_of_2(x.shape[1]),
+            block_h,
+            num_warps=4,
+            enable_fp_fusion=False,
+        )
+    return out
+
+
+def _shared_gate_fake(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    shared: torch.Tensor,
+    block_h: int,
+) -> torch.Tensor:
+    return torch.empty_like(shared)
+
+
+direct_register_custom_op(
+    op_name="bf16_decode_shared_gate",
+    op_func=_shared_gate,
+    fake_impl=_shared_gate_fake,
+)
+
+
+def bf16_shared_expert_gate(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    shared: torch.Tensor,
+    block_h: int = 512,
+) -> torch.Tensor:
+    """Fuse a scalar BF16 projection, sigmoid, and shared-expert scaling.
+
+    Inputs must be contiguous CUDA BF16 tensors: x/shared [M, H], weight
+    [1, H]. FP32 reduction order can differ from the GEMM implementation.
+    """
+    return torch.ops.vllm.bf16_decode_shared_gate(x, weight, shared, block_h)
 
 
 @triton.jit

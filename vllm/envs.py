@@ -92,6 +92,7 @@ if TYPE_CHECKING:
     VLLM_MAIN_CUDA_VERSION: str = "13.0"
     VLLM_FLOAT32_MATMUL_PRECISION: Literal["highest", "high", "medium"] = "highest"
     VLLM_BATCH_INVARIANT: bool = False
+    VLLM_FUSE_BF16_SHARED_GATE: bool = False
     VLLM_FUSE_BF16_MOE_REDUCE: bool = False
     VLLM_TRITON_USE_TD: bool | None = None
     VLLM_GPU_SYNC_CHECK: Literal["warn", "error"] | None = None
@@ -629,7 +630,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Enable batch-invariant mode: deterministic results regardless of
     # batch composition. Requires NVIDIA GPU with compute capability >= 9.0.
-    # Opt-in CUTLASS FP4 finalize for SM120 BF16 decode (M <= 4, H = 2560).
+    # Opt-in shared-gate and CUTLASS FP4 finalize fusions for SM120 BF16 decode
+    # (M <= 4, H = 2560), bypassed in batch-invariant mode.
+    "VLLM_FUSE_BF16_SHARED_GATE": lambda: bool(
+        int(os.getenv("VLLM_FUSE_BF16_SHARED_GATE", "0"))
+    ),
     "VLLM_FUSE_BF16_MOE_REDUCE": lambda: bool(
         int(os.getenv("VLLM_FUSE_BF16_MOE_REDUCE", "0"))
     ),
