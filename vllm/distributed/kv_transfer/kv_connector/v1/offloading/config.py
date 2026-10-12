@@ -4,6 +4,7 @@
 
 from typing import TYPE_CHECKING
 
+from vllm.config.kv_transfer import KVTransferConfig
 from vllm.utils.math_utils import round_up
 from vllm.v1.core.kv_cache_utils import (
     resolve_dcp_kv_block_size,
@@ -59,9 +60,16 @@ def _group_kv_bytes_per_block(group: "KVCacheGroupSpec") -> int:
 def build_offloading_config(
     vllm_config: "VllmConfig",
     kv_cache_config: "KVCacheConfig",
+    kv_transfer_config: "KVTransferConfig | None" = None,
 ) -> OffloadingConfig:
-    """Translate vLLM configuration into the native offloading boundary."""
-    kv_transfer_config = vllm_config.kv_transfer_config
+    """Translate vLLM configuration into the native offloading boundary.
+
+    ``kv_transfer_config`` overrides ``vllm_config.kv_transfer_config`` when
+    the OffloadingConnector is nested inside a MultiConnector and the caller
+    has already resolved its own config.
+    """
+    if kv_transfer_config is None:
+        kv_transfer_config = vllm_config.kv_transfer_config
     assert kv_transfer_config is not None
     extra_config = kv_transfer_config.kv_connector_extra_config
     assert kv_transfer_config.engine_id is not None
@@ -281,4 +289,67 @@ def build_offloading_config(
         replicated_layout=replicated_layout,
         canonical_layout=canonical_layout,
         kv_cache_layout=vllm_config.cache_config.kv_cache_layout,
+        # Unified across workers by `unify_cpu_offload_num_chunks` before the
+        # scheduler and worker connectors are built.
+        num_cpu_blocks=vllm_config.cache_config.num_cpu_blocks,
     )
+
+
+def _is_cpu_offloading_spec(kv_transfer_config: "KVTransferConfig") -> bool:
+    return kv_transfer_config.kv_connector_extra_config.get(
+        "spec_name", "CPUOffloadingSpec"
+    ) == "CPUOffloadingSpec"
+
+
+def get_cpu_offloading_kv_transfer_config(
+    vllm_config: "VllmConfig",
+) -> "KVTransferConfig | None":
+    """The KVTransferConfig driving the CPU offloading spec, if configured.
+
+    Returns the top-level config for a direct OffloadingConnector, or the
+    nested entry's own config when it is wrapped in a MultiConnector, so
+    callers read the connector's kv_connector_extra_config (e.g.
+    cpu_bytes_to_use) instead of the wrapper's.
+    """
+    kv_transfer_config = vllm_config.kv_transfer_config
+    if kv_transfer_config is None:
+        return None
+
+    if kv_transfer_config.kv_connector == "MultiConnector":
+        candidates = []
+        for entry in kv_transfer_config.kv_connector_extra_config.get(
+            "connectors", []
+        ):
+            if entry.get("kv_connector") != "OffloadingConnector":
+                continue
+            entry_kwargs = {
+                k: v
+                for k, v in entry.items()
+                if k not in ("engine_id", "kv_role")
+            }
+            candidates.append(
+                KVTransferConfig(
+                    **entry_kwargs,
+                    kv_role=entry.get("kv_role", kv_transfer_config.kv_role),
+                    engine_id=entry.get("engine_id", kv_transfer_config.engine_id),
+                )
+            )
+        candidates = [c for c in candidates if _is_cpu_offloading_spec(c)]
+        if len(candidates) > 1:
+            raise ValueError(
+                "At most one OffloadingConnector with CPUOffloadingSpec may "
+                "be configured."
+            )
+        return candidates[0] if candidates else None
+
+    if kv_transfer_config.kv_connector != "OffloadingConnector":
+        return None
+    if not _is_cpu_offloading_spec(kv_transfer_config):
+        return None
+    return kv_transfer_config
+
+
+def uses_cpu_offloading_spec(vllm_config: "VllmConfig") -> bool:
+    """Whether the configured native offloading backend is the CPU tier,
+    directly or nested inside a MultiConnector."""
+    return get_cpu_offloading_kv_transfer_config(vllm_config) is not None
