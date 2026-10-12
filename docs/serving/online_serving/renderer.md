@@ -159,8 +159,10 @@ then keeps `mm_hashes` and `mm_placeholders` and sets `kwargs_data` and
 `mm_metadata` to null. When the model processor can derive the exact token
 layout from source-item metadata, `/render` skips materializing encoder
 tensors. Processors whose prompt updates already ignore processed kwargs take
-this generic path automatically. Other models and modalities fall back to full
-preprocessing before dropping the tensors.
+this generic path automatically. Qwen2-VL, Qwen2.5-VL, and Qwen3-VL image
+inputs opt in with their existing smart-resize and token-count logic. Other
+models and modalities fall back to full preprocessing before dropping the
+tensors.
 
 This is an exact optimization, not token estimation: both paths return the same
 `token_ids`, `mm_hashes`, and `mm_placeholders`.

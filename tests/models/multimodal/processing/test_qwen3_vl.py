@@ -16,12 +16,76 @@ from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.model_executor.models.qwen3_vl import Qwen3VLProcessingInfo
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.cache import MultiModalProcessorOnlyCache
+from vllm.multimodal.processing import ProcessorInputs, TimingContext
 from vllm.multimodal.processing.context import BaseProcessingInfo
 
 from ...registry import HF_EXAMPLE_MODELS
 from ...utils import build_model_context
 
 MODEL_ID = "Qwen/Qwen3-VL-4B-Instruct"
+
+
+@pytest.mark.parametrize("model_id", [MODEL_ID])
+@pytest.mark.parametrize("shape", [(128, 128), (360, 640), (720, 1280)])
+def test_routing_metadata_matches_full_image_processing(
+    model_id: str,
+    shape: tuple[int, int],
+) -> None:
+    ctx = build_model_context(
+        model_id,
+        limit_mm_per_prompt={"image": 1, "video": 0},
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    image = np.zeros((*shape, 3), dtype=np.uint8)
+    image_token_id = processor.info.get_hf_processor().image_token_id
+
+    def make_inputs() -> ProcessorInputs:
+        return ProcessorInputs(
+            prompt=[image_token_id],
+            mm_data_items=processor.info.parse_mm_data({"image": [image]}),
+        )
+
+    full = processor.apply(make_inputs(), TimingContext(enabled=False))
+    routing = processor.apply_routing_metadata(
+        make_inputs(),
+        TimingContext(enabled=False),
+    )
+
+    assert routing["prompt_token_ids"] == full["prompt_token_ids"]
+    assert routing["mm_hashes"] == full["mm_hashes"]
+    assert routing["mm_placeholders"] == full["mm_placeholders"]
+    assert routing["mm_kwargs"] == {}
+
+
+def test_inherited_qwen3_processing_info_uses_full_fallback() -> None:
+    class UnverifiedQwen3VLProcessingInfo(Qwen3VLProcessingInfo):
+        pass
+
+    ctx = build_model_context(
+        MODEL_ID,
+        limit_mm_per_prompt={"image": 1, "video": 0},
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    processor.info = UnverifiedQwen3VLProcessingInfo(processor.info.ctx)
+    image = np.zeros((128, 128, 3), dtype=np.uint8)
+    image_token_id = processor.info.get_hf_processor().image_token_id
+
+    def make_inputs() -> ProcessorInputs:
+        return ProcessorInputs(
+            prompt=[image_token_id],
+            mm_data_items=processor.info.parse_mm_data({"image": [image]}),
+        )
+
+    full = processor.apply(make_inputs(), TimingContext(enabled=False))
+    routing = processor.apply_routing_metadata(
+        make_inputs(),
+        TimingContext(enabled=False),
+    )
+
+    assert routing["prompt_token_ids"] == full["prompt_token_ids"]
+    assert routing["mm_hashes"] == full["mm_hashes"]
+    assert routing["mm_placeholders"] == full["mm_placeholders"]
+    assert routing["mm_kwargs"] != {}
 
 
 def test_qwen3_video_routing_schema_adds_vllm_compatibility_kwargs(

@@ -76,6 +76,7 @@ from vllm.multimodal.inputs import (
 )
 from vllm.multimodal.parse import (
     DictEmbeddingItems,
+    ImageProcessorItems,
     ImageSize,
     ModalityDataItems,
     MultiModalDataItems,
@@ -85,8 +86,11 @@ from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
     BaseProcessingInfo,
+    MultiModalProcessingResult,
+    ProcessorInputs,
     PromptReplacement,
     PromptUpdate,
+    TimingContext,
 )
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
@@ -843,6 +847,8 @@ class Qwen2VLMultiModalDataParser(MultiModalDataParser):
 
 
 class Qwen2VLProcessingInfo(BaseProcessingInfo):
+    _supports_routing_metadata_image_fast_path = True
+
     def get_hf_config(self):
         return self.ctx.get_hf_config(Qwen2VLConfig)
 
@@ -1233,6 +1239,77 @@ class Qwen2VLDummyInputsBuilder(BaseDummyInputsBuilder[Qwen2VLProcessingInfo]):
 
 
 class Qwen2VLMultiModalProcessor(BaseMultiModalProcessor[Qwen2VLProcessingInfo]):
+    _supports_routing_metadata_image_fast_path = True
+    _routing_metadata_processing_info_type = Qwen2VLProcessingInfo
+
+    def _apply_routing_metadata(
+        self,
+        inputs: ProcessorInputs,
+        timing_ctx: TimingContext,
+    ) -> MultiModalProcessingResult | None:
+        # The model's ProcessingInfo already owns the exact smart-resize and
+        # feature-count calculation. Keep unsupported modalities and
+        # precomputed embeddings on the full processor path.
+        if not (
+            type(self).__dict__.get(
+                "_supports_routing_metadata_image_fast_path",
+                False,
+            )
+            and type(self.info).__dict__.get(
+                "_supports_routing_metadata_image_fast_path",
+                False,
+            )
+            and type(self.info)
+            is type(self).__dict__.get("_routing_metadata_processing_info_type")
+        ):
+            return None
+        if set(inputs.mm_data_items) != {"image"}:
+            return None
+        image_items = inputs.mm_data_items.get("image")
+        if not isinstance(image_items, ImageProcessorItems):
+            return None
+
+        hf_kwargs = inputs.hf_processor_mm_kwargs
+        hf_processor = self.info.get_hf_processor(**hf_kwargs)
+        image_processor = self.info.get_image_processor(**hf_kwargs)
+        image_token_id = self.info.get_tokenizer().get_vocab()[hf_processor.image_token]
+
+        with timing_ctx.record("routing_metadata_item_shapes"):
+            token_counts = [
+                self.info.get_num_image_tokens(
+                    image_width=size.width,
+                    image_height=size.height,
+                    image_processor=image_processor,
+                    mm_kwargs=hf_kwargs,
+                )
+                for size in (
+                    image_items.get_image_size(i) for i in range(len(image_items))
+                )
+            ]
+
+        def image_replacement(item_idx: int) -> list[int]:
+            return [image_token_id] * token_counts[item_idx]
+
+        with timing_ctx.record("routing_metadata_hashes"):
+            mm_hashes = self._get_mm_hashes(inputs)
+
+        prompt_updates = self._bind_and_group_updates(
+            [
+                PromptReplacement(
+                    modality="image",
+                    target=[image_token_id],
+                    replacement=image_replacement,
+                )
+            ],
+            inputs.mm_data_items.get_all_counts(),
+        )
+        return MultiModalProcessingResult(
+            prompt_ids=self._postprocess_prompt(inputs.prompt),
+            kwargs=MultiModalKwargsItems({}),
+            hashes=mm_hashes,
+            prompt_updates=prompt_updates,
+        )
+
     def _get_prompt_updates(
         self,
         mm_items: MultiModalDataItems,
