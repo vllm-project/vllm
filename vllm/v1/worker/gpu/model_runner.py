@@ -2555,15 +2555,15 @@ def sort_batch_req_ids(
     # decode_threshold=1, where a context-less decode_query_len chunk is a prefill.
     def key(r: str) -> tuple[bool, bool, bool, int]:
         num = num_tokens_per_req[r]
-        # seq_len == query_len in the classifier, i.e. no computed context.
-        no_context = (
-            num_computed_tokens is not None
-            and req_id_to_index is not None
-            and num_computed_tokens[req_id_to_index[r]] == 0
-        )
         return (
             not draft_tokens.get(r),
-            num > 1 and no_context,  # single-token requests stay with the decodes
+            # Single-token requests stay with the decodes, so skip the lookup for
+            # them. `not` keeps the numpy scalar out of the tuple: sorting compares
+            # tuples O(n log n) times, and numpy scalars compare far slower.
+            num > 1
+            and num_computed_tokens is not None
+            and req_id_to_index is not None
+            and not num_computed_tokens[req_id_to_index[r]],
             num != decode_query_len,
             num,
         )
