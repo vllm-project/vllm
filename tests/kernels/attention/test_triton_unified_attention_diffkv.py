@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Unit tests for the Triton DiffKV unified-attention kernel."""
 
+from unittest.mock import patch
+
 import pytest
 import torch
 
@@ -16,6 +18,7 @@ from vllm.v1.attention.backends.fa_utils import (
     get_flash_attn_version,
     is_flash_attn_varlen_func_available,
 )
+from vllm.v1.attention.ops import triton_unified_attention_diffkv as diffkv_module
 from vllm.v1.attention.ops.triton_unified_attention_diffkv import (
     unified_attention_diffkv,
 )
@@ -35,6 +38,8 @@ NUM_HEADS = [(4, 4), (8, 2), (5, 1)]
 HEAD_SIZES = [(128, 128), (192, 128)]
 BLOCK_SIZES = [16]
 DTYPES = [torch.bfloat16]
+# None keeps the KV cache in the query dtype.
+KV_CACHE_DTYPES = [None, current_platform.fp8_dtype()]
 
 NUM_BLOCKS = 2048
 
@@ -80,6 +85,7 @@ def _alloc_segm_buffers(seq_threshold_3D: int, num_query_heads: int, head_size_v
 @pytest.mark.parametrize("sliding_window", [None, 128])
 @pytest.mark.parametrize("soft_cap", [None, 50.0])
 @pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("kv_cache_dtype", KV_CACHE_DTYPES)
 @pytest.mark.parametrize("seq_threshold_3D", SEQ_THRESHOLD_3D_VALUES)
 @torch.inference_mode()
 def test_triton_unified_attn_diffkv_vs_reference(
@@ -89,13 +95,17 @@ def test_triton_unified_attn_diffkv_vs_reference(
     sliding_window: int | None,
     soft_cap: float | None,
     dtype: torch.dtype,
+    kv_cache_dtype: torch.dtype | None,
     block_size: int,
     seq_threshold_3D: int,
+    quant_query: bool = False,
 ) -> None:
     head_size_qk, head_size_v = head_sizes
 
-    # Keep the FA3/FA4 comparison on NVIDIA; ROCm uses the PyTorch oracle.
-    if not current_platform.is_rocm():
+    # FA3/FA4 is the reference on NVIDIA; ROCm and the FP8 KV cache (FA would
+    # also quantize Q) use the PyTorch oracle.
+    use_torch_ref = current_platform.is_rocm() or kv_cache_dtype is not None
+    if not use_torch_ref:
         fa_version = get_flash_attn_version(
             head_size=head_size_qk, head_size_v=head_size_v
         )
@@ -126,6 +136,20 @@ def test_triton_unified_attn_diffkv_vs_reference(
     )
     key_cache = kv_cache[..., :head_size_qk]
     value_cache = kv_cache[..., head_size_qk:]
+    q_descale = k_descale = v_descale = None
+    if kv_cache_dtype is not None:
+        # Non-power-of-two scales exercise descale rounding.
+        k_descale = torch.tensor(0.3, dtype=torch.float32)
+        v_descale = torch.tensor(0.7, dtype=torch.float32)
+        kv_cache = torch.cat(
+            [key_cache / k_descale, value_cache / v_descale], dim=-1
+        ).to(kv_cache_dtype)
+        key_cache = kv_cache[..., :head_size_qk]
+        value_cache = kv_cache[..., head_size_qk:]
+
+    if quant_query:
+        q_descale = torch.tensor(0.2, dtype=torch.float32)
+        query = (query / q_descale).to(kv_cache_dtype)
 
     cu_query_lens = torch.tensor([0] + query_lens, dtype=torch.int32).cumsum(
         dim=0, dtype=torch.int32
@@ -137,12 +161,20 @@ def test_triton_unified_attn_diffkv_vs_reference(
         0, NUM_BLOCKS, (num_seqs, max_num_blocks_per_seq), dtype=torch.int32
     )
 
-    if current_platform.is_rocm():
+    if use_torch_ref:
+        ref_key_cache = key_cache.float()
+        ref_value_cache = value_cache.float()
+        if kv_cache_dtype is not None:
+            ref_key_cache *= k_descale
+            ref_value_cache *= v_descale
         # FP32 also keeps the helper's in-place scaling off the kernel input.
+        ref_query = query.float()
+        if quant_query:
+            ref_query *= q_descale
         ref_out = ref_paged_attn(
-            query.float(),
-            key_cache.float(),
-            value_cache.float(),
+            ref_query,
+            ref_key_cache,
+            ref_value_cache,
             query_lens,
             kv_lens,
             block_tables,
@@ -153,6 +185,7 @@ def test_triton_unified_attn_diffkv_vs_reference(
     else:
         from vllm.v1.attention.backends.fa_utils import flash_attn_varlen_func
 
+        assert fa_version is not None
         # FA's TMA path needs aligned singleton strides (num_kv_heads == 1).
         fa_k = canonicalize_singleton_dim_strides(key_cache)
         fa_v = canonicalize_singleton_dim_strides(value_cache)
@@ -199,6 +232,124 @@ def test_triton_unified_attn_diffkv_vs_reference(
         softmax_segm_output=segm_output,
         softmax_segm_max=segm_max,
         softmax_segm_expsum=segm_expsum,
+        q_descale=q_descale,
+        k_descale=k_descale,
+        v_descale=v_descale,
     )
 
     torch.testing.assert_close(triton_out, ref_out, atol=2e-2, rtol=2e-2)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda() or not current_platform.has_device_capability(89),
+    reason="FP8 query requires CUDA SM89+",
+)
+@pytest.mark.parametrize(
+    "seq_lens,seq_threshold_3D",
+    [([(129, 463)], 0), ([(1, 2011)], 0), ([(1, 2011)], 8)],
+)
+def test_triton_unified_attn_diffkv_fp8_query(seq_lens, seq_threshold_3D):
+    test_triton_unified_attn_diffkv_vs_reference(
+        seq_lens=seq_lens,
+        num_heads=(8, 2),
+        head_sizes=(192, 128),
+        sliding_window=None,
+        soft_cap=None,
+        dtype=torch.bfloat16,
+        kv_cache_dtype=current_platform.fp8_dtype(),
+        block_size=16,
+        seq_threshold_3D=seq_threshold_3D,
+        quant_query=True,
+    )
+
+
+def _capture_diffkv_launch(
+    query_lens: list[int], max_seqlen_q: int, segm_first_dim: int
+):
+    """Run the launcher with both Triton kernels mocked; return grid/kwargs."""
+    num_query_heads, num_kv_heads = 8, 2
+    head_size_qk, head_size_v = 128, 128
+    num_seqs = len(query_lens)
+    num_tokens = sum(query_lens)
+
+    query = torch.zeros(
+        num_tokens, num_query_heads, head_size_qk, dtype=torch.bfloat16, device="cpu"
+    )
+    kv_cache = torch.zeros(
+        NUM_BLOCKS,
+        BLOCK_SIZES[0],
+        num_kv_heads,
+        head_size_qk + head_size_v,
+        dtype=torch.bfloat16,
+        device="cpu",
+    )
+    key_cache = kv_cache[..., :head_size_qk]
+    value_cache = kv_cache[..., head_size_qk:]
+    out = torch.zeros(
+        num_tokens, num_query_heads, head_size_v, dtype=torch.bfloat16, device="cpu"
+    )
+    cu_seqlens_q = torch.tensor(
+        [0] + query_lens, dtype=torch.int32, device="cpu"
+    ).cumsum(dim=0, dtype=torch.int32)
+    seqused_k = torch.full((num_seqs,), 512, dtype=torch.int32, device="cpu")
+    block_tables = torch.zeros(num_seqs, 32, dtype=torch.int32, device="cpu")
+    segm_output, segm_max, segm_expsum = _alloc_segm_buffers(
+        segm_first_dim, num_query_heads, head_size_v
+    )
+
+    with (
+        patch.object(diffkv_module, "kernel_unified_attention_diffkv") as mock_kernel,
+        patch.object(diffkv_module, "kernel_reduce_segments_diffkv") as mock_reduce,
+    ):
+        unified_attention_diffkv(
+            q=query,
+            k=key_cache,
+            v=value_cache,
+            out=out,
+            cu_seqlens_q=cu_seqlens_q,
+            seqused_k=seqused_k,
+            softmax_scale=head_size_qk**-0.5,
+            causal=True,
+            window_size=(-1, -1),
+            block_table=block_tables,
+            softcap=0,
+            max_seqlen_q=max_seqlen_q,
+            seq_threshold_3D=8,
+            num_par_softmax_segments=NUM_PAR_SOFTMAX_SEGMENTS,
+            softmax_segm_output=segm_output,
+            softmax_segm_max=segm_max,
+            softmax_segm_expsum=segm_expsum,
+        )
+
+    grid = mock_kernel.__getitem__.call_args.args[0]
+    kwargs = mock_kernel.__getitem__.return_value.call_args.kwargs
+    return grid, kwargs, mock_reduce.__getitem__.called
+
+
+def test_spec_verify_block_m_grouping_and_launch_kwargs() -> None:
+    """Pin program granularity for verify/decode without launching Triton."""
+    verify_grid, verify_kwargs, verify_reduce = _capture_diffkv_launch(
+        query_lens=[8, 8], max_seqlen_q=8, segm_first_dim=16
+    )
+    num_queries_per_kv = 4
+    expected_block_m = min(128, next_power_of_2(8 * num_queries_per_kv))
+    assert verify_grid == (4, 2, NUM_PAR_SOFTMAX_SEGMENTS)
+    assert verify_kwargs["IS_3D"] is True
+    assert verify_kwargs["BLOCK_M"] == expected_block_m
+    assert verify_kwargs["BLOCK_Q"] == expected_block_m // num_queries_per_kv
+    assert verify_kwargs["TILE_SIZE"] == 16
+    assert verify_kwargs["num_warps"] == 4
+    assert "num_stages" not in verify_kwargs
+    assert verify_reduce
+
+    decode_grid, decode_kwargs, decode_reduce = _capture_diffkv_launch(
+        query_lens=[1], max_seqlen_q=1, segm_first_dim=8
+    )
+    assert decode_grid == (1, 2, NUM_PAR_SOFTMAX_SEGMENTS)
+    assert decode_kwargs["IS_3D"] is True
+    assert decode_kwargs["BLOCK_M"] == 16
+    assert decode_kwargs["BLOCK_Q"] == 4
+    assert decode_kwargs["TILE_SIZE"] == 16
+    assert "num_warps" not in decode_kwargs
+    assert "num_stages" not in decode_kwargs
+    assert decode_reduce

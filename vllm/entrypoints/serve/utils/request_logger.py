@@ -71,11 +71,10 @@ class RequestLogger:
 
     def log_request_body(self, request: AnyRequest | AnyPoolingRequest) -> None:
         if logger.isEnabledFor(logging.DEBUG):
-            max_log_len = self.max_log_len if self.max_log_len is not None else -1
             logger.debug(
                 "Request %s JSON body: %s",
                 getattr(request, "request_id", "N/A"),
-                request.model_dump_json(exclude_unset=True)[:max_log_len],
+                request.model_dump_json(exclude_unset=True)[: self.max_log_len],
             )
 
     def log_outputs(

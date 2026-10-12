@@ -20,7 +20,7 @@ _INIT_SLOPE = 0.5
 _INIT_BIAS = -0.2
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["num_reqs"])
 def _accumulate_kernel(
     info_ptr,
     grad_ptr,
@@ -160,7 +160,7 @@ def _refit_kernel(
     tl.store(counts_ptr + k, 0.0, mask=mask)
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["num_tokens"])
 def _local_max_sumexp_kernel(
     local_max_ptr,
     local_max_stride,
@@ -216,7 +216,7 @@ def _local_max_sumexp_kernel(
     )
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["num_tokens"])
 def _predict_kernel(
     features_ptr,
     features_stride,
@@ -422,7 +422,8 @@ class OnlineAcceptanceEstimator:
             self.predictions.stride(0),
             self.counts,
             num_reqs,
-            BLOCK_R=triton.next_power_of_2(max(num_reqs, 1)),
+            BLOCK_R=max(256, triton.next_power_of_2(num_reqs)),
+            num_warps=1 if num_reqs <= 256 else 4,
         )
 
         self._steps_since_refit += 1

@@ -7,7 +7,11 @@ from dataclasses import dataclass, replace
 import pytest
 import torch
 
-from tests.kernels.moe.utils import check_accuracy, check_deferred_moe_finalize
+from tests.kernels.moe.utils import (
+    check_accuracy,
+    check_deferred_moe_finalize,
+    make_dummy_moe_config,
+)
 from vllm._aiter_ops import (
     is_aiter_found,
     is_aiter_found_and_supported,
@@ -47,7 +51,6 @@ if ROCM_AVAILABLE:
     ROCM_GFX950 = on_gfx950()
 
     if ROCM_AITER_AVAILABLE:
-        from aiter.ops.triton.moe.quant_moe import upcast_from_mxfp
         from aiter.ops.triton.quant import dynamic_mxfp4_quant
 
 if TRTLLM_GEN_MXFP4_AVAILABLE:
@@ -191,11 +194,7 @@ def mxfp8_dequantize(x, scale):
 def mxfp4_quant_dequant(x: torch.Tensor) -> torch.Tensor:
     shape = x.shape
     quantized, scale = dynamic_mxfp4_quant(x.to(torch.bfloat16).flatten(0, -2))
-    return (
-        upcast_from_mxfp(quantized.view(torch.uint8), scale, torch.bfloat16, axis=-1)
-        .reshape(shape)
-        .float()
-    )
+    return mxfp4_dequantize(quantized.view(torch.uint8), scale).reshape(shape)
 
 
 def reference_moe(
@@ -786,6 +785,7 @@ def test_trtllm_mxfp4_deferred_finalize(
                 global_num_experts=num_experts,
                 expert_map=None,
                 apply_router_weight_on_input=False,
+                routing_sink=None,
             ),
         )
         return
@@ -1729,7 +1729,7 @@ def test_rocm_mxfp4_moe_oracle(
     w13_conv, w2_conv, w13_scale_conv, w2_scale_conv, w13_bias_conv, w2_bias_conv = (
         convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
             mxfp4_backend=backend,
-            layer=layer,  # type: ignore[arg-type]
+            layer=layer,
             w13_weight=w13_quant,
             w2_weight=w2_quant,
             w13_weight_scale=w13_scale,
@@ -1785,6 +1785,7 @@ def test_rocm_mxfp4_moe_oracle(
                 global_num_experts=num_experts,
                 expert_map=None,
                 apply_router_weight_on_input=False,
+                routing_sink=None,
             )
         else:
             # Modular impl uses topk_weights and topk_ids
@@ -1809,12 +1810,8 @@ def test_rocm_mxfp4_moe_oracle(
     assert out.abs().max() > 0.01, "Output is effectively zero"
 
     # Dequantize weights for reference computation
-    w13_dq = upcast_from_mxfp(
-        w13_quant_ref.view(torch.uint8), w13_scale_ref, torch.bfloat16, axis=-1
-    )
-    w2_dq = upcast_from_mxfp(
-        w2_quant_ref.view(torch.uint8), w2_scale_ref, torch.bfloat16, axis=-1
-    )
+    w13_dq = mxfp4_dequantize(w13_quant_ref.view(torch.uint8), w13_scale_ref)
+    w2_dq = mxfp4_dequantize(w2_quant_ref.view(torch.uint8), w2_scale_ref)
 
     # Determine activation type and layout
     # SWIGLUOAI uses interleaved layout (gate/up alternating)
@@ -2016,6 +2013,52 @@ def test_select_mxfp4_moe_backend_raises_with_unsupported_reasons(
         mxfp4_oracle.select_mxfp4_moe_backend(moe_config)
 
 
+@pytest.mark.parametrize(
+    "moe_backend,w4a4,supported,expected",
+    [
+        # The checkpoint's activation wins over BF16 backends listed first.
+        ("auto", True, {"CUTLASS_MXFP4_MXFP4", "MARLIN"}, "CUTLASS_MXFP4_MXFP4"),
+        # No W4A4 kernel: run at BF16 rather than another quantized activation.
+        ("auto", True, {"FLASHINFER_TRTLLM_MXFP4_MXFP8", "MARLIN"}, "MARLIN"),
+        ("marlin", True, {"MARLIN"}, "MARLIN"),
+        # A BF16 checkpoint never gets its activations quantized.
+        ("auto", False, {"CUTLASS_MXFP4_MXFP4", "MARLIN"}, "MARLIN"),
+    ],
+)
+def test_select_mxfp4_moe_backend_respects_checkpoint_activation(
+    monkeypatch: pytest.MonkeyPatch,
+    moe_backend: str,
+    w4a4: bool,
+    supported: set[str],
+    expected: str,
+):
+    """Activations run at the checkpoint's precision when a backend supports
+    it and fall back to BF16 otherwise, never to a lower precision."""
+    import vllm.model_executor.layers.fused_moe.oracle.mxfp4 as mxfp4_oracle
+    from vllm.model_executor.layers.quantization.utils.quant_utils import (
+        kMxfp4Dynamic,
+    )
+
+    def backend_to_kernel_cls(backend):
+        class Experts:
+            @staticmethod
+            def is_supported_config(*args):
+                return backend.name in supported, None
+
+        return [Experts]
+
+    monkeypatch.setattr(mxfp4_oracle, "backend_to_kernel_cls", backend_to_kernel_cls)
+    monkeypatch.setattr(mxfp4_oracle, "_user_moe_activation_override", lambda: None)
+    moe_config = make_dummy_moe_config()
+    moe_config.moe_backend = moe_backend
+
+    backend, _ = mxfp4_oracle.select_mxfp4_moe_backend(
+        moe_config, activation_key=kMxfp4Dynamic if w4a4 else None
+    )
+
+    assert backend.name == expected
+
+
 @pytest.mark.parametrize("backend_name", ["AITER_TRITON_MXFP4_BF16", "AITER_MXFP4_FP8"])
 @pytest.mark.parametrize("use_ep", [False, True])
 def test_aiter_mxfp4_monolithic_rejects_expert_parallel(
@@ -2211,4 +2254,80 @@ def test_emulation_a_mxfp6_moe_forward_quantizes_activations():
     assert max_diff > 0.0, (
         "w_mxfp4_a_mxfp6_e3m2 output is bit-identical to weight-only w_mxfp4:"
         " the emulation never fake-quantized the activations"
+    )
+
+
+# (backend, activation, hidden_in, inter_in, hidden_out, inter_out)
+#
+# The AITER_MXFP4_MXFP4 (W4A4) rows are the ones this table exists for: the
+# per-partition intermediate is aligned to 128, not 256, so a model whose native
+# shard is already 128-aligned is allocated at its real width instead of being
+# padded up. `hidden_size` deliberately stays on 256 -- the gfx950 stage-1 mxfp4
+# kernels are generated with tile_k 256 only, and stage-1 reduces over model_dim.
+#
+# The remaining rows pin the neighbouring branches so a future edit to this
+# function cannot silently move a backend between them.
+ROCM_MXFP4_ROUNDUP_CASES = [
+    # W4A4: 3072 / TP8 = 384 stays 384. This is the case the alignment change is
+    # for; the generic 256 round-up would allocate 512.
+    ("AITER_MXFP4_MXFP4", "SILU", 6144, 384, 6144, 384),
+    # W4A4, already 256-aligned (e.g. moe_intermediate 2048 at TP8): identity in
+    # both the old and the new form, so such models are provably untouched.
+    ("AITER_MXFP4_MXFP4", "SILU", 6144, 256, 6144, 256),
+    # W4A4, 1024 / TP8 = 128: the most aggressive case, halved rather than trimmed.
+    ("AITER_MXFP4_MXFP4", "SILU", 4096, 128, 4096, 128),
+    # W4A4 ignores the activation -- the branch does not read it.
+    ("AITER_MXFP4_MXFP4", None, 6144, 384, 6144, 384),
+    ("AITER_MXFP4_MXFP4", "SWIGLUOAI", 6144, 384, 6144, 384),
+    # W4A4 hidden_size is still rounded to 256, unlike the intermediate.
+    ("AITER_MXFP4_MXFP4", "SILU", 384, 384, 512, 384),
+    # W4A16 CK + SiTU/SILU keeps its own 128/128 carve-out.
+    ("AITER_MXFP4_BF16", "SITU", 384, 384, 384, 384),
+    ("AITER_MXFP4_BF16", "SILU", 384, 384, 384, 384),
+    # ... but only for those activations; anything else takes the generic ROCm arm.
+    ("AITER_MXFP4_BF16", "SWIGLUOAI", 384, 384, 512, 512),
+    # Backends that stay on the generic ROCm 256/256 round-up.
+    ("AITER_MXFP4_FP8", "SILU", 384, 384, 512, 512),
+    ("AITER_TRITON_MXFP4_BF16", "SILU", 384, 384, 512, 512),
+    ("TRITON", "SWIGLUOAI", 384, 384, 512, 512),
+]
+
+
+@pytest.mark.parametrize(
+    "backend_name,activation_name,hidden_in,inter_in,hidden_out,inter_out",
+    ROCM_MXFP4_ROUNDUP_CASES,
+)
+@pytest.mark.skipif(not ROCM_AVAILABLE, reason="ROCm is required for this test")
+def test_rocm_mxfp4_round_up_hidden_and_intermediate(
+    backend_name: str,
+    activation_name: str | None,
+    hidden_in: int,
+    inter_in: int,
+    hidden_out: int,
+    inter_out: int,
+):
+    """Pin the ROCm arm of mxfp4_round_up_hidden_size_and_intermediate_size.
+
+    The allocation this function returns is what every MXFP4 MoE weight buffer,
+    scale buffer and aiter tuned-config lookup is sized from, so a change here is
+    invisible locally and expensive everywhere else. Asserting the table keeps
+    each backend on the alignment its kernels actually require.
+    """
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+    from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
+        Mxfp4MoeBackend,
+        mxfp4_round_up_hidden_size_and_intermediate_size,
+    )
+
+    backend = Mxfp4MoeBackend[backend_name]
+    activation = MoEActivation[activation_name] if activation_name else None
+
+    hidden, intermediate = mxfp4_round_up_hidden_size_and_intermediate_size(
+        backend, hidden_in, inter_in, activation
+    )
+
+    assert (hidden, intermediate) == (hidden_out, inter_out), (
+        f"{backend_name} / {activation_name}: "
+        f"hidden {hidden_in}->{hidden} (expected {hidden_out}), "
+        f"intermediate {inter_in}->{intermediate} (expected {inter_out})"
     )
