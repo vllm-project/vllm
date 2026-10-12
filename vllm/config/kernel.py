@@ -330,6 +330,17 @@ class KernelConfig:
                    running QDQ on activations.
     """
 
+    enable_litetopk_decode: bool = False
+    """Enable producer-assisted LiteTopK decode on SM100 with patched DeepGEMM.
+
+    Supports FP8 H32/D128, page64, FP32 top2048 and 1..4 decode tokens per
+    request, or MXFP4 H32/D128, page128, BF16 top512 and 1..6 tokens.
+    BF16 rounding may change selected indices versus FP32 scoring.
+    Other shapes, context parallelism, candidate mask consumers and
+    explicit sparse_indexer_topk_backend choices use the existing path.
+    Persistent scratch uses about 68 KiB per maximum token row per stream/lane.
+    """
+
     sparse_indexer_topk_backend: SparseIndexerTopkBackend = "auto"
     """Backend for the DSA sparse indexer decode top-k kernel. Available options:
 

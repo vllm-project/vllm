@@ -701,6 +701,7 @@ def fp8_fp4_paged_mqa_logits(
     max_model_len: int,
     clean_logits: bool,
     indices: torch.Tensor | None = None,
+    histogram: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Compute MQA logits using a paged KV-cache.
 
@@ -726,6 +727,7 @@ def fp8_fp4_paged_mqa_logits(
         max_model_len: Maximum sequence length used to size the logits output.
         clean_logits: Whether to clean the unfilled logits into `-inf`.
         indices: Optional request index for each varlen row.
+        histogram: Optional zero-at-entry int32 [rows, 1024] score counts.
 
     Returns:
         Logits tensor of shape [B * next_n, max_model_len], dtype
@@ -743,6 +745,8 @@ def fp8_fp4_paged_mqa_logits(
     if block_tables.dim() >= 2 and block_tables.stride(-1) != 1:
         block_tables = block_tables.clone(memory_format=torch.contiguous_format)
     kwargs = {} if indices is None else {"indices": indices}
+    if histogram is not None:
+        kwargs["histogram"] = histogram
     return _fp8_fp4_paged_mqa_logits_impl(
         q,
         kv_cache,

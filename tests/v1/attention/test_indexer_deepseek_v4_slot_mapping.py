@@ -102,9 +102,12 @@ def test_fused_indexer_decode_metadata(query_lens, padding):
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
-def test_indexer_draft_decode_metadata_update_is_capture_safe():
+@pytest.mark.parametrize("page", [64, 128])
+def test_indexer_draft_decode_metadata_update_is_capture_safe(page):
     if not indexer_module.has_deep_gemm():
         pytest.skip("requires DeepGEMM")
+    if page == 128 and not indexer_module.has_litetopk_decode():
+        pytest.skip("requires SM100 and LiteTopK")
     device = torch.device("cuda")
     num_reqs = 3
     seq_lens = torch.tensor([17, 33, 65], dtype=torch.int32, device=device)
@@ -115,7 +118,7 @@ def test_indexer_draft_decode_metadata_update_is_capture_safe():
     num_sms = torch.cuda.get_device_properties(device).multi_processor_count
     schedule_metadata = indexer_module.get_paged_mqa_logits_metadata(
         torch.div(seq_lens, 16, rounding_mode="floor").unsqueeze(1),
-        64,
+        page,
         num_sms,
     ).clone()
 
@@ -124,7 +127,7 @@ def test_indexer_draft_decode_metadata_update_is_capture_safe():
     builder.compress_ratio = 16
     builder.num_sms = num_sms
     builder.arange_buffer = torch.arange(num_reqs + 1, dtype=torch.int32, device=device)
-    builder.kv_cache_spec = SimpleNamespace(num_states=64)
+    builder.kv_cache_spec = SimpleNamespace(num_states=page)
     metadata = DeepseekV32IndexerMetadata(
         seq_lens=seq_lens,
         max_seq_len=128,
@@ -139,6 +142,9 @@ def test_indexer_draft_decode_metadata_update_is_capture_safe():
             decode_lens=torch.zeros(num_reqs, dtype=torch.int32, device=device),
             requires_padding=False,
             schedule_metadata=schedule_metadata,
+            litetopk_bf16_schedule=(
+                torch.empty_like(schedule_metadata) if page == 128 else None
+            ),
         ),
         block_table=block_table,
     )
@@ -157,12 +163,19 @@ def test_indexer_draft_decode_metadata_update_is_capture_safe():
     torch.testing.assert_close(
         schedule_metadata,
         indexer_module.get_paged_mqa_logits_metadata(
-            expected_decode_seq_lens.unsqueeze(1), 64, num_sms
+            expected_decode_seq_lens.unsqueeze(1), page, num_sms
         ),
     )
     assert metadata.decode is not None
+    if page == 128:
+        torch.testing.assert_close(
+            metadata.decode.litetopk_bf16_schedule,
+            indexer_module.get_litetopk_bf16_metadata(
+                expected_decode_seq_lens.unsqueeze(1), None, 1
+            ),
+        )
     assert torch.all(metadata.decode.decode_lens == 1)
-    expected_slot_mapping = block_table[:, 0].to(torch.int64) * 64 + torch.tensor(
+    expected_slot_mapping = block_table[:, 0].to(torch.int64) * page + torch.tensor(
         [1, 2, 4], dtype=torch.int64, device=device
     )
     torch.testing.assert_close(metadata.slot_mapping, expected_slot_mapping)

@@ -41,7 +41,7 @@ def _block_scores_kernel(
         & (cols < end)
         & (cols < width),
         other=-float("inf"),
-    )
+    ).to(tl.float32)
     reduced = tl.reduce(values, 1, _max_with_nan)
     reduced = tl.where(
         (end > start) & (blocks == (end - start - 1) // BLOCK_SIZE),

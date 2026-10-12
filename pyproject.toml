@@ -208,6 +208,7 @@ ignore-hidden = false
 extend-ignore-identifiers-re = [".*[Uu][Ee][0-9][Mm][0-9].*"]
 
 [tool.typos.default.extend-identifiers]
+__hge2_mask = "__hge2_mask"
 a63ede7 = "a63ede7"
 bbc5b7ede = "bbc5b7ede"
 NOOPs = "NOOPs"

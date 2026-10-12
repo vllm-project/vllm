@@ -2034,3 +2034,72 @@ def test_sparse_indexer_topk_aiter_expands_mtp_row_ends(monkeypatch) -> None:
 
     assert recorded["next_n"] == 1
     assert recorded["row_ends"] == [99, 100, 199, 200]
+
+
+def _litetopk_histogram(scores: torch.Tensor, lengths: torch.Tensor) -> torch.Tensor:
+    values = scores.float().contiguous()
+    bits = values.view(torch.int32).long() & 0xFFFFFFFF
+    mag = bits & 0x7FFFFFFF
+    negative = ((bits >> 31) != 0) & (mag != 0)
+    code = (values.half().view(torch.int16).long() & 0x7FFF) >> 6
+    adjusted = (mag - negative.long()).clamp(max=0x435F0000).int().view(torch.float32)
+    code = torch.where(
+        code >= 304, (adjusted.floor().long() + 288).clamp(min=304), code
+    )
+    bins = torch.where(negative, 512 + code, 511 - code)
+    valid = (
+        torch.arange(scores.shape[1], device=scores.device)[None, :] < lengths[:, None]
+    )
+    valid &= ~values.isnan()
+    hist = torch.zeros((scores.shape[0], 1024), device=scores.device, dtype=torch.int32)
+    return hist.scatter_add_(1, bins.clamp(0, 1023), valid.int())
+
+
+@requires_sm100
+@pytest.mark.parametrize("rows", [1, 17, 65, 149, 300])
+@pytest.mark.parametrize("mode", ["random", "ties", "stale_histogram"])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+@torch.inference_mode()
+def test_litetopk_logical_indices_and_reusable_graph(
+    rows: int, mode: str, dtype: torch.dtype
+) -> None:
+    """Cover CTA regimes, overflow fallback and changing live rows without resets."""
+    width, capacity = 16384, 8192
+    k = 2048 if dtype == torch.float32 else 512
+    torch.manual_seed(rows)
+    scores = torch.randn((rows, width), device="cuda", dtype=dtype)
+    if mode == "ties":
+        scores.zero_()  # Crossing bin exceeds capacity: exact whole-row fallback.
+    lengths = torch.full((rows,), width, device="cuda", dtype=torch.int32)
+    histogram = _litetopk_histogram(scores, lengths)
+    buffer = torch.full((rows, k + 8), -777, device="cuda", dtype=torch.int32)
+    output = buffer[:, :k]
+    # Extra states must never overlap the active rows' candidate region.
+    workspace = torch.zeros(
+        (rows + 3) * (16 + capacity * 8), device="cuda", dtype=torch.uint8
+    )
+
+    def select():
+        torch.ops._C.litetopk_decode(
+            scores, lengths, histogram, output, workspace, capacity
+        )
+
+    select()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        select()
+    for live in (width, k - 1, width - 7):
+        lengths.fill_(live)
+        histogram.copy_(_litetopk_histogram(scores, lengths))
+        if mode == "stale_histogram":
+            histogram.zero_()
+        graph.replay()
+        _assert_exact_topk(scores, output, lengths)
+        if mode == "ties":
+            expected = torch.arange(min(live, k), device="cuda")
+            assert torch.equal(
+                output[:, : min(live, k)].sort(1).values, expected.expand(rows, -1)
+            )
+        assert not histogram.any()
+        assert not workspace[(rows + 3) * 16 :].any()
+        assert (buffer[:, k:] == -777).all()
