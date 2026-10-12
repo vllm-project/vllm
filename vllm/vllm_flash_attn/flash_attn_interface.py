@@ -214,6 +214,7 @@ def flash_attn_varlen_func(
     aux_tensors=None,
     aux_tensor_leading_dims=None,
     dynamic_causal: "torch.Tensor | None" = None,
+    seqused_q: "torch.Tensor | None" = None,
 ):
     """dropout_p should be set to 0.0 during evaluation
     Supports multi-query and grouped-query attention (MQA/GQA) by passing in K, V with fewer heads
@@ -289,6 +290,7 @@ def flash_attn_varlen_func(
         aux_tensors: auxiliary tensors consumed by mask_mod. FA4 only.
         aux_tensor_leading_dims: leading dimensions of each entry in aux_tensors.
         dynamic_causal: optional per-sequence causal offsets. FA4 only.
+        seqused_q: optional per-sequence number of query tokens to compute. FA4 only.
 
     Return:
         out: (total, nheads, headdim).
@@ -307,6 +309,7 @@ def flash_attn_varlen_func(
         "seqused_k must be provided if block_table is provided"
     )
 
+    assert seqused_q is None or fa_version == 4, "seqused_q is only supported by FA4"
     assert output_scale is None or fa_version == 4, (
         f"Fused FP8 output (output_scale) is only supported by FA4, "
         f"got fa_version={fa_version}"
@@ -455,6 +458,7 @@ def flash_attn_varlen_func(
             softmax_scale=softmax_scale,
             causal=causal,
             dynamic_causal=dynamic_causal,
+            seqused_q=seqused_q,
             softcap=softcap,
             window_size_left=real_window_size[0] if real_window_size[0] >= 0 else None,
             window_size_right=real_window_size[1] if real_window_size[1] >= 0 else None,

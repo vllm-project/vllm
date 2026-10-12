@@ -616,11 +616,11 @@ blackwell_only = pytest.mark.skipif(
 
 
 @contextmanager
-def _blackwell(vllm_config=None):
+def _blackwell(vllm_config=None, capability=None):
     platform = MagicMock()
     platform.is_xpu.return_value = False
     platform.is_rocm.return_value = False
-    platform.get_device_capability.return_value = DeviceCapability(10, 0)
+    platform.get_device_capability.return_value = capability or DeviceCapability(10, 0)
     with (
         patch("vllm.v1.attention.backends.fa_utils.current_platform", platform),
         patch(
@@ -639,6 +639,7 @@ def _blackwell(vllm_config=None):
 def _hd256_config(
     *,
     is_mm_prefix_lm=False,
+    is_diffusion=False,
     rswa_window=None,
     dcp_size=1,
     softcap=None,
@@ -648,6 +649,7 @@ def _hd256_config(
     vllm_config = MagicMock()
     vllm_config.attention_config.flash_attn_version = None
     vllm_config.model_config.is_mm_prefix_lm = is_mm_prefix_lm
+    vllm_config.model_config.is_diffusion = is_diffusion
     vllm_config.model_config.rswa_window = rswa_window
     vllm_config.model_config.hf_text_config.attn_logit_softcapping = softcap
     vllm_config.model_config.get_head_size.return_value = head_size
@@ -689,6 +691,37 @@ def test_fa4_hd256_fallback_matrix(kwargs, config_kwargs, expected):
         **kwargs,
     }
     with _blackwell(_hd256_config(head_size=kwargs["head_size"], **config_kwargs)):
+        assert get_flash_attn_version(**kwargs) == expected
+
+
+@blackwell_only
+@pytest.mark.parametrize(
+    "kwargs,config_kwargs,capability,expected",
+    [
+        ({}, {}, DeviceCapability(10, 0), 4),
+        ({}, {}, DeviceCapability(12, 0), 2),
+        ({"head_size_v": 256}, {}, DeviceCapability(10, 0), 2),
+        ({"has_sinks": True}, {}, DeviceCapability(10, 0), 2),
+        ({"requires_softcap": True}, {}, DeviceCapability(10, 0), 2),
+        ({}, {"softcap": 50.0}, DeviceCapability(10, 0), 2),
+        ({}, {"cache_dtype": "fp8"}, DeviceCapability(10, 0), 2),
+        ({}, {"dcp_size": 2}, DeviceCapability(10, 0), 2),
+        ({}, {"rswa_window": 512}, DeviceCapability(10, 0), 2),
+        ({}, {"is_mm_prefix_lm": True}, DeviceCapability(10, 0), 2),
+        # Diffusion models use a per-sequence causal flag instead of mm_prefix.
+        (
+            {},
+            {"is_mm_prefix_lm": True, "is_diffusion": True},
+            DeviceCapability(10, 0),
+            4,
+        ),
+    ],
+)
+def test_fa4_hd512_fallback_matrix(kwargs, config_kwargs, capability, expected):
+    from vllm.v1.attention.backends.fa_utils import get_flash_attn_version
+
+    kwargs = {"head_size": 512, "kv_cache_block_size": 16, **kwargs}
+    with _blackwell(_hd256_config(head_size=512, **config_kwargs), capability):
         assert get_flash_attn_version(**kwargs) == expected
 
 
