@@ -14,20 +14,22 @@ Routes on the number of activation rows M:
 Both paths read the checkpoint layout directly ([N, K/2] uint8 E2M1 codes,
 [N, K/32] uint8 E8M0 scales), so there is no weight repack.
 
-Opt-in with ``VLLM_ROCM_MXFP4_W4A8=1``: for W4A4 checkpoints the MXFP4
-activation QDQ is not applied. Decode uses int8 activations and prefill uses
-the model dtype, which kept accuracy where mixing MXFP4-QDQ prefill with int8
-decode did not.
+Selected when int8 activations are requested, e.g. with
+``--quantization-config.linear.activation int8_per_group_32``. For W4A4
+checkpoints this replaces the MXFP4 activation QDQ: decode uses int8
+activations and prefill uses the model dtype, which kept accuracy where mixing
+MXFP4-QDQ prefill with int8 decode did not.
 """
 
 import torch
 import torch.nn.functional as F
 from torch.nn.parameter import Parameter
 
-import vllm.envs as envs
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import dequant_mxfp4
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    kMxfp4Dynamic,
+    QuantKey,
+    kInt8Dynamic32Sym,
+    kMxfp4Static,
 )
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_quark
@@ -90,8 +92,6 @@ class RdnaW4A8MxFp4LinearKernel(MxFp4LinearKernel):
 
         if not on_gfx11():
             return False, "requires RDNA3/RDNA3.5 (gfx11)"
-        if not envs.VLLM_ROCM_MXFP4_W4A8:
-            return False, "disabled; set VLLM_ROCM_MXFP4_W4A8=1 to enable"
         if not (
             hasattr(torch.ops, "_rocm_C")
             and hasattr(torch.ops._rocm_C, "mxfp4_w4a8_gemv")
@@ -100,9 +100,17 @@ class RdnaW4A8MxFp4LinearKernel(MxFp4LinearKernel):
         return True, None
 
     @classmethod
+    def _supports_quant_scheme(
+        cls,
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        return weight_key == kMxfp4Static and activation_key == kInt8Dynamic32Sym
+
+    @classmethod
     def can_implement(cls, config: MxFp4LinearLayerConfig) -> tuple[bool, str | None]:
-        if config.activation_quant_key not in (None, kMxfp4Dynamic):
-            return False, "only supports MXFP4 dynamic or unquantized activations"
+        if config.activation_quant_key != kInt8Dynamic32Sym:
+            return False, "only supports dynamic per-32-group int8 activations"
         if not has_quark():
             return False, "amd-quark package not available (needed for M > 8)"
         return True, None

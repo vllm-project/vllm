@@ -20,6 +20,7 @@ from vllm.model_executor.layers.quantization.utils.mxfp6_utils import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kMxfp4Dynamic,
+    kMxfp4Static,
     kMxfp6E2M3Dynamic,
     kMxfp6E3M2Dynamic,
 )
@@ -59,6 +60,16 @@ class EmulationMxfp4LinearKernel(MxFp4LinearKernel):
         cls, compute_capability: int | None = None
     ) -> tuple[bool, str | None]:
         return True, None
+
+    @classmethod
+    def _supports_quant_scheme(
+        cls,
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        return weight_key == kMxfp4Static and (
+            activation_key is None or activation_key in _ACTIVATION_QUANT_DEQUANT_FUNCS
+        )
 
     @classmethod
     def can_implement(cls, config: MxFp4LinearLayerConfig) -> tuple[bool, str | None]:
