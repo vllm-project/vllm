@@ -253,18 +253,35 @@ def mixed_growth_blocks(
 
 
 TEST_FA_VERSION_ENV = "VLLM_UNO_TEST_FA_VERSION"
+TEST_ATTENTION_BACKEND_ENV = "VLLM_UNO_TEST_ATTENTION_BACKEND"
+# The attention backends Uno's e2e tests run on: FLASH_ATTN (the tests' choice
+# on CUDA) and TRITON_ATTN (their choice on ROCm, and selectable on CUDA).
+TEST_ATTENTION_BACKENDS = ("FLASH_ATTN", "TRITON_ATTN")
+# The attention implementation class each of those backends builds per layer.
+TEST_ATTENTION_IMPLS = {
+    "FLASH_ATTN": "FlashAttentionImpl",
+    "TRITON_ATTN": "TritonAttentionImpl",
+}
 
 
-def resolve_attention_config(raw: str | None) -> dict[str, object]:
+def resolve_attention_config(
+    raw: str | None, rocm: bool = False, backend: str | None = None
+) -> dict[str, object]:
     """The e2e attention config, with the FlashAttention version left open.
+
+    ``backend`` (``VLLM_UNO_TEST_ATTENTION_BACKEND``) picks the backend:
+    FLASH_ATTN by default on CUDA, TRITON_ATTN by default and only on ROCm,
+    which has no FlashAttention decoder backend. Any other name is refused, as
+    is a FlashAttention version pin on TRITON_ATTN: a pin there would name a
+    kernel the run never used.
 
     Both e2e engines used to pin ``flash_attn_version=2``, which meant the
     module could never exercise FlashAttention 3 on any card: the platform
     prefers FA3 on SM90 only when the version is unset, and an explicit 2 wins
     over that preference. Uno's Hopper support was therefore never covered by
-    its own tests. The backend stays pinned -- Uno requires FlashAttention and
-    a test that silently ran on another backend would be measuring something
-    else -- while the version follows the platform: FA3 on Hopper, FA4 on
+    its own tests. The backend stays pinned -- a test that silently ran on
+    another backend would be measuring something else -- while the
+    FlashAttention version follows the platform: FA3 on Hopper, FA4 on
     SM100, FA2 elsewhere, so Ampere and sm_121 keep the behaviour they were
     validated with.
 
@@ -273,6 +290,25 @@ def resolve_attention_config(raw: str | None) -> dict[str, object]:
     own downgrade rules, and a value this module cannot honour must fail
     loudly rather than be ignored into the platform default.
     """
+    if backend is None:
+        backend = "TRITON_ATTN" if rocm else "FLASH_ATTN"
+    if backend not in TEST_ATTENTION_BACKENDS:
+        raise ValueError(
+            f"{TEST_ATTENTION_BACKEND_ENV} must be one of "
+            f"{', '.join(TEST_ATTENTION_BACKENDS)} (got {backend!r})"
+        )
+    if rocm and backend != "TRITON_ATTN":
+        raise ValueError(
+            f"{TEST_ATTENTION_BACKEND_ENV}={backend} is not available on ROCm; "
+            "Uno runs TRITON_ATTN there"
+        )
+    if backend == "TRITON_ATTN":
+        if raw is not None:
+            raise ValueError(
+                f"{TEST_FA_VERSION_ENV} pins a FlashAttention version, and this "
+                f"run uses TRITON_ATTN (got {raw!r}); leave it unset"
+            )
+        return {"backend": "TRITON_ATTN"}
     config: dict[str, object] = {"backend": "FLASH_ATTN"}
     if raw is None:
         return config
@@ -299,6 +335,8 @@ def format_attention_receipt(state: Mapping[str, Any], requested: int | None) ->
     backends = sorted(str(b) for b in state.get("backends", []))
     if len(versions) == 1:
         resolved = f"FlashAttention version {versions[0]}"
+    elif not versions and backends and not any("FlashAttention" in b for b in backends):
+        resolved = "no FlashAttention (non-FlashAttention backend)"
     elif not versions:
         resolved = "FlashAttention version unreported"
     else:

@@ -943,6 +943,53 @@ def test_attention_config_refuses_what_it_cannot_honour(raw):
         budget.resolve_attention_config(raw)
 
 
+def test_attention_config_runs_triton_on_rocm_and_refuses_a_version_pin():
+    """ROCm has no FlashAttention decoder, so the ROCm arm is TRITON_ATTN.
+
+    A FlashAttention version pin on that arm would name a kernel the run never
+    used, so it fails loudly instead of being dropped.
+    """
+    from tests.v1.e2e.spec_decode import uno_kv_budget as budget
+
+    assert budget.resolve_attention_config(None, rocm=True) == {
+        "backend": "TRITON_ATTN"
+    }
+    assert budget.resolve_attention_config(None, rocm=True, backend="TRITON_ATTN") == {
+        "backend": "TRITON_ATTN"
+    }
+    with pytest.raises(ValueError, match="leave it unset"):
+        budget.resolve_attention_config("2", rocm=True)
+    with pytest.raises(ValueError, match="not available on ROCm"):
+        budget.resolve_attention_config(None, rocm=True, backend="FLASH_ATTN")
+    line = budget.format_attention_receipt(
+        {"backends": ["TritonAttentionImpl"], "flash_attn_versions": []}, None
+    )
+    assert "no FlashAttention" in line and "TritonAttentionImpl" in line
+
+
+def test_attention_config_selects_triton_on_cuda_and_refuses_the_rest():
+    """On CUDA the e2e backend can be switched to TRITON_ATTN; nothing else.
+
+    The default stays FLASH_ATTN, a version pin on TRITON_ATTN is refused for
+    the same reason as on ROCm, and a backend the module was never run on is
+    refused instead of being passed to the engine.
+    """
+    from tests.v1.e2e.spec_decode import uno_kv_budget as budget
+
+    assert budget.resolve_attention_config(None, backend="TRITON_ATTN") == {
+        "backend": "TRITON_ATTN"
+    }
+    assert budget.resolve_attention_config("3", backend="FLASH_ATTN") == {
+        "backend": "FLASH_ATTN",
+        "flash_attn_version": 3,
+    }
+    with pytest.raises(ValueError, match="leave it unset"):
+        budget.resolve_attention_config("2", backend="TRITON_ATTN")
+    for name in ("FLASHINFER", "triton_attn", ""):
+        with pytest.raises(ValueError, match="must be one of"):
+            budget.resolve_attention_config(None, backend=name)
+
+
 def test_attention_receipt_names_the_built_version_not_the_request():
     """The receipt reports what the engine built, and says what was asked.
 
@@ -1091,6 +1138,140 @@ def test_draft_graph_engagement_follows_the_k_rule(
     else:
         assert proposer.num_eager_proposals == 1
         assert proposer.num_graph_replays == 0
+
+
+@pytest.mark.parametrize(
+    ("device_type", "is_cuda", "is_rocm", "arch", "refused"),
+    [
+        ("cuda", True, False, None, None),
+        ("cuda", False, True, "gfx1201", None),
+        ("cuda", False, True, "gfx942:sramecc+:xnack-", None),
+        ("cuda", False, True, "gfx1100", None),
+        ("cuda", False, False, None, "NVIDIA CUDA or AMD ROCm"),
+        ("cpu", True, False, None, "GPU device"),
+    ],
+)
+def test_uno_admits_any_cuda_or_rocm_gpu(
+    monkeypatch, device_type, is_cuda, is_rocm, arch, refused
+):
+    """Any NVIDIA CUDA or AMD ROCm GPU passes; other devices refuse.
+
+    HIP reports the device type "cuda", so ROCm is told apart by the platform.
+    The card is not restricted, on either vendor: the attention backend is.
+    Checked on the helper and on ``UnoSpeculator.__init__``, the engine's entry
+    point: an admitted device gets as far as config validation, a refused one
+    stops with the message.
+    """
+    from vllm.v1.worker.gpu.spec_decode import uno
+
+    class ReachedConfigValidation(Exception):
+        pass
+
+    def reached(_config):
+        raise ReachedConfigValidation
+
+    platform = SimpleNamespace(is_cuda=lambda: is_cuda, is_rocm=lambda: is_rocm)
+    monkeypatch.setattr(uno, "current_platform", platform)
+    monkeypatch.setattr(uno, "validate_uno_config", reached)
+    monkeypatch.setattr(
+        torch.cuda,
+        "get_device_properties",
+        lambda _device: SimpleNamespace(gcnArchName=arch),
+    )
+    device = torch.device(device_type)
+    refusal = uno.uno_device_refusal(device)
+    if refused is None:
+        assert refusal is None
+        with pytest.raises(ReachedConfigValidation):
+            UnoSpeculator(MagicMock(spec=VllmConfig), device)
+    else:
+        assert refusal is not None and refused in refusal
+        with pytest.raises(ValueError, match=refused):
+            UnoSpeculator(MagicMock(spec=VllmConfig), device)
+
+
+def _load_uno_with_backend(monkeypatch, backend_name: str, rocm: bool):
+    """Run ``UnoSpeculator.load_model`` on one layer of ``backend_name``."""
+    from vllm.v1.worker.gpu.spec_decode import uno
+
+    platform = SimpleNamespace(is_cuda=lambda: not rocm, is_rocm=lambda: rocm)
+    monkeypatch.setattr(uno, "current_platform", platform)
+    backend = SimpleNamespace(get_name=lambda: backend_name)
+    layer = SimpleNamespace(
+        get_kv_cache_spec=lambda _config: object(),
+        get_attn_backend=lambda: backend,
+    )
+    monkeypatch.setattr(
+        uno, "get_layers_from_vllm_config", lambda *_args: {"layers.0.attn": layer}
+    )
+    monkeypatch.setattr(
+        UnoSpeculator, "_validate_local_argmax_reduction", lambda _s: None
+    )
+    proposer = object.__new__(UnoSpeculator)
+    proposer.vllm_config = None
+    target = nn.Identity()
+    proposer.load_model(target)
+    assert proposer.model is target
+    assert proposer.draft_attn_layer_names == {"layers.0.attn"}
+
+
+@pytest.mark.parametrize(
+    ("rocm", "backend_name", "refused"),
+    [
+        (False, "FLASH_ATTN", None),
+        (False, "TRITON_ATTN", None),
+        (False, "FLEX_ATTENTION", "CUDA is tested only with the FLASH_ATTN and"),
+        (True, "TRITON_ATTN", None),
+        (True, "FLASH_ATTN", "ROCm is tested only with the TRITON_ATTN"),
+        (True, "ROCM_ATTN", "ROCm is tested only with the TRITON_ATTN"),
+    ],
+)
+def test_uno_load_model_admits_only_the_tested_backends(
+    monkeypatch, rocm, backend_name, refused
+):
+    """Loading admits exactly the backends Uno's tests run on, per platform.
+
+    FLASH_ATTN and TRITON_ATTN on CUDA, TRITON_ATTN on ROCm. Anything else is
+    refused at load with a message naming the tested backends, before the
+    builder capability checks run.
+    """
+    if refused is None:
+        _load_uno_with_backend(monkeypatch, backend_name, rocm)
+    else:
+        with pytest.raises(ValueError, match=refused):
+            _load_uno_with_backend(monkeypatch, backend_name, rocm)
+
+
+def test_uno_refuses_flashinfer_on_cuda_even_with_a_capable_builder(monkeypatch):
+    """FlashInfer passes Uno's capability checks and is still refused.
+
+    FlashInfer's builder supports in-place draft decode updates with
+    trtllm-gen decode, so ``set_attn`` alone would accept it, but no Uno test
+    runs on it. The tested-backend list in ``load_model`` refuses it.
+    """
+    from vllm.v1.kv_cache_interface import FullAttentionSpec
+    from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
+
+    capable = SimpleNamespace(supports_draft_decode_metadata_update=True)
+
+    def install_groups(self, *args):
+        self.attn_groups = [[capable]]
+
+    monkeypatch.setattr(DraftModelSpeculator, "set_attn", install_groups)
+    cache = SimpleNamespace(
+        kv_cache_groups=[
+            SimpleNamespace(
+                kv_cache_spec=FullAttentionSpec(
+                    block_size=4, num_kv_heads=1, head_size=16, dtype=torch.bfloat16
+                )
+            )
+        ]
+    )
+    proposer = object.__new__(UnoSpeculator)
+    proposer.set_attn(None, cache, None, None, [])
+    assert proposer.attn_groups == [[capable]]
+    with pytest.raises(ValueError, match="not FLASHINFER"):
+        _load_uno_with_backend(monkeypatch, "FLASHINFER", rocm=False)
 
 
 @pytest.mark.parametrize("supports_update", [False, True])

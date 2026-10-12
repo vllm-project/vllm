@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Greedy Uno parity with the original Qwen3-8B adapter on one NVIDIA GPU.
+"""Greedy Uno parity with the original Qwen3-8B adapter on one CUDA or ROCm GPU.
 
 Exact-token equality against a plain engine is this module's main instrument,
 and it is only valid where the plain engine reproduces itself. It does not
@@ -48,6 +48,8 @@ from .uno_kv_budget import (
     SURVIVOR_MAX_MODEL_LEN,
     SURVIVOR_NUM_SPECULATIVE_TOKENS,
     SURVIVOR_PROMPT_TOKENS,
+    TEST_ATTENTION_BACKEND_ENV,
+    TEST_ATTENTION_IMPLS,
     TEST_FA_VERSION_ENV,
     MatrixArm,
     allocatable_blocks,
@@ -79,9 +81,25 @@ from .utils import (
     get_test_prompts,
 )
 
+# The engine's admission (``uno_device_refusal``), read from the platform
+# without touching the device: these tests fork, and a parent that initialized
+# the GPU at collection would hand every child a broken context.
+UNO_PLATFORM_ADMITTED = current_platform.is_cuda() or current_platform.is_rocm()
 pytestmark = pytest.mark.skipif(
-    not current_platform.is_cuda(), reason="Uno requires an NVIDIA CUDA device"
+    not UNO_PLATFORM_ADMITTED,
+    reason="Uno requires an NVIDIA CUDA or AMD ROCm device",
 )
+
+
+def _e2e_attention_config() -> dict[str, object]:
+    """FLASH_ATTN on CUDA, TRITON_ATTN on ROCm, unless
+    ``VLLM_UNO_TEST_ATTENTION_BACKEND`` picks another tested backend
+    (``resolve_attention_config``)."""
+    return resolve_attention_config(
+        os.environ.get(TEST_FA_VERSION_ENV),
+        rocm=current_platform.is_rocm(),
+        backend=os.environ.get(TEST_ATTENTION_BACKEND_ENV),
+    )
 
 
 # Bounds on the per-step trace a failing survivor run carries in its assertion
@@ -741,8 +759,8 @@ def _drive_mixed_phase(
 
 @pytest.mark.forked
 @pytest.mark.skipif(
-    not current_platform.is_cuda(),
-    reason="Uno survivor batching requires an NVIDIA CUDA device",
+    not UNO_PLATFORM_ADMITTED,
+    reason="Uno survivor batching requires an NVIDIA CUDA or AMD ROCm device",
 )
 def test_uno_continuous_batching_survivor_matches_solo(
     vllm_runner,
@@ -991,7 +1009,7 @@ def test_uno_continuous_batching_survivor_matches_solo(
         enforce_eager=True,
         compilation_config={"cudagraph_capture_sizes": [16]},
         async_scheduling=True,
-        attention_config=resolve_attention_config(os.environ.get(TEST_FA_VERSION_ENV)),
+        attention_config=_e2e_attention_config(),
         max_model_len=max_model_len,
         max_num_seqs=4,
         **memory_options,
@@ -1279,6 +1297,7 @@ def test_uno_greedy_matches_base_model(
     # dual stream, which is the regime the sm_86 evidence found nondeterministic
     # and the one the production path uses.
     representative_case = k == 8 and not enforce_eager and not dual_stream
+    attention_config = _e2e_attention_config()
     common = dict(
         revision=MODEL_REVISION,
         dtype="bfloat16",
@@ -1286,7 +1305,7 @@ def test_uno_greedy_matches_base_model(
         enforce_eager=enforce_eager,
         compilation_config={"cudagraph_capture_sizes": capture_sizes},
         async_scheduling=True,
-        attention_config=resolve_attention_config(os.environ.get(TEST_FA_VERSION_ENV)),
+        attention_config=attention_config,
         max_model_len=MATRIX_MAX_MODEL_LEN,
         max_num_seqs=max_num_seqs,
         max_num_batched_tokens=prefill_budget,
@@ -1389,6 +1408,11 @@ def test_uno_greedy_matches_base_model(
 
     device_name = torch.cuda.get_device_name(0)
     capability = torch.cuda.get_device_capability(0)
+    arch = (
+        torch.cuda.get_device_properties(0).gcnArchName
+        if current_platform.is_rocm()
+        else f"sm_{capability[0]}{capability[1]}"
+    )
 
     def instrument_receipt() -> str:
         """What this comparison could and could not measure, as one line."""
@@ -1397,7 +1421,7 @@ def test_uno_greedy_matches_base_model(
         # eight_candidates_graphs and native_overlap_graphs read identically.
         return (
             f"uno greedy instrument: K={k}, card={device_name}, "
-            f"sm_{capability[0]}{capability[1]}, enforce_eager={enforce_eager}, "
+            f"{arch}, enforce_eager={enforce_eager}, "
             f"prefix_cache={enable_prefix_caching}, dual_stream={dual_stream}, "
             f"graphs_expected={expect_graphs}, "
             f"representative_case={representative_case}, "
@@ -1491,9 +1515,19 @@ def test_uno_greedy_matches_base_model(
         assert (
             spec_attention["flash_attn_versions"]
             == ref_attention["flash_attn_versions"]
+            and spec_attention["backends"] == ref_attention["backends"]
         ), (
-            "the reference and Uno engines resolved different FlashAttention "
-            f"versions: reference {ref_attention}, Uno {spec_attention}"
+            "the reference and Uno engines resolved different attention "
+            f"kernels: reference {ref_attention}, Uno {spec_attention}"
+        )
+        # ...and that kernel must be the backend this run asked for, so a run
+        # labelled TRITON_ATTN cannot pass on a FlashAttention build.
+        requested_backend = str(attention_config["backend"])
+        assert spec_attention["backends"] == [
+            TEST_ATTENTION_IMPLS[requested_backend]
+        ], (
+            f"the run asked for {requested_backend} but built "
+            f"{spec_attention['backends']}"
         )
         states = speculative.llm.llm_engine.collective_rpc(_uno_execution_state)
         assert all(state["shared_model"] for state in states)
@@ -1747,7 +1781,7 @@ def test_uno_greedy_matches_base_model_to_max_model_len(
         enforce_eager=False,
         compilation_config={"cudagraph_capture_sizes": [8, 16, 32, 64]},
         async_scheduling=True,
-        attention_config=resolve_attention_config(os.environ.get(TEST_FA_VERSION_ENV)),
+        attention_config=_e2e_attention_config(),
         max_model_len=max_model_len,
         max_num_seqs=4,
         max_num_batched_tokens=256,
@@ -2005,7 +2039,7 @@ def test_uno_prebuilt_lora_request_never_selects_unos_adapter(
         enforce_eager=False,
         compilation_config={"cudagraph_capture_sizes": [8, 16, 32, 64]},
         async_scheduling=True,
-        attention_config=resolve_attention_config(os.environ.get(TEST_FA_VERSION_ENV)),
+        attention_config=_e2e_attention_config(),
         max_model_len=1024,
         max_num_seqs=4,
         max_num_batched_tokens=256,

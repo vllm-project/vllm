@@ -9,6 +9,7 @@ import torch
 
 from vllm import SamplingParams
 from vllm.config import (
+    AttentionConfig,
     CacheConfig,
     DeviceConfig,
     LoRAConfig,
@@ -66,6 +67,9 @@ def _serving_config(speculative_config, **overrides):
         scheduler_config=SimpleNamespace(
             async_scheduling=True, max_num_seqs=4, max_num_batched_tokens=256
         ),
+        # TRITON_ATTN is admitted on CUDA and ROCm alike, so these tests do not
+        # depend on the platform they run on (ROCm refuses an unset backend).
+        attention_config=AttentionConfig(backend="TRITON_ATTN"),
     )
     for name, value in overrides.items():
         setattr(config, name, value)
@@ -240,6 +244,73 @@ def test_uno_rejects_unsupported_serving_options(
     config = _serving_config(uno_config_factory(), **overrides)
     with pytest.raises(ValueError, match=message):
         validate_uno_config(config)
+
+
+@pytest.mark.parametrize(
+    ("rocm", "backend", "per_kind", "refused"),
+    [
+        (False, None, None, None),
+        (False, "FLASH_ATTN", None, None),
+        (False, "TRITON_ATTN", None, None),
+        (False, "FLASHINFER", None, "not FLASHINFER"),
+        (False, "FLEX_ATTENTION", None, "not FLEX_ATTENTION"),
+        (False, None, "FLASHINFER", "not FLASHINFER"),
+        (True, "TRITON_ATTN", None, None),
+        (True, None, None, "requires an explicit tested attention backend"),
+        (True, "ROCM_ATTN", None, "not ROCM_ATTN"),
+        (True, "FLASH_ATTN", None, "not FLASH_ATTN"),
+    ],
+)
+def test_uno_refuses_an_untested_attention_backend_at_config_time(
+    uno_config_factory, monkeypatch, rocm, backend, per_kind, refused
+):
+    """An untested backend the config asks for is refused before any load.
+
+    CUDA admits FLASH_ATTN and TRITON_ATTN (and the platform default, which
+    load_model checks per layer); ROCm admits only an explicit TRITON_ATTN,
+    because its default backend is not one Uno's tests run. A per-kind
+    override is checked like the global backend.
+    """
+    from vllm.v1.attention.backends.registry import AttentionBackendEnum
+    from vllm.v1.worker.gpu.spec_decode import uno
+
+    platform = SimpleNamespace(is_cuda=lambda: not rocm, is_rocm=lambda: rocm)
+    monkeypatch.setattr(uno, "current_platform", platform)
+    attention = SimpleNamespace(
+        backend=None if backend is None else AttentionBackendEnum[backend],
+        backend_per_kind=(
+            {} if per_kind is None else {"full": AttentionBackendEnum[per_kind]}
+        ),
+    )
+    config = _serving_config(uno_config_factory(), attention_config=attention)
+    if refused is None:
+        validate_uno_config(config)
+    else:
+        with pytest.raises(ValueError, match=refused):
+            validate_uno_config(config)
+
+
+def test_uno_refuses_flashinfer_before_the_speculator_is_built(
+    uno_config_factory, monkeypatch
+):
+    """The config-time refusal fires in UnoSpeculator.__init__, which the
+    runner calls before it loads any weights, and before the parent
+    speculator allocates its buffers."""
+    from vllm.v1.worker.gpu.spec_decode import uno
+    from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
+
+    platform = SimpleNamespace(is_cuda=lambda: True, is_rocm=lambda: False)
+    monkeypatch.setattr(uno, "current_platform", platform)
+
+    def built(*_args, **_kwargs):
+        raise AssertionError("the speculator was built before the refusal")
+
+    monkeypatch.setattr(DraftModelSpeculator, "__init__", built)
+    config = _serving_config(
+        uno_config_factory(), attention_config=AttentionConfig(backend="FLASHINFER")
+    )
+    with pytest.raises(ValueError, match="not FLASHINFER"):
+        uno.UnoSpeculator(config, torch.device("cuda"))
 
 
 def test_uno_refuses_user_lora_serving(uno_config_factory, monkeypatch):
