@@ -43,6 +43,7 @@ from vllm.v1.worker.simulated.offline import (
     RequestTiming,
     SimulationResult,
     TimedRequest,
+    add_token_request,
     engine_clock,
     make_engine,
 )
@@ -184,9 +185,7 @@ def run_disaggregated(
             clocks[id(engine)].sleep_until(t)
             waiting.discard(id(engine))
             idle_steps.pop(id(engine), None)
-            engine.add_request(
-                f"timed-{i}", {"prompt_token_ids": req.prompt_token_ids}, params
-            )
+            add_token_request(engine, f"timed-{i}", req.prompt_token_ids, params)
             continue
 
         # Step the engine furthest behind; of several at the same time, each

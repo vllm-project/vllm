@@ -177,6 +177,19 @@ def make_engine(engine_args: EngineArgs, clock: Clock | None = None) -> LLMEngin
     return engine
 
 
+def add_token_request(
+    engine: LLMEngine,
+    request_id: str,
+    prompt_token_ids: list[int],
+    params: SamplingParams,
+) -> None:
+    """Add a request given by token ids, rendered as `LLMEngine` expects."""
+    (engine_input,) = engine.renderer.render_cmpl(
+        [{"prompt_token_ids": prompt_token_ids}]
+    )
+    engine.add_request(request_id, engine_input, params)
+
+
 def engine_clock(engine: LLMEngine) -> Clock:
     """The clock an engine from `make_engine()` runs on."""
     return _engine_clocks[engine]
@@ -240,7 +253,7 @@ def run(
             request_id = request_ids[i][k]
             params = turns[i][k].sampling_params.clone()
             params.output_kind = RequestOutputKind.DELTA
-            engine.add_request(request_id, {"prompt_token_ids": prompt}, params)
+            add_token_request(engine, request_id, prompt, params)
             timings[request_id] = RequestTiming(request_id, arrival, len(prompt))
             if k + 1 < len(turns[i]):
                 in_flight[request_id] = (i, k, prompt)
