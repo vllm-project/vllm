@@ -448,6 +448,7 @@ steps:
 
 - label: ":nvidia: (B200) [Nightly] LM Eval Qwen3.5 Models"
   key: lm-eval-qwen3-5-models-2xb200
+  automatic_shard: true
   timeout_in_minutes: 45
   device: b200-k8s
   optional: true
@@ -1370,6 +1371,7 @@ steps:
 
 - label: ":nvidia: (H100) [Nightly] LM Eval KV-Offload Large"
   key: kv-offload-large
+  automatic_shard: true
   # Nightly only: 4-GPU H100 pods wait behind smaller jobs on per-PR runs.
   optional: true
   timeout_in_minutes: 40
