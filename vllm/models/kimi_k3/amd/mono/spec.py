@@ -17,7 +17,6 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 
-from vllm.models.common.mono.abi import fault_inject
 from vllm.models.common.mono.spec import (
     CacheReq,
     Feature,
@@ -182,14 +181,6 @@ def pack(model, ctx: MonoContext) -> Any:
     runner.num_spec = 0 if spec is None else spec.num_speculative_tokens
     kinds = layer_kinds(model.config)
     runner.first_layer = min(i for i in kinds if i >= model.start_layer)
-    if (fault := fault_inject()) is not None:
-        rank, epoch, us = fault
-        runner.fault = {
-            "fault_rank": rank,
-            "fault_epoch": epoch,
-            "fault_layer": 128 + runner.first_layer,  # the step's first K2
-            "fault_ticks": us * 100,  # 100 MHz ticks
-        }
     runner.kda_prefix = next(
         model.layers[i].self_attn.prefix for i, k in kinds.items() if k == WHOLE
     )
