@@ -10,6 +10,8 @@ meta:
     - multimodal
   performance_headline: "Matches offline open-source ASR accuracy at 480ms delay; >12.5 tok/s on a single 16GB GPU"
   related_recipes: []
+  hardware:
+    dgx_spark_gb10: verified
 
 model:
   model_id: "mistralai/Voxtral-Mini-4B-Realtime-2602"
@@ -46,8 +48,7 @@ compatible_strategies:
   - single_node_tp
   - multi_node_tp
 
-hardware_overrides: 
-  dgx_spark_gb10: verified
+hardware_overrides: {}
 
 strategy_overrides:
   single_node_tp:
