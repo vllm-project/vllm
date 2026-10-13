@@ -898,7 +898,6 @@ def _run_mamba_prefix_cache_mrv1(
         load_format="dummy",
         enable_prefix_caching=True,
         block_size=BLOCK_SIZE,
-        mamba_cache_mode="align",
         speculative_config={
             "method": "qwen3_next_mtp",
             "num_speculative_tokens": num_speculative_tokens,
@@ -1158,7 +1157,6 @@ def _run_mamba_prefix_cache_mrv2(
         skip_tokenizer_init=True,
         enable_prefix_caching=True,
         block_size=BLOCK_SIZE,
-        mamba_cache_mode="align",
         speculative_config={
             "method": "qwen3_next_mtp",
             "num_speculative_tokens": num_speculative_tokens,
