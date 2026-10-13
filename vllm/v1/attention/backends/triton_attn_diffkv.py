@@ -181,10 +181,6 @@ class TritonAttentionDiffKVImpl(TritonAttentionImpl):
         if attn_metadata is None:
             return output.fill_(0)
 
-        assert attn_metadata.use_cascade is False, (
-            "Cascade attention not supported for TritonAttentionDiffKVImpl"
-        )
-
         num_actual_tokens = attn_metadata.num_actual_tokens
         head_size_qk = self.head_size
         head_size_v = TritonAttentionDiffKVBackend.head_size_v

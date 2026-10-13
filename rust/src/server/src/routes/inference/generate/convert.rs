@@ -85,8 +85,8 @@ pub(super) fn prepare_generate_request(
         data_parallel_rank: ctx.data_parallel_rank,
         session_id: ctx.session_id,
         kv_hints: None,
-        reasoning_parser_kwargs: Default::default(),
-        reasoning_ended: None,
+        reasoning_parser_kwargs: request.reasoning_parser_kwargs.unwrap_or_default(),
+        reasoning_ended: request.reasoning_ended,
         lora_request: lora_resolution.lora_request.clone(),
         arrival_time: None,
     };
@@ -222,6 +222,54 @@ mod tests {
             prepared.text_request.sampling_params.thinking_token_budget,
             Some(64)
         );
+    }
+
+    #[test]
+    fn prepare_generate_request_forwards_reasoning_controls() {
+        for (controls, expected) in [
+            (json!({}), (json!({"chat_template_kwargs": {}}), None)),
+            (
+                json!({
+                    "reasoning_ended": false,
+                    "reasoning_parser_kwargs": {
+                        "chat_template_kwargs": {"enable_thinking": true}
+                    }
+                }),
+                (
+                    json!({"chat_template_kwargs": {"enable_thinking": true}}),
+                    Some(false),
+                ),
+            ),
+            (
+                json!({"reasoning_ended": true, "reasoning_parser_kwargs": {}}),
+                (json!({"chat_template_kwargs": {}}), Some(true)),
+            ),
+        ] {
+            let mut body = json!({
+                "model": "Qwen/Qwen1.5-0.5B-Chat",
+                "token_ids": [11, 22, 33],
+                "sampling_params": {}
+            });
+            body.as_object_mut().unwrap().extend(controls.as_object().unwrap().clone());
+            let request: GenerateRequest = serde_json::from_value(body).expect("parse request");
+
+            let prepared = prepare_generate_request(
+                request,
+                &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+                ResolvedRequestContext::default(),
+                None,
+            )
+            .expect("prepare");
+
+            assert_eq!(
+                (
+                    serde_json::to_value(&prepared.text_request.reasoning_parser_kwargs).unwrap(),
+                    prepared.text_request.reasoning_ended,
+                ),
+                expected,
+                "controls: {controls}"
+            );
+        }
     }
 
     #[test]

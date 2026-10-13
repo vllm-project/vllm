@@ -13,7 +13,7 @@ import pytest
 import torch
 
 import vllm.v1.worker.utils as worker_utils
-from vllm.v1.core import kv_cache_utils
+from vllm.v1.core import kv_cache_planning
 from vllm.v1.worker import gpu_model_runner as v1
 
 
@@ -31,8 +31,10 @@ def test_override_is_restored_even_when_config_computation_raises(monkeypatch, r
             raise RuntimeError("boom")
         return "minimal"
 
-    monkeypatch.setattr(kv_cache_utils, "get_kv_cache_groups", lambda c, s: [])
-    monkeypatch.setattr(kv_cache_utils, "get_kv_cache_config_from_groups", from_groups)
+    monkeypatch.setattr(kv_cache_planning, "get_kv_cache_groups", lambda c, s: [])
+    monkeypatch.setattr(
+        kv_cache_planning, "get_kv_cache_config_from_groups", from_groups
+    )
 
     if raises:
         with pytest.raises(RuntimeError, match="boom"):
