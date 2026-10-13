@@ -559,10 +559,12 @@ def test_nvfp4_ple_cuda_lookup_and_graph_replay(monkeypatch, pinned, rank):
         expected[(cpu_ids < rank * 4) | (cpu_ids >= (rank + 1) * 4)] = 0
         torch.testing.assert_close(output.cpu(), expected, atol=0, rtol=0)
         if pinned:
-            hidden_states = torch.empty(2, 320, device="cuda", dtype=torch.bfloat16)
-            layer.start_prefetch(hidden_states, ids)
+            layer.start_prefetch(ids)
             torch.testing.assert_close(
-                layer(hidden_states).cpu(), expected.flatten(-2), atol=0, rtol=0
+                layer.finalize_prefetch(total_tokens=ids.shape[0]).cpu(),
+                expected.flatten(-2),
+                atol=0,
+                rtol=0,
             )
     assert layer.weight.device.type == ("cpu" if pinned else "cuda")
     assert layer.weight_scale.device == layer.weight.device
