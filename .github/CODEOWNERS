@@ -164,7 +164,7 @@
 .readthedocs.yaml @hmellor
 mkdocs.yaml @hmellor
 
-# Model recipes (rendered at recipes.vllm.ai by vllm-project/recipes)
+# Model recipes
 /recipes @esmeetu
 
 # Linting
