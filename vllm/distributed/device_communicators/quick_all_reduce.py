@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from enum import Enum
+from typing import Any
 
 import torch
 import torch.distributed as dist
@@ -42,6 +43,7 @@ MB = 1024 * KB
 
 
 class QuickAllReduce:
+    _flydsl_int4: Any = None
     _SUPPORTED_WORLD_SIZES = [2, 4, 8]
     _SUPPORTED_DTYPES = [torch.float16, torch.bfloat16]
     # The following data is based on kernel tests.
@@ -88,7 +90,6 @@ class QuickAllReduce:
 
         """
         self.disabled = True
-        self._flydsl_int4 = None
         if not self._rocm_arch_available():
             logger.debug(
                 "Custom quick allreduce is only supported on ROCm MI300 series."
@@ -243,7 +244,6 @@ class QuickAllReduce:
             qr_max_size if qr_max_size is not None else ops.qr_max_size()
         )
         qr_min_size = self._get_qr_min_size(effective_qr_max_size)
-        self._ptr = 0
         self.qr_max_size = effective_qr_max_size
         self.qr_min_size = qr_min_size
         if qr_min_size is not None:
@@ -257,11 +257,6 @@ class QuickAllReduce:
                 self.qr_quantization_min_size // KB,
             )
 
-        # AITER's FlyDSL INT4 implementation is substantially faster than the
-        # HIP QuickReduce INT4 kernel for prefill-sized BF16 payloads. It owns
-        # its own HIP IPC buffers, so initialize it instead of the HIP
-        # communicator. Keep a 2 MiB floor: the FlyDSL kernel's fixed launch
-        # cost regresses decode-sized collectives below this.
         use_flydsl = envs.VLLM_ROCM_QUICK_REDUCE_USE_FLYDSL
         if use_flydsl and self.qr_quant_level != QuickReduceRegime.INT4:
             logger.warning(
@@ -278,7 +273,8 @@ class QuickAllReduce:
                 rank=self.rank,
                 world_size=self.world_size,
             )
-            # QuickAllReduceInt4 rejects payloads above its 4 GiB window.
+            # FlyDSL rejects payloads above 4 GiB, and its launch cost
+            # regresses collectives below 2 MiB.
             self.qr_max_size = min(effective_qr_max_size, 0xFFFFFFFF)
             self.qr_min_size = qr_min_size if qr_min_size is not None else 2 * MB
             self.disabled = False
@@ -405,8 +401,6 @@ class QuickAllReduce:
         if self._flydsl_int4 is not None:
             self._flydsl_int4.close()
             self._flydsl_int4 = None
-            # Without this, should_quick_allreduce() would fall through to the
-            # HIP path with no communicator behind it.
             self.disabled = True
         if not self.disabled and getattr(self, "_ptr", None):
             if ops is not None:

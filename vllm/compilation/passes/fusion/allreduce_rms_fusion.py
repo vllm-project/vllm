@@ -1596,13 +1596,10 @@ class RocmAiterAllReduceFusionPass(VllmFusionPatternMatcherPass):
 
         if envs.VLLM_ROCM_QUICK_REDUCE_USE_FLYDSL:
             logger.warning_once(
-                "VLLM_ROCM_QUICK_REDUCE_USE_FLYDSL is set together with "
-                "fuse_allreduce_rms. FlyDSL QuickReduce has no fused "
-                "all-reduce + RMSNorm kernel, so fused all-reduces in the "
-                "QuickReduce size range run AITER's HIP QuickReduce + RMSNorm "
-                "instead of FlyDSL. Set "
-                "compilation_config.pass_config.fuse_allreduce_rms=false to "
-                "route them through FlyDSL QuickReduce."
+                "FlyDSL QuickReduce has no fused all-reduce + RMSNorm kernel, "
+                "so with fuse_allreduce_rms the all-reduces in its size range "
+                "run on AITER's HIP QuickReduce. Set fuse_allreduce_rms=false "
+                "to route them through FlyDSL."
             )
 
         hidden_dim = config.model_config.get_hidden_size()
