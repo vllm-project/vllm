@@ -132,15 +132,16 @@ def test_explicit_aiter_flydsl_fails_closed(on_rocm: bool):
 
 
 def _flydsl_prefill_unavailable() -> bool:
-    return (
-        not current_platform.is_rocm()
-        or not rocm_aiter_ops.is_gdn_flydsl_prefill_available()
-    )
+    if not current_platform.is_rocm():
+        return True
+    from vllm.platforms.rocm import on_mi3xx
+
+    return not on_mi3xx() or not rocm_aiter_ops.is_gdn_flydsl_prefill_available()
 
 
 @pytest.mark.skipif(
     _flydsl_prefill_unavailable(),
-    reason="needs ROCm with the AITER FlyDSL GDN prefill kernels installed",
+    reason="needs gfx942/gfx950 with the AITER FlyDSL GDN prefill kernels installed",
 )
 @pytest.mark.parametrize(
     "state_dtype", [torch.float32, torch.bfloat16], ids=["fp32_state", "bf16_state"]
