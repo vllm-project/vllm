@@ -39,6 +39,10 @@ logger = init_logger(__name__)
 
 _STORE_TIMEOUT_S = 30.0
 _CANCEL_DRAIN_TIMEOUT_S = 10.0
+# Minimum spacing between wait-mode cancel attempts for one round. Each
+# attempt calls into NIXL on the scheduler thread, so an unconfirmed
+# cancellation is retried at this rate instead of on every poll tick.
+_CANCEL_RETRY_INTERVAL_S = 0.1
 # Cap on time the server holds a HIT_PENDING / RETRY key from an inbound
 # LookupMsg before falling back to MISS. Long enough that an in-flight
 # primary write or a just-started promotion typically completes; short
@@ -86,6 +90,8 @@ class _OutboundRequestState:
     finishing: bool = False  # Signal finish request ASAP
     inflight: int = 0  # transfers submitted for this round, not yet polled
     store_timed_out: bool = False
+    # Last wait-mode cancel attempt for this round's transfers (monotonic).
+    last_cancel_at: float | None = None
     # Job IDs that submit_store'd blocks for this round and have not
     # yet emitted a StoreResult. The terminal-finalize helper drains
     # this set; poll-done and poll-failed discard entries as their
@@ -1050,8 +1056,9 @@ class ServerRole:
             self._finalize_abort(kv_request_id, round_seq)
             return
 
+        now = time.monotonic()
         started_at = self._pending_aborts[(kv_request_id, round_seq)]
-        if time.monotonic() - started_at >= _CANCEL_DRAIN_TIMEOUT_S and not (
+        if now - started_at >= _CANCEL_DRAIN_TIMEOUT_S and not (
             rnd is not None and rnd.store_timed_out
         ):
             for tid in ids:
@@ -1067,6 +1074,9 @@ class ServerRole:
             self._finalize_abort(kv_request_id, round_seq)
             return
 
+        # All of the aborted round's transfers share one round state.
+        if not self._cancel_due(self._inflight[ids[0]].round, now):
+            return
         still = self._transport.cancel(ids, mode="wait")
         # Tids the transport successfully released are gone from its
         # _inflight; mirror that in session bookkeeping so they don't
@@ -1082,6 +1092,21 @@ class ServerRole:
                     kv_request_id, round_seq, success=False, send_done=False
                 )
             self._finalize_abort(kv_request_id, round_seq)
+
+    @staticmethod
+    def _cancel_due(rnd: _OutboundRequestState, now: float) -> bool:
+        """Rate-limit wait-mode cancels of ``rnd``'s transfers.
+
+        Shared by the store-timeout sweep and the abort drain, so a round
+        gets at most one attempt per ``_CANCEL_RETRY_INTERVAL_S``.
+        """
+        if (
+            rnd.last_cancel_at is not None
+            and now - rnd.last_cancel_at < _CANCEL_RETRY_INTERVAL_S
+        ):
+            return False
+        rnd.last_cancel_at = now
+        return True
 
     def _finalize_abort(self, kv_request_id: str, round_seq: int) -> None:
         self._pending_aborts.pop((kv_request_id, round_seq), None)
@@ -1165,7 +1190,8 @@ class ServerRole:
     def _timeout_pending_store_jobs(self) -> list[StoreResult]:
         if not self._store_jobs:
             return []
-        deadline = time.monotonic() - _STORE_TIMEOUT_S
+        now = time.monotonic()
+        deadline = now - _STORE_TIMEOUT_S
         timed_out: list[int] | None = None
         for jid, submitted_at in self._store_jobs.items():
             if submitted_at <= deadline:
@@ -1185,6 +1211,8 @@ class ServerRole:
         }
         for (kv_request_id, round_key), rnd in rounds.items():
             rnd.store_timed_out = True
+            if not self._cancel_due(rnd, now):
+                continue
             tids = [tid for tid, xfer in self._inflight.items() if xfer.round is rnd]
             still = set(self._transport.cancel(tids, mode="wait"))
             for tid in tids:

@@ -248,10 +248,13 @@ class NixlTransport(DataTransport):
     ) -> list[int]:
         """Cancel inflight transfers by their IDs.
 
-        See ``DataTransport.cancel`` for the contract. In "wait" mode,
-        transfers whose ``release_xfer_handle`` raises (NIXL could not
-        complete the abort because the backend is still draining) stay
-        in ``self._inflight`` so a later ``poll()`` will observe them.
+        See ``DataTransport.cancel`` for the contract. In "wait" mode, a
+        transfer is released only once NIXL reports it terminal. Releasing
+        a PROC/PEND handle does not stop the WRITE: the UCX backend frees
+        the request without cancelling RMA, and the bytes keep landing. So
+        PROC/PEND transfers, and those whose state check or
+        ``release_xfer_handle`` raises, stay in ``self._inflight`` for a
+        later ``poll()`` to observe.
         """
         if mode == "immediate":
             handles = [
@@ -266,6 +269,21 @@ class NixlTransport(DataTransport):
         for tid in transfer_ids:
             entry = self._inflight.get(tid)
             if entry is None:
+                continue
+            try:
+                state = self._agent.check_xfer_state(entry.handle)
+            except Exception as exc:
+                logger.debug(
+                    "NixlTransport %s: cancel state check failed for "
+                    "transfer_id=%d: %s",
+                    self._agent_name,
+                    tid,
+                    exc,
+                )
+                still_inflight.append(tid)
+                continue
+            if state in ("PROC", "PEND"):
+                still_inflight.append(tid)
                 continue
             try:
                 self._agent.release_xfer_handle(entry.handle)

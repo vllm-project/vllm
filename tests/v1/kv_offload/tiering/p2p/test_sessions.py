@@ -14,10 +14,12 @@ from __future__ import annotations
 
 import time
 from collections.abc import Sequence
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
+import vllm.v1.kv_offload.tiering.p2p.session.server as server_mod
 from vllm.v1.kv_offload.base import (
     LookupResult,
     OffloadKey,
@@ -1633,8 +1635,10 @@ class TestServerFlows:
 
     @pytest.mark.parametrize("cancel_pending", [False, True])
     def test_store_timeout_cancels_stuck_transfer_after_confirmation(
-        self, cancel_pending
+        self, cancel_pending, monkeypatch
     ):
+        # Retry on every poll; pacing is covered by the *_paced tests.
+        monkeypatch.setattr(server_mod, "_CANCEL_RETRY_INTERVAL_S", 0.0)
         session, conn, transport = _make_session()
         _activate(session, conn)
         session.add_stored_blocks("req-1", [b"k1"], [0], job_id=1)
@@ -1704,7 +1708,10 @@ class TestServerFlows:
         assert session.poll().stores == []
 
     @pytest.mark.parametrize("success", [True, False, None])
-    def test_store_timeout_waits_for_other_transfers_in_round(self, success):
+    def test_store_timeout_waits_for_other_transfers_in_round(
+        self, success, monkeypatch
+    ):
+        monkeypatch.setattr(server_mod, "_CANCEL_RETRY_INTERVAL_S", 0.0)
         session, conn, transport = _make_session()
         _activate(session, conn)
         conn.enqueue(
@@ -1742,7 +1749,8 @@ class TestServerFlows:
         assert terminal[0][TransferDoneMsg.SUCCESS] is False
         assert session.poll().stores == []
 
-    def test_abort_during_store_timeout_keeps_unconfirmed_pins(self):
+    def test_abort_during_store_timeout_keeps_unconfirmed_pins(self, monkeypatch):
+        monkeypatch.setattr(server_mod, "_CANCEL_RETRY_INTERVAL_S", 0.0)
         session, conn, transport = _make_session()
         _activate(session, conn)
         session.add_stored_blocks("req-1", [b"k1"], [0], job_id=1)
@@ -1778,6 +1786,140 @@ class TestServerFlows:
         assert session.poll().stores == [StoreResult(job_id=1, success=False)]
         assert sum(m[TYPE_KEY] == AbortAckMsg.TYPE for m in conn._sent) == 1
         assert session.poll().stores == []
+
+    @staticmethod
+    def _fake_clock(monkeypatch) -> list[float]:
+        clock = [1000.0]
+        monkeypatch.setattr(
+            server_mod, "time", SimpleNamespace(monotonic=lambda: clock[0])
+        )
+        return clock
+
+    @staticmethod
+    def _submit_unconfirmed_transfer(session, conn, transport) -> int:
+        """Start one transfer for job 1 whose wait-cancel never confirms."""
+        session.add_stored_blocks("req-1", [b"k1"], [0], job_id=1)
+        conn.enqueue(
+            {
+                TYPE_KEY: FetchMsg.TYPE,
+                FetchMsg.ROUND_SEQ: 0,
+                FetchMsg.KV_REQUEST_ID: "req-1",
+                FetchMsg.KEYS: [b"k1"],
+                FetchMsg.BLOCK_INDEXES: [5],
+            }
+        )
+        session.poll()
+        tid = next(iter(transport._transfers))
+        transport._cancel_still_inflight.add(tid)
+        return tid
+
+    @staticmethod
+    def _wait_cancels(transport) -> int:
+        return sum(1 for _, mode in transport._cancel_calls if mode == "wait")
+
+    def test_store_timeout_cancel_retry_is_paced(self, monkeypatch):
+        clock = self._fake_clock(monkeypatch)
+        session, conn, transport = _make_session()
+        _activate(session, conn)
+        tid = self._submit_unconfirmed_transfer(session, conn, transport)
+        session._server._store_jobs[1] = clock[0] - 60.0
+
+        assert session.poll().stores == []
+        assert self._wait_cancels(transport) == 1
+        start = clock[0]
+        for dt in (0.0, 0.05, 0.099):
+            clock[0] = start + dt
+            for _ in range(5):
+                assert session.poll().stores == []
+        assert self._wait_cancels(transport) == 1
+
+        clock[0] = start + server_mod._CANCEL_RETRY_INTERVAL_S + 1e-3
+        assert session.poll().stores == []
+        assert self._wait_cancels(transport) == 2
+
+        transport._cancel_still_inflight.clear()
+        clock[0] += server_mod._CANCEL_RETRY_INTERVAL_S + 1e-3
+        assert session.poll().stores == [StoreResult(job_id=1, success=False)]
+        assert self._wait_cancels(transport) == 3
+        assert tid not in session._server._inflight
+
+    def test_abort_drain_cancel_retry_is_paced(self, monkeypatch):
+        clock = self._fake_clock(monkeypatch)
+        session, conn, transport = _make_session()
+        _activate(session, conn)
+        self._submit_unconfirmed_transfer(session, conn, transport)
+        conn.enqueue(
+            {
+                TYPE_KEY: AbortFetchMsg.TYPE,
+                AbortFetchMsg.KV_REQUEST_ID: "req-1",
+                AbortFetchMsg.ROUND_SEQ: 0,
+            }
+        )
+        # The first drain attempt is immediate.
+        session.poll()
+        assert self._wait_cancels(transport) == 1
+        for _ in range(5):
+            session.poll()
+        assert self._wait_cancels(transport) == 1
+
+        clock[0] += server_mod._CANCEL_RETRY_INTERVAL_S + 1e-3
+        session.poll()
+        assert self._wait_cancels(transport) == 2
+        assert not any(m[TYPE_KEY] == AbortAckMsg.TYPE for m in conn._sent)
+
+        transport._cancel_still_inflight.clear()
+        clock[0] += server_mod._CANCEL_RETRY_INTERVAL_S + 1e-3
+        session.poll()
+        assert sum(m[TYPE_KEY] == AbortAckMsg.TYPE for m in conn._sent) == 1
+
+    def test_unconfirmed_store_cancel_never_acks_or_tears_down(self, monkeypatch):
+        """A cancellation that is never confirmed must not release the pin,
+        send AbortAck, force-cancel, or remove the peer, however long it
+        stays pending. AbortAck follows the release once it is confirmed."""
+        clock = self._fake_clock(monkeypatch)
+        session, conn, transport = _make_session()
+        _activate(session, conn)
+        peers = dict(transport._remote_peers)
+        tid = self._submit_unconfirmed_transfer(session, conn, transport)
+        session._server._store_jobs[1] = clock[0] - 60.0
+        assert session.poll().stores == []
+
+        abort = {
+            TYPE_KEY: AbortFetchMsg.TYPE,
+            AbortFetchMsg.KV_REQUEST_ID: "req-1",
+            AbortFetchMsg.ROUND_SEQ: 0,
+        }
+        started_at = clock[0]
+        conn.enqueue(dict(abort))
+        assert session.poll().stores == []
+        # A duplicate abort neither resets the drain start nor adds a cancel.
+        conn.enqueue(dict(abort))
+        assert session.poll().stores == []
+        assert session._server._pending_aborts[("req-1", 0)] == started_at
+        # The store sweep and the abort drain share the round's pacing.
+        assert self._wait_cancels(transport) == 1
+
+        ticks = 50
+        for step in range(1, ticks + 1):
+            clock[0] = started_at + step * 10.0
+            assert session.poll().stores == []
+        assert clock[0] - started_at > _CANCEL_DRAIN_TIMEOUT_S
+        assert self._wait_cancels(transport) == 1 + ticks
+        assert all(mode == "wait" for _, mode in transport._cancel_calls)
+        assert 1 in session._server._store_jobs
+        assert tid in session._server._inflight
+        assert transport._remote_peers == peers
+        assert not any(
+            m[TYPE_KEY] in (AbortAckMsg.TYPE, TransferDoneMsg.TYPE) for m in conn._sent
+        )
+
+        transport._cancel_still_inflight.clear()
+        clock[0] += server_mod._CANCEL_RETRY_INTERVAL_S + 1e-3
+        assert session.poll().stores == [StoreResult(job_id=1, success=False)]
+        assert 1 not in session._server._store_jobs
+        assert sum(m[TYPE_KEY] == AbortAckMsg.TYPE for m in conn._sent) == 1
+        assert session.poll().stores == []
+        assert sum(m[TYPE_KEY] == AbortAckMsg.TYPE for m in conn._sent) == 1
 
 
 # ---------------------------------------------------------------------------
