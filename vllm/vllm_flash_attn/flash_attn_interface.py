@@ -118,6 +118,12 @@ def maybe_contiguous(x):
     return x.contiguous() if x is not None and x.stride(-1) != 1 else x
 
 
+def _raise_unsupported_feature(fa_version: int, feature_name: str):
+    raise NotImplementedError(
+        f"FlashAttention V{fa_version} does not support the '{feature_name}' feature."
+    )
+
+
 # NOTE only used in FA3
 def get_scheduler_metadata(
     batch_size,
@@ -326,24 +332,22 @@ def flash_attn_varlen_func(
     dummy_cu_seqlens_k = torch.empty_like(cu_seqlens_q)
 
     if fa_version == 2:
-        if (
-            scheduler_metadata is not None
-            and q_descale is not None
-            and k_descale is not None
-            and v_descale is not None
-        ):
-            raise NotImplementedError(
-                "FA2 does not support scheduler_metadata, q_descale, "
-                "k_descale, v_descale"
-            )
-        if s_aux is not None:
-            raise NotImplementedError("FA2 does not support s_aux")
-        if num_splits > 1:
-            raise NotImplementedError("FA2 does not support num_splits > 1")
-        if mask_mod is not None:
-            raise NotImplementedError("FA2 does not support mask_mod")
-        if aux_tensors is not None:
-            raise NotImplementedError("FA2 does not support aux_tensors")
+        unsupported_features = [
+            (
+                "scheduler_metadata / descaling",
+                scheduler_metadata is not None
+                or q_descale is not None
+                or k_descale is not None
+                or v_descale is not None,
+            ),
+            ("s_aux", s_aux is not None),
+            ("num_splits > 1", num_splits > 1),
+            ("mask_mod", mask_mod is not None),
+            ("aux_tensors", aux_tensors is not None),
+        ]
+        for feature_name, is_unsupported in unsupported_features:
+            if is_unsupported:
+                _raise_unsupported_feature(2, feature_name)
         out, softmax_lse = torch.ops._vllm_fa2_C.varlen_fwd(
             q,
             k,
@@ -371,11 +375,14 @@ def flash_attn_varlen_func(
             None,
         )
     elif fa_version == 3:
-        assert alibi_slopes is None, "Alibi is not supported in FA3"
-        if mask_mod is not None:
-            raise NotImplementedError("FA3 does not support mask_mod")
-        if aux_tensors is not None:
-            raise NotImplementedError("FA3 does not support aux_tensors")
+        unsupported_features = [
+            ("alibi_slopes", alibi_slopes is not None),
+            ("mask_mod", mask_mod is not None),
+            ("aux_tensors", aux_tensors is not None),
+        ]
+        for feature_name, is_unsupported in unsupported_features:
+            if is_unsupported:
+                _raise_unsupported_feature(3, feature_name)
         out, softmax_lse, _, _ = torch.ops._vllm_fa3_C.fwd(
             q,
             k,
@@ -416,7 +423,8 @@ def flash_attn_varlen_func(
             cp_tot_seqused_k,
         )
     elif fa_version == 4:
-        assert alibi_slopes is None, "Alibi is not supported in FA4"
+        if alibi_slopes is not None:
+            _raise_unsupported_feature(4, "alibi_slopes")
         if block_sparse_tensors is not None:
             assert block_sparse_tensors.full_block_cnt is not None, (
                 "FA4 block_sparse_tensors must materialize empty full_block_cnt "
