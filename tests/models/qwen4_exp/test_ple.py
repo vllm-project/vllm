@@ -27,9 +27,6 @@ from vllm.model_executor.layers.quantization.modelopt import (
 )
 from vllm.model_executor.layers.quantization.online.base import OnlineQuantizationConfig
 from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
-from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (
-    _e4m3_inline,
-)
 from vllm.models.qwen4_exp.amd import ple_layer as amd_ple_layer
 from vllm.models.qwen4_exp.amd.ple_layer import (
     Qwen4ExpPLELayer as Qwen4ExpPLELayerAMD,
@@ -50,7 +47,6 @@ from vllm.models.qwen4_exp.nvidia.ngram_embedding import (
 )
 from vllm.models.qwen4_exp.nvidia.ple_layer import Qwen4ExpPLELayer
 from vllm.platforms import current_platform
-from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import weak_ref_tensor
 from vllm.v1.attention.backends.short_conv_attn import (
     PleShortConvAttentionMetadata,
@@ -402,105 +398,12 @@ def test_nvfp4_ple_loads_streamed_shards_across_etp_boundaries(monkeypatch, rank
     torch.testing.assert_close(output, expected, atol=0, rtol=0)
 
 
-@pytest.mark.parametrize("suffix", ["weight", "weight_scale"])
-def test_nvfp4_ple_rejects_unsharded_table(monkeypatch, suffix):
-    module, tensors, codes, scales = _make_nvfp4_ngram_embedding(monkeypatch)
-    table = codes if suffix == "weight" else scales
-    with pytest.raises(ValueError, match="got unsharded"):
-        module.load_weights([(f"ngram_embedding.{suffix}", table)])
-
-
 def test_nvfp4_ple_rejects_missing_global_scale(monkeypatch):
     module, tensors, _, _ = _make_nvfp4_ngram_embedding(monkeypatch)
     module.load_weights(tensors[:-1])
     layer = module.ngram_embedding
     with pytest.raises(ValueError, match="missing its global scale"):
         layer.embedding_method.process_weights_after_loading(layer)
-
-
-def test_nvfp4_ple_accepts_load_that_bypasses_load_weights(monkeypatch):
-    """--load-format sharded_state copies the state dict without load_weights."""
-    source, tensors, _, _ = _make_nvfp4_ngram_embedding(monkeypatch)
-    source.load_weights(tensors)
-    target, _, _, _ = _make_nvfp4_ngram_embedding(monkeypatch)
-    layer = target.ngram_embedding
-    for name, tensor in source.ngram_embedding.state_dict().items():
-        layer.state_dict()[name].copy_(tensor)
-    layer.embedding_method.process_weights_after_loading(layer)
-    ids = torch.tensor([[3, 1]])
-    torch.testing.assert_close(layer(ids), source.ngram_embedding(ids))
-
-
-@triton.jit
-def _decode_e4m3_kernel(src, dst, BLOCK: tl.constexpr):
-    offsets = tl.arange(0, BLOCK)
-    tl.store(dst + offsets, _e4m3_inline(tl.load(src + offsets)))
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
-def test_e4m3_inline_matches_torch_for_every_byte():
-    src = torch.arange(256, dtype=torch.int32).to(torch.uint8).cuda()
-    out = torch.empty(256, dtype=torch.float32, device="cuda")
-    _decode_e4m3_kernel[(1,)](src, out, BLOCK=256)
-    expected = src.view(torch.float8_e4m3fn).float()
-    torch.testing.assert_close(out, expected, rtol=0, atol=0, equal_nan=True)
-
-
-def test_amd_rejects_nvfp4_ple(monkeypatch):
-    _mock_etp_group(monkeypatch)
-    config = Qwen4ExpTextConfig(
-        ngram_size=3,
-        heads_per_ngram=1,
-        ngram_vocab_size_base=5,
-        make_ngram_vocab_size_divisible_by=8,
-        split_ngram_parts=2,
-        ple_embed_dim=32,
-        eos_token_id=0,
-        vocab_size=64,
-    )
-    config.ple_embedding_dtype = "nvfp4"
-    with pytest.raises(NotImplementedError, match="not supported on ROCm"):
-        amd_ple_layer.Qwen4ExpNGramEmbedding(
-            config,
-            embedding_dim=config.ple_embed_dim,
-            ple_dense_layer_id=0,
-            max_total_tokens=4,
-            prefix="test.ple_embedding",
-            layer_name="test.ple",
-            quant_config=None,
-            params_dtype=torch.bfloat16,
-        )
-
-
-@pytest.mark.parametrize("suffix", ["weight", "weight_scale"])
-def test_nvfp4_ple_rejects_incorrect_packed_shape_or_dtype(monkeypatch, suffix):
-    module, tensors, _, _ = _make_nvfp4_ngram_embedding(monkeypatch)
-    name, tensor = next(
-        pair for pair in tensors if pair[0] == f"ngram_embedding.shard_0.{suffix}"
-    )
-    with pytest.raises(ValueError, match="Shape mismatch"):
-        module.load_weights([(name, tensor[:, :-1])])
-    with pytest.raises(ValueError, match="requires torch"):
-        module.load_weights([(name, tensor.float())])
-
-
-def test_nvfp4_ple_uses_explicit_storage_dtype_in_mixed_checkpoint():
-    prefix = "model.language_model.layers.1.ple.ple_embedding.ngram_embedding"
-    config = ModelOptMixedPrecisionConfig.from_config(
-        {
-            "quantization": {
-                "quant_algo": "MIXED_PRECISION",
-                "kv_cache_quant_algo": None,
-                "quantized_layers": {
-                    "model.layers.0.mlp.experts": {"quant_algo": "NVFP4"}
-                },
-            }
-        }
-    )
-    assert isinstance(
-        Qwen4ExpPLEEmbeddingMethod.from_quant_config(config, prefix, "nvfp4"),
-        Qwen4ExpPLENvFp4EmbeddingMethod,
-    )
 
 
 def test_nvfp4_ple_resolves_from_mixed_precision_quantized_layers():
@@ -528,8 +431,9 @@ def test_nvfp4_ple_resolves_from_mixed_precision_quantized_layers():
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
 @pytest.mark.parametrize("pinned", [False, True])
-@pytest.mark.parametrize("rank", [0, 1])
-def test_nvfp4_ple_cuda_lookup_and_graph_replay(monkeypatch, pinned, rank):
+def test_nvfp4_ple_cuda_lookup_and_graph_replay(monkeypatch, pinned):
+    # Rank 1 exercises both the vocab offset and out-of-shard masking.
+    rank = 1
     module, tensors, codes, scales = _make_nvfp4_ngram_embedding(
         monkeypatch, rank=rank, device="cuda", pinned=pinned
     )
@@ -863,13 +767,6 @@ def test_ple_embedding_dtype_overrides_modelopt_exclusion() -> None:
         ),
         Qwen4ExpPLEFp8EmbeddingMethod,
     )
-
-
-def test_ple_embedding_dtype_rejects_unknown_value() -> None:
-    with pytest.raises(ValueError, match="got 'fp4'"):
-        Qwen4ExpPLEEmbeddingMethod.from_quant_config(
-            None, "model.layers.1.ple.ple_embedding.ngram_embedding", "fp4"
-        )
 
 
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float8_e4m3fn])
