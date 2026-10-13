@@ -165,12 +165,13 @@ def resolve_tokenizer_args(
                 "mistral_format=True is not supported with tokenizer_mode='hf'"
             )
         kwargs["mistral_format"] = False
-        tokenizer_name = get_non_weight_snapshot_path(
-            str(tokenizer_name),
-            revision=revision,
-            cache_dir=download_dir,
-            token=kwargs.get("token"),
-        )
+        if kwargs.get("code_revision") in (None, revision):
+            tokenizer_name = get_non_weight_snapshot_path(
+                str(tokenizer_name),
+                revision=revision,
+                cache_dir=download_dir,
+                token=kwargs.get("token"),
+            )
 
     return tokenizer_mode, tokenizer_name, args, kwargs
 

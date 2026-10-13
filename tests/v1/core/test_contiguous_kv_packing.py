@@ -18,13 +18,15 @@ import torch
 
 from vllm.config import CacheConfig
 from vllm.v1.core.kv_cache_manager import KVCacheManager
-from vllm.v1.core.kv_cache_utils import (
+from vllm.v1.core.kv_cache_planning import (
     _get_kv_cache_bytes_per_block,
     _get_packed_kv_cache_groups,
     _pool_bytes_per_block,
-    generate_scheduler_kv_cache_config,
     get_kv_cache_config_from_groups,
     get_kv_cache_groups,
+)
+from vllm.v1.core.kv_cache_utils import (
+    generate_scheduler_kv_cache_config,
     resolve_kv_cache_block_sizes,
 )
 from vllm.v1.hisparse.layout import _build_hisparse_kv_cache_tensors
@@ -276,7 +278,14 @@ class TestCSALinearGrouping:
         neither divides the hit length nor bounds the (empty) block list."""
         config = _shared_layout_config()
         config.cache_config.enable_prefix_caching = True
-        groups = get_kv_cache_groups(config, _make_csa_linear_specs())
+        config.cache_config.mamba_cache_mode = "align"
+        specs = {
+            name: replace(spec, mamba_cache_mode="align")
+            if isinstance(spec, MambaSpec)
+            else spec
+            for name, spec in _make_csa_linear_specs().items()
+        }
+        groups = get_kv_cache_groups(config, specs)
         kv_cache_config = get_kv_cache_config_from_groups(
             config, groups, available_memory=BYTES_PER_BLOCK * 64
         )
