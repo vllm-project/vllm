@@ -148,15 +148,16 @@ def test_consumed_think_prefix_preserves_literal_response_marker(finished_reason
     ) == (reasoning, body if finished_reasoning else None, [])
 
 
-def test_response_control_after_whitespace_preserves_content():
+def test_response_control_after_whitespace_stays_in_reasoning():
     parser = ReasoningOnlyParser(_dummy_tokenizer())
     request = ChatCompletionRequest(model="test-model", messages=[])
     body = '{"ok":true}'
+    text = "\n" + RESPONSE_OPEN + body
     assert parser.parse(
-        "\n" + RESPONSE_OPEN + body,
+        text,
         request,
         model_output_token_ids=[ord("\n"), *RESPONSE_OPEN_IDS, *map(ord, body)],
-    ) == (None, body, [])
+    ) == (text, None, [])
 
 
 def test_is_reasoning_end_uses_full_input_ids():
