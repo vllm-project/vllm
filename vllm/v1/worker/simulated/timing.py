@@ -566,7 +566,9 @@ class ReplayTimingProvider:
         miss_fallback_s: float = 0.0,
     ) -> None:
         records = load_step_log(path)
-        self.exact: dict[str, tuple[float, float]] = {}
+        # Steps of one composition, recorded more than once, vary run to run:
+        # replay their mean.
+        same_key: dict[str, list[tuple[float, float]]] = {}
         points = []
         for rec in records:
             cost = _record_cost(rec)
@@ -579,8 +581,15 @@ class ReplayTimingProvider:
                     ),
                     separators=(",", ":"),
                 )
-                self.exact[key] = cost
+                same_key.setdefault(key, []).append(cost)
             points.append((_record_features(rec), cost))
+        self.exact: dict[str, tuple[float, float]] = {
+            key: (
+                math.fsum(d for d, _ in costs) / len(costs),
+                math.fsum(h for _, h in costs) / len(costs),
+            )
+            for key, costs in same_key.items()
+        }
         if fallback not in ("knn", "zero"):
             raise ValueError(f"unknown replay fallback {fallback!r}")
         self.fallback = fallback

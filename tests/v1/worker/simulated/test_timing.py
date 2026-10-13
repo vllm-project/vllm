@@ -113,25 +113,28 @@ def test_replay_exact_match_then_knn_fallback(tmp_path):
         _step(0, _req("a", 128, 0, 128)),
         _step(1, _req("a", 1, 128, 128)),
         _step(2, _req("a", 1, 129, 128), _req("b", 1, 7, 7)),
+        _step(3, _req("c", 128, 0, 128)),
     ]
     costs = [
         StepCost(device_s=0.010),
         StepCost(device_s=0.002),
         StepCost(device_s=0.003),
+        StepCost(device_s=0.014),
     ]
     for s, c in zip(steps, costs):
         writer.write(s, c, t_start=0.0, t_deadline=c.device_s, finished_req_ids=[])
     writer.close()
-    assert len(log.read_text().splitlines()) == 3
+    assert len(log.read_text().splitlines()) == 4
 
     replay = ReplayTimingProvider(_Cfg(), path=str(log))  # type: ignore[arg-type]
     # Same batch composition under different request ids still matches.
     same_shape = _step(9, _req("x", 1, 7, 7), _req("y", 1, 129, 128))
     assert replay.estimate(same_shape).device_s == pytest.approx(0.003)
-    assert replay.estimate(steps[0]).device_s == pytest.approx(0.010)
+    # A composition recorded twice replays its mean.
+    assert replay.estimate(steps[0]).device_s == pytest.approx(0.012)
     # Unseen composition falls back to the nearest neighbours.
     miss = replay.estimate(_step(10, _req("z", 1, 128, 128), _req("w", 1, 128, 128)))
-    assert 0.002 <= miss.device_s <= 0.010
+    assert 0.002 <= miss.device_s <= 0.014
     m = replay.metrics()
     assert m["replay_exact_match_steps"] == 2
     assert m["replay_miss_steps"] == 1
