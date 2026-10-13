@@ -32,13 +32,13 @@ Output (gzipped JSON):
       "errors": [],                 # [{"object", "source", "error"}, ...]
       "objects": [
         {
-          "source": "csrc/libtorch_stable/fused_qknorm_rope_kernel.cu",
+          "source": "csrc/fused_qknorm_rope_kernel.cu",
           "target": "_C",
           "object": "CMakeFiles/_C.dir/csrc/.../fused_qknorm_rope_kernel.cu.o",
           "device": true,
           "symbols": ["_Z21fusedQKNormRopeKernelI...", ...],
-          "deps": ["csrc/libtorch_stable/fused_qknorm_rope_kernel.cu",
-                   "csrc/cuda_compat.h", ...]
+          "deps": ["csrc/fused_qknorm_rope_kernel.cu",
+                   "csrc/core/cuda_compat.h", ...]
           # "error": "..."          # present when cuobjdump failed on it
         },
         ...
@@ -255,7 +255,7 @@ def main() -> int:
         or os.environ.get("VLLM_BUILD_COMMIT")
         or "",
         "cuda": cuda_release(nvcc),
-        "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
+        "generated_at": dt.datetime.now(dt.UTC).isoformat(timespec="seconds"),
         "build_dirs": [],
         "incomplete": False,
         "errors": [],
