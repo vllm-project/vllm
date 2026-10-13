@@ -148,7 +148,6 @@ if TYPE_CHECKING:
     VLLM_ROCM_AITER_MLA_ASM_PADDING: Literal["auto", "gluon", "asm"] = "auto"
     VLLM_ROCM_AITER_MLA_DCP_VERIFY: Literal["auto", "asm", "segmented"] = "auto"
     VLLM_ROCM_USE_AITER_MHA: bool = True
-    VLLM_ROCM_USE_AITER_FP4_ASM_GEMM: bool | None = None
     VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA: bool = False
     VLLM_ROCM_USE_AITER_TRITON_ROPE: bool = False
     VLLM_ROCM_USE_AITER_FP8BMM: bool = True
@@ -1352,15 +1351,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # By default is enabled.
     "VLLM_ROCM_USE_AITER_MHA": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_MHA", "True").lower() in ("true", "1")
-    ),
-    # Whether dynamically-quantized MXFP4 linears use the aiter ASM fp4 gemm.
-    # Unset: per weight shape, when aiter has tuned configs for both the ASM
-    # gemm (prefill-sized M) and the preshuffled Triton gemm (decode-sized M).
-    # 1/0 forces it on/off.
-    "VLLM_ROCM_USE_AITER_FP4_ASM_GEMM": lambda: (
-        None
-        if "VLLM_ROCM_USE_AITER_FP4_ASM_GEMM" not in os.environ
-        else os.environ["VLLM_ROCM_USE_AITER_FP4_ASM_GEMM"].lower() in ("true", "1")
     ),
     # Whether sparse MLA prefill and decode run on aiter's Triton kernel, which
     # reads the KV cache as stored (bf16 or fp8, paged or flat). Used by the

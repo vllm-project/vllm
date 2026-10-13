@@ -145,10 +145,8 @@ class AiterMxfp4LinearKernel(MxFp4LinearKernel):
 
     def __init__(self, config: MxFp4LinearLayerConfig) -> None:
         super().__init__(config)
-        self.use_asm_gemm = rocm_aiter_ops.is_asm_fp4_gemm_dynamic_quant_enabled()
-        self.use_tuned_dispatch = (
-            rocm_aiter_ops.is_asm_fp4_gemm_tuned_dispatch_enabled()
-        )
+        self.asm_gemm_supported = rocm_aiter_ops.is_asm_fp4_gemm_supported()
+        self.use_asm_gemm = False
         self.out_dtype = torch.get_default_dtype()
 
     @classmethod
@@ -188,7 +186,10 @@ class AiterMxfp4LinearKernel(MxFp4LinearKernel):
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        if self.use_tuned_dispatch:
+        # The ASM GEMM needs the preshuffled weight layout, which decode-sized M
+        # then run on the preshuffled Triton GEMM. Use it only when aiter has
+        # tuned configs for both.
+        if self.asm_gemm_supported:
             n, k_bytes = layer.weight.shape
             self.use_asm_gemm = rocm_aiter_ops.is_asm_fp4_gemm_tuned(
                 n, k_bytes
