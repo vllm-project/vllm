@@ -524,3 +524,24 @@ def test_mixed_group_copy_preserves_runner_width(
     copied.create_metadata_builders(config, torch.device("cpu"), kernel_block_size=480)
     assert copied.kernel_block_table is not None
     assert copied.kernel_block_table.shape[-1] == runner_width * 4
+
+
+@pytest.mark.parametrize("dcp_world_size", [1, 4])
+def test_qsa_side_cache_builder_keeps_spec_rows_as_decodes(dcp_world_size):
+    """The QSA side caches are replicated on every DCP rank, so MTP verify
+    rows keep the reorder threshold 1 + num_spec under DCP too."""
+    from vllm.models.qwen4_exp.common.qsa_cache import QSAMetadataBuilder
+
+    config = SimpleNamespace(
+        parallel_config=SimpleNamespace(decode_context_parallel_size=dcp_world_size),
+        speculative_config=SimpleNamespace(
+            num_speculative_tokens=3, parallel_drafting=False
+        ),
+        use_v2_model_runner=True,
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=64, max_num_seqs=4),
+    )
+    builder = QSAMetadataBuilder(
+        _qsa_selector(dcp_world_size), ["layer.0"], config, torch.device("cpu")
+    )
+
+    assert builder.reorder_batch_threshold == 4
