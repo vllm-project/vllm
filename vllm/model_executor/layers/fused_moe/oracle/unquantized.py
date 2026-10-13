@@ -528,6 +528,26 @@ def make_unquantized_moe_kernel(
     logger.info_once("Using %s", prepare_finalize.__class__.__name__)
     logger.info_once("Using %s MoE backend", experts_cls.__name__)
 
+    # Fail fast when the selected experts kernel requires the batched-experts
+    # activation format but the prepare/finalize stage produces a different
+    # one (e.g. moe_backend="batched_triton" on CUDA without all2all kernels,
+    # where maybe_make_prepare_finalize falls back to a naive Standard-format
+    # stage on non-XPU platforms).
+    if (
+        experts_cls.activation_format() == mk.FusedMoEActivationFormat.BatchedExperts
+        and prepare_finalize.activation_format
+        != mk.FusedMoEActivationFormat.BatchedExperts
+    ):
+        raise ValueError(
+            f"{experts_cls.__name__} requires the batched-experts activation "
+            "format, but the prepare/finalize stage "
+            f"({prepare_finalize.__class__.__name__}) produces "
+            f"{prepare_finalize.activation_format.name}. "
+            'moe_backend="batched_triton" requires the batched '
+            "prepare/finalize path (all2all kernels or the XPU batched "
+            'opt-in); use moe_backend="triton" instead.'
+        )
+
     # Create Experts
     if prepare_finalize.activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
         max_num_tokens = prepare_finalize.max_num_tokens_per_rank()
