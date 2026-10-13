@@ -224,6 +224,30 @@ def test_max_num_active_seqs_caps_admission():
     assert scheduler.max_num_running_reqs == 16
 
 
+@pytest.mark.parametrize(
+    "disable_cascade_attn, expected_scan",
+    [(True, False), (False, True)],
+)
+def test_schedule_common_prefix_scan_gated_by_cascade_attn(
+    disable_cascade_attn: bool, expected_scan: bool
+):
+    """The common-prefix block scan must only run when cascade attention
+    (its sole consumer) is enabled."""
+    scheduler = create_scheduler(disable_cascade_attn=disable_cascade_attn)
+    assert scheduler.compute_common_prefix_blocks == expected_scan
+    requests = create_requests(num_requests=2)
+    for request in requests:
+        scheduler.add_request(request)
+
+    with patch.object(
+        scheduler.kv_cache_manager,
+        "get_num_common_prefix_blocks",
+        return_value=[0] * len(scheduler.kv_cache_config.kv_cache_groups),
+    ) as mock_scan:
+        scheduler.schedule()
+        assert mock_scan.called == expected_scan
+
+
 def _bind_hisparse_connector(scheduler):
     connector = object.__new__(HiSparseConnector)
     connector.connector_scheduler = HiSparseConnectorScheduler(async_speculative=False)

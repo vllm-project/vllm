@@ -84,6 +84,7 @@ def create_scheduler(
     scheduling_policy: SchedulerPolicy = "fcfs",
     diffusion_canvas_length: int | None = None,
     scheduler_cls: type[Scheduler] | None = None,
+    disable_cascade_attn: bool = True,
 ) -> Scheduler | AsyncScheduler:
     """Create scheduler under test.
 
@@ -112,6 +113,7 @@ def create_scheduler(
         # SchedulerConfig one, so both must agree.
         max_model_len=max_model_len,
         runner=runner,
+        disable_cascade_attn=disable_cascade_attn,
     )
     if mm_encoder_only:
         model_config.multimodal_config.mm_encoder_only = True

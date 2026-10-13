@@ -361,6 +361,13 @@ class Scheduler(SchedulerInterface):
 
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
         self.use_v2_model_runner = vllm_config.use_v2_model_runner
+        # The common-prefix block scan feeds only cascade attention, which is
+        # opt-in (disable_cascade_attn defaults to True). VllmConfig already
+        # forces the flag off under async speculative decoding, DBO, and
+        # VLLM_BATCH_INVARIANT.
+        self.compute_common_prefix_blocks = (
+            not vllm_config.model_config.disable_cascade_attn
+        )
         # Scheduler iteration counter. Drives the V2+PP+async decode-throttle
         # cadence (`next_decode_eligible_step`).
         self.current_step = 0
@@ -1417,8 +1424,10 @@ class Scheduler(SchedulerInterface):
         # Get the longest common prefix among all requests in the running queue.
         # This can be potentially used for cascade attention.
         num_common_prefix_blocks = [0] * len(self.kv_cache_config.kv_cache_groups)
-        with record_function_or_nullcontext("schedule: get_num_common_prefix_blocks"):
-            if self.running:
+        if self.compute_common_prefix_blocks and self.running:
+            with record_function_or_nullcontext(
+                "schedule: get_num_common_prefix_blocks"
+            ):
                 any_request_id = self.running[0].request_id
                 num_common_prefix_blocks = (
                     self.kv_cache_manager.get_num_common_prefix_blocks(any_request_id)
