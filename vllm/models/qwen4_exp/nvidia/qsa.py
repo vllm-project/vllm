@@ -300,7 +300,12 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
             raise NotImplementedError("QSA does not support sliding-window attention")
 
         num_tokens = attn_metadata.num_actual_tokens
-        output.zero_()
+        if self.dcp_world_size > 1:
+            # The DCP gate writes every row below num_tokens; clear only the
+            # padding rows.
+            output[num_tokens:].zero_()
+        else:
+            output.zero_()
         if num_tokens == 0:
             return output
 
@@ -384,7 +389,11 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
         from vllm.distributed.parallel_state import get_dcp_group
 
         from .ops.qsa import qsa_sparse_paged_attention
-        from .ops.qsa_dcp import qsa_localize_dcp_indices
+        from .ops.qsa_dcp import (
+            gate_qsa_dcp_output,
+            qsa_dcp_combine,
+            qsa_localize_dcp_indices,
+        )
 
         group = get_dcp_group()
 
@@ -414,19 +423,18 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
         # A row with count 0 runs no tile; the reader writes output 0 and LSE
         # -inf, the identity for the LSE combine.
 
-        merged = cast(
-            torch.Tensor,
-            self.dcp_combine(
-                partial_out.float(),
-                partial_lse.float(),
-                group,
-                ctx=self._dcp_combine_ctx,
-                is_lse_base_on_e=self.lse_base_on_e,
-            ),
+        # The BF16 partial goes to the combine as is: the reader already
+        # rounded it to BF16, so an fp32 copy only doubles the reduce-scatter.
+        merged = qsa_dcp_combine(
+            partial_out,
+            partial_lse,
+            group,
+            self.dcp_combine,
+            torch.empty_like(partial_out),
+            ctx=self._dcp_combine_ctx,
+            is_lse_base_on_e=self.lse_base_on_e,
         )
-
-        gated = merged * torch.sigmoid(output_gate.view_as(merged).float())
-        output.copy_(gated)
+        gate_qsa_dcp_output(merged, output_gate, output)
 
 
 class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
