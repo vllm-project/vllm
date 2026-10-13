@@ -1,20 +1,39 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Configuration-level regression tests for Qwen4Exp GDN/PLE RecoverSSM selection.
+"""Configuration-level regression tests for Qwen GDN/PLE RecoverSSM selection.
 
-``--use-replayssm`` with speculative decoding selects RecoverSSM for Qwen4Exp, as it
-does for Kimi-K3 KDA. The MTP drafter's derived config shares ``cache_config`` and must
-keep the choice. These tests run the real validator function against stand-in configs.
+``--use-replayssm`` with speculative decoding selects RecoverSSM for Qwen4Exp, Qwen3.5
+and Qwen3-Next, as it does for Kimi-K3 KDA. The MTP drafter's derived config shares
+``cache_config`` and must keep the choice. These tests run the real validator function
+against stand-in configs.
 """
 
 from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
+import torch
 
 from vllm.config.mamba import MambaBackendEnum
 from vllm.config.vllm import VllmConfig
 from vllm.model_executor.layers.mamba.recoverssm_utils import uses_recoverssm
+from vllm.model_executor.models.interfaces import supports_replayssm
+from vllm.model_executor.models.interns2_mobius import (
+    InternS2MobiusForCausalLM,
+    InternS2MobiusMTP,
+)
+from vllm.model_executor.models.interns2_preview import (
+    InternS2PreviewForConditionalGeneration,
+)
+from vllm.model_executor.models.qwen3_5 import (
+    Qwen3_5ForCausalLM,
+    Qwen3_5ForConditionalGeneration,
+    Qwen3_5MoeForCausalLM,
+    Qwen3_5MoeForConditionalGeneration,
+)
+from vllm.model_executor.models.qwen3_5_mtp import Qwen3_5MoeMTP, Qwen3_5MTP
+from vllm.model_executor.models.qwen3_next import Qwen3NextForCausalLM
+from vllm.model_executor.models.qwen3_next_mtp import Qwen3NextMTP
 from vllm.v1.attention.backend import AttentionCGSupport
 
 TARGET = "Qwen4ExpForConditionalGeneration"
@@ -67,9 +86,22 @@ def test_validator_is_registered():
     )
 
 
-@pytest.mark.parametrize(
-    "arch", ["Qwen4ExpForConditionalGeneration", "Qwen4ExpForCausalLM"]
-)
+QWEN_GDN_ARCHS = [
+    "Qwen4ExpForConditionalGeneration",
+    "Qwen4ExpForCausalLM",
+    "Qwen4ExpMTP",
+    "Qwen3NextForCausalLM",
+    "Qwen3NextMTP",
+    "Qwen3_5ForCausalLM",
+    "Qwen3_5MoeForCausalLM",
+    "Qwen3_5ForConditionalGeneration",
+    "Qwen3_5MoeForConditionalGeneration",
+    "Qwen3_5MTP",
+    "Qwen3_5MoeMTP",
+]
+
+
+@pytest.mark.parametrize("arch", QWEN_GDN_ARCHS)
 def test_replayssm_with_spec_selects_recoverssm(arch):
     cfg = _config(arch)
     _validator()(cfg)
@@ -114,13 +146,14 @@ def test_flag_unset_keeps_the_stock_path():
     assert not uses_recoverssm(cfg.cache_config, 3)
 
 
-def test_qwen4exp_replayssm_requires_speculative_decoding():
+@pytest.mark.parametrize("arch", QWEN_GDN_ARCHS)
+def test_qwen_gdn_replayssm_requires_speculative_decoding(arch):
     with pytest.raises(ValueError, match="requires speculative decoding"):
-        _validator()(_config(TARGET, num_spec=0))
+        _validator()(_config(arch, num_spec=0))
 
 
 def test_architecture_without_replayssm_support_is_rejected():
-    cfg = _config("Qwen3NextForCausalLM", supports_replayssm=False)
+    cfg = _config("LlamaForCausalLM", supports_replayssm=False)
     with pytest.raises(ValueError, match="not supported for architecture"):
         _validator()(cfg)
 
@@ -170,3 +203,79 @@ def test_never_support_falls_back_to_piecewise_with_breakable_cudagraphs(
         uniform_decode_query_len=4,
     )
     assert resolved.name == expected
+
+
+QWEN_GDN_MODELS = [
+    Qwen3NextForCausalLM,
+    Qwen3_5ForCausalLM,
+    Qwen3_5MoeForCausalLM,
+    Qwen3_5ForConditionalGeneration,
+    Qwen3_5MoeForConditionalGeneration,
+]
+
+
+@pytest.mark.parametrize(
+    "cls",
+    [*QWEN_GDN_MODELS, Qwen3_5MTP, Qwen3_5MoeMTP, Qwen3NextMTP],
+    ids=lambda c: c.__name__,
+)
+def test_qwen_gdn_models_declare_replayssm_support(cls):
+    assert supports_replayssm(cls)
+
+
+@pytest.mark.parametrize(
+    "cls",
+    [
+        InternS2PreviewForConditionalGeneration,
+        InternS2MobiusForCausalLM,
+        InternS2MobiusMTP,
+    ],
+    ids=lambda c: c.__name__,
+)
+def test_unvalidated_qwen_gdn_subclasses_do_not_inherit_support(cls):
+    """Subclasses outside the RecoverSSM list must keep rejecting --use-replayssm
+    instead of inheriting support from their Qwen3.5 base."""
+    assert not supports_replayssm(cls)
+
+
+def _state_config(use_recoverssm: bool, num_spec: int, tp: int):
+    # Qwen3.5-4B linear-attention dims: 16 key heads, 32 value heads, K = V = 128
+    return SimpleNamespace(
+        model_config=SimpleNamespace(
+            dtype=torch.bfloat16,
+            hf_text_config=SimpleNamespace(
+                linear_num_key_heads=16,
+                linear_num_value_heads=32,
+                linear_key_head_dim=128,
+                linear_value_head_dim=128,
+                linear_conv_kernel_dim=4,
+            ),
+        ),
+        cache_config=SimpleNamespace(
+            use_recoverssm=use_recoverssm,
+            mamba_cache_dtype="bfloat16",
+            mamba_ssm_cache_dtype="bfloat16",
+        ),
+        parallel_config=SimpleNamespace(tensor_parallel_size=tp),
+        speculative_config=(
+            SimpleNamespace(num_speculative_tokens=num_spec) if num_spec else None
+        ),
+    )
+
+
+@pytest.mark.parametrize("cls", QWEN_GDN_MODELS, ids=lambda c: c.__name__)
+@pytest.mark.parametrize(("num_spec", "tp"), [(3, 1), (5, 2), (0, 1)])
+def test_qwen_gdn_state_carries_replay_record_like_the_layer(cls, num_spec, tp):
+    """The model-level Mamba state (which sizes the KV cache page) must add the
+    replay record exactly when QwenGatedDeltaNetAttention does."""
+    stock = _state_config(False, num_spec, tp)
+    on = _state_config(True, num_spec, tp)
+    shapes = cls.get_mamba_state_shape_from_config(on)
+    dtypes = cls.get_mamba_state_dtype_from_config(on)
+    assert shapes[:2] == cls.get_mamba_state_shape_from_config(stock)
+    assert dtypes[:2] == cls.get_mamba_state_dtype_from_config(stock)
+    if num_spec == 0:
+        assert len(shapes) == len(dtypes) == 2
+    else:
+        assert shapes[2] == (32 // tp, num_spec + 1, 128 + 128 + 1)
+        assert dtypes[2] == torch.float32

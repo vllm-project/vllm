@@ -77,6 +77,18 @@ _QWEN4EXP_RECOVERSSM_ARCHS = (
     "Qwen4ExpForConditionalGeneration",
     "Qwen4ExpMTP",
 )
+# Qwen3-Next / Qwen3.5 share the Qwen GDN layer (and its RecoverSSM path) with Qwen4Exp.
+_QWEN_GDN_RECOVERSSM_ARCHS = (
+    *_QWEN4EXP_RECOVERSSM_ARCHS,
+    "Qwen3NextForCausalLM",
+    "Qwen3NextMTP",
+    "Qwen3_5ForCausalLM",
+    "Qwen3_5MoeForCausalLM",
+    "Qwen3_5ForConditionalGeneration",
+    "Qwen3_5MoeForConditionalGeneration",
+    "Qwen3_5MTP",
+    "Qwen3_5MoeMTP",
+)
 
 DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES = frozenset(
     {
@@ -3436,7 +3448,7 @@ class VllmConfig:
         recoverssm_architectures = (
             "KimiLinearForCausalLM",
             "KimiK3ForConditionalGeneration",
-            *_QWEN4EXP_RECOVERSSM_ARCHS,
+            *_QWEN_GDN_RECOVERSSM_ARCHS,
         )
         is_recoverssm_model = (
             self.model_config is not None
@@ -3456,14 +3468,15 @@ class VllmConfig:
             )
         if (
             self.model_config is not None
-            and self.model_config.architecture in _QWEN4EXP_RECOVERSSM_ARCHS
+            and self.model_config.architecture in _QWEN_GDN_RECOVERSSM_ARCHS
             and not self.cache_config.use_recoverssm
         ):
-            # Qwen4Exp's GDN and PLE layers have no plain ReplaySSM path; with them the
-            # flag selects RecoverSSM, which needs speculative decoding.
+            # The Qwen GDN (and Qwen4Exp PLE) layers have no plain ReplaySSM path;
+            # with them the flag selects RecoverSSM, which needs speculative decoding.
             raise ValueError(
-                "--use-replayssm on Qwen4Exp selects GDN RecoverSSM and requires "
-                "speculative decoding (num_speculative_tokens > 0)"
+                f"--use-replayssm on {self.model_config.architecture} selects GDN "
+                "RecoverSSM and requires speculative decoding "
+                "(num_speculative_tokens > 0)"
             )
         if (
             self.mamba_config.backend == MambaBackendEnum.FLASHINFER

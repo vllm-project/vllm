@@ -888,6 +888,10 @@ class Qwen4ExpForConditionalGeneration(
 ):
     """Qwen3-VL vision tower backed by the Qwen4Exp language model."""
 
+    # Inherits SupportsReplaySSM from its Qwen3.5 base, but RecoverSSM is not
+    # validated on this platform: keep rejecting --use-replayssm.
+    supports_replayssm = False  # type: ignore[assignment]
+
     requires_raw_input_tokens = True
 
     packed_modules_mapping = Qwen3_5ForConditionalGeneration.packed_modules_mapping | {
