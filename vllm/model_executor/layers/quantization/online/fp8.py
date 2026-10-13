@@ -205,7 +205,6 @@ class Fp8PerTensorOnlineLinearMethod(OnlineLinearBase):
     """Online tensorwise FP8 linear quantization.
     Loads fp16/bf16 weights and quantizes them per-tensor during loading."""
 
-    # Per-tensor amax would also span cudagraph-padded rows (stale data).
     activation_quant_key = (
         kFp8DynamicTokenSym
         if cutlass_fp8_supported() or current_platform.is_xpu()
