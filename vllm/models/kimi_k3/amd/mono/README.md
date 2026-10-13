@@ -1,7 +1,7 @@
 # Kimi-K3 mono decode (MI355X)
 
-A MonoKernel as RFC #60904 proposes, opt-in with `--monokernel` (or
-`VLLM_ROCM_MONO_DECODE=1`). A pure spec-verify step of at most 8 rows runs each
+A MonoKernel as RFC #60904 proposes, opt-in with `--monokernel`
+(`VLLM_ROCM_MONO_DECODE=1` still turns it on but is deprecated). A pure spec-verify step of at most 8 rows runs each
 MoE decoder layer as persistent FlyDSL launches (256 CTAs, all resident), the
 TP all-reduces in-kernel over peer memory:
 
@@ -35,4 +35,5 @@ layers.
 Every in-kernel wait gives up after 10 s: the rank records the wait, raises its
 flag on the output rank and stops waiting. `step_health()` returns the output
 rank's flags; Model Runner V2 fails the step before its tokens are returned.
-`VLLM_MONO_FAULT_INJECT=rank:epoch:us` (tests only) stalls a rank.
+`tests/models/kimi_k3/amd_mono/test_engine_fault.py` stalls a rank in a served
+model and checks the engine stops.

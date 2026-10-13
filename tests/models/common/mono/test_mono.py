@@ -115,6 +115,19 @@ def test_configure_raises_with_every_reason(monkeypatch):
         guards.configure(fake_vllm_config(), "x:SPEC")
 
 
+@pytest.mark.parametrize("monokernel", [True, False])
+def test_the_env_switch_is_deprecated(monkeypatch, caplog_vllm, monokernel):
+    """``VLLM_ROCM_MONO_DECODE=1`` still turns a MonoKernel on, with a warning."""
+    monkeypatch.setattr(guards, "load_spec", lambda path: fake_spec())
+    monkeypatch.setattr("vllm.envs.VLLM_ROCM_MONO_DECODE", not monokernel)
+    cfg = fake_vllm_config(**{"kernel_config.monokernel": monokernel})
+    assert guards.enabled(cfg)
+    guards.configure(cfg, "x:SPEC")
+    assert ("VLLM_ROCM_MONO_DECODE=1 is deprecated" in caplog_vllm.text) == (
+        not monokernel
+    )
+
+
 def test_capture_sizes_up_to_the_widest_are_the_widths(monkeypatch):
     """Configure sets them rather than refusing; larger sizes stay."""
     monkeypatch.setattr(guards, "load_spec", lambda path: fake_spec())
@@ -246,10 +259,10 @@ def test_a_failed_step_raises():
         failstop.check(failed_words(8, [3]))
 
 
-def test_unsafe_warn_serves_on(monkeypatch):
-    monkeypatch.setattr("vllm.envs.VLLM_MONO_UNSAFE_WARN", True)
+def test_a_failed_step_is_counted_by_rank():
     failstop.INCIDENTS.clear()
-    failstop.check(failed_words(8, [2, 5]))
+    with pytest.raises(RuntimeError):
+        failstop.check(failed_words(8, [2, 5]))
     assert failstop.drain() == {"incidents:2": 1, "incidents:5": 1}
 
 
