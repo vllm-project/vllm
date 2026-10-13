@@ -118,7 +118,7 @@ token's KV cache is 352 Bytes, structured as:
     elements, stored permuted (an 8x4 -> 4x8 transpose: the scale for element
     block `s` lives at byte `8 * (s & 3) + (s >> 2)`) so that the 8 scales one
     FlashMLA dequant thread needs are contiguous. See the layout comment in
-    `csrc/libtorch_stable/cache_kernels.cu`.
+    `csrc/cache_kernels.cu`.
 
 """
 
@@ -334,14 +334,14 @@ class FlashMLASparseMetadata(SparseMLACommonMetadata):
     fp8_use_mixed_batch: bool = False
 
 
-def get_prefill_workspace_size(max_model_len: int):
-    # NOTE(Lucas): 5 is a magic number for controlling the prefill buffer size.
-    # May be tuned later.
-    # Memory usage: 5 * max_model_len * 576 * 2 bytes
-    #   Example: DeepSeek-V3.2 with max_model_len=163840 ->
+def get_prefill_workspace_size(vllm_config: VllmConfig) -> int:
+    # Memory usage: factor * max_model_len * 576 * 2 bytes
+    #   Example: DeepSeek-V3.2 with max_model_len=163840 and the default factor ->
     #            5 * 163840 * 576 * 2 = ~900 MB
     # This fits nicely below the typical MoE workspace size of >2GB so this is "free"
-    return max_model_len * 5
+    factor = vllm_config.attention_config.sparse_mla_prefill_workspace_factor
+    assert factor is not None
+    return vllm_config.model_config.max_model_len * factor
 
 
 class FlashMLASparseMetadataBuilder(
@@ -562,9 +562,7 @@ class FlashMLASparseMetadataBuilder(
 
             prefill_seq_lens_cpu = seq_lens_cpu[num_decodes:]
             # Chunk prefill requests to fit within workspace size
-            max_prefill_buffer_size = get_prefill_workspace_size(
-                self.vllm_config.model_config.max_model_len
-            )
+            max_prefill_buffer_size = get_prefill_workspace_size(self.vllm_config)
             # Workspace rows per entry, and the prefill rows each entry covers.
             workspace_rows = prefill_seq_lens_cpu
             row_bounds = np.arange(num_prefills + 1)
@@ -804,9 +802,7 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
         if kv_cache_dtype in QUANTIZED_DS_MLA_CACHE_FORMATS:
             # Reserve workspace during initialization
             assert vllm_config is not None and vllm_config.model_config is not None
-            prefill_workspace_size = get_prefill_workspace_size(
-                vllm_config.model_config.max_model_len
-            )
+            prefill_workspace_size = get_prefill_workspace_size(vllm_config)
             parallel_config = vllm_config.parallel_config
             self.pcp_dcp_kv_gather = (
                 parallel_config.prefill_context_parallel_size > 1

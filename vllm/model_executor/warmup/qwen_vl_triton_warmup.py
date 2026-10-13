@@ -72,7 +72,11 @@ def _warm_mrope(runner: "GPUModelRunner", model: torch.nn.Module) -> None:
         (module for module in model.modules() if isinstance(module, MRotaryEmbedding)),
         None,
     )
-    if rope is None:
+    if rope is None or all(
+        getattr(module, "use_fused_qk_norm_rope_gate", False)
+        for module in model.modules()
+        if any(child is rope for child in module.children())
+    ):
         return
 
     model_config = runner.model_config

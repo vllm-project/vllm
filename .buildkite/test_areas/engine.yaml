@@ -164,6 +164,7 @@ steps:
   device: h100
   num_devices: 2
   key: replayssm-e2e
+  automatic_shard: true
   timeout_in_minutes: 90
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:

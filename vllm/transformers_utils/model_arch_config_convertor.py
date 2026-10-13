@@ -17,6 +17,10 @@ from vllm.transformers_utils.config import (
     ConfigFormat,
     get_safetensors_params_metadata,
 )
+from vllm.transformers_utils.repo_utils import (
+    file_or_path_exists,
+    get_hf_file_to_dict,
+)
 from vllm.utils.torch_utils import common_broadcastable_dtype
 
 logger = init_logger(__name__)
@@ -643,6 +647,31 @@ class MimoV2ModelArchConfigConvertor(ModelArchConfigConvertorBase):
         _strip_mimo_v2_attention_chunk_size(hf_config, hf_text_config)
 
 
+class Qwen3OmniMoeModelArchConfigConvertor(ModelArchConfigConvertorBase):
+    def __init__(
+        self,
+        hf_config: PreTrainedConfig,
+        hf_text_config: PreTrainedConfig,
+        revision: str | None = None,
+    ):
+        # Clef-Omni keeps Qwen3-Omni's config and adds a joint schema head;
+        # route to its wrapper class when the head's config file is present.
+        # Mutate hf_config (like the deepseek_v4/mimo_v2 rewrites above)
+        # because model-class resolution reads hf_config.architectures.
+        if getattr(hf_config, "architectures", None) == [
+            "Qwen3OmniMoeForConditionalGeneration"
+        ]:
+            model_path = hf_config.name_or_path
+            if model_path and file_or_path_exists(
+                model_path, "joint_head_config.json", revision
+            ):
+                hf_config.architectures = ["ClefOmniForJointSchema"]
+                hf_config.joint_head_config = get_hf_file_to_dict(
+                    "joint_head_config.json", model_path, revision
+                )
+        super().__init__(hf_config, hf_text_config, revision)
+
+
 class MimoV2MTPModelArchConfigConvertor(ModelArchConfigConvertorBase):
     def __init__(
         self,
@@ -822,6 +851,7 @@ MODEL_ARCH_CONFIG_CONVERTORS = {
     "bailing_hybrid_v3_mtp": BailingHybridV3MTPModelArchConfigConvertor,
     "pangu_ultra_moe_mtp": PanguUltraMoeMTPModelArchConfigConvertor,
     "qwen3_5_mtp": Qwen3_5MTPModelArchConfigConvertor,
+    "qwen3_omni_moe": Qwen3OmniMoeModelArchConfigConvertor,
     "qwen3_next_mtp": Qwen3NextMTPModelArchConfigConvertor,
     "qwen4_exp_mtp": Qwen4ExpMTPModelArchConfigConvertor,
     "RefinedWeb": FalconModelArchConfigConvertor,
