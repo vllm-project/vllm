@@ -23,9 +23,18 @@ from vllm.model_executor.layers.fused_moe.config import (
 )
 from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
     ArmCPUUnquantizedExperts,
+    CPUEmulationExpertsMxfp4,
+    CPUExpertsMxfp4,
     CPUUnquantizedExperts,
     PowerCPUUnquantizedExperts,
     X86CPUUnquantizedExperts,
+)
+from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
+    Mxfp4MoeBackend,
+    convert_gpt_oss_weight_to_mxfp4_moe_kernel_format,
+    convert_weight_to_mxfp4_moe_kernel_format,
+    make_mxfp4_moe_quant_config,
+    select_mxfp4_moe_backend,
 )
 from vllm.model_executor.layers.fused_moe.router.cpu_router import _softmax_topk
 from vllm.platforms import CpuArchEnum, current_platform
@@ -491,6 +500,128 @@ def test_cpu_vec_fused_moe_shape_support(
         mk.FusedMoEActivationFormat.Standard,
     )
     assert supported is expected
+
+
+@pytest.mark.parametrize("amx_supported", [False, True])
+@pytest.mark.parametrize("backend", ["auto", "cpu"])
+def test_cpu_mxfp4_backend_selection(monkeypatch, amx_supported, backend):
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.fused_moe.oracle.mxfp4._user_moe_activation_override",
+        lambda: None,
+    )
+    monkeypatch.setattr(torch.cpu, "_is_amx_tile_supported", lambda: amx_supported)
+    monkeypatch.setattr(
+        current_platform, "get_cpu_architecture", lambda: CpuArchEnum.X86
+    )
+    config = _make_moe_config(4, 64, 64, 2, torch.bfloat16, MoEActivation.SWIGLUOAI)
+    config.moe_backend = backend
+    selected, experts = select_mxfp4_moe_backend(config)
+    assert selected == (
+        Mxfp4MoeBackend.CPU if amx_supported else Mxfp4MoeBackend.CPU_EMULATION
+    )
+    assert experts is (CPUExpertsMxfp4 if amx_supported else CPUEmulationExpertsMxfp4)
+
+
+@pytest.mark.parametrize("act", [MoEActivation.SILU, MoEActivation.SWIGLUOAI])
+@pytest.mark.parametrize("use_bias", [False, True])
+def test_cpu_mxfp4_emulation(default_vllm_config, act, use_bias):
+    from tests.quantization.reference_mxfp4 import dq_mxfp4_torch
+
+    set_random_seed(0)
+    experts, hidden, intermediate, topk = 4, 64, 96, 2
+    w13 = torch.randint(
+        0, 256, (experts, 2 * intermediate, hidden // 2), dtype=torch.uint8
+    )
+    w2 = torch.randint(0, 256, (experts, hidden, intermediate // 2), dtype=torch.uint8)
+    s13 = torch.randint(
+        120, 125, (experts, 2 * intermediate, hidden // 32), dtype=torch.uint8
+    )
+    s2 = torch.randint(
+        120, 125, (experts, hidden, intermediate // 32), dtype=torch.uint8
+    )
+    # Decode through the independent bit-level reference, not the fallback helper.
+    ref_w13 = dq_mxfp4_torch(w13, s13, torch.bfloat16)
+    ref_w2 = dq_mxfp4_torch(w2, s2, torch.bfloat16)
+    b13 = torch.randn(experts, 2 * intermediate) if use_bias else None
+    b2 = torch.randn(experts, hidden) if use_bias else None
+    layer = _StubMoELayer(w13, w2, act, b13, b2)
+    convert = (
+        convert_gpt_oss_weight_to_mxfp4_moe_kernel_format
+        if act == MoEActivation.SWIGLUOAI
+        else convert_weight_to_mxfp4_moe_kernel_format
+    )
+    w13, w2, s13, s2, converted_b13, converted_b2 = convert(
+        Mxfp4MoeBackend.CPU_EMULATION, layer, w13, w2, s13, s2, b13, b2
+    )
+    layer = _StubMoELayer(w13, w2, act, converted_b13, converted_b2)
+    layer.w13_weight_scale = torch.nn.Parameter(s13, requires_grad=False)
+    layer.w2_weight_scale = torch.nn.Parameter(s2, requires_grad=False)
+    config = _make_moe_config(
+        experts, hidden, intermediate, topk, torch.bfloat16, act, use_bias
+    )
+    quant_config = make_mxfp4_moe_quant_config(
+        Mxfp4MoeBackend.CPU_EMULATION,
+        s13,
+        s2,
+        w1_bias=getattr(layer, "w13_bias", None),
+        w2_bias=getattr(layer, "w2_bias", None),
+    )
+    impl = CPUEmulationExpertsMxfp4(config, quant_config)
+    impl.process_weights_after_loading(layer)
+    assert layer.w13_weight.dtype == layer.w2_weight.dtype == torch.bfloat16
+    x = torch.randn(7, hidden, dtype=torch.bfloat16)
+    router = torch.randn(7, experts)
+    weights, ids = _softmax_topk(router, topk, False)
+    expected = ref_fused_moe(
+        x,
+        ref_w13,
+        ref_w2,
+        b13.to(torch.bfloat16) if b13 is not None else None,
+        b2.to(torch.bfloat16) if b2 is not None else None,
+        weights,
+        ids,
+        act,
+    )
+    output = torch.empty_like(x)
+    impl.apply(
+        output=output,
+        hidden_states=x,
+        w1=layer.w13_weight,
+        w2=layer.w2_weight,
+        topk_weights=weights,
+        topk_ids=ids,
+        activation=act,
+        global_num_experts=experts,
+        expert_map=None,
+        a1q_scale=None,
+        a2_scale=None,
+        workspace13=torch.empty(0),
+        workspace2=torch.empty(0),
+        expert_tokens_meta=None,
+        apply_router_weight_on_input=False,
+    )
+    torch.testing.assert_close(output, expected, atol=2e-2, rtol=2e-2)
+
+
+@pytest.mark.parametrize("scale_dtype", [torch.uint8, torch.float8_e8m0fnu])
+@pytest.mark.parametrize("exponent", [0, 120, 127, 133, 255])
+def test_cpu_mxfp4_decode(scale_dtype, exponent):
+    from tests.quantization.reference_mxfp4 import dq_mxfp4_torch
+    from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
+        dequant_mxfp4_experts,
+    )
+
+    # Every pair of E2M1 values, including negative zero, with E8M0 edge cases.
+    packed = torch.arange(256).to(torch.uint8).reshape(2, 2, 64)
+    scales = torch.full((2, 2, 4), exponent, dtype=torch.uint8)
+    expected = dq_mxfp4_torch(packed, scales, torch.bfloat16)
+    actual = dequant_mxfp4_experts(packed, scales.view(scale_dtype))
+    if exponent == 255:
+        # E8M0 reserves 0xff for NaN; the reference's exponent-only
+        # conversion models infinity instead of this reserved encoding.
+        assert actual.isnan().all()
+        return
+    torch.testing.assert_close(actual, expected, atol=0, rtol=0, equal_nan=True)
 
 
 @pytest.mark.parametrize("expert_num", EXPERT_NUM)

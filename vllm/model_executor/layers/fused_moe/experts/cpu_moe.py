@@ -599,6 +599,56 @@ def prepare_mxfp4_moe_layer_for_cpu(
     return packed_w13, packed_w2, packed_w13_scale, packed_w2_scale
 
 
+class CPUEmulationExpertsMxfp4(CPUUnquantizedExperts):
+    """Load-time BF16 fallback for CPUs without a native MXFP4 kernel."""
+
+    @staticmethod
+    def _supports_quant_scheme(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        return (weight_key, activation_key) == (kMxfp4Static, None)
+
+    @staticmethod
+    def is_supported_config(
+        cls: type[mk.FusedMoEExperts],
+        moe_config: FusedMoEConfig,
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+        activation_format: mk.FusedMoEActivationFormat,
+    ) -> tuple[bool, str | None]:
+        if moe_config.in_dtype != torch.bfloat16:
+            return False, "CPU MXFP4 emulation requires bfloat16 activations"
+        return CPUUnquantizedExperts.is_supported_config(
+            cls, moe_config, weight_key, activation_key, activation_format
+        )
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
+            dequant_mxfp4_experts,
+        )
+
+        logger.warning_once(
+            "CPU MXFP4 emulation expands expert weights to BF16 at load time. "
+            "Expert weight storage is approximately 4x the packed MXFP4 storage."
+        )
+        for name in ("w13", "w2"):
+            replace_parameter(
+                layer,
+                f"{name}_weight",
+                dequant_mxfp4_experts(
+                    getattr(layer, f"{name}_weight"),
+                    getattr(layer, f"{name}_weight_scale"),
+                ),
+            )
+            bias = getattr(layer, f"{name}_bias", None)
+            if bias is not None:
+                # Keep the parameter referenced by the already-created quant
+                # config while converting to the grouped-GEMM bias dtype.
+                bias.data = bias.data.to(torch.bfloat16)
+        super().process_weights_after_loading(layer)
+
+
 class CPUExpertsMxfp4(mk.FusedMoEExpertsModular):
     """CPU MXFP4 W4A16 modular MoE experts."""
 
