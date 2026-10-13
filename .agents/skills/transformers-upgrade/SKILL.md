@@ -185,4 +185,7 @@ available, and a model eval for any model whose resolved config changed.
 Models in `vllm/models/` are high priority: whenever their config or model
 code changes, run GSM8k (`tests/evals/gsm8k/`) and GPQA Diamond
 (`tests/evals/gpt_oss/`) on `main` and the branch, even when the dumps show
-no diff, and put both scores in the PR.
+no diff, and put both scores in the PR. FlashInfer autotuning picks kernel
+tactics afresh on every server start, which moved DeepSeek-V4-Flash GSM8k by
+about 1 point; pass `--kernel-config '{"enable_flashinfer_autotune": false}'`
+to both servers so greedy outputs are comparable.
