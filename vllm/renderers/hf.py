@@ -22,14 +22,7 @@ import torch
 from typing_extensions import override
 
 from vllm import envs
-from vllm.entrypoints.chat_utils import (
-    PROMPT_EMBEDS_PLACEHOLDER_TOKEN,
-    ChatTemplateResolutionError,
-    load_chat_template,
-    parse_chat_messages,
-    parse_chat_messages_async,
-)
-from vllm.exceptions import VLLMValidationError
+from vllm.exceptions import ChatTemplateResolutionError, VLLMValidationError
 from vllm.inputs import EmbedsPrompt
 from vllm.inputs.engine import MultiModalInput
 from vllm.logger import init_logger
@@ -46,6 +39,12 @@ from vllm.multimodal.processing.processor import (
     apply_token_matches,
     find_mm_placeholders,
 )
+from vllm.renderers.chat_utils import (
+    PROMPT_EMBEDS_PLACEHOLDER_TOKEN,
+    load_chat_template,
+    parse_chat_messages,
+    parse_chat_messages_async,
+)
 from vllm.tokenizers.hf import HfTokenizer, maybe_make_thread_pool
 from vllm.transformers_utils.chat_templates import get_chat_template_fallback_path
 from vllm.transformers_utils.processor import cached_get_processor
@@ -59,17 +58,17 @@ if TYPE_CHECKING:
     from collections.abc import Set
 
     from vllm.config import ModelConfig, VllmConfig
-    from vllm.entrypoints.chat_utils import (
-        ChatCompletionMessageParam,
-        ChatTemplateContentFormat,
-        ChatTemplateContentFormatOption,
-        ConversationMessage,
-    )
     from vllm.inputs import MultiModalDataDict, MultiModalUUIDDict, TokensPrompt
     from vllm.inputs.engine import TokensInput
     from vllm.multimodal.processing.processor import (
         MultiModalPromptUpdates,
         ResolvedPromptUpdate,
+    )
+    from vllm.renderers.chat_utils import (
+        ChatCompletionMessageParam,
+        ChatTemplateContentFormat,
+        ChatTemplateContentFormatOption,
+        ConversationMessage,
     )
 
     from .inputs import DictPrompt

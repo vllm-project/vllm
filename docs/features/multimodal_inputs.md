@@ -1020,6 +1020,13 @@ vllm serve Qwen/Qwen3-VL-30B-A3B-Instruct \
 
 When you extract video frames on the client side and send them as `video/jpeg` (base64-concatenated JPEG frames), you can preserve the original video metadata by using `media_io_kwargs` in your request. This enables more accurate video understanding by preserving temporal information that would otherwise be lost during client-side frame extraction.
 
+!!! warning
+    Per-request `media_io_kwargs` (and `mm_processor_kwargs`) are rejected by
+    default because they let a client change media loading and preprocessing
+    resource usage. Start the server with `--trust-request-mm-kwargs` only when
+    your API clients are trusted; see
+    [Per-request multimodal arguments](../usage/security.md#per-request-multimodal-arguments).
+
 **Supported Parameters:**
 
 | Parameter | Type | Description |
@@ -1042,7 +1049,7 @@ When you extract video frames on the client side and send them as `video/jpeg` (
     frames_b64 = ",".join([encode_image(f) for f in frames])
     video_url = f"data:video/jpeg;base64,{frames_b64}"
 
-    # Pass video metadata via media_io_kwargs
+    # Pass video metadata via media_io_kwargs (server started with --trust-request-mm-kwargs)
     response = client.chat.completions.create(
         model="your-multimodal-model",
         messages=[{
