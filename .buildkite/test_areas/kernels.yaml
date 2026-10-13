@@ -695,7 +695,7 @@ steps:
       - amd-smi
       - pytest -v -s kernels/quantization/test_nvfp4_emulation.py -k test_nvfp4_dense_emulation --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
-- label: ":nvidia: (DGX) Spark b12x Linear Kernels Nightly"
+- label: ":nvidia: (DGX) Spark Nightly b12x Linear Kernels"
   key: b12x-linear-kernels-dgx-spark-nightly
   timeout_in_minutes: 60
   device: dgx-spark
@@ -760,7 +760,7 @@ steps:
       - tools/benchmark_helion_kernels.py
 
  
-- label: ":nvidia: (H100) FP8 MoE Kernels"
+- label: ":nvidia: (H100) Nightly MoE Kernels"
   key: kernels-fp8-moe-test-1xh100
   timeout_in_minutes: 40
   device: h100
@@ -777,7 +777,7 @@ steps:
     - pytest -v -s kernels/moe/test_triton_moe_no_act_mul.py
     - pytest -v -s kernels/moe/test_triton_moe_ptpc_fp8.py
 
-- label: ":nvidia: (H100) DeepEP FP8 MoE Kernels"
+- label: ":nvidia: (H100) Nightly DeepEP FP8 MoE Kernels"
   key: kernels-fp8-moe-test-2xh100
   timeout_in_minutes: 45
   device: h100
@@ -806,7 +806,7 @@ steps:
       commands:
       - pytest -v -s kernels/moe/test_deepep_moe.py
 
-- label: ":nvidia: (B200) FP4 MoE Kernels"
+- label: ":nvidia: (B200) Nightly FP4 MoE Kernels"
   key: kernels-fp4-moe-test-b200
   timeout_in_minutes: 25
   device: b200-k8s

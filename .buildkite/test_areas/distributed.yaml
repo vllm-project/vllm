@@ -396,7 +396,7 @@ steps:
       - pytest -v -s distributed/test_symm_mem_allreduce.py
       - pytest -v -s distributed/test_multiproc_executor.py::test_multiproc_executor_multi_node
 
-- label: ":nvidia: (H100) Distributed DP + EP"
+- label: ":nvidia: (H100) Nightly Torchrun DP+EP Example"
   key: distributed-tests-8xh100
   timeout_in_minutes: 20
   optional: true
@@ -437,7 +437,7 @@ steps:
       - vllm/v1/worker/gpu_worker.py
       - vllm/platforms/rocm.py
 
-- label: ":nvidia: (A100) Distributed"
+- label: ":nvidia: (A100) Nightly Custom AllReduce + Multi-GPU Correctness"
   key: distributed-tests-4xa100
   device: a100
   optional: true
@@ -475,7 +475,7 @@ steps:
       - pytest -v -s -x lora/test_mixtral.py
       - pytest -v -s models/test_vision.py -m 'distributed(num_gpus=4)'
 
-- label: ":nvidia: (H100) Distributed Features"
+- label: ":nvidia: (H100) Nightly CP + DBO + RL Weight Transfer"
   key: distributed-tests-2xh100-2xmi300
   timeout_in_minutes: 30
   device: h100
@@ -545,7 +545,7 @@ steps:
       - pytest -v -s tests/distributed/test_quick_all_reduce.py
       - pytest -v -s tests/distributed/test_aiter_rms_fallback.py
 
-- label: ":nvidia: (B200) Distributed"
+- label: ":nvidia: (B200) Nightly Collectives + CP + DBO"
   key: distributed-tests-2xb200
   device: b200-k8s
   optional: true
@@ -620,7 +620,7 @@ steps:
       commands:
       - pytest -v -s tests/kernels/test_rocm_gemm_rs_ar.py
 
-- label: ":nvidia: (L4) Distributed 2-Node"
+- label: ":nvidia: (L4) Nightly Distributed 2-Node"
   key: 2-node-test-4-gpus
   timeout_in_minutes: 30
   working_dir: "/vllm-workspace/tests"
