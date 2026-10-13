@@ -29,6 +29,7 @@ from typing import cast
 import pytest
 
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.reasoning.muse_glimmer_reasoning_parser import MuseGlimmerReasoningParser
 from vllm.tool_parsers.muse_glimmer_tool_parser import MuseGlimmerToolParser
 
@@ -400,3 +401,15 @@ def test_exact_match_kept():
         T, _call("get_weather"), _req("get_weather")
     )
     assert out.tool_calls[0].function.name == "get_weather"
+
+
+def test_named_custom_tool_choice_skips_structured_outputs():
+    # Custom tools ride the function shim; a named custom choice must skip
+    # the base adjust_request like a named function choice does.
+    request = ResponsesRequest(
+        input="hi",
+        tools=[{"type": "custom", "name": "emit_command"}],
+        tool_choice={"type": "custom", "name": "emit_command"},
+    )
+    T.adjust_request(request)
+    assert request.structured_outputs is None

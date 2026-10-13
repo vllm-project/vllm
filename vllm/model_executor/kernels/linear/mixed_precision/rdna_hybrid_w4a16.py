@@ -57,9 +57,21 @@ def _on_gfx1151() -> bool:
     return on_gfx1151()
 
 
+def _on_gfx115x() -> bool:
+    if not current_platform.is_rocm():
+        return False
+    from vllm.platforms.rocm import on_gfx115x
+
+    return on_gfx115x()
+
+
 # Maximum activation rows supported by HIP skinny (Python M maps to C++ N_in).
 # When K*M exceeds regular LDS capacity, the C++ medium kernel caches the
 # prefix in LDS and reads the remaining activation elements from global memory.
+# On gfx115x the K*M term is dropped entirely: deep-K shapes stage every
+# activation row in LDS one K chunk at a time, and only when N is not a
+# multiple of the kernel's row tile does the medium kernel fall back to reading
+# the rows that do not fit from global memory.
 MAX_SKINNY_BATCH_SIZE = 5
 # 64 KiB per-workgroup LDS limit expressed in fp16 elements.
 # (AMD RDNA has 128 KiB total LDS per CU, but 64 KiB per workgroup.)
@@ -86,6 +98,7 @@ def _triton_w4a16_skinny_fmt_kernel(
     K,
     K8,  # K // 8
     num_groups,  # K // group_size
+    stride_sn,  # row stride of scales_ptr and zp_ptr, in groups
     stride_bn,  # b_ptr row stride; >= K8, the rows may be padded
     stride_am,  # a_ptr row stride in elements; >= K, rows may be padded
     # Quantization parameters
@@ -146,12 +159,12 @@ def _triton_w4a16_skinny_fmt_kernel(
         b = (b >> shifts_full) & 0xF
 
         group_idx = (k_start * BLOCK_K) // group_size
-        scale_ptrs = scales_ptr + offs_n * num_groups + group_idx
+        scale_ptrs = scales_ptr + offs_n * stride_sn + group_idx
         scale_mask = offs_n < N
         scales = tl.load(scale_ptrs, mask=scale_mask, other=1.0)
 
         if HAS_ZP:
-            zp_ptrs = zp_ptr + (offs_n // 8) * num_groups + group_idx
+            zp_ptrs = zp_ptr + (offs_n // 8) * stride_sn + group_idx
             zp_word = tl.load(zp_ptrs, mask=scale_mask, other=0)
             zp_raw = (zp_word >> (4 * (offs_n % 8))) & 0xF
             b_fp = (b - zp_raw[:, None]).to(scales.dtype) * scales[:, None]
@@ -216,7 +229,8 @@ def triton_w4a16_skinny_fmt_gemm(
     """
     assert a.stride(1) == 1, "Activation rows must be contiguous"
     assert b_q.stride(1) == 1, "Weight rows must be contiguous"
-    assert scales.is_contiguous(), "Scales must be contiguous"
+    assert scales.stride(1) == 1, "Scale rows must be contiguous"
+    stride_sn = scales.stride(0)
 
     M, K = a.shape
     N = b_q.shape[0]
@@ -230,7 +244,10 @@ def triton_w4a16_skinny_fmt_gemm(
         f"scales shape mismatch: {scales.shape} vs ({N}, {num_groups})"
     )
     if zp is not None:
-        assert zp.is_contiguous(), "Zero-points must be contiguous"
+        assert zp.stride(1) == 1, "Zero-point rows must be contiguous"
+        assert zp.stride(0) == stride_sn, (
+            f"zp row stride {zp.stride(0)} must match scales {stride_sn}"
+        )
         assert N % 8 == 0, f"N must be divisible by 8 for packed zp, got {N}"
         assert zp.shape == (N // 8, num_groups), (
             f"zp shape mismatch: {zp.shape} vs ({N // 8}, {num_groups})"
@@ -337,6 +354,7 @@ def triton_w4a16_skinny_fmt_gemm(
         K,
         K8,
         num_groups,
+        stride_sn,
         stride_bn,
         stride_am,
         group_size=group_size,
@@ -466,7 +484,9 @@ def _rdna_hybrid_w4a16_apply_impl(
     K = x_2d.shape[1]
     N = w_q.shape[0]
 
-    if M <= MAX_SKINNY_BATCH_SIZE and K * M <= MEDIUM_SKINNY_LIMIT_ELEMENTS:
+    if M <= MAX_SKINNY_BATCH_SIZE and (
+        K * M <= MEDIUM_SKINNY_LIMIT_ELEMENTS or _on_gfx115x()
+    ):
         # record_function is not torch.compile-safe; use nullcontext when
         # compiling to keep the op traceable.
         ctx = (
