@@ -2161,13 +2161,17 @@ class EngineArgs:
             return [cvd_ids[i] for i in int_ids]
         return int_ids
 
-    def create_diffusion_config(self) -> DiffusionConfig | None:
+    def create_diffusion_config(
+        self, model_config: ModelConfig
+    ) -> DiffusionConfig | None:
         if self.diffusion_config is None:
             return None
         cfg = self.diffusion_config
         if isinstance(cfg, str):
             cfg = json.loads(cfg)
-        return DiffusionConfig(**cfg)
+        from vllm.model_executor.models.config import get_diffusion_config_cls
+
+        return get_diffusion_config_cls(model_config)(**cfg)
 
     def create_watermark_config(self) -> WatermarkConfig | None:
         if self.watermark_config is None:
@@ -2618,7 +2622,7 @@ class EngineArgs:
             target_model_config=model_config,
             target_parallel_config=parallel_config,
         )
-        diffusion_config = self.create_diffusion_config()
+        diffusion_config = self.create_diffusion_config(model_config)
         watermark_config = self.create_watermark_config()
 
         self._set_default_max_num_seqs_and_batched_tokens_args(

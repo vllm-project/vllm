@@ -1,7 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar, Literal
 
+from pydantic import Field
+
+from vllm.config import utils as config_utils
+from vllm.config.diffusion import DiffusionConfig
 from vllm.logger import init_logger
 from vllm.utils.math_utils import round_up
 
@@ -16,6 +20,9 @@ logger = init_logger(__name__)
 
 
 class VerifyAndUpdateConfig:
+    diffusion_config_cls: ClassVar[type[DiffusionConfig]] = DiffusionConfig
+    """Type `--diffusion-config` is parsed into for this architecture."""
+
     @staticmethod
     def verify_and_update_config(vllm_config: "VllmConfig") -> None:
         return
@@ -457,7 +464,37 @@ class DiffusionGemmaModelForBlockDiffusionConfig(VerifyAndUpdateConfig):
             )
 
 
+@config_utils.config
+class NemotronDiffusionConfig(DiffusionConfig):
+    """Nemotron Labs Diffusion options for `--diffusion-config`."""
+
+    temperature: float | None = Field(default=None, ge=0)
+    """Default sampling temperature; explicit request temperatures take
+    precedence. 0 means greedy. If unset, the model's generation defaults
+    apply."""
+
+    selection_policy: (
+        Literal["low_confidence", "leftmost", "confidence_threshold"] | None
+    ) = None
+    """Which masked positions to unmask each denoising step.
+    ``low_confidence``: the most confident predictions first (LLaDA),
+    top-k per step with k from the even transfer schedule.
+    ``leftmost``: strictly left-to-right.
+    ``confidence_threshold``: unmask every position whose chosen-token
+    probability exceeds ``confidence_threshold`` (always at least the single
+    most confident one, so each step makes progress).
+    If not set, read from the model's generation_config.json
+    (``diffusion_selection_policy``), defaulting to ``confidence_threshold``."""
+
+    confidence_threshold: float | None = Field(default=None, gt=0, lt=1)
+    """Probability threshold for ``selection_policy="confidence_threshold"``.
+    If not set, read from the model's generation_config.json
+    (``diffusion_confidence_threshold``), defaulting to 0.9."""
+
+
 class NemotronLabsDiffusionForBlockDiffusionConfig(VerifyAndUpdateConfig):
+    diffusion_config_cls = NemotronDiffusionConfig
+
     @classmethod
     def verify_and_update_config(cls, vllm_config: "VllmConfig") -> None:
         """Set up the diffusion config and defaults for the Nemotron
@@ -503,15 +540,14 @@ class NemotronLabsDiffusionForBlockDiffusionConfig(VerifyAndUpdateConfig):
         # canvas_length from the HF config.
         hf_config = vllm_config.model_config.hf_config
         if vllm_config.diffusion_config is None:
-            from vllm.config.diffusion import DiffusionConfig
-
-            vllm_config.diffusion_config = DiffusionConfig(
+            vllm_config.diffusion_config = NemotronDiffusionConfig(
                 canvas_length=getattr(hf_config, "canvas_length", 32),
             )
         elif vllm_config.diffusion_config.canvas_length is None:
             vllm_config.diffusion_config.canvas_length = getattr(
                 hf_config, "canvas_length", 32
             )
+        assert isinstance(vllm_config.diffusion_config, NemotronDiffusionConfig)
 
         # Use the ordinary generation defaults; explicit request temperatures
         # always take precedence over this compatibility setting.
@@ -1316,3 +1352,8 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "VoyageQwen3BidirectionalEmbedModel": VoyageQwen3BidirectionalEmbedModelConfig,
     "XLMRobertaModel": JinaRobertaModelConfig,
 }
+
+
+def get_diffusion_config_cls(model_config: "ModelConfig") -> type[DiffusionConfig]:
+    cls = MODELS_CONFIG_MAP.get(model_config.architecture, VerifyAndUpdateConfig)
+    return cls.diffusion_config_cls
