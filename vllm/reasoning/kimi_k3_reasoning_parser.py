@@ -215,36 +215,25 @@ class KimiK3ReasoningParser(ReasoningParser):
         return self._extract_content_ids(input_ids)
 
     def count_reasoning_tokens(self, token_ids: Sequence[int]) -> int:
-        if not self._thinking_enabled:
+        if not self._thinking_enabled or self.is_response_only(token_ids):
             return 0
         think_open = self._think_open_ids
         think_close = self._think_close_ids
-        response_open = self._response_open_ids
-        first_ids = {m[0] for m in (think_open, think_close, response_open) if m}
+        first_ids = {m[0] for m in (think_open, think_close) if m}
         n = len(token_ids)
         count = 0
         in_reasoning = True
-        seen_open = False
         i = 0
         while i < n:
             head = token_ids[i]
             if head in first_ids:
                 if i + len(think_open) <= n and _match_at(token_ids, i, think_open):
                     in_reasoning = True
-                    seen_open = True
                     i += len(think_open)
                     continue
                 if i + len(think_close) <= n and _match_at(token_ids, i, think_close):
                     in_reasoning = False
                     i += len(think_close)
-                    continue
-                if (
-                    not seen_open
-                    and i + len(response_open) <= n
-                    and _match_at(token_ids, i, response_open)
-                ):
-                    in_reasoning = False
-                    i += len(response_open)
                     continue
             if in_reasoning:
                 count += 1
