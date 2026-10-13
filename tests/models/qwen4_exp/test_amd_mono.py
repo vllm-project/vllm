@@ -14,6 +14,8 @@ formats at TP2 shapes.
   the MLP HC's mix, the sparse MoE block (softmax top-10, the MXFP4 experts
   with the intermediate padded to 128, the fused shared expert) + all-reduce +
   the MLP HC combine, and the sums of squares it hands the next front.
+- Graph replay (two GPUs): a GDN and a QSA layer at mixed widths in one HIP
+  graph, replayed bit-identically.
 """
 
 import pytest
@@ -24,6 +26,8 @@ import torch.nn.functional as F
 
 from tests.models.qwen3_5.test_amd_mono import (
     COS_MIN,
+    REPLAY_WIDTHS,
+    REPLAYS,
     STOCK_COS_MIN,
     _all_reduce_fp32,
     _check_route,
@@ -470,3 +474,199 @@ K2_MODES: tuple[dict[str, bool], ...] = ({"oq": True}, {"og": True})
 @multi_gpu_test(num_gpus=2)
 def test_k2_tp2_matches_vllm_ops(monkeypatch: pytest.MonkeyPatch) -> None:
     multi_process_parallel(monkeypatch, 2, 1, _k2_worker)
+
+
+# ---------------------------------------------------------------- replay
+@ray.remote(num_gpus=1, max_calls=1)
+def _replay_worker(
+    monkeypatch: pytest.MonkeyPatch,
+    tp_size: int,
+    pp_size: int,
+    rank: int,
+    distributed_init_port: str,
+) -> None:
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    device = torch.device(f"cuda:{rank}")
+    torch.accelerator.set_device_index(device)
+    init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
+
+    from vllm.distributed import get_tp_group
+    from vllm.models.kimi_k3.amd.mono.common.peer_memory import PeerBuffer
+    from vllm.models.qwen4_exp.amd.mono import hc, k1, k2
+    from vllm.models.qwen4_exp.amd.mono.layout import (
+        HC,
+        HH,
+        HIDDEN,
+        MAX_TOKENS,
+        Layout,
+    )
+
+    lay = Layout(TP)
+    tp = get_tp_group()
+    peers = PeerBuffer(
+        k2.peer_bytes(MAX_TOKENS, TP), tp.cpu_group, rank, tp_size, device
+    )
+    peers.bytes.zero_()
+    epoch = torch.zeros(1, dtype=torch.int32, device=device)
+    mw = _moe_weights(rank, device)
+    mw.pop("raw")
+    w = _gdn_inputs(MAX_TOKENS, MAX_TOKENS)
+    gc = torch.Generator(device=device).manual_seed(13)  # replicated weights
+    qsa_hw = _hc_weights(gc)
+    mlp_hw = [_hc_weights(gc) for _ in range(2)]
+    gr = torch.Generator(device=device).manual_seed(300 + rank)  # TP shards
+    _, _, w_o, w_os = _mxfp4_linear(gr, HIDDEN, lay.CORE)
+    o_qsa = _randn(gr, HIDDEN, lay.CORE, scale=0.02)
+    # the QSA layer's attention output and gate: vLLM's, fixed here
+    core_q = _randn(gr, MAX_TOKENS, lay.CORE)
+    gate_q = _randn(gr, MAX_TOKENS, lay.CORE, scale=2.0)
+    conv0, rstate0 = w["conv_state"].clone(), w["rstate"].clone()
+    conv, rstate = conv0.clone(), rstate0.clone()
+    widths = set(REPLAY_WIDTHS)
+    k1_scr = {
+        s: torch.zeros(
+            max(
+                k1.scratch_bytes(k1.K1Build(tokens=s, tp=TP, self_msq=m, front_only=f))
+                for m in (False, True)
+                for f in (False, True)
+            ),
+            dtype=torch.uint8,
+            device=device,
+        )
+        for s in widths
+    }
+    k2_scr = {
+        s: torch.zeros(
+            k2.scratch_bytes(k2.K2Build(tokens=s, tp=TP)),
+            dtype=torch.uint8,
+            device=device,
+        )
+        for s in widths
+    }
+    outs = [torch.empty(s, HH, dtype=bf, device=device) for s in REPLAY_WIDTHS]
+    msqs = [torch.empty(hc.NRED, s, HC, device=device) for s in REPLAY_WIDTHS]
+    xs = [torch.empty(s, HIDDEN, dtype=bf, device=device) for s in REPLAY_WIDTHS]
+    # the last row of odd widths is a cudagraph pad row
+    idxs = {}
+    for s in widths:
+        idxs[s] = w["st_idx"][:s].clone()
+        if s % 2:
+            idxs[s][-1] = 0
+
+    def post(key, state, inj, core, out, msq, li, **kw):
+        k2.layer_post(
+            key,
+            core=core,
+            state=state,
+            inj_a=inj,
+            **mlp_hw[li],
+            out=out,
+            msq_out=msq,
+            scratch=k2_scr[key.tokens],
+            peers=peers.addresses,
+            rank=rank,
+            epoch=epoch,
+            layer=k2.TAG_SLOTS // 2 + li,
+            **mw,
+            **kw,
+        )
+
+    def steps() -> None:
+        conv.copy_(conv0)
+        rstate.copy_(rstate0)
+        for i, s in enumerate(REPLAY_WIDTHS):
+            epoch.add_(1)
+            state = w["state"][:s].contiguous()
+            # a GDN layer from the step's state, then a QSA layer's front and K2
+            inj = torch.empty(s, HC, dtype=bf, device=device)
+            core = torch.empty(s, lay.CORE, dtype=bf, device=device)
+            k1.gdn_pre(
+                k1.K1Build(tokens=s, tp=TP, self_msq=True),
+                state=state,
+                msq_in=None,
+                hc_w=w["hc_w"],
+                w_down=w["w_down"],
+                w_up=w["w_up"],
+                inj_out=inj,
+                w_qkvz=w["w_qkvz"],
+                w_qkvzs=w["w_qkvzs"],
+                w_ba=w["w_ba"],
+                conv_w=w["conv_w"],
+                conv_state=conv,
+                a_log=w["a_log"],
+                dt_bias=w["dt_bias"],
+                norm_w=w["norm_w"],
+                rstate=rstate,
+                st_idx=idxs[s],
+                core=core,
+                scratch=k1_scr[s],
+                epoch=epoch,
+                layer=0,
+            )
+            state1 = torch.empty(s, HH, dtype=bf, device=device)
+            msq = torch.empty(hc.NRED, s, HC, device=device)
+            key = k2.K2Build(tokens=s, tp=TP, oq=True)
+            post(key, state, inj, core, state1, msq, 0, w_o=w_o, w_os=w_os)
+            inj = torch.empty(s, HC, dtype=bf, device=device)
+            k1.hc_front(
+                k1.K1Build(tokens=s, tp=TP, front_only=True),
+                state=state1,
+                msq_in=msq,
+                **qsa_hw,
+                inj_out=inj,
+                bin_out=xs[i],
+                scratch=k1_scr[s],
+                epoch=epoch,
+                layer=1,
+            )
+            key = k2.K2Build(tokens=s, tp=TP, og=True)
+            post(
+                key,
+                state1,
+                inj,
+                core_q[:s],
+                outs[i],
+                msqs[i],
+                1,
+                w_o=o_qsa,
+                gate=gate_q[:s],
+            )
+
+    def snapshot() -> list[torch.Tensor]:
+        return [t.clone() for t in (*outs, *msqs, *xs, conv, rstate)]
+
+    steps()  # eager: builds every width before the capture
+    torch.accelerator.synchronize()
+    eager = snapshot()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        steps()
+    graph.replay()
+    torch.accelerator.synchronize()
+    first = snapshot()
+    assert all(torch.equal(a, b) for a, b in zip(eager, first)), "graph != eager"
+    for n in range(REPLAYS - 1):
+        graph.replay()
+        torch.accelerator.synchronize()
+        bad = [
+            i
+            for i, (a, b) in enumerate(zip(snapshot(), first))
+            if not torch.equal(a, b)
+        ]
+        assert not bad, f"replay {n + 2}: tensors {bad} differ"
+    for o in outs:
+        gathered = [torch.empty_like(o) for _ in range(tp_size)]
+        dist.all_gather(gathered, o)
+        assert all(torch.equal(gathered[0], g) for g in gathered), "ranks disagree"
+    peers.close()
+
+
+@multi_gpu_test(num_gpus=2)
+def test_mixed_width_graph_replay(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A GDN layer (K1, K2 with the MXFP4 out_proj) and a QSA layer (the HC
+    front, K2 with the gated o_proj) at six consecutive decode steps of widths
+    1-8 (pad rows included), captured in one HIP graph as a FULL decode graph
+    holds them and replayed 300 times: bit-identical to the eager run every
+    time, on both ranks. Steps of different widths share the peer buffer and
+    the epoch; a scratch race between widths shows up as a mismatch."""
+    multi_process_parallel(monkeypatch, 2, 1, _replay_worker)
