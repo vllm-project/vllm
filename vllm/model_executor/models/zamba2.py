@@ -86,16 +86,21 @@ class Zamba2LoRA(nn.Module):
         )
 
         if isinstance(output_dim, list):
-            B_class = MergedColumnParallelLinear
+            self.B: ColumnParallelLinear = MergedColumnParallelLinear(
+                rank,
+                output_dim,
+                bias=False,
+                quant_config=quant_config,
+                prefix=f"{prefix}.B",
+            )
         else:
-            B_class = ColumnParallelLinear
-        self.B = B_class(
-            rank,
-            output_dim,
-            bias=False,
-            quant_config=quant_config,
-            prefix=f"{prefix}.B",
-        )
+            self.B = ColumnParallelLinear(
+                rank,
+                output_dim,
+                bias=False,
+                quant_config=quant_config,
+                prefix=f"{prefix}.B",
+            )
 
     def forward(
         self,
@@ -304,7 +309,7 @@ class Zamba2MLP(nn.Module):
         self,
         config: Zamba2Config,
         bare_block_idx: int,
-        num_hybrid_layers: dict[int, int],
+        num_hybrid_layers: int,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
@@ -891,6 +896,7 @@ class Zamba2ForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsMambaPrefixC
             head_dim=hf_config.mamba_headdim,
             state_size=hf_config.mamba_d_state,
             conv_kernel=hf_config.mamba_d_conv,
+            num_spec=vllm_config.num_speculative_tokens,
         )
 
     @classmethod

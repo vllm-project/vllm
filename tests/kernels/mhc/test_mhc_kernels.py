@@ -27,6 +27,7 @@ from vllm.model_executor.layers.mhc import (
     HAS_AITER_MHC,
     HAS_AITER_MHC_FUSED,
     HAS_AITER_MHC_FUSED_NORM,
+    HAS_AITER_MHC_FUSED_POST_PRE_DELAYED_RMS_NORM,
     HAS_AITER_MHC_PRE_NORM,
     HAS_TILELANG_MHC,
     MHCFusedPostPreOp,
@@ -166,7 +167,7 @@ def test_v41_dspark_head_collapses_with_last_ffn_mix(num_tokens, monkeypatch):
 
     monkeypatch.setattr(dspark, "mhc_post_tilelang", lambda *args: streams)
     draft = SimpleNamespace(
-        use_mega_moe=False,
+        use_native_mega_moe=False,
         use_sequence_parallel=False,
         hc_mult=hc_mult,
         layers=[make_layer(mix) for mix in mixes],
@@ -438,13 +439,16 @@ def test_deepseek_v41_mhc_fused_post_pre_delayed(num_tokens, hidden_size, carrie
         return
 
     # The post mapping and the collapse are what the unfused kernels produce.
+    # The two kernels may round a near-midpoint residual differently (FMA
+    # contraction is up to the compiler), so allow one bf16 ulp there and
+    # check the collapse against the fused kernel's own residual.
     residual_ref = torch.ops.vllm.mhc_post_tilelang(
         x, residual, post_layer_mix, comb_res_mix
     )
     layer_input_ref = mhc_pre_delayed_tilelang(
-        residual_ref, *mix_args, pre_mix=pre_mix, norm_weight=weight, norm_eps=1e-6
+        residual_cur, *mix_args, pre_mix=pre_mix, norm_weight=weight, norm_eps=1e-6
     )[2]
-    torch.testing.assert_close(residual_cur, residual_ref, atol=0, rtol=0)
+    torch.testing.assert_close(residual_cur, residual_ref, atol=0, rtol=2**-7)
     torch.testing.assert_close(layer_input, layer_input_ref, atol=0, rtol=0)
 
     post_ref, comb_ref, _, next_pre_ref = mhc_fused_post_pre_delayed_ref(
@@ -1301,17 +1305,108 @@ def test_mhc_pre_delayed_rocm_aiter(num_tokens, carried):
 
 
 @pytest.mark.skipif(
+    not (current_platform.is_rocm() and HAS_AITER_MHC_FUSED_POST_PRE_DELAYED_RMS_NORM),
+    reason="AITER fused delayed-seam kernel required (gfx950)",
+)
+@pytest.mark.parametrize("num_tokens", [1, 2, 7, 128, 1024])
+@pytest.mark.parametrize("seam", ["post", "no_post", "identity_pre"])
+def test_mhc_pre_delayed_rocm_aiter_fused_rms_norm(num_tokens, seam):
+    """One fused kernel must match the whole reference seam: the post block
+    (the previous seam's post/comb gates fold ``sublayer_out`` into the
+    streams), the delayed pre block (projection + Sinkhorn producing the next
+    seam's post/comb/pre gates, plus the collapse with the carried pre-mix),
+    and the RMSNorm folded onto the collapse.
+
+    ``num_tokens`` spans the kernel's split-K config buckets. ``seam`` covers
+    the three call shapes the model makes: a regular seam (post folded in), an
+    Engram seam (post already applied), and the draft entry seam
+    (``pre_mix=None`` = identity pre-mix).
+    """
+    set_random_seed(0)
+    hc_mult, hidden_size = 4, 5120
+    residual, fn, hc_scale, hc_base, norm_weight = _rocm_mhc_inputs(
+        num_tokens=num_tokens, hidden_size=hidden_size, hc_mult=hc_mult
+    )
+    rms_eps = hc_pre_eps = hc_sinkhorn_eps = norm_eps = 1e-6
+    args = (
+        residual,
+        fn,
+        hc_scale,
+        hc_base,
+        rms_eps,
+        hc_pre_eps,
+        hc_sinkhorn_eps,
+        1.0,
+        20,
+    )
+
+    pre_mix = (
+        None
+        if seam == "identity_pre"
+        else torch.rand(num_tokens, hc_mult, dtype=torch.float32, device=DEVICE) + 0.5
+    )
+    post_kwargs = {}
+    residual_ref = residual
+    if seam == "post":
+        sublayer_out = torch.randn(
+            num_tokens, hidden_size, dtype=torch.bfloat16, device=DEVICE
+        )
+        post_layer_mix = 2 * torch.rand(
+            num_tokens, hc_mult, 1, dtype=torch.float32, device=DEVICE
+        )
+        comb_res_mix = torch.softmax(
+            torch.randn(num_tokens, hc_mult, hc_mult, device=DEVICE), dim=-1
+        )
+        post_kwargs = dict(
+            sublayer_out=sublayer_out,
+            post_layer_mix=post_layer_mix,
+            comb_res_mix=comb_res_mix,
+        )
+        residual_ref = mhc_post_torch(
+            sublayer_out, residual, post_layer_mix, comb_res_mix
+        )
+
+    expected = mhc_pre_delayed_torch(residual_ref, *args[1:], pre_mix=pre_mix)
+    expected_layer_input = F.rms_norm(
+        expected[2], (hidden_size,), norm_weight, norm_eps
+    )
+
+    residual_out, *actual = object.__new__(MHCPreDelayedOp).forward_hip(
+        *args,
+        pre_mix=pre_mix,
+        norm_weight=norm_weight,
+        norm_eps=norm_eps,
+        **post_kwargs,
+    )
+
+    if seam == "post":
+        torch.testing.assert_close(residual_out, residual_ref)
+    else:
+        # No post was requested, so the residual comes straight back.
+        assert residual_out is residual
+    # Gates: post_mix, comb_mix, next_pre_mix (bf16 MFMA vs the fp32 reference).
+    for i in (0, 1, 3):
+        torch.testing.assert_close(actual[i], expected[i], atol=5e-4, rtol=1e-3)
+    # The collapse is bf16 and the kernel projects the once-rounded R', so
+    # near-zero values need an absolute tolerance (same bound as aiter's UT).
+    torch.testing.assert_close(actual[2], expected_layer_input, atol=2e-2, rtol=1e-2)
+
+
+@pytest.mark.skipif(
     not (current_platform.is_rocm() and HAS_AITER_MHC),
     reason="AITER mHC required",
 )
 def test_mhc_pre_delayed_rocm_aiter_declines_unsupported(monkeypatch):
-    """The broadcast seam and a fused norm must not take the AITER path.
+    """The broadcast seam must not take the AITER path; a fused norm must not
+    take the unfused AITER op.
 
-    Neither is expressible with AITER's pre kernels: the broadcast projects a
-    narrower ``x``, and ``mhc_pre_gemm_sqrsum`` folds no RMSNorm. What is
-    asserted here is the routing decision, which is what this gate owns; the
-    numerics of whichever fallback it lands on are covered by
-    ``test_deepseek_v41_mhc_pre_delayed``.
+    The broadcast projects a narrower ``x``, which no AITER pre kernel takes;
+    ``mhc_pre_gemm_sqrsum`` folds no RMSNorm, so a fused norm routes to the
+    fused seam kernel where it exists (gfx950) and away from AITER otherwise.
+    What is asserted here is the routing decision, which is what this gate
+    owns; the numerics of the paths are covered by
+    ``test_deepseek_v41_mhc_pre_delayed`` and
+    ``test_mhc_pre_delayed_rocm_aiter_fused_rms_norm``.
     """
     set_random_seed(0)
     hc_mult, hidden_size = 4, 5120
@@ -1331,6 +1426,18 @@ def test_mhc_pre_delayed_rocm_aiter_declines_unsupported(monkeypatch):
 
     monkeypatch.setattr(torch.ops.vllm, "mhc_pre_delayed_aiter", spy)
 
+    fused_op = torch.ops.vllm.mhc_fused_post_pre_delayed_rms_norm_aiter
+    took_fused = False
+
+    def fused_spy(*spy_args, **spy_kwargs):
+        nonlocal took_fused
+        took_fused = True
+        return fused_op(*spy_args, **spy_kwargs)
+
+    monkeypatch.setattr(
+        torch.ops.vllm, "mhc_fused_post_pre_delayed_rms_norm_aiter", fused_spy
+    )
+
     x = residual[:, 0].contiguous()
     broadcast_fn = fn.view(-1, hc_mult, hidden_size).sum(1)
     broadcast_residual = x.unsqueeze(1).expand(-1, hc_mult, -1).contiguous()
@@ -1342,11 +1449,15 @@ def test_mhc_pre_delayed_rocm_aiter_declines_unsupported(monkeypatch):
     )
     assert residual_out is broadcast_residual
     assert not took_aiter, "the broadcast seam must not reach AITER"
+    assert not took_fused, "the broadcast seam must not reach AITER"
     for i in range(4):
         torch.testing.assert_close(actual[i], expected[i], atol=1e-4, rtol=1e-3)
 
+    # A fused norm must not reach the unfused AITER op; where the fused seam
+    # kernel exists (gfx950) it routes there instead.
     op.forward_hip(*args, norm_weight=norm_weight, norm_eps=1e-6)
-    assert not took_aiter, "a fused norm must not reach AITER"
+    assert not took_aiter, "a fused norm must not reach the unfused AITER op"
+    assert took_fused == mhc_layers.HAS_AITER_MHC_FUSED_POST_PRE_DELAYED_RMS_NORM
 
     # Positive control: the same inputs without a norm do take the AITER path,
     # so the two declines above are the gate discriminating rather than the
