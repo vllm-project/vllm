@@ -1721,8 +1721,6 @@ def test_dflash_draft_sampler_watermarks_drafts_in_step_order(monkeypatch):
         num_steps=num_steps,
     )
 
-    # Row 0 is watermarked in step order: [1, 2] -> 3, then [2, 3] -> 4. The
-    # greedy and opted-out rows keep their ordinary samples, seed + position.
     assert torch.equal(sampled, torch.tensor([3, 4, 102, 103, 204, 205]))
     assert torch.equal(draft_logits[batch_slots], logits.view(num_reqs, num_steps, -1))
 
@@ -1733,16 +1731,17 @@ def test_dflash_draft_sampler_watermarks_drafts_in_step_order(monkeypatch):
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize("deduplicate_contexts", ["none", "single_turn", "all"])
 def test_dflash_draft_sampler_matches_step_loop_on_cuda(deduplicate_contexts, dtype):
-    """The fused CUDA `sample_block` is bit-exact with sampling step by step."""
+    """The fused CUDA `sample_block` is bit-exact with sampling step by step.
+
+    Covers repeated contexts, a NaN logit, and greedy, opted-out and padding
+    rows; padding rows are discarded, so only valid rows are compared.
+    """
     num_reqs, num_steps, vocab_size, max_num_reqs = 4, 5, 1500, 6
     generator = torch.Generator().manual_seed(0)
-    # Tokens 0-2 dominate, so contexts repeat and deduplication fires.
     logits = torch.randn(num_reqs, num_steps, vocab_size, generator=generator) * 3
     logits[..., :3] += 6
     logits[0, 1, 5] = float("nan")
     logits = logits.to(dtype).cuda()
-    # Row 3 is a padding row, whose drafts are discarded, so only rows 0-2 are
-    # compared. Slot 2 is greedy and row 1 is opted out.
     idx_mapping = torch.tensor([4, 2, 0, -1], dtype=torch.int32)
     valid = (idx_mapping >= 0).cuda()
     idx_mapping = idx_mapping.repeat_interleave(num_steps).cuda()
