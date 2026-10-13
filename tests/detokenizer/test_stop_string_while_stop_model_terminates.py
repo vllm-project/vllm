@@ -8,6 +8,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest, FinishReason
 from vllm.v1.engine.detokenizer import BaseIncrementalDetokenizer
 from vllm.v1.engine.output_processor import OutputProcessor
+from vllm.v1.metrics.stats import IterationStats
 from vllm.v1.outputs import LogprobsLists, SamplingMaskLists
 
 
@@ -202,3 +203,28 @@ def test_stop_string_trims_speculative_overflow(
     assert result.sampling_mask.token_ids == [[token] for token in expected_token_ids]
     assert result.routed_experts is not None
     assert result.routed_experts.ravel().tolist() == expected_token_ids
+
+
+def test_stop_string_trim_updates_generation_token_stats(
+    include_stop_str_in_output: bool,
+):
+    """Tokens dropped past a stop string are not counted as generated."""
+    token_ids = [ord(c) for c in "abcdef"]
+    req = _make_request(
+        stop=["cd"], include_stop_str_in_output=include_stop_str_in_output
+    )
+    req.external_req_id = req.request_id
+    processor = OutputProcessor(tokenizer=None, log_stats=True)
+    processor.add_request(req, prompt=None)
+    processor.request_states[req.request_id].detokenizer = _DummyDetokenizer(req)
+
+    iteration_stats = IterationStats()
+    outputs = processor.process_outputs(
+        [EngineCoreOutput(request_id=req.request_id, new_token_ids=token_ids)],
+        engine_core_timestamp=0.0,
+        iteration_stats=iteration_stats,
+    )
+
+    assert outputs.request_outputs[0].outputs[0].token_ids == token_ids[:4]
+    assert iteration_stats.num_generation_tokens == 4
+    assert iteration_stats.finished_requests[0].num_generation_tokens == 4
