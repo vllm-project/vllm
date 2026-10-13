@@ -853,10 +853,16 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
         # req_id_per_token covers the whole batch; slice it to the MQA tokens
         # (q may exclude prefill tokens routed to dense MHA).
         req_id_per_token = attn_metadata.req_id_per_token[: topk_indices.shape[0]]
-        decode_out: torch.Tensor | None = None
         if cache is not None:
             assert isinstance(index_group, HiSparseMLAIndexGroup)
+            assert q.shape[1] % self.prefill_padding == 0, (
+                "HiSparse expects the head-padded concatenated query"
+            )
             num_decode_tokens = attn_metadata.num_decode_tokens
+            # Each lane writes its rows of one output instead of concatenating.
+            output = None
+            if num_decode_tokens < q.shape[0]:
+                output = q.new_empty((q.shape[0], q.shape[1], self.kv_lora_rank))
             if num_decode_tokens > 0:
                 decode_topk, decode_lengths = (
                     index_group.convert_logical_to_physical_topk(
@@ -873,15 +879,16 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
                     decode_topk,
                     decode_lengths,
                     actual_num_heads,
+                    out=None if output is None else output[:num_decode_tokens],
                 )
-                if num_decode_tokens == q.shape[0]:
+                if output is None:
                     return decode_out, None
+            assert output is not None
             # q is a view of this impl's workspace, so take staging alongside it.
             *_, staging = current_workspace_manager().get_simultaneous(
                 *self.workspace_specs,
                 index_group.prefill_staging_spec(self.index_group_index),
             )
-            outputs = [] if decode_out is None else [decode_out]
             lses: list[torch.Tensor] = []
             for (
                 tokens,
@@ -896,13 +903,17 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
                 staging=staging,
                 flat_rows=True,
             ):
-                plan_out, plan_lse = self._bf16_flash_mla_kernel(
-                    q[tokens], staged_rows, plan_topk, plan_lengths, actual_num_heads
+                _, plan_lse = self._bf16_flash_mla_kernel(
+                    q[tokens],
+                    staged_rows,
+                    plan_topk,
+                    plan_lengths,
+                    actual_num_heads,
+                    out=output[tokens],
                 )
-                outputs.append(plan_out)
                 lses.append(plan_lse)
-            output = torch.cat(outputs) if len(outputs) > 1 else outputs[0]
-            if decode_out is not None:
+            output = output[:, :actual_num_heads]
+            if num_decode_tokens > 0:
                 return output, None
             return output, torch.cat(lses) if len(lses) > 1 else lses[0]
         # Convert per-request indices to global slots (decode) or workspace offsets.
