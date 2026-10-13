@@ -37,11 +37,17 @@ from vllm.utils.torch_utils import (
     is_quantized_kv_cache,
     np_to_pinned_tensor,
 )
-from vllm.v1.attention.backend import AttentionMetadataBuilder
+from vllm.v1.attention.backend import AttentionLayer, AttentionMetadataBuilder
 from vllm.v1.attention.backends.fa_utils import get_flash_attn_version
 from vllm.v1.attention.backends.mla.index_group import (
+    HiSparseMLAIndexGroup,
     SparseMLAIndexGroup,
     SparseMLAIndexGroupBuilder,
+)
+from vllm.v1.attention.backends.mla.sparse_utils import (
+    flat_kv_row_view,
+    triton_convert_req_index_to_global_index,
+    triton_filter_and_convert_dcp_index,
 )
 from vllm.v1.attention.backends.utils import (
     split_decodes_and_prefills,
@@ -673,6 +679,9 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], SharedTopkIndicesBuffer, Generic
     """Sparse MLA base with dense and masked-MHA prefill paths."""
 
     is_sparse = True
+    # Reuse the index group's top-k conversion only for uniform decode batches
+    # of multi-layer groups; other batches convert per layer.
+    group_conversion_decode_only: ClassVar[bool] = False
 
     def __init__(
         self,
@@ -770,6 +779,158 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], SharedTopkIndicesBuffer, Generic
             block_stride_rows=block_stride_rows,
             return_valid_counts=return_valid_counts,
         )
+
+    def forward_mqa(
+        self,
+        q: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+        kv_c_and_k_pe_cache: torch.Tensor,
+        attn_metadata: T,
+        layer: AttentionLayer,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        assert self.topk_indices_buffer is not None
+        num_tokens = q[0].shape[0] if isinstance(q, tuple) else q.shape[0]
+        topk = self.topk_indices_buffer[:num_tokens]
+        num_decode_tokens = attn_metadata.num_decode_tokens
+        block_size = attn_metadata.block_size
+        index_group = self.index_group
+        if not isinstance(index_group, HiSparseMLAIndexGroup):
+            _, block_stride_rows = flat_kv_row_view(kv_c_and_k_pe_cache, block_size)
+            if self.dcp_world_size > 1:
+                physical_topk, valid_counts = triton_filter_and_convert_dcp_index(
+                    attn_metadata.req_id_per_token[:num_tokens],
+                    attn_metadata.block_table,
+                    topk,
+                    dcp_size=self.dcp_world_size,
+                    dcp_rank=self.dcp_rank,
+                    cp_kv_cache_interleave_size=attn_metadata.cp_kv_cache_interleave_size,
+                    BLOCK_SIZE=block_size,
+                    BLOCK_STRIDE_ROWS=block_stride_rows,
+                    NUM_TOPK_TOKENS=topk.shape[1],
+                    return_valid_counts=True,
+                )
+            elif self.group_conversion_decode_only and not (
+                index_group is not None
+                and index_group.num_layers > 1
+                and num_decode_tokens >= num_tokens
+            ):
+                physical_topk, valid_counts = triton_convert_req_index_to_global_index(
+                    attn_metadata.req_id_per_token[:num_tokens],
+                    attn_metadata.block_table,
+                    topk,
+                    BLOCK_SIZE=block_size,
+                    BLOCK_STRIDE_ROWS=block_stride_rows,
+                    NUM_TOPK_TOKENS=topk.shape[1],
+                    return_valid_counts=True,
+                )
+            else:
+                physical_topk, valid_counts = self._convert_logical_to_physical_topk(
+                    topk,
+                    attn_metadata,
+                    block_stride_rows=block_stride_rows,
+                    return_valid_counts=True,
+                )
+            return self._forward_mqa_kernel(
+                q,
+                kv_c_and_k_pe_cache,
+                physical_topk,
+                valid_counts,
+                layer=layer,
+                block_size=block_size,
+                is_decode=num_decode_tokens >= num_tokens,
+            )
+
+        assert self.dcp_world_size == 1
+        layer_index = self.index_group_index
+        hot_cache = index_group.physical_kv_cache(layer_index).view(
+            kv_c_and_k_pe_cache.dtype
+        )
+        assert hot_cache.is_contiguous(), "HiSparse hot buffer must be contiguous"
+        cache = index_group.cache(layer_index)
+        if num_decode_tokens == 0 and cache.all_context_pages_resident:
+            physical_topk, valid_counts = index_group.convert_logical_to_physical_topk(
+                layer_index,
+                topk,
+                attn_metadata,
+                block_stride_rows=None,
+                return_valid_counts=True,
+            )
+            return self._forward_mqa_kernel(
+                q,
+                hot_cache,
+                physical_topk,
+                valid_counts,
+                layer=layer,
+                block_size=block_size,
+                is_decode=False,
+            )
+
+        def q_slice(tokens: slice) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+            return (q[0][tokens], q[1][tokens]) if isinstance(q, tuple) else q[tokens]
+
+        # Each lane writes its rows of one output instead of concatenating.
+        output = self._new_mqa_output(q) if num_decode_tokens < num_tokens else None
+        if num_decode_tokens:
+            physical_topk, valid_counts = index_group.convert_logical_to_physical_topk(
+                layer_index,
+                topk[:num_decode_tokens],
+                attn_metadata,
+                block_stride_rows=None,
+                return_valid_counts=True,
+            )
+            decode_out, decode_lse = self._forward_mqa_kernel(
+                q_slice(slice(num_decode_tokens)),
+                hot_cache,
+                physical_topk,
+                valid_counts,
+                layer=layer,
+                block_size=block_size,
+                is_decode=True,
+                out=None if output is None else output[:num_decode_tokens],
+            )
+            if output is None:
+                return decode_out, decode_lse
+
+        assert output is not None
+        for (
+            tokens,
+            staged_cache,
+            physical_topk,
+            valid_counts,
+        ) in index_group.staged_prefills(
+            layer_index, kv_c_and_k_pe_cache, attn_metadata, topk
+        ):
+            self._forward_mqa_kernel(
+                q_slice(tokens),
+                staged_cache,
+                physical_topk,
+                valid_counts,
+                layer=layer,
+                block_size=block_size,
+                is_decode=False,
+                out=output[tokens],
+            )
+        # HiSparse runs without DCP, so no lane returns an LSE.
+        return output, None
+
+    def _new_mqa_output(
+        self, q: torch.Tensor | tuple[torch.Tensor, torch.Tensor]
+    ) -> torch.Tensor:
+        q = q[0] if isinstance(q, tuple) else q
+        return q.new_empty((q.shape[0], self.num_heads, self.kv_lora_rank))
+
+    def _forward_mqa_kernel(
+        self,
+        q: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+        kv_cache: torch.Tensor,
+        topk_indices: torch.Tensor,
+        valid_counts: torch.Tensor,
+        *,
+        layer: AttentionLayer,
+        block_size: int,
+        is_decode: bool,
+        out: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        raise NotImplementedError
 
     @staticmethod
     def masked_mha_workspace_fits(prefill: MLACommonPrefillMetadata) -> bool:
