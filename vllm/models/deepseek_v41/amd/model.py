@@ -14,6 +14,7 @@ from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
+    tensor_model_parallel_all_reduce,
 )
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
@@ -22,7 +23,11 @@ from vllm.model_executor.layers.fused_moe import (
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.mhc import MHCPostOp, MHCPreDelayedOp
+from vllm.model_executor.layers.mhc import (
+    HAS_AITER_MHC_FUSED_POST_PRE_DELAYED_RMS_NORM,
+    MHCPostOp,
+    MHCPreDelayedOp,
+)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
@@ -54,6 +59,7 @@ from vllm.models.common.ops.sequence_parallel import (
 from vllm.models.deepseek_v4.amd.model import (
     DeepseekV4MoE as DeepseekV4MoEBase,
 )
+from vllm.models.deepseek_v41.amd.mono_decode import MonoDecodeLayer
 from vllm.models.deepseek_v41.amd.rocm import DeepseekV41ROCMAiterMLAAttention
 from vllm.models.deepseek_v41.attention import DeepseekV4Attention
 from vllm.sequence import IntermediateTensors
@@ -61,12 +67,8 @@ from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
-from ..common.engram import EngramLayout, NgramHashState
+from ..common.engram import Engram, EngramLayout, NgramHashState
 from ..common.mm_preprocess import IMAGE_SENTINEL_BASE_ID, image_sentinel_mask
-
-# Engram host offload and its prefetch stream are neither ROCm- nor
-# NVIDIA-specific, so they are imported rather than duplicated.
-from ..nvidia.engram import Engram
 
 if typing.TYPE_CHECKING:
     from vllm.v1.attention.backends.mla.sparse_swa import DeepseekSparseSWAMetadata
@@ -251,6 +253,16 @@ class DeepseekV4DecoderLayer(nn.Module):
         )
         self.mhc_pre_delayed = MHCPreDelayedOp()
         self.mhc_post = MHCPostOp()
+        # Where aiter's fused seam kernel runs (gfx950), it folds the following
+        # attn_norm / ffn_norm into its collapse, so the separate norms are
+        # skipped for the seams it takes.
+        self.fuse_seam_norm = HAS_AITER_MHC_FUSED_POST_PRE_DELAYED_RMS_NORM
+        # Decode steps of an eligible layer may run as the mono decode layer.
+        self.mono = MonoDecodeLayer.create(self, vllm_config)
+        if self.mono is not None and self.mono.ffn_only:
+            # A decode step hands wo_b's TP partial to the FFN launch; forward
+            # reduces it on the others.
+            self.attn.wo_b.reduce_results = False
 
     @staticmethod
     def _hc_collapse(x: torch.Tensor, pre_mix: torch.Tensor) -> torch.Tensor:
@@ -269,6 +281,15 @@ class DeepseekV4DecoderLayer(nn.Module):
         engram_hashes: torch.Tensor | None = None,
         engram_mask: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        if self.mono is not None:
+            out = self.mono(self, x, positions, residual, post_mix, res_mix, pre_mix)
+            if out is not None:
+                return out
+        # Layer 0's attention seam projects the 2-D embedding with the folded
+        # hc_attn_fn_broadcast instead of the 4-stream residual with hc_attn_fn.
+        # The fused kernel only takes the latter, so that seam keeps the
+        # separate attn_norm.
+        fuse_attn_norm = self.fuse_seam_norm and not (residual is None and x.dim() == 2)
         # The reference collapses each sublayer's input with the *previous*
         # sublayer's pre-mix: attention uses the pre-mix carried in (identity
         # for the first layer), the FFN uses this layer's attention pre-mix.
@@ -303,6 +324,8 @@ class DeepseekV4DecoderLayer(nn.Module):
                     self.hc_post_alpha,
                     self.hc_sinkhorn_iters,
                     pre_mix=pre_mix,
+                    norm_weight=self.attn_norm.weight if self.fuse_seam_norm else None,
+                    norm_eps=self.attn_norm.variance_epsilon,
                 )
         else:
             pre_args = (
@@ -328,7 +351,11 @@ class DeepseekV4DecoderLayer(nn.Module):
                     engram_mask,
                 )
                 residual, post_mix, res_mix, x, attn_pre = self.mhc_pre_delayed(
-                    residual, *pre_args, pre_mix=pre_mix
+                    residual,
+                    *pre_args,
+                    pre_mix=pre_mix,
+                    norm_weight=self.attn_norm.weight if self.fuse_seam_norm else None,
+                    norm_eps=self.attn_norm.variance_epsilon,
                 )
             else:
                 (
@@ -344,8 +371,11 @@ class DeepseekV4DecoderLayer(nn.Module):
                     sublayer_out=x,
                     post_layer_mix=post_mix,
                     comb_res_mix=res_mix,
+                    norm_weight=self.attn_norm.weight if self.fuse_seam_norm else None,
+                    norm_eps=self.attn_norm.variance_epsilon,
                 )
-        x = self.attn_norm(x)
+        if not fuse_attn_norm:
+            x = self.attn_norm(x)
 
         if self.use_sequence_parallel:
             x = sp_all_gather(x)[: positions.shape[0]]
@@ -353,6 +383,11 @@ class DeepseekV4DecoderLayer(nn.Module):
         x = self.attn(positions, x, None)
         if self.use_sequence_parallel:
             x = sp_reduce_scatter(x)
+        elif self.mono is not None and self.mono.ffn_only:
+            out = self.mono.ffn(self, x, residual, post_mix, res_mix, attn_pre)
+            if out is not None:
+                return out
+            x = tensor_model_parallel_all_reduce(x)
 
         residual, post_mix, res_mix, x, ffn_pre = self.mhc_pre_delayed(
             residual,
@@ -368,8 +403,11 @@ class DeepseekV4DecoderLayer(nn.Module):
             sublayer_out=x,
             post_layer_mix=post_mix,
             comb_res_mix=res_mix,
+            norm_weight=self.ffn_norm.weight if self.fuse_seam_norm else None,
+            norm_eps=self.ffn_norm.variance_epsilon,
         )
-        x = self.ffn_norm(x)
+        if not self.fuse_seam_norm:
+            x = self.ffn_norm(x)
         x = self.ffn(x, input_ids)
         return x, residual, post_mix, res_mix, ffn_pre
 
@@ -895,6 +933,11 @@ def _make_deepseek_v4_weights_mapper(
             # renames the engram fp8 table but not its scale; route the
             # scale explicitly to the same module.
             re.compile(r"(engram\.embed)\.scale$"): r"\1_tokens.weight_scale_inv",
+            # Quark exports spell the same tensor ``embed.weight_scale``,
+            # which the ``\.scale$`` rules never match.
+            re.compile(
+                r"(engram\.embed)\.weight_scale$"
+            ): r"\1_tokens.weight_scale_inv",
             re.compile(r"\.scale$"): f".{linear_scale_name}",
         }
     else:
@@ -908,6 +951,11 @@ def _make_deepseek_v4_weights_mapper(
             ): r"\1.weight_scale_inv",
             # Same engram reroute as the fp4 branch above.
             re.compile(r"(engram\.embed)\.scale$"): r"\1_tokens.weight_scale_inv",
+            # Quark exports spell the same tensor ``embed.weight_scale``,
+            # which the ``\.scale$`` rules never match.
+            re.compile(
+                r"(engram\.embed)\.weight_scale$"
+            ): r"\1_tokens.weight_scale_inv",
             re.compile(r"\.scale$"): f".{linear_scale_name}",
         }
     return WeightsMapper(
