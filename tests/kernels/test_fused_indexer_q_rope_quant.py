@@ -26,6 +26,7 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
 )
 from vllm.models.deepseek_v4.common.ops import fused_indexer_q_rope_quant
 from vllm.platforms import current_platform
+from vllm.utils.deep_gemm import mqa_logits_use_mx_scales
 from vllm.utils.import_utils import has_cutedsl
 
 HEAD_DIM = 128
@@ -347,6 +348,10 @@ def _indexer_k_reference(
     exponent = k.float().abs().amax(dim=-1, keepdim=True).clamp(min=1e-4) / 448
     scale = exponent.log2().ceil().exp2()
     values = (k.float() / scale).clamp(-448, 448).to(torch.float8_e4m3fn)
+    if mqa_logits_use_mx_scales():
+        # The power-of-two scale's exponent as 4 equal UE8M0 bytes.
+        ue8m0 = (scale.view(torch.int32) >> 23).to(torch.uint8)
+        return values.view(torch.uint8), ue8m0.repeat(1, 4)
     return values.view(torch.uint8), scale.view(torch.uint8)
 
 
