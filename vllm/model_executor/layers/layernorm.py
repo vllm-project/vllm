@@ -12,6 +12,7 @@ from vllm import envs, ir
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.determinism.batch_invariant import rms_norm_batch_invariant
+from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
@@ -282,6 +283,53 @@ class LayerNorm(CustomOp):
 
     def extra_repr(self) -> str:
         return f"hidden_size={self.normalized_shape[0]}, eps={self.eps}"
+
+
+def rms_norm_add_rms_norm(
+    post_norm: RMSNorm | GemmaRMSNorm,
+    pre_norm: RMSNorm | GemmaRMSNorm,
+    x: torch.Tensor,
+    residual: torch.Tensor,
+    *,
+    round_residual_before_norm: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Fuse a post norm, residual add, and pre norm when supported.
+
+    Some architectures round the residual addition to the activation dtype
+    before applying the second norm. The optional flag preserves that boundary.
+    """
+    if (
+        envs.VLLM_BATCH_INVARIANT
+        or not current_platform.is_cuda_alike()
+        or post_norm.variance_epsilon != pre_norm.variance_epsilon
+        or not _fusable_norm(post_norm)
+        or not _fusable_norm(pre_norm)
+    ):
+        x = post_norm(x)
+        if round_residual_before_norm:
+            residual = (x + residual).to(x.dtype)
+            return pre_norm(residual), residual
+        return pre_norm(x, residual)
+    return ir.ops.rms_norm_add_rms_norm(
+        x,
+        residual,
+        _ir_norm_weight(post_norm),
+        _ir_norm_weight(pre_norm),
+        post_norm.variance_epsilon,
+        round_residual_before_norm=round_residual_before_norm,
+    )
+
+
+def _fusable_norm(norm: RMSNorm | GemmaRMSNorm) -> bool:
+    if isinstance(norm, GemmaRMSNorm):
+        return True
+    return isinstance(norm, RMSNorm) and norm.variance_size_override is None
+
+
+def _ir_norm_weight(norm: RMSNorm | GemmaRMSNorm) -> torch.Tensor | None:
+    if isinstance(norm, GemmaRMSNorm):
+        return norm.weight.float() + 1.0
+    return norm.weight.data if norm.has_weight else None
 
 
 # --8<-- [start:rms_norm_gated]

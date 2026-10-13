@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import importlib
+import os
+import subprocess
 import sys
 import types
 from unittest import mock
@@ -180,3 +182,31 @@ def test_no_triton_fallback():
                 sys.modules[name] = module
             else:
                 sys.modules.pop(name, None)
+
+
+def test_kernel_package_imports_without_triton():
+    # Exercise module-level Triton references in a fresh interpreter, where
+    # package imports cannot reuse modules loaded by other tests.
+    script = """
+import importlib.util
+
+real_find_spec = importlib.util.find_spec
+def find_spec_without_triton(name, *args, **kwargs):
+    if name in {"triton", "pytorch-triton-xpu"}:
+        return None
+    return real_find_spec(name, *args, **kwargs)
+
+importlib.util.find_spec = find_spec_without_triton
+from vllm.triton_utils import HAS_TRITON
+assert not HAS_TRITON
+import vllm.kernels
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        check=False,
+        env=os.environ.copy(),
+        text=True,
+        timeout=120,
+    )
+    assert result.returncode == 0, result.stderr
