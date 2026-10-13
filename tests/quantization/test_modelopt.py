@@ -39,7 +39,9 @@ from vllm.model_executor.layers.quantization.modelopt import (
     ModelOptNvFp4Config,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kFp8Static128BlockSym,
     kFp8StaticTensorSym,
+    kFp8StaticTokenSym,
     kMxfp8Dynamic,
     kMxfp8Static,
     kNvfp4Dynamic,
@@ -1027,3 +1029,26 @@ def test_modelopt_fp8_pb_wo_rejects_non_128_input():
         scheme.create_weights(
             torch.nn.Module(), mo.WEIGHT, mo.CkptCtx(), shapes, Mock()
         )
+
+
+@pytest.mark.parametrize("params_dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize(
+    "weight_key",
+    [kFp8StaticTensorSym, kFp8StaticTokenSym, kFp8Static128BlockSym],
+    ids=["tensor", "channel", "block128"],
+)
+def test_modelopt_fp8_weight_schemes_set_orig_dtype(
+    dist_init, weight_key, params_dtype
+):
+    """Marlin's FP8 weight prep casts scales to ``layer.orig_dtype``, and ModelOpt
+    FP8 falls back to Marlin below SM89 (e.g. Ampere), so every FP8 weight scheme
+    must set it."""
+    from vllm.model_executor.layers.quantization import modelopt as mo
+
+    layer = torch.nn.Module()
+    shapes = mo.Shapes([256], 256, params_dtype)
+    mo.SCHEME_FOR[weight_key].create_weights(
+        layer, mo.WEIGHT, mo.CkptCtx(), shapes, Mock()
+    )
+
+    assert layer.orig_dtype == params_dtype

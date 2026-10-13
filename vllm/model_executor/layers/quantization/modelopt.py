@@ -2157,6 +2157,7 @@ class KFp8StaticChannel(QuantKeyScheme):
             input_dim=1,
             output_dim=0,
         )
+        layer.orig_dtype = shapes.params_dtype
         self.register_params(
             layer,
             "weight_scale",
@@ -2208,6 +2209,7 @@ class KFp8Block128(QuantKeyScheme):
             output_dim=0,
         )
         ob, ib = cdiv(out, 128), in_ // 128
+        layer.orig_dtype = shapes.params_dtype
         self.register_params(
             layer,
             "weight_scale",
