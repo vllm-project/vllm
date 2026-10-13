@@ -1,9 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Compare sharded QSA attention with a full-cache result on one GPU.
-
-The two-rank model path, including its collective, is tested separately.
-"""
+"""Compare sharded QSA attention with a full-cache result on one GPU."""
 
 import pytest
 import torch
@@ -82,6 +79,9 @@ def test_sharded_ranks_reproduce_the_single_rank_result(
         qsa_localize_dcp_indices,
         qsa_neutralize_empty_owner_lse_,
     )
+    from vllm.models.qwen4_exp.nvidia.qsa import Qwen4ExpQSAFlashAttentionImpl
+
+    assert Qwen4ExpQSAFlashAttentionImpl.lse_base_on_e is False
 
     torch.manual_seed(1234 + seq_len)
     device = "cuda"
