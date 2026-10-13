@@ -307,6 +307,7 @@ def _allowed_tools_request(
             "input": "hi",
             "tools": [
                 {"type": "function", "name": "get_weather", "parameters": {}},
+                {"type": "custom", "name": "run_sql"},
                 _namespace_tool(),
                 _MCP_TOOL,
             ],
@@ -360,6 +361,26 @@ def test_allowed_tools_ignore_builtin_entries():
     assert _is_grammar_accept_string(grammar, _hermes_call("crm__lookup"))
     assert not _is_grammar_accept_string(grammar, _hermes_call("get_weather"))
     assert builtin_only.structured_outputs is None
+
+
+def test_allowed_tools_allow_custom_tools():
+    """Custom tools are shown as single-string function shims, so can be allowed."""
+    request = _allowed_tools_request(
+        "required",
+        [{"type": "function", "name": "lookup"}, {"type": "custom", "name": "run_sql"}],
+    )
+    parser = _HermesParser(MagicMock(), tools=request.tools)
+
+    request = parser.adjust_request(request)
+
+    grammar = Grammar.from_structural_tag(request.structured_outputs.structural_tag)
+    sql_call = (
+        '<tool_call>\n{"name": "run_sql", "arguments": {"input": "select 1"}}\n'
+        "</tool_call>"
+    )
+    assert _is_grammar_accept_string(grammar, sql_call)
+    assert _is_grammar_accept_string(grammar, _hermes_call("crm__lookup"))
+    assert not _is_grammar_accept_string(grammar, _hermes_call("get_weather"))
 
 
 def test_harmony_structural_tag_keeps_builtin_tools():

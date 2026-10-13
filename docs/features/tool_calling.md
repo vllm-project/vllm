@@ -104,9 +104,9 @@ When tool_choice='required' is set, the model is guaranteed to generate one or m
 
 ## Allowed Tools
 
-In the Responses API, `tool_choice={"type": "allowed_tools", "mode": "auto", "tools": [{"type": "function", "name": "..."}]}` keeps every tool in the prompt but limits which functions the model can call. With `mode="required"` the model must call at least one of them; with `mode="auto"` it can also reply with text. Function entries are resolved like a named `tool_choice`, so a namespace function can be listed by its local name or by its full `namespace__function` name.
+In the Responses API, `tool_choice={"type": "allowed_tools", "mode": "auto", "tools": [{"type": "function", "name": "..."}]}` keeps every tool in the prompt but limits which function and custom tools the model can call. With `mode="required"` the model must call at least one of them; with `mode="auto"` it can also reply with text. Function and custom entries are resolved like a named `tool_choice`, so a namespace function can be listed by its local name or by its full `namespace__function` name.
 
-The limit is enforced with structural tags, so it requires `VLLM_ENFORCE_STRICT_TOOL_CALLING=true` (the default) and a tool parser that builds a structural tag for the request. For models that are only shown function tools, entries for built-in tools are ignored. Without a structural tag, tool calls are extracted as with `tool_choice="auto"`; the `hf` parser rejects the request instead, because it cannot enforce the limit.
+The limit is enforced with structural tags, so it requires `VLLM_ENFORCE_STRICT_TOOL_CALLING=true` (the default) and a tool parser that builds a structural tag for the request. For models that are only shown function and custom tools, entries for built-in tools are ignored. Without a structural tag, tool calls are extracted as with `tool_choice="auto"`; the `hf` parser rejects the request instead, because it cannot enforce the limit.
 
 ## None Function Calling
 

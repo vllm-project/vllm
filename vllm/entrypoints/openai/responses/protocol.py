@@ -776,7 +776,7 @@ class ResponsesRequest(OpenAIBaseModel):
                 "tools": [
                     {**ref, "name": _resolve_named_tool_choice(ref["name"], tools)}
                     if isinstance(ref, dict)
-                    and ref.get("type") == "function"
+                    and ref.get("type") in ("function", "custom")
                     and isinstance(ref.get("name"), str)
                     else ref
                     for ref in tool_choice["tools"]
