@@ -588,6 +588,10 @@ class VllmConfig:
             # V1 Model Runner does not fully support async scheduling with PP.
             if pp_size <= 1:
                 return 2
+        if pp_size > 1 and self.speculative_config is not None:
+            # Overlapped spec-decode steps under-count logits rows (the async
+            # path compensates via output placeholders; this path does not).
+            return 1
         return pp_size
 
     @property
