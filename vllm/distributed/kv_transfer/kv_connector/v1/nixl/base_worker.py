@@ -1489,10 +1489,14 @@ class NixlBaseConnectorWorker:
         self._ple_block_len = None
         self._ple_region_index = None
 
-        packed_storage = _share_storage_and_block_stride(list(xfer_buffers.values()))
-        # CSA-linear needs separate logical regions for attention and state
-        # aliases even though every view shares one block-major allocation.
-        packed_storage = packed_storage and not self._is_csa_linear
+        # A shared packed row may transfer whole only if every page in it is
+        # replicated across TP ranks: MLA without SSM state. Head-sharded
+        # attention or SSM state (e.g. Qwen3.8-Flash-Next) must stay split.
+        packed_storage = (
+            _share_storage_and_block_stride(list(xfer_buffers.values()))
+            and self.use_mla
+            and not self._has_mamba
+        )
         if route_packed_layers and any(
             not isinstance(spec, (MLAAttentionSpec, SlidingWindowMLASpec))
             for spec in self._layer_specs.values()
