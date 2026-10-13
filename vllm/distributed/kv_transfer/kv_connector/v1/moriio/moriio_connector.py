@@ -2473,8 +2473,12 @@ class MoRIIOConnectorWorker:
                     self.block_size,
                 )
             if geometry.block_len != self.block_len:
+                # Unlike block_size above, divergent block_len is allowed
+                # unconditionally (not gated on hma_enabled) -- it covers
+                # non-hybrid models too, e.g. GLM-5.2 DSA's per-layer
+                # geometry. Don't attribute it to HMA in the log.
                 logger.debug(
-                    "MoRIIO HMA per-layer block_len for %s: %d "
+                    "MoRIIO per-layer block_len for %s: %d "
                     "(page/default %d); continuing with per-layer sizes.",
                     layer_name,
                     geometry.block_len,
