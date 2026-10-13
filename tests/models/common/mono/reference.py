@@ -179,8 +179,10 @@ REFERENCE = MonoSpec(
 REFERENCE_WIDE = replace(
     REFERENCE,
     name="reference-wide",
-    refuse_config=lambda c: refuse_config(c)
-    + (["needs max_num_seqs >= 8"] if c.scheduler_config.max_num_seqs < 8 else []),
+    refuse_config=lambda c: (
+        refuse_config(c)
+        + (["needs max_num_seqs >= 8"] if c.scheduler_config.max_num_seqs < 8 else [])
+    ),
 )
 
 MONO_SPECS = (REFERENCE_WIDE, REFERENCE)

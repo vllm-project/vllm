@@ -37,7 +37,7 @@ from vllm.models.common.mono.guards import (
     set_capture_sizes,
 )
 from vllm.models.common.mono.layer import attach, forward_layer
-from vllm.models.common.mono.spec import MonoUnsupported
+from vllm.models.common.mono.spec import Feature, MonoUnsupported
 
 KERNEL_BACKENDS = ("aiter", "flydsl")
 """Backends a spec module must not pull in: it is imported at config time, on
@@ -127,9 +127,10 @@ class MonoConformance:
         config.use_v2_model_runner = False
         for spec in load_specs(self.specs_path):
             reasons = refuse_config(spec, config)
-            assert sum("lora" in r for r in reasons) == 1, reasons
-            assert sum("speculative_decoding" in r for r in reasons) == 1, reasons
             assert sum("Model Runner V2" in r for r in reasons) == 1, reasons
+            for feature in (Feature.LORA, Feature.SPECULATIVE_DECODING):
+                want = 0 if feature in spec.supports else 1
+                assert sum(feature.value in r for r in reasons) == want, reasons
 
     def test_refusal_names_every_variant(self, config):
         config.use_v2_model_runner = False

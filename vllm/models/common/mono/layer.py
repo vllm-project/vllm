@@ -12,7 +12,7 @@ from vllm.logger import init_logger
 from vllm.models.common.mono import failstop
 from vllm.models.common.mono.guards import enabled, load_specs, refused, select
 from vllm.models.common.mono.routing import Mono
-from vllm.models.common.mono.spec import MonoUnsupported
+from vllm.models.common.mono.spec import LayerKernel, MonoUnsupported
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -60,15 +60,31 @@ def attach(model, vllm_config: "VllmConfig", specs_path: str) -> Mono | None:
     return mono
 
 
+def kernel_for(mono: Mono | None, i: int, positions) -> LayerKernel | None:
+    """Layer ``i``'s kernel when this step runs on the kernels, else None.
+
+    The first call under a forward context decides for every layer. A model
+    whose layer signature or dispatch site does not fit ``forward_layer`` looks
+    the kernel up itself and calls ``launch`` where it suits the layer.
+    """
+    if mono is None:
+        return None
+    mono.begin_once(positions)
+    step = mono.step
+    if step is None:
+        return None
+    return mono.kernels.get((i, step.width))
+
+
 def forward_layer(mono: Mono | None, i: int, layer, positions, *args, **kwargs):
     """Layer ``i`` on its kernel when this step runs on the kernels, else the
-    vLLM layer unchanged. The first call under a forward context decides for
-    every layer."""
-    if mono is not None:
-        mono.begin_once(positions)
-        step = mono.step
-        if step is not None and (k := mono.kernels.get((i, step.width))) is not None:
-            return k.launch(step, positions, *args, **kwargs)
+    vLLM layer unchanged."""
+    k = kernel_for(mono, i, positions)
+    step = None if mono is None else mono.step
+    if k is not None and step is not None:
+        out = k.launch(step, positions, *args, **kwargs)
+        if out is not None:
+            return out
     return layer(positions, *args, **kwargs)
 
 

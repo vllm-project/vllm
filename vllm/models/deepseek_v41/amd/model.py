@@ -50,6 +50,8 @@ from vllm.model_executor.models.utils import (
     make_layers,
     maybe_prefix,
 )
+from vllm.models.common.mono import attach, configure, health, kernel_for
+from vllm.models.common.mono.routing import Mono
 from vllm.models.common.ops.sequence_parallel import (
     sp_all_gather,
     sp_padding_mask,
@@ -59,7 +61,7 @@ from vllm.models.common.ops.sequence_parallel import (
 from vllm.models.deepseek_v4.amd.model import (
     DeepseekV4MoE as DeepseekV4MoEBase,
 )
-from vllm.models.deepseek_v41.amd.mono_decode import MonoDecodeLayer
+from vllm.models.deepseek_v41.amd.mono_spec import SPECS_PATH, Kernel
 from vllm.models.deepseek_v41.amd.rocm import DeepseekV41ROCMAiterMLAAttention
 from vllm.models.deepseek_v41.attention import DeepseekV4Attention
 from vllm.models.deepseek_v41.decoder_replay_layers import DecoderReplayLayers
@@ -258,12 +260,6 @@ class DeepseekV4DecoderLayer(nn.Module):
         # attn_norm / ffn_norm into its collapse, so the separate norms are
         # skipped for the seams it takes.
         self.fuse_seam_norm = HAS_AITER_MHC_FUSED_POST_PRE_DELAYED_RMS_NORM
-        # Decode steps of an eligible layer may run as the mono decode layer.
-        self.mono = MonoDecodeLayer.create(self, vllm_config)
-        if self.mono is not None and self.mono.ffn_only:
-            # A decode step hands wo_b's TP partial to the FFN launch; forward
-            # reduces it on the others.
-            self.attn.wo_b.reduce_results = False
 
     @staticmethod
     def _hc_collapse(x: torch.Tensor, pre_mix: torch.Tensor) -> torch.Tensor:
@@ -281,10 +277,15 @@ class DeepseekV4DecoderLayer(nn.Module):
         residual: torch.Tensor | None = None,
         engram_hashes: torch.Tensor | None = None,
         engram_mask: torch.Tensor | None = None,
+        mono: Mono | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        if self.mono is not None:
-            out = self.mono(
-                self,
+        kernel = typing.cast(
+            Kernel | None, kernel_for(mono, self.attn.layer_id, positions)
+        )
+        step = None if mono is None else mono.step
+        if kernel is not None and step is not None and not kernel.ffn_only:
+            out = kernel.launch(
+                step,
                 x,
                 positions,
                 residual,
@@ -394,10 +395,11 @@ class DeepseekV4DecoderLayer(nn.Module):
         x = self.attn(positions, x, None)
         if self.use_sequence_parallel:
             x = sp_reduce_scatter(x)
-        elif self.mono is not None and self.mono.ffn_only:
-            out = self.mono.ffn(self, x, residual, post_mix, res_mix, attn_pre)
-            if out is not None:
-                return out
+        elif not self.attn.wo_b.reduce_results:
+            if kernel is not None and step is not None:
+                out = kernel.launch(step, x, residual, post_mix, res_mix, attn_pre)
+                if out is not None:
+                    return out
             x = tensor_model_parallel_all_reduce(x)
 
         residual, post_mix, res_mix, x, ffn_pre = self.mhc_pre_delayed(
@@ -481,6 +483,9 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         self.hc_mult = config.hc_mult
         self.hc_dim = self.hc_mult * config.hidden_size
         self.rms_norm_eps = config.rms_norm_eps
+        self.vllm_config = vllm_config
+        self.mono: Mono | None = None
+        configure(vllm_config, SPECS_PATH)
 
         # Three aux streams: one per non-default input GEMM in
         # DeepseekV4Attention._run_parallel_input_projections
@@ -843,6 +848,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 residual,
                 engram_hashes,
                 engram_mask,
+                self.mono,
             )
             # The aux id of the first replay layer is the post of the last
             # full-batch layer. Capture it on the trimmed rows instead.
@@ -1411,6 +1417,10 @@ class DeepseekV41LLMForCausalLM(
     def process_weights_after_loading(self) -> None:
         self.model.finalize_mega_moe_weights()
         self.model.finalize_mhc_broadcast_weights()
+        self.model.mono = attach(self.model, self.model.vllm_config, SPECS_PATH)
+
+    def step_health(self) -> torch.Tensor | None:
+        return health(self.model.mono)
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         return self.model.get_expert_mapping()

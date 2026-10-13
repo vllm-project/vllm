@@ -8,6 +8,19 @@ fail-stop and metrics (``failstop``), peer memory (``peer``) and the
 error-word layout (``abi``)."""
 
 from vllm.models.common.mono.guards import configure
-from vllm.models.common.mono.layer import account_step, attach, forward_layer, health
+from vllm.models.common.mono.layer import (
+    account_step,
+    attach,
+    forward_layer,
+    health,
+    kernel_for,
+)
 
-__all__ = ["account_step", "attach", "configure", "forward_layer", "health"]
+__all__ = [
+    "account_step",
+    "attach",
+    "configure",
+    "forward_layer",
+    "health",
+    "kernel_for",
+]

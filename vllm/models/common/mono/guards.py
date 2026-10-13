@@ -140,6 +140,7 @@ def set_capture_sizes(spec: MonoSpec, vllm_config: "VllmConfig") -> None:
 
 def configure(vllm_config: "VllmConfig", specs_path: str) -> None:
     """Picks the variant, sets the capture sizes, or raises with every reason.
+    A no-op with ``--monokernel`` off.
 
     Args:
         vllm_config: The engine's config, before the weights are loaded.
@@ -149,6 +150,8 @@ def configure(vllm_config: "VllmConfig", specs_path: str) -> None:
         MonoUnsupported: Every variant refused this config.
 
     """
+    if not enabled(vllm_config):
+        return
     spec, refusals = select(load_specs(specs_path), vllm_config)
     if spec is None:
         raise MonoUnsupported("MonoKernel refused: " + refused(refusals))

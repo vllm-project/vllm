@@ -94,7 +94,10 @@ class LayerKernel(Protocol):
     """Attention layers whose caches ``MonoSpec.bind`` checks."""
 
     def launch(self, step: MonoStep, *args, **kwargs) -> Any:
-        """Takes and returns what the vLLM layer it replaces does."""
+        """Takes and returns what the vLLM layer it replaces does, or None to
+        decline this call, which sends the layer down vLLM's path. Decline only
+        on what the step descriptor cannot answer, such as the layout of the
+        tensors the layer was handed."""
         ...
 
     def health(self) -> torch.Tensor:

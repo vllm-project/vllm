@@ -209,15 +209,21 @@ class MonoProbe:
         torch.save((self._captured, self._gaps), f"{path}.rank{rank}")
 
     def mono_layers(self) -> dict:
-        from vllm.models.deepseek_v41.amd import mono_decode
-
+        model = self.model_runner.model  # type: ignore[attr-defined]
+        mono = getattr(model.model, "mono", None)
+        kernels = {} if mono is None else mono.kernels
         layers = {
-            i: None
-            if m.mono is None
-            else ["ffn" if m.mono.ffn_only else "whole", m.mono._weights is not None]
-            for i, m in self._decoder_layers().items()
+            i: next(
+                (
+                    ["ffn" if k.ffn_only else "whole", k.weights is not None]
+                    for (j, _), k in kernels.items()
+                    if j == i
+                ),
+                None,
+            )
+            for i in self._decoder_layers()
         }
-        runner = mono_decode._runner
+        runner = None if mono is None else mono.ctx.state.runner
         return {
             "layers": layers,
             "epoch": -1 if runner is None else int(runner.epoch[0]),
