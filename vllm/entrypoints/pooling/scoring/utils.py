@@ -15,7 +15,7 @@ from vllm.renderers.chat_utils import (
     ChatCompletionContentPartTextParam,
     ConversationMessage,
     MultiModalItemTracker,
-    _parse_chat_message_content_parts,
+    parse_chat_message_content_parts,
 )
 
 from .typing import (
@@ -193,7 +193,7 @@ def _parse_score_content(
 
     mm_parser = mm_tracker.create_parser()
 
-    parse_res = _parse_chat_message_content_parts(
+    parse_res = parse_chat_message_content_parts(
         role=role,
         parts=parts,
         mm_tracker=mm_tracker,
