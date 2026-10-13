@@ -296,12 +296,12 @@ class Mxfp4OnlineMoEMethod(OnlineMoEMethodBase):
         if getattr(layer, "_already_called_process_weights_after_loading", False):
             return
 
+        w13_weight, w2_weight = self.get_weights_for_quantization(layer)
+        self._zero_padding(layer, w13_weight, w2_weight)
+
         if self.mxfp4_backend == Mxfp4MoeBackend.NONE:
             layer._already_called_process_weights_after_loading = True
             return
-
-        w13_weight, w2_weight = self.get_weights_for_quantization(layer)
-        self._zero_padding(layer, w13_weight, w2_weight)
 
         layer.w13_input_scale = None
         layer.w2_input_scale = None

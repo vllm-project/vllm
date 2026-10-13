@@ -38,7 +38,7 @@ from vllm.model_executor.layers.quantization.online.moe_base import (
     OnlineMoEMethodBase,
 )
 from vllm.model_executor.layers.quantization.online.requantization import (
-    OnlineLinearRequantizationMixin,
+    OnlineRequantizationMixin,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
@@ -120,7 +120,7 @@ def _is_tp_sharded(layer: Module, *, reduces_output_dim: bool = True) -> bool:
     return is_row_parallel or (reduces_output_dim and is_column_parallel)
 
 
-class OnlineLinearBase(OnlineLinearRequantizationMixin, LinearMethodBase):
+class OnlineLinearBase(OnlineRequantizationMixin, LinearMethodBase):
     """Shared base for online FP8 linear methods. Loads fp16/bf16 checkpoint
     weights onto meta device and materializes them just-in-time."""
 
@@ -131,6 +131,14 @@ class OnlineLinearBase(OnlineLinearRequantizationMixin, LinearMethodBase):
         super().__init__()
         self.out_dtype = torch.get_default_dtype()
         self.input_dtype = get_current_vllm_config().model_config.dtype
+
+    def get_weight_for_quantization(self, layer: torch.nn.Module) -> torch.Tensor:
+        if self.requantization_source is None:
+            return layer.weight
+        weight = self.requantization_source.dequantize_weight(layer)
+        if not isinstance(weight, torch.Tensor):
+            raise TypeError("Linear requantization requires a single weight tensor.")
+        return weight
 
     def create_weights(
         self,

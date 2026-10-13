@@ -114,6 +114,7 @@ Currently supported combinations are:
 | Serialized ModelOpt MXFP8 linear | any online linear method | Target-specific hardware requirements |
 | Serialized compressed-tensors NVFP4 MoE | any online MoE method | Target-specific hardware requirements |
 | Serialized ModelOpt NVFP4 MoE | any online MoE method | Target-specific hardware requirements |
+| Serialized Quark NVFP4 MoE | any online MoE method | Target-specific hardware requirements |
 
 For example, serialized ModelOpt MXFP8 linears can be converted to
 per-channel-weight/per-token-activation FP8 at load time:
