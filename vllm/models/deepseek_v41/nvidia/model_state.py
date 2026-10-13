@@ -337,7 +337,7 @@ class DeepseekV41ModelState(DefaultModelState):
             self._warm_up_replay_kernels(input_batch, slot_mappings)
         window, cacheable_groups = self._replay
         replay_start: torch.Tensor | None = None
-        if window:
+        if window or self.decoder_replay_layers is not None:
             num_reqs = input_batch.num_reqs
             # Decode rows sit above the hit, so only prefills carry a replay
             # start; dummy batches (captures, profiling) carry none.
@@ -349,7 +349,7 @@ class DeepseekV41ModelState(DefaultModelState):
             replay_start = self._replay_start_staging.copy_to_gpu(
                 replay_start_np, out=self._replay_start[:num_reqs]
             )
-            if replay_start_np.any():
+            if window and replay_start_np.any():
                 # The replayed tokens rebuild window KV only: their slots in the
                 # prefix-cacheable groups are padded so the cached KV stays as is.
                 _pad_replayed_slots_kernel[(num_reqs,)](
@@ -397,21 +397,21 @@ class DeepseekV41ModelState(DefaultModelState):
         dummy batches never replay or trim, so they would not launch them."""
         assert self._replay is not None
         window, cacheable_groups = self._replay
-        if not window:
-            return
-        _pad_replayed_slots_kernel.warmup(
-            slot_mappings,
-            slot_mappings.stride(0),
-            cacheable_groups,
-            input_batch.query_start_loc,
-            input_batch.positions,
-            self._replay_start,
-            window,
-            PAD_SLOT_ID,
-            NUM_GROUPS=cacheable_groups.numel(),
-            BLOCK=1024,
-            grid=(1,),
-        )
+        # Pad warmup is prefix-cache SWA. A zero window must not skip the gather warmup.
+        if window:
+            _pad_replayed_slots_kernel.warmup(
+                slot_mappings,
+                slot_mappings.stride(0),
+                cacheable_groups,
+                input_batch.query_start_loc,
+                input_batch.positions,
+                self._replay_start,
+                window,
+                PAD_SLOT_ID,
+                NUM_GROUPS=cacheable_groups.numel(),
+                BLOCK=1024,
+                grid=(1,),
+            )
         if self.decoder_replay_layers is None:
             return
         assert self._kept_slot_mappings is not None
