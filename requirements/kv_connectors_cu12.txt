@@ -1,5 +1,5 @@
 # LMCache 0.5.x uses CUDA 13 dependencies; retain the CUDA 12 release here.
 lmcache == 0.4.4
 cupy-cuda12x != 14.1.0
-nixl == 1.4.1
+nixl == 1.5.0rc1.dev72182327 # do-not-merge: NIXL RC validation
 mooncake-transfer-engine >= 0.3.12
