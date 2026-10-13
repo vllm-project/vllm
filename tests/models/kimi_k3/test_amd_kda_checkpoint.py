@@ -19,7 +19,6 @@ from vllm.model_executor.layers.mamba.checkpoint import (
     MambaPrefillCheckpointExporter,
     MambaPrefillCheckpointMetadata,
 )
-from vllm.model_executor.layers.mamba.gdn.base import GatedDeltaNetAttention
 from vllm.model_executor.layers.mamba.ops.causal_conv1d import causal_conv1d_fn
 from vllm.models.kimi_k3.amd.kda import KimiK3DeltaAttention
 from vllm.models.kimi_k3.amd.kda_metadata import KimiK3ROCmKDAMetadataBuilder
@@ -474,10 +473,12 @@ def test_checkpoint_metadata_skips_unaligned_offset() -> None:
 
 
 def _spec_for(monkeypatch, **attrs) -> MambaSpec:
-    """Run the layer's `get_kv_cache_spec` over a stubbed base spec."""
-    base = MambaSpec(block_size=BLOCK_SIZE, shapes=((16, 64),), dtypes=(torch.float16,))
+    """Run the layer's `get_kv_cache_spec` over stubbed state shapes."""
     monkeypatch.setattr(
-        GatedDeltaNetAttention, "get_kv_cache_spec", lambda self, cfg: base
+        KimiK3DeltaAttention, "get_state_shape", lambda self: ((16, 64),)
+    )
+    monkeypatch.setattr(
+        KimiK3DeltaAttention, "get_state_dtype", lambda self: (torch.float16,)
     )
     layer = KimiK3DeltaAttention.__new__(KimiK3DeltaAttention)
     for name, value in dict(
@@ -489,7 +490,10 @@ def _spec_for(monkeypatch, **attrs) -> MambaSpec:
         setattr(layer, name, attrs.get(name, value))
     vllm_config = create_vllm_config(model_name="Qwen/Qwen3.5-0.8B")
     vllm_config.cache_config.mamba_cache_mode = "align"
-    return layer.get_kv_cache_spec(vllm_config)
+    vllm_config.cache_config.mamba_block_size = BLOCK_SIZE
+    spec = layer.get_kv_cache_spec(vllm_config)
+    assert isinstance(spec, MambaSpec)
+    return spec
 
 
 def test_opt_in_publishes_chunk_walk_alignment(monkeypatch) -> None:

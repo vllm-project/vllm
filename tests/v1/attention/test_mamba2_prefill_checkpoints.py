@@ -2,6 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Internal prefill checkpoints for Mamba2 align-mode prefix caching."""
 
+from types import SimpleNamespace
+
+import pytest
 import torch
 
 from tests.v1.attention.utils import (
@@ -9,10 +12,12 @@ from tests.v1.attention.utils import (
     create_common_attn_metadata,
     create_vllm_config,
 )
+from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.v1.attention.backends.mamba2_attn import (
     Mamba2AttentionMetadataBuilder,
 )
 from vllm.v1.attention.backends.mamba_attn import BaseMambaAttentionMetadataBuilder
+from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.kv_cache_interface import MambaSpec
 
@@ -166,3 +171,40 @@ def test_builder_emits_nothing_outside_align_mode():
     meta = _build(builder, seq_lens=[900], query_lens=[900])
 
     assert meta.checkpoint_chunk_idx is None
+
+
+class _CheckpointingMambaLayer(MambaBase):
+    mamba_type = MambaAttentionBackendEnum.MAMBA2
+
+    def __init__(self, prefill_checkpoint_alignment: int | None):
+        self._prefill_checkpoint_alignment = prefill_checkpoint_alignment
+
+    def get_prefill_checkpoint_alignment(self) -> int | None:
+        return self._prefill_checkpoint_alignment
+
+    def get_state_shape(self):
+        return ((4, 8),)
+
+    def get_state_dtype(self):
+        return (torch.float32,)
+
+
+@pytest.mark.parametrize("alignment", [1, 16, None])
+def test_layer_checkpoint_alignment_reaches_the_kv_cache_spec(alignment):
+    """The scheduler learns a layer's checkpoint grid only from its spec, and a
+    checkpoint block reserved without one would cache a state never written."""
+    vllm_config = SimpleNamespace(
+        cache_config=SimpleNamespace(
+            mamba_block_size=64,
+            mamba_page_size_padded=None,
+            mamba_cache_mode="align",
+            use_replayssm=False,
+        ),
+        num_speculative_tokens=0,
+    )
+
+    spec = _CheckpointingMambaLayer(alignment).get_kv_cache_spec(vllm_config)
+
+    assert isinstance(spec, MambaSpec)
+    assert spec.num_prefill_checkpoint_blocks == int(alignment is not None)
+    assert spec.prefill_checkpoint_alignment == alignment
