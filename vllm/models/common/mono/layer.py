@@ -1,22 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The hooks a model calls: ``attach`` after load, ``forward_layer`` in its
-layer loop, ``health`` from ``step_health``."""
+layer loop."""
 
 from typing import TYPE_CHECKING
 
-import torch
-
 from vllm.config.compilation import CUDAGraphMode
 from vllm.logger import init_logger
-from vllm.models.common.mono import failstop
 from vllm.models.common.mono.guards import (
     _enabled,
     _load_specs,
     _refusal_message,
     _select_spec,
 )
-from vllm.models.common.mono.runtime import MonoRuntime
+from vllm.models.common.mono.runtime import MonoRuntime, drain
 from vllm.models.common.mono.spec import LayerKernel, MonoUnsupported
 
 if TYPE_CHECKING:
@@ -55,12 +52,6 @@ def attach(model, vllm_config: "VllmConfig", specs_path: str) -> MonoRuntime | N
     if not mono.kernels:
         logger.info("MonoKernel %s: no layer takes a kernel", spec.name)
         return None
-    if not hasattr(model, "step_health"):
-        logger.warning_once(
-            "MonoKernel %s: the model exposes no step_health(), so the runner "
-            "cannot fail a step whose in-kernel wait gave up",
-            spec.name,
-        )
     _ATTACHED = mono
     return mono
 
@@ -93,16 +84,10 @@ def forward_layer(mono: MonoRuntime | None, i: int, layer, positions, *args, **k
     return layer(positions, *args, **kwargs)
 
 
-def health(mono: MonoRuntime | None) -> torch.Tensor | None:
-    """The step's error words, read by the runner after each step: any set
-    word fails the step before its tokens are returned (``failstop``)."""
-    return None if mono is None else mono.health()
-
-
 def account_step(num_tokens: int, runtime_mode: CUDAGraphMode) -> dict[str, int] | None:
     """Called by the runner after every served step: counts it, and returns the
-    counters to export since the last call (``failstop.drain``)."""
+    counters to export since the last call (``runtime.drain``)."""
     if _ATTACHED is None:
         return None
     _ATTACHED.account(num_tokens, runtime_mode)
-    return failstop.drain()
+    return drain()

@@ -102,10 +102,6 @@ class LayerKernel(Protocol):
         tensors the layer was handed."""
         ...
 
-    def health(self) -> torch.Tensor:
-        """This rank's error words: any set word fails the step."""
-        ...
-
     def warmup_keys(self) -> list[Any]:
         """Hashable build keys of this width's launches, compiled before CUDA
         graph capture by vLLM's JIT warm-up."""

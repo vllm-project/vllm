@@ -50,7 +50,7 @@ from vllm.model_executor.models.utils import (
     make_layers,
     maybe_prefix,
 )
-from vllm.models.common.mono import attach, configure, health, kernel_for
+from vllm.models.common.mono import attach, configure, kernel_for
 from vllm.models.common.mono.runtime import MonoRuntime
 from vllm.models.common.ops.sequence_parallel import (
     sp_all_gather,
@@ -1420,7 +1420,11 @@ class DeepseekV41LLMForCausalLM(
         self.model.mono = attach(self.model, self.model.vllm_config, SPECS_PATH)
 
     def step_health(self) -> torch.Tensor | None:
-        return health(self.model.mono)
+        """This rank's error words, one a TP rank, nonzero once one of its
+        in-kernel waits gave up: any set word fails the step before its tokens
+        are returned."""
+        mono = self.model.mono
+        return None if mono is None else mono.state.words
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         return self.model.get_expert_mapping()

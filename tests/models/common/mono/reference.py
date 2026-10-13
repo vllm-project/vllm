@@ -51,20 +51,13 @@ class ReferenceModel(torch.nn.Module):
         self.end_layer = layers
         self.mono = None
 
-    def step_health(self) -> torch.Tensor | None:
-        from vllm.models.common.mono import health
-
-        return health(self.mono)
-
 
 @dataclass
 class LaunchState:
     """What ``launch_state`` builds once at attach: views of the model's
-    weights, never a copy, and the error words every kernel of this rank
-    shares."""
+    weights, never a copy."""
 
     weights: dict[int, torch.Tensor]
-    words: torch.Tensor
 
 
 class ReferenceKernel:
@@ -83,18 +76,11 @@ class ReferenceKernel:
         self.launched.append(step.num_tokens)
         return self.layer(positions, *args, **kwargs)
 
-    def health(self) -> torch.Tensor:
-        return self.state.words
-
     def warmup_keys(self) -> list[Any]:
         return [(self.layer.index, self.width)]
 
     def compile(self, key: Any) -> None:
         self.compiled.append(key)
-
-    def fail(self, rank: int = 0) -> None:
-        """Reports an in-kernel wait that gave up, as a launch would."""
-        self.state.words[rank] = 1
 
 
 def layers(config) -> list[int]:
@@ -128,10 +114,8 @@ def skip_step(ctx: MonoContext, state: LaunchState, step: MonoStep) -> str | Non
 
 
 def launch_state(model, ctx: MonoContext) -> LaunchState:
-    _, world, _ = _tp()
     return LaunchState(
-        weights={i: layer.weight.data for i, layer in enumerate(model.layers)},
-        words=torch.zeros(world, dtype=torch.int32, device=ctx.device),
+        weights={i: layer.weight.data for i, layer in enumerate(model.layers)}
     )
 
 
@@ -152,12 +136,6 @@ def bind(ctx: MonoContext, caches) -> list[str]:
 
 def build(ctx: MonoContext, state: LaunchState, layer, width: int) -> ReferenceKernel:
     return ReferenceKernel(ctx, state, layer, width)
-
-
-def _tp():
-    from vllm.models.common.mono.peer import tp_group
-
-    return tp_group()
 
 
 REFERENCE = MonoSpec[LaunchState](

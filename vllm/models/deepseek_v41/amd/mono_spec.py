@@ -131,9 +131,6 @@ class LayerKernelBase:
         self.weights = launch_state.weights[layer.attn.layer_id]
         self.cache_layers: tuple[str, ...] = ()
 
-    def health(self) -> torch.Tensor:
-        return self.launch_state.words
-
     def warmup_keys(self) -> list[Any]:
         raise NotImplementedError
 

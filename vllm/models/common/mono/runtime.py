@@ -11,8 +11,13 @@ is baked in at capture, so it is a function of the captured size: FULL graphs
 serve uniform decode batches and every width is a capture size
 (``guards``), so no replay pads a request's rows. PIECEWISE
 steps run vLLM's layers.
+
+It also counts the steps it decided (``STEPS``, drained by ``drain`` and
+exported as ``vllm:monokernel_steps``): steps on the kernels, and steps on
+vLLM's path by reason.
 """
 
+from collections import Counter
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -22,7 +27,6 @@ from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.warmup.jit_warmup import VllmJitKernel
-from vllm.models.common.mono import failstop
 from vllm.models.common.mono.guards import _agree_across_ranks, _refuse_model
 from vllm.models.common.mono.peer import tp_group
 from vllm.models.common.mono.spec import (
@@ -37,6 +41,19 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
 logger = init_logger(__name__)
+
+STEPS: Counter[tuple[str, str]] = Counter()
+"""Served steps by spec and path, where path is "mono" or the reason the step
+ran vLLM's layers."""
+
+
+def drain() -> dict[str, int] | None:
+    """The counts since the last drain, keyed ``"steps:<spec>:<path>"``."""
+    if not STEPS:
+        return None
+    out = {f"steps:{spec}:{path}": n for (spec, path), n in STEPS.items()}
+    STEPS.clear()
+    return out
 
 
 class MonoWarmup(VllmJitKernel["MonoWarmup.CompileKey"]):
@@ -191,7 +208,7 @@ class MonoRuntime:
             why = self.baked.get(num_tokens, "not captured")
         else:
             why, self.last = self.last, "no step"
-        failstop.count_step(self.spec.name, why)
+        STEPS[self.spec.name, why or "mono"] += 1
 
     def _decide(self, positions: torch.Tensor) -> str | None:
         fc = get_forward_context()
@@ -206,6 +223,3 @@ class MonoRuntime:
             self._bind()
             self.step = step
         return why
-
-    def health(self) -> torch.Tensor:
-        return next(iter(self.kernels.values())).health()
