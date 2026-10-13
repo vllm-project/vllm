@@ -231,9 +231,11 @@ class Qwen4ExpNGramEmbedding(nn.Module):
             )
         weight = self.ngram_embedding.weight
         logger.info(
-            "Initialized PLE embedding %s: quantization_method=%s, "
+            "Initialized PLE embedding %s: "
+            "quantization_config=%s, quantization_method=%s, "
             "weight_dtype=%s, weight_device=%s, pinned=%s",
             embedding_prefix,
+            type(quant_config).__name__,
             type(embedding_quant_method).__name__,
             weight.dtype,
             weight.device,

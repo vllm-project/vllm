@@ -260,9 +260,11 @@ class Qwen4ExpNGramEmbedding(nn.Module):
             data_parallel_rank=data_parallel_rank,
         )
         logger.info(
-            "Initialized AMD PLE embedding %s: quantization_method=%s, "
+            "Initialized AMD PLE embedding %s: "
+            "quantization_config=%s, quantization_method=%s, "
             "weight_dtype=%s, weight_device=%s, pinned=%s",
             embedding_prefix,
+            type(quant_config).__name__,
             type(embedding_quant_method).__name__,
             self.ngram_embedding.weight.dtype,
             self.ngram_embedding.weight.device,

@@ -1,12 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import logging
 from dataclasses import dataclass
 from itertools import accumulate
 from types import SimpleNamespace
 
 import pytest
 import torch
+from compressed_tensors.quantization import QuantizationArgs
 from torch import nn
 from torch.nn import functional as F
 from transformers import Qwen4ExpTextConfig
@@ -18,6 +20,10 @@ from tests.v1.attention.utils import BatchSpec, create_common_attn_metadata
 from vllm.config import SpeculativeConfig, VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.config.quantization import QuantizationConfigArgs
+from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
+from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
+    CompressedTensorsConfig,
+)
 from vllm.model_executor.layers.quantization.fp8 import Fp8Config
 from vllm.model_executor.layers.quantization.inc import INCConfig
 from vllm.model_executor.layers.quantization.modelopt import (
@@ -551,17 +557,44 @@ def test_ple_fp8_embedding_respects_checkpoint_shard_exclusions() -> None:
     )
 
 
-def test_ple_embedding_rejects_unsupported_quantization_configs() -> None:
+@pytest.mark.parametrize(
+    "quant_config",
+    [
+        pytest.param(ModelOptNvFp4Config(exclude_modules=[]), id="modelopt-nvfp4"),
+        pytest.param(
+            OnlineQuantizationConfig(QuantizationConfigArgs(linear="fp8_per_tensor")),
+            id="online-fp8",
+        ),
+        pytest.param(
+            CompressedTensorsConfig(
+                target_scheme_map={
+                    "re:.*ngram_embedding": {
+                        "weights": QuantizationArgs(num_bits=8, type="int"),
+                    },
+                },
+                ignore=[],
+                quant_format="int-quantized",
+            ),
+            id="compressed-tensors",
+        ),
+    ],
+)
+def test_ple_embedding_falls_back_for_unsupported_quantization_configs(
+    quant_config: QuantizationConfig,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Warn when global quantization falls back to an unquantized PLE table."""
     prefix = "model.layers.1.ple.ple_embedding.ngram_embedding"
-    nvfp4_config = ModelOptNvFp4Config(exclude_modules=[])
-    with pytest.raises(NotImplementedError, match="ModelOptNvFp4Config"):
-        Qwen4ExpPLEEmbeddingMethod.from_quant_config(nvfp4_config, prefix)
-
-    online_fp8_config = OnlineQuantizationConfig(
-        QuantizationConfigArgs(linear="fp8_per_tensor")
+    test_logger = logging.getLogger("test.ple_fallback")
+    monkeypatch.setattr(ngram_embedding_module, "logger", test_logger)
+    caplog.set_level(logging.WARNING, logger=test_logger.name)
+    assert isinstance(
+        Qwen4ExpPLEEmbeddingMethod.from_quant_config(quant_config, prefix),
+        Qwen4ExpPLEUnquantizedEmbeddingMethod,
     )
-    with pytest.raises(NotImplementedError, match="OnlineQuantizationConfig"):
-        Qwen4ExpPLEEmbeddingMethod.from_quant_config(online_fp8_config, prefix)
+    assert caplog.records[0].levelno == logging.WARNING
+    assert "Falling back to unquantized PLE" in caplog.text
 
 
 def test_ple_embedding_respects_modelopt_exclusion() -> None:
@@ -588,8 +621,10 @@ def test_ple_embedding_respects_inc_layer_config() -> None:
     )
 
     quant_config.extra_config = None
-    with pytest.raises(NotImplementedError, match="INCConfig"):
-        Qwen4ExpPLEEmbeddingMethod.from_quant_config(quant_config, prefix)
+    assert isinstance(
+        Qwen4ExpPLEEmbeddingMethod.from_quant_config(quant_config, prefix),
+        Qwen4ExpPLEUnquantizedEmbeddingMethod,
+    )
 
 
 def test_ple_embedding_is_unquantized_under_quark() -> None:

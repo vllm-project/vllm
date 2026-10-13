@@ -228,10 +228,13 @@ class Qwen4ExpPLEEmbeddingMethod(QuantizeMethodBase):
                 "Qwen4Exp PLE embedding only supports serialized FP8 checkpoints"
             )
 
-        raise NotImplementedError(
-            "Qwen4Exp PLE embedding does not support quantization config "
-            f"{type(quant_config).__name__}"
+        logger.warning(
+            "Falling back to unquantized PLE embedding for %s "
+            "with quantization config %s.",
+            prefix,
+            type(quant_config).__name__,
         )
+        return Qwen4ExpPLEUnquantizedEmbeddingMethod()
 
     def apply(
         self,
