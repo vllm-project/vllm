@@ -23,7 +23,7 @@ import zmq.asyncio
 from huggingface_hub.utils import httpx
 
 from vllm import envs
-from vllm.config import VllmConfig
+from vllm.config import KVTransferConfig, VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     EngineId,
     TransferTopology,
@@ -89,7 +89,6 @@ except ImportError:
     TransferEngine = None
 
 if TYPE_CHECKING:
-    from vllm.config.kv_transfer import KVTransferConfig
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
@@ -674,7 +673,6 @@ class SendBlockMeta:
     sending: int = 0
 
     def expired(self, now: float) -> bool:
-        # Past its expire time and not being sent: its blocks are freed.
         return bool(self.p_req_id) and self.expire_time < now and self.sending == 0
 
 
@@ -808,10 +806,9 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
     # Worker Side Methods
     ############################################################
     @classmethod
-    def supports_sleep_mode(cls, kv_transfer_config: "KVTransferConfig") -> bool:
-        # Only RDMA peers drop a stale remote key (the failed access refreshes it).
-        # Mooncake installs its NVLink transport instead if either variable is set,
-        # whatever its value; a peer then keeps its import of the old pages.
+    def supports_sleep_mode(cls, kv_transfer_config: KVTransferConfig) -> bool:
+        # Only RDMA peers refresh a stale remote key. Either variable, set to any
+        # value, switches Mooncake to its NVLink transport.
         if any(v in os.environ for v in ("MC_FORCE_MNNVL", "MC_INTRANODE_NVLINK")):
             return False
         extra_config = kv_transfer_config.kv_connector_extra_config
@@ -1266,7 +1263,6 @@ class MooncakeConnectorWorker:
         self.seen_base_addresses: list[int] = []
         self._kv_data_lens: list[int] = []
         self._kv_unregistered = False
-        # Pulls on the receiver loop that may still write into local blocks.
         self._local_pulls = 0
         # Aligned regions depend only on the peer's registered layout.
         # The third item is an error string when alignment cannot proceed.
@@ -2242,8 +2238,7 @@ class MooncakeConnectorWorker:
                 )
 
     def unregister_kv_caches(self) -> None:
-        """Unregister the KV caches once no send or pull uses them; TimeoutError
-        past the abort timeout. Idempotent."""
+        """Waits up to the abort timeout for pending sends and pulls."""
         if self._kv_unregistered or not self.seen_base_addresses:
             return
         deadline = time.perf_counter() + envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT
@@ -2259,7 +2254,6 @@ class MooncakeConnectorWorker:
         self._kv_unregistered = True
 
     def restore_kv_caches(self) -> None:
-        """Register the unregistered KV caches again: same addresses, new pages."""
         if not self._kv_unregistered:
             return
         ret_value = self.engine.batch_register_memory(
@@ -2283,13 +2277,12 @@ class MooncakeConnectorWorker:
                     self._has_pending_recvs(), self.receiver_loop
                 )
             )
-        # A wedged loop raises TimeoutError instead of hanging past the deadline.
         return any(
             fut.result(timeout=deadline - time.perf_counter()) for fut in pending
         )
 
     async def _has_pending_sends(self) -> bool:
-        # A ready request is sent as soon as D asks for it, until it expires.
+        # D may still pull a ready request until it expires.
         now = time.perf_counter()
         return any(
             meta.ready.is_set() and not meta.expired(now)
@@ -2302,7 +2295,6 @@ class MooncakeConnectorWorker:
     def _create_pull_task(
         self, coro: Coroutine[Any, Any, None], pull_metas: dict[ReqId, PullReqMeta]
     ) -> None:
-        """Run a pull; one that writes local blocks is counted until it ends."""
         if any(any(meta.local_block_ids) for meta in pull_metas.values()):
             self._local_pulls += 1
             coro = self._counted_pull(coro)

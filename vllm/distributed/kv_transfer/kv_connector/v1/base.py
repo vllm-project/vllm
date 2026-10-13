@@ -208,8 +208,7 @@ class KVConnectorBase_V1(ABC):
 
     @classmethod
     def supports_sleep_mode(cls, kv_transfer_config: "KVTransferConfig") -> bool:
-        """False if the connector hands KV device memory to a NIC or another process
-        and cannot re-register it after sleep mode remaps the KV cache."""
+        """Whether the connector can follow the KV cache remap of sleep mode."""
         return True
 
     def __init__(
@@ -301,13 +300,13 @@ class KVConnectorBase_V1(ABC):
         return
 
     def unregister_kv_caches(self) -> None:
-        """Before the KV cache is unmapped: wait for in-flight transfers, then
-        drop registrations of that memory without freeing it. Idempotent."""
+        """Before sleep unmaps the KV cache: wait for in-flight transfers and drop
+        its memory registrations. Idempotent."""
         return
 
     def restore_kv_caches(self) -> None:
-        """After the KV cache is mapped again: redo what `unregister_kv_caches`
-        dropped. Idempotent."""
+        """After wake-up maps the KV cache again: redo `unregister_kv_caches`.
+        Idempotent."""
         return
 
     def set_host_xfer_buffer_ops(self, copy_operation: CopyBlocksOp):

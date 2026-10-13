@@ -2623,8 +2623,6 @@ def mooncake_sleep_worker(kv_role: str):
 
 @pytest.mark.parametrize("kv_role", ["kv_producer", "kv_consumer", "kv_both"])
 def test_sleep_cycle_unregisters_and_restores_registration(kv_role: str):
-    """Nothing stays registered while the KV caches are unmapped, and waking up
-    registers the same addresses again. Both calls are idempotent."""
     with mooncake_sleep_worker(kv_role) as (connector, expected):
         engine = connector.connector_worker.engine
         connector.unregister_kv_caches()
@@ -2637,8 +2635,7 @@ def test_sleep_cycle_unregisters_and_restores_registration(kv_role: str):
 
 @pytest.mark.parametrize("expired", [False, True], ids=["ready_to_send", "expired"])
 def test_unregister_waits_for_blocks_ready_to_send(monkeypatch, expired: bool):
-    """Blocks that D may still pull keep their registration until the abort
-    timeout fails the release; expired blocks are freed by get_finished()."""
+    """D may still pull a ready block until it expires."""
     monkeypatch.setattr(
         mooncake_connector.envs, "VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT", 0.2
     )

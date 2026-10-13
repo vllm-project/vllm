@@ -7,7 +7,7 @@ import openai
 import requests
 
 BASE_URL = f"http://localhost:{os.environ.get('PROXY_PORT', 8192)}/v1"
-# Comma-separated server URLs to put to sleep and wake up before the eval.
+# Comma-separated server URLs to sleep and wake up before the eval.
 SLEEP_WAKE_URLS = [
     url for url in os.environ.get("SLEEP_WAKE_URLS", "").split(",") if url
 ]
@@ -51,7 +51,6 @@ def test_accuracy():
     """Run the end to end accuracy test."""
     run_simple_prompt()
     if SLEEP_WAKE_URLS:
-        # KV transfers must still be correct after the KV cache is remapped.
         sleep_and_wake_up(SLEEP_WAKE_URLS)
 
     model_args = (

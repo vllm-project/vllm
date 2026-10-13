@@ -14,11 +14,11 @@ enabling prefix caching via hash-based deduplication.
 from collections import Counter
 from collections.abc import Iterable, Sequence
 from contextlib import AbstractContextManager
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import torch
 
-from vllm.config import VllmConfig
+from vllm.config import KVTransferConfig, VllmConfig
 from vllm.distributed.kv_events import (
     BlockStored,
     KVCacheEvent,
@@ -52,9 +52,6 @@ from .data import MooncakeStoreConnectorMetadata
 from .metrics import MooncakeStoreConnectorStats, MooncakeStorePromMetrics
 from .scheduler import MooncakeStoreScheduler
 from .worker import MooncakeStoreWorker
-
-if TYPE_CHECKING:
-    from vllm.config.kv_transfer import KVTransferConfig
 
 logger = init_logger(__name__)
 
@@ -131,8 +128,7 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
     """KV connector using MooncakeDistributedStore as shared KV pool."""
 
     @classmethod
-    def supports_sleep_mode(cls, kv_transfer_config: "KVTransferConfig") -> bool:
-        # Its RDMA registration keeps the KV pages from before the sleep.
+    def supports_sleep_mode(cls, kv_transfer_config: KVTransferConfig) -> bool:
         return False
 
     @staticmethod

@@ -163,7 +163,6 @@ def test_kv_connector_allows_expandable_segments_with_cumem_allocator(
     ids=["mooncake-tcp", "nixl"],
 )
 def test_sleep_mode_refuses_unsupported_kv_connector(kv_connector, extra_config):
-    """Sleep mode refuses a connector that cannot follow the KV cache remap."""
     with pytest.raises(ValueError, match=f"^{kv_connector} does not support sleep"):
         _build_config(
             kv_connector=kv_connector,
@@ -174,8 +173,7 @@ def test_sleep_mode_refuses_unsupported_kv_connector(kv_connector, extra_config)
 
 @pytest.mark.parametrize("env", ["MC_FORCE_MNNVL=0", "MC_INTRANODE_NVLINK=1"])
 def test_sleep_mode_refuses_mooncake_nvlink_transport(monkeypatch, env):
-    """Mooncake switches to its NVLink transport when either variable is set,
-    whatever its value and the configured protocol."""
+    """Either variable, set to any value, selects Mooncake's NVLink transport."""
     monkeypatch.setenv(*env.split("="))
     with pytest.raises(ValueError, match="^MooncakeConnector does not support sleep"):
         _build_config(kv_connector="MooncakeConnector", enable_sleep_mode=True)
