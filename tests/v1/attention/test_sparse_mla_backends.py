@@ -100,7 +100,9 @@ from vllm.v1.attention.backends.mla.flashmla_sparse import (
     FlashMLASparseImpl,
     FlashMLASparseMetadata,
     FlashMLASparseMetadataBuilder,
+    _fp8_kv_pages,
     triton_convert_req_index_to_global_index,
+    triton_filter_and_convert_dcp_index,
 )
 from vllm.v1.attention.backends.mla.index_group import (
     HiSparseMLAIndexGroup,
@@ -5268,25 +5270,25 @@ def test_fp8_mixed_batch_dcp_neutralizes_empty_rows(monkeypatch):
     num_tokens, num_heads, head_dim = 3, 2, 3
     q = torch.empty(num_tokens, num_heads, head_dim, device=DEVICE_TYPE)
     local_indices = torch.tensor(
-        [[0, 1, -1, -1], [-1, -1, -1, -1], [2, -1, 3, -1]],
+        [[0, 1, -1, -1], [-1, -1, -1, -1], [2, 3, -1, -1]],
         dtype=torch.int32,
         device=DEVICE_TYPE,
     )
+    local_lengths = torch.tensor([2, 0, 2], dtype=torch.int32, device=DEVICE_TYPE)
 
     monkeypatch.setattr(
         "vllm.v1.attention.backends.mla.flashmla_sparse."
         "triton_filter_and_convert_dcp_index",
-        lambda *args, **kwargs: local_indices,
+        lambda *args, **kwargs: (local_indices, local_lengths),
     )
 
-    def run_kernel(**kwargs):
-        out = torch.full(
-            (1, num_tokens, num_heads, 1), float("nan"), device=DEVICE_TYPE
-        )
-        lse = torch.full((1, num_heads, num_tokens), float("nan"), device=DEVICE_TYPE)
+    def run_kernel(q, kv_c_and_k_pe_cache, topk_indices, topk_length):
+        assert torch.equal(topk_length, local_lengths)
+        out = torch.full((num_tokens, num_heads, 1), float("nan"), device=DEVICE_TYPE)
+        lse = torch.full((num_tokens, num_heads), float("nan"), device=DEVICE_TYPE)
         for token_id in (0, 2):  # rows with local candidates get real values
-            out[0, token_id] = float(token_id + 1)
-            lse[0, :, token_id] = float(token_id + 1)
+            out[token_id] = float(token_id + 1)
+            lse[token_id] = float(token_id + 1)
         return out, lse
 
     metadata = SimpleNamespace(
@@ -5306,7 +5308,7 @@ def test_fp8_mixed_batch_dcp_neutralizes_empty_rows(monkeypatch):
         dcp_world_size=2,
         dcp_rank=0,
         need_to_return_lse_for_decode=True,
-        _fp8_flash_mla_kernel=run_kernel,
+        _fp8_flash_mla_kernel_per_token=run_kernel,
     )
 
     out, lse = FlashMLASparseImpl._forward_fp8_kv_mixed_batch(
@@ -5415,6 +5417,204 @@ def test_bf16_dcp_filters_topk_and_neutralizes_empty_rows(monkeypatch):
         assert torch.equal(out[token_id], torch.full_like(out[token_id], token_id + 1))
         assert torch.equal(lse[token_id], torch.full_like(lse[token_id], token_id + 1))
     assert out.is_contiguous()
+
+
+def _make_fp8_dcp_rows(
+    num_heads: int,
+    dcp_world_size: int,
+    dcp_rank: int,
+    interleave: int,
+    block_size: int,
+    block_stride_rows: int,
+):
+    """One DCP rank's fp8_ds_mla cache and indexer rows: 340 decode rows for each
+    of three requests, then the first positions of a fresh prefill of request 0,
+    whose rows see only a few candidates. Returns the queries, the cache's
+    64-token page view, the rank's slots packed into a prefix with their counts
+    (what the DCP path hands the kernel), and the same slots masked in place."""
+    torch.manual_seed(0)
+    num_topk = 2048
+    seq_lens = [9000, 2100, 700]
+    # With interleave > 1 a rank's local slots can run up to interleave past
+    # seq_len / dcp.
+    local_blocks = [
+        cdiv(cdiv(s, dcp_world_size) + interleave, block_size) for s in seq_lens
+    ]
+    block_table = torch.zeros(
+        len(seq_lens), max(local_blocks), dtype=torch.int32, device=DEVICE_TYPE
+    )
+    perm = torch.randperm(sum(local_blocks), device=DEVICE_TYPE).to(torch.int32)
+    start = 0
+    for r, n in enumerate(local_blocks):
+        block_table[r, :n] = perm[start : start + n]
+        start += n
+
+    rows, req_ids = [], []
+    for r, s in enumerate(seq_lens):
+        row = torch.full((340, num_topk), -1, dtype=torch.int32, device=DEVICE_TYPE)
+        cand = torch.rand(340, s, device=DEVICE_TYPE).argsort(dim=-1)[:, :num_topk]
+        row[:, : cand.shape[1]] = cand.to(torch.int32)
+        rows.append(row)
+        req_ids += [r] * 340
+    slots = torch.arange(num_topk, dtype=torch.int32, device=DEVICE_TYPE)
+    positions = torch.arange(24, dtype=torch.int32, device=DEVICE_TYPE).unsqueeze(1)
+    rows.append(torch.where(slots <= positions, slots, -1))
+    req_ids += [0] * 24
+    global_topk = torch.cat(rows)
+    req_id = torch.tensor(req_ids, dtype=torch.int32, device=DEVICE_TYPE)
+
+    num_slots = sum(local_blocks) * block_size
+    cache = torch.zeros(
+        sum(local_blocks), block_size, 656, dtype=torch.uint8, device=DEVICE_TYPE
+    )
+    ops.concat_and_cache_mla(
+        (torch.randn(num_slots, 512, device=DEVICE_TYPE) * 0.5).bfloat16(),
+        (torch.randn(num_slots, 64, device=DEVICE_TYPE) * 0.5).bfloat16(),
+        cache,
+        torch.arange(num_slots, device=DEVICE_TYPE),
+        kv_cache_dtype="fp8_ds_mla",
+        scale=torch.ones(1, device=DEVICE_TYPE),
+    )
+    pad = (0, 0, 0, block_stride_rows - block_size)
+    cache = torch.nn.functional.pad(cache, pad)[:, :block_size]
+    kv_pages, stride_rows = _fp8_kv_pages(cache, block_size)
+
+    def rank_slots(**kwargs):
+        return triton_filter_and_convert_dcp_index(
+            req_id,
+            block_table,
+            global_topk,
+            dcp_size=dcp_world_size,
+            dcp_rank=dcp_rank,
+            cp_kv_cache_interleave_size=interleave,
+            BLOCK_SIZE=block_size,
+            BLOCK_STRIDE_ROWS=stride_rows,
+            NUM_TOPK_TOKENS=num_topk,
+            **kwargs,
+        )
+
+    packed, lengths = rank_slots(return_valid_counts=True)
+    masked = rank_slots(compact_valid_to_front=False)
+    assert isinstance(masked, torch.Tensor)
+    q = torch.randn(global_topk.shape[0], num_heads, 576, device=DEVICE_TYPE) * 0.3
+    return q.bfloat16(), kv_pages, packed, lengths, masked
+
+
+def _make_fp8_sparse_impl(impl_cls, num_heads, scale, **impl_kwargs):
+    vllm_config = create_vllm_config(
+        model_name="deepseek-ai/DeepSeek-V2-Lite-Chat",
+        block_size=64,
+        max_num_batched_tokens=2048,
+    )
+    with set_current_vllm_config(vllm_config):
+        return impl_cls(
+            num_heads=num_heads,
+            head_size=576,
+            scale=scale,
+            num_kv_heads=1,
+            alibi_slopes=None,
+            sliding_window=None,
+            kv_cache_dtype="fp8_ds_mla",
+            logits_soft_cap=None,
+            attn_type="decoder",
+            kv_sharing_target_layer_name=None,
+            q_lora_rank=None,
+            kv_lora_rank=512,
+            qk_nope_head_dim=128,
+            qk_rope_head_dim=64,
+            qk_head_dim=192,
+            v_head_dim=128,
+            kv_b_proj=None,
+            **impl_kwargs,
+        )
+
+
+@pytest.mark.parametrize("num_heads", [32, 128])
+@pytest.mark.parametrize("dcp_world_size,dcp_rank", [(2, 1), (4, 3)])
+@pytest.mark.parametrize("interleave", [1, 16])
+@pytest.mark.parametrize(
+    "block_size,block_stride_rows",
+    # GLM-5.3 on SM90 packs 128-token blocks at a 192-row stride.
+    [(64, 64), (128, 192)],
+)
+def test_fp8_dcp_topk_length_matches_masked_rows(
+    dist_init,
+    workspace_init,
+    num_heads,
+    dcp_world_size,
+    dcp_rank,
+    interleave,
+    block_size,
+    block_stride_rows,
+):
+    """Handing the kernel each row's owned-slot count as topk_length must match
+    the call that masks the slots other DCP ranks own, for rows with fewer than
+    topk candidates, with padded (32) and native (128) heads, and for a batch
+    spanning two calls (1044 tokens, 1024 per call at 128 heads)."""
+    ok, reason = flashmla.is_flashmla_sparse_supported()
+    if not ok:
+        pytest.skip(reason)
+    q, kv_pages, packed, lengths, masked = _make_fp8_dcp_rows(
+        num_heads, dcp_world_size, dcp_rank, interleave, block_size, block_stride_rows
+    )
+    scale = q.shape[-1] ** -0.5
+    impl = _make_fp8_sparse_impl(FlashMLASparseImpl, num_heads, scale)
+    out, lse = impl._fp8_flash_mla_kernel_per_token(q, kv_pages, packed, lengths)
+
+    # The call before topk_length: every token in one batch entry, the slots of
+    # other ranks set to -1, and the queries padded to the kernel's head count.
+    kernel_heads = 64 if num_heads <= 64 else 128
+    ref_out, ref_lse = flashmla.flash_mla_with_kvcache(
+        q=torch.nn.functional.pad(q, (0, 0, 0, kernel_heads - num_heads)).unsqueeze(0),
+        k_cache=kv_pages.unsqueeze(-2),
+        block_table=None,
+        cache_seqlens=None,
+        head_dim_v=512,
+        tile_scheduler_metadata=flashmla.get_mla_metadata()[0],
+        is_fp8_kvcache=True,
+        indices=masked.unsqueeze(0),
+        softmax_scale=scale,
+    )
+    ref_out = ref_out[0, :, :num_heads]
+    ref_lse = ref_lse[0, :num_heads].transpose(0, 1)
+
+    assert torch.equal(lengths, (masked != -1).sum(dim=-1, dtype=torch.int32))
+    owned = lengths > 0
+    assert not owned.all(), "expected rows this rank owns nothing of"
+    torch.testing.assert_close(out[owned], ref_out[owned], atol=2e-2, rtol=2e-2)
+    torch.testing.assert_close(lse[owned], ref_lse[owned], atol=1e-4, rtol=1e-5)
+
+
+def test_hyv4_fp8_per_token_kernel_applies_sink(dist_init, workspace_init):
+    """HY V4's sink reaches the per-token call the DCP path uses, head by head
+    and through the kernel's head padding: a +inf sink zeroes its head and a
+    -inf sink leaves it as it is without a sink."""
+    from vllm.models.hy_v4.nvidia.flashmla_sparse import HYV4FlashMLASparseImpl
+
+    ok, reason = flashmla.is_flashmla_sparse_supported()
+    if not ok:
+        pytest.skip(reason)
+    num_heads = 32
+    q, kv_pages, packed, lengths, _ = _make_fp8_dcp_rows(num_heads, 4, 3, 1, 64, 64)
+    scale = q.shape[-1] ** -0.5
+    sinks = torch.full(
+        (num_heads,), float("-inf"), dtype=torch.float32, device=DEVICE_TYPE
+    )
+    sinks[::2] = float("inf")
+    hyv4 = _make_fp8_sparse_impl(HYV4FlashMLASparseImpl, num_heads, scale, sinks=sinks)
+    plain = _make_fp8_sparse_impl(FlashMLASparseImpl, num_heads, scale)
+    out, lse = hyv4._fp8_flash_mla_kernel_per_token(q, kv_pages, packed, lengths)
+    ref_out, ref_lse = plain._fp8_flash_mla_kernel_per_token(
+        q, kv_pages, packed, lengths
+    )
+
+    owned = lengths > 0
+    assert ref_out[owned][:, ::2].any()
+    assert not out[owned][:, ::2].any()
+    torch.testing.assert_close(
+        out[owned][:, 1::2], ref_out[owned][:, 1::2], atol=0, rtol=0
+    )
+    torch.testing.assert_close(lse[owned], ref_lse[owned], atol=0, rtol=0)
 
 
 def test_hisparse_prefill_reuses_builder_staging_plan():
