@@ -30,9 +30,10 @@ steps:
       - vllm/_aiter_ops.py
       - vllm/platforms/rocm.py
 
-- label: ":nvidia: (H200 MIG 35GB) Core Operation Kernels Shard %N"
+- label: ":nvidia: (H200 MIG 35GB) Core Operation Kernels"
   device: h200_35gb
   key: kernels-core-operation-test
+  automatic_shard: true
   timeout_in_minutes: 120
   source_file_dependencies:
   - csrc/
@@ -40,10 +41,10 @@ steps:
   - tests/kernels/test_concat_mla_q.py
   - tests/kernels/test_fused_qk_norm_rope_gate.py
   commands:
-    - pytest -v -s kernels/core --ignore=kernels/core/test_minimax_reduce_rms.py kernels/test_concat_mla_q.py kernels/test_fused_qk_norm_rope_gate.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
-  parallelism: 3
+    - pytest -v -s kernels/core --ignore=kernels/core/test_minimax_reduce_rms.py kernels/test_concat_mla_q.py kernels/test_fused_qk_norm_rope_gate.py
   mirror:
     amd:
+      parallelism: 3
       label: ":amd: (MI300) Core Operation Kernels Shard %N"
       dind: false
       device: mi300_1
