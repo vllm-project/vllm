@@ -2,7 +2,6 @@
 #ifndef CPU_TYPES_X86_HPP
 #define CPU_TYPES_X86_HPP
 
-#include <array>
 #include <cstring>
 #include <immintrin.h>
 #include <sleef.h>
@@ -185,31 +184,6 @@ struct BF16Vec16 : public Vec<BF16Vec16> {
 };
 
 #ifdef __AVX512F__
-template <int mantissa_bits>
-FORCE_INLINE __m512i fp8_to_bf16(__m256i bytes) {
-  // The cache writer saturates NaN/Inf inputs to finite FP8 encodings.
-  const __m512i x = _mm512_cvtepi8_epi16(bytes);
-  const __m512i magnitude = _mm512_and_si512(x, _mm512_set1_epi16(0x7f));
-  const __m512i normal =
-      _mm512_add_epi16(_mm512_slli_epi16(magnitude, 7 - mantissa_bits),
-                       _mm512_set1_epi16(mantissa_bits == 3 ? 0x3c00 : 0x3800));
-  const __mmask32 exponent_nonzero = _mm512_test_epi16_mask(
-      x, _mm512_set1_epi16(mantissa_bits == 3 ? 0x78 : 0x7c));
-  __m512i result;
-  if constexpr (mantissa_bits == 3) {
-    // E4M3 AMX decoding flushes encoded subnormals to signed zero.
-    result = _mm512_maskz_mov_epi16(exponent_nonzero, normal);
-  } else {
-    alignas(64) static constexpr std::array<uint16_t, 32> subnormals = {
-        0, 0x3780, 0x3800, 0x3840};
-    const __m512i subnormal =
-        _mm512_permutexvar_epi16(x, _mm512_load_si512(subnormals.data()));
-    result = _mm512_mask_blend_epi16(exponent_nonzero, subnormal, normal);
-  }
-  // Signed widening places the FP8 sign directly in BF16 bit 15.
-  return _mm512_ternarylogic_epi32(result, x, _mm512_set1_epi16(0x8000), 0xf8);
-}
-
 struct BF16Vec32 : public Vec<BF16Vec32> {
   constexpr static int VEC_ELEM_NUM = 32;
 
@@ -249,14 +223,34 @@ struct BF16Vec32 : public Vec<BF16Vec32> {
     reg = _mm512_slli_epi16(_mm512_cvtepu8_epi16(b8), 8);
   }
 
+  // The cache writer saturates NaN/Inf inputs to finite FP8 encodings.
   explicit BF16Vec32(const uint8_t* ptr, fp8_bf16_e4m3_tag) {
-    reg = fp8_to_bf16<3>(
-        _mm256_loadu_si256(reinterpret_cast<const __m256i*>(ptr)));
+    const __m256i bytes =
+        _mm256_loadu_si256(reinterpret_cast<const __m256i*>(ptr));
+    const __m512i x = _mm512_cvtepi8_epi16(bytes);
+    const __m512i magnitude = _mm512_and_si512(x, _mm512_set1_epi16(0x7f));
+    const __m512i normal = _mm512_add_epi16(_mm512_slli_epi16(magnitude, 4),
+                                            _mm512_set1_epi16(0x3c00));
+    // E4M3 AMX decoding flushes encoded subnormals to signed zero.
+    const __m512i result = _mm512_maskz_mov_epi16(
+        _mm512_test_epi16_mask(x, _mm512_set1_epi16(0x78)), normal);
+    reg = _mm512_ternarylogic_epi32(result, x, _mm512_set1_epi16(0x8000), 0xf8);
   }
 
   explicit BF16Vec32(const uint8_t* ptr, fp8_bf16_e5m2_tag) {
-    reg = fp8_to_bf16<2>(
-        _mm256_loadu_si256(reinterpret_cast<const __m256i*>(ptr)));
+    alignas(64) static constexpr uint16_t subnormals[32] = {0, 0x3780, 0x3800,
+                                                            0x3840};
+    const __m256i bytes =
+        _mm256_loadu_si256(reinterpret_cast<const __m256i*>(ptr));
+    const __m512i x = _mm512_cvtepi8_epi16(bytes);
+    const __m512i magnitude = _mm512_and_si512(x, _mm512_set1_epi16(0x7f));
+    const __m512i normal = _mm512_add_epi16(_mm512_slli_epi16(magnitude, 5),
+                                            _mm512_set1_epi16(0x3800));
+    const __m512i subnormal =
+        _mm512_permutexvar_epi16(x, _mm512_load_si512(subnormals));
+    const __m512i result = _mm512_mask_blend_epi16(
+        _mm512_test_epi16_mask(x, _mm512_set1_epi16(0x7c)), subnormal, normal);
+    reg = _mm512_ternarylogic_epi32(result, x, _mm512_set1_epi16(0x8000), 0xf8);
   }
 
   void save(void* ptr) const { *reinterpret_cast<__m512i*>(ptr) = reg; }
