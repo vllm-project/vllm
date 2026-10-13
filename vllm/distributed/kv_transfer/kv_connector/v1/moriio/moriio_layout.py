@@ -298,9 +298,15 @@ def get_layer_transfer_geometry(
         and shape[3] * element_size == spec.state_content_size_bytes
     ):
         # Standardized per-layer [B, H, N, C] view (MLA is just H == 1).
+        # For fp8_ds_mla the block stride may exceed the data content
+        # (padding/interleaving); block_len is the actual data footprint
+        # so the last block does not overrun the backing allocation.
         num_blocks, num_heads, num_states, content_dim = shape
         slot_size_bytes = num_heads * content_dim * element_size
-        block_len = num_states * slot_size_bytes
+        block_len = 1 + sum(
+            (s - 1) * st for s, st in zip(shape[1:], stride[1:])
+        )
+        block_len *= element_size
         return LayerTransferGeometry(
             num_blocks=num_blocks,
             block_size=spec.block_size,
