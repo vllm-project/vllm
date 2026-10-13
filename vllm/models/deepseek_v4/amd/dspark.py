@@ -11,8 +11,8 @@ ROCm port of ``nvidia/dspark.py``. Follows the same nvidia->amd recipe used for
     tilelang / triton / torch) instead of calling the tilelang kernels directly,
     and gate the trailing ``mhc_post`` on ``use_fused_mhc`` (True when AITER
     or TileLang fused MHC is available; False only on the torch fallback);
-  * use the AITER MegaMoE path (``aiter_mega_moe``) instead of the DeepGEMM
-    mega-MoE path.
+  * run the routed experts through the fused-MoE layer only, without the
+    DeepGEMM mega-MoE path.
 
 Everything else — the semi-autoregressive drafting hooks, the Markov head, the
 sliding-window context-KV insert, and the checkpoint ``mtp.*`` weight remap — is
@@ -49,7 +49,6 @@ from vllm.model_executor.models.qwen3_dspark import (
 )
 from vllm.model_executor.models.utils import maybe_prefix
 
-from .mega_moe import finalize_mega_moe_weights
 from .model import (
     DeepseekV4DecoderLayer,
 )
@@ -391,9 +390,7 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
             ckpt_down_proj_name="w2",
             ckpt_up_proj_name="w3",
             num_experts=self.config.n_routed_experts,
-            routed_experts_prefix=(
-                "" if self.model.layers[0].ffn.use_mega_moe else "routed_experts"
-            ),
+            routed_experts_prefix="routed_experts",
         )
         expert_scale_suffix = (
             ".weight_scale"
@@ -496,9 +493,6 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
             self.model.confidence_head = None
         logger.info_once("DSpark draft model loaded: %d params", len(loaded_params))
         return loaded_params
-
-    def process_weights_after_loading(self) -> None:
-        finalize_mega_moe_weights(self)
 
     def _remap_dspark_name(self, name: str) -> str | None:
         """Map a checkpoint ``mtp.{i}.*`` name to this model's parameter path.
