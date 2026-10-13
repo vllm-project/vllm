@@ -22,6 +22,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import AbstractContextManager
 from typing import Any, TypeVar
 
+import regex as re
 import torch
 import zmq
 
@@ -1486,6 +1487,9 @@ class MooncakeStoreWorker:
         assert kv_role is not None
         self.kv_role = kv_role
         extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
+        self.cache_prefix = extra_config.get("cache_prefix", "")
+        if not isinstance(self.cache_prefix, str) or "@" in self.cache_prefix:
+            raise ValueError("cache_prefix must be a string without '@'")
         self.can_put = self.kv_role in ("kv_producer", "kv_both") or (
             extra_config.get("save_decode_cache", False)
         )
@@ -1637,11 +1641,7 @@ class MooncakeStoreWorker:
             pcp_rank=self.pcp_rank,
             dcp_rank=self.dcp_rank,
             pp_rank=self.pp_rank,
-            cache_prefix=str(
-                vllm_config.kv_transfer_config.kv_connector_extra_config.get(
-                    "cache_prefix", ""
-                )
-            ),
+            cache_prefix=self.cache_prefix,
             store_namespace=store_namespace,
         )
         self._group_tp_replication_factors: tuple[int, ...] = (
@@ -2379,6 +2379,14 @@ class MooncakeStoreWorker:
     def group_tp_replication_factors(self) -> tuple[int, ...]:
         return self._group_tp_replication_factors
 
+    def remove_store_keys(self) -> int:
+        """Remove this cache prefix, or all keys when no prefix is configured."""
+        if self.cache_prefix:
+            return self.store.remove_by_regex(
+                "^" + re.escape(self.cache_prefix) + "@", force=True
+            )
+        return self.store.remove_all(force=True)
+
     def close(self) -> None:
         """Release the MooncakeDistributedStore handle on teardown.
 
@@ -2419,9 +2427,9 @@ class LookupKeyServer:
 
     Handles two request types, tagged at frame 0:
     - ``LOOKUP_MSG``: prefix-cache hit query, returns its load plan.
-    - ``RESET_MSG``: drains the send thread queue, then runs
-      ``store.remove_all(force=True)``. Caller must have paused the
-      scheduler first.
+    - ``RESET_MSG``: drains the send thread queue, then removes store keys
+      in the configured cache prefix. See ``MooncakeStoreScheduler.reset_store``
+      for the caller's ordering requirements.
     """
 
     def __init__(
@@ -2459,26 +2467,24 @@ class LookupKeyServer:
 
                 elif msg_type == RESET_MSG:
                     try:
-                        # Drain in-flight puts before wiping the master;
-                        # otherwise stale puts can repopulate it post-reset.
-                        # Safe across HMA: store.remove_all wipes the underlying
-                        # flat key space, clearing every (group_id, hash) entry.
+                        # Drain local puts so they cannot repopulate the cache
+                        # after reset. Other writers must be quiesced by callers.
                         if self.store_worker.kv_send_thread is not None:
                             self.store_worker.kv_send_thread.request_queue.join()
-                        removed = self.store_worker.store.remove_all(force=True)
+                        removed = self.store_worker.remove_store_keys()
                         if type(removed) is not int or removed < 0:
                             logger.error(
-                                "Mooncake remove_all returned invalid result: %r",
+                                "Mooncake store reset returned invalid result: %r",
                                 removed,
                             )
                             self.socket.send(RESP_ERR)
                         else:
                             logger.info(
-                                "Mooncake store reset via remove_all succeeded."
+                                "Mooncake store reset removed %d keys.", removed
                             )
                             self.socket.send(RESP_OK)
                     except Exception as e:
-                        logger.error("Mooncake remove_all failed: %s", e)
+                        logger.error("Mooncake store reset failed: %s", e)
                         self.socket.send(RESP_ERR)
 
                 else:
@@ -2570,7 +2576,7 @@ class LookupKeyClient:
             future.cancel()
 
     def _reset(self) -> bool:
-        """Trigger ``store.remove_all(force=True)`` on worker rank 0.
+        """Trigger a reset of the configured cache prefix on worker rank 0.
 
         Ordering assumption: caller MUST ensure no in-flight Mooncake
         lookups or transfers when invoking reset. In RL workflows this

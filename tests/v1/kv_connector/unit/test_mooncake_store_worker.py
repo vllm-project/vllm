@@ -4872,6 +4872,7 @@ def _run_reset_message(monkeypatch, store_worker):
     return socket.send.call_args.args[0]
 
 
+@pytest.mark.parametrize("prefix", ["", "job-a"])
 @pytest.mark.parametrize(
     ("result", "expected"),
     [
@@ -4886,23 +4887,32 @@ def _run_reset_message(monkeypatch, store_worker):
         (RuntimeError("master unavailable"), worker.RESP_ERR),
     ],
 )
-def test_reset_reports_legacy_removal_result(monkeypatch, result, expected):
+def test_reset_reports_legacy_removal_result(monkeypatch, prefix, result, expected):
     w = worker.MooncakeStoreWorker.__new__(worker.MooncakeStoreWorker)
+    w.cache_prefix = prefix
     w.kv_send_thread = None
     w.recv_request_queue = MagicMock()
-    w.store = MagicMock(spec=["remove_all"])
+    w.store = MagicMock(spec=["remove_by_regex", "remove_all"])
+    remove = w.store.remove_by_regex if prefix else w.store.remove_all
     if isinstance(result, Exception):
-        w.store.remove_all.side_effect = result
+        remove.side_effect = result
     else:
-        w.store.remove_all.return_value = result
+        remove.return_value = result
     assert _run_reset_message(monkeypatch, w) == expected
     w.recv_request_queue.join.assert_not_called()
-    w.store.remove_all.assert_called_once_with(force=True)
+    if prefix:
+        w.store.remove_by_regex.assert_called_once_with(r"^job\-a@", force=True)
+        w.store.remove_all.assert_not_called()
+    else:
+        w.store.remove_all.assert_called_once_with(force=True)
+        w.store.remove_by_regex.assert_not_called()
 
 
+@pytest.mark.parametrize("prefix", ["", "job-a"])
 @pytest.mark.parametrize("has_sender", [False, True])
-def test_reset_drains_local_sends_before_removal(monkeypatch, has_sender):
+def test_reset_drains_local_sends_before_removal(monkeypatch, prefix, has_sender):
     w = worker.MooncakeStoreWorker.__new__(worker.MooncakeStoreWorker)
+    w.cache_prefix = prefix
     calls = MagicMock()
     w.kv_send_thread = MagicMock() if has_sender else None
     if has_sender:
@@ -4910,18 +4920,87 @@ def test_reset_drains_local_sends_before_removal(monkeypatch, has_sender):
     w.recv_request_queue = calls.recv
     w.recv_request_queue.join.side_effect = RuntimeError("unfinished receive work")
     w.store = calls.store
-    w.store.remove_all.return_value = 0
+    remove = w.store.remove_by_regex if prefix else w.store.remove_all
+    remove.return_value = 0
     assert _run_reset_message(monkeypatch, w) == worker.RESP_OK
     expected = [call.send.join()] if has_sender else []
-    expected += [call.store.remove_all(force=True)]
+    expected += (
+        [call.store.remove_by_regex(r"^job\-a@", force=True)]
+        if prefix
+        else [call.store.remove_all(force=True)]
+    )
     assert calls.mock_calls == expected
 
 
-def test_reset_send_drain_failure_prevents_removal(monkeypatch):
+@pytest.mark.parametrize("prefix", ["", "job-a"])
+def test_reset_send_drain_failure_prevents_removal(monkeypatch, prefix):
     w = worker.MooncakeStoreWorker.__new__(worker.MooncakeStoreWorker)
+    w.cache_prefix = prefix
     w.kv_send_thread = MagicMock()
     w.recv_request_queue = MagicMock()
-    w.store = MagicMock(spec=["remove_all"])
+    w.store = MagicMock(spec=["remove_by_regex", "remove_all"])
     w.kv_send_thread.request_queue.join.side_effect = RuntimeError("drain failed")
     assert _run_reset_message(monkeypatch, w) == worker.RESP_ERR
     w.store.remove_all.assert_not_called()
+    w.store.remove_by_regex.assert_not_called()
+
+
+@pytest.mark.parametrize("prefix", ["job-a", "job.a+(x)[y]", r"job\a"])
+def test_reset_preserves_other_cache_prefixes(monkeypatch, prefix):
+    import regex as re
+
+    owned = {
+        PoolKey(
+            KeyMetadata(model, rank, 0, 0, 0, group_id=group, cache_prefix=prefix),
+            "hash",
+        ).to_string()
+        for model, rank, group in itertools.product(
+            ["model-a", "model-b"], [0, 1], [0, 1]
+        )
+    }
+    foreign = {
+        PoolKey(
+            KeyMetadata("model-a", 0, 0, 0, 0, cache_prefix=other), "hash"
+        ).to_string()
+        for other in ["", "other", prefix + "-other", "other-" + prefix]
+    }
+    keys = owned | foreign
+    w = worker.MooncakeStoreWorker.__new__(worker.MooncakeStoreWorker)
+    w.cache_prefix = prefix
+    w.kv_send_thread = None
+    w.store = MagicMock(spec=["remove_by_regex", "remove_all"])
+
+    def remove(pattern, *, force):
+        assert force is True
+        matched = {key for key in keys if re.search(pattern, key)}
+        keys.difference_update(matched)
+        return len(matched)
+
+    w.store.remove_by_regex.side_effect = remove
+    assert _run_reset_message(monkeypatch, w) == worker.RESP_OK
+    assert keys == foreign
+    assert _run_reset_message(monkeypatch, w) == worker.RESP_OK
+    assert keys == foreign
+    w.store.remove_all.assert_not_called()
+
+
+def test_scoped_reset_missing_api_never_removes_all(monkeypatch):
+    w = worker.MooncakeStoreWorker.__new__(worker.MooncakeStoreWorker)
+    w.cache_prefix = "job-a"
+    w.kv_send_thread = None
+    w.store = MagicMock(spec=["remove_all"])
+    assert _run_reset_message(monkeypatch, w) == worker.RESP_ERR
+    w.store.remove_all.assert_not_called()
+
+
+@pytest.mark.parametrize("prefix", [None, 123, "job@a"])
+def test_worker_rejects_ambiguous_cache_prefix_before_store_setup(monkeypatch, prefix):
+    store = MagicMock()
+    _install_fake_mooncake(monkeypatch, store)
+    _patch_worker_runtime(monkeypatch)
+    with pytest.raises(ValueError, match="cache_prefix must be a string without '@'"):
+        worker.MooncakeStoreWorker(
+            _make_vllm_config(extra_config={"cache_prefix": prefix}),
+            _make_kv_cache_config(),
+        )
+    store.setup.assert_not_called()
