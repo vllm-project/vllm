@@ -40,9 +40,6 @@ from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
     _swizzle_mxfp4,
 )
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
-    is_rocm_gfx1250 as _is_rocm_gfx1250,
-)
-from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
     mx_scale_kwargs as _mx_scale_kwargs,
 )
 from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
@@ -155,7 +152,9 @@ class Mxfp4MoeBackend(Enum):
     # W4A16: aiter Triton moe_gemm_a16w4 kernel (gfx942/gfx950/gfx1250)
     AITER_TRITON_MXFP4_BF16 = "AITER_TRITON_MXFP4_BF16"
     AITER_MXFP4_FP8 = "AITER_MXFP4_FP8"  # W4A8: triton kernel
-    AITER_MXFP4_MXFP4 = "AITER_MXFP4_MXFP4"  # W4A4: CK kernel
+    AITER_MXFP4_MXFP4 = "AITER_MXFP4_MXFP4"  # W4A4: CK kernel (gfx950)
+    # W4A4: aiter Triton/Gluon moe_gemm_a4w4 kernel (gfx1250)
+    AITER_TRITON_MXFP4_MXFP4 = "AITER_TRITON_MXFP4_MXFP4"
     # Triton
     TRITON = "TRITON"
     TRITON_UNFUSED = "TRITON_UNFUSED"
@@ -307,16 +306,18 @@ def backend_to_kernel_cls(
         return [AiterW4A8ExpertsMonolithic]
 
     elif backend == Mxfp4MoeBackend.AITER_MXFP4_MXFP4:
-        from vllm.model_executor.layers.fused_moe.experts.aiter_mxfp4_w4a4_moe import (
-            AiterW4A4ExpertsMonolithic,
-        )
         from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
             AiterMxfp4Experts,
         )
 
-        if _is_rocm_gfx1250():
-            return [AiterW4A4ExpertsMonolithic, AiterMxfp4Experts]
         return [AiterMxfp4Experts]
+
+    elif backend == Mxfp4MoeBackend.AITER_TRITON_MXFP4_MXFP4:
+        from vllm.model_executor.layers.fused_moe.experts.aiter_mxfp4_w4a4_moe import (
+            AiterW4A4ExpertsMonolithic,
+        )
+
+        return [AiterW4A4ExpertsMonolithic]
 
     elif backend == Mxfp4MoeBackend.XPU:
         from vllm.model_executor.layers.fused_moe.experts.xpu_moe import XPUExpertsMxFp4
@@ -378,9 +379,11 @@ def map_mxfp4_backend(runner_backend: MoEBackend) -> list[Mxfp4MoeBackend]:
             Mxfp4MoeBackend.AITER_TRITON_MXFP4_BF16,
             Mxfp4MoeBackend.AITER_MXFP4_FP8,
             Mxfp4MoeBackend.AITER_MXFP4_MXFP4,
+            Mxfp4MoeBackend.AITER_TRITON_MXFP4_MXFP4,
         ],
         "aiter_triton_mxfp4_bf16": [Mxfp4MoeBackend.AITER_TRITON_MXFP4_BF16],
         "aiter_mxfp4_fp8": [Mxfp4MoeBackend.AITER_MXFP4_FP8],
+        "aiter_triton_mxfp4_mxfp4": [Mxfp4MoeBackend.AITER_TRITON_MXFP4_MXFP4],
         "aiter_mxfp4_mxfp4": [Mxfp4MoeBackend.AITER_MXFP4_MXFP4],
         "xpu": [Mxfp4MoeBackend.XPU],
         "cpu": [Mxfp4MoeBackend.CPU],
@@ -404,6 +407,7 @@ def _get_priority_backends_for_gpt_oss() -> list[Mxfp4MoeBackend]:
         Mxfp4MoeBackend.AITER_TRITON_MXFP4_BF16,
         Mxfp4MoeBackend.AITER_MXFP4_FP8,
         Mxfp4MoeBackend.AITER_MXFP4_MXFP4,
+        Mxfp4MoeBackend.AITER_TRITON_MXFP4_MXFP4,
         Mxfp4MoeBackend.TRITON,
         Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_BF16,
         Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_MXFP8,
@@ -436,13 +440,10 @@ def _get_priority_backends() -> list[Mxfp4MoeBackend]:
     backend-level ``is_supported_config`` check filters by device capability).
     """
     if current_platform.is_rocm():
-        if _is_rocm_gfx1250():
-            return [
-                Mxfp4MoeBackend.AITER_MXFP4_MXFP4,
-                Mxfp4MoeBackend.AITER_MXFP4_BF16,
-                Mxfp4MoeBackend.EMULATION,
-            ]
+        # AITER_TRITON_MXFP4_MXFP4 only supports gfx1250, so other ROCm archs
+        # fall through to AITER_MXFP4_BF16.
         return [
+            Mxfp4MoeBackend.AITER_TRITON_MXFP4_MXFP4,
             Mxfp4MoeBackend.AITER_MXFP4_BF16,
             Mxfp4MoeBackend.EMULATION,
         ]
@@ -478,6 +479,7 @@ def _backend_activation_key(backend: Mxfp4MoeBackend) -> QuantKey | None:
         return kFp8StaticTensorSym
     if backend in (
         Mxfp4MoeBackend.AITER_MXFP4_MXFP4,
+        Mxfp4MoeBackend.AITER_TRITON_MXFP4_MXFP4,
         Mxfp4MoeBackend.CUTLASS_MXFP4_MXFP4,
     ):
         return kMxfp4Dynamic
@@ -802,17 +804,13 @@ def select_deepseek_v4_mxfp4_moe_backend(
         current_platform.is_rocm()
         and config.routing_method == RoutingMethodType.DeepseekV4
     ):
-        if _is_rocm_gfx1250():
-            priority_backends = [
-                Mxfp4MoeBackend.AITER_MXFP4_MXFP4,
-                Mxfp4MoeBackend.AITER_MXFP4_BF16,
-                Mxfp4MoeBackend.TRITON_UNFUSED,
-            ]
-        else:
-            priority_backends = [
-                Mxfp4MoeBackend.AITER_MXFP4_BF16,
-                Mxfp4MoeBackend.TRITON_UNFUSED,
-            ]
+        # AITER_TRITON_MXFP4_MXFP4 only supports gfx1250, so other ROCm archs
+        # fall through to AITER_MXFP4_BF16.
+        priority_backends = [
+            Mxfp4MoeBackend.AITER_TRITON_MXFP4_MXFP4,
+            Mxfp4MoeBackend.AITER_MXFP4_BF16,
+            Mxfp4MoeBackend.TRITON_UNFUSED,
+        ]
     else:
         priority_backends = _get_priority_backends()
 
@@ -972,12 +970,6 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
     hidden_size = w13_weight.shape[2] * 2
 
     sf_block_size = 32  # mxfp4 block size
-
-    is_gfx1250 = False
-    if current_platform.is_rocm():
-        from vllm.platforms.rocm import on_gfx1250
-
-        is_gfx1250 = on_gfx1250()
 
     if mxfp4_backend == Mxfp4MoeBackend.HUMMING:
         from vllm.model_executor.layers.quantization.utils.humming import (
@@ -1231,55 +1223,60 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
                 w2_bias,
             )
 
-    elif mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_MXFP4:
+    elif mxfp4_backend == Mxfp4MoeBackend.AITER_TRITON_MXFP4_MXFP4:
         if w13_bias is not None:
             w13_bias = w13_bias.data.to(torch.float32)
         if w2_bias is not None:
             w2_bias = w2_bias.data.to(torch.float32)
 
-        if is_gfx1250:
-            # Triton moe_gemm_a4w4: uint8 column-major weights.
-            w13_data = w13_weight.data.view(torch.uint8)
-            w2_data = w2_weight.data.view(torch.uint8)
-            w13_scale_data = w13_weight_scale.data.view(torch.uint8)
+        # Triton moe_gemm_a4w4: uint8 column-major weights.
+        w13_data = w13_weight.data.view(torch.uint8)
+        w2_data = w2_weight.data.view(torch.uint8)
+        w13_scale_data = w13_weight_scale.data.view(torch.uint8)
 
-            # SILU applies the activation outside the GEMM and keeps the
-            # checkpoint's packed halves; the SWIGLUOAI epilogue needs them
-            # interleaved.
-            if getattr(layer, "activation", None) in (
-                MoEActivation.SWIGLUOAI,
-                MoEActivation.SWIGLUOAI_UNINTERLEAVE,
-            ):
-                w13_data = _interleave_gate_up_rows(w13_data)
-                w13_scale_data = _interleave_gate_up_rows(w13_scale_data)
+        # SILU applies the activation outside the GEMM and keeps the
+        # checkpoint's packed halves; the SWIGLUOAI epilogue needs them
+        # interleaved.
+        if getattr(layer, "activation", None) in (
+            MoEActivation.SWIGLUOAI,
+            MoEActivation.SWIGLUOAI_UNINTERLEAVE,
+        ):
+            w13_data = _interleave_gate_up_rows(w13_data)
+            w13_scale_data = _interleave_gate_up_rows(w13_scale_data)
 
-            # Transpose to [E, K, N] — the view has stride(-2)==1 (column-major),
-            # which is what moe_gemm_a4w4 asserts.
-            w13_data = w13_data.transpose(1, 2)
-            w2_data = w2_data.transpose(1, 2)
+        # Transpose to [E, K, N] — the view has stride(-2)==1 (column-major),
+        # which is what moe_gemm_a4w4 asserts.
+        w13_data = w13_data.transpose(1, 2)
+        w2_data = w2_data.transpose(1, 2)
 
-            # Scales are [E, N, K_scale]; both kernels index them as
-            # [E, K_scale, N] with K innermost, so transpose(1, 2)
-            # Keep them uint8: Triton moe_gemm_a4w4 takes e8m0 scales
-            w13_scale = w13_scale_data.transpose(1, 2)
-            w2_scale = w2_weight_scale.data.view(torch.uint8).transpose(1, 2)
+        # Scales are [E, N, K_scale]; both kernels index them as
+        # [E, K_scale, N] with K innermost, so transpose(1, 2)
+        # Keep them uint8: Triton moe_gemm_a4w4 takes e8m0 scales
+        w13_scale = w13_scale_data.transpose(1, 2)
+        w2_scale = w2_weight_scale.data.view(torch.uint8).transpose(1, 2)
 
-            from aiter.ops.triton.utils.shuffle import shuffle_scale_moe
+        from aiter.ops.triton.utils.shuffle import shuffle_scale_moe
 
-            w13_scale = shuffle_scale_moe(
-                w13_scale,
-                arch="gfx1250",
-                preshuffle_factor=32,
-                scale_kwidth=4,
-            )
-            w2_scale = shuffle_scale_moe(
-                w2_scale,
-                arch="gfx1250",
-                preshuffle_factor=32,
-                scale_kwidth=4,
-            )
+        w13_scale = shuffle_scale_moe(
+            w13_scale,
+            arch="gfx1250",
+            preshuffle_factor=32,
+            scale_kwidth=4,
+        )
+        w2_scale = shuffle_scale_moe(
+            w2_scale,
+            arch="gfx1250",
+            preshuffle_factor=32,
+            scale_kwidth=4,
+        )
 
-            return (w13_data, w2_data, w13_scale, w2_scale, w13_bias, w2_bias)
+        return (w13_data, w2_data, w13_scale, w2_scale, w13_bias, w2_bias)
+
+    elif mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_MXFP4:
+        if w13_bias is not None:
+            w13_bias = w13_bias.data.to(torch.float32)
+        if w2_bias is not None:
+            w2_bias = w2_bias.data.to(torch.float32)
 
         # e8m0_shuffle on weight scales (GFX950 swizzle layout)
         from aiter.utility.fp4_utils import e8m0_shuffle
@@ -2005,6 +2002,7 @@ def convert_weight_to_mxfp4_moe_kernel_format(
         )
     elif mxfp4_backend in (
         Mxfp4MoeBackend.AITER_MXFP4_MXFP4,
+        Mxfp4MoeBackend.AITER_TRITON_MXFP4_MXFP4,
         Mxfp4MoeBackend.AITER_MXFP4_FP8,
     ):
         return convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
@@ -2158,6 +2156,7 @@ def make_mxfp4_moe_quant_config(
         )
     elif mxfp4_backend in (
         Mxfp4MoeBackend.AITER_MXFP4_MXFP4,
+        Mxfp4MoeBackend.AITER_TRITON_MXFP4_MXFP4,
         Mxfp4MoeBackend.CUTLASS_MXFP4_MXFP4,
     ):
         return ocp_mx_moe_quant_config(
