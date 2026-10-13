@@ -66,7 +66,7 @@ The final output of every choice carries `weight_versions`, the label of the wei
 ]
 ```
 
-- With `stream: true`, only the last chunk of each choice carries the list, including the last chunk after an abort. Its offsets cover the whole output. Earlier chunks carry `null`.
+- With `stream: true`, only the last chunk of each choice carries the list, including the last chunk after an abort. Its offsets cover the whole output. Earlier chunks carry `null` or omit the field.
 - An output with no tokens, such as a request aborted before its first token, gets `[]`.
 - The labels are the ones you set with `/update_weight_version` or `/finish_weight_update`, see [Async Reinforcement Learning](../../training/async_rl.md#weight-versions-in-outputs). vLLM doesn't order or check them, and the label is `"default"` until you set one.
 

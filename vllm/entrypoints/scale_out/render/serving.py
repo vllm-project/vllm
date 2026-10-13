@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import TYPE_CHECKING
 
+from fastapi import Request
+
 from vllm.entrypoints.anthropic.protocol import AnthropicMessagesRequest
 from vllm.entrypoints.anthropic.serving import AnthropicServingMessages
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
@@ -31,7 +33,6 @@ from vllm.renderers.inputs.preprocess import (
     extract_prompt_len,
 )
 from vllm.renderers.online_renderer import OnlineRenderer
-from vllm.utils import random_uuid
 
 logger = init_logger(__name__)
 
@@ -77,6 +78,7 @@ class ServingRender(BaseServing):
     async def render_chat_request(
         self,
         request: ChatCompletionRequest,
+        raw_request: Request | None = None,
     ) -> GenerateRequest | ErrorResponse:
         """Validate the model and preprocess a chat completion request.
 
@@ -139,7 +141,9 @@ class ServingRender(BaseServing):
             )
         reasoning_ended = request.resolve_reasoning_ended(parser, token_ids)
 
-        request_id = f"chatcmpl-{random_uuid()}"
+        request_id = (
+            f"chatcmpl-{self._base_request_id(raw_request, request.request_id)}"
+        )
 
         return GenerateRequest(
             request_id=request_id,
@@ -161,6 +165,7 @@ class ServingRender(BaseServing):
     async def render_messages_request(
         self,
         request: AnthropicMessagesRequest,
+        raw_request: Request | None = None,
     ) -> GenerateRequest | ErrorResponse:
         """Validate the model and preprocess an Anthropic Messages request.
 
@@ -172,11 +177,12 @@ class ServingRender(BaseServing):
             request, merge_inline_system=self._merge_inline_system
         )
         chat_req.return_mm_kwargs = request.return_mm_kwargs
-        return await self.render_chat_request(chat_req)
+        return await self.render_chat_request(chat_req, raw_request)
 
     async def render_completion_request(
         self,
         request: CompletionRequest,
+        raw_request: Request | None = None,
     ) -> list[GenerateRequest] | ErrorResponse:
         """Validate the model and preprocess a completion request.
 
@@ -186,13 +192,20 @@ class ServingRender(BaseServing):
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
             return error_check_ret
+
+        if request.use_beam_search:
+            return self.create_error_response(
+                "Beam search is not supported by the render endpoint"
+            )
+
         result = await self.online_renderer.render_completion(
             request, skip_mm_cache=True
         )
         if isinstance(result, ErrorResponse):
             return result
+        base_id = f"cmpl-{self._base_request_id(raw_request, request.request_id)}"
         generate_requests: list[GenerateRequest] = []
-        for engine_input in result:
+        for i, engine_input in enumerate(result):
             prompt_components = extract_prompt_components(
                 self.model_config, engine_input
             )
@@ -214,7 +227,7 @@ class ServingRender(BaseServing):
                 max_tokens, self.default_sampling_params
             )
 
-            request_id = f"cmpl-{random_uuid()}"
+            request_id = base_id if len(result) == 1 else f"{base_id}-{i}"
 
             generate_requests.append(
                 GenerateRequest(
