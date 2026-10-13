@@ -12,7 +12,6 @@ from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import next_power_of_2
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.attention.ops import triton_unified_attention as attention
-from vllm.v1.attention.ops import triton_unified_attention as triton_ua
 from vllm.v1.attention.ops.triton_attention_helpers import (
     apply_softcap,
     compute_tile_loop_bounds,
@@ -318,9 +317,9 @@ def test_select_query_block(
     nq_per_kv: int,
     expected: tuple[int, int, bool],
 ) -> None:
-    monkeypatch.setattr(triton_ua, "_is_gfx1100", lambda: is_gfx1100)
-    monkeypatch.setattr(triton_ua, "_is_gfx1151", lambda: False)
-    assert triton_ua._select_query_block(max_seqlen_q, nq_per_kv) == expected
+    monkeypatch.setattr(attention, "_is_gfx1100", lambda: is_gfx1100)
+    monkeypatch.setattr(attention, "_is_gfx1151", lambda: False)
+    assert attention._select_query_block(max_seqlen_q, nq_per_kv) == expected
 
 
 @pytest.mark.parametrize(
@@ -336,9 +335,9 @@ def test_select_query_block_gfx1151(
     nq_per_kv: int,
     expected: tuple[int, int, bool],
 ) -> None:
-    monkeypatch.setattr(triton_ua, "_is_gfx1100", lambda: False)
-    monkeypatch.setattr(triton_ua, "_is_gfx1151", lambda: True)
-    assert triton_ua._select_query_block(max_seqlen_q, nq_per_kv) == expected
+    monkeypatch.setattr(attention, "_is_gfx1100", lambda: False)
+    monkeypatch.setattr(attention, "_is_gfx1151", lambda: True)
+    assert attention._select_query_block(max_seqlen_q, nq_per_kv) == expected
 
 
 @triton.jit
@@ -492,8 +491,8 @@ def test_tuned_long_prefill_matches_dense_reference(
     num_query_heads: int,
 ) -> None:
     torch.set_default_device(DEVICE_TYPE)
-    monkeypatch.setattr(triton_ua, "_is_gfx1100", lambda: True)
-    monkeypatch.setattr(triton_ua, "_is_gfx1151", lambda: False)
+    monkeypatch.setattr(attention, "_is_gfx1100", lambda: True)
+    monkeypatch.setattr(attention, "_is_gfx1151", lambda: False)
 
     query_len, kv_len = 512, 1024
     num_kv_heads, head_size, block_size = 1, 128, 16
@@ -523,7 +522,7 @@ def test_tuned_long_prefill_matches_dense_reference(
     seqused_k = torch.tensor([kv_len], dtype=torch.int32, device=device)
     block_table = torch.arange(num_blocks, dtype=torch.int32, device=device)[None]
 
-    assert triton_ua._select_query_block(query_len, num_query_heads) == (
+    assert attention._select_query_block(query_len, num_query_heads) == (
         64,
         64 // num_query_heads,
         True,
