@@ -123,12 +123,10 @@ def _use_sm12x_small_m_dispatch(c: FP8ScaledMMLinearLayerConfig) -> bool:
     if envs.VLLM_BATCH_INVARIANT:
         return False
     n, k = c.weight_shape
-    # cutlass_scaled_mm only writes bf16/fp16; apply_weights uses the
-    # activation dtype when out_dtype is None.
-    out_dtype = c.out_dtype if c.out_dtype is not None else c.input_dtype
     return (
         current_platform.is_device_capability_family(120)
-        and out_dtype in (torch.bfloat16, torch.float16)
+        # cutlass_scaled_mm only writes bf16/fp16.
+        and c.out_dtype in (torch.bfloat16, torch.float16)
         and n % 16 == 0
         and k % 16 == 0
         and cutlass_fp8_supported()
