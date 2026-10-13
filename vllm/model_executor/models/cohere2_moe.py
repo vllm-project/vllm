@@ -25,7 +25,7 @@ from vllm.distributed import (
 )
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
-from vllm.model_executor.layers.activation import SiluAndMul
+from vllm.model_executor.layers.activation import SiluAndMul, SiluAndMulWithClamp
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
@@ -157,6 +157,7 @@ class Cohere2MoeMLP(nn.Module):
         quant_config: QuantizationConfig | None = None,
         reduce_results: bool = False,
         prefix: str = "",
+        swiglu_limit: float | None = None,
     ):
         super().__init__()
         self.config = config
@@ -181,7 +182,11 @@ class Cohere2MoeMLP(nn.Module):
             reduce_results=reduce_results,
             prefix=f"{prefix}.down_proj",
         )
-        self.act_fn = SiluAndMul()
+        self.swiglu_limit = swiglu_limit
+        if self.swiglu_limit is not None:
+            self.act_fn = SiluAndMulWithClamp(swiglu_limit=self.swiglu_limit)
+        else:
+            self.act_fn = SiluAndMul()
 
     def forward(self, x):
         gate_up, _ = self.gate_up_proj(x)
@@ -327,6 +332,8 @@ class Cohere2Moe(nn.Module):
             prefix=f"{prefix}.gate",
         )
 
+        swiglu_limit = getattr(config, "swiglu_limit", None)
+
         self.shared_experts: Cohere2MoeMLP | None
         if hasattr(config, "num_shared_experts") and config.num_shared_experts > 0:
             self.shared_experts = Cohere2MoeMLP(
@@ -334,6 +341,7 @@ class Cohere2Moe(nn.Module):
                 intermediate_size=config.intermediate_size * config.num_shared_experts,
                 quant_config=quant_config,
                 prefix=f"{prefix}.shared_experts",
+                swiglu_limit=swiglu_limit,
             )
             self.shared_expert_combination_strategy = getattr(
                 config, "shared_expert_combination_strategy", "sum"
@@ -361,6 +369,7 @@ class Cohere2Moe(nn.Module):
             custom_routing_function=self.custom_routing_function,
             shared_experts=self.shared_experts,
             reduce_results=not defer_all_reduce,
+            swiglu_limit=swiglu_limit,
         )
         # The deferral is dropped when the MoE runner must reduce itself
         # (e.g. EP all2all or sequence parallel).
@@ -452,6 +461,7 @@ class Cohere2MoeDecoderLayer(nn.Module):
                 ),
                 quant_config=quant_config,
                 prefix=f"{prefix}.mlp",
+                swiglu_limit=getattr(config, "swiglu_limit", None),
             )
         else:
             self.mlp = Cohere2Moe(
