@@ -79,7 +79,7 @@ QWEN4_EXP_SM90_GEMM_PLANS: dict[tuple[int, int], dict[int, SkinnyGemmConfig]] = 
     (4224, 2560): {
         1: SkinnyGemmConfig(1, 128, 2, k_unroll=6, vector_width=2, static_k=2560),
         2: SkinnyGemmConfig(2, 128, 2, k_unroll=3, vector_width=2, static_k=2560),
-        4: SkinnyGemmConfig(4, 64, 4, k_unroll=2, vector_width=4),
+        4: SkinnyGemmConfig(4, 64, 4, k_unroll=1, vector_width=8),
     },
     # GDN and QSA output projections, TP=4.
     (2560, 1536): {

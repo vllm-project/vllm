@@ -774,6 +774,8 @@ class CompilationConfig:
         # Qwen4Exp's AMD backend still uses these splitting ops.
         "vllm::qwen4_exp_ple_short_conv",
         "vllm::qwen4_exp_qsa_with_output",
+        # The fused prepare calls this op instead of the one above.
+        "vllm::qwen4_exp_qsa_prepare_with_output",
         "vllm::linear_attention",
         "vllm::qwen_gdn_attention_core",
         "vllm::qwen_gdn_attention_core_fused_norm_packed",

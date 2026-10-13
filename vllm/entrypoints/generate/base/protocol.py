@@ -15,10 +15,10 @@ from pydantic import (
 
 import vllm.envs as envs
 from vllm.config.utils import replace
-from vllm.entrypoints.chat_utils import make_tool_call_id
 from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel, UsageInfo
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
+from vllm.renderers.chat_utils import make_tool_call_id
 from vllm.sampling_params import StructuredOutputsParams
 
 logger = init_logger(__name__)

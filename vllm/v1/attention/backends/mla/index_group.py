@@ -243,7 +243,7 @@ class HiSparseMLAIndexGroup(SparseMLAIndexGroup):
                 layer_index,
                 logical_topk_indices,
                 req_id_per_token,
-                leader.block_table,
+                leader.batch_block_table(),
                 leader.view.block_size,
                 block_stride_rows=leader.view.attention_block_stride,
                 return_valid_counts=return_valid_counts,
@@ -268,8 +268,11 @@ class HiSparseMLAIndexGroup(SparseMLAIndexGroup):
         assert staging_plan is not None
         resident_cache = None
         if cache.view is not None and cache.block_table is not None:
+            state_indices = cache.runtime.request_state_indices
+            assert state_indices is not None
             staging_plan.ensure_gpu_sources(
-                cache.block_table[attn_metadata.num_decodes :],
+                cache.block_table,
+                state_indices[attn_metadata.num_decodes :],
                 cache.view.block_size,
             )
             resident_cache = cache.view.cache
@@ -291,8 +294,11 @@ class HiSparseMLAIndexGroup(SparseMLAIndexGroup):
         plan = prefill.host_staging_plan if prefill is not None else None
         assert plan is not None
         assert cache.view is not None and cache.block_table is not None
+        state_indices = cache.runtime.request_state_indices
+        assert state_indices is not None
         plan.ensure_gpu_sources(
-            cache.block_table[attn_metadata.num_decodes :],
+            cache.block_table,
+            state_indices[attn_metadata.num_decodes :],
             cache.view.block_size,
         )
         assert plan.gpu_row_ids is not None
