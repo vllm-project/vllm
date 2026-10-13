@@ -33,6 +33,7 @@ from vllm.entrypoints.generate.structured_decisions.serving import (
     parse_questions,
 )
 from vllm.entrypoints.generate.structured_decisions.strategies import (
+    ClefFlashStrategy,
     DiffusionGemmaCanvasStrategy,
     JointSchemaStrategy,
     LiquidStrategy,
@@ -94,6 +95,8 @@ def test_strategy_selection():
     # Clef-Omni scores options with its head, so it reads no logprobs.
     clef = model("ClefOmniForJointSchema", "raw_logits")
     assert select_read_strategy(clef, ("token_classify",)) is JointSchemaStrategy
+    clef_flash = model("ClefFlashForJointSchema", "raw_logits")
+    assert select_read_strategy(clef_flash, ("token_classify",)) is ClefFlashStrategy
 
 
 def test_route_is_registered_by_default():
@@ -366,8 +369,8 @@ JOINT_SCHEMA_REQUEST: dict[str, Any] = dict(
 )
 
 
-@pytest.fixture
-def joint_schema(qwen, engine_and_renderer):
+@pytest.fixture(params=[JointSchemaStrategy, ClefFlashStrategy])
+def joint_schema(request, qwen, engine_and_renderer):
     tokenizer, _ = qwen
     engine, online_renderer = engine_and_renderer
     # The probability the head gives each option, by option id.
@@ -382,9 +385,7 @@ def joint_schema(qwen, engine_and_renderer):
         yield PoolingRequestOutput(request_id, PoolingOutput(data), ids, 0, True)
 
     engine.encode.side_effect = encode
-    strategy = JointSchemaStrategy(
-        ReadContext(engine, online_renderer, None, "auto", {})
-    )
+    strategy = request.param(ReadContext(engine, online_renderer, None, "auto", {}))
     return serving(engine, strategy), engine, tokenizer
 
 
@@ -468,7 +469,10 @@ async def test_media_needs_a_model_that_takes_it(serving_and_engine):
 
 
 @pytest.mark.asyncio
-async def test_joint_schema_reads_media_before_the_state(joint_schema, monkeypatch):
+@pytest.mark.parametrize("num_images", [1, 2])
+async def test_joint_schema_reads_media_before_the_state(
+    joint_schema, monkeypatch, num_images
+):
     serving, engine, tokenizer = joint_schema
     strategy = serving.strategy
     strategy.__dict__["_connector"] = MediaConnector()
@@ -491,23 +495,30 @@ async def test_joint_schema_reads_media_before_the_state(joint_schema, monkeypat
     Image.new("RGB", (8, 8), "red").save(buffer, format="PNG")
     image = "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode()
     response = await serving.create_decision(
-        StructuredDecisionRequest(**JOINT_SCHEMA_REQUEST, images=[image])
+        StructuredDecisionRequest(**JOINT_SCHEMA_REQUEST, images=[image] * num_images)
     )
     assert isinstance(response, StructuredDecisionResponse)
 
-    placeholder = tokenizer.encode(
-        "<|vision_start|><|image_pad|><|vision_end|>\n", add_special_tokens=False
-    )
+    if isinstance(strategy, ClefFlashStrategy):
+        media_text = "<|vision_start|><|image_pad|><|vision_end|>" * num_images + "\n"
+    else:
+        media_text = "<|vision_start|><|image_pad|><|vision_end|>\n" * num_images
+    placeholder = tokenizer.encode(media_text, add_special_tokens=False)
     assert rendered["prompt_token_ids"] == strategy.prefix + placeholder
     assert rendered["multi_modal_data"]["image"][0].size == (8, 8)
-    assert rendered["mm_processor_kwargs"] == {
-        "images_kwargs": {"size": strategy.IMAGE_SIZE}
-    }
+    if isinstance(strategy, ClefFlashStrategy):
+        assert rendered["mm_processor_kwargs"] == {
+            "videos_kwargs": {"do_sample_frames": False}
+        }
+    else:
+        assert rendered["mm_processor_kwargs"] == {
+            "images_kwargs": {"size": strategy.IMAGE_SIZE}
+        }
     prompt = engine.encode.call_args.args[0]
     assert prompt["type"] == "multimodal"
     ids = prompt["prompt_token_ids"]
-    expanded = len(strategy.prefix) + len(placeholder) + 2
-    assert ids[:expanded].count(image_pad) == 3
+    expanded = len(strategy.prefix) + len(placeholder) + 2 * num_images
+    assert ids[:expanded].count(image_pad) == 3 * num_images
     state_and_questions = JOINT_SCHEMA_PROMPT.split("STATE:\n", 1)[1]
     assert tokenizer.decode(ids[expanded:]) == state_and_questions
     assert response.answers["team"]["choice"] == "billing"
@@ -515,7 +526,9 @@ async def test_joint_schema_reads_media_before_the_state(joint_schema, monkeypat
 
 
 @pytest.mark.asyncio
-async def test_joint_schema_hears_video_soundtracks(joint_schema, monkeypatch):
+async def test_joint_schema_video_audio_follows_model_modalities(
+    joint_schema, monkeypatch
+):
     serving, engine, tokenizer = joint_schema
     strategy = serving.strategy
     video = MediaWithBytes(
@@ -532,6 +545,7 @@ async def test_joint_schema_hears_video_soundtracks(joint_schema, monkeypatch):
             return video
 
         async def fetch_audio_async(self, url):
+            assert not isinstance(strategy, ClefFlashStrategy)
             if url == "https://example.org/silent.mp4":
                 raise ValueError("No audio stream found.")
             return track
@@ -552,11 +566,17 @@ async def test_joint_schema_hears_video_soundtracks(joint_schema, monkeypatch):
         )
     )
     assert isinstance(response, StructuredDecisionResponse)
-    assert rendered["multi_modal_data"] == {"video": [video], "audio": [track]}
-    assert rendered["mm_processor_kwargs"] == {
-        "images_kwargs": {"size": strategy.IMAGE_SIZE},
-        "use_audio_in_video": True,
-    }
+    if isinstance(strategy, ClefFlashStrategy):
+        assert rendered["multi_modal_data"] == {"video": [video]}
+        assert rendered["mm_processor_kwargs"] == {
+            "videos_kwargs": {"do_sample_frames": False}
+        }
+    else:
+        assert rendered["multi_modal_data"] == {"video": [video], "audio": [track]}
+        assert rendered["mm_processor_kwargs"] == {
+            "images_kwargs": {"size": strategy.IMAGE_SIZE},
+            "use_audio_in_video": True,
+        }
 
     # A video without a decodable soundtrack is watched silently.
     response = await serving.create_decision(
@@ -566,7 +586,8 @@ async def test_joint_schema_hears_video_soundtracks(joint_schema, monkeypatch):
     )
     assert isinstance(response, StructuredDecisionResponse)
     assert rendered["multi_modal_data"] == {"video": [video]}
-    assert rendered["mm_processor_kwargs"]["use_audio_in_video"] is False
+    if not isinstance(strategy, ClefFlashStrategy):
+        assert rendered["mm_processor_kwargs"]["use_audio_in_video"] is False
 
     # Audio clips cannot be read with videos that have soundtracks.
     response = await serving.create_decision(
