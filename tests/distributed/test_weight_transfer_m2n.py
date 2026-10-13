@@ -84,7 +84,6 @@ VALID_UID_B64 = base64.b64encode(b"\x00" * 128).decode()
 def test_shutdown_destroys_communicator_once(engine_type, group_attribute):
     engine = object.__new__(engine_type)
     engine._handle = None
-    engine._executor = None
     group = Mock()
     setattr(engine, group_attribute, group)
 
@@ -597,34 +596,6 @@ class TestWireTypes:
         init_metadata.assert_called_once()
         make_communicator.assert_called_once_with(nccl, group, b"\x00" * 128)
 
-    def test_partial_worker_initialization_aborts_owned_resources(self):
-        vllm_config = SimpleNamespace(
-            parallel_config=Mock(), model_config=SimpleNamespace(quantization=None)
-        )
-        engine = M2NWeightTransferEngine(
-            WeightTransferConfig(backend="nccl_m2n"),
-            vllm_config,
-            torch.device("cuda:0"),
-            torch.nn.Module(),
-        )
-        handle = Mock()
-        group = Mock()
-
-        def fail_after_allocation(this, init_info):
-            this._handle = handle
-            this.model_update_group = group
-            raise RuntimeError("late init failure")
-
-        engine._init_transfer_engine = MethodType(fail_after_allocation, engine)
-
-        with pytest.raises(RuntimeError, match="late init failure"):
-            engine.init_transfer_engine(self._init_info())
-
-        handle.destroy.assert_called_once_with()
-        group.destroy.assert_called_once_with()
-        assert engine._handle is None
-        assert engine.model_update_group is None
-
     @pytest.mark.parametrize("worker_rank_offset", [0, 3])
     def test_worker_rank_offset_must_stay_in_destination_interval(
         self, worker_rank_offset
@@ -703,7 +674,7 @@ class TestWireTypes:
         engine._reshard = Mock()
 
         with pytest.raises(ValueError, match=r"parameter 'unknown'"):
-            engine._receive_weights(
+            engine.receive_weights(
                 M2NWeightTransferUpdateInfo(names=["valid", "unknown"])
             )
 
@@ -753,7 +724,7 @@ class TestWireTypes:
         stream = Mock()
         monkeypatch.setattr(torch.cuda, "current_stream", lambda: stream)
 
-        engine._receive_weights(
+        engine.receive_weights(
             M2NWeightTransferUpdateInfo(names=["pair.weight", "direct", "pair.scale"])
         )
 
@@ -784,8 +755,8 @@ class TestWireTypes:
         monkeypatch.setattr(torch.cuda, "current_stream", Mock())
 
         update = M2NWeightTransferUpdateInfo(names=["b"])
-        engine._receive_weights(update)
-        engine._receive_weights(update)
+        engine.receive_weights(update)
+        engine.receive_weights(update)
 
         assert engine._reshard.call_count == 2
         assert all(call.args[2].name == "b" for call in engine._reshard.call_args_list)
@@ -906,24 +877,6 @@ class TestTrainerSourceContract:
         engine._dst_placements = [REPLICATED] * len(engine._metas)
         engine.group = Mock(comm=1)
         return engine
-
-    def test_partial_trainer_initialization_aborts_owned_resources(self):
-        source = _StaticM2NSource([], [])
-        engine = self._engine(source)
-        handle = Mock()
-        group = Mock()
-        executor = Mock()
-        engine._handle = handle
-        engine.group = group
-        engine._executor = executor
-
-        engine._abort(RuntimeError("init failed"))
-
-        group.destroy.assert_called_once_with()
-        handle.destroy.assert_called_once_with()
-        executor.shutdown.assert_called_once_with(wait=False, cancel_futures=True)
-        assert engine.group is None
-        assert engine._handle is None
 
     @pytest.mark.parametrize(
         ("case", "match"),

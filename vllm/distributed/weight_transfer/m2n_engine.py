@@ -22,7 +22,6 @@ trainer is the trainer engine's job.
 
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
-from enum import Enum
 from typing import TYPE_CHECKING, Any, cast
 
 import torch
@@ -63,12 +62,9 @@ from vllm.distributed.weight_transfer.nccl_common import (
     decode_nccl_unique_id,
     worker_init_metadata_group,
 )
-from vllm.logger import init_logger
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
-
-logger = init_logger(__name__)
 
 __all__ = [
     "M2NWeightTransferInitInfo",
@@ -216,14 +212,6 @@ class M2NWeightTransferUpdateInfo(WeightTransferUpdateInfo):
     names: list[str]
 
 
-class _M2NEngineState(str, Enum):
-    PREFLIGHT = "preflight"
-    READY = "ready"
-    UPDATING = "updating"
-    POISONED = "poisoned"
-    CLOSED = "closed"
-
-
 # ---------------------------------------------------------------------------
 # Worker engine
 # ---------------------------------------------------------------------------
@@ -262,19 +250,8 @@ class M2NWeightTransferEngine(
         self._parameter_destinations: list[M2NDestination] = []
         self._index: dict[str, int] = {}
         self._uses_load_weights = False
-        self._state = _M2NEngineState.PREFLIGHT
-        self._failure: BaseException | None = None
 
     def init_transfer_engine(self, init_info: M2NWeightTransferInitInfo) -> None:
-        try:
-            self._require_state(_M2NEngineState.PREFLIGHT, "initialize nccl_m2n")
-            self._init_transfer_engine(init_info)
-            self._state = _M2NEngineState.READY
-        except BaseException as exc:
-            self._poison(exc)
-            raise
-
-    def _init_transfer_engine(self, init_info: M2NWeightTransferInitInfo) -> None:
         """Agree on source and local readiness before constructing NCCL."""
         rendezvous_info = NCCLWeightTransferInitInfo(
             master_address=init_info.master_address,
@@ -433,53 +410,29 @@ class M2NWeightTransferEngine(
         `load_weights`, so a plan with no fallback entries has nothing to
         reload.
         """
-        try:
-            self._require_state(_M2NEngineState.READY, "start a weight update")
-            self._state = _M2NEngineState.UPDATING
-            if self._uses_load_weights:
-                from vllm.model_executor.model_loader.reload import (
-                    initialize_layerwise_reload,
-                )
+        if not self._uses_load_weights:
+            return
+        from vllm.model_executor.model_loader.reload import (
+            initialize_layerwise_reload,
+        )
 
-                initialize_layerwise_reload(self.model)
-        except BaseException as exc:
-            self._poison(exc)
-            raise
+        initialize_layerwise_reload(self.model)
 
     def finish_weight_update(self) -> None:
         """Finalize layerwise reloading when the plan uses fallback entries."""
-        try:
-            self._require_state(_M2NEngineState.UPDATING, "finish a weight update")
-            if self._uses_load_weights:
-                from vllm.model_executor.model_loader.reload import (
-                    finalize_layerwise_reload,
-                )
+        if not self._uses_load_weights:
+            return
+        from vllm.model_executor.model_loader.reload import finalize_layerwise_reload
 
-                finalize_layerwise_reload(self.model, self.model_config)
-            self._state = _M2NEngineState.READY
-        except BaseException as exc:
-            self._poison(exc)
-            raise
-
-    def update_weights(self, update_info: dict[str, Any]) -> None:
-        """Poison the engine if parsing, transfer, or synchronization fails."""
-        try:
-            super().update_weights(update_info)
-        except BaseException as exc:
-            self._poison(exc)
-            raise
+        finalize_layerwise_reload(self.model, self.model_config)
 
     def receive_weights(self, update_info: M2NWeightTransferUpdateInfo) -> None:
         """Receive each requested parameter using its initialization-time plan."""
-        try:
-            self._require_state(_M2NEngineState.UPDATING, "receive weights")
-            self._receive_weights(update_info)
-        except BaseException as exc:
-            self._poison(exc)
-            raise
-
-    def _receive_weights(self, update_info: M2NWeightTransferUpdateInfo) -> None:
-        assert self._handle is not None and self.model_update_group is not None
+        if self._handle is None or self.model_update_group is None:
+            raise RuntimeError(
+                "nccl_m2n weight transfer not initialized. "
+                "Call init_transfer_engine() first."
+            )
         if not isinstance(update_info.names, list) or any(
             not isinstance(name, str) for name in update_info.names
         ):
@@ -576,72 +529,14 @@ class M2NWeightTransferEngine(
             handle=self._handle,
         )
 
-    def _require_state(self, expected: _M2NEngineState, action: str) -> None:
-        if self._state is _M2NEngineState.POISONED:
-            raise RuntimeError(
-                "nccl_m2n engine failed earlier and cannot be reused"
-            ) from self._failure
-        if self._state is _M2NEngineState.CLOSED:
-            raise RuntimeError("nccl_m2n engine is shut down")
-        if self._state is not expected:
-            raise RuntimeError(
-                f"cannot {action} while nccl_m2n engine is "
-                f"{self._state.value}; expected {expected.value}"
-            )
-
-    def _poison(self, failure: BaseException) -> None:
-        """Mark unusable before aborting NCCL; never synchronize this path."""
-        if self._state is _M2NEngineState.CLOSED:
-            return
-        if self._failure is None:
-            self._failure = failure
-        self._state = _M2NEngineState.POISONED
-
-        group = self.model_update_group
-        self.model_update_group = None
-        if group is not None:
-            try:
-                group.destroy()
-            except BaseException:
-                logger.exception("failed to abort poisoned nccl_m2n communicator")
-
-        handle = self._handle
-        self._handle = None
-        if handle is not None:
-            try:
-                handle.destroy()
-            except BaseException:
-                logger.exception("failed to destroy poisoned nccl_m2n handle")
-
     def shutdown(self) -> None:
-        """Idempotently release resources, without syncing a poisoned engine."""
-        if self._state is _M2NEngineState.CLOSED:
-            return
-        try:
-            if self._state is _M2NEngineState.UPDATING:
-                self._poison(RuntimeError("nccl_m2n shut down during an active update"))
-            elif self._state is not _M2NEngineState.POISONED:
-                if self._state is _M2NEngineState.READY:
-                    torch.accelerator.synchronize()
-                handle = self._handle
-                self._handle = None
-                if handle is not None:
-                    handle.destroy()
-                group = self.model_update_group
-                self.model_update_group = None
-                if group is not None:
-                    group.destroy()
-        except BaseException as exc:
-            self._poison(exc)
-            raise
-        finally:
-            self._state = _M2NEngineState.CLOSED
-            self._drop_plan()
-
-    def _drop_plan(self) -> None:
-        self._m2n = None
-        self._metas = []
-        self._dst_mesh = None
+        """Finish pending GPU work and release M2N communication state."""
+        if self._handle is not None:
+            # M2N does not synchronize caller streams on finalize.
+            torch.accelerator.synchronize()
+            self._handle.destroy()
+            self._handle = None
+        if self.model_update_group is not None:
+            self.model_update_group.destroy()
+            self.model_update_group = None
         self._parameter_destinations = []
-        self._index = {}
-        self._uses_load_weights = False
