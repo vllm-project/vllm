@@ -12,6 +12,7 @@ blocks echoed back by Anthropic clients, and streaming conversion in
 Also covers cache usage computation in ``_build_anthropic_usage``.
 """
 
+import asyncio
 import json
 from argparse import Namespace
 from http import HTTPStatus
@@ -25,6 +26,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.testclient import TestClient
 from pydantic import BaseModel, Field, ValidationError
 
+import vllm.envs as envs
 from vllm.entrypoints.anthropic.api_router import attach_router
 from vllm.entrypoints.anthropic.protocol import (
     AnthropicCountTokensRequest,
@@ -2170,3 +2172,129 @@ class TestWatermarking:
         params = _convert(request).to_sampling_params(16, {})
 
         assert params.watermarking is watermarking
+
+
+class TestMessageStreamConverterKeepalive:
+    """Nothing is written to a ``/v1/messages`` stream until the first token
+    arrives, so a long prefill or queue wait trips idle timers on gateways
+    and clients (most default to 300s). While waiting on the OpenAI stream
+    the converter emits keepalives; ``ping`` events by default.
+    """
+
+    @staticmethod
+    async def _slow_input(delay: float):
+        await asyncio.sleep(delay)
+        yield _make_stream_chunk(delta=DeltaMessage(role="assistant"))
+        yield _make_stream_chunk(delta=DeltaMessage(content="Hello"))
+        yield _make_stream_chunk(finish_reason="stop")
+        yield _make_stream_chunk(
+            choices=[], usage=UsageInfo(prompt_tokens=3, completion_tokens=1)
+        )
+        yield "data: [DONE]"
+
+    @pytest.mark.asyncio
+    async def test_ping_events_fill_the_wait_for_the_first_chunk(self, monkeypatch):
+        monkeypatch.setattr(envs, "VLLM_ANTHROPIC_STREAM_KEEPALIVE_INTERVAL_S", 0.05)
+        converter = _make_stream_converter()
+        output = []
+        async for event in converter.message_stream_converter(self._slow_input(0.3)):
+            output.append(event)
+        events = _parse_sse_events(output)
+        kinds = [ev for ev, _ in events]
+
+        assert kinds[0] == "ping"
+        assert kinds.count("ping") >= 2
+        first_real = kinds.index("message_start")
+        assert set(kinds[:first_real]) == {"ping"}
+        assert all(data == {"type": "ping"} for ev, data in events if ev == "ping")
+        assert output[0] == 'event: ping\ndata: {"type": "ping"}\n\n'
+        # The rest of the stream is untouched.
+        assert kinds[first_real:] == [
+            "message_start",
+            "content_block_start",
+            "content_block_delta",
+            "content_block_stop",
+            "message_delta",
+            "message_stop",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_no_keepalive_when_chunks_arrive_promptly(self, monkeypatch):
+        monkeypatch.setattr(envs, "VLLM_ANTHROPIC_STREAM_KEEPALIVE_INTERVAL_S", 1.0)
+        converter = _make_stream_converter()
+        output = []
+        async for event in converter.message_stream_converter(self._slow_input(0)):
+            output.append(event)
+        kinds = [ev for ev, _ in _parse_sse_events(output)]
+        assert "ping" not in kinds
+        assert kinds[0] == "message_start"
+
+    @pytest.mark.asyncio
+    async def test_comment_mode_emits_sse_comments(self, monkeypatch):
+        monkeypatch.setattr(envs, "VLLM_ANTHROPIC_STREAM_KEEPALIVE", "comment")
+        monkeypatch.setattr(envs, "VLLM_ANTHROPIC_STREAM_KEEPALIVE_INTERVAL_S", 0.05)
+        converter = _make_stream_converter()
+        output = []
+        async for event in converter.message_stream_converter(self._slow_input(0.2)):
+            output.append(event)
+        comments = [raw for raw in output if raw.startswith(":")]
+        assert comments and set(comments) == {": keepalive\n\n"}
+        assert output.index(comments[0]) == 0
+        kinds = [ev for ev, _ in _parse_sse_events(output)]
+        assert "ping" not in kinds
+        assert kinds[0] == "message_start"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("mode", ["off", "none", "0"])
+    async def test_off_mode_sends_nothing_while_waiting(self, monkeypatch, mode):
+        monkeypatch.setattr(envs, "VLLM_ANTHROPIC_STREAM_KEEPALIVE", mode)
+        monkeypatch.setattr(envs, "VLLM_ANTHROPIC_STREAM_KEEPALIVE_INTERVAL_S", 0.05)
+        converter = _make_stream_converter()
+        output = []
+        async for event in converter.message_stream_converter(self._slow_input(0.2)):
+            output.append(event)
+        assert not [raw for raw in output if raw.startswith(":")]
+        kinds = [ev for ev, _ in _parse_sse_events(output)]
+        assert "ping" not in kinds
+        assert kinds[0] == "message_start"
+
+    @pytest.mark.asyncio
+    async def test_closing_the_stream_cancels_the_pending_read(self, monkeypatch):
+        """When the client goes away mid-wait, the in-flight ``__anext__``
+        on the OpenAI stream must be cancelled rather than left running."""
+        monkeypatch.setattr(envs, "VLLM_ANTHROPIC_STREAM_KEEPALIVE_INTERVAL_S", 0.05)
+        released = asyncio.Event()
+        finalized = asyncio.Event()
+
+        async def blocked_input():
+            try:
+                await released.wait()
+                yield _make_stream_chunk(delta=DeltaMessage(role="assistant"))
+            finally:
+                finalized.set()
+
+        converter = _make_stream_converter()
+        stream = converter.message_stream_converter(blocked_input())
+        first = await stream.__anext__()
+        assert first == 'event: ping\ndata: {"type": "ping"}\n\n'
+        await stream.aclose()
+        await asyncio.wait_for(finalized.wait(), timeout=1)
+        assert not released.is_set()
+
+    @pytest.mark.asyncio
+    async def test_error_from_the_stream_still_surfaces(self, monkeypatch):
+        monkeypatch.setattr(envs, "VLLM_ANTHROPIC_STREAM_KEEPALIVE_INTERVAL_S", 0.05)
+
+        async def failing_input():
+            await asyncio.sleep(0.1)
+            raise RuntimeError("engine exploded")
+            yield  # pragma: no cover
+
+        converter = _make_stream_converter()
+        output = []
+        async for event in converter.message_stream_converter(failing_input()):
+            output.append(event)
+        events = _parse_sse_events(output)
+        assert events[0][0] == "ping"
+        assert events[-1][0] == "error"
+        assert "engine exploded" in events[-1][1]["error"]["message"]

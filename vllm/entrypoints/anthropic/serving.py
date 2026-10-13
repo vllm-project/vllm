@@ -5,16 +5,19 @@
 
 """Anthropic Messages API serving handler."""
 
+import asyncio
 import json
 import logging
 import time
 import uuid
 from collections.abc import AsyncGenerator
+from contextlib import suppress
 from typing import Any, Literal, get_args
 
 import jinja2
 from fastapi import Request
 
+import vllm.envs as envs
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.anthropic.protocol import (
     AnthropicContentBlock,
@@ -137,6 +140,68 @@ def _is_json(text: str) -> bool:
     except json.JSONDecodeError:
         return False
     return True
+
+
+_KEEPALIVE_PING_EVENT = 'event: ping\ndata: {"type": "ping"}\n\n'
+_KEEPALIVE_COMMENT = ": keepalive\n\n"
+
+
+def _stream_keepalive() -> tuple[str | None, float | None]:
+    """Return the keepalive payload and idle interval for streaming responses.
+
+    Nothing is written to a ``/v1/messages`` stream until the first token, so
+    a long prefill or queue wait is indistinguishable from a dead connection
+    for the idle timers on proxies and clients (commonly 300s). See
+    ``VLLM_ANTHROPIC_STREAM_KEEPALIVE`` and
+    ``VLLM_ANTHROPIC_STREAM_KEEPALIVE_INTERVAL_S``.
+    """
+    mode = envs.VLLM_ANTHROPIC_STREAM_KEEPALIVE
+    if mode == "ping":
+        payload: str | None = _KEEPALIVE_PING_EVENT
+    elif mode == "comment":
+        payload = _KEEPALIVE_COMMENT
+    else:
+        return None, None
+    interval = envs.VLLM_ANTHROPIC_STREAM_KEEPALIVE_INTERVAL_S
+    if interval <= 0:
+        return None, None
+    return payload, interval
+
+
+async def _iter_with_keepalive(
+    generator: AsyncGenerator[str, None], interval: float | None
+) -> AsyncGenerator[str | None, None]:
+    """Yield the generator's items, and ``None`` whenever the next item has
+    not arrived within ``interval`` seconds.
+
+    The pending ``__anext__`` is kept as a task across timeouts: cancelling
+    it, as ``asyncio.wait_for`` would, leaves the underlying async generator
+    unusable ("asynchronous generator is already running").
+    """
+    if interval is None:
+        async for item in generator:
+            yield item
+        return
+    pending: asyncio.Future[str] | None = None
+    try:
+        while True:
+            if pending is None:
+                pending = asyncio.ensure_future(generator.__anext__())
+            done, _ = await asyncio.wait({pending}, timeout=interval)
+            if not done:
+                yield None
+                continue
+            task, pending = pending, None
+            try:
+                item = task.result()
+            except StopAsyncIteration:
+                return
+            yield item
+    finally:
+        if pending is not None:
+            pending.cancel()
+            with suppress(asyncio.CancelledError, Exception):
+                await pending
 
 
 def wrap_data_with_event(data: str, event: str):
@@ -883,6 +948,8 @@ class AnthropicServingMessages(OpenAIServingChat):
         self,
         generator: AsyncGenerator[str, None],
     ) -> AsyncGenerator[str, None]:
+        keepalive, keepalive_interval = _stream_keepalive()
+        items = _iter_with_keepalive(generator, keepalive_interval)
         try:
 
             class _ActiveBlockState:
@@ -991,7 +1058,13 @@ class AnthropicServingMessages(OpenAIServingChat):
                 events.extend(stop_active_block())
                 return events
 
-            async for item in generator:
+            async for item in items:
+                if item is None:
+                    # Idle for longer than the keepalive interval; keep every
+                    # timer on the path alive until the next chunk arrives.
+                    assert keepalive is not None
+                    yield keepalive
+                    continue
                 if item.startswith("data:"):
                     data_str = item[5:].strip().rstrip("\n")
                     if data_str == "[DONE]":
@@ -1231,6 +1304,10 @@ class AnthropicServingMessages(OpenAIServingChat):
             )
             data = error_response.model_dump_json(exclude_unset=True)
             yield wrap_data_with_event(data, "error")
+        finally:
+            # Cancel any in-flight __anext__ so the underlying stream is
+            # not left running after the client goes away.
+            await items.aclose()
 
     async def count_tokens(
         self,
