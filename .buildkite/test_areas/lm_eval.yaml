@@ -236,6 +236,7 @@ steps:
 
 - label: ":nvidia: (B200) LM Eval PCP"
   key: lm-eval-pcp-4xb200
+  automatic_shard: true
   timeout_in_minutes: 360
   device: b200-k8s
   num_devices: 4
