@@ -1,18 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Model runner for simulated execution.
+"""Model runner for simulated execution: the V2 runner's bookkeeping, with each
+step's forward and sampling replaced by its predicted time and trace or
+fallback tokens."""
 
-Request bookkeeping (states, block tables, input preparation, sampling
-post-processing) is the stock V2 runner's. The forward pass is replaced by a
-`TimingProvider` that predicts how long the step would take, and sampling by
-trace replay (`SamplingParams.trace_decode_token_ids`) with a fixed fallback
-token. A step's predicted host time holds the engine thread inside
-`sample_tokens()`, as the real calls would; its device time runs on a serial
-device queue and is paid in `SimulatedAsyncOutput.get_output()`, so the engine
-core can schedule the next step meanwhile.
-"""
-
-import contextlib
 import dataclasses
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
@@ -51,11 +42,13 @@ from vllm.v1.worker.simulated.timing import (
     StepLogWriter,
     ZeroTimingProvider,
     acceptance_rates_from_log,
+    accepted_in_step_order,
     build_step_descriptor,
     driven_engine_clock,
     empty_step_descriptor,
     gather_dp_step,
     get_timing_provider,
+    new_clock,
     parallel_summary,
     step_log_path,
 )
@@ -64,6 +57,11 @@ if TYPE_CHECKING:
     from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 
 logger = init_logger(__name__)
+
+_WARMUP_REQ_ID = "__simulated_warmup__"
+_WARMUP_PROMPT_LEN = 2
+# The draft token id the runner reports for drafts it does not propose.
+_PLACEHOLDER_DRAFT = -1
 
 
 @dataclass
@@ -86,7 +84,7 @@ class SimulatedModelRunner(GPUModelRunner):
             sim.timing, dict(sim.timing_args), vllm_config
         )
         if sim.clock == "real":
-            self.clock: Clock = RealClock()
+            self.clock: Clock = new_clock(sim.clock)
         else:
             clock = driven_engine_clock()
             if clock is None:
@@ -102,11 +100,8 @@ class SimulatedModelRunner(GPUModelRunner):
         self._pending_step: _PendingStep | None = None
         self._step_index = 0
         self._warming_up = False
-        # Each pipeline stage's device is a serial resource: under async
-        # scheduling the host prepares step N+1 while step N "runs", but N+1
-        # cannot start on a stage before N leaves it. Track when each stage
-        # becomes free. Every rank models the whole pipeline from the same
-        # inputs, so all ranks agree on every deadline.
+        # When each pipeline stage's device becomes free; every rank models
+        # the whole pipeline, so all agree on every deadline.
         self._stage_free_at = [0.0] * self.parallel_config.pipeline_parallel_size
         self._kv_transfers: SimulatedTransfers | None = None
         self._last_output: SimulatedAsyncOutput | None = None
@@ -134,10 +129,6 @@ class SimulatedModelRunner(GPUModelRunner):
                 rates = acceptance_rates_from_log(rates)
             self._acceptance_rates = np.asarray(rates, dtype=np.float64)
             logger.info("Draft acceptance rates by position: %s", rates)
-
-    # ------------------------------------------------------------------ #
-    # Virtual KV cache: specs and block tables are real, tensors are not.
-    # ------------------------------------------------------------------ #
 
     def initialize_kv_cache_tensors(
         self,
@@ -175,33 +166,29 @@ class SimulatedModelRunner(GPUModelRunner):
         logger.info("Skipping model warmup under simulated execution.")
 
     def warm_up_step_kernels(self) -> None:
-        """Push one two-token request through the real step path so the Triton
-        input-preparation and post-processing kernels are compiled before
-        traffic arrives; otherwise the first scheduled step stalls for
-        hundreds of milliseconds and distorts early TTFT samples.
-
-        Best effort: a failure costs only the warmup, and the step is neither
-        priced nor logged."""
+        """Compile the step path's Triton kernels with an unpriced, unlogged
+        step, before the first request's step would."""
         from vllm.sampling_params import SamplingParams
         from vllm.v1.core.sched.output import NewRequestData, SchedulerOutput
 
-        req_id = "__simulated_warmup__"
+        req_id = _WARMUP_REQ_ID
+        prompt = [0] * _WARMUP_PROMPT_LEN
         num_groups = len(self.kv_cache_config.kv_cache_groups)
         new_req = NewRequestData(
             req_id=req_id,
-            prompt_token_ids=[0, 1],
+            prompt_token_ids=prompt,
             mm_features=[],
             sampling_params=SamplingParams(max_tokens=1),
             pooling_params=None,
             block_ids=tuple([0] for _ in range(num_groups)),
             num_computed_tokens=0,
             lora_request=None,
-            prefill_token_ids=[0, 1],
+            prefill_token_ids=prompt,
         )
         step = SchedulerOutput.make_empty()
         step.scheduled_new_reqs = [new_req]
-        step.num_scheduled_tokens = {req_id: 2}
-        step.total_num_scheduled_tokens = 2
+        step.num_scheduled_tokens = {req_id: len(prompt)}
+        step.total_num_scheduled_tokens = len(prompt)
         done = SchedulerOutput.make_empty()
         done.finished_req_ids = {req_id}
 
@@ -222,10 +209,8 @@ class SimulatedModelRunner(GPUModelRunner):
                 raise RuntimeError(f"Unexpected simulated warmup output: {out}")
             if self.device.type != "cpu":
                 torch.accelerator.synchronize()
+            self.execute_model(done)
         finally:
-            # Drop the warmup request's state, also after a failed step.
-            with contextlib.suppress(Exception):
-                self.execute_model(done)
             self.step_log = step_log
             self.timing_provider = provider
             self._pending_step = None
@@ -235,10 +220,6 @@ class SimulatedModelRunner(GPUModelRunner):
             self._stage_free_at = [0.0] * len(self._stage_free_at)
             self._warming_up = False
             self.kv_connector.set_disabled(False)
-
-    # ------------------------------------------------------------------ #
-    # Execution
-    # ------------------------------------------------------------------ #
 
     @torch.inference_mode()
     def execute_model(  # type: ignore[override]
@@ -255,11 +236,7 @@ class SimulatedModelRunner(GPUModelRunner):
         # Blocks until any stores the scheduler must flush have completed.
         self.kv_connector.pre_forward(scheduler_output)
         t_entry = self.clock.now()
-        self.finish_requests(scheduler_output)
-        self.free_states(scheduler_output)
-        self.add_requests(scheduler_output)
-        self.update_requests(scheduler_output)
-        self.block_tables.apply_staged_writes()
+        self._update_request_states(scheduler_output)
 
         if not scheduler_output.total_num_scheduled_tokens:
             # Nothing to run; the engine core uses this output directly and
@@ -332,24 +309,16 @@ class SimulatedModelRunner(GPUModelRunner):
             num_accepted = np.where(
                 completes, self._num_accepted(pending, input_batch, num_drafts), 0
             )
-            # Under MoE DP the descriptor is the joint step, whose other
-            # ranks' acceptance this rank does not know.
             pending.cost = dataclasses.replace(
                 pending.cost,
-                num_accepted=(
-                    tuple(
-                        int(num_accepted[row[r.req_id]])
-                        for r in pending.descriptor.requests
-                    )
-                    if all(r.req_id in row for r in pending.descriptor.requests)
-                    else None
+                num_accepted=accepted_in_step_order(
+                    pending.descriptor,
+                    {r: int(num_accepted[i]) for r, i in row.items()},
                 ),
             )
         num_sampled_np = np.where(completes, 1 + num_accepted, 0).astype(np.int32)
 
-        # Output tokens: the recorded trace where a request has one (trace
-        # replay excludes speculative decoding), otherwise the fallback token.
-        # Logits are never computed.
+        # Output tokens: the request's trace, else the fallback token.
         sampled = torch.full(
             (num_reqs, 1 + self.num_speculative_steps),
             self.fallback_token_id,
@@ -378,7 +347,7 @@ class SimulatedModelRunner(GPUModelRunner):
                 input_batch,
                 torch.full(
                     (num_reqs, pending.num_spec_tokens_to_schedule),
-                    -1,
+                    _PLACEHOLDER_DRAFT,
                     dtype=torch.int64,
                     device=self.device,
                 ),
@@ -417,10 +386,8 @@ class SimulatedModelRunner(GPUModelRunner):
         return kv_output
 
     def _skip_to_transfer(self) -> None:
-        """With nothing to run and no step output pending, the engine core
-        only polls the KV connector until a transfer completes: skip to the
-        next completion (collected by the next step's poll), but not past the
-        driver's next request arrival."""
+        """With nothing to run, skip to the next KV transfer completion, but
+        not past the driver's next request arrival."""
         if self._kv_transfers is None or isinstance(self.clock, RealClock):
             return
         if self._last_output is not None and not self._last_output.resolved:
@@ -430,10 +397,8 @@ class SimulatedModelRunner(GPUModelRunner):
             self.clock.sleep_until(min(t, self.clock.horizon))
 
     def _run_pipeline(self, t_start: float, device_s: float) -> float:
-        """Push a step entering stage 0 at `t_start` through the pipeline;
-        returns when it leaves the last stage. `device_s` is the step's time
-        through the whole model, so with balanced stages each one is busy for
-        an equal share of it."""
+        """Push a step entering stage 0 at `t_start` through balanced pipeline
+        stages; returns when it leaves the last."""
         stage_s = device_s / len(self._stage_free_at)
         t = t_start
         for stage, free_at in enumerate(self._stage_free_at):
@@ -441,13 +406,19 @@ class SimulatedModelRunner(GPUModelRunner):
             self._stage_free_at[stage] = t
         return t
 
+    def _syncs_dp(self) -> bool:
+        """Whether this step joins the other MoE-DP ranks' lockstep step."""
+        return not (
+            self.dp_size == 1 or self._warming_up or should_skip_dp_coordination()
+        )
+
     def _dp_joint_step(
         self, descriptor: StepDescriptor, now: float
     ) -> tuple[StepDescriptor, float]:
         """Under MoE data parallelism, the joint step of all DP ranks and the
         time at which they all reached it (the gather is a barrier); this
         rank's own step otherwise."""
-        if self.dp_size == 1 or self._warming_up or should_skip_dp_coordination():
+        if not self._syncs_dp():
             return descriptor, now
         joint = gather_dp_step(descriptor)
         return joint, self.clock.now()
@@ -456,7 +427,7 @@ class SimulatedModelRunner(GPUModelRunner):
         """The latest DP rank's start time. Clocks need not agree across
         hosts, so the ranks exchange delays relative to the moment they all
         reached the step."""
-        if self.dp_size == 1 or self._warming_up or should_skip_dp_coordination():
+        if not self._syncs_dp():
             return t_start
         delay = torch.tensor([t_start - now], dtype=torch.float64)
         dist.all_reduce(delay, op=dist.ReduceOp.MAX, group=get_dp_group().cpu_group)

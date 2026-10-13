@@ -1,14 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Timing model for simulated execution.
-
-A `TimingProvider` turns a `StepDescriptor` (what the scheduler asked the
-worker to do in one step) into a `StepCost` (how long the device would be
-busy). Providers see plain Python data only, so they can be thin wrappers
-over compiled engines, measured tables or analytical models without any torch
-dependency. The interface is deliberately per step, not per operator: how a
-step decomposes into kernels is the provider's business.
-"""
+"""Step timing for simulated execution: a `TimingProvider` prices a
+`StepDescriptor` as a `StepCost`."""
 
 from __future__ import annotations
 
@@ -19,7 +12,7 @@ import json
 import math
 import os
 import time
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterator, Mapping
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
@@ -36,10 +29,10 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-
-# --------------------------------------------------------------------------- #
-# Step description and cost
-# --------------------------------------------------------------------------- #
+# Recorded steps a k-NN lookup interpolates.
+_DEFAULT_KNN_K = 4
+# Relative error below which a smaller host-time fit wins a tie.
+_FIT_TIE_TOLERANCE = 1e-9
 
 
 @dataclass(frozen=True)
@@ -64,7 +57,6 @@ class ParallelSummary:
     tensor_parallel_size: int = 1
     pipeline_parallel_size: int = 1
     data_parallel_size: int = 1
-    expert_parallel_size: int = 1
 
 
 def parallel_summary(vllm_config: VllmConfig) -> ParallelSummary:
@@ -73,18 +65,7 @@ def parallel_summary(vllm_config: VllmConfig) -> ParallelSummary:
         tensor_parallel_size=pc.tensor_parallel_size,
         pipeline_parallel_size=pc.pipeline_parallel_size,
         data_parallel_size=pc.data_parallel_size,
-        expert_parallel_size=(
-            pc.tensor_parallel_size * pc.data_parallel_size
-            if pc.enable_expert_parallel
-            else 1
-        ),
     )
-
-
-def _replay_key(pairs: Iterable[tuple[int, int]]) -> str:
-    """A batch composition, (scheduled, computed) tokens per request in any
-    order, as the key of `ReplayTimingProvider`."""
-    return json.dumps(sorted(pairs), separators=(",", ":"))
 
 
 @dataclass(frozen=True)
@@ -116,14 +97,35 @@ class StepDescriptor:
 
     def replay_key(self) -> str:
         """Batch composition key shared with recorded step logs."""
-        return _replay_key(
+        pairs = sorted(
             (r.num_scheduled_tokens, r.num_computed_tokens) for r in self.requests
         )
+        return json.dumps(pairs, separators=(",", ":"))
 
     def to_json_dict(self) -> dict[str, Any]:
         d = asdict(self)
         d["requests"] = [asdict(r) for r in self.requests]
         return d
+
+    @classmethod
+    def from_json_dict(cls, d: dict[str, Any]) -> StepDescriptor:
+        return cls(
+            **d
+            | {
+                "requests": tuple(SimRequestStep(**r) for r in d["requests"]),
+                "parallel": ParallelSummary(**d.get("parallel", {})),
+            }
+        )
+
+
+def accepted_in_step_order(
+    step: StepDescriptor, accepted: Mapping[str, int]
+) -> tuple[int, ...] | None:
+    """Accepted drafts of the step's requests, in its order; None for a joint
+    MoE-DP step, whose other ranks' requests are not in `accepted`."""
+    if not all(r.req_id in accepted for r in step.requests):
+        return None
+    return tuple(accepted[r.req_id] for r in step.requests)
 
 
 def build_step_descriptor(
@@ -132,13 +134,9 @@ def build_step_descriptor(
     step_index: int,
     parallel: ParallelSummary,
 ) -> StepDescriptor:
-    """Describe one scheduled step from the `SchedulerOutput` alone.
-
-    `prompt_lens` is the caller's running map of request id to prompt length;
-    this function adds newly scheduled requests to it and drops the ones the
-    scheduler reports finished. Keeping the builder independent of worker
-    state lets a real worker and the simulated runner emit identical
-    descriptors, which is what makes recorded steps replayable."""
+    """Describe one scheduled step from the `SchedulerOutput`, as the simulated
+    runner and a recording worker both do. `prompt_lens` maps request
+    ids to prompt lengths across steps."""
     for req_id in scheduler_output.finished_req_ids:
         prompt_lens.pop(req_id, None)
     num_scheduled = scheduler_output.num_scheduled_tokens
@@ -237,15 +235,8 @@ def gather_dp_step(descriptor: StepDescriptor) -> StepDescriptor:
 
 @dataclass(frozen=True)
 class StepCost:
-    """Predicted cost of one step.
-
-    `device_s` is the time the device is busy with the step. `host_s` is the
-    host time the target deployment spends inside the step's
-    `execute_model`/`sample_tokens` calls (input preparation, kernel launches,
-    sampling); the simulated runner holds the engine thread for that long, as
-    the real calls would, while the device time runs on the device queue. The
-    rest of the host loop (scheduling, output processing) is the real code and
-    pays its own cost."""
+    """Predicted cost of one step: device time, and the host time the step's
+    `execute_model`/`sample_tokens` calls take."""
 
     device_s: float
     host_s: float = 0.0
@@ -263,11 +254,6 @@ class TimingProvider(Protocol):
     def estimate(self, step: StepDescriptor) -> StepCost: ...
 
 
-# --------------------------------------------------------------------------- #
-# Built-in providers
-# --------------------------------------------------------------------------- #
-
-
 class ZeroTimingProvider:
     """Every step takes no device time (pure scheduler / KV-cache simulation)."""
 
@@ -281,12 +267,8 @@ class ZeroTimingProvider:
 
 @dataclass(frozen=True)
 class HostTimeModel:
-    """A step's host time: ``fixed_us + per_req_us * R + per_prefill_token_us
-    * P`` for R scheduled requests and P prefill tokens.
-
-    Host work (input preparation, launches, sampling) barely depends on model
-    size, so a model fitted to a recording transfers to other models of the
-    same deployment shape: same host, parallelism and speculative decoding."""
+    """A step's host time: ``fixed_us + per_req_us * R + per_prefill_token_us *
+    P`` for R scheduled requests and P prefill tokens."""
 
     fixed_us: float = 0.0
     per_req_us: float = 0.0
@@ -294,25 +276,22 @@ class HostTimeModel:
 
     @classmethod
     def from_log(cls, path: str) -> HostTimeModel:
-        """Non-negative least-squares fit to the steps of a recorded log
-        (recorded under async scheduling, so host time excludes device time).
-        A term the log cannot determine, because its feature does not vary
-        independently of the others, is left at zero."""
+        """Non-negative least-squares fit to a recorded step log; terms the log
+        cannot determine stay at zero."""
         rows, host_us = [], []
         for rec in load_step_log(path):
             if "step" not in rec:
                 raise ValueError(f"{path}: host time needs a recorded step log")
-            step = rec["step"]
-            rows.append((1.0, len(step["requests"]), step["num_prefill_tokens"]))
+            step = StepDescriptor.from_json_dict(rec["step"])
+            rows.append((1.0, step.num_reqs, step.num_prefill_tokens))
             host_us.append(_record_cost(rec)[1] * 1e6)
         if not rows:
             raise ValueError(f"{path} has no recorded steps")
         a, y = np.asarray(rows, dtype=np.float64), np.asarray(host_us)
         if not a[:, 2].any():
             logger.warning("%s has no prefill steps: no per-token host time", path)
-        # Exhaustive NNLS over the subsets of terms whose features the log
-        # determines. Smaller subsets, and those with the fixed term, go first
-        # and win ties, so an undetermined split stays in the fixed term.
+        # NNLS over the determined subsets of terms; on a tie the smaller
+        # subset, preferring the fixed term, wins.
         best, best_err = np.zeros(3), np.inf
         subsets = sorted(
             (c for k in (1, 2, 3) for c in itertools.combinations(range(3), k)),
@@ -323,7 +302,7 @@ class HostTimeModel:
                 continue
             fit, *_ = np.linalg.lstsq(a[:, cols], y, rcond=None)
             err = float(np.sum((a[:, cols] @ fit - y) ** 2))
-            if (fit >= 0).all() and err < best_err * (1 - 1e-9):
+            if (fit >= 0).all() and err < best_err * (1 - _FIT_TIE_TOLERANCE):
                 best, best_err = np.zeros(3), err
                 best[list(cols)] = fit
         model = cls(*(float(c) for c in best))
@@ -404,13 +383,9 @@ def knn_lookup_counts() -> tuple[int, int]:
 
 class _KNNTable:
     """Inverse-distance weighted k-NN over z-scored (num_reqs, num_tokens,
-    sum_past_kv) features, interpolating (device_s, host_s). Points are
-    normalized once; a query is one vectorized distance pass, so lookups stay
-    off the step's critical path.
-
-    k-NN does not extrapolate: a step beyond the recorded range (a larger
-    batch than any recorded) gets the time of the nearest recorded steps, which
-    underestimates it. Such lookups are counted and warned about."""
+    sum_past_kv) features of recorded steps. A lookup outside the
+    recorded range, which k-NN underestimates, is counted and warned
+    about."""
 
     def __init__(
         self,
@@ -463,57 +438,37 @@ class _KNNTable:
 def load_step_log(
     path: str, kind: Literal["step", "kv_transfers", "kv_post"] = "step"
 ) -> list[dict[str, Any]]:
-    """The step records of a JSON/JSONL step log or hand-written table, or its
-    records of completed KV transfers (`kv_transfers`) or of NIXL read
-    postings (`kv_post`)."""
-    text = Path(path).read_text()
-    try:
-        # A JSON array, or one object with a "steps" array.
-        obj = json.loads(text)
-        records = obj if isinstance(obj, list) else obj.get("steps", [obj])
-    except json.JSONDecodeError:
-        # JSONL, as StepLogWriter writes.
-        records = [json.loads(line) for line in text.splitlines() if line.strip()]
+    """The step records of a JSONL step log, or its records of completed KV
+    transfers (`kv_transfers`) or NIXL read postings (`kv_post`)."""
+    lines = Path(path).read_text().splitlines()
+    records = [json.loads(line) for line in lines if line.strip()]
     if kind == "step":
         return [r for r in records if "kv_transfers" not in r and "kv_post" not in r]
     return [r for r in records if kind in r]
 
 
 def _record_cost(rec: dict[str, Any]) -> tuple[float, float]:
-    """(device_s, host_s) of a record from `--simulation-config log_path` or
-    a hand-written table: {"cost": {"device_s", "host_s"}}, {"device_s"} or
-    {"device_ms"}, with an optional "host_s"/"host_ms"."""
-    cost = rec["cost"] if isinstance(rec.get("cost"), dict) else rec
-    if "device_s" in cost:
-        device_s = float(cost["device_s"])
-    elif "device_ms" in cost:
-        device_s = float(cost["device_ms"]) * 1e-3
-    else:
-        raise ValueError(f"record has no device time: {list(rec)}")
-    host_s = float(cost.get("host_s", cost.get("host_ms", 0.0) * 1e-3))
-    return device_s, host_s
+    """(device_s, host_s) of a step record, or of a hand-written one."""
+    cost = rec.get("cost", rec)
+    return float(cost["device_s"]), float(cost.get("host_s") or 0.0)
 
 
 def _record_features(rec: dict[str, Any]) -> tuple[float, float, float]:
-    if "step" in rec and isinstance(rec["step"], dict):
-        reqs = rec["step"]["requests"]
-        return (
-            float(len(reqs)),
-            float(sum(r["num_scheduled_tokens"] for r in reqs)),
-            float(sum(r["num_computed_tokens"] for r in reqs)),
-        )
+    """`_step_features` of a step record, or of a hand-written one:
+    {"num_reqs", "num_tokens", "sum_past_kv", "device_s"[, "host_s"]}."""
+    if "step" in rec:
+        return _step_features(StepDescriptor.from_json_dict(rec["step"]))
     return (
         float(rec["num_reqs"]),
         float(rec["num_tokens"]),
-        float(rec.get("sum_past_kv", rec.get("num_kv_tokens", 0.0))),
+        float(rec["sum_past_kv"]),
     )
 
 
 def acceptance_rates_from_log(path: str) -> list[float]:
-    """Per-position conditional draft acceptance rates of a step log recorded
-    with speculative decoding: rate[i] is the fraction of requests that had a
-    draft at position i, and had all earlier drafts accepted, whose draft at
-    position i was accepted too."""
+    """Per-position draft acceptance rates of a step log recorded with
+    speculative decoding, each conditional on the earlier drafts being
+    accepted."""
     reached = np.zeros(0)
     accepted = np.zeros(0)
     for rec in load_step_log(path):
@@ -534,13 +489,12 @@ def acceptance_rates_from_log(path: str) -> list[float]:
 
 
 class TableTimingProvider:
-    """Interpolates a measured table of step costs.
+    """Interpolates recorded steps (`path`, a step log or a hand-written JSONL
+    table)."""
 
-    `path` is a JSON/JSONL file of records; each record carries a device time,
-    optionally a host time, and either a full `step` descriptor (as written by
-    `log_path`) or the features `num_reqs`, `num_tokens`, `sum_past_kv`."""
-
-    def __init__(self, vllm_config: VllmConfig, *, path: str, k: int = 4) -> None:
+    def __init__(
+        self, vllm_config: VllmConfig, *, path: str, k: int = _DEFAULT_KNN_K
+    ) -> None:
         records = load_step_log(path)
         self.table = _KNNTable(
             [(_record_features(r), _record_cost(r)) for r in records], k
@@ -552,14 +506,9 @@ class TableTimingProvider:
 
 
 class ReplayTimingProvider:
-    """Exact replay of recorded step times keyed by batch composition.
-
-    A recorded run (real or simulated) is matched step by step on the sorted
-    ``[(num_scheduled_tokens, num_computed_tokens), ...]`` composition. On a
-    miss, ``fallback="knn"`` interpolates like `TableTimingProvider` and
-    ``fallback="zero"`` returns `miss_fallback_s`. The miss rate is reported
-    in `metrics()`; a high miss rate means the simulated scheduler diverged
-    from the recorded one, which is exactly what this provider is for."""
+    """Replays the mean recorded time of a step's exact batch composition; on a
+    miss, interpolates (``fallback="knn"``) or returns
+    `miss_fallback_s`."""
 
     def __init__(
         self,
@@ -567,7 +516,7 @@ class ReplayTimingProvider:
         *,
         path: str,
         fallback: str = "knn",
-        k: int = 4,
+        k: int = _DEFAULT_KNN_K,
         miss_fallback_s: float = 0.0,
     ) -> None:
         records = load_step_log(path)
@@ -578,10 +527,7 @@ class ReplayTimingProvider:
         for rec in records:
             cost = _record_cost(rec)
             if "step" in rec:
-                reqs = rec["step"]["requests"]
-                key = _replay_key(
-                    (r["num_scheduled_tokens"], r["num_computed_tokens"]) for r in reqs
-                )
+                key = StepDescriptor.from_json_dict(rec["step"]).replay_key()
                 same_key.setdefault(key, []).append(cost)
             points.append((_record_features(rec), cost))
         self.exact: dict[str, tuple[float, float]] = {
@@ -644,11 +590,6 @@ def get_timing_provider(
     return provider
 
 
-# --------------------------------------------------------------------------- #
-# Clock and async output
-# --------------------------------------------------------------------------- #
-
-
 class Clock(Protocol):
     horizon: float
     """When the driver of an in-process engine next has work for it (a
@@ -675,13 +616,7 @@ class RealClock:
 
 
 class VirtualClock:
-    """Simulated time: waiting for a deadline moves the clock to it at once.
-
-    With the in-process engine the worker and the driver share one process
-    and a clock (`VIRTUAL_CLOCK`, or one per engine when several run
-    concurrently). The engine's own host loop
-    (scheduling, output processing) takes no simulated time; a step's
-    predicted `host_s` still holds the engine thread."""
+    """Simulated time: waiting for a deadline moves the clock to it."""
 
     def __init__(self) -> None:
         self._now = 0.0
@@ -695,11 +630,8 @@ class VirtualClock:
 
 
 class FastForwardClock:
-    """The wall clock with waits skipped: host work takes its real time, and
-    waiting for a deadline shifts the clock forward instead of sleeping. With
-    the in-process engine nothing else runs while the engine core waits for a
-    step, so this reproduces the `real` clock's timeline in a fraction of the
-    time, host overheads included."""
+    """The wall clock with waits skipped: waiting for a deadline shifts the
+    clock forward instead of sleeping."""
 
     def __init__(self) -> None:
         self._offset = 0.0
@@ -712,19 +644,18 @@ class FastForwardClock:
         self._offset += max(0.0, deadline - self.now())
 
 
-# One instance per process, shared by the in-process engine's worker and the
-# driver that timestamps requests.
-VIRTUAL_CLOCK = VirtualClock()
-FAST_FORWARD_CLOCK = FastForwardClock()
+_CLOCKS: dict[str, type[Clock]] = {
+    "real": RealClock,
+    "virtual": VirtualClock,
+    "fast_forward": FastForwardClock,
+}
+# The clock of the engine being built in the process of its driver.
 _driven_engine_clock: Clock | None = None
 
 
 @contextlib.contextmanager
 def building_driven_engine(clock: Clock) -> Iterator[None]:
-    """Engines built in this context run in the process of a driver that
-    reads `clock` too (`vllm.v1.worker.simulated.offline`). Engines that run
-    concurrently in one process (prefill and decode instances) each get their
-    own clock."""
+    """Engines built in this context share `clock` with their driver."""
     global _driven_engine_clock
     _driven_engine_clock = clock
     try:
@@ -738,23 +669,14 @@ def driven_engine_clock() -> Clock | None:
     return _driven_engine_clock
 
 
-def get_clock(kind: str) -> Clock:
-    if kind == "real":
-        return RealClock()
-    if kind == "virtual":
-        return VIRTUAL_CLOCK
-    if kind == "fast_forward":
-        return FAST_FORWARD_CLOCK
-    raise ValueError(f"unknown clock {kind!r}")
+def new_clock(kind: str) -> Clock:
+    """A new clock of `SimulationConfig.clock` kind `kind`."""
+    return _CLOCKS[kind]()
 
 
 class SimulatedAsyncOutput(AsyncModelRunnerOutput):
-    """Defers the step's completion to `get_output()`.
-
-    Executors resolve `AsyncModelRunnerOutput` lazily (when the engine core
-    needs the result), so blocking here instead of inside `execute_model`
-    lets the scheduler prepare step N+1 while "step N" is still running,
-    exactly as with a real device under async scheduling."""
+    """Defers a step's completion to `get_output()`, so the engine core
+    schedules the next step meanwhile, as under async scheduling."""
 
     def __init__(self, output: ModelRunnerOutput, deadline: float, clock: Clock):
         self.output = output
@@ -768,27 +690,21 @@ class SimulatedAsyncOutput(AsyncModelRunnerOutput):
         return self.output
 
 
-# --------------------------------------------------------------------------- #
-# Step log
-# --------------------------------------------------------------------------- #
+def is_output_rank() -> bool:
+    """Whether this rank returns the step output: the last pipeline stage's
+    first tensor-parallel rank."""
+    from vllm.distributed.parallel_state import get_pp_group, get_tp_group
+
+    return get_pp_group().is_last_rank and get_tp_group().rank_in_group == 0
 
 
 def step_log_path(vllm_config: VllmConfig) -> str | None:
-    """This rank's step log, if it writes one. Only the rank whose output the
-    executor returns (last pipeline stage, first tensor-parallel rank) writes
-    one. Under pipeline parallelism a recorded device time therefore runs from
-    the step's arrival at the last stage, whose first kernels wait for the
-    earlier stages, to its end: the step's time through the whole pipeline,
-    which is what `device_s` means to the simulated runner (while the pipeline
-    is not saturated). MoE data-parallel ranks step in lockstep and log the
-    joint step, so only DP rank 0 writes; independent (dense) DP rank i > 0
-    writes `<log_path>.dp<i>`."""
-    from vllm.distributed.parallel_state import get_pp_group, get_tp_group
-
+    """This rank's step log, if it writes one: the output rank's, of DP rank 0
+    under MoE DP (which logs joint steps), else `<log_path>.dp<i>` for an
+    independent DP rank i > 0. Under pipeline parallelism a recorded step is
+    timed on the last stage, so its device time spans the whole pipeline."""
     path = vllm_config.simulation_config.log_path
-    if path is None or not get_pp_group().is_last_rank:
-        return None
-    if get_tp_group().rank_in_group != 0:
+    if path is None or not is_output_rank():
         return None
     parallel_config = vllm_config.parallel_config
     dp_index = parallel_config.data_parallel_index

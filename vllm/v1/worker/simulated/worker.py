@@ -8,12 +8,12 @@ import torch
 from vllm.platforms import current_platform
 
 if current_platform.is_cpu():
-    # Turns torch's CUDA stream/event/pin_memory APIs into no-ops so the GPU
-    # model runner's buffers work on a CPU-only host. Must precede the GPU
-    # worker and runner imports, as in cpu_worker.py.
+    # Stubs torch's CUDA stream/event APIs for the GPU runner, as in
+    # cpu_worker.py; must precede its import.
     import vllm.v1.worker.cpu.shm  # noqa: F401
 
 from vllm.distributed.kv_transfer import kv_transfer_state
+from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBaseType
 from vllm.logger import init_logger
 from vllm.utils.mem_utils import format_gib
 from vllm.utils.torch_utils import set_random_seed
@@ -26,14 +26,9 @@ logger = init_logger(__name__)
 
 
 class SimulatedWorker(Worker):
-    """Runs the real request bookkeeping of the V2 model runner while skipping
-    weight loading, KV-cache allocation and the forward pass.
+    """Worker for simulated execution: no weights, no KV tensors, no forward."""
 
-    On a CUDA host the worker still binds a device: the runner keeps its small
-    request-state and block-table buffers there and uses the stock Triton
-    input-preparation kernels. On the CPU platform it needs Triton's CPU
-    backend for the same kernels. The model itself lives on the meta device
-    either way."""
+    _kv_connector: KVConnectorBaseType | None = None
 
     def init_device(self) -> None:
         if current_platform.is_cuda_alike():
@@ -60,16 +55,16 @@ class SimulatedWorker(Worker):
         self._init_workspace_and_model_runner()
 
     def initialize_from_config(self, kv_cache_config: KVCacheConfig) -> None:
-        # The worker-side KV connector is a process global. Engines simulated
-        # in one process (a disaggregated deployment's prefill and decode
-        # instances) each need their own; the runner keeps its reference.
-        kv_transfer_state._KV_CONNECTOR_AGENT = None
+        # Engines simulated in one process (disaggregated instances) each
+        # build their own connector, which is a process global.
+        kv_transfer_state.set_kv_transfer_group(None)
         super().initialize_from_config(kv_cache_config)
-        self._kv_connector = kv_transfer_state._KV_CONNECTOR_AGENT
+        if kv_transfer_state.has_kv_transfer_group():
+            self._kv_connector = kv_transfer_state.get_kv_transfer_group()
 
     def shutdown(self) -> None:
         # Shut down this engine's connector, not the last one built.
-        kv_transfer_state._KV_CONNECTOR_AGENT = getattr(self, "_kv_connector", None)
+        kv_transfer_state.set_kv_transfer_group(self._kv_connector)
         super().shutdown()
 
     def execute_model(self, scheduler_output):  # type: ignore[override]
@@ -108,14 +103,7 @@ class SimulatedWorker(Worker):
 
     def compile_or_warm_up_model(self) -> CompilationTimes:
         assert isinstance(self.model_runner, SimulatedModelRunner)
-        try:
-            self.model_runner.warm_up_step_kernels()
-        except Exception:
-            logger.warning(
-                "Simulated-step warmup failed; the first scheduled step will "
-                "compile the Triton kernels instead.",
-                exc_info=True,
-            )
+        self.model_runner.warm_up_step_kernels()
         return CompilationTimes(
             language_model=self.compilation_config.compilation_time,
             encoder=self.compilation_config.encoder_compilation_time,

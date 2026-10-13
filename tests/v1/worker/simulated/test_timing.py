@@ -92,17 +92,16 @@ def test_replay_exact_match_then_knn_fallback(tmp_path):
     assert zero_fallback.estimate(sim_step(11, sim_req("q", 64, 0, 64))).device_s == 0.5
 
 
+def _write_table(path, rows) -> None:
+    """A hand-written table: (num_reqs, num_tokens, sum_past_kv, device_s)."""
+    keys = ("num_reqs", "num_tokens", "sum_past_kv", "device_s")
+    path.write_text("".join(json.dumps(dict(zip(keys, r))) + "\n" for r in rows))
+
+
 def test_table_provider_accepts_hand_written_records(tmp_path):
-    table = tmp_path / "table.json"
-    table.write_text(
-        json.dumps(
-            [
-                {"num_reqs": 1, "num_tokens": 1, "sum_past_kv": 100, "device_ms": 2.0},
-                {"num_reqs": 8, "num_tokens": 8, "sum_past_kv": 800, "device_ms": 3.0},
-                {"num_reqs": 1, "num_tokens": 512, "sum_past_kv": 0, "device_ms": 20.0},
-            ]
-        )
-    )
+    table = tmp_path / "table.jsonl"
+    rows = [(1, 1, 100, 2e-3), (8, 8, 800, 3e-3), (1, 512, 0, 20e-3)]
+    _write_table(table, rows)
     p = TableTimingProvider(StubConfig(), path=str(table), k=1)  # type: ignore[arg-type]
     decode1 = sim_step(0, sim_req("a", 1, 100, 50))
     assert p.estimate(decode1).device_s == pytest.approx(2e-3)
@@ -111,15 +110,8 @@ def test_table_provider_accepts_hand_written_records(tmp_path):
 
 
 def test_table_counts_lookups_beyond_recorded_range(tmp_path):
-    table = tmp_path / "table.json"
-    table.write_text(
-        json.dumps(
-            [
-                {"num_reqs": 1, "num_tokens": 1, "sum_past_kv": 100, "device_ms": 2.0},
-                {"num_reqs": 4, "num_tokens": 4, "sum_past_kv": 400, "device_ms": 3.0},
-            ]
-        )
-    )
+    table = tmp_path / "table.jsonl"
+    _write_table(table, [(1, 1, 100, 2e-3), (4, 4, 400, 3e-3)])
     p = TableTimingProvider(StubConfig(), path=str(table), k=1)  # type: ignore[arg-type]
     before = knn_lookup_counts()
     p.estimate(sim_step(0, *(sim_req(str(i), 1, 100, 50) for i in range(2))))

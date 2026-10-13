@@ -1,16 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Drive an in-process engine with a timed arrival schedule.
-
-`simulate()` replays a list of requests, each with an arrival time, and
-multi-turn sessions, whose turns arrive as earlier ones finish, against an
-`LLMEngine` running in the caller's process, and timestamps every request's
-output tokens. With ``simulation_config.clock`` set to ``"virtual"`` or
-``"fast_forward"`` the timestamps are simulated time and the run takes only as
-long as the host work, which is what makes configuration sweeps cheap. With
-the real clock (simulated or real execution) the same driver produces the
-wall-clock baseline to compare against.
-"""
+"""Drive an in-process engine with timed requests and sessions, and timestamp
+its outputs."""
 
 from __future__ import annotations
 
@@ -20,7 +11,7 @@ import time
 import weakref
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
@@ -31,7 +22,7 @@ from vllm.v1.worker.simulated.timing import (
     Clock,
     VirtualClock,
     building_driven_engine,
-    get_clock,
+    new_clock,
 )
 
 if TYPE_CHECKING:
@@ -40,6 +31,11 @@ if TYPE_CHECKING:
     from vllm.v1.engine.llm_engine import LLMEngine
 
 logger = init_logger(__name__)
+
+# Prefix of the ids of a run's requests (`<prefix><index>[.<turn>]`).
+REQUEST_ID_PREFIX = "timed-"
+# Engine steps without progress after which a run is aborted.
+MAX_STALLED_STEPS = 10_000
 
 _engine_clocks: weakref.WeakKeyDictionary[LLMEngine, Clock] = (
     weakref.WeakKeyDictionary()
@@ -66,10 +62,8 @@ class Turn:
 
 @dataclass
 class TimedSession:
-    """A multi-turn conversation. A turn's prompt is the previous turn's prompt
-    and output followed by its own tokens, and it arrives only after the
-    previous turn finished, so later turns can reuse the conversation's KV
-    cache (on the device or, with offloading, in the CPU cache)."""
+    """A multi-turn conversation: each turn extends the previous turn's prompt
+    and output, and arrives `think_time` after it finished."""
 
     turns: list[Turn]
     arrival_time: float = 0.0
@@ -115,46 +109,51 @@ class SimulationResult:
     run's clock (simulated seconds under the virtual clock)."""
     wall_time: float
 
-    def summary(self) -> dict[str, float]:
-        """Latency percentiles in milliseconds and throughputs, named as in
-        `vllm bench serve`."""
-
-        def stats(name: str, values: list[float]) -> dict[str, float]:
-            if not values:
-                return {}
-            ms = np.asarray(values) * 1e3
-            return {
-                f"mean_{name}_ms": float(ms.mean()),
-                f"median_{name}_ms": float(np.median(ms)),
-                f"p99_{name}_ms": float(np.percentile(ms, 99)),
-            }
-
-        done = [r for r in self.requests if r.finish_time is not None]
-        input_tokens = sum(r.num_prompt_tokens for r in done)
-        output_tokens = sum(r.num_output_tokens for r in done)
-        # Peak number of requests between arrival and completion.
-        events = sorted(
-            (t, d) for r in done for t, d in ((r.arrival_time, 1), (r.finish_time, -1))
+    def summary(
+        self,
+        percentile_metrics: Sequence[str] = ("ttft", "tpot", "itl", "e2el"),
+        percentiles: Sequence[float] = (99,),
+        goodput: dict[str, float] | None = None,
+    ) -> dict[str, Any]:
+        """The run's results, computed and named as by `vllm bench serve`."""
+        from vllm.benchmarks.lib.endpoint_request_func import RequestFuncOutput
+        from vllm.benchmarks.serve import (
+            calculate_metrics,
+            metric_results,
+            percentile_metric_results,
         )
-        per_s = 1 / self.duration if self.duration else 0
-        out = {
-            "completed": float(len(done)),
-            "duration_s": self.duration,
-            "wall_time_s": self.wall_time,
-            "total_input_tokens": float(input_tokens),
-            "total_output_tokens": float(output_tokens),
-            "request_throughput": len(done) * per_s,
-            "output_throughput": output_tokens * per_s,
-            "total_token_throughput": (input_tokens + output_tokens) * per_s,
-            "max_concurrent_requests": float(
-                max(np.cumsum([d for _, d in events]), default=0)
-            ),
-        }
-        out |= stats("ttft", [r.ttft for r in done if r.ttft is not None])
-        out |= stats("tpot", [r.tpot for r in done if r.tpot is not None])
-        out |= stats("itl", [itl for r in done for itl in r.itls])
-        out |= stats("e2el", [r.e2el for r in done if r.e2el is not None])
-        return out
+
+        outputs = [
+            RequestFuncOutput(
+                success=r.finish_time is not None,
+                latency=r.e2el or 0.0,
+                output_tokens=r.num_output_tokens,
+                ttft=r.ttft or 0.0,
+                itl=r.itls,
+                prompt_len=r.num_prompt_tokens,
+                start_time=r.arrival_time,
+            )
+            for r in self.requests
+        ]
+        metrics, _ = calculate_metrics(
+            [],
+            outputs,
+            self.duration,
+            None,
+            list(percentiles),
+            goodput or {},
+            show_plot=False,
+        )
+        result = metric_results(metrics, self.duration, bool(goodput))
+        for name in percentile_metrics:
+            result |= percentile_metric_results(
+                name,
+                getattr(metrics, f"mean_{name}_ms"),
+                getattr(metrics, f"median_{name}_ms"),
+                getattr(metrics, f"std_{name}_ms"),
+                getattr(metrics, f"percentiles_{name}_ms"),
+            )
+        return result
 
 
 def make_engine(
@@ -162,17 +161,15 @@ def make_engine(
     clock: Clock | None = None,
     usage_context: UsageContext | None = None,
 ) -> LLMEngine:
-    """An `LLMEngine` whose engine core runs in this process, so that it and
-    the driver share the simulation clock: `clock`, by default the process's
-    clock of the configured kind. `usage_context` picks the defaults of unset
-    scheduler limits, as for the engine simulated (`OPENAI_API_SERVER` for
-    `vllm serve`)."""
+    """An `LLMEngine` whose engine core runs in this process, on `clock` (by
+    default a new clock of the configured kind). `usage_context` picks
+    the defaults of unset scheduler limits."""
     from vllm.v1.engine.llm_engine import LLMEngine
     from vllm.v1.executor import Executor
 
     vllm_config = engine_args.create_engine_config(usage_context)
     if clock is None:
-        clock = get_clock(vllm_config.simulation_config.clock)
+        clock = new_clock(vllm_config.simulation_config.clock)
     with building_driven_engine(clock):
         engine = LLMEngine(
             vllm_config=vllm_config,
@@ -205,21 +202,12 @@ def engine_clock(engine: LLMEngine) -> Clock:
 def run(
     engine: LLMEngine,
     requests: Sequence[TimedRequest | TimedSession],
-    max_stalled_steps: int = 10_000,
+    max_stalled_steps: int = MAX_STALLED_STEPS,
     frontend_latency_s: float = 0.0,
 ) -> SimulationResult:
     """Feed `requests` to `engine` (from `make_engine()`) at their arrival
-    times and timestamp the outputs. A request is admitted at the first
-    engine step at or after its arrival, as the engine core of a server picks
-    up requests between steps; a session's turns arrive one after another.
-    The result lists one timing per request, or per turn of a session, in
-    input order. Under the virtual clock, `max_stalled_steps` consecutive
-    engine steps without output or clock progress abort the run.
-
-    `frontend_latency_s` is a server's per-request latency outside the engine
-    core (HTTP, API server, IPC), which a client sees on top of the engine's:
-    a request reaches the engine that long after its arrival, adding it to
-    TTFT and end-to-end latency (and to the gap between a session's turns)."""
+    times plus `frontend_latency_s`, and timestamp the outputs: one
+    timing per request or session turn, in input order."""
     from vllm.v1.engine.core_client import InprocClient
 
     sim = engine.vllm_config.simulation_config
@@ -238,11 +226,14 @@ def run(
     if any(t.sampling_params.n != 1 for ts in turns for t in ts):
         raise ValueError("Timed runs support n=1 only.")
     request_ids = [
-        [f"timed-{i}" if len(ts) == 1 else f"timed-{i}.{k}" for k in range(len(ts))]
+        [
+            f"{REQUEST_ID_PREFIX}{i}" + (f".{k}" if len(ts) > 1 else "")
+            for k in range(len(ts))
+        ]
         for i, ts in enumerate(turns)
     ]
-    clock = _engine_clocks.get(engine) or get_clock(sim.clock)
-    # The driven clocks are process-global; drop a horizon an aborted run left.
+    clock = engine_clock(engine)
+    # Drop the horizon an aborted run on this engine may have left.
     clock.horizon = math.inf
     wall_start = time.perf_counter()
     t0 = clock.now()

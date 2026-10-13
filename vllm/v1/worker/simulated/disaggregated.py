@@ -39,6 +39,8 @@ from vllm.outputs import RequestOutput
 from vllm.sampling_params import RequestOutputKind
 from vllm.v1.worker.simulated.kv_nixl import simulated_nixl_worker
 from vllm.v1.worker.simulated.offline import (
+    MAX_STALLED_STEPS,
+    REQUEST_ID_PREFIX,
     RequestTiming,
     SimulationResult,
     TimedRequest,
@@ -118,7 +120,7 @@ def run_disaggregated(
     requests: Sequence[TimedRequest],
     handoff_latency_s: float = 0.0,
     routing: Literal["round_robin", "least_unfinished"] = "round_robin",
-    max_stalled_steps: int = 10_000,
+    max_stalled_steps: int = MAX_STALLED_STEPS,
     frontend_latency_s: float = 0.0,
 ) -> SimulationResult:
     """Run `requests` through prefill and decode engines from `make_instance()`
@@ -145,7 +147,9 @@ def run_disaggregated(
     heapq.heapify(events)
     seq = len(events)
     timings = {
-        i: RequestTiming(f"timed-{i}", r.arrival_time, len(r.prompt_token_ids))
+        i: RequestTiming(
+            f"{REQUEST_ID_PREFIX}{i}", r.arrival_time, len(r.prompt_token_ids)
+        )
         for i, r in enumerate(requests)
     }
     is_prefill = {id(e) for e in prefill}
@@ -191,7 +195,9 @@ def run_disaggregated(
             clocks[id(engine)].sleep_until(t)
             waiting.discard(id(engine))
             idle_steps.pop(id(engine), None)
-            add_token_request(engine, f"timed-{i}", req.prompt_token_ids, params)
+            add_token_request(
+                engine, f"{REQUEST_ID_PREFIX}{i}", req.prompt_token_ids, params
+            )
             continue
 
         # Step the engine furthest behind; of several at the same time, each
@@ -229,7 +235,7 @@ def run_disaggregated(
         t = clock.now()
         for out in outputs:
             assert isinstance(out, RequestOutput)
-            i = int(out.request_id.removeprefix("timed-"))
+            i = int(out.request_id.removeprefix(REQUEST_ID_PREFIX))
             if id(engine) in is_prefill:
                 if out.finished:
                     # The proxy hands the request to a decode instance.
@@ -280,7 +286,7 @@ def simulate_disaggregated(
     num_decode: int = 1,
     handoff_latency_s: float = 0.0,
     routing: Literal["round_robin", "least_unfinished"] = "round_robin",
-    max_stalled_steps: int = 10_000,
+    max_stalled_steps: int = MAX_STALLED_STEPS,
     frontend_latency_s: float = 0.0,
 ) -> SimulationResult:
     """Build `num_prefill` prefill and `num_decode` decode instances and run
