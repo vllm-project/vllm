@@ -12,8 +12,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-
-from .utils import maybe_prefix
+from vllm.model_executor.models.utils import maybe_prefix
 
 
 class ResidualBlock(nn.Module):

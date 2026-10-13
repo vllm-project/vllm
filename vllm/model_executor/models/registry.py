@@ -691,7 +691,7 @@ _SPECULATIVE_DECODING_MODELS = {
     "Glm4MoeLiteMTPModel": ("glm4_moe_lite_mtp", "Glm4MoeLiteMTP"),
     "GlmOcrMTPModel": ("glm_ocr_mtp", "GlmOcrMTP"),
     "Glm5NextMTPModel": ("vllm.models.glm5next", "Glm5NextMTP"),
-    "MedusaModel": ("medusa", "Medusa"),
+    "MedusaModel": ("vllm.models.medusa", "Medusa"),
     "OpenPanguMTPModel": ("openpangu_mtp", "OpenPanguMTP"),
     "Qwen3NextMTP": ("qwen3_next_mtp", "Qwen3NextMTP"),
     "Qwen4ExpMTP": ("vllm.models.qwen4_exp", "Qwen4ExpMTP"),
