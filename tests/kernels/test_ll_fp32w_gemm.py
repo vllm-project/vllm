@@ -6,6 +6,8 @@ import pytest
 import torch
 import torch.nn.functional as F
 
+from vllm.platforms import current_platform
+
 pytestmark = pytest.mark.skipif(
     not torch.accelerator.is_available(), reason="CUDA required"
 )
@@ -13,7 +15,7 @@ pytestmark = pytest.mark.skipif(
 
 @pytest.fixture(autouse=True, scope="module")
 def _require_sm90_and_cutedsl():
-    if torch.accelerator.get_device_capability()[0] < 9:
+    if not current_platform.has_device_capability(90):
         pytest.skip("Requires SM90+ (Hopper/Blackwell)")
     from vllm.model_executor.kernels.linear.cute_dsl.ll_fp32w import (
         is_available,
@@ -247,8 +249,8 @@ def test_cudagraph(M, K, N):
     b = torch.randn(N, K, dtype=torch.float32, device="cuda")
     _gemm(a, b)
     torch.accelerator.synchronize()
-    g = torch.accelerator.CUDAGraph()
-    with torch.accelerator.graph(g):
+    g = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(g):
         out = _gemm(a, b)
     for _ in range(5):
         g.replay()
@@ -262,8 +264,8 @@ def test_cudagraph_20x_replay():
     b = torch.randn(64, 4096, dtype=torch.float32, device="cuda")
     _gemm(a, b)
     torch.accelerator.synchronize()
-    g = torch.accelerator.CUDAGraph()
-    with torch.accelerator.graph(g):
+    g = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(g):
         out = _gemm(a, b)
     results = []
     for _ in range(20):
@@ -282,8 +284,8 @@ def test_cudagraph_input_update():
     b = torch.randn(128, 5120, dtype=torch.float32, device="cuda")
     _gemm(a, b)
     torch.accelerator.synchronize()
-    g = torch.accelerator.CUDAGraph()
-    with torch.accelerator.graph(g):
+    g = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(g):
         out = _gemm(a, b)
     a.copy_(torch.randn_like(a))
     g.replay()
