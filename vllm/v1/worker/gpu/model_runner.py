@@ -2254,11 +2254,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             copy_stream=self.output_copy_stream,
             check_ep_fault=self.check_ep_fault,
             pending_aux_output=pending_aux_output,
-            blocking=(
-                self.scheduler_config.async_scheduling
-                or self.parallel_config.world_size_across_dp > 1
-                or self.compilation_config.cudagraph_mode == CUDAGraphMode.NONE
-            ),
         )
 
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None

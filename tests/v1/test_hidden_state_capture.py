@@ -174,8 +174,7 @@ def test_hidden_capture_keeps_bfloat16_on_cpu(non_blocking):
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 @pytest.mark.parametrize("layout", ["final", "aux_final", "dflash_aux"])
-@pytest.mark.parametrize("blocking", [False, True])
-def test_hidden_capture_async_rows_survive_graph_output_reuse(layout, blocking):
+def test_hidden_capture_async_rows_survive_graph_output_reuse(layout):
     """The runner's output event makes copies readable despite graph replay reuse."""
     from vllm.v1.outputs import ModelRunnerOutput
     from vllm.v1.worker.gpu.async_utils import AsyncOutput
@@ -232,7 +231,6 @@ def test_hidden_capture_async_rows_survive_graph_output_reuse(layout, blocking):
                     copy_stream,
                     False,
                     None,
-                    blocking=blocking,
                 )
             )
             source.add_(20)

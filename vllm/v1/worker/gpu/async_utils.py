@@ -122,8 +122,6 @@ class AsyncOutput(AsyncModelRunnerOutput):
         copy_stream: torch.cuda.Stream,
         check_ep_fault: bool,
         pending_aux_output: "PendingAuxOutput | None",
-        *,
-        blocking: bool = True,
     ):
         # NOTE(woosuk): We must retain references to the GPU tensors,
         # as the copy operations are performed on a different CUDA stream than
@@ -132,8 +130,8 @@ class AsyncOutput(AsyncModelRunnerOutput):
         self.sampler_output = sampler_output
         self.num_sampled_tokens = num_sampled_tokens
         self.pending_aux_output = pending_aux_output
-        # Concurrent workers use sleeping waits to avoid driver-lock contention.
-        self.copy_event = torch.cuda.Event(blocking=blocking)
+        # Blocking (sleep) event to avoid busy-polling the CUDA driver lock.
+        self.copy_event = torch.cuda.Event(blocking=True)
         self._has_fault: torch.Tensor | None = None
 
         with stream(copy_stream, main_stream):
