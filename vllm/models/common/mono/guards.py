@@ -11,7 +11,6 @@ import importlib
 from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING
 
-from vllm import envs
 from vllm.config.compilation import CUDAGraphMode
 from vllm.logger import init_logger
 from vllm.models.common.mono.peer import tp_agree
@@ -31,13 +30,8 @@ _FULL_MODES = (
 
 
 def enabled(vllm_config: "VllmConfig") -> bool:
-    """``--monokernel``, or ``VLLM_ROCM_MONO_DECODE=1`` (#60397's switch).
-
-    The ``KernelConfig`` flag lands in a separate core PR, so a tree without it
-    reads as off rather than failing to import.
-    """
-    flag = getattr(vllm_config.kernel_config, "monokernel", False)
-    return bool(flag) or envs.VLLM_ROCM_MONO_DECODE
+    """Whether ``--monokernel`` asked for the model's MonoKernels."""
+    return bool(vllm_config.kernel_config.monokernel)
 
 
 def load_specs(path: str) -> tuple[MonoSpec, ...]:

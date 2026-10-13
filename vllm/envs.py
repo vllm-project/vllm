@@ -156,7 +156,6 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION: bool = False
     VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: bool = False
     VLLM_ROCM_AITER_MEGA_MOE_FUSE_SHARED_EXPERTS: bool = False
-    VLLM_ROCM_MONO_DECODE: bool = False
     VLLM_MONO_UNSAFE_WARN: bool = False
     VLLM_MONO_FAULT_INJECT: str = ""
     VLLM_ROCM_USE_AITER_TRITON_GEMM: bool = True
@@ -1399,12 +1398,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ROCM_AITER_MEGA_MOE_FUSE_SHARED_EXPERTS": lambda: (
         os.getenv("VLLM_ROCM_AITER_MEGA_MOE_FUSE_SHARED_EXPERTS", "False").lower()
         in ("true", "1")
-    ),
-    # Run the eligible layers of decode steps on the model's mono decode
-    # kernels: persistent launches a layer, the TP all-reduces in-kernel
-    # (DeepSeek-V4.1 on CDNA4). By default is disabled.
-    "VLLM_ROCM_MONO_DECODE": lambda: (
-        os.getenv("VLLM_ROCM_MONO_DECODE", "False").lower() in ("true", "1")
     ),
     # Warn instead of failing the step when a mono decode kernel reports an
     # error word (an in-kernel wait gave up). For debugging only: the step's
