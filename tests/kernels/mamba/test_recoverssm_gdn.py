@@ -4,8 +4,10 @@
 per-token states, and the boundary checks (malformed metadata must raise ValueError
 before any kernel reads or writes out of bounds)."""
 
+from types import SimpleNamespace
 from typing import Any, cast
 
+import numpy as np
 import pytest
 import torch
 
@@ -58,6 +60,7 @@ def _verify(inp: dict, **override):
         query_start_loc=d["query_start_loc"],
         state_indices=d["state_indices"],
         spec_query_len=d["spec_query_len"],
+        record_indices=d.get("record_indices"),
         out=d.get("out"),
     )
 
@@ -302,6 +305,71 @@ def test_commit_maps_noncontiguous_requests_in_align_mode():
         final_blk = int(bt[r, max(c0 + n - 1, 0) // bs])
         tok = int(inp["query_start_loc"][i]) + n - 1
         assert torch.equal(ckpt[final_blk], states[tok])
+
+
+@pytest.mark.parametrize("align", [False, True])
+def test_records_outside_the_page_match_in_page_records(align):
+    """The GDN layer keeps replay records in a separate buffer addressed by request
+    slot. Verify output and committed states must equal those with records stored at
+    the state index (in the page), for non-contiguous spec rows, in both modes."""
+    qlens = [4, 1, 2]
+    bs = 8
+    bt = torch.arange(1, 1 + 5 * 6, dtype=torch.int32, device="cuda").reshape(5, 6)
+    nc = torch.tensor([5, 0, 16, 9, 0], dtype=torch.int32, device="cuda")
+    req_rows = torch.tensor([0, 2, 3], dtype=torch.int32, device="cuda")
+    acc = torch.tensor([3, 9, 1, 2, 9], dtype=torch.int32, device="cuda")
+    results = []
+    for out_of_page in (False, True):
+        inp = _make(qlens, nb=40)
+        inp["state_indices"] = torch.stack(
+            [bt[r, int(nc[r]) // bs] for r in req_rows.tolist()]
+        ).contiguous()
+        record_indices = None
+        if out_of_page:
+            # rows never written must never be read
+            inp["replay_cache"] = torch.full(
+                (6, HV, T, V + K + 1), float("nan"), device="cuda"
+            )
+            record_indices = torch.tensor([4, 0, 5], dtype=torch.int32, device="cuda")
+            inp["record_indices"] = record_indices
+        out = _verify(inp)
+        ckpt = inp["checkpoint_state"].clone()
+        align_kw: dict[str, Any] = (
+            dict(block_table=bt, num_computed_tokens=nc, mamba_block_size=bs)
+            if align
+            else {}
+        )
+        _context(inp, ckpt).commit(
+            acc,
+            inp["state_indices"],
+            inp["query_start_loc"],
+            request_indices=req_rows,
+            record_indices=record_indices,
+            **align_kw,
+        )
+        results.append((out, ckpt))
+    (want_out, want_ckpt), (got_out, got_ckpt) = results
+    assert torch.equal(got_out, want_out)
+    assert torch.equal(got_ckpt, want_ckpt)
+
+
+def test_builder_stages_request_slots_as_record_indices():
+    """Record rows are the spec rows' persistent request slots (req_idx), so two
+    requests never share one; CUDA-graph padding windows get row 0."""
+    from vllm.v1.attention.backends.gdn_recoverssm import (
+        GDNRecoverSSMMetadataBuilder,
+    )
+    from vllm.v1.utils import CpuGpuBuffer
+
+    builder = SimpleNamespace(
+        _record_indices=CpuGpuBuffer(8, dtype=torch.int32, device="cuda")
+    )
+    stage = GDNRecoverSSMMetadataBuilder._stage_record_indices
+    rows = torch.tensor([0, 2, 3])
+    m = SimpleNamespace(req_idx=np.array([6, 1, 3, 0, 2]))
+    assert stage(cast(Any, builder), cast(Any, m), rows, 5).tolist() == [6, 3, 0, 0, 0]
+    m = SimpleNamespace(req_idx=None)  # no request slots: the batch rows
+    assert stage(cast(Any, builder), cast(Any, m), rows, 3).tolist() == [0, 2, 3]
 
 
 # (num_computed, accepted, block size): boundary after 1 / after 2 / ending exactly on

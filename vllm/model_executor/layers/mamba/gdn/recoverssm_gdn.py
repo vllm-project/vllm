@@ -12,7 +12,11 @@ The verify step caches, per token, the delta-rule correction c_t = beta_t * (v_t
 k_t) (V floats), the normalised key (K floats) and the decay exp(g_t) (1 float) in one
 fp32 "replay" record. Recovery folds the accepted prefix: S_n = exp(sum_t g_t) S_0 +
 sum_t exp(sum_{s>t} g_s) c_t k_t^T and writes the checkpoint once (plus the
-block-boundary state in align mode)."""
+block-boundary state in align mode).
+
+A record only lives from a step's verify to the same step's commit. It is addressed by
+its own row index (``record_indices``), so it can live outside the Mamba page; without
+record indices it is addressed by the checkpoint's state index."""
 
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -50,6 +54,7 @@ def _gdn_recoverssm_verify_kernel(
     out_ptr,
     query_start_loc_ptr,
     state_indices_ptr,
+    record_indices_ptr,
     scale,
     softplus_beta,
     softplus_threshold,
@@ -70,6 +75,7 @@ def _gdn_recoverssm_verify_kernel(
     stride_out_token,
     stride_qsl,
     stride_si,
+    stride_ri,
     H: tl.constexpr,
     HV: tl.constexpr,
     K: tl.constexpr,
@@ -111,8 +117,9 @@ def _gdn_recoverssm_verify_kernel(
     ).to(tl.float32)
     neg_A = -tl.exp(tl.load(A_log_ptr + pid_hv).to(tl.float32))
     dt_bias = tl.load(dt_bias_ptr + pid_hv).to(tl.float32)
+    record_idx = tl.load(record_indices_ptr + pid_b * stride_ri).to(tl.int64)
     rec_base = (
-        replay_ptr + state_idx * stride_replay_block + pid_hv * stride_replay_head
+        replay_ptr + record_idx * stride_replay_block + pid_hv * stride_replay_head
     )
     for t in tl.static_range(SPEC_QUERY_LEN):
         valid = t < query_len
@@ -186,6 +193,7 @@ def gdn_recoverssm_verify(
     query_start_loc: torch.Tensor,
     state_indices: torch.Tensor,
     spec_query_len: int,
+    record_indices: torch.Tensor | None = None,
     scale: float | None = None,
     softplus_beta: float = 1.0,
     softplus_threshold: float = 20.0,
@@ -194,8 +202,9 @@ def gdn_recoverssm_verify(
 ) -> torch.Tensor:
     """Verify a GDN speculative window against its checkpoint without modifying the
     checkpoint. q, k: [1, T, H, K]; v: [1, T, HV, V]; a, b: [T, HV] (or [1, T, HV]);
-    checkpoint_state: [blocks, HV, V, K]; replay_cache: [blocks, HV, spec_query_len, V +
-    K + 1] fp32. Returns out [1, T, HV, V]."""
+    checkpoint_state: [blocks, HV, V, K]; replay_cache: [rows, HV, spec_query_len, V +
+    K + 1] fp32, row ``record_indices[i]`` for window i (default: its state index).
+    Returns out [1, T, HV, V]."""
     _require(
         q.ndim == 4 and q.shape[0] == 1, "q must have shape [1, tokens, heads, dim]"
     )
@@ -235,10 +244,20 @@ def gdn_recoverssm_verify(
         tuple(checkpoint_state.shape[1:]) == (HV, V, K),
         "checkpoint shape is incompatible",
     )
-    _rec = (nb, HV, spec_query_len, V + K + 1)
-    _require(tuple(replay_cache.shape) == _rec, f"replay buffer needs shape {_rec}")
+    _rec = (HV, spec_query_len, V + K + 1)
+    _require(
+        replay_cache.ndim == 4 and tuple(replay_cache.shape[1:]) == _rec,
+        f"replay buffer needs shape [rows, {', '.join(map(str, _rec))}]",
+    )
     _require(replay_cache.dtype == torch.float32, "replay buffer must use float32")
     _require(state_indices.ndim == 1, "state indices must be one-dimensional")
+    if record_indices is None:
+        _require(replay_cache.shape[0] == nb, "in-page replay needs one row per block")
+        record_indices = state_indices
+    _require(
+        record_indices.ndim == 1 and record_indices.shape[0] >= state_indices.shape[0],
+        "record indices must be one-dimensional and cover every window",
+    )
     _require(
         query_start_loc.ndim == 1
         and query_start_loc.shape[0] == state_indices.shape[0] + 1,
@@ -263,6 +282,7 @@ def gdn_recoverssm_verify(
                 replay_cache,
                 query_start_loc,
                 state_indices,
+                record_indices,
             )
             if t_ is not None
         )
@@ -296,6 +316,7 @@ def gdn_recoverssm_verify(
         out,
         query_start_loc,
         state_indices,
+        record_indices,
         scale,
         softplus_beta,
         softplus_threshold,
@@ -316,6 +337,7 @@ def gdn_recoverssm_verify(
         out.stride(1),
         query_start_loc.stride(0),
         state_indices.stride(0),
+        record_indices.stride(0),
         H=H,
         HV=HV,
         K=K,
@@ -339,6 +361,7 @@ def _commit_gdn_state_kernel(
     replay_base_addrs_ptr,
     replay_block_strides_ptr,
     state_indices_ptr,
+    record_indices_ptr,
     commit_lens_ptr,
     final_state_indices_ptr,
     boundary_state_indices_ptr,
@@ -351,6 +374,7 @@ def _commit_gdn_state_kernel(
     stride_replay_pos,
     stride_replay_dim,
     stride_si,
+    stride_ri,
     K: tl.constexpr,
     V: tl.constexpr,
     BK: tl.constexpr,
@@ -392,7 +416,8 @@ def _commit_gdn_state_kernel(
         tl.pointer_type(replay_ref_ptr.dtype.element_ty)
     )
     rbs = tl.load(replay_block_strides_ptr + pid_l)
-    rec_base = replay_ptr + src * rbs + pid_h * stride_replay_head
+    record_idx = tl.load(record_indices_ptr + pid_b * stride_ri).to(tl.int64)
+    rec_base = replay_ptr + record_idx * rbs + pid_h * stride_replay_head
     offs_k = tl.arange(0, BK)
     offs_v = pid_v * BV + tl.arange(0, BV)
     mask_k = offs_k < K
@@ -471,14 +496,17 @@ class GDNRecoverSSMCommitContext:
                 and s.device == _dev,
                 "layers need matching checkpoints",
             )
-        _rec = (nb, HV, spec_query_len, V + K + 1)
+        _rec = (HV, spec_query_len, V + K + 1)
         for r in replays:
             _require(
-                tuple(r.shape) == _rec
+                r.ndim == 4
+                and tuple(r.shape[1:]) == _rec
+                and r.shape[0] == replays[0].shape[0]
                 and r.dtype == torch.float32
                 and r.stride()[1:] == replays[0].stride()[1:]
                 and r.device == _dev,
-                f"layers need matching float32 replay buffers of shape {_rec}",
+                "layers need matching float32 replay buffers of shape "
+                f"[rows, {', '.join(map(str, _rec))}]",
             )
         conv_ref = conv_states[0]
         _require(
@@ -533,12 +561,12 @@ class GDNRecoverSSMCommitContext:
     ) -> "GDNRecoverSSMCommitContext":
         from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
 
-        if any(len(layer.kv_cache) != 3 for layer in layers):
-            raise ValueError("GDN RecoverSSM pages must contain conv, state and replay")
+        if any(len(layer.kv_cache) != 2 for layer in layers):
+            raise ValueError("GDN RecoverSSM pages must contain conv and state")
         return cls.from_tensors(
             [layer.kv_cache[0] for layer in layers],
             [layer.kv_cache[1] for layer in layers],
-            [layer.kv_cache[2] for layer in layers],
+            [layer.recoverssm_replay for layer in layers],
             spec_query_len=spec_query_len,
             max_num_reqs=max_num_reqs,
             conv_dim_first=is_conv_state_dim_first(),
@@ -554,12 +582,25 @@ class GDNRecoverSSMCommitContext:
         num_computed_tokens: torch.Tensor | None = None,
         mamba_block_size: int | None = None,
         commit_conv: bool = True,
+        record_indices: torch.Tensor | None = None,
     ) -> None:
-        """Fold accepted GDN and convolution inputs into every layer's checkpoint."""
+        """Fold accepted GDN and convolution inputs into every layer's checkpoint.
+        Window i's replay record is row ``record_indices[i]`` (default: its state
+        index), as written by the verify."""
         batch = state_indices.shape[0]
         if batch == 0:
             return
         _require(state_indices.ndim == 1, "state indices must be one-dimensional")
+        if record_indices is None:
+            _require(
+                self.replays[0].shape[0] == self.checkpoints[0].shape[0],
+                "in-page replay needs one row per block",
+            )
+            record_indices = state_indices
+        _require(
+            record_indices.ndim == 1 and record_indices.shape[0] >= batch,
+            "record indices must be one-dimensional and cover every window",
+        )
         _require(
             batch <= self.commit_lens.shape[0], "commit batch exceeds its plan capacity"
         )
@@ -600,6 +641,7 @@ class GDNRecoverSSMCommitContext:
                     request_indices,
                     block_table,
                     num_computed_tokens,
+                    record_indices,
                 )
             ),
             "commit inputs must be on the same device",
@@ -669,6 +711,7 @@ class GDNRecoverSSMCommitContext:
             self.replay_base_addrs,
             self.replay_block_strides,
             state_indices,
+            record_indices,
             self.commit_lens,
             self.final_state_indices,
             self.boundary_state_indices,
@@ -681,6 +724,7 @@ class GDNRecoverSSMCommitContext:
             rr.stride(2),
             rr.stride(3),
             state_indices.stride(0),
+            record_indices.stride(0),
         )
         grid = (triton.cdiv(V, BV), batch, num_layers * HV)
         # Final states first: a boundary state can land in the window's source

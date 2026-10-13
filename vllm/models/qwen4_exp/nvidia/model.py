@@ -812,32 +812,14 @@ class Qwen4ExpForCausalLM(
         )
 
     @classmethod
-    def _uses_gdn_recoverssm(cls, vllm_config: VllmConfig) -> bool:
-        """One predicate for the replay record's shape AND dtype (they must
-        agree for the MambaSpec)."""
-        num_spec = (
-            vllm_config.speculative_config.num_speculative_tokens
-            if vllm_config.speculative_config
-            else 0
-        )
-        from vllm.model_executor.layers.mamba.recoverssm_utils import uses_recoverssm
-
-        return uses_recoverssm(vllm_config.cache_config, num_spec or 0)
-
-    @classmethod
     def get_gdn_mamba_state_dtype_from_config(
         cls, vllm_config: VllmConfig
     ) -> tuple[torch.dtype, ...]:
-        dtypes: tuple[torch.dtype, ...] = (
-            MambaStateDtypeCalculator.gated_delta_net_state_dtype(
-                vllm_config.model_config.dtype,
-                vllm_config.cache_config.mamba_cache_dtype,
-                vllm_config.cache_config.mamba_ssm_cache_dtype,
-            )
+        return MambaStateDtypeCalculator.gated_delta_net_state_dtype(
+            vllm_config.model_config.dtype,
+            vllm_config.cache_config.mamba_cache_dtype,
+            vllm_config.cache_config.mamba_ssm_cache_dtype,
         )
-        if cls._uses_gdn_recoverssm(vllm_config):  # replay record, fp32
-            dtypes = (*dtypes, torch.float32)
-        return dtypes
 
     @classmethod
     def get_gdn_mamba_state_shape_from_config(
@@ -851,7 +833,7 @@ class Qwen4ExpForCausalLM(
             if vllm_config.speculative_config
             else 0
         )
-        shapes = MambaStateShapeCalculator.gated_delta_net_state_shape(
+        return MambaStateShapeCalculator.gated_delta_net_state_shape(
             tp_size,
             hf_config.linear_num_key_heads,
             hf_config.linear_num_value_heads,
@@ -860,18 +842,6 @@ class Qwen4ExpForCausalLM(
             hf_config.linear_conv_kernel_dim,
             num_spec,
         )
-        if cls._uses_gdn_recoverssm(
-            vllm_config
-        ):  # replay record [HV, spec_query_len, V + K + 1]
-            shapes = (
-                *shapes,
-                (
-                    hf_config.linear_num_value_heads // tp_size,
-                    num_spec + 1,
-                    hf_config.linear_value_head_dim + hf_config.linear_key_head_dim + 1,
-                ),
-            )
-        return shapes
 
     @classmethod
     def get_mamba_state_dtype_from_config(
@@ -1173,7 +1143,6 @@ class Qwen4ExpForConditionalGeneration(
         cls,
         vllm_config: VllmConfig,
     ) -> MambaStateShapes:
-        # GDN RecoverSSM adds a third state (the replay record) to Qwen3.5's two.
         return Qwen4ExpForCausalLM.get_mamba_state_shape_from_config(vllm_config)
 
     @classmethod

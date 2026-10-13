@@ -6,7 +6,7 @@ import functools
 import itertools
 import os
 from dataclasses import replace
-from typing import Literal
+from typing import Literal, cast
 
 import torch
 from einops import rearrange
@@ -525,15 +525,16 @@ class ChunkGatedDeltaRule(CustomOp):
 
 @PluggableLayer.register("qwen_gated_delta_net_attention")
 class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
+    recoverssm_replay: torch.Tensor  # RecoverSSM only, see __init__
+
     def _uses_gdn_recoverssm(self) -> bool:
-        """One predicate for the replay state's shape, dtype and the attention
-        backend."""
+        """One predicate for the replay buffer and the attention backend."""
         from vllm.model_executor.layers.mamba.recoverssm_utils import uses_recoverssm
 
         return uses_recoverssm(self.cache_config, self.num_spec)
 
     def get_state_shape(self) -> tuple[tuple[int, ...], ...]:
-        shapes = MambaStateShapeCalculator.gated_delta_net_state_shape(
+        return MambaStateShapeCalculator.gated_delta_net_state_shape(
             self.tp_size,
             self.num_k_heads,
             self.num_v_heads,
@@ -542,23 +543,6 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             self.conv_kernel_size,
             self.num_spec,
         )
-        if self._uses_gdn_recoverssm():
-            # per-token replay record [HV, spec_query_len, V + K + 1] fp32
-            shapes = (
-                *shapes,
-                (
-                    self.num_v_heads // self.tp_size,
-                    self.num_spec + 1,
-                    self.head_v_dim + self.head_k_dim + 1,
-                ),
-            )
-        return shapes
-
-    def get_state_dtype(self) -> tuple[torch.dtype, ...]:
-        dtypes = super().get_state_dtype()
-        if self._uses_gdn_recoverssm():
-            dtypes = (*dtypes, torch.float32)
-        return dtypes
 
     def get_attn_backend(self):
         if self._uses_gdn_recoverssm():
@@ -749,6 +733,22 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             logger.info_once(
                 "GDN RecoverSSM speculative verify active (spec_query_len %d)",
                 self.num_spec + 1,
+            )
+            # Per-token replay records [HV, spec_query_len, V + K + 1] fp32. A record
+            # lives only from a step's verify to the same step's commit, so it is
+            # kept per request slot rather than in every Mamba page: in the page it
+            # would grow the page, and with it the hybrid attention block size that
+            # prefix-cache hits are rounded to.
+            self.register_buffer(
+                "recoverssm_replay",
+                torch.zeros(
+                    get_current_vllm_config().scheduler_config.max_num_seqs,
+                    self.num_v_heads // self.tp_size,
+                    self.num_spec + 1,
+                    self.head_v_dim + self.head_k_dim + 1,
+                    dtype=torch.float32,
+                ),
+                persistent=False,
             )
         if self.speculative_config is not None:
             logger.info_once("GDN spec decode kernel: %s", self.gdn_decode_kernel)
@@ -1385,7 +1385,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         dtype = qkv_or_qkvz.dtype
         num_k_heads = self.num_k_heads // self.tp_size
         num_v_heads = self.num_v_heads // self.tp_size
-        state_dtype = self.get_state_dtype()[1]  # 3 dtypes with the replay record
+        state_dtype = self.get_state_dtype()[1]
 
         # All kernels use BT = chunk_size, so a single pass with T = chunk_size
         # is sufficient to populate every autotuner cache. Mirror the real
@@ -1820,6 +1820,9 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             from vllm.model_executor.layers.mamba.gdn.recoverssm_gdn import (
                 gdn_recoverssm_verify,
             )
+            from vllm.v1.attention.backends.gdn_recoverssm import (
+                GDNRecoverSSMMetadata,
+            )
 
             _n = attn_metadata.num_spec_decodes
             assert spec_query_start_loc is not None
@@ -1833,9 +1836,12 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 key_spec,
                 value_spec,
                 checkpoint_state=ssm_state,
-                replay_cache=self_kv_cache[2],
+                replay_cache=self.recoverssm_replay,
                 query_start_loc=spec_query_start_loc[: _n + 1],
                 state_indices=spec_state_indices_tensor[:_n, 0],
+                record_indices=cast(
+                    GDNRecoverSSMMetadata, attn_metadata
+                ).recoverssm_record_indices,
                 spec_query_len=self.num_spec + 1,
                 use_qk_l2norm_in_kernel=True,
                 # spec-only batch: write straight into the layer output
