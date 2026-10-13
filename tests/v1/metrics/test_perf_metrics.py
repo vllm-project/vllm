@@ -525,12 +525,11 @@ def test_model_metrics_aggregation():
         "expected_num_logits_tokens",
     ),
     [
-        pytest.param(True, 2, [], 1, id="new-prefill"),
+        pytest.param(True, 4, [], 1, id="new-or-resumed-prefill"),
         pytest.param(False, 1, [], 1, id="decode"),
         pytest.param(False, 2, [], 1, id="chunked-prefill"),
         pytest.param(False, 3, [11, 12], 3, id="speculative-decode"),
         pytest.param(True, 3, [-1, -1], 3, id="padded-speculative-decode"),
-        pytest.param(True, 4, [11, 12], 1, id="resumed-prefill"),
     ],
 )
 def test_step_perf_stats_classifies_requests(
