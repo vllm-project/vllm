@@ -372,6 +372,10 @@ class MiMoV2FlashDecoderLayer(nn.Module):
         max_position_embeddings = getattr(config, "max_position_embeddings", 32768)
 
         v_scale = getattr(config, "attention_value_scale", None)
+        # cache_config.sliding_window holds MiMo's SWA window; global layers
+        # would otherwise fall back to it in Attention.
+        cache_config = vllm_config.cache_config
+        cache_config.sliding_window = None
 
         if self.is_compressed_softmax_layer():
             self.self_attn = MiMoV2Attention(
@@ -389,6 +393,7 @@ class MiMoV2FlashDecoderLayer(nn.Module):
                 layer_id=layer_id,
                 rope_theta=getattr(config, "swa_rope_theta", rope_theta),
                 max_position_embeddings=max_position_embeddings,
+                cache_config=cache_config,
                 quant_config=quant_config,
                 partial_rotary_factor=getattr(config, "partial_rotary_factor", 1.0),
                 prefix=f"{prefix}.self_attn",
@@ -406,6 +411,7 @@ class MiMoV2FlashDecoderLayer(nn.Module):
                 layer_id=layer_id,
                 rope_theta=rope_theta,
                 max_position_embeddings=max_position_embeddings,
+                cache_config=cache_config,
                 quant_config=quant_config,
                 partial_rotary_factor=getattr(config, "partial_rotary_factor", 1.0),
                 prefix=f"{prefix}.self_attn",

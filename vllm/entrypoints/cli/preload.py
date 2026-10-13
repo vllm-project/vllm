@@ -39,6 +39,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.model_loader.weight_cache.protocol import (
     check_ipc_platform_support,
 )
+from vllm.usage.usage_lib import UsageContext
 from vllm.utils.network_utils import get_distributed_init_method, get_open_port
 
 if typing.TYPE_CHECKING:
@@ -157,7 +158,13 @@ class PreloadSubcommand(CLISubcommand):
         )
 
         engine_args = EngineArgs.from_cli_args(args)
-        vllm_config = engine_args.create_engine_config()
+        # Warmup context for flashinfer autotune.
+        usage_context = (
+            UsageContext.OPENAI_API_SERVER
+            if engine_args.kernel_config.enable_flashinfer_autotune is not False
+            else None
+        )
+        vllm_config = engine_args.create_engine_config(usage_context=usage_context)
         if vllm_config.load_config.load_format == "ipc_cache":
             raise ValueError(
                 "The weight cache daemon itself must load from disk; use the "

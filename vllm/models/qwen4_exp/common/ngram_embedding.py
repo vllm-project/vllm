@@ -27,10 +27,12 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
     CompressedTensorsConfig,
 )
 from vllm.model_executor.layers.quantization.fp8 import Fp8Config
+from vllm.model_executor.layers.quantization.inc import INCConfig
 from vllm.model_executor.layers.quantization.modelopt import (
     ModelOptMixedPrecisionConfig,
     ModelOptQuantConfigBase,
 )
+from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     create_fp8_scale_parameter,
 )
@@ -68,6 +70,7 @@ class Qwen4ExpPLEEmbedding(PLEVocabParallelEmbedding, ABC):
         num_ngram_heads: int = 1,
         max_total_tokens: int = 0,
         data_parallel_rank: int = 0,
+        reduce_results: bool = True,
     ) -> None:
         del num_ngram_heads, max_total_tokens
         super().__init__(
@@ -78,6 +81,7 @@ class Qwen4ExpPLEEmbedding(PLEVocabParallelEmbedding, ABC):
             prefix=prefix,
             quant_method=embedding_method,
             parallel_group=get_etp_group(),
+            reduce_results=reduce_results,
         )
         self.embedding_method = embedding_method
         self.data_parallel_rank = data_parallel_rank
@@ -151,12 +155,13 @@ class Qwen4ExpPLEEmbedding(PLEVocabParallelEmbedding, ABC):
         return embeddings.narrow(0, slot_offset, local_num_tokens)
 
     @abstractmethod
-    def start_prefetch(
-        self,
-        hidden_states: torch.Tensor,
-        ngram_ids: torch.Tensor,
-    ) -> None:
+    def start_prefetch(self, ngram_ids: torch.Tensor) -> None:
         """Start an asynchronous lookup when supported."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def finalize_prefetch(self, total_tokens: int) -> torch.Tensor:
+        """Return prefetched embeddings for the full input token set."""
         raise NotImplementedError
 
 
@@ -189,6 +194,14 @@ class Qwen4ExpPLEEmbeddingMethod(QuantizeMethodBase):
             isinstance(quant_config, CompressedTensorsConfig)
             and quant_config.get_scheme_dict(None, layer_name=prefix) is None
         ):
+            return Qwen4ExpPLEUnquantizedEmbeddingMethod()
+        if (
+            isinstance(quant_config, INCConfig)
+            and not quant_config.config_parser.resolve(None, prefix).quantized
+        ):
+            return Qwen4ExpPLEUnquantizedEmbeddingMethod()
+        # Quark quantizes only Linear and MoE layers; PLE tables stay BF16.
+        if isinstance(quant_config, QuarkConfig):
             return Qwen4ExpPLEUnquantizedEmbeddingMethod()
         if not isinstance(quant_config, Fp8Config):
             raise NotImplementedError(
@@ -341,16 +354,16 @@ class Qwen4ExpPLEDeviceEmbedding(Qwen4ExpPLEEmbedding):
         """Allocate the complete PLE weight on the active device."""
         return torch.empty(num_embeddings, embedding_dim, dtype=dtype)
 
-    def start_prefetch(
-        self,
-        hidden_states: torch.Tensor,
-        ngram_ids: torch.Tensor,
-    ) -> None:
+    def start_prefetch(self, ngram_ids: torch.Tensor) -> None:
         """Resident embedding prefetch is a no-op."""
         return None
 
+    def finalize_prefetch(self, total_tokens: int) -> torch.Tensor:
+        """Reject prefetch finalization for resident embeddings."""
+        raise RuntimeError("Device PLE embedding does not support prefetch")
+
     def forward(self, ngram_ids: torch.Tensor) -> torch.Tensor:
-        """Gather ETP inputs, look up embeddings, and select local rows."""
+        """Gather ETP IDs, optionally reduce lookup results, and select local rows."""
         slot_size, slot_offset = self._get_dp_gather_slot(ngram_ids.shape[0])
         gathered_ids = self._gather_dp_ids(ngram_ids, slot_size)
         embeddings = super().forward(gathered_ids)
@@ -363,29 +376,33 @@ class Qwen4ExpPLEDeviceEmbedding(Qwen4ExpPLEEmbedding):
 
 @triton.jit
 def _lookup_ple_embedding_from_pinned_kernel(
-    weight_ptr,
+    weight_ptr: tl.pointer_type(tl.uint8),  # type: ignore[valid-type]
     ids_ptr,
-    output_ptr,
-    embedding_dim,
+    output_ptr: tl.pointer_type(tl.uint8),  # type: ignore[valid-type]
+    row_bytes,
     tp_vocab_start,
     tp_vocab_end,
     BLOCK_D: tl.constexpr,
 ):
-    """Look up TP-owned PLE rows through a CUDA view of pinned host memory."""
-    row_id = tl.program_id(0)
+    """Copy TP-owned PLE rows as raw bytes from a CUDA view of pinned host memory.
+
+    Byte pointers keep the storage dtype out of the kernel signature, so
+    dtypes Triton cannot lower on the GPU (FP8 E4M3FN before SM89) still work.
+    """
+    row_id = tl.program_id(0).to(tl.int64)
     global_idx = tl.load(ids_ptr + row_id)
     in_range = (global_idx >= tp_vocab_start) & (global_idx < tp_vocab_end)
     local_idx = tl.where(in_range, global_idx - tp_vocab_start, 0)
     offsets = tl.arange(0, BLOCK_D)
-    store_mask = offsets < embedding_dim
+    store_mask = offsets < row_bytes
     load_mask = store_mask & in_range
     values = tl.load(
-        weight_ptr + local_idx * embedding_dim + offsets,
+        weight_ptr + local_idx * row_bytes + offsets,
         mask=load_mask,
-        other=0.0,
+        other=0,
     )
     tl.store(
-        output_ptr + row_id * embedding_dim + offsets,
+        output_ptr + row_id * row_bytes + offsets,
         values,
         mask=store_mask,
     )
@@ -408,6 +425,7 @@ class Qwen4ExpPLEPinnedHostEmbedding(Qwen4ExpPLEEmbedding):
         num_ngram_heads: int = 1,
         max_total_tokens: int = 0,
         data_parallel_rank: int = 0,
+        reduce_results: bool = True,
     ) -> None:
         if not is_uva_available():
             raise RuntimeError("Engram CPU offload requires UVA support")
@@ -421,9 +439,11 @@ class Qwen4ExpPLEPinnedHostEmbedding(Qwen4ExpPLEEmbedding):
             num_ngram_heads=num_ngram_heads,
             max_total_tokens=max_total_tokens,
             data_parallel_rank=data_parallel_rank,
+            reduce_results=reduce_results,
         )
         self._uva_weight = get_accelerator_view_from_cpu_tensor(self.weight)
-        self._block_d = triton.next_power_of_2(self.embedding_dim)
+        self._row_bytes = self.embedding_dim * self.weight.element_size()
+        self._block_d = triton.next_power_of_2(self._row_bytes)
         self._prefetch_stream: torch.cuda.Stream | None = None
         self._prefetch_buffer: torch.Tensor | None = None
         self._prefetch_alloc_lock = threading.Lock()
@@ -475,7 +495,7 @@ class Qwen4ExpPLEPinnedHostEmbedding(Qwen4ExpPLEEmbedding):
                 self._uva_weight,
                 flat_ids,
                 output,
-                self.embedding_dim,
+                self._row_bytes,
                 self.shard_indices.org_vocab_start_index,
                 self.shard_indices.org_vocab_end_index,
                 BLOCK_D=self._block_d,
@@ -506,11 +526,7 @@ class Qwen4ExpPLEPinnedHostEmbedding(Qwen4ExpPLEEmbedding):
         return self.parallel_group.all_reduce(embeddings)
 
     @eager_break_during_capture
-    def start_prefetch(
-        self,
-        hidden_states: torch.Tensor,
-        ngram_ids: torch.Tensor,
-    ) -> None:
+    def start_prefetch(self, ngram_ids: torch.Tensor) -> None:
         """Gather ETP IDs and launch their UVA lookup on the side stream."""
         buffer = self._prefetch_buffer
         if buffer is None:
@@ -559,14 +575,18 @@ class Qwen4ExpPLEPinnedHostEmbedding(Qwen4ExpPLEEmbedding):
         prefetch_output: torch.Tensor,
         output: torch.Tensor,
     ) -> None:
-        """Join the side stream, reduce ETP shards, and select local rows."""
+        """Join the side stream, optionally reduce ETP shards, and select rows."""
         prefetch_stream = self._prefetch_stream
         if prefetch_stream is None:
             raise RuntimeError("pinned PLE finalize requires a prior start_prefetch")
         torch.cuda.current_stream().wait_stream(prefetch_stream)
         slot_size, slot_offset = self._get_dp_gather_slot(output.shape[0])
-        active_output = prefetch_output[: slot_size * self.etp_data_parallel_size]
-        embeddings = self._reduce_etp_embeddings(active_output)
+        embeddings = prefetch_output[: slot_size * self.etp_data_parallel_size]
+        if self.reduce_results:
+            embeddings = self._reduce_etp_embeddings(embeddings)
+        else:
+            # The outer TP reduce-scatter requires ETP=TP.
+            assert self.etp_data_parallel_size == 1
         embeddings = self._select_embeddings(
             embeddings,
             output.shape[0],
@@ -574,11 +594,18 @@ class Qwen4ExpPLEPinnedHostEmbedding(Qwen4ExpPLEEmbedding):
         )
         output.copy_(embeddings.flatten(-2))
 
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        """Finish the pinned lookup into graph-owned output storage."""
+    def finalize_prefetch(self, total_tokens: int) -> torch.Tensor:
+        """Finalize the full-token pinned lookup with optional ETP reduction."""
         buffer = self._prefetch_buffer
         if buffer is None:
             raise RuntimeError("pinned PLE lookup requires a prior start_prefetch")
-        output = buffer.new_empty((hidden_states.shape[0], self._output_dim))
+        # total_tokens counts this DP rank's tokens before SP sharding.
+        output = buffer.new_empty((total_tokens, self._output_dim))
         self._finalize_prefetch(buffer, output)
         return output
+
+    def forward(self, input_: torch.Tensor) -> torch.Tensor:
+        raise RuntimeError(
+            "Pinned-host PLE embedding requires "
+            "start_prefetch() and finalize_prefetch()."
+        )

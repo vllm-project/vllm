@@ -5,12 +5,12 @@ from collections.abc import Iterable, Sequence
 
 from openai.types.responses import ResponseFunctionToolCall
 
-from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.responses.protocol import (
     ResponseInputOutputItem,
     ResponsesRequest,
 )
+from vllm.renderers.chat_utils import ChatCompletionMessageParam
 
 
 def count_tool_calls(tool_calls: object) -> int:
