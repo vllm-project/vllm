@@ -149,6 +149,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_MLA: bool = True
     VLLM_ROCM_AITER_MLA_ASM_PADDING: Literal["auto", "gluon", "asm"] = "auto"
     VLLM_ROCM_AITER_MLA_DCP_VERIFY: Literal["auto", "asm", "segmented"] = "auto"
+    VLLM_ROCM_AITER_MLA_PAD_TO_NATIVE_SHAPE: Literal["auto", "off", "force"] = "off"
     VLLM_ROCM_USE_AITER_MHA: bool = True
     VLLM_ROCM_USE_AITER_FP4_ASM_GEMM: bool = False
     VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA: bool = False
@@ -1356,6 +1357,20 @@ environment_variables: dict[str, Callable[[], Any]] = {
         "VLLM_ROCM_AITER_MLA_ASM_PADDING",
         "auto",
         ["auto", "gluon", "asm"],
+        case_sensitive=False,
+    ),
+    # Pad the AITER MLA decode head count up to one AITER runs natively, not
+    # just to the next multiple of 16. AITER folds a non-native count into
+    # 16-head pseudo-batches that each re-read the KV cache. "off" (default)
+    # keeps the multiple-of-16 rule; "auto" picks the smallest count
+    # aiter.get_mla_decode_shape_support reports native and supported for every
+    # reachable decode shape, at most twice the aligned count unless that count
+    # has no kernel (then the cap is ignored and init fails if nothing fits);
+    # "force" drops the cap. "auto" and "force" need ROCm/aiter#6107.
+    "VLLM_ROCM_AITER_MLA_PAD_TO_NATIVE_SHAPE": env_with_choices(
+        "VLLM_ROCM_AITER_MLA_PAD_TO_NATIVE_SHAPE",
+        "off",
+        ["auto", "off", "force"],
         case_sensitive=False,
     ),
     # Whether to use aiter mha ops.
