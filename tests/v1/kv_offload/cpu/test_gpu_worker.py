@@ -232,6 +232,7 @@ def _submittable_handler(monkeypatch: pytest.MonkeyPatch, gpu_to_cpu: bool = Tru
 
     platform = MagicMock()
     platform.stream.return_value = contextlib.nullcontext()
+    platform.is_cuda_alike.return_value = False
     monkeypatch.setattr(gpu_worker, "current_platform", platform)
     return handler
 
@@ -256,9 +257,12 @@ def test_submit_failure_is_not_reported_until_stream_drains(
     handler._stream_pool = [stream]
     handler._event_pool = [end_event, start_event]
     handler._swap_blocks_batch.side_effect = RuntimeError("failed at index 1")
+    clear = MagicMock()
+    monkeypatch.setattr(gpu_worker, "_clear_pending_device_error", clear)
 
     assert _submit(handler, 7) is True
 
+    clear.assert_called_once_with()
     end_event.record.assert_called_once_with(stream)
     (transfer,) = handler._transfers
     assert (transfer.job_id, transfer.failed) == (7, True)
@@ -356,11 +360,11 @@ def test_get_finished_reports_failure_when_event_query_raises() -> None:
     ]
 
 
-def test_get_finished_propagates_non_device_errors() -> None:
-    """Only device faults are downgraded to a failed transfer.
+def test_get_finished_propagates_non_runtime_errors() -> None:
+    """Only RuntimeError, which device faults raise, becomes a failed transfer.
 
-    A missing op or a bad argument is a programming error; swallowing it would
-    turn a loud, one-line diagnosis into a silently degraded cache.
+    Anything else, such as a missing op, must stay loud rather than silently
+    degrade the cache.
     """
     handler = _bare_handler()
     broken = MagicMock()
@@ -370,6 +374,19 @@ def test_get_finished_propagates_non_device_errors() -> None:
 
     with pytest.raises(AttributeError, match="no such op"):
         handler.get_finished()
+
+
+def test_submit_propagates_non_runtime_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    handler = _submittable_handler(monkeypatch)
+    handler._stream_pool = [MagicMock()]
+    handler._event_pool = [MagicMock(), MagicMock()]
+    handler._swap_blocks_batch.side_effect = AttributeError("no such op")
+    clear = MagicMock()
+    monkeypatch.setattr(gpu_worker, "_clear_pending_device_error", clear)
+
+    with pytest.raises(AttributeError, match="no such op"):
+        _submit(handler, 7)
+    clear.assert_not_called()
 
 
 def test_wait_swallows_synchronize_failure() -> None:
@@ -889,4 +906,77 @@ def test_load_waits_for_pending_compute_stream_writes(default_vllm_config) -> No
             for block_id in loaded_blocks:
                 torch.testing.assert_close(gpu_tensor[block_id].cpu(), expected)
     finally:
+        worker.shutdown()
+
+
+@pytest.mark.skipif(
+    not current_platform.is_rocm(),
+    reason="faults a real hipMemcpyBatchAsync call",
+)
+@pytest.mark.parametrize("gpu_to_cpu", [True, False])
+@pytest.mark.parametrize(
+    "num_blocks", [16, 9000], ids=["one_batch", "fault_in_second_batch"]
+)
+def test_device_fault_does_not_fail_the_next_kernel_launch(
+    default_vllm_config, gpu_to_cpu: bool, num_blocks: int
+) -> None:
+    """A caught copy fault must not leave its error pending on the thread.
+
+    The runtime keeps a failed call's error until it is read, and the next
+    kernel launch check would raise it, killing the model step the catch was
+    meant to protect.
+    """
+    page_size_bytes = 4096
+    gpu_tensor = torch.zeros(
+        (num_blocks, page_size_bytes), dtype=torch.int8, device=DEVICES[0]
+    )
+    worker = CPUOffloadingWorker(
+        kv_caches=CanonicalKVCaches(
+            tensors=[
+                CanonicalKVCacheTensor(
+                    tensor=gpu_tensor, page_size_bytes=page_size_bytes
+                )
+            ],
+            group_data_refs=[
+                [CanonicalKVCacheRef(tensor_idx=0, page_size_bytes=page_size_bytes)]
+            ],
+        ),
+        blocks_per_chunk=1,
+        num_cpu_chunks=num_blocks,
+    )
+    handler = worker._store_handler if gpu_to_cpu else worker._load_handler
+    swap_blocks_batch = handler._swap_blocks_batch
+    faulted = []
+
+    def zero_one_copy(src, dst, sizes, **kwargs):
+        sizes[len(sizes) - 500 if num_blocks > 8192 else len(sizes) // 2] = 0
+        try:
+            swap_blocks_batch(src, dst, sizes, **kwargs)
+        except RuntimeError:
+            faulted.append(True)
+            raise
+
+    handler._swap_blocks_batch = zero_one_copy
+    gpu_spec = GPULoadStoreSpec(
+        list(range(num_blocks)), group_sizes=(num_blocks,), block_indices=(0,)
+    )
+    cpu_spec = CPULoadStoreSpec(list(range(num_blocks)))
+    try:
+        if gpu_to_cpu:
+            assert worker.submit_store(1, gpu_spec, cpu_spec)
+        else:
+            assert worker.submit_load(1, cpu_spec, gpu_spec)
+        if not faulted:
+            pytest.skip("this runtime accepts zero-size copies")
+
+        torch.arange(4096, device=DEVICES[0]).cumsum(0)
+        torch.accelerator.synchronize()
+
+        deadline = time.time() + 10
+        finished: list[TransferResult] = []
+        while time.time() < deadline and not finished:
+            finished = worker.get_finished()
+        assert [(r.job_id, r.success) for r in finished] == [(1, False)]
+    finally:
+        gpu_worker._clear_pending_device_error()
         worker.shutdown()
