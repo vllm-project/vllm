@@ -822,6 +822,28 @@ def test_read_matches_only_requests_with_pending_remote_prefill(params, expected
     assert scheduler.get_num_new_matched_tokens(request, 0) == expected
 
 
+def test_read_rematch_after_alloc_keeps_queued_transfer():
+    """Clearing the flag blocks another external hit, not the queued READ."""
+    sched = _make_read_scheduler()
+    request = _make_read_request([[10, 11], [91]])
+    request.num_prompt_tokens = 32
+    assert sched.get_num_new_matched_tokens(request, 0) == (31, False)
+
+    sched.update_state_after_alloc(
+        request, _FakeBlocks(all_groups=([100, 101], [200])), num_external_tokens=31
+    )
+
+    assert sched._reqs_need_recv["req"][1] == [[100, 101], [200]]
+    assert request.kv_transfer_params["do_remote_prefill"] is False
+
+    meta = sched.build_connector_meta(SchedulerOutput.make_empty())
+    queued = meta.reqs_to_recv["req"]
+    assert queued.transfer_id == "tx"
+    assert queued.local_block_ids == [[100, 101], [200]]
+    assert queued.remote_block_ids == [[10, 11], [91]]
+    assert sched.get_num_new_matched_tokens(request, 0) == (0, False)
+
+
 def test_get_num_new_matched_tokens_read_recomputes_last_token():
     sched = _FakeScheduler(is_producer=False, mode=MoRIIOMode.READ, _has_mamba=True)
     req = SimpleNamespace(
