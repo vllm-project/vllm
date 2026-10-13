@@ -1192,6 +1192,7 @@ def test_online_requantized_moe_reload(
         expected_dtype = {
             "mxfp4": torch.uint8,
             "int8": torch.int8,
+            "mxfp8": torch.float8_e4m3fn,
         }.get(online_target, current_platform.fp8_dtype())
 
         # Gate/up weights must use the requested target's quantized dtype.
