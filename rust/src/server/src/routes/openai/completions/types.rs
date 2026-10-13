@@ -11,6 +11,7 @@ use validator::Validate;
 use vllm_engine_core_client::protocol::sampling::RepetitionDetectionParams;
 use vllm_text::{Prompt, TruncationSide};
 
+use crate::routes::openai::utils::metrics::{PerRequestMetrics, StreamPerRequestMetrics};
 use crate::routes::openai::utils::types::{
     LogProbs, Normalizable, PromptLogprobs, StreamOptions, StreamResponseEnvelope, StringOrArray,
     Usage, default_true, deserialize_request_top_k, validate_stop,
@@ -158,6 +159,11 @@ pub struct CompletionRequest {
     /// Number of prompt logprobs to return
     pub prompt_logprobs: Option<i32>,
 
+    /// Specific vocab token IDs to return logprobs for at each generated
+    /// position, in addition to the sampled token. Takes precedence over
+    /// the top-k selected by `logprobs`. Requires `logprobs` to be set.
+    pub logprob_token_ids: Option<Vec<u32>>,
+
     // -------- Extra vLLM Parameters --------
     /// Whether to add special tokens (e.g. BOS) to the prompt
     #[serde(default = "default_true")]
@@ -234,6 +240,7 @@ pub(super) struct CompletionResponse {
     pub model: String,
     pub choices: Vec<CompletionChoice>,
     pub usage: Option<Usage>,
+    pub metrics: Option<PerRequestMetrics>,
     pub system_fingerprint: Option<String>,
     pub kv_transfer_params: Option<Value>,
     pub ec_transfer_params: Option<Value>,
@@ -260,6 +267,7 @@ pub(super) struct CompletionStreamResponse {
     pub envelope: Arc<StreamResponseEnvelope>,
     pub choices: Vec<CompletionStreamChoice>,
     pub usage: Option<Usage>,
+    pub metrics: Option<StreamPerRequestMetrics>,
 }
 
 impl CompletionStreamResponse {
@@ -269,6 +277,7 @@ impl CompletionStreamResponse {
             envelope: Arc::clone(envelope),
             choices: Vec::new(),
             usage: None,
+            metrics: None,
         }
     }
 }

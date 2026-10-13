@@ -290,6 +290,81 @@ def test_idle_dp_rank_dummy_trims_with_its_peers(dp_state):
     assert dp_metadata.num_tokens_across_dp_cpu.tolist() == [1, 129]
 
 
+def test_zero_prefix_window_warms_gather_and_skips_pad(monkeypatch):
+    """ROCm leaves the prefix-cache window at 0. Replay still needs replay_start
+    and a warmed gather kernel. The pad kernel stays on the prefix-cache path."""
+    import vllm.models.deepseek_v41.nvidia.model_state as model_state
+
+    calls = {"pad_warmup": 0, "gather_warmup": 0, "pad_launch": 0}
+
+    def pad_warmup(*args, **kwargs):
+        calls["pad_warmup"] += 1
+
+    def gather_warmup(*args, **kwargs):
+        calls["gather_warmup"] += 1
+
+    class _Pad:
+        warmup = staticmethod(pad_warmup)
+
+        def __getitem__(self, grid):
+            def launch(*args, **kwargs):
+                calls["pad_launch"] += 1
+
+            return launch
+
+    monkeypatch.setattr(model_state, "_pad_replayed_slots_kernel", _Pad())
+    monkeypatch.setattr(
+        model_state._gather_replay_batch_kernel, "warmup", gather_warmup
+    )
+
+    cfg = MagicMock()
+    cfg.model_config.enable_prompt_embeds = False
+    cfg.model_config.uses_mrope = False
+    cfg.model_config.is_multimodal_model = False
+    cfg.scheduler_config.max_num_seqs = 16
+    cfg.scheduler_config.max_num_batched_tokens = 1024
+    cfg.parallel_config.data_parallel_size = 1
+    cfg.compilation_config.fast_moe_cold_start = False
+    cfg.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+    layers = SimpleNamespace(window=WINDOW, replay_batch=None, metadata_prefixes=set())
+    model = SimpleNamespace(token_lookback_depth=0, decoder_replay_layers=layers)
+    groups = SimpleNamespace(
+        kv_cache_groups=[
+            SimpleNamespace(
+                layer_names=["swa"],
+                kv_cache_spec=SimpleNamespace(
+                    prefix_cacheable=False, prefix_replay_tokens=0
+                ),
+            ),
+            SimpleNamespace(
+                layer_names=["mla"],
+                kv_cache_spec=SimpleNamespace(
+                    prefix_cacheable=True, prefix_replay_tokens=0
+                ),
+            ),
+        ]
+    )
+
+    def prepare_attn(self, input_batch, cg_mode, block_tables, slot_mappings, *a, **kw):
+        return {"swa": kw["model_specific_attn_metadata"]}
+
+    monkeypatch.setattr(DefaultModelState, "prepare_attn", prepare_attn)
+    state = DeepseekV41ModelState(cfg, model, None, DEVICE)
+    state._replay_start_np[0] = 16
+    batch = _input_batch([8], [24], [True])
+    state.prepare_attn(
+        batch,
+        CUDAGraphMode.NONE,
+        BLOCK_TABLES,
+        _slot_mappings(batch.num_tokens_after_padding),
+        [],
+        groups,
+    )
+    assert state._replay[0] == 0
+    assert calls == {"pad_warmup": 0, "gather_warmup": 1, "pad_launch": 0}
+    assert state._replay_start[:1].tolist() == [16]
+
+
 def test_dp_ranks_pad_to_one_replay_graph(dp_state):
     """Every rank pads its replay batch to the graph fitting the largest rank's."""
     dp_state.replay_cudagraphs = MagicMock()
