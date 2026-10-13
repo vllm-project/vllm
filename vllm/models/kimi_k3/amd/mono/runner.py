@@ -24,7 +24,8 @@ from vllm.models.kimi_k3.amd.ops.mono.common.plan import HEALTH_WORDS
 class MonoRunner:
     """Collective: every TP rank builds it at the same point."""
 
-    def __init__(self, device: torch.device):
+    def __init__(self, device: torch.device, dcp: int | None = None):
+        """``dcp``: M1's ranks, 1 or the TP group (default: the DCP group's)."""
         from vllm.models.kimi_k3.amd.ops.mono import layer
         from vllm.models.kimi_k3.amd.ops.mono.attention import kda, mla, mla_back
 
@@ -53,7 +54,7 @@ class MonoRunner:
         tp = get_tp_group()
         self.rank = tp.rank_in_group
         self.world = tp.world_size
-        self.dcp = get_dcp_group().world_size  # M1's ranks: 1 or the TP group
+        self.dcp = get_dcp_group().world_size if dcp is None else dcp
         # K2's regions, M1a's gathered query (QG), M1b's partials (CMB); M1
         # takes no peer memory at DCP1
         m1 = self.dcp > 1

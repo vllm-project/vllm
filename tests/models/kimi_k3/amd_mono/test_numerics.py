@@ -830,7 +830,8 @@ def _m1_worker(
     )
 
     R, nb = tp_size, 4
-    runner = MonoRunner(device)
+    # DCP8 over the TP group; the test's distributed init sets up no DCP group
+    runner = MonoRunner(device, dcp=R)
 
     def pre(w, prefix, blocks, cache, q8, gate, layer=3):
         S = prefix.size(0)
@@ -992,7 +993,7 @@ def _fault_worker(
     runner.fault = {
         "fault_rank": STALLED,
         "fault_epoch": 2,
-        "fault_layer": 3,
+        "fault_layer": 128 + 3,  # K2's slot of layer 3 (_k2_launch's default)
         "fault_ticks": WAIT_TICKS * 3 // 2,
     }
     mw = _moe_weights(rank, device)
