@@ -93,6 +93,7 @@ def test_set_worker_net_device_uses_pcp_aware_gpu_index(monkeypatch, pcp, pp):
         pipeline_parallel_size=pp,
         data_parallel_size=2,
         data_parallel_rank_local=1,
+        distributed_executor_backend="mp",
     )
     vllm_net_devices.set_worker_net_device(
         1, SimpleNamespace(parallel_config=parallel_config)
