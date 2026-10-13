@@ -133,15 +133,29 @@ def test_route_needs_gfx950(monkeypatch):
 DCP = 8
 
 
-def _build(monkeypatch, route, gathered_heads, segmented_supported=True):
-    """Run the real builder __init__ on CPU at TP8/DCP8 with speculative decoding.
+def _build(
+    monkeypatch,
+    route,
+    gathered_heads,
+    segmented_supported=True,
+    *,
+    dcp=DCP,
+    pad_mode=None,
+    shape_query=None,
+    non_causal=False,
+    info_calls=None,
+    cache_dtype="fp8_e4m3",
+):
+    """Run the real builder __init__ on CPU at DCP ``dcp`` with speculative decoding.
 
     Stubs only what needs a GPU, AITER, or a DCP group, so the route decision
-    under test is the one the builder actually makes.
+    under test is the one the builder actually makes. ``shape_query`` becomes
+    aiter.get_mla_decode_shape_support, and ``info_calls`` collects the
+    ``(head count, max qlen)`` pairs the persistent metadata is sized for.
     """
 
     def init_common_builder(self, *args, **kwargs):
-        self.num_heads = gathered_heads // DCP
+        self.num_heads = gathered_heads // dcp
         self.q_data_type = torch.bfloat16
         self.mla_dims = SimpleNamespace(
             kv_lora_rank=512,
@@ -149,8 +163,31 @@ def _build(monkeypatch, route, gathered_heads, segmented_supported=True):
             qk_rope_head_dim=64,
             v_head_dim=128,
         )
-        self.dcp_world_size = DCP
+        self.dcp_world_size = dcp
         self.reorder_batch_threshold = 5
+        self.non_causal_multi_token_decode = non_causal
+
+    def get_mla_metadata_info_v1(batch_size, max_qo_len, num_heads, *args, **kwargs):
+        if info_calls is not None:
+            info_calls.append((num_heads, max_qo_len))
+        # Some sizes grow with the shape and some shrink, so buffers shared by
+        # two shapes need the elementwise max.
+        n = num_heads * max_qo_len
+        return (
+            (2, torch.int32),
+            (n + 1, torch.int32),
+            ((n, 8), torch.int32),
+            (4096 // n, torch.int32),
+            ((4096 // n, 2), torch.int32),
+            (n, torch.int32),
+        )
+
+    aiter = SimpleNamespace(
+        dtypes=SimpleNamespace(fp8="fp8", fp16="fp16", bf16="bf16"),
+        get_mla_metadata_info_v1=get_mla_metadata_info_v1,
+    )
+    if shape_query is not None:
+        aiter.get_mla_decode_shape_support = shape_query
 
     monkeypatch.setattr(
         rocm_aiter_mla.MLACommonMetadataBuilder, "__init__", init_common_builder
@@ -169,29 +206,24 @@ def _build(monkeypatch, route, gathered_heads, segmented_supported=True):
         "get_device_properties",
         lambda device: SimpleNamespace(multi_processor_count=256),
     )
-    monkeypatch.setitem(
-        sys.modules,
-        "aiter",
-        SimpleNamespace(
-            dtypes=SimpleNamespace(fp8="fp8", fp16="fp16", bf16="bf16"),
-            get_mla_metadata_info_v1=lambda *args, **kwargs: tuple(
-                (1, torch.int32) for _ in range(6)
-            ),
-        ),
-    )
+    monkeypatch.setitem(sys.modules, "aiter", aiter)
     if route is None:
         monkeypatch.delenv("VLLM_ROCM_AITER_MLA_DCP_VERIFY", raising=False)
     else:
         monkeypatch.setenv("VLLM_ROCM_AITER_MLA_DCP_VERIFY", route)
+    if pad_mode is None:
+        monkeypatch.delenv("VLLM_ROCM_AITER_MLA_PAD_TO_NATIVE_SHAPE", raising=False)
+    else:
+        monkeypatch.setenv("VLLM_ROCM_AITER_MLA_PAD_TO_NATIVE_SHAPE", pad_mode)
 
     config = SimpleNamespace(
         speculative_config=SimpleNamespace(num_speculative_tokens=4),
         parallel_config=SimpleNamespace(
-            decode_context_parallel_size=DCP, cp_kv_cache_interleave_size=1
+            decode_context_parallel_size=dcp, cp_kv_cache_interleave_size=1
         ),
         model_config=SimpleNamespace(max_model_len=16, dtype=torch.bfloat16),
         scheduler_config=SimpleNamespace(max_num_seqs=2),
-        cache_config=SimpleNamespace(cache_dtype="fp8_e4m3", num_gpu_blocks=None),
+        cache_config=SimpleNamespace(cache_dtype=cache_dtype, num_gpu_blocks=None),
         compilation_config=SimpleNamespace(
             cudagraph_mode=SimpleNamespace(has_full_cudagraphs=lambda: False)
         ),
@@ -251,6 +283,128 @@ def test_auto_off_gfx950_stays_segmented(monkeypatch):
 
     monkeypatch.setattr(rocm, "on_gfx950", lambda: False)
     assert not _build(monkeypatch, "auto", gathered_heads=96)._asm_dcp_verify
+
+
+# --------------------------------------------------------------------------
+# VLLM_ROCM_AITER_MLA_PAD_TO_NATIVE_SHAPE -- the plain route's head count
+# --------------------------------------------------------------------------
+
+
+def _gfx950_fp8_query(calls):
+    """Fake aiter.get_mla_decode_shape_support for gfx950 with an fp8 KV cache."""
+
+    def query(num_heads, max_seqlen_qo, q_dtype, kv_dtype, *, return_lse, causal, **kw):
+        calls.append((num_heads, max_seqlen_qo, return_lse, causal))
+        native = num_heads in NATIVE or (num_heads == 96 and max_seqlen_qo <= 6)
+        return SimpleNamespace(arch="gfx950", native=native, supported=True)
+
+    return query
+
+
+def _assert_buffers_fit(builder, info_calls):
+    """The persistent buffers hold the fake sizes of every sized shape."""
+    n = [heads * qlen for heads, qlen in info_calls]
+    assert builder._mla_work_indptr.shape == (max(n) + 1,)
+    assert builder._mla_work_info_set.shape == (max(n), 8)
+    assert builder._mla_reduce_indptr.shape == (4096 // min(n),)
+    assert builder._mla_reduce_final_map.shape == (4096 // min(n), 2)
+    assert builder._mla_reduce_partial_map.shape == (max(n),)
+
+
+def test_pad_off_never_queries_aiter(on_gfx950, monkeypatch):
+    """The default must run on an AITER without the shape query."""
+    info_calls: list[tuple[int, int]] = []
+    builder = _build(monkeypatch, "auto", gathered_heads=48, info_calls=info_calls)
+    assert builder._padded_decode_num_heads == 48
+    assert builder._num_attention_heads == builder._asm_dcp_verify_heads == 64
+    # The plain qlen-1 decode plans its own count into the cprr-sized buffers.
+    assert info_calls == [(64, 5), (48, 1)]
+    _assert_buffers_fit(builder, info_calls)
+
+
+@pytest.mark.parametrize("pad_mode", ["auto", "FORCE"])
+def test_pad_needs_the_aiter_shape_query(on_gfx950, monkeypatch, pad_mode):
+    with pytest.raises(RuntimeError, match=r"ROCm/aiter#6107"):
+        _build(monkeypatch, "auto", gathered_heads=48, pad_mode=pad_mode)
+
+
+@pytest.mark.parametrize("non_causal", [False, True])
+def test_pad_queries_only_the_plain_dcp_shapes(on_gfx950, monkeypatch, non_causal):
+    """Under DCP a causal multi-token block never takes the plain route."""
+    calls: list[tuple[int, int, bool, bool]] = []
+    builder = _build(
+        monkeypatch,
+        "auto",
+        gathered_heads=48,
+        pad_mode="auto",
+        shape_query=_gfx950_fp8_query(calls),
+        non_causal=non_causal,
+    )
+    expected = {(1, True, True)}
+    if non_causal:
+        expected |= {(qlen, True, False) for qlen in range(1, 6)}
+    assert {call[1:] for call in calls} == expected
+    assert builder._padded_decode_num_heads == 64
+
+
+@pytest.mark.parametrize("non_causal", [False, True])
+@pytest.mark.parametrize("gathered_heads", [80, 96])
+def test_plain_and_cprr_counts_share_the_buffers(
+    on_gfx950, monkeypatch, gathered_heads, non_causal
+):
+    """The plain route is sized only for the qlens it reaches under DCP."""
+    info_calls: list[tuple[int, int]] = []
+    builder = _build(
+        monkeypatch,
+        "auto",
+        gathered_heads=gathered_heads,
+        pad_mode="auto",
+        shape_query=_gfx950_fp8_query([]),
+        non_causal=non_causal,
+        info_calls=info_calls,
+    )
+    assert builder._padded_decode_num_heads == 96
+    assert builder._num_attention_heads == builder._asm_dcp_verify_heads == 128
+    assert info_calls == [(128, 5), (96, 5 if non_causal else 1)]
+    _assert_buffers_fit(builder, info_calls)
+
+
+def test_pad_without_dcp_queries_every_qlen(on_gfx950, monkeypatch):
+    calls: list[tuple[int, int, bool, bool]] = []
+    info_calls: list[tuple[int, int]] = []
+    builder = _build(
+        monkeypatch,
+        "auto",
+        gathered_heads=48,
+        dcp=1,
+        pad_mode="auto",
+        shape_query=_gfx950_fp8_query(calls),
+        info_calls=info_calls,
+    )
+    assert {call[1:] for call in calls} == {(q, False, True) for q in range(1, 6)}
+    assert not builder._asm_dcp_verify
+    assert builder._padded_decode_num_heads == builder._num_attention_heads == 64
+    assert info_calls == [(64, 5)]
+
+
+@pytest.mark.parametrize("cache_dtype,max_qlen", [("auto", 4), ("fp8_e4m3", 5)])
+def test_pad_skips_qlens_a_padded_rank_runs_unscheduled(
+    on_gfx950, monkeypatch, cache_dtype, max_qlen
+):
+    """Past qlen 4 a padded bf16 rank decodes without the schedule, at 16."""
+    calls: list[tuple[int, int, bool, bool]] = []
+    builder = _build(
+        monkeypatch,
+        "auto",
+        gathered_heads=8,
+        dcp=1,
+        pad_mode="auto",
+        shape_query=_gfx950_fp8_query(calls),
+        cache_dtype=cache_dtype,
+    )
+    expected = {(q, False, True) for q in range(1, max_qlen + 1)}
+    assert {call[1:] for call in calls} == expected
+    assert builder._padded_decode_num_heads == 16
 
 
 # --------------------------------------------------------------------------

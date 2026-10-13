@@ -22,6 +22,9 @@ Three properties are checked:
   * a shard told the wrong ``cp_rank`` fails both -- without this positive
     control a passing run proves nothing, since a kernel that ignored global
     positions still produces plausible-looking output.
+
+The same harness also checks the plain qlen-1 DCP decode padded to a native
+head count (``VLLM_ROCM_AITER_MLA_PAD_TO_NATIVE_SHAPE``).
 """
 
 from __future__ import annotations
@@ -375,8 +378,19 @@ def _run_shard(
     return md, o, lse, local_len
 
 
-def _numerics(heads_per_rank: int, sabotage: bool = False):
-    """Run every DCP shard and return (per-shard max rel err, merged rel err)."""
+def _rel_err(actual: torch.Tensor, expected: torch.Tensor) -> float:
+    return (actual - expected).abs().max().item() / max(
+        expected.abs().max().item(), 1e-6
+    )
+
+
+def _run_shards(heads_per_rank: int, qlen: int = QLEN, sabotage: bool = False):
+    """Run every DCP shard on the real builder and asm kernel.
+
+    Returns ``(shards, ref_o)``: per shard ``(metadata, o, lse, shard_ref_o,
+    shard_ref_lse)`` as fp32 ``[req, qlen, heads, ...]``, and the full-context
+    reference output.
+    """
     import aiter
 
     from vllm.config import set_current_vllm_config
@@ -406,7 +420,7 @@ def _numerics(heads_per_rank: int, sabotage: bool = False):
             non_causal_multi_token_decode=False,
         )
 
-        nr, ctx, qlen = NUM_REQS, CTX, QLEN
+        nr, ctx = NUM_REQS, CTX
         L = ctx + qlen
         gathered_heads = heads_per_rank * DCP
         kv_dtype = aiter.dtypes.fp8
@@ -434,8 +448,7 @@ def _numerics(heads_per_rank: int, sabotage: bool = False):
             q_f32, kv_f32, ctx, qlen, SCALE, torch.arange(L, device=device)
         )
 
-        shard_o, shard_lse = [], []
-        max_shard_rel = 0.0
+        shards = []
         for r in range(DCP):
             pos = torch.arange(r, L, DCP, device=device)  # residue class r
             kern_rank = (r + 1) % DCP if sabotage else r
@@ -454,24 +467,28 @@ def _numerics(heads_per_rank: int, sabotage: bool = False):
                 DCP,
                 pos,
             )
-            # The route actually under test must have been taken; a silent
-            # fall-out to Triton/segmented would otherwise pass quietly.
-            assert md.decode.dcp_route is rocm_aiter_mla._DCPDecodeRoute.CPRR
-            assert md.decode.asm_decode_num_heads, "cprr asm route was not taken"
+            shards.append(
+                (
+                    md,
+                    o.float().view(nr, qlen, gathered_heads, KV_LORA_RANK),
+                    lse.float().view(nr, qlen, gathered_heads),
+                    *_torch_reference(q_f32, kv_f32, ctx, qlen, SCALE, pos),
+                )
+            )
+        return shards, ref_o
 
-            o = o.float().view(nr, qlen, gathered_heads, KV_LORA_RANK)
-            shard_lse.append(lse.float().view(nr, qlen, gathered_heads))
-            shard_o.append(o)
 
-            po, _ = _torch_reference(q_f32, kv_f32, ctx, qlen, SCALE, pos)
-            rel = (o - po).abs().max().item() / max(po.abs().max().item(), 1e-6)
-            max_shard_rel = max(max_shard_rel, rel)
-
-        merged, _ = _merge_partials(shard_o, shard_lse)
-        merge_rel = (merged - ref_o).abs().max().item() / max(
-            ref_o.abs().max().item(), 1e-6
-        )
-        return max_shard_rel, merge_rel
+def _numerics(heads_per_rank: int, sabotage: bool = False):
+    """Run every DCP shard and return (per-shard max rel err, merged rel err)."""
+    shards, ref_o = _run_shards(heads_per_rank, sabotage=sabotage)
+    for md, *_ in shards:
+        # The route actually under test must have been taken; a silent
+        # fall-out to Triton/segmented would otherwise pass quietly.
+        assert md.decode.dcp_route is rocm_aiter_mla._DCPDecodeRoute.CPRR
+        assert md.decode.asm_decode_num_heads, "cprr asm route was not taken"
+    merged, _ = _merge_partials([s[1] for s in shards], [s[2] for s in shards])
+    max_shard_rel = max(_rel_err(o, ref) for _, o, _, ref, _ in shards)
+    return max_shard_rel, _rel_err(merged, ref_o)
 
 
 # --------------------------------------------------------------------------
@@ -518,6 +535,65 @@ def test_wrong_cp_rank_breaks_the_result():
         f"sabotaged run still passed (shard {shard_rel:.3e}, merge "
         f"{merge_rel:.3e}) -- cp_rank is not reaching the kernel"
     )
+
+
+def _has_shape_query() -> bool:
+    if not is_aiter_found():
+        return False
+    import aiter
+
+    return hasattr(aiter, "get_mla_decode_shape_support")
+
+
+def _expected_padded_heads(gathered_heads: int) -> int:
+    """Smallest count up to twice the gathered one that is native for qlen-1 DCP."""
+    import aiter
+
+    def native(heads: int) -> bool:
+        s = aiter.get_mla_decode_shape_support(
+            heads, 1, aiter.dtypes.fp8, aiter.dtypes.fp8, return_lse=True
+        )
+        return s.native and s.supported is True
+
+    limit = min(128, 2 * gathered_heads)
+    candidates = range(gathered_heads, limit + 1, 16)
+    return next((h for h in candidates if native(h)), gathered_heads)
+
+
+@requires_cprr
+@pytest.mark.skipif(
+    not _has_shape_query(),
+    reason="needs AITER with get_mla_decode_shape_support (ROCm/aiter#6107)",
+)
+@pytest.mark.parametrize(
+    "heads_per_rank", [6, 10, 14, 12], ids=["48", "80", "112", "96"]
+)
+@torch.inference_mode()
+def test_padded_plain_decode_matches_reference(monkeypatch, heads_per_rank):
+    """qlen-1 DCP decode padded to a native head count must match the reference.
+
+    The plain route plans and launches at the padded count while cprr keeps its
+    own, and both plan into the same buffers.
+    """
+    gathered_heads = heads_per_rank * DCP
+    padded = _expected_padded_heads(gathered_heads)
+    outputs = {}
+    for pad_mode, expected_heads in (("off", gathered_heads), ("auto", padded)):
+        monkeypatch.setenv("VLLM_ROCM_AITER_MLA_PAD_TO_NATIVE_SHAPE", pad_mode)
+        shards, ref_o = _run_shards(heads_per_rank, qlen=1)
+        for md, o, lse, ref_shard_o, ref_shard_lse in shards:
+            assert md.decode.dcp_route is rocm_aiter_mla._DCPDecodeRoute.PLAIN
+            assert md.decode.has_persistent_metadata
+            assert md.decode.padded_num_heads == expected_heads
+            assert _rel_err(o, ref_shard_o) < SHARD_RTOL, pad_mode
+            assert _rel_err(lse, ref_shard_lse) < SHARD_RTOL, pad_mode
+        merged, _ = _merge_partials([s[1] for s in shards], [s[2] for s in shards])
+        assert _rel_err(merged, ref_o) < MERGE_RTOL, pad_mode
+        outputs[pad_mode] = shards
+
+    for off, auto in zip(outputs["off"], outputs["auto"]):
+        assert _rel_err(auto[1], off[1]) < SHARD_RTOL
+        assert _rel_err(auto[2], off[2]) < SHARD_RTOL
 
 
 @requires_cprr
