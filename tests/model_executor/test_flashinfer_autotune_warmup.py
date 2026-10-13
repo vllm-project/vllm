@@ -64,21 +64,19 @@ def test_flashinfer_autotune_token_counts_include_deferred_moe_limits():
             _make_moe(max_deferred_tokens=128),
             _make_moe(max_deferred_tokens=64, enabled=False),
             _make_moe(max_deferred_tokens=-1),
-        ],
-        linear_backend="flashinfer_cutedsl",
+        ]
     )
 
     with patch("vllm.model_executor.layers.fused_moe.MoERunner", _FakeMoERunner):
         token_counts = _flashinfer_autotune_token_counts(runner)
 
-    assert token_counts == (8192, 32, 128)
+    assert token_counts == (8192, 128)
 
 
 def test_flashinfer_autotune_token_counts_are_bounded_and_deduplicated():
     runner = _make_runner(
         [_make_moe(max_deferred_tokens=4096)],
         max_tokens=32,
-        linear_backend="flashinfer_cutedsl",
     )
 
     with patch("vllm.model_executor.layers.fused_moe.MoERunner", _FakeMoERunner):
@@ -423,7 +421,7 @@ def test_dynamic_nvfp4_logits_tuning_is_bounded_by_sampled_sequences():
     observed = {}
 
     @contextmanager
-    def autotune(*, tuning_buckets):
+    def autotune(*, tuning_buckets, **_):
         active_buckets.append(tuning_buckets)
         try:
             yield
@@ -456,3 +454,34 @@ def test_dynamic_nvfp4_logits_tuning_is_bounded_by_sampled_sequences():
         "logits_buckets": (1, 2, 4, 8, 16),
     }
     assert not active_buckets
+
+
+def test_autotune_cache_key_normalizes_kv_init_fields():
+    """mamba_block_size/kv_cache_layout only resolve at engine KV-init time;
+    they must not feed the autotune cache key, or nothing can compute the key
+    before startup (the daemon tunes before any KV init). block_size must
+    stay in the key: the daemon replays the engine's block-size resolution
+    before tuning, and different block sizes may select different ops."""
+    from vllm.config.cache import CacheConfig
+    from vllm.model_executor.warmup.flashinfer_autotune_cache import (
+        _normalize_cache_config_for_hash,
+    )
+
+    fresh = CacheConfig()
+    # Simulate the engine's KV-init write-backs (hybrid model values).
+    mutated = CacheConfig()
+    mutated.mamba_block_size = 512
+    mutated.kv_cache_layout = "LBHNC"
+
+    # Negative control: the write-backs are hashed factors.
+    assert mutated.compute_hash() != fresh.compute_hash()
+    normalized = _normalize_cache_config_for_hash(mutated)
+    assert normalized.compute_hash() == fresh.compute_hash()
+    # Factory state is returned untouched.
+    assert _normalize_cache_config_for_hash(fresh) is fresh
+    # block_size stays significant (the daemon keys on the resolved value).
+    resolved = CacheConfig(block_size=64)
+    assert (
+        _normalize_cache_config_for_hash(resolved).compute_hash()
+        != fresh.compute_hash()
+    )
