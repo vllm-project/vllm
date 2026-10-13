@@ -240,9 +240,9 @@ vllm serve MODEL \
   '{"algorithm":"synthid_text","key":42,"context_width":4,"depth":32}'
 ```
 
-`depth` controls the number of tournament-sampling layers. Higher values
-strengthen the watermark but add sampling overhead. Depths above 32 require
-additional Philox evaluations.
+`depth` controls the number of tournament-sampling layers, must be between 1
+and 32, and defaults to 32. Higher values strengthen the watermark but add
+sampling overhead.
 
 `SynthIDWatermarkDetector` implements the corresponding unweighted-mean detector
 using the same generation parameters. Its reported p-value assumes independent
