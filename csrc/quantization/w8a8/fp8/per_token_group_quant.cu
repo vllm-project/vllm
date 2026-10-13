@@ -78,9 +78,13 @@ __device__ __forceinline__ void QuantizeGroup(
     const float y_s, const float min_8bit, const float max_8bit) {
   constexpr int vec_size = 16 / sizeof(T);
 
+  // One div.rn per group instead of per element; the register-resident
+  // kernel does the same, keeping both schedules bit-identical.
+  const float inv_y = 1.0f / y_s;
+
   // quantize shared -> global 8-bit
   auto scalar_op_quant = [&] __device__(DST_DTYPE & dst, const T& src) {
-    float q = fminf(fmaxf(static_cast<float>(src) / y_s, min_8bit), max_8bit);
+    float q = fminf(fmaxf(static_cast<float>(src) * inv_y, min_8bit), max_8bit);
     dst = DST_DTYPE(q);
   };
 
@@ -272,16 +276,14 @@ __global__ void per_token_group_quant_8bit_register_kernel(
       }
     }
 
-    // A UE8M0 scale is an exact power of two, so multiplying by the reciprocal
-    // matches dividing. Otherwise the reciprocal costs an ulp and can move
-    // values that land exactly on an 8-bit boundary, so divide instead to stay
-    // bit-exact with the smem kernel.
+    // One div.rn per group; the smem path (QuantizeGroup) does the same,
+    // keeping both schedules bit-identical.
     const float inv_y = 1.0f / y_s;
     uint32_t packed[VEC_SIZE / 4] = {};
 #pragma unroll
     for (int i = 0; i < VEC_SIZE; ++i) {
       const float v = static_cast<float>(regs[i]);
-      const float scaled = SCALE_UE8M0 ? (v * inv_y) : (v / y_s);
+      const float scaled = v * inv_y;
       const float q = fminf(fmaxf(scaled, min_8bit), max_8bit);
       DST_DTYPE qb = DST_DTYPE(q);
       const uint8_t byte = *reinterpret_cast<uint8_t*>(&qb);
