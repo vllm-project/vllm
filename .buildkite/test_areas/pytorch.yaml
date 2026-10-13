@@ -207,16 +207,12 @@ steps:
   - csrc/
   commands:
   # Smoke tests under the fullgraph directory, except test_full_cudagraph.py,
-  # a heavy test covered in other steps. One pytest per file: the forked tests
-  # in test_multimodal_compile.py fail in a process that has initialized CUDA
-  # (https://github.com/vllm-project/vllm/issues/28965). Plain pytest
-  # commands, so the step can be sharded automatically.
-  - pytest -s -v compile/fullgraph/test_basic_correctness.py
-  - pytest -s -v compile/fullgraph/test_full_graph.py
+  # a heavy test covered in other steps. test_multimodal_compile.py runs in a
+  # pytest of its own: its forked tests fail in a process that has already
+  # initialized CUDA (https://github.com/vllm-project/vllm/issues/28965).
+  # Plain pytest commands, so the step can be sharded automatically.
+  - pytest -s -v compile/fullgraph --ignore=compile/fullgraph/test_full_cudagraph.py --ignore=compile/fullgraph/test_multimodal_compile.py
   - pytest -s -v compile/fullgraph/test_multimodal_compile.py
-  - pytest -s -v compile/fullgraph/test_multiple_graphs.py
-  - pytest -s -v compile/fullgraph/test_simple.py
-  - pytest -s -v compile/fullgraph/test_toy_llama.py
   mirror:
     amd:
       label: ":amd: (MI355 DPX) PyTorch Fullgraph"
