@@ -88,6 +88,11 @@ class PriorityEvictionQueue:
     _COMPACT_SLACK = 4096
 
     def __init__(self) -> None:
+        # Set by the first kv.retain directive and never cleared: until then
+        # the block pool skips every retention check and keeps no chain
+        # bookkeeping, so a deployment that sends no hints runs the upstream
+        # LRU path at upstream cost.
+        self.ever_used = False
         self._meta: dict[int, RetentionMeta] = {}
         self._heap: list[tuple[int, float, int, int, KVCacheBlock]] = []
         self._in_queue: set[int] = set()
@@ -106,6 +111,12 @@ class PriorityEvictionQueue:
     @property
     def num_blocks(self) -> int:
         return len(self._in_queue)
+
+    @property
+    def active(self) -> bool:
+        """Whether the pool has to consult this queue at all: some directive
+        was applied at some point, or an entry exists (however it got there)."""
+        return self.ever_used or bool(self._meta)
 
     def __contains__(self, block: KVCacheBlock) -> bool:
         return block.block_id in self._in_queue
@@ -129,6 +140,7 @@ class PriorityEvictionQueue:
             return False
         if last_freed_time is not None:
             meta.last_freed_time = last_freed_time
+        self.ever_used = True  # an entry reached the heap, whichever path made it
         self._in_queue.add(block.block_id)
         self._push(block, meta)
         return True
@@ -325,6 +337,7 @@ class PriorityEvictionQueue:
         went down (0 = dropped), so the pool can cap the scope's holds on the
         block's descendants, whose content is unreachable without it.
         """
+        self.ever_used = True
         now = time.monotonic()
         released: list[int] = []
         lowered: list[tuple[KVCacheBlock, int]] = []
@@ -400,6 +413,7 @@ class PriorityEvictionQueue:
         if meta is None:
             meta = RetentionMeta()
             self._meta[block.block_id] = meta
+            self.ever_used = True
         old_priority = meta.priority if meta.holds else -1
         hold = meta.holds.get(scope)
         if hold is None:

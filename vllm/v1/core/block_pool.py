@@ -207,6 +207,9 @@ class BlockPool:
         # of a hash leaves the cache its children are dead weight (reaped at
         # once), and a scope lowering its hold on a block caps its holds on
         # the block's descendants.
+        # Both are kept from the first kv.retain hint on (see
+        # PriorityEvictionQueue.ever_used): blocks cached before that carry
+        # no links, so a cascade or reap does not reach them.
         self._children: dict[BlockHashWithGroupId, set[int]] = {}
         self._parent_key: dict[int, BlockHashWithGroupId] = {}
         # KV-cache groups whose lookups walk the hash chain from the first
@@ -287,6 +290,10 @@ class BlockPool:
         )
 
         new_block_hashes = block_hashes[num_cached_blocks:]
+        pq = self.priority_eviction_queue
+        if request.kv_hints is not None:
+            pq.ever_used = True  # link this request's blocks before its hook
+        chain = pq.active
         new_hashes: list[ExternalBlockHash] | None = (
             [] if self.enable_kv_cache_events else None
         )
@@ -316,10 +323,12 @@ class BlockPool:
                 block_hash_with_group_id,
                 blk,
                 num_tokens=num_hash_tokens,
+                retention=chain,
             )
             parent_idx = num_cached_blocks + i - 1
             if (
-                parent_idx >= 0
+                chain
+                and parent_idx >= 0
                 and blk.block_hash == block_hash_with_group_id
                 and self._chain_group(kv_cache_group_id)
             ):
@@ -638,7 +647,9 @@ class BlockPool:
                 is not None
             ):
                 removed_hashes.append(block_hash)
-        parent_key = self._parent_key.pop(block.block_id, None)
+        parent_key = (
+            self._parent_key.pop(block.block_id, None) if self._parent_key else None
+        )
         if parent_key is not None:
             siblings = self._children.get(parent_key)
             if siblings is not None:
@@ -668,6 +679,7 @@ class BlockPool:
         block_hash_with_group_id: BlockHashWithGroupId,
         block: KVCacheBlock,
         num_tokens: int | None,
+        retention: bool | None = None,
     ) -> None:
         if block.block_hash == block_hash_with_group_id:
             return
@@ -691,7 +703,10 @@ class BlockPool:
         # letting it sit protected in the queue until eviction gets to it. The
         # new copy is inserted first so the hash never goes empty here, which
         # would otherwise reap its children as dead.
-        self._drop_stale_copies(block_hash_with_group_id, block)
+        if retention is None:
+            retention = self.priority_eviction_queue.active
+        if retention:
+            self._drop_stale_copies(block_hash_with_group_id, block)
 
     def _drop_stale_copies(
         self, key: BlockHashWithGroupId, new_block: KVCacheBlock
@@ -754,6 +769,8 @@ class BlockPool:
         to [num_prompt_tokens, None) rather than defaulting to start=0 (which
         would pin the whole prompt).
         """
+        if request.kv_hints is None:
+            return
         parsed = parse_retain_actions(request.kv_hints, strict=False)
         if parsed is None:
             return
@@ -837,12 +854,11 @@ class BlockPool:
         # expiry means "protection released," not "evict now," so treating a
         # lapsed protection as freshly freed avoids mass-evicting a still-live
         # working set on a TTL underestimate.
-        expired = [
-            self.blocks[block_id]
-            for block_id in self.priority_eviction_queue.release_expired()
-        ]
-        if expired:
-            self.free_block_queue.append_n(expired)
+        pq = self.priority_eviction_queue
+        if pq.active:
+            expired = [self.blocks[block_id] for block_id in pq.release_expired()]
+            if expired:
+                self.free_block_queue.append_n(expired)
 
         # LRU first, then top up from the priority queue (lowest priority
         # first); the while loop never runs when nothing is prioritized.
@@ -852,10 +868,11 @@ class BlockPool:
         # unpinned rather than freed, or any other path that leaves an entry on
         # a block in the LRU list. It is being reused for new content now, so
         # the entry goes.
-        for block in ret:
-            self.priority_eviction_queue.unprotect(block.block_id)
+        if pq.active:
+            for block in ret:
+                pq.unprotect(block.block_id)
         while len(ret) < num_blocks:
-            evicted = self.priority_eviction_queue.pop_lowest()
+            evicted = pq.pop_lowest()
             assert evicted is not None, "Priority queue empty but more blocks required"
             ret.append(evicted)
 
@@ -864,8 +881,9 @@ class BlockPool:
 
         # In order to only iterate the list once, we duplicated code a bit
         if self.enable_caching:
+            retention = pq.active
             for block in ret:
-                self._maybe_evict_cached_block(block)
+                self._maybe_evict_cached_block(block, retention)
                 assert block.ref_cnt == 0
                 block.ref_cnt += 1
                 if self.metrics_collector:
@@ -905,12 +923,16 @@ class BlockPool:
                 released.append(block)
         self.free_block_queue.append_n(released)
 
-    def _maybe_evict_cached_block(self, block: KVCacheBlock) -> bool:
+    def _maybe_evict_cached_block(
+        self, block: KVCacheBlock, retention: bool | None = None
+    ) -> bool:
         """If a block is cached in `cached_block_hash_to_block`, we reset its hash
         metadata and evict it from the cache.
 
         Args:
             block: The block to evict.
+            retention: Whether retention is active (reap the orphans the
+                eviction leaves behind); looked up when None.
 
         Returns:
             True if the block is evicted, False otherwise.
@@ -920,7 +942,10 @@ class BlockPool:
         if not evicted_hashes:
             # The block doesn't have hash, eviction is not needed
             return False
-        self._reap_orphans(evicted_hashes)
+        if retention is None:
+            retention = self.priority_eviction_queue.active
+        if retention:
+            self._reap_orphans(evicted_hashes)
         return True
 
     def _evict_from_cache(self, block: KVCacheBlock) -> list[BlockHashWithGroupId]:
@@ -976,14 +1001,16 @@ class BlockPool:
             blocks: A list of blocks to touch.
 
         """
+        pq = self.priority_eviction_queue
+        queued = pq.active
         for block in blocks:
             if block.is_null:
                 continue
             # ref_cnt=0 means the block is logically free; remove it from
             # whichever queue holds it (priority queue or LRU free list).
             if block.ref_cnt == 0:
-                if block in self.priority_eviction_queue:
-                    self.priority_eviction_queue.suspend(block)
+                if queued and block in pq:
+                    pq.suspend(block)
                 elif (
                     block.prev_free_block is not None
                     or block.next_free_block is not None
@@ -1016,7 +1043,9 @@ class BlockPool:
         # an arbitrary block_id tiebreak that could strand a mid-prefix block
         # and break the cached chain; the offset is far smaller than real
         # inter-free gaps, so cross-request recency ordering is unaffected.
-        now = time.monotonic()
+        pq = self.priority_eviction_queue
+        queued = pq.active
+        now = time.monotonic() if queued else 0.0
         for pos, block in enumerate(ordered_blocks):
             if block.is_null:  # never pooled; its ref_cnt is not maintained
                 continue
@@ -1027,8 +1056,7 @@ class BlockPool:
             if block.ref_cnt == 0:
                 # Protected blocks go to the priority queue (try_insert falls
                 # through to LRU for the rest).
-                pq = self.priority_eviction_queue
-                if pq.try_insert(block, last_freed_time=now + pos * 1e-9):
+                if queued and pq.try_insert(block, last_freed_time=now + pos * 1e-9):
                     continue
                 if block.block_hash is None or not self.enable_caching:
                     # LIFO reuse of non-cached blocks for better GPU locality.
