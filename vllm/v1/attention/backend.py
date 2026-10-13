@@ -211,6 +211,10 @@ class AttentionBackend(ABC):
         return True
 
     @classmethod
+    def supports_hisparse(cls) -> bool:
+        return False
+
+    @classmethod
     def supports_device_cpu_query_lens_mismatch(cls) -> bool:
         """Whether this backend can run a batch whose device query_start_loc disagrees
         with the CPU one; backends that plan off the CPU query lengths must opt out.
@@ -294,6 +298,7 @@ class AttentionBackend(ABC):
         use_adaptive_verification: bool = False,
         use_dcp: bool = False,
         use_rswa: bool = False,
+        use_hisparse: bool = False,
     ) -> list[str]:
         invalid_reasons = []
         if not cls.supports_head_size(head_size):
@@ -338,6 +343,8 @@ class AttentionBackend(ABC):
             invalid_reasons.append("batch invariance not supported")
         if use_kv_connector and not cls.supports_kv_connector():
             invalid_reasons.append("KV connector not supported")
+        if use_hisparse and not cls.supports_hisparse():
+            invalid_reasons.append("HiSparse not supported")
         if use_pcp and not cls.supports_pcp():
             invalid_reasons.append("PCP not supported")
         if use_dcp and not cls.supports_dcp():
