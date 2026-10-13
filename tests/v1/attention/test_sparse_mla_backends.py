@@ -41,7 +41,6 @@ from vllm.model_executor.layers.attention.mla_attention import _use_masked_mha
 from vllm.model_executor.layers.attention.sparse_mla_attention import (
     GLOBAL_TOPK_MASK_MAX_BYTES,
     SparseMLACommonImpl,
-    SparseMLACommonMetadataBuilder,
     SparseMLAPrefillMetadata,
     _is_masked_mha_available,
     _masked_mha_workspace_fits,
@@ -116,6 +115,7 @@ from vllm.v1.hisparse.runtime import (
     ResolvedHiSparseConfig,
     _has_hisparse_ops,
     build_hisparse_prefill_staging_plan,
+    build_hisparse_prefill_staging_plans,
     hisparse_prefill_staging_remap,
 )
 from vllm.v1.hisparse.types import SparseKVRowMirror
@@ -3175,21 +3175,6 @@ def test_hisparse_mixed_batch_bf16_row_split(
         v_head_dim=v_head_dim,
         vllm_config=vllm_config,
     )
-    vllm_config.compilation_config.static_forward_context["placeholder"] = (
-        SimpleNamespace(prefill_backend=prefill_backend, impl=SimpleNamespace())
-    )
-
-    builder_cls = FlashMLASparseBackend.get_builder_cls()
-    builder = builder_cls(kv_cache_spec, ["placeholder"], vllm_config, device)
-    if split_prefills:
-        builder.hisparse_staging_block_capacity = cdiv(
-            max(prefill_seq_lens), block_size
-        )
-    metadata = builder.build(
-        common_prefix_len=0, common_attn_metadata=common_attn_metadata
-    )
-    assert isinstance(metadata.prefill, SparseMLAPrefillMetadata)
-
     # Per-token sparse indices bounded by each token's position, with unique
     # offsets and -1 padding (same construction as the decode parity test).
     positions: list[int] = []
@@ -3242,6 +3227,27 @@ def test_hisparse_mixed_batch_bf16_row_split(
         )
     assert isinstance(impl.index_group, HiSparseMLAIndexGroup)
     cache_handle = impl.index_group.cache(impl.index_group_index)
+    if split_prefills:
+        # Room for the longest prefill's history and block-0 padding, not both.
+        cache_handle.runtime.prefill_staging_bytes = (
+            (cdiv(max(prefill_seq_lens), block_size) + 1)
+            * block_size
+            * head_size
+            * dtype.itemsize
+        )
+    vllm_config.compilation_config.static_forward_context["placeholder"] = (
+        SimpleNamespace(
+            prefill_backend=prefill_backend,
+            impl=SimpleNamespace(),
+            hisparse_cache=cache_handle,
+        )
+    )
+    builder_cls = FlashMLASparseBackend.get_builder_cls()
+    builder = builder_cls(kv_cache_spec, ["placeholder"], vllm_config, device)
+    metadata = builder.build(
+        common_prefix_len=0, common_attn_metadata=common_attn_metadata
+    )
+    assert isinstance(metadata.prefill, SparseMLAPrefillMetadata)
     blocks_per_request = cdiv(cache_handle.runtime.region_stride, block_size)
     num_hot_blocks = cache_handle.runtime.max_num_reqs * blocks_per_request
     hot_cache = torch.zeros(
@@ -3320,29 +3326,28 @@ def test_hisparse_mixed_batch_bf16_row_split(
 
 def test_hisparse_staging_plans_fit_reserved_capacity():
     """Prefills whose staged history together exceeds the reserved buffer get
-    separate plans, so no plan stages more than the buffer holds."""
-    block_size, capacity = 4, 3
-    builder = SimpleNamespace(
-        kv_cache_spec=SimpleNamespace(block_size=block_size),
-        hisparse_staging_block_capacity=capacity,
-    )
-    # One decode, then prefills of 2, 1 and 3 blocks.
-    seq_lens = torch.tensor([5, 8, 4, 12], dtype=torch.int32)
-    metadata = SimpleNamespace(
-        seq_lens=seq_lens,
-        query_start_loc_cpu=torch.tensor([0, 1, 3, 4, 8], dtype=torch.int32),
-    )
-    block_table = torch.arange(12, dtype=torch.int32).view(3, 4)
+    separate plans, so no plan stages more rows than the buffer holds."""
+    block_size, row_width = 4, 2
+    runtime = object.__new__(HiSparseRuntime)
+    runtime.row_width = row_width
+    runtime.kv_dtype = torch.float32
+    # Three blocks of history plus the plan's block-0 padding.
+    reserved_rows = 4 * block_size
+    runtime.prefill_staging_bytes = reserved_rows * row_width * 4
+    # Prefills of 2, 1, 1 and 3 blocks after one single-token decode.
+    seq_lens = torch.tensor([8, 4, 4, 12], dtype=torch.int32)
+    query_start_loc = torch.tensor([1, 3, 4, 5, 9], dtype=torch.int32)
+    block_table = torch.arange(1, 17, dtype=torch.int32).view(4, 4)
 
-    plans = SparseMLACommonMetadataBuilder._build_hisparse_staging_plans(
-        builder, metadata, block_table, 1, seq_lens[1:]
+    plans = build_hisparse_prefill_staging_plans(
+        runtime, block_table, seq_lens, seq_lens, query_start_loc, block_size
     )
 
-    assert [plan.request_start for plan in plans] == [0, 2]
-    assert [plan.block_table.shape[0] for plan in plans] == [2, 1]
-    assert [plan.tokens for plan in plans] == [slice(0, 3), slice(3, 7)]
+    assert [plan.request_start for plan in plans] == [0, 2, 3]
+    assert [plan.block_table.shape[0] for plan in plans] == [2, 1, 1]
+    assert [plan.tokens for plan in plans] == [slice(0, 3), slice(3, 4), slice(4, 8)]
     for plan in plans:
-        assert plan.row_ids.shape[1] <= (capacity + 1) * block_size
+        assert plan.row_ids.shape[1] <= reserved_rows
 
 
 def test_hisparse_prefill_staging_remap():

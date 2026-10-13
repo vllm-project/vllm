@@ -24,6 +24,7 @@ from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.mem_utils import get_max_shared_memory_bytes
 from vllm.utils.torch_utils import async_tensor_h2d, current_stream
 from vllm.v1.attention.backend import max_decode_query_len
+from vllm.v1.attention.backends.utils import split_prefill_chunks
 from vllm.v1.hisparse.types import SparseKVResidencyUpdate
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 from vllm.v1.simple_kv_offload.cuda_mem_ops import pin_tensor
@@ -616,6 +617,41 @@ def build_hisparse_prefill_staging_plan(
     )
 
 
+def build_hisparse_prefill_staging_plans(
+    runtime: HiSparseRuntime,
+    block_table: torch.Tensor,
+    seq_lens: torch.Tensor,
+    seq_lens_cpu: torch.Tensor,
+    query_start_loc_cpu: torch.Tensor,
+    block_size: int,
+) -> list[HiSparsePrefillStagingPlan]:
+    """Split a batch's prefills into groups whose staged history fits the
+    reserved staging buffer, one plan per group. Inputs start at the batch's
+    first prefill."""
+    num_prefills = seq_lens_cpu.shape[0]
+    prefill_blocks = (seq_lens_cpu + block_size - 1) // block_size
+    capacity = runtime.prefill_staging_block_capacity(block_size)
+    bounds = (
+        [(0, num_prefills)]
+        if capacity is None
+        else split_prefill_chunks(prefill_blocks, capacity)
+    )
+    query_start_loc_cpu = query_start_loc_cpu - query_start_loc_cpu[0]
+    return [
+        build_hisparse_prefill_staging_plan(
+            block_table[start:end],
+            seq_lens[start:end],
+            block_size,
+            int(prefill_blocks[start:end].sum()),
+            request_start=start,
+            tokens=slice(
+                int(query_start_loc_cpu[start]), int(query_start_loc_cpu[end])
+            ),
+        )
+        for start, end in bounds
+    ]
+
+
 _RESIDENT_COPY_ROWS = 1 << 16
 
 
@@ -776,6 +812,15 @@ class HiSparseRuntime:
     @property
     def prefill_staging_spec(self) -> tuple[tuple[int, ...], torch.dtype]:
         return ((self.prefill_staging_bytes,), torch.uint8)
+
+    def prefill_staging_block_capacity(self, block_size: int) -> int | None:
+        """Blocks of ``block_size`` rows one staging plan may reference, or None
+        when prefills don't stage through the shared workspace."""
+        if not self.prefill_staging_bytes:
+            return None
+        block_bytes = block_size * self.row_width * self.kv_dtype.itemsize
+        # One block is the plan's block-0 padding.
+        return self.prefill_staging_bytes // block_bytes - 1
 
     def bind_hot_cache(
         self,

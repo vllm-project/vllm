@@ -31,7 +31,6 @@ from vllm.model_executor.layers.attention.mla_attention import (
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.flashinfer import has_flashinfer
-from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import (
     PIN_MEMORY,
     is_quantized_kv_cache,
@@ -49,15 +48,12 @@ from vllm.v1.attention.backends.mla.sparse_utils import (
     triton_convert_req_index_to_global_index,
     triton_filter_and_convert_dcp_index,
 )
-from vllm.v1.attention.backends.utils import (
-    split_decodes_and_prefills,
-    split_prefill_chunks,
-)
+from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 from vllm.v1.attention.ops.dcp import MLADCPManager
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
 from vllm.v1.hisparse.runtime import (
     HiSparsePrefillStagingPlan,
-    build_hisparse_prefill_staging_plan,
+    build_hisparse_prefill_staging_plans,
 )
 
 if TYPE_CHECKING:
@@ -247,21 +243,10 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
             layer_names[0]
         ]
         layer_prefill_backend = attention_layer.prefill_backend
-        self.hisparse_staging_block_capacity: int | None = None
         hisparse_cache = getattr(attention_layer, "hisparse_cache", None)
-        if hisparse_cache is not None and hisparse_cache.runtime.prefill_staging_bytes:
-            runtime = hisparse_cache.runtime
-            block_size = kv_cache_spec.block_size
-            block_bytes = block_size * runtime.row_width * runtime.kv_dtype.itemsize
-            # One block is the staging plan's block-0 padding.
-            capacity = runtime.prefill_staging_bytes // block_bytes - 1
-            needed = cdiv(vllm_config.model_config.max_model_len, block_size)
-            if capacity < needed:
-                raise ValueError(
-                    f"HiSparse prefill staging holds {capacity} blocks of "
-                    f"{block_size} tokens, but max_model_len needs {needed}."
-                )
-            self.hisparse_staging_block_capacity = capacity
+        self.hisparse_runtime = (
+            hisparse_cache.runtime if hisparse_cache is not None else None
+        )
         self.dcp_manager: MLADCPManager | None = None
         if self.dcp_world_size > 1:
             self.dcp_manager = getattr(attention_layer, "dcp_manager", None)
@@ -350,41 +335,6 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
             dcp_manager=self.dcp_manager,
         )
 
-    def _build_hisparse_staging_plans(
-        self,
-        common_attn_metadata: "CommonAttentionMetadata",
-        block_table: torch.Tensor,
-        num_decodes: int,
-        prefill_seq_lens_cpu: torch.Tensor,
-    ) -> list[HiSparsePrefillStagingPlan]:
-        """Split prefill requests into groups whose staged history fits the
-        reserved staging buffer, one plan per group."""
-        block_size = self.kv_cache_spec.block_size
-        num_prefills = prefill_seq_lens_cpu.shape[0]
-        prefill_blocks = (prefill_seq_lens_cpu + block_size - 1) // block_size
-        capacity = self.hisparse_staging_block_capacity
-        bounds = (
-            split_prefill_chunks(prefill_blocks, capacity)
-            if capacity is not None
-            else [(0, num_prefills)]
-        )
-        query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu[num_decodes:]
-        query_start_loc_cpu = query_start_loc_cpu - query_start_loc_cpu[0]
-        seq_lens = common_attn_metadata.seq_lens[num_decodes:]
-        return [
-            build_hisparse_prefill_staging_plan(
-                block_table[start:end],
-                seq_lens[start:end],
-                block_size,
-                int(prefill_blocks[start:end].sum()),
-                request_start=start,
-                tokens=slice(
-                    int(query_start_loc_cpu[start]), int(query_start_loc_cpu[end])
-                ),
-            )
-            for start, end in bounds
-        ]
-
     def build(
         self,
         common_prefix_len: int,
@@ -432,12 +382,14 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
                 prefill_query_lens_cpu,
             )
             staging_plans = None
-            if self.vllm_config.attention_config.hisparse_config is not None:
-                staging_plans = self._build_hisparse_staging_plans(
-                    common_attn_metadata,
+            if self.hisparse_runtime is not None:
+                staging_plans = build_hisparse_prefill_staging_plans(
+                    self.hisparse_runtime,
                     block_table,
-                    num_decodes,
+                    common_attn_metadata.seq_lens[num_decodes:],
                     seq_lens_cpu[num_decodes : num_decodes + num_prefills],
+                    common_attn_metadata.query_start_loc_cpu[num_decodes:],
+                    self.kv_cache_spec.block_size,
                 )
             prefill = SparseMLAPrefillMetadata(
                 block_table=block_table,
