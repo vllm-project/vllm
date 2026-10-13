@@ -6,14 +6,14 @@ Routes based on the activation shape:
   M <= MAX_SKINNY_BATCH_SIZE and K*M <= MEDIUM_SKINNY_LIMIT_ELEMENTS:
       HIP skinny GEMM (wvSplitK_int4_g)
   M >= MIN_DENSE_BATCH_SIZE:  dense GEMM on a cached dequantized copy, when
-      ``KernelConfig.enable_rdna_hybrid_w4a16_prefill_dequant`` is set
+      ``KernelConfig.rdna_hybrid_w4a16_prefill_dequant`` is "enable"
   otherwise: Triton W4A16 fused dequant GEMM
 
 Stores the weights ONCE as int8 [N, K//2] (ExLlama shuffle packed). Both
 paths read this single buffer: the HIP skinny kernel uses it directly, and
 the triton kernel reinterprets it as int32 [N, K//8] via a view (and
 transposes tiles in-register). No dual weight storage unless
-``enable_rdna_hybrid_w4a16_prefill_dequant`` caches the dense prefill copy.
+``rdna_hybrid_w4a16_prefill_dequant`` caches the dense prefill copy.
 """
 
 from contextlib import AbstractContextManager, nullcontext
@@ -602,8 +602,8 @@ class RDNAHybridW4A16LinearKernel(MPLinearKernel):
     Stores the weights once as int8 [N, K//2] (ExLlama shuffle packed). The
     HIP skinny kernel reads it directly; the triton kernel reinterprets the
     same buffer as int32 [N, K//8] via a view, so there is no dual weight
-    storage unless ``enable_rdna_hybrid_w4a16_prefill_dequant`` caches a dense
-    prefill copy.
+    storage unless ``rdna_hybrid_w4a16_prefill_dequant`` caches a dense prefill
+    copy.
     """
 
     SUPPORTED_QUANT_TYPES = [
@@ -671,14 +671,14 @@ class RDNAHybridW4A16LinearKernel(MPLinearKernel):
             raise ValueError(
                 "Not enough room in the gpu_memory_utilization budget to cache "
                 "a dequantized W4A16 prefill weight "
-                "(kernel_config.enable_rdna_hybrid_w4a16_prefill_dequant) while "
+                "(kernel_config.rdna_hybrid_w4a16_prefill_dequant) while "
                 "keeping KV cache for one max_model_len request. Increase "
                 "`gpu_memory_utilization`, lower `max_model_len`, or disable it."
             )
 
         logger.info_once(
             "Caching dense %s copies of W4A16 weights for prefill "
-            "(kernel_config.enable_rdna_hybrid_w4a16_prefill_dequant). Each copy "
+            "(kernel_config.rdna_hybrid_w4a16_prefill_dequant). Each copy "
             "is 4x its int4 weight and is reported in the model loading memory, "
             "at the expense of KV cache.",
             c.act_type,
@@ -734,7 +734,7 @@ class RDNAHybridW4A16LinearKernel(MPLinearKernel):
         self._transform_param(layer, self.w_s_name, lambda x: w_s_skinny)
 
         kernel_config = get_current_vllm_config().kernel_config
-        if kernel_config.enable_rdna_hybrid_w4a16_prefill_dequant:
+        if kernel_config.rdna_hybrid_w4a16_prefill_dequant == "enable":
             self._cache_dequant_weight(layer, unpacked, w_s_skinny, w_zp)
 
     def apply_weights(
