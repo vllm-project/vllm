@@ -11,6 +11,7 @@ import torch
 import vllm._aiter_ops as aiter_ops
 import vllm.distributed as vllm_distributed
 import vllm.kernels  # noqa: F401
+from vllm.platforms import current_platform
 
 
 def test_rocm_aiter_gemma_rmsnorm_falls_back_after_allreduce(
@@ -72,9 +73,14 @@ def test_rocm_aiter_gemma_rmsnorm_falls_back_after_allreduce(
     fake_aiter.rmsnorm2d_fwd_with_add = fake_rmsnorm2d_fwd_with_add
     monkeypatch.setitem(sys.modules, "aiter", fake_aiter)
 
-    inp = torch.randn(8192, 16, dtype=torch.bfloat16)
+    # On the platform's device, not the CPU. The fallback leaves Python through
+    # `torch.ops.vllm_aiter.fused_add_rms_norm`, which is registered for the
+    # platform's dispatch key alone, so CPU tensors have nothing to dispatch to
+    # on a GPU build. The kernel behind it is still the fake above.
+    device = current_platform.device_type
+    inp = torch.randn(8192, 16, dtype=torch.bfloat16, device=device)
     residual = torch.randn_like(inp)
-    weight = torch.randn(16, dtype=torch.bfloat16)
+    weight = torch.randn(16, dtype=torch.bfloat16, device=device)
 
     out, residual_out = aiter_ops._rocm_aiter_fused_allreduce_rmsnorm_impl(
         inp, residual, weight, 1e-6, gemma_norm=True
