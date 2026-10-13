@@ -36,6 +36,8 @@ __all__ = [
     "ChatCompletionContentPartVideoEmbedsParam",
     "ChatCompletionContentPartVideoParam",
     "ChatCompletionMessageParam",
+    "ChatTemplateContentFormat",
+    "ChatTemplateContentFormatOption",
     "ConversationMessage",
     "CustomChatCompletionContentPILImageParam",
     "CustomChatCompletionContentSimpleAudioParam",
@@ -64,64 +66,6 @@ class ChatCompletionContentPartAudioParam(TypedDict, total=False):
 
     type: Required[Literal["audio_url"]]
     """The type of the content part."""
-
-
-class VideoURL(TypedDict, total=False):
-    url: Required[str]
-    """
-    Either a URL of the video or a data URL with base64 encoded video data.
-    """
-
-
-class ChatCompletionContentPartVideoParam(TypedDict, total=False):
-    video_url: Required[VideoURL]
-
-    type: Required[Literal["video_url"]]
-    """The type of the content part."""
-
-
-class PILImage(BaseModel):
-    """A PIL.Image.Image object."""
-
-    image_pil: Image.Image
-    model_config = ConfigDict(arbitrary_types_allowed=True)
-
-
-class CustomChatCompletionContentPILImageParam(TypedDict, total=False):
-    """A simpler version of the param that only accepts a PIL image.
-
-    Example:
-    {
-        "image_pil": ImageAsset('cherry_blossom').pil_image
-    }
-
-    """
-
-    image_pil: PILImage | None
-    uuid: str | None
-    """
-    User-provided UUID of a media. User must guarantee that it is properly
-    generated and unique for different medias.
-    """
-
-
-class CustomChatCompletionContentSimpleImageParam(TypedDict, total=False):
-    """A simpler version of the param that only accepts a plain image_url.
-    This is supported by OpenAI API, although it is not documented.
-
-    Example:
-    {
-        "image_url": "https://example.com/image.jpg"
-    }
-
-    """
-
-    image_url: str | None
-    uuid: str | None
-    """
-    User-provided UUID of a media. User must guarantee that it is properly
-    generated and unique for different medias.
-    """
 
 
 MultiModalEmbedsPayload: TypeAlias = str | dict[str, str | list[int | float]]
@@ -186,6 +130,64 @@ class ChatCompletionContentPartPromptEmbedsParam(TypedDict, total=False):
     """The type of the content part."""
 
 
+class VideoURL(TypedDict, total=False):
+    url: Required[str]
+    """
+    Either a URL of the video or a data URL with base64 encoded video data.
+    """
+
+
+class ChatCompletionContentPartVideoParam(TypedDict, total=False):
+    video_url: Required[VideoURL]
+
+    type: Required[Literal["video_url"]]
+    """The type of the content part."""
+
+
+class PILImage(BaseModel):
+    """A PIL.Image.Image object."""
+
+    image_pil: Image.Image
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+
+class CustomChatCompletionContentPILImageParam(TypedDict, total=False):
+    """A simpler version of the param that only accepts a PIL image.
+
+    Example:
+    {
+        "image_pil": ImageAsset('cherry_blossom').pil_image
+    }
+
+    """
+
+    image_pil: PILImage | None
+    uuid: str | None
+    """
+    User-provided UUID of a media. User must guarantee that it is properly
+    generated and unique for different medias.
+    """
+
+
+class CustomChatCompletionContentSimpleImageParam(TypedDict, total=False):
+    """A simpler version of the param that only accepts a plain image_url.
+    This is supported by OpenAI API, although it is not documented.
+
+    Example:
+    {
+        "image_url": "https://example.com/image.jpg"
+    }
+
+    """
+
+    image_url: str | None
+    uuid: str | None
+    """
+    User-provided UUID of a media. User must guarantee that it is properly
+    generated and unique for different medias.
+    """
+
+
 class CustomChatCompletionContentSimpleAudioParam(TypedDict, total=False):
     """A simpler version of the param that only accepts a plain audio_url.
 
@@ -217,24 +219,6 @@ class CustomChatCompletionContentSimpleVideoParam(TypedDict, total=False):
     """
 
 
-class CustomChatCompletionContentToolReferenceParam(TypedDict, total=False):
-    """A tool reference content param that only accepts a plain tool name.
-
-    Example:
-    {
-        "name": "get_weather",
-        "type": "tool_reference"
-    }
-
-    """
-
-    name: str
-    """The name of the tool being referenced."""
-
-    type: Literal["tool_reference"]
-    """The content type."""
-
-
 class CustomThinkCompletionContentParam(TypedDict, total=False):
     """A Think Completion Content Param that accepts a plain text and a boolean.
 
@@ -257,6 +241,24 @@ class CustomThinkCompletionContentParam(TypedDict, total=False):
     """The thinking type."""
 
 
+class CustomChatCompletionContentToolReferenceParam(TypedDict, total=False):
+    """A tool reference content param that only accepts a plain tool name.
+
+    Example:
+    {
+        "name": "get_weather",
+        "type": "tool_reference"
+    }
+
+    """
+
+    name: str
+    """The name of the tool being referenced."""
+
+    type: Literal["tool_reference"]
+    """The content type."""
+
+
 ChatCompletionContentPartParam: TypeAlias = (
     OpenAIChatCompletionContentPartParam
     | ChatCompletionContentPartAudioParam
@@ -272,8 +274,8 @@ ChatCompletionContentPartParam: TypeAlias = (
     | CustomChatCompletionContentSimpleAudioParam
     | CustomChatCompletionContentSimpleVideoParam
     | CustomChatCompletionContentToolReferenceParam
-    | CustomThinkCompletionContentParam
     | str
+    | CustomThinkCompletionContentParam
 )
 
 
@@ -344,6 +346,13 @@ class ConversationMessage(TypedDict, total=False):
 
     task: str | None
     """Model-specific task marker. Currently passed through for DeepSeek V4."""
+
+
+# Passed in by user
+ChatTemplateContentFormatOption = Literal["auto", "string", "openai"]
+
+# After resolving "auto"
+ChatTemplateContentFormat = Literal["string", "openai"]
 
 
 ModalityStr = Literal[

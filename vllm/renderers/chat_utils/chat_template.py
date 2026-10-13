@@ -4,12 +4,10 @@
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
-from typing import Literal
 
 from vllm.exceptions import VLLMValidationError
 
-# Passed in by user
-ChatTemplateContentFormatOption = Literal["auto", "string", "openai"]
+from .types import ChatTemplateContentFormatOption
 
 
 @dataclass

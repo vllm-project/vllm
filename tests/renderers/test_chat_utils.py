@@ -26,6 +26,7 @@ from vllm.renderers.chat_utils import (
     AsyncMultiModalItemTracker,
     ChatCompletionMessageParam,
     ConversationMessage,
+    parse_chat_message_content,
     parse_chat_messages,
     parse_chat_messages_async,
     validate_chat_template,
@@ -3204,7 +3205,7 @@ def _parse_one(message) -> ConversationMessage:
     parser = tracker.create_parser.return_value
     parser.model_config.enable_prompt_embeds = False
     parser.mm_placeholder_storage.return_value = {}
-    result = _parse_chat_message_content(
+    result = parse_chat_message_content(
         message, tracker, content_format="string", interleave_strings=False
     )
     assert len(result) == 1

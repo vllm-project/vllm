@@ -128,7 +128,7 @@ class BaseMultiModalContentParser(ABC):
 class MultiModalContentParser(BaseMultiModalContentParser):
     def __init__(
         self,
-        tracker: "MultiModalItemTracker",
+        tracker: MultiModalItemTracker,
         mm_processor_kwargs: dict[str, Any] | None = None,
     ) -> None:
         super().__init__()
@@ -309,7 +309,7 @@ class MultiModalContentParser(BaseMultiModalContentParser):
 class AsyncMultiModalContentParser(BaseMultiModalContentParser):
     def __init__(
         self,
-        tracker: "AsyncMultiModalItemTracker",
+        tracker: AsyncMultiModalItemTracker,
         mm_processor_kwargs: dict[str, Any] | None = None,
     ) -> None:
         super().__init__()
