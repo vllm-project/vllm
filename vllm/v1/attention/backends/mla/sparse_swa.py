@@ -83,6 +83,7 @@ class DeepseekV4SWACache(torch.nn.Module, AttentionLayerBase):
         block_size: int = 64,
         packed_bytes_per_token: int = 584,
         packed_page_alignment: int = 576,
+        packed_block_stride_alignment: int | None = None,
         bounded_replay: bool = False,
     ):
         super().__init__()
@@ -97,6 +98,7 @@ class DeepseekV4SWACache(torch.nn.Module, AttentionLayerBase):
         self.dtype = dtype
         self.packed_bytes_per_token = packed_bytes_per_token
         self.packed_page_alignment = packed_page_alignment
+        self.packed_block_stride_alignment = packed_block_stride_alignment
         compilation_config = get_current_vllm_config().compilation_config
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
@@ -135,6 +137,9 @@ class DeepseekV4SWACache(torch.nn.Module, AttentionLayerBase):
             ),
             # FlashMLA packing stride; 512B for FlashInfer sparse (#44577).
             alignment=self.packed_page_alignment if uses_fp8_ds_mla_layout else 512,
+            block_stride_alignment=(
+                self.packed_block_stride_alignment if uses_fp8_ds_mla_layout else None
+            ),
             model_version="deepseek_v4",
             kv_quant_mode=get_kv_quant_mode(self.cache_config.cache_dtype),
         )

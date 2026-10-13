@@ -239,7 +239,8 @@ def rope_quant_insert(
     UE8M0 scale bytes, including one zero padding scale), 528 B for V4.1
     (512 MXFP8 value bytes covering the RoPE dims too, then 16 UE8M0 scales of
     32 dims each), or 288 B for V4.1 NVFP4 (256 bytes of e2m1 pairs then 32
-    e4m3 scales of 16 dims each), which only the compressed cache uses.
+    e4m3 scales of 16 dims each), which only the compressed cache uses. The
+    two V4.1 records keep each token's scales right after its own values.
     ``bfloat16`` and ``float8_e4m3fn`` are the plain [448 NoPE | 64 RoPE] rows
     read by FlashInfer, the latter scaled by the per-tensor ``fp8_scale``.
     """
@@ -390,8 +391,8 @@ def _rope_quant_insert_mxfp8_kernel(
         rotated = tl.where(rotated == rotated, rotated, 0.0)
 
     page = cache + (slot // CACHE_BLOCK).to(tl.int64) * CACHE_STRIDE
-    values = page + (slot % CACHE_BLOCK) * 512
-    scales = page + CACHE_BLOCK * 512 + (slot % CACHE_BLOCK) * 16
+    values = page + (slot % CACHE_BLOCK) * 528
+    scales = values + 512
 
     quant = tl.reshape(rotated, (16, 32))
     amax = tl.maximum(tl.max(tl.abs(quant), 1), 1e-4)
@@ -453,12 +454,9 @@ def _rope_quant_insert_nvfp4_kernel(
     lo, hi = tl.split(tl.reshape(tl.reshape(scaled, (512,)), (256, 2)))
 
     page = cache + (slot // CACHE_BLOCK).to(tl.int64) * CACHE_STRIDE
-    tl.store(
-        page + (slot % CACHE_BLOCK) * 256 + tl.arange(0, 256),
-        _fp32x2_to_fp4x2(lo, hi),
-    )
-    scales = page + CACHE_BLOCK * 256 + (slot % CACHE_BLOCK) * 32
-    tl.store(scales + tl.arange(0, 32), scale.to(tl.uint8, bitcast=True))
+    values = page + (slot % CACHE_BLOCK) * 288
+    tl.store(values + tl.arange(0, 256), _fp32x2_to_fp4x2(lo, hi))
+    tl.store(values + 256 + tl.arange(0, 32), scale.to(tl.uint8, bitcast=True))
 
 
 @triton.jit

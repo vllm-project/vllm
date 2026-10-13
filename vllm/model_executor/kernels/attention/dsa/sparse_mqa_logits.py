@@ -427,7 +427,7 @@ def sparse_mqa_logits_paged_decode(
         q: [rows, 1, H, D] packed Q values (MXFP4 viewed as int8).
         q_scale: [rows, 1, H] int32 packed UE8M0 Q scales.
         kv_cache: 4D [num_pages, page_kv, 1, head_bytes] uint8 fused cache
-            view; the page stride must be 512B-aligned.
+            view; the page stride must be 256B-aligned.
         weights: [rows, H] bf16 per-head weights.
         context_lens: [rows] int32 per-row (compressed) context lengths.
         block_table: [rows, P] int32 per-row page table, ``stride(-1) == 1``.
@@ -451,8 +451,8 @@ def sparse_mqa_logits_paged_decode(
     rows = q.shape[0]
     page_kv = kv_cache.shape[1]
     assert weights.dtype == torch.bfloat16, weights.dtype
-    assert kv_cache.stride(0) % 512 == 0, (
-        "paged cache page stride must be 512B-aligned: "
+    assert kv_cache.stride(0) % 256 == 0, (
+        "paged cache page stride must be 256B-aligned: "
         f"shape={tuple(kv_cache.shape)} stride={kv_cache.stride()}"
     )
     assert page_kv % sparse_block_kv == 0, (page_kv, sparse_block_kv)
