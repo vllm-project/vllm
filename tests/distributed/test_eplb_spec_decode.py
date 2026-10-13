@@ -219,6 +219,62 @@ def test_dspark_draft_supports_eplb_for_dsv4_and_dsv41(dspark_vllm_config):
     )
 
 
+def test_dsv41_dspark_weight_loading_includes_eplb_redundant_experts(monkeypatch):
+    from torch import nn
+
+    from vllm.models.deepseek_v41.nvidia import dspark as dspark_module
+
+    mappings = []
+    original_mapping = dspark_module.fused_moe_make_expert_params_mapping
+
+    def capture_mapping(*args, **kwargs):
+        mapping = original_mapping(*args, **kwargs)
+        mappings.append(mapping)
+        return mapping
+
+    monkeypatch.setattr(
+        dspark_module, "fused_moe_make_expert_params_mapping", capture_mapping
+    )
+    monkeypatch.setattr(
+        dspark_module, "get_tensor_model_parallel_world_size", lambda: 1
+    )
+    monkeypatch.setattr(dspark_module, "get_tensor_model_parallel_rank", lambda: 0)
+    monkeypatch.setattr(
+        dspark_module.DSparkDeepseekV4ForCausalLM,
+        "process_weights_after_loading",
+        lambda self: None,
+    )
+
+    draft = object.__new__(dspark_module.DSparkDeepseekV4ForCausalLM)
+    nn.Module.__init__(draft)
+    draft.model = SimpleNamespace(
+        layers=[
+            SimpleNamespace(
+                ffn=SimpleNamespace(
+                    use_native_mega_moe=False,
+                    n_redundant_experts=3,
+                )
+            )
+        ],
+        confidence_head=None,
+    )
+    draft.config = SimpleNamespace(
+        dspark_n_routed_experts=4,
+        n_routed_experts=8,
+        num_attention_heads=4,
+    )
+
+    draft.load_weights([])
+
+    assert len(mappings) == 1
+    expert_zero_w1_slots = [
+        expert_id
+        for _, checkpoint_name, expert_id, _ in mappings[0]
+        if checkpoint_name.startswith("experts.0.w1.")
+    ]
+    assert expert_zero_w1_slots == [0, 4]
+
+
 def test_eplb_draft_model_name_adds_suffix(dspark_vllm_config):
     draft_model_config = dspark_vllm_config.speculative_config.draft_model_config
     assert eplb_draft_model_name(draft_model_config) == "dspark (draft)"
