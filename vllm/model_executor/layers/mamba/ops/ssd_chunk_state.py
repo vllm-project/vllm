@@ -8,7 +8,10 @@
 
 import torch
 
-from vllm.model_executor.layers.mamba.ops.triton_helpers import fast_exp
+from vllm.model_executor.layers.mamba.ops.triton_helpers import (
+    fast_exp,
+    launch_autotuned,
+)
 from vllm.triton_utils import tl, triton
 
 from .mamba_ssm import softplus
@@ -321,32 +324,41 @@ def _chunk_cumsum_fwd(
         nheads, nchunks, chunk_size, device=dt.device, dtype=torch.float32
     )
     grid_chunk_cs = lambda META: (nchunks, triton.cdiv(nheads, META["BLOCK_SIZE_H"]))
-    with torch.accelerator.device_index(dt.device.index):
-        _chunk_cumsum_fwd_kernel[grid_chunk_cs](
-            dt_ptr=dt,
-            A_ptr=A,
-            dt_bias_ptr=dt_bias,
-            dt_out_ptr=dt_out,
-            dA_cumsum_ptr=dA_cumsum,
-            cu_chunk_seqlens_ptr=cu_chunk_seqlens,
-            nheads=nheads,
-            chunk_size=chunk_size,
-            dt_min=dt_limit[0],
-            dt_max=dt_limit[1],
-            stride_dt_seqlen=dt.stride(0),
-            stride_dt_head=dt.stride(1),
-            stride_A_head=A.stride(0),
-            stride_dt_bias_head=dt_bias.stride(0) if dt_bias is not None else 0,
-            stride_dt_out_head=dt_out.stride(0),
-            stride_dt_out_chunk=dt_out.stride(1),
-            stride_dt_out_csize=dt_out.stride(2),
-            stride_dA_cs_head=dA_cumsum.stride(0),
-            stride_dA_cs_chunk=dA_cumsum.stride(1),
-            stride_dA_cs_csize=dA_cumsum.stride(2),
-            DT_SOFTPLUS=dt_softplus,
-            HAS_DT_BIAS=dt_bias is not None,
-            BLOCK_SIZE_CHUNK=triton.next_power_of_2(chunk_size),
-        )
+    launch_autotuned(
+        _chunk_cumsum_fwd_kernel,
+        grid_chunk_cs,
+        (
+            chunk_size,
+            nheads,
+            dt.dtype,
+            A.dtype,
+            None if dt_bias is None else dt_bias.dtype,
+            cu_chunk_seqlens.dtype,
+        ),
+        dt_ptr=dt,
+        A_ptr=A,
+        dt_bias_ptr=dt_bias,
+        dt_out_ptr=dt_out,
+        dA_cumsum_ptr=dA_cumsum,
+        cu_chunk_seqlens_ptr=cu_chunk_seqlens,
+        nheads=nheads,
+        chunk_size=chunk_size,
+        dt_min=dt_limit[0],
+        dt_max=dt_limit[1],
+        stride_dt_seqlen=dt.stride(0),
+        stride_dt_head=dt.stride(1),
+        stride_A_head=A.stride(0),
+        stride_dt_bias_head=dt_bias.stride(0) if dt_bias is not None else 0,
+        stride_dt_out_head=dt_out.stride(0),
+        stride_dt_out_chunk=dt_out.stride(1),
+        stride_dt_out_csize=dt_out.stride(2),
+        stride_dA_cs_head=dA_cumsum.stride(0),
+        stride_dA_cs_chunk=dA_cumsum.stride(1),
+        stride_dA_cs_csize=dA_cumsum.stride(2),
+        DT_SOFTPLUS=dt_softplus,
+        HAS_DT_BIAS=dt_bias is not None,
+        BLOCK_SIZE_CHUNK=triton.next_power_of_2(chunk_size),
+    )
     return dA_cumsum, dt_out
 
 
@@ -375,33 +387,45 @@ def _chunk_state_fwd(
         nchunks,
         nheads,
     )
-    with torch.accelerator.device_index(x.device.index):
-        _chunk_state_fwd_kernel[grid](
-            x_ptr=x,
-            b_ptr=B,
-            states_ptr=states,
-            dt_ptr=dt,
-            dA_cumsum_ptr=dA_cumsum,
-            cu_chunk_seqlens_ptr=cu_chunk_seqlens,
-            hdim=headdim,
-            dstate=dstate,
-            chunk_size=chunk_size,
-            nheads_ngroups_ratio=nheads // ngroups,
-            stride_x_seqlen=x.stride(0),
-            stride_x_head=x.stride(1),
-            stride_x_hdim=x.stride(2),
-            stride_b_seqlen=B.stride(0),
-            stride_b_head=B.stride(1),
-            stride_b_dstate=B.stride(2),
-            stride_states_chunk=states.stride(0),
-            stride_states_head=states.stride(1),
-            stride_states_hdim=states.stride(2),
-            stride_states_dstate=states.stride(3),
-            stride_dt_head=dt.stride(0),
-            stride_dt_chunk=dt.stride(1),
-            stride_dt_csize=dt.stride(2),
-            stride_dA_cs_head=dA_cumsum.stride(0),
-            stride_dA_cs_chunk=dA_cumsum.stride(1),
-            stride_dA_cs_csize=dA_cumsum.stride(2),
-        )
+    launch_autotuned(
+        _chunk_state_fwd_kernel,
+        grid,
+        (
+            headdim,
+            dstate,
+            chunk_size,
+            x.dtype,
+            B.dtype,
+            states.dtype,
+            dt.dtype,
+            dA_cumsum.dtype,
+            cu_chunk_seqlens.dtype,
+        ),
+        x_ptr=x,
+        b_ptr=B,
+        states_ptr=states,
+        dt_ptr=dt,
+        dA_cumsum_ptr=dA_cumsum,
+        cu_chunk_seqlens_ptr=cu_chunk_seqlens,
+        hdim=headdim,
+        dstate=dstate,
+        chunk_size=chunk_size,
+        nheads_ngroups_ratio=nheads // ngroups,
+        stride_x_seqlen=x.stride(0),
+        stride_x_head=x.stride(1),
+        stride_x_hdim=x.stride(2),
+        stride_b_seqlen=B.stride(0),
+        stride_b_head=B.stride(1),
+        stride_b_dstate=B.stride(2),
+        stride_states_chunk=states.stride(0),
+        stride_states_head=states.stride(1),
+        stride_states_hdim=states.stride(2),
+        stride_states_dstate=states.stride(3),
+        stride_dt_head=dt.stride(0),
+        stride_dt_chunk=dt.stride(1),
+        stride_dt_csize=dt.stride(2),
+        stride_dA_cs_head=dA_cumsum.stride(0),
+        stride_dA_cs_chunk=dA_cumsum.stride(1),
+        stride_dA_cs_csize=dA_cumsum.stride(2),
+    )
     return states
