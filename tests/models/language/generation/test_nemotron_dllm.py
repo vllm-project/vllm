@@ -207,14 +207,26 @@ def test_ar_mode_config(explicit_diffusion_config):
         assert config.model_config.override_generation_config["max_new_tokens"] is None
 
 
-def test_diffusion_config_temperature():
-    from vllm.config.diffusion import DiffusionConfig
+def test_diffusion_config_cls_follows_architecture():
+    """Only Nemotron accepts Nemotron options in --diffusion-config."""
+    from types import SimpleNamespace
+    from typing import Any, cast
 
-    # Nemotron uses this as a default; negative values are invalid.
-    assert DiffusionConfig(canvas_length=32).temperature is None
-    assert DiffusionConfig(canvas_length=32, temperature=1.0).temperature == 1.0
+    from vllm.config.diffusion import DiffusionConfig
+    from vllm.model_executor.models.config import (
+        NemotronDiffusionConfig,
+        get_diffusion_config_cls,
+    )
+
+    def cls_for(arch: str) -> type[DiffusionConfig]:
+        return get_diffusion_config_cls(cast(Any, SimpleNamespace(architecture=arch)))
+
+    assert cls_for("NemotronLabsDiffusionModel") is NemotronDiffusionConfig
+    assert cls_for("DiffusionGemmaForBlockDiffusion") is DiffusionConfig
     with pytest.raises(ValueError):
-        DiffusionConfig(canvas_length=32, temperature=-0.5)
+        DiffusionConfig(**{"canvas_length": 32, "temperature": 0.0})
+    with pytest.raises(ValueError):
+        NemotronDiffusionConfig(canvas_length=32, temperature=-0.5)
 
 
 # ---------------------------------------------------------------------------
