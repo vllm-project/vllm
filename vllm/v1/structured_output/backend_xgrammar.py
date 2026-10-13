@@ -414,7 +414,7 @@ def validate_xgrammar_grammar(sampling_params: SamplingParams) -> None:
 
     so_params = sampling_params.structured_outputs
 
-    if so_params.regex:
+    if so_params.regex is not None:
         # A NUL byte is never meaningful in a regex pattern and is not handled
         # by xgrammar's native regex converter. Reject it here, before the
         # pattern reaches that native code; the try/except below does not cover
@@ -432,6 +432,7 @@ def validate_xgrammar_grammar(sampling_params: SamplingParams) -> None:
             raise VLLMValidationError(
                 f"Failed to transform regex into a grammar: {err}"
             ) from err
+        return
 
     if so_params.choice:
         choice_grammar = choice_as_grammar(so_params.choice)
@@ -445,7 +446,7 @@ def validate_xgrammar_grammar(sampling_params: SamplingParams) -> None:
         so_params.grammar = choice_grammar
         return
 
-    if so_params.json:
+    if so_params.json is not None:
         check_json_nesting(so_params.json)
         if isinstance(so_params.json, str):
             try:
@@ -468,6 +469,9 @@ def validate_xgrammar_grammar(sampling_params: SamplingParams) -> None:
             raise VLLMValidationError(
                 f"Failed to transform json schema into a grammar: {err}"
             ) from err
+        return
+
+    if so_params.json_object:
         return
 
     if so_params.grammar:
@@ -502,3 +506,9 @@ def validate_xgrammar_grammar(sampling_params: SamplingParams) -> None:
                 xgr.Grammar.from_structural_tag(so_params.structural_tag)
         except Exception as e:
             raise VLLMValidationError("Invalid structural tag specification.") from e
+        return
+
+    raise VLLMValidationError(
+        "XGrammar structured outputs backend "
+        "does not support this structured outputs specification"
+    )
