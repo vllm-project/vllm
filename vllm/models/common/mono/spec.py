@@ -42,15 +42,6 @@ class MonoUnsupported(Exception):
 
 
 @dataclass(frozen=True)
-class CacheReq:
-    """A cache the kernels read: its KV cache group, dtype and layout."""
-
-    group: str
-    dtype: str
-    layout: str
-
-
-@dataclass(frozen=True)
 class MonoContext:
     """One rank's view of the deployment, built once at attach.
 
@@ -114,7 +105,6 @@ class MonoSpec(Generic[LaunchStateT]):
         name: Log and metric name.
         supports: Features this spec serves. Default deny: a feature in use
             that is absent from it refuses the deployment.
-        caches: The caches the kernels read, by attention layer name.
         weight_source: ``"views"`` to read vLLM's post-load layout in place,
             ``"convert"`` to build a second layout once after load.
         layers: The decoder layers that get a kernel, from the model's config.
@@ -139,7 +129,6 @@ class MonoSpec(Generic[LaunchStateT]):
 
     name: str
     supports: frozenset[Feature]
-    caches: Mapping[str, CacheReq]
     weight_source: Literal["views", "convert"]
 
     # Model shape

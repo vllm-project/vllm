@@ -23,7 +23,7 @@ from vllm.models.common.mono.guards import (
     _set_capture_sizes,
     configure,
 )
-from vllm.models.common.mono.layer import attach, kernel_for_layer
+from vllm.models.common.mono.runtime import attach, kernel_for_layer
 from vllm.models.common.mono.spec import Feature, MonoUnsupported
 
 KERNEL_BACKENDS = ("aiter", "flydsl")

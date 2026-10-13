@@ -13,7 +13,7 @@ import torch
 from tests.models.common.mono.kit import MonoConformance, forward
 from vllm.config.compilation import CUDAGraphMode
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import Mxfp4MoeBackend
-from vllm.models.common.mono.layer import attach, kernel_for_layer
+from vllm.models.common.mono.runtime import attach, kernel_for_layer
 from vllm.models.common.mono.spec import MonoUnsupported
 from vllm.models.deepseek_v41.amd import mono_spec as ms
 

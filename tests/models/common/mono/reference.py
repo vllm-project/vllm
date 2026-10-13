@@ -10,9 +10,10 @@ import torch
 
 from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import get_forward_context
-from vllm.models.common.mono.spec import CacheReq, MonoContext, MonoSpec
+from vllm.models.common.mono.spec import MonoContext, MonoSpec
 
-CACHE = CacheReq(group="kv", dtype="bfloat16", layout="2nhd")
+CACHE_DTYPE = "bfloat16"
+CACHE_LAYOUT = "2nhd"
 
 _LAYOUT_DIMS = {"2nhd": 4}
 
@@ -117,10 +118,10 @@ def launch_state(model, ctx: MonoContext) -> LaunchState:
 def refuse_caches(ctx: MonoContext, caches) -> list[str]:
     reasons = []
     for name, cache in caches.items():
-        if str(cache.dtype).removeprefix("torch.") != CACHE.dtype:
-            reasons.append(f"{name}: dtype {cache.dtype}, needs {CACHE.dtype}")
-        if cache.ndim != _LAYOUT_DIMS[CACHE.layout]:
-            reasons.append(f"{name}: {cache.ndim}d, needs layout {CACHE.layout}")
+        if str(cache.dtype).removeprefix("torch.") != CACHE_DTYPE:
+            reasons.append(f"{name}: dtype {cache.dtype}, needs {CACHE_DTYPE}")
+        if cache.ndim != _LAYOUT_DIMS[CACHE_LAYOUT]:
+            reasons.append(f"{name}: {cache.ndim}d, needs layout {CACHE_LAYOUT}")
     return reasons
 
 
@@ -131,7 +132,6 @@ def build(ctx: MonoContext, state: LaunchState, layer, width: int) -> ReferenceK
 REFERENCE = MonoSpec[LaunchState](
     name="reference",
     supports=frozenset(),
-    caches={"attn": CACHE},
     weight_source="views",
     layers=layers,
     widths=widths,

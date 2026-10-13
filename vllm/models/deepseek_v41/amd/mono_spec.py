@@ -12,7 +12,6 @@ from vllm.config import CUDAGraphMode
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.models.common.mono.spec import (
-    CacheReq,
     Feature,
     MonoContext,
     MonoSpec,
@@ -486,7 +485,6 @@ def _layers(config) -> list[int]:
 MONO_SPEC = MonoSpec[LaunchState](
     name="dsv41-cdna4",
     supports=frozenset({Feature.PIPELINE_PARALLEL, Feature.SPECULATIVE_DECODING}),
-    caches={"swa": CacheReq("swa", "fp8_ds_mla", "blocks,block,bytes")},
     weight_source="views",
     layers=_layers,
     widths=_widths,
