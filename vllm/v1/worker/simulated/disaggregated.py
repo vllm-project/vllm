@@ -2,26 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Simulate disaggregated prefill: prefill and decode instances in one process.
 
-`simulate_disaggregated()` builds prefill and decode engines connected by the
-`NixlConnector` (pull mode, with the simulated worker side of
-`vllm.v1.worker.simulated.kv_nixl`) and plays the proxy: a request goes to a
-prefill instance with ``max_tokens=1``; when that finishes, it goes to a
-decode instance with the kv_transfer_params the prefill instance returned,
-and the decode instance reads the KV and generates the output. Instances are
-picked round-robin, as by vLLM's example proxies, or by fewest unfinished
-requests.
-
-Each engine runs on its own virtual clock, so the instances run concurrently
-in simulated time although they step one at a time: the engine whose clock
-is furthest behind steps next. An event (an arrival, or a request handed over
-from prefill to decode) reaches its engine at its time or, if the engine is
-in the middle of a step then, when the step ends, as a busy engine core picks
-up requests between steps. When the engines furthest behind only wait for KV
-transfers, the driver moves their clocks to the earliest time anything can
-happen: the next event, another engine's clock or a transfer's completion.
-
-The proxy's own latency (HTTP hops, request parsing) is `handoff_latency_s`,
-a constant; the instances' API servers are not modeled.
+The driver plays the proxy: a request goes to a prefill instance with
+``max_tokens=1``, then to a decode instance with the kv_transfer_params the
+prefill instance returned. Each engine runs on its own virtual clock and the
+engine furthest behind steps next; an event reaches a busy engine when its
+step ends. Engines that only wait for KV transfers skip ahead to the next
+time anything can happen.
 """
 
 from __future__ import annotations
@@ -53,7 +39,23 @@ from vllm.v1.worker.simulated.timing import VirtualClock
 if TYPE_CHECKING:
     from vllm.engine.arg_utils import EngineArgs
     from vllm.usage.usage_lib import UsageContext
+    from vllm.v1.core.sched.scheduler import Scheduler
+    from vllm.v1.engine.core import EngineCore
     from vllm.v1.engine.llm_engine import LLMEngine
+
+# How the proxy picks an instance: round-robin, as vLLM's example proxies do,
+# or by fewest unfinished requests.
+Routing = Literal["round_robin", "least_unfinished"]
+
+# The kv_transfer_params a proxy sends with a request to a prefill instance.
+_PREFILL_KV_TRANSFER_PARAMS: dict[str, Any] = {
+    "do_remote_decode": True,
+    "do_remote_prefill": False,
+    "remote_engine_id": None,
+    "remote_block_ids": None,
+    "remote_host": None,
+    "remote_port": None,
+}
 
 
 def make_instance(
@@ -96,13 +98,24 @@ def next_transfer_completion(engine: LLMEngine) -> float:
     return math.inf if t is None else t
 
 
+def _core(engine: LLMEngine) -> EngineCore:
+    from vllm.v1.engine.core_client import InprocClient
+
+    assert isinstance(engine.engine_core, InprocClient)
+    return engine.engine_core.engine_core
+
+
+def _scheduler(engine: LLMEngine) -> Scheduler:
+    from vllm.v1.core.sched.scheduler import Scheduler
+
+    scheduler = _core(engine).scheduler
+    assert isinstance(scheduler, Scheduler)
+    return scheduler
+
+
 def _has_work(engine: LLMEngine) -> bool:
     # Includes finished requests whose blocks a prefill instance still holds.
-    return engine.engine_core.engine_core.scheduler.has_requests()  # type: ignore[attr-defined]
-
-
-def _steps_in_flight(engine: LLMEngine) -> int:
-    return engine.engine_core.engine_core.batch_queue_size  # type: ignore[attr-defined]
+    return _scheduler(engine).has_requests()
 
 
 def _only_waits(engine: LLMEngine) -> bool:
@@ -110,7 +123,7 @@ def _only_waits(engine: LLMEngine) -> bool:
     transfer completes: no running requests and no received KV to resume. A
     waiting request then waits for its remote KV, or for blocks that only
     those requests free."""
-    scheduler = engine.engine_core.engine_core.scheduler  # type: ignore[attr-defined]
+    scheduler = _scheduler(engine)
     return not scheduler.running and not scheduler.finished_recving_kv_req_ids
 
 
@@ -119,7 +132,7 @@ def run_disaggregated(
     decode: Sequence[LLMEngine],
     requests: Sequence[TimedRequest],
     handoff_latency_s: float = 0.0,
-    routing: Literal["round_robin", "least_unfinished"] = "round_robin",
+    routing: Routing = "round_robin",
     max_stalled_steps: int = MAX_STALLED_STEPS,
     frontend_latency_s: float = 0.0,
 ) -> SimulationResult:
@@ -181,14 +194,9 @@ def run_disaggregated(
                 engine = pick(prefill)
                 params.max_tokens = 1
                 params.min_tokens = 0
-                params.extra_args["kv_transfer_params"] = {
-                    "do_remote_decode": True,
-                    "do_remote_prefill": False,
-                    "remote_engine_id": None,
-                    "remote_block_ids": None,
-                    "remote_host": None,
-                    "remote_port": None,
-                }
+                params.extra_args["kv_transfer_params"] = dict(
+                    _PREFILL_KV_TRANSFER_PARAMS
+                )
             else:
                 engine = pick(decode)
                 params.extra_args["kv_transfer_params"] = handover
@@ -259,7 +267,7 @@ def run_disaggregated(
             stalled = 0
         else:
             idle_steps[id(engine)] = idle_steps.get(id(engine), 0) + 1
-            if idle_steps[id(engine)] >= _steps_in_flight(engine) and _only_waits(
+            if idle_steps[id(engine)] >= _core(engine).batch_queue_size and _only_waits(
                 engine
             ):
                 waiting.add(id(engine))
@@ -285,7 +293,7 @@ def simulate_disaggregated(
     num_prefill: int = 1,
     num_decode: int = 1,
     handoff_latency_s: float = 0.0,
-    routing: Literal["round_robin", "least_unfinished"] = "round_robin",
+    routing: Routing = "round_robin",
     max_stalled_steps: int = MAX_STALLED_STEPS,
     frontend_latency_s: float = 0.0,
 ) -> SimulationResult:

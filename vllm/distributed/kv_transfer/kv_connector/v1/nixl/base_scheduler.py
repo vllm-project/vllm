@@ -27,7 +27,11 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     NixlHandshakePayload,
     ReqId,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.nixl.utils import zmq_ctx
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl.utils import (
+    kv_lease_duration,
+    side_channel_port,
+    zmq_ctx,
+)
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
@@ -74,16 +78,9 @@ class NixlBaseConnectorScheduler:
         self.engine_id: EngineId = engine_id
         self.kv_cache_config = kv_cache_config
         self.side_channel_host = envs.VLLM_NIXL_SIDE_CHANNEL_HOST
-        self.side_channel_port = (
-            envs.VLLM_NIXL_SIDE_CHANNEL_PORT
-            + vllm_config.parallel_config.data_parallel_index
-        )
+        self.side_channel_port = side_channel_port(vllm_config.parallel_config)
         assert vllm_config.kv_transfer_config is not None
-        self._kv_lease_duration: int = (
-            vllm_config.kv_transfer_config.get_from_extra_config(
-                "kv_lease_duration", 30
-            )
-        )
+        self._kv_lease_duration = kv_lease_duration(vllm_config.kv_transfer_config)
         # NOTE (NickLucche): For now we use a hardcoded value for a simpler interface.
         self._heartbeat_interval = self._kv_lease_duration // 6
         if current_platform.device_type == "cpu":

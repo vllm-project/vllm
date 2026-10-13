@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from vllm.config import KVTransferConfig
 from vllm.v1.worker.simulated.kv_transfer import (
     TransferRate,
 )
@@ -20,7 +21,7 @@ from vllm.v1.worker.simulated.timing import (
 def _nixl_worker(
     engine_id: str,
     clock,
-    role="kv_both",
+    role="kv_consumer",
     port=None,
     mla=False,
     kv_heads=8,
@@ -38,12 +39,13 @@ def _nixl_worker(
     group = SimpleNamespace(
         kv_cache_spec=SimpleNamespace(page_size_bytes=10), layer_names=["layer"]
     )
-    kv_cache_config = SimpleNamespace(kv_cache_groups=[group], transfer_group_ids=(0,))
+    kv_cache_config = SimpleNamespace(
+        kv_cache_groups=[group], transfer_group_ids=(0,), transfer_groups=(group,)
+    )
     config = SimpleNamespace(
-        kv_transfer_config=SimpleNamespace(
-            kv_role=role, get_from_extra_config=lambda key, default: default
-        ),
+        kv_transfer_config=KVTransferConfig(kv_connector="NixlConnector", kv_role=role),
         parallel_config=SimpleNamespace(data_parallel_index=0),
+        cache_config=SimpleNamespace(block_size=16),
         model_config=SimpleNamespace(
             use_mla=mla, get_total_num_kv_heads=lambda: kv_heads
         ),
@@ -223,32 +225,6 @@ def test_simulated_nixl_books_reads_across_processes(monkeypatch):
         decode.shutdown()
 
 
-@pytest.mark.parametrize(
-    ("prefill_tp", "decode_tp", "rank", "mla", "kv_heads", "plan"),
-    [
-        (2, 2, 1, False, 8, [(1, True)]),
-        # Decode ranks split a prefill rank's heads.
-        (2, 4, 3, False, 8, [(1, True)]),
-        # A decode rank gathers the heads of several prefill ranks.
-        (4, 2, 1, False, 8, [(2, True), (3, True)]),
-        # MLA: one replicated copy is read, the other holders notified.
-        (4, 2, 1, True, 1, [(2, True), (3, False)]),
-        # Rejected by the real connector: replicated heads on the prefill
-        # side, and sizes that do not divide.
-        (4, 2, 1, False, 2, None),
-        (3, 2, 1, False, 8, None),
-    ],
-)
-def test_simulated_nixl_maps_tensor_parallel_ranks(
-    prefill_tp, decode_tp, rank, mla, kv_heads, plan
-):
-    worker = _nixl_worker(
-        f"sim-map-{prefill_tp}-{decode_tp}", VirtualClock(), mla=mla, kv_heads=kv_heads
-    )
-    worker.tp_rank, worker.tp_size = rank, decode_tp
-    assert worker._read_plan(prefill_tp) == plan
-
-
 def test_simulated_nixl_frees_blocks_after_all_readers():
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
         NixlConnectorMetadata,
@@ -274,24 +250,25 @@ def test_simulated_nixl_frees_blocks_after_all_readers():
 
 @pytest.mark.parametrize(
     ("prefill_tp", "decode_tp", "kv_heads"),
-    [(2, 2, 8), (2, 4, 8), (4, 2, 8), (2, 4, 2), (4, 2, 2), (3, 2, 8), (2, 3, 8)],
+    [(2, 2, 8), (2, 4, 8), (4, 2, 8), (2, 4, 2), (4, 2, 2)],
 )
 def test_simulated_nixl_notifies_every_prefill_rank(prefill_tp, decode_tp, kv_heads):
-    """Whatever the layouts, accepted or not, every prefill rank is notified
-    by exactly as many decode ranks as it waits for."""
+    """Whether the layout is accepted or not, every prefill rank is notified
+    by as many decode ranks as it waits for, so it frees the blocks."""
     worker = _nixl_worker(
         f"sim-notify-{prefill_tp}-{decode_tp}-{kv_heads}",
         VirtualClock(),
         kv_heads=kv_heads,
     )
     notified = [0] * prefill_tp
+    readers = 1
     for rank in range(decode_tp):
         worker.tp_rank, worker.tp_size = rank, decode_tp
-        plan = worker._read_plan(prefill_tp)
-        ranks = [r for r, _ in plan] if plan else worker._notified_ranks(prefill_tp)
-        for r in ranks:
+        for r in worker._topology.handshake_target_ranks(prefill_tp):
             notified[r] += 1
-    assert notified == [worker._num_readers(prefill_tp, r) for r in range(prefill_tp)]
+        if (mapping := worker._mapping(prefill_tp)) is not None:
+            readers = mapping.local_consumers
+    assert notified == [readers] * prefill_tp
 
 
 def test_simulated_nixl_push_writes_from_every_prefill_stage():

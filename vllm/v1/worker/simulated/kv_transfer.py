@@ -33,8 +33,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
     OffloadingWorkerMetadata,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.config import (
-    _group_kv_bytes_per_block,
     get_offloading_group_ids,
+    group_kv_bytes_per_block,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
     OffloadingConnector,
@@ -52,6 +52,13 @@ from vllm.v1.worker.gpu.kv_connector import ActiveKVConnector
 from vllm.v1.worker.simulated.timing import Clock, load_step_log
 
 logger = init_logger(__name__)
+
+# Fitted records this many times slower than predicted (a connection's setup,
+# or a NIXL agent's first postings to new memory) are outliers.
+_OUTLIER_FACTOR = 20
+_MAX_REFITS = 3
+# Rows whose units per count vary within this ratio have a single shape.
+_SAME_SHAPE_RATIO = 1.05
 
 
 @dataclass(frozen=True)
@@ -133,9 +140,8 @@ def kv_post_cost(timing: KVTransferTiming | str) -> PostCost:
 
 
 def post_cost_from_log(path: str) -> PostCost:
-    """Least-squares `PostCost` of the read postings recorded in a step log.
-    Records far slower than the rest (a NIXL agent's first postings to new
-    memory) are left out."""
+    """Least-squares `PostCost` of the read postings recorded in a step log,
+    without outliers."""
     rows = [
         (rec["kv_post"]["reads"], rec["kv_post"]["runs"], rec["kv_post"]["seconds"])
         for rec in load_step_log(path, kind="kv_post")
@@ -146,16 +152,9 @@ def post_cost_from_log(path: str) -> PostCost:
     # Both terms grow with reads + runs: screen out the slowest postings
     # before the first fit, which they would otherwise dominate.
     unit_s = a[:, 2] / (a[:, 0] + a[:, 1])
-    a = a[unit_s <= 20 * np.median(unit_s)]
-    per_read_s, per_run_s = _fit_transfers(a)
-    for _ in range(3):
-        typical = a[:, 2] <= 20 * (a[:, 0] * per_read_s + a[:, 1] * per_run_s)
-        if typical.all():
-            break
-        a = a[typical]
-        per_read_s, per_run_s = _fit_transfers(a)
-    runs_per_read = a[:, 1] / a[:, 0]
-    if runs_per_read.max() <= 1.05 * runs_per_read.min():
+    a = a[unit_s <= _OUTLIER_FACTOR * np.median(unit_s)]
+    a, per_read_s, per_run_s = _fit(a)
+    if _single_shape(a):
         logger.warning(
             "The reads recorded in %s are all alike, so the posting cost of "
             "reads into scattered blocks is extrapolated. Record until the "
@@ -173,26 +172,38 @@ def post_cost_from_log(path: str) -> PostCost:
     return cost
 
 
-def _fit_transfers(a: np.ndarray) -> tuple[float, float]:
+def _single_shape(a: np.ndarray) -> bool:
+    units_per_count = a[:, 1] / a[:, 0]
+    return units_per_count.max() <= _SAME_SHAPE_RATIO * units_per_count.min()
+
+
+def _lstsq(a: np.ndarray) -> tuple[float, float]:
     """Least-squares seconds per count and per unit of (count, units,
-    seconds) rows: a transfer's latency and seconds per GB, or a posting's
-    seconds per read and per run."""
-    sizes = a[:, 1] / a[:, 0]
-    (latency_s, s_per_gb), *_ = np.linalg.lstsq(a[:, :2], a[:, 2], rcond=None)
-    if latency_s < 0 or s_per_gb <= 0 or sizes.max() <= 1.05 * sizes.min():
-        # The two not separable (no fit, or rows of one shape): attribute
-        # all to the units.
-        latency_s, s_per_gb = 0.0, a[:, 2].sum() / a[:, 1].sum()
-    return float(latency_s), float(s_per_gb)
+    seconds) rows; all to the units if the two are not separable."""
+    (per_count, per_unit), *_ = np.linalg.lstsq(a[:, :2], a[:, 2], rcond=None)
+    if per_count < 0 or per_unit <= 0 or _single_shape(a):
+        per_count, per_unit = 0.0, a[:, 2].sum() / a[:, 1].sum()
+    return float(per_count), float(per_unit)
+
+
+def _fit(a: np.ndarray) -> tuple[np.ndarray, float, float]:
+    """`_lstsq`, refitted without outliers; also returns the rows kept."""
+    per_count, per_unit = _lstsq(a)
+    for _ in range(_MAX_REFITS):
+        typical = a[:, 2] <= _OUTLIER_FACTOR * (
+            a[:, 0] * per_count + a[:, 1] * per_unit
+        )
+        if typical.all():
+            break
+        a = a[typical]
+        per_count, per_unit = _lstsq(a)
+    return a, per_count, per_unit
 
 
 def transfer_rates_from_log(path: str) -> tuple[TransferRate, TransferRate | None]:
-    """(load, store) rates fitted by least squares to the transfers of a step
-    log recorded with a KV connector; store is None if none were recorded.
-    Each `kv_transfers` record sums, per direction, the transfers that
-    completed in one engine step. Records more than 20x slower than the fit
-    predicts (a connection's first transfers, which include its setup) are
-    left out."""
+    """(load, store) rates fitted by least squares, without outliers, to the
+    transfers of a step log recorded with a KV connector; store is None if
+    none were recorded."""
     rows: dict[str, list[tuple[float, float, float]]] = {"load": [], "store": []}
     for rec in load_step_log(path, kind="kv_transfers"):
         for direction, t in rec["kv_transfers"].items():
@@ -207,30 +218,16 @@ def transfer_rates_from_log(path: str) -> tuple[TransferRate, TransferRate | Non
             raise ValueError(f"{path} has no recorded KV {direction}s")
         # Bytes in GB keep the two columns on a similar scale.
         a = a[a[:, 1] > 0] * [1.0, 1e-9, 1.0]
-        latency_s, s_per_gb = _fit_transfers(a)
-        # Leave out records far slower than the fit predicts (a connection's
-        # setup), and refit.
-        for _ in range(3):
-            typical = a[:, 2] <= 20 * (a[:, 0] * latency_s + a[:, 1] * s_per_gb)
-            if typical.all():
-                break
-            logger.info(
-                "Leaving out %d of %d KV %s records from %s as outliers.",
-                (~typical).sum(),
-                len(a),
-                direction,
-                path,
-            )
-            a = a[typical]
-            latency_s, s_per_gb = _fit_transfers(a)
-        rate = TransferRate(float(latency_s), float(1e9 / s_per_gb))
+        kept, latency_s, s_per_gb = _fit(a)
+        rate = TransferRate(latency_s, 1e9 / s_per_gb)
         rates.append(rate)
         logger.info(
-            "KV %ss from %s: %.1f us + %.2f GB/s (%d steps)",
+            "KV %ss from %s: %.1f us + %.2f GB/s (%d of %d steps)",
             direction,
             path,
             rate.latency_s * 1e6,
             rate.bytes_per_s * 1e-9,
+            len(kept),
             len(direction_rows),
         )
     assert rates[0] is not None
@@ -257,10 +254,10 @@ def completed_transfers(
             )
             if s.sizes
         }
-    elif isinstance(stats, NixlKVConnectorStats) and stats.data["transfer_duration"]:
+    elif isinstance(stats, NixlKVConnectorStats) and stats.num_successful_transfers:
         transfers = {
             "load": {
-                "count": len(stats.data["transfer_duration"]),
+                "count": stats.num_successful_transfers,
                 "bytes": sum(stats.data["bytes_transferred"]),
                 "seconds": sum(stats.data["transfer_duration"]),
             }
@@ -380,7 +377,11 @@ def simulated_kv_connector(
     clock: Clock,
     device_free_at: Callable[[], float],
 ) -> SimulatedKVConnector:
-    from vllm.v1.worker.simulated.kv_nixl import NixlConnector, NixlPushConnector
+    from vllm.v1.worker.simulated.kv_nixl import (
+        NixlConnector,
+        NixlPushConnector,
+        SimulatedNixlWorker,
+    )
 
     timing = vllm_config.simulation_config.kv_transfer_timing
     if timing is None:
@@ -401,13 +402,14 @@ def simulated_kv_connector(
             load,
             store,
             bytes_per_block=[
-                _group_kv_bytes_per_block(groups[group_id])
+                group_kv_bytes_per_block(groups[group_id])
                 for group_id in get_offloading_group_ids(kv_cache_config)
             ],
             device_free_at=device_free_at,
         )
     elif isinstance(connector, NixlConnector | NixlPushConnector):
-        transfers = connector.worker
+        assert isinstance(connector.connector_worker, SimulatedNixlWorker)
+        transfers = connector.connector_worker
         transfers.configure(clock, load, kv_post_cost(timing))
     else:
         raise ValueError(

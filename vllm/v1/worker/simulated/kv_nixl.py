@@ -2,22 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Disaggregated prefill (NIXL) under simulated execution.
 
-Simulated execution loads this module's `NixlConnector` (pull mode) and
-`NixlPushConnector` in place of the real ones; push mode, for served
-instances, also lets a prefill instance use pipeline parallelism (see
-`SimulatedNixlPushWorker`). The rest describes pull mode.
-
-Its scheduler side is the real `NixlPullConnectorScheduler`: the prefill
-instance holds a finished request's blocks under a lease, the decode instance
-waits in WAITING_FOR_REMOTE_KVS, and the kv_transfer_params between them are
-the real ones. Its worker side, `SimulatedNixlWorker`, moves no data and
-needs no NIXL. Workers of engines in one process (see
-`vllm.v1.worker.simulated.disaggregated`) find each other by engine id; served
-instances (`vllm serve`, the real clock, tensor parallelism) reach each
-other over ZMQ at the prefill instance's side-channel address, which the
-real kv_transfer_params carry: a decode rank asks the prefill ranks the
-real connector maps it to, whatever the two tensor parallelisms, to book
-its reads.
+The connectors here are the real pull- and push-mode NIXL connectors with a
+simulated worker side, which moves no data and needs no NIXL: the scheduler
+side, leases and kv_transfer_params are the real ones. Engines in one process
+(`vllm.v1.worker.simulated.disaggregated`) find each other's workers by engine
+id; served instances book transfers over ZMQ at ports derived from the
+prefill instance's side-channel port.
 """
 
 import heapq
@@ -32,12 +22,9 @@ import zmq
 
 from vllm import envs
 from vllm.config import VllmConfig
+from vllm.distributed.kv_transfer.kv_connector.utils import TransferTopology
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
-    KVConnectorRole,
     KVConnectorTransferResults,
-)
-from vllm.distributed.kv_transfer.kv_connector.v1.nixl.connector import (
-    NixlBaseConnector,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.connector import (
     NixlPullConnector as RealNixlPullConnector,
@@ -48,17 +35,18 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.connector import (
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     NixlConnectorMetadata,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.nixl.pull_scheduler import (
-    NixlPullConnectorScheduler,
-)
-from vllm.distributed.kv_transfer.kv_connector.v1.nixl.push_scheduler import (
-    NixlPushConnectorScheduler,
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import (
+    TPMapping,
+    compute_tp_mapping,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.utils import (
     get_base_request_id,
+    get_representative_spec_type,
+    kv_lease_extension,
+    side_channel_port,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.config import (
-    _group_kv_bytes_per_block,
+    group_kv_bytes_per_block,
 )
 from vllm.distributed.parallel_state import (
     get_pp_group,
@@ -72,7 +60,6 @@ from vllm.v1.worker.simulated.kv_transfer import PostCost, read_runs
 from vllm.v1.worker.simulated.timing import Clock, RealClock
 
 if TYPE_CHECKING:
-    from vllm.forward_context import ForwardContext
     from vllm.v1.worker.simulated.kv_transfer import TransferRate
 
 logger = init_logger(__name__)
@@ -88,16 +75,24 @@ def simulated_nixl_worker(engine_id: str) -> "SimulatedNixlWorker":
     return _workers[engine_id]
 
 
-# How long a decode rank waits for a served prefill rank to book its read.
 _BOOKING_TIMEOUT_MS = 10_000
+_BOOKING_PORT_OFFSET = 10_000
+# Larger than the side-channel port gaps between DP ranks and P/D instances.
+_BOOKING_PORT_STRIDE = 1000
 
 
 def _rank_port(side_channel_port: int, rank: int) -> int:
-    """Where a served rank (pp_rank * tp_size + tp_rank) takes bookings. The
-    stride of 1000 keeps apart the ports of instances whose side-channel
-    ports differ by less, such as data-parallel instances (consecutive) and
-    the usual prefill/decode pairs (100 apart)."""
-    return side_channel_port + 10_000 + 1000 * rank
+    """The booking port of served rank `pp_rank * tp_size + tp_rank`."""
+    return side_channel_port + _BOOKING_PORT_OFFSET + _BOOKING_PORT_STRIDE * rank
+
+
+def _warn_layout(req_id: str, prefill_tp: int, decode_tp: int) -> None:
+    logger.warning(
+        "Failing %s: prefill tensor parallelism %d, decode %d.",
+        req_id,
+        prefill_tp,
+        decode_tp,
+    )
 
 
 def _is_finite(*values: Any) -> bool:
@@ -113,21 +108,14 @@ class _Event:
 
 
 class SimulatedNixlWorker:
-    """The NIXL worker of one engine, as a timing model.
+    """The pull-mode NIXL worker of one engine, as a timing model.
 
-    A decode instance reads a request's KV from its prefill instance when the
-    scheduler hands it over, from the prefill ranks the real connector maps
-    each decode rank to. A request's reads run concurrently, each taking
-    `TransferRate.seconds()` of its bytes; reads of different requests queue
-    on each rank's link. When they complete, the request is reported in
-    finished_recving, and each prefill rank, once all the decode ranks
-    reading it have notified it, reports the request in finished_sending and
-    so frees its blocks. Leases never expire: a simulated decode instance
-    always reads or releases the blocks, which is what the real one's
-    heartbeats keep the lease alive for (the scheduler sends them on the
-    wall clock, which would make a simulation depend on the host's speed).
-    A booking lost to a prefill instance that stopped answering therefore
-    holds that rank's blocks."""
+    Each decode rank reads from the prefill ranks the real TP mapping assigns
+    it; a request's reads run concurrently, and reads of different requests
+    queue on each rank's link. A prefill rank frees a request's blocks once
+    all its readers have notified it. Leases never expire, since heartbeats
+    run on the wall clock: a booking lost to an unresponsive prefill rank
+    holds its blocks."""
 
     # Whether a prefill instance may use pipeline parallelism.
     supports_pp = False
@@ -151,7 +139,7 @@ class SimulatedNixlWorker:
             self.pp_rank = get_pp_group().rank_in_group
             self.pp_size = get_pp_group().world_size
         self.engine_id = engine_id
-        self.is_producer = vllm_config.kv_transfer_config.kv_role == "kv_producer"
+        self.is_producer = vllm_config.kv_transfer_config.is_kv_producer
         if self.pp_size > 1 and not (self.supports_pp and self.is_producer):
             raise NotImplementedError(
                 "Simulated disaggregated prefill supports pipeline parallelism "
@@ -159,14 +147,16 @@ class SimulatedNixlWorker:
             )
         self.use_mla = vllm_config.model_config.use_mla
         self.num_kv_heads = vllm_config.model_config.get_total_num_kv_heads()
-        self.side_channel_port = (
-            envs.VLLM_NIXL_SIDE_CHANNEL_PORT
-            + vllm_config.parallel_config.data_parallel_index
+        self.block_size = vllm_config.cache_config.block_size
+        self._group_spec_types = tuple(
+            get_representative_spec_type(g.kv_cache_spec)
+            for g in kv_cache_config.transfer_groups
         )
+        self.side_channel_port = side_channel_port(vllm_config.parallel_config)
         # Per transfer group, in the order of ReqMeta.local_block_ids.
         groups = kv_cache_config.kv_cache_groups
         self.bytes_per_block = [
-            _group_kv_bytes_per_block(groups[group_id])
+            group_kv_bytes_per_block(groups[group_id])
             for group_id in kv_cache_config.transfer_group_ids
         ]
         self.clock: Clock | None = None
@@ -295,41 +285,36 @@ class SimulatedNixlWorker:
             heapq.heappush(self._notifs, _Event(end, req_id))
         return end
 
-    def _read_plan(self, remote_tp: int) -> list[tuple[int, bool]] | None:
-        """The prefill ranks this decode rank reads a request's KV from, as the
-        real pull connector maps tensor-parallel ranks, each with whether it
-        is read or only notified; None for layouts the real connector
-        rejects. Reads split this rank's KV evenly. (The real mapping,
-        `compute_tp_mapping`, needs the handshake's attention backends and
-        block layout, which simulated instances do not exchange.)"""
-        local, d = self.tp_size, self.tp_rank
-        if max(remote_tp, local) % min(remote_tp, local):
-            return None
-        if local >= remote_tp:
-            return [(d * remote_tp // local, True)]
-        group = range(d * (remote_tp // local), (d + 1) * (remote_tp // local))
-        if self.use_mla:
-            # One copy of the replicated latent; the other holders are notified.
-            return [(r, r == group[0]) for r in group]
-        if remote_tp > self.num_kv_heads:
-            return None
-        return [(r, True) for r in group]
+    @property
+    def _topology(self) -> TransferTopology:
+        """The local layout, all the real connector's rank mapping needs."""
+        return TransferTopology(
+            tp_rank=self.tp_rank,
+            tp_size=self.tp_size,
+            block_size=self.block_size,
+            engine_id=self.engine_id,
+            is_mla=self.use_mla,
+            is_mamba=False,
+            total_num_kv_heads=1 if self.use_mla else self.num_kv_heads,
+            attn_backends=[],
+        )
 
-    def _notified_ranks(self, remote_tp: int) -> list[int]:
-        """The prefill ranks this decode rank notifies of a request's reads:
-        those the real mapping pairs it with, which for every layout covers
-        each prefill rank."""
-        local, d = self.tp_size, self.tp_rank
-        if local >= remote_tp:
-            return [d * remote_tp // local]
-        return [r for r in range(remote_tp) if r * local // remote_tp == d]
+    def _paired_ranks(self, remote_tp: int) -> list[int]:
+        """The remote ranks the real connector handshakes with; none if the
+        two tensor parallelisms do not divide each other."""
+        if max(remote_tp, self.tp_size) % min(remote_tp, self.tp_size):
+            return []
+        return self._topology.handshake_target_ranks(remote_tp)
 
-    def _num_readers(self, remote_tp: int, rank: int) -> int:
-        """How many decode ranks notify prefill rank `rank` of a request."""
-        local = self.tp_size
-        if local >= remote_tp:
-            return sum(1 for d in range(local) if d * remote_tp // local == rank)
-        return 1
+    def _mapping(self, remote_tp: int) -> TPMapping | None:
+        """The real connector's rank mapping to a remote instance of
+        `remote_tp` ranks; None for layouts it rejects."""
+        if not self._paired_ranks(remote_tp):
+            return None
+        if not self.use_mla and self.tp_size < remote_tp > self.num_kv_heads:
+            # Replicated remote heads (NixlBaseWorker's handshake check).
+            return None
+        return compute_tp_mapping(self._topology, remote_tp, self._group_spec_types)
 
     def _book_remote_read(
         self,
@@ -396,19 +381,15 @@ class SimulatedNixlWorker:
                 len(ids) * size
                 for ids, size in zip(meta.local_block_ids, self.bytes_per_block)
             )
-            plan = self._read_plan(meta.tp_size)
-            failed = plan is None
-            if plan is None:
-                # Layouts the real connector rejects: notify the prefill ranks
-                # this rank stands for, so they free the blocks, and fail the
-                # request, which is then prefilled here.
-                logger.warning(
-                    "Failing %s: prefill tensor parallelism %d, decode %d.",
-                    req_id,
-                    meta.tp_size,
-                    self.tp_size,
-                )
-                plan = [(r, False) for r in self._notified_ranks(meta.tp_size)]
+            # Read from the source ranks and notify the other paired ones; a
+            # rejected layout fails the request and only notifies.
+            mapping = self._mapping(meta.tp_size)
+            failed = mapping is None
+            if mapping is None:
+                _warn_layout(req_id, meta.tp_size, self.tp_size)
+            sources = mapping.all_source_ranks if mapping else ()
+            plan = [(r, r in sources) for r in self._paired_ranks(meta.tp_size)]
+            readers = mapping.local_consumers if mapping else 1
             share = num_bytes // max(1, sum(reads for _, reads in plan))
             producer = _workers.get(remote.engine_id)
             if producer is None and not isinstance(self.clock, RealClock):
@@ -436,10 +417,7 @@ class SimulatedNixlWorker:
                 if producer is not None:
                     assert rank == 0, "in-process engines have one rank"
                     read_end = producer.book_read(
-                        remote.request_id,
-                        read_bytes,
-                        start,
-                        self._num_readers(meta.tp_size, rank),
+                        remote.request_id, read_bytes, start, readers
                     )
                 else:
                     duration = self._book_remote_read(
@@ -449,7 +427,7 @@ class SimulatedNixlWorker:
                         remote.request_id,
                         read_bytes,
                         start - now,
-                        self._num_readers(meta.tp_size, rank),
+                        readers,
                     )
                     if duration is None:
                         failed = True
@@ -542,22 +520,14 @@ class _Incoming:
 
 
 class SimulatedNixlPushWorker(SimulatedNixlWorker):
-    """The NIXL worker of one served engine in push mode, as a timing model.
+    """The push-mode NIXL worker of one served engine, as a timing model.
 
-    A decode instance registers each request with its prefill instance as
-    soon as it is scheduled, from every decode rank to the prefill ranks the
-    real connector pairs it with, in every pipeline stage; it also forwards
-    its scheduler's heartbeats, which extend the prefill instance's leases. A
-    prefill rank writes a request's KV once it has both finished the request
-    and received the registration: its own stage's layers and heads, split
-    over the decode ranks it maps to, concurrently, after the writes of
-    earlier requests on its link. Each write notifies its decode rank when it
-    ends; the decode rank reports the request in finished_recving after one
-    write per prefill stage and source rank, and the prefill rank reports it
-    in finished_sending when its own writes end, or when the lease of a
-    request that was never registered (a full prefix hit on the decode
-    instance) expires. Layouts the real connector rejects fail the request
-    on the decode instance."""
+    Decode ranks register each scheduled request with their paired prefill
+    ranks in every pipeline stage, and forward heartbeats. A prefill rank
+    writes its share of a request's KV once the request is both finished and
+    registered; the decode rank has it after one write per prefill stage and
+    source rank. A request never registered (a full prefix hit) is freed when
+    its lease expires."""
 
     supports_pp = True
 
@@ -566,10 +536,7 @@ class SimulatedNixlPushWorker(SimulatedNixlWorker):
     ):
         super().__init__(vllm_config, engine_id, kv_cache_config)
         assert vllm_config.kv_transfer_config is not None
-        lease_s = vllm_config.kv_transfer_config.get_from_extra_config(
-            "kv_lease_duration", 30
-        )
-        self.lease_extension_s = lease_s * 2 // 3
+        self.lease_extension_s = kv_lease_extension(vllm_config.kv_transfer_config)
         # Decode side, by request id.
         self._incoming: dict[str, _Incoming] = {}
         # Prefill side, by base request id: finished requests and
@@ -661,23 +628,21 @@ class SimulatedNixlPushWorker(SimulatedNixlWorker):
         self._notify_writes(writes)
 
     def _layout_supported(self, prefill_tp: int) -> bool:
-        """Whether the real push connector accepts these tensor-parallel
-        layouts (decode ranks with replicated heads would get no write)."""
-        decode_tp = self.tp_size
-        if max(prefill_tp, decode_tp) % min(prefill_tp, decode_tp):
+        """Whether every decode rank gets a write: no replicated decode heads."""
+        if not self._paired_ranks(prefill_tp):
             return False
-        return self.use_mla or decode_tp <= max(prefill_tp, self.num_kv_heads)
+        return self.use_mla or self.tp_size <= max(prefill_tp, self.num_kv_heads)
 
     def _write_plan(self, decode_tp: int) -> list[tuple[int, float]]:
-        """The decode ranks this prefill rank writes a request's KV to, each
-        with its share of this rank's bytes, as the real push connector maps
-        ranks (decode instances reject other layouts)."""
-        local, p = self.tp_size, self.tp_rank
-        if local >= decode_tp:
-            return [(p * decode_tp // local, 1.0)]
-        ratio = decode_tp // local
-        share = 1.0 if self.use_mla else 1.0 / ratio
-        return [(p * ratio + i, share) for i in range(ratio)]
+        """The decode ranks this prefill rank writes to, each with its share of
+        the bytes, as the real push worker maps them; MLA's replicated latent
+        goes to every paired decode rank."""
+        mapping = self._mapping(decode_tp)
+        assert mapping is not None
+        if self.use_mla and self.tp_size < decode_tp:
+            return [(r, 1.0) for r in self._paired_ranks(decode_tp)]
+        ranks = mapping.all_source_ranks
+        return [(r, 1.0 if self.use_mla else 1.0 / len(ranks)) for r in ranks]
 
     def _match(self, base: str) -> list[tuple[str, int, int, str, float]]:
         """Under the lock: start the writes of a request that is both finished
@@ -726,12 +691,7 @@ class SimulatedNixlPushWorker(SimulatedNixlWorker):
         failed = set()
         for req_id, meta in metadata.reqs_to_recv.items():
             if not self._layout_supported(meta.tp_size):
-                logger.warning(
-                    "Failing %s: prefill tensor parallelism %d, decode %d.",
-                    req_id,
-                    meta.tp_size,
-                    self.tp_size,
-                )
+                _warn_layout(req_id, meta.tp_size, self.tp_size)
                 failed.add(req_id)
                 continue
             expected = max(1, meta.pp_size) * max(1, meta.tp_size // self.tp_size)
@@ -761,7 +721,7 @@ class SimulatedNixlPushWorker(SimulatedNixlWorker):
         for heartbeat in metadata.heartbeat_by_engine.values():
             message = ["heartbeat", sorted(heartbeat.req_ids)]
             for pp_rank in range(heartbeat.pp_size):
-                for tp_rank in self._notified_ranks(heartbeat.tp_size):
+                for tp_rank in self._paired_ranks(heartbeat.tp_size):
                     rank = pp_rank * heartbeat.tp_size + tp_rank
                     self._call(heartbeat.host, heartbeat.port, rank, message)
         # Prefill side: finished requests write once registered.
@@ -782,7 +742,7 @@ class SimulatedNixlPushWorker(SimulatedNixlWorker):
     ) -> bool:
         """Register a request with every prefill stage's paired ranks."""
         for pp_rank in range(reg["remote_pp_size"]):
-            for tp_rank in self._notified_ranks(prefill_tp):
+            for tp_rank in self._paired_ranks(prefill_tp):
                 answered, ok = self._call(
                     reg["remote_host"],
                     reg["remote_port"],
@@ -836,56 +796,18 @@ class SimulatedNixlPushWorker(SimulatedNixlWorker):
 
 
 class NixlConnector(RealNixlPullConnector):
-    """The pull-mode NixlConnector with a simulated worker side. It keeps the
-    real connector's name, which configuration checks look for."""
+    """The pull-mode NixlConnector with a simulated worker side."""
 
-    def __init__(
-        self,
-        vllm_config: VllmConfig,
-        role: KVConnectorRole,
-        kv_cache_config: KVCacheConfig,
-    ):
-        NixlBaseConnector.__init__(self, vllm_config, role, kv_cache_config)
-        if role == KVConnectorRole.SCHEDULER:
-            self.connector_scheduler = NixlPullConnectorScheduler(
-                vllm_config, self.engine_id, kv_cache_config
-            )
-        else:
-            self.worker = SimulatedNixlWorker(
-                vllm_config, self.engine_id, kv_cache_config
-            )
-            self.connector_worker = self.worker  # type: ignore[assignment]
-
-    def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
-        assert isinstance(self._connector_metadata, NixlConnectorMetadata)
-        self.worker.start_load_kv(self._connector_metadata)
+    worker_cls = SimulatedNixlWorker  # type: ignore[assignment]
 
     def set_xfer_handshake_metadata_pp_aware(self, metadata: dict) -> None:
-        """No handshake: simulated workers find each other in process, or
-        book reads at the prefill ranks' own ports."""
+        """No handshake: simulated workers find or book each other directly."""
 
 
 class NixlPushConnector(RealNixlPushConnector):
-    """The NixlPushConnector with a simulated worker side, for served
-    instances. It keeps the real connector's name, which configuration
-    checks look for."""
+    """The NixlPushConnector with a simulated worker side."""
 
-    def __init__(
-        self,
-        vllm_config: VllmConfig,
-        role: KVConnectorRole,
-        kv_cache_config: KVCacheConfig,
-    ):
-        NixlBaseConnector.__init__(self, vllm_config, role, kv_cache_config)
-        if role == KVConnectorRole.SCHEDULER:
-            self.connector_scheduler = NixlPushConnectorScheduler(
-                vllm_config, self.engine_id, kv_cache_config
-            )
-        else:
-            self.worker = SimulatedNixlPushWorker(
-                vllm_config, self.engine_id, kv_cache_config
-            )
-            self.connector_worker = self.worker  # type: ignore[assignment]
+    worker_cls = SimulatedNixlPushWorker  # type: ignore[assignment]
 
     def set_xfer_handshake_metadata_pp_aware(self, metadata: dict) -> None:
         """No handshake: simulated ranks book transfers at each other's ports."""

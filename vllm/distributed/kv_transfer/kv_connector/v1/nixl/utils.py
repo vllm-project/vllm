@@ -4,14 +4,18 @@
 
 import contextlib
 from collections.abc import Iterator
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import regex as re
 import zmq
 
+from vllm import envs
 from vllm.platforms import current_platform
 from vllm.utils.network_utils import make_zmq_socket
 from vllm.v1.kv_cache_interface import KVCacheSpec, UniformTypeKVCacheSpecs
+
+if TYPE_CHECKING:
+    from vllm.config import KVTransferConfig, ParallelConfig
 
 # Supported platforms and types of kv transfer buffer.
 # {device: tuple of supported kv buffer types}
@@ -47,6 +51,22 @@ def zmq_ctx(socket_type: Any, addr: str) -> Iterator[zmq.Socket]:
     finally:
         if ctx is not None:
             ctx.destroy(linger=0)
+
+
+def side_channel_port(parallel_config: "ParallelConfig") -> int:
+    """The NIXL side-channel port of this data-parallel rank."""
+    return envs.VLLM_NIXL_SIDE_CHANNEL_PORT + parallel_config.data_parallel_index
+
+
+def kv_lease_duration(kv_transfer_config: "KVTransferConfig") -> int:
+    """Seconds a producer holds a finished request's KV blocks for a consumer."""
+    return kv_transfer_config.get_from_extra_config("kv_lease_duration", 30)
+
+
+def kv_lease_extension(kv_transfer_config: "KVTransferConfig") -> int:
+    """Seconds a consumer's heartbeat extends a lease by."""
+    # NOTE (NickLucche): For now we use a hardcoded value for a simpler interface.
+    return kv_lease_duration(kv_transfer_config) * 2 // 3
 
 
 def get_representative_spec_type(spec: KVCacheSpec) -> type[KVCacheSpec]:
