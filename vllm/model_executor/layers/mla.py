@@ -6,8 +6,10 @@ from typing import TYPE_CHECKING
 import torch
 
 from vllm.config import CacheConfig
+from vllm.forward_context import get_forward_context
 from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.attention import MLAAttention
+from vllm.model_executor.layers.linear import get_pcp_o_proj_batch_has_prefill
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.models.common.ops import fused_q_kv_rmsnorm
 from vllm.platforms import current_platform
@@ -215,6 +217,21 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
             q_c = q_proj_input
         else:
             kv_c_normed = self.kv_a_layernorm(kv_c)
+
+        # Keep the weight gather off the Q/KV RMSNorm kernels while retaining
+        # Q projection, RoPE, indexer, and attention as overlap candidates.
+        if hasattr(self.o_proj, "prefetch_full_weight_if_needed"):
+            attn_metadata_raw = get_forward_context().attn_metadata
+            if isinstance(attn_metadata_raw, dict):
+                attn_metadata = attn_metadata_raw.get(self.mla_attn.layer_name)
+            elif isinstance(attn_metadata_raw, list):
+                attn_metadata = attn_metadata_raw[0].get(self.mla_attn.layer_name)
+            else:
+                attn_metadata = attn_metadata_raw
+            self.o_proj.prefetch_full_weight_if_needed(
+                get_pcp_o_proj_batch_has_prefill(attn_metadata)
+            )
+
         # Add head dim of 1 to k_pe
         k_pe = k_pe.unsqueeze(1)
 
