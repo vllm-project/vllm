@@ -10,7 +10,10 @@ from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionReque
 from vllm.entrypoints.openai.completion.protocol import CompletionRequest
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
-from vllm.entrypoints.serve.utils.api_utils import validate_json_request
+from vllm.entrypoints.serve.utils.api_utils import (
+    apply_routed_expert_session,
+    validate_json_request,
+)
 from vllm.logger import init_logger
 
 from ..token_in_token_out.protocol import GenerateRequest
@@ -37,6 +40,7 @@ def render(request: Request) -> ServingRender | None:
     },
 )
 async def render_chat_completion(request: ChatCompletionRequest, raw_request: Request):
+    apply_routed_expert_session(request, raw_request)
     handler = render(raw_request)
     if handler is None:
         raise NotImplementedError(
@@ -63,6 +67,7 @@ async def render_chat_completion(request: ChatCompletionRequest, raw_request: Re
     },
 )
 async def render_messages(request: AnthropicMessagesRequest, raw_request: Request):
+    apply_routed_expert_session(request, raw_request)
     handler = render(raw_request)
     if handler is None:
         raise NotImplementedError("The model does not support Messages Render API")
@@ -86,6 +91,7 @@ async def render_messages(request: AnthropicMessagesRequest, raw_request: Reques
     },
 )
 async def render_completion(request: CompletionRequest, raw_request: Request):
+    apply_routed_expert_session(request, raw_request)
     handler = render(raw_request)
     if handler is None:
         raise NotImplementedError("The model does not support Completions Render API")
@@ -110,6 +116,7 @@ async def render_completion(request: CompletionRequest, raw_request: Request):
     },
 )
 async def render_responses(request: ResponsesRequest, raw_request: Request):
+    apply_routed_expert_session(request, raw_request)
     handler = render(raw_request)
     if handler is None:
         raise NotImplementedError("The model does not support Responses Render API")

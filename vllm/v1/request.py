@@ -182,6 +182,8 @@ class Request:
 
         self.spec_token_ids: list[int] = []
         self.num_computed_tokens = 0
+        # First admitted cache hit; preserved across preemption and cache resets.
+        self.num_cached_tokens = -1
         self.cache_salt: str | None = cache_salt
 
         # Multi-modal related
