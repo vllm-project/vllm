@@ -62,7 +62,7 @@ class VLLMNotFoundError(VLLMClientError):
     pass
 
 
-class ChatTemplateResolutionError(VLLMServerError):
+class ChatTemplateResolutionError(VLLMClientError):
     """Raised when chat template resolution fails."""
 
     pass
