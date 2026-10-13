@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import logging
+import mmap
 import random
 import time
 import uuid
+from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
@@ -23,6 +25,7 @@ from vllm.v1.kv_offload.base import (
 from vllm.v1.kv_offload.cpu import gpu_worker
 from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
 from vllm.v1.kv_offload.cpu.gpu_worker import CPUOffloadingWorker
+from vllm.v1.kv_offload.cpu.memory import CPUOffloadMemoryConfig
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 
 NUM_GPU_BLOCKS = [64]
@@ -35,6 +38,94 @@ DEVICE_TYPE = current_platform.device_type
 DEVICES = [f"{DEVICE_TYPE}:0"]
 NUM_MAPPINGS = [3]
 NUM_MAPPINGS_PER_GROUP = [2]
+requires_accelerator = pytest.mark.skipif(
+    not (current_platform.is_cuda_alike() or current_platform.is_xpu()),
+    reason="GPU offload transfer tests require CUDA/ROCm/XPU",
+)
+
+
+def test_handlers_consume_shared_region_selected_by_memory_config(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setattr(gpu_worker, "PIN_MEMORY", False)
+    created_handlers: list[Any] = []
+
+    class FakeSingleDirectionOffloadingHandler:
+        def __init__(
+            self,
+            gpu_tensors: list[torch.Tensor],
+            cpu_tensors: list[torch.Tensor],
+            blocks_per_chunk: int,
+            layer_refs_per_group: list[list[CanonicalKVCacheRef]],
+            gpu_to_cpu: bool,
+            canonical_layout: bool = False,
+            host_memory_is_pinned: bool = True,
+        ) -> None:
+            self.gpu_tensors = gpu_tensors
+            self.cpu_tensors = cpu_tensors
+            self.blocks_per_chunk = blocks_per_chunk
+            self.layer_refs_per_group = layer_refs_per_group
+            self.gpu_to_cpu = gpu_to_cpu
+            created_handlers.append(self)
+
+    monkeypatch.setattr(
+        gpu_worker,
+        "SingleDirectionOffloadingHandler",
+        FakeSingleDirectionOffloadingHandler,
+    )
+
+    gpu_page_size_bytes = mmap.PAGESIZE
+    blocks_per_chunk = 2
+    num_cpu_chunks = 3
+    kv_caches = CanonicalKVCaches(
+        tensors=[
+            CanonicalKVCacheTensor(
+                tensor=torch.zeros((4, gpu_page_size_bytes), dtype=torch.int8),
+                page_size_bytes=gpu_page_size_bytes,
+            )
+        ],
+        group_data_refs=[
+            [CanonicalKVCacheRef(tensor_idx=0, page_size_bytes=gpu_page_size_bytes)]
+        ],
+    )
+    memory_config = CPUOffloadMemoryConfig.from_extra_config(
+        {"cpu_memory_backend": "shm", "cpu_memory_path": str(tmp_path)}
+    )
+    mmap_region = SharedOffloadRegion(
+        engine_id=str(uuid.uuid4()),
+        num_chunks=num_cpu_chunks,
+        rank=0,
+        kv_bytes_per_chunk=gpu_page_size_bytes * blocks_per_chunk,
+        cpu_page_size=gpu_page_size_bytes * blocks_per_chunk,
+        memory_config=memory_config,
+    )
+
+    cpu_tensor: torch.Tensor | None = None
+    try:
+        worker = CPUOffloadingWorker(
+            kv_caches=kv_caches,
+            blocks_per_chunk=blocks_per_chunk,
+            num_cpu_chunks=num_cpu_chunks,
+            mmap_region=mmap_region,
+        )
+
+        assert worker._mmap_region is mmap_region
+        assert len(created_handlers) == 2
+        cpu_tensor = created_handlers[0].cpu_tensors[0]
+        assert cpu_tensor is not None
+        assert created_handlers[1].cpu_tensors[0] is cpu_tensor
+        assert mmap_region.mmap_path.startswith(str(tmp_path))
+        assert cpu_tensor.shape == (
+            num_cpu_chunks,
+            gpu_page_size_bytes * blocks_per_chunk,
+        )
+        assert cpu_tensor.data_ptr() == mmap_region._base.data_ptr()
+    finally:
+        for handler in created_handlers:
+            handler.cpu_tensors.clear()
+            handler.gpu_tensors.clear()
+        cpu_tensor = None
+        mmap_region.cleanup()
 
 
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm-specific test")
@@ -249,6 +340,7 @@ def test_worker_syncs_before_cleanup_after_handler_failure(
     ("use_shared_memory", "replicated_layout"),
     [(False, False), (True, False), (True, True)],
 )
+@requires_accelerator
 @torch.inference_mode()
 def test_transfer(
     default_vllm_config,
@@ -429,6 +521,7 @@ def test_transfer(
 @pytest.mark.parametrize("num_cpu_chunks", NUM_CPU_CHUNKS)
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.parametrize("device", DEVICES)
+@requires_accelerator
 @torch.inference_mode()
 def test_transfer_multi_group(
     default_vllm_config,

@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import contextlib
 import errno
 import mmap
 import os
@@ -10,33 +9,17 @@ from collections.abc import Callable
 import numpy as np
 import torch
 
-from vllm.distributed.device_communicators.shm_broadcast import (
-    check_shm_free_space,
-)
 from vllm.logger import init_logger
 from vllm.v1.kv_offload.cpu.host_register import host_unregister
+from vllm.v1.kv_offload.cpu.memory import (
+    CPUOffloadMemoryConfig,
+    create_shared_memory_allocation,
+)
 
 logger = init_logger(__name__)
 
 # MADV_POPULATE_WRITE was added in Linux 5.14 (value 23).
 _MADV_POPULATE_WRITE = getattr(mmap, "MADV_POPULATE_WRITE", 23)
-
-
-def _wait_for_file_size(fd: int, expected_size: int, timeout: float = 30.0) -> None:
-    """Spin-wait until the file reaches expected_size (creator truncated it)."""
-    deadline = time.monotonic() + timeout
-    while True:
-        if os.fstat(fd).st_size >= expected_size:
-            return
-        if os.fstat(fd).st_nlink == 0:
-            raise RuntimeError(
-                "Shared offload region creator failed during initialization."
-            )
-        if time.monotonic() > deadline:
-            raise TimeoutError(
-                f"Timed out waiting for mmap file to reach {expected_size} bytes"
-            )
-        time.sleep(0.005)
 
 
 def _madvise_populate_write(mmap_obj: mmap.mmap, offset: int, length: int) -> None:
@@ -75,7 +58,7 @@ class SharedOffloadRegion:
     the rest open the existing file and wait until it reaches the expected
     size.  Each worker then mmap()s the full file.
 
-    File path: /dev/shm/vllm_offload_{engine_id}.mmap.  When a barrier is
+    Default file path: /dev/shm/vllm_offload_{engine_id}.mmap.  When a barrier is
     given, the path is unlinked once every worker has mapped the file, so
     the kernel reclaims the memory when the last worker exits, no matter
     how it exits; mappings taken before the unlink stay valid.
@@ -95,6 +78,7 @@ class SharedOffloadRegion:
         cpu_page_size: int,
         barrier: Callable[[], None] | None = None,
         *,
+        memory_config: CPUOffloadMemoryConfig | None = None,
         creator_memory_check: Callable[[int], None] | None = None,
         populate_only_on_creator: bool = False,
     ) -> None:
@@ -103,51 +87,39 @@ class SharedOffloadRegion:
         self.page_size = mmap.PAGESIZE
         assert kv_bytes_per_chunk % self.page_size == 0
 
+        self.memory_config = memory_config or CPUOffloadMemoryConfig()
         self.num_chunks = num_chunks
         self._row_stride = kv_bytes_per_chunk
         self.total_size_bytes = self.num_chunks * self._row_stride
 
-        self.mmap_path = f"/dev/shm/vllm_offload_{engine_id}.mmap"
+        self.mapped_size_bytes = self.memory_config.mapped_size(self.total_size_bytes)
+        self.mmap_path = self.memory_config.mmap_path(engine_id)
         self._creator = False  # set True only if this worker creates the file
         self.rank = rank
+        self.fd: int | None = None
+        self.mmap_obj: mmap.mmap | None = None
+        self._base: torch.Tensor | None = None
+        self._views: list[torch.Tensor] = []
+        self._canonical_offset = 0
+        self.is_pinned = False
+        self.pinned_addresses: list[int] = []
         if rank is not None:
             # byte offset to this worker's first slot within each chunk row
             self._worker_offset = rank * cpu_page_size
             # exclusive upper bound for this worker's area within each row
             self._worker_area_end = (rank + 1) * cpu_page_size
         try:
-            try:
-                self.fd: int | None = os.open(
-                    self.mmap_path, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600
-                )
-            except FileExistsError:
-                # Joiner path — another worker won O_EXCL. Reopen and wait
-                # for the file to reach expected size.
-                self.fd = os.open(self.mmap_path, os.O_RDWR)
-                _wait_for_file_size(self.fd, self.total_size_bytes)
-                logger.info("Opened existing mmap file %s", self.mmap_path)
-            else:
-                # Creator path. We won O_EXCL, so we own the file: any
-                # failure here must clean up so concurrent joiners don't
-                # land on a 0-byte stub and spin in _wait_for_file_size
-                # for the full 30 s timeout.
-                self._creator = True
-                if creator_memory_check is not None:
-                    creator_memory_check(self.total_size_bytes)
-                check_shm_free_space(
-                    self.total_size_bytes,
-                    allocation_name="CPU KV offload shared region in /dev/shm",
-                )
-                os.ftruncate(self.fd, self.total_size_bytes)
-                logger.info(
-                    "Created mmap file %s (%.2f GB)",
-                    self.mmap_path,
-                    self.total_size_bytes / 1e9,
-                )
-
-            self.mmap_obj: mmap.mmap | None = mmap.mmap(
+            allocation = create_shared_memory_allocation(
+                instance_id=engine_id,
+                logical_size_bytes=self.total_size_bytes,
+                memory_config=self.memory_config,
+                creator_memory_check=creator_memory_check,
+            )
+            self.fd = allocation.fd
+            self._creator = allocation.creator
+            self.mmap_obj = mmap.mmap(
                 self.fd,
-                self.total_size_bytes,
+                self.mapped_size_bytes,
                 flags=mmap.MAP_SHARED,
                 prot=mmap.PROT_READ | mmap.PROT_WRITE,
             )
@@ -156,16 +128,7 @@ class SharedOffloadRegion:
                 populate_write_fn = _get_populate_write_fn(self.mmap_obj)
                 populate_write_fn(self.mmap_obj, 0, self.total_size_bytes)
         except Exception:
-            if self._creator:
-                with contextlib.suppress(FileNotFoundError):
-                    os.unlink(self.mmap_path)
-                self._creator = False
-            if hasattr(self, "mmap_obj") and self.mmap_obj is not None:
-                self.mmap_obj.close()
-                self.mmap_obj = None
-            if hasattr(self, "fd") and self.fd is not None:
-                os.close(self.fd)
-                self.fd = None
+            self.cleanup()
             # Peers block inside the barrier until the collective times out if
             # we die before reaching it.  Arrive anyway so every worker calls
             # barrier() exactly once and they fail on their own errors instead
@@ -187,25 +150,16 @@ class SharedOffloadRegion:
             try:
                 barrier()
             except Exception:
-                if self._creator:
-                    with contextlib.suppress(FileNotFoundError):
-                        os.unlink(self.mmap_path)
-                    self._creator = False
-                self.mmap_obj.close()
-                os.close(self.fd)
-                self.mmap_obj = None
-                self.fd = None
+                self.cleanup()
                 raise
             if self._creator:
                 os.unlink(self.mmap_path)
                 self._creator = False
                 logger.info("Unlinked mmap file %s", self.mmap_path)
 
-        self._base = torch.frombuffer(memoryview(self.mmap_obj), dtype=torch.int8)
-        self._views: list[torch.Tensor] = []
-        self._canonical_offset = 0
-        self.is_pinned: bool = False
-        self.pinned_addresses: list[int] = []
+        self._base = torch.frombuffer(
+            memoryview(self.mmap_obj), dtype=torch.int8, count=self.total_size_bytes
+        )
 
         if populate_only_on_creator:
             return
@@ -333,6 +287,7 @@ class SharedOffloadRegion:
         Shape: (num_chunks, row_stride_bytes). Secondary tiers address
         chunk *b* as ``view[b]``.
         """
+        assert self._base is not None
         kv_tensor = self._base.view(self.num_chunks, self._row_stride)
         np_arr = kv_tensor.numpy()
         assert np_arr.ctypes.data == self._base.data_ptr(), (
