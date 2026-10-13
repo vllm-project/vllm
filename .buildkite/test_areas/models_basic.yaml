@@ -178,9 +178,9 @@ steps:
   - pytest -v -s models/kimi_k3/test_prefix_cache.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
   parallelism: 2
 
-- label: ":nvidia: (4xB200) MiniMax-M3 Feature Matrix Shard %N"
+- label: ":nvidia: (4xB200) MiniMax-M3 Feature Matrix"
   key: minimax-m3-feature-matrix-4xb200
-  timeout_in_minutes: 75
+  timeout_in_minutes: 40
   device: b200-k8s
   num_devices: 4
   source_file_dependencies:
@@ -197,8 +197,7 @@ steps:
   - .buildkite/scripts/install-kv-connectors.sh
   commands:
   - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
-  - pytest -v -s models/minimax_m3 --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
-  parallelism: 2
+  - pytest -v -s models/minimax_m3
 
 - label: ":nvidia: (H200) GLM5Next"
   key: glm5next-unit-tests

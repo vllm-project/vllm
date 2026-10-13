@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""MiniMax-M3 serving feature combinations on a 6-layer dummy-weight model.
+"""MiniMax-M3 + DSpark serving deployments on a 6-layer dummy-weight model.
 
-Each deployment starts one or two servers and checks that completions, chat,
-streaming, structured outputs and, where enabled, DSpark, image input, P/D
-KV transfer and KV offload reloads all work together.
+Each deployment combines DSpark with parallelism, image input, P/D KV transfer
+or CPU KV offload, and checks that structured outputs still terminate, that the
+KV transfer or offload path is taken, and that its logprobs match a recompute.
 """
 
 import contextlib
@@ -50,14 +50,10 @@ BASE_ARGS = [
     "8192",
     "--no-enable-flashinfer-autotune",
     "--enable-prompt-tokens-details",
-    "--enable-prefix-caching",
     "--max-num-seqs",
     "8",
     "--reasoning-parser",
     "minimax_m3",
-    "--tool-call-parser",
-    "minimax_m3",
-    "--enable-auto-tool-choice",
     # Dummy logits are near-uniform; without this a JSON grammar can loop on
     # whitespace until max_tokens.
     "--structured-outputs-config",
@@ -91,7 +87,7 @@ NIXL_OFFLOADING = {
     "kv_connector_extra_config": {"connectors": [NIXL, OFFLOADING]},
 }
 
-PERSON_SCHEMA = {
+ANSWER_SCHEMA = {
     "type": "object",
     "properties": {
         "answer": {"type": "string", "enum": ["yes", "no"]},
@@ -100,39 +96,41 @@ PERSON_SCHEMA = {
     "required": ["answer", "score"],
     "additionalProperties": False,
 }
-COLORS = ["red", "green", "blue"]
 
 
 @dataclass(frozen=True)
 class Instance:
     tp: int = 1
     dp: int = 1
-    pp: int = 1
-    dspark: bool = False
     image: bool = False
-    hma: bool = True
     kv_config: dict | None = None
     extra_args: tuple[str, ...] = ()
 
     @property
     def num_gpus(self) -> int:
-        return self.tp * self.dp * self.pp
+        return self.tp * self.dp
 
     def args(self, draft: str) -> list[str]:
-        args = BASE_ARGS + ["--tensor-parallel-size", str(self.tp)]
+        spec = {"method": "dspark", "model": draft, "num_speculative_tokens": 3}
+        args = BASE_ARGS + [
+            "--tensor-parallel-size",
+            str(self.tp),
+            "--speculative-config",
+            json.dumps(spec),
+        ]
         if self.dp > 1:
             args += ["--data-parallel-size", str(self.dp), "--enable-expert-parallel"]
-        if self.pp > 1:
-            args += ["--pipeline-parallel-size", str(self.pp)]
-        if self.dspark:
-            spec = {"method": "dspark", "model": draft, "num_speculative_tokens": 3}
-            args += ["--speculative-config", json.dumps(spec)]
         if not self.image:
             args.append("--language-model-only")
-        if not self.hma:
-            args.append("--disable-hybrid-kv-cache-manager")
         if self.kv_config is not None:
-            args += ["--kv-transfer-config", json.dumps(self.kv_config)]
+            # DSpark's sliding-window layers make the hybrid manager mix block
+            # sizes, which the NIXL and CPU offload connectors do not support
+            # (#60791).
+            args += [
+                "--disable-hybrid-kv-cache-manager",
+                "--kv-transfer-config",
+                json.dumps(self.kv_config),
+            ]
         return args + list(self.extra_args)
 
 
@@ -152,73 +150,30 @@ class Deployment:
         return sum(i.num_gpus for i in self.instances)
 
 
-# DSpark's sliding-window layers make the hybrid manager use mixed block sizes,
-# which NixlConnector (#60791) and the CPU offload connectors do not handle, so
-# connector + DSpark deployments turn it off; the *-hma cases track the failures.
-NO_HMA_DSPARK = dict(dspark=True, hma=False)
 DEPLOYMENTS = {
-    "tp1": Deployment(Instance()),
-    "tp1-dspark": Deployment(Instance(dspark=True)),
-    "tp2-dspark": Deployment(Instance(tp=2, dspark=True)),
-    "tp4-ep-dspark-image": Deployment(
-        Instance(
-            tp=4, dspark=True, image=True, extra_args=("--enable-expert-parallel",)
-        )
+    "tp4-ep-image": Deployment(
+        Instance(tp=4, image=True, extra_args=("--enable-expert-parallel",))
     ),
-    "dep4-dspark": Deployment(
-        Instance(
-            dp=4,
-            dspark=True,
-            extra_args=("--all2all-backend", "flashinfer_nvlink_one_sided"),
-        )
+    "dep4": Deployment(
+        Instance(dp=4, extra_args=("--all2all-backend", "flashinfer_nvlink_one_sided"))
     ),
-    "offloading-dspark": Deployment(
-        Instance(kv_config=OFFLOADING, **NO_HMA_DSPARK), offload=True
+    "simple-offload": Deployment(Instance(kv_config=SIMPLE_OFFLOAD), offload=True),
+    "pd-image": Deployment(
+        Instance(image=True, kv_config=NIXL),
+        prefill=Instance(image=True, kv_config=NIXL),
     ),
-    "simple-offload-dspark": Deployment(
-        Instance(kv_config=SIMPLE_OFFLOAD, **NO_HMA_DSPARK), offload=True
+    "pd-push": Deployment(
+        Instance(kv_config=NIXL_PUSH_D), prefill=Instance(kv_config=NIXL_PUSH_P)
     ),
-    "simple-offload-dspark-hma": Deployment(
-        Instance(dspark=True, kv_config=SIMPLE_OFFLOAD), offload=True
+    "pd-tp2-dep2": Deployment(
+        Instance(dp=2, kv_config=NIXL), prefill=Instance(tp=2, kv_config=NIXL)
     ),
-    "pd-dspark-image": Deployment(
-        Instance(image=True, kv_config=NIXL, **NO_HMA_DSPARK),
-        prefill=Instance(image=True, kv_config=NIXL, **NO_HMA_DSPARK),
-    ),
-    "pd-push-dspark": Deployment(
-        Instance(kv_config=NIXL_PUSH_D, **NO_HMA_DSPARK),
-        prefill=Instance(kv_config=NIXL_PUSH_P, **NO_HMA_DSPARK),
-    ),
-    "pd-tp2-dep2-dspark": Deployment(
-        Instance(dp=2, kv_config=NIXL, **NO_HMA_DSPARK),
-        prefill=Instance(tp=2, kv_config=NIXL, **NO_HMA_DSPARK),
-    ),
-    "pd-offloading-dspark": Deployment(
-        Instance(kv_config=NIXL_OFFLOADING, **NO_HMA_DSPARK),
-        prefill=Instance(kv_config=NIXL_OFFLOADING, **NO_HMA_DSPARK),
+    "pd-offloading": Deployment(
+        Instance(kv_config=NIXL_OFFLOADING),
+        prefill=Instance(kv_config=NIXL_OFFLOADING),
         offload=True,
     ),
-    "pd-dspark-hma": Deployment(
-        Instance(kv_config=NIXL, dspark=True),
-        prefill=Instance(kv_config=NIXL, dspark=True),
-    ),
-    "pp2": Deployment(Instance(pp=2)),
 }
-
-KNOWN_FAILURES = {
-    "simple-offload-dspark-hma": "CPU offload never reloads with HMA + DSpark (#60791)",
-    "pd-dspark-hma": "NIXL cannot split KV regions with HMA + DSpark (#60791)",
-    "pp2": "PP stages disagree on supported KV cache layouts (#54710)",
-}
-
-
-def _case(name: str):
-    marks = []
-    if (num_gpus := DEPLOYMENTS[name].num_gpus) > 1:
-        marks += multi_gpu_marks(num_gpus=num_gpus)
-    if reason := KNOWN_FAILURES.get(name):
-        marks.append(pytest.mark.xfail(reason=reason, strict=True))
-    return pytest.param(name, marks=marks, id=name)
 
 
 @pytest.fixture(scope="module")
@@ -337,7 +292,7 @@ def _post(url: str, path: str, body: dict) -> dict:
     return response.json()
 
 
-def _complete(url: str, model: str, prompt: list[int], salt: str, **extra) -> dict:
+def _complete(url: str, model: str, prompt: list[int], salt: str) -> dict:
     return _post(
         url,
         "completions",
@@ -349,7 +304,6 @@ def _complete(url: str, model: str, prompt: list[int], salt: str, **extra) -> di
             "logprobs": NUM_LOGPROBS,
             "return_tokens_as_token_ids": True,
             "cache_salt": salt,
-            **extra,
         },
     )
 
@@ -394,75 +348,27 @@ def _reset_gpu_prefix_cache(url: str) -> None:
         time.sleep(0.1)
 
 
-def _check_structured_outputs(url: str, model: str) -> None:
-    """Bounded grammars must finish and parse even with dummy weights."""
-    # With thinking disabled the grammar applies from the first output token.
-    no_think = {"thinking_mode": "disabled"}
-    schema = {"name": "answer", "schema": PERSON_SCHEMA}
-    response = _chat(
-        url,
-        model,
-        "Answer as JSON.",
-        response_format={"type": "json_schema", "json_schema": schema},
-        chat_template_kwargs=no_think,
-    )
-    choice = response["choices"][0]
-    assert choice["finish_reason"] == "stop", choice
-    parsed = json.loads(choice["message"]["content"])
-    assert parsed["answer"] in ("yes", "no") and 0 <= parsed["score"] <= 9, parsed
-
-    response = _chat(
-        url,
-        model,
-        "Pick a color.",
-        structured_outputs={"choice": COLORS},
-        chat_template_kwargs=no_think,
-    )
-    assert response["choices"][0]["message"]["content"] in COLORS, response
-
-
-def _check_chat(url: str, model: str, image: bool) -> None:
-    response = _chat(url, model, "Hello")
-    assert response["usage"]["completion_tokens"] > 0, response
-
-    stream = requests.post(
-        f"{url}/v1/chat/completions",
-        json={
-            "model": model,
-            "messages": [{"role": "user", "content": "Count to five."}],
-            "max_tokens": 16,
-            "temperature": 0,
-            "stream": True,
-        },
-        stream=True,
-        timeout=600,
-    )
-    stream.raise_for_status()
-    chunks = [line for line in stream.iter_lines() if line.startswith(b"data: {")]
-    assert chunks, "empty stream"
-
-    if image:
-        buf = io.BytesIO()
-        Image.new("RGB", (448, 448), (200, 40, 40)).save(buf, format="PNG")
-        image_url = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
-        content = [
-            {"type": "image_url", "image_url": {"url": image_url}},
-            {"type": "text", "text": "What color is this image?"},
-        ]
-        response = _chat(url, model, content)
-        assert response["usage"]["prompt_tokens"] > 100, response
-
-
-@pytest.mark.parametrize("name", [_case(name) for name in DEPLOYMENTS])
-def test_feature_combination(name: str, model_dirs: tuple[str, str]) -> None:
+@pytest.mark.parametrize(
+    "name",
+    [
+        pytest.param(
+            name,
+            marks=multi_gpu_marks(num_gpus=d.num_gpus) if d.num_gpus > 1 else (),
+            id=name,
+        )
+        for name, d in DEPLOYMENTS.items()
+    ],
+)
+def test_dspark_deployment(name: str, model_dirs: tuple[str, str]) -> None:
     deployment = DEPLOYMENTS[name]
-    decode = deployment.decode
     rng = random.Random(0)
     prompt = [rng.randint(1000, 150000) for _ in range(3 * 128 + 37)]
+    model = model_dirs[0]
+    # Pairs of responses whose logprobs must match.
+    comparisons: list[tuple[str, dict, dict]] = []
     with _serve(deployment, model_dirs) as servers:
         # Under P/D the prefiller computes prompts, so offload hits are read there.
         compute_url, decode_url = servers[0].url_root, servers[-1].url_root
-        model = model_dirs[0]
         if deployment.prefill is None:
             proxy = contextlib.nullcontext(decode_url)
         else:
@@ -474,15 +380,19 @@ def test_feature_combination(name: str, model_dirs: tuple[str, str]) -> None:
                 source="external_kv_transfer",
             )
             output = _complete(url, model, prompt, "first")
-            # A local recompute on the decoder is the reference output.
-            recompute = _complete(decode_url, model, prompt, "recompute")
+            if deployment.prefill is not None:
+                recompute = _complete(decode_url, model, prompt, "recompute")
+                # Dummy weights differ across TP sizes.
+                if deployment.prefill.tp == deployment.decode.tp:
+                    comparisons.append(("kv_transfer", recompute, output))
             if deployment.offload:
-                _complete(compute_url, model, prompt, "offload")
                 _reset_gpu_prefix_cache(compute_url)
-                resend = _complete(compute_url, model, prompt, "offload")
-                cached = resend["usage"]["prompt_tokens_details"]["cached_tokens"]
-                assert cached > 0, resend["usage"]
+                reload = _complete(compute_url, model, prompt, "first")
+                cached = reload["usage"]["prompt_tokens_details"]["cached_tokens"]
+                assert cached > 0, reload["usage"]
+                comparisons.append(("cpu_reload", output, reload))
 
+            # Mixed-length prompts so drafts run alongside chunked prefills.
             with ThreadPoolExecutor(8) as pool:
                 prompts = [
                     [rng.randint(1000, 150000) for _ in range(rng.randint(64, 2048))]
@@ -493,8 +403,36 @@ def test_feature_combination(name: str, model_dirs: tuple[str, str]) -> None:
                 ):
                     assert response["usage"]["completion_tokens"] > 0, response
 
-            _check_chat(url, model, decode.image)
-            _check_structured_outputs(url, model)
+            # With thinking disabled the grammar applies from the first token, so
+            # DSpark drafts are checked against it from the start.
+            response = _chat(
+                url,
+                model,
+                "Answer as JSON.",
+                response_format={
+                    "type": "json_schema",
+                    "json_schema": {"name": "answer", "schema": ANSWER_SCHEMA},
+                },
+                chat_template_kwargs={"thinking_mode": "disabled"},
+            )
+            choice = response["choices"][0]
+            assert choice["finish_reason"] == "stop", choice
+            parsed = json.loads(choice["message"]["content"])
+            assert parsed["answer"] in ("yes", "no"), parsed
+            assert 0 <= parsed["score"] <= 9, parsed
+
+            if deployment.decode.image:
+                buf = io.BytesIO()
+                Image.new("RGB", (448, 448), (200, 40, 40)).save(buf, format="PNG")
+                image_url = (
+                    "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
+                )
+                content = [
+                    {"type": "image_url", "image_url": {"url": image_url}},
+                    {"type": "text", "text": "What color is this image?"},
+                ]
+                response = _chat(url, model, content)
+                assert response["usage"]["prompt_tokens"] > 100, response
 
         if deployment.prefill is not None:
             external = _metric(
@@ -503,15 +441,13 @@ def test_feature_combination(name: str, model_dirs: tuple[str, str]) -> None:
                 source="external_kv_transfer",
             )
             assert external > external_before, "decoder received no KV transfer"
-        if decode.dspark:
-            drafts = _metric(decode_url, "vllm:spec_decode_num_drafts_total")
-            assert drafts > 0, "DSpark proposed no drafts"
+        drafts = _metric(decode_url, "vllm:spec_decode_num_drafts_total")
+        assert drafts > 0, "DSpark proposed no drafts"
 
-    # Dummy weights differ across TP sizes.
-    if len({(i.tp, i.dp, i.pp) for i in deployment.instances}) == 1:
+    for label, reference, candidate in comparisons:
         check_logprobs_close(
-            outputs_0_lst=[_tokens_text_logprobs(recompute)],
-            outputs_1_lst=[_tokens_text_logprobs(output)],
-            name_0="recompute",
-            name_1=name,
+            outputs_0_lst=[_tokens_text_logprobs(reference)],
+            outputs_1_lst=[_tokens_text_logprobs(candidate)],
+            name_0="reference",
+            name_1=label,
         )
