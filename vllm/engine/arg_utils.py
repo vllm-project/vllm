@@ -453,6 +453,12 @@ _LOG_CONFIG_FILE_DEPRECATION_MESSAGE = (
 )
 
 
+_DISABLE_CASCADE_ATTN_DEPRECATION_MESSAGE = (
+    "--disable-cascade-attn is deprecated and has no effect since cascade "
+    "attention has been removed. It will be removed in v0.33.0."
+)
+
+
 class DeprecatedLogConfigFileAction(argparse.Action):
     """Warn when the legacy ``--log-config-file`` option is used."""
 
@@ -579,7 +585,7 @@ class EngineArgs:
         CacheConfig, "prefix_cache_retention_interval"
     )
     disable_sliding_window: bool = ModelConfig.disable_sliding_window
-    disable_cascade_attn: bool = ModelConfig.disable_cascade_attn
+    disable_cascade_attn: bool | None = None
     offload_backend: str = OffloadConfig.offload_backend
     cpu_offload_gb: float = UVAOffloadConfig.cpu_offload_gb
     cpu_offload_params: set[str] = get_field(UVAOffloadConfig, "cpu_offload_params")
@@ -752,6 +758,7 @@ class EngineArgs:
     enable_flashinfer_autotune: bool = get_field(
         KernelConfig, "enable_flashinfer_autotune"
     )
+    monokernel: bool = get_field(KernelConfig, "monokernel")
     worker_cls: str = ParallelConfig.worker_cls
     worker_extension_cls: str = ParallelConfig.worker_extension_cls
 
@@ -985,7 +992,10 @@ class EngineArgs:
             "--disable-sliding-window", **model_kwargs["disable_sliding_window"]
         )
         model_group.add_argument(
-            "--disable-cascade-attn", **model_kwargs["disable_cascade_attn"]
+            "--disable-cascade-attn",
+            action=argparse.BooleanOptionalAction,
+            default=None,
+            help=_DISABLE_CASCADE_ATTN_DEPRECATION_MESSAGE,
         )
         model_group.add_argument(
             "--skip-tokenizer-init", **model_kwargs["skip_tokenizer_init"]
@@ -1793,6 +1803,7 @@ class EngineArgs:
             "--enable-flashinfer-autotune",
             **kernel_kwargs["enable_flashinfer_autotune"],
         )
+        kernel_group.add_argument("--monokernel", **kernel_kwargs["monokernel"])
         moe_backend_kwargs = kernel_kwargs["moe_backend"]
         moe_backend_kwargs["type"] = lambda s: s.lower().replace("-", "_")
         kernel_group.add_argument("--moe-backend", **moe_backend_kwargs)
@@ -1940,6 +1951,8 @@ class EngineArgs:
                 "launched vLLM.",
                 self.seed,
             )
+        if self.disable_cascade_attn is not None:
+            warnings.warn(_DISABLE_CASCADE_ATTN_DEPRECATION_MESSAGE, stacklevel=1)
 
         return ModelConfig(
             model=self.model,
@@ -1971,7 +1984,6 @@ class EngineArgs:
             use_fp64_gumbel=self.use_fp64_gumbel,
             enable_trace_replay=self.enable_trace_replay,
             disable_sliding_window=self.disable_sliding_window,
-            disable_cascade_attn=self.disable_cascade_attn,
             skip_tokenizer_init=self.skip_tokenizer_init,
             enable_prompt_embeds=self.enable_prompt_embeds,
             served_model_name=self.served_model_name,
@@ -2744,6 +2756,8 @@ class EngineArgs:
                     "are mutually exclusive"
                 )
             kernel_config.enable_flashinfer_autotune = self.enable_flashinfer_autotune
+        if self.monokernel:
+            kernel_config.monokernel = True
         if self.moe_backend != "auto":
             kernel_config.moe_backend = self.moe_backend
         if self.linear_backend != "auto":
