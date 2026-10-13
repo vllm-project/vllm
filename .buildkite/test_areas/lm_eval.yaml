@@ -371,6 +371,7 @@ steps:
       - vllm/tokenizers/
       - vllm/v1/attention/
       - vllm/v1/core/kv_cache_utils.py
+      - vllm/v1/core/kv_cache_planning.py
       - vllm/v1/spec_decode/metrics.py
       - vllm/v1/worker/
       - vllm/_aiter_ops.py
@@ -516,6 +517,7 @@ steps:
       - vllm/v1/spec_decode/
       - vllm/v1/worker/gpu/spec_decode/
       - vllm/v1/core/kv_cache_utils.py
+      - vllm/v1/core/kv_cache_planning.py
       - vllm/model_executor/layers/layernorm.py
       - csrc/
       - vllm/_aiter_ops.py
@@ -559,6 +561,7 @@ steps:
       - vllm/v1/spec_decode/
       - vllm/v1/worker/gpu/spec_decode/
       - vllm/v1/core/kv_cache_utils.py
+      - vllm/v1/core/kv_cache_planning.py
       - vllm/model_executor/layers/layernorm.py
       - csrc/
       - vllm/_aiter_ops.py
@@ -602,6 +605,7 @@ steps:
       - vllm/v1/spec_decode/
       - vllm/v1/worker/gpu/spec_decode/
       - vllm/v1/core/kv_cache_utils.py
+      - vllm/v1/core/kv_cache_planning.py
       - vllm/model_executor/layers/layernorm.py
       - csrc/
       - vllm/_aiter_ops.py
@@ -645,6 +649,7 @@ steps:
       - vllm/v1/spec_decode/
       - vllm/v1/worker/gpu/spec_decode/
       - vllm/v1/core/kv_cache_utils.py
+      - vllm/v1/core/kv_cache_planning.py
       - vllm/model_executor/layers/layernorm.py
       - csrc/
       - vllm/_aiter_ops.py
@@ -688,6 +693,7 @@ steps:
       - vllm/v1/spec_decode/
       - vllm/v1/worker/gpu/spec_decode/
       - vllm/v1/core/kv_cache_utils.py
+      - vllm/v1/core/kv_cache_planning.py
       - vllm/model_executor/layers/layernorm.py
       - csrc/
       - vllm/_aiter_ops.py
