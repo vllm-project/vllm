@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from typing import NamedTuple
 
 from vllm.utils.math_utils import cdiv, round_down
@@ -426,20 +426,22 @@ class KVCacheCoordinator(ABC):
             blocks.extend(manager.pop_blocks_for_free(request_id))
         return blocks
 
-    def get_num_common_prefix_blocks(self, running_request_id: str) -> list[int]:
-        """Get the number of common prefix blocks for all requests with allocated
-        KV cache for each kv cache group.
+    def get_num_common_prefix_blocks(
+        self, scheduled_request_ids: Collection[str]
+    ) -> list[int]:
+        """Get the number of common prefix blocks shared by all of the
+        scheduled requests, for each kv cache group.
 
         Args:
-            running_request_id: The request ID of any running request, used to
-                identify the common prefix blocks.
+            scheduled_request_ids: The request IDs scheduled in the current
+                step.
 
         Returns:
             list[int]: The number of common prefix blocks for each kv cache group.
 
         """
         return [
-            manager.get_num_common_prefix_blocks(running_request_id)
+            manager.get_num_common_prefix_blocks(scheduled_request_ids)
             for manager in self.single_type_managers
         ]
 
@@ -527,7 +529,9 @@ class KVCacheCoordinatorNoPrefixCache(KVCacheCoordinator):
         )
         self.num_single_type_manager = len(self.single_type_managers)
 
-    def get_num_common_prefix_blocks(self, running_request_id: str) -> list[int]:
+    def get_num_common_prefix_blocks(
+        self, scheduled_request_ids: Collection[str]
+    ) -> list[int]:
         return [0] * self.num_single_type_manager
 
     def find_longest_cache_hit(

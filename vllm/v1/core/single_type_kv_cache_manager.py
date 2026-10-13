@@ -3,7 +3,7 @@
 import itertools
 from abc import ABC, abstractmethod
 from collections import defaultdict
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from typing import TYPE_CHECKING, ClassVar
 
 from vllm.distributed.kv_events import MEDIUM_CPU
@@ -589,16 +589,19 @@ class SingleTypeKVCacheManager(ABC):
         self.block_pool.free_blocks(reversed(self.pop_blocks_for_free(request_id)))
 
     @abstractmethod
-    def get_num_common_prefix_blocks(self, running_request_id: str) -> int:
-        """Get the number of common prefix blocks for all requests with allocated
-        KV cache.
+    def get_num_common_prefix_blocks(
+        self, scheduled_request_ids: Collection[str]
+    ) -> int:
+        """Get the number of common prefix blocks shared by all of the
+        scheduled requests.
 
         Args:
-            running_request_id: The request ID.
+            scheduled_request_ids: The request IDs scheduled in the current
+                step.
 
         Returns:
-            The number of common prefix blocks for all requests with allocated
-            KV cache.
+            The number of common prefix blocks shared by all of the
+            scheduled requests.
 
         """
         raise NotImplementedError
@@ -898,14 +901,51 @@ class FullAttentionManager(SingleTypeKVCacheManager):
             block_size=self.block_size,
         )
 
-    def get_num_common_prefix_blocks(self, running_request_id: str) -> int:
-        blocks = self.req_to_blocks[running_request_id]
-        num_common_blocks = 0
-        for block in blocks:
-            if block.ref_cnt == len(self.req_to_blocks):
-                num_common_blocks += 1
-            else:
-                break
+    def get_num_common_prefix_blocks(
+        self, scheduled_request_ids: Collection[str]
+    ) -> int:
+        """Get the number of common prefix blocks shared by all of the
+        scheduled requests.
+
+        Only the requests scheduled in the current step are considered, so
+        preempted or idle requests holding KV cache with a different prefix
+        do not force the result to zero.
+
+        Blocks are compared by physical identity. Under prefix caching, two
+        live requests share the block at a position iff they also share the
+        block at every earlier position: a referenced block is never
+        evicted, so both requests resolve the same chained block hash to
+        the same cached block. Block agreement is therefore
+        prefix-monotone and is binary-searched with one comparison per
+        probe: O(num_scheduled * log(num_blocks)).
+
+        Subclasses whose tables contain the shared null block must
+        override this: every request's table references the same physical
+        null block, so identity comparison would mistake it for sharing
+        even though it carries no KV (see RSWAManager and
+        SlidingWindowManager).
+        """
+        tables = [
+            blocks
+            for request_id in scheduled_request_ids
+            if (blocks := self.req_to_blocks.get(request_id)) is not None
+        ]
+        if len(tables) <= 1:
+            return 0
+
+        ref_blocks = tables[0]
+        num_common_blocks = len(ref_blocks)
+        for blocks in tables[1:]:
+            lo, hi = 0, min(num_common_blocks, len(blocks))
+            while lo < hi:
+                mid = (lo + hi + 1) // 2
+                if blocks[mid - 1].block_id == ref_blocks[mid - 1].block_id:
+                    lo = mid
+                else:
+                    hi = mid - 1
+            num_common_blocks = lo
+            if num_common_blocks == 0:
+                return 0
         return num_common_blocks
 
 
@@ -921,6 +961,19 @@ class RSWAManager(FullAttentionManager):
     def __init__(self, kv_cache_spec: RSWASpec, **kwargs) -> None:
         super().__init__(kv_cache_spec, **kwargs)
         self.rswa_window: int = kv_cache_spec.rswa_window
+
+    def get_num_common_prefix_blocks(
+        self, scheduled_request_ids: Collection[str]
+    ) -> int:
+        """NOTE: The gap blocks between the reference prefix and the decode
+        window are freed and replaced with the shared null block, which
+        carries no KV. Every request's table references the same physical
+        null block, so identity comparison would count a matching gap as
+        shared prefix. Return 0 here for correctness. Need to support
+        cascade attention + R-SWA together to report the reference-prefix
+        common prefix instead.
+        """
+        return 0
 
     def remove_skipped_blocks(
         self,
@@ -1194,7 +1247,9 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
             num_computed_tokens - self.sliding_window + 1 - self.extra_retained_tokens,
         )
 
-    def get_num_common_prefix_blocks(self, running_request_id: str) -> int:
+    def get_num_common_prefix_blocks(
+        self, scheduled_request_ids: Collection[str]
+    ) -> int:
         """NOTE(Chen): The prefix blocks are null blocks for sliding window layers.
         So it's not correct to count ref_cnt like FullAttentionManager. Return
         0 here for correctness. Need to support cascade attention + sliding
@@ -1289,7 +1344,9 @@ class CircularBufferManager(FullAttentionManager):
     ) -> None:
         return
 
-    def get_num_common_prefix_blocks(self, running_request_id: str) -> int:
+    def get_num_common_prefix_blocks(
+        self, scheduled_request_ids: Collection[str]
+    ) -> int:
         return 0
 
     def get_num_skipped_tokens(self, num_computed_tokens: int) -> int:
@@ -1447,7 +1504,9 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
         ) * self.attention_chunk_size
         return num_skipped_tokens
 
-    def get_num_common_prefix_blocks(self, running_request_id: str) -> int:
+    def get_num_common_prefix_blocks(
+        self, scheduled_request_ids: Collection[str]
+    ) -> int:
         """Cascade attention is not supported by chunked local attention."""
         return 0
 
@@ -1680,7 +1739,9 @@ class MambaManager(SingleTypeKVCacheManager):
                     self.block_pool.free_blocks([blocks[last_state_block_idx]])
                     blocks[last_state_block_idx] = self._null_block
 
-    def get_num_common_prefix_blocks(self, running_request_id: str) -> int:
+    def get_num_common_prefix_blocks(
+        self, scheduled_request_ids: Collection[str]
+    ) -> int:
         """Cascade attention is not supported by mamba"""
         return 0
 
@@ -2192,7 +2253,9 @@ class CrossAttentionManager(SingleTypeKVCacheManager):
         # requests, so this method is not relevant.
         raise ValueError("Should not be called as prefix caching is disabled.")
 
-    def get_num_common_prefix_blocks(self, running_request_id: str) -> int:
+    def get_num_common_prefix_blocks(
+        self, scheduled_request_ids: Collection[str]
+    ) -> int:
         # Cross-attention blocks contain request-specific encoder states
         # and are not shared between different requests
         return 0
@@ -2394,7 +2457,9 @@ class _HiSparseAuxiliaryManager(SingleTypeKVCacheManager):
     ) -> None:
         return None
 
-    def get_num_common_prefix_blocks(self, running_request_id: str) -> int:
+    def get_num_common_prefix_blocks(
+        self, scheduled_request_ids: Collection[str]
+    ) -> int:
         return 0
 
     @classmethod

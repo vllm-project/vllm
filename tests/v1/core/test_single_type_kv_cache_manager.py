@@ -78,6 +78,149 @@ def test_external_computed_blocks_do_not_corrupt_free_pool():
     assert len(manager.req_to_blocks[request_id]) == 3
 
 
+def _make_full_attention_manager(
+    num_blocks: int = 64, enable_caching: bool = False
+) -> FullAttentionManager:
+    block_size = 4
+    spec = FullAttentionSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+    )
+    block_pool = BlockPool(
+        num_gpu_blocks=num_blocks,
+        enable_caching=enable_caching,
+        hash_block_size=block_size,
+    )
+    return FullAttentionManager(
+        spec,
+        block_pool=block_pool,
+        enable_caching=enable_caching,
+        kv_cache_group_id=0,
+        scheduler_block_size=block_size,
+    )
+
+
+def test_full_attention_common_prefix_among_scheduled_requests_only():
+    """The common-prefix scan only considers the scheduled requests, so an
+    idle request holding KV cache with a different prefix must not force
+    the result to zero."""
+    manager = _make_full_attention_manager()
+
+    def fresh_block() -> KVCacheBlock:
+        return manager.block_pool.get_new_blocks(1)[0]
+
+    # Three scheduled requests share a 4-block prefix plus a private tail.
+    shared = [fresh_block() for _ in range(4)]
+    for i in range(3):
+        manager.req_to_blocks[f"req-{i}"] = list(shared) + [fresh_block()]
+    # An idle (unscheduled) request with a different prefix holds KV cache.
+    manager.req_to_blocks["idle"] = [fresh_block() for _ in range(2)]
+
+    scheduled = {"req-0", "req-1", "req-2"}
+    assert manager.get_num_common_prefix_blocks(scheduled) == 4
+
+    # A shorter table truncates the common prefix.
+    manager.req_to_blocks["req-1"] = list(shared[:3])
+    assert manager.get_num_common_prefix_blocks(scheduled) == 3
+
+    # Divergence inside the shared region shortens it accordingly.
+    manager.req_to_blocks["req-1"] = list(shared[:2]) + [fresh_block()]
+    assert manager.get_num_common_prefix_blocks(scheduled) == 2
+
+    # A single scheduled request has nobody to share with.
+    assert manager.get_num_common_prefix_blocks({"req-0"}) == 0
+    assert manager.get_num_common_prefix_blocks(set()) == 0
+
+
+def test_rswa_common_prefix_is_zero_despite_shared_null_gap():
+    """R-SWA frees the gap between the reference prefix and the decode
+    window into the shared null block. Two requests at the same decode
+    progress have nulls at identical positions, so identity comparison
+    alone would report a common prefix across the gap, whose blocks carry
+    no KV. The manager must return 0."""
+    block_size = 4
+    rswa_spec = RSWASpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+        rswa_window=8,
+    )
+    block_pool = BlockPool(num_gpu_blocks=64, enable_caching=True, hash_block_size=4)
+    manager = RSWAManager(
+        rswa_spec,
+        block_pool=block_pool,
+        enable_caching=True,
+        kv_cache_group_id=0,
+        scheduler_block_size=block_size,
+    )
+    null_block = block_pool.null_block
+
+    # Two requests sharing a reference prefix, each with a null gap at the
+    # same positions followed by a private decode window.
+    shared = [block_pool.get_new_blocks(1)[0] for _ in range(2)]
+    for i in range(2):
+        manager.req_to_blocks[f"req-{i}"] = (
+            list(shared) + [null_block, null_block] + [block_pool.get_new_blocks(1)[0]]
+        )
+
+    assert manager.get_num_common_prefix_blocks({"req-0", "req-1"}) == 0
+
+
+def test_full_attention_common_prefix_with_prefix_caching():
+    """Requests sharing a prefix through the prefix cache share physical
+    blocks, which the scheduled-set scan reports as the common prefix."""
+    from tests.v1.core.test_prefix_caching import (
+        make_kv_cache_config,
+        make_kv_cache_manager,
+        make_request,
+    )
+
+    block_size = 4
+    num_shared_blocks = 8
+    init_none_hash(sha256)
+    manager = make_kv_cache_manager(
+        make_kv_cache_config(block_size, num_blocks=64),
+        enable_caching=True,
+        max_model_len=20 * block_size,
+        hash_block_size=block_size,
+    )
+
+    shared_tokens = list(range(num_shared_blocks * block_size))
+    num_tokens = len(shared_tokens) + block_size
+    req0 = make_request(
+        "req-0", shared_tokens + [1000] * block_size, block_size, sha256
+    )
+    req1 = make_request(
+        "req-1", shared_tokens + [1001] * block_size, block_size, sha256
+    )
+
+    # First request: allocate and cache its full blocks.
+    assert manager.allocate_slots(req0, num_tokens) is not None
+    req0.num_computed_tokens = num_tokens
+    manager.get_computed_blocks(req0)
+
+    # Second request: hits the cached shared prefix, so it shares the
+    # physical blocks of req-0 for the first num_shared_blocks blocks.
+    cached_blocks, num_computed, _ = manager.get_computed_blocks(req1)
+    assert num_computed == len(shared_tokens)
+    assert (
+        manager.allocate_slots(
+            req1,
+            num_tokens - num_computed,
+            num_new_computed_tokens=num_computed,
+            new_computed_blocks=cached_blocks,
+        )
+        is not None
+    )
+
+    assert manager.get_num_common_prefix_blocks({"req-0", "req-1"}) == [
+        num_shared_blocks
+    ]
+
+
 def test_mamba_speculative_block_relocation_requires_exclusive_ownership():
     spec = MambaSpec(
         block_size=4,
@@ -397,7 +540,7 @@ def test_circular_buffer_allocates_one_block_for_the_request_lifetime():
 
     manager.cache_blocks(request_id, 1024, replay_boundaries=(0,))
     manager.remove_skipped_blocks(request_id, 1024)
-    assert manager.get_num_common_prefix_blocks(request_id) == 0
+    assert manager.get_num_common_prefix_blocks([request_id]) == 0
     assert manager.get_num_skipped_tokens(1024) == 0
     assert manager.req_to_blocks[request_id] == blocks
 

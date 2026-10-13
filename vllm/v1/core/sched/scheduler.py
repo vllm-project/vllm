@@ -1421,17 +1421,28 @@ class Scheduler(SchedulerInterface):
             scheduled_running_reqs
         ) <= len(self.running)
 
-        # Get the longest common prefix among all requests in the running queue.
-        # This can be potentially used for cascade attention.
+        # Get the longest common prefix among the requests scheduled in this
+        # step. This can be potentially used for cascade attention.
         num_common_prefix_blocks = [0] * len(self.kv_cache_config.kv_cache_groups)
         if self.compute_common_prefix_blocks and self.running:
             with record_function_or_nullcontext(
                 "schedule: get_num_common_prefix_blocks"
             ):
-                any_request_id = self.running[0].request_id
-                num_common_prefix_blocks = (
-                    self.kv_cache_manager.get_num_common_prefix_blocks(any_request_id)
+                scheduled_request_ids = {
+                    req.request_id for req in scheduled_running_reqs
+                }
+                scheduled_request_ids.update(
+                    req.request_id for req in scheduled_resumed_reqs
                 )
+                scheduled_request_ids.update(
+                    req.request_id for req in scheduled_new_reqs
+                )
+                if scheduled_request_ids:
+                    num_common_prefix_blocks = (
+                        self.kv_cache_manager.get_num_common_prefix_blocks(
+                            scheduled_request_ids
+                        )
+                    )
 
         # Construct the scheduler output.
         if self.use_v2_model_runner:
