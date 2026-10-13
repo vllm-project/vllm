@@ -79,9 +79,17 @@ class DeepseekV32DecoderLayer(torch.nn.Module):
                 quant_config=quant_config,
                 prefix=f"{prefix}.mlp",
             )
-            # Do not force skip_final_all_reduce=True. Mori EP / fused MoE can
-            # already return a reduced output; forcing skip_final then asserts
-            # ("requires an un-reduced fused output") on GLM-5.2 WideEP.
+            if config.model_type != "glm_moe_dsa":
+                # Keep forcing skip_final_all_reduce=True for DeepSeek V3.2
+                # (unchanged, original behavior).
+                #
+                # Do NOT force it for GLM-5.2 (glm_moe_dsa): its Mori EP /
+                # fused MoE combine kernel can already return a reduced
+                # output on WideEP, and forcing skip_final_all_reduce=True
+                # then asserts ("requires an un-reduced fused output").
+                # Leaving it unset lets FusedMoE.__init__ compute the
+                # correct value from use_all2all_kernels instead.
+                self.mlp.experts.moe_config.skip_final_all_reduce = True
         else:
             self.mlp = DeepseekV2MLP(
                 hidden_size=config.hidden_size,
