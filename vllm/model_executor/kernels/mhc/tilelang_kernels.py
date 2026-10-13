@@ -59,9 +59,12 @@ def compute_num_split(block_k: int, k: int | None, grid_size: int) -> int:
 # (hc_mult 4, hidden_size 5120 and 7168) against the separate post + split-k
 # GEMM it replaces; the bands are coarse because the loss against a per-shape
 # optimum is ~1-2%, while one fixed config gives up to 18% at the top of the
-# range.
+# range. SM90 (H20, hidden 4096-7168) takes two projection tiles over 512-wide
+# k-slices up to 8 tokens: every tile redoes the post mapping over its k-slice,
+# and two 256-thread round trips per block beat twelve tiles of four to seven.
 _FUSED_POST_PRE_N_THR = 128
 _FUSED_POST_PRE_MAX_TOKENS = 32
+_SM90_FUSED_POST_PRE_MAX_TOKENS = 8
 # At up to this many tokens the grid is too small to hide the latency of each
 # thread's serial loads, so when the hidden size allows, a twice wider block
 # over twice as many k-slices gives every thread a single pass instead of four
@@ -96,6 +99,15 @@ def mhc_fused_post_pre_split_config(
         and _fused_post_pre_single_pass_supported()
     ):
         return tile_n, n_splits, n_thr
+    mix_size = hc_mult * (hc_mult + 2)
+    if (
+        num_tokens <= _SM90_FUSED_POST_PRE_MAX_TOKENS
+        and mix_size % 12 == 0
+        and hidden_size % 512 == 0
+        and current_platform.is_cuda()
+        and current_platform.is_device_capability(90)
+    ):
+        return 12, hidden_size // 512, 256
     n_thr = _FUSED_POST_PRE_N_THR
     if hidden_size % n_thr:
         return None
@@ -107,7 +119,6 @@ def mhc_fused_post_pre_split_config(
     else:
         tile_n, n_splits = 6, 8
     # The kernel drops projection tiles and k-slices it cannot fill evenly.
-    mix_size = hc_mult * (hc_mult + 2)
     while tile_n > 1 and mix_size % tile_n:
         tile_n -= 1
     while n_splits > 1 and hidden_size % (n_splits * n_thr):
@@ -1462,10 +1473,15 @@ class MhcPreBigFuseTileLangKernel(
         )
         return self._trace_dispatch(self.dispatch)(
             warmup_cases,
+            # Every fused token count, so every split the fused GEMM picks.
             num_tokens=WarmupIntRange(
                 1,
                 max_tokens + 1,
-                advance=lambda value: 8 if value < 8 else cdiv(value, 64) * 64 + 1,
+                advance=lambda value: (
+                    value + 1
+                    if value < _FUSED_POST_PRE_MAX_TOKENS
+                    else cdiv(value, 64) * 64 + 1
+                ),
             ),
             n_splits=1,
             hidden_size=hidden_size,
@@ -1481,7 +1497,7 @@ class MhcPreBigFuseTileLangKernel(
             if broadcast_norm_eps is not None
             else norm_eps,
             _when=lambda *, use_fused_tilelang, num_tokens: (
-                not use_fused_tilelang or num_tokens <= 16
+                not use_fused_tilelang or num_tokens <= _FUSED_POST_PRE_MAX_TOKENS
             ),
         )
 
