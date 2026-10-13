@@ -10,7 +10,7 @@ DEEPGEMM_GIT_REPO="https://github.com/cleonard530/DeepGEMM.git"
 # NOTE: This targets the vLLM fork's dev branch, which carries the sm120
 # and sm90 paged-MQA ports plus the SwiGLU alpha/beta and SiTU Mega MoE
 # activations, plus the CUDA 12.x layout header fix from vllm-project/DeepGEMM#12.
-DEEPGEMM_GIT_REF="a641d397a7b9533860ca1ab89c2ae4f11b03f6c6"
+DEEPGEMM_GIT_REF="4ce76bb54072ebf86b8dbe4398a835dddc097c10"
 WHEEL_DIR=""
 
 # Parse command line arguments

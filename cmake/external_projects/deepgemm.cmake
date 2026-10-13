@@ -34,7 +34,7 @@ else()
   # alpha/beta, and SiTU for FP8/FP4 Mega MoE. Also includes the CUDA 12.x
   # layout header fix from vllm-project/DeepGEMM#12.
   # TORCH_LIBRARY build with a CPython 3.10 stable-ABI floor.
-  set(_DEEPGEMM_UPSTREAM_TAG "a641d397a7b9533860ca1ab89c2ae4f11b03f6c6")
+  set(_DEEPGEMM_UPSTREAM_TAG "4ce76bb54072ebf86b8dbe4398a835dddc097c10")
 
   set(_deepgemm_fc_root "${FETCHCONTENT_BASE_DIR}")
   if(NOT _deepgemm_fc_root)
