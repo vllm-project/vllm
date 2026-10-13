@@ -21,6 +21,11 @@ from vllm.v1.watermarking.watermarker import (
 _STREAM_DOMAIN = 0x53594E54 << 32
 
 
+def _validate_depth(depth: int) -> None:
+    if not 1 <= depth <= 32:
+        raise ValueError("SynthID-Text depth must be between 1 and 32")
+
+
 class SynthIDWatermarker(Watermarker):
     def __init__(
         self,
@@ -30,8 +35,7 @@ class SynthIDWatermarker(Watermarker):
         prf: WatermarkPRFName = "philox",
     ) -> None:
         _validate_context_width(context_width)
-        if depth < 1:
-            raise ValueError("SynthID-Text depth must be positive")
+        _validate_depth(depth)
         selected_prf = create_prf(prf, key)
         if not isinstance(selected_prf, PhiloxPRF):
             raise ValueError("SynthID-Text requires the Philox PRF")
@@ -76,22 +80,18 @@ class SynthIDWatermarker(Watermarker):
         vocabulary = torch.arange(logits.shape[-1], device=logits.device)
         probs = torch.softmax(logits, dim=1, dtype=torch.float32)  # [B, V]
 
-        for start in range(0, self.depth, 32):
-            stream = _STREAM_DOMAIN | start // 32
-            num_bits = min(32, self.depth - start)
+        # [B, C] and [V] -> [B, V]
+        words = self.prf.uint32(
+            contexts,
+            vocabulary,
+            stream=_STREAM_DOMAIN,
+        )
 
-            # [B, C] and [V] -> [B, V]
-            words = self.prf.uint32(
-                contexts,
-                vocabulary,
-                stream=stream,
-            )
-
-            probs = self._update_probs(
-                probs,
-                words,
-                num_bits,
-            )
+        probs = self._update_probs(
+            probs,
+            words,
+            self.depth,
+        )
 
         log_probs = torch.log(probs)
         return torch.where(
@@ -168,6 +168,7 @@ class SynthIDWatermarkDetector(WatermarkDetector):
         deduplicate_contexts: bool = True,
     ) -> None:
         _validate_context_width(context_width)
+        _validate_depth(depth)
         selected_prf = create_prf(prf, key)
         if not isinstance(selected_prf, PhiloxPRF):
             raise ValueError("SynthID-Text requires the Philox PRF")
@@ -178,29 +179,21 @@ class SynthIDWatermarkDetector(WatermarkDetector):
     def _score_tokens(
         self, contexts: torch.Tensor, targets: torch.Tensor
     ) -> torch.Tensor:
-        blocks = []
+        # [N, C] and [N, 1] -> [N, 1] -> [N]
+        words = self.prf.uint32(
+            contexts,
+            targets.unsqueeze(-1),
+            stream=_STREAM_DOMAIN,
+        ).squeeze(-1)
 
-        for start in range(0, self.depth, 32):
-            stream = _STREAM_DOMAIN | start // 32
-            num_bits = min(32, self.depth - start)
+        # [depth]
+        bit_positions = torch.arange(
+            self.depth,
+            device=words.device,
+        )
 
-            # [N, C] and [N, 1] -> [N, 1] -> [N]
-            words = self.prf.uint32(
-                contexts,
-                targets.unsqueeze(-1),
-                stream=stream,
-            ).squeeze(-1)
-
-            # [D_block]
-            bit_positions = torch.arange(
-                num_bits,
-                device=words.device,
-            )
-
-            # [N, 1] and [D_block] -> [N, D_block]
-            blocks.append((words.unsqueeze(-1) >> bit_positions) & 1)
-        # [N, depth]
-        return torch.cat(blocks, dim=-1)
+        # [N, 1] and [depth] -> [N, depth]
+        return (words.unsqueeze(-1) >> bit_positions) & 1
 
     def _aggregate_scores(self, token_scores: torch.Tensor) -> float:
         return token_scores.to(torch.float64).mean().item()
