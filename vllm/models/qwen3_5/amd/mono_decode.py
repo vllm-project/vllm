@@ -18,9 +18,13 @@ bf16 or fused as MXFP4 expert 512 (``VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS``
 in_proj_qkvz and out_proj / o_proj bf16 or online MXFP4 on the ASM FP4 GEMM
 (``VLLM_ROCM_USE_AITER_FP4_ASM_GEMM``).
 
+With MTP (``mono_base``), a GDN layer of a verify step runs the input norm and
+vLLM's GDN core instead of K1, then K2; the drafter reads the final norm's
+output, as from the stock model.
+
 The step is chosen whole in the model's outer forward, which no torch.compile
 traces; a FULL decode graph captures it per width. Any other step (prefill,
-mixed, spec decode, more rows) takes the compiled model.
+mixed, more rows) takes the compiled model.
 
 The all-reduces run in-kernel over a peer buffer every TP rank maps. Mailbox
 tags carry a device epoch bumped once a step (captured with it), so no buffer
@@ -48,7 +52,7 @@ class MonoDecode(B.QwenMonoDecode):
     TP_SIZES = (L.TP,)
     MAX_TOKENS = L.MAX_TOKENS
     BLOCKS = L.BLOCKS
-    MTP = False
+    MTP = True
 
     def unsupported(self, model) -> str | None:
         from vllm.model_executor.models.qwen3_next import Qwen3NextSparseMoeBlock
@@ -182,14 +186,17 @@ class MonoDecode(B.QwenMonoDecode):
         h = model.embed_input_ids(input_ids)
         residual: torch.Tensor | None = None
         for layer in islice(model.layers, model.start_layer, model.end_layer):
-            if layer.layer_type == "linear_attention":
+            gate = None
+            if layer.layer_type == "linear_attention" and not self.spec:
                 core = torch.empty(s, L.CORE, dtype=h.dtype, device=h.device)
                 res_attn = torch.empty_like(h)
                 self._k1(layer, md, h, residual, res_attn, core)
-                gate = None
             else:
                 x, res_attn = _gemma_norm(layer.input_layernorm, h, residual)
-                core, gate = _attention_core(layer.self_attn, x, positions)
+                if layer.layer_type == "linear_attention":
+                    core = B.gdn_core(layer.linear_attn, x)
+                else:
+                    core, gate = _attention_core(layer.self_attn, x, positions)
             h, residual = self._k2(layer, core, res_attn, gate)
         h, _ = _gemma_norm(model.norm, h, residual)
         return h
