@@ -9,6 +9,7 @@ import torch
 from torch.nn import Module
 
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
+from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 
 if TYPE_CHECKING:
     import vllm.model_executor.layers.fused_moe.modular_kernel as mk
@@ -40,6 +41,8 @@ class Mxfp8OnlineLinearMethod(OnlineLinearBase):
     Loads bf16/fp16 checkpoints and quantizes weights to MXFP8 (microscaling
     FP8 with block-32 scales) during weight loading.
     """
+
+    activation_quant_key: QuantKey | None = None
 
     def create_weights(
         self,

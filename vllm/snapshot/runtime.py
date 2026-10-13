@@ -24,7 +24,7 @@ import urllib.request
 from collections.abc import Iterable
 from contextlib import suppress
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import NoReturn
 
@@ -872,7 +872,7 @@ class LocalSnapshotTools:
         return SnapshotManifest(
             schema_version=1,
             boundary="post-engine-init-reloadable-state-released",
-            created_at=datetime.now(timezone.utc).isoformat(),
+            created_at=datetime.now(UTC).isoformat(),
             artifact_bytes=self._artifact_bytes(workdir),
             **identity.model_dump(),
             model=source_model,
