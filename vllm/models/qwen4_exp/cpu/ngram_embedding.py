@@ -7,6 +7,7 @@ from collections.abc import Iterable
 import torch
 import torch.nn.functional as F
 from torch import nn
+from transformers import Qwen4ExpTextConfig
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import (
@@ -30,9 +31,6 @@ from vllm.model_executor.parameter import (
     PerTensorScaleParameter,
 )
 from vllm.model_executor.utils import set_weight_attrs
-from vllm.transformers_utils.configs.qwen4_exp import (
-    Qwen4ExpTextConfig,
-)
 
 from ..common.ple import PLEVocabParallelEmbedding
 from .ops.ple import ple_ngram_ids

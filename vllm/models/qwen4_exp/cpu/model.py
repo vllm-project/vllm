@@ -11,6 +11,7 @@ from math import lcm
 
 import torch
 from torch import nn
+from transformers import Qwen4ExpConfig, Qwen4ExpTextConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
@@ -50,7 +51,6 @@ from vllm.model_executor.models.qwen3_5 import (
 )
 from vllm.model_executor.models.qwen3_next import (
     Qwen3NextAttention,
-    Qwen3NextMLP,
     Qwen3NextSparseMoeBlock,
 )
 from vllm.model_executor.models.qwen3_vl import (
@@ -74,16 +74,14 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers.registry import cached_tokenizer_from_config
-from vllm.transformers_utils.configs.qwen4_exp import (
-    Qwen4ExpTextConfig,
-)
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.kv_cache_interface import MambaSpec
 
-from ..config import Qwen4ExpConfig
 from .hyperconnection import GatedResidual, HyperConnectionConfig
 from .ple_layer import Qwen4ExpPLELayer
 from .qsa import Qwen4ExpQSAAttention
+
+_QSA_LAYER_TYPES = ("qwen_sparse_attention", "indexed_attention")
 
 
 def _get_padded_moe_intermediate_size(
@@ -347,7 +345,7 @@ class Qwen4ExpDecoderLayer(nn.Module):
                 prefix=f"{prefix}.linear_attn",
                 gqa_interleaved_layout=False,
             )
-        elif layer_type == "full_attention":
+        elif layer_type in _QSA_LAYER_TYPES:
             use_qsa = getattr(config, "indexer_n_heads", None) is not None
             if not use_qsa:
                 self.self_attn = Qwen3NextAttention(
@@ -368,24 +366,9 @@ class Qwen4ExpDecoderLayer(nn.Module):
         else:
             raise ValueError(f"Invalid layer_type {layer_type}")
 
-        mlp_only_layers = getattr(config, "mlp_only_layers", [])
-        num_experts = getattr(config, "num_experts", 0) or 0
-        absolute_layer_id = self.layer_idx + 1
-        is_moe_layer = self.layer_idx not in mlp_only_layers and (
-            num_experts > 0 and absolute_layer_id % config.decoder_sparse_step == 0
+        self.mlp = Qwen4ExpSparseMoeBlock(
+            vllm_config=vllm_config, prefix=f"{prefix}.mlp"
         )
-        if is_moe_layer:
-            self.mlp = Qwen4ExpSparseMoeBlock(
-                vllm_config=vllm_config, prefix=f"{prefix}.mlp"
-            )
-        else:
-            self.mlp = Qwen3NextMLP(
-                hidden_size=config.hidden_size,
-                intermediate_size=config.intermediate_size,
-                hidden_act=config.hidden_act,
-                quant_config=quant_config,
-                prefix=f"{prefix}.mlp",
-            )
 
         hc_config = HyperConnectionConfig(
             hc_count=config.hc_count,
@@ -444,7 +427,7 @@ class Qwen4ExpDecoderLayer(nn.Module):
 
         if self.layer_type == "linear_attention":
             attn_out = self.linear_attn(hidden_states=block_input)
-        elif self.layer_type == "full_attention":
+        elif self.layer_type in _QSA_LAYER_TYPES:
             attn_out = self.self_attn(
                 hidden_states=block_input,
                 positions=positions,
@@ -538,7 +521,7 @@ class Qwen4ExpModel(nn.Module):
         self._qsa_layer_ids = frozenset(
             layer_idx
             for layer_idx, layer_type in enumerate(config.layer_types)
-            if layer_type == "full_attention"
+            if layer_type in _QSA_LAYER_TYPES
             and getattr(config, "indexer_n_heads", None) is not None
         )
         self.embed_tokens = VocabParallelEmbedding(self.vocab_size, config.hidden_size)

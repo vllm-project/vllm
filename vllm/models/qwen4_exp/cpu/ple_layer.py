@@ -9,6 +9,7 @@ from collections.abc import Sequence
 
 import torch
 from torch import nn
+from transformers import Qwen4ExpTextConfig
 
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import CacheConfig, ModelConfig, VllmConfig, get_current_vllm_config
@@ -19,9 +20,6 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateDtypeCalculator,
     MambaStateShapeCalculator,
     is_conv_state_dim_first,
-)
-from vllm.transformers_utils.configs.qwen4_exp import (
-    Qwen4ExpTextConfig,
 )
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
