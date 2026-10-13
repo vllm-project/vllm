@@ -194,6 +194,13 @@ _TOOL_PARSERS_TO_REGISTER = {
         "qwen3_engine_tool_parser",
         "Qwen3EngineToolParser",
     ),
+    # TODO: Qwen2.5/QwQ/Qwen3 JSON tool calls. Aliased to `hermes` for now;
+    # a dedicated parser should treat the template's newline before and
+    # between `<tool_call>` blocks as framing, as the Rust frontend does.
+    "qwen3_json": (
+        "hermes_tool_parser",
+        "Hermes2ProToolParser",
+    ),
     "qwen3_xml": (
         "qwen3_engine_tool_parser",
         "Qwen3EngineToolParser",

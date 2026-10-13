@@ -11,11 +11,14 @@ from transformers import Qwen4ExpTextConfig
 
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import get_current_vllm_config
+from vllm.distributed import get_etp_group, get_tp_group
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
 )
+from vllm.model_executor.layers.quantization.utils.fp8_utils import is_fp8
 from vllm.model_executor.models.utils import AutoWeightsLoader
+from vllm.models.common.ops.sequence_parallel import sp_reduce_scatter, sp_shard
 
 from ..common.ngram_embedding import (
     Qwen4ExpPLEDeviceEmbedding,
@@ -71,6 +74,7 @@ class Qwen4ExpPLEPageableHostEmbedding(Qwen4ExpPLEPinnedHostEmbedding):
         num_ngram_heads: int = 1,
         max_total_tokens: int = 0,
         data_parallel_rank: int = 0,
+        reduce_results: bool = True,
     ) -> None:
         device = torch.device("cuda", torch.accelerator.current_device_index())
         require_pageable_access(device.index)
@@ -94,6 +98,7 @@ class Qwen4ExpPLEPageableHostEmbedding(Qwen4ExpPLEPinnedHostEmbedding):
             num_ngram_heads=num_ngram_heads,
             max_total_tokens=max_total_tokens,
             data_parallel_rank=data_parallel_rank,
+            reduce_results=reduce_results,
         )
         layer_match = re.search(r"layers\.(\d+)\.", prefix)
         if layer_match is None:
@@ -107,6 +112,7 @@ class Qwen4ExpPLEPageableHostEmbedding(Qwen4ExpPLEPinnedHostEmbedding):
         self._rebind_pending = False
         self._pending_table: MappedTable | None = None
         self._reload_error: Exception | None = None
+        self._device = device
         self._prefetch_stream = torch.cuda.Stream(device=device)
         self._prefetch_buffer = torch.empty(
             max_total_tokens * self.etp_data_parallel_size,
@@ -174,7 +180,7 @@ class Qwen4ExpPLEPageableHostEmbedding(Qwen4ExpPLEPinnedHostEmbedding):
             self.weight.dtype,
             int(getattr(self._model_config.hf_text_config, "split_ngram_parts", 512)),
         )
-        return MappedTable(layout, self._prefetch_buffer.device)
+        return MappedTable(layout, self._device)
 
     def _bind(self) -> None:
         if self._reload_error is not None:
@@ -187,7 +193,7 @@ class Qwen4ExpPLEPageableHostEmbedding(Qwen4ExpPLEPinnedHostEmbedding):
             table = MappedTable.zeros(
                 self.org_vocab_size,
                 self.embedding_dim * self.weight.dtype.itemsize,
-                self._prefetch_buffer.device,
+                self._device,
             )
         else:
             table = self._pending_table or self._map_checkpoint_files()
@@ -211,18 +217,14 @@ class Qwen4ExpPLEPageableHostEmbedding(Qwen4ExpPLEPinnedHostEmbedding):
             # layer without loadable elements is only restored): rebind now,
             # or raise if that reload was rejected.
             self._bind()
+        buffer = self._prefetch_buffer
+        assert buffer is not None, "allocated in __init__"
         slot_size, _ = self._get_dp_gather_slot(ngram_ids.shape[0])
         gathered_ids = self._gather_dp_ids(ngram_ids, slot_size)
-        self._lookup(
-            gathered_ids, output=self._prefetch_buffer[: gathered_ids.shape[0]]
-        )
+        self._lookup(gathered_ids, output=buffer[: gathered_ids.shape[0]])
 
     @eager_break_during_capture
-    def start_prefetch(
-        self,
-        hidden_states: torch.Tensor,
-        ngram_ids: torch.Tensor,
-    ) -> None:
+    def start_prefetch(self, ngram_ids: torch.Tensor) -> None:
         """Look up on the current stream, not the pinned backend's side stream.
 
         With the side-stream lookup, greedy outputs on GB10 were not reproducible
@@ -401,8 +403,10 @@ class Qwen4ExpNGramEmbedding(nn.Module):
         prefix: str,
         quant_config: QuantizationConfig | None = None,
         params_dtype: torch.dtype | None = None,
+        use_sequence_parallel: bool = False,
     ) -> None:
         super().__init__()
+        self.use_sequence_parallel = use_sequence_parallel
         self.embedding_dim = embedding_dim
         self.ngram_size = int(config.ngram_size)
         self.heads_per_ngram = int(config.heads_per_ngram)
@@ -468,6 +472,11 @@ class Qwen4ExpNGramEmbedding(nn.Module):
             embedding_cls = Qwen4ExpPLEPinnedHostEmbedding
         else:
             embedding_cls = Qwen4ExpPLEDeviceEmbedding
+        # A TP reduce-scatter covers all vocabulary owners only when ETP=TP.
+        self.use_reduce_scatter = (
+            self.use_sequence_parallel
+            and get_etp_group().world_size == get_tp_group().world_size
+        )
         self.ngram_embedding = embedding_cls(
             padded_vocab_size,
             self.head_dim,
@@ -478,6 +487,7 @@ class Qwen4ExpNGramEmbedding(nn.Module):
             num_ngram_heads=self.ngram_heads,
             max_total_tokens=max_total_tokens,
             data_parallel_rank=data_parallel_rank,
+            reduce_results=not self.use_reduce_scatter,
         )
         if self.ngram_embedding.supports_prefetch:
             # The side-stream lookup outlives eager-break args, whose
@@ -605,6 +615,18 @@ class Qwen4ExpNGramEmbedding(nn.Module):
             id_blocks.append(ids[request_indices, adjusted_columns])
         return torch.cat(id_blocks, dim=-1)
 
+    def _sp_shard_embeddings(self, embeddings: torch.Tensor) -> torch.Tensor:
+        """Shard embedding token rows, optionally reducing vocabulary contributions."""
+        # Each embedding element has one vocabulary owner, including FP8 bytes.
+        output_dtype = embeddings.dtype
+        if is_fp8(embeddings):
+            embeddings = embeddings.view(torch.int8)
+        if self.use_reduce_scatter:
+            embeddings = sp_reduce_scatter(embeddings)
+        else:
+            embeddings = sp_shard(embeddings)
+        return embeddings.view(output_dtype)
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -612,11 +634,19 @@ class Qwen4ExpNGramEmbedding(nn.Module):
         query_start_loc: torch.Tensor,
         ngram_context: torch.Tensor,
     ) -> torch.Tensor:
+        """Return full embeddings or a token shard after combining vocabulary owners."""
         embedding = self.ngram_embedding
         if embedding.supports_prefetch:
-            return embedding(hidden_states)
-        ngram_ids = self.compute_ngram_ids(input_ids, query_start_loc, ngram_context)
-        return self.ngram_embedding(ngram_ids).flatten(-2)
+            # Prefetch contains full tokens even when hidden states are sharded.
+            embeddings = embedding.finalize_prefetch(total_tokens=input_ids.shape[0])
+        else:
+            ngram_ids = self.compute_ngram_ids(
+                input_ids, query_start_loc, ngram_context
+            )
+            embeddings = embedding(ngram_ids).flatten(-2)
+        if not self.use_sequence_parallel:
+            return embeddings
+        return self._sp_shard_embeddings(embeddings)
 
     def cpu_ngram_ids_fn(self):
         """A CPU-only ``compute_ngram_ids`` for host-side page prefetching."""
@@ -627,7 +657,6 @@ class Qwen4ExpNGramEmbedding(nn.Module):
 
     def start_prefetch(
         self,
-        hidden_states: torch.Tensor,
         input_ids: torch.Tensor,
         query_start_loc: torch.Tensor,
         ngram_context: torch.Tensor,
@@ -642,7 +671,7 @@ class Qwen4ExpNGramEmbedding(nn.Module):
             ngram_context,
             output=self._prefetch_ids[: input_ids.numel()],
         )
-        embedding.start_prefetch(hidden_states, ngram_ids)
+        embedding.start_prefetch(ngram_ids)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         """Load hash buffers and checkpoint-split embedding rows."""
@@ -730,9 +759,3 @@ def copy_module_for_cpu_ids(module: "Qwen4ExpNGramEmbedding"):
         _shift_precompute=Qwen4ExpNGramEmbedding._shift_precompute,
         _shift_apply=Qwen4ExpNGramEmbedding._shift_apply,
     )
-
-
-__all__ = [
-    "Qwen4ExpNGramEmbedding",
-    "Qwen4ExpPLEPageableHostEmbedding",
-]

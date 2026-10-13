@@ -136,7 +136,13 @@ def test_arm_cpu_unquantized_kernel_selection(
     ],
 )
 @patch(
-    "vllm.utils.flashinfer.has_flashinfer",
+    "vllm.model_executor.layers.fused_moe.experts.flashinfer_cutlass_moe."
+    "has_flashinfer_cutlass_fused_moe",
+    return_value=False,
+)
+@patch(
+    "vllm.model_executor.layers.fused_moe.experts.trtllm_bf16_moe."
+    "has_flashinfer_trtllm_fused_moe",
     return_value=False,
 )
 @patch(
@@ -145,13 +151,18 @@ def test_arm_cpu_unquantized_kernel_selection(
 )
 def test_select_default_backend_by_platform(
     mock_aiter_enabled,
-    mock_has_flashinfer,
+    mock_has_flashinfer_trtllm,
+    mock_has_flashinfer_cutlass,
     monkeypatch,
     platform_method,
     expected_backend,
 ):
     """Test default backend selection per platform with all optional
-    accelerators (FlashInfer, AITER) disabled."""
+    accelerators (FlashInfer, AITER) disabled.
+
+    Patch the feature probes directly because their cached results can outlive
+    changes to has_flashinfer().
+    """
     with patch(
         "vllm.model_executor.layers.fused_moe.oracle.unquantized.current_platform"
     ) as mock_platform:
@@ -405,6 +416,41 @@ def test_select_cuda_flashinfer_trtllm_modular_for_standard_all2all(
         assert selected_backend == UnquantizedMoeBackend.FLASHINFER_TRTLLM
         assert experts_cls is not None
         assert experts_cls.__name__ == "TrtLlmBf16ExpertsModular"
+
+
+@patch(
+    "vllm.model_executor.layers.fused_moe.experts.trtllm_bf16_moe.TrtLlmBf16ExpertsBase._supports_current_device",
+    return_value=True,
+)
+@pytest.mark.parametrize("require_decomposed_backend", [False, True])
+def test_require_decomposed_backend_rejects_monolithic_kernels(
+    mock_supports_current_device,
+    require_decomposed_backend,
+):
+    """Expert substitution adjusts routes, so the kernel must not route itself."""
+    from vllm.model_executor.layers.fused_moe.experts.trtllm_bf16_moe import (
+        TrtLlmBf16ExpertsMonolithic,
+    )
+    from vllm.model_executor.layers.fused_moe.modular_kernel import (
+        FusedMoEActivationFormat,
+    )
+
+    moe_config = make_dummy_moe_config()
+    moe_config.routing_method = RoutingMethodType.Renormalize
+    moe_config.require_decomposed_backend = require_decomposed_backend
+
+    supported, reason = TrtLlmBf16ExpertsMonolithic.is_supported_config(
+        TrtLlmBf16ExpertsMonolithic,
+        moe_config,
+        None,
+        None,
+        FusedMoEActivationFormat.Standard,
+    )
+
+    assert supported != require_decomposed_backend
+    assert (reason is not None and "routes adjusted" in reason) == (
+        require_decomposed_backend
+    )
 
 
 @patch(
