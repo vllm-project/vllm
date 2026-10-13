@@ -515,6 +515,24 @@ def _get_backend_priorities(
     return backends
 
 
+def _rocm_attn_falls_back_to_triton(vllm_config: "VllmConfig | None") -> bool:
+    """Whether ROCM_ATTN would spend the run in its Triton fallbacks.
+
+    Its HIP paged-attention kernel only serves single-token decode with a
+    power-of-two block size. Speculative decoding verifies several tokens per
+    request, so every step takes the prefix-prefill kernel instead. Hybrid
+    models enlarge the attention block to the mamba page size (e.g. 832), which
+    disables the HIP kernel. In both cases the unified attention backends,
+    which handle multi-token queries in one kernel, are faster.
+    """
+    if vllm_config is None:
+        return False
+    if getattr(vllm_config, "speculative_config", None) is not None:
+        return True
+    model_config = getattr(vllm_config, "model_config", None)
+    return model_config is not None and model_config.is_hybrid
+
+
 def _uses_turboquant(vllm_config: "VllmConfig | None") -> bool:
     """Whether the run's KV cache dtype is one of the turboquant_* presets."""
     cache_config = getattr(vllm_config, "cache_config", None)
@@ -699,6 +717,16 @@ class RocmPlatform(Platform):
         # TODO: Make this explicit in the selector in a future PR.
         if is_encoder_decoder and AttentionBackendEnum.ROCM_ATTN in backend_priorities:
             backend_priorities.remove(AttentionBackendEnum.ROCM_ATTN)
+        if (
+            _rocm_attn_falls_back_to_triton(vllm_config)
+            and AttentionBackendEnum.ROCM_ATTN in backend_priorities
+        ):
+            # Keep ROCM_ATTN valid, but rank the unified backends above it.
+            backend_priorities.remove(AttentionBackendEnum.ROCM_ATTN)
+            backend_priorities.insert(
+                backend_priorities.index(AttentionBackendEnum.TRITON_ATTN) + 1,
+                AttentionBackendEnum.ROCM_ATTN,
+            )
         is_turboquant_run = _uses_turboquant(vllm_config)
         for priority, backend in enumerate(backend_priorities):
             try:
