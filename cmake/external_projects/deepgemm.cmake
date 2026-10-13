@@ -33,7 +33,7 @@ else()
   # plus the SM120 port, the SM90 paged-MQA kv_block=32/next_n=4 port,
   # configurable SwiGLU alpha/beta, SiTU for FP8/FP4 Mega MoE, and NVFP4
   # Mega MoE. TORCH_STABLE_LIBRARY build with a CPython 3.10 stable-ABI floor.
-  set(_DEEPGEMM_UPSTREAM_TAG "a981d8e3a58e877b7f53e63707de5834312fb710")
+  set(_DEEPGEMM_UPSTREAM_TAG "bd2e2000fa883310b4229b300aa2e13cd4a52925")
 
   set(_deepgemm_fc_root "${FETCHCONTENT_BASE_DIR}")
   if(NOT _deepgemm_fc_root)
