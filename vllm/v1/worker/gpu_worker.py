@@ -108,7 +108,7 @@ from vllm.v1.outputs import (
     DraftTokenIds,
     ModelRunnerOutput,
 )
-from vllm.v1.utils import compute_iteration_details, report_usage_stats
+from vllm.v1.utils import report_usage_stats
 from vllm.v1.worker.extensible_kv_cache import (
     extend_kv_cache,
     kv_cache_lent_for_weight_update,
@@ -1402,7 +1402,8 @@ class Worker(WorkerBase):
         if not self.profiler.should_annotate:
             return nullcontext()
 
-        iteration_details = compute_iteration_details(scheduler_output)
+        iteration_details = scheduler_output.iteration_details
+        assert iteration_details is not None
 
         if self.vllm_config.profiler_config.detailed_trace_annotation:
             # Compute roofline-model metrics per request, split by phase

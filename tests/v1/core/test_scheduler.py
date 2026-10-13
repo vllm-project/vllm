@@ -184,8 +184,11 @@ def test_mamba_decode_checkpoint_publication(
     assert cached_tokens == (block_size if outcome in ("accepted", "finished") else 0)
 
 
-def test_make_scheduled_encoder_input_stats_output_embeddings():
+def test_scheduled_encoder_input_stats_output_embeddings():
     scheduler = create_scheduler()
+    scheduler.observability_config.enable_logging_iteration_details = True
+    scheduler.max_num_encoder_input_tokens = 441
+    scheduler.encoder_cache_manager = EncoderCacheManager(cache_size=441)
     mm_features = [
         MultiModalFeatureSpec(
             data=MultiModalKwargsItem.dummy(),
@@ -206,13 +209,15 @@ def test_make_scheduled_encoder_input_stats_output_embeddings():
             mm_position=PlaceholderRange(offset=400, length=49),
         ),
     ]
-    scheduler.requests["req"] = Mock(mm_features=mm_features)
+    (request,) = create_requests(num_requests=1, num_tokens=449)
+    request.mm_features = mm_features
+    scheduler.add_request(request)
 
-    stats = scheduler._make_scheduled_encoder_input_stats({"req": [0, 1, 2]})
+    stats = scheduler.schedule().iteration_details
 
     assert stats is not None
-    assert stats.num_inputs == 3
-    assert stats.output_tokens == 441
+    assert stats.num_encoder_inputs == 3
+    assert stats.num_encoder_output_tokens == 441
 
 
 def test_scheduled_encoder_input_stats_disabled_without_iteration_logging(
@@ -220,12 +225,12 @@ def test_scheduled_encoder_input_stats_disabled_without_iteration_logging(
 ):
     scheduler = create_scheduler()
     make_stats = Mock(side_effect=AssertionError("stats should not be computed"))
-    monkeypatch.setattr(scheduler, "_make_scheduled_encoder_input_stats", make_stats)
+    monkeypatch.setattr("vllm.v1.core.sched.scheduler.IterationDetails", make_stats)
 
     scheduler_output = scheduler.schedule()
 
     make_stats.assert_not_called()
-    assert scheduler_output.scheduled_encoder_input_stats is None
+    assert scheduler_output.iteration_details is None
 
 
 def test_scheduled_encoder_input_stats_disabled_without_log_stats(
@@ -235,12 +240,53 @@ def test_scheduled_encoder_input_stats_disabled_without_log_stats(
     scheduler.log_stats = False
     scheduler.observability_config.enable_logging_iteration_details = True
     make_stats = Mock(side_effect=AssertionError("stats should not be computed"))
-    monkeypatch.setattr(scheduler, "_make_scheduled_encoder_input_stats", make_stats)
+    monkeypatch.setattr("vllm.v1.core.sched.scheduler.IterationDetails", make_stats)
 
     scheduler_output = scheduler.schedule()
 
     make_stats.assert_not_called()
-    assert scheduler_output.scheduled_encoder_input_stats is None
+    assert scheduler_output.iteration_details is None
+
+
+@pytest.mark.parametrize("use_v2_model_runner", [False, True])
+def test_iteration_details_count_recomputation_as_prefill(use_v2_model_runner):
+    scheduler = create_scheduler(
+        max_num_seqs=1,
+        max_num_batched_tokens=8,
+        max_model_len=128,
+        use_v2_model_runner=use_v2_model_runner,
+    )
+    scheduler.observability_config.enable_logging_iteration_details = True
+    _start_decoding(scheduler)
+    (request,) = scheduler.running
+    assert request.num_output_tokens == 1
+
+    scheduler.running.remove(request)
+    scheduler._preempt_request(request, 0.0)
+
+    for num_tokens in (8, 1):
+        output = scheduler.schedule()
+        details = output.iteration_details
+        assert details is not None
+        assert details.num_prefill_requests == 1
+        assert details.num_prefill_tokens == num_tokens
+        assert details.num_decode_requests == details.num_decode_tokens == 0
+        scheduler.update_from_output(
+            output,
+            ModelRunnerOutput(
+                req_ids=[request.request_id],
+                req_id_to_index={request.request_id: 0},
+                sampled_token_ids=[[] if num_tokens == 8 else [0]],
+                logprobs=None,
+                prompt_logprobs_dict={},
+                pooler_output=[],
+            ),
+        )
+
+    details = scheduler.schedule().iteration_details
+    assert details is not None
+    assert details.num_decode_requests == details.num_decode_tokens == 1
+    assert details.num_prefill_requests == details.num_prefill_tokens == 0
 
 
 def test_add_requests():
