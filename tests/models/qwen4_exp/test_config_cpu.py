@@ -7,7 +7,9 @@ from unittest.mock import patch
 import pytest
 import torch
 from torch import nn
+from transformers import Qwen4ExpConfig, Qwen4ExpTextConfig
 
+from vllm.config import ParallelConfig
 from vllm.model_executor.models.config import (
     Qwen3_5ForConditionalGenerationConfig,
     Qwen4ExpForConditionalGenerationConfig,
@@ -20,7 +22,6 @@ from vllm.models.qwen4_exp.cpu.model import (
 )
 from vllm.platforms import current_platform
 from vllm.platforms.interface import CpuArchEnum
-from vllm.transformers_utils.configs.qwen4_exp import Qwen4ExpTextConfig
 
 
 def _text_config() -> Qwen4ExpTextConfig:
@@ -37,7 +38,9 @@ def _text_config() -> Qwen4ExpTextConfig:
         linear_num_value_heads=2,
         linear_key_head_dim=8,
         linear_value_head_dim=8,
-        num_experts=0,
+        num_experts=4,
+        num_experts_per_tok=2,
+        eos_token_id=1,
         hc_count=2,
         hc_lowrank=4,
         ple_layer_ids=[1],
@@ -47,14 +50,15 @@ def _text_config() -> Qwen4ExpTextConfig:
 
 
 def _vllm_config(restriction: str | None = None) -> SimpleNamespace:
+    text_config = _text_config()
     config = SimpleNamespace(
         model_config=SimpleNamespace(
-            hf_text_config=_text_config(),
-            hf_config=_text_config(),
+            hf_text_config=text_config,
+            hf_config=Qwen4ExpConfig(text_config=text_config),
             multimodal_config=SimpleNamespace(language_model_only=True),
             enforce_eager=False,
         ),
-        parallel_config=SimpleNamespace(
+        parallel_config=ParallelConfig(
             pipeline_parallel_size=1,
             tensor_parallel_size=1,
             enable_dbo=False,
