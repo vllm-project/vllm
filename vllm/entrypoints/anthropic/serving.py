@@ -35,7 +35,6 @@ from vllm.entrypoints.anthropic.protocol import (
     AnthropicToolChangeDefinition,
     AnthropicUsage,
 )
-from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
 from vllm.entrypoints.generate.base.protocol import (
     JsonSchemaResponseFormat,
     ResponseFormat,
@@ -54,6 +53,7 @@ from vllm.entrypoints.serve.engine.protocol import ErrorResponse, UsageInfo
 from vllm.entrypoints.serve.exception_handling.utils import sanitize_message
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.logger import init_logger
+from vllm.renderers.chat_utils import ChatTemplateContentFormatOption
 from vllm.renderers.hf import HfRenderer, resolve_chat_template
 from vllm.renderers.online_renderer import OnlineRenderer
 
@@ -163,6 +163,8 @@ class AnthropicServingMessages(OpenAIServingChat):
         tool_strict_level: str = "auto",
         enable_prompt_tokens_details: bool = False,
         enable_force_include_usage: bool = False,
+        enable_log_outputs: bool = False,
+        enable_log_deltas: bool = True,
         default_chat_template_kwargs: dict[str, Any] | None = None,
         disabled_thinking_effort: AnthropicDisabledThinkingEffortOption = "auto",
     ):
@@ -181,6 +183,8 @@ class AnthropicServingMessages(OpenAIServingChat):
             tool_parser=tool_parser,
             enable_prompt_tokens_details=enable_prompt_tokens_details,
             enable_force_include_usage=enable_force_include_usage,
+            enable_log_outputs=enable_log_outputs,
+            enable_log_deltas=enable_log_deltas,
             default_chat_template_kwargs=default_chat_template_kwargs,
         )
         self._merge_inline_system = self._should_merge_inline_system(online_renderer)

@@ -828,6 +828,18 @@ impl EngineCoreClient {
         Ok(())
     }
 
+    /// Release the trainer connection without shutting down inference.
+    pub async fn shutdown_weight_transfer_engine(&self) -> Result<()> {
+        self.collective_rpc(
+            "shutdown_weight_transfer_engine",
+            None,
+            Vec::<JsonValue>::new(),
+            BTreeMap::<String, JsonValue>::new(),
+        )
+        .await?;
+        Ok(())
+    }
+
     /// Start a weight update for the base model.
     pub async fn start_weight_update(&self) -> Result<()> {
         self.collective_rpc(

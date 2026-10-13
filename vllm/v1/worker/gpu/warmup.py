@@ -106,7 +106,6 @@ def run_mixed_prefill_decode_warmup(
     prefill_token_ids = list(range(prefill_len))
 
     kv_cache_groups = model_runner.kv_cache_config.kv_cache_groups
-    num_kv_cache_groups = len(kv_cache_groups)
     block_count = _warmup_block_counter(model_runner)
     kv_cache_specs = [g.kv_cache_spec for g in kv_cache_groups]
     decode_prefill_block_counts = [
@@ -166,7 +165,6 @@ def run_mixed_prefill_decode_warmup(
         decode_req_id: decode_prompt_len,
     }
     decode_prefill_output.total_num_scheduled_tokens = decode_prompt_len
-    decode_prefill_output.num_common_prefix_blocks = [0] * num_kv_cache_groups
 
     decode_new_blocks = tuple(_alloc_blocks(n) for n in decode_block_deltas)
     cached_decode_req = CachedRequestData.make_empty()
@@ -198,7 +196,6 @@ def run_mixed_prefill_decode_warmup(
         prefill_req_id: prefill_len,
     }
     mixed_output.total_num_scheduled_tokens = num_tokens
-    mixed_output.num_common_prefix_blocks = [0] * num_kv_cache_groups
 
     cleanup_output = SchedulerOutput.make_empty()
     cleanup_output.finished_req_ids = {decode_req_id, prefill_req_id}
@@ -272,7 +269,6 @@ def _warmup_kernels(
     decode_len = prompt_len + num_decode_steps * decode_query_len
 
     kv_cache_groups = model_runner.kv_cache_config.kv_cache_groups
-    num_kv_cache_groups = len(kv_cache_groups)
 
     # Encoder-decoder models: give each warmup request a dummy encoder input so
     # cross-attention warms up over a realistic, non-empty key sequence.
@@ -361,7 +357,6 @@ def _warmup_kernels(
     prefill_output.scheduled_new_reqs = new_reqs
     prefill_output.num_scheduled_tokens = {rid: prompt_len for rid in req_ids}
     prefill_output.total_num_scheduled_tokens = prompt_len * num_reqs
-    prefill_output.num_common_prefix_blocks = [0] * num_kv_cache_groups
 
     # Disable KV connector for warmup run.
     model_runner.kv_connector.set_disabled(True)
@@ -424,7 +419,6 @@ def _warmup_kernels(
             decode_output.total_num_scheduled_tokens = sum(
                 step_num_scheduled_tokens.values()
             )
-            decode_output.num_common_prefix_blocks = [0] * num_kv_cache_groups
 
             worker_execute_model(decode_output)
             worker_sample_tokens(None)
