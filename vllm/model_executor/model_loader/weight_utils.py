@@ -1498,70 +1498,25 @@ LoaderFunction = Callable[[torch.Tensor, torch.Tensor], None]
 
 
 def load_attention_sink(param: torch.Tensor, loaded_weight: torch.Tensor) -> None:
-    """Load global sink heads into a TP-local parameter, padding with -inf.
-
-    Attention sinks are checkpoint-backed parameters and must participate in
-    the standard weight_loader pipeline. Register this on the parameter - see
-    ``make_attention_sink`` - so layerwise reload can replay sharding and shape
-    adaptation during RL weight updates. Model-specific load_weights copies
-    bypass that lifecycle.
-
-    The runtime sink must keep ``-inf`` in its padded heads; this loader
-    restores that invariant on every load. Checkpoint heads are assumed to be
-    evenly partitioned across tensor-parallel ranks, so models with uneven
-    partitions need explicit head ranges here.
-
-    Args:
-        param: One-dimensional runtime sink, optionally padded.
-        loaded_weight: One-dimensional checkpoint sink containing all heads.
-
-    Raises:
-        ValueError: If either tensor is not one-dimensional, if the checkpoint
-            sink is empty, if its head count is not divisible by the
-            tensor-parallel size, or if a rank's head range does not fit the
-            runtime parameter.
-
-    """
+    """Load this rank's heads of a global sink; padded heads are set to -inf."""
     tp_size = get_tensor_model_parallel_world_size()
-    tp_rank = get_tensor_model_parallel_rank()
-    if param.ndim != 1 or loaded_weight.ndim != 1:
-        raise ValueError("Attention sinks must be one-dimensional")
     heads = loaded_weight.numel()
-    if heads == 0:
-        # An empty sink is not a valid checkpoint: loading it would leave every
-        # runtime head at -inf, silently disabling the sink.
-        raise ValueError("Attention sink checkpoint is empty")
     if heads % tp_size:
         raise ValueError(
             f"Attention sink heads ({heads}) must be divisible by tp_size ({tp_size})"
         )
     local_heads = heads // tp_size
-    if local_heads > param.numel():
-        raise ValueError(
-            f"Attention sink heads per rank ({local_heads}) exceed the runtime "
-            f"parameter size ({param.numel()})"
-        )
-    local_weight = loaded_weight.narrow(0, tp_rank * local_heads, local_heads)
-    default_weight_loader(param[:local_heads], local_weight)
-    if param.numel() > local_heads:
-        param.data[local_heads:].fill_(-float("inf"))
+    start = get_tensor_model_parallel_rank() * local_heads
+    default_weight_loader(
+        param[:local_heads], loaded_weight.narrow(0, start, local_heads)
+    )
+    param.data[local_heads:].fill_(-float("inf"))
 
 
 def make_attention_sink(
     num_heads: int, dtype: torch.dtype | None = None
 ) -> torch.nn.Parameter:
-    """Create a checkpoint-backed per-head attention sink parameter.
-
-    Padded heads start at ``-inf``, which means "no sink" to the kernels, and
-    the common loader is registered so layerwise reload can replay the load.
-
-    Args:
-        num_heads: Runtime sink heads for this rank, including any padding.
-        dtype: Parameter dtype; defaults to the ambient default dtype, which is
-            the model dtype while the model is constructed. Kernels that require
-            fp32 sinks should pass ``torch.float32``.
-
-    """
+    """Create a sink with -inf padding and register its TP weight loader."""
     sink = torch.nn.Parameter(
         torch.full((num_heads,), -float("inf"), dtype=dtype), requires_grad=False
     )

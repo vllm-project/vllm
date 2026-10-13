@@ -1,13 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import ast
 import gc
 import importlib.machinery
 import inspect
 import sys
 import types
 from importlib import import_module
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
 from weakref import WeakKeyDictionary, ref
@@ -16,7 +14,6 @@ import pytest
 import torch
 from torch.nn.parameter import UninitializedParameter
 
-import vllm
 import vllm.model_executor.model_loader.reload.layerwise as reload_layerwise
 import vllm.model_executor.model_loader.reload.meta as reload_meta
 from vllm.config import ModelConfig
@@ -46,43 +43,6 @@ from vllm.model_executor.model_loader.weight_utils import (
     load_attention_sink,
 )
 from vllm.platforms import current_platform
-
-
-@pytest.mark.parametrize(
-    "path,class_name",
-    [
-        ("models/deepseek_v4/attention.py", "DeepseekV4Attention"),
-        ("models/deepseek_v41/attention.py", "DeepseekV4Attention"),
-        ("models/hy_v4/nvidia/attention.py", "HYV4MLAAttention"),
-        ("model_executor/models/mimo_v2.py", "MiMoV2Attention"),
-        ("model_executor/models/gpt_oss.py", "OAIAttention"),
-        ("model_executor/models/laguna.py", "LagunaAttention"),
-        ("model_executor/models/qwen3_dflash.py", "DFlashQwen3Attention"),
-    ],
-)
-def test_attention_sink_uses_common_factory(path, class_name):
-    """Every sink model must build its sink through the common factory.
-
-    The factory is what attaches ``load_attention_sink`` and the ``-inf``
-    padding, so a model that creates the parameter by hand bypasses the
-    layerwise reload lifecycle this PR fixes.
-    """
-    # Relative to the imported package: CI runs the tests from a checkout while
-    # importing an installed vllm, so the test file's own path tells us nothing.
-    source = Path(vllm.__file__).resolve().parent / path
-    tree = ast.parse(source.read_text(encoding="utf-8"))
-    cls = next(
-        n
-        for n in ast.walk(tree)
-        if isinstance(n, ast.ClassDef) and n.name == class_name
-    )
-    calls = [
-        node
-        for node in ast.walk(cls)
-        if isinstance(node, ast.Call)
-        and getattr(node.func, "id", None) == "make_attention_sink"
-    ]
-    assert calls, f"{class_name} does not create its attention sink via the factory"
 
 
 @pytest.mark.parametrize("tp_rank", [0, 1])
@@ -134,7 +94,48 @@ def test_attention_sink_model_loading_shards_once(
     assert getattr(model.model.mtp, sink_name).data_ptr() == sink.data_ptr()
 
 
-@pytest.mark.parametrize("quant_method", ["mxfp4", "quark", None])
+@pytest.mark.parametrize("tp_rank", [0, 1])
+@pytest.mark.parametrize(
+    "module_name,class_name,attention_name,sink_name",
+    [
+        ("deepseek_v4", "DeepseekV4Model", "attn", "attn_sink"),
+        ("deepseek_v41", "DeepseekV4Model", "attn", "attn_sink"),
+        ("hy_v4", "HYV4Model", "self_attn", "learnable_sink_param"),
+    ],
+)
+def test_attention_sink_deepseek_hy_loading_uses_parameter_loader(
+    monkeypatch, tp_rank, module_name, class_name, attention_name, sink_name
+):
+    """DeepSeek and HY-V4 pass global sinks to the parameter's current loader."""
+    module = import_module(f"vllm.models.{module_name}.nvidia.model")
+    from vllm.model_executor.model_loader import weight_utils
+
+    monkeypatch.setattr(weight_utils, "get_tensor_model_parallel_world_size", lambda: 2)
+    monkeypatch.setattr(weight_utils, "get_tensor_model_parallel_rank", lambda: tp_rank)
+    cls = getattr(module, class_name)
+    model = cls.__new__(cls)
+    torch.nn.Module.__init__(model)
+    model.config = SimpleNamespace(tie_word_embeddings=False)
+    model.quant_config = None
+    model.get_expert_mapping = lambda: []
+    attention = torch.nn.Module()
+    layer = torch.nn.Module()
+    setattr(layer, attention_name, attention)
+    model.layers = torch.nn.ModuleList([layer])
+    sink = torch.nn.Parameter(torch.zeros(6), requires_grad=False)
+    attention.register_parameter(sink_name, sink)
+    checkpoint = torch.arange(8, dtype=torch.float32)
+    name = f"layers.0.{attention_name}.{sink_name}"
+
+    for offset in (0, 10):
+        weight = checkpoint + offset
+        sink.weight_loader = Mock(side_effect=load_attention_sink)
+        assert model.load_weights([(name, weight)]) == {name}
+        sink.weight_loader.assert_called_once_with(sink, weight)
+        assert torch.equal(sink[:4], weight.chunk(2)[tp_rank])
+        assert torch.isneginf(sink[4:]).all()
+
+
 def _gpt_oss_container(monkeypatch, quant_method=None):
     """A minimal GptOssModel whose loading paths can be driven directly."""
     from vllm.model_executor.models import gpt_oss

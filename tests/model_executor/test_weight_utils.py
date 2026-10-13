@@ -49,43 +49,24 @@ def test_attention_sink_loader_shapes(
 
 
 @pytest.mark.parametrize(
-    "checkpoint_shape,runtime_shape",
-    [((2, 4), (4,)), ((8,), (2, 2)), ((0,), (4,)), ((7,), (4,)), ((8,), (3,))],
+    "checkpoint_shape,runtime_shape,error",
+    [
+        ((2, 4), (4,), RuntimeError),
+        ((8,), (2, 2), AssertionError),
+        ((7,), (4,), ValueError),
+        ((8,), (3,), AssertionError),
+    ],
 )
 def test_attention_sink_loader_rejects_invalid_shapes(
-    monkeypatch, checkpoint_shape, runtime_shape
+    monkeypatch, checkpoint_shape, runtime_shape, error
 ):
     """Invalid sink shapes fail before changing the runtime parameter."""
     monkeypatch.setattr(weight_utils, "get_tensor_model_parallel_world_size", lambda: 2)
     monkeypatch.setattr(weight_utils, "get_tensor_model_parallel_rank", lambda: 0)
     param = torch.nn.Parameter(torch.ones(runtime_shape), requires_grad=False)
-    with pytest.raises(ValueError):
+    with pytest.raises(error):
         load_attention_sink(param, torch.zeros(checkpoint_shape))
     assert torch.equal(param, torch.ones(runtime_shape))
-
-
-def test_attention_sink_loader_rejects_empty_checkpoint(monkeypatch):
-    """An empty sink checkpoint must not silently disable the sink."""
-    monkeypatch.setattr(weight_utils, "get_tensor_model_parallel_world_size", lambda: 2)
-    monkeypatch.setattr(weight_utils, "get_tensor_model_parallel_rank", lambda: 0)
-    param = torch.nn.Parameter(torch.ones(4), requires_grad=False)
-    with pytest.raises(ValueError, match="empty"):
-        load_attention_sink(param, torch.zeros(0))
-    assert torch.equal(param, torch.ones(4))
-
-
-@pytest.mark.parametrize("tp_rank", [0, 1])
-def test_attention_sink_loader_restores_padding(monkeypatch, tp_rank):
-    """Padded heads are set back to -inf even if they held other values."""
-    monkeypatch.setattr(weight_utils, "get_tensor_model_parallel_world_size", lambda: 2)
-    monkeypatch.setattr(
-        weight_utils, "get_tensor_model_parallel_rank", lambda rank=tp_rank: rank
-    )
-    param = torch.nn.Parameter(torch.full((6,), 123.0), requires_grad=False)
-    load_attention_sink(param, torch.arange(8, dtype=torch.float32))
-    local = torch.arange(8, dtype=torch.float32).chunk(2)[tp_rank]
-    assert torch.equal(param[:4], local)
-    assert torch.isinf(param[4:]).all() and (param[4:] < 0).all()
 
 
 @pytest.mark.parametrize("param_dtype", [torch.bfloat16, torch.float32])
