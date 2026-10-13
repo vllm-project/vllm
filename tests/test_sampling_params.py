@@ -8,7 +8,10 @@ import pytest
 from vllm import SamplingParams
 from vllm.config.diffusion import DiffusionConfig
 from vllm.exceptions import VLLMValidationError
-from vllm.utils.diffusion import validate_diffusion_sampling_params
+from vllm.utils.diffusion import (
+    is_single_pass_read,
+    validate_diffusion_sampling_params,
+)
 from vllm.v1.engine.input_processor import InputProcessor
 
 
@@ -258,6 +261,27 @@ def test_diffusion_accepts_extra_args():
         }
     )
     _verify_diffusion(params, canvas_length=8)
+
+
+@pytest.mark.parametrize(
+    "kwargs, extra_args, expected",
+    [
+        pytest.param({}, {}, True, id="one-step-read"),
+        pytest.param({}, {"diffusion_read_only": False}, False, id="generation"),
+        pytest.param({}, {"diffusion_max_steps": None}, False, id="uncapped-read"),
+        pytest.param({}, {"diffusion_max_steps": 2}, False, id="two-step-read"),
+        pytest.param({"prompt_logprobs": 1}, {}, False, id="prompt-logprobs"),
+        pytest.param(
+            {"prompt_logprob_token_ids": [[1]]}, {}, False, id="prompt-token-ids"
+        ),
+    ],
+)
+def test_single_pass_read_is_a_one_step_read_without_prompt_scores(
+    kwargs, extra_args, expected
+):
+    read = {"diffusion_read_only": True, "diffusion_max_steps": 1}
+    params = SamplingParams(**kwargs, extra_args={**read, **extra_args})
+    assert is_single_pass_read(params) is expected
 
 
 @pytest.mark.parametrize("value", [-(2**63) - 1, 2**64])
