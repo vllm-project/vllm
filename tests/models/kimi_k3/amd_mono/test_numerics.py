@@ -10,6 +10,10 @@ spec-verify step, random weights in the checkpoint's formats at TP8 shapes:
   Then a CUDA graph of K2 replayed 300 times, bit-identical, and a stalled rank
   (the fault hook): every rank's launch finishes and the output rank's flags
   fail the step.
+- M1a (AttnRes -> qkv_a / g_proj -> q / kv RMSNorm + the fp8 KV write -> q_b
+  -> fp4 W_UK -> the DCP query gather) and M1b (the a2a LSE combine -> fp4
+  W_UV -> the gate): one GPU, then TP8 + DCP8 with a graph of two MLA layers
+  (M1a -> M1b -> K2) replayed.
 """
 
 import pytest
@@ -260,6 +264,291 @@ def test_k1_matches_vllm_ops(
     }
     assert errs["conv_state"] < 1e-3 and errs["rstate"] < 1e-3, errs
     assert _cos(core, ref["core"]) > COS_MIN, errs
+
+
+# ---------------------------------------------------------------- M1a (MLA)
+
+
+def _rms(x, w, eps):
+    xf = x.float()
+    return (xf * torch.rsqrt(xf.pow(2).mean(-1, keepdim=True) + eps) * w.float()).to(bf)
+
+
+def _mla_inputs(S: int, nb: int, rank: int = 0, ranks: int = 1):
+    from aiter.ops.triton.quant import dynamic_mxfp4_quant
+
+    from vllm.models.kimi_k3.amd.ops.mono.attention.kda import HIDDEN
+    from vllm.models.kimi_k3.amd.ops.mono.attention.mla import (
+        ENTRY,
+        GROWS,
+        KVL,
+        NH,
+        NOPE,
+        QB,
+        QKV_A,
+        QL,
+    )
+
+    g = torch.Generator(device="cuda").manual_seed(0)  # replicated
+    gr = torch.Generator(device="cuda").manual_seed(300 + rank)  # TP shards
+    w = {
+        "prefix": _randn(g, S, HIDDEN, scale=2.0),
+        "delta": _randn(g, S, HIDDEN, scale=0.5),
+        "blocks": _randn(g, S, 8, HIDDEN, scale=2.0),
+        "ares_nw": (1 + _randn(g, HIDDEN, scale=0.1, dtype=torch.float32)).to(bf),
+        "ares_qk": _randn(g, HIDDEN, scale=0.05),
+        "in_nw": (1 + _randn(g, HIDDEN, scale=0.1, dtype=torch.float32)).to(bf),
+        "w_qkv": _randn(g, QKV_A, HIDDEN, scale=0.02),
+        "w_g": _randn(gr, GROWS, HIDDEN, scale=0.02),
+        "q_nw": (1 + _randn(g, QL, scale=0.1, dtype=torch.float32)).to(bf),
+        "kv_nw": (1 + _randn(g, KVL, scale=0.1, dtype=torch.float32)).to(bf),
+        "w_qb": _randn(gr, QB, QL, scale=0.03),
+    }
+    # W_UK as vLLM's MLA keeps it: rows (n, h) quantized by aiter, the scales
+    # column-major: W_K (12, 512, 64) strides (64, 768, 1), its scales (1, 12, 6144)
+    uk = _randn(gr, KVL * NH, NOPE, scale=0.1)
+    wq, ws = dynamic_mxfp4_quant(uk)
+    w["w_k"] = wq.view(torch.uint8).unflatten(0, (KVL, NH)).transpose(0, 1)
+    w["w_k_scale"] = ws.view(torch.uint8).unflatten(0, (KVL, NH)).transpose(0, 1)
+    # hybrid page alignment: entries dense, blocks strided; a token another
+    # DCP rank's (slot -1): every other one, or t % ranks != rank
+    bs, nblk = 16, 2 * S // 16 + 2
+    # finite E4M3 bytes (0x7f is NaN)
+    pages = torch.randint(0, 0x70, (nblk, bs * ENTRY + 512), dtype=torch.uint8,
+                          device="cuda", generator=gr)
+    w["kv_cache"] = pages[:, : bs * ENTRY].view(nblk, bs, ENTRY)
+    perm = torch.randperm(nblk * bs, device="cuda", generator=gr)[:S]
+    if ranks == 1:
+        perm[1::2] = -1
+    else:
+        perm[torch.arange(S, device="cuda") % ranks != rank] = -1
+    w["slots"] = perm.to(torch.int64)
+    return w
+
+
+def _mla_reference(w, nb: int):
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.models.kimi_k3.amd.ops.attn_res import attn_res
+    from vllm.models.kimi_k3.amd.ops.mono.attention.mla import KVL, NH, NOPE, QL, ROPE
+    from vllm.platforms import current_platform
+
+    fp8 = current_platform.fp8_dtype()
+    prefix, blocks = w["prefix"].clone(), w["blocks"].clone()
+    x = attn_res(prefix, w["delta"], blocks, w["ares_nw"], w["ares_qk"],
+                 w["in_nw"], nb, -1, 1e-5, 1e-5)
+    qkv = F.linear(x, w["w_qkv"])
+    q_c, kv_c, k_pe = qkv.split([QL, KVL, ROPE], -1)
+    q_c, kv_c = _rms(q_c, w["q_nw"], 1e-6), _rms(kv_c, w["kv_nw"], 1e-6)
+    q = F.linear(q_c, w["w_qb"]).view(-1, NH, NOPE + ROPE)
+    q_nope, q_pe = q.split([NOPE, ROPE], -1)
+    one = torch.ones(1, dtype=torch.float32, device="cuda")
+    ql = rocm_aiter_ops.batched_gemm_a16wfp4(
+        q_nope.transpose(0, 1), w["w_k"], w["w_k_scale"],
+        transpose_bm=True, prequant=True, y_scale=one,
+    )
+    q8 = torch.cat([ql, q_pe], -1).float().clamp(-448, 448).to(fp8)
+    cache = w["kv_cache"].clone()
+    entry = torch.cat([kv_c, k_pe], -1).float().clamp(-448, 448).to(fp8)
+    flat = cache.view(-1, cache.size(1), cache.size(2))
+    for t, s in enumerate(w["slots"].tolist()):
+        if s >= 0:
+            flat[s // cache.size(1), s % cache.size(1)] = entry[t].view(torch.uint8)
+    gate = F.linear(x, w["w_g"]).sigmoid()
+    return {"prefix": prefix, "blocks": blocks, "q": q8, "cache": cache, "gate": gate}
+
+
+def _fp8_f(t):
+    from vllm.platforms import current_platform
+
+    return t.view(current_platform.fp8_dtype()).float()
+
+
+@needs_gfx950
+@pytest.mark.parametrize("S", [4, 8, 16, 32, 64])
+def test_m1a_single_gpu_matches_vllm_ops(S: int) -> None:
+    """M1a (ranks = 1) against attn_res -> qkv_a -> q / kv RMSNorm -> q_b ->
+    aiter's fp4 W_UK -> the fp8 query, the fp8 cache rows and the gate."""
+    from vllm.models.kimi_k3.amd.ops.mono.attention.mla import (
+        ENTRY,
+        GROWS,
+        KVL,
+        NH,
+        MlaPreBuild,
+        mla_pre,
+        peer_bytes,
+        scratch_bytes,
+    )
+    from vllm.models.kimi_k3.amd.ops.mono.common.plan import HEALTH_WORDS
+
+    nb = 4
+    w = _mla_inputs(S, nb)
+    ref = _mla_reference(w, nb)
+    key = MlaPreBuild(tokens=S, nblocks=nb, delta=True, ranks=1)
+    prefix, blocks, cache = w["prefix"].clone(), w["blocks"].clone(), w["kv_cache"].clone()
+    q = torch.zeros(S, NH, ENTRY, dtype=torch.uint8, device="cuda")
+    gate = torch.zeros(S, GROWS, dtype=bf, device="cuda")
+    peer = torch.zeros(peer_bytes(S, 1), dtype=torch.uint8, device="cuda")
+    health = torch.zeros(HEALTH_WORDS, dtype=torch.int32, device="cuda")
+    flags = torch.zeros(1, dtype=torch.int32, device="cuda")
+    mla_pre(
+        key,
+        prefix=prefix,
+        delta=w["delta"],
+        blocks=blocks,
+        ares_nw=w["ares_nw"],
+        ares_qk=w["ares_qk"],
+        in_nw=w["in_nw"],
+        w_qkv=w["w_qkv"],
+        w_g=w["w_g"],
+        q_nw=w["q_nw"],
+        kv_nw=w["kv_nw"],
+        w_qb=w["w_qb"],
+        w_k=w["w_k"],
+        w_k_scale=w["w_k_scale"],
+        kv_cache=cache,
+        slots=w["slots"],
+        gate_out=gate,
+        q_out=q,
+        scratch=torch.zeros(scratch_bytes(key), dtype=torch.uint8, device="cuda"),
+        peers=torch.tensor([peer.data_ptr()], dtype=torch.int64, device="cuda"),
+        rank=0,
+        layer=3,
+        epoch=torch.ones(1, dtype=torch.int32, device="cuda"),
+        health=health,
+        alarm=flags.data_ptr(),
+    )
+    torch.accelerator.synchronize()
+    assert not health.any() and not flags.any()
+
+    torch.testing.assert_close(prefix, ref["prefix"], atol=0, rtol=0)
+    torch.testing.assert_close(blocks, ref["blocks"], atol=0, rtol=0)
+    # GEMV sums differ from hipBLASLt's / aiter's in order only: an fp8 or bf16
+    # value now and then lands one step off
+    errs = {
+        "gate": _rel_l2(gate, ref["gate"]),
+        "q_nope": _rel_l2(_fp8_f(q[..., :KVL]), ref["q"][..., :KVL].float()),
+        "q_pe": _rel_l2(_fp8_f(q[..., KVL:]), ref["q"][..., KVL:].float()),
+        "cache": _rel_l2(_fp8_f(cache), _fp8_f(ref["cache"])),
+        "q_same": (q == ref["q"].view(torch.uint8)).float().mean().item(),
+        "cache_same": (cache == ref["cache"]).float().mean().item(),
+    }
+    assert errs["gate"] < 1e-2 and errs["cache"] < 2e-2, errs
+    assert errs["q_nope"] < 3e-2 and errs["q_pe"] < 3e-2, errs
+    assert _cos(_fp8_f(q), ref["q"].float()) > 0.999, errs
+    # rows of another rank's tokens untouched
+    assert errs["cache_same"] > 0.99, errs
+
+
+def _a2a_combine(o, lse, seq_lens, qsl, q: int):
+    """``_dcp_a2a_pack_send`` + ``_dcp_a2a_unpack_combine`` for one rank's heads,
+    every rank's partials stacked: o [R, S, 12, 512], lse [R, S, 12], each
+    sender's local KV lengths seq_lens [R, requests]."""
+    S = o.size(1)
+    t = torch.arange(S, device=o.device)
+    empty = (seq_lens[:, t // q] == 0) | (t >= qsl[S // q])
+    lse = lse.masked_fill(empty.unsqueeze(-1), float("-inf"))
+    lse = torch.where(lse.isnan() | (lse == float("inf")), float("-inf"), lse)
+    m = lse.max(0).values
+    m = torch.where(m == float("-inf"), 0.0, m)
+    glse = (lse - m).exp().sum(0).log() + m
+    w = (lse - glse).exp().nan_to_num(0.0)
+    p = torch.where(w.unsqueeze(-1) == 0, 0.0, o.float())
+    return (p * w.unsqueeze(-1)).sum(0).to(bf)
+
+
+def _mla_back_inputs(S: int, q: int, R: int, rank: int = 0):
+    from aiter.ops.triton.quant import dynamic_mxfp4_quant
+
+    from vllm.models.kimi_k3.amd.ops.mono.attention.mla import GROWS, KVL, NH
+
+    g = torch.Generator(device="cuda").manual_seed(1 + rank)
+    nreq = S // q
+    w = {
+        # AITER's padded 128-head outputs, viewed to the gathered heads
+        "o": _randn(g, S, 128, KVL, scale=0.5)[:, : R * NH],
+        "lse": (torch.randn(S, 128, generator=g, device="cuda") * 3)[:, : R * NH],
+        "gate": torch.rand(S, GROWS, generator=g, device="cuda").to(bf),
+        # the first request with no local KV (when there are others)
+        "seq_lens": torch.randint(1, 900, (nreq,), dtype=torch.int32,
+                                  device="cuda", generator=g),
+        "qsl": torch.arange(0, S + 1, q, dtype=torch.int32, device="cuda"),
+    }
+    # a request this rank holds none of, and with ranks, one no rank holds
+    if nreq > 1:
+        w["seq_lens"][rank % nreq] = 0
+    if R > 1 and nreq > 2:
+        w["seq_lens"][-1] = 0
+    uv = _randn(g, 128 * NH, KVL, scale=0.05)
+    wq, ws = dynamic_mxfp4_quant(uv)
+    # (12, 128, 256) dense rows a head; the scales column-major as vLLM keeps them
+    w["w_v"] = wq.view(torch.uint8).view(NH, 128, KVL // 2)
+    w["w_v_scale"] = ws.view(torch.uint8).unflatten(0, (NH, 128))
+    return w
+
+
+def _uv_gate(lat, w):
+    """vLLM's ``_v_up_proj`` (aiter's fp4 W_UV) times the gate."""
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.models.kimi_k3.amd.ops.mono.attention.mla import NH
+
+    S = lat.size(0)
+    out = torch.empty(S, NH, 128, dtype=bf, device=lat.device)
+    rocm_aiter_ops.batched_gemm_a16wfp4(
+        lat.transpose(0, 1), w["w_v"], w["w_v_scale"], out,
+        transpose_bm=True, prequant=True, y_scale=None,
+    )
+    return out.view(S, -1) * w["gate"]
+
+
+def _mla_back_reference(w, S: int, q: int):
+    lat = _a2a_combine(w["o"].unsqueeze(0), w["lse"].unsqueeze(0),
+                       w["seq_lens"].unsqueeze(0), w["qsl"], q)
+    return _uv_gate(lat, w)
+
+
+@needs_gfx950
+@pytest.mark.parametrize("S, q", [(4, 4), (8, 4), (16, 4), (32, 4), (64, 4), (64, 8)])
+def test_m1b_single_gpu_matches_vllm_ops(S: int, q: int) -> None:
+    """M1b (ranks = 1) against the a2a LSE combine (its empty-shard mask) ->
+    aiter's fp4 W_UV -> the gate."""
+    from vllm.models.kimi_k3.amd.ops.mono.attention.mla import GROWS
+    from vllm.models.kimi_k3.amd.ops.mono.attention.mla_back import (
+        MlaPostBuild,
+        mla_post,
+        peer_bytes,
+    )
+    from vllm.models.kimi_k3.amd.ops.mono.common.plan import HEALTH_WORDS
+
+    w = _mla_back_inputs(S, q, 1)
+    ref = _mla_back_reference(w, S, q)
+    peer = torch.zeros(peer_bytes(S, 1), dtype=torch.uint8, device="cuda")
+    health = torch.zeros(HEALTH_WORDS, dtype=torch.int32, device="cuda")
+    flags = torch.zeros(1, dtype=torch.int32, device="cuda")
+    core = torch.zeros(S, GROWS, dtype=bf, device="cuda")
+    mla_post(
+        MlaPostBuild(tokens=S, qlen=q, ranks=1),
+        o=w["o"],
+        lse=w["lse"],
+        seq_lens=w["seq_lens"],
+        qsl=w["qsl"],
+        w_v=w["w_v"],
+        w_v_scale=w["w_v_scale"],
+        gate=w["gate"],
+        core=core,
+        peers=torch.tensor([peer.data_ptr()], dtype=torch.int64, device="cuda"),
+        rank=0,
+        layer=5,
+        epoch=torch.ones(1, dtype=torch.int32, device="cuda"),
+        health=health,
+        alarm=flags.data_ptr(),
+    )
+    torch.accelerator.synchronize()
+    assert not health.any() and not flags.any()
+    # the masked request's rows are exactly zero
+    if S > q:
+        assert not core[:q].any() and not ref[:q].any()
+    err = _rel_l2(core, ref)
+    assert err < 1e-2 and _cos(core, ref) > COS_MIN, err
 
 
 # ---------------------------------------------------------------- K2 / MoE
@@ -516,6 +805,176 @@ def test_k2_tp8_matches_vllm_ops_and_replays(monkeypatch: pytest.MonkeyPatch) ->
     multi_process_parallel(monkeypatch, 8, 1, _k2_worker)
 
 
+def _gather(t: torch.Tensor) -> torch.Tensor:
+    """Every rank's ``t`` stacked [ranks, ...]."""
+    out = [torch.empty_like(t) for _ in range(dist.get_world_size())]
+    dist.all_gather(out, t.contiguous())
+    return torch.stack(out)
+
+
+@ray.remote(num_gpus=1, max_calls=1)
+def _m1_worker(
+    monkeypatch: pytest.MonkeyPatch,
+    tp_size: int,
+    pp_size: int,
+    rank: int,
+    distributed_init_port: str,
+) -> None:
+    device = _init_worker(monkeypatch, tp_size, pp_size, rank, distributed_init_port)
+
+    from vllm.models.kimi_k3.amd.mono.runner import MonoRunner
+    from vllm.models.kimi_k3.amd.ops.mono.attention.kda import HIDDEN
+    from vllm.models.kimi_k3.amd.ops.mono.attention.mla import (
+        ENTRY,
+        GROWS,
+        NH,
+        MlaPreBuild,
+        mla_pre,
+    )
+    from vllm.models.kimi_k3.amd.ops.mono.attention.mla_back import (
+        MlaPostBuild,
+        mla_post,
+    )
+
+    R, nb = tp_size, 4
+    runner = MonoRunner(device)
+
+    def pre(w, prefix, blocks, cache, q8, gate, layer=3):
+        S = prefix.size(0)
+        key = MlaPreBuild(
+            tokens=S, nblocks=nb, delta=True, ranks=R, peer_off=runner.mla_peer_off
+        )
+        mla_pre(
+            key,
+            prefix=prefix,
+            delta=w["delta"],
+            blocks=blocks,
+            ares_nw=w["ares_nw"],
+            ares_qk=w["ares_qk"],
+            in_nw=w["in_nw"],
+            w_qkv=w["w_qkv"],
+            w_g=w["w_g"],
+            q_nw=w["q_nw"],
+            kv_nw=w["kv_nw"],
+            w_qb=w["w_qb"],
+            w_k=w["w_k"],
+            w_k_scale=w["w_k_scale"],
+            kv_cache=cache,
+            slots=w["slots"],
+            gate_out=gate,
+            q_out=q8,
+            layer=layer,
+            **runner.launch_args(),
+            **runner.peer_args(),
+        )
+
+    def post(b, q, gate, core, layer=3):
+        key = MlaPostBuild(
+            tokens=core.size(0), qlen=q, ranks=R, peer_off=runner.mla_post_off
+        )
+        mla_post(
+            key,
+            o=b["o"],
+            lse=b["lse"],
+            seq_lens=b["seq_lens"],
+            qsl=b["qsl"],
+            w_v=b["w_v"],
+            w_v_scale=b["w_v_scale"],
+            gate=gate,
+            core=core,
+            layer=layer,
+            **runner.launch_args(),
+            **runner.peer_args(),
+        )
+
+    # M1a: this rank's query rows land at heads 12 * rank.. on every rank
+    for S in (4, 8, 16, 32, 64):
+        w = _mla_inputs(S, nb, rank, R)
+        ref = _mla_reference(w, nb)
+        runner.step_begin()
+        prefix, blocks = w["prefix"].clone(), w["blocks"].clone()
+        cache = w["kv_cache"].clone()
+        q8 = torch.zeros(S, R * NH, ENTRY, dtype=torch.uint8, device=device)
+        gate = torch.zeros(S, GROWS, dtype=bf, device=device)
+        pre(w, prefix, blocks, cache, q8, gate)
+        torch.accelerator.synchronize()
+        assert not runner.health.any() and not runner.flags.any(), S
+        torch.testing.assert_close(prefix, ref["prefix"], atol=0, rtol=0)
+        want = _gather(ref["q"].view(torch.uint8)).transpose(0, 1).reshape_as(q8)
+        errs = {
+            "q": _rel_l2(_fp8_f(q8), _fp8_f(want)),
+            "gate": _rel_l2(gate, ref["gate"]),
+            "cache_same": (cache == ref["cache"]).float().mean().item(),
+        }
+        assert errs["q"] < 3e-2 and errs["gate"] < 1e-2, (S, errs)
+        assert _cos(_fp8_f(q8), _fp8_f(want)) > 0.999, (S, errs)
+        assert errs["cache_same"] > 0.99, (S, errs)
+
+    # M1b: every sender's partials for this rank's heads, each with its own
+    # empty-shard mask, combined in rank order
+    for S, q in ((4, 4), (16, 4), (64, 4), (64, 8)):
+        b = _mla_back_inputs(S, q, R, rank)
+        runner.step_begin()
+        core = torch.zeros(S, GROWS, dtype=bf, device=device)
+        post(b, q, b["gate"], core)
+        torch.accelerator.synchronize()
+        assert not runner.health.any() and not runner.flags.any(), (S, q)
+        heads = slice(NH * rank, NH * (rank + 1))
+        lat = _a2a_combine(
+            _gather(b["o"])[:, :, heads],
+            _gather(b["lse"])[:, :, heads],
+            _gather(b["seq_lens"]),
+            b["qsl"],
+            q,
+        )
+        ref = _uv_gate(lat, b)
+        if S // q > 2:  # the last request no rank holds
+            assert not core[-q:].any(), (S, q)
+        err = _rel_l2(core, ref)
+        assert err < 1e-2 and _cos(core, ref) > COS_MIN, (S, q, err)
+
+    # A graph of one step, two MLA layers of M1a -> M1b -> K2 (each layer its
+    # own tags, the peer regions reused), replayed bit-identical
+    S, q = 64, 4
+    w = _mla_inputs(S, nb, rank, R)
+    b = _mla_back_inputs(S, q, R, rank)
+    k = _k2_inputs(rank, device, S)
+    mw = _moe_weights(rank, device)
+    prefix, blocks = torch.empty_like(w["prefix"]), torch.empty_like(w["blocks"])
+    cache = w["kv_cache"].clone()
+    q8 = torch.zeros(S, R * NH, ENTRY, dtype=torch.uint8, device=device)
+    gate = torch.zeros(S, GROWS, dtype=bf, device=device)
+    core = torch.zeros(S, GROWS, dtype=bf, device=device)
+    out = torch.empty(S, HIDDEN, dtype=bf, device=device)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        runner.step_begin()
+        prefix.copy_(w["prefix"])
+        blocks.copy_(w["blocks"])
+        for layer in (3, 5):
+            pre(w, prefix, blocks, cache, q8, gate, layer)
+            post(b, q, gate, core, layer)
+            k2w = dict(k, core=core, blocks=blocks)
+            _k2_launch(runner, k2w, mw, prefix, out, False, layer=layer)
+    graph.replay()
+    torch.accelerator.synchronize()
+    want = [t.clone() for t in (prefix, q8, core, out)]
+    for _ in range(300):
+        graph.replay()
+    torch.accelerator.synchronize()
+    for got, ref in zip((prefix, q8, core, out), want):
+        assert torch.equal(got, ref)
+    assert not runner.health.any() and not runner.flags.any()
+
+
+@needs_gfx950
+@multi_gpu_test(num_gpus=8)
+def test_m1_tp8_dcp8_matches_vllm_ops_and_replays(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    multi_process_parallel(monkeypatch, 8, 1, _m1_worker)
+
+
 STALLED = 3
 
 
@@ -572,10 +1031,12 @@ def test_stalled_rank_fails_the_step_without_a_hang(
 
 @needs_gfx950
 def test_warmup_compiles_without_launching() -> None:
-    """The JIT warm-up compiles K1 and K2 before capture without running them:
+    """The JIT warm-up compiles K1, K2, M1a and M1b before capture without running them:
     a launch on its null arguments would fault."""
     from vllm.models.kimi_k3.amd.mono.kernel import compile_build
     from vllm.models.kimi_k3.amd.ops.mono.attention.kda import KdaPreBuild
+    from vllm.models.kimi_k3.amd.ops.mono.attention.mla import MlaPreBuild
+    from vllm.models.kimi_k3.amd.ops.mono.attention.mla_back import MlaPostBuild
     from vllm.models.kimi_k3.amd.ops.mono.layer import K2Build
 
     for s, q in ((8, 8), (16, 4), (64, 16)):
@@ -583,4 +1044,6 @@ def test_warmup_compiles_without_launching() -> None:
             KdaPreBuild(tokens=s, qlen=q, nblocks=4, delta=True, state_len=3 + q - 1)
         )
         compile_build(K2Build(tokens=s, nblocks=4))
+        compile_build(MlaPreBuild(tokens=s, nblocks=4, delta=True))
+        compile_build(MlaPostBuild(tokens=s, qlen=q))
     torch.accelerator.synchronize()

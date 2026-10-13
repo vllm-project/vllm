@@ -7,7 +7,11 @@ peer memory:
 
 - **Whole layers** (KDA): K1 (AttnRes, in_proj, f_b, spec conv, KDA recurrence,
   gated RMSNorm), then K2.
-- **FFN layers** (MLA): vLLM's AttnRes and MLA up to o_proj's input, then K2.
+- **FFN layers** (MLA, TP8 + DCP8): M1a (AttnRes, qkv_a and g_proj, q / kv
+  RMSNorm, the fp8 KV write of this rank's tokens, q_b, MXFP4 W_UK, the fp8
+  query gathered to every rank's peer memory), AITER's MLA decode on this rank's
+  KV shard, M1b (the a2a LSE combine of every rank's partials, MXFP4 W_UV, the
+  sigmoid gate), then K2.
 - **K2**: o_proj + all-reduce + MLP AttnRes, then the latent MoE (router,
   top-16, MXFP4 experts, shared experts, latent all-reduce + RMSNorm, up_proj,
   final all-reduce).
@@ -18,15 +22,21 @@ mono/
                  eligible, build
     kernel.py    the layer kernels: vLLM tensors -> launches
     runner.py    per-rank launch state: scratch, step epoch, health, peers
-    runtime.py   model-agnostic: configure, attach, forward_layer, health
-                 (private until vllm/models/common/mono/ exists)
+    mla.py       the FFN layers' MLA as vLLM ops: the context, AITER's
+                 decode (the M1a / M1b test reference)
 ops/mono/        kernel source
     layer.py     K2
-    attention/   kda.py (K1), back.py
+    attention/   kda.py (K1), mla.py (M1a), mla_back.py (M1b), back.py
     stages/      moe.py, gemv.py
     common/      device ops, mailbox sync, MX helpers, plan / build keys,
                  peer memory (adapted from ROCm/ATOM atom/mono, MIT)
 ```
+
+Every launch's mailbox tag is the step epoch and a slot: K1 and M1a / M1b
+use the layer index, K2 128 + the layer index. The peer buffer holds K2's
+regions, then M1a's gathered query, then M1b's partials; a region is reused
+by the next layer only after K2's all-reduce, which every rank reaches past
+its M1b.
 
 With the switch on, an unsupported config raises at startup with every reason.
 Every other step (prefill, mixed, other widths, PIECEWISE graphs) runs vLLM's

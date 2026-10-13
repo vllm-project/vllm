@@ -20,6 +20,8 @@ def _k3_config(**over):
     cfg = {
         "speculative_config.num_speculative_tokens": 7,
         "parallel_config.decode_context_parallel_size": 8,
+        "parallel_config.cp_kv_cache_interleave_size": 1,
+        "cache_config": SimpleNamespace(cache_dtype="fp8"),
     }
     return fake_vllm_config(**{**cfg, **over})
 
@@ -76,6 +78,9 @@ def test_supported_config_is_accepted(monkeypatch):
         ({"speculative_config": None}, "needs speculative decoding"),
         ({"speculative_config.num_speculative_tokens": 64}, "exceed 64"),
         ({"parallel_config.tensor_parallel_size": 4}, "needs TP8"),
+        ({"parallel_config.decode_context_parallel_size": 1}, "needs DCP8"),
+        ({"parallel_config.cp_kv_cache_interleave_size": 16}, "interleave 1"),
+        ({"cache_config": SimpleNamespace(cache_dtype="auto")}, "fp8 KV cache"),
         ({"kv_transfer_config": object()}, "kv_connector"),
         (
             {"compilation_config.cudagraph_mode": CUDAGraphMode.PIECEWISE},
@@ -102,6 +107,16 @@ def test_bind_names_the_cache():
     rstate = torch.zeros(2, 12, 128, 128, dtype=torch.bfloat16)
     reasons = MONO_SPEC.bind(None, {"layers.5.attn": (conv, rstate)})
     assert len(reasons) == 2 and all(r.startswith("layers.5.attn:") for r in reasons)
+
+
+def test_bind_checks_the_mla_cache():
+    ok = torch.zeros(4, 16, 576, dtype=torch.uint8)
+    assert MONO_SPEC.bind(None, {"layers.3.attn": ok}) == []
+    strided = torch.zeros(4, 32, 576, dtype=torch.uint8)[:, ::2]
+    bf16 = torch.zeros(4, 16, 576, dtype=torch.bfloat16)
+    for bad in (strided, bf16):
+        reasons = MONO_SPEC.bind(None, {"layers.3.attn": bad})
+        assert len(reasons) == 1 and reasons[0].startswith("layers.3.attn:")
 
 
 def _step(width: int, **md) -> MonoStep:
@@ -132,12 +147,37 @@ def _step(width: int, **md) -> MonoStep:
     ],
 )
 def test_eligible_is_pure_uniform_spec_verify(width, md, why):
-    ctx = SimpleNamespace(state=SimpleNamespace(kda_prefix="kda"))
+    ctx = SimpleNamespace(state=SimpleNamespace(kda_prefix="kda", mla_prefix=""))
     assert MONO_SPEC.eligible(ctx, _step(width, **md)) == why
 
 
+@pytest.mark.parametrize(
+    "mla, why",
+    [
+        ({}, None),
+        (None, "no MLA decode metadata"),
+        ({"decode": None}, "no MLA decode metadata"),
+        ({"num_prefills": 1}, "MLA: not pure decode"),
+        ({"num_decode_tokens": 2}, "MLA: not pure decode"),
+        ({"decode": SimpleNamespace(max_qo_len=2)}, "MLA: not uniform"),
+    ],
+)
+def test_eligible_checks_the_mla_decode(mla, why):
+    """One request of 4 tokens: the MLA layers' metadata must agree."""
+    step = _step(4)
+    if mla is not None:
+        a = SimpleNamespace(
+            decode=SimpleNamespace(max_qo_len=4), num_prefills=0, num_decode_tokens=4
+        )
+        for k, v in mla.items():
+            setattr(a, k, v)
+        step.attn_metadata["mla"] = a
+    ctx = SimpleNamespace(state=SimpleNamespace(kda_prefix="kda", mla_prefix="mla"))
+    assert MONO_SPEC.eligible(ctx, step) == why
+
+
 def test_eligible_needs_metadata():
-    ctx = SimpleNamespace(state=SimpleNamespace(kda_prefix="kda"))
+    ctx = SimpleNamespace(state=SimpleNamespace(kda_prefix="kda", mla_prefix=""))
     step = MonoStep(4, 4, torch.zeros(4), None, CUDAGraphMode.FULL)
     assert MONO_SPEC.eligible(ctx, step) == "no metadata"
 

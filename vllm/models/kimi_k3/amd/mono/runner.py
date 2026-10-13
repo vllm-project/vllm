@@ -26,7 +26,7 @@ class MonoRunner:
 
     def __init__(self, device: torch.device):
         from vllm.models.kimi_k3.amd.ops.mono import layer
-        from vllm.models.kimi_k3.amd.ops.mono.attention import kda
+        from vllm.models.kimi_k3.amd.ops.mono.attention import kda, mla, mla_back
 
         self.scratch = torch.zeros(
             max(
@@ -40,6 +40,9 @@ class MonoRunner:
                     )
                 ),
                 layer.scratch_bytes(layer.K2Build(tokens=MAX_TOKENS, nblocks=8)),
+                mla.scratch_bytes(
+                    mla.MlaPreBuild(tokens=MAX_TOKENS, nblocks=8, delta=True)
+                ),
             ),
             dtype=torch.uint8,
             device=device,
@@ -49,7 +52,15 @@ class MonoRunner:
 
         tp = get_tp_group()
         self.rank = tp.rank_in_group
-        nbytes = PEER_HEAD + layer.peer_bytes(MAX_TOKENS)
+        self.world = tp.world_size
+        # K2's regions, M1a's gathered query (QG), M1b's partials (CMB)
+        self.mla_peer_off = layer.peer_bytes(MAX_TOKENS)
+        self.mla_post_off = self.mla_peer_off + mla.peer_bytes(MAX_TOKENS, self.world)
+        nbytes = (
+            PEER_HEAD
+            + self.mla_post_off
+            + mla_back.peer_bytes(MAX_TOKENS, self.world)
+        )
         self.peers = PeerBuffer(nbytes, tp.cpu_group, self.rank, tp.world_size, device)
         self.peers.bytes.zero_()
         self.peer_table = self.peers.addresses + PEER_HEAD
@@ -58,6 +69,7 @@ class MonoRunner:
         self.fault: dict = {}  # K2Build's fault_* fields (tests only)
         self.first_layer = -1  # the step's first kernel layer: bumps the epoch
         self.kda_prefix = ""  # a KDA layer's name: the step's metadata
+        self.mla_prefix = ""  # an MLA layer's name: its decode metadata
         self.num_spec = 0  # speculative tokens a request
 
     def step_begin(self) -> None:

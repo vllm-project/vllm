@@ -7,8 +7,9 @@ prefix_delta)``.
 - ``WholeLayer`` (KDA layers): K1 (AttnRes, in_proj, f_b, spec conv, the KDA
   recurrence, the gated norm) writes o_proj's input; K2 runs o_proj, its
   all-reduce, the MLP AttnRes and the latent MoE.
-- ``FfnLayer`` (MLA layers): vLLM's AttnRes and MLA up to o_proj's input, then
-  K2.
+- ``FfnLayer`` (MLA layers): M1a (AttnRes, the query prologue, the KV write
+  and the DCP query gather), AITER's decode, M1b (the DCP combine, W_UV and
+  the gate), then K2.
 
 Weights are views of the loaded parameters, taken at every launch.
 """
@@ -79,14 +80,20 @@ def _k2(layer, runner: MonoRunner, core, prefix, blocks, reset=False):
 
 
 def compile_build(key) -> None:
-    """Compiles one launch's kernel (a ``K2Build`` or ``KdaPreBuild``) without
-    running it: FlyDSL's compile-only mode returns before the launch."""
+    """Compiles one launch's kernel (a ``K2Build``, ``KdaPreBuild``,
+    ``MlaPreBuild`` or ``MlaPostBuild``) without running it: FlyDSL's
+    compile-only mode returns before the launch."""
     import os
 
     from vllm.models.kimi_k3.amd.ops.mono import layer as k2
-    from vllm.models.kimi_k3.amd.ops.mono.attention import kda
+    from vllm.models.kimi_k3.amd.ops.mono.attention import kda, mla, mla_back
 
-    mod = kda if isinstance(key, kda.KdaPreBuild) else k2
+    mod = {
+        kda.KdaPreBuild: kda,
+        k2.K2Build: k2,
+        mla.MlaPreBuild: mla,
+        mla_back.MlaPostBuild: mla_back,
+    }[type(key)]
     launch = mod.build(key)
     # FlyDSL's compile-only switch has no FLYDSL_ prefix
     old = os.environ.get("COMPILE_ONLY")
@@ -212,24 +219,100 @@ class WholeLayer(_Layer):
 
 
 class FfnLayer(_Layer):
+    def __init__(self, layer, runner: MonoRunner, width: int):
+        super().__init__(layer, runner, width)
+        self.wrapper = layer.self_attn.mla_attn
+        self.cache_layers = (self.wrapper.mla_attn.layer_name,)
+
+    def _m1a_key(self, delta: bool):
+        from vllm.models.kimi_k3.amd.ops.mono.attention import mla
+
+        layer, w = self.layer, self.wrapper
+        return mla.MlaPreBuild(
+            tokens=self.width,
+            nblocks=layer.prev_valid_blocks,
+            delta=delta,
+            eps=layer.self_attention_res_norm.variance_epsilon,
+            out_eps=layer.input_layernorm.variance_epsilon,
+            q_eps=w.q_a_layernorm.variance_epsilon,
+            kv_eps=w.kv_a_layernorm.variance_epsilon,
+            ranks=self.runner.world,
+            peer_off=self.runner.mla_peer_off,
+        )
+
+    def _m1b_key(self, qlen: int):
+        from vllm.models.kimi_k3.amd.ops.mono.attention import mla_back
+
+        return mla_back.MlaPostBuild(
+            tokens=self.width,
+            qlen=qlen,
+            ranks=self.runner.world,
+            peer_off=self.runner.mla_post_off,
+        )
+
+    def warmup_keys(self) -> list:
+        # a layer after another always has a pending delta
+        m1b = self._m1b_key(self.runner.num_spec + 1)
+        return [self._m1a_key(True), m1b, *super().warmup_keys()]
+
     def launch(
         self, step: MonoStep, positions, prefix_sum, block_residual, prefix_delta
     ):
-        from vllm.models.kimi_k3.amd.linear import _apply_attn_res
+        from vllm.models.kimi_k3.amd.mono import mla
+        from vllm.models.kimi_k3.amd.ops.mono.attention import mla as m1
+        from vllm.models.kimi_k3.amd.ops.mono.attention import mla_back
+        from vllm.models.kimi_k3.amd.ops.mono.attention.kda import HIDDEN
+        from vllm.platforms import current_platform
 
-        layer = self.layer
+        layer, w, runner = self.layer, self.wrapper, self.runner
+        a = w.mla_attn
         if self.first:
-            self.runner.step_begin()
-        hidden_states = _apply_attn_res(
-            prefix_sum,
-            block_residual,
-            layer.self_attention_res_proj,
-            layer.self_attention_res_norm,
-            layer.prev_valid_blocks,
+            runner.step_begin()
+        md, _, kv_cache, slots = mla.context(w)
+        s = prefix_sum.size(0)
+        q8 = prefix_sum.new_empty(
+            s, runner.world * m1.NH, m1.ENTRY,
+            dtype=current_platform.fp8_dtype(),
+        )  # fmt: skip
+        gate = prefix_sum.new_empty(s, m1.GROWS)
+        m1.mla_pre(
+            self._m1a_key(prefix_delta is not None),
+            prefix=prefix_sum,
             delta=prefix_delta,
-            output_norm=layer.input_layernorm,
-            quant_key=layer.self_attn.get_input_quant_key(),
+            blocks=block_residual,
+            ares_nw=layer.self_attention_res_norm.weight,
+            ares_qk=layer.self_attention_res_proj.weight.view(HIDDEN),
+            in_nw=layer.input_layernorm.weight,
+            w_qkv=w.fused_qkv_a_proj.weight,
+            w_g=w.g_proj.weight,
+            q_nw=w.q_a_layernorm.weight,
+            kv_nw=w.kv_a_layernorm.weight,
+            w_qb=w.q_b_proj.weight,
+            w_k=a.W_K,
+            w_k_scale=a.W_K_scale,
+            kv_cache=kv_cache,
+            slots=slots[:s],
+            gate_out=gate,
+            q_out=q8,
+            layer=layer.layer_idx,
+            **runner.launch_args(),
+            **runner.peer_args(),
         )
-        core = layer.self_attn.mla_attn.forward_core(positions, hidden_states)
-        out = _k2(layer, self.runner, core, prefix_sum, block_residual)
+        o, lse = mla.attend(w, q8, kv_cache, md)
+        core = torch.empty_like(gate)
+        mla_back.mla_post(
+            self._m1b_key(runner.num_spec + 1),
+            o=o,
+            lse=lse,
+            seq_lens=md.decode.seq_lens,
+            qsl=md.query_start_loc,
+            w_v=a.W_V,
+            w_v_scale=a.W_V_scale,
+            gate=gate,
+            core=core,
+            layer=layer.layer_idx,
+            **runner.launch_args(),
+            **runner.peer_args(),
+        )
+        out = _k2(layer, runner, core, prefix_sum, block_residual)
         return prefix_sum, block_residual, out
