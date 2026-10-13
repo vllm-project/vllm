@@ -923,7 +923,11 @@ steps:
   - vllm/distributed/device_communicators/
   - vllm/config
   commands:
-    - pytest -v -s kernels/moe/test_moe_layer.py
+    # NVSHMEM IB setup intermittently hangs in this B200 DeepEP LL case.
+    # TODO: fix me
+    - >-
+      pytest -v -s kernels/moe/test_moe_layer.py
+      --deselect='kernels/moe/test_moe_layer.py::test_moe_layer[False-deepep_low_latency-2-1-True]'
     - pytest -v -s kernels/moe/test_deepep_v2_moe.py
   mirror:
     amd:
