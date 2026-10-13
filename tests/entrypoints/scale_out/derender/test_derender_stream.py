@@ -64,6 +64,7 @@ from vllm.renderers.online_derenderer import (
     _seed_stream_state,
 )
 from vllm.tokenizers import get_tokenizer
+from vllm.tokenizers.detokenizer_utils import convert_ids_list_to_tokens
 from vllm.utils import random_uuid
 
 MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
@@ -194,6 +195,7 @@ def _make_stream_chunk(
     metrics: PerRequestMetrics | None = None,
     logprobs: dict | None = None,
     prompt_token_ids: list[int] | None = None,
+    stop_reason: int | str | None = None,
 ) -> GenerateStreamResponse:
     """Build a GenerateStreamResponse SSE chunk."""
     return GenerateTokensStreamResponse(
@@ -203,6 +205,7 @@ def _make_stream_chunk(
                 index=index,
                 token_ids=token_ids,
                 finish_reason=finish_reason,
+                stop_reason=stop_reason,
                 logprobs=logprobs,
             )
         ],
@@ -212,17 +215,12 @@ def _make_stream_chunk(
     )
 
 
-def _placeholder_logprobs(token_ids: list[int]) -> dict:
-    """Per-token logprob entries using token_id:N placeholders, as sent by
-    the generate worker."""
+def _generate_logprobs(token_ids: list[int]) -> dict:
+    """Per-token `GenerateLogProbs` entries (integer token ids, no token or
+    bytes), as sent by the generate worker."""
     return {
         "content": [
-            {
-                "token": f"token_id:{tid}",
-                "logprob": -0.5,
-                "bytes": None,
-                "top_logprobs": [],
-            }
+            {"token_id": tid, "logprob": -0.5, "rank": 1, "top_logprobs": []}
             for tid in token_ids
         ]
     }
@@ -890,14 +888,27 @@ class TestDerenderCompletionStream:
         )
         assert chunk.choices[0].finish_reason == "length"
 
+    @pytest.mark.asyncio
+    async def test_stop_reason_forwarded(self, derenderer, tokenizer):
+        """stop_reason from the final generate chunk reaches the derendered
+        choice, matching what the coupled server reports."""
+        token_ids = tokenizer.encode("done")[:2]
+        chunk, _ = await derenderer.derender_completion_stream(
+            model=MODEL_NAME,
+            generate_chunk=_make_stream_chunk(
+                token_ids, finish_reason="stop", stop_reason="\n\n"
+            ),
+        )
+        assert chunk.choices[0].stop_reason == "\n\n"
+
 
 class TestStreamLogprobs:
-    """Streaming derender must carry per-chunk logprobs with placeholders
-    resolved, matching what the generate streaming path emits."""
+    """Streaming derender must carry per-chunk logprobs with token ids
+    decoded, matching what the generate streaming path emits."""
 
     @pytest.mark.asyncio
     async def test_chat_stream_logprobs_resolved_per_chunk(self, derenderer, tokenizer):
-        """Each streamed chunk carries logprobs with token_id:N resolved."""
+        """Each streamed chunk carries logprobs with its token ids decoded."""
         token_ids = tokenizer.encode("hello world")[:6]
         mid = len(token_ids) // 2
 
@@ -906,17 +917,15 @@ class TestStreamLogprobs:
             chunk, state = await derenderer.derender_chat_stream(
                 model=MODEL_NAME,
                 generate_chunk=_make_stream_chunk(
-                    part, logprobs=_placeholder_logprobs(part)
+                    part, logprobs=_generate_logprobs(part)
                 ),
                 state=state,
             )
             logprobs = chunk.choices[0].logprobs
             assert logprobs is not None and logprobs.content is not None
-            assert len(logprobs.content) == len(part)
-            for entry in logprobs.content:
-                assert not entry.token.startswith("token_id:"), (
-                    f"placeholder not resolved: {entry.token!r}"
-                )
+            assert [entry.token for entry in logprobs.content] == (
+                convert_ids_list_to_tokens(tokenizer, part)
+            )
 
     @pytest.mark.asyncio
     async def test_chat_stream_logprobs_multibyte_across_chunks(
@@ -936,7 +945,7 @@ class TestStreamLogprobs:
             last_chunk, state = await derenderer.derender_chat_stream(
                 model=MODEL_NAME,
                 generate_chunk=_make_stream_chunk(
-                    [tid], logprobs=_placeholder_logprobs([tid])
+                    [tid], logprobs=_generate_logprobs([tid])
                 ),
                 state=state,
             )
@@ -959,13 +968,13 @@ class TestStreamLogprobs:
         chunk1, state = await derenderer.derender_completion_stream(
             model=MODEL_NAME,
             generate_chunk=_make_stream_chunk(
-                token_ids[:mid], logprobs=_placeholder_logprobs(token_ids[:mid])
+                token_ids[:mid], logprobs=_generate_logprobs(token_ids[:mid])
             ),
         )
         chunk2, _ = await derenderer.derender_completion_stream(
             model=MODEL_NAME,
             generate_chunk=_make_stream_chunk(
-                token_ids[mid:], logprobs=_placeholder_logprobs(token_ids[mid:])
+                token_ids[mid:], logprobs=_generate_logprobs(token_ids[mid:])
             ),
             state=state,
         )
@@ -982,7 +991,7 @@ class TestStreamLogprobs:
             _, state = await derenderer.derender_chat_stream(
                 model=MODEL_NAME,
                 generate_chunk=_make_stream_chunk(
-                    [tid], logprobs=_placeholder_logprobs([tid])
+                    [tid], logprobs=_generate_logprobs([tid])
                 ),
                 state=state,
             )
@@ -1317,7 +1326,7 @@ class TestDerenderChatStreamParsed:
     async def test_include_reasoning_false_suppresses_reasoning(
         self, parsed_derenderer
     ):
-        chat_request = _chat_request(include_reasoning=False)
+        chat_request = _chat_request(include_reasoning=False, return_token_ids=True)
         chunk, _ = await parsed_derenderer.derender_chat_stream(
             model=MODEL_NAME,
             generate_chunk=_make_stream_chunk(
@@ -1326,6 +1335,7 @@ class TestDerenderChatStreamParsed:
             chat_request=chat_request,
         )
         delta = chunk.choices[0].delta
+        assert chunk.choices[0].token_ids is None
         assert delta.reasoning is None
         assert delta.content == "c"
 

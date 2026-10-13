@@ -33,6 +33,7 @@ from vllm.v1.attention.backends.mla.compressor_utils import (
 )
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 from vllm.v1.attention.ops.flashmla import FlashMLASchedMeta, get_mla_metadata
+from vllm.v1.attention.ops.metadata import compute_token_to_req_indices
 from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     MLAAttentionSpec,
@@ -829,7 +830,8 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
         self,
         metadata: DeepseekSparseSWAMetadata,
     ) -> None:
-        if metadata.num_decode_tokens == 0:
+        num_tokens = metadata.num_decode_tokens
+        if num_tokens == 0:
             return
         assert metadata.query_start_loc is not None
         assert metadata.seq_lens is not None
@@ -839,23 +841,55 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
         assert metadata.decode_swa_lens is not None
         assert metadata.replay_start is not None
 
-        _COMPUTE_SWA_INDICES_AND_LENS_KERNEL(
-            metadata.decode_swa_indices,
-            metadata.decode_swa_lens,
-            metadata.decode_swa_indices.shape[-1],
-            metadata.decode_swa_indices.shape[-1],
-            metadata.decode_swa_lens,  # unused (HAS_IMAGE=False)
-            metadata.decode_swa_lens,  # unused (HAS_IMAGE=False)
+        # Recompute the validity mask and token->request map from the device
+        # buffers. Their padding differs from the dummy batch the graph was
+        # captured with.
+        torch.ge(metadata.slot_mapping, 0, out=metadata.is_valid_token)
+        compute_token_to_req_indices(
             metadata.query_start_loc,
-            metadata.seq_lens,
             metadata.token_to_req_indices,
-            metadata.is_valid_token,
-            metadata.block_table,
-            self.block_size,
-            metadata.replay_start,
-            num_tokens=metadata.num_decode_tokens,
-            token_offset=0,
+            num_tokens,
+            num_tokens,
         )
+
+        # build() points non-causal (DSpark draft) metadata at its own buffer.
+        noncausal = self.decode_swa_indices_noncausal
+        if (
+            noncausal is not None
+            and metadata.decode_swa_indices.data_ptr() == noncausal.data_ptr()
+        ):
+            _COMPUTE_DSPARK_NONCAUSAL_SWA_INDICES_KERNEL(
+                metadata.decode_swa_indices,
+                metadata.decode_swa_lens,
+                self.window_size,
+                self.noncausal_index_width,
+                metadata.query_start_loc,
+                metadata.seq_lens,
+                metadata.token_to_req_indices,
+                metadata.is_valid_token,
+                metadata.block_table,
+                self.block_size,
+                num_tokens=num_tokens,
+                token_offset=0,
+            )
+        else:
+            _COMPUTE_SWA_INDICES_AND_LENS_KERNEL(
+                metadata.decode_swa_indices,
+                metadata.decode_swa_lens,
+                metadata.decode_swa_indices.shape[-1],
+                metadata.decode_swa_indices.shape[-1],
+                metadata.decode_swa_lens,  # unused (HAS_IMAGE=False)
+                metadata.decode_swa_lens,  # unused (HAS_IMAGE=False)
+                metadata.query_start_loc,
+                metadata.seq_lens,
+                metadata.token_to_req_indices,
+                metadata.is_valid_token,
+                metadata.block_table,
+                self.block_size,
+                metadata.replay_start,
+                num_tokens=metadata.num_decode_tokens,
+                token_offset=0,
+            )
         tile_sched = self.build_tile_scheduler(metadata.num_decode_tokens)
         metadata.tile_sched_swaonly = tile_sched[_LAYER_TYPE_SWAONLY]
         metadata.tile_sched_c4a = tile_sched[_LAYER_TYPE_C4A]

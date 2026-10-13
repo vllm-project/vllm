@@ -2195,6 +2195,32 @@ def moe_align_block_size(
     )
 
 
+def fused_globalize_align_block_size(
+    topk_idx: torch.Tensor,
+    psum: torch.Tensor,
+    rank_expert_offset: int,
+    global_num_experts: int,
+    local_num_experts: int,
+    block_size: int,
+    sorted_ids: torch.Tensor,
+    expert_ids: torch.Tensor,
+    num_tokens_post_pad: torch.Tensor,
+    scatter_idx: torch.Tensor | None = None,
+) -> None:
+    torch.ops._moe_C.fused_globalize_align_block_size(
+        topk_idx,
+        psum,
+        rank_expert_offset,
+        global_num_experts,
+        local_num_experts,
+        block_size,
+        sorted_ids,
+        expert_ids,
+        num_tokens_post_pad,
+        scatter_idx,
+    )
+
+
 def batched_moe_align_block_size(
     max_tokens_per_batch: int,
     block_size: int,
@@ -4461,12 +4487,6 @@ def cpu_gemm_wna16(
         isa_hint,
     )
     out = out.reshape(x_shape[:-1] + (out.size(-1),)) if len(x_shape) > 2 else out
-    return out
-
-
-def cpu_activation_lut_bf16(input: torch.Tensor, activation: str) -> torch.Tensor:
-    out = torch.empty_like(input)
-    torch.ops._C.activation_lut_bf16(out, input, activation)
     return out
 
 
