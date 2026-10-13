@@ -30,7 +30,13 @@ from vllm.multimodal.inputs import (
     VisionChunkImage,
     VisionChunkVideo,
 )
+from vllm.multimodal.media import MEDIA_CONNECTOR_REGISTRY, MediaConnector
+from vllm.multimodal.media.base import MediaDecodedBudget
 from vllm.multimodal.processing import BaseMultiModalProcessor
+from vllm.renderers.embed_utils import (
+    safe_load_prompt_embeds,
+    safe_load_prompt_embeds_async,
+)
 from vllm.transformers_utils.processor import get_video_processor_cls_name
 from vllm.utils import random_uuid
 from vllm.utils.collection_utils import is_list_of, is_list_of_numbers
@@ -214,6 +220,8 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
         self._items_by_modality = defaultdict[str, list[_T]](list)
         # Track original modality for each vision_chunk item (image or video)
         self._modality_order = defaultdict[str, list[str]](list)
+        self.decoded_budget = MediaDecodedBudget()
+        self.download_budget = MediaRequestDownloadBudget()
 
     @cached_property
     def use_unified_vision_chunk_modality(self) -> bool:
