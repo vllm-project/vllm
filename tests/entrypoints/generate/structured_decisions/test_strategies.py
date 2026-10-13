@@ -481,6 +481,49 @@ async def test_images_skip_the_splice(make_context, monkeypatch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "policy,num_questions,budget_fraction,gated",
+    [
+        ("fcfs", 2, 1.5, True),
+        ("fcfs", 2, 0.75, False),
+        ("fcfs", 1, 1.5, False),
+        ("priority", 2, 1.5, False),
+    ],
+)
+async def test_big_decisions_take_the_gate(
+    make_context, policy, num_questions, budget_fraction, gated
+):
+    context = make_context()
+    scheduler_config = context.engine_client.vllm_config.scheduler_config
+    scheduler_config.policy = policy
+    strategy = NextTokenStrategy(context)
+    gate = strategy._big_decision_gate = asyncio.Semaphore(1)
+    gate_full = []
+
+    async def record_gate(prompt, params, request_id, **kwargs):
+        gate_full.append(gate.locked())
+        async for output in generate(prompt, params, request_id):
+            yield output
+
+    context.engine_client.generate.side_effect = record_gate
+    # The engine prefills a shared state once, so only a state over budget is big.
+    state = "state " * int(scheduler_config.max_num_batched_tokens * budget_fraction)
+    read = strategy.read(
+        QUESTIONS[:num_questions],
+        None,
+        state,
+        request_id="r",
+        chat_template_kwargs=None,
+        lora_request=None,
+        priority=0,
+    )
+    reads = await asyncio.wait_for(read, 30)
+    assert len(reads) == num_questions
+    assert gate_full == [gated] * num_questions
+    assert not gate.locked()
+
+
+@pytest.mark.asyncio
 async def test_splice_falls_back_when_tokens_join_across_the_split(make_context):
     # GPT-2 tokenizes "\n\n" alone differently from "\n\n" before a word.
     strategy = NextTokenStrategy.__new__(NextTokenStrategy)
