@@ -114,21 +114,24 @@ def test_mhc_pre_big_fuse_dispatch_matches_legacy_runtime_config(
     )
 
 
+IS_SM90 = current_platform.is_cuda() and current_platform.is_device_capability(90)
+
+
 @pytest.mark.parametrize(
-    ("num_tokens", "hidden_size", "expected_tile_n", "expected_n_splits"),
+    ("num_tokens", "hidden_size", "expected", "expected_sm90"),
     [
-        (1, 4096, 2, 8),
-        (4, 8192, 2, 8),
-        (8, 5120, 2, 8),
-        (16, 5120, 6, 8),
-        (32, 7168, 6, 8),
+        (1, 4096, (2, 8, 128), (12, 8, 256)),
+        (4, 8192, (2, 8, 128), (12, 16, 256)),
+        (8, 5120, (2, 8, 128), (12, 10, 256)),
+        (16, 5120, (6, 8, 128), (6, 8, 128)),
+        (32, 7168, (6, 8, 128), (6, 8, 128)),
     ],
 )
 def test_mhc_fused_dispatch_matches_the_launch_config(
     num_tokens: int,
     hidden_size: int,
-    expected_tile_n: int,
-    expected_n_splits: int,
+    expected: tuple[int, int, int],
+    expected_sm90: tuple[int, int, int],
 ) -> None:
     """The compile key must be the config the launch will actually use.
 
@@ -140,7 +143,7 @@ def test_mhc_fused_dispatch_matches_the_launch_config(
         num_tokens, hidden_size, hc_mult=4
     )
 
-    assert (tile_n, n_splits) == (expected_tile_n, expected_n_splits)
+    assert (tile_n, n_splits, n_thr) == (expected_sm90 if IS_SM90 else expected)
     assert kernel.dispatch(
         num_tokens=num_tokens,
         hidden_size=hidden_size,
@@ -286,6 +289,17 @@ def test_mhc_fused_declines_shapes_it_cannot_tile() -> None:
                 n_thr=128,
             ),
         ),
+        pytest.param(
+            MhcFusedTileLangKernel(),
+            MhcFusedTileLangKernel.CompileKey(
+                hidden_size=5120,
+                hc_mult=4,
+                n_splits=10,
+                tile_n=12,
+                n_thr=256,
+            ),
+            marks=pytest.mark.skipif(not IS_SM90, reason="SM90-only band"),
+        ),
         (
             HcHeadFusedTileLangKernel(),
             HcHeadFusedTileLangKernel.CompileKey(
@@ -317,9 +331,14 @@ def test_tilelang_warmup_inputs_reproduce_compile_key(
     monkeypatch.setattr(
         jit_warmup_tilelang_helper,
         "compile_tilelang",
-        lambda jit_impl, *args, **kwargs: compiled.append(jit_impl),
+        lambda jit_impl, *args, **kwargs: compiled.append((jit_impl, kwargs)),
     )
 
     kernel.compile(compile_key)
 
-    assert compiled == [expected_kernel]
+    assert [jit_impl for jit_impl, _ in compiled] == [expected_kernel]
+    if isinstance(kernel, MhcFusedTileLangKernel):
+        # The warmup must compile the key's own variant, not one of a neighbour.
+        assert compiled[0][1] == dict(
+            n_thr=compile_key.n_thr, tile_n=compile_key.tile_n
+        )
