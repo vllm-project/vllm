@@ -29,7 +29,6 @@ from vllm.model_executor.layers.fusion.relu2_fp8_quant import (
 from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
-    kFp8Dynamic64Sym,
     kFp8Dynamic128Sym,
     kFp8StaticTensorSym,
     kNvfp4Dynamic,
@@ -103,13 +102,6 @@ def _silu_and_mul_fp8_dynamic_128(
 ) -> QuantizedActivation:
     """SiluAndMul + FP8 dynamic per-group (group=128) quantization."""
     return _silu_and_mul_fp8_dynamic_block(x, linear, 128, kFp8Dynamic128Sym)
-
-
-def _silu_and_mul_fp8_dynamic_64(
-    x: torch.Tensor, linear: LinearBase
-) -> QuantizedActivation:
-    """SiluAndMul + FP8 dynamic per-group (group=64) quantization."""
-    return _silu_and_mul_fp8_dynamic_block(x, linear, 64, kFp8Dynamic64Sym)
 
 
 def _silu_and_mul_nvfp4_dynamic(
@@ -202,7 +194,6 @@ if current_platform.is_cuda() and current_platform.has_device_capability(90):
 if current_platform.is_cuda_alike():
     # Per-block dynamic quantization (e.g., DeepSeek block FP8)
     _FUSED_ACT_QUANT[(SiluAndMul, kFp8Dynamic128Sym)] = _silu_and_mul_fp8_dynamic_128
-    _FUSED_ACT_QUANT[(SiluAndMul, kFp8Dynamic64Sym)] = _silu_and_mul_fp8_dynamic_64
 
 # Add NVFP4 if supported (requires SM100+)
 if current_platform.is_cuda() and hasattr(torch.ops._C, "silu_and_mul_nvfp4_quant"):

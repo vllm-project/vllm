@@ -12,7 +12,6 @@ from vllm.model_executor.layers.quantization.utils import replace_parameter
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     QuantKey,
-    kFp8Dynamic64Sym,
     kFp8Dynamic128Sym,
     kFp8StaticTensorSym,
 )
@@ -186,7 +185,7 @@ class CutlassFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         if key == kFp8StaticTensorSym:
             return key
         # Per-block dynamic quantization (e.g., DeepSeek block FP8)
-        if key in (kFp8Dynamic128Sym, kFp8Dynamic64Sym):
+        if key == kFp8Dynamic128Sym:
             return key
         return None
 

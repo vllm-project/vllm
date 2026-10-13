@@ -17,7 +17,6 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
-    kFp8Dynamic64Sym,
     kFp8Dynamic128Sym,
 )
 from vllm.model_executor.utils import replace_parameter
@@ -104,8 +103,6 @@ class Fp8BlockScaledMMLinearKernel(
         act_group_shape = self.config.activation_quant_key.scale.group_shape
         if act_group_shape.col == 128:
             return kFp8Dynamic128Sym
-        elif act_group_shape.col == 64:
-            return kFp8Dynamic64Sym
         return None
 
     def _get_layer_params(self, layer: torch.nn.Module, **kwargs) -> FP8BlockParams:
