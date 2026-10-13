@@ -47,6 +47,13 @@ class EagleSpeculatorConfig(DraftModelSpeculatorConfig):
     def adapt_draft_model_config(cls, spec: SpeculativeConfig) -> None:
         assert cls.base_method is not None
         wrap_eagle_hf_config(spec, cls.base_method)
+        # The draft's rotary embedding comes from the draft config only;
+        # surface the resolved base so a silent default can't go unnoticed
+        # (#61231).
+        SpeculativeConfig._log_draft_rope_resolution(
+            spec.draft_model_config.hf_config,
+            spec.target_model_config.hf_config,
+        )
 
     @classmethod
     def apply_options(cls, spec: SpeculativeConfig) -> None:
