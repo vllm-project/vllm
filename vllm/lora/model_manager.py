@@ -12,12 +12,14 @@ from vllm.config import VllmConfig
 from vllm.config.lora import LoRAConfig
 from vllm.logger import init_logger
 from vllm.lora.layers import (
+    BaseClassificationHeadWithLoRA,
     BaseLayerWithLoRA,
     ClassificationHeadWithLoRA,
     FusedMoE3DWithLoRA,
     FusedMoEWithLoRA,
     LoRAMapping,
     LoRAMappingType,
+    TokenClassificationHeadWithLoRA,
 )
 from vllm.lora.lora_model import LoRAModel, MoEEPLoadSpec
 from vllm.lora.lora_weights import (
@@ -38,6 +40,7 @@ from vllm.lora.utils import (
     replace_submodule,
 )
 from vllm.model_executor.layers.fused_moe import MoERunner
+from vllm.model_executor.layers.pooler.tokwise import TokenPooler
 from vllm.model_executor.models import (
     SupportsLoRA,
     is_pooling_model,
@@ -126,6 +129,10 @@ class LoRAModelManager:
             if self.is_pooling_model
             else None
         )
+        self._is_token_classification_head = (
+            self._pooling_task == "token_classify"
+            and isinstance(self.model.pooler, TokenPooler)
+        )
         self.packed_modules: dict[str, list[str]] = {}
         self.modules: dict[str, BaseLayerWithLoRA] = {}
         self._last_mapping: LoRAMapping | None = None
@@ -136,7 +143,10 @@ class LoRAModelManager:
         self.supported_modules_to_save = (
             {"score", "classifier"}
             if self.is_pooling_model
-            and vllm_config.model_config.score_type == "cross-encoder"
+            and (
+                vllm_config.model_config.score_type == "cross-encoder"
+                or self._is_token_classification_head
+            )
             else set()
         )
 
@@ -164,12 +174,14 @@ class LoRAModelManager:
         self._init_punica_wrapper(max_num_batched_tokens, vllm_config)
         self._create_lora_modules()
 
-        self._classification_head: tuple[str, ClassificationHeadWithLoRA] | None = None
+        self._classification_head: tuple[str, BaseClassificationHeadWithLoRA] | None = (
+            None
+        )
         if self.is_pooling_model:
             classification_heads = [
                 (module_name, module)
                 for module_name, module in self.modules.items()
-                if isinstance(module, ClassificationHeadWithLoRA)
+                if isinstance(module, BaseClassificationHeadWithLoRA)
             ]
             if classification_heads:
                 assert len(classification_heads) == 1, (
@@ -369,7 +381,7 @@ class LoRAModelManager:
         self.lora_index_to_id[index] = lora_model.id
         num_lora_weights_applied = 0
         for module_name, module in self.modules.items():
-            if isinstance(module, ClassificationHeadWithLoRA):
+            if isinstance(module, BaseClassificationHeadWithLoRA):
                 full_module = self._get_module_to_save_weights(lora_model, module_name)
                 if full_module is None:
                     module.reset_module_to_save(index)
@@ -448,7 +460,10 @@ class LoRAModelManager:
 
         if self._classification_head is not None:
             _, classification_head = self._classification_head
-            if classification_head.punica_wrapper is punica_wrapper:
+            if (
+                isinstance(classification_head, ClassificationHeadWithLoRA)
+                and classification_head.punica_wrapper is punica_wrapper
+            ):
                 classification_head.set_output_mapping(
                     tuple(
                         self.lora_index_to_id.index(lora_id) if lora_id > 0 else -1
@@ -546,6 +561,7 @@ class LoRAModelManager:
                     self.lora_slots,
                     self.lora_config,
                     self.model.config,
+                    is_token_level=self._is_token_classification_head,
                 )
             else:
                 new_module = from_layer(
@@ -557,7 +573,7 @@ class LoRAModelManager:
                 )
             new_module = replace_submodule(self.model, module_name, new_module)
 
-            if is_classifier_head:
+            if is_classifier_head and not self._is_token_classification_head:
                 self.model.pooler.replace_classifier(new_module)
             if isinstance(new_module, BaseLayerWithLoRA):
                 wrapped_by_id[id(module)] = new_module
@@ -1277,7 +1293,7 @@ class LoRAModelManager:
         if self._classification_head is None:
             raise ValueError(
                 f"Cannot load full module {saved_module_name!r}: the model does "
-                "not expose a unique ClassificationHeadWithLoRA."
+                "not expose a unique classification head."
             )
 
         module_name, wrapper = self._classification_head
@@ -1319,14 +1335,29 @@ class LoRAModelManager:
         if self._classification_head is None:
             return
 
-        module_name, _ = self._classification_head
-        has_full_module = (
-            self._get_module_to_save_weights(lora_model, module_name) is not None
-        )
+        module_name, wrapper = self._classification_head
+        full_module = self._get_module_to_save_weights(lora_model, module_name)
+        has_full_module = full_module is not None
         has_lora_weights = (
             self._get_lora_layer_weights(lora_model, module_name) is not None
         )
         if not has_full_module and not has_lora_weights:
+            return
+
+        if isinstance(wrapper, TokenClassificationHeadWithLoRA):
+            if has_full_module and has_lora_weights:
+                raise ValueError(
+                    "Token classification heads cannot combine modules_to_save "
+                    "with LoRA A/B weights."
+                )
+            if (
+                full_module is not None
+                and full_module.weight.size(0) != wrapper.output_size
+            ):
+                raise ValueError(
+                    "Token classification heads require the same number of labels "
+                    f"as the base model ({wrapper.output_size})."
+                )
             return
 
         raise ValueError(

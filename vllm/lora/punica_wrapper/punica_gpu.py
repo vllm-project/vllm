@@ -337,23 +337,26 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         weight_stacked: torch.Tensor,
         bias_stacked: torch.Tensor,
         module_enabled: torch.Tensor,
+        *,
+        is_logits: bool = True,
     ) -> None:
         adapter_y = torch.empty(
             (x.size(0), weight_stacked.size(-2)),
             dtype=torch.float32,
             device=x.device,
         )
+        mapping_meta = (
+            self.prompt_mapping_meta if is_logits else self.token_mapping_meta
+        )
         lora_shrink(
             x,
             [weight_stacked],
             adapter_y.unsqueeze(0),
-            *self.prompt_mapping_meta.meta_args(
-                x.size(0), self.lora_config.specialize_active_lora
-            ),
+            *mapping_meta.meta_args(x.size(0), self.lora_config.specialize_active_lora),
             1.0,
         )
         result = self._select_full_linear_output(
-            y, adapter_y, bias_stacked, module_enabled
+            y, adapter_y, bias_stacked, module_enabled, is_logits=is_logits
         )
         y.copy_(result)
 

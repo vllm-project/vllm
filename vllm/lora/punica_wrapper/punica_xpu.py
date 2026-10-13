@@ -342,8 +342,10 @@ class PunicaWrapperXPU(PunicaWrapperBase):
         weight_stacked: torch.Tensor,
         bias_stacked: torch.Tensor,
         module_enabled: torch.Tensor,
+        *,
+        is_logits: bool = True,
     ) -> None:
-        indices = self.sampler_indices
+        indices = self.sampler_indices if is_logits else self.token_lora_indices
         adapter_y = torch.zeros(
             (x.size(0), weight_stacked.size(-2)),
             dtype=torch.float32,
@@ -351,7 +353,7 @@ class PunicaWrapperXPU(PunicaWrapperBase):
         )
         bgmv_shrink(x, weight_stacked, adapter_y, indices, 1.0)
         result = self._select_full_linear_output(
-            y, adapter_y, bias_stacked, module_enabled
+            y, adapter_y, bias_stacked, module_enabled, is_logits=is_logits
         )
         y.copy_(result)
 
