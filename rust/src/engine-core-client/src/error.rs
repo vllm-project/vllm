@@ -49,6 +49,8 @@ pub enum Error {
     UnexpectedHandshakeIdentity { expected: Vec<u8>, actual: Vec<u8> },
     #[error("unexpected startup handshake message: {message}")]
     UnexpectedHandshakeMessage { message: String },
+    #[error("invalid engine-core client configuration: {message}")]
+    InvalidClientConfig { message: String },
     #[error("unexpected non-control output on coordinator path: {message}")]
     UnexpectedCoordinatorOutput { message: String },
     #[error("unexpected output on main dispatcher path: {message}")]
@@ -81,6 +83,8 @@ pub enum Error {
     ClientClosed { message: String },
     #[error("request output stream for `{request_id}` closed unexpectedly")]
     RequestStreamClosed { request_id: String },
+    #[error("profiling session is already active")]
+    ProfileAlreadyActive,
     #[error("utility call `{method}` failed (call_id={call_id}): {message}")]
     UtilityCallFailed {
         method: String,

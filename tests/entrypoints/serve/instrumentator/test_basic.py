@@ -12,6 +12,7 @@ import requests
 from fastapi import Request
 
 from tests.utils import RemoteOpenAIServer
+from vllm import envs
 from vllm.v1.engine.exceptions import EngineDeadError
 from vllm.version import __version__ as VLLM_VERSION
 
@@ -20,7 +21,7 @@ MODEL_NAME = "Qwen/Qwen3-0.6B"
 
 @pytest.fixture(scope="module")
 def server_args(request: pytest.FixtureRequest) -> list[str]:
-    """Provide extra arguments to the server via indirect parametrization
+    """Provide extra arguments to the server via indirect parametrization.
 
     Usage:
 
@@ -83,8 +84,10 @@ async def test_show_version(server: RemoteOpenAIServer):
     response = requests.get(server.url_for("version"))
     response.raise_for_status()
 
-    # Tolerate additive fields (e.g. the Rust frontend reports its own version).
-    assert response.json()["version"] == VLLM_VERSION
+    payload = response.json()
+    assert payload["version"] == VLLM_VERSION
+    if envs.VLLM_USE_RUST_FRONTEND:
+        assert payload["rust_frontend_version"] == VLLM_VERSION
 
 
 @pytest.mark.asyncio

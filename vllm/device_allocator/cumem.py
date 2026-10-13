@@ -10,14 +10,20 @@
 # the only successful approach is to call cuda driver API in C.
 import atexit
 import gc
-import os
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from typing import Any
 
 import torch
 
-from vllm.device_allocator import AllocationData, HandleType
+from vllm.device_allocator import DEFERRABLE_TAGS, AllocationData, HandleType
+from vllm.device_allocator.alloc_conf import (
+    EXPANDABLE_SEGMENTS,
+    conf_flag_enabled,
+    current_alloc_conf,
+    set_alloc_conf,
+    with_conf_flag,
+)
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.system_utils import find_loaded_library
@@ -80,8 +86,7 @@ def use_memory_pool_with_allocator(
 
 
 class CuMemAllocator:
-    """
-    A singleton class that manages a memory pool for CUDA tensors.
+    """A singleton class that manages a memory pool for CUDA tensors.
     The memory in this pool can be offloaded or discarded when the
     allocator sleeps.
 
@@ -93,7 +98,7 @@ class CuMemAllocator:
     offloaded to CPU memory, and the rest of the tensors will be discarded.
     When we call `wake_up`, all tensors that are previously offloaded
     will be loaded back to GPU memory, and the rest of the tensors will
-    have empty memory.
+    have empty memory (zeroed on ROCm).
 
     Why it needs to be a singleton?
     When allocated tensors are garbage collected, PyTorch will call
@@ -109,8 +114,7 @@ class CuMemAllocator:
 
     @staticmethod
     def get_instance() -> "CuMemAllocator":
-        """
-        CuMemAllocator is a singleton class.
+        """CuMemAllocator is a singleton class.
         We cannot call the constructor directly.
         Call this method to get the instance.
         """
@@ -135,7 +139,7 @@ class CuMemAllocator:
     def __init__(self):
         self.pointer_to_data: dict[int, AllocationData] = {}
         self.current_tag: str = CuMemAllocator.default_tag
-        self.allocator_and_pools: dict[str, Any] = {}
+        self.allocator_and_pools: dict[str, list[Any]] = {}
         # Creating strong references to the two callbacks here to prevent
         # these ephemeral bound-method objects being garbage collected.
         # See discussions in https://github.com/vllm-project/vllm/pull/22724
@@ -163,7 +167,7 @@ class CuMemAllocator:
         if not self.allocator_and_pools:
             return
 
-        pool_entries = list(self.allocator_and_pools.values())
+        pool_entries = [e for es in self.allocator_and_pools.values() for e in es]
         self.allocator_and_pools.clear()
 
         mem_pools = [entry[0] for entry in pool_entries]
@@ -182,9 +186,9 @@ class CuMemAllocator:
         self.release_pools()
 
     def _python_malloc_callback(self, allocation_handle: HandleType) -> None:
+        """Internal method to store the allocation data
+        when memory is allocated in the memory pool.
         """
-        Internal method to store the allocation data
-        when memory is allocated in the memory pool."""
         py_d_mem = allocation_handle[2]
         self.pointer_to_data[py_d_mem] = AllocationData(
             allocation_handle, self.current_tag
@@ -198,9 +202,9 @@ class CuMemAllocator:
         return
 
     def _python_free_callback(self, ptr: int) -> HandleType:
+        """Internal method to look up the allocation data
+        when memory is freed in the memory pool.
         """
-        Internal method to look up the allocation data
-        when memory is freed in the memory pool."""
         data = self.pointer_to_data.pop(ptr)
         if data.cpu_backup_tensor is not None:
             data.cpu_backup_tensor = None
@@ -227,14 +231,14 @@ class CuMemAllocator:
         return data.handle
 
     def sleep(self, offload_tags: tuple[str, ...] | str | None = None) -> None:
-        """
-        Put the allocator in sleep mode.
+        """Put the allocator in sleep mode.
         All data in the memory allocation with the specified tag will be
         offloaded to CPU memory, and others will be discarded.
 
         Args:
             offload_tags: The tags of the memory allocation that will be
                 offloaded. The rest of the memory allocation will be discarded.
+
         """
         if offload_tags is None:
             # by default, allocated tensors are offloaded
@@ -247,8 +251,15 @@ class CuMemAllocator:
 
         total_bytes = 0
         backup_bytes = 0
+        has_policy_conflict = False
 
         for ptr, data in self.pointer_to_data.items():
+            if data.is_asleep:
+                requests_offload = data.tag in offload_tags
+                was_offloaded = data.cpu_backup_tensor is not None
+                if requests_offload != was_offloaded:
+                    has_policy_conflict = True
+                continue
             handle = data.handle
             total_bytes += handle[1]
             if data.tag in offload_tags:
@@ -277,25 +288,64 @@ class CuMemAllocator:
             (total_bytes - backup_bytes) / 1024**3,
         )
 
+        if has_policy_conflict:
+            logger.warning(
+                "CuMemAllocator: sleep cannot change the policy of "
+                "already-asleep allocations; the existing policy was kept."
+            )
+
         gc.collect()
         torch.cuda.empty_cache()
 
+    def discard(self, tags: tuple[str, ...] | str) -> None:
+        """Discard mapped allocations with the given tags without CPU backup."""
+        if isinstance(tags, str):
+            tags = (tags,)
+
+        discarded_bytes = 0
+        has_policy_conflict = False
+        for data in self.pointer_to_data.values():
+            if data.tag not in tags:
+                continue
+            if data.is_asleep:
+                if data.cpu_backup_tensor is not None:
+                    has_policy_conflict = True
+                continue
+            torch.accelerator.synchronize(data.handle[0])
+            unmap_and_release(data.handle)
+            data.is_asleep = True
+            discarded_bytes += data.handle[1]
+
+        logger.info(
+            "CuMemAllocator: discarded %.2f GiB for tags %s.",
+            discarded_bytes / 1024**3,
+            tags,
+        )
+
+        if has_policy_conflict:
+            logger.warning(
+                "CuMemAllocator: discard cannot change the policy of "
+                "already-asleep allocations; the existing policy was kept."
+            )
+
     def wake_up(self, tags: list[str] | None = None) -> None:
-        """
-        Wake up the allocator from sleep mode.
+        """Wake up the allocator from sleep mode.
         All data that is previously offloaded will be loaded back to GPU
-        memory, and the rest of the data will have empty memory.
+        memory, and the rest will have empty memory (zeroed on ROCm).
 
         Args:
-            tags: The tags of the memory allocation that will be loaded
-                back to GPU memory. If None, all memory allocation will be loaded
-                back to GPU memory.
+            tags: The deferrable tags (weights, kv_cache) to load back to GPU
+                memory; every other tag is always loaded back. If None, all
+                memory allocation will be loaded back to GPU memory.
+
         """
         gc.collect()
         torch.accelerator.empty_cache()
 
         for ptr, data in self.pointer_to_data.items():
-            if tags is None or data.tag in tags:
+            if not data.is_asleep:
+                continue
+            if tags is None or data.tag in tags or data.tag not in DEFERRABLE_TAGS:
                 handle = data.handle
                 create_and_map(handle)
                 data.is_asleep = False
@@ -308,17 +358,21 @@ class CuMemAllocator:
                         cpu_ptr = cpu_backup_tensor.data_ptr()
                         libcudart.cudaMemcpy(ptr, cpu_ptr, size_in_bytes)
                         data.cpu_backup_tensor = None
+                elif current_platform.is_rocm():
+                    # amdgpu <6.14 may return stale VRAM (#44972); drop with its support
+                    libcudart.cudaMemset(ptr, 0, handle[1])
+                    torch.accelerator.synchronize()
 
     @contextmanager
     def use_memory_pool(self, tag: str | None = None):
-        """
-        A context manager to use the memory pool.
+        """A context manager to use the memory pool.
         All memory allocation created inside the context will be allocated
         in the memory pool, and has the specified tag.
 
         Args:
             tag: The tag of the memory allocation. If None, the default tag
                 will be used.
+
         """
         if tag is None:
             tag = CuMemAllocator.default_tag
@@ -327,17 +381,25 @@ class CuMemAllocator:
 
         # Expandable segments are incompatible with the memory pool used for
         # sleep mode (see https://github.com/pytorch/pytorch/issues/147851).
-        # If the user has enabled expandable segments via
-        # PYTORCH_CUDA_ALLOC_CONF, temporarily disable them for the duration
-        # of the memory pool context and restore on exit.
-        conf = os.environ.get("PYTORCH_CUDA_ALLOC_CONF", "")
-        expandable_was_enabled = "expandable_segments:True" in conf
+        # If the user has enabled expandable segments, temporarily disable
+        # them for the duration of the memory pool context and restore on
+        # exit. The whole config string is rewritten, not just this one
+        # field: torch resets every option that is absent from the string it
+        # is handed, so a bare "expandable_segments:False" would also drop
+        # max_split_size_mb, garbage_collection_threshold and
+        # roundup_power2_divisions for the rest of the process.
+        prev_conf = current_alloc_conf()
+        expandable_was_enabled = conf_flag_enabled(prev_conf, EXPANDABLE_SEGMENTS)
         if expandable_was_enabled:
-            torch.cuda.memory._set_allocator_settings("expandable_segments:False")
+            set_alloc_conf(with_conf_flag(prev_conf, EXPANDABLE_SEGMENTS, False))
 
         old_tag = self.current_tag
         self.current_tag = tag
         try:
+            if tag != old_tag:
+                # Older pools of this tag are never reused, so trim them.
+                for pool, _ in self.allocator_and_pools.get(tag, []):
+                    self._trim(pool)
             with use_memory_pool_with_allocator(
                 self.python_malloc_callback, self.python_free_callback
             ) as data:
@@ -346,7 +408,7 @@ class CuMemAllocator:
                 # and the memory pool.
                 # to avoid the issue, we keep a reference of the data.
                 # see https://github.com/pytorch/pytorch/issues/146431 .
-                self.allocator_and_pools[tag] = data
+                self.allocator_and_pools.setdefault(tag, []).append(data)
                 yield
                 # PyTorch's bug, calling torch.cuda.empty_cache() will error
                 # when using pluggable allocator, see
@@ -359,20 +421,38 @@ class CuMemAllocator:
                 # TODO: we should expose `empty_cache` method in the memory
                 # pool.
                 # TODO: ask for help from PyTorch team to expose this method.
-                allocations = data[0].snapshot()
-                for allocation in allocations:
-                    if allocation["allocated_size"] == 0:
-                        handle = self._python_free_callback(allocation["address"])
-                        unmap_and_release(handle)
+                self._trim(data[0])
         finally:
             self.current_tag = old_tag
             if expandable_was_enabled:
-                torch.cuda.memory._set_allocator_settings("expandable_segments:True")
+                set_alloc_conf(prev_conf)
+
+    def _trim(self, pool: Any) -> None:
+        """Release free segments of a pool that is never allocated from again."""
+        for allocation in pool.snapshot():
+            data = self.pointer_to_data.get(allocation["address"])
+            if allocation["allocated_size"] == 0 and data and not data.is_asleep:
+                unmap_and_release(self._python_free_callback(allocation["address"]))
+
+    @contextmanager
+    def cudagraph_pool(self) -> Iterator[tuple[int, int]]:
+        """Tag CUDA graph capture allocations and yield the graph pool id."""
+        if "cudagraph" not in self.allocator_and_pools:
+            allocator = get_pluggable_allocator(
+                self.python_malloc_callback, self.python_free_callback
+            )
+            mem_pool = torch.cuda.memory.MemPool(allocator._allocator)
+            self.allocator_and_pools["cudagraph"] = [(mem_pool, allocator)]
+        old_tag = self.current_tag
+        self.current_tag = "cudagraph"
+        try:
+            # capture_begin routes allocations to this pool; no use_mem_pool.
+            yield self.allocator_and_pools["cudagraph"][0][0].id
+        finally:
+            self.current_tag = old_tag
 
     def get_current_usage(self) -> int:
-        """
-        Get the total number of bytes allocated in the memory pool.
-        """
+        """Get the total number of bytes allocated in the memory pool."""
         sum_bytes: int = 0
         for ptr, data in self.pointer_to_data.items():
             handle = data.handle

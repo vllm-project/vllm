@@ -17,6 +17,7 @@ import torch
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheConfig,
+    KVCacheLayout,
     KVCacheSpec,
     MambaSpec,
     MLAAttentionSpec,
@@ -31,13 +32,16 @@ if TYPE_CHECKING:
 CANONICAL_FORMAT_VERSION = 1
 
 
-def canonical_format_id() -> str:
+def canonical_format_id(kv_cache_layout: str) -> str:
     """Identity of the canonical byte format, for namespacing persisted KV.
     Canonical pages keep the worker's KV layout family, so the id couples the
-    format version with that family; consumers must match it exactly."""
-    from vllm.v1.attention.backends.utils import get_kv_cache_layout
-
-    return f"v{CANONICAL_FORMAT_VERSION}-{get_kv_cache_layout().lower()}"
+    format version with that family; consumers must match it exactly. The family
+    keeps its historical NHD/HND spelling so ids stay stable for KV persisted
+    before the layout enum existed."""
+    layout = KVCacheLayout[kv_cache_layout]
+    legacy = {KVCacheLayout.LBNHC: "nhd", KVCacheLayout.LBHNC: "hnd"}
+    family = legacy.get(layout, layout.name.lower())
+    return f"v{CANONICAL_FORMAT_VERSION}-{family}"
 
 
 @dataclass(frozen=True)
@@ -278,7 +282,7 @@ def _layer_mapping(
     if isinstance(spec, MLAAttentionSpec):
         # TP-replicated latent; CP shards its tokens across the DCP groups
         if (
-            spec.compress_ratio != 1
+            spec.tokens_per_state != 1
             or page % bs
             or ctx.tp_size % ctx.dcp_size
             or spec.kv_quant_mode.is_per_token_head

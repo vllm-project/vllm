@@ -19,18 +19,47 @@ from vllm.model_executor.layers.fused_moe.expert_map_manager import (
 from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
     FusedMoEMethodBase,
 )
+from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
+from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
+    RoutedExpertsSink,
+)
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
     UnquantizedFusedMoEMethod,
 )
+from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
+    resolve_quant_method,
 )
+from vllm.utils.math_utils import cdiv
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.fused_moe.runner.shared_experts import SharedExperts
 
 
 logger = init_logger(__name__)
+
+
+def _index_expert_mapping(
+    mapping: list[tuple[str, str, int, str]],
+) -> dict[str, list[tuple[str, str, int, str]]]:
+    """Index by logical checkpoint ID, preserving entry order and EPLB replicas.
+
+    An empty index keeps the full scan for unsupported mapping names.
+    """
+    mapping_by_expert: dict[str, list[tuple[str, str, int, str]]] = {}
+    for entry in mapping:
+        prefix, _, suffix = entry[1].partition(".")
+        expert_key, sep, _ = suffix.partition(".")
+        if (
+            prefix != "experts"
+            or not expert_key
+            or (expert_key.isdecimal() and not sep)
+        ):
+            return {}
+        if expert_key.isdecimal():
+            mapping_by_expert.setdefault(expert_key, []).append(entry)
+    return mapping_by_expert
 
 
 class FusedMoeWeightScaleSupported(Enum):
@@ -42,8 +71,7 @@ class FusedMoeWeightScaleSupported(Enum):
 
 @PluggableLayer.register("routed_experts")
 class RoutedExperts(PluggableLayer):
-    """
-    Container for routed expert weights and execution logic.
+    """Container for routed expert weights and execution logic.
 
     This module owns the expert weight parameters (w13_weight, w2_weight, scales, etc.)
     and handles:
@@ -60,7 +88,7 @@ class RoutedExperts(PluggableLayer):
         expert_map_manager: ExpertMapManager,
         ckpt_gate_proj_name: str = "gate_proj",
         ckpt_down_proj_name: str = "down_proj",
-        ckpt_up_proj_name: str = "up_proj",
+        ckpt_up_proj_name: str | None = "up_proj",
         is_fused_checkpoint_transposed: bool = False,
         #
         # Extra params that are needed by quant_methods, pass along for now
@@ -87,6 +115,13 @@ class RoutedExperts(PluggableLayer):
         self.ckpt_gate_proj_name = ckpt_gate_proj_name
         self.ckpt_down_proj_name = ckpt_down_proj_name
         self.ckpt_up_proj_name = ckpt_up_proj_name
+        if moe_config.is_act_and_mul == (ckpt_up_proj_name is None):
+            raise ValueError(
+                f"{layer_name}: ckpt_up_proj_name={ckpt_up_proj_name!r} is "
+                f"inconsistent with activation {moe_config.activation.value!r}. "
+                "Gated MoE needs an up projection name; non-gated MoE must "
+                "pass None."
+            )
         self.is_fused_checkpoint_transposed = is_fused_checkpoint_transposed
         self.expert_map_manager = expert_map_manager
         self.hidden_size = moe_config.hidden_dim
@@ -114,9 +149,12 @@ class RoutedExperts(PluggableLayer):
         self.swiglu_alpha = swiglu_alpha
         self.swiglu_beta = swiglu_beta
         self.e_score_correction_bias = e_score_correction_bias
+        # Set by bind_routed_experts_capturer for monolithic kernels.
+        self.routing_sink: RoutedExpertsSink | None = None
         self.apply_router_weight_on_input = apply_router_weight_on_input
         # End random parameters
         self._loaded_expert_biases: set[str] = set()
+        self._fused_shared_expert_quantizer = self._get_fused_shared_expert_quantizer()
 
         self.quant_method = self._get_quant_method(
             self.layer_name,
@@ -166,12 +204,6 @@ class RoutedExperts(PluggableLayer):
             "global_num_experts": moe_config.num_experts,
         }
 
-        # need full intermediate size pre-sharding for WNA16 act order
-        if self._needs_intermediate_size_param(self.quant_method):
-            moe_quant_params["intermediate_size_full"] = (
-                self.moe_config.intermediate_size
-            )
-
         self.quant_method.create_weights(layer=self, **moe_quant_params)
 
         self.lora_base_layer_prefix = ""
@@ -192,25 +224,16 @@ class RoutedExperts(PluggableLayer):
         quant_config: QuantizationConfig | None,
         moe_config: FusedMoEConfig,
     ) -> FusedMoEMethodBase:
-        """
-        Helper method to ensure quant_method is never None and
+        """Helper method to ensure quant_method is never None and
         of the proper type.
         """
         quant_method = None
         if quant_config is not None:
-            quant_method = quant_config.get_quant_method(self, prefix)
+            quant_method = resolve_quant_method(quant_config, self, prefix)
         if quant_method is None:
             quant_method = UnquantizedFusedMoEMethod(moe_config)
         assert isinstance(quant_method, FusedMoEMethodBase)
         return quant_method
-
-    # TODO(bnell): make this a method on quant_method
-    def _needs_intermediate_size_param(self, quant_method: FusedMoEMethodBase) -> bool:
-        return quant_method.__class__.__name__ in (
-            "AutoGPTQMoEMethod",
-            "CompressedTensorsWNA16MoEMethod",
-            "CompressedTensorsW4A16FlydslMoEMethod",
-        )
 
     def _ensure_moe_quant_config_init(self):
         if self.quant_method.moe_quant_config is None:
@@ -330,8 +353,7 @@ class RoutedExperts(PluggableLayer):
         param: torch.Tensor,
         tp_rank: int,
     ):
-        """
-        Load w13 weight scales assuming that w1 weight scales and w3 weight
+        """Load w13 weight scales assuming that w1 weight scales and w3 weight
         scales are stored in the same loaded_weight tensor.
         """
         shard_size = param.shape[shard_dim]
@@ -347,10 +369,9 @@ class RoutedExperts(PluggableLayer):
         shard_id: str,
         loaded_weight: torch.Tensor,
         tp_rank: int,
-        load_full_w2: bool = False,
+        is_scale: bool = False,
     ):
-        """
-        Load grouped weight scales for group quantization or model weights
+        """Load grouped weight scales for group quantization or model weights
 
         Args:
             shard_dim: dimension to shard
@@ -358,17 +379,41 @@ class RoutedExperts(PluggableLayer):
             shard_id: either w1, w2, or w3
             loaded_weight: checkpoint weight to load into the param
             tp_rank: tensor parallel rank
-            load_full_w2: whether or not the w2 loaded should be sharded.
+            is_scale: whether padding should use unit scales instead of zero weights.
+
         """
+        padded_tp = self.moe_config.tp_shard_with_padding
+        if padded_tp:
+            destination = expert_data
+            if shard_id in ("w1", "w3") and self.moe_config.is_act_and_mul:
+                half = destination.shape[shard_dim] // 2
+                destination = destination.narrow(
+                    shard_dim, 0 if shard_id == "w1" else half, half
+                )
+            shard_size = destination.shape[shard_dim]
+            expected_size = (
+                self.moe_config.intermediate_size
+                * shard_size
+                // self.moe_config.intermediate_size_per_partition
+            )
+            if loaded_weight.shape[shard_dim] != expected_size:
+                raise ValueError(
+                    "Block-aligned TP loading expects an unsharded checkpoint "
+                    f"projection of size {expected_size}, got "
+                    f"{loaded_weight.shape[shard_dim]}."
+                )
+            start = min(tp_rank * shard_size, expected_size)
+            size = min(shard_size, expected_size - start)
+            loaded_weight = loaded_weight.narrow(shard_dim, start, size)
+            destination.fill_(1 if is_scale else 0)
+
         if shard_id == "w2":
-            # In the case where we have actorder/g_idx, we do not partition the
-            # w2 scales, as indicated by `load_full` argument, for all tp cases
             self._load_w2(
                 shard_dim=shard_dim,
                 loaded_weight=loaded_weight,
                 expert_data=expert_data,
                 tp_rank=tp_rank,
-                load_full=load_full_w2,
+                load_full=padded_tp,
             )
         elif shard_id in ("w1", "w3"):
             self._load_w13(
@@ -377,6 +422,7 @@ class RoutedExperts(PluggableLayer):
                 loaded_weight=loaded_weight,
                 expert_data=expert_data,
                 tp_rank=tp_rank,
+                load_full=padded_tp,
             )
 
     def _load_per_channel_weight_scale(
@@ -461,6 +507,7 @@ class RoutedExperts(PluggableLayer):
                 Must be non-negative.
             shard_dim: The dimension index corresponding to the shard
                 (intermediate) dimension. Defaults to `None`.
+
         """
         dims = (hidden_dim,) if shard_dim is None else (hidden_dim, shard_dim)
         if loaded_weight.ndim > 0:
@@ -534,8 +581,7 @@ class RoutedExperts(PluggableLayer):
     ):
         # Index the loaded weight for tp sharding.
         # down_proj: "RowParallel" so tp sharding on input_dim
-        # Only narrow if the loaded_weight is not a scalar (0-dim tensor)
-        # and we're not loading the full weight
+        # Padded TP weights have already been sliced by the grouped loader.
         if not load_full and loaded_weight.ndim > 0:
             # Same padding fix as _load_w13: use unpadded per-rank size.
             tp_size = self.moe_config.moe_parallel_config.tp_size
@@ -557,6 +603,23 @@ class RoutedExperts(PluggableLayer):
             hidden_dim=hidden_dim,
             shard_dim=shard_dim,
         )
+        if (
+            loaded_weight.device.type == "cpu"
+            and expert_data.device.type == "cuda"
+            and not expert_data.is_contiguous()
+            and expert_data.ndim == 2
+        ):
+            # A strided CPU-to-CUDA copy can allocate a full-shard CUDA
+            # temporary. Make the TP slice contiguous on CPU and copy rows
+            # in chunks to limit the temporary used for the padded view.
+            loaded_weight = loaded_weight.contiguous()
+            num_chunks = max(cdiv(loaded_weight.nbytes, 1 << 20), 1)
+            for dst, src in zip(
+                expert_data.chunk(num_chunks, dim=0),
+                loaded_weight.chunk(num_chunks, dim=0),
+            ):
+                dst.copy_(src)
+            return
         expert_data.copy_(loaded_weight)
 
     def _load_single_value(
@@ -569,24 +632,30 @@ class RoutedExperts(PluggableLayer):
         # _to_scalar's reshape(()) would reject the size-2 weight_shape.
         param_data[expert_id] = loaded_weight
 
-    def _load_g_idx(
+    def _get_fused_shared_expert_quantizer(
         self,
-        shard_id: str,
-        expert_data: torch.Tensor,
-        shard_dim: int,
-        loaded_weight: torch.Tensor,
-        tp_rank: int,
-    ):
-        if shard_id == "w2":
-            self._load_w2(
-                shard_dim=shard_dim,
-                loaded_weight=loaded_weight,
-                expert_data=expert_data,
-                tp_rank=tp_rank,
-            )
-        else:
-            assert shard_id in ("w1", "w3")
-            expert_data.copy_(loaded_weight)
+    ) -> Callable[[torch.Tensor], tuple[torch.Tensor, torch.Tensor]] | None:
+        """Return the quantizer for an online-quantized fused shared expert."""
+        online_config = getattr(self.quant_config, "online_quantization_config", None)
+        prefix = self.moe_config.shared_expert_prefix
+        if (
+            online_config is None
+            or prefix is None
+            or self.expert_map_manager.num_fused_shared_experts == 0
+        ):
+            return None
+        # FSE compatibility checks require every shared-expert projection to
+        # use the routed experts' weight key.
+        resolved = online_config.resolve_quant_method_cls(
+            LinearBase, f"{prefix}.down_proj"
+        )
+        if resolved is None:
+            return None
+        from vllm.model_executor.layers.quantization.online.base import (
+            ONLINE_SHARED_EXPERT_QUANTIZERS,
+        )
+
+        return ONLINE_SHARED_EXPERT_QUANTIZERS[resolved[3].weight]
 
     @overload
     def weight_loader(
@@ -645,23 +714,55 @@ class RoutedExperts(PluggableLayer):
             return False if return_success else None
         # Hereafter, `expert_id` is local physical id
 
+        # A full-precision fused shared expert is quantized into the checkpoint
+        # layout, then loaded like a pre-quantized expert weight and scale.
+        if (
+            self._fused_shared_expert_quantizer is not None
+            and self.moe_config.num_logical_experts
+            <= global_expert_id
+            < self.moe_config.num_logical_experts
+            + self.expert_map_manager.num_fused_shared_experts
+            and weight_name.endswith("_weight")
+            and loaded_weight.is_floating_point()
+            and loaded_weight.dtype != param.dtype
+        ):
+            weight, weight_scale = self._fused_shared_expert_quantizer(
+                loaded_weight.to(self.moe_config.device)
+            )
+            stem = "w2" if shard_id == "w2" else "w13"
+            self.weight_loader(
+                getattr(self, f"{stem}_weight_scale"),
+                weight_scale,
+                f"{weight_name}_scale",
+                shard_id,
+                global_expert_id,
+                return_success=True,
+            )
+            loaded = self.weight_loader(
+                param, weight, weight_name, shard_id, global_expert_id, True
+            )
+            return loaded if return_success else None
+
         # is_transposed: if the dim to shard the weight
-        # should be flipped. Required by GPTQ, compressed-tensors
+        # should be flipped. Required by GPTQ/AWQ (K-first format).
         # should be whatever dimension intermediate_size_per_partition is
         is_transposed = getattr(param, "is_transposed", False)
 
         # compressed-tensors checkpoints with packed weights are stored flipped
         # TODO (mgoin): check self.quant_method.quant_config.quant_format
         # against known CompressionFormat enum values that have this quality
-        if quant_method_name in (
-            "CompressedTensorsWNA16MoEMethod",
-            "CompressedTensorsWNA16RDNA3MoEMethod",
-            "CompressedTensorsW4A16FlydslMoEMethod",
+        if (
+            quant_method_name
+            in (
+                "CompressedTensorsWNA16MoEMethod",
+                "CompressedTensorsW4A16FlydslMoEMethod",
+            )
+            and is_transposed
         ):
-            if is_transposed:
-                loaded_weight = loaded_weight.t().contiguous()
-            else:
-                loaded_weight = loaded_weight
+            # Transpose on the parameter's device: a CPU transpose of the
+            # mmap view reads the file column-wise, which is very slow on
+            # NFS. The contiguous .to() reads it sequentially.
+            loaded_weight = loaded_weight.to(param.device).t().contiguous()
 
         if shard_id not in ("w1", "w2", "w3"):
             raise ValueError(f"shard_id must be ['w1','w2','w3'] but got {shard_id}.")
@@ -734,17 +835,6 @@ class RoutedExperts(PluggableLayer):
                 param=param,
                 loaded_weight=loaded_weight,
                 expert_id=global_expert_id if use_global_sf else expert_id,
-            )
-            return True if return_success else None
-
-        # Case g_idx
-        if "g_idx" in weight_name:
-            self._load_g_idx(
-                shard_dim=0,
-                shard_id=shard_id,
-                loaded_weight=loaded_weight,
-                expert_data=expert_data,
-                tp_rank=self.moe_config.tp_rank,
             )
             return True if return_success else None
 
@@ -831,13 +921,27 @@ class RoutedExperts(PluggableLayer):
                 FusedMoeWeightScaleSupported.GROUP.value,
                 FusedMoeWeightScaleSupported.BLOCK.value,
             ]:
+                scale_refine = getattr(self.quant_method, "weight_scale_refine", None)
+                if (
+                    quant_method == FusedMoeWeightScaleSupported.BLOCK.value
+                    and scale_refine is not None
+                ):
+                    # FP8 block scales are stored per (block_n, block_k) tile
+                    # of the unsharded weight, while the TP-sharded parameters
+                    # use a refined block grid (see Fp8MoEMethod). Upsample the
+                    # scales to the refined grid (lossless: the refined block
+                    # divides the checkpoint block) so per-rank slicing stays
+                    # exact. Dim -2 is the weight's N dim, dim -1 is K.
+                    loaded_weight = loaded_weight.repeat_interleave(
+                        scale_refine[0], dim=-2
+                    ).repeat_interleave(scale_refine[1], dim=-1)
                 self._load_model_weight_or_group_weight_scale(
                     shard_id=shard_id,
                     shard_dim=shard_dim,
                     loaded_weight=loaded_weight,
                     expert_data=expert_data,
                     tp_rank=self.moe_config.tp_rank,
-                    load_full_w2=getattr(param, "load_full_w2", False),
+                    is_scale=True,
                 )
             elif quant_method == FusedMoeWeightScaleSupported.TENSOR.value:
                 self._load_per_tensor_weight_scale(
@@ -878,14 +982,22 @@ class RoutedExperts(PluggableLayer):
         self, weights: Iterable[tuple[str, torch.Tensor]]
     ) -> Iterable[str]:
         expert_mapping = self.get_expert_mapping(include_fused=True)
+        mapping_by_expert = _index_expert_mapping(expert_mapping)
+
         for expert_name, loaded_weight in weights:
             qual_name = f"{self.layer_name}.{expert_name}"
-            # Fused expert weights can be identified by their 3D tensors
             is_fused = loaded_weight.dim() == 3
+            # Fused tensors and ambiguous names keep the full mapping.
+            candidates = expert_mapping
+            if not is_fused and qual_name.count("experts.") == 1:
+                expert_key = qual_name.partition("experts.")[2].partition(".")[0]
+                candidates = mapping_by_expert.get(expert_key, expert_mapping)
+
             matched = False
-            for param_name, weight_name, expert_id, shard_id in expert_mapping:
+            for param_name, weight_name, expert_id, shard_id in candidates:
                 if weight_name not in qual_name:
                     if matched and is_fused:
+                        # Fused tensors use the first contiguous run of matches.
                         break
                     continue
                 matched = True
@@ -922,7 +1034,7 @@ class RoutedExperts(PluggableLayer):
                         loaded_weight,
                         self.is_fused_checkpoint_transposed and uses_weight_layout,
                     )
-                    if shard_id in {"w1", "w3"}:
+                    if shard_id in {"w1", "w3"} and self.moe_config.is_act_and_mul:
                         # Repurpose expert_id for deconcatenating w1 and w3
                         experts_shard = fused_weight.chunk(2, dim=1)[expert_id]
                     else:
@@ -980,6 +1092,7 @@ class RoutedExperts(PluggableLayer):
             routed_experts_prefix="",
             lora_base_layer_prefix=self.lora_base_layer_prefix,
             include_fused=include_fused,
+            is_gated=moe_config.is_act_and_mul,
         )
 
     @staticmethod
@@ -987,7 +1100,7 @@ class RoutedExperts(PluggableLayer):
         model: torch.nn.Module,
         ckpt_gate_proj_name: str,
         ckpt_down_proj_name: str,
-        ckpt_up_proj_name: str,
+        ckpt_up_proj_name: str | None,
         num_experts: int,
         num_redundant_experts: int = 0,
         routed_experts_prefix: str = "routed_experts",
@@ -1001,6 +1114,8 @@ class RoutedExperts(PluggableLayer):
         See `build_expert_params_mapping` for the returned tuple format.
         """
         has_base_layer = any(".base_layer." in n for n, _ in model.named_parameters())
+        prefix = "base_layer." if has_base_layer else ""
+        # These loaders index ``params_dict[full_name]``, so both sides get it.
         return RoutedExperts.build_expert_params_mapping(
             ckpt_gate_proj_name,
             ckpt_down_proj_name,
@@ -1008,22 +1123,24 @@ class RoutedExperts(PluggableLayer):
             num_experts,
             num_redundant_experts,
             routed_experts_prefix,
-            "base_layer." if has_base_layer else "",
+            lora_base_layer_prefix=prefix,
+            lora_base_layer_prefix_on_param_name=prefix,
         )
 
     @staticmethod
     def build_expert_params_mapping(
         ckpt_gate_proj_name: str,
         ckpt_down_proj_name: str,
-        ckpt_up_proj_name: str,
+        ckpt_up_proj_name: str | None,
         num_experts: int,
         num_redundant_experts: int = 0,
         routed_experts_prefix: str = "routed_experts",
         lora_base_layer_prefix: str = "",
+        lora_base_layer_prefix_on_param_name: str = "",
         include_fused: bool = False,
+        is_gated: bool = True,
     ) -> list[tuple[str, str, int, str]]:
-        """
-        Create expert parameter mapping for weight loading with redundant experts.
+        """Create expert parameter mapping for weight loading with redundant experts.
 
         This mapping handles the physical-to-logical expert ID conversion needed
         when loading weights with EPLB redundant experts.
@@ -1034,8 +1151,18 @@ class RoutedExperts(PluggableLayer):
             ckpt_up_proj_name: Name of up projection in checkpoint
             num_experts: Number of logical (non-redundant) experts
             num_redundant_experts: Number of redundant experts
-            lora_base_layer_prefix: Prefix to add if this layer is a LoRA base layer
+            lora_base_layer_prefix: LoRA ``base_layer.`` prefix for the
+                ``weight_name`` (checkpoint) side
+            lora_base_layer_prefix_on_param_name: same, for the ``param_name``
+                side. Independent because ``get_expert_mapping`` resolves
+                ``param_name`` via ``getattr`` against this layer's bare
+                ``w13_weight``/``w2_weight`` (no prefix), while
+                ``make_expert_params_mapping`` indexes the model-wide
+                ``params_dict`` (prefix included).
             include_fused: Prepend the fused pre-fused-checkpoint entries
+            is_gated: Whether w13 holds gate and up (gated activation) or a
+                single up projection. Selects the fused checkpoint layout.
+            routed_experts_prefix: Prefix of the routed experts submodule
 
         Returns:
             List of tuples (param_name, weight_name, expert_id, shard_id)
@@ -1044,6 +1171,7 @@ class RoutedExperts(PluggableLayer):
             - weight_name: Weight name in checkpoint
             - expert_id: Physical expert ID
             - shard_id: Shard identifier (w1, w2, w3)
+
         """
         num_physical_experts = num_experts + num_redundant_experts
 
@@ -1060,13 +1188,21 @@ class RoutedExperts(PluggableLayer):
         if routed_experts_prefix != "":
             routed_experts_prefix = f"{routed_experts_prefix}."
 
-        w13 = f"experts.{routed_experts_prefix}{lora_base_layer_prefix}w13_"
-        w2 = f"experts.{routed_experts_prefix}{lora_base_layer_prefix}w2_"
+        w13 = (
+            f"experts.{lora_base_layer_prefix_on_param_name}{routed_experts_prefix}w13_"
+        )
+        w2 = f"experts.{lora_base_layer_prefix_on_param_name}{routed_experts_prefix}w2_"
 
         fused_mapping = []
         if include_fused:
             gate_up = None
-            if ckpt_gate_proj_name == "gate_proj" and ckpt_up_proj_name == "up_proj":
+            w13_shards: tuple[str, ...] = ("w1", "w3")
+            if not is_gated:
+                # Non-gated: the stacked checkpoint tensor is the up projection
+                # itself, nothing to split into gate and up.
+                gate_up = ckpt_gate_proj_name
+                w13_shards = ("w1",)
+            elif ckpt_gate_proj_name == "gate_proj" and ckpt_up_proj_name == "up_proj":
                 gate_up = "gate_up_proj"
             elif ckpt_gate_proj_name == "w1" and ckpt_up_proj_name == "w3":
                 gate_up = "w13"
@@ -1080,10 +1216,16 @@ class RoutedExperts(PluggableLayer):
             if gate_up is not None:
                 fused_mapping = [
                     # (param_name, weight_name, expert_id, shard_id)
-                    (f"{w13}weight", f"experts.{gate_up}", 0, "w1"),
-                    (f"{w13}weight", f"experts.{gate_up}", 1, "w3"),
+                    # expert_id doubles as the chunk index when splitting w13.
+                    *(
+                        (f"{w13}weight", f"experts.{gate_up}", chunk, shard_id)
+                        for chunk, shard_id in enumerate(w13_shards)
+                    ),
                     (f"{w2}weight", f"experts.{ckpt_down_proj_name}", 0, "w2"),
                 ]
+            if gate_up is not None and is_gated:
+                # Per-expert gate_up_proj tensors; the non-gated equivalent is
+                # already covered by the per-expert mapping below.
                 fused_mapping.extend(
                     (
                         w13,
@@ -1112,6 +1254,7 @@ class RoutedExperts(PluggableLayer):
                 ("w2", ckpt_down_proj_name),
                 ("w3", ckpt_up_proj_name),
             ]
+            if weight_name is not None
         ]
 
         return fused_mapping + per_expert_mapping
@@ -1120,8 +1263,7 @@ class RoutedExperts(PluggableLayer):
         def _maybe_make_contiguous(
             name: str, p: torch.nn.Parameter
         ) -> torch.nn.Parameter:
-            """
-            In some cases, the last 2 dimensions (the non-expert dimensions)
+            """In some cases, the last 2 dimensions (the non-expert dimensions)
             of the weight scale tensor are transposed. This function
             transforms the tensor (view update) so the tensor is contiguous().
             Example: A non-contiguous scale tensor,
@@ -1200,9 +1342,8 @@ class RoutedExperts(PluggableLayer):
         topk_ids: torch.Tensor,
         shared_experts: "SharedExperts | None" = None,
         shared_experts_input: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        """
-        Execute routed experts using the quantization method's apply function.
+    ) -> torch.Tensor | UnfinalizedMoEOutput:
+        """Execute routed experts using the quantization method's apply function.
 
         This is called by the runner after router selection (for modular kernels)
         quant_method.apply() which accesses the weights on this RoutedExperts
@@ -1216,7 +1357,8 @@ class RoutedExperts(PluggableLayer):
             shared_experts_input: Input for shared experts (if any)
 
         Returns:
-            Output tensor from routed experts
+            Finalized routed states or a deferred-finalize output.
+
         """
         assert not self.quant_method.is_monolithic
 
@@ -1235,9 +1377,8 @@ class RoutedExperts(PluggableLayer):
         x: torch.Tensor,
         router_logits: torch.Tensor | None = None,
         input_ids: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        """
-        Execute routed experts using the quantization method's apply function.
+    ) -> torch.Tensor | UnfinalizedMoEOutput:
+        """Execute routed experts using the quantization method's apply function.
 
         This is called by the runner after router selection (for modular kernels)
         or with router logits (for monolithic kernels). It delegates to
@@ -1250,7 +1391,8 @@ class RoutedExperts(PluggableLayer):
             input_ids: input ids for DeepSeek V4
 
         Returns:
-            Output tensor from routed experts
+            Finalized routed states or a deferred-finalize output.
+
         """
         assert self.quant_method.is_monolithic
 

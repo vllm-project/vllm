@@ -22,6 +22,9 @@ from vllm.utils.network_utils import (
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.engine import ReconfigureDistributedRequest, ReconfigureRankType
 from vllm.v1.executor.abstract import Executor
+from vllm.v1.executor.ray_env_utils import (
+    update_runtime_env_for_worker_import,
+)
 from vllm.v1.executor.ray_utils import (
     WORKER_SPECIFIC_ENV_VARS,
     FutureWrapper,
@@ -49,8 +52,7 @@ COMPLETED_NONE_FUTURE.set_result(None)
 
 @dataclass
 class RayWorkerMetaData:
-    """
-    Metadata for a Ray worker.
+    """Metadata for a Ray worker.
     The order of ray worker creation can be random,
     and we need to reset the rank after creating all workers.
     """
@@ -62,7 +64,7 @@ class RayWorkerMetaData:
 
 
 class RayDistributedExecutor(Executor):
-    """Ray-based distributed executor"""
+    """Ray-based distributed executor."""
 
     uses_ray: bool = True
     supports_pp: bool = True
@@ -88,6 +90,19 @@ class RayDistributedExecutor(Executor):
 
         # KV connector setup
         self.has_connector = self.vllm_config.kv_transfer_config is not None
+
+        if (
+            self.vllm_config.ec_transfer_config is not None
+            and self.parallel_config.world_size > 1
+        ):
+            raise NotImplementedError(
+                "EC connector worker metadata is not supported with the "
+                "legacy Ray executor when world_size > 1: only the output "
+                "of a single worker is fetched, silently dropping the "
+                "other workers' EC connector state. Set "
+                "VLLM_USE_RAY_V2_EXECUTOR_BACKEND=1 to use RayExecutorV2, "
+                "or use the multiprocessing executor instead."
+            )
 
         self.uses_sampler = self.vllm_config.model_config.runner_type != "pooling" and (
             self.vllm_config.ec_transfer_config is None
@@ -134,6 +149,7 @@ class RayDistributedExecutor(Executor):
         env_vars.update(
             {env_var: "1" for env_var in current_platform.ray_noset_device_env_vars}
         )
+        update_runtime_env_for_worker_import(runtime_env)
         return ray_remote_kwargs
 
     # child class could overwrite this to return actual env vars.
@@ -232,8 +248,7 @@ class RayDistributedExecutor(Executor):
             ip_counts[ip] = ip_counts.get(ip, 0) + 1
 
         def sort_by_driver_then_worker_ip(item: RayWorkerMetaData):
-            """
-            Sort the workers based on 3 properties:
+            """Sort the workers based on 3 properties:
             1. If the worker is on the same node as the driver (vllm engine),
                 it should be placed first.
             2. Then, if the worker is on a node with fewer workers, it should
@@ -422,6 +437,7 @@ class RayDistributedExecutor(Executor):
 
         Returns:
             The model runner output.
+
         """
         scheduler_output = self.scheduler_output
         if scheduler_output is None:

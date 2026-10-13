@@ -6,10 +6,10 @@ from typing import TYPE_CHECKING
 from fastapi import FastAPI
 
 from vllm.config import ModelConfig, VllmConfig
-from vllm.entrypoints.chat_utils import ChatTemplateConfig
 from vllm.logger import init_logger
 from vllm.plugins.io_processors import has_io_processor
 from vllm.renderers import BaseRenderer
+from vllm.renderers.chat_utils import ChatTemplateConfig
 from vllm.tasks import POOLING_TASKS, SCORE_TYPE_MAP, SupportedTask
 
 from .base.io_processor import PoolingIOProcessor
@@ -65,10 +65,16 @@ def init_pooling_io_processors(
 
         processors["token_embed"] = TokenEmbedIOProcessor
 
-    if has_io_processor(
+    if pooling_task == "embed&token_classify":
+        from .pooling.io_processor import UnsupportedCombinedTaskIOProcessor
+
+        processors[pooling_task] = UnsupportedCombinedTaskIOProcessor
+
+    has_plugin = has_io_processor(
         vllm_config,
         model_config.io_processor_plugin,
-    ):
+    )
+    if has_plugin:
         from .pooling.io_processor import PluginWithIOProcessorPlugins
 
         processors["plugin"] = PluginWithIOProcessorPlugins
@@ -145,7 +151,7 @@ def init_pooling_state(
     if model_config is None:
         return
 
-    from vllm.entrypoints.chat_utils import load_chat_template
+    from vllm.renderers.chat_utils import load_chat_template
     from vllm.tasks import POOLING_TASKS
 
     from .classify.serving import ServingClassification
@@ -160,6 +166,7 @@ def init_pooling_state(
         chat_template=resolved_chat_template,
         chat_template_content_format=args.chat_template_content_format,
         trust_request_chat_template=args.trust_request_chat_template,
+        trust_request_mm_kwargs=args.trust_request_mm_kwargs,
     )
 
     state.serving_pooling = (

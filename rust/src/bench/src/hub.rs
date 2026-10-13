@@ -3,8 +3,8 @@
 
 use std::path::PathBuf;
 
-use hf_hub::Repo;
 use hf_hub::api::tokio::{ApiBuilder, ApiRepo};
+use hf_hub::{Repo, RepoType};
 
 /// A handle to a HuggingFace Hub repo, downloading via hf-hub's on-disk cache.
 pub struct HubRepo {
@@ -18,6 +18,10 @@ impl HubRepo {
 
     pub fn dataset(repo_id: String) -> Result<Self, String> {
         Self::new(Repo::dataset(repo_id))
+    }
+
+    pub fn dataset_with_revision(repo_id: String, revision: String) -> Result<Self, String> {
+        Self::new(Repo::with_revision(repo_id, RepoType::Dataset, revision))
     }
 
     fn new(repo: Repo) -> Result<Self, String> {
@@ -35,5 +39,11 @@ impl HubRepo {
     /// Auth is handled by hf-hub via HF_TOKEN / the cached login token.
     pub async fn get(&self, filename: &str) -> Result<PathBuf, String> {
         self.repo.get(filename).await.map_err(|e| format!("{e}"))
+    }
+
+    /// List all file paths in the repo at its revision.
+    pub async fn list_files(&self) -> Result<Vec<String>, String> {
+        let info = self.repo.info().await.map_err(|e| format!("{e}"))?;
+        Ok(info.siblings.into_iter().map(|s| s.rfilename).collect())
     }
 }
