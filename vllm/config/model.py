@@ -278,7 +278,12 @@ class ModelConfig:
     NOTE: This disables both `torch.compile` and CUDA graphs, and is
     equivalent to setting `-cc.mode=none -cc.cudagraph_mode=none`."""
     return_sampling_mask: bool = False
-    """Whether to return the post-processing token support for each sample."""
+    """Whether to return the post-processing token support for each sample.
+
+    When enabled, every request must use ``temperature > 0`` and ``top_k > 0``
+    so the sampling mask stays bounded. Default ``SamplingParams`` (``top_k=0``)
+    are rejected at request admission.
+    """
     max_logprobs: int = Field(default=20, ge=-1)
     """Maximum number of log probabilities to return when `logprobs` is
     specified in `SamplingParams`. The default value comes the default for the
