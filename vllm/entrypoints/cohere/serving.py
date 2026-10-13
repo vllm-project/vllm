@@ -512,7 +512,7 @@ class CohereServingChatV2(OpenAIServingChat):
         # Tool message content uses ``ToolMessageV2Content``, a union of
         # ``TextToolContent`` and ``DocumentToolContent``. The latter
         # produces ``{"type": "document", "document": {...}}`` blocks,
-        # which vLLM's shared ``_parse_chat_message_content_parts`` in
+        # which vLLM's shared ``parse_chat_message_content_parts`` in
         # ``vllm/renderers/chat_utils.py`` rejects because the OpenAI
         # ``ChatCompletionContentPartParam`` union only knows text /
         # image / audio / etc. Emitting them anyway triggers a Pydantic
