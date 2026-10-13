@@ -717,6 +717,21 @@ class MoRIIOConnectorScheduler:
                 "write_done never arrives; write_recv_timeout only takes "
                 "effect with the default 'fail' policy."
             )
+        # Timeouts are reported as block ids, which the scheduler rejects for
+        # several KV cache groups (ids are only unique within a group). WRITE
+        # mode is single-group today; with more groups the timer stays off.
+        self._write_recv_single_group = len(kv_cache_config.kv_cache_groups) == 1
+        if (
+            self.mode == MoRIIOMode.WRITE
+            and not self.is_producer
+            and not self._write_recv_single_group
+        ):
+            logger.warning(
+                "MoRI-IO WRITE-mode consumer: write_recv_timeout is disabled "
+                "with %d KV cache groups; block-level load errors are not "
+                "supported for multiple groups.",
+                len(kv_cache_config.kv_cache_groups),
+            )
 
         if self.is_producer:
             set_role(ROLE.PRODUCER)
@@ -1449,10 +1464,11 @@ class MoRIIOConnectorScheduler:
         self._reqs_need_save.clear()
         self._reqs_need_send = {}
 
-        self._reap_stale_write_recvs()
-        if self._write_load_failed_block_ids:
-            meta.write_load_failed_block_ids = self._write_load_failed_block_ids
-            self._write_load_failed_block_ids = []
+        if self.mode == MoRIIOMode.WRITE and not self.is_producer:
+            self._reap_stale_write_recvs()
+            if self._write_load_failed_block_ids:
+                meta.write_load_failed_block_ids = self._write_load_failed_block_ids
+                self._write_load_failed_block_ids = []
 
         return meta
 
@@ -1466,7 +1482,11 @@ class MoRIIOConnectorScheduler:
         """
         # num_external_tokens == 0: the producer pushes nothing, so there is
         # nothing to wait for.
-        if num_external_tokens <= 0 or req_id in self._write_recv_deadline:
+        if (
+            not self._write_recv_single_group
+            or num_external_tokens <= 0
+            or req_id in self._write_recv_deadline
+        ):
             return
         # Record only the blocks this request owns. get_block_ids() also
         # returns prefix-cache hits shared with other requests; reporting those
@@ -1613,7 +1633,7 @@ class MoRIIOConnectorScheduler:
         # request is vllm-project/vllm#59114. Receive tracking is independent
         # of the client, so keep timing it and mark it orphaned. The timer is
         # stopped on receive completion instead, in update_connector_output.
-        if request_id in self._write_recv_deadline:
+        if not self.is_producer and request_id in self._write_recv_deadline:
             self._write_recv_orphaned.add(request_id)
         # Consumer: can unmap transfer_id<->request_id immediately since done_recving
         #   has fired at this point (i.e. KV has been transferred)
@@ -1763,8 +1783,9 @@ class MoRIIOConnectorScheduler:
             # connector_output is the aggregated output, so a request appears
             # here only once every worker reports it -- in the same step the
             # scheduler marks it ready, before it can run.
-            for req_id in connector_output.finished_recving or ():
-                self.clear_write_recv_watchdog(req_id)
+            if self.mode == MoRIIOMode.WRITE:
+                for req_id in connector_output.finished_recving or ():
+                    self.clear_write_recv_watchdog(req_id)
             return
 
         incoming = set(connector_output.finished_sending or ())
