@@ -549,7 +549,8 @@ class VllmConfig:
         else:
             vllm_factors.append("None")
         vllm_factors.append(self.aux_output_config.compute_hash())
-        vllm_factors.append(self.simulation_config.compute_hash())
+        if self.simulation_config.simulate_forward:
+            vllm_factors.append(self.simulation_config.compute_hash())
         if self.additional_config:
             if isinstance(additional_config := self.additional_config, dict):
                 additional_config_hash = safe_hash(
@@ -1448,6 +1449,8 @@ class VllmConfig:
             logger.info_once("Performance mode set to '%s'.", self.performance_mode)
 
         self.try_verify_and_update_config()
+        if self.model_config is not None:
+            self.simulation_config.verify_and_update_config(self)
         self._resolve_and_verify_engram_config()
 
         self._check_supports_watermarking()
@@ -2667,27 +2670,6 @@ class VllmConfig:
         if self.model_config.is_hybrid:
             HybridAttentionMambaModelConfig.verify_and_update_config(self)
 
-        if self.simulation_config.simulate_forward:
-            self.load_config.load_format = "dummy"
-            self.load_config.device = "meta"
-            kv_transfer = self.kv_transfer_config
-            if (
-                kv_transfer is not None
-                and kv_transfer.kv_connector in ("NixlConnector", "NixlPushConnector")
-                and not kv_transfer.kv_connector_module_path
-            ):
-                # Same scheduler side, simulated worker side.
-                kv_transfer.kv_connector_module_path = (
-                    "vllm.v1.worker.simulated.kv_nixl"
-                )
-
-            if (
-                self.speculative_config is not None
-                and self.speculative_config.draft_load_config is not None
-            ):
-                self.speculative_config.draft_load_config.load_format = "dummy"
-                self.speculative_config.draft_load_config.device = "meta"
-
         if self.model_config.convert_type == "classify":
             # Maybe convert ForCausalLM into ForSequenceClassification model.
             from vllm.model_executor.models.adapters import SequenceClassificationConfig
@@ -2752,7 +2734,6 @@ class VllmConfig:
             f"quantization_config={self.model_config.quantization_config}, "  # noqa
             f"enforce_eager={self.model_config.enforce_eager}, "
             f"aux_output_config={self.aux_output_config!r}, "
-            f"simulation_config={self.simulation_config!r}, "
             f"kv_cache_dtype={self.cache_config.cache_dtype}, "
             f"device_config={self.device_config.device}, "
             f"structured_outputs_config={self.structured_outputs_config!r}, "

@@ -123,7 +123,7 @@ from vllm.platforms import CpuArchEnum, current_platform
 from vllm.plugins import load_general_plugins
 from vllm.ray.lazy_utils import is_in_ray_actor, is_ray_initialized
 from vllm.transformers_utils.config import maybe_override_with_speculators
-from vllm.transformers_utils.repo_utils import get_model_path
+from vllm.transformers_utils.repo_utils import get_hf_file_to_dict, get_model_path
 from vllm.transformers_utils.utils import is_cloud_storage
 from vllm.utils.argparse_utils import (
     FlexibleArgumentParser,
@@ -132,7 +132,10 @@ from vllm.utils.argparse_utils import (
 )
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.network_utils import get_ip
-from vllm.utils.torch_utils import resolve_kv_cache_dtype_string
+from vllm.utils.torch_utils import (
+    get_kv_cache_quant_algo_string,
+    resolve_kv_cache_dtype_string,
+)
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.sample.logits_processor import LogitsProcessor
 from vllm.version import __version__ as VLLM_VERSION
@@ -1984,11 +1987,20 @@ class EngineArgs:
         quantization = self.quantization
         quantization_config = self.quantization_config
         if self.simulate_forward:
+            # Simulated forward never loads weights: drop the checkpoint's
+            # weight quantization (its KV cache dtype is resolved from the
+            # checkpoint in create_engine_config()).
             quantization = None
             quantization_config = None
-            if not callable(hf_overrides):
-                # Simulated forward never loads weights; ignore checkpoint
-                # weight quantization while preserving attention/KV metadata.
+            if callable(hf_overrides):
+                user_overrides = hf_overrides
+
+                def hf_overrides(config):
+                    config = user_overrides(config)
+                    config.quantization_config = None
+                    return config
+
+            else:
                 hf_overrides = {**hf_overrides, "quantization_config": None}
 
         return ModelConfig(
@@ -2019,7 +2031,8 @@ class EngineArgs:
             max_logprobs=self.max_logprobs,
             logprobs_mode=self.logprobs_mode,
             use_fp64_gumbel=self.use_fp64_gumbel,
-            # Simulated forward emits output tokens only via trace replay.
+            # Lets simulated requests carry their output tokens
+            # (trace_decode_token_ids).
             enable_trace_replay=self.enable_trace_replay or self.simulate_forward,
             disable_sliding_window=self.disable_sliding_window,
             skip_tokenizer_init=self.skip_tokenizer_init,
@@ -2297,6 +2310,17 @@ class EngineArgs:
         resolved_cache_dtype = resolve_kv_cache_dtype_string(
             self.kv_cache_dtype, model_config
         )
+        if self.simulate_forward and resolved_cache_dtype == "auto":
+            # The model config's quantization config was dropped; the
+            # checkpoint's still sets the KV cache dtype.
+            checkpoint = get_hf_file_to_dict(
+                "config.json", self.hf_config_path or self.model, self.revision
+            )
+            quant_cfg = (checkpoint or {}).get("quantization_config")
+            if quant_cfg:
+                resolved_cache_dtype = (
+                    get_kv_cache_quant_algo_string(quant_cfg) or "auto"
+                )
 
         assert self.enable_prefix_caching is not None, (
             "enable_prefix_caching must be set by this point"
@@ -2655,7 +2679,6 @@ class EngineArgs:
         assert model_config.max_model_len is not None, (
             "max_model_len must be set by this point"
         )
-        async_scheduling = self.async_scheduling
         scheduler_config = SchedulerConfig(
             runner_type=model_config.runner_type,
             max_num_batched_tokens=self.max_num_batched_tokens,
@@ -2679,7 +2702,7 @@ class EngineArgs:
             watermark=self.watermark,
             prefill_schedule_interval=self.prefill_schedule_interval,
             disable_hybrid_kv_cache_manager=self.disable_hybrid_kv_cache_manager,
-            async_scheduling=async_scheduling,
+            async_scheduling=self.async_scheduling,
             stream_interval=self.stream_interval,
         )
 
@@ -2918,92 +2941,6 @@ class EngineArgs:
 
     def _check_feature_supported(self):
         """Raise an error if the feature is not supported."""
-        if self.simulate_forward:
-            if not (current_platform.is_cpu() or current_platform.is_cuda_alike()):
-                _raise_unsupported_error(
-                    feature_name="simulated forward on this platform"
-                )
-            if self.enable_lora:
-                _raise_unsupported_error(feature_name="simulated forward with LoRA")
-            if self.prefill_context_parallel_size > 1:
-                _raise_unsupported_error(
-                    feature_name="simulated forward with prefill context parallelism"
-                )
-            num_ranks = (
-                self.tensor_parallel_size
-                * self.pipeline_parallel_size
-                * self.data_parallel_size
-            )
-            if self.simulation_config.clock != "real" and num_ranks > 1:
-                _raise_unsupported_error(
-                    feature_name=(
-                        f"the {self.simulation_config.clock} simulation clock "
-                        "with more than one rank"
-                    )
-                )
-            kv_transfer = self.kv_transfer_config
-            if isinstance(kv_transfer, dict):
-                kv_transfer = KVTransferConfig(**kv_transfer)
-            cpu_offloading = (
-                kv_transfer is not None
-                and kv_transfer.kv_connector == "OffloadingConnector"
-                and kv_transfer.kv_connector_extra_config.get(
-                    "spec_name", "CPUOffloadingSpec"
-                )
-                == "CPUOffloadingSpec"
-            )
-            nixl = kv_transfer is not None and kv_transfer.kv_connector in (
-                "NixlConnector",
-                "NixlPushConnector",
-            )
-            if kv_transfer is not None and not (cpu_offloading or nixl):
-                _raise_unsupported_error(
-                    feature_name=(
-                        "simulated forward with KV transfer other than CPU "
-                        "offloading by the OffloadingConnector or "
-                        "disaggregated prefill by the NixlConnector or "
-                        "NixlPushConnector"
-                    )
-                )
-            if (
-                kv_transfer is not None
-                and kv_transfer.kv_connector == "NixlPushConnector"
-                and kv_transfer.kv_role not in ("kv_producer", "kv_consumer")
-            ):
-                _raise_unsupported_error(
-                    feature_name=(
-                        "simulated push-mode disaggregated prefill with "
-                        f"kv_role={kv_transfer.kv_role}"
-                    )
-                )
-            if (
-                kv_transfer is not None
-                and kv_transfer.kv_connector == "NixlPushConnector"
-                and self.simulation_config.clock != "real"
-            ):
-                _raise_unsupported_error(
-                    feature_name=(
-                        "simulated push-mode disaggregated prefill outside "
-                        "served instances (the real clock)"
-                    )
-                )
-            if nixl and self.simulation_config.clock == "fast_forward":
-                # Served instances run on the real clock; in-process ones
-                # (vllm.v1.worker.simulated.disaggregated) on virtual clocks.
-                _raise_unsupported_error(
-                    feature_name=(
-                        "simulated disaggregated prefill with the fast_forward clock"
-                    )
-                )
-            if self.weight_transfer_config is not None:
-                _raise_unsupported_error(
-                    feature_name="simulated forward with weight transfer"
-                )
-            if self.runner not in ("auto", "generate"):
-                _raise_unsupported_error(
-                    feature_name="simulated forward for non-generation runners"
-                )
-
         if self.pipeline_parallel_size > 1:
             supports_pp = getattr(
                 self.distributed_executor_backend, "supports_pp", False

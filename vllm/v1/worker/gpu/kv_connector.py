@@ -66,7 +66,6 @@ class ActiveKVConnector(KVConnector):
         self._disabled = False
 
     def register_kv_caches(self, kv_caches_dict: dict[str, torch.Tensor]) -> None:
-        # Register kv caches with KV Connector if applicable.
         self.kv_connector.register_kv_caches(kv_caches_dict)
         self.kv_connector.set_host_xfer_buffer_ops(copy_kv_blocks)
 

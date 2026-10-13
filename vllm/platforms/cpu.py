@@ -313,7 +313,8 @@ class CpuPlatform(Platform):
 
         # Accelerated GDN uses AMX tiles or AVX-512BF16 VDPBF16PS.
         if (
-            torch.cpu._is_avx512_bf16_supported()
+            not simulated
+            and torch.cpu._is_avx512_bf16_supported()
             and cache_config.mamba_ssm_cache_dtype != "float32"
         ):
             mamba_backend = _cpu_mamba_backend(vllm_config)
@@ -335,7 +336,7 @@ class CpuPlatform(Platform):
 
         # Legacy setting
         env_key = "VLLM_CPU_KVCACHE_SPACE"
-        if env_key in os.environ and os.environ[env_key] != "":
+        if not simulated and os.environ.get(env_key, "") != "":
             kv_cache_space = int(os.environ[env_key])
             cache_config.kv_cache_memory_bytes = kv_cache_space * GiB_bytes
 

@@ -24,6 +24,58 @@ SIMULATED_FORWARD_MODELS = [
 ]
 
 
+@pytest.mark.parametrize(
+    "kwargs, error",
+    [
+        (
+            {
+                "kv_transfer_config": {
+                    "kv_connector": "ExampleConnector",
+                    "kv_role": "kv_both",
+                }
+            },
+            "not ExampleConnector",
+        ),
+        (
+            {"simulation_config": {"clock": "virtual"}, "tensor_parallel_size": 2},
+            "supports one rank",
+        ),
+        ({"enable_lora": True}, "LoRA"),
+    ],
+)
+def test_simulated_config_rejections(kwargs, error) -> None:
+    from vllm.engine.arg_utils import EngineArgs
+
+    with pytest.raises(ValueError, match=error):
+        EngineArgs(
+            model="Qwen/Qwen3-0.6B", max_model_len=1024, simulate_forward=True, **kwargs
+        ).create_engine_config()
+
+
+def test_simulated_config_keeps_checkpoint_kv_cache_dtype(tmp_path) -> None:
+    """Simulation drops a checkpoint's weight quantization but keeps the KV
+    cache dtype it declares."""
+    from vllm.engine.arg_utils import EngineArgs
+    from vllm.transformers_utils.repo_utils import get_hf_file_to_dict
+
+    config = get_hf_file_to_dict("config.json", "Qwen/Qwen3-0.6B")
+    config["quantization_config"] = {
+        "quant_method": "modelopt",
+        "quant_algo": "FP8",
+        "kv_cache_quant_algo": "FP8",
+    }
+    (tmp_path / "config.json").write_text(json.dumps(config))
+
+    vllm_config = EngineArgs(
+        model=str(tmp_path),
+        max_model_len=1024,
+        simulate_forward=True,
+        skip_tokenizer_init=True,
+    ).create_engine_config()
+    assert vllm_config.model_config.quantization is None
+    assert vllm_config.cache_config.cache_dtype == "fp8_e4m3"
+
+
 def _check_model_available(model: str) -> None:
     try:
         model_info = HF_EXAMPLE_MODELS.find_hf_info(model)
