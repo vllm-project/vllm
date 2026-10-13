@@ -2,12 +2,11 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 #pragma once
 #include <algorithm>
+#include <bit>
 #include <cmath>
 #include <cstdint>
 #include <limits>
 #include <type_traits>
-
-#include <c10/util/bit_cast.h>
 
 #include "cpu/utils.hpp"
 
@@ -36,7 +35,7 @@ inline uint8_t float_to_fp8_scalar(float v, float inv_scale) noexcept {
   constexpr uint32_t min_subnormal = (128 - bias - mantissa_bits) << 23;
   constexpr uint32_t min_normal = (128 - bias) << 23;
   v *= inv_scale;
-  const uint32_t bits = c10::bit_cast<uint32_t>(v);
+  const uint32_t bits = std::bit_cast<uint32_t>(v);
   const uint8_t sign = (bits >> 24) & 0x80;
   const uint32_t magnitude = bits & 0x7fffffffu;
   if (magnitude > max_bits) {
