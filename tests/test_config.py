@@ -3431,6 +3431,10 @@ def test_fusion_pass_op_priority():
     assert "+quant_fp8" in cfg4.compilation_config.custom_ops
     assert cfg4.compilation_config.pass_config.fuse_norm_quant
 
+    # NVFP4 quant is always a custom op, so Inductor cannot fuse it
+    cfg5 = VllmConfig(model_config=ModelConfig("RedHatAI/Llama-3.1-8B-Instruct-NVFP4"))
+    assert cfg5.compilation_config.pass_config.fuse_norm_quant
+
 
 def test_scheduler_config_init():
     with pytest.raises(ValidationError):
