@@ -50,7 +50,6 @@ from .interfaces import (
     is_hybrid,
     requires_raw_input_tokens,
     supports_hc_sp,
-    supports_mamba_prefix_caching,
     supports_multimodal,
     supports_multimodal_encoder_tp_data,
     supports_multimodal_raw_input_only,
@@ -287,6 +286,7 @@ _REWARD_MODELS = {
 
 _TOKEN_CLASSIFICATION_MODELS = {
     "BertForTokenClassification": ("bert", "BertForTokenClassification"),
+    "ClefFlashForJointSchema": ("clef_flash", "ClefFlashForJointSchema"),
     "ClefOmniForJointSchema": ("clef_omni", "ClefOmniForJointSchema"),
     "ModernBertForTokenClassification": (
         "modernbert",
@@ -880,7 +880,6 @@ class _ModelInfo:
     is_attention_free: bool
     is_hybrid: bool
     has_noops: bool
-    supports_mamba_prefix_caching: bool
     supports_replayssm: bool
     supports_transcription: bool
     supports_transcription_only: bool
@@ -910,7 +909,6 @@ class _ModelInfo:
             has_inner_state=has_inner_state(model),
             is_attention_free=is_attention_free(model),
             is_hybrid=is_hybrid(model),
-            supports_mamba_prefix_caching=supports_mamba_prefix_caching(model),
             supports_replayssm=supports_replayssm(model),
             supports_transcription=supports_transcription(model),
             supports_transcription_only=(

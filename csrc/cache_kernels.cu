@@ -630,7 +630,8 @@ __global__ void indexer_k_quant_and_cache_kernel(
     const int cache_block_size,                // cache block size
     const int64_t cache_block_stride,  // stride for each block in kv_cache
 
-    const bool use_ue8m0  // use ue8m0 scale format
+    const bool use_ue8m0,    // use ue8m0 scale format
+    const bool use_mx_scale  // store the ue8m0 scale as packed MX bytes
 ) {
   constexpr int VEC_SIZE = 4;
   const int64_t token_idx = blockIdx.x;
@@ -679,7 +680,13 @@ __global__ void indexer_k_quant_and_cache_kernel(
     const int64_t dst_scale_idx =
         block_idx * cache_block_stride + cache_block_size * head_dim +
         (block_offset * head_dim + head_dim_idx) * 4 / quant_block_size;
-    reinterpret_cast<float*>(kv_cache)[dst_scale_idx / 4] = scale;
+    if (use_mx_scale) {
+      // One UE8M0 byte per 32 elements, all equal to the shared scale's.
+      reinterpret_cast<uint32_t*>(kv_cache)[dst_scale_idx / 4] =
+          ((__float_as_uint(scale) >> 23) & 0xFF) * 0x01010101u;
+    } else {
+      reinterpret_cast<float*>(kv_cache)[dst_scale_idx / 4] = scale;
+    }
   }
 }
 
@@ -1912,7 +1919,7 @@ void cp_gather_and_upconvert_nvfp4_kv_cache(
           reinterpret_cast<KV_T*>(k.data_ptr()),                              \
           reinterpret_cast<CACHE_T*>(kv_cache.data_ptr()),                    \
           slot_mapping.const_data_ptr<int64_t>(), head_dim, quant_block_size, \
-          cache_block_size, cache_block_stride, use_ue8m0);
+          cache_block_size, cache_block_stride, use_ue8m0, use_mx_scale);
 
 void indexer_k_quant_and_cache(
     torch::stable::Tensor& k,         // [num_tokens, head_dim]
@@ -1924,8 +1931,13 @@ void indexer_k_quant_and_cache(
   int head_dim = k.size(1);
   int cache_block_size = kv_cache.size(1);
   int64_t cache_block_stride = kv_cache.stride(0);
-  bool use_ue8m0 = scale_fmt == "ue8m0";
+  // "mxfp8" stores the ue8m0 scale as four packed UE8M0 bytes, the MX scales
+  // DeepGEMM's SM100 MQA logits kernels read.
+  bool use_mx_scale = scale_fmt == "mxfp8";
+  bool use_ue8m0 = use_mx_scale || scale_fmt == "ue8m0";
 
+  STD_TORCH_CHECK(!use_mx_scale || (head_dim == 128 && quant_block_size == 128),
+                  "mxfp8 scales require head_dim == quant_block_size == 128");
   STD_TORCH_CHECK(k.device() == kv_cache.device(),
                   "k and kv_cache must be on the same device");
   STD_TORCH_CHECK(k.device() == slot_mapping.device(),

@@ -74,7 +74,6 @@ from vllm.model_executor.models.interfaces import (
     SupportsEagle,
     SupportsEagle3,
     SupportsLoRA,
-    SupportsMambaPrefixCaching,
     SupportsPP,
     SupportsQuant,
     SupportsReplaySSM,
@@ -725,7 +724,6 @@ class NemotronHForCausalLM(
     IsHybrid,
     SupportsQuant,
     MixtureOfExperts,
-    SupportsMambaPrefixCaching,
     SupportsReplaySSM,
 ):
     # Relevant only if self.has_moe is True

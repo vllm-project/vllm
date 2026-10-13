@@ -17,6 +17,7 @@ from vllm.model_executor.layers.fused_moe import GateLinear
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.models.transformers.fx_utils import (
     find_node,
+    is_complete,
     is_op,
     peel,
     trace,
@@ -107,6 +108,24 @@ def _reaches(node: fx.Node, key: str) -> set[fx.Node]:
     return seen
 
 
+def _renormalizes(topk: fx.Node) -> bool:
+    """Are the top-k weights divided by their own sum?
+
+    Every HF router spells renormalization as a division by a sum over the
+    selection, optionally offset by an epsilon."""
+    downstream = _reaches(topk, "users")
+    for node in downstream:
+        if not (is_op(node, "div") or is_op(node, "truediv")) or len(node.args) < 2:
+            continue
+        denominator = node.args[1]
+        if not isinstance(denominator, fx.Node):
+            continue
+        cone = _reaches(denominator, "all_input_nodes")
+        if any(is_op(n, "sum") and n in downstream for n in cone):
+            return True
+    return False
+
+
 class SharedExpertMLP(nn.Module):
     """Wraps an HF shared expert, applying the output gating it is paired with."""
 
@@ -147,12 +166,18 @@ class MoEBlockFuser:
     shared_name: str | None
     shared_gate_name: str | None
     router_dtype: torch.dtype | None = None
+    renormalize: bool | None = None
 
     @staticmethod
-    def _match_router(gate: nn.Module) -> tuple[str, torch.dtype | None] | None:
-        """Matches `topk(score(linear(x)))`, `score` being `softmax`/`sigmoid`.
+    def _match_router(
+        gate: nn.Module,
+    ) -> tuple[str, torch.dtype | None, bool | None] | None:
+        """Matches `topk(score(linear(x)))` or `score(topk(linear(x)))`, `score` being
+        `softmax`/`sigmoid`.
 
-        Returns the scoring function and the dtype the router computes in."""
+        Returns the scoring function, the dtype the router computes in, and
+        whether the top-k weights are renormalized (`None` if the trace was cut
+        short before it could say)."""
         state = {name for name, _ in named_state(gate)}
         if "weight" not in state or state - {"weight", "e_score_correction_bias"}:
             return None
@@ -164,20 +189,31 @@ class MoEBlockFuser:
         if not topks:
             return None
         topk = topks[-1]
-        # Exactly one scoring op upstream of the top-k, fed (transitively) by a linear.
-        scorers = [
-            n
-            for n in _reaches(topk, "all_input_nodes")
-            if is_op(n, "softmax") or is_op(n, "sigmoid")
-        ]
+        is_scorer = lambda n: is_op(n, "softmax") or is_op(n, "sigmoid")
+        post_topk = False
+        # Find all scoring functions that reach the top-k node.
+        scorers = [n for n in _reaches(topk, "all_input_nodes") if is_scorer(n)]
+        if not scorers:
+            # Find all scoring functions that are users of the top-k node.
+            scorers = [n for n in _reaches(topk, "users") if is_scorer(n)]
+            post_topk = True
         if len(scorers) != 1:
             return None
         scorer = scorers[0]
         logits_cone = _reaches(scorer, "all_input_nodes")
         if not any(is_op(n, "linear") for n in logits_cone):
             return None
-        scoring_func = "softmax" if is_op(scorer, "softmax") else "sigmoid"
-        return scoring_func, _forced_dtype(logits_cone)
+        is_softmax = is_op(scorer, "softmax")
+        # vLLM always scores every expert, so matching a router that softmaxes
+        # the selection alone takes renormalizing. Otherwise look for the
+        # division, reading its absence as "no" only from a complete trace.
+        renormalize: bool | None
+        if (post_topk and is_softmax) or _renormalizes(topk):
+            renormalize = True
+        else:
+            renormalize = False if is_complete(graph) else None
+        scoring_func = "softmax" if is_softmax else "sigmoid"
+        return scoring_func, _forced_dtype(logits_cone), renormalize
 
     @staticmethod
     def _match_shared_experts(
@@ -221,14 +257,14 @@ class MoEBlockFuser:
         if _returns_tuple(type(moe_block)):
             return None
         # Router: the child that scores + top-k selects.
-        gate_name = scoring_func = router_dtype = None
+        gate_name = scoring_func = router_dtype = renormalize = None
         for name, child in moe_block.named_children():
             if (
                 name != experts_name
                 and (router := cls._match_router(child)) is not None
             ):
                 gate_name = name
-                scoring_func, router_dtype = router
+                scoring_func, router_dtype, renormalize = router
                 break
         if gate_name is None or scoring_func is None:
             return None
@@ -256,7 +292,14 @@ class MoEBlockFuser:
         for name, child in moe_block.named_children():
             if name not in accounted and next(named_state(child), None) is not None:
                 return None
-        return cls(gate_name, scoring_func, shared_name, shared_gate_name, router_dtype)
+        return cls(
+            gate_name,
+            scoring_func,
+            shared_name,
+            shared_gate_name,
+            router_dtype,
+            renormalize,
+        )
 
     def gate(
         self, moe_block: nn.Module, prefix: str, out_dtype: torch.dtype | None = None
