@@ -340,12 +340,17 @@ def test_packed_uncompressed_cache_still_rejects_virtual_split() -> None:
         head_size=128,
         dtype=torch.bfloat16,
     )
-    stride = 2 * spec.page_size_bytes
-    cache = KVCacheConfig(
+    cache = _single_packed_cache(spec, 2 * spec.page_size_bytes)
+    with pytest.raises(ValueError, match="cannot be split"):
+        allocate_kv_cache(cache, torch.device("cpu"), KVCacheLayout.BLNHC, [BLOCK_SIZE])
+
+
+def _single_packed_cache(spec: FullAttentionSpec, stride: int) -> KVCacheConfig:
+    return KVCacheConfig(
         num_blocks=2,
         kv_cache_tensors=[
             KVCacheTensor(
-                size=2 * stride,
+                size=max(2 * stride, stride + spec.page_size_bytes),
                 layers=["main"],
                 layer_stride=spec.page_size_bytes,
                 block_stride=stride,
@@ -353,5 +358,50 @@ def test_packed_uncompressed_cache_still_rejects_virtual_split() -> None:
         ],
         kv_cache_groups=[KVCacheGroupSpec(["main"], spec)],
     )
+
+
+def test_packed_compressed_cache_without_independent_mapping_rejects_split() -> None:
+    """Compression alone does not authorize a virtual block-table mapping."""
+    spec = MLAAttentionSpec(
+        block_size=2 * BLOCK_SIZE,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.bfloat16,
+        tokens_per_state=4,
+    )
+    cache = _single_packed_cache(spec, 2 * spec.page_size_bytes)
     with pytest.raises(ValueError, match="cannot be split"):
         allocate_kv_cache(cache, torch.device("cpu"), KVCacheLayout.BLNHC, [BLOCK_SIZE])
+
+
+def test_packed_compressed_cache_rejects_stride_shorter_than_manager_page() -> None:
+    """Virtual pages must not alias the following manager block."""
+    spec = _IndependentSelectorWithoutGenericSlots(
+        block_size=2 * BLOCK_SIZE,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.bfloat16,
+        tokens_per_state=4,
+    )
+    cache = _single_packed_cache(spec, spec.page_size_bytes // 2)
+    with pytest.raises(ValueError, match="cannot be split"):
+        allocate_kv_cache(cache, torch.device("cpu"), KVCacheLayout.BLNHC, [BLOCK_SIZE])
+
+
+def test_packed_compressed_cache_rejects_nonintegral_state_split() -> None:
+    """Each manager state must belong to a kernel page."""
+    spec = _IndependentSelectorWithoutGenericSlots(
+        block_size=10,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.bfloat16,
+        tokens_per_state=3,
+    )
+    cache = torch.zeros(
+        (2, 1, spec.num_states, spec.state_content_size_bytes // 2),
+        dtype=torch.bfloat16,
+    )
+    group = AttentionGroup(_QSAMainBackend, ["main"], spec, 0)
+    group.kernel_block_size = 5
+    with pytest.raises(ValueError, match="cannot be split"):
+        group.map_kv_cache_to_kernel_blocks(cache)
