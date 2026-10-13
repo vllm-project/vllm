@@ -12,6 +12,7 @@ steps:
   - vllm/engine/
   - vllm/entrypoints/logger.py
   - vllm/envs.py
+  - vllm/forward_context.py
   - vllm/logger.py
   - vllm/logging_utils/
   - vllm/platforms/
@@ -21,12 +22,13 @@ steps:
   - tests/engine
   - tests/test_sequence
   - tests/test_config
+  - tests/test_forward_context
   - tests/test_logger
   - tests/test_vllm_port
   - tests/jit_monitor/test_hooks.py
   - tests/jit_monitor/test_hooks_gpu.py
   commands:
-  - pytest -v -s engine test_sequence.py test_config.py test_logger.py test_vllm_port.py jit_monitor/test_hooks.py jit_monitor/test_hooks_gpu.py
+  - pytest -v -s engine test_sequence.py test_config.py test_forward_context.py test_logger.py test_vllm_port.py jit_monitor/test_hooks.py jit_monitor/test_hooks_gpu.py
   mirror:
     amd:
       label: ":amd: (MI355 DPX) Engine Core"
