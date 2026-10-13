@@ -1039,6 +1039,8 @@ class MuseGlimmerDecoderLayer(nn.Module):
 
         def make_sandwich_norm(eps: float) -> nn.Module:
             if self.use_amd_fused_norm:
+                # GemmaRMSNorm has Muse's (1 + weight) scaling and exposes the
+                # residual-aware IR pattern matched by the ROCm AITER fusion.
                 return GemmaRMSNorm(config.hidden_size, eps=eps)
             return MuseGlimmerRMSNorm(config.hidden_size, eps=eps, weight_offset=1)
 
