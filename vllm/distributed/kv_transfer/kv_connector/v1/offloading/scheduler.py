@@ -689,7 +689,6 @@ class OffloadingConnectorScheduler:
             result = self.manager.lookup(key, req_context)
             match result:
                 case LookupResult.HIT:
-                    self._events_tracker.record_hit(req_context, key)
                     hit_count += 1
                 case LookupResult.HIT_PENDING:
                     defer_lookup = True
@@ -990,7 +989,6 @@ class OffloadingConnectorScheduler:
         for boundary in range(max_boundary, complete_boundary, -tokens_per_hash):
             boundary_pending = False
             boundary_missed = False
-            boundary_keys = []
             for group_config in self.config.kv_group_configs:
                 key = self._make_boundary_key(
                     req_status.req,
@@ -998,7 +996,6 @@ class OffloadingConnectorScheduler:
                     boundary,
                     req_status.req_context,
                 )
-                boundary_keys.append(key)
                 result = self.manager.lookup(key, req_status.req_context)
                 if result is LookupResult.MISS:
                     boundary_missed = True
@@ -1008,8 +1005,6 @@ class OffloadingConnectorScheduler:
 
             pending |= boundary_pending
             if not boundary_missed and not boundary_pending:
-                for key in boundary_keys:
-                    self._events_tracker.record_hit(req_status.req_context, key)
                 req_status.partial_tail_boundary = boundary
                 return boundary - local_tokens
 
@@ -1394,12 +1389,6 @@ class OffloadingConnectorScheduler:
                         block_indices=block_indices,
                     ),
                     dst_spec=store_output.store_spec,
-                )
-                self._events_tracker.record_store(
-                    req,
-                    group_config,
-                    boundary // group_config.tokens_per_chunk - 1,
-                    key,
                 )
         return store_jobs
 
@@ -2072,13 +2061,11 @@ class OffloadingConnectorScheduler:
                     self.manager.on_request_finished(status.req_context)
                 del self._req_status[req_id]
 
-        # Reset offloading manager cache. Raw removals already queued by an
-        # eviction remain valid and still need the detached expansion records.
+        # Translate queued events before resetting active request state.
         self.manager.reset_cache()
         self._pending_events.extend(
             self._events_tracker.take_events(self.manager.take_events())
         )
-        self._events_tracker.reset()
 
         # Reset store progress so active requests re-offload from chunk 0.
         for status in self._req_status.values():
@@ -2099,7 +2086,6 @@ class OffloadingConnectorScheduler:
 
     def shutdown(self) -> None:
         self.manager.shutdown()
-        self._events_tracker.reset()
         self._pending_events.clear()
         self._jobs.clear()
         self._req_status.clear()

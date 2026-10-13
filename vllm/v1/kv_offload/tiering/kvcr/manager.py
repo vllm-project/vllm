@@ -617,7 +617,6 @@ class KVCRSecondaryTierManager(SecondaryTierManager):
                 medium=medium,
                 removed=event.removed,
                 ownership="kvcr",
-                removal_expected=True,
             )
         )
 

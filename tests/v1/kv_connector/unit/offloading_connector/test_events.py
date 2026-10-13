@@ -177,7 +177,6 @@ def _stored_event(
     medium: Medium = _CPU_MEDIUM,
     locality: Locality | None = None,
     ownership: str | None = None,
-    removal_expected: bool = False,
     req_context: ReqContext | None = None,
 ) -> OffloadingEvent:
     return OffloadingEvent(
@@ -186,7 +185,6 @@ def _stored_event(
         removed=False,
         locality=locality,
         ownership=ownership,
-        removal_expected=removal_expected,
         req_context=req_context,
     )
 
@@ -392,8 +390,6 @@ def test_take_events_publishes_routable_block_stored():
     assert len(batch2) == 3
     assert batch2[0].parent_block_hash == batch1[-1].block_hashes[-1]
 
-    assert len(tracker._pending_event_metadata) == 6
-
 
 def test_promotion_emits_full_cpu_stored_event():
     tracker, req, _, key = _lookup_chunk()
@@ -522,31 +518,29 @@ def test_stored_event_without_matching_context_uses_placeholder(event_context):
     assert event.block_size == 0
 
 
-def test_stored_event_uses_context_not_retained_removal_payload():
+def test_stored_event_reads_request_when_event_is_translated():
     tracker = _tracker()
     req = _request(block_hashes=[_hash(0)], token_count=4)
     [key] = _record_chunks(tracker, req, _group_config(), num_chunks=1)
-    tracker.record_hit(req.req_context, key)
-    tracker._pending_event_metadata[key].token_ids = (99, 99, 99, 99)
+    req.all_token_ids = [9, 8, 7, 6]
 
     [stored] = tracker.take_events([_stored_event([key], req_context=req.req_context)])
 
-    assert stored.token_ids == [1, 2, 3, 4]
+    assert stored.token_ids == [9, 8, 7, 6]
 
 
-def test_stored_event_without_context_ignores_retained_removal_payload():
+def test_stored_event_without_context_and_key_only_removal():
     tracker = _tracker()
     req = _request(block_hashes=[_hash(0), _hash(1)], token_count=8)
     [key] = _record_chunks(
         tracker, req, _group_config(blocks_per_chunk=2), num_chunks=1
     )
-    tracker.record_hit(req.req_context, key)
 
     [stored] = tracker.take_events([_stored_event([key])])
     [removed] = tracker.take_events([_removed_event([key])])
 
     assert stored.block_size == 0
-    assert removed.block_hashes == [_wire_hash(_hash(0)), _wire_hash(_hash(1))]
+    assert removed.block_hashes == [_wire_hash(_hash(1))]
 
 
 @pytest.mark.parametrize("unsafe_path", ["resumable", "mamba_truncation"])
@@ -735,7 +729,6 @@ def test_lookup_promotion_factor_gt_1_store_and_remove():
     )
     assert len(stored) == 2
 
-    expected_hashes = []
     for chunk_idx, event in enumerate(stored):
         assert isinstance(event, BlockStored)
         expected_chunk_hashes = [
@@ -752,17 +745,13 @@ def test_lookup_promotion_factor_gt_1_store_and_remove():
             assert event.parent_block_hash is None
         else:
             assert event.parent_block_hash == _wire_hash(_hash(blocks_per_chunk - 1))
-        expected_hashes.extend(expected_chunk_hashes)
-
-    assert len(tracker._pending_event_metadata) == 2
 
     removed = list(tracker.take_events([_removed_event(keys)]))
     assert len(removed) == 1
     assert isinstance(removed[0], BlockRemoved)
-    assert removed[0].block_hashes == expected_hashes
+    assert removed[0].block_hashes == [_wire_hash(_hash(1)), _wire_hash(_hash(3))]
     assert removed[0].medium == _CPU_MEDIUM.value
     assert removed[0].group_idx == 0
-    assert not tracker._pending_event_metadata
 
 
 def test_take_events_factor_gt_1_store_is_order_independent():
@@ -853,11 +842,9 @@ def test_event_metadata_skips_non_full_attention_group(
 
 
 @pytest.mark.parametrize("secondary_removal_in_same_batch", [False, True])
-def test_primary_removal_preserves_metadata_for_same_batch_kvcr_store(
+def test_primary_removal_before_secondary_store_uses_only_key(
     secondary_removal_in_same_batch,
 ):
-    """A removal must not drop the payload a later store in the same batch
-    still needs, and must still drop it once no residency is left."""
     tracker = _tracker()
     group_config = _group_config(block_size=64, blocks_per_chunk=2)
     req = _request(block_hashes=[_hash(i) for i in range(4)], token_count=256)
@@ -866,12 +853,7 @@ def test_primary_removal_preserves_metadata_for_same_batch_kvcr_store(
 
     batch = [
         _removed_event([key]),
-        _stored_event(
-            [key],
-            ownership="kvcr",
-            removal_expected=True,
-            req_context=req.req_context,
-        ),
+        _stored_event([key], ownership="kvcr", req_context=req.req_context),
     ]
     if secondary_removal_in_same_batch:
         batch.append(secondary_removal)
@@ -880,93 +862,43 @@ def test_primary_removal_preserves_metadata_for_same_batch_kvcr_store(
         events += tracker.take_events([secondary_removal])
     removed, stored, final_removal = events
 
-    hashes = [_wire_hash(_hash(2)), _wire_hash(_hash(3))]
     assert isinstance(removed, BlockRemoved)
-    assert removed.block_hashes == hashes
+    assert removed.block_hashes == [_wire_hash(_hash(3))]
     assert stored.block_size == 64
     assert stored.token_ids == list(range(129, 257))
     assert stored.parent_block_hash == _wire_hash(_hash(1))
-    assert stored.block_hashes == hashes
+    assert stored.block_hashes == [_wire_hash(_hash(2)), _wire_hash(_hash(3))]
     assert stored.ownership == "kvcr"
-    assert final_removal.block_hashes == hashes
-
-    # Nothing holds a residency now, so the payload is gone.
-    [after_eviction] = tracker.take_events([_stored_event([key], ownership="kvcr")])
-    assert after_eviction.block_size == 0
+    assert final_removal.block_hashes == [_wire_hash(_hash(3))]
+    assert final_removal.ownership == "kvcr"
 
 
-def test_pending_cpu_removal_consumes_hit_backfill_until_next_hit():
+def test_removal_needs_no_request_context_or_prior_store():
     tracker = _tracker()
-    block_hashes = [_hash(0), _hash(1)]
-    req = _request(block_hashes=block_hashes, token_count=8)
-    group_config = _group_config(blocks_per_chunk=2)
-    key = _record_chunks(tracker, req, group_config, num_chunks=1)[0]
-    tracker.record_hit(req.req_context, key)
-    confirmed_meta = tracker._pending_event_metadata[key]
-    lookup_req = _request(
-        block_hashes=block_hashes,
-        token_count=8,
-        req_id="new-request",
-    )
+    key = make_offload_key(_hash(7), 2)
 
-    tracker.record_lookup(
-        lookup_req,
-        group_config,
-        0,
-        key,
-    )
-    assert tracker._pending_event_metadata[key] is confirmed_meta
+    [removed] = tracker.take_events([_removed_event([key])])
 
-    list(
-        tracker.take_events([_stored_event([key], Medium.STORAGE, ownership="custom")])
-    )
-    removed = list(tracker.take_events([_removed_event([key])]))
-    assert len(removed) == 1
-    assert removed[0].block_hashes == [
-        _wire_hash(_hash(0)),
-        _wire_hash(_hash(1)),
-    ]
-
-    tracker.on_new_request(lookup_req.req_context, lookup_req, (group_config,))
-    tracker.record_hit(lookup_req.req_context, key)
-    removed = list(tracker.take_events([_removed_event([key])]))
-    assert removed[0].block_hashes == [
-        _wire_hash(_hash(0)),
-        _wire_hash(_hash(1)),
-    ]
+    assert removed.block_hashes == [_wire_hash(_hash(7))]
+    assert removed.group_idx == 2
 
 
-@pytest.mark.parametrize(
-    ("record_method", "position"),
-    [("record_store", 0), ("record_partial_store", 4)],
-)
-def test_reoffload_preserves_secondary_residency(record_method, position):
-    tracker, req, group_config, key = _lookup_chunk()
+def test_secondary_removal_is_key_only_and_preserves_ownership():
+    tracker, req, _, key = _lookup_chunk()
     [stored] = tracker.take_events(
         [
             _stored_event(
-                [key],
-                Medium.STORAGE,
-                ownership="custom",
-                removal_expected=True,
-                req_context=req.req_context,
+                [key], Medium.STORAGE, ownership="custom", req_context=req.req_context
             )
         ]
     )
-
-    getattr(tracker, record_method)(req, group_config, position, key)
-
-    assert tracker._pending_event_metadata[key].active_residencies == {
-        (Medium.CPU, None),
-        (Medium.STORAGE, "custom"),
-    }
     [removed] = tracker.take_events(
         [_removed_event([key], Medium.STORAGE, ownership="custom")]
     )
 
     assert stored.token_ids == [1, 2, 3, 4]
+    assert removed.block_hashes == [_wire_hash(_hash(0))]
     assert stored.ownership == removed.ownership == "custom"
-    assert key in tracker._pending_event_metadata
 
 
 def test_take_events_groups_removed_hashes_by_kv_group():
@@ -985,8 +917,8 @@ def test_take_events_groups_removed_hashes_by_kv_group():
     assert len(removed) == 2
     by_group = {event.group_idx: event.block_hashes for event in removed}
     assert by_group == {
-        0: [_wire_hash(_hash(0)), _wire_hash(_hash(1))],
-        1: [_wire_hash(_hash(10)), _wire_hash(_hash(11))],
+        0: [_wire_hash(_hash(1))],
+        1: [_wire_hash(_hash(11))],
     }
 
 
@@ -1007,7 +939,7 @@ def test_take_events_supports_restore_after_eviction():
     removed = list(tracker.take_events([_removed_event([key])]))
     assert len(removed) == 1
     assert isinstance(removed[0], BlockRemoved)
-    assert not tracker._pending_event_metadata
+    assert removed[0].block_hashes == [_wire_hash(_hash(0))]
 
     replacement_req = _request(
         block_hashes=[_hash(0)],
@@ -1028,23 +960,16 @@ def test_take_events_supports_restore_after_eviction():
     assert second_store[0].token_ids == [1, 2, 3, 4]
 
 
-def test_reset_keeps_request_context_for_secondary_events():
+def test_removal_keeps_request_context_for_secondary_events():
     tracker = _tracker()
     group_config = _group_config()
     req = _request(block_hashes=[_hash(i) for i in range(3)], token_count=12)
     _record_lookup_chunks(tracker, req, group_config, num_chunks=3)
 
     key = make_offload_key(req.block_hashes[0], group_config.group_idx)
-    tracker.record_hit(req.req_context, key)
-    assert tracker._request_event_context(req.req_context) is not None
-    assert tracker._pending_event_metadata
-
-    tracker.reset()
+    list(tracker.take_events([_removed_event([key])]))
 
     assert tracker._request_event_context(req.req_context) is not None
-    assert not tracker._pending_event_metadata
-
-    key = make_offload_key(req.block_hashes[0], group_config.group_idx)
     [event] = tracker.take_events(
         [_stored_event([key], medium=Medium.STORAGE, req_context=req.req_context)]
     )

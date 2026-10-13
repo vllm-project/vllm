@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import MagicMock, call
+from unittest.mock import MagicMock
 
 import pytest
 import torch
@@ -1041,7 +1041,7 @@ def test_scheduler_reports_lookup_async_delay_on_resolve(request_runner):
     assert reduced[f"{_ConnectorMetricName.LOOKUP_ASYNC_DELAY}_sum"] > 0
 
 
-def test_max_offload_tokens_zero_does_not_create_removal_metadata(request_runner):
+def test_max_offload_tokens_zero_does_not_emit_events(request_runner):
     runner = request_runner(
         block_size=4,
         num_gpu_blocks=10,
@@ -1059,21 +1059,16 @@ def test_max_offload_tokens_zero_does_not_create_removal_metadata(request_runner
     )
     runner.run(decoded_tokens=[])
 
-    tracker = runner.connector_scheduler._events_tracker
     assert runner.manager.lookup.call_count == 3
-    assert not tracker._pending_event_metadata
     assert list(runner.connector_scheduler.take_events()) == []
 
     runner.manager.lookup.return_value = LookupResult.MISS
     runner.run(decoded_tokens=[EOS_TOKEN_ID])
 
-    assert not tracker._pending_event_metadata
     assert list(runner.connector_scheduler.take_events()) == []
 
 
-def test_abort_before_hit_uses_placeholder_then_later_hit_heals_removal(
-    request_runner,
-):
+def test_abort_before_hit_uses_placeholder_then_key_only_removal(request_runner):
     runner = request_runner(
         block_size=4,
         num_gpu_blocks=10,
@@ -1094,47 +1089,24 @@ def test_abort_before_hit_uses_placeholder_then_later_hit_heals_removal(
 
     runner.new_request(token_ids=[1] * 8)
     runner.run(decoded_tokens=[])
-
-    tracker = runner.connector_scheduler._events_tracker
-    assert not tracker._pending_event_metadata
     key = runner.manager.lookup.call_args.args[0]
     req_id = str(runner.req_id)
-    req_status = runner.connector_scheduler._req_status[req_id]
-
     runner.scheduler.finish_requests((req_id,), RequestStatus.FINISHED_ABORTED)
 
-    assert not tracker._pending_event_metadata
-
     raw_events.append(OffloadingEvent(keys=[key], medium=Medium.CPU, removed=False))
-    events = list(runner.connector_scheduler.take_events())
-    assert len(events) == 1
-    assert isinstance(events[0], BlockStored)
-    assert events[0].block_size == 0
-    assert events[0].token_ids == []
-
-    runner.manager.lookup.return_value = LookupResult.HIT
-    group_config = runner.connector_scheduler.config.kv_group_configs[0]
-    assert (
-        runner.connector_scheduler._maximal_prefix_lookup(
-            [key],
-            req_status.req_context,
-            req_status.req,
-            group_config,
-            0,
-        )
-        == 1
-    )
-    assert key in tracker._pending_event_metadata
+    [stored] = runner.connector_scheduler.take_events()
+    assert isinstance(stored, BlockStored)
+    assert stored.block_size == 0
+    assert stored.token_ids == []
 
     raw_events.append(OffloadingEvent(keys=[key], medium=Medium.CPU, removed=True))
-    [event] = runner.connector_scheduler.take_events()
-    assert isinstance(event, BlockRemoved)
-    assert event.medium == MEDIUM_CPU
-    assert len(event.block_hashes) == 2
-    assert key not in tracker._pending_event_metadata
+    [removed] = runner.connector_scheduler.take_events()
+    assert isinstance(removed, BlockRemoved)
+    assert removed.medium == MEDIUM_CPU
+    assert len(removed.block_hashes) == 1
 
 
-def test_reset_buffers_queued_removal_before_clearing_metadata(request_runner):
+def test_reset_buffers_queued_key_only_removal(request_runner):
     runner = request_runner(
         block_size=4,
         num_gpu_blocks=10,
@@ -1157,19 +1129,13 @@ def test_reset_buffers_queued_removal_before_clearing_metadata(request_runner):
     runner.run(decoded_tokens=[])
 
     scheduler = runner.connector_scheduler
-    tracker = scheduler._events_tracker
-    req_status = scheduler._req_status[str(runner.req_id)]
     key = runner.manager.lookup.call_args.args[0]
-    tracker.record_hit(req_status.req_context, key)
-    assert key in tracker._pending_event_metadata
-
     raw_events.append(OffloadingEvent(keys=[key], medium=Medium.CPU, removed=True))
     scheduler.reset_cache()
 
-    assert not tracker._pending_event_metadata
     [event] = scheduler.take_events()
     assert isinstance(event, BlockRemoved)
-    assert len(event.block_hashes) == 2
+    assert len(event.block_hashes) == 1
     assert not scheduler._pending_events
 
 
@@ -1195,7 +1161,6 @@ def test_promotion_hit_precedes_stored_event_translation(
         expected_stored=tuple(range(blocks_per_chunk)),
     )
     runner.scheduler.reset_prefix_cache()
-    runner.connector_scheduler._events_tracker.reset()
 
     raw_events: list[OffloadingEvent] = []
 
@@ -1971,15 +1936,10 @@ class TestMaximalPrefixLookup:
         sched = _make_scheduler_with_lookup({1: LookupResult.HIT, 2: LookupResult.HIT})
 
         assert _maximal_lookup(sched, keys) == 2
-        assert sched._events_tracker.record_hit.call_args_list == [
-            call(_EMPTY_REQ_CTX, keys[0]),
-            call(_EMPTY_REQ_CTX, keys[1]),
-        ]
 
     def test_all_miss(self):
         sched = _make_scheduler_with_lookup({})
         assert _maximal_lookup(sched, to_keys([1, 2])) == 0
-        sched._events_tracker.record_hit.assert_not_called()
 
     def test_partial_prefix(self):
         sched = _make_scheduler_with_lookup({1: LookupResult.HIT, 2: LookupResult.HIT})
@@ -2005,7 +1965,6 @@ class TestMaximalPrefixLookup:
         sched = _make_scheduler_with_lookup({1: pending_result})
 
         assert _maximal_lookup(sched, to_keys([1])) is None
-        sched._events_tracker.record_hit.assert_not_called()
 
     def test_retry_defers(self):
         keys = to_keys([1, 2])
@@ -2015,9 +1974,6 @@ class TestMaximalPrefixLookup:
 
         assert _maximal_lookup(sched, keys) is None
         assert sched.manager.lookup.call_count == 2
-        sched._events_tracker.record_hit.assert_called_once_with(
-            _EMPTY_REQ_CTX, keys[1]
-        )
 
     def test_retry_after_hit_defers(self):
         keys = to_keys([1, 2])
@@ -2026,9 +1982,6 @@ class TestMaximalPrefixLookup:
         )
 
         assert _maximal_lookup(sched, keys) is None
-        sched._events_tracker.record_hit.assert_called_once_with(
-            _EMPTY_REQ_CTX, keys[0]
-        )
 
     def test_hit_pending_defers(self):
         keys = to_keys([1, 2])
@@ -2038,9 +1991,6 @@ class TestMaximalPrefixLookup:
 
         assert _maximal_lookup(sched, keys) is None
         assert sched.manager.lookup.call_count == 2
-        sched._events_tracker.record_hit.assert_called_once_with(
-            _EMPTY_REQ_CTX, keys[1]
-        )
 
     def test_hit_pending_does_not_stop_scan(self):
         """HIT_PENDING defers but does not break until a miss."""
@@ -2050,7 +2000,6 @@ class TestMaximalPrefixLookup:
 
         assert _maximal_lookup(sched, to_keys([1, 2, 3])) is None
         assert sched.manager.lookup.call_count == 2
-        sched._events_tracker.record_hit.assert_not_called()
 
     def test_retry_stops_at_miss(self):
         sched = _make_scheduler_with_lookup(
@@ -2059,7 +2008,6 @@ class TestMaximalPrefixLookup:
 
         assert _maximal_lookup(sched, to_keys([1, 2, 3])) is None
         assert sched.manager.lookup.call_count == 2
-        sched._events_tracker.record_hit.assert_not_called()
 
 
 class TestSlidingWindowLookup:
