@@ -1422,7 +1422,10 @@ def test_dequantize_and_gather_k_cache(
 
 @pytest.mark.parametrize("num_tokens", [1, 4, 8, 17])
 @pytest.mark.parametrize("block_size", [16, 64])
-def test_indexer_quant_cache_roundtrip(num_tokens: int, block_size: int):
+@pytest.mark.parametrize("scale_fmt", ["ue8m0", "mxfp8"])
+def test_indexer_quant_cache_roundtrip(
+    num_tokens: int, block_size: int, scale_fmt: str
+):
     """K → indexer_k_quant_and_cache → cp_gather_indexer_k_quant_cache
     → manual dequant → compare against original."""
     HEAD_DIM = 128
@@ -1442,7 +1445,9 @@ def test_indexer_quant_cache_roundtrip(num_tokens: int, block_size: int):
     )
     slot_mapping = torch.arange(num_tokens, dtype=torch.int64, device=device)
 
-    ops.indexer_k_quant_and_cache(k, kv_cache, slot_mapping, QUANT_BLOCK_SIZE, "ue8m0")
+    ops.indexer_k_quant_and_cache(
+        k, kv_cache, slot_mapping, QUANT_BLOCK_SIZE, scale_fmt
+    )
 
     # ── Gather ──────────────────────────────────────────────────────────
     max_blocks_per_seq = num_blocks
@@ -1465,7 +1470,12 @@ def test_indexer_quant_cache_roundtrip(num_tokens: int, block_size: int):
 
     # ── Manual dequant ──────────────────────────────────────────────────
     k_fp8 = dst_k.view(torch.float8_e4m3fn).float()  # [num_tokens, 128]
-    scale = dst_scale.view(torch.float32)  # [num_tokens, 1]
+    if scale_fmt == "mxfp8":
+        # One UE8M0 byte per 32 elements, all equal to the token's scale.
+        assert (dst_scale == dst_scale[:, :1]).all()
+        scale = (dst_scale[:, :1].to(torch.int32) << 23).view(torch.float32)
+    else:
+        scale = dst_scale.view(torch.float32)  # [num_tokens, 1]
     k_recovered = k_fp8 * scale  # [num_tokens, 128]
 
     # ── Compare ─────────────────────────────────────────────────────────
@@ -1749,8 +1759,13 @@ def _reference_kv_compress_norm_rope(
         ),
     ],
 )
-def test_fused_kv_insert_indexer(num_tokens: int, kv_block_size: int, use_fp4: bool):
+@pytest.mark.parametrize("mx_scale", [False, True])
+def test_fused_kv_insert_indexer(
+    num_tokens: int, kv_block_size: int, use_fp4: bool, mx_scale: bool
+):
     """Fused K compress+norm+rope+quant+insert for the indexer KV cache."""
+    if use_fp4 and mx_scale:
+        pytest.skip("MX scales only change the FP8 cache")
     HEAD_DIM = 128
     ROPE_DIM = 64
     BLOCK_SIZE = 16
@@ -1833,6 +1848,7 @@ def test_fused_kv_insert_indexer(num_tokens: int, kv_block_size: int, use_fp4: b
         TOKEN_STRIDE=TOKEN_STRIDE,
         SCALE_DIM=SCALE_DIM,
         KV_BLOCK_STRIDE=kv_cache.stride(0),
+        MX_SCALE=mx_scale,
         num_warps=1,
     )
 
@@ -1876,12 +1892,18 @@ def test_fused_kv_insert_indexer(num_tokens: int, kv_block_size: int, use_fp4: b
             ), f"token {i}: FP8 bytes differ"
 
             scale_off = kv_block_size * TOKEN_STRIDE + pos * SCALE_DIM
-            actual_scale = kv_cache[blk, scale_off : scale_off + SCALE_DIM].view(
-                torch.float32
-            )
-            assert torch.equal(actual_scale, scale[i : i + 1]), (
-                f"token {i}: scale {actual_scale.item()} != {scale[i].item()}"
-            )
+            actual_scale = kv_cache[blk, scale_off : scale_off + SCALE_DIM]
+            if mx_scale:
+                # The power-of-two scale's exponent as 4 equal UE8M0 bytes.
+                ue8m0 = (scale[i : i + 1].view(torch.int32) >> 23).to(torch.uint8)
+                assert torch.equal(actual_scale, ue8m0.repeat(SCALE_DIM)), (
+                    f"token {i}: mx scale {actual_scale.tolist()} != {ue8m0.item()}"
+                )
+            else:
+                actual_scale = actual_scale.view(torch.float32)
+                assert torch.equal(actual_scale, scale[i : i + 1]), (
+                    f"token {i}: scale {actual_scale.item()} != {scale[i].item()}"
+                )
 
 
 @pytest.mark.parametrize("compress_ratio", [4, 128])
