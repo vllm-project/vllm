@@ -21,6 +21,10 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer import get_kv_transfer_group
+from vllm.distributed.kv_transfer.kv_connector.utils import BlockIds
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
+    NixlConnectorMetadata,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.stats import (
     NixlKVConnectorStats,
 )
@@ -47,6 +51,49 @@ from vllm.v1.worker.gpu.kv_connector import ActiveKVConnector
 from vllm.v1.worker.simulated.timing import Clock, load_step_log
 
 logger = init_logger(__name__)
+
+
+@dataclass(frozen=True)
+class PostCost:
+    """Host time a NIXL decode rank spends posting a step's reads, which holds
+    its engine thread: `per_read_s` per read plus `per_run_s` per run of
+    blocks that are consecutive on both instances. NIXL merges such a run
+    into one descriptor per KV cache region, so the second term grows as the
+    blocks a decode instance hands out scatter (once its cache has filled)."""
+
+    per_read_s: float = 0.0
+    per_run_s: float = 0.0
+
+    def seconds(self, num_reads: int, num_runs: int) -> float:
+        return num_reads * self.per_read_s + num_runs * self.per_run_s
+
+
+def read_runs(local_block_ids: BlockIds, remote_block_ids: BlockIds) -> int:
+    """Runs of blocks consecutive on both sides in one read, over its KV cache
+    groups. Remote blocks the decode instance already holds (a local prefix
+    hit) are not read: the last ones are paired with the local blocks."""
+    runs = 0
+    for local, remote in zip(local_block_ids, remote_block_ids):
+        if not local:
+            continue
+        remote = remote[len(remote) - len(local) :]
+        runs += 1 + sum(
+            1
+            for i in range(1, len(local))
+            if local[i] != local[i - 1] + 1 or remote[i] != remote[i - 1] + 1
+        )
+    return runs
+
+
+def nixl_reads(metadata: NixlConnectorMetadata) -> tuple[int, int]:
+    """(reads, runs) a NIXL decode rank posts for a step's connector metadata."""
+    num_reads = num_runs = 0
+    for meta in metadata.reqs_to_recv.values():
+        if meta.remote is None or not any(meta.local_block_ids):
+            continue
+        num_reads += 1
+        num_runs += read_runs(meta.local_block_ids, meta.remote.block_ids)
+    return num_reads, num_runs
 
 
 @dataclass(frozen=True)
@@ -80,13 +127,68 @@ def kv_transfer_rates(
     return load, store
 
 
+def kv_post_cost(timing: dict[str, float] | str) -> PostCost:
+    """The NIXL read posting cost from `SimulationConfig.kv_transfer_timing`:
+    `post_us_per_read` and `post_us_per_run`, or fitted from a step log
+    (zero if it recorded none)."""
+    if isinstance(timing, str):
+        return post_cost_from_log(timing)
+    return PostCost(
+        per_read_s=timing.get("post_us_per_read", 0.0) * 1e-6,
+        per_run_s=timing.get("post_us_per_run", 0.0) * 1e-6,
+    )
+
+
+def post_cost_from_log(path: str) -> PostCost:
+    """Least-squares `PostCost` of the read postings recorded in a step log.
+    Records far slower than the rest (a NIXL agent's first postings to new
+    memory) are left out."""
+    rows = [
+        (rec["kv_post"]["reads"], rec["kv_post"]["runs"], rec["kv_post"]["seconds"])
+        for rec in load_step_log(path, kind="kv_post")
+    ]
+    if not rows:
+        return PostCost()
+    a = np.asarray(rows, dtype=np.float64)
+    # Both terms grow with reads + runs: screen out the slowest postings
+    # before the first fit, which they would otherwise dominate.
+    unit_s = a[:, 2] / (a[:, 0] + a[:, 1])
+    a = a[unit_s <= 20 * np.median(unit_s)]
+    per_read_s, per_run_s = _fit_transfers(a)
+    for _ in range(3):
+        typical = a[:, 2] <= 20 * (a[:, 0] * per_read_s + a[:, 1] * per_run_s)
+        if typical.all():
+            break
+        a = a[typical]
+        per_read_s, per_run_s = _fit_transfers(a)
+    runs_per_read = a[:, 1] / a[:, 0]
+    if runs_per_read.max() <= 1.05 * runs_per_read.min():
+        logger.warning(
+            "The reads recorded in %s are all alike, so the posting cost of "
+            "reads into scattered blocks is extrapolated. Record until the "
+            "decode instance's KV cache has filled and its blocks are reused.",
+            path,
+        )
+    cost = PostCost(per_read_s, per_run_s)
+    logger.info(
+        "NIXL read posting from %s: %.1f us per read + %.2f us per run (%d records)",
+        path,
+        per_read_s * 1e6,
+        per_run_s * 1e6,
+        len(rows),
+    )
+    return cost
+
+
 def _fit_transfers(a: np.ndarray) -> tuple[float, float]:
-    """Least-squares (latency s, s per GB) of (count, GB, seconds) rows."""
+    """Least-squares seconds per count and per unit of (count, units,
+    seconds) rows: a transfer's latency and seconds per GB, or a posting's
+    seconds per read and per run."""
     sizes = a[:, 1] / a[:, 0]
     (latency_s, s_per_gb), *_ = np.linalg.lstsq(a[:, :2], a[:, 2], rcond=None)
     if latency_s < 0 or s_per_gb <= 0 or sizes.max() <= 1.05 * sizes.min():
-        # Latency not separable from bandwidth (no fit, or transfers of one
-        # size): attribute all to bandwidth.
+        # The two not separable (no fit, or rows of one shape): attribute
+        # all to the units.
         latency_s, s_per_gb = 0.0, a[:, 2].sum() / a[:, 1].sum()
     return float(latency_s), float(s_per_gb)
 
@@ -99,7 +201,7 @@ def transfer_rates_from_log(path: str) -> tuple[TransferRate, TransferRate | Non
     predicts (a connection's first transfers, which include its setup) are
     left out."""
     rows: dict[str, list[tuple[float, float, float]]] = {"load": [], "store": []}
-    for rec in load_step_log(path, kv_transfers=True):
+    for rec in load_step_log(path, kind="kv_transfers"):
         for direction, t in rec["kv_transfers"].items():
             rows[direction].append((t["count"], t["bytes"], t["seconds"]))
     rates: list[TransferRate | None] = []
@@ -313,7 +415,7 @@ def simulated_kv_connector(
         )
     elif isinstance(connector, NixlConnector | NixlPushConnector):
         transfers = connector.worker
-        transfers.configure(clock, load)
+        transfers.configure(clock, load, kv_post_cost(timing))
     else:
         raise ValueError(
             "Simulated execution supports the OffloadingConnector and the "

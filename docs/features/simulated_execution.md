@@ -411,6 +411,21 @@ the blocks, which is what the real one's heartbeats ensure. A decode instance re
 `NixlConnector` logs its reads, so passing its step log as
 `kv_transfer_timing` fits the rate.
 
+Posting a step's reads also holds a decode instance's engine thread, and the
+device idles meanwhile. NIXL merges a run of blocks that are consecutive on
+both instances into one descriptor per KV cache region, so the cost grows
+once a decode instance's blocks scatter. That happens after its KV cache has
+filled once, so a run with fewer requests than the cache holds never shows
+it. The simulated decode instance holds its clock for `post_us_per_read`
+per read plus `post_us_per_run` per such run. A recorded decode instance logs
+each posting and leaves it out of its step's device and host times, and
+`kv_transfer_timing` given as that log fits the two costs. Record past the
+point where the cache has filled, or the cost of scattered reads is
+extrapolated. On H200 with NIXL over `cuda_ipc`, a 2048-token Qwen3-8B read
+took 0.2 ms to post into consecutive blocks and 16 ms into scattered ones.
+The first scattered posting of a fresh decode instance took about 320 ms
+once more; that one-off is not modeled.
+
 Every instance runs on its own virtual clock; the instance furthest behind
 steps next, so the instances run concurrently in simulated time; an
 instance that only waits for transfers moves ahead to the earliest time

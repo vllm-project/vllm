@@ -70,7 +70,10 @@ class SimulationConfig:
     `NixlConnector`. Stores (offloading only) go to the CPU cache. Given as
     `load_gbps` and `store_gbps` (1e9 bytes/s) with optional
     `load_latency_us` and `store_latency_us`, or the path of a step log
-    recorded with the connector to fit them from."""
+    recorded with the connector to fit them from. A NIXL decode instance also
+    holds its engine thread while posting reads: `post_us_per_read` plus
+    `post_us_per_run` per run of blocks consecutive on both instances, also
+    fitted from a step log."""
 
     fallback_token_id: int = Field(default=0, ge=0)
     """Token id emitted at every decode step for requests that carry no
@@ -92,7 +95,14 @@ class SimulationConfig:
         cls, timing: dict[str, float] | str | None
     ) -> dict[str, float] | str | None:
         if isinstance(timing, dict):
-            allowed = {"load_gbps", "store_gbps", "load_latency_us", "store_latency_us"}
+            allowed = {
+                "load_gbps",
+                "store_gbps",
+                "load_latency_us",
+                "store_latency_us",
+                "post_us_per_read",
+                "post_us_per_run",
+            }
             if "load_gbps" not in timing or not timing.keys() <= allowed:
                 raise ValueError(
                     f"kv_transfer_timing needs load_gbps and accepts "

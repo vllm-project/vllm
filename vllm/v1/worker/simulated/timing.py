@@ -23,7 +23,7 @@ import weakref
 from collections.abc import Iterator
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 
 import numpy as np
 
@@ -459,9 +459,12 @@ class _KNNTable:
         return StepCost(device_s=float(device_s), host_s=float(host_s))
 
 
-def load_step_log(path: str, kv_transfers: bool = False) -> list[dict[str, Any]]:
-    """The step records of a JSON/JSONL step log or hand-written table, or with
-    `kv_transfers` its KV offloading transfer records instead."""
+def load_step_log(
+    path: str, kind: Literal["step", "kv_transfers", "kv_post"] = "step"
+) -> list[dict[str, Any]]:
+    """The step records of a JSON/JSONL step log or hand-written table, or its
+    records of completed KV transfers (`kv_transfers`) or of NIXL read
+    postings (`kv_post`)."""
     text = Path(path).read_text()
     stripped = text.lstrip()
     if stripped.startswith("["):
@@ -471,7 +474,9 @@ def load_step_log(path: str, kv_transfers: bool = False) -> list[dict[str, Any]]
         records = obj.get("steps", [obj])
     else:
         records = [json.loads(line) for line in text.splitlines() if line.strip()]
-    return [rec for rec in records if ("kv_transfers" in rec) == kv_transfers]
+    if kind == "step":
+        return [r for r in records if "kv_transfers" not in r and "kv_post" not in r]
+    return [r for r in records if kind in r]
 
 
 def _record_cost(rec: dict[str, Any]) -> tuple[float, float]:
@@ -843,6 +848,14 @@ class StepLogWriter:
         """Append the KV transfers that completed in a step, per direction:
         their count, bytes and summed duration."""
         rec = {"kv_transfers": transfers, "t": t}
+        self._f.write(json.dumps(rec, separators=(",", ":")) + "\n")
+        self._f.flush()
+
+    def write_kv_post(self, reads: int, runs: int, seconds: float, t: float) -> None:
+        """Append the NIXL reads a decode rank posted in a step: their count,
+        runs of consecutive blocks (see `PostCost`) and the time posting took,
+        which the step's own record leaves out."""
+        rec = {"kv_post": {"reads": reads, "runs": runs, "seconds": seconds}, "t": t}
         self._f.write(json.dumps(rec, separators=(",", ":")) + "\n")
         self._f.flush()
 

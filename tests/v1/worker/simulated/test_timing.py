@@ -572,6 +572,67 @@ def test_simulated_nixl_reads_notify_the_prefill_instance():
     assert decode.next_completion() is None and prefill.next_completion() is None
 
 
+def test_nixl_read_posting_cost(tmp_path):
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
+        NixlConnectorMetadata,
+        RemoteMeta,
+        ReqMeta,
+    )
+    from vllm.v1.worker.simulated.kv_transfer import (
+        PostCost,
+        post_cost_from_log,
+        read_runs,
+    )
+    from vllm.v1.worker.simulated.timing import load_step_log
+
+    # Runs of blocks consecutive on both sides; on a local prefix hit only the
+    # last remote blocks are read.
+    assert read_runs(([4, 5, 6],), ([7, 8, 9],)) == 1
+    assert read_runs(([4, 5, 9],), ([7, 8, 9],)) == 2
+    assert read_runs(([5, 6],), ([1, 2, 8],)) == 2
+
+    path = tmp_path / "steps.jsonl"
+    writer = StepLogWriter(str(path))
+    cost = PostCost(per_read_s=200e-6, per_run_s=100e-6)
+    for reads, runs in [(1, 1), (2, 2), (1, 128), (4, 512)]:
+        writer.write_kv_post(reads, runs, cost.seconds(reads, runs), t=0.0)
+    # A first posting to new memory, far slower than the rest: left out.
+    writer.write_kv_post(1, 100, 0.5, t=0.0)
+    writer.close()
+    fitted = post_cost_from_log(str(path))
+    assert fitted.per_read_s == pytest.approx(cost.per_read_s)
+    assert fitted.per_run_s == pytest.approx(cost.per_run_s)
+    assert load_step_log(str(path)) == []
+
+    # Posting holds the decode rank's engine thread, and each request's reads
+    # start once posted: 0.75 s for r1 (one run), then r2's.
+    clock = VirtualClock()
+    prefill = _nixl_worker("sim-post-p", clock)  # noqa: F841 (held weakly)
+    decode = _nixl_worker("sim-post-d", clock)
+    decode.configure(
+        clock,
+        TransferRate(latency_s=0.0, bytes_per_s=10.0),
+        PostCost(per_read_s=0.5, per_run_s=0.25),
+    )
+    meta = NixlConnectorMetadata()
+    meta.reqs_to_recv = {
+        req_id: ReqMeta(
+            local_block_ids=(local,),
+            local_physical_block_ids=(local,),
+            tp_size=1,
+            awaiting_kvs=True,
+            remote=RemoteMeta((remote,), "", 0, "sim-post-p", f"p-{req_id}"),
+        )
+        for req_id, local, remote in [("r1", [0, 1], [0, 1]), ("r2", [2], [5])]
+    }
+    decode.start_load_kv(meta)
+    assert clock.now() == pytest.approx(1.5)
+    # r1's 20 bytes from 0.75 s; r2's 10 bytes queue behind them on the link.
+    assert decode.next_completion() == pytest.approx(2.75)
+    clock.sleep_until(3.75)
+    assert decode.get_finished() == (set(), {"r1", "r2"})
+
+
 def test_simulated_nixl_books_reads_across_processes(monkeypatch):
     """A served decode rank books its read with the prefill rank over ZMQ,
     and fails the request when the prefill rank does not answer."""

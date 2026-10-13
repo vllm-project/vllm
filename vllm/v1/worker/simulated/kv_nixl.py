@@ -66,6 +66,7 @@ from vllm.distributed.parallel_state import (
 from vllm.logger import init_logger
 from vllm.utils.network_utils import make_zmq_path
 from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.worker.simulated.kv_transfer import PostCost, read_runs
 from vllm.v1.worker.simulated.timing import Clock, RealClock
 
 if TYPE_CHECKING:
@@ -168,6 +169,7 @@ class SimulatedNixlWorker:
         ]
         self.clock: Clock | None = None
         self.rate: TransferRate | None = None
+        self.post = PostCost()
         self.link_free_at = 0.0
         # Decode side: reads in flight, and reads that could not be booked.
         self._recving: list[_Event] = []
@@ -197,9 +199,12 @@ class SimulatedNixlWorker:
             raise ValueError(f"Two simulated engines share engine_id {engine_id}.")
         _workers[engine_id] = self
 
-    def configure(self, clock: Clock, rate: "TransferRate") -> None:
+    def configure(
+        self, clock: Clock, rate: "TransferRate", post: PostCost | None = None
+    ) -> None:
         self.clock = clock
         self.rate = rate
+        self.post = post or PostCost()
         if self._serves() and isinstance(clock, RealClock):
             # A served instance: peers book transfers over ZMQ. Bind here, so
             # that a taken port fails startup.
@@ -405,6 +410,12 @@ class SimulatedNixlWorker:
                     f"No simulated engine {remote.engine_id} to read {req_id}'s "
                     "KV from."
                 )
+            if self.post != PostCost() and num_bytes and not failed:
+                # Posting the reads holds the engine thread; they start once
+                # posted.
+                runs = read_runs(meta.local_block_ids, remote.block_ids)
+                self.clock.sleep_until(now + self.post.seconds(1, runs))
+                now = self.clock.now()
             # A request's reads from several prefill ranks run concurrently;
             # those of different requests one after another on this link.
             earliest = max(now, self.link_free_at)
@@ -557,11 +568,14 @@ class SimulatedNixlPushWorker(SimulatedNixlWorker):
         self._writes_out: dict[str, float] = {}
         self._leases: dict[str, float] = {}
 
-    def configure(self, clock: Clock, rate: "TransferRate") -> None:
+    def configure(
+        self, clock: Clock, rate: "TransferRate", post: PostCost | None = None
+    ) -> None:
         if not isinstance(clock, RealClock):
             raise NotImplementedError(
                 "The simulated NixlPushConnector needs served instances."
             )
+        # A decode rank posts no reads in push mode.
         super().configure(clock, rate)
 
     def _serves(self) -> bool:

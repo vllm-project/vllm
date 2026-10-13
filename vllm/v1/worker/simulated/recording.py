@@ -12,15 +12,22 @@ reference a simulated run of the same deployment is validated against.
 """
 
 import time
+from typing import Any
 
 import torch
 
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl.connector import (
+    NixlPullConnector,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
+    NixlConnectorMetadata,
+)
 from vllm.distributed.parallel_state import get_pp_group, get_tp_group
 from vllm.logger import init_logger
 from vllm.v1.outputs import AsyncModelRunnerOutput, ModelRunnerOutput
 from vllm.v1.worker.dp_utils import should_skip_dp_coordination
 from vllm.v1.worker.gpu_worker import Worker
-from vllm.v1.worker.simulated.kv_transfer import completed_transfers
+from vllm.v1.worker.simulated.kv_transfer import completed_transfers, nixl_reads
 from vllm.v1.worker.simulated.timing import (
     StepCost,
     StepDescriptor,
@@ -125,10 +132,49 @@ class RecordingWorker(Worker):
         self._parallel = parallel_summary(self.vllm_config)
         self._prompt_lens: dict[str, int] = {}
         self._step_index = 0
+        # A NIXL decode rank's read postings in the current step: when the
+        # first began (on the device stream) and how long they took.
+        self._posts_wrapped = False
+        self._post_event: torch.cuda.Event | None = None
+        self._post_s = 0.0
         if self._writer is not None:
             logger.info("Recording per-step timing to %s", log_path)
 
+    def _wrap_read_postings(self) -> None:
+        """Time the reads a NIXL decode rank posts at the end of a step. They
+        hold the engine thread, and the device idles once the step's work is
+        done, so the step's record leaves them out and they are logged on
+        their own (see `PostCost`)."""
+        self._posts_wrapped = True
+        connector = getattr(
+            getattr(self.model_runner, "kv_connector", None), "kv_connector", None
+        )
+        writer = self._writer
+        if not isinstance(connector, NixlPullConnector) or writer is None:
+            return
+        start_load_kv = connector.start_load_kv
+
+        def timed_start_load_kv(forward_context: Any, **kwargs: Any) -> None:
+            metadata = connector._get_connector_metadata()
+            assert isinstance(metadata, NixlConnectorMetadata)
+            num_reads, num_runs = nixl_reads(metadata)
+            if not num_reads:
+                return start_load_kv(forward_context, **kwargs)
+            if self._pending is not None and self._post_event is None:
+                self._post_event = torch.cuda.Event(enable_timing=True)
+                self._post_event.record(torch.cuda.current_stream(self.device))
+            t = time.perf_counter()
+            start_load_kv(forward_context, **kwargs)
+            seconds = time.perf_counter() - t
+            if self._pending is not None:
+                self._post_s += seconds
+            writer.write_kv_post(num_reads, num_runs, seconds, t)
+
+        connector.start_load_kv = timed_start_load_kv  # type: ignore[method-assign]
+
     def execute_model(self, scheduler_output):  # type: ignore[override]
+        if not self._posts_wrapped:
+            self._wrap_read_postings()
         if not self._describes:
             return super().execute_model(scheduler_output)
         descriptor = build_step_descriptor(
@@ -168,9 +214,12 @@ class RecordingWorker(Worker):
         # A step is pending only when this rank writes a log.
         writer = self._writer
         assert writer is not None
-        end = torch.cuda.Event(enable_timing=True)
-        end.record(torch.cuda.current_stream(self.device))
-        host_s = time.perf_counter() - t_start
+        end, self._post_event = self._post_event, None
+        if end is None:
+            end = torch.cuda.Event(enable_timing=True)
+            end.record(torch.cuda.current_stream(self.device))
+        host_s = time.perf_counter() - t_start - self._post_s
+        self._post_s = 0.0
         if isinstance(output, AsyncModelRunnerOutput):
             return _RecordedOutput(
                 output, start, end, descriptor, host_s, t_start, finished, writer
