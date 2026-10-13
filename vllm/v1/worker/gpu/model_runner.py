@@ -19,6 +19,7 @@ instead of embedding feature-specific logic directly.
 import functools
 import gc
 import time
+from collections.abc import Iterable
 from contextlib import AbstractContextManager
 from copy import deepcopy
 from dataclasses import replace
@@ -46,6 +47,7 @@ from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     initialize_mamba_ssu_backend,
 )
 from vllm.model_executor.model_loader import get_model_loader
+from vllm.model_executor.model_loader.reload.inplace import reload_weights
 from vllm.model_executor.models.interfaces import requires_raw_input_tokens
 from vllm.model_executor.offloader import (
     create_offloader,
@@ -373,9 +375,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             tasks.extend(PoolingRunner.get_supported_tasks(self.model))
         return tuple(tasks)
 
-    def load_model(self, load_dummy_weights: bool = False, *args, **kwargs) -> None:
+    def load_model(
+        self,
+        load_dummy_weights: bool = False,
+        *args,
+        model: nn.Module | None = None,
+        **kwargs,
+    ) -> None:
         time_before_load = time.perf_counter()
-        if load_dummy_weights:
+        if model is None and load_dummy_weights:
             self.load_config.load_format = "dummy"
         self.eplb.prepare_load()
         eplb_models_added = False
@@ -385,7 +393,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
             # Capture warmup providers selected while constructing the model.
             with self.jit_warmup_registry.activate():
-                self.model = model_loader.load_model(
+                self.model = model or model_loader.load_model(
                     vllm_config=self.vllm_config,
                     model_config=self.vllm_config.model_config,
                 )
@@ -557,22 +565,21 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             return None
         return speculator.model
 
-    def reload_weights(self, *args, **kwargs) -> None:
-        # TODO(Wentao): Use full version instead of import when fully migrated to v2
-        from vllm.v1.worker.gpu_model_runner import GPUModelRunner as GPUModelRunnerV1
-
-        GPUModelRunnerV1.reload_weights(self, *args, **kwargs)  # type: ignore[arg-type]
-
-    def update_config(self, *args, **kwargs) -> None:
-        # TODO(Wentao): Use full version instead of import when fully migrated to v2
-        from vllm.v1.worker.gpu_model_runner import GPUModelRunner as GPUModelRunnerV1
-
-        GPUModelRunnerV1.update_config(self, *args, **kwargs)  # type: ignore[arg-type]
-
-        # v2 reads config via self.vllm_config (e.g. in load_model), so keep it
-        # in sync with the attributes the v1 helper just replaced.
-        self.vllm_config.model_config = self.model_config
-        self.vllm_config.load_config = self.load_config
+    def reload_weights(
+        self,
+        weights_iterator: Iterable[tuple[str, torch.Tensor]] | None = None,
+        weights_path: str | None = None,
+        is_checkpoint_format: bool = True,
+    ) -> None:
+        """Reload weights in place."""
+        vllm_config = self.vllm_config
+        model = self.get_model()
+        reload_weights(
+            vllm_config, model, weights_iterator, weights_path, is_checkpoint_format
+        )
+        self.reset_lora_state()
+        self.reset_encoder_cache()
+        self.reset_mm_cache()
 
     @functools.cached_property
     def main_stream(self) -> torch.cuda.Stream:
@@ -849,6 +856,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.max_num_tokens
                 - num_reqs * self.speculator.num_extra_query_per_req,
             )
+
+        assert num_tokens <= self.max_num_tokens, (
+            f"Dummy run with {num_tokens} tokens exceeds max_num_batched_tokens "
+            f"({self.max_num_tokens})"
+        )
 
         # Distribute the remainder evenly so no dummy request exceeds
         # ceil(num_tokens / num_reqs) <= max_model_len tokens.
@@ -1224,17 +1236,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def update_requests(self, scheduler_output: SchedulerOutput) -> None:
         # Add new blocks and update num_computed_tokens for the existing requests.
         reqs = scheduler_output.scheduled_cached_reqs
-        table_updates = scheduler_output.block_table_updates or {}
-        for req_id, block_ids in table_updates.items():
-            if (idx := self.req_states.req_id_to_index.get(req_id)) is not None:
-                self.block_tables.append_block_ids(idx, block_ids, overwrite=True)
         num_computed_tokens_np = self.req_states.num_computed_tokens_np
         for req_id, num_computed_tokens, req_new_block_ids in zip(
             reqs.req_ids, reqs.num_computed_tokens, reqs.new_block_ids
         ):
             req_index = self.req_states.req_id_to_index[req_id]
             num_computed_tokens_np[req_index] = num_computed_tokens
-            if req_new_block_ids is not None and req_id not in table_updates:
+            if req_new_block_ids is not None:
                 self.block_tables.append_block_ids(
                     req_index, req_new_block_ids, overwrite=False
                 )
@@ -1895,9 +1903,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
             assert block_tables is not None
             attn_groups = self.attn_groups
-            if dummy_run and is_profile:
+            if dummy_run and is_profile and not valid_dummy_state_slots:
                 # Mamba layers take a cheap warmup path with no metadata;
                 # attention metadata is still built so those kernels tune.
+                # valid_dummy_state_slots runs the real Mamba kernels on distinct
+                # state slots; the caller must restore that state afterwards.
                 attn_groups = [
                     [g for g in groups if not isinstance(g.kv_cache_spec, MambaSpec)]
                     for groups in attn_groups
