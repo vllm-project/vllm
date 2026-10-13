@@ -5,11 +5,19 @@ DeepGEMM JIT's the kernels. The warmup aims to JIT all the kernels that would
 be used during model execution beforehand.
 """
 
+import sys
+from typing import TYPE_CHECKING, TypeGuard
+
 import torch
 from tqdm import tqdm
 
 import vllm.envs as envs
-from vllm.distributed.parallel_state import get_dp_group, is_global_first_rank
+from vllm.distributed.parallel_state import (
+    get_dp_group,
+    get_ep_group,
+    is_global_first_rank,
+)
+from vllm.forward_context import ForwardContext, override_forward_context
 from vllm.model_executor.kernels.linear.scaled_mm.deep_gemm import (
     DeepGemmFp8BlockScaledMMKernel,
 )
@@ -23,6 +31,7 @@ from vllm.model_executor.layers.fused_moe.experts.triton_deep_gemm_moe import (
 )
 from vllm.tracing import instrument
 from vllm.utils.deep_gemm import (
+    _import_deep_gemm,
     fp8_gemm_nt,
     get_mk_alignment_for_contiguous_layout,
     m_grouped_fp8_gemm_nt_contiguous,
@@ -31,6 +40,10 @@ from vllm.utils.deep_gemm import (
 from vllm.utils.math_utils import cdiv
 from vllm.utils.platform_utils import num_compute_units
 from vllm.v1.worker.workspace import current_workspace_manager
+
+if TYPE_CHECKING:
+    from vllm.models.deepseek_v4.nvidia.model import DeepseekV4MoE
+    from vllm.models.kimi_k3.nvidia.model import KimiMoE
 
 
 def _generate_optimal_warmup_m_values(
@@ -142,6 +155,22 @@ def _fused_moe_grouped_gemm_may_use_deep_gemm(module: torch.nn.Module) -> bool:
 
     fused_experts = moe_kernel.impl.fused_experts
     return isinstance(fused_experts, (DeepGemmExperts, TritonOrDeepGemmExperts))
+
+
+# Model construction already imports the model modules. Avoid importing them here.
+def _mega_moe_uses_mega_gate(module: torch.nn.Module) -> "TypeGuard[DeepseekV4MoE]":
+    # DeepSeek-V4 routes with bf16_mega_gate, Kimi K3 with its GateLinear.
+    dsv4 = sys.modules.get("vllm.models.deepseek_v4.nvidia.model")
+    return dsv4 is not None and isinstance(module, dsv4.DeepseekV4MoE)
+
+
+def _mega_moe_may_use_deep_gemm(
+    module: torch.nn.Module,
+) -> "TypeGuard[DeepseekV4MoE | KimiMoE]":
+    if _mega_moe_uses_mega_gate(module):
+        return module.use_native_mega_moe
+    kimi = sys.modules.get("vllm.models.kimi_k3.nvidia.model")
+    return kimi is not None and isinstance(module, kimi.KimiMoE) and module.use_mega_moe
 
 
 FP8_GEMM_NT_WARMUP_CACHE: set[torch.Size] = set()
@@ -305,6 +334,110 @@ def _deepgemm_grouped_fp8_gemm_nt_contiguous_warmup(
             GROUPED_FP8_GEMM_NT_CONTIGUOUS_WARMUP_CACHE.add(w.size())
 
 
+FP8_FP4_MEGA_MOE_WARMUP_CACHE: set[tuple] = set()
+
+
+def _get_fp8_fp4_mega_moe_warmup_key(module: "DeepseekV4MoE | KimiMoE") -> tuple:
+    gate = module.gate
+    return (
+        gate.output_size,
+        getattr(gate, "tid2eid", None) is not None,
+        gate.e_score_correction_bias is not None,
+        getattr(module, "image_sentinel_lo", 0),
+        module.experts.has_fused_shared_experts,
+    )
+
+
+def _get_fp8_fp4_mega_moe_m_values(
+    module: "DeepseekV4MoE | KimiMoE", max_tokens: int
+) -> list[int]:
+    """Get the largest M per distinct fp8_fp4_mega_moe config and, where used,
+    bf16_mega_gate config."""
+    dg = _import_deep_gemm()
+    gate, experts = module.gate, module.experts
+    uses_mega_gate = _mega_moe_uses_mega_gate(module)
+    num_max_tokens_per_rank = experts.get_symm_buffer().num_max_tokens_per_rank
+    if module.use_sequence_parallel:
+        max_tokens = cdiv(max_tokens, module.tp_size)
+
+    m_values: dict[tuple, int] = {}
+    for num_tokens in range(1, max_tokens + 1):
+        gate_config = (
+            dg.get_bf16_mega_gate_config(
+                num_tokens, gate.input_size, gate.output_size, experts.top_k
+            )
+            if uses_mega_gate
+            else {}
+        )
+        block_m = dg.get_block_m_for_mega_moe(
+            get_ep_group().world_size,
+            experts.num_experts,
+            num_max_tokens_per_rank,
+            num_tokens,
+            experts.top_k,
+            "fp8xfp4",
+        )
+        # Keep the largest M: DeepSeek-V4 only calls bf16_mega_gate above a
+        # small token threshold, and a config's largest M is always above it.
+        m_values[(tuple(gate_config.items()), block_m)] = num_tokens
+    return sorted(m_values.values())
+
+
+def _deepgemm_fp8_fp4_mega_moe_warmup(
+    module: "DeepseekV4MoE | KimiMoE",
+    max_tokens: int,
+    pbar: tqdm | None = None,
+):
+    from vllm.models.deepseek_v4.nvidia.model import (
+        prepare_mega_gate_routing_metadata,
+    )
+
+    key = _get_fp8_fp4_mega_moe_warmup_key(module)
+    if key in FP8_FP4_MEGA_MOE_WARMUP_CACHE:
+        return
+
+    m_values = _get_fp8_fp4_mega_moe_m_values(module, max_tokens)
+    max_m = m_values[-1]  # sorted
+
+    device = module.experts.get_symm_buffer().x.device
+    input_ids = torch.zeros(max_m, device=device, dtype=torch.int64)
+    hidden_states = torch.zeros(
+        (max_m, module.gate.input_size), device=device, dtype=torch.bfloat16
+    )
+    is_padding = torch.zeros(max_m + 1, device=device, dtype=torch.bool)
+    # With padding skip on, sequence parallel gives ranks > 0 a padding mask
+    # slice at any alignment.
+    sp_masked = module.use_sequence_parallel and envs.VLLM_MOE_SKIP_PADDING
+    offsets = (0, 1) if sp_masked else (0,)
+
+    # Run the whole layer so the gate sees the same optional inputs as serving.
+    for num_tokens in m_values:
+        inputs: tuple = (hidden_states[:num_tokens],)
+        if _mega_moe_uses_mega_gate(module):
+            ids = input_ids[:num_tokens]
+            inputs += (
+                ids,
+                prepare_mega_gate_routing_metadata(
+                    ids,
+                    has_hash_routing=module.gate.tid2eid is not None,
+                    image_sentinel_base_id=module.image_sentinel_lo or None,
+                ),
+            )
+        for offset in offsets:
+            forward_context = ForwardContext(
+                no_compile_layers={},
+                attn_metadata={},
+                slot_mapping={},
+                is_padding=is_padding[offset : offset + num_tokens],
+            )
+            with override_forward_context(forward_context):
+                module(*inputs)
+        if pbar is not None:
+            pbar.update(1)
+
+    FP8_FP4_MEGA_MOE_WARMUP_CACHE.add(key)
+
+
 def deepgemm_fp8_gemm_nt_warmup(
     model: torch.nn.Module, max_tokens: int, pbar: tqdm | None = None
 ):
@@ -330,11 +463,21 @@ def deepgemm_grouped_fp8_gemm_nt_contiguous_warmup(
         )
 
 
+@torch.inference_mode()
+def deepgemm_fp8_fp4_mega_moe_warmup(
+    model: torch.nn.Module, max_tokens: int, pbar: tqdm | None = None
+):
+    for m in model.modules():
+        if _mega_moe_may_use_deep_gemm(m):
+            _deepgemm_fp8_fp4_mega_moe_warmup(m, max_tokens, pbar=pbar)
+
+
 def _count_warmup_iterations(model: torch.nn.Module, max_tokens: int) -> int:
     seen_fp8_sizes: set[torch.Size] = set(FP8_GEMM_NT_WARMUP_CACHE)
     seen_grouped_sizes: set[torch.Size] = set(
         GROUPED_FP8_GEMM_NT_CONTIGUOUS_WARMUP_CACHE
     )
+    seen_mega_moe_keys: set[tuple] = set(FP8_FP4_MEGA_MOE_WARMUP_CACHE)
 
     total = 0
     for m in model.modules():
@@ -355,6 +498,11 @@ def _count_warmup_iterations(model: torch.nn.Module, max_tokens: int) -> int:
             if w2.size() not in seen_grouped_sizes:
                 total += n_values
                 seen_grouped_sizes.add(w2.size())
+        elif _mega_moe_may_use_deep_gemm(m):
+            key = _get_fp8_fp4_mega_moe_warmup_key(m)
+            if key not in seen_mega_moe_keys:
+                total += len(_get_fp8_fp4_mega_moe_m_values(m, max_tokens))
+                seen_mega_moe_keys.add(key)
     return total
 
 
@@ -369,6 +517,8 @@ def deep_gemm_warmup(model: torch.nn.Module, max_tokens: int):
         with tqdm(total=total, desc="DeepGEMM warmup") as pbar:
             deepgemm_fp8_gemm_nt_warmup(model, max_tokens, pbar)
             deepgemm_grouped_fp8_gemm_nt_contiguous_warmup(model, max_tokens, pbar)
+            deepgemm_fp8_fp4_mega_moe_warmup(model, max_tokens, pbar)
     else:
         deepgemm_fp8_gemm_nt_warmup(model, max_tokens, None)
         deepgemm_grouped_fp8_gemm_nt_contiguous_warmup(model, max_tokens, None)
+        deepgemm_fp8_fp4_mega_moe_warmup(model, max_tokens, None)
