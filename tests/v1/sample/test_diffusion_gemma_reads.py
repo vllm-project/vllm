@@ -3,13 +3,17 @@
 """Per-request DiffusionGemma state behind structured reads: seed canvases,
 pinned positions, read-only slots and the per-slot step cap."""
 
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 import torch
+from torch._dynamo.utils import counters
 
 from vllm.model_executor.models.diffusion_gemma import (
     _MASKED_LOGIT,
     DiffusionGemmaRequestStates,
+    DiffusionSampler,
     _compiled_sample_step,
     _concat_logprob_stashes,
     _denoise_temperature,
@@ -20,7 +24,7 @@ from vllm.platforms import current_platform
 from vllm.v1.outputs import LogprobsTensors
 
 pytestmark = pytest.mark.skipif(
-    not current_platform.is_cuda(), reason="the sampler state lives on the GPU"
+    not current_platform.is_cuda_alike(), reason="the sampler state lives on the GPU"
 )
 
 CL = 8
@@ -29,9 +33,9 @@ MAX_REQS = 4
 MAX_STEPS = 48
 
 
-def _states() -> DiffusionGemmaRequestStates:
+def _states(max_num_reqs: int = MAX_REQS) -> DiffusionGemmaRequestStates:
     return DiffusionGemmaRequestStates(
-        max_num_reqs=MAX_REQS,
+        max_num_reqs=max_num_reqs,
         canvas_length=CL,
         vocab_size=VOCAB,
         max_denoising_steps=MAX_STEPS,
@@ -170,7 +174,6 @@ def _denoise_once(
         states.read_only,
         sampled,
         num_sampled,
-        torch.zeros(MAX_REQS, CL, dtype=torch.int64, device=device),
         confidence_threshold=0.1,
         vocab_size=VOCAB,
         CL=width,
@@ -229,6 +232,90 @@ def test_single_step_tile_skips_self_conditioning():
 
 def test_sample_step_is_compiled():
     assert hasattr(_compiled_sample_step, "_torchdynamo_orig_callable")
+
+
+def test_warmup_compiles_every_serving_variant():
+    num_reqs = 16
+    sampler = DiffusionSampler(
+        SimpleNamespace(
+            sampling_states=None,
+            logprob_token_ids_state=None,
+            req_states=None,
+            logprobs_mode="raw_logprobs",
+        ),
+        SimpleNamespace(canvas_length=CL),
+        VOCAB,
+        _states(max_num_reqs=num_reqs),
+        confidence_threshold=0.1,
+        t_min=0.5,
+        t_max=1.0,
+        entropy_bound=0.1,
+        embed_weight=torch.nn.Parameter(
+            torch.zeros(VOCAB, 4, dtype=torch.bfloat16, device="cuda"),
+            requires_grad=False,
+        ),
+        normalizer=torch.tensor(1.0, dtype=torch.bfloat16, device="cuda"),
+    )
+    torch._dynamo.reset()
+    sampler.warmup()
+    num_graphs = counters["stats"]["unique_graphs"]
+    states = sampler.diffusion_states
+    for slot in range(num_reqs):
+        states.add_request(slot)
+        states.is_encoder_phase[slot] = False
+    query_start_loc = torch.arange(num_reqs + 1, dtype=torch.int32, device="cuda")
+
+    with torch.compiler.set_stance("fail_on_recompile"), torch.inference_mode():
+        for num_decode, num_idle, width, num_allowed, compute_sc in (
+            (1, 0, CL, None, True),
+            (3, 1, CL, None, False),
+            (num_reqs, 0, CL, None, True),
+            (2, 0, 4, None, True),
+            (5, 2, 2, None, False),
+            (2, 0, 1, None, True),
+            (1, 3, 1, None, False),
+            (2, 0, CL, 5, True),
+            (3, 1, 4, 3, True),
+            (1, 0, CL, 1, True),
+            (2, 0, 1, 1, True),
+            (4, 0, 2, 8, False),
+        ):
+            n, m = num_decode, num_decode + num_idle
+            slots = torch.arange(m, device="cuda")
+            allowed = None
+            embed_weight, sc_vocab_end = sampler.embed_weight, VOCAB
+            if num_allowed is not None:
+                allowed = torch.arange(num_allowed, device="cuda")
+                embed_weight, sc_vocab_end = sampler.embed_weight[allowed], num_allowed
+            logits = torch.zeros(n * width, sc_vocab_end, device="cuda")
+            sampler._denoise_tile(
+                states,
+                logits,
+                slots[:n],
+                torch.arange(n, device="cuda"),
+                torch.full((n,), width, device="cuda"),
+                slots,
+                sampler._sampled[:m],
+                sampler._num_sampled[:m],
+                W=width,
+                allowed=allowed,
+                embed_weight=embed_weight,
+                sc_vocab_start=0,
+                sc_vocab_end=sc_vocab_end,
+                compute_sc=compute_sc,
+            )
+            sampler._build_output(
+                SimpleNamespace(
+                    num_reqs=m,
+                    query_start_loc_np=np.arange(m + 1),
+                    query_start_loc=query_start_loc[: m + 1],
+                ),
+                sampler._sampled[:m],
+                sampler._num_sampled[:m],
+                np.ones(m, dtype=np.int32),
+                torch.device("cuda"),
+            )
+    assert counters["stats"]["unique_graphs"] == num_graphs
 
 
 @pytest.mark.parametrize("stance", ["default", "force_eager"])

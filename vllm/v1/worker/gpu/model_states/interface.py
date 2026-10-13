@@ -251,6 +251,15 @@ class ModelState(ABC):
         """
         return None
 
+    def warmup_compiled(self) -> None:
+        """Compile graphs that the profile and dummy runs do not reach.
+
+        Called from kernel warmup with serving's torch thread count set, which
+        Dynamo guards on. Not called for process-local warmups, so it may issue
+        collectives.
+        """
+        return None
+
     num_new_sampled_tokens_per_step: int = 1
     """New tokens sampled on each decode step 
     (excluding accepted draft tokens, a.k.a num bonus tokens)."""
