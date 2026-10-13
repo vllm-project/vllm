@@ -51,7 +51,7 @@ from vllm.model_executor.models.utils import (
     maybe_prefix,
 )
 from vllm.models.common.mono import attach, configure, health, kernel_for
-from vllm.models.common.mono.routing import Mono
+from vllm.models.common.mono.runtime import MonoRuntime
 from vllm.models.common.ops.sequence_parallel import (
     sp_all_gather,
     sp_padding_mask,
@@ -277,7 +277,7 @@ class DeepseekV4DecoderLayer(nn.Module):
         residual: torch.Tensor | None = None,
         engram_hashes: torch.Tensor | None = None,
         engram_mask: torch.Tensor | None = None,
-        mono: Mono | None = None,
+        mono: MonoRuntime | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         kernel = typing.cast(
             LayerKernelBase | None, kernel_for(mono, self.attn.layer_id, positions)
@@ -484,7 +484,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         self.hc_dim = self.hc_mult * config.hidden_size
         self.rms_norm_eps = config.rms_norm_eps
         self.vllm_config = vllm_config
-        self.mono: Mono | None = None
+        self.mono: MonoRuntime | None = None
         configure(vllm_config, SPECS_PATH)
 
         # Three aux streams: one per non-default input GEMM in

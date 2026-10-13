@@ -16,7 +16,7 @@ from vllm.models.common.mono.guards import (
     _refusal_message,
     _select_spec,
 )
-from vllm.models.common.mono.routing import Mono
+from vllm.models.common.mono.runtime import MonoRuntime
 from vllm.models.common.mono.spec import LayerKernel, MonoUnsupported
 
 if TYPE_CHECKING:
@@ -24,10 +24,10 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-_ATTACHED: Mono | None = None
+_ATTACHED: MonoRuntime | None = None
 
 
-def attach(model, vllm_config: "VllmConfig", specs_path: str) -> Mono | None:
+def attach(model, vllm_config: "VllmConfig", specs_path: str) -> MonoRuntime | None:
     """Picks the variant, builds the launch state and this rank's layer
     kernels. Collective over the TP group.
 
@@ -37,7 +37,7 @@ def attach(model, vllm_config: "VllmConfig", specs_path: str) -> Mono | None:
         specs_path: ``"package.module:MONO_SPECS"``.
 
     Returns:
-        This rank's ``Mono``, or None with the switch off or when no layer
+        This rank's ``MonoRuntime``, or None with the switch off or when no layer
         takes a kernel.
 
     Raises:
@@ -51,7 +51,7 @@ def attach(model, vllm_config: "VllmConfig", specs_path: str) -> Mono | None:
     spec, refusals = _select_spec(_load_specs(specs_path), vllm_config)
     if spec is None:
         raise MonoUnsupported("MonoKernel refused: " + _refusal_message(refusals))
-    mono = Mono(spec, model, vllm_config)
+    mono = MonoRuntime(spec, model, vllm_config)
     if not mono.kernels:
         logger.info("MonoKernel %s: no layer takes a kernel", spec.name)
         return None
@@ -65,7 +65,7 @@ def attach(model, vllm_config: "VllmConfig", specs_path: str) -> Mono | None:
     return mono
 
 
-def kernel_for(mono: Mono | None, i: int, positions) -> LayerKernel | None:
+def kernel_for(mono: MonoRuntime | None, i: int, positions) -> LayerKernel | None:
     """Layer ``i``'s kernel when this step runs on the kernels, else None.
 
     The first call under a forward context decides for every layer. A model
@@ -81,7 +81,7 @@ def kernel_for(mono: Mono | None, i: int, positions) -> LayerKernel | None:
     return mono.kernels.get((i, step.width))
 
 
-def forward_layer(mono: Mono | None, i: int, layer, positions, *args, **kwargs):
+def forward_layer(mono: MonoRuntime | None, i: int, layer, positions, *args, **kwargs):
     """Layer ``i`` on its kernel when this step runs on the kernels, else the
     vLLM layer unchanged."""
     k = kernel_for(mono, i, positions)
@@ -93,7 +93,7 @@ def forward_layer(mono: Mono | None, i: int, layer, positions, *args, **kwargs):
     return layer(positions, *args, **kwargs)
 
 
-def health(mono: Mono | None) -> torch.Tensor | None:
+def health(mono: MonoRuntime | None) -> torch.Tensor | None:
     """The step's error words, read by the runner after each step: any set
     word fails the step before its tokens are returned (``failstop``)."""
     return None if mono is None else mono.health()

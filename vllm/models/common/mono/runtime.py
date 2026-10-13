@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The per-step decision and cache re-binding.
+"""The live side of a spec: one ``MonoRuntime`` a rank, built at attach, owning
+this rank's layer kernels and making the per-step decision and cache re-binding.
+It launches nothing itself.
 
-``Mono.begin_step`` decides once a forward, for every kernel layer, from what
-every rank sees alike: the batch's width and the attention metadata, never
+``MonoRuntime.begin_step`` decides once a forward, for every kernel layer, from
+what every rank sees alike: the batch's width and the attention metadata, never
 rank-local state and never a collective. Under a FULL CUDA graph the decision
 is baked in at capture, so it is a function of the captured size: FULL graphs
 serve uniform decode batches and every width is a capture size
@@ -58,7 +60,7 @@ class MonoWarmup(VllmJitKernel["MonoWarmup.CompileKey"]):
         self._compiled_cache[compile_key] = True
 
 
-class Mono:
+class MonoRuntime:
     """A model's MonoKernels on this rank: built once after load."""
 
     def __init__(self, spec: MonoSpec[Any], model, vllm_config: "VllmConfig"):
