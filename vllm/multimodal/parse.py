@@ -13,11 +13,11 @@ from typing import (
     TypeAlias,
     TypeGuard,
     TypeVar,
+    assert_never,
 )
 
 import numpy as np
 import torch
-from typing_extensions import assert_never
 
 from vllm.inputs import ModalityData, MultiModalDataDict, MultiModalUUIDDict
 from vllm.utils.collection_utils import is_list_of

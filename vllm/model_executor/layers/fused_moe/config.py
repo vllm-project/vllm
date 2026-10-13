@@ -1293,6 +1293,9 @@ class FusedMoEConfig:
     has_bias: bool = False
     is_lora_enabled: bool = False
     has_hash_routing: bool = False
+    # Routes are adjusted between routing and expert execution.
+    require_decomposed_backend: bool = False
+    shared_expert_prefix: str | None = None
 
     # When True, the MoE skips its final cross-rank all-reduce (and the separate
     # shared-expert reduce), returning the partial per-rank sum. The caller is

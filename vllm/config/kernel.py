@@ -137,6 +137,7 @@ MoEBackend = Literal[
     "humming",
     "triton_unfused",
     "aiter",
+    "aiter_mega_moe",
     "aiter_triton_mxfp4_bf16",
     "flydsl",
     "hpc",
@@ -278,6 +279,9 @@ class KernelConfig:
     enable_flashinfer_autotune: bool = None  # type: ignore[assignment]
     """If True, run FlashInfer autotuning during kernel warmup."""
 
+    enable_rocm_segmented_attn_autotune: bool = False
+    """If True, autotune ROCm segmented attention during kernel warmup on RDNA GPUs."""
+
     # TODO(roberto): Remove after registered CuTeDSL warmups are migrated
     # to the shared JIT warmup infrastructure.
     # https://github.com/vllm-project/vllm/pull/47451
@@ -314,6 +318,9 @@ class KernelConfig:
     - "humming": Use Humming Mixed Precision kernels
     - "triton_unfused": Use Triton unfused MoE kernels
     - "aiter": Use AMD AITer kernels (ROCm only)
+    - "aiter_mega_moe": Use the AITER MegaMoE fused dispatch/GEMM/combine
+      kernel (ROCm gfx950, requires DP+EP with a MoRI all2all backend;
+      DeepSeek-V4 only)
     - "aiter_triton_mxfp4_bf16": Use the AITER Triton MXFP4 W4A16
       (moe_gemm_a16w4) MoE kernel (ROCm gfx942/gfx950/gfx1250)
     - "flydsl": Use AMD FlyDSL kernels (ROCm only)
@@ -406,6 +413,7 @@ class KernelConfig:
             "enable_cutedsl_warmup",
             "enable_jit_warmup",
             "enable_flashinfer_autotune",
+            "enable_rocm_segmented_attn_autotune",
             "ir_op_priority",  # handled separately below
         }
         if self.linear_backend_per_quant is None:
