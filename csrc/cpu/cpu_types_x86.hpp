@@ -238,18 +238,15 @@ struct BF16Vec32 : public Vec<BF16Vec32> {
   }
 
   explicit BF16Vec32(const uint8_t* ptr, fp8_bf16_e5m2_tag) {
-    alignas(64) static constexpr uint16_t subnormals[32] = {0, 0x3780, 0x3800,
-                                                            0x3840};
     const __m256i bytes =
         _mm256_loadu_si256(reinterpret_cast<const __m256i*>(ptr));
     const __m512i x = _mm512_cvtepi8_epi16(bytes);
     const __m512i magnitude = _mm512_and_si512(x, _mm512_set1_epi16(0x7f));
     const __m512i normal = _mm512_add_epi16(_mm512_slli_epi16(magnitude, 5),
                                             _mm512_set1_epi16(0x3800));
-    const __m512i subnormal =
-        _mm512_permutexvar_epi16(x, _mm512_load_si512(subnormals));
-    const __m512i result = _mm512_mask_blend_epi16(
-        _mm512_test_epi16_mask(x, _mm512_set1_epi16(0x7c)), subnormal, normal);
+    // E5M2 AMX decoding flushes encoded subnormals to signed zero.
+    const __m512i result = _mm512_maskz_mov_epi16(
+        _mm512_test_epi16_mask(x, _mm512_set1_epi16(0x7c)), normal);
     reg = _mm512_ternarylogic_epi32(result, x, _mm512_set1_epi16(0x8000), 0xf8);
   }
 
