@@ -712,7 +712,9 @@ class RoutedExperts(PluggableLayer):
             isinstance(base_quant_method, OnlineMoEMethodBase)
             and base_quant_method.requantization_source is not None
         ):
-            assert isinstance(base_quant_method.requantization_source, FusedMoEMethodBase)
+            assert isinstance(
+                base_quant_method.requantization_source, FusedMoEMethodBase
+            )
             base_quant_method = base_quant_method.requantization_source
 
         quant_method_name = base_quant_method.__class__.__name__

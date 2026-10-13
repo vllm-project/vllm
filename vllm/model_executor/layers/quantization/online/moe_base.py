@@ -40,6 +40,11 @@ class OnlineMoEMethodBase(OnlineRequantizationMixin, FusedMoEMethodBase):
         params_dtype: torch.dtype,
         **extra_weight_attrs,
     ):
+        # Target conversion needs this metadata even when the source creates weights.
+        layer.num_experts = num_experts
+        layer.orig_dtype = params_dtype
+        layer.weight_block_size = None
+
         if self.requantization_source is not None:
             self.create_requantization_source_weights(
                 layer,
@@ -50,10 +55,6 @@ class OnlineMoEMethodBase(OnlineRequantizationMixin, FusedMoEMethodBase):
                 **extra_weight_attrs,
             )
             return
-
-        layer.num_experts = num_experts
-        layer.orig_dtype = params_dtype
-        layer.weight_block_size = None
 
         # Fused gate_up_proj (column parallel) — full precision on meta device
         w13_weight = torch.nn.Parameter(
@@ -117,10 +118,6 @@ class OnlineMoEMethodBase(OnlineRequantizationMixin, FusedMoEMethodBase):
     def get_weights_for_quantization(
         self, layer: torch.nn.Module
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
-            FusedMoEMethodBase,
-        )
-
         if self.requantization_source is None:
             return layer.w13_weight, layer.w2_weight
 
@@ -136,7 +133,6 @@ class OnlineMoEMethodBase(OnlineRequantizationMixin, FusedMoEMethodBase):
         target_hidden_size = config.hidden_dim
         target_intermediate_size = config.intermediate_size_per_partition
 
-        assert isinstance(self, FusedMoEMethodBase)
         num_experts = layer.local_num_experts
         num_shards = self.moe.w13_num_shards
 

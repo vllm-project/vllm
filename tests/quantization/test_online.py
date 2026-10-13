@@ -833,6 +833,8 @@ def test_weight_loading_requantization_moe(
     assert isinstance(target, Fp8PerTensorOnlineMoEMethod)
     # Source allocation and loading must use the original checkpoint method.
     assert target.requantization_source is source
+    # Requantization requires a checkpoint source for dequantization.
+    assert source is not None
     torch.manual_seed(11)
     w1 = torch.randn(2, 64, 32, dtype=torch.bfloat16)
     w3 = torch.randn_like(w1)
