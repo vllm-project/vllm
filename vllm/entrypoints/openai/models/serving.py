@@ -7,18 +7,18 @@ from http import HTTPStatus
 
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.openai.engine.protocol import (
+from vllm.entrypoints.openai.models.protocol import BaseModelPath, LoRAModulePath
+from vllm.entrypoints.serve import create_error_response
+from vllm.entrypoints.serve.engine.protocol import (
     ErrorResponse,
     ModelCard,
     ModelList,
     ModelPermission,
 )
-from vllm.entrypoints.openai.models.protocol import BaseModelPath, LoRAModulePath
 from vllm.entrypoints.serve.lora.protocol import (
     LoadLoRAAdapterRequest,
     UnloadLoRAAdapterRequest,
 )
-from vllm.entrypoints.serve.utils.error_response import create_error_response
 from vllm.exceptions import LoRAAdapterNotFoundError
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -212,6 +212,16 @@ class OpenAIServingModels:
                     status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
                 )
 
+            previous = self.lora_requests.get(lora_name)
+            if previous is not None and previous.lora_path == lora_path:
+                logger.warning(
+                    "Reloaded LoRA adapter '%s' in place from the same path '%s'. "
+                    "Prefix-cache blocks computed with its previous weights are "
+                    "not invalidated; load changed weights from a new path to "
+                    "avoid reusing them.",
+                    lora_name,
+                    lora_path,
+                )
             self.lora_requests[lora_name] = lora_request
             logger.info(
                 "Loaded new LoRA adapter: name '%s', path '%s'", lora_name, lora_path
@@ -241,6 +251,14 @@ class OpenAIServingModels:
         if not request.lora_name or not request.lora_path:
             return create_error_response(
                 message="Both 'lora_name' and 'lora_path' must be provided.",
+                err_type="InvalidUserInput",
+                status_code=HTTPStatus.BAD_REQUEST,
+            )
+
+        if self.is_base_model(request.lora_name):
+            return create_error_response(
+                message=f"The lora adapter '{request.lora_name}' conflicts with a "
+                "served base model.",
                 err_type="InvalidUserInput",
                 status_code=HTTPStatus.BAD_REQUEST,
             )
@@ -289,6 +307,7 @@ class OpenAIServingModels:
             LoRARequest if found and loaded successfully.
             ErrorResponse (404) if no resolver finds the adapter.
             ErrorResponse (400) if adapter(s) are found but none load.
+
         """
         async with self.lora_resolver_lock[lora_name]:
             # First check if this LoRA is already loaded

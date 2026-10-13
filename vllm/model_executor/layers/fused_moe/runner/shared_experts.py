@@ -65,16 +65,12 @@ class SharedExperts(torch.nn.Module):
             logger.debug_once("Disabling MoE shared_experts cuda stream")
             self._stream = None
         else:
-            # TODO(rob): enable shared expert overlap with non-cuda-alike.
-            # aux_stream() returns None on non-cuda-alike platforms.
             self._stream = aux_stream()
             if self._stream is not None:
                 logger.debug_once("Enabled separate cuda stream for MoE shared_experts")
-
-        if self._stream is not None:
-            # One pair per DBO ubatch id.
-            self._input_ready_event = [torch.cuda.Event(), torch.cuda.Event()]
-            self._output_ready_event = [torch.cuda.Event(), torch.cuda.Event()]
+                # One pair per DBO ubatch id to sync aux and main stream.
+                self._input_ready_event = [torch.cuda.Event(), torch.cuda.Event()]
+                self._output_ready_event = [torch.cuda.Event(), torch.cuda.Event()]
 
     # TODO(bnell): Hack for elastic_ep. Get rid of this
     def _set_moe_config(self, new_moe_config: FusedMoEConfig):
@@ -89,6 +85,7 @@ class SharedExperts(torch.nn.Module):
         # Both these comm backends have been shown to be safe for shared expert overlap.
         _EPLB_OVERLAP_SAFE_BACKENDS = (
             "allgather_reducescatter",
+            "deepep_v2",
             "flashinfer_nvlink_one_sided",
         )
 
@@ -100,14 +97,6 @@ class SharedExperts(torch.nn.Module):
             parallel_config.enable_eplb
             and parallel_config.all2all_backend not in _EPLB_OVERLAP_SAFE_BACKENDS
         ) or parallel_config.use_fi_nvl_two_sided_kernels
-
-    @property
-    def _should_enable_stream_overlap_heuristic(self) -> bool:
-        # On ROCm, empirically it's shown that only DPA deployments benefit from
-        # multi-stream shared experts
-        if not current_platform.is_rocm():
-            return True
-        return self._moe_config.moe_parallel_config.dp_size > 1
 
     def _determine_shared_experts_order(
         self,
@@ -124,7 +113,6 @@ class SharedExperts(torch.nn.Module):
             and self._stream is not None
             and hidden_states.shape[0]
             <= envs.VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD
-            and self._should_enable_stream_overlap_heuristic
         )
 
         if should_run_shared_in_aux_stream:

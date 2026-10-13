@@ -4,7 +4,6 @@ from collections.abc import Sequence
 from typing import Any
 
 from vllm import PoolingParams, PoolingRequestOutput
-from vllm.logger import init_logger
 from vllm.plugins.io_processors import get_io_processor
 from vllm.renderers.inputs.preprocess import parse_model_prompt, prompt_to_seq
 
@@ -21,7 +20,17 @@ from ..typing import (
 )
 from .protocol import IOProcessorRequest, IOProcessorResponse
 
-logger = init_logger(__name__)
+
+class UnsupportedCombinedTaskIOProcessor(PoolingIOProcessor):
+    name = "embed&token_classify"
+
+    def create_pooling_params(self, request):
+        raise ValueError(
+            "The 'embed&token_classify' pooling task is only available "
+            "through an IO processor plugin. Send a plugin request with "
+            "a 'data' field, "
+            "or select a concrete task with --pooler-config.task."
+        )
 
 
 class PluginWithoutIOProcessorPlugins(PoolingIOProcessor):
@@ -105,23 +114,7 @@ class PluginWithIOProcessorPlugins(PoolingIOProcessor):
             ctx.final_res_batch,
             request_id=ctx.request_id,
         )
-
-        if callable(
-            output_to_response := getattr(self.io_processor, "output_to_response", None)
-        ):
-            logger.warning_once(
-                "`IOProcessor.output_to_response` is deprecated. To ensure "
-                "consistency between offline and online APIs, "
-                "`IOProcessorResponse` will become a transparent wrapper "
-                "around output data from v0.19 onwards.",
-            )
-
-            if hasattr(output, "request_id") and output.request_id is None:
-                output.request_id = ctx.request_id  # type: ignore
-
-            ctx.response = output_to_response(output)  # type: ignore
-        else:
-            ctx.response = IOProcessorResponse(request_id=ctx.request_id, data=output)
+        ctx.response = IOProcessorResponse(request_id=ctx.request_id, data=output)
 
     #######################################
     # offline APIs
@@ -156,7 +149,7 @@ class PluginWithIOProcessorPlugins(PoolingIOProcessor):
             pooling_params = ctx.pooling_params
 
         params_seq: list[PoolingParams] = [
-            self.io_processor.merge_pooling_params(param)
+            self.io_processor.merge_pooling_params(param.clone())
             for param in self._params_to_seq(
                 pooling_params,
                 num_requests,

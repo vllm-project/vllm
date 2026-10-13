@@ -28,6 +28,7 @@ class LateInteractionParams(
             - "score_doc": score a document against a cached query.
         query_key: stable key used for both DP routing and worker cache lookup.
         query_uses: expected number of document requests
+
     """
 
     mode: str
@@ -47,6 +48,7 @@ class PoolingParams(
             `None` uses the pooler's default, which is `True` in most cases.
         dimensions: Reduce the dimensions of embeddings
             if model support matryoshka representation.
+
     """
 
     # --8<-- [start:common-pooling-params]
@@ -88,7 +90,7 @@ class PoolingParams(
         return deepcopy(self)
 
     def verify(self, model_config: ModelConfig) -> None:
-        # plugin task uses io_processor.parse_request to verify inputs,
+        # plugin task uses io_processor.parse_data to verify inputs,
         # skipping PoolingParams verify
         if self.task == "plugin":
             if self.skip_reading_prefix_cache is None:

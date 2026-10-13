@@ -262,14 +262,27 @@ def test_gemma4_adjust_request(generic_tokenizer):
     assert result is request
 
 
-def test_gemma4_previous_turn_reasoning_is_reasoning_end(generic_tokenizer):
+@pytest.mark.parametrize(
+    ("chat_template_kwargs", "expected_is_reasoning_end"),
+    [
+        pytest.param({}, True, id="omitted_enable_thinking"),
+        pytest.param({"enable_thinking": False}, True, id="thinking_disabled"),
+        pytest.param({"enable_thinking": True}, False, id="thinking_enabled"),
+    ],
+)
+def test_gemma4_new_turn_reasoning_end_matches_enable_thinking(
+    generic_tokenizer,
+    chat_template_kwargs,
+    expected_is_reasoning_end,
+):
     output = (
         "<|channel>thought\n1st thought<channel|>1st content<turn|>\n"
         "<|turn>user\nThanks<|turn>model\n"
     )
     output_tokens = gemma4_encode_output(generic_tokenizer, output)
     parser: ReasoningParser = ReasoningParserManager.get_reasoning_parser(parser_name)(
-        generic_tokenizer
+        generic_tokenizer,
+        chat_template_kwargs=chat_template_kwargs,
     )
     is_reasoning_end = parser.is_reasoning_end(output_tokens)
-    assert not is_reasoning_end
+    assert is_reasoning_end is expected_is_reasoning_end

@@ -11,10 +11,13 @@ from PIL import Image
 
 import vllm.envs as envs
 from vllm.utils.serial_utils import tensor2base64
-from vllm.utils.sparse_utils import check_sparse_tensor_invariants_threadsafe
+from vllm.utils.sparse_utils import (
+    check_sparse_tensor_invariants_threadsafe,
+    safe_to_dense,
+)
 
-from ..image import convert_image_mode, normalize_image, rgba_to_rgb
-from .base import MediaIO, MediaWithBytes
+from ..image import convert_image_mode, normalize_image, open_image, rgba_to_rgb
+from .base import MediaDecodedBudget, MediaIO, MediaWithBytes
 
 MAGIC_NUMPY_PREFIX = b"\x93NUMPY"  # https://numpy.org/devdocs/reference/generated/numpy.lib.format.html#format-version-1-0
 
@@ -25,12 +28,19 @@ class ImageMediaIO(MediaIO[Image.Image]):
     error handling.
     """
 
-    def __init__(self, image_mode: str | None = "RGB", **kwargs) -> None:
+    def __init__(
+        self,
+        image_mode: str | None = "RGB",
+        *,
+        decoded_budget: MediaDecodedBudget | None = None,
+        **kwargs,
+    ) -> None:
         super().__init__()
 
         # Target mode for loaded images; `None` keeps the original mode
         # (i.e. no conversion, alpha channel is preserved as-is).
         self.image_mode = image_mode
+        self.decoded_budget = decoded_budget
         # `kwargs` contains custom arguments from
         # --media-io-kwargs for this modality, merged with
         # per-request runtime media_io_kwargs via merge_kwargs().
@@ -75,7 +85,7 @@ class ImageMediaIO(MediaIO[Image.Image]):
 
     def load_bytes(self, data: bytes) -> MediaWithBytes[Image.Image]:
         try:
-            image = Image.open(BytesIO(data))
+            image = open_image(BytesIO(data))
             w, h = image.size
             max_pixels = envs.VLLM_MAX_IMAGE_PIXELS
             if max_pixels > 0 and w * h > max_pixels:
@@ -84,6 +94,8 @@ class ImageMediaIO(MediaIO[Image.Image]):
                     f"the maximum of {max_pixels} pixels. Set "
                     f"VLLM_MAX_IMAGE_PIXELS to increase this limit."
                 )
+            if self.decoded_budget is not None:
+                self.decoded_budget.charge(w * h * 4)
             image = normalize_image(image)
             image.load()
             converted = self._convert_image_mode(image)
@@ -135,7 +147,7 @@ class ImageEmbeddingMediaIO(MediaIO[torch.Tensor]):
         buffer = BytesIO(data)
         with check_sparse_tensor_invariants_threadsafe():
             tensor = torch.load(buffer, weights_only=True)
-            return tensor.to_dense()
+            return safe_to_dense(tensor, parameter="image_embeds")
 
     def _load_numpy(self, data: bytes) -> torch.Tensor:
         with BytesIO(data) as buffer:
@@ -156,7 +168,7 @@ class ImageEmbeddingMediaIO(MediaIO[torch.Tensor]):
 
         with check_sparse_tensor_invariants_threadsafe():
             tensor = torch.load(filepath, weights_only=True)
-            return tensor.to_dense()
+            return safe_to_dense(tensor, parameter="image_embeds")
 
     def encode_base64(self, media: torch.Tensor) -> str:
         return tensor2base64(media)

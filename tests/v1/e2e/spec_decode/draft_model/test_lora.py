@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-This script contains:
+"""This script contains:
 1. test lora with speculative decoding for batch inference
 """
 
 import pytest
 import torch
 
+import vllm.envs as envs
 from vllm import SamplingParams
 from vllm.config import CompilationConfig
 from vllm.lora.request import LoRARequest
@@ -58,15 +58,13 @@ def test_batch_inference_correctness(
     model_setup: tuple[str, str, str, str, int],
     vllm_runner,
 ):
-    """
-    Compare the outputs of a LLM with only Lora and a LLM with both SD and Lora.
+    """Compare the outputs of a LLM with only Lora and a LLM with both SD and Lora.
     Should be the same and no failure when doing batch inference.
     model_setup: (method, model_name, spec_model_name, lora_path, tp_size)
     """
     with monkeypatch.context() as m:
-        # Disable randomness
-        if current_platform.is_cuda():
-            m.setenv("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+        m.setenv("VLLM_BATCH_INVARIANT", "1")
+        m.setattr(envs, "VLLM_BATCH_INVARIANT", True)
         set_random_seed(SEED)
         m.setattr(torch.backends.cudnn, "benchmark", False)
         m.setattr(torch.backends.cudnn, "deterministic", True)
