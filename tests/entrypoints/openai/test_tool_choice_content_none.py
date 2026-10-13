@@ -21,7 +21,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatMessage,
 )
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
-from vllm.entrypoints.serve.engine.protocol import UsageInfo
+from vllm.entrypoints.serve.engine.protocol import PromptTokenUsageInfo, UsageInfo
 from vllm.parser.abstract_parser import DelegatingParser
 
 pytestmark = pytest.mark.skip_global_cleanup
@@ -123,9 +123,26 @@ def test_chat_completion_response_omits_empty_tool_calls_payload():
     payload_exclude_unset = response.model_dump(exclude_unset=True)
 
     assert "tool_calls" not in payload["choices"][0]["message"]
+    assert "annotations" not in payload["choices"][0]["message"]
+    assert "prompt_tokens_details" not in payload["usage"]
     assert "tool_calls" not in payload_exclude_unset["choices"][0]["message"]
     parsed = OpenAIChatCompletion.model_validate(payload)
     assert parsed.choices[0].message.tool_calls is None
+
+
+def test_chat_completion_response_keeps_annotation_and_prompt_token_details():
+    response = _chat_response(ChatMessage(role="assistant", content="done"))
+    response.choices[0].message.annotations = []
+    response.usage.prompt_tokens_details = PromptTokenUsageInfo(cached_tokens=0)
+
+    payload = response.model_dump()
+
+    assert payload["choices"][0]["message"]["annotations"] == []
+    assert payload["usage"]["prompt_tokens_details"] == {
+        "cached_tokens": 0,
+        "created_cache_tokens": None,
+        "multimodal_tokens": None,
+    }
 
 
 def test_chat_completion_response_keeps_non_empty_tool_calls_payload():
