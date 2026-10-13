@@ -6,13 +6,16 @@ from unittest.mock import Mock
 
 import huggingface_hub.constants
 import pytest
+import torch
 from huggingface_hub.utils import LocalEntryNotFoundError
 
 from vllm.model_executor.model_loader.weight_utils import (
     download_weights_from_hf,
     drop_checkpoint_cache,
+    initialize_single_dummy_weight,
     maybe_remap_kv_scale_name,
 )
+from vllm.platforms import current_platform
 
 
 def test_download_weights_from_hf():
@@ -305,6 +308,48 @@ def test_drop_checkpoint_cache_releases_local_weight_files(
     monkeypatch.setattr("os.posix_fadvise", fadvise)
     drop_checkpoint_cache(str(tmp_path))
     fadvise.assert_called_once()
+
+
+@pytest.mark.parametrize("dtype", [torch.float8_e4m3fn, torch.float8_e5m2])
+def test_dummy_fp8_weight_is_not_degenerate(dtype):
+    """+-1e-3 underflows in FP8, so 8-bit floats default to +-1."""
+    param = torch.empty(4096, dtype=dtype)
+    initialize_single_dummy_weight(param)
+    values = param.float()
+    assert values.isfinite().all()
+    assert values.abs().max() <= 1.0
+    assert (values != 0).float().mean() > 0.99
+
+
+@pytest.mark.parametrize(
+    ("dtype", "name"),
+    [(torch.float8_e8m0fnu, "weight_scale_inv"), (torch.uint8, "w13_weight_scale")],
+)
+def test_dummy_e8m0_scale_is_fixed_exponent(dtype, name):
+    """E8M0 scales, including uint8-stored ones, get a finite 2**-7."""
+    param = torch.empty(64, dtype=dtype)
+    initialize_single_dummy_weight(param, name=name)
+    assert (param.view(torch.uint8) == 120).all()
+
+
+@pytest.mark.parametrize("dtype", [torch.uint8, torch.int8, torch.float4_e2m1fn_x2])
+def test_dummy_packed_weight_gets_random_bytes(dtype):
+    """Packed weights are filled deterministically instead of left uninitialized."""
+    # Some backends can't fill packed FP4 directly, so view zeroed bytes.
+    params = [torch.zeros(4096, dtype=torch.uint8).view(dtype) for _ in range(2)]
+    for param in params:
+        initialize_single_dummy_weight(param, name="w13_weight")
+    raw = params[0].view(torch.uint8)
+    assert raw.unique().numel() > 250
+    assert torch.equal(raw, params[1].view(torch.uint8))
+
+
+@pytest.mark.skipif(current_platform.is_rocm(), reason="ROCm zeroes integer params")
+def test_dummy_wide_integer_param_is_untouched():
+    """Wider integer params may be indices, so random values are unsafe."""
+    param = torch.arange(16, dtype=torch.int32)
+    initialize_single_dummy_weight(param, name="g_idx")
+    assert torch.equal(param, torch.arange(16, dtype=torch.int32))
 
 
 if __name__ == "__main__":
