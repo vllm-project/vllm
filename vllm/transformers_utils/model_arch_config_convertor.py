@@ -647,6 +647,27 @@ class MimoV2ModelArchConfigConvertor(ModelArchConfigConvertorBase):
         _strip_mimo_v2_attention_chunk_size(hf_config, hf_text_config)
 
 
+class Qwen3_5ModelArchConfigConvertor(ModelArchConfigConvertorBase):
+    def __init__(
+        self,
+        hf_config: PreTrainedConfig,
+        hf_text_config: PreTrainedConfig,
+        revision: str | None = None,
+    ):
+        if getattr(hf_config, "architectures", None) == [
+            "Qwen3_5ForConditionalGeneration"
+        ]:
+            model_path = hf_config.name_or_path
+            if model_path and file_or_path_exists(
+                model_path, "joint_head_config.json", revision
+            ):
+                hf_config.architectures = ["ClefFlashForJointSchema"]
+                hf_config.joint_head_config = get_hf_file_to_dict(
+                    "joint_head_config.json", model_path, revision
+                )
+        super().__init__(hf_config, hf_text_config, revision)
+
+
 class Qwen3OmniMoeModelArchConfigConvertor(ModelArchConfigConvertorBase):
     def __init__(
         self,
@@ -850,6 +871,7 @@ MODEL_ARCH_CONFIG_CONVERTORS = {
     "nemotron-nas": NemotronNasModelArchConfigConvertor,
     "bailing_hybrid_v3_mtp": BailingHybridV3MTPModelArchConfigConvertor,
     "pangu_ultra_moe_mtp": PanguUltraMoeMTPModelArchConfigConvertor,
+    "qwen3_5": Qwen3_5ModelArchConfigConvertor,
     "qwen3_5_mtp": Qwen3_5MTPModelArchConfigConvertor,
     "qwen3_omni_moe": Qwen3OmniMoeModelArchConfigConvertor,
     "qwen3_next_mtp": Qwen3NextMTPModelArchConfigConvertor,

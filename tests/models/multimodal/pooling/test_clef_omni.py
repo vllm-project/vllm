@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The Clef-Omni pooler against a port of the checkpoint's joint schema head,
+"""The shared Clef pooler against a port of the checkpoint's joint schema head,
 which loops over questions where the pooler batches them."""
 
 import math
@@ -11,7 +11,10 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from vllm.model_executor.models.clef_omni import JointSchemaHead, JointSchemaPooler
+from vllm.model_executor.models.clef_joint_schema import (
+    JointSchemaHead,
+    JointSchemaPooler,
+)
 from vllm.pooling_params import PoolingParams
 from vllm.v1.pool.metadata import PoolingMetadata, PoolingStates
 
