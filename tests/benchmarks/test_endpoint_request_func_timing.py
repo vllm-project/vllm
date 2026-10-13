@@ -154,6 +154,29 @@ class _FakeSession:
 
 
 # (id, request function, api url, is_chat_payload)
+_STREAM_ERROR_MESSAGE = "internal server error during generation"
+
+
+def _error_chunk(message: str = _STREAM_ERROR_MESSAGE) -> bytes:
+    """The error envelope the server sends inside an HTTP 200 stream.
+
+    The stream generators dump an ``ErrorResponse`` through
+    ``create_streaming_error_response``, so the event carries an ``error``
+    object and no ``choices``. A dead engine, a failed tool parser and a
+    generation error all arrive this way, so the message itself is arbitrary.
+    """
+    return _sse(
+        {
+            "error": {
+                "message": message,
+                "type": "InternalServerError",
+                "param": None,
+                "code": 500,
+            }
+        }
+    )
+
+
 STREAMING_ENDPOINTS = [
     (
         "completions",
@@ -345,6 +368,37 @@ def test_usage_only_stream_is_not_reported_as_success(
     assert "TTFT" in output.error
 
 
+@pytest.mark.parametrize(
+    "endpoint_id,request_func,api_url,chat",
+    STREAMING_ENDPOINTS,
+    ids=[e[0] for e in STREAMING_ENDPOINTS],
+)
+def test_error_event_stream_is_not_reported_as_success(
+    endpoint_id: str,
+    request_func,
+    api_url: str,
+    chat: bool,
+) -> None:
+    """A stream ending in a server error event must fail, tokens or not.
+
+    Generation that fails after the response has started cannot change the
+    HTTP 200 already sent, so the server reports the failure as an error event
+    before ``[DONE]``. Counting that request as complete hides the failure and
+    feeds its truncated token count and short latency into the aggregates.
+    """
+    n_tokens = 2
+    chunks = [(0.0, _token_chunk(i, chat=chat)) for i in range(n_tokens)]
+    chunks.append((0.0, _error_chunk()))
+    chunks.append((0.0, b"data: [DONE]\n\n"))
+
+    output = _run(
+        request_func, api_url, endpoint_id, chunks, n_tokens, expect_success=False
+    )
+
+    assert not output.success
+    assert _STREAM_ERROR_MESSAGE in output.error
+
+
 # ``benchmarks/backend_request_func.py`` is a standalone script rather than a
 # package module, so it is loaded by path. It also builds its own ClientSession,
 # so the scripted stream is injected by swapping the module's aiohttp reference.
@@ -462,3 +516,27 @@ def test_legacy_usage_only_stream_is_not_reported_as_success(
 
     assert not output.success
     assert output.itl == []
+
+
+@pytest.mark.parametrize(
+    "endpoint_id,func_name,api_url,chat",
+    LEGACY_ENDPOINTS,
+    ids=[e[0] for e in LEGACY_ENDPOINTS],
+)
+def test_legacy_error_event_stream_is_not_reported_as_success(
+    monkeypatch: pytest.MonkeyPatch,
+    endpoint_id: str,
+    func_name: str,
+    api_url: str,
+    chat: bool,
+) -> None:
+    """The standalone script must fail an error-terminated stream too."""
+    n_tokens = 2
+    chunks = [(0.0, _token_chunk(i, chat=chat)) for i in range(n_tokens)]
+    chunks.append((0.0, _error_chunk()))
+    chunks.append((0.0, b"data: [DONE]\n\n"))
+
+    output = _run_legacy(monkeypatch, func_name, api_url, endpoint_id, chunks, n_tokens)
+
+    assert not output.success
+    assert _STREAM_ERROR_MESSAGE in output.error
