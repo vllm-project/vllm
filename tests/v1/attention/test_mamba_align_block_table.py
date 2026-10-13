@@ -64,7 +64,7 @@ def _make(nreq, block_size, nspec, device, noncontig=False):
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")
 @pytest.mark.parametrize("nreq", [1, 2, 8, 64])
 @pytest.mark.parametrize("block_size", [16, 64, 256])
-@pytest.mark.parametrize("nspec", [0, 1, 3, 7])
+@pytest.mark.parametrize("nspec", [0, 1, 2, 3, 4, 7])
 def test_matches_reference(nreq, block_size, nspec):
     bt, sl = _make(nreq, block_size, nspec, "cuda")
     got = mamba_get_block_table_tensor(bt, sl, _spec(block_size, nspec), "align")

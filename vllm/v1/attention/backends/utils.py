@@ -1161,11 +1161,28 @@ def get_dcp_local_seq_lens(
     return dcp_local_seq_lens
 
 
-@triton.jit
+# `do_not_specialize_on_alignment` on the three pointers: Triton puts pointer
+# alignment in the specialization key, and the MRV1 DBO path hands this kernel
+# `seq_lens[request_slice]` / `block_table_tensor[request_slice]` VIEWS
+# (ubatch_utils.py:278/316). When a ubatch starts at a request index that is
+# not a multiple of 4, the view is differently aligned and a fresh variant
+# JIT-compiles mid-step -- 25-28 ms cold, ~1.5 ms warm, and an error under
+# `jit_monitor_mode=error`. The torch expression this replaced never compiled
+# anything, so that recompile would be a regression introduced by this change.
+@triton.jit(
+    do_not_specialize_on_alignment=["out_ptr", "block_table_ptr", "seq_lens_ptr"]
+)
 def _mamba_align_block_table_kernel(
     out_ptr,
     block_table_ptr,
-    block_table_stride_0,
+    # int64, because `req_idx * block_table_stride_0` is otherwise computed in
+    # i32: `program_id` is i32 and Triton specializes a stride below 2^31 to
+    # i32, so the product wraps once a row offset reaches 2^31 elements (a
+    # 4096 x 625000 table faults from row 3436 on MI355X). `torch.gather`,
+    # which this replaces, indexes in 64-bit and has no such limit --
+    # narrowing it silently would be a bad trade for one kernel launch.
+    # `mamba_utils.py:43` annotates its row stride the same way.
+    block_table_stride_0: tl.int64,
     block_table_stride_1,
     seq_lens_ptr,
     seq_lens_stride,
@@ -1233,6 +1250,26 @@ def mamba_get_block_table_tensor(
         # launch. Zero-length requests in a CUDA graph still clamp to row 0.
         num_reqs = block_table.shape[0]
         n_out = 1 + kv_cache_spec.num_speculative_blocks
+        # The expression this replaced took its row count from `seq_lens` (a
+        # `torch.gather` whose index tensor is built from it), so a mismatch
+        # raised and a cross-device pair raised. Taking `num_reqs` from
+        # `block_table` instead silently changed all of that: with 4 block-table
+        # rows and 2 `seq_lens`, the old code returned 2 correct rows and the new
+        # kernel returns 4, two of them read from memory past the end of
+        # `seq_lens`; a pinned-CPU `seq_lens` with a GPU `block_table` used to
+        # raise and would now be read zero-copy from host memory.
+        #
+        # No in-tree caller does any of that today, but this helper is shared by
+        # gdn_attn, mamba_attn, short_conv_attn and linear_attn. Both are host
+        # metadata, so this costs no synchronisation, and it keeps the CPU
+        # branch below and the GPU kernel agreeing on the same inputs.
+        assert seq_lens.shape[0] == num_reqs, (
+            f"seq_lens has {seq_lens.shape[0]} rows, block_table has {num_reqs}"
+        )
+        assert seq_lens.device == block_table.device, (
+            f"seq_lens is on {seq_lens.device}, block_table on "
+            f"{block_table.device}"
+        )
         if not block_table.is_cuda:
             # Triton runs on the accelerator only, and this helper IS called
             # with CPU tensors: the GDN and linear-attention metadata builders
