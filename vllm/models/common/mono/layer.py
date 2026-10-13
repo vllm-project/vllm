@@ -28,7 +28,7 @@ _ATTACHED: Mono | None = None
 
 
 def attach(model, vllm_config: "VllmConfig", specs_path: str) -> Mono | None:
-    """Picks the variant, packs the weights and builds this rank's layer
+    """Picks the variant, builds the launch state and this rank's layer
     kernels. Collective over the TP group.
 
     Args:

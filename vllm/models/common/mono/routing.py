@@ -83,7 +83,7 @@ class Mono:
         if not indices:
             self.cache_layers: list[str] = []
             return
-        self.state = spec.pack(model, self.ctx)
+        self.state = spec.launch_state(model, self.ctx)
         for i in indices:
             for w in self.widths:
                 self.kernels[i, w] = spec.build(
@@ -127,20 +127,20 @@ class Mono:
         if owners:
             MonoWarmup(self.spec.name, owners).register_warmup()
 
-    def repack(self, model) -> None:
-        """Writes ``model``'s current weights into the allocation ``pack``
-        returned, in place.
+    def reload_weights(self, model) -> None:
+        """Writes ``model``'s current weights into the allocation
+        ``launch_state`` returned, in place.
 
         Raises:
-            MonoUnsupported: The spec declares no ``repack``, so its weights
-                cannot move after attach.
+            MonoUnsupported: The spec declares no ``reload_weights``, so its
+                weights cannot move after attach.
 
         """
-        if self.spec.repack is None:
+        if self.spec.reload_weights is None:
             raise MonoUnsupported(
                 f"MonoKernel {self.spec.name}: weights cannot move after attach"
             )
-        self.spec.repack(model, self.ctx, self.state)
+        self.spec.reload_weights(model, self.ctx, self.state)
 
     def _bind(self) -> None:
         """Re-checks the caches whenever they moved (keyed on every tensor's

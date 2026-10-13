@@ -59,8 +59,9 @@ class ReferenceModel(torch.nn.Module):
 
 @dataclass
 class LaunchState:
-    """What ``pack`` builds once at attach: views of the model's weights, never
-    a copy, and the error words every kernel of this rank shares."""
+    """What ``launch_state`` builds once at attach: views of the model's
+    weights, never a copy, and the error words every kernel of this rank
+    shares."""
 
     weights: dict[int, torch.Tensor]
     words: torch.Tensor
@@ -126,7 +127,7 @@ def skip_step(ctx: MonoContext, state: LaunchState, step: MonoStep) -> str | Non
     return "prefill" if step.attn_metadata.get("prefill") else None
 
 
-def pack(model, ctx: MonoContext) -> LaunchState:
+def launch_state(model, ctx: MonoContext) -> LaunchState:
     _, world, _ = _tp()
     return LaunchState(
         weights={i: layer.weight.data for i, layer in enumerate(model.layers)},
@@ -134,7 +135,7 @@ def pack(model, ctx: MonoContext) -> LaunchState:
     )
 
 
-def repack(model, ctx: MonoContext, state: LaunchState) -> None:
+def reload_weights(model, ctx: MonoContext, state: LaunchState) -> None:
     for i, layer in enumerate(model.layers):
         state.weights[i].copy_(layer.weight.data)
 
@@ -170,8 +171,8 @@ REFERENCE = MonoSpec(
     refuse_model=refuse_model,
     skip_layer=skip_layer,
     skip_step=skip_step,
-    pack=pack,
-    repack=repack,
+    launch_state=launch_state,
+    reload_weights=reload_weights,
     bind=bind,
     build=build,
 )

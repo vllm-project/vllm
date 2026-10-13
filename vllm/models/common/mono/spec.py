@@ -133,7 +133,7 @@ class MonoSpec:
             that is absent from it refuses the deployment.
         caches: The caches the kernels read, by attention layer name.
         weight_source: ``"views"`` to read vLLM's post-load layout in place,
-            ``"convert"`` to pack a second layout once after load.
+            ``"convert"`` to build a second layout once after load.
         layers: The decoder layers that get a kernel, from the model's config.
         widths: The rows a launch serves, from the engine's config. These
             become the CUDA graph capture sizes.
@@ -144,12 +144,13 @@ class MonoSpec:
             kernel's.
         skip_step: Why one step takes vLLM's path, None when it takes the
             kernel's.
-        pack: The weights and launch state, built once at attach. The only
-            place a weight copy is ever made. Opaque to the library, which
+        launch_state: The weights and launch state, built once at attach. The
+            only place a weight copy is ever made. Opaque to the library, which
             only hands it back to the spec's own callbacks.
-        repack: Writes new weights into the allocation ``pack`` returned,
-            in place, because the kernels and the captured graphs hold its
-            address. None refuses anything that moves weights after attach.
+        reload_weights: Writes new weights into the allocation
+            ``launch_state`` returned, in place, because the kernels and the
+            captured graphs hold its address. None refuses anything that moves
+            weights after attach.
         bind: Checks the KV caches the kernels will read, on every re-bind.
         build: One ``LayerKernel`` for (context, state, layer, width).
 
@@ -171,7 +172,7 @@ class MonoSpec:
     skip_step: Callable[[MonoContext, Any, MonoStep], str | None]
 
     # Callbacks
-    pack: Callable[[Any, MonoContext], Any]
-    repack: Callable[[Any, MonoContext, Any], None] | None
+    launch_state: Callable[[Any, MonoContext], Any]
+    reload_weights: Callable[[Any, MonoContext, Any], None] | None
     bind: Callable[[MonoContext, Mapping[str, Any]], list[str]]
     build: Callable[[MonoContext, Any, Any, int], LayerKernel]

@@ -88,7 +88,7 @@ def test_kernels_run_the_layers_they_replace():
     assert [k.launched for k in mono.kernels.values() if k.launched] == [[width]] * 3
 
 
-def test_repack_writes_in_place():
+def test_reload_weights_writes_in_place():
     config = reference.make_config()
     model = reference.make_model(config)
     mono = attach(model, config, SPECS_PATH)
@@ -96,18 +96,18 @@ def test_repack_writes_in_place():
     with torch.no_grad():
         for layer in model.layers:
             layer.weight.copy_(torch.full_like(layer.weight, 7))
-    mono.repack(model)
+    mono.reload_weights(model)
     assert {i: w.data_ptr() for i, w in mono.state.weights.items()} == before
     assert all((w == 7).all() for w in mono.state.weights.values())
 
 
-def test_repack_is_refused_when_the_spec_declares_none():
+def test_reload_weights_is_refused_when_the_spec_declares_none():
     config = reference.make_config()
     model = reference.make_model(config)
     mono = attach(model, config, SPECS_PATH)
-    mono.spec = replace(mono.spec, repack=None)
+    mono.spec = replace(mono.spec, reload_weights=None)
     with pytest.raises(MonoUnsupported, match="weights cannot move"):
-        mono.repack(model)
+        mono.reload_weights(model)
 
 
 def test_model_refusal_is_raised():

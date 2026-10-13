@@ -394,7 +394,7 @@ def _skip_step(
     return None
 
 
-def _pack(model, ctx: MonoContext) -> LaunchState:
+def _launch_state(model, ctx: MonoContext) -> LaunchState:
     """This rank's runner, collective over the TP group."""
     from vllm.models.common.mono.peer import tp_group
     from vllm.models.deepseek_v41.amd.mono.runner import MAX_TOKENS, DSV41MonoLayer
@@ -518,8 +518,8 @@ MONO_SPEC = MonoSpec(
     refuse_model=_refuse_model,
     skip_layer=_skip_layer,
     skip_step=_skip_step,
-    pack=_pack,
-    repack=None,
+    launch_state=_launch_state,
+    reload_weights=None,
     bind=_bind,
     build=_build,
 )
