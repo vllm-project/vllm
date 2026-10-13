@@ -112,10 +112,8 @@ class PunicaWrapperABC(ABC):
         weight_stacked: torch.Tensor,
         bias_stacked: torch.Tensor,
         module_enabled: torch.Tensor,
-        *,
-        is_logits: bool = True,
     ) -> torch.Tensor | None:
-        """Apply full linear weights using request or token routing."""
+        """Apply request-routed full linear weights to selected rows."""
         raise NotImplementedError
 
 
@@ -220,12 +218,10 @@ class PunicaWrapperBase(PunicaWrapperABC):
         adapter_y: torch.Tensor,
         bias_stacked: torch.Tensor,
         module_enabled: torch.Tensor,
-        *,
-        is_logits: bool = True,
     ) -> torch.Tensor:
-        indices = self.sampler_indices if is_logits else self.token_lora_indices
+        indices = self.sampler_indices
         assert indices.size(0) == y.size(0), (
-            "Full linear rows do not match LoRA mapping"
+            "Full linear rows do not match LoRA request mapping"
         )
         safe_indices = indices.clamp_min(0)
         use_full = (indices >= 0) & module_enabled[safe_indices]
