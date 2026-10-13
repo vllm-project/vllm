@@ -4,6 +4,7 @@
 
 import functools
 import itertools
+import math
 import os
 from dataclasses import replace
 from typing import Literal
@@ -305,13 +306,17 @@ def fi_chunk_gated_delta_rule(
 
 
 def _checkpoint_grid(cache_config: CacheConfig) -> int:
-    """Tokens between the prefix-cache boundaries align-mode checkpoints land on.
+    """Token grid that FlashInfer GDN checkpoint offsets are kept on.
 
-    The platform keeps it a multiple of FlashInfer's checkpoint alignment.
+    Prefix-cache boundaries, made multiples of FlashInfer's checkpoint
+    alignment; the platform already keeps blocks on it.
     """
-    grid = cache_config.prefix_match_unit or cache_config.mamba_block_size
-    assert grid is not None
-    return grid
+    if cache_config.prefix_match_unit is not None:
+        return math.lcm(
+            cache_config.prefix_match_unit, FLASHINFER_GDN_CHECKPOINT_ALIGNMENT
+        )
+    assert cache_config.mamba_block_size is not None
+    return cache_config.mamba_block_size
 
 
 @CustomOp.register("chunk_gated_delta_rule")
@@ -633,7 +638,9 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             self._max_num_batched_tokens = (
                 vllm_config.scheduler_config.max_num_batched_tokens
             )
-            self._checkpoint_exporter = MambaPrefillCheckpointExporter()
+            self._checkpoint_exporter = MambaPrefillCheckpointExporter(
+                state_len=self.conv_kernel_size - 1
+            )
         self.enable_packed_recurrent_decode = (
             envs.VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE
         )

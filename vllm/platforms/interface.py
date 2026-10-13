@@ -1099,23 +1099,10 @@ class Platform:
                 # multiple of 128 so split kernel blocks keep that invariant.
                 kernel_block_alignment_size = max(kernel_block_alignment_size, 128)
         if cache_config.mamba_cache_mode == "align":
-            # Internal prefill checkpoints land on prefix-cache boundaries, so
-            # blocks and any finer match unit must sit on the Mamba layers'
-            # checkpoint grid.
-            checkpoint_grid = cls._mamba_checkpoint_alignment(vllm_config)
-            if checkpoint_grid > 1 and cache_config.prefix_match_unit is not None:
-                prefix_match_unit = lcm(cache_config.prefix_match_unit, checkpoint_grid)
-                if prefix_match_unit != cache_config.prefix_match_unit:
-                    logger.info(
-                        "Setting prefix_match_unit to %d tokens so that Mamba "
-                        "prefill checkpoints land on their kernels' grid.",
-                        prefix_match_unit,
-                    )
-                    cache_config.prefix_match_unit = prefix_match_unit
-                # Blocks must stay divisible by the match unit.
-                checkpoint_grid = prefix_match_unit
+            # Internal prefill checkpoints land on block boundaries.
             kernel_block_alignment_size = lcm(
-                kernel_block_alignment_size, checkpoint_grid
+                kernel_block_alignment_size,
+                cls._mamba_checkpoint_alignment(vllm_config),
             )
 
         # Use minimum block size that satisfies both backend alignment and

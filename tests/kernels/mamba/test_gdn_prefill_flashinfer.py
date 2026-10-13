@@ -66,8 +66,9 @@ def test_flashinfer_gdn_prefill_uses_int64_cu_seqlens(monkeypatch):
     not (
         current_platform.is_device_capability(90)
         or current_platform.is_device_capability_family(100)
+        or current_platform.is_device_capability_family(120)
     ),
-    reason="FlashInfer GDN prefill checkpoints need SM90 or SM100.",
+    reason="FlashInfer GDN prefill checkpoints need SM90, SM100 or SM120.",
 )
 @pytest.mark.parametrize("use_cp", [True, False])
 @pytest.mark.parametrize("ssm_dtype", [torch.float32, torch.bfloat16])
@@ -78,11 +79,13 @@ def test_flashinfer_checkpoints_export_the_state_at_each_offset(use_cp, ssm_dtyp
     prefills put FlashInfer's stride (their offsets' gcd) below both offsets,
     so the exporter must pick each state out of the shared emitted buffer;
     the third prefill takes no checkpoint. Both FlashInfer routes are covered
-    because ``use_cp="auto"`` may take either.
+    because ``use_cp="auto"`` may take either. The conv cache has MTP's spec
+    slots after the window, which the conv kernels leave alone.
     """
     torch.manual_seed(0)
     device = "cuda"
     num_qk_heads, num_v_heads, head_dim, conv_dim, state_len = 2, 4, 128, 16, 3
+    num_spec = 2
     offsets = [0, 128, 0, 192]
     query_lens = [200, 50, 300]
     state_indices = [NULL_BLOCK_ID, 3, NULL_BLOCK_ID, 5]
@@ -129,12 +132,16 @@ def test_flashinfer_checkpoints_export_the_state_at_each_offset(use_cp, ssm_dtyp
     raw_qkv = torch.randn(1 + num_tokens, conv_dim, device=device).bfloat16()
     cu_seqlens = torch.tensor([0] + [1 + n for n in prefill_cu], device=device)
     conv_state = torch.zeros(
-        num_blocks, state_len, conv_dim, device=device, dtype=torch.bfloat16
+        num_blocks,
+        state_len + num_spec,
+        conv_dim,
+        device=device,
+        dtype=torch.bfloat16,
     ).transpose(-1, -2)
     ssm_state = torch.zeros(
         num_blocks, num_v_heads, head_dim, head_dim, device=device, dtype=ssm_dtype
     )
-    MambaPrefillCheckpointExporter().export(
+    MambaPrefillCheckpointExporter(state_len=state_len).export(
         MambaPrefillCheckpointMetadata(
             checkpoint_offsets=torch.tensor(offsets, device=device, dtype=torch.int32),
             state_indices=torch.tensor(state_indices, device=device),
@@ -170,8 +177,12 @@ def test_flashinfer_checkpoints_export_the_state_at_each_offset(use_cp, ssm_dtyp
         )
         end = cu_seqlens[row].item() + offset
         torch.testing.assert_close(
-            conv_state[block], raw_qkv[end - state_len : end].T, atol=0, rtol=0
+            conv_state[block, :, :state_len],
+            raw_qkv[end - state_len : end].T,
+            atol=0,
+            rtol=0,
         )
+        assert not conv_state[block, :, state_len:].any()
 
     untouched = [i for i in range(num_blocks) if i not in written]
     assert not ssm_state[untouched].any()

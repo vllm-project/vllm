@@ -64,8 +64,8 @@ class MambaBase(AttentionLayerBase):
 
     def get_prefill_checkpoint_alignment(self) -> int | None:
         """Token alignment of the checkpoint offsets this layer can export from
-        inside a prefill, if any; in align mode, the platform puts Mamba blocks
-        and the prefix-cache grid on it.
+        inside a prefill, if any; in align mode, the platform makes Mamba blocks
+        multiples of it.
         """
         return None
 
