@@ -186,9 +186,6 @@ logger = init_logger(__name__)
 
 
 class GPUModelRunner(LoRAModelRunnerMixin):
-    sampler_cls: type[Sampler] = Sampler
-    block_tables_cls: type[BlockTables] = BlockTables
-
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
@@ -2409,6 +2406,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     @property
     def pcp_manager_cls(self) -> type[pcp.PCPManager]:
         return pcp.PCPManager
+
+    # Hardware runners can select the sampler and block table classes.
+    @property
+    def sampler_cls(self) -> type[Sampler]:
+        return Sampler
+
+    @property
+    def block_tables_cls(self) -> type[BlockTables]:
+        return BlockTables
 
 
 class ExecuteModelState(NamedTuple):

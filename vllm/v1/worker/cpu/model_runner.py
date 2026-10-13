@@ -10,8 +10,13 @@ logger = init_logger(__name__)
 
 
 class CPUModelRunner(GPUModelRunner):
-    sampler_cls = CPUSampler
-    block_tables_cls = CPUBlockTables
+    @property
+    def sampler_cls(self) -> type[CPUSampler]:
+        return CPUSampler
+
+    @property
+    def block_tables_cls(self) -> type[CPUBlockTables]:
+        return CPUBlockTables
 
     # TBD: Whether need to move this to Worker?
     def warming_up_model(self) -> None:
