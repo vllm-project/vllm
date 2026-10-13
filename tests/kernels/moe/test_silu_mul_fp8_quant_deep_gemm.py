@@ -230,6 +230,34 @@ def test_batch_invariant_packed_scale_padding(H: int):
     assert torch.all(scale_bytes[:, H // 128 :] == 0)
 
 
+@pytest.mark.skipif(
+    not current_platform.is_cuda() or not current_platform.has_device_capability(80),
+    reason="batch-invariant fused SiLU quantization requires CUDA sm80+",
+)
+@torch.inference_mode()
+def test_batch_invariant_input_contract():
+    y = torch.randn((4, 256), device=DEVICE, dtype=torch.bfloat16)
+    with pytest.raises(ValueError, match="contiguous CUDA BF16"):
+        fused_silu_mul_per_token_group_quant_fp8(
+            y.T.contiguous().T, use_ue8m0=True, masked_m=None
+        )
+    with pytest.raises(ValueError, match="activation shape"):
+        fused_silu_mul_per_token_group_quant_fp8(
+            y[:, :192].contiguous(), use_ue8m0=True, masked_m=None
+        )
+    output_q = torch.empty((4, 128), device="cpu", dtype=fp8_dtype)
+    with pytest.raises(ValueError, match="output_q must be contiguous"):
+        fused_silu_mul_per_token_group_quant_fp8(
+            y, use_ue8m0=True, masked_m=None, output_q=output_q
+        )
+    with pytest.raises(ValueError, match="masked_m must be int32"):
+        fused_silu_mul_per_token_group_quant_fp8(
+            y.unsqueeze(0),
+            use_ue8m0=True,
+            masked_m=torch.tensor([4], device=DEVICE, dtype=torch.int64),
+        )
+
+
 @pytest.mark.parametrize("E,T,H,fp8_type", CASES)
 @torch.inference_mode()
 def test_silu_mul_fp8_quant_deep_gemm(E: int, T: int, H: int, fp8_type: torch.dtype):

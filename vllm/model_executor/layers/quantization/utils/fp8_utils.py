@@ -72,8 +72,27 @@ def fused_silu_mul_per_token_group_quant_fp8(
     )
     from vllm.utils.deep_gemm import DeepGemmQuantScaleFMT
 
-    if input.ndim != (2 if masked_m is None else 3):
+    if (
+        group_size != 128
+        or input.ndim != (2 if masked_m is None else 3)
+        or input.shape[-1] % (2 * group_size)
+        or input.numel() == 0
+    ):
         raise ValueError("invalid batch-invariant activation shape")
+    if not input.is_cuda or not input.is_contiguous() or input.dtype != torch.bfloat16:
+        raise ValueError(
+            "batch-invariant activation input must be contiguous CUDA BF16"
+        )
+    if masked_m is not None and (
+        masked_m.shape != (input.shape[0],)
+        or masked_m.dtype != torch.int32
+        or masked_m.device != input.device
+    ):
+        raise ValueError("masked_m must be int32 with one count per expert")
+    if output_q is not None and (
+        not output_q.is_contiguous() or output_q.device != input.device
+    ):
+        raise ValueError("output_q must be contiguous on the input device")
     scale_format = (
         DeepGemmQuantScaleFMT.UE8M0
         if use_ue8m0
