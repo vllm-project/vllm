@@ -202,7 +202,7 @@ extend-exclude = ["tests/models/fixtures/*", "tests/prompts/*", "tests/tokenizer
     "rust/src/chat/src/renderer/deepseek_v32/fixtures/*", "rust/src/parser/**",
     "rust/src/text/src/output/decoded.rs",
     "rust/src/tokenizer/src/incremental.rs",
-    "recipes/*"]
+    "recipes/models/*"]
 ignore-hidden = false
 
 [tool.typos.default]
