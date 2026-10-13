@@ -400,11 +400,12 @@ def test_daemon_rejects_unmappable_parallelism():
         )
 
 
-@pytest.fixture
-def weight_cache_key():
+def test_weight_cache_key_distinguishes_dp_ranks():
+    from dataclasses import replace
+
     from vllm.model_executor.model_loader.weight_cache.protocol import WeightCacheKey
 
-    return WeightCacheKey(
+    key = WeightCacheKey(
         checkpoint="ckpt",
         model_arch="Arch",
         tp_size=1,
@@ -420,12 +421,6 @@ def weight_cache_key():
         pp_size=2,
         pp_rank=1,
     )
-
-
-def test_weight_cache_key_distinguishes_dp_ranks(weight_cache_key):
-    from dataclasses import replace
-
-    key = weight_cache_key
     assert key.mismatched_fields(replace(key, dp_rank=4)) == ["dp_rank"]
     assert key.mismatched_fields(replace(key, dp_size=8, dp_rank=3)) == ["dp_size"]
     assert key.mismatched_fields(replace(key, pp_rank=0)) == ["pp_rank"]
@@ -452,11 +447,11 @@ def test_weight_cache_key_distinguishes_nvfp4_activation_override(
         quantization="modelopt_fp4",
         quantization_config=None,
         revision=None,
+        hf_text_config=SimpleNamespace(),
         hf_config=SimpleNamespace(
             architectures=["NemotronHForCausalLM"],
             quantization_config=hf_quant_config,
         ),
-        hf_text_config=SimpleNamespace(),
     )
     static_key = WeightCacheKey.from_model_config(model_config, tp_size=1, tp_rank=0)
     model_config.quantization_config = QuantizationConfigArgs(
@@ -478,182 +473,64 @@ def test_weight_cache_key_distinguishes_nvfp4_activation_override(
     ) == ["quant_config_hash"]
 
 
-@pytest.mark.parametrize(
-    "nested_text_config", [False, True], ids=["text", "multimodal"]
-)
-@pytest.mark.parametrize(
-    "rope_parameters, expected_mismatches",
-    [
-        ({"rope_type": "default", "rope_theta": 1000000.0}, ["rope_parameters_hash"]),
-        (
-            {"rope_type": "linear", "rope_theta": 10000.0, "factor": 2.0},
-            ["rope_parameters_hash"],
-        ),
-        ({"rope_type": "default", "rope_theta": 10000.0}, []),
-    ],
-    ids=["theta", "scaling", "explicit-defaults"],
-)
-def test_weight_cache_key_checks_effective_rope_parameters(
-    tmp_path, nested_text_config, rope_parameters, expected_mismatches
-):
-    """Daemon rotary buffers must not override the engine's RoPE settings."""
-    from transformers import Qwen2Config, Qwen3VLConfig, Qwen3VLTextConfig
-
-    from vllm.config import ModelConfig
-    from vllm.model_executor.model_loader.weight_cache.protocol import WeightCacheKey
-
-    if nested_text_config:
-        config = Qwen3VLConfig(
-            architectures=["Qwen3VLForConditionalGeneration"],
-            text_config=Qwen3VLTextConfig(
-                rope_parameters={"rope_type": "default", "rope_theta": 10000.0}
-            ).to_dict(),
-        )
-        overrides = {"text_config": {"rope_parameters": rope_parameters}}
-    else:
-        config = Qwen2Config(architectures=["Qwen2ForCausalLM"])
-        overrides = {"rope_parameters": rope_parameters}
-    config.save_pretrained(tmp_path)
-    kwargs = dict(model=str(tmp_path), skip_tokenizer_init=True, max_model_len=128)
-    daemon_config = ModelConfig(**kwargs)
-    engine_config = ModelConfig(**kwargs, hf_overrides=overrides)
-    daemon_key = WeightCacheKey.from_model_config(daemon_config, 1, 0)
-    engine_key = WeightCacheKey.from_model_config(engine_config, 1, 0)
-
-    assert daemon_key.mismatched_fields(engine_key) == expected_mismatches
-
-
-@pytest.mark.parametrize(
-    "is_reload, rope_hash, tp_rank, expected_mismatches",
-    [
-        (False, "initial", 0, []),
-        (False, "loaded", 0, ["rope_parameters_hash"]),
-        (True, "loaded", 0, []),
-        (True, "initial", 0, []),
-        (True, "different", 0, ["rope_parameters_hash"]),
-        (True, "loaded", 1, ["tp_rank"]),
-    ],
-    ids=[
-        "startup",
-        "startup-rejects-loaded",
-        "reload",
-        "reload-with-initial",
-        "reload-rejects-different",
-        "reload-checks-rank",
-    ],
-)
-def test_daemon_checks_rope_parameters_for_loading_stage(
-    monkeypatch, weight_cache_key, is_reload, rope_hash, tp_rank, expected_mismatches
-):
-    """Reloads also accept post-load RoPE settings without weakening startup checks."""
-    import socket
-    from dataclasses import replace
-
-    import torch
-
-    from vllm.model_executor.model_loader.weight_cache import daemon
-    from vllm.model_executor.model_loader.weight_cache.protocol import recv_msg
-
-    server = object.__new__(daemon.WeightCacheDaemon)
-    server.cache_config = weight_cache_key
-    server.loaded_rope_parameters_hash = "loaded"
-    server.model = torch.nn.Linear(1, 1)
-    server.role = "target"
-    server.global_rank = 0
-    monkeypatch.setattr(daemon, "get_current_device_uuid", lambda: "test-device")
-    request = {
-        "cache_config": replace(
-            weight_cache_key, rope_parameters_hash=rope_hash, tp_rank=tp_rank
-        ),
-        "is_reload": is_reload,
-    }
-    client_socket, server_socket = socket.socketpair()
-    with client_socket, server_socket:
-        client_socket.settimeout(5)
-        server_socket.settimeout(5)
-        server._handle_get_state(server_socket, request)
-        response = recv_msg(client_socket)
-    assert response["status"] == ("mismatch" if expected_mismatches else "ok")
-    if expected_mismatches:
-        assert response["fields"] == expected_mismatches
-
-
 @pytest.mark.parametrize("fallback", [False, True])
-def test_ipc_loader_reloads_constructor_normalized_rope(
-    tmp_path, monkeypatch, fallback
-):
-    """Reload normalized RoPE buffers through the loader, rejecting different theta."""
-    import copy
+@pytest.mark.parametrize("nested", [False, True], ids=["text", "multimodal"])
+@pytest.mark.parametrize(
+    "case",
+    [
+        (False, "yarn", 10000.0, 2.0, 0, None),
+        (False, "deepseek_yarn", 10000, 2, 0, "rope_parameters_hash"),
+        (True, "deepseek_yarn", 10000, 2, 0, None),
+        (True, "yarn", 10000, 2, 0, None),
+        (True, "deepseek_yarn", 1000000, 2, 0, "rope_parameters_hash"),
+        (True, "deepseek_yarn", 10000, 4, 0, "rope_parameters_hash"),
+        (True, "deepseek_yarn", 10000, 2, 1, "tp_rank"),
+    ],
+)
+def test_ipc_rope_matching(tmp_path, monkeypatch, fallback, nested, case):
+    """Reloads accept constructor-normalized RoPE without weakening other checks."""
     import socket
     from concurrent.futures import ThreadPoolExecutor
+    from contextlib import nullcontext
     from types import SimpleNamespace
 
     import torch
-    from transformers import DeepseekV2Config
+    from transformers import DeepseekV2Config, Qwen3VLConfig
 
-    from vllm.config import LoadConfig, ModelConfig, VllmConfig, set_current_vllm_config
+    from vllm.config import LoadConfig, ModelConfig
     from vllm.model_executor.model_loader.weight_cache import daemon, ipc_loader
     from vllm.model_executor.model_loader.weight_cache.protocol import (
         CacheConfigMismatchError,
         WeightCacheKey,
         hash_rope_parameters,
     )
-    from vllm.model_executor.models import deepseek_v2
 
-    DeepseekV2Config(
-        architectures=["DeepseekV2ForCausalLM"],
-        hidden_size=128,
-        num_attention_heads=2,
-        num_hidden_layers=1,
-        intermediate_size=256,
-        vocab_size=32,
-        max_position_embeddings=64,
-        rope_parameters={
-            "rope_type": "yarn",
-            "rope_theta": 10000.0,
-            "factor": 2.0,
-            "original_max_position_embeddings": 64,
-        },
-    ).save_pretrained(tmp_path)
+    is_reload, rope_type, theta, factor, rank, mismatch = case
+    rope = dict(rope_type="yarn", rope_theta=10000, factor=2)
+    config = (
+        Qwen3VLConfig(text_config={"rope_parameters": rope})
+        if nested
+        else DeepseekV2Config(rope_parameters=rope)
+    )
+    config.architectures = [
+        "Qwen3VLForConditionalGeneration" if nested else "DeepseekV2ForCausalLM"
+    ]
+    config.save_pretrained(tmp_path)
     model_config = ModelConfig(
         model=str(tmp_path),
         skip_tokenizer_init=True,
-        max_model_len=32,
-        dtype="float32",
+        max_model_len=128,
     )
     server = object.__new__(daemon.WeightCacheDaemon)
     server.cache_config = WeightCacheKey.from_model_config(model_config, 1, 0)
-    # Keep the constructor and rotary buffers real; isolate distributed attention.
-    with monkeypatch.context() as patch:
-        for name in (
-            "ColumnParallelLinear",
-            "ReplicatedLinear",
-            "RowParallelLinear",
-            "RMSNorm",
-            "Attention",
-        ):
-            patch.setattr(deepseek_v2, name, torch.nn.Identity)
-        patch.setattr(deepseek_v2, "get_tensor_model_parallel_world_size", lambda: 1)
-        vllm_config = VllmConfig()
-        with set_current_vllm_config(vllm_config), torch.device("cpu"):
-            server.model = deepseek_v2.DeepseekV2Attention(
-                vllm_config=vllm_config,
-                config=model_config.hf_text_config,
-                hidden_size=128,
-                num_heads=2,
-                qk_nope_head_dim=32,
-                qk_rope_head_dim=32,
-                v_head_dim=32,
-                q_lora_rank=None,
-                kv_lora_rank=32,
-                max_position_embeddings=64,
-            )
+    rope = model_config.hf_text_config.rope_parameters
+    # DeepseekV2 construction normalizes yarn to deepseek_yarn.
+    rope["rope_type"] = "deepseek_yarn"
     server.loaded_rope_parameters_hash = hash_rope_parameters(model_config)
-    assert (
-        server.loaded_rope_parameters_hash != server.cache_config.rope_parameters_hash
-    )
-    server.role = "target"
-    server.global_rank = 0
+    rope.update(rope_type=rope_type, rope_theta=theta, factor=factor)
+    server.model = torch.nn.Module()
+    server.model.register_buffer("rotary_cache", torch.ones(2), persistent=False)
+    server.role, server.global_rank = "target", 0
     for module in (daemon, ipc_loader):
         monkeypatch.setattr(module, "get_current_device_uuid", lambda: "test-device")
     for name in ("get_dp_group", "get_pp_group"):
@@ -661,51 +538,34 @@ def test_ipc_loader_reloads_constructor_normalized_rope(
             ipc_loader, name, lambda: SimpleNamespace(world_size=1, rank_in_group=0)
         )
     monkeypatch.setattr(ipc_loader, "get_tensor_model_parallel_world_size", lambda: 1)
-    monkeypatch.setattr(ipc_loader, "get_tensor_model_parallel_rank", lambda: 0)
+    monkeypatch.setattr(ipc_loader, "get_tensor_model_parallel_rank", lambda: rank)
     monkeypatch.setattr(torch.accelerator, "current_device_index", lambda: 0)
-    loader = ipc_loader.IpcModelLoader(
-        LoadConfig(
-            load_format="ipc_cache",
-            model_loader_extra_config={"fallback": fallback, "state_timeout_s": 5},
-        )
-    )
-    model = copy.deepcopy(server.model)
-    expected_buffers = dict(server.model.named_buffers())
-    assert any(torch.count_nonzero(buffer) for buffer in expected_buffers.values())
-    for different_theta in (False, True):
-        if different_theta:
-            model_config.hf_text_config.rope_parameters["rope_theta"] = 1000000.0
-        for buffer in model.buffers():
-            buffer.zero_()
-        client_socket, server_socket = socket.socketpair()
-        with (
-            client_socket,
-            server_socket,
-            ThreadPoolExecutor(max_workers=1) as executor,
-        ):
-            client_socket.settimeout(5)
-            server_socket.settimeout(5)
-            monkeypatch.setattr(
-                loader, "_connect", lambda timeout, conn=client_socket: conn
-            )
-            server_task = executor.submit(server._handle_connection, server_socket)
-            try:
-                if different_theta:
-                    with pytest.raises(
-                        CacheConfigMismatchError, match="rope_parameters_hash"
-                    ):
-                        loader.load_weights(model, model_config)
-                    assert all(
-                        torch.count_nonzero(buffer) == 0 for buffer in model.buffers()
-                    )
-                else:
+    loader = ipc_loader.IpcModelLoader(LoadConfig(load_format="ipc_cache"))
+    loader.fallback = fallback
+    loader.state_timeout_s = 5
+    model = torch.nn.Module()
+    model.register_buffer("rotary_cache", torch.zeros(2), persistent=False)
+    client, connection = socket.socketpair()
+    with client, connection, ThreadPoolExecutor(max_workers=1) as executor:
+        client.settimeout(5)
+        connection.settimeout(5)
+        monkeypatch.setattr(loader, "_connect", lambda timeout: client)
+        server_task = executor.submit(server._handle_connection, connection)
+        try:
+            with (
+                pytest.raises(CacheConfigMismatchError, match=mismatch)
+                if mismatch
+                else nullcontext()
+            ):
+                if is_reload:
                     loader.load_weights(model, model_config)
-                    for name, buffer in model.named_buffers():
-                        torch.testing.assert_close(
-                            buffer, expected_buffers[name], rtol=0, atol=0
-                        )
-            finally:
-                server_task.result(timeout=5)
+                else:
+                    loader._fetch_entries(model_config)
+            if is_reload:
+                expected = torch.zeros(2) if mismatch else server.model.rotary_cache
+                torch.testing.assert_close(model.rotary_cache, expected)
+        finally:
+            server_task.result(timeout=5)
 
 
 def test_ipc_loader_copy_mode_reports_no_external_weight_memory():

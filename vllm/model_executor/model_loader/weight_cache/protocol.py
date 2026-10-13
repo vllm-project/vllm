@@ -244,10 +244,17 @@ def _hash_quant_config(quant_config: Any, runtime_quant_config: Any = None) -> s
 
 def hash_rope_parameters(model_config: ModelConfig) -> str:
     """Fingerprint the text RoPE parameters used to construct cached buffers."""
-    payload = json.dumps(
-        getattr(model_config.hf_text_config, "rope_parameters", None),
-        sort_keys=True,
-    )
+
+    def normalize_numbers(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {key: normalize_numbers(item) for key, item in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [normalize_numbers(item) for item in value]
+        # JSON distinguishes 10000 from 10000.0, but RoPE does not.
+        return int(value) if isinstance(value, float) and value.is_integer() else value
+
+    parameters = getattr(model_config.hf_text_config, "rope_parameters", None)
+    payload = json.dumps(normalize_numbers(parameters), sort_keys=True)
     return safe_hash(payload.encode(), usedforsecurity=False).hexdigest()
 
 
