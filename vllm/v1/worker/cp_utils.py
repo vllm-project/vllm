@@ -47,7 +47,7 @@ def check_attention_cp_compatibility(
                     "MTP with cp_kv_cache_interleave_size > 1 is not "
                     f"supported in {layer_impl.__class__.__name__}."
                 )
-            if dcp_size > 1:
+            if dcp_size > 1 and layer_impl.dcp_world_size > 1:
                 assert layer_impl.need_to_return_lse_for_decode, (
                     "Decode Context Parallelism (DCP) requires attention "
                     "implementations to return the softmax LSE during decode, "

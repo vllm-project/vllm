@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterable, Mapping, Sequence
 from contextlib import AbstractContextManager, nullcontext
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
@@ -148,6 +148,8 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
         if spec := attn_module.get_kv_cache_spec(vllm_config):
             if isinstance(spec, AttentionSpec):
                 spec = customize_attention_spec(attn_module.get_attn_backend(), spec)
+            if not getattr(attn_module, "dcp_sharded", True):
+                spec = replace(spec, dcp_sharded=False)
             kv_cache_spec[layer_name] = spec
     if vllm_config.attention_config.hisparse_config is not None:
         kv_cache_spec = resolve_hisparse_specs(vllm_config, kv_cache_spec, attn_layers)

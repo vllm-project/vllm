@@ -47,6 +47,8 @@ For Kimi-K2, the architecture is similar to DeepSeek-R1, but with more parameter
 
 For Qwen3-235B-A22B, we have 4 kv-heads. When we deploy it with `-tp 8`, the KV cache duplication is 2x. Then we can add `-dcp 2` to remove the KV cache duplication.
 
+For Gemma 4 31B, the full attention layers have 4 kv-heads and the sliding window layers have 16. Decode context parallel only shards the full attention layers, because sliding window KV cache is bounded by the window and stays replicated, so the dcp size is limited by the full attention layers' kv-heads: with `-tp 8` we can add `-dcp 2`. Sliding window models need Model Runner V2 and the hybrid KV cache manager (both default) for decode context parallel.
+
 In short, for decode context parallel, try to increase `-tp` size until you get satisfactory performance, and then add `-dcp` to reduce the KV cache duplication.
 
 Decode context parallel is supported in vLLM, for both MLA and GQA models. Some attention backends also support the combination of decode context parallel and MTP (multi-token prediction) to further accelerate the decoding phase.

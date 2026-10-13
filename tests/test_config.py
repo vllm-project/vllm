@@ -421,7 +421,9 @@ def test_nixl_dcp_check_skipped_for_submodel_config():
 def test_nixl_dcp_check_rejects_non_mla_model_with_dcp(monkeypatch):
     # Pretend the model has a single KV head so the DCP feasibility checks
     # pass and the MLA-only assert is what actually fires.
-    monkeypatch.setattr(ModelConfig, "get_total_num_kv_heads", lambda self: 1)
+    monkeypatch.setattr(
+        ModelConfig, "_get_dcp_sharded_layer_heads", lambda self: {(1, 16)}
+    )
     with pytest.raises(ValidationError, match="only supported for MLA models"):
         VllmConfig(
             model_config=ModelConfig("Qwen/Qwen3-0.6B", max_model_len=2048),

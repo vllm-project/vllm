@@ -430,6 +430,22 @@ class Attention(nn.Module, AttentionLayerBase):
             kv_sharing_target_layer_name,
             **extra_impl_args,
         )
+        # DCP shards full-attention KV only; sliding-window layers keep their
+        # window replicated and attend without the cross-rank LSE combine.
+        self.dcp_sharded = (
+            sliding_window is None
+            or vllm_config.parallel_config.decode_context_parallel_size == 1
+        )
+        if not self.dcp_sharded:
+            if (
+                not vllm_config.use_v2_model_runner
+                or vllm_config.scheduler_config.disable_hybrid_kv_cache_manager
+            ):
+                raise ValueError(
+                    "Decode context parallelism with sliding-window attention "
+                    "requires Model Runner V2 and the hybrid KV cache manager."
+                )
+            self.impl.disable_dcp()
         self.backend = AttentionBackendEnum[self.attn_backend.get_name()]
         self.dtype = dtype
 

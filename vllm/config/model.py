@@ -1529,6 +1529,32 @@ class ModelConfig:
                         "sparse_attention_enabled"
                     ] = True
 
+    def _get_dcp_sharded_layer_heads(self) -> set[tuple[int, int]]:
+        """(KV heads, query heads) of the layers DCP shards. Sliding-window
+        layers keep their KV replicated under DCP, so they are excluded."""
+        arch_config = self.model_arch_config
+        layer_types = getattr(self.hf_text_config, "layer_types", None) or []
+        if self.get_sliding_window() is None:
+            layer_types = []
+
+        def is_sliding(i: int) -> bool:
+            return i < len(layer_types) and layer_types[i] == "sliding_attention"
+
+        heads = {
+            (
+                arch_config[i].total_num_kv_heads,
+                arch_config[i].total_num_attention_heads,
+            )
+            for i in range(arch_config.total_num_hidden_layers)
+            if not is_sliding(i)
+        }
+        if not heads:
+            logger.warning_once(
+                "Decode context parallelism has no effect: every attention "
+                "layer uses a sliding window, whose KV stays replicated."
+            )
+        return heads
+
     def verify_with_parallel_config(
         self,
         parallel_config: ParallelConfig,
@@ -1563,8 +1589,12 @@ class ModelConfig:
             )
 
         decode_context_parallel_size = parallel_config.decode_context_parallel_size
-        if decode_context_parallel_size > 1 and not self.use_mla:
-            total_num_kv_heads = self.get_total_num_kv_heads()
+        if (
+            decode_context_parallel_size > 1
+            and not self.use_mla
+            and (layer_heads := self._get_dcp_sharded_layer_heads())
+        ):
+            total_num_kv_heads = max(kv_heads for kv_heads, _ in layer_heads)
             if tensor_parallel_size <= total_num_kv_heads:
                 raise ValueError(
                     "Decode context parallelism for GQA/MQA requires "
@@ -1584,14 +1614,15 @@ class ModelConfig:
                     f"{total_num_kv_heads} model KV heads."
                 )
 
-            num_q_per_kv = total_num_attention_heads // total_num_kv_heads
-            if num_q_per_kv % decode_context_parallel_size != 0:
-                raise ValueError(
-                    "The model's number of query heads per KV head "
-                    f"({num_q_per_kv}) must be divisible by "
-                    "`--decode-context-parallel-size` "
-                    f"({decode_context_parallel_size}) for GQA/MQA."
-                )
+            for kv_heads, num_heads in sorted(layer_heads):
+                num_q_per_kv = num_heads // kv_heads
+                if num_q_per_kv % decode_context_parallel_size != 0:
+                    raise ValueError(
+                        "The model's number of query heads per KV head "
+                        f"({num_q_per_kv}) must be divisible by "
+                        "`--decode-context-parallel-size` "
+                        f"({decode_context_parallel_size}) for GQA/MQA."
+                    )
 
         # torch_shm uses a single IPC queue to rank 0; DP>1 is
         # incompatible because API servers can't know which
