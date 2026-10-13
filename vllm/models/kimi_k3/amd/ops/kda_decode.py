@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """ROCm entry points for the fused Kimi-K3 KDA decode kernel.
 
-The kernel in ``csrc/libtorch_stable/kimi_k3/fused_kda_decode_kernel_rocm.cu``
+The kernel in ``csrc/kimi_k3/fused_kda_decode_kernel_rocm.cu``
 replaces, for a pure non-speculative decode batch, the three Triton launches
 and two copies the AMD KDA layer otherwise runs per layer: the packed causal
 conv1d update, the recurrent delta-rule step, and the gated output RMSNorm.
