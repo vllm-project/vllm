@@ -301,8 +301,6 @@ def test_dsv4_dspark_fused_moe_expert_mapping_includes_redundant_experts(
     draft._remap_dspark_name = lambda name: (
         dspark.DSparkDeepseekV4ForCausalLM._remap_dspark_name(draft, name)
     )
-    monkeypatch.setattr(dspark, "get_tensor_model_parallel_world_size", lambda: 1)
-    monkeypatch.setattr(dspark, "get_tensor_model_parallel_rank", lambda: 0)
     monkeypatch.setattr(
         dspark,
         "fused_moe_make_expert_params_mapping",
