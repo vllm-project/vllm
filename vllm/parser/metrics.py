@@ -19,6 +19,7 @@ _tool_call_parser_invocations: Counter | None = None
 class ToolCallOutcome(Enum):
     TOOL_CALL = "tool_call"
     NO_TOOL_CALL = "no_tool_call"
+    PARSE_FAILURE = "parse_failure"
 
 
 class RequestType(Enum):
@@ -102,12 +103,9 @@ def record_tool_parser_invocation(
     request: object,
 ) -> None:
     """Increment the tool-call parser invocation counter when registered.
-    Currently parser failures are treated as no tool calls.
 
-    TODO: To accurately track parser failures, add a new ToolCallOutcome and
-    more importantly, ensure exceptions are propagated out of the ToolParsers
-    instead of being caught internally. This would require going through
-    ToolParser implementation on a case-by-case basis.
+    Surfaced exceptions count as parse failures. Errors caught internally by a
+    parser cannot be distinguished from ordinary no-tool output here.
     """
     if _tool_call_parser_invocations is None:
         return
@@ -124,6 +122,8 @@ def record_tool_parser_invocation(
             request_type = RequestType.OTHER
 
     match is_tool_called:
+        case Exception():
+            outcome = ToolCallOutcome.PARSE_FAILURE
         case bool():
             outcome = (
                 ToolCallOutcome.TOOL_CALL

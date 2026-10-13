@@ -27,16 +27,25 @@ def registry(monkeypatch):
     return registry
 
 
-def _record_and_read(registry, request, is_streaming, tool_choice, tool_count):
+def _record_and_read(
+    registry,
+    request,
+    is_streaming,
+    tool_choice,
+    tool_count,
+    *,
+    is_tool_called=True,
+    outcome="tool_call",
+):
     metrics.record_tool_parser_invocation(
-        is_tool_called=True, is_streaming=is_streaming, request=request
+        is_tool_called=is_tool_called, is_streaming=is_streaming, request=request
     )
     return registry.get_sample_value(
         "vllm:tool_call_parser_invocations_total",
         {
             "model_name": "test-model",
             "mode": "streaming" if is_streaming else "non_streaming",
-            "outcome": "tool_call",
+            "outcome": outcome,
             "request_type": "chat_completions",
             "tool_choice": tool_choice,
             "tool_count": tool_count,
@@ -98,3 +107,20 @@ def test_reinitializing_metrics_preserves_labeled_counts(registry):
     assert _record_and_read(registry, request, False, "auto", "0") == 1
     metrics.init_parser_metrics(model_name="test-model")
     assert _record_and_read(registry, request, False, "auto", "0") == 2
+
+
+@pytest.mark.parametrize("is_streaming", [False, True])
+def test_parser_failures_are_distinct_from_no_tool_calls(registry, is_streaming):
+    request = ChatCompletionRequest.model_construct(tool_choice="auto", tools=[])
+    record = partial(_record_and_read, registry, request, is_streaming, "auto", "0")
+    assert record(is_tool_called=False, outcome="no_tool_call") == 1
+    assert (
+        record(
+            is_tool_called=ValueError("private-argument"),
+            outcome="parse_failure",
+        )
+        == 1
+    )
+    assert record(is_tool_called=False, outcome="no_tool_call") == 2
+    assert record() == 1
+    assert b"private-argument" not in generate_latest(registry)
