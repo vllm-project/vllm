@@ -599,7 +599,6 @@ def test_multi_connector_handle_preemptions_integration():
         shutil.rmtree(storage_path, ignore_errors=True)
 
 
-@pytest.mark.skip_global_cleanup
 class TestMultiConnectorStats:
     """Tests for MultiConnector stats reconstruction and operations."""
 

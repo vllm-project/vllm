@@ -10,8 +10,6 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 
-pytestmark = pytest.mark.skip_global_cleanup
-
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("endpoint", ["/v1/completions", "/v1/chat/completions"])
