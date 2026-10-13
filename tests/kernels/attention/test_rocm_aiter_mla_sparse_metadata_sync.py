@@ -523,6 +523,8 @@ def test_forward_mqa_slices_full_batch_metadata_to_query_tokens(monkeypatch):
     impl.kv_cache_dtype = "auto"
     impl.num_heads = 4
     impl.topk_indices_buffer = torch.arange(48, dtype=torch.int32).view(12, 4)
+    impl.owns_indexer = True
+    impl.index_epoch = 0
     expected_output = torch.zeros(2, 4, 512, dtype=torch.bfloat16)
     forward_mla = Mock(return_value=(expected_output, None))
     monkeypatch.setattr(impl, "_forward_mla", forward_mla)
@@ -570,6 +572,8 @@ def test_forward_mqa_slices_decode_subset_for_bf16_and_fp8(monkeypatch, kv_cache
     impl.kv_cache_dtype = kv_cache_dtype
     impl.num_heads = 4
     impl.topk_indices_buffer = torch.arange(48, dtype=torch.int32).view(12, 4)
+    impl.owns_indexer = True
+    impl.index_epoch = 0
     expected_output = torch.zeros(2, 4, 512, dtype=torch.bfloat16)
     forward_mla = Mock(return_value=(expected_output, None))
     monkeypatch.setattr(impl, "_forward_mla", forward_mla)
