@@ -1351,6 +1351,10 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "Qwen/Qwen3-Omni-30B-A3B-Instruct",
         max_model_len=4096,
     ),
+    "ClefOmniForJointSchema": _HfExamplesInfo(
+        "Cloudflare/clef-omni",
+        max_model_len=4096,
+    ),
     "Qwen3ASRForConditionalGeneration": _HfExamplesInfo(
         "Qwen/Qwen3-ASR-0.6B",
         max_model_len=4096,

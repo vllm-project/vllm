@@ -266,6 +266,57 @@ def test_v41_dspark_loads_linear_scales(
     torch.testing.assert_close(param, checkpoint_scale)
 
 
+def test_dsv4_dspark_fused_moe_expert_mapping_includes_redundant_experts(
+    monkeypatch,
+):
+    from vllm.models.deepseek_v4.nvidia import dspark
+
+    captured: dict[str, int] = {}
+
+    def capture_expert_mapping(*args, **kwargs):
+        captured.update(kwargs)
+        return []
+
+    draft = SimpleNamespace(
+        config=SimpleNamespace(
+            num_attention_heads=4,
+            n_routed_experts=8,
+            expert_dtype="fp4",
+        ),
+        quant_config=None,
+        pad_shared_expert=False,
+        model=SimpleNamespace(
+            layers=[
+                SimpleNamespace(
+                    ffn=SimpleNamespace(
+                        use_native_mega_moe=False,
+                        use_mega_moe=False,
+                        n_redundant_experts=4,
+                    )
+                )
+            ],
+            confidence_head=None,
+        ),
+        named_parameters=lambda: [],
+        process_weights_after_loading=lambda: None,
+    )
+    draft._remap_dspark_name = lambda name: (
+        dspark.DSparkDeepseekV4ForCausalLM._remap_dspark_name(draft, name)
+    )
+    monkeypatch.setattr(dspark, "get_tensor_model_parallel_world_size", lambda: 1)
+    monkeypatch.setattr(dspark, "get_tensor_model_parallel_rank", lambda: 0)
+    monkeypatch.setattr(
+        dspark,
+        "fused_moe_make_expert_params_mapping",
+        capture_expert_mapping,
+    )
+
+    dspark.DSparkDeepseekV4ForCausalLM.load_weights(draft, [])
+
+    assert captured["num_experts"] == 8
+    assert captured["num_redundant_experts"] == 4
+
+
 def test_dsv4_context_wkv_weights_are_duplicated_by_draft_layer():
     weights = [
         ("mtp.0.attn.wkv.weight", torch.arange(4)),
@@ -343,7 +394,7 @@ def test_k3_dspark_mla_kv_cache_spec_groups_with_target_mla():
     """The draft's MLA layers must share a KV cache group with the target's."""
     from vllm.model_executor.layers.attention.mla_attention import MLAAttention
     from vllm.models.kimi_k3.nvidia.mla import MultiHeadLatentAttention
-    from vllm.v1.core.kv_cache_utils import _get_kv_cache_groups_uniform_page_size
+    from vllm.v1.core.kv_cache_planning import _get_kv_cache_groups_uniform_page_size
 
     vllm_config = SimpleNamespace(
         model_config=None, cache_config=SimpleNamespace(block_size=64)
