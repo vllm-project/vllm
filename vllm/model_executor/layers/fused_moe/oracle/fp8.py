@@ -211,10 +211,12 @@ def backend_to_kernel_cls(
 
     elif backend == Fp8MoeBackend.AITER:
         from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
-            AiterExperts,
+            AiterFp8BlockExperts,
+            AiterFp8ChannelExperts,
+            AiterFp8TensorExperts,
         )
 
-        return [AiterExperts]
+        return [AiterFp8BlockExperts, AiterFp8TensorExperts, AiterFp8ChannelExperts]
 
     elif backend == Fp8MoeBackend.VLLM_CUTLASS:
         from vllm.model_executor.layers.fused_moe.experts.triton_cutlass_moe import (
