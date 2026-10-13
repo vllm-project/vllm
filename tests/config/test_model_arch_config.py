@@ -70,6 +70,40 @@ def _load_groundtruth(filename: str) -> dict:
         return json.load(f)
 
 
+@pytest.mark.parametrize("has_joint_head", [False, True])
+@pytest.mark.parametrize(
+    "architecture", ["Qwen3_5ForConditionalGeneration", "ColQwen3_5"]
+)
+def test_qwen35_joint_head_selects_clef_flash(tmp_path, has_joint_head, architecture):
+    """Only a Qwen3.5 generation checkpoint with a joint head selects Clef."""
+    from transformers import Qwen3_5Config
+
+    head_config = {
+        "hidden_size": 4096,
+        "width": 1024,
+        "routing_layers": 2,
+        "layers": 4,
+        "heads": 16,
+        "feedforward": 4096,
+    }
+    if has_joint_head:
+        (tmp_path / "joint_head_config.json").write_text(json.dumps(head_config))
+    config = Qwen3_5Config(architectures=[architecture])
+    config.name_or_path = str(tmp_path)
+    model_config = SimpleNamespace(
+        hf_config=config,
+        hf_text_config=config.text_config,
+        _supports_multimodal_for_mm_prefix=lambda: True,
+    )
+    converted = ModelConfig.get_model_arch_config(model_config)
+    if has_joint_head and architecture == "Qwen3_5ForConditionalGeneration":
+        assert converted.architectures == ["ClefFlashForJointSchema"]
+        assert config.joint_head_config == head_config
+    else:
+        assert converted.architectures == [architecture]
+        assert not hasattr(config, "joint_head_config")
+
+
 def _assert_model_arch_config(
     model_config, expected: dict, check_head_size: bool = True
 ):
