@@ -2,6 +2,7 @@
 #ifndef CPU_TYPES_X86_HPP
 #define CPU_TYPES_X86_HPP
 
+#include <array>
 #include <cstring>
 #include <immintrin.h>
 #include <sleef.h>
@@ -18,9 +19,7 @@ namespace vec_op {
 // VEC path (FP8 → pseudo-FP16 layout, scale correction applied later):
 struct fp8_e4m3_tag {};  // E4M3 → pseudo-FP16; BF16 value = true_E4M3 * 2^-8
 struct fp8_e5m2_tag {};  // E5M2 → FP16 bits directly (same exponent bias=15)
-// AMX path (FP8 → unscaled BF16, no FP32 round-trip):
-// BF16 value = true_E4M3 * 2^-120 (E4M3) or true_E5M2 * 2^-112 (E5M2).
-// Exponent rebiasing is folded into k/v scales by the caller.
+// AMX path: FP8 → BF16.
 struct fp8_bf16_e4m3_tag {};
 struct fp8_bf16_e5m2_tag {};
 
@@ -186,6 +185,31 @@ struct BF16Vec16 : public Vec<BF16Vec16> {
 };
 
 #ifdef __AVX512F__
+template <int mantissa_bits>
+FORCE_INLINE __m512i fp8_to_bf16(__m256i bytes) {
+  // The cache writer saturates NaN/Inf inputs to finite FP8 encodings.
+  const __m512i x = _mm512_cvtepi8_epi16(bytes);
+  const __m512i magnitude = _mm512_and_si512(x, _mm512_set1_epi16(0x7f));
+  const __m512i normal =
+      _mm512_add_epi16(_mm512_slli_epi16(magnitude, 7 - mantissa_bits),
+                       _mm512_set1_epi16(mantissa_bits == 3 ? 0x3c00 : 0x3800));
+  const __mmask32 exponent_nonzero = _mm512_test_epi16_mask(
+      x, _mm512_set1_epi16(mantissa_bits == 3 ? 0x78 : 0x7c));
+  __m512i result;
+  if constexpr (mantissa_bits == 3) {
+    // E4M3 AMX decoding flushes encoded subnormals to signed zero.
+    result = _mm512_maskz_mov_epi16(exponent_nonzero, normal);
+  } else {
+    alignas(64) static constexpr std::array<uint16_t, 32> subnormals = {
+        0, 0x3780, 0x3800, 0x3840};
+    const __m512i subnormal =
+        _mm512_permutexvar_epi16(x, _mm512_load_si512(subnormals.data()));
+    result = _mm512_mask_blend_epi16(exponent_nonzero, subnormal, normal);
+  }
+  // Signed widening places the FP8 sign directly in BF16 bit 15.
+  return _mm512_ternarylogic_epi32(result, x, _mm512_set1_epi16(0x8000), 0xf8);
+}
+
 struct BF16Vec32 : public Vec<BF16Vec32> {
   constexpr static int VEC_ELEM_NUM = 32;
 
@@ -225,28 +249,14 @@ struct BF16Vec32 : public Vec<BF16Vec32> {
     reg = _mm512_slli_epi16(_mm512_cvtepu8_epi16(b8), 8);
   }
 
-  // Direct FP8-E4M3 → unscaled BF16 for AMX (no FP32 round-trip).
-  // BF16 value = true_E4M3 * 2^-120; exponent rebiasing folded into k/v scales.
   explicit BF16Vec32(const uint8_t* ptr, fp8_bf16_e4m3_tag) {
-    __m256i b8 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(ptr));
-    __m512i b16 = _mm512_cvtepu8_epi16(b8);
-    __m512i sign =
-        _mm512_slli_epi16(_mm512_and_si512(b16, _mm512_set1_epi16(0x80)), 8);
-    __m512i payload =
-        _mm512_slli_epi16(_mm512_and_si512(b16, _mm512_set1_epi16(0x7F)), 4);
-    reg = _mm512_or_si512(sign, payload);
+    reg = fp8_to_bf16<3>(
+        _mm256_loadu_si256(reinterpret_cast<const __m256i*>(ptr)));
   }
 
-  // Direct FP8-E5M2 → unscaled BF16 for AMX (no FP32 round-trip).
-  // BF16 value = true_E5M2 * 2^-112; exponent rebiasing folded into k/v scales.
   explicit BF16Vec32(const uint8_t* ptr, fp8_bf16_e5m2_tag) {
-    __m256i b8 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(ptr));
-    __m512i b16 = _mm512_cvtepu8_epi16(b8);
-    __m512i sign =
-        _mm512_slli_epi16(_mm512_and_si512(b16, _mm512_set1_epi16(0x80)), 8);
-    __m512i payload =
-        _mm512_slli_epi16(_mm512_and_si512(b16, _mm512_set1_epi16(0x7F)), 5);
-    reg = _mm512_or_si512(sign, payload);
+    reg = fp8_to_bf16<2>(
+        _mm256_loadu_si256(reinterpret_cast<const __m256i*>(ptr)));
   }
 
   void save(void* ptr) const { *reinterpret_cast<__m512i*>(ptr) = reg; }
@@ -303,44 +313,24 @@ struct BF16Vec32 : public Vec<BF16Vec32> {
     reg_high = _mm256_slli_epi16(_mm256_cvtepu8_epi16(b8_high), 8);
   }
 
-  // Direct FP8-E4M3 → unscaled BF16 for AMX (AVX2 path, no FP32 round-trip).
-  // BF16 value = true_E4M3 * 2^-120; exponent rebiasing folded into k/v scales.
   explicit BF16Vec32(const uint8_t* ptr, fp8_bf16_e4m3_tag) {
-    __m256i b8 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(ptr));
-    __m128i b8_low = _mm256_extracti128_si256(b8, 0);
-    __m128i b8_high = _mm256_extracti128_si256(b8, 1);
-    __m256i b16_low = _mm256_cvtepu8_epi16(b8_low);
-    __m256i b16_high = _mm256_cvtepu8_epi16(b8_high);
-    reg_low = _mm256_or_si256(
-        _mm256_slli_epi16(_mm256_and_si256(b16_low, _mm256_set1_epi16(0x80)),
-                          8),
-        _mm256_slli_epi16(_mm256_and_si256(b16_low, _mm256_set1_epi16(0x7F)),
-                          4));
-    reg_high = _mm256_or_si256(
-        _mm256_slli_epi16(_mm256_and_si256(b16_high, _mm256_set1_epi16(0x80)),
-                          8),
-        _mm256_slli_epi16(_mm256_and_si256(b16_high, _mm256_set1_epi16(0x7F)),
-                          4));
+    alignas(32) c10::BFloat16 values[32];
+    for (int i = 0; i < 32; ++i) {
+      values[i] = c10::BFloat16(static_cast<float>(
+          c10::Float8_e4m3fn(ptr[i], c10::Float8_e4m3fn::from_bits())));
+    }
+    reg_low = _mm256_load_si256(reinterpret_cast<const __m256i*>(values));
+    reg_high = _mm256_load_si256(reinterpret_cast<const __m256i*>(values + 16));
   }
 
-  // Direct FP8-E5M2 → unscaled BF16 for AMX (AVX2 path, no FP32 round-trip).
-  // BF16 value = true_E5M2 * 2^-112; exponent rebiasing folded into k/v scales.
   explicit BF16Vec32(const uint8_t* ptr, fp8_bf16_e5m2_tag) {
-    __m256i b8 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(ptr));
-    __m128i b8_low = _mm256_extracti128_si256(b8, 0);
-    __m128i b8_high = _mm256_extracti128_si256(b8, 1);
-    __m256i b16_low = _mm256_cvtepu8_epi16(b8_low);
-    __m256i b16_high = _mm256_cvtepu8_epi16(b8_high);
-    reg_low = _mm256_or_si256(
-        _mm256_slli_epi16(_mm256_and_si256(b16_low, _mm256_set1_epi16(0x80)),
-                          8),
-        _mm256_slli_epi16(_mm256_and_si256(b16_low, _mm256_set1_epi16(0x7F)),
-                          5));
-    reg_high = _mm256_or_si256(
-        _mm256_slli_epi16(_mm256_and_si256(b16_high, _mm256_set1_epi16(0x80)),
-                          8),
-        _mm256_slli_epi16(_mm256_and_si256(b16_high, _mm256_set1_epi16(0x7F)),
-                          5));
+    alignas(32) c10::BFloat16 values[32];
+    for (int i = 0; i < 32; ++i) {
+      values[i] = c10::BFloat16(static_cast<float>(
+          c10::Float8_e5m2(ptr[i], c10::Float8_e5m2::from_bits())));
+    }
+    reg_low = _mm256_load_si256(reinterpret_cast<const __m256i*>(values));
+    reg_high = _mm256_load_si256(reinterpret_cast<const __m256i*>(values + 16));
   }
 
   void save(void* ptr) const {
