@@ -1380,9 +1380,15 @@ def instanttensor_weights_iterator(
     if local_expert_ids is not None:
         # NCCL loading requires identical tensor layouts across ranks.
         process_group = None
-        extra_kwargs["tensor_filter"] = lambda name: (
-            not should_skip_weight(name, local_expert_ids)
-        )
+        included_names: list[str] = []
+        for path in hf_weights_files:
+            with safe_open(path, framework="pt") as metadata:
+                included_names.extend(
+                    name
+                    for name in metadata.keys()  # noqa: SIM118
+                    if not should_skip_weight(name, local_expert_ids)
+                )
+        extra_kwargs["tensor_filter"] = included_names
 
     # copy=True yields tensors that own their memory, staying valid after the
     # context exits or InstantTensor reuses its buffer.

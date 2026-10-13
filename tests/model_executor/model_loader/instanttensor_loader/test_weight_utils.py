@@ -34,8 +34,12 @@ def test_instanttensor_ep_filter(monkeypatch, local_ids):
     reader = native_open.return_value.__enter__.return_value
 
     def open_reader(*args, **kwargs):
-        predicate = kwargs.get("tensor_filter", lambda name: True)
-        selected = {name: tensor for name, tensor in weights.items() if predicate(name)}
+        names = kwargs.get("tensor_filter")
+        selected = {
+            name: tensor
+            for name, tensor in weights.items()
+            if names is None or name in names
+        }
         reader.total_tensor_size = sum(
             tensor.numel() * tensor.element_size() for tensor in selected.values()
         )
@@ -50,8 +54,17 @@ def test_instanttensor_ep_filter(monkeypatch, local_ids):
     monkeypatch.setattr(weight_utils, "get_world_group", lambda: group)
     monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
     monkeypatch.setattr(current_platform, "current_device", lambda: 0)
+    metadata_reader = MagicMock()
+    metadata_reader.return_value.__enter__.return_value.keys.return_value = list(
+        weights
+    )
+    monkeypatch.setattr(weight_utils, "safe_open", metadata_reader)
 
-    loaded = dict(instanttensor_weights_iterator([], False, local_expert_ids=local_ids))
+    loaded = dict(
+        instanttensor_weights_iterator(
+            ["model.safetensors"], False, local_expert_ids=local_ids
+        )
+    )
     expected = set(weights)
     if local_ids is not None:
         expected -= {
