@@ -156,7 +156,7 @@ BACKEND_EP_DP_TP_SUPPORT: dict[str, tuple[bool, bool, bool, bool]] = {
     "mori_high_throughput":        (True, False, False,  True),
     "mori_low_latency":            (True, False, False,  True),
     "flashinfer_nvlink_two_sided": (False, True, False, False),
-    "flashinfer_nvlink_one_sided": (False, True, False, False),
+    "flashinfer_nvlink_one_sided": (True,  True, False, False),
     "deepep_low_latency":          (True, False, False,  True),
     "deepep_high_throughput":      (True, False, False,  True),
     "nixl_ep":                     (True, False, False,  True),
@@ -1794,6 +1794,17 @@ def _parallel_worker(
             local_failed = True
             local_error = traceback.format_exc()
         finally:
+            # Independent test configs can change top_k and num_experts, unlike
+            # the layers sharing a one-sided manager in a single model.
+            if test_config.backend == "flashinfer_nvlink_one_sided":
+                from flashinfer.comm.trtllm_moe_alltoall import MoeAlltoAll
+
+                torch.accelerator.synchronize()
+                manager = get_ep_group().device_communicator.all2all_manager
+                if manager is not None:
+                    manager.cleanup()
+                # Run cached tensor deleters before their JIT library unloads.
+                MoeAlltoAll._WORKSPACE_CACHE.clear()
             # DeepEP managers are not reliably reusable across many subtests in
             # a single worker process. Tear them down after each DeepEP case so
             # later subtests do not inherit stale communication state. Skip this
