@@ -81,8 +81,18 @@ def ensure_kv_transfer_initialized(
 
     kv_transfer_config = vllm_config.kv_transfer_config
     if kv_transfer_config is not None and kv_transfer_config.is_kv_transfer_instance:
-        # NIXL P/D requires an interleave_size equal to block_size.
-        vllm_config.adjust_dcp_kv_cache_interleave_size(kv_cache_config)
+        # Already resolved before profiling (WorkerBase.set_kv_cache_layout) and
+        # possibly baked into compiled graphs, so it must not change here.
+        interleave = vllm_config.parallel_config.cp_kv_cache_interleave_size
+        vllm_config.adjust_dcp_kv_cache_interleave_size(kv_cache_config.kv_cache_groups)
+        if vllm_config.parallel_config.cp_kv_cache_interleave_size != interleave:
+            raise RuntimeError(
+                "cp_kv_cache_interleave_size changed from "
+                f"{interleave} to "
+                f"{vllm_config.parallel_config.cp_kv_cache_interleave_size} "
+                "after model profiling. Set --cp-kv-cache-interleave-size "
+                "explicitly."
+            )
         _sync_engine_id_across_tp(vllm_config)
 
         _KV_CONNECTOR_AGENT = KVConnectorFactory.create_connector(
