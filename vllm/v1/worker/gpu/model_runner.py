@@ -482,7 +482,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 "custom_logits_processors": custom_logits_processors,
             }
             if self.vllm_config.watermark_config is None:
-                self.sampler = Sampler(**sampler_kwargs)
+                self.sampler = self.sampler_cls(**sampler_kwargs)
             else:
                 wm_config = self.vllm_config.watermark_config
                 watermarker = create_watermarker(wm_config)
@@ -2400,6 +2400,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     @property
     def pcp_manager_cls(self) -> type[pcp.PCPManager]:
         return pcp.PCPManager
+
+    @property
+    def sampler_cls(self) -> type[Sampler]:
+        return Sampler
 
 
 class ExecuteModelState(NamedTuple):
