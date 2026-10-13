@@ -4,13 +4,13 @@
 import os
 import socket
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any, Literal, overload
+from datetime import timedelta
+from typing import TYPE_CHECKING, Any, Literal, Self, overload
 
 import regex as re
 import torch
 from pydantic import Field, field_validator, model_validator
 from torch.distributed import ProcessGroup, ReduceOp, Store
-from typing_extensions import Self
 
 import vllm.envs as envs
 from vllm.config.fault_tolerance import FaultToleranceConfig
@@ -56,6 +56,7 @@ All2AllBackend = Literal[
     "flashinfer_nvlink_two_sided",
     "flashinfer_nvlink_one_sided",
     "flashinfer_cft_counted_write",
+    "passthrough",
 ]
 
 
@@ -104,6 +105,17 @@ class EPLBConfig:
     - None: Auto-select backend ("torch_xccl" on XPU, prefers "nixl" 
       on CUDA, falls back to "torch_gloo")
     """
+
+    enable_migration_batching: bool = False
+    """Schedule expert migrations in batches where each rank communicates with
+    at most one peer. This reduces per-rank network contention at the cost of
+    additional sequential communication steps. This option only applies to
+    async EPLB and is disabled by default."""
+
+    @property
+    def migration_batching_enabled(self) -> bool:
+        """Whether contention-aware batching is active for this configuration."""
+        return self.use_async and self.enable_migration_batching
 
     @model_validator(mode="after")
     def _validate_eplb_config(self) -> Self:
@@ -170,6 +182,11 @@ class ParallelConfig:
     --data-parallel-start-rank."""
     is_moe_model: bool | None = None
     """Whether the deployed model is MoE (if known)."""
+    enable_hc_sp: bool = False
+    """Enable sequence parallelism for HyperConnection (HC) computation.
+    Currently supported by Qwen4Exp on CUDA with TP>1 and PP=1 (ignored when TP=1).
+    Does not change MoE parallelism. MoE SP may enable HC SP independently of this flag.
+    """
     enable_expert_parallel: bool = False
     """Use expert parallelism instead of tensor parallelism for MoE layers."""
     enable_batch_sharded_sampling: bool | None = None
@@ -216,6 +233,9 @@ class ParallelConfig:
       all-to-all kernels. Requires sm_100+ (Blackwell), CUDA 13.4+, and a
       compatible NVLink fabric environment. Automatically falls back to the
       one-sided path when prerequisites are not met."""
+    - "passthrough": No all2all at all: the MoE backend dispatches and combines
+      itself (e.g. the FlashInfer MoE-EP megakernels). Bound automatically for
+      such MoE backends; not selectable from the CLI."""
 
     max_parallel_loading_workers: int | None = Field(default=None, ge=1)
     """Maximum number of parallel loading workers when loading model
@@ -224,6 +244,15 @@ class ParallelConfig:
 
     disable_custom_all_reduce: bool = False
     """Disable the custom all-reduce kernel and fall back to NCCL."""
+
+    enable_shm_tensor_arena: bool = False
+    """Route large CPU tensors (e.g. multimodal ``pixel_values``) in the
+    engine→worker broadcast through a zero-copy shared-memory arena instead of
+    sending a copy to every reader. **Experimental**: may be reconciled with
+    vLLM's existing multimodal shm tensor caching in a future release. Opt-in;
+    most beneficial for multimodal serving with large images and tensor
+    parallelism. Active only when all queue readers are node-local; reserves
+    slots in ``/dev/shm``."""
 
     enable_elastic_ep: bool = False
     """Enable elastic expert parallelism with stateless NCCL groups for DP/EP."""
@@ -281,14 +310,14 @@ class ParallelConfig:
     worker_cls: str = "auto"
     """The full name of the worker class to use. If "auto", the worker class
     will be determined based on the platform."""
-    sd_worker_cls: str = "auto"
-    """The full name of the worker class to use for speculative decoding.
-    If "auto", the worker class will be determined based on the platform."""
     worker_extension_cls: str = ""
     """The full name of the worker extension class to use. The worker extension
     class is dynamically inherited by the worker class. This is used to inject
     new attributes and methods to the worker class for use in collective_rpc
-    calls."""
+    calls. It may also define `init_worker_extension(self)`, called after
+    device and distributed initialization but before model loading, and
+    `destroy_worker_extension(self)`, called (best-effort) before the worker
+    shuts down."""
     master_addr: str = "127.0.0.1"
     """distributed master address for multi-node distributed 
     inference when distributed_executor_backend is mp."""
@@ -604,6 +633,19 @@ class ParallelConfig:
         return self.world_size * self.data_parallel_size
 
     @property
+    def pcp_shard_decode_requests(self) -> bool:
+        """Whether PCP can shard decode requests across its ranks.
+
+        PCP-only execution replicates the KV cache, so each decode request can
+        have a single PCP owner. DCP shards the KV cache and therefore requires
+        every decode request to run on every participating DCP rank.
+        """
+        return (
+            self.prefill_context_parallel_size > 1
+            and self.decode_context_parallel_size == 1
+        )
+
+    @property
     def use_ubatching(self) -> bool:
         return self.enable_dbo or self.ubatch_size > 1
 
@@ -617,6 +659,11 @@ class ParallelConfig:
         Client manages local EngineCores in hybrid and external LB case.
         """
         return self.data_parallel_external_lb or self.data_parallel_hybrid_lb
+
+    @property
+    def cpu_distributed_timeout(self) -> timedelta | None:
+        seconds = self.cpu_distributed_timeout_seconds
+        return timedelta(seconds=seconds) if seconds is not None else None
 
     def get_next_dp_init_port(self) -> int:
         """We might need to initialize process groups in multiple
@@ -699,6 +746,7 @@ class ParallelConfig:
                     backend="gloo",
                     return_store=return_store,
                     listen_socket=listen_socket,
+                    timeout=self.cpu_distributed_timeout,
                 )
             except DistNetworkError as e:
                 # We only want to retry when the root cause is EADDRINUSE.
@@ -731,6 +779,7 @@ class ParallelConfig:
                 "deepep_v2",
                 "flashinfer_nvlink_one_sided",
                 "flashinfer_cft_counted_write",
+                "passthrough",
                 "mori_high_throughput",
                 "mori_low_latency",
                 "nixl_ep",
@@ -875,12 +924,12 @@ class ParallelConfig:
             "nnodes",
             "max_parallel_loading_workers",
             "disable_custom_all_reduce",
+            "enable_shm_tensor_arena",
             "ray_workers_use_nsight",
             "ray_runtime_env",
             "placement_group",
             "distributed_executor_backend",
             "worker_cls",
-            "sd_worker_cls",
             "worker_extension_cls",
             "_api_process_count",
             "_api_process_rank",
@@ -1085,10 +1134,6 @@ class ParallelConfig:
     def _verify_args(self) -> Self:
         # Lazy import to avoid circular import
         from vllm.v1.executor import Executor
-
-        # Enable batch invariance settings if requested
-        if envs.VLLM_BATCH_INVARIANT:
-            self.disable_custom_all_reduce = True
 
         if (
             self.distributed_executor_backend is not None

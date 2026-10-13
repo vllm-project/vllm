@@ -9,6 +9,7 @@ import torch
 from torch import nn
 
 from vllm.config import VllmConfig
+from vllm.model_executor.layers.fusion.mm_input_norm import build_mm_input_norm
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.compressed_tensors import (
     compressed_tensors,
@@ -65,6 +66,7 @@ class KimiK3ForConditionalGeneration(
     """Kimi-K3 model with Kimi-K2.5 vision and KimiLinear text."""
 
     supports_encoder_tp_data = True
+    supports_mm_device_do_normalize = True
 
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
@@ -103,6 +105,7 @@ class KimiK3ForConditionalGeneration(
             self.vision_tower = MoonViT3dPretrainedModel(
                 config.vision_config,
                 quant_config=self._maybe_ignore_quant_config(quant_config),
+                input_norm=build_mm_input_norm(vllm_config.model_config),
                 prefix=maybe_prefix(prefix, "vision_tower"),
             )
             if self._maybe_ignore_quant_config(quant_config) is not None:
@@ -114,6 +117,7 @@ class KimiK3ForConditionalGeneration(
 
             self.mm_projector = KimiK25MultiModalProjector(
                 config=config.vision_config,
+                out_hidden_size=config.text_config.hidden_size,
                 use_data_parallel=self.use_data_parallel,
                 quant_config=self._maybe_ignore_quant_config(quant_config),
                 prefix=maybe_prefix(prefix, "mm_projector"),
@@ -163,8 +167,6 @@ class KimiK3ForConditionalGeneration(
                 pixel_values.shape[0] * pixel_values.shape[1], *pixel_values.shape[2:]
             )
 
-        target_dtype = next(self.vision_tower.parameters()).dtype
-        pixel_values = pixel_values.to(target_dtype)
         assert isinstance(grid_thws, torch.Tensor), (
             f"expect grid_thws to be a tensor, got {type(grid_thws)}"
         )
