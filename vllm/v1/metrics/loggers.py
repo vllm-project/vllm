@@ -140,6 +140,9 @@ class LoggingStatLogger(StatLoggerBase):
             )
         self.last_prompt_throughput: float = 0.0
         self.last_generation_throughput: float = 0.0
+        self.last_preemptions: int = 0
+        self.last_corrupted_reqs: int = 0
+        self.last_finished_reqs: int = 0
         self.engine_is_idle = False
         self.aggregated = False
 
@@ -154,6 +157,7 @@ class LoggingStatLogger(StatLoggerBase):
         self.num_generation_tokens: int = 0
         self.num_corrupted_reqs: int = 0
         self.num_preemptions: int = 0
+        self.num_finished_reqs: int = 0
 
     def _enable_perf_stats(self) -> bool:
         return self.vllm_config.observability_config.enable_mfu_metrics
@@ -165,6 +169,7 @@ class LoggingStatLogger(StatLoggerBase):
         self.num_generation_tokens += iteration_stats.num_generation_tokens
         self.num_corrupted_reqs += iteration_stats.num_corrupted_reqs
         self.num_preemptions += iteration_stats.num_preempted_reqs
+        self.num_finished_reqs += len(iteration_stats.finished_requests)
 
     def _get_throughput(self, tracked_stats: int, now: float) -> float:
         # Compute summary metrics for tracked stats
@@ -257,6 +262,13 @@ class LoggingStatLogger(StatLoggerBase):
         prompt_throughput = self._get_throughput(self.num_prompt_tokens, now)
         generation_throughput = self._get_throughput(self.num_generation_tokens, now)
 
+        # Snapshot the interval counters before _reset clears them: log()
+        # reports these per interval, and a zero (e.g. Finished: 0 while
+        # generation throughput is high) is the thrashing signal.
+        self.last_preemptions = self.num_preemptions
+        self.last_corrupted_reqs = self.num_corrupted_reqs
+        self.last_finished_reqs = self.num_finished_reqs
+
         self._reset(now)
         self.engine_is_idle = not any(
             (
@@ -300,6 +312,11 @@ class LoggingStatLogger(StatLoggerBase):
             log_parts.append("Deferred: %d reqs")
             log_args.append(self.last_scheduler_stats.num_skipped_waiting_reqs)
 
+        # Unconditional: Finished: 0 while generation throughput is high is
+        # the preemption-churn signature (motion without progress).
+        log_parts.append("Finished: %d reqs")
+        log_args.append(self.last_finished_reqs)
+
         kv_fetch = self.last_scheduler_stats.num_kv_fetch_reqs_by_stage
         if any(kv_fetch.values()):
             log_parts.append(
@@ -307,9 +324,9 @@ class LoggingStatLogger(StatLoggerBase):
             )
             log_args.extend(kv_fetch.get(stage, 0) for stage in KV_FETCH_STAGES)
 
-        if self.num_preemptions > 0:
+        if self.last_preemptions > 0:
             log_parts.append("Preemptions: %d")
-            log_args.append(self.num_preemptions)
+            log_args.append(self.last_preemptions)
 
         log_parts.append("%s KV cache usage: %.1f%%")
         log_args.extend(
@@ -324,7 +341,7 @@ class LoggingStatLogger(StatLoggerBase):
 
         if envs.VLLM_COMPUTE_NANS_IN_LOGITS:
             log_parts.append("Corrupted: %d reqs")
-            log_args.append(self.num_corrupted_reqs)
+            log_args.append(self.last_corrupted_reqs)
         if not self.connector_prefix_caching_metrics.empty:
             log_parts.append("External prefix cache hit rate: %.1f%%")
             log_args.append(self.connector_prefix_caching_metrics.hit_rate * 100)
