@@ -2017,6 +2017,22 @@ def prepare_prefill_inputs_cpu(
     )
 
 
+def get_prompt_logprobs_token_ids_cpu(
+    num_tokens: int,
+    query_start_loc: torch.Tensor,
+    idx_mapping: torch.Tensor,
+    num_computed_tokens: torch.Tensor,
+    all_token_ids: torch.Tensor,
+) -> torch.Tensor:
+    return torch.ops._C.get_prompt_logprobs_token_ids_cpu(
+        num_tokens,
+        query_start_loc,
+        idx_mapping,
+        num_computed_tokens,
+        all_token_ids,
+    )
+
+
 def prepare_pos_seq_lens_cpu(
     idx_mapping: torch.Tensor,
     query_start_loc: torch.Tensor,

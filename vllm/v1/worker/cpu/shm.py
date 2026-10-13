@@ -96,11 +96,14 @@ import vllm.v1.worker.gpu.buffer_utils as gpu_buffer_utils
 import vllm.v1.worker.gpu.block_table as gpu_block_table
 import vllm.v1.worker.gpu.input_batch as gpu_input_batch
 import vllm.v1.worker.gpu.sample.gumbel as gpu_gumbel
+import vllm.v1.worker.gpu.sample.logprob as gpu_logprob
+import vllm.v1.worker.gpu.sample.prompt_logprob as gpu_prompt_logprob
 import vllm.v1.worker.gpu.sample.sampler as gpu_sampler
 import vllm.v1.worker.cpu.block_table as cpu_block_table
 import vllm.v1.worker.cpu.buffer_utils as cpu_buffer_utils
 import vllm.v1.worker.cpu.gumbel as cpu_gumbel
 import vllm.v1.worker.cpu.input_batch as cpu_input_batch
+import vllm.v1.worker.cpu.logprob as cpu_logprob
 
 gpu_buffer_utils.UvaBuffer = cpu_buffer_utils.UvaBuffer
 
@@ -116,6 +119,14 @@ if not HAS_TRITON:
     )
     gpu_gumbel.gumbel_sample = cpu_gumbel.gumbel_sample
     gpu_sampler.gumbel_sample = cpu_gumbel.gumbel_sample
+    gpu_logprob.compute_token_logprobs = cpu_logprob.compute_token_logprobs
+    gpu_logprob.compute_topk_scores = cpu_logprob.compute_topk_scores
+    gpu_prompt_logprob.compute_token_logprobs = cpu_logprob.compute_token_logprobs
+    gpu_prompt_logprob.compute_topk_scores = cpu_logprob.compute_topk_scores
+    gpu_prompt_logprob.get_prompt_logprobs_token_ids = (
+        cpu_logprob.get_prompt_logprobs_token_ids
+    )
+    gpu_sampler.compute_topk_scores = cpu_logprob.compute_topk_scores
     gpu_input_batch.prepare_prefill_inputs = cpu_input_batch.prepare_prefill_inputs
     gpu_input_batch.prepare_pos_seq_lens = cpu_input_batch.prepare_pos_seq_lens
     gpu_input_batch.combine_sampled_and_draft_tokens = (

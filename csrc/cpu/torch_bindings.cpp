@@ -432,6 +432,10 @@ void prepare_prefill_inputs_cpu(torch::Tensor& input_ids,
                                 const torch::Tensor& all_token_ids,
                                 const torch::Tensor& prefill_len,
                                 const torch::Tensor& num_computed_tokens);
+torch::Tensor get_prompt_logprobs_token_ids_cpu(
+    int64_t num_tokens, const torch::Tensor& query_start_loc,
+    const torch::Tensor& idx_mapping, const torch::Tensor& num_computed_tokens,
+    const torch::Tensor& all_token_ids);
 void prepare_pos_seq_lens_cpu(const torch::Tensor& idx_mapping,
                               const torch::Tensor& query_start_loc,
                               const torch::Tensor& num_computed_tokens,
@@ -1068,6 +1072,12 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "Tensor query_start_loc, Tensor all_token_ids, Tensor prefill_len, "
       "Tensor num_computed_tokens) -> ()",
       &cpu_utils::prepare_prefill_inputs_cpu);
+
+  ops.def(
+      "get_prompt_logprobs_token_ids_cpu("
+      "SymInt num_tokens, Tensor query_start_loc, Tensor idx_mapping, "
+      "Tensor num_computed_tokens, Tensor all_token_ids) -> Tensor",
+      &cpu_utils::get_prompt_logprobs_token_ids_cpu);
 
   ops.def(
       "prepare_pos_seq_lens_cpu(Tensor idx_mapping, Tensor query_start_loc, "
