@@ -373,6 +373,72 @@ class BlockPool:
             session_id=request.session_id,
         )
 
+    def cache_decode_checkpoint(
+        self,
+        request: Request,
+        block: KVCacheBlock,
+        block_hash_with_group_id: BlockHashWithGroupId,
+        num_tokens: int,
+        block_size: int,
+        kv_cache_group_id: int,
+    ) -> bool:
+        """Publish one exact, already-materialized recurrent-state checkpoint.
+
+        Unlike ``cache_full_blocks``, this inserts only the supplied hash alias.
+        Any other hashes owned by ``block`` remain intact.
+        """
+        assert self.enable_caching
+        assert not block.is_null and block.ref_cnt > 0
+        assert num_tokens > 0 and num_tokens % block_size == 0
+        assert get_group_id(block_hash_with_group_id) == kv_cache_group_id
+
+        block_hashes = resolve_block_hashes(
+            request.block_hashes, self.hash_block_size, block_size
+        )
+        block_idx = num_tokens // block_size - 1
+        assert 0 <= block_idx < len(block_hashes)
+        block_hash = block_hashes[block_idx]
+        assert block_hash_with_group_id == make_block_hash_with_group_id(
+            block_hash, kv_cache_group_id
+        )
+
+        if self.cached_block_hash_to_block.contain(
+            block_hash_with_group_id, block.block_id
+        ):
+            return False
+
+        self._insert_block_hash(
+            block_hash_with_group_id,
+            block,
+            num_tokens=num_tokens,
+        )
+        if self.enable_kv_cache_events:
+            parent_block_hash = (
+                maybe_convert_block_hash(block_hashes[block_idx - 1])
+                if block_idx > 0
+                else None
+            )
+            block_start = num_tokens - block_size
+            extra_keys, _ = generate_block_hash_extra_keys(
+                request,
+                block_start,
+                num_tokens,
+                0,
+            )
+            self.kv_event_queue.append(
+                self._build_block_stored_event(
+                    request,
+                    block_hashes=[maybe_convert_block_hash(block_hash)],
+                    parent_block_hash=parent_block_hash,
+                    start_token_idx=block_start,
+                    end_token_idx=num_tokens,
+                    block_size=block_size,
+                    kv_cache_group_id=kv_cache_group_id,
+                    extra_keys_list=[extra_keys],
+                )
+            )
+        return True
+
     def emit_cached_block_events(
         self,
         request: Request,
@@ -454,6 +520,7 @@ class BlockPool:
         kv_cache_group_id: int,
         block_size: int,
         replace_existing_hashes: bool = False,
+        keep_existing_hashes: bool = False,
     ) -> BlockHashWithGroupId | None:
         """Register a partial prefix-cache entry for an existing block.
 
@@ -484,6 +551,9 @@ class BlockPool:
             replace_existing_hashes: Whether the block contents were replaced
                 and all existing cache entries must be removed before the new
                 entry is registered.
+            keep_existing_hashes: Keep shorter entries already on ``block``.
+                Only valid for append-only (attention) blocks that will not be
+                written again, such as those of a finished request.
 
         Returns:
             The hash key with group ID if a partial entry can be registered;
@@ -494,6 +564,7 @@ class BlockPool:
             return None
 
         assert block_size % self.hash_block_size == 0
+        assert not (replace_existing_hashes and keep_existing_hashes)
         block_hash = self._get_partial_block_hash(request, num_tokens)
         num_hash_blocks = num_tokens // self.hash_block_size
         block_hash_with_group_id = make_block_hash_with_group_id(
@@ -510,6 +581,7 @@ class BlockPool:
             already_cached = False
         elif (
             not already_cached
+            and not keep_existing_hashes
             and block.block_hash is not None
             and block.block_hash_num_tokens is not None
             and block.block_hash_num_tokens < num_hash_blocks * self.hash_block_size

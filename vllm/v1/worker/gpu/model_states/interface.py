@@ -164,6 +164,22 @@ class ModelState(ABC):
         across block boundaries. No-op by default."""
         return None
 
+    def save_decode_checkpoints(
+        self,
+        req_ids: list[str],
+        checkpoints: dict[str, tuple[int, tuple[int, ...]]],
+        idx_mapping: torch.Tensor,
+        num_sampled: torch.Tensor,
+        num_computed_tokens: torch.Tensor,
+    ) -> None:
+        """Copy accepted match-unit decode states into the scheduler's private
+        snapshot blocks. The scheduler treats a crossed boundary as copied, so a
+        model state that cannot copy must fail rather than skip."""
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support fine-grained Mamba decode "
+            "checkpoints."
+        )
+
     def postprocess_state(
         self,
         idx_mapping: torch.Tensor,
