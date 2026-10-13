@@ -205,6 +205,7 @@ def _simulate_comb(task: _CombTask) -> None:
     from vllm.entrypoints.launchers.cli_args import make_arg_parser
     from vllm.sampling_params import SamplingParams
     from vllm.tokenizers import get_tokenizer
+    from vllm.usage.usage_lib import UsageContext
     from vllm.v1.engine.llm_engine import LLMEngine
     from vllm.v1.worker.simulated.disaggregated import (
         make_instance,
@@ -270,14 +271,16 @@ def _simulate_comb(task: _CombTask) -> None:
         _prompt_token_ids(s.prompt, tokenizer, bench_args.backend) for s in samples
     ]
 
+    # Unset scheduler limits default as for `vllm serve`.
+    serving = UsageContext.OPENAI_API_SERVER
     engines: list[LLMEngine]
     if task.num_instances:
         prefill = [
-            make_instance(role_args["prefill"], "kv_producer", f"prefill{i}")
+            make_instance(role_args["prefill"], "kv_producer", f"prefill{i}", serving)
             for i in range(task.num_instances["prefill"])
         ]
         decode = [
-            make_instance(role_args["decode"], "kv_consumer", f"decode{i}")
+            make_instance(role_args["decode"], "kv_consumer", f"decode{i}", serving)
             for i in range(task.num_instances["decode"])
         ]
         engines = [*prefill, *decode]
@@ -296,7 +299,7 @@ def _simulate_comb(task: _CombTask) -> None:
                 frontend_latency_s=task.frontend_latency_ms * 1e-3,
             )
     else:
-        engine = make_engine(engine_args)
+        engine = make_engine(engine_args, usage_context=serving)
         engines = [engine]
         parallel_config = engine.vllm_config.parallel_config
         layout = {

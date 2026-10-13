@@ -36,6 +36,7 @@ from vllm.v1.worker.simulated.timing import (
 
 if TYPE_CHECKING:
     from vllm.engine.arg_utils import EngineArgs
+    from vllm.usage.usage_lib import UsageContext
     from vllm.v1.engine.llm_engine import LLMEngine
 
 logger = init_logger(__name__)
@@ -156,14 +157,20 @@ class SimulationResult:
         return out
 
 
-def make_engine(engine_args: EngineArgs, clock: Clock | None = None) -> LLMEngine:
+def make_engine(
+    engine_args: EngineArgs,
+    clock: Clock | None = None,
+    usage_context: UsageContext | None = None,
+) -> LLMEngine:
     """An `LLMEngine` whose engine core runs in this process, so that it and
     the driver share the simulation clock: `clock`, by default the process's
-    clock of the configured kind."""
+    clock of the configured kind. `usage_context` picks the defaults of unset
+    scheduler limits, as for the engine simulated (`OPENAI_API_SERVER` for
+    `vllm serve`)."""
     from vllm.v1.engine.llm_engine import LLMEngine
     from vllm.v1.executor import Executor
 
-    vllm_config = engine_args.create_engine_config()
+    vllm_config = engine_args.create_engine_config(usage_context)
     if clock is None:
         clock = get_clock(vllm_config.simulation_config.clock)
     with building_driven_engine(clock):

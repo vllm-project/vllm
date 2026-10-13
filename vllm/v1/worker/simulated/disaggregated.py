@@ -51,15 +51,20 @@ from vllm.v1.worker.simulated.timing import VirtualClock
 
 if TYPE_CHECKING:
     from vllm.engine.arg_utils import EngineArgs
+    from vllm.usage.usage_lib import UsageContext
     from vllm.v1.engine.llm_engine import LLMEngine
 
 
 def make_instance(
-    engine_args: EngineArgs, kv_role: Literal["kv_producer", "kv_consumer"], name: str
+    engine_args: EngineArgs,
+    kv_role: Literal["kv_producer", "kv_consumer"],
+    name: str,
+    usage_context: UsageContext | None = None,
 ) -> LLMEngine:
     """A prefill (`kv_role="kv_producer"`) or decode (`"kv_consumer"`) engine on
     its own virtual clock. Extra NixlConnector settings are taken from
-    `engine_args.kv_transfer_config`; a set `log_path` gets `.<name>` appended."""
+    `engine_args.kv_transfer_config`; a set `log_path` gets `.<name>` appended.
+    `usage_context` is as for `make_engine()`."""
     base = engine_args.kv_transfer_config
     if isinstance(base, dict):
         base = KVTransferConfig(**base)
@@ -78,7 +83,7 @@ def make_instance(
         ),
         simulation_config=sim,
     )
-    return make_engine(args, VirtualClock())
+    return make_engine(args, VirtualClock(), usage_context)
 
 
 def next_transfer_completion(engine: LLMEngine) -> float | None:
