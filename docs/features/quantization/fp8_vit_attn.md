@@ -3,9 +3,9 @@
 For visual understanding workloads with large images (e.g. QHD, 4K) and relatively
 short text prompts/generation, the ViT encoder attention can become a significant
 bottleneck, especially when the text model is quantized (e.g. NVFP4). vLLM
-supports optional FP8 quantization for the ViT encoder attention via the
-FlashInfer cuDNN backend. Q/K/V are quantized on-the-fly to FP8 before the
-cuDNN attention call.
+supports optional FP8 quantization for ViT encoder attention via FlashInfer
+cuDNN on NVIDIA GPUs and AITER on AMD GPUs. Q/K/V are quantized on-the-fly to
+FP8 before the attention call.
 
 !!! note
     - Currently supports Qwen3-VL family models only (`qwen3_vl`, `qwen3_vl_moe`,
@@ -15,19 +15,28 @@ cuDNN attention call.
       requests. Smaller images may see no speedup due to quantization overhead
       (3 quantization kernel launches + un-padding).
     - FP8 tensor-core speedup is more pronounced on GB300 than GB200.
+    - On ROCm, packed variable-length image and video batches are supported by
+      AITER's native varlen FP8 attention.
 
 ## Requirements
 
-- FlashInfer cuDNN backend with cuDNN >= 9.17.1.
+- NVIDIA: FlashInfer cuDNN backend with cuDNN >= 9.17.1.
+- AMD: AITER with `flash_attn_varlen_fp8_pertensor_func` support on gfx942
+  (MI300 series) or gfx950 (MI350 series).
 
 ## Usage
 
-Enable FP8 ViT attention by passing `--mm-encoder-attn-dtype fp8` together
-with `--mm-encoder-attn-backend FLASHINFER`:
+Enable FP8 ViT attention by passing `--mm-encoder-attn-dtype fp8` and selecting
+the backend for the current platform:
 
 ```bash
 vllm serve $MODEL \
     --mm-encoder-attn-backend FLASHINFER \
+    --mm-encoder-attn-dtype fp8
+
+# AMD ROCm
+vllm serve $MODEL \
+    --mm-encoder-attn-backend ROCM_AITER_FA \
     --mm-encoder-attn-dtype fp8
 ```
 
@@ -45,7 +54,7 @@ reuse them to avoid the dynamic overhead:
 # Step 1: calibrate and save scales (runs dynamic scaling for 16 passes,
 # then dumps the learned scales to JSON).
 vllm bench mm-processor \
-    --model $MODEL --mm-encoder-attn-backend FLASHINFER \
+    --model $MODEL --mm-encoder-attn-backend $MM_ATTN_BACKEND \
     --mm-encoder-attn-dtype fp8 \
     --mm-encoder-fp8-scale-save-path /path/to/scales.json \
     --dataset-name hf --dataset-path lmarena-ai/VisionArena-Chat \
@@ -53,7 +62,7 @@ vllm bench mm-processor \
 
 # Step 2: serve with static scales (no dynamic overhead).
 vllm serve $MODEL \
-    --mm-encoder-attn-backend FLASHINFER \
+    --mm-encoder-attn-backend $MM_ATTN_BACKEND \
     --mm-encoder-attn-dtype fp8 \
     --mm-encoder-fp8-scale-path /path/to/scales.json
 ```
@@ -93,6 +102,16 @@ Keys `q_scale` / `k_scale` / `v_scale` are accepted as aliases.
 | 4K (2160x3840) | 543.44 ms | 460.31 ms | **1.18x** |
 
 Crossover is around FullHD with 3 images/request. At QHD and above, FP8 wins.
+
+**Complete AITER attention call on MI300X** (BF16 input, 16 heads,
+head_dim=72; FP8 includes Q/K/V quantization):
+
+| Sequence length | AITER BF16 | AITER FP8 | Speedup |
+| --------------- | ---------- | --------- | ------- |
+| 2304 | 0.467 ms | 0.337 ms | **1.38x** |
+| 4096 | 0.812 ms | 0.764 ms | **1.06x** |
+| 8192 | 2.555 ms | 2.364 ms | **1.08x** |
+| 16384 | 9.769 ms | 8.655 ms | **1.13x** |
 
 ## Accuracy
 

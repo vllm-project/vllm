@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Example for starting a Gradio Webserver
 Start vLLM API server:
-    python -m vllm.entrypoints.api_server \
+    python examples/applications/api_server/server.py \
         --model meta-llama/Llama-2-7b-chat-hf
 
 Start Webserver:

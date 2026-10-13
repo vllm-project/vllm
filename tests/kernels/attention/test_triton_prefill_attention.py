@@ -5,6 +5,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
+import vllm.v1.attention.ops.triton_prefill_attention as prefill_ops
 from vllm.platforms import current_platform
 from vllm.v1.attention.ops.triton_prefill_attention import context_attention_fwd
 
@@ -230,3 +231,87 @@ def test_context_attention_sliding_window(
 
     # Compare outputs
     torch.testing.assert_close(o, o_ref, rtol=2e-2, atol=2e-2)
+
+
+class _LaunchCapture:
+    """Records the launch configuration in place of ``_fwd_kernel``."""
+
+    grid: tuple
+    kwargs: dict
+
+    def __getitem__(self, grid):
+        self.grid = grid
+        return self._record
+
+    def _record(self, *args, **kwargs) -> None:
+        self.kwargs = kwargs
+
+
+def _capture_tile_config(
+    monkeypatch, *, is_rocm: bool, on_gfx1x: bool, dtype=torch.bfloat16
+) -> _LaunchCapture:
+    """Capture the tile configuration with the platform predicates mocked.
+
+    Both tile widths are numerically correct, so the tests above pass whichever
+    one is selected. This needs no RDNA part and allocates no device memory, so
+    it covers the RDNA branch on the CDNA and NVIDIA agents CI actually runs.
+    """
+    platform = prefill_ops.current_platform
+    monkeypatch.setattr(platform, "is_rocm", lambda: is_rocm)
+    # Every device this kernel targets is cuda-alike at capability 80 or better,
+    # so the stock tile is 128 for 16-bit dtypes.
+    monkeypatch.setattr(platform, "is_cuda_alike", lambda: True)
+    monkeypatch.setattr(platform, "has_device_capability", lambda *a, **k: True)
+    if is_rocm:
+        import vllm.platforms.rocm as rocm_platform
+
+        monkeypatch.setattr(rocm_platform, "on_gfx1x", lambda: on_gfx1x)
+
+    capture = _LaunchCapture()
+    monkeypatch.setattr(prefill_ops, "_fwd_kernel", capture)
+
+    def meta(*shape):
+        return torch.empty(shape, dtype=dtype, device="meta")
+
+    seq_lens = torch.empty(2, dtype=torch.int32, device="meta")
+    context_attention_fwd(
+        meta(256, 8, 128),
+        meta(256, 2, 128),
+        meta(256, 2, 128),
+        meta(256, 8, 128),
+        seq_lens,
+        seq_lens,
+        128,
+    )
+    return capture
+
+
+@pytest.mark.parametrize(
+    ("is_rocm", "on_gfx1x", "dtype", "expected_block_n"),
+    [
+        pytest.param(True, True, torch.bfloat16, 32, id="rdna"),
+        # on_gfx1x() is what excludes gfx10xx, CDNA and gfx1250.
+        pytest.param(True, False, torch.bfloat16, 128, id="rocm-not-rdna"),
+        pytest.param(False, False, torch.bfloat16, 128, id="not-rocm"),
+        # get_block_size already returns 32 here, so min() must not widen it.
+        pytest.param(True, True, torch.float32, 32, id="rdna-float32"),
+    ],
+)
+def test_kv_tile_width_is_gated_by_platform(
+    monkeypatch, is_rocm: bool, on_gfx1x: bool, dtype, expected_block_n: int
+) -> None:
+    capture = _capture_tile_config(
+        monkeypatch, is_rocm=is_rocm, on_gfx1x=on_gfx1x, dtype=dtype
+    )
+    assert capture.kwargs["BLOCK_N"] == expected_block_n
+
+
+def test_rdna_narrows_the_kv_tile_and_nothing_else(monkeypatch) -> None:
+    with monkeypatch.context() as m:
+        tuned = _capture_tile_config(m, is_rocm=True, on_gfx1x=True)
+    with monkeypatch.context() as m:
+        stock = _capture_tile_config(m, is_rocm=True, on_gfx1x=False)
+
+    assert tuned.kwargs.pop("BLOCK_N") != stock.kwargs.pop("BLOCK_N")
+    assert tuned.kwargs == stock.kwargs
+    assert tuned.grid == stock.grid

@@ -5,7 +5,15 @@ from fastapi import FastAPI
 
 from vllm.logger import init_logger
 
+from .exception_handling.error_response import create_error_response
+
 logger = init_logger(__name__)
+
+__all__ = [
+    "create_error_response",
+    "register_vllm_serve_api_routers",
+    "register_vllm_dev_api_routers",
+]
 
 
 def register_vllm_serve_api_routers(app: FastAPI):
@@ -41,10 +49,6 @@ def register_vllm_dev_api_routers(app: FastAPI):
     from .dev.cache.api_router import attach_router as attach_cache_router
 
     attach_cache_router(app)
-
-    from .dev.rlhf.api_router import attach_router as attach_rlhf_router
-
-    attach_rlhf_router(app)
 
     from .dev.rpc.api_router import attach_router as attach_rpc_router
 

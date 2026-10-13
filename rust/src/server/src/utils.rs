@@ -1,7 +1,14 @@
-use std::collections::HashMap;
-use std::time::{SystemTime, UNIX_EPOCH};
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use std::collections::HashMap;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use axum::BoxError;
 use axum::http::HeaderMap;
+use axum::response::sse::{Event, KeepAlive, Sse};
+use axum::response::{IntoResponse, Response};
+use futures::Stream;
 use serde_json::Value;
 use thiserror_ext::AsReport;
 use uuid::Uuid;
@@ -12,6 +19,8 @@ use crate::error::ApiError;
 pub struct ResolvedRequestContext {
     pub request_id: String,
     pub data_parallel_rank: Option<u32>,
+    pub priority: Option<i32>,
+    pub session_id: Option<String>,
 }
 
 /// Return the current Unix timestamp in seconds for OpenAI response objects.
@@ -20,6 +29,27 @@ pub fn unix_timestamp() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs())
         .unwrap_or_default()
+}
+
+/// Build a streaming SSE response, optionally sending keep-alive comments
+/// while the stream is idle.
+///
+/// With `keep_alive_interval` set, a `: keep-alive` comment is sent whenever no
+/// event has been produced for that long (queued, prefill, between tokens, or
+/// while a parser buffers a long tool call). SSE parsers ignore comments, but
+/// they still count as bytes for read timeouts in reverse proxies and clients.
+pub fn sse_response<S, E>(stream: S, keep_alive_interval: Option<Duration>) -> Response
+where
+    S: Stream<Item = Result<Event, E>> + Send + 'static,
+    E: Into<BoxError>,
+{
+    let sse = Sse::new(stream);
+    match keep_alive_interval {
+        Some(interval) => sse
+            .keep_alive(KeepAlive::new().interval(interval).text("keep-alive"))
+            .into_response(),
+        None => sse.into_response(),
+    }
 }
 
 /// Construct an API error for a failed utility call to the engine core.
@@ -43,6 +73,42 @@ pub fn merge_kv_transfer_params(
         );
     }
     xargs
+}
+
+/// Merge `ec_transfer_params` into the `vllm_xargs` map, mirroring the Python
+/// vLLM behavior where `ec_transfer_params` is injected into `extra_args` for
+/// engine-core consumption.
+pub fn merge_ec_transfer_params(
+    mut xargs: Option<HashMap<String, Value>>,
+    ec_transfer_params: Option<&HashMap<String, Value>>,
+) -> Option<HashMap<String, Value>> {
+    if let Some(ec_params) = ec_transfer_params {
+        let map = xargs.get_or_insert_with(HashMap::new);
+        map.insert(
+            "ec_transfer_params".to_string(),
+            // This is safe because we know that `ec_params` is already valid JSON.
+            serde_json::to_value(ec_params).unwrap(),
+        );
+    }
+    xargs
+}
+
+pub fn resolve_session_id(
+    ctx: &ResolvedRequestContext,
+    request_session_id: Option<&str>,
+    xargs: Option<&HashMap<String, Value>>,
+) -> Option<String> {
+    request_session_id
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .or_else(|| ctx.session_id.clone())
+        .or_else(|| {
+            xargs
+                .and_then(|map| map.get("session_id"))
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+        })
 }
 
 /// Convert OpenAI-style `logit_bias` with string token-ID keys into the
@@ -70,8 +136,9 @@ pub fn convert_logit_bias(
         .transpose()
 }
 
-/// Extract common request metadata from HTTP headers: the external request ID
-/// and the optional data-parallel rank used for engine routing.
+/// Extract common request metadata from HTTP headers: the external request ID,
+/// session ID, priority, and the optional data-parallel rank used for engine
+/// routing.
 pub fn resolve_request_context(
     headers: &HeaderMap,
     request_id: Option<&str>,
@@ -81,14 +148,25 @@ pub fn resolve_request_context(
         .get("X-data-parallel-rank")
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.trim().parse().ok());
+    let priority = headers
+        .get("X-Vllm-Priority")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.trim().parse().ok());
 
     // Extract request id from header.
     let request_id_header = headers.get("X-Request-Id").and_then(|value| value.to_str().ok());
     let request_id = resolve_base_request_id(request_id_header, request_id);
+    let session_id = headers
+        .get("X-Session-ID")
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
 
     ResolvedRequestContext {
         request_id,
         data_parallel_rank,
+        priority,
+        session_id,
     }
 }
 
@@ -103,4 +181,85 @@ pub fn resolve_base_request_id(
         id.truncate(8);
         id
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::convert::Infallible;
+
+    use futures::{StreamExt as _, stream};
+    use tokio::time::{Instant, sleep};
+
+    use super::*;
+
+    /// Collect `(elapsed seconds, frame)` pairs from a response whose event
+    /// stream idles for 20 seconds between its two events.
+    async fn idle_stream_frames(keep_alive_interval: Option<Duration>) -> Vec<(u64, String)> {
+        let events = stream::iter([Ok::<_, Infallible>(Event::default().data("first"))]).chain(
+            stream::once(async {
+                sleep(Duration::from_secs(20)).await;
+                Ok(Event::default().data("second"))
+            }),
+        );
+        let start = Instant::now();
+        sse_response(events, keep_alive_interval)
+            .into_body()
+            .into_data_stream()
+            .map(|frame| {
+                let frame = frame.expect("read frame");
+                (
+                    start.elapsed().as_secs(),
+                    String::from_utf8(frame.to_vec()).expect("utf-8 frame"),
+                )
+            })
+            .collect()
+            .await
+    }
+
+    /// An idle gap is filled with `: keep-alive` comments at the configured
+    /// interval, and real events still pass through in order.
+    #[tokio::test(start_paused = true)]
+    async fn sse_response_sends_keep_alive_comments_while_idle() {
+        let frames = idle_stream_frames(Some(Duration::from_secs(8))).await;
+        expect_test::expect![[r#"
+            [
+                (
+                    0,
+                    "data: first\n\n",
+                ),
+                (
+                    8,
+                    ": keep-alive\n\n",
+                ),
+                (
+                    16,
+                    ": keep-alive\n\n",
+                ),
+                (
+                    20,
+                    "data: second\n\n",
+                ),
+            ]
+        "#]]
+        .assert_debug_eq(&frames);
+    }
+
+    /// Without an interval, an idle gap produces no extra bytes.
+    #[tokio::test(start_paused = true)]
+    async fn sse_response_without_keep_alive_interval_sends_no_comments() {
+        let frames = idle_stream_frames(None).await;
+        expect_test::expect![[r#"
+            [
+                (
+                    0,
+                    "data: first\n\n",
+                ),
+                (
+                    20,
+                    "data: second\n\n",
+                ),
+            ]
+        "#]]
+        .assert_debug_eq(&frames);
+    }
 }

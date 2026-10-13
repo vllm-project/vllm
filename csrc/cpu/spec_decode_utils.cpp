@@ -208,6 +208,89 @@ void copy_and_expand_eagle_inputs_kernel_impl(
   }
 }
 
+void copy_and_expand_dflash_inputs_kernel_impl(
+    const torch::Tensor& next_token_ids, const torch::Tensor& target_positions,
+    torch::Tensor& out_input_ids, torch::Tensor& out_context_positions,
+    torch::Tensor& out_query_positions, torch::Tensor& out_context_slot_mapping,
+    torch::Tensor& out_query_slot_mapping, torch::Tensor& out_token_indices,
+    const torch::Tensor& block_table, const torch::Tensor& query_start_loc,
+    const std::optional<torch::Tensor>& num_rejected_tokens,
+    const int64_t parallel_drafting_token_id, const int64_t block_size,
+    const int64_t num_query_per_req, const int64_t num_speculative_tokens,
+    const int64_t total_input_tokens, const bool has_num_rejected) {
+  const int64_t num_reqs = query_start_loc.size(0) - 1;
+
+  const int64_t* next_ids_ptr = next_token_ids.data_ptr<int64_t>();
+  const int64_t* target_pos_ptr = target_positions.data_ptr<int64_t>();
+  const int32_t* block_table_ptr = block_table.data_ptr<int32_t>();
+  const int32_t* query_start_ptr = query_start_loc.data_ptr<int32_t>();
+  const int64_t* rejected_ptr =
+      has_num_rejected && num_rejected_tokens.has_value()
+          ? num_rejected_tokens.value().data_ptr<int64_t>()
+          : nullptr;
+
+  int64_t* out_ids_ptr = out_input_ids.data_ptr<int64_t>();
+  int64_t* out_ctx_pos_ptr = out_context_positions.data_ptr<int64_t>();
+  int64_t* out_query_pos_ptr = out_query_positions.data_ptr<int64_t>();
+  int64_t* out_ctx_slot_ptr = out_context_slot_mapping.data_ptr<int64_t>();
+  int64_t* out_query_slot_ptr = out_query_slot_mapping.data_ptr<int64_t>();
+  int32_t* out_token_idx_ptr = out_token_indices.data_ptr<int32_t>();
+
+  const int64_t block_table_stride = block_table.stride(0);
+
+#pragma omp parallel for
+  for (int64_t req_idx = 0; req_idx < num_reqs; ++req_idx) {
+    int32_t ctx_start = query_start_ptr[req_idx];
+    int32_t ctx_end = query_start_ptr[req_idx + 1];
+    int64_t num_ctx = ctx_end - ctx_start;
+    int64_t valid_ctx_end = ctx_end;
+    if (rejected_ptr != nullptr) {
+      valid_ctx_end -= rejected_ptr[req_idx];
+    }
+    // Guard against out-of-bounds: ensure valid_ctx_end > ctx_start so that
+    // valid_ctx_end - 1 never reads before the request's context range.
+    valid_ctx_end =
+        std::max(valid_ctx_end, static_cast<int64_t>(ctx_start + 1));
+
+    int64_t last_pos = target_pos_ptr[valid_ctx_end - 1];
+
+    for (int64_t j = 0; j < num_ctx; ++j) {
+      int64_t ctx_idx = ctx_start + j;
+      int64_t ctx_pos_idx = std::min(ctx_idx, total_input_tokens - 1);
+      int64_t position = target_pos_ptr[ctx_pos_idx];
+      int64_t block_num = position / block_size;
+      block_num = std::min(block_num, block_table_stride - 1);
+      int32_t block_id =
+          block_table_ptr[req_idx * block_table_stride + block_num];
+      int64_t slot = block_id * block_size + (position % block_size);
+
+      out_ctx_pos_ptr[ctx_idx] = position;
+      out_ctx_slot_ptr[ctx_idx] = slot;
+    }
+
+    for (int64_t query_off = 0; query_off < num_query_per_req; ++query_off) {
+      int64_t query_out = req_idx * num_query_per_req + query_off;
+      int64_t position = last_pos + 1 + query_off;
+      int64_t block_num = position / block_size;
+      block_num = std::min(block_num, block_table_stride - 1);
+      int32_t block_id =
+          block_table_ptr[req_idx * block_table_stride + block_num];
+      int64_t slot = block_id * block_size + (position % block_size);
+
+      out_query_pos_ptr[query_out] = position;
+      out_query_slot_ptr[query_out] = slot;
+      out_ids_ptr[query_out] =
+          query_off == 0 ? next_ids_ptr[req_idx] : parallel_drafting_token_id;
+
+      if (query_off > 0) {
+        int64_t sample_out_idx =
+            req_idx * num_speculative_tokens + (query_off - 1);
+        out_token_idx_ptr[sample_out_idx] = query_out;
+      }
+    }
+  }
+}
+
 void rejection_greedy_sample_kernel_impl(
     torch::Tensor& output_token_ids, const torch::Tensor& cu_num_draft_tokens,
     const torch::Tensor& draft_token_ids, const torch::Tensor& target_argmax,

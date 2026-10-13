@@ -7,7 +7,12 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from PIL import Image
-from transformers import BatchFeature, ProcessorMixin, TensorType
+from transformers import (
+    BatchFeature,
+    ImageProcessingMixin,
+    ProcessorMixin,
+    TensorType,
+)
 from transformers.processing_utils import ProcessingKwargs
 from typing_extensions import Unpack
 
@@ -86,6 +91,7 @@ def get_image_size_for_max_num_patches(
         `tuple[int, int]`: Height and width (in pixels) that are multiples of
         `patch_size * pixel_shuffle_scale` and respect both the maximum and
         optional minimum patch-count constraints.
+
     """
 
     def get_scaled_image_size(scale, original_size, patch_size, pixel_shuffle_scale):
@@ -172,9 +178,11 @@ def prepare_image_tensor(
             The tensor is converted to floating point if needed.
         scale (`float`, *optional*, defaults to `VISION_SCALE`):
             Scalar multiplier applied before normalization.
+
     Returns:
         `torch.Tensor`: Normalized tensor with the same shape as the input and
         dtype `torch.float32`.
+
     """
     if not torch.is_floating_point(image):
         image = image.float()
@@ -204,6 +212,7 @@ def patchify_vision(image: torch.Tensor, patch_size: int) -> torch.Tensor:
 
     Raises:
         ValueError: If `height` or `width` is not divisible by `patch_size`.
+
     """
     num_images, height, width, channels = image.shape
     if height % patch_size or width % patch_size:
@@ -260,6 +269,7 @@ def process_vision_for_patches(
         / patch_size, channels * patch_size**2)` and `dims_virtual` encodes
         effective `(images, height, width)` dimensions after optional pixel
         shuffling.
+
     """
     # Add batch dim if single image
     if images.dim() == 3:
@@ -322,7 +332,7 @@ class IsaacProcessorKwargs(ProcessingKwargs, total=False):  # type: ignore[call-
     }
 
 
-class IsaacImageProcessor:
+class IsaacImageProcessor(ImageProcessingMixin):
     model_input_names = ["pixel_values", "image_grid_thw"]
 
     def __init__(
