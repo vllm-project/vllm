@@ -110,7 +110,19 @@ class DraftWatermarker:
         logits_cache_col: torch.Tensor | None = None,
         use_fp64: bool = False,
         logits_cache_source: torch.Tensor | None = None,
+        num_steps: int = 1,
     ) -> torch.Tensor:
+        if num_steps > 1:
+            return self.sample_block(
+                logits,
+                idx_mapping,
+                temperature,
+                seed,
+                pos,
+                logits_cache=logits_cache,
+                logits_cache_col=logits_cache_col,
+                use_fp64=use_fp64,
+            )
         assert apply_temperature
         assert is_drafting
         assert logits_cache is not None

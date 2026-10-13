@@ -3,6 +3,7 @@
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import replace
+from functools import partial
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -452,26 +453,11 @@ class DraftModelSpeculator(BaseSpeculator):
             return self.get_draft_top_tokens(hidden_states, spec_step_idx)
 
         logits = self.compute_draft_logits(hidden_states, spec_step_idx)
-        if (
-            draft_logits is not None
-            and num_steps > 1
-            and self.draft_watermarker is not None
-        ):
-            sampled = self.draft_watermarker.sample_block(
-                logits,
-                idx_mapping,
-                temperature,
-                seeds,
-                sample_src_positions,
-                logits_cache=draft_logits,
-                logits_cache_col=draft_step,
-                use_fp64=self.use_fp64_gumbel,
-            )
-        elif draft_logits is not None:
+        if draft_logits is not None:
             sampler = (
                 gumbel_sample
                 if self.draft_watermarker is None
-                else self.draft_watermarker.sample
+                else partial(self.draft_watermarker.sample, num_steps=num_steps)
             )
             sampled = sampler(
                 logits,
