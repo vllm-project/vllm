@@ -8,7 +8,14 @@ the tokenizer's single eos. Such tokens can therefore escape the grammar
 bitmask while the FSM is still mid-object and truncate structured output.
 ``compile_grammar`` now forwards ``all_stop_token_ids`` to the matcher as
 ``override_stop_tokens`` so xgrammar masks them until the grammar completes.
+
+Issue #60580: xgrammar only treats tokens that decode to an empty string as
+special, so a tokenizer's control tokens (e.g. ``<|im_start|>``) matched
+grammar text and could be sampled inside a JSON string. Structural tags and
+Lark grammars, which can name such tokens, must still be able to emit them.
 """
+
+import json
 
 import pytest
 from transformers import AutoTokenizer
@@ -24,6 +31,14 @@ VOCAB_SIZE = 50257
 EOS = 50256  # <|endoftext|> -- the tokenizer's only default stop token
 QUOTE = 1  # standalone `"`; opens then closes the JSON string
 LETTER = 55  # `X`: valid string content, not a special/stop token by default
+
+QWEN_TOKENIZER = "Qwen/Qwen3-0.6B"
+QWEN_VOCAB_SIZE = 151936
+
+# Qwen3 special added tokens.
+ENDOFTEXT = 151643  # <|endoftext|>: a generation_config stop token
+IM_START = 151644  # <|im_start|>: never a stop token
+IM_END = 151645  # <|im_end|>: the tokenizer's eos
 
 
 def _token_allowed(row, token_id: int) -> bool:
@@ -80,3 +95,81 @@ def test_request_stop_tokens_gated_to_grammar_terminal(backend: XgrammarBackend)
     assert _token_allowed(bm_override[0], LETTER)
     assert _token_allowed(bm_default[0], EOS)
     assert _token_allowed(bm_override[0], EOS)
+
+
+@pytest.fixture(scope="module")
+def qwen_tokenizer():
+    return AutoTokenizer.from_pretrained(QWEN_TOKENIZER)
+
+
+@pytest.fixture(scope="module")
+def qwen_backend(qwen_tokenizer) -> XgrammarBackend:
+    vllm_config = VllmConfig(
+        structured_outputs_config=StructuredOutputsConfig(backend="xgrammar")
+    )
+    return XgrammarBackend(
+        vllm_config, tokenizer=qwen_tokenizer, vocab_size=QWEN_VOCAB_SIZE
+    )
+
+
+@pytest.mark.parametrize(
+    "request_type, grammar_spec",
+    [
+        (StructuredOutputOptions.JSON, '{"type": "string"}'),
+        (StructuredOutputOptions.REGEX, '"[^"]*"'),
+        (StructuredOutputOptions.GRAMMAR, 'root ::= "\\"" [^"]* "\\""'),
+    ],
+)
+def test_special_tokens_masked_until_grammar_ends(
+    qwen_backend: XgrammarBackend, qwen_tokenizer, request_type, grammar_spec
+):
+    grammar = qwen_backend.compile_grammar(
+        request_type, grammar_spec, stop_token_ids={IM_END, ENDOFTEXT}
+    )
+    bitmask = qwen_backend.allocate_token_bitmask(1)
+
+    text = qwen_tokenizer.encode('"The company is', add_special_tokens=False)
+    assert grammar.accept_tokens("req", text)
+    grammar.fill_bitmask(bitmask, 0)
+    for token_id in (IM_START, IM_END, ENDOFTEXT):
+        assert not _token_allowed(bitmask[0], token_id)
+
+    quote = qwen_tokenizer.encode('"', add_special_tokens=False)
+    assert grammar.accept_tokens("req", quote)
+    grammar.fill_bitmask(bitmask, 0)
+    assert not _token_allowed(bitmask[0], IM_START)
+    assert _token_allowed(bitmask[0], IM_END)
+    assert _token_allowed(bitmask[0], ENDOFTEXT)
+
+
+@pytest.mark.parametrize(
+    "request_type, grammar_spec",
+    [
+        (
+            StructuredOutputOptions.STRUCTURAL_TAG,
+            json.dumps(
+                {
+                    "type": "structural_tag",
+                    "format": {
+                        "type": "tag",
+                        "begin": "<|im_start|>",
+                        "content": {
+                            "type": "json_schema",
+                            "json_schema": {"type": "string"},
+                        },
+                        "end": "\n",
+                    },
+                }
+            ),
+        ),
+        (StructuredOutputOptions.GRAMMAR, f'start: <[{IM_START}]> "assistant"'),
+    ],
+)
+def test_token_naming_grammars_can_emit_special_tokens(
+    qwen_backend: XgrammarBackend, request_type, grammar_spec
+):
+    grammar = qwen_backend.compile_grammar(request_type, grammar_spec)
+    bitmask = qwen_backend.allocate_token_bitmask(1)
+    grammar.fill_bitmask(bitmask, 0)
+    assert _token_allowed(bitmask[0], IM_START)
+    assert grammar.accept_tokens("req", [IM_START])

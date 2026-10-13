@@ -573,6 +573,8 @@ class FusedMoEExperts(ABC):
             and not cls._supports_hash_routing()
         ):
             return False, _make_reason("hash routing")
+        elif moe_config.require_decomposed_backend and cls.is_monolithic():
+            return False, _make_reason("routes adjusted after routing")
         elif not cls._supports_routing_method(
             moe_config.routing_method, weight_key, activation_key
         ):

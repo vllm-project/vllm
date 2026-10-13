@@ -1528,7 +1528,32 @@ steps:
   commands:
   - pytest -v -s kernels/moe --ignore=kernels/moe/test_modular_oai_triton_moe.py --ignore=kernels/moe/test_modular_kernel_combinations.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
   - pytest -v -s kernels/moe/test_modular_oai_triton_moe.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
-  - VLLM_ROCM_USE_AITER=1 VLLM_ROCM_USE_AITER_MOE=1 pytest -v -s kernels/moe/test_modular_kernel_combinations.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+  - VLLM_ROCM_USE_AITER=1 VLLM_ROCM_USE_AITER_MOE=1 pytest -v -s kernels/moe/test_modular_kernel_combinations.py -k "not multigpu" --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+
+- label: ":amd: (MI300) MoE Kernels Multi-GPU" # TBD
+  timeout_in_minutes: 30
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  dind: false
+  agent_pool: mi300_2
+  num_gpus: 2
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - csrc/quantization/cutlass_w8a8/moe/
+  - csrc/moe/
+  - csrc/rocm/
+  - tests/kernels/moe/test_modular_kernel_combinations.py
+  - tests/kernels/moe/modular_kernel_tools/
+  - tests/kernels/utils.py
+  - vllm/model_executor/layers/fused_moe/
+  - vllm/distributed/device_communicators/
+  - vllm/distributed/parallel_state.py
+  - vllm/envs.py
+  - vllm/config
+  - vllm/_aiter_ops.py
+  - vllm/platforms/rocm.py
+  commands:
+  - VLLM_ROCM_USE_AITER=1 VLLM_ROCM_USE_AITER_MOE=1 pytest -v -s kernels/moe/test_modular_kernel_combinations.py -k "multigpu"
 
 - label: ":amd: (MI300) vLLM IR" # TBD
   timeout_in_minutes: 50
@@ -3498,7 +3523,7 @@ steps:
   - export MODEL_NAMES='moonshotai/Kimi-Linear-48B-A3B-Instruct'
   - export PREFILL_BLOCK_SIZE='2048'
   - export DECODE_BLOCK_SIZE='2048'
-  - export VLLM_SERVE_EXTRA_ARGS='--trust-remote-code,--mamba-cache-mode align,--max-model-len 32768'
+  - export VLLM_SERVE_EXTRA_ARGS='--trust-remote-code,--max-model-len 32768'
   - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
   - bash v1/kv_connector/nixl_integration/run_accuracy_test.sh
 
@@ -3539,8 +3564,11 @@ steps:
   - examples/rl/rlhf_async_new_apis.py
   - tests/distributed/test_weight_transfer.py
   - tests/distributed/test_packed_tensor.py
+  - tests/v1/attention/test_rocm_mla_dcp_context.py
+  - vllm/v1/attention/ops/rocm_aiter_mla_prefill.py
   commands:
   - pytest -v -s tests/distributed/test_context_parallel.py
+  - pytest -v -s tests/v1/attention/test_rocm_mla_dcp_context.py
   - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 examples/rl/rlhf_async_new_apis.py
   - VLLM_LOGGING_LEVEL=DEBUG python3 examples/features/data_parallel/data_parallel_offline.py --model=Qwen/Qwen1.5-MoE-A2.7B -tp=1 -dp=2 --max-model-len=2048 --all2all-backend=deepep_high_throughput
   - VLLM_LOGGING_LEVEL=DEBUG python3 examples/features/data_parallel/data_parallel_offline.py --model=Qwen/Qwen1.5-MoE-A2.7B -tp=1 -dp=2 --max-model-len=2048 --all2all-backend=allgather_reducescatter --disable-nccl-for-dp-synchronization
@@ -4318,6 +4346,7 @@ steps:
   - vllm/v1/spec_decode/
   - vllm/v1/worker/gpu/spec_decode/
   - vllm/v1/core/kv_cache_utils.py
+  - vllm/v1/core/kv_cache_planning.py
   - vllm/model_executor/layers/layernorm.py
   - csrc/
   - vllm/_aiter_ops.py
@@ -4351,6 +4380,7 @@ steps:
   - vllm/v1/spec_decode/
   - vllm/v1/worker/gpu/spec_decode/
   - vllm/v1/core/kv_cache_utils.py
+  - vllm/v1/core/kv_cache_planning.py
   - vllm/model_executor/layers/layernorm.py
   - csrc/
   - vllm/_aiter_ops.py
@@ -4384,6 +4414,7 @@ steps:
   - vllm/v1/spec_decode/
   - vllm/v1/worker/gpu/spec_decode/
   - vllm/v1/core/kv_cache_utils.py
+  - vllm/v1/core/kv_cache_planning.py
   - vllm/model_executor/layers/layernorm.py
   - csrc/
   - vllm/_aiter_ops.py
@@ -4417,6 +4448,7 @@ steps:
   - vllm/v1/spec_decode/
   - vllm/v1/worker/gpu/spec_decode/
   - vllm/v1/core/kv_cache_utils.py
+  - vllm/v1/core/kv_cache_planning.py
   - vllm/model_executor/layers/layernorm.py
   - csrc/
   - vllm/_aiter_ops.py
@@ -4450,6 +4482,7 @@ steps:
   - vllm/v1/spec_decode/
   - vllm/v1/worker/gpu/spec_decode/
   - vllm/v1/core/kv_cache_utils.py
+  - vllm/v1/core/kv_cache_planning.py
   - vllm/model_executor/layers/layernorm.py
   - csrc/
   - vllm/_aiter_ops.py
