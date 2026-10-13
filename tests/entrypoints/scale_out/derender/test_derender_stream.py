@@ -195,6 +195,7 @@ def _make_stream_chunk(
     metrics: PerRequestMetrics | None = None,
     logprobs: dict | None = None,
     prompt_token_ids: list[int] | None = None,
+    stop_reason: int | str | None = None,
 ) -> GenerateStreamResponse:
     """Build a GenerateStreamResponse SSE chunk."""
     return GenerateTokensStreamResponse(
@@ -204,6 +205,7 @@ def _make_stream_chunk(
                 index=index,
                 token_ids=token_ids,
                 finish_reason=finish_reason,
+                stop_reason=stop_reason,
                 logprobs=logprobs,
             )
         ],
@@ -885,6 +887,19 @@ class TestDerenderCompletionStream:
             generate_chunk=_make_stream_chunk(token_ids, finish_reason="length"),
         )
         assert chunk.choices[0].finish_reason == "length"
+
+    @pytest.mark.asyncio
+    async def test_stop_reason_forwarded(self, derenderer, tokenizer):
+        """stop_reason from the final generate chunk reaches the derendered
+        choice, matching what the coupled server reports."""
+        token_ids = tokenizer.encode("done")[:2]
+        chunk, _ = await derenderer.derender_completion_stream(
+            model=MODEL_NAME,
+            generate_chunk=_make_stream_chunk(
+                token_ids, finish_reason="stop", stop_reason="\n\n"
+            ),
+        )
+        assert chunk.choices[0].stop_reason == "\n\n"
 
 
 class TestStreamLogprobs:
