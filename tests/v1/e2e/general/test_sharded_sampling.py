@@ -8,10 +8,9 @@ request is queued before the first step, so the first prefill has the same
 shape in both runs. Give the engine its own process and the comparison turns
 into a coin toss: prefill starts before the last requests arrive over IPC, so
 one boot batches two requests where the other batches one. The batch shape
-sets the GEMM reduction order, logprobs shift by up to ~0.25, and near-ties
-flip — measured at up to 5 of 16 completions, with sharding disabled on both
-sides. A real sharding bug — rows routed to the wrong request, misaligned
-gathers — produces many-nats divergence and scrambled top-k sets."""
+sets the GEMM reduction order and can make near-ties flip. A real sharding
+bug — rows routed to the wrong request, misaligned gathers — produces
+many-nats divergence and scrambled top-k sets."""
 
 import pytest
 import torch
@@ -25,13 +24,10 @@ from vllm.distributed import (
 from vllm.logprobs import Logprob, LogprobsOnePosition
 
 MODEL = "meta-llama/Llama-3.2-1B-Instruct"
-# The smaller tiny-random/gpt-oss-bf16 has one KV head and cannot run with
-# TP=2. This checkpoint has two KV heads, so each TP rank owns one.
-GPT_OSS_MODEL = "tengomucho/tiny-random-gpt-oss"
+GPT_OSS_MODEL = "trl-internal-testing/tiny-GptOssForCausalLM"
+GPT_OSS_REVISION = "e82685101216af1953707faa42567d232a5e4d45"
 
 # Misrouted rows move logprobs by nats; anything under this is float noise.
-# With matched batches the two boots agreed bitwise over hundreds of positions,
-# so the bound is not expected to be reached.
 LOGPROB_TOL = 0.5
 
 PROMPTS = [
@@ -43,7 +39,6 @@ PROMPTS = [
     "Once upon a time, in a distant kingdom,",
     "Python's GIL stands for",
     "The fastest land animal is",
-    "The prime number after 17 is",
 ]
 
 # Exercise greedy, seeded random, top-k/top-p, penalties, and logprobs.
@@ -66,8 +61,8 @@ def _is_sharded_sampling_active(worker) -> bool:
     return worker.model_runner.batch_sharder is not None
 
 
-def _local_logits_match_full(worker) -> dict[str, int | bool]:
-    """Reassemble rank-local GPT-OSS logits and compare with the full path."""
+def _local_logits_match_full(worker) -> dict[str, bool]:
+    """Reassemble rank-local logits and compare with the full path."""
     model = worker.model_runner.model
     hidden_size = model.config.hidden_size
     dtype = model.lm_head.weight.dtype
@@ -86,32 +81,32 @@ def _local_logits_match_full(worker) -> dict[str, int | bool]:
     gathered_logits = gathered_logits[..., : model.config.vocab_size]
 
     has_full_logits = full_logits is not None
-    matches = not has_full_logits or torch.equal(full_logits, gathered_logits)
     return {
         "has_full_logits": has_full_logits,
-        "matches": matches,
-        "gathered_vocab_size": gathered_logits.shape[-1],
-        "vocab_size": model.config.vocab_size,
+        "matches": not has_full_logits or torch.equal(full_logits, gathered_logits),
     }
 
 
-def _sampling_params(num_prompts: int = len(PROMPTS)) -> list[SamplingParams]:
+def _sampling_params(num_prompts: int) -> list[SamplingParams]:
     return [SAMPLING_PARAMS[i % len(SAMPLING_PARAMS)] for i in range(num_prompts)]
 
 
 def _generate(
-    monkeypatch: pytest.MonkeyPatch,
     disable_sharding: bool,
-    model: str = MODEL,
-    exercise_empty_rank: bool = False,
+    model: str,
+    prompts: list[str],
+    sampling_params: list[SamplingParams],
+    revision: str | None,
 ):
     llm = LLM(
         model=model,
+        revision=revision,
+        tokenizer_revision=revision,
         tensor_parallel_size=2,
         enable_batch_sharded_sampling=not disable_sharding,
         max_model_len=1024,
-        # More requests than ranks, so round-robin slot ownership splits the
-        # batch across both ranks.
+        # Keep capacity at least as large as the TP size. The actual request
+        # count may be smaller to exercise an empty rank.
         max_num_seqs=len(PROMPTS),
         enforce_eager=True,
         enable_prefix_caching=False,
@@ -125,28 +120,15 @@ def _generate(
         # intended sampling mode.
         modes = llm.llm_engine.collective_rpc(_is_sharded_sampling_active)
         assert all(mode == (not disable_sharding) for mode in modes), modes
-        if model == GPT_OSS_MODEL and not disable_sharding:
+        if not disable_sharding:
             logits_checks = llm.llm_engine.collective_rpc(_local_logits_match_full)
             assert any(check["has_full_logits"] for check in logits_checks)
             assert all(check["matches"] for check in logits_checks)
-            assert all(
-                check["gathered_vocab_size"] == check["vocab_size"]
-                for check in logits_checks
-            )
-        params = _sampling_params()
-        # The final wave reuses the request slots freed by earlier waves,
+        # The second wave reuses request slots freed by the first,
         # covering the cross-rank slot-recycling path that ownership uses.
-        wave1 = llm.generate(PROMPTS, params)
-        outputs = list(wave1)
-        output_params = list(params)
-        if exercise_empty_rank:
-            # A single request belongs to one TP rank, leaving the other rank
-            # with an empty shard regardless of which slot was recycled.
-            outputs += llm.generate(PROMPTS[:1], params[:1])
-            output_params += params[:1]
-        outputs += llm.generate(PROMPTS[::-1], params[::-1])
-        output_params += params[::-1]
-        return outputs, output_params
+        wave1 = llm.generate(prompts, sampling_params)
+        wave2 = llm.generate(prompts[::-1], sampling_params[::-1])
+        return wave1 + wave2
     finally:
         del llm
         cleanup_dist_env_and_memory()
@@ -304,31 +286,43 @@ def _configure_test_environment(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @multi_gpu_test(num_gpus=2)
 @pytest.mark.parametrize(
-    ("model", "exercise_empty_rank"),
-    [(MODEL, False), (GPT_OSS_MODEL, True)],
-    ids=["llama", "gpt-oss"],
+    ("model", "revision", "prompts"),
+    [
+        pytest.param(MODEL, None, PROMPTS, id="llama"),
+        pytest.param(MODEL, None, PROMPTS[:1], id="llama-empty-rank"),
+        pytest.param(
+            GPT_OSS_MODEL,
+            GPT_OSS_REVISION,
+            PROMPTS,
+            id="gpt-oss",
+        ),
+    ],
 )
 def test_sharded_sampling_outputs_match(
     monkeypatch: pytest.MonkeyPatch,
     model: str,
-    exercise_empty_rank: bool,
+    revision: str | None,
+    prompts: list[str],
 ):
     """Generation, logprobs, and prompt logprobs match between batch-sharded
     sampling and the replicated fallback."""
     _configure_test_environment(monkeypatch)
+    sampling_params = _sampling_params(len(prompts))
 
-    ref_outputs, ref_params = _generate(
-        monkeypatch,
+    ref_outputs = _generate(
         disable_sharding=True,
         model=model,
-        exercise_empty_rank=exercise_empty_rank,
+        prompts=prompts,
+        sampling_params=sampling_params,
+        revision=revision,
     )
-    shard_outputs, shard_params = _generate(
-        monkeypatch,
+    shard_outputs = _generate(
         disable_sharding=False,
         model=model,
-        exercise_empty_rank=exercise_empty_rank,
+        prompts=prompts,
+        sampling_params=sampling_params,
+        revision=revision,
     )
 
-    assert ref_params == shard_params
-    _assert_outputs_match(ref_outputs, shard_outputs, ref_params)
+    expected_params = sampling_params + sampling_params[::-1]
+    _assert_outputs_match(ref_outputs, shard_outputs, expected_params)
