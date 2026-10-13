@@ -161,6 +161,11 @@ def apply_pre_quantized_block_scaled_mm(
 # do not touch the shared DeepSeek V4 cache utilities.
 _SPARSE_PREFILL_TOPK_ALIGNMENT = 128
 
+# At or below this many tokens the CSA/HCA fork enqueues the long default chain
+# before the compressor chains (default_first); above it, the device is
+# saturated and aux-first is faster. Tuned with MTP=2 (96 tokens = conc 32).
+_DEFAULT_FIRST_TOKEN_THRESHOLD = 96
+
 
 @triton.jit
 def _combine_topk_swa_indices_kernel(
@@ -807,6 +812,8 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         indexer = self.indexer
         compressor = self.compressor
         assert compressor is not None
+        # Static per captured graph: each capture size bakes its own order.
+        default_first = hidden_states.shape[0] <= _DEFAULT_FIRST_TOKEN_THRESHOLD
 
         def default_chain():
             qr_kv = self._fused_wqa_wkv_gemm(hidden_states)
@@ -838,6 +845,7 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
                 [self.ln_events[1]],
                 aux_streams[:1],
                 enable=True,
+                default_first=default_first,
             )
             self._sparse_indexer_and_attn(
                 hidden_states, None, None, None, q, kv_out, positions, o_padded
@@ -864,6 +872,7 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
             self.ln_events[1:3],
             aux_streams[:2],
             enable=True,
+            default_first=default_first,
         )
 
         indexer_weights_out, _ = indexer.weights_proj(hidden_states)
