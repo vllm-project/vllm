@@ -632,7 +632,7 @@ class BaseRenderer(ABC, Generic[_T]):
     ) -> TokensPrompt:
         tokenizer = self.get_tokenizer()
         want_offsets = self._wants_offsets(prompt, params)
-        kwargs = params.get_encode_kwargs()
+        kwargs = params.get_encode_kwargs(tokenizer)
         if want_offsets:
             kwargs = {**kwargs, "return_offsets_mapping": True}
         encoding = tokenizer(prompt["prompt"], **kwargs)
