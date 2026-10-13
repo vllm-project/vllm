@@ -235,6 +235,65 @@ def test_non_output_rank_skips_capture_snapshot():
     worker._capturer.snapshot_routing_data.assert_not_called()
 
 
+def test_first_pp_route_snapshot():
+    worker = object.__new__(AuxOutputWorkerConnector)
+    local = torch.ones((4, 3, 2), dtype=torch.int32)
+    worker._capturer = SimpleNamespace(device_buffer=local)
+    batch = _input_batch(["request"], np.array([0]), np.array([0, 2]))
+
+    snapshot = worker.merge_pp_routed_experts(batch, None)
+    local.zero_()
+    torch.testing.assert_close(snapshot, torch.ones((2, 3, 2), dtype=torch.int32))
+
+
+def test_pp_route_shape_mismatch():
+    worker = object.__new__(AuxOutputWorkerConnector)
+    worker._capturer = SimpleNamespace(
+        device_buffer=torch.zeros((4, 3, 2), dtype=torch.int32)
+    )
+    batch = _input_batch(["request"], np.array([0]), np.array([0, 2]))
+
+    with pytest.raises(ValueError, match="PP routed expert shapes must match"):
+        worker.merge_pp_routed_experts(batch, torch.zeros((1, 3, 2), dtype=torch.int32))
+
+
+def test_pp_routes_reach_request_outputs():
+    worker = _make_worker(2)
+    local = torch.zeros((8, *_SHAPE), dtype=torch.int32)
+    local[:, 2] = torch.arange(16).reshape(8, 2)
+    previous = torch.arange(30, dtype=torch.int32).reshape(5, *_SHAPE)
+    previous[:, 2] = 0
+    expected = (local[:5] + previous).numpy().astype(_DTYPE)
+    worker._capturer = Mock(device_buffer=local, output_dtype=torch.uint8)
+    worker.begin_step(
+        _metadata(
+            0,
+            [
+                _request_metadata("first", 0, 3, 0, []),
+                _request_metadata("second", 0, 2, 0, []),
+            ],
+            {},
+        ).metadata
+    )
+    batch = _input_batch(["first", "second"], np.array([0, 0]), np.array([0, 3, 5, 8]))
+
+    merged = worker.merge_pp_routed_experts(batch, previous)
+    assert torch.count_nonzero(local[:, :2]) == 0
+    assert torch.count_nonzero(previous[:, 2]) == 0
+    local.zero_()
+    previous.zero_()
+    pending = worker.prepare_output(batch, merged)
+    assert pending is not None
+    worker._capturer.snapshot_routing_data.assert_not_called()
+    assert pending.routed_experts_gpu.dtype == torch.uint8
+    pending.enqueue_cpu_copy(np.array([1, 1]), np.array([0, 0]))
+    outputs = worker.process_output(pending)
+
+    np.testing.assert_array_equal(outputs["first"].rows, expected[:3])
+    np.testing.assert_array_equal(outputs["second"].rows, expected[3:])
+    worker.close()
+
+
 def test_worker_skips_aux_outputs_for_internal_warmup_step():
     worker = _make_worker(1)
     worker._capturer = Mock()
