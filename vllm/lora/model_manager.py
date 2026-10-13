@@ -1286,7 +1286,23 @@ class LoRAModelManager:
                     "is_3d_lora_weight=True on the LoRA request."
                 )
 
-    def _validate_modules_to_save(self, lora_model: LoRAModel) -> None:
+    def _validate_classification_head_lora(self, lora_model: LoRAModel) -> None:
+        if self._classification_head is not None:
+            module_name, wrapper = self._classification_head
+            if (
+                isinstance(wrapper, ClassificationHeadWithLoRA)
+                and self._pooling_task == "token_classify"
+                and (
+                    self._get_module_to_save_weights(lora_model, module_name)
+                    is not None
+                    or self._get_lora_layer_weights(lora_model, module_name) is not None
+                )
+            ):
+                raise ValueError(
+                    f"Classification head {module_name!r} uses request routing; "
+                    "token_classify requires a token-routed classification head."
+                )
+
         if not lora_model.modules_to_save:
             return
         saved_module_name = next(iter(lora_model.modules_to_save))
@@ -1318,6 +1334,18 @@ class LoRAModelManager:
                 f"received {received_weight_shape}."
             )
 
+        if isinstance(wrapper, TokenClassificationHeadWithLoRA):
+            if self._get_lora_layer_weights(lora_model, module_name) is not None:
+                raise ValueError(
+                    "Token classification heads cannot combine modules_to_save "
+                    "with LoRA A/B weights."
+                )
+            if full_module.weight.size(0) != wrapper.output_size:
+                raise ValueError(
+                    "Token classification heads require the same number of labels "
+                    f"as the base model ({wrapper.output_size})."
+                )
+
         if full_module.bias is None:
             return
         expected_bias_shape = (full_module.weight.size(0),)
@@ -1328,43 +1356,6 @@ class LoRAModelManager:
                 "an incompatible bias shape: expected "
                 f"{expected_bias_shape}, received {received_bias_shape}."
             )
-
-    def _validate_token_classification_lora(self, lora_model: LoRAModel) -> None:
-        if self._pooling_task != "token_classify":
-            return
-        if self._classification_head is None:
-            return
-
-        module_name, wrapper = self._classification_head
-        full_module = self._get_module_to_save_weights(lora_model, module_name)
-        has_full_module = full_module is not None
-        has_lora_weights = (
-            self._get_lora_layer_weights(lora_model, module_name) is not None
-        )
-        if not has_full_module and not has_lora_weights:
-            return
-
-        if isinstance(wrapper, TokenClassificationHeadWithLoRA):
-            if has_full_module and has_lora_weights:
-                raise ValueError(
-                    "Token classification heads cannot combine modules_to_save "
-                    "with LoRA A/B weights."
-                )
-            if (
-                full_module is not None
-                and full_module.weight.size(0) != wrapper.output_size
-            ):
-                raise ValueError(
-                    "Token classification heads require the same number of labels "
-                    f"as the base model ({wrapper.output_size})."
-                )
-            return
-
-        raise ValueError(
-            f"LoRA adapter {lora_model.id} contains weights for classification "
-            f"head {module_name!r}, but token_classify only supports LoRA on "
-            "the model backbone."
-        )
 
     def deactivate_adapter(self, adapter_id: int) -> bool:
         if adapter_id not in self._active_adapters:
