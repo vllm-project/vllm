@@ -5,7 +5,7 @@
 import functools
 import itertools
 import os
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from typing import Literal
 
 import torch
@@ -34,10 +34,10 @@ from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
     RowParallelLinear,
 )
-from vllm.model_executor.layers.mamba.gdn.base import GatedDeltaNetAttention
-from vllm.model_executor.layers.mamba.kda_checkpoint import (
-    FlashKDAPrefillCheckpointExporter,
+from vllm.model_executor.layers.mamba.checkpoint import (
+    MambaPrefillCheckpointExporter,
 )
+from vllm.model_executor.layers.mamba.gdn.base import GatedDeltaNetAttention
 from vllm.model_executor.layers.mamba.mamba_mixer2 import mamba_v2_sharded_weight_loader
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateShapeCalculator,
@@ -312,15 +312,6 @@ def _checkpoint_grid(cache_config: CacheConfig) -> int:
     grid = cache_config.prefix_match_unit or cache_config.mamba_block_size
     assert grid is not None
     return grid
-
-
-@dataclass(frozen=True)
-class FlashInferGDNPrefillCheckpointExporter(FlashKDAPrefillCheckpointExporter):
-    """Store GDN checkpoints from the states FlashInfer's prefill emits.
-
-    GDN caches the same conv window and recurrent row as KDA; ``export``'s
-    ``recurrent_rows`` picks each row's state out of the emitted ones.
-    """
 
 
 @CustomOp.register("chunk_gated_delta_rule")
@@ -642,7 +633,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             self._max_num_batched_tokens = (
                 vllm_config.scheduler_config.max_num_batched_tokens
             )
-            self._checkpoint_exporter = FlashInferGDNPrefillCheckpointExporter()
+            self._checkpoint_exporter = MambaPrefillCheckpointExporter()
         self.enable_packed_recurrent_decode = (
             envs.VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE
         )
