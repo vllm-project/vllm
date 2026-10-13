@@ -152,6 +152,46 @@ def _run_prepare(
     )
 
 
+def test_prepare_dflash_inputs_pads_the_unused_buffer_tail():
+    """The padding launch is exercised through the real `propose()` path.
+
+    `_pad_dflash_buffers_kernel` fills the tail of each draft input buffer so
+    a CUDA-graph replay at a larger captured size reads padding rather than
+    stale values. Asserting that through `_run_prepare` -- rather than against
+    a local copy of the launch arithmetic -- is the point: `pad_span`, the
+    grid and `PAD_BLOCK_SIZE` are production code, and a test that re-derives
+    them passes no matter how they regress.
+
+    Shape here is num_reqs=1, num_query_per_req=num_speculative_steps=3,
+    max_num_reqs=4, max_num_tokens=16, so last_query_end=3 and every buffer
+    has a tail wider than one block.
+
+    `_run_prepare` pre-fills every buffer with a sentinel (-1 / -2), so an
+    unwritten tail shows up as the sentinel rather than as a plausible zero.
+    """
+    out = _run_prepare(
+        target_positions=[10, 11, 12, 13],
+        block_table_values=[0, 0, 7, 8, 9, 10, 11, 12],
+    )
+    last_query_end = 3
+
+    # Per-request buffers are padded to max_num_reqs for CUDA-graph safety:
+    # query_start_loc holds the final offset, seq_lens holds 0.
+    assert out.input_buffers.query_start_loc.cpu().tolist()[1:] == [last_query_end] * 4
+    assert out.input_buffers.seq_lens.cpu().tolist()[1:] == [0, 0, 0]
+
+    # Padded sample slots point at query index 0 -- a valid row -- so replay
+    # never reads out of bounds; their idx mapping is -1 so sampling discards
+    # them instead of writing stale draft logits.
+    assert out.sample_indices.tolist()[3:] == [0] * 9
+    assert out.sample_pos.tolist()[3:] == [0] * 9
+    assert out.sample_idx_mapping.tolist()[3:] == [-1] * 9
+
+    # Slots past the real query tokens must be PAD so a larger replay writes
+    # no K/V.
+    assert out.query_slot_mapping.tolist()[last_query_end:] == [PAD_SLOT_ID] * 13
+
+
 @pytest.mark.parametrize("cp_rank,cp_size", [(0, 1), (0, 2), (1, 2)])
 def test_prepare_dflash_inputs_excludes_rejected_context_suffix(cp_rank, cp_size):
     # Positions 10/11 use physical block 7. Rejected positions 12/13 would use

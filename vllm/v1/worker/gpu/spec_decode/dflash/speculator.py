@@ -937,33 +937,35 @@ def prepare_dflash_inputs(
     # serially; here they are covered by the grid. A wider block is used than
     # the main kernel's because these are plain contiguous fills.
     last_query_end = num_reqs * num_query_per_req
+    # `num_reqs <= max_num_reqs` on this path, so the first term is >= 1 and
+    # pad_span is unconditionally positive -- there is no empty-span case to
+    # guard, and nothing for a `max(1, ...)` to clamp.
     pad_span = max(
         max_num_reqs + 1 - num_reqs,
         (max_num_reqs - num_reqs) * num_speculative_steps,
         max_num_tokens - last_query_end,
     )
-    if pad_span > 0:
-        # Sized the same way as the main kernel above, which rounds the
-        # actual work up to a power of two rather than hardcoding a width.
-        # A bare 1024 launched a 1024-wide block even when pad_span was 3.
-        # The cap is higher than the main kernel's 256 because this kernel
-        # only does contiguous fills, with no per-element index arithmetic.
-        PAD_BLOCK_SIZE = min(1024, triton.next_power_of_2(max(1, pad_span)))
-        _pad_dflash_buffers_kernel[(triton.cdiv(pad_span, PAD_BLOCK_SIZE),)](
-            input_buffers.input_ids,
-            input_buffers.positions,
-            input_buffers.is_padding,
-            input_buffers.query_start_loc,
-            input_buffers.seq_lens,
-            sample_indices,
-            sample_pos,
-            sample_idx_mapping,
-            query_slot_mapping,
-            num_reqs,
-            num_query_per_req,
-            num_speculative_steps,
-            max_num_reqs,
-            max_num_tokens,
-            PAD_SLOT_ID=PAD_SLOT_ID,
-            BLOCK_SIZE=PAD_BLOCK_SIZE,
-        )
+    # Sized the same way as the main kernel above, which rounds the actual
+    # work up to a power of two rather than hardcoding a width. A bare 1024
+    # launched a 1024-wide block even when pad_span was 3. The cap is higher
+    # than the main kernel's 256 because this kernel only does contiguous
+    # fills, with no per-element index arithmetic.
+    PAD_BLOCK_SIZE = min(1024, triton.next_power_of_2(pad_span))
+    _pad_dflash_buffers_kernel[(triton.cdiv(pad_span, PAD_BLOCK_SIZE),)](
+        input_buffers.input_ids,
+        input_buffers.positions,
+        input_buffers.is_padding,
+        input_buffers.query_start_loc,
+        input_buffers.seq_lens,
+        sample_indices,
+        sample_pos,
+        sample_idx_mapping,
+        query_slot_mapping,
+        num_reqs,
+        num_query_per_req,
+        num_speculative_steps,
+        max_num_reqs,
+        max_num_tokens,
+        PAD_SLOT_ID=PAD_SLOT_ID,
+        BLOCK_SIZE=PAD_BLOCK_SIZE,
+    )
