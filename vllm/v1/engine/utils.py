@@ -1279,7 +1279,6 @@ def launch_core_engines(
 
     # Hold a coordination TCPStore (alive for this frame) so engines pick DP
     # master ports at bind time; pre-allocated ports can be taken before use.
-    coord_store = None
     if (
         dp_size > 1
         and not offline_mode
