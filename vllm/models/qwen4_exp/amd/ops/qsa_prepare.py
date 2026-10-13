@@ -124,7 +124,11 @@ def _to_dst_dtype(x, dst, scale):
     """Round to BF16 like the unfused path, then scale for an FP8 destination."""
     out_ty = dst.dtype.element_ty
     x = x.to(tl.bfloat16)
-    if out_ty == tl.float8e4nv:
+    # FP8 destinations carry the cache scale. Triton's fp8 casts land in
+    # whichever code space the destination tensor uses (OCP e4m3 codes
+    # for float8e4nv pointers, FNUZ codes for ROCm fnuz pointers), so
+    # only the scale divide is needed here.
+    if out_ty == tl.float8e4nv or out_ty == tl.float8e4b8:
         x = x.to(tl.float32) / scale
     return x.to(out_ty)
 
