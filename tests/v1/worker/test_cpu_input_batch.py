@@ -12,6 +12,7 @@ from vllm.v1.worker.cpu.input_batch import (
     combine_sampled_and_draft_tokens,
     get_num_sampled_and_rejected,
     post_update,
+    post_update_num_computed_tokens,
     prepare_pos_seq_lens,
     prepare_prefill_inputs,
 )
@@ -266,3 +267,15 @@ def test_post_update_cpu_without_optional_inputs() -> None:
     assert last_sampled_tokens.squeeze(1).tolist() == [70, 4]
     assert total_len.tolist() == [2, 4]
     assert all_token_ids[1].tolist() == [-1, -1, -1, 4, -1, -1]
+
+
+def test_post_update_num_computed_tokens_cpu() -> None:
+    num_computed_tokens = torch.tensor([10, 20, 30, 40, 50], dtype=torch.int32)
+
+    post_update_num_computed_tokens(
+        idx_mapping=torch.tensor([3, 1, 4], dtype=torch.int32),
+        num_computed_tokens=num_computed_tokens,
+        query_start_loc=torch.tensor([0, 3, 5, 6], dtype=torch.int32),
+    )
+
+    assert num_computed_tokens.tolist() == [10, 22, 30, 43, 51]
