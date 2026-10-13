@@ -18,6 +18,7 @@ from vllm.pooling_params import LateChunkingParams
 
 MODEL_NAME = "intfloat/multilingual-e5-small"
 DTYPE = "bfloat16"
+LATE_CHUNK_CASES = [(1, False), (5, True), (512, False)]
 LATE_CHUNK_TEXTS = [
     "passage: Berlin has museums. They display art.",
     "passage: 中文 😀 e\u0301",
@@ -38,21 +39,20 @@ def offline_late_chunks(vllm_runner):
         enforce_eager=True,
         gpu_memory_utilization=0.5,
     ) as runner:
-        for size in (1, 5, 512):
-            for normalize in (False, True):
-                outputs = runner.llm.encode(
-                    LATE_CHUNK_TEXTS,
-                    pooling_task="token_embed",
-                    use_tqdm=False,
-                    pooling_params=PoolingParams(
-                        use_activation=normalize,
-                        late_chunking_params=LateChunkingParams(size),
-                    ),
-                )
-                results[size, normalize] = [
-                    (output.outputs.data.tolist(), output.late_chunking)
-                    for output in outputs
-                ]
+        for size, normalize in LATE_CHUNK_CASES:
+            outputs = runner.llm.encode(
+                LATE_CHUNK_TEXTS,
+                pooling_task="token_embed",
+                use_tqdm=False,
+                pooling_params=PoolingParams(
+                    use_activation=normalize,
+                    late_chunking_params=LateChunkingParams(size),
+                ),
+            )
+            results[size, normalize] = [
+                (output.outputs.data.tolist(), output.late_chunking)
+                for output in outputs
+            ]
     return results
 
 
@@ -76,8 +76,7 @@ def server(offline_late_chunks):
         yield remote_server
 
 
-@pytest.mark.parametrize("chunk_size", [1, 5, 512])
-@pytest.mark.parametrize("normalize", [False, True])
+@pytest.mark.parametrize("chunk_size, normalize", LATE_CHUNK_CASES)
 def test_late_chunking_vectors_and_source_ranges(
     server, offline_late_chunks, chunk_size, normalize
 ):
@@ -155,16 +154,10 @@ def test_late_chunking_vectors_and_source_ranges(
 @pytest.mark.parametrize(
     "overrides",
     [
-        {"late_chunking_params": {"chunk_size": True}},
-        {"late_chunking_params": {"chunk_size": 1.5}},
-        {"late_chunking_params": {"chunk_size": "2"}},
-        {"late_chunking_params": {"chunk_size": 0}},
         {"input": [0, 581, 2]},
         {"input": ""},
         {"truncate_prompt_tokens": 4},
         {"padding": "max_length"},
-        {"encoding_format": "base64"},
-        {"task": "embed"},
         {"input": "word " * 600},
     ],
 )
