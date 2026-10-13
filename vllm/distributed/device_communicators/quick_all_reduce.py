@@ -284,6 +284,13 @@ class QuickAllReduce:
                 rank=self.rank,
                 world_size=self.world_size,
             )
+            # compile() runs a real all-reduce on every rank. It moves the JIT
+            # out of the first prefill and out of CUDA graph capture.
+            warmup = torch.empty(
+                FLYDSL_MIN_SIZE // 2, dtype=torch.bfloat16, device=self.device
+            )
+            self._flydsl_int4.compile(warmup, torch.empty_like(warmup))
+            torch.accelerator.synchronize(self.device)
             logger.info(
                 "Using AITER FlyDSL INT4 QuickReduce for BF16 payloads of at "
                 "least %d MiB; other payloads use the HIP QuickReduce kernels.",
