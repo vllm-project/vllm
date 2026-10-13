@@ -1700,16 +1700,17 @@ def test_flashinfer_xqa_decode_correctness(default_vllm_config):
 
 @pytest.mark.skipif(
     AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST
-    or not current_platform.is_device_capability_family(120),
-    reason="NVFP4 XQA decode requires SM12x.",
+    or not any(current_platform.is_device_capability_family(f) for f in (80, 90, 120)),
+    reason="FlashInfer decodes an NVFP4 cache with XQA on SM12x and fa2 on SM8x/SM90.",
 )
 @pytest.mark.parametrize("use_cuda_graph", [False, True])
 @pytest.mark.parametrize("q_len", [1, 4])
-def test_flashinfer_xqa_nvfp4_decode_correctness(
+def test_flashinfer_nvfp4_decode_correctness(
     default_vllm_config, q_len, use_cuda_graph
 ):
     """Single-token and spec-decode queries over an NVFP4 cache decode with
-    XQA, eager and replayed, and match the fa2 prefill that wrote the cache."""
+    XQA on SM12x and fa2 on SM8x/SM90, eager and replayed, and match the fa2
+    prefill that wrote the cache."""
     import unittest.mock
 
     from vllm.v1.attention.backends import flashinfer as fi
@@ -1782,12 +1783,12 @@ def test_flashinfer_xqa_nvfp4_decode_correctness(
     # The full prefill writes every token through the NVFP4 writer; its fa2
     # output for the last q_len tokens of each request is the reference.
     _, reference = run(seq_lens)
-    xqa_fn = fi.flashinfer_xqa_batch_decode_with_kv_cache
-    with unittest.mock.patch.object(
-        fi, "flashinfer_xqa_batch_decode_with_kv_cache", wraps=xqa_fn
-    ) as xqa:
+    xqa = current_platform.is_device_capability_family(120)
+    name = "flashinfer_xqa_batch_decode_with_kv_cache" if xqa else "fast_plan_decode"
+    with unittest.mock.patch.object(fi, name, wraps=getattr(fi, name)) as decode:
         rows, output = run([q_len] * len(seq_lens), use_cuda_graph)
-    assert xqa.called
+    assert decode.called
+    assert xqa or decode.call_args.kwargs["q_len_per_req"] == q_len
     torch.testing.assert_close(output, reference[rows], atol=2e-2, rtol=2e-2)
 
 

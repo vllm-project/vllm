@@ -110,6 +110,14 @@ def _nvfp4_kv_on_fa2() -> bool:
     return any(current_platform.is_device_capability_family(f) for f in (80, 90, 120))
 
 
+def _native_decode_on_fa2(is_nvfp4: bool = False) -> bool:
+    # Enable native fa2 multi-token decode below SM90, and on SM90 for an NVFP4
+    # cache that fa3 cannot read.
+    return not current_platform.has_device_capability(90) or (
+        is_nvfp4 and current_platform.is_device_capability(90)
+    )
+
+
 _KVPair = tuple[torch.Tensor, torch.Tensor]
 
 
@@ -927,10 +935,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         )
         self._init_reorder_batch_threshold(
             1,
-            # Pre-SM90 fa2 decodes uniform spec queries natively.
             supports_spec_as_decode=(
                 self.flashinfer_trtllm_api_decode_kernel is not None
-                or not current_platform.has_device_capability(90)
+                or _native_decode_on_fa2(self.is_kvcache_nvfp4)
             ),
             # trtllm-gen decode receives no cp_rank/global-seq-len information,
             # so its end-aligned causal mask is wrong for q_len > 1 over the
@@ -1052,36 +1059,28 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         is_xqa_arch = current_platform.is_device_capability(
             90
         ) or current_platform.is_device_capability_family(120)
-        # Pre-SM90 fa2 decodes uniform spec queries natively.
-        is_fa2_arch = not current_platform.has_device_capability(90)
+        uses_fa2 = False
         has_uniform_batch_support: bool = len(kv_specs) > 0
         for spec in kv_specs:
             if not isinstance(spec, AttentionSpec):
                 # FlashInfer only applies to attention, so we don't consider other types
                 # of KV spec (e.g. Mamba) here. This is mostly for type checking.
                 continue
-            if not (
-                is_fa2_arch
-                or can_use_trtllm_attention(
-                    num_qo_heads=num_qo_heads,
-                    num_kv_heads=spec.num_kv_heads,
-                    is_prefill=False,
-                )
-            ) or (
-                is_xqa_arch
-                and (
-                    (
-                        spec.kv_quant_mode.is_nvfp4
-                        and not current_platform.is_device_capability_family(120)
-                    )
-                    or not _is_xqa_head_dim_supported(spec.head_size)
-                )
-            ):
+            if _native_decode_on_fa2(spec.kv_quant_mode.is_nvfp4):
+                uses_fa2 = True
+            elif not can_use_trtllm_attention(
+                num_qo_heads=num_qo_heads,
+                num_kv_heads=spec.num_kv_heads,
+                is_prefill=False,
+            ) or (is_xqa_arch and not _is_xqa_head_dim_supported(spec.head_size)):
                 has_uniform_batch_support = False
                 break
 
+        # Only XQA decodes non-causal spec queries.
         use_non_causal = vllm_config.attention_config.use_non_causal
-        if has_uniform_batch_support and (not use_non_causal or is_xqa_arch):
+        if has_uniform_batch_support and (
+            not use_non_causal or (is_xqa_arch and not uses_fa2)
+        ):
             return AttentionCGSupport.UNIFORM_BATCH
         else:
             return AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
@@ -1095,9 +1094,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
     ) -> int | None:
         # The uniform gate already covers DCP, head geometry, the XQA head-dim
         # limit and causality, and yields None for subclasses that force NEVER.
-        # Pre-SM90 fa2 has no varlen decode.
+        # The native fa2 decode wrapper takes only uniform query lengths.
         if (
-            not current_platform.has_device_capability(90)
+            _native_decode_on_fa2()
             or cls.get_cudagraph_support(vllm_config, kv_cache_spec)
             != AttentionCGSupport.UNIFORM_BATCH
         ):
@@ -1796,7 +1795,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 )
                 # Decodes are uniform here; spec decodes are planned per request.
                 q_len_per_req = num_decode_tokens // num_decodes
-                num_input_tokens = num_decode_tokens // q_len_per_req
+                num_input_tokens = num_decodes
 
                 decode_wrapper = self._get_decode_wrapper(
                     num_input_tokens, use_cudagraph, q_len_per_req
