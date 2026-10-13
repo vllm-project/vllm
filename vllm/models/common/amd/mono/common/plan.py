@@ -15,7 +15,7 @@ sources, in FlyDSL's JIT cache key)."""
 import enum
 import functools
 import hashlib
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, fields, is_dataclass
 from pathlib import Path
 
 # ---------------------------------------------------------------- execution model
@@ -119,17 +119,24 @@ def source_digest(*paths: str) -> str:
     return h.hexdigest()[:16]
 
 
-def key_tuple(key, sources: str) -> tuple:
-    """``key``'s (field name, value) pairs, every value a scalar, then
-    ("sources", ``sources``): the model's ``source_digest``."""
+def _key_items(key, prefix: str = "") -> list:
     out = []
     for f in fields(key):
         value = getattr(key, f.name)
+        if is_dataclass(value):
+            out += _key_items(value, f"{prefix}{f.name}.")
+            continue
         if not isinstance(value, _SCALARS):
             raise TypeError(
                 f"{type(key).__name__}.{f.name} = {value!r}: a build parameter must be"
-                " a scalar to reach the JIT cache key"
+                " a scalar (or a dataclass of them) to reach the JIT cache key"
             )
-        out.append((f.name, value))
-    out.append(("sources", sources))
-    return tuple(out)
+        out.append((prefix + f.name, value))
+    return out
+
+
+def key_tuple(key, sources: str) -> tuple:
+    """``key``'s (field name, value) pairs, every value a scalar (a nested
+    dataclass, the model's ``MonoSpec``, flattened), then ("sources",
+    ``sources``): the package's ``source_digest``."""
+    return tuple(_key_items(key) + [("sources", sources)])

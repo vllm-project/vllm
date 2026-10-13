@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Device primitives of the DeepSeek-V4.1 attention mega kernel.
+"""Device primitives of the mono layer's attention stages.
 
 Wave reductions and shuffles, hardware math, bf16 / fp8 / MX packing, the
 scaled MFMA, buffer and 64-bit global accesses, and the tagged-pair mailbox.

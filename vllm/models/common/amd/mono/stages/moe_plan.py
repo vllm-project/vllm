@@ -15,14 +15,14 @@ slots' flags (``polled_tile`` its tiles) before it reads their MID rows. Called
 by the kernel on traced Int32 and by the CPU property test on Python ints.
 """
 
-from vllm.models.deepseek_v41.amd.mono.common.plan import cdiv, imin
+from vllm.models.common.amd.mono.common.plan import cdiv, imin
 
 TILE = 16  # picks a pick tile: an MFMA's N
 
 
-def pick_tiles(count):
-    """A slot's pick tiles: its ``count`` picks, ``TILE`` a tile."""
-    return cdiv(count, TILE)
+def pick_tiles(count, tile=TILE):
+    """A slot's pick tiles: its ``count`` picks, ``tile`` a tile."""
+    return cdiv(count, tile)
 
 
 def ug_parts(groups, ug_groups):
@@ -42,10 +42,10 @@ def ug_tasks(units, ug_parts):
     return units * ug_parts
 
 
-def tile_pick0(slot_first, tile, tile_first):
+def tile_pick0(slot_first, tile, tile_first, size=TILE):
     """Pick tile ``tile``'s first pick, its slot's picks from ``slot_first`` and
-    tiles from ``tile_first``."""
-    return slot_first + (tile - tile_first) * TILE
+    tiles (``size`` picks each) from ``tile_first``."""
+    return slot_first + (tile - tile_first) * size
 
 
 def polled_tile(tile_first, tiles, j):

@@ -271,14 +271,15 @@ def _check_layers(rank: int, tp: int, device) -> None:
         mxfp8_e4m3_quantize,
     )
     from vllm.model_executor.model_loader.utils import process_weights_after_loading
+    from vllm.models.common.amd.mono.layer import scratch_layout
+    from vllm.models.common.amd.mono.runner import (
+        AttnWeights,
+        MonoLayerWeights,
+        MonoRunner,
+    )
     from vllm.models.common.ops import fused_q_kv_rmsnorm
     from vllm.models.deepseek_v41.amd.model import DeepseekV4MoE
-    from vllm.models.deepseek_v41.amd.mono.layer import scratch_layout
-    from vllm.models.deepseek_v41.amd.mono.runner import (
-        AttnWeights,
-        DSV41MonoLayer,
-        MonoLayerWeights,
-    )
+    from vllm.models.deepseek_v41.amd.mono_decode import SPEC
     from vllm.models.deepseek_v41.amd.rocm import (
         compute_global_topk_ragged_indices_and_indptr,
     )
@@ -353,7 +354,7 @@ def _check_layers(rank: int, tp: int, device) -> None:
     sink = f32(H, gen=gs)
     e, sh = moe.experts.routed_experts, moe.shared_experts
     u8 = lambda t: t.view(torch.uint8)  # noqa: E731
-    runner = DSV41MonoLayer(tp, rank, get_tp_group().cpu_group, device)
+    runner = MonoRunner(SPEC, tp, rank, get_tp_group().cpu_group, device)
     gw, bias = moe.gate.weight.float(), moe.gate.e_score_correction_bias.float()
 
     def top6(x):
@@ -452,7 +453,7 @@ def _check_layers(rank: int, tp: int, device) -> None:
             topk_indices=s["topk"], comp_cache=s["comp_cache"],
             comp_block_table=s["comp_block_table"],
         )  # fmt: skip
-        off = scratch_layout(M, tp)["normed"][0]
+        off = scratch_layout(SPEC, M, tp)["normed"][0]
         normed = runner.scratch(M)[off : off + M * HIDDEN * 2].view(bf).view(M, HIDDEN)
         tag = f"ratio {ratio}, {R} x {T}"
         assert _cos(runner.res_mid[:M], res) > 0.99999, tag

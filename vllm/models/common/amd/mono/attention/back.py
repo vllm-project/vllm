@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""K2 ``back``: one DeepSeek-V4.1 attention layer from the rotated query to the
-rank's wo_b partial.
+"""K2 ``back``: one attention layer (a ``MonoSpec``'s widths; the counts below
+are V4.1's at TP4) from the rotated query to the rank's wo_b partial.
 
 One launch a layer and rank, ``BLOCKS`` x ``THREADS``, S rows:
 
@@ -13,7 +13,10 @@ One launch a layer and rank, ``BLOCKS`` x ``THREADS``, S rows:
             MFMA), the chunk's max / sum per head, bf16 p in LDS; PV over the
             chunk's raw rows (wave w: dims 64 w ..) -> the chunk's partial
             (bf16) and its (max, sum) per head, published
-    combine (S x H): a (token, head)'s chunks merged with the sink folded in,
+            A wide key table (``bounded``) skips the chunks past a token's
+            keys, known from its position.
+    combine (S x H): a (token, head)'s chunks merged with the sink folded in
+            (``bounded``: its live chunks only, ``merge_live``),
             bf16, inverse GPT-J RoPE of dims 448.., vLLM's MXFP8 of each 32
             -> XO (published)
     wo_a    (G x 1024 / 32, two 16-row tiles): the group's XO rows times wo_a
@@ -32,6 +35,20 @@ from aiter.ops.flydsl.kernels import buffer_ops as bo
 from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr.typing import T, as_ir_value
 
+from ..spec import (
+    HALF,
+    HEAD_DIM,
+    HEAD_TILE,
+    NOPE,
+    ROPE,
+    ROWS,
+    WINDOW,
+    WOA_ROWS,
+    Dims,
+    MonoSpec,
+    tile_rows,
+    token_tiles,
+)
 from .device import (
     BLOCKS,
     CM_DEV,
@@ -50,6 +67,7 @@ from .device import (
     gload,
     gstore,
     hw_exp2,
+    hw_rsq,
     lane_gather,
     ld_f32,
     ld_i32,
@@ -64,23 +82,7 @@ from .device import (
     xshfl,
 )
 from .gemv import RED, gemv_loads, gemv_mfmas, lds_row, row_sum, rows_loads, rows_store
-from .plan import (
-    DATA,
-    HALF,
-    HEAD_DIM,
-    HEAD_TILE,
-    KEYS,
-    NOPE,
-    ROPE,
-    ROWS,
-    WOA_ROWS,
-    Dims,
-    back_scratch,
-    cdiv,
-    front_end,
-    tile_rows,
-    token_tiles,
-)
+from .plan import DATA, back_scratch, cdiv, front_end
 
 _STREAM = fx.Stream(None)
 NEG = -3.4028234663852886e38
@@ -98,10 +100,12 @@ BACK_POINTS = 16  # start, stage ends, split internals, GEMV internals
 
 @dataclass(frozen=True)
 class BackBuild:
+    spec: MonoSpec
     tokens: int
     tp: int
     ratio: int  # 0: window only; 1 / 2: top-k over a compressed cache
     timeline: bool = False
+    topk: int = 0  # a token's compressed keys at most (``Dims.topk``)
 
 
 def plus(t0, v):
@@ -112,7 +116,7 @@ def head_groups(d: Dims, s: int) -> int:
     """Wave groups a split unit's head tiles are spread over: two (a tile each,
     64-key chunks, twice the units) while the units fit the grid, else one (a
     wave's keys loaded and dequantized once for every head tile)."""
-    return 2 if d.head_tiles == 2 and s * cdiv(KEYS, 64) <= BLOCKS else 1
+    return 2 if d.head_tiles == 2 and s * cdiv(d.keys, 64) <= BLOCKS else 1
 
 
 def chunk_keys(d: Dims, s: int) -> int:
@@ -150,10 +154,10 @@ def key_rec(c, t, k):
     """(data address, scale address, valid) of token t's key k from K1's key
     table: slot | 1 << 31 for a compressed row, a window slot otherwise, -1 for
     none (it reads a zero record: its scores are masked, its values zeros)."""
-    a, ratio = c["args"], c["ratio"]
+    a, ratio, keys = c["args"], c["ratio"], c["d"].keys
     # a table this launch wrote (``krdy``) is read past the CU's cache
     cm = CM_DEV if const_expr("krdy" in c) else 0
-    val = ld_i32(a["kt"], t * KEYS + fx.min(fx.max(k, 0), KEYS - 1), cm)
+    val = ld_i32(a["kt"], t * keys + fx.min(fx.max(k, 0), keys - 1), cm)
     ok = val != fx.Int32(-1)
     slot = ok.select(val & fx.Int32(0x7FFFFFFF), fx.Int32(0))
     if const_expr(ratio > 0):
@@ -192,16 +196,57 @@ def _fp8_pair_f32(word, scale, hi):
 
 @traced
 def stage_split(c, unit):
-    """Flash-decoding over chunk ``unit % nchunk`` of token ``unit // nchunk``,
-    every head of the rank -> the chunk's partial and (max, sum) per head. Wave
-    (head group hg, key tile kt): keys 16 kt .. of the chunk (loaded and
-    dequantized once) against the group's head tiles; then dims 64 w .. of the
-    PV over every key and head."""
-    tid, lane, wave, d, s = c["tid"], c["lane"], c["wave"], c["d"], c["S"]
-    a, sl = c["args"], c["sl"]
+    """Flash-decoding over chunk ``unit % nchunk`` of token ``unit // nchunk``
+    (``split_chunk``). A build whose key table is wider than a token's top-k
+    (``bounded``: every compressed row of a long context) skips a chunk past
+    the token's keys at most, known from its position alone: no load of its q
+    or keys."""
     nchunk = c["nchunk"]
     t = unit // nchunk
     ch = unit % nchunk
+    if const_expr(c.get("bounded", False)):
+        d = c["d"]
+        pos = ld_i32(c["args"]["pos"], 2 * t)
+        cap = fx.min((pos + 1) // c["ratio"], fx.Int32(d.topk_width)) + WINDOW
+        if ch * chunk_keys(d, c["S"]) < cap:
+            split_chunk(c, t, ch)
+    else:
+        split_chunk(c, t, ch)
+
+
+@traced
+def q_head_rstd(c):
+    """Each head's weightless RMSNorm of the token's q in LDS (``q_head_norm``):
+    rsq(mean(q^2) + eps) -> ``qn`` [head]. vLLM norms q before its RoPE, which
+    keeps every pair's norm: the scores scale by it after the dot product."""
+    tid, d, sl = c["tid"], c["d"], c["sl"]
+    tph = THREADS // d.heads  # threads a head
+    words = HEAD_DIM // 2 // tph
+    h = tid // tph
+    i = tid % tph
+    acc = fx.Float32(0.0)
+    for w in range_constexpr(words):
+        v = fx.Int32(fx.ptr_load(sl["q"] + (h * Q_ROW + i * words + w)))
+        lo, hi = bf_lo(v), bf_hi(v)
+        acc = acc + lo * lo + hi * hi
+    offs = tuple(o for o in (32, 16, 8, 4, 2, 1) if o < tph)
+    acc = butterfly(acc, offs)
+    if i == 0:
+        mean = acc * fx.Float32(1.0 / HEAD_DIM)
+        fx.ptr_store(hw_rsq(mean + fx.Float32(d.spec.norm_eps)), sl["qn"] + h)
+    gpu.barrier()
+
+
+@traced
+def split_chunk(c, t, ch):
+    """Flash-decoding over chunk ``ch`` of token ``t``, every head of the rank
+    -> the chunk's partial and (max, sum) per head. Wave (head group hg, key
+    tile kt): keys 16 kt .. of the chunk (loaded and dequantized once) against
+    the group's head tiles; then dims 64 w .. of the PV over every key and
+    head."""
+    tid, lane, wave, d, s = c["tid"], c["lane"], c["wave"], c["d"], c["S"]
+    a, sl = c["args"], c["sl"]
+    nchunk = c["nchunk"]
     ck = chunk_keys(d, s)
     ngrp = head_groups(d, s)
     nkt = WAVES // ngrp  # 16-key tiles a chunk
@@ -264,6 +309,8 @@ def stage_split(c, unit):
             if g == 0:
                 fx.ptr_store(scw, rawb + DATA // 4)
         gpu.barrier()
+        if const_expr(d.spec.q_head_norm):
+            q_head_rstd(c)
         stamp(c, 5)
         # QK: A = the keys (dequantized once), B = q of a head tile (LDS); the
         # contraction's 32-dim chunk 2 c + h of the nope dims is {64 c + 16 g +
@@ -303,8 +350,12 @@ def stage_split(c, unit):
         valid = [lane_gather(okw, 4 * g + i) != 0 for i in range(4)]
         svs = []
         for ht in range_constexpr(nht):
+            hscale = scale
+            if const_expr(d.spec.q_head_norm):
+                head = (hgi * nht + ht) * HEAD_TILE + r16
+                hscale = scale * fx.ptr_load(sl["qn"] + head)
             sv = [
-                fx.Float32(valid[i].select(accs[ht][i] * scale, fx.Float32(NEG)))
+                fx.Float32(valid[i].select(accs[ht][i] * hscale, fx.Float32(NEG)))
                 for i in range(4)
             ]
             mw = butterfly(
@@ -441,6 +492,98 @@ def stage_split(c, unit):
 
 # ---------------------------------------------------------------- combine
 
+
+def _chunk_loads(c, t, h, d0, cc):
+    """Chunk cc's (max, sum) of head h and its partial's 8 dims from d0."""
+    d, nchunk = c["d"], c["nchunk"]
+    stv = fx.Vector(
+        bo.buffer_load(
+            rsrc(c["pstat"]),
+            ((t * nchunk + cc) * d.heads + h) * 2,
+            vec_width=2,
+            dtype=T.f32,
+        )
+    )
+    pv = fx.Vector(
+        bo.buffer_load(
+            rsrc(c["part"]),
+            (((t * nchunk + cc) * d.heads + h) * HEAD_DIM + d0) // 2,
+            vec_width=4,
+            dtype=T.i32,
+        )
+    )
+    vals = []
+    for e in range_constexpr(4):
+        vals += [bf_lo(pv[e]), bf_hi(pv[e])]
+    return stv, vals
+
+
+def merge_all(c, t, h, d0, nlive, sink):
+    """The chunks' (sum, 8 dims) of (t, h) weighted by exp2(max - the max),
+    the sink's term first, in chunk order: every chunk loaded at once (a
+    past-``nlive`` chunk weighs nothing)."""
+    m = fx.Float32(NEG)
+    ms, ls, vs = [], [], []
+    for cc in range_constexpr(c["nchunk"]):
+        live = cc < nlive
+        stv, vals = _chunk_loads(c, t, h, d0, cc)
+        mc = fx.Float32(live.select(stv[0], fx.Float32(NEG)))
+        ms.append(mc)
+        ls.append(fx.Float32(live.select(stv[1], fx.Float32(0.0))))
+        vs.append([fx.Float32(live.select(v, fx.Float32(0.0))) for v in vals])
+        m = fx.max(m, mc)
+    m_final = fx.max(m, sink)
+    lsum = hw_exp2(sink - m_final)
+    tot = [fx.Float32(0.0)] * 8
+    for cc in range_constexpr(c["nchunk"]):
+        wgt = hw_exp2(ms[cc] - m_final)
+        lsum = lsum + ls[cc] * wgt
+        tot = [tot[e] + vs[cc][e] * wgt for e in range(8)]
+    return lsum, tot
+
+
+MERGE_BATCH = 4  # a wide table's chunks loaded together (``merge_live``)
+
+
+@traced
+def merge_live(c, t, h, d0, nlive, sink):
+    """``merge_all`` over the live chunks only, ``MERGE_BATCH`` at a time (a
+    wide key table: most of its chunks past a token's keys)."""
+    m = fx.Float32(NEG)
+    for c0 in range(0, nlive, MERGE_BATCH):
+        for u in range_constexpr(MERGE_BATCH):
+            live = c0 + u < nlive
+            stv, _ = _chunk_loads(c, t, h, d0, fx.min(c0 + u, nlive - 1))
+            m = fx.max(m, fx.Float32(live.select(stv[0], fx.Float32(NEG))))
+    m_final = fx.max(m, sink)
+    lsum = hw_exp2(sink - m_final)
+    t0, t1, t2, t3, t4, t5, t6, t7 = [fx.Float32(0.0)] * 8
+    for c0 in range(0, nlive, MERGE_BATCH):
+        got = [
+            _chunk_loads(c, t, h, d0, fx.min(c0 + u, nlive - 1))
+            for u in range(MERGE_BATCH)
+        ]
+        for u in range_constexpr(MERGE_BATCH):
+            live = c0 + u < nlive
+            stv, vals = got[u]
+            wgt = hw_exp2(fx.Float32(live.select(stv[0], fx.Float32(NEG))) - m_final)
+            lsum = lsum + fx.Float32(live.select(stv[1], fx.Float32(0.0))) * wgt
+            v = [fx.Float32(live.select(x, fx.Float32(0.0))) for x in vals]
+            t0, t1, t2, t3 = (
+                t0 + v[0] * wgt,
+                t1 + v[1] * wgt,
+                t2 + v[2] * wgt,
+                t3 + v[3] * wgt,
+            )
+            t4, t5, t6, t7 = (
+                t4 + v[4] * wgt,
+                t5 + v[5] * wgt,
+                t6 + v[6] * wgt,
+                t7 + v[7] * wgt,
+            )
+    return lsum, [t0, t1, t2, t3, t4, t5, t6, t7]
+
+
 COMB_HEADS = WAVES  # heads a combine unit: a wave each
 
 
@@ -457,7 +600,11 @@ def stage_combine(c, unit):
     h = hg * COMB_HEADS + wave
     nchunk = c["nchunk"]
     ck = chunk_keys(d, s)
-    kv_len = ld_i32(a["klen"], t)
+    if const_expr("krdy" in c):
+        # a key table this launch builds: its count once published, past the
+        # CU's cache (a CTA without split work gets here first)
+        await_flags(c, c["krdy"], 1, lambda u: t)
+    kv_len = ld_i32(a["klen"], t, CM_DEV if const_expr("krdy" in c) else 0)
     nlive = (kv_len + ck - 1) // ck
     pos = ld_i32(a["pos"], 2 * t)
     sink = ld_f32(a["sink"], h) * fx.Float32(LOG2E)
@@ -475,41 +622,10 @@ def stage_combine(c, unit):
         for i in range(4)
     ]
     await_flags(c, c["srdy"], nlive, lambda u: t * nchunk + u)
-    m = fx.Float32(NEG)
-    ms, ls, vs = [], [], []
-    for cc in range_constexpr(nchunk):
-        live = cc < nlive
-        stv = fx.Vector(
-            bo.buffer_load(
-                rsrc(c["pstat"]),
-                ((t * nchunk + cc) * d.heads + h) * 2,
-                vec_width=2,
-                dtype=T.f32,
-            )
-        )
-        pv = fx.Vector(
-            bo.buffer_load(
-                rsrc(c["part"]),
-                (((t * nchunk + cc) * d.heads + h) * HEAD_DIM + d0) // 2,
-                vec_width=4,
-                dtype=T.i32,
-            )
-        )
-        mc = fx.Float32(live.select(stv[0], fx.Float32(NEG)))
-        ms.append(mc)
-        ls.append(fx.Float32(live.select(stv[1], fx.Float32(0.0))))
-        vals = []
-        for e in range_constexpr(4):
-            vals += [bf_lo(pv[e]), bf_hi(pv[e])]
-        vs.append([fx.Float32(live.select(v, fx.Float32(0.0))) for v in vals])
-        m = fx.max(m, mc)
-    m_final = fx.max(m, sink)
-    lsum = hw_exp2(sink - m_final)
-    tot = [fx.Float32(0.0)] * 8
-    for cc in range_constexpr(nchunk):
-        wgt = hw_exp2(ms[cc] - m_final)
-        lsum = lsum + ls[cc] * wgt
-        tot = [tot[e] + vs[cc][e] * wgt for e in range(8)]
+    if const_expr(c.get("bounded", False)):
+        lsum, tot = merge_live(c, t, h, d0, nlive, sink)
+    else:
+        lsum, tot = merge_all(c, t, h, d0, nlive, sink)
     inv = fx.Float32(1.0) / lsum
     o = [bf16_round(tot[e] * inv) for e in range(8)]
     # inverse GPT-J RoPE of each pair: e' = e cos + o sin, o' = o cos - e sin
@@ -593,12 +709,21 @@ def woa_loads(c, task):
         task * WOA_ROWS,
         WOA_SPLIT_K,
         tiled=True,
+        ld=c["d"].ld(c["d"].group_k),
     )
 
 
 def wob_loads(c, task, pred=None):
-    a = c["args"]
-    return gemv_loads(c, a["wob"], a["wob_s"], c["d"].o_rows, task * ROWS, pred=pred)
+    a, d = c["args"], c["d"]
+    return gemv_loads(
+        c,
+        a["wob"],
+        a["wob_s"],
+        d.o_rows,
+        task * ROWS,
+        pred=pred,
+        shuffled=d.spec.preshuffled,
+    )
 
 
 def _wob_store(a, t, col, v0, v1):
@@ -643,9 +768,9 @@ def stage_wob(c, task, ops, task2, ops2, has2, t0, n, mark=False):
 
 def back_plan(key):
     """(nchunk, n_split, n_comb, COMB0, WOA0, WOB0, early_wob) of a build."""
-    s, d = key.tokens, Dims(key.tp)
+    s, d = key.tokens, Dims(key.spec, key.tp, key.topk)
     ck = chunk_keys(d, s)
-    nchunk = cdiv(KEYS, ck)
+    nchunk = cdiv(d.keys, ck)
     n_split = s * nchunk
     n_comb = s * (d.heads // COMB_HEADS)
     COMB0 = n_split % BLOCKS
@@ -675,6 +800,17 @@ def back_lds_members(s: int, d: Dims) -> dict:
         p: fx.Array[fx.Int32, d.heads * p_row(d, s), 16]
         st: fx.Array[fx.Float32, 2 * d.heads * (WAVES // head_groups(d, s)), 16]
 
+    if d.spec.q_head_norm:
+
+        @fx.struct
+        class SplitLds:  # type: ignore[no-redef]
+            q: fx.Array[fx.Int32, d.heads * Q_ROW, 16]
+            raw: fx.Array[fx.Int32, ck * REC // 4, 16]
+            p: fx.Array[fx.Int32, d.heads * p_row(d, s), 16]
+            st: fx.Array[fx.Float32, 2 * d.heads * (WAVES // head_groups(d, s)), 16]
+            # each head's q norm (``q_head_rstd``)
+            qn: fx.Array[fx.Float32, d.heads, 16]
+
     @fx.struct
     class GemvLds:
         red: fx.Array[fx.Float32, 2 * RED, 16]
@@ -701,7 +837,7 @@ def back_context(key, lds, args: dict, scratch, tag, layout=None) -> dict:
     """The attention back's context: LDS views (``lds``: an allocated
     ``back_lds``, or a dict of the members' views), mailbox (tag ``tag``),
     scratch regions, arguments by name."""
-    s, d = key.tokens, Dims(key.tp)
+    s, d = key.tokens, Dims(key.spec, key.tp, key.topk)
     tid = fx.thread_idx.x
     if isinstance(lds, dict):
         spl, gml = lds["split"], lds["gemv"]
@@ -720,7 +856,13 @@ def back_context(key, lds, args: dict, scratch, tag, layout=None) -> dict:
         "ratio": key.ratio,
         "mb": Mailbox(tag),
         "nchunk": back_plan(key)[0],
-        "sl": {"q": spl.q.ptr, "raw": spl.raw.ptr, "p": spl.p.ptr, "st": spl.st.ptr},
+        "sl": {
+            "q": spl.q.ptr,
+            "raw": spl.raw.ptr,
+            "p": spl.p.ptr,
+            "st": spl.st.ptr,
+            "qn": spl.qn.ptr if d.spec.q_head_norm else None,
+        },
         "args": args,
     }
     for region, (off, _) in (
@@ -777,7 +919,7 @@ def epoch_end(c, epoch, ep, reset=None):
 def run_back(c, key, bid):
     """The attention back's stages on this CTA: split, combine, wo_a, wo_b."""
     s = key.tokens
-    dd = Dims(key.tp)
+    dd = Dims(key.spec, key.tp, key.topk)
     # plain ints: a Python object read inside traced control flow is carried
     woa_tasks, groups, heads, group_k = dd.woa_tasks, dd.groups, dd.heads, dd.group_k
     q_rows, o_rows, wob_tasks = dd.q_rows, dd.o_rows, dd.wob_tasks
@@ -806,6 +948,7 @@ def run_back(c, key, bid):
         WOA_SPLIT_K,
         tiled=True,
         pred=has_woa,
+        ld=dd.ld(group_k),
     )
     wob_task = first_task(bid, WOB0)
     wob_second = wob_task + BLOCKS

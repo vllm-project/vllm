@@ -14,6 +14,7 @@ import torch
 
 from vllm.config import CUDAGraphMode
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import Mxfp4MoeBackend
+from vllm.models.common.amd.mono import decode as dec
 from vllm.models.deepseek_v41.amd import mono_decode as md
 
 M = 6
@@ -95,9 +96,9 @@ def run(monkeypatch):
             }
         fc = SimpleNamespace(cudagraph_runtime_mode=mode, attn_metadata=metadata)
         runner = _Runner()
-        monkeypatch.setattr(md, "is_forward_context_available", lambda: True)
-        monkeypatch.setattr(md, "get_forward_context", lambda: fc)
-        monkeypatch.setattr(md, "_mono_runner", lambda device: runner)
+        monkeypatch.setattr(dec, "is_forward_context_available", lambda: True)
+        monkeypatch.setattr(dec, "get_forward_context", lambda: fc)
+        monkeypatch.setattr(dec, "mono_runner", lambda spec, device, max_topk=0: runner)
         monkeypatch.setattr(md.MonoDecodeLayer, "weights", lambda self, layer: None)
         args = {**_inputs(), **inputs}
         mono = md.MonoDecodeLayer(ffn_only)
@@ -319,9 +320,9 @@ def _deployment(monkeypatch, cdna=4, cus=256):
 
     monkeypatch.delenv("VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4", raising=False)
     monkeypatch.setattr(rocm, "get_cdna_version", lambda: cdna)
-    monkeypatch.setattr(md, "get_tensor_model_parallel_world_size", lambda: 2)
-    monkeypatch.setattr(md, "_compute_units", lambda: cus)
-    name = "vllm.models.deepseek_v41.amd.mono.runner"
+    monkeypatch.setattr(dec, "get_tensor_model_parallel_world_size", lambda: 2)
+    monkeypatch.setattr(dec, "_compute_units", lambda: cus)
+    name = "vllm.models.common.amd.mono.runner"
     runner = ModuleType(name)
     runner.BLOCKS = 256  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, name, runner)

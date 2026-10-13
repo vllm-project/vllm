@@ -51,17 +51,30 @@ def _steps(c, nsteps, split, tiled):
     return [(part * per + i, None) for i in range(per)]
 
 
-def _step_load(c, r_w, r_ws, k, row0, st, pred=None):
+def _step_load(c, r_w, r_ws, k, row0, st, pred=None, shuffled=False, ld=None):
     """Global step ``st``'s weight operand of rows row0 .. +16: two 16 B chunks a
     lane (K bytes 16 j .. and 64 + 16 j .. of the step, row row0 + lane % 16)
     and the E8M0 byte of its K block. ``pred`` false: masked (out of range: no
-    memory traffic, zeros)."""
+    memory traffic, zeros). ``shuffled``: the weight in aiter's (16, 16)
+    shuffle (a 16-row group's 32-column blocks of 16 x 32 bytes, each a 16-column
+    half after the other), where a lane's chunk is 16 contiguous bytes too.
+    ``ld``: a row-major weight's row stride (bytes), past ``k``."""
     lane = c["lane"]
     j = lane // 16
-    row = row0 + lane % 16
-    base = row * k + 128 * st + 16 * j
-    lo = fx.Vector(bo.buffer_load(r_w, base // 4, vec_width=4, dtype=T.i32))
-    hi = fx.Vector(bo.buffer_load(r_w, (base + 64) // 4, vec_width=4, dtype=T.i32))
+    if const_expr(shuffled):
+        assert k % 64 == 0
+        blocks = (row0 // 16) * (k // 64) + 2 * st
+        lo = fx.Vector(
+            bo.buffer_load(r_w, blocks * 256 + lane * 4, vec_width=4, dtype=T.i32)
+        )
+        hi = fx.Vector(
+            bo.buffer_load(r_w, (blocks + 1) * 256 + lane * 4, vec_width=4, dtype=T.i32)
+        )
+    else:
+        row = row0 + lane % 16
+        base = row * (k if ld is None else ld) + 128 * st + 16 * j
+        lo = fx.Vector(bo.buffer_load(r_w, base // 4, vec_width=4, dtype=T.i32))
+        hi = fx.Vector(bo.buffer_load(r_w, (base + 64) // 4, vec_width=4, dtype=T.i32))
     kg = k // 32
     wsi = (row0 // 32) * kg + st * 4 + j
     word = fx.Int32(bo.buffer_load(r_ws, wsi // 4, vec_width=1, dtype=T.i32))
@@ -69,11 +82,23 @@ def _step_load(c, r_w, r_ws, k, row0, st, pred=None):
 
 
 def gemv_loads(
-    c, w, ws, k, row0, split=None, tiled=False, kbeg=0, nsteps=None, pred=None
+    c,
+    w,
+    ws,
+    k,
+    row0,
+    split=None,
+    tiled=False,
+    kbeg=0,
+    nsteps=None,
+    pred=None,
+    shuffled=False,
+    ld=None,
 ):
     """The weight operands of rows row0 .. +16 (``tiled``: row0 + 16 (wave //
     split)) over steps kbeg .. kbeg + nsteps for this wave, all in flight
-    (``pred`` false: masked off, no memory traffic)."""
+    (``pred`` false: masked off, no memory traffic; ``shuffled``: the weight in
+    aiter's (16, 16) shuffle; ``ld``: a row-major weight's row stride)."""
     nsteps = k // 128 if nsteps is None else nsteps
     if const_expr(pred is None):
         r_w, r_ws = rsrc(w), rsrc(ws)
@@ -92,6 +117,8 @@ def gemv_loads(
             row0,
             kbeg + (st if live is None else fx.min(st, nsteps - 1)),
             pred,
+            shuffled,
+            ld,
         )
         for st, live in _steps(c, nsteps, split, tiled)
     ]
