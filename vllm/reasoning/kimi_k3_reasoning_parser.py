@@ -307,7 +307,7 @@ class KimiK3ReasoningParser(ReasoningParser):
 
         A leading response control prefix takes precedence over quoted think
         markers in its body. Otherwise, handles four shapes:
-          * response opener without think markers -> no think channel; all content
+          * text-only response opener without think markers -> all content
           * open marker present       -> reasoning starts after ``<|open|>think<|sep|>``
           * open marker absent but a   close marker exists (gen-prefix consumed
             the open) -> reasoning starts at offset 0
@@ -327,11 +327,8 @@ class KimiK3ReasoningParser(ReasoningParser):
         if (
             m_open is None
             and m_close is None
-            and (
-                _subseq_index(model_output_token_ids, self._response_open_ids) != -1
-                if model_output_token_ids
-                else self._response_open_re.search(model_output) is not None
-            )
+            and not model_output_token_ids
+            and self._response_open_re.search(model_output) is not None
         ):
             return None, self._content_after_reasoning(model_output, request)
         if m_close is not None:
