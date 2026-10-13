@@ -7,15 +7,32 @@ import pytest
 import torch
 
 from vllm.config import DeviceConfig, ModelConfig, VllmConfig
-from vllm.models.qwen4_exp.common.qsa_cache import QSACompressedKeyCache
-from vllm.v1.core.kv_cache_planning import get_kv_cache_groups
+from vllm.models.qwen4_exp.common.qsa_cache import (
+    QSACompressedKeyCache,
+    QSAStateBackend,
+    compressed_qsa_slot_mapping,
+)
+from vllm.v1.attention.backend import MultipleOf
+from vllm.v1.core.kv_cache_planning import (
+    get_kv_cache_config_from_groups,
+    get_kv_cache_groups,
+)
 from vllm.v1.core.kv_cache_utils import generate_scheduler_kv_cache_config
 from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
     FullAttentionSpec,
     KVCacheConfig,
+    KVCacheGroupSpec,
+    KVCacheTensor,
     MLAAttentionSpec,
     UniformTypeKVCacheSpecs,
+)
+from vllm.v1.kv_cache_layout import KVCacheLayout
+from vllm.v1.worker.utils import (
+    AttentionGroup,
+    allocate_kv_cache,
+    map_kv_caches_to_kernel_blocks,
+    prepare_kernel_block_sizes,
 )
 
 pytestmark = pytest.mark.cpu_test
@@ -54,12 +71,12 @@ def _selector(dcp_world_size: int) -> MLAAttentionSpec:
     )
 
 
-def _qsa_selector(dcp_world_size: int) -> MLAAttentionSpec:
+def _qsa_selector(dcp_world_size: int, compress_ratio: int = 8) -> MLAAttentionSpec:
     cache = SimpleNamespace(
         cache_config=SimpleNamespace(block_size=BLOCK_SIZE),
         head_size=128,
         dtype=torch.bfloat16,
-        compress_ratio=8,
+        compress_ratio=compress_ratio,
     )
     config = SimpleNamespace(
         parallel_config=SimpleNamespace(decode_context_parallel_size=dcp_world_size)
@@ -191,3 +208,142 @@ def test_dcp1_selector_can_share_a_group_with_main_kv() -> None:
     groups = get_kv_cache_groups(config, {"main": _main_kv(), "selector": selector})
     assert len(groups) == 1
     assert groups[0].layer_names == ["main", "selector"]
+
+
+class _QSAMainBackend:
+    @staticmethod
+    def get_name() -> str:
+        return "QWEN4_EXP_QSA_TRITON"
+
+    @staticmethod
+    def get_supported_kernel_block_sizes(spec=None):
+        return [MultipleOf(16)]
+
+
+def _packed_qsa_views(dcp_world_size: int):
+    config = _config(dcp_world_size)
+    config.cache_config.kv_cache_layout = "BLNHC"
+    main = FullAttentionSpec(
+        block_size=BLOCK_SIZE,
+        num_kv_heads=1,
+        head_size=256,
+        dtype=torch.bfloat16,
+    )
+    selector = _qsa_selector(dcp_world_size, compress_ratio=4)
+    specs = {"main": main, "selector": selector}
+    groups = get_kv_cache_groups(config, specs)
+    cache = get_kv_cache_config_from_groups(
+        config,
+        groups,
+        available_memory=2 * sum(spec.page_size_bytes for spec in specs.values()),
+    )
+    attn_groups = [
+        [
+            AttentionGroup(
+                QSAStateBackend if name == "selector" else _QSAMainBackend,
+                [name],
+                specs[name],
+                group_id,
+            )
+            for name in group.layer_names
+        ]
+        for group_id, group in enumerate(groups)
+    ]
+    kernel_sizes = prepare_kernel_block_sizes(cache, attn_groups)
+    views = allocate_kv_cache(
+        cache, torch.device("cpu"), KVCacheLayout.BLNHC, kernel_sizes
+    )
+    return config, groups, cache, attn_groups, kernel_sizes, views, selector
+
+
+def test_packed_replicated_selector_maps_two_manager_blocks_without_aliasing() -> None:
+    """The selector's virtual pages must stay inside its packed physical pages."""
+    config, groups, cache, attn_groups, kernel_sizes, views, selector = (
+        _packed_qsa_views(2)
+    )
+    assert len(groups) == 1
+    assert groups[0].kv_cache_spec.block_size == BLOCK_SIZE
+    assert selector.block_size == 2 * BLOCK_SIZE
+    assert kernel_sizes == [BLOCK_SIZE]
+    assert len(cache.kv_cache_tensors) == 2
+    assert all(t.block_stride > t.layer_stride for t in cache.kv_cache_tensors)
+
+    selector_group = next(g for g in attn_groups[0] if g.layer_names == ["selector"])
+    selector_group.create_metadata_builders(
+        config, torch.device("cpu"), kernel_block_size=BLOCK_SIZE
+    )
+    raw_selector = views["selector"]
+    assert raw_selector.shape == (2, 1, 392, 128)
+    mapped = map_kv_caches_to_kernel_blocks(views, attn_groups[0])["selector"]
+    stride = selector_group.kernel_block_stride
+    assert stride == cache.kv_cache_tensors[0].block_stride // (
+        selector.page_size_bytes // 2
+    )
+    assert mapped.shape == (stride + 2, 1, 196, 128)
+
+    block_table = selector_group.map_to_kernel_block_table(
+        torch.tensor([[0, 1]], dtype=torch.int32)
+    )
+    assert block_table.tolist() == [[0, 1, stride, stride + 1]]
+    slots = compressed_qsa_slot_mapping(
+        block_table,
+        torch.zeros(2, dtype=torch.int32),
+        torch.tensor([1567, 1603], dtype=torch.int64),
+        storage_block_size=196,
+        compress_ratio=4,
+    )
+    assert slots.tolist() == [391, stride * 196 + 8]
+
+    mapped[1, 0, 0, 0] = 2
+    mapped[1, 0, 195, 0] = 4
+    mapped[stride, 0, 8, 0] = 3
+    assert raw_selector[0, 0, 196, 0] == 2
+    assert raw_selector[0, 0, 391, 0] == 4
+    assert raw_selector[1, 0, 8, 0] == 3
+    assert torch.count_nonzero(views["main"]) == 0
+
+    restored = selector_group.map_kv_cache_to_manager_blocks(mapped, 2)
+    assert restored.data_ptr() == raw_selector.data_ptr()
+    assert restored.shape == raw_selector.shape
+    assert restored.stride() == raw_selector.stride()
+    assert torch.equal(restored, raw_selector)
+
+
+def test_dcp1_packed_selector_keeps_its_original_view() -> None:
+    """Equal manager and kernel blocks must not remap the DCP=1 cache."""
+    config, _, _, attn_groups, kernel_sizes, views, selector = _packed_qsa_views(1)
+    assert kernel_sizes == [BLOCK_SIZE]
+    assert selector.block_size == BLOCK_SIZE
+    assert views["selector"].shape == (2, 1, 196, 128)
+    selector_group = next(g for g in attn_groups[0] if g.layer_names == ["selector"])
+    selector_group.create_metadata_builders(
+        config, torch.device("cpu"), kernel_block_size=BLOCK_SIZE
+    )
+    assert selector_group.kernel_block_size is None
+    mapped = map_kv_caches_to_kernel_blocks(views, attn_groups[0])
+    assert mapped["selector"] is views["selector"]
+
+
+def test_packed_uncompressed_cache_still_rejects_virtual_split() -> None:
+    """A token cache cannot use the compressed-cache strided mapping path."""
+    spec = FullAttentionSpec(
+        block_size=2 * BLOCK_SIZE,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.bfloat16,
+    )
+    stride = 2 * spec.page_size_bytes
+    cache = KVCacheConfig(
+        num_blocks=2,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=2 * stride,
+                layers=["main"],
+                layer_stride=spec.page_size_bytes,
+                block_stride=stride,
+            )
+        ],
+        kv_cache_groups=[KVCacheGroupSpec(["main"], spec)],
+    )
+    with pytest.raises(ValueError, match="cannot be split"):
+        allocate_kv_cache(cache, torch.device("cpu"), KVCacheLayout.BLNHC, [BLOCK_SIZE])

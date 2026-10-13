@@ -615,6 +615,28 @@ def allocate_kv_cache(
         kernel_block_size = None
         if kernel_block_sizes is not None and group_id < len(kernel_block_sizes):
             kernel_block_size = kernel_block_sizes[group_id]
+        if (
+            kernel_block_size is not None
+            and isinstance(spec, AttentionSpec)
+            and spec.tokens_per_state > 1
+            and spec.num_heads == 1
+            and spec.page_size_padded is None
+            and spec.block_size > kernel_block_size
+            and spec.block_size % kernel_block_size == 0
+            and tensor.block_stride != spec.page_size_bytes
+            and tensor.block_stride
+            % (
+                spec.get_num_kernel_states(kernel_block_size)
+                * spec.state_content_size_bytes
+            )
+            == 0
+            and spec.num_states
+            == (spec.block_size // kernel_block_size)
+            * spec.get_num_kernel_states(kernel_block_size)
+        ):
+            # Bind packed compressed pages whole; AttentionGroup maps their
+            # kernel blocks with the stride between manager blocks later.
+            kernel_block_size = None
         views = create_kv_cache_views(
             buf,
             spec,
