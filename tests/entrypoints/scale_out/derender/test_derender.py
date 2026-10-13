@@ -11,7 +11,9 @@ import pytest_asyncio
 
 from tests.utils import RemoteLaunchRenderServer
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
-from vllm.entrypoints.scale_out.token_in_token_out.protocol import GenerateResponse
+from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
+    GenerateTokensResponse,
+)
 from vllm.renderers.online_derenderer import OnlineDerenderer
 from vllm.tokenizers import get_tokenizer
 
@@ -1478,7 +1480,7 @@ def test_derender_chat_finish_reason_matches_chat_completion(
         tools=_E2E_TOOLS,
         tool_choice=tool_choice,
     )
-    response = GenerateResponse.model_validate(
+    response = GenerateTokensResponse.model_validate(
         _make_generate_response(
             tokenizer.encode(text, add_special_tokens=False),
             finish_reason=engine_finish_reason,
