@@ -445,13 +445,9 @@ def fused_recurrent_gated_delta_rule_packed_decode(
         and current_platform.is_cuda()
         and current_platform.is_device_capability_family(100, device_id=dev.index)
     ):
-        small_workload = (
-            512
-            if mixed_qkv.dtype == torch.float32
-            and initial_state.dtype == torch.float32
-            else 64
-        )
-        if B * HV <= small_workload:
+        # Tuned on GB300; validated on GB200 and with 148 SMs.
+        # MRv2 decode warmup/graph capture compiles the reachable BV variants.
+        if B * HV <= 64:
             BV = 4
         elif initial_state.dtype == torch.float32:
             BV = 8
