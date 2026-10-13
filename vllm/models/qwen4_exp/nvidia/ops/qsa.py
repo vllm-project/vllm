@@ -29,8 +29,10 @@ def _maybe_dequant(tile):
         # 15, exp+mantissa to bits 13..7 gives the fp16 of x * 2^-8. Exact for
         # every finite code; the two NaN codes decode to +-480 after the host
         # scale instead of NaN.
-        code = tile.to(tl.uint16)
-        bits = ((code & 0x80) << 8) | ((code & 0x7F) << 7)
+        # Sign-extending the byte sets bits 15..7 to the sign; the shift moves
+        # exp+mantissa to bits 13..7 and the mask clears the sign copy at 14.
+        code = tile.to(tl.int8, bitcast=True).to(tl.int16).to(tl.uint16, bitcast=True)
+        bits = (code << 7) & 0xBF80
         return bits.to(tl.float16, bitcast=True)
     elif tile.dtype == tl.float8e4nv:
         return tile.to(tl.float16)
