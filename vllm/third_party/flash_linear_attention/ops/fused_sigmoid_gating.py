@@ -12,6 +12,45 @@ import torch
 from vllm.triton_utils import tl, triton
 
 
+@triton.jit
+def _gated_delta_rule_step(
+    b_h,
+    b_k,
+    b_v,
+    b_a,
+    b_b,
+    b_A_log,
+    b_dt_bias,
+    beta,
+    threshold,
+    USE_QK_L2NORM_IN_KERNEL: tl.constexpr,
+    IS_KDA: tl.constexpr,
+):
+    # If the model is loaded in fp16, without the .float() here, A might be -inf
+    x = b_a + b_dt_bias
+    softplus_x = tl.where(
+        beta * x <= threshold, (1 / beta) * tl.log(1 + tl.exp(beta * x)), x
+    )
+    b_g = -tl.exp(b_A_log) * softplus_x
+
+    # compute beta_output = sigmoid(b)
+    b_beta = tl.sigmoid(b_b)
+
+    if USE_QK_L2NORM_IN_KERNEL:
+        b_k = b_k * (tl.rsqrt(tl.sum(b_k * b_k) + 1e-6))
+    # [BV, BK]
+    if not IS_KDA:
+        b_h *= tl.exp(b_g)
+    else:
+        b_h *= tl.exp(b_g[None, :])
+    # [BV]
+    b_v -= tl.sum(b_h * b_k[None, :], 1)
+    b_v *= b_beta
+    # [BV, BK]
+    b_h += b_v[:, None] * b_k[None, :]
+    return b_h
+
+
 @triton.heuristics(
     {
         "USE_INITIAL_STATE": lambda args: args["h0"] is not None,
@@ -58,6 +97,7 @@ def fused_sigmoid_gating_delta_rule_update_kernel(
     IS_CONTINUOUS_BATCHING: tl.constexpr,
     IS_SPEC_DECODING: tl.constexpr,
     IS_KDA: tl.constexpr,
+    DEFER_SPEC_STATE: tl.constexpr,
 ):
     i_k, i_v, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_n, i_hv = i_nh // HV, i_nh % HV
@@ -98,9 +138,56 @@ def fused_sigmoid_gating_delta_rule_update_kernel(
     mask_k = o_k < K
     mask_v = o_v < V
     mask_h = mask_v[:, None] & mask_k[None, :]
+    b_A_log = tl.load(p_A_log).to(tl.float32)
+    b_dt_bias = tl.load(p_dt_bias).to(tl.float32)
 
+    # With DEFER_SPEC_STATE, a spec-decode step stores the full state only after
+    # its first token (slot 0); the raw inputs of the later tokens are recorded
+    # in slot 1, which holds HV * V * K elements, far more than they need. The
+    # next step replays the accepted ones, rebuilding the same state that the
+    # per-token stores would have kept, for one state store per step instead
+    # of one per token.
+    STASH_W: tl.constexpr = BK + BV + 2
+    o_r = tl.arange(0, BV)
     b_h = tl.zeros([BV, BK], dtype=tl.float32)
-    if USE_INITIAL_STATE:
+    if DEFER_SPEC_STATE:
+        state_idx = tl.load(ssm_state_indices + i_n * stride_indices_seq).to(tl.int64)
+        if state_idx <= 0:
+            return
+        p_h0 = h0 + state_idx * stride_init_state_token
+        p_h0 = p_h0 + i_hv * V * K + o_v[:, None] * K + o_k[None, :]
+        b_h += tl.load(p_h0, mask=mask_h, other=0).to(tl.float32)
+        stash_idx = tl.load(
+            ssm_state_indices + i_n * stride_indices_seq + stride_indices_tok
+        ).to(tl.int64)
+        # Each program records its own copy of k, so programs never share a
+        # record and replay reads only what this program wrote.
+        p_stash = (
+            h0
+            + stash_idx * stride_init_state_token
+            + (i_hv * tl.num_programs(1) + i_v) * STASH_W
+        )
+        stash_stride = HV * tl.num_programs(1) * STASH_W
+        num_replay = tl.load(num_accepted_tokens + i_n).to(tl.int32) - 1
+        for i_r in range(0, num_replay):
+            p_r = p_stash + i_r * stash_stride
+            b_h = _gated_delta_rule_step(
+                b_h,
+                tl.load(p_r + o_k, mask=mask_k, other=0).to(tl.float32),
+                tl.load(p_r + BK + o_r, mask=mask_v, other=0).to(tl.float32),
+                tl.load(p_r + BK + BV).to(tl.float32),
+                tl.load(p_r + BK + BV + 1).to(tl.float32),
+                b_A_log,
+                b_dt_bias,
+                beta,
+                threshold,
+                USE_QK_L2NORM_IN_KERNEL,
+                IS_KDA,
+            )
+        # Replay must finish reading the records before this step's tokens
+        # overwrite them.
+        tl.debug_barrier()
+    elif USE_INITIAL_STATE:
         if IS_CONTINUOUS_BATCHING:
             if IS_SPEC_DECODING:
                 i_t = tl.load(num_accepted_tokens + i_n).to(tl.int64) - 1
@@ -124,37 +211,40 @@ def fused_sigmoid_gating_delta_rule_update_kernel(
         b_k = tl.load(p_k, mask=mask_k, other=0).to(tl.float32)
         b_v = tl.load(p_v, mask=mask_v, other=0).to(tl.float32)
         b_b = tl.load(p_b).to(tl.float32)
-
-        # If the model is loaded in fp16, without the .float() here, A might be -inf
-        x = tl.load(p_a).to(tl.float32) + tl.load(p_dt_bias).to(tl.float32)
-        softplus_x = tl.where(
-            beta * x <= threshold, (1 / beta) * tl.log(1 + tl.exp(beta * x)), x
-        )
-        b_g = -tl.exp(tl.load(p_A_log).to(tl.float32)) * softplus_x
-
-        # compute beta_output = sigmoid(b)
-        b_beta = tl.sigmoid(b_b.to(tl.float32))
+        b_a = tl.load(p_a).to(tl.float32)
+        if DEFER_SPEC_STATE:
+            if i_t > 0:
+                p_r = p_stash + (i_t - 1) * stash_stride
+                tl.store(p_r + o_k, b_k.to(p_r.dtype.element_ty), mask=mask_k)
+                tl.store(p_r + BK + o_r, b_v.to(p_r.dtype.element_ty), mask=mask_v)
+                tl.store(p_r + BK + BV, b_a.to(p_r.dtype.element_ty))
+                tl.store(p_r + BK + BV + 1, b_b.to(p_r.dtype.element_ty))
 
         if USE_QK_L2NORM_IN_KERNEL:
             b_q = b_q * (tl.rsqrt(tl.sum(b_q * b_q) + 1e-6))
-            b_k = b_k * (tl.rsqrt(tl.sum(b_k * b_k) + 1e-6))
         b_q = b_q * scale
-        # [BV, BK]
-        if not IS_KDA:
-            b_h *= tl.exp(b_g)
-        else:
-            b_h *= tl.exp(b_g[None, :])
-        # [BV]
-        b_v -= tl.sum(b_h * b_k[None, :], 1)
-        b_v *= b_beta
-        # [BV, BK]
-        b_h += b_v[:, None] * b_k[None, :]
+        b_h = _gated_delta_rule_step(
+            b_h,
+            b_k,
+            b_v,
+            b_a,
+            b_b,
+            b_A_log,
+            b_dt_bias,
+            beta,
+            threshold,
+            USE_QK_L2NORM_IN_KERNEL,
+            IS_KDA,
+        )
         # [BV]
         b_o = tl.sum(b_h * b_q[None, :], 1)
         tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=mask_v)
 
         # keep the states for multi-query tokens
-        if INPLACE_FINAL_STATE:
+        if DEFER_SPEC_STATE:
+            if i_t == 0:
+                tl.store(p_h0, b_h.to(p_h0.dtype.element_ty), mask=mask_h)
+        elif INPLACE_FINAL_STATE:
             # Load state index and check for invalid entries
             final_state_idx = tl.load(
                 ssm_state_indices + i_n * stride_indices_seq + i_t
@@ -196,20 +286,31 @@ def fused_sigmoid_gating_delta_rule_update(
     num_accepted_tokens: torch.Tensor | None = None,
     use_qk_l2norm_in_kernel: bool = False,
     is_kda: bool = False,
+    defer_spec_state: bool = False,
 ):
     """
     Fused triton implementation of sigmoid gating delta rule update.
     This function uses a single fused kernel that combines both sigmoid gating
     computation and the recurrent delta rule update for better performance.
+
+    With defer_spec_state, a spec-decode step keeps the state after its first
+    token in slot 0 of each row of ssm_state_indices and records the inputs of
+    the other tokens in slot 1, rather than storing a state per token. The
+    next step replays num_accepted_tokens - 1 records from slot 1 onto slot 0.
+    Every spec-decode step of a request must then use this mode, and nothing
+    else may read the per-token slots.
     """
     B, T, H, K, V = *k.shape, v.shape[-1]
     HV = v.shape[2]
     N = B if cu_seqlens is None else len(cu_seqlens) - 1
-    BK, BV = triton.next_power_of_2(K), min(triton.next_power_of_2(V), 32)
+    # The deferred mode does less memory traffic per token, so it is bound by
+    # the serial token loop and gains from more, smaller programs.
+    BK = triton.next_power_of_2(K)
+    BV = min(triton.next_power_of_2(V), 16 if defer_spec_state else 32)
     NK, NV = triton.cdiv(K, BK), triton.cdiv(V, BV)
     assert NK == 1, "NK > 1 is not supported yet"
     num_stages = 3
-    num_warps = 4
+    num_warps = 1 if defer_spec_state else 4
 
     if cu_seqlens is not None and q.shape[0] != 1:
         raise ValueError(
@@ -237,6 +338,22 @@ def fused_sigmoid_gating_delta_rule_update(
         stride_indices_seq, stride_indices_tok = ssm_state_indices.stride(0), 1
     else:
         stride_indices_seq, stride_indices_tok = ssm_state_indices.stride()
+
+    if defer_spec_state:
+        assert (
+            inplace_final_state
+            and not is_kda
+            and num_accepted_tokens is not None
+            and ssm_state_indices is not None
+            and ssm_state_indices.ndim == 2
+        )
+        max_query_len = ssm_state_indices.size(1)
+        # Replay matches the per-token states exactly only if the state is
+        # never rounded between tokens.
+        assert initial_state.dtype == torch.float32
+        assert (max_query_len - 1) * NV * (BK + BV + 2) <= V * K, (
+            "too many speculative tokens to record in one state slot"
+        )
 
     grid = (NK, NV, N * HV)
     fused_sigmoid_gating_delta_rule_update_kernel[grid](
@@ -272,6 +389,7 @@ def fused_sigmoid_gating_delta_rule_update(
         INPLACE_FINAL_STATE=inplace_final_state,
         USE_QK_L2NORM_IN_KERNEL=use_qk_l2norm_in_kernel,
         IS_KDA=is_kda,
+        DEFER_SPEC_STATE=defer_spec_state,
         num_warps=num_warps,
         num_stages=num_stages,
     )
