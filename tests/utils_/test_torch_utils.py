@@ -14,6 +14,7 @@ from vllm.utils.torch_utils import (
     is_lossless_cast,
     is_quantized_kv_cache,
     set_default_torch_dtype,
+    set_random_seed,
     set_torch_threads_for_runtime,
     startup_omp_num_threads,
 )
@@ -217,3 +218,17 @@ def test_async_tensor_h2d_staging(device):
         async_tensor_h2d([1, 2, 3], device=device, dtype=torch.int32),
         torch.tensor([1, 2, 3], dtype=torch.int32, device=device),
     )
+
+
+def test_set_random_seed_differs_per_data_parallel_index():
+    """Unseeded requests draw from the global RNGs; DP engines sharing the engine
+    seed must get distinct, reproducible streams, and index 0 keeps the seed."""
+
+    def draws(*args):
+        set_random_seed(*args)
+        return np.random.randint(2**31, size=4).tolist(), torch.rand(4).tolist()
+
+    assert draws(42, 0) == draws(42)
+    assert draws(42, 1) == draws(42, 1)
+    assert len({str(draws(42, i)) for i in range(4)}) == 4
+    assert draws(42, 1) != draws(43, 1)

@@ -17,10 +17,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
     SchedulerOffloadConfig,
 )
 from vllm.platforms import current_platform
-from vllm.v1.core.kv_cache_utils import (
-    generate_scheduler_kv_cache_config,
-    kv_cache_groups_tp_replicas,
-)
+from vllm.v1.core.kv_cache_planning import kv_cache_groups_tp_replicas
+from vllm.v1.core.kv_cache_utils import generate_scheduler_kv_cache_config
 from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
     FullAttentionSpec,
@@ -71,7 +69,7 @@ def _make_vllm_config(
             decode_context_parallel_size=decode_context_parallel_size,
         )
     config.kv_events_config = None
-    config.use_v2_model_runner = False
+    config.use_v2_model_runner = True
     config.kv_transfer_config = KVTransferConfig(
         kv_connector="OffloadingConnector",
         kv_role="kv_both",
@@ -284,7 +282,7 @@ def _parallelism_agnostic(
     kv_cache_groups: list[KVCacheGroupSpec],
     *,
     canonical: bool = False,
-    v2: bool = False,
+    v2: bool = True,
 ) -> bool:
     config = _make_vllm_config(
         extra_config={"canonical_layout": True} if canonical else None
@@ -308,7 +306,7 @@ def _replicated_layout(
     prefill_context_parallel_size: int = 1,
     decode_context_parallel_size: int = 1,
     use_mla: bool = True,
-    use_v2_model_runner: bool = False,
+    use_v2_model_runner: bool = True,
     distributed_executor_backend: Any = "mp",
     nnodes: int = 1,
     world_size: int | None = None,
@@ -1105,7 +1103,10 @@ def test_replicated_layout_parallel_gate(kwargs: dict[str, Any], case: str):
 
 
 def test_parallelism_agnostic_for_single_full_attention_group():
-    assert _parallelism_agnostic([KVCacheGroupSpec(["l0"], _full_attention_spec())])
+    # The direct (non-canonical) parallelism-agnostic layout is MRV1-only.
+    assert _parallelism_agnostic(
+        [KVCacheGroupSpec(["l0"], _full_attention_spec())], v2=False
+    )
 
 
 _SWA_SPEC = SlidingWindowSpec(
@@ -1147,7 +1148,9 @@ def _uniform_group(*specs: KVCacheSpec) -> KVCacheGroupSpec:
     ],
 )
 def test_parallelism_agnostic_excluded(kv_cache_groups: list[KVCacheGroupSpec]):
-    assert not _parallelism_agnostic(kv_cache_groups)
+    # The direct layout is never parallelism-agnostic on MRV2, so check the
+    # MRV1 gate.
+    assert not _parallelism_agnostic(kv_cache_groups, v2=False)
 
 
 @pytest.mark.parametrize(
@@ -1178,7 +1181,7 @@ def test_parallelism_agnostic_excluded(kv_cache_groups: list[KVCacheGroupSpec]):
 def test_canonical_layout_gate(kv_cache_groups, certified):
     """The canonical layout certifies portability group by group; none of
     these shapes are portable in the direct layout."""
-    assert not _parallelism_agnostic(kv_cache_groups)
+    assert not _parallelism_agnostic(kv_cache_groups, v2=False)
     assert _parallelism_agnostic(kv_cache_groups, canonical=True) is certified
 
 
@@ -1233,7 +1236,7 @@ def test_canonical_layout_certifies_v2_model_runner():
     registration, so the static gate must not depend on the model-runner
     version — the v2 runner is the case the canonical layout exists for."""
     groups = _groups(_full_attention_spec())
-    assert _parallelism_agnostic(groups, canonical=True, v2=True)
+    assert _parallelism_agnostic(groups, canonical=True)
 
 
 @pytest.mark.parametrize("tp_size", [1, 2, 4])
@@ -1275,7 +1278,6 @@ def test_canonical_mla_dsa_rows_are_tp_independent(tp_size, scheduler):
 
 def test_parallelism_agnostic_disabled_on_v2_model_runner():
     config = _make_vllm_config()
-    config.use_v2_model_runner = True
     kv_cache_config = KVCacheConfig(
         num_blocks=0,
         kv_cache_tensors=[],

@@ -24,7 +24,7 @@ import torch
 import torch.nn as nn
 from transformers import PreTrainedConfig
 
-from vllm.config import VllmConfig
+from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
@@ -64,6 +64,7 @@ class MiMoV2MTPLayer(nn.Module):
         self,
         config: PreTrainedConfig,
         prefix: str,
+        cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
     ) -> None:
         super().__init__()
@@ -100,6 +101,7 @@ class MiMoV2MTPLayer(nn.Module):
             layer_id=0,
             rope_theta=swa_rope_theta,
             max_position_embeddings=getattr(config, "max_position_embeddings", 32768),
+            cache_config=cache_config,
             quant_config=quant_config,
             partial_rotary_factor=getattr(config, "partial_rotary_factor", 1.0),
             prefix=f"{prefix}.self_attn",
@@ -147,6 +149,7 @@ class _MiMoV2MTPLayers(nn.Module):
         self,
         config: PreTrainedConfig,
         num_mtp_layers: int,
+        cache_config: CacheConfig | None,
         quant_config: QuantizationConfig | None,
         prefix: str,
     ) -> None:
@@ -156,6 +159,7 @@ class _MiMoV2MTPLayers(nn.Module):
                 str(i): MiMoV2MTPLayer(
                     config=config,
                     prefix=f"{prefix}.{i}",
+                    cache_config=cache_config,
                     quant_config=quant_config,
                 )
                 for i in range(num_mtp_layers)
@@ -182,6 +186,7 @@ class MiMoV2MultiTokenPredictor(nn.Module):
         self.mtp = _MiMoV2MTPLayers(
             config=config,
             num_mtp_layers=num_mtp_layers,
+            cache_config=vllm_config.cache_config,
             quant_config=vllm_config.quant_config,
             prefix=maybe_prefix(prefix, "mtp.layers"),
         )
