@@ -3321,14 +3321,11 @@ class VllmConfig:
             self.cache_config.use_kda_recoverssm = False
             return self
 
-        glm5next_architectures = (
-            "Glm5NextForCausalLM",
-            "Glm5NextForConditionalGeneration",
-        )
         kda_architectures = (
             "KimiLinearForCausalLM",
             "KimiK3ForConditionalGeneration",
-            *glm5next_architectures,
+            "Glm5NextForCausalLM",
+            "Glm5NextForConditionalGeneration",
         )
         is_kda_model = (
             self.model_config is not None
@@ -3354,14 +3351,6 @@ class VllmConfig:
                 "FlashInfer ReplaySSM requires --replayssm-buffer-len <= 16"
             )
         if self.cache_config.use_kda_recoverssm:
-            if (
-                self.model_config is not None
-                and self.model_config.architecture in glm5next_architectures
-                and not self.use_v2_model_runner
-            ):
-                raise ValueError(
-                    "GLM-5.3 RecoverSSM requires VLLM_USE_V2_MODEL_RUNNER=1"
-                )
             if self.mamba_config.enable_stochastic_rounding:
                 raise ValueError(
                     "RecoverSSM supports bfloat16/float32 "
@@ -3415,12 +3404,16 @@ class VllmConfig:
                 "Triton ReplaySSM requires Model Runner V1; use "
                 "--mamba-backend flashinfer or Model Runner V1"
             )
+        # KDA RecoverSSM records are verify scratch after the conv and recurrent
+        # state of each Mamba page. NIXL transfers only those two regions of a
+        # request's single state block, and DecodeBench fills dummy state.
         if (
             self.kv_transfer_config is not None
             and self.kv_transfer_config.is_kv_transfer_instance
             and not (
                 self.cache_config.use_kda_recoverssm
-                and self.kv_transfer_config.kv_connector == "DecodeBenchConnector"
+                and self.kv_transfer_config.kv_connector
+                in ("DecodeBenchConnector", "NixlConnector")
             )
         ):
             raise ValueError(

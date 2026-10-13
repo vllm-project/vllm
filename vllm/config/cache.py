@@ -214,8 +214,7 @@ class CacheConfig:
     required."""
     use_kda_recoverssm: bool = field(default=False, init=False)
     """Whether KDA uses RecoverSSM speculative decode. Enabled by use_replayssm
-    for supported KDA architectures with speculative decoding. GLM-5.3 requires
-    Model Runner V2 and the Triton mamba backend."""
+    for supported KDA architectures with speculative decoding."""
 
     # Will be set after profiling.
     num_gpu_blocks: int | None = field(default=None, init=False)

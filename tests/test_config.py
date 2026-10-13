@@ -273,6 +273,19 @@ def test_kda_recoverssm_derivation_is_revalidated():
     config.use_v2_model_runner = True
     config.cache_config.mamba_cache_mode = "none"
 
+    config.model_config.architecture = "Glm5NextForConditionalGeneration"
+    VllmConfig.validate_mamba_cached_kernel(config)
+    assert config.cache_config.use_kda_recoverssm
+    for connector in ("DecodeBenchConnector", "NixlConnector"):
+        config.kv_transfer_config = SimpleNamespace(
+            is_kv_transfer_instance=True, kv_connector=connector
+        )
+        VllmConfig.validate_mamba_cached_kernel(config)
+    config.kv_transfer_config.kv_connector = "OffloadingConnector"
+    with pytest.raises(ValueError, match="incompatible with KV connectors"):
+        VllmConfig.validate_mamba_cached_kernel(config)
+    config.kv_transfer_config = None
+
     config.model_config.architecture = "NemotronHForCausalLM"
     config.mamba_config.backend = MambaBackendEnum.FLASHINFER
     VllmConfig.validate_mamba_cached_kernel(config)
@@ -4192,57 +4205,3 @@ def test_hybrid_layer_counts_sparse_attention_as_attention(
             )
             == len(layer_types) - expected_attention
         )
-
-
-@pytest.mark.parametrize(
-    "architecture", ["Glm5NextForCausalLM", "Glm5NextForConditionalGeneration"]
-)
-@pytest.mark.parametrize("cache_mode", ["none", "align"])
-@pytest.mark.parametrize("use_v2", [False, True])
-def test_recoverssm_requires_post_sampling_commit(architecture, cache_mode, use_v2):
-    """MRV1 cannot commit the read-only checkpoint after sampling."""
-    from types import SimpleNamespace
-
-    from vllm.config import CacheConfig, MambaConfig, ParallelConfig, VllmConfig
-
-    config = SimpleNamespace(
-        model_config=SimpleNamespace(
-            architecture=architecture, supports_replayssm=True
-        ),
-        cache_config=CacheConfig(use_replayssm=True, mamba_cache_mode=cache_mode),
-        mamba_config=MambaConfig(),
-        parallel_config=ParallelConfig(),
-        num_speculative_tokens=3,
-        use_v2_model_runner=use_v2,
-        kv_transfer_config=None,
-    )
-    if use_v2:
-        VllmConfig.validate_mamba_cached_kernel(config)
-        assert config.cache_config.use_kda_recoverssm
-    else:
-        with pytest.raises(ValueError, match="GLM-5.3 RecoverSSM requires"):
-            VllmConfig.validate_mamba_cached_kernel(config)
-
-
-@pytest.mark.parametrize("connector", ["DecodeBenchConnector", "NixlConnector"])
-def test_kda_recoverssm_allows_only_benchmark_connector(connector):
-    """Dummy-state benchmarks need no serialization or remote state transfer."""
-    from vllm.config import KVTransferConfig, MambaConfig, ParallelConfig
-
-    config = SimpleNamespace(
-        model_config=SimpleNamespace(
-            architecture="Glm5NextForConditionalGeneration", supports_replayssm=True
-        ),
-        cache_config=CacheConfig(use_replayssm=True),
-        mamba_config=MambaConfig(),
-        parallel_config=ParallelConfig(),
-        num_speculative_tokens=3,
-        use_v2_model_runner=True,
-        kv_transfer_config=KVTransferConfig(kv_connector=connector, kv_role="kv_both"),
-    )
-    if connector == "DecodeBenchConnector":
-        VllmConfig.validate_mamba_cached_kernel(config)
-        assert config.cache_config.use_kda_recoverssm
-    else:
-        with pytest.raises(ValueError, match="incompatible with KV connectors"):
-            VllmConfig.validate_mamba_cached_kernel(config)
