@@ -43,8 +43,6 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
 
         self.inputs_embeds: torch.Tensor | None = None
 
-        self.use_fused_multi_step_decode = False
-
     def load_model(self, target_model: nn.Module) -> None:
         super().load_model(target_model)
         if not self.supports_mm_inputs:

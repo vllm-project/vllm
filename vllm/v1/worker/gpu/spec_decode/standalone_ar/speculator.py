@@ -92,8 +92,13 @@ class StandaloneARSpeculator(DraftModelSpeculator):
             return
 
         assert self.decode_cudagraph_manager is not None
+        decode_fn = (
+            self._generate_fused_drafts
+            if self.supports_decode_metadata_update
+            else self._generate_draft
+        )
         self.decode_cudagraph_manager.capture(
-            self._generate_fused_drafts,
+            decode_fn,
             self.model_state,
             self.input_buffers,
             self.block_tables,
@@ -275,7 +280,7 @@ class StandaloneARSpeculator(DraftModelSpeculator):
         if num_reqs_padded > num_reqs:
             query_start_loc[num_reqs + 1 :].fill_(num_reqs)
 
-    def _multi_step_decode(
+    def _fused_multi_step_decode(
         self,
         num_reqs: int,
         skip_attn: bool,
@@ -283,7 +288,12 @@ class StandaloneARSpeculator(DraftModelSpeculator):
         num_tokens_across_dp: torch.Tensor | None,
         seq_lens_cpu_upper_bound: torch.Tensor,
     ) -> None:
-        """Prepare eager decode metadata, then run the fused draft loop."""
+        """Prepare metadata and run all draft steps in one fused loop."""
+        if batch_desc.cg_mode == CUDAGraphMode.FULL:
+            assert self.decode_cudagraph_manager is not None
+            self.decode_cudagraph_manager.run_fullgraph(batch_desc)
+            return
+
         num_reqs_padded = batch_desc.num_reqs or num_reqs
         attn_metadata = None
         slot_mappings_by_layer = None
@@ -312,6 +322,74 @@ class StandaloneARSpeculator(DraftModelSpeculator):
             batch_desc.cg_mode,
         )
 
+    def _multi_step_decode(
+        self,
+        num_reqs: int,
+        skip_attn: bool,
+        batch_desc: BatchExecutionDescriptor,
+        num_tokens_across_dp: torch.Tensor | None,
+        seq_lens_cpu_upper_bound: torch.Tensor,
+    ) -> None:
+        """Rebuild attention metadata on the host before each draft step."""
+        num_reqs_padded = batch_desc.num_reqs or num_reqs
+        positions = self.input_buffers.positions[:num_reqs_padded]
+        query_start_loc = self.input_buffers.query_start_loc[: num_reqs_padded + 1]
+        idx_mapping = self.idx_mapping[:num_reqs_padded]
+
+        for step in range(1, self.num_speculative_steps):
+            self.input_buffers.input_ids[:num_reqs_padded].copy_(
+                self.draft_tokens[:num_reqs_padded, step - 1].int()
+            )
+            torch.clamp(
+                positions + 1,
+                max=self.max_model_len - 1,
+                out=positions,
+            )
+            torch.clamp(
+                self.input_buffers.seq_lens[:num_reqs_padded] + 1,
+                max=self.max_model_len,
+                out=self.input_buffers.seq_lens[:num_reqs_padded],
+            )
+
+            attn_metadata = None
+            slot_mappings_by_layer = None
+            if not skip_attn:
+                assert self.block_tables is not None
+                assert self.kv_cache_config is not None
+                slot_mappings = self.block_tables.compute_slot_mappings(
+                    idx_mapping,
+                    query_start_loc,
+                    positions,
+                    batch_desc.num_tokens,
+                )
+                slot_mappings_by_layer = build_slot_mappings_by_layer(
+                    slot_mappings, self.kv_cache_config
+                )
+                attn_metadata = self._build_uniform_attn_metadata(
+                    batch_desc=batch_desc,
+                    num_reqs=num_reqs,
+                    num_query_per_req=1,
+                    seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
+                    step=step + 1,
+                )
+
+            self.current_draft_step.fill_(step)
+            if batch_desc.cg_mode == CUDAGraphMode.FULL:
+                assert self.decode_cudagraph_manager is not None
+                self.decode_cudagraph_manager.run_fullgraph(batch_desc)
+            else:
+                self._generate_draft(
+                    num_reqs_padded,
+                    batch_desc.num_tokens,
+                    attn_metadata,
+                    slot_mappings_by_layer,
+                    num_tokens_across_dp,
+                    batch_desc.cg_mode,
+                )
+            self.draft_tokens[:num_reqs_padded, step].copy_(
+                self.decode_output[:num_reqs_padded]
+            )
+
     def _generate_fused_drafts(
         self,
         num_reqs: int,
@@ -324,12 +402,6 @@ class StandaloneARSpeculator(DraftModelSpeculator):
     ) -> None:
         if num_speculative_steps is None:
             num_speculative_steps = self.num_speculative_steps
-
-        attn_groups = (
-            [group for groups in self.attn_groups for group in groups]
-            if attn_metadata is not None
-            else []
-        )
 
         for step in range(1, num_speculative_steps):
             self.input_buffers.input_ids[:num_reqs].copy_(
@@ -354,8 +426,7 @@ class StandaloneARSpeculator(DraftModelSpeculator):
                     self.input_buffers.positions[:num_reqs],
                     num_tokens_padded,
                 )
-                for attn_group in attn_groups:
-                    attn_group.update_draft_decode_metadata(attn_metadata)
+                self._update_draft_decode_metadata(attn_metadata, num_reqs)
 
             self.current_draft_step.fill_(step)
             hidden_states = self._run_model(
@@ -381,6 +452,35 @@ class StandaloneARSpeculator(DraftModelSpeculator):
     def supports_batch_sharded_draft_logits(self) -> bool:
         # Every draft logits write goes through sample_draft.
         return True
+
+    def _generate_draft(
+        self,
+        num_reqs: int,
+        num_tokens_padded: int,
+        attn_metadata: dict[str, Any] | None,
+        slot_mappings: dict[str, torch.Tensor] | None,
+        num_tokens_across_dp: torch.Tensor | None,
+        cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
+        num_speculative_steps: int | None = None,
+    ) -> None:
+        hidden_states = self._run_model(
+            self.input_buffers.input_ids[:num_tokens_padded],
+            self.input_buffers.positions[:num_tokens_padded],
+            attn_metadata,
+            slot_mappings,
+            num_tokens_across_dp,
+            cudagraph_runtime_mode,
+            self.decode_cudagraph_manager,
+        )
+        self.decode_output[:num_reqs] = self.sample_draft(
+            hidden_states[:num_reqs],
+            self.input_buffers.positions[:num_reqs],
+            self.idx_mapping[:num_reqs],
+            self.temperature,
+            self.seeds,
+            self.current_draft_step,
+            self.draft_logits,
+        )
 
     @torch.inference_mode()
     def propose(
@@ -539,17 +639,18 @@ class StandaloneARSpeculator(DraftModelSpeculator):
             skip_attn,
             decode_batch_desc,
         )
-        if decode_batch_desc.cg_mode == CUDAGraphMode.FULL:
-            assert self.decode_cudagraph_manager is not None
-            self.decode_cudagraph_manager.run_fullgraph(decode_batch_desc)
-        else:
-            self._multi_step_decode(
-                num_reqs,
-                skip_attn,
-                decode_batch_desc,
-                decode_num_tokens_across_dp,
-                input_batch.seq_lens_cpu_upper_bound,
-            )
+        decode_fn = (
+            self._fused_multi_step_decode
+            if self.supports_decode_metadata_update
+            else self._multi_step_decode
+        )
+        decode_fn(
+            num_reqs,
+            skip_attn,
+            decode_batch_desc,
+            decode_num_tokens_across_dp,
+            input_batch.seq_lens_cpu_upper_bound,
+        )
 
         return self.draft_tokens[:num_reqs]
 
