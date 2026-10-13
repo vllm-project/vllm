@@ -378,6 +378,8 @@ class RequestOffloadState:
     # Fine-grained token boundary selected beyond the last complete offload
     # chunk. It is consumed when the corresponding load is scheduled.
     partial_tail_boundary: int | None = None
+    # True once a load from the offload tier was scheduled for this request.
+    loaded_from_offload: bool = False
     # Loaded attention keys cover their token positions. Recurrent state
     # supports the whole reused external prefix.
     load_key_ranges: list[tuple[int, int, OffloadKey]] = field(default_factory=list)
@@ -1255,6 +1257,7 @@ class OffloadingConnectorScheduler:
             return
 
         req_status = self._req_status[request.request_id]
+        req_status.loaded_from_offload = True
 
         num_locally_computed_tokens = req_status.num_locally_computed_tokens
         num_cached_tokens = num_locally_computed_tokens + num_external_tokens
@@ -1531,6 +1534,10 @@ class OffloadingConnectorScheduler:
                 continue
             req_status = self._req_status.get(req_id)
             assert req_status is not None
+            if self._max_eagle_proof_margin and not req_status.loaded_from_offload:
+                # Requests that did not load from the offload tier keep their
+                # EAGLE tail in the GPU prefix cache; skip the store.
+                continue
             boundaries = {boundary for _, _, boundary in entries}
             assert len(boundaries) == 1
             boundary = boundaries.pop()

@@ -916,6 +916,7 @@ def test_eagle_partial_tail_store_keys_attention_at_proof():
     request = _make_partial_tail_request(scheduler)
     request.num_computed_tokens = 30
     req_status = scheduler._req_status["req"]
+    req_status.loaded_from_offload = True
     req_status.group_states[0].block_ids[:] = [11, 12]
     req_status.group_states[1].block_ids[:] = [0, 21]
     scheduler.manager.prepare_store.side_effect = lambda keys, req_context: (
@@ -977,6 +978,7 @@ def test_eagle_partial_tail_store_needs_proof_in_prompt(
     request.num_prompt_tokens = num_prompt_tokens
     request.num_computed_tokens = num_computed_tokens
     req_status = scheduler._req_status["req"]
+    req_status.loaded_from_offload = True
     req_status.group_states[0].block_ids[:] = [11, 12]
     req_status.group_states[1].block_ids[:] = [0, 21]
     scheduler.manager.prepare_store.side_effect = lambda keys, req_context: (
@@ -1093,7 +1095,8 @@ def test_eagle_partial_tail_round_trip_serves_mamba_checkpoint(cow_on_proof_step
     The resend hits the Mamba checkpoint at 24 only through the EAGLE
     group's proof key at 28. With ``cow_on_proof_step``, the steps follow core:
     the prefill stops at 24, and the CoW hand-off arrives on the step that
-    computes tokens 24-30.
+    computes tokens 24-30. The producer models a turn that loaded its prefix
+    from the offload tier, so that its tail is stored.
     """
     scheduler = _make_partial_tail_scheduler(eagle=True)
     stored: set = set()
@@ -1130,6 +1133,7 @@ def test_eagle_partial_tail_round_trip_serves_mamba_checkpoint(cow_on_proof_step
     producer.status = RequestStatus.RUNNING
     assert scheduler.get_num_new_matched_tokens(producer, 0) == (0, False)
     producer_status = scheduler._req_status["req"]
+    producer_status.loaded_from_offload = True
     producer_status.group_states[0].block_ids[:] = [11, 12]
     producer_status.group_states[1].block_ids[:] = [0, 21]
     if cow_on_proof_step:
@@ -1164,6 +1168,58 @@ def test_eagle_partial_tail_round_trip_serves_mamba_checkpoint(cow_on_proof_step
     )
     [load_job_id] = scheduler._current_batch_load_jobs
     assert scheduler._jobs[load_job_id].keys == stored
+
+
+@pytest.mark.parametrize("host_hit", [False, True])
+def test_eagle_partial_tail_store_needs_offload_load(host_hit):
+    """Store an EAGLE partial tail only after a load from the offload tier.
+
+    Without a host hit, the GPU prefix cache keeps the tail, and the hand-off
+    that computes the proof at 28 stores nothing. After the request loads 24
+    tokens from the offload tier, the same hand-off stores the tail.
+    """
+    scheduler = _make_partial_tail_scheduler(eagle=True)
+    scheduler.manager.lookup.side_effect = lambda key, req_context: (
+        LookupResult.HIT
+        if host_hit
+        and (get_offload_group_idx(key) == 0 or get_offload_block_hash(key) == b"h5")
+        else LookupResult.MISS
+    )
+    scheduler.manager.prepare_store.side_effect = lambda keys, req_context: (
+        generate_store_output(keys)
+    )
+    request = _make_partial_tail_request(scheduler)
+    num_external_tokens = 24 if host_hit else 0
+    assert scheduler.get_num_new_matched_tokens(request, 0) == (
+        num_external_tokens,
+        host_hit,
+    )
+    scheduler.update_state_after_alloc(
+        request,
+        KVCacheBlocks(
+            (
+                [KVCacheBlock(11), KVCacheBlock(12)],
+                [KVCacheBlock(0, is_null=True), KVCacheBlock(21)],
+            )
+        ),
+        num_external_tokens=num_external_tokens,
+    )
+    req_status = scheduler._req_status["req"]
+    req_status.group_states[0].block_ids[:] = [11, 12]
+    req_status.group_states[1].block_ids[:] = [0, 21]
+    request.num_computed_tokens = 24
+
+    output = SimpleNamespace(
+        num_scheduled_tokens={"req": 6},
+        kv_connector_block_state=KVConnectorBlockState(
+            req_ids=set(),
+            resolve_block_ids={}.__getitem__,
+            boundary_state_offloads={"req": [(1, 99, 24)]},
+        ),
+    )
+
+    assert bool(scheduler._build_partial_tail_store_jobs(output)) == host_hit
+    assert scheduler.manager.prepare_store.called == host_hit
 
 
 def test_scheduler_reports_allocation_failure(request_runner):
