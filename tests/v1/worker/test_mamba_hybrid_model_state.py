@@ -387,7 +387,13 @@ def test_recoverssm_commits_accepted_window_after_v2_sampling() -> None:
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
-def test_recoverssm_align_tracks_mixed_batch_state_and_neutralizes_copy_bias() -> None:
+@pytest.mark.parametrize(
+    ("computed", "sampled", "expected_column"),
+    [(4, 3, 0), (4, 4, 0), (4, 5, 1), (8, 8, 1), (8, 9, 2)],
+)
+def test_recoverssm_align_tracks_mixed_batch_state_and_neutralizes_copy_bias(
+    computed: int, sampled: int, expected_column: int
+) -> None:
     state = object.__new__(MambaHybridModelState)
     state._align_mode = True
     state._mamba_ctx = None
@@ -400,11 +406,13 @@ def test_recoverssm_align_tracks_mixed_batch_state_and_neutralizes_copy_bias() -
     metadata.commit_recoverssm_state.return_value = RecoverSSMPostprocessMetadata(
         num_spec_decodes=1,
         request_indices=torch.tensor([1], dtype=torch.int32, device="cuda"),
-        num_computed_tokens=torch.tensor([6, 7], dtype=torch.int32, device="cuda"),
+        num_computed_tokens=torch.tensor(
+            [6, computed], dtype=torch.int32, device="cuda"
+        ),
         block_size=8,
         block_table=torch.zeros((2, 4), dtype=torch.int32, device="cuda"),
     )
-    num_sampled = torch.tensor([2, 3], dtype=torch.int32, device="cuda")
+    num_sampled = torch.tensor([2, sampled], dtype=torch.int32, device="cuda")
     idx_mapping = torch.tensor([3, 1], dtype=torch.int32, device="cuda")
     group = SimpleNamespace(layer_names=["layer"])
 
@@ -412,7 +420,7 @@ def test_recoverssm_align_tracks_mixed_batch_state_and_neutralizes_copy_bias() -
 
     state.postprocess_state(idx_mapping, num_sampled)
 
-    expected_state_indices = [-1, 1, -1, -1, -1]
+    expected_state_indices = [-1, expected_column, -1, -1, -1]
     assert state._mamba_state_idx_gpu.tolist() == expected_state_indices
     expected_accepted = [9, 1, 9, 2, 9]
     assert state.num_accepted_tokens_gpu.tolist() == expected_accepted
