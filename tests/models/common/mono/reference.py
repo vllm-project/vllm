@@ -58,7 +58,7 @@ class ReferenceModel(torch.nn.Module):
 
 
 @dataclass
-class Packed:
+class LaunchState:
     """What ``pack`` builds once at attach: views of the model's weights, never
     a copy, and the error words every kernel of this rank shares."""
 
@@ -69,10 +69,10 @@ class Packed:
 class ReferenceKernel:
     """One layer's launch at one width: calls the layer it replaces."""
 
-    def __init__(self, ctx: MonoContext, packed: Packed, layer, width: int):
+    def __init__(self, ctx: MonoContext, state: LaunchState, layer, width: int):
         self.cache_layers = (layer.attn_name,)
         self.ctx = ctx
-        self.packed = packed
+        self.state = state
         self.layer = layer
         self.width = width
         self.launched: list[int] = []
@@ -83,7 +83,7 @@ class ReferenceKernel:
         return self.layer(positions, *args, **kwargs)
 
     def health(self) -> torch.Tensor:
-        return self.packed.words
+        return self.state.words
 
     def warmup_keys(self) -> list[Any]:
         return [(self.layer.index, self.width)]
@@ -93,7 +93,7 @@ class ReferenceKernel:
 
     def fail(self, rank: int = 0) -> None:
         """Reports an in-kernel wait that gave up, as a launch would."""
-        self.packed.words[rank] = 1
+        self.state.words[rank] = 1
 
 
 def layers(config) -> list[int]:
@@ -122,21 +122,21 @@ def skip_layer(ctx: MonoContext, layer) -> str | None:
     return "dense layer" if layer.dense else None
 
 
-def skip_step(ctx: MonoContext, step: MonoStep) -> str | None:
+def skip_step(ctx: MonoContext, state: LaunchState, step: MonoStep) -> str | None:
     return "prefill" if step.attn_metadata.get("prefill") else None
 
 
-def pack(model, ctx: MonoContext) -> Packed:
+def pack(model, ctx: MonoContext) -> LaunchState:
     _, world, _ = _tp()
-    return Packed(
+    return LaunchState(
         weights={i: layer.weight.data for i, layer in enumerate(model.layers)},
         words=torch.zeros(world, dtype=torch.int32, device=ctx.device),
     )
 
 
-def repack(model, ctx: MonoContext, packed: Packed) -> None:
+def repack(model, ctx: MonoContext, state: LaunchState) -> None:
     for i, layer in enumerate(model.layers):
-        packed.weights[i].copy_(layer.weight.data)
+        state.weights[i].copy_(layer.weight.data)
 
 
 def bind(ctx: MonoContext, caches) -> list[str]:
@@ -149,8 +149,8 @@ def bind(ctx: MonoContext, caches) -> list[str]:
     return reasons
 
 
-def build(ctx: MonoContext, packed: Packed, layer, width: int) -> ReferenceKernel:
-    return ReferenceKernel(ctx, packed, layer, width)
+def build(ctx: MonoContext, state: LaunchState, layer, width: int) -> ReferenceKernel:
+    return ReferenceKernel(ctx, state, layer, width)
 
 
 def _tp():

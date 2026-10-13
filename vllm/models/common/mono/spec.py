@@ -48,7 +48,7 @@ class CacheReq:
     layout: str
 
 
-@dataclass
+@dataclass(frozen=True)
 class MonoContext:
     """One rank's view of the deployment, built once at attach.
 
@@ -56,15 +56,12 @@ class MonoContext:
         vllm_config: The engine's config.
         rank: This rank's index in the TP group.
         device: The device the kernels launch on.
-        state: The spec's own per-rank state, whatever ``pack`` keeps there.
-            Opaque to the library, which never reads it.
 
     """
 
     vllm_config: "VllmConfig"
     rank: int
     device: torch.device
-    state: Any = None
 
 
 @dataclass
@@ -148,12 +145,13 @@ class MonoSpec:
         skip_step: Why one step takes vLLM's path, None when it takes the
             kernel's.
         pack: The weights and launch state, built once at attach. The only
-            place a weight copy is ever made.
+            place a weight copy is ever made. Opaque to the library, which
+            only hands it back to the spec's own callbacks.
         repack: Writes new weights into the allocation ``pack`` returned,
             in place, because the kernels and the captured graphs hold its
             address. None refuses anything that moves weights after attach.
         bind: Checks the KV caches the kernels will read, on every re-bind.
-        build: One ``LayerKernel`` for (context, packed, layer, width).
+        build: One ``LayerKernel`` for (context, state, layer, width).
 
     """
 
@@ -162,14 +160,17 @@ class MonoSpec:
     caches: Mapping[str, CacheReq]
     weight_source: Literal["views", "convert"]
 
+    # Model shape
     layers: Callable[[Any], list[int]]
     widths: Callable[["VllmConfig"], tuple[int, ...]]
 
+    # Capabilities
     refuse_config: Callable[["VllmConfig"], list[str]]
     refuse_model: Callable[[Any], list[str]]
     skip_layer: Callable[[MonoContext, Any], str | None]
-    skip_step: Callable[[MonoContext, MonoStep], str | None]
+    skip_step: Callable[[MonoContext, Any, MonoStep], str | None]
 
+    # Callbacks
     pack: Callable[[Any, MonoContext], Any]
     repack: Callable[[Any, MonoContext, Any], None] | None
     bind: Callable[[MonoContext, Mapping[str, Any]], list[str]]

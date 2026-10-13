@@ -97,10 +97,15 @@ def _select(
 
 
 @dataclass
-class Packed:
-    """This rank's launch state: the runner (one a rank, its peer memory
-    collective over the TP group), each kernel layer's weight views, and the
-    metadata keys ``skip_step`` validates for every kernel layer at once."""
+class LaunchState:
+    """What this rank's launches hold across every step: the runner (one a
+    rank, its peer memory collective over the TP group), the error words, each
+    kernel layer's weight views, and the metadata keys ``skip_step`` validates
+    for every kernel layer at once.
+
+    Built once at attach and never moved: the kernels and the captured graphs
+    hold its addresses.
+    """
 
     runner: Any
     first: int
@@ -116,15 +121,17 @@ class Kernel:
 
     ffn_only = False
 
-    def __init__(self, packed: Packed, layer: "DeepseekV4DecoderLayer", width: int):
-        self.packed = packed
+    def __init__(
+        self, launch_state: LaunchState, layer: "DeepseekV4DecoderLayer", width: int
+    ):
+        self.launch_state = launch_state
         self.layer = layer
         self.width = width
-        self.weights = packed.weights[layer.attn.layer_id]
+        self.weights = launch_state.weights[layer.attn.layer_id]
         self.cache_layers: tuple[str, ...] = ()
 
     def health(self) -> torch.Tensor:
-        return self.packed.words
+        return self.launch_state.words
 
     def warmup_keys(self) -> list[Any]:
         raise NotImplementedError
@@ -139,8 +146,10 @@ class Kernel:
 class WholeLayer(Kernel):
     """The whole backbone layer as K1 and K2, from the layer's own inputs."""
 
-    def __init__(self, packed: Packed, layer: "DeepseekV4DecoderLayer", width: int):
-        super().__init__(packed, layer, width)
+    def __init__(
+        self, launch_state: LaunchState, layer: "DeepseekV4DecoderLayer", width: int
+    ):
+        super().__init__(launch_state, layer, width)
         attn = layer.attn
         self.ratio = attn.compress_ratio
         self.index = attn.indexer is not None
@@ -151,7 +160,7 @@ class WholeLayer(Kernel):
         )
         # K1's seam folds the owed post into the residual, except where the
         # residual arrives settled: the embedding, or after the Engram write.
-        settled = attn.layer_id == packed.first or layer.engram is not None
+        settled = attn.layer_id == launch_state.first or layer.engram is not None
         self.folds = (True, False) if settled else (True,)
 
     def warmup_keys(self) -> list[Any]:
@@ -159,8 +168,8 @@ class WholeLayer(Kernel):
 
     def compile(self, key: Any) -> None:
         width, ratio, fold, index = key
-        self.packed.runner.scratch(width)
-        self.packed.runner.kernels(width, ratio, fold=fold, index=index)
+        self.launch_state.runner.scratch(width)
+        self.launch_state.runner.kernels(width, ratio, fold=fold, index=index)
 
     def launch(
         self,
@@ -175,7 +184,7 @@ class WholeLayer(Kernel):
         engram_mask: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, ...] | None:
         layer, attn = self.layer, self.layer.attn
-        runner = self.packed.runner
+        runner = self.launch_state.runner
         first = residual is None
         if first and x.dim() != 2:
             return None
@@ -234,8 +243,8 @@ class FfnSeam(Kernel):
         return [(self.width, "ffn")]
 
     def compile(self, key: Any) -> None:
-        self.packed.runner.scratch(key[0])
-        self.packed.runner.ffn_kernel(key[0])
+        self.launch_state.runner.scratch(key[0])
+        self.launch_state.runner.ffn_kernel(key[0])
 
     def launch(
         self,
@@ -249,7 +258,7 @@ class FfnSeam(Kernel):
         tensors = (part, residual, post_mix, res_mix, pre_mix)
         if not all(t.is_contiguous() for t in tensors):
             return None
-        return self.packed.runner.ffn(self.weights, *tensors)
+        return self.launch_state.runner.ffn(self.weights, *tensors)
 
 
 def _compute_units() -> int:
@@ -348,11 +357,12 @@ def _ffn_only(layer) -> str | None:
     return None
 
 
-def _skip_step(ctx: MonoContext, step: MonoStep) -> str | None:
+def _skip_step(
+    ctx: MonoContext, launch_state: LaunchState, step: MonoStep
+) -> str | None:
     """Why this step keeps vLLM's path at every layer, or None when the kernels
     take it. One verdict for every kernel layer, from the batch the whole TP
     group sees alike."""
-    packed: Packed = ctx.state
     md = step.attn_metadata
     if not 1 <= step.width <= MAX_ROWS:
         return f"{step.width} rows"
@@ -361,9 +371,9 @@ def _skip_step(ctx: MonoContext, step: MonoStep) -> str | None:
         return f"{step.runtime_mode} step"
     if not isinstance(md, dict):  # a profile / dummy run, or DBO ubatches
         return "no attention metadata"
-    if any(md.get(k) is None for k in packed.comp_keys):
+    if any(md.get(k) is None for k in launch_state.comp_keys):
         return "layer metadata missing"
-    for key in packed.swa_keys:
+    for key in launch_state.swa_keys:
         swa = cast("DeepseekV4ROCMAiterSparseSWAMetadata | None", md.get(key))
         if swa is None:
             return "layer metadata missing"
@@ -371,7 +381,7 @@ def _skip_step(ctx: MonoContext, step: MonoStep) -> str | None:
             return "not a decode-only step"
         if swa.num_decode_tokens > step.width:
             return "more decode tokens than rows"
-        if not packed.need_swa:
+        if not launch_state.need_swa:
             continue
         if swa.decode_swa_width != SWA_WIDTH:
             return f"SWA width {swa.decode_swa_width}"
@@ -384,20 +394,18 @@ def _skip_step(ctx: MonoContext, step: MonoStep) -> str | None:
     return None
 
 
-def _pack(model, ctx: MonoContext) -> Packed:
+def _pack(model, ctx: MonoContext) -> LaunchState:
     """This rank's runner, collective over the TP group."""
     from vllm.models.common.mono.peer import tp_group
     from vllm.models.deepseek_v41.amd.mono.runner import MAX_TOKENS, DSV41MonoLayer
 
     assert MAX_TOKENS >= MAX_ROWS, MAX_TOKENS
     rank, world, cpu_group = tp_group()
-    packed = Packed(
+    return LaunchState(
         runner=DSV41MonoLayer(world, rank, cpu_group, ctx.device),
         first=getattr(model, "start_layer", 0),
         words=torch.zeros(world, dtype=torch.int32, device=ctx.device),
     )
-    ctx.state = packed
-    return packed
 
 
 def _weights(layer, ffn_only: bool, world: int):
@@ -471,22 +479,24 @@ def _bind(ctx: MonoContext, caches) -> list[str]:
     return reasons
 
 
-def _build(ctx: MonoContext, packed: Packed, layer, width: int):
+def _build(ctx: MonoContext, launch_state: LaunchState, layer, width: int):
     world = ctx.vllm_config.parallel_config.tensor_parallel_size
     why = _ffn_only(layer)
-    if layer.attn.layer_id not in packed.weights:
-        packed.weights[layer.attn.layer_id] = _weights(layer, why is not None, world)
+    if layer.attn.layer_id not in launch_state.weights:
+        launch_state.weights[layer.attn.layer_id] = _weights(
+            layer, why is not None, world
+        )
     if why is not None:
         logger.info_once("DSv4.1 MonoKernel: the FFN launch for layers with %s", why)
         # A decode step hands wo_b's TP partial to the FFN launch; the layer
         # reduces it on the steps that keep vLLM's path.
         layer.attn.wo_b.reduce_results = False
-        return FfnSeam(packed, layer, width)
-    kernel = WholeLayer(packed, layer, width)
-    packed.need_swa = True
+        return FfnSeam(launch_state, layer, width)
+    kernel = WholeLayer(launch_state, layer, width)
+    launch_state.need_swa = True
     for key, keys in (
-        (kernel.swa_key, packed.swa_keys),
-        (kernel.comp_key, packed.comp_keys),
+        (kernel.swa_key, launch_state.swa_keys),
+        (kernel.comp_key, launch_state.comp_keys),
     ):
         if key is not None and key not in keys:
             keys.append(key)

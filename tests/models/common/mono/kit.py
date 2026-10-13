@@ -175,7 +175,7 @@ class MonoConformance:
         decisions = []
         for rank in range(2):
             other = attach(self.make_model(config), config, self.specs_path)
-            other.ctx.rank = rank
+            other.ctx = replace(other.ctx, rank=rank)
             with forward(
                 config, CUDAGraphMode.NONE, self.decode_metadata(config, model)
             ):

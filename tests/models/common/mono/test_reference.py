@@ -92,13 +92,13 @@ def test_repack_writes_in_place():
     config = reference.make_config()
     model = reference.make_model(config)
     mono = attach(model, config, SPECS_PATH)
-    before = {i: w.data_ptr() for i, w in mono.packed.weights.items()}
+    before = {i: w.data_ptr() for i, w in mono.state.weights.items()}
     with torch.no_grad():
         for layer in model.layers:
             layer.weight.copy_(torch.full_like(layer.weight, 7))
     mono.repack(model)
-    assert {i: w.data_ptr() for i, w in mono.packed.weights.items()} == before
-    assert all((w == 7).all() for w in mono.packed.weights.values())
+    assert {i: w.data_ptr() for i, w in mono.state.weights.items()} == before
+    assert all((w == 7).all() for w in mono.state.weights.values())
 
 
 def test_repack_is_refused_when_the_spec_declares_none():

@@ -72,7 +72,7 @@ class Mono:
         self.ctx = MonoContext(vllm_config, rank, next(model.parameters()).device)
         self.widths = spec.widths(vllm_config)
         self.kernels: dict[tuple[int, int], LayerKernel] = {}
-        self.packed: Any = None
+        self.state: Any = None
         self.step: MonoStep | None = None
         self.baked: dict[int, str | None] = {}
         self.last: str | None = "no step"
@@ -83,11 +83,11 @@ class Mono:
         if not indices:
             self.cache_layers: list[str] = []
             return
-        self.packed = spec.pack(model, self.ctx)
+        self.state = spec.pack(model, self.ctx)
         for i in indices:
             for w in self.widths:
                 self.kernels[i, w] = spec.build(
-                    self.ctx, self.packed, model.layers[i], w
+                    self.ctx, self.state, model.layers[i], w
                 )
         self.cache_layers = sorted(
             {n for k in self.kernels.values() for n in k.cache_layers}
@@ -140,7 +140,7 @@ class Mono:
             raise MonoUnsupported(
                 f"MonoKernel {self.spec.name}: weights cannot move after attach"
             )
-        self.spec.repack(model, self.ctx, self.packed)
+        self.spec.repack(model, self.ctx, self.state)
 
     def _bind(self) -> None:
         """Re-checks the caches whenever they moved (keyed on every tensor's
@@ -199,7 +199,7 @@ class Mono:
         if n not in self.widths:
             return "width"
         step = MonoStep(n, n, positions, fc.attn_metadata, fc.cudagraph_runtime_mode)
-        why = self.spec.skip_step(self.ctx, step)
+        why = self.spec.skip_step(self.ctx, self.state, step)
         if why is None:
             self._bind()
             self.step = step
