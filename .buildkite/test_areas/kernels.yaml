@@ -72,10 +72,10 @@ steps:
   num_devices: 2
   device: h100
   source_file_dependencies:
-  - csrc/libtorch_stable/minimax_reduce_rms_kernel.cu
-  - csrc/libtorch_stable/minimax_reduce_rms_kernel.h
-  - csrc/libtorch_stable/ops.h
-  - csrc/libtorch_stable/torch_bindings.cpp
+  - csrc/minimax_reduce_rms_kernel.cu
+  - csrc/minimax_reduce_rms_kernel.h
+  - csrc/ops.h
+  - csrc/torch_bindings.cpp
   - vllm/model_executor/layers/minimax_rms_norm/
   - vllm/model_executor/layers/mamba/linear/minimax_linear_attn.py
   - tests/kernels/core/test_minimax_reduce_rms.py
@@ -122,7 +122,7 @@ steps:
       depends_on:
       - image-build-amd
       source_file_dependencies:
-      - csrc/libtorch_stable/fused_deepseek_v4_qnorm_rope_kv_insert_kernel.cu
+      - csrc/fused_deepseek_v4_qnorm_rope_kv_insert_kernel.cu
       - vllm/models/deepseek_v4/common/ops/
       - tests/kernels/test_fused_deepseek_v4_qnorm_rope_kv_insert.py
       - vllm/platforms/rocm.py
@@ -316,6 +316,7 @@ steps:
   timeout_in_minutes: 30
   source_file_dependencies:
   - csrc/attention/
+  - csrc/core/vec_dtypes/
   - vllm/v1/attention
     # TODO: remove this dependency (https://github.com/vllm-project/vllm/issues/32267)
   - vllm/model_executor/layers/attention
@@ -335,6 +336,7 @@ steps:
       - image-build-amd
       source_file_dependencies:
       - csrc/attention/
+      - csrc/core/vec_dtypes/
       - vllm/v1/attention
       - vllm/model_executor/layers/attention
       - tests/kernels/attention
@@ -467,7 +469,7 @@ steps:
   num_devices: 1
   timeout_in_minutes: 50
   source_file_dependencies:
-  - csrc/quantization/cutlass_w8a8/moe/
+  - csrc/quantization/w8a8/cutlass/moe/
   - csrc/moe/
   - tests/kernels/moe
   - vllm/model_executor/layers/fused_moe/
@@ -485,7 +487,7 @@ steps:
       device: mi300_1
       timeout_in_minutes: 55
       source_file_dependencies:
-      - csrc/quantization/cutlass_w8a8/moe/
+      - csrc/quantization/w8a8/cutlass/moe/
       - csrc/moe/
       - tests/kernels/moe
       - vllm/model_executor/layers/fused_moe/
@@ -504,6 +506,7 @@ steps:
 - label: ":nvidia: (H200 MIG 35GB) Mamba Kernels"
   device: h200_35gb
   key: kernels-mamba-test
+  automatic_shard: true
   timeout_in_minutes: 60
   source_file_dependencies:
   - csrc/mamba/
@@ -551,6 +554,21 @@ steps:
     - pytest -v -s kernels/attention/test_deepgemm_attention.py
     - pytest -v -s quantization/test_cutlass_w4a16.py
 
+- label: ":nvidia: (B200) MiniMax-M3 Attention Kernels"
+  key: kernels-minimax-m3-attention-b200
+  timeout_in_minutes: 30
+  working_dir: "/vllm-workspace/"
+  device: b200-k8s
+  num_devices: 1
+  source_file_dependencies:
+  - vllm/models/minimax_m3/
+  - vllm/config/cache.py
+  - vllm/v1/kv_cache_interface.py
+  - tests/v1/attention/utils.py
+  - tests/kernels/attention/test_minimax_m3.py
+  commands:
+    - pytest -v -s tests/kernels/attention/test_minimax_m3.py
+
 - label: ":nvidia: (B200) Kernels Shard %N"
   key: kernels-b200
   timeout_in_minutes: 30
@@ -560,11 +578,10 @@ steps:
   # optional: true
   source_file_dependencies:
   - csrc/quantization/fp4/
-  - csrc/libtorch_stable/nvfp4_kv_cache_kernels.cu
-  - csrc/libtorch_stable/quantization/fp4/
-  - csrc/libtorch_stable/quantization/w8a8/cutlass/
+  - csrc/nvfp4_kv_cache_kernels.cu
+  - csrc/quantization/w8a8/cutlass/
   - csrc/attention/mla/
-  - csrc/quantization/cutlass_w8a8/moe/
+  - csrc/quantization/w8a8/cutlass/moe/
   - vllm/model_executor/layers/fusion/
   - vllm/model_executor/layers/fused_moe/experts/cutlass_moe.py
   - vllm/model_executor/layers/fused_moe/experts/flashinfer_cutlass_moe.py
@@ -590,9 +607,9 @@ steps:
   - vllm/config/attention.py
   - vllm/v1/attention/backends/registry.py
   - vllm/_custom_ops.py
-  - csrc/libtorch_stable/fused_minimax_m3_qknorm_rope_kv_insert_kernel.cu
-  - csrc/libtorch_stable/ops.h
-  - csrc/libtorch_stable/torch_bindings.cpp
+  - csrc/fused_minimax_m3_qknorm_rope_kv_insert_kernel.cu
+  - csrc/ops.h
+  - csrc/torch_bindings.cpp
   - tests/kernels/attention/test_flashinfer_mla_decode.py
   - tests/kernels/attention/test_minimax_m3_msa_cutlass_sparse_decode.py
   - tests/kernels/attention/test_cache.py
@@ -600,7 +617,6 @@ steps:
   - tests/kernels/test_fused_minimax_m3_qknorm_rope_kv_insert.py
   - tests/kernels/mamba/test_gdn_prefill_cutedsl.py
   - tests/kernels/test_bf16x3_router_gemm_cutedsl.py
-  - tests/kernels/attention/test_minimax_m3.py
   - tests/kernels/test_ll_bf16_gemm.py
   - tests/kernels/test_top_k_per_row.py
   - tests/kernels/quantization/test_silu_mul_nvfp4_quant.py
@@ -646,7 +662,6 @@ steps:
           pytest -v -s tests/kernels/moe/test_flashinfer.py
           pytest -v -s tests/kernels/moe/test_trtllm_nvfp4_moe.py
           pytest -v -s tests/kernels/mamba/test_gdn_prefill_cutedsl.py
-          pytest -v -s tests/kernels/attention/test_minimax_m3.py
           ;;
         *)
           echo "unexpected BUILDKITE_PARALLEL_JOB=$$BUILDKITE_PARALLEL_JOB" >&2
@@ -712,7 +727,7 @@ steps:
   - tests/quantization/reference_mxfp4.py
   - tests/quantization/test_auto_round.py
   commands:
-  - uv pip install --system b12x==1.3.0
+  - uv pip install --system b12x==1.5.1
   - pytest -v -s model_executor/kernels/test_b12x_linear.py
       model_executor/test_b12x_warmup.py
       kernels/quantization/test_block_fp8.py
@@ -839,7 +854,7 @@ steps:
   device: h100
   num_devices: 2
   source_file_dependencies:
-  - csrc/quantization/cutlass_w8a8/moe/
+  - csrc/quantization/w8a8/cutlass/moe/
   - csrc/moe/
   - tests/kernels/moe
   - vllm/model_executor/layers/fused_moe/
@@ -882,7 +897,7 @@ steps:
   device: b200-k8s
   num_devices: 2
   source_file_dependencies:
-  - csrc/quantization/cutlass_w8a8/moe/
+  - csrc/quantization/w8a8/cutlass/moe/
   - csrc/moe/
   - tests/kernels/moe
   - vllm/model_executor/layers/fused_moe/
@@ -995,7 +1010,7 @@ steps:
   source_file_dependencies:
   - csrc/quantization/fp4/
   - csrc/attention/mla/
-  - csrc/quantization/cutlass_w8a8/moe/
+  - csrc/quantization/w8a8/cutlass/moe/
   - vllm/model_executor/layers/fused_moe/cutlass_moe.py
   - vllm/v1/attention/backends/triton_attn.py
   - vllm/v1/attention/backends/rocm_attn.py

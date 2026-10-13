@@ -9,8 +9,10 @@ import numpy as np
 import numpy.typing as npt
 import pybase64
 import pytest
+import torch
 from PIL import Image
 
+import vllm.envs as envs
 from vllm.assets.base import get_vllm_public_assets
 from vllm.assets.video import (
     video_get_metadata,
@@ -18,6 +20,7 @@ from vllm.assets.video import (
     video_to_pil_images_list,
 )
 from vllm.multimodal.media import ImageMediaIO, VideoMediaIO
+from vllm.multimodal.media.base import MediaDecodedBudget
 from vllm.multimodal.video import (
     PYNVVIDEOCODEC_VIDEO_BACKEND,
     VIDEO_LOADER_REGISTRY,
@@ -45,6 +48,18 @@ class Assert10Frames1FPSVideoLoader(VideoLoader):
         assert num_frames == 10, "bad num_frames"
         assert fps == 1.0, "bad fps"
         return FAKE_OUTPUT_2
+
+
+@pytest.mark.skip_global_cleanup
+def test_video_request_budget_counts_torch_frames(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(envs, "VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES", 16)
+    budget = MediaDecodedBudget()
+    video_io = VideoMediaIO(ImageMediaIO(decoded_budget=budget))
+    frames = torch.zeros((2, 2, 2, 3), dtype=torch.uint8)
+    video_io.video_loader = SimpleNamespace(load_bytes=lambda *_args, **_kwargs: frames)
+
+    with pytest.raises(ValueError, match="VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES"):
+        video_io.load_bytes(b"video")
 
 
 def test_video_media_io_kwargs(monkeypatch: pytest.MonkeyPatch):
