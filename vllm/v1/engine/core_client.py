@@ -1580,7 +1580,26 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
                 # race with routing decisions; the snapshot raises the score
                 # when other clients or stale requests load the engine.
                 inflight = self.engine_inflight[self.core_engines[idx]]
-                score: float = max(self.client_count * inflight, waiting + running)
+                raw_inflight = self.client_count * inflight
+                # Grow the in-flight term superlinearly past a small burst
+                # threshold. In-flight is the only real-time signal within a
+                # snapshot window, and a linear term lets a healthy engine's
+                # score overtake a genuinely overloaded engine's frozen
+                # snapshot score mid-burst (load inversion).
+                # Knee (10): the in-flight level below which the ~100ms
+                # coordinator snapshot is still fresh, so scoring must stay
+                # identical to main (exact round-robin preserved). It is a
+                # conservative upper bound, not a tuned optimum. 10 and 1.5
+                # are empirical. Aggregation: the knee applies to
+                # raw_inflight, the burst aggregated across all API-server
+                # clients, so a single client crosses it at ~10/client_count
+                # of its own in-flight requests; equality with main holds
+                # for the aggregate only.
+                if raw_inflight > 10:
+                    inflight_score = 10.0 + (raw_inflight - 10.0) ** 1.5
+                else:
+                    inflight_score = float(raw_inflight)
+                score: float = max(inflight_score, waiting + running)
                 if waiting:
                     # Waiting requests are penalized in proportion to KV cache
                     # pressure: a queue on a KV-bound engine drains slowly, so
