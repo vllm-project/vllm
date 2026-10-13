@@ -65,30 +65,40 @@ SM_SCALE = HEAD_DIM**-0.5
         "decode_query_len",
         "num_q_heads",
         "num_kv_heads",
+        "is_sm103",
         "expected",
     ),
     [
-        pytest.param(8, 4, 64, 4, False, id="tp1-below-min-batch"),
-        pytest.param(16, 4, 64, 4, True, id="tp1-supported"),
-        pytest.param(16, 4, 16, 1, True, id="tp4-min-batch"),
-        pytest.param(24, 4, 16, 1, True, id="tp4-intermediate-batch"),
-        pytest.param(32, 4, 16, 1, True, id="tp4-supported"),
-        pytest.param(16, 1, 64, 4, True, id="tp1-query-len-1"),
-        pytest.param(16, 1, 16, 1, True, id="tp4-query-len-1"),
-        pytest.param(16, 2, 64, 4, True, id="tp1-query-len-2"),
-        pytest.param(16, 2, 16, 1, True, id="tp4-query-len-2"),
-        pytest.param(16, 32, 64, 4, True, id="query-len-upper-bound"),
-        pytest.param(16, 0, 64, 4, False, id="query-len-zero"),
-        pytest.param(16, 33, 64, 4, False, id="query-len-above-bound"),
+        pytest.param(15, 1, 64, 4, True, False, id="qlen1-below-row-floor"),
+        pytest.param(16, 1, 64, 4, True, True, id="qlen1-at-row-floor"),
+        pytest.param(10, 3, 32, 2, True, False, id="qlen3-below-row-floor"),
+        pytest.param(11, 3, 32, 2, True, True, id="qlen3-at-row-floor"),
+        pytest.param(3, 4, 64, 4, True, False, id="qlen4-below-row-floor"),
+        pytest.param(4, 4, 64, 4, True, True, id="qlen4-at-row-floor"),
+        pytest.param(7, 8, 16, 1, True, False, id="qlen8-below-row-floor"),
+        pytest.param(8, 8, 16, 1, True, True, id="qlen8-at-row-floor"),
+        pytest.param(15, 9, 64, 4, True, False, id="unmeasured-query-length"),
+        pytest.param(15, 4, 8, 1, True, False, id="unmeasured-heads"),
+        pytest.param(15, 4, 64, 4, False, False, id="sm100-keeps-old-floor"),
+        pytest.param(16, 32, 64, 4, True, True, id="query-len-upper-bound"),
+        pytest.param(16, 0, 64, 4, True, False, id="query-len-zero"),
+        pytest.param(16, 33, 64, 4, True, False, id="query-len-above-bound"),
     ],
 )
 def test_msa_cutlass_decode_static_dispatch(
     batch_size: int,
     decode_query_len: int,
-    expected: bool,
     num_q_heads: int,
     num_kv_heads: int,
+    is_sm103: bool,
+    expected: bool,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(
+        current_platform,
+        "is_device_capability",
+        lambda capability: is_sm103 and capability == (10, 3),
+    )
     assert (
         should_prepare_decode_metadata(
             batch_size,
@@ -291,6 +301,7 @@ def test_msa_metadata_builder_prepares_cutlass_for_regular_decode(
     builder.kv_cache_dtype = "fp8_e4m3"
     builder.decode_backend = "cutlass"
     builder.msa_cutlass_plan_cache = object()
+    builder.msa_cutlass_min_batch_size = None
 
     metadata = builder.build(
         0,
@@ -486,6 +497,10 @@ def _make_topk(
         pytest.param(64, 4, 8, 8, False, id="tp1-query-len-8"),
         pytest.param(16, 1, 8, 1, True, id="tp4-query-len-1"),
         pytest.param(16, 1, 16, 4, True, id="tp4-query-len-4"),
+        # Measured B300 EAGLE3 dispatch boundaries.
+        pytest.param(64, 4, 2, 4, True, id="tp1-batch-4-query-len-4"),
+        pytest.param(32, 2, 4, 4, True, id="tp2-batch-8-query-len-4"),
+        pytest.param(16, 1, 8, 4, True, id="tp4-batch-16-query-len-4"),
     ],
 )
 def test_msa_cutlass_decode_matches_triton_with_interleaved_cache(
