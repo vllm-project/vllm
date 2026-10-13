@@ -274,7 +274,8 @@ class Fp8LinearMethod(LinearMethodBase):
             # Use per-token quantization for better perf if dynamic and cutlass
             if self.act_q_static:
                 self.activation_quant_key = kFp8StaticTensorSym
-            elif cutlass_fp8_supported():
+            # Per-tensor amax would also span cudagraph-padded rows (stale data).
+            elif cutlass_fp8_supported() or current_platform.is_xpu():
                 self.activation_quant_key = kFp8DynamicTokenSym
             else:
                 self.activation_quant_key = kFp8DynamicTensorSym
