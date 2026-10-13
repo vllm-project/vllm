@@ -81,6 +81,7 @@ from vllm.v1.utils import record_function_or_nullcontext
 logger = init_logger(__name__)
 
 
+
 class Scheduler(SchedulerInterface):
     def __init__(
         self,
@@ -428,6 +429,7 @@ class Scheduler(SchedulerInterface):
         self.return_sampling_mask = vllm_config.model_config.return_sampling_mask
 
         self._pause_state: PauseState = PauseState.UNPAUSED
+        self.srpf_starvation_clock = 0
 
         # In-flight requests still prefilling (prefill chunks + in-progress
         # async KV loads). Their remaining-block reservation gates async loads.
@@ -439,6 +441,15 @@ class Scheduler(SchedulerInterface):
             {} if self.log_stats and self.connector is not None else None
         )
         self._kv_fetch_counts: dict[str, int] = dict.fromkeys(KV_FETCH_STAGES, 0)
+
+    def _get_srpf_key_for_req(self, req: Request) -> tuple:
+        starvation = getattr(req, "frozen_starvation_clock", 0)
+        if req.status != RequestStatus.WAITING_FOR_REMOTE_KVS:
+            starvation += (self.srpf_starvation_clock - getattr(req, "last_scheduled_clock", self.srpf_starvation_clock))
+        is_starved = starvation > 5
+        remaining_prefill = max(0, req.num_prompt_tokens - req.num_computed_tokens)
+        return (not is_starved, remaining_prefill, req.arrival_time)
+
 
     def _mamba_block_aligned_split(
         self,
@@ -654,6 +665,21 @@ class Scheduler(SchedulerInterface):
                 long_prefill_token_threshold, input_budget // num_eligible_reqs
             )
 
+        # SRPF + Aging Queue Sorting Prototype
+        import os
+        if self.policy == SchedulingPolicy.FCFS and os.environ.get("VLLM_ENABLE_SRPF") == "1":
+            self.running.sort(key=self._get_srpf_key_for_req)
+
+            for q in (self.waiting, self.skipped_waiting):
+                _sorted_reqs = sorted(q, key=self._get_srpf_key_for_req)
+                if hasattr(q, "clear") and hasattr(q, "extend"):
+                    q.clear()
+                    q.extend(_sorted_reqs)
+                else:
+                    q._heap.clear()
+                    q._heap.extend(_sorted_reqs)
+
+
         # First, schedule the RUNNING requests.
         req_index = 0
         while req_index < len(self.running) and token_budget > 0:
@@ -799,39 +825,42 @@ class Scheduler(SchedulerInterface):
                             key=lambda r: (r.priority, r.arrival_time),
                         )
                     else:
-                        preempted_req = self.running[-1]
+                        # If SRPF is enabled, self.running is reordered, so [-1] is the heaviest request.
+                        # We must scan for the youngest request (max arrival_time) to protect heavy requests from thrashing.
+                        import os
+                        if os.environ.get("VLLM_ENABLE_SRPF") == "1":
+                            preempted_req = max(self.running, key=lambda r: r.arrival_time)
+                        else:
+                            preempted_req = self.running[-1]
 
                     # A deferred free will not help with immediate allocation.
                     if not self._request_blocks_can_be_freed(preempted_req):
                         break
 
-                    if self.policy == SchedulingPolicy.PRIORITY:
-                        victim_index = self.running.index(preempted_req)
-                        del self.running[victim_index]
-                        if victim_index < req_index:
-                            req_index -= 1
+                    victim_index = self.running.index(preempted_req)
+                    del self.running[victim_index]
+                    if victim_index < req_index:
+                        req_index -= 1
 
-                        if preempted_req in scheduled_running_reqs:
-                            preempted_req_id = preempted_req.request_id
-                            scheduled_running_reqs.remove(preempted_req)
-                            restored = num_scheduled_tokens.pop(preempted_req_id)
-                            token_budget += restored
-                            input_budget += restored + draft_slots
-                            req_to_new_blocks.pop(preempted_req_id)
-                            scheduled_spec_decode_tokens.pop(preempted_req_id, None)
-                            preempted_encoder_inputs = scheduled_encoder_inputs.pop(
-                                preempted_req_id, None
+                    if preempted_req in scheduled_running_reqs:
+                        preempted_req_id = preempted_req.request_id
+                        scheduled_running_reqs.remove(preempted_req)
+                        restored = num_scheduled_tokens.pop(preempted_req_id)
+                        token_budget += restored
+                        input_budget += restored + draft_slots
+                        req_to_new_blocks.pop(preempted_req_id)
+                        scheduled_spec_decode_tokens.pop(preempted_req_id, None)
+                        preempted_encoder_inputs = scheduled_encoder_inputs.pop(
+                            preempted_req_id, None
+                        )
+                        if preempted_encoder_inputs:
+                            # Restore encoder compute budget if the preempted
+                            # request had encoder inputs scheduled in this step.
+                            num_embeds_to_restore = sum(
+                                preempted_req.get_num_encoder_embeds(i)
+                                for i in preempted_encoder_inputs
                             )
-                            if preempted_encoder_inputs:
-                                # Restore encoder compute budget if the preempted
-                                # request had encoder inputs scheduled in this step.
-                                num_embeds_to_restore = sum(
-                                    preempted_req.get_num_encoder_embeds(i)
-                                    for i in preempted_encoder_inputs
-                                )
-                                encoder_compute_budget += num_embeds_to_restore
-                    else:
-                        preempted_req = self.running.pop()
+                            encoder_compute_budget += num_embeds_to_restore
 
                     self._preempt_request(
                         preempted_req,
@@ -1321,6 +1350,8 @@ class Scheduler(SchedulerInterface):
                     # If loading async, allocate memory and put request
                     # into the WAITING_FOR_REMOTE_KV state.
                     request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
+                    request.frozen_starvation_clock = getattr(request, "frozen_starvation_clock", 0) + (self.srpf_starvation_clock - getattr(request, "last_scheduled_clock", self.srpf_starvation_clock))
+
                     # Set num_computed_tokens even though KVs are not yet loaded.
                     # request.num_computed_tokens will not be used anywhere until
                     # the request finished the KV transfer.
@@ -1399,6 +1430,14 @@ class Scheduler(SchedulerInterface):
             if not defer_prefills:
                 _, num_waiting = self.get_request_counts()
                 self.prefill_capacity_bound = num_waiting > len(self.deferred_waiting)
+
+        if self._pause_state == PauseState.UNPAUSED:
+
+            self.srpf_starvation_clock += 1
+            scheduled_reqs = scheduled_running_reqs + scheduled_new_reqs + scheduled_resumed_reqs
+            for req in scheduled_reqs:
+                req.last_scheduled_clock = self.srpf_starvation_clock
+                req.frozen_starvation_clock = 0
 
         # Check if the scheduling constraints are satisfied.
         total_num_scheduled_tokens = sum(num_scheduled_tokens.values())
@@ -2465,6 +2504,25 @@ class Scheduler(SchedulerInterface):
         else:
             self.waiting.add_request(request)
 
+    def _select_waiting_queue_for_scheduling(self) -> RequestQueue | None:
+        import os
+        is_srpf = self.policy == SchedulingPolicy.FCFS and os.environ.get("VLLM_ENABLE_SRPF") == "1"
+
+        if self.policy == SchedulingPolicy.FCFS and not is_srpf:
+            return self.skipped_waiting or self.waiting or None
+
+        # PRIORITY mode or SRPF mode: compare queue heads when both queues are non-empty.
+        if self.waiting and self.skipped_waiting:
+            waiting_req = self.waiting.peek_request()
+            skipped_req = self.skipped_waiting.peek_request()
+            
+            if is_srpf:
+                return self.waiting if self._get_srpf_key_for_req(waiting_req) < self._get_srpf_key_for_req(skipped_req) else self.skipped_waiting
+            else:
+                return self.waiting if waiting_req < skipped_req else self.skipped_waiting
+
+        return self.waiting or self.skipped_waiting or None
+
     def _handle_stopped_request(self, request: Request) -> bool:
         """Return True if finished (can be False for resumable requests)."""
         if not request.resumable:
@@ -2633,6 +2691,7 @@ class Scheduler(SchedulerInterface):
         else:
             if request.resumable:
                 request.streaming_queue = deque()
+            request.last_scheduled_clock = getattr(self, "srpf_starvation_clock", 0)
             self._enqueue_waiting_request(request)
             self.requests[request.request_id] = request
             if self.spec_decode_metrics_level != "none":
@@ -3190,6 +3249,9 @@ class Scheduler(SchedulerInterface):
                 request.status = RequestStatus.PREEMPTED
             else:
                 request.status = RequestStatus.WAITING
+            request.last_scheduled_clock = getattr(self, "srpf_starvation_clock", 0)
+            return True
+
 
         elif request.status == RequestStatus.WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR:
             # Check whether grammar compilation has finished.
@@ -3437,3 +3499,4 @@ class Scheduler(SchedulerInterface):
         self.failed_recving_kv_req_ids |= async_failed_req_ids
         # Return sync affected IDs to skip in update_from_output
         return sync_failed_req_ids
+
