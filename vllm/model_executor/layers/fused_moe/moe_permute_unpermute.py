@@ -13,90 +13,70 @@ from vllm.v1.worker.workspace import (
 
 @dataclass
 class MoEPermuteScratch:
-    # Reused metadata buffers for repeated grouped-MoE permutes.
-    max_num_tokens: int
-    topk: int
+    """Reused metadata buffers for repeated grouped-MoE permutes.
+
+    Capacity follows the largest input seen, like the shared workspace: it grows
+    during warmup and is fixed once the workspace manager is locked.
+    """
+
     num_experts: int
     num_local_experts: int
     device: torch.device
-    hidden_size: int | None = None
-    hidden_dtype: torch.dtype | None = None
+    max_expanded_rows: int = field(init=False, default=0)
     token_expert_indices: torch.Tensor = field(init=False)
     expert_first_token_offset: torch.Tensor = field(init=False)
     permuted_idx: torch.Tensor = field(init=False)
     inv_permuted_idx: torch.Tensor = field(init=False)
-    permuted_hidden_states: torch.Tensor | None = field(init=False, default=None)
     sort_workspace: torch.Tensor = field(init=False)
     permuted_experts_id: torch.Tensor = field(init=False)
     sorted_row_idx: torch.Tensor = field(init=False)
     topk_ids_int32: torch.Tensor = field(init=False)
     topk_ids_for_sort: torch.Tensor = field(init=False)
-    max_expanded_rows: int = field(init=False)
 
     def __post_init__(self) -> None:
-        assert self.max_num_tokens > 0
-        assert self.topk > 0
         assert self.num_experts > 0
         assert self.num_local_experts > 0
-        if self.hidden_size is None:
-            assert self.hidden_dtype is None
-        else:
-            assert self.hidden_dtype is not None
-
-        self.max_expanded_rows = self.max_num_tokens * self.topk
-        self.token_expert_indices = torch.arange(
-            self.max_expanded_rows, dtype=torch.int32, device=self.device
-        )
         self.expert_first_token_offset = torch.empty(
             self.num_local_experts + 1, dtype=torch.int64, device=self.device
         )
-        self.permuted_idx = torch.empty(
-            self.max_expanded_rows, dtype=torch.int32, device=self.device
-        )
-        self.inv_permuted_idx = torch.empty(
-            self.max_expanded_rows, dtype=torch.int32, device=self.device
-        )
-        if self.hidden_size is not None:
-            hidden_numel = self.max_expanded_rows * self.hidden_size
-            self.permuted_hidden_states = torch.empty(
-                hidden_numel, dtype=self.hidden_dtype, device=self.device
+        # torch.device("cuda") in config, after initialized,
+        # will be changed to cuda:{index}, so we need to refresh here.
+        self.device = self.expert_first_token_offset.device
+
+    def reserve(self, expanded_rows: int) -> None:
+        """Ensure capacity for ``expanded_rows`` (num_tokens * topk) rows."""
+        if expanded_rows <= self.max_expanded_rows:
+            return
+        if (
+            is_workspace_manager_initialized()
+            and current_workspace_manager().is_locked()
+        ):
+            raise AssertionError(
+                f"Workspace is locked but MoE permute scratch requires "
+                f"{expanded_rows} rows, current capacity is "
+                f"{self.max_expanded_rows} rows. Scratch growth is not allowed "
+                "after locking."
             )
-        self.permuted_experts_id = torch.empty(
-            self.max_expanded_rows, dtype=torch.int32, device=self.device
+
+        def empty_rows() -> torch.Tensor:
+            return torch.empty(expanded_rows, dtype=torch.int32, device=self.device)
+
+        self.token_expert_indices = torch.arange(
+            expanded_rows, dtype=torch.int32, device=self.device
         )
-        self.sorted_row_idx = torch.empty(
-            self.max_expanded_rows, dtype=torch.int32, device=self.device
-        )
-        self.topk_ids_int32 = torch.empty(
-            self.max_expanded_rows, dtype=torch.int32, device=self.device
-        )
-        self.topk_ids_for_sort = torch.empty(
-            self.max_expanded_rows, dtype=torch.int32, device=self.device
-        )
+        self.permuted_idx = empty_rows()
+        self.inv_permuted_idx = empty_rows()
+        self.permuted_experts_id = empty_rows()
+        self.sorted_row_idx = empty_rows()
+        self.topk_ids_int32 = empty_rows()
+        self.topk_ids_for_sort = empty_rows()
         sorter_size = torch.ops._moe_C.moe_permute_sort_workspace_size(
-            self.max_expanded_rows, self.num_experts
+            expanded_rows, self.num_experts
         )
         self.sort_workspace = torch.empty(
             sorter_size, dtype=torch.int8, device=self.device
         )
-        # torch.device("cuda") in config, after initialized,
-        # will be changed to cuda:{index}, so we need to refresh here.
-        self.device = self.token_expert_indices.device
-
-    def validate(self, hidden_states: torch.Tensor, topk_ids: torch.Tensor) -> None:
-        n_token, n_hidden = hidden_states.shape
-        assert hidden_states.device == self.device
-        assert topk_ids.device == self.device
-        assert n_token <= self.max_num_tokens
-        assert topk_ids.size(1) == self.topk
-        assert topk_ids.size(0) == n_token
-        if self.hidden_size is not None:
-            assert n_hidden == self.hidden_size
-            assert hidden_states.dtype == self.hidden_dtype
-            assert self.permuted_hidden_states is not None
-
-    def token_expert_indices_view(self, n_token: int) -> torch.Tensor:
-        return self.token_expert_indices[: n_token * self.topk].view(n_token, self.topk)
+        self.max_expanded_rows = expanded_rows
 
     def prepare_topk_ids(self, topk_ids: torch.Tensor) -> torch.Tensor:
         if topk_ids.dtype == torch.int32:
@@ -114,17 +94,16 @@ def moe_prepare_scatter(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Generate expert offsets and shared scatter/unpermute destination indices."""
     assert topk_ids.device == scratch.device
-    assert topk_ids.size(0) <= scratch.max_num_tokens
-    assert topk_ids.size(1) == scratch.topk
     n_token, topk = topk_ids.shape
     expanded_rows = topk_ids.numel()
+    scratch.reserve(expanded_rows)
     inverse = scratch.inv_permuted_idx[:expanded_rows].view(n_token, topk)
     if expanded_rows == 0:
         scratch.expert_first_token_offset.zero_()
         return scratch.expert_first_token_offset, inverse
     torch.ops._moe_C.moe_prepare_scatter(
         scratch.prepare_topk_ids(topk_ids),
-        scratch.token_expert_indices_view(n_token),
+        scratch.token_expert_indices[:expanded_rows].view(n_token, topk),
         expert_map,
         scratch.num_experts,
         scratch.num_local_experts,
@@ -140,13 +119,9 @@ def moe_prepare_scatter(
 
 def get_moe_permute_scratch(
     *,
-    max_num_tokens: int,
-    topk: int,
     num_experts: int,
     num_local_experts: int,
     device: torch.device,
-    hidden_size: int | None = None,
-    hidden_dtype: torch.dtype | None = None,
 ) -> MoEPermuteScratch:
     """Share scratch across sequential layers in the current ubatch and lane.
 
@@ -155,28 +130,15 @@ def get_moe_permute_scratch(
 
     def create_scratch() -> MoEPermuteScratch:
         return MoEPermuteScratch(
-            max_num_tokens=max_num_tokens,
-            topk=topk,
             num_experts=num_experts,
             num_local_experts=num_local_experts,
             device=device,
-            hidden_size=hidden_size,
-            hidden_dtype=hidden_dtype,
         )
 
     if not is_workspace_manager_initialized():
         return create_scratch()
 
-    key = (
-        MoEPermuteScratch,
-        max_num_tokens,
-        topk,
-        num_experts,
-        num_local_experts,
-        device,
-        hidden_size,
-        hidden_dtype,
-    )
+    key = (MoEPermuteScratch, num_experts, num_local_experts, device)
     return current_workspace_manager().get_persistent_resource(key, create_scratch)
 
 
@@ -204,9 +166,8 @@ def moe_permute(
             parallel shard.
         permuted_hidden_states (Optional[torch.Tensor]): Optional output tensor.
             If None, the output tensor will be created in this function.
-        scratch (Optional[MoEPermuteScratch]): Optional preallocated scratch
-            buffers. Validated against hidden_states and topk_ids when given,
-            otherwise the buffers are allocated in this function.
+        scratch (Optional[MoEPermuteScratch]): Optional reusable metadata
+            buffers. Otherwise they are allocated in this function.
 
     Returns:
     - permuted_hidden_states (torch.Tensor): permuted activation.
@@ -227,20 +188,11 @@ def moe_permute(
     if n_local_expert == -1:
         n_local_expert = n_expert
     if permuted_hidden_states is None:
-        if scratch is None:
-            permuted_hidden_states = torch.empty(
-                (permuted_row_size, n_hidden),
-                dtype=hidden_states.dtype,
-                device=hidden_states.device,
-            )
-        else:
-            scratch.validate(hidden_states, topk_ids)
-            hidden_numel = permuted_row_size * n_hidden
-            scratch_hidden_states = scratch.permuted_hidden_states
-            assert scratch_hidden_states is not None
-            permuted_hidden_states = scratch_hidden_states[:hidden_numel].view(
-                permuted_row_size, n_hidden
-            )
+        permuted_hidden_states = torch.empty(
+            (permuted_row_size, n_hidden),
+            dtype=hidden_states.dtype,
+            device=hidden_states.device,
+        )
     assert permuted_hidden_states.size() == (permuted_row_size, n_hidden), (
         f"Expected permuted hidden states to be {(permuted_row_size, n_hidden)}"
         f" but got {permuted_hidden_states.size()}"
@@ -278,10 +230,15 @@ def moe_permute(
             permuted_idx,
         )
     else:
-        scratch.validate(hidden_states, topk_ids)
+        assert hidden_states.device == scratch.device
+        assert topk_ids.device == scratch.device
+        assert topk_ids.size(0) == n_token
         assert n_expert == scratch.num_experts
         assert n_local_expert == scratch.num_local_experts
-        token_expert_indices = scratch.token_expert_indices_view(n_token)
+        scratch.reserve(permuted_row_size)
+        token_expert_indices = scratch.token_expert_indices[:permuted_row_size].view(
+            n_token, topk
+        )
         expert_first_token_offset = scratch.expert_first_token_offset
         permuted_idx = scratch.permuted_idx[:permuted_row_size]
         permuted_idx.fill_(permuted_row_size)

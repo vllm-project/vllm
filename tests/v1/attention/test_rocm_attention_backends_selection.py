@@ -250,7 +250,6 @@ def test_segmented_attention_forward_uses_dedicated_dispatch(monkeypatch):
     output = torch.empty_like(query)
     kv_cache = torch.empty(2, 2, 16, 256, dtype=torch.bfloat16)
     metadata = SimpleNamespace(
-        use_cascade=False,
         num_actual_tokens=3,
         block_table=torch.zeros(1, 1, dtype=torch.int32),
         query_start_loc=torch.tensor([0, 3], dtype=torch.int32),
