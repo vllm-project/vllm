@@ -19,7 +19,11 @@ from vllm.distributed import (
     tensor_model_parallel_all_gather,
     tensor_model_parallel_all_reduce,
 )
-from vllm.forward_context import ForwardContext, get_forward_context
+from vllm.forward_context import (
+    ForwardContext,
+    get_forward_context,
+    in_piecewise_cudagraph,
+)
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp, PluggableLayer
 from vllm.model_executor.layers.attention import Attention
@@ -50,6 +54,8 @@ from vllm.model_executor.layers.mamba.ops.ssd_flashinfer import (
     FLASHINFER_SSD_HEAD_DIM,
     FLASHINFER_SSD_STATE_SIZE,
     mamba_chunk_scan_flashinfer,
+    mamba_chunk_scan_flashinfer_static,
+    prepare_static_ssd,
 )
 from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     commit_replayssm_ring_trackers,
@@ -73,7 +79,13 @@ from vllm.utils.torch_utils import (
     direct_register_custom_op,
 )
 from vllm.v1.attention.backend import AttentionMetadata
-from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadata
+from vllm.v1.attention.backends.mamba2_attn import (
+    Mamba2AttentionMetadata,
+    Mamba2StaticMetadata,
+    mamba2_mixer_in_piecewise_cudagraphs,
+    mamba2_static_flashinfer_seqs,
+    validate_mamba2_mixer_in_piecewise_cudagraphs,
+)
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.kv_cache_interface import KVCacheGroupSpec, KVCacheSpec, MambaSpec
 
@@ -279,6 +291,9 @@ class MambaMixer2(MambaBase, PluggableLayer):
     """
 
     # --8<-- [end:mamba_mixer2]
+
+    # (dim, width) view of conv1d's weight, registered as a buffer in __init__.
+    conv_weights: torch.Tensor
 
     def __init__(
         self,
@@ -547,6 +562,19 @@ class MambaMixer2(MambaBase, PluggableLayer):
         self.use_flashinfer_prefill = (
             self.mamba_config.prefill_backend == MambaBackendEnum.FLASHINFER
         )
+        # Static launches (capture size -> sequence slots) that run FlashInfer's
+        # scan; the SSD warmup prepares each before any capture.
+        self.static_flashinfer_ssd_launches: dict[int, int] = {}
+        self.capture_in_piecewise_cudagraph = mamba2_mixer_in_piecewise_cudagraphs(
+            vllm_config
+        )
+        if self.capture_in_piecewise_cudagraph:
+            validate_mamba2_mixer_in_piecewise_cudagraphs(vllm_config)
+            max_num_seqs = vllm_config.scheduler_config.max_num_seqs
+            self.static_flashinfer_ssd_launches = {
+                size: mamba2_static_flashinfer_seqs(size, max_num_seqs)
+                for size in vllm_config.compilation_config.cudagraph_capture_sizes or ()
+            }
         if self.use_flashinfer_prefill and (
             self.head_dim != FLASHINFER_SSD_HEAD_DIM
             or self.ssm_state_size != FLASHINFER_SSD_STATE_SIZE
@@ -769,6 +797,29 @@ class MambaMixer2(MambaBase, PluggableLayer):
                     else None,
                 )
 
+        if self.static_flashinfer_ssd_launches:
+            # Captured launches run FlashInfer's scan inside CUDA graph capture:
+            # allocate its scratch and build each size's runner workspace (and
+            # the bfloat16 D) outside any capture.
+            try:
+                prepare_static_ssd(
+                    device,
+                    self.static_flashinfer_ssd_launches,
+                    nheads,
+                    ngroups,
+                    ssm_state_dtype,
+                    self.A,
+                    self.D_bf16(),
+                    self.dt_bias,
+                )
+            except Exception:
+                logger.warning(
+                    "Mamba2 static-shape FlashInfer SSD warmup failed for layer "
+                    "%s; CUDA graph capture may fail.",
+                    self.prefix,
+                    exc_info=True,
+                )
+
         logger.debug("Mamba2 SSD kernel warmup completed for layer %s", self.prefix)
         torch.accelerator.empty_cache()
 
@@ -843,6 +894,25 @@ class MambaMixer2(MambaBase, PluggableLayer):
             ).contiguous()
             hidden_states, _B, _C = self.split_hidden_states_B_C_fn(hidden_states_B_C)
             return hidden_states
+
+        if attn_metadata.static is not None and in_piecewise_cudagraph():
+            # Captured in a piecewise CUDA graph: shapes fixed by the padded
+            # token count (splitting_ops leave out vllm::mamba_mixer2).
+            self.conv_ssm_forward_static(
+                hidden_states_B_C,
+                dt,
+                output,
+                attn_metadata.static,
+                conv_state,
+                ssm_state,
+                x_cache,
+                B_cache,
+                dt_cache,
+                ring_start,
+                prev_num_accepted,
+                prev_query_len,
+            )
+            return
 
         num_prefills = attn_metadata.num_prefills
         num_prefill_tokens = attn_metadata.num_prefill_tokens
@@ -1182,6 +1252,142 @@ class MambaMixer2(MambaBase, PluggableLayer):
                     cu_seqlens=query_start_loc_d,
                     is_blackwell=self.is_blackwell,
                 )
+
+    def conv_ssm_forward_static(
+        self,
+        hidden_states_B_C: torch.Tensor,
+        dt: torch.Tensor,
+        output: torch.Tensor,
+        static: Mamba2StaticMetadata,
+        conv_state: torch.Tensor,
+        ssm_state: torch.Tensor,
+        x_cache: torch.Tensor | None,
+        B_cache: torch.Tensor | None,
+        dt_cache: torch.Tensor | None,
+        ring_start: torch.Tensor | None,
+        prev_num_accepted: torch.Tensor | None,
+        prev_query_len: torch.Tensor | None,
+    ) -> None:
+        """conv_ssm_forward with every shape and grid fixed by the padded
+        token count, for a mixer captured in a piecewise CUDA graph.
+
+        Both sub-paths always run over the whole padded batch; the static
+        metadata routes each token to its prefill sequence or decode row, and
+        padding sequences, rows and conv1d programs do no work. The prefill
+        scan is FlashInfer's and the decodes use FlashInfer ReplaySSM (see
+        validate_mamba2_mixer_in_piecewise_cudagraphs).
+        """
+        num_tokens = hidden_states_B_C.shape[0]
+        assert num_tokens == static.num_tokens
+        assert self.replayssm_buffer_len is not None and x_cache is not None
+        assert B_cache is not None and dt_cache is not None
+        assert ring_start is not None and prev_num_accepted is not None
+        assert prev_query_len is not None
+        assert static.replayssm_state_indices_d is not None
+        nheads = self.num_heads // self.tp_size
+        ngroups = self.n_groups // self.tp_size
+        out = output.view(num_tokens, nheads, self.head_dim)
+
+        # Prefill sequences: conv1d, then the SSD scan, which reads each
+        # initial state from, and writes each final state to, its cache slot.
+        conv_out = causal_conv1d_fn(
+            hidden_states_B_C.transpose(0, 1),
+            self.conv_weights,
+            self.conv1d.bias,
+            activation=self.activation,
+            conv_states=conv_state,
+            has_initial_state=static.has_initial_states_p,
+            cache_indices=static.state_indices_p,
+            metadata=static,
+            query_start_loc=static.query_start_loc_p,
+        ).transpose(0, 1)
+        hidden_states_p, B_p, C_p = self.split_hidden_states_B_C_fn(conv_out)
+        num_fi_seqs = static.cu_seqlens_fi.numel() - 1
+        mamba_chunk_scan_flashinfer_static(
+            hidden_states_p.view(num_tokens, nheads, self.head_dim),
+            dt,
+            self.A,
+            B_p.view(num_tokens, ngroups, -1),
+            C_p.view(num_tokens, ngroups, -1),
+            self.D_bf16(),
+            self.dt_bias,
+            static.cu_seqlens_fi,
+            static.prefill_bounds_fi,
+            out,
+            ssm_state,
+            static.state_indices_p[:num_fi_seqs],
+            static.has_initial_states_p[:num_fi_seqs],
+            static.num_seqs_fi,
+        )
+        if self._updates_replayssm_trackers:
+            reset_replayssm_ring_trackers(
+                ring_start, prev_num_accepted, prev_query_len, static.state_indices_p
+            )
+
+        # Decode rows: varlen conv1d update and FlashInfer ReplaySSM.
+        use_spec_decode = self.num_spec > 0
+        query_len = 1 + self.num_spec
+        if use_spec_decode and self._commits_replayssm_trackers:
+            assert static.num_accepted_tokens is not None
+            commit_replayssm_ring_trackers(
+                ring_start,
+                prev_num_accepted,
+                prev_query_len,
+                static.replayssm_state_indices_d,
+                static.num_accepted_tokens,
+                static.query_start_loc_d,
+                logical_window=self.replayssm_buffer_len,
+                ring_buffer_len=x_cache.size(2),
+            )
+        conv_out_d = causal_conv1d_update(
+            hidden_states_B_C,
+            conv_state,
+            self.conv_weights,
+            self.conv1d.bias,
+            self.activation,
+            conv_state_indices=static.state_indices_d,
+            num_accepted_tokens=static.num_accepted_tokens,
+            query_start_loc=static.query_start_loc_d,
+            max_query_len=query_len,
+        )
+        hidden_states_d, B_d, C_d = self.split_hidden_states_B_C_fn(conv_out_d)
+        A_d = (
+            self.A[:, None, ...][:, :, None]
+            .expand(-1, self.head_dim, self.ssm_state_size)
+            .to(dtype=torch.float32)
+        )
+        if self._replayssm_rand_seeds is not None:
+            self._replayssm_rand_seeds.random_(0, 2**32)
+        selective_state_update_replayssm_flashinfer(
+            ssm_state,
+            hidden_states_d.view(num_tokens, nheads, self.head_dim),
+            dt[:, :, None].expand(-1, -1, self.head_dim),
+            A_d,
+            B_d.view(num_tokens, ngroups, -1),
+            C_d.view(num_tokens, ngroups, -1),
+            out,
+            x_cache,
+            B_cache,
+            dt_cache,
+            ring_start,
+            prev_num_accepted,
+            prev_query_len,
+            logical_window=self.replayssm_buffer_len,
+            D=self.D[:, None, ...].expand(-1, self.head_dim),
+            dt_bias=self.dt_bias[:, None, ...].expand(-1, self.head_dim),
+            dt_softplus=True,
+            state_batch_indices=static.replayssm_state_indices_d,
+            scratch=static.replayssm_scratch,
+            update_trackers=self._updates_replayssm_trackers and not use_spec_decode,
+            enable_stochastic_rounding=self.mamba_config.enable_stochastic_rounding,
+            stochastic_rounding_philox_rounds=(
+                self.mamba_config.stochastic_rounding_philox_rounds
+            ),
+            rand_seed=self._replayssm_rand_seed,
+            cu_seqlens=static.query_start_loc_d,
+            max_seqlen=query_len,
+            enable_pdl=False,
+        )
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec | None:
         spec = super().get_kv_cache_spec(vllm_config)
