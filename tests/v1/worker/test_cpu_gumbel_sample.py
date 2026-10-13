@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import math
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -9,6 +10,7 @@ import vllm._C  # noqa: F401
 
 from vllm.platforms import current_platform
 from vllm.v1.worker.cpu.gumbel import gumbel_sample
+from vllm.v1.worker.cpu.sampler import CPUSamplingStates
 
 pytestmark = pytest.mark.skipif(not current_platform.is_cpu(), reason="CPU only")
 
@@ -316,6 +318,20 @@ def test_pre_scaled_logits_match_temperature_application() -> None:
     )
 
     assert torch.equal(actual, expected)
+
+
+def test_sampling_states_apply_temperature() -> None:
+    states = CPUSamplingStates.__new__(CPUSamplingStates)
+    temperatures = torch.tensor([0.5, 0.0, 2.0, 1.0])
+    states.temperature = SimpleNamespace(np=temperatures.numpy(), gpu=temperatures)
+
+    logits = torch.arange(1, 69, dtype=torch.float32).reshape(4, 17)
+    expanded_idx_mapping = torch.tensor([2, 0, 3, 1], dtype=torch.int32)
+    expected = logits / torch.tensor([2.0, 0.5, 1.0, 1.0]).unsqueeze(1)
+
+    states.apply_temperature(logits, expanded_idx_mapping, torch.arange(4).numpy())
+
+    assert torch.equal(logits, expected)
 
 
 @pytest.mark.parametrize("use_fp64", [False, True])

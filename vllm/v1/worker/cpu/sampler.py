@@ -7,10 +7,28 @@ import torch
 from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
 from vllm.v1.worker.cpu.gumbel import gumbel_sample
 from vllm.v1.worker.gpu.sample.sampler import Sampler
+from vllm.v1.worker.gpu.sample.states import SamplingStates
+
+
+class CPUSamplingStates(SamplingStates):
+    def apply_temperature(
+        self,
+        logits: torch.Tensor,
+        expanded_idx_mapping: torch.Tensor,
+        idx_mapping_np: np.ndarray,
+    ) -> None:
+        temp_np = self.temperature.np[idx_mapping_np]
+        if np.all((temp_np == 0.0) | (temp_np == 1.0)):
+            return
+
+        temperature = self.temperature.gpu[expanded_idx_mapping].unsqueeze(1)
+        logits.div_(torch.where(temperature == 0.0, 1.0, temperature))
 
 
 class CPUSampler(Sampler):
     """CPU extension point for Model Runner V2 sampling."""
+
+    sampling_states_cls = CPUSamplingStates
 
     def _sample_random(
         self,
