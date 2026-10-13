@@ -18,7 +18,7 @@ class EventBatch(msgspec.Struct, array_like=True, omit_defaults=True, gc=False):
 
 
 class KVCacheEvent(msgspec.Struct, omit_defaults=True, gc=False, tag=True):
-    """Base class for all KV cache-related events"""
+    """Base class for all KV cache-related events."""
 
 
 class BlockStored(KVCacheEvent):
@@ -45,6 +45,7 @@ class BlockStored(KVCacheEvent):
     kv_cache_spec_kind: str | None = None
     kv_cache_spec_sliding_window: int | None = None
     locality: str | None = None
+    session_id: str | None = None
 
 
 class BlockRemoved(KVCacheEvent):

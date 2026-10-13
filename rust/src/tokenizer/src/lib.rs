@@ -17,7 +17,7 @@ mod tiktoken;
 
 pub use error::{Result, TokenizerError};
 pub use hf::HuggingFaceTokenizer;
-pub use incremental::IncrementalDecoder;
+pub use incremental::{DecodedText, IncrementalDecoder, TokenAnchor, TokenAttribution};
 pub use tekken::TekkenTokenizer;
 pub use tiktoken::TiktokenTokenizer;
 

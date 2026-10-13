@@ -42,7 +42,7 @@ def decode_opencv(
     frame_idx = loader_cls.compute_frames_index_to_sample(
         source=source, target=target, **sampling_kwargs
     )
-    frames, valid = OpenCVVideoBackendMixin.read_frames(
+    frames, valid = loader_cls.read_frames(
         cap,
         frame_idx,
         total_frames_num=source.total_frames_num,
@@ -128,8 +128,7 @@ class OpenCVVideoBackendMixin:
         frame_indices: list[int],
         total_frames: int,
     ) -> tuple[npt.NDArray, list[int], dict[int, int]]:
-        """
-        Read frames with dynamic window forward-scan recovery.
+        """Read frames with dynamic window forward-scan recovery.
 
         When a target frame fails to load, the next successfully grabbed
         frame (before the next target frame) will be used to recover it.
@@ -144,6 +143,7 @@ class OpenCVVideoBackendMixin:
             - frames_array: Array of loaded frames
             - valid_frame_indices: List of frame indices that were loaded
             - recovered_map: Dict mapping recovered_idx -> source_idx
+
         """
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))

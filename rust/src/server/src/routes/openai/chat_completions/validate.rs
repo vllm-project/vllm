@@ -4,6 +4,7 @@
 use super::types::ChatCompletionRequest;
 use crate::error::{ApiError, bail_invalid_request};
 use crate::routes::openai::utils::types::{ChatMessage, Tool};
+use crate::routes::openai::utils::validate_generation_prompt_truncation;
 
 /// Enforce the minimal compatibility contract for the Rust OpenAI server.
 pub(super) fn validate_request_compat(
@@ -31,6 +32,13 @@ pub(super) fn validate_request_compat(
         bail_invalid_request!(
             param = "top_logprobs",
             "top_logprobs can only be used when logprobs=true."
+        );
+    }
+
+    if request.logprob_token_ids.as_ref().is_some_and(|ids| !ids.is_empty()) && !request.logprobs {
+        bail_invalid_request!(
+            param = "logprob_token_ids",
+            "when using `logprob_token_ids`, `logprobs` must be set to true."
         );
     }
 
@@ -84,11 +92,7 @@ pub(super) fn validate_request_compat(
             "spaces_between_special_tokens is not supported."
         );
     }
-    reject_non_default(
-        request.truncate_prompt_tokens.as_ref(),
-        "truncate_prompt_tokens",
-        "truncate_prompt_tokens is not supported.",
-    )?;
+    validate_generation_prompt_truncation(request.truncate_prompt_tokens, request.echo)?;
     reject_non_default(
         request.media_io_kwargs.as_ref(),
         "media_io_kwargs",
@@ -128,8 +132,8 @@ fn validate_function_tools(tools: &[Tool], param: &'static str) -> Result<(), Ap
 mod tests {
     use std::collections::HashMap;
 
+    use crate::routes::openai::utils::types::ReasoningEffort;
     use serde_json::json;
-    use vllm_chat::ReasoningEffort;
 
     use super::validate_request_compat;
     use crate::routes::openai::chat_completions::types::ChatCompletionRequest;
@@ -198,7 +202,9 @@ mod tests {
                     description: None,
                     parameters: json!({}),
                     strict: None,
+                    defer_loading: None,
                 },
+                defer_loading: None,
             }]),
             ..base_request()
         };
@@ -215,7 +221,9 @@ mod tests {
                         description: None,
                         parameters: json!({}),
                         strict: None,
+                        defer_loading: None,
                     },
+                    defer_loading: None,
                 }]),
                 name: None,
             }],
@@ -237,7 +245,9 @@ mod tests {
                         description: None,
                         parameters: json!({}),
                         strict: None,
+                        defer_loading: None,
                     },
+                    defer_loading: None,
                 }]),
                 name: None,
             }],

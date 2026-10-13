@@ -3,6 +3,7 @@
 
 use super::types::CompletionRequest;
 use crate::error::{ApiError, bail_invalid_request};
+use crate::routes::openai::utils::validate_generation_prompt_truncation;
 
 /// Enforce the minimal compatibility contract for the Rust OpenAI server.
 pub(super) fn validate_request_compat(
@@ -66,6 +67,22 @@ pub(super) fn validate_request_compat(
         }
     }
 
+    if request.logprob_token_ids.as_ref().is_some_and(|ids| !ids.is_empty()) {
+        if request.logprobs.is_none() {
+            bail_invalid_request!(
+                param = "logprob_token_ids",
+                "when using `logprob_token_ids`, `logprobs` must be set."
+            );
+        }
+        if request.echo && request.max_tokens == Some(0) {
+            bail_invalid_request!(
+                param = "logprob_token_ids",
+                "`logprob_token_ids` is not supported when `echo=True` and \
+                 `max_tokens=0` because no output tokens are generated."
+            );
+        }
+    }
+
     if request.use_beam_search {
         bail_invalid_request!(
             param = "use_beam_search",
@@ -85,12 +102,7 @@ pub(super) fn validate_request_compat(
             "spaces_between_special_tokens is not supported."
         );
     }
-    if request.truncate_prompt_tokens.is_some() {
-        bail_invalid_request!(
-            param = "truncate_prompt_tokens",
-            "truncate_prompt_tokens is not supported."
-        );
-    }
+    validate_generation_prompt_truncation(request.truncate_prompt_tokens, request.echo)?;
 
     Ok(())
 }

@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Correctness test for the Inkling FA4 relative-attention score-mod kernel.
 
-Checks ``INKLING_FA4_REL_ATTENTION_KERNEL`` against a pure-PyTorch reference
+Checks ``_INKLING_FA4_REL_ATTENTION_KERNEL`` against a pure-PyTorch reference
 that implements the relative bias exactly as documented in the Inkling architecture
 guide::
 
@@ -23,7 +23,7 @@ from vllm.models.inkling.nvidia.attention import (
     compute_log_scaling_tau,
 )
 from vllm.models.inkling.nvidia.ops.fa4_rel_attention import (
-    INKLING_FA4_REL_ATTENTION_KERNEL,
+    _INKLING_FA4_REL_ATTENTION_KERNEL,
     _use_sheared_bias,
     inkling_fa4_num_splits,
 )
@@ -279,7 +279,7 @@ def _run_case(seq_lens, num_heads, num_kv_heads, rel_extent, window_left, seed=0
         num_kv_heads=num_kv_heads,
         max_kv_len=max(kv_lens),
     )
-    out = INKLING_FA4_REL_ATTENTION_KERNEL(
+    out = _INKLING_FA4_REL_ATTENTION_KERNEL(
         q,
         key_cache,
         value_cache,

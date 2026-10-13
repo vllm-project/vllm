@@ -55,6 +55,8 @@ logger = init_logger(__name__)
     }
 )
 class MiMoModel(Qwen2Model):
+    supports_aux_hidden_states_over_pp = False
+
     def forward(
         self,
         input_ids: torch.Tensor | None,

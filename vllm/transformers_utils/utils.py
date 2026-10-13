@@ -80,16 +80,15 @@ def _maybe_space_split_dict(path: str | PathLike) -> dict[str, str]:
 
 @cache
 def maybe_model_redirect(model: str) -> str:
-    """
-    Use model_redirect to redirect the model name to a local folder.
+    """Use model_redirect to redirect the model name to a local folder.
 
     Args:
         model: hf model name
 
     Returns:
         maybe redirect to a local folder
-    """
 
+    """
     model_redirect_path = envs.VLLM_MODEL_REDIRECT_PATH
 
     if not model_redirect_path:

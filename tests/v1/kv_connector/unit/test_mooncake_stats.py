@@ -4,6 +4,8 @@
 import threading
 from unittest.mock import MagicMock
 
+import numpy as np
+
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector import (
     MooncakeConnector,
     MooncakeConnectorWorker,
@@ -40,6 +42,9 @@ def test_record_transfer_and_reduce():
     assert reduced["Num failed transfers"] == 0
     assert reduced["Num failed recvs"] == 0
     assert reduced["Num KV expired reqs"] == 0
+    # Reduced values must be plain Python scalars so CLI logging renders
+    # them without numpy reprs (eg np.float64(...)).
+    assert all(not isinstance(v, np.generic) for v in reduced.values())
 
 
 def test_record_failures_keeps_stats_non_empty():

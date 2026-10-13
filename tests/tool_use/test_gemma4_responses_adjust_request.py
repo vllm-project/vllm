@@ -171,7 +171,7 @@ def test_tool_parser_adjust_request_builds_valid_response_text_config() -> None:
 
 
 def test_gemma4_required_skips_structured_outputs_chatcompletion() -> None:
-    """required + ChatCompletion: ``Gemma4EngineToolParser`` must skip the
+    """Required + ChatCompletion: ``Gemma4EngineToolParser`` must skip the
     forced JSON ``structured_outputs`` so the model emits its native
     ``<|tool_call>`` syntax. The base parser constrained output to JSON the
     native parser cannot read, leaking it as content with empty
@@ -187,7 +187,7 @@ def test_gemma4_required_skips_structured_outputs_chatcompletion() -> None:
 
 
 def test_gemma4_named_skips_structured_outputs_chatcompletion() -> None:
-    """named + ChatCompletion: the forced single-function JSON schema must be
+    """Named + ChatCompletion: the forced single-function JSON schema must be
     skipped, same as ``required``.
     """
     parser = Gemma4ToolParser(_StubTokenizer())
@@ -202,7 +202,7 @@ def test_gemma4_named_skips_structured_outputs_chatcompletion() -> None:
 
 
 def test_gemma4_required_skips_structured_outputs_responses() -> None:
-    """required + Responses: the forced JSON schema (``request.text``) must be
+    """Required + Responses: the forced JSON schema (``request.text``) must be
     skipped so the native delimiters reach the extractor.
     """
     parser = Gemma4ToolParser(_StubTokenizer())
@@ -215,7 +215,7 @@ def test_gemma4_required_skips_structured_outputs_responses() -> None:
 
 
 def test_gemma4_named_skips_structured_outputs_responses() -> None:
-    """named (``ToolChoiceFunction``) + Responses: the forced single-function
+    """Named (``ToolChoiceFunction``) + Responses: the forced single-function
     JSON schema must be skipped.
     """
     parser = Gemma4ToolParser(_StubTokenizer())
@@ -230,7 +230,7 @@ def test_gemma4_named_skips_structured_outputs_responses() -> None:
 
 
 def test_gemma4_keeps_special_tokens_with_tools_thinking_disabled() -> None:
-    """tools active + thinking disabled: ``skip_special_tokens`` must stay
+    """Tools active + thinking disabled: ``skip_special_tokens`` must stay
     False so ``<|tool_call>`` delimiters reach the extractor. The merged
     enable_thinking early-return stripped them, breaking tool calling when
     thinking is off.

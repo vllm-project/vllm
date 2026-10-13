@@ -1,10 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import copy
+
 import pytest
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
 from tests.reasoning.utils import run_reasoning_extraction
+from vllm.parser.engine.adapters import ParserEngineReasoningAdapter
+from vllm.parser.glm47_moe import Glm47MoeParser
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
 
 parser_name = "glm45"
@@ -15,7 +19,7 @@ REASONING_MODEL_NAME = "zai-org/GLM-4.7"
 
 
 @pytest.fixture(scope="module")
-def glm45_tokenizer():
+def glm45_tokenizer() -> PreTrainedTokenizerBase:
     return AutoTokenizer.from_pretrained(REASONING_MODEL_NAME)
 
 
@@ -227,3 +231,88 @@ def test_is_reasoning_end_full_prompt(
     token_ids = glm45_tokenizer.convert_tokens_to_ids(tokens)
     check_is_reasoning_end = parser.is_reasoning_end(token_ids)
     assert check_is_reasoning_end == is_reasoning_end
+
+
+GLM53_TEMPLATE = (
+    "[gMASK]<sop>\n"
+    "{%- set effective_reasoning_effort = reasoning_effort if reasoning_effort is"
+    " defined and reasoning_effort in ['low', 'high'] else 'max' -%}\n"
+    "<|system|>Reasoning Effort: {{ effective_reasoning_effort | capitalize }}\n"
+    "{% for tc in m.tool_calls %}\n"
+    "{{- '<tool_call>' + tc.name -}}\n"
+    "{% set _args = tc.arguments %}"
+    "{% for k, v in _args.items() %}"
+    "<arg_key>{{ k }}</arg_key><arg_value>{{ v }}</arg_value>"
+    "{% endfor %}</tool_call>\n"
+    "{% endfor %}\n"
+    "<|assistant|>{{- '<think>' -}}"
+)
+
+GLM53_LEAK = {
+    "output": "Simple question.</think>2 + 2 = **4**",
+    "reasoning": "Simple question.",
+    "content": "2 + 2 = **4**",
+    "is_reasoning_end": True,
+}
+
+
+@pytest.fixture()
+def glm53_style_tokenizer(glm45_tokenizer):
+    tokenizer = copy.copy(glm45_tokenizer)
+    tokenizer.chat_template = GLM53_TEMPLATE
+    return tokenizer
+
+
+def _glm_engine(parser: ReasoningParser) -> Glm47MoeParser:
+    assert isinstance(parser, ParserEngineReasoningAdapter)
+    engine = parser._parser_engine
+    assert isinstance(engine, Glm47MoeParser)
+    return engine
+
+
+@pytest.mark.parametrize(
+    "disable_kwargs", [{"enable_thinking": False}, {"thinking": False}]
+)
+def test_glm53_template_forces_reasoning(disable_kwargs: dict, glm53_style_tokenizer):
+    parser_cls = ReasoningParserManager.get_reasoning_parser(parser_name)
+    parser = parser_cls(glm53_style_tokenizer, chat_template_kwargs=disable_kwargs)
+    assert _glm_engine(parser).thinking_enabled
+
+    output = glm53_style_tokenizer.tokenize(GLM53_LEAK["output"])
+    output_tokens: list[str] = [
+        glm53_style_tokenizer.convert_tokens_to_string([token]) for token in output
+    ]
+    reasoning, content = run_reasoning_extraction(parser, output_tokens)
+    assert reasoning == GLM53_LEAK["reasoning"]
+    assert content == GLM53_LEAK["content"]
+
+    output_ids = glm53_style_tokenizer.convert_tokens_to_ids(output)
+    assert parser.is_reasoning_end(output_ids) == GLM53_LEAK["is_reasoning_end"]
+
+
+def test_glm53_template_forces_reasoning_streaming(glm53_style_tokenizer):
+    parser = ReasoningParserManager.get_reasoning_parser(parser_name)(
+        glm53_style_tokenizer, chat_template_kwargs={"enable_thinking": False}
+    )
+    output = glm53_style_tokenizer.tokenize(GLM53_LEAK["output"])
+    output_tokens: list[str] = [
+        glm53_style_tokenizer.convert_tokens_to_string([token]) for token in output
+    ]
+    reasoning, content = run_reasoning_extraction(parser, output_tokens, streaming=True)
+    assert reasoning == GLM53_LEAK["reasoning"]
+    assert content == GLM53_LEAK["content"]
+
+
+def test_glm47_template_honors_thinking_disable(glm45_tokenizer):
+    parser = ReasoningParserManager.get_reasoning_parser(parser_name)(
+        glm45_tokenizer, chat_template_kwargs={"enable_thinking": False}
+    )
+    assert not _glm_engine(parser).thinking_enabled
+
+    output = glm45_tokenizer.tokenize(GLM53_LEAK["output"])
+    output_tokens: list[str] = [
+        glm45_tokenizer.convert_tokens_to_string([token]) for token in output
+    ]
+    reasoning, content = run_reasoning_extraction(parser, output_tokens)
+    assert reasoning is None
+    assert content == GLM53_LEAK["output"]

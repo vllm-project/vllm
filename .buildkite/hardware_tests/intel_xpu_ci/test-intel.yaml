@@ -15,7 +15,8 @@ steps:
           limit: 2
         - exit_status: -10  # Agent was lost
           limit: 2
-  - label: "XPU example Test"
+  - label: ":intel: (BMG) Example Test"
+    key: xpu-example-test
     depends_on:
       - image-build-xpu
     timeout_in_minutes: 50
@@ -36,7 +37,8 @@ steps:
       - >-
         bash .buildkite/scripts/hardware_ci/run-intel-test.sh
         'bash .buildkite/scripts/hardware_ci/run-intel-ci-test.sh example'
-  - label: "XPU V1 test"
+  - label: ":intel: (BMG) V1 test"
+    key: xpu-v1-test
     depends_on:
       - image-build-xpu
     timeout_in_minutes: 70
@@ -58,7 +60,8 @@ steps:
         bash .buildkite/scripts/hardware_ci/run-intel-test.sh
         'bash .buildkite/scripts/hardware_ci/run-intel-ci-test.sh v1'
     parallelism: 2
-  - label: "XPU W8A8 FP8 Linear Examples"
+  - label: ":intel: (BMG) W8A8 FP8 Linear Examples"
+    key: xpu-w8a8-fp8-linear-examples
     depends_on:
       - image-build-xpu
     timeout_in_minutes: 60
@@ -80,7 +83,8 @@ steps:
       - >-
         bash .buildkite/scripts/hardware_ci/run-intel-test.sh
         'bash .buildkite/scripts/hardware_ci/run-intel-ci-test.sh w8a8-fp8-linear'
-  - label: "XPU server test"
+  - label: ":intel: (BMG) Server test"
+    key: xpu-server-test
     depends_on:
       - image-build-xpu
     timeout_in_minutes: 45
@@ -101,7 +105,8 @@ steps:
       - >-
         bash .buildkite/scripts/hardware_ci/run-intel-test.sh
         'bash .buildkite/scripts/hardware_ci/run-intel-ci-test.sh server'
-  - label: "XPU quantization test"
+  - label: ":intel: (BMG) Quantization test"
+    key: xpu-quantization-test
     depends_on:
       - image-build-xpu
     timeout_in_minutes: 60
@@ -122,7 +127,8 @@ steps:
       - >-
         bash .buildkite/scripts/hardware_ci/run-intel-test.sh
         'bash .buildkite/scripts/hardware_ci/run-intel-ci-test.sh quantization'
-  - label: "XPU compressed tensors FP8 test"
+  - label: ":intel: (BMG) Compressed tensors FP8 test"
+    key: xpu-compressed-tensors-fp8-test
     depends_on:
       - image-build-xpu
     timeout_in_minutes: 60
@@ -144,7 +150,8 @@ steps:
       - >-
         bash .buildkite/scripts/hardware_ci/run-intel-test.sh
         'bash .buildkite/scripts/hardware_ci/run-intel-ci-test.sh compressed-tensors-fp8'
-  - label: "XPU Graph"
+  - label: ":intel: (BMG) Graph"
+    key: xpu-graph
     depends_on:
       - image-build-xpu
     timeout_in_minutes: 60

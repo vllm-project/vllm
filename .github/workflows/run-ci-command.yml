@@ -16,17 +16,10 @@ permissions:
 jobs:
   run-ci-command:
     if: >-
+      github.repository_owner == 'vllm-project' &&
       github.event.issue.pull_request &&
-      (github.event.comment.body == '/ci run' ||
-      github.event.comment.body == '/ci run all' ||
-      github.event.comment.body == '/ci run nightly' ||
-      github.event.comment.body == '/ci retry' ||
-      github.event.comment.body == '/ci cancel' ||
-      github.event.comment.body == '/amd-ci run' ||
-      github.event.comment.body == '/amd-ci run all' ||
-      github.event.comment.body == '/amd-ci run nightly' ||
-      github.event.comment.body == '/amd-ci retry' ||
-      github.event.comment.body == '/amd-ci cancel')
+      (startsWith(github.event.comment.body, '/ci') ||
+      startsWith(github.event.comment.body, '/amd-ci'))
     runs-on: [self-hosted, linux, x64, vllm-runners]
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -47,3 +40,14 @@ jobs:
           BUILDKITE_PIPELINE: ci
           CI_TRUSTED_USERS: ${{ vars.CI_TRUSTED_USERS }}
           GH_TOKEN: ${{ github.token }}
+      - name: Report failure on the PR
+        if: failure()
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            await github.rest.issues.createComment({
+              ...context.repo,
+              issue_number: context.issue.number,
+              body: `❌ @${context.payload.comment.user.login}, your CI command failed with an unexpected error, so CI may not have started. See the [workflow run](${runUrl}) for details.`,
+            });
