@@ -11,7 +11,10 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from vllm.model_executor.models.clef import JointSchemaHead, JointSchemaPooler
+from vllm.model_executor.models.clef_joint_schema import (
+    JointSchemaHead,
+    JointSchemaPooler,
+)
 from vllm.pooling_params import PoolingParams
 from vllm.v1.pool.metadata import PoolingMetadata, PoolingStates
 

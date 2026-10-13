@@ -16,7 +16,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmb
 from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
 from vllm.multimodal import MULTIMODAL_REGISTRY
 
-from .clef import JOINT_HEAD_WEIGHTS, JointSchemaHead, JointSchemaPooler
+from .clef_joint_schema import JOINT_HEAD_WEIGHTS, JointSchemaHead, JointSchemaPooler
 from .interfaces_base import default_pooling_type
 from .qwen3_omni_moe_thinker import (
     Qwen3OmniMoeThinkerDummyInputsBuilder,
