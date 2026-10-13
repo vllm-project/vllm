@@ -266,7 +266,7 @@ LinearBackend = Literal[
 ]
 
 
-W4A16PrefillDequantMode = Literal["off", "soft", "hard"]
+RDNAHybridW4A16PrefillDequantMode = Literal["off", "soft", "hard"]
 
 
 @config
@@ -386,9 +386,10 @@ class KernelConfig:
     precedence over ``linear_backend``; for example,
     ``{"nvfp4_w4a16": "humming"}``."""
 
-    w4a16_prefill_dequant: W4A16PrefillDequantMode = "off"
+    rdna_hybrid_w4a16_prefill_dequant: RDNAHybridW4A16PrefillDequantMode = "off"
     """Cache a dense dequantized copy of each weight for the RDNA hybrid
-    W4A16 linear kernel's prefill GEMM (no-op for every other kernel).
+    W4A16 linear kernel's prefill GEMM. Applies only on gfx11/gfx12 RDNA
+    GPUs, where that kernel is selected; a no-op for every other kernel.
     Prefill GEMMs then run on the dense copy instead of dequantizing int4
     every step, cutting TTFT by 21-26% on gfx1151 for Qwen3 and Gemma-4.
     Decode stays on int4, so TPOT is unchanged. The copy is ~4x the size of

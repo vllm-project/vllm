@@ -471,7 +471,7 @@ def test_rdna_hybrid_w4a16_process_weights_asymmetric_repack(group_size, dist_in
 
 
 # ---------------------------------------------------------------------------
-# process_weights_after_loading: w4a16_prefill_dequant cache
+# process_weights_after_loading: rdna_hybrid_w4a16_prefill_dequant cache
 # ---------------------------------------------------------------------------
 
 _W_DEQUANT_ATTR = RDNAHybridW4A16LinearKernel.DEQUANT_WEIGHT_NAME
@@ -519,7 +519,7 @@ def _prefill_dequant_vllm_config(mode: str, gpu_memory_utilization: float):
     from vllm.config import CacheConfig, KernelConfig, VllmConfig
 
     return VllmConfig(
-        kernel_config=KernelConfig(w4a16_prefill_dequant=mode),
+        kernel_config=KernelConfig(rdna_hybrid_w4a16_prefill_dequant=mode),
         cache_config=CacheConfig(gpu_memory_utilization=gpu_memory_utilization),
     )
 
