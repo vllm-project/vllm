@@ -61,7 +61,7 @@ class MonoWarmup(VllmJitKernel["MonoWarmup.CompileKey"]):
 class Mono:
     """A model's MonoKernels on this rank: built once after load."""
 
-    def __init__(self, spec: MonoSpec, model, vllm_config: "VllmConfig"):
+    def __init__(self, spec: MonoSpec[Any], model, vllm_config: "VllmConfig"):
         rank, _, cpu_group = tp_group()
         self.spec = spec
         _agree_across_ranks(

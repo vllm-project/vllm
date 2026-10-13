@@ -11,7 +11,7 @@ before anything collective follows.
 
 import importlib
 from collections.abc import Callable, Sequence
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from vllm.config.compilation import CUDAGraphMode
 from vllm.logger import init_logger
@@ -36,7 +36,7 @@ def _enabled(vllm_config: "VllmConfig") -> bool:
     return bool(vllm_config.kernel_config.monokernel)
 
 
-def _load_specs(path: str) -> tuple[MonoSpec, ...]:
+def _load_specs(path: str) -> tuple[MonoSpec[Any], ...]:
     """``"package.module:NAME"`` -> the spec variants, importing only that
     module. ``NAME`` is a ``MonoSpec`` or a tuple of them, in the order they
     are preferred."""
@@ -71,7 +71,7 @@ def _features_in_use(vllm_config: "VllmConfig") -> set[Feature]:
     return {f for f, used in on.items() if used}
 
 
-def _refuse_config(spec: MonoSpec, vllm_config: "VllmConfig") -> list[str]:
+def _refuse_config(spec: MonoSpec[Any], vllm_config: "VllmConfig") -> list[str]:
     """Every reason this config cannot run ``spec``: default-deny on features,
     then the runner and the graph mode, then the spec's own."""
     reasons = [
@@ -86,7 +86,7 @@ def _refuse_config(spec: MonoSpec, vllm_config: "VllmConfig") -> list[str]:
     return reasons + list(spec.refuse_config(vllm_config))
 
 
-def _refuse_model(spec: MonoSpec, model) -> list[str]:
+def _refuse_model(spec: MonoSpec[Any], model) -> list[str]:
     """Every reason the loaded model cannot run ``spec``. A MonoKernel replaces
     the layer loop, which a traced graph has already inlined, so a model
     carrying ``@support_torch_compile`` is refused."""
@@ -102,8 +102,8 @@ def _refuse_model(spec: MonoSpec, model) -> list[str]:
 
 
 def _select_spec(
-    specs: Sequence[MonoSpec], vllm_config: "VllmConfig"
-) -> tuple[MonoSpec | None, dict[str, list[str]]]:
+    specs: Sequence[MonoSpec[Any]], vllm_config: "VllmConfig"
+) -> tuple[MonoSpec[Any] | None, dict[str, list[str]]]:
     """The first variant this config can serve, and every variant's refusals.
 
     Returns:
@@ -127,7 +127,7 @@ def _refusal_message(refusals: dict[str, list[str]]) -> str:
     )
 
 
-def _set_capture_sizes(spec: MonoSpec, vllm_config: "VllmConfig") -> None:
+def _set_capture_sizes(spec: MonoSpec[Any], vllm_config: "VllmConfig") -> None:
     """The capture sizes up to the largest width become exactly the widths, so
     a replay never pads a request's rows; larger sizes stay as configured (and
     capture vLLM's path)."""

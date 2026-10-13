@@ -507,7 +507,7 @@ def _layers(config) -> list[int]:
     return list(range(config.num_hidden_layers))
 
 
-MONO_SPEC = MonoSpec(
+MONO_SPEC = MonoSpec[LaunchState](
     name="dsv41-cdna4",
     supports=frozenset({Feature.PIPELINE_PARALLEL, Feature.SPECULATIVE_DECODING}),
     caches={"swa": CacheReq("swa", "fp8_ds_mla", "blocks,block,bytes")},

@@ -160,7 +160,7 @@ def _tp():
     return tp_group()
 
 
-REFERENCE = MonoSpec(
+REFERENCE = MonoSpec[LaunchState](
     name="reference",
     supports=frozenset(),
     caches={"attn": CACHE},

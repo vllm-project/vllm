@@ -6,7 +6,7 @@ the spec's callbacks see."""
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Generic, Literal, Protocol, TypeVar
 
 import torch
 
@@ -33,6 +33,11 @@ class Feature(str, Enum):
     SLEEP_MODE = "sleep_mode"
     CPU_WEIGHT_OFFLOAD = "cpu_weight_offload"
     WEIGHT_UPDATES = "weight_updates"
+
+
+LaunchStateT = TypeVar("LaunchStateT")
+"""Whatever one spec's ``launch_state`` builds. The library never looks inside
+it, so a spec chooses the type and the callbacks that receive it agree."""
 
 
 class MonoUnsupported(Exception):
@@ -112,13 +117,18 @@ class LayerKernel(Protocol):
 
 
 @dataclass(frozen=True)
-class MonoSpec:
+class MonoSpec(Generic[LaunchStateT]):
     """One (model, vendor, ISA)'s declaration: values and callbacks, no
     behaviour of its own.
 
     A spec is a value, so a second ISA is ``dataclasses.replace`` of the first
     at module scope rather than a subclass, and a model exports its candidates
     as a ``MONO_SPECS`` tuple the library selects from.
+
+    The parameter is the spec's own launch state: ``launch_state`` builds it,
+    and ``reload_weights``, ``skip_step`` and ``build`` are handed back the
+    same object. Annotate the spec with it (``MonoSpec[MyLaunchState](...)``)
+    and those four callbacks are checked against each other.
 
     Gating runs in tiers, and the prefix is the consequence. ``refuse_*`` says
     the deployment asked for something it cannot have, so it may take the
@@ -169,10 +179,10 @@ class MonoSpec:
     refuse_config: Callable[["VllmConfig"], list[str]]
     refuse_model: Callable[[Any], list[str]]
     skip_layer: Callable[[MonoContext, Any], str | None]
-    skip_step: Callable[[MonoContext, Any, MonoStep], str | None]
+    skip_step: Callable[[MonoContext, LaunchStateT, MonoStep], str | None]
 
     # Callbacks
-    launch_state: Callable[[Any, MonoContext], Any]
-    reload_weights: Callable[[Any, MonoContext, Any], None] | None
+    launch_state: Callable[[Any, MonoContext], LaunchStateT]
+    reload_weights: Callable[[Any, MonoContext, LaunchStateT], None] | None
     bind: Callable[[MonoContext, Mapping[str, Any]], list[str]]
-    build: Callable[[MonoContext, Any, Any, int], LayerKernel]
+    build: Callable[[MonoContext, LaunchStateT, Any, int], LayerKernel]
