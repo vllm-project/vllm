@@ -2,10 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Unit tests for the NCCL M2N weight transfer backend.
 
-These cover how a transfer is *described* — layout encoding and the wire-type
-validation that keeps a bad plan from reaching a collective, since a mismatch
-there is a hang rather than an error. The transfer itself needs the m2n runtime
-and multiple GPUs, so it is exercised separately.
+These cover how a transfer is *described* — layout encoding, the vLLM-owned
+source contract, and delegation of descriptor validation to M2N. The transfer
+itself needs the M2N runtime and multiple GPUs, so it is exercised separately.
 """
 
 import logging
@@ -33,16 +32,13 @@ from vllm.distributed.weight_transfer.m2n_common import (
     M2NParamMeta,
     M2NWireParam,
     check_data_plane_agreement,
-    check_placements,
     check_runtime_ready_agreement,
     check_source_plan_agreement,
-    check_transferable,
     create_m2n_communicator,
     publish_destination_placements,
     resolve_layout,
     source_plan_digest,
-    validate_layout,
-    validate_local_tensor,
+    validate_local_buffer,
 )
 from vllm.distributed.weight_transfer.m2n_engine import (
     M2NWeightTransferEngine,
@@ -99,16 +95,52 @@ def test_shutdown_destroys_communicator_once(engine_type, group_attribute):
     assert getattr(engine, group_attribute) is None
 
 
+class _BufferLike:
+    """Minimal nccl4py buffer protocol without torch-only methods."""
+
+    def __init__(self, dtype=torch.float32, shape=(4,)):
+        self.dtype = dtype
+        self.shape = shape
+
+    def data_ptr(self):
+        return 1234
+
+
+class _AllocatorAwareBuffer(_BufferLike):
+    def __init__(self):
+        super().__init__()
+        self.record_stream = Mock()
+
+
+class _FakeDistTensor:
+    def __init__(self, buffer, local_shape=None, dtype=None, **kwargs):
+        del kwargs
+        self.local_shape = (
+            tuple(local_shape) if local_shape is not None else tuple(buffer.shape)
+        )
+        self.dtype = dtype if dtype is not None else buffer.dtype
+
+
+def _fake_m2n():
+    return SimpleNamespace(
+        DistTensor=_FakeDistTensor,
+        Mesh=lambda dims, start_rank=0: (tuple(dims), start_rank),
+        Replicate=lambda: REPLICATE,
+        Shard=lambda dim: dim,
+        reshard=Mock(),
+    )
+
+
 class TestLayout:
     def test_replicated_splits_nothing(self):
         """A replicated tensor imposes no divisibility constraint. The shape
         dims are deliberately coprime with the mesh size: a layout that actually
         split the tensor would reject them."""
         mesh = M2NMesh((2, 2), start_rank=1)
-        indivisible_shape = (7, 13)  # neither dim divisible by any mesh axis
 
         resolved_mesh, placements = resolve_layout(mesh, REPLICATED)
-        validate_layout(resolved_mesh, placements, indivisible_shape, "destination")
+        assert resolved_mesh.dims == (4, 1)
+        assert placements == (REPLICATE, 0)
 
     def test_replicated_keeps_the_same_ranks(self):
         """Replication re-factors the mesh to get a size-1 axis for its no-op
@@ -126,23 +158,10 @@ class TestLayout:
         assert resolved_mesh == mesh
         assert placements == (REPLICATE, 0)
 
-    def test_two_shard_axes_rejected(self):
-        """One axis has to replicate; a 2-D mesh that shards both is not
-        something a single reshard can express."""
-        with pytest.raises(ValueError, match="shards both"):
-            check_placements((0, 1))
+    def test_placement_legality_is_deferred_to_m2n(self):
+        layout = M2NLayout(M2NMesh((1, 2), 0), (REPLICATE, 3))
 
-    def test_placement_below_replicate_rejected(self):
-        with pytest.raises(ValueError, match=r"parameter 'w'.*-2"):
-            check_placements((-2, REPLICATE), "parameter 'w' source placements")
-
-    def test_shard_dim_must_exist(self):
-        with pytest.raises(ValueError, match="rank 2"):
-            validate_layout(M2NMesh((1, 2), 0), (REPLICATE, 2), (8, 16), "source")
-
-    def test_shard_must_divide_evenly(self):
-        with pytest.raises(ValueError, match="does not divide evenly"):
-            validate_layout(M2NMesh((1, 3), 0), (REPLICATE, 0), (8, 16), "source")
+        assert layout.placements == (REPLICATE, 3)
 
 
 class TestSourceLayout:
@@ -203,34 +222,62 @@ class TestSourceLayout:
             engine._prepare_source_plan(source, num_trainer_ranks=1)
 
     @pytest.mark.parametrize(
-        ("tensor", "match"),
-        [
-            (torch.zeros(4, dtype=torch.float32), "dtype"),
-            (torch.zeros(2, 3).T, "non-contiguous"),
-            (torch.zeros(3), "local shape"),
-        ],
+        ("dtype", "shape"),
+        [(torch.complex64, (4,)), (torch.float32, (2, 2, 2, 2))],
     )
-    def test_local_tensor_must_match_manifest(self, tensor, match):
-        shape = (3, 2) if match == "non-contiguous" else (4,)
-        dtype = torch.bfloat16 if match == "dtype" else torch.float32
+    def test_transport_capabilities_are_deferred_to_m2n(self, dtype, shape):
+        source = ManifestM2NWeightSource(
+            [
+                M2NManifestEntry(
+                    "w",
+                    dtype,
+                    shape,
+                    M2NLayout(M2NMesh((1, 1), 0), REPLICATED),
+                    lambda: _BufferLike(dtype, shape),
+                )
+            ]
+        )
+        engine = M2NTrainerWeightTransferEngine(
+            client=Mock(), source=source, is_sender=False
+        )
+
+        engine._prepare_source_plan(source, num_trainer_ranks=1)
+
+    @pytest.mark.parametrize("placements", [(REPLICATE, 1), (REPLICATE, 0)])
+    def test_layout_geometry_is_deferred_to_m2n(self, placements):
+        source = ManifestM2NWeightSource(
+            [
+                M2NManifestEntry(
+                    "w",
+                    torch.float32,
+                    (5,),
+                    M2NLayout(M2NMesh((1, 2), 0), placements),
+                    lambda: _BufferLike(shape=(5,)),
+                )
+            ]
+        )
+        engine = M2NTrainerWeightTransferEngine(
+            client=Mock(), source=source, is_sender=False
+        )
+
+        engine._prepare_source_plan(source, num_trainer_ranks=2)
+
+    @pytest.mark.parametrize("case", ["dtype", "shape"])
+    def test_local_buffer_must_match_declared_metadata(self, case):
+        buffer = _BufferLike()
+        if case == "dtype":
+            buffer.dtype = torch.float16
+        else:
+            buffer.shape = (3,)
         meta = M2NParamMeta(
             "w",
-            dtype,
-            shape,
+            torch.float32,
+            (4,),
             M2NLayout(M2NMesh((1, 1), 0), REPLICATED),
         )
+        match = "dtype" if case == "dtype" else "local shape"
         with pytest.raises(ValueError, match=rf"parameter 'w'.*{match}"):
-            validate_local_tensor(meta, tensor)
-
-
-class TestTransferable:
-    def test_unsupported_dtype_names_the_parameter(self):
-        with pytest.raises(ValueError, match="'w'"):
-            check_transferable("w", torch.complex64, (4,))
-
-    def test_rank_four_rejected(self):
-        with pytest.raises(ValueError, match="rank 4"):
-            check_transferable("w", torch.bfloat16, (2, 2, 2, 2))
+            validate_local_buffer(_fake_m2n(), meta, buffer)
 
 
 class TestPreflightAgreement:
@@ -399,7 +446,6 @@ class TestWireTypes:
             lambda value: value.pop("shape"),
             lambda value: value.update(extra="field"),
             lambda value: value.update(src_mesh_dims=[1]),
-            lambda value: value.update(src_placements=[REPLICATE, REPLICATE]),
         ],
     )
     def test_malformed_wire_parameter_rejected(self, mutation):
@@ -631,16 +677,15 @@ class TestWireTypes:
             )
         )
 
-    def test_limits_use_resolved_sharded_destination(self, monkeypatch):
+    def test_sharded_destination_defers_capacity_to_m2n(self, monkeypatch):
         destination = M2NDestination("w", (REPLICATE, 0), torch.empty(8, 8))
 
         self._init_32_to_4_plan(monkeypatch, destination)
 
-    def test_limits_still_reject_replicated_destination(self, monkeypatch):
+    def test_replicated_destination_defers_capacity_to_m2n(self, monkeypatch):
         destination = M2NDestination("w", REPLICATED, None)
 
-        with pytest.raises(ValueError, match=r"32 source shards.*MAX_SOURCES=16"):
-            self._init_32_to_4_plan(monkeypatch, destination)
+        self._init_32_to_4_plan(monkeypatch, destination)
 
     def test_update_preflights_all_names_before_reshard(self):
         engine = object.__new__(M2NWeightTransferEngine)
@@ -854,7 +899,7 @@ class TestTrainerSourceContract:
         engine = M2NTrainerWeightTransferEngine(
             client=Mock(), source=source, is_sender=False
         )
-        engine._m2n = Mock()
+        engine._m2n = _fake_m2n()
         engine._handle = object()
         engine._metas = source.metadata()
         engine._dst_mesh = M2NMesh((1, 1), 1)
@@ -889,17 +934,11 @@ class TestTrainerSourceContract:
         ],
     )
     def test_source_cardinality_and_order(self, monkeypatch, case, match):
-        tensor = Mock(spec=torch.Tensor)
-        tensor.dtype = torch.float32
-        tensor.shape = (4,)
-        tensor.device = torch.device("cuda:0")
-        tensor.is_contiguous.return_value = True
-        tensor.detach.return_value = tensor
-        tensor.record_stream = Mock()
+        buffer = _BufferLike()
         values = {
             "missing": [],
-            "extra": [("weight", tensor), ("extra", tensor)],
-            "reordered": [("other", tensor)],
+            "extra": [("weight", buffer), ("extra", buffer)],
+            "reordered": [("other", buffer)],
         }[case]
         source = _StaticM2NSource([self._meta()], values)
         engine = self._engine(source)
@@ -911,32 +950,18 @@ class TestTrainerSourceContract:
             engine._send()
 
     @pytest.mark.parametrize(
-        ("case", "match"),
-        [
-            ("dtype", "dtype"),
-            ("shape", "local shape"),
-            ("device", "expected cuda:0"),
-            ("contiguity", "non-contiguous"),
-        ],
+        ("case", "match"), [("dtype", "dtype"), ("shape", "local shape")]
     )
-    def test_materialized_tensor_is_validated_before_reshard(
+    def test_materialized_buffer_matches_declared_metadata(
         self, monkeypatch, case, match
     ):
-        tensor = Mock(spec=torch.Tensor)
-        tensor.dtype = torch.float32
-        tensor.shape = (4,)
-        tensor.device = torch.device("cuda:0")
-        tensor.is_contiguous.return_value = True
+        buffer = _BufferLike()
         if case == "dtype":
-            tensor.dtype = torch.float16
-        elif case == "shape":
-            tensor.shape = (2,)
-        elif case == "device":
-            tensor.device = torch.device("cpu")
+            buffer.dtype = torch.float16
         else:
-            tensor.is_contiguous.return_value = False
+            buffer.shape = (2,)
 
-        source = _StaticM2NSource([self._meta()], [("weight", tensor)])
+        source = _StaticM2NSource([self._meta()], [("weight", buffer)])
         engine = self._engine(source)
         monkeypatch.setattr(torch.cuda, "current_stream", Mock())
         monkeypatch.setattr(torch.accelerator, "synchronize", Mock())
@@ -946,6 +971,48 @@ class TestTrainerSourceContract:
             engine._send()
 
         engine._m2n.reshard.assert_not_called()
+
+    def test_m2n_compatible_buffer_needs_no_torch_methods(self, monkeypatch):
+        buffer = _BufferLike()
+        source = _StaticM2NSource([self._meta()], [("weight", buffer)])
+        engine = self._engine(source)
+        stream = Mock()
+        monkeypatch.setattr(torch.cuda, "current_stream", lambda: stream)
+        monkeypatch.setattr(torch.accelerator, "synchronize", Mock())
+        monkeypatch.setattr(torch.accelerator, "current_device_index", lambda: 0)
+
+        engine._send()
+
+        assert engine._m2n.reshard.call_args.args[0] is buffer
+        stream.synchronize.assert_called_once_with()
+
+    def test_allocator_aware_buffer_records_send_stream(self, monkeypatch):
+        buffer = _AllocatorAwareBuffer()
+        source = _StaticM2NSource([self._meta()], [("weight", buffer)])
+        engine = self._engine(source)
+        stream = Mock()
+        monkeypatch.setattr(torch.cuda, "current_stream", lambda: stream)
+        monkeypatch.setattr(torch.accelerator, "synchronize", Mock())
+        monkeypatch.setattr(torch.accelerator, "current_device_index", lambda: 0)
+
+        engine._send()
+
+        buffer.record_stream.assert_called_once_with(stream)
+
+    def test_raw_pointer_uses_declared_shape_and_dtype(self, monkeypatch):
+        pointer = 1234
+        source = _StaticM2NSource([self._meta()], [("weight", pointer)])
+        engine = self._engine(source)
+        monkeypatch.setattr(torch.cuda, "current_stream", Mock())
+        monkeypatch.setattr(torch.accelerator, "synchronize", Mock())
+        monkeypatch.setattr(torch.accelerator, "current_device_index", lambda: 0)
+
+        engine._send()
+
+        call = engine._m2n.reshard.call_args
+        assert call.args[0] == pointer
+        assert call.kwargs["src_local_shape"] == (4,)
+        assert call.kwargs["src_dtype"] == torch.float32
 
 
 class TestRegistration:

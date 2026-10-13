@@ -43,10 +43,8 @@ from vllm.distributed.weight_transfer.m2n_common import (
     M2NWireParam,
     Placements,
     check_data_plane_agreement,
-    check_plan_limits,
     check_runtime_ready_agreement,
     check_source_plan_agreement,
-    check_transferable,
     create_m2n_communicator,
     import_m2n,
     prepare_m2n_local_runtime,
@@ -55,7 +53,6 @@ from vllm.distributed.weight_transfer.m2n_common import (
     source_plan_digest,
     to_mesh,
     to_placements,
-    validate_layout,
 )
 from vllm.distributed.weight_transfer.m2n_layout import (
     M2NDestination,
@@ -381,7 +378,6 @@ class M2NWeightTransferEngine(
                     f"parameter '{param.name}' has invalid dtype name "
                     f"'{param.dtype_name}'; expected the name of a torch.dtype"
                 )
-            check_transferable(param.name, dtype, param.shape)
             layout = M2NLayout(M2NMesh(param.src_mesh_dims, 0), param.src_placements)
             if layout.mesh.size != num_trainer_ranks:
                 raise ValueError(
@@ -389,12 +385,6 @@ class M2NWeightTransferEngine(
                     f"{layout.mesh.size} ranks, but there are "
                     f"{num_trainer_ranks} trainer ranks"
                 )
-            src_mesh, src_placements = resolve_layout(
-                layout.mesh,
-                layout.placements,
-                f"parameter '{param.name}' source placements",
-            )
-            validate_layout(src_mesh, src_placements, param.shape, "source")
             self._metas.append(M2NParamMeta(param.name, dtype, param.shape, layout))
 
     def _prepare_destination_plan(self, init_info: M2NWeightTransferInitInfo) -> None:
@@ -429,27 +419,6 @@ class M2NWeightTransferEngine(
             shard_axis_size=shard_axis_size,
             allow_direct=allow_direct,
         )
-        # Check the resolved layout rather than a provisional replicated one.
-        # For example, 32 source shards feeding 4 destination shards may need
-        # only 8 sources per destination, while a replicated plan needs all 32.
-        for meta, destination in zip(self._metas, self._parameter_destinations):
-            src_mesh, src_placements = resolve_layout(
-                meta.source_layout.mesh,
-                meta.source_layout.placements,
-                f"parameter '{meta.name}' source placements",
-            )
-            dst_mesh, dst_placements = resolve_layout(
-                self._dst_mesh,
-                destination.placements,
-                f"parameter '{meta.name}' destination placements",
-            )
-            validate_layout(dst_mesh, dst_placements, meta.shape, "destination")
-            check_plan_limits(
-                (src_mesh, src_placements),
-                (dst_mesh, dst_placements),
-                meta.name,
-            )
-
         # Update requests carry names only, so cache their plan indices. Track
         # whether any fallback entry requires the `load_weights` lifecycle.
         self._index = {meta.name: i for i, meta in enumerate(self._metas)}

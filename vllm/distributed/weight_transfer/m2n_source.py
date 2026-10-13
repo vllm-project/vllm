@@ -47,11 +47,15 @@ class M2NWeightSource(WeightSource):
         """Name, dtype, full shape, and source layout for each parameter."""
         raise NotImplementedError
 
-    def __iter__(self) -> Iterator[tuple[str, torch.Tensor]]:
-        """Yield `(name, local shard)` pairs in metadata order.
+    def __iter__(self) -> Iterator[tuple[str, Any]]:  # type: ignore[override]
+        """Yield `(name, local buffer)` pairs in metadata order.
 
         Providers must enqueue materialization on the caller's current CUDA
-        stream, or return a tensor whose writes are already visible to it.
+        stream, or return a buffer whose writes are already visible to it.
+        Buffers may be torch tensors, CUDA Array Interface objects, or raw
+        device pointers accepted by nccl4py. Providers own correct
+        communicator-device placement. Raw-pointer providers additionally own
+        allocation lifetime, dtype, and shape correctness.
         """
         raise NotImplementedError
 
@@ -64,7 +68,7 @@ class M2NManifestEntry:
     dtype: torch.dtype
     global_shape: tuple[int, ...]
     source_layout: M2NLayout
-    local_tensor: Callable[[], torch.Tensor]
+    local_tensor: Callable[[], Any]
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "global_shape", tuple(self.global_shape))
@@ -105,8 +109,8 @@ class ManifestM2NWeightSource(M2NWeightSource):
         """Return a fresh list while preserving the immutable manifest order."""
         return list(self._metadata)
 
-    def __iter__(self) -> Iterator[tuple[str, torch.Tensor]]:
-        """Materialize one rank-local tensor at a time."""
+    def __iter__(self) -> Iterator[tuple[str, Any]]:  # type: ignore[override]
+        """Materialize one rank-local buffer at a time."""
         for entry in self._entries:
             yield entry.key, entry.local_tensor()
 

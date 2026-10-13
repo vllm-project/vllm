@@ -37,8 +37,8 @@ from vllm.distributed.weight_transfer.m2n_common import (
     check_data_plane_agreement,
     check_runtime_ready_agreement,
     check_source_plan_agreement,
-    check_transferable,
     create_m2n_communicator,
+    expected_local_shape,
     import_m2n,
     prepare_m2n_local_runtime,
     publish_destination_placements,
@@ -46,8 +46,7 @@ from vllm.distributed.weight_transfer.m2n_common import (
     source_plan_digest,
     to_mesh,
     to_placements,
-    validate_layout,
-    validate_local_tensor,
+    validate_local_buffer,
 )
 from vllm.distributed.weight_transfer.m2n_source import M2NWeightSource
 from vllm.distributed.weight_transfer.nccl_common import (
@@ -345,11 +344,6 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
                 f"inference side planned {len(placements)} parameters, but "
                 f"this trainer announced {len(self._metas)}"
             )
-        # Check every worker-selected destination against the corresponding
-        # global parameter shape before the first transfer.
-        for meta, placement in zip(self._metas, placements):
-            mesh, resolved = resolve_layout(self._dst_mesh, placement)
-            validate_layout(mesh, resolved, meta.shape, "destination")
         return placements
 
     def _worker_init_info(self, init_info: M2NTrainerInitInfo) -> dict[str, Any]:
@@ -386,7 +380,6 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
                     f"'{meta.name}'"
                 )
             names.add(meta.name)
-            check_transferable(meta.name, meta.dtype, meta.shape)
             layout = meta.source_layout
             if layout.mesh.start_rank != 0:
                 raise ValueError(
@@ -399,12 +392,6 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
                     f"{layout.mesh.size} ranks, but there are "
                     f"{num_trainer_ranks} trainer ranks"
                 )
-            mesh, placements = resolve_layout(
-                layout.mesh,
-                layout.placements,
-                f"parameter '{meta.name}' source placements",
-            )
-            validate_layout(mesh, placements, meta.shape, "source")
         self._wire_params = [
             M2NWireParam(
                 name=meta.name,
@@ -551,12 +538,13 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
         m2n = self._m2n
         stream = torch.cuda.current_stream()
 
-        expected_device = torch.device("cuda", torch.accelerator.current_device_index())
+        device_index = torch.accelerator.current_device_index()
         # Optimizer work may have used another CUDA stream. Make prior writes
         # visible before a provider materializes current-stream local shards.
-        torch.accelerator.synchronize(expected_device.index)
+        torch.accelerator.synchronize(device_index)
+        inflight_buffers: list[Any] = []
         sent = 0
-        for index, (name, tensor) in enumerate(self.source):
+        for index, (name, buffer) in enumerate(self.source):
             if index >= len(self._metas):
                 raise RuntimeError(
                     "weight source yielded more parameters than metadata() "
@@ -569,16 +557,21 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
                     f"its metadata declared '{meta.name}'; the source must "
                     "iterate in a stable order"
                 )
-            validate_local_tensor(meta, tensor, expected_device)
-            shard = tensor.detach()
+            validate_local_buffer(m2n, meta, buffer)
             src_mesh, src_placements = resolve_layout(
                 meta.source_layout.mesh, meta.source_layout.placements
             )
             dst_mesh, dst_placements = resolve_layout(
                 self._dst_mesh, self._dst_placements[index]
             )
+            raw_pointer_args = {}
+            if isinstance(buffer, int):
+                raw_pointer_args = {
+                    "src_local_shape": expected_local_shape(meta),
+                    "src_dtype": meta.dtype,
+                }
             m2n.reshard(
-                shard,
+                buffer,
                 None,
                 self.group,
                 stream,
@@ -587,13 +580,16 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
                 dst_mesh=to_mesh(m2n, dst_mesh),
                 dst_placements=to_placements(m2n, dst_placements),
                 handle=self._handle,
+                **raw_pointer_args,
             )
-            # A custom source may yield temporary storage allocated on another
-            # stream. M2N retains only its device pointer for asynchronous work,
-            # so tell the allocator not to reuse that storage until this stream
-            # has finished with it. For storage allocated on this stream,
-            # record_stream is effectively a no-op.
-            shard.record_stream(stream)
+            # Let allocator-aware buffers recycle storage in stream order.
+            # Other object owners must stay alive until the final synchronize;
+            # raw-pointer lifetime remains the source's responsibility.
+            record_stream = getattr(buffer, "record_stream", None)
+            if callable(record_stream):
+                record_stream(stream)
+            elif not isinstance(buffer, int):
+                inflight_buffers.append(buffer)
             sent += 1
 
         if sent != len(self._metas):

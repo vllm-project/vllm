@@ -79,19 +79,28 @@ engine.send_weights()
 
 `send_weights()` drives the whole round — `start_weight_update`, `update_weights`, `finish_weight_update`. Every rank in the communicator must be inside the same reshard, so `update_weights` has to be in flight while the trainer sends; the engine runs it on a helper thread so the trainer loop does not have to open-code that.
 
-Trainers with a custom producer (a Megatron export, MoE re-fusing) subclass `M2NWeightSource` and supply layouts explicitly.
+Trainers with a custom producer (a Megatron export, MoE re-fusing) subclass
+`M2NWeightSource` and supply layouts explicitly. A source may yield any
+nccl4py-compatible CUDA buffer: a torch tensor, a CUDA Array Interface object,
+or a raw device pointer. vLLM keeps buffer owners alive through stream
+completion, using allocator stream tracking when the buffer provides it.
+Sources must provide buffers on the communicator's current device; nccl4py
+resolves their pointers but does not verify device ownership. Raw-pointer
+sources are additionally responsible for pointer lifetime and matching their
+declared dtype and local shape.
 
 See [`examples/rl/rlhf_m2n.py`](../../../examples/rl/rlhf_m2n.py) for a runnable FSDP → TP example.
 
 ## Limitations
 
-- Tensor rank 1..3; 4-D parameters are rejected.
-- dtypes: int8/uint8, fp8 e4m3/e5m2, fp16, bf16, int32/uint32, fp32, int64/uint64, fp64. No fp4.
+- Tensor-rank and dtype support are defined and validated by the installed M2N
+  runtime rather than duplicated in vLLM.
 - Each parameter's source mesh must cover the same contiguous trainer-rank interval starting at 0, and be 1-D or 2-D.
 - `Partial` placements are not supported.
 - Models with known model-level checkpoint preprocessing use the full-tensor
   fallback for the affected module.
 - A reshard cannot be issued from inside a CUDA graph capture (weight updates run outside capture, so this only matters for custom callers).
-- The reshard plan is capped per *shard*, not per mesh: at most 16 source shards may feed one destination shard, and one source shard may feed at most 64 destination shards (`MAX_SOURCES` / `MAX_TARGETS` in the m2n build; raising either needs a rebuild).
-- A directly-resharded parameter spreads over `tp_size` destination shards, so each one is fed by fewer source shards. A parameter on the fallback path is replicated, i.e. a single destination shard fed by every source shard, so a trainer that **sharded** its parameters is still limited to 16 ranks whenever any parameter falls back — which fused parameters always do. A replicated trainer is unaffected.
+- Source/target capacity is algorithm- and build-specific. The installed M2N
+  runtime validates the complete plan while preparing each reshard; vLLM does
+  not mirror M2N's internal source or target limits.
 - Each communicator holds a cached staging pool (~256 MiB by default: 4 channels x 64 MiB).
