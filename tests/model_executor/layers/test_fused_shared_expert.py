@@ -4,6 +4,7 @@
 import importlib
 import inspect
 import sys
+import weakref
 from copy import deepcopy
 from types import ModuleType, SimpleNamespace
 from typing import Any, cast
@@ -1542,3 +1543,277 @@ def test_fp8_shared_expert_fse_propagates_partial_shard_exclusion() -> None:
             "model.layers.0.mlp.experts",
             "model.layers.0.mlp.shared_experts",
         )
+
+
+def test_hyv4_heterogeneous_fusion_requires_exact_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vllm.models.hy_v4.amd import moe as hyv4_moe
+
+    class FakeModelOptMxFp8Config:
+        is_checkpoint_mxfp8_serialized = True
+        exclude_modules: list[str] = []
+
+        def is_layer_excluded(self, prefix):
+            return prefix in self.exclude_modules
+
+    config = SimpleNamespace(
+        num_shared_experts=1,
+        hidden_size=6144,
+        expert_hidden_dim=2048,
+        num_experts=256,
+        num_experts_per_tok=8,
+    )
+    parallel_config = SimpleNamespace(
+        enable_expert_parallel=False,
+        enable_eplb=False,
+        data_parallel_size=1,
+        decode_context_parallel_size=1,
+        prefill_context_parallel_size=1,
+    )
+    current_config = SimpleNamespace(
+        parallel_config=parallel_config,
+        kernel_config=SimpleNamespace(moe_backend="aiter"),
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=32768),
+        model_config=SimpleNamespace(dtype=torch.bfloat16),
+        load_config=SimpleNamespace(load_format="auto"),
+        offload_config=None,
+        weight_transfer_config=None,
+    )
+    quant_config = FakeModelOptMxFp8Config()
+    monkeypatch.setattr(hyv4_moe, "ModelOptMxFp8Config", FakeModelOptMxFp8Config)
+    monkeypatch.setattr(hyv4_moe, "get_current_vllm_config", lambda: current_config)
+    monkeypatch.setattr(hyv4_moe, "get_tensor_model_parallel_world_size", lambda: 8)
+    monkeypatch.setattr(hyv4_moe, "on_gfx950", lambda: True)
+    monkeypatch.setattr(
+        hyv4_moe.rocm_aiter_ops,
+        "fused_moe_supports_hy4_shared_expert",
+        lambda _tokens: True,
+    )
+    monkeypatch.setattr(
+        hyv4_moe.envs, "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS", True
+    )
+
+    prefix = "model.layers.0.mlp"
+    assert hyv4_moe._use_hyv4_heterogeneous_fusion(config, quant_config, prefix)
+
+    parallel_config.decode_context_parallel_size = 2
+    assert hyv4_moe._use_hyv4_heterogeneous_fusion(config, quant_config, prefix)
+    parallel_config.decode_context_parallel_size = 1
+    parallel_config.enable_eplb = True
+    assert not hyv4_moe._use_hyv4_heterogeneous_fusion(config, quant_config, prefix)
+    parallel_config.enable_eplb = False
+    config.hidden_size = 4096
+    assert not hyv4_moe._use_hyv4_heterogeneous_fusion(config, quant_config, prefix)
+    config.hidden_size = 6144
+    quant_config.exclude_modules = ["model.layers.0.mlp.shared_experts.gate_up_proj"]
+    assert not hyv4_moe._use_hyv4_heterogeneous_fusion(config, quant_config, prefix)
+    quant_config.exclude_modules = []
+    current_config.offload_config = SimpleNamespace(
+        uva=SimpleNamespace(cpu_offload_gb=1),
+        prefetch=SimpleNamespace(offload_group_size=0),
+    )
+    assert not hyv4_moe._use_hyv4_heterogeneous_fusion(config, quant_config, prefix)
+    current_config.offload_config.uva.cpu_offload_params = {"self_attn"}
+    assert hyv4_moe._use_hyv4_heterogeneous_fusion(config, quant_config, prefix)
+    current_config.offload_config.uva.cpu_offload_params = {"experts"}
+    assert not hyv4_moe._use_hyv4_heterogeneous_fusion(config, quant_config, prefix)
+    current_config.offload_config = SimpleNamespace(
+        offload_backend="prefetch",
+        uva=SimpleNamespace(cpu_offload_gb=0),
+        prefetch=SimpleNamespace(
+            offload_group_size=8,
+            offload_params={"self_attn"},
+        ),
+    )
+    assert hyv4_moe._use_hyv4_heterogeneous_fusion(config, quant_config, prefix)
+    current_config.offload_config.prefetch.offload_params = {"w13_weight"}
+    assert not hyv4_moe._use_hyv4_heterogeneous_fusion(config, quant_config, prefix)
+    current_config.offload_config = None
+    current_config.weight_transfer_config = SimpleNamespace()
+    assert not hyv4_moe._use_hyv4_heterogeneous_fusion(config, quant_config, prefix)
+    current_config.weight_transfer_config = None
+    current_config.load_config.load_format = "ipc_cache"
+    assert not hyv4_moe._use_hyv4_heterogeneous_fusion(config, quant_config, prefix)
+
+
+def test_hyv4_shared_expert_preparation_pads_gate_up_and_scales(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vllm.models.hy_v4.amd import moe as hyv4_moe
+
+    hidden_size = 128
+    native_intermediate = 128
+    routed_intermediate = 256
+    gate = torch.full((native_intermediate, hidden_size), 1, dtype=torch.float8_e4m3fn)
+    up = torch.full((native_intermediate, hidden_size), 2, dtype=torch.float8_e4m3fn)
+    down = torch.full((hidden_size, native_intermediate), 3, dtype=torch.float8_e4m3fn)
+    shared = SimpleNamespace(
+        gate_up_proj=SimpleNamespace(
+            weight=torch.cat((gate, up)),
+            weight_scale=torch.tensor([[0x7D], [0x7E]], dtype=torch.uint8),
+        ),
+        down_proj=SimpleNamespace(
+            weight=down,
+            weight_scale=torch.full((1, 1), 0x7E, dtype=torch.uint8),
+        ),
+    )
+    monkeypatch.setattr(
+        hyv4_moe.rocm_aiter_ops,
+        "moe_shuffle_weight",
+        lambda tensor, **_kwargs: tensor,
+    )
+    monkeypatch.setattr(
+        hyv4_moe.rocm_aiter_ops,
+        "moe_shuffle_scale",
+        lambda tensor, **_kwargs: tensor,
+    )
+
+    w1, w2, s1, s2 = hyv4_moe._prepare_hyv4_fp8_shared_expert(
+        shared,
+        torch.empty(
+            (257, 2 * routed_intermediate, hidden_size),
+            dtype=torch.float8_e4m3fn,
+        ),
+        torch.empty(
+            (257, hidden_size, routed_intermediate),
+            dtype=torch.float8_e4m3fn,
+        ),
+    )
+
+    assert w1.shape == (1, 2 * routed_intermediate, hidden_size)
+    assert torch.equal(w1[0, :native_intermediate], gate)
+    assert torch.all(
+        w1[0, native_intermediate:routed_intermediate].view(torch.uint8) == 0
+    )
+    assert torch.equal(
+        w1[
+            0,
+            routed_intermediate : routed_intermediate + native_intermediate,
+        ],
+        up,
+    )
+    assert w2.shape == (1, hidden_size, routed_intermediate)
+    assert torch.equal(w2[0, :, :native_intermediate], down)
+    assert torch.all(w2[0, :, native_intermediate:].view(torch.uint8) == 0)
+    assert torch.all(s1.view(torch.uint8)[:native_intermediate] == 0x7D)
+    assert torch.all(
+        s1.view(torch.uint8)[native_intermediate:routed_intermediate] == 0x7F
+    )
+    assert torch.all(
+        s1.view(torch.uint8)[
+            routed_intermediate : routed_intermediate + native_intermediate
+        ]
+        == 0x7E
+    )
+    assert torch.all(
+        s1.view(torch.uint8)[routed_intermediate + native_intermediate :] == 0x7F
+    )
+    assert torch.all(s2.view(torch.uint8)[:, : native_intermediate // 32] == 0x7E)
+    assert torch.all(s2.view(torch.uint8)[:, native_intermediate // 32 :] == 0x7F)
+
+
+def test_hyv4_shared_expert_refresh_preserves_registered_storage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vllm.model_executor.layers.fused_moe.experts import aiter_mxfp8_moe
+    from vllm.models.hy_v4.amd import moe as hyv4_moe
+
+    class SharedExpert:
+        pass
+
+    class FakeAiterMxfp8Experts:
+        def set_shared_expert(self, *args):
+            self.attached = args
+
+    shared_expert = SharedExpert()
+    fused_experts = FakeAiterMxfp8Experts()
+    layer = SimpleNamespace(
+        _shared_expert_ref=weakref.ref(shared_expert),
+        quant_method=SimpleNamespace(
+            moe_kernel=SimpleNamespace(fused_experts=fused_experts)
+        ),
+        w13_weight=torch.empty(1),
+        w2_weight=torch.empty(1),
+        shared_w1=torch.empty((1, 4, 4), dtype=torch.float8_e4m3fn),
+        shared_w2=torch.empty((1, 4, 2), dtype=torch.float8_e4m3fn),
+        shared_w1_scale=torch.empty((4, 1), dtype=torch.float8_e8m0fnu),
+        shared_w2_scale=torch.empty((4, 1), dtype=torch.float8_e8m0fnu),
+        shared_expert_id=8,
+    )
+    storage_ptrs = tuple(
+        tensor.data_ptr()
+        for tensor in (
+            layer.shared_w1,
+            layer.shared_w2,
+            layer.shared_w1_scale,
+            layer.shared_w2_scale,
+        )
+    )
+    first = tuple(
+        torch.full_like(tensor, index + 1)
+        for index, tensor in enumerate(
+            (
+                layer.shared_w1,
+                layer.shared_w2,
+                layer.shared_w1_scale,
+                layer.shared_w2_scale,
+            )
+        )
+    )
+    second = tuple(torch.full_like(tensor, 7) for tensor in first)
+    values = iter((first, second))
+    monkeypatch.setattr(
+        hyv4_moe,
+        "_prepare_hyv4_fp8_shared_expert",
+        lambda *_args: next(values),
+    )
+    monkeypatch.setattr(
+        aiter_mxfp8_moe,
+        "AiterMxfp8Experts",
+        FakeAiterMxfp8Experts,
+    )
+
+    experts_cls = hyv4_moe.HYV4HeterogeneousSharedRoutedExperts
+    method = experts_cls.prepare_heterogeneous_shared_expert
+    method(layer)
+    stable_tensors = (
+        layer.shared_w1,
+        layer.shared_w2,
+        layer.shared_w1_scale,
+        layer.shared_w2_scale,
+    )
+    temporary_tensors = tuple(torch.empty_like(tensor) for tensor in stable_tensors)
+    (
+        layer.shared_w1,
+        layer.shared_w2,
+        layer.shared_w1_scale,
+        layer.shared_w2_scale,
+    ) = temporary_tensors
+    layer.prepare_heterogeneous_shared_expert = lambda: method(layer)
+    experts_cls.process_weights_after_reload(layer)
+
+    tensors = layer._shared_kernel_storage
+    assert tensors is not None
+    assert tuple(tensor.data_ptr() for tensor in tensors) == storage_ptrs
+    assert all(
+        torch.equal(tensor, expected) for tensor, expected in zip(tensors, second)
+    )
+    assert all(
+        current is temporary
+        for current, temporary in zip(
+            (
+                layer.shared_w1,
+                layer.shared_w2,
+                layer.shared_w1_scale,
+                layer.shared_w2_scale,
+            ),
+            temporary_tensors,
+        )
+    )
+    assert tensors[0].is_shuffled
+    assert tensors[1].is_shuffled
+    assert all(
+        attached is tensor
+        for attached, tensor in zip(fused_experts.attached[:4], tensors)
+    )

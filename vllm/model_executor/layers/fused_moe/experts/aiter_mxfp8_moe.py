@@ -3,7 +3,8 @@
 """MXFP8 (1x32 block, E8M0) MoE via AITER's FlyDSL two-stage grouped GEMM
 (gfx950); alternative to ``Mxfp8NativeTritonExperts``. Routes through
 ``aiter.fused_moe`` (per_1x32, gate_mode=INTERLEAVE); weights are preshuffled in
-``convert_to_fp8_moe_kernel_format``.
+``convert_to_fp8_moe_kernel_format``. FHMoE may additionally attach one
+separately stored MXFP8 shared expert.
 """
 
 import math
@@ -29,6 +30,29 @@ class AiterMxfp8Experts(Mxfp8TritonExpertsBase):
     """MXFP8 MoE through AITER's FlyDSL two-stage grouped GEMM (gfx950)."""
 
     consumes_expert_mask = True
+
+    def __init__(self, moe_config, quant_config):
+        super().__init__(moe_config, quant_config)
+        self.shared_w1: torch.Tensor | None = None
+        self.shared_w2: torch.Tensor | None = None
+        self.shared_w1_scale: torch.Tensor | None = None
+        self.shared_w2_scale: torch.Tensor | None = None
+        self.shared_expert_id = -1
+
+    def set_shared_expert(
+        self,
+        shared_w1: torch.Tensor,
+        shared_w2: torch.Tensor,
+        shared_w1_scale: torch.Tensor,
+        shared_w2_scale: torch.Tensor,
+        shared_expert_id: int,
+    ) -> None:
+        """Attach one separately stored MXFP8 shared expert to the dispatch."""
+        self.shared_w1 = shared_w1
+        self.shared_w2 = shared_w2
+        self.shared_w1_scale = shared_w1_scale
+        self.shared_w2_scale = shared_w2_scale
+        self.shared_expert_id = shared_expert_id
 
     @property
     def quant_dtype(self) -> torch.dtype | str | None:
@@ -125,6 +149,22 @@ class AiterMxfp8Experts(Mxfp8TritonExpertsBase):
         # RoutedExperts.expert_map hands AITER experts the precomputed 0/1
         # expert_mask (with trailing sentinel) instead of the vLLM expert_map.
         expert_mask = expert_map
+        assert hidden_states.is_contiguous(), (
+            "AITER MXFP8 MoE requires contiguous hidden states"
+        )
+        shared_kwargs = {}
+        if self.shared_expert_id >= 0:
+            shared_kwargs = {
+                "moe_sorting_dispatch_policy": (
+                    rocm_aiter_ops.get_moe_dispatch_policy()
+                ),
+                "shared_w1": self.shared_w1,
+                "shared_w2": self.shared_w2,
+                "shared_w1_scale": self.shared_w1_scale,
+                "shared_w2_scale": self.shared_w2_scale,
+                "shared_expert_id": self.shared_expert_id,
+                "clamp_shared": False,
+            }
 
         # Route through the graph-safe ``rocm_aiter_fused_moe`` custom op so the
         # call is captured under HIP graphs / torch.compile (a direct
@@ -146,11 +186,11 @@ class AiterMxfp8Experts(Mxfp8TritonExpertsBase):
             w2_scale=self.w2_scale_val,
             a1_scale=None,
             a2_scale=None,
-            # MXFP8 w1 and its scales are preshuffled into AITER's GUGU layout
-            # during model loading. Declare that layout explicitly so AITER can
-            # dispatch the gfx950-optimized FlyDSL kernel instead of CK.
+            # AITER MXFP8 W1 weights and scales are always preshuffled into
+            # gate/up-interleaved layout during post-load conversion.
             gate_mode=GateMode.INTERLEAVE.value,
             swiglu_limit=swiglu_limit,
             output_dtype=output.dtype,
+            **shared_kwargs,
         )
         output.copy_(out.to(output.dtype))

@@ -69,12 +69,12 @@ from ..nvidia.attention import (
     compute_skip_topk_layers,
     is_skip_topk_indexer_weight,
 )
-from ..nvidia.moe import HYV4FeedForward, HYV4MoEFused
 from .hc import (
     HYV4HCHeadLayer,
     HYV4HCLayer,
     HYV4HCPreLayer,
 )
+from .moe import HYV4FeedForward, HYV4MoEFused
 from .triton_ihc import triton_ihc_post_pre_rms_norm, triton_ihc_supported
 
 logger = init_logger(__name__)
@@ -144,7 +144,10 @@ class HYV4DecoderLayer(nn.Module):
             self.block_type = "feedforward"
         else:
             self.mlp = HYV4MoEFused(
-                config=config, quant_config=quant_config, prefix=f"{prefix}.mlp"
+                config=config,
+                quant_config=quant_config,
+                prefix=f"{prefix}.mlp",
+                enable_eplb=vllm_config.parallel_config.enable_eplb,
             )
             self.block_type = "moe"
         self.post_attention_layernorm = RMSNorm(config.hidden_size, config.rms_norm_eps)

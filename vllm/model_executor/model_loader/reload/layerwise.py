@@ -38,6 +38,7 @@ __all__ = [
     "initialize_layerwise_reload",
     "finalize_layerwise_processing",
     "finalize_layerwise_reload",
+    "run_post_reload_callbacks",
 ]
 
 
@@ -284,8 +285,20 @@ def finalize_layerwise_processing(model: torch.nn.Module, model_config: ModelCon
     LOADING_LAYERS.clear()
 
 
-def finalize_layerwise_reload(*args, **kwargs):
-    finalize_layerwise_processing(*args, **kwargs)
+def run_post_reload_callbacks(model: torch.nn.Module) -> None:
+    """Refresh cross-layer derived state after every layer has been restored."""
+    for layer in model.modules():
+        callback = getattr(layer, "process_weights_after_reload", None)
+        if callable(callback):
+            callback()
+
+
+def finalize_layerwise_reload(
+    model: torch.nn.Module,
+    model_config: ModelConfig,
+) -> None:
+    finalize_layerwise_processing(model, model_config)
+    run_post_reload_callbacks(model)
 
 
 def _finalize_attention_layer(

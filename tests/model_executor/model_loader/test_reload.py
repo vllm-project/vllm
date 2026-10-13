@@ -25,6 +25,7 @@ from vllm.model_executor.model_loader.reload.layerwise import (
     initialize_layerwise_reload,
     initialize_online_processing,
     record_metadata_for_reloading,
+    run_post_reload_callbacks,
 )
 from vllm.model_executor.model_loader.reload.meta import (
     capture_layer_to_meta,
@@ -1050,6 +1051,20 @@ def test_hpc_rope_norm_kernel_sees_refit_norm_weights(monkeypatch, hpc_rope_norm
     assert torch.equal(k, loaded(3.0).float())
     assert (q.data_ptr(), k.data_ptr()) == (q_ptr, k_ptr)
     assert not hasattr(rnorm, "qnorm_weight")
+
+
+def test_post_reload_callbacks_run_after_child_restoration():
+    events = []
+
+    class ReloadAwareLayer(torch.nn.Module):
+        def process_weights_after_reload(self):
+            events.append(self)
+
+    child = ReloadAwareLayer()
+    model = torch.nn.Sequential(child)
+    run_post_reload_callbacks(model)
+
+    assert events == [child]
 
 
 def _device_tensor_ptrs(worker) -> dict[str, int]:

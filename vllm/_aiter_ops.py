@@ -346,6 +346,7 @@ def _rocm_aiter_fused_moe_impl(
     shared_w2_scale: torch.Tensor | None = None,
     shared_expert_id: int = -1,
     q_dtype_a: torch.dtype | None = None,
+    clamp_shared: bool = True,
 ) -> torch.Tensor:
     has_shared_expert = _validate_rocm_aiter_fused_moe_shared_expert_args(
         shared_w1,
@@ -354,6 +355,8 @@ def _rocm_aiter_fused_moe_impl(
         shared_w2_scale,
         shared_expert_id,
     )
+    if not clamp_shared and not has_shared_expert:
+        raise ValueError("clamp_shared=False requires FHMoE shared-expert dispatch.")
 
     from aiter import ActivationType, QuantType
     from aiter.fused_moe import fused_moe
@@ -379,6 +382,12 @@ def _rocm_aiter_fused_moe_impl(
             shared_w2_scale=shared_w2_scale,
             shared_expert_id=shared_expert_id,
         )
+        # Preserve compatibility with older AITER FHMoE builds used by DSV4:
+        # their implicit/default behavior is clamped shared SiLU, but they do
+        # not accept this keyword. HY4 explicitly requests the new unclamped
+        # semantic and its capability probe requires keyword support.
+        if not clamp_shared:
+            extra_kwargs["clamp_shared"] = False
     if q_dtype_a is not None:
         # DeepSeek V4.1 a4w4 override (use_mxfp4_w4a4_dsv4 in
         # rocm_aiter_moe.py). rocm_aiter_ops.fused_moe_supports_quant_dtype_a()
@@ -443,6 +452,7 @@ def _rocm_aiter_fused_moe_fake(
     shared_w2_scale: torch.Tensor | None = None,
     shared_expert_id: int = -1,
     q_dtype_a: torch.dtype | None = None,
+    clamp_shared: bool = True,
 ) -> torch.Tensor:
     if output_dtype is not None:
         return torch.empty_like(hidden_states, dtype=output_dtype)
@@ -2803,6 +2813,84 @@ class rocm_aiter_ops:
         )
 
     @staticmethod
+    def _probe_hy4_mxfp8_fhmoe_capability(num_tokens: int) -> bool:
+        """Probe AITER's optimized HY4 MXFP8/MXFP8 FHMoE contract."""
+        if type(num_tokens) is not int or num_tokens <= 0:
+            return False
+        try:
+            import inspect
+
+            import aiter.fhmoe as fhmoe
+            from aiter.fused_moe import fused_moe
+            from aiter.ops.flydsl.moe_common import GateMode
+            from aiter.ops.shuffle import moe_shuffle_scale, moe_shuffle_weight
+
+            params = inspect.signature(fused_moe).parameters
+            weight_shuffle_params = inspect.signature(moe_shuffle_weight).parameters
+            scale_shuffle_params = inspect.signature(moe_shuffle_scale).parameters
+            supports_mxfp8 = getattr(fhmoe, "supports_mxfp8_fhmoe_config", None)
+            if not callable(supports_mxfp8):
+                return False
+            support_params = inspect.signature(supports_mxfp8).parameters
+            required_support_params = (
+                "max_tokens",
+                "model_dim",
+                "inter_dim",
+                "experts",
+                "topk",
+                "dtype",
+                "hidden_pad",
+                "intermediate_pad",
+                "gate_mode",
+                "doweight_stage1",
+            )
+            if not all(name in support_params for name in required_support_params):
+                return False
+            supports_num_tokens = supports_mxfp8(
+                num_tokens,
+                model_dim=6144,
+                inter_dim=256,
+                experts=257,
+                topk=9,
+                dtype=torch.bfloat16,
+                hidden_pad=0,
+                intermediate_pad=0,
+                gate_mode=GateMode.INTERLEAVE,
+                doweight_stage1=False,
+            )
+        except Exception:
+            return False
+        return (
+            supports_num_tokens is True
+            and all(
+                name in params
+                for name in (
+                    "shared_w1",
+                    "shared_w2",
+                    "shared_w1_scale",
+                    "shared_w2_scale",
+                    "shared_expert_id",
+                    "clamp_shared",
+                )
+            )
+            and all(
+                name in weight_shuffle_params
+                for name in ("experts_cnt", "is_guinterleave", "gate_up", "layout")
+            )
+            and all(
+                name in scale_shuffle_params
+                for name in ("experts_cnt", "is_guinterleave", "gate_up")
+            )
+        )
+
+    @classmethod
+    @if_aiter_supported
+    @functools.cache
+    def fused_moe_supports_hy4_shared_expert(cls, num_tokens: int) -> bool:
+        """Whether AITER has HY4 MXFP8 FHMoE configs through the given M."""
+        return cls._probe_hy4_mxfp8_fhmoe_capability(num_tokens)
+
+    @staticmethod
     def register_ops_once() -> None:
         global _OPS_REGISTERED
 
@@ -3296,6 +3384,7 @@ class rocm_aiter_ops:
         shared_w2_scale: torch.Tensor | None = None,
         shared_expert_id: int = -1,
         q_dtype_a: torch.dtype | None = None,
+        clamp_shared: bool = True,
     ) -> torch.Tensor:
         return torch.ops.vllm.rocm_aiter_fused_moe(
             hidden_states,
@@ -3328,6 +3417,7 @@ class rocm_aiter_ops:
             shared_w2_scale,
             shared_expert_id,
             q_dtype_a,
+            clamp_shared,
         )
 
     @staticmethod
@@ -4030,12 +4120,54 @@ class rocm_aiter_ops:
         return shuffle_weight(tensor, layout=layout)
 
     @staticmethod
+    def moe_shuffle_weight(
+        tensor: torch.Tensor,
+        experts_cnt: int | None = None,
+        is_guinterleave: bool = False,
+        gate_up: bool = False,
+        layout: tuple[int, int] = (16, 16),
+    ) -> torch.Tensor:
+        """Shuffle a MoE weight into AITER's architecture-specific B layout."""
+        from aiter.ops.shuffle import moe_shuffle_weight
+
+        return moe_shuffle_weight(
+            tensor,
+            experts_cnt=experts_cnt,
+            is_guinterleave=is_guinterleave,
+            gate_up=gate_up,
+            layout=layout,
+        )
+
+    @staticmethod
+    def moe_shuffle_scale(
+        tensor: torch.Tensor,
+        experts_cnt: int | None = None,
+        is_guinterleave: bool = False,
+        gate_up: bool = False,
+    ) -> torch.Tensor:
+        """Shuffle MoE weight scales for AITER's architecture-specific layout."""
+        from aiter.ops.shuffle import moe_shuffle_scale
+
+        return moe_shuffle_scale(
+            tensor,
+            experts_cnt=experts_cnt,
+            is_guinterleave=is_guinterleave,
+            gate_up=gate_up,
+        )
+
+    @staticmethod
     def shuffle_weight_a16w4(
         tensor: "torch.Tensor",
         nLane: int,
         gate_up: bool,
     ) -> "torch.Tensor":
-        """Shuffles the weight tensor into (A16W4) layout for AITER kernels.
+        """Legacy compatibility wrapper for AITER's historical A16W4 shuffle.
+
+        This name is outdated: the underlying shuffle is also used by other
+        dtypes and only describes a layout transformation. New code should use
+        :meth:`moe_shuffle_weight` with explicit interleave/layout arguments.
+        TODO: Remove this wrapper after existing MXFP4 callers migrate to the
+        generic MoE API.
 
         Args:
             tensor: The input weight tensor to be shuffled.

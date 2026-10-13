@@ -192,6 +192,7 @@ def test_apply_forwards_activation_and_interleaved_gate_mode(activation):
     experts.quant_config = SimpleNamespace(gemm1_clamp_limit=None)
     experts.w1_scale_val = None
     experts.w2_scale_val = None
+    experts.shared_expert_id = -1
     captured = {}
 
     def fake_fused_moe(hidden_states, *_args, **kwargs):
