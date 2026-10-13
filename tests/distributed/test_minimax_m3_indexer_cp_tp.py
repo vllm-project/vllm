@@ -134,7 +134,6 @@ def _run_cp_topk_matches_non_cp(
             topk=TOPK,
             init_blocks=INIT_BLOCKS,
             local_blocks=LOCAL_BLOCKS,
-            scale=HEAD_DIM**-0.5,
             group=get_tp_group(),
             device=device,
         )
@@ -143,7 +142,15 @@ def _run_cp_topk_matches_non_cp(
             (dec.local_heads, q.shape[0], TOPK), -2, dtype=torch.int32, device=device
         )
         with torch.inference_mode():
-            dec(q[:, own].contiguous(), cache, table, seq_lens, query_len, got)
+            dec(
+                q[:, own].contiguous(),
+                cache,
+                table,
+                seq_lens,
+                query_len,
+                got,
+                scale=HEAD_DIM**-0.5,
+            )
             ref = minimax_m3_index_decode(
                 q,
                 cache,

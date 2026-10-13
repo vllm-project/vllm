@@ -344,7 +344,6 @@ def test_cp_decode_owns_kv_sharded_heads(
             topk=16,
             init_blocks=0,
             local_blocks=1,
-            scale=1.0,
             group=None,  # type: ignore[arg-type]  # only used by forward()
             device=torch.device(DEVICE),
         )
@@ -374,3 +373,33 @@ def test_indexer_cp_config_default_off():
     from vllm.config.attention import AttentionConfig
 
     assert AttentionConfig().minimax_m3_indexer_cp is False
+
+
+def test_cp_decode_shared_across_layers():
+    """Every indexer layer on a rank gets the same scratch buffers."""
+    from vllm.models.minimax_m3.amd.indexer_context_parallel import (
+        get_shared_cp_decode,
+    )
+
+    def get(**overrides):
+        kwargs = dict(
+            total_heads=4,
+            rank=0,
+            world_size=4,
+            max_tokens=8,
+            max_seq_len=4 * BLOCK,
+            topk=16,
+            init_blocks=0,
+            local_blocks=1,
+            group=None,
+            device=torch.device(DEVICE),
+        )
+        kwargs.update(overrides)
+        return get_shared_cp_decode(**kwargs)
+
+    first, second = get(), get()
+    assert first is second
+    assert first._scores.data_ptr() == second._scores.data_ptr()
+    # A different geometry (e.g. another rank's layout) gets its own buffers.
+    assert get(rank=1) is not first
+    assert get(max_tokens=16) is not first
