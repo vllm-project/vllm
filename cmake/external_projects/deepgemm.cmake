@@ -28,12 +28,11 @@ if(DEEPGEMM_SRC_DIR)
   message(STATUS "DeepGEMM using local DEEPGEMM_SRC_DIR: ${deepgemm_SOURCE_DIR}")
 else()
   set(_DEEPGEMM_UPSTREAM_REPO "https://github.com/vllm-project/DeepGEMM.git")
-  # Pinned to the fork's dev branch: upstream 2.8.0 plus the SM120
-  # port, the SM90 paged-MQA kv_block=32/next_n=4 port, configurable SwiGLU
-  # alpha/beta, and SiTU for FP8/FP4 Mega MoE. Also includes the CUDA 12.x
-  # layout header fix from vllm-project/DeepGEMM#12.
-  # TORCH_LIBRARY build with a CPython 3.10 stable-ABI floor.
-  set(_DEEPGEMM_UPSTREAM_TAG "1e1842a833699298f7afc02eefb2ed168fff6938")
+  # Pinned to the fork's dev branch: upstream's 26/09/30 release (2.8.1)
+  # plus the SM120 port, the SM90 paged-MQA kv_block=32/next_n=4 port,
+  # configurable SwiGLU alpha/beta, SiTU for FP8/FP4 Mega MoE, and NVFP4
+  # Mega MoE. TORCH_STABLE_LIBRARY build with a CPython 3.10 stable-ABI floor.
+  set(_DEEPGEMM_UPSTREAM_TAG "a981d8e3a58e877b7f53e63707de5834312fb710")
 
   set(_deepgemm_fc_root "${FETCHCONTENT_BASE_DIR}")
   if(NOT _deepgemm_fc_root)
@@ -145,6 +144,7 @@ if(DEEPGEMM_ARCHS)
   #
   install(FILES
     "${deepgemm_SOURCE_DIR}/deep_gemm/__init__.py"
+    "${deepgemm_SOURCE_DIR}/deep_gemm/locality_domain.py"
     DESTINATION vllm/third_party/deep_gemm
     COMPONENT _deep_gemm_C)
 
