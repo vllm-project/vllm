@@ -5,7 +5,6 @@ meta:
   description: "Liquid AI's smallest vision-language model (450M) — LFM2 hybrid LM backbone plus a SigLIP2 vision tower for image+text chat, light enough for edge GPUs."
   date_added: 2026-06-25
   date_updated: 2026-06-24
-  difficulty: beginner
   tasks:
     - multimodal
   performance_headline: "450M vision-language model (hybrid LM + SigLIP2 vision) — image understanding light enough for edge / on-device serving"

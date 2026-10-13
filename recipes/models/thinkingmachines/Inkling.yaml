@@ -5,7 +5,6 @@ meta:
   description: "Natively multimodal 1T-parameter MoE from Thinking Machines Lab — text/image/audio in, text out, up to 1M context — with relative attention, short convolution, and shared expert sinks."
   date_added: 2026-07-15
   date_updated: 2026-08-04
-  difficulty: intermediate
   tasks:
     - multimodal
   performance_headline: "380 tok/s/user with MTP8 (mean acceptance length 4.5) and 140 tok/s/user without MTP on 4× GB200 GPUs"

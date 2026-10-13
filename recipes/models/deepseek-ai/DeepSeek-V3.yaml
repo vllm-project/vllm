@@ -5,7 +5,6 @@ meta:
   description: "DeepSeek-V3 is a 671B-parameter Mixture-of-Experts model with native FP8 weights and strong reasoning, coding, and math capabilities."
   date_added: 2025-08-01
   date_updated: 2026-09-10
-  difficulty: intermediate
   tasks:
     - text
   performance_headline: "Frontier open-weights MoE with native FP8 and FP4 variants"

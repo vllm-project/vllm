@@ -5,7 +5,6 @@ meta:
   description: "Ling-2.6-flash (BailingMoeV2_5) instruct model with 104B total / 7.4B active params, hybrid linear + MLA attention, 128K context, optimized for agent workloads"
   date_added: 2026-04-28
   date_updated: 2026-05-13
-  difficulty: intermediate
   tasks:
     - text
   related_recipes:

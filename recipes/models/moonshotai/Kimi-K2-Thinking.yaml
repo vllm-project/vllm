@@ -5,7 +5,6 @@ meta:
   description: "Kimi-K2-Thinking is an advanced reasoning MoE model with native INT4 QAT weights, designed for long-horizon agent workflows interleaving chain-of-thought reasoning with tool calls."
   date_added: 2025-11-06
   date_updated: 2026-04-17
-  difficulty: advanced
   tasks:
     - text
   performance_headline: "1T MoE thinking model with native INT4 QAT for 2x low-latency speed-up"

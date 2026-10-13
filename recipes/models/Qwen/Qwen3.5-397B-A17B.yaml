@@ -5,7 +5,6 @@ meta:
   description: "Multimodal MoE model with gated delta networks architecture, 397B total / 17B active parameters, up to 262K context"
   date_added: 2026-02-16
   date_updated: 2026-10-07
-  difficulty: intermediate
   tasks:
     - multimodal
     - text

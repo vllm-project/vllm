@@ -5,7 +5,6 @@ meta:
   description: "DeepSeek V4 flagship MoE (1.6T total / 49B active) with hybrid CSA+HCA attention, manifold-constrained hyper-connections, Muon-trained on 32T+ tokens, and three-tier reasoning."
   date_added: 2026-04-24
   date_updated: 2026-10-03
-  difficulty: hard
   tasks:
     - text
   performance_headline: "Frontier 1.6T/49B reasoning MoE with native FP4+FP8 weights, MTP and DSpark speculative decoding, and 1M-token context"

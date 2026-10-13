@@ -5,7 +5,6 @@ meta:
   description: "PaddleOCR-VL-1.6 (0.9B) — region-aware data optimization + progressive post-training; new SOTA 96.33% on OmniDocBench v1.6, drop-in replacement for 1.5"
   date_added: 2026-07-11
   date_updated: 2026-07-08
-  difficulty: beginner
   tasks:
     - multimodal
   related_recipes:

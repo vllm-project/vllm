@@ -5,7 +5,6 @@ meta:
   description: "MiniMax M2.7 MoE language model (230B total / 10B active) — latest M2 release for coding, agent toolchains, and long-context reasoning with native FP8"
   date_added: 2026-04-12
   date_updated: 2026-09-14
-  difficulty: intermediate
   tasks:
     - text
   performance_headline: "Latest M2 series release; verified accuracy on AIME25, GPQA-D, GSM8K; 196K context"

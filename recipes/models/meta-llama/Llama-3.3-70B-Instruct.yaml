@@ -5,7 +5,6 @@ meta:
   description: "Llama 3.3 70B dense model with NVIDIA FP8/FP4 quantized variants for Hopper and Blackwell GPUs"
   date_added: 2025-08-06
   date_updated: 2026-09-22
-  difficulty: beginner
   tasks:
     - text
   performance_headline: ""

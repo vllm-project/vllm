@@ -5,7 +5,6 @@ meta:
   description: "Flagship scientific multimodal MoE (397B total / 17B active) on the Qwen3.5 hybrid linear/full-attention architecture — 262K context, MTP-accelerated reasoning. BF16 and FP8 checkpoints."
   date_added: 2026-09-14
   date_updated: 2026-09-14
-  difficulty: intermediate
   tasks:
     - multimodal
     - text

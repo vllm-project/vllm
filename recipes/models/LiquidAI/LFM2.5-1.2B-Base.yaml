@@ -5,7 +5,6 @@ meta:
   description: "Liquid AI's 1.2B pretrained base model on the LFM2 hybrid conv+attention backbone — a text-completion and fine-tuning foundation (no chat template)."
   date_added: 2026-06-25
   date_updated: 2026-06-24
-  difficulty: beginner
   tasks:
     - text
   performance_headline: "1.2B pretrained base (no chat template) — completions endpoint, ideal as a fine-tuning base"

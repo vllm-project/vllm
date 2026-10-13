@@ -5,7 +5,6 @@ meta:
   description: "Multilingual, multimodal reranker for text and visual documents across 29+ languages via Qwen2-VL backbone"
   date_added: 2025-10-29
   date_updated: 2026-04-17
-  difficulty: beginner
   tasks:
     - embedding
   related_recipes: []

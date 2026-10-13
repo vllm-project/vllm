@@ -4,7 +4,6 @@ meta:
   provider: "Qwen"
   description: "Qwen4 architecture preview with a 125B-parameter main model, supplemented by an additional 51B N-gram embeddings, with 6B parameters activated per token."
   date_updated: 2026-09-30
-  difficulty: advanced
   tasks:
     - multimodal
     - text

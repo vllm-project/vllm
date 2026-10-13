@@ -5,7 +5,6 @@ meta:
   description: "Liquid AI's 8B mixture-of-experts model (~1B active) on the LFM2 hybrid conv+attention backbone, with <think> reasoning and tool calling at ~1B decode cost."
   date_added: 2026-06-25
   date_updated: 2026-06-24
-  difficulty: intermediate
   tasks:
     - text
   performance_headline: "8B-total / ~1B-active hybrid MoE with reasoning and tool calling — 8B quality at ~1B decode cost on a single GPU"

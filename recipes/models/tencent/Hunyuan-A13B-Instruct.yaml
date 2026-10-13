@@ -5,7 +5,6 @@ meta:
   description: "Tencent Hunyuan A13B instruct-tuned MoE language model with AITER-accelerated AMD ROCm deployment"
   date_added: 2026-04-11
   date_updated: 2026-09-10
-  difficulty: beginner
   tasks:
     - text
   performance_headline: "Hunyuan-A13B MoE with AITER acceleration on AMD MI300X/MI325X/MI355X"

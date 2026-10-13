@@ -5,7 +5,6 @@ meta:
   description: "Qwen2.5-VL dense vision-language model (7B) for image and video understanding — fits on a single TPU v6e chip, one GPU, or Intel Xeon 6 CPU."
   date_added: 2025-08-22
   date_updated: 2026-09-12
-  difficulty: beginner
   tasks:
     - multimodal
     - text

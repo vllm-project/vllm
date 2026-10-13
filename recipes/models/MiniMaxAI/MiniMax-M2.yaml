@@ -5,7 +5,6 @@ meta:
   description: "MiniMax M2 MoE language model (230B total / 10B active) for coding, agent toolchains, and long-context reasoning — native FP8 checkpoint, with an NVFP4 variant for Blackwell"
   date_added: 2025-10-26
   date_updated: 2026-05-11
-  difficulty: intermediate
   tasks:
     - text
   performance_headline: "Open-source MoE with strong SWE-Bench and Terminal-Bench performance, 196K context"

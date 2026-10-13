@@ -5,7 +5,6 @@ meta:
   description: "Mistral Small 4 (119B MoE, 6.5B active) — multimodal hybrid instruct + reasoning model with native FP8 weights and 256K context"
   date_added: 2026-05-13
   date_updated: 2026-05-13
-  difficulty: intermediate
   tasks:
     - multimodal
   related_recipes:

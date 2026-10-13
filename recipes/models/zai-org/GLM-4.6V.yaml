@@ -5,7 +5,6 @@ meta:
   description: "GLM-4.6 vision-language MoE model — image-text-to-text with 128K context, native FP8 checkpoint, and expert parallelism"
   date_added: 2025-12-07
   date_updated: 2026-04-17
-  difficulty: intermediate
   tasks:
     - multimodal
   performance_headline: "Updated GLM-V series with 128K context length and native FP8"

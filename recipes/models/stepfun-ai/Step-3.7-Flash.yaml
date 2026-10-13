@@ -5,7 +5,6 @@ meta:
   description: "Production-grade vision-language MoE (~198B total / 11B active parameters) combining a 196B sparse language backbone with a 1.8B perception encoder, hybrid SWA/Global attention, and 3-way Multi-Token Prediction"
   date_added: 2026-05-29
   date_updated: 2026-05-30
-  difficulty: intermediate
   tasks:
     - multimodal
   performance_headline: "Sparse MoE VLM with hybrid attention and 3-layer MTP speculative decoding"

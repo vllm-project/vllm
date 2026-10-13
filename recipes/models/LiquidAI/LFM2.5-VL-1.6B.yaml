@@ -5,7 +5,6 @@ meta:
   description: "Liquid AI's 1.6B vision-language model — LFM2 hybrid LM backbone plus a SigLIP2 vision tower for image+text chat on a single small GPU."
   date_added: 2026-06-25
   date_updated: 2026-06-24
-  difficulty: beginner
   tasks:
     - multimodal
   performance_headline: "1.6B vision-language model (hybrid LM + SigLIP2 vision) — image understanding on a single small GPU"

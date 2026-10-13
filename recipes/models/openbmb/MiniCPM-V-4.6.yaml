@@ -5,7 +5,6 @@ meta:
   description: "MiniCPM-V 4.6 (1.3B) — pocket-sized multimodal LLM for ultra-efficient single-image, multi-image, and video understanding, built on SigLIP2-400M + a Qwen3.5-0.8B hybrid-attention backbone"
   date_added: 2026-06-02
   date_updated: 2026-06-02
-  difficulty: beginner
   tasks:
     - multimodal
   performance_headline: "~1.5× token throughput vs Qwen3.5-0.8B with mixed 4×/16× visual token compression"

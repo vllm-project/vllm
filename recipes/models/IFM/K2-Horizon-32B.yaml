@@ -5,7 +5,6 @@ meta:
   description: "Dense long-context model for reasoning research and high-capacity serving"
   date_added: 2026-08-31
   date_updated: 2026-09-02
-  difficulty: advanced
   tasks: [text]
   performance_headline: "34.78B stored parameters including embeddings, with native vLLM execution and up to 512K context"
   related_recipes: ["IFM/K2-Horizon-7B", "IFM/K2-Horizon-MoVA-36B-A4B"]

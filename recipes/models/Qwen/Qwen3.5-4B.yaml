@@ -5,7 +5,6 @@ meta:
   description: "Qwen3.5 compact dense multimodal model (4B) — fits on 16 GB consumer GPUs with full 262K context or one Xeon 6 NUMA node or Intel Arc Pro B60/B70"
   date_added: 2026-04-22
   date_updated: 2026-09-14
-  difficulty: beginner
   tasks:
     - multimodal
     - text

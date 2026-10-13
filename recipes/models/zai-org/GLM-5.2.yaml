@@ -5,7 +5,6 @@ meta:
   description: "GLM-5.2 — frontier-scale MoE language model (~743B total parameters, 39B active) with up to 5-token MTP speculative decoding and thinking mode"
   date_added: 2026-06-16
   date_updated: 2026-10-03
-  difficulty: advanced
   tasks:
     - text
   performance_headline: "Latest GLM-5 series MoE with extended MTP (5 draft tokens), improved reasoning and agentic performance"

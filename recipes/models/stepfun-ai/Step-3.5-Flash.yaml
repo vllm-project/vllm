@@ -5,7 +5,6 @@ meta:
   description: "Production-grade reasoning MoE (~196B total / 11B active parameters) with hybrid attention schedules, SWA compensation, and multi-token prediction for low-latency long-context inference"
   date_added: 2026-02-01
   date_updated: 2026-04-17
-  difficulty: intermediate
   tasks:
     - text
   performance_headline: "Sparse MoE reasoning model with hybrid attention and step3p5 MTP speculative decoding"

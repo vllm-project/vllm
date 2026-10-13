@@ -5,7 +5,6 @@ meta:
   description: "Coding-focused agentic MoE built on Kimi-K2.6, tuned for long-horizon software-engineering tasks with thinking-only reasoning, tool calling, and vision-language input"
   date_added: 2026-06-12
   date_updated: 2026-07-29
-  difficulty: intermediate
   tasks:
     - multimodal
     - text

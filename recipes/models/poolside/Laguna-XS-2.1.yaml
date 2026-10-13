@@ -5,7 +5,6 @@ meta:
   description: "Poolside's 33B total / 3B activated MoE coding model with mixed sliding-window + global attention, native interleaved reasoning, and 256K context — designed for agentic coding."
   date_added: 2026-07-02
   date_updated: 2026-07-02
-  difficulty: intermediate
   tasks:
     - text
   performance_headline: "33B/3B-A MoE for agentic coding with interleaved thinking and tool use"

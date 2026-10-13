@@ -5,7 +5,6 @@ meta:
   description: "Qwen3 MoE model with 30.5B total and 3.3B active parameters, validated for BF16 serving on Intel Xeon 6 and Intel Arc Pro B70 and W8A8 serving on Ascend A3."
   date_added: 2026-08-14
   date_updated: 2026-09-23
-  difficulty: intermediate
   tasks:
     - text
   performance_headline: "Validated on Intel Xeon 6 (GNR), Ascend A3 W8A8 and 4x Intel Arc Pro B70 with BF16 serving"

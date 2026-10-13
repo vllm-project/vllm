@@ -5,7 +5,6 @@ meta:
   description: "Tencent Hy3 — scaled-up MoE language model (295B total / 21B active) with a 3.8B MTP layer for speculative decoding, 256K context, and hy_v3 tool/reasoning parsers"
   date_added: 2026-07-06
   date_updated: 2026-09-14
-  difficulty: intermediate
   tasks:
     - text
   performance_headline: "Hy3 MoE — 295B/21B on 8×H200, 8×H20-3e(141GB), or 8×AMD MI300X/MI355X with MTP"

@@ -5,7 +5,6 @@ meta:
   description: "Open-source speech recognition model (~2B) with strong dialect support (Cantonese and others) and robust low-volume speech transcription"
   date_added: 2026-01-26
   date_updated: 2026-04-17
-  difficulty: beginner
   tasks:
     - multimodal
   performance_headline: "Outperforms Whisper V3 on multiple benchmarks at compact 1.5B active / 2B total size"

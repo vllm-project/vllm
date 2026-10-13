@@ -5,7 +5,6 @@ meta:
   description: "Sparse MoVA and MoE long-context model for research and production-style serving experiments"
   date_added: 2026-08-31
   date_updated: 2026-09-03
-  difficulty: advanced
   tasks: [text]
   performance_headline: "37.44B stored parameters including embeddings / 5.95B active parameters per token"
   related_recipes: ["IFM/K2-Horizon-32B", "IFM/K2-Horizon-375B-A23B"]

@@ -5,7 +5,6 @@ meta:
   description: "Lightweight text-only guardrail/safety classifier model in the Qwen3Guard family."
   date_added: 2025-11-28
   date_updated: 2026-04-30
-  difficulty: beginner
   tasks:
     - text
   performance_headline: "Runs on a single GPU; serves safety classifications over OpenAI-compatible API"

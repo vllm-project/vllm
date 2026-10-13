@@ -4,7 +4,6 @@ meta:
   provider: "inclusionAI"
   description: "Ling-3.0-flash MoE model with BF16, FP8, FP4, and INT4 checkpoints, native MTP, and an external DSpark draft model"
   date_updated: 2026-09-09
-  difficulty: advanced
   tasks:
     - text
   performance_headline: "BF16, FP8, FP4, and INT4 support NVIDIA H20/H200 and AMD MI300X/MI355X; DGX Spark verified TP1 FP4/INT4"

@@ -5,7 +5,6 @@ meta:
   description: "Compact dense model for mathematics, code, instruction following, and STEM tasks"
   date_added: 2026-08-31
   date_updated: 2026-08-31
-  difficulty: advanced
   tasks:
     - text
   performance_headline: "1.08B stored parameters including embeddings, with 131K context and native K2-Horizon parsing"

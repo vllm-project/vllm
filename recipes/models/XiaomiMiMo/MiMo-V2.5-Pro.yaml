@@ -5,7 +5,6 @@ meta:
   description: "Xiaomi's flagship MoE reasoning model (1.02T total / 42B active) with hybrid attention, native FP8 weights, and Multi-Token Prediction"
   date_added: 2026-04-27
   date_updated: 2026-04-27
-  difficulty: advanced
   tasks:
     - text
   related_recipes:

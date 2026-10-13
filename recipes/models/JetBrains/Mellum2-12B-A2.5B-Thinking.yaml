@@ -5,7 +5,6 @@ meta:
   description: "JetBrains' reasoning-augmented code MoE (12B total / 2.5B active) that emits explicit <think> chains for debugging, planning, and agentic coding"
   date_added: 2026-06-02
   date_updated: 2026-06-02
-  difficulty: intermediate
   tasks:
     - text
   performance_headline: "69.9 LiveCodeBench v6, 58.4 AIME — fits on a single GPU"

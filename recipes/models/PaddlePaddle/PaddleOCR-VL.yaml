@@ -5,7 +5,6 @@ meta:
   description: "PaddleOCR-VL (0.9B) — compact vision-language model for document parsing, OCR, tables, formulas, charts"
   date_added: 2025-11-04
   date_updated: 2026-04-17
-  difficulty: beginner
   tasks:
     - multimodal
   related_recipes: []

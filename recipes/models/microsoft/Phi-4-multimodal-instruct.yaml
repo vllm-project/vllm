@@ -5,7 +5,6 @@ meta:
   description: "Microsoft Phi-4 multimodal model supporting text, image, and audio inputs with text outputs."
   date_added: 2026-08-19
   date_updated: 2026-09-12
-  difficulty: intermediate
   tasks:
     - multimodal
   performance_headline: "Validated on Intel Xeon 6"

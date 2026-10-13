@@ -5,7 +5,6 @@ meta:
   description: "InternVL 3.5 vision-language models from Shanghai AI Lab with thinking-mode prompting"
   date_added: 2025-09-20
   date_updated: 2026-04-17
-  difficulty: beginner
   tasks:
     - multimodal
   related_recipes:

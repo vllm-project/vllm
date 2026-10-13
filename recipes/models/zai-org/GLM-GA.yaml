@@ -5,7 +5,6 @@ meta:
   description: "GLM-GA dense vision-language model (~10B) — image and video understanding with 128K context and dedicated Glmga video processor (fps=2, up to 640 frames)"
   date_added: 2026-06-03
   date_updated: 2026-05-27
-  difficulty: beginner
   tasks:
     - multimodal
   performance_headline: "Dense VLM based on GLM-4.6V-Flash with dedicated video processor supporting long videos up to 640 frames"

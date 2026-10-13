@@ -5,7 +5,6 @@ meta:
   description: "MiniMax M2.5 MoE language model (230B total / 10B active) for coding, agent toolchains, and long-context reasoning — native FP8 checkpoint"
   date_added: 2026-02-13
   date_updated: 2026-09-14
-  difficulty: intermediate
   tasks:
     - text
   performance_headline: "Refreshed M2 series MoE with strong SWE-Bench and Terminal-Bench performance, 196K context"

@@ -5,7 +5,6 @@ meta:
   description: "BharatGen's hybrid-MoE reasoning model for English, Hindi and 21 Indian languages, with thinking traces and Hermes-style tool calling"
   date_added: 2026-09-20
   date_updated: 2026-09-20
-  difficulty: beginner
   tasks:
     - text
   performance_headline: "17B total / 2.4B active parameters; the full BF16 checkpoint serves at TP1 on a single H100 or a single 48 GB L40S"

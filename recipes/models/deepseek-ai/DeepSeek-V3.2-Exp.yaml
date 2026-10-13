@@ -5,7 +5,6 @@ meta:
   description: "Experimental DeepSeek-V3.2 preview with sparse attention (MQA-like logits) and FP8 KV cache; architecture matches DeepSeek-V3.1 except for the sparse attention mechanism."
   date_added: 2025-09-29
   date_updated: 2026-09-14
-  difficulty: advanced
   tasks:
     - text
   performance_headline: "Sparse attention MoE with FP8 KV cache and strong GSM8K score (~0.96)"

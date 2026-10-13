@@ -5,7 +5,6 @@ meta:
   description: "Flagship Qwen3 MoE instruct model with 235B total and 22B active parameters, tuned for high-quality text generation."
   date_added: 2025-10-15
   date_updated: 2026-04-17
-  difficulty: intermediate
   tasks:
     - text
   performance_headline: "Verified on 4x/8x H200, MI300X/MI325X/MI355X nodes (BF16 and FP8)"

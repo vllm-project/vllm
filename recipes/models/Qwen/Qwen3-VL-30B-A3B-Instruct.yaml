@@ -5,7 +5,6 @@ meta:
   description: "Qwen3-VL MoE vision-language model with 30B total / 3B active parameters, supporting image, video, and text workloads."
   date_added: 2026-08-17
   date_updated: 2026-09-12
-  difficulty: intermediate
   tasks:
     - multimodal
     - text

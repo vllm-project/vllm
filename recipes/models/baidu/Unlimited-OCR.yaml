@@ -5,7 +5,6 @@ meta:
   description: "Baidu's state-of-the-art document-parsing model with Reference Sliding Window Attention (R-SWA), optimized for full-page OCR and markdown generation."
   date_added: 2026-06-28
   date_updated: 2026-06-28
-  difficulty: intermediate
   tasks:
     - multimodal
   performance_headline: "One-shot long-horizon document parsing to markdown"

@@ -5,7 +5,6 @@ meta:
   description: "Intern-S1 vision-language model from Shanghai AI Lab with BF16/FP8 variants and thinking/non-thinking modes"
   date_added: 2025-08-19
   date_updated: 2026-04-17
-  difficulty: intermediate
   tasks:
     - multimodal
   related_recipes:

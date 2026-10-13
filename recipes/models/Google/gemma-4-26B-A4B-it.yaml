@@ -5,7 +5,6 @@ meta:
   description: "Google's Gemma 4 MoE multimodal model (26B total / 4B active) with 128 fine-grained experts, top-8 routing, thinking mode, and tool-use protocol."
   date_added: 2026-04-02
   date_updated: 2026-09-12
-  difficulty: intermediate
   tasks:
     - multimodal
     - text

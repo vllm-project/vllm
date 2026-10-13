@@ -5,7 +5,6 @@ meta:
   description: "IBM Granite 3.2 2B instruction-tuned dense language model with long-context support."
   date_added: 2026-08-19
   date_updated: 2026-08-19
-  difficulty: beginner
   tasks:
     - text
   performance_headline: "Validated on Intel Xeon 6 with BF16 serving"

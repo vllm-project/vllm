@@ -5,7 +5,6 @@ meta:
   description: "Meta's Llama 3.1 8B dense instruction-tuned language model with 128K context"
   date_added: 2025-10-15
   date_updated: 2026-09-12
-  difficulty: beginner
   tasks:
     - text
   related_recipes:

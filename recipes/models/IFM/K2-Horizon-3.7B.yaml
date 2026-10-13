@@ -5,7 +5,6 @@ meta:
   description: "Dense model for long-context research, serving, and downstream adaptation"
   date_added: 2026-08-31
   date_updated: 2026-09-02
-  difficulty: advanced
   tasks: [text]
   performance_headline: "5.06B stored parameters including embeddings, with up to 512K context"
   related_recipes: ["IFM/K2-Horizon-0.9B", "IFM/K2-Horizon-7B"]

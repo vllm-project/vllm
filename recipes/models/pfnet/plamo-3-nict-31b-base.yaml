@@ -5,7 +5,6 @@ meta:
   description: "Largest PLaMo 3 NICT Japanese/English base model with interleaved sliding-window and full attention."
   date_added: 2026-06-03
   date_updated: 2026-09-13
-  difficulty: intermediate
   tasks:
     - text
   performance_headline: "31B-class PLaMo 3 base checkpoint for high-quality bilingual generation"

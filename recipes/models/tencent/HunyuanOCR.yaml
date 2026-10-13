@@ -5,7 +5,6 @@ meta:
   description: "Tencent Hunyuan end-to-end OCR expert VLM (~1B) for online OCR serving with an OpenAI-compatible API"
   date_added: 2025-11-25
   date_updated: 2026-04-17
-  difficulty: beginner
   tasks:
     - multimodal
   performance_headline: "Compact 1B end-to-end OCR VLM from the Hunyuan native multimodal family"

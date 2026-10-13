@@ -5,7 +5,6 @@ meta:
   description: "PaddleOCR-VL-1.5 (0.9B) — next-gen compact VLM for document parsing; adds text spotting, seal recognition, and Tibetan/Bengali"
   date_added: 2026-05-11
   date_updated: 2026-05-11
-  difficulty: beginner
   tasks:
     - multimodal
   related_recipes:

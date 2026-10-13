@@ -5,7 +5,6 @@ meta:
   description: "Scientific multimodal MoE (36B total / 3B active) continued pre-trained from Qwen3.5 — hybrid linear/full attention, 262K context, MTP-accelerated reasoning. BF16 and FP8 checkpoints."
   date_added: 2026-05-15
   date_updated: 2026-05-15
-  difficulty: intermediate
   tasks:
     - multimodal
     - text

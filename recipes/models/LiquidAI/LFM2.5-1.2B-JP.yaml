@@ -5,7 +5,6 @@ meta:
   description: "Liquid AI's 1.2B Japanese-specialized chat model on the LFM2 hybrid conv+attention backbone, with a 32K context window on a single small GPU."
   date_added: 2026-06-25
   date_updated: 2026-06-24
-  difficulty: beginner
   tasks:
     - text
   performance_headline: "Japanese-tuned 1.2B hybrid chat model — single small GPU"

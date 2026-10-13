@@ -5,7 +5,6 @@ meta:
   description: "Multilingual realtime speech transcription (13 languages) with a natively streaming causal audio encoder; configurable 80ms–2.4s transcription delay served via vLLM's Realtime API"
   date_added: 2026-05-13
   date_updated: 2026-05-13
-  difficulty: beginner
   tasks:
     - multimodal
   performance_headline: "Matches offline open-source ASR accuracy at 480ms delay; >12.5 tok/s on a single 16GB GPU"

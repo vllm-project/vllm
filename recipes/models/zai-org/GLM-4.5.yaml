@@ -5,7 +5,6 @@ meta:
   description: "GLM-4.5 MoE language model (~358B total parameters, BF16) with built-in MTP layers for speculative decoding and native tool calling"
   date_added: 2025-08-12
   date_updated: 2026-09-14
-  difficulty: intermediate
   tasks:
     - text
   performance_headline: "GLM-4.X series MoE model with native FP8 and BF16 support and MTP speculative decoding"

@@ -5,7 +5,6 @@ meta:
   description: "Google's compact Gemma 4 multimodal model (effective 4B) with native text, image, and audio, plus thinking mode and tool-use protocol."
   date_added: 2026-04-02
   date_updated: 2026-09-12
-  difficulty: beginner
   tasks:
     - multimodal
     - text

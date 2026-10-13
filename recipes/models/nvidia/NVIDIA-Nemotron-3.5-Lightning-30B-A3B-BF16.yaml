@@ -5,7 +5,6 @@ meta:
   description: "NVIDIA Nemotron 3.5 Lightning hybrid Mamba-MoE (30B total / 3B active) with NVFP4 and BF16 checkpoints, 1M context, and MTP / DSpark / DFlash speculative decoding"
   date_added: 2026-08-03
   date_updated: 2026-10-08
-  difficulty: intermediate
   tasks:
     - text
   related_recipes:

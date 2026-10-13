@@ -5,7 +5,6 @@ meta:
   description: "Pre-release 2.8T-parameter native multimodal MoE with Kimi Delta Attention, Gated MLA, Attention Residuals, and a 1M-token context window"
   date_added: 2026-07-27
   date_updated: 2026-10-12
-  difficulty: hard
   tasks:
     - multimodal
     - text

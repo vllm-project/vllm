@@ -5,7 +5,6 @@ meta:
   description: "27B-parameter dense hybrid-attention model with linear attention on 48 of 64 layers, a vision tower, a built-in MTP draft head, 262K native context window and extensible to 1M context"
   date_added: 2026-08-14
   date_updated: 2026-10-08
-  difficulty: beginner
   tasks:
     - multimodal
     - text

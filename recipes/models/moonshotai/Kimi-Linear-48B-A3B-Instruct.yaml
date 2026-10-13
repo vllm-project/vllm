@@ -5,7 +5,6 @@ meta:
   description: "Kimi-Linear is a 48B-parameter instruction-tuned MoE model (~3B activated) with a linear-attention variant supporting very long context (1M tokens)."
   date_added: 2025-10-31
   date_updated: 2026-04-17
-  difficulty: intermediate
   tasks:
     - text
   performance_headline: "Linear-attention MoE with 1M-token context on a single node"

@@ -5,7 +5,6 @@ meta:
   description: "DeepSeek's first experimental multimodal V4 model — the V4-Flash MoE backbone plus a 32-layer vision tower, 1M context, and a fused DSpark draft module."
   date_added: 2026-09-01
   date_updated: 2026-09-14
-  difficulty: advanced
   tasks:
     - text
     - multimodal

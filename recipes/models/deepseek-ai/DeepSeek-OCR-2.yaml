@@ -5,7 +5,6 @@ meta:
   description: "Next-generation DeepSeek OCR model with improved document-to-markdown grounding and optical context compression."
   date_added: 2026-03-28
   date_updated: 2026-04-17
-  difficulty: intermediate
   tasks:
     - multimodal
   performance_headline: "Improved grounding and markdown conversion over DeepSeek-OCR"

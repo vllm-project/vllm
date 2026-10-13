@@ -6,7 +6,6 @@ meta:
   description: "DeepSeek V4.1 Flash vision-language MoE (552B backbone; 8B active per prompt token, 16B per output token) combining sliding-window plus compressed sparse attention with a two-level indexer, engram n-gram memory, hyper-connections, and a DSpark multi-token draft head."
   date_added: 2026-09-09
   date_updated: 2026-10-03
-  difficulty: advanced
   tasks:
     - text
     - multimodal

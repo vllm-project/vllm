@@ -5,7 +5,6 @@ meta:
   description: "Qwen3 4B dense model with hybrid thinking/non-thinking modes — fits on a single TPU v6e chip, one GPU or one Xeon 6 NUMA node."
   date_added: 2025-10-15
   date_updated: 2026-09-12
-  difficulty: beginner
   tasks:
     - text
   performance_headline: "Verified on TPU v6e (Trillium) with BF16 on a single chip"

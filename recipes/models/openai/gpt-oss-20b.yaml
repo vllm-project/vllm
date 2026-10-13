@@ -5,7 +5,6 @@ meta:
   description: "OpenAI's gpt-oss-20b — 21B-total / 3.6B-active MoE reasoning model with native MXFP4 quant; supports GPU, XPU, and Xeon 6 CPU serving"
   date_added: 2025-08-05
   date_updated: 2026-09-12
-  difficulty: beginner
   tasks:
     - text
   performance_headline: "21B/3.6B-A MoE reasoning model with native MXFP4 — runs on 16GB"

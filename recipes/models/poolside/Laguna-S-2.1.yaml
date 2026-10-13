@@ -5,7 +5,6 @@ meta:
   description: "Poolside's 118B total / 8B activated MoE coding model with mixed sliding-window + global attention, native interleaved reasoning, and 256K context — the larger sibling of Laguna XS-2.1, tuned for agentic coding."
   date_added: 2026-07-21
   date_updated: 2026-07-22
-  difficulty: intermediate
   tasks:
     - text
   performance_headline: "118B/8B-A MoE for agentic coding with interleaved thinking and tool use"

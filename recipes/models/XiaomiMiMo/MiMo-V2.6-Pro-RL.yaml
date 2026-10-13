@@ -5,7 +5,6 @@ meta:
   description: "Xiaomi's flagship omnimodal MoE (1.02T total / 42B active) with hybrid attention, FP8-compute/mxfp4-stored weights, 1M context, and a DFlash speculative decoder — the default MOPD checkpoint fixes the RL release's tool-call repetition"
   date_added: 2026-09-22
   date_updated: 2026-10-07
-  difficulty: advanced
   tasks:
     - text
     - multimodal

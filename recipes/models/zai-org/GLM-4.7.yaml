@@ -5,7 +5,6 @@ meta:
   description: "GLM-4.7 MoE language model (~358B total parameters) with MTP speculative decoding, updated tool call parser, and reasoning support"
   date_added: 2025-12-20
   date_updated: 2026-09-18
-  difficulty: intermediate
   tasks:
     - text
   performance_headline: "Latest GLM-4.X release with updated glm47 tool call parser and MTP speculative decoding"

@@ -5,7 +5,6 @@ meta:
   description: "MiniCPM5-1B — dense 1B on-device LLM with hybrid Think/No-Think reasoning, native 128K context, and strong agentic tool use, built on the standard Llama architecture"
   date_added: 2026-06-02
   date_updated: 2026-06-02
-  difficulty: beginner
   tasks:
     - text
   performance_headline: "1B-class open-source SOTA on tool use, code, and reasoning"

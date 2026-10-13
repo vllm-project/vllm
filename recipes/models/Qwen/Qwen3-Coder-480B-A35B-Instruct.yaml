@@ -5,7 +5,6 @@ meta:
   description: "Large coder MoE with 480B total / 35B active parameters, strong tool-use and code generation capabilities."
   date_added: 2025-07-23
   date_updated: 2026-04-17
-  difficulty: advanced
   tasks:
     - text
   performance_headline: "HumanEval 0.939, MBPP 0.918 (FP8). Recommended FP8 on 8x H200/H20 via DP=8"

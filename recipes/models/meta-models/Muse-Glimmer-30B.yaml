@@ -5,7 +5,6 @@ meta:
   description: "Dense 29.6B vision-language model with a ViT-G/14 perception encoder and 128K context, distilled from Muse Spark for local agentic use. Emits channel-scoped reasoning and XML-style ATEM tool calls rather than JSON, so it needs the dedicated `muse_glimmer` tool-call and reasoning parsers."
   date_added: 2026-08-09
   date_updated: 2026-09-09
-  difficulty: advanced
   tasks:
     - text
     - multimodal

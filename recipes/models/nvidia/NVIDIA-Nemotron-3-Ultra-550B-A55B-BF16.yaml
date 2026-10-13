@@ -5,7 +5,6 @@ meta:
   description: "NVIDIA Nemotron 3 Ultra hybrid Transformer-Mamba MoE model for long-context agentic reasoning, coding, and tool use."
   date_added: 2026-06-04
   date_updated: 2026-09-10
-  difficulty: advanced
   tasks:
     - text
   performance_headline: "550B total / 55B active parameters with BF16 and NVFP4 serving paths"

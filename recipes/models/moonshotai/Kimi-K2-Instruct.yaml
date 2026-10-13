@@ -5,7 +5,6 @@ meta:
   description: "Moonshot AI's Kimi-K2 is a trillion-parameter MoE instruction model (~32B active) with native FP8 weights and strong tool-calling capabilities."
   date_added: 2025-09-25
   date_updated: 2026-04-17
-  difficulty: advanced
   tasks:
     - text
   performance_headline: "Open-weights 1T-parameter MoE with native FP8 and Kimi K2 tool calling"

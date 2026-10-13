@@ -5,7 +5,6 @@ meta:
   description: "MiMo-V2.5 is a native omnimodal model with strong agentic capabilities, supporting text, image, video, and audio understanding within a unified architecture"
   date_added: 2026-04-27
   date_updated: 2026-04-27
-  difficulty: advanced
   tasks:
     - multimodal
     - text

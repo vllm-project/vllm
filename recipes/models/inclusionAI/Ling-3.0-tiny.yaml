@@ -5,7 +5,6 @@ meta:
   description: "Ling-3.0-tiny lightweight hybrid-reasoning MoE with BF16, block-FP8, and compressed-tensors INT4 checkpoints"
   date_added: 2026-08-31
   date_updated: 2026-09-09
-  difficulty: intermediate
   tasks:
     - text
   performance_headline: "7.9B total / 1.3B active parameters with a 3:1 KDA-MLA stack; all three official checkpoints run with TP1"

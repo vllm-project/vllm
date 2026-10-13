@@ -5,7 +5,6 @@ meta:
   description: "Ling-3.0-flash vision-language MoE model with BF16, FP8, FP4, and INT4 checkpoints"
   date_added: 2026-09-08
   date_updated: 2026-09-08
-  difficulty: advanced
   tasks:
     - text
     - multimodal

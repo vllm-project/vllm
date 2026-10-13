@@ -5,7 +5,6 @@ meta:
   description: "Ring-2.6-1T (BailingMoeV2_5) FP8 thinking model with 1T total / 50B active params, hybrid linear + MLA attention, 128K context"
   date_added: 2026-05-14
   date_updated: 2026-05-15
-  difficulty: advanced
   tasks:
     - text
   related_recipes:

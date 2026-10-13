@@ -5,7 +5,6 @@ meta:
   description: "Multimodal MoE model available in BF16 and native FP8, with hybrid DSA and SWA, 512K context, and MTP speculative decoding."
   date_added: 2026-08-13
   date_updated: 2026-09-09
-  difficulty: advanced
   tasks:
     - multimodal
     - text

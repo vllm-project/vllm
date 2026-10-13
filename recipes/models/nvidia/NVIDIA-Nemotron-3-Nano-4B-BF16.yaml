@@ -5,7 +5,6 @@ meta:
   description: "NVIDIA Nemotron-3-Nano 4B (Mamba-hybrid dense) — compact reasoning + tool-use model with BF16 and FP8 variants"
   date_added: 2026-04-28
   date_updated: 2026-04-28
-  difficulty: beginner
   tasks:
     - text
   related_recipes:

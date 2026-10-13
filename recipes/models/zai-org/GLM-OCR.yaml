@@ -5,7 +5,6 @@ meta:
   description: "GLM-OCR image-to-text model with built-in MTP speculative decoding for high-throughput OCR serving"
   date_added: 2026-01-26
   date_updated: 2026-04-17
-  difficulty: beginner
   tasks:
     - multimodal
   performance_headline: "Multilingual end-to-end OCR VLM with MTP-accelerated decoding"

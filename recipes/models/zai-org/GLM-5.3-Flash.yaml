@@ -5,7 +5,6 @@ meta:
   description: "GLM-5.3-Flash is a 320B-total / 18B-active multimodal MoE with hybrid KDA and sparse MLA attention, native FP8 weights, MTP, and a 1M-token context window."
   date_added: 2026-08-27
   date_updated: 2026-10-08
-  difficulty: advanced
   tasks:
     - text
     - multimodal

@@ -5,7 +5,6 @@ meta:
   description: "Baidu ERNIE 4.5 MoE text models (21B-A3B, 300B-A47B) with BF16 and FP8 support plus ERNIE-MTP speculative decoding"
   date_added: 2025-09-03
   date_updated: 2026-04-17
-  difficulty: intermediate
   tasks:
     - text
   related_recipes:

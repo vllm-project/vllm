@@ -5,7 +5,6 @@ meta:
   description: "Qwen2.5-VL dense vision-language model (72B) for high-quality image and video understanding."
   date_added: 2025-08-22
   date_updated: 2026-04-17
-  difficulty: intermediate
   tasks:
     - multimodal
     - text

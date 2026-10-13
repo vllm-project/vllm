@@ -5,7 +5,6 @@ meta:
   description: "Advanced Qwen3-Next MoE model (80B total / 3B active) with hybrid attention, highly sparse experts, and multi-token prediction."
   date_added: 2025-09-11
   date_updated: 2026-09-10
-  difficulty: intermediate
   tasks:
     - text
   performance_headline: "Highly sparse MoE with MTP-accelerated decoding, runs on 4x H200/H20/A100/A800"

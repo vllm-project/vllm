@@ -5,7 +5,6 @@ meta:
   description: "Jina AI's fifth-gen multilingual text embedding model (677M, Qwen3-0.6B-Base) with task-specific LoRA adapters for retrieval, text-matching, classification, and clustering."
   date_added: 2026-05-09
   date_updated: 2026-05-09
-  difficulty: beginner
   tasks:
     - embedding
   performance_headline: "71.7 MTEB English v2 / 67.7 MMTEB at <1B params, 119+ languages, 32K context"

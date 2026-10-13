@@ -5,7 +5,6 @@ meta:
   description: "Qwen2.5 32B dense base (pretrained) language model for text completion — verified on TPU v6e (Trillium)."
   date_added: 2026-06-05
   date_updated: 2026-06-04
-  difficulty: intermediate
   tasks:
     - text
   performance_headline: "Verified on TPU v6e (Trillium) with BF16, TP=4 on a 2x2 slice"

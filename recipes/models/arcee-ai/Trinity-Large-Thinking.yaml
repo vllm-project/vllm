@@ -5,7 +5,6 @@ meta:
   description: "Arcee AI's reasoning-focused sparse MoE (AfmoeForCausalLM) with structured <think> traces and agentic tool use"
   date_added: 2026-04-10
   date_updated: 2026-04-17
-  difficulty: intermediate
   tasks:
     - text
   related_recipes: []

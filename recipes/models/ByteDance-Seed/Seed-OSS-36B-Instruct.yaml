@@ -5,7 +5,6 @@ meta:
   description: "ByteDance Seed-OSS 36B dense model with unique 'thinking budget' control and 512K context support"
   date_added: 2025-08-28
   date_updated: 2026-04-17
-  difficulty: intermediate
   tasks:
     - text
   related_recipes: []

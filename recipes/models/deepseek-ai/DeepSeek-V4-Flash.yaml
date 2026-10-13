@@ -5,7 +5,6 @@ meta:
   description: "DeepSeek V4 MoE model with hybrid CSA+HCA attention, manifold-constrained hyper-connections, and three-tier reasoning (Non-think / Think High / Think Max)."
   date_added: 2026-07-31
   date_updated: 2026-09-29
-  difficulty: hard
   tasks:
     - text
   performance_headline: "Compact 284B/13B V4 sibling — single-node 1M-context serving with FP4+FP8 weights, MTP, and DSpark speculative decoding"

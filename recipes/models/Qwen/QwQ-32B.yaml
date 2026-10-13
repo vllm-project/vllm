@@ -5,7 +5,6 @@ meta:
   description: "Qwen's 32B dense reasoning model, validated for Intel Xeon 6 CPU execution."
   date_added: 2026-08-17
   date_updated: 2026-09-12
-  difficulty: intermediate
   tasks:
     - text
   performance_headline: "Validated for Intel Xeon 6 CPU execution"

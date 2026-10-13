@@ -5,7 +5,6 @@ meta:
   description: "Liquid AI's most compact LFM2.5 chat model (230M) on the LFM2 hybrid conv+attention backbone — distilled from LFM2.5-350M, tool calling and 32K context, built for edge / on-device serving."
   date_added: 2026-06-25
   date_updated: 2026-06-25
-  difficulty: beginner
   tasks:
     - text
   performance_headline: "230M hybrid instruct model with tool calling — runs from low-cost CPUs to production GPUs, ideal for tightest on-device budgets"

@@ -5,7 +5,6 @@ meta:
   description: "JetBrains' instruction-tuned code MoE (12B total / 2.5B active) that answers directly without an externalized chain of thought — low-latency coding and tool use"
   date_added: 2026-06-02
   date_updated: 2026-06-02
-  difficulty: intermediate
   tasks:
     - text
   performance_headline: "78.4 EvalPlus, 67.1 MultiPL-E — direct answers, fits on a single GPU"

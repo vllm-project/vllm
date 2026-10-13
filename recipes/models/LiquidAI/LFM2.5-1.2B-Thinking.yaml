@@ -5,7 +5,6 @@ meta:
   description: "Liquid AI's 1.2B reasoning model on the LFM2 hybrid conv+attention backbone — <think> chain-of-thought, tool calling, and 32K context on a single small GPU."
   date_added: 2026-06-25
   date_updated: 2026-06-24
-  difficulty: beginner
   tasks:
     - text
   performance_headline: "1.2B hybrid reasoning model with <think> chain-of-thought and tool calling — single small GPU"
