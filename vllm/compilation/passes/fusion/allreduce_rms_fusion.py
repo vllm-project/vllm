@@ -35,7 +35,7 @@ from vllm.utils.torch_utils import (
     direct_register_custom_op,
 )
 
-from ..inductor_pass import enable_fake_mode
+from ..inductor_pass import enable_fake_mode, get_pass_context
 from ..vllm_inductor_pass import (
     VllmFusionPatternMatcherPass,
     VllmInductorPass,
@@ -1595,7 +1595,10 @@ class RocmAiterAllReduceFusionPass(VllmFusionPatternMatcherPass):
 
         hidden_dim = config.model_config.get_hidden_size()
         element_size = torch.tensor([], dtype=self.model_dtype).element_size()
-        max_size = ca_comm.effective_max_size()
+        custom_ar_max_size = ca_comm.effective_max_size()
+        # The workspace the fused QR+RMSNorm kernel stages through.
+        qr_comm = getattr(get_tp_group().device_communicator, "qr_comm", None)
+        max_size = ca_comm.fused_rms_max_size(hidden_dim, self.model_dtype, qr_comm)
         _AITER_OLD_FUSED_AR_RMS_HIDDEN = (512, 1024, 2048, 4096)
         if (
             not ca_comm.supports_dynamic_hidden_dim
@@ -1614,6 +1617,24 @@ class RocmAiterAllReduceFusionPass(VllmFusionPatternMatcherPass):
         self.max_token_num = min(
             max_token_num,
             config.scheduler_config.max_num_batched_tokens,
+        )
+        # The per-group-FP8-quant variants have no QuickReduce kernel, so they
+        # stay capped at the pool. VllmConfig puts a compile-range boundary at
+        # the pool, so each range is either fully below that cap or above it.
+        self.custom_ar_max_token_num = min(
+            custom_ar_max_size // (hidden_dim * element_size),
+            config.scheduler_config.max_num_batched_tokens,
+        )
+        self.quant_pm_pass = PatternMatcherPass(
+            pass_name=f"{self.pass_name}_group_quant"
+        )
+        logger.debug_once(
+            "AITER allreduce-rmsnorm fusion: AR+RMS up to %d tokens (%d MB), "
+            "AR+RMS+quant up to %d tokens (%d MB)",
+            self.max_token_num,
+            max_size // MiB,
+            self.custom_ar_max_token_num,
+            custom_ar_max_size // MiB,
         )
 
         # Only register the AR+RMS+per-group-FP8-quant patterns when the
@@ -1643,21 +1664,24 @@ class RocmAiterAllReduceFusionPass(VllmFusionPatternMatcherPass):
                         epsilon,
                         self.model_dtype,
                         self.device,
-                    )
+                    ),
+                    self.quant_pm_pass,
                 )
                 self.register(
                     AiterAllreduceFusedRMSNormGroupQuantFP8Pattern(
                         epsilon,
                         self.model_dtype,
                         self.device,
-                    )
+                    ),
+                    self.quant_pm_pass,
                 )
                 self.register(
                     AiterAllreduceFusedAddRMSNormGroupQuantFP8Pattern(
                         epsilon,
                         self.model_dtype,
                         self.device,
-                    )
+                    ),
+                    self.quant_pm_pass,
                 )
 
             # Must stay above the non-Gemma AR+RMS patterns below, which would
@@ -1713,6 +1737,7 @@ class RocmAiterAllReduceFusionPass(VllmFusionPatternMatcherPass):
         self.disabled = False
 
         self.dump_patterns(config, self.pm_pass)
+        self.dump_patterns(config, self.quant_pm_pass)
 
     def is_applicable_for_range(self, compile_range: Range) -> bool:
         if self.disabled:
@@ -1722,7 +1747,11 @@ class RocmAiterAllReduceFusionPass(VllmFusionPatternMatcherPass):
 
     @VllmInductorPass.time_and_log
     def __call__(self, graph: fx.Graph) -> None:
-        self.matched_count = self.pm_pass.apply(graph)
+        self.matched_count = 0
+        # Quant patterns go first, or the AR+RMS-only ones consume the all_reduce.
+        if get_pass_context().compile_range.end <= self.custom_ar_max_token_num:
+            self.matched_count += self.quant_pm_pass.apply(graph)
+        self.matched_count += self.pm_pass.apply(graph)
         VllmPatternMatcherPass.match_table[self.pass_name] += self.matched_count
         logger.debug(
             "%s Replaced %s patterns", self.__class__.__name__, self.matched_count
