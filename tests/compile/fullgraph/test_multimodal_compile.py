@@ -18,8 +18,8 @@ def test_compile():
     assert not vllm_config.compilation_config.compile_mm_encoder
 
 
-# Each test compiles in a fresh interpreter: compilation state from another
-# test, or CUDA initialized by another file in this pytest, breaks a forked one
+# Each test compiles in a fresh interpreter, not a fork: a fork fails once
+# another test file in the same pytest has initialized CUDA
 # (https://github.com/vllm-project/vllm/issues/21073, #28965).
 @pytest.mark.core_model
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Skip if not cuda")
