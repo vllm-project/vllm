@@ -1,7 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import itertools
+
 import numpy as np
+import pytest
 
 from vllm.logprobs import (
     FlatLogprobs,
@@ -282,3 +285,54 @@ def test_flat_logprobs_reads_like_list_across_storage_changes() -> None:
             expected.append(entry)
 
     check()
+
+
+def test_flat_logprobs_column_views() -> None:
+    """The column attributes are read-only views: every index, slice and
+    iteration reads the same values as the eager lists, across each storage
+    mode (uniform rows, irregular widths, per-entry ranks), and a view taken
+    earlier follows later appends."""
+    flat = FlatLogprobs()
+
+    def eager() -> dict[str, list]:
+        entries = [
+            (token_id, value.logprob, value.rank, value.decoded_token)
+            for position in flat
+            for token_id, value in position.items()
+        ]
+        ends = list(itertools.accumulate(len(position) for position in flat))
+        return {
+            "token_ids": [e[0] for e in entries],
+            "logprobs": [e[1] for e in entries],
+            "ranks": [e[2] for e in entries],
+            "decoded_tokens": [e[3] for e in entries],
+            "start_indices": [0, *ends[:-1]] if ends else [],
+            "end_indices": ends,
+        }
+
+    def check() -> None:
+        for name, expected in eager().items():
+            view = getattr(flat, name)
+            assert len(view) == len(expected), name
+            assert view == expected and list(view) == expected, name
+            n = len(expected)
+            assert [view[i] for i in range(-n, n)] == expected * 2, name
+            for index in (slice(1, -1), slice(None, None, 2), slice(5, 2)):
+                assert view[index] == expected[index], name
+            with pytest.raises(IndexError):
+                view[n]
+
+    token_ids_view = flat.token_ids
+    flat.append_rows(
+        np.array([[1, 2, 3], [4, 5, 6]], np.int32),
+        np.array([[-0.5, -1.0, -2.0], [-0.25, -0.75, -3.0]], np.float32),
+        np.array([7, 1]),
+    )
+    check()
+    flat.append(None)
+    flat.append({9: Logprob(-0.5, 2, "a")})
+    check()
+    flat.append({10: Logprob(-0.5, None, None), 11: Logprob(-1.5, 5, "b")})
+    check()
+    assert token_ids_view == [1, 2, 3, 4, 5, 6, 9, 10, 11]
+    assert flat.token_ids != "123456"

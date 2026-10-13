@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import itertools
-from collections.abc import Iterable, Iterator, MutableSequence, Sequence
+import operator
+from collections.abc import Callable, Iterable, Iterator, MutableSequence, Sequence
 from dataclasses import dataclass
-from typing import overload
+from typing import Any, overload
 
 import numpy as np
 
@@ -61,8 +62,7 @@ class _Column:
         return self._len
 
     def append(self, values: np.ndarray | Sequence[int] | Sequence[float]) -> None:
-        if not isinstance(values, np.ndarray):
-            values = self._array(values)
+        values = np.asarray(values)
         if not values.size:
             return
         start = self._len
@@ -77,28 +77,66 @@ class _Column:
         self._buf[start:end] = values
         self._len = end
 
-    def _array(self, values: Sequence[int] | Sequence[float]) -> np.ndarray:
-        """Python numbers as ``dtype`` if they round-trip, else ``wide``."""
-        try:
-            array = np.array(values, dtype=self.dtype)
-            if array.tolist() == list(values):
-                return array
-        except OverflowError:
-            pass
-        return np.array(values, dtype=self.wide)
-
     def view(self) -> np.ndarray:
         return self._buf[: self._len]
 
+    def item(self, index: int) -> int | float:
+        return self._buf[index].item()
 
-def _canonical_ranks(widths: np.ndarray, first_ranks: np.ndarray) -> np.ndarray:
-    """Per-entry ranks of positions with ``widths`` entries whose entry
-    ``j > 0`` has rank ``j`` and entry 0 has rank ``first_ranks``."""
-    starts = np.cumsum(widths) - widths
-    ranks = np.arange(int(widths.sum()), dtype=np.int64) - np.repeat(starts, widths)
-    nonempty = widths > 0
-    ranks[starts[nonempty]] = first_ranks[nonempty]
-    return ranks
+    def read(self, start: int, stop: int) -> list:
+        return self._buf[start:stop].tolist()
+
+
+class _ColumnView(Sequence[Any]):
+    """A read-only view of one ``FlatLogprobs`` column that converts only the
+    elements read, so indexing it in a loop costs O(1) per element and no
+    copy is kept. It follows later appends."""
+
+    # Elements converted per step while iterating.
+    _BLOCK = 1024
+
+    def __init__(
+        self,
+        length: Callable[[], int],
+        read: Callable[[int, int], list],
+        item: Callable[[int], Any] | None = None,
+    ) -> None:
+        self._length = length
+        # read(start, stop) -> elements [start, stop) as Python values.
+        self._read = read
+        self._item = item or (lambda index: read(index, index + 1)[0])
+
+    def __len__(self) -> int:
+        return self._length()
+
+    def __getitem__(self, index):
+        n = len(self)
+        if isinstance(index, slice):
+            start, stop, step = index.indices(n)
+            if step == 1:
+                return self._read(start, max(start, stop))
+            return [self[i] for i in range(start, stop, step)]
+        i = operator.index(index)
+        if i < 0:
+            i += n
+        if not 0 <= i < n:
+            raise IndexError("FlatLogprobs column index out of range")
+        return self._item(i)
+
+    def __iter__(self) -> Iterator[Any]:
+        n = len(self)
+        for start in range(0, n, self._BLOCK):
+            yield from self[start : min(start + self._BLOCK, n)]
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, Sequence) or isinstance(other, (str, bytes)):
+            return NotImplemented
+        return len(self) == len(other) and list(self) == list(other)
+
+    __hash__ = None  # type: ignore[assignment]
+
+    def __repr__(self) -> str:
+        return repr(list(self))
 
 
 class FlatLogprobs(MutableSequence[LogprobsOnePosition | None]):
@@ -119,7 +157,8 @@ class FlatLogprobs(MutableSequence[LogprobsOnePosition | None]):
     we support the key Sequence APIs of list, so it could act as
     list[LogprobsOnePosition]. The column attributes (``start_indices``,
     ``end_indices``, ``token_ids``, ``logprobs``, ``ranks``,
-    ``decoded_tokens``) are read-only and return new lists.
+    ``decoded_tokens``) are read-only views that convert only the elements
+    read; use ``list(...)`` for a list.
     """
 
     def __init__(
@@ -243,17 +282,10 @@ class FlatLogprobs(MutableSequence[LogprobsOnePosition | None]):
         n = len(first_ranks)
         if n == 0:
             return
-        if ranks is not None and self._ranks is None:
-            existing = self._entry_ranks(0, len(self))
-            self._ranks = _Column("<i8")
-            self._ranks.append(existing)
-        if self._ranks is not None:
-            self._ranks.append(
-                _canonical_ranks(np.broadcast_to(widths, n), first_ranks)
-                if ranks is None
-                else ranks
-            )
         base = len(self._token_ids)
+        if ranks is not None and self._ranks is None:
+            self._ranks = _Column("<i8")
+            self._ranks.append(self._canonical_ranks(0, base))
         if (
             self._ends is None
             and isinstance(widths, int)
@@ -277,6 +309,10 @@ class FlatLogprobs(MutableSequence[LogprobsOnePosition | None]):
         self._logprobs.append(logprobs)
         self._first_ranks.append(first_ranks)
         count = len(self._token_ids) - base
+        if self._ranks is not None:
+            self._ranks.append(
+                self._canonical_ranks(base, base + count) if ranks is None else ranks
+            )
         if (
             self._decoded is None
             and decoded_tokens is not None
@@ -302,16 +338,25 @@ class FlatLogprobs(MutableSequence[LogprobsOnePosition | None]):
         return int(self._ends.view()[position - 1]) if position else 0
 
     def _entry_ranks(self, start: int, stop: int) -> np.ndarray:
-        """Ranks of the entries of positions ``[start, stop)``, int64 with
-        ``_NO_RANK`` for None."""
-        if start >= stop:
-            return np.empty(0, dtype=np.int64)
-        begin = self._start(start)
-        ends = self._ends_range(start, stop)
+        """Ranks of entries ``[start, stop)``, int64 with ``_NO_RANK`` for
+        None."""
         if self._ranks is not None:
-            return self._ranks.view()[begin : ends[-1]]
-        return _canonical_ranks(
-            np.diff(ends, prepend=begin), self._first_ranks.view()[start:stop]
+            return self._ranks.view()[start:stop]
+        return self._canonical_ranks(start, stop)
+
+    def _canonical_ranks(self, start: int, stop: int) -> np.ndarray:
+        """Ranks of entries ``[start, stop)`` from their position's first
+        rank: entry ``j > 0`` of a position has rank ``j``."""
+        entries = np.arange(start, stop)
+        if self._ends is None:
+            positions = entries // max(self._width, 1)
+            begins = positions * self._width
+        else:
+            ends = self._ends.view()
+            positions = np.searchsorted(ends, entries, side="right")
+            begins = np.where(positions > 0, ends[positions - 1], 0)
+        return np.where(
+            entries == begins, self._first_ranks.view()[positions], entries - begins
         )
 
     def _extend_from(self, source: "FlatLogprobs", start: int, stop: int) -> None:
@@ -380,33 +425,50 @@ class FlatLogprobs(MutableSequence[LogprobsOnePosition | None]):
         return self._token_ids.view()[begins[begins < ends]].tolist()
 
     @property
-    def start_indices(self) -> list[int]:
-        return [0, *self._ends_range(0, len(self) - 1).tolist()] if len(self) else []
+    def start_indices(self) -> Sequence[int]:
+        return _ColumnView(self.__len__, self._start_list, self._start)
 
     @property
-    def end_indices(self) -> list[int]:
-        return self._ends_range(0, len(self)).tolist()
+    def end_indices(self) -> Sequence[int]:
+        return _ColumnView(self.__len__, self._end_list, self._end)
 
     @property
-    def token_ids(self) -> list[int]:
-        return self._token_ids.view().tolist()
+    def token_ids(self) -> Sequence[int]:
+        column = self._token_ids
+        return _ColumnView(column.__len__, column.read, column.item)
 
     @property
-    def logprobs(self) -> list[float]:
-        return self._logprobs.view().tolist()
+    def logprobs(self) -> Sequence[float]:
+        column = self._logprobs
+        return _ColumnView(column.__len__, column.read, column.item)
 
     @property
-    def ranks(self) -> list[int | None]:
-        return [
-            None if rank == _NO_RANK else rank
-            for rank in self._entry_ranks(0, len(self)).tolist()
-        ]
+    def ranks(self) -> Sequence[int | None]:
+        return _ColumnView(self._token_ids.__len__, self._rank_list)
 
     @property
-    def decoded_tokens(self) -> list[str | None]:
+    def decoded_tokens(self) -> Sequence[str | None]:
+        return _ColumnView(self._token_ids.__len__, self._decoded_list)
+
+    def _start_list(self, start: int, stop: int) -> list[int]:
+        if start >= stop:
+            return []
+        return [self._start(start), *self._ends_range(start, stop - 1).tolist()]
+
+    def _end_list(self, start: int, stop: int) -> list[int]:
+        return self._ends_range(start, stop).tolist()
+
+    def _end(self, position: int) -> int:
+        return self._start(position + 1)
+
+    def _rank_list(self, start: int, stop: int) -> list[int | None]:
+        ranks = self._entry_ranks(start, stop).tolist()
+        return [None if rank == _NO_RANK else rank for rank in ranks]
+
+    def _decoded_list(self, start: int, stop: int) -> list[str | None]:
         if self._decoded is None:
-            return [None] * self.num_entries
-        return list(self._decoded)
+            return [None] * (stop - start)
+        return self._decoded[start:stop]
 
     def __len__(self) -> int:
         """Gets number of positions stored in the container."""
@@ -432,27 +494,18 @@ class FlatLogprobs(MutableSequence[LogprobsOnePosition | None]):
         if not isinstance(index, int):
             raise TypeError(f"Invalid index type: {type(index)}")
         position = range(len(self))[index]
-        begin, end = self._start(position), self._start(position + 1)
-        if self._ranks is not None:
-            ranks = self._ranks.view()[begin:end].tolist()
-        elif end > begin:
-            ranks = [self._first_ranks.view()[position].item(), *range(1, end - begin)]
-        else:
-            ranks = []
-        return self._position(
-            self._token_ids.view()[begin:end].tolist(),
-            self._logprobs.view()[begin:end].tolist(),
-            ranks,
-            begin,
-        )
+        return self._position(position, self._start(position), self._end(position))
 
-    def _position(
-        self, token_ids: list[int], logprobs: list[float], ranks: list[int], begin: int
-    ) -> LogprobsOnePosition:
+    def _position(self, position: int, begin: int, end: int) -> LogprobsOnePosition:
+        """Position ``position``, whose entries are ``[begin, end)``."""
+        if self._ranks is not None:
+            ranks = self._ranks.read(begin, end)
+        else:
+            ranks = [self._first_ranks.item(position), *range(1, end - begin)]
         decoded: Iterable[str | None] = (
             itertools.repeat(None)
             if self._decoded is None
-            else self._decoded[begin : begin + len(token_ids)]
+            else self._decoded[begin:end]
         )
         return {
             token_id: Logprob(
@@ -461,7 +514,10 @@ class FlatLogprobs(MutableSequence[LogprobsOnePosition | None]):
                 decoded_token=decoded_token,
             )
             for token_id, logprob, rank, decoded_token in zip(
-                token_ids, logprobs, ranks, decoded
+                self._token_ids.read(begin, end),
+                self._logprobs.read(begin, end),
+                ranks,
+                decoded,
             )
         }
 
@@ -478,24 +534,9 @@ class FlatLogprobs(MutableSequence[LogprobsOnePosition | None]):
         """Iterates the container and yields LogprobsOnePosition for
         each position.
         """
-        token_ids = self._token_ids.view()
-        logprobs = self._logprobs.view()
-        first_ranks = self._first_ranks.view().tolist()
-        ranks = None if self._ranks is None else self._ranks.view()
         begin = 0
         for position, end in enumerate(self._ends_range(0, len(self)).tolist()):
-            if ranks is not None:
-                position_ranks = ranks[begin:end].tolist()
-            elif end > begin:
-                position_ranks = [first_ranks[position], *range(1, end - begin)]
-            else:
-                position_ranks = []
-            yield self._position(
-                token_ids[begin:end].tolist(),
-                logprobs[begin:end].tolist(),
-                position_ranks,
-                begin,
-            )
+            yield self._position(position, begin, end)
             begin = end
 
     def __eq__(self, other: object) -> bool:
@@ -506,7 +547,9 @@ class FlatLogprobs(MutableSequence[LogprobsOnePosition | None]):
                 self._ends_range(0, len(self)), other._ends_range(0, len(other))
             )
             and np.array_equal(self._token_ids.view(), other._token_ids.view())
-            and np.array_equal(self._logprobs.view(), other._logprobs.view())
+            and np.array_equal(
+                self._logprobs.view(), other._logprobs.view(), equal_nan=True
+            )
             and np.array_equal(
                 self._entry_ranks(0, len(self)), other._entry_ranks(0, len(other))
             )
