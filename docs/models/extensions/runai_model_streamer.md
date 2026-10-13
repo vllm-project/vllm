@@ -82,6 +82,14 @@ vllm serve /home/meta-llama/Llama-3.2-3B-Instruct \
     --model-loader-extra-config '{"memory_limit":5368709120}'
 ```
 
+You can set `pinned_staging` to page-lock the streamer's CPU buffer and have the streamer copy every tensor to the GPU out of it, so the host-to-device copies run as DMA copies from pinned memory instead of pageable copies. This helps on hosts where the weight load is bound by the copy path rather than by storage (for example a large checkpoint on a fast local disk or a parallel filesystem). The buffer is registered once per load, at roughly 0.2 s per GB, so unless `memory_limit` is set it is bounded to 16 GB. If the buffer cannot be pinned, loading falls back to the regular path.
+
+```bash
+vllm serve /home/meta-llama/Llama-3.2-3B-Instruct \
+    --load-format runai_streamer \
+    --model-loader-extra-config '{"pinned_staging":true}'
+```
+
 !!! note
     For further instructions about tunable parameters and additional parameters configurable through environment variables, read the [Environment Variables Documentation](https://github.com/run-ai/runai-model-streamer/blob/master/docs/src/env-vars.md).
 
