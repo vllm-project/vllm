@@ -266,7 +266,7 @@ class BlockPool:
             request.block_hashes, self.hash_block_size, block_size
         )
 
-        new_block_hashes = block_hashes[num_cached_blocks:]
+        new_block_hashes = block_hashes[num_cached_blocks:num_full_blocks]
         new_hashes: list[ExternalBlockHash] | None = (
             [] if self.enable_kv_cache_events else None
         )
@@ -591,12 +591,12 @@ class BlockPool:
         self,
         block: KVCacheBlock,
     ) -> list[BlockHashWithGroupId]:
-        block_hashes: list[BlockHashWithGroupId] = []
-        if block.block_hash is not None:
-            block_hashes.append(block.block_hash)
-        block_hashes.extend(self.cached_block_hashes_by_block.pop(block.block_id, ()))
-        if not block_hashes:
+        if block.block_hash is None:
+            # Secondary hashes are only registered on blocks with a primary hash.
+            assert block.block_id not in self.cached_block_hashes_by_block
             return []
+        block_hashes = [block.block_hash]
+        block_hashes.extend(self.cached_block_hashes_by_block.pop(block.block_id, ()))
 
         removed_hashes: list[BlockHashWithGroupId] = []
         for block_hash in block_hashes:
@@ -632,14 +632,14 @@ class BlockPool:
         if block.block_hash == block_hash_with_group_id:
             return
 
-        if self.cached_block_hash_to_block.contain(
-            block_hash_with_group_id, block.block_id
-        ):
-            return
-
         if block.block_hash is None:
+            # No cache entry can point at a block without a primary hash.
             block.set_block_hash(block_hash_with_group_id, num_tokens=num_tokens)
         else:
+            if self.cached_block_hash_to_block.contain(
+                block_hash_with_group_id, block.block_id
+            ):
+                return
             self.cached_block_hashes_by_block.setdefault(block.block_id, set()).add(
                 block_hash_with_group_id
             )

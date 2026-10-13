@@ -4472,6 +4472,20 @@ def test_resolve_block_hashes_rejects_mismatched_view():
         resolve_block_hashes(mismatched, 2, 4)
 
 
+@pytest.mark.parametrize("num_hashes", [0, 7, 9])
+@pytest.mark.parametrize(
+    "idx",
+    [slice(None), slice(1, None), slice(1, 3), slice(-2, None), slice(None, None, 2)]
+    + [slice(5, 1), slice(None, None, -1), slice(3, 0, -2)],
+)
+def test_block_hash_list_with_block_size_slice(num_hashes, idx):
+    """Slicing the coarse view matches slicing its element-wise expansion,
+    including a partial trailing coarse block that must be dropped."""
+    raw = [BlockHash(bytes([i])) for i in range(num_hashes)]
+    view = kv_cache_utils.BlockHashListWithBlockSize(raw, 2, 6)
+    assert view[idx] == list(view)[idx]
+
+
 @pytest.mark.parametrize("use_override", [True, False])
 def test_kv_cache_reserves_null_block_for_max_model_len(use_override):
     """A KV cache sized to exactly the blocks a max_model_len request needs must

@@ -254,7 +254,9 @@ class FreeKVCacheBlockQueue:
     prev_free_block and next_free_block attributes of the given blocks.
 
     The queue is ordered by block ID in the beginning. When a block is allocated
-    and then freed, it will be appended back with the eviction order:
+    and then freed, blocks without a hash are prepended (reused first; blocks
+    released by ``BlockPool.unpin_blocks`` are the exception), and cached
+    blocks are appended back with the eviction order:
     1. The least recent used block is at the front (LRU).
     2. If two blocks have the same last accessed time (allocated by the
        same sequence), the one with more hash tokens (the tail of a block
@@ -640,23 +642,22 @@ def generate_block_hash_extra_keys(
         A tuple of extra keys and the next multi-modal index.
 
     """
-    mm_extra_keys: list[Any]
-    mm_extra_keys, new_start_mm_idx = _gen_mm_extra_hash_keys(
-        request, start_token_idx, end_token_idx, start_mm_idx
-    )
-    lora_extra_keys = _gen_lora_extra_hash_keys(request)
-    cache_salt_keys: list[tuple[str, str]] = (
-        [("cache_salt", request.cache_salt)]
-        if (start_token_idx == 0 and request.cache_salt)
-        else []
-    )
-    prompt_embeds_keys = _gen_prompt_embeds_extra_hash_keys(
-        request, start_token_idx, end_token_idx
-    )
-
-    extra_keys: list[Any] = (
-        lora_extra_keys + mm_extra_keys + cache_salt_keys + prompt_embeds_keys
-    )
+    # The order of the keys is part of the hash; keep it stable.
+    extra_keys: list[Any] = []
+    if request.lora_request:
+        extra_keys += _gen_lora_extra_hash_keys(request)
+    new_start_mm_idx = start_mm_idx
+    if request.mm_features:
+        mm_extra_keys, new_start_mm_idx = _gen_mm_extra_hash_keys(
+            request, start_token_idx, end_token_idx, start_mm_idx
+        )
+        extra_keys += mm_extra_keys
+    if start_token_idx == 0 and request.cache_salt:
+        extra_keys.append(("cache_salt", request.cache_salt))
+    if request.prompt_embeds is not None:
+        extra_keys += _gen_prompt_embeds_extra_hash_keys(
+            request, start_token_idx, end_token_idx
+        )
 
     if not extra_keys:
         return None, new_start_mm_idx
@@ -701,8 +702,7 @@ def hash_block_tokens(
 ) -> BlockHash:
     """Computes a hash value corresponding to the contents of a block and
     the contents of the preceding block(s). The hash value is used for
-    prefix caching. We use LRU cache for this function to avoid recomputing
-    hash values for the same block contents.
+    prefix caching.
 
     Args:
         hash_function: The hash function used to compute block hash.
@@ -713,8 +713,7 @@ def hash_block_tokens(
         extra_keys: Extra keys for the block.
 
     Returns:
-        The hash value of the block and the token ids in the block.
-        The entire tuple is used as the hash key of the block.
+        The hash of the block, chained over all preceding blocks.
 
     """
     if not parent_block_hash:
@@ -3003,6 +3002,9 @@ class BlockHashListWithBlockSize:
 
         if isinstance(idx, slice):
             start, stop, step = idx.indices(len(self))
+            if step > 0:
+                sf = self.scale_factor
+                return self.block_hashes[(start + 1) * sf - 1 : stop * sf : step * sf]
             return [self._get_value_at(i) for i in range(start, stop, step)]
 
         raise TypeError(f"Invalid index type: {type(idx)!r}")
