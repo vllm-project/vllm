@@ -106,6 +106,7 @@ pub struct RequestMetrics {
     pub prompt_tokens_by_source: PromptTokenSourceCounterFamily,
     pub prompt_tokens_cached: Family<EngineLabels, U64Counter>,
     pub generation_tokens: Family<EngineLabels, U64Counter>,
+    pub corrupted_requests: Family<EngineLabels, U64Counter>,
 
     // Request lifecycle counters and histograms.
     pub request_success: FinishedReasonCounterFamily,
@@ -171,6 +172,13 @@ impl RequestMetrics {
             "vllm:generation_tokens",
             "Number of generation tokens processed.",
             generation_tokens.clone(),
+        );
+
+        let corrupted_requests = Family::default();
+        registry.register(
+            "vllm:corrupted_requests",
+            "Corrupted requests, in terms of total number of requests with NaNs in logits.",
+            corrupted_requests.clone(),
         );
 
         // Request lifecycle counters and histograms.
@@ -309,6 +317,7 @@ impl RequestMetrics {
             prompt_tokens_by_source,
             prompt_tokens_cached,
             generation_tokens,
+            corrupted_requests,
             request_success,
             request_prompt_tokens,
             request_generation_tokens,

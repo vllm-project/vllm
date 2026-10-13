@@ -80,7 +80,7 @@ steps:
     pytest -v -s entrypoints/serve --ignore=entrypoints/serve/dev/rpc &&
     pytest -v -s entrypoints/rl --ignore=entrypoints/rl/weight_transfer
     --ignore=entrypoints/rl/return_routed_experts/test_openai_api.py
-    --ignore=entrypoints/rl/test_weight_operation_metrics.py
+    --ignore=entrypoints/rl/weight_transfer_metrics
     --deselect="tests/entrypoints/rl/state_transitions/test_pause_resume.py::TestPauseResume::test_clear_cache_preserves_output_and_controls_prefix_cache[MRV1]" &&
     PYTHONPATH=/workspace/vllm pytest -v -s entrypoints/serve/dev/rpc'
 
