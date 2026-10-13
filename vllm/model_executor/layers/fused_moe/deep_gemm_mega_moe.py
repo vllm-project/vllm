@@ -18,19 +18,15 @@ from vllm.platforms import current_platform
 logger = init_logger(__name__)
 
 
-def ue8m0_uint8_to_float(sf: torch.Tensor) -> torch.Tensor:
-    """Reinterpret a uint8 UE8M0 exponent tensor as float32 scale values."""
-    return (sf.to(torch.int32) << 23).view(torch.float32)
-
-
 class DeepGemmMegaMoEBackend:
     """Abstract MegaMoE backend that hides deep_gemm-specific details.
 
     A backend advertises its expected hidden-state quantization layout via
-    ``hidden_quant`` and its expected MMA type via ``mma_type``. It is
-    responsible for the routed-expert weight transform run at load time, the
-    optional shared-expert weight transform, and the actual MegaMoE kernel
-    invocation at inference time. Runtime capability checks live in
+    ``hidden_quant`` and its expected MMA type via ``mma_type``. It owns the
+    kernel weight layout: :meth:`create_weights` registers parameters in that
+    layout and :meth:`load_weight` writes each checkpoint tensor into it, so
+    loading (and reloading) needs no post-load transform. It also runs the
+    MegaMoE kernel. Runtime capability checks live in
     :func:`get_deep_gemm_mega_moe_backend`: obtaining a backend already implies
     that the current device and shapes are supported.
     """
@@ -39,49 +35,39 @@ class DeepGemmMegaMoEBackend:
     mma_type: str = "fp8xfp4"
     hidden_quant: QuantKey = kMxfp8Dynamic
 
-    def transform_weights(
+    def create_weights(
         self,
+        layer: nn.Module,
         *,
-        w13_weight: torch.Tensor,
-        w13_weight_scale: torch.Tensor,
-        w2_weight: torch.Tensor,
-        w2_weight_scale: torch.Tensor,
         num_local_experts: int,
         hidden_size: int,
         intermediate_size: int,
-        activation: str | None = None,
-    ) -> tuple[
-        tuple[torch.Tensor, torch.Tensor],
-        tuple[torch.Tensor, torch.Tensor],
-    ]:
+        num_shared_experts: int,
+    ) -> None:
+        """Register the expert (and fused shared-expert) kernel-layout parameters:
+        ``w13_weight``, ``w13_weight_scale``, ``w2_weight``, ``w2_weight_scale``
+        and, if ``num_shared_experts``, ``shared_l{1,2}_weight[_scale]``. Routed
+        parameters are indexed by local expert on dim 0, which EPLB moves."""
         raise NotImplementedError
 
-    def supports_shared_experts(self, deep_gemm) -> bool:
-        return False
-
-    def transform_shared_expert_weights(
+    def load_weight(
         self,
-        *,
-        shared_experts: nn.Module,
-        num_shared_experts: int,
-        hidden_size: int,
-        intermediate_size: int,
-        prefix: str,
-    ) -> (
-        tuple[
-            tuple[torch.Tensor, torch.Tensor],
-            tuple[torch.Tensor, torch.Tensor],
-        ]
-        | None
-    ):
-        """Return ``(l1, l2)`` transformed shared-expert weights, or ``None``.
+        dst: torch.Tensor,
+        src: torch.Tensor,
+        shard_id: str,
+        is_scale: bool,
+    ) -> None:
+        """Write checkpoint shard ``src`` (``w1``/``w2``/``w3``) into ``dst``, one
+        expert's slice or a shared-expert parameter, in the kernel layout."""
+        raise NotImplementedError
 
-        ``shared_experts`` must expose ``gate_up_proj`` and ``down_proj``
-        linear layers. A ``None`` return means the backend cannot fuse shared
-        experts for this module; the caller should fall back to a separate
-        shared MLP.
+    def supports_shared_experts(self, shared_experts: nn.Module) -> bool:
+        """Whether ``shared_experts`` can be fused into the MegaMoE kernel.
+
+        Decided at construction from the installed kernel API and the shared
+        MLP's parameters, so the fused layout is fixed before any weight loads.
         """
-        return None
+        return False
 
     def run_mega_moe(
         self,
@@ -133,229 +119,153 @@ class DeepGemmSm100MegaMoEBackend(DeepGemmMegaMoEBackend):
     mma_type = "fp8xfp4"
     hidden_quant = kMxfp8Dynamic
 
-    def transform_weights(
+    def create_weights(
         self,
+        layer: nn.Module,
         *,
-        w13_weight: torch.Tensor,
-        w13_weight_scale: torch.Tensor,
-        w2_weight: torch.Tensor,
-        w2_weight_scale: torch.Tensor,
         num_local_experts: int,
         hidden_size: int,
         intermediate_size: int,
-        activation: str | None = None,
-    ) -> tuple[
-        tuple[torch.Tensor, torch.Tensor],
-        tuple[torch.Tensor, torch.Tensor],
-    ]:
-        from vllm.utils.deep_gemm import _import_deep_gemm
-
-        deep_gemm = _import_deep_gemm()
-
-        w13_scale = deep_gemm.transform_sf_into_required_layout(
-            ue8m0_uint8_to_float(w13_weight_scale).contiguous(),
-            2 * intermediate_size,
-            hidden_size,
-            (1, 32),
-            num_local_experts,
-        )
-        w2_scale = deep_gemm.transform_sf_into_required_layout(
-            ue8m0_uint8_to_float(w2_weight_scale).contiguous(),
-            hidden_size,
-            intermediate_size,
-            (1, 32),
-            num_local_experts,
-        )
-        kwargs = {} if activation is None else {"activation": activation}
-        return deep_gemm.transform_weights_for_mega_moe(
-            (w13_weight.view(torch.int8).contiguous(), w13_scale),
-            (w2_weight.view(torch.int8).contiguous(), w2_scale),
-            **kwargs,
-        )
-
-    def supports_shared_experts(self, deep_gemm) -> bool:
-        """Check the Python API before touching a symmetric-memory group.
-
-        This also gives users of an older precompiled vLLM wheel a safe serial
-        fallback instead of failing halfway through multi-rank buffer setup.
-        """
-        try:
-            buffer_params = signature(deep_gemm.get_symm_buffer_for_mega_moe).parameters
-            kernel_params = signature(deep_gemm.fp8_fp4_mega_moe).parameters
-        except (TypeError, ValueError):
-            return False
-        return (
-            hasattr(deep_gemm, "get_block_m_for_mega_moe")
-            and hasattr(deep_gemm, "transform_weights_for_mega_moe")
-            and "num_shared_experts" in buffer_params
-            and "shared_l1_weights" in kernel_params
-            and "shared_l2_weights" in kernel_params
-        )
-
-    def transform_shared_expert_weights(
-        self,
-        *,
-        shared_experts: nn.Module,
         num_shared_experts: int,
-        hidden_size: int,
-        intermediate_size: int,
-        prefix: str,
-    ) -> (
-        tuple[
-            tuple[torch.Tensor, torch.Tensor],
-            tuple[torch.Tensor, torch.Tensor],
-        ]
-        | None
-    ):
-        from vllm.utils.deep_gemm import _import_deep_gemm
+    ) -> None:
+        def register(name: str, data: torch.Tensor) -> None:
+            layer.register_parameter(name, nn.Parameter(data, requires_grad=False))
 
-        deep_gemm = _import_deep_gemm()
-
-        gate_up = shared_experts.gate_up_proj
-        down = shared_experts.down_proj
-        gate_up_weight = gate_up.weight.data
-        gate_up_scale = (
-            gate_up.weight_scale
-            if hasattr(gate_up, "weight_scale")
-            else gate_up.weight_scale_inv
-        ).data
-        down_weight = down.weight.data
-        down_scale = (
-            down.weight_scale
-            if hasattr(down, "weight_scale")
-            else down.weight_scale_inv
-        ).data
-
-        # MegaMoE's shared FP8 MMA consumes a 1x32 scale for every weight row,
-        # while the checkpoint uses coarser block-FP8 scales (usually
-        # 128x128). Build a dedicated, numerically equivalent scale view.
-        ue8m0_scale_dtypes = (torch.float8_e8m0fnu, torch.uint8, torch.int32)
-        if (
-            gate_up_scale.dtype in ue8m0_scale_dtypes
-            and down_scale.dtype in ue8m0_scale_dtypes
-        ):
-            gate_up_scale = self._prepare_shared_expert_scale(
-                deep_gemm,
-                gate_up,
-                gate_up_scale,
-                gate_up_weight.shape[0],
-                gate_up_weight.shape[1],
-                prefix,
-            )
-            down_scale = self._prepare_shared_expert_scale(
-                deep_gemm,
-                down,
-                down_scale,
-                down_weight.shape[0],
-                down_weight.shape[1],
-                prefix,
-            )
-
-        if gate_up_scale is None or down_scale is None:
-            return None
-
-        shared_intermediate_size = intermediate_size * num_shared_experts
-        expected_gate_up_shape = (
-            2 * shared_intermediate_size,
-            hidden_size,
+        # FP4 weights two per byte; UE8M0 scales MN-major, four per int32 along K.
+        e, h, i = num_local_experts, hidden_size, intermediate_size
+        register("w13_weight", torch.zeros(e, 2 * i, h // 2, dtype=torch.int8))
+        register(
+            "w13_weight_scale",
+            torch.zeros(e, h // 128, 2 * i, dtype=torch.int32).transpose(1, 2),
         )
-        expected_down_shape = (hidden_size, shared_intermediate_size)
-        if (
-            gate_up_weight.dtype != torch.float8_e4m3fn
-            or down_weight.dtype != torch.float8_e4m3fn
-            or gate_up_scale.dtype != torch.int32
-            or down_scale.dtype != torch.int32
-            or tuple(gate_up_weight.shape) != expected_gate_up_shape
-            or tuple(down_weight.shape) != expected_down_shape
-        ):
-            logger.warning(
-                "Disabling native MegaMoE shared-expert fusion for %s: expected "
-                "replicated block-FP8 weights with gate_up=%s, down=%s, and "
-                "DeepGEMM int32 scales; got gate_up=%s/%s/%s and down=%s/%s/%s.",
-                prefix,
-                expected_gate_up_shape,
-                expected_down_shape,
-                tuple(gate_up_weight.shape),
-                gate_up_weight.dtype,
-                gate_up_scale.dtype,
-                tuple(down_weight.shape),
-                down_weight.dtype,
-                down_scale.dtype,
-            )
-            return None
-
-        transformed_l1, transformed_l2 = deep_gemm.transform_weights_for_mega_moe(
-            (gate_up_weight, gate_up_scale),
-            (down_weight, down_scale),
+        register("w2_weight", torch.zeros(e, h, i // 2, dtype=torch.int8))
+        register(
+            "w2_weight_scale",
+            torch.zeros(e, i // 128, h, dtype=torch.int32).transpose(1, 2),
         )
-        # L1 interleaving allocates a full copy. Re-home the loader Parameter on
-        # that storage so the original 2*intermediate*hidden FP8 tensor can be
-        # released instead of adding roughly 0.7 GiB per rank on DSV4-Flash.
-        # The generic linear post-load hook may still repack the serial scales,
-        # but this shared MLP is never called after native fusion is enabled.
-        gate_up.weight.data = transformed_l1[0]
-        transformed_l1 = (gate_up.weight.data, transformed_l1[1])
-        return transformed_l1, transformed_l2
+        if num_shared_experts == 0:
+            return
+        # The shared expert is FP8 with the layout of one routed expert slice.
+        s, fp8 = i * num_shared_experts, torch.float8_e4m3fn
+        register("shared_l1_weight", torch.zeros(2 * s, h, dtype=fp8))
+        register(
+            "shared_l1_weight_scale",
+            torch.zeros(h // 128, 2 * s, dtype=torch.int32).transpose(0, 1),
+        )
+        register("shared_l2_weight", torch.zeros(h, s, dtype=fp8))
+        register(
+            "shared_l2_weight_scale",
+            torch.zeros(s // 128, h, dtype=torch.int32).transpose(0, 1),
+        )
+
+    def load_weight(
+        self,
+        dst: torch.Tensor,
+        src: torch.Tensor,
+        shard_id: str,
+        is_scale: bool,
+    ) -> None:
+        if shard_id not in ("w1", "w2", "w3"):
+            raise ValueError(f"Unsupported expert shard id: {shard_id}")
+        rows = dst.shape[0] // (1 if shard_id == "w2" else 2)
+        if is_scale:
+            src = self._pack_scale(src, rows, dst.shape[1] * 4)
+        else:
+            src = src.view(dst.dtype)
+            if tuple(src.shape) != (rows, dst.shape[1]):
+                raise ValueError(
+                    f"MegaMoE {shard_id} weight shape {tuple(src.shape)} does not "
+                    f"match the kernel shard ({rows}, {dst.shape[1]})"
+                )
+        dst, src = self._kernel_layout_shard(dst, src, shard_id, is_scale)
+        dst.copy_(src)
 
     @staticmethod
-    def _prepare_shared_expert_scale(
-        deep_gemm,
-        linear: nn.Module,
-        scale: torch.Tensor,
-        mn: int,
-        k: int,
-        prefix: str,
-    ) -> torch.Tensor | None:
-        block_size = getattr(linear, "weight_block_size", None)
-        if block_size is None or len(block_size) != 2:
-            logger.warning(
-                "Disabling native MegaMoE shared-expert fusion for %s: "
-                "shared FP8 weight block size is unavailable.",
-                prefix,
+    def _pack_scale(sf: torch.Tensor, rows: int, cols: int) -> torch.Tensor:
+        """Expand block UE8M0 scales to one per 1x32 and pack four along K per int32."""
+        sf = sf.view(torch.uint8)
+        if rows % sf.shape[0] or cols % sf.shape[1]:
+            raise ValueError(
+                f"Scale shape {tuple(sf.shape)} does not tile ({rows}, {cols})"
             )
-            return None
+        sf = sf.repeat_interleave(rows // sf.shape[0], 0)
+        sf = sf.repeat_interleave(cols // sf.shape[1], 1)
+        return sf.contiguous().clone().view(torch.int32)
 
-        block_m, block_k = block_size
-        num_k_blocks = (k + block_k - 1) // block_k
-        # The linear hook's DeepGEMM layout packs four k-block bytes per int32.
-        packed = scale.dtype == torch.int32
-        expected_shape = (
-            (mn, (num_k_blocks + 3) // 4)
-            if packed
-            else ((mn + block_m - 1) // block_m, num_k_blocks)
-        )
-        if block_k % 32 != 0 or tuple(scale.shape) != expected_shape:
-            logger.warning(
-                "Disabling native MegaMoE shared-expert fusion for %s: "
-                "cannot convert shared scale shape %s with block size %s "
-                "to MegaMoE's 1x32 layout for weight (%d, %d).",
-                prefix,
-                tuple(scale.shape),
-                tuple(block_size),
-                mn,
-                k,
+    @staticmethod
+    def _kernel_layout_shard(
+        dst: torch.Tensor,
+        src: torch.Tensor,
+        shard_id: str,
+        is_scale: bool,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Pair a checkpoint shard with its destination in the MegaMoE layout."""
+        k = src.shape[-1]
+        if shard_id == "w2":
+            if not is_scale:
+                return dst, src
+            # UTCCP: scale row 128*b + 32*j + i -> 128*b + 4*i + j.
+            return dst.view(-1, 32, 4, k).transpose(1, 2), src.reshape(-1, 4, 32, k)
+        half = 0 if shard_id == "w1" else 1
+        if not is_scale:
+            # Interleave gate/up by 8 rows: r -> (r // 8) * 16 + 8 * half + r % 8.
+            return dst.view(-1, 2, 8, k)[:, half], src.reshape(-1, 8, k)
+        # Interleave + UTCCP: 64b + 16j + 8q + m -> 128b + 64q + 32half + 4m + j.
+        dst = dst.view(-1, 2, 2, 8, 4, k)[:, :, half].permute(0, 3, 1, 2, 4)
+        return dst, src.reshape(-1, 4, 2, 8, k)
+
+    def supports_shared_experts(self, shared_experts: nn.Module) -> bool:
+        for linear in (shared_experts.gate_up_proj, shared_experts.down_proj):
+            weight = linear.weight
+            scale = getattr(linear, "weight_scale", None)
+            if scale is None:
+                scale = getattr(linear, "weight_scale_inv", None)
+            if not self._tiles_1x32(weight, scale):
+                logger.warning_once(
+                    "Disabling native MegaMoE shared-expert fusion: needs FP8 "
+                    "weights with UE8M0 block scales that tile to 1x32; got "
+                    "weight %s/%s and scale %s/%s.",
+                    tuple(weight.shape),
+                    weight.dtype,
+                    None if scale is None else tuple(scale.shape),
+                    None if scale is None else scale.dtype,
+                )
+                return False
+
+        from vllm.utils.deep_gemm import _import_deep_gemm
+
+        deep_gemm = _import_deep_gemm()
+        try:
+            api = {
+                *signature(deep_gemm.get_symm_buffer_for_mega_moe).parameters,
+                *signature(deep_gemm.fp8_fp4_mega_moe).parameters,
+            }
+        except (AttributeError, TypeError, ValueError):
+            api = set()
+        if not (
+            hasattr(deep_gemm, "get_block_m_for_mega_moe")
+            and {"num_shared_experts", "shared_l1_weights", "shared_l2_weights"} <= api
+        ):
+            logger.warning_once(
+                "Disabling native MegaMoE shared-expert fusion because the "
+                "installed DeepGEMM Python API is older than the vLLM "
+                "source. Rebuild the vendored _deep_gemm_C extension to enable it.",
             )
-            return None
+            return False
+        return True
 
-        if packed:
-            row_scale = scale.flatten().view(torch.uint8).view(mn, -1)[:, :num_k_blocks]
-        else:
-            row_scale = scale.view(torch.uint8).repeat_interleave(block_m, dim=0)[:mn]
-        scale_1x32 = (
-            ue8m0_uint8_to_float(row_scale)
-            .repeat_interleave(block_k // 32, dim=1)[:, : k // 32]
-            .contiguous()
+    @staticmethod
+    def _tiles_1x32(weight: torch.Tensor, scale: torch.Tensor | None) -> bool:
+        if scale is None or weight.dim() != 2 or scale.dim() != 2:
+            return False
+        (rows, cols), (scale_rows, scale_cols) = weight.shape, scale.shape
+        return (
+            weight.dtype == torch.float8_e4m3fn
+            and scale.dtype in (torch.uint8, torch.float8_e8m0fnu)
+            and rows % scale_rows == 0
+            and cols % scale_cols == 0
+            and (cols // scale_cols) % 32 == 0
         )
-        # The grouped API is used with a singleton dimension to request the
-        # MN-major, TMA-aligned packed-UE8M0 strides, then squeezed back to the
-        # 2D layout required for a shared expert.
-        return deep_gemm.transform_sf_into_required_layout(
-            scale_1x32.unsqueeze(0),
-            mn,
-            k,
-            (1, 32),
-            1,
-        ).squeeze(0)
 
     def run_mega_moe(
         self,
