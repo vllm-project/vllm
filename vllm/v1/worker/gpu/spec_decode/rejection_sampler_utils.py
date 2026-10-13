@@ -63,9 +63,11 @@ def _compute_global_residual_mass(
     target_local_sumexp_stride,
     draft_token,
     logit_idx,
+    temp,
     vocab_num_blocks,
     PADDED_VOCAB_NUM_BLOCKS: tl.constexpr,
     HAS_DRAFT_LOGITS: tl.constexpr,
+    SCALE_TARGET_LOGITS: tl.constexpr,
 ):
     if HAS_DRAFT_LOGITS:
         blocks = tl.arange(0, PADDED_VOCAB_NUM_BLOCKS)
@@ -92,6 +94,11 @@ def _compute_global_residual_mass(
         target_logit = tl.load(
             target_logits_ptr + logit_idx * target_logits_stride + draft_token,
         ).to(tl.float32)
+        if SCALE_TARGET_LOGITS:
+            # target_logits is raw (caller didn't pre-divide by temperature);
+            # this call site is only reached when temp != 0 (see the
+            # USE_BLOCK_VERIFICATION branch in _rejection_kernel).
+            target_logit = target_logit / temp
         m_b = tl.exp(target_logit - target_lse)
         return prefix_joint_ratio * (1.0 - m_b)
 
@@ -149,12 +156,19 @@ def _compute_global_logprobs_and_logsumexp(
     vocab_num_blocks,
     PADDED_VOCAB_NUM_BLOCKS: tl.constexpr,
     HAS_DRAFT_LOGITS: tl.constexpr,
+    SCALE_TARGET_LOGITS: tl.constexpr,
 ):
     target_logit = tl.load(
         target_logits_ptr + logit_idx * target_logits_stride + token,
         mask=mask,
         other=float("-inf"),
     ).to(tl.float32)
+    if SCALE_TARGET_LOGITS:
+        # target_logits is raw; every caller of this helper only reaches it
+        # when temp != 0 (see _compute_cumulative_log_p_kernel,
+        # _compute_local_residual_mass_kernel and the non-greedy branch of
+        # _rejection_kernel).
+        target_logit = target_logit / temp
     target_lse = _compute_global_logsumexp(
         target_local_max_ptr,
         target_local_max_stride,
@@ -239,6 +253,7 @@ def _compute_local_logits_stats_kernel(
     num_logits,
     BLOCK_SIZE: tl.constexpr,
     HAS_DRAFT_LOGITS: tl.constexpr,
+    SCALE_TARGET_LOGITS: tl.constexpr,
 ):
     logit_idx = tl.program_id(0).to(tl.int64)
 
@@ -280,6 +295,9 @@ def _compute_local_logits_stats_kernel(
             mask=mask,
             other=float("-inf"),
         ).to(tl.float32)
+        if SCALE_TARGET_LOGITS:
+            # target_logits is raw; temp != 0 is guaranteed in this branch.
+            target_logits = target_logits / temp
         target_max, target_sumexp = _compute_max_and_sumexp(target_logits)
         tl.store(
             target_local_max_ptr + logit_idx * target_local_max_stride + block_idx,
@@ -352,6 +370,7 @@ def _compute_cumulative_log_p_kernel(
     vocab_num_blocks,
     PADDED_VOCAB_NUM_BLOCKS: tl.constexpr,
     HAS_DRAFT_LOGITS: tl.constexpr,
+    SCALE_TARGET_LOGITS: tl.constexpr,
 ):
     req_idx = tl.program_id(0)
     req_state_idx = tl.load(idx_mapping_ptr + req_idx).to(tl.int64)
@@ -393,6 +412,7 @@ def _compute_cumulative_log_p_kernel(
                     vocab_num_blocks,
                     PADDED_VOCAB_NUM_BLOCKS,
                     HAS_DRAFT_LOGITS,
+                    SCALE_TARGET_LOGITS,
                 )
             )
             log_p = tl.minimum(log_p + (target_logprob - draft_logprob), 0.0)
@@ -438,6 +458,7 @@ def _compute_local_residual_mass_kernel(
     vocab_num_blocks,
     BLOCK_SIZE: tl.constexpr,
     PADDED_VOCAB_NUM_BLOCKS: tl.constexpr,
+    SCALE_TARGET_LOGITS: tl.constexpr,
 ):
     logit_idx = tl.program_id(0).to(tl.int64)
     # Adaptive verification can end before num_speculative_steps.
@@ -486,6 +507,7 @@ def _compute_local_residual_mass_kernel(
         vocab_num_blocks,
         PADDED_VOCAB_NUM_BLOCKS,
         True,  # HAS_DRAFT_LOGITS
+        SCALE_TARGET_LOGITS,
     )
 
     # Compute the residual mass: max(p_i * M_b(x|x_{<i}) - M_s(x|x_{<i}), 0)
@@ -560,6 +582,7 @@ def _rejection_kernel(
     SYNTHETIC_MODE: tl.constexpr,
     USE_BLOCK_VERIFICATION: tl.constexpr,
     FLY_WINDOW_SIZE: tl.constexpr,
+    SCALE_TARGET_LOGITS: tl.constexpr,
 ):
     req_idx = tl.program_id(0)
     req_state_idx = tl.load(idx_mapping_ptr + req_idx).to(tl.int64)
@@ -647,9 +670,11 @@ def _rejection_kernel(
                         target_local_sumexp_stride,
                         next_draft_token,
                         logit_idx + 1,
+                        temp,
                         vocab_num_blocks,
                         PADDED_VOCAB_NUM_BLOCKS,
                         HAS_DRAFT_LOGITS,
+                        SCALE_TARGET_LOGITS,
                     )
                     denom = residual_mass + 1.0 - prefix_joint_ratio
                     h = tl.where(denom > 0.0, residual_mass / denom, 1.0)
@@ -683,6 +708,7 @@ def _rejection_kernel(
                         vocab_num_blocks,
                         PADDED_VOCAB_NUM_BLOCKS,
                         HAS_DRAFT_LOGITS,
+                        SCALE_TARGET_LOGITS,
                     )
                 )
                 if FLY_WINDOW_SIZE == 0 or pending_rejection < 0:
@@ -851,6 +877,7 @@ def _resample_kernel(
     CONTEXT_WIDTH: tl.constexpr,
     WATERMARK: tl.constexpr,
     DEDUPLICATE_CONTEXTS: tl.constexpr,
+    SCALE_TARGET_LOGITS: tl.constexpr,
 ):
     req_idx = tl.program_id(0)
     resample_idx = tl.load(rejected_step_ptr + req_idx)
@@ -881,6 +908,15 @@ def _resample_kernel(
         mask=mask,
         other=float("-inf"),
     ).to(tl.float32)
+    if SCALE_TARGET_LOGITS:
+        # target_logits is raw. is_bonus can reach here with temp == 0 (the
+        # bonus token always resamples), so guard the divide; the greedy
+        # case only uses this result through an argmax, which a positive
+        # scale factor never changes.
+        safe_temp = tl.where(temp == 0.0, 1.0, temp)
+        scaled_target_logits = target_logits / safe_temp
+    else:
+        scaled_target_logits = target_logits
 
     # Compute the residual logits to resample the rejected token from.
     is_watermarked = False
@@ -905,7 +941,7 @@ def _resample_kernel(
     if is_bonus or not is_valid_rejected_draft:
         # Bonus token (no rejections) or -1 placeholder token. In either case,
         # directly use the target logits.
-        residual_logits = target_logits
+        residual_logits = scaled_target_logits
     elif HAS_DRAFT_LOGITS:
         # draft_logits is stored pre-temperature, so apply scale first.
         draft_logits = (
@@ -921,7 +957,7 @@ def _resample_kernel(
         )
         target_lse = tl.load(target_rejected_logsumexp_ptr + req_idx)
         draft_lse = tl.load(draft_rejected_logsumexp_ptr + req_idx)
-        target_log_probs = target_logits - target_lse
+        target_log_probs = scaled_target_logits - target_lse
         if USE_BLOCK_VERIFICATION:
             # Block residual is:
             #   max(p_tau * M_b(x) - M_s(x), 0) / Z.
@@ -956,7 +992,7 @@ def _resample_kernel(
         # and does not need to be applied.
         residual_logits = tl.where(
             block != rejected_draft_token,
-            target_logits,
+            scaled_target_logits,
             float("-inf"),
         ).to(tl.float32)
 
@@ -1115,11 +1151,19 @@ def rejection_sample(
     fly_window_size: int = 0,
     fly_entropy_threshold: float = 0.3,
     fly_entropy_top_k: int = 3,
+    # If True (default), target_logits has already been divided by
+    # temperature by the caller, matching historical behavior. If False,
+    # target_logits is raw and every kernel below divides by temperature
+    # itself on load -- the same "scale on load" convention already used
+    # for draft_logits here -- so a caller can skip materializing a
+    # temperature-scaled FP32 copy of the full logits tensor.
+    target_logits_pre_scaled: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     assert target_logits.ndim == 2 and target_logits.stride(-1) == 1
     assert draft_logits is None or (
         draft_logits.ndim == 3 and draft_logits.stride(-1) == 1
     )
+    scale_target_logits = not target_logits_pre_scaled
     num_reqs = cu_num_logits.shape[0] - 1
     num_logits, vocab_size = target_logits.shape
 
@@ -1216,6 +1260,7 @@ def rejection_sample(
         num_logits,
         BLOCK_SIZE=VOCAB_BLOCK_SIZE,
         HAS_DRAFT_LOGITS=has_draft_logits,
+        SCALE_TARGET_LOGITS=scale_target_logits,
     )
 
     # Precompute the running joint ratio and residual mass for block
@@ -1251,6 +1296,7 @@ def rejection_sample(
             vocab_num_blocks,
             PADDED_VOCAB_NUM_BLOCKS=padded_vocab_num_blocks,
             HAS_DRAFT_LOGITS=has_draft_logits,
+            SCALE_TARGET_LOGITS=scale_target_logits,
             num_warps=1,
         )
 
@@ -1288,6 +1334,7 @@ def rejection_sample(
                 vocab_num_blocks,
                 BLOCK_SIZE=VOCAB_BLOCK_SIZE,
                 PADDED_VOCAB_NUM_BLOCKS=padded_vocab_num_blocks,
+                SCALE_TARGET_LOGITS=scale_target_logits,
             )
         else:
             local_residual_mass = None
@@ -1342,6 +1389,7 @@ def rejection_sample(
         SYNTHETIC_MODE=synthetic_conditional_rates is not None,
         USE_BLOCK_VERIFICATION=use_block_verification,
         FLY_WINDOW_SIZE=fly_window_size,
+        SCALE_TARGET_LOGITS=scale_target_logits,
         num_warps=1,
     )
 
@@ -1391,6 +1439,7 @@ def rejection_sample(
         CONTEXT_WIDTH=context_width,
         WATERMARK=watermark,
         DEDUPLICATE_CONTEXTS=watermarking_skip_mask is not None,
+        SCALE_TARGET_LOGITS=scale_target_logits,
     )
 
     # Insert the resampled tokens into the output sampled.
