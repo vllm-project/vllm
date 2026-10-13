@@ -21,6 +21,7 @@ from vllm.v1.attention.backends.mla.flashinfer_mla_sparse_sm90 import (
     FlashInferMLASparseSM90Builder,
     FlashInferMLASparseSM90Impl,
 )
+from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.v1.kv_cache_interface import MLAAttentionSpec
 # isort: on
 
@@ -245,6 +246,8 @@ def test_plan_uses_state_params(monkeypatch, kv_dtype):
     assert wrapper.plan_args is not None
     args, kwargs = wrapper.plan_args
     (qo, kv, indices, kv_len, heads, ckv, kpe, page, causal, scale) = args
+    # The wrapper copies host tensors to the GPU with non_blocking=True.
+    assert all(t.is_pinned() == PIN_MEMORY for t in (qo, kv, kv_len))
     assert qo.tolist() == [0, 1, 2, 3, 3]  # clamp: rows past 3 have no queries
     assert kv.tolist() == [0, 2, 7, 14, 14]
     assert kv_len.tolist() == [2, 5, 7, 0]

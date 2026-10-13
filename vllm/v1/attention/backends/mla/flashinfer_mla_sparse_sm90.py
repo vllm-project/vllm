@@ -45,6 +45,7 @@ from vllm.model_executor.layers.attention.sparse_mla_attention import (
 from vllm.platforms.interface import DeviceCapability
 from vllm.triton_utils import tl, triton
 from vllm.utils.flashinfer import has_flashinfer_sm90_nope_mla
+from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionLayer,
@@ -360,11 +361,19 @@ class _SM90State:
         # Only the live prefix of kv_indices: the wrapper snapshots and
         # copies whatever is passed.
         num_indices = max(int(self._kv_cpu[-1]), 1)
+        qo_indptr, kv_indptr, kv_len_arr = self._qo_cpu, self._kv_cpu, self._lens_cpu
+        # plan() copies these to the GPU with non_blocking=True; stage them in
+        # pinned memory so the copies stay async (the reused buffers
+        # themselves are intentionally not pinned).
+        if PIN_MEMORY:
+            qo_indptr = qo_indptr.pin_memory()
+            kv_indptr = kv_indptr.pin_memory()
+            kv_len_arr = kv_len_arr.pin_memory()
         self.wrapper.plan(
-            self._qo_cpu,
-            self._kv_cpu,
+            qo_indptr,
+            kv_indptr,
             self.kv_indices[:num_indices],
-            self._lens_cpu,
+            kv_len_arr,
             self.num_heads,
             self.kv_lora_rank,  # head_dim_ckv
             self.qk_rope_head_dim,  # 0 (NoPE) or 64 (rope MLA)
