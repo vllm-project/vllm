@@ -49,6 +49,7 @@ def _make_bare_scheduler(
     scheduler.enable_kv_events = False
     scheduler.lookup_async = False
     scheduler.enable_lookup = True
+    scheduler._capacity_only = False
     scheduler._block_size = 16
     scheduler._hash_block_size = hash_block_size
     scheduler.enable_partial_hash_hits = enable_partial_hash_hits
