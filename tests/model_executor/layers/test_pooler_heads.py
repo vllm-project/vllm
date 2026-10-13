@@ -308,6 +308,7 @@ class TestTokenEmbeddingPoolerHead:
         x = torch.randn(5, _HIDDEN)
         param = PoolingParams(task="token_embed")
         out = head.forward_chunk(x, param)
+        assert out is x
         assert torch.equal(out, x)
 
     def test_none_chunked_prefill(self):
