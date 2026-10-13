@@ -3,8 +3,8 @@
 # Adapted from ROCm/ATOM (https://github.com/ROCm/ATOM) at 97359d6, MIT License,
 # Copyright (C) 2026, Advanced Micro Devices, Inc.:
 # atom/model_ops/deepseek_v41/router.py
-"""V4.1's router GEMV tile for decode: bf16 x [T, 5120] times the gate weight
-[384, 5120] -> f32 logits, in one fixed summation order.
+"""The router GEMV tile for decode: bf16 x [T, K] times the gate weight
+[experts, K] -> f32 logits, in one fixed summation order (K the hidden width).
 
 Rows 16 a tile, K in ``PARTS`` contiguous parts, 16x16x32 bf16 MFMA: in part
 p wave w takes the part's K steps w, w + 8, ... (32 columns each) in that
@@ -20,25 +20,24 @@ from aiter.ops.flydsl.kernels import buffer_ops as bo
 from flydsl.expr import const_expr, range_constexpr
 from flydsl.expr.typing import T
 
-from vllm.models.deepseek_v41.amd.mono.common.ops import mfma_bf16, rsrc
-from vllm.models.deepseek_v41.amd.mono.common.plan import WAVES
+from vllm.models.common.amd.mono.common.ops import mfma_bf16, rsrc
+from vllm.models.common.amd.mono.common.plan import WAVES
 
-HIDDEN = 5120
 ROWS = 16  # a tile's rows: the MFMA's M
 PARTS = 4  # contiguous K parts of a tile, summed in order
 
 
-def _k0s(part, lane, wave):
+def _k0s(k, part, lane, wave):
     """The K offsets of this lane's loads in part ``part`` (8 bf16 each)."""
-    per_wave = HIDDEN // 32 // WAVES // PARTS
-    assert per_wave * 32 * WAVES * PARTS == HIDDEN
+    per_wave = k // 32 // WAVES // PARTS
+    assert per_wave * 32 * WAVES * PARTS == k
     return [
         (part * per_wave * WAVES + wave + WAVES * i) * 32 + 8 * (lane // 16)
         for i in range(per_wave)
     ]
 
 
-def router_weight_loads(w, task, part, lane, wave, w_cm=0):
+def router_weight_loads(w, k, task, part, lane, wave, w_cm=0):
     """``router_tile``'s weight operands (rows 16 task .., K part ``part``).
     ``w_cm``: their load cache policy (nontemporal where nothing else of the
     step reuses them)."""
@@ -47,17 +46,17 @@ def router_weight_loads(w, task, part, lane, wave, w_cm=0):
         fx.Vector(
             bo.buffer_load(
                 rsrc(w),
-                (row * HIDDEN + k0) // 2,
+                (row * k + k0) // 2,
                 vec_width=4,
                 dtype=T.i32,
                 cache_modifier=w_cm,
             )
         )
-        for k0 in _k0s(part, lane, wave)
+        for k0 in _k0s(k, part, lane, wave)
     ]
 
 
-def router_x_loads(x, part, s, lane, wave, x_cm=0, t0=0):
+def router_x_loads(x, k, part, s, lane, wave, x_cm=0, t0=0):
     """``router_tile``'s x operands: the s tokens from ``t0`` (column
     lane % 16; ``t0`` traced or an int). ``x_cm``: their load cache policy
     (device scope when another CTA of the same launch wrote x)."""
@@ -68,13 +67,13 @@ def router_x_loads(x, part, s, lane, wave, x_cm=0, t0=0):
         fx.Vector(
             bo.buffer_load(
                 rsrc(x),
-                (tok * HIDDEN + k0) // 2,
+                (tok * k + k0) // 2,
                 vec_width=4,
                 dtype=T.i32,
                 cache_modifier=x_cm,
             )
         )
-        for k0 in _k0s(part, lane, wave)
+        for k0 in _k0s(k, part, lane, wave)
     ]
 
 

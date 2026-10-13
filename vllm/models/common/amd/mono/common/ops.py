@@ -35,7 +35,7 @@ from flydsl.expr import const_expr, range_constexpr, rocdl
 from flydsl.expr import math as fmath
 from flydsl.expr.typing import T, as_ir_value
 
-from vllm.models.deepseek_v41.amd.mono.common.plan import THREADS, WAVES
+from vllm.models.common.amd.mono.common.plan import THREADS, WAVES
 
 # ---------------------------------------------------------------- primitives
 # gfx95x cache policy bits (LLVM CPol): SC0 = 1, SC1 = 16. SC1 alone is device
@@ -293,6 +293,7 @@ def sum_partials(poll, own, pair_of, tp):
 
 
 # ---------------------------------------------------------------- timeline stamps
+@traced
 def stamp(on, tls, tid, k):
     # compile-time gate outside, traced condition inside: they cannot be one `and`
     if const_expr(on):  # noqa: SIM102

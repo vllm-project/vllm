@@ -83,6 +83,7 @@ steps:
       source_file_dependencies:
       - vllm/models/deepseek_v4/
       - vllm/models/deepseek_v41/
+      - vllm/models/common/amd/
       - tests/models/test_deepseek_v4_vl_rocm.py
       - tests/models/test_hyv4_rocm.py
       - tests/models/transformers/test_layer_registry_e2e.py
@@ -272,9 +273,26 @@ steps:
   depends_on:
   - image-build-amd
   source_file_dependencies:
+  - vllm/models/common/amd/
   - vllm/models/deepseek_v41/amd/
   - tests/models/test_dsv41_mono_numerics.py
   - tests/models/test_dsv41_mono_layers.py
   commands:
   - pytest -v -s tests/models/test_dsv41_mono_numerics.py
   - pytest -v -s tests/models/test_dsv41_mono_layers.py
+
+- label: ':amd: (MI355) DeepSeek-V4-Pro Mono Decode Numerics'
+  key: dsv4-mono-decode-numerics-amd
+  dind: false
+  device: mi355_8
+  num_devices: 8
+  timeout_in_minutes: 40
+  working_dir: /vllm-workspace/
+  depends_on:
+  - image-build-amd
+  source_file_dependencies:
+  - vllm/models/common/amd/
+  - vllm/models/deepseek_v4/amd/
+  - tests/models/test_dsv4_mono_numerics.py
+  commands:
+  - pytest -v -s tests/models/test_dsv4_mono_numerics.py

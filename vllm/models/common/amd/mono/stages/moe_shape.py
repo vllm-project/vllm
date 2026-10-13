@@ -12,16 +12,18 @@ from dataclasses import dataclass, field
 
 import flydsl.expr as fx
 
-from vllm.models.deepseek_v41.amd.mono.common.plan import BLOCKS, WAVES
-from vllm.models.deepseek_v41.amd.mono.stages import moe_plan as mplan
-from vllm.models.deepseek_v41.amd.mono.stages.dims import UG_PART, Dims
-from vllm.models.deepseek_v41.amd.mono.stages.gemv import ROWS, TILE, token_tiles
-from vllm.models.deepseek_v41.amd.mono.stages.router import PARTS as ROUTER_PARTS
+from vllm.models.common.amd.mono.common.plan import BLOCKS, WAVES
+from vllm.models.common.amd.mono.spec import UG_PART, Dims, MonoSpec
+from vllm.models.common.amd.mono.stages import moe_plan as mplan
+from vllm.models.common.amd.mono.stages.gemv import ROWS, TILE, token_tiles
+from vllm.models.common.amd.mono.stages.router import PARTS as ROUTER_PARTS
 
-EXPERTS, TOPK = 384, 6  # the target's routing (a build's: ``MoeBuild``)
 ROUTER0 = 8  # the router's first task: past the xq tasks (a token each)
+# the LDS an x tile's MXFP8 rows may take (``RouteShape.x_tile``): beside them
+# the ug stage holds its scale blocks, the route table and the partials
+X_TILE_BYTES = 96 * 1024
 MASK_WORDS = 2  # an expert's token bitmap in the route table: tokens <= 64
-# a route lane's experts (EXPERTS / 64) sorted descending, ties kept in index
+# a route lane's experts (experts / 64) sorted descending, ties kept in index
 # order: the network by their count
 SORT_NETS = {
     6: [
@@ -44,15 +46,17 @@ SORT_NETS = {
 
 @dataclass(frozen=True)
 class MoeBuild:
+    spec: MonoSpec
     tokens: int
-    # routed experts and a token's top-k: the target's, or the DSpark draft's
-    experts: int = EXPERTS
-    topk: int = TOPK
     # the TP size: every width a rank holds (``Dims``)
-    tp: int = 4
+    tp: int
     timeline: bool = field(default=False, metadata={"sym": "tl"})
     # FP4 groups an ug task (``RouteShape.ug_groups``)
     ug_groups: int = 2
+    # a hash layer's routing: each token's experts given (``RouteShape``)
+    hash_route: bool = False
+    # the all-reduce in two hops (``stages.allreduce``)
+    two_hop: bool = False
 
 
 @dataclass(frozen=True)
@@ -64,8 +68,7 @@ class RouteShape:
     order and each slot's first position in it (past one token tile also each
     slot's first pick tile and each pick tile's slot)."""
 
-    experts: int
-    topk: int
+    spec: MonoSpec
     tokens: int
     tp: int
     # FP4 groups (32 intermediate columns) an ug task, its waves splitting K in
@@ -73,10 +76,24 @@ class RouteShape:
     # closer together: faster at the draft's widths (40 rows -4 us), slower at
     # the target's (48 rows +3 us; the runners pick)
     ug_groups: int = 2
+    # a hash layer: each token's top-k experts are given ([S, topk] int32 in
+    # the bias argument: the layer's tid2eid rows of the step's tokens), the
+    # router's scores only weigh them
+    hash_route: bool = False
+    # the all-reduce in two hops (``stages.allreduce``)
+    two_hop: bool = False
+
+    @property
+    def experts(self) -> int:
+        return self.spec.experts
+
+    @property
+    def topk(self) -> int:
+        return self.spec.topk
 
     @property
     def dims(self) -> Dims:
-        return Dims(self.tp)
+        return Dims(self.spec, self.tp)
 
     @property
     def ug_parts(self) -> int:
@@ -127,9 +144,23 @@ class RouteShape:
         return self.route0 + max(8, self.tokens)
 
     @property
+    def x_tile(self) -> int:
+        """The rows of an x tile in LDS -- the shared stage's token tile, the
+        ug stage's pick tile: an MFMA's N (16) while they fit
+        ``X_TILE_BYTES``, else 8 (a wide hidden: the MFMA's columns past
+        them repeat the last)."""
+        row = self.dims.hidden + self.dims.x_groups
+        return TILE if TILE * row <= X_TILE_BYTES else TILE // 2
+
+    @property
+    def x_tiles(self) -> int:
+        """A step's x tiles."""
+        return -(-self.tokens // self.x_tile)
+
+    @property
     def shared_units(self) -> int:
         """The shared expert's (task, token tile) units (``stage_shared``)."""
-        return self.dims.shared_tasks * len(token_tiles(self.tokens))
+        return self.dims.shared_tasks * self.x_tiles
 
     @property
     def ug0(self) -> int:
@@ -146,20 +177,20 @@ class RouteShape:
 
     @property
     def multi(self) -> bool:
-        """More than one token tile: an ug task is a (tile of a slot's picks,
-        part) (``stage_ug``)."""
-        return self.tokens > TILE
+        """More than one x tile: an ug task is a (tile of a slot's picks, part)
+        (``stage_ug``)."""
+        return self.tokens > self.x_tile
 
     @property
     def slot_tiles(self) -> int:
         """A slot's pick tiles at most (a token picks an expert once)."""
-        return len(token_tiles(self.tokens))
+        return self.x_tiles
 
     @property
     def max_tiles(self) -> int:
         """The pick tiles of U at most: a slot's partial tile each, then the
         whole tiles, and never more than a tile a pick."""
-        return min(self.picks, self.max_u + self.picks // TILE)
+        return min(self.picks, self.max_u + self.picks // self.x_tile)
 
     @property
     def tile_first0(self) -> int:
@@ -198,8 +229,8 @@ class RouteShape:
 
     @property
     def tile_picks(self) -> int:
-        """A slot's picks at most: a token picks an expert once."""
-        return min(self.tokens, 16)
+        """A pick tile's picks at most: a token picks an expert once."""
+        return min(self.tokens, self.x_tile)
 
     def route_w(self, tab, s, t, k):
         return fx.ptr_load(tab + (t * 2 * self.topk + self.topk + k)).bitcast(
@@ -226,4 +257,6 @@ class RouteShape:
 
 
 def route_shape(key: MoeBuild) -> RouteShape:
-    return RouteShape(key.experts, key.topk, key.tokens, key.tp, key.ug_groups)
+    return RouteShape(
+        key.spec, key.tokens, key.tp, key.ug_groups, key.hash_route, key.two_hop
+    )
