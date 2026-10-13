@@ -474,8 +474,7 @@ def test_simulate_offline_kv_offloading(tmp_path) -> None:
 
 def test_simulate_disaggregated_prefill() -> None:
     """A request is prefilled on the prefill instance, its KV read by the
-    decode instance in the modeled time, and decoded there; the prefill
-    instance frees its blocks once they are read."""
+    decode instance in the modeled time, and decoded there."""
     from vllm.engine.arg_utils import EngineArgs
     from vllm.v1.worker.simulated.disaggregated import simulate_disaggregated
     from vllm.v1.worker.simulated.offline import TimedRequest

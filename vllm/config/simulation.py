@@ -191,18 +191,21 @@ class SimulationConfig:
                 )
         if nixl:
             assert kv_transfer is not None
-            if kv_transfer.kv_connector == "NixlPushConnector":
-                if kv_transfer.kv_role not in ("kv_producer", "kv_consumer"):
-                    raise ValueError(
-                        "Simulated push-mode disaggregated prefill needs "
-                        f"kv_role kv_producer or kv_consumer, not "
-                        f"{kv_transfer.kv_role}."
-                    )
-                if self.clock != "real":
-                    raise ValueError(
-                        "Simulated push-mode disaggregated prefill runs served "
-                        "instances, on the real clock."
-                    )
+            if kv_transfer.kv_role not in ("kv_producer", "kv_consumer"):
+                raise ValueError(
+                    "Simulated disaggregated prefill needs kv_role kv_producer "
+                    f"or kv_consumer, not {kv_transfer.kv_role}."
+                )
+            if parallel.decode_context_parallel_size > 1:
+                raise ValueError(
+                    "Simulated disaggregated prefill does not support decode "
+                    "context parallelism."
+                )
+            if kv_transfer.kv_connector == "NixlPushConnector" and self.clock != "real":
+                raise ValueError(
+                    "Simulated push-mode disaggregated prefill runs served "
+                    "instances, on the real clock."
+                )
             if self.clock == "fast_forward":
                 # Served instances run on the real clock, in-process ones
                 # (vllm.v1.worker.simulated.disaggregated) on virtual clocks.

@@ -92,19 +92,13 @@ per_prefill_token_us * P` and fits it to a recorded step log
 (`HostTimeModel.from_log`, or `host_fit_log` for the `linear` provider), for
 providers that model only the device. Under async scheduling host time shows
 only where it exceeds the device's, mostly in prefill steps of small models,
-so it matters most for TTFT. Host work barely depends on model size: on H200
-with CUDA graphs, Qwen3-0.6B and Qwen3-8B both spend about 1.1 ms per step
-plus 12–16 µs per prefill token. With an analytical provider, Qwen3-0.6B's
-mean TTFT is 37% low without host time, 2% high with host time fitted to a
-0.6B recording, and 21% high fitted to a Qwen3-8B recording of a similar
-workload. Fit to a recording of the same deployment shape (parallelism,
-speculative decoding) whose prefills resemble the simulated workload's; a
-recording whose prompts mostly hit the cache leaves the per-token term
-poorly determined. The fit keeps terms non-negative and leaves a term the
-recording cannot determine at zero: per-request time needs a varying number
-of requests per step, per-token time needs prefill steps. Record under async
-scheduling (the default); without it the measured host time includes waiting
-for the device.
+so it matters most for TTFT. Fit to a recording of the same deployment shape
+(parallelism, speculative decoding) whose prefills resemble the simulated
+workload's. The fit keeps terms non-negative and leaves a term the recording
+cannot determine at zero: per-request time needs a varying number of requests
+per step, per-token time needs prefill steps. Record under async scheduling
+(the default); without it the measured host time includes waiting for the
+device.
 
 ### Recording a real deployment
 
@@ -132,10 +126,6 @@ also contains whatever the engine core does between the two calls (e.g. the
 structured-output grammar bitmask) and any wait on a full kernel-launch queue;
 replaying it under a different scheduler configuration attributes that time
 to the step regardless.
-
-On Qwen3-0.6B / H200 with `vllm bench serve` (ISL 512, OSL 64, 10 rps,
-64 prompts), replaying a recording of the same workload reproduces the real
-run within 2% on mean, median and P99 TTFT, TPOT and ITL.
 
 ### Offline runs in simulated time
 
@@ -182,11 +172,9 @@ work, roughly 1 ms per step, so the speedup over real time is the step time
 of the modeled deployment divided by that. `make_engine()` and `run()` also drive a
 real (non-simulated) engine on the real clock, which is how the
 reference for a comparison is produced.
-[examples/features/simulated_execution/sweep_offline.py](../../examples/features/simulated_execution/sweep_offline.py)
-sweeps `max_num_seqs` this way, and
 [`vllm bench sweep simulate`](../benchmarking/sweeps.md#simulated-sweep) runs
-the combinations of a `vllm bench sweep serve` experiment, optionally searching
-each for the highest request rate that meets latency targets.
+the combinations of a `vllm bench sweep serve` experiment this way, optionally
+searching each for the highest request rate that meets latency targets.
 
 The engine core is all that runs, so a server's latency outside it (HTTP, API
 server, IPC) is missing from TTFT and end-to-end latency. Passing it as
@@ -216,20 +204,6 @@ session = TimedSession(
 )
 ```
 
-On Qwen3-8B / H200 with a 2 GiB GPU KV cache and a 32 GiB CPU cache, 32
-sessions (arriving at 2/s) of 5 turns each (a shared 1024-token system
-prompt plus 1024 tokens, then 256 tokens per turn, OSL 128, think time
-exponential with mean 3 s), replayed from a recording under the
-`fast_forward` clock:
-
-| | TTFT mean | TTFT P99 | TPOT mean | E2E mean |
-| --- | --- | --- | --- | --- |
-| With CPU offloading, real / simulated (ms) | 420.9 / 417.0 | 1625 / 1588 | 6.161 / 6.162 | 1203 / 1200 |
-| Without, real / simulated (ms) | 655.9 / 647.6 | 2234 / 2179 | 6.951 / 6.960 | 1539 / 1531 |
-
-The simulation reproduces the 36% lower TTFT that offloading buys, and takes
-6–7 s per run instead of 39 s.
-
 ### Speculative decoding
 
 With a `speculative_config`, the scheduler schedules draft tokens as usual and
@@ -254,13 +228,10 @@ simulation_config={
 }
 ```
 
-Recorded on Qwen3-8B with an EAGLE3 speculator (3 drafts) on H200 and
-replayed this way under the `fast_forward` clock, a Poisson workload of 100
-MMLU-Pro prompts at 4 requests/s reproduces mean TPOT, TTFT and E2E latency
-within 2.5% and tokens per step within 3%, in 5 s instead of 30 s. Acceptance
-is sampled independently per step, so the spread of per-request acceptance
-(and with it P99 TPOT) is narrower than on the real deployment. Trace replay
-is not available with speculative decoding; outputs are fallback tokens.
+Acceptance is sampled independently per step, so the spread of per-request
+acceptance (and with it P99 TPOT) is narrower than on the real deployment.
+Trace replay is not available with speculative decoding; outputs are fallback
+tokens.
 
 ### Parallelism
 
@@ -298,23 +269,6 @@ Only the output rank (last pipeline stage, first tensor-parallel rank) writes
 the step log, for simulated and recorded runs alike. On CUDA hosts each rank
 binds its own device, as in the deployment being modeled; a simulated rank
 needs only a few MB of device memory.
-
-On Qwen3-8B / H200 with a Poisson workload (ISL 512, OSL 64, 8 req/s, 96
-requests), replaying a recording of the same configuration through the
-offline driver on the real clock gives:
-
-| | TTFT mean | TPOT mean | E2E mean |
-| --- | --- | --- | --- |
-| TP=2, real / simulated (ms) | 19.94 / 20.09 | 3.990 / 3.996 | 271.3 / 271.9 |
-| PP=2, real / simulated (ms) | 18.81 / 18.30 | 5.881 / 5.915 | 389.3 / 391.0 |
-
-With PP=2 saturated (256 requests at 64 req/s) the simulation is about 10%
-optimistic (TPOT 10.06 vs 11.12 ms): each step on the real deployment
-spends about 0.2 ms more between worker calls (engine loop and IPC) than the
-simulation's, and the simulated scheduler forms slightly smaller batches.
-Qwen3-VL-30B-A3B-Instruct-FP8 (MoE, text only) with DP=2
-and expert parallelism under `vllm serve` (ISL 512, OSL 64, 16 req/s, 128
-requests) reproduces mean TPOT within 2% and mean TTFT within 9%.
 
 ### KV cache offloading
 
@@ -360,21 +314,6 @@ step that waits for stores the scheduler must flush pays the wait in the
 simulation; its recorded host time includes it too, so replaying such a step
 counts the wait twice (flushes are rare: they follow preemption or reuse of a
 block still being stored).
-
-On Qwen3-8B / H200 with a 4 GiB GPU KV cache and a 32 GiB CPU cache, 240
-requests at 3 req/s whose prompts are one of 24 shared 4096-token documents
-plus a unique 64-token suffix (OSL 64), replayed from a recording of the same
-configuration under the `fast_forward` clock:
-
-| | TTFT mean | TTFT P99 | TPOT mean | E2E mean |
-| --- | --- | --- | --- | --- |
-| Real (ms) | 45.5 | 164.5 | 5.622 | 399.7 |
-| Simulated, rates fitted from the recording (ms) | 44.9 | 164.4 | 5.616 | 398.7 |
-| Simulated, 25 GB/s guessed (ms) | 52.4 | 164.6 | 5.613 | 406.0 |
-| Simulated without the CPU cache (ms) | 93.6 | 202.1 | 6.755 | 519.2 |
-
-The simulated run issues the same 164 loads (90.3 GB) and 304 stores as the
-real one and takes 11 s instead of 83 s.
 
 ### Disaggregated prefill
 
@@ -441,41 +380,6 @@ difference. Each instance has one rank. `handoff_latency_s` is the proxy's
 latency from a finished prefill to the decode instance receiving the
 request; the instances' API servers are not modeled.
 
-On Qwen3-8B / H200 (one prefill and one decode instance on two GPUs, NIXL
-within the node, the toy proxy from the NIXL integration tests; 120 requests
-at 4 req/s, ISL 2048, OSL 128), replaying each instance's recording with a
-7 ms handoff latency (the median measured on the real deployment):
-
-| | TTFT mean | TTFT median | TTFT P99 | TPOT mean |
-| --- | --- | --- | --- | --- |
-| Real (ms) | 99.2 | 88.7 | 198.6 | 5.294 |
-| Simulated (ms) | 89.8 | 87.3 | 165.6 | 5.309 |
-
-The fitted read rate is 54 GB/s (a 302 MB prefix in about 5.6 ms). The
-TTFT tail is still low: on the real deployment the time from a prefill's end
-to the decode instance's first step varies from 10 to over 50 ms with the
-HTTP path through the proxy and the API servers, which the simulation takes
-as constant. A run takes 6 s instead of 35 s.
-
-To predict other prefill:decode ratios, the same deployment ran 1P1D, 2P1D
-and 1P2D at 8 req/s (240 requests), with the client acting as the proxy
-(the toy proxy, which relays every streamed token through one Python
-process, inflates TTFT and distorts TPOT at this load). The simulation
-replayed only the 1P1D recording at 4 req/s above, with the handoff latency
-calibrated once on the 1P1D run (26 ms):
-
-| | TTFT mean real / simulated | TPOT mean real / simulated |
-| --- | --- | --- |
-| 1P1D (calibration) | 116.0 / 114.4 ms | 5.863 / 5.680 ms |
-| 2P1D | 107.1 / 105.7 ms | 5.863 / 5.680 ms |
-| 1P2D | 113.7 / 113.7 ms | 5.362 / 5.248 ms |
-
-The prediction gets the ratios' effects (a second prefill instance lowers
-TTFT by 8%, simulated 8%; a second decode instance TPOT by 9%, simulated 8%)
-and their means within 3%, from a recording at half the load. Medians are
-2–7% high and P99s a third to a half of the real ones: the real HTTP path's
-latency varies, the simulation's does not.
-
 #### Served instances
 
 Simulated prefill and decode instances also run as ordinary servers, on the
@@ -515,30 +419,9 @@ instance that stopped answering holds that request's blocks there, as
 simulated leases do not expire. As the proxy, the API servers and the HTTP path run for
 real, they add their own latency, including its variation.
 
-On the 1P1D deployment above at 8 req/s, through the toy proxy, served
-simulation reproduces mean TTFT within 6%, P99 TTFT within 23% and TPOT
-within 1% (the in-process driver's P99 was half the real one). With
-tensor parallelism 2 on both instances (four GPUs, the client playing the
-proxy), replaying their recordings:
-
-| | TTFT mean | TTFT median | TTFT P99 | TPOT mean |
-| --- | --- | --- | --- | --- |
-| Real (ms) | 73.4 | 63.7 | 162.8 | 3.874 |
-| Simulated, served (ms) | 73.2 | 66.4 | 136.0 | 3.874 |
-
-With different tensor parallelism on the two instances (three GPUs),
-the decode instance's recorded reads fit a rate per read, which is what
-concurrent reads achieve: with TP=2 prefill and TP=1 decode the decode rank
-reads half of its KV from each prefill rank (4.5 GB/s per read, as NIXL
-reads the heads' slices); with TP=1 prefill and TP=2 decode both decode ranks
-read their half of the prefill rank's KV (7.4 GB/s per read):
-
-| | TTFT mean | TTFT median | TTFT P99 | TPOT mean |
-| --- | --- | --- | --- | --- |
-| Prefill TP=2, decode TP=1: real (ms) | 122.5 | 109.2 | 206.2 | 6.973 |
-| Prefill TP=2, decode TP=1: simulated (ms) | 124.3 | 116.1 | 203.0 | 6.890 |
-| Prefill TP=1, decode TP=2: real (ms) | 107.5 | 94.8 | 184.0 | 4.071 |
-| Prefill TP=1, decode TP=2: simulated (ms) | 110.8 | 99.3 | 193.0 | 4.035 |
+With different tensor parallelism on the two instances, the decode
+instance's recorded reads fit a rate per read, which is what concurrent reads
+achieve.
 
 #### Push mode and pipeline parallelism
 
@@ -564,24 +447,6 @@ decode instance, which then prefills it itself. Here the prefill
 instance records the transfers, so its step log is the one to fit
 `kv_transfer_timing` to.
 
-On Qwen3-8B / H200 at 4 req/s (ISL 2048, OSL 128, the client playing the
-push proxy), replaying each instance's recording, without the first ten
-requests (the real connector's first transfers between each pair of ranks
-include NIXL's setup, up to 2 s):
-
-| Prefill / decode | TTFT mean real / sim | TTFT median real / sim | TPOT real / sim |
-| --- | --- | --- | --- |
-| TP1 / TP1 | 93.5 / 90.8 ms | 84.3 / 85.8 ms | 5.308 / 5.305 ms |
-| TP1 PP2 / TP1 | 93.8 / 98.6 ms | 84.6 / 84.5 ms | 5.308 / 5.312 ms |
-| TP2 / TP1 | 85.7 / 80.1 ms | 81.7 / 75.9 ms | 5.307 / 5.305 ms |
-| TP1 PP2 / TP2 | 115.1 / 95.7 ms | 87.2 / 89.9 ms | 3.759 / 3.761 ms |
-
-A sixth of the real writes take 10–15 times the typical time, throughout
-the run, and the fitted rate averages them in: it leaves out only records
-more than 20 times slower than the fit predicts, which are setup. In the last
-layout NIXL's setup lasts longer than ten requests (real P99 TTFT 731 ms),
-which raises the real mean.
-
 ### Running without a GPU
 
 A CPU build of vLLM (`VLLM_TARGET_DEVICE=cpu`, which installs Triton's CPU
@@ -606,6 +471,21 @@ GPU default of 16, which coarsens prefix-cache matching. Pass `--block-size`
 to match the deployment when its backend uses a larger one; MLA models on
 CPUs without AMX keep the CPU backend's required size. The CPU build needs
 Python 3.11 or newer for triton-cpu.
+
+## Accuracy
+
+Validated on H200 by replaying a recording of the real deployment (Qwen3-0.6B
+or Qwen3-8B, random or MMLU-Pro prompts):
+
+| Feature | Real vs simulated |
+| --- | --- |
+| Serving (`vllm serve`, `vllm bench serve`) | mean TTFT, TPOT, ITL within about 2% |
+| Speculative decoding (EAGLE3) | TTFT, TPOT, E2E within 2.5% |
+| TP=2, PP=2; MoE DP=2 with expert parallelism | TPOT within 2%; TTFT within 3% (9% for MoE DP); PP=2 when saturated: TPOT 10% low |
+| KV offloading; multi-turn sessions | TTFT within 2%, TPOT within 0.2% |
+| Disaggregated prefill at light load (in-process, served, heterogeneous TP, push with PP) | TPOT within 2%; mean TTFT within 10%; P99 TTFT low, as the HTTP path's latency varies |
+| Disaggregated prefill near saturation, long-running servers (`--fill-kv-caches`) | TPOT −11% to +5%, median TTFT −11% to +22% |
+| `vllm bench sweep simulate` | see [Simulated Sweep](../benchmarking/sweeps.md#simulated-sweep) |
 
 ## Limitations
 

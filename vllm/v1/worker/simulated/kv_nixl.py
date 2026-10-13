@@ -250,8 +250,12 @@ class SimulatedNixlWorker:
                     logger.warning("Rejected a KV transfer booking", exc_info=True)
                 # A REP socket must answer before it can receive again.
                 sock.send_json(reply)
+                self._after_reply()
         finally:
             sock.close(linger=0)
+
+    def _after_reply(self) -> None:
+        """Booking-thread work that must not delay a booking's answer."""
 
     def _handle(self, message: Any) -> Any:
         """Answer a booking from a peer in another process."""
@@ -410,7 +414,11 @@ class SimulatedNixlWorker:
                     f"No simulated engine {remote.engine_id} to read {req_id}'s "
                     "KV from."
                 )
-            if self.post != PostCost() and num_bytes and not failed:
+            if (
+                (self.post.per_read_s or self.post.per_run_s)
+                and num_bytes
+                and not failed
+            ):
                 # Posting the reads holds the engine thread; they start once
                 # posted.
                 runs = read_runs(meta.local_block_ids, remote.block_ids)
@@ -474,6 +482,7 @@ class SimulatedNixlWorker:
                 # As the real worker, drop reads of requests no longer tracked.
                 if req_id not in self._reqs_to_process:
                     self._expected.pop(req_id, None)
+                    self._notified.pop(req_id, None)
                     self._read_floor.pop(req_id, None)
                     continue
                 self._notified[req_id] = self._notified.get(req_id, 0) + 1
@@ -567,7 +576,11 @@ class SimulatedNixlPushWorker(SimulatedNixlWorker):
         # when its writes end, and the lease of an unregistered one.
         self._finished: dict[str, tuple[str, list[int]]] = {}
         self._registrations: dict[str, dict[str, Any]] = {}
+        self._registration_copies: dict[str, int] = {}
         self._late_registrations: dict[str, int] = {}
+        # Write notifications a registration started, sent once it is answered
+        # (booking thread only).
+        self._unsent_writes: list[tuple[str, int, int, str, float]] = []
         self._writes_out: dict[str, float] = {}
         self._leases: dict[str, float] = {}
 
@@ -609,9 +622,13 @@ class SimulatedNixlPushWorker(SimulatedNixlWorker):
                     else:
                         self._late_registrations[base] = late - 1
                     return True
+                if base in self._registrations:
+                    # Another decode rank's copy, before the request finished.
+                    self._registration_copies[base] += 1
+                    return True
                 self._registrations[base] = reg
-                writes = self._match(base)
-            self._notify_writes(writes)
+                self._registration_copies[base] = 1
+                self._unsent_writes += self._match(base)
             return True
         if op == "write":
             _, req_id, duration = message
@@ -636,6 +653,10 @@ class SimulatedNixlPushWorker(SimulatedNixlWorker):
                         self._leases[req_id] = max(lease, deadline)
             return True
         raise ValueError(f"unknown booking {op!r}")
+
+    def _after_reply(self) -> None:
+        writes, self._unsent_writes = self._unsent_writes, []
+        self._notify_writes(writes)
 
     def _layout_supported(self, prefill_tp: int) -> bool:
         """Whether the real push connector accepts these tensor-parallel
@@ -665,9 +686,13 @@ class SimulatedNixlPushWorker(SimulatedNixlWorker):
         req_id, blocks = self._finished.pop(base)
         reg = self._registrations.pop(base)
         self._leases.pop(req_id, None)
-        # Decode ranks beyond the first that register with this rank.
-        if reg["tp_size"] > self.tp_size:
-            self._late_registrations[base] = reg["tp_size"] // self.tp_size - 1
+        # Copies of the registration from the other decode ranks this rank
+        # writes to that are still to come.
+        late = max(1, reg["tp_size"] // self.tp_size) - self._registration_copies.pop(
+            base, 1
+        )
+        if late > 0:
+            self._late_registrations[base] = late
         num_bytes = sum(
             min(n, m) * size
             for n, m, size in zip(blocks, reg["blocks"], self.bytes_per_block)
@@ -859,10 +884,6 @@ class NixlPushConnector(RealNixlPushConnector):
                 vllm_config, self.engine_id, kv_cache_config
             )
             self.connector_worker = self.worker  # type: ignore[assignment]
-
-    def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
-        assert isinstance(self._connector_metadata, NixlConnectorMetadata)
-        self.worker.start_load_kv(self._connector_metadata)
 
     def set_xfer_handshake_metadata_pp_aware(self, metadata: dict) -> None:
         """No handshake: simulated ranks book transfers at each other's ports."""

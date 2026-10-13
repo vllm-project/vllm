@@ -362,10 +362,12 @@ def test_simulated_nixl_push_writes_from_every_prefill_stage():
         w.shutdown()
 
 
-def test_simulated_nixl_push_write_before_decode_rank_schedules():
+@pytest.mark.parametrize("finish_first", [True, False])
+def test_simulated_nixl_push_with_more_decode_ranks(finish_first):
     """With more decode ranks than prefill ranks, the prefill rank writes to
-    all of them as soon as one registers; a decode rank that schedules the
-    request only afterwards still completes."""
+    all of them once the request is finished and one has registered: a decode
+    rank that schedules the request only afterwards still completes, and
+    registrations sent before the request finished leave nothing behind."""
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
         NixlConnectorMetadata,
         RemoteMeta,
@@ -419,14 +421,21 @@ def test_simulated_nixl_push_write_before_decode_rank_schedules():
 
         finished = NixlConnectorMetadata()
         finished.push_finished_blocks = {"d-bbbbbbbb": ([5, 6],)}
-        prefill.start_load_kv(finished)
-        schedule(decode[0])  # matches, and writes to both decode ranks
-        time.sleep(0.05)
-        schedule(decode[1])  # its write is already in
+        if finish_first:
+            prefill.start_load_kv(finished)
+            schedule(decode[0])  # matches, and writes to both decode ranks
+            time.sleep(0.05)
+            schedule(decode[1])  # its write is already in
+        else:
+            schedule(decode[0])
+            schedule(decode[1])
+            prefill.start_load_kv(finished)  # matches both registrations
         time.sleep(0.05)
         for d in decode:
             assert d.get_finished() == (set(), {"d-aaaaaaaa"})
-        assert prefill._registrations == {} and prefill._late_registrations == {}
+        assert prefill._registrations == {}
+        assert prefill._registration_copies == {}
+        assert prefill._late_registrations == {}
     finally:
         for w in (*decode, prefill):
             w.shutdown()

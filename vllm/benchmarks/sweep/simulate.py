@@ -87,12 +87,17 @@ def max_rate_meeting_slo(
         missing = slo.keys() - run_data.keys()
         if missing:
             raise ValueError(f"SLO metrics {sorted(missing)} are not reported.")
-        return all(float(run_data[k]) <= v for k, v in slo.items())  # type: ignore[arg-type]
+        # A metric a run does not define (NaN, e.g. TPOT of one-token
+        # outputs) does not bound it.
+        values = {k: float(run_data[k]) for k in slo}  # type: ignore[arg-type]
+        return all(math.isnan(x) or x <= slo[k] for k, x in values.items())
 
     batch = evaluate(math.inf)
     if meets(batch):
         return math.inf
     rate = float(batch["request_throughput"])  # type: ignore[arg-type]
+    if not rate > 0:
+        return 0.0
     lo, hi = 0.0, math.inf
     for _ in range(8):
         if meets(evaluate(rate)):
@@ -241,7 +246,12 @@ def _simulate_comb(task: _CombTask) -> None:
         * args.data_parallel_size
         for role, args in role_args.items()
     }
-    # Disaggregated instances run in this process, with one rank each.
+    if task.num_instances and any(n > 1 for n in num_ranks.values()):
+        raise ValueError(
+            "Disaggregated combinations run their instances in one process, "
+            "with one rank each; serve multi-rank instances with "
+            "`vllm serve --simulate-forward` instead."
+        )
     _select_devices(task.index, 1 if task.num_instances else num_ranks["serve"])
     engine_args = next(iter(role_args.values()))
 
@@ -252,6 +262,15 @@ def _simulate_comb(task: _CombTask) -> None:
     )
     if bench_args.max_concurrency is not None:
         raise ValueError("Simulated sweeps do not support --max-concurrency.")
+    if task.slo is not None and (
+        bench_args.ramp_up_strategy is not None
+        or bench_args.dataset_name == "timed_trace"
+        or bench_args.self_timed
+    ):
+        raise ValueError(
+            "`--slo` searches the request rate, which ramp-up and timed "
+            "traces do not use."
+        )
     bench_args.model = bench_args.model or engine_args.model
     if bench_args.self_timed is None:
         bench_args.self_timed = bench_args.dataset_name == "timed_trace"
@@ -285,11 +304,7 @@ def _simulate_comb(task: _CombTask) -> None:
             for i in range(task.num_instances["decode"])
         ]
         engines = [*prefill, *decode]
-        layout: dict[str, object] = {
-            "gpu_count": sum(
-                n * num_ranks[role] for role, n in task.num_instances.items()
-            )
-        }
+        layout: dict[str, object] = {"gpu_count": sum(task.num_instances.values())}
 
         def simulate_run(requests: list[TimedRequest]) -> SimulationResult:
             return run_disaggregated(
@@ -705,13 +720,12 @@ def run_main(args: SweepSimulateArgs):
             "are underestimated (timing_lookups_outside_range in their summary.json). "
             "Record the deployment under a load that covers the simulated one."
         )
-    if args.slo:
-        df = pd.DataFrame.from_records(
-            [
-                json.loads(path.read_text())
-                for path in sorted(experiment_dir.rglob("result.json"))
-            ]
-        )
+    results = [
+        json.loads(path.read_text())
+        for path in sorted(experiment_dir.rglob("result.json"))
+    ]
+    if args.slo and results:
+        df = pd.DataFrame.from_records(results)
         df["output_throughput_per_gpu"] = (
             df.get("output_throughput", 0) / df["gpu_count"]
         )

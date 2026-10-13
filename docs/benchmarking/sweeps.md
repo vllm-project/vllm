@@ -146,11 +146,11 @@ You can override the number of iterations in the algorithm by setting `--workloa
 
 ### Simulated Sweep
 
-`vllm bench sweep simulate` runs the combinations of `vllm bench sweep serve` with [simulated execution](../features/simulated_execution.md): the real scheduler and KV-cache manager, with each step taking the time a timing model predicts, on a simulated clock. A run takes as long as the engine's host work rather than the length of the benchmark, needs none of the deployment's GPUs, and combinations run in parallel (`-j`), spread over the devices listed in `CUDA_VISIBLE_DEVICES`. It takes the same `--serve-cmd`, `--bench-cmd`, `--serve-params` and `--bench-params`, and builds the requests `vllm bench serve` would send with the same seed, so a configuration it picks can be checked by passing the same files to `vllm bench sweep serve`.
+`vllm bench sweep simulate` runs the combinations of `vllm bench sweep serve` with [simulated execution](../features/simulated_execution.md): the real scheduler and KV-cache manager, with each step taking the time a timing model predicts, on a simulated clock. It needs none of the deployment's GPUs, a run takes as long as the engine's host work, and combinations run in parallel (`-j`) over the devices in `CUDA_VISIBLE_DEVICES`. It takes the same `--serve-cmd`, `--bench-cmd`, `--serve-params` and `--bench-params`, and sends the requests `vllm bench serve` would, so a configuration it picks can be checked by passing the same files to `vllm bench sweep serve`.
 
-The timing model goes in `--simulation-config`, typically a replay of a step log recorded on the target deployment (`record_step_timing`). A combination can override its keys as `simulation_config.<key>`.
+The timing model goes in `--simulation-config`, typically a replay of a step log recorded on the target deployment (`record_step_timing`); a combination can override its keys as `simulation_config.<key>`. Fix the KV cache size (`--kv-cache-memory-bytes`) in `--serve-cmd` to the real deployment's.
 
-With `--slo`, every combination is searched for the highest request rate whose run meets all of the given upper bounds. The search starts from the throughput of a run with all requests sent at once, brackets the boundary by doubling or halving the rate, then bisects (`--search-iters`):
+With `--slo`, each combination is searched for the highest request rate whose run meets all the given upper bounds: from the throughput of a run with all requests sent at once, the rate is bracketed by doubling or halving, then bisected (`--search-iters`).
 
 ```bash
 vllm bench sweep simulate \
@@ -164,25 +164,24 @@ vllm bench sweep simulate \
     --experiment-name demo-sim
 ```
 
-Fix the KV cache size (`--kv-cache-memory-bytes`) in `--serve-cmd`, so that the simulated deployment has the KV capacity of the real one.
+Each run is saved as `summary.json` with the metrics of `vllm bench serve`, so [the plots](#visualization) work on the results; each combination's best run is saved as `result.json` with `max_request_rate`, and `slo_summary.csv` ranks the combinations by output throughput per GPU.
 
-The simulation covers the engine core, not the HTTP and API-server path, which adds a nearly constant latency to every request's TTFT and end-to-end latency (about 8 ms for a local `vllm bench serve` against `vllm serve`). Pass it as `--frontend-latency-ms`. To calibrate it, simulate the runs of the recording (the same `--bench-params`) and take the difference between the real and simulated median TTFT at rates without queueing. Each run is saved as `summary.json` with the metrics of `vllm bench serve`, so [the plots](#visualization) work on the results. The best run of each combination is saved as `result.json` with `max_request_rate`, and `slo_summary.csv` ranks the combinations by output throughput per GPU at that rate.
+- **`--frontend-latency-ms`**: the HTTP and API-server latency the simulation leaves out, added to TTFT and end-to-end latency (about 8 ms for a local `vllm bench serve` against `vllm serve`). Calibrate it as the real minus the simulated median TTFT of the recording's runs, at rates without queueing.
+- **Disaggregated deployments**: `_num_prefill` and `_num_decode` simulate that many prefill and decode instances (NIXL pull mode, one rank each, routed round-robin). Keys prefixed with `_prefill.` or `_decode.` apply to one role, such as `_prefill.simulation_config.timing_args.path`. `--handoff-latency-ms` is the proxy's time from a finished prefill to the decode instance. Throughput per GPU counts all instances (`gpu_count`; pass `--gpu-count-var gpu_count` to `plot_pareto`).
 
-A combination with `_num_prefill` and/or `_num_decode` simulates a disaggregated deployment of that many prefill and decode instances (NIXL pull mode, one rank each), routed round-robin. Keys prefixed with `_prefill.` or `_decode.` apply to one role only, for example each role's recording as `_prefill.simulation_config.timing_args.path`. `--handoff-latency-ms` is the proxy's time from a prefill instance finishing a request to a decode instance receiving it. `kv_transfer_timing` goes in `--simulation-config`. Throughput per GPU counts all instances' GPUs (`gpu_count`; pass `--gpu-count-var gpu_count` to `plot_pareto`).
+    ```json
+    [
+        {"_benchmark_name": "1p2d", "_num_prefill": 1, "_num_decode": 2},
+        {"_benchmark_name": "2p1d", "_num_prefill": 2, "_num_decode": 1}
+    ]
+    ```
 
-A fresh server hands out KV cache blocks in order until its cache has filled once, and in scattered order after that. A disaggregated decode instance posts reads into scattered blocks far more slowly, so it is slower once its cache has filled, and stays so (see [Simulated Execution](../features/simulated_execution.md)). `--fill-kv-caches` uses up each instance's cache once before a combination's first run, so that the runs predict a long-running deployment rather than a fresh one. A real benchmark of a fresh server is comparable only without it.
+- **`--fill-kv-caches`**: uses up each instance's KV cache once before a combination's first run, so that the runs predict a long-running deployment, whose KV blocks are scattered, rather than a fresh server. A disaggregated decode instance posts reads into scattered blocks much more slowly.
 
-```json
-[
-    {"_benchmark_name": "1p2d", "_num_prefill": 1, "_num_decode": 2},
-    {"_benchmark_name": "2p1d", "_num_prefill": 2, "_num_decode": 1}
-]
-```
-
-Replayed step times are only as good as the recording's coverage. A lookup cannot extrapolate: a step larger than any recorded one (a bigger batch, or longer prefill chunks) gets the time of the largest recorded steps, which underestimates it. The sweep therefore counts such lookups in each run (`timing_lookups_outside_range` of `timing_lookups`), reports their share in `slo_summary.csv`, and warns when a run exceeds 1%. Record under the heaviest load the search will simulate. For disaggregated deployments, that means recording a configuration with the most prefill capacity at a high rate, so that the decode instance sees its largest batches. Fit `kv_transfer_timing` from a recording where transfers rarely overlap: reads queue on a simulated link, so the simulation adds contention itself. Record it past the point where the decode instance's cache has filled (or after filling it with other requests), so that it also times reads into scattered blocks.
+Replayed step times are only as good as the recording's coverage: a step larger than any recorded one gets the time of the largest recorded steps, which underestimates it. The sweep reports such lookups per run (`timing_lookups_outside_range`) and warns when a run exceeds 1%, so record under the heaviest load the search will simulate; for disaggregated deployments, a configuration with the most prefill capacity at a high rate. Fit `kv_transfer_timing` from a recording where transfers rarely overlap (the simulated link adds contention itself) and that runs past the point where the decode instance's cache has filled.
 
 !!! note
-    The simulated clock needs the engine in one process, so multi-rank combinations (`tensor_parallel_size` or `pipeline_parallel_size` above 1) need `"clock": "real"`, which runs in real time. Request rates (`--request-rate`, `--burstiness`, ramp-up and timed traces) are supported; `--max-concurrency` and multimodal datasets are not.
+    The simulated clock needs the engine in one process, so multi-rank combinations need `"clock": "real"`, which runs in real time. `--max-concurrency` and multimodal datasets are not supported, nor are ramp-up and timed traces with `--slo`.
 
 ## Startup Benchmark
 

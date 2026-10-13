@@ -85,11 +85,13 @@ def make_instance(
     return make_engine(args, VirtualClock(), usage_context)
 
 
-def next_transfer_completion(engine: LLMEngine) -> float | None:
+def next_transfer_completion(engine: LLMEngine) -> float:
+    """When the engine's next KV transfer completes; inf if none is in flight."""
     assert engine.vllm_config.kv_transfer_config is not None
     engine_id = engine.vllm_config.kv_transfer_config.engine_id
     assert engine_id is not None
-    return simulated_nixl_worker(engine_id).next_completion()
+    t = simulated_nixl_worker(engine_id).next_completion()
+    return math.inf if t is None else t
 
 
 def _has_work(engine: LLMEngine) -> bool:
@@ -202,7 +204,7 @@ def run_disaggregated(
             t_next = min(
                 [events[0][0] if events else math.inf]
                 + [clocks[id(e)].now() for e in active if e not in tied]
-                + [next_transfer_completion(e) or math.inf for e in tied]
+                + [next_transfer_completion(e) for e in tied]
             )
             if t_next == math.inf:
                 raise RuntimeError(
