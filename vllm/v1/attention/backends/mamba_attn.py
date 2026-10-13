@@ -628,6 +628,25 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
 
         return self._update_metadata_for_cudagraph_capture(metadata)
 
+    def _stage_static_decode_indices(
+        self, metadata: M, state_indices_tensor_d: torch.Tensor, num_rows: int
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """Stage this group's decode state indices into the persistent decode
+        buffers padded to `num_rows` rows with NULL_BLOCK_ID, for a mixer
+        captured in a piecewise CUDA graph. Returns the (num_rows, ...) views
+        of the state indices and of their first column for FlashInfer
+        ReplaySSM."""
+        num_decodes = metadata.num_decodes
+        state_indices = self.state_indices_tensor_d[:num_rows]
+        state_indices[:num_decodes].copy_(state_indices_tensor_d, non_blocking=True)
+        state_indices[num_decodes:] = NULL_BLOCK_ID
+        replayssm_state_indices = None
+        if self.use_flashinfer_replayssm:
+            assert self.decode_replayssm_state_indices_d is not None
+            replayssm_state_indices = self.decode_replayssm_state_indices_d[:num_rows]
+            replayssm_state_indices.copy_(state_indices[:, 0], non_blocking=True)
+        return state_indices, replayssm_state_indices
+
     def _update_metadata_for_cudagraph_capture(
         self,
         metadata: M,

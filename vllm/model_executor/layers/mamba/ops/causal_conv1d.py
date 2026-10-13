@@ -12,6 +12,11 @@ from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID, PAD_SLOT_ID
 
+# Tokens of a sequence per program of causal_conv1d_fn's prefill kernel
+# (vllm-project/vllm#18218). A piecewise-captured Mamba2 mixer builds its static
+# conv1d program map for it.
+CAUSAL_CONV1D_BLOCK_M = 8
+
 
 @triton.jit(do_not_specialize_on_alignment=["num_cache_lines"])
 def _causal_conv1d_fwd_kernel(  # continuous batching
@@ -475,7 +480,7 @@ def causal_conv1d_fn(
     stride_istate_dim = 0
     stride_istate_token = 0
     num_cache_lines = 0
-    BLOCK_M = 8
+    BLOCK_M = CAUSAL_CONV1D_BLOCK_M
     if conv_states is not None:
         # extensions to support vLLM:
         # 1. conv_states is used to replaced initial_states
