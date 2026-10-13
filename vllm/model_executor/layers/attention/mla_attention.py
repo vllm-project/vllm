@@ -661,6 +661,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 "FLASHMLA_SPARSE",
                 "FLASHINFER_MLA_SPARSE",
                 "FLASHINFER_MLA_SPARSE_SM120",
+                "FLASH_ATTN_MLA_SPARSE_FA4",
                 "DEEPSEEK_V32_INDEXER",
             ):
                 from vllm.v1.attention.backends.mla.compressor_utils import (
@@ -751,7 +752,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
 
     def _uses_flat_kv_cache(self) -> bool:
         backend = self.attn_backend.get_name()
-        return backend == "FLASHINFER_MLA_SPARSE" or (
+        return backend in ("FLASHINFER_MLA_SPARSE", "FLASH_ATTN_MLA_SPARSE_FA4") or (
             backend == "FLASHMLA_SPARSE"
             and self.kv_cache_dtype not in ("fp8_ds_mla", "nvfp4_ds_mla")
         )
@@ -1857,6 +1858,9 @@ def _use_masked_mha(
     seq_len: int,
     has_context: bool,
 ) -> bool:
+    if backend_name == "FLASH_ATTN_MLA_SPARSE_FA4":
+        # Its prefill batches run on FlashInfer's kernel, so it shares those rows.
+        backend_name = "FLASHINFER_MLA_SPARSE"
     thresholds = (
         _MASKED_MHA_THRESHOLDS.get((qk_head_dim, v_head_dim), {})
         .get(backend_name, {})
