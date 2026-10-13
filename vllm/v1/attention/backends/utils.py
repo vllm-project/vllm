@@ -1267,8 +1267,7 @@ def mamba_get_block_table_tensor(
             f"seq_lens has {seq_lens.shape[0]} rows, block_table has {num_reqs}"
         )
         assert seq_lens.device == block_table.device, (
-            f"seq_lens is on {seq_lens.device}, block_table on "
-            f"{block_table.device}"
+            f"seq_lens is on {seq_lens.device}, block_table on {block_table.device}"
         )
         if not block_table.is_cuda:
             # Triton runs on the accelerator only, and this helper IS called
