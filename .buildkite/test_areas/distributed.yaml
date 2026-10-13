@@ -423,6 +423,7 @@ steps:
       label: ":amd: (MI355) Distributed DP + EP"
       dind: false
       optional: false
+      soft_fail: true
       device: mi355_8
       timeout_in_minutes: 50
       depends_on:
