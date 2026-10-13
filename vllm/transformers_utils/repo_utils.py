@@ -63,6 +63,11 @@ def resolve_revision(
     requested revision that also carries the commit hash, so downstream error
     messages stay readable and offline loads reuse the cached `refs/` entry.
 
+    A commit hash only means something for the repo it was resolved against, so
+    a repo that is not `repo_id` needs its own call. Passing a revision resolved
+    for another repo back in is safe: the revision initially requested is
+    resolved again, against `repo_id` this time.
+
     Returns:
         The resolved revision, or `revision` unchanged if it cannot be resolved
         (local path, ModelScope, or any Hub error).
@@ -297,6 +302,80 @@ def get_model_path(model: str | Path, revision: str | None = None):
         repo_id=model,
         **common_kwargs,
     )
+
+
+_WEIGHT_FILE_PATTERNS = [
+    "*.safetensors",
+    "*.bin",
+    "*.pt",
+    "*.pth",
+    "*.ckpt",
+    "*.gguf",
+    "*.h5",
+    "*.msgpack",
+    "*.onnx",
+    "*.onnx_data",
+    # Large non-weight assets that tokenizers and processors never read
+    "*.png",
+    "*.jpg",
+    "*.jpeg",
+    "*.gif",
+    "*.webp",
+    "*.mp3",
+    "*.mp4",
+    "*.wav",
+    "*.flac",
+    "*.parquet",
+    "*.arrow",
+    "*.ipynb",
+    "*.zip",
+    "*.tar*",
+]
+
+
+@cache
+def _snapshot_non_weight_files(
+    repo_id: str,
+    revision: str | None,
+    cache_dir: str | None,
+    token: str | bool | None,
+) -> str:
+    # Avoid circular import
+    from vllm.model_executor.model_loader.weight_utils import get_lock
+
+    with get_lock(repo_id, cache_dir):
+        return hf_api().snapshot_download(
+            repo_id=repo_id,
+            revision=revision,
+            cache_dir=cache_dir,
+            token=token,
+            local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
+            ignore_patterns=_WEIGHT_FILE_PATTERNS,
+        )
+
+
+def get_non_weight_snapshot_path(
+    repo_id: str,
+    revision: str | None = None,
+    cache_dir: str | None = None,
+    token: str | bool | None = None,
+) -> str:
+    """Download all non-weight files of a Hub repo and return the local snapshot.
+
+    Loading tokenizers and processors from a local directory stops Transformers
+    from making a Hub request per file (including the `additional_chat_templates`
+    listing). Returns `repo_id` unchanged if it is local or cannot be fetched, so
+    Transformers handles it as before. Failures are not cached, so they are retried.
+    """
+    if envs.VLLM_USE_MODELSCOPE or Path(repo_id).exists():
+        return repo_id
+    # Normalise so that `None` and "main" share a cache entry
+    revision = revision or huggingface_hub.constants.DEFAULT_REVISION
+    try:
+        return _snapshot_non_weight_files(repo_id, revision, cache_dir, token)
+    except (HfHubHTTPError, OSError, ValueError):
+        logger.debug("Failed to snapshot %s", repo_id, exc_info=True)
+        return repo_id
 
 
 def _try_download_from_hf_hub(

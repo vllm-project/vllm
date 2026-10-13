@@ -5,19 +5,14 @@ import pytest
 from transformers import AutoModel
 
 from vllm.assets.base import VLLM_S3_BUCKET_URL
-from vllm.entrypoints.chat_utils import (
+from vllm.entrypoints.pooling.scoring.typing import ScoreMultiModalParam
+from vllm.renderers.chat_utils import (
     ChatCompletionContentPartImageEmbedsParam,
     ChatCompletionContentPartImageParam,
     ChatCompletionContentPartTextParam,
 )
-from vllm.entrypoints.pooling.scoring.typing import ScoreMultiModalParam
 
 from ....conftest import HfRunner, VllmRunner
-
-pytestmark = pytest.mark.skip(
-    reason="jinaai/jina-reranker-m0 custom code is incompatible with "
-    "transformers v5 (missing all_tied_weights_keys)"
-)
 
 MODELS = ["jinaai/jina-reranker-m0"]
 
@@ -29,8 +24,8 @@ MM_PROCESSOR_KWARGS = {
 LIMIT_MM_PER_PROMPT = {"image": 2}
 
 CHECKPOINT_TO_HF_MAPPER = {
-    "visual.": "model.visual.",
-    "model.": "model.language_model.",
+    r"^visual\.": "model.visual.",
+    r"^model\.(?!language_model\.|visual\.)": "model.language_model.",
 }
 
 HANDELSBLATT_IMAGE_URL = (

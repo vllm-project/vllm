@@ -21,6 +21,34 @@ pub struct BaseCacheStats {
     pub hits: u64,
 }
 
+/// Cache-hit tokens per source tier. Python sends a sparse
+/// `dict[CacheHitSource, int]`, so absent tiers default to zero.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CachedTokensBySource {
+    pub device: u64,
+    pub host: u64,
+    pub p2p: u64,
+    pub disk: u64,
+    pub external_unspecified: u64,
+}
+
+impl CachedTokensBySource {
+    /// Label values, in the same order as [`Self::counts`].
+    pub const SOURCES: [&'static str; 5] =
+        ["device", "host", "p2p", "disk", "external_unspecified"];
+
+    pub fn counts(&self) -> [u64; 5] {
+        [
+            self.device,
+            self.host,
+            self.p2p,
+            self.disk,
+            self.external_unspecified,
+        ]
+    }
+}
+
 /// Stores prefix cache hit statistics.
 /// - `reset`: Whether `reset_prefix_cache` was invoked.
 /// - `queries`: Refers to the number of tokens that were queried.
@@ -38,6 +66,9 @@ pub struct PrefixCacheStats {
     pub preempted_queries: u64,
     /// The `hits` number for preempted requests.
     pub preempted_hits: u64,
+    /// `hits` split by the cache tier that supplied them (connector stats only).
+    #[serde(default)]
+    pub hits_by_source: CachedTokensBySource,
 }
 
 /// Single KV cache block eviction sample.
@@ -278,9 +309,9 @@ pub use kv_connector::*;
 pub struct SchedulerStats {
     /// Number of requests in model execution batches.
     pub num_running_reqs: u64,
-    /// Length of the "waiting" request queue.
+    /// Number of waiting requests not deferred.
     pub num_waiting_reqs: u64,
-    /// Length of the "skipped waiting" queue.
+    /// Number of waiting requests deferred by transient constraints or a blocked status.
     #[serde(default)]
     pub num_skipped_waiting_reqs: u64,
     /// Internal DP load-balancing step counter.
@@ -303,4 +334,32 @@ pub struct SchedulerStats {
     pub cudagraph_stats: Option<CudagraphStats>,
     /// Estimated MFU/performance stats, when enabled.
     pub perf_stats: Option<PerfStats>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CachedTokensBySource, PrefixCacheStats};
+
+    #[test]
+    fn prefix_cache_stats_hits_by_source_defaults_and_decodes() {
+        // Engines without per-source attribution omit the field entirely.
+        let legacy = serde_json::json!({
+            "reset": false, "requests": 1, "queries": 8, "hits": 4,
+            "preempted_requests": 0, "preempted_queries": 0, "preempted_hits": 0
+        });
+        let wire = rmp_serde::to_vec_named(&legacy).unwrap();
+        let stats: PrefixCacheStats = rmp_serde::from_slice(&wire).unwrap();
+        assert_eq!(stats.base.hits, 4);
+        assert_eq!(stats.hits_by_source, CachedTokensBySource::default());
+
+        let payload = serde_json::json!({
+            "reset": false, "requests": 1, "queries": 16, "hits": 12,
+            "preempted_requests": 0, "preempted_queries": 0, "preempted_hits": 0,
+            "hits_by_source": {"host": 8, "p2p": 4}
+        });
+        let wire = rmp_serde::to_vec_named(&payload).unwrap();
+        let stats: PrefixCacheStats = rmp_serde::from_slice(&wire).unwrap();
+        assert_eq!(stats.hits_by_source.counts(), [0, 8, 4, 0, 0]);
+        assert_eq!(CachedTokensBySource::SOURCES[1], "host");
+    }
 }

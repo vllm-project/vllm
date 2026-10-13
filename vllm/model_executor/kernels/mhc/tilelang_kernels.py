@@ -23,6 +23,23 @@ from vllm.utils.math_utils import cdiv
 
 ENABLE_PDL = current_platform.is_arch_support_pdl() and current_platform.is_cuda()
 
+# TileLang's HIP AllReduce shuffle phase ignores a nonzero reduction-group
+# offset, so the 64-thread RMSNorm reduction must be wave64-aligned and use
+# threads 0..63.
+_MIX_ON_TRAILING_THREADS = current_platform.is_rocm()
+
+
+def _is_mix_thread():
+    if _MIX_ON_TRAILING_THREADS:
+        return T.get_thread_binding() >= 64
+    return T.get_thread_binding() < 32
+
+
+def _is_collapse_thread():
+    if _MIX_ON_TRAILING_THREADS:
+        return T.get_thread_binding() < 64
+    return T.get_thread_binding() >= 32
+
 
 @cache
 def compute_num_split(block_k: int, k: int | None, grid_size: int) -> int:
@@ -353,7 +370,7 @@ def mhc_pre_big_fuse_with_norm_tilelang(
                 mixes[j] *= rms[0]
             T.copy(mixes, mixes_shared)
 
-        if split_mode != "input" and T.get_thread_binding() < 32:
+        if split_mode != "input" and _is_mix_thread():
             cm = T.alloc_fragment((hc_mult, hc_mult), T.float32)
             for j in T.Parallel(hc_mult):
                 if save_pre_mix:
@@ -399,7 +416,7 @@ def mhc_pre_big_fuse_with_norm_tilelang(
 
             for j, k in T.Parallel(hc_mult, hc_mult):
                 comb_mix[i, j * hc_mult + k] = cm[j, k]
-        elif split_mode != "stats" and T.get_thread_binding() >= 32:
+        elif split_mode != "stats" and _is_collapse_thread():
             pre_mix_shared = T.alloc_shared(hc_mult, T.float32)
             for j in T.Parallel(hc_mult):
                 if use_pre_mix_in:
@@ -546,7 +563,7 @@ def mhc_pre_big_fuse_broadcast_with_norm_tilelang(
         mixes_shared = T.alloc_shared(hc_mult3, T.float32)
         T.copy(mixes, mixes_shared)
 
-        if T.get_thread_binding() < 32:
+        if _is_mix_thread():
             cm = T.alloc_fragment((hc_mult, hc_mult), T.float32)
             for j in T.Parallel(hc_mult):
                 post_mix[i, j] = (
