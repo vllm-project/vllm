@@ -161,10 +161,15 @@ def apply_pre_quantized_block_scaled_mm(
 # do not touch the shared DeepSeek V4 cache utilities.
 _SPARSE_PREFILL_TOPK_ALIGNMENT = 128
 
-# At or below this many tokens the CSA/HCA fork enqueues the long default chain
-# before the compressor chains (default_first); above it, the device is
-# saturated and aux-first is faster. Tuned with MTP=2 (96 tokens = conc 32).
-_DEFAULT_FIRST_TOKEN_THRESHOLD = 96
+
+def _default_first_token_threshold() -> int:
+    """Max tokens at which the CSA/HCA fork enqueues the default chain first.
+
+    At small batches starting the long default chain first shortens the step
+    tail; larger batches saturate the device and aux-first is faster. Only
+    tuned on gfx950 (24 tokens = conc 8 with MTP=2); 0 disables elsewhere.
+    """
+    return 24 if _ON_GFX950 else 0
 
 
 @triton.jit
@@ -813,7 +818,7 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         compressor = self.compressor
         assert compressor is not None
         # Static per captured graph: each capture size bakes its own order.
-        default_first = hidden_states.shape[0] <= _DEFAULT_FIRST_TOKEN_THRESHOLD
+        default_first = hidden_states.shape[0] <= _default_first_token_threshold()
 
         def default_chain():
             qr_kv = self._fused_wqa_wkv_gemm(hidden_states)
