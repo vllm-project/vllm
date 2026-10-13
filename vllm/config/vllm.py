@@ -2670,6 +2670,16 @@ class VllmConfig:
         if self.simulation_config.simulate_forward:
             self.load_config.load_format = "dummy"
             self.load_config.device = "meta"
+            kv_transfer = self.kv_transfer_config
+            if (
+                kv_transfer is not None
+                and kv_transfer.kv_connector == "NixlConnector"
+                and not kv_transfer.kv_connector_module_path
+            ):
+                # Same scheduler side, simulated worker side.
+                kv_transfer.kv_connector_module_path = (
+                    "vllm.v1.worker.simulated.kv_nixl"
+                )
 
             if (
                 self.speculative_config is not None

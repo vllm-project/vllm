@@ -15,9 +15,11 @@ if current_platform.is_cpu():
     # worker and runner imports, as in cpu_worker.py.
     import vllm.v1.worker.cpu.shm  # noqa: F401
 
+from vllm.distributed.kv_transfer import kv_transfer_state
 from vllm.logger import init_logger
 from vllm.utils.mem_utils import format_gib
 from vllm.utils.torch_utils import set_random_seed
+from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu_worker import (
     Worker,
     dp_adjusted_local_rank,
@@ -79,6 +81,19 @@ class SimulatedWorker(Worker):
             self.vllm_config.simulation_config.timing,
         )
         self._init_workspace_and_model_runner()
+
+    def initialize_from_config(self, kv_cache_config: KVCacheConfig) -> None:
+        # The worker-side KV connector is a process global. Engines simulated
+        # in one process (a disaggregated deployment's prefill and decode
+        # instances) each need their own; the runner keeps its reference.
+        kv_transfer_state._KV_CONNECTOR_AGENT = None
+        super().initialize_from_config(kv_cache_config)
+        self._kv_connector = kv_transfer_state._KV_CONNECTOR_AGENT
+
+    def shutdown(self) -> None:
+        # Shut down this engine's connector, not the last one built.
+        kv_transfer_state._KV_CONNECTOR_AGENT = getattr(self, "_kv_connector", None)
+        super().shutdown()
 
     def execute_model(self, scheduler_output):  # type: ignore[override]
         """No hidden states flow between pipeline stages: every stage runs

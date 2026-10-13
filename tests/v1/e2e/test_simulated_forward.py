@@ -266,7 +266,7 @@ def test_simulate_offline_kv_offloading(tmp_path) -> None:
             "clock": "virtual",
             "timing": "constant",
             "timing_args": {"fixed_us": step_s * 1e6},
-            "kv_offload_timing": {"load_gbps": load_gbps, "store_gbps": load_gbps},
+            "kv_transfer_timing": {"load_gbps": load_gbps, "store_gbps": load_gbps},
             "log_path": str(log),
         },
     )
@@ -296,6 +296,45 @@ def test_simulate_offline_kv_offloading(tmp_path) -> None:
     assert result.requests[2].ttft == pytest.approx(
         load["bytes"] / (load_gbps * 1e9) + step_s
     )
+
+
+def test_simulate_disaggregated_prefill() -> None:
+    """A request is prefilled on the prefill instance, its KV read by the
+    decode instance in the modeled time, and decoded there; the prefill
+    instance frees its blocks once they are read."""
+    if not (current_platform.is_cpu() or current_platform.is_cuda_alike()):
+        pytest.skip("Simulated forward needs the CPU or a CUDA-alike platform.")
+    from vllm.engine.arg_utils import EngineArgs
+    from vllm.v1.worker.simulated.disaggregated import simulate_disaggregated
+    from vllm.v1.worker.simulated.offline import TimedRequest
+
+    load_gbps = 10
+    args = EngineArgs(
+        model="Qwen/Qwen3-0.6B",
+        max_model_len=2048,
+        kv_cache_memory_bytes=1024**3,
+        simulation_config={
+            "simulate_forward": True,
+            "timing": "constant",
+            "timing_args": {"fixed_us": 1000, "prefill_us_per_token": 10},
+            "kv_transfer_timing": {"load_gbps": load_gbps},
+        },
+    )
+    params = SamplingParams(max_tokens=4, ignore_eos=True)
+    requests = [
+        TimedRequest(list(range(1000, 1640)), params, 0.0),
+        TimedRequest(list(range(3000, 3320)), params, 0.5),
+    ]
+    result = simulate_disaggregated(args, args, requests)
+
+    for request in result.requests:
+        prompt = request.num_prompt_tokens
+        prefill_s = (1000 + 10 * prompt) * 1e-6
+        # Qwen3-0.6B's KV is 114688 bytes per token.
+        read_s = prompt * 114688 / (load_gbps * 1e9)
+        # The decode instance recomputes the last prompt token.
+        assert request.ttft == pytest.approx(prefill_s + read_s + 1010e-6)
+        assert request.num_output_tokens == 4
 
 
 class AcceptAllDrafts:

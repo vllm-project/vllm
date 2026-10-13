@@ -17,6 +17,7 @@ from __future__ import annotations
 import heapq
 import math
 import time
+import weakref
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
@@ -27,6 +28,7 @@ from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.v1.worker.simulated.timing import (
+    Clock,
     VirtualClock,
     building_driven_engine,
     get_clock,
@@ -37,6 +39,10 @@ if TYPE_CHECKING:
     from vllm.v1.engine.llm_engine import LLMEngine
 
 logger = init_logger(__name__)
+
+_engine_clocks: weakref.WeakKeyDictionary[LLMEngine, Clock] = (
+    weakref.WeakKeyDictionary()
+)
 
 
 @dataclass
@@ -141,20 +147,30 @@ class SimulationResult:
         return out
 
 
-def make_engine(engine_args: EngineArgs) -> LLMEngine:
+def make_engine(engine_args: EngineArgs, clock: Clock | None = None) -> LLMEngine:
     """An `LLMEngine` whose engine core runs in this process, so that it and
-    the driver share the simulation clock."""
+    the driver share the simulation clock: `clock`, by default the process's
+    clock of the configured kind."""
     from vllm.v1.engine.llm_engine import LLMEngine
     from vllm.v1.executor import Executor
 
     vllm_config = engine_args.create_engine_config()
-    with building_driven_engine():
-        return LLMEngine(
+    if clock is None:
+        clock = get_clock(vllm_config.simulation_config.clock)
+    with building_driven_engine(clock):
+        engine = LLMEngine(
             vllm_config=vllm_config,
             executor_class=Executor.get_class(vllm_config),
             log_stats=not engine_args.disable_log_stats,
             multiprocess_mode=False,
         )
+    _engine_clocks[engine] = clock
+    return engine
+
+
+def engine_clock(engine: LLMEngine) -> Clock:
+    """The clock an engine from `make_engine()` runs on."""
+    return _engine_clocks[engine]
 
 
 def run(
@@ -190,7 +206,7 @@ def run(
         [f"timed-{i}" if len(ts) == 1 else f"timed-{i}.{k}" for k in range(len(ts))]
         for i, ts in enumerate(turns)
     ]
-    clock = get_clock(sim.clock)
+    clock = _engine_clocks.get(engine) or get_clock(sim.clock)
     # The driven clocks are process-global; drop a horizon an aborted run left.
     clock.horizon = math.inf
     wall_start = time.perf_counter()

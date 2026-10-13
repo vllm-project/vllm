@@ -37,12 +37,13 @@ from vllm.v1.worker.dp_utils import should_skip_dp_coordination
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
-from vllm.v1.worker.simulated.kv_offload import (
-    SimulatedOffloadingWorker,
+from vllm.v1.worker.simulated.kv_transfer import (
+    SimulatedTransfers,
     completed_transfers,
     simulated_kv_connector,
 )
 from vllm.v1.worker.simulated.timing import (
+    Clock,
     RealClock,
     SimulatedAsyncOutput,
     StepCost,
@@ -51,11 +52,10 @@ from vllm.v1.worker.simulated.timing import (
     ZeroTimingProvider,
     acceptance_rates_from_log,
     build_step_descriptor,
+    driven_engine_clock,
     empty_step_descriptor,
     gather_dp_step,
-    get_clock,
     get_timing_provider,
-    is_building_driven_engine,
     parallel_summary,
     step_log_path,
 )
@@ -85,13 +85,17 @@ class SimulatedModelRunner(GPUModelRunner):
         self.timing_provider = get_timing_provider(
             sim.timing, dict(sim.timing_args), vllm_config
         )
-        if sim.clock != "real" and not is_building_driven_engine():
-            raise ValueError(
-                f"The {sim.clock} clock needs the engine core in the process of "
-                "a driver reading the same clock; build the engine with "
-                "vllm.v1.worker.simulated.offline.make_engine()."
-            )
-        self.clock = get_clock(sim.clock)
+        if sim.clock == "real":
+            self.clock: Clock = RealClock()
+        else:
+            clock = driven_engine_clock()
+            if clock is None:
+                raise ValueError(
+                    f"The {sim.clock} clock needs the engine core in the process "
+                    "of a driver reading the same clock; build the engine with "
+                    "vllm.v1.worker.simulated.offline.make_engine()."
+                )
+            self.clock = clock
         log_path = step_log_path(vllm_config)
         self.step_log = StepLogWriter(log_path) if log_path else None
         self.fallback_token_id = sim.fallback_token_id
@@ -104,7 +108,7 @@ class SimulatedModelRunner(GPUModelRunner):
         # becomes free. Every rank models the whole pipeline from the same
         # inputs, so all ranks agree on every deadline.
         self._stage_free_at = [0.0] * self.parallel_config.pipeline_parallel_size
-        self._kv_transfers: SimulatedOffloadingWorker | None = None
+        self._kv_transfers: SimulatedTransfers | None = None
         self._last_output: SimulatedAsyncOutput | None = None
         self._parallel = parallel_summary(vllm_config)
         self._prompt_lens: dict[str, int] = {}

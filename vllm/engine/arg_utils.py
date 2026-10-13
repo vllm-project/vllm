@@ -2932,17 +2932,31 @@ class EngineArgs:
             kv_transfer = self.kv_transfer_config
             if isinstance(kv_transfer, dict):
                 kv_transfer = KVTransferConfig(**kv_transfer)
-            if kv_transfer is not None and (
-                kv_transfer.kv_connector != "OffloadingConnector"
-                or kv_transfer.kv_connector_extra_config.get(
+            cpu_offloading = (
+                kv_transfer is not None
+                and kv_transfer.kv_connector == "OffloadingConnector"
+                and kv_transfer.kv_connector_extra_config.get(
                     "spec_name", "CPUOffloadingSpec"
                 )
-                != "CPUOffloadingSpec"
-            ):
+                == "CPUOffloadingSpec"
+            )
+            nixl = (
+                kv_transfer is not None and kv_transfer.kv_connector == "NixlConnector"
+            )
+            if kv_transfer is not None and not (cpu_offloading or nixl):
                 _raise_unsupported_error(
                     feature_name=(
-                        "simulated forward with KV transfer other than "
-                        "CPU offloading by the OffloadingConnector"
+                        "simulated forward with KV transfer other than CPU "
+                        "offloading by the OffloadingConnector or "
+                        "disaggregated prefill by the NixlConnector"
+                    )
+                )
+            if nixl and self.simulation_config.clock != "virtual":
+                # The instances exchange KV in process, on per-engine clocks.
+                _raise_unsupported_error(
+                    feature_name=(
+                        "simulated disaggregated prefill outside "
+                        "vllm.v1.worker.simulated.disaggregated (virtual clock)"
                     )
                 )
             if self.weight_transfer_config is not None:

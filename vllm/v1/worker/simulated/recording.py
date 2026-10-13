@@ -20,7 +20,7 @@ from vllm.logger import init_logger
 from vllm.v1.outputs import AsyncModelRunnerOutput, ModelRunnerOutput
 from vllm.v1.worker.dp_utils import should_skip_dp_coordination
 from vllm.v1.worker.gpu_worker import Worker
-from vllm.v1.worker.simulated.kv_offload import completed_transfers
+from vllm.v1.worker.simulated.kv_transfer import completed_transfers
 from vllm.v1.worker.simulated.timing import (
     StepCost,
     StepDescriptor,
@@ -80,7 +80,7 @@ class _RecordedOutput(AsyncModelRunnerOutput):
 def _write_transfers(
     writer: StepLogWriter, output: ModelRunnerOutput | AsyncModelRunnerOutput | None
 ) -> None:
-    """Log the KV offloading transfers this rank saw complete in the step."""
+    """Log the KV transfers this rank saw complete in the step."""
     if isinstance(output, ModelRunnerOutput):
         transfers = completed_transfers(output.kv_connector_output)
         if transfers:

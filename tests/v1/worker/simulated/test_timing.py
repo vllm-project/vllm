@@ -4,12 +4,13 @@
 
 import json
 import time
+from types import SimpleNamespace
 
 import pytest
 
 from vllm.v1.kv_offload.base import GPULoadStoreSpec
 from vllm.v1.outputs import ModelRunnerOutput
-from vllm.v1.worker.simulated.kv_offload import (
+from vllm.v1.worker.simulated.kv_transfer import (
     SimulatedOffloadingWorker,
     TransferRate,
     transfer_rates_from_log,
@@ -442,3 +443,79 @@ def test_host_time_model_leaves_undetermined_terms_at_zero(tmp_path):
     writer.close()
     model = HostTimeModel.from_log(str(path))
     assert model == HostTimeModel(pytest.approx(1100), 0.0, pytest.approx(15))
+
+
+def test_kv_transfer_rates_without_stores(tmp_path):
+    from vllm.v1.worker.simulated.kv_transfer import kv_transfer_rates
+
+    load, store = kv_transfer_rates({"load_gbps": 2.0, "load_latency_us": 5.0})
+    assert (load.bytes_per_s, load.latency_s, store) == (2e9, pytest.approx(5e-6), None)
+    # A disaggregated decode instance's recording has reads only.
+    path = tmp_path / "steps.jsonl"
+    writer = StepLogWriter(str(path))
+    for num_bytes in (1 << 20, 4 << 20):
+        writer.write_transfers(
+            {"load": {"count": 1, "bytes": num_bytes, "seconds": num_bytes / 1e10}},
+            t=0.0,
+        )
+    writer.close()
+    load, store = transfer_rates_from_log(str(path))
+    assert load.bytes_per_s == pytest.approx(1e10) and store is None
+
+
+def _nixl_worker(engine_id: str, clock: VirtualClock):
+    from vllm.v1.worker.simulated.kv_nixl import SimulatedNixlWorker
+
+    group = SimpleNamespace(
+        kv_cache_spec=SimpleNamespace(page_size_bytes=10), layer_names=["layer"]
+    )
+    kv_cache_config = SimpleNamespace(kv_cache_groups=[group], transfer_group_ids=(0,))
+    worker = SimpleNamespace(kv_transfer_config=object())
+    nixl = SimulatedNixlWorker(worker, engine_id, kv_cache_config)
+    nixl.configure(clock, TransferRate(latency_s=0.0, bytes_per_s=10.0))
+    return nixl
+
+
+def test_simulated_nixl_reads_notify_the_prefill_instance():
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
+        NixlConnectorMetadata,
+        RemoteMeta,
+        ReqMeta,
+    )
+
+    clock = VirtualClock()
+    prefill = _nixl_worker("sim-p", clock)
+    decode = _nixl_worker("sim-d", clock)
+    sent = NixlConnectorMetadata()
+    sent.reqs_in_batch = {"p1", "p2"}
+    prefill.start_load_kv(sent)
+
+    def recv(blocks, remote_req, awaiting=True):
+        return ReqMeta(
+            local_block_ids=(blocks,),
+            local_physical_block_ids=(blocks,),
+            tp_size=1,
+            awaiting_kvs=awaiting,
+            remote=RemoteMeta(blocks, "", 0, "sim-p", remote_req),
+        )
+
+    meta = NixlConnectorMetadata()
+    # 20 and 10 bytes at 10 B/s, serial on the link; r3 only notifies, about
+    # a request the prefill instance no longer tracks.
+    meta.reqs_to_recv = {
+        "r1": recv([0, 1], "p1"),
+        "r2": recv([2], "p2"),
+        "r3": recv([], "p3", awaiting=False),
+    }
+    decode.start_load_kv(meta)
+    assert decode.next_completion() == pytest.approx(2.0)
+
+    assert decode.get_finished() == (set(), set())
+    assert prefill.get_finished() == (set(), set())
+    clock.sleep_until(2.5)
+    assert decode.get_finished() == (set(), {"r1"})
+    assert prefill.get_finished() == ({"p1"}, set())
+    clock.sleep_until(3.0)
+    assert decode.get_finished() == (set(), {"r2"})
+    assert prefill.get_finished() == ({"p2"}, set())
+    assert decode.next_completion() is None and prefill.next_completion() is None

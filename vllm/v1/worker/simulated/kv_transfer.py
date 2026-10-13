@@ -1,22 +1,29 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""KV cache offloading under simulated execution.
+"""KV connector transfers under simulated execution.
 
-The `OffloadingConnector` runs unmodified on the scheduler side: the CPU
-cache's lookups and evictions, and the load and store jobs it issues, are the
-real ones. On the worker, `SimulatedOffloadingWorker` takes the place of the
-CPU offloading worker: no data moves, and a transfer completes once its
-modeled duration has elapsed on the simulation clock.
+A connector's scheduler side runs unmodified: the lookups, evictions and the
+load and store jobs it issues are the real ones. On the worker the data mover
+is replaced by a simulation that moves no data, and a transfer completes once
+its modeled duration has elapsed on the simulation clock:
+`SimulatedOffloadingWorker` for the `OffloadingConnector`'s CPU offloading,
+and `kv_nixl.SimulatedNixlWorker` for disaggregated prefill with the
+`NixlConnector`.
 """
 
 from collections import deque
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from typing import Protocol
 
 import numpy as np
 import torch
 
 from vllm.config import VllmConfig
+from vllm.distributed.kv_transfer import get_kv_transfer_group
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl.stats import (
+    NixlKVConnectorStats,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
     OffloadingWorkerMetadata,
 )
@@ -53,10 +60,11 @@ class TransferRate:
         return self.latency_s + num_bytes / self.bytes_per_s
 
 
-def kv_offload_rates(
+def kv_transfer_rates(
     timing: dict[str, float] | str,
-) -> tuple[TransferRate, TransferRate]:
-    """(load, store) rates from `SimulationConfig.kv_offload_timing`."""
+) -> tuple[TransferRate, TransferRate | None]:
+    """(load, store) rates from `SimulationConfig.kv_transfer_timing`; store
+    is None if not given."""
     if isinstance(timing, str):
         return transfer_rates_from_log(timing)
     load, store = (
@@ -64,56 +72,81 @@ def kv_offload_rates(
             latency_s=timing.get(f"{direction}_latency_us", 0.0) * 1e-6,
             bytes_per_s=timing[f"{direction}_gbps"] * 1e9,
         )
+        if f"{direction}_gbps" in timing
+        else None
         for direction in ("load", "store")
     )
+    assert load is not None
     return load, store
 
 
-def transfer_rates_from_log(path: str) -> tuple[TransferRate, TransferRate]:
+def transfer_rates_from_log(path: str) -> tuple[TransferRate, TransferRate | None]:
     """(load, store) rates fitted by least squares to the transfers of a step
-    log recorded with KV offloading. Each `kv_transfers` record sums, per
-    direction, the transfers that completed in one engine step."""
+    log recorded with a KV connector; store is None if none were recorded.
+    Each `kv_transfers` record sums, per direction, the transfers that
+    completed in one engine step."""
     rows: dict[str, list[tuple[float, float, float]]] = {"load": [], "store": []}
     for rec in load_step_log(path, kv_transfers=True):
         for direction, t in rec["kv_transfers"].items():
             rows[direction].append((t["count"], t["bytes"], t["seconds"]))
-    rates = []
+    rates: list[TransferRate | None] = []
     for direction, direction_rows in rows.items():
         a = np.asarray(direction_rows, dtype=np.float64).reshape(-1, 3)
         if not a[:, 1].any():
-            raise ValueError(f"{path} has no recorded KV offloading {direction}s")
+            if direction == "store":
+                rates.append(None)
+                continue
+            raise ValueError(f"{path} has no recorded KV {direction}s")
         # Bytes in GB keep the two columns on a similar scale.
         a[:, 1] *= 1e-9
         (latency_s, s_per_gb), *_ = np.linalg.lstsq(a[:, :2], a[:, 2], rcond=None)
         if latency_s < 0 or s_per_gb <= 0:
             # Latency not separable from bandwidth: attribute all to bandwidth.
             latency_s, s_per_gb = 0.0, a[:, 2].sum() / a[:, 1].sum()
-        rates.append(TransferRate(float(latency_s), float(1e9 / s_per_gb)))
+        rate = TransferRate(float(latency_s), float(1e9 / s_per_gb))
+        rates.append(rate)
         logger.info(
-            "KV offloading %ss from %s: %.1f us + %.2f GB/s (%d steps)",
+            "KV %ss from %s: %.1f us + %.2f GB/s (%d steps)",
             direction,
             path,
-            rates[-1].latency_s * 1e6,
-            rates[-1].bytes_per_s * 1e-9,
+            rate.latency_s * 1e6,
+            rate.bytes_per_s * 1e-9,
             len(direction_rows),
         )
+    assert rates[0] is not None
     return rates[0], rates[1]
 
 
 def completed_transfers(
     kv_output: KVConnectorOutput | None,
 ) -> dict[str, dict[str, float]] | None:
-    """The KV offloading transfers that completed in a step, per direction, as
-    a step log's `kv_transfers` record holds them."""
-    meta = kv_output.kv_connector_worker_meta if kv_output is not None else None
-    if not isinstance(meta, OffloadingWorkerMetadata):
+    """The KV transfers that completed in a step, per direction, as a step log's
+    `kv_transfers` record holds them: CPU offloading's loads and stores, or a
+    NIXL decode instance's reads."""
+    if kv_output is None:
         return None
-    stats = meta.transfer_stats
-    transfers = {
-        direction: {"count": len(s.sizes), "bytes": s.bytes, "seconds": s.time}
-        for direction, s in (("load", stats.load), ("store", stats.store))
-        if s.sizes
-    }
+    meta = kv_output.kv_connector_worker_meta
+    stats = kv_output.kv_connector_stats
+    if isinstance(meta, OffloadingWorkerMetadata):
+        transfer_stats = meta.transfer_stats
+        transfers = {
+            direction: {"count": len(s.sizes), "bytes": s.bytes, "seconds": s.time}
+            for direction, s in (
+                ("load", transfer_stats.load),
+                ("store", transfer_stats.store),
+            )
+            if s.sizes
+        }
+    elif isinstance(stats, NixlKVConnectorStats) and stats.data["transfer_duration"]:
+        transfers = {
+            "load": {
+                "count": len(stats.data["transfer_duration"]),
+                "bytes": sum(stats.data["bytes_transferred"]),
+                "seconds": sum(stats.data["transfer_duration"]),
+            }
+        }
+    else:
+        return None
     return transfers or None
 
 
@@ -199,23 +232,26 @@ class SimulatedOffloadingWorker(OffloadingWorker):
         return min(ends, default=None)
 
 
+class SimulatedTransfers(Protocol):
+    def next_completion(self) -> float | None:
+        """When the next in-flight transfer completes, if any."""
+        ...
+
+
 class SimulatedKVConnector(ActiveKVConnector):
-    """The model runner's KV connector hooks, with the offloading connector's
+    """The model runner's KV connector hooks, with the connector's
     worker-side transfers simulated instead of registering KV caches."""
 
-    def __init__(self, vllm_config: VllmConfig, transfers: SimulatedOffloadingWorker):
+    def __init__(self, vllm_config: VllmConfig, transfers: SimulatedTransfers):
         self.transfers = transfers
         super().__init__(vllm_config, {})
 
     def register_kv_caches(self, kv_caches_dict: dict[str, torch.Tensor]) -> None:
         connector = self.kv_connector
-        if not isinstance(connector, OffloadingConnector):
-            raise ValueError(
-                "Simulated execution supports KV transfer only with the "
-                f"OffloadingConnector, not {type(connector).__name__}."
-            )
-        assert connector.connector_worker is not None
-        connector.connector_worker.worker = self.transfers
+        if isinstance(connector, OffloadingConnector):
+            assert connector.connector_worker is not None
+            assert isinstance(self.transfers, SimulatedOffloadingWorker)
+            connector.connector_worker.worker = self.transfers
 
 
 def simulated_kv_connector(
@@ -224,23 +260,38 @@ def simulated_kv_connector(
     clock: Clock,
     device_free_at: Callable[[], float],
 ) -> SimulatedKVConnector:
-    timing = vllm_config.simulation_config.kv_offload_timing
+    from vllm.v1.worker.simulated.kv_nixl import NixlConnector
+
+    timing = vllm_config.simulation_config.kv_transfer_timing
     if timing is None:
         raise ValueError(
-            "Simulated KV offloading needs simulation_config.kv_offload_timing: "
-            "transfer bandwidths, or the path of a step log recorded with "
-            "offloading."
+            "Simulated KV transfer needs simulation_config.kv_transfer_timing: "
+            "transfer bandwidths, or the path of a step log recorded with the "
+            "connector."
         )
-    load, store = kv_offload_rates(timing)
-    groups = kv_cache_config.kv_cache_groups
-    transfers = SimulatedOffloadingWorker(
-        clock,
-        load,
-        store,
-        bytes_per_block=[
-            _group_kv_bytes_per_block(groups[group_id])
-            for group_id in get_offloading_group_ids(kv_cache_config)
-        ],
-        device_free_at=device_free_at,
-    )
+    load, store = kv_transfer_rates(timing)
+    connector = get_kv_transfer_group()
+    transfers: SimulatedTransfers
+    if isinstance(connector, OffloadingConnector):
+        if store is None:
+            raise ValueError("KV offloading needs kv_transfer_timing store_gbps.")
+        groups = kv_cache_config.kv_cache_groups
+        transfers = SimulatedOffloadingWorker(
+            clock,
+            load,
+            store,
+            bytes_per_block=[
+                _group_kv_bytes_per_block(groups[group_id])
+                for group_id in get_offloading_group_ids(kv_cache_config)
+            ],
+            device_free_at=device_free_at,
+        )
+    elif isinstance(connector, NixlConnector):
+        transfers = connector.worker
+        transfers.configure(clock, load)
+    else:
+        raise ValueError(
+            "Simulated execution supports the OffloadingConnector and the "
+            f"NixlConnector, not {type(connector).__name__}."
+        )
     return SimulatedKVConnector(vllm_config, transfers)

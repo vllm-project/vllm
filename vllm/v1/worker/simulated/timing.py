@@ -642,7 +642,8 @@ class VirtualClock:
     """Simulated time: waiting for a deadline moves the clock to it at once.
 
     With the in-process engine the worker and the driver share one process
-    and therefore one `VIRTUAL_CLOCK`. The engine's own host loop
+    and a clock (`VIRTUAL_CLOCK`, or one per engine when several run
+    concurrently). The engine's own host loop
     (scheduling, output processing) takes no simulated time; a step's
     predicted `host_s` still holds the engine thread."""
 
@@ -679,23 +680,26 @@ class FastForwardClock:
 # driver that timestamps requests.
 VIRTUAL_CLOCK = VirtualClock()
 FAST_FORWARD_CLOCK = FastForwardClock()
-_building_driven_engine = False
+_driven_engine_clock: Clock | None = None
 
 
 @contextlib.contextmanager
-def building_driven_engine() -> Iterator[None]:
+def building_driven_engine(clock: Clock) -> Iterator[None]:
     """Engines built in this context run in the process of a driver that
-    reads the same clock (`vllm.v1.worker.simulated.offline`)."""
-    global _building_driven_engine
-    _building_driven_engine = True
+    reads `clock` too (`vllm.v1.worker.simulated.offline`). Engines that run
+    concurrently in one process (prefill and decode instances) each get their
+    own clock."""
+    global _driven_engine_clock
+    _driven_engine_clock = clock
     try:
         yield
     finally:
-        _building_driven_engine = False
+        _driven_engine_clock = None
 
 
-def is_building_driven_engine() -> bool:
-    return _building_driven_engine
+def driven_engine_clock() -> Clock | None:
+    """The clock of the driven engine being built, if any."""
+    return _driven_engine_clock
 
 
 def get_clock(kind: str) -> Clock:
@@ -762,8 +766,8 @@ def step_log_path(vllm_config: VllmConfig) -> str | None:
 
 class StepLogWriter:
     """Appends one JSON line per simulated step, plus one per step in which
-    KV offloading transfers completed. The step records feed the `table` and
-    `replay` providers, the transfer records `kv_offload_timing`."""
+    KV connector transfers completed. The step records feed the `table` and
+    `replay` providers, the transfer records `kv_transfer_timing`."""
 
     def __init__(self, path: str) -> None:
         self.path = Path(path)
@@ -789,8 +793,8 @@ class StepLogWriter:
         self._f.flush()
 
     def write_transfers(self, transfers: dict[str, dict[str, float]], t: float) -> None:
-        """Append the KV offloading transfers that completed in a step, per
-        direction: their count, bytes and summed duration."""
+        """Append the KV transfers that completed in a step, per direction:
+        their count, bytes and summed duration."""
         rec = {"kv_transfers": transfers, "t": t}
         self._f.write(json.dumps(rec, separators=(",", ":")) + "\n")
         self._f.flush()
