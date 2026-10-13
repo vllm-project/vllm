@@ -281,6 +281,8 @@ class OpenAIServingChatBatch(OpenAIServingChat):
                         chat_template_kwargs=self._effective_chat_template_kwargs(
                             single_request
                         ),
+                        chat_template=single_request.chat_template
+                        or self.chat_template,
                     )
                     parser.set_prompt_token_ids(final_res.prompt_token_ids)
                     reasoning, content, _ = parser.parse(

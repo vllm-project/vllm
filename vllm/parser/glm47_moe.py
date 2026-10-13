@@ -111,12 +111,20 @@ def _glm47_arg_value_extender(raw_args: str) -> ArgValueExtender | None:
     return extend
 
 
-def _glm53_always_thinks(tokenizer: TokenizerLike) -> bool:
+def _glm53_always_thinks(
+    tokenizer: TokenizerLike, chat_template: str | None = None
+) -> bool:
     # GLM-5.3 keeps the GLM-4.x prompt and tool-call format but replaces the
     # enable_thinking toggle with an always-on "Reasoning Effort:" header, so
     # its generation prompt always opens <think> and the model output carries
     # no opening tag.
-    template = getattr(tokenizer, "chat_template", None)
+    # Judge the served template, which may add the switch back; a template
+    # name (e.g. "tool_use") is not Jinja source, so use the tokenizer's.
+    template = (
+        chat_template
+        if isinstance(chat_template, str) and "{" in chat_template
+        else getattr(tokenizer, "chat_template", None)
+    )
     return (
         isinstance(template, str)
         and "[gMASK]<sop>" in template
@@ -245,7 +253,7 @@ class Glm47MoeParser(ParserEngine):
         thinking = chat_kwargs.get("thinking", None)
         enable_thinking = chat_kwargs.get("enable_thinking", None)
         if (thinking is False or enable_thinking is False) and _glm53_always_thinks(
-            tokenizer
+            tokenizer, kwargs.get("chat_template")
         ):
             logger.warning_once(
                 "Ignoring enable_thinking/thinking: the GLM-5.3 chat template "
