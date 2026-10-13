@@ -27,8 +27,11 @@ from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.warmup.jit_warmup import VllmJitKernel
-from vllm.models.common.mono.guards import _agree_across_ranks, _refuse_model
-from vllm.models.common.mono.peer import tp_group
+from vllm.models.common.mono.guards import (
+    _agree_across_ranks,
+    _refuse_model,
+    tp_group,
+)
 from vllm.models.common.mono.spec import (
     LayerKernel,
     MonoContext,

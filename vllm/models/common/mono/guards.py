@@ -7,15 +7,22 @@ sizes and raises with every reason the config is refused. The rest is the
 library's own and stays private to this package: ``_agree_across_ranks`` runs a
 later refusal stage (after load) on every TP rank and agrees on the verdict
 before anything collective follows.
+
+Peer memory is the model's own: only its kernels know what they put where, and
+``tp_group`` is where it reads this rank's place in the TP group. What this
+package keeps is the agreement every stage goes through (``tp_agree``), because
+a rank that refuses alone leaves every other rank waiting in-kernel for ever.
 """
 
 import importlib
 from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Any
 
+import torch
+import torch.distributed as dist
+
 from vllm.config.compilation import CUDAGraphMode
 from vllm.logger import init_logger
-from vllm.models.common.mono.peer import tp_agree
 from vllm.models.common.mono.spec import Feature, MonoSpec, MonoUnsupported
 
 if TYPE_CHECKING:
@@ -29,6 +36,39 @@ _FULL_MODES = (
     CUDAGraphMode.FULL_DECODE_ONLY,
     CUDAGraphMode.FULL_AND_PIECEWISE,
 )
+
+
+def tp_group() -> tuple[int, int, object | None]:
+    """This rank's (rank, world size, CPU group) in the TP group, and
+    (0, 1, None) before distributed is initialized."""
+    if not dist.is_available() or not dist.is_initialized():
+        return 0, 1, None
+    from vllm.distributed import get_tp_group
+
+    tp = get_tp_group()
+    return tp.rank_in_group, tp.world_size, tp.cpu_group
+
+
+def tp_agree(ok: bool, group) -> bool:
+    """Agrees a verdict every TP rank must take alike.
+
+    A MonoKernel waits in-kernel on every peer rank, so a rank that turned mono
+    off alone, or failed to build what the others launch, leaves the others
+    spinning on the GPU for ever. Every rank must call this at the same point.
+
+    Args:
+        ok: This rank's local verdict.
+        group: The TP group's CPU (gloo) process group, or None for one rank.
+
+    Returns:
+        True when every rank of ``group`` passed ``ok`` true.
+
+    """
+    if group is None:
+        return ok
+    flag = torch.tensor([int(ok)], dtype=torch.int32)
+    dist.all_reduce(flag, op=dist.ReduceOp.MIN, group=group)
+    return bool(flag.item())
 
 
 def _enabled(vllm_config: "VllmConfig") -> bool:

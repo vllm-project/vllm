@@ -394,7 +394,7 @@ def _skip_step(
 
 def _launch_state(model, ctx: MonoContext) -> LaunchState:
     """This rank's runner, collective over the TP group."""
-    from vllm.models.common.mono.peer import tp_group
+    from vllm.models.common.mono.guards import tp_group
     from vllm.models.deepseek_v41.amd.mono.runner import MAX_TOKENS, DSV41MonoLayer
 
     assert MAX_TOKENS >= MAX_ROWS, MAX_TOKENS
