@@ -783,3 +783,50 @@ fn custom_roles_are_rejected_as_request_errors() {
     expect!["chat role `root` is not supported by this chat renderer"]
         .assert_eq(&error.to_report_string());
 }
+
+/// latest_reminder is a model-defined role that Python already renders for
+/// DeepSeek V4/V4.1. The Rust renderer should accept it while still rejecting
+/// arbitrary custom roles. See issue #61372.
+#[test]
+fn latest_reminder_role_is_rendered_like_python_encoder() {
+    let mut request = ChatRequest {
+        messages: vec![
+            ChatMessage::user("Summarize the context."),
+            ChatMessage::custom("latest_reminder", "Keep the answer concise."),
+        ],
+        ..ChatRequest::for_test()
+    };
+    request
+        .chat_options
+        .template_kwargs
+        .insert("thinking".to_string(), Value::Bool(false));
+
+    let rendered = render_request(&request);
+
+    expect![[r#"<｜begin▁of▁sentence｜><｜User｜>Summarize the context.<｜Assistant｜></think><｜latest_reminder｜>Keep the answer concise."#]]
+        .assert_eq(&rendered);
+}
+
+/// When a latest_reminder precedes the final assistant turn, the user turn
+/// must still close with an Assistant transition so the assistant message
+/// opens correctly.
+#[test]
+fn latest_reminder_before_assistant_still_transitions() {
+    let mut request = ChatRequest {
+        messages: vec![
+            ChatMessage::user("Hello"),
+            ChatMessage::custom("latest_reminder", "Be brief"),
+            ChatMessage::assistant_text("Hi there"),
+        ],
+        ..ChatRequest::for_test()
+    };
+    request
+        .chat_options
+        .template_kwargs
+        .insert("thinking".to_string(), Value::Bool(false));
+
+    let rendered = render_request(&request);
+
+    expect![[r#"<｜begin▁of▁sentence｜><｜User｜>Hello<｜Assistant｜></think><｜latest_reminder｜>Be briefHi there<｜end▁of▁sentence｜>"#]]
+        .assert_eq(&rendered);
+}
