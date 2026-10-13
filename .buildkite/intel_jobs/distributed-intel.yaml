@@ -2,7 +2,7 @@ group: Distributed Intel
 depends_on:
   - image-build-xpu
 steps:
-- label: ":intel: (XPU) Distributed Torchrun + Shutdown"
+- label: ":intel: (BMG) Distributed Torchrun + Shutdown"
   key: distributed-torchrun-shutdown-tests-2-gpus
   timeout_in_minutes: 30
   device: intel_gpu
