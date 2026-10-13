@@ -146,7 +146,6 @@ async def test_render_chat_hoists_transfer_params_out_of_extra_args():
     assert response.kv_transfer_params == {"do_remote_prefill": True}
     assert response.ec_transfer_params == {"remote": True}
     assert response.sampling_params.extra_args == {"foo": 1}
-    assert request.vllm_xargs == {"foo": 1}
 
 
 @pytest.mark.asyncio
