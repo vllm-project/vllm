@@ -1393,7 +1393,7 @@ class FusedMoEConfig:
 
         if self.use_mori_kernels:
             assert self.rocm_aiter_fmoe_enabled, (
-                "MORI transport currently requires AITER fused expert compute."
+                "Mori needs to be used with aiter fused_moe for now."
             )
         if self.use_mori_kernels or self.use_mori_epv2_kernels:
             assert not self.aiter_fmoe_shared_expert_enabled, (

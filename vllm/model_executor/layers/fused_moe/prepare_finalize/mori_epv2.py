@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import inspect
 from typing import Any
 
 import torch
@@ -27,8 +26,8 @@ class MoriEPv2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         mori_op: Any,
         max_tokens_per_rank: int,
         num_dispatchers: int,
-        num_local_experts: int | None = None,
-        rank_expert_offset: int = 0,
+        num_local_experts: int,
+        rank_expert_offset: int,
     ):
         super().__init__()
         self.mori_op = mori_op
@@ -38,16 +37,7 @@ class MoriEPv2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         self.rank_expert_offset = rank_expert_offset
         self._padding_expert_ids: torch.Tensor | None = None
         self._routing = None
-        self._recv_topk_ids = None
         self._experts_read_recv_rows_only = False
-        # MORI main dropped clone_routing; its dispatch already returns the
-        # op-owned live routing, which is what clone_routing=False asked for.
-        self._dispatch_kwargs = {"return_routing": True}
-        params = inspect.signature(mori_op.dispatch).parameters
-        if "clone_routing" in params or any(
-            p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()
-        ):
-            self._dispatch_kwargs["clone_routing"] = False
 
     @property
     def activation_format(self) -> mk.FusedMoEActivationFormat:
@@ -57,6 +47,19 @@ class MoriEPv2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
             AiterExperts,
         )
+
+        if fused_experts.moe_config.in_dtype != torch.bfloat16:
+            raise ValueError(
+                "MORI EPv2 only dispatches BF16 activations; got "
+                f"{fused_experts.moe_config.in_dtype}"
+            )
+        quant_dtype = fused_experts.quant_config.quant_dtype
+        if quant_dtype is not None and not fused_experts.expects_unquantized_inputs:
+            raise ValueError(
+                "MORI EPv2 dispatches unquantized BF16 activations, but "
+                f"{type(fused_experts).__name__} expects {quant_dtype} "
+                "activations quantized before dispatch"
+            )
 
         # AITER computes only the first expert_num_tokens rows.
         self._experts_read_recv_rows_only = isinstance(fused_experts, AiterExperts)
@@ -70,12 +73,9 @@ class MoriEPv2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
     ) -> torch.Tensor | None:
         # Experts that reduce top-k themselves write straight into the arena
         # rows combine sends, and combine skips its copy-in.
-        combine_in_view = getattr(self.mori_op, "combine_in_view", None)
-        if combine_in_view is None or not isinstance(
-            weight_and_reduce_impl, TopKWeightAndReduceNoOP
-        ):
+        if not isinstance(weight_and_reduce_impl, TopKWeightAndReduceNoOP):
             return None
-        buf = combine_in_view()
+        buf = self.mori_op.combine_in_view()
         if (
             len(shape) != 2
             or buf.dtype != dtype
@@ -105,8 +105,6 @@ class MoriEPv2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         # DP padding tokens carry expert id -1 (VLLM_MOE_SKIP_PADDING) and zero
         # weight. MORI EPv2 has no invalid-expert slot and its FlyDSL dispatch
         # faults on -1, so send them to this rank's own experts instead.
-        if self.num_local_experts is None:
-            return topk_ids
         if self._padding_expert_ids is None:
             slots = torch.arange(topk_ids.shape[1], device=topk_ids.device)
             self._padding_expert_ids = (
@@ -122,9 +120,8 @@ class MoriEPv2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         batches, times the dispatchers per DP rank (each TP rank may send the
         same batch). Slicing the capacity-sized buffers (world_size *
         max_num_tokens rows) to this bound keeps the row masking, the experts
-        and combine's copy-in off the unused tail; on gfx1250 A0 those
-        full-capacity writes cost seconds per step. The bound is rounded up to
-        a multiple of _RECV_ROW_ALIGN to limit the distinct expert shapes.
+        and combine's copy-in off the unused tail. The bound is rounded up to a
+        multiple of _RECV_ROW_ALIGN to limit the distinct expert shapes.
         """
         dp_meta = (
             get_forward_context().dp_metadata
@@ -139,7 +136,7 @@ class MoriEPv2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         if dp_rank >= n_dp or a1.shape[0] > int(tokens[dp_rank]):
             # Metadata that does not cover this rank's own batch is stale; a
             # bound derived from it could cut off received rows.
-            logger.warning_once(
+            logger.debug_once(
                 "MORI EPv2: DP token counts do not cover this rank's batch; "
                 "using the full receive buffer."
             )
@@ -151,12 +148,6 @@ class MoriEPv2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         bound = max(bound, 1)
         bound = -(-bound // _RECV_ROW_ALIGN) * _RECV_ROW_ALIGN
         return min(capacity, bound)
-
-    def _experts_skip_unused_rows(self, quant_config: FusedMoEQuantConfig) -> bool:
-        # A dynamic per-tensor activation scale is still taken over every row.
-        return self._experts_read_recv_rows_only and not (
-            quant_config.is_per_tensor and quant_config.a1_scale is None
-        )
 
     def prepare(
         self,
@@ -188,7 +179,7 @@ class MoriEPv2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             topk_weights.to(torch.float32),
             None,
             self._route_padding_locally(topk_ids.to(torch.int32)),
-            **self._dispatch_kwargs,
+            return_routing=True,
         )
         rows = self._recv_rows_bound(a1, dispatch_a1.shape[0])
         if rows < dispatch_a1.shape[0]:
@@ -202,15 +193,14 @@ class MoriEPv2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             torch.arange(dispatch_a1.shape[0], device=dispatch_a1.device)
             >= dispatch_recv_token_num
         ).unsqueeze(1)
-        if not self._experts_skip_unused_rows(quant_config):
+        # Experts that read only the received rows can skip clearing the rest,
+        # unless a dynamic per-tensor activation scale is taken over every row.
+        if not self._experts_read_recv_rows_only or (
+            quant_config.is_per_tensor and quant_config.a1_scale is None
+        ):
             dispatch_a1.masked_fill_(unused, 0)
         dispatch_weights.masked_fill_(unused, 0)
         dispatch_ids.masked_fill_(unused, -1)
-        self._recv_topk_ids = dispatch_ids
-        logger.warning_once(
-            "MORI EPv2 dispatch entered: "
-            "mori.ops.dispatch_combine_v2.EpDispatchCombineOp.dispatch"
-        )
         expert_tokens_meta = mk.ExpertTokensMetadata(
             expert_num_tokens=dispatch_recv_token_num,
             expert_num_tokens_cpu=None,
@@ -234,19 +224,10 @@ class MoriEPv2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
     ) -> None:
         del topk_weights, topk_ids, apply_router_weight_on_input
         del weight_and_reduce_impl
-        if self._routing is None or self._recv_topk_ids is None:
+        if self._routing is None:
             raise RuntimeError("MORI EPv2 combine called without a dispatch")
-        result = self.mori_op.combine(
-            fused_expert_output,
-            None,
-            self._recv_topk_ids,
-            routing=self._routing,
-        )[0]
-        logger.warning_once(
-            "MORI EPv2 combine entered: "
-            "mori.ops.dispatch_combine_v2.EpDispatchCombineOp.combine"
-        )
+        # combine takes its token mapping from the routing, not from indices.
+        result = self.mori_op.combine(fused_expert_output, routing=self._routing)[0]
         output.copy_(result[: output.shape[0]])
         if not torch.cuda.is_current_stream_capturing():
             self._routing = None
-            self._recv_topk_ids = None

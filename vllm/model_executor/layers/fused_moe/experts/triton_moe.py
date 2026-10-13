@@ -564,7 +564,6 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
                 B_bias=self.w2_bias,
             )
 
-        intermediate_cache3.zero_()
         if lora_context is not None and lora_context.aux_stream is not None:
             lora_delta_w2 = torch.zeros_like(intermediate_cache3)
 
@@ -622,9 +621,9 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         topk_ids: torch.Tensor | None = None,
         expert_map: torch.Tensor | None = None,
     ) -> None:
-        if expert_map is not None:
-            # Skip the slots whose expert is not on this rank: the rows the
-            # alignment dropped, or the zeros the `-1` blocks wrote.
+        if topk_ids is not None:
+            # Skip the slots the alignment dropped, which are never written:
+            # `-1` ids (e.g. DP padding) and, under EP, experts not on this rank.
             ops.moe_sum(input, output, topk_ids, expert_map)
         else:
             ops.moe_sum(input, output)

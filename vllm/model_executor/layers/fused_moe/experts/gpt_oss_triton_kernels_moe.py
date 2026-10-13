@@ -55,7 +55,6 @@ def _triton_kernel_moe_supports_current_device() -> bool:
         # on_gfx9() already excludes gfx906/gfx908.
         # gfx1x family: gfx11xx (RDNA3/3.5) and gfx12xx (RDNA4);
         # on_gfx1x() excludes gfx10xx (RDNA1/RDNA2).
-        # gfx1250 is CDNA-classified, so on_gfx1x() no longer covers it.
         return on_gfx9() or on_gfx1x() or on_gfx1250()
     return False
 

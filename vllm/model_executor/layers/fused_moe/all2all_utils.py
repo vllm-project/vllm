@@ -329,6 +329,13 @@ def maybe_make_prepare_finalize(
 
     elif moe.use_mori_epv2_kernels:
         num_local_experts = moe.num_experts // all2all_manager.world_size
+        # MORI EPv2 routes expert e to rank e // num_local_experts, so every rank
+        # must hold the same number of experts.
+        if num_local_experts * all2all_manager.world_size != moe.num_experts:
+            raise ValueError(
+                f"MORI EPv2 needs the {moe.num_experts} experts to split evenly "
+                f"over {all2all_manager.world_size} expert-parallel ranks"
+            )
         all_to_all_args = dict(
             hidden_dim=moe.hidden_dim,
             max_num_inp_token_per_rank=moe.max_num_tokens,

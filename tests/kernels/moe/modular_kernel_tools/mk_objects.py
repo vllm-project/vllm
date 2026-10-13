@@ -252,8 +252,8 @@ if has_mori():
     register_prepare_and_finalize(
         MoriEPv2PrepareAndFinalize,
         standard_format,
-        fp8_types,
-        blocked_quantization_support=True,
+        [torch.bfloat16],
+        blocked_quantization_support=False,
         backend="mori_epv2",
         supports_apply_weight_on_input=False,
     )

@@ -29,6 +29,7 @@ vLLM provides multiple communication backends for EP. Use `--all2all-backend` to
 | `flashinfer_nvlink_one_sided` | MNNVL systems | FlashInfer's one-sided A2A strategy for multi-node NVLink | High-throughput workloads |
 | `passthrough` | Any | Internal, not accepted on the CLI: bound automatically for MoE backends that dispatch and combine themselves, so no all-to-all runs in the framework | `--moe-backend flashinfer_moe_ep_*` (FlashInfer MoE-EP megakernels) |
 | `flashinfer_nvlink_two_sided` | MNNVL systems | FlashInfer's two-sided A2A strategy for multi-node NVLink | Systems with NVLink across nodes |
+| `mori_epv2` | ROCm, one CCO-LSA team | MoRI EPv2 dispatch/combine over a symmetric-memory window; experts can write straight into combine's staging buffer | AMD Instinct nodes whose EP ranks share one load/store-accessible team (a node, or a UALink fabric); see [MoRI EPv2](#mori-epv2-rocm) |
 
 ## Single Node Deployment
 
@@ -79,6 +80,28 @@ vllm serve deepseek-ai/DeepSeek-V3-0324 \
     --data-parallel-size 8 \         # Data parallelism across 8 processes
     --enable-expert-parallel         # Enable expert parallelism
 ```
+
+### MoRI EPv2 (ROCm)
+
+`--all2all-backend mori_epv2` moves MoE tokens with MoRI EPv2 (`mori.ops.dispatch_combine_v2`), which reads and writes peer GPU memory directly through a MoRI CCO symmetric-memory window. Install a MoRI build that ships `mori.ops.dispatch_combine_v2`.
+
+```bash
+VLLM_ROCM_USE_AITER=1 VLLM_ROCM_USE_AITER_MOE=1 \
+VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=0 \
+vllm serve deepseek-ai/DeepSeek-V4-Pro \
+    --tensor-parallel-size 1 \
+    --data-parallel-size 8 \
+    --enable-expert-parallel \
+    --all2all-backend mori_epv2
+```
+
+Limitations:
+
+- All EP ranks must be in one MoRI CCO-LSA team, i.e. GPUs that can load and store each other's memory: one node, or one UALink fabric. Startup fails otherwise; there is no multi-node RDMA path yet.
+- Activations are dispatched in BF16, so the model dtype must be BF16 and the experts must take unquantized inputs (AITER fused MoE, which quantizes after the all-to-all, or BF16 experts). Experts that expect activations quantized before dispatch, such as FP8 or INT8 Triton experts, are rejected at startup.
+- AITER shared-expert fusion is not supported: set `VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=0`.
+- On NICs that limit a registered memory region to 2 GiB, use a MoRI build that includes ROCm/mori#704, or the window registration fails once the dispatch arena outgrows that limit (DeepSeek-V4-Pro at EP8 already does at the default 16k batched tokens).
+- Use a MoRI build that includes ROCm/mori#761. Older builds leave a stale HIP error behind when the fabric-handle probe fails (e.g. on a single MI355X node), and the next PyTorch allocation raises `operation not supported`.
 
 ## Multi-Node Deployment
 

@@ -1,11 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""MoE with non-gated activations preserves the projection width."""
+"""Tests for MoE with non-gated activations (*_no_mul).
+
+These tests verify that MoE layers work correctly with activations like
+silu_no_mul, gelu_no_mul, relu2_no_mul where the activation output dimension
+equals N (not N // 2 like gated activations).
+"""
 
 import pytest
 import torch
 
-from tests.kernels.moe.utils import make_dummy_moe_config, make_test_quant_config
+from tests.kernels.moe.utils import (
+    check_accuracy,
+    make_dummy_moe_config,
+    make_test_quant_config,
+)
 from tests.kernels.quant_utils import dequant
 from vllm.model_executor.layers.fused_moe.activation import (
     ApplyMoEActivationConfig,
@@ -34,6 +43,7 @@ pytestmark = [
     ),
 ]
 
+# Test parameters
 M_SIZES = [1, 16, 64]
 N_SIZES = [128, 256]
 K_SIZES = [64, 128]
@@ -177,11 +187,21 @@ def test_triton_experts_no_mul_activation(
         w2_ref[ids], dequant(aq, scale, None, False).unsqueeze(-1)
     ).view(m, topk, k)
     expected = (expected * topk_weights.unsqueeze(-1)).to(dtype).sum(dim=1)
-    torch.testing.assert_close(output, expected, atol=2e-2, rtol=2e-2)
+    if quant_dtype is None:
+        torch.testing.assert_close(output, expected, atol=2e-2, rtol=2e-2)
+    else:
+        # The kernel accumulates the first GEMM in another order, so an activation
+        # on an fp8 rounding boundary can quantize to its neighbour and move the
+        # outputs it feeds by a whole fp8 step. Unwritten slots or a polluted
+        # activation scale corrupt most outputs instead.
+        check_accuracy(output, expected, atol=2e-2, rtol=2e-2, percent=0.9)
 
 
 @torch.inference_mode()
 def test_workspace_shapes_no_mul_vs_gated():
+    """Test that workspace shapes differ correctly between gated and non-gated."""
+    from vllm.model_executor.layers.fused_moe.experts.triton_moe import TritonExperts
+
     M, N, K, topk = 64, 256, 128, 2
 
     experts = TritonExperts(
@@ -189,20 +209,36 @@ def test_workspace_shapes_no_mul_vs_gated():
         quant_config=FUSED_MOE_UNQUANTIZED_CONFIG,
     )
 
-    for activation, width in (
-        (MoEActivation.SILU_NO_MUL, N),
-        (MoEActivation.SILU, N // 2),
-    ):
-        ws1, ws2, output = experts.workspace_shapes(
-            M, N, K, topk, 8, 8, None, activation
-        )
-        assert ws1 == (M, topk, max(width, K))
-        assert ws2 == (M, topk, max(N, K))
-        assert output == (M, K)
+    ws1_no_mul, _, out_no_mul = experts.workspace_shapes(
+        M, N, K, topk, 8, 8, None, MoEActivation.SILU_NO_MUL
+    )
+
+    ws1_gated, _, out_gated = experts.workspace_shapes(
+        M, N, K, topk, 8, 8, None, MoEActivation.SILU
+    )
+
+    # For no_mul: activation_out_dim = N
+    # For gated: activation_out_dim = N // 2
+    # workspace1 should use max(activation_out_dim, K)
+    activation_out_dim_no_mul = N
+    activation_out_dim_gated = N // 2
+
+    assert ws1_no_mul[2] == max(activation_out_dim_no_mul, K), (
+        f"no_mul workspace1 last dim should be max({activation_out_dim_no_mul}, {K})"
+    )
+    assert ws1_gated[2] == max(activation_out_dim_gated, K), (
+        f"gated workspace1 last dim should be max({activation_out_dim_gated}, {K})"
+    )
+
+    # Output shapes should be the same
+    assert out_no_mul == out_gated == (M, K)
 
 
 @torch.inference_mode()
 def test_adjust_n_for_activation():
+    """Test the adjust_N_for_activation method."""
+    from vllm.model_executor.layers.fused_moe.experts.triton_moe import TritonExperts
+
     experts = TritonExperts(
         moe_config=make_dummy_moe_config(),
         quant_config=FUSED_MOE_UNQUANTIZED_CONFIG,
@@ -210,9 +246,11 @@ def test_adjust_n_for_activation():
 
     N = 256
 
+    # Gated activations should return N // 2
     assert experts.adjust_N_for_activation(N, MoEActivation.SILU) == N // 2
     assert experts.adjust_N_for_activation(N, MoEActivation.GELU) == N // 2
 
+    # Non-gated activations should return N
     assert experts.adjust_N_for_activation(N, MoEActivation.SILU_NO_MUL) == N
     assert experts.adjust_N_for_activation(N, MoEActivation.GELU_NO_MUL) == N
     assert experts.adjust_N_for_activation(N, MoEActivation.RELU2_NO_MUL) == N

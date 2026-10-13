@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import ctypes
 import os
 import threading
 from collections.abc import Iterator
@@ -1127,6 +1126,7 @@ class MoriEPv2All2AllManager(All2AllManagerBase):
         from mori.cco import GDA_CONNECTION_NONE, CCODevCommRequirements
 
         self._windows: list[_MoriEPv2Window] = []
+        self.handle_cache = Cache()
         # Open the first window now so a wrong topology fails before the
         # weights load; ops that need more get their own window later.
         comm = self._open_window(_MORI_EPV2_WINDOW_ALIGN).comm
@@ -1141,16 +1141,11 @@ class MoriEPv2All2AllManager(All2AllManagerBase):
                     "MORI EPv2 requires all expert-parallel ranks in one LSA team, "
                     f"got LSA size {lsa_size} for {self.world_size} ranks"
                 )
-        except Exception:
+        except Exception as e:
+            e.add_note("MORI EPv2: probing the CCO-LSA team of the EP group failed")
             self.destroy()
             raise
-        self.handle_cache = Cache()
-        logger.warning(
-            "MORI EPv2 selected: module=mori.ops.dispatch_combine_v2 "
-            "transport=cco-LSA class=EpDispatchCombineOp rank=%d world=%d",
-            self.rank,
-            self.world_size,
-        )
+        logger.debug("MORI EPv2 all2all over a %d-rank CCO-LSA team", self.world_size)
 
     def _open_window(self, nbytes: int) -> _MoriEPv2Window:
         from mori.cco import Communicator
@@ -1161,10 +1156,6 @@ class MoriEPv2All2AllManager(All2AllManagerBase):
         comm = Communicator.init(
             self.world_size, self.rank, values[0], per_rank_vmm=nbytes
         )
-        # cco probes fabric handles with hipMemCreate and, where they are
-        # unsupported, leaves hipErrorNotSupported as the HIP last error; the
-        # next torch call that checks it (an allocation) would raise it.
-        ctypes.CDLL("libamdhip64.so").hipGetLastError()
         window = _MoriEPv2Window(comm, nbytes)
         self._windows.append(window)
         return window
@@ -1192,7 +1183,7 @@ class MoriEPv2All2AllManager(All2AllManagerBase):
         window.free_bytes -= arena
         handle = EpDispatchCombineOp(config, window.comm)
         window.comm.barrier()
-        logger.warning(
+        logger.debug(
             "MORI EPv2 op initialized: dispatch=%s combine=%s recv_cap=%d "
             "schedule=%s arena_gb=%d cco_windows=%d",
             config.dispatch_dtype,
@@ -1208,6 +1199,11 @@ class MoriEPv2All2AllManager(All2AllManagerBase):
         return self.handle_cache.get_or_create(kwargs, self._make_handle)
 
     def destroy(self):
+        # Each op's arena lives in a cco window, so free the ops first.
+        with self.handle_cache._lock:
+            for handle in list(self.handle_cache._cache.values()):
+                handle.close()
+            self.handle_cache._cache.clear()
         for window in self._windows:
             window.comm.destroy()
         self._windows.clear()
