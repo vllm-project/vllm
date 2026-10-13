@@ -1,23 +1,29 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Benchmark comparing Triton vs PyTorch sort-based top-k/top-p implementations.
+"""Benchmark top-k/top-p filtering with Triton, FlashInfer, and optional PyTorch.
 
-Compares:
-- apply_top_k_top_p_triton (Triton binary search)
-- apply_top_k_top_p (PyTorch sort-based)
+All implementations return masked logits. Timings include a fresh-input copy.
+FlashInfer timings include softmax and mask reconstruction when its APIs require them.
+L2 is flushed before each measured iteration, outside the timed region.
 
 Scenarios:
 - top_k only (whole batch, partial batch)
 - top_p only (whole batch, partial batch)
 - mix of top_k and top_p
+- optional sparse inputs via --num-finite-logits
 """
 
 import argparse
 import gc
+import json
 from dataclasses import dataclass
+from pathlib import Path
 
+import flashinfer.sampling as fi_sampling
+import pandas as pd
 import torch
+from flashinfer.testing import bench_gpu_time_with_cupti
 
 from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p_pytorch
 from vllm.v1.sample.ops.topk_topp_triton import (
@@ -65,14 +71,18 @@ def calculate_ops_pct(
 
 
 def create_logits(
-    batch_size: int, vocab_size: int, device: str = "cuda"
+    batch_size: int,
+    vocab_size: int,
+    device: str = "cuda",
+    num_finite_logits: int | None = None,
 ) -> torch.Tensor:
     """Create random logits mimicking a realistic LLM distribution.
 
     Uses a Zipf-like probability distribution (rank^-1.1) converted to logits
     via log, then randomly permuted per row. This produces a peaked distribution
     where a small number of tokens capture most probability mass, similar to
-    real model outputs.
+    real model outputs. When num_finite_logits is set, retain that many ranks
+    before permuting their positions independently in each row.
     """
     # Create Zipf-like probabilities: p(rank) ~ rank^(-alpha)
     ranks = torch.arange(1, vocab_size + 1, dtype=torch.float32, device=device)
@@ -81,6 +91,8 @@ def create_logits(
 
     # Convert to logits (log-probabilities, unnormalized is fine)
     base_logits = probs.log()
+    if num_finite_logits is not None:
+        base_logits[num_finite_logits:] = -float("inf")
 
     # Broadcast to batch and randomly permute each row
     logits = base_logits.unsqueeze(0).expand(batch_size, -1).clone()
@@ -88,6 +100,26 @@ def create_logits(
         logits[i] = logits[i, torch.randperm(vocab_size, device=device)]
 
     return logits
+
+
+def apply_top_k_top_p_flashinfer_mask(logits, k, p):
+    """Keep top-k in logits; adapt probability-based top-p back to logits."""
+    if k is not None:
+        logits = fi_sampling.top_k_mask_logits(logits, k)
+    if p is not None:
+        # Top-p renormalization requires softmax, even after logits-based top-k.
+        probs = logits.softmax(dim=-1)
+        probs = fi_sampling.top_p_renorm_probs(probs, p, is_deterministic=True)
+        # Return the selected original logits, not normalized probabilities.
+        logits = logits.masked_fill(probs == 0, -float("inf"))
+    return logits
+
+
+IMPLEMENTATIONS = {
+    "triton": apply_top_k_top_p_triton,
+    "flashinfer-mask": apply_top_k_top_p_flashinfer_mask,
+    "pytorch": apply_top_k_top_p_pytorch,
+}
 
 
 def measure_memory() -> tuple[int, int]:
@@ -105,53 +137,6 @@ def reset_memory_stats():
     torch.accelerator.reset_peak_memory_stats()
     torch.accelerator.empty_cache()
     gc.collect()
-
-
-def benchmark_function(
-    func,
-    logits: torch.Tensor,
-    k: torch.Tensor | None,
-    p: torch.Tensor | None,
-    warmup_iters: int = 5,
-    benchmark_iters: int = 20,
-) -> tuple[float, int]:
-    """Benchmark a function and return (avg_time_ms, peak_memory_bytes).
-
-    Returns average time in milliseconds and peak memory usage.
-    """
-    # Warmup
-    for _ in range(warmup_iters):
-        logits_copy = logits.clone()
-        func(logits_copy, k, p)
-    torch.accelerator.synchronize()
-
-    # Reset memory stats before benchmark
-    reset_memory_stats()
-
-    # Benchmark
-    start_events = [
-        torch.cuda.Event(enable_timing=True) for _ in range(benchmark_iters)
-    ]
-    end_events = [torch.cuda.Event(enable_timing=True) for _ in range(benchmark_iters)]
-
-    for i in range(benchmark_iters):
-        logits_copy = logits.clone()
-        start_events[i].record()
-        func(logits_copy, k, p)
-        end_events[i].record()
-
-    torch.accelerator.synchronize()
-
-    # Calculate timing
-    times = [
-        start_events[i].elapsed_time(end_events[i]) for i in range(benchmark_iters)
-    ]
-    avg_time = sum(times) / len(times)
-
-    # Get peak memory
-    _, peak_memory = measure_memory()
-
-    return avg_time, peak_memory
 
 
 def create_benchmark_configs(
@@ -286,118 +271,103 @@ def format_memory(bytes_val: int) -> str:
 
 def run_benchmark(
     configs: list[BenchmarkConfig],
+    implementations: list[str],
     warmup_iters: int = 5,
     benchmark_iters: int = 20,
     verbose: bool = True,
+    num_finite_logits: int | None = None,
+    check: bool = False,
+    output: Path | None = None,
 ):
-    """Run all benchmarks and print results."""
+    """Run selected implementations with identical inputs and masked-logit outputs."""
     results = []
 
-    print("=" * 100)
-    print("Top-k/Top-p Benchmark: Triton vs PyTorch Sort-based")
-    print("=" * 100)
-    print()
-
-    for config in configs:
-        if verbose:
-            print(f"Running: {config.description}")
-
-        # Create fresh logits for this config
-        logits = create_logits(config.batch_size, config.vocab_size)
-
-        # Benchmark Triton
-        reset_memory_stats()
-        triton_time, triton_mem = benchmark_function(
-            apply_top_k_top_p_triton,
-            logits,
-            config.k_values,
-            config.p_values,
-            warmup_iters,
-            benchmark_iters,
+    for index, config in enumerate(configs):
+        logits = create_logits(
+            config.batch_size,
+            config.vocab_size,
+            num_finite_logits=num_finite_logits,
         )
-
-        # Benchmark PyTorch
-        reset_memory_stats()
-        pytorch_time, pytorch_mem = benchmark_function(
-            apply_top_k_top_p_pytorch,
-            logits,
-            config.k_values,
-            config.p_values,
-            warmup_iters,
-            benchmark_iters,
-        )
-
-        speedup = pytorch_time / triton_time if triton_time > 0 else float("inf")
-        mem_ratio = pytorch_mem / triton_mem if triton_mem > 0 else float("inf")
-
-        result = {
-            "config": config,
-            "triton_time_ms": triton_time,
-            "pytorch_time_ms": pytorch_time,
-            "triton_mem": triton_mem,
-            "pytorch_mem": pytorch_mem,
-            "speedup": speedup,
-            "mem_ratio": mem_ratio,
-        }
-        results.append(result)
-
+        checks = {}
+        if check:
+            checks = check_implementations(logits, config, implementations)
+        k, p = config.k_values, config.p_values
+        timings = {}
+        for name in implementations:
+            func = IMPLEMENTATIONS[name]
+            reset_memory_stats()
+            times = bench_gpu_time_with_cupti(
+                # note: measured runtime includes logits.clone()
+                lambda func=func, logits=logits, k=k, p=p: func(logits.clone(), k, p),
+                dry_run_iters=warmup_iters,
+                repeat_iters=benchmark_iters,
+                use_cuda_graph=False,  # sampling is outside cuda graph
+                cold_l2_cache=True,
+            )
+            elapsed = sum(times) / len(times)
+            _, memory = measure_memory()
+            timings[name] = dict(time_ms=elapsed, peak_memory=memory)
+        row = create_result_row(config, timings, checks)
+        results.append(row)
+        if output is not None:
+            with output.open("a") as file:
+                file.write(json.dumps(row) + "\n")
         if verbose:
-            print(f"  Triton:  {triton_time:.3f} ms, {format_memory(triton_mem)}")
-            print(f"  PyTorch: {pytorch_time:.3f} ms, {format_memory(pytorch_mem)}")
-            print(f"  Speedup: {speedup:.2f}x, Memory ratio: {mem_ratio:.2f}x")
-            print()
-
-        # Clean up
+            print(f"Completed {index + 1}/{len(configs)}: {config.name}", flush=True)
         del logits
         reset_memory_stats()
 
     return results
 
 
+def check_implementations(
+    logits: torch.Tensor,
+    config: BenchmarkConfig,
+    implementations: list[str],
+) -> dict:
+    """Compare filtered distributions against PyTorch outside the timed region."""
+    k, p = config.k_values, config.p_values
+    reference = apply_top_k_top_p_pytorch(logits.clone(), k, p).softmax(dim=-1)
+    checks = {}
+    for name in implementations:
+        actual = IMPLEMENTATIONS[name](logits.clone(), k, p).softmax(dim=-1)
+        total_variation = (actual - reference).abs().sum(-1).max().item() / 2
+        checks[name] = {
+            "close": torch.allclose(actual, reference, rtol=1e-5, atol=1e-6),
+            "max_total_variation": total_variation,
+        }
+        if not checks[name]["close"]:
+            print(f"Distribution difference: {name} {config.name} {checks[name]}")
+        del actual
+    return checks
+
+
 def print_summary_table(results: list[dict]):
-    """Print a summary table of results."""
+    """Print the same result rows saved to the output file."""
     print()
-    print("=" * 130)
-    print("SUMMARY TABLE")
-    print("=" * 130)
-    print()
+    print(pd.DataFrame(results).to_string(index=False, float_format="{:.3g}".format))
 
-    # Header
-    header = (
-        f"{'Scenario':<40} {'Batch':>6} {'Vocab':>7} {'Ops%':>6} "
-        f"{'Triton (ms)':>12} {'PyTorch (ms)':>13} {'Speedup':>8} "
-        f"{'Tri Mem':>10} {'Pyt Mem':>10}"
-    )
-    print(header)
-    print("-" * 130)
 
-    # Group by scenario type
-    current_vocab = None
-    for result in results:
-        config = result["config"]
-
-        # Add separator between vocab sizes
-        if current_vocab != config.vocab_size:
-            if current_vocab is not None:
-                print("-" * 130)
-            current_vocab = config.vocab_size
-
-        scenario = config.name.split("_b")[0]  # Extract scenario name
-        print(
-            f"{scenario:<40} {config.batch_size:>6} {config.vocab_size:>7} "
-            f"{config.ops_pct:>5.0f}% "
-            f"{result['triton_time_ms']:>12.3f} {result['pytorch_time_ms']:>13.3f} "
-            f"{result['speedup']:>7.2f}x "
-            f"{format_memory(result['triton_mem']):>10} "
-            f"{format_memory(result['pytorch_mem']):>10}"
-        )
-
-    print("=" * 130)
+def create_result_row(config, timings, checks) -> dict:
+    """Build a shared row for the summary table and JSONL output."""
+    row = {
+        "Scenario": config.name.split("_b")[0],
+        "Batch": config.batch_size,
+        "Vocab": config.vocab_size,
+        "Ops%": f"{config.ops_pct:.0f}%",
+    }
+    row.update({f"{name} (ms)": data["time_ms"] for name, data in timings.items()})
+    for name, data in timings.items():
+        row[f"{name} mem"] = format_memory(data["peak_memory"])
+    for name, data in checks.items():
+        row[f"{name} check"] = data["close"]
+        row[f"{name} max TV"] = data["max_total_variation"]
+    return row
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Benchmark Triton vs PyTorch sort-based top-k/top-p implementations"
+        description="Benchmark Triton and FlashInfer top-k/top-p filtering"
     )
     parser.add_argument(
         "--batch-sizes",
@@ -431,29 +401,60 @@ def main():
         help="Only print summary table",
     )
 
-    args = parser.parse_args()
+    parser.add_argument(
+        "--num-finite-logits",
+        type=int,
+        help="Finite logits per row; remaining entries are -inf (default: dense)",
+    )
 
-    # Print configuration
-    print(f"Batch sizes: {args.batch_sizes}")
-    print(f"Vocab sizes: {args.vocab_sizes}")
-    print(f"Warmup iterations: {args.warmup_iters}")
-    print(f"Benchmark iterations: {args.benchmark_iters}")
-    print()
+    parser.add_argument(
+        "--implementations",
+        nargs="+",
+        choices=list(IMPLEMENTATIONS),
+        default=["triton", "flashinfer-mask"],
+        help="Implementations to compare (PyTorch is an optional reference)",
+    )
+
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="Check filtered distributions against PyTorch outside the timed region",
+    )
+
+    parser.add_argument(
+        "--scenarios",
+        nargs="+",
+        choices=[
+            "topk_whole",
+            "topk_partial",
+            "topp_whole",
+            "topp_partial",
+            "topk_topp_whole",
+            "mixed_partial",
+        ],
+        help="Run only the selected scenarios (default: all)",
+    )
+    parser.add_argument("--output", type=Path, help="Save incremental JSONL results")
+
+    args = parser.parse_args()
+    if args.output is not None:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.open("x").close()
+    if args.num_finite_logits is not None and not (
+        0 <= args.num_finite_logits <= min(args.vocab_sizes)
+    ):
+        parser.error("--num-finite-logits must be between 0 and each vocabulary size")
+    torch.manual_seed(0)
 
     # Check CUDA
     if not torch.cuda.is_available():
         print("ERROR: CUDA is not available. This benchmark requires a GPU.")
         return
 
-    device_name = torch.cuda.get_device_name(0)
-    print(f"GPU: {device_name}")
-    print()
-
     # Create configs
-    configs = create_benchmark_configs(
-        args.batch_sizes,
-        args.vocab_sizes,
-    )
+    configs = create_benchmark_configs(args.batch_sizes, args.vocab_sizes)
+    if args.scenarios is not None:
+        configs = [c for c in configs if c.name.split("_b")[0] in args.scenarios]
 
     # Run benchmarks
     results = run_benchmark(
@@ -461,6 +462,10 @@ def main():
         warmup_iters=args.warmup_iters,
         benchmark_iters=args.benchmark_iters,
         verbose=not args.quiet,
+        num_finite_logits=args.num_finite_logits,
+        implementations=args.implementations,
+        check=args.check,
+        output=args.output,
     )
 
     # Print summary

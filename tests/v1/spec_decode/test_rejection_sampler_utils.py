@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import math
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -10,6 +11,10 @@ from vllm.v1.watermarking import GumbelWatermarker
 from vllm.v1.watermarking.spec_decode import watermarked_rejection_sample
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 from vllm.v1.worker.gpu.sample.watermark import philox_gumbel_sample
+from vllm.v1.worker.gpu.spec_decode.rejection_sampler import (
+    RejectionSampler,
+    gather_draft_sampled,
+)
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
     rejection_sample,
 )
@@ -163,7 +168,7 @@ def test_watermarked_bonus_uses_target_key():
         watermarker=GumbelWatermarker(key=42, context_width=2),
     )
     expected = GumbelWatermarker(key=42, context_width=2).sample(
-        target_logits.unsqueeze(0), contexts[1:], lambda _: None
+        target_logits.unsqueeze(0), contexts[1:]
     )
 
     assert num_sampled.item() == 2
@@ -191,11 +196,187 @@ def test_watermarked_recovery_uses_target_key():
         watermarker=GumbelWatermarker(key=42, context_width=2),
     )
     expected = GumbelWatermarker(key=42, context_width=2).sample(
-        target_logits.unsqueeze(0), contexts[:1], lambda _: None
+        target_logits.unsqueeze(0), contexts[:1]
     )
 
     assert num_sampled.item() == 1
     assert sampled[0, 0] == expected.token_ids[0]
+
+
+def test_repeated_draft_context_does_not_change_acceptance():
+    torch.manual_seed(0)
+    num_trials = 8
+    # A draft distribution of its own, so the drafts are not accepted outright.
+    target_logits = torch.randn(64, device="cuda")
+    draft_logits = torch.randn(64, device="cuda")
+    inputs = _build_rejection_sample_inputs(
+        target_logits,
+        draft_logits,
+        num_speculative_steps=1,
+        temperature=1.0,
+        num_trials=num_trials,
+    )
+    expected, expected_num_sampled = rejection_sample(**inputs, num_speculative_steps=1)
+
+    sampled, num_sampled = watermarked_rejection_sample(
+        **inputs,
+        num_speculative_steps=1,
+        contexts=torch.tensor([[10, 11], [11, 12]], device="cuda").repeat(
+            num_trials, 1
+        ),
+        watermarking=torch.ones(num_trials, dtype=torch.bool, device="cuda"),
+        watermarking_skip_mask=torch.tensor([True, False], device="cuda").repeat(
+            num_trials
+        ),
+        watermarker=GumbelWatermarker(key=42, context_width=2),
+    )
+
+    # Some drafts must actually be rejected, or the ordinary-residual branch
+    # the skip mask selects is never reached.
+    assert (expected_num_sampled == 1).any()
+    torch.testing.assert_close(num_sampled, expected_num_sampled, rtol=0, atol=0)
+    torch.testing.assert_close(sampled[:, :1], expected[:, :1], rtol=0, atol=0)
+
+
+def test_repeated_context_skip_mask_is_read_per_row_in_a_block():
+    """A block of three drafts, accepted at row 0 and rejected at row 1.
+
+    The skip mask selects the sampler per row, so the row the target recovers
+    at decides which key draws the recovery token.
+    """
+    num_speculative_steps = 3
+    target_logits = torch.tensor([float("-inf"), 0.0, 1.0, 2.0], device="cuda")
+    draft_logits = torch.tensor([30.0, -30.0, -30.0, -30.0], device="cuda")
+    inputs = _build_rejection_sample_inputs(
+        target_logits,
+        draft_logits,
+        num_speculative_steps=num_speculative_steps,
+        temperature=1.0,
+        num_trials=1,
+    )
+    # Row 0 drafts a token the target gives 0.67 and the draft e**-60, so it is
+    # accepted; row 1 drafts a token the target gives no mass, so it is not.
+    inputs["draft_sampled"][1] = 3
+    inputs["draft_sampled"][2] = 0
+    contexts = torch.tensor(
+        [[10, 11], [11, 3], [3, 0], [0, 1]], dtype=torch.int64, device="cuda"
+    )
+    expected, expected_num_sampled = rejection_sample(
+        **inputs, num_speculative_steps=num_speculative_steps
+    )
+    assert expected_num_sampled.item() == 2
+    assert expected[0, 0].item() == 3
+
+    watermarker = GumbelWatermarker(key=42, context_width=2)
+    skipped, skipped_num_sampled = watermarked_rejection_sample(
+        **inputs,
+        num_speculative_steps=num_speculative_steps,
+        contexts=contexts,
+        watermarking=torch.tensor([True], device="cuda"),
+        watermarking_skip_mask=torch.tensor([False, True, False, False], device="cuda"),
+        watermarker=watermarker,
+    )
+
+    assert skipped_num_sampled.item() == 2
+    torch.testing.assert_close(skipped[:, :2], expected[:, :2], rtol=0, atol=0)
+
+    watermarked, watermarked_num_sampled = watermarked_rejection_sample(
+        **inputs,
+        num_speculative_steps=num_speculative_steps,
+        contexts=contexts,
+        watermarking=torch.tensor([True], device="cuda"),
+        watermarking_skip_mask=torch.zeros(
+            num_speculative_steps + 1, dtype=torch.bool, device="cuda"
+        ),
+        watermarker=watermarker,
+    )
+    # The residual equals the target to within e**-60, so the recovery token is
+    # the target key's draw on the rejected row's context.
+    recovery = GumbelWatermarker(key=42, context_width=2).sample(
+        target_logits.unsqueeze(0), contexts[1:2], lambda _: None
+    )
+
+    assert watermarked_num_sampled.item() == 2
+    assert watermarked[0, 0].item() == 3
+    assert watermarked[0, 1] == recovery.token_ids[0]
+
+
+def test_repeated_recovery_context_uses_ordinary_residual_sample():
+    target_logits = torch.tensor([float("-inf"), 0.0, 1.0, 2.0], device="cuda")
+    draft_logits = torch.tensor([100.0, -100.0, -100.0, -100.0], device="cuda")
+    inputs = _build_rejection_sample_inputs(
+        target_logits,
+        draft_logits,
+        num_speculative_steps=1,
+        temperature=1.0,
+        num_trials=1,
+    )
+    inputs["draft_sampled"][1] = 0
+    expected, expected_num_sampled = rejection_sample(**inputs, num_speculative_steps=1)
+
+    sampled, num_sampled = watermarked_rejection_sample(
+        **inputs,
+        num_speculative_steps=1,
+        contexts=torch.tensor([[10, 11], [11, 0]], device="cuda"),
+        watermarking=torch.tensor([True], device="cuda"),
+        watermarking_skip_mask=torch.tensor([True, False], device="cuda"),
+        watermarker=GumbelWatermarker(key=42, context_width=2),
+    )
+
+    torch.testing.assert_close(num_sampled, expected_num_sampled, rtol=0, atol=0)
+    torch.testing.assert_close(sampled[:, :1], expected[:, :1], rtol=0, atol=0)
+
+
+def test_repeated_bonus_context_uses_ordinary_target_sample():
+    target_logits = torch.randn(64, device="cuda")
+    inputs = _build_rejection_sample_inputs(
+        target_logits,
+        target_logits,
+        num_speculative_steps=1,
+        temperature=1.0,
+        num_trials=1,
+    )
+    expected, expected_num_sampled = rejection_sample(**inputs, num_speculative_steps=1)
+
+    sampled, num_sampled = watermarked_rejection_sample(
+        **inputs,
+        num_speculative_steps=1,
+        contexts=torch.tensor([[10, 11], [11, 12]], device="cuda"),
+        watermarking=torch.tensor([True], device="cuda"),
+        watermarking_skip_mask=torch.tensor([False, True], device="cuda"),
+        watermarker=GumbelWatermarker(key=42, context_width=2),
+    )
+
+    torch.testing.assert_close(num_sampled, expected_num_sampled, rtol=0, atol=0)
+    torch.testing.assert_close(sampled[:, :2], expected[:, :2], rtol=0, atol=0)
+
+
+def test_repeated_context_does_not_change_unwatermarked_or_greedy_rows():
+    target_logits = torch.randn(64, device="cuda")
+    inputs = _build_rejection_sample_inputs(
+        target_logits,
+        target_logits,
+        num_speculative_steps=1,
+        temperature=1.0,
+        num_trials=2,
+    )
+    inputs["temperature"][1] = 0
+    expected, expected_num_sampled = rejection_sample(**inputs, num_speculative_steps=1)
+
+    sampled, num_sampled = watermarked_rejection_sample(
+        **inputs,
+        num_speculative_steps=1,
+        contexts=torch.tensor([[10, 11], [11, 12], [20, 21], [21, 22]], device="cuda"),
+        watermarking=torch.tensor([False, True], device="cuda"),
+        watermarking_skip_mask=torch.ones(4, dtype=torch.bool, device="cuda"),
+        watermarker=GumbelWatermarker(key=42, context_width=2),
+    )
+
+    torch.testing.assert_close(num_sampled, expected_num_sampled, rtol=0, atol=0)
+    for row, length in enumerate(num_sampled):
+        torch.testing.assert_close(
+            sampled[row, : int(length)], expected[row, : int(length)], rtol=0, atol=0
+        )
 
 
 def test_watermarked_recovery_supports_smaller_draft_vocabulary():
@@ -220,9 +401,7 @@ def test_watermarked_recovery_supports_smaller_draft_vocabulary():
         watermarking=torch.tensor([True], device="cuda"),
         watermarker=watermarker,
     )
-    expected = watermarker.sample(
-        target_logits[:4].unsqueeze(0), contexts[:1], lambda _: None
-    )
+    expected = watermarker.sample(target_logits[:4].unsqueeze(0), contexts[:1])
 
     assert num_sampled.item() == 1
     assert sampled[0, 0] == expected.token_ids[0]
@@ -667,6 +846,82 @@ def test_placeholder_blocks_later_draft_tokens(use_block_verification: bool):
         "The first draft was rarely accepted; the test is not exercising "
         "acceptance past the placeholder."
     )
+
+
+def test_verify_rejects_unproposed_drafts():
+    """Zero drafts padded onto a step starting in the prefill must be rejected."""
+    torch.manual_seed(0)
+    device = "cuda"
+    num_trials = 256
+    K = 8
+
+    # Row 0: token 0 is very unlikely. Rows >= 1 follow the zero inputs and
+    # predict token 0. The never-written draft logits row is uniform.
+    target_logits_1d = torch.randn(VOCAB_SIZE, device=device)
+    target_logits_1d[0] = -20.0
+    inputs = _build_rejection_sample_inputs(
+        target_logits_1d,
+        torch.zeros(VOCAB_SIZE, device=device),
+        K,
+        temperature=1.0,
+        num_trials=num_trials,
+    )
+    target_rest = torch.randn(VOCAB_SIZE, device=device)
+    target_rest[0] = 20.0
+    inputs["target_logits"].view(num_trials, K + 1, VOCAB_SIZE)[:, 1:] = target_rest
+    inputs["draft_sampled"].view(num_trials, K + 1)[:, 1:] = 0
+
+    # Each request's first logit is the last prefill token, as in the first
+    # decode step after a P/D remote KV load.
+    first_pos = inputs["pos"].view(num_trials, K + 1)[:, 0]
+    prefill_len = first_pos + 1
+    rejection_sampler = object.__new__(RejectionSampler)
+    rejection_sampler.sampler = SimpleNamespace(
+        apply_sampling_params=lambda logits, *args: logits,
+        sampling_states=SimpleNamespace(
+            temperature=SimpleNamespace(gpu=inputs["temperature"]),
+            seeds=SimpleNamespace(gpu=inputs["seed"]),
+        ),
+        use_fp64_gumbel=False,
+    )
+    rejection_sampler.num_speculative_steps = K
+    rejection_sampler.synthetic_conditional_rates = None
+    rejection_sampler.use_block_verification = True
+    rejection_sampler.watermark_key = None
+
+    def verify() -> tuple[torch.Tensor, torch.Tensor]:
+        draft_sampled, pos = gather_draft_sampled(
+            inputs["draft_sampled"],
+            inputs["pos"],
+            torch.arange(num_trials * (K + 1), device=device),
+            inputs["expanded_idx_mapping"],
+            inputs["expanded_local_pos"],
+            prefill_len,
+        )
+        _, sampled, num_sampled = rejection_sampler._verify(
+            inputs["target_logits"],
+            inputs["draft_logits"],
+            draft_sampled,
+            pos,
+            inputs["cu_num_logits"],
+            inputs["idx_mapping"],
+            None,
+            inputs["expanded_idx_mapping"],
+            inputs["expanded_local_pos"],
+            None,
+            draft_sampled,
+        )
+        return sampled, num_sampled
+
+    sampled, num_sampled = verify()
+    assert (num_sampled == 1).all()
+    # Resampled from the target at row 0, not from a residual.
+    assert (sampled[:, 0] != 0).all()
+
+    # Once past the prefill, block verification accepts the same zero drafts.
+    prefill_len.copy_(first_pos)
+    _, num_sampled = verify()
+    assert (num_sampled == K + 1).all()
 
 
 @pytest.mark.parametrize(

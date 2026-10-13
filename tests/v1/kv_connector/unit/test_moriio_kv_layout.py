@@ -4,8 +4,7 @@
 import importlib.util
 import math
 import threading
-from collections import OrderedDict, defaultdict
-from queue import Queue
+from collections import OrderedDict
 from types import SimpleNamespace
 from typing import Any
 
@@ -18,6 +17,8 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     MLAAttentionSpec,
 )
+
+from .utils import make_moriio_writer
 
 aiter_available = importlib.util.find_spec("aiter") is not None
 mori_available = importlib.util.find_spec("mori") is not None
@@ -88,18 +89,6 @@ def _worker(
 
 def _remote_meta(num_blocks: int = 16) -> SimpleNamespace:
     return SimpleNamespace(num_blocks=num_blocks)
-
-
-def _writer_with_fake_worker(fake_worker: Any) -> Any:
-    writer = MoRIIOWriter.__new__(MoRIIOWriter)
-    writer._worker_ref = lambda: fake_worker
-    writer._write_task_q = Queue()
-    writer._write_state_lock = threading.Lock()
-    writer._scheduled_writes = defaultdict(int)
-    writer._scheduled_layers = defaultdict(set)
-    writer._sealed_writes = {}
-    writer.ensure_worker_started = lambda: None
-    return writer
 
 
 def _wrapper_for_messages() -> Any:
@@ -409,7 +398,7 @@ def test_write_scheduler_deduplicates_layers_and_seals_expected_count():
     request_info = RemoteAllocInfo(block_ids=[4, 5])
     wrapper = _wrapper_for_messages()
     wrapper.done_remote_allocate_req_dict["xfer"] = request_info
-    writer = _writer_with_fake_worker(SimpleNamespace(moriio_wrapper=wrapper))
+    writer = make_moriio_writer(SimpleNamespace(moriio_wrapper=wrapper))
 
     assert writer.schedule_write(_write_task("dense0"))
     assert not writer.schedule_write(_write_task("dense0"))
@@ -459,12 +448,12 @@ def test_write_completion_notifies_once_after_all_sealed_writes_finish():
     request_info = RemoteAllocInfo(block_ids=[4, 5], writes_expected=2)
     request_info.transfer_statuses.extend(["status-a", "status-b"])
     request_info.completion_request_id = "req"
-    request_info.completion_remote_notify_port = 7000
+    # Final notify port is resolved in _execute_write_task; finalize reads it
+    # as-is, so set the already-offset value (base 7000 + tp_rank-2 offset).
+    request_info.completion_notify_port = 7002
     request_info.completion_remote_ip = "127.0.0.1"
     wrapper.done_remote_allocate_req_dict["xfer"] = request_info
-    writer = _writer_with_fake_worker(
-        SimpleNamespace(moriio_wrapper=wrapper, tp_rank=2)
-    )
+    writer = make_moriio_writer(SimpleNamespace(moriio_wrapper=wrapper, tp_rank=2))
     writer._scheduled_writes["xfer"] = 2
     writer._scheduled_layers["xfer"] = {"dense0", "indexer"}
     writer._sealed_writes["xfer"] = 2
@@ -512,7 +501,7 @@ def test_moriio_wrapper_waits_scoped_statuses_without_global_drain():
 def test_write_failure_marks_terminal_and_clears_scheduled_state():
     wrapper = _wrapper_for_messages()
     wrapper.done_remote_allocate_req_dict["xfer"] = RemoteAllocInfo(block_ids=[4, 5])
-    writer = _writer_with_fake_worker(SimpleNamespace(moriio_wrapper=wrapper))
+    writer = make_moriio_writer(SimpleNamespace(moriio_wrapper=wrapper))
     writer._scheduled_writes["xfer"] = 2
     writer._scheduled_layers["xfer"] = {"dense0", "indexer"}
     writer._sealed_writes["xfer"] = 2
@@ -530,7 +519,7 @@ def test_write_failure_marks_terminal_and_clears_scheduled_state():
 def test_schedule_write_rejects_terminal_transfer_without_recreating_state():
     wrapper = _wrapper_for_messages()
     wrapper.done_remote_allocate_req_dict["xfer"] = RemoteAllocInfo(block_ids=[4, 5])
-    writer = _writer_with_fake_worker(SimpleNamespace(moriio_wrapper=wrapper))
+    writer = make_moriio_writer(SimpleNamespace(moriio_wrapper=wrapper))
     writer._scheduled_writes["xfer"] = 1
     writer._scheduled_layers["xfer"] = {"dense0"}
     writer._sealed_writes["xfer"] = 1
@@ -672,14 +661,32 @@ def test_moriio_wrapper_rejects_invalid_messages(role, payload, match):
         wrapper._handle_message(payload)
 
 
-def test_local_block_ids_longer_than_remote_raises_value_error():
-    cache = torch.empty((8, 2, 4, 2, 3), dtype=torch.bfloat16)
+def test_local_block_ids_longer_than_remote_raises():
+    # A longer local list is a genuine bug here and must fail loudly; the WRITE
+    # producer save path trims lookahead blocks before they reach this layer.
+    cache = torch.empty((8, 2, 4, 2, 3), dtype=torch.bfloat16)  # interleaved
     worker = _worker({"layer": cache}, {"layer": _full_spec()})
 
     with pytest.raises(ValueError, match="longer than remote_block_ids"):
         moriio_layout.compute_block_transfer_offsets(
-            "layer", cache, worker.layer_to_spec, [1, 3], [4], _remote_meta().num_blocks
+            "layer",
+            cache,
+            worker.layer_to_spec,
+            [1, 3, 6, 7],
+            [4, 5],
+            _remote_meta().num_blocks,
         )
+
+
+def test_shorter_local_block_ids_still_transfers_only_what_decode_allocated():
+    # READ-mode partial transfer keeps its shorter-local behavior.
+    cache = torch.empty((8, 2, 4, 2, 3), dtype=torch.bfloat16)
+    worker = _worker({"layer": cache}, {"layer": _full_spec()})
+
+    short = moriio_layout.compute_block_transfer_offsets(
+        "layer", cache, worker.layer_to_spec, [1], [4, 5], _remote_meta().num_blocks
+    )
+    assert len(short[0]) == 1
 
 
 @pytest.mark.parametrize(
