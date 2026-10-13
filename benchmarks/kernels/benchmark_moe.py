@@ -40,7 +40,7 @@ from vllm.utils.torch_utils import set_random_seed
 logger = init_logger(__name__)
 
 if current_platform.is_rocm():
-    from vllm.platforms.rocm import on_cdna
+    from vllm.platforms.rocm import on_cdna, on_rdna
 
     # AMD RDNA doesn't have MFMA but WMMA
     WMMA_TILE = 16
@@ -518,7 +518,7 @@ def prune_rocm_configs(M, N, K, configs, is_fp16=True):
         # RDNA (gfx11/gfx12): reject configs that exceed 256 VGPRs per wave.
         # WMMA is 16x16; the accumulator is 8 VGPRs per tile in wave32 mode
         # regardless of dtype (MoE always accumulates in fp32/int32).
-        if not on_cdna():
+        if on_rdna():
             accum_vgprs = (
                 (BLOCK_SIZE_M // WMMA_TILE)
                 * (BLOCK_SIZE_N // WMMA_TILE)
