@@ -296,18 +296,29 @@ def has_xgrammar_unsupported_json_features(schema: dict[str, Any]) -> bool:
 
         schema_types = _schema_types(obj)
 
-        # Check for numeric ranges
+        # integer/number + multipleOf is unsupported by xgrammar
+        # This is known behavior and xgrammar emits warning in logs:
+        #   [21:18:08] /project/cpp/json_schema_converter.cc:1053:
+        #   Warning: multipleOf is not supported for type:number; ignoring multipleOf
+        # This warning was added in PR
+        # https://github.com/mlc-ai/xgrammar/pull/670
+        # So, no need to track progress on this
         if (schema_types & {"integer", "number"}) and ("multipleOf" in obj):
             return True
 
-        # Check for array unsupported keywords
+        # array + some constraints is unsupported by xgrammar
+        # Tracking issue: https://github.com/mlc-ai/xgrammar/issues/968
         if "array" in schema_types and any(
             key in obj
             for key in ("uniqueItems", "contains", "minContains", "maxContains")
         ):
             return True
 
-        # Unsupported keywords for strings
+        # string + format with unsupported keywords
+        # is unsupported by xgrammar
+        # Tracking issue: https://github.com/mlc-ai/xgrammar/issues/967
+        # See tests on this in test_backend_xgrammar.py
+        # unsupported_string_schemas
         if (
             "string" in schema_types
             and "format" in obj
@@ -315,48 +326,51 @@ def has_xgrammar_unsupported_json_features(schema: dict[str, Any]) -> bool:
         ):
             return True
 
-        # A string mixing a generative constraint (pattern or format) with
-        # explicit length bounds. xgrammar compiles the pattern/format side
-        # and silently drops minLength/maxLength from the grammar, so output
-        # can violate the bound without any error surfacing. Verified against
-        # the compiled EBNF: pattern/format grammars come out byte-identical
-        # with and without the length keywords, while maxLength alone lowers
-        # to {0, N} correctly.
+        # string + format/pattern + length constraint is unsupported by xgrammar
+        # Tracking issue: https://github.com/mlc-ai/xgrammar/issues/966
+        # See tests on this in test_backend_xgrammar.py
+        # unsupported_string_schemas
         if "string" in schema_types and _has_pattern_and_length_bounds(obj):
             return True
 
-        # propertyNames validates names, so it is a string schema even when it
-        # omits "type", which is the form that escapes the check above.
-        if (
-            "object" in schema_types
-            and isinstance(obj.get("propertyNames"), dict)
-            and _has_pattern_and_length_bounds(obj["propertyNames"])
-        ):
-            return True
+        # propertyNames is not supported in pair with some constraints
+        # in xgrammar
+        # See tests on this in test_backend_xgrammar.py
+        # unsupported_propertyNames_combinations
+        if "object" in schema_types and "propertyNames" in obj:
+            # propertyNames + maxLength is unsupported by xgrammar
+            # Tracking issue: https://github.com/mlc-ai/xgrammar/issues/960
+            property_names = obj.get("propertyNames")
+            if isinstance(property_names, dict) and _has_pattern_and_length_bounds(
+                property_names
+            ):
+                return True
+            # propertyNames + patternProperties is unsupported by xgrammar
+            # Tracking issue: https://github.com/mlc-ai/xgrammar/issues/959
+            if "patternProperties" in obj:
+                return True
+            # propertyNames + properties is unsupported by xgrammar
+            # Tracking issue: https://github.com/mlc-ai/xgrammar/issues/958
+            if "properties" in obj:
+                return True
+            # propertyNames + unevaluatedProperties is unsupported by xgrammar
+            # Tracking issue: https://github.com/mlc-ai/xgrammar/issues/961
+            if obj.get("unevaluatedProperties", True) is not True:
+                return True
 
-        # FIXME: propertyNames conflicts with properties/patternProperties/
-        # additionalProperties/unevaluatedProperties under xgrammar.
-        # https://github.com/mlc-ai/xgrammar/issues/826
-        if (
-            "object" in schema_types
-            and "propertyNames" in obj
-            and (
-                "properties" in obj
-                or "patternProperties" in obj
-                or isinstance(obj.get("additionalProperties"), dict)
-                or obj.get("unevaluatedProperties", True) is not True
-            )
-        ):
-            return True
-
-        # FIXME: multiple patternProperties, or patternProperties alongside
-        # properties, conflict under xgrammar.
-        if (
-            "object" in schema_types
-            and isinstance(obj.get("patternProperties"), dict)
-            and ("properties" in obj or len(obj["patternProperties"]) > 1)
-        ):
-            return True
+        # patternProperties is not supported in pair with some constraints
+        # in xgrammar
+        # See tests on this in test_backend_xgrammar.py
+        # unsupported_patternProperties_combinations
+        if "object" in schema_types and isinstance(obj.get("patternProperties"), dict):
+            # patternProperties + properties is unsupported by xgrammar
+            # Tracking issue: https://github.com/mlc-ai/xgrammar/issues/964
+            if "properties" in obj:
+                return True
+            # patternProperties + patternProperties is unsupported by xgrammar
+            # Tracking issue: https://github.com/mlc-ai/xgrammar/issues/965
+            if len(obj["patternProperties"]) > 1:
+                return True
 
         # Note(arpera):
         # Xgrammar lacks support of multi-branch allOf
@@ -370,8 +384,7 @@ def has_xgrammar_unsupported_json_features(schema: dict[str, Any]) -> bool:
         # would accept any kind of json, such as
         # "maybe", "", 42, {}, [], {"a": 1}, etc.
         # which is NOT what is expected.
-        # Reported this issue to xgrammar team to track progress on resolving:
-        # https://github.com/mlc-ai/xgrammar/issues/937
+        # Tracking issue: https://github.com/mlc-ai/xgrammar/issues/937
         allof = obj.get("allOf")
         if isinstance(allof, list) and len(allof) >= 2:
             return True

@@ -346,7 +346,6 @@ def test_rocm_backend_sliding_window_includes_boundary_token(
     value_cache[..., :seq_len] = value.permute(1, 2, 0)
     scale = torch.tensor(1.0, device=device)
     metadata = SimpleNamespace(
-        use_cascade=False,
         num_actual_tokens=query_len,
         query_start_loc=torch.tensor([0, query_len], dtype=torch.int32, device=device),
         seq_lens=torch.tensor([seq_len], dtype=torch.int32, device=device),
