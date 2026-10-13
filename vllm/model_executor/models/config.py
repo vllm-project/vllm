@@ -73,9 +73,13 @@ class GlmMoeDsaForCausalLM(VerifyAndUpdateConfig):
 class Glm5NextModelConfig(VerifyAndUpdateConfig):
     @staticmethod
     def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        from vllm.platforms import current_platform
+
         cache_config = vllm_config.cache_config
         if (
             cache_config.cache_dtype != "auto"
+            or not current_platform.is_cuda()
+            or not current_platform.is_device_capability_family(100)
             or getattr(vllm_config.model_config.hf_text_config, "index_topk", None)
             is None
         ):
