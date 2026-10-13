@@ -75,24 +75,6 @@ def _apply_e8m0_scale(values, encoded_scales):
     return tl.where(values == 0.0, 0.0, scaled)
 
 
-# --------------------------------------------------------------------------
-# Hardware unpack: v_cvt_scalef32_pk_bf16_fp4 via inline assembly
-#
-# The software path below costs ~10 VALU ops per value, which measured 1.8x
-# SLOWER than bf16 despite moving 3.76x fewer bytes -- bf16 reaches ~7.8 TB/s
-# (essentially peak) while the software path plateaus at 8% of peak. The
-# hardware instruction does nibble extract, magnitude and scale for two values
-# in ONE op, which is the only measured route to the bandwidth win.
-#
-# Contract, established empirically:
-#   * inputs must be int32 -- a uint8 tensor cannot bind to a 'v' constraint
-#   * the output must be int32 too -- a bf16 output only ever receives the
-#     instruction's low result, so the odd nibbles would be lost
-#   * op_sel:[s0, s1, 0] selects source nibble pair 2*s0 + 4*s1; the third
-#     field does not affect source selection
-#   * the scale is an inline constant 1.0; the E8M0 group scale is applied
-#     afterwards by _apply_e8m0_scale, which costs ~1 op per value
-# --------------------------------------------------------------------------
 # Must be tl.constexpr *instances*: the JIT refuses plain module globals, and
 # annotating is not the same thing.
 _ASM_P01 = tl.constexpr("v_cvt_scalef32_pk_bf16_fp4 $0, $1, 1.0 op_sel:[0,0,0]")
@@ -191,8 +173,21 @@ def load_mxfp4_rows(
     """Gather BLOCK_K packed rows as a bf16 [BLOCK_K, LATENT] tile.
 
     ``cache_ptr`` is the uint8 cache, ``row_pitch`` its row size in bytes.
-    Invalid slots come back as zeros.
+    Invalid slots come back as zeros. Each row, with no padding::
+
+        | packed E2M1 codes        | E8M0 scales        |
+        |<----- LATENT // 2 ------>|<- LATENT // GROUP ->|
+        |<------- row_pitch == row_bytes(LATENT) -------->|
+
+    Code byte ``b`` holds values ``2b`` (low nibble) and ``2b + 1`` (high
+    nibble); scale byte ``g`` covers values ``GROUP * g`` to
+    ``GROUP * g + GROUP - 1``.
     """
+    # The gfx950 path loads the codes as int32 words into one power-of-two tile.
+    tl.static_assert(
+        LATENT >= 128 and (LATENT & (LATENT - 1)) == 0,
+        "mxfp4_mla needs a power-of-two latent of at least 128",
+    )
     base = slots[:, None].to(tl.int64) * row_pitch
     encoded_scales = tl.load(
         cache_ptr + base + LATENT // 2 + tl.arange(0, LATENT // _GROUP)[None, :],
@@ -216,53 +211,3 @@ def load_mxfp4_rows(
         )
         tile = unpack_mxfp4_tile(packed, encoded_scales, BLOCK_K, LATENT, _GROUP)
     return tl.where(valid[:, None], tile, 0.0)
-
-
-@triton.jit
-def _gather_mxfp4_kernel(
-    cache_ptr,
-    slots_ptr,
-    out_ptr,
-    num_slots,
-    row_pitch,
-    BLOCK_K: tl.constexpr,
-    LATENT: tl.constexpr,
-):
-    """Standalone driver for :func:`load_mxfp4_rows`, used by the tests."""
-    offsets = tl.program_id(0) * BLOCK_K + tl.arange(0, BLOCK_K)
-    slots = tl.load(slots_ptr + offsets).to(tl.int64)
-    valid = (slots >= 0) & (slots < num_slots)
-    values = load_mxfp4_rows(
-        cache_ptr, tl.where(valid, slots, 0), valid, row_pitch, BLOCK_K, LATENT
-    )
-    tl.store(
-        out_ptr + offsets[:, None] * LATENT + tl.arange(0, LATENT)[None, :],
-        values,
-    )
-
-
-def gather_mxfp4_rows(cache, slots, latent: int, block_k: int = 16):
-    """Host-side driver for the gather kernel. Test and reference harness."""
-    import torch
-
-    from vllm.v1.attention.ops.mxfp4_mla import row_bytes
-
-    if cache.dtype != torch.uint8:
-        raise ValueError(f"expected a uint8 cache, got {cache.dtype}")
-    pitch = row_bytes(latent)
-    flat = cache.reshape(-1)
-    n = slots.numel()
-    if n % block_k:
-        raise ValueError(f"{n} slots is not a multiple of block_k={block_k}")
-    out = torch.empty(n, latent, dtype=torch.bfloat16, device=cache.device)
-    _gather_mxfp4_kernel[(n // block_k,)](
-        flat,
-        slots,
-        out,
-        flat.numel() // pitch,
-        pitch,
-        BLOCK_K=block_k,
-        LATENT=latent,
-        num_warps=4,
-    )
-    return out

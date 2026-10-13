@@ -13,7 +13,9 @@ from __future__ import annotations
 import pytest
 import torch
 
+from vllm.triton_utils import tl, triton
 from vllm.v1.attention.ops import mxfp4_mla as mx
+from vllm.v1.attention.ops.mxfp4_mla_read import load_mxfp4_rows
 
 
 def _on_rocm_gpu() -> bool:
@@ -30,8 +32,52 @@ ROW = 272
 BLOCK_K = 16
 
 
+@triton.jit
+def _gather_mxfp4_kernel(
+    cache_ptr,
+    slots_ptr,
+    out_ptr,
+    num_slots,
+    row_pitch,
+    BLOCK_K: tl.constexpr,
+    LATENT: tl.constexpr,
+):
+    offsets = tl.program_id(0) * BLOCK_K + tl.arange(0, BLOCK_K)
+    slots = tl.load(slots_ptr + offsets).to(tl.int64)
+    valid = (slots >= 0) & (slots < num_slots)
+    values = load_mxfp4_rows(
+        cache_ptr, tl.where(valid, slots, 0), valid, row_pitch, BLOCK_K, LATENT
+    )
+    tl.store(
+        out_ptr + offsets[:, None] * LATENT + tl.arange(0, LATENT)[None, :],
+        values,
+    )
+
+
+def gather_mxfp4_rows(cache, slots, latent: int, block_k: int = 16):
+    """Run load_mxfp4_rows on its own: gather ``slots`` as bf16 rows."""
+    if cache.dtype != torch.uint8:
+        raise ValueError(f"expected a uint8 cache, got {cache.dtype}")
+    pitch = mx.row_bytes(latent)
+    flat = cache.reshape(-1)
+    n = slots.numel()
+    if n % block_k:
+        raise ValueError(f"{n} slots is not a multiple of block_k={block_k}")
+    out = torch.empty(n, latent, dtype=torch.bfloat16, device=cache.device)
+    _gather_mxfp4_kernel[(n // block_k,)](
+        flat,
+        slots,
+        out,
+        flat.numel() // pitch,
+        pitch,
+        BLOCK_K=block_k,
+        LATENT=latent,
+        num_warps=4,
+    )
+    return out
+
+
 def _ops():
-    from vllm.v1.attention.ops.mxfp4_mla_read import gather_mxfp4_rows
     from vllm.v1.attention.ops.mxfp4_mla_store import store_mxfp4_mla
 
     return store_mxfp4_mla, gather_mxfp4_rows

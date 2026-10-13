@@ -982,6 +982,7 @@ class Platform:
                 kv_quant_mode=kv_quant_mode,
                 # Must match MLAAttention.get_kv_cache_spec, else the mamba
                 # state no longer fits the real (smaller) MLA page.
+                # test_hybrid_block_size_matches_the_layer_page checks both.
                 state_content_bytes=(
                     mxfp4_row_bytes(model_config.get_head_size())
                     if cache_config.cache_dtype == "mxfp4_mla"

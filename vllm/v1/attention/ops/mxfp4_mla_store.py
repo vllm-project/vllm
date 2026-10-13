@@ -88,17 +88,11 @@ def _mxfp4_mla_store_kernel(
     ROW_BYTES: tl.constexpr,
     SCALE_OFFSET: tl.constexpr,
 ):
-    # int64: program_id is int32, so a token-major offset of token *
-    # kv_stride_token wraps once the source holds more than 2**31 elements --
-    # 4.19M tokens at a 512-wide latent. That is reachable when the whole cache
-    # is filled in one launch, and it faults rather than degrades.
+    # int64: token * kv_stride_token overflows int32 past 2**31 source elements.
     token = tl.program_id(0).to(tl.int64)
 
-    # Slot guard. block_table fills the mapping with PAD_SLOT_ID = -1 before
-    # each step, so CUDA-graph batch padding arrives as negative slots. Writing
-    # one would compute a negative row base and scribble outside the cache --
-    # silent corruption, not a crash. The read kernels guard both ends; match
-    # them here.
+    # CUDA-graph padding arrives as PAD_SLOT_ID (-1); skip it and anything past
+    # the cache.
     slot = tl.load(slot_mapping_ptr + token).to(tl.int64)
     if slot < 0 or slot >= num_slots:
         return

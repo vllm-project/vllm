@@ -838,6 +838,11 @@ class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
             raise ValueError(
                 f"mxfp4_mla needs kv_lora_rank to be a power of two >= 128, got {rank}"
             )
+        if kv_cache_dtype == "mxfp4_mla" and self.qk_rope_head_dim != 0:
+            raise ValueError(
+                "mxfp4_mla stores only the latent, so it needs a rope-free (NoPE) "
+                f"model; got qk_rope_head_dim={self.qk_rope_head_dim}"
+            )
 
         if rocm_aiter_ops.is_triton_sparse_mla_enabled():
             reason = self._aiter_sparse_mla_unsupported_reason(vllm_config)
