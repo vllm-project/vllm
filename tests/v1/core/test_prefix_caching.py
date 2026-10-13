@@ -1617,6 +1617,7 @@ def make_kv_cache_config_hybrid_model(
             block_size=block_size,
             shapes=((1, 1),),
             dtypes=(torch.float32,),
+            mamba_cache_mode="align",
         )
 
     return KVCacheConfig(
@@ -1652,6 +1653,7 @@ def make_kv_cache_config_three_types(
             block_size=block_size,
             shapes=((1, 1),),
             dtypes=(torch.float32,),
+            mamba_cache_mode="align",
         )
     elif third_spec_type == "sliding_window":
         third_spec = SlidingWindowSpec(
@@ -1732,6 +1734,7 @@ def test_prefix_cache_hit_uses_per_group_dcp_geometry(draft_sharded):
                     block_size=block_size,
                     shapes=(1, 1),
                     dtypes=(torch.float32,),
+                    mamba_cache_mode="align",
                 ),
             ),
         ],
@@ -1757,10 +1760,13 @@ def test_prefix_cache_hit_uses_per_group_dcp_geometry(draft_sharded):
     req0 = make_request("0", common_token_ids + [99] * 7, block_size, hash_fn)
     computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(req0)
     assert num_computed_tokens == 0
-    blocks = manager.allocate_slots(
-        req0, len(req0.prompt_token_ids), 0, computed_blocks
-    )
-    assert blocks is not None
+    # Align-mode Mamba keeps a state only where a chunk ends, so end the first
+    # chunk on the shared prefix.
+    for num_new_tokens in (len(common_token_ids), 7):
+        blocks = manager.allocate_slots(req0, num_new_tokens, 0, computed_blocks)
+        assert blocks is not None
+        req0.num_computed_tokens += num_new_tokens
+        computed_blocks = None
 
     req1 = make_request("1", common_token_ids + [100] * 5, block_size, hash_fn)
     computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(req1)
@@ -2285,7 +2291,7 @@ def _make_hybrid_kv_cache_config(
             - "full": FullAttentionSpec
             - "sliding_window": SlidingWindowSpec with window=2*block_size
             - "sliding_window_large": SlidingWindowSpec with window=4*block_size
-            - "mamba": MambaSpec
+            - "mamba": MambaSpec in prefix-caching ("align") mode
 
     """
     spec_map = {
@@ -2310,11 +2316,6 @@ def _make_hybrid_kv_cache_config(
             sliding_window=4 * block_size,
         ),
         "mamba": lambda: MambaSpec(
-            block_size=block_size,
-            shapes=((1, 1),),
-            dtypes=(torch.float32,),
-        ),
-        "mamba_align": lambda: MambaSpec(
             block_size=block_size,
             shapes=((1, 1),),
             dtypes=(torch.float32,),
@@ -2427,14 +2428,16 @@ def test_prefill_hybrid_model_combinations(spec_types: list[str]):
     assert not computed_blocks.blocks[0]  # No cache hit initially
     assert num_computed_tokens == 0
 
-    blocks = manager.allocate_slots(
-        req0, 55, len(computed_blocks.blocks[0]) * block_size, computed_blocks
-    )
-    assert blocks is not None
-    # Should have blocks for all groups
-    assert len(blocks.get_block_ids()) == num_groups
-
-    manager.new_step_starts()
+    # Align-mode Mamba keeps a state only where a chunk ends, so end the first
+    # chunk on the common prefix.
+    for num_new_tokens in (len(common_token_ids), len(unique_token_ids)):
+        blocks = manager.allocate_slots(req0, num_new_tokens, 0, computed_blocks)
+        assert blocks is not None
+        # Should have blocks for all groups
+        assert len(blocks.get_block_ids()) == num_groups
+        req0.num_computed_tokens += num_new_tokens
+        computed_blocks = None
+        manager.new_step_starts()
 
     # Second request: should hit cached blocks for common prefix
     req1 = make_request("1", common_token_ids + [4] * 5, block_size, hash_fn)
@@ -2549,7 +2552,7 @@ def test_prefill_hybrid_model_mamba_align():
     num_blocks = 30
 
     kv_cache_config = _make_hybrid_kv_cache_config(
-        block_size, num_blocks, ["full", "mamba_align"]
+        block_size, num_blocks, ["full", "mamba"]
     )
     manager = make_kv_cache_manager(
         kv_cache_config,
@@ -2585,7 +2588,7 @@ def test_hybrid_cache_mamba_align_shared_prefix_detection():
     """
     block_size = 16
     manager = make_kv_cache_manager(
-        _make_hybrid_kv_cache_config(block_size, 30, ["full", "mamba_align"]),
+        _make_hybrid_kv_cache_config(block_size, 30, ["full", "mamba"]),
         max_model_len=8192,
         enable_caching=True,
         hash_block_size=block_size,
@@ -2660,7 +2663,7 @@ def test_hybrid_model_mamba_align_with_dynamic_draft_tokens():
     num_blocks = 30
 
     kv_cache_config = _make_hybrid_kv_cache_config(
-        block_size, num_blocks, ["full", "mamba_align"]
+        block_size, num_blocks, ["full", "mamba"]
     )
     manager = KVCacheManager(
         kv_cache_config,
@@ -5896,49 +5899,6 @@ def test_mamba_reachable_block_mask_pins_shared_prefix():
     assert retained(0, None) == {14}
 
 
-def test_mamba_shared_prefix_survives_zero_retention():
-    """Manager-level check of the full wiring: a pinned shared-prefix boundary
-    (``Request.shared_prefix_boundary``, set by the scheduler on Marconi-style
-    detection) keeps its Mamba state block cached under
-    ``prefix_cache_retention_interval=0``, which otherwise retains only the
-    end-of-prompt replay boundary. Without this, a shared prefix (junction
-    before ``num_prompt``) would be recomputed by every sharing request."""
-    block_size = 16
-
-    # 16-block (256-token) prompt; replay boundary is block 240 // 16 - 1 = 14.
-    token_ids = [i for i in range(16) for _ in range(block_size)]
-
-    def cached_mamba_blocks(shared_prefix_boundary):
-        # Fresh manager per scenario so cached blocks don't leak between runs.
-        manager = make_kv_cache_manager(
-            _make_hybrid_kv_cache_config(block_size, 100, ["full", "mamba"]),
-            max_model_len=8192,
-            enable_caching=True,
-            hash_block_size=block_size,
-            retention_interval=0,
-        )
-        req = make_request("r", token_ids, block_size, sha256)
-        req.shared_prefix_boundary = shared_prefix_boundary
-        computed_blocks, num_computed, _ = manager.get_computed_blocks(req)
-        blocks = manager.allocate_slots(
-            req, len(token_ids), num_computed, computed_blocks
-        )
-        assert blocks is not None
-        pool = manager.block_pool
-        return {
-            i
-            for i in range(16)
-            if pool.get_cached_block(req.block_hashes[i], kv_cache_group_ids=[1])
-            is not None
-        }
-
-    # Without a pinned boundary, retention=0 keeps only the replay boundary (14).
-    assert cached_mamba_blocks(0) == {14}
-    # Pinning the shared prefix at token 96 (state block 5) retains it too, so a
-    # later request sharing that prefix can hit the Mamba state.
-    assert cached_mamba_blocks(96) == {5, 14}
-
-
 def test_mamba_shared_prefix_reuse_under_zero_retention():
     """Full cross-request Marconi flow: a partial shared prefix cached by the
     detecting request must stay reusable by a later request under
@@ -5949,7 +5909,7 @@ def test_mamba_shared_prefix_reuse_under_zero_retention():
 
     def last_req_hit(retention, pin):
         manager = make_kv_cache_manager(
-            _make_hybrid_kv_cache_config(block_size, 200, ["full", "mamba_align"]),
+            _make_hybrid_kv_cache_config(block_size, 200, ["full", "mamba"]),
             max_model_len=8192,
             enable_caching=True,
             hash_block_size=block_size,
