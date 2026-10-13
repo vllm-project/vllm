@@ -83,3 +83,21 @@ def test_failing_destroy_hook_is_logged_not_raised(make_wrapper, caplog_vllm):
     wrapper.shutdown()
     assert wrapper.worker.events == ["device", "shutdown"]
     assert "Worker extension destroy hook failed" in caplog_vllm.text
+
+
+class _NonTorchModel:
+    def __repr__(self) -> str:
+        return "NonTorchModel(layers=2)"
+
+
+class _NonTorchWorker(WorkerBase):
+    def __init__(self) -> None:
+        pass
+
+    def get_model(self) -> _NonTorchModel:
+        return _NonTorchModel()
+
+
+def test_model_inspection_uses_repr_for_non_torch_models():
+    """Out-of-tree workers may serve models that are not torch modules."""
+    assert _NonTorchWorker().get_model_inspection() == "NonTorchModel(layers=2)"

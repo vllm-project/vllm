@@ -165,7 +165,10 @@ class WorkerBase:
         """Return a transformers-style hierarchical view of the model."""
         from vllm.model_inspection import format_model_inspection
 
-        return format_model_inspection(self.get_model())
+        model = self.get_model()
+        if not isinstance(model, nn.Module):
+            return repr(model)
+        return format_model_inspection(model)
 
     def load_model(self, *, load_dummy_weights: bool = False) -> None:
         """Load model onto target device."""
