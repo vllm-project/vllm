@@ -50,7 +50,10 @@ def _triton_kernel_moe_supports_current_device() -> bool:
         # SM120/121. SM12x needs the opt-flag constraints applied by
         # `_swizzle_mxfp4` and `_constrain_sm12x_block_m` to fit its 99KB of
         # shared memory; it is still ordered after MARLIN by the selector.
-        return cap is not None and (9, 0) <= (cap.major, cap.minor) < (13, 0)
+        if cap is None:
+            return False
+        cap_tuple = (cap.major, cap.minor)
+        return (9, 0) <= cap_tuple < (11, 0) or (12, 0) <= cap_tuple < (13, 0)
     if p.is_rocm():
         from vllm.platforms.rocm import on_gfx1x, on_gfx9
 
