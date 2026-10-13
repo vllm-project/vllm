@@ -664,6 +664,7 @@ __global__ void per_token_group_quant_8bit_packed_register_kernel(
       static_cast<int64_t>(mn_idx) * groups_per_row * GROUP_SIZE +
       sf_k_idx * GROUP_SIZE + lane_id * VEC_SIZE;
 
+  uint4 packed_out;
 #if !defined(USE_ROCM) && defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   if constexpr (std::is_same_v<T, c10::BFloat16> &&
                 std::is_same_v<DST_DTYPE, c10::Float8_e4m3fn> &&
@@ -685,39 +686,36 @@ __global__ void per_token_group_quant_8bit_packed_register_kernel(
           __NV_SATFINITE, __NV_E4M3);
       words[i] = static_cast<uint32_t>(q0) | (static_cast<uint32_t>(q1) << 16);
     }
-    *reinterpret_cast<uint4*>(group_output) =
-        make_uint4(words[0], words[1], words[2], words[3]);
-    cudaTriggerProgrammaticLaunchCompletion();
-    return;
-  }
+    packed_out = make_uint4(words[0], words[1], words[2], words[3]);
+  } else
 #endif
-
-  // Quantize and pack into 16 fp8/int8 bytes (= uint4). VEC_SIZE==16 so we
-  // fill four 32-bit words, four bytes each.
-  uint32_t packed_lo = 0;
-  uint32_t packed_lo_hi = 0;
-  uint32_t packed_hi_lo = 0;
-  uint32_t packed_hi = 0;
+  {
+    // Quantize and pack into 16 fp8/int8 bytes (= uint4). VEC_SIZE==16 so we
+    // fill four 32-bit words, four bytes each.
+    uint32_t packed_lo = 0;
+    uint32_t packed_lo_hi = 0;
+    uint32_t packed_hi_lo = 0;
+    uint32_t packed_hi = 0;
 #pragma unroll
-  for (int i = 0; i < VEC_SIZE; ++i) {
-    float q =
-        fminf(fmaxf(static_cast<float>(regs[i]) * inv_y, min_8bit), max_8bit);
-    DST_DTYPE qb = DST_DTYPE(q);
-    uint8_t byte = *reinterpret_cast<uint8_t*>(&qb);
-    const int shift = (i & 3) * 8;
-    if (i < 4) {
-      packed_lo |= static_cast<uint32_t>(byte) << shift;
-    } else if (i < 8) {
-      packed_lo_hi |= static_cast<uint32_t>(byte) << shift;
-    } else if (i < 12) {
-      packed_hi_lo |= static_cast<uint32_t>(byte) << shift;
-    } else {
-      packed_hi |= static_cast<uint32_t>(byte) << shift;
+    for (int i = 0; i < VEC_SIZE; ++i) {
+      float q =
+          fminf(fmaxf(static_cast<float>(regs[i]) * inv_y, min_8bit), max_8bit);
+      DST_DTYPE qb = DST_DTYPE(q);
+      uint8_t byte = *reinterpret_cast<uint8_t*>(&qb);
+      const int shift = (i & 3) * 8;
+      if (i < 4) {
+        packed_lo |= static_cast<uint32_t>(byte) << shift;
+      } else if (i < 8) {
+        packed_lo_hi |= static_cast<uint32_t>(byte) << shift;
+      } else if (i < 12) {
+        packed_hi_lo |= static_cast<uint32_t>(byte) << shift;
+      } else {
+        packed_hi |= static_cast<uint32_t>(byte) << shift;
+      }
     }
-  }
 
-  uint4 packed_out =
-      make_uint4(packed_lo, packed_lo_hi, packed_hi_lo, packed_hi);
+    packed_out = make_uint4(packed_lo, packed_lo_hi, packed_hi_lo, packed_hi);
+  }
   *reinterpret_cast<uint4*>(group_output) = packed_out;
 
 #if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
