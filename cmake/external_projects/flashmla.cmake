@@ -119,8 +119,8 @@ if(FLASH_MLA_ARCHS)
         ${flashmla_SOURCE_DIR}/csrc/cuda_kernels/sm100/prefill/sparse/fused_norm_rope_attn_rope_cast_fwd/permute_q_b_proj/kernel.cu
         ${flashmla_SOURCE_DIR}/csrc/cuda_kernels/sm100/prefill/sparse/fused_norm_rope_attn_rope_cast_fwd/permute_wv_proj/kernel.cu
 
-        # Legacy kernels upstream dropped: V3.2 / V4 (separate scale region in a
-        # page block), NVFP4 and everything on Hopper
+        # Legacy kernels (upstream keeps them under cuda_kernels/legacy/):
+        # V4, V3.2 and V3.2-NVFP4, and everything on Hopper
         ${flashmla_SOURCE_DIR}/csrc/cuda_kernels/legacy/smxx/decode/get_decoding_sched_meta/get_decoding_sched_meta.cu
         ${flashmla_SOURCE_DIR}/csrc/cuda_kernels/legacy/smxx/decode/combine/combine.cu
 

@@ -793,7 +793,7 @@ void launchFusedDeepseekV4QNormRopeKVRopeQuantInsert(
 // backend.  Differences from the legacy path:
 //   * No Q head padding — output Q layout matches the input num_heads_q.
 //   * KV is written as a *contiguous* 512-wide row per token (token-strided),
-//     not the legacy UE8M0 paged layout with a separate scale tail.
+//     not the V4 paged record with a separate scale tail.
 //   * Q/KV are stored either as bf16 or as per-tensor E4M3 FP8 (one global
 //     scale), selected by the STORE_Q_FP8 / STORE_KV_FP8 template flags.
 //

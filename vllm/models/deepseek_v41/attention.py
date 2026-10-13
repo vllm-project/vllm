@@ -517,7 +517,8 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             288 if self.kv_cache_dtype == "nvfp4_ds_mla" else self.swa_bytes_per_token
         )
         # One alignment for every page in the block: the block stride is their
-        # sum. V4's TMA stride is 576 B; V4.1's are on the SWA block stride.
+        # sum. V4 needs its 576 B TMA stride; V4.1's is on the SWA block
+        # stride, and 512 is free (its pages are already 512 B multiples).
         self.kv_page_alignment = 512 if self.kv_mxfp8 else 576
         if self.kv_cache_dtype == "nvfp4_ds_mla" and not self.kv_mxfp8:
             raise ValueError(

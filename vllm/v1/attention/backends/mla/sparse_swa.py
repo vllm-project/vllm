@@ -135,7 +135,7 @@ class DeepseekV4SWACache(torch.nn.Module, AttentionLayerBase):
             state_content_bytes=(
                 self.packed_bytes_per_token if uses_fp8_ds_mla_layout else None
             ),
-            # FlashMLA packing stride; 512B for FlashInfer sparse (#44577).
+            # Packed page alignment; 512B for FlashInfer sparse (#44577).
             alignment=self.packed_page_alignment if uses_fp8_ds_mla_layout else 512,
             block_stride_alignment=(
                 self.packed_block_stride_alignment if uses_fp8_ds_mla_layout else None
