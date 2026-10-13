@@ -16,8 +16,10 @@ from vllm.outputs import (
     CompletionOutput,
     PoolingOutput,
     PoolingRequestOutput,
+    RequestError,
     RequestOutput,
     SamplingMask,
+    WeightVersionSpan,
 )
 from vllm.sampling_params import RequestOutputKind
 from vllm.tokenizers import TokenizerLike
@@ -189,6 +191,8 @@ class RequestState:
         # Routed experts accumulation (prompt + sample chunks)
         self.routed_experts_chunks: list[np.ndarray] = []
         self.sampling_mask_chunks: list[SamplingMaskLists] = []
+        # (weight version, first output-token index) for each span.
+        self.weight_version_starts: list[tuple[str, int]] = []
 
         # Stream Interval
         self.stream_interval = stream_interval
@@ -272,7 +276,7 @@ class RequestState:
             output_kind = request.pooling_params.output_kind
 
         assert request.external_req_id is not None
-        return cls(
+        state = cls(
             request_id=request.request_id,
             external_req_id=request.external_req_id,
             parent_req=parent_req,
@@ -295,6 +299,10 @@ class RequestState:
             stream_input=request.resumable,
             remote_prefill_cached_tokens=remote_prefill_cached_tokens,
         )
+        if state.stats is not None and sampling_params is not None:
+            state.stats.is_watermarked = bool(sampling_params.watermarking)
+            state.stats.is_watermark_skipped = sampling_params._watermarking_skipped
+        return state
 
     def make_request_output(
         self,
@@ -304,6 +312,7 @@ class RequestState:
         stop_reason: int | str | None,
         kv_transfer_params: dict[str, Any] | None = None,
         ec_transfer_params: dict[str, Any] | None = None,
+        error: RequestError | None = None,
     ) -> RequestOutput | PoolingRequestOutput | None:
         finished = finish_reason is not None
         final_only = self.output_kind == RequestOutputKind.FINAL_ONLY
@@ -342,6 +351,7 @@ class RequestState:
                 external_req_id,
                 [self._new_pooling_output(pooling_output)],
                 finished,
+                error=error,
             )
 
         output = self._new_completion_output(new_token_ids, finish_reason, stop_reason)
@@ -369,6 +379,7 @@ class RequestState:
         finished: bool,
         kv_transfer_params: dict[str, Any] | None = None,
         ec_transfer_params: dict[str, Any] | None = None,
+        error: RequestError | None = None,
     ) -> RequestOutput | PoolingRequestOutput:
         # If prompt embeds were used, put placeholder prompt token ids
         prompt_token_ids = self.prompt_token_ids
@@ -385,6 +396,7 @@ class RequestState:
                 num_cached_tokens=self.num_cached_tokens,
                 prompt_token_ids=prompt_token_ids,
                 finished=finished,
+                error=error,
             )
         assert self.logprobs_processor is not None
         if self.output_kind == RequestOutputKind.DELTA:
@@ -439,10 +451,16 @@ class RequestState:
             logprobs = logprobs[-num_new_tokens:] if num_new_tokens else logprobs[:0]
 
         sampling_mask = None
-        if finished and self.sampling_mask_chunks:
+        if (delta or finished) and self.sampling_mask_chunks:
             sampling_mask = SamplingMask(
-                [chunk.token_ids.tolist() for chunk in self.sampling_mask_chunks]
+                [
+                    position
+                    for chunk in self.sampling_mask_chunks
+                    for position in chunk.to_nested_list()
+                ]
             )
+            if delta:
+                self.sampling_mask_chunks.clear()
 
         # Concatenate routed experts on finish
         routed_experts = None
@@ -460,7 +478,24 @@ class RequestState:
             finish_reason=str(finish_reason) if finished else None,
             stop_reason=stop_reason if finished else None,
             spec_decode_metrics=self.spec_decode_metrics if finished else None,
+            weight_versions=self._weight_version_spans() if finished else None,
         )
+
+    def track_weight_version(self, weight_version: str) -> None:
+        """Start a span when the weight version changes."""
+        assert self.detokenizer is not None
+        starts = self.weight_version_starts
+        if not starts or starts[-1][0] != weight_version:
+            starts.append((weight_version, self.detokenizer.num_output_tokens()))
+
+    def _weight_version_spans(self) -> list[WeightVersionSpan] | None:
+        assert self.detokenizer is not None
+        num_tokens = self.detokenizer.num_output_tokens()
+        starts = self.weight_version_starts
+        if not starts and num_tokens:
+            return None  # No label was reported for these tokens.
+        ends = [start for _, start in starts[1:]] + [num_tokens]
+        return [WeightVersionSpan(v, s, e) for (v, s), e in zip(starts, ends)]
 
     def _new_pooling_output(self, pooling_output: torch.Tensor) -> PoolingOutput:
         return PoolingOutput(data=pooling_output)
@@ -648,6 +683,7 @@ class OutputProcessor:
         engine_core_outputs: list[EngineCoreOutput],
         engine_core_timestamp: float | None = None,
         iteration_stats: IterationStats | None = None,
+        weight_version: str | None = None,
     ) -> OutputProcessorOutput:
         """Process the EngineCoreOutputs:
         1) Compute stats for logging
@@ -709,20 +745,40 @@ class OutputProcessor:
             if engine_core_output.spec_decode_metrics is not None:
                 req_state.spec_decode_metrics = engine_core_output.spec_decode_metrics
 
+            request_error = None
+            if (
+                req_state.detokenizer is None
+                and engine_core_output.mm_cache_miss_hashes
+                and finish_reason == FinishReason.ERROR
+            ):
+                request_error = RequestError(
+                    code="multimodal_cache_miss",
+                    message="Multi-modal processor cache miss.",
+                    retryable=True,
+                )
+                pooling_output = EMPTY_CPU_TENSOR
+
             if pooling_output is None:
                 assert req_state.detokenizer is not None
                 assert req_state.logprobs_processor is not None
-                if engine_core_output.new_sampling_mask is not None:
-                    req_state.sampling_mask_chunks.append(
-                        engine_core_output.new_sampling_mask
-                    )
+                if new_token_ids and weight_version is not None:
+                    req_state.track_weight_version(weight_version)
                 # 2) Detokenize the token ids into text and perform stop checks.
+                num_prev_tokens = req_state.detokenizer.num_output_tokens()
                 stop_string = req_state.detokenizer.update(
                     new_token_ids, finish_reason == FinishReason.STOP
                 )
                 if stop_string:
                     finish_reason = FinishReason.STOP
                     stop_reason = stop_string
+                    self._trim_surplus_tokens(
+                        req_state, engine_core_output, num_prev_tokens
+                    )
+
+                if engine_core_output.new_sampling_mask is not None:
+                    req_state.sampling_mask_chunks.append(
+                        engine_core_output.new_sampling_mask
+                    )
 
                 # 3) Compute sample and prompt logprobs for request,
                 # if required.
@@ -736,6 +792,7 @@ class OutputProcessor:
                 stop_reason,
                 kv_transfer_params,
                 ec_transfer_params,
+                error=request_error,
             ):
                 if req_state.streaming_input:
                     request_output.finished = False
@@ -773,6 +830,27 @@ class OutputProcessor:
             request_outputs=request_outputs,
             reqs_to_abort=reqs_to_abort,
         )
+
+    @staticmethod
+    def _trim_surplus_tokens(
+        req_state: RequestState, output: EngineCoreOutput, num_prev_tokens: int
+    ) -> None:
+        """Drop new tokens generated past a stop string matched by the
+        detokenizer, e.g. when multiple tokens are accepted in one step."""
+        assert req_state.detokenizer is not None
+        num_kept = req_state.detokenizer.num_output_tokens() - num_prev_tokens
+        num_dropped = len(output.new_token_ids) - num_kept
+        if num_dropped <= 0:
+            return
+        del output.new_token_ids[num_kept:]
+        if output.new_logprobs is not None:
+            output.new_logprobs = output.new_logprobs.slice_request(0, num_kept)
+        if output.new_sampling_mask is not None:
+            output.new_sampling_mask = output.new_sampling_mask.slice_request(
+                0, num_kept
+            )
+        if output.routed_experts is not None:
+            req_state.routed_experts_chunks[-1] = output.routed_experts[:-num_dropped]
 
     def _finish_request(self, req_state: RequestState) -> None:
         req_id = req_state.request_id

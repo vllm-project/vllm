@@ -4,6 +4,7 @@
 
 import json
 import os
+import sys
 from argparse import BooleanOptionalAction
 
 import pytest
@@ -252,6 +253,28 @@ def test_duplicate_dict_args(caplog_vllm, parser):
     assert "--optimization-level" in caplog_vllm.text
 
 
+@pytest.mark.skipif(
+    sys.version_info >= (3, 13), reason="argparse handles deprecated natively"
+)
+def test_deprecated_arg_scoped_to_subcommand(caplog_vllm, disable_log_dedup):
+    """A deprecated arg of one subcommand must not warn for a sibling
+    subcommand that defines a non-deprecated arg with the same dest."""
+    parser = FlexibleArgumentParser()
+    subparsers = parser.add_subparsers(dest="subcommand")
+    run_batch = subparsers.add_parser("run-batch")
+    run_batch.add_argument_group("Frontend").add_argument(
+        "--url", default="0.0.0.0", deprecated=True
+    )
+    chat = subparsers.add_parser("chat")
+    chat.add_argument("--url", default="http://localhost:8000/v1")
+
+    parser.parse_args(["chat", "--url", "http://localhost:9000/v1"])
+    assert "is deprecated" not in caplog_vllm.text
+
+    parser.parse_args(["run-batch", "--url", "1.2.3.4"])
+    assert caplog_vllm.text.count("argument 'url' is deprecated") == 1
+
+
 def test_model_specification(
     parser_with_config, cli_config_file, cli_config_file_with_model
 ):
@@ -476,32 +499,32 @@ def test_compilation_config_mode_validator():
     """Test that CompilationConfig.mode field validator converts strings to integers."""
     from vllm.config.compilation import CompilationConfig, CompilationMode
 
-    config = CompilationConfig(mode=0)  # type: ignore[arg-type]
+    config = CompilationConfig(mode=0)
     assert config.mode == CompilationMode.NONE
 
-    config = CompilationConfig(mode=3)  # type: ignore[arg-type]
+    config = CompilationConfig(mode=3)
     assert config.mode == CompilationMode.VLLM_COMPILE
 
-    config = CompilationConfig(mode="NONE")  # type: ignore[arg-type]
+    config = CompilationConfig(mode="NONE")
     assert config.mode == CompilationMode.NONE
 
-    config = CompilationConfig(mode="STOCK_TORCH_COMPILE")  # type: ignore[arg-type]
+    config = CompilationConfig(mode="STOCK_TORCH_COMPILE")
     assert config.mode == CompilationMode.STOCK_TORCH_COMPILE
 
-    config = CompilationConfig(mode="DYNAMO_TRACE_ONCE")  # type: ignore[arg-type]
+    config = CompilationConfig(mode="DYNAMO_TRACE_ONCE")
     assert config.mode == CompilationMode.DYNAMO_TRACE_ONCE
 
-    config = CompilationConfig(mode="VLLM_COMPILE")  # type: ignore[arg-type]
+    config = CompilationConfig(mode="VLLM_COMPILE")
     assert config.mode == CompilationMode.VLLM_COMPILE
 
-    config = CompilationConfig(mode="none")  # type: ignore[arg-type]
+    config = CompilationConfig(mode="none")
     assert config.mode == CompilationMode.NONE
 
-    config = CompilationConfig(mode="vllm_compile")  # type: ignore[arg-type]
+    config = CompilationConfig(mode="vllm_compile")
     assert config.mode == CompilationMode.VLLM_COMPILE
 
     with pytest.raises(ValidationError, match="Invalid compilation mode"):
-        CompilationConfig(mode="INVALID_MODE")  # type: ignore[arg-type]
+        CompilationConfig(mode="INVALID_MODE")
 
 
 def test_flat_product():
