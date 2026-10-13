@@ -114,7 +114,7 @@ def launch_state(model, ctx: MonoContext) -> LaunchState:
     )
 
 
-def bind(ctx: MonoContext, caches) -> list[str]:
+def refuse_caches(ctx: MonoContext, caches) -> list[str]:
     reasons = []
     for name, cache in caches.items():
         if str(cache.dtype).removeprefix("torch.") != CACHE.dtype:
@@ -140,7 +140,7 @@ REFERENCE = MonoSpec[LaunchState](
     skip_layer=skip_layer,
     skip_step=skip_step,
     launch_state=launch_state,
-    bind=bind,
+    refuse_caches=refuse_caches,
     build=build,
 )
 

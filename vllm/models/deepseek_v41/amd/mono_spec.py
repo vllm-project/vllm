@@ -436,7 +436,7 @@ def _attn_weights(a, world: int):
     return attn
 
 
-def _bind(ctx: MonoContext, caches) -> list[str]:
+def _refuse_caches(ctx: MonoContext, caches) -> list[str]:
     """Every reason the kernels cannot read these caches: they index each as
     [blocks, block, RECORD] bytes."""
     reasons = []
@@ -495,7 +495,7 @@ MONO_SPEC = MonoSpec[LaunchState](
     skip_layer=_skip_layer,
     skip_step=_skip_step,
     launch_state=_launch_state,
-    bind=_bind,
+    refuse_caches=_refuse_caches,
     build=_build,
 )
 

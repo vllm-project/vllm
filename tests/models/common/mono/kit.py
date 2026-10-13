@@ -91,7 +91,7 @@ class MonoConformance:
         raise NotImplementedError
 
     def bad_caches(self, config, model) -> dict[str, Any]:
-        """Caches that break at least two of ``bind``'s checks at once."""
+        """Caches that break at least two of ``refuse_caches``'s checks."""
         raise NotImplementedError
 
     @pytest.fixture
@@ -189,21 +189,21 @@ class MonoConformance:
         with forward(config, CUDAGraphMode.PIECEWISE, meta):
             assert mono.begin_step(self._positions(mono)) == "piecewise"
 
-    def test_caches_rebind_when_they_move(self, config, model, mono):
-        binds: list = []
-        mono.spec = _spy(mono.spec, "bind", binds)
+    def test_caches_rechecked_when_they_move(self, config, model, mono):
+        checks: list = []
+        mono.spec = _spy(mono.spec, "refuse_caches", checks)
         self._decode(config, model, mono)
-        assert len(binds) == 1
+        assert len(checks) == 1
         self._decode(config, model, mono)
-        assert len(binds) == 1
+        assert len(checks) == 1
         sfc = config.compilation_config.static_forward_context
         for name in mono.cache_layers:
             sfc[name].kv_cache = sfc[name].kv_cache.clone()
         self._decode(config, model, mono)
-        assert len(binds) == 2
+        assert len(checks) == 2
 
-    def test_bind_reports_every_mismatch(self, config, model, mono):
-        reasons = mono.spec.bind(mono.ctx, self.bad_caches(config, model))
+    def test_refuse_caches_reports_every_reason(self, config, model, mono):
+        reasons = mono.spec.refuse_caches(mono.ctx, self.bad_caches(config, model))
         assert len(reasons) >= 2, reasons
 
     def test_mismatched_caches_refuse_the_step(self, config, model, mono):

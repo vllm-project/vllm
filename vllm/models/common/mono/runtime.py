@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""One ``MonoRuntime`` a rank: the per-step decision and cache re-binding."""
+"""One ``MonoRuntime`` a rank: the per-step decision and the cache re-checks."""
 
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -67,7 +67,7 @@ class MonoRuntime:
         self.state: Any = None
         self.width: int | None = None
         self._fc: Any = None
-        self._bound: tuple | None = None
+        self._checked: tuple | None = None
 
         indices = self._kernel_layers(model)
         if not indices:
@@ -117,7 +117,7 @@ class MonoRuntime:
         if owners:
             MonoWarmup(self.spec.name, owners).register_warmup()
 
-    def _bind(self) -> None:
+    def _refuse_caches(self) -> None:
         """Re-checks the caches whenever they moved (keyed on every tensor's
         data_ptr and numel): memory profiling runs real steps on throwaway
         caches before the real ones exist."""
@@ -128,18 +128,18 @@ class MonoRuntime:
             for c in caches.values()
             for t in (c if isinstance(c, (list, tuple)) else (c,))
         )
-        if key == self._bound:
+        if key == self._checked:
             return
         if torch.cuda.is_available() and torch.cuda.is_current_stream_capturing():
             raise MonoUnsupported(
                 f"MonoKernel {self.spec.name}: caches moved during CUDA graph capture"
             )
-        reasons = self.spec.bind(self.ctx, caches)
+        reasons = self.spec.refuse_caches(self.ctx, caches)
         if reasons:
             raise MonoUnsupported(
                 f"MonoKernel {self.spec.name} caches: " + "; ".join(reasons)
             )
-        self._bound = key
+        self._checked = key
 
     def begin_once(self, positions: torch.Tensor) -> None:
         """Decides this forward's step, on the first kernel layer to ask."""
@@ -152,9 +152,6 @@ class MonoRuntime:
         """None runs this step on the kernels (and sets ``width``), else the
         reason it runs vLLM's layers."""
         self.width = None
-        return self._decide(positions)
-
-    def _decide(self, positions: torch.Tensor) -> str | None:
         if get_forward_context().cudagraph_runtime_mode == CUDAGraphMode.PIECEWISE:
             return "piecewise"
         n = positions.size(-1)
@@ -162,6 +159,6 @@ class MonoRuntime:
             return "width"
         why = self.spec.skip_step(self.ctx, self.state, n)
         if why is None:
-            self._bind()
+            self._refuse_caches()
             self.width = n
         return why

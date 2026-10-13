@@ -70,7 +70,7 @@ class LayerKernel(Protocol):
     """One decoder layer's launch, at one width, on this rank."""
 
     cache_layers: tuple[str, ...]
-    """Attention layers whose caches ``MonoSpec.bind`` checks."""
+    """Attention layers whose caches ``MonoSpec.refuse_caches`` checks."""
 
     def launch(self, *args, **kwargs) -> Any:
         """Takes and returns what the vLLM layer it replaces does, or None to
@@ -131,7 +131,8 @@ class MonoSpec(Generic[LaunchStateT]):
         launch_state: The weights and launch state, built once at attach. The
             only place a weight copy is ever made. Opaque to the library, which
             only hands it back to the spec's own callbacks.
-        bind: Checks the KV caches the kernels will read, on every re-bind.
+        refuse_caches: Deployment refusals the KV caches the kernels will read
+            answer, re-run whenever those caches move.
         build: One ``LayerKernel`` for (context, state, layer, width).
 
     """
@@ -153,5 +154,5 @@ class MonoSpec(Generic[LaunchStateT]):
 
     # Callbacks
     launch_state: Callable[[Any, MonoContext], LaunchStateT]
-    bind: Callable[[MonoContext, Mapping[str, Any]], list[str]]
+    refuse_caches: Callable[[MonoContext, Mapping[str, Any]], list[str]]
     build: Callable[[MonoContext, LaunchStateT, Any, int], LayerKernel]
