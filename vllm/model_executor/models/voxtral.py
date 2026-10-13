@@ -23,6 +23,7 @@ from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.config.speech_to_text import SpeechToTextParams
 from vllm.inputs import MultiModalDataDict, PromptType, TokensPrompt
 from vllm.logger import init_logger
+from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models import SupportsPP
@@ -35,6 +36,7 @@ from vllm.model_executor.models.whisper_causal import WhisperCausalEncoder
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
+    MultiModalKwargsItem,
     MultiModalKwargsItems,
     NestedTensors,
 )
@@ -311,6 +313,8 @@ class VoxtralForConditionalGeneration(
         "gate_up_proj": ["gate_proj", "up_proj"],
     }
 
+    supports_tower_connector_lora = True
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         self.tokenizer = cached_tokenizer_from_config(vllm_config.model_config)
@@ -341,6 +345,8 @@ class VoxtralForConditionalGeneration(
             self.audio_language_adapter = AudioLanguageAdapter(
                 hidden_size=config.audio_config.d_model * self.downsample_factor,
                 dim=config.text_config.hidden_size,
+                quant_config=vllm_config.quant_config,
+                prefix=maybe_prefix(prefix, "audio_language_adapter"),
             )
 
         self.make_empty_intermediate_tensors = (
@@ -353,6 +359,45 @@ class VoxtralForConditionalGeneration(
             language_model="language_model",
             connector="audio_language_adapter",
             tower_model=["whisper_encoder"],
+        )
+
+    def get_mm_lora_token_counts(
+        self,
+        *,
+        modality: str,
+        mm_kwargs: MultiModalKwargsItem | None,
+        num_mm_embeds: int,
+    ) -> tuple[int, int | None]:
+        """Return ``(tower_tokens, connector_tokens)`` for multimodal LoRA.
+
+        The feature extractor pads every audio independently to whole
+        30-second chunks, so the whisper tower always runs on
+        ``num_chunks * max_source_positions`` tokens per item, while the
+        adapter consumes exactly one row per LM audio embed (see
+        ``embed_multimodal``).
+
+        With ``mm_kwargs``, the chunk count is derived from the item's padded
+        audio array, mirroring ``VoxtralEncoderModel.prepare_inputs_for_conv``.
+        Without it (punica wrapper sizing from the encoder budget, or an item
+        served from the encoder cache), both counts are ceiled to whole
+        chunks: every scheduled item contributes chunk-padded embeds, so a
+        batch within an unaligned budget can exceed the raw budget (encoder
+        profiling runs ``ceil(budget / item_embeds)`` maximum-size items).
+        """
+        del modality
+        audio_config = self.config.audio_config
+        if mm_kwargs is not None:
+            audio_arr = mm_kwargs.get_data()["audio_arrays"]
+            chunk_samples = self.whisper_encoder.chunk_size * audio_config.hop_length
+            num_chunks = math.ceil(len(audio_arr) / chunk_samples)
+            return num_chunks * audio_config.max_source_positions, num_mm_embeds
+        tokens_per_chunk = math.ceil(
+            audio_config.max_source_positions / self.downsample_factor
+        )
+        num_chunks = math.ceil(num_mm_embeds / tokens_per_chunk)
+        return (
+            num_chunks * audio_config.max_source_positions,
+            num_chunks * tokens_per_chunk,
         )
 
     def forward(
@@ -542,8 +587,11 @@ class VoxtralForConditionalGeneration(
 
                 if name in audio_params:
                     param = audio_params[name]
+                    weight_loader = getattr(
+                        param, "weight_loader", default_weight_loader
+                    )
                     with torch.no_grad():
-                        default_weight_loader(param, w)
+                        weight_loader(param, w)
                     loaded_weights.add(name)
                 else:
                     yield (name, w)
@@ -649,14 +697,37 @@ class VoxtralForConditionalGeneration(
 
 
 class AudioLanguageAdapter(nn.Module):
-    def __init__(self, hidden_size: int, dim: int) -> None:
+    def __init__(
+        self,
+        hidden_size: int,
+        dim: int,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
+    ) -> None:
         super().__init__()
-        self.w_in = nn.Linear(hidden_size, dim, bias=False)
+        # ReplicatedLinear (a vLLM-native linear) so the connector can be
+        # wrapped for LoRA; a plain nn.Linear is left unwrapped by from_layer.
+        self.w_in = ReplicatedLinear(
+            hidden_size,
+            dim,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.w_in",
+        )
         self.gelu = nn.GELU()
-        self.w_out = nn.Linear(dim, dim, bias=False)
+        self.w_out = ReplicatedLinear(
+            dim,
+            dim,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.w_out",
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.w_out(self.gelu(self.w_in(x)))
+        x, _ = self.w_in(x)
+        x = self.gelu(x)
+        x, _ = self.w_out(x)
+        return x
 
 
 class VoxtralEncoderModel(nn.Module):
