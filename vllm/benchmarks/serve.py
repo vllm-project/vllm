@@ -408,8 +408,38 @@ def get_request_delays(
     ramp_up_end_rps: int | None = None,
     self_timed: bool = False,
 ) -> tuple[list[float], list[float]]:
-    """Send time of each request in seconds after the first, and the request
-    rate in effect when it is sent. See `get_request` for the arguments."""
+    """Send times of requests at a specified rate with OPTIONAL burstiness
+    and OPTIONAL ramp-up strategy.
+
+    Args:
+        input_requests:
+            A list of input requests, each represented as a SampleRequest.
+        self_timed:
+            If True, the requests carry their own arrival timing and no
+            request rate, burstiness or ramp-up is applied.
+        request_rate:
+            The rate at which requests are generated (requests/s).
+        burstiness (optional):
+            The burstiness factor of the request generation.
+            Only takes effect when request_rate is not inf.
+            Default value is 1, which follows a Poisson process.
+            Otherwise, the request intervals follow a gamma distribution.
+            A lower burstiness value (0 < burstiness < 1) results
+            in more bursty requests, while a higher burstiness value
+            (burstiness > 1) results in a more uniform arrival of requests.
+        ramp_up_strategy (optional):
+            The ramp-up strategy. Can be "linear" or "exponential".
+            If None, uses constant request rate (specified by request_rate).
+        ramp_up_start_rps (optional):
+            The starting request rate for ramp-up.
+        ramp_up_end_rps (optional):
+            The ending request rate for ramp-up.
+
+    Returns:
+        Each request's send time in seconds after the first, and the request
+        rate in effect when it is sent.
+
+    """
     assert burstiness > 0, (
         f"A positive burstiness factor is expected, but given {burstiness}."
     )
@@ -488,45 +518,18 @@ async def get_request(
     ramp_up_end_rps: int | None = None,
     self_timed: bool = False,
 ) -> AsyncGenerator[tuple[SampleRequest, float], None]:
-    """Asynchronously generates requests at a specified rate
-    with OPTIONAL burstiness and OPTIONAL ramp-up strategy.
-
-    Args:
-        input_requests:
-            A list of input requests, each represented as a SampleRequest.
-        self_timed:
-            If True, the requests carry their own arrival timing and no
-            request rate, burstiness or ramp-up is applied.
-        request_rate:
-            The rate at which requests are generated (requests/s).
-        burstiness (optional):
-            The burstiness factor of the request generation.
-            Only takes effect when request_rate is not inf.
-            Default value is 1, which follows a Poisson process.
-            Otherwise, the request intervals follow a gamma distribution.
-            A lower burstiness value (0 < burstiness < 1) results
-            in more bursty requests, while a higher burstiness value
-            (burstiness > 1) results in a more uniform arrival of requests.
-        ramp_up_strategy (optional):
-            The ramp-up strategy. Can be "linear" or "exponential".
-            If None, uses constant request rate (specified by request_rate).
-        ramp_up_start_rps (optional):
-            The starting request rate for ramp-up.
-        ramp_up_end_rps (optional):
-            The ending request rate for ramp-up.
-
-    """
+    """Yield each request at its send time (see `get_request_delays`)."""
     # Convert to list to get length for ramp-up calculations
     if isinstance(input_requests, Iterable) and not isinstance(input_requests, list):
         input_requests = list(input_requests)
     delay_ts, request_rates = get_request_delays(
         input_requests,
         request_rate,
-        burstiness,
-        ramp_up_strategy,
-        ramp_up_start_rps,
-        ramp_up_end_rps,
-        self_timed,
+        burstiness=burstiness,
+        ramp_up_strategy=ramp_up_strategy,
+        ramp_up_start_rps=ramp_up_start_rps,
+        ramp_up_end_rps=ramp_up_end_rps,
+        self_timed=self_timed,
     )
 
     start_ts = time.time()

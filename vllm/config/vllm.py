@@ -707,6 +707,14 @@ class VllmConfig:
     @property
     def use_v2_model_runner(self) -> bool:
         if self.simulation_config.simulate_forward:
+            unsupported = self._get_v2_model_runner_unsupported_features()
+            if envs.VLLM_USE_V2_MODEL_RUNNER is False or not HAS_TRITON:
+                unsupported.append("VLLM_USE_V2_MODEL_RUNNER=0 or no Triton")
+            if unsupported:
+                raise ValueError(
+                    "Simulated forward runs on Model Runner V2, which does not "
+                    f"support {', '.join(unsupported)}."
+                )
             return True
 
         if self.attention_config.hisparse_config is not None:

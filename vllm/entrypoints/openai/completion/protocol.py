@@ -246,7 +246,7 @@ class CompletionRequest(OpenAIBaseModel):
     trace_decode_token_ids: list[int] | None = Field(
         default=None,
         description="Output token IDs to replay instead of sampling. "
-        "Requires the server to run with `--enable-trace-replay`.",
+        "Requires `--enable-trace-replay` or `--simulate-forward`.",
     )
 
     repetition_detection: RepetitionDetectionParams | None = Field(

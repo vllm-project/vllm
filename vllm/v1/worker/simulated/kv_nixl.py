@@ -38,7 +38,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.connector import (
     NixlBaseConnector,
-    NixlPullConnector,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl.connector import (
+    NixlPullConnector as RealNixlPullConnector,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.connector import (
     NixlPushConnector as RealNixlPushConnector,
@@ -833,7 +835,7 @@ class SimulatedNixlPushWorker(SimulatedNixlWorker):
         return min(times, default=None)
 
 
-class NixlConnector(NixlPullConnector):
+class NixlConnector(RealNixlPullConnector):
     """The pull-mode NixlConnector with a simulated worker side. It keeps the
     real connector's name, which configuration checks look for."""
 
@@ -887,3 +889,10 @@ class NixlPushConnector(RealNixlPushConnector):
 
     def set_xfer_handshake_metadata_pp_aware(self, metadata: dict) -> None:
         """No handshake: simulated ranks book transfers at each other's ports."""
+
+
+NixlPullConnector = NixlConnector
+
+# The connector names (vllm.distributed.kv_transfer.kv_connector.factory)
+# whose worker side this module simulates.
+SIMULATED_CONNECTORS = ("NixlConnector", "NixlPullConnector", "NixlPushConnector")

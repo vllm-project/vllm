@@ -38,7 +38,7 @@ SIMULATED_FORWARD_MODELS = [
                     "kv_role": "kv_both",
                 }
             },
-            "not ExampleConnector",
+            "ExampleConnector connector",
         ),
         (
             {"simulation_config": {"clock": "virtual"}, "tensor_parallel_size": 2},

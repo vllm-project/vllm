@@ -20,6 +20,7 @@ import numpy as np
 import torch
 
 from vllm.config import VllmConfig
+from vllm.config.simulation import KVTransferTiming
 from vllm.distributed.kv_transfer import get_kv_transfer_group
 from vllm.distributed.kv_transfer.kv_connector.utils import BlockIds
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
@@ -108,35 +109,27 @@ class TransferRate:
 
 
 def kv_transfer_rates(
-    timing: dict[str, float] | str,
+    timing: KVTransferTiming | str,
 ) -> tuple[TransferRate, TransferRate | None]:
-    """(load, store) rates from `SimulationConfig.kv_transfer_timing`; store
-    is None if not given."""
+    """(load, store) rates of `SimulationConfig.kv_transfer_timing`; store is
+    None if not given."""
     if isinstance(timing, str):
         return transfer_rates_from_log(timing)
-    load, store = (
-        TransferRate(
-            latency_s=timing.get(f"{direction}_latency_us", 0.0) * 1e-6,
-            bytes_per_s=timing[f"{direction}_gbps"] * 1e9,
-        )
-        if f"{direction}_gbps" in timing
+    assert timing.load_gbps is not None
+    load = TransferRate(timing.load_latency_us * 1e-6, timing.load_gbps * 1e9)
+    store = (
+        TransferRate(timing.store_latency_us * 1e-6, timing.store_gbps * 1e9)
+        if timing.store_gbps is not None
         else None
-        for direction in ("load", "store")
     )
-    assert load is not None
     return load, store
 
 
-def kv_post_cost(timing: dict[str, float] | str) -> PostCost:
-    """The NIXL read posting cost from `SimulationConfig.kv_transfer_timing`:
-    `post_us_per_read` and `post_us_per_run`, or fitted from a step log
-    (zero if it recorded none)."""
+def kv_post_cost(timing: KVTransferTiming | str) -> PostCost:
+    """NIXL read posting cost of `SimulationConfig.kv_transfer_timing`."""
     if isinstance(timing, str):
         return post_cost_from_log(timing)
-    return PostCost(
-        per_read_s=timing.get("post_us_per_read", 0.0) * 1e-6,
-        per_run_s=timing.get("post_us_per_run", 0.0) * 1e-6,
-    )
+    return PostCost(timing.post_us_per_read * 1e-6, timing.post_us_per_run * 1e-6)
 
 
 def post_cost_from_log(path: str) -> PostCost:

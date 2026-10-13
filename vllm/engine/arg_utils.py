@@ -122,8 +122,8 @@ from vllm.logger import configure_logging_if_needed, init_logger, suppress_loggi
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.plugins import load_general_plugins
 from vllm.ray.lazy_utils import is_in_ray_actor, is_ray_initialized
-from vllm.transformers_utils.config import maybe_override_with_speculators
-from vllm.transformers_utils.repo_utils import get_hf_file_to_dict, get_model_path
+from vllm.transformers_utils.config import get_config, maybe_override_with_speculators
+from vllm.transformers_utils.repo_utils import get_model_path
 from vllm.transformers_utils.utils import is_cloud_storage
 from vllm.utils.argparse_utils import (
     FlexibleArgumentParser,
@@ -2031,9 +2031,7 @@ class EngineArgs:
             max_logprobs=self.max_logprobs,
             logprobs_mode=self.logprobs_mode,
             use_fp64_gumbel=self.use_fp64_gumbel,
-            # Lets simulated requests carry their output tokens
-            # (trace_decode_token_ids).
-            enable_trace_replay=self.enable_trace_replay or self.simulate_forward,
+            enable_trace_replay=self.enable_trace_replay,
             disable_sliding_window=self.disable_sliding_window,
             skip_tokenizer_init=self.skip_tokenizer_init,
             enable_prompt_embeds=self.enable_prompt_embeds,
@@ -2311,13 +2309,17 @@ class EngineArgs:
             self.kv_cache_dtype, model_config
         )
         if self.simulate_forward and resolved_cache_dtype == "auto":
-            # The model config's quantization config was dropped; the
-            # checkpoint's still sets the KV cache dtype.
-            checkpoint = get_hf_file_to_dict(
-                "config.json", self.hf_config_path or self.model, self.revision
+            # The checkpoint's quantization config, dropped from the model
+            # config, still sets the KV cache dtype.
+            checkpoint = get_config(
+                model_config.hf_config_path or model_config.model,
+                model_config.trust_remote_code,
+                model_config.revision,
+                model_config.code_revision,
+                model_config.config_format,
             )
-            quant_cfg = (checkpoint or {}).get("quantization_config")
-            if quant_cfg:
+            quant_cfg = getattr(checkpoint, "quantization_config", None)
+            if isinstance(quant_cfg, dict):
                 resolved_cache_dtype = (
                     get_kv_cache_quant_algo_string(quant_cfg) or "auto"
                 )

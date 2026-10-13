@@ -23,6 +23,9 @@ from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from .interface import CpuArchEnum, Platform, PlatformEnum
 
+# The CPU attention backend's block size granularity (CPUAttentionBackend).
+_CPU_ATTN_BLOCK_MULTIPLE = 32
+
 logger = init_logger(__name__)
 
 if TYPE_CHECKING:
@@ -215,8 +218,7 @@ class CpuPlatform(Platform):
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
         model_config = vllm_config.model_config
-        # A simulation models a GPU deployment: it keeps that deployment's
-        # scheduling settings rather than the CPU platform's defaults.
+        # A simulation keeps the settings of the GPU deployment it models.
         simulated = vllm_config.simulation_config.simulate_forward
 
         # Import lazily: vllm.triton_utils imports vllm.platforms.current_platform,
@@ -293,19 +295,19 @@ class CpuPlatform(Platform):
                 )
             cache_config.block_size = 256
         elif not cache_config.user_specified_block_size:
-            # The GPU default block size (16) is below the CPU attention
-            # backend's minimum; a simulation takes that minimum, the closest
-            # prefix-caching granularity.
-            cache_config.block_size = 32 if simulated else 128
+            # A simulation takes the minimum, the closest to the GPU default.
+            cache_config.block_size = _CPU_ATTN_BLOCK_MULTIPLE if simulated else 128
 
-        if simulated and not reference_cpu_mla_enabled:
-            if cache_config.block_size % 32 != 0:
+        if (
+            not reference_cpu_mla_enabled
+            and cache_config.block_size % _CPU_ATTN_BLOCK_MULTIPLE != 0
+        ):
+            if simulated:
                 raise ValueError(
                     "Simulated execution on the CPU platform needs a KV block "
-                    "size that is a multiple of 32 (CPU attention backend), "
+                    f"size that is a multiple of {_CPU_ATTN_BLOCK_MULTIPLE}, "
                     f"got {cache_config.block_size}."
                 )
-        elif not reference_cpu_mla_enabled and cache_config.block_size % 32 != 0:
             logger.warning(
                 "CPU backend prefers block_size is multiples of 32, "
                 "otherwise the performance is not optimized."
@@ -357,12 +359,7 @@ class CpuPlatform(Platform):
             parallel_config.distributed_executor_backend = "mp"
 
         if parallel_config.worker_cls == "auto":
-            if simulated:
-                parallel_config.worker_cls = (
-                    "vllm.v1.worker.simulated.worker.SimulatedWorker"
-                )
-            else:
-                parallel_config.worker_cls = "vllm.v1.worker.cpu_worker.CPUWorker"
+            parallel_config.worker_cls = "vllm.v1.worker.cpu_worker.CPUWorker"
         # Disable DBO
         if parallel_config.enable_dbo:
             logger.warning_once("Dual-Batch Overlap is not supported on CPU, disabled.")

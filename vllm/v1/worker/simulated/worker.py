@@ -3,8 +3,6 @@
 """Worker for simulated execution: no weights, no KV tensors, no forward."""
 
 # ruff: noqa: E402
-import os
-
 import torch
 
 from vllm.platforms import current_platform
@@ -20,11 +18,7 @@ from vllm.logger import init_logger
 from vllm.utils.mem_utils import format_gib
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.kv_cache_interface import KVCacheConfig
-from vllm.v1.worker.gpu_worker import (
-    Worker,
-    dp_adjusted_local_rank,
-    init_worker_distributed_environment,
-)
+from vllm.v1.worker.gpu_worker import Worker, init_worker_distributed_environment
 from vllm.v1.worker.simulated.model_runner import SimulatedModelRunner
 from vllm.v1.worker.worker_base import CompilationTimes
 
@@ -42,30 +36,13 @@ class SimulatedWorker(Worker):
     either way."""
 
     def init_device(self) -> None:
-        # Nothing to reduce across ranks; the custom all-reduce needs P2P probes.
-        self.parallel_config.disable_custom_all_reduce = True
-
         if current_platform.is_cuda_alike():
-            self.local_rank = dp_adjusted_local_rank(
-                self.parallel_config, self.local_rank
-            )
-            assert self.local_rank < torch.accelerator.device_count(), (
-                f"local rank {self.local_rank} is out of bounds for "
-                f"{torch.accelerator.device_count()} devices"
-            )
-            visible = current_platform.logical_device_id_to_visible_device_id(
-                self.local_rank
-            )
-            self.device = torch.device(f"{current_platform.device_type}:{visible}")
-            torch.accelerator.set_device_index(self.device)
+            self._bind_device()
         else:
+            from vllm.v1.worker.cpu_worker import set_dist_ident
+
             self.device = torch.device("cpu")
-            init_method = self.distributed_init_method
-            os.environ["VLLM_DIST_IDENT"] = (
-                os.path.basename(init_method.removeprefix("file://"))
-                if init_method.startswith("file://")
-                else init_method.split(":")[-1]
-            )
+            set_dist_ident(self.distributed_init_method)
 
         init_worker_distributed_environment(
             self.vllm_config,

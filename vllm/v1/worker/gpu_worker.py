@@ -18,7 +18,6 @@ import torch.nn as nn
 import vllm.envs as envs
 from vllm.config import (
     CUDAGraphMode,
-    ParallelConfig,
     VllmConfig,
     set_current_vllm_config,
     update_config,
@@ -433,55 +432,77 @@ class Worker(WorkerBase):
         finally:
             torch._C._accelerator_setAllocatorSettings(original_settings)
 
+    def _bind_device(self) -> None:
+        """Bind this rank's CUDA device, adjusting the local rank for DP."""
+        parallel_config = self.parallel_config
+        if (
+            parallel_config.distributed_executor_backend
+            not in ("ray", "external_launcher")
+            and parallel_config.data_parallel_backend != "ray"
+            and parallel_config.nnodes_within_dp == 1
+        ):
+            # Use local DP rank if available, otherwise use global DP rank.
+            dp_local_rank = self.parallel_config.data_parallel_rank_local
+            if dp_local_rank is None:
+                dp_local_rank = self.parallel_config.data_parallel_index
+
+            tp_pcp_pp_world_size = (
+                self.parallel_config.pipeline_parallel_size
+                * self.parallel_config.prefill_context_parallel_size
+                * self.parallel_config.tensor_parallel_size
+            )
+
+            # DP_LOCAL_RANK * TP_PCP_PP_WORLD_SIZE + TP_LOCAL_RANK
+            self.local_rank += dp_local_rank * tp_pcp_pp_world_size
+
+        # Publish the logical-to-physical mapping for topology queries
+        # such as NIC affinity and P2P checks.
+        assigned_physical_gpu_ids = parallel_config.assigned_physical_gpu_ids
+        if assigned_physical_gpu_ids is not None:
+            from vllm.platforms.interface import set_assigned_physical_gpu_ids
+
+            set_assigned_physical_gpu_ids(assigned_physical_gpu_ids)
+            assert self.local_rank < len(assigned_physical_gpu_ids), (
+                f"local_rank {self.local_rank} is out of bounds for "
+                f"assigned_physical_gpu_ids {assigned_physical_gpu_ids}"
+            )
+            # NOTE(patch pr45026): local_world_size is derived from
+            # parallel_config.nnodes, which is only set for the "mp"
+            # multi-node backend. With the "ray"/"external_launcher"
+            # backends nnodes stays 1, so local_world_size collapses to
+            # the full world_size and this check wrongly fires on
+            # cross-node deployments. assigned_physical_gpu_ids is already
+            # per-node and the local_rank bound above fully validates the
+            # mapping for these backends, so skip the check for them.
+            if parallel_config.distributed_executor_backend not in (
+                "ray",
+                "external_launcher",
+            ):
+                assert self.parallel_config.local_world_size <= len(
+                    assigned_physical_gpu_ids
+                ), (
+                    f"local_world_size ({self.parallel_config.local_world_size})"
+                    " exceeds assigned_physical_gpu_ids count "
+                    f"({len(assigned_physical_gpu_ids)})"
+                )
+        else:
+            assert self.local_rank < torch.accelerator.device_count(), (
+                f"DP adjusted local rank {self.local_rank} is out of "
+                f"bounds for {torch.accelerator.device_count()} devices."
+            )
+
+        visible_device_index = current_platform.logical_device_id_to_visible_device_id(
+            self.local_rank
+        )
+        self.device = torch.device(f"cuda:{visible_device_index}")
+        torch.accelerator.set_device_index(self.device)
+
     @instrument(span_name="Init device")
     def init_device(self):
         if self.device_config.device_type == "cuda":
             # This env var set by Ray causes exceptions with graph building.
             os.environ.pop("NCCL_ASYNC_ERROR_HANDLING", None)
-            parallel_config = self.parallel_config
-            self.local_rank = dp_adjusted_local_rank(parallel_config, self.local_rank)
-
-            # Publish the logical-to-physical mapping for topology queries
-            # such as NIC affinity and P2P checks.
-            assigned_physical_gpu_ids = parallel_config.assigned_physical_gpu_ids
-            if assigned_physical_gpu_ids is not None:
-                from vllm.platforms.interface import set_assigned_physical_gpu_ids
-
-                set_assigned_physical_gpu_ids(assigned_physical_gpu_ids)
-                assert self.local_rank < len(assigned_physical_gpu_ids), (
-                    f"local_rank {self.local_rank} is out of bounds for "
-                    f"assigned_physical_gpu_ids {assigned_physical_gpu_ids}"
-                )
-                # NOTE(patch pr45026): local_world_size is derived from
-                # parallel_config.nnodes, which is only set for the "mp"
-                # multi-node backend. With the "ray"/"external_launcher"
-                # backends nnodes stays 1, so local_world_size collapses to
-                # the full world_size and this check wrongly fires on
-                # cross-node deployments. assigned_physical_gpu_ids is already
-                # per-node and the local_rank bound above fully validates the
-                # mapping for these backends, so skip the check for them.
-                if parallel_config.distributed_executor_backend not in (
-                    "ray",
-                    "external_launcher",
-                ):
-                    assert self.parallel_config.local_world_size <= len(
-                        assigned_physical_gpu_ids
-                    ), (
-                        f"local_world_size ({self.parallel_config.local_world_size})"
-                        " exceeds assigned_physical_gpu_ids count "
-                        f"({len(assigned_physical_gpu_ids)})"
-                    )
-            else:
-                assert self.local_rank < torch.accelerator.device_count(), (
-                    f"DP adjusted local rank {self.local_rank} is out of "
-                    f"bounds for {torch.accelerator.device_count()} devices."
-                )
-
-            visible_device_index = (
-                current_platform.logical_device_id_to_visible_device_id(self.local_rank)
-            )
-            self.device = torch.device(f"cuda:{visible_device_index}")
-            torch.accelerator.set_device_index(self.device)
+            self._bind_device()
 
             current_platform.check_if_supports_dtype(self.model_config.dtype)
 
@@ -1618,28 +1639,6 @@ class Worker(WorkerBase):
 
     def elastic_ep_execute(self, execute_method: str, *args, **kwargs):
         return self.elastic_ep_executor.execute(execute_method, *args, **kwargs)
-
-
-def dp_adjusted_local_rank(parallel_config: ParallelConfig, local_rank: int) -> int:
-    """The local device index of a rank: with one node per DP group and the
-    multiprocessing backend, local DP ranks take consecutive blocks of
-    devices (DP_LOCAL_RANK * TP_PCP_PP_WORLD_SIZE + TP_LOCAL_RANK)."""
-    if (
-        parallel_config.distributed_executor_backend in ("ray", "external_launcher")
-        or parallel_config.data_parallel_backend == "ray"
-        or parallel_config.nnodes_within_dp != 1
-    ):
-        return local_rank
-    # Use local DP rank if available, otherwise use global DP rank.
-    dp_local_rank = parallel_config.data_parallel_rank_local
-    if dp_local_rank is None:
-        dp_local_rank = parallel_config.data_parallel_index
-    tp_pcp_pp_world_size = (
-        parallel_config.pipeline_parallel_size
-        * parallel_config.prefill_context_parallel_size
-        * parallel_config.tensor_parallel_size
-    )
-    return local_rank + dp_local_rank * tp_pcp_pp_world_size
 
 
 def init_worker_distributed_environment(

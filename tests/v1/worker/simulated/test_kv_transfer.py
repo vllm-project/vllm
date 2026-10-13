@@ -80,9 +80,11 @@ def test_kv_transfer_rates_fitted_from_log(tmp_path):
 
 
 def test_kv_transfer_rates_without_stores(tmp_path):
+    from vllm.config.simulation import KVTransferTiming
     from vllm.v1.worker.simulated.kv_transfer import kv_transfer_rates
 
-    load, store = kv_transfer_rates({"load_gbps": 2.0, "load_latency_us": 5.0})
+    timing = KVTransferTiming(load_gbps=2.0, load_latency_us=5.0)
+    load, store = kv_transfer_rates(timing)
     assert (load.bytes_per_s, load.latency_s, store) == (2e9, pytest.approx(5e-6), None)
     # A disaggregated decode instance's recording has reads only.
     path = tmp_path / "steps.jsonl"

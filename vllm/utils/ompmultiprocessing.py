@@ -16,9 +16,13 @@ from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.utils.cpu_resource_utils import LogicalCPUInfo
 from vllm.utils.system_utils import set_env_var
+from vllm.utils.torch_utils import startup_omp_num_threads
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+
+# OpenMP threads of a simulated worker.
+_SIMULATED_MAX_OMP_THREADS = 4
 
 logger = init_logger(__name__)
 
@@ -32,6 +36,7 @@ class OMPProcessManager:
         self.simulated = config.simulation_config.simulate_forward
         if self.simulated:
             # Simulated workers are not bound to cores (configure_omp_envs()).
+            self.skip_setup = True
             if envs.VLLM_CPU_OMP_THREADS_BIND not in ("auto", "nobind"):
                 logger.warning(
                     "Ignoring VLLM_CPU_OMP_THREADS_BIND=%s: simulated workers "
@@ -81,11 +86,14 @@ class OMPProcessManager:
     @contextmanager
     def configure_omp_envs(self, rank: int, local_rank: int):
         if current_platform.is_cpu() and self.simulated:
-            # Simulated workers run only small input-preparation kernels, which
-            # gain nothing past a few threads: cap each rank's pool rather than
-            # giving it its own cores, so that any number of ranks fits.
-            threads = max(1, min(4, (os.cpu_count() or 1) // self.local_world_size))
-            with set_env_var("OMP_NUM_THREADS", str(threads)):
+            # Simulated workers run only small kernels: share the host's cores.
+            threads = min(
+                _SIMULATED_MAX_OMP_THREADS,
+                startup_omp_num_threads(self.local_world_size),
+            )
+            with set_env_var(
+                "OMP_NUM_THREADS", os.environ.get("OMP_NUM_THREADS", str(threads))
+            ):
                 yield
             return
         if not current_platform.is_cpu() or self.skip_setup:
