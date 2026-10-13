@@ -131,9 +131,10 @@ def run_config_tuning(
 
 
 def _tables() -> list[TunableConfigTable]:
+    from vllm.model_executor.warmup.fused_moe_autotune import FusedMoEConfigTable
     from vllm.model_executor.warmup.mamba_ssu_autotune import MambaSSUConfigTable
 
-    return [MambaSSUConfigTable()]
+    return [MambaSSUConfigTable(), FusedMoEConfigTable()]
 
 
 def triton_autotune(worker: Worker) -> None:
