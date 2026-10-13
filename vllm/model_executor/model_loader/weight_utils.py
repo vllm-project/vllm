@@ -1521,18 +1521,54 @@ def composed_weight_loader(
     return composed_loader
 
 
+# E8M0 byte 120 encodes 2**-7: with packed FP4 (|x| <= 6) or the FP8 dummy
+# range below, the dequantized weights stay small and finite.
+_DUMMY_E8M0_SCALE_BYTE = 120
+# Default dummy range of 8-bit floats. +-1e-3 is below FP8 E4M3's smallest
+# normal (2**-6), so it would mostly round to zero or subnormals.
+_DUMMY_FP8_RANGE = 1.0
+
+
 @torch.no_grad()
 def initialize_single_dummy_weight(
     param: torch.Tensor,
-    low: float = -1e-3,
-    high: float = 1e-3,
+    low: float | None = None,
+    high: float | None = None,
     seed: int = 1234,
+    name: str = "",
 ) -> None:
+    """Fill `param` with deterministic dummy values suited to its dtype.
+
+    8-bit integer and packed FP4 params get random bytes (every FP4 code is
+    finite), except uint8 params named like a scale, which hold E8M0 scales
+    and get a fixed exponent. Other integer params (e.g. indices) are left
+    untouched. Float params are sampled from `[low, high]`, which defaults to
+    +-1e-3, or +-1 for 8-bit floats.
+    """
     if param.device.type == "meta":
         return  # deferred to finalize_layerwise_processing (e.g. online quant)
 
     if (dummy_weight_value := getattr(param, "dummy_weight_value", None)) is not None:
         param.fill_(dummy_weight_value)
+        return
+
+    is_e8m0 = param.dtype == torch.float8_e8m0fnu or (
+        param.dtype == torch.uint8 and "scale" in name
+    )
+    if is_e8m0:
+        param.view(torch.uint8).fill_(_DUMMY_E8M0_SCALE_BYTE)
+        return
+
+    if (
+        param.dtype in (torch.uint8, torch.int8, torch.float4_e2m1fn_x2)
+        and not current_platform.is_tpu()
+    ):
+        generator = torch.Generator(device=param.device)
+        generator.manual_seed(seed)
+        if param.dtype == torch.int8:
+            param.random_(-128, 128, generator=generator)
+        else:
+            param.view(torch.uint8).random_(0, 256, generator=generator)
         return
 
     if not torch.is_floating_point(param):
@@ -1542,6 +1578,13 @@ def initialize_single_dummy_weight(
             # across processes. Zero them for reproducibility.
             param.zero_()
         return
+
+    if low is None or high is None:
+        dummy_range = 1e-3
+        if torch.finfo(param.dtype).bits < 16:
+            dummy_range = _DUMMY_FP8_RANGE
+        low = -dummy_range if low is None else low
+        high = dummy_range if high is None else high
 
     if current_platform.is_tpu():
         generator = torch.Generator(device="cpu")
