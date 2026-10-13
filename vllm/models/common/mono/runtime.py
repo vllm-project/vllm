@@ -24,6 +24,7 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
+from vllm.models.common.mono.kernels import MonoKernels
 from vllm.models.common.mono.spec import MonoSpec
 
 logger = init_logger(__name__)
@@ -50,8 +51,7 @@ NO_STEP = StepDecision("not started")
 @dataclass
 class _Reserved:
     scratch: torch.Tensor | None = None
-    peer: Any = None
-    owner: Any = None
+    kernels: MonoKernels | None = None
     width: int | None = None
 
 
@@ -110,6 +110,7 @@ class MonoRuntime:
             else None
         )
         self._reserved: dict[Any, _Reserved] = {}
+        self._peer: Any = None
         self.enabled = enabled
         self._voted: bool | None = None
         self.step_index = 0
@@ -118,12 +119,10 @@ class MonoRuntime:
     def reserve(
         self,
         key: Any,
-        scratch_bytes: int = 0,
-        peer_bytes: int = 0,
-        owner: Any = None,
+        kernels: MonoKernels | None = None,
         width: int | None = None,
     ) -> _Reserved:
-        """Allocate this key's resources once, eagerly.
+        """Allocate this key's resources once, eagerly, asking ``kernels`` for them.
 
         Reserving inside a CUDA-graph capture raises: peer memory is exchanged
         collectively and scratch must outlive the capture. vLLM runs every graph
@@ -132,13 +131,12 @@ class MonoRuntime:
 
         Args:
             key: ``(width, geometry)`` or any hashable the model keys launches on.
-            scratch_bytes: Device scratch for this key, 0 for none.
-            peer_bytes: Symmetric peer memory for this key, 0 for none.
-            owner: The kernel object owning this key's launch. Objects exposing
-                ``advance_step()`` are advanced once per step and objects
-                exposing ``poll_error()`` are read by :meth:`health`.
+            kernels: The launches this key serves, asked for their
+                :meth:`MonoKernels.scratch_bytes` at ``width`` and their
+                :meth:`MonoKernels.peer_bytes`. They are advanced once per step
+                and read by :meth:`health`.
             width: The step width this key's launch is built for, None when it
-                serves every width. Only the step width's owners are advanced.
+                serves every width. Only the step width's kernels are advanced.
 
         Returns:
             The key's resources.
@@ -151,29 +149,31 @@ class MonoRuntime:
                 f"{self.spec.name}: key {key} first reserved inside a CUDA graph "
                 "capture, before any eager step at that width"
             )
-        res = _Reserved(owner=owner, width=width)
-        if scratch_bytes:
-            res.scratch = torch.zeros(
-                scratch_bytes, dtype=torch.uint8, device=self.device
-            )
-        if peer_bytes:
-            if self._peer_factory is None:
-                raise RuntimeError(
-                    f"{self.spec.name}: no peer_factory to reserve peers"
+        res = _Reserved(kernels=kernels, width=width)
+        if kernels is not None:
+            if width is not None and (nbytes := kernels.scratch_bytes(width)):
+                res.scratch = torch.zeros(nbytes, dtype=torch.uint8, device=self.device)
+            if self._peer is None and (nbytes := kernels.peer_bytes()):
+                if self._peer_factory is None:
+                    raise RuntimeError(
+                        f"{self.spec.name}: no peer_factory to reserve peers"
+                    )
+                self._peer = self._peer_factory(
+                    nbytes, self.rank, self.world, self.cpu_group, self.device
                 )
-            res.peer = self._peer_factory(
-                peer_bytes, self.rank, self.world, self.cpu_group, self.device
-            )
         self._reserved[key] = res
         return res
 
     def scratch(self, key: Any) -> torch.Tensor | None:
+        assert key in self._reserved
         return self._reserved[key].scratch
 
-    def peer(self, key: Any) -> Any:
-        return self._reserved[key].peer
+    @property
+    def peer_buffer(self) -> Any:
+        """The symmetric peer memory, one per runtime, None until reserved."""
+        return self._peer
 
-    def owners(self, width: int | None = None) -> list[Any]:
+    def kernels(self, width: int | None = None) -> list[MonoKernels]:
         """Reserved kernel objects in reservation order.
 
         Args:
@@ -182,9 +182,9 @@ class MonoRuntime:
 
         """
         return [
-            r.owner
+            r.kernels
             for r in self._reserved.values()
-            if r.owner is not None
+            if r.kernels is not None
             and (width is None or r.width is None or r.width == width)
         ]
 
@@ -198,8 +198,8 @@ class MonoRuntime:
         out = dict(tags)
         if res.scratch is not None:
             out["scratch"] = res.scratch
-        if res.peer is not None:
-            out["peers"] = res.peer
+        if self._peer is not None:
+            out["peers"] = self._peer
         if self.epoch is not None:
             out["epoch"] = self.epoch
         return out
@@ -227,10 +227,8 @@ class MonoRuntime:
         self.step = StepDecision(reason, None if reason else width)
         if self.step:
             self.step_index += 1
-            for owner in self.owners(width):
-                advance = getattr(owner, "advance_step", None)
-                if advance is not None:
-                    advance()
+            for kernels in self.kernels(width):
+                kernels.advance_step()
         return self.step
 
     def _state_reason(self) -> str:
@@ -270,9 +268,8 @@ class MonoRuntime:
         """Expired mailbox polls reported by this runtime's kernel objects."""
         return tuple(
             e
-            for owner in self.owners(width)
-            if (poll := getattr(owner, "poll_error", None)) is not None
-            for e in poll(clear=clear)
+            for kernels in self.kernels(width)
+            for e in kernels.poll_error(clear=clear)
         )
 
     def disable(self, why: str) -> None:

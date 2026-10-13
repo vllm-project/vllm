@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Declarative deployment gate for MonoKernels.
 
-A ``MonoSpec`` says what a model's persistent decode kernel can run. Gating on a
+A MonoSpec says what a model's monokernel can run. Gating on a
 spec is fail-closed for :class:`Feature`: a feature vLLM reports as on and the
 spec does not list in ``supports`` refuses the configuration, so a kernel written
 before a feature existed refuses it rather than silently miscomputing. The

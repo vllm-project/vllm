@@ -410,7 +410,7 @@ class MonoLive:
             )
             if is_fused not in runtimes:
                 runtimes[is_fused] = op
-                self.rt.reserve((S, is_fused), owner=op, width=S)
+                self.rt.reserve((S, is_fused), kernels=op, width=S)
             self.ops[(L, S)] = op
             self._launch_kw[(L, S)] = self.rt.launch_args(
                 (S, is_fused), layer=L - self.first, advance=False

@@ -12,7 +12,7 @@ from types import SimpleNamespace as NS
 import pytest
 import torch
 
-from vllm.models.common.mono import MonoRuntime, StepDecision
+from vllm.models.common.mono import MonoKernels, MonoRuntime, StepDecision
 from vllm.models.common.mono.runtime import NO_STEP
 from vllm.models.deepseek_v32.amd.mono import dispatch as D
 from vllm.models.deepseek_v32.amd.mono import guards as G
@@ -36,7 +36,7 @@ def _single_rank_boundary_norm(monkeypatch):
     monkeypatch.setattr(far, "fused_allreduce_rms_norm", _far)
 
 
-class ScratchOp:
+class ScratchOp(MonoKernels):
     """Sticky poll-error words in a scratch buffer, as Glm5MonoKernel.poll_error."""
 
     def __init__(self):
@@ -62,7 +62,7 @@ def bare_rt(widths=(1,), vote=True, vote_each_step=False):
     rt.vllm_config = None
     rt.rank, rt.world, rt.cpu_group = 0, 1, None
     rt.device = torch.device("cpu")
-    rt._peer_factory, rt.epoch = None, None
+    rt._peer_factory, rt.epoch, rt._peer = None, None, None
     rt._voting, rt._vote_each_step = vote, vote_each_step
     rt._reserved, rt.enabled, rt._voted = {}, True, None
     rt.step_index, rt.step = 0, NO_STEP
@@ -81,7 +81,7 @@ def bare_live(step_sync=True, check_every=1, widths=(1,)):
     lv.ops = {(3, S): ScratchOp()}
     lv._st = dict(T=1, S=S, md=None)
     lv.rt = bare_rt(widths, vote=step_sync, vote_each_step=check_every <= 0)
-    lv.rt.reserve((S, False), owner=lv.ops[(3, S)], width=S)
+    lv.rt.reserve((S, False), kernels=lv.ops[(3, S)], width=S)
     lv.rt.step_index = 1
     return lv
 

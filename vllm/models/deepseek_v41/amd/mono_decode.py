@@ -31,6 +31,8 @@ from vllm.logger import init_logger
 from vllm.models.common.mono import Feature, MonoOp, MonoRuntime, MonoSpec
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
+
     from vllm.models.deepseek_v41.amd.model import DeepseekV4DecoderLayer
     from vllm.models.deepseek_v41.amd.mono.runner import (
         DSV41MonoLayer,
@@ -44,8 +46,6 @@ logger = init_logger(__name__)
 RECORD = 584  # an fp8_ds_mla KV record: 576 data bytes, 8 scale bytes
 SWA_WIDTH = 128  # a causal decode token's window slots
 MAX_ROWS = 48  # the kernels' step rows at most: 8 requests x (1 + 5 DSpark drafts)
-
-_rt: MonoRuntime | None = None
 
 
 def _needs_a8w4_moe(vllm_config) -> str | None:
@@ -80,39 +80,25 @@ def _scale_bytes(scale: torch.Tensor) -> torch.Tensor:
     return scale if scale.dtype == torch.uint8 else scale.view(torch.uint8)
 
 
-def _runtime(vllm_config) -> MonoRuntime:
-    """The process's mono runtime (one a TP rank, shared by every layer). Its
-    peer-memory handshake is collective over the TP group: every rank builds it
-    at the same layer of the same step."""
-    global _rt
-    if _rt is None:
-        from vllm.models.deepseek_v41.amd.mono.runner import (
-            EPOCH_WORDS,
-            MAX_TOKENS,
-            peer_factory,
-        )
+class DSV41MonoDecode(MonoOp):
+    """One model's mono decode path (``create``: None when no layer is eligible).
 
-        assert MAX_TOKENS >= MAX_ROWS, MAX_TOKENS
-        # [epoch, -, -, -, a mark per CTA, the MoE's counters]
-        _rt = MonoRuntime(
-            DSV41_MONO, vllm_config, peer_factory=peer_factory, epoch_words=EPOCH_WORDS
-        )
-    return _rt
+    A layer the kernels serve whole runs ``forward``; the rest run ``ffn``, the
+    FFN launch after vLLM's attention. Which of the two a layer takes is the
+    ``ffn_only`` entry ``build`` leaves for it, read from vLLM's own forward
+    too; a layer's weights are taken at its first call, after loading.
 
-
-class MonoDecodeLayer(MonoOp):
-    """One decoder layer's mono path (``create``: None when the layer is not
-    eligible): the whole layer (``forward``) or, with ``ffn_only``, the FFN
-    launch after vLLM's attention (``ffn``). Its weights are taken from the
-    layer at the first call, after loading."""
+    These kernels are built for gfx950. A port to a second architecture is a
+    subclass of its own, with its own ``spec`` and layer checks, named by
+    ``variant``."""
 
     spec = DSV41_MONO
 
-    def __init__(self, vllm_config, layer: "DeepseekV4DecoderLayer") -> None:
-        self.layer = layer
-        self.ffn_only = False
+    def __init__(self, vllm_config, layers: "Iterable[DeepseekV4DecoderLayer]") -> None:
+        self.layers = [layer for layer in layers if hasattr(layer, "attn")]
         super().__init__(vllm_config)
-        self._weights: MonoLayerWeights | None = None
+        self.ffn_only: dict[int, bool] = {}
+        self._weights: dict[int, MonoLayerWeights] = {}
         self._kernels: DSV41MonoLayer | None = None
 
     def refuse_model(self) -> list[str]:
@@ -120,27 +106,27 @@ class MonoDecodeLayer(MonoOp):
         in AITER's A8W4 MXFP4 layout: no other MoE backend is servable."""
         from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import Mxfp4MoeBackend
 
-        ffn = self.layer.ffn
-        experts = getattr(getattr(ffn, "experts", None), "routed_experts", None)
-        if experts is None:
-            return []  # not a routed MoE: the layer checks refuse it
-        backend = getattr(experts.quant_method, "mxfp4_backend", None)
-        if backend != Mxfp4MoeBackend.AITER_MXFP4_BF16:
-            return [f"needs the AITER_MXFP4_BF16 MoE backend, not {backend}"]
+        for layer in self.layers:
+            experts = getattr(
+                getattr(layer.ffn, "experts", None), "routed_experts", None
+            )
+            if experts is None:
+                continue  # not a routed MoE: the layer checks skip it
+            backend = getattr(experts.quant_method, "mxfp4_backend", None)
+            if backend != Mxfp4MoeBackend.AITER_MXFP4_BF16:
+                return [f"needs the AITER_MXFP4_BF16 MoE backend, not {backend}"]
         return []
 
-    def skip_layer(self) -> list[str]:
-        """Skip the layers whose seams or MoE the kernels do not serve, and
-        pick the seam the rest are entered at (``ffn_only``)."""
-        layer = self.layer
+    def skip_layer(self, layer: "DeepseekV4DecoderLayer") -> str:
+        """Skip the layers whose seams or MoE the kernels do not serve."""
         attn, ffn = layer.attn, layer.ffn
         hf = self.vllm_config.model_config.hf_config
         if layer.use_sequence_parallel:
-            return ["sequence-parallel layer"]
+            return "sequence-parallel layer"
         if not layer.fuse_seam_norm:
-            return ["needs aiter's fused mHC seam"]
+            return "needs aiter's fused mHC seam"
         if attn.layer_id >= hf.num_hidden_layers:
-            return ["draft layer"]
+            return "draft layer"
         if (
             ffn.shared_experts is None
             or ffn.gate.tid2eid is not None
@@ -151,49 +137,82 @@ class MonoDecodeLayer(MonoOp):
             or ffn.scoring_func != "sqrtsoftplus"
             or not ffn.renormalize
         ):
-            return ["MoE routing outside the kernels' (384 / 6, sqrtsoftplus, x1.5)"]
-        # the whole layer: the kernels' attention takes the standard layers only
-        why = None
+            return "MoE routing outside the kernels' (384 / 6, sqrtsoftplus, x1.5)"
+        return ""
+
+    @staticmethod
+    def _ffn_only(layer: "DeepseekV4DecoderLayer") -> str:
+        """Why the kernels enter this layer at the FFN seam, '' for a whole one."""
+        attn = layer.attn
         if layer.engram is not None:
-            why = "Engram"
-        elif attn.compressor is not None or attn.indexer is not None:
-            why = "a compressor / indexer"
-        elif attn.compress_ratio not in (1, 2):
-            why = f"compress ratio {attn.compress_ratio}"
-        elif attn.kv_mxfp8 or attn.kv_cache_dtype != "fp8_ds_mla":
-            why = f"a {attn.kv_cache_dtype} KV cache"
-        self.ffn_only = why is not None
-        if why is None:
-            logger.info_once("DSv4.1 mono decode: the whole standard backbone layers")
-        else:
-            logger.info_once(
-                "DSv4.1 mono decode: the FFN launch for layers with %s", why
-            )
-        return []
+            return "Engram"
+        if attn.compressor is not None or attn.indexer is not None:
+            return "a compressor / indexer"
+        if attn.compress_ratio not in (1, 2):
+            return f"compress ratio {attn.compress_ratio}"
+        if attn.kv_mxfp8 or attn.kv_cache_dtype != "fp8_ds_mla":
+            return f"a {attn.kv_cache_dtype} KV cache"
+        return ""
 
     def build(self) -> None:
-        self.rt = _runtime(self.vllm_config)
+        """The rank's runtime, and the seam each eligible layer is entered at.
+
+        The runtime's peer-memory handshake is collective over the TP group:
+        one a rank, shared by every layer, so every rank reserves it alike."""
+        from vllm.models.deepseek_v41.amd.mono.runner import (
+            EPOCH_WORDS,
+            MAX_TOKENS,
+            peer_factory,
+        )
+
+        assert MAX_TOKENS >= MAX_ROWS, MAX_TOKENS
+        # [epoch, -, -, -, a mark per CTA, the MoE's counters]
+        self.rt = MonoRuntime(
+            DSV41_MONO,
+            self.vllm_config,
+            peer_factory=peer_factory,
+            epoch_words=EPOCH_WORDS,
+        )
+        for layer in self.mono_layers(self.layers):
+            why = self._ffn_only(layer)
+            self.ffn_only[layer.attn.layer_id] = bool(why)
+            layer.mono = self
+            if why:
+                logger.info_once(
+                    "DSv4.1 mono decode: the FFN launch for layers with %s", why
+                )
+                # a decode step hands wo_b's TP partial to the FFN launch
+                layer.attn.wo_b.reduce_results = False
+            else:
+                logger.info_once(
+                    "DSv4.1 mono decode: the whole standard backbone layers"
+                )
 
     @property
-    def kernels(self):
+    def kernels(self) -> "DSV41MonoLayer":
         if self._kernels is None:
             from vllm.models.deepseek_v41.amd.mono.runner import DSV41MonoLayer
 
             self._kernels = DSV41MonoLayer(self.rt)
         return self._kernels
 
-    @property
-    def weights(self):
-        if self._weights is not None:
-            return self._weights
+    def scratch(self, width: int | None) -> torch.Tensor:
+        """This width's scratch, reserved on the first step that reaches it."""
+        assert width is not None, "a step that goes has a width"
+        res = self.rt.reserve(width, self.kernels, width)
+        assert res.scratch is not None
+        return res.scratch
+
+    def weights(self, layer: "DeepseekV4DecoderLayer"):
         from vllm.models.deepseek_v41.amd.mono.runner import MonoLayerWeights
 
-        layer = self.layer
         a, f = layer.attn, layer.ffn
+        if (cached := self._weights.get(a.layer_id)) is not None:
+            return cached
         e, sh = f.experts.routed_experts, f.shared_experts
         assert sh is not None  # ``skip_layer`` took only layers with one
-        self._weights = MonoLayerWeights(
-            attn=None if self.ffn_only else self._attn_weights(a),
+        w = MonoLayerWeights(
+            attn=None if self.ffn_only[a.layer_id] else self._attn_weights(a),
             hc_attn_fn=layer.hc_attn_fn,
             hc_attn_scale=layer.hc_attn_scale,
             hc_attn_base=layer.hc_attn_base,
@@ -213,8 +232,9 @@ class MonoDecodeLayer(MonoOp):
             sw2=sh.down_proj.weight,
             sw2_s=_scale_bytes(sh.down_proj.weight_scale),
         )
-        self._weights.check(get_tensor_model_parallel_world_size())
-        return self._weights
+        w.check(get_tensor_model_parallel_world_size())
+        self._weights[a.layer_id] = w
+        return w
 
     @staticmethod
     def _attn_weights(a):
@@ -245,7 +265,8 @@ class MonoDecodeLayer(MonoOp):
         logger.debug_once("DSv4.1 mono decode skipped a step: %s", why)
         return None
 
-    def _metadata(self):
+    @staticmethod
+    def _metadata(layer: "DeepseekV4DecoderLayer"):
         """(the layer's SWA metadata, its compressed cache's), None when the
         step carries none."""
         if not is_forward_context_available():
@@ -253,7 +274,7 @@ class MonoDecodeLayer(MonoOp):
         md = get_forward_context().attn_metadata
         if not isinstance(md, dict):  # a profile / dummy run, or DBO ubatches
             return None, None
-        attn = self.layer.attn
+        attn = layer.attn
         swa = cast(
             "DeepseekV4ROCMAiterSparseSWAMetadata | None",
             md.get(attn.swa_cache_layer.prefix),
@@ -266,7 +287,7 @@ class MonoDecodeLayer(MonoOp):
             )
         return swa, comp
 
-    def skip_step(self, rows: int, tensors, whole_layer: bool) -> str:
+    def skip_step(self, rows: int, layer, tensors, whole_layer: bool) -> str:
         if not is_forward_context_available():
             return "no forward context"
         fc = get_forward_context()
@@ -275,7 +296,7 @@ class MonoDecodeLayer(MonoOp):
             return f"{fc.cudagraph_runtime_mode} step"
         if not isinstance(fc.attn_metadata, dict):
             return "no attention metadata"
-        swa, comp = self._metadata()
+        swa, comp = self._metadata(layer)
         if swa is None:
             return "layer metadata missing"
         if swa.num_prefills != 0 or swa.num_decodes == 0:
@@ -300,6 +321,7 @@ class MonoDecodeLayer(MonoOp):
 
     def forward(
         self,
+        layer: "DeepseekV4DecoderLayer",
         x: torch.Tensor,
         positions: torch.Tensor,
         residual: torch.Tensor | None,
@@ -310,22 +332,23 @@ class MonoDecodeLayer(MonoOp):
         """The layer's outputs (x, residual, post_mix, res_mix, pre_mix) by the
         mono kernels, or None when this step takes the original path (always for
         an ``ffn_only`` layer)."""
-        if self.ffn_only:
+        if self.ffn_only[layer.attn.layer_id]:
             return None
         if residual is None or x.dim() != 2:
             return self._skip("first layer")
         tensors = (x, residual, post_mix, res_mix, pre_mix)
-        step = self.step(x.shape[0], tensors, whole_layer=True)
+        step = self.step(x.shape[0], layer, tensors, whole_layer=True)
         if not step:
             return self._skip(step.reason)
-        attn = self.layer.attn
-        swa, comp = self._metadata()
+        attn = layer.attn
+        swa, comp = self._metadata(layer)
         assert swa is not None and comp is not None
         logger.info_once(
             "DSv4.1 mono decode layer active (decode steps of <= %d rows)", MAX_ROWS
         )
         return self.kernels.forward(
-            self.weights,
+            self.weights(layer),
+            self.scratch(step.width),
             x,
             residual,
             post_mix,
@@ -346,6 +369,7 @@ class MonoDecodeLayer(MonoOp):
 
     def ffn(
         self,
+        layer: "DeepseekV4DecoderLayer",
         part: torch.Tensor,
         residual: torch.Tensor,
         post_mix: torch.Tensor,
@@ -356,11 +380,11 @@ class MonoDecodeLayer(MonoOp):
         output, and the attention seam's outputs; None when this step takes the
         original path (the caller then reduces ``part`` itself)."""
         tensors = (part, residual, post_mix, res_mix, pre_mix)
-        step = self.step(part.shape[0], tensors, whole_layer=False)
+        step = self.step(part.shape[0], layer, tensors, whole_layer=False)
         if not step:
             return self._skip(step.reason)
         logger.info_once(
             "DSv4.1 mono decode FFN launch active (decode steps of <= %d rows)",
             MAX_ROWS,
         )
-        return self.kernels.ffn(self.weights, *tensors)
+        return self.kernels.ffn(self.weights(layer), self.scratch(step.width), *tensors)

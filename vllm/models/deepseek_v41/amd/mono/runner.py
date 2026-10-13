@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING
 
 import torch
 
-from vllm.models.common.mono import check_tensors
+from vllm.models.common.mono import MonoKernels, check_tensors
 
 from .attention.plan import HEAD_DIM, HIDDEN, KEYS, Dims
 from .common.plan import BLOCKS
@@ -48,7 +48,6 @@ __all__ = [
     "BLOCKS",
     "EPOCH_WORDS",
     "MAX_TOKENS",
-    "PEER",
     "AttnWeights",
     "DSV41MonoLayer",
     "MonoLayerWeights",
@@ -57,7 +56,6 @@ __all__ = [
 
 _LOG2E = 1.4426950408889634
 HC = 4
-PEER = "peer"
 
 
 def _ensure_writable_flydsl_cache() -> None:
@@ -165,7 +163,7 @@ def peer_factory(nbytes: int, rank: int, world: int, group, device) -> PeerBuffe
     return peer
 
 
-class DSV41MonoLayer:
+class DSV41MonoLayer(MonoKernels):
     """The mono decode kernels of one TP rank, over a shared ``MonoRuntime``.
 
     The runtime holds what the persistent launches wait on (a width's scratch,
@@ -195,7 +193,6 @@ class DSV41MonoLayer:
         self.post_a = torch.zeros(MAX_TOKENS, HC, dtype=torch.float32, device=dev)
         self.comb_a = torch.zeros(MAX_TOKENS, HC, HC, dtype=torch.float32, device=dev)
         self.pre_a = torch.zeros(MAX_TOKENS, HC, dtype=torch.float32, device=dev)
-        self.peer = rt.reserve(PEER, peer_bytes=2 * peer_half_bytes(self.tp)).peer
         self._qk_scale = (
             torch.tensor([HEAD_DIM**-0.5 * _LOG2E], dtype=torch.float32)
             .view(torch.int32)
@@ -203,18 +200,18 @@ class DSV41MonoLayer:
         )
         self._kernels: dict = {}
 
-    def scratch(self, tokens: int) -> torch.Tensor:
-        """Step width ``tokens``'s scratch: a width's layout has memory of its own
-        (``layer.scratch_layout``)."""
-        res = self.rt.reserve(
-            (tokens, "layer"), scratch_bytes=scratch_bytes(tokens, self.tp)
-        )
-        assert res.scratch is not None
-        return res.scratch
+    def scratch_bytes(self, width: int) -> int:
+        """A width's layout has memory of its own (``layer.scratch_layout``)."""
+        return scratch_bytes(width, self.tp)
 
-    @staticmethod
-    def supports(tokens: int) -> bool:
-        return 1 <= tokens <= MAX_TOKENS
+    def peer_bytes(self) -> int:
+        return 2 * peer_half_bytes(self.tp)
+
+    @property
+    def peer(self) -> PeerBuffer:
+        peer = self.rt.peer_buffer
+        assert peer is not None, "the mono runtime has not reserved its peers"
+        return peer
 
     def kernels(self, tokens: int, ratio: int):
         key = (tokens, ratio)
@@ -243,6 +240,7 @@ class DSV41MonoLayer:
     def forward(
         self,
         w: MonoLayerWeights,
+        scratch: torch.Tensor,  # this width's scratch, from the runtime
         x: torch.Tensor,  # [M, 5120] bf16: the previous FFN output (reduced)
         residual: torch.Tensor,  # [M, 4, 5120] bf16
         post_mix: torch.Tensor,  # [M, 4, 1] f32
@@ -262,7 +260,6 @@ class DSV41MonoLayer:
         """-> (out, residual, post_mix, res_mix, pre_mix): the layer's outputs
         (``outs``: buffers to write them into)."""
         M = x.shape[0]
-        assert self.supports(M), M
         a = w.attn
         assert a is not None
         ratio = a.ratio
@@ -333,7 +330,7 @@ class DSV41MonoLayer:
             token_to_req.data_ptr(),
             self.kt.data_ptr(),
             self.klen.data_ptr(),
-            self.scratch(M).data_ptr(),
+            scratch.data_ptr(),
             self.epoch.data_ptr(),
             0,
             stream=st,
@@ -380,7 +377,7 @@ class DSV41MonoLayer:
             w.sw2.data_ptr(),
             w.sw2_s.data_ptr(),
             out.data_ptr(),
-            self.scratch(M).data_ptr(),
+            scratch.data_ptr(),
             self.peer.local,
             self.peer.addresses.data_ptr(),
             self.rank,
@@ -393,6 +390,7 @@ class DSV41MonoLayer:
     def ffn(
         self,
         w: MonoLayerWeights,
+        scratch: torch.Tensor,  # this width's scratch, from the runtime
         part: torch.Tensor,  # [M, 5120] bf16: this rank's unreduced wo_b output
         residual: torch.Tensor,  # [M, 4, 5120] bf16, after the attention seam
         post_mix: torch.Tensor,  # [M, 4, 1] f32, the attention seam's
@@ -404,7 +402,6 @@ class DSV41MonoLayer:
         attention vLLM ran: the attention's TP reduce, the FFN seam, the MoE and
         its all-reduce in one launch."""
         M = part.shape[0]
-        assert self.supports(M), M
         for t_ in (part, residual, post_mix, res_mix, pre_mix):
             assert t_.is_contiguous()
         assert part.dtype == residual.dtype == torch.bfloat16
@@ -436,7 +433,7 @@ class DSV41MonoLayer:
             w.sw2.data_ptr(),
             w.sw2_s.data_ptr(),
             out.data_ptr(),
-            self.scratch(M).data_ptr(),
+            scratch.data_ptr(),
             self.peer.local,
             self.peer.addresses.data_ptr(),
             self.rank,

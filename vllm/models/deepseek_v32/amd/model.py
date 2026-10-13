@@ -37,6 +37,7 @@ from vllm.model_executor.models.utils import (
     make_empty_intermediate_tensors_factory,
     make_layers,
 )
+from vllm.models.common.mono import SupportsMonoKernel
 from vllm.models.common.ops.fused_allreduce_rms_norm import fused_allreduce_rms_norm
 from vllm.sequence import IntermediateTensors
 
@@ -119,7 +120,7 @@ class DeepseekV32DecoderLayer(torch.nn.Module):
         return hidden_states, residual
 
 
-class DeepseekV32Model(torch.nn.Module):
+class DeepseekV32Model(torch.nn.Module, SupportsMonoKernel):
     fall_back_to_pt_during_load = False
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -179,9 +180,6 @@ class DeepseekV32Model(torch.nn.Module):
         self.num_redundant_experts = (
             vllm_config.parallel_config.eplb_config.num_redundant_experts
         )
-        # GLM-5.2 decode MonoKernel, set after weight loading (see
-        # DeepseekV32ForCausalLM.process_weights_after_loading)
-        self.mono = None
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)

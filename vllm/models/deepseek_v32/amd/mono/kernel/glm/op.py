@@ -33,6 +33,7 @@ from vllm.models.deepseek_v32.amd.mono.kernel.config import (
     V_DIM,
     glm5_tp_config,
 )
+from vllm.models.common.mono.kernels import MonoKernels
 from vllm.models.deepseek_v32.amd.mono.kernel.glm.kernel import build_glm5_monokernel
 from vllm.models.deepseek_v32.amd.mono.kernel.glm.layout import INDEX_DIM, POLL_STAGES, layout
 from vllm.models.deepseek_v32.amd.mono.kernel.packing import pack_bf16, pack_fp8, pack_mxfp4
@@ -68,7 +69,7 @@ def prepare_glm5_weights(W: LayerWeights, attention_weight: AttentionWeight | st
     return packed
 
 
-class Glm5MonoKernel:
+class Glm5MonoKernel(MonoKernels):
     """One TP rank of GLM-5's indexed decode MonoKernel.
 
     With ``with_indexer=True``, a single persistent launch covers index K/Q/W

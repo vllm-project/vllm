@@ -204,18 +204,21 @@ class MonoProbe:
         torch.save((self._captured, self._gaps), f"{path}.rank{rank}")
 
     def mono_layers(self) -> dict:
-        from vllm.models.deepseek_v41.amd import mono_decode
-
-        layers = {
-            i: None
-            if m.mono is None
-            else ["ffn" if m.mono.ffn_only else "whole", m.mono._weights is not None]
-            for i, m in self._decoder_layers().items()
-        }
-        rt = mono_decode._rt
+        op = None
+        layers: dict = {}
+        for i, m in self._decoder_layers().items():
+            if m.mono is None:
+                layers[i] = None
+                continue
+            op = m.mono
+            layer_id = m.attn.layer_id
+            layers[i] = [
+                "ffn" if op.ffn_only[layer_id] else "whole",
+                layer_id in op._weights,
+            ]
         return {
             "layers": layers,
-            "epoch": -1 if rt is None else int(rt.epoch[0]),
+            "epoch": -1 if op is None else int(op.rt.epoch[0]),
         }
 
 

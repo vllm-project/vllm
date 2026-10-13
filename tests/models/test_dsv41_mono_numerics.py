@@ -271,15 +271,18 @@ def _check_layers(rank: int, tp: int, device) -> None:
         mxfp8_e4m3_quantize,
     )
     from vllm.model_executor.model_loader.utils import process_weights_after_loading
+    from vllm.models.common.mono import MonoRuntime
     from vllm.models.common.ops import fused_q_kv_rmsnorm
     from vllm.models.deepseek_v41.amd.model import DeepseekV4MoE
     from vllm.models.deepseek_v41.amd.mono.layer import scratch_layout
     from vllm.models.deepseek_v41.amd.mono.runner import (
+        EPOCH_WORDS,
         AttnWeights,
         DSV41MonoLayer,
         MonoLayerWeights,
+        peer_factory,
     )
-    from vllm.models.deepseek_v41.amd.mono_decode import _runtime as mono_runtime
+    from vllm.models.deepseek_v41.amd.mono_decode import DSV41_MONO
     from vllm.models.deepseek_v41.amd.rocm import (
         compute_global_topk_ragged_indices_and_indptr,
     )
@@ -354,7 +357,8 @@ def _check_layers(rank: int, tp: int, device) -> None:
     sink = f32(H, gen=gs)
     e, sh = moe.experts.routed_experts, moe.shared_experts
     u8 = lambda t: t.view(torch.uint8)  # noqa: E731
-    runner = DSV41MonoLayer(mono_runtime(vc))
+    rt = MonoRuntime(DSV41_MONO, vc, peer_factory=peer_factory, epoch_words=EPOCH_WORDS)
+    runner = DSV41MonoLayer(rt)
     gw, bias = moe.gate.weight.float(), moe.gate.e_score_correction_bias.float()
 
     def top6(x):
@@ -447,14 +451,15 @@ def _check_layers(rank: int, tp: int, device) -> None:
         out = moe_out(xf)
 
         # ---- the whole layer: K1 + K2
+        sc = rt.reserve(M, runner, M).scratch
         o = runner.forward(
-            mw, x0, res0, post0, comb0, pre0, s["positions"], s["slot_mapping"],
+            mw, sc, x0, res0, post0, comb0, pre0, s["positions"], s["slot_mapping"],
             s["swa_cache"], s["swa_indices"], s["swa_lens"], s["token_to_req"],
             topk_indices=s["topk"], comp_cache=s["comp_cache"],
             comp_block_table=s["comp_block_table"],
         )  # fmt: skip
         off = scratch_layout(M, tp)["normed"][0]
-        normed = runner.scratch(M)[off : off + M * HIDDEN * 2].view(bf).view(M, HIDDEN)
+        normed = sc[off : off + M * HIDDEN * 2].view(bf).view(M, HIDDEN)
         tag = f"ratio {ratio}, {R} x {T}"
         assert _cos(runner.res_mid[:M], res) > 0.99999, tag
         for got, want in (
@@ -477,7 +482,7 @@ def _check_layers(rank: int, tp: int, device) -> None:
         assert tok[same].min() > 0.99, tag
 
         # ---- the FFN launch, from the same unreduced wo_b output
-        f = runner.ffn(mw, part, res, post, comb, attn_pre)
+        f = runner.ffn(mw, sc, part, res, post, comb, attn_pre)
         torch.testing.assert_close(f[1], res2, rtol=2**-8, atol=1e-6)
         torch.testing.assert_close(normed, xf, rtol=2**-7, atol=1e-6)
         assert _cos(f[0], out) > 0.9999 and _rel(f[0], out) < 0.015, tag
@@ -490,14 +495,14 @@ def _check_layers(rank: int, tp: int, device) -> None:
             comp_block_table=s["comp_block_table"],
         )  # fmt: skip
 
-        def step(mw=mw, x0=x0, res0=res0, post0=post0, comb0=comb0, pre0=pre0,
+        def step(mw=mw, sc=sc, x0=x0, res0=res0, post0=post0, comb0=comb0, pre0=pre0,
                  args=args, s=s, meta=meta, whole=whole, part=part, res=res,
                  post=post, comb=comb, attn_pre=attn_pre, ffn=ffn):  # fmt: skip
             runner.forward(
-                mw, x0, res0, post0, comb0, pre0, *args, s["swa_lens"],
+                mw, sc, x0, res0, post0, comb0, pre0, *args, s["swa_lens"],
                 s["token_to_req"], **meta, outs=whole,
             )  # fmt: skip
-            runner.ffn(mw, part, res, post, comb, attn_pre, outs=ffn)
+            runner.ffn(mw, sc, part, res, post, comb, attn_pre, outs=ffn)
             return [*whole, *ffn]
 
         steps.append(step)

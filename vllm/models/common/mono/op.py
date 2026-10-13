@@ -15,7 +15,8 @@ launch must not be split, reordered, or captured piecewise.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Self
+from collections.abc import Iterable
+from typing import Any, Generic, Self, TypeVar
 
 import torch
 
@@ -27,6 +28,20 @@ from vllm.utils.torch_utils import direct_register_custom_op
 
 logger = init_logger(__name__)
 
+_Op = TypeVar("_Op", bound="MonoOp")
+
+
+class SupportsMonoKernel(Generic[_Op]):
+    """A module a :class:`MonoOp` of type ``_Op`` binds itself to.
+
+    ``mono`` is None until an op binds it, and stays None wherever the kernel is
+    off, so the module reads it as its own branch back to vLLM's path. Which
+    module holds it is the model's to choose: the decoder layer whose steps the
+    kernels take, or the model that owns the layer loop.
+    """
+
+    mono: _Op | None = None
+
 
 class MonoOp(ABC):
     """One model's MonoKernel, gated by its spec and served by a runtime.
@@ -37,10 +52,11 @@ class MonoOp(ABC):
     Gating runs in tiers, each a method returning reasons and reading what the
     one before it could not see. The prefix is the consequence:
 
+    * :meth:`variant`: the subclass this deployment's device is served by.
     * ``spec.opt_in``: the switch. False is not a reason, the kernel is off.
     * :meth:`MonoSpec.refuse_config`: the engine's ``VllmConfig``.
     * :meth:`refuse_model`: the loaded model, for the whole deployment.
-    * :meth:`skip_layer`: the loaded model, for this instance only.
+    * :meth:`skip_layer`: the loaded model, one layer at a time.
     * :meth:`skip_step`: this step's shapes and attention metadata.
 
     ``refuse_*`` says the deployment asked for something it cannot have, so it
@@ -55,10 +71,20 @@ class MonoOp(ABC):
     narrow it to what it actually built (``self.spec = replace(type(self).spec,
     widths=...)``) before calling ``super().__init__``, since a spec is a value.
 
+    One op serves a whole model, not one layer: the layers share the kernels,
+    the peer buffers and the step decision, so splitting the op per layer would
+    only duplicate state. Per-layer choices are the subclass's own to keep,
+    keyed by layer, as it walks :meth:`mono_layers`.
+
+    One op serves one GPU architecture. Kernels built for a second ISA differ in
+    more than a flag (their widths, the parallel sizes they build for, how they
+    read the weights, which layers they take whole), so each is a subclass with
+    its own spec, chosen by :meth:`variant`.
+
     Attributes:
         spec: This instance's :class:`MonoSpec`.
         refusals: Why this deployment cannot run the kernel, empty when it can.
-        skips: Why this instance opts out, empty when it does not.
+        skips: Why this model has no mono layer to run, empty when it has.
         rt: The runtime, created by :meth:`build` only once gating passes.
 
     """
@@ -68,7 +94,7 @@ class MonoOp(ABC):
     def __init__(self, vllm_config: VllmConfig) -> None:
         self.vllm_config = vllm_config
         self.refusals = self.spec.refuse_config(vllm_config) or self.refuse_model()
-        self.skips = [] if self.refusals else self.skip_layer()
+        self.skips: list[str] = []
         self._rt: MonoRuntime | None = None
 
     @property
@@ -89,19 +115,52 @@ class MonoOp(ABC):
         """
         return []
 
-    def skip_layer(self) -> list[str]:
-        """Reasons this instance opts out, read from the loaded model.
+    def skip_layer(self, layer: Any) -> str:
+        """Why this layer takes vLLM's path, '' when it can go the mono way.
 
         A :class:`MonoSpec` is deliberately CPU-testable and sees only
         ``VllmConfig``; a module a checkpoint does or does not carry, or a seam
         the kernels cannot enter, is answered here instead. The rest of the
         model may still take the mono path, so this never raises.
         """
-        return []
+        return ""
+
+    def mono_layers(self, layers: Iterable[Any]) -> list[Any]:
+        """The layers of ``layers`` that pass :meth:`skip_layer`, logging the rest.
+
+        Run once at build, and records the skip when none is left. What each
+        kept layer then runs (a whole layer, a seam, a different width) is the
+        subclass's own to keep, per layer, in whatever shape it reads back.
+        """
+        keep = []
+        for layer in layers:
+            assert isinstance(layer, SupportsMonoKernel), (
+                f"{type(layer).__name__} holds no mono op: it has to subclass "
+                "SupportsMonoKernel for the mono path to be reachable from it"
+            )
+            why = self.skip_layer(layer)
+            if why:
+                logger.info_once("%s is off for a layer: %s", self.spec.name, why)
+            else:
+                keep.append(layer)
+        if not keep:
+            self.skips.append("no layer the kernels can run")
+        return keep
 
     @property
     def ok(self) -> bool:
         return not self.refusals and not self.skips and self._rt is not None
+
+    @classmethod
+    def variant(cls, vllm_config: VllmConfig) -> type[Self]:
+        """The subclass serving this deployment's device, ``cls`` by default.
+
+        Resolved before any gating, so the spec every later tier reads is the
+        one the chosen subclass carries. A model whose kernels are built for a
+        second architecture answers with that port's subclass here, rather than
+        teaching one spec and one set of predicates to mean two things.
+        """
+        return cls
 
     @classmethod
     def create(cls, vllm_config: VllmConfig, **kwargs) -> Self | None:
@@ -111,21 +170,22 @@ class MonoOp(ABC):
             ValueError: When the spec refuses and ``on_refusal`` is ``"raise"``.
 
         """
-        spec = cls.spec
+        impl = cls.variant(vllm_config)
+        spec = impl.spec
         if not spec.wanted(vllm_config):
             return None
-        op = cls(vllm_config, **kwargs)
+        op = impl(vllm_config, **kwargs)
         if op.refusals:
             why = "; ".join(op.refusals)
             if spec.on_refusal == "raise":
                 raise ValueError(f"{spec.name} cannot run this configuration: {why}")
             logger.info_once("%s is off: %s", spec.name, why)
             return None
+        op.build()
         if op.skips:
             why = "; ".join(op.skips)
-            logger.info_once("%s is off for this layer: %s", spec.name, why)
+            logger.info_once("%s has no layer to run: %s", spec.name, why)
             return None
-        op.build()
         return op
 
     def build(self) -> None:  # noqa: B027

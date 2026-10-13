@@ -36,6 +36,7 @@ class _Kernels:
 def _layer(comp="comp"):
     cache = lambda: torch.zeros(4, 128 * md.RECORD, dtype=torch.uint8)  # noqa: E731
     attn = SimpleNamespace(
+        layer_id=21,
         swa_cache_layer=SimpleNamespace(prefix="swa", kv_cache=cache()),
         compressed_cache_prefix=comp,
         topk_indices_buffer=torch.zeros(64, 512, dtype=torch.int32),
@@ -79,7 +80,7 @@ def _runtime(monkeypatch) -> MonoRuntime:
     group = SimpleNamespace(rank_in_group=0, world_size=2, cpu_group=None)
     monkeypatch.setattr(distributed, "get_tp_group", lambda: group)
     rt = MonoRuntime(md.DSV41_MONO, _config(), device=torch.device("cpu"))
-    monkeypatch.setattr(md, "_runtime", lambda vllm_config: rt)
+    monkeypatch.setattr(md, "MonoRuntime", lambda *args, **kwargs: rt)
     return rt
 
 
@@ -100,20 +101,21 @@ def run(monkeypatch):
         kernels = _Kernels()
         monkeypatch.setattr(md, "is_forward_context_available", lambda: True)
         monkeypatch.setattr(md, "get_forward_context", lambda: fc)
-        monkeypatch.setattr(md.MonoDecodeLayer, "weights", property(lambda self: None))
+        monkeypatch.setattr(md.DSV41MonoDecode, "weights", lambda self, layer: None)
+        monkeypatch.setattr(md.DSV41MonoDecode, "scratch", lambda self, rows: None)
         args = {**_inputs(), **inputs}
         is_ffn = (entry or ("ffn" if ffn_only else "layer")) == "ffn"
         # the first layer's attention has no compressed cache
-        mono = md.MonoDecodeLayer.__new__(md.MonoDecodeLayer)
-        mono.layer = _layer(comp=None if is_ffn else "comp")
-        mono.ffn_only = ffn_only
+        layer = _layer(comp=None if is_ffn else "comp")
+        mono = md.DSV41MonoDecode.__new__(md.DSV41MonoDecode)
+        mono.ffn_only = {layer.attn.layer_id: ffn_only}
         mono.rt = _runtime(monkeypatch)
         mono._kernels = kernels
         if is_ffn:
             # x stands for wo_b's unreduced output
             part, _ = args.pop("x"), args.pop("positions")
-            return mono.ffn(part, **args), kernels.calls
-        return mono.forward(**args), kernels.calls
+            return mono.ffn(layer, part, **args), kernels.calls
+        return mono.forward(layer, **args), kernels.calls
 
     return _run
 
@@ -124,7 +126,7 @@ def test_decode_step_runs_mono(run, mode):
     assert out == ("mono outputs",) and len(calls) == 1
     args, kwargs = calls[0]
     # the caches reach the kernels as [blocks, block, record] bytes
-    assert args[8].shape == (4, 32, md.RECORD) and args[8].stride() == (
+    assert args[9].shape == (4, 32, md.RECORD) and args[9].stride() == (
         128 * md.RECORD,
         md.RECORD,
         1,
@@ -191,6 +193,7 @@ def _decoder_layer(engram=None, **attn):
             compress_ratio=1,
             kv_mxfp8=False,
             kv_cache_dtype="fp8_ds_mla",
+            wo_b=SimpleNamespace(reduce_results=True),
         )
         | attn
     )
@@ -235,8 +238,8 @@ def test_layers_take_whole_or_ffn_launch(monkeypatch, layer, path):
     """The whole-layer kernels serve the standard layers; every other backbone
     layer keeps vLLM's attention and runs its FFN half as one launch."""
     _deployment(monkeypatch)
-    mono = md.MonoDecodeLayer.create(_config(), layer=layer)
-    got = None if mono is None else "ffn" if mono.ffn_only else "whole"
+    mono = md.DSV41MonoDecode.create(_config(), layers=[layer])
+    got = None if mono is None else "ffn" if all(mono.ffn_only.values()) else "whole"
     assert got == path
 
 
@@ -244,7 +247,7 @@ def test_layers_take_whole_or_ffn_launch(monkeypatch, layer, path):
 def test_decode_step_runs_ffn_launch(run, mode):
     out, calls = run(mode, ffn_only=True, metadata={"swa": _swa()})
     assert out == ("ffn outputs",) and len(calls) == 1
-    assert calls[0][0][1].shape == (M, 5120)  # wo_b's unreduced output
+    assert calls[0][0][2].shape == (M, 5120)  # wo_b's unreduced output
 
 
 def test_ffn_layer_never_runs_whole(run):
@@ -301,12 +304,17 @@ def _deployment(monkeypatch, arch="gfx950", cus=256):
 
     monkeypatch.setenv("VLLM_ROCM_MONO_DECODE", "1")
     monkeypatch.delenv("VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4", raising=False)
+    from vllm.platforms import current_platform
+
     monkeypatch.setattr(mono_spec, "_device_arch", lambda: arch)
     monkeypatch.setattr(torch.accelerator, "current_device_index", lambda: 0)
-    monkeypatch.setattr(md.current_platform, "num_compute_units", lambda _: cus)
+    monkeypatch.setattr(current_platform, "num_compute_units", lambda _: cus)
     name = "vllm.models.deepseek_v41.amd.mono.runner"
     runner = ModuleType(name)
     runner.BLOCKS = 256  # type: ignore[attr-defined]
+    runner.EPOCH_WORDS = 8  # type: ignore[attr-defined]
+    runner.MAX_TOKENS = md.MAX_ROWS  # type: ignore[attr-defined]
+    runner.peer_factory = lambda *args: None  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, name, runner)
     _runtime(monkeypatch)
 
@@ -315,7 +323,7 @@ def _deployment(monkeypatch, arch="gfx950", cus=256):
 def test_opt_in_outside_the_kernels_arch_raises(monkeypatch, arch):
     _deployment(monkeypatch, arch=arch)
     with pytest.raises(ValueError, match="want gfx950"):
-        md.MonoDecodeLayer.create(_config(), layer=_decoder_layer())
+        md.DSV41MonoDecode.create(_config(), layers=[_decoder_layer()])
 
 
 def _other_backend():
@@ -345,4 +353,4 @@ def test_opt_in_outside_the_kernels_moe_raises(monkeypatch, case, match):
         monkeypatch.setenv("VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4", "1")
     layer = case.get("layer", _decoder_layer)()
     with pytest.raises(ValueError, match=match):
-        md.MonoDecodeLayer.create(_config(**case.get("parallel", {})), layer=layer)
+        md.DSV41MonoDecode.create(_config(**case.get("parallel", {})), layers=[layer])
