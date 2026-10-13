@@ -913,6 +913,7 @@ def drop_checkpoint_cache(
             model_name_or_path,
         )
         return
+    dropped_bytes = 0
     for path in checkpoint_dir.glob("*.safetensors"):
         try:
             with path.open("rb") as file:
@@ -921,6 +922,13 @@ def drop_checkpoint_cache(
             logger.warning(
                 "Could not release checkpoint page cache for %s: %s", path, exc
             )
+        else:
+            dropped_bytes += path.stat().st_size
+    logger.info(
+        "Released %.2f GiB of checkpoint page cache in %s",
+        dropped_bytes / 1024**3,
+        checkpoint_dir,
+    )
 
 
 def _get_checkpoints_size_bytes(files: list[str]) -> int:

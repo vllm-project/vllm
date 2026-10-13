@@ -116,7 +116,8 @@ def _drop_previous_checkpoint_cache(model_name: str) -> None:
     previous = _cached_model_name
     _cached_model_name = model_name
     if previous is not None:
-        logger.info("Releasing page cache of checkpoint %s", previous)
+        # This module's logger has no handler, so INFO records are dropped.
+        print(f"Releasing page cache of checkpoint {previous}", flush=True)
         drop_checkpoint_cache(previous)
 
 
