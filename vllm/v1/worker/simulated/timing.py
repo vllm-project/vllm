@@ -405,12 +405,15 @@ class _KNNTable:
         self.mean = feats.mean(axis=0)
         std = feats.std(axis=0)
         self.std = np.where(std > 0, std, 1.0)
-        self.points = (feats - self.mean) / self.std
+        # One contiguous array per feature: summing three columns is several
+        # times faster than reducing over a length-3 axis, with the same result.
+        self.columns = np.ascontiguousarray(((feats - self.mean) / self.std).T)
         self.k = min(max(1, k), len(points))
 
     def query(self, f: tuple[float, float, float]) -> StepCost:
         q = (np.asarray(f, dtype=np.float64) - self.mean) / self.std
-        dist = np.sqrt(((self.points - q) ** 2).sum(axis=1))
+        x, y, z = self.columns
+        dist = np.sqrt((x - q[0]) ** 2 + (y - q[1]) ** 2 + (z - q[2]) ** 2)
         idx = np.argpartition(dist, self.k - 1)[: self.k]
         d = dist[idx]
         if (d == 0.0).any():

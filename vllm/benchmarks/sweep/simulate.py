@@ -205,6 +205,10 @@ def _simulate_comb(task: _CombTask) -> None:
         _prompt_token_ids(s.prompt, tokenizer, bench_args.backend) for s in samples
     ]
 
+    if engine_args.simulation_config.clock == "virtual":
+        # Under the virtual clock host time comes only from the timing model,
+        # so the engine's stats collection costs wall time and changes nothing.
+        engine_args.disable_log_stats = True
     engine = make_engine(engine_args)
     parallel_config = engine.vllm_config.parallel_config
     layout = {
@@ -230,8 +234,12 @@ def _simulate_comb(task: _CombTask) -> None:
         requests = [
             TimedRequest(
                 prompt_token_ids=prompt,
+                # Text is not needed; a server detokenizes in its frontend, off
+                # the engine core's thread.
                 sampling_params=SamplingParams(
-                    max_tokens=sample.expected_output_len, ignore_eos=True
+                    max_tokens=sample.expected_output_len,
+                    ignore_eos=True,
+                    detokenize=False,
                 ),
                 arrival_time=delay,
             )
