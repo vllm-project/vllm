@@ -14,6 +14,7 @@ Generic MXFP4 wrapper/reference checks already live in
 """
 
 import importlib
+import sys
 import warnings
 
 import pytest
@@ -50,7 +51,14 @@ SKINNY_GEMM_PASS_RATES = {
 }
 PRESHUFFLED_SHAPES = [
     (64, 4096, 8192),
-    (32, 8192, 16384),
+    (32, 14336, 4096),
+]
+# (N, K) of the qkv, o, gate_up and down linears of Llama-3.1-8B
+LLAMA_8B_LINEAR_SHAPES = [
+    (6144, 4096),
+    (4096, 4096),
+    (28672, 4096),
+    (4096, 14336),
 ]
 
 
@@ -462,6 +470,40 @@ def test_aiter_fp4_gemm_preshuffled_tuned_shapes(shape):
     assert torch.isfinite(out).all()
 
     _assert_deterministic(run_preshuffled, n_runs=3)
+
+
+@pytest.mark.parametrize(("N", "K"), LLAMA_8B_LINEAR_SHAPES)
+def test_preshuffled_tuned_probe_matches_kernel_config_lookup(N, K, monkeypatch):
+    """The tuned-shape probe has to look up the same preshuffled config file
+    that gemm_afp4wfp4_preshuffle loads, otherwise the M <= 64 preshuffle
+    routing picks the wrong shapes. Config lookups are mocked, no GPU needed.
+    """
+    pytest.importorskip("aiter")
+    import aiter.ops.triton.utils.gemm_config_utils as gemm_config_utils
+    from aiter.ops.triton.gemm_afp4wfp4 import _get_config
+
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    lookups = []
+
+    def fake_get_gemm_config(config_name, M, N=None, K=None, *args, **kwargs):
+        lookups.append((config_name, N, K))
+        return {}, True
+
+    monkeypatch.setattr(gemm_config_utils, "get_gemm_config", fake_get_gemm_config)
+    monkeypatch.setattr(
+        sys.modules[_get_config.__module__], "get_gemm_config", fake_get_gemm_config
+    )
+    probe = rocm_aiter_ops.is_triton_gemm_afp4wfp4_presh_ws_tuned
+    probe.cache_clear()
+    try:
+        # Both get weight.shape[1], the packed fp4 K in bytes.
+        assert probe(N, K // 2)
+        _get_config(16, N, K // 2, True)
+    finally:
+        probe.cache_clear()
+
+    assert lookups == [("GEMM-AFP4WFP4_PRESHUFFLED", N, K)] * 2
 
 
 @pytest.mark.skipif(not on_gfx950(), reason="gfx950 ROCm only")
