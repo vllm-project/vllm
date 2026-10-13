@@ -16,9 +16,7 @@ Ascend NPU content through overlays.
 ## Editing a recipe
 
 Start a new recipe from
-[`templates/text.yaml`](https://github.com/vllm-project/recipes/blob/main/templates/text.yaml)
-or
-[`templates/multimodal.yaml`](https://github.com/vllm-project/recipes/blob/main/templates/multimodal.yaml).
+[`templates/recipe.yaml`](https://github.com/vllm-project/recipes/blob/main/templates/recipe.yaml).
 Fields are defined in
 [SCHEMA.md](https://github.com/vllm-project/recipes/blob/main/SCHEMA.md) and
 checked against [`recipe.schema.json`](https://recipes.vllm.ai/recipe.schema.json)
