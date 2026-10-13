@@ -8,7 +8,8 @@ import torch
 from torch import nn
 from transformers import Glm5NextTextConfig
 
-from vllm.config import ParallelConfig, VllmConfig
+from vllm.config import ParallelConfig, VllmConfig, get_current_vllm_config
+from vllm.config.kernel import NATIVE_MEGA_MOE_BACKENDS
 from vllm.distributed import (
     get_ep_group,
     get_pp_group,
@@ -22,6 +23,9 @@ from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
     GateLinear,
     fused_moe_make_expert_params_mapping,
+)
+from vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router import (
+    fused_topk_bias,
 )
 from vllm.model_executor.layers.fused_moe.utils import (
     is_model_fused_shared_expert_compatible,
@@ -285,6 +289,14 @@ class Glm5NextMoE(nn.Module):
                 swiglu_limit=swiglu_limit,
             )
 
+        vllm_config = get_current_vllm_config()
+        self.use_mega_moe = (
+            vllm_config.kernel_config.moe_backend in NATIVE_MEGA_MOE_BACKENDS
+        )
+        if self.use_mega_moe:
+            self._init_mega_moe_experts(vllm_config, config, quant_config, prefix)
+            return
+
         self.experts = FusedMoEFactory(
             shared_experts=self.shared_experts,
             gate=self.gate,
@@ -314,12 +326,102 @@ class Glm5NextMoE(nn.Module):
             swiglu_limit=swiglu_limit,
         )
 
+    def _init_mega_moe_experts(
+        self,
+        vllm_config: VllmConfig,
+        config: Glm5NextTextConfig,
+        quant_config: QuantizationConfig | None,
+        prefix: str,
+    ) -> None:
+        """DeepGEMM FP8xFP8 MegaMoE: the kernel dispatches, runs the routed and
+        shared experts and combines across the EP group."""
+        from vllm.models.glm5next.nvidia.mega_moe import Glm5NextMegaMoEExperts
+
+        parallel_config = vllm_config.parallel_config
+        if not parallel_config.enable_expert_parallel:
+            raise NotImplementedError(
+                "GLM-5.3 MegaMoE requires expert parallel. Enable it with "
+                "--enable-expert-parallel, or pick a different moe backend."
+            )
+        if self.tp_size != 1:
+            raise NotImplementedError(
+                "GLM-5.3 MegaMoE requires tensor_parallel_size=1 (DP + EP)."
+            )
+        if (config.n_group or 1) > 1 or (config.topk_group or 1) > 1:
+            raise NotImplementedError("GLM-5.3 MegaMoE requires one expert group.")
+        weight_block_size = getattr(quant_config, "weight_block_size", None)
+        if weight_block_size is None:
+            raise NotImplementedError(
+                "GLM-5.3 MegaMoE requires a block-FP8 checkpoint "
+                "(quantization_config.weight_block_size)."
+            )
+        if self.n_physical_experts % self.ep_size != 0:
+            raise ValueError(
+                f"n_physical_experts={self.n_physical_experts} must be divisible "
+                f"by ep_size={self.ep_size}."
+            )
+        self.mega_top_k = config.num_experts_per_tok
+        self.mega_renormalize = config.norm_topk_prob
+        self.mega_scoring_func = config.scoring_func
+        self.mega_activation_clamp = (
+            float(config.swiglu_limit) if config.swiglu_limit is not None else None
+        )
+        self.experts = Glm5NextMegaMoEExperts(
+            vllm_config,
+            num_experts=self.n_physical_experts,
+            num_local_experts=self.n_local_physical_experts,
+            experts_start_idx=self.physical_expert_start,
+            num_logical_experts=self.n_logical_experts,
+            top_k=self.mega_top_k,
+            hidden_size=config.hidden_size,
+            intermediate_size=config.moe_intermediate_size,
+            weight_block_size=tuple(weight_block_size),
+            num_shared_experts=(
+                self.n_shared_experts if self.shared_experts is not None else 0
+            ),
+            prefix=f"{prefix}.experts",
+        )
+
+    def finalize_mega_moe_weights(self) -> None:
+        if self.use_mega_moe:
+            self.experts.finalize_weights(self.shared_experts)
+
+    def _forward_mega_moe(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        router_logits, _ = self.gate(hidden_states)
+        bias = self.gate.e_score_correction_bias
+        topk_weights, topk_ids = fused_topk_bias(
+            hidden_states=hidden_states,
+            gating_output=router_logits,
+            scoring_func=self.mega_scoring_func,
+            e_score_correction_bias=bias.data if bias is not None else None,
+            topk=self.mega_top_k,
+            renormalize=self.mega_renormalize,
+            indices_type=torch.int64,
+            routed_scaling_factor=self.routed_scaling_factor,
+        )
+        final_hidden_states = self.experts(
+            hidden_states,
+            topk_weights,
+            topk_ids,
+            activation_clamp=self.mega_activation_clamp,
+        )
+        if (
+            self.shared_experts is not None
+            and not self.experts.has_fused_shared_experts
+        ):
+            final_hidden_states = final_hidden_states + self.shared_experts(
+                hidden_states
+            )
+        return final_hidden_states
+
     def forward(
         self,
         hidden_states: torch.Tensor,
         already_sequence_parallel: bool = False,
     ) -> torch.Tensor:
         num_tokens, hidden_dim = hidden_states.shape
+        if self.use_mega_moe:
+            return self._forward_mega_moe(hidden_states).view(num_tokens, hidden_dim)
 
         # Chunk the hidden states so they aren't replicated across TP ranks.
         # This avoids duplicate computation in self.experts.
@@ -1041,6 +1143,11 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
                     )
                     weight_loader(param, loaded_weight, **kwargs)
             loaded_params.add(name)
+        for layer in self.layers:
+            if isinstance(layer, Glm5NextDecoderLayer) and isinstance(
+                layer.mlp, Glm5NextMoE
+            ):
+                layer.mlp.finalize_mega_moe_weights()
         return loaded_params
 
 

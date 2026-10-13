@@ -23,6 +23,66 @@ def ue8m0_uint8_to_float(sf: torch.Tensor) -> torch.Tensor:
     return (sf.to(torch.int32) << 23).view(torch.float32)
 
 
+_FP8_MAX = 448.0
+_SF_GRAN_K = 32
+
+
+def requant_block_fp8_to_ue8m0(
+    weight: torch.Tensor,
+    scale: torch.Tensor,
+    chunk: int = 8,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Requantize block-FP8 weights to E4M3 with one UE8M0 scale per 1x32.
+
+    The SM100 MegaMoE feeds its scales to the block-scaled MMA, so they have to
+    be powers of two, one per row and 32 columns. A checkpoint with float32
+    scales per block (e.g. 128x128) is rounded once more to get there.
+
+    Args:
+        weight: ``(..., mn, k)`` E4M3 values.
+        scale: ``(..., mn / block_m, k / block_k)`` float32 dequantization
+            scales (``real = weight * scale``).
+        chunk: Leading-dimension entries converted at a time, bounding the
+            float32 workspace.
+
+    Returns:
+        ``(weight, sf)``: the requantized E4M3 weights and their float32
+        power-of-two scales, ``(..., mn, k / 32)``.
+
+    """
+    assert weight.dtype == torch.float8_e4m3fn, weight.dtype
+    assert scale.dtype == torch.float32, scale.dtype
+    *lead, mn, k = weight.shape
+    block_m, block_k = mn // scale.shape[-2], k // scale.shape[-1]
+    assert k % _SF_GRAN_K == 0, k
+    assert tuple(scale.shape) == (*lead, mn // block_m, k // block_k) and (
+        mn % block_m == 0 and k % block_k == 0
+    ), (tuple(weight.shape), tuple(scale.shape))
+    w = weight.reshape(-1, mn, k)
+    s = scale.reshape(-1, scale.shape[-2], scale.shape[-1])
+    out = torch.empty_like(w)
+    sf = torch.empty(
+        w.shape[0], mn, k // _SF_GRAN_K, dtype=torch.float32, device=w.device
+    )
+    for start in range(0, w.shape[0], chunk):
+        end = min(start + chunk, w.shape[0])
+        s_full = (
+            s[start:end]
+            .repeat_interleave(block_m, dim=1)
+            .repeat_interleave(block_k, dim=2)
+        )
+        real = w[start:end].to(torch.float32) * s_full
+        groups = real.view(end - start, mn, k // _SF_GRAN_K, _SF_GRAN_K)
+        amax = groups.abs().amax(dim=-1).clamp_(min=1e-30)
+        # Smallest power of two holding the group's largest value in E4M3.
+        new_sf = torch.exp2(torch.ceil(torch.log2(amax / _FP8_MAX)))
+        out[start:end] = ((groups / new_sf.unsqueeze(-1)).view(end - start, mn, k)).to(
+            torch.float8_e4m3fn
+        )
+        sf[start:end] = new_sf
+    return out.view(*lead, mn, k), sf.view(*lead, mn, k // _SF_GRAN_K)
+
+
 class DeepGemmMegaMoEBackend:
     """Abstract MegaMoE backend that hides deep_gemm-specific details.
 
@@ -433,12 +493,114 @@ class DeepGemmSm100MegaMoEBackend(DeepGemmMegaMoEBackend):
         )
 
 
+class DeepGemmSm100Fp8MegaMoEBackend(DeepGemmSm100MegaMoEBackend):
+    """SM100 MegaMoE over block-FP8 experts (``fp8_fp4_mega_moe`` with E4M3
+    weights). Routed and shared expert weights arrive with float32 block scales
+    and are requantized to the kernel's UE8M0 1x32 scales."""
+
+    mma_type = "fp8xfp8"
+
+    @staticmethod
+    def _to_kernel_format(
+        deep_gemm, weight: torch.Tensor, scale: torch.Tensor, num_groups: int
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        weight, sf = requant_block_fp8_to_ue8m0(weight, scale)
+        mn, k = weight.shape[-2:]
+        sf = deep_gemm.transform_sf_into_required_layout(
+            sf.contiguous(), mn, k, (1, _SF_GRAN_K), num_groups
+        )
+        return weight, sf
+
+    def transform_weights(
+        self,
+        *,
+        w13_weight: torch.Tensor,
+        w13_weight_scale: torch.Tensor,
+        w2_weight: torch.Tensor,
+        w2_weight_scale: torch.Tensor,
+        num_local_experts: int,
+        hidden_size: int,
+        intermediate_size: int,
+        activation: str | None = None,
+    ) -> tuple[
+        tuple[torch.Tensor, torch.Tensor],
+        tuple[torch.Tensor, torch.Tensor],
+    ]:
+        from vllm.utils.deep_gemm import _import_deep_gemm
+
+        deep_gemm = _import_deep_gemm()
+        kwargs = {} if activation is None else {"activation": activation}
+        return deep_gemm.transform_weights_for_mega_moe(
+            self._to_kernel_format(
+                deep_gemm, w13_weight, w13_weight_scale, num_local_experts
+            ),
+            self._to_kernel_format(
+                deep_gemm, w2_weight, w2_weight_scale, num_local_experts
+            ),
+            **kwargs,
+        )
+
+    def transform_shared_expert_weights(
+        self,
+        *,
+        shared_experts: nn.Module,
+        num_shared_experts: int,
+        hidden_size: int,
+        intermediate_size: int,
+        prefix: str,
+    ) -> (
+        tuple[
+            tuple[torch.Tensor, torch.Tensor],
+            tuple[torch.Tensor, torch.Tensor],
+        ]
+        | None
+    ):
+        from vllm.utils.deep_gemm import _import_deep_gemm
+
+        deep_gemm = _import_deep_gemm()
+        shared_size = intermediate_size * num_shared_experts
+        pairs = []
+        for linear, shape in (
+            (shared_experts.gate_up_proj, (2 * shared_size, hidden_size)),
+            (shared_experts.down_proj, (hidden_size, shared_size)),
+        ):
+            weight = linear.weight
+            scale = getattr(linear, "weight_scale_inv", None)
+            if scale is None:
+                scale = getattr(linear, "weight_scale", None)
+            if (
+                scale is None
+                or weight.dtype != torch.float8_e4m3fn
+                or scale.dtype != torch.float32
+                or tuple(weight.shape) != shape
+            ):
+                logger.warning(
+                    "Disabling native MegaMoE shared-expert fusion for %s: "
+                    "expected replicated block-FP8 weights of shape %s with "
+                    "float32 block scales.",
+                    prefix,
+                    shape,
+                )
+                return None
+            # Requantized copies: the shared MLP keeps its own storage, which
+            # the generic post-load hooks may still rewrite.
+            w, sf = self._to_kernel_format(
+                deep_gemm, weight.data.unsqueeze(0), scale.data.unsqueeze(0), 1
+            )
+            pairs.append((w.squeeze(0), sf.squeeze(0)))
+        return deep_gemm.transform_weights_for_mega_moe(*pairs)
+
+
 def get_deep_gemm_mega_moe_backend(
     device: torch.device,
     hidden_size: int,
     intermediate_size: int,
+    mma_type: str = "fp8xfp4",
 ) -> DeepGemmMegaMoEBackend:
     """Return the DeepGEMM MegaMoE backend for ``device``.
+
+    ``mma_type`` selects by expert weight format: ``fp8xfp4`` for MXFP4
+    experts, ``fp8xfp8`` for block-FP8 experts.
 
     A successful return implies the backend can run on this device with the
     given ``hidden_size`` / ``intermediate_size``. All runtime capability
@@ -463,4 +625,8 @@ def get_deep_gemm_mega_moe_backend(
             "DeepGEMM MegaMoE requires hidden and intermediate sizes "
             "to be multiples of 128."
         )
+    if mma_type == "fp8xfp8":
+        return DeepGemmSm100Fp8MegaMoEBackend()
+    if mma_type != "fp8xfp4":
+        raise ValueError(f"Unsupported DeepGEMM MegaMoE mma_type: {mma_type!r}")
     return DeepGemmSm100MegaMoEBackend()
