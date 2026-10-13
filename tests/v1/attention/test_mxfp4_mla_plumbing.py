@@ -142,6 +142,9 @@ def test_hybrid_block_size_matches_the_layer_page(monkeypatch, kv_cache_dtype):
         ),
     )
     backend = types.SimpleNamespace(get_supported_kernel_block_sizes=lambda: [64])
+    monkeypatch.setattr(
+        Platform, "_find_non_ssm_backends", classmethod(lambda cls, _: [backend])
+    )
 
     Platform._align_hybrid_block_size(config, backend)
 

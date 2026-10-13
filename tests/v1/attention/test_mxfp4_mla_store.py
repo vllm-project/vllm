@@ -264,6 +264,30 @@ def test_paged_cache_view_and_scale_view_agree():
 
 
 @_rocm_gpu
+def test_packed_layout_block_stride_is_honored():
+    """Other layers' pages can sit between this layer's blocks, so a block's
+    stride exceeds block_size rows; slots must land in their block, not in the
+    gap."""
+    num_blocks, block_size, gap = 3, 8, 5
+    backing = _empty_cache(num_blocks * (block_size + gap)).reshape(
+        num_blocks, block_size + gap, ROW
+    )
+    paged = backing[:, :block_size]
+    num = num_blocks * block_size
+    x = _latent(num, seed=11)
+    slots = torch.randperm(num)
+    _store()(x.to(torch.bfloat16).cuda(), slots.cuda().to(torch.int64), paged)
+
+    got = backing.cpu()
+    want_packed, want_scales = mx.quantize_pack(x.to(torch.bfloat16), GROUP)
+    for i, slot in enumerate(slots.tolist()):
+        block, offset = divmod(slot, block_size)
+        assert torch.equal(got[block, offset, :256], want_packed[i]), f"row {i}"
+        assert torch.equal(got[block, offset, 256:], want_scales[i]), f"row {i}"
+    assert (got[:, block_size:] == 0xCD).all(), "a write landed in the gap"
+
+
+@_rocm_gpu
 def test_token_offset_does_not_overflow_int32():
     """A single launch may cover more than 2**31 source elements.
 

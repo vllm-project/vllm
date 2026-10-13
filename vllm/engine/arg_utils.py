@@ -453,6 +453,12 @@ _LOG_CONFIG_FILE_DEPRECATION_MESSAGE = (
 )
 
 
+_DISABLE_CASCADE_ATTN_DEPRECATION_MESSAGE = (
+    "--disable-cascade-attn is deprecated and has no effect since cascade "
+    "attention has been removed. It will be removed in v0.33.0."
+)
+
+
 class DeprecatedLogConfigFileAction(argparse.Action):
     """Warn when the legacy ``--log-config-file`` option is used."""
 
@@ -538,6 +544,7 @@ class EngineArgs:
     data_parallel_external_lb: bool = False
     data_parallel_multi_port_external_lb: bool = False
     data_parallel_backend: DataParallelBackend = ParallelConfig.data_parallel_backend
+    enable_hc_sp: bool = ParallelConfig.enable_hc_sp
     enable_expert_parallel: bool = ParallelConfig.enable_expert_parallel
     enable_batch_sharded_sampling: bool | None = (
         ParallelConfig.enable_batch_sharded_sampling
@@ -578,7 +585,7 @@ class EngineArgs:
         CacheConfig, "prefix_cache_retention_interval"
     )
     disable_sliding_window: bool = ModelConfig.disable_sliding_window
-    disable_cascade_attn: bool = ModelConfig.disable_cascade_attn
+    disable_cascade_attn: bool | None = None
     offload_backend: str = OffloadConfig.offload_backend
     cpu_offload_gb: float = UVAOffloadConfig.cpu_offload_gb
     cpu_offload_params: set[str] = get_field(UVAOffloadConfig, "cpu_offload_params")
@@ -622,6 +629,7 @@ class EngineArgs:
     allow_deprecated_quantization: bool = ModelConfig.allow_deprecated_quantization
     enforce_eager: bool = ModelConfig.enforce_eager
     disable_custom_all_reduce: bool = ParallelConfig.disable_custom_all_reduce
+    enable_shm_tensor_arena: bool = ParallelConfig.enable_shm_tensor_arena
     language_model_only: bool = MultiModalConfig.language_model_only
     limit_mm_per_prompt: dict[str, int | dict[str, int]] = get_field(
         MultiModalConfig, "limit_per_prompt"
@@ -750,6 +758,7 @@ class EngineArgs:
     enable_flashinfer_autotune: bool = get_field(
         KernelConfig, "enable_flashinfer_autotune"
     )
+    monokernel: bool = get_field(KernelConfig, "monokernel")
     worker_cls: str = ParallelConfig.worker_cls
     worker_extension_cls: str = ParallelConfig.worker_extension_cls
 
@@ -983,7 +992,10 @@ class EngineArgs:
             "--disable-sliding-window", **model_kwargs["disable_sliding_window"]
         )
         model_group.add_argument(
-            "--disable-cascade-attn", **model_kwargs["disable_cascade_attn"]
+            "--disable-cascade-attn",
+            action=argparse.BooleanOptionalAction,
+            default=None,
+            help=_DISABLE_CASCADE_ATTN_DEPRECATION_MESSAGE,
         )
         model_group.add_argument(
             "--skip-tokenizer-init", **model_kwargs["skip_tokenizer_init"]
@@ -1257,6 +1269,7 @@ class EngineArgs:
             "server per local data parallel rank and exposes aggregated health on "
             "a supervisor port.",
         )
+        parallel_group.add_argument("--enable-hc-sp", **parallel_kwargs["enable_hc_sp"])
         parallel_group.add_argument(
             "--enable-expert-parallel",
             "-ep",
@@ -1274,6 +1287,10 @@ class EngineArgs:
             "--all2all-backend", **parallel_kwargs["all2all_backend"]
         )
         parallel_group.add_argument("--enable-dbo", **parallel_kwargs["enable_dbo"])
+        parallel_group.add_argument(
+            "--enable-shm-tensor-arena",
+            **parallel_kwargs["enable_shm_tensor_arena"],
+        )
         parallel_group.add_argument(
             "--ubatch-size",
             **parallel_kwargs["ubatch_size"],
@@ -1786,6 +1803,7 @@ class EngineArgs:
             "--enable-flashinfer-autotune",
             **kernel_kwargs["enable_flashinfer_autotune"],
         )
+        kernel_group.add_argument("--monokernel", **kernel_kwargs["monokernel"])
         moe_backend_kwargs = kernel_kwargs["moe_backend"]
         moe_backend_kwargs["type"] = lambda s: s.lower().replace("-", "_")
         kernel_group.add_argument("--moe-backend", **moe_backend_kwargs)
@@ -1933,6 +1951,8 @@ class EngineArgs:
                 "launched vLLM.",
                 self.seed,
             )
+        if self.disable_cascade_attn is not None:
+            warnings.warn(_DISABLE_CASCADE_ATTN_DEPRECATION_MESSAGE, stacklevel=1)
 
         return ModelConfig(
             model=self.model,
@@ -1964,7 +1984,6 @@ class EngineArgs:
             use_fp64_gumbel=self.use_fp64_gumbel,
             enable_trace_replay=self.enable_trace_replay,
             disable_sliding_window=self.disable_sliding_window,
-            disable_cascade_attn=self.disable_cascade_attn,
             skip_tokenizer_init=self.skip_tokenizer_init,
             enable_prompt_embeds=self.enable_prompt_embeds,
             served_model_name=self.served_model_name,
@@ -2527,6 +2546,7 @@ class EngineArgs:
             data_parallel_backend=self.data_parallel_backend,
             data_parallel_hybrid_lb=self.data_parallel_hybrid_lb,
             is_moe_model=model_config.is_moe,
+            enable_hc_sp=self.enable_hc_sp,
             enable_expert_parallel=self.enable_expert_parallel,
             enable_batch_sharded_sampling=self.enable_batch_sharded_sampling,
             enable_ep_weight_filter=self.enable_ep_weight_filter,
@@ -2534,6 +2554,7 @@ class EngineArgs:
             enable_elastic_ep=self.enable_elastic_ep,
             elastic_ep_max_dp_size=self.elastic_ep_max_dp_size,
             enable_dbo=self.enable_dbo,
+            enable_shm_tensor_arena=self.enable_shm_tensor_arena,
             ubatch_size=self.ubatch_size,
             dbo_decode_token_threshold=self.dbo_decode_token_threshold,
             dp_sync_interval=self.dp_sync_interval,
@@ -2735,6 +2756,8 @@ class EngineArgs:
                     "are mutually exclusive"
                 )
             kernel_config.enable_flashinfer_autotune = self.enable_flashinfer_autotune
+        if self.monokernel:
+            kernel_config.monokernel = True
         if self.moe_backend != "auto":
             kernel_config.moe_backend = self.moe_backend
         if self.linear_backend != "auto":

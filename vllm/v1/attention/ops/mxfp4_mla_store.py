@@ -76,9 +76,11 @@ def _quantize_e2m1(normalized):
 def _mxfp4_mla_store_kernel(
     kv_ptr,  # [num_tokens, latent] bf16/fp16/fp32
     slot_mapping_ptr,  # [num_tokens] int64
-    cache_ptr,  # uint8, flat; row pitch ROW_BYTES
+    cache_ptr,  # uint8; row pitch ROW_BYTES
     kv_stride_token,
     num_slots,
+    block_size,
+    block_stride_rows,
     LATENT: tl.constexpr,
     GROUP: tl.constexpr,
     NUM_GROUPS: tl.constexpr,
@@ -130,7 +132,8 @@ def _mxfp4_mla_store_kernel(
     high = _quantize_e2m1(odd * inv_scale).to(tl.int32)
     packed = ((low & 0x0F) | ((high & 0x0F) << 4)).to(tl.uint8)
 
-    row = cache_ptr + slot * ROW_BYTES
+    physical_row = (slot // block_size) * block_stride_rows + slot % block_size
+    row = cache_ptr + physical_row * ROW_BYTES
     tl.store(row + group * HALF_GROUP + pair, packed)
     tl.store(
         row + SCALE_OFFSET + tl.arange(0, NUM_GROUPS),
@@ -150,7 +153,10 @@ def store_mxfp4_mla(
         kv_c_normed: ``[num_tokens, latent]``, the post-RMSNorm latent.
         slot_mapping: ``[num_tokens]`` global slot indices; negative entries
             (``PAD_SLOT_ID``) are skipped.
-        cache: ``uint8``, viewable as ``[num_slots, row_bytes(latent)]``.
+        cache: ``uint8``, either the paged ``[num_blocks, block_size,
+            row_bytes(latent)]`` layer view, whose block stride may exceed
+            ``block_size`` rows when other layers' pages sit between blocks, or
+            any contiguous tensor viewable as ``[num_slots, row_bytes(latent)]``.
         group: number of latent elements sharing one E8M0 scale.
 
     """
@@ -163,10 +169,27 @@ def store_mxfp4_mla(
 
     num_tokens, latent = kv_c_normed.shape
     pitch = row_bytes(latent, group)
-    flat = cache.view(-1)
-    if flat.numel() % pitch:
-        raise ValueError(f"cache of {flat.numel()} bytes is not a multiple of {pitch}")
-    num_slots = flat.numel() // pitch
+    if cache.ndim == 3:
+        num_blocks, block_size, width = cache.shape
+        if (
+            width != pitch
+            or cache.stride()[1:] != (pitch, 1)
+            or cache.stride(0) % pitch
+        ):
+            raise ValueError(
+                f"paged cache {tuple(cache.shape)} with strides {cache.stride()} "
+                f"is not a whole number of {pitch}-byte rows per block"
+            )
+        block_stride_rows = cache.stride(0) // pitch
+    else:
+        cache = cache.view(-1)
+        if cache.numel() % pitch:
+            raise ValueError(
+                f"cache of {cache.numel()} bytes is not a multiple of {pitch}"
+            )
+        num_blocks, block_size = 1, cache.numel() // pitch
+        block_stride_rows = block_size
+    num_slots = num_blocks * block_size
 
     if num_tokens == 0:
         return
@@ -174,9 +197,11 @@ def store_mxfp4_mla(
     _mxfp4_mla_store_kernel[(num_tokens,)](
         kv_c_normed,
         slot_mapping,
-        flat,
+        cache,
         kv_c_normed.stride(0),
         num_slots,
+        block_size,
+        block_stride_rows,
         LATENT=latent,
         GROUP=group,
         NUM_GROUPS=latent // group,
