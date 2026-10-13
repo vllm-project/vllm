@@ -520,13 +520,32 @@ class _CheckpointingMambaLayer(MambaBase):
     mamba_type = MambaAttentionBackendEnum.GDN_ATTN
 
     def __init__(self, prefill_checkpoint_alignment: int | None):
-        self.prefill_checkpoint_alignment = prefill_checkpoint_alignment
+        self._prefill_checkpoint_alignment = prefill_checkpoint_alignment
+
+    def get_prefill_checkpoint_alignment(self) -> int | None:
+        return self._prefill_checkpoint_alignment
 
     def get_state_shape(self):
         return ()
 
     def get_state_dtype(self):
         return ()
+
+
+def _align_qwen3_5_blocks(
+    prefill_checkpoint_alignment: int | None, prefix_match_unit: int | None = None
+):
+    from tests.v1.attention.utils import create_vllm_config
+
+    vllm_config = create_vllm_config(model_name="Qwen/Qwen3.5-0.8B")
+    cache_config = vllm_config.cache_config
+    cache_config.mamba_cache_mode = "align"
+    cache_config.prefix_match_unit = prefix_match_unit
+    vllm_config.compilation_config.static_forward_context["linear_attn"] = (
+        _CheckpointingMambaLayer(prefill_checkpoint_alignment)
+    )
+    Platform._align_hybrid_block_size(vllm_config, _mock_backend([MultipleOf(16)]))
+    return cache_config
 
 
 @pytest.mark.parametrize("prefill_checkpoint_alignment", [64, None])
@@ -536,17 +555,19 @@ def test_blocks_land_on_the_mamba_checkpoint_grid(prefill_checkpoint_alignment):
     Unaligned, Qwen3.5-0.8B's block (544) puts every other checkpoint off the
     grid.
     """
-    from tests.v1.attention.utils import create_vllm_config
-
-    vllm_config = create_vllm_config(model_name="Qwen/Qwen3.5-0.8B")
-    vllm_config.compilation_config.static_forward_context["linear_attn"] = (
-        _CheckpointingMambaLayer(prefill_checkpoint_alignment)
-    )
-
-    Platform._align_hybrid_block_size(vllm_config, _mock_backend([MultipleOf(16)]))
+    cache_config = _align_qwen3_5_blocks(prefill_checkpoint_alignment)
 
     expected = 576 if prefill_checkpoint_alignment else 544
-    assert vllm_config.cache_config.block_size == expected
+    assert cache_config.block_size == expected
+
+
+def test_prefix_match_unit_is_raised_onto_the_mamba_checkpoint_grid():
+    """Checkpoints land on prefix-cache boundaries, so a 32-token match unit
+    would put every other one off a 64-token grid."""
+    cache_config = _align_qwen3_5_blocks(64, prefix_match_unit=32)
+
+    assert cache_config.prefix_match_unit == 64
+    assert cache_config.block_size == 576
 
 
 def test_xpu_gdn_rounding_rejected_by_a_sibling_backend_raises(monkeypatch):

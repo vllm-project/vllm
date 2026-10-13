@@ -936,6 +936,24 @@ class Platform:
             cache_config.mamba_page_size_padded = shared_page
 
     @classmethod
+    def _mamba_checkpoint_alignment(cls, vllm_config: "VllmConfig") -> int:
+        """LCM of the Mamba layers' prefill checkpoint alignments, 1 if none."""
+        from vllm.config.vllm import get_layers_from_vllm_config
+        from vllm.model_executor.layers.mamba.abstract import MambaBase
+
+        mamba_layers = get_layers_from_vllm_config(
+            vllm_config,
+            MambaBase,  # type: ignore[type-abstract]
+        )
+        return math.lcm(
+            *(
+                alignment
+                for layer in mamba_layers.values()
+                if (alignment := layer.get_prefill_checkpoint_alignment()) is not None
+            )
+        )
+
+    @classmethod
     def _align_hybrid_block_size(
         cls,
         vllm_config: "VllmConfig",
@@ -946,11 +964,7 @@ class Platform:
         """
         from math import lcm
 
-        from vllm.config.vllm import (
-            get_layers_from_vllm_config,
-            set_current_vllm_config,
-        )
-        from vllm.model_executor.layers.mamba.abstract import MambaBase
+        from vllm.config.vllm import set_current_vllm_config
         from vllm.model_executor.models import ModelRegistry
         from vllm.utils.math_utils import cdiv
         from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
@@ -1084,16 +1098,25 @@ class Platform:
                 # For hybrid MLA/Mamba models, make the manager block size a
                 # multiple of 128 so split kernel blocks keep that invariant.
                 kernel_block_alignment_size = max(kernel_block_alignment_size, 128)
-        # Internal prefill checkpoints sit on block boundaries.
-        mamba_layers = get_layers_from_vllm_config(
-            vllm_config,
-            MambaBase,  # type: ignore[type-abstract]
-        )
-        for layer in mamba_layers.values():
-            if layer.prefill_checkpoint_alignment is not None:
-                kernel_block_alignment_size = lcm(
-                    kernel_block_alignment_size, layer.prefill_checkpoint_alignment
-                )
+        if cache_config.mamba_cache_mode == "align":
+            # Internal prefill checkpoints land on prefix-cache boundaries, so
+            # blocks and any finer match unit must sit on the Mamba layers'
+            # checkpoint grid.
+            checkpoint_grid = cls._mamba_checkpoint_alignment(vllm_config)
+            if checkpoint_grid > 1 and cache_config.prefix_match_unit is not None:
+                prefix_match_unit = lcm(cache_config.prefix_match_unit, checkpoint_grid)
+                if prefix_match_unit != cache_config.prefix_match_unit:
+                    logger.info(
+                        "Setting prefix_match_unit to %d tokens so that Mamba "
+                        "prefill checkpoints land on their kernels' grid.",
+                        prefix_match_unit,
+                    )
+                    cache_config.prefix_match_unit = prefix_match_unit
+                # Blocks must stay divisible by the match unit.
+                checkpoint_grid = prefix_match_unit
+            kernel_block_alignment_size = lcm(
+                kernel_block_alignment_size, checkpoint_grid
+            )
 
         # Use minimum block size that satisfies both backend alignment and
         # mamba page size compatibility

@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Inference-only Qwen3-Next/Qwen3.5 model."""
 
+import functools
 import itertools
 import os
 from dataclasses import dataclass, replace
@@ -17,6 +18,7 @@ from vllm import envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import (
+    CacheConfig,
     VllmConfig,
     get_current_vllm_config,
 )
@@ -64,6 +66,7 @@ from vllm.third_party.flash_linear_attention.ops import (
 )
 from vllm.third_party.flash_linear_attention.ops.chunk import l2norm_fwd
 from vllm.third_party.flash_linear_attention.ops.utils import FLA_CHUNK_SIZE
+from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import (
     LayerNameType,
     _encode_layer_name,
@@ -299,6 +302,16 @@ def fi_chunk_gated_delta_rule(
         return output.unsqueeze(0), final_state
     else:
         return result.unsqueeze(0), None
+
+
+def _checkpoint_grid(cache_config: CacheConfig) -> int:
+    """Tokens between the prefix-cache boundaries align-mode checkpoints land on.
+
+    The platform keeps it a multiple of FlashInfer's checkpoint alignment.
+    """
+    grid = cache_config.prefix_match_unit or cache_config.mamba_block_size
+    assert grid is not None
+    return grid
 
 
 @dataclass(frozen=True)
@@ -619,23 +632,15 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         self.gdn_prefill_backend = self.chunk_gated_delta_rule.gdn_prefill_backend
         self._prefill_kernels_warmed_up = False
         # FlashInfer's prefill emits mid-prefill states, so an align-mode
-        # checkpoint needs no split prefill. Worst case is a state every
-        # alignment tokens across the whole batch.
-        self._checkpoint_buffer_spec: tuple[tuple[int, ...], torch.dtype] | None = None
+        # checkpoint needs no split prefill.
+        self._checkpoint_alignment: int | None = None
         if (
             vllm_config.cache_config.mamba_cache_mode == "align"
             and self.gdn_prefill_backend == "flashinfer"
         ):
-            self.prefill_checkpoint_alignment = FLASHINFER_GDN_CHECKPOINT_ALIGNMENT
-            self._checkpoint_buffer_spec = (
-                (
-                    vllm_config.scheduler_config.max_num_batched_tokens
-                    // self.prefill_checkpoint_alignment,
-                    self.num_v_heads // self.tp_size,
-                    self.head_v_dim,
-                    self.head_k_dim,
-                ),
-                torch.float32,
+            self._checkpoint_alignment = FLASHINFER_GDN_CHECKPOINT_ALIGNMENT
+            self._max_num_batched_tokens = (
+                vllm_config.scheduler_config.max_num_batched_tokens
             )
             self._checkpoint_exporter = FlashInferGDNPrefillCheckpointExporter()
         self.enable_packed_recurrent_decode = (
@@ -671,14 +676,34 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
 
+    def get_prefill_checkpoint_alignment(self) -> int | None:
+        return self._checkpoint_alignment
+
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec | None:
         spec = super().get_kv_cache_spec(vllm_config)
-        if self.prefill_checkpoint_alignment is None or not isinstance(spec, MambaSpec):
+        if self._checkpoint_alignment is None or not isinstance(spec, MambaSpec):
             return spec
+        # FlashInfer emits states at one stride for the whole batch, the gcd of
+        # the offsets; keeping every offset on the prefix-cache grid keeps that
+        # stride a multiple of the grid, which bounds the states emitted.
         return replace(
             spec,
             num_prefill_checkpoint_blocks=1,
-            prefill_checkpoint_alignment=self.prefill_checkpoint_alignment,
+            prefill_checkpoint_alignment=_checkpoint_grid(vllm_config.cache_config),
+        )
+
+    @functools.cached_property
+    def _checkpoint_buffer_spec(self) -> tuple[tuple[int, ...], torch.dtype]:
+        # Offsets on the grid emit at most one state per grid step of a batch.
+        # Read lazily: the block size is final only after the model is built.
+        return (
+            (
+                cdiv(self._max_num_batched_tokens, _checkpoint_grid(self.cache_config)),
+                self.num_v_heads // self.tp_size,
+                self.head_v_dim,
+                self.head_k_dim,
+            ),
+            torch.float32,
         )
 
     def _fused_gdn_decode_unsupported_reason(
@@ -1224,7 +1249,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         if self._prefill_kernels_warmed_up:
             return
         self._prefill_kernels_warmed_up = True
-        if self._checkpoint_buffer_spec is not None:
+        if self._checkpoint_alignment is not None:
             # Size the workspace while profiling; it is locked afterwards.
             current_workspace_manager().get_simultaneous(self._checkpoint_buffer_spec)
 
@@ -1355,7 +1380,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         wherever the heuristic can pick it; ``use_cp=False`` forces the other.
         """
         checkpoint_buffers: list[torch.Tensor | None] = [None]
-        if self._checkpoint_buffer_spec is not None:
+        if self._checkpoint_alignment is not None:
             (state_checkpoints,) = current_workspace_manager().get_simultaneous(
                 self._checkpoint_buffer_spec
             )
@@ -1726,7 +1751,6 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 )
             else:
                 # Only FlashInfer's prefill emits checkpoints.
-                assert self._checkpoint_buffer_spec is not None
                 (state_checkpoints,) = current_workspace_manager().get_simultaneous(
                     self._checkpoint_buffer_spec
                 )

@@ -161,10 +161,11 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         self._check_chunk_metadata_override(type(self), self.gdn_prefill_backend)
         # Only the Qwen GDN layer opts in on FlashInfer; KDA layers sharing this
         # backend export checkpoints their own way.
+        checkpoint_alignment = kv_cache_spec.prefill_checkpoint_alignment
         self.plan_flashinfer_checkpoints = (
             self.gdn_prefill_backend == "flashinfer"
-            and kv_cache_spec.prefill_checkpoint_alignment
-            == FLASHINFER_GDN_CHECKPOINT_ALIGNMENT
+            and checkpoint_alignment is not None
+            and checkpoint_alignment % FLASHINFER_GDN_CHECKPOINT_ALIGNMENT == 0
         )
 
         if self.speculative_config:
