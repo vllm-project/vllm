@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from types import SimpleNamespace
 from typing import Any
 
@@ -84,7 +84,18 @@ class Config:
 
     world_size: int
 
+    activation: MoEActivation = MoEActivation.SILU
+
     torch_trace_dir_path: str | None = None
+
+    # Force AiterExperts's hidden_pad/intermediate_pad computation
+    # (`experts/rocm_aiter_moe.py`) to diverge from the padded K/N sizes above.
+    # None (default) preserves today's behavior: FusedMoEConfig defaults both
+    # to the (unpadded) K/intermediate_size_per_partition, so hidden_pad and
+    # intermediate_pad come out to 0.
+    # See https://github.com/vllm-project/vllm/issues/54966 ("Test padding").
+    hidden_dim_unpadded: int | None = None
+    intermediate_size_per_partition_unpadded: int | None = None
 
     def __post_init__(self):
         if self.quant_config is None:
@@ -156,6 +167,9 @@ class Config:
         vllm_config.model_config = SimpleNamespace(
             enforce_eager=True,
             is_moe=True,
+            enable_sleep_mode=False,
+            sleep_mode_backend="cumem",
+            sleep_mode_offload_cudagraph=False,
         )
         vllm_config.parallel_config.data_parallel_size = self.world_size
         vllm_config.parallel_config.enable_expert_parallel = True
@@ -310,6 +324,16 @@ class Config:
                 f"per_act_token={self.is_per_act_token_quant}, "
                 f"block={self.quant_block_shape})"
             )
+
+        # Check activation support; NotImplementedError means no opinion.
+        try:
+            if not self.fused_experts_type._supports_activation(self.activation):
+                return False, (
+                    f"FE {self.fused_experts_type.__name__} does not support "
+                    f"activation {self.activation}"
+                )
+        except NotImplementedError:
+            pass
 
         # Check block quantization support
         is_block_quantized = self.quant_block_shape is not None
@@ -605,6 +629,7 @@ def reference_moe_impl(
         topk_ids=rank_tensors.topk_ids,
         global_num_experts=config.E,
         expert_map=None,
+        activation=config.activation,
         w1_scale=w1_scale,
         w2_scale=w2_scale,
         a1_scale=a_scale,
@@ -648,9 +673,13 @@ def make_modular_kernel(
         moe_parallel_config=moe_parallel_config,
         in_dtype=config.dtype,
         max_num_tokens=next_power_of_2(config.M),
-        activation=MoEActivation.SILU,
+        activation=config.activation,
         device=vllm_config.device_config.device,
         routing_method=RoutingMethodType.DeepSeekV3,
+        hidden_dim_unpadded=config.hidden_dim_unpadded,
+        intermediate_size_per_partition_unpadded=(
+            config.intermediate_size_per_partition_unpadded
+        ),
     )
 
     prepare_finalize = maybe_make_prepare_finalize(
@@ -676,11 +705,29 @@ def make_modular_kernel(
     return modular_kernel
 
 
+def _shuffle_weights_for_aiter(rank_weights: WeightTensors) -> WeightTensors:
+    """Pre-shuffle weights so AITER selects its prebuilt `preshuffle_on` module.
+
+    Production shuffles in `process_weights_after_loading`; this harness builds its
+    tensors directly, so without this every call asks for a `preshuffle_off` module
+    that is not prebuilt, and JIT-compiles a kernel the image already ships.
+    """
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    w1, w2 = rocm_aiter_ops.shuffle_weights(rank_weights.w1, rank_weights.w2)
+    w1.is_shuffled = True
+    w2.is_shuffled = True
+    return replace(rank_weights, w1=w1, w2=w2)
+
+
 def _maybe_convert_weights_for_experts(
     config: Config,
     rank_weights: WeightTensors,
 ) -> WeightTensors:
     """Convert weights to expert-specific format (e.g., TrtLLM BlockMajorK)."""
+    from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
+        AiterExperts,
+    )
     from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
         Fp8MoeBackend,
         convert_to_fp8_moe_kernel_format,
@@ -688,6 +735,15 @@ def _maybe_convert_weights_for_experts(
 
     fe_type = config.fused_experts_type
     fe_name = getattr(fe_type, "__name__", "")
+
+    # AITER's prebuilt modules carry a gfx950 instance table even on gfx942 and reject
+    # intermediate sizes that are not a multiple of 256, but only for the fp8 per-tensor
+    # and per-token schemes. Those keep JIT-compiling until
+    # https://github.com/ROCm/aiter/issues/5766 is fixed.
+    if issubclass(fe_type, AiterExperts) and (
+        config.quant_dtype is None or config.quant_block_shape is not None
+    ):
+        return _shuffle_weights_for_aiter(rank_weights)
 
     backend: Fp8MoeBackend | None = None
     if fe_name == "TrtLlmFp8ExpertsModular":
@@ -774,7 +830,7 @@ def run_modular_kernel(
         "w2": rank_weights.w2,
         "topk_weights": rank_tensors.topk_weights,
         "topk_ids": topk_ids,
-        "activation": MoEActivation.SILU,
+        "activation": config.activation,
         "expert_map": rank_tensors.expert_map,
         "global_num_experts": config.E,
         "apply_router_weight_on_input": config.topk == 1

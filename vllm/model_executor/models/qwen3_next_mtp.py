@@ -6,6 +6,7 @@ from collections.abc import Iterable
 
 import torch
 from torch import nn
+from transformers import Qwen3NextConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
@@ -29,7 +30,6 @@ from vllm.model_executor.models.qwen3_next import (
 )
 from vllm.model_executor.models.utils import sequence_parallel_chunk
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.configs.qwen3_next import Qwen3NextConfig
 
 from .utils import (
     AutoWeightsLoader,
@@ -187,13 +187,6 @@ class Qwen3NextMTP(nn.Module, QwenNextMixtureOfExperts):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         config = vllm_config.model_config.hf_config
         self.vllm_config = vllm_config
-        cache_config = vllm_config.cache_config
-        if cache_config.mamba_cache_mode == "all":
-            raise NotImplementedError(
-                "Qwen3NextMTP currently does not support 'all' prefix caching, "
-                "please use '--mamba-cache-mode=align' instead"
-            )
-
         self.quant_config = vllm_config.quant_config
 
         super().__init__()
@@ -234,15 +227,18 @@ class Qwen3NextMTP(nn.Module, QwenNextMixtureOfExperts):
     ) -> torch.Tensor | None:
         return self.logits_processor(self.lm_head, hidden_states)
 
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        shared_weight_names = ["embed_tokens", "lm_head"]
+    def is_unused_checkpoint_weight(self, name: str) -> bool:
+        return not name.startswith("mtp.") and not any(
+            key in name for key in ["embed_tokens", "lm_head"]
+        )
 
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         def remap_weight_names(weights):
             for name, weight in weights:
+                if self.is_unused_checkpoint_weight(name):
+                    continue
                 if name.startswith("mtp."):
                     name = name.replace("mtp.", "model.")
-                elif not any(key in name for key in shared_weight_names):
-                    continue
                 yield name, weight
 
         loader = AutoWeightsLoader(self)

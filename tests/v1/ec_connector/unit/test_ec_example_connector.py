@@ -56,6 +56,22 @@ def test_metadata_preserves_repeated_item_positions():
     }
 
 
+def test_audio_metadata_survives_processor_cache_hit():
+    resolver = Mock()
+    resolver.fields_for.return_value = {"audio_num_tokens"}
+    feature = MultiModalFeatureSpec(
+        data=None,
+        modality="audio",
+        identifier="audio",
+        mm_position=PlaceholderRange(
+            offset=0, length=4, is_embed=torch.tensor([False, True, True, False])
+        ),
+    )
+    assert collect_ec_item_metadata([feature], resolver) == {
+        "audio": {"metadata": {"audio_num_tokens": [2]}, "item_indices": [0]}
+    }
+
+
 @pytest.fixture
 def temp_storage(tmp_path):
     """Fixture providing temporary storage path."""
@@ -229,6 +245,18 @@ class TestCacheExistence:
         assert not result[0]  # First doesn't exist
         assert result[1]  # Second exists
         assert not result[2]  # Third doesn't exist
+
+    def test_has_cache_item_miss_creates_no_folder(
+        self, mock_vllm_config_consumer, temp_storage
+    ):
+        """Test a cache miss leaves no empty folder in the shared storage."""
+        connector = ECExampleConnector(
+            vllm_config=mock_vllm_config_consumer,
+            role=ECConnectorRole.SCHEDULER,
+        )
+
+        assert not connector.has_cache_item("missing_hash")
+        assert os.listdir(temp_storage) == []
 
 
 class TestStateManagement:
