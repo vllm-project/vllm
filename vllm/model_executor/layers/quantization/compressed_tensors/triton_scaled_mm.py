@@ -28,6 +28,8 @@ def _scaled_mm_tile_coords(
     GROUP_M: tl.constexpr,
     N_STRIPE: tl.constexpr,
 ):
+    tl.static_assert(GROUP_M >= 1, "GROUP_M must be positive")
+    tl.static_assert(N_STRIPE >= 0, "N_STRIPE must be nonnegative")
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
 
     if N_STRIPE > 0:
@@ -282,7 +284,6 @@ def triton_scaled_mm(
     assert bias is None or bias.is_floating_point()
     assert is_weak_contiguous(input)
     assert is_weak_contiguous(weight)
-    assert group_m >= 1 and n_stripe >= 0
 
     # Scale addressing in the kernel assumes consecutive elements.
     scale_a, scale_b = scale_a.contiguous(), scale_b.contiguous()
@@ -333,15 +334,16 @@ def triton_scaled_mm(
         set_triton_allocator(input.device)
         _TD_ALLOCATOR_DEVICES.add(input.device)
 
-    group_m, n_stripe, unmasked_loads = _get_scaled_mm_launch_policy(
-        input,
-        weight,
-        (block_size_m, block_size_n, block_size_k),
-        use_td,
-        group_m,
-        n_stripe,
-        unmasked_loads,
-    )
+    if group_m != 1 or n_stripe != 0 or unmasked_loads:
+        group_m, n_stripe, unmasked_loads = _get_scaled_mm_launch_policy(
+            input,
+            weight,
+            (block_size_m, block_size_n, block_size_k),
+            use_td,
+            group_m,
+            n_stripe,
+            unmasked_loads,
+        )
 
     # A = input, B = weight, C = result
     # A = M x K, B = K x N, C = M x N

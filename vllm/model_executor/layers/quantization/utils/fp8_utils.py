@@ -948,7 +948,11 @@ def get_w8a8_per_token_fp8_configs(
             "Using configuration from %s for W8A8 per-token FP8 kernel.",
             config_file_path,
         )
-        return {int(m): config for m, config in json.load(f).items()}
+        configs = {int(m): config for m, config in json.load(f).items()}
+    for config in configs.values():
+        assert config.get("GROUP_M", 1) >= 1, "GROUP_M must be positive"
+        assert config.get("N_STRIPE", 0) >= 0, "N_STRIPE must be nonnegative"
+    return configs
 
 
 def get_w8a8_per_token_fp8_config(
