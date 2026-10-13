@@ -291,12 +291,12 @@ def test_fused_kda_decode_skips_null_block_padding() -> None:
     torch.testing.assert_close(actual_state, expected_state, atol=2e-3, rtol=2e-3)
 
 
-@torch.inference_mode()
 def test_decode_weights_staged_after_loading(dist_init) -> None:
     """The fused-decode weight copies must not depend on the weight loaders.
 
     Loaders that bypass ``weight_loader`` (e.g. ``--load-format dummy``) left
-    them uninitialized, so decode could read NaN.
+    them uninitialized, so decode could read NaN. Loading runs with grad mode
+    on, so the copies must also stay out of autograd.
     """
     _requires_kernel()
     from tests.v1.attention.utils import create_vllm_config
@@ -323,10 +323,11 @@ def test_decode_weights_staged_after_loading(dist_init) -> None:
             config, vllm_config, prefix="model.layers.0.self_attn"
         )
     assert layer.decode_conv1d_weight is not None
-    for param in layer.parameters():
-        param.normal_()
-    layer.decode_conv1d_weight.fill_(float("nan"))
-    layer.decode_norm_weight.fill_(float("nan"))
+    with torch.no_grad():
+        for param in layer.parameters():
+            param.normal_()
+        layer.decode_conv1d_weight.fill_(float("nan"))
+        layer.decode_norm_weight.fill_(float("nan"))
 
     process_weights_after_loading(
         torch.nn.ModuleList([layer]), vllm_config.model_config, torch.device("cuda")
@@ -343,3 +344,4 @@ def test_decode_weights_staged_after_loading(dist_init) -> None:
     torch.testing.assert_close(
         layer.decode_norm_weight, layer.o_norm.weight.float(), atol=0, rtol=0
     )
+    assert not layer.decode_norm_weight.requires_grad

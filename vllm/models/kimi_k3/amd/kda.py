@@ -279,16 +279,18 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
 
+    @torch.no_grad()
     def process_weights_after_loading(self, act_dtype: torch.dtype) -> None:
-        if self.decode_conv1d_weight is None or is_weights_pre_processed():
+        if is_weights_pre_processed():
             return
-        assert self.decode_norm_weight is not None
-        self.decode_conv1d_weight.copy_(
-            self.conv1d.weight.view(
-                3, self.local_projection_size, self.conv_size
-            ).transpose(1, 2)
-        )
-        self.decode_norm_weight.copy_(self.o_norm.weight)
+        if self.decode_conv1d_weight is not None:
+            self.decode_conv1d_weight.copy_(
+                self.conv1d.weight.view(
+                    3, self.local_projection_size, self.conv_size
+                ).transpose(1, 2)
+            )
+        if self.decode_norm_weight is not None:
+            self.decode_norm_weight.copy_(self.o_norm.weight)
 
     def rearrange_mixed_qkv(
         self, mixed_qkv: torch.Tensor
