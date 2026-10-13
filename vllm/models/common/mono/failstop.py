@@ -6,25 +6,17 @@ A MonoKernel never returns tokens from a step it did not finish: the runner
 copies the model's error words (``abi``) next to the sampled token ids, and
 ``check`` raises before that step's tokens are returned. The engine then stops
 like on any other engine death, and the deployment's restart policy recovers
-it. ``VLLM_MONO_UNSAFE_WARN=1`` (tests and benchmarks only, no CLI flag) logs
-the incident and keeps serving instead.
+it.
 
-Counters (``drain``, exported as ``vllm:monokernel_steps`` and
-``vllm:monokernel_incidents``): steps on the kernels, steps on vLLM's path by
-reason, and incidents by failed rank.
+Counters (``drain``, exported as ``vllm:monokernel_steps``): steps on the
+kernels, and steps on vLLM's path by reason.
 """
 
 from collections import Counter
 
 import torch
 
-from vllm import envs
-from vllm.logger import init_logger
-
-logger = init_logger(__name__)
-
 STEPS: Counter[tuple[str, str]] = Counter()
-INCIDENTS: Counter[str] = Counter()
 
 
 def count_step(spec: str, why: str | None) -> None:
@@ -34,14 +26,12 @@ def count_step(spec: str, why: str | None) -> None:
 
 
 def drain() -> dict[str, int] | None:
-    """The counts since the last drain: ``"steps:<spec>:<path>"`` (path "mono"
-    or the reason the step ran vLLM's layers) and ``"incidents:<rank>"``."""
-    if not STEPS and not INCIDENTS:
+    """The counts since the last drain: ``"steps:<spec>:<path>"``, where path
+    is "mono" or the reason the step ran vLLM's layers."""
+    if not STEPS:
         return None
     out = {f"steps:{spec}:{path}": n for (spec, path), n in STEPS.items()}
-    out.update({f"incidents:{rank}": n for rank, n in INCIDENTS.items()})
     STEPS.clear()
-    INCIDENTS.clear()
     return out
 
 
@@ -53,19 +43,13 @@ def check(words: torch.Tensor) -> None:
             a TP rank, nonzero once one of its in-kernel waits gave up).
 
     Raises:
-        RuntimeError: A rank gave up a wait, unless ``VLLM_MONO_UNSAFE_WARN``.
+        RuntimeError: A rank gave up a wait.
 
     """
     if not words.any():
         return
     ranks = [r for r, w in enumerate(words.tolist()) if w]
-    for r in ranks:
-        INCIDENTS[str(r)] += 1
-    msg = (
+    raise RuntimeError(
         f"MonoKernel step failed: TP ranks {ranks} gave up an in-kernel wait; "
         "the step's tokens are discarded"
     )
-    if envs.VLLM_MONO_UNSAFE_WARN:
-        logger.error("%s (VLLM_MONO_UNSAFE_WARN=1: serving on)", msg)
-        return
-    raise RuntimeError(msg)

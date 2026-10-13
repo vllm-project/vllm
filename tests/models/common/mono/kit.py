@@ -111,10 +111,8 @@ class MonoConformance:
     @pytest.fixture(autouse=True)
     def _counters(self):
         failstop.STEPS.clear()
-        failstop.INCIDENTS.clear()
         yield
         failstop.STEPS.clear()
-        failstop.INCIDENTS.clear()
 
     def spec(self, config):
         spec, refusals = select(load_specs(self.specs_path), config)
@@ -237,18 +235,9 @@ class MonoConformance:
         words[0] = 1
         with pytest.raises(RuntimeError, match="MonoKernel step failed"):
             failstop.check(words)
-        assert failstop.INCIDENTS["0"] == 1
-
-    def test_fail_stop_warns_when_unsafe(self, mono, monkeypatch):
-        monkeypatch.setattr("vllm.envs.VLLM_MONO_UNSAFE_WARN", True)
-        words = torch.zeros_like(mono.health())
-        words[0] = 1
-        failstop.check(words)
-        assert failstop.INCIDENTS["0"] == 1
 
     def test_healthy_step_passes(self, mono):
         failstop.check(torch.zeros_like(mono.health()))
-        assert not failstop.INCIDENTS
 
     def test_counters_follow_full_replay(self, config, model, mono):
         width = min(mono.widths)

@@ -11,13 +11,7 @@ The output rank's flags: one int32 word a TP rank in the first PEER_HEAD bytes
 of the output rank's peer buffer. A rank whose wait gives up writes its word
 there, drains the store, then sets FAILED, so nothing it stores later can
 overtake the flag. The runner reads these words after every step.
-
-The fault hook (tests only, ``VLLM_MONO_FAULT_INJECT=rank:epoch:us``): a
-build-time stall of one CTA of rank ``rank`` for ``us`` microseconds, once, in
-the step at ``epoch``; no code when unset.
 """
-
-from vllm import envs
 
 MONO_ABI_VERSION = 1
 
@@ -30,12 +24,3 @@ WAIT_SECONDS = 10
 def health_words(ctas: int) -> int:
     """A rank's health words for a grid of ``ctas``: the header, a record a CTA."""
     return (ctas + 1) * RECORD_WORDS
-
-
-def fault_inject() -> tuple[int, int, int] | None:
-    """(rank, epoch, microseconds) of ``VLLM_MONO_FAULT_INJECT``, or None."""
-    v = envs.VLLM_MONO_FAULT_INJECT
-    if not v:
-        return None
-    rank, epoch, us = (int(x) for x in v.split(":"))
-    return rank, epoch, us
