@@ -5,6 +5,7 @@ import pytest
 
 from tests.utils import single_gpu_only
 from vllm import SamplingParams
+from vllm.platforms import current_platform
 
 from ...utils import (
     assert_request_outputs_match,
@@ -55,7 +56,9 @@ def test_mtp_draft_lm_head_quantization(
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
     prompts = get_test_prompts(mm_enabled=False)
     results = {}
-    for quant in (None, "fp8", "nvfp4"):
+    # NVFP4 needs a CUDA W4A16 kernel.
+    quants = (None, "fp8", "nvfp4") if current_platform.is_cuda() else (None, "fp8")
+    for quant in quants:
         with vllm_runner(
             "Qwen/Qwen3.5-0.8B-Base",
             block_size=None,
@@ -88,6 +91,9 @@ def test_mtp_draft_lm_head_quantization(
 
 
 @single_gpu_only
+@pytest.mark.skipif(
+    not current_platform.is_cuda(), reason="nvfp4 needs a CUDA W4A16 kernel"
+)
 def test_mtp_draft_lm_head_quantization_survives_sleep_and_reload(
     monkeypatch: pytest.MonkeyPatch,
     sampling_config: SamplingParams,

@@ -18,6 +18,7 @@ from vllm.model_executor.model_loader.reload import (
     record_metadata_for_reloading,
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.platforms import current_platform
 from vllm.v1.worker.gpu_worker import Worker
 
 # Not a multiple of the vocab padding, so the head has padded rows.
@@ -25,6 +26,11 @@ VOCAB, HIDDEN = 4000, 512
 requires_cuda = pytest.mark.skipif(
     not torch.cuda.is_available(), reason="Marlin needs CUDA"
 )
+# NVFP4 needs a CUDA W4A16 kernel; ROCm only runs the fp8 cases.
+requires_nvfp4 = pytest.mark.skipif(
+    not current_platform.is_cuda(), reason="nvfp4 needs a CUDA W4A16 kernel"
+)
+NVFP4 = pytest.param("nvfp4", marks=requires_nvfp4)
 
 
 def _target_head(monkeypatch, seed: int = 0) -> ParallelLMHead:
@@ -47,7 +53,7 @@ def _tensors(module: torch.nn.Module) -> dict[str, torch.Tensor]:
 @requires_cuda
 @pytest.mark.parametrize(
     ("quantization", "max_rel_err", "min_top1"),
-    [("fp8", 0.05, 0.9), ("nvfp4", 0.15, 0.75)],
+    [("fp8", 0.05, 0.9), pytest.param("nvfp4", 0.15, 0.75, marks=requires_nvfp4)],
 )
 def test_tracks_bf16_head_through_logits_processor(
     default_vllm_config, dist_init, monkeypatch, quantization, max_rel_err, min_top1
@@ -73,7 +79,7 @@ def test_tracks_bf16_head_through_logits_processor(
 
 
 @requires_cuda
-@pytest.mark.parametrize("quantization", ["fp8", "nvfp4"])
+@pytest.mark.parametrize("quantization", ["fp8", NVFP4])
 def test_refresh_follows_target_update(
     default_vllm_config, dist_init, monkeypatch, quantization
 ):
@@ -143,7 +149,7 @@ def test_draft_weight_update_refreshes_copy(
 
 
 @requires_cuda
-@pytest.mark.parametrize("quantization", ["fp8", "nvfp4"])
+@pytest.mark.parametrize("quantization", ["fp8", NVFP4])
 def test_draft_weight_update_loads_lm_head(
     default_vllm_config, dist_init, monkeypatch, quantization
 ):
@@ -184,6 +190,7 @@ def test_draft_weight_update_loads_lm_head(
 
 
 @requires_cuda
+@requires_nvfp4
 def test_layerwise_reload_of_drafter_keeps_copy(
     default_vllm_config, dist_init, monkeypatch
 ):
