@@ -38,6 +38,70 @@ from vllm.utils.platform_utils import get_device_name_as_file_name
 
 logger = init_logger(__name__)
 
+
+def require_batch_invariant_quant_kernel() -> None:
+    if not is_batch_invariant_quant_kernel_enabled():
+        raise RuntimeError(
+            "batch-invariant FP8 quantization requires the CUDA extension"
+        )
+
+
+def is_batch_invariant_quant_kernel_enabled() -> bool:
+    return hasattr(torch.ops._C, "persistent_masked_m_silu_mul_quant")
+
+
+def fused_silu_mul_per_token_group_quant_fp8(
+    input: torch.Tensor,
+    *,
+    use_ue8m0: bool,
+    round_scale: bool | None = None,
+    clamp_limit: float | None = None,
+    masked_m: torch.Tensor | None,
+    output_q: torch.Tensor | None = None,
+    group_size: int = 128,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Compatibility wrapper over the existing persistent SiLU quantizer."""
+    require_batch_invariant_quant_kernel()
+    if round_scale is None:
+        round_scale = use_ue8m0
+    if use_ue8m0 and not round_scale:
+        raise ValueError("packed UE8M0 scales require round_scale=True")
+
+    from vllm.model_executor.layers.fused_moe.experts.batched_deep_gemm_moe import (
+        persistent_masked_m_silu_mul_quant,
+    )
+    from vllm.utils.deep_gemm import DeepGemmQuantScaleFMT
+
+    if input.ndim != (2 if masked_m is None else 3):
+        raise ValueError("invalid batch-invariant activation shape")
+    scale_format = (
+        DeepGemmQuantScaleFMT.UE8M0
+        if use_ue8m0
+        else DeepGemmQuantScaleFMT.FLOAT32_CEIL_UE8M0
+        if round_scale
+        else DeepGemmQuantScaleFMT.FLOAT32
+    )
+    full_tokens = masked_m is None
+    counts = (
+        torch.empty((1,), device=input.device, dtype=torch.int32)
+        if full_tokens
+        else masked_m
+    )
+    quantized, scales = persistent_masked_m_silu_mul_quant(
+        input.unsqueeze(0) if full_tokens else input,
+        counts,
+        group_size=group_size,
+        quant_scale_fmt=scale_format,
+        clamp_limit=clamp_limit,
+        full_tokens=full_tokens,
+        original_numerics=True,
+        output_q=output_q.unsqueeze(0)
+        if full_tokens and output_q is not None
+        else output_q,
+    )
+    return (quantized[0], scales[0]) if full_tokens else (quantized, scales)
+
+
 # Pre-fill value for scale parameters whose shards load independently. The
 # shards are combined with .max(), so an unloaded shard must never win; the
 # smallest representable float32 guarantees that.
