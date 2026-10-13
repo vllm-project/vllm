@@ -73,6 +73,12 @@ class BaseMambaAttentionMetadata:
     # the FlashInfer ReplaySSM backend is selected.
     write_pos_d: torch.Tensor | None = None
     is_flush_d: torch.Tensor | None = None
+    # SketchSSM: sketch rows (persistent request indices) and -1 padded
+    # flush rows.
+    sketch_indices_d: torch.Tensor | None = None
+    sketch_flush_rows_d: torch.Tensor | None = None
+    sketch_indices_p: torch.Tensor | None = None
+    sketch_build_p: torch.Tensor | None = None
     bc_pre_scratch: torch.Tensor | None = None
     # ReplaySSM — FlashInfer checkpointing_ssu two-kernel scratch.
     replayssm_scratch: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None
@@ -105,6 +111,8 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         self.num_spec_tokens: int = vllm_config.num_speculative_tokens
         self.use_spec_decode = self.num_spec_tokens > 0
         self.use_replayssm = vllm_config.cache_config.use_replayssm
+        self.use_sketchssm = vllm_config.cache_config.sketchssm is not None
+        self.use_window_rings = vllm_config.cache_config.use_mamba_window_rings
         self.replayssm_buffer_len = vllm_config.cache_config.replayssm_buffer_len
         self.use_flashinfer_replayssm = (
             self.use_replayssm
@@ -139,7 +147,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         ) = None
         self.decode_replayssm_state_indices_d: torch.Tensor | None = None
         # ReplaySSM CUDA-graph buffers for the selected backend.
-        if self.use_replayssm and not self.use_flashinfer_replayssm:
+        if self.use_window_rings and not self.use_flashinfer_replayssm:
             self.decode_write_pos_d: torch.Tensor = torch.empty(
                 (self.decode_cudagraph_max_bs,),
                 dtype=torch.int32,
@@ -150,6 +158,17 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                 dtype=torch.int8,
                 device=device,
             )
+            if self.use_sketchssm:
+                self.decode_sketch_flush_rows_d: torch.Tensor = torch.empty(
+                    (self.decode_cudagraph_max_bs,),
+                    dtype=torch.int32,
+                    device=device,
+                )
+                self.decode_sketch_indices_d: torch.Tensor = torch.empty(
+                    (self.decode_cudagraph_max_bs,),
+                    dtype=torch.int32,
+                    device=device,
+                )
             # B_cache shape = (ngroups, replayssm_buffer_len, dstate); the page
             # layout is (conv_state, ssm_state, x_cache, dt_cache, B_cache).
             bc_ngroups = kv_cache_spec.shapes[4][0]
@@ -467,6 +486,8 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         nums_dict, batch_ptr, token_chunk_offset_ptr = None, None, None
         write_pos_d = None
         is_flush_d = None
+        sketch_indices_d = sketch_flush_rows_d = None
+        sketch_indices_p = sketch_build_p = None
         replayssm_scratch = None
 
         state_indices_tensor = mamba_get_block_table_tensor(
@@ -521,7 +542,16 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                     )
                 )
 
-        if self.use_replayssm and not self.use_flashinfer_replayssm and num_decodes > 0:
+            if self.use_sketchssm:
+                sketch_indices_p, sketch_build_p = _sketch_prefill_rows(
+                    common_attn_metadata, num_decodes, num_reqs
+                )
+
+        if (
+            self.use_window_rings
+            and not self.use_flashinfer_replayssm
+            and num_decodes > 0
+        ):
             decode_base_cpu = common_attn_metadata.replayssm_decode_base_cpu
             seq_lens_cpu = common_attn_metadata.seq_lens_cpu_upper_bound
             async_spec_decode = (
@@ -579,6 +609,10 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                     & ((num_computed_d + query_lens_cpu) % block_size == 0)
                 )
             is_flush_cpu = is_flush_cpu.to(torch.int8)
+            if self.use_sketchssm:
+                sketch_indices_d, sketch_flush_rows_d = _sketch_decode_rows(
+                    common_attn_metadata, num_decodes, is_flush_cpu
+                )
             write_pos_d = async_tensor_h2d(
                 write_pos_cpu.to(torch.int32).tolist(),
                 dtype=torch.int32,
@@ -601,7 +635,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
 
         bc_pre_scratch = None
         if (
-            self.use_replayssm
+            self.use_window_rings
             and self.decode_bc_pre_scratch is not None
             and num_decodes > 0
         ):
@@ -618,6 +652,10 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             state_indices_tensor_d=state_indices_tensor_d,
             write_pos_d=write_pos_d,
             is_flush_d=is_flush_d,
+            sketch_indices_d=sketch_indices_d,
+            sketch_flush_rows_d=sketch_flush_rows_d,
+            sketch_indices_p=sketch_indices_p,
+            sketch_build_p=sketch_build_p,
             bc_pre_scratch=bc_pre_scratch,
             replayssm_scratch=replayssm_scratch,
             num_accepted_tokens=num_accepted_tokens,
@@ -643,6 +681,8 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         num_accepted_tokens = metadata.num_accepted_tokens
         write_pos_d = metadata.write_pos_d
         is_flush_d = metadata.is_flush_d
+        sketch_indices_d = metadata.sketch_indices_d
+        sketch_flush_rows_d = metadata.sketch_flush_rows_d
         bc_pre_scratch = metadata.bc_pre_scratch
         replayssm_scratch = metadata.replayssm_scratch
         replayssm_state_indices_d = None
@@ -669,7 +709,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                     1  # pad with 1st slot index
                 )
 
-            if self.use_replayssm and not self.use_flashinfer_replayssm:
+            if self.use_window_rings and not self.use_flashinfer_replayssm:
                 assert write_pos_d is not None
                 assert is_flush_d is not None
                 self.decode_write_pos_d[: metadata.num_decodes].copy_(
@@ -685,6 +725,20 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                 )
                 is_flush_d = self.decode_is_flush_d[:padded_bs]
                 is_flush_d[metadata.num_decodes :] = 0
+
+                if self.use_sketchssm:
+                    assert sketch_indices_d is not None
+                    self.decode_sketch_indices_d[: metadata.num_decodes].copy_(
+                        sketch_indices_d[: metadata.num_decodes], non_blocking=True
+                    )
+                    sketch_indices_d = self.decode_sketch_indices_d[:padded_bs]
+                    sketch_indices_d[metadata.num_decodes :] = 0
+                    assert sketch_flush_rows_d is not None
+                    self.decode_sketch_flush_rows_d[: metadata.num_decodes].copy_(
+                        sketch_flush_rows_d[: metadata.num_decodes], non_blocking=True
+                    )
+                    sketch_flush_rows_d = self.decode_sketch_flush_rows_d[:padded_bs]
+                    sketch_flush_rows_d[metadata.num_decodes :] = -1
 
                 if self.decode_bc_pre_scratch is not None:
                     bc_pre_scratch = self.decode_bc_pre_scratch[:padded_bs]
@@ -718,6 +772,8 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             num_accepted_tokens=num_accepted_tokens,
             write_pos_d=write_pos_d,
             is_flush_d=is_flush_d,
+            sketch_indices_d=sketch_indices_d,
+            sketch_flush_rows_d=sketch_flush_rows_d,
             bc_pre_scratch=bc_pre_scratch,
             replayssm_scratch=replayssm_scratch,
             replayssm_state_indices_d=replayssm_state_indices_d,
@@ -762,3 +818,46 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         )
 
         return self._update_metadata_for_cudagraph_capture(new_metadata)
+
+
+def _sketch_decode_rows(
+    common_attn_metadata: CommonAttentionMetadata,
+    num_decodes: int,
+    is_flush_cpu: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Sketch rows of the decode rows, and the flush rows padded with -1."""
+    req_idx = common_attn_metadata.req_idx
+    assert req_idx is not None, "SketchSSM requires persistent request indices"
+    # Decode rows can outnumber the requests (padding); those read sketch row 0.
+    rows = req_idx[:num_decodes].tolist()
+    rows += [0] * (num_decodes - len(rows))
+    flush_rows = torch.nonzero(is_flush_cpu).flatten().tolist()
+    device = common_attn_metadata.query_start_loc.device
+    return (
+        async_tensor_h2d(rows, dtype=torch.int32, device=device),
+        async_tensor_h2d(
+            flush_rows + [-1] * (num_decodes - len(flush_rows)),
+            dtype=torch.int32,
+            device=device,
+        ),
+    )
+
+
+def _sketch_prefill_rows(
+    common_attn_metadata: CommonAttentionMetadata,
+    num_decodes: int,
+    num_reqs: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Sketch rows of the prefill rows, and which of them finish their prompt."""
+    req_idx = common_attn_metadata.req_idx
+    decode_base_cpu = common_attn_metadata.replayssm_decode_base_cpu
+    seq_lens_cpu = common_attn_metadata.seq_lens_cpu_upper_bound
+    assert req_idx is not None, "SketchSSM requires persistent request indices"
+    assert decode_base_cpu is not None and seq_lens_cpu is not None
+    rows = slice(num_decodes, num_reqs)
+    done = seq_lens_cpu[rows] >= decode_base_cpu[rows]
+    device = common_attn_metadata.query_start_loc.device
+    return (
+        async_tensor_h2d(req_idx[rows].tolist(), dtype=torch.int32, device=device),
+        async_tensor_h2d(done.to(torch.int8).tolist(), dtype=torch.int8, device=device),
+    )

@@ -42,11 +42,18 @@ class MambaHybridAttnMetadata(ModelSpecificAttnMetadata):
     is_prefilling: torch.Tensor
     num_accepted_tokens: torch.Tensor | None = None
     num_decode_draft_tokens_cpu: torch.Tensor | None = None
+    # Ring origin per request row (CPU) for SketchSSM: the prefill length.
+    replayssm_decode_base_cpu: torch.Tensor | None = None
 
     def get_extra_common_attn_kwargs(
         self, kv_cache_group_id: int, num_reqs: int
     ) -> dict[str, Any]:
-        return {"is_prefilling": self.is_prefilling[:num_reqs]}
+        kwargs: dict[str, Any] = {"is_prefilling": self.is_prefilling[:num_reqs]}
+        if self.replayssm_decode_base_cpu is not None:
+            kwargs["replayssm_decode_base_cpu"] = self.replayssm_decode_base_cpu[
+                :num_reqs
+            ]
+        return kwargs
 
     def get_extra_attn_kwargs(
         self, attn_metadata_builder: Any, num_reqs: int
@@ -301,6 +308,15 @@ class MambaHybridModelState(DefaultModelState):
             )
             num_decode_draft_tokens_cpu = torch.from_numpy(num_decode_draft_tokens_np)
 
+        replayssm_decode_base_cpu = None
+        if self.cache_config.sketchssm is not None:
+            # Padding rows get a zero origin. prefill_len includes output
+            # tokens replayed on resumption.
+            replayssm_decode_base_cpu = torch.zeros(num_reqs, dtype=torch.int32)
+            replayssm_decode_base_cpu[: input_batch.num_reqs] = torch.from_numpy(
+                input_batch.prefill_len_np[: input_batch.num_reqs]
+            )
+
         if self._align_mode:
             mamba_group_ids, _ = self._get_mamba_group_info(kv_cache_config)
             aligned_index_builders = []
@@ -321,6 +337,7 @@ class MambaHybridModelState(DefaultModelState):
             is_prefilling=is_prefilling,
             num_accepted_tokens=num_accepted_tokens,
             num_decode_draft_tokens_cpu=num_decode_draft_tokens_cpu,
+            replayssm_decode_base_cpu=replayssm_decode_base_cpu,
         )
         attn_metadata = build_attn_metadata(
             attn_groups=attn_groups,
@@ -340,6 +357,12 @@ class MambaHybridModelState(DefaultModelState):
             model_specific_attn_metadata=mamba_attn_metadata,
             for_cudagraph_capture=for_capture,
             rswa_prefix_lens=input_batch.prompt_lens,
+            # SketchSSM keys its per-request sketches by the persistent index.
+            req_idx=(
+                input_batch.idx_mapping_np
+                if self.cache_config.sketchssm is not None
+                else None
+            ),
         )
         if self.recoverssm is not None:
             self.recoverssm.record_step(
