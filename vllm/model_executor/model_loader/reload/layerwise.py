@@ -181,9 +181,19 @@ def make_online_process_loader(layer: torch.nn.Module, param_name: str) -> Calla
         bound_args = loader_signature.bind(*args, **kwargs)
         bound_args.apply_defaults()
 
+        # Evaluate the loader *before* buffering it.  Under expert parallelism a
+        # weight loader rejects the slices this rank does not own: it returns
+        # False and copies nothing.  Buffering those unconditionally pinned the
+        # global expert slices in ``loaded_weights`` (16 MiB x 768 ~= 12 GiB on a
+        # full MoE layer) without ever advancing ``load_numel``, which is the
+        # main driver of the wake-up OOM.  Counting once, after the guard, also
+        # keeps ``load_numel`` from being inflated twice for a single loader call.
+        num_loaded, ret = get_numel_loaded(original_loader, bound_args)
+        if ret is False:
+            return ret
+
         # Buffer loaded weights, track loading progress
         info.loaded_weights.append((param_name, bound_args))
-        num_loaded, ret = get_numel_loaded(original_loader, bound_args)
         info.load_numel += num_loaded
 
         logger.debug(
