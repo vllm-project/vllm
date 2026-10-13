@@ -1420,12 +1420,5 @@ class DeepseekV41LLMForCausalLM(
         self.model.finalize_mhc_broadcast_weights()
         self.model.mono = attach(self.model, self.model.vllm_config, SPECS_PATH)
 
-    def step_health(self) -> torch.Tensor | None:
-        """This rank's error words, one a TP rank, nonzero once one of its
-        in-kernel waits gave up: any set word fails the step before its tokens
-        are returned."""
-        mono = self.model.mono
-        return None if mono is None else mono.state.words
-
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         return self.model.get_expert_mapping()
