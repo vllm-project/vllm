@@ -17,10 +17,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
     SchedulerOffloadConfig,
 )
 from vllm.platforms import current_platform
-from vllm.v1.core.kv_cache_utils import (
-    generate_scheduler_kv_cache_config,
-    kv_cache_groups_tp_replicas,
-)
+from vllm.v1.core.kv_cache_planning import kv_cache_groups_tp_replicas
+from vllm.v1.core.kv_cache_utils import generate_scheduler_kv_cache_config
 from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
     FullAttentionSpec,
