@@ -1,0 +1,138 @@
+meta:
+  title: "LFM2.5 1.2B Base"
+  slug: "lfm2.5-1.2b-base"
+  provider: "LiquidAI"
+  description: "Liquid AI's 1.2B pretrained base model on the LFM2 hybrid conv+attention backbone — a text-completion and fine-tuning foundation (no chat template)."
+  date_added: 2026-06-25
+  date_updated: 2026-06-24
+  difficulty: beginner
+  tasks:
+    - text
+  performance_headline: "1.2B pretrained base (no chat template) — completions endpoint, ideal as a fine-tuning base"
+  related_recipes:
+    - LiquidAI/LFM2.5-1.2B-Instruct
+    - LiquidAI/LFM2.5-350M
+  hardware:
+    h100: verified
+    h200: verified
+    b200: verified
+
+model:
+  model_id: "LiquidAI/LFM2.5-1.2B-Base"
+  min_vllm_version: "0.23.0"
+  architecture: dense
+  parameter_count: "1.2B"
+  active_parameters: "1.2B"
+  context_length: 32768
+  base_args: []
+  base_env: {}
+
+variants:
+  default:
+    precision: bf16
+    vram_minimum_gb: 3
+    description: "Full BF16 — single 8 GB+ NVIDIA GPU with room for KV cache"
+
+compatible_strategies:
+  - single_node_tp
+
+hardware_overrides:
+  # Blackwell (B200) only: route RMSNorm to the bundled oink kernels (measured ~+2.6% on B200,
+  # output identical). Inert (falls back to native) on non-Blackwell GPUs.
+  blackwell:
+    extra_env:
+      VLLM_USE_OINK_OPS: "1"
+strategy_overrides:
+  single_node_tp:
+    tp: 1
+
+guide: |
+  ## Overview
+
+  [LFM2.5-1.2B-Base](https://huggingface.co/LiquidAI/LFM2.5-1.2B-Base) is the pretrained base
+  checkpoint behind [Liquid AI's](https://www.liquid.ai/) LFM2.5-1.2B instruct models, built on
+  the **LFM2 hybrid backbone** (short-range gated convolution blocks interleaved with grouped-query
+  attention). It is **not** instruction-tuned and has no chat template — use the
+  `/v1/completions` endpoint (raw text continuation), or fine-tune it for your own task.
+
+  ### Key Features
+  - **Pretrained base**: No chat template, no instruction tuning — a clean foundation for fine-tuning or raw completion.
+  - **Hybrid backbone**: Gated short convolutions interleaved with grouped-query attention — a smaller KV cache and lower decode latency than a same-size full-attention transformer.
+  - **32K context**: 32,768-token context window.
+  - **Native vLLM support**: Served via the `Lfm2ForCausalLM` architecture.
+
+  ### Supported Variants
+
+  Dense:
+  - `LiquidAI/LFM2.5-230M` (230M)
+  - `LiquidAI/LFM2.5-350M` (350M)
+  - `LiquidAI/LFM2.5-1.2B-Instruct` (1.2B)
+  - `LiquidAI/LFM2.5-1.2B-Thinking` (1.2B, reasoning)
+  - `LiquidAI/LFM2.5-1.2B-JP` / `LiquidAI/LFM2.5-1.2B-JP-202606` (Japanese)
+  - `LiquidAI/LFM2.5-1.2B-Base` (pretrained base)
+
+  MoE:
+  - `LiquidAI/LFM2.5-8B-A1B` (8B total / ~1B active)
+
+  Vision-Language:
+  - `LiquidAI/LFM2.5-VL-450M`, `LiquidAI/LFM2.5-VL-1.6B`
+
+  See the [LFM2.5 usage guide](../../LiquidAI/LFM2.5) for the full family.
+
+  ## Prerequisites
+
+  - **Hardware**: 1× GPU with ≥8 GB VRAM.
+  - **vLLM**: ≥ 0.23.0.
+
+  ### pip (NVIDIA CUDA)
+  ```bash
+  uv venv
+  source .venv/bin/activate
+  uv pip install -U vllm --torch-backend auto
+  ```
+
+  ## Deployment Configurations
+
+  ### Quick Start (Single GPU, BF16)
+  ```bash
+  vllm serve LiquidAI/LFM2.5-1.2B-Base
+  ```
+
+  ### Docker (NVIDIA)
+  ```bash
+  docker run -itd --name lfm2.5-base \
+    --ipc=host --network host --shm-size 16G --gpus all \
+    -v ~/.cache/huggingface:/root/.cache/huggingface \
+    vllm/vllm-openai:latest \
+      --model LiquidAI/LFM2.5-1.2B-Base \
+      --host 0.0.0.0 --port 8000
+  ```
+
+  ## Client Usage
+
+  ### Text Completion
+  This is a base model — use the **completions** endpoint, not chat. Recommended sampling:
+  temperature `0.3`, `min_p 0.15`, `repetition_penalty 1.05`.
+  ```python
+  from openai import OpenAI
+  client = OpenAI(base_url="http://localhost:8000/v1", api_key="EMPTY")
+  response = client.completions.create(
+      model="LiquidAI/LFM2.5-1.2B-Base",
+      prompt="The three laws of thermodynamics are:",
+      temperature=0.3,
+      extra_body={"min_p": 0.15, "repetition_penalty": 1.05},
+  )
+  print(response.choices[0].text)
+  ```
+
+  ## Configuration Tips
+  - Use `/v1/completions` (raw continuation) — there is no chat template on a base model.
+  - For fine-tuning, this checkpoint is the recommended starting point for custom LFM2.5-1.2B tasks.
+  - Set `--max-model-len` to match your workload (up to 32K).
+  - Sampling presets are per-request client defaults — don't bake them into `vllm serve`.
+
+  ## References
+  - [Model card](https://huggingface.co/LiquidAI/LFM2.5-1.2B-Base)
+  - [LFM2.5 usage guide](../../LiquidAI/LFM2.5)
+  - [Liquid AI](https://www.liquid.ai/)
+  - [vLLM supported models](https://docs.vllm.ai/en/latest/models/supported_models.html)

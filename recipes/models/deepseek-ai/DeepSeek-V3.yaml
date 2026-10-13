@@ -1,0 +1,254 @@
+meta:
+  title: "DeepSeek-V3"
+  slug: "deepseek-v3"
+  provider: "DeepSeek"
+  description: "DeepSeek-V3 is a 671B-parameter Mixture-of-Experts model with native FP8 weights and strong reasoning, coding, and math capabilities."
+  date_added: 2025-08-01
+  date_updated: 2026-09-10
+  difficulty: intermediate
+  tasks:
+    - text
+  performance_headline: "Frontier open-weights MoE with native FP8 and FP4 variants"
+  related_recipes:
+    - "deepseek-ai/DeepSeek-R1"
+    - "deepseek-ai/DeepSeek-V3.1"
+  hardware:
+    h200: verified
+    b200: verified
+    gb200: verified
+    mi300x: verified
+    mi325x: verified
+    mi350x: verified
+    mi355x: verified
+
+model:
+  model_id: "deepseek-ai/DeepSeek-V3"
+  min_vllm_version: "0.12.0"
+  architecture: moe
+  parameter_count: "671B"
+  active_parameters: "37B"
+  context_length: 163840
+  supports_dcp: true
+  base_args:
+    - "--trust-remote-code"
+    - "--enable-expert-parallel"
+  base_env: {}
+
+features:
+  tool_calling:
+    description: "Enable DeepSeek-V3 tool calling with the deepseek_v3 tool-call parser."
+    args:
+      - "--enable-auto-tool-choice"
+      - "--tool-call-parser"
+      - "deepseek_v3"
+      - "--chat-template"
+      - "examples/tool_chat_template_deepseekv3.jinja"
+  reasoning:
+    description: "Enable reasoning/thinking mode with the DeepSeek R1 reasoning parser."
+    args:
+      - "--reasoning-parser"
+      - "deepseek_v3"
+
+opt_in_features: []
+
+variants:
+  default:
+    precision: fp8
+    vram_minimum_gb: 805
+    description: "Native FP8 weights on 8xH200 (recommended)"
+  v3_0324:
+    model_id: "deepseek-ai/DeepSeek-V3-0324"
+    precision: fp8
+    vram_minimum_gb: 805
+    description: "March 2025 DeepSeek-V3 refresh (DeepSeek-V3-0324)"
+  fp4:
+    model_id: "nvidia/DeepSeek-V3-FP4"
+    precision: fp4
+    vram_minimum_gb: 403
+    description: "NVIDIA FP4 quantized weights for Blackwell (e.g. 4xB200)"
+
+compatible_strategies:
+  - single_node_tp
+  - single_node_tep
+  - single_node_dep
+  - single_node_dpa_tp
+  - multi_node_tp
+  - multi_node_tp_pp
+  - multi_node_dep
+  - multi_node_tep
+  - pd_cluster
+
+hardware_overrides:
+  amd:
+    extra_args: []
+    extra_env:
+      VLLM_ROCM_USE_AITER: "1"
+
+strategy_overrides:
+  single_node_dpa_tp:
+    extra_env:
+      VLLM_ENGINE_READY_TIMEOUT_S: "1800"
+
+guide: |
+  ## Overview
+
+  DeepSeek-V3 is a 671B-parameter Mixture-of-Experts model (37B activated per token)
+  shipped with native FP8 weights. It shares its architecture with DeepSeek-R1, so the
+  same launch recipes apply to both models. DeepSeek publishes a refreshed checkpoint as
+  [`DeepSeek-V3-0324`](https://huggingface.co/deepseek-ai/DeepSeek-V3-0324), available
+  here as the **V3 0324** variant. For Blackwell GPUs, NVIDIA publishes an FP4 quantized
+  variant (`nvidia/DeepSeek-V3-FP4` / `nvidia/DeepSeek-R1-FP4`) that runs on fewer GPUs.
+
+  ## Prerequisites
+
+  - **Hardware (FP8)**: 8x H200 (CUDA) or 8x MI300X / MI325X / MI355X (ROCm)
+  - **Hardware (FP4)**: 4x B200 GPUs
+  - **vLLM**: Current stable release
+
+  ### CUDA
+  ```bash
+  uv venv
+  source .venv/bin/activate
+  uv pip install -U vllm --torch-backend auto
+  ```
+
+  ### ROCm (MI300X, MI325X, MI355X)
+  Requires Python 3.12, ROCm 7.2.1, and glibc >= 2.35.
+  ```bash
+  uv venv --python 3.12
+  source .venv/bin/activate
+  uv pip install vllm --extra-index-url https://wheels.vllm.ai/rocm/
+  ```
+
+  ## Client Usage
+
+  ### 8xH200 / 8xMI300X (FP8)
+
+  Tensor Parallel + Expert Parallel (TP8+EP) — CUDA:
+  ```bash
+  vllm serve deepseek-ai/DeepSeek-V3 \
+    --trust-remote-code \
+    --tensor-parallel-size 8 \
+    --enable-expert-parallel
+  ```
+
+  Tensor Parallel + Expert Parallel (TP8+EP) — ROCm:
+  ```bash
+  export VLLM_ROCM_USE_AITER=1
+
+  vllm serve deepseek-ai/DeepSeek-V3 \
+    --trust-remote-code \
+    --tensor-parallel-size 8 \
+    --enable-expert-parallel
+  ```
+
+  Data Parallel + Expert Parallel (DP8+EP) — CUDA:
+  ```bash
+  vllm serve deepseek-ai/DeepSeek-V3 \
+    --trust-remote-code \
+    --data-parallel-size 8 \
+    --enable-expert-parallel
+  ```
+
+  ### 8xMI350X / 8xMI355X (DPA+TP)
+
+  Each GPU runs its own attention replica with a private KV cache, while the MoE
+  experts stay tensor-sharded across all eight GPUs. Aggregate KV-cache
+  capacity is roughly 8x that of a single TP8 replica, useful for workloads 
+  benefiting from larger KV capacities. 
+
+  Engine (all eight ranks in one process, listening on 8100):
+  ```bash
+  export VLLM_ROCM_USE_AITER=1
+  export VLLM_ENGINE_READY_TIMEOUT_S=1800
+
+  vllm serve deepseek-ai/DeepSeek-V3-0324 \
+    --trust-remote-code \
+    --port 8100 \
+    --data-parallel-size 8 \
+    --tensor-parallel-size 1
+  ```
+
+  Router (client-facing on 8000, spreads requests across the eight DP ranks):
+  ```bash
+  uv pip install vllm-router
+
+  vllm-router \
+    --host 0.0.0.0 \
+    --port 8000 \
+    --policy consistent_hash \
+    --intra-node-data-parallel-size 8 \
+    --worker-urls http://localhost:8100 \
+    --worker-startup-timeout-secs 1800
+  ```
+
+  Notes:
+
+  - `--intra-node-data-parallel-size` must match the engine's
+    `--data-parallel-size`. A mismatch silently under-uses ranks.
+  - `consistent_hash` is the policy that makes this worthwhile for chat: it pins
+    a conversation to the rank that already holds its prefix, so the larger
+    aggregate cache actually gets hit. `round_robin` scatters turns of the same
+    conversation across ranks and throws the prefix away.
+  - Start the engine first, then the router; `--worker-startup-timeout-secs 1800`
+    covers the engine's weight load either way.
+  - Send client traffic to the router on port 8000, never to 8100 directly.
+
+  ### 4xB200 (FP4)
+
+  On vLLM v0.28.0 and later, the FlashInfer MoE kernels are selected automatically
+  for both FP4 and FP8 on Blackwell — no environment variables are needed. To pin
+  the backend explicitly, pass `--moe-backend flashinfer_trtllm`.
+
+  Tensor Parallel + Expert Parallel (TP4+EP):
+  ```bash
+  CUDA_VISIBLE_DEVICES=0,1,2,3 vllm serve nvidia/DeepSeek-V3-FP4 \
+    --trust-remote-code \
+    --tensor-parallel-size 4 \
+    --enable-expert-parallel
+  ```
+
+  Data Parallel + Expert Parallel (DP4+EP):
+  ```bash
+  CUDA_VISIBLE_DEVICES=0,1,2,3 vllm serve nvidia/DeepSeek-V3-FP4 \
+    --trust-remote-code \
+    --data-parallel-size 4 \
+    --enable-expert-parallel
+  ```
+
+  ## Benchmarking
+
+  For benchmarking, prefix caching is disabled by default in vLLM — no extra server
+  flag is needed.
+
+  ```bash
+  # Prompt-heavy benchmark (8k/1k)
+  vllm bench serve \
+    --model deepseek-ai/DeepSeek-V3 \
+    --dataset-name random \
+    --random-input-len 8000 \
+    --random-output-len 1000 \
+    --request-rate 10000 \
+    --num-prompts 16 \
+    --ignore-eos
+  ```
+
+  Test different workloads by adjusting input/output lengths:
+  - Prompt-heavy: 8000 input / 1000 output
+  - Decode-heavy: 1000 input / 8000 output
+  - Balanced: 1000 input / 1000 output
+
+  ## Troubleshooting
+
+  - **Disaggregated Serving with Wide EP (Experimental GB200)**: See
+    [vLLM issue #33583](https://github.com/vllm-project/vllm/issues/33583) and the
+    [vLLM blog post](https://blog.vllm.ai/2026/02/03/dsr1-gb200-part1.html) for
+    GB200 disaggregated serving recipes.
+
+  ## References
+
+  - [DeepSeek-V3 on Hugging Face](https://huggingface.co/deepseek-ai/DeepSeek-V3)
+  - [DeepSeek-V3-0324 on Hugging Face](https://huggingface.co/deepseek-ai/DeepSeek-V3-0324)
+  - [NVIDIA DeepSeek-V3-FP4](https://huggingface.co/nvidia/DeepSeek-V3-FP4)
+  - [vLLM Expert Parallelism docs](https://docs.vllm.ai/en/latest/serving/expert_parallel_deployment.html)
+  - [vLLM Data Parallel deployment docs](https://docs.vllm.ai/en/latest/serving/data_parallel_deployment.html)

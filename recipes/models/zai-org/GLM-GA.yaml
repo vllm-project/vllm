@@ -1,0 +1,162 @@
+meta:
+  title: "GLM-GA"
+  slug: "glm-ga"
+  provider: "GLM (Z-AI)"
+  description: "GLM-GA dense vision-language model (~10B) — image and video understanding with 128K context and dedicated Glmga video processor (fps=2, up to 640 frames)"
+  date_added: 2026-06-03
+  date_updated: 2026-05-27
+  difficulty: beginner
+  tasks:
+    - multimodal
+  performance_headline: "Dense VLM based on GLM-4.6V-Flash with dedicated video processor supporting long videos up to 640 frames"
+  related_recipes:
+    - zai-org/GLM-4.6V
+
+model:
+  model_id: "zai-org/GLM-GA"
+  min_vllm_version: "0.21.0"
+  architecture: dense
+  parameter_count: "10B"
+  context_length: 131072
+  base_args:
+    - "--trust-remote-code"
+    - "--allowed-local-media-path"
+    - "/"
+    - "--mm-processor-cache-type"
+    - "shm"
+    - "--reasoning-parser"
+    - "glm45"
+  base_env: {VLLM_VIDEO_LOADER_BACKEND: "glm4_6v"}
+
+dependencies:
+  - command: "uv pip install git+https://github.com/huggingface/transformers.git"
+    note: "Latest transformers from main branch for GlmgaImageProcessor / GlmgaVideoProcessor support"
+
+features:
+  text_only:
+    description: "Skip loading the vision encoder for text-only workloads — frees VRAM for KV cache."
+    args:
+      - "--language-model-only"
+
+opt_in_features:
+  - text_only
+
+variants:
+  default:
+    precision: bf16
+    vram_minimum_gb: 29
+    description: "Full precision BF16 — runs on a single H100/H200"
+
+compatible_strategies:
+  - single_node_tp
+  - multi_node_tp
+
+hardware_overrides: {}
+
+strategy_overrides: {}
+
+guide: |
+  ## Overview
+
+  GLM-GA is a dense vision-language model (~10B parameters) based on the
+  GLM-4.6V-Flash architecture. It shares the same `Glm4vForConditionalGeneration`
+  model class as GLM-4.6V but uses dedicated `GlmgaImageProcessor` and
+  `GlmgaVideoProcessor` sub-processors. The key difference is in video processing:
+  GLM-GA samples at a fixed 2 fps and supports up to 640 frames, enabling
+  long-video understanding.
+
+  ## Prerequisites
+
+  - **vLLM version:** >= 0.21.0
+  - **Transformers:** latest (required for Glmga processor support)
+  - **Hardware:** 1x H100/H200 or equivalent (BF16)
+
+  ### Install vLLM
+
+  ```bash
+  uv venv
+  source .venv/bin/activate
+  uv pip install -U vllm --torch-backend auto
+  uv pip install git+https://github.com/huggingface/transformers.git
+  ```
+
+  ## Launching the Server
+
+  ### Single GPU
+
+  ```bash
+  export VLLM_VIDEO_LOADER_BACKEND=glm4_6v
+  vllm serve zai-org/GLM-GA \
+       --tool-call-parser glm45 \
+       --reasoning-parser glm45 \
+       --enable-auto-tool-choice \
+       --allowed-local-media-path / \
+       --mm-processor-cache-type shm
+  ```
+
+  ### Tuning Tips
+
+  - `--max-model-len=65536` is a common default; you can push to 131072.
+  - `--max-num-batched-tokens=32768` for prompt-heavy workloads.
+  - `--mm-processor-cache-type shm` for efficient vision processing.
+
+  ## Client Usage
+
+  ### Image Understanding
+
+  ```python
+  from openai import OpenAI
+
+  client = OpenAI(api_key="EMPTY", base_url="http://localhost:8000/v1")
+  resp = client.chat.completions.create(
+      model="zai-org/GLM-GA",
+      messages=[{
+          "role": "user",
+          "content": [
+              {"type": "image_url", "image_url": {"url": "https://example.com/image.png"}},
+              {"type": "text", "text": "Describe the image."}
+          ]
+      }],
+      max_tokens=512,
+  )
+  print(resp.choices[0].message.content)
+  ```
+
+  ### Video Understanding
+
+  ```python
+  from openai import OpenAI
+
+  client = OpenAI(api_key="EMPTY", base_url="http://localhost:8000/v1")
+  resp = client.chat.completions.create(
+      model="zai-org/GLM-GA",
+      messages=[{
+          "role": "user",
+          "content": [
+              {"type": "video_url", "video_url": {"url": "https://example.com/video.mp4"}},
+              {"type": "text", "text": "Summarize what happens in this video."}
+          ]
+      }],
+      max_tokens=1024,
+  )
+  print(resp.choices[0].message.content)
+  ```
+
+  ## Video Processing Details
+
+  GLM-GA uses a dedicated `GlmgaVideoProcessor` that differs from GLM-4.6V:
+  - Fixed 2 fps sampling (GLM-4.6V uses dynamic fps based on duration)
+  - Up to 640 frames per video
+  - Frame upsampling uses `math.floor` alignment matching the HuggingFace reference
+
+  ## Troubleshooting
+
+  - **Long-context memory:** At 128K context, tune `--max-num-batched-tokens` and
+    `--gpu-memory-utilization` to prevent OOM.
+  - **Video loading errors:** Ensure OpenCV or PyAV is installed for video decoding.
+
+  ## References
+
+  - [Model card](https://huggingface.co/zai-org/GLM-GA)
+  - [GLM-4.6V-Flash](https://huggingface.co/zai-org/GLM-4.6V-Flash) (base architecture)
+  - [vLLM multimodal inputs guide](https://docs.vllm.ai/en/latest/features/multimodal_inputs.html)

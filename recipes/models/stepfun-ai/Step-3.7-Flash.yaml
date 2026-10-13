@@ -1,0 +1,255 @@
+meta:
+  title: "Step-3.7-Flash"
+  slug: "step-3.7-flash"
+  provider: "StepFun"
+  description: "Production-grade vision-language MoE (~198B total / 11B active parameters) combining a 196B sparse language backbone with a 1.8B perception encoder, hybrid SWA/Global attention, and 3-way Multi-Token Prediction"
+  date_added: 2026-05-29
+  date_updated: 2026-05-30
+  difficulty: intermediate
+  tasks:
+    - multimodal
+  performance_headline: "Sparse MoE VLM with hybrid attention and 3-layer MTP speculative decoding"
+  related_recipes:
+    - "stepfun-ai/Step-3.5-Flash"
+  hardware:
+    h200: verified
+    b200: verified
+    dgx_station_gb300: verified
+
+model:
+  model_id: "stepfun-ai/Step-3.7-Flash"
+  min_vllm_version: "0.23.0"
+  docker_image: "vllm/vllm-openai:stepfun37"
+  install:
+    docker:
+      note: "Dedicated Step-3.7 image — preferred over the nightly pip wheel until support lands in vllm:latest."
+  architecture: moe
+  parameter_count: "198B"
+  active_parameters: "11B"
+  context_length: 262144
+  base_args:
+    - "--trust-remote-code"
+    - "--enable-expert-parallel"
+    - "--disable-cascade-attn"
+  base_env: {}
+
+features:
+  tool_calling:
+    description: "Step-3.5 tool call parser with automatic tool choice"
+    args:
+      - "--tool-call-parser"
+      - "step3p5"
+      - "--enable-auto-tool-choice"
+  reasoning:
+    description: "Step-3.5 reasoning parser for chain-of-thought extraction"
+    args:
+      - "--reasoning-parser"
+      - "step3p5"
+  spec_decoding:
+    description: "3-layer Multi-Token Prediction speculative decoding (MTP-3)"
+    args:
+      - "--speculative-config"
+      - '{"method": "mtp", "num_speculative_tokens": 3}'
+
+opt_in_features:
+  - spec_decoding
+
+variants:
+  default:
+    precision: bf16
+    vram_minimum_gb: 475
+    description: "Full precision BF16 — recommended on 8xH200/B200 with TP8+EP"
+  fp8:
+    model_id: "stepfun-ai/Step-3.7-Flash-FP8"
+    precision: fp8
+    vram_minimum_gb: 238
+    description: "Native FP8 checkpoint — runs on 8xH200/B200 with TP8+EP"
+  nvfp4:
+    model_id: "stepfun-ai/Step-3.7-Flash-NVFP4"
+    precision: nvfp4
+    vram_minimum_gb: 119
+    tp: 4
+    extra_args:
+      - "--quantization"
+      - "modelopt"
+      - "--kv-cache-dtype"
+      - "fp8"
+      - "--gpu-memory-utilization"
+      - "0.9"
+      - "--async-scheduling"
+    description: "NVFP4 quantized — Blackwell only; TP4+EP with FP8 KV cache"
+
+compatible_strategies:
+  - single_node_tp
+  - single_node_tep
+  - single_node_dep
+  - multi_node_tp
+  - multi_node_tep
+  - multi_node_dep
+  - pd_cluster
+
+hardware_overrides: {}
+
+strategy_overrides: {}
+
+guide: |
+  ## Overview
+
+  [Step-3.7-Flash](https://huggingface.co/stepfun-ai/Step-3.7-Flash) is a 198B-parameter
+  sparse Mixture-of-Experts vision-language model from
+  [StepFun](https://www.stepfun.com/company), pairing a 196B language backbone with a
+  1.8B perception encoder. It activates ~11B parameters per token and supports a
+  256k context window with three selectable reasoning levels (low / medium / high).
+
+  Key highlights:
+
+  - **Multimodal Understanding**: Native vision encoder for single and multi-image inputs alongside text
+  - **Hybrid Attention Architecture**: Interleaves Sliding Window Attention (512-token window) and Global Attention at a 3:1 ratio
+  - **Sparse MoE**: 11B active parameters out of 198B total
+  - **Multi-Layer MTP**: 3-way Multi-Token Prediction (MTP-3) for low-latency reasoning chains
+
+  Available precisions:
+
+  - [stepfun-ai/Step-3.7-Flash](https://huggingface.co/stepfun-ai/Step-3.7-Flash) (BF16)
+  - [stepfun-ai/Step-3.7-Flash-FP8](https://huggingface.co/stepfun-ai/Step-3.7-Flash-FP8)
+  - [stepfun-ai/Step-3.7-Flash-NVFP4](https://huggingface.co/stepfun-ai/Step-3.7-Flash-NVFP4) (Blackwell only)
+
+  ## Prerequisites
+
+  - **vLLM version:** nightly (the model registry hasn't shipped in a stable release yet)
+  - **Hardware:** 8xH200/B200 for BF16 and FP8; 4xB200 for NVFP4
+
+  ### Install vLLM (nightly)
+
+  ```bash
+  uv venv
+  source .venv/bin/activate
+  uv pip install -U vllm --pre \
+      --extra-index-url https://wheels.vllm.ai/nightly
+  ```
+
+  Or via Docker:
+
+  ```bash
+  docker pull vllm/vllm-openai:stepfun37
+  ```
+
+  ## Launching the Server
+
+  ### BF16
+
+  ```bash
+  vllm serve stepfun-ai/Step-3.7-Flash \
+      --served-model-name step3p7-flash \
+      --tensor-parallel-size 8 \
+      --enable-expert-parallel \
+      --disable-cascade-attn \
+      --reasoning-parser step3p5 \
+      --tool-call-parser step3p5 \
+      --enable-auto-tool-choice \
+      --speculative-config '{"method": "mtp", "num_speculative_tokens": 3}' \
+      --trust-remote-code
+  ```
+
+  ### FP8
+
+  ```bash
+  vllm serve stepfun-ai/Step-3.7-Flash-FP8 \
+      --served-model-name step3p7-flash \
+      --tensor-parallel-size 8 \
+      --enable-expert-parallel \
+      --disable-cascade-attn \
+      --reasoning-parser step3p5 \
+      --tool-call-parser step3p5 \
+      --enable-auto-tool-choice \
+      --speculative-config '{"method": "mtp", "num_speculative_tokens": 3}' \
+      --trust-remote-code
+  ```
+
+  ### NVFP4 (Blackwell only)
+
+  Requires modelopt quantization and FP8 KV cache alignment.
+
+  ```bash
+  vllm serve stepfun-ai/Step-3.7-Flash-NVFP4 \
+      --served-model-name step3p7 \
+      --tensor-parallel-size 4 \
+      --gpu-memory-utilization 0.9 \
+      --enable-expert-parallel \
+      --quantization modelopt \
+      --kv-cache-dtype fp8 \
+      --reasoning-parser step3p5 \
+      --tool-call-parser step3p5 \
+      --enable-auto-tool-choice \
+      --async-scheduling \
+      --trust-remote-code
+  ```
+
+  ### DGX Station Single-GPU
+
+  The [DGX Station](https://www.nvidia.com/en-us/products/workstations/dgx-station/)
+  ships a single GB300 Grace-Blackwell Ultra Superchip with 252 GB of HBM3e, so the
+  FP8 and NVFP4 checkpoints both fit entirely in VRAM on one GPU (BF16 at ~475 GB does
+  not). Use the dedicated `vllm/vllm-openai:stepfun37` image and serve on a single GPU:
+
+  ```bash
+  vllm serve stepfun-ai/Step-3.7-Flash-FP8 \
+      --served-model-name step3p7-flash \
+      --tensor-parallel-size 1 \
+      --gpu-memory-utilization 0.95 \
+      --kv-cache-dtype fp8 \
+      --reasoning-parser step3p5 \
+      --tool-call-parser step3p5 \
+      --enable-auto-tool-choice \
+      --trust-remote-code
+  ```
+
+  Swap in `stepfun-ai/Step-3.7-Flash-NVFP4` to run the NVFP4 checkpoint instead. Or
+  launch the prebuilt container directly:
+
+  ```bash
+  docker run -d --name vllm-server \
+      --gpus all --ipc host \
+      --ulimit memlock=-1 --ulimit stack=67108864 \
+      -p 8000:8000 \
+      -e HF_TOKEN="$HF_TOKEN" \
+      -v "$HOME/.cache/huggingface/hub:/root/.cache/huggingface/hub" \
+      vllm/vllm-openai:stepfun37 \
+      stepfun-ai/Step-3.7-Flash-FP8 \
+        --gpu-memory-utilization 0.95 \
+        --trust-remote-code \
+        --reasoning-parser step3p5 \
+        --enable-auto-tool-choice \
+        --tool-call-parser step3p5 \
+        --kv-cache-dtype fp8
+  ```
+
+  See the [NVIDIA build DGX Station instructions](https://build.nvidia.com/station/vllm/instructions)
+  for the full container setup.
+
+  ## Benchmarking
+
+  ```bash
+  vllm bench serve \
+      --backend vllm \
+      --model stepfun-ai/Step-3.7-Flash \
+      --endpoint /v1/completions \
+      --dataset-name random \
+      --random-input 2048 \
+      --random-output 1024 \
+      --max-concurrency 10 \
+      --num-prompt 100
+  ```
+
+  ## Troubleshooting
+
+  - **MoE kernel tuning:** See [tune-moe-kernel](https://github.com/vllm-project/recipes/blob/main/Qwen/Qwen3-Next.md#tune-moe-kernel) to tune Triton kernels for your hardware.
+  - **NVFP4 + TP > 4:** The author recommends TP4+EP for NVFP4. Higher TP isn't validated.
+  - **Cascade attention:** Always pass `--disable-cascade-attn` — the hybrid SWA/GA schedule is not compatible with cascade attention in vLLM.
+
+  ## References
+
+  - [Model card](https://huggingface.co/stepfun-ai/Step-3.7-Flash)
+  - [FP8 checkpoint](https://huggingface.co/stepfun-ai/Step-3.7-Flash-FP8)
+  - [NVFP4 checkpoint](https://huggingface.co/stepfun-ai/Step-3.7-Flash-NVFP4)
+  - [StepFun](https://www.stepfun.com/company)

@@ -1,0 +1,178 @@
+meta:
+  title: "Qwen3.5-9B"
+  slug: "qwen3.5-9b"
+  provider: "Qwen"
+  description: "Qwen3.5 dense multimodal model (9B) with gated delta networks hybrid attention, MTP, and 262K context"
+  date_added: 2026-04-22
+  date_updated: 2026-09-14
+  difficulty: beginner
+  tasks:
+    - multimodal
+    - text
+  performance_headline: "Single-GPU Qwen3.5 dense with MTP-accelerated decoding"
+  related_recipes:
+    - "Qwen/Qwen3.5-27B"
+    - "Qwen/Qwen3.5-4B"
+  hardware:
+    arc_pro_b60: verified
+    arc_pro_b70: verified
+
+model:
+  model_id: "Qwen/Qwen3.5-9B"
+  min_vllm_version: "0.17.0"
+  default_frontend: rust
+  architecture: dense
+  parameter_count: "9B"
+  active_parameters: "9B"
+  context_length: 262144
+  base_args:
+    - "--trust-remote-code"
+  base_env: {}
+
+features:
+  tool_calling:
+    description: "Enable automatic tool choice with Qwen3 Coder parser"
+    args:
+      - "--enable-auto-tool-choice"
+      - "--tool-call-parser"
+      - "qwen3_coder"
+  reasoning:
+    description: "Enable chain-of-thought reasoning with Qwen3 parser"
+    args:
+      - "--reasoning-parser"
+      - "qwen3"
+  spec_decoding:
+    description: "Multi-token prediction speculative decoding for lower latency"
+    args:
+      - "--speculative-config"
+      - '{"method":"mtp","num_speculative_tokens":1}'
+  text_only:
+    description: "Skip loading the vision encoder for text-only workloads — frees VRAM for KV cache."
+    args:
+      - "--language-model-only"
+  long_context:
+    description: "YaRN RoPE scaling past the native 262,144-token window to ~1,010,000 tokens. Static YaRN holds the scaling factor constant regardless of input length, so leave this off unless you actually serve long prompts; for ~524K, halve the factor to 2.0."
+    args:
+      - "--hf-overrides"
+      - '{"text_config": {"rope_parameters": {"mrope_interleaved": true, "mrope_section": [11, 11, 10], "rope_type": "yarn", "rope_theta": 10000000, "partial_rotary_factor": 0.25, "factor": 4.0, "original_max_position_embeddings": 262144}}}'
+      - "--max-model-len"
+      - "1010000"
+    env:
+      VLLM_ALLOW_LONG_MAX_MODEL_LEN: "1"
+
+opt_in_features:
+  - spec_decoding
+  - text_only
+  - long_context
+
+variants:
+  default:
+    precision: bf16
+    vram_minimum_gb: 22
+    description: "Full precision BF16 — single 24 GB GPU or Intel Arc Pro B60/B70"
+
+  fp8:
+    model_id: "RedHatAI/Qwen3.5-9B-FP8-dynamic"
+    precision: fp8
+    vram_minimum_gb: 11
+    description: "RedHatAI FP8 (E4M3) with dynamic per-token activation quantization"
+    extra_args:
+      - "--kv-cache-dtype"
+      - "fp8"
+
+compatible_strategies:
+  - single_node_tp
+  - multi_node_tp
+
+hardware_overrides:
+  xpu:
+    extra_args:
+      - "--enforce-eager"
+
+strategy_overrides: {}
+
+guide: |
+  ## Overview
+
+  [Qwen3.5-9B](https://huggingface.co/Qwen/Qwen3.5-9B) is a dense multimodal
+  model from the Qwen3.5 family — same gated delta networks hybrid attention,
+  vision encoder, 262K context, and MTP support as its larger siblings, but
+  sized to fit comfortably on a single 24 GB GPU.
+
+  ## Prerequisites
+
+  - **vLLM version:** >= 0.17.0
+  - **Hardware:** single 24 GB GPU (RTX 4090 / L4 / A10G / H100) or Intel Arc Pro B60/B70
+
+  ### Install vLLM
+
+  ```bash
+  uv venv
+  source .venv/bin/activate
+  uv pip install -U vllm --torch-backend=auto
+  ```
+
+  ### Docker
+  ```bash
+  docker pull vllm/vllm-openai-xpu:latest  # Intel XPU (B60 / B70)
+  ```
+
+  ## Launching the Server
+
+  ### Single-GPU BF16
+
+  ```bash
+  vllm serve Qwen/Qwen3.5-9B \
+    --max-model-len 262144 \
+    --reasoning-parser qwen3
+  ```
+
+  ### MTP speculative decoding
+
+  ```bash
+  vllm serve Qwen/Qwen3.5-9B \
+    --speculative-config '{"method": "mtp", "num_speculative_tokens": 1}' \
+    --reasoning-parser qwen3
+  ```
+
+  ### Docker (Intel XPU B60 / B70)
+
+  Validated on 1× Intel Arc Pro B60 / B70 (B60 24 GB, B70 32 GB per card) with the
+  official vLLM XPU image `vllm/vllm-openai-xpu:latest`.
+  
+  ```bash
+  docker run --device /dev/dri \
+    -v /dev/dri/by-path:/dev/dri/by-path --shm-size=16g \
+    --privileged --ipc=host -p 8000:8000 \
+    -v ~/.cache/huggingface:/root/.cache/huggingface \
+    vllm/vllm-openai-xpu:latest \
+    Qwen/Qwen3.5-9B \
+    --reasoning-parser qwen3 \
+    --max-model-len 8192 \
+    --enforce-eager
+  ```
+
+  ## Client Usage
+
+  ```python
+  from openai import OpenAI
+
+  client = OpenAI(api_key="EMPTY", base_url="http://localhost:8000/v1")
+  resp = client.chat.completions.create(
+      model="Qwen/Qwen3.5-9B",
+      messages=[{"role": "user", "content": "Hello!"}],
+      max_tokens=128,
+  )
+  print(resp.choices[0].message.content)
+  ```
+
+  ## Troubleshooting
+
+  - **CUDA graph / Mamba cache size error:** reduce `--max-cudagraph-capture-size`
+    (default 512). See [vLLM PR #34571](https://github.com/vllm-project/vllm/pull/34571).
+  - **Disable reasoning:** add `--default-chat-template-kwargs '{"enable_thinking": false}'`.
+
+  ## References
+
+  - [Model card](https://huggingface.co/Qwen/Qwen3.5-9B)
+  - [Base checkpoint](https://huggingface.co/Qwen/Qwen3.5-9B-Base)

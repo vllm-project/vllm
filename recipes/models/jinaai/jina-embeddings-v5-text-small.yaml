@@ -1,0 +1,213 @@
+meta:
+  title: "Jina Embeddings v5 Text Small"
+  slug: "jina-embeddings-v5-text-small"
+  provider: "Jina AI"
+  description: "Jina AI's fifth-gen multilingual text embedding model (677M, Qwen3-0.6B-Base) with task-specific LoRA adapters for retrieval, text-matching, classification, and clustering."
+  date_added: 2026-05-09
+  date_updated: 2026-05-09
+  difficulty: beginner
+  tasks:
+    - embedding
+  performance_headline: "71.7 MTEB English v2 / 67.7 MMTEB at <1B params, 119+ languages, 32K context"
+  related_recipes:
+    - "jinaai/jina-reranker-m0"
+
+model:
+  model_id: "jinaai/jina-embeddings-v5-text-small"
+  min_vllm_version: "0.20.0"
+  architecture: dense
+  parameter_count: "0.7B"
+  active_parameters: "0.7B"
+  context_length: 32768
+  base_args:
+    - "--trust-remote-code"
+    - "--runner"
+    - "pooling"
+  base_env: {}
+
+features: {}
+
+opt_in_features: []
+
+variants:
+  default:
+    model_id: "jinaai/jina-embeddings-v5-text-small-retrieval"
+    label: "retrieval"
+    precision: bf16
+    vram_minimum_gb: 2
+    description: "Retrieval task: query/document encoding for RAG and search. Adapter pre-merged into the base weights."
+  text_matching:
+    model_id: "jinaai/jina-embeddings-v5-text-small-text-matching"
+    label: "text-matching"
+    precision: bf16
+    vram_minimum_gb: 2
+    description: "Text-matching task: semantic similarity, dedup, paraphrase detection. Adapter pre-merged into the base weights."
+  classification:
+    model_id: "jinaai/jina-embeddings-v5-text-small-classification"
+    label: "classification"
+    precision: bf16
+    vram_minimum_gb: 2
+    description: "Classification task: linear probing, intent detection. Adapter pre-merged into the base weights."
+  clustering:
+    model_id: "jinaai/jina-embeddings-v5-text-small-clustering"
+    label: "clustering"
+    precision: bf16
+    vram_minimum_gb: 2
+    description: "Clustering task: k-means, topic discovery. Adapter pre-merged into the base weights."
+
+compatible_strategies:
+  - single_node_tp
+
+hardware_overrides: {}
+
+strategy_overrides:
+  single_node_tp:
+    tp: 1
+
+guide: |
+  ## Overview
+
+  [`jina-embeddings-v5-text-small`](https://huggingface.co/jinaai/jina-embeddings-v5-text-small)
+  is the fifth generation of Jina AI's multilingual text embedding family, released
+  February 18, 2026. It scores **71.7 on MTEB English v2** and **67.7 on MMTEB** with
+  only 677M parameters — the highest among multilingual embedding models under 1B —
+  and supports **119+ languages with up to 32K-token context**. Built on
+  `Qwen3-0.6B-Base` and trained by distilling `Qwen3-Embedding-4B` plus task-specific
+  contrastive losses, it produces 1024-dim embeddings that stay robust under
+  truncation (Matryoshka dims: 32–1024) and binary quantization.
+
+  vLLM support landed in [PR #39575](https://github.com/vllm-project/vllm/pull/39575)
+  via the `JinaEmbeddingsV5Model` architecture and the `--runner pooling` API.
+
+  ### Task-specific adapters
+
+  v5 ships four LoRA adapters — one per supported task. For each task, Jina AI
+  publishes a sibling repo with that adapter **pre-merged into the base weights**;
+  these are the simplest path for vLLM and what this recipe serves. Pick a task
+  above; the recipe swaps the model id accordingly:
+
+  | Task | Pre-merged repo |
+  |------|----------------|
+  | Retrieval | `jinaai/jina-embeddings-v5-text-small-retrieval` |
+  | Text-matching | `jinaai/jina-embeddings-v5-text-small-text-matching` |
+  | Classification | `jinaai/jina-embeddings-v5-text-small-classification` |
+  | Clustering | `jinaai/jina-embeddings-v5-text-small-clustering` |
+
+  ## Prerequisites
+
+  - **Hardware**: any single GPU with ≥ 2 GB VRAM (T4 / L4 / A10 / A100 / H100 /
+    H200 / B200 / MI300X all fine — bf16 weights are ~1.4 GB).
+  - **vLLM**: requires a build that includes PR #39575. Use the nightly wheel
+    until the next stable release ships:
+
+    ```bash
+    uv pip install -U vllm --pre \
+      --extra-index-url https://wheels.vllm.ai/nightly \
+      --index-strategy unsafe-best-match
+    ```
+
+  ## Launch command
+
+  Use the launch command above (it points at the chosen task's pre-merged repo).
+  The full form looks like:
+
+  ```bash
+  vllm serve jinaai/jina-embeddings-v5-text-small-retrieval \
+    --trust-remote-code \
+    --runner pooling \
+    --host 0.0.0.0 --port 8000
+  ```
+
+  Swap the model id for `-text-matching`, `-classification`, or `-clustering` to
+  serve the corresponding task — or just toggle the **Variant** pill above.
+
+  ### Alternative: base repo + `--hf-overrides`
+
+  If you'd rather download a single checkpoint and switch tasks at startup, serve
+  the base `jinaai/jina-embeddings-v5-text-small` repo and pass the task via
+  `--hf-overrides`:
+
+  ```bash
+  vllm serve jinaai/jina-embeddings-v5-text-small \
+    --trust-remote-code \
+    --runner pooling \
+    --hf-overrides '{"jina_task": "retrieval"}'
+  ```
+
+  Allowed values: `retrieval`, `text-matching`, `classification`, `clustering`.
+  This loads the base weights and merges the requested adapter at startup.
+
+  ## Client usage
+
+  ### Embeddings (`/v1/embeddings`)
+
+  ```bash
+  curl -s http://localhost:8000/v1/embeddings \
+    -H "Content-Type: application/json" \
+    -d '{
+      "model": "jinaai/jina-embeddings-v5-text-small-retrieval",
+      "input": ["Query: What is climate change?"]
+    }' | python3 -m json.tool
+  ```
+
+  ### Python (OpenAI SDK)
+
+  ```python
+  from openai import OpenAI
+  client = OpenAI(base_url="http://localhost:8000/v1", api_key="EMPTY")
+
+  resp = client.embeddings.create(
+      model="jinaai/jina-embeddings-v5-text-small-retrieval",
+      input=[
+          "Climate change has led to rising sea levels.",
+          "Overview of climate change impacts on coastal cities.",
+      ],
+  )
+  for d in resp.data:
+      print(d.index, len(d.embedding))
+  ```
+
+  ### Multilingual text-matching example
+
+  Switch the **Variant** pill to **text-matching** (or serve the
+  `-text-matching` repo) and embed semantically equivalent strings across
+  languages:
+
+  ```python
+  texts = [
+      "غروب جميل على الشاطئ",
+      "海滩上美丽的日落",
+      "A beautiful sunset over the beach",
+      "Un beau coucher de soleil sur la plage",
+      "浜辺に沈む美しい夕日",
+  ]
+  resp = client.embeddings.create(
+      model="jinaai/jina-embeddings-v5-text-small-text-matching",
+      input=texts,
+  )
+  ```
+
+  ## Configuration tips
+
+  - **Pick the task that matches your workload** — retrieval prompts (`query`
+    vs. `document`) are baked into the retrieval adapter, so the wrong task
+    measurably degrades recall.
+  - **Matryoshka truncation**: embeddings stay useful when truncated to 32 / 64
+    / 128 / 256 / 512 / 768 dims — keep the prefix and renormalize.
+  - **Throughput**: with TP=1 on a single small GPU, the bottleneck is usually
+    tokenization — batch your inputs (`input: [...]` with up to a few hundred
+    short docs per request).
+  - **bf16 vs fp16**: README recommends bf16 on modern GPUs; PR #39575's test
+    used fp16. Either dtype works; bf16 is more numerically stable on Hopper /
+    Blackwell / MI300X+.
+
+  ## References
+
+  - [Model card](https://huggingface.co/jinaai/jina-embeddings-v5-text-small)
+  - [Release blog](https://jina.ai/news/jina-embeddings-v5-text-distilling-4b-quality-into-sub-1b-multilingual-embeddings)
+  - [Technical report (arXiv:2602.15547)](https://arxiv.org/abs/2602.15547)
+  - [vLLM PR #39575 — Add Jina Embeddings v5 model support](https://github.com/vllm-project/vllm/pull/39575)
+  - [Pre-merged retrieval repo](https://huggingface.co/jinaai/jina-embeddings-v5-text-small-retrieval)
+  - [Pre-merged text-matching repo](https://huggingface.co/jinaai/jina-embeddings-v5-text-small-text-matching)
+  - [Pre-merged classification repo](https://huggingface.co/jinaai/jina-embeddings-v5-text-small-classification)
+  - [Pre-merged clustering repo](https://huggingface.co/jinaai/jina-embeddings-v5-text-small-clustering)

@@ -1,0 +1,129 @@
+meta:
+  title: "MiniCPM5-1B"
+  slug: "minicpm5-1b"
+  provider: "MiniCPM (OpenBMB)"
+  description: "MiniCPM5-1B — dense 1B on-device LLM with hybrid Think/No-Think reasoning, native 128K context, and strong agentic tool use, built on the standard Llama architecture"
+  date_added: 2026-06-02
+  date_updated: 2026-06-02
+  difficulty: beginner
+  tasks:
+    - text
+  performance_headline: "1B-class open-source SOTA on tool use, code, and reasoning"
+  related_recipes:
+    - openbmb/MiniCPM-V-4.6
+
+model:
+  model_id: "openbmb/MiniCPM5-1B"
+  min_vllm_version: "0.21.0"
+  architecture: dense
+  parameter_count: "1.1B"
+  active_parameters: "1.1B"
+  context_length: 131072
+  base_args: []
+  base_env: {}
+
+features:
+  reasoning:
+    description: "Enable hybrid deep-thinking mode — the chat template wraps a <think> block before the answer. Recommended sampling shifts to temperature=0.9, top_p=0.95. Leave off for fast No-Think responses (temperature=0.7)."
+    args:
+      - "--default-chat-template-kwargs"
+      - '{"enable_thinking": true}'
+
+opt_in_features:
+  - reasoning
+
+variants:
+  default:
+    precision: bf16
+    vram_minimum_gb: 3
+    description: "BF16 weights (~1.1B params) — tiny footprint, runs on a single consumer GPU"
+
+compatible_strategies:
+  - single_node_tp
+  - multi_node_tp
+
+kv_offload_support:
+  offloading_cpu: verified
+  offloading_fs: verified
+
+strategy_overrides:
+  single_node_tp:
+    tp: 1
+
+guide: |
+  ## Overview
+
+  **MiniCPM5-1B** is the first checkpoint in OpenBMB's MiniCPM5 series — a dense
+  1B model built for on-device and resource-constrained deployment, reaching
+  1B-class open-source SOTA on agentic tool use, code generation, and difficult
+  reasoning. It uses the **standard `LlamaForCausalLM` architecture**, so vLLM
+  loads it natively with no custom kernels or model-code fork.
+
+  Its headline feature is **hybrid reasoning**: a single checkpoint serves as
+  both a fast assistant (No-Think) and a deliberate reasoner (Think), toggled by
+  the chat template's `enable_thinking` flag.
+
+  ## Prerequisites
+
+  - **vLLM ≥ 0.21.0** — MiniCPM5-1B is supported natively as of the v0.21.0
+    release. (For CUDA 12.x driver hosts, the cookbook suggests `vllm==0.10.1.1`
+    as a fallback.)
+
+  ## Launch command
+
+  Use the command builder above. The baseline is simply:
+
+  ```bash
+  vllm serve openbmb/MiniCPM5-1B --port 8000
+  ```
+
+  At ~1.1B params the model fits on a single GPU (TP=1). It supports the full
+  native 128K context; drop `--max-model-len` to `8192` / `32768` to free KV
+  cache on small GPUs, and set `--enforce-eager` if CUDA graphs OOM on a tiny
+  VRAM budget.
+
+  ## Reasoning modes
+
+  Toggle the **Reasoning** feature to serve with deep-thinking on by default
+  (`--default-chat-template-kwargs '{"enable_thinking": true}'`). You can also
+  flip it per request via `chat_template_kwargs`:
+
+  ```bash
+  curl http://localhost:8000/v1/chat/completions \
+    -H "Content-Type: application/json" \
+    -d '{
+      "model": "openbmb/MiniCPM5-1B",
+      "messages": [{"role": "user", "content": "Explain GQA in one sentence."}],
+      "temperature": 0.9, "top_p": 0.95, "max_tokens": 1024,
+      "chat_template_kwargs": {"enable_thinking": true}
+    }'
+  ```
+
+  | Mode | `enable_thinking` | `temperature` | `top_p` |
+  | --- | --- | --- | --- |
+  | Think | `true` | 0.9 | 0.95 |
+  | No-Think | `false` | 0.7 | 0.95 |
+
+  ## Tool calling
+
+  MiniCPM5-1B emits **XML-style** tool calls. The vLLM-side `minicpm5` parser
+  ([PR #43175](https://github.com/vllm-project/vllm/pull/43175)) merged to `main`
+  on 2026-05-27 but is **not in v0.21.0 or v0.22.0** — those releases were cut
+  before the merge. Until a release bakes it in (v0.23+), load it as a plugin
+  from the [MiniCPM repo](https://github.com/OpenBMB/MiniCPM):
+
+  ```bash
+  vllm serve openbmb/MiniCPM5-1B --port 8000 \
+    --enable-auto-tool-choice \
+    --tool-parser-plugin /path/to/MiniCPM/tool_parsers/minicpm5xml_tool_parser.py \
+    --tool-call-parser minicpm5
+  ```
+
+  SGLang ships the `minicpm5` parser built-in and is the author-recommended
+  backend for tool calling.
+
+  ## References
+
+  - [Model card](https://huggingface.co/openbmb/MiniCPM5-1B)
+  - [vLLM deployment cookbook](https://github.com/OpenBMB/MiniCPM/blob/main/docs/deployment/vllm.md)
+  - [MiniCPM Tech Report](https://arxiv.org/pdf/2506.07900)

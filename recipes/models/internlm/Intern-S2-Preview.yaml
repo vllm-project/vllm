@@ -1,0 +1,207 @@
+meta:
+  title: "Intern-S2-Preview"
+  slug: "intern-s2-preview"
+  provider: "InternLM"
+  description: "Scientific multimodal MoE (36B total / 3B active) continued pre-trained from Qwen3.5 — hybrid linear/full attention, 262K context, MTP-accelerated reasoning. BF16 and FP8 checkpoints."
+  date_added: 2026-05-15
+  date_updated: 2026-05-15
+  difficulty: intermediate
+  tasks:
+    - multimodal
+    - text
+  performance_headline: "35B-A3B scientific multimodal foundation model — single-node BF16 with MTP"
+  related_recipes:
+    - "internlm/Intern-S1"
+    - "Qwen/Qwen3.5-35B-A3B"
+  hardware:
+    h200: verified
+    gb200: verified
+
+model:
+  model_id: "internlm/Intern-S2-Preview"
+  min_vllm_version: "0.22.0"
+  architecture: moe
+  parameter_count: "36B"
+  active_parameters: "3B"
+  context_length: 262144
+  base_args:
+    - "--trust-remote-code"
+  base_env: {}
+
+features:
+  tool_calling:
+    description: "Enable automatic tool choice with the Qwen3 Coder parser (per official deployment guide)"
+    args:
+      - "--enable-auto-tool-choice"
+      - "--tool-call-parser"
+      - "qwen3_coder"
+  reasoning:
+    description: "Extract <think>...</think> chain-of-thought via the Qwen3 reasoning parser"
+    args:
+      - "--reasoning-parser"
+      - "qwen3"
+  spec_decoding:
+    description: "Shared-weight MTP speculative decoding — 4 draft tokens (recommended in the deployment guide)"
+    args:
+      - "--speculative-config"
+      - '{"method":"mtp","num_speculative_tokens":4}'
+  text_only:
+    description: "Skip loading the vision encoder for text-only workloads — frees VRAM for KV cache. Mutually exclusive with encoder_parallel."
+    args:
+      - "--language-model-only"
+  encoder_parallel:
+    description: "Run the vision encoder in data-parallel mode — avoids TP comm overhead on the small encoder. Mutually exclusive with text_only."
+    args:
+      - "--mm-encoder-tp-mode"
+      - "data"
+
+opt_in_features:
+  - spec_decoding
+  - text_only
+
+variants:
+  default:
+    precision: bf16
+    vram_minimum_gb: 87
+    description: "BF16 on 1x H200 or 2x H100/H800 (deployment guide uses TP=2)"
+  fp8:
+    model_id: "internlm/Intern-S2-Preview-FP8"
+    precision: fp8
+    vram_minimum_gb: 44
+    description: "Official DeepSeek-style block FP8 (128x128, ue8m0 scales) — fits on a single H100/H200"
+
+compatible_strategies:
+  - single_node_tp
+  - single_node_tep
+  - single_node_dep
+  - multi_node_tp
+  - multi_node_dep
+  - multi_node_tep
+
+hardware_overrides: {}
+
+strategy_overrides: {}
+
+guide: |
+  ## Overview
+
+  [Intern-S2-Preview](https://huggingface.co/internlm/Intern-S2-Preview) is a
+  scientific multimodal foundation model from Shanghai AI Laboratory, continued
+  pre-trained from Qwen3.5. It packs 36B total / 3B active parameters across
+  256 experts with hybrid linear/full attention, supports a 262K context, and
+  ships with built-in shared-weight MTP for fast reasoning.
+
+  Beyond chat and reasoning, it adds vision and time-series modalities and
+  improves agent capabilities for scientific workflows.
+
+  ## Prerequisites
+
+  - **vLLM version:** nightly build with `InternS2PreviewForConditionalGeneration`
+    support ([PR #42705](https://github.com/vllm-project/vllm/pull/42705)). The
+    architecture is not yet in any stable release.
+  - **Hardware (BF16):** 1x H200 (141 GB) or 2x H100/H800 (80 GB)
+  - **Hardware (FP8):** single H100/H200
+  - **Trust remote code:** required (custom modeling files ship in the repo)
+
+  ### Install vLLM (nightly)
+
+  ```bash
+  uv venv
+  source .venv/bin/activate
+  uv pip install -U vllm --pre --extra-index-url https://wheels.vllm.ai/nightly
+  ```
+
+  ## Launch commands
+
+  ### Recommended — with MTP speculative decoding
+
+  ```bash
+  vllm serve internlm/Intern-S2-Preview \
+    --trust-remote-code \
+    --tensor-parallel-size 2 \
+    --reasoning-parser qwen3 \
+    --enable-auto-tool-choice \
+    --tool-call-parser qwen3_coder \
+    --speculative-config '{"method":"mtp","num_speculative_tokens":4}'
+  ```
+
+  ### Basic serving (no MTP)
+
+  ```bash
+  vllm serve internlm/Intern-S2-Preview \
+    --trust-remote-code \
+    --tensor-parallel-size 2 \
+    --reasoning-parser qwen3 \
+    --enable-auto-tool-choice \
+    --tool-call-parser qwen3_coder
+  ```
+
+  ### Long-context (YaRN, up to 512K)
+
+  The base config sets `max_position_embeddings = 262144`. For longer contexts,
+  override the RoPE config to enable YaRN:
+
+  ```bash
+  vllm serve internlm/Intern-S2-Preview \
+    --trust-remote-code \
+    --tensor-parallel-size 2 \
+    --max-model-len 512000 \
+    --reasoning-parser qwen3 \
+    --enable-auto-tool-choice \
+    --tool-call-parser qwen3_coder \
+    --hf-overrides '{"text_config": {"rope_parameters": {"mrope_interleaved": true, "mrope_section": [11, 11, 10], "rope_type": "yarn", "rope_theta": 10000000, "partial_rotary_factor": 0.25, "factor": 4.0, "original_max_position_embeddings": 262144}}}'
+  ```
+
+  ## Client Usage
+
+  Recommended sampling parameters from the model card:
+
+  ```python
+  from openai import OpenAI
+
+  client = OpenAI(api_key="EMPTY", base_url="http://localhost:8000/v1")
+  resp = client.chat.completions.create(
+      model="internlm/Intern-S2-Preview",
+      messages=[{"role": "user", "content": "Design a synthesis route for paracetamol."}],
+      temperature=0.8,
+      top_p=0.95,
+      max_tokens=32768,
+      extra_body={
+          "top_k": 50,
+          "min_p": 0.0,
+          "spaces_between_special_tokens": False,
+      },
+  )
+  print(resp.choices[0].message.content)
+  ```
+
+  ### Toggle thinking mode
+
+  Thinking is enabled by default. Disable it per request:
+
+  ```python
+  resp = client.chat.completions.create(
+      model="internlm/Intern-S2-Preview",
+      messages=[{"role": "user", "content": "What is AGI?"}],
+      temperature=0.8,
+      top_p=0.95,
+      extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+  )
+  ```
+
+  > The model card notes: do **not** disable thinking mode for agentic tasks.
+
+  ## Troubleshooting
+
+  - **Unknown architecture `InternS2PreviewForConditionalGeneration`:** the
+    handler landed via vLLM PR #42705 — use a nightly wheel or build from main
+    once the PR merges.
+  - **OOM at full 262K context:** drop `--max-model-len` to 65536 or 131072,
+    or lower `--gpu-memory-utilization` headroom.
+
+  ## References
+
+  - [Model card](https://huggingface.co/internlm/Intern-S2-Preview)
+  - [Deployment guide](https://huggingface.co/internlm/Intern-S2-Preview/blob/main/deployment_guide.md)
+  - [Intern-S1 GitHub](https://github.com/InternLM/Intern-S1)
+  - [vLLM support PR #42705](https://github.com/vllm-project/vllm/pull/42705)

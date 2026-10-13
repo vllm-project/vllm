@@ -1,0 +1,188 @@
+meta:
+  title: "PaddleOCR-VL-1.6"
+  slug: "paddleocr-vl-1.6"
+  provider: "PaddlePaddle"
+  description: "PaddleOCR-VL-1.6 (0.9B) — region-aware data optimization + progressive post-training; new SOTA 96.33% on OmniDocBench v1.6, drop-in replacement for 1.5"
+  date_added: 2026-07-11
+  date_updated: 2026-07-08
+  difficulty: beginner
+  tasks:
+    - multimodal
+  related_recipes:
+    - "PaddlePaddle/PaddleOCR-VL-1.5"
+    - "PaddlePaddle/PaddleOCR-VL"
+
+model:
+  model_id: "PaddlePaddle/PaddleOCR-VL-1.6"
+  min_vllm_version: "0.11.1"
+  architecture: dense
+  parameter_count: "0.9B"
+  active_parameters: "0.9B"
+  context_length: 131072
+  base_args:
+    - "--trust-remote-code"
+    - "--max-num-batched-tokens"
+    - "16384"
+    - "--no-enable-prefix-caching"
+    - "--mm-processor-cache-gb"
+    - "0"
+  base_env: {}
+
+dependencies:
+  - note: "PaddlePaddle runtime (install in a separate venv from vllm to avoid conflicts)"
+    command: "uv pip install paddlepaddle-gpu==3.2.1 --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu126/"
+    brand: NVIDIA
+  - note: "PaddleOCR document-parsing helpers — 1.6 requires >= 3.6.0 (pipeline_version v1.6)"
+    command: 'uv pip install -U "paddleocr[doc-parser]>=3.6.0"'
+  - note: "Safetensors loader used by the doc-parser path"
+    command: "uv pip install safetensors"
+
+features:
+  text_only:
+    description: "Skip loading the vision encoder for text-only workloads — frees VRAM for KV cache. Mutually exclusive with encoder_parallel."
+    args:
+      - "--language-model-only"
+  encoder_parallel:
+    description: "Run the vision encoder in data-parallel mode — avoids TP comm overhead on the small encoder. Mutually exclusive with text_only."
+    args:
+      - "--mm-encoder-tp-mode"
+      - "data"
+
+opt_in_features:
+  - text_only
+  - encoder_parallel
+
+variants:
+  default:
+    precision: bf16
+    vram_minimum_gb: 2
+    description: "BF16 weights — small footprint, runs on most GPUs"
+
+compatible_strategies:
+  - single_node_tp
+  - multi_node_tp
+
+kv_offload_support:
+  offloading_cpu: verified
+  offloading_fs: verified
+
+hardware_overrides:
+  amd:
+    extra_args: []
+    extra_env:
+      SAFETENSORS_FAST_GPU: "1"
+strategy_overrides: {}
+
+guide: |
+  ## Overview
+
+  [PaddleOCR-VL-1.6](https://huggingface.co/PaddlePaddle/PaddleOCR-VL-1.6) upgrades
+  PaddleOCR-VL-1.5 with a region-aware data optimization framework (targeted enhancement
+  of weak regions found in the previous model) and a progressive post-training recipe
+  based on curated data selection and reinforcement learning:
+
+  - **96.33% on OmniDocBench v1.6** (new SOTA), plus new records on OmniDocBench v1.5
+    and Real5-OmniDocBench (scanning, warping, screen-photography, illumination, skew)
+  - Major gains in table, Chinese ancient document, and Chinese rare character recognition
+  - Improved seal/stamp recognition, text spotting, and chart recognition
+
+  The architecture is **fully compatible with PaddleOCR-VL-1.5** (same 0.9B NaViT-style
+  dynamic-resolution vision encoder + ERNIE-4.5-0.3B LM), so migration is plug-and-play:
+  the vLLM launch command and feature flags are unchanged.
+
+  ## Prerequisites
+
+  - Hardware: 1x GPU (small VRAM footprint)
+  - vLLM >= 0.11.1
+
+  ### Install vLLM
+
+  ```bash
+  uv venv
+  source .venv/bin/activate
+  uv pip install -U vllm
+  ```
+
+  ## Launch command
+
+  ```bash
+  vllm serve PaddlePaddle/PaddleOCR-VL-1.6 \
+    --trust-remote-code \
+    --max-num-batched-tokens 16384 \
+    --no-enable-prefix-caching \
+    --mm-processor-cache-gb 0
+  ```
+
+  Tip: OCR workloads don't benefit much from prefix caching or image reuse, so disable
+  those to avoid hashing/caching overhead.
+
+  ## Client Usage
+
+  Task-specific prompts (same task set as 1.5, including `spotting` and `seal`):
+
+  ```python
+  from openai import OpenAI
+
+  client = OpenAI(api_key="EMPTY", base_url="http://localhost:8000/v1", timeout=3600)
+
+  TASKS = {
+      "ocr": "OCR:",
+      "table": "Table Recognition:",
+      "formula": "Formula Recognition:",
+      "chart": "Chart Recognition:",
+      "spotting": "Spotting:",
+      "seal": "Seal Recognition:",
+  }
+
+  response = client.chat.completions.create(
+      model="PaddlePaddle/PaddleOCR-VL-1.6",
+      messages=[{
+          "role": "user",
+          "content": [
+              {"type": "image_url", "image_url": {"url": "https://.../receipt.png"}},
+              {"type": "text", "text": TASKS["spotting"]},
+          ],
+      }],
+      temperature=0.0,
+  )
+  print(response.choices[0].message.content)
+  ```
+
+  ## Offline Inference with PP-DocLayoutV3
+
+  Use separate venvs for `vllm` and `paddlepaddle` to avoid conflicts. The 1.6 pipeline
+  requires `paddleocr[doc-parser] >= 3.6.0` and `pipeline_version="v1.6"`, which
+  automatically uses [PP-DocLayoutV3](https://huggingface.co/PaddlePaddle/PP-DocLayoutV3)
+  for layout detection (PP-DocLayoutV2 belongs to the v1 pipeline). Pass
+  `vl_rec_api_model_name="PaddlePaddle/PaddleOCR-VL-1.6"` so the client matches the
+  model name the vLLM server exposes — otherwise it defaults to
+  `PaddleOCR-VL-1.6-0.9B` and fails with "The model PaddleOCR-VL-1.6-0.9B does not exist."
+
+  ```bash
+  uv pip install paddlepaddle-gpu==3.2.1 --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu126/
+  uv pip install -U "paddleocr[doc-parser]>=3.6.0"
+  uv pip install safetensors
+  ```
+
+  ```python
+  from paddleocr import PaddleOCRVL
+
+  pipeline = PaddleOCRVL(
+      pipeline_version="v1.6",
+      vl_rec_backend="vllm-server",
+      vl_rec_server_url="http://localhost:8000/v1",
+      vl_rec_api_model_name="PaddlePaddle/PaddleOCR-VL-1.6",
+  )
+
+  output = pipeline.predict("https://paddle-model-ecology.bj.bcebos.com/paddlex/imgs/demo_image/paddleocr_vl_demo.png")
+  for i, res in enumerate(output):
+      res.save_to_json(save_path=f"output_{i}.json")
+      res.save_to_markdown(save_path=f"output_{i}.md")
+  ```
+
+  ## References
+
+  - [PaddleOCR-VL-1.6 on Hugging Face](https://huggingface.co/PaddlePaddle/PaddleOCR-VL-1.6)
+  - [Technical report (arXiv)](https://arxiv.org/pdf/2606.03264)
+  - [PaddleOCR GitHub](https://github.com/PaddlePaddle/PaddleOCR)
+  - [vLLM support PR](https://github.com/vllm-project/vllm/pull/27758)

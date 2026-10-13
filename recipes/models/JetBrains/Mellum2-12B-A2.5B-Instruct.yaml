@@ -1,0 +1,154 @@
+meta:
+  title: "Mellum2-12B-A2.5B-Instruct"
+  slug: "mellum2-12b-a2.5b-instruct"
+  provider: "JetBrains"
+  description: "JetBrains' instruction-tuned code MoE (12B total / 2.5B active) that answers directly without an externalized chain of thought — low-latency coding and tool use"
+  date_added: 2026-06-02
+  date_updated: 2026-06-02
+  difficulty: intermediate
+  tasks:
+    - text
+  performance_headline: "78.4 EvalPlus, 67.1 MultiPL-E — direct answers, fits on a single GPU"
+  related_recipes:
+    - "JetBrains/Mellum2-12B-A2.5B-Thinking"
+  hardware:
+    h200: verified
+    mi300x: verified
+    mi325x: verified
+    mi355x: verified
+
+model:
+  model_id: "JetBrains/Mellum2-12B-A2.5B-Instruct"
+  min_vllm_version: "0.23.0"
+  architecture: moe
+  parameter_count: "12B"
+  active_parameters: "2.5B"
+  context_length: 131072
+  base_args:
+    - "--max-model-len"
+    - "131072"
+    - "--trust-remote-code"
+  base_env: {}
+
+features:
+  tool_calling:
+    description: "Hermes tool-call parser for function calling"
+    args:
+      - "--enable-auto-tool-choice"
+      - "--tool-call-parser"
+      - "hermes"
+
+opt_in_features: []
+
+variants:
+  default:
+    precision: bf16
+    vram_minimum_gb: 29
+    description: "Native bfloat16 weights; fits comfortably on a single H200/H100/A100"
+
+compatible_strategies:
+  - single_node_tp
+  - single_node_tep
+  - single_node_dep
+
+hardware_overrides: {}
+
+strategy_overrides:
+  single_node_tp:
+    tp: 1
+
+guide: |
+  ## Overview
+
+  [Mellum2-12B-A2.5B-Instruct](https://huggingface.co/JetBrains/Mellum2-12B-A2.5B-Instruct)
+  is JetBrains' instruction-tuned code assistant. It shares the same Mixture-of-Experts
+  backbone as the rest of the Mellum2 family — 64 experts (8 activated per token), 12B total
+  / 2.5B active parameters, sliding-window + full-attention layers, 131,072-token context —
+  but is post-trained (SFT + RLVR on math, coding, tool use, instruction following, reasoning,
+  and knowledge) to **answer directly, without an externalized chain of thought**. For complex
+  debugging, multi-step planning, or math/reasoning-heavy tasks where you want explicit
+  reasoning traces, use the
+  [Thinking](https://huggingface.co/JetBrains/Mellum2-12B-A2.5B-Thinking) variant instead.
+
+  ## Prerequisites
+
+  - Hardware: a single H200, H100, or A100 (~29 GB at bf16) is plenty. On AMD,
+    use MI300X / MI325X / MI355X with TP=1.
+  - vLLM **nightly** — `MellumForCausalLM` support landed after v0.22.0 and is not yet in a
+    stable release. Install the nightly wheels until the next tagged release ships.
+
+  ### Install vLLM (nightly)
+
+  ```bash
+  uv venv
+  source .venv/bin/activate
+  uv pip install -U vllm --extra-index-url https://wheels.vllm.ai/nightly
+  ```
+
+  ## Launch command
+
+  Unlike the Thinking checkpoint, Instruct does not emit `<think>` blocks, so no
+  `--reasoning-parser` is needed.
+
+  ### Single GPU
+
+  ```bash
+  vllm serve JetBrains/Mellum2-12B-A2.5B-Instruct \
+    --max-model-len 131072 \
+    --trust-remote-code \
+    --tensor-parallel-size 1
+
+  # Optional: add tool calling.
+  vllm serve JetBrains/Mellum2-12B-A2.5B-Instruct \
+    --max-model-len 131072 \
+    --trust-remote-code \
+    --tensor-parallel-size 1 \
+    --enable-auto-tool-choice \
+    --tool-call-parser hermes
+  ```
+
+  ### Docker (AMD MI300X / MI325X / MI355X)
+
+  MI300X / MI325X / MI355X GPUs have larger per-GPU HBM, so you can use
+  `--max-model-len auto`.
+
+  ```bash
+  # Plain serving
+  vllm serve JetBrains/Mellum2-12B-A2.5B-Instruct \
+    --max-model-len auto \
+    --trust-remote-code \
+    --tensor-parallel-size 1
+
+  # Add tool calling.
+  vllm serve JetBrains/Mellum2-12B-A2.5B-Instruct \
+    --max-model-len auto \
+    --trust-remote-code \
+    --tensor-parallel-size 1 \
+    --enable-auto-tool-choice \
+    --tool-call-parser hermes
+  ```
+
+  ## Client usage
+
+  JetBrains recommends sampling at `temperature=0.6`, `top_p=0.95`, `top_k=20`.
+
+  ```python
+  from openai import OpenAI
+  client = OpenAI(base_url="http://localhost:8000/v1", api_key="EMPTY")
+
+  resp = client.chat.completions.create(
+      model="JetBrains/Mellum2-12B-A2.5B-Instruct",
+      messages=[{"role": "user", "content": "Write a Python function to reverse a string."}],
+      max_tokens=81920,
+      temperature=0.6,
+      top_p=0.95,
+      extra_body={"top_k": 20},
+  )
+  print(resp.choices[0].message.content)
+  ```
+
+  ## References
+
+  - [Model card](https://huggingface.co/JetBrains/Mellum2-12B-A2.5B-Instruct)
+  - [vLLM support PR #43992](https://github.com/vllm-project/vllm/pull/43992)
+  - [Mellum2 Technical Report](https://arxiv.org/abs/2605.31268)

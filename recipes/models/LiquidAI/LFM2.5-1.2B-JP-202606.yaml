@@ -1,0 +1,159 @@
+meta:
+  title: "LFM2.5 1.2B JP (202606)"
+  slug: "lfm2.5-1.2b-jp-202606"
+  provider: "LiquidAI"
+  description: "Liquid AI's updated (2026-06) 1.2B Japanese chat model on the LFM2 hybrid conv+attention backbone — adds tool calling, with a 32K context window."
+  date_added: 2026-06-25
+  date_updated: 2026-06-24
+  difficulty: beginner
+  tasks:
+    - text
+  performance_headline: "Updated Japanese-tuned 1.2B hybrid chat model with tool calling — single small GPU"
+  related_recipes:
+    - LiquidAI/LFM2.5-1.2B-JP
+    - LiquidAI/LFM2.5-1.2B-Instruct
+  hardware:
+    h100: verified
+    h200: verified
+    b200: verified
+
+model:
+  model_id: "LiquidAI/LFM2.5-1.2B-JP-202606"
+  min_vllm_version: "0.23.0"
+  architecture: dense
+  parameter_count: "1.2B"
+  active_parameters: "1.2B"
+  context_length: 32768
+  base_args: []
+  base_env: {}
+
+features:
+  tool_calling:
+    description: "Surface LFM2.5's Pythonic tool calls (wrapped in <|tool_call_start|>…<|tool_call_end|>) as OpenAI tool_calls via vLLM's native lfm2 parser"
+    args:
+      - "--enable-auto-tool-choice"
+      - "--tool-call-parser"
+      - "lfm2"
+
+variants:
+  default:
+    precision: bf16
+    vram_minimum_gb: 3
+    description: "Full BF16 — single 8 GB+ NVIDIA GPU with room for KV cache"
+
+compatible_strategies:
+  - single_node_tp
+
+hardware_overrides:
+  # Blackwell (B200) only: route RMSNorm to the bundled oink kernels (measured ~+2.6% on B200,
+  # output identical). Inert (falls back to native) on non-Blackwell GPUs.
+  blackwell:
+    extra_env:
+      VLLM_USE_OINK_OPS: "1"
+strategy_overrides:
+  single_node_tp:
+    tp: 1
+
+guide: |
+  ## Overview
+
+  [LFM2.5-1.2B-JP-202606](https://huggingface.co/LiquidAI/LFM2.5-1.2B-JP-202606) is the updated
+  (June 2026) Japanese-specialized 1.2B chat model from [Liquid AI](https://www.liquid.ai/),
+  adding tool calling on top of the **LFM2 hybrid backbone** (short-range gated convolution
+  blocks interleaved with grouped-query attention). It serves on a single small GPU through
+  vLLM's OpenAI-compatible API.
+
+  ### Key Features
+  - **Japanese-specialized**: Updated June 2026 checkpoint tuned for Japanese chat.
+  - **Hybrid backbone**: Gated short convolutions interleaved with grouped-query attention — a smaller KV cache and lower decode latency than a same-size full-attention transformer.
+  - **Tool calling**: Pythonic tool calls (`<|tool_call_start|>…<|tool_call_end|>`) surfaced as OpenAI `tool_calls` by vLLM's native `lfm2` parser.
+  - **32K context**: 32,768-token context window.
+  - **Native vLLM support**: Served via the `Lfm2ForCausalLM` architecture.
+
+  ### Supported Variants
+
+  Dense:
+  - `LiquidAI/LFM2.5-230M` (230M)
+  - `LiquidAI/LFM2.5-350M` (350M)
+  - `LiquidAI/LFM2.5-1.2B-Instruct` (1.2B)
+  - `LiquidAI/LFM2.5-1.2B-Thinking` (1.2B, reasoning)
+  - `LiquidAI/LFM2.5-1.2B-JP` / `LiquidAI/LFM2.5-1.2B-JP-202606` (Japanese)
+  - `LiquidAI/LFM2.5-1.2B-Base` (pretrained base)
+
+  MoE:
+  - `LiquidAI/LFM2.5-8B-A1B` (8B total / ~1B active)
+
+  Vision-Language:
+  - `LiquidAI/LFM2.5-VL-450M`, `LiquidAI/LFM2.5-VL-1.6B`
+
+  See the [LFM2.5 usage guide](../../LiquidAI/LFM2.5) for the full family.
+
+  ## Prerequisites
+
+  - **Hardware**: 1× GPU with ≥8 GB VRAM.
+  - **vLLM**: ≥ 0.23.0.
+
+  ### pip (NVIDIA CUDA)
+  ```bash
+  uv venv
+  source .venv/bin/activate
+  uv pip install -U vllm --torch-backend auto
+  ```
+
+  ## Deployment Configurations
+
+  ### Quick Start (Single GPU, BF16)
+  ```bash
+  vllm serve LiquidAI/LFM2.5-1.2B-JP-202606
+  ```
+
+  ### Full-Featured Server Launch
+  Enables tool calling:
+  ```bash
+  vllm serve LiquidAI/LFM2.5-1.2B-JP-202606 \
+    --enable-auto-tool-choice \
+    --tool-call-parser lfm2 \
+    --host 0.0.0.0 --port 8000
+  ```
+
+  ### Docker (NVIDIA)
+  ```bash
+  docker run -itd --name lfm2.5-jp-202606 \
+    --ipc=host --network host --shm-size 16G --gpus all \
+    -v ~/.cache/huggingface:/root/.cache/huggingface \
+    vllm/vllm-openai:latest \
+      --model LiquidAI/LFM2.5-1.2B-JP-202606 \
+      --host 0.0.0.0 --port 8000
+  ```
+
+  ## Client Usage
+
+  ### Text Generation
+  The updated checkpoint uses temperature `0.1`, `top_k 50`, `repetition_penalty 1.05` (`top_k`
+  and `repetition_penalty` ride in `extra_body`).
+  ```python
+  from openai import OpenAI
+  client = OpenAI(base_url="http://localhost:8000/v1", api_key="EMPTY")
+  response = client.chat.completions.create(
+      model="LiquidAI/LFM2.5-1.2B-JP-202606",
+      messages=[{"role": "user", "content": "京都でおすすめの観光スポットを3つ教えてください。"}],
+      temperature=0.1,
+      extra_body={"top_k": 50, "repetition_penalty": 1.05},
+  )
+  print(response.choices[0].message.content)
+  ```
+
+  ### Tool Calling
+  Launch with `--enable-auto-tool-choice --tool-call-parser lfm2`, then pass `tools=[…]`; the
+  `lfm2` parser converts the model's Pythonic call into a standard `tool_calls` array.
+
+  ## Configuration Tips
+  - Set `--max-model-len` to match your workload (up to 32K); lowering it frees VRAM for KV cache.
+  - `--gpu-memory-utilization 0.90–0.95` maximizes KV cache capacity.
+  - Sampling presets are per-request client defaults — don't bake them into `vllm serve`.
+
+  ## References
+  - [Model card](https://huggingface.co/LiquidAI/LFM2.5-1.2B-JP-202606)
+  - [LFM2.5 usage guide](../../LiquidAI/LFM2.5)
+  - [Liquid AI](https://www.liquid.ai/)
+  - [vLLM supported models](https://docs.vllm.ai/en/latest/models/supported_models.html)

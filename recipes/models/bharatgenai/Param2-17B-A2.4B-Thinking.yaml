@@ -1,0 +1,236 @@
+meta:
+  title: "Param-2-17B-A2.4B-Thinking"
+  slug: "param2-17b-a2-4b-thinking"
+  provider: "BharatGen"
+  description: "BharatGen's hybrid-MoE reasoning model for English, Hindi and 21 Indian languages, with thinking traces and Hermes-style tool calling"
+  date_added: 2026-09-20
+  date_updated: 2026-09-20
+  difficulty: beginner
+  tasks:
+    - text
+  performance_headline: "17B total / 2.4B active parameters; the full BF16 checkpoint serves at TP1 on a single H100 or a single 48 GB L40S"
+  related_recipes: []
+  default_hardware: h100
+  hardware:
+    h100: verified
+    l40s: verified
+
+model:
+  model_id: "bharatgenai/Param2-17B-A2.4B-Thinking"
+  min_vllm_version: "0.20.0"
+  architecture: moe
+  parameter_count: "17B"
+  active_parameters: "2.4B"
+  context_length: 32768
+  base_args:
+    - "--trust-remote-code"
+    - "--async-scheduling"
+
+features:
+  tool_calling:
+    description: "Parse the model's <tool_call> JSON blocks into OpenAI tool calls with the Hermes parser"
+    args:
+      - "--enable-auto-tool-choice"
+      - "--tool-call-parser"
+      - "hermes"
+  reasoning:
+    description: "Split the model's <think> traces into the reasoning field with the Qwen3 parser"
+    args:
+      - "--reasoning-parser"
+      - "qwen3"
+
+opt_in_features: []
+
+variants:
+  default:
+    precision: bf16
+    vram_minimum_gb: 41
+    tp: 1
+    description: "Official BF16 checkpoint; approximately 34.3 GB of repository weights, served with TP1"
+
+compatible_strategies:
+  - single_node_tp
+
+hardware_overrides: {}
+
+strategy_overrides:
+  single_node_tp:
+    tp: 1
+
+guide: |
+  ## Overview
+
+  `bharatgenai/Param2-17B-A2.4B-Thinking` is BharatGen's early post-training
+  checkpoint of Param-2-17B, a hybrid Mixture-of-Experts model with **17B total
+  parameters** and **2.4B activated per token**. Each sparse block routes to 6
+  of 64 experts and additionally keeps **2 shared experts** always active; the
+  first layer is dense (`first_k_dense_replace: 1`) before the MoE stack begins.
+  The shared-expert design is aimed at stable cross-lingual representations for
+  Indian languages.
+
+  Beyond English and Hindi it covers 21 scheduled Indian languages — Assamese,
+  Bengali, Bodo, Dogri, Gujarati, Kannada, Konkani, Kashmiri, Maithili,
+  Malayalam, Manipuri, Marathi, Nepali, Oriya, Punjabi, Sanskrit, Santali,
+  Sindhi, Tamil, Telugu and Urdu — and was pretrained on roughly 22.6T tokens.
+
+  The checkpoint is a **thinking** model: its chat template always opens an
+  assistant turn with a `<think>` block, and tool calls are emitted as
+  Hermes-style `<tool_call>{"name": ..., "arguments": ...}</tool_call>` JSON.
+  That is why the two Features above map onto the `qwen3` reasoning parser and
+  the `hermes` tool-call parser.
+
+  ## Prerequisites
+
+  - **vLLM:** 0.20.0 or newer. `Param2MoEForCausalLM` was registered upstream in
+    [PR #38000](https://github.com/vllm-project/vllm/pull/38000) and the
+    tensor-parallel attention-head fix landed in
+    [PR #39707](https://github.com/vllm-project/vllm/pull/39707); both ship in
+    v0.20.0. Nothing extra needs to be installed.
+  - **`--trust-remote-code` is required.** vLLM implements the model natively
+    (`vllm/model_executor/models/param2moe.py`), but `model_type: param2moe` is
+    not registered with Transformers, so the config still loads from the repo's
+    `configuration_param2moe.py`.
+  - **Hardware:** one GPU is enough. The BF16 weights are ~34.3 GB, so an H100
+    80GB leaves ample room for the 32,768-token KV cache. A single 48 GB
+    **L40S** also runs the same configuration: at the default
+    `--gpu-memory-utilization 0.9` roughly 8–9 GB remains for KV, and this
+    model's KV cache is small (21 layers × 8 KV heads × 64 head dim ≈ 42 KB per
+    token), so about 6 concurrent sequences fit at the full 32,768-token
+    window — more if you cap `--max-model-len`.
+  - **License:** the checkpoint is released under the BharatGen
+    **Non-Commercial** license — review it before deploying.
+
+  ## Launching the Server
+
+  This is the exact configuration verified on both H100 and L40S:
+
+  ```bash
+  vllm serve bharatgenai/Param2-17B-A2.4B-Thinking \
+    --trust-remote-code \
+    --async-scheduling \
+    --tensor-parallel-size 1 \
+    --enable-auto-tool-choice \
+    --tool-call-parser hermes \
+    --reasoning-parser qwen3
+  ```
+
+  To pin the server to one specific GPU on a multi-GPU node, prefix the command
+  with `CUDA_VISIBLE_DEVICES=<id>`; add `--port <port>` if 8000 is taken.
+
+  `--async-scheduling` overlaps scheduling with the model forward pass and cuts
+  host overhead between decode steps. It is not required — drop it if you hit an
+  incompatibility with another feature you enable.
+
+  TP1 is the recommended layout: the model fits on one GPU and a 2.4B
+  active-parameter forward pass gains little from sharding. To raise aggregate
+  throughput, run several independent TP1 replicas behind a load balancer rather
+  than increasing TP — especially on L40S, which has no NVLink, so cross-GPU TP
+  would fall back to PCIe.
+
+  ## Client Usage
+
+  Reasoning traces arrive in `message.reasoning` once `--reasoning-parser qwen3`
+  is active:
+
+  ```python
+  from openai import OpenAI
+
+  client = OpenAI(base_url="http://localhost:8000/v1", api_key="EMPTY")
+  response = client.chat.completions.create(
+      model="bharatgenai/Param2-17B-A2.4B-Thinking",
+      messages=[
+          {"role": "user", "content": "एक कक्षा में 30 छात्र हैं। पूरी कक्षा का औसत 70 है। शीर्ष 10 का औसत 85 और निचले 10 का औसत 50 है। मध्य 10 छात्रों का औसत क्या है?"}
+      ],
+      temperature=0,
+  )
+  msg = response.choices[0].message
+  print(msg.reasoning)
+  print(msg.content)
+  ```
+
+  The model card recommends **deterministic decoding** (`temperature=0`) for
+  evaluations, structured tasks and production use; sampling defaults of
+  `temperature=0.7`, `top_p=0.9`, `top_k=50` are suggested for open-ended
+  generation. The card also notes the model is strong at structured output
+  (Markdown, tables, JSON), and that clear task/format/constraint instructions
+  in the prompt matter noticeably.
+
+  ### Skipping the thinking block
+
+  The chat template accepts `enable_thinking`. Setting it to `false` prefills an
+  empty `<think></think>` block so the model answers directly:
+
+  ```python
+  response = client.chat.completions.create(
+      model="bharatgenai/Param2-17B-A2.4B-Thinking",
+      messages=[{"role": "user", "content": "Name the capital of Maharashtra."}],
+      extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+  )
+  ```
+
+  ### Tool calling
+
+  With the Tool Calling feature on, pass `tools` as usual and read
+  `message.tool_calls`:
+
+  ```python
+  response = client.chat.completions.create(
+      model="bharatgenai/Param2-17B-A2.4B-Thinking",
+      messages=[{"role": "user", "content": "What is the weather in Pune?"}],
+      tools=[{
+          "type": "function",
+          "function": {
+              "name": "get_weather",
+              "description": "Get the current weather for a city",
+              "parameters": {
+                  "type": "object",
+                  "properties": {"city": {"type": "string"}},
+                  "required": ["city"],
+              },
+          },
+      }],
+      tool_choice="auto",
+  )
+  print(response.choices[0].message.tool_calls)
+  ```
+
+  ## Benchmarking
+
+  ```bash
+  vllm bench serve \
+    --model bharatgenai/Param2-17B-A2.4B-Thinking \
+    --dataset-name random \
+    --random-input-len 2048 \
+    --random-output-len 1024 \
+    --num-prompts 200
+  ```
+
+  Because thinking traces count toward the output budget, keep
+  `--random-output-len` generous when benchmarking with reasoning enabled, or
+  benchmark with `enable_thinking: false` to measure the non-reasoning path.
+
+  ## Notes and Limitations
+
+  - **Context:** the native window is 32,768 tokens. The model card states a
+    128k-context variant is planned but not yet released, so do not raise
+    `--max-model-len` past 32,768 on this checkpoint.
+  - **No MTP head:** `num_nextn_predict_layers: 0`, so there is no
+    speculative-decoding draft shipped with this checkpoint.
+  - **Early post-training checkpoint:** BharatGen describes the release as an
+    early post-training snapshot intended for downstream use and further
+    fine-tuning.
+  - **Verification scope:** the `verified` H100 and L40S badges cover the BF16
+    checkpoint at TP1 with the launch command above. Other GPUs are untested
+    rather than known-bad.
+  - **L40S headroom:** at 48 GB the weights alone take ~34.3 GB, so KV cache is
+    the binding constraint rather than weight capacity. Lower
+    `--max-model-len` if you need more concurrency than the full context window
+    allows.
+
+  ## References
+
+  - [Param2-17B-A2.4B-Thinking on Hugging Face](https://huggingface.co/bharatgenai/Param2-17B-A2.4B-Thinking)
+  - [BharatGen on Hugging Face](https://huggingface.co/bharatgenai)
+  - [vLLM support PR #38000 — Add support for BharatGen's Param2MoE model](https://github.com/vllm-project/vllm/pull/38000)
+  - [vLLM PR #39707 — Fix attention-head mismatch under tensor parallelism for param2moe](https://github.com/vllm-project/vllm/pull/39707)
+  - [vLLM supported models — `Param2MoEForCausalLM`](https://docs.vllm.ai/en/latest/models/supported_models.html)

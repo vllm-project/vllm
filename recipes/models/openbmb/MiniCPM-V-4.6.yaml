@@ -1,0 +1,121 @@
+meta:
+  title: "MiniCPM-V 4.6"
+  slug: "minicpm-v-4-6"
+  provider: "MiniCPM (OpenBMB)"
+  description: "MiniCPM-V 4.6 (1.3B) — pocket-sized multimodal LLM for ultra-efficient single-image, multi-image, and video understanding, built on SigLIP2-400M + a Qwen3.5-0.8B hybrid-attention backbone"
+  date_added: 2026-06-02
+  date_updated: 2026-06-02
+  difficulty: beginner
+  tasks:
+    - multimodal
+  performance_headline: "~1.5× token throughput vs Qwen3.5-0.8B with mixed 4×/16× visual token compression"
+  related_recipes:
+    - openbmb/MiniCPM5-1B
+
+model:
+  model_id: "openbmb/MiniCPM-V-4.6"
+  min_vllm_version: "0.22.0"
+  architecture: dense
+  parameter_count: "1.3B"
+  active_parameters: "1.3B"
+  context_length: 262144
+  base_args:
+    - "--trust-remote-code"
+  base_env: {}
+
+dependencies:
+  - note: "MiniCPM-V 4.6 ships as a standalone architecture (MiniCPMV4_6ForConditionalGeneration) only in transformers >= 5.7.0"
+    command: 'uv pip install -U "transformers>=5.7.0"'
+  - note: "Video understanding support (decoders for the video input path)"
+    command: 'uv pip install -U "vllm[video]"'
+    optional: true
+
+features:
+  tool_calling:
+    description: "Function/tool calling via the qwen3_coder parser (the v4.6 chat template emits Qwen3-Coder-style <tool_call> blocks)"
+    args:
+      - "--enable-auto-tool-choice"
+      - "--tool-call-parser"
+      - "qwen3_coder"
+
+opt_in_features: []
+
+variants:
+  default:
+    precision: bf16
+    vram_minimum_gb: 4
+    description: "BF16 weights (~1.3B params) — tiny footprint, runs comfortably on a single consumer GPU"
+
+compatible_strategies:
+  - single_node_tp
+  - multi_node_tp
+
+strategy_overrides:
+  single_node_tp:
+    tp: 1
+
+guide: |
+  ## Overview
+
+  **MiniCPM-V 4.6** is OpenBMB's most edge-friendly multimodal model to date.
+  It pairs a **SigLIP2-400M** vision encoder with a **Qwen3.5-0.8B** hybrid
+  linear/full-attention language backbone (~1.3B params total). It handles
+  single-image, multi-image, and video understanding, and introduces **mixed
+  4×/16× visual token compression** — switch the `downsample_mode` per request
+  to trade accuracy for speed.
+
+  > MiniCPM-V 4.6 ships as **two independent checkpoints** — this recipe covers
+  > the Instruct model (`openbmb/MiniCPM-V-4.6`). For chain-of-thought output,
+  > use the separate `openbmb/MiniCPM-V-4.6-Thinking` checkpoint instead (unlike
+  > v4.5, the mode is no longer toggled at runtime).
+
+  ## Prerequisites
+
+  - **vLLM ≥ 0.22.0** — the `MiniCPMV4_6ForConditionalGeneration` architecture
+    landed via [PR #43213](https://github.com/vllm-project/vllm/pull/43213)
+    (merged 2026-05-22) and first shipped in the v0.22.0 release. No fork is
+    required.
+  - **transformers ≥ 5.7.0** — the model is merged as a standalone architecture
+    only in this version.
+  - For video inputs, install the `vllm[video]` extra.
+
+  ## Launch command
+
+  Use the command builder above. The baseline is simply:
+
+  ```bash
+  vllm serve openbmb/MiniCPM-V-4.6 --trust-remote-code --port 8000
+  ```
+
+  Enable the **Tool calling** feature to add `--enable-auto-tool-choice
+  --tool-call-parser qwen3_coder`. The model emits a Qwen3-Coder-style
+  `<tool_call>` block inside the message content.
+
+  At 1.3B params the model fits on a single GPU (TP=1). v4.6 supports context up
+  to 256K, but start with a smaller `--max-model-len` (e.g. `8192`) and raise it
+  to fit your GPU memory and workload.
+
+  ## Client usage
+
+  **Image:**
+
+  ```bash
+  curl -s http://localhost:8000/v1/chat/completions -H 'Content-Type: application/json' -d '{
+    "model": "openbmb/MiniCPM-V-4.6",
+    "messages": [{"role": "user", "content": [
+      {"type": "image_url", "image_url": {"url": "https://huggingface.co/datasets/openbmb/DemoCase/resolve/main/refract.png"}},
+      {"type": "text", "text": "What causes this phenomenon?"}
+    ]}]
+  }'
+  ```
+
+  > **Stop tokens:** v4.6 uses the Qwen3.5 backbone with a new vocab. If you see
+  > runaway generations, pass `"stop_token_ids": [248044, 248046]` in your
+  > request body.
+
+  ## References
+
+  - [Model card](https://huggingface.co/openbmb/MiniCPM-V-4.6)
+  - [Thinking checkpoint](https://huggingface.co/openbmb/MiniCPM-V-4.6-Thinking)
+  - [vLLM deployment guide (Cookbook)](https://github.com/OpenSQZ/MiniCPM-V-CookBook/blob/main/deployment/vllm/minicpm-v4_6_vllm.md)
+  - [vLLM support PR #43213](https://github.com/vllm-project/vllm/pull/43213)

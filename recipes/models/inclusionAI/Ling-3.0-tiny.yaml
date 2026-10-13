@@ -1,0 +1,165 @@
+meta:
+  title: "Ling-3.0-tiny"
+  slug: "ling-3-0-tiny"
+  provider: "inclusionAI"
+  description: "Ling-3.0-tiny lightweight hybrid-reasoning MoE with BF16, block-FP8, and compressed-tensors INT4 checkpoints"
+  date_added: 2026-08-31
+  date_updated: 2026-09-09
+  difficulty: intermediate
+  tasks:
+    - text
+  performance_headline: "7.9B total / 1.3B active parameters with a 3:1 KDA-MLA stack; all three official checkpoints run with TP1"
+  related_recipes:
+    - inclusionAI/Ling-3.0-flash
+  hardware:
+    h200: verified
+
+model:
+  model_id: "inclusionAI/Ling-3.0-tiny"
+  min_vllm_version: "0.28.0"
+  architecture: moe
+  parameter_count: "7.9B"
+  active_parameters: "1.3B"
+  context_length: 131072
+  base_args:
+    - "--trust-remote-code"
+    - "--dtype"
+    - "bfloat16"
+    - "--gpu-memory-utilization"
+    - "0.85"
+    - "--enable-prefix-caching"
+
+features:
+  tool_calling:
+    description: "Enable Ling 3 automatic tool calling"
+    args:
+      - "--enable-auto-tool-choice"
+      - "--tool-call-parser"
+      - "ling3"
+  reasoning:
+    description: "Split Ling 3 thinking traces into reasoning"
+    args:
+      - "--reasoning-parser"
+      - "ling3"
+
+opt_in_features: []
+
+variants:
+  default:
+    precision: bf16
+    vram_minimum_gb: 18
+    tp: 1
+    description: "Official BF16 checkpoint; approximately 15.8 GB of repository weights and served with TP1"
+  fp8:
+    model_id: "inclusionAI/Ling-3.0-tiny-fp8"
+    precision: fp8
+    vram_minimum_gb: 11
+    tp: 1
+    description: "Official serialized block-FP8 checkpoint with dynamic activations and 128x128 weight blocks; served with TP1"
+  int4:
+    model_id: "inclusionAI/Ling-3.0-tiny-int4"
+    precision: int4
+    vram_minimum_gb: 8
+    tp: 1
+    description: "Official compressed-tensors group-wise INT4 checkpoint; served with TP1"
+
+compatible_strategies:
+  - single_node_tp
+
+hardware_overrides: {}
+
+strategy_overrides:
+  single_node_tp:
+    tp: 1
+
+guide: |
+  ## Overview
+
+  `inclusionAI/Ling-3.0-tiny` is the lightweight member of the Ling 3.0
+  family. It has 7.9B total parameters and activates 1.3B parameters per token.
+  Its 24-layer hybrid stack repeats three Kimi Delta Attention (KDA) layers and
+  one Multi-Head Latent Attention (MLA) layer, while each sparse MoE block
+  selects 8 of 128 routed experts plus one shared expert.
+
+  The official release provides three served checkpoints:
+
+  - `inclusionAI/Ling-3.0-tiny`: BF16;
+  - `inclusionAI/Ling-3.0-tiny-fp8`: serialized block FP8;
+  - `inclusionAI/Ling-3.0-tiny-int4`: compressed-tensors INT4.
+
+  All three use the same `BailingMoeV3ForCausalLM` architecture and a native
+  131,072-token context window. Select the corresponding Variant above; the
+  served model ID changes automatically.
+
+  ## Prerequisites
+
+  - **vLLM:** 0.28.0 or newer, which includes Ling 3.0 / Bailing V3
+    hybrid-attention support;
+  - **Parallelism:** TP1 is recommended for all three checkpoints;
+  - **Thinking mode:** enabled per request by the chat template.
+
+  ## Launching the Server
+
+  BF16 on one GPU:
+
+  ```bash
+  vllm serve inclusionAI/Ling-3.0-tiny \
+    --trust-remote-code \
+    --dtype bfloat16 \
+    --tensor-parallel-size 1 \
+    --gpu-memory-utilization 0.85 \
+    --enable-prefix-caching \
+    --enable-auto-tool-choice \
+    --tool-call-parser ling3 \
+    --reasoning-parser ling3
+  ```
+
+  For FP8 or INT4, keep the same arguments and replace the served checkpoint:
+
+  ```bash
+  # Serialized block FP8
+  vllm serve inclusionAI/Ling-3.0-tiny-fp8 \
+    --trust-remote-code --dtype bfloat16 --tensor-parallel-size 1 \
+    --gpu-memory-utilization 0.85 --enable-prefix-caching --enable-auto-tool-choice \
+    --tool-call-parser ling3 --reasoning-parser ling3
+
+  # Compressed-tensors INT4
+  vllm serve inclusionAI/Ling-3.0-tiny-int4 \
+    --trust-remote-code --dtype bfloat16 --tensor-parallel-size 1 \
+    --gpu-memory-utilization 0.85 --enable-prefix-caching --enable-auto-tool-choice \
+    --tool-call-parser ling3 --reasoning-parser ling3
+  ```
+
+  ## Thinking Mode
+
+  Thinking is controlled per request. The model card recommends
+  `temperature=1.0`, `top_p=0.95`, and `top_k=20` when thinking is enabled:
+
+  ```python
+  from openai import OpenAI
+
+  client = OpenAI(base_url="http://localhost:8000/v1", api_key="EMPTY")
+  response = client.chat.completions.create(
+      model="inclusionAI/Ling-3.0-tiny",
+      messages=[{"role": "user", "content": "Solve the problem step by step."}],
+      temperature=1.0,
+      top_p=0.95,
+      extra_body={
+          "top_k": 20,
+          "chat_template_kwargs": {"enable_thinking": True},
+      },
+  )
+  msg = response.choices[0].message
+  print(msg.reasoning)
+  print(msg.content)
+  ```
+
+  Set `enable_thinking` to `false` for direct answers. When using a quantized
+  variant, set the client `model` to its FP8 or INT4 checkpoint ID.
+
+  ## References
+
+  - [Ling 3.0 collection](https://huggingface.co/collections/inclusionAI/ling-30)
+  - [Ling-3.0-tiny on Hugging Face](https://huggingface.co/inclusionAI/Ling-3.0-tiny)
+  - [Ling-3.0-tiny-fp8 on Hugging Face](https://huggingface.co/inclusionAI/Ling-3.0-tiny-fp8)
+  - [Ling-3.0-tiny-int4 on Hugging Face](https://huggingface.co/inclusionAI/Ling-3.0-tiny-int4)

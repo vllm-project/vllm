@@ -1,0 +1,173 @@
+meta:
+  title: "MiMo-V2.5"
+  slug: "mimo-v2-5"
+  provider: "MiMo (Xiaomi)"
+  description: "MiMo-V2.5 is a native omnimodal model with strong agentic capabilities, supporting text, image, video, and audio understanding within a unified architecture"
+  date_added: 2026-04-27
+  date_updated: 2026-04-27
+  difficulty: advanced
+  tasks:
+    - multimodal
+    - text
+  related_recipes:
+    - "XiaomiMiMo/MiMo-V2-Flash"
+  hardware:
+    h200: verified
+
+model:
+  model_id: "XiaomiMiMo/MiMo-V2.5"
+  min_vllm_version: "0.21.0"
+  architecture: moe
+  parameter_count: "311B"
+  active_parameters: "15B"
+  context_length: 1048576
+  base_args:
+    - "--trust-remote-code"
+    - "--generation-config"
+    - "vllm"
+  base_env: {}
+
+features:
+  tool_calling:
+    description: "MiMo tool-call parser"
+    args:
+      - "--tool-call-parser"
+      - "mimo"
+      - "--enable-auto-tool-choice"
+  reasoning:
+    description: "MiMo reasoning parser"
+    args:
+      - "--reasoning-parser"
+      - "mimo"
+  spec_decoding:
+    description: "Multi-Token Prediction"
+    args:
+      - "--speculative-config"
+      - '{"method":"mtp","num_speculative_tokens":1}'
+
+opt_in_features:
+  - spec_decoding
+
+variants:
+  default:
+    precision: fp8
+    vram_minimum_gb: 374
+    # FP8 block-wise e4m3 128x128 — TP=8 hits an attention-projection shape
+    # mismatch (param padded to a 128-aligned shard the checkpoint can't fill).
+    # Author-verified config is TP=4. EP doesn't help (mismatch is on attention,
+    # not MoE), so single_node_tep at 8 GPUs is also broken — use a 4-GPU box
+    # or accept 4 idle GPUs on an 8-GPU box.
+    tp: 4
+    description: "Native FP8 weights (block-wise e4m3 128x128); 4x H200 with TP4"
+    extra_args:
+      - "--gpu-memory-utilization"
+      - "0.95"
+      - "--max-model-len"
+      - "auto"
+
+compatible_strategies:
+  - single_node_tp
+  - single_node_tep
+  - multi_node_tp
+  - multi_node_tep
+  - multi_node_dep
+  - pd_cluster
+
+hardware_overrides: {}
+strategy_overrides: {}
+
+guide: |
+  ## Overview
+
+  MiMo-V2.5 is Xiaomi's native omnimodal MoE model with 310B total parameters
+  and 15B active per token, supporting text, image, video, and audio understanding
+  within a unified architecture. Built on the MiMo-V2-Flash backbone with dedicated
+  vision (729M) and audio (261M) encoders, it uses 256 routed experts (top-8) with
+  hybrid attention (SWA-128 + full-attention at 5:1 ratio) over 48 layers
+  (1 dense + 47 MoE) and ships with native FP8 (block-wise e4m3) weights.
+  A 3-layer Multi-Token Prediction (MTP) head is included for speculative decoding.
+
+  ## Prerequisites
+
+  - Hardware: 4x H200 (TP4)
+
+  ### Pull the vLLM docker image
+
+  Stable vLLM does not yet support MiMo V2.5. Use the pre-built image:
+
+  ```bash
+  docker pull vllm/vllm-openai:mimov25-cu129
+  ```
+
+  ## Launch commands
+
+  Single-node TP4 (H200):
+
+  ```bash
+  vllm serve XiaomiMiMo/MiMo-V2.5 \
+    --tensor-parallel-size 4 \
+    --trust-remote-code \
+    --gpu-memory-utilization 0.95 \
+    --max-model-len auto \
+    --generation-config vllm
+  ```
+
+  With tool calling + reasoning:
+
+  ```bash
+  vllm serve XiaomiMiMo/MiMo-V2.5 \
+    --tensor-parallel-size 4 \
+    --trust-remote-code \
+    --gpu-memory-utilization 0.95 \
+    --max-model-len auto \
+    --reasoning-parser mimo \
+    --tool-call-parser mimo \
+    --enable-auto-tool-choice \
+    --generation-config vllm
+  ```
+
+  Tunable flags:
+  - `--max-model-len` — full context is 1,048,576; use `auto` to size to KV budget.
+  - `--max-num-batched-tokens=32768` for prompt-heavy workloads; lower for latency.
+  - `--gpu-memory-utilization=0.95` to maximize KV cache.
+
+  ## Client Usage
+
+  ```bash
+  curl -X POST http://localhost:8000/v1/chat/completions \
+    -H "Content-Type: application/json" \
+    -d '{
+      "model": "XiaomiMiMo/MiMo-V2.5",
+      "messages": [{"role": "user", "content": "Hello MiMo!"}],
+      "chat_template_kwargs": {"enable_thinking": true}
+    }'
+  ```
+
+  Set `"enable_thinking": false` (or omit the kwargs) to disable thinking mode.
+
+  ## Benchmarking
+
+  Launch the server with `--no-enable-prefix-caching` to get consistent measurements.
+
+  ### VisionArena-Chat
+  ```
+  vllm bench serve \
+    --model XiaomiMiMo/MiMo-V2.5 \
+    --backend openai-chat \
+    --endpoint /v1/chat/completions \
+    --dataset-name hf \
+    --dataset-path lmarena-ai/VisionArena-Chat \
+    --num-prompts 128
+  ```
+
+  ### Random Synthetic
+  ```bash
+  vllm bench serve \
+    --model XiaomiMiMo/MiMo-V2.5 \
+    --dataset-name random --random-input-len 8000 --random-output-len 1000 \
+    --request-rate 3 --num-prompts 1800 --ignore-eos
+  ```
+
+  ## References
+
+  - [MiMo-V2.5 on Hugging Face](https://huggingface.co/XiaomiMiMo/MiMo-V2.5)

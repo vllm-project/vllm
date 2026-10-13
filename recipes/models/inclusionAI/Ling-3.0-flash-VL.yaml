@@ -1,0 +1,168 @@
+meta:
+  title: "Ling-3.0-flash-VL"
+  slug: "ling-3-0-flash-vl"
+  provider: "inclusionAI"
+  description: "Ling-3.0-flash vision-language MoE model with BF16, FP8, FP4, and INT4 checkpoints"
+  date_added: 2026-09-08
+  date_updated: 2026-09-08
+  difficulty: advanced
+  tasks:
+    - text
+    - multimodal
+  related_recipes:
+    - "inclusionAI/Ling-3.0-flash"
+
+model:
+  model_id: "inclusionAI/Ling-3.0-flash-VL"
+  min_vllm_version: "nightly"
+  nightly_required: true
+  architecture: moe
+  parameter_count: "124.85B"
+  active_parameters: "5.51B"
+  context_length: 131072
+  base_args:
+    - "--trust-remote-code"
+    - "--dtype"
+    - "bfloat16"
+    - "--gpu-memory-utilization"
+    - "0.9"
+    - "--enable-chunked-prefill"
+    - "--compilation-config"
+    - '{"cudagraph_mode":"FULL_AND_PIECEWISE"}'
+    - "--enable-prefix-caching"
+
+features:
+  tool_calling:
+    description: "Enable Ling 3 automatic tool calling"
+    args:
+      - "--enable-auto-tool-choice"
+      - "--tool-call-parser"
+      - "ling3"
+  reasoning:
+    description: "Split Ling 3 thinking traces into reasoning"
+    args:
+      - "--reasoning-parser"
+      - "ling3"
+
+variants:
+  default:
+    precision: bf16
+    vram_minimum_gb: 300
+    description: "BF16 checkpoint; defaults to TP4"
+  fp8:
+    model_id: "inclusionAI/Ling-3.0-flash-VL-fp8"
+    precision: fp8
+    vram_minimum_gb: 150
+    tp: 2
+    description: "Serialized block-FP8 checkpoint; defaults to TP2"
+  fp4:
+    model_id: "inclusionAI/Ling-3.0-flash-VL-fp4"
+    precision: fp4
+    # FP8 language projections and MXFP4 routed experts; BF16 vision/projector.
+    # The Hopper fallback does not require native Blackwell FP4 tensor cores.
+    precision_hardware:
+      brand: NVIDIA
+    vram_minimum_gb: 85
+    tp: 1
+    description: "Mixed block-FP8 and MXFP4 checkpoint; defaults to TP1"
+  int4:
+    model_id: "inclusionAI/Ling-3.0-flash-VL-int4"
+    precision: int4
+    vram_minimum_gb: 95
+    tp: 1
+    description: "INT4 checkpoint; defaults to TP1"
+
+compatible_strategies:
+  - single_node_tp
+
+hardware_overrides: {}
+
+strategy_overrides:
+  single_node_tp:
+    tp: 4
+
+guide: |
+  ## Overview
+
+  `inclusionAI/Ling-3.0-flash-VL` uses the
+  `BailingMoeV3VLForConditionalGeneration` architecture. It combines the
+  Ling-3.0-flash hybrid MLA/KDA language backbone with a vision encoder and
+  projector for image understanding. The language backbone has 512 routed
+  experts (8 active per token) and one shared expert.
+
+  BF16, FP8, mixed block-FP8/MXFP4, and INT4 checkpoints are available. The
+  vision tower and projector remain BF16 in the mixed FP4 checkpoint.
+
+  ## Prerequisites
+
+  - **vLLM:** an official nightly build containing Ling-3.0-flash-VL support
+  - **Precision:** BF16, FP8, FP4, or INT4 weights with BF16 compute
+  - **Context length:** 131,072 tokens
+
+  ## Launching the Server
+
+  ```bash
+  NCCL_DEBUG=WARN vllm serve inclusionAI/Ling-3.0-flash-VL \
+    --trust-remote-code \
+    --dtype bfloat16 \
+    --tensor-parallel-size 4 \
+    --gpu-memory-utilization 0.9 \
+    --enable-chunked-prefill \
+    --compilation-config '{"cudagraph_mode":"FULL_AND_PIECEWISE"}' \
+    --enable-prefix-caching \
+    --enable-auto-tool-choice \
+    --tool-call-parser ling3 \
+    --reasoning-parser ling3
+  ```
+
+  For a quantized variant, use the same flags with the corresponding model
+  ID and tensor parallel size:
+
+  | Variant | Model ID | TP |
+  |---|---|---:|
+  | FP8 | `inclusionAI/Ling-3.0-flash-VL-fp8` | 2 |
+  | FP4 | `inclusionAI/Ling-3.0-flash-VL-fp4` | 1 |
+  | INT4 | `inclusionAI/Ling-3.0-flash-VL-int4` | 1 |
+
+  ## Image Requests
+
+  ```python
+  import base64
+  from pathlib import Path
+  from openai import OpenAI
+
+  client = OpenAI(base_url="http://localhost:8000/v1", api_key="EMPTY")
+  image = base64.b64encode(Path("image.png").read_bytes()).decode("ascii")
+  response = client.chat.completions.create(
+      model="inclusionAI/Ling-3.0-flash-VL",
+      messages=[{
+          "role": "user",
+          "content": [
+              {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{image}"}},
+              {"type": "text", "text": "Describe the image."},
+          ],
+      }],
+      temperature=0.0,
+      max_tokens=1024,
+      extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+  )
+  print(response.choices[0].message.content)
+  ```
+
+  For multiple images, add more `image_url` entries to `content`. For
+  text-only requests, use ordinary string content. When serving a quantized
+  variant, use its checkpoint ID in the client request.
+
+  ## Thinking Mode
+
+  As with Ling-3.0-flash, thinking is selected per request through
+  `chat_template_kwargs`. Set `enable_thinking` to `True` to enable it;
+  with `--reasoning-parser ling3`, the parsed trace is in `message.reasoning`
+  and the final answer is in `message.content`.
+
+  ## References
+
+  - [Ling-3.0-flash-VL](https://huggingface.co/inclusionAI/Ling-3.0-flash-VL)
+  - [Ling-3.0-flash-VL-fp8](https://huggingface.co/inclusionAI/Ling-3.0-flash-VL-fp8)
+  - [Ling-3.0-flash-VL-fp4](https://huggingface.co/inclusionAI/Ling-3.0-flash-VL-fp4)
+  - [Ling-3.0-flash-VL-int4](https://huggingface.co/inclusionAI/Ling-3.0-flash-VL-int4)

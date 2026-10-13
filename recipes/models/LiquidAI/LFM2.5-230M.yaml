@@ -1,0 +1,185 @@
+meta:
+  title: "LFM2.5 230M"
+  slug: "lfm2.5-230m"
+  provider: "LiquidAI"
+  description: "Liquid AI's most compact LFM2.5 chat model (230M) on the LFM2 hybrid conv+attention backbone — distilled from LFM2.5-350M, tool calling and 32K context, built for edge / on-device serving."
+  date_added: 2026-06-25
+  date_updated: 2026-06-25
+  difficulty: beginner
+  tasks:
+    - text
+  performance_headline: "230M hybrid instruct model with tool calling — runs from low-cost CPUs to production GPUs, ideal for tightest on-device budgets"
+  related_recipes:
+    - LiquidAI/LFM2.5-350M
+    - LiquidAI/LFM2.5-1.2B-Instruct
+    - LiquidAI/LFM2.5-8B-A1B
+  hardware:
+    h100: verified
+    h200: verified
+    b200: verified
+
+model:
+  model_id: "LiquidAI/LFM2.5-230M"
+  min_vllm_version: "0.23.0"
+  architecture: dense
+  parameter_count: "230M"
+  active_parameters: "230M"
+  context_length: 32768
+  base_args: []
+  base_env: {}
+
+features:
+  tool_calling:
+    description: "Surface LFM2.5's Pythonic tool calls (wrapped in <|tool_call_start|>…<|tool_call_end|>) as OpenAI tool_calls via vLLM's native lfm2 parser"
+    args:
+      - "--enable-auto-tool-choice"
+      - "--tool-call-parser"
+      - "lfm2"
+
+variants:
+  default:
+    precision: bf16
+    vram_minimum_gb: 1
+    description: "Full BF16 — fits essentially any GPU (~0.5 GB of weights)"
+
+compatible_strategies:
+  - single_node_tp
+
+hardware_overrides: {}
+strategy_overrides:
+  single_node_tp:
+    tp: 1
+
+guide: |
+  ## Overview
+
+  [LFM2.5-230M](https://huggingface.co/LiquidAI/LFM2.5-230M) is the most compact chat model in
+  [Liquid AI's](https://www.liquid.ai/) LFM2.5 family, built on the **LFM2 hybrid backbone**:
+  short-range gated convolution blocks interleaved with grouped-query attention. It was
+  **distilled from LFM2.5-350M** and refined with multi-stage reinforcement learning, then
+  trained on a 19T-token budget — keeping memory and latency low enough for the tightest edge and
+  on-device budgets while still supporting tool calling and a 32K context window through vLLM's
+  OpenAI-compatible API.
+
+  ### Key Features
+  - **Hybrid backbone**: 14 layers — 8 double-gated short-convolution blocks interleaved with 6 grouped-query attention blocks — for a smaller KV cache and lower decode latency than a same-size full-attention transformer.
+  - **32K context**: Long-context support (`context_length = 32768`).
+  - **Tool calling**: Pythonic tool calls (`<|tool_call_start|>…<|tool_call_end|>`) surfaced as OpenAI `tool_calls` by vLLM's native `lfm2` parser.
+  - **Native vLLM support**: Served via the `Lfm2ForCausalLM` architecture — no `--trust-remote-code` required.
+  - **Edge-ready**: ~0.5 GB of BF16 weights — runs from low-cost CPUs to production GPUs (213 tok/s decode on a Galaxy S25 Ultra, 42 tok/s on a Raspberry Pi 5).
+
+  Best suited for data extraction and lightweight on-device agentic pipelines; the model card
+  notes it is **not** recommended for reasoning-heavy workloads (advanced math, code generation,
+  creative writing) — reach for a larger sibling there.
+
+  ### Supported Variants
+
+  Dense:
+  - `LiquidAI/LFM2.5-230M` (230M)
+  - `LiquidAI/LFM2.5-350M` (350M)
+  - `LiquidAI/LFM2.5-1.2B-Instruct` (1.2B)
+  - `LiquidAI/LFM2.5-1.2B-Thinking` (1.2B, reasoning)
+  - `LiquidAI/LFM2.5-1.2B-JP` / `LiquidAI/LFM2.5-1.2B-JP-202606` (Japanese)
+  - `LiquidAI/LFM2.5-1.2B-Base` (pretrained base)
+
+  MoE:
+  - `LiquidAI/LFM2.5-8B-A1B` (8B total / ~1B active)
+
+  Vision-Language:
+  - `LiquidAI/LFM2.5-VL-450M`, `LiquidAI/LFM2.5-VL-1.6B`
+
+  See the [LFM2.5 usage guide](../../LiquidAI/LFM2.5) for the full family.
+
+  ## Prerequisites
+
+  - **Hardware**: 1× GPU (~1 GB VRAM for weights; any modern GPU works). Verified on H100.
+  - **vLLM**: ≥ 0.23.0 — the LFM2 architecture ships in the 0.23.0 stable release.
+
+  ### pip (NVIDIA CUDA)
+  ```bash
+  uv venv
+  source .venv/bin/activate
+  uv pip install -U vllm --torch-backend auto
+  ```
+
+  ## Deployment Configurations
+
+  ### Quick Start (Single GPU, BF16)
+  ```bash
+  vllm serve LiquidAI/LFM2.5-230M
+  ```
+
+  ### Full-Featured Server Launch
+  Enables tool calling:
+  ```bash
+  vllm serve LiquidAI/LFM2.5-230M \
+    --enable-auto-tool-choice \
+    --tool-call-parser lfm2 \
+    --host 0.0.0.0 --port 8000
+  ```
+
+  ### Docker (NVIDIA)
+  ```bash
+  docker run -itd --name lfm2.5-230m \
+    --ipc=host --network host --shm-size 16G --gpus all \
+    -v ~/.cache/huggingface:/root/.cache/huggingface \
+    vllm/vllm-openai:latest \
+      --model LiquidAI/LFM2.5-230M \
+      --host 0.0.0.0 --port 8000
+  ```
+
+  ## Client Usage
+
+  ### Text Generation
+  The model card recommends temperature `0.1`, `top_k 50`, `repetition_penalty 1.05` (`top_k` and
+  `repetition_penalty` ride in `extra_body`).
+  ```python
+  from openai import OpenAI
+  client = OpenAI(base_url="http://localhost:8000/v1", api_key="EMPTY")
+  response = client.chat.completions.create(
+      model="LiquidAI/LFM2.5-230M",
+      messages=[{"role": "user", "content": "Give me three uses for baking soda."}],
+      temperature=0.1,
+      extra_body={"top_k": 50, "repetition_penalty": 1.05},
+  )
+  print(response.choices[0].message.content)
+  ```
+
+  ### Tool Calling
+  Launch with `--enable-auto-tool-choice --tool-call-parser lfm2`, then pass `tools=[…]`; the
+  `lfm2` parser converts the model's Pythonic call into a standard `tool_calls` array.
+  ```python
+  response = client.chat.completions.create(
+      model="LiquidAI/LFM2.5-230M",
+      messages=[{"role": "user", "content": "What's the weather in Paris?"}],
+      tools=[{
+          "type": "function",
+          "function": {
+              "name": "get_weather",
+              "description": "Get current weather for a location",
+              "parameters": {"type": "object", "properties": {"location": {"type": "string"}}, "required": ["location"]},
+          },
+      }],
+      temperature=0.1,
+      extra_body={"top_k": 50, "repetition_penalty": 1.05},
+  )
+  print(response.choices[0].message.tool_calls)
+  ```
+
+  ### Structured Outputs
+  vLLM's guided decoding constrains output to a JSON schema via `response_format`. The model does
+  not see the schema itself — put semantic instructions in the system prompt. Data extraction is a
+  primary use case for this model, so structured outputs pair naturally with it.
+
+  ## Configuration Tips
+  - At 230M the model fits any GPU; raise `--max-num-seqs` to push batch throughput.
+  - Set `--max-model-len` to match your workload (up to 32K).
+  - `--gpu-memory-utilization 0.90–0.95` maximizes KV cache capacity.
+  - Sampling presets are per-request client defaults — don't bake them into `vllm serve`.
+
+  ## References
+  - [Model card](https://huggingface.co/LiquidAI/LFM2.5-230M)
+  - [Blog post](https://www.liquid.ai/blog/lfm2-5-230m)
+  - [LFM2.5 usage guide](../../LiquidAI/LFM2.5)
+  - [Liquid AI](https://www.liquid.ai/)
+  - [vLLM supported models](https://docs.vllm.ai/en/latest/models/supported_models.html)

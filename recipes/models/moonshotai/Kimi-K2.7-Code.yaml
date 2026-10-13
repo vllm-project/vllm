@@ -1,0 +1,250 @@
+meta:
+  title: "Kimi-K2.7-Code"
+  slug: "kimi-k2.7-code"
+  provider: "Moonshot AI"
+  description: "Coding-focused agentic MoE built on Kimi-K2.6, tuned for long-horizon software-engineering tasks with thinking-only reasoning, tool calling, and vision-language input"
+  date_added: 2026-06-12
+  date_updated: 2026-07-29
+  difficulty: intermediate
+  tasks:
+    - multimodal
+    - text
+  performance_headline: "1T MoE coding agent with ~30% fewer thinking tokens than Kimi-K2.6"
+  related_recipes:
+    - "moonshotai/Kimi-K2.6"
+    - "moonshotai/Kimi-K2-Thinking"
+  hardware:
+    h200: verified
+    mi300x: verified
+    mi325x: verified
+    mi355x: verified
+
+model:
+  model_id: "moonshotai/Kimi-K2.7-Code"
+  min_vllm_version: "0.19.1"
+  docker_image:
+    nvidia: "vllm/vllm-openai:latest"
+    amd: "vllm/vllm-openai-rocm:nightly"
+  architecture: moe
+  parameter_count: "1T"
+  active_parameters: "32B"
+  context_length: 262144
+  supports_dcp: true
+  base_args:
+    - "--trust-remote-code"
+  base_env: {}
+
+dependencies: []
+
+features:
+  tool_calling:
+    description: "Kimi K2 tool-call parser with automatic tool choice"
+    args:
+      - "--tool-call-parser"
+      - "kimi_k2"
+      - "--enable-auto-tool-choice"
+  reasoning:
+    description: "Kimi K2 reasoning parser for extracting chain-of-thought content (Kimi-K2.7-Code is thinking-only — keep this enabled)"
+    args:
+      - "--reasoning-parser"
+      - "kimi_k2"
+  spec_decoding:
+    description: "Eagle3 speculative decoding for accelerated inference"
+    args:
+      - "--speculative-config"
+      - '{"model":"lightseekorg/kimi-k2.7-coder-eagle3.1-mla","method":"eagle3","num_speculative_tokens":3}'
+  text_only:
+    description: "Skip loading the vision encoder for text-only workloads — frees VRAM for KV cache. Mutually exclusive with encoder_parallel."
+    args:
+      - "--language-model-only"
+  encoder_parallel:
+    description: "Run the vision encoder in data-parallel mode — avoids TP comm overhead on the small encoder. Mutually exclusive with text_only."
+    args:
+      - "--mm-encoder-tp-mode"
+      - "data"
+
+opt_in_features:
+  - text_only
+
+variants:
+  default:
+    precision: int4
+    vram_minimum_gb: 714
+    description: "Native INT4 via compressed-tensors (~595 GB on disk); fits 8×H200"
+
+compatible_strategies:
+  - single_node_tp
+  - single_node_tep
+  - single_node_dep
+  - multi_node_tp
+  - multi_node_tp_pp
+  - multi_node_dep
+  - multi_node_tep
+  - pd_cluster
+
+hardware_overrides:
+  amd:
+    # Verified on 8× MI300X / MI355X (MI325X listed as supported but not verified).
+    extra_env:
+      VLLM_ROCM_USE_AITER: "1"
+      VLLM_ROCM_QUICK_REDUCE_QUANTIZATION: "INT4"
+
+strategy_overrides: {}
+
+guide: |
+  ## Overview
+
+  [Kimi-K2.7-Code](https://huggingface.co/moonshotai/Kimi-K2.7-Code) is a coding-focused
+  agentic model built on top of Kimi-K2.6. It substantially improves real-world
+  long-horizon coding performance — strengthening end-to-end task completion across complex
+  software-engineering workflows while improving token efficiency, reducing thinking-token
+  usage by ~30% versus Kimi-K2.6.
+
+  It shares the same architecture as Kimi-K2.5 / Kimi-K2.6 (1T-parameter MoE, 32B activated,
+  DeepSeek-V3 backbone with MLA attention and a MoonViT vision encoder), so the K2.6
+  deployment method can be reused directly. Kimi-K2.7-Code runs in **thinking mode only**
+  with `preserve_thinking` forced on; keep the reasoning parser enabled.
+
+  ## Prerequisites
+
+  - **vLLM version:** >= 0.19.1 (manually verified). The model is also available in the
+    vLLM nightly wheel, but nightly builds are experimental.
+  - **Hardware (INT4):** 8x H200 GPUs (verified), or equivalent aggregate VRAM (~640 GB)
+
+  ```bash
+  uv venv
+  source .venv/bin/activate
+  uv pip install -U vllm --torch-backend=auto
+  ```
+
+  ## Launch command
+
+  Serve on a single H200 node with TP8 (vision encoder in data-parallel mode):
+
+  ```bash
+  vllm serve moonshotai/Kimi-K2.7-Code \
+    --tensor-parallel-size 8 \
+    --mm-encoder-tp-mode data \
+    --trust-remote-code \
+    --tool-call-parser kimi_k2 \
+    --enable-auto-tool-choice \
+    --reasoning-parser kimi_k2
+  ```
+
+  **Key notes**
+
+  - `--tool-call-parser kimi_k2` — required for enabling tool calling.
+  - `--reasoning-parser kimi_k2` — Kimi-K2.7-Code supports thinking mode only; pass this for
+    correct reasoning processing.
+  - `--mm-encoder-tp-mode data` — runs the small MoonViT encoder data-parallel to avoid TP
+    communication overhead.
+
+  ### AMD MI300X/MI325X
+
+  On 8x MI300X or MI325X (`gfx942`), use the standard W4A16 MoE path with AITER
+  and INT4 QuickReduce.
+
+  ```bash
+  export VLLM_ROCM_USE_AITER=1
+  export VLLM_ROCM_QUICK_REDUCE_QUANTIZATION=INT4
+
+  vllm serve moonshotai/Kimi-K2.7-Code \
+    --host 0.0.0.0 \
+    --port 8000 \
+    --trust-remote-code \
+    --tensor-parallel-size 8 \
+    --tool-call-parser kimi_k2 \
+    --enable-auto-tool-choice \
+    --reasoning-parser kimi_k2 \
+    --mm-encoder-tp-mode data
+  ```
+
+  ### AMD MI350X/MI355X
+
+  On 8x MI350X or MI355X (`gfx950`), add `--moe-backend flydsl` to use the
+  optimized FlyDSL W4A16 MoE kernel. Keep LoRA disabled for this path.
+
+  ```bash
+  export VLLM_ROCM_USE_AITER=1
+  export VLLM_ROCM_QUICK_REDUCE_QUANTIZATION=INT4
+
+  vllm serve moonshotai/Kimi-K2.7-Code \
+    --tensor-parallel-size 8 \
+    --trust-remote-code \
+    --mm-encoder-tp-mode data \
+    --moe-backend flydsl \
+    --tool-call-parser kimi_k2 \
+    --enable-auto-tool-choice \
+    --reasoning-parser kimi_k2 \
+    --compilation-config '{"pass_config": {"fuse_allreduce_rms": false}}'
+  ```
+
+  Notes:
+  - The FlyDSL INT4 MoE path does not support expert parallelism; do not add
+    `--enable-expert-parallel`.
+  - Keep `--compilation-config '{"pass_config": {"fuse_allreduce_rms": false}}'`;
+    it is required for this FlyDSL path on MI350X / MI355X.
+  - vLLM has tuned MI350X/MI355X FlyDSL configs for this Kimi shape at TP=8 and TP=4.
+  - Keep vLLM's default block size unless you are tuning long-context
+    throughput; `--block-size 64` is safe to try.
+
+  ## Client Usage
+
+  Once the vLLM server is running, consume it via the OpenAI-compatible API. The recommended
+  sampling for thinking mode is `temperature=1.0` and `top_p=0.95`.
+
+  ```python
+  import time
+  from openai import OpenAI
+
+  client = OpenAI(
+      api_key="EMPTY",
+      base_url="http://localhost:8000/v1",
+      timeout=3600,
+  )
+
+  messages = [
+      {
+          "role": "user",
+          "content": [
+              {
+                  "type": "image_url",
+                  "image_url": {
+                      "url": "https://huggingface.co/moonshotai/Kimi-K2.7-Code/resolve/main/figures/kimi-logo.png"
+                  },
+              },
+              {"type": "text", "text": "Describe this image in detail."},
+          ],
+      }
+  ]
+
+  start = time.time()
+  response = client.chat.completions.create(
+      model="moonshotai/Kimi-K2.7-Code",
+      messages=messages,
+      max_tokens=4096,
+      temperature=1.0,
+      top_p=0.95,
+  )
+  print(f"Response costs: {time.time() - start:.2f}s")
+  print(f"Reasoning: {response.choices[0].message.reasoning}")
+  print(f"Response: {response.choices[0].message.content}")
+  ```
+
+  ## Troubleshooting
+
+  - **OOM errors:** Lower `--gpu-memory-utilization` or adjust TP/EP to match your GPU count.
+  - **Vision encoder performance:** Use `--mm-encoder-tp-mode data` to run the vision encoder
+    in data-parallel mode. The encoder is small, so TP adds communication overhead with little gain.
+  - **Unique multimodal inputs:** Pass `--mm-processor-cache-gb 0` to avoid caching overhead.
+    For repeated inputs, `--mm-processor-cache-type shm` uses host shared memory for better
+    performance at high TP settings.
+  - **Text-only workloads:** Pass `--language-model-only` to skip loading MoonViT and free
+    VRAM for KV cache.
+
+  ## References
+
+  - [Kimi-K2.7-Code on Hugging Face](https://huggingface.co/moonshotai/Kimi-K2.7-Code)
+  - [Kimi-K2.7-Code deployment guide](https://huggingface.co/moonshotai/Kimi-K2.7-Code/blob/main/docs/deploy_guidance.md)
+  - [Kimi-K2.6 recipe](https://recipes.vllm.ai/moonshotai/Kimi-K2.6)
+  - [vLLM multimodal inputs guide](https://docs.vllm.ai/en/latest/features/multimodal_inputs.html)
