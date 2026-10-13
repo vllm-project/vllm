@@ -108,6 +108,7 @@ def test_unpaged_mqa_logits_preserves_intervals_and_scale_layout(
     valid = (positions >= starts[:, None]) & (positions < ends[:, None])
     assert actual.shape == expected.shape
     assert actual.dtype == torch.float32
+    assert not torch.isneginf(actual[valid]).any()
     torch.testing.assert_close(actual[valid], expected[valid], rtol=1e-3, atol=1e-3)
 
 
