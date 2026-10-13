@@ -24,6 +24,10 @@ from functools import cached_property
 
 from vllm.parser.engine.events import EventType
 
+# Maps a raw argument delta to the JSON text it appends to the open trailing
+# value, or returns None when the delta may change anything else.
+ArgValueExtender = Callable[[str], str | None]
+
 
 class ParserState(Enum):
     CONTENT = auto()
@@ -89,6 +93,11 @@ class ParserEngineConfig:
     tool_call_body_array: bool = False
 
     arg_structural_chars: frozenset[str] | None = None
+
+    # Called with the raw argument text when its converted JSON ends in an
+    # open value; returns an extender for that value, or None. Streaming
+    # skips ``arg_converter`` for every delta the extender accepts.
+    arg_value_extender: Callable[[str], ArgValueExtender | None] | None = None
 
     # Special tokens exempt from auto-drop but not state-machine terminals.
     preserve_tokens: frozenset[str] = field(default_factory=frozenset)
