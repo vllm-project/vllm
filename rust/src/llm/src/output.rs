@@ -20,6 +20,7 @@ use vllm_engine_core_client::{
     AbortCause, EngineCoreOutputStream, EngineCoreStreamDelivery, EngineCoreStreamOutput,
 };
 
+use crate::RequestTimestamps;
 use crate::error::Result;
 use crate::inflight::RequestGuard;
 use crate::request_metrics::{RequestMetricsTracker, current_unix_timestamp_secs};
@@ -183,6 +184,12 @@ pub struct GenerateOutput {
     pub spec_decode_metrics: Option<Box<RequestSpecDecodeMetrics>>,
     /// Weight-version spans over all output tokens, set on terminal outputs only.
     pub weight_versions: Option<Vec<WeightVersionSpan>>,
+    /// Snapshot of engine lifecycle timestamps after this output.
+    ///
+    /// Every output carries a snapshot because text decoding may finish the
+    /// request locally after matching a stop string, before the engine emits a
+    /// terminal output.
+    pub timestamps: RequestTimestamps,
 }
 
 impl GenerateOutput {
@@ -237,6 +244,7 @@ impl GenerateOutput {
         self.ec_transfer_params = next.ec_transfer_params;
         self.spec_decode_metrics = next.spec_decode_metrics;
         self.weight_versions = next.weight_versions;
+        self.timestamps = next.timestamps;
     }
 }
 
@@ -266,6 +274,7 @@ impl GenerateOutput {
             sampling_mask: None,
             spec_decode_metrics: None,
             weight_versions: None,
+            timestamps: RequestTimestamps::default(),
         }
     }
 }
@@ -402,6 +411,7 @@ impl GenerateOutputStream {
             sampling_mask,
             spec_decode_metrics: raw.spec_decode_metrics,
             weight_versions,
+            timestamps: self.request_metrics.timestamps(),
         };
 
         Ok(output)
