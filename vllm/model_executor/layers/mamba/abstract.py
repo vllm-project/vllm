@@ -62,10 +62,20 @@ class MambaBase(AttentionLayerBase):
     def get_state_dtype(self) -> tuple[torch.dtype, ...]:
         pass
 
+    def get_prefill_checkpoint_alignment(self) -> int | None:
+        """Token alignment of the checkpoint offsets this layer can export from
+        inside a prefill, or None if it cannot.
+
+        Only read in align mode, where the scheduler declines checkpoints off
+        this grid and splits the prefill instead.
+        """
+        return None
+
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec | None:
         mamba_block_size = vllm_config.cache_config.mamba_block_size
         assert mamba_block_size is not None
         page_size_padded = vllm_config.cache_config.mamba_page_size_padded
+        checkpoint_alignment = self.get_prefill_checkpoint_alignment()
         return MambaSpec(
             shapes=tuple(self.get_state_shape()),
             dtypes=self.get_state_dtype(),
@@ -81,6 +91,8 @@ class MambaBase(AttentionLayerBase):
                 if vllm_config.cache_config.use_replayssm
                 else vllm_config.num_speculative_tokens
             ),
+            num_prefill_checkpoint_blocks=int(checkpoint_alignment is not None),
+            prefill_checkpoint_alignment=checkpoint_alignment,
         )
 
     def get_attn_backend(self) -> type[AttentionBackend]:
