@@ -26,7 +26,7 @@ import flydsl.compiler as flyc
 import flydsl.expr as fx
 import torch
 from aiter.ops.flydsl.kernels import buffer_ops as bo
-from flydsl.expr import gpu, range_constexpr
+from flydsl.expr import const_expr, gpu, range_constexpr
 from flydsl.expr.typing import Int32, Int64, T
 
 from vllm.models.kimi_k3.amd.mono.attention.kda import (
@@ -163,13 +163,25 @@ def o_loads(c, rg):
 def load_core(c):
     """The core rows (S x 1536 bf16) -> LDS, rows padded."""
     s, tid = c["S"], c["tid"]
-    words = s * OK // 8
+    rows, first = c.get("panel_rows", s), c.get("panel_first", 0)
+    words = rows * OK // 8
     row = OK + LDS_PAD
     for i in range_constexpr((words + THREADS - 1) // THREADS):
         e = fx.min(tid + THREADS * i, words - 1)
-        v = fx.Vector(
-            bo.buffer_load(rsrc(c["args"]["core"]), e * 4, vec_width=4, dtype=T.i32)
-        )
+        if const_expr(c.get("core_mailbox") is not None):
+            values = c["poll"](
+                [(c["core_mailbox"], first * OK // 2 + e * 4 + q, 1) for q in range(4)]
+            )
+            v = fx.Vector.from_elements([value[0] for value in values], fx.Int32)
+        else:
+            v = fx.Vector(
+                bo.buffer_load(
+                    rsrc(c["args"]["core"]),
+                    first * OK // 2 + e * 4,
+                    vec_width=4,
+                    dtype=T.i32,
+                )
+            )
         t = e // (OK // 8)
         k = e % (OK // 8) * 8
         if tid + THREADS * i < words:
@@ -181,9 +193,9 @@ def load_core(c):
 def stage_o(c, rg, ops):
     """Rows 16 rg ..: GEMV -> bf16 partials -> every rank's AR region, this
     rank's slot (thread: token, row pair; a put a peer)."""
-    s, tid, lane, wave, red = c["S"], c["tid"], c["lane"], c["wave"], c["red"]
+    s, lane, wave = c["S"], c["lane"], c["wave"]
     g = lane // ROWS
-    t = fx.min(lane % ROWS, s - 1)
+    t = fx.min(lane % ROWS, c.get("panel_rows", s) - 1)
     row = OK + LDS_PAD
     acc = fx.Vector.filled(4, 0.0, fx.Float32)
     for i in range_constexpr(2):
@@ -203,17 +215,63 @@ def stage_o(c, rg, ops):
             acc = mfma_bf16(
                 ops[i][q].bitcast(fx.BFloat16), xb.bitcast(fx.BFloat16), acc
             )
+    publish_o(c, rg, acc)
+
+
+@traced
+def publish_o(c, rg, acc):
+    s, tid, lane, wave, red = c["S"], c["tid"], c["lane"], c["wave"], c["red"]
+    first, count = c.get("panel_first", 0), c.get("panel_rows", s)
     fx.ptr_store(acc, red + (wave * 64 + lane) * 4)
     gpu.barrier()
-    if tid < s * (ROWS // 2):
+    if tid < count * (ROWS // 2):
         tt = tid // (ROWS // 2)
         rp = tid % (ROWS // 2)
         v0 = bf16_round(row_sum(red, 2 * rp, tt))
         v1 = bf16_round(row_sum(red, 2 * rp + 1, tt))
-        at = (c["rank"] * s + tt) * HIDDEN + rg * ROWS + 2 * rp
+        at = (c["rank"] * s + tt + first) * HIDDEN + rg * ROWS + 2 * rp
         for p in range_constexpr(TP):
             c["put_bf"](c["ar_peer"][p], at, [v0, v1])
     gpu.barrier()
+
+
+@traced
+def stage_o_stream(c, first, stride, ops):
+    """Consume ready core tiles once, updating each output tile's accumulator."""
+    s, tid, lane, wave = c["S"], c["tid"], c["lane"], c["wave"]
+    t = fx.min(lane % ROWS, s - 1)
+    g = lane // ROWS
+    mailbox = c.get("core_mailbox")
+    poll = c["poll"]
+    source = rsrc(c["args"]["core"])
+    accumulators = [fx.Vector.filled(4, 0.0, fx.Float32) for _ in ops]
+    for i in range_constexpr(2):
+        ch = wave + WAVES * i
+        for q in range_constexpr(4):
+            xb = fx.Vector.filled(4, 0, fx.Int32)
+            if ch < OKCH:
+                at = (t * OK + ch * 128 + g * 8 + 32 * q) // 2
+                if const_expr(mailbox is not None):
+                    values = poll([(mailbox, at + j, 2) for j in (0, 2)])
+                    xb = fx.Vector.from_elements(
+                        [word for pair in values for word in pair], fx.Int32
+                    )
+                else:
+                    xb = fx.Vector(bo.buffer_load(source, at, vec_width=4, dtype=T.i32))
+            if const_expr(i == 0 and q == 0):
+                stamp(c["tl_on"], c["tls"], tid, 17)
+            accumulators = [
+                mfma_bf16(
+                    ops[j][i][q].bitcast(fx.BFloat16),
+                    xb.bitcast(fx.BFloat16),
+                    accumulators[j],
+                )
+                for j in range(len(ops))
+            ]
+    for j in range_constexpr(len(ops)):
+        task = first + stride * j
+        if task < OTASKS:
+            publish_o(c, task, accumulators[j])
 
 
 @traced
@@ -221,6 +279,7 @@ def stage_reduce(c, task):
     """Columns 128 task ..: the 8 ranks' partials, rank order, -> bf16 delta in
     LDS (thread: token, column pair)."""
     s, tid = c["S"], c["tid"]
+    total, first = c.get("ar_tokens", s), c.get("ar_first", 0)
     for batch in range_constexpr((s + WAVES - 1) // WAVES):
         if tid // (COLS // 2) + batch * WAVES < s:
             t = tid // (COLS // 2) + batch * WAVES
@@ -229,7 +288,8 @@ def stage_reduce(c, task):
             lo, hi = sum_partials(
                 c["poll"],
                 c["ar_own"],
-                lambda src, t=t, col=col: ((src * s + t) * HIDDEN + col) // 2,
+                lambda src, t=t, col=col: ((src * total + first + t) * HIDDEN + col)
+                // 2,
                 TP,
             )
             fx.ptr_store(bf16_round(lo), c["delta_lds"] + (t * COLS + 2 * cp))

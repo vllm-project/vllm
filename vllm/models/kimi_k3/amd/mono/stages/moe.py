@@ -310,27 +310,29 @@ def pk_fp4_bf16(old, word, scale, j):
 
 # ---------------------------------------------------------------- early
 @traced
-def early_out(c, kind, i, q, red):
+def early_out(c, kind, i, q, red, first=0, count=None):
     """Task (i, q) of ``kind`` (0 router, 1 latent, 2 sgu): its 16 rows. A K-split
     kind's parts q > 0 publish fp32 partials; part 0 adds them in part order and
     publishes the rows (router: fp32 to every rank's RLOG, latent: bf16 to every
     rank's LAT); sgu bf16 to SGU."""
     s, tid = c["S"], c["tid"]
+    count = s if count is None else count
+    producer_quant = c.get("producer_quant", False)
     if const_expr(kind == 2):
-        if tid < (ROWS // 2) * s:
+        if tid < (ROWS // 2) * count:
             rp = tid % (ROWS // 2)
             t = tid // (ROWS // 2)
             v0 = bf16_round(row_sum(red, 2 * rp, t))
             v1 = bf16_round(row_sum(red, 2 * rp + 1, t))
-            c["put_bf"](c["sgu"], t * 2 * SI + i * ROWS + 2 * rp, [v0, v1])
+            c["put_bf"](c["sgu"], (t + first) * 2 * SI + i * ROWS + 2 * rp, [v0, v1])
     else:
         parts = R_PARTS if kind == 0 else L_PARTS
         region = c["rpart"] if kind == 0 else c["lpart"]
-        if tid < ROWS * s:
+        if tid < ROWS * count:
             r = tid % ROWS
             t = tid // ROWS
             v = row_sum(red, r, t)
-            at = lambda qq: ((i * parts + qq) * s + t) * ROWS + r  # noqa: E731
+            at = lambda qq: ((i * parts + qq) * s + t + first) * ROWS + r  # noqa: E731
             if q > 0:
                 c["put"](region, at(q), v)
             if q == 0:
@@ -340,26 +342,35 @@ def early_out(c, kind, i, q, red):
                 fx.ptr_store(v, c["av"] + tid)
         gpu.barrier()
         if const_expr(kind == 0):
-            if (q == 0) & (tid < ROWS * s):
+            if (q == 0) & (tid < ROWS * count):
                 r = tid % ROWS
                 t = tid // ROWS
                 v = fx.ptr_load(c["av"] + tid)
                 for p in range_constexpr(TP):
                     c["put"](
                         c["peer"]["rlog"][p],
-                        (c["rank"] * s + t) * (E // TP) + i * ROWS + r,
+                        (c["rank"] * s + t + first) * (E // TP) + i * ROWS + r,
                         v,
                     )
         else:
-            if (q == 0) & (tid < (ROWS // 2) * s):
+            if (q == 0) & (tid < (ROWS // 2) * count):
                 rp = tid % (ROWS // 2)
                 t = tid // (ROWS // 2)
                 v0 = bf16_round(fx.ptr_load(c["av"] + (t * ROWS + 2 * rp)))
                 v1 = bf16_round(fx.ptr_load(c["av"] + (t * ROWS + 2 * rp + 1)))
-                col = c["rank"] * (LAT // TP) + i * ROWS + 2 * rp
-                for p in range_constexpr(TP):
-                    c["put_bf"](c["peer"]["lat"][p], t * LAT + col, [v0, v1])
+                if const_expr(producer_quant):
+                    col = (t + first) * (LAT // TP) + i * ROWS + 2 * rp
+                    c["put_bf"](c["local_lat"], col, [v0, v1])
+                else:
+                    col = c["rank"] * (LAT // TP) + i * ROWS + 2 * rp
+                    for p in range_constexpr(TP):
+                        c["put_bf"](
+                            c["peer"]["lat"][p], (t + first) * LAT + col, [v0, v1]
+                        )
     gpu.barrier()
+    if const_expr(kind == 1 and producer_quant):  # noqa: SIM102
+        if (q == 0) & (i % 2 == 0):
+            publish_producer_latq(c, i, first, count)
 
 
 def early_shape(kind):
@@ -387,22 +398,34 @@ def early_loads(c, kind, i, q):
 
 @traced
 def early_compute(c, kind, i, q, ops):
-    """Early task (i, q): x's K slice (the input row, or -- ``xflags`` -- the
-    row this launch's AttnRes stage publishes) against ``ops`` -> ``early_out``."""
+    """Reuse the early task's weight operands across sixteen-token panels."""
     tid, lane, wave, red = c["tid"], c["lane"], c["wave"], c["red"]
     klen, _ = early_shape(kind)
-    if const_expr(c.get("xflags") is not None):
+    source = c["xbuf"] if c.get("xflags") is not None else c["args"]["x"]
+    stream_x = c.get("stream_x", False)
+    if const_expr(c.get("xflags") is not None and not stream_x):
         if tid < c["xflags"]:
             c["poll"]([(c["xrdy"], tid, 1)])
         gpu.barrier()
+    for first in range_constexpr(0, c["S"], 16):
+        count = min(16, c["S"] - first)
+        if const_expr(stream_x):
+            if tid < c["xflags"]:
+                c["poll"]([(c["xpanels"], first // 16 * c["xflags"] + tid, 1)])
+            gpu.barrier()
+        panel = dict(c, S=count)
         acc = gemv.staged_mfmas(
-            c, c["xbuf"], klen, ops, CM_DEV, ldk=HIDDEN, k0=q * klen
+            panel,
+            source + fx.Int64(first * HIDDEN * 2),
+            klen,
+            ops,
+            CM_DEV if c.get("xflags") is not None else 0,
+            ldk=HIDDEN,
+            k0=q * klen,
         )
-    else:
-        acc = gemv.staged_mfmas(c, c["args"]["x"], klen, ops, ldk=HIDDEN, k0=q * klen)
-    fx.ptr_store(acc, red + (wave * 64 + lane) * 4)
-    gpu.barrier()
-    early_out(c, kind, i, q, red)
+        fx.ptr_store(acc, red + (wave * 64 + lane) * 4)
+        gpu.barrier()
+        early_out(c, kind, i, q, red, first, count)
 
 
 @traced
@@ -447,6 +470,7 @@ def stage_route(c, t):
     sigmoids renormalized in that order (IEEE 1 / sum)."""
     lane, wave, red = c["lane"], c["wave"], c["red"]
     a = c["args"]
+    route_timeline = c.get("route_timeline", False)
     if wave == 0:
         s = c["S"]
         per = E // 64
@@ -458,6 +482,8 @@ def stage_route(c, t):
                 (c["peer"]["rlog_own"], (src * s + t) * (E // TP) + e % (E // TP), 1)
             )
         got = c["poll"](specs)
+        if const_expr(route_timeline):
+            stamp(route_timeline, c["tls"], c["tid"], 20)
         keys, sigs = [], []
         for i in range_constexpr(per):
             e = lane + 64 * i
@@ -530,15 +556,74 @@ def bo_ld_f32(ptr, i):
 
 
 @traced
+def load_sparse_route(c):
+    """Pack each expert's selected (token, top-k slot) pairs into disjoint lists."""
+    s, tid, lane, wave = c["S"], c["tid"], c["lane"], c["wave"]
+    rt = c["rt"]
+    for i in range_constexpr((s * 2 * TOPK + THREADS - 1) // THREADS):
+        at = tid + i * THREADS
+        if at < s * 2 * TOPK:
+            value = c["poll"]([(c["route"], at, 1)])[0][0]
+            fx.ptr_store(value, rt["route"] + at)
+    for i in range_constexpr((E + THREADS - 1) // THREADS):
+        e = tid + i * THREADS
+        if e < E:
+            fx.ptr_store(fx.Int32(0), rt["flag"] + e)
+    gpu.barrier()
+    for i in range_constexpr((s * TOPK + THREADS - 1) // THREADS):
+        at = tid + i * THREADS
+        if at < s * TOPK:
+            t, k = at // TOPK, at % TOPK
+            e = fx.ptr_load(rt["route"] + t * 2 * TOPK + k)
+            fx.llvm.atomic_add(rt["flag"] + e, fx.Int32(1), syncscope="workgroup")
+    gpu.barrier()
+    e0, e1 = 2 * tid, 2 * tid + 1
+    f0 = (e0 < E).select(fx.ptr_load(rt["flag"] + fx.min(e0, E - 1)), fx.Int32(0))
+    f1 = (e1 < E).select(fx.ptr_load(rt["flag"] + fx.min(e1, E - 1)), fx.Int32(0))
+    live0 = (f0 > 0).select(fx.Int32(1), fx.Int32(0))
+    live1 = (f1 > 0).select(fx.Int32(1), fx.Int32(0))
+    slot, total = block_excl_scan(live0 + live1, lane, wave, c["scan"])
+    gpu.barrier()
+    start, _ = block_excl_scan(f0 + f1, lane, wave, c["scan"])
+    gpu.barrier()
+    for e, n, at, base in ((e0, f0, slot, start), (e1, f1, slot + live0, start + f0)):
+        if n > 0:
+            fx.ptr_store(at, rt["flag"] + e)
+            fx.ptr_store(e, rt["expert"] + at)
+            fx.ptr_store(base, rt["begins"] + at)
+            fx.ptr_store(n, rt["counts"] + at)
+            fx.ptr_store(fx.Int32(0), rt["cursor"] + at)
+    gpu.barrier()
+    for i in range_constexpr((s * TOPK + THREADS - 1) // THREADS):
+        at = tid + i * THREADS
+        if at < s * TOPK:
+            t, k = at // TOPK, at % TOPK
+            e = fx.ptr_load(rt["route"] + t * 2 * TOPK + k)
+            slot = fx.ptr_load(rt["flag"] + e)
+            index = fx.llvm.atomic_add(
+                rt["cursor"] + slot, fx.Int32(1), syncscope="workgroup"
+            )
+            base = fx.ptr_load(rt["begins"] + slot)
+            fx.ptr_store(fx.Uint16(at), rt["picks"] + base + index)
+    gpu.barrier()
+    return uniform(total)
+
+
+@traced
 def load_route(c):
     """ROUTE -> LDS (ids, weights); the union U: slot_of[e], expert_of[slot],
     kof[slot][t] (the token's top-k index, -1 if not picked); returns |U|."""
+    if const_expr(c.get("sparse_routes", False)):
+        return load_sparse_route(c)
     s, tid, lane, wave = c["S"], c["tid"], c["lane"], c["wave"]
     rt = c["rt"]
+    route_type = fx.Int8 if c.get("compact_lds", False) else fx.Int32
     n = s * 2 * TOPK
-    if tid < n:
-        v = c["poll"]([(c["route"], tid, 1)])[0][0]
-        fx.ptr_store(v, rt["route"] + tid)
+    for i in range_constexpr((n + THREADS - 1) // THREADS):
+        at = tid + i * THREADS
+        if at < n:
+            v = c["poll"]([(c["route"], at, 1)])[0][0]
+            fx.ptr_store(v, rt["route"] + at)
     for i in range_constexpr((E + THREADS - 1) // THREADS):
         e = tid + THREADS * i
         if e < E:
@@ -546,13 +631,15 @@ def load_route(c):
     for i in range_constexpr((c["max_u"] * c["route_rows"] + THREADS - 1) // THREADS):
         j = tid + THREADS * i
         if j < c["max_u"] * c["route_rows"]:
-            fx.ptr_store(fx.Int32(-1), rt["kof"] + j)
+            fx.ptr_store(route_type(-1), rt["kof"] + j)
     gpu.barrier()
-    if tid < s * TOPK:
-        t = tid // TOPK
-        k = tid % TOPK
-        e = fx.max(fx.min(fx.ptr_load(rt["route"] + (t * 2 * TOPK + k)), E - 1), 0)
-        fx.ptr_store(fx.Int32(1), rt["flag"] + e)
+    for i in range_constexpr((s * TOPK + THREADS - 1) // THREADS):
+        at = tid + i * THREADS
+        if at < s * TOPK:
+            t = at // TOPK
+            k = at % TOPK
+            e = fx.max(fx.min(fx.ptr_load(rt["route"] + (t * 2 * TOPK + k)), E - 1), 0)
+            fx.ptr_store(fx.Int32(1), rt["flag"] + e)
     gpu.barrier()
     e0 = fx.min(2 * tid, E - 1)
     f0 = (2 * tid < E).select(fx.ptr_load(rt["flag"] + e0), fx.Int32(0))
@@ -568,12 +655,14 @@ def load_route(c):
         fx.ptr_store(off + f0, rt["flag"] + 2 * tid + 1)
         fx.ptr_store(fx.Int32(2 * tid + 1), rt["expert"] + off + f0)
     gpu.barrier()
-    if tid < s * TOPK:
-        t = tid // TOPK
-        k = tid % TOPK
-        e = fx.max(fx.min(fx.ptr_load(rt["route"] + (t * 2 * TOPK + k)), E - 1), 0)
-        slot = fx.ptr_load(rt["flag"] + e)
-        fx.ptr_store(fx.Int32(k), rt["kof"] + (slot * c["route_rows"] + t))
+    for i in range_constexpr((s * TOPK + THREADS - 1) // THREADS):
+        at = tid + i * THREADS
+        if at < s * TOPK:
+            t = at // TOPK
+            k = at % TOPK
+            e = fx.max(fx.min(fx.ptr_load(rt["route"] + (t * 2 * TOPK + k)), E - 1), 0)
+            slot = fx.ptr_load(rt["flag"] + e)
+            fx.ptr_store(route_type(k), rt["kof"] + (slot * c["route_rows"] + t))
     gpu.barrier()
     return uniform(tot)
 
@@ -584,6 +673,7 @@ def load_latq(c):
     thread a (token, 32-block): amax of |bf16| bits, the ceil code of amax / 6,
     v_cvt_scalef32_pk_fp4_bf16 -> latq words, latsc codes."""
     s, tid = c["S"], c["tid"]
+    scale_type = fx.Uint8 if c.get("compact_lds", False) else fx.Int32
     nblk = s * (LAT // 32)
     for i in range_constexpr((nblk + THREADS - 1) // THREADS):
         b = fx.min(tid + THREADS * i, nblk - 1)
@@ -605,11 +695,94 @@ def load_latq(c):
                 for j in range_constexpr(4):
                     pk = pk_fp4_bf16(pk, ws[4 * q + j], scale, j)
                 fx.ptr_store(pk, c["latq"] + (t * (LAT // 8) + kb * 4 + q))
-            fx.ptr_store(code, c["latsc"] + (t * (LAT // 32) + kb))
+            fx.ptr_store(scale_type(code), c["latsc"] + (t * (LAT // 32) + kb))
     gpu.barrier()
 
 
 # ---------------------------------------------------------------- ug
+@traced
+def quantize_lat_block(c, region, base):
+    got = c["poll"]([(region, base + j, 2) for j in range(0, 16, 2)])
+    ws = [w for pair in got for w in pair]
+    am = fx.Int32(0)
+    for w in ws:
+        am = fx.max(am, w & 0x7FFF)
+        am = fx.max(am, (w >> 16) & 0x7FFF)
+    code = e8m0_roundup((am << 16).bitcast(fx.Float32))
+    scale = (code << 23).bitcast(fx.Float32)
+    packed = []
+    for q in range_constexpr(4):
+        pk = fx.Int32(0)
+        for j in range_constexpr(4):
+            pk = pk_fp4_bf16(pk, ws[4 * q + j], scale, j)
+        packed.append(pk)
+    return packed, code
+
+
+@traced
+def publish_producer_latq(c, row_group, first=0, count=None):
+    """Pair neighboring 16-column producers; gather their quantized TP shards."""
+    tid = c["tid"]
+    count = c["S"] if count is None else count
+    if tid < count:
+        token = tid + first
+        base = (token * (LAT // TP) + row_group * ROWS) // 2
+        packed, code = quantize_lat_block(c, c["local_lat"], base)
+        b = token * (LAT // 32) + c["rank"] * (LAT // TP // 32) + row_group // 2
+        for p in range_constexpr(TP):
+            for q in range_constexpr(2):
+                c["put_words"](
+                    c["peer"]["qlat"][p], b * 4 + q * 2, packed[q * 2 : q * 2 + 2]
+                )
+            c["put"](c["peer"]["qlatsc"][p], b, code)
+    gpu.barrier()
+
+
+@traced
+def publish_latq(c, worker, workers):
+    """Quantize disjoint LAT blocks once; publish packed values and scale tags."""
+    tid = c["tid"]
+    nblk = c["S"] * (LAT // 32)
+    stride = workers * THREADS
+    for i in range_constexpr((nblk + stride - 1) // stride):
+        b = worker * THREADS + tid + i * stride
+        if b < nblk:
+            packed, code = quantize_lat_block(c, c["peer"]["lat_own"], b * 16)
+            for q in range_constexpr(2):
+                c["put_words"](
+                    c["shared_latq"], b * 4 + q * 2, packed[q * 2 : q * 2 + 2]
+                )
+            c["put"](c["shared_latsc"], b, code)
+    gpu.barrier()
+
+
+@traced
+def load_shared_latq(c):
+    """Load the shared MXFP4 values into each consumer's LDS."""
+    tid = c["tid"]
+    scale_type = fx.Uint8 if c.get("compact_lds", False) else fx.Int32
+    width = c.get("latq_vec", 1)
+    for name, count, target in (
+        ("shared_latq", c["S"] * LAT // 8, c["latq"]),
+        ("shared_latsc", c["S"] * LAT // 32, c["latsc"]),
+    ):
+        rounds = (count + THREADS * width - 1) // (THREADS * width)
+        got = c["poll"](
+            [
+                (c[name], fx.min((tid + i * THREADS) * width, count - width), width)
+                for i in range(rounds)
+            ]
+        )
+        for i in range_constexpr(rounds):
+            if (tid + i * THREADS) * width < count:
+                for j in range_constexpr(width):
+                    value = (
+                        scale_type(got[i][j]) if name == "shared_latsc" else got[i][j]
+                    )
+                    fx.ptr_store(value, target + (tid + i * THREADS) * width + j)
+    gpu.barrier()
+
+
 def w13_scale_word(e, rg, st, lane):
     """The dword of aiter's gate_up=False ``shuffle_scale`` holding (row rg 16 +
     lane % 16, K block 4 st + lane / 16) for st's pair and rg's pair: byte
@@ -652,12 +825,25 @@ def ug_loads(c, task):
 
 @traced
 def stage_ug(c, task, ops):
+    if const_expr(c.get("sparse_routes", False)):
+        count = uniform(fx.ptr_load(c["rt"]["counts"] + task // UG_GROUPS))
+        for first in range_constexpr(0, c["S"], 16):
+            if first < count:
+                stage_ug_panel(c, task, ops, first, fx.min(16, count - first))
+    else:
+        for first in range_constexpr(0, c["S"], 16):
+            stage_ug_panel(c, task, ops, first, min(16, c["S"] - first))
+
+
+@traced
+def stage_ug_panel(c, task, ops, first, count):
     """Slot task / 12, 32-column group task % 12: gate rows 32 g .. and up rows
     384 + 32 g .. of the slot's expert (``ops``: ``ug_loads``) against the MXFP4
     latent; SiTUv2; MXFP4 a 32-column group -> INTER / ISC of each picking
     token."""
-    s, tid, lane, wave, red = c["S"], c["tid"], c["lane"], c["wave"], c["red"]
+    tid, lane, wave, red = c["tid"], c["lane"], c["wave"], c["red"]
     rt = c["rt"]
+    sparse = c.get("sparse_routes", False)
     slot = task // UG_GROUPS
     g = task % UG_GROUPS
     rgl = wave % 4
@@ -666,18 +852,37 @@ def stage_ug(c, task, ops):
     steps = [half * (W13_STEPS // 2) + i for i in range(W13_STEPS // 2)]
     av = ops[: len(steps)]
     sw = ops[len(steps) :]
-    t = fx.min(lane % 16, s - 1)
+    if const_expr(sparse):
+        base = uniform(fx.ptr_load(rt["begins"] + slot))
+        pick = fx.Int32(
+            fx.ptr_load(rt["picks"] + base + first + fx.min(lane % 16, count - 1))
+        )
+        t = pick // TOPK
+    else:
+        t = first + fx.min(lane % 16, count - 1)
     kb = lane // 16
+    stream_latent = c.get("stream_latent", False)
     acc = fx.Vector.filled(4, 0.0, fx.Float32)
     for i in range_constexpr(len(steps) if c["xp"] != 2 else 0):
         st = steps[i]
-        bw = fx.Vector(
-            fx.ptr_load(
-                c["latq"] + (t * (LAT // 8) + st * 16 + kb * 4),
-                result_type=fx.Vector.make_type(4, fx.Int32),
+        if const_expr(stream_latent):
+            offset = t * (LAT // 8) + st * 16 + kb * 4
+            values = c["poll"](
+                [(c["shared_latq"], offset + d, 2) for d in (0, 2)]
+                + [(c["shared_latsc"], t * (LAT // 32) + st * 4 + kb, 1)]
             )
-        )
-        sb = fx.ptr_load(c["latsc"] + (t * (LAT // 32) + st * 4 + kb))
+            bw = fx.Vector.from_elements(
+                [v for pair in values[:2] for v in pair], fx.Int32
+            )
+            sb = values[2][0]
+        else:
+            bw = fx.Vector(
+                fx.ptr_load(
+                    c["latq"] + (t * (LAT // 8) + st * 16 + kb * 4),
+                    result_type=fx.Vector.make_type(4, fx.Int32),
+                )
+            )
+            sb = fx.Int32(fx.ptr_load(c["latsc"] + (t * (LAT // 32) + st * 4 + kb)))
         # the code's byte (st % 2) 2 + rg % 2 of the word; rg % 2 is the wave's
         sa = (sw[i // 2] >> ((st % 2) * 16 + (rg % 2) * 8)) & 0xFF
         acc = mfma_scaled(av[i], bw, acc, sa, sb, FP4, FP4, 0, 0)
@@ -697,14 +902,16 @@ def stage_ug(c, task, ops):
     # thread (token, column): g / u summed over the K halves, SiTUv2
     tt = tid // 32
     col = tid % 32
-    live = tt < s
-    tt = fx.min(tt, s - 1)
-    first = col < 16  # gate / up row group 0 (waves 0, 2) or 1 (1, 3); +4: K's 2nd half
+    live = tt < count
+    tt = fx.min(tt, count - 1)
+    first_group = (
+        col < 16
+    )  # gate / up row group 0 (waves 0, 2) or 1 (1, 3); +4: K's 2nd half
     r = col % 16
-    gv = first.select(
+    gv = first_group.select(
         row_sum(red, r, tt, waves=(0, 4)), row_sum(red, r, tt, waves=(1, 5))
     )
-    uv = first.select(
+    uv = first_group.select(
         row_sum(red, r, tt, waves=(2, 6)), row_sum(red, r, tt, waves=(3, 7))
     )
     v = situ_aiter(gv, uv)
@@ -713,7 +920,12 @@ def stage_ug(c, task, ops):
     gpu.barrier()
     fx.ptr_store(v, c["av"] + tid)
     gpu.barrier()
-    k = fx.ptr_load(rt["kof"] + (slot * c["route_rows"] + tt))
+    if const_expr(sparse):
+        pick = fx.Int32(fx.ptr_load(rt["picks"] + base + first + tt))
+        k = pick % TOPK
+    else:
+        k = fx.Int32(fx.ptr_load(rt["kof"] + (slot * c["route_rows"] + first + tt)))
+        pick = (tt + first) * TOPK + k
     if live & (col < 4) & (k >= 0):
         scale = (code << 23).bitcast(fx.Float32)
         pk = fx.Int32(0)
@@ -721,7 +933,6 @@ def stage_ug(c, task, ops):
             x0 = fx.ptr_load(c["av"] + (tt * 32 + col * 8 + 2 * j))
             x1 = fx.ptr_load(c["av"] + (tt * 32 + col * 8 + 2 * j + 1))
             pk = pk_fp4_f32(pk, x0, x1, scale, j)
-        pick = tt * TOPK + k
         c["put_words"](c["inter"], pick * 48 + g * 4 + col, [pk])
         if col == 0:
             c["put"](c["isc"], pick * UG_GROUPS + g, code)
@@ -762,22 +973,34 @@ def reset_queues(c):
 def load_inter(c):
     """Every pick's INTER words and ISC codes -> LDS."""
     s, tid = c["S"], c["tid"]
+    scale_type = fx.Uint8 if c.get("compact_lds", False) else fx.Int32
+    width = c.get("inter_vec", 1)
     nw = s * TOPK * 48
-    per = (nw + THREADS - 1) // THREADS
+    per = (nw + THREADS * width - 1) // (THREADS * width)
     got = c["poll"](
-        [(c["inter"], fx.min(tid + THREADS * i, nw - 1), 1) for i in range(per)]
+        [
+            (c["inter"], fx.min((tid + THREADS * i) * width, nw - width), width)
+            for i in range(per)
+        ]
     )
     for i in range_constexpr(per):
-        if tid + THREADS * i < nw:
-            fx.ptr_store(got[i][0], c["interq"] + (tid + THREADS * i))
+        if (tid + THREADS * i) * width < nw:
+            for j in range_constexpr(width):
+                fx.ptr_store(got[i][j], c["interq"] + (tid + THREADS * i) * width + j)
     nc = s * TOPK * UG_GROUPS
-    perc = (nc + THREADS - 1) // THREADS
+    perc = (nc + THREADS * width - 1) // (THREADS * width)
     gc = c["poll"](
-        [(c["isc"], fx.min(tid + THREADS * i, nc - 1), 1) for i in range(perc)]
+        [
+            (c["isc"], fx.min((tid + THREADS * i) * width, nc - width), width)
+            for i in range(perc)
+        ]
     )
     for i in range_constexpr(perc):
-        if tid + THREADS * i < nc:
-            fx.ptr_store(gc[i][0], c["intsc"] + (tid + THREADS * i))
+        if (tid + THREADS * i) * width < nc:
+            for j in range_constexpr(width):
+                fx.ptr_store(
+                    scale_type(gc[i][j]), c["intsc"] + (tid + THREADS * i) * width + j
+                )
     gpu.barrier()
 
 
@@ -798,33 +1021,151 @@ def poll_inter(c, pick, kb):
     still run (no wait for all of U)."""
     return c["poll"](
         [
-            (c["inter"], pick * 48 + st * 16 + kb * 4 + d, 1)
+            (c["inter"], pick * 48 + st * 16 + kb * 4 + d, 2)
             for st in range(W2_STEPS)
-            for d in range(4)
+            for d in (0, 2)
         ]
         + [(c["isc"], pick * UG_GROUPS + st * 4 + kb, 1) for st in range(W2_STEPS)]
     )
+
+
+@traced
+def run_routed(c, nu, workers, down_workers):
+    """Start down on reserved workers; UG workers join after their own tasks."""
+    bid, tid, tls, on = c["bid"], c["tid"], c["tls"], c["tl_on"]
+    stream_inter = c.get("stream_inter", False)
+    total = nu * UG_GROUPS
+    if const_expr(down_workers > 0):
+        if bid >= down_workers:
+            producers = workers - down_workers
+            task = workers - 1 - bid
+            ops = ug_loads(c, fx.min(task, total - 1))
+            while task < total:
+                nxt = task + producers
+                following = ug_loads(c, fx.min(nxt, total - 1))
+                stage_ug(c, task, ops)
+                task, ops = nxt, following
+            stamp(on, tls, tid, 3)
+        stamp(on, tls, tid, 18)
+        for task in range(bid, DOWN_TASKS, workers):
+            down_ops = down_loads(c, task, nu, fx.min(c["wave"], nu - 1))
+            stage_down(c, task, nu, down_ops)
+        stamp(on, tls, tid, 16)
+    else:
+        task = workers - 1 - bid
+        ops = ug_loads(c, fx.min(task, total - 1))
+        while task < total:
+            nxt = task + workers
+            following = ug_loads(c, fx.min(nxt, total - 1))
+            stage_ug(c, task, ops)
+            task, ops = nxt, following
+        stamp(on, tls, tid, 3)
+        for task in range(bid, DOWN_TASKS, workers):
+            down_ops = down_loads(c, task, nu, fx.min(c["wave"], nu - 1))
+            if const_expr(not stream_inter):
+                load_inter(c)
+            stamp(on, tls, tid, 15)
+            stage_down(c, task, nu, down_ops)
+        stamp(on, tls, tid, 16)
 
 
 def down_loads(c, rgd, nu, b0):
     """The w2 tiles and scale codes of a wave's batch from slot b0 (slots b0,
     b0 + 8, ...; past |U| the last slot's): flat, ``stage_down`` unpacks."""
     lane = c["lane"]
+    down_batch = c.get("down_batch", DOWN_BATCH)
     r_w = rsrc(c["args"]["w2"])
     rt = c["rt"]
-    slots = [fx.min(b0 + WAVES * j, nu - 1) for j in range(DOWN_BATCH)]
+    slots = [fx.min(b0 + WAVES * j, nu - 1) for j in range(down_batch)]
     es = [uniform(fx.ptr_load(rt["expert"] + sl)) for sl in slots]
     av = [
         fp4_tile_load(r_w, es[j] * (LAT * RI // 8), rgd, RI, st, lane * 4)
-        for j in range(DOWN_BATCH)
+        for j in range(down_batch)
         for st in range(W2_STEPS)
     ]
     sa = [
         w2_scale(c, es[j], rgd, st, lane)
-        for j in range(DOWN_BATCH)
+        for j in range(down_batch)
         for st in range(W2_STEPS)
     ]
     return av + sa
+
+
+@traced
+def stage_down_panel(c, rgd, slot, live, ops, j, b0, first, count):
+    """Compute one expert's token panel and scatter contributions by top-k slot."""
+    tid, lane = c["tid"], c["lane"]
+    rt = c["rt"]
+    sparse = c.get("sparse_routes", False)
+    stream_inter = c.get("stream_inter", False)
+    contrib_type = fx.BFloat16 if c.get("compact_lds", False) else fx.Float32
+    kb = lane // 16
+    nbs = c.get("down_batch", DOWN_BATCH) * W2_STEPS
+    wave = c["wave"]
+    if const_expr(sparse):
+        base = fx.ptr_load(rt["begins"] + slot)
+        pick = fx.Int32(
+            fx.ptr_load(rt["picks"] + base + first + fx.min(lane % 16, count - 1))
+        )
+        t, k = pick // TOPK, pick % TOPK
+        picked = lane % 16 < count
+    else:
+        t = first + fx.min(lane % 16, count - 1)
+        k = fx.Int32(fx.ptr_load(rt["kof"] + slot * c["route_rows"] + t))
+        picked = (k >= 0) & (lane % 16 < count)
+        pick = t * TOPK + fx.max(k, 0)
+    acc = fx.Vector.filled(4, 0.0, fx.Float32)
+    if const_expr(stream_inter):
+        words = fx.Vector.filled(W2_STEPS * 5, 0, fx.Int32)
+        if live & picked:
+            values = poll_inter(c, pick, kb)
+            words = fx.Vector.from_elements(
+                [word for pair in values for word in pair], fx.Int32
+            )
+        if const_expr(j == 0):  # noqa: SIM102
+            if (b0 == wave) & (rgd == c["bid"]):
+                stamp(c["tl_on"], c["tls"], tid, 15)
+    for st in range_constexpr(W2_STEPS):
+        if const_expr(stream_inter):
+            bw = fx.Vector.from_elements(
+                [words[st * 4 + d] for d in range(4)], fx.Int32
+            )
+            scode = words[W2_STEPS * 4 + st]
+        else:
+            bw = fx.Vector(
+                fx.ptr_load(
+                    c["interq"] + (pick * 48 + st * 16 + kb * 4),
+                    result_type=fx.Vector.make_type(4, fx.Int32),
+                )
+            )
+            scode = fx.Int32(fx.ptr_load(c["intsc"] + (pick * UG_GROUPS + st * 4 + kb)))
+        bw = fx.Vector.from_elements(
+            [picked.select(bw[d], fx.Int32(0)) for d in range(4)], fx.Int32
+        )
+        sb = picked.select(scode, fx.Int32(UNIT_SCALE))
+        acc = mfma_scaled(
+            ops[j * W2_STEPS + st],
+            bw,
+            acc,
+            ops[nbs + j * W2_STEPS + st],
+            sb,
+            FP4,
+            FP4,
+            0,
+            0,
+        )
+    if const_expr(stream_inter and j == 0):  # noqa: SIM102
+        if (b0 == wave) & (rgd == c["bid"]):
+            stamp(c["tl_on"], c["tls"], tid, 19)
+    # lane: rows 4 (lane / 16) + i of token lane % 16
+    if live & picked:
+        wt = fx.ptr_load(rt["route"] + (t * 2 * TOPK + TOPK + k)).bitcast(fx.Float32)
+        for i in range_constexpr(4):
+            row = 4 * (lane // 16) + i
+            fx.ptr_store(
+                contrib_type(bf16_round(acc[i] * wt)),
+                c["contrib"] + ((t * TOPK + k) * ROWS + row),
+            )
 
 
 @traced
@@ -834,58 +1175,37 @@ def stage_down(c, rgd, nu, ops0):
     one's MFMAs; ``ops0`` the first, issued before INTER was waited for) ->
     bf16(w acc) a (token, k) in LDS -> folded in top-k order with a bf16
     rounding an add -> every rank's LATR."""
-    s, tid, lane, wave = c["S"], c["tid"], c["lane"], c["wave"]
+    s, tid, wave = c["S"], c["tid"], c["wave"]
     rt = c["rt"]
-    t = fx.min(lane % 16, s - 1)
-    kb = lane // 16
-    nbs = DOWN_BATCH * W2_STEPS
+    down_batch = c.get("down_batch", DOWN_BATCH)
+    sparse = c.get("sparse_routes", False)
     b0 = wave
     ops = ops0
     while b0 < nu:
-        nb = b0 + WAVES * DOWN_BATCH
+        nb = b0 + WAVES * down_batch
         ops_n = down_loads(c, rgd, nu, fx.min(nb, nu - 1))
-        slots = [fx.min(b0 + WAVES * j, nu - 1) for j in range(DOWN_BATCH)]
-        for j in range_constexpr(DOWN_BATCH):
+        slots = [fx.min(b0 + WAVES * j, nu - 1) for j in range(down_batch)]
+        for j in range_constexpr(down_batch):
             live = (b0 + WAVES * j) < nu
-            k = fx.ptr_load(rt["kof"] + (slots[j] * c["route_rows"] + t))
-            picked = (k >= 0) & (lane % 16 < s)
-            pick = t * TOPK + fx.max(k, 0)
-            acc = fx.Vector.filled(4, 0.0, fx.Float32)
-            # this slot's picks' INTER, polled here (not all of U first): a slot
-            # whose ug tasks are done is multiplied while later ones still run
-            for st in range_constexpr(W2_STEPS):
-                bw = fx.Vector(
-                    fx.ptr_load(
-                        c["interq"] + (pick * 48 + st * 16 + kb * 4),
-                        result_type=fx.Vector.make_type(4, fx.Int32),
-                    )
-                )
-                scode = fx.ptr_load(c["intsc"] + (pick * UG_GROUPS + st * 4 + kb))
-                bw = fx.Vector.from_elements(
-                    [picked.select(bw[d], fx.Int32(0)) for d in range(4)], fx.Int32
-                )
-                sb = picked.select(scode, fx.Int32(UNIT_SCALE))
-                acc = mfma_scaled(
-                    ops[j * W2_STEPS + st],
-                    bw,
-                    acc,
-                    ops[nbs + j * W2_STEPS + st],
-                    sb,
-                    FP4,
-                    FP4,
-                    0,
-                    0,
-                )
-            # lane: rows 4 (lane / 16) + i of token lane % 16
-            if live & picked:
-                wt = fx.ptr_load(rt["route"] + (t * 2 * TOPK + TOPK + k)).bitcast(
-                    fx.Float32
-                )
-                for i in range_constexpr(4):
-                    row = 4 * (lane // 16) + i
-                    fx.ptr_store(
-                        bf16_round(acc[i] * wt),
-                        c["contrib"] + ((t * TOPK + k) * ROWS + row),
+            if const_expr(sparse):
+                count = fx.ptr_load(rt["counts"] + slots[j])
+                for first in range_constexpr(0, s, 16):
+                    if first < count:
+                        stage_down_panel(
+                            c,
+                            rgd,
+                            slots[j],
+                            live,
+                            ops,
+                            j,
+                            b0,
+                            first,
+                            fx.min(16, count - first),
+                        )
+            else:
+                for first in range_constexpr(0, s, 16):
+                    stage_down_panel(
+                        c, rgd, slots[j], live, ops, j, b0, first, min(16, s - first)
                     )
         b0 = nb
         ops = ops_n
@@ -897,10 +1217,16 @@ def stage_down(c, rgd, nu, ops0):
         y1 = fx.Float32(0.0)
         for k in range_constexpr(TOPK):
             y0 = bf16_round(
-                y0 + fx.ptr_load(c["contrib"] + ((tt * TOPK + k) * ROWS + 2 * rp))
+                y0
+                + fx.Float32(
+                    fx.ptr_load(c["contrib"] + ((tt * TOPK + k) * ROWS + 2 * rp))
+                )
             )
             y1 = bf16_round(
-                y1 + fx.ptr_load(c["contrib"] + ((tt * TOPK + k) * ROWS + 2 * rp + 1))
+                y1
+                + fx.Float32(
+                    fx.ptr_load(c["contrib"] + ((tt * TOPK + k) * ROWS + 2 * rp + 1))
+                )
             )
         for p in range_constexpr(TP):
             c["put_bf"](
@@ -950,16 +1276,42 @@ def load_h(c):
 
 @traced
 def stage_sdown(c, j, ops):
+    lo = c["rank"] * UP_TASKS
+    for first in range_constexpr(0, c["S"], 16):
+        stage_sdown_panel(c, j, ops, first, min(16, c["S"] - first))
+        if const_expr(c.get("tail_panels", False)):  # noqa: SIM102
+            if (j >= lo) & (j < lo + UP_TASKS):
+                publish(
+                    c["put"],
+                    c["shpanels"],
+                    first // 16 * UP_TASKS + j - lo,
+                    fx.Int32(1),
+                    c["tid"] == 0,
+                )
+    if const_expr(c.get("tail_panels", False)):
+        return
+    publish(
+        c["put"],
+        c["shrdy"],
+        fx.max(fx.min(j - lo, UP_TASKS - 1), 0),
+        fx.Int32(1),
+        (c["tid"] == 0) & (j >= lo) & (j < lo + UP_TASKS),
+    )
+    gpu.barrier()
+
+
+@traced
+def stage_sdown_panel(c, j, ops, first, count):
     """Shared down rows 16 j .. (K 768) against h in LDS (``load_h``): bf16
     partial -> SHP (this rank's up columns) or every rank's FINAL."""
     s, tid, lane, wave, red = c["S"], c["tid"], c["lane"], c["wave"], c["red"]
     hrow = SI + gemv.LDS_PAD
-    acc = gemv.mfmas(lane, wave, c["xl"], hrow, SI, s, ops)
+    acc = gemv.mfmas(lane, wave, c["xl"] + first * hrow // 2, hrow, SI, count, ops)
     fx.ptr_store(acc, red + (wave * 64 + lane) * 4)
     gpu.barrier()
     lo = c["rank"] * UP_TASKS
     mine = (j >= lo) & (j < lo + UP_TASKS)
-    if tid < (ROWS // 2) * s:
+    if tid < (ROWS // 2) * count:
         rp = tid % (ROWS // 2)
         tt = tid // (ROWS // 2)
         v0 = bf16_round(row_sum(red, 2 * rp, tt))
@@ -973,32 +1325,26 @@ def stage_sdown(c, j, ops):
             bo.buffer_store(
                 w,
                 rsrc(c["shp"]),
-                (tt * UP_N + (j - lo) * ROWS + 2 * rp) // 2,
+                ((tt + first) * UP_N + (j - lo) * ROWS + 2 * rp) // 2,
                 cache_modifier=CM_DEV,
             )
         else:
             for p in range_constexpr(TP):
                 c["put_bf"](
                     c["peer"]["final"][p],
-                    (c["rank"] * s + tt) * HIDDEN + j * ROWS + 2 * rp,
+                    (c["rank"] * s + tt + first) * HIDDEN + j * ROWS + 2 * rp,
                     [v0, v1],
                 )
-    publish(
-        c["put"],
-        c["shrdy"],
-        fx.max(fx.min(j - lo, UP_TASKS - 1), 0),
-        fx.Int32(1),
-        (tid == 0) & mine,
-    )
     gpu.barrier()
 
 
 @traced
-def run_sdown(c, bid, w_sd):
+def run_sdown(c, bid, w_sd, h_loaded=False):
     """This rank's 56 shared-down tasks whose columns the up stage adds to (k ->
     row group (k + 56 rank) % 448), on the CTAs past the down tasks: up waits
     on them."""
-    load_h(c)
+    if const_expr(not h_loaded):
+        load_h(c)
     lo = c["rank"] * UP_TASKS
     if bid >= DOWN_TASKS:
         for k in range(bid - DOWN_TASKS, UP_TASKS, BLOCKS - DOWN_TASKS):
@@ -1007,13 +1353,14 @@ def run_sdown(c, bid, w_sd):
 
 
 @traced
-def run_sdown_rest(c, bid, w_sd):
+def run_sdown_rest(c, bid, w_sd, h_loaded=False):
     """The other 392 shared-down tasks (only the final reduce waits on them), on
     the CTAs past lnorm / up's (84 ..), after their down: off the latent-norm ->
     up critical path."""
     r0 = LN0 + LN_TASKS  # 84: past the lnorm / up CTAs
     if bid >= r0:
-        load_h(c)
+        if const_expr(not h_loaded):
+            load_h(c)
         lo = c["rank"] * UP_TASKS
         for k in range(UP_TASKS + bid - r0, SD_TASKS, BLOCKS - r0):
             j = (k + lo) % SD_TASKS
@@ -1069,7 +1416,19 @@ def stage_lnorm(c, j):
                 y, rsrc(c["ln"]), (t * LAT + col) // 2, cache_modifier=CM_DEV
             )
         gpu.barrier()
-    publish(c["put"], c["lnrdy"], j, fx.Int32(1), tid == 0)
+        if const_expr(
+            c.get("tail_panels", False)
+            and ((batch + 1) * WAVES % 16 == 0 or batch == (s + WAVES - 1) // WAVES - 1)
+        ):
+            publish(
+                c["put"],
+                c["lnpanels"],
+                batch * WAVES // 16 * LN_TASKS + j,
+                fx.Int32(1),
+                tid == 0,
+            )
+    if const_expr(not c.get("tail_panels", False)):
+        publish(c["put"], c["lnrdy"], j, fx.Int32(1), tid == 0)
     gpu.barrier()
 
 
@@ -1081,37 +1440,56 @@ def stage_up(c, j):
     a = c["args"]
     row0 = c["rank"] * UP_N + j * ROWS  # the hidden column; w_up is the shard
     ops = gemv.loads(lane, wave, a["w_up"], j * ROWS, LAT)
-    if tid < LN_TASKS:
-        c["poll"]([(c["lnrdy"], tid, 1)])
-    if tid == 0:
-        c["poll"]([(c["shrdy"], j, 1)])
+    if const_expr(not c.get("tail_panels", False)):
+        if tid < LN_TASKS:
+            c["poll"]([(c["lnrdy"], tid, 1)])
+        if const_expr(not c.get("late_shared_wait", False)):  # noqa: SIM102
+            if tid == 0:
+                c["poll"]([(c["shrdy"], j, 1)])
     gpu.barrier()
-    lrow = LAT + gemv.LDS_PAD
-    gemv.dev_rows_to_lds(tid, c["ln"], LAT, s, c["xl"], lrow)
-    acc = gemv.mfmas(lane, wave, c["xl"], lrow, LAT, s, ops)
-    fx.ptr_store(acc, red + (wave * 64 + lane) * 4)
-    gpu.barrier()
-    if tid < (ROWS // 2) * s:
-        rp = tid % (ROWS // 2)
-        tt = tid // (ROWS // 2)
-        w = fx.Int32(
-            bo.buffer_load(
-                rsrc(c["shp"]),
-                (tt * UP_N + j * ROWS + 2 * rp) // 2,
-                vec_width=1,
-                dtype=T.i32,
-                cache_modifier=CM_DEV,
-            )
+    for first in range_constexpr(0, s, 16):
+        count = min(16, s - first)
+        if const_expr(c.get("tail_panels", False)):
+            if tid < LN_TASKS:
+                c["poll"]([(c["lnpanels"], first // 16 * LN_TASKS + tid, 1)])
+            if const_expr(not c.get("late_shared_wait", False)):  # noqa: SIM102
+                if tid == 0:
+                    c["poll"]([(c["shpanels"], first // 16 * UP_TASKS + j, 1)])
+            gpu.barrier()
+        lrow = LAT + gemv.LDS_PAD
+        gemv.dev_rows_to_lds(
+            tid, c["ln"] + fx.Int64(first * LAT * 2), LAT, count, c["xl"], lrow
         )
-        v0 = bf16_round(bf_lo(w) + row_sum(red, 2 * rp, tt))
-        v1 = bf16_round(bf_hi(w) + row_sum(red, 2 * rp + 1, tt))
-        for p in range_constexpr(TP):
-            c["put_bf"](
-                c["peer"]["final"][p],
-                (c["rank"] * s + tt) * HIDDEN + row0 + 2 * rp,
-                [v0, v1],
+        acc = gemv.mfmas(lane, wave, c["xl"], lrow, LAT, count, ops)
+        fx.ptr_store(acc, red + (wave * 64 + lane) * 4)
+        if const_expr(c.get("late_shared_wait", False)):  # noqa: SIM102
+            if tid == 0:
+                if const_expr(c.get("tail_panels", False)):
+                    c["poll"]([(c["shpanels"], first // 16 * UP_TASKS + j, 1)])
+                else:
+                    c["poll"]([(c["shrdy"], j, 1)])
+        gpu.barrier()
+        if tid < (ROWS // 2) * count:
+            rp = tid % (ROWS // 2)
+            tt = tid // (ROWS // 2)
+            w = fx.Int32(
+                bo.buffer_load(
+                    rsrc(c["shp"]),
+                    ((tt + first) * UP_N + j * ROWS + 2 * rp) // 2,
+                    vec_width=1,
+                    dtype=T.i32,
+                    cache_modifier=CM_DEV,
+                )
             )
-    gpu.barrier()
+            v0 = bf16_round(bf_lo(w) + row_sum(red, 2 * rp, tt))
+            v1 = bf16_round(bf_hi(w) + row_sum(red, 2 * rp + 1, tt))
+            for p in range_constexpr(TP):
+                c["put_bf"](
+                    c["peer"]["final"][p],
+                    (c["rank"] * s + tt + first) * HIDDEN + row0 + 2 * rp,
+                    [v0, v1],
+                )
+        gpu.barrier()
 
 
 @traced

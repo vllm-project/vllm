@@ -132,6 +132,17 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         self.local_projection_size = divide(self.projection_size, self.tp_size)
         self.conv_size = kda_config["short_conv_kernel_size"]
         self.use_full_rank_gate = True
+        from vllm.models.kimi_k3.amd.mono_decode import local_post_enabled
+
+        self.use_local_post = (
+            self.local_num_heads == 12
+            and self.head_dim == 128
+            and local_post_enabled(vllm_config)
+        )
+        self.compilation_config = vllm_config.compilation_config
+        self.local_post_min_tokens = (
+            16 if vllm_config.kv_transfer_config is not None else 30
+        )
 
         # Keep f_a before the narrow beta shard, then pad each TP-local row to
         # select the aligned BF16 GEMM path. The padding also avoids an Inductor
@@ -315,6 +326,12 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
     ) -> torch.Tensor:
         projected_qkvgfab = self.in_proj_qkvgfab(hidden_states)[0]
         num_tokens = projected_qkvgfab.shape[0]
+        if self.use_local_post and num_tokens >= self.local_post_min_tokens:
+            from vllm.models.kimi_k3.amd.mono_decode import post_projection
+
+            core = projected_qkvgfab.new_empty(num_tokens, self.local_projection_size)
+            post_projection(self, projected_qkvgfab, core)
+            return self.o_proj(core)[0]
 
         split_sizes = [
             3 * self.local_projection_size,

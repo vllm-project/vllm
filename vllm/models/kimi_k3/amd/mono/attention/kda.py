@@ -36,7 +36,7 @@ import flydsl.compiler as flyc
 import flydsl.expr as fx
 import torch
 from aiter.ops.flydsl.kernels import buffer_ops as bo
-from flydsl.expr import const_expr, gpu, range_constexpr
+from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr.typing import Int32, Int64, T
 
 from vllm.models.kimi_k3.amd.mono.common.debug import stamp, stamp_begin, stamp_flush
@@ -55,6 +55,7 @@ from vllm.models.kimi_k3.amd.mono.common.ops import (
     traced,
     uniform,
     wave_max,
+    xshfl,
 )
 from vllm.models.kimi_k3.amd.mono.common.plan import (
     BLOCKS,
@@ -100,6 +101,8 @@ LDS_PAD = 8  # bf16 a padded x row
 # timeline points: start, slice, gate, mix, load_x, gemv0, gemv1, k.stage,
 # k.conv, k.gates, k.recur, k.norm
 TL_POINTS = 15
+TOKEN_PIPELINE = 1 << 26
+MAILBOX_OUTPUT = 1 << 27
 
 assert NA + GEMV_CTAS <= BLOCKS and NA == 8 * GSL
 
@@ -125,12 +128,15 @@ class KdaPreBuild:
     kda0: int = 0  # the first KDA task's CTA
     xp: int = 0  # experiment switch (timing only)
     state_rows: int = 0  # zero selects a measured configuration
+    pipeline: int = 0  # manual pipeline experiments; see attention/parallel.py
+    head_workers: int = 16
+    projection_chunks: int = 2
 
 
 def _state_rows(key: KdaPreBuild) -> int:
     if key.state_rows:
         return key.state_rows
-    if key.tokens == 24 and key.qlen == 6:
+    if key.tokens in (18, 24) and key.qlen == 6:
         return 32
     if (key.tokens, key.qlen) in ((48, 4), (50, 5)):
         return 64
@@ -190,15 +196,33 @@ def scratch_layout(key: KdaPreBuild) -> dict:
         "qk": s * NH * 2 * HD,
         "onrm": s * NH * (HD // _state_rows(key)),
     }
+    if key.pipeline & 12:
+        pairs["head_ready"] = s // key.qlen * NH
     lay = pair_layout(pairs.items())
     end = max(o + n for o, n in lay.values())
     # the plain bf16 x rows (not pairs), 16 B aligned
     lay["x"] = ((end + 15) // 16 * 16, s * HIDDEN * 2)
+    if key.pipeline & 12:
+        end = sum(lay["x"])
+        lay["head_data"] = (end, s // key.qlen * NH * (3 * key.qlen * HD + 16) * 4)
+        lay["y"] = (
+            sum(lay["head_data"]),
+            s * PROJ * (8 if key.pipeline & MAILBOX_OUTPUT else 4),
+        )
     return lay
 
 
 def scratch_bytes(key: KdaPreBuild) -> int:
     return max(o + n for o, n in scratch_layout(key).values())
+
+
+def timeline_words(key: KdaPreBuild) -> int:
+    tiles = token_tiles(key.tokens, key.qlen, tile_tokens=16)
+    heads = key.tokens // key.qlen * NH
+    records = heads * (HD // _state_rows(key) + 1) + key.tokens * NH
+    return BLOCKS * TL_POINTS + (records + len(tiles) * BLOCKS) * max(
+        2 * key.qlen + 10, 16
+    )
 
 
 TAG_SLOTS = 256  # a step's mailbox tags: epoch x 256 + a launch's slot
@@ -220,9 +244,11 @@ def ld_bf(ptr, i, cm=0):
     )
 
 
-def ld_bf4(ptr, i):
+def ld_bf4(ptr, i, cm=0):
     """bf16 elements i .. i + 4 (i a multiple of 4) as four f32."""
-    w = fx.Vector(bo.buffer_load(rsrc(ptr), i // 2, vec_width=2, dtype=T.i32))
+    w = fx.Vector(
+        bo.buffer_load(rsrc(ptr), i // 2, vec_width=2, dtype=T.i32, cache_modifier=cm)
+    )
     return [bf_lo(w[0]), bf_hi(w[0]), bf_lo(w[1]), bf_hi(w[1])]
 
 
@@ -262,6 +288,7 @@ def stage_slice(c, task):
     source) partial sum of squares and qk dot -> PART."""
     s, ns, nb, tid, lane = c["S"], c["NS"], c["NB"], c["tid"], c["lane"]
     a = c["args"]
+    stream = c.get("stream_attn", False)
     c0 = task * COLS
     n = s * ns * QC  # threads' work items
     for i in range_constexpr((n + THREADS - 1) // THREADS):
@@ -293,7 +320,10 @@ def stage_slice(c, task):
                 pre = [bf16r(pre[j] + dl[j]) for j in range(4)]
             if live & is_pre:
                 bo.buffer_store(
-                    bf4_words(pre), rsrc(a["prefix"]), (t * HIDDEN + col) // 2
+                    bf4_words(pre),
+                    rsrc(a["prefix"]),
+                    (t * HIDDEN + col) // 2,
+                    cache_modifier=CM_DEV if stream else 0,
                 )
         if const_expr(c.get("write_idx", -1) >= 0):  # noqa: SIM102 (traced: `and` does not combine traced values)
             # the block-write layer's attention seam: the updated prefix is
@@ -312,9 +342,10 @@ def stage_slice(c, task):
         q = ld_bf4(a["ares_qk"], col)
         # a thread past the end holds a clamped copy of the last element: it
         # must not store (it raced the owner with zeros)
-        if live:
-            for j in range_constexpr(4):
-                fx.ptr_store(v[j], c["vals"] + (row * COLS + (e % QC) * 4 + j))
+        if const_expr(not stream):  # noqa: SIM102
+            if live:
+                for j in range_constexpr(4):
+                    fx.ptr_store(v[j], c["vals"] + (row * COLS + (e % QC) * 4 + j))
         sq = v[0] * v[0] + v[1] * v[1] + v[2] * v[2] + v[3] * v[3]
         dt = (
             v[0] * (w[0] * q[0])
@@ -328,6 +359,8 @@ def stage_slice(c, task):
             at = ((task * s + t) * ns + src) * 2
             c["put"](c["part"], at, sq)
             c["put"](c["part"], at + 1, dt)
+    if const_expr(stream):
+        rocdl.s_waitcnt(vmcnt=0)
     gpu.barrier()
 
 
@@ -432,10 +465,162 @@ def stage_gate_local(c):
 
 
 @traced
+def stage_mix_streamed(c, task):
+    """Publish each normalized token panel before mixing the following panel."""
+    s, ns, tid, lane, red = c["S"], c["NS"], c["tid"], c["lane"], c["red"]
+    a = c["args"]
+    stream = c.get("stream_attn", False)
+    mixed_stride = COLS if stream else ns * COLS
+    norm = red + s * (ns + 1)
+    for i in range_constexpr((s * (ns + 1) + THREADS - 1) // THREADS):
+        at = tid + i * THREADS
+        if at < s * (ns + 1):
+            value = c["poll"]([(c["wgt"], at, 1)])[0][0]
+            fx.ptr_store(f32_of(value), red + at)
+    gpu.barrier()
+    for first in range_constexpr(0, s, 16):
+        count = min(16, s - first)
+        t = first + fx.min(tid // QC, count - 1)
+        mine = tid // QC < count
+        cc = (tid % QC) * 4
+        if const_expr(stream):
+            sources = [
+                ld_bf4(
+                    a["blocks"], t * a["blk_sm"] + src * a["blk_sr"] + task * COLS + cc
+                )
+                for src in range(ns - 1)
+            ] + [ld_bf4(a["prefix"], t * HIDDEN + task * COLS + cc, CM_DEV)]
+        mixed = []
+        for j in range_constexpr(4):
+            acc = fx.Float32(0.0)
+            for src in range_constexpr(ns):
+                if const_expr(stream):
+                    value = sources[src][j]
+                else:
+                    value = fx.ptr_load(c["vals"] + (t * ns + src) * COLS + cc + j)
+                acc = acc + fx.ptr_load(red + t * (ns + 1) + src) * value
+            mixed.append(acc / fx.ptr_load(red + t * (ns + 1) + ns))
+        if mine:
+            for j in range_constexpr(4):
+                fx.ptr_store(mixed[j], c["vals"] + t * mixed_stride + cc + j)
+        sq = sum(value * value for value in mixed)
+        sq = butterfly(sq, (16, 8, 4, 2, 1))
+        if mine & (lane % 32 == 0):
+            c["put"](c["msq"], task * s + t, sq)
+        gpu.barrier()
+        if tid < 8 * count:
+            group, token = tid // count, first + tid % count
+            values = c["poll"](
+                [(c["msq"], (group * GSL + k) * s + token, 1) for k in range(GSL)]
+            )
+            fx.ptr_store(sum_polled(values), norm + tid)
+        gpu.barrier()
+        total = fx.ptr_load(norm + t - first)
+        for group in range_constexpr(1, 8):
+            total = total + fx.ptr_load(norm + group * count + t - first)
+        r = hw_rsq(total * fx.Float32(1.0 / HIDDEN) + fx.Float32(c["out_eps"]))
+        weight = ld_bf4(a["in_nw"], task * COLS + cc)
+        values = [
+            fx.ptr_load(c["vals"] + t * mixed_stride + cc + j) * r * weight[j]
+            for j in range(4)
+        ]
+        if mine:
+            at = (t * HIDDEN + task * COLS + cc) // 2
+            bo.buffer_store(
+                bf4_words(values), rsrc(c["xbuf"]), at, cache_modifier=CM_DEV
+            )
+            if const_expr(c["debug"]):
+                bo.buffer_store(bf4_words(values), rsrc(a["x_dbg"]), at)
+        publish(c["put"], c["xpanels"], first // 16 * NA + task, fx.Int32(1), tid == 0)
+        gpu.barrier()
+    publish(c["put"], c["xrdy"], task, fx.Int32(1), tid == 0)
+    gpu.barrier()
+
+
+@traced
+def stage_mix_wide(c, task):
+    """Mix token panels before reusing the source-weight reduction storage."""
+    if const_expr(c.get("stream_x", False)):
+        stage_mix_streamed(c, task)
+        return
+    s, ns, tid, lane, red = c["S"], c["NS"], c["tid"], c["lane"], c["red"]
+    a = c["args"]
+    stream = c.get("stream_attn", False)
+    mixed_stride = COLS if stream else ns * COLS
+    for i in range_constexpr((s * (ns + 1) + THREADS - 1) // THREADS):
+        at = tid + i * THREADS
+        if at < s * (ns + 1):
+            value = c["poll"]([(c["wgt"], at, 1)])[0][0]
+            fx.ptr_store(f32_of(value), red + at)
+    gpu.barrier()
+    for first in range_constexpr(0, s, 16):
+        t = first + fx.min(tid // QC, min(16, s - first) - 1)
+        mine = first + tid // QC < s
+        cc = (tid % QC) * 4
+        if const_expr(stream):
+            # stage_slice has already rounded and stored the updated prefix.
+            sources = [
+                ld_bf4(
+                    a["blocks"], t * a["blk_sm"] + src * a["blk_sr"] + task * COLS + cc
+                )
+                for src in range(ns - 1)
+            ] + [ld_bf4(a["prefix"], t * HIDDEN + task * COLS + cc, CM_DEV)]
+        mixed = []
+        for j in range_constexpr(4):
+            acc = fx.Float32(0.0)
+            for src in range_constexpr(ns):
+                if const_expr(stream):
+                    value = sources[src][j]
+                else:
+                    value = fx.ptr_load(c["vals"] + (t * ns + src) * COLS + cc + j)
+                acc = acc + fx.ptr_load(red + t * (ns + 1) + src) * value
+            mixed.append(acc / fx.ptr_load(red + t * (ns + 1) + ns))
+        if mine:
+            for j in range_constexpr(4):
+                fx.ptr_store(mixed[j], c["vals"] + t * mixed_stride + cc + j)
+        sq = sum(value * value for value in mixed)
+        sq = butterfly(sq, (16, 8, 4, 2, 1))
+        if mine & (lane % 32 == 0):
+            c["put"](c["msq"], task * s + t, sq)
+    gpu.barrier()
+    if tid < 8 * s:
+        group, t = tid // s, tid % s
+        values = c["poll"](
+            [(c["msq"], (group * GSL + k) * s + t, 1) for k in range(GSL)]
+        )
+        fx.ptr_store(sum_polled(values), red + group * s + t)
+    gpu.barrier()
+    for first in range_constexpr(0, s, 16):
+        t = first + fx.min(tid // QC, min(16, s - first) - 1)
+        cc = (tid % QC) * 4
+        total = fx.ptr_load(red + t)
+        for group in range_constexpr(1, 8):
+            total = total + fx.ptr_load(red + group * s + t)
+        r = hw_rsq(total * fx.Float32(1.0 / HIDDEN) + fx.Float32(c["out_eps"]))
+        weight = ld_bf4(a["in_nw"], task * COLS + cc)
+        values = [
+            fx.ptr_load(c["vals"] + t * mixed_stride + cc + j) * r * weight[j]
+            for j in range(4)
+        ]
+        if first + tid // QC < s:
+            at = (t * HIDDEN + task * COLS + cc) // 2
+            bo.buffer_store(
+                bf4_words(values), rsrc(c["xbuf"]), at, cache_modifier=CM_DEV
+            )
+            if const_expr(c["debug"]):
+                bo.buffer_store(bf4_words(values), rsrc(a["x_dbg"]), at)
+    publish(c["put"], c["xrdy"], task, fx.Int32(1), tid == 0)
+    gpu.barrier()
+
+
+@traced
 def stage_mix(c, task):
     """Columns 128 task ..: the softmax mix of ``vals`` (4 columns a thread), its
     sum of squares (MSQ), every slice's -> rstd, then bf16 x = mixed rstd w ->
     the plain x rows, and the slice's XRDY flag."""
+    if const_expr(c["S"] > 16):
+        stage_mix_wide(c, task)
+        return
     s, ns, tid, lane, red = c["S"], c["NS"], c["tid"], c["lane"], c["red"]
     a = c["args"]
     c0 = task * COLS
@@ -490,7 +675,7 @@ def stage_mix(c, task):
 
 
 # ---------------------------------------------------------------- gemv CTAs
-def gemv_loads(c, rg, chunks):
+def gemv_loads(c, rg, chunks, columns=4, first_column=0):
     """This wave's weight operands of rows 16 rg .. for its K chunks ``chunks``
     (indices into wave, wave + 8, ..): a lane 64 contiguous bytes of its row a
     chunk (4 dwordx4). ``rg`` past the last group loads the last group."""
@@ -500,20 +685,26 @@ def gemv_loads(c, rg, chunks):
     g = lane // ROWS
     out = []
     for i in chunks:
-        k = (wave + WAVES * i) * KCH + g * 8
-        base = (row * HIDDEN + k) // 2  # dwords
+        if c.get("pipeline", 0) & 33554432:
+            group = fx.min(rg, GEMV_TASKS - 1)
+            base = (((group * PER_WAVE + i) * WAVES + wave) * 4 * 64 + lane) * 4
+            stride = 64 * 4
+        else:
+            k = (wave + WAVES * i) * KCH + g * 8
+            base = (row * HIDDEN + k) // 2  # dwords
+            stride = 16
         out.append(
             [
                 fx.Vector(
                     bo.buffer_load(
                         r_w,
-                        base + 16 * q,
+                        base + stride * q,
                         vec_width=4,
                         dtype=T.i32,
                         cache_modifier=CM_NT,
                     )
                 )
-                for q in range(4)
+                for q in range(first_column, columns)
             ]
         )
     return out
@@ -523,22 +714,32 @@ def gemv_loads(c, rg, chunks):
 def load_x(c):
     """Every slice's x ready -> the bf16 x rows into LDS (rows padded)."""
     s, tid = c["S"], c["tid"]
-    if tid < NA:
-        c["poll"]([(c["xrdy"], tid, 1)])
+    if const_expr(not c.get("x_ready", False)):  # noqa: SIM102
+        if tid < NA:
+            c["poll"]([(c["xrdy"], tid, 1)])
     gpu.barrier()
     words = s * HIDDEN // 8  # 16 B chunks
     row = HIDDEN + LDS_PAD
-    for i in range_constexpr((words + THREADS - 1) // THREADS):
-        e = fx.min(tid + THREADS * i, words - 1)
-        v = fx.Vector(
-            bo.buffer_load(
-                rsrc(c["xbuf"]), e * 4, vec_width=4, dtype=T.i32, cache_modifier=CM_DEV
+    if const_expr(c.get("pipeline", 0) & 16):
+        from vllm.models.kimi_k3.amd.mono.attention import parallel
+
+        parallel.load_x_batched(c, 0, HIDDEN)
+    else:
+        for i in range_constexpr((words + THREADS - 1) // THREADS):
+            e = fx.min(tid + THREADS * i, words - 1)
+            v = fx.Vector(
+                bo.buffer_load(
+                    rsrc(c["xbuf"]),
+                    e * 4,
+                    vec_width=4,
+                    dtype=T.i32,
+                    cache_modifier=CM_DEV,
+                )
             )
-        )
-        t = e // (HIDDEN // 8)
-        k = e % (HIDDEN // 8) * 8
-        if tid + THREADS * i < words:
-            fx.ptr_store(v, c["xl"] + (t * row + k) // 2)
+            t = e // (HIDDEN // 8)
+            k = e % (HIDDEN // 8) * 8
+            if tid + THREADS * i < words:
+                fx.ptr_store(v, c["xl"] + (t * row + k) // 2)
     gpu.barrier()
 
 
@@ -582,28 +783,34 @@ def stage_gemv(c, rg, ops):
 def projection_chunk(c, half, ops0, ops1, acc0, acc1):
     """One K slice's weights against every row of a token tile."""
     s, tid, lane, wave = c["S"], c["tid"], c["lane"], c["wave"]
-    if tid < NA:
-        c["poll"]([(c["xrdy"], tid, 1)])
+    if const_expr(not c.get("x_ready", False)):  # noqa: SIM102
+        if tid < NA:
+            c["poll"]([(c["xrdy"], tid, 1)])
     gpu.barrier()
     row = c["XCOLS"] + LDS_PAD
     count = 4 if half == 0 else 3
     width = count * WAVES * KCH
     words = s * width // 8
-    for i in range_constexpr((words + THREADS - 1) // THREADS):
-        e = fx.min(tid + THREADS * i, words - 1)
-        tt = e // (width // 8)
-        kk = e % (width // 8) * 8
-        v = fx.Vector(
-            bo.buffer_load(
-                rsrc(c["xbuf"]),
-                (tt * HIDDEN + half * 4096 + kk) // 2,
-                vec_width=4,
-                dtype=T.i32,
-                cache_modifier=CM_DEV,
+    if const_expr(c.get("pipeline", 0) & 16):
+        from vllm.models.kimi_k3.amd.mono.attention import parallel
+
+        parallel.load_x_batched(c, half * 4096, width)
+    else:
+        for i in range_constexpr((words + THREADS - 1) // THREADS):
+            e = fx.min(tid + THREADS * i, words - 1)
+            tt = e // (width // 8)
+            kk = e % (width // 8) * 8
+            v = fx.Vector(
+                bo.buffer_load(
+                    rsrc(c["xbuf"]),
+                    (tt * HIDDEN + half * 4096 + kk) // 2,
+                    vec_width=4,
+                    dtype=T.i32,
+                    cache_modifier=CM_DEV,
+                )
             )
-        )
-        if tid + THREADS * i < words:
-            fx.ptr_store(v, c["xl"] + (tt * row + kk) // 2)
+            if tid + THREADS * i < words:
+                fx.ptr_store(v, c["xl"] + (tt * row + kk) // 2)
     gpu.barrier()
     t, g = fx.min(lane % ROWS, s - 1), lane // ROWS
     for i in range_constexpr(count):
@@ -676,14 +883,17 @@ def kda_stage(c, req, h, ch):
     k0 = (tid % 32) * 4
     k["head_off"] = (h * HD + vr) * HD + k0
     base0 = a["rstate"] + fx.Int64(fx.max(k["slot0"], 0)) * fx.Int64(a["rs_seq"]) * 4
-    k["st"] = [
-        fx.Vector(
-            bo.buffer_load(
-                rsrc(base0), k["head_off"] + r * 16 * HD, vec_width=4, dtype=T.f32
+    if const_expr(c.get("pipeline", 0) & 2048):
+        k["st"] = c["state_preload"]
+    else:
+        k["st"] = [
+            fx.Vector(
+                bo.buffer_load(
+                    rsrc(base0), k["head_off"] + r * 16 * HD, vec_width=4, dtype=T.f32
+                )
             )
-        )
-        for r in range(c["VCH"] // 16)
-    ]
+            for r in range(c["VCH"] // 16)
+        ]
     # f_b: wave w's rows 16 w .. of head h, a lane 64 B of its row
     fr = h * HD + wave * 16 + lane % 16
     fb = (fr * HD + (lane // 16) * 32) // 2
@@ -696,6 +906,19 @@ def kda_stage(c, req, h, ch):
         ld_f32(a["dt_bias"], h * HD + wave * 16 + 4 * (lane // 16) + i)
         for i in range(4)
     ]
+    if const_expr(c.get("pipeline", 0) & 256):
+        fr_hi = h * HD + (wave % 4 + 4) * 16 + lane % 16
+        fb_hi = (fr_hi * HD + (lane // 16) * 32) // 2
+        k["fb_hi"] = [
+            fx.Vector(
+                bo.buffer_load(rsrc(a["w_fb"]), fb_hi + 4 * q, vec_width=4, dtype=T.i32)
+            )
+            for q in range(4)
+        ]
+        k["dtb_hi"] = [
+            ld_f32(a["dt_bias"], h * HD + (wave % 4 + 4) * 16 + 4 * (lane // 16) + i)
+            for i in range(4)
+        ]
     return k
 
 
@@ -851,12 +1074,24 @@ def kda_recur(c, k, req, h, ch):
             if lane % 32 == 0:
                 fx.ptr_store(o, c["ol"] + (j * c["VCH"] + v + 16 * r))
     gpu.barrier()
-    if tid < L:
-        ss = fx.Float32(0.0)
-        for e in range_constexpr(c["VCH"]):
-            x = fx.ptr_load(c["ol"] + (tid * c["VCH"] + e))
-            ss = ss + x * x
-        c["put"](c["onrm"], ((req * NH + h) * L + tid) * c["NVCH"] + ch, ss)
+    if const_expr(c.get("pipeline", 0) & 512):
+        for first in range_constexpr(0, L, WAVES):
+            token = c["wave"] + first
+            if token < L:
+                x = fx.ptr_load(c["ol"] + (token * c["VCH"] + lane % c["VCH"]))
+                ss = (lane < c["VCH"]).select(x * x, fx.Float32(0.0))
+                ss = butterfly(ss, (32, 16, 8, 4, 2, 1))
+                if lane == 0:
+                    c["put"](
+                        c["onrm"], ((req * NH + h) * L + token) * c["NVCH"] + ch, ss
+                    )
+    else:
+        if tid < L:
+            ss = fx.Float32(0.0)
+            for e in range_constexpr(c["VCH"]):
+                x = fx.ptr_load(c["ol"] + (tid * c["VCH"] + e))
+                ss = ss + x * x
+            c["put"](c["onrm"], ((req * NH + h) * L + tid) * c["NVCH"] + ch, ss)
     gpu.barrier()
 
 
@@ -866,6 +1101,7 @@ def kda_norm(c, req, h, ch):
     -> core_out."""
     L, tid = c["L"], c["tid"]
     a = c["args"]
+    tagged_core = c.get("core_mailbox") is not None
     if tid < L * c["VCH"]:
         j = tid // c["VCH"]
         e = tid % c["VCH"]
@@ -888,32 +1124,102 @@ def kda_norm(c, req, h, ch):
         bo.buffer_store(
             y.to(fx.BFloat16), rsrc(a["core_out"]), (req * L + j) * PROJ + h * HD + vr
         )
+        if const_expr(tagged_core):
+            neighbor = xshfl(y, 1)
+            if tid % 2 == 0:
+                c["put_bf"](
+                    c["core_mailbox"],
+                    (req * L + j) * PROJ + h * HD + vr,
+                    [y, neighbor],
+                )
     gpu.barrier()
 
 
 @traced
 def kda_task(c, task, on, tls):
+    from vllm.models.kimi_k3.amd.mono.attention import parallel
+
     tid = c["tid"]
     req = task // (NH * c["NVCH"])
     h = (task // c["NVCH"]) % NH
     ch = task % c["NVCH"]
+    if const_expr("event_prod_base" in c):
+        parallel.event(c, c["event_prod_base"] + task, 0)
     k = kda_stage(c, req, h, ch)
     stamp(on, tls, tid, 7)
     kda_conv(c, k, req, h, ch)
     stamp(on, tls, tid, 8)
-    kda_gates(c, k, req, h)
+    if const_expr("event_prod_base" in c):
+        parallel.event(c, c["event_prod_base"] + task, 1)
+    if const_expr(c.get("pipeline", 0) & 256):
+        parallel.wave_gates(c, k, req, h)
+    elif const_expr(c.get("pipeline", 0) & 12):
+        parallel.head_load(c, req, h)
+    elif const_expr(c.get("pipeline", 0) & 1):
+        parallel.gates(c, k, req, h)
+    else:
+        kda_gates(c, k, req, h)
     stamp(on, tls, tid, 9)
-    kda_recur(c, k, req, h, ch)
-    stamp(on, tls, tid, 10)
-    kda_norm(c, req, h, ch)
+    if const_expr("event_prod_base" in c):
+        parallel.event(c, c["event_prod_base"] + task, 2)
+    if const_expr(c.get("pipeline", 0) & 4):
+        parallel.recur(c, k, req, h, ch, task)
+    else:
+        kda_recur(c, k, req, h, ch)
+        stamp(on, tls, tid, 10)
+        if const_expr("event_prod_base" in c):
+            parallel.event(c, c["event_prod_base"] + task, 3)
+        kda_norm(c, req, h, ch)
+        if const_expr("event_prod_base" in c):
+            parallel.event(c, c["event_prod_base"] + task, 4)
     stamp(on, tls, tid, 11)
 
 
 @traced
 def kda_tasks(c, on, tls):
+    from vllm.models.kimi_k3.amd.mono.attention import parallel
+
     s, L, bid = c["S"], c["L"], c["bid"]
-    for task in range(first_task(bid, c["kda0"]), (s // L) * NH * c["NVCH"], BLOCKS):
-        kda_task(c, task, on, tls)
+    if const_expr(c.get("pipeline", 0) & TOKEN_PIPELINE):
+        count = c["head_workers"]
+        producers = BLOCKS - count
+        if bid < producers:
+            for task in range(bid, (s // L) * NH * c["NVCH"], producers):
+                kda_task(c, task, on, tls)
+        else:
+            for head in range(bid - producers, s // L * NH, count):
+                parallel.head_prepare(c, head)
+                for token in range_constexpr(L):
+                    parallel.output(c, head * L + token)
+    elif const_expr(c.get("pipeline", 0) & 8):
+        heads = c["head_total"]
+        if bid < heads:
+            first = c["head_first"]
+            if (bid >= first) & (bid < first + s // L * NH):
+                parallel.head_prepare(c, bid - first)
+        else:
+            producers = BLOCKS - heads
+            task0 = (
+                bid - heads - c["event_prod_base"] % producers + producers
+            ) % producers
+            for task in range(task0, s // L * NH * c["NVCH"], producers):
+                kda_task(c, task, on, tls)
+    elif const_expr(c.get("pipeline", 0) & 4):
+        count = c["head_workers"]
+        producers = BLOCKS - count
+        if bid < producers:
+            for task in range(bid, (s // L) * NH * c["NVCH"], producers):
+                kda_task(c, task, on, tls)
+        else:
+            for task in range(bid - producers, s // L * NH, count):
+                parallel.head_prepare(c, task)
+            for task in range(bid - producers, s * NH, count):
+                parallel.output(c, task)
+    else:
+        for task in range(
+            first_task(bid, c["kda0"]), (s // L) * NH * c["NVCH"], BLOCKS
+        ):
+            kda_task(c, task, on, tls)
 
 
 # ---------------------------------------------------------------- kernel
@@ -921,6 +1227,8 @@ _BUILDS: dict = {}
 
 
 def build(key: KdaPreBuild):
+    from vllm.models.kimi_k3.amd.mono.attention import parallel
+
     if key in _BUILDS:
         return _BUILDS[key]
     state_rows = _state_rows(key)
@@ -929,6 +1237,44 @@ def build(key: KdaPreBuild):
     tile_tokens = 16
     tiles = token_tiles(key.tokens, key.qlen, tile_tokens=tile_tokens)
     s, L = max(rows for _, rows in tiles), key.qlen
+    base_pipeline = key.pipeline
+    if key.pipeline & MAILBOX_OUTPUT:
+        assert key.pipeline & TOKEN_PIPELINE
+    if key.pipeline & TOKEN_PIPELINE:
+        assert key.pipeline & 4
+        assert s // L * NH <= key.head_workers
+        base_pipeline = key.pipeline & ~(TOKEN_PIPELINE | MAILBOX_OUTPUT | 4)
+    assert base_pipeline in (
+        *range(9),
+        16,
+        32,
+        64,
+        96,
+        128,
+        256,
+        512,
+        520,
+        768,
+        1024,
+        1536,
+        2048,
+        2560,
+        4096,
+        8192,
+        16384,
+        2113536,
+        33562624,
+        33570816,
+        35667968,
+    )
+    assert key.projection_chunks in (1, 2, 3, 4)
+    assert 1 <= key.head_workers <= 32
+    if key.pipeline & 4:
+        assert s // L * NH * nvch <= BLOCKS - key.head_workers
+    if key.pipeline & 8:
+        assert s // L * NH * nvch <= BLOCKS - key.tokens // L * NH
+    if key.pipeline & 2048:
+        assert s // L * NH * nvch <= BLOCKS
     ns = key.nblocks + 1
     layouts = [
         scratch_layout(replace(key, tokens=rows, state_rows=state_rows))
@@ -941,8 +1287,24 @@ def build(key: KdaPreBuild):
         offsets.append(total)
         total += max(o + n for o, n in layout.values())
     xcols = 4096 if s > TILE_TOKENS else HIDDEN
+    if key.pipeline & 2:
+        xcols = WAVES * KCH
+    if key.pipeline & 64:
+        xcols = key.projection_chunks * WAVES * KCH
+    if key.pipeline & 128:
+        xcols = 0
+    if key.pipeline & 4096:
+        xcols = 14 * KCH
+    if key.pipeline & 24576:
+        xcols = 2 * WAVES * KCH
     xrow = xcols + LDS_PAD
-    assert s * xrow * 2 <= 136 * 1024, "x rows exceed LDS"
+    xbanks = 2 if key.pipeline & 4098 else 1
+    assert xbanks * s * xrow * 2 <= 136 * 1024, "x rows exceed LDS"
+    if key.pipeline & 24576:
+        assert (
+            s * xrow * 2 + 2 * THREADS * (20 if key.pipeline & 16384 else 16) * 4
+            <= 152 * 1024
+        )
     assert L <= 16 and key.nblocks >= 1
 
     @fx.struct
@@ -951,7 +1313,16 @@ def build(key: KdaPreBuild):
 
     @fx.struct
     class GemvLds:
+        xl: fx.Array[fx.Int32, xbanks * s * xrow // 2, 16]
+
+    cached_words = 20 if key.pipeline & 16384 else 16
+
+    @fx.struct
+    class CachedGemvLds:
         xl: fx.Array[fx.Int32, s * xrow // 2, 16]
+        weights: fx.Array[fx.Int32, 2 * THREADS * cached_words, 16]
+
+    GemvStorage = CachedGemvLds if key.pipeline & 24576 else GemvLds
 
     @fx.struct
     class KdaLds:
@@ -965,7 +1336,7 @@ def build(key: KdaPreBuild):
     @fx.union
     class RoleLds:
         attn: AttnLds
-        gemv: GemvLds
+        gemv: GemvStorage  # type: ignore[valid-type]
         kda: KdaLds
 
     @fx.struct
@@ -977,6 +1348,8 @@ def build(key: KdaPreBuild):
     name = (
         f"k3_mono_kda_pre_s{key.tokens}_l{L}_nb{key.nblocks}_d{int(key.delta)}"
         f"_g{int(key.debug)}_t{int(key.timeline)}_v{state_rows}"
+        f"_p{key.pipeline}_hw{key.head_workers}"
+        f"_pc{key.projection_chunks}"
     )
 
     @flyc.kernel(name=name, known_block_size=[THREADS, 1, 1])
@@ -1028,6 +1401,7 @@ def build(key: KdaPreBuild):
             c = {
                 "S": s,
                 "XCOLS": xcols,
+                "XROWS": max(rows for _, rows in tiles),
                 "L": L,
                 "VCH": state_rows,
                 "NVCH": nvch,
@@ -1045,6 +1419,20 @@ def build(key: KdaPreBuild):
                 "onorm_eps": key.onorm_eps,
                 "lb": key.lower_bound,
                 "kda0": key.kda0,
+                "pipeline": key.pipeline,
+                "projection_chunks": key.projection_chunks,
+                "x_ready": bool(key.pipeline & 224),
+                "head_workers": key.head_workers,
+                "head_total": key.tokens // L * NH,
+                "head_first": first // L * NH,
+                "events": tl + fx.Int64(BLOCKS * TL_POINTS * 8),
+                "event_stride": max(2 * L + 10, 16),
+                "event_prod_base": first // L * NH * nvch,
+                "event_head_base": key.tokens // L * NH * nvch + first // L * NH,
+                "event_out_base": key.tokens // L * NH * (nvch + 1) + first * NH,
+                "event_init_base": key.tokens // L * NH * (nvch + 1)
+                + key.tokens * NH
+                + tile * BLOCKS,
                 "xp": key.xp,
                 "write_idx": key.write_idx,
                 "gate_local": False,
@@ -1099,40 +1487,78 @@ def build(key: KdaPreBuild):
             }
             for region in ("part", "wgt", "msq", "xrdy", "proj", "qk", "onrm"):
                 c[region] = sreg(tile_scratch, lay[region][0], region)
+            if const_expr(key.pipeline & 12):
+                c["head_ready"] = sreg(tile_scratch, lay["head_ready"][0], "head_ready")
+                c["head_data"] = tile_scratch + fx.Int64(lay["head_data"][0])
+                c["ybuf"] = tile_scratch + fx.Int64(lay["y"][0])
+                if const_expr(key.pipeline & MAILBOX_OUTPUT):
+                    c["output_values"] = sreg(
+                        tile_scratch, lay["y"][0], "output_values"
+                    )
+            if const_expr(key.pipeline & 24576):
+                c["wl"] = gl.weights.ptr
             contexts.append(c)
         on, tls = key.timeline, lds.tls.ptr
+        if const_expr(key.pipeline & 2048):
+            for tile in range_constexpr(len(tiles)):
+                c = contexts[tile]
+                first = (key.kda0 + tiles[tile][0] // L * NH * nvch) % BLOCKS
+                c["state_preload"] = parallel.prefetch_state(c, first)
         if const_expr(key.tokens > TILE_TOKENS):
             stamp_begin(on, tls, tid, TL_POINTS)
             if bid < NA:
                 for tile in range_constexpr(len(tiles)):
                     c = contexts[tile]
+                    parallel.event(c, c["event_init_base"] + bid, 0)
                     stage_slice(c, bid)
+                    parallel.event(c, c["event_init_base"] + bid, 1)
                     if bid < c["S"]:
                         stage_gate(c, bid)
+                    parallel.event(c, c["event_init_base"] + bid, 2)
                     stage_mix(c, bid)
+                    parallel.event(c, c["event_init_base"] + bid, 3)
                 stamp(on, tls, tid, 3)
             if bid >= NA:
                 stamp(on, tls, tid, 4)
                 rg0, rg1 = 2 * (bid - NA), 2 * (bid - NA) + 1
-                accs0 = [fx.Vector.filled(4, 0.0, fx.Float32) for _ in tiles]
-                accs1 = [fx.Vector.filled(4, 0.0, fx.Float32) for _ in tiles]
-                for half in range_constexpr(2):
-                    chunks = range(half * 4, min(half * 4 + 4, PER_WAVE))
-                    ops0 = gemv_loads(contexts[0], rg0, chunks)
-                    ops1 = gemv_loads(contexts[0], rg1, chunks)
+                if const_expr(key.pipeline & 224):
+                    parallel.await_inputs(contexts)
+                if const_expr(key.pipeline & 24576):
+                    parallel.cached_projection(contexts, rg0, rg1)
+                elif const_expr(key.pipeline & 4096):
+                    parallel.wave_projection(contexts, rg0, rg1)
+                elif const_expr(key.pipeline & 1024):
+                    parallel.resident_projection(contexts, rg0, rg1)
+                elif const_expr(key.pipeline & 128):
+                    parallel.register_projection(contexts, rg0, rg1)
+                elif const_expr(key.pipeline & 64):
+                    parallel.prefetched_projection(contexts, rg0, rg1)
+                elif const_expr(key.pipeline & 2):
                     for tile in range_constexpr(len(tiles)):
-                        accs0[tile], accs1[tile] = projection_chunk(
-                            contexts[tile],
-                            half,
-                            ops0,
-                            ops1,
-                            accs0[tile],
-                            accs1[tile],
-                        )
-                stamp(on, tls, tid, 5)
-                for tile in range_constexpr(len(tiles)):
-                    projection_out(contexts[tile], rg0, accs0[tile])
-                    projection_out(contexts[tile], rg1, accs1[tile])
+                        parallel.projection(contexts[tile], rg0, rg1)
+                else:
+                    accs0 = [fx.Vector.filled(4, 0.0, fx.Float32) for _ in tiles]
+                    accs1 = [fx.Vector.filled(4, 0.0, fx.Float32) for _ in tiles]
+                    for half in range_constexpr(2):
+                        chunks = range(half * 4, min(half * 4 + 4, PER_WAVE))
+                        ops0 = gemv_loads(contexts[0], rg0, chunks)
+                        ops1 = gemv_loads(contexts[0], rg1, chunks)
+                        for tile in range_constexpr(len(tiles)):
+                            c = contexts[tile]
+                            parallel.event(c, c["event_init_base"] + bid, 2 * half)
+                            accs0[tile], accs1[tile] = projection_chunk(
+                                contexts[tile],
+                                half,
+                                ops0,
+                                ops1,
+                                accs0[tile],
+                                accs1[tile],
+                            )
+                            parallel.event(c, c["event_init_base"] + bid, 2 * half + 1)
+                    stamp(on, tls, tid, 5)
+                    for tile in range_constexpr(len(tiles)):
+                        projection_out(contexts[tile], rg0, accs0[tile])
+                        projection_out(contexts[tile], rg1, accs1[tile])
                 stamp(on, tls, tid, 6)
             for tile in range_constexpr(len(tiles)):
                 c = contexts[tile]
@@ -1157,16 +1583,29 @@ def build(key: KdaPreBuild):
                     gi = bid - NA
                     rg0 = 2 * gi
                     rg1 = 2 * gi + 1
-                    ops0 = gemv_loads(c, rg0, range(PER_WAVE))
-                    load_x(c)
-                    stamp(on, tls, tid, 4)
-                    # Prefetch the second group under the first group's MFMAs.
-                    ops1 = gemv_loads(c, rg1, range(4))
-                    stage_gemv(c, rg0, ops0)
-                    stamp(on, tls, tid, 5)
-                    ops1 = ops1 + gemv_loads(c, rg1, range(4, PER_WAVE))
-                    stage_gemv(c, rg1, ops1)
-                    stamp(on, tls, tid, 6)
+                    if const_expr(key.pipeline & 224):
+                        parallel.await_inputs([c])
+                    if const_expr(key.pipeline & 24576):
+                        parallel.cached_projection([c], rg0, rg1)
+                    elif const_expr(key.pipeline & 4096):
+                        parallel.wave_projection([c], rg0, rg1)
+                    elif const_expr(key.pipeline & 128):
+                        parallel.register_projection([c], rg0, rg1)
+                    elif const_expr(key.pipeline & 64):
+                        parallel.prefetched_projection([c], rg0, rg1)
+                    elif const_expr(key.pipeline & 2):
+                        parallel.projection(c, rg0, rg1)
+                    else:
+                        ops0 = gemv_loads(c, rg0, range(PER_WAVE))
+                        load_x(c)
+                        stamp(on, tls, tid, 4)
+                        # Prefetch the second group under the first group's MFMAs.
+                        ops1 = gemv_loads(c, rg1, range(4))
+                        stage_gemv(c, rg0, ops0)
+                        stamp(on, tls, tid, 5)
+                        ops1 = ops1 + gemv_loads(c, rg1, range(4, PER_WAVE))
+                        stage_gemv(c, rg1, ops1)
+                        stamp(on, tls, tid, 6)
                 kda_tasks(c, on, tls)
                 stamp_flush(on, tls, tl, tid, bid, TL_POINTS)
 
@@ -1285,6 +1724,9 @@ def kda_pre(
         "a slot's state must be dense; slots may be strided"
     )
     assert conv_state.dtype == torch.bfloat16
+    if key.timeline:
+        assert tl is not None and tl.dtype == torch.int64
+        assert tl.numel() >= timeline_words(key), "timeline buffer is too small"
     f = build(key)
     f(
         prefix.data_ptr(),

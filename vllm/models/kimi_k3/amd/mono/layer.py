@@ -23,7 +23,7 @@ from dataclasses import dataclass
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 import torch
-from flydsl.expr import const_expr, range_constexpr
+from flydsl.expr import const_expr, gpu, range_constexpr
 from flydsl.expr.typing import Int32, Int64
 
 from vllm.models.kimi_k3.amd.mono.attention import back as k2a
@@ -53,7 +53,7 @@ from vllm.models.kimi_k3.amd.mono.common.plan import (
     pair_layout,
 )
 from vllm.models.kimi_k3.amd.mono.common.ranks import peer_bases
-from vllm.models.kimi_k3.amd.mono.common.sync import Mailbox, preg, shift, sreg
+from vllm.models.kimi_k3.amd.mono.common.sync import Mailbox, preg, publish, shift, sreg
 from vllm.models.kimi_k3.amd.mono.stages import gemv as gemv
 from vllm.models.kimi_k3.amd.mono.stages import moe as k2b
 
@@ -67,11 +67,24 @@ SD0 = k2b.DOWN_TASKS  # 224: the shared down's CTAs
 # timeline points: 0 start, 1 o_proj done / AR reduced, 2 early done / slice,
 # 3 ug, 4 down/sdown, 5 lnorm, 6 up, 7 reduce, 8 gate, 9 mix (x published),
 # 10 route, 11 route table, 12 latent quant, 13 route starts
-TL_POINTS = 17  # + 14 (unused), 15 INTER loaded, 16 down done
+TL_POINTS = 21  # 15 first down input, 16 down done, 18 down entered, 20 logits ready
 
 assert E0 + k2b.R_TASKS + k2b.L_TASKS <= BLOCKS and k2b.G_TASKS <= E0 - O0
 
-REGIONS = ("part", "wgt", "msq", "xrdy", "ar") + k2b.REGIONS
+REGIONS = (
+    ("part", "wgt", "msq", "xrdy", "ar")
+    + k2b.REGIONS
+    + (
+        "shared_latq",
+        "shared_latsc",
+        "local_lat",
+        "qlat",
+        "qlatsc",
+        "xpanels",
+        "lnpanels",
+        "shpanels",
+    )
+)
 
 _STREAM = fx.Stream(None)
 
@@ -88,6 +101,31 @@ class K2Build:
     diag: bool = False
     timeline: bool = False
     xp: int = 0  # timing experiments (7: route without its selection)
+    shared_down_workers: int = 0
+    shared_down_first: bool = False
+    shared_h_once: bool = False
+    tail_panels: bool = False
+    parallel_shared_activation: bool = False
+    late_shared_wait: bool = False
+    latent_quant_workers: int = 0
+    producer_latent_quant: bool = False
+    down_workers: int = 0
+    full_shared_pipeline: bool = False
+    down_batch: int = 5
+    inter_vec: int = 1
+    latq_vec: int = 1
+    trim_oproj: bool = False
+    stream_oproj: bool = False
+    balanced_oproj: bool = False
+    wide: bool = False
+    compact_lds: bool = False
+    cache_wide_inter: bool = False
+    separate_wide_lds: bool = False
+    stream_attn: bool = False
+    stream_latent: bool = False
+    sparse_routes: bool = False
+    stream_x: bool = False
+    front_panels: bool = False
 
 
 ABI = KernelAbi(
@@ -126,7 +164,12 @@ ABI = KernelAbi(
 
 def peer_layout(s):
     """K2a's AR region, then K2b's: one parity's (name -> (byte offset, bytes))."""
-    pairs = {"ar": k2a.ar_half_pairs(s), **k2b.peer_pairs(s)}
+    pairs = {
+        "ar": k2a.ar_half_pairs(s),
+        **k2b.peer_pairs(s),
+        "qlat": s * k2b.LAT // 8,
+        "qlatsc": s * k2b.LAT // 32,
+    }
     return pair_layout(pairs.items())
 
 
@@ -145,6 +188,25 @@ def scratch_layout(key: K2Build) -> dict:
         lay[name] = ((end + 15) // 16 * 16 + o, n)
     end = max(o + n for o, n in lay.values())
     lay["xrow"] = ((end + 15) // 16 * 16, s * HIDDEN * 2)
+    if key.latent_quant_workers:
+        end = lay["xrow"][0] + lay["xrow"][1]
+        for name, count in (
+            ("shared_latq", s * k2b.LAT // 8),
+            ("shared_latsc", s * k2b.LAT // 32),
+        ):
+            offset = (end + 15) // 16 * 16
+            lay[name] = (offset, count * 8)
+            end = offset + count * 8
+    if key.producer_latent_quant:
+        end = max(o + n for o, n in lay.values())
+        lay["local_lat"] = ((end + 15) // 16 * 16, s * (k2b.LAT // k2b.TP) * 4)
+    if key.stream_x:
+        end = max(o + n for o, n in lay.values())
+        lay["xpanels"] = ((end + 15) // 16 * 16, ((s + 15) // 16) * NA * 8)
+    if key.tail_panels:
+        for name, tasks in (("lnpanels", k2b.LN_TASKS), ("shpanels", k2b.UP_TASKS)):
+            end = max(o + n for o, n in lay.values())
+            lay[name] = ((end + 15) // 16 * 16, ((s + 15) // 16) * tasks * 8)
     return lay
 
 
@@ -154,14 +216,193 @@ def scratch_bytes(key: K2Build) -> int:
 
 @traced
 def stage_oproj(c, gi):
-    """o_proj tasks gi, gi + 200, gi + 400 (< 448): every task's weights in
-    flight at once (one memory latency, not three), then the MFMAs."""
-    ops = [k2a.o_loads(c, fx.min(gi + O_N * j, OTASKS - 1)) for j in range(O_ROUNDS)]
-    k2a.load_core(c)
-    for j in range_constexpr(O_ROUNDS):
-        t = gi + O_N * j
-        if t < OTASKS:
-            k2a.stage_o(c, t, ops[j])
+    workers = BLOCKS if c.get("balanced_oproj", False) else O_N
+    rounds = (OTASKS + workers - 1) // workers
+    if const_expr(c.get("trim_oproj", False)):
+        if gi < OTASKS - workers * (rounds - 1):
+            stage_oproj_tasks(c, gi, rounds, workers)
+        else:
+            stage_oproj_tasks(c, gi, rounds - 1, workers)
+    else:
+        stage_oproj_tasks(c, gi, rounds, workers)
+
+
+@traced
+def stage_oproj_tasks(c, gi, rounds, workers):
+    """Prefetch this CTA's assigned output tiles together, then run their MFMAs."""
+    ops = [k2a.o_loads(c, fx.min(gi + workers * j, OTASKS - 1)) for j in range(rounds)]
+    if const_expr(c.get("core_ready") is not None):
+        if c["tid"] < c["core_writers"]:
+            c["poll"]([(c["core_ready"], c["tid"], 1)])
+        gpu.barrier()
+        stamp(c["tl_on"], c["tls"], c["tid"], 17)
+    if const_expr(c.get("stream_oproj", False)):
+        k2a.stage_o_stream(c, gi, workers, ops)
+    else:
+        for first in range_constexpr(0, c["S"], 16):
+            panel = dict(c, panel_first=first, panel_rows=min(16, c["S"] - first))
+            k2a.load_core(panel)
+            if const_expr(c.get("core_mailbox") is not None):
+                stamp(c["tl_on"], c["tls"], c["tid"], 17)
+            for j in range_constexpr(rounds):
+                t = gi + workers * j
+                if t < OTASKS:
+                    k2a.stage_o(panel, t, ops[j])
+
+
+@traced
+def stage_front_panels(c):
+    """Stream all-reduce and AttnRes through disjoint token-panel mailboxes."""
+    s, ns, bid, tid = c["S"], c["NS"], c["bid"], c["tid"]
+    a = c["args"]
+    on, tls = c["tl_on"], c["tls"]
+    for first in range_constexpr(0, s, 16):
+        count = min(16, s - first)
+        panel = dict(
+            c,
+            S=count,
+            ar_tokens=s,
+            ar_first=first,
+            stream_attn=False,
+            stream_x=False,
+            xbuf=c["xbuf"] + fx.Int64(first * HIDDEN * 2),
+            part=shift(c["part"], first * NA * ns * 2 * 8),
+            wgt=shift(c["wgt"], first * (ns + 1) * 8),
+            msq=shift(c["msq"], first * NA * 8),
+            xrdy=shift(c["xpanels"], first // 16 * NA * 8),
+            args=dict(
+                a,
+                prefix=a["prefix"] + fx.Int64(first * HIDDEN * 2),
+                blocks=a["blocks"] + fx.Int64(first) * fx.Int64(a["blk_sm"]) * 2,
+            ),
+        )
+        k2a.stage_reduce(panel, bid)
+        stamp(on, tls, tid, 1)
+        stage_slice(panel, bid)
+        stamp(on, tls, tid, 2)
+        if bid < count:
+            stage_gate(panel, bid)
+        stamp(on, tls, tid, 8)
+        stage_mix(panel, bid)
+        stamp(on, tls, tid, 9)
+    publish(c["put"], c["xrdy"], bid, fx.Int32(1), tid == 0)
+    gpu.barrier()
+
+
+@traced
+def run_stages(c, key):
+    bid, tid, rank, s = c["bid"], c["tid"], c["rank"], c["S"]
+    w_sd = c["args"]["w_sd"]
+    shared_start = BLOCKS - key.shared_down_workers
+    activation_start = max(H0, s) if key.parallel_shared_activation else H0
+    on, tls = key.timeline, c["tls"]
+    stamp_begin(on, tls, tid, c.get("tl_points", TL_POINTS))
+    # ---- o_proj on every CTA past AttnRes's
+    eb = bid - E0
+    lb = eb - k2b.R_TASKS
+    is_r = (bid >= E0) & (eb < k2b.R_TASKS)
+    is_l = (bid >= E0 + k2b.R_TASKS) & (lb < k2b.L_TASKS)
+    # o_proj first (every AttnRes CTA waits on the slowest partial; loads
+    # retire in order), the early weights after: they land before x does
+    if const_expr(key.balanced_oproj):
+        stage_oproj(c, bid)
+        stamp(on, tls, tid, 1)
+    if is_r:
+        if const_expr(not key.balanced_oproj):
+            stage_oproj(c, bid - O0)
+        stamp(on, tls, tid, 1)
+        rops = k2b.early_loads(c, 0, eb // k2b.R_PARTS, eb % k2b.R_PARTS)
+        k2b.early_compute(c, 0, eb // k2b.R_PARTS, eb % k2b.R_PARTS, rops)
+    if is_l:
+        if const_expr(not key.balanced_oproj):
+            stage_oproj(c, bid - O0)
+        stamp(on, tls, tid, 1)
+        lops = k2b.early_loads(c, 1, lb // k2b.L_PARTS, lb % k2b.L_PARTS)
+        k2b.early_compute(c, 1, lb // k2b.L_PARTS, lb % k2b.L_PARTS, lops)
+    if (bid >= O0) & ~is_r & ~is_l:
+        if const_expr(not key.balanced_oproj):
+            stage_oproj(c, bid - O0)
+        stamp(on, tls, tid, 1)
+        gi = bid - O0
+        if gi < k2b.G_TASKS:
+            k2b.early_compute(c, 2, gi, 0, k2b.early_loads(c, 2, gi, 0))
+    # ---- AttnRes: the reduced o_proj -> x; then route / SiTU
+    if bid < NA:
+        if const_expr(key.front_panels):
+            stage_front_panels(c)
+        else:
+            k2a.stage_reduce(c, bid)
+            stamp(on, tls, tid, 1)
+            stage_slice(c, bid)
+            stamp(on, tls, tid, 2)
+            for token in range(bid, s, NA):
+                stage_gate(c, token)
+            stamp(on, tls, tid, 8)
+            stage_mix(c, bid)
+            stamp(on, tls, tid, 9)
+        stamp(on, tls, tid, 13)
+        for token in range(bid, s, NA):
+            k2b.stage_route(c, token)
+        stamp(on, tls, tid, 10)
+        if const_expr(s > NA - H0):
+            for token in range(bid, s, NA):
+                k2b.stage_h(c, token)
+        else:
+            if (bid >= activation_start) & (bid < activation_start + s):
+                k2b.stage_h(c, bid - activation_start)
+    if bid >= NA:
+        stamp(on, tls, tid, 2)
+    if const_expr(key.shared_down_workers > 0):  # noqa: SIM102
+        if bid >= shared_start:
+            k2b.load_h(c)
+            for task in range(
+                bid - shared_start,
+                k2b.SD_TASKS if key.full_shared_pipeline else k2b.UP_TASKS,
+                key.shared_down_workers,
+            ):
+                row = (task + rank * k2b.UP_TASKS) % k2b.SD_TASKS
+                k2b.stage_sdown(
+                    c,
+                    row,
+                    gemv.loads(c["lane"], c["wave"], w_sd, row * k2b.ROWS, k2b.SI),
+                )
+            stamp(on, tls, tid, 14)
+    # ---- the routed experts
+    # the latent (ready ~10 us before the route) quantized first
+    if const_expr(key.producer_latent_quant and not key.stream_latent):
+        k2b.load_shared_latq(c)
+    elif const_expr(key.latent_quant_workers > 0):
+        quant_start = E0 + k2b.R_TASKS + k2b.L_TASKS
+        if (bid >= quant_start) & (bid < quant_start + key.latent_quant_workers):
+            k2b.publish_latq(c, bid - quant_start, key.latent_quant_workers)
+        k2b.load_shared_latq(c)
+    elif const_expr(not key.stream_latent):
+        k2b.load_latq(c)
+    stamp(on, tls, tid, 12)
+    nu = k2b.load_route(c)
+    stamp(on, tls, tid, 11)
+    k2b.run_routed(c, nu, BLOCKS, key.down_workers)
+    if const_expr(key.shared_h_once):  # noqa: SIM102
+        if bid >= k2b.LN0 + k2b.LN_TASKS:
+            k2b.load_h(c)
+    if const_expr(key.shared_down_first):
+        k2b.run_sdown(c, bid, w_sd, h_loaded=key.shared_h_once)
+        stamp(on, tls, tid, 14)
+    if const_expr(not key.full_shared_pipeline):
+        k2b.run_sdown_rest(c, bid, w_sd, h_loaded=key.shared_h_once)
+    if const_expr(key.shared_down_workers == 0 and not key.shared_down_first):
+        k2b.run_sdown(c, bid, w_sd, h_loaded=key.shared_h_once)
+    stamp(on, tls, tid, 4)
+    if (bid >= k2b.LN0) & (bid < k2b.LN0 + k2b.LN_TASKS):
+        k2b.stage_lnorm(c, bid - k2b.LN0)
+    stamp(on, tls, tid, 5)
+    if bid < k2b.UP_TASKS:
+        k2b.stage_up(c, bid)
+    stamp(on, tls, tid, 6)
+    if const_expr(key.reduce):  # noqa: SIM102 (traced: `and` does not combine traced values)
+        if (bid >= k2b.RED0) & (bid < k2b.RED0 + k2b.RED_TASKS):
+            k2b.stage_reduce(c, bid - k2b.RED0)
+    stamp(on, tls, tid, 7)
 
 
 _BUILDS: dict = {}
@@ -171,9 +412,33 @@ def build(key: K2Build):
     if key in _BUILDS:
         return _BUILDS[key]
     s, ns = key.tokens, key.nblocks + 1
-    assert 1 <= s <= k2b.MOE_TILE_TOKENS
-    max_u = s * k2b.TOPK
-    route_rows = 8 if s <= 8 else k2b.MOE_TILE_TOKENS
+    assert 1 <= s <= (64 if key.wide else k2b.MOE_TILE_TOKENS)
+    assert key.shared_down_workers in (0, 16, 32, 64)
+    assert not key.shared_down_first or key.shared_down_workers == 0
+    assert not key.shared_h_once or key.shared_down_workers == 0
+    assert not key.tail_panels or key.wide and s > 16
+    assert key.latent_quant_workers in (0, 1, 2, 4, 8)
+    assert not (key.latent_quant_workers and key.producer_latent_quant)
+    assert key.down_workers in (0, 16, 32, 64, 96, 112)
+    assert not key.full_shared_pipeline or key.shared_down_workers > 0
+    assert 1 <= key.down_batch <= 10
+    assert key.inter_vec in (1, 2)
+    assert key.latq_vec in (1, 2)
+    assert not key.wide or not key.stream_oproj
+    assert not key.cache_wide_inter or key.wide and key.compact_lds
+    assert not key.stream_attn or key.wide and s > 16
+    assert not key.stream_latent or key.wide and key.producer_latent_quant
+    assert not key.sparse_routes or key.wide and key.compact_lds
+    assert not key.stream_x or key.wide and s > 16
+    assert not key.front_panels or key.stream_x
+    assert not key.stream_x or s * (ns + 1) + 128 <= WAVES * 64 * 4
+    assert s <= 32 or key.stream_attn and key.compact_lds and not key.cache_wide_inter
+    stream_inter = key.down_workers > 0 or key.wide and not key.cache_wide_inter
+    route_type = fx.Int8 if key.compact_lds else fx.Int32
+    scale_type = fx.Uint8 if key.compact_lds else fx.Int32
+    contrib_type = fx.BFloat16 if key.compact_lds else fx.Float32
+    max_u = min(s * k2b.TOPK, k2b.E) if key.wide else s * k2b.TOPK
+    route_rows = s if key.wide else 8 if s <= 8 else 16
     lay = scratch_layout(key)
     play = peer_layout(s)
     half = peer_bytes(s) // 2
@@ -183,36 +448,69 @@ def build(key: K2Build):
         route: fx.Array[fx.Int32, s * 2 * k2b.TOPK, 16]
         flag: fx.Array[fx.Int32, k2b.E, 16]
         expert: fx.Array[fx.Int32, max_u, 16]
-        kof: fx.Array[fx.Int32, max_u * route_rows, 16]
+        kof: fx.Array[route_type, 4 if key.sparse_routes else max_u * route_rows, 16]
+        begins: fx.Array[fx.Int32, max_u if key.sparse_routes else 4, 16]
+        counts: fx.Array[fx.Int32, max_u if key.sparse_routes else 4, 16]
+        cursor: fx.Array[fx.Int32, max_u if key.sparse_routes else 4, 16]
+        picks: fx.Array[fx.Uint16, s * k2b.TOPK if key.sparse_routes else 4, 16]
         scan: fx.Array[fx.Int32, WAVES, 16]
 
     @fx.struct
     class EarlyLds:
         xl: fx.Array[
             fx.Int32,
-            s * ((HIDDEN if s <= 8 else 4096) + gemv.LDS_PAD) // 2,
+            min(s, 16) * ((HIDDEN if s <= 8 else 4096) + gemv.LDS_PAD) // 2,
             16,
         ]
 
     @fx.struct
     class AttnLds:
-        vals: fx.Array[fx.Float32, s * ns * COLS, 16]
-        dl: fx.Array[fx.Float32, s * COLS, 16]
+        vals: fx.Array[
+            fx.Float32,
+            (
+                min(s, 16) * ns
+                if key.front_panels
+                else s * (1 if key.stream_attn else ns)
+            )
+            * COLS,
+            16,
+        ]
+        dl: fx.Array[fx.Float32, (min(s, 16) if key.front_panels else s) * COLS, 16]
 
     @fx.struct
     class UgLds:
-        latq: fx.Array[fx.Int32, s * k2b.LAT // 8, 16]
-        latsc: fx.Array[fx.Int32, s * k2b.LAT // 32, 16]
+        latq: fx.Array[fx.Int32, 4 if key.stream_latent else s * k2b.LAT // 8, 16]
+        latsc: fx.Array[scale_type, 4 if key.stream_latent else s * k2b.LAT // 32, 16]
         av: fx.Array[fx.Float32, THREADS, 16]
 
     @fx.struct
     class DownLds:
-        interq: fx.Array[fx.Int32, s * k2b.TOPK * 48, 16]
-        intsc: fx.Array[fx.Int32, s * k2b.TOPK * k2b.UG_GROUPS, 16]
-        contrib: fx.Array[fx.Float32, s * k2b.TOPK * k2b.ROWS, 16]
+        interq: fx.Array[fx.Int32, 4 if stream_inter else s * k2b.TOPK * 48, 16]
+        intsc: fx.Array[
+            scale_type,
+            4 if stream_inter else s * k2b.TOPK * k2b.UG_GROUPS,
+            16,
+        ]
+        contrib: fx.Array[contrib_type, s * k2b.TOPK * k2b.ROWS, 16]
+
+    @fx.union
+    class RoutedStages:
+        ug: UgLds
+        down: DownLds
+
+    @fx.struct
+    class RoutedLds:
+        route: RouteLds
+        stages: RoutedStages
 
     @fx.union
     class StageLds:
+        early: EarlyLds
+        attn: AttnLds
+        routed: RoutedLds
+
+    @fx.union
+    class LegacyStages:
         early: EarlyLds
         attn: AttnLds
         ug: UgLds
@@ -227,6 +525,24 @@ def build(key: K2Build):
     name = (
         f"k3_mono_k2_s{s}_nb{key.nblocks}_x{int(key.reset)}_r{int(key.reduce)}"
         f"_g{int(key.diag)}_t{int(key.timeline)}"
+        f"_sd{key.shared_down_workers}_ha{int(key.parallel_shared_activation)}"
+        f"_sdf{int(key.shared_down_first)}"
+        f"_h1{int(key.shared_h_once)}"
+        f"_tp{int(key.tail_panels)}"
+        f"_lw{int(key.late_shared_wait)}"
+        f"_lq{key.latent_quant_workers}"
+        f"_lqp{int(key.producer_latent_quant)}"
+        f"_dw{key.down_workers}_db{key.down_batch}_iv{key.inter_vec}"
+        f"_lv{key.latq_vec}"
+        f"_sx{int(key.stream_x)}"
+        f"_fp{int(key.front_panels)}"
+        f"_optrim{int(key.trim_oproj)}_opstream{int(key.stream_oproj)}"
+        f"_opbalanced{int(key.balanced_oproj)}_wide{int(key.wide)}"
+        f"_compact{int(key.compact_lds)}_cached{int(key.cache_wide_inter)}"
+        f"_separate{int(key.separate_wide_lds)}"
+        f"_attnstream{int(key.stream_attn)}"
+        f"_latstream{int(key.stream_latent)}"
+        f"_sparse{int(key.sparse_routes)}"
     )
 
     @flyc.kernel(name=name, known_block_size=[THREADS, 1, 1])
@@ -265,9 +581,16 @@ def build(key: K2Build):
         bid = fx.block_idx.x
         alloc = fx.SharedAllocator()
         lds = alloc.allocate(Smem).peek()
-        rl = alloc.allocate(RouteLds).peek()
-        st = alloc.allocate(StageLds)
-        el, al, ul, dl = st.early.peek(), st.attn.peek(), st.ug.peek(), st.down.peek()
+        if const_expr(key.wide and not key.separate_wide_lds):
+            st = alloc.allocate(StageLds)
+            rl = st.routed.route.peek()
+            el, al = st.early.peek(), st.attn.peek()
+            ul, dl = st.routed.stages.ug.peek(), st.routed.stages.down.peek()
+        else:
+            rl = alloc.allocate(RouteLds).peek()
+            st = alloc.allocate(LegacyStages)
+            el, al = st.early.peek(), st.attn.peek()
+            ul, dl = st.ug.peek(), st.down.peek()
         if const_expr(key.diag):
             mb = Mailbox(step_tag(epoch, layer) - 1, diag, region_ids(REGIONS))
         else:
@@ -276,7 +599,7 @@ def build(key: K2Build):
         bases = peer_bases(peers, TP_)
         own = load_ptr64(peers, rank)
         peer = {}
-        for region in ("rlog", "lat", "latr", "final", "ar"):
+        for region in ("rlog", "lat", "latr", "final", "ar", "qlat", "qlatsc"):
             off = play[region][0]
             peer[region] = [
                 shift(preg(b, off, region), fx.Int64(par) * half) for b in bases
@@ -284,7 +607,7 @@ def build(key: K2Build):
             peer[region + "_own"] = shift(preg(own, off, region), fx.Int64(par) * half)
         c = {
             "S": s,
-            "max_u": s * k2b.TOPK,
+            "max_u": max_u,
             "route_rows": route_rows,
             "NS": ns,
             "NB": key.nblocks,
@@ -301,7 +624,22 @@ def build(key: K2Build):
             "out_eps": key.out_eps,
             "ln_eps": key.ln_eps,
             "xp": key.xp,
-            "lazy_inter": True,
+            "stream_inter": stream_inter,
+            "compact_lds": key.compact_lds,
+            "stream_attn": key.stream_attn,
+            "stream_latent": key.stream_latent,
+            "sparse_routes": key.sparse_routes,
+            "stream_x": key.stream_x,
+            "down_batch": key.down_batch,
+            "inter_vec": key.inter_vec,
+            "latq_vec": key.latq_vec,
+            "trim_oproj": key.trim_oproj,
+            "stream_oproj": key.stream_oproj,
+            "balanced_oproj": key.balanced_oproj,
+            "route_timeline": key.timeline,
+            "late_shared_wait": key.late_shared_wait,
+            "tail_panels": key.tail_panels,
+            "producer_quant": key.producer_latent_quant,
             "put": mb.put,
             "put_bf": mb.put_bf,
             "put_words": mb.put_words,
@@ -325,6 +663,10 @@ def build(key: K2Build):
                 "flag": rl.flag.ptr,
                 "expert": rl.expert.ptr,
                 "kof": rl.kof.ptr,
+                "begins": rl.begins.ptr,
+                "counts": rl.counts.ptr,
+                "cursor": rl.cursor.ptr,
+                "picks": rl.picks.ptr,
             },
             "xbuf": scratch + fx.Int64(lay["xrow"][0]),
             "xflags": NA,
@@ -374,88 +716,20 @@ def build(key: K2Build):
             "shrdy",
         ):
             c[region] = sreg(scratch, lay[region][0], region)
+        if const_expr(key.latent_quant_workers > 0):
+            for region in ("shared_latq", "shared_latsc"):
+                c[region] = sreg(scratch, lay[region][0], region)
+        if const_expr(key.producer_latent_quant):
+            c["local_lat"] = sreg(scratch, lay["local_lat"][0], "local_lat")
+            c["shared_latq"] = peer["qlat_own"]
+            c["shared_latsc"] = peer["qlatsc_own"]
+        if const_expr(key.stream_x):
+            c["xpanels"] = sreg(scratch, lay["xpanels"][0], "xpanels")
+        if const_expr(key.tail_panels):
+            for region in ("lnpanels", "shpanels"):
+                c[region] = sreg(scratch, lay[region][0], region)
+        run_stages(c, key)
         on, tls = key.timeline, lds.tls.ptr
-        stamp_begin(on, tls, tid, TL_POINTS)
-        # ---- o_proj on every CTA past AttnRes's
-        eb = bid - E0
-        lb = eb - k2b.R_TASKS
-        is_r = (bid >= E0) & (eb < k2b.R_TASKS)
-        is_l = (bid >= E0 + k2b.R_TASKS) & (lb < k2b.L_TASKS)
-        # o_proj first (every AttnRes CTA waits on the slowest partial; loads
-        # retire in order), the early weights after: they land before x does
-        if is_r:
-            stage_oproj(c, bid - O0)
-            stamp(on, tls, tid, 1)
-            rops = k2b.early_loads(c, 0, eb // k2b.R_PARTS, eb % k2b.R_PARTS)
-            k2b.early_compute(c, 0, eb // k2b.R_PARTS, eb % k2b.R_PARTS, rops)
-        if is_l:
-            stage_oproj(c, bid - O0)
-            stamp(on, tls, tid, 1)
-            lops = k2b.early_loads(c, 1, lb // k2b.L_PARTS, lb % k2b.L_PARTS)
-            k2b.early_compute(c, 1, lb // k2b.L_PARTS, lb % k2b.L_PARTS, lops)
-        if (bid >= O0) & ~is_r & ~is_l:
-            stage_oproj(c, bid - O0)
-            stamp(on, tls, tid, 1)
-            gi = bid - O0
-            if gi < k2b.G_TASKS:
-                k2b.early_compute(c, 2, gi, 0, k2b.early_loads(c, 2, gi, 0))
-        # ---- AttnRes: the reduced o_proj -> x; then route / SiTU
-        if bid < NA:
-            k2a.stage_reduce(c, bid)
-            stamp(on, tls, tid, 1)
-            stage_slice(c, bid)
-            stamp(on, tls, tid, 2)
-            if bid < s:
-                stage_gate(c, bid)
-            stamp(on, tls, tid, 8)
-            stage_mix(c, bid)
-            stamp(on, tls, tid, 9)
-            stamp(on, tls, tid, 13)
-            if bid < s:
-                k2b.stage_route(c, bid)
-            stamp(on, tls, tid, 10)
-            if (bid >= H0) & (bid < H0 + s):
-                k2b.stage_h(c, bid - H0)
-        if bid >= NA:
-            stamp(on, tls, tid, 2)
-        # ---- the routed experts
-        # the latent (ready ~10 us before the route) quantized first
-        k2b.load_latq(c)
-        stamp(on, tls, tid, 12)
-        nu = k2b.load_route(c)
-        stamp(on, tls, tid, 11)
-        total = nu * k2b.UG_GROUPS
-        last = total - 1
-        # reversed placement: the round's leftover tasks go to the high CTAs,
-        # whose early work ends first (the AttnRes / route CTAs start ug last)
-        task = BLOCKS - 1 - bid
-        ops = k2b.ug_loads(c, fx.min(task, last))
-        while task < total:
-            nxt = task + BLOCKS
-            ops_n = k2b.ug_loads(c, fx.min(nxt, last))
-            k2b.stage_ug(c, task, ops)
-            task = nxt
-            ops = ops_n
-        stamp(on, tls, tid, 3)
-        if bid < k2b.DOWN_TASKS:
-            dops = k2b.down_loads(c, bid, nu, fx.min(c["wave"], nu - 1))
-            k2b.load_inter(c)
-            stamp(on, tls, tid, 15)
-            k2b.stage_down(c, bid, nu, dops)
-            stamp(on, tls, tid, 16)
-        k2b.run_sdown_rest(c, bid, w_sd)
-        k2b.run_sdown(c, bid, w_sd)
-        stamp(on, tls, tid, 4)
-        if (bid >= k2b.LN0) & (bid < k2b.LN0 + k2b.LN_TASKS):
-            k2b.stage_lnorm(c, bid - k2b.LN0)
-        stamp(on, tls, tid, 5)
-        if bid < k2b.UP_TASKS:
-            k2b.stage_up(c, bid)
-        stamp(on, tls, tid, 6)
-        if const_expr(key.reduce):  # noqa: SIM102 (traced: `and` does not combine traced values)
-            if (bid >= k2b.RED0) & (bid < k2b.RED0 + k2b.RED_TASKS):
-                k2b.stage_reduce(c, bid - k2b.RED0)
-        stamp(on, tls, tid, 7)
         stamp_flush(on, tls, tl, tid, bid, TL_POINTS)
 
     @flyc.jit

@@ -32,7 +32,7 @@ def alloc_scratch(device) -> None:
     and the epoch."""
     if _State.scratch is not None:
         return
-    from vllm.models.kimi_k3.amd.mono import layer
+    from vllm.models.kimi_k3.amd.mono import layer, overlap
     from vllm.models.kimi_k3.amd.mono.attention import kda
     from vllm.models.kimi_k3.amd.mono.stages import moe
 
@@ -51,6 +51,33 @@ def alloc_scratch(device) -> None:
         ),
         moe.scratch_bytes(moe.MoeBuild(tokens=moe.MOE_TILE_TOKENS)),
         layer.scratch_bytes(layer.K2Build(tokens=moe.MOE_TILE_TOKENS, nblocks=8)),
+        layer.scratch_bytes(
+            layer.K2Build(
+                tokens=48,
+                nblocks=8,
+                producer_latent_quant=True,
+                stream_x=True,
+                wide=True,
+                tail_panels=True,
+            )
+        ),
+        overlap.scratch_bytes(
+            overlap.OverlapBuild(
+                kda.KdaPreBuild(
+                    tokens=16,
+                    qlen=1,
+                    nblocks=8,
+                    delta=True,
+                    state_len=3 + TILE_TOKENS,
+                    state_rows=16,
+                    pipeline=33562624,
+                ),
+                layer.K2Build(tokens=16, nblocks=8, producer_latent_quant=True),
+                k1_workers=256,
+                reuse_workers=True,
+                tagged_core=True,
+            )
+        ),
     )
     _State.zero_bytes = (n + 255) // 256 * 256
     _State.scratch = torch.zeros(_State.zero_bytes, dtype=torch.uint8, device=device)
@@ -73,9 +100,7 @@ def peers(device) -> "PeerBuffer":
         from vllm.models.kimi_k3.amd.mono.stages import moe
 
         tp = get_tp_group()
-        nbytes = max(
-            moe.peer_bytes(moe.MOE_TILE_TOKENS), layer.peer_bytes(moe.MOE_TILE_TOKENS)
-        )
+        nbytes = max(moe.peer_bytes(moe.MOE_TILE_TOKENS), layer.peer_bytes(48))
         buf = PeerBuffer(nbytes, tp.cpu_group, tp.rank_in_group, tp.world_size, device)
         buf.bytes.zero_()
         _State.peers = buf

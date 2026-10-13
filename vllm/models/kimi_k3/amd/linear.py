@@ -637,7 +637,7 @@ class KimiDecoderLayer(nn.Module):
 
         self._mono_kda: mono.MonoKda | None = None
         self._mono_k2: mono.MonoK2 | None = None
-        if self.use_attn_residuals and mono.enabled():
+        if self.use_attn_residuals and mono.kda_enabled():
             if config.is_kda_layer(layer_idx):
                 runner = mono.MonoKda(self)
                 self._mono_kda = runner if runner.ok else None
@@ -750,6 +750,15 @@ class KimiDecoderLayer(nn.Module):
         prefix_delta: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         assert self._mono_kda is not None
+        if (
+            self._mono_k2 is not None
+            and prefix_sum.size(0) <= 16
+            and self._mono_k2.eligible(prefix_sum)
+            and not self._mono_kda.serialized_offload
+        ):
+            return self._mono_kda.fused(
+                prefix_sum, block_residual, prefix_delta, positions
+            )
         core = self._mono_kda.core(prefix_sum, block_residual, prefix_delta, positions)
         if self._mono_k2 is not None and self._mono_k2.eligible(core):
             if self.is_block_write_layer:

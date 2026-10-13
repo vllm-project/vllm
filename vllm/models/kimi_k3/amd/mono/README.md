@@ -1,55 +1,70 @@
 # Kimi-K3 mono decode (MI355X)
 
-Opt-in with `VLLM_ROCM_MONO_DECODE=1`. A spec-verify step of at most 16 rows
-runs each decoder layer as two persistent FlyDSL launches (256 CTAs, all
-resident), the TP all-reduces in-kernel over peer memory. For 17..64 rows,
-KDA layers use K1 followed by the existing projection and AITER MoE path:
+Enable with `VLLM_ROCM_MONO_DECODE=1` on TP8, gfx950. This experimental
+extension is based on #60683 at `9c6c96d8ef`, before its shared MonoKernel
+runtime refactor. Its serving results do not apply to that PR's current head.
 
-- **K1** (`attention/kda.py`, KDA layers): AttnRes, in_proj, f_b, spec conv,
-  KDA recurrence, gated RMSNorm.
-- **K2** (`layer.py`, MoE layers): `attention/back.py` (o_proj + all-reduce +
-  MLP AttnRes) then `stages/moe.py` (router, top-16, MXFP4 experts, shared
-  experts, latent all-reduce + RMSNorm, up_proj, final all-reduce).
+K1 covers AttnRes, input projection, f_b, speculative convolution, KDA
+recurrence and gated RMSNorm. K2 covers output projection, the TP reduction,
+MLP AttnRes, routed and shared experts, latent reduction and RMSNorm, up
+projection and the final TP reduction. MLA's attention and DCP output merge
+finish before K2 consumes the local output; this implementation does not fuse
+the MLA prologue or epilogue.
 
-```text
-amd/mono_decode.py   eligibility per layer / per step, vLLM tensors -> kernel inputs
-amd/mono/
-    runner.py        scratch, step epoch, peer memory
-    layer.py         K2
-    attention/       kda.py (K1), back.py
-    stages/          moe.py, gemv.py
-    common/          device ops, mailbox sync, MX helpers, plan / build keys,
-                     peer memory, debug (adapted from ROCm/ATOM atom/mono, MIT)
-```
+## Serving selection
 
-Rows are processed in tiles of at most 16 inside each persistent launch. K1
-tiles keep complete requests together; each request has at most 8 verification
-tokens. LDS is sized for one tile. K1 scratch regions are separate for
-each tile, so workers can advance without overwriting another tile's mailbox.
-For more than 8 rows, K1 stages 4096 then 3072 input columns in LDS and keeps
-both projection groups' accumulators in registers. Each weight slice serves
-all token tiles before the next slice is loaded. K2/MoE stages wide GEMVs in
-4096-column slices and uses a bounded expert-to-token table for each tile;
-K2/MoE runs only one tile.
+| Rows in the step | Selected implementation |
+| --- | --- |
+| 1–16 | K2; eligible KDA steps with verification lengths 2, 4, 6 or 8 use the combined K1/K2 schedule outside FULL graphs |
+| 18, 20, 24 | K2 with sparse expert routing and compact LDS |
+| 28, 30, 32, 36, 40, 42, 48 | K2 also streams projection panels to their consumers |
+| 48 | K2 also stages shared H once and pipelines latent RMSNorm/shared-down into up projection in 16-token panels |
+| Other widths | Existing projection and AITER MoE path; KDA may still use an eligible K1 path through 64 rows |
 
-K1 groups 32 state rows per KDA task for 24 rows with verification length 6,
-and 64 state rows for 48/4 and 50/5. Serving also selects 32 state rows for
-32/8 and 64 for 64/8. Each thread holds multiple state rows in registers and
-shares the gates and q/k normalization between them. Other shapes retain
-16 state rows per task.
+M56 and M64 do not select the wide K2 kernel. Measurements have not established
+a complete K1+K2 benefit there. Prefill, mixed steps, unsupported layouts and
+unsupported graph metadata retain their existing paths.
 
-K1 caches the callable returned by `flydsl.compiler.compile` per build.
-Metadata pointers, strides, layer tags, and streams are runtime arguments;
-the compile call itself executes the first launch. This avoids repeating
-FlyDSL's signature and JIT-cache analysis at each eager graph break.
+## Data and worker scheduling
 
-K2 and standalone mono MoE support up to 16 rows in one tile. Larger batches
-use the production projection and AITER MoE path because persistent MoE
-regresses at larger row counts. K1 remains eligible up to 64 rows. M64 has not
-shown a stable end-to-end gain at conc8. Performance results apply to
-TP8/DCP1 with DSpark k=7; other parallelism and verification lengths require separate measurement.
+K1 processes complete requests in token tiles, stages input columns in bounded
+LDS slices, and retains projection accumulators across those slices. Selected
+small shapes pack projection weights once and use separate worker assignments
+for projection and recurrence. Compiled callables and stable argument tuples
+are cached; state indices, accepted counts and epochs remain runtime inputs.
 
-Constraints: TP8, gfx950, at most 64 rows for K1 and 16 for K2/MoE; K1 needs
-breakable CUDA graphs. Off with a KV connector: the kernels spin-wait on
-every CTA being resident, and a connector's copy kernels on another stream can hold the CUs.
-Any other step takes the existing path.
+The combined small-row schedule reuses workers as K1 output becomes ready.
+Epoch-tagged handoffs prevent K2 from consuming incomplete local output, and
+the TP reductions wait for the corresponding peer data. Experimental reserved
+worker and ring-buffer schedules remain available to the benchmark; serving
+selects the worker-reuse schedule.
+
+Wide K2 uses compact routing metadata and a sparse expert-pick list. It keeps
+expert intermediates in LDS through 32 rows and streams them above that size.
+From 28 rows, projection consumers advance after their input panel is ready.
+At M48, each up-projection panel waits for all of its latent-normalization
+producers and its shared-expert producer. These local readiness flags have
+separate scratch space; peer-buffer layout and reduction ordering are retained.
+
+## Compatibility and validation
+
+Full mono is disabled with a KV connector. Local post-projection fusion has
+separate eligibility checks; the serialized-offload K1 experiment additionally
+requires an explicit connector option. Neither changes the default offload
+gate. FULL-only graph metadata is excluded from these KDA fusion paths.
+InferenceX conc8 with CPU offload and FULL graphs therefore does not exercise
+the complete pipeline.
+
+The numerical suite is `tests/models/kimi_k3/test_amd_mono.py`. Kernel
+benchmarks live under `benchmarks/kernels/benchmark_kimi_k3_mono*.py`; they
+include actual original-PR and non-mono operator chains, state/reset checks and
+changed-input graph replay. Full-model accuracy equivalence is not established
+by kernel-level checks.
+
+The rev022 serving snapshot measured 472.28 output tok/s at 8k/1k, conc8/k5,
+GPU KV and PIECEWISE graphs: +5.83% versus saved non-mono and -0.74% versus
+rev018. This was one formal round against saved three-round medians. Its
+scheduler reported a node failure and some raw artifacts were not archived;
+the result is provisional and does not establish an incremental gain from
+the M48 tail-panel change. The original-PR comparison includes its overhead
+when unsupported widths fall back to ordinary operators.
