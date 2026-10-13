@@ -36,7 +36,7 @@ from vllm.models.common.mono.guards import (
     _set_capture_sizes,
     configure,
 )
-from vllm.models.common.mono.layer import attach, forward_layer
+from vllm.models.common.mono.layer import attach, kernel_for_layer
 from vllm.models.common.mono.spec import Feature, MonoUnsupported
 
 KERNEL_BACKENDS = ("aiter", "flydsl")
@@ -55,6 +55,18 @@ def forward(config, mode: CUDAGraphMode, attn_metadata: Any) -> Iterator[None]:
     )
     with override_forward_context(context):
         yield
+
+
+def forward_layer(mono, i: int, layer, positions, *args, **kwargs):
+    """Layer ``i`` on its kernel when this step runs on the kernels, else the
+    vLLM layer unchanged: the layer loop a model writes for itself."""
+    k = kernel_for_layer(mono, i, positions)
+    step = None if mono is None else mono.step
+    if k is not None and step is not None:
+        out = k.launch(step, positions, *args, **kwargs)
+        if out is not None:
+            return out
+    return layer(positions, *args, **kwargs)
 
 
 def _spy(spec, field: str, calls: list):

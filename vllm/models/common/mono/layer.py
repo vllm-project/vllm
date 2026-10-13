@@ -1,11 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The hooks a model calls: ``attach`` after load, ``forward_layer`` in its
+"""The hooks a model calls: ``attach`` after load, ``kernel_for_layer`` in its
 layer loop."""
 
 from typing import TYPE_CHECKING
 
-from vllm.config.compilation import CUDAGraphMode
 from vllm.logger import init_logger
 from vllm.models.common.mono.guards import (
     _enabled,
@@ -13,15 +12,13 @@ from vllm.models.common.mono.guards import (
     _refusal_message,
     _select_spec,
 )
-from vllm.models.common.mono.runtime import MonoRuntime, drain
+from vllm.models.common.mono.runtime import MonoRuntime
 from vllm.models.common.mono.spec import LayerKernel, MonoUnsupported
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
 logger = init_logger(__name__)
-
-_ATTACHED: MonoRuntime | None = None
 
 
 def attach(model, vllm_config: "VllmConfig", specs_path: str) -> MonoRuntime | None:
@@ -42,7 +39,6 @@ def attach(model, vllm_config: "VllmConfig", specs_path: str) -> MonoRuntime | N
             another) refused the loaded model.
 
     """
-    global _ATTACHED
     if not _enabled(vllm_config):
         return None
     spec, refusals = _select_spec(_load_specs(specs_path), vllm_config)
@@ -52,16 +48,15 @@ def attach(model, vllm_config: "VllmConfig", specs_path: str) -> MonoRuntime | N
     if not mono.kernels:
         logger.info("MonoKernel %s: no layer takes a kernel", spec.name)
         return None
-    _ATTACHED = mono
     return mono
 
 
-def kernel_for(mono: MonoRuntime | None, i: int, positions) -> LayerKernel | None:
+def kernel_for_layer(mono: MonoRuntime | None, i: int, positions) -> LayerKernel | None:
     """Layer ``i``'s kernel when this step runs on the kernels, else None.
 
-    The first call under a forward context decides for every layer. A model
-    whose layer signature or dispatch site does not fit ``forward_layer`` looks
-    the kernel up itself and calls ``launch`` where it suits the layer.
+    The first call under a forward context decides for every layer. The model
+    calls ``launch`` where it suits the layer, and runs the vLLM layer
+    unchanged when this returns None.
     """
     if mono is None:
         return None
@@ -70,24 +65,3 @@ def kernel_for(mono: MonoRuntime | None, i: int, positions) -> LayerKernel | Non
     if step is None:
         return None
     return mono.kernels.get((i, step.width))
-
-
-def forward_layer(mono: MonoRuntime | None, i: int, layer, positions, *args, **kwargs):
-    """Layer ``i`` on its kernel when this step runs on the kernels, else the
-    vLLM layer unchanged."""
-    k = kernel_for(mono, i, positions)
-    step = None if mono is None else mono.step
-    if k is not None and step is not None:
-        out = k.launch(step, positions, *args, **kwargs)
-        if out is not None:
-            return out
-    return layer(positions, *args, **kwargs)
-
-
-def account_step(num_tokens: int, runtime_mode: CUDAGraphMode) -> dict[str, int] | None:
-    """Called by the runner after every served step: counts it, and returns the
-    counters to export since the last call (``runtime.drain``)."""
-    if _ATTACHED is None:
-        return None
-    _ATTACHED.account(num_tokens, runtime_mode)
-    return drain()

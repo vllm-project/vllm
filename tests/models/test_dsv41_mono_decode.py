@@ -20,7 +20,7 @@ import torch
 from tests.models.common.mono.kit import MonoConformance, forward
 from vllm.config.compilation import CUDAGraphMode
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import Mxfp4MoeBackend
-from vllm.models.common.mono.layer import attach, kernel_for
+from vllm.models.common.mono.layer import attach, kernel_for_layer
 from vllm.models.common.mono.spec import MonoUnsupported
 from vllm.models.deepseek_v41.amd import mono_spec as ms
 
@@ -273,7 +273,7 @@ class TestDsv41Spec(MonoConformance):
     def _run_layers(self, mono, model) -> None:
         positions = self._positions(mono)
         for i, layer in enumerate(model.layers):
-            kernel_for(mono, i, positions)
+            kernel_for_layer(mono, i, positions)
 
 
 def _rocm_platform() -> ModuleType:
@@ -474,7 +474,7 @@ def test_whole_launch_runs_the_layer(monkeypatch):
     mono, model = _attach(monkeypatch)
     positions = torch.zeros(1, dtype=torch.long)
     with forward(mono.ctx.vllm_config, CUDAGraphMode.FULL, _metadata(model)):
-        kernel = kernel_for(mono, 1, positions)
+        kernel = kernel_for_layer(mono, 1, positions)
         out = kernel.launch(
             mono.step,
             torch.zeros(1, HIDDEN),
@@ -497,7 +497,7 @@ def test_first_layer_takes_the_embedding(monkeypatch):
     mono, model = _attach(monkeypatch)
     positions = torch.zeros(1, dtype=torch.long)
     with forward(mono.ctx.vllm_config, CUDAGraphMode.FULL, _metadata(model)):
-        kernel = kernel_for(mono, 0, positions)
+        kernel = kernel_for_layer(mono, 0, positions)
         out = kernel.launch(
             mono.step, torch.zeros(1, HIDDEN), positions, None, None, None, None
         )
@@ -509,7 +509,7 @@ def test_ffn_launch_takes_wo_b_unreduced(monkeypatch):
     mono, model = _attach(monkeypatch, compressor=object())
     positions = torch.zeros(1, dtype=torch.long)
     with forward(mono.ctx.vllm_config, CUDAGraphMode.FULL, _metadata(model)):
-        kernel = kernel_for(mono, 1, positions)
+        kernel = kernel_for_layer(mono, 1, positions)
         assert kernel.ffn_only
         out = kernel.launch(
             mono.step,
@@ -528,7 +528,7 @@ def test_launch_declines_a_layout_it_cannot_read(monkeypatch):
     mono, model = _attach(monkeypatch)
     positions = torch.zeros(1, dtype=torch.long)
     with forward(mono.ctx.vllm_config, CUDAGraphMode.FULL, _metadata(model)):
-        kernel = kernel_for(mono, 1, positions)
+        kernel = kernel_for_layer(mono, 1, positions)
         out = kernel.launch(
             mono.step, torch.zeros(1, 4, HIDDEN), positions, None, None, None, None
         )

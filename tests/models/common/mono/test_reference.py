@@ -9,10 +9,10 @@ import pytest
 import torch
 
 from tests.models.common.mono import reference
-from tests.models.common.mono.kit import MonoConformance, forward
+from tests.models.common.mono.kit import MonoConformance, forward, forward_layer
 from vllm.config.compilation import CUDAGraphMode
 from vllm.models.common.mono.guards import _enabled, _select_spec
-from vllm.models.common.mono.layer import attach, forward_layer
+from vllm.models.common.mono.layer import attach
 from vllm.models.common.mono.spec import MonoUnsupported
 
 SPECS_PATH = "tests.models.common.mono.reference:MONO_SPECS"

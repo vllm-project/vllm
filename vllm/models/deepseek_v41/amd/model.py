@@ -50,7 +50,7 @@ from vllm.model_executor.models.utils import (
     make_layers,
     maybe_prefix,
 )
-from vllm.models.common.mono import attach, configure, kernel_for
+from vllm.models.common.mono import attach, configure, kernel_for_layer
 from vllm.models.common.mono.runtime import MonoRuntime
 from vllm.models.common.ops.sequence_parallel import (
     sp_all_gather,
@@ -280,7 +280,8 @@ class DeepseekV4DecoderLayer(nn.Module):
         mono: MonoRuntime | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         kernel = typing.cast(
-            DSV41LayerKernel | None, kernel_for(mono, self.attn.layer_id, positions)
+            DSV41LayerKernel | None,
+            kernel_for_layer(mono, self.attn.layer_id, positions),
         )
         step = None if mono is None else mono.step
         if kernel is not None and step is not None and not kernel.ffn_only:
