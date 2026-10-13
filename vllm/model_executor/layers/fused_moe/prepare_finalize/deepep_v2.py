@@ -111,6 +111,11 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         self.use_fp8_dispatch = use_fp8_dispatch
         self.sp_size = sp_size
 
+        # Set by FusedMoEKernelModularImpl when the experts globalize
+        # recv_topk_idx themselves, letting the decode path skip the standalone
+        # _globalize_recv_topk_idx launch.
+        self.defer_globalize = False
+
         # DBO microbatching: one handle slot per micro-batch.
         self.handles: list[deep_ep.EPHandle | None] = [None, None]
 
@@ -210,18 +215,21 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             expert_x, expert_x_scale = recv_x, None
 
         # Dispatch leaves padding rows uninitialized. Convert local expert IDs
-        # to global IDs and mask padding before expert kernels build routing.
-        recv_topk_idx = _globalize_recv_topk_idx(
-            recv_topk_idx,
-            psum_recv_per_rank,
-            self.rank_expert_offset,
-            self.num_experts,
-        )
+        # to global IDs and mask padding unless the expert backend handles it.
+        if not self.defer_globalize:
+            recv_topk_idx = _globalize_recv_topk_idx(
+                recv_topk_idx,
+                psum_recv_per_rank,
+                self.rank_expert_offset,
+                self.num_experts,
+            )
         expert_tokens_meta = mk.ExpertTokensMetadata(
             expert_num_tokens=None,
             expert_num_tokens_cpu=None,
         )
         expert_tokens_meta.psum_recv_per_rank = psum_recv_per_rank
+        if self.defer_globalize:
+            expert_tokens_meta.rank_expert_offset = self.rank_expert_offset
 
         if _quantize_before_dispatch(quant_config, defer_input_quant):
             if quant_config.quant_dtype == "mxfp8" and expert_x_scale is not None:

@@ -100,7 +100,10 @@ def _run(pf, output: torch.Tensor, do_async: bool):
 
 
 @requires_deep_ep_v2
-def test_prepare_keeps_nonexpanded_layout_across_capture_transitions(monkeypatch):
+@pytest.mark.parametrize("defer_globalize", [False, True])
+def test_prepare_keeps_nonexpanded_layout_across_capture_transitions(
+    monkeypatch, defer_globalize
+):
     """Capture transitions preserve routing shape and GPU-side receive counts."""
     context = None
     capturing = False
@@ -109,9 +112,17 @@ def test_prepare_keeps_nonexpanded_layout_across_capture_transitions(monkeypatch
         _dv2, "is_forward_context_available", lambda: context is not None
     )
     monkeypatch.setattr(_dv2, "get_forward_context", lambda: context)
-    monkeypatch.setattr(_dv2, "_globalize_recv_topk_idx", lambda ids, *args: ids)
+    globalize_calls = []
+
+    def globalize(ids, *args):
+        globalize_calls.append(args)
+        return ids + 4
+
+    monkeypatch.setattr(_dv2, "_globalize_recv_topk_idx", globalize)
     tokens = torch.ones(3, 8, dtype=torch.bfloat16)
     pf = _make_pf(tokens)
+    pf.defer_globalize = defer_globalize
+    pf.rank_expert_offset = 4
     for mode, capturing in (
         (None, False),
         (CUDAGraphMode.NONE, False),
@@ -128,6 +139,7 @@ def test_prepare_keeps_nonexpanded_layout_across_capture_transitions(monkeypatch
             if mode is None
             else SimpleNamespace(cudagraph_runtime_mode=mode, dp_metadata=None)
         )
+        globalize_calls.clear()
         recv = pf.prepare_async(
             tokens,
             torch.ones(3, 2),
@@ -151,6 +163,9 @@ def test_prepare_keeps_nonexpanded_layout_across_capture_transitions(monkeypatch
         assert ids.shape == (3, 2)
         assert meta.expert_num_tokens is None
         assert meta.psum_recv_per_rank is not None
+        assert len(globalize_calls) == (0 if defer_globalize else 1)
+        assert torch.all(ids == (0 if defer_globalize else 4))
+        assert meta.rank_expert_offset == (4 if defer_globalize else None)
 
 
 @requires_deep_ep_v2
