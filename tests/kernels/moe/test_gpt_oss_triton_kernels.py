@@ -32,8 +32,11 @@ from triton_kernels.testing import assert_close
 
 from vllm.model_executor.layers.fused_moe.config import mxfp4_w4a16_moe_quant_config
 from vllm.model_executor.layers.fused_moe.experts.gpt_oss_triton_kernels_moe import (
+    _sm12x_block_m,
     triton_kernel_moe_forward,
 )
+from vllm.model_executor.layers.fused_moe.oracle import mxfp4 as mxfp4_oracle
+from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import Mxfp4MoeBackend
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import mx_scale_kwargs
 from vllm.utils.math_utils import round_up
 
@@ -314,9 +317,13 @@ def test_equiv(num_token, a_dtype, w_dtype, tp, workspace_init):
         pc2,
     ) = init_compute_data(M, K, N, E, a_dtype, w_dtype, num_warps=8)
 
-    if current_platform.is_device_capability_family(100):
+    if current_platform.is_device_capability_family(
+        100
+    ) or current_platform.is_device_capability_family(120):
+        # Mirrors `_swizzle_mxfp4`; SM12x also needs epilogue_subtile=1.
         constraints = {
             "is_persistent": True,
+            "epilogue_subtile": 1,
         }
         opt_flags.update_opt_flags_constraints(constraints)
 
@@ -354,6 +361,38 @@ def test_equiv(num_token, a_dtype, w_dtype, tp, workspace_init):
         topk=topk,
     )
     assert_close(ref=out_ref, tri=out_triton_monolithic, maxtol=0.025, rmstol=0.005)
+
+
+@pytest.mark.parametrize(
+    ("num_rows", "num_experts", "expected"),
+    [
+        (4, 32, 16),  # bs=1 decode: below the 16-row floor
+        (32 * 20, 32, 32),  # 20 tokens/expert rounds up to 32
+        (32 * 33, 32, 32),  # heuristic would pick 64; capped for 99KB smem
+        (12000, 32, 32),  # prefill: heuristic would pick 128
+    ],
+)
+def test_sm12x_block_m(num_rows, num_experts, expected):
+    assert _sm12x_block_m(num_rows, num_experts) == expected
+
+
+@pytest.mark.parametrize("sm12x", [True, False])
+def test_gpt_oss_priority_prefers_marlin_on_sm12x(
+    monkeypatch: pytest.MonkeyPatch, sm12x: bool
+):
+    """SM12x runs the OAI Triton kernels at small tiles only, so MARLIN must
+    stay the default there while TRITON remains selectable explicitly."""
+    monkeypatch.setattr(mxfp4_oracle.current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(
+        mxfp4_oracle.current_platform,
+        "is_device_capability_family",
+        lambda family: sm12x and family == 120,
+    )
+    order = mxfp4_oracle._get_priority_backends_for_gpt_oss()
+    triton_first = order.index(Mxfp4MoeBackend.TRITON) < order.index(
+        Mxfp4MoeBackend.MARLIN
+    )
+    assert triton_first is not sm12x
 
 
 def test_unit_shuffle():

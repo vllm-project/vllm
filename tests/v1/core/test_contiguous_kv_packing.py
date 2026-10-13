@@ -10,6 +10,7 @@ block); the allocation is the same either way.
 """
 
 from dataclasses import replace
+from math import lcm
 from unittest.mock import MagicMock
 
 import pytest
@@ -17,18 +18,22 @@ import torch
 
 from vllm.config import CacheConfig
 from vllm.v1.core.kv_cache_manager import KVCacheManager
-from vllm.v1.core.kv_cache_utils import (
+from vllm.v1.core.kv_cache_planning import (
     _get_kv_cache_bytes_per_block,
     _get_packed_kv_cache_groups,
     _pool_bytes_per_block,
-    generate_scheduler_kv_cache_config,
     get_kv_cache_config_from_groups,
     get_kv_cache_groups,
+)
+from vllm.v1.core.kv_cache_utils import (
+    generate_scheduler_kv_cache_config,
     resolve_kv_cache_block_sizes,
 )
+from vllm.v1.hisparse.layout import _build_hisparse_kv_cache_tensors
 from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
     FullAttentionSpec,
+    HiSparseHotSpec,
     KVCacheGroupSpec,
     KVCacheLayout,
     KVCacheSpec,
@@ -77,6 +82,30 @@ def _mock_vllm_config(layout: str | None):
     config.cache_config.kv_cache_layout = layout
     config.attention_config.hisparse_config = None
     return config
+
+
+def test_packed_alignment_preserves_hot_pages_and_generic_stride():
+    """One shared stride must satisfy both constraints, regardless of rounding order."""
+    spec = replace(_mla(128), block_stride_alignment=1152)
+    hot = HiSparseHotSpec(block_size=16, page_size=5120, blocks_per_request=2)
+    groups = [KVCacheGroupSpec(["attention"], spec), KVCacheGroupSpec(["hot"], hot)]
+    alignment = lcm(1152, hot.page_size_bytes)
+    stride = _pool_bytes_per_block(_mock_vllm_config("BLHNC"), groups)
+    assert stride == alignment
+    layout = KVCacheLayout.BLHNC
+    tensors = _build_hisparse_kv_cache_tensors(groups, 3, 3 * stride, layout, stride)
+    assert {tensor.block_stride for tensor in tensors} == {alignment}
+    assert {tensor.size for tensor in tensors} == {3 * alignment}
+
+
+@pytest.mark.parametrize("spec", [_full(), _mla(128)])
+def test_block_alignment_survives_merge_and_rejects_incompatible_specs(spec):
+    aligned = replace(spec, block_stride_alignment=512)
+    assert type(spec).merge([aligned, aligned]).block_stride_alignment == 512
+    with pytest.raises(AssertionError):
+        type(spec).merge([aligned, spec])
+    with pytest.raises(ValueError, match="must be positive"):
+        replace(spec, block_stride_alignment=0)
 
 
 def _pages(groups) -> dict[str, int]:
@@ -227,7 +256,7 @@ class TestCSALinearGrouping:
     def test_every_group_fits_one_packed_block(self):
         config = _shared_layout_config()
         groups = get_kv_cache_groups(config, _make_csa_linear_specs())
-        bytes_per_block = _get_kv_cache_bytes_per_block(groups)
+        bytes_per_block = _get_kv_cache_bytes_per_block(groups, KVCacheLayout.BLHNC)
 
         pages = _pages(groups)
         for group in groups:
@@ -249,7 +278,14 @@ class TestCSALinearGrouping:
         neither divides the hit length nor bounds the (empty) block list."""
         config = _shared_layout_config()
         config.cache_config.enable_prefix_caching = True
-        groups = get_kv_cache_groups(config, _make_csa_linear_specs())
+        config.cache_config.mamba_cache_mode = "align"
+        specs = {
+            name: replace(spec, mamba_cache_mode="align")
+            if isinstance(spec, MambaSpec)
+            else spec
+            for name, spec in _make_csa_linear_specs().items()
+        }
+        groups = get_kv_cache_groups(config, specs)
         kv_cache_config = get_kv_cache_config_from_groups(
             config, groups, available_memory=BYTES_PER_BLOCK * 64
         )
@@ -391,7 +427,7 @@ class TestCSALinearGrouping:
         groups = _get_packed_kv_cache_groups(config, specs)
         gdn = [g for g in groups if g.layer_names[0].startswith("gdn.")]
 
-        assert _get_kv_cache_bytes_per_block(groups) == sum(
+        assert _get_kv_cache_bytes_per_block(groups, KVCacheLayout.BLHNC) == sum(
             specs[name].page_size_bytes for name in specs if name.startswith("wide.")
         )
         # That block holds every GDN state at once, so the repeat pattern alone
@@ -438,7 +474,7 @@ class TestSlidingWindowBucketCap:
         pages = _pages(groups)
         main = next(g for g in groups if "layers.2.attn" in g.layer_names)
         main_bytes = sum(pages[n] for n in main.layer_names)
-        assert _get_kv_cache_bytes_per_block(groups) == main_bytes
+        assert _get_kv_cache_bytes_per_block(groups, KVCacheLayout.BLHNC) == main_bytes
         swa_groups = [g for g in groups if g.layer_names[0].endswith(".swa")]
         per_group = main_bytes // pages["layers.0.swa"]
         assert len(swa_groups) == -(-43 // per_group)
@@ -452,9 +488,9 @@ class TestSlidingWindowBucketCap:
 class TestDensePacking:
     def test_bytes_per_block_is_largest_group(self):
         groups, g1, g2 = _mixed_page_groups()
-        assert _get_kv_cache_bytes_per_block(groups) == _expected_bytes_per_block(
-            groups
-        )
+        assert _get_kv_cache_bytes_per_block(
+            groups, KVCacheLayout.BLHNC
+        ) == _expected_bytes_per_block(groups)
 
         config = get_kv_cache_config_from_groups(
             _mock_vllm_config("BLHNC"), groups, MEMORY
@@ -527,6 +563,20 @@ class TestDensePacking:
             assert idx_tensor.offset == 2 * _mla(512).page_size_bytes
             assert mla_tensor.block_stride == block_stride
 
+    def test_layer_outer_pads_only_unaligned_pages(self):
+        """Layer-outer block strides are pages, so only an unaligned page pads."""
+        mla_page = _mla(512).page_size_bytes
+        idx = replace(_mla(128), block_stride_alignment=12288)
+        groups = [_uniform_group({"mla.0": _mla(512), "idx.0": idx})]
+        config = get_kv_cache_config_from_groups(
+            _mock_vllm_config("LBNHC"), groups, MEMORY
+        )
+        mla_tensor, idx_tensor = config.kv_cache_tensors
+        assert config.num_blocks == MEMORY // (mla_page + 12288)
+        assert (mla_tensor.block_stride, idx_tensor.block_stride) == (mla_page, 12288)
+        assert idx_tensor.offset == mla_page * config.num_blocks
+        _bind(config, "LBNHC")
+
     def test_overlaid_groups_alias_and_stay_isolated(self):
         groups, g1, g2 = _mixed_page_groups()
         # Overlay models resolve to a block-outer layout at backend selection (the
@@ -535,7 +585,9 @@ class TestDensePacking:
             _mock_vllm_config("BLNHC"), groups, MEMORY
         )
         assert config.num_blocks == MEMORY // _expected_bytes_per_block(groups)
-        assert _pool_bytes_per_block(groups) == _expected_bytes_per_block(groups)
+        assert _pool_bytes_per_block(
+            _mock_vllm_config("BLNHC"), groups
+        ) == _expected_bytes_per_block(groups)
 
         views = _bind(config, "BLNHC")
         assert set(views) == set(g1) | set(g2)
@@ -640,7 +692,10 @@ class TestCompressorRingGroup:
         assert len(ring_groups) == 1
         assert not ring_groups[0].kv_cache_spec.prefix_cacheable
         kv_cache_config = get_kv_cache_config_from_groups(
-            config, groups, available_memory=64 * _get_kv_cache_bytes_per_block(groups)
+            config,
+            groups,
+            available_memory=64
+            * _get_kv_cache_bytes_per_block(groups, KVCacheLayout.BLHNC),
         )
         assert resolve_kv_cache_block_sizes(kv_cache_config, config) == (128, 64)
         manager = KVCacheManager(
@@ -689,7 +744,10 @@ class TestSWABoundedReplayGrouping:
             for g in groups
         ) == [(False, 128)] * 4 + [(True, 0)]
         kv_cache_config = get_kv_cache_config_from_groups(
-            config, groups, available_memory=64 * _get_kv_cache_bytes_per_block(groups)
+            config,
+            groups,
+            available_memory=64
+            * _get_kv_cache_bytes_per_block(groups, KVCacheLayout.BLHNC),
         )
         manager = KVCacheManager(
             generate_scheduler_kv_cache_config([kv_cache_config]),

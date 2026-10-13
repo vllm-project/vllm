@@ -243,6 +243,13 @@ def test_draft_model_supports_eplb_for_dsv41_dspark(dspark_vllm_config):
     )
 
 
+def test_draft_model_supports_eplb_requires_draft_moe(dspark_vllm_config):
+    assert not draft_model_supports_eplb(
+        dspark_vllm_config.speculative_config,
+        None,
+    )
+
+
 def test_eplb_registers_dspark_draft_model(
     dspark_vllm_config, monkeypatch: pytest.MonkeyPatch
 ):
