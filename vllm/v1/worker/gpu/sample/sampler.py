@@ -40,6 +40,8 @@ from vllm.v1.worker.gpu.states import RequestState
 
 
 class Sampler:
+    sampling_states_cls: type[SamplingStates] = SamplingStates
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -59,7 +61,7 @@ class Sampler:
         self.use_fp64_gumbel = use_fp64_gumbel
 
         self.req_states = req_states
-        self.sampling_states = SamplingStates(max_num_reqs, vocab_size)
+        self.sampling_states = self.sampling_states_cls(max_num_reqs, vocab_size)
 
         lp_req_state = LogitsProcRequestState.from_request_state(req_states)
         self.penalties_state = PenaltiesState(vllm_config, lp_req_state)
