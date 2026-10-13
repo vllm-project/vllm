@@ -18,6 +18,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
 )
 from vllm.platforms import current_platform
+from vllm.utils.math_utils import round_up
 
 from ..base import MMLinearLayerConfig
 
@@ -129,7 +130,7 @@ class FP8ScaledMMLinearKernel(
         torch._scaled_mm requires; apply_weights pads the input to match."""
         weight_name = self.layer_param_names[0]
         weight = getattr(layer, weight_name)
-        pad_k = -weight.shape[0] % 16
+        pad_k = round_up(weight.shape[0], 16) - weight.shape[0]
         if pad_k > 0:
             # Pad the (N, K) view so the weight stays column-major.
             padded = torch.nn.functional.pad(weight.t(), (0, pad_k)).t()
