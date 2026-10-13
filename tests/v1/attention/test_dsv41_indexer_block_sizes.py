@@ -2,15 +2,18 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """DSv4.1 SM12x kernel block-size declarations and resolved sizes.
 
-Pins the declarations touched by the SM12x uniform-64 change and the block
-size resolved through AttentionBackend.get_preferred_block_size for the
-DSv4.1 backend set (indexer, FlashInfer sparse, sparse SWA, compressor),
-for the default launch and with --block-size 64 / 128.
+Pins the SM12x declarations touched by the uniform-64 change (indexer,
+FlashInfer sparse), the deliberately-unchanged sparse_mla base declaration,
+the SWA/compressor geometry, and the block size resolved through
+Platform._preferred_block_size_for_backends for the full DSv4.1 backend set.
 """
+
+from types import SimpleNamespace
 
 import pytest
 
 from vllm.platforms import current_platform
+from vllm.platforms.interface import Platform
 from vllm.v1.attention.backend import MultipleOf
 from vllm.v1.attention.backends.mla.indexer import DeepseekV41IndexerBackend
 from vllm.models.deepseek_v41.sparse_mla import DeepseekV4SparseMLABackend
@@ -20,19 +23,21 @@ from vllm.models.deepseek_v41.nvidia.flashinfer_sparse import (
 )
 from vllm.models.deepseek_v41.compressor import CompressorBackend
 
-# Expected SM12x declarations. NOTE: if the PR adopts [64, 128] (keeps
-# native 128-token kernel blocks for --block-size 128), update UNIFORM
-# accordingly — the resolution tests below are written to pass for both
-# [64] and [64, 128] since min() and the modulo checks agree.
+# SM12x declarations changed by this PR: 64-token kernel blocks.
 UNIFORM = [64]
 
-# The backends actually touched by the SM12x change. The sparse_mla base
-# declaration is deliberately NOT touched: on SM12x it is unreachable
-# (FLASHMLA_SPARSE_DSV41 gates supports_compute_capability to major 9/10,
-# and the ROCm backend overrides it).
+# Backends actually touched. The sparse_mla base declaration is deliberately
+# NOT touched: on SM12x it is unreachable (FLASHMLA_SPARSE_DSV41 gates
+# supports_compute_capability to major 9/10, and the ROCm backend overrides it).
 V41_BACKENDS = [
     DeepseekV41IndexerBackend,
     DeepseekV4FlashInferMLASparseBackend,
+]
+
+# The full DSv4.1 backend set the platform resolves the default launch over.
+V41_SET = V41_BACKENDS + [
+    DeepseekSparseSWAFlashInferBackend,
+    CompressorBackend,
 ]
 
 
@@ -69,6 +74,18 @@ def test_sm12x_swa_and_compressor_unchanged(sm12x):
     assert isinstance(comp[0], MultipleOf) and comp[0].base == 1
 
 
+def test_sm12x_default_launch_resolves_64_for_full_set(sm12x):
+    # What this PR actually changes: the default launch resolves through
+    # the platform over the whole DSv4.1 backend set. With the indexer and
+    # FlashInfer sparse backends declaring [64] on SM12x (and the SWA path
+    # a multiple of 32), the smallest size every backend accepts is 64 —
+    # instead of the stock 128 that the FlashInfer SM120 kernels reject.
+    resolved = Platform._preferred_block_size_for_backends(
+        V41_SET, 16, SimpleNamespace()
+    )
+    assert resolved == 64
+
+
 @pytest.mark.parametrize("default,expected", [(16, 64), (64, 64), (128, 128)])
 @pytest.mark.parametrize("backend", V41_BACKENDS)
 def test_sm12x_resolved_block_size(sm12x, backend, default, expected):
@@ -78,11 +95,13 @@ def test_sm12x_resolved_block_size(sm12x, backend, default, expected):
     assert backend.get_preferred_block_size(default) == expected
 
 
-def test_non_sm12x_declarations_unchanged(monkeypatch):
+@pytest.mark.parametrize("family,base_expected", [(90, [64]), (100, [128])])
+def test_non_sm12x_sparse_mla_base_declaration(monkeypatch, family, base_expected):
     monkeypatch.setattr(current_platform, "is_rocm", lambda: False)
     monkeypatch.setattr(
-        current_platform, "is_device_capability_family", lambda family: False
+        current_platform, "is_device_capability_family", lambda f: f == family
     )
-    # Hopper keeps the 64/128 split, FlashInfer sparse keeps 128.
-    assert DeepseekV4SparseMLABackend.get_supported_kernel_block_sizes() == [128]
+    # Off SM12x the sparse_mla base keeps its Hopper/Blackwell split and the
+    # FlashInfer sparse backend keeps 128 — the change is SM12x-only.
+    assert DeepseekV4SparseMLABackend.get_supported_kernel_block_sizes() == base_expected
     assert DeepseekV4FlashInferMLASparseBackend.get_supported_kernel_block_sizes() == [128]
