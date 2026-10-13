@@ -2622,7 +2622,7 @@ def mooncake_sleep_worker(kv_role: str):
 
 
 @pytest.mark.parametrize("kv_role", ["kv_producer", "kv_consumer", "kv_both"])
-def test_sleep_cycle_releases_and_restores_registration(kv_role: str):
+def test_sleep_cycle_unregisters_and_restores_registration(kv_role: str):
     """Nothing stays registered while the KV caches are unmapped, and waking up
     registers the same addresses again."""
     with mooncake_sleep_worker(kv_role) as (connector, expected):
@@ -2630,8 +2630,8 @@ def test_sleep_cycle_releases_and_restores_registration(kv_role: str):
         assert engine.registered == expected
         connector.restore_kv_caches()  # nothing released: a wake-up without sleep
         for _ in range(2):
-            connector.release_kv_caches()
-            connector.release_kv_caches()  # idempotent: sleeping after a discard
+            connector.unregister_kv_caches()
+            connector.unregister_kv_caches()  # idempotent: sleeping after a discard
             assert engine.registered == {}
             connector.restore_kv_caches()
             connector.restore_kv_caches()  # idempotent: a retried wake-up
@@ -2648,7 +2648,7 @@ def test_sleep_cycle_releases_and_restores_registration(kv_role: str):
     ],
     ids=["ready_to_send", "not_ready", "expired", "expired_while_sending"],
 )
-def test_release_waits_for_blocks_ready_to_send(
+def test_unregister_waits_for_blocks_ready_to_send(
     monkeypatch, ready: bool, expired: bool, sending: int, waits: bool
 ):
     """Blocks that D may still pull keep their registration until the abort
@@ -2676,10 +2676,10 @@ def test_release_waits_for_blocks_ready_to_send(
 
         if waits:
             with pytest.raises(TimeoutError, match="did not finish in time"):
-                connector.release_kv_caches()
+                connector.unregister_kv_caches()
             assert worker.engine.registered == expected
         else:
-            connector.release_kv_caches()
+            connector.unregister_kv_caches()
             assert worker.engine.registered == {}
 
 
@@ -2689,7 +2689,7 @@ def test_release_waits_for_blocks_ready_to_send(
     [([[0]], True), ([[]], False)],
     ids=["pull", "notify_only"],
 )
-def test_release_waits_for_pull_into_local_blocks(
+def test_unregister_waits_for_pull_into_local_blocks(
     local_block_ids, waits: bool, bootstrap: bool
 ):
     """Memory that P may still write into keeps its registration until the pull,
@@ -2736,7 +2736,7 @@ def test_release_waits_for_pull_into_local_blocks(
             assert pulling.wait(timeout=10)
 
             releasing = threading.Thread(
-                target=connector.release_kv_caches, daemon=True
+                target=connector.unregister_kv_caches, daemon=True
             )
             releasing.start()
             releasing.join(timeout=0.3 if waits else 10)
@@ -2751,7 +2751,7 @@ def test_release_waits_for_pull_into_local_blocks(
         assert worker.engine.registered == {}
 
 
-def test_release_times_out_on_a_wedged_loop(monkeypatch):
+def test_unregister_times_out_on_a_wedged_loop(monkeypatch):
     """A wedged transfer loop fails the release at the deadline, keeping the
     registration, instead of hanging it."""
     monkeypatch.setattr(
@@ -2763,7 +2763,7 @@ def test_release_times_out_on_a_wedged_loop(monkeypatch):
         worker.sender_loop.call_soon_threadsafe(unwedge.wait, 10)
         try:
             with pytest.raises(TimeoutError, match="did not finish in time"):
-                connector.release_kv_caches()
+                connector.unregister_kv_caches()
             assert worker.engine.registered == expected
         finally:
             unwedge.set()

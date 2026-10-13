@@ -300,13 +300,13 @@ class KVConnectorBase_V1(ABC):
         """
         return
 
-    def release_kv_caches(self) -> None:
+    def unregister_kv_caches(self) -> None:
         """Before the KV cache is unmapped: wait for in-flight transfers, then
-        drop registrations of that memory. Idempotent."""
+        drop registrations of that memory without freeing it. Idempotent."""
         return
 
     def restore_kv_caches(self) -> None:
-        """After the KV cache is mapped again: redo what `release_kv_caches`
+        """After the KV cache is mapped again: redo what `unregister_kv_caches`
         dropped. Idempotent."""
         return
 

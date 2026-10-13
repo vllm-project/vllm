@@ -259,15 +259,15 @@ def test_cache_hit_sources_delegate_to_selected_connector(mc: MultiConnector):
     )
 
 
-def test_multi_connector_releases_and_restores_every_child(mc: MultiConnector):
+def test_multi_connector_unregisters_and_restores_every_child(mc: MultiConnector):
     for connector in mc._connectors:
-        connector.release_kv_caches = MagicMock()
+        connector.unregister_kv_caches = MagicMock()
         connector.restore_kv_caches = MagicMock()
 
-    mc.release_kv_caches()
+    mc.unregister_kv_caches()
     mc.restore_kv_caches()
     for connector in mc._connectors:
-        connector.release_kv_caches.assert_called_once_with()
+        connector.unregister_kv_caches.assert_called_once_with()
         connector.restore_kv_caches.assert_called_once_with()
 
 

@@ -91,11 +91,11 @@ def test_worker_drives_communicator_suspension(monkeypatch, enable_nccl_comm_sus
 @pytest.mark.parametrize(
     ("call", "expected"),
     [
-        (lambda w: w.sleep(level=1), ["release", "suspend"]),
+        (lambda w: w.sleep(level=1), ["unregister", "suspend"]),
         (lambda w: w.wake_up(tags=None), ["resume", "restore"]),
         (lambda w: w.wake_up(tags=["kv_cache"]), ["resume", "restore"]),
         (lambda w: w.wake_up(tags=["weights"]), ["resume"]),
-        (lambda w: w.discard(("kv_cache",)), ["release", "discard"]),
+        (lambda w: w.discard(("kv_cache",)), ["unregister", "discard"]),
         (lambda w: w.discard(("weights",)), ["discard"]),
     ],
     ids=[
@@ -107,10 +107,10 @@ def test_worker_drives_communicator_suspension(monkeypatch, enable_nccl_comm_sus
         "discard-weights",
     ],
 )
-def test_worker_releases_kv_connector_around_kv_cache_remap(
+def test_worker_unregisters_kv_connector_around_kv_cache_remap(
     monkeypatch, call, expected
 ):
-    """The KV connector is released before the KV cache is unmapped and restored
+    """The KV connector is unregistered before the KV cache is unmapped and restored
     after it is mapped again, and only then."""
     from types import SimpleNamespace
 
@@ -124,7 +124,7 @@ def test_worker_releases_kv_connector_around_kv_cache_remap(
         discard=lambda tags: calls.append("discard"),
     )
     connector = SimpleNamespace(
-        release_kv_caches=lambda: calls.append("release"),
+        unregister_kv_caches=lambda: calls.append("unregister"),
         restore_kv_caches=lambda: calls.append("restore"),
     )
     worker = object.__new__(Worker)

@@ -263,9 +263,9 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         for c in self._connectors:
             c.register_kv_caches(kv_caches)
 
-    def release_kv_caches(self) -> None:
+    def unregister_kv_caches(self) -> None:
         for c in self._connectors:
-            c.release_kv_caches()
+            c.unregister_kv_caches()
 
     def restore_kv_caches(self) -> None:
         for c in self._connectors:

@@ -816,9 +816,9 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_worker is not None
         self.connector_worker.register_kv_caches(kv_caches)
 
-    def release_kv_caches(self) -> None:
+    def unregister_kv_caches(self) -> None:
         assert self.connector_worker is not None
-        self.connector_worker.release_kv_caches()
+        self.connector_worker.unregister_kv_caches()
 
     def restore_kv_caches(self) -> None:
         assert self.connector_worker is not None
@@ -1260,7 +1260,7 @@ class MooncakeConnectorWorker:
         self.opaque_packed_storages: set[int] = set()
         self.seen_base_addresses: list[int] = []
         self._kv_data_lens: list[int] = []
-        self._kv_released = False
+        self._kv_unregistered = False
         # Pulls on the receiver loop that may still write into local blocks.
         self._local_pulls = 0
         # Aligned regions depend only on the peer's registered layout.
@@ -2236,10 +2236,10 @@ class MooncakeConnectorWorker:
                     f"{ready_timeout:.0f}s."
                 )
 
-    def release_kv_caches(self) -> None:
+    def unregister_kv_caches(self) -> None:
         """Unregister the KV caches once no send or pull uses them; TimeoutError
         past the abort timeout. Idempotent."""
-        if self._kv_released or not self.seen_base_addresses:
+        if self._kv_unregistered or not self.seen_base_addresses:
             return
         deadline = time.perf_counter() + envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT
         try:
@@ -2251,18 +2251,18 @@ class MooncakeConnectorWorker:
             raise TimeoutError("Mooncake KV transfers did not finish in time") from e
         if self.engine.batch_unregister_memory(self.seen_base_addresses) != 0:
             raise RuntimeError("Mooncake batch memory unregistration failed.")
-        self._kv_released = True
+        self._kv_unregistered = True
 
     def restore_kv_caches(self) -> None:
         """Register the released KV caches again: same addresses, new pages."""
-        if not self._kv_released:
+        if not self._kv_unregistered:
             return
         ret_value = self.engine.batch_register_memory(
             self.seen_base_addresses, self._kv_data_lens
         )
         if ret_value != 0:
             raise RuntimeError("Mooncake batch memory registration failed.")
-        self._kv_released = False
+        self._kv_unregistered = False
 
     def _transfers_pending(self, deadline: float) -> bool:
         pending = []
