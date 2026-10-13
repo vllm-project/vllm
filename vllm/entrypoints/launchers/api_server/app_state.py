@@ -157,6 +157,19 @@ async def init_app_state(
 
         init_pooling_state(engine_client, state, args, request_logger, supported_tasks)
 
+    from vllm.entrypoints.generate.structured_decisions.api_router import (
+        init_structured_decisions_state,
+    )
+
+    init_structured_decisions_state(
+        engine_client,
+        state,
+        args,
+        request_logger,
+        supported_tasks,
+        default_chat_template_kwargs,
+    )
+
     await init_endpoint_plugins_state(engine_client, state, args)
 
     state.enable_server_load_tracking = args.enable_server_load_tracking

@@ -204,7 +204,7 @@ impl ToolCallMixVariant {
 }
 
 impl RoundtripCase {
-    /// Qwen3 XML tool-call format with `qwen3` reasoning tags.
+    /// Qwen3 JSON tool-call format with `qwen3` reasoning tags.
     fn qwen3() -> Self {
         Self {
             model_id: "Qwen/Qwen3-0.6B",
@@ -1051,6 +1051,7 @@ fn decoded_completion_stream(
                     kv_transfer_params: None,
                     ec_transfer_params: None,
                     sampling_mask: None,
+                    timestamps: Default::default(),
                 })),
             }
         });
@@ -1063,6 +1064,7 @@ fn decoded_completion_stream(
                 kv_transfer_params: None,
                 ec_transfer_params: None,
                 sampling_mask: None,
+                timestamps: Default::default(),
             });
             events.push(DecodedTextEvent::TextDelta {
                 decoded: chunk.delta,
