@@ -336,7 +336,12 @@ class HiSparseMLAIndexGroup(SparseMLAIndexGroup):
         cache = self.cache(layer_index)
         prefill = attn_metadata.prefill
         assert prefill is not None and prefill.host_staging_plans is not None
-        (plan,) = prefill.host_staging_plans
+        plans = prefill.host_staging_plans
+        assert len(plans) == 1, (
+            "fp8_ds_mla prefills do not stage through the shared workspace, so "
+            f"the builder makes one unbounded plan; got {len(plans)}."
+        )
+        (plan,) = plans
         assert cache.view is not None and cache.block_table is not None
         state_indices = cache.runtime.request_state_indices
         assert state_indices is not None

@@ -211,9 +211,6 @@ class FlashInferMLASparseSM120Impl(SparseMLACommonImpl[FlashInferMLASparseMetada
             None,
         )
 
-    def _new_mqa_output(self, q: torch.Tensor) -> torch.Tensor:
-        return q.new_empty((q.shape[0], self.num_heads, self.kv_lora_rank))
-
     def _run_mqa_kernel(
         self,
         q: torch.Tensor,
