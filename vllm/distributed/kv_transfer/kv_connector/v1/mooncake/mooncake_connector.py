@@ -803,9 +803,18 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
     ############################################################
     @classmethod
     def supports_sleep_mode(cls, kv_transfer_config: KVTransferConfig) -> bool:
-        # Only RDMA peers refresh a stale remote key. Either variable, set to any
-        # value, switches Mooncake to its NVLink transport.
-        if any(v in os.environ for v in ("MC_FORCE_MNNVL", "MC_INTRANODE_NVLINK")):
+        # Only the classic engine over RDMA is validated: its peers refresh a stale
+        # remote key. Any of these variables, set to any value, selects an NVLink
+        # transport or the TENT engine instead.
+        if any(
+            v in os.environ
+            for v in (
+                "MC_FORCE_MNNVL",
+                "MC_INTRANODE_NVLINK",
+                "MC_USE_TENT",
+                "MC_USE_TEV1",
+            )
+        ):
             return False
         extra_config = kv_transfer_config.kv_connector_extra_config
         return extra_config.get("mooncake_protocol", "rdma") == "rdma"

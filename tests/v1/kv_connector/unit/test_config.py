@@ -171,9 +171,12 @@ def test_sleep_mode_refuses_unsupported_kv_connector(kv_connector, extra_config)
         )
 
 
-@pytest.mark.parametrize("env", ["MC_FORCE_MNNVL=0", "MC_INTRANODE_NVLINK=1"])
-def test_sleep_mode_refuses_mooncake_nvlink_transport(monkeypatch, env):
-    """Either variable, set to any value, selects Mooncake's NVLink transport."""
+@pytest.mark.parametrize(
+    "env",
+    ["MC_FORCE_MNNVL=0", "MC_INTRANODE_NVLINK=1", "MC_USE_TENT=1", "MC_USE_TEV1=1"],
+)
+def test_sleep_mode_refuses_unvalidated_mooncake_transport(monkeypatch, env):
+    """Each variable, set to any value, selects an NVLink transport or TENT."""
     monkeypatch.setenv(*env.split("="))
     with pytest.raises(ValueError, match="^MooncakeConnector does not support sleep"):
         _build_config(kv_connector="MooncakeConnector", enable_sleep_mode=True)
