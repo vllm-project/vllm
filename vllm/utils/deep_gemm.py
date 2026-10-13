@@ -164,6 +164,7 @@ _fp8_fp4_paged_sparse_mqa_logits_impl: Callable[..., Any] | None = None
 _get_sparse_mqa_logits_metadata_impl: Callable[..., Any] | None = None
 _get_paged_sparse_mqa_logits_metadata_impl: Callable[..., Any] | None = None
 _tf32_hc_prenorm_gemm_impl: Callable[..., Any] | None = None
+_compile_tf32_hc_prenorm_gemm_impl: Callable[..., Any] | None = None
 _mega_mhc_impl: Callable[..., Any] | None = None
 _bf16_mega_gate_impl: Callable[..., Any] | None = None
 _get_mn_major_tma_aligned_tensor_impl: Callable[..., Any] | None = None
@@ -242,6 +243,7 @@ def _lazy_init() -> None:
     global _get_sparse_mqa_logits_metadata_impl
     global _get_paged_sparse_mqa_logits_metadata_impl
     global _tf32_hc_prenorm_gemm_impl, _mega_mhc_impl
+    global _compile_tf32_hc_prenorm_gemm_impl
     global _bf16_mega_gate_impl
     global _get_mn_major_tma_aligned_tensor_impl
     global _get_mk_alignment_for_contiguous_layout_impl
@@ -318,6 +320,9 @@ def _lazy_init() -> None:
         _dg, "get_paged_sparse_mqa_logits_metadata", None
     )
     _tf32_hc_prenorm_gemm_impl = getattr(_dg, "tf32_hc_prenorm_gemm", None)
+    _compile_tf32_hc_prenorm_gemm_impl = getattr(
+        _dg, "compile_tf32_hc_prenorm_gemm", None
+    )
     _mega_mhc_impl = getattr(_dg, "mega_mhc", None)
     _bf16_mega_gate_impl = getattr(_dg, "bf16_mega_gate", None)
     _get_mn_major_tma_aligned_tensor_impl = getattr(
@@ -927,6 +932,13 @@ def fp8_fp4_paged_sparse_mqa_logits(
         num_max_sparse_blocks,
         sparse_block_kv,
     )
+
+
+def compile_tf32_hc_prenorm_gemm(n: int, k: int, num_splits: int) -> None:
+    _lazy_init()
+    if _compile_tf32_hc_prenorm_gemm_impl is None:
+        _missing()
+    _compile_tf32_hc_prenorm_gemm_impl(n, k, num_splits)
 
 
 def tf32_hc_prenorm_gemm(

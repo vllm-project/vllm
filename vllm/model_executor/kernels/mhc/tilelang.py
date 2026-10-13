@@ -32,7 +32,6 @@ def _hc_prenorm_gemm_outputs(
     )
     from vllm.utils.deep_gemm import (
         is_deep_gemm_supported,
-        tf32_hc_prenorm_gemm,
     )
 
     use_deep_gemm = is_deep_gemm_supported() or not use_tilelang_fallback
@@ -54,7 +53,11 @@ def _hc_prenorm_gemm_outputs(
         device=x.device,
     )
     if use_deep_gemm:
-        tf32_hc_prenorm_gemm(x, fn, out, sqrsum, n_splits)
+        from vllm.model_executor.kernels.mhc.warmup import (
+            HC_PRENORM_GEMM_DEEP_GEMM_KERNEL,
+        )
+
+        HC_PRENORM_GEMM_DEEP_GEMM_KERNEL(x, fn, out, sqrsum, n_splits)
     else:
         from vllm.model_executor.kernels.mhc.tilelang_kernels import (
             _HC_PRENORM_GEMM_TILELANG_KERNEL,
