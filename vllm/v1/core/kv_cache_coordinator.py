@@ -62,6 +62,30 @@ def _validate_prefix_cache_retention_interval(
         )
 
 
+def replay_boundaries(
+    num_prompt_tokens: int, scheduler_block_size: int, use_eagle: bool
+) -> tuple[int, ...]:
+    """Positions a later request replaying a prompt can resume at.
+
+    A hit is the shortest across all groups, so every group retains state
+    at each position; EAGLE groups also keep the block above, which they
+    match and drop back from (see ``reachable_block_mask``).
+
+    Two positions are reachable: a resend of the identical prompt is capped
+    at ``num_tokens - 1`` (its last token is recomputed for logits), a
+    longer sibling matches the final aligned block. They differ only on a
+    block-aligned prompt, where retaining just the higher one collapses the
+    resend's hit to 0. The alignment is the scheduler block size, not the
+    finer hash granularity, which would over-estimate the reach.
+    """
+    if not use_eagle:
+        return (num_prompt_tokens - 1,)
+    block = scheduler_block_size
+    resend = (num_prompt_tokens - 1) // block * block
+    extension = num_prompt_tokens // block * block
+    return tuple(sorted({max(resend - block, 0), max(extension - block, 0)}))
+
+
 class KVCacheCoordinator(ABC):
     """Coordinate the KV cache of different KV cache groups."""
 
@@ -319,27 +343,6 @@ class KVCacheCoordinator(ABC):
             for manager in self.single_type_managers
         )
 
-    def get_replay_boundaries(self, request: Request) -> tuple[int, ...]:
-        """Positions a later request replaying this prompt can resume at.
-
-        A hit is the shortest across all groups, so every group retains state
-        at each position; EAGLE groups also keep the block above, which they
-        match and drop back from (see ``reachable_block_mask``).
-
-        Two positions are reachable: a resend of the identical prompt is capped
-        at ``num_tokens - 1`` (its last token is recomputed for logits), a
-        longer sibling matches the final aligned block. They differ only on a
-        block-aligned prompt, where retaining just the higher one collapses the
-        resend's hit to 0. The alignment is the scheduler block size, not the
-        finer hash granularity, which would over-estimate the reach.
-        """
-        if not self.eagle_group_ids:
-            return (request.num_prompt_tokens - 1,)
-        block = self.scheduler_block_size
-        resend = (request.num_prompt_tokens - 1) // block * block
-        extension = request.num_prompt_tokens // block * block
-        return tuple(sorted({max(resend - block, 0), max(extension - block, 0)}))
-
     def get_num_cacheable_tokens(
         self, num_computed_tokens: int, kv_cache_group_id: int
     ) -> int:
@@ -358,7 +361,11 @@ class KVCacheCoordinator(ABC):
                 (including tokens that are already cached).
 
         """
-        boundaries = self.get_replay_boundaries(request)
+        boundaries = replay_boundaries(
+            request.num_prompt_tokens,
+            self.scheduler_block_size,
+            use_eagle=bool(self.eagle_group_ids),
+        )
         for group_id, manager in enumerate(self.single_type_managers):
             if not manager.enable_caching:
                 continue
@@ -418,23 +425,6 @@ class KVCacheCoordinator(ABC):
         for manager in self.single_type_managers:
             blocks.extend(manager.pop_blocks_for_free(request_id))
         return blocks
-
-    def get_num_common_prefix_blocks(self, running_request_id: str) -> list[int]:
-        """Get the number of common prefix blocks for all requests with allocated
-        KV cache for each kv cache group.
-
-        Args:
-            running_request_id: The request ID of any running request, used to
-                identify the common prefix blocks.
-
-        Returns:
-            list[int]: The number of common prefix blocks for each kv cache group.
-
-        """
-        return [
-            manager.get_num_common_prefix_blocks(running_request_id)
-            for manager in self.single_type_managers
-        ]
 
     def remove_skipped_blocks(
         self,
@@ -519,9 +509,6 @@ class KVCacheCoordinatorNoPrefixCache(KVCacheCoordinator):
             num_prefill_lookahead=num_prefill_lookahead,
         )
         self.num_single_type_manager = len(self.single_type_managers)
-
-    def get_num_common_prefix_blocks(self, running_request_id: str) -> list[int]:
-        return [0] * self.num_single_type_manager
 
     def find_longest_cache_hit(
         self,
