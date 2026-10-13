@@ -158,8 +158,9 @@ steps:
       # cuda.bindings.driver), so it is deliberately left out here.
       - pytest -v -s models/kimi_k3
 
-- label: ":nvidia: (4xB200) Kimi K3 Prefix Cache Shard %N"
+- label: ":nvidia: (4xB200) Kimi K3 Prefix Cache"
   key: kimi-k3-prefix-cache-4xb200
+  automatic_shard: true
   timeout_in_minutes: 75
   device: b200-k8s
   num_devices: 4
@@ -177,8 +178,7 @@ steps:
   - .buildkite/scripts/install-kv-connectors.sh
   commands:
   - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
-  - pytest -v -s models/kimi_k3/test_prefix_cache.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
-  parallelism: 2
+  - pytest -v -s models/kimi_k3/test_prefix_cache.py
 
 - label: ":nvidia: (H200) GLM5Next"
   key: glm5next-unit-tests
