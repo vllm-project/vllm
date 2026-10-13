@@ -4,7 +4,7 @@ meta:
   provider: "Qwen"
   description: "Qwen3.6 dense multimodal model (27B) with gated delta networks hybrid attention, MTP, and 262K context"
   date_added: 2026-04-22
-  date_updated: 2026-09-17
+  date_updated: 2026-10-12
   tasks:
     - multimodal
     - text
@@ -20,6 +20,7 @@ meta:
     ascend_910c: verified
     arc_pro_b60: verified
     arc_pro_b70: verified
+    mi300x: verified
 
 model:
   model_id: "Qwen/Qwen3.6-27B"
@@ -29,6 +30,9 @@ model:
   parameter_count: "27B"
   active_parameters: "27B"
   context_length: 262144
+  docker_image:
+    # The AMD numbers in the guide were measured on this tag (2026-10-12).
+    amd: "vllm/vllm-openai-rocm:v0.31.0"
   base_args:
     - "--trust-remote-code"
   base_env: {}
@@ -333,6 +337,19 @@ compatible_strategies:
   - multi_node_tp
 
 hardware_overrides:
+  amd:
+    # AITER is opt-in on ROCm and the image does not set it. Without these two the
+    # server auto-selects ROCM_ATTN, which cannot use its native kernel for this
+    # model (head size 256, 784-token hybrid blocks) and falls back to a Triton
+    # path whose single-stream decode drops ~5x from ~200 to ~32k prompt tokens.
+    # ROCM_AITER_FA stays flat across context on MI300X and is also the backend
+    # #1082 moved to for gfx950 on v0.31.0. Verified 2026-10-12 on one MI300X
+    # (see the AMD section of the guide).
+    extra_args:
+      - "--attention-backend"
+      - "ROCM_AITER_FA"
+    extra_env:
+      VLLM_ROCM_USE_AITER: "1"
   xpu:
     extra_args:
       - "--enforce-eager"
@@ -358,6 +375,7 @@ guide: |
   - **Hardware (FP8):** single 40 GB GPU (H100/H200/L40S)
   - **Hardware (Int4):** single 24 GB GPU
   - **Hardware (NVFP4):** single NVIDIA Blackwell GPU (B200/B300/GB10 DGX Spark)
+  - **Hardware (AMD):** 1x MI300X (BF16 fits one 192 GB GPU)
 
   ### Install vLLM
 
@@ -524,6 +542,38 @@ guide: |
     --headless
   ```
 
+
+  ### AMD (MI300X, single GPU, BF16)
+
+  BF16 fits one MI300X. Two settings matter on ROCm and neither is on by default:
+  `VLLM_ROCM_USE_AITER=1` and an explicit attention backend. The auto-selected
+  `ROCM_ATTN` cannot use its native kernel for this model and its decode slows
+  sharply as the prompt grows; `ROCM_AITER_FA` stays flat.
+
+  ```bash
+  VLLM_ROCM_USE_AITER=1 vllm serve Qwen/Qwen3.6-27B \
+    --attention-backend ROCM_AITER_FA \
+    --enable-auto-tool-choice --tool-call-parser qwen3_coder \
+    --reasoning-parser qwen3
+  ```
+
+  MTP works with the same flags (add the **Speculative decoding** feature above).
+  Single-stream decode (tokens/s at ~200 / ~2k / ~12k / ~32k prompt tokens, 512
+  output tokens, prefix caching on, which is the default), measured 2026-10-12 on
+  one MI300X with `vllm/vllm-openai-rocm:v0.31.0`:
+
+  | | MI300X |
+  |---|---|
+  | image defaults (`ROCM_ATTN`) | 66 / 56 / 27 / 13 |
+  | AITER + `ROCM_AITER_UNIFIED_ATTN` | 66 / 66 / 60 / 49 |
+  | AITER + `ROCM_AITER_FA` | 67 / 67 / 65 / 62 |
+  | + MTP (`num_speculative_tokens: 3`) | 139 / 176 / 168 / 157 |
+
+  The synthetic prompts are repetitive, which flatters MTP; on real coding-agent
+  requests (10-25k-token contexts) decode averaged 27 tok/s with image defaults,
+  68 with `ROCM_AITER_FA` and 161 with MTP added. GSM8K (first 250 test
+  questions, greedy, thinking off) is unchanged: 0.952 image defaults, 0.952
+  `ROCM_AITER_FA`, 0.964 `ROCM_AITER_UNIFIED_ATTN`, 0.964 `ROCM_AITER_FA` + MTP.
 
   ### Docker (Intel XPU B60 / B70)
 
