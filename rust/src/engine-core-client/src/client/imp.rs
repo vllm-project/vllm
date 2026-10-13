@@ -453,10 +453,12 @@ pub(crate) async fn run_output_dispatcher_loop(
                     let has_outputs = !batch.outputs.is_empty();
                     let mut iteration_tokens: u64 =
                         batch.outputs.iter().map(output_iteration_tokens).sum();
-                    let (engine_index, timestamp) = (batch.engine_index, batch.timestamp);
+                    let (engine_index, timestamp, weight_version) =
+                        (batch.engine_index, batch.timestamp, batch.weight_version);
                     let outputs = batch.outputs.into_iter().map(|output| EngineCoreStreamOutput {
                         engine_index,
                         timestamp,
+                        weight_version: weight_version.clone(),
                         output,
                     });
                     for output in inner.send_outputs(outputs) {

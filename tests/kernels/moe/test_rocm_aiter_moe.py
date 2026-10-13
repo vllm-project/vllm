@@ -848,13 +848,13 @@ def test_activation_method_enum_values():
 def test_aiter_mxfp4_quant_scheme_support_matches_gfx950():
     """AITER MXFP4 MoE support should stay gfx950-only."""
     from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
-        AiterExperts,
+        AiterMxfp4Experts,
     )
     from vllm.model_executor.layers.quantization.utils.quant_utils import (
         kMxfp4Static,
     )
 
-    assert AiterExperts._supports_quant_scheme(kMxfp4Static, None) is on_gfx950()
+    assert AiterMxfp4Experts._supports_quant_scheme(kMxfp4Static, None) is on_gfx950()
 
 
 @pytest.mark.skipif(not on_gfx950(), reason="gfx950 ROCm only")
