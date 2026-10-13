@@ -16,12 +16,13 @@ the same launches, so the ranks' epochs agree.
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
 import torch
 
-from .attention.plan import HEAD_DIM, HIDDEN, KEYS, Dims
+from .attention.plan import HEAD_DIM, HIDDEN, KEYS, Q_RANK, Dims
 from .common.plan import BLOCKS
 from .layer import (
     EPOCH_WORDS,
@@ -170,6 +171,12 @@ class DSV41MonoLayer:
         self.klen = torch.zeros(2 * MAX_TOKENS, dtype=torch.int32, device=dev)
         self._dummy = torch.zeros(4, dtype=torch.int32, device=dev)
         self._zero_rec = torch.zeros(1024, dtype=torch.uint8, device=dev)
+        # the first layer's incoming pre-mix: stream 0 of the broadcast embedding
+        self._first_pre = torch.zeros(MAX_TOKENS, HC, dtype=torch.float32, device=dev)
+        self._first_pre[:, 0] = 1.0
+        # an index source's K1 outputs, vLLM's indexer's inputs
+        self.normed = torch.zeros(MAX_TOKENS, HIDDEN, dtype=torch.bfloat16, device=dev)
+        self.qr = torch.zeros(MAX_TOKENS, Q_RANK, dtype=torch.bfloat16, device=dev)
         # the attention seam's outputs, K1 -> K2
         self.res_mid = torch.zeros(
             MAX_TOKENS, HC, HIDDEN, dtype=torch.bfloat16, device=dev
@@ -203,14 +210,17 @@ class DSV41MonoLayer:
             self._scratch[tokens] = buf
         return buf
 
+    def first_pre_mix(self, tokens: int) -> torch.Tensor:
+        return self._first_pre[:tokens]
+
     @staticmethod
     def supports(tokens: int) -> bool:
         return 1 <= tokens <= MAX_TOKENS
 
-    def kernels(self, tokens: int, ratio: int):
-        key = (tokens, ratio)
+    def kernels(self, tokens: int, ratio: int, fold: bool = True, index: bool = False):
+        key = (tokens, ratio, fold, index)
         if key not in self._kernels:
-            b = MonoBuild(tokens, self.tp, ratio)
+            b = MonoBuild(tokens, self.tp, ratio, fold=fold, index=index)
             self._kernels[key] = (build_mono_k1(b), build_mono_k2(b))
         return self._kernels[key]
 
@@ -249,15 +259,21 @@ class DSV41MonoLayer:
         comp_cache: torch.Tensor | None = None,
         comp_block_table: torch.Tensor | None = None,
         outs: tuple | None = None,
+        fold: bool = True,
+        select: Callable[[torch.Tensor, torch.Tensor], None] | None = None,
     ):
         """-> (out, residual, post_mix, res_mix, pre_mix): the layer's outputs
-        (``outs``: buffers to write them into)."""
+        (``outs``: buffers to write them into). ``select(normed, qr)``: an index
+        source's top-k selection into ``topk_indices``, run between the
+        kernels on K1's normed input and qr."""
         M = x.shape[0]
         assert self.supports(M), M
         a = w.attn
         assert a is not None
         ratio = a.ratio
-        k1, k2 = self.kernels(M, ratio)
+        index = select is not None
+        assert not index or ratio
+        k1, k2 = self.kernels(M, ratio, fold, index)
         st = torch.cuda.current_stream()
         if outs is None:
             outs = self._outs(M, residual)
@@ -324,11 +340,15 @@ class DSV41MonoLayer:
             token_to_req.data_ptr(),
             self.kt.data_ptr(),
             self.klen.data_ptr(),
+            self.normed.data_ptr(),
+            self.qr.data_ptr(),
             self.scratch(M).data_ptr(),
             self.epoch.data_ptr(),
             0,
             stream=st,
         )
+        if select is not None:
+            select(self.normed[:M], self.qr[:M])
         k2(
             self.q.data_ptr(),
             swa_cache.data_ptr(),
@@ -339,6 +359,13 @@ class DSV41MonoLayer:
             comp_block,
             self.kt.data_ptr(),
             self.klen.data_ptr(),
+            slot_mapping.data_ptr(),
+            swa_indices.data_ptr(),
+            swa_lens.data_ptr(),
+            token_to_req.data_ptr(),
+            topk.data_ptr(),
+            bt.data_ptr(),
+            bt_stride,
             positions.data_ptr(),
             a.attn_sink.data_ptr(),
             self._qk_scale,
