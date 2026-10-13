@@ -352,5 +352,27 @@ def test_dummy_wide_integer_param_is_untouched():
     assert torch.equal(param, torch.arange(16, dtype=torch.int32))
 
 
+def test_dummy_norm_weights_are_neutral(default_vllm_config):
+    """Dummy norms stay identity-like, keeping activations at a realistic scale."""
+    from vllm.model_executor.layers.layernorm import (
+        GemmaRMSNorm,
+        LayerNorm,
+        RMSNorm,
+        RMSNormGated,
+    )
+
+    expected = {
+        RMSNorm(16): {"weight": 1.0},
+        GemmaRMSNorm(16): {"weight": 0.0},
+        LayerNorm(16): {"weight": 1.0, "bias": 0.0},
+        RMSNormGated(16): {"weight": 1.0},
+    }
+    for norm, values in expected.items():
+        for name, param in norm.named_parameters():
+            param.data.uniform_(-5, 5)
+            initialize_single_dummy_weight(param, name=name)
+            assert torch.all(param == values[name]), (type(norm).__name__, name)
+
+
 if __name__ == "__main__":
     test_download_weights_from_hf()
