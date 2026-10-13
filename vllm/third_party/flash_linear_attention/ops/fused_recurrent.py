@@ -441,17 +441,20 @@ def fused_recurrent_gated_delta_rule_packed_decode(
         )
     BV = min(triton.next_power_of_2(V), 32)
     if (
-        B <= 256
-        and (H, HV) in ((16, 48), (8, 24), (4, 12), (2, 6))
-        and K == V == 128
-        and mixed_qkv.dtype == torch.bfloat16
-        and initial_state.dtype == torch.float32
-        and use_qk_l2norm_in_kernel
+        K == V == 128
         and current_platform.is_cuda()
         and current_platform.is_device_capability_family(100, device_id=dev.index)
     ):
-        # Smaller value tiles improve decode parallelism on SM100/SM103.
-        BV = 4 if B * HV <= 96 else 8
+        small_workload = (
+            512
+            if mixed_qkv.dtype == torch.float32
+            and initial_state.dtype == torch.float32
+            else 64
+        )
+        if B * HV <= small_workload:
+            BV = 4
+        elif initial_state.dtype == torch.float32:
+            BV = 8
     num_stages = 3
     num_warps = 1
 
