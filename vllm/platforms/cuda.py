@@ -27,6 +27,7 @@ with contextlib.suppress(ImportError):
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.utils.import_utils import import_pynvml
+from vllm.utils.platform_utils import cuda_get_device_properties
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from .interface import DeviceCapability, Platform, PlatformEnum, in_wsl
@@ -838,7 +839,7 @@ class NvmlCudaPlatform(CudaPlatformBase):
             # device-level NVML memory query - nvidia-smi reports [N/A] for
             # memory.total there. Fall back to the same source
             # NonNvmlCudaPlatform reads.
-            return int(torch.cuda.get_device_properties(device_id).total_memory)
+            return int(cuda_get_device_properties(device_id, ("total_memory",))[0])
 
     @classmethod
     @with_nvml_context
