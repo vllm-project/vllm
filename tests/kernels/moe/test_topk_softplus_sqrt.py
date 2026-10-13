@@ -87,7 +87,7 @@ def _torch_topk_softplus_sqrt(
     "backend,expected_experts",
     [
         ("aiter_triton_mxfp4_bf16", "AiterW4A16ExpertsMonolithic"),
-        ("aiter", "AiterExperts"),
+        ("aiter", "AiterMxfp4Experts"),
         ("triton_unfused", "UnfusedOAITritonExperts"),
     ],
 )
