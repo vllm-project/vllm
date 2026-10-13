@@ -261,6 +261,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
+from vllm.transformers_utils.deepseek_v4_utils import get_compress_ratios
 from vllm.utils.flashinfer import has_flashinfer
 from vllm.utils.math_utils import cdiv, round_down, round_up
 from vllm.utils.torch_utils import (
@@ -1734,7 +1735,7 @@ def get_mla_dims(model_config: ModelConfig) -> MLADims:
     hf_text_config = model_config.hf_text_config
 
     # Check if this is a DeepseekV4 config (uses unified head_dim + rope_head_dim)
-    if hasattr(hf_text_config, "compress_ratios"):
+    if get_compress_ratios(hf_text_config):
         # DeepseekV4 style config: unified head_dim with rope_head_dim
         head_dim = hf_text_config.head_dim
         rope_head_dim = hf_text_config.qk_rope_head_dim

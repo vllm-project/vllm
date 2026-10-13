@@ -62,6 +62,7 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.models.deepseek_v4.xpu.xpu_sparse import DeepseekV4XPUAttention
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
+from vllm.transformers_utils.deepseek_v4_utils import get_num_hash_layers
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import direct_register_custom_op
 
@@ -638,7 +639,7 @@ class DeepseekV4MoE(nn.Module):
 
         self.gate.e_score_correction_bias = None
         self.gate.tid2eid = None
-        is_hash_moe = extract_layer_index(prefix) < config.num_hash_layers
+        is_hash_moe = extract_layer_index(prefix) < get_num_hash_layers(config)
         self.hash_indices_dtype = torch.int64 if self.use_mega_moe else torch.int32
         if is_hash_moe:
             # hash MoE doesn't use e_score_correction_bias
