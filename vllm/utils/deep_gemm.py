@@ -21,8 +21,14 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     get_fp8_min_max,
 )
 from vllm.platforms import current_platform
-from vllm.utils.import_utils import has_deep_gemm
+from vllm.utils.import_utils import has_deep_gemm as _has_deep_gemm_package
 from vllm.utils.math_utils import cdiv
+
+
+def has_deep_gemm() -> bool:
+    """Whether a real or shape-only DeepGEMM backend is available."""
+    return envs.VLLM_META_MODE or _has_deep_gemm_package()
+
 
 _DEEPGEMM_BLACKWELL_EXCLUDED_MODEL_TYPES: set[str] = {
     "qwen3_5_text",
@@ -113,7 +119,7 @@ def is_deep_gemm_supported() -> bool:
     Currently, only Hopper and Blackwell GPUs are supported.
     """
     is_supported_arch = current_platform.support_deep_gemm()
-    return is_supported_arch and envs.VLLM_USE_DEEP_GEMM and has_deep_gemm()
+    return is_supported_arch and envs.VLLM_USE_DEEP_GEMM and _has_deep_gemm_package()
 
 
 @functools.cache
@@ -143,6 +149,10 @@ def is_deep_gemm_e8m0_used() -> bool:
 
 def _missing(*_: Any, **__: Any) -> NoReturn:
     """Placeholder for unavailable DeepGEMM backend."""
+    # Some wrappers call this placeholder without forwarding their tensors, so
+    # the runtime mode is the only available indication that no payload exists.
+    if envs.VLLM_META_MODE:
+        return None
     raise RuntimeError(
         "DeepGEMM backend is unavailable in the current vLLM environment, "
         "or the available DeepGEMM package does not provide the required APIs "
@@ -272,7 +282,11 @@ def _lazy_init() -> None:
     ):
         return
 
-    if not has_deep_gemm():
+    if not _has_deep_gemm_package():
+        return
+    # Meta mode has no device for the real kernels even when the package is
+    # installed; leave the shape-only backend (unbound impls) in place.
+    if envs.VLLM_META_MODE:
         return
 
     # Set up deep_gemm cache path
@@ -666,6 +680,13 @@ def fp8_fp4_mqa_logits(
         zero, and the tail is not cleaned. bf16 on SM100, fp32 elsewhere.
 
     """
+    q_values, _ = q
+    k_values, _ = kv
+    if q_values.is_meta or k_values.is_meta:
+        return q_values.new_empty(
+            (q_values.shape[0], k_values.shape[0]), dtype=torch.float32
+        )
+
     _lazy_init()
     if _fp8_fp4_mqa_logits_impl is None:
         return _missing()
@@ -723,10 +744,16 @@ def get_paged_mqa_logits_metadata(
 
     """
     _lazy_init()
-    if _get_paged_mqa_logits_metadata_impl is None:
-        return _missing()
     next_n = context_lens.shape[1] if context_lens.dim() == 2 else 1
     num_slots = _paged_mqa_logits_schedule_slots(num_sms, next_n)
+    if _get_paged_mqa_logits_metadata_impl is None:
+        if envs.VLLM_META_MODE:
+            return torch.zeros(
+                (num_slots + 1, 2),
+                dtype=torch.int32,
+                device=context_lens.device,
+            )
+        return _missing()
     kwargs = {} if indices is None else {"indices": indices}
     return _get_paged_mqa_logits_metadata_impl(
         context_lens, block_size, num_slots, **kwargs
@@ -774,6 +801,12 @@ def fp8_fp4_paged_mqa_logits(
         row's context length are not cleaned. bf16 on SM100, fp32 elsewhere.
 
     """
+    q_values, _ = q
+    if q_values.is_meta or kv_cache.is_meta:
+        return q_values.new_empty(
+            (weights.shape[0], max_model_len), dtype=torch.float32
+        )
+
     _lazy_init()
     if _fp8_fp4_paged_mqa_logits_impl is None:
         return _missing()

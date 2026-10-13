@@ -434,7 +434,25 @@ class Worker(WorkerBase):
 
     @instrument(span_name="Init device")
     def init_device(self):
-        if self.device_config.device_type == "cuda":
+        if envs.VLLM_META_MODE:
+            # Run the regular distributed model-runner path on CPU with
+            # meta-device model weights and KV cache.
+            from vllm import meta_mode
+
+            self.device = torch.device("cpu")
+            init_worker_distributed_environment(
+                self.vllm_config,
+                self.rank,
+                self.distributed_init_method,
+                self.local_rank,
+                "gloo",
+            )
+            set_random_seed(self.model_config.seed)
+            meta_mode.install_launch_hooks()
+            # The meta paths (fake sampled ids, MetaAsyncOutput) live in the
+            # V1 model runner.
+            self.use_v2_model_runner = False
+        elif self.device_config.device_type == "cuda":
             # This env var set by Ray causes exceptions with graph building.
             os.environ.pop("NCCL_ASYNC_ERROR_HANDLING", None)
             parallel_config = self.parallel_config
@@ -644,6 +662,15 @@ class Worker(WorkerBase):
             by adjusting the `gpu_memory_utilization` parameter.
 
         """
+        if envs.VLLM_META_MODE:
+            # Meta KV needs no device-memory profile; derive a budget from the
+            # model's KV spec covering max_num_seqs sequences at max_model_len.
+            spec = self.model_runner.get_kv_cache_spec()
+            per_seq = sum(
+                s.max_memory_usage_bytes(self.vllm_config) for s in spec.values()
+            )
+            max_num_seqs = self.scheduler_config.max_num_seqs
+            return max(per_seq * max_num_seqs, 256 * 1024 * 1024)
         maybe_apply_startup_plan(self)
 
         if kv_cache_memory_bytes := self.cache_config.kv_cache_memory_bytes:
@@ -906,6 +933,10 @@ class Worker(WorkerBase):
 
     @instrument(span_name="Warmup (GPU)")
     def compile_or_warm_up_model(self) -> CompilationTimes:
+        if envs.VLLM_META_MODE:
+            # Meta tensors require no kernel warmup or graph capture; generate()
+            # exercises the forward path directly.
+            return CompilationTimes(language_model=0.0, encoder=0.0)
         warmup_sizes: list[int] = []
 
         if (

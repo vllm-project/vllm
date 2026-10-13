@@ -63,6 +63,10 @@ class MarlinFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         return "weight_scale"
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        if layer.weight.is_meta:
+            # Marlin repacking needs real values; meta weights keep their
+            # logical FP8 layout and apply_weights() propagates the output shape.
+            return
         if self.block_quant:
             scale_name = self._block_scale_name(layer)
             weight, weight_scale = process_fp8_weight_block_strategy(
@@ -85,6 +89,8 @@ class MarlinFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        if x.is_meta:
+            return x.new_empty((*x.shape[:-1], layer.output_size_per_partition))
         if self.block_quant:
             weight_scale = getattr(layer, self._block_scale_name(layer))
         else:

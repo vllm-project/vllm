@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Worker-side handler for SimpleCPUOffloadConnector."""
 
+import sys
 from typing import TYPE_CHECKING
 
 import torch
@@ -49,6 +50,7 @@ class SimpleCPUOffloadWorker:
         self.gpu_kv_caches: dict[str, torch.Tensor] | None = None
         self.cpu_kv_caches: dict[str, torch.Tensor] | None = None
         self.device: torch.device | None = None
+        self._is_meta = False
         self.num_cpu_blocks: int = 0
 
         # CUDA streams for the async transfers
@@ -97,6 +99,10 @@ class SimpleCPUOffloadWorker:
             return
 
         self.device = next(iter(kv_caches.values())).device
+        self._is_meta = self.device.type == "meta"
+        if self._is_meta:
+            # Meta KV has no storage; transfers reduce to event bookkeeping.
+            return
 
         assert self.kv_cache_config is not None
         num_blocks = self.kv_cache_config.num_blocks
@@ -254,6 +260,8 @@ class SimpleCPUOffloadWorker:
         self._connector_metadata = None
 
     def start_load_kv(self) -> None:
+        if self._is_meta:
+            return
         # Invoked after the forward launch on steps without sync loads
         # (SchedulerOutput.has_sync_kv_loads), so the CPU-side block copy
         # op overhead (~5ms) stays hidden behind GPU compute. Stores are
@@ -278,6 +286,8 @@ class SimpleCPUOffloadWorker:
         after a compute-done event recorded on the current stream. See
         #45704 for the bug and #39306 for the srcAccessOrder rationale.
         """
+        if self._is_meta:
+            return
         metadata = self._connector_metadata
         if metadata is not None and metadata.store_gpu_blocks:
             backend = self._backend
@@ -360,6 +370,9 @@ class SimpleCPUOffloadWorker:
 
     def _poll_stream_events(self, is_store: bool) -> int:
         """Non-blocking poll for completed events and return the high-water mark."""
+        if self._is_meta:
+            # Meta transfers carry no payload, so every pending event is done.
+            return sys.maxsize
         events = self._store_events if is_store else self._load_events
         hwm = self._store_hwm if is_store else self._load_hwm
         while events:

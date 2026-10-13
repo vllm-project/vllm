@@ -164,6 +164,8 @@ if TYPE_CHECKING:
     VLLM_ROCM_MOE_PADDING: bool = True
     VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT: bool = False
     VLLM_ENABLE_V1_MULTIPROCESSING: bool = True
+    VLLM_META_MODE: bool = False
+    VLLM_META_TOKEN_LATENCY_MS: float = 0.05
     VLLM_LOG_BATCHSIZE_INTERVAL: float = -1
     VLLM_DISABLE_COMPILE_CACHE: bool = False
     VLLM_REPLICATE_EMBED: bool = False
@@ -1466,6 +1468,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # If set, enable multiprocessing in LLM for the V1 code path.
     "VLLM_ENABLE_V1_MULTIPROCESSING": lambda: bool(
         int(os.getenv("VLLM_ENABLE_V1_MULTIPROCESSING", "1"))
+    ),
+    # Meta CI: run the engine end-to-end on a CPU-only box with zero-memory
+    # (meta) weights + KV cache, for functional validation. See vllm/meta_mode.py.
+    "VLLM_META_MODE": lambda: bool(int(os.getenv("VLLM_META_MODE", "0"))),
+    # Simulated per-token compute latency (ms) in meta mode; each engine step
+    # sleeps total_num_scheduled_tokens * this value.
+    "VLLM_META_TOKEN_LATENCY_MS": lambda: float(
+        os.getenv("VLLM_META_TOKEN_LATENCY_MS", "0.05")
     ),
     "VLLM_LOG_BATCHSIZE_INTERVAL": lambda: float(
         os.getenv("VLLM_LOG_BATCHSIZE_INTERVAL", "-1")

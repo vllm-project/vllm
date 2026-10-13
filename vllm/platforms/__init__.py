@@ -316,7 +316,12 @@ def __getattr__(name: str):
         global _current_platform
         if _current_platform is None:
             platform_cls_qualname = resolve_current_platform_cls_qualname()
-            _current_platform = resolve_obj_by_qualname(platform_cls_qualname)()
+            platform_cls = resolve_obj_by_qualname(platform_cls_qualname)
+            if envs.VLLM_META_MODE:
+                from vllm.platforms.meta import wrap_meta_platform
+
+                platform_cls = wrap_meta_platform(platform_cls)
+            _current_platform = platform_cls()
             global _init_trace
             _init_trace = "".join(traceback.format_stack())
         return _current_platform

@@ -11,7 +11,7 @@ For Kimi-K3 speculative decoding, ``--use-replayssm`` selects the simplified
 RecoverSSM path implemented here instead of the Mamba2 ReplaySSM kernel.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import cache
 from typing import TYPE_CHECKING
 
@@ -335,6 +335,30 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
                 dtype=torch.int32,
                 device=device,
             )
+
+    def prepare_for_forward(
+        self, metadata: KimiK3KDAMetadata, device: torch.device
+    ) -> KimiK3KDAMetadata:
+        """Project kernel-only state metadata after CPU request classification.
+
+        ``gather_initial_states`` requires its indices and initial-state mask to
+        share the recurrent state's device. ``fused_recurrent_kda_packed_decode``
+        likewise rejects CPU state indices mixed with meta activations before its
+        intercepted Triton launch. Keep the cached CPU metadata value-carrying,
+        and give model forward a shallow copy with these kernel inputs on meta.
+        """
+        if device.type != "meta":
+            return metadata
+
+        def move(tensor: torch.Tensor | None) -> torch.Tensor | None:
+            return None if tensor is None else tensor.to(device)
+
+        return replace(
+            metadata,
+            has_initial_state=move(metadata.has_initial_state),
+            spec_state_indices_tensor=move(metadata.spec_state_indices_tensor),
+            non_spec_state_indices_tensor=move(metadata.non_spec_state_indices_tensor),
+        )
 
     def _get_recoverssm_context(self) -> "KDARecoverSSMCommitContext":
         context = self.recoverssm_context

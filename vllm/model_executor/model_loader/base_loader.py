@@ -59,17 +59,25 @@ class BaseModelLoader(ABC):
         log_model_inspection(model)
         return model
 
-    @instrument(span_name="Load model")
-    def load_model(
-        self, vllm_config: VllmConfig, model_config: ModelConfig, prefix: str = ""
-    ) -> nn.Module:
-        """Load a model with the given configurations."""
+    def get_load_device(self, vllm_config: VllmConfig) -> torch.device:
+        """Device on which the model is constructed and weights are loaded."""
         device_config = vllm_config.device_config
         load_config = vllm_config.load_config
         load_device = (
             device_config.device if load_config.device is None else load_config.device
         )
-        target_device = torch.device(load_device)
+        return torch.device(load_device)
+
+    def get_processing_device(self, target_device: torch.device) -> torch.device:
+        """Device used by post-load weight processing."""
+        return target_device
+
+    @instrument(span_name="Load model")
+    def load_model(
+        self, vllm_config: VllmConfig, model_config: ModelConfig, prefix: str = ""
+    ) -> nn.Module:
+        """Load a model with the given configurations."""
+        target_device = self.get_load_device(vllm_config)
         with set_default_torch_dtype(model_config.dtype):
             with target_device:
                 time_before_load = time.perf_counter()
@@ -84,7 +92,7 @@ class BaseModelLoader(ABC):
                     time_after_load - time_before_load,
                 )
 
-            logger.debug("Loading weights on %s ...", load_device)
+            logger.debug("Loading weights on %s ...", target_device)
             self.load_weights(model, model_config)
 
             # Release transient tensors held by PyTorch's caching allocator
@@ -106,7 +114,9 @@ class BaseModelLoader(ABC):
             if _has_online_quant(model):
                 finalize_layerwise_processing(model, model_config)
 
-            process_weights_after_loading(model, model_config, target_device)
+            process_weights_after_loading(
+                model, model_config, self.get_processing_device(target_device)
+            )
             log_online_quantization_time(vllm_config)
 
             gc.collect()

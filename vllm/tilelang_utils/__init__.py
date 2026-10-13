@@ -104,6 +104,18 @@ def tilelang_jit(kernel_function: Callable[..., Any]) -> Callable[..., Any]:
     global, so on the deferred ROCm path this rebinds `T`/`tilelang` in the
     decorated function's own module globals once they become available.
     """
+    import vllm.envs as envs
+
+    if envs.VLLM_META_MODE:
+        # Meta CI: no accelerator, so the TileLang kernel is never launched (like
+        # the Triton no-op). Callers pre-allocate their (meta) outputs and pass
+        # them in for write-in-place, so skipping the launch preserves shapes and
+        # avoids compiling the kernel (needs a real GPU).
+        def _meta_noop(*args: Any, **kwargs: Any) -> None:
+            return None
+
+        return _meta_noop
+
     if not current_platform.is_rocm():
         _ensure_tilelang_imported()
         return tilelang.jit(pass_configs=_get_pass_configs())(kernel_function)

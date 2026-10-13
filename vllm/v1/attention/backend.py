@@ -700,6 +700,13 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
         """
         raise NotImplementedError
 
+    def prepare_for_forward(self, metadata: M, device: torch.device) -> M:
+        """Return metadata projected to the model-forward device.
+
+        Implementations must not mutate metadata that may be cached or reused.
+        """
+        return metadata
+
     def update_block_table(
         self,
         metadata: M,

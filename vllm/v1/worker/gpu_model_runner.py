@@ -138,6 +138,7 @@ from vllm.v1.attention.backends.utils import (
     NULL_BLOCK_ID,
     create_fast_prefill_custom_backend,
     get_dcp_local_seq_lens,
+    mamba_get_block_table_tensor,
     reorder_batch_to_split_decodes_and_prefills,
 )
 from vllm.v1.core.sched.output import NewRequestData
@@ -490,6 +491,9 @@ class GPUModelRunner(
         scheduler_config = self.scheduler_config
         parallel_config = self.parallel_config
         self.device = device
+        self.forward_device = (
+            torch.device("meta") if self.load_config.load_format == "meta" else device
+        )
         self.dtype = self.model_config.dtype
 
         self.check_ep_fault = False
@@ -1139,6 +1143,8 @@ class GPUModelRunner(
 
     def _zero_block_ids(self, block_ids: list[int]) -> None:
         """Zero the KV cache memory for the given block IDs."""
+        if self.kv_caches and all(cache.is_meta for cache in self.kv_caches):
+            return
         if hasattr(self, "_kv_block_zeroer"):
             self._kv_block_zeroer.zero_block_ids(block_ids)
 
@@ -2477,6 +2483,20 @@ class GPUModelRunner(
                     ],
                 )
 
+            if (
+                self.load_config.load_format == "meta"
+                and self.cache_config.mamba_cache_mode == "align"
+                and hasattr(builder, "mamba_aligned_state_indices")
+            ):
+                # MRV2 precomputes these with a device kernel; meta runs MRV1,
+                # so derive the equivalent indices from the host block table.
+                builder.mamba_aligned_state_indices = mamba_get_block_table_tensor(
+                    common_attn_metadata.block_table_tensor,
+                    common_attn_metadata.seq_lens,
+                    kv_cache_spec,
+                    "align",
+                )
+
             if for_cudagraph_capture:
                 attn_metadata_i = attn_group.build_metadata_for_cudagraph_capture(
                     common_attn_metadata, ubid or 0
@@ -2500,6 +2520,10 @@ class GPUModelRunner(
                 )
                 if builder.supports_update_block_table:
                     cached_attn_metadata[cache_key] = attn_metadata_i
+
+            attn_metadata_i = builder.prepare_for_forward(
+                attn_metadata_i, self.forward_device
+            )
 
             if ubid is None:
                 assert isinstance(attn_metadata, dict)
@@ -3545,7 +3569,19 @@ class GPUModelRunner(
             # With spec decoding, this is done in propose_draft_token_ids().
             if self.input_batch.prev_sampled_token_ids is None:
                 assert sampled_token_ids.shape[-1] == 1
-                self.input_batch.prev_sampled_token_ids = sampled_token_ids
+                if sampled_token_ids.is_meta:
+                    from vllm import meta_mode
+
+                    # The next step copies these into input_ids, so they must
+                    # carry values.
+                    self.input_batch.prev_sampled_token_ids = torch.full(
+                        sampled_token_ids.shape,
+                        meta_mode.META_TOKEN_ID,
+                        dtype=self.input_ids.gpu.dtype,
+                        device=self.device,
+                    )
+                else:
+                    self.input_batch.prev_sampled_token_ids = sampled_token_ids
             self.input_batch.prev_req_id_to_index = {
                 req_id: i
                 for i, req_id in enumerate(self.input_batch.req_ids)
@@ -4530,6 +4566,20 @@ class GPUModelRunner(
                 cudagraph_stats=cudagraph_stats,
             )
 
+        # Meta sampled ids carry no values and the async D2H below needs a real
+        # device, so return the deferred meta output for both scheduling modes;
+        # its get_output() realizes the simulated latency on consumption.
+        if sampler_output.sampled_token_ids.is_meta:
+            from vllm import meta_mode
+
+            if self.use_async_scheduling:
+                output.sampled_token_ids = self._to_list(
+                    sampler_output.sampled_token_ids
+                )
+                for i in invalid_req_indices:
+                    output.sampled_token_ids[i].clear()
+            return meta_mode.MetaAsyncOutput(output, scheduler_output)
+
         if not self.use_async_scheduling:
             return output
 
@@ -5151,6 +5201,15 @@ class GPUModelRunner(
             format_gib(self.model_memory_usage),
             time_after_load - time_before_load,
         )
+
+        # Production initializes this buffer during warmup. Meta mode skips
+        # warmup, so initialize it here for non-first pipeline stages.
+        if self.load_config.load_format == "meta" and not get_pp_group().is_first_rank:
+            self.intermediate_tensors = self.model.make_empty_intermediate_tensors(
+                batch_size=self.max_num_tokens,
+                dtype=self.model_config.dtype,
+                device=torch.device("meta"),
+            )
 
         mm_config = self.model_config.multimodal_config
         self.is_multimodal_pruning_enabled = (
@@ -6997,9 +7056,17 @@ class GPUModelRunner(
         """
         allocation_context = kv_cache_allocation_context or nullcontext()
         with allocation_context:
+            # Meta CI: allocate the KV pool on meta (zero memory). IO buffers /
+            # slot mapping stay on self.device (real values drive scheduling);
+            # attention is faked so KV is never read.
+            kv_cache_device = (
+                torch.device("meta")
+                if self.load_config.load_format == "meta"
+                else self.device
+            )
             kv_caches = allocate_kv_cache(
                 kv_cache_config,
-                self.device,
+                kv_cache_device,
                 self.cache_config.get_resolved_kv_cache_layout(),
                 kernel_block_sizes,
             )
@@ -7181,6 +7248,10 @@ class GPUModelRunner(
         return kv_cache_spec
 
     def _to_list(self, sampled_token_ids: torch.Tensor) -> list[list[int]]:
+        if sampled_token_ids.is_meta:
+            from vllm import meta_mode
+
+            return meta_mode.fake_token_ids(sampled_token_ids)
         # This is a short term mitigation for issue mentioned in
         # https://github.com/vllm-project/vllm/issues/22754.
         # `tolist` would trigger a cuda wise stream sync, which

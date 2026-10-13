@@ -2268,6 +2268,33 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
     # when speculative decoding is enabled.
     reorder_batch_threshold: int = 1
 
+    def prepare_for_forward(self, metadata: M, device: torch.device) -> M:
+        """Project the chunked-context scratch workspace to the forward device.
+
+        Kimi-K3 ``_compute_prefill_context`` derives ``k_nope``/``k_pe`` from
+        this workspace before calling ``fused_kimi_k3_mla_kv_concat`` (or its
+        FP8 variant). A CPU workspace dispatches those CUDA/Meta-only custom ops
+        to their missing CPU backend. The meta workspace preserves shapes and
+        selects their schema-derived Meta no-op kernels.
+        """
+        if device.type != "meta" or metadata.prefill is None:
+            return metadata
+        chunked_context = metadata.prefill.chunked_context
+        if chunked_context is None:
+            return metadata
+        return replace(
+            metadata,
+            prefill=replace(
+                metadata.prefill,
+                chunked_context=replace(
+                    chunked_context,
+                    workspace=torch.empty_like(
+                        chunked_context.workspace, device=device
+                    ),
+                ),
+            ),
+        )
+
     def _validate_dspark_dcp_support(self, supports_dcp_with_varlen: bool) -> None:
         speculative_config = getattr(self.vllm_config, "speculative_config", None)
         parallel_config = self.vllm_config.parallel_config

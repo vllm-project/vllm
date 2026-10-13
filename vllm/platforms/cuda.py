@@ -468,6 +468,23 @@ class CudaPlatformBase(Platform):
             f"{config_str}. Reasons: {reasons_str}."
         )
         if len(valid_backends_priorities) == 0:
+            if envs.VLLM_META_MODE and all_invalid_reasons:
+                # Meta CI: every backend is rejected (no accelerator), but the
+                # attention forward is faked via the opaque unified(_mla)_attention
+                # op, so the backend class is only needed for metadata. Prefer
+                # backends matching the requested sparsity (NOT rejected for
+                # "sparse not supported") and return the first that imports.
+                meta_candidates = [
+                    b
+                    for b, pr in all_invalid_reasons.items()
+                    if "sparse not supported" not in pr[1]
+                ] or list(all_invalid_reasons)
+                meta_candidates.sort(key=lambda b: all_invalid_reasons[b][0])
+                for b in meta_candidates:
+                    try:
+                        return _backend_cls_path(_get_attn_backend_class(b))
+                    except (ImportError, OSError):
+                        continue
             raise ValueError(
                 f"No valid attention backend found for {cls.device_name} "
                 f"with {config_str}. Reasons: {reasons_str}."
