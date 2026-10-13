@@ -2,12 +2,18 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for model adapter weight loading (adapters.py)."""
 
+import json
+from types import SimpleNamespace
+
 import pytest
 import torch
+from safetensors.torch import save_file
 from transformers import Gemma3Config, PreTrainedConfig, Qwen2Config
 
 from vllm.model_executor.models.adapters import (
     _create_pooling_model_cls,
+    _load_dense_weights,
+    _load_st_projector,
     _resolve_num_labels,
 )
 from vllm.model_executor.models.utils import (
@@ -15,8 +21,68 @@ from vllm.model_executor.models.utils import (
     StageMissingLayer,
     WeightsMapper,
 )
+from vllm.transformers_utils.config import InvalidSentenceTransformersModulePath
 
 pytestmark = pytest.mark.cpu_test
+
+
+@pytest.mark.parametrize(
+    "escape", ["absolute", "parent", "directory_symlink", "file_symlink"]
+)
+@pytest.mark.parametrize("filename", ["model.safetensors", "pytorch_model.bin"])
+def test_dense_weights_reject_outside_model(tmp_path, escape, filename):
+    model = tmp_path / "model"
+    model.mkdir()
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    (victim / filename).touch()
+
+    if escape == "absolute":
+        folder = str(victim)
+    elif escape == "parent":
+        folder = "../victim"
+    elif escape == "directory_symlink":
+        (model / "linked").symlink_to(victim, target_is_directory=True)
+        folder = "linked"
+    else:
+        (model / "module").mkdir()
+        (model / "module" / filename).symlink_to(victim / filename)
+        folder = "module"
+
+    config = SimpleNamespace(model=str(model), revision=None)
+    with pytest.raises(InvalidSentenceTransformersModulePath):
+        _load_dense_weights(torch.nn.Linear(4, 2), folder, config)
+
+
+def test_dense_weights_load_within_model(tmp_path):
+    folder = tmp_path / "2_Dense"
+    folder.mkdir()
+    weight = torch.ones(2, 4)
+    save_file({"linear.weight": weight}, folder / "model.safetensors")
+
+    linear = torch.nn.Linear(4, 2)
+    config = SimpleNamespace(model=str(tmp_path), revision=None)
+    assert _load_dense_weights(linear, "2_Dense", config)
+    assert torch.equal(linear.weight, weight)
+
+
+def test_st_projector_rejects_outside_weight_file(tmp_path):
+    model = tmp_path / "model"
+    folder = model / "2_Dense"
+    folder.mkdir(parents=True)
+    victim = tmp_path / "victim.safetensors"
+    victim.touch()
+    (folder / "model.safetensors").symlink_to(victim)
+    (folder / "config.json").write_text(
+        json.dumps({"in_features": 4, "out_features": 2, "bias": False})
+    )
+    (model / "modules.json").write_text(
+        json.dumps([{"type": "sentence_transformers.models.Dense", "path": "2_Dense"}])
+    )
+
+    config = SimpleNamespace(model=str(model), revision=None, head_dtype=torch.float32)
+    with pytest.raises(InvalidSentenceTransformersModulePath):
+        _load_st_projector(config)
 
 
 class SimpleInnerModel(torch.nn.Module):
