@@ -247,6 +247,7 @@ def _min_cutlass_batch_size(
         or (num_q_heads, num_kv_heads) not in _B300_EAGLE3_HEAD_GEOMETRIES
     ):
         return _DEFAULT_MIN_CUTLASS_BATCH_SIZE
+    # Use CUTLASS once batch_size * decode_query_len * num_q_heads >= 1024.
     query_head_rows = decode_query_len * num_q_heads
     return (_B300_EAGLE3_QUERY_HEAD_ROWS + query_head_rows - 1) // query_head_rows
 
