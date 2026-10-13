@@ -64,7 +64,7 @@ def test_torch_qsa_metadata_masks_null_block() -> None:
         max_query_len=8,
         max_seq_len=8,
         block_table_tensor=torch.zeros((1, 1), dtype=torch.int32),
-        slot_mapping=torch.full((8,), -1, dtype=torch.int64),
+        slot_mapping=torch.arange(8, dtype=torch.int64),
         _token_to_req_indices_cache=torch.zeros(8, dtype=torch.int32),
     )
     slots = _build_qsa_metadata_torch(

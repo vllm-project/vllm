@@ -875,6 +875,8 @@ class QSACompressedKeyCache(_QSAStateCache):
             head_size=self.head_size,
             dtype=self.dtype,
             tokens_per_state=self.compress_ratio,
+            # Every spec reports sharded at world size 1. Above that this cache
+            # is replicated, with its own block table.
             dcp_sharded=dcp_world_size == 1,
         )
 

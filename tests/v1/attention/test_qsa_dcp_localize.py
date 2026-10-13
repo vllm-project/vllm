@@ -147,3 +147,65 @@ def test_the_kernel_wrapper_rejects_a_gate_with_return_lse():
         )
     with pytest.raises(ValueError, match="requires an output gate"):
         qsa_ops.qsa_sparse_paged_attention(*args)
+
+
+def test_empty_qsa_batch_returns_the_dcp_output_and_lse_pair():
+    """A rank with no query tokens still supplies both DCP merge inputs."""
+    from vllm.models.qwen4_exp.nvidia.ops.qsa import qsa_sparse_paged_attention
+
+    query = torch.empty((0, 4, 64), dtype=torch.bfloat16)
+    cache = torch.empty((1, 16, 2, 64), dtype=torch.bfloat16)
+    indices = torch.empty((0, 9), dtype=torch.int32)
+    block_table = torch.zeros((1, 1), dtype=torch.int32)
+    token_to_req = torch.empty((0,), dtype=torch.int32)
+
+    output, lse = qsa_sparse_paged_attention(
+        query,
+        cache,
+        cache,
+        indices,
+        block_table,
+        token_to_req,
+        False,
+        return_lse=True,
+    )
+
+    assert output.shape == query.shape
+    assert output.dtype == query.dtype
+    assert lse.shape == query.shape[:2]
+    assert lse.dtype == torch.float32
+    assert lse.device == query.device
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="QSA kernel needs a GPU")
+def test_empty_qsa_lse_matches_nonempty_result_layout():
+    from vllm.models.qwen4_exp.nvidia.ops.qsa import qsa_sparse_paged_attention
+
+    query = torch.zeros((1, 4, 64), dtype=torch.bfloat16, device="cuda")
+    cache = torch.zeros((1, 16, 2, 64), dtype=torch.bfloat16, device="cuda")
+    indices = _pack([[0]], 8).cuda()
+    block_table = torch.zeros((1, 1), dtype=torch.int32, device="cuda")
+    token_to_req = torch.zeros((1,), dtype=torch.int32, device="cuda")
+    output, lse = qsa_sparse_paged_attention(
+        query,
+        cache,
+        cache,
+        indices,
+        block_table,
+        token_to_req,
+        False,
+        return_lse=True,
+    )
+    empty_output, empty_lse = qsa_sparse_paged_attention(
+        query[:0],
+        cache,
+        cache,
+        indices[:0],
+        block_table,
+        token_to_req[:0],
+        False,
+        return_lse=True,
+    )
+    assert empty_output.shape == (0, *output.shape[1:])
+    assert empty_lse.shape == (0, *lse.shape[1:])
+    assert empty_lse.dtype == lse.dtype

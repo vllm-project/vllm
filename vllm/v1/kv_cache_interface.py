@@ -1295,6 +1295,9 @@ class UniformTypeKVCacheSpecs(KVCacheSpec):
     ) -> bool:
         """Whether all layers have the same type of KV cache spec.
 
+        Layers can mix sharded and replicated caches if they span the same
+        number of tokens and each replicated cache maps its own slots.
+
         Uses the registry to determine grouping base classes, so custom specs
         that inherit from FullAttentionSpec are treated as full attention.
         """
