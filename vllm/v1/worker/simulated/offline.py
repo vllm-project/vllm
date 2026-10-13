@@ -129,15 +129,24 @@ class SimulationResult:
             }
 
         done = [r for r in self.requests if r.finish_time is not None]
+        input_tokens = sum(r.num_prompt_tokens for r in done)
+        output_tokens = sum(r.num_output_tokens for r in done)
+        # Peak number of requests between arrival and completion.
+        events = sorted(
+            (t, d) for r in done for t, d in ((r.arrival_time, 1), (r.finish_time, -1))
+        )
+        per_s = 1 / self.duration if self.duration else 0
         out = {
             "completed": float(len(done)),
             "duration_s": self.duration,
             "wall_time_s": self.wall_time,
-            "request_throughput": len(done) / self.duration if self.duration else 0,
-            "output_throughput": (
-                sum(r.num_output_tokens for r in done) / self.duration
-                if self.duration
-                else 0
+            "total_input_tokens": float(input_tokens),
+            "total_output_tokens": float(output_tokens),
+            "request_throughput": len(done) * per_s,
+            "output_throughput": output_tokens * per_s,
+            "total_token_throughput": (input_tokens + output_tokens) * per_s,
+            "max_concurrent_requests": float(
+                max(np.cumsum([d for _, d in events]), default=0)
             ),
         }
         out |= stats("ttft", [r.ttft for r in done if r.ttft is not None])

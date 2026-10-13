@@ -178,6 +178,62 @@ def test_simulate_offline_virtual_clock() -> None:
     assert result.summary()["mean_tpot_ms"] == pytest.approx(step_s * 1e3)
 
 
+def test_sweep_simulate_slo(tmp_path) -> None:
+    """`vllm bench sweep simulate` finds a higher SLO-meeting request rate
+    for a larger batch, and writes results the sweep plots read."""
+    if not (current_platform.is_cpu() or current_platform.is_cuda_alike()):
+        pytest.skip("Simulated forward needs the CPU or a CUDA-alike platform.")
+    from vllm.benchmarks.sweep.simulate import SweepSimulateArgs, run_main
+    from vllm.utils.argparse_utils import FlexibleArgumentParser
+
+    serve_params = tmp_path / "serve_params.json"
+    serve_params.write_text(json.dumps([{"max_num_seqs": 2}, {"max_num_seqs": 16}]))
+    parser = SweepSimulateArgs.add_cli_args(FlexibleArgumentParser())
+    args = parser.parse_args(
+        [
+            "--serve-cmd",
+            "vllm serve Qwen/Qwen3-0.6B --max-model-len 1024 "
+            "--kv-cache-memory-bytes 1073741824",
+            "--bench-cmd",
+            "vllm bench serve --dataset-name random --random-input-len 128 "
+            "--random-output-len 16 --num-prompts 40",
+            "--serve-params",
+            str(serve_params),
+            "--simulation-config",
+            json.dumps(
+                {
+                    "timing": "constant",
+                    "timing_args": {"fixed_us": 2000, "prefill_us_per_token": 10},
+                }
+            ),
+            "--slo",
+            "p99_ttft_ms=50",
+            "--search-iters",
+            "3",
+            "-j",
+            "2",
+            "-o",
+            str(tmp_path),
+            "-e",
+            "exp",
+        ]
+    )
+    run_main(SweepSimulateArgs.from_cli_args(args))
+
+    exp = tmp_path / "exp"
+    max_rates = {}
+    for max_num_seqs in (2, 16):
+        comb_dir = exp / f"SERVE--max_num_seqs={max_num_seqs}"
+        result = json.loads((comb_dir / "result.json").read_text())
+        assert result["p99_ttft_ms"] <= 50
+        max_rates[max_num_seqs] = result["max_request_rate"]
+        runs = [json.loads(p.read_text()) for p in comb_dir.rglob("summary.json")]
+        assert len(runs) > 3
+        assert all(run["completed"] == 40 for (run,) in runs)
+    assert 0 < max_rates[2] < max_rates[16]
+    assert (exp / "summary.csv").exists() and (exp / "slo_summary.csv").exists()
+
+
 def test_simulate_offline_host_time_holds_engine_thread() -> None:
     """A step whose host time exceeds its device time paces the run by the
     host time: the next step cannot start before the engine thread is free."""

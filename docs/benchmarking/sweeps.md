@@ -144,6 +144,31 @@ You can override the number of iterations in the algorithm by setting `--workloa
     In general, `--workload-var max_concurrency` produces more reliable results because it directly controls the workload imposed on the vLLM engine.
     Nevertheless, we default to `--workload-var request_rate` to maintain similar behavior as GuideLLM.
 
+### Simulated Sweep
+
+`vllm bench sweep simulate` runs the combinations of `vllm bench sweep serve` with [simulated execution](../features/simulated_execution.md): the real scheduler and KV-cache manager, with each step taking the time a timing model predicts, on a simulated clock. A run takes as long as the engine's host work rather than the length of the benchmark, needs none of the deployment's GPUs, and combinations run in parallel (`-j`), spread over the devices listed in `CUDA_VISIBLE_DEVICES`. It takes the same `--serve-cmd`, `--bench-cmd`, `--serve-params` and `--bench-params`, and builds the requests `vllm bench serve` would send with the same seed, so a configuration it picks can be checked by passing the same files to `vllm bench sweep serve`.
+
+The timing model goes in `--simulation-config`, typically a replay of a step log recorded on the target deployment (`record_step_timing`). A combination can override its keys as `simulation_config.<key>`.
+
+With `--slo`, every combination is searched for the highest request rate whose run meets all of the given upper bounds. The search starts from the throughput of a run with all requests sent at once, brackets the boundary by doubling or halving the rate, then bisects (`--search-iters`):
+
+```bash
+vllm bench sweep simulate \
+    --serve-cmd 'vllm serve Qwen/Qwen3-8B --kv-cache-memory-bytes 21474836480' \
+    --bench-cmd 'vllm bench serve --model Qwen/Qwen3-8B --dataset-name random --random-input-len 1024 --random-output-len 256 --num-prompts 400 --ignore-eos' \
+    --serve-params benchmarks/serve_hparams.json \
+    --simulation-config '{"timing": "replay", "timing_args": {"path": "steps.jsonl"}}' \
+    --slo p99_ttft_ms=500,mean_tpot_ms=8 \
+    -j 8 \
+    --output-dir benchmarks/results \
+    --experiment-name demo-sim
+```
+
+Fix the KV cache size (`--kv-cache-memory-bytes`) in `--serve-cmd`, so that the simulated deployment has the KV capacity of the real one. Each run is saved as `summary.json` with the metrics of `vllm bench serve`, so [the plots](#visualization) work on the results. The best run of each combination is saved as `result.json` with `max_request_rate`, and `slo_summary.csv` ranks the combinations by output throughput per GPU at that rate.
+
+!!! note
+    The simulated clock needs the engine in one process, so multi-rank combinations (`tensor_parallel_size` or `pipeline_parallel_size` above 1) need `"clock": "real"`, which runs in real time. Request rates (`--request-rate`, `--burstiness`, ramp-up and timed traces) are supported; `--max-concurrency` and multimodal datasets are not.
+
 ## Startup Benchmark
 
 `vllm bench sweep startup` runs `vllm bench startup` across parameter combinations to compare cold/warm startup time for different engine settings.

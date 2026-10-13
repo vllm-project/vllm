@@ -13,12 +13,15 @@ from .serve import SweepServeArgs
 from .serve import main as serve_main
 from .serve_workload import SweepServeWorkloadArgs
 from .serve_workload import main as serve_workload_main
+from .simulate import SweepSimulateArgs
+from .simulate import main as simulate_main
 from .startup import SweepStartupArgs
 from .startup import main as startup_main
 
 SUBCOMMANDS = (
     (SweepServeArgs, serve_main),
     (SweepServeWorkloadArgs, serve_workload_main),
+    (SweepSimulateArgs, simulate_main),
     (SweepStartupArgs, startup_main),
     (SweepPlotArgs, plot_main),
     (SweepPlotParetoArgs, plot_pareto_main),

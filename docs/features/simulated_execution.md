@@ -183,7 +183,10 @@ of the modeled deployment divided by that. `make_engine()` and `run()` also driv
 real (non-simulated) engine on the real clock, which is how the
 reference for a comparison is produced.
 [examples/features/simulated_execution/sweep_offline.py](../../examples/features/simulated_execution/sweep_offline.py)
-sweeps `max_num_seqs` this way.
+sweeps `max_num_seqs` this way, and
+[`vllm bench sweep simulate`](../benchmarking/sweeps.md#simulated-sweep) runs
+the combinations of a `vllm bench sweep serve` experiment, optionally searching
+each for the highest request rate that meets latency targets.
 
 A `TimedSession` is a multi-turn conversation: each `Turn` appends its tokens
 to the previous turn's prompt and output, and arrives `think_time` seconds
