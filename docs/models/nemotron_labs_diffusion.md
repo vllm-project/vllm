@@ -15,7 +15,7 @@ to a separate follow-up.
 vllm serve nvidia/Nemotron-Labs-Diffusion-3B \
     --attention-backend TRITON_ATTN \
     --max-num-seqs 8 \
-    --diffusion-config '{"temperature": 0.0, "confidence_threshold": 0.9}'
+    --diffusion-config '{"model_options": {"temperature": 0.0, "confidence_threshold": 0.9}}'
 ```
 
 The canvas length defaults to the checkpoint's `block_size`. The default
@@ -33,10 +33,10 @@ Temperature scaling precedes top-k/top-p filtering and applies to returned
 sampling logprobs. Confidence is measured using unscaled logits over the retained
 candidates.
 
-`DiffusionConfig.temperature`, when provided, sets the default for requests that
+`DiffusionConfig.model_options.temperature`, when provided, sets the default for requests that
 omit temperature; it no longer overrides explicit request temperatures.
 `--override-generation-config '{"temperature": 0.7}'` sets the same standard
-default and takes precedence over `DiffusionConfig.temperature`. Without either
+default and takes precedence over `DiffusionConfig.model_options.temperature`. Without either
 setting, the checkpoint's ordinary generation defaults apply (temperature 1 if
 unspecified). The previous `1` selector for an engine temperature is removed.
 The `low_confidence` policy instead reveals a scheduled number of the most
