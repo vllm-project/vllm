@@ -18,14 +18,14 @@ DEVICE = "cuda"
 def _on_supported_arch() -> bool:
     if not current_platform.is_rocm():
         return False
-    from vllm.platforms.rocm import on_gfx950, on_gfx1250
+    from vllm.platforms.rocm import get_cdna_version
 
-    return on_gfx950() or on_gfx1250()
+    return get_cdna_version() >= 4
 
 
 pytestmark = pytest.mark.skipif(
     not _on_supported_arch(),
-    reason="The AITER Gluon KDA decode kernels require gfx950 / gfx1250",
+    reason="The AITER Gluon KDA decode kernels require CDNA4 or newer",
 )
 
 

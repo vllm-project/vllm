@@ -61,7 +61,7 @@ from vllm.models.kimi_k3.amd.ops.third_party.kda import (
     fused_recurrent_kda,
     fused_recurrent_kda_packed_decode,
 )
-from vllm.platforms.rocm import on_gfx950, on_gfx1250
+from vllm.platforms.rocm import get_cdna_version
 from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 from vllm.v1.attention.backend import AttentionBackend
@@ -187,9 +187,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         # into one kernel, which wants a width-major fp32 conv weight staged at
         # load time. Everything else keeps the [channel, width] layout.
         conv_state_dtype, _ = self.get_state_dtype()
-        self.use_aiter_decode = rocm_aiter_ops.is_enabled() and (
-            on_gfx950() or on_gfx1250()
-        )
+        self.use_aiter_decode = rocm_aiter_ops.is_enabled() and get_cdna_version() >= 4
         use_hip_decode = not self.use_aiter_decode and is_fused_kda_decode_supported(
             self.local_num_heads,
             self.head_dim,
