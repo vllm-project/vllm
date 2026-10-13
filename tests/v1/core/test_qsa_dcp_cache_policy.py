@@ -253,38 +253,47 @@ def _packed_qsa_views(dcp_world_size: int):
     views = allocate_kv_cache(
         cache, torch.device("cpu"), KVCacheLayout.BLNHC, kernel_sizes
     )
-    return config, groups, cache, attn_groups, kernel_sizes, views, selector
+    selector_group = next(g for g in attn_groups[0] if g.layer_names == ["selector"])
+    return SimpleNamespace(
+        config=config,
+        groups=groups,
+        cache=cache,
+        attn_groups=attn_groups,
+        kernel_sizes=kernel_sizes,
+        views=views,
+        selector=selector,
+        selector_group=selector_group,
+    )
 
 
 def test_packed_replicated_selector_maps_two_manager_blocks_without_aliasing() -> None:
     """The selector's virtual pages must stay inside its packed physical pages."""
-    config, groups, cache, attn_groups, kernel_sizes, views, selector = (
-        _packed_qsa_views(2)
-    )
-    assert len(groups) == 1
-    assert groups[0].kv_cache_spec.block_size == BLOCK_SIZE
-    assert selector.block_size == 2 * BLOCK_SIZE
-    assert kernel_sizes == [BLOCK_SIZE]
-    assert len(cache.kv_cache_tensors) == 2
-    assert all(t.block_stride > t.layer_stride for t in cache.kv_cache_tensors)
+    run = _packed_qsa_views(2)
+    assert len(run.groups) == 1
+    assert run.groups[0].kv_cache_spec.block_size == BLOCK_SIZE
+    assert run.selector.block_size == 2 * BLOCK_SIZE
+    assert run.kernel_sizes == [BLOCK_SIZE]
+    assert len(run.cache.kv_cache_tensors) == 2
+    assert all(t.block_stride > t.layer_stride for t in run.cache.kv_cache_tensors)
 
-    selector_group = next(g for g in attn_groups[0] if g.layer_names == ["selector"])
-    selector_group.create_metadata_builders(
-        config, torch.device("cpu"), kernel_block_size=BLOCK_SIZE
+    run.selector_group.create_metadata_builders(
+        run.config, torch.device("cpu"), kernel_block_size=BLOCK_SIZE
     )
-    raw_selector = views["selector"]
+    raw_selector = run.views["selector"]
     assert raw_selector.shape == (2, 1, 392, 128)
-    mapped = map_kv_caches_to_kernel_blocks(views, attn_groups[0])["selector"]
-    stride = selector_group.kernel_block_stride
-    assert stride == cache.kv_cache_tensors[0].block_stride // (
-        selector.page_size_bytes // 2
+    mapped = map_kv_caches_to_kernel_blocks(run.views, run.attn_groups[0])["selector"]
+    stride = run.selector_group.kernel_block_stride
+    assert stride == run.cache.kv_cache_tensors[0].block_stride // (
+        run.selector.page_size_bytes // 2
     )
     assert mapped.shape == (stride + 2, 1, 196, 128)
 
-    block_table = selector_group.map_to_kernel_block_table(
+    block_table = run.selector_group.map_to_kernel_block_table(
         torch.tensor([[0, 1]], dtype=torch.int32)
     )
     assert block_table.tolist() == [[0, 1, stride, stride + 1]]
+    # Token 1567 ends block 0's second virtual page; 1603 lands in
+    # state 8 of manager block 1 after the intervening packed layers.
     slots = compressed_qsa_slot_mapping(
         block_table,
         torch.zeros(2, dtype=torch.int32),
@@ -300,9 +309,9 @@ def test_packed_replicated_selector_maps_two_manager_blocks_without_aliasing() -
     assert raw_selector[0, 0, 196, 0] == 2
     assert raw_selector[0, 0, 391, 0] == 4
     assert raw_selector[1, 0, 8, 0] == 3
-    assert torch.count_nonzero(views["main"]) == 0
+    assert torch.count_nonzero(run.views["main"]) == 0
 
-    restored = selector_group.map_kv_cache_to_manager_blocks(mapped, 2)
+    restored = run.selector_group.map_kv_cache_to_manager_blocks(mapped, 2)
     assert restored.data_ptr() == raw_selector.data_ptr()
     assert restored.shape == raw_selector.shape
     assert restored.stride() == raw_selector.stride()
@@ -311,17 +320,16 @@ def test_packed_replicated_selector_maps_two_manager_blocks_without_aliasing() -
 
 def test_dcp1_packed_selector_keeps_its_original_view() -> None:
     """Equal manager and kernel blocks must not remap the DCP=1 cache."""
-    config, _, _, attn_groups, kernel_sizes, views, selector = _packed_qsa_views(1)
-    assert kernel_sizes == [BLOCK_SIZE]
-    assert selector.block_size == BLOCK_SIZE
-    assert views["selector"].shape == (2, 1, 196, 128)
-    selector_group = next(g for g in attn_groups[0] if g.layer_names == ["selector"])
-    selector_group.create_metadata_builders(
-        config, torch.device("cpu"), kernel_block_size=BLOCK_SIZE
+    run = _packed_qsa_views(1)
+    assert run.kernel_sizes == [BLOCK_SIZE]
+    assert run.selector.block_size == BLOCK_SIZE
+    assert run.views["selector"].shape == (2, 1, 196, 128)
+    run.selector_group.create_metadata_builders(
+        run.config, torch.device("cpu"), kernel_block_size=BLOCK_SIZE
     )
-    assert selector_group.kernel_block_size is None
-    mapped = map_kv_caches_to_kernel_blocks(views, attn_groups[0])
-    assert mapped["selector"] is views["selector"]
+    assert run.selector_group.kernel_block_size is None
+    mapped = map_kv_caches_to_kernel_blocks(run.views, run.attn_groups[0])
+    assert mapped["selector"] is run.views["selector"]
 
 
 def test_packed_uncompressed_cache_still_rejects_virtual_split() -> None:

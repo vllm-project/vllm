@@ -258,6 +258,18 @@ class KVBlockZeroer:
             self.zero_block_ids([0])
 
 
+def packed_kernel_blocks_are_mappable(
+    spec: KVCacheSpec, kernel_block_size: int, block_stride_bytes: int
+) -> bool:
+    """Whether packed manager blocks can be viewed as kernel blocks."""
+    kernel_rows = spec.get_num_kernel_states(kernel_block_size)
+    return (
+        spec.tokens_per_state > 1
+        and spec.num_heads == 1
+        and block_stride_bytes % (kernel_rows * spec.state_content_size_bytes) == 0
+    )
+
+
 @dataclass(eq=False)
 class AttentionGroup:
     backend: type[AttentionBackend]
@@ -404,10 +416,8 @@ class AttentionGroup:
         # Token and pooled caches are written through manager-block slot
         # mappings, so only compressed caches (written from their block table)
         # can be mapped.
-        if (
-            spec.tokens_per_state <= 1
-            or kv_cache.shape[1] != 1
-            or kv_cache.stride(0) % (kernel_rows * kv_cache.stride(-2))
+        if not packed_kernel_blocks_are_mappable(
+            spec, self.kernel_block_size, kv_cache.stride(0) * kv_cache.element_size()
         ):
             raise ValueError(
                 f"{self.backend.get_name()} needs {self.kernel_block_size}-token "
@@ -618,18 +628,14 @@ def allocate_kv_cache(
         if (
             kernel_block_size is not None
             and isinstance(spec, AttentionSpec)
-            and spec.tokens_per_state > 1
-            and spec.num_heads == 1
             and spec.page_size_padded is None
             and spec.block_size > kernel_block_size
             and spec.block_size % kernel_block_size == 0
-            and tensor.block_stride != spec.page_size_bytes
-            and tensor.block_stride
-            % (
-                spec.get_num_kernel_states(kernel_block_size)
-                * spec.state_content_size_bytes
+            and tensor.block_stride != spec.unpadded_page_size_bytes
+            and packed_kernel_blocks_are_mappable(
+                spec, kernel_block_size, tensor.block_stride
             )
-            == 0
+            # All manager states must be represented after the split.
             and spec.num_states
             == (spec.block_size // kernel_block_size)
             * spec.get_num_kernel_states(kernel_block_size)
