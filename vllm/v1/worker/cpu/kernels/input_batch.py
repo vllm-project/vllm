@@ -12,16 +12,12 @@ def prepare_prefill_inputs(
     grid,
     input_ids_ptr,
     next_prefill_tokens_ptr,
-    next_prefill_tokens_stride,
     num_lookahead,
     idx_mapping_ptr,
     query_start_loc_ptr,
     all_token_ids_ptr,
-    all_token_ids_stride,
     prefill_lens_ptr,
     num_computed_tokens_ptr,
-    BLOCK_SIZE,
-    LOOKAHEAD_BLOCK,
 ):
     for batch_idx in range(grid[0]):
         req = idx_mapping_ptr[batch_idx]
@@ -48,7 +44,6 @@ def prepare_pos_seq_lens(
     query_start_loc_ptr,
     num_computed_tokens_ptr,
     max_num_reqs,
-    BLOCK_SIZE,
 ):
     num_reqs = grid[0] - 1
     seq_lens_ptr[num_reqs:max_num_reqs] = 0
@@ -71,10 +66,8 @@ def combine_sampled_and_draft_tokens(
     seq_lens_ptr,
     prefill_len_ptr,
     draft_tokens_ptr,
-    draft_tokens_stride,
     cu_num_logits_ptr,
     logits_indices_ptr,
-    BLOCK_SIZE,
     NUM_NEW_SAMPLED_TOKENS=1,
 ):
     for batch_idx in range(grid[0]):
@@ -123,14 +116,11 @@ def post_update(
     num_computed_tokens_ptr,
     last_sampled_tokens_ptr,
     output_bin_counts_ptr,
-    output_bin_counts_stride,
     sampled_tokens_ptr,
-    sampled_tokens_stride,
     num_sampled_ptr,
     num_rejected_ptr,
     query_start_loc_ptr,
     all_token_ids_ptr,
-    all_token_ids_stride,
     total_len_ptr,
 ):
     for batch_idx in range(grid[0]):
@@ -174,7 +164,6 @@ def expand_idx_mapping(
     expanded_idx_mapping_ptr,
     expanded_local_pos_ptr,
     cu_num_logits_ptr,
-    BLOCK_SIZE,
 ):
     for batch_idx in range(grid[0]):
         start = cu_num_logits_ptr[batch_idx]
@@ -187,16 +176,12 @@ def expand_idx_mapping(
 def prepare_rope_positions(
     grid,
     positions_ptr,
-    positions_stride,
     prefill_positions_ptr,
-    prefill_positions_stride0,
-    prefill_positions_stride1,
     prefill_delta_ptr,
     idx_mapping_ptr,
     query_start_loc_ptr,
     prefill_lens_ptr,
     num_computed_tokens_ptr,
-    BLOCK_SIZE,
     NUM_DIMS,
 ):
     for batch_idx in range(grid[0]):
@@ -216,7 +201,6 @@ def prepare_rope_positions(
 
 def apply_prompt_embeds(
     inputs_embeds_ptr: torch.Tensor,
-    inputs_embeds_stride: int,
     embeds_ptrs_ptr: torch.Tensor,
     mask_ptrs_ptr: torch.Tensor,
     embeds_lens_ptr: torch.Tensor,
@@ -224,8 +208,6 @@ def apply_prompt_embeds(
     query_start_loc_ptr: torch.Tensor,
     num_computed_tokens_ptr: torch.Tensor,
     hidden_size: int,
-    TOKEN_BLOCK: int,
-    BLOCK_SIZE: int,
     *,
     grid: tuple[int, int],
 ) -> None:

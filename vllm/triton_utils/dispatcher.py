@@ -43,14 +43,14 @@ def _kernel_arg_names(kernel: Callable[..., Any]) -> tuple[str, ...]:
 class KernelOverride:
     """Stands in for a Triton kernel and routes launches to ``impl``.
 
-    The JIT warmup infrastructure launches kernels as
-    ``kernel[grid](**kwargs)`` where ``kwargs`` are keyed by the original
-    kernel's argument names. This wrapper forwards those launch arguments
-    to the platform implementation: by keyword when the implementation's
-    parameter names match the kernel's, otherwise positionally in the
-    kernel's parameter order. Triton launch options (``num_warps``, ...)
-    are dropped, and implementations with a keyword-only ``grid``
-    parameter receive the launch grid.
+    Launch arguments are bound to the original kernel's argument names.
+    When every parameter of ``impl`` is a kernel argument, ``impl`` receives
+    just the arguments it declares, by keyword, so kernel arguments it does
+    not use can be added or reordered without breaking it. Otherwise
+    ``impl`` must mirror the kernel's full signature and receives the
+    arguments positionally. Triton launch options (``num_warps``, ...) are
+    dropped, and implementations with a ``grid`` parameter receive the
+    launch grid.
     """
 
     def __init__(self, kernel: Callable[..., Any], impl: Callable[..., Any]) -> None:
@@ -64,9 +64,23 @@ class KernelOverride:
         self.__module__ = getattr(kernel, "__module__", "")
         params = inspect.signature(impl).parameters
         self._takes_grid = "grid" in params
-        self._forward_by_name = (
-            tuple(name for name in params if name != "grid") == self.arg_names
-        )
+        names = tuple(name for name in params if name != "grid")
+        # Parameters with defaults may outlive the kernel argument they mirrored.
+        unknown = [
+            name
+            for name in names
+            if name not in self.arg_names
+            and params[name].default is inspect.Parameter.empty
+        ]
+        # Parameters to forward by keyword, or None to forward positionally.
+        self._forward_names: tuple[str, ...] | None = None if unknown else names
+        if unknown and len(names) != len(self.arg_names):
+            logger.warning(
+                "Override %r takes %s, which are not arguments of the kernel %s",
+                self.__name__,
+                unknown,
+                self.arg_names,
+            )
 
     def __getitem__(self, grid: Any) -> Callable[..., Any]:
         if self._takes_grid:
@@ -76,9 +90,14 @@ class KernelOverride:
     def _launch(self, *args: Any, **kwargs: Any) -> Any:
         for option in _LAUNCH_OPTIONS.intersection(kwargs):
             del kwargs[option]
-        if args or self._forward_by_name:
-            return self._impl(*args, **kwargs)
         extra = {"grid": kwargs.pop("grid")} if self._takes_grid else {}
+        if self._forward_names is not None:
+            kwargs.update(zip(self.arg_names, args))
+            names = self._forward_names
+            used = {name: kwargs[name] for name in names if name in kwargs}
+            return self._impl(**used, **extra)
+        if args:
+            return self._impl(*args, **kwargs, **extra)
         unexpected = [name for name in kwargs if name not in self.arg_names]
         if unexpected:
             raise RuntimeError(

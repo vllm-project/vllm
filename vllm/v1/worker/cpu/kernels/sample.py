@@ -27,13 +27,9 @@ def _ranks(logits: torch.Tensor, token_ids: torch.Tensor) -> torch.Tensor:
 def topk_log_softmax(
     output_ptr: torch.Tensor,
     logits_ptr: torch.Tensor,
-    logits_stride: int,
     topk_ids_ptr: torch.Tensor,
-    topk_ids_stride: int,
     topk: int,
     vocab_size: int,
-    BLOCK_SIZE: int,
-    TOPK_BLOCK_SIZE: int,
 ) -> None:
     output_ptr.copy_(
         _token_logprobs(logits_ptr[:, :vocab_size], topk_ids_ptr[:, :topk])
@@ -43,10 +39,8 @@ def topk_log_softmax(
 def ranks(
     output_ptr: torch.Tensor,
     logits_ptr: torch.Tensor,
-    logits_stride: int,
     token_ids_ptr: torch.Tensor,
     vocab_size: int,
-    BLOCK_SIZE: int,
 ) -> None:
     batch_size = output_ptr.shape[0]
     output_ptr.copy_(
@@ -56,18 +50,13 @@ def ranks(
 
 def fill_logprob_token_ids(
     out_token_ids_ptr: torch.Tensor,
-    out_token_ids_stride: int,
     out_valid_mask_ptr: torch.Tensor,
-    out_valid_mask_stride: int,
     sampled_token_ids_ptr: torch.Tensor,
     topk_indices_ptr: torch.Tensor,
-    topk_indices_stride: int,
     expanded_idx_mapping_ptr: torch.Tensor,
     num_per_req_token_ids_ptr: torch.Tensor,
     per_req_token_ids_ptr: torch.Tensor,
-    per_req_token_ids_stride: int,
     NUM_TOPK: int,
-    PADDED_COLS: int,
 ) -> None:
     batch_size, num_cols = out_token_ids_ptr.shape
     num_cols -= 1
@@ -96,8 +85,6 @@ def prompt_logprobs_token_ids(
     idx_mapping_ptr,
     num_computed_tokens_ptr,
     all_token_ids_ptr,
-    all_token_ids_stride,
-    BLOCK_SIZE,
 ):
     for batch_idx in range(grid[0]):
         req = idx_mapping_ptr[batch_idx]
@@ -112,14 +99,11 @@ def prompt_logprobs_token_ids(
 
 def apply_grammar_bitmask(
     logits_ptr: torch.Tensor,
-    logits_stride: int,
     logits_indices_ptr: torch.Tensor,
     cu_num_logits_ptr: torch.Tensor,
     bitmask_ptr: torch.Tensor,
-    bitmask_stride: int,
     vocab_size: int,
     MASK_STRIDE: int,
-    BLOCK_SIZE: int,
 ) -> None:
     num_masks, num_words = bitmask_ptr.shape
     mapping_idx = logits_indices_ptr[:num_masks].long()
@@ -138,9 +122,7 @@ def apply_grammar_bitmask(
 
 def num_nans(
     logits_ptr: torch.Tensor,
-    logits_stride: int,
     num_nans_ptr: torch.Tensor,
     vocab_size: int,
-    BLOCK_SIZE: int,
 ) -> None:
     num_nans_ptr.copy_(logits_ptr[:, :vocab_size].isnan().sum(dim=1))

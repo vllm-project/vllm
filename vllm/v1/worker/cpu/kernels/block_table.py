@@ -14,8 +14,6 @@ def apply_write(
     write_starts_ptr,
     write_contents_ptr,
     write_cu_lens_ptr,
-    write_group_ids_ptr,
-    BLOCK_SIZE,
     MULTI_GROUP,
 ):
     # CPUBlockTables applies each group separately, so only the single-group
@@ -37,7 +35,6 @@ def zero_kv_blocks(
     seg_block_strides_ptr,
     seg_page_sizes_ptr,
     block_ids_ptr,
-    BLOCK_SIZE,
 ):
     # Strides and page sizes are in int32 elements.
     for block_id in block_ids_ptr:
@@ -57,7 +54,6 @@ def dcp_local_seq_lens(
     cp_interleave,
     num_reqs,
     max_num_reqs,
-    BLOCK_SIZE,
 ):
     out_ptr[num_reqs:max_num_reqs] = 0
     for i in range(num_reqs):
