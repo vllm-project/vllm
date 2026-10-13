@@ -15,6 +15,7 @@ from vllm import envs
 from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.utils.cpu_resource_utils import LogicalCPUInfo
+from vllm.utils.torch_utils import available_cpu_count
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -146,6 +147,7 @@ class OMPProcessManager:
                 cpu_list, reserve_list = [], []
                 raise RuntimeError(f"{cpu_arch} doesn't support auto CPU binding.")
 
+            cpu_list = self._cap_by_cpu_quota(cpu_list)
             for item in cpu_list:
                 self.cpu_lists.append([x.id for x in item])
             self.reserved_cpu_list = [x.id for x in reserve_list]
@@ -296,3 +298,38 @@ class OMPProcessManager:
                 cpu_lists_of_ranks[i] = cpu_lists_of_ranks[i][:-num]
 
         return cpu_lists_of_ranks, reserved_cpu_list
+
+    def _cap_by_cpu_quota(
+        self, cpu_lists_of_ranks: list[list[LogicalCPUInfo]]
+    ) -> list[list[LogicalCPUInfo]]:
+        """Trim the auto-selected OpenMP CPU lists to the cgroup CPU quota.
+
+        A container CPU limit (cgroup v2 cpu.max or v1 CFS quota, e.g. a
+        Kubernetes pod with limits.cpu but no static CPU manager, or
+        `docker run --cpus`) does not shrink the scheduling affinity, so
+        every rank would otherwise start one spinning OpenMP thread per
+        selected core and get throttled.
+
+        The quota is shared by the API processes on this node and split
+        evenly across ranks, keeping at least one thread per rank.
+        """
+        num_ranks = len(cpu_lists_of_ranks)
+        num_threads = sum(len(cpus) for cpus in cpu_lists_of_ranks)
+        budget = available_cpu_count() // max(1, self.internal_dp_size)
+        budget = max(budget, num_ranks)
+        if num_threads <= budget:
+            return cpu_lists_of_ranks
+
+        capped = [
+            cpus[: budget // num_ranks + (1 if i < budget % num_ranks else 0)]
+            for i, cpus in enumerate(cpu_lists_of_ranks)
+        ]
+        logger.warning(
+            "Auto CPU binding selected %d OpenMP threads, but the cgroup CPU "
+            "quota allows %d CPUs. Using %d threads instead to avoid CPU "
+            "throttling. Set VLLM_CPU_OMP_THREADS_BIND to override.",
+            num_threads,
+            budget,
+            sum(len(cpus) for cpus in capped),
+        )
+        return capped
