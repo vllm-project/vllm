@@ -103,7 +103,9 @@ def _make_scheduler(timeout: float = TIMEOUT_S) -> MoRIIOConnectorScheduler:
     scheduler._write_recv_orphaned = set()
     scheduler._write_load_failed_block_ids = []
     scheduler._write_recv_timeout = timeout
+    scheduler._write_recv_single_group = True
     scheduler.send_notify_block = MagicMock()
+    scheduler._release_write_prefill_blocks = MagicMock()
     scheduler.map_request_id = MagicMock()
     scheduler.unmap_request_id = MagicMock()
     return scheduler
@@ -170,14 +172,21 @@ def _expire(scheduler: MoRIIOConnectorScheduler, request_id: str = REQ_ID):
 
 
 def _build_real_scheduler(
-    extra_config: dict | None = None, kv_load_failure_policy: str = "fail"
+    extra_config: dict | None = None,
+    kv_load_failure_policy: str = "fail",
+    num_groups: int = 1,
 ):
-    """Run the real ``__init__`` (single full-attention group, WRITE mode)."""
+    """Run the real ``__init__`` (full-attention groups, WRITE mode)."""
     spec = FullAttentionSpec(
         block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32
     )
-    group = SimpleNamespace(enable_kv_transfer=True, kv_cache_spec=spec)
-    kv_cache_config = SimpleNamespace(kv_cache_groups=[group], transfer_groups=(group,))
+    groups = [
+        SimpleNamespace(enable_kv_transfer=True, kv_cache_spec=spec)
+        for _ in range(num_groups)
+    ]
+    kv_cache_config = SimpleNamespace(
+        kv_cache_groups=groups, transfer_groups=tuple(groups)
+    )
     vllm_config = SimpleNamespace(
         kv_transfer_config=SimpleNamespace(
             kv_connector_extra_config={
@@ -258,6 +267,27 @@ def test_default_fail_policy_does_not_warn(log):
     assert not any("recompute" in str(c.args[0]) for c in log.warning.call_args_list)
 
 
+def test_timer_is_disabled_with_several_kv_cache_groups(log):
+    """The scheduler raises on block-level load errors with several groups."""
+    scheduler = _build_real_scheduler(num_groups=2)
+    messages = [str(c.args[0]) for c in log.warning.call_args_list]
+    assert any("write_recv_timeout is disabled" in m for m in messages)
+
+    scheduler._arm_write_recv_timer(REQ_ID, _make_blocks(own_ids=[10, 11]), 32)
+    assert REQ_ID not in scheduler._write_recv_deadline
+
+
+def test_timer_is_armed_with_a_single_kv_cache_group(log):
+    scheduler = _build_real_scheduler()
+    assert not any(
+        "write_recv_timeout is disabled" in str(c.args[0])
+        for c in log.warning.call_args_list
+    )
+
+    scheduler._arm_write_recv_timer(REQ_ID, _make_blocks(own_ids=[10, 11]), 32)
+    assert scheduler._write_recv_block_ids[REQ_ID] == [10, 11]
+
+
 # --- arming ---------------------------------------------------------------
 
 
@@ -319,11 +349,14 @@ def test_fully_cached_request_arms_no_timer():
 
 
 def test_no_external_tokens_arms_no_timer():
+    """A full local prefix hit releases the producer instead of waiting."""
     scheduler = _make_scheduler()
 
     _arm(scheduler, num_external_tokens=0)
 
     assert scheduler._write_recv_deadline == {}
+    scheduler._release_write_prefill_blocks.assert_called_once()
+    scheduler.send_notify_block.assert_not_called()
 
 
 def test_timer_is_not_rearmed_for_a_request_already_waiting():
@@ -630,7 +663,11 @@ def consumer(monkeypatch, clock):
     return scheduler, connector
 
 
-def _step(scheduler, finished_recving: set[str] | None = None) -> set[int]:
+def _step(
+    scheduler,
+    finished_recving: set[str] | None = None,
+    failed_recving: set[str] | None = None,
+) -> set[int]:
     """One engine step. Returns the block ids reported as timed out.
 
     The worker is simulated the way the real one behaves: block ids the
@@ -649,6 +686,8 @@ def _step(scheduler, finished_recving: set[str] | None = None) -> set[int]:
         )
     else:
         runner_output = EMPTY_MODEL_RUNNER_OUTPUT
+    if failed_recving:
+        runner_output.kv_connector_output.failed_recving = failed_recving
     scheduler.update_from_output(out, runner_output)
     return timed_out
 
@@ -698,9 +737,7 @@ def test_scheduler_fails_a_timed_out_request_and_keeps_its_blocks(consumer, cloc
     assert pool.get_num_free_blocks() == free_before
 
 
-def test_scheduler_does_not_fail_an_aborted_request_a_second_time(
-    consumer, clock, log
-):
+def test_scheduler_does_not_fail_an_aborted_request_a_second_time(consumer, clock, log):
     scheduler, connector = consumer
     pool = scheduler.kv_cache_manager.block_pool
     free_before = pool.get_num_free_blocks()
@@ -723,9 +760,7 @@ def test_scheduler_does_not_fail_an_aborted_request_a_second_time(
     assert request.status == RequestStatus.FINISHED_ABORTED
     assert pool.get_num_free_blocks() == held
     assert not log.error.called
-    assert any(
-        "still incomplete" in str(c.args[0]) for c in log.warning.call_args_list
-    )
+    assert any("still incomplete" in str(c.args[0]) for c in log.warning.call_args_list)
     assert request_id not in connector._write_recv_deadline
     assert request_id not in connector._write_recv_orphaned
 
@@ -813,9 +848,7 @@ def test_scheduler_times_out_exactly_at_the_deadline(consumer, clock):
     assert request.status == RequestStatus.FINISHED_ERROR
 
 
-def test_scheduler_fails_every_request_that_expires_in_the_same_step(
-    consumer, clock
-):
+def test_scheduler_fails_every_request_that_expires_in_the_same_step(consumer, clock):
     scheduler, _ = consumer
     pool = scheduler.kv_cache_manager.block_pool
     first = _add_waiting_request(scheduler, "xfer-a")
@@ -832,3 +865,24 @@ def test_scheduler_fails_every_request_that_expires_in_the_same_step(
     _step(scheduler, finished_recving={first.request_id, second.request_id})
     assert first.request_id not in scheduler.requests
     assert second.request_id not in scheduler.requests
+
+
+def test_scheduler_does_not_time_out_a_request_the_producer_reported_failed(
+    consumer, clock, log
+):
+    """A producer ``write_failed`` (#57705) is reported as finished_recving
+    plus failed_recving, which ends the receive and so stops the timer."""
+    scheduler, connector = consumer
+    request = _add_waiting_request(scheduler)
+    request_id = request.request_id
+
+    _step(scheduler, finished_recving={request_id}, failed_recving={request_id})
+    assert request_id not in connector._write_recv_deadline
+    assert request.status == RequestStatus.FINISHED_ERROR
+
+    clock.advance(10 * TIMEOUT_S)
+    assert _step(scheduler) == set()
+    assert not log.error.called
+    assert not any(
+        "still incomplete" in str(c.args[0]) for c in log.warning.call_args_list
+    )
