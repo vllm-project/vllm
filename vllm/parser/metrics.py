@@ -39,9 +39,17 @@ def init_parser_metrics(*, model_name: str) -> None:
             documentation=(
                 "Total number of ToolParser invocations. "
                 "Non-streaming increments once per choice; "
-                "streaming increments once per delta."
+                "streaming increments once per delta. "
+                "Tool choices are normalized and tool counts are bucketed."
             ),
-            labelnames=["model_name", "mode", "outcome", "request_type"],
+            labelnames=[
+                "model_name",
+                "mode",
+                "outcome",
+                "request_type",
+                "tool_choice",
+                "tool_count",
+            ],
         )
     except ValueError:
         _tool_call_parser_invocations = cast(
@@ -59,7 +67,32 @@ def init_parser_metrics(*, model_name: str) -> None:
             mode=mode,
             outcome=outcome.value,
             request_type=request_type.value,
+            tool_choice="unset",
+            tool_count="0",
         )
+
+
+def _tool_choice_label(tool_choice: object) -> str:
+    if tool_choice is None:
+        return "unset"
+    if isinstance(tool_choice, str):
+        return tool_choice if tool_choice in ("auto", "none", "required") else "other"
+    choice_type = (
+        tool_choice.get("type")
+        if isinstance(tool_choice, dict)
+        else getattr(tool_choice, "type", None)
+    )
+    return "named" if choice_type == "function" else "other"
+
+
+def _tool_count_bucket(count: int) -> str:
+    if count <= 1:
+        return str(count)
+    if count <= 5:
+        return "2-5"
+    if count <= 10:
+        return "6-10"
+    return "10+"
 
 
 def record_tool_parser_invocation(
@@ -105,4 +138,6 @@ def record_tool_parser_invocation(
         mode="streaming" if is_streaming else "non_streaming",
         outcome=outcome.value,
         request_type=request_type.value,
+        tool_choice=_tool_choice_label(getattr(request, "tool_choice", None)),
+        tool_count=_tool_count_bucket(len(getattr(request, "tools", None) or ())),
     ).inc()
