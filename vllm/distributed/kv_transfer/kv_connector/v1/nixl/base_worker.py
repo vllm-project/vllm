@@ -3854,18 +3854,11 @@ class NixlBaseConnectorWorker:
                 return
             replaced = self._remote_agents.keys() - self._engine_by_address.values()
         now = time.perf_counter()
+        # A failed read can leave the backend connection to the peer failed
+        # while its metadata stays loaded, so only a fresh handshake recovers.
         for engine_id in self._failed_remote_engines - self._invalid_remote_engines:
-            agents = self._remote_agents.get(engine_id, {}).values()
-            try:
-                # No descriptors: query local existence, not peer health.
-                if not all(map(self.nixl_wrapper.check_remote_metadata, agents)):
-                    self._mark_remote_engine_invalid(engine_id, now)
-            except Exception:
-                logger.warning(
-                    "Could not check local NIXL metadata for engine %s.",
-                    engine_id,
-                    exc_info=True,
-                )
+            if engine_id in self._remote_agents:
+                self._mark_remote_engine_invalid(engine_id, now)
         self._failed_remote_engines.clear()
         # Invalid peers keep rejecting new reads until their backoff has elapsed.
         invalid = {
@@ -3892,7 +3885,7 @@ class NixlBaseConnectorWorker:
             )
 
     def _mark_remote_engine_invalid(self, engine_id: EngineId, now: float) -> None:
-        """Schedule release of an engine whose local NIXL metadata is gone.
+        """Schedule release of an engine after a failed read.
 
         The first invalidation is released as soon as reads drain. Repeats
         before the peer has stayed healthy for the max backoff double the
@@ -3912,8 +3905,7 @@ class NixlBaseConnectorWorker:
         self._invalid_engine_backoff[engine_id] = (backoff, now + backoff)
         self._invalid_remote_engines.add(engine_id)
         logger.warning(
-            "Local NIXL metadata for remote engine %s was invalidated; "
-            "re-handshaking after reads drain%s.",
+            "Read from remote engine %s failed; re-handshaking after reads drain%s.",
             engine_id,
             f" and a {backoff:.0f}s backoff" if backoff else "",
         )
