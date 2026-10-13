@@ -7176,6 +7176,8 @@ class GPUModelRunner(
                     spec = customize_attention_spec(
                         attn_module.get_attn_backend(), spec
                     )
+                if attn_module.is_draft_layer:
+                    spec = replace(spec, is_draft_layer=True)
                 kv_cache_spec[layer_name] = spec
 
         return kv_cache_spec
