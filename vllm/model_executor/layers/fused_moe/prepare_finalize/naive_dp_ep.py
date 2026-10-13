@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from contextlib import AbstractContextManager, nullcontext
+from collections.abc import Iterator
+from contextlib import contextmanager
 
 import torch
 
@@ -15,6 +16,11 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
 from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import nvfp4_block_scale_interleave
+from vllm.v1.worker.ubatching import (
+    dbo_enabled,
+    dbo_switch_to_compute_sync,
+    dbo_yield_and_switch_from_compute_to_comm,
+)
 
 
 def _quantize_and_setup_dispatch(
@@ -136,14 +142,33 @@ class MoEPrepareAndFinalizeNaiveDPEPModular(mk.FusedMoEPrepareAndFinalizeModular
             return self._allocate_combine_input(shape, dtype, device)
         return None
 
-    def _comm_region(self) -> AbstractContextManager[None]:
+    def supports_dbo(self) -> bool:
+        # prepare()/finalize() hand the collective to the comm stream
+        # themselves (see _comm_region), so the synchronous path is DBO-safe.
+        # supports_async() stays False: it also selects MK-internal
+        # shared-expert overlap. Only validated on ROCm so far.
+        return current_platform.is_rocm()
+
+    @contextmanager
+    def _comm_region(self) -> Iterator[None]:
         """Scope the dispatch/combine collective runs in.
 
-        The base class runs the collective on the calling stream. Subclasses
-        may redirect it, e.g. to a side communication stream so a DBO peer
-        ubatch can compute while the collective is in flight.
+        Without DBO the collective runs on the calling stream. Under DBO it
+        runs on the comm stream so the peer ubatch can compute while it is in
+        flight, using the same compute/comm handoff as DeepEP-HT. Graph
+        capture keeps every collective on the capture stream, so overlap is
+        limited to eager steps (prefill).
         """
-        return nullcontext()
+        if not dbo_enabled() or torch.cuda.is_current_stream_capturing():
+            yield
+            return
+        # Release the CPU to the peer ubatch so it can enqueue compute while
+        # this ubatch's collective runs; the compute stream waits on exit.
+        dbo_yield_and_switch_from_compute_to_comm()
+        try:
+            yield
+        finally:
+            dbo_switch_to_compute_sync()
 
     def prepare(
         self,
@@ -336,20 +361,6 @@ def make_moe_prepare_and_finalize_naive_dp_ep(
     is_sequence_parallel: bool = False,
     num_dispatchers: int = 1,
 ) -> MoEPrepareAndFinalizeNaiveDPEPModular | MoEPrepareAndFinalizeNaiveDPEPMonolithic:
-    if current_platform.is_rocm() and not use_monolithic:
-        # ROCm: use the DBO-aware subclass so the DP all-gather /
-        # reduce-scatter runs on the shared comm stream instead of blocking
-        # the compute stream under --enable-dbo. No ROCm config currently
-        # selects a monolithic expert kernel on this path.
-        from vllm.model_executor.layers.fused_moe.prepare_finalize.naive_dp_ep_rocm import (  # noqa: E501
-            MoEPrepareAndFinalizeNaiveDPEPModularROCmDBO,
-        )
-
-        return MoEPrepareAndFinalizeNaiveDPEPModularROCmDBO(
-            is_sequence_parallel=is_sequence_parallel,
-            num_dispatchers=num_dispatchers,
-        )
-
     return (
         MoEPrepareAndFinalizeNaiveDPEPMonolithic(
             is_sequence_parallel=is_sequence_parallel,
