@@ -1437,8 +1437,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
         os.environ.get("VLLM_ROCM_QUICK_REDUCE_QUANTIZATION_MIN_SIZE_KB", None)
     ),
     # Custom quick allreduce kernel for MI3* cards.
-    # If set to 1 with VLLM_ROCM_QUICK_REDUCE_QUANTIZATION=INT4, use AITER's
-    # FlyDSL INT4 QuickReduce for BF16 payloads instead of the HIP kernels.
+    # If set to 1 with VLLM_ROCM_USE_AITER=1 and
+    # VLLM_ROCM_QUICK_REDUCE_QUANTIZATION=INT4, use AITER's FlyDSL INT4
+    # QuickReduce for the BF16 payloads it supports. The HIP kernels take the rest.
     "VLLM_ROCM_QUICK_REDUCE_USE_FLYDSL": lambda: (
         os.getenv("VLLM_ROCM_QUICK_REDUCE_USE_FLYDSL", "False").lower() in ("true", "1")
     ),

@@ -10,6 +10,7 @@ from torch.distributed import ProcessGroup
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import get_current_vllm_config_or_none
 from vllm.distributed.parallel_state import in_the_same_node_as
 from vllm.logger import init_logger
@@ -40,6 +41,8 @@ class QuickReduceRegime(Enum):
 
 KB = 1024
 MB = 1024 * KB
+# FlyDSL's launch cost regresses collectives below this size.
+FLYDSL_MIN_SIZE = 2 * MB
 
 
 class QuickAllReduce:
@@ -244,6 +247,7 @@ class QuickAllReduce:
             qr_max_size if qr_max_size is not None else ops.qr_max_size()
         )
         qr_min_size = self._get_qr_min_size(effective_qr_max_size)
+        self._ptr = ops.init_custom_qr(self.rank, self.world_size, qr_max_size)
         self.qr_max_size = effective_qr_max_size
         self.qr_min_size = qr_min_size
         if qr_min_size is not None:
@@ -256,39 +260,35 @@ class QuickAllReduce:
                 "Custom quick allreduce: quantization codec threshold = %d KB",
                 self.qr_quantization_min_size // KB,
             )
+        self.create_shared_buffer()
+        if envs.VLLM_ROCM_QUICK_REDUCE_USE_FLYDSL:
+            self._init_flydsl_int4()
+        self.disabled = False
 
-        use_flydsl = envs.VLLM_ROCM_QUICK_REDUCE_USE_FLYDSL
-        if use_flydsl and self.qr_quant_level != QuickReduceRegime.INT4:
+    def _init_flydsl_int4(self):
+        if not rocm_aiter_ops.is_flydsl_quick_reduce_enabled():
+            logger.warning(
+                "VLLM_ROCM_QUICK_REDUCE_USE_FLYDSL requires VLLM_ROCM_USE_AITER=1; "
+                "using the HIP QuickReduce kernels."
+            )
+        elif self.qr_quant_level != QuickReduceRegime.INT4:
             logger.warning(
                 "VLLM_ROCM_QUICK_REDUCE_USE_FLYDSL only supports INT4 "
                 "QuickReduce; using the HIP QuickReduce kernels for %s.",
                 self.qr_quant_level.name,
             )
-        if use_flydsl and self.qr_quant_level == QuickReduceRegime.INT4:
-            from aiter.ops.flydsl import QuickAllReduceInt4
-
-            self._flydsl_int4 = QuickAllReduceInt4(
+        else:
+            self._flydsl_int4 = rocm_aiter_ops.create_flydsl_quick_all_reduce_int4(
                 group=self.group,
                 device=self.device,
                 rank=self.rank,
                 world_size=self.world_size,
             )
-            # FlyDSL rejects payloads above 4 GiB, and its launch cost
-            # regresses collectives below 2 MiB.
-            self.qr_max_size = min(effective_qr_max_size, 0xFFFFFFFF)
-            self.qr_min_size = qr_min_size if qr_min_size is not None else 2 * MB
-            self.disabled = False
             logger.info(
-                "Using AITER FlyDSL INT4 QuickReduce for BF16 payloads "
-                "from %d MiB through %d MiB",
-                self.qr_min_size // MB,
-                self.qr_max_size // MB,
+                "Using AITER FlyDSL INT4 QuickReduce for BF16 payloads of at "
+                "least %d MiB; other payloads use the HIP QuickReduce kernels.",
+                FLYDSL_MIN_SIZE // MB,
             )
-            return
-
-        self._ptr = ops.init_custom_qr(self.rank, self.world_size, qr_max_size)
-        self.create_shared_buffer()
-        self.disabled = False
 
     @staticmethod
     def _get_qr_min_size(qr_max_size: int | None) -> int | None:
@@ -346,15 +346,6 @@ class QuickAllReduce:
         """Check if quickreduce is available."""
         if self.disabled:
             return False
-        if self._flydsl_int4 is not None:
-            inp_size = inp.numel() * inp.element_size()
-            return (
-                inp.dtype == torch.bfloat16
-                and inp.is_contiguous()
-                and inp.data_ptr() % 16 == 0
-                and inp_size % 16 == 0
-                and self.qr_min_size <= inp_size <= self.qr_max_size
-            )
         if inp.dtype not in self._SUPPORTED_DTYPES:
             return False
         inp_size = inp.numel() * inp.element_size()
@@ -380,13 +371,23 @@ class QuickAllReduce:
         # as QR uses static IPC buffer.
         if out is None:
             out = torch.empty_like(inp)
-        if self._flydsl_int4 is not None:
+        if self._use_flydsl_int4(inp):
             self._flydsl_int4.allreduce(inp, out)
             return out
         ops.qr_all_reduce(
             self._ptr, inp, out, self._get_qr_quant_level(inp), self.use_fp16_kernels
         )
         return out
+
+    def _use_flydsl_int4(self, inp: torch.Tensor) -> bool:
+        return (
+            self._flydsl_int4 is not None
+            and inp.dtype == torch.bfloat16
+            and inp.is_contiguous()
+            and inp.data_ptr() % 16 == 0
+            and inp.numel() * inp.element_size() >= FLYDSL_MIN_SIZE
+            and self._get_qr_quant_level(inp) == QuickReduceRegime.INT4.value
+        )
 
     def _get_qr_quant_level(self, inp: torch.Tensor) -> int:
         quantization_min_size = self.qr_quantization_min_size
@@ -401,7 +402,6 @@ class QuickAllReduce:
         if self._flydsl_int4 is not None:
             self._flydsl_int4.close()
             self._flydsl_int4 = None
-            self.disabled = True
         if not self.disabled and getattr(self, "_ptr", None):
             if ops is not None:
                 ops.qr_destroy(self._ptr)

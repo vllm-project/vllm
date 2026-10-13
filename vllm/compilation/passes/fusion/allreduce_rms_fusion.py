@@ -11,7 +11,6 @@ import torch.fx as fx
 from torch._higher_order_ops.auto_functionalize import auto_functionalized
 from torch._inductor.pattern_matcher import PatternMatcherPass
 
-import vllm.envs as envs
 import vllm.ir.ops
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.passes.fusion.rms_quant_fusion import (
@@ -1594,7 +1593,7 @@ class RocmAiterAllReduceFusionPass(VllmFusionPatternMatcherPass):
             return
         self.ca_comm = ca_comm
 
-        if envs.VLLM_ROCM_QUICK_REDUCE_USE_FLYDSL:
+        if rocm_aiter_ops.is_flydsl_quick_reduce_enabled():
             logger.warning_once(
                 "FlyDSL QuickReduce has no fused all-reduce + RMSNorm kernel, "
                 "so with fuse_allreduce_rms the all-reduces in its size range "
