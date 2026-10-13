@@ -134,12 +134,10 @@ def test_full_attention_common_prefix_among_scheduled_requests_only():
     assert manager.get_num_common_prefix_blocks(set()) == 0
 
 
-def test_rswa_common_prefix_is_zero_despite_shared_null_gap():
-    """R-SWA frees the gap between the reference prefix and the decode
-    window into the shared null block. Two requests at the same decode
-    progress have nulls at identical positions, so identity comparison
-    alone would report a common prefix across the gap, whose blocks carry
-    no KV. The manager must return 0."""
+def test_rswa_common_prefix_bounded_by_reference_region():
+    """The common prefix of scheduled R-SWA requests spans the shared
+    reference region; the freed gap (shared null blocks) must never be
+    counted even when two requests have identical gap positions."""
     block_size = 4
     rswa_spec = RSWASpec(
         block_size=block_size,
@@ -158,15 +156,32 @@ def test_rswa_common_prefix_is_zero_despite_shared_null_gap():
     )
     null_block = block_pool.null_block
 
-    # Two requests sharing a reference prefix, each with a null gap at the
-    # same positions followed by a private decode window.
-    shared = [block_pool.get_new_blocks(1)[0] for _ in range(2)]
+    # Two requests sharing a 4-block reference (16-token prompt); eviction
+    # frees the gap at blocks 4-7 into the shared null block.
+    shared = [KVCacheBlock(1000 + i) for i in range(4)]
     for i in range(2):
-        manager.req_to_blocks[f"req-{i}"] = (
-            list(shared) + [null_block, null_block] + [block_pool.get_new_blocks(1)[0]]
-        )
+        table = shared + [KVCacheBlock(2000 + 10 * i + j) for j in range(6)]
+        manager.req_to_blocks[f"req-{i}"] = table
+        manager.remove_skipped_blocks(f"req-{i}", 40, num_prompt_tokens=16)
+        assert table[4] is null_block
+        assert table[7] is null_block
 
-    assert manager.get_num_common_prefix_blocks({"req-0", "req-1"}) == 0
+    # Common prefix = the shared reference region (4 blocks). Without the
+    # reference bound, identity comparison would also count the identical
+    # null gap (blocks 4-7) and over-report 8.
+    assert manager.get_num_common_prefix_blocks({"req-0", "req-1"}) == 4
+
+    # Divergence inside the reference region shortens the prefix.
+    manager.req_to_blocks["req-1"] = shared[:2] + [
+        KVCacheBlock(3000 + j) for j in range(8)
+    ]
+    manager._reference_block_counts["req-1"] = 4
+    assert manager.get_num_common_prefix_blocks({"req-0", "req-1"}) == 2
+
+    # Bookkeeping is dropped when the request is removed.
+    manager.pop_blocks_for_free("req-1")
+    assert "req-1" not in manager._reference_block_counts
+    assert manager.get_num_common_prefix_blocks({"req-0"}) == 0
 
 
 def test_full_attention_common_prefix_with_prefix_caching():

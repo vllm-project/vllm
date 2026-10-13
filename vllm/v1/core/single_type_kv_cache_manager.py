@@ -919,10 +919,8 @@ class FullAttentionManager(SingleTypeKVCacheManager):
         prefix-monotone and is binary-searched with one comparison per
         probe: O(num_scheduled * log(num_blocks)).
 
-        Subclasses whose tables contain the shared null block must
-        override this: every request's table references the same physical
-        null block, so identity comparison would mistake it for sharing
-        even though it carries no KV (see RSWAManager and
+        Subclasses whose tables contain the shared null block must bound
+        the search away from it (see RSWAManager and
         SlidingWindowManager).
         """
         tables = [
@@ -932,11 +930,29 @@ class FullAttentionManager(SingleTypeKVCacheManager):
         ]
         if len(tables) <= 1:
             return 0
+        return self._longest_common_prefix_len(tables)
 
+    @staticmethod
+    def _longest_common_prefix_len(
+        tables: list[list[KVCacheBlock]],
+        bounds: list[int] | None = None,
+    ) -> int:
+        """Longest common prefix length (in blocks) of the given block
+        tables, compared by physical block identity.
+
+        `bounds[i]` optionally caps how far into `tables[i]` the prefix
+        may extend.
+        """
         ref_blocks = tables[0]
-        num_common_blocks = len(ref_blocks)
-        for blocks in tables[1:]:
-            lo, hi = 0, min(num_common_blocks, len(blocks))
+        num_common_blocks = (
+            min(len(ref_blocks), bounds[0]) if bounds else len(ref_blocks)
+        )
+        for i in range(1, len(tables)):
+            blocks = tables[i]
+            hi = min(num_common_blocks, len(blocks))
+            if bounds is not None:
+                hi = min(hi, bounds[i])
+            lo = 0
             while lo < hi:
                 mid = (lo + hi + 1) // 2
                 if blocks[mid - 1].block_id == ref_blocks[mid - 1].block_id:
@@ -961,19 +977,37 @@ class RSWAManager(FullAttentionManager):
     def __init__(self, kv_cache_spec: RSWASpec, **kwargs) -> None:
         super().__init__(kv_cache_spec, **kwargs)
         self.rswa_window: int = kv_cache_spec.rswa_window
+        # Reference-region length (in blocks) per request whose gap has
+        # been freed; requests without an entry have no null blocks yet.
+        self._reference_block_counts: dict[str, int] = {}
+
+    def pop_blocks_for_free(self, request_id: str) -> list[KVCacheBlock]:
+        self._reference_block_counts.pop(request_id, None)
+        return super().pop_blocks_for_free(request_id)
 
     def get_num_common_prefix_blocks(
         self, scheduled_request_ids: Collection[str]
     ) -> int:
-        """NOTE: The gap blocks between the reference prefix and the decode
-        window are freed and replaced with the shared null block, which
-        carries no KV. Every request's table references the same physical
-        null block, so identity comparison would count a matching gap as
-        shared prefix. Return 0 here for correctness. Need to support
-        cascade attention + R-SWA together to report the reference-prefix
-        common prefix instead.
+        """Get the number of common prefix blocks shared by all of the
+        scheduled requests, within the always-visible reference region.
+
+        The gap between the reference prefix and the decode window is
+        freed into the shared null block, which every request's table
+        references identically; identity comparison alone would mistake
+        it for sharing. Bound the search at each request's reference
+        boundary so the common prefix only spans real KV.
         """
-        return 0
+        tables: list[list[KVCacheBlock]] = []
+        bounds: list[int] = []
+        for request_id in scheduled_request_ids:
+            blocks = self.req_to_blocks.get(request_id)
+            if blocks is None:
+                continue
+            tables.append(blocks)
+            bounds.append(self._reference_block_counts.get(request_id, len(blocks)))
+        if len(tables) <= 1:
+            return 0
+        return self._longest_common_prefix_len(tables, bounds)
 
     def remove_skipped_blocks(
         self,
@@ -1005,6 +1039,7 @@ class RSWAManager(FullAttentionManager):
             num_prompt_tokens, processed_computed_tokens - self.rswa_window
         )
         last_gap_block = window_start // bs  # exclusive upper bound
+        self._reference_block_counts[request_id] = first_gap_block
         self._remove_blocks_in_range(request_id, first_gap_block, last_gap_block)
 
 
