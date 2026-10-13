@@ -44,13 +44,21 @@ class BenchBatch:
         return output
 
 
-def _num_blocks(spec: KVCacheSpec, computed: int, kv_len: int) -> tuple[int, int]:
+def kv_block_size(spec: KVCacheSpec, dcp_size: int) -> int:
+    """Tokens per block as the scheduler counts them: DCP spreads each
+    block's tokens over the DCP ranks."""
+    return spec.block_size * (dcp_size if spec.dcp_sharded else 1)
+
+
+def _num_blocks(
+    spec: KVCacheSpec, computed: int, kv_len: int, dcp_size: int
+) -> tuple[int, int]:
     """Return (leading null blocks, live blocks) for one request."""
+    block_size = kv_block_size(spec, dcp_size)
     if isinstance(spec, UniformTypeKVCacheSpecs):
         spec = spec.first_spec
     if isinstance(spec, (CircularBufferSpec, MambaSpec)):
         return 0, 1
-    block_size = spec.block_size
     total = -(-kv_len // block_size)
     skipped = 0
     if isinstance(spec, SlidingWindowSpec):
@@ -65,6 +73,7 @@ def build_batch(
     num_kv_blocks: int,
     vocab_size: int,
     rng: np.random.Generator,
+    dcp_size: int = 1,
 ) -> BenchBatch:
     """Allocate disjoint blocks and build `NewRequestData` for every request.
 
@@ -100,7 +109,9 @@ def build_batch(
         computed = req.prefix_len - replay
         block_ids = []
         for group, ranges in zip(kv_cache_groups, group_block_ranges):
-            skipped, live = _num_blocks(group.kv_cache_spec, computed, req.kv_len)
+            skipped, live = _num_blocks(
+                group.kv_cache_spec, computed, req.kv_len, dcp_size
+            )
             block_ids.append([0] * skipped + list(range(cursor, cursor + live)))
             ranges.append((cursor, cursor + live))
             cursor += live

@@ -152,6 +152,7 @@ def run_case(runner, case: BenchCase, args: argparse.Namespace) -> dict[str, Any
 
     context = runner.vllm_config.compilation_config.static_forward_context
     kv_config = runner.kv_cache_config
+    dcp_size = runner.parallel_config.decode_context_parallel_size
     rng = np.random.default_rng([args.seed, runner.dp_rank])
     batch = build_batch(
         case,
@@ -159,6 +160,7 @@ def run_case(runner, case: BenchCase, args: argparse.Namespace) -> dict[str, Any
         kv_config.num_blocks,
         runner.model_config.get_vocab_size(),
         rng,
+        dcp_size,
     )
     zero_kv_blocks(context, kv_config.kv_cache_groups, batch, kv_config.num_blocks)
     bench = ForwardBench(
@@ -167,7 +169,7 @@ def run_case(runner, case: BenchCase, args: argparse.Namespace) -> dict[str, Any
         args.iters,
         args.samples,
         touched_kv_views(
-            context, kv_config.kv_cache_groups, batch, kv_config.num_blocks
+            context, kv_config.kv_cache_groups, batch, kv_config.num_blocks, dcp_size
         ),
     )
     routing, balanced = install_routing(

@@ -12,7 +12,7 @@ from collections.abc import Iterator
 
 import torch
 
-from vllm.benchmarks.forward.batch import BenchBatch
+from vllm.benchmarks.forward.batch import BenchBatch, kv_block_size
 
 
 def _tensors(kv_cache) -> Iterator[torch.Tensor]:
@@ -50,19 +50,20 @@ def touched_kv_views(
     kv_cache_groups,
     batch: BenchBatch,
     num_blocks: int,
+    dcp_size: int,
 ) -> list[torch.Tensor]:
     """Views of the KV blocks a step may write: each request's last
     ceil(scheduled / block_size) + 2 blocks, in every group."""
     scheduled_tokens = [batch.expected[req_id][0] for req_id in batch.req_ids]
     views = []
     for group, ranges in zip(kv_cache_groups, batch.group_block_ranges):
-        spec = getattr(group.kv_cache_spec, "first_spec", group.kv_cache_spec)
+        block_size = kv_block_size(group.kv_cache_spec, dcp_size)
         for name in group.layer_names:
             layer = static_forward_context[name]
             for tensor in _tensors(getattr(layer, "kv_cache", None)):
                 dim, factor = _block_dim(tensor, num_blocks)
                 for (begin, end), tokens in zip(ranges, scheduled_tokens):
-                    first = max(begin, end - (-(-tokens // spec.block_size) + 2))
+                    first = max(begin, end - (-(-tokens // block_size) + 2))
                     views.append(
                         tensor.narrow(dim, first * factor, (end - first) * factor)
                     )
