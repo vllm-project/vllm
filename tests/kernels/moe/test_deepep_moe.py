@@ -472,7 +472,7 @@ DTYPES = [torch.bfloat16, current_platform.fp8_dtype()]
 @pytest.mark.parametrize("topk", [6])
 @pytest.mark.parametrize("world_dp_size", [(2, 1)])
 @pytest.mark.parametrize("per_act_token_quant", [False, True])
-@multi_gpu_test(num_gpus=2)
+@multi_gpu_test(num_gpus=2, method="spawn")
 @requires_deep_ep
 def test_deep_ep_moe(
     dtype: torch.dtype,
@@ -528,7 +528,7 @@ USE_FP8_DISPATCH = [True, False]
 @pytest.mark.parametrize("topk", [6])
 @pytest.mark.parametrize("world_dp_size", [(2, 1)])
 @pytest.mark.parametrize("use_fp8_dispatch", USE_FP8_DISPATCH)
-@multi_gpu_test(num_gpus=2)
+@multi_gpu_test(num_gpus=2, method="spawn")
 @requires_deep_ep
 def test_low_latency_deep_ep_moe(
     dtype: torch.dtype,
