@@ -203,6 +203,7 @@ def test_input_image_detail_defaults_or_preserves(detail: str | None) -> None:
 
     request = ResponsesRequest.model_validate({"input": [item]})
 
+    assert isinstance(request.input, list)
     assert request.input[0]["content"][0]["detail"] == (
         "auto" if detail is None else detail
     )

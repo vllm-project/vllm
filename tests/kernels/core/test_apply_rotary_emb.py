@@ -233,9 +233,15 @@ def test_apply_rotary_emb_xpu_matches_native(
 def test_packed_qk_rope_correctness(
     num_tokens: int, dtype: torch.dtype, default_vllm_config
 ):
-    """packed_qk_rope_ must be bitwise identical to the per-tensor
-    ApplyRotaryEmb path with enable_fp32_compute=True, and must leave the V
-    slice untouched."""
+    """packed_qk_rope_ must match the per-tensor ApplyRotaryEmb path with
+    enable_fp32_compute=True to within one ULP, and must leave the V slice
+    untouched.
+
+    Both sides compute in fp32 on identical inputs. The only gap is which
+    product the backend keeps exact inside the o1 multiply-add, and that
+    follows the register layout, so it is decided by codegen rather than by
+    the source and holds neither across backends nor across Triton versions.
+    """
     from vllm.model_executor.layers.rotary_embedding.common import ApplyRotaryEmb
     from vllm.model_executor.layers.rotary_embedding.packed_qk_rope import (
         packed_qk_rope_,
@@ -265,6 +271,13 @@ def test_packed_qk_rope_correctness(
     xk_ref = op(xk, cos, sin)
 
     packed_qk_rope_(xqkv, freqs_cis)
-    torch.testing.assert_close(xqkv[:, 0], xq_ref, atol=0, rtol=0)
-    torch.testing.assert_close(xqkv[:, 1], xk_ref, atol=0, rtol=0)
+
+    # One ULP at the largest magnitude present, not relative: o1 can cancel,
+    # so the error scales with the inputs to the sum, not with the result.
+    eps = torch.finfo(dtype).eps
+    q_atol = eps * xq_ref.abs().max().item()
+    k_atol = eps * xk_ref.abs().max().item()
+    torch.testing.assert_close(xqkv[:, 0], xq_ref, atol=q_atol, rtol=0)
+    torch.testing.assert_close(xqkv[:, 1], xk_ref, atol=k_atol, rtol=0)
+    # V is never read or written by the kernel, so it stays exact.
     torch.testing.assert_close(xqkv[:, 2], xv, atol=0, rtol=0)

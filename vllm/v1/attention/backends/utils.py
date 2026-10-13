@@ -305,6 +305,8 @@ def resolve_kv_cache_layout(
     # specs can re-interpret HNC with different sizes as long as the total number of
     # bytes is the same. If not block-compact, each spec must agree on HNC to alias
     # the same page (this aliasing is done by the Hybrid Memory Allocator, HMA).
+    # Specs without per-layer views lay out their own raw backing tensor.
+    kv_cache_specs = tuple(spec for spec in kv_cache_specs if spec.has_layer_views)
     hnc_shapes = {
         (spec.num_heads, spec.num_states, spec.page_size_bytes)
         for spec in kv_cache_specs
@@ -317,8 +319,12 @@ def resolve_kv_cache_layout(
                 f"none is in every supported set: {supported_layouts}."
             )
 
+    # Self-addressed per-request rings (e.g. the kpool tail) are replicated
+    # state like Mamba and don't need a separate draft group.
     dcp_sharding = {
-        spec.dcp_sharded for spec in kv_cache_specs if isinstance(spec, AttentionSpec)
+        spec.dcp_sharded
+        for spec in kv_cache_specs
+        if isinstance(spec, AttentionSpec) and spec.uses_slot_mapping
     }
     page_sizes = {spec.page_size_bytes for spec in kv_cache_specs}
     if len(dcp_sharding) > 1 and len(page_sizes) > 1:
@@ -1175,11 +1181,6 @@ def mamba_get_block_table_tensor(
     """Get the block table tensor for mamba kernels from the input
     common_attn_metadata.block_table_tensor given different mamba cache modes.
 
-    - "all":   input  (#requests, cdiv(max_model_len, block_size)
-                        + num_speculative_blocks);
-               output (#requests, cdiv(max_model_len, block_size)
-                        + num_speculative_blocks).
-
     - "none":  input  (#requests, 1 + num_speculative_blocks);
                output (#requests, 1 + num_speculative_blocks).
 
@@ -1187,7 +1188,7 @@ def mamba_get_block_table_tensor(
                output (#requests, 1 + num_speculative_blocks), which are the last
                1 + num_speculative_blocks of each request.
     """
-    if mamba_cache_mode in ("all", "none"):
+    if mamba_cache_mode == "none":
         return block_table
     else:
         assert isinstance(kv_cache_spec, MambaSpec)

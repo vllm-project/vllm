@@ -165,7 +165,6 @@ T = TypeVar("T", bound=SparseMLACommonMetadata)
 class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
     metadata_cls: type[T]
     require_uniform_decodes: ClassVar[bool] = False
-    hisparse_supports_multi_token_decode: ClassVar[bool] = False
 
     def __init__(
         self,
@@ -259,8 +258,6 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
     ) -> None:
         if self.vllm_config.attention_config.hisparse_config is not None:
             reorder_batch_threshold = 1
-            if not self.hisparse_supports_multi_token_decode:
-                supports_spec_as_decode = False
         super()._init_reorder_batch_threshold(
             reorder_batch_threshold,
             supports_spec_as_decode,

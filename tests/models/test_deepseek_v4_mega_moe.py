@@ -6,8 +6,18 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from vllm.model_executor.layers.fused_moe.deep_gemm_mega_moe import (
+    DeepGemmSm100MegaMoEBackend,
+)
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
     bind_routed_experts_capturer,
+)
+from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    deepgemm_post_process_weight_scale_block,
+)
+from vllm.model_executor.models.interfaces import (
+    get_mixture_of_experts_model,
+    is_mixture_of_experts,
 )
 from vllm.models.deepseek_v4.nvidia.dspark import DSparkDeepseekV4ForCausalLM
 from vllm.models.deepseek_v4.nvidia.model import (
@@ -22,7 +32,9 @@ from vllm.models.deepseek_v4.nvidia.ops.prepare_megamoe import prepare_megamoe_i
 from vllm.models.deepseek_v41.common.mm_preprocess import IMAGE_SENTINEL_BASE_ID
 from vllm.models.deepseek_v41.nvidia.model import DeepseekV4MoE as DeepseekV41MoE
 from vllm.platforms import current_platform
+from vllm.transformers_utils.configs.deepseek_v4 import DeepseekV4Config
 from vllm.transformers_utils.configs.deepseek_v41 import DeepseekV41Config
+from vllm.utils.deep_gemm import is_deep_gemm_supported
 from vllm.utils.torch_utils import set_default_torch_dtype
 
 pytestmark = pytest.mark.skipif(
@@ -447,7 +459,9 @@ def test_deepseek_v4_mega_moe_preserves_checkpoint_dimensions(
     ):
         param.data.random_(1, 128)
         originals.append(param.data.clone())
-    monkeypatch.setattr(experts, "_check_runtime_supported", lambda: None)
+    monkeypatch.setattr(
+        experts, "_ensure_backend", lambda: DeepGemmSm100MegaMoEBackend()
+    )
     monkeypatch.setattr(
         "vllm.utils.deep_gemm._import_deep_gemm",
         lambda: SimpleNamespace(
@@ -473,19 +487,23 @@ def test_deepseek_v4_mega_moe_preserves_checkpoint_dimensions(
 
 
 @pytest.mark.parametrize(
-    "hidden_size,intermediate_size,block_size,mxfp8",
+    "hidden_size,intermediate_size,block_size,mxfp8,packed",
     [
-        pytest.param(128, 512, 128, False, id="aligned-block128"),
-        pytest.param(128, 512, 128, True, id="aligned-block128-mxfp8"),
-        pytest.param(5120, 2304, 32, False, id="deepseek-v41-flash"),
-        pytest.param(128, 2304, 128, False, id="native-block128"),
-        pytest.param(5120, 2304, 32, True, id="deepseek-v41-flash-mxfp8"),
+        pytest.param(128, 512, 128, False, False, id="aligned-block128"),
+        pytest.param(128, 512, 128, False, True, id="aligned-block128-packed"),
+        pytest.param(128, 512, 128, True, False, id="aligned-block128-mxfp8"),
+        pytest.param(5120, 2304, 32, False, False, id="deepseek-v41-flash"),
+        pytest.param(128, 2304, 128, False, False, id="native-block128"),
+        pytest.param(128, 2304, 128, False, True, id="native-block128-packed"),
+        pytest.param(5120, 2304, 32, True, False, id="deepseek-v41-flash-mxfp8"),
     ],
 )
 def test_deepseek_v4_mega_moe_finalizes_native_shared_expert_weights(
-    monkeypatch, hidden_size, intermediate_size, block_size, mxfp8
+    monkeypatch, hidden_size, intermediate_size, block_size, mxfp8, packed
 ):
     """Shared fusion preserves checkpoint weights and scales at native widths."""
+    if packed and not is_deep_gemm_supported():
+        pytest.skip("Packing the shared scales requires DeepGEMM")
 
     class FakeDeepGemm:
         transformed_dims: list[tuple[int, int]] = []
@@ -539,7 +557,9 @@ def test_deepseek_v4_mega_moe_finalizes_native_shared_expert_weights(
         intermediate_size=intermediate_size,
         num_shared_experts=1,
     )
-    experts._check_runtime_supported = lambda: None
+    monkeypatch.setattr(
+        experts, "_ensure_backend", lambda: DeepGemmSm100MegaMoEBackend()
+    )
 
     def fp8_parameter(*shape):
         return torch.nn.Parameter(
@@ -593,6 +613,18 @@ def test_deepseek_v4_mega_moe_finalizes_native_shared_expert_weights(
             .repeat_interleave(block_k // 32, dim=1)
         )
         originals.append((linear.weight.view(torch.uint8).clone(), scale_1x32))
+        if packed:
+            linear.weight_scale_inv = torch.nn.Parameter(
+                deepgemm_post_process_weight_scale_block(
+                    scale.data.cuda().unsqueeze(0),
+                    *linear.weight.shape,
+                    quant_block_shape=linear.weight_block_size,
+                    num_groups=1,
+                )
+                .squeeze(0)
+                .cpu(),
+                requires_grad=False,
+            )
     monkeypatch.setattr("vllm.utils.deep_gemm._import_deep_gemm", lambda: FakeDeepGemm)
 
     original_gate_up_ptr = shared_experts.gate_up_proj.weight.data_ptr()
@@ -644,6 +676,10 @@ def test_deepseek_v4_mega_moe_does_not_double_add_fused_shared_expert(
 
     class FakeExperts(torch.nn.Module):
         has_fused_shared_experts = fused
+        _backend = DeepGemmSm100MegaMoEBackend()
+
+        def _ensure_backend(self):
+            return self._backend
 
         def forward(self, hidden_states, *args, **kwargs):
             return torch.ones_like(hidden_states)
@@ -657,7 +693,7 @@ def test_deepseek_v4_mega_moe_does_not_double_add_fused_shared_expert(
 
     moe = DeepseekV4MoE.__new__(DeepseekV4MoE)
     torch.nn.Module.__init__(moe)
-    moe.use_mega_moe = True
+    moe.use_native_mega_moe = True
     moe.gate = FakeGate()
     moe.experts = FakeExperts()
     moe.shared_experts = FakeSharedExperts()
@@ -880,6 +916,96 @@ def test_deepseek_v4_drafter_pwal_hooks_finalize_mega_moe():
     DSparkDeepseekV4ForCausalLM.process_weights_after_loading(dspark)
 
     assert calls == ["mtp", "dspark"]
+
+
+@pytest.fixture
+def v4_dspark_config(dist_init):
+    hf_config = DeepseekV4Config(
+        architectures=["DeepseekV4ForCausalLM"],
+        hidden_size=128,
+        num_hidden_layers=2,
+        n_routed_experts=8,
+        num_experts_per_tok=2,
+        num_hash_layers=0,
+        n_shared_experts=1,
+        moe_intermediate_size=128,
+        hidden_act="silu",
+        swiglu_limit=10.0,
+        norm_topk_prob=True,
+        topk_method="noaux_tc",
+        routed_scaling_factor=1.5,
+        hc_mult=1,
+        hc_eps=1e-5,
+        rms_norm_eps=1e-5,
+        dspark_target_layer_ids=[0],
+        dspark_markov_rank=8,
+        index_topk=4,
+        head_dim=64,
+        num_attention_heads=4,
+        vocab_size=256,
+        n_mtp_layers=2,
+        enable_confidence_head=False,
+        compress_ratios=[1, 1],
+        q_lora_rank=32,
+        o_lora_rank=32,
+        qk_rope_head_dim=16,
+        o_groups=4,
+        sliding_window=128,
+        hc_sinkhorn_iters=1,
+    )
+    model_config = SimpleNamespace(
+        dtype=torch.bfloat16,
+        hf_config=hf_config,
+        max_model_len=2048,
+    )
+    return SimpleNamespace(
+        model_config=model_config,
+        quant_config=None,
+        kernel_config=SimpleNamespace(
+            moe_backend="deep_gemm_mega_moe",
+            enable_jit_warmup=False,
+        ),
+        parallel_config=SimpleNamespace(
+            pipeline_parallel_size=1,
+            tensor_parallel_size=1,
+            data_parallel_size=1,
+            enable_expert_parallel=True,
+            enable_eplb=True,
+            eplb_config=SimpleNamespace(num_redundant_experts=4),
+        ),
+        attention_config=SimpleNamespace(backend=None),
+        cache_config=SimpleNamespace(block_size=64, cache_dtype="auto"),
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=4),
+        compilation_config=SimpleNamespace(static_forward_context={}),
+        speculative_config=SimpleNamespace(draft_model_config=model_config),
+        use_v2_model_runner=False,
+    )
+
+
+def test_dspark_draft_registers_mixture_of_experts(
+    v4_dspark_config, monkeypatch, dist_init
+):
+    """DSV4 DSpark MoE drafts expose MixtureOfExperts for EPLB registration."""
+    if not current_platform.is_device_capability_family(100):
+        pytest.skip("DeepGEMM MegaMoE requires SM100")
+
+    hf_config = v4_dspark_config.model_config.hf_config
+    monkeypatch.setattr(
+        "vllm.models.deepseek_v4.nvidia.dspark.get_current_vllm_config",
+        lambda: v4_dspark_config,
+    )
+
+    with (
+        set_default_torch_dtype(v4_dspark_config.model_config.dtype),
+        torch.device("cuda"),
+    ):
+        draft = DSparkDeepseekV4ForCausalLM(vllm_config=v4_dspark_config)
+
+    assert is_mixture_of_experts(draft)
+    assert get_mixture_of_experts_model(draft) is draft
+    assert len(draft.moe_layers) == draft.model.num_dspark_layers == 2
+    assert draft.num_routed_experts == hf_config.n_routed_experts
+    assert draft.num_redundant_experts == 4
 
 
 @pytest.mark.skipif(

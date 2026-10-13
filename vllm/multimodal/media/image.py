@@ -16,7 +16,7 @@ from vllm.utils.sparse_utils import (
     safe_to_dense,
 )
 
-from ..image import convert_image_mode, normalize_image, rgba_to_rgb
+from ..image import convert_image_mode, normalize_image, open_image, rgba_to_rgb
 from .base import MediaIO, MediaWithBytes
 
 MAGIC_NUMPY_PREFIX = b"\x93NUMPY"  # https://numpy.org/devdocs/reference/generated/numpy.lib.format.html#format-version-1-0
@@ -78,7 +78,7 @@ class ImageMediaIO(MediaIO[Image.Image]):
 
     def load_bytes(self, data: bytes) -> MediaWithBytes[Image.Image]:
         try:
-            image = Image.open(BytesIO(data))
+            image = open_image(BytesIO(data))
             w, h = image.size
             max_pixels = envs.VLLM_MAX_IMAGE_PIXELS
             if max_pixels > 0 and w * h > max_pixels:

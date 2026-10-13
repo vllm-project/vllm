@@ -12,15 +12,15 @@ from openai.types.chat import (
 from openai.types.chat.chat_completion_content_part_image_param import ImageURL
 
 from vllm import PoolingParams
-from vllm.entrypoints.chat_utils import (
-    ChatCompletionContentPartParam,
-    ChatCompletionMessageParam,
-    CustomChatCompletionMessageParam,
-)
 from vllm.inputs import tokens_input
 from vllm.logger import init_logger
 from vllm.outputs import PoolingOutput, PoolingRequestOutput
 from vllm.renderers import merge_kwargs
+from vllm.renderers.chat_utils import (
+    ChatCompletionContentPartParam,
+    ChatCompletionMessageParam,
+    CustomChatCompletionMessageParam,
+)
 from vllm.renderers.hf import resolve_chat_template
 from vllm.utils.collection_utils import chunk_list
 from vllm.utils.mistral import is_mistral_tokenizer
@@ -142,13 +142,16 @@ class EmbedIOProcessor(PoolingIOProcessor):
                 )
 
             prompt_token_ids = cast(list[int], token_ids)
+            cache_salt = cast(str | None, engine_input["prompts"].get("cache_salt"))
 
             for chunk_idx, chunk_tokens in enumerate(
                 chunk_list(prompt_token_ids, max_model_len)
             ):
                 chunked_engine_inputs.append(
                     PoolingEngineInput(
-                        prompts=tokens_input(prompt_token_ids=chunk_tokens),
+                        prompts=tokens_input(
+                            prompt_token_ids=chunk_tokens, cache_salt=cache_salt
+                        ),
                         params=engine_input["params"],
                         lora_requests=engine_input["lora_requests"],
                         priorities=engine_input["priorities"],

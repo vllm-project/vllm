@@ -143,6 +143,13 @@ class WorkerBase:
         if callable(reset_fn):
             reset_fn()
 
+    def release_late_interaction_query_cache(self, query_keys: list[str]) -> None:
+        release_fn = getattr(
+            self.model_runner, "release_late_interaction_query_cache", None
+        )
+        if callable(release_fn):
+            release_fn(query_keys)
+
     def get_model(self) -> nn.Module:
         raise NotImplementedError
 

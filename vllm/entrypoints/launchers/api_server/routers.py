@@ -25,6 +25,12 @@ def register_api_routers(
 
     register_models_api_router(app)
 
+    from vllm.entrypoints.generate.structured_decisions.api_router import (
+        register_structured_decisions_api_router,
+    )
+
+    register_structured_decisions_api_router(app)
+
     from vllm.entrypoints.serve.sagemaker.api_router import (
         attach_router as register_sagemaker_api_router,
     )
@@ -35,6 +41,10 @@ def register_api_routers(
         from vllm.entrypoints.serve import register_vllm_dev_api_routers
 
         register_vllm_dev_api_routers(app)
+
+        from vllm.entrypoints.rl.factories import register_rl_api_routers
+
+        register_rl_api_routers(app)
 
     if "generate" in supported_tasks:
         from vllm.entrypoints.generate.api_router import (
