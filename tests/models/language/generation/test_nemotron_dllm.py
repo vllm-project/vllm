@@ -207,26 +207,30 @@ def test_ar_mode_config(explicit_diffusion_config):
         assert config.model_config.override_generation_config["max_new_tokens"] is None
 
 
-def test_diffusion_config_cls_follows_architecture():
-    """Only Nemotron accepts Nemotron options in --diffusion-config."""
+def test_diffusion_model_options_are_model_specific():
+    """DiffusionConfig parses without a model; each model checks its own options."""
     from types import SimpleNamespace
     from typing import Any, cast
 
     from vllm.config.diffusion import DiffusionConfig
     from vllm.model_executor.models.config import (
-        NemotronDiffusionConfig,
-        get_diffusion_config_cls,
+        DiffusionGemmaDiffusionOptions,
+        NemotronDiffusionOptions,
+        _parse_diffusion_model_options,
     )
 
-    def cls_for(arch: str) -> type[DiffusionConfig]:
-        return get_diffusion_config_cls(cast(Any, SimpleNamespace(architecture=arch)))
+    def parse(options: dict[str, Any], cls: type) -> Any:
+        dc = DiffusionConfig(canvas_length=32, model_options=options)
+        config = cast(Any, SimpleNamespace(diffusion_config=dc))
+        _parse_diffusion_model_options(config, cls)
+        return dc.model_options
 
-    assert cls_for("NemotronLabsDiffusionModel") is NemotronDiffusionConfig
-    assert cls_for("DiffusionGemmaForBlockDiffusion") is DiffusionConfig
+    opts = parse({"temperature": 0.0}, NemotronDiffusionOptions)
+    assert opts.temperature == 0.0
     with pytest.raises(ValueError):
-        DiffusionConfig(**{"canvas_length": 32, "temperature": 0.0})
+        parse({"temperature": 0.0}, DiffusionGemmaDiffusionOptions)
     with pytest.raises(ValueError):
-        NemotronDiffusionConfig(canvas_length=32, temperature=-0.5)
+        parse({"temperature": -0.5}, NemotronDiffusionOptions)
 
 
 # ---------------------------------------------------------------------------
@@ -662,7 +666,7 @@ def test_stochastic_rollouts(monkeypatch):
         enforce_eager=True,
         max_model_len=MAX_MODEL_LEN,
         gpu_memory_utilization=0.6,
-        diffusion_config={"temperature": 0.0},
+        diffusion_config={"model_options": {"temperature": 0.0}},
     )
     assert llm.get_default_sampling_params().temperature == 0.0
     temperatures = [0.0, 0.7, 1.0, 1.5]
