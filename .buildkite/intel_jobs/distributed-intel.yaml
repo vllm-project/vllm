@@ -1,4 +1,4 @@
-group: Distributed
+group: Distributed Intel
 depends_on:
   - image-build-xpu
 steps:
