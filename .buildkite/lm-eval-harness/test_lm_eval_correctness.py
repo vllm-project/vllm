@@ -111,7 +111,11 @@ def _drop_previous_checkpoint_cache(model_name: str) -> None:
     safetensors prefetch gate measures, so without this the models evaluated so
     far consume the RAM budget of the ones still to come. The last model's cache
     is left in place for whichever job lands on the node next.
+
+    ROCm only: the prefetch this protects does not engage upstream.
     """
+    if not current_platform.is_rocm():
+        return
     global _cached_model_name
     previous = _cached_model_name
     _cached_model_name = model_name
