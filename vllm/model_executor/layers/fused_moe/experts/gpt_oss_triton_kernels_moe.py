@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import functools
+
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
@@ -19,7 +21,10 @@ from vllm.model_executor.layers.fused_moe.experts.lora_experts_mixin import (
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
-from vllm.model_executor.layers.fused_moe.utils import _resize_cache
+from vllm.model_executor.layers.fused_moe.utils import (
+    _resize_cache,
+    remap_topk_to_local,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kMxfp4Static,
@@ -41,11 +46,11 @@ def _triton_kernel_moe_supports_current_device() -> bool:
     p = current_platform
     if p.is_cuda():
         cap = p.get_device_capability()
-        # Keep the original `(9, 0) <= cap < (11, 0)` window on
-        # CUDA (covers Hopper SM90 and Blackwell SM100, excludes
-        # SM120) — this PR is ROCm-scoped and the broader CUDA
-        # range was not validated.
-        return cap is not None and (9, 0) <= (cap.major, cap.minor) < (11, 0)
+        # Hopper SM90, datacenter Blackwell SM100/103 and consumer Blackwell
+        # SM120/121. SM12x needs the opt-flag constraints applied by
+        # `_swizzle_mxfp4` and `_constrain_sm12x_block_m` to fit its 99KB of
+        # shared memory; it is still ordered after MARLIN by the selector.
+        return cap is not None and (9, 0) <= (cap.major, cap.minor) < (13, 0)
     if p.is_rocm():
         from vllm.platforms.rocm import on_gfx1x, on_gfx9
 
@@ -55,6 +60,36 @@ def _triton_kernel_moe_supports_current_device() -> bool:
         # on_gfx1x() excludes gfx10xx (RDNA1/RDNA2).
         return on_gfx9() or on_gfx1x()
     return False
+
+
+@functools.cache
+def _is_sm12x() -> bool:
+    return current_platform.is_cuda() and current_platform.is_device_capability_family(
+        120
+    )
+
+
+# Consumer Blackwell has 99KB of opt-in shared memory: with block_m >= 64 the
+# persistent mxfp4 kernel fits a single pipeline stage and runs 2-3x slower
+# than with 32, but triton_kernels' block_m heuristic still tops out at 128.
+_SM12X_MAX_BLOCK_M = 32
+
+
+def _sm12x_block_m(num_rows: int, num_experts: int) -> int:
+    """triton_kernels' tokens-per-expert block_m heuristic, capped at 32."""
+    tokens_per_expt = max(1, num_rows // num_experts)
+    return max(16, min(triton.next_power_of_2(tokens_per_expt), _SM12X_MAX_BLOCK_M))
+
+
+def _constrain_sm12x_block_m(num_rows: int, num_experts: int) -> None:
+    """Pin block_m for the following matmul_ogs calls on SM12x."""
+    if not _is_sm12x():
+        return
+    import triton_kernels.matmul_ogs_details.opt_flags as opt_flags
+
+    opt_flags.update_opt_flags_constraints(
+        {"block_m": _sm12x_block_m(num_rows, num_experts)}
+    )
 
 
 def _patch_make_bitmatrix_metadata() -> None:
@@ -784,6 +819,7 @@ def triton_kernel_fused_experts(
         )
     )
     gammas = routing_data.gate_scal if routing_data else None
+    _constrain_sm12x_block_m(M * topk, E)
 
     matmul_ogs(
         hidden_states,
@@ -959,49 +995,6 @@ def masked_moe_sum(
     _masked_topk_sum_kernel[grid](
         intermediate, topk_ids, output, K, topk=topk, BLOCK_K=BLOCK_K
     )
-
-
-@triton.jit
-def _remap_topk_to_local_kernel(
-    topk_ids_ptr,  # [n] global expert IDs (-1 = invalid)
-    expert_map_ptr,  # [num_experts] global->local (-1 for non-local)
-    out_ptr,  # [n] int64 local expert IDs (-1 for invalid/non-local)
-    n_elements,
-    BLOCK: tl.constexpr,
-):
-    pid = tl.program_id(0)
-    offs = pid * BLOCK + tl.arange(0, BLOCK)
-    mask = offs < n_elements
-    tid = tl.load(topk_ids_ptr + offs, mask=mask, other=-1)
-    # Gather expert_map[tid] for valid (tid >= 0); clamp the index so invalid
-    # rows don't read OOB, then select -1 for them. Matches
-    # torch.where(tid >= 0, expert_map[clamp(tid, 0)], -1) -- preserving -1 (a
-    # plain expert_map[-1] would wrap to a valid local id and misroute).
-    valid = tid >= 0
-    idx = tl.where(valid, tid, 0)
-    local = tl.load(expert_map_ptr + idx, mask=mask, other=-1)
-    out = tl.where(valid, local.to(tl.int64), -1)
-    tl.store(out_ptr + offs, out, mask=mask)
-
-
-def remap_topk_to_local(
-    topk_ids: torch.Tensor, expert_map: torch.Tensor
-) -> torch.Tensor:
-    """Fused global->local expert-id mapping over a topk_ids tensor, preserving -1.
-
-    Replaces ``torch.where(topk_ids >= 0, expert_map[topk_ids.clamp(min=0)], -1)``
-    with one kernel. Returns a NEW int64 tensor -- the caller keeps the original
-    ``topk_ids`` as ``global_topk_ids``, so this must not write in place.
-
-    (Distinct from ``deep_gemm_utils.apply_expert_map``, which is a scalar
-    ``@triton.jit`` device helper called from within other kernels.)
-    """
-    out = torch.empty_like(topk_ids, dtype=torch.int64)
-    n = topk_ids.numel()
-    BLOCK = 1024
-    grid = (triton.cdiv(n, BLOCK),)
-    _remap_topk_to_local_kernel[grid](topk_ids, expert_map, out, n, BLOCK=BLOCK)
-    return out
 
 
 class BaseOAITritonExperts(mk.FusedMoEExpertsModular):
@@ -1403,6 +1396,7 @@ class UnfusedOAITritonExperts(LoRAExpertsMixin, BaseOAITritonExperts):
         intermediate_cache2 = _resize_cache(workspace13, (M * topk, activation_out_dim))
 
         gammas = routing_data.gate_scal if routing_data else None
+        _constrain_sm12x_block_m(M * topk, E)
 
         matmul_ogs(
             hidden_states,
@@ -1580,6 +1574,7 @@ class OAITritonMxfp4ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
         e_score_correction_bias: torch.Tensor | None = None,
         routed_scaling_factor: float | None = None,
         topk_group: int | None = None,
+        routing_replay_out: torch.Tensor | None = None,
     ) -> torch.Tensor:
         return triton_kernel_moe_forward(
             hidden_states=hidden_states,
