@@ -191,6 +191,16 @@ def _compute_global_logprobs_and_logsumexp(
 
 
 @triton.jit
+def _is_bonus_logit(expanded_local_pos_ptr, logit_idx):
+    next_local_pos = tl.load(
+        expanded_local_pos_ptr + logit_idx + 1,
+        mask=logit_idx + 1 < tl.num_programs(0),
+        other=0,
+    )
+    return next_local_pos == 0
+
+
+@triton.jit
 def _compute_local_logits_stats_kernel(
     # [num_logits, num_blocks]
     target_local_argmax_ptr,
@@ -221,17 +231,16 @@ def _compute_local_logits_stats_kernel(
     # [max_num_reqs]
     temp_ptr,
     vocab_size,
-    num_speculative_steps,
     BLOCK_SIZE: tl.constexpr,
     HAS_DRAFT_LOGITS: tl.constexpr,
 ):
     logit_idx = tl.program_id(0).to(tl.int64)
-    draft_step_idx = tl.load(expanded_local_pos_ptr + logit_idx)
 
-    if draft_step_idx >= num_speculative_steps:
-        # Bonus token. Max/argmax and summed exponentials are not needed.
+    if _is_bonus_logit(expanded_local_pos_ptr, logit_idx):
+        # Max/argmax and summed exponentials are not needed.
         return
 
+    draft_step_idx = tl.load(expanded_local_pos_ptr + logit_idx)
     req_state_idx = tl.load(expanded_idx_mapping_ptr + logit_idx).to(tl.int64)
     temp = tl.load(temp_ptr + req_state_idx).to(tl.float32)
 
@@ -419,17 +428,14 @@ def _compute_local_residual_mass_kernel(
     # [max_num_reqs]
     temp_ptr,
     vocab_size,
-    num_speculative_steps,
     vocab_num_blocks,
     BLOCK_SIZE: tl.constexpr,
     PADDED_VOCAB_NUM_BLOCKS: tl.constexpr,
 ):
     logit_idx = tl.program_id(0).to(tl.int64)
     # Adaptive verification can end before num_speculative_steps.
-    if logit_idx + 1 >= tl.num_programs(0):
-        return
     draft_step_idx = tl.load(expanded_local_pos_ptr + logit_idx)
-    if draft_step_idx == 0 or draft_step_idx >= num_speculative_steps:
+    if draft_step_idx == 0 or _is_bonus_logit(expanded_local_pos_ptr, logit_idx):
         # The acceptance threshold, h, looks one position ahead and sums
         # over: max(p_i * M_b(x|x_{<i}) - M_s(x|x_{<i}), 0). Tokens at the
         # first and last (bonus) positions aren't needed for this computation.
@@ -1133,7 +1139,6 @@ def rejection_sample(
         expanded_local_pos,
         temperature,
         vocab_size,
-        num_speculative_steps,
         BLOCK_SIZE=VOCAB_BLOCK_SIZE,
         HAS_DRAFT_LOGITS=has_draft_logits,
     )
@@ -1204,7 +1209,6 @@ def rejection_sample(
                 expanded_local_pos,
                 temperature,
                 vocab_size,
-                num_speculative_steps,
                 vocab_num_blocks,
                 BLOCK_SIZE=VOCAB_BLOCK_SIZE,
                 PADDED_VOCAB_NUM_BLOCKS=padded_vocab_num_blocks,
