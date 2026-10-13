@@ -157,6 +157,8 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: bool = False
     VLLM_ROCM_AITER_MEGA_MOE_FUSE_SHARED_EXPERTS: bool = False
     VLLM_ROCM_MONO_DECODE: bool = False
+    VLLM_MONO_UNSAFE_WARN: bool = False
+    VLLM_MONO_FAULT_INJECT: str = ""
     VLLM_ROCM_USE_AITER_TRITON_GEMM: bool = True
     VLLM_ROCM_USE_SKINNY_GEMM: bool = True
     VLLM_ROCM_FP8_PADDING: bool = True
@@ -1404,6 +1406,16 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ROCM_MONO_DECODE": lambda: (
         os.getenv("VLLM_ROCM_MONO_DECODE", "False").lower() in ("true", "1")
     ),
+    # Warn instead of failing the step when a mono decode kernel reports an
+    # error word (an in-kernel wait gave up). For debugging only: the step's
+    # output is not trustworthy. By default is disabled.
+    "VLLM_MONO_UNSAFE_WARN": lambda: (
+        os.getenv("VLLM_MONO_UNSAFE_WARN", "False").lower() in ("true", "1")
+    ),
+    # Make one mono decode launch report a fault, to test the fail-stop path:
+    # "rank:epoch:us" sets the rank, the step epoch and how long the injected
+    # stall lasts. By default is disabled.
+    "VLLM_MONO_FAULT_INJECT": lambda: os.getenv("VLLM_MONO_FAULT_INJECT", ""),
     # Whether to use aiter triton kernels for gemm ops.
     # By default is enabled.
     "VLLM_ROCM_USE_AITER_TRITON_GEMM": lambda: (

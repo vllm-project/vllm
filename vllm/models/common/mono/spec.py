@@ -1,0 +1,173 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""What a model declares to run MonoKernels: its ``MonoSpec``, and the types
+the spec's callbacks see."""
+
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
+from enum import Enum
+from typing import TYPE_CHECKING, Any, Literal, Protocol
+
+import torch
+
+from vllm.config.compilation import CUDAGraphMode
+
+if TYPE_CHECKING:
+    from vllm.config import VllmConfig
+
+
+class Feature(str, Enum):
+    """What a deployment can turn on. A feature in use that a spec's
+    ``supports`` does not list is refused."""
+
+    PIPELINE_PARALLEL = "pipeline_parallel"
+    DATA_PARALLEL = "data_parallel"
+    EXPERT_PARALLEL = "expert_parallel"
+    EPLB = "eplb"
+    DECODE_CONTEXT_PARALLEL = "decode_context_parallel"
+    PREFILL_CONTEXT_PARALLEL = "prefill_context_parallel"
+    LORA = "lora"
+    KV_CONNECTOR = "kv_connector"
+    ROUTED_EXPERT_CAPTURE = "routed_expert_capture"
+    SPECULATIVE_DECODING = "speculative_decoding"
+    SLEEP_MODE = "sleep_mode"
+    CPU_WEIGHT_OFFLOAD = "cpu_weight_offload"
+    WEIGHT_UPDATES = "weight_updates"
+
+
+class MonoUnsupported(Exception):
+    """The configuration or the loaded model is outside what a spec serves."""
+
+
+@dataclass(frozen=True)
+class CacheReq:
+    """A cache the kernels read: its KV cache group, dtype and layout."""
+
+    group: str
+    dtype: str
+    layout: str
+
+
+@dataclass
+class MonoContext:
+    """One rank's view of the deployment, built once at attach.
+
+    Attributes:
+        vllm_config: The engine's config.
+        rank: This rank's index in the TP group.
+        device: The device the kernels launch on.
+        state: The spec's own per-rank state, whatever ``pack`` keeps there.
+            Opaque to the library, which never reads it.
+
+    """
+
+    vllm_config: "VllmConfig"
+    rank: int
+    device: torch.device
+    state: Any = None
+
+
+@dataclass
+class MonoStep:
+    """One forward's batch descriptor, built once and read by every layer.
+
+    Attributes:
+        num_tokens: The step's query rows.
+        width: The padded rows the launch serves.
+        positions: The step's position ids.
+        attn_metadata: The forward context's attention metadata, by layer name.
+        runtime_mode: The CUDA graph mode this step runs under.
+
+    """
+
+    num_tokens: int
+    width: int
+    positions: torch.Tensor
+    attn_metadata: Any
+    runtime_mode: CUDAGraphMode
+
+
+class LayerKernel(Protocol):
+    """One decoder layer's launch, at one width, on this rank."""
+
+    cache_layers: tuple[str, ...]
+    """Attention layers whose caches ``MonoSpec.bind`` checks."""
+
+    def launch(self, step: MonoStep, *args, **kwargs) -> Any:
+        """Takes and returns what the vLLM layer it replaces does."""
+        ...
+
+    def health(self) -> torch.Tensor:
+        """This rank's error words, in the ``abi`` layout."""
+        ...
+
+    def warmup_keys(self) -> list[Any]:
+        """Hashable build keys of this width's launches, compiled before CUDA
+        graph capture by vLLM's JIT warm-up."""
+        ...
+
+    def compile(self, key: Any) -> None:
+        """Compiles one of ``warmup_keys`` without launching it."""
+        ...
+
+
+@dataclass(frozen=True)
+class MonoSpec:
+    """One (model, vendor, ISA)'s declaration: values and callbacks, no
+    behaviour of its own.
+
+    A spec is a value, so a second ISA is ``dataclasses.replace`` of the first
+    at module scope rather than a subclass, and a model exports its candidates
+    as a ``MONO_SPECS`` tuple the library selects from.
+
+    Gating runs in tiers, and the prefix is the consequence. ``refuse_*`` says
+    the deployment asked for something it cannot have, so it may take the
+    engine down; ``skip_*`` says only that this layer, or this step, takes
+    vLLM's path, and never raises. If the same model with the same flags could
+    legitimately have another layer, or a later step, that passes the check, it
+    is a ``skip_*``. Every tier reports all of its reasons, never the first.
+
+    Attributes:
+        name: Log and metric name.
+        supports: Features this spec serves. Default deny: a feature in use
+            that is absent from it refuses the deployment.
+        caches: The caches the kernels read, by attention layer name.
+        weight_source: ``"views"`` to read vLLM's post-load layout in place,
+            ``"convert"`` to pack a second layout once after load.
+        layers: The decoder layers that get a kernel, from the model's config.
+        widths: The rows a launch serves, from the engine's config. These
+            become the CUDA graph capture sizes.
+        refuse_config: Deployment refusals the engine's config answers, before
+            the weights are loaded.
+        refuse_model: Deployment refusals only the loaded model answers.
+        skip_layer: Why one layer takes vLLM's path, None when it takes the
+            kernel's.
+        skip_step: Why one step takes vLLM's path, None when it takes the
+            kernel's.
+        pack: The weights and launch state, built once at attach. The only
+            place a weight copy is ever made.
+        repack: Writes new weights into the allocation ``pack`` returned,
+            in place, because the kernels and the captured graphs hold its
+            address. None refuses anything that moves weights after attach.
+        bind: Checks the KV caches the kernels will read, on every re-bind.
+        build: One ``LayerKernel`` for (context, packed, layer, width).
+
+    """
+
+    name: str
+    supports: frozenset[Feature]
+    caches: Mapping[str, CacheReq]
+    weight_source: Literal["views", "convert"]
+
+    layers: Callable[[Any], list[int]]
+    widths: Callable[["VllmConfig"], tuple[int, ...]]
+
+    refuse_config: Callable[["VllmConfig"], list[str]]
+    refuse_model: Callable[[Any], list[str]]
+    skip_layer: Callable[[MonoContext, Any], str | None]
+    skip_step: Callable[[MonoContext, MonoStep], str | None]
+
+    pack: Callable[[Any, MonoContext], Any]
+    repack: Callable[[Any, MonoContext, Any], None] | None
+    bind: Callable[[MonoContext, Mapping[str, Any]], list[str]]
+    build: Callable[[MonoContext, Any, Any, int], LayerKernel]
