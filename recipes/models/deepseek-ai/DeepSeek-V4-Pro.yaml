@@ -4,7 +4,7 @@ meta:
   provider: "DeepSeek"
   description: "DeepSeek V4 flagship MoE (1.6T total / 49B active) with hybrid CSA+HCA attention, manifold-constrained hyper-connections, Muon-trained on 32T+ tokens, and three-tier reasoning."
   date_added: 2026-04-24
-  date_updated: 2026-10-03
+  date_updated: 2026-10-12
   tasks:
     - text
   performance_headline: "Frontier 1.6T/49B reasoning MoE with native FP4+FP8 weights, MTP and DSpark speculative decoding, and 1M-token context"
@@ -471,6 +471,91 @@ guide: |
   - **LMCache** — `LMCacheMPConnector`: a node-local KV pool served by a
     companion `lmcache server` process, launched before `vllm serve`.
     Single-node strategies only. Install from the extra-install block above; see the [LMCache docs](https://docs.lmcache.ai/).
+
+  ## Agentic serving on GB200 (DSpark)
+
+  The [InferenceX AgentX configurations](https://github.com/SemiAnalysisAI/InferenceX/tree/954a9aa600417289c6967f4cd96a3e9279a09c77/inferencex-e2e/benchmarks/multi_node/srt-slurm-recipes/dsv4/vllm/gb200-fp4/agentx)
+  use the following pinned setup. These are Dynamo-specific launch settings, separate
+  from the command-builder defaults and the general K7 DSpark example above.
+
+  - Checkpoint: [deepseek-ai/DeepSeek-V4-Pro-0813](https://huggingface.co/deepseek-ai/DeepSeek-V4-Pro-0813/tree/72e1d3230f6c080a530b0a1d46f8eb4602340597), with its native DSpark draft.
+  - Image: `vllm/vllm-openai:nightly-dev-arm64-cu13.0.1-20ebb28` (no vLLM patches).
+  - Dynamo: `1.3.0.dev20260720`, with etcd, NATS and an embedded RDMA Mooncake store.
+  - Hardware: four GB200 GPUs per tray; keep all serving trays in one NVLink domain.
+
+  ### Layouts and speculation
+
+  `C` is client concurrency; `K` is `num_speculative_tokens`. DEP means TP1 with
+  data parallelism and expert parallelism of the indicated width. Each disaggregated
+  layout has one prefill pool and one decode pool. `S` is decode `max-num-seqs`
+  **per DP rank**, or the aggregate engine's limit for TP8.
+
+  | C | Serving layout | Total GPUs | K | S | Decode/aggregate `max-num-batched-tokens` |
+  |---|---|---:|---:|---:|---:|
+  | 1, 4, 8 | Aggregate TP8, no EP | 8 | 6 | 16 | 8192 |
+  | 32 | Prefill DEP8 / decode DEP8 | 16 | 5 | 8 | 8240 |
+  | 64 | Prefill DEP8 / decode DEP8 | 16 | 5 | 16 | 8288 |
+  | 128 | Prefill DEP8 / decode DEP8 | 16 | 5 | 32 | 8384 |
+  | 256 | Prefill DEP8 / decode DEP8 | 16 | 5 | 64 | 8576 |
+  | 360 | Prefill DEP8 / decode DEP12 | 20 | 6 | 60 | 8616 |
+  | 384 | Prefill DEP8 / decode DEP8 | 16 | 6 | 96 | 8864 |
+  | 384 | Prefill DEP12 / decode DEP12 | 24 | 5 | 64 | 8576 |
+  | 512 | Prefill DEP12 / decode DEP16 | 28 | 6 | 64 | 8640 |
+
+  Shared engine arguments (set K from the table; use the same K on both PD roles):
+
+  ```text
+  --tokenizer-mode deepseek_v4 --trust-remote-code
+  --kv-cache-dtype fp8 --block-size 256 --max-model-len 1048576
+  --no-disable-hybrid-kv-cache-manager --no-enable-flashinfer-autotune
+  --attention-config '{"backend":"FLASHINFER_MLA_SPARSE_DSV4","use_prefill_query_quantization":true,"indexer_kv_dtype":"mxfp4"}'
+  --speculative-config '{"method":"dspark","num_speculative_tokens":6,"draft_sample_method":"probabilistic","rejection_sample_method":"block"}'
+  ```
+
+  Both paths set `VLLM_USE_V2_MODEL_RUNNER=1`. Aggregate TP8 uses
+  `--disable-custom-all-reduce`, `VLLM_ALLREDUCE_USE_FLASHINFER=1`,
+  `VLLM_FLASHINFER_ALLREDUCE_BACKEND=auto` and `--gpu-memory-utilization 0.94`.
+  It does not select an EP MoE backend. Both DEP pools instead use
+  `--enable-expert-parallel --enable-ep-weight-filter --enable-cumem-allocator`,
+  `--moe-backend deep_gemm_amxf4_mega_moe` and `VLLM_DSV4_MEGA_FP8_COMBINE=1`.
+  This pinned-image MoE configuration is for the native mixed FP4/FP8 checkpoint;
+  it is not the generic `deep_gemm_mega_moe` setting above.
+
+  Aggregate and decode use `cudagraph_mode=FULL_DECODE_ONLY`, `mode=0`, and explicit
+  `cudagraph_capture_sizes=[K+1, 2*(K+1), ..., S*(K+1)]`. For example, TP8 K6
+  captures `[7,14,21,28,35,42,49,56,63,70,77,84,91,98,105,112]`.
+  DEP decode sets `max-cudagraph-capture-size=S*(K+1)` and a token budget of at least
+  `8192+S*(K+1)`. Prefill uses `max-num-seqs=64`, `max-num-batched-tokens=8192`,
+  `long-prefill-token-threshold=1024` and `VLLM_CONNECTOR_PREFETCH_DEPTH=0`.
+  Prefill memory utilization is `0.85` at C32 and `0.9` at the other points;
+  decode uses `0.9`. Keep the per-point KV-memory and scheduling settings in
+  the linked YAMLs when reproducing a point.
+
+  ### Dynamo routing and KV transfer
+
+  - Aggregate: `--router-mode kv --router-temperature 0 --router-queue-threshold 65536`.
+  - Disaggregated: `--router-mode random --router-session-affinity-ttl-secs 900`.
+    AgentX sends the conversation ID as `x-dynamo-session-id`.
+  - Both DEP roles use `MultiConnector` with `NixlConnector` for PD transfer and
+    `MooncakeStoreConnector` for shared prefix storage. These are the role-specific
+    `--kv-transfer-config` values:
+
+  Prefill:
+
+  ```json
+  {"kv_connector":"MultiConnector","kv_role":"kv_both","kv_connector_extra_config":{"connectors":[{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_load_failure_policy":"fail","kv_buffer_device":"cuda","kv_connector_extra_config":{"enforce_handshake_compat":false,"enable_cross_layers_blocks":false}},{"kv_connector":"MooncakeStoreConnector","kv_role":"kv_both","kv_connector_extra_config":{"load_async":true,"lookup_async":true,"enable_cross_layers_blocks":false,"enable_offload":false}}]}}
+  ```
+
+  Decode:
+
+  ```json
+  {"kv_connector":"MultiConnector","kv_role":"kv_consumer","kv_connector_extra_config":{"connectors":[{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_load_failure_policy":"fail","kv_buffer_device":"cuda","kv_connector_extra_config":{"enforce_handshake_compat":false,"enable_cross_layers_blocks":false}},{"kv_connector":"MooncakeStoreConnector","kv_role":"kv_consumer","kv_connector_extra_config":{"load_async":true,"lookup_async":false,"enable_lookup":false,"enable_cross_layers_blocks":false,"enable_offload":false}}]}}
+  ```
+
+  Use the linked YAMLs with the InferenceX Slurm launcher for the full service setup,
+  per-node ranks and network configuration. Throughput runs use InferenceX's golden
+  acceptance lengths; quality evaluation uses real target verification, not forced
+  acceptance. No new performance or quality measurements are reported here.
 
   ## Agentic benchmark reproduction (InferenceX MI355X sweep)
 
