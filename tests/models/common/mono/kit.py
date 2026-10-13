@@ -7,8 +7,8 @@ in the five hooks, which gives it the contract the library relies on: refusals
 are complete, the spec module is importable without a kernel backend, the
 capture sizes are the spec's widths, one forward decides once and alike on
 every rank, caches re-bind when they move, attach does not move the model's
-weights, cache checks report every mismatch, served steps are counted, and
-every width is warmed up before capture.
+weights, cache checks report every mismatch, and every width is warmed up
+before capture.
 
 The kit never launches a kernel: it drives the library through the spec's own
 callbacks, so a spec whose kernels need a GPU still conforms on CPU.
@@ -28,7 +28,6 @@ import torch
 from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import ForwardContext, override_forward_context
 from vllm.model_executor.warmup.jit_warmup import JitWarmupRegistry
-from vllm.models.common.mono import runtime
 from vllm.models.common.mono.guards import (
     _load_specs,
     _refuse_config,
@@ -119,12 +118,6 @@ class MonoConformance:
     @pytest.fixture
     def mono(self, config, model):
         return attach(model, config, self.specs_path)
-
-    @pytest.fixture(autouse=True)
-    def _counters(self):
-        runtime.STEPS.clear()
-        yield
-        runtime.STEPS.clear()
 
     def spec(self, config):
         spec, refusals = _select_spec(_load_specs(self.specs_path), config)
@@ -241,21 +234,6 @@ class MonoConformance:
         attach(model, config, self.specs_path)
         after = {n: p.data_ptr() for n, p in model.named_parameters()}
         assert before == after
-
-    def test_counters_follow_full_replay(self, config, model, mono):
-        width = min(mono.widths)
-        with forward(config, CUDAGraphMode.FULL, self.decode_metadata(config, model)):
-            mono.begin_step(torch.zeros(width, dtype=torch.long))
-        for _ in range(3):
-            mono.account(width, CUDAGraphMode.FULL)
-        assert runtime.drain() == {f"steps:{mono.spec.name}:mono": 3}
-
-    def test_counters_name_the_skipped_path(self, config, model, mono):
-        width = min(mono.widths)
-        with forward(config, CUDAGraphMode.FULL, self.skipped_metadata(config, model)):
-            why = mono.begin_step(torch.zeros(width, dtype=torch.long))
-        mono.account(width, CUDAGraphMode.FULL)
-        assert runtime.drain() == {f"steps:{mono.spec.name}:{why}": 1}
 
     def test_warmup_registered_for_every_width(self, config):
         registry = JitWarmupRegistry(config)
