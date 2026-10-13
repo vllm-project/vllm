@@ -52,7 +52,7 @@ def qsa_localize_dcp_indices(
     dcp_rank: int,
     cp_kv_cache_interleave_size: int,
 ) -> torch.Tensor:
-    """Copy owned selection ids into compact-local slots."""
+    """Copy the selection ids this rank owns into local slots."""
     if packed_indices.ndim != 2:
         raise ValueError("QSA packed indices must be two-dimensional")
     if out.shape != packed_indices.shape:
@@ -63,7 +63,7 @@ def qsa_localize_dcp_indices(
     if width_plus_count < 2:
         raise ValueError("QSA packed indices need selection columns plus a count")
     if not 0 <= dcp_rank < dcp_world_size:
-        raise ValueError("QSA DCP rank is outside the world")
+        raise ValueError("QSA DCP rank must be less than the DCP world size")
     if cp_kv_cache_interleave_size <= 0:
         raise ValueError("QSA DCP interleave must be positive")
     if dcp_world_size <= 1:
@@ -99,7 +99,7 @@ def qsa_neutralize_empty_owner_lse_(
     lse: torch.Tensor,
     empty_rows: torch.Tensor,
 ) -> None:
-    """Set empty-owner LSE rows to the merge identity."""
+    """Set rows with no local selection to the merge identity."""
     if empty_rows.dtype != torch.bool:
         raise ValueError("empty_rows must be a boolean mask")
     if lse.shape[0] != empty_rows.shape[0]:

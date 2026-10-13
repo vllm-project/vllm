@@ -210,7 +210,7 @@ def _qsa_sparse_paged_gqa_splitk_kernel(
         0.0,
     )
     output_mask = head_offsets[:, None] < GROUP_SIZE
-    # LSE requires the split workspace.
+    # The log-sum-exp output needs the split workspace.
     if NUM_SPLITS == 1 and not RETURN_LSE:
         # Preserve the unfused path's BF16 attention-output rounding before
         # applying the gate in FP32.

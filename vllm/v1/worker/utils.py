@@ -642,8 +642,8 @@ def allocate_kv_cache(
                 spec, kernel_block_size, tensor.block_stride
             )
         ):
-            # Bind packed compressed pages whole; AttentionGroup maps their
-            # kernel blocks with the stride between manager blocks later.
+            # Bind the packed compressed page whole. AttentionGroup maps its
+            # kernel blocks afterwards, with the stride between manager blocks.
             kernel_block_size = None
         views = create_kv_cache_views(
             buf,

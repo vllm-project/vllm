@@ -493,8 +493,8 @@ class DFlashSpeculator(DraftModelSpeculator):
             self._precompute_context_kv(0, num_target_tokens, dummy_run)
 
         is_full_cudagraph = batch_desc.cg_mode == CUDAGraphMode.FULL
-        # Rebuild the draft attention metadata even when replaying the FULL
-        # graph so that any attention metadata builder state is updated.
+        # Rebuild the draft attention metadata even when the FULL graph
+        # replays, so the metadata builder keeps its state current.
         draft_attn_metadata = self._build_uniform_attn_metadata(
             num_reqs=num_reqs,
             batch_desc=batch_desc,

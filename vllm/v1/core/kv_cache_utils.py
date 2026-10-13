@@ -1029,7 +1029,7 @@ def generate_scheduler_kv_cache_config(
     cfg = copy.deepcopy(kv_cache_configs[0])
     for group in cfg.kv_cache_groups:
         if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs):
-            # The sharded member owns the group's DCP block geometry.
+            # The sharded member sets the group's DCP block size.
             specs = group.kv_cache_spec.kv_cache_specs.values()
             group.kv_cache_spec = next(
                 (spec for spec in specs if spec.dcp_sharded),
