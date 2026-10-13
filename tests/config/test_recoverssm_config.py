@@ -34,6 +34,7 @@ from vllm.model_executor.models.qwen3_5 import (
 from vllm.model_executor.models.qwen3_5_mtp import Qwen3_5MoeMTP, Qwen3_5MTP
 from vllm.model_executor.models.qwen3_next import Qwen3NextForCausalLM
 from vllm.model_executor.models.qwen3_next_mtp import Qwen3NextMTP
+from vllm.models.qwen4_exp.nvidia.model import Qwen4ExpForCausalLM
 from vllm.v1.attention.backend import AttentionCGSupport
 
 TARGET = "Qwen4ExpForConditionalGeneration"
@@ -263,19 +264,19 @@ def _state_config(use_recoverssm: bool, num_spec: int, tp: int):
     )
 
 
-@pytest.mark.parametrize("cls", QWEN_GDN_MODELS, ids=lambda c: c.__name__)
+@pytest.mark.parametrize(
+    "cls", [*QWEN_GDN_MODELS, Qwen4ExpForCausalLM], ids=lambda c: c.__name__
+)
 @pytest.mark.parametrize(("num_spec", "tp"), [(3, 1), (5, 2), (0, 1)])
-def test_qwen_gdn_state_carries_replay_record_like_the_layer(cls, num_spec, tp):
-    """The model-level Mamba state (which sizes the KV cache page) must add the
-    replay record exactly when QwenGatedDeltaNetAttention does."""
+def test_qwen_gdn_recoverssm_keeps_the_stock_mamba_page(cls, num_spec, tp):
+    """The replay record lives in a per-request-slot layer buffer, not the Mamba
+    page: the page, and with it the hybrid attention block size that prefix-cache
+    hits are rounded to, stays the same as without RecoverSSM."""
     stock = _state_config(False, num_spec, tp)
     on = _state_config(True, num_spec, tp)
-    shapes = cls.get_mamba_state_shape_from_config(on)
-    dtypes = cls.get_mamba_state_dtype_from_config(on)
-    assert shapes[:2] == cls.get_mamba_state_shape_from_config(stock)
-    assert dtypes[:2] == cls.get_mamba_state_dtype_from_config(stock)
-    if num_spec == 0:
-        assert len(shapes) == len(dtypes) == 2
-    else:
-        assert shapes[2] == (32 // tp, num_spec + 1, 128 + 128 + 1)
-        assert dtypes[2] == torch.float32
+    assert cls.get_mamba_state_shape_from_config(
+        on
+    ) == cls.get_mamba_state_shape_from_config(stock)
+    assert cls.get_mamba_state_dtype_from_config(
+        on
+    ) == cls.get_mamba_state_dtype_from_config(stock)

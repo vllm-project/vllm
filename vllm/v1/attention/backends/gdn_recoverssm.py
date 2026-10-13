@@ -6,7 +6,11 @@ Wraps the generic GDN builder: every active decode row runs through the spec pat
 draft-less step is a T=1 window), the spec state indices keep only the checkpoint
 column, num_accepted_tokens is always 1 (the checkpoint and the compacted conv window
 already hold the accepted state), and the metadata carries what the post-sampling commit
-needs. Mirrors the Kimi-K3 KDA builder's RecoverSSM handling."""
+needs. Mirrors the Kimi-K3 KDA builder's RecoverSSM handling.
+
+The verify writes each window's replay record to the layer's per-request-slot buffer
+(``QwenGatedDeltaNetAttention.recoverssm_replay``) at the request's persistent slot
+(``req_idx``), and the commit reads it from there."""
 
 from dataclasses import dataclass, field, fields
 from typing import Any
@@ -26,6 +30,7 @@ from vllm.v1.attention.backends.recoverssm_metadata import (
     recoverssm_request_indices,
     recoverssm_spec_rows,
 )
+from vllm.v1.utils import CpuGpuBuffer
 
 logger = init_logger(__name__)
 
@@ -37,6 +42,7 @@ class GDNRecoverSSMCommitMetadata:
     request_indices: (
         torch.Tensor | None
     )  # batch rows of the spec requests (None: rows 0..n-1)
+    record_indices: torch.Tensor  # [>= num_spec_decodes] replay rows (request slots)
     block_table: torch.Tensor | None  # align mode
     num_computed_tokens: torch.Tensor | None
     block_size: int | None
@@ -46,6 +52,9 @@ class GDNRecoverSSMCommitMetadata:
 class GDNRecoverSSMMetadata(GDNAttentionMetadata, RecoverSSMMetadata):
     recoverssm_commit: GDNRecoverSSMCommitMetadata | None = None
     recoverssm_context: Any = field(default=None, repr=False, compare=False)
+    # replay-buffer row per spec window (its request slot), padded like the state
+    # indices
+    recoverssm_record_indices: torch.Tensor | None = None
 
     def commit_recoverssm_state(
         self, num_accepted_tokens: torch.Tensor
@@ -62,6 +71,7 @@ class GDNRecoverSSMMetadata(GDNAttentionMetadata, RecoverSSMMetadata):
             block_table=c.block_table,
             num_computed_tokens=c.num_computed_tokens,
             mamba_block_size=c.block_size,
+            record_indices=c.record_indices,
         )
         if c.block_table is None:
             return None
@@ -86,6 +96,8 @@ class GDNRecoverSSMMetadataBuilder(GDNAttentionMetadataBuilder):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
         max_reqs = vllm_config.scheduler_config.max_num_seqs
         self._ones = torch.ones(max_reqs, dtype=torch.int32, device=device)
+        # Persistent so FULL CUDA graphs replay the verify with this step's rows.
+        self._record_indices = CpuGpuBuffer(max_reqs, dtype=torch.int32, device=device)
         self._context: Any = None
         self._logged = False
         self._capturing = False
@@ -158,11 +170,15 @@ class GDNRecoverSSMMetadataBuilder(GDNAttentionMetadataBuilder):
             request_indices = recoverssm_request_indices(
                 rows, n, m.query_start_loc.device
             )
+            record_indices = self._stage_record_indices(
+                m, rows, base["spec_state_indices_tensor"].shape[0]
+            )
             align = self.vllm_config.cache_config.mamba_cache_mode == "align"
             commit = GDNRecoverSSMCommitMetadata(
                 state_indices=base["spec_state_indices_tensor"],
                 query_start_loc=meta.spec_query_start_loc,
                 request_indices=request_indices,
+                record_indices=record_indices,
                 block_table=m.block_table_tensor if align else None,
                 num_computed_tokens=m.compute_num_computed_tokens() if align else None,
                 block_size=self.kv_cache_spec.block_size if align else None,
@@ -176,7 +192,23 @@ class GDNRecoverSSMMetadataBuilder(GDNAttentionMetadataBuilder):
             **base,
             recoverssm_commit=commit,
             recoverssm_context=self._get_context() if commit is not None else None,
+            recoverssm_record_indices=(
+                commit.record_indices if commit is not None else None
+            ),
         )
+
+    def _stage_record_indices(
+        self, m: CommonAttentionMetadata, rows: torch.Tensor, padded_len: int
+    ) -> torch.Tensor:
+        """Replay-buffer rows of the spec windows: each request's persistent slot
+        (``req_idx``), so two requests never share a record row. Padding windows (null
+        state, skipped by the kernels) get row 0."""
+        cpu = self._record_indices.np
+        n = rows.numel()
+        rows_np = rows.numpy()
+        cpu[:n] = rows_np if m.req_idx is None else m.req_idx[rows_np]
+        cpu[n:padded_len] = 0
+        return self._record_indices.copy_to_gpu(padded_len)
 
     def build_for_cudagraph_capture(
         self, common_attn_metadata: CommonAttentionMetadata
