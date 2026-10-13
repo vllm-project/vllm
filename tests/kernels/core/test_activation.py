@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import random
+from unittest.mock import patch
 
 import pytest
 import torch
@@ -236,6 +237,10 @@ def test_swiglu_limit_func_without_routing_uses_output_buffer() -> None:
     torch.testing.assert_close(output, expected, atol=2e-2, rtol=2e-2)
 
 
+@pytest.mark.parametrize(
+    ("alpha", "beta"),
+    [(1.0, 0.0), (1.702, 0.0), (1.0, 1.0)],
+)
 @pytest.mark.parametrize("swiglu_limit", SWIGLU_LIMITS)
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
 @pytest.mark.parametrize("d", D)
@@ -245,6 +250,8 @@ def test_swiglu_limit_func_without_routing_uses_output_buffer() -> None:
 @torch.inference_mode()
 def test_silu_and_mul_with_clamp(
     default_vllm_config,
+    alpha: float,
+    beta: float,
     swiglu_limit: float,
     num_tokens: int,
     d: int,
@@ -258,8 +265,38 @@ def test_silu_and_mul_with_clamp(
     # Use large values to ensure clamping is exercised.
     x = torch.randn(num_tokens, 2 * d, dtype=dtype) * swiglu_limit * 2
 
-    layer = SiluAndMulWithClamp(swiglu_limit, compile_native=False)
-    out = layer(x)
+    default_vllm_config.compilation_config.custom_ops = [
+        "none",
+        "+silu_and_mul_with_clamp",
+    ]
+    layer = SiluAndMulWithClamp(
+        swiglu_limit,
+        alpha=alpha,
+        beta=beta,
+        compile_native=False,
+    )
+    if current_platform.is_rocm():
+        # forward_hip is always dispatched; the alpha/beta gate is checked
+        # inside it at call time rather than picked at construction time, so
+        # verify the actual routing by spying on the two candidate methods.
+        assert layer._forward_method == layer.forward_hip
+        with (
+            patch.object(layer, "forward_cuda", wraps=layer.forward_cuda) as cuda_spy,
+            patch.object(
+                layer, "forward_native", wraps=layer.forward_native
+            ) as native_spy,
+        ):
+            out = layer(x)
+        if alpha == 1.0 and beta == 0.0:
+            cuda_spy.assert_called_once()
+            native_spy.assert_not_called()
+        else:
+            native_spy.assert_called_once()
+            cuda_spy.assert_not_called()
+    else:
+        assert layer._forward_method == layer.forward_cuda
+        out = layer(x)
+
     ref_out = layer.forward_native(x)
 
     rtol = {
@@ -273,10 +310,11 @@ def test_silu_and_mul_with_clamp(
 
     # Verify clamping is actually being applied: the clamped output should
     # differ from the unclamped SiluAndMul output when inputs are large.
-    unclamped_out = SiluAndMul.forward_native(x)
-    assert not torch.equal(ref_out.float(), unclamped_out.float()), (
-        "Input was not large enough to exercise the clamp; increase scale"
-    )
+    if alpha == 1.0 and beta == 0.0:
+        unclamped_out = SiluAndMul.forward_native(x)
+        assert not torch.equal(ref_out.float(), unclamped_out.float()), (
+            "Input was not large enough to exercise the clamp; increase scale"
+        )
 
     # Verify gate clamping semantics with a controlled scalar case.
     # gate=large_val is clamped to limit first, then silu(limit) * 1.0.
@@ -309,7 +347,10 @@ def test_silu_and_mul_with_clamp(
 
     # opcheck
     out_buf = torch.empty(x.shape[:-1] + (d,), dtype=dtype, device=device)
-    opcheck(torch.ops._C.silu_and_mul_with_clamp, (out_buf, x, swiglu_limit))
+    opcheck(
+        torch.ops._C.silu_and_mul_with_clamp,
+        (out_buf, x, swiglu_limit, layer.alpha, layer.beta),
+    )
 
 
 @pytest.mark.parametrize("linear_beta", [-1.0, 2.0])
