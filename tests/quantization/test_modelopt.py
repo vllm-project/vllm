@@ -7,6 +7,7 @@ Run `pytest tests/quantization/test_modelopt.py`.
 
 import os
 from contextlib import nullcontext
+from types import SimpleNamespace
 from typing import Any, NoReturn
 from unittest.mock import MagicMock, Mock, patch
 
@@ -1026,4 +1027,249 @@ def test_modelopt_fp8_pb_wo_rejects_non_128_input():
     with pytest.raises(ValueError, match="in divisible by 128"):
         scheme.create_weights(
             torch.nn.Module(), mo.WEIGHT, mo.CkptCtx(), shapes, Mock()
+        )
+
+
+def _iq2_xs_moe_config(tp_size=1, tp_rank=0):
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+
+    return SimpleNamespace(
+        moe_backend="b12x",
+        in_dtype=torch.bfloat16,
+        activation=MoEActivation.SILU,
+        has_bias=False,
+        swiglu_limit=None,
+        swiglu_alpha=None,
+        swiglu_beta=None,
+        hidden_dim=256,
+        intermediate_size_per_partition=512 // tp_size,
+        tp_rank=tp_rank,
+        moe_parallel_config=SimpleNamespace(
+            use_ep=False,
+            ep_size=1,
+            use_all2all_kernels=False,
+            enable_eplb=False,
+            tp_size=tp_size,
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    "codec,block_size,block_bytes",
+    [("iq2_xs", 256, 74), ("iq2_xxs", 256, 66), ("q8_0", 32, 34)],
+)
+def test_modelopt_mixed_precision_dispatches_iq2_xs_experts(
+    monkeypatch, codec, block_size, block_bytes
+):
+    from vllm.model_executor.layers.fused_moe.b12x import B12xExperts
+    from vllm.model_executor.layers.quantization.modelopt_block_quant import (
+        ModelOptBlockQuantMoEMethod,
+    )
+
+    monkeypatch.setattr(B12xExperts, "_supports_current_device", lambda: True)
+    config = _mixed_precision_config(
+        {
+            "model.language_model.layers.0.mlp.experts": {
+                "quant_algo": codec.upper(),
+                "group_size": block_size,
+                "block_payload_bytes": block_bytes,
+                "packing": "ggml",
+            },
+        }
+    )
+    layer = MagicMock(spec=RoutedExperts)
+    layer.moe_config = _iq2_xs_moe_config()
+    method = config.get_quant_method(
+        layer,
+        "language_model.model.layers.0.mlp.experts",
+    )
+    assert isinstance(method, ModelOptBlockQuantMoEMethod)
+    quant = method.get_fused_moe_quant_config(layer)
+    assert quant.weight_quant_dtype == codec
+    assert quant.quant_dtype is None
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("group_size", 0),
+        ("block_payload_bytes", 75),
+        ("packing", "unknown"),
+    ],
+)
+@pytest.mark.parametrize(
+    "codec,block_size,block_bytes",
+    [("iq2_xs", 256, 74), ("iq2_xxs", 256, 66), ("q8_0", 32, 34)],
+)
+def test_modelopt_block_quant_rejects_incompatible_block_metadata(
+    field, value, codec, block_size, block_bytes
+):
+    recipe = {
+        "quant_algo": codec.upper(),
+        "group_size": block_size,
+        "block_payload_bytes": block_bytes,
+        "packing": "ggml",
+        field: value,
+    }
+    with pytest.raises(ValueError, match=f"unsupported {codec.upper()} block contract"):
+        _mixed_precision_config({"model.layers.0.mlp.experts": recipe})
+
+
+@pytest.mark.parametrize("parallel", ["row", "column"])
+@pytest.mark.parametrize("tp_rank", [0, 1])
+@pytest.mark.parametrize(
+    "codec,block_size,block_bytes",
+    [("iq2_xs", 256, 74), ("iq2_xxs", 256, 66), ("q8_0", 32, 34)],
+)
+def test_modelopt_block_quant_dense_loading_preserves_whole_blocks(
+    monkeypatch, parallel, tp_rank, codec, block_size, block_bytes
+):
+    import vllm.model_executor.parameter as parameter_module
+    import vllm.utils.b12x as b12x_utils
+    from vllm.model_executor.layers.linear import LinearBase
+    from vllm.model_executor.layers.quantization.modelopt_block_quant import (
+        ModelOptBlockQuantLinearMethod,
+    )
+
+    monkeypatch.setattr(
+        b12x_utils,
+        "get_b12x_blockscaled",
+        lambda: SimpleNamespace(
+            BlockQuantLinearWeight=object,
+            is_supported=lambda: True,
+        ),
+    )
+    monkeypatch.setattr(
+        parameter_module, "get_tensor_model_parallel_rank", lambda: tp_rank
+    )
+    monkeypatch.setattr(
+        parameter_module, "get_tensor_model_parallel_world_size", lambda: 2
+    )
+    prefix = "model.layers.1.mixer.shared_experts.up_proj"
+    config = _mixed_precision_config(
+        {
+            prefix: {
+                "quant_algo": codec.upper(),
+                "group_size": block_size,
+                "block_payload_bytes": block_bytes,
+                "packing": "ggml",
+            }
+        }
+    )
+    method = config.get_quant_method(MagicMock(spec=LinearBase), prefix)
+    assert isinstance(method, ModelOptBlockQuantLinearMethod)
+    layer = torch.nn.Module()
+    n, k = (128, 256) if parallel == "row" else (64, 512)
+    method.create_weights(
+        layer, k, [n], 512, 128, torch.bfloat16, weight_loader=lambda *args: None
+    )
+    source = torch.randint(
+        0, 256, (128, 512 // block_size, block_bytes), dtype=torch.uint8
+    )
+    if parallel == "row":
+        layer.weight.load_row_parallel_weight(source)
+        expected = source[
+            :, tp_rank * (256 // block_size) : (tp_rank + 1) * (256 // block_size)
+        ]
+    else:
+        layer.weight.load_column_parallel_weight(source)
+        expected = source[tp_rank * n : (tp_rank + 1) * n]
+    torch.testing.assert_close(layer.weight, expected, atol=0, rtol=0)
+
+
+@pytest.mark.parametrize("tp_size,tp_rank", [(1, 0), (2, 0), (2, 1)])
+@pytest.mark.parametrize("gated", [True, False])
+@pytest.mark.parametrize(
+    "codec,block_size,block_bytes",
+    [("iq2_xs", 256, 74), ("iq2_xxs", 256, 66), ("q8_0", 32, 34)],
+)
+def test_modelopt_block_quant_loads_expert_blocks_with_aligned_tp_slices(
+    monkeypatch,
+    tp_size,
+    tp_rank,
+    gated,
+    codec,
+    block_size,
+    block_bytes,
+):
+    import vllm.model_executor.parameter as parameter_module
+    from vllm.model_executor.layers.fused_moe.b12x import B12xExperts
+    from vllm.model_executor.layers.quantization.modelopt_block_quant import (
+        ModelOptBlockQuantMoEMethod,
+    )
+
+    monkeypatch.setattr(B12xExperts, "_supports_current_device", lambda: True)
+    monkeypatch.setattr(
+        parameter_module, "get_tensor_model_parallel_rank", lambda: tp_rank
+    )
+    monkeypatch.setattr(
+        parameter_module, "get_tensor_model_parallel_world_size", lambda: tp_size
+    )
+    config = _iq2_xs_moe_config(tp_size, tp_rank)
+    if not gated:
+        from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+
+        config.activation = MoEActivation.RELU2_NO_MUL
+    method = ModelOptBlockQuantMoEMethod(config, codec=codec)
+    layer = torch.nn.Module()
+    layer.layer_name = "model.layers.0.mlp.experts"
+    layer.is_fused_checkpoint_transposed = False
+    layer._orient_fused_weight = RoutedExperts._orient_fused_weight
+    layer.get_expert_mapping = lambda **kwargs: (
+        RoutedExperts.build_expert_params_mapping(
+            "gate_proj",
+            "down_proj",
+            "up_proj",
+            num_experts=2,
+            routed_experts_prefix="",
+            **kwargs,
+        )
+    )
+    local_i = 512 // tp_size
+    method.create_weights(layer, 2, 256, local_i, torch.bfloat16)
+    assert layer.w13_weight.shape[1] == local_i * (2 if gated else 1)
+    layer.w13_weight.data.zero_()
+    layer.w2_weight.data.zero_()
+    for shard, name in (
+        ("w1", "w13_weight"),
+        ("w3", "w13_weight"),
+        ("w2", "w2_weight"),
+    ):
+        if shard == "w3" and not gated:
+            continue
+        shape = (
+            (256, 512 // block_size, block_bytes)
+            if shard == "w2"
+            else (512, 256 // block_size, block_bytes)
+        )
+        source = torch.randint(1, 256, shape, dtype=torch.uint8)
+        param = getattr(layer, name)
+        projection = {"w1": "gate", "w3": "up", "w2": "down"}[shard]
+        loaded = list(
+            RoutedExperts.load_weights(
+                layer,
+                [(f"1.{projection}_proj.weight", source)],
+            )
+        )
+        assert loaded == [name]
+        if shard == "w2":
+            expected = source[
+                :,
+                tp_rank * (local_i // block_size) : (tp_rank + 1)
+                * (local_i // block_size),
+            ]
+            actual = param[1]
+        else:
+            expected = source[tp_rank * local_i : (tp_rank + 1) * local_i]
+            offset = 0 if shard == "w1" else local_i
+            actual = param[1, offset : offset + local_i]
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+        assert param[0].count_nonzero() == 0
+    with pytest.raises(ValueError, match="invalid packed tensor"):
+        layer.w2_weight.weight_loader(
+            layer.w2_weight,
+            torch.zeros(256, 512),
+            "w2_weight",
+            "w2",
+            0,
         )
