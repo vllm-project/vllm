@@ -116,8 +116,9 @@ class LaunchState:
     need_swa: bool = False
 
 
-class Kernel:
-    """What both launches share: the layer, its width and its weight views."""
+class LayerKernelBase:
+    """The ``LayerKernel`` both launches implement: the layer, its width and
+    its weight views, with the launch shape left to the subclass."""
 
     ffn_only = False
 
@@ -143,7 +144,7 @@ class Kernel:
         raise NotImplementedError
 
 
-class WholeLayer(Kernel):
+class WholeLayer(LayerKernelBase):
     """The whole backbone layer as K1 and K2, from the layer's own inputs."""
 
     def __init__(
@@ -233,7 +234,7 @@ class WholeLayer(Kernel):
         )
 
 
-class FfnSeam(Kernel):
+class FfnSeam(LayerKernelBase):
     """The FFN seam, MoE and both reductions as one launch, from wo_b's
     unreduced output after vLLM's attention."""
 
@@ -479,7 +480,9 @@ def _bind(ctx: MonoContext, caches) -> list[str]:
     return reasons
 
 
-def _build(ctx: MonoContext, launch_state: LaunchState, layer, width: int):
+def _build(
+    ctx: MonoContext, launch_state: LaunchState, layer, width: int
+) -> LayerKernelBase:
     world = ctx.vllm_config.parallel_config.tensor_parallel_size
     why = _ffn_only(layer)
     if layer.attn.layer_id not in launch_state.weights:
