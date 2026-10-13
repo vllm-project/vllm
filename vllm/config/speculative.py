@@ -90,7 +90,6 @@ _QWEN3_OMNI_TARGET_ARCHITECTURES = frozenset(
     }
 )
 _QWEN3_OMNI_DSPARK_ARCHITECTURE = "Qwen3OmniDSparkModel"
-_LING_DSPARK_KV_CACHE_BLOCK_SIZE = 128
 
 
 def _is_qwen3_omni_target(model_config: ModelConfig) -> bool:
@@ -144,6 +143,112 @@ def _get_qwen3_dspark_value(config: Any, name: str) -> Any:
     return value
 
 
+def _validate_qwen3_dspark_draft(
+    name: str,
+    draft_hf_config: Any,
+    target_num_layers: int,
+) -> int:
+    """Validate the draft fields shared by standalone Qwen3 DSpark checkpoints.
+
+    Returns the trained block_size.
+    """
+    block_size = _get_qwen3_dspark_value(draft_hf_config, "block_size")
+    if block_size is None:
+        block_size = _get_qwen3_dspark_value(draft_hf_config, "dspark_block_size")
+    if (
+        not isinstance(block_size, int)
+        or isinstance(block_size, bool)
+        or block_size <= 0
+    ):
+        raise ValueError(
+            f"{name} requires a positive integer block_size in the draft config."
+        )
+
+    target_layer_ids = _get_nested_config_value(
+        draft_hf_config, "dflash_config", "target_layer_ids"
+    )
+    if target_layer_ids is None:
+        target_layer_ids = getattr(draft_hf_config, "dspark_target_layer_ids", None)
+    if target_layer_ids is None:
+        target_layer_ids = getattr(draft_hf_config, "target_layer_ids", None)
+    if not isinstance(target_layer_ids, (list, tuple)) or not target_layer_ids:
+        raise ValueError(
+            f"{name} requires a non-empty target_layer_ids list in the draft config."
+        )
+    if any(
+        not isinstance(layer_id, int) or isinstance(layer_id, bool)
+        for layer_id in target_layer_ids
+    ):
+        raise ValueError(f"{name} target_layer_ids must contain only integers.")
+    if list(target_layer_ids) != sorted(set(target_layer_ids)):
+        raise ValueError(
+            f"{name} target_layer_ids must be unique and strictly increasing."
+        )
+    if target_layer_ids[0] < 0 or target_layer_ids[-1] >= target_num_layers:
+        raise ValueError(
+            f"{name} target_layer_ids must be zero-based text-layer indices in "
+            f"[0, {target_num_layers - 1}]; got {target_layer_ids}."
+        )
+
+    markov_rank = getattr(draft_hf_config, "markov_rank", None)
+    if (
+        not isinstance(markov_rank, int)
+        or isinstance(markov_rank, bool)
+        or markov_rank <= 0
+    ):
+        raise ValueError(
+            f"{name} requires a positive integer markov_rank in the draft config."
+        )
+    markov_head_type = getattr(draft_hf_config, "markov_head_type", None)
+    if markov_head_type != "vanilla":
+        raise ValueError(
+            f"{name} currently requires markov_head_type='vanilla'; "
+            f"got {markov_head_type!r}."
+        )
+
+    sample_from_anchor = getattr(draft_hf_config, "sample_from_anchor", True)
+    bonus_anchor = getattr(draft_hf_config, "dspark_bonus_anchor", False)
+    if sample_from_anchor is not True or bonus_anchor is not False:
+        raise ValueError(
+            f"{name} requires sample_from_anchor=true and dspark_bonus_anchor=false."
+        )
+
+    draft_input_vocab_size = getattr(draft_hf_config, "vocab_size", None)
+    if (
+        not isinstance(draft_input_vocab_size, int)
+        or isinstance(draft_input_vocab_size, bool)
+        or draft_input_vocab_size <= 0
+    ):
+        raise ValueError(
+            f"{name} input vocab_size must be a positive integer; "
+            f"got {draft_input_vocab_size}."
+        )
+
+    noise_token_id = _get_nested_config_value(
+        draft_hf_config, "dflash_config", "mask_token_id"
+    )
+    for token_name in (
+        "mask_token_id",
+        "dspark_noise_token_id",
+        "pard_token",
+        "ptd_token_id",
+    ):
+        if noise_token_id is None:
+            noise_token_id = getattr(draft_hf_config, token_name, None)
+        if noise_token_id is not None:
+            break
+    if (
+        not isinstance(noise_token_id, int)
+        or isinstance(noise_token_id, bool)
+        or not 0 <= noise_token_id < draft_input_vocab_size
+    ):
+        raise ValueError(
+            f"{name} requires a valid mask/noise token id within the draft input "
+            f"vocabulary [0, {draft_input_vocab_size - 1}]."
+        )
+    return block_size
+
+
 def _validate_qwen3_omni_dspark(
     target_model_config: ModelConfig,
     draft_model_config: ModelConfig,
@@ -163,29 +268,25 @@ def _validate_qwen3_omni_dspark(
             "Qwen3DSparkModel checkpoints must be converted first."
         )
 
-    block_size = _get_qwen3_dspark_value(draft_hf_config, "block_size")
-    if block_size is None:
-        block_size = _get_qwen3_dspark_value(draft_hf_config, "dspark_block_size")
-    if (
-        not isinstance(block_size, int)
-        or isinstance(block_size, bool)
-        or block_size <= 0
-    ):
+    target_text_config = _get_qwen3_omni_text_config(target_model_config)
+    if target_text_config is None:
         raise ValueError(
-            "Qwen3-Omni DSpark requires a positive integer block_size in the "
-            "draft config."
+            "Qwen3-Omni DSpark could not resolve the target thinker text_config."
         )
+    target_num_layers = getattr(
+        target_text_config,
+        "num_hidden_layers",
+        target_model_config.get_total_num_hidden_layers(),
+    )
+    block_size = _validate_qwen3_dspark_draft(
+        "Qwen3-Omni DSpark", draft_hf_config, target_num_layers
+    )
     if num_speculative_tokens != block_size:
         raise ValueError(
             "Qwen3-Omni DSpark requires num_speculative_tokens to match the "
             f"trained block_size ({block_size}); got {num_speculative_tokens}."
         )
 
-    target_text_config = _get_qwen3_omni_text_config(target_model_config)
-    if target_text_config is None:
-        raise ValueError(
-            "Qwen3-Omni DSpark could not resolve the target thinker text_config."
-        )
     target_hidden_size = getattr(
         target_text_config,
         "hidden_size",
@@ -239,69 +340,10 @@ def _validate_qwen3_omni_dspark(
                 f"value ({target_value}); got {draft_value}."
             )
 
-    target_layer_ids = _get_nested_config_value(
-        draft_hf_config, "dflash_config", "target_layer_ids"
-    )
-    if target_layer_ids is None:
-        target_layer_ids = getattr(draft_hf_config, "dspark_target_layer_ids", None)
-    if target_layer_ids is None:
-        target_layer_ids = getattr(draft_hf_config, "target_layer_ids", None)
-    if not isinstance(target_layer_ids, (list, tuple)) or not target_layer_ids:
-        raise ValueError(
-            "Qwen3-Omni DSpark requires a non-empty target_layer_ids list in "
-            "the draft config."
-        )
-    if any(
-        not isinstance(layer_id, int) or isinstance(layer_id, bool)
-        for layer_id in target_layer_ids
-    ):
-        raise ValueError(
-            "Qwen3-Omni DSpark target_layer_ids must contain only integers."
-        )
-    if list(target_layer_ids) != sorted(set(target_layer_ids)):
-        raise ValueError(
-            "Qwen3-Omni DSpark target_layer_ids must be unique and strictly increasing."
-        )
-    target_num_layers = getattr(
-        target_text_config,
-        "num_hidden_layers",
-        target_model_config.get_total_num_hidden_layers(),
-    )
-    if target_layer_ids[0] < 0 or target_layer_ids[-1] >= target_num_layers:
-        raise ValueError(
-            "Qwen3-Omni DSpark target_layer_ids must be zero-based text-layer "
-            f"indices in [0, {target_num_layers - 1}]; got {target_layer_ids}."
-        )
-
     if _get_qwen3_dspark_value(draft_hf_config, "use_aux_hidden_state") is not True:
         raise ValueError(
             "Qwen3-Omni DSpark requires use_aux_hidden_state=true because Omni "
             "conditioning is supplied through thinker hidden states."
-        )
-
-    markov_rank = getattr(draft_hf_config, "markov_rank", None)
-    if (
-        not isinstance(markov_rank, int)
-        or isinstance(markov_rank, bool)
-        or markov_rank <= 0
-    ):
-        raise ValueError(
-            "Qwen3-Omni DSpark requires a positive integer markov_rank in the "
-            "draft config."
-        )
-    markov_head_type = getattr(draft_hf_config, "markov_head_type", None)
-    if markov_head_type != "vanilla":
-        raise ValueError(
-            "Qwen3-Omni DSpark currently requires markov_head_type='vanilla'; "
-            f"got {markov_head_type!r}."
-        )
-
-    sample_from_anchor = getattr(draft_hf_config, "sample_from_anchor", True)
-    bonus_anchor = getattr(draft_hf_config, "dspark_bonus_anchor", False)
-    if sample_from_anchor is not True or bonus_anchor is not False:
-        raise ValueError(
-            "Qwen3-Omni DSpark requires sample_from_anchor=true and "
-            "dspark_bonus_anchor=false."
         )
 
     target_vocab_size = getattr(
@@ -309,19 +351,9 @@ def _validate_qwen3_omni_dspark(
         "vocab_size",
         target_model_config.get_vocab_size(),
     )
-    draft_input_vocab_size = getattr(draft_hf_config, "vocab_size", None)
-    if (
-        not isinstance(draft_input_vocab_size, int)
-        or isinstance(draft_input_vocab_size, bool)
-        or draft_input_vocab_size <= 0
-    ):
-        raise ValueError(
-            "Qwen3-Omni DSpark input vocab_size must be a positive integer; "
-            f"got {draft_input_vocab_size}."
-        )
     draft_output_vocab_size = getattr(draft_hf_config, "draft_vocab_size", None)
     if draft_output_vocab_size is None:
-        draft_output_vocab_size = draft_input_vocab_size
+        draft_output_vocab_size = draft_hf_config.vocab_size
     if (
         not isinstance(draft_output_vocab_size, int)
         or isinstance(draft_output_vocab_size, bool)
@@ -331,29 +363,6 @@ def _validate_qwen3_omni_dspark(
             "Qwen3-Omni DSpark draft_vocab_size must be a positive integer no "
             f"larger than target vocab_size ({target_vocab_size}); got "
             f"{draft_output_vocab_size}."
-        )
-
-    noise_token_id = _get_nested_config_value(
-        draft_hf_config, "dflash_config", "mask_token_id"
-    )
-    for name in (
-        "mask_token_id",
-        "dspark_noise_token_id",
-        "pard_token",
-        "ptd_token_id",
-    ):
-        if noise_token_id is None:
-            noise_token_id = getattr(draft_hf_config, name, None)
-        if noise_token_id is not None:
-            break
-    if (
-        not isinstance(noise_token_id, int)
-        or isinstance(noise_token_id, bool)
-        or not 0 <= noise_token_id < draft_input_vocab_size
-    ):
-        raise ValueError(
-            "Qwen3-Omni DSpark requires a valid mask/noise token id within the "
-            f"draft input vocabulary [0, {draft_input_vocab_size - 1}]."
         )
 
     rope_configs = (
@@ -389,15 +398,10 @@ def _normalize_ling_dspark(
         )
 
     draft_hf_config = draft_model_config.hf_config
-    block_size = _get_qwen3_dspark_value(draft_hf_config, "block_size")
-    if (
-        not isinstance(block_size, int)
-        or isinstance(block_size, bool)
-        or block_size <= 0
-    ):
-        raise ValueError(
-            "Ling DSpark requires a positive integer block_size in the draft config."
-        )
+    target_num_layers = target_model_config.get_total_num_hidden_layers()
+    block_size = _validate_qwen3_dspark_draft(
+        "Ling DSpark", draft_hf_config, target_num_layers
+    )
     if num_speculative_tokens is None:
         num_speculative_tokens = block_size
 
@@ -411,7 +415,6 @@ def _normalize_ling_dspark(
             f"size ({target_hidden_size}); got {draft_target_hidden_size}."
         )
 
-    target_num_layers = target_model_config.get_total_num_hidden_layers()
     draft_target_num_layers = getattr(draft_hf_config, "num_target_layers", None)
     if draft_target_num_layers != target_num_layers:
         raise ValueError(
@@ -420,73 +423,17 @@ def _normalize_ling_dspark(
         )
 
     target_vocab_size = target_model_config.get_vocab_size()
-    draft_vocab_size = getattr(draft_hf_config, "vocab_size", None)
-    if draft_vocab_size != target_vocab_size:
+    if draft_hf_config.vocab_size != target_vocab_size:
         raise ValueError(
             "Ling DSpark draft vocab_size must match the target vocab size "
-            f"({target_vocab_size}); got {draft_vocab_size}."
+            f"({target_vocab_size}); got {draft_hf_config.vocab_size}."
         )
-
-    target_layer_ids = getattr(draft_hf_config, "target_layer_ids", None)
-    draft_num_layers = getattr(draft_hf_config, "num_hidden_layers", None)
-    if (
-        not isinstance(target_layer_ids, (list, tuple))
-        or len(target_layer_ids) != draft_num_layers
-        or any(
-            not isinstance(layer_id, int)
-            or isinstance(layer_id, bool)
-            or not 0 <= layer_id < target_num_layers
-            for layer_id in target_layer_ids
-        )
-    ):
-        raise ValueError(
-            "Ling DSpark target_layer_ids must contain one valid zero-based "
-            "target layer for every draft layer."
-        )
-    if any(
-        current <= previous
-        for previous, current in zip(target_layer_ids, target_layer_ids[1:])
-    ):
-        raise ValueError("Ling DSpark target_layer_ids must be strictly increasing.")
 
     if getattr(draft_hf_config, "use_aux_hidden_state", True) is not True:
         raise ValueError("Ling DSpark requires use_aux_hidden_state=true.")
-    markov_rank = getattr(draft_hf_config, "markov_rank", None)
-    if (
-        not isinstance(markov_rank, int)
-        or isinstance(markov_rank, bool)
-        or markov_rank <= 0
-    ):
-        raise ValueError("Ling DSpark requires a positive integer markov_rank.")
-    markov_head_type = getattr(draft_hf_config, "markov_head_type", None)
-    if markov_head_type != "vanilla":
-        raise ValueError(
-            "Ling DSpark currently requires markov_head_type='vanilla'; "
-            f"got {markov_head_type!r}."
-        )
-
-    sample_from_anchor = getattr(draft_hf_config, "sample_from_anchor", True)
-    bonus_anchor = getattr(draft_hf_config, "dspark_bonus_anchor", False)
-    if sample_from_anchor is not True or bonus_anchor is not False:
-        raise ValueError(
-            "Ling DSpark requires sample_from_anchor=true and "
-            "dspark_bonus_anchor=false."
-        )
-
-    mask_token_id = _get_qwen3_dspark_value(draft_hf_config, "mask_token_id")
-    if (
-        not isinstance(mask_token_id, int)
-        or isinstance(mask_token_id, bool)
-        or not 0 <= mask_token_id < draft_vocab_size
-    ):
-        raise ValueError(
-            "Ling DSpark requires a valid mask_token_id within the draft vocabulary."
-        )
 
     draft_hf_config.sample_from_anchor = True
     draft_hf_config.dspark_bonus_anchor = False
-    # Avoid inflating dense draft KV pages with the KDA-expanded target block size.
-    draft_hf_config.kv_cache_block_size = _LING_DSPARK_KV_CACHE_BLOCK_SIZE
     draft_hf_config.architectures = ["Qwen3DSparkModel"]
     return num_speculative_tokens
 

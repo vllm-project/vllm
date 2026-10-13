@@ -4040,7 +4040,6 @@ def test_ling_dspark_checkpoint_contract_is_normalized():
     assert draft_config.hf_config.architectures == ["Qwen3DSparkModel"]
     assert draft_config.hf_config.sample_from_anchor is True
     assert draft_config.hf_config.dspark_bonus_anchor is False
-    assert draft_config.hf_config.kv_cache_block_size == 128
 
     target_config, draft_config = _make_ling_dspark_configs()
     assert _normalize_ling_dspark(target_config, draft_config, None) == 8

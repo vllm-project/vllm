@@ -86,32 +86,37 @@ def _add_global_draft_layer_exclusions(
 
 
 class _DFlashAttention(Attention):
-    kv_cache_block_size: int | None = None
-
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec | None:
         spec = super().get_kv_cache_spec(vllm_config)
-        block_size = self.kv_cache_block_size
-        if block_size is None or spec is None:
+        target_page_size = vllm_config.cache_config.mamba_page_size_padded
+        if (
+            not isinstance(spec, FullAttentionSpec)
+            or not vllm_config.model_config.use_mla
+            or target_page_size is None
+            or spec.page_size_bytes <= target_page_size
+        ):
             return spec
-        if not isinstance(spec, FullAttentionSpec):
-            raise NotImplementedError(
-                "Independent DFlash KV block size requires full attention."
-            )
 
-        supported_sizes = self.attn_backend.get_supported_kernel_block_sizes()
-        directly_supported = not supported_sizes or any(
-            block_size % size.base == 0
-            if isinstance(size, MultipleOf)
-            else block_size == size
-            for size in supported_sizes
+        # MLA pages cannot be padded, so a larger draft page would force the
+        # hybrid MLA/linear-attention target pages to grow. Fit the draft block
+        # into the target page instead; the page is padded during unification.
+        page_size_per_token = spec.page_size_bytes // spec.block_size
+        supported_sizes = self.attn_backend.get_supported_kernel_block_sizes(spec)
+        for block_size in range(target_page_size // page_size_per_token, 0, -1):
+            if spec.block_size % block_size == 0 and (
+                not supported_sizes
+                or any(
+                    block_size % size.base == 0
+                    if isinstance(size, MultipleOf)
+                    else block_size == size
+                    for size in supported_sizes
+                )
+            ):
+                return replace(spec, block_size=block_size)
+        raise NotImplementedError(
+            f"{self.attn_backend.get_name()} has no kernel block size that fits "
+            f"the DFlash draft KV page into the {target_page_size}-byte target page."
         )
-        if not directly_supported:
-            raise NotImplementedError(
-                f"{self.attn_backend.get_name()} cannot directly use the "
-                f"{block_size}-token KV block required by this DFlash draft. "
-                "Use attention_backend=FLASH_ATTN."
-            )
-        return replace(spec, block_size=block_size)
 
 
 def _dflash_layer_causal(config: Qwen3Config, layer_idx: int) -> bool:
@@ -286,10 +291,6 @@ class DFlashQwen3Attention(nn.Module):
         )
 
         self.sliding_window = sliding_window
-        speculative_config = get_current_vllm_config().speculative_config
-        assert speculative_config is not None
-        draft_model_config = speculative_config.draft_model_config
-        assert draft_model_config is not None
         self.attn = _DFlashAttention(
             self.num_heads,
             self.head_dim,
@@ -301,11 +302,6 @@ class DFlashQwen3Attention(nn.Module):
             prefix=f"{prefix}.attn",
             attn_type=attn_type,
             sinks=self.attention_sink_bias,
-        )
-        self.attn.kv_cache_block_size = getattr(
-            draft_model_config.hf_config,
-            "kv_cache_block_size",
-            None,
         )
         self.causal = causal
         if current_platform.is_rocm():
