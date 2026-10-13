@@ -254,6 +254,8 @@ class CohereServingChatV2(OpenAIServingChat):
         tool_strict_level: str = "auto",
         enable_prompt_tokens_details: bool = False,
         enable_force_include_usage: bool = False,
+        enable_log_outputs: bool = False,
+        enable_log_deltas: bool = True,
         default_chat_template_kwargs: dict[str, Any] | None = None,
         is_reasoning_model: bool = True,
     ) -> None:
@@ -272,6 +274,8 @@ class CohereServingChatV2(OpenAIServingChat):
             tool_parser=tool_parser,
             enable_prompt_tokens_details=enable_prompt_tokens_details,
             enable_force_include_usage=enable_force_include_usage,
+            enable_log_outputs=enable_log_outputs,
+            enable_log_deltas=enable_log_deltas,
             default_chat_template_kwargs=default_chat_template_kwargs,
         )
         # Controls how the assistant's chain-of-thought is surfaced on
