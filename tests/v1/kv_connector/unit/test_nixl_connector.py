@@ -3363,7 +3363,8 @@ class TestPeerReplacement:
         block_size = maybe_update_block_size(16)
 
         config = create_vllm_config(
-            kv_connector_extra_config={"engine_ttl": 0}, block_size=block_size
+            kv_connector_extra_config={"engine_ttl": 0, "decoder_kv_blocks_ttl": 1},
+            block_size=block_size,
         )
         config.kv_transfer_config.kv_buffer_device = "cpu"
         platform = SimpleNamespace(
@@ -3738,13 +3739,14 @@ class TestPeerReplacement:
         self.transport.check_xfer_state.return_value = "PROC"
         self.worker.start_load_kv(self._request("old"))
         self.worker.get_transfer_results()
+        clock = time.perf_counter
+        # Past decoder_kv_blocks_ttl only: still reads.
+        monkeypatch.setattr(time, "perf_counter", lambda: clock() + 2)
         self.worker.start_load_kv(self._request("old", req_id="old-req-2"))
         assert self.transport.make_prepped_xfer.call_count == 3
 
-        # Past decoder_kv_blocks_ttl (480 s by default).
-        clock = time.perf_counter
+        # Past stalled_read_timeout (480 s): rejected in the same step.
         monkeypatch.setattr(time, "perf_counter", lambda: clock() + 481)
-        self.worker.get_transfer_results()
         self.transport.make_prepped_xfer.reset_mock()
         self.worker.start_load_kv(self._request("old", req_id="blocked"))
         self.worker.start_load_kv(self._request("healthy"))
@@ -3758,7 +3760,7 @@ class TestPeerReplacement:
         assert not result.failed_recving
         self.transport.remove_remote_agent.assert_called_once_with("old")
 
-    def test_stalled_read_is_ignored_with_zero_ttl(self, monkeypatch):
+    def test_stalled_read_is_ignored_with_zero_timeout(self, monkeypatch):
         self.worker._stalled_read_timeout = 0
         self.transport.check_xfer_state.return_value = "PROC"
         self.worker.start_load_kv(self._request("old"))

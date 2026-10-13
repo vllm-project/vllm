@@ -8,9 +8,6 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from vllm.distributed.kv_transfer.kv_connector.utils import BlockIds, EngineId
-from vllm.distributed.kv_transfer.kv_connector.v1.base import (
-    KVConnectorTransferResults,
-)
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
     NixlBaseConnectorWorker,
 )
@@ -50,9 +47,9 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         # Registration generation of each remote engine's loaded agent.
         self._remote_registration_generations: dict[EngineId, int] = {}
         # Seconds a READ may stay in flight before its engine is marked invalid
-        # (<= 0: never). Reuses the TTL the push registration watchdog defaults to.
+        # (<= 0: never).
         self._stalled_read_timeout = float(
-            self.kv_transfer_config.get_from_extra_config("decoder_kv_blocks_ttl", 480)
+            self.kv_transfer_config.get_from_extra_config("stalled_read_timeout", 480)
         )
         # Request -> (engine it reads from, when its READs count as stalled).
         self._read_deadlines: dict[ReqId, tuple[EngineId, float]] = {}
@@ -61,6 +58,8 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         """Start loading by triggering non-blocking nixl_xfer.
         We check for these trnxs to complete in each step().
         """
+        # Before posting, so this step already skips a stalled engine.
+        self._mark_stalled_engines()
         for req_id, meta in metadata.reqs_to_recv.items():
             meta.local_physical_block_ids = self._logical_to_kernel_block_ids(
                 meta.local_block_ids, self._physical_blocks_per_logical_kv_block
@@ -663,8 +662,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                 raise
             self._recving_transfers[request_id].append(handle)
 
-    def get_transfer_results(self) -> KVConnectorTransferResults:
-        results = super().get_transfer_results()
+    def _mark_stalled_engines(self) -> None:
         # NIXL has no transfer deadline: a READ on a wedged connection stays in
         # PROC, and later reads from that engine would hang on it too.
         now = time.perf_counter()
@@ -678,7 +676,6 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                     f"a read for request {req_id} has been in flight for over "
                     f"{self._stalled_read_timeout:g}s",
                 )
-        return results
 
     def _get_new_notifs(self) -> set[str]:
         """Get req_ids which got a remote xfer message. When multiple consumers
