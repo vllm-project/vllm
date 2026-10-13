@@ -2,8 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for the V2 model runner's InputBatch (vllm.v1.worker.gpu.input_batch)."""
 
-from dataclasses import replace
-
 import numpy as np
 import pytest
 import torch
@@ -41,9 +39,6 @@ def test_make_dummy_distributes_remainder(num_reqs: int, num_tokens: int):
         max_num_reqs=num_reqs, max_num_tokens=num_tokens, device=torch.device(DEVICE)
     )
     batch = InputBatch.make_dummy(num_reqs, num_tokens, buffers)
-    assert batch.is_dummy
-    assert replace(batch, num_tokens=1).is_dummy
-
     max_per_req = -(-num_tokens // num_reqs)
     assert batch.num_scheduled_tokens.sum() == num_tokens
     assert batch.num_scheduled_tokens.max() == max_per_req

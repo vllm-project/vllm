@@ -53,7 +53,7 @@ def test_compressed_qsa_null_block_has_no_slot() -> None:
     assert slots.tolist() == [-1, 1]
 
 
-def test_torch_qsa_metadata_masks_null_block_without_flag() -> None:
+def test_torch_qsa_metadata_masks_null_block() -> None:
     query_start_loc = torch.tensor([0, 8], dtype=torch.int32)
     metadata = CommonAttentionMetadata(
         query_start_loc=query_start_loc,

@@ -100,6 +100,8 @@ def _logical_to_physical_qsa_slots(
     if not all(block_table.shape):
         return torch.full_like(positions, PAD_SLOT_ID)
     physical_blocks = block_table[safe_requests, safe_blocks].long()
+    # Block 0 is the reserved null block. Rows with no block of their own point
+    # at it, and it must never be written.
     valid &= physical_blocks > 0
     slots = physical_blocks * block_size + positions.remainder(block_size)
     return torch.where(valid, slots, PAD_SLOT_ID)
