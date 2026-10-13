@@ -957,18 +957,31 @@ def test_eagle_partial_tail_store_keys_attention_at_proof():
 
 
 @pytest.mark.parametrize(
-    ("num_computed_tokens", "num_scheduled_tokens"), [(24, 0), (27, 0), (24, 3)]
+    ("num_prompt_tokens", "num_computed_tokens", "num_scheduled_tokens", "stored"),
+    [
+        (30, 24, 0, False),
+        (30, 27, 0, False),
+        (30, 24, 3, False),
+        # The step computes the proof token 28 exactly.
+        (30, 24, 4, True),
+        # Tokens past the prompt end at 26 do not compute the proof.
+        (26, 24, 6, False),
+    ],
 )
-def test_eagle_partial_tail_store_skips_tail_without_proof(
-    num_computed_tokens, num_scheduled_tokens
+def test_eagle_partial_tail_store_needs_proof_in_prompt(
+    num_prompt_tokens, num_computed_tokens, num_scheduled_tokens, stored
 ):
-    """No store when the proof at 28 is not computed by the end of the step."""
+    """Store the tail only if this step computes the proof at 28 in the prompt."""
     scheduler = _make_partial_tail_scheduler(eagle=True)
     request = _make_partial_tail_request(scheduler)
+    request.num_prompt_tokens = num_prompt_tokens
     request.num_computed_tokens = num_computed_tokens
     req_status = scheduler._req_status["req"]
     req_status.group_states[0].block_ids[:] = [11, 12]
     req_status.group_states[1].block_ids[:] = [0, 21]
+    scheduler.manager.prepare_store.side_effect = lambda keys, req_context: (
+        generate_store_output(keys)
+    )
 
     output = SimpleNamespace(
         num_scheduled_tokens={"req": num_scheduled_tokens},
@@ -979,8 +992,8 @@ def test_eagle_partial_tail_store_skips_tail_without_proof(
         ),
     )
 
-    assert scheduler._build_partial_tail_store_jobs(output) == {}
-    scheduler.manager.prepare_store.assert_not_called()
+    assert bool(scheduler._build_partial_tail_store_jobs(output)) == stored
+    assert scheduler.manager.prepare_store.called == stored
 
 
 @pytest.mark.parametrize("missing", [None, b"h6", b"h3"])
