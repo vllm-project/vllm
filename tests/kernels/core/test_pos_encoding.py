@@ -191,3 +191,34 @@ def test_rope_module_cache(default_vllm_config):
         )
         # check if cache take effect
         assert id(rope) == rope_setting_id_map[str(setting)]
+
+
+@torch.inference_mode()
+def test_yarn_cos_sin_cache_covers_max_position(default_vllm_config):
+    """The cos/sin cache is indexed by position without a bounds check, so a
+    YaRN rope whose max_position exceeds original_max_position * factor must
+    still have a row for every position below max_position."""
+    rope_parameters = {
+        "rope_type": "yarn",
+        "rope_theta": 5_000_000,
+        "factor": 2.0,
+        "original_max_position_embeddings": 16384,
+        "attention_factor": 1.0,
+    }
+    long_rope = get_rope(64, 131072, True, rope_parameters, torch.float32)
+    assert long_rope.cos_sin_cache.shape[0] == 131072
+
+    # max_position within original_max_position * factor keeps the old size.
+    short_rope = get_rope(64, 32768, True, rope_parameters, torch.float32)
+    assert short_rope.cos_sin_cache.shape[0] == 32768
+
+    # Extending the cache leaves the existing rows unchanged ...
+    torch.testing.assert_close(
+        long_rope.cos_sin_cache[:32768], short_rope.cos_sin_cache
+    )
+    # ... and the new rows use the same YaRN frequencies.
+    inv_freq = long_rope._compute_inv_freq(long_rope.scaling_factor)
+    positions = torch.tensor([40000, 131071])
+    freqs = positions[:, None].float() * inv_freq[None, :]
+    expected = torch.cat((freqs.cos(), freqs.sin()), dim=-1) * long_rope.mscale
+    torch.testing.assert_close(long_rope.cos_sin_cache[positions], expected)

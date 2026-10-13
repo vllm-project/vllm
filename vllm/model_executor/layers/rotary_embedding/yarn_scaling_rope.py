@@ -29,8 +29,12 @@ class YaRNScalingRotaryEmbedding(RotaryEmbedding):
         mscale_all_dim: float | None = None,
         attention_factor: float | None = None,
         truncate: bool = True,
+        cache_max_position: int | None = None,
     ) -> None:
         self.scaling_factor = scaling_factor
+        # Minimum number of cos/sin cache rows; may exceed
+        # max_position_embeddings * scaling_factor.
+        self.cache_max_position = cache_max_position
         self.beta_fast = beta_fast
         self.beta_slow = beta_slow
         self.truncate = truncate
@@ -75,9 +79,12 @@ class YaRNScalingRotaryEmbedding(RotaryEmbedding):
 
     def _compute_cos_sin_cache(self) -> torch.Tensor:
         inv_freq = self._compute_inv_freq(self.scaling_factor)
-        t = torch.arange(
-            self.max_position_embeddings * self.scaling_factor, dtype=torch.float32
-        )
+        num_rows = int(self.max_position_embeddings * self.scaling_factor)
+        # getattr: MRotaryEmbedding reuses this method without the attribute.
+        cache_max_position = getattr(self, "cache_max_position", None)
+        if cache_max_position is not None:
+            num_rows = max(num_rows, int(cache_max_position))
+        t = torch.arange(num_rows, dtype=torch.float32)
         freqs = torch.einsum("i,j -> ij", t, inv_freq)
         cos = freqs.cos() * self.mscale
         sin = freqs.sin() * self.mscale
