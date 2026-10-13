@@ -19,7 +19,7 @@ from transformers import AutoTokenizer
 from vllm.exceptions import VLLMValidationError
 from vllm.renderers import TokenizeParams
 from vllm.renderers.chat_utils import parse_chat_messages, parse_chat_messages_async
-from vllm.renderers.chat_utils.chat_message_content import (
+from vllm.renderers.chat_utils.chat_message import (
     _PROMPT_EMBEDS_MISSING_DATA_ERROR,
     _RESERVED_PLACEHOLDER_IN_TEXT_ERROR,
 )
