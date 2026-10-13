@@ -275,6 +275,10 @@ class FakeCapacityOp:
         self.recv = recv
         self.dispatch_kwargs = None
         self.combine_input: torch.Tensor | None = None
+        self.combine_in = torch.empty(capacity, 4, dtype=torch.bfloat16)
+
+    def combine_in_view(self):
+        return self.combine_in
 
     def dispatch(self, input, weights, scales, indices, *, return_routing=True):
         self.dispatch_kwargs = {"return_routing": return_routing}
@@ -292,7 +296,14 @@ class FakeCapacityOp:
         return torch.zeros(1, 4, dtype=torch.bfloat16), None
 
 
-def _prepare_with_dp(monkeypatch, op, num_tokens_across_dp, num_dispatchers=4):
+def _prepare_with_dp(
+    monkeypatch,
+    op,
+    num_tokens_across_dp,
+    num_dispatchers=4,
+    experts=None,
+    quant_config=None,
+):
     import vllm.model_executor.layers.fused_moe.prepare_finalize.mori_epv2 as m
 
     if num_tokens_across_dp is None:
@@ -305,8 +316,11 @@ def _prepare_with_dp(monkeypatch, op, num_tokens_across_dp, num_dispatchers=4):
         )
     monkeypatch.setattr(m, "is_forward_context_available", lambda: True)
     monkeypatch.setattr(m, "get_forward_context", lambda: ctx)
+    monkeypatch.setattr(m, "get_dp_group", lambda: SimpleNamespace(rank_in_group=0))
     monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: False)
     prepare_finalize = MoriEPv2PrepareAndFinalize(op, 16, num_dispatchers)
+    if experts is not None:
+        prepare_finalize.post_init_setup(experts)
     prepared = prepare_finalize.prepare(
         torch.ones(1, 4, dtype=torch.bfloat16),
         torch.ones(1, 2, dtype=torch.bfloat16),
@@ -314,7 +328,7 @@ def _prepare_with_dp(monkeypatch, op, num_tokens_across_dp, num_dispatchers=4):
         num_experts=8,
         expert_map=None,
         apply_router_weight_on_input=False,
-        quant_config=SimpleNamespace(),
+        quant_config=quant_config or SimpleNamespace(),
     )
     prepare_finalize.finalize(
         torch.empty(1, 4, dtype=torch.bfloat16),
@@ -334,7 +348,7 @@ def _prepare_with_dp(monkeypatch, op, num_tokens_across_dp, num_dispatchers=4):
         (4, [1, 3, 2, 0], 7, 32),
         (4, [8, 8, 8, 8], 32, 32),
         (4, [33, 0, 0, 0], 20, 64),
-        (4, [0, 0, 0, 0], 0, 32),
+        (4, [1, 0, 0, 0], 0, 32),
         # TP=2 per DP rank: each TP rank may send its DP batch, 2 * 50 rows.
         (4, [30, 20], 90, 128),
         # Dispatchers not a multiple of DP ranks: dispatchers * largest batch.
@@ -343,6 +357,8 @@ def _prepare_with_dp(monkeypatch, op, num_tokens_across_dp, num_dispatchers=4):
         (4, [100, 100, 100, 100], 200, 256),
         # No DP metadata: no host-side bound, keep the full buffer.
         (4, None, 7, 256),
+        # Stale metadata that misses this rank's own batch: full buffer.
+        (4, [0, 3, 2, 0], 5, 256),
     ],
 )
 def test_mori_epv2_slices_receive_rows_to_dp_bound(
@@ -368,3 +384,61 @@ def test_mori_epv2_slices_receive_rows_to_dp_bound(
     assert op.combine_input is not None and op.combine_input.shape[0] == rows
     # MORI main's dispatch has no clone_routing parameter.
     assert op.dispatch_kwargs == {"return_routing": True}
+
+
+def _aiter_experts():
+    from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
+        AiterExperts,
+    )
+
+    return object.__new__(AiterExperts)
+
+
+@pytest.mark.parametrize(
+    "experts,per_tensor,a1_cleared",
+    [
+        # Triton reads every row, so stale rows must be zeroed.
+        (None, False, True),
+        # AITER only reads expert_num_tokens rows.
+        ("aiter", False, False),
+        # A dynamic per-tensor scale still spans every row.
+        ("aiter", True, True),
+    ],
+)
+def test_mori_epv2_clears_input_rows_only_when_experts_read_them(
+    monkeypatch, experts, per_tensor, a1_cleared
+):
+    op = FakeCapacityOp(capacity=256, recv=7)
+    a1, _, _, ids, weights = _prepare_with_dp(
+        monkeypatch,
+        op,
+        [1, 3, 2, 0],
+        experts=_aiter_experts() if experts == "aiter" else None,
+        quant_config=SimpleNamespace(is_per_tensor=per_tensor, a1_scale=None),
+    )
+    assert bool((a1[7:] == 0).all()) == a1_cleared
+    assert bool(torch.isnan(a1[7:]).all()) != a1_cleared
+    assert (ids[7:] == -1).all() and (weights[7:] == 0).all()
+
+
+def test_mori_epv2_experts_write_into_combine_staging(monkeypatch):
+    from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
+        TopKWeightAndReduceContiguous,
+        TopKWeightAndReduceNoOP,
+    )
+
+    op = FakeCapacityOp(capacity=256, recv=7)
+    prepare_finalize = MoriEPv2PrepareAndFinalize(op, 16, 4)
+    alloc = prepare_finalize.allocate_fused_expert_output
+    device = op.combine_in.device
+    out = alloc((32, 4), torch.bfloat16, device, TopKWeightAndReduceNoOP())
+    assert out is not None and out.shape == (32, 4)
+    assert out.data_ptr() == op.combine_in.data_ptr()
+    # Unreduced expert output, other dtypes or too many rows keep the workspace.
+    for args in (
+        ((32, 4), torch.bfloat16, device, TopKWeightAndReduceContiguous()),
+        ((32, 4), torch.float32, device, TopKWeightAndReduceNoOP()),
+        ((257, 4), torch.bfloat16, device, TopKWeightAndReduceNoOP()),
+    ):
+        assert alloc(*args) is None
+

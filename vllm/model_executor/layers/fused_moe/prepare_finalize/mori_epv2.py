@@ -7,9 +7,13 @@ from typing import Any
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm.distributed import get_dp_group
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
+from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
+    TopKWeightAndReduceNoOP,
+)
 
 logger = init_logger(__name__)
 
@@ -35,6 +39,7 @@ class MoriEPv2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         self._padding_expert_ids: torch.Tensor | None = None
         self._routing = None
         self._recv_topk_ids = None
+        self._experts_read_recv_rows_only = False
         # MORI main dropped clone_routing; its dispatch already returns the
         # op-owned live routing, which is what clone_routing=False asked for.
         self._dispatch_kwargs = {"return_routing": True}
@@ -47,6 +52,39 @@ class MoriEPv2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
     @property
     def activation_format(self) -> mk.FusedMoEActivationFormat:
         return mk.FusedMoEActivationFormat.Standard
+
+    def post_init_setup(self, fused_experts: mk.FusedMoEExperts):
+        from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
+            AiterExperts,
+        )
+
+        # AITER computes only the first expert_num_tokens rows.
+        self._experts_read_recv_rows_only = isinstance(fused_experts, AiterExperts)
+
+    def allocate_fused_expert_output(
+        self,
+        shape: tuple[int, ...],
+        dtype: torch.dtype,
+        device: torch.device,
+        weight_and_reduce_impl: mk.TopKWeightAndReduce,
+    ) -> torch.Tensor | None:
+        # Experts that reduce top-k themselves write straight into the arena
+        # rows combine sends, and combine skips its copy-in.
+        combine_in_view = getattr(self.mori_op, "combine_in_view", None)
+        if combine_in_view is None or not isinstance(
+            weight_and_reduce_impl, TopKWeightAndReduceNoOP
+        ):
+            return None
+        buf = combine_in_view()
+        if (
+            len(shape) != 2
+            or buf.dtype != dtype
+            or buf.device != device
+            or shape[1] != buf.shape[1]
+            or shape[0] > buf.shape[0]
+        ):
+            return None
+        return buf[: shape[0]]
 
     def output_is_reduced(self) -> bool:
         return True
@@ -97,13 +135,28 @@ class MoriEPv2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             return capacity
         tokens = dp_meta.num_tokens_across_dp_cpu
         n_dp = tokens.numel()
+        dp_rank = get_dp_group().rank_in_group
+        if dp_rank >= n_dp or a1.shape[0] > int(tokens[dp_rank]):
+            # Metadata that does not cover this rank's own batch is stale; a
+            # bound derived from it could cut off received rows.
+            logger.warning_once(
+                "MORI EPv2: DP token counts do not cover this rank's batch; "
+                "using the full receive buffer."
+            )
+            return capacity
         if n_dp > 0 and self.num_dispatchers_ % n_dp == 0:
             bound = self.num_dispatchers_ // n_dp * int(tokens.sum())
         else:
             bound = self.num_dispatchers_ * int(tokens.max())
-        bound = max(bound, a1.shape[0], 1)
+        bound = max(bound, 1)
         bound = -(-bound // _RECV_ROW_ALIGN) * _RECV_ROW_ALIGN
         return min(capacity, bound)
+
+    def _experts_skip_unused_rows(self, quant_config: FusedMoEQuantConfig) -> bool:
+        # A dynamic per-tensor activation scale is still taken over every row.
+        return self._experts_read_recv_rows_only and not (
+            quant_config.is_per_tensor and quant_config.a1_scale is None
+        )
 
     def prepare(
         self,
@@ -116,7 +169,7 @@ class MoriEPv2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         quant_config: FusedMoEQuantConfig,
         defer_input_quant: bool = False,
     ) -> mk.PrepareResultType:
-        del num_experts, expert_map, quant_config, defer_input_quant
+        del num_experts, expert_map, defer_input_quant
         assert not apply_router_weight_on_input, (
             "MORI EPv2 does not support apply_router_weight_on_input=True"
         )
@@ -149,7 +202,8 @@ class MoriEPv2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             torch.arange(dispatch_a1.shape[0], device=dispatch_a1.device)
             >= dispatch_recv_token_num
         ).unsqueeze(1)
-        dispatch_a1.masked_fill_(unused, 0)
+        if not self._experts_skip_unused_rows(quant_config):
+            dispatch_a1.masked_fill_(unused, 0)
         dispatch_weights.masked_fill_(unused, 0)
         dispatch_ids.masked_fill_(unused, -1)
         self._recv_topk_ids = dispatch_ids
