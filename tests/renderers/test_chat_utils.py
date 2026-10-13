@@ -2,13 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
-import re
 import warnings
 from collections.abc import Mapping
 from typing import Literal
 from unittest.mock import MagicMock
 
 import pytest
+import regex as re
 import torch
 
 from vllm.assets.audio import AudioAsset
