@@ -18,7 +18,6 @@ from vllm.model_executor.layers.attention.mla_attention import (
     MLACommonMetadataBuilder,
     QueryLenSupport,
 )
-from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
 from vllm.utils.math_utils import round_up
 from vllm.utils.torch_utils import is_quantized_kv_cache
@@ -497,7 +496,3 @@ class XPUFlashAttnMLAImpl(FlashAttnMLAImpl):
             # FA returns LSE in shape [ H, B ] but DCP wants [ B, H ]
             return o, lse.transpose(0, 1)  # [ H, B ] -> [ B, H ]
         return attn_out, None
-
-
-if current_platform.is_xpu():
-    FlashAttnMLABackend = XPUFlashAttnMLABackend  # type: ignore[misc]

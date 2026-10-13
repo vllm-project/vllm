@@ -165,8 +165,11 @@ class XPUPlatform(Platform):
                     f"Invalid attention backend for {cls.device_name}, "
                     f"with use_mla: {attn_selector_config.use_mla}"
                 )
-            flash_attn_mla_cls = AttentionBackendEnum.FLASH_ATTN_MLA.get_class()
-            invalid_reasons = flash_attn_mla_cls.validate_configuration(
+            from vllm.v1.attention.backends.mla.flashattn_mla import (
+                XPUFlashAttnMLABackend,
+            )
+
+            invalid_reasons = XPUFlashAttnMLABackend.validate_configuration(
                 device_capability=cls.get_device_capability(),  # type: ignore[arg-type]
                 **attn_selector_config._asdict(),
             )
@@ -183,7 +186,7 @@ class XPUPlatform(Platform):
                 )
                 return AttentionBackendEnum.TRITON_MLA.get_path()
             logger.info_once("Using Flash Attention MLA backend on XPU.")
-            return AttentionBackendEnum.FLASH_ATTN_MLA.get_path()
+            return "vllm.v1.attention.backends.mla.flashattn_mla.XPUFlashAttnMLABackend"
         if selected_backend == AttentionBackendEnum.TRITON_ATTN:
             logger.info_once("Using Triton backend.")
             return AttentionBackendEnum.TRITON_ATTN.get_path()
