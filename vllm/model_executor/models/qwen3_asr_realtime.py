@@ -120,6 +120,7 @@ class Qwen3ASRRealtimeMultiModalProcessor(Qwen3ASRMultiModalProcessor):
         )
 
         audio_data = audios[0]
+        assert audio_data is not None
         audio_feature_lengths = audio_data.get("audio_feature_lengths")
         if audio_feature_lengths is not None:
             if isinstance(audio_feature_lengths.data, torch.Tensor):

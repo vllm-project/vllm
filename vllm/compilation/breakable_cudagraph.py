@@ -25,6 +25,7 @@ from __future__ import annotations
 import dataclasses
 import functools
 import gc
+import logging
 import threading
 import weakref
 from collections.abc import Callable
@@ -33,9 +34,9 @@ from typing import Any, ClassVar, TypeVar
 import torch
 
 import vllm.envs as envs
+from vllm.compilation.cudagraph_pool import capture_pool
 from vllm.compilation.monitor import validate_cudagraph_capturing_enabled
 from vllm.config import CUDAGraphMode, VllmConfig
-from vllm.distributed.device_communicators.pynccl_allocator import set_graph_pool_id
 from vllm.forward_context import (
     BatchDescriptor,
     get_forward_context,
@@ -285,7 +286,7 @@ class BreakableCUDAGraphWrapper:
         self.runtime_mode = runtime_mode
         self.compilation_config = vllm_config.compilation_config
         self.graph_pool = current_platform.get_global_graph_pool()
-        self.is_debugging_mode = envs.VLLM_LOGGING_LEVEL == "DEBUG"
+        self.is_debugging_mode = logger.isEnabledFor(logging.DEBUG)
 
         self.entries: dict[BatchDescriptor, _BreakableEntry] = {}
         BreakableCUDAGraphWrapper._all_instances.add(self)
@@ -369,11 +370,6 @@ class BreakableCUDAGraphWrapper:
 
         entry.input_addresses = self._collect_tensor_addresses(args, kwargs)
 
-        if self.graph_pool is not None:
-            set_graph_pool_id(self.graph_pool)
-        else:
-            set_graph_pool_id(current_platform.graph_pool_handle())
-
         # Match torch.cuda.graph()'s pre-capture cleanup, which we bypass.
         # Skip it when gc is disabled: bulk capture runs under
         # freeze_gc_for_cudagraph_capture, which already did this cleanup,
@@ -385,8 +381,10 @@ class BreakableCUDAGraphWrapper:
         # pre-capture prefetches are complete and don't leak into the graph.
         get_offloader().sync_prev_onload()
 
-        capture = BreakableCUDAGraphCapture(pool=self.graph_pool)
-        with capture:
+        with (
+            capture_pool(self.graph_pool, self.vllm_config) as pool,
+            BreakableCUDAGraphCapture(pool=pool) as capture,
+        ):
             output = self.runnable(*args, **kwargs)
             # Join the offloader's copy stream while we still hold the last
             # segment open, so the join is captured into the graph (otherwise

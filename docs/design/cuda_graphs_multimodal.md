@@ -7,27 +7,20 @@ For two-tower vision encoders (e.g., DeepSeek-OCR's SAM + CLIP with dynamic tili
 !!! note
     Encoder CUDA Graphs are orthogonal to decoder CUDA Graphs — both can be enabled simultaneously. Encoder graphs capture the vision encoder execution (e.g., ViT in Qwen3-VL), while decoder graphs capture the language model execution as described in the [CUDA Graphs design document](cuda_graphs.md).
 
-## Compatibility Matrix
-
-!!! note
-    The symbols used below have the following meanings:
-
-    - ✅ = Full compatibility
-    - 🟠 = Partial compatibility
-    - ❌ = No compatibility
-    - ❔ = Unknown or TBD
-
-### Model x Feature
+## Supported Models
 
 | Architecture | Models | CG for Image | CG for Video | Multi-Path Graph |
 | ------------ | ------ | ------------ | ------------ | --------------- |
 | `DeepseekOCRForCausalLM` | `DeepSeek-OCR` | ✅︎ | ❌︎ | ✅︎ |
+| `DeepseekV41ForCausalLM` | `DeepSeek-V4.1-Flash` | ✅︎ | ❌︎ | ❌︎ |
 | `Ernie4_5_VLMoeForConditionalGeneration` | `ERNIE-4.5-VL` | ✅︎ | ❌︎ | ❌︎ |
 | `Gemma3ForConditionalGeneration` | `Gemma3` | ✅︎ | ❌︎ | ❌︎ |
 | `Glm4vForConditionalGeneration` | `GLM-4.1V, GLM-4.6V-Flash` | ✅︎ | ✅︎ | ❌︎ |
 | `Gemma4ForConditionalGeneration` | `Gemma-4` | ✅︎ | ✅︎ | ❌︎ |
 | `InternVLChatModel` | `InternVL3.5`, `InternVL3`, `InternVL2.5`, `InternVL2` | ✅︎ | ✅︎ | ❌︎ |
 | `KimiVLForConditionalGeneration` | `Kimi-VL` | ✅︎ | ❌︎ | ❌︎ |
+| `KimiK25ForConditionalGeneration` | `Kimi-K2.5, Kimi-K2.6` | ✅︎ | ❌︎ | ❌︎ |
+| `KimiK3ForConditionalGeneration` | `Kimi-K3` | ✅︎ | ❌︎ | ❌︎ |
 | `Llama4ForConditionalGeneration` | `Llama 4` | ✅︎ | ❌︎ | ❌︎ |
 | `Qwen2VLForConditionalGeneration` | `Qwen2-VL` | ✅︎ | ✅︎ | ❌︎ |
 | `Qwen2_5_VLForConditionalGeneration` | `Qwen2.5-VL` | ✅︎ | ✅︎ | ❌︎ |
@@ -37,26 +30,6 @@ For two-tower vision encoders (e.g., DeepSeek-OCR's SAM + CLIP with dynamic tili
 | `Step3VLForConditionalGeneration` | `Step3-VL` | ✅︎ | ❌︎ | ✅︎ |
 | `MiniCPMV` | `MiniCPMV2.5` | ✅︎ | ❌︎ | ❌︎ |
 | `MiniCPMV` | `MiniCPMV2.6`, `MiniCPMV4.0` | ✅︎ | ✅︎ | ❌︎ |
-
-### Model x Hardware
-
-| Architecture | NV Blackwell | NV Ampere | AMD MI300X | AMD MI350X / MI355X |
-| ------------ | ---------------- | ------------- | -------------- | --------------------- |
-| `DeepseekOCRForCausalLM` | ✅︎ | ✅︎ | ❔ | ✅︎ |
-| `Ernie4_5_VLMoeForConditionalGeneration` | ✅︎ | ✅︎ | ❔ | ✅︎ |
-| `Gemma3ForConditionalGeneration` | ✅︎ | ✅︎ | ❔ | ✅︎ |
-| `Glm4vForConditionalGeneration` | ✅︎ | ✅︎ | ❔ | ✅︎ |
-| `Gemma4ForConditionalGeneration` | ✅︎ | ✅︎ | ❔ | ✅︎ |
-| `InternVLChatModel` | ✅︎ | ✅︎ | ❔ | ✅︎ |
-| `KimiVLForConditionalGeneration` | ✅︎ | ✅︎ | ❔ | ✅︎ |
-| `Llama4ForConditionalGeneration` | ✅︎ | ✅︎ | ❔ | ✅︎ |
-| `Qwen2VLForConditionalGeneration` | ✅︎ | ✅︎ | ❔ | ✅︎ |
-| `Qwen2_5_VLForConditionalGeneration` | ✅︎ | ✅︎ | ❔ | ✅︎ |
-| `Qwen3VLForConditionalGeneration` | ✅︎ | ✅︎ | ❔ | ✅︎ |
-| `Qwen3_5ForConditionalGeneration` | ✅︎ | ✅︎ | ❔ | ✅︎ |
-| `Qwen3_5MoeForConditionalGeneration` | ✅︎ | ✅︎ | ❔ | ✅︎ |
-| `Step3VLForConditionalGeneration` | ✅︎ | ✅︎ | ❔ | ✅︎ |
-| `MiniCPMV` | ✅︎ | ✅︎ | ❔ | ❔ |
 
 !!! note
     Encoder CUDA Graph has currently been tested with `--mm-encoder-attn-backend=FLASH_ATTN` and `--mm-encoder-attn-backend=FLASHINFER` on Blackwell GPUs.
@@ -80,7 +53,7 @@ The encoder CUDA Graph system uses a **budget-based capture/replay** strategy, m
 * [EncoderItemSpec][vllm.v1.worker.encoder_cudagraph_defs.EncoderItemSpec]: describes a single encoder input item (image or video) with its input size and output token count.
 * [BudgetGraphMetadata][vllm.v1.worker.encoder_cudagraph.BudgetGraphMetadata]: holds the captured CUDA Graph and its associated I/O buffers for a single token budget level.
 
-### Budget-based graph capture
+### Budget-Based Graph Capture
 
 Multiple CUDA Graphs are pre-captured at different **token budget** levels (e.g., `[2048, 4096, 8192, 13824]`). Each budget defines a fixed token capacity, and all budgets share the same maximum batch size (number of images). The `BudgetGraphMetadata` for each level stores the graph along with pre-allocated input, metadata, and output buffers:
 
@@ -99,20 +72,7 @@ Budgets are auto-generated as power-of-2 levels from a model-provided range via 
 
 Each entry in `EncoderCudaGraphConfig.paths` defines an independently captured encoder path. A path can provide its own minimum token budget and opt into zero-token batches; the manager generates and stores a separate budget graph set for every configured path.
 
-### Greedy bin-packing at runtime
-
-When a batch of images arrives, the manager sorts images by output token count (smallest first) and greedily packs as many images as possible into each sub-batch while staying within the **largest** token budget and the maximum batch size. Once a sub-batch is finalized (the next image would overflow either constraint), the manager finds the **smallest** budget that fits the sub-batch's total tokens and replays the corresponding CUDA Graph. This repeats until the batch is exhausted. Images that exceed all budgets fall back to eager execution.
-
-For multi-path models, the same greedy packing loop constrains every configured path simultaneously (see [Multi-Path graph capture](#multi-path-graph-capture)).
-
-For each graph replay:
-
-1. Call `prepare_encoder_cudagraph_replay_buffers()` to compute buffer values (including `pixel_values` and precomputed metadata) from actual batch inputs.
-2. Zero the pre-allocated `input_buffers`, then slice-copy the replay values into them.
-3. Replay the CUDA Graph.
-4. Clone outputs from `output_buffer` (cloning is necessary since the buffer is reused across replays).
-
-### Multi-Path graph capture
+### Multi-Path Graph Capture
 
 `EncoderCudaGraphConfig.paths` maps path names to `EncoderCudaGraphPathConfig` capture policies. For example, DeepSeek-OCR configures a **global** image path and a **local** patch path, which are captured independently under `budget_graphs["global"]` and `budget_graphs["local"]`.
 
@@ -127,7 +87,7 @@ Both lists are capped at the same `max_budget`.
 
 * Sort images by total output tokens (global + local), smallest first.
 * Greedily pack images: an image is added to the current sub-batch only if every accumulated path token count is within that path's maximum budget, with the image count ≤ `max_batch_size`.
-* Once any path constraint would overflow, finalize the sub-batch and find the smallest fitting budget **independently** for each path.
+* Once any path constraint would overflow, or the budget-cliff deferral condition fires on any path, finalize the sub-batch and find the smallest fitting budget **independently** for each path.
 * Repeat until all images are packed.
 
 **Partial graph fallback.** For each non-empty path, the manager replays the smallest fitting graph or runs only that path eagerly when no graph fits. Paths with zero tokens are skipped; a `0`-budget graph is never captured or replayed.
@@ -139,11 +99,41 @@ Both lists are capped at the same `max_budget`.
 !!! note
     The dual-path design enables partial CUDA graph coverage — one path can hit while the other falls back to eager. This avoids wasted compute on zero-padded patch buffers for untiled images and avoids graph invalidation caused by variable `crop_shape` per image.
 
-### Data-parallel support
+### Greedy Bin-Packing at Runtime
+
+When a batch of images arrives, the manager sorts images by output token count (smallest first) and greedily packs as many images as possible into each sub-batch while staying within the **largest** token budget and the maximum batch size. Once a sub-batch is finalized (the next image would overflow either constraint, or deferring it is cheaper), the manager finds the **smallest** budget that fits the sub-batch's total tokens and replays the corresponding CUDA Graph. This repeats until the batch is exhausted. Images that exceed all budgets fall back to eager execution.
+
+For multi-path models, the same greedy packing loop constrains every configured path simultaneously.
+
+For each graph replay:
+
+1. Call `prepare_encoder_cudagraph_replay_buffers()` to compute buffer values (including `pixel_values` and precomputed metadata) from actual batch inputs.
+2. Zero the pre-allocated `input_buffers`, then slice-copy the replay values into them.
+3. Replay the CUDA Graph.
+4. Clone outputs from `output_buffer` (cloning is necessary since the buffer is reused across replays).
+
+**Budget-cliff deferral:**
+
+Greedy packing can be wasteful when a large image arrives after small ones: merging it into the current sub-batch may force the whole batch into a much larger budget graph even though splitting would cost less. Because token budgets are discrete (e.g., `[256, 4096, 8192]`), one extra token can double the required graph level — a "budget cliff". Images that overflow the largest budget still finalize the sub-batch unconditionally; for images that *fit*, the packer additionally applies a deferral test: finalize the current sub-batch (replaying it at its own small budget) and start a new sub-batch with the deferred image.
+
+For each candidate image, the packer compares three budgets per path: `b_cur` (the smallest budget fitting the current sub-batch), `b_alone` (the smallest budget fitting the image alone), and `b_merged` (the smallest budget fitting both). Merging costs `b_merged`; deferring costs `b_cur + b_alone` plus one extra replay. The image is deferred when, on any path, both conditions hold:
+
+1. `b_cur + b_alone < b_merged` — splitting strictly saves budget. The strict inequality makes ties merge: with budgets `[256, 4096, 8192]`, two 4000-token images tie (`4096 + 4096 == 8192`), and merging wins because a single replay avoids an extra graph launch.
+2. `b_alone >= b_cur` — the image alone occupies at least as large a budget bucket as the entire current sub-batch.
+
+**Condition 1 is the cost test.** For example, a 200-token image followed by a 4000-token image with budgets `[256, 4096, 8192]`: merging takes `b_merged = 8192` (4200 tokens round up to 8192), while deferring takes `256 + 4096 = 4352` — the image is deferred, saving 3840 tokens of padding compute.
+
+**Condition 2 separates "whales" from "tag-alongs".** Because images are sorted smallest first, a whale arrives last, and deferring it lets the small sub-batch replay at its own small budget instead of being dragged into a large bucket for one image's sake. Without condition 2, deferring mid-size images fragments a flood of similar images into extra replays: with budgets `[256, 2048, 4096, 8192]` and six equal 1366-token images, condition 1 alone defers every third image and yields three 4096 replays (12288 budget tokens in total), while with condition 2 five images merge into one 8192 replay plus a single 2048 replay — fewer replays *and* fewer budget tokens (10240).
+
+The conditions compose cleanly: when `b_alone == b_cur`, condition 1 requires `b_merged > 2 * b_cur`, i.e. deferral fires only when merging jumps at least two budget levels, so ties always merge. This also lets small images defer across a huge cliff: with budgets `[256, 4096]` and four 100-token images, adding the third image (300 tokens) would jump from 256 to 4096, so the packer defers it and packs the images as two 256-budget pairs.
+
+For multi-path items, the conditions are evaluated per path and OR-ed: any path on which the image is a whale defers the whole image, while paths where the image contributes zero tokens are skipped.
+
+### ViT DP Mode Support
 
 When `mm_encoder_tp_mode="data"`, the manager distributes images across TP ranks using load-balanced assignment via `get_load_balance_assignment`, executes locally on each rank, then gathers results back in the original order via `tensor_model_parallel_all_gather`.
 
-### Video inference support
+### Video Inference Support
 
 Following <https://github.com/vllm-project/vllm/pull/35963> (ViT full CUDA graph support for image inference), <https://github.com/vllm-project/vllm/pull/38061> extends the encoder CUDA graph framework to support video inference for Qwen3-VL. Previously, the CUDA graph capture/replay path only handled image inputs (`pixel_values` + `image_grid_thw`). Video inputs use different keys (`pixel_values_videos` + `video_grid_thw`) and require larger `cu_seqlens` buffers because each video item contributes multiple frames (`T` attention sequences). This PR generalizes the protocol and manager to handle both modalities through a single shared graph manager.
 
@@ -152,7 +142,7 @@ Following <https://github.com/vllm-project/vllm/pull/35963> (ViT full CUDA graph
 
     Mixed inputs (image+video) per prompt are also supported now.
 
-## Model integration via `SupportsEncoderCudaGraph`
+## Model Integration via `SupportsEncoderCudaGraph`
 
 Models opt-in to encoder CUDA Graphs by implementing the [SupportsEncoderCudaGraph][vllm.model_executor.models.interfaces.SupportsEncoderCudaGraph] protocol. This protocol encapsulates all model-specific logic so that the manager remains model-agnostic. The protocol defines the following methods:
 
@@ -180,9 +170,9 @@ Four fields in `CompilationConfig` control encoder CUDA Graphs:
 
 Multi-path mode is configured at the model level through `EncoderCudaGraphConfig.paths`. Each `EncoderCudaGraphPathConfig` can set a path-specific minimum budget and whether zero-token batches are allowed. The manager automatically generates separate budget lists and uses the same execution loop for single- and multi-path models.
 
-## Usage guide
+## Usage Guide
 
-### Image inference
+### Image Inference
 
 Enable encoder CUDA Graphs via `compilation_config`:
 
@@ -226,7 +216,7 @@ model = vllm.LLM(
 
 The manager tracks hit/miss statistics and logs them periodically. A "hit" means an image was processed via CUDA Graph replay; a "miss" means eager fallback (image exceeded all budgets).
 
-### Video inference
+### Video Inference
 
 Enable encoder CUDA Graphs via `compilation_config`:
 

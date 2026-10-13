@@ -3,7 +3,8 @@
 
 import torch
 import torch.nn as nn
-from transformers import PretrainedConfig
+import torch.nn.functional as F
+from transformers import PreTrainedConfig
 
 from vllm import envs
 from vllm.config.lora import LoRAConfig
@@ -109,6 +110,15 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
     @property
     def intermediate_size_per_partition(self) -> int:
         return self.moe_config.intermediate_size_per_partition
+
+    @property
+    def _tp_shard_size(self) -> int:
+        """Per-rank stride of an adapter along the expert intermediate dim: the
+        base weights are sharded by the unpadded size even when a backend pads."""
+        unpadded = self.moe_config.intermediate_size_per_partition_unpadded
+        if unpadded is None:
+            return self.intermediate_size_per_partition
+        return unpadded
 
     def _init_lora_stream_context(self) -> None:
         self._lora_stream: torch.cuda.Stream | None = None
@@ -245,7 +255,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         self,
         max_loras: int,
         lora_config: LoRAConfig,
-        model_config: PretrainedConfig | None = None,
+        model_config: PreTrainedConfig | None = None,
     ) -> None:
         """Initializes lora matrices."""
         self._verify_ep_fs(lora_config)
@@ -311,7 +321,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
             return w13_lora_b
 
         # w13_lora_b shape (num_experts,output_size,rank)
-        shard_size = self.intermediate_size_per_partition
+        shard_size = self._tp_shard_size
         start_idx = self.tp_rank * shard_size
         end_idx = (self.tp_rank + 1) * shard_size
 
@@ -322,7 +332,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         if self.tp_size == 1:
             return w2_lora_a
         # w2_lora_a shape (num_experts,rank,input_size)
-        shard_size = self.intermediate_size_per_partition
+        shard_size = self._tp_shard_size
         start_idx = self.tp_rank * shard_size
         end_idx = (self.tp_rank + 1) * shard_size
 
@@ -465,7 +475,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         source_layer: nn.Module,
         lora_config: LoRAConfig,
         packed_modules_list: list,
-        model_config: PretrainedConfig | None = None,
+        model_config: PreTrainedConfig | None = None,
     ) -> bool:
         """Returns True if the layer can be replaced by this LoRA layer."""
         # source_layer is MoERunner
@@ -511,7 +521,7 @@ class FusedMoE3DWithLoRA(FusedMoEWithLoRA):
         self,
         max_loras: int,
         lora_config: LoRAConfig,
-        model_config: PretrainedConfig | None = None,
+        model_config: PreTrainedConfig | None = None,
     ) -> None:
         """Initializes lora matrices."""
         if model_config is None:
@@ -536,7 +546,7 @@ class FusedMoE3DWithLoRA(FusedMoEWithLoRA):
             return w13_lora_b
 
         # w13_lora_b shape (num_experts,output_size,rank)
-        shard_size = self.intermediate_size_per_partition
+        shard_size = self._tp_shard_size
         start_idx = self.tp_rank * shard_size
         end_idx = (self.tp_rank + 1) * shard_size
         # HACK: Currently, only GPT-OSS is in interleaved order
@@ -557,6 +567,11 @@ class FusedMoE3DWithLoRA(FusedMoEWithLoRA):
             w3_lora_b = w13_lora_b[:, slice_size:, :]
             sliced_w1_lora_b = w1_lora_b[:, start_idx:end_idx, :]
             sliced_w3_lora_b = w3_lora_b[:, start_idx:end_idx, :]
+            # w3 starts at the allocated (possibly padded) per-rank size, as
+            # in the base w13 weight.
+            pad = self.intermediate_size_per_partition - sliced_w1_lora_b.shape[1]
+            if pad > 0:
+                sliced_w1_lora_b = F.pad(sliced_w1_lora_b, (0, 0, 0, pad))
 
             return torch.cat([sliced_w1_lora_b, sliced_w3_lora_b], dim=1)
 
@@ -624,7 +639,7 @@ class FusedMoE3DWithLoRA(FusedMoEWithLoRA):
         source_layer: nn.Module,
         lora_config: LoRAConfig,
         packed_modules_list: list,
-        model_config: PretrainedConfig | None = None,
+        model_config: PreTrainedConfig | None = None,
     ) -> bool:
         """Returns True if the layer can be replaced by this LoRA layer."""
         # source_layer is MoERunner
