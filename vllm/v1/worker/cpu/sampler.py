@@ -24,6 +24,19 @@ class CPUSamplingStates(SamplingStates):
         temperature = self.temperature.gpu[expanded_idx_mapping].unsqueeze(1)
         logits.div_(torch.where(temperature == 0.0, 1.0, temperature))
 
+    def apply_min_p(
+        self,
+        logits: torch.Tensor,
+        expanded_idx_mapping: torch.Tensor,
+        idx_mapping_np: np.ndarray,
+    ) -> None:
+        if np.all(self.min_p.np[idx_mapping_np] == 0.0):
+            return
+
+        min_p = self.min_p.gpu[expanded_idx_mapping].unsqueeze(1)
+        threshold = logits.amax(dim=1, keepdim=True) + min_p.log()
+        logits.masked_fill_((min_p != 0.0) & (logits < threshold), float("-inf"))
+
 
 class CPUSampler(Sampler):
     """CPU extension point for Model Runner V2 sampling."""
