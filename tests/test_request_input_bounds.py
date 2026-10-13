@@ -43,6 +43,7 @@ def prompt_embeds_processor():
         logits_processors=None,
         is_diffusion=False,
         return_sampling_mask=False,
+        supports_multimodal_inputs=False,
     )
     model_config.get_vocab_size.return_value = 32
     model_config.try_get_generation_config.return_value = {}
@@ -53,9 +54,7 @@ def prompt_embeds_processor():
     )
     renderer = Mock(tokenizer=None)
     renderer.get_eos_token_id.return_value = None
-    registry = Mock()
-    registry.supports_multimodal_inputs.return_value = False
-    return InputProcessor(config, renderer, mm_registry=registry)
+    return InputProcessor(config, renderer, mm_registry=Mock())
 
 
 @pytest.mark.parametrize("mask_len", [0, 1, 2, 4])

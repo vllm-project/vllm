@@ -103,7 +103,7 @@ def _update_min_larger_stats(data, above_mask, min_larger, num_min_larger, senti
     return min_larger, num_min_larger
 
 
-@triton.jit
+@triton.jit(do_not_specialize_on_alignment=["BATCH_SIZE"])
 def _topk_topp_kernel(
     LOGITS,
     LOGITS_STRIDE_0,
@@ -206,7 +206,10 @@ def _topk_topp_kernel(
                 k_pivots_num = tl.zeros((), dtype=tl.uint32)
                 min_larger = float("inf")
                 num_min_larger = tl.zeros((), dtype=tl.uint32)
-                if num_outliers > k:
+                if num_finite_total <= k:
+                    # All finite logits survive top-k; skip the cutoff search.
+                    k_pivot = -float("inf")
+                elif num_outliers > k:
                     max_range = max_logit
                     min_range = outlier_pivot
                     search_range = tl.cast(num_outliers, tl.int32)
@@ -1225,7 +1228,7 @@ def _topp_sb_combine(
     )
 
 
-@triton.jit
+@triton.jit(do_not_specialize_on_alignment=["ROUND"])
 def _topp_sb_step_kernel(
     LOGITS,
     LOGITS_STRIDE_0,

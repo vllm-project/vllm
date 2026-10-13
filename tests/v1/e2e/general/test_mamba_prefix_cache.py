@@ -55,7 +55,10 @@ async_scheduling_mode = False
 num_accepted_tokens = 1
 prompt_token_ids: list[int] = []
 MODEL = "Qwen/Qwen3-Next-80B-A3B-Instruct-FP8"
-BLOCK_SIZE = 560
+# Must be a value no platform rewrites, since the step actions below encode
+# where block boundaries fall. XPU rounds GDN block sizes up to a multiple of 64
+# (XPUPlatform.update_block_size_for_backend), so use one.
+BLOCK_SIZE = 576
 DEVICE_TYPE = current_platform.device_type
 NUM_HIDDEN_LAYERS = 1
 cur_step_action_idx = 0
@@ -126,6 +129,10 @@ def get_fake_propose_draft_token_ids_fn():
             first_token_id_index = (
                 num_computed_tokens + 1
             )  # bonus token isn't considered as computed
+        # num_accepted_tokens_cpu is filled by a non-blocking D2H copy in the
+        # same step; wait for it or a lagging GPU yields stale counts.
+        if self.num_accepted_tokens_event is not None:
+            self.num_accepted_tokens_event.synchronize()
         first_token_id_index += self.input_batch.num_accepted_tokens_cpu[0].item()
         proposed_draft_token_ids = [
             prompt_token_ids[
@@ -189,6 +196,7 @@ def get_fake_allocate_slots_fn(original_allocate_slots_fn: Callable):
         full_sequence_must_fit: bool = False,
         reserved_blocks: int = 0,
         has_scheduled_reqs: bool = True,
+        skip_zeroing_group_ids: tuple[int, ...] = (),
     ):
         ret = original_allocate_slots_fn(
             self,
@@ -203,6 +211,7 @@ def get_fake_allocate_slots_fn(original_allocate_slots_fn: Callable):
             full_sequence_must_fit,
             reserved_blocks,
             has_scheduled_reqs,
+            skip_zeroing_group_ids,
         )
         if cur_step_action is not None:
             cur_block_ids = self.coordinator.single_type_managers[0].req_to_blocks[
@@ -541,26 +550,27 @@ def get_mamba_prefix_cache_step_configs(
     async_scheduling: bool = False,
 ) -> dict[str, TestConfig]:
     a = async_scheduling
+    B = BLOCK_SIZE
     tests = {
         "accept_1": TestConfig(
-            num_prompt_tokens=554,
+            num_prompt_tokens=B - 6,
             num_generated_tokens=20,
             num_accepted_tokens=1,
             step_actions=[
-                StepAction(0, 554, [1, 1, 1, 1], (-1, -1), (-1, -1)),
-                StepAction(554, 4, [1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(0, B - 6, [1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(B - 6, 4, [1, 1, 1, 1], (-1, -1), (-1, -1)),
                 StepAction(
-                    555, 4, [1, 1, 1, 1, 1] if a else [1, 1, 1, 1], (-1, -1), (-1, -1)
+                    B - 5, 4, [1, 1, 1, 1, 1] if a else [1, 1, 1, 1], (-1, -1), (-1, -1)
                 ),
                 StepAction(
-                    556, 4, [1, 1, 1, 1, 1] if a else [1, 1, 1, 1], (-1, -1), (-1, -1)
+                    B - 4, 4, [1, 1, 1, 1, 1] if a else [1, 1, 1, 1], (-1, -1), (-1, -1)
                 ),
-                StepAction(557, 4, [1, 1, 1, 1, 1], (0, 1), (-1, -1)),
-                StepAction(558, 4, [1, 1, 1, 1, 1], (-1, -1), (-1, -1)),
-                StepAction(559, 4, [1, 1, 1, 1, 1], (-1, -1), (1, 0)),
-                StepAction(560, 4, [1, 1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(B - 3, 4, [1, 1, 1, 1, 1], (0, 1), (-1, -1)),
+                StepAction(B - 2, 4, [1, 1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(B - 1, 4, [1, 1, 1, 1, 1], (-1, -1), (1, 0)),
+                StepAction(B, 4, [1, 1, 1, 1, 1], (-1, -1), (-1, -1)),
                 StepAction(
-                    561,
+                    B + 1,
                     4,
                     [1, 1, 1, 1, 1] if a else [0, 1, 1, 1, 1],
                     (-1, -1),
@@ -570,19 +580,19 @@ def get_mamba_prefix_cache_step_configs(
         ),
         # test case 2.1: no hit, accept 2 tokens
         "accept_2_1": TestConfig(
-            num_prompt_tokens=554,
+            num_prompt_tokens=B - 6,
             num_generated_tokens=20,
             num_accepted_tokens=2,
             step_actions=[
-                StepAction(0, 554, [1, 1, 1, 1], (-1, -1), (-1, -1)),
-                StepAction(554, 4, [1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(0, B - 6, [1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(B - 6, 4, [1, 1, 1, 1], (-1, -1), (-1, -1)),
                 StepAction(
-                    556, 4, [1, 1, 1, 1, 1] if a else [1, 1, 1, 1], (-1, -1), (-1, -1)
+                    B - 4, 4, [1, 1, 1, 1, 1] if a else [1, 1, 1, 1], (-1, -1), (-1, -1)
                 ),
-                StepAction(558, 4, [1, 1, 1, 1, 1], (1, 1), (2, 0)),
-                StepAction(560, 4, [1, 1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(B - 2, 4, [1, 1, 1, 1, 1], (1, 1), (2, 0)),
+                StepAction(B, 4, [1, 1, 1, 1, 1], (-1, -1), (-1, -1)),
                 StepAction(
-                    562,
+                    B + 2,
                     4,
                     [1, 1, 1, 1, 1] if a else [0, 1, 1, 1, 1],
                     (-1, -1),
@@ -592,56 +602,56 @@ def get_mamba_prefix_cache_step_configs(
         ),
         # test case 2.2: no hit, accept 2 tokens
         "accept_2_2": TestConfig(
-            num_prompt_tokens=555,
+            num_prompt_tokens=B - 5,
             num_generated_tokens=20,
             num_accepted_tokens=2,
             step_actions=[
-                StepAction(0, 555, [1, 1, 1, 1], (-1, -1), (-1, -1)),
-                StepAction(555, 4, [1, 1, 1, 1], (-1, -1), (-1, -1)),
-                StepAction(557, 4, [1, 1, 1, 1, 1], (1, 1), (-1, -1)),
-                StepAction(559, 4, [1, 1, 1, 1, 1], (-1, -1), (1, 0)),
+                StepAction(0, B - 5, [1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(B - 5, 4, [1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(B - 3, 4, [1, 1, 1, 1, 1], (1, 1), (-1, -1)),
+                StepAction(B - 1, 4, [1, 1, 1, 1, 1], (-1, -1), (1, 0)),
                 StepAction(
-                    561,
+                    B + 1,
                     4,
                     [1, 1, 1, 1, 1] if a else [0, 1, 1, 1, 1],
                     (-1, -1),
                     (-1, -1),
                 ),
-                StepAction(563, 4, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(B + 3, 4, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
             ],
         ),
         "accept_3_1": TestConfig(
-            num_prompt_tokens=553,
+            num_prompt_tokens=B - 7,
             num_generated_tokens=20,
             num_accepted_tokens=3,
             step_actions=[
-                StepAction(0, 553, [1, 1, 1, 1], (-1, -1), (-1, -1)),
-                StepAction(553, 4, [1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(0, B - 7, [1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(B - 7, 4, [1, 1, 1, 1], (-1, -1), (-1, -1)),
                 StepAction(
-                    556, 4, [1, 1, 1, 1, 1] if a else [1, 1, 1, 1], (-1, -1), (-1, -1)
+                    B - 4, 4, [1, 1, 1, 1, 1] if a else [1, 1, 1, 1], (-1, -1), (-1, -1)
                 ),
-                StepAction(559, 4, [1, 1, 1, 1, 1], (2, 1), (1, 0)),
+                StepAction(B - 1, 4, [1, 1, 1, 1, 1], (2, 1), (1, 0)),
                 StepAction(
-                    562,
+                    B + 2,
                     4,
                     [1, 1, 1, 1, 1] if a else [0, 1, 1, 1, 1],
                     (-1, -1),
                     (-1, -1),
                 ),
-                StepAction(565, 4, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(B + 5, 4, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
             ],
         ),
         "accept_3_2": TestConfig(
-            num_prompt_tokens=554,
+            num_prompt_tokens=B - 6,
             num_generated_tokens=20,
             num_accepted_tokens=3,
             step_actions=[
-                StepAction(0, 554, [1, 1, 1, 1], (-1, -1), (-1, -1)),
-                StepAction(554, 4, [1, 1, 1, 1], (-1, -1), (-1, -1)),
-                StepAction(557, 4, [1, 1, 1, 1, 1], (2, 1), (3, 0)),
-                StepAction(560, 4, [1, 1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(0, B - 6, [1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(B - 6, 4, [1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(B - 3, 4, [1, 1, 1, 1, 1], (2, 1), (3, 0)),
+                StepAction(B, 4, [1, 1, 1, 1, 1], (-1, -1), (-1, -1)),
                 StepAction(
-                    563,
+                    B + 3,
                     4,
                     [1, 1, 1, 1, 1] if a else [0, 1, 1, 1, 1],
                     (-1, -1),
@@ -650,87 +660,87 @@ def get_mamba_prefix_cache_step_configs(
             ],
         ),
         "accept_3_3": TestConfig(
-            num_prompt_tokens=555,
+            num_prompt_tokens=B - 5,
             num_generated_tokens=20,
             num_accepted_tokens=3,
             step_actions=[
-                StepAction(0, 555, [1, 1, 1, 1], (-1, -1), (-1, -1)),
-                StepAction(555, 4, [1, 1, 1, 1], (-1, -1), (-1, -1)),
-                StepAction(558, 4, [1, 1, 1, 1, 1], (2, 1), (2, 0)),
+                StepAction(0, B - 5, [1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(B - 5, 4, [1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(B - 2, 4, [1, 1, 1, 1, 1], (2, 1), (2, 0)),
                 StepAction(
-                    561,
+                    B + 1,
                     4,
                     [1, 1, 1, 1, 1] if a else [0, 1, 1, 1, 1],
                     (-1, -1),
                     (-1, -1),
                 ),
-                StepAction(564, 4, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(B + 4, 4, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
             ],
         ),
         "accept_4_1": TestConfig(
-            num_prompt_tokens=553,
+            num_prompt_tokens=B - 7,
             num_generated_tokens=20,
             num_accepted_tokens=4,
             step_actions=[
-                StepAction(0, 553, [1, 1, 1, 1], (-1, -1), (-1, -1)),
-                StepAction(553, 4, [1, 1, 1, 1], (-1, -1), (-1, -1)),
-                StepAction(557, 4, [1, 1, 1, 1, 1], (3, 1), (3, 0)),
+                StepAction(0, B - 7, [1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(B - 7, 4, [1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(B - 3, 4, [1, 1, 1, 1, 1], (3, 1), (3, 0)),
                 StepAction(
-                    561,
+                    B + 1,
                     4,
                     [1, 1, 1, 1, 1] if a else [0, 1, 1, 1, 1],
                     (-1, -1),
                     (-1, -1),
                 ),
-                StepAction(565, 4, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(B + 5, 4, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
             ],
         ),
         "accept_4_2": TestConfig(
-            num_prompt_tokens=554,
+            num_prompt_tokens=B - 6,
             num_generated_tokens=25,
             num_accepted_tokens=4,
             step_actions=[
-                StepAction(0, 554, [1, 1, 1, 1], (-1, -1), (-1, -1)),
-                StepAction(554, 4, [1, 1, 1, 1], (-1, -1), (-1, -1)),
-                StepAction(558, 4, [1, 1, 1, 1, 1], (3, 1), (2, 0)),
+                StepAction(0, B - 6, [1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(B - 6, 4, [1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(B - 2, 4, [1, 1, 1, 1, 1], (3, 1), (2, 0)),
                 StepAction(
-                    562,
+                    B + 2,
                     4,
                     [1, 1, 1, 1, 1] if a else [0, 1, 1, 1, 1],
                     (-1, -1),
                     (-1, -1),
                 ),
-                StepAction(566, 4, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(B + 6, 4, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
             ],
         ),
         "accept_4_3": TestConfig(
-            num_prompt_tokens=555,
+            num_prompt_tokens=B - 5,
             num_generated_tokens=25,
             num_accepted_tokens=4,
             step_actions=[
-                StepAction(0, 555, [1, 1, 1, 1], (-1, -1), (-1, -1)),
-                StepAction(555, 4, [1, 1, 1, 1], (-1, -1), (-1, -1)),
-                StepAction(559, 4, [1, 1, 1, 1, 1], (3, 1), (1, 0)),
+                StepAction(0, B - 5, [1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(B - 5, 4, [1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(B - 1, 4, [1, 1, 1, 1, 1], (3, 1), (1, 0)),
                 StepAction(
-                    563,
+                    B + 3,
                     4,
                     [1, 1, 1, 1, 1] if a else [0, 1, 1, 1, 1],
                     (-1, -1),
                     (-1, -1),
                 ),
-                StepAction(567, 4, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(B + 7, 4, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
             ],
         ),
         "accept_4_4": TestConfig(
-            num_prompt_tokens=556,
+            num_prompt_tokens=B - 4,
             num_generated_tokens=25,
             num_accepted_tokens=4,
             step_actions=[
-                StepAction(0, 556, [1, 1, 1, 1], (-1, -1), (-1, -1)),
-                StepAction(556, 4, [1, 1, 1, 1], (-1, -1), (3, 0)),
-                StepAction(560, 4, [1, 1, 1, 1, 1], (0, 1), (-1, -1)),
+                StepAction(0, B - 4, [1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(B - 4, 4, [1, 1, 1, 1], (-1, -1), (3, 0)),
+                StepAction(B, 4, [1, 1, 1, 1, 1], (0, 1), (-1, -1)),
                 StepAction(
-                    564,
+                    B + 4,
                     4,
                     [1, 1, 1, 1, 1] if a else [0, 1, 1, 1, 1],
                     (-1, -1),
@@ -739,23 +749,23 @@ def get_mamba_prefix_cache_step_configs(
             ],
         ),
         "prompt_block_size": TestConfig(
-            num_prompt_tokens=560,
+            num_prompt_tokens=B,
             num_generated_tokens=10,
             num_accepted_tokens=4,
             step_actions=[
-                StepAction(0, 560, [1, 1, 1, 1], (-1, -1), (-1, -1)),
-                StepAction(560, 4, [1, 1, 1, 1, 1], (0, 1), (-1, -1)),
+                StepAction(0, B, [1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(B, 4, [1, 1, 1, 1, 1], (0, 1), (-1, -1)),
             ],
         ),
         "prompt_2_block_size": TestConfig(
-            num_prompt_tokens=560 * 2,
+            num_prompt_tokens=B * 2,
             num_generated_tokens=10,
             num_accepted_tokens=4,
             step_actions=[
-                StepAction(0, 560, [1, 1, 1, 1], (-1, -1), (-1, -1)),
-                StepAction(560, 560, [1, 1, 1, 1, 1], (0, 1), (-1, -1)),
+                StepAction(0, B, [1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(B, B, [1, 1, 1, 1, 1], (0, 1), (-1, -1)),
                 StepAction(
-                    560 * 2,
+                    B * 2,
                     4,
                     [1, 1, 1, 1, 1, 1] if a else [0, 1, 1, 1, 1, 1],
                     (1, 2),
@@ -764,14 +774,14 @@ def get_mamba_prefix_cache_step_configs(
             ],
         ),
         "prompt_2_block_size_10": TestConfig(
-            num_prompt_tokens=560 * 2 + 10,
+            num_prompt_tokens=B * 2 + 10,
             num_generated_tokens=10,
             num_accepted_tokens=4,
             step_actions=[
-                StepAction(0, 560, [1, 1, 1, 1], (-1, -1), (-1, -1)),
-                StepAction(560, 570, [1, 0, 1, 1, 1, 1], (0, 2), (-1, -1)),
+                StepAction(0, B, [1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(B, B + 10, [1, 0, 1, 1, 1, 1], (0, 2), (-1, -1)),
                 StepAction(
-                    560 * 2 + 10,
+                    B * 2 + 10,
                     4,
                     [1, 0, 1, 1, 1, 1] if a else [0, 0, 1, 1, 1, 1],
                     (-1, -1),
@@ -780,14 +790,14 @@ def get_mamba_prefix_cache_step_configs(
             ],
         ),
         "prompt_3_block_size": TestConfig(
-            num_prompt_tokens=560 * 3,
+            num_prompt_tokens=B * 3,
             num_generated_tokens=10,
             num_accepted_tokens=4,
             step_actions=[
-                StepAction(0, 560 * 2, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
-                StepAction(560 * 2, 560, [0, 1, 1, 1, 1, 1], (1, 2), (-1, -1)),
+                StepAction(0, B * 2, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(B * 2, B, [0, 1, 1, 1, 1, 1], (1, 2), (-1, -1)),
                 StepAction(
-                    560 * 3,
+                    B * 3,
                     4,
                     [0, 1, 1, 1, 1, 1, 1] if a else [0, 0, 1, 1, 1, 1, 1],
                     (2, 3),
@@ -796,14 +806,14 @@ def get_mamba_prefix_cache_step_configs(
             ],
         ),
         "prompt_3_block_size_10": TestConfig(
-            num_prompt_tokens=560 * 3 + 10,
+            num_prompt_tokens=B * 3 + 10,
             num_generated_tokens=10,
             num_accepted_tokens=4,
             step_actions=[
-                StepAction(0, 560 * 2, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
-                StepAction(560 * 2, 570, [0, 1, 0, 1, 1, 1, 1], (1, 3), (-1, -1)),
+                StepAction(0, B * 2, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(B * 2, B + 10, [0, 1, 0, 1, 1, 1, 1], (1, 3), (-1, -1)),
                 StepAction(
-                    560 * 3 + 10,
+                    B * 3 + 10,
                     4,
                     [0, 1, 0, 1, 1, 1, 1] if a else [0, 0, 0, 1, 1, 1, 1],
                     (-1, -1),
@@ -812,21 +822,21 @@ def get_mamba_prefix_cache_step_configs(
             ],
         ),
         "prompt_10_block_size": TestConfig(
-            num_prompt_tokens=560 * 10,
+            num_prompt_tokens=B * 10,
             num_generated_tokens=10,
             num_accepted_tokens=4,
             step_actions=[
-                StepAction(0, 560 * 5, [0, 0, 0, 0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(0, B * 5, [0, 0, 0, 0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
                 StepAction(
-                    560 * 5,
-                    560 * 4,
+                    B * 5,
+                    B * 4,
                     [0, 0, 0, 0, 1, 0, 0, 0, 1, 1, 1, 1],
                     (4, 8),
                     (-1, -1),
                 ),
                 StepAction(
-                    560 * 9,
-                    560,
+                    B * 9,
+                    B,
                     [0, 0, 0, 0, 1, 0, 0, 0, 1, 1, 1, 1, 1]
                     if a
                     else [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1],
@@ -834,7 +844,7 @@ def get_mamba_prefix_cache_step_configs(
                     (-1, -1),
                 ),
                 StepAction(
-                    560 * 10,
+                    B * 10,
                     4,
                     [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1]
                     if a
@@ -845,21 +855,21 @@ def get_mamba_prefix_cache_step_configs(
             ],
         ),
         "prompt_10_block_size_10": TestConfig(
-            num_prompt_tokens=560 * 10 + 10,
+            num_prompt_tokens=B * 10 + 10,
             num_generated_tokens=10,
             num_accepted_tokens=4,
             step_actions=[
-                StepAction(0, 560 * 5, [0, 0, 0, 0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(0, B * 5, [0, 0, 0, 0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
                 StepAction(
-                    560 * 5,
-                    560 * 4,
+                    B * 5,
+                    B * 4,
                     [0, 0, 0, 0, 1, 0, 0, 0, 1, 1, 1, 1],
                     (4, 8),
                     (-1, -1),
                 ),
                 StepAction(
-                    560 * 9,
-                    560 + 10,
+                    B * 9,
+                    B + 10,
                     [0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 1, 1, 1]
                     if a
                     else [0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 1, 1, 1, 1],
@@ -892,7 +902,6 @@ def _run_mamba_prefix_cache_mrv1(
         load_format="dummy",
         enable_prefix_caching=True,
         block_size=BLOCK_SIZE,
-        mamba_cache_mode="align",
         speculative_config={
             "method": "qwen3_next_mtp",
             "num_speculative_tokens": num_speculative_tokens,
@@ -1152,7 +1161,6 @@ def _run_mamba_prefix_cache_mrv2(
         skip_tokenizer_init=True,
         enable_prefix_caching=True,
         block_size=BLOCK_SIZE,
-        mamba_cache_mode="align",
         speculative_config={
             "method": "qwen3_next_mtp",
             "num_speculative_tokens": num_speculative_tokens,

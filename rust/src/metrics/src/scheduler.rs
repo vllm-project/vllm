@@ -7,10 +7,9 @@ use std::sync::{Arc, Mutex};
 use itertools::Itertools as _;
 use prometheus_client::encoding::{EncodeLabelSet, EncodeLabelValue, LabelValueEncoder};
 use prometheus_client::metrics::family::Family;
-use prometheus_client::metrics::histogram::Histogram;
 use prometheus_client::registry::Registry;
 
-use crate::{F64Gauge, HistogramFamily, U64Counter, U64Gauge};
+use crate::{F64Gauge, Histogram, HistogramFamily, U64Counter, U64Gauge};
 
 const KV_CACHE_RESIDENCY_BUCKETS: [f64; 21] = [
     0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 30.0, 60.0,
@@ -85,6 +84,13 @@ fn nixl_num_descriptors_histogram() -> Histogram {
 pub struct EngineLabels {
     pub model_name: String,
     pub engine: u32,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct CacheHitSourceLabels {
+    pub model_name: String,
+    pub engine: u32,
+    pub source: &'static str,
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
@@ -237,6 +243,7 @@ pub struct SchedulerMetrics {
     pub prefix_cache_hits: Family<EngineLabels, U64Counter>,
     pub external_prefix_cache_queries: Family<EngineLabels, U64Counter>,
     pub external_prefix_cache_hits: Family<EngineLabels, U64Counter>,
+    pub prompt_tokens_cached_by_source: Family<CacheHitSourceLabels, U64Counter>,
 
     // Speculative decoding counters.
     pub spec_decode_num_drafts: Family<EngineLabels, U64Counter>,
@@ -340,6 +347,13 @@ impl SchedulerMetrics {
         );
 
         let external_prefix_cache_hits = Family::default();
+
+        let prompt_tokens_cached_by_source = Family::default();
+        registry.register(
+            "vllm:prompt_tokens_cached_by_source",
+            "Prefix-cache hit tokens by the cache tier that supplied them: device (local HBM), host (offloaded to DRAM), disk, p2p (transferred from another vLLM instance) or external_unspecified. Counted at admission; sums to vllm:prefix_cache_hits + vllm:external_prefix_cache_hits.",
+            prompt_tokens_cached_by_source.clone(),
+        );
         registry.register(
             "vllm:external_prefix_cache_hits",
             "External prefix cache hits from KV connector cross-instance cache sharing, in terms of number of cached tokens.",
@@ -529,6 +543,7 @@ impl SchedulerMetrics {
             prefix_cache_hits,
             external_prefix_cache_queries,
             external_prefix_cache_hits,
+            prompt_tokens_cached_by_source,
             spec_decode_num_drafts,
             spec_decode_num_draft_tokens,
             spec_decode_num_accepted_tokens,
