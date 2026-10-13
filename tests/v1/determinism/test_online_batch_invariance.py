@@ -19,7 +19,13 @@ from typing import Any
 
 import openai
 import pytest
-from utils import BACKENDS, TEST_MODEL, _random_prompt, skip_if_not_cuda_alike
+from utils import (
+    BACKENDS,
+    TEST_MODEL,
+    _random_prompt,
+    skip_if_not_cuda,
+    skip_if_not_cuda_alike,
+)
 
 from tests.utils import RemoteOpenAIServer
 
