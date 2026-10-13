@@ -29,6 +29,7 @@ def _make_experts(
     intermediate_size=INTER,
     max_num_batched_tokens=3000,
     swiglu_limit=None,
+    fuse_shared_expert=False,
 ):
     monkeypatch.setattr(
         mega_moe_module,
@@ -47,6 +48,7 @@ def _make_experts(
         hidden_size=HIDDEN,
         intermediate_size=intermediate_size,
         swiglu_limit=swiglu_limit,
+        fuse_shared_expert=fuse_shared_expert,
     )
 
 
@@ -106,6 +108,24 @@ def test_experts_load_into_local_slots(monkeypatch):
             assert torch.all(w13[:INTER] == 10 * expert + 1)
             assert torch.all(w13[INTER:] == 10 * expert + 2)
             assert torch.all(w2 == 10 * expert + 3)
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="Requires ROCm")
+def test_shared_expert_route_appended(monkeypatch):
+    experts = _make_experts(
+        monkeypatch, ep_rank=3, ep_size=8, num_experts=384, fuse_shared_expert=True
+    )
+    ids = torch.randint(0, 384, (37, 2), device="cuda", dtype=torch.int32)
+    ids[::5, 1] = -1
+    weights = torch.rand(37, 2, device="cuda")
+    out_weights, out_ids = experts.append_shared_expert(weights, ids)
+
+    shared = torch.full((37, 1), 3 * 49 + 48, device="cuda", dtype=torch.int32)
+    expected_ids = torch.cat([torch.where(ids >= 0, ids + ids // 48, ids), shared], 1)
+    torch.testing.assert_close(out_ids, expected_ids)
+    torch.testing.assert_close(
+        out_weights, torch.cat([weights, torch.ones(37, 1, device="cuda")], 1)
+    )
 
 
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="Requires ROCm")
