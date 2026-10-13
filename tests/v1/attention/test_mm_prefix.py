@@ -673,6 +673,58 @@ def test_composite_routes_queries_that_need_image_masking(
     assert requires_mm_prefix(common, unclamped_window=True) is unclamped_expected
 
 
+@pytest.mark.skip_global_cleanup
+def test_composite_backend_preserves_kv_cache_zeroing_requirement():
+    from vllm.v1.attention.backend import AttentionBackend
+    from vllm.v1.attention.backends.composite import (
+        MMPrefixAttentionRouting,
+        create_composite_attention_backend,
+    )
+    from vllm.v1.kv_cache_interface import FullAttentionSpec
+
+    class Builder:
+        requires_block_table_width = False
+
+    class DefaultBackend(AttentionBackend):
+        forward_includes_kv_cache_update = False
+
+        @staticmethod
+        def get_name():
+            return "DEFAULT"
+
+        @staticmethod
+        def get_impl_cls():
+            return None
+
+        @staticmethod
+        def get_builder_cls():
+            return Builder
+
+    class ZeroingBackend(DefaultBackend):
+        requires_kv_cache_zeroing = True
+
+        @staticmethod
+        def get_name():
+            return "ZEROING"
+
+    backend = create_composite_attention_backend(
+        DefaultBackend,
+        ZeroingBackend,
+        name="ZeroingCompositeBackend",
+        backend_name="ZEROING_COMPOSITE",
+        module=__name__,
+        routing_policy=MMPrefixAttentionRouting,
+    )
+    spec = FullAttentionSpec(
+        block_size=16,
+        num_kv_heads=1,
+        head_size=64,
+        dtype=torch.bfloat16,
+    )
+
+    assert backend.customize_spec(spec).requires_kv_cache_zeroing
+
+
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA attention kernels")
 @pytest.mark.parametrize("head_size", [256, 512])
 @pytest.mark.parametrize(

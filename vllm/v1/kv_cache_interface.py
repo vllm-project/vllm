@@ -516,6 +516,8 @@ class AttentionSpec(KVCacheSpec):
     num_kv_heads: int
     head_size: int
     dtype: torch.dtype
+    requires_kv_cache_zeroing: bool = field(default=False, compare=False)
+    """Whether the selected backend requires clean pages before cache reuse."""
     head_size_v: int = None  # type: ignore[assignment]
     kv_quant_mode: KVQuantMode = KVQuantMode.NONE
     page_size_padded: int | None = None
@@ -534,6 +536,19 @@ class AttentionSpec(KVCacheSpec):
         super().__post_init__()
         if self.head_size_v is None:
             object.__setattr__(self, "head_size_v", self.head_size)
+
+    @classmethod
+    def merge(cls, specs: list[Self]) -> Self:
+        if not all(spec == specs[0] for spec in specs[1:]):
+            raise AssertionError(
+                "All layers in the same KV cache group must be the same."
+            )
+        return replace(
+            specs[0],
+            requires_kv_cache_zeroing=any(
+                spec.requires_kv_cache_zeroing for spec in specs
+            ),
+        )
 
     @property
     def num_heads(self) -> int:
@@ -652,6 +667,9 @@ class FullAttentionSpec(AttentionSpec):
             num_head_slots=specs[0].num_head_slots,
             state_content_bytes=specs[0].state_content_bytes,
             tokens_per_state=specs[0].tokens_per_state,
+            requires_kv_cache_zeroing=any(
+                spec.requires_kv_cache_zeroing for spec in specs
+            ),
             sliding_window=cls.merge_window_sizes(sliding_window),
             attention_chunk_size=cls.merge_window_sizes(attention_chunk_size),
             # If any layer in the group is non-causal, treat the group as
@@ -660,6 +678,8 @@ class FullAttentionSpec(AttentionSpec):
         )
         for spec in specs:
             for f in fields(AttentionSpec):
+                if f.name == "requires_kv_cache_zeroing":
+                    continue
                 assert getattr(spec, f.name) == getattr(merged_spec, f.name), (
                     "All attention layers in the same KV cache group must have "
                     "the same attention spec."
@@ -736,6 +756,9 @@ class MLAAttentionSpec(FullAttentionSpec):
             num_head_slots=specs[0].num_head_slots,
             state_content_bytes=specs[0].state_content_bytes,
             cache_dtype_str=cache_dtype_str_set.pop(),
+            requires_kv_cache_zeroing=any(
+                spec.requires_kv_cache_zeroing for spec in specs
+            ),
             tokens_per_state=tokens_per_state_set.pop(),
             model_version=model_version_set.pop(),
             cache_role=cache_role_set.pop(),
@@ -747,6 +770,8 @@ class MLAAttentionSpec(FullAttentionSpec):
         )
         for spec in specs:
             for f in fields(AttentionSpec):
+                if f.name == "requires_kv_cache_zeroing":
+                    continue
                 assert getattr(spec, f.name) == getattr(merged_spec, f.name), (
                     "All attention layers in the same KV cache group must have "
                     "the same attention spec."
@@ -799,6 +824,7 @@ class RSWASpec(FullAttentionSpec):
             num_head_slots=base.num_head_slots,
             state_content_bytes=base.state_content_bytes,
             tokens_per_state=base.tokens_per_state,
+            requires_kv_cache_zeroing=base.requires_kv_cache_zeroing,
             sliding_window=base.sliding_window,
             attention_chunk_size=base.attention_chunk_size,
             non_causal=base.non_causal,
@@ -1012,6 +1038,9 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
             page_size_padded=specs[0].page_size_padded,
             num_head_slots=specs[0].num_head_slots,
             state_content_bytes=specs[0].state_content_bytes,
+            requires_kv_cache_zeroing=any(
+                spec.requires_kv_cache_zeroing for spec in specs
+            ),
             sliding_window=sliding_window_set.pop(),
             extra_retained_tokens=extra_retained_set.pop(),
             cache_dtype_str=cache_dtype_str_set.pop(),
@@ -1202,12 +1231,17 @@ class SinkFullAttentionSpec(FullAttentionSpec):
             page_size_padded=specs[0].page_size_padded,
             num_head_slots=specs[0].num_head_slots,
             state_content_bytes=specs[0].state_content_bytes,
+            requires_kv_cache_zeroing=any(
+                spec.requires_kv_cache_zeroing for spec in specs
+            ),
             sliding_window=cls.merge_window_sizes(sliding_window),
             attention_chunk_size=cls.merge_window_sizes(attention_chunk_size),
             non_causal=any(spec.non_causal for spec in specs),
         )
         for spec in specs:
             for f in fields(AttentionSpec):
+                if f.name == "requires_kv_cache_zeroing":
+                    continue
                 assert getattr(spec, f.name) == getattr(merged_spec, f.name), (
                     "All attention layers in the same KV cache group must have "
                     "the same attention spec."
@@ -1569,6 +1603,14 @@ class KVCacheConfig:
         )
 
     @property
+    def has_attention_layers_requiring_zeroing(self) -> bool:
+        return any(
+            isinstance(spec, AttentionSpec) and spec.requires_kv_cache_zeroing
+            for group in self.kv_cache_groups
+            for spec in iter_layer_specs(group.kv_cache_spec)
+        )
+
+    @property
     def has_mixed_precision_kv_cache(self) -> bool:
         """Whether device attention caches use more than one precision."""
         kv_cache_precisions: set[tuple[torch.dtype, KVQuantMode]] = set()
@@ -1587,8 +1629,13 @@ class KVCacheConfig:
         """Whether newly allocated KV cache blocks must be zeroed before use.
 
         Required for Mamba layers, whose state is read before it is fully written
-        (#35219), and for mixed-precision caches, where a block reused across
-        groups can be reinterpreted under a different precision and decode stale
-        bytes to NaN/Inf. Uniform-precision caches skip zeroing.
+        (#35219), attention backends whose kernels can consume non-finite values
+        from an unwritten page suffix, and mixed-precision caches, where a block
+        reused across groups can be reinterpreted under a different precision and
+        decode stale bytes to NaN/Inf.
         """
-        return self.has_mamba_layers or self.has_mixed_precision_kv_cache
+        return (
+            self.has_mamba_layers
+            or self.has_attention_layers_requiring_zeroing
+            or self.has_mixed_precision_kv_cache
+        )

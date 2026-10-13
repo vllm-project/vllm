@@ -359,6 +359,10 @@ def create_composite_attention_backend(
 
     class CompositeAttentionBackend(AttentionBackend):
         forward_includes_kv_cache_update = False
+        requires_kv_cache_zeroing = (
+            general_backend.requires_kv_cache_zeroing
+            or causal_backend.requires_kv_cache_zeroing
+        )
         general_backend_cls = general_backend
         causal_backend_cls = causal_backend
 
@@ -494,9 +498,10 @@ def create_composite_attention_backend(
         @classmethod
         def customize_spec(cls, spec):
             general_spec = general_backend.customize_spec(spec)
-            if general_spec != causal_backend.customize_spec(spec):
+            causal_spec = causal_backend.customize_spec(spec)
+            if general_spec != causal_spec:
                 raise ValueError("Composite backends require the same KV cache spec")
-            return general_spec
+            return super().customize_spec(general_spec)
 
         @classmethod
         def supported_kv_cache_layouts(cls):

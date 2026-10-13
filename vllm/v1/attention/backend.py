@@ -65,6 +65,8 @@ class AttentionBackend(ABC):
         "float16",
         "bfloat16",
     ]
+    requires_kv_cache_zeroing: ClassVar[bool] = False
+    """Whether recycled KV cache blocks must be zeroed before reuse."""
 
     # Does attention's forward() include kv cache update?
     forward_includes_kv_cache_update: bool = True
@@ -146,7 +148,9 @@ class AttentionBackend(ABC):
 
         (see: https://github.com/vllm-project/vllm/issues/42449)
         """
-        return spec
+        if not cls.requires_kv_cache_zeroing:
+            return spec
+        return replace(spec, requires_kv_cache_zeroing=True)
 
     @classmethod
     def get_preferred_block_size(cls, default_block_size: int) -> int:
