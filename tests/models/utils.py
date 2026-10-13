@@ -609,17 +609,3 @@ def dummy_hf_overrides(
         )
 
     return hf_config
-
-
-def check_transformers_version(
-    model: str,
-    min_transformers_version: str | None = None,
-    max_transformers_version: str | None = None,
-):
-    from .registry import _HfExamplesInfo
-
-    return _HfExamplesInfo(
-        model,
-        min_transformers_version=min_transformers_version,
-        max_transformers_version=max_transformers_version,
-    ).check_transformers_version(on_fail="skip")
