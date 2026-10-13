@@ -22,7 +22,9 @@ from vllm.model_executor.layers.mamba.checkpoint import (
 )
 from vllm.model_executor.layers.mamba.gdn.base import GatedDeltaNetAttention
 from vllm.model_executor.layers.mamba.kda_checkpoint import (
+    SPLIT_KDA_CHECKPOINT_ALIGNMENT,
     FlashKDAPrefillCheckpointExporter,
+    chunk_kda_with_checkpoints,
     kda_prefill_checkpoint_alignment,
 )
 from vllm.model_executor.layers.mamba.mamba_utils import (
@@ -169,6 +171,20 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         spec = super().get_kv_cache_spec(vllm_config)
         assert isinstance(spec, MambaSpec)
         alignment = kda_prefill_checkpoint_alignment(self.kda_prefill_backend)
+        cache_config = vllm_config.cache_config
+        if (
+            alignment is None
+            and self.kda_prefill_backend == "triton"
+            # The Triton chunk kernel only returns final states, so the
+            # export splits checkpointed rows and reruns their tails inside
+            # one forward. It runs in the eager prefill branch, which
+            # spec-decode batches skip, and tails shorter than the prefix
+            # match unit cannot be reused.
+            and cache_config.mamba_cache_mode == "align"
+            and vllm_config.speculative_config is None
+            and cache_config.prefix_match_unit in (None, spec.block_size)
+        ):
+            alignment = SPLIT_KDA_CHECKPOINT_ALIGNMENT
         return replace(
             spec,
             num_prefill_checkpoint_blocks=int(alignment is not None),
@@ -378,6 +394,9 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
                     vllm_config.model_config.dtype,
                 ),
             )
+        # Both prefill backends export checkpoints through the same exporter;
+        # the Triton backend does it by splitting rows at each checkpoint.
+        if self.kda_prefill_backend in ("flashkda", "triton"):
             self._checkpoint_exporter = FlashKDAPrefillCheckpointExporter(
                 state_len=self.conv_size - 1
             )
@@ -702,6 +721,8 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             initial_state = gather_initial_states(
                 recurrent_state, non_spec_state_indices_tensor, has_initial_state
             )
+            checkpoint = attn_metadata_narrowed.checkpoint
+            checkpoint_split = attn_metadata_narrowed.checkpoint_split
             if self.kda_prefill_backend == "flashkda":
                 # Non-spec step: write straight into the layer output buffer
                 # (dense token order, no merge copy). Step with spec-decode
@@ -716,10 +737,42 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
                     initial_state=initial_state,
                     cu_seqlens=non_spec_query_start_loc,
                     out=ns_out,
-                    checkpoint=attn_metadata_narrowed.checkpoint,
+                    checkpoint=checkpoint,
                     raw_qkv=raw_qkv_ns,
                     conv_state=conv_state,
                     recurrent_state=recurrent_state,
+                )
+            elif checkpoint_split is not None:
+                assert checkpoint is not None
+                assert self._checkpoint_exporter is not None
+                (
+                    core_attn_out_non_spec,
+                    last_recurrent_state,
+                    checkpoint_state,
+                ) = chunk_kda_with_checkpoints(
+                    chunk_kda_with_fused_gate,
+                    checkpoint_split,
+                    q=_rearr(q_ns),
+                    k=_rearr(k_ns),
+                    v=_rearr(v_ns),
+                    raw_g=g1_ns,
+                    # Chunk path wants the pre-sigmoided fp32 beta (its
+                    # kernels don't sigmoid); beta_ns is raw bf16 from forward.
+                    beta=_cast_sigmoid(beta_ns.squeeze(0)).unsqueeze(0),
+                    initial_state=initial_state,
+                    A_log=self.A_log,
+                    g_bias=self.dt_bias,
+                    use_qk_l2norm_in_kernel=True,
+                    safe_gate=safe_gate,
+                    lower_bound=lower_bound,
+                )
+                self._checkpoint_exporter.export(
+                    checkpoint,
+                    raw_qkv=raw_qkv_ns,
+                    conv_state=conv_state,
+                    recurrent_checkpoint=checkpoint_state[checkpoint_split.rows],
+                    recurrent_state=recurrent_state,
+                    cu_seqlens=non_spec_query_start_loc,
                 )
             else:
                 (
