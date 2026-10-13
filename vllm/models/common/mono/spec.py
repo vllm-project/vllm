@@ -98,7 +98,7 @@ class LayerKernel(Protocol):
         ...
 
     def health(self) -> torch.Tensor:
-        """This rank's error words, in the ``abi`` layout."""
+        """This rank's error words: any set word fails the step."""
         ...
 
     def warmup_keys(self) -> list[Any]:

@@ -7,7 +7,7 @@ every rank sees alike: the batch's width and the attention metadata, never
 rank-local state and never a collective. Under a FULL CUDA graph the decision
 is baked in at capture, so it is a function of the captured size: FULL graphs
 serve uniform decode batches and every width is a capture size
-(``guards.set_capture_sizes``), so no replay pads a request's rows. PIECEWISE
+(``guards``), so no replay pads a request's rows. PIECEWISE
 steps run vLLM's layers.
 """
 
@@ -21,7 +21,7 @@ from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.warmup.jit_warmup import VllmJitKernel
 from vllm.models.common.mono import failstop
-from vllm.models.common.mono.guards import agree, refuse_model
+from vllm.models.common.mono.guards import _agree_across_ranks, _refuse_model
 from vllm.models.common.mono.peer import tp_group
 from vllm.models.common.mono.spec import (
     LayerKernel,
@@ -64,8 +64,8 @@ class Mono:
     def __init__(self, spec: MonoSpec, model, vllm_config: "VllmConfig"):
         rank, _, cpu_group = tp_group()
         self.spec = spec
-        agree(
-            lambda: refuse_model(spec, model),
+        _agree_across_ranks(
+            lambda: _refuse_model(spec, model),
             cpu_group,
             f"MonoKernel {spec.name} refused for the loaded model",
         )

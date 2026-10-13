@@ -11,7 +11,7 @@ import torch
 from tests.models.common.mono import reference
 from tests.models.common.mono.kit import MonoConformance, forward
 from vllm.config.compilation import CUDAGraphMode
-from vllm.models.common.mono.guards import enabled, select
+from vllm.models.common.mono.guards import _enabled, _select_spec
 from vllm.models.common.mono.layer import attach, forward_layer
 from vllm.models.common.mono.spec import MonoUnsupported
 
@@ -42,19 +42,19 @@ class TestReferenceSpec(MonoConformance):
 def test_switch_off_means_no_attach():
     config = reference.make_config()
     config.kernel_config.monokernel = False
-    assert not enabled(config)
+    assert not _enabled(config)
     assert attach(reference.make_model(config), config, SPECS_PATH) is None
 
 
 def test_the_first_servable_variant_wins():
     config = reference.make_config()
     config.scheduler_config.max_num_seqs = 4
-    spec, refusals = select(reference.MONO_SPECS, config)
+    spec, refusals = _select_spec(reference.MONO_SPECS, config)
     assert spec is reference.REFERENCE
     assert refusals["reference-wide"] == ["needs max_num_seqs >= 8"]
 
     config.scheduler_config.max_num_seqs = 8
-    spec, refusals = select(reference.MONO_SPECS, config)
+    spec, refusals = _select_spec(reference.MONO_SPECS, config)
     assert spec is reference.REFERENCE_WIDE
     assert refusals == {}
 

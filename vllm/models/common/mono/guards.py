@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Refusals. ``configure`` runs once from core config post-init, before load:
-it imports only the model's spec module, picks the variant this config can
-serve, adds its widths to the CUDA graph capture sizes and raises with every
-reason the config is refused. ``agree`` runs a later refusal stage (after load)
-on every TP rank and agrees on the verdict before anything collective follows.
+"""Refusals. ``configure``, the only name a model calls, runs once from core
+config post-init, before load: it imports only the model's spec module, picks
+the variant this config can serve, adds its widths to the CUDA graph capture
+sizes and raises with every reason the config is refused. The rest is the
+library's own and stays private to this package: ``_agree_across_ranks`` runs a
+later refusal stage (after load) on every TP rank and agrees on the verdict
+before anything collective follows.
 """
 
 import importlib
@@ -29,12 +31,12 @@ _FULL_MODES = (
 )
 
 
-def enabled(vllm_config: "VllmConfig") -> bool:
+def _enabled(vllm_config: "VllmConfig") -> bool:
     """Whether ``--monokernel`` asked for the model's MonoKernels."""
     return bool(vllm_config.kernel_config.monokernel)
 
 
-def load_specs(path: str) -> tuple[MonoSpec, ...]:
+def _load_specs(path: str) -> tuple[MonoSpec, ...]:
     """``"package.module:NAME"`` -> the spec variants, importing only that
     module. ``NAME`` is a ``MonoSpec`` or a tuple of them, in the order they
     are preferred."""
@@ -43,7 +45,7 @@ def load_specs(path: str) -> tuple[MonoSpec, ...]:
     return (specs,) if isinstance(specs, MonoSpec) else tuple(specs)
 
 
-def features_in_use(vllm_config: "VllmConfig") -> set[Feature]:
+def _features_in_use(vllm_config: "VllmConfig") -> set[Feature]:
     """The deployment's features a spec has to list in ``supports``."""
     pc = vllm_config.parallel_config
     oc = vllm_config.offload_config
@@ -69,12 +71,12 @@ def features_in_use(vllm_config: "VllmConfig") -> set[Feature]:
     return {f for f, used in on.items() if used}
 
 
-def refuse_config(spec: MonoSpec, vllm_config: "VllmConfig") -> list[str]:
+def _refuse_config(spec: MonoSpec, vllm_config: "VllmConfig") -> list[str]:
     """Every reason this config cannot run ``spec``: default-deny on features,
     then the runner and the graph mode, then the spec's own."""
     reasons = [
         f"{f.value} is not supported"
-        for f in sorted(features_in_use(vllm_config) - spec.supports)
+        for f in sorted(_features_in_use(vllm_config) - spec.supports)
     ]
     if not vllm_config.use_v2_model_runner:
         reasons.append("needs Model Runner V2")
@@ -84,7 +86,7 @@ def refuse_config(spec: MonoSpec, vllm_config: "VllmConfig") -> list[str]:
     return reasons + list(spec.refuse_config(vllm_config))
 
 
-def refuse_model(spec: MonoSpec, model) -> list[str]:
+def _refuse_model(spec: MonoSpec, model) -> list[str]:
     """Every reason the loaded model cannot run ``spec``. A MonoKernel replaces
     the layer loop, which a traced graph has already inlined, so a model
     carrying ``@support_torch_compile`` is refused."""
@@ -99,7 +101,7 @@ def refuse_model(spec: MonoSpec, model) -> list[str]:
     return reasons + list(spec.refuse_model(model))
 
 
-def select(
+def _select_spec(
     specs: Sequence[MonoSpec], vllm_config: "VllmConfig"
 ) -> tuple[MonoSpec | None, dict[str, list[str]]]:
     """The first variant this config can serve, and every variant's refusals.
@@ -111,21 +113,21 @@ def select(
     """
     refusals: dict[str, list[str]] = {}
     for spec in specs:
-        reasons = refuse_config(spec, vllm_config)
+        reasons = _refuse_config(spec, vllm_config)
         if not reasons:
             return spec, refusals
         refusals[spec.name] = reasons
     return None, refusals
 
 
-def refused(refusals: dict[str, list[str]]) -> str:
+def _refusal_message(refusals: dict[str, list[str]]) -> str:
     """Every variant's reasons as one message."""
     return "; ".join(
         f"{name}: {', '.join(reasons)}" for name, reasons in refusals.items()
     )
 
 
-def set_capture_sizes(spec: MonoSpec, vllm_config: "VllmConfig") -> None:
+def _set_capture_sizes(spec: MonoSpec, vllm_config: "VllmConfig") -> None:
     """The capture sizes up to the largest width become exactly the widths, so
     a replay never pads a request's rows; larger sizes stay as configured (and
     capture vLLM's path)."""
@@ -150,12 +152,12 @@ def configure(vllm_config: "VllmConfig", specs_path: str) -> None:
         MonoUnsupported: Every variant refused this config.
 
     """
-    if not enabled(vllm_config):
+    if not _enabled(vllm_config):
         return
-    spec, refusals = select(load_specs(specs_path), vllm_config)
+    spec, refusals = _select_spec(_load_specs(specs_path), vllm_config)
     if spec is None:
-        raise MonoUnsupported("MonoKernel refused: " + refused(refusals))
-    set_capture_sizes(spec, vllm_config)
+        raise MonoUnsupported("MonoKernel refused: " + _refusal_message(refusals))
+    _set_capture_sizes(spec, vllm_config)
     if vllm_config.compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
         logger.warning(
             "MonoKernel %s under eager mode: for debugging only, serve with FULL "
@@ -164,7 +166,7 @@ def configure(vllm_config: "VllmConfig", specs_path: str) -> None:
         )
 
 
-def agree(refuse: Callable[[], list[str]], group, what: str) -> None:
+def _agree_across_ranks(refuse: Callable[[], list[str]], group, what: str) -> None:
     """``refuse``'s reasons on this rank, then every TP rank's verdict agreed: a
     rank that refused alone would leave the others spinning in-kernel.
 

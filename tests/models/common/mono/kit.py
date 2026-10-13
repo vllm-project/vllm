@@ -30,11 +30,11 @@ from vllm.forward_context import ForwardContext, override_forward_context
 from vllm.model_executor.warmup.jit_warmup import JitWarmupRegistry
 from vllm.models.common.mono import failstop
 from vllm.models.common.mono.guards import (
+    _load_specs,
+    _refuse_config,
+    _select_spec,
+    _set_capture_sizes,
     configure,
-    load_specs,
-    refuse_config,
-    select,
-    set_capture_sizes,
 )
 from vllm.models.common.mono.layer import attach, forward_layer
 from vllm.models.common.mono.spec import Feature, MonoUnsupported
@@ -115,7 +115,7 @@ class MonoConformance:
         failstop.STEPS.clear()
 
     def spec(self, config):
-        spec, refusals = select(load_specs(self.specs_path), config)
+        spec, refusals = _select_spec(_load_specs(self.specs_path), config)
         assert spec is not None, refusals
         return spec
 
@@ -123,8 +123,8 @@ class MonoConformance:
         config.lora_config = object()
         config.speculative_config = object()
         config.use_v2_model_runner = False
-        for spec in load_specs(self.specs_path):
-            reasons = refuse_config(spec, config)
+        for spec in _load_specs(self.specs_path):
+            reasons = _refuse_config(spec, config)
             assert sum("Model Runner V2" in r for r in reasons) == 1, reasons
             for feature in (Feature.LORA, Feature.SPECULATIVE_DECODING):
                 want = 0 if feature in spec.supports else 1
@@ -134,7 +134,7 @@ class MonoConformance:
         config.use_v2_model_runner = False
         with pytest.raises(MonoUnsupported) as excinfo:
             configure(config, self.specs_path)
-        for spec in load_specs(self.specs_path):
+        for spec in _load_specs(self.specs_path):
             assert spec.name in str(excinfo.value)
 
     def test_spec_module_imports_no_kernel_backend(self):
@@ -159,7 +159,7 @@ class MonoConformance:
         config.compilation_config.cudagraph_capture_sizes = list(
             range(1, max(widths) * 2 + 1)
         )
-        set_capture_sizes(spec, config)
+        _set_capture_sizes(spec, config)
         sizes = config.compilation_config.cudagraph_capture_sizes
         assert [s for s in sizes if s <= max(widths)] == sorted(widths)
 

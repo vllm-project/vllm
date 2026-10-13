@@ -10,7 +10,12 @@ import torch
 from vllm.config.compilation import CUDAGraphMode
 from vllm.logger import init_logger
 from vllm.models.common.mono import failstop
-from vllm.models.common.mono.guards import enabled, load_specs, refused, select
+from vllm.models.common.mono.guards import (
+    _enabled,
+    _load_specs,
+    _refusal_message,
+    _select_spec,
+)
 from vllm.models.common.mono.routing import Mono
 from vllm.models.common.mono.spec import LayerKernel, MonoUnsupported
 
@@ -41,11 +46,11 @@ def attach(model, vllm_config: "VllmConfig", specs_path: str) -> Mono | None:
 
     """
     global _ATTACHED
-    if not enabled(vllm_config):
+    if not _enabled(vllm_config):
         return None
-    spec, refusals = select(load_specs(specs_path), vllm_config)
+    spec, refusals = _select_spec(_load_specs(specs_path), vllm_config)
     if spec is None:
-        raise MonoUnsupported("MonoKernel refused: " + refused(refusals))
+        raise MonoUnsupported("MonoKernel refused: " + _refusal_message(refusals))
     mono = Mono(spec, model, vllm_config)
     if not mono.kernels:
         logger.info("MonoKernel %s: no layer takes a kernel", spec.name)

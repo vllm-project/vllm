@@ -3,7 +3,7 @@
 """Fail-stop and metrics.
 
 A MonoKernel never returns tokens from a step it did not finish: the runner
-copies the model's error words (``abi``) next to the sampled token ids, and
+copies the model's error words next to the sampled token ids, and
 ``check`` raises before that step's tokens are returned. The engine then stops
 like on any other engine death, and the deployment's restart policy recovers
 it.
