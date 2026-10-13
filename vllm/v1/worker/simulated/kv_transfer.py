@@ -2,13 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """KV connector transfers under simulated execution.
 
-A connector's scheduler side runs unmodified: the lookups, evictions and the
-load and store jobs it issues are the real ones. On the worker the data mover
-is replaced by a simulation that moves no data, and a transfer completes once
-its modeled duration has elapsed on the simulation clock:
-`SimulatedOffloadingWorker` for the `OffloadingConnector`'s CPU offloading,
-and `kv_nixl.SimulatedNixlWorker` for disaggregated prefill with the
-`NixlConnector`.
+A connector's scheduler side runs unmodified; on the worker, a simulation that
+moves no data completes each transfer after its modeled duration:
+`SimulatedOffloadingWorker` for CPU offloading, and `kv_nixl` for NIXL.
 """
 
 from collections import deque

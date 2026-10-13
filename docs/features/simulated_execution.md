@@ -1,41 +1,28 @@
 # Simulated Execution
 
-Simulated execution runs the real vLLM engine (scheduler, KV-cache manager,
+Simulated execution runs the real vLLM engine (scheduler, KV cache manager,
 prefix caching, chunked prefill, preemption, async scheduling and the OpenAI
-frontend) while replacing the model forward pass with a timing model. It
-answers questions such as "what TTFT and TPOT would this configuration give on
-that hardware" without the hardware, downloading weights or running kernels,
-and it lets scheduler and KV-cache behavior be exercised deterministically on
-a CPU-only CI node.
+frontend) but replaces the model forward pass with a timing model. It predicts
+a deployment's TTFT, TPOT and throughput without its hardware or weights, and
+exercises scheduler and KV cache behavior deterministically on CPU-only hosts.
 
 ## How it works
 
-* The model is built on the `meta` device, so vLLM's own KV-cache specs,
-  attention metadata and hybrid/sliding-window layouts are available without
-  parameters in memory.
-* The KV cache is virtual: block accounting runs through the normal path with
-  the capacity given by `--kv-cache-memory-bytes`, but no tensors are
-  allocated.
+* The model is built on the `meta` device, so KV cache specs, attention
+  metadata and hybrid layouts are vLLM's own, with no parameters in memory.
+* The KV cache is virtual: blocks are accounted as usual within
+  `--kv-cache-memory-bytes`, but no tensors are allocated.
 * Output tokens come from `SamplingParams.trace_decode_token_ids` (see
-  [trace replay](../serving/online_serving/trace_replay.md)) or, for requests
-  without a trace, from `fallback_token_id`; such requests end by
-  `max_tokens`.
-* Each step's cost comes from a *timing provider*. The provider sees a plain
-  description of the step and returns how long the device would be busy
-  (`device_s`) and, optionally, how long the host spends inside the step's
-  `execute_model`/`sample_tokens` calls (`host_s`: input preparation, kernel
-  launches, sampling). The host time holds the engine thread, as the real
-  calls do; the device time runs on a serial device queue and is paid when
-  the engine core consumes the step's output, so the engine keeps scheduling
-  the next step meanwhile, exactly as with a real GPU under async scheduling.
-  A step completes when both its device work and its host work are done. The
-  rest of the host loop (scheduling, output processing, the frontend) is the
-  real code and takes its real time.
+  [trace replay](../serving/online_serving/trace_replay.md)) or, without a
+  trace, are `fallback_token_id`; such requests end by `max_tokens`.
+* A *timing provider* prices each step: its device time (`device_s`) runs on
+  a modeled device queue, overlapping the next step's scheduling as under
+  async scheduling, and its optional host time (`host_s`, spent in
+  `execute_model` and `sample_tokens`) holds the engine thread. The rest of
+  the engine loop is the real code and takes its real time.
 
-The worker runs on CUDA-alike hosts as well as the CPU platform. On a CUDA host
-it binds a device for the runner's small request-state buffers and uses the
-stock Triton input-preparation kernels; on the CPU platform the same kernels
-need Triton's CPU backend (see [Running without a GPU](#running-without-a-gpu)).
+Simulation runs on CUDA-alike hosts and on the CPU platform (see
+[Running without a GPU](#running-without-a-gpu)).
 
 ## Usage
 
@@ -67,71 +54,60 @@ out = llm.generate(
 )
 ```
 
-`--kv-cache-memory-bytes` should be the KV budget of the deployment being
-modeled (read it off the real server's startup log); prefix-cache hit rates
-and preemption behavior depend strongly on it.
+Set `--kv-cache-memory-bytes` to the KV budget of the modeled deployment, as
+its startup log reports it: prefix-cache hit rates and preemption depend on it.
 
 ### Timing providers
 
 | `timing` | behavior | `timing_args` |
 | --- | --- | --- |
-| `zero` | every step takes no device time (default; KV/scheduler-only simulation) | none |
+| `zero` | steps take no device time (default) | none |
 | `linear` | `fixed_us + prefill_us_per_token * P + decode_us_per_req * D + decode_us_per_kv_token * K` | those four, plus `host_us` or `host_fit_log` |
-| `table` | nearest-neighbour interpolation over recorded steps | `path`, `k` |
-| `replay` | exact match on the step's batch composition, nearest-neighbour fallback, reports the miss rate | `path`, `fallback` (`knn`/`zero`), `k`, `miss_fallback_s` |
-| `module.Class` | any class implementing `vllm.v1.worker.simulated.timing.TimingProvider` | passed as keyword arguments |
+| `table` | nearest-neighbor interpolation over a step log | `path`, `k` |
+| `replay` | exact match on the step's batch composition, else `fallback` | `path`, `fallback` (`knn`/`zero`), `k`, `miss_fallback_s` |
+| `module.Class` | a `vllm.v1.worker.simulated.timing.TimingProvider` | its keyword arguments |
 
-A provider receives a `StepDescriptor`: per request the tokens scheduled this
-step, the KV length before it, prompt length, prefix-cache hits at admission,
-draft tokens and whether it is still prefilling; plus batch totals, the number
-of common-prefix blocks and the parallel configuration. It returns a
-`StepCost` with `device_s` and an optional `host_s`.
+A provider receives a `StepDescriptor`: per request, the tokens scheduled in
+the step, the KV length before it, the prompt length, prefix-cache hits at
+admission, draft tokens and whether it is prefilling; plus batch totals,
+common-prefix blocks and the parallel configuration. It returns a `StepCost`.
+
+`table` and `replay` read a recorded step log (see below). A `table` can also
+be written by hand, as JSONL records of
+`{"num_reqs", "num_tokens", "sum_past_kv", "device_s"[, "host_s"]}`: the
+step's requests and scheduled tokens, and the sum of their KV lengths before
+the step.
 
 `HostTimeModel` prices host time as `fixed_us + per_req_us * R +
-per_prefill_token_us * P` and fits it to a recorded step log
-(`HostTimeModel.from_log`, or `host_fit_log` for the `linear` provider), for
-providers that model only the device. Under async scheduling host time shows
-only where it exceeds the device's, mostly in prefill steps of small models,
-so it matters most for TTFT. Fit to a recording of the same deployment shape
-(parallelism, speculative decoding) whose prefills resemble the simulated
-workload's. The fit keeps terms non-negative and leaves a term the recording
-cannot determine at zero: per-request time needs a varying number of requests
-per step, per-token time needs prefill steps. Record under async scheduling
-(the default); without it the measured host time includes waiting for the
-device.
+per_prefill_token_us * P`, fitted to a step log (`HostTimeModel.from_log`, or
+`host_fit_log` for `linear`), for providers that model only the device. Under
+async scheduling host time matters only where it exceeds device time, mostly
+in prefills, so it mainly affects TTFT. Fit it to a recording of the same
+parallel layout and speculative decoding setup, made under async scheduling;
+terms the recording does not determine stay zero.
 
 ### Recording a real deployment
 
-A real deployment can write the same per-step log, measured with CUDA events,
-to calibrate or validate simulated runs:
+A real deployment writes the same step log, timed with CUDA events:
 
 ```bash
 vllm serve Qwen/Qwen3-0.6B \
   --simulation-config '{"record_step_timing": true, "log_path": "/tmp/real_steps.jsonl"}'
 ```
 
-Feeding that file to the `replay` provider (`"timing": "replay",
-"timing_args": {"path": "/tmp/real_steps.jsonl"}`) reproduces the recorded
-step times whenever the simulated scheduler forms the same batches; the
-reported miss rate measures how far the two runs diverged. The `table`
-provider interpolates the same records for workloads the recording did not
-cover.
-
-Both providers return the recorded device and host times. Recording both
-matters: large prefills are typically host-bound (their kernel launches and
-sampling take longer on the CPU than the kernels take on the GPU), and pricing
-them by device time alone underestimates TTFT. The recorded host time spans
-the engine thread from `execute_model` to the end of `sample_tokens`, so it
-also contains whatever the engine core does between the two calls (e.g. the
-structured-output grammar bitmask) and any wait on a full kernel-launch queue;
-replaying it under a different scheduler configuration attributes that time
-to the step regardless.
+`replay` with this log reproduces the recorded step times wherever the
+simulated scheduler forms the same batches; `table` interpolates them for
+other workloads. Both return the recorded device and host times. Host time
+matters: large prefills are often host-bound, and pricing them by device time
+alone underestimates TTFT. The recorded host time spans the engine thread
+from `execute_model` to the end of `sample_tokens`, so it includes engine core
+work between the two calls, such as structured-output bitmasks.
 
 ### Offline runs in simulated time
 
-`vllm.v1.worker.simulated.offline` drives an in-process engine with a timed
-arrival schedule (of requests and multi-turn sessions) and timestamps every
-output token, so a workload can be run without waiting for it:
+`vllm.v1.worker.simulated.offline` drives an in-process engine with timed
+arrivals of requests and multi-turn sessions, and timestamps every output
+token:
 
 ```python
 from vllm.engine.arg_utils import EngineArgs
@@ -154,44 +130,34 @@ result = simulate(
     ),
     requests,
 )
-print(result.summary())  # TTFT/TPOT/ITL/E2E percentiles, as vllm bench serve
+print(result.summary())  # as vllm bench serve reports them
 ```
 
 `simulation_config.clock` selects the time base:
 
-| `clock` | waits (device time, idle gaps between arrivals) | engine host loop (scheduling, output processing) | use |
+| `clock` | waits (device time, idle gaps) | engine host loop | use |
 | --- | --- | --- | --- |
-| `real` (default) | slept | real time | serving; the wall-clock baseline |
-| `fast_forward` | skipped | real time | sweeps: same latencies as `real` in a fraction of the time |
-| `virtual` | skipped | free | deterministic runs (CI, scheduler research); underestimates host-bound workloads |
+| `real` (default) | slept | real time | serving |
+| `fast_forward` | skipped | real time | sweeps: the latencies of `real`, faster |
+| `virtual` | skipped | free | deterministic runs; underestimates host-bound workloads |
 
-Under every clock a step's predicted `host_s` holds the engine thread. The
-non-real clocks need an engine built by `make_engine()` (which `simulate()`
-calls), so that the engine core runs in the driver's process. A run takes as long as the engine's host
-work, roughly 1 ms per step, so the speedup over real time is the step time
-of the modeled deployment divided by that. `make_engine()` and `run()` also drive a
-real (non-simulated) engine on the real clock, which is how the
-reference for a comparison is produced.
-[`vllm bench sweep simulate`](../benchmarking/sweeps.md#simulated-sweep) runs
-the combinations of a `vllm bench sweep serve` experiment this way, optionally
-searching each for the highest request rate that meets latency targets.
+Predicted `host_s` holds the engine thread under every clock. The non-real
+clocks need an engine from `make_engine()` (which `simulate()` uses), and a
+run then takes as long as the engine's host work. `make_engine()` and `run()`
+also drive a real engine on the real clock, to produce a reference run.
+[`vllm bench sweep simulate`](../benchmarking/sweeps.md#simulated-sweep) runs a
+`vllm bench sweep serve` experiment this way.
 
-The engine core is all that runs, so a server's latency outside it (HTTP, API
-server, IPC) is missing from TTFT and end-to-end latency. Passing it as
-`frontend_latency_s` to `run()` or `simulate()` delays each request's
-arrival at the engine by that much.
+Only the engine core runs, so `frontend_latency_s` (of `run()` and
+`simulate()`) adds the server's latency outside it (HTTP, API server, IPC) to
+each request's arrival.
 
 A `TimedSession` is a multi-turn conversation: each `Turn` appends its tokens
 to the previous turn's prompt and output, and arrives `think_time` seconds
-after the previous turn finished. Later turns therefore reuse the
-conversation's KV cache, from the device's prefix cache or, with KV
-offloading, the CPU cache, and how long a session waits depends on how fast
-the engine served its earlier turns. `run()` and `simulate()` accept sessions
-alongside single requests and report one timing per turn, flattened in input
-order. Prompts are token ids concatenated exactly, so chat-template tokens
-(end-of-turn markers, role headers) belong in each turn's `new_token_ids`. A
-turn whose prompt exceeds `max_model_len` aborts the run, so size it for a
-session's whole conversation.
+after the previous turn finished, so later turns reuse the conversation's KV
+cache. Results have one timing per turn, in input order. Prompts are
+concatenated token ids, so chat-template tokens belong in each turn's
+`new_token_ids`, and `max_model_len` must fit a whole conversation.
 
 ```python
 from vllm.v1.worker.simulated.offline import TimedSession, Turn
@@ -206,18 +172,14 @@ session = TimedSession(
 
 ### Speculative decoding
 
-With a `speculative_config`, the scheduler schedules draft tokens as usual and
-the simulated runner decides how many are accepted per request and step. The
-draft model is built on the meta device like the target (its KV cache counts
-against the budget), and no draft is ever proposed: the runner reports
-placeholder drafts, as the real runner does under async scheduling.
+The scheduler schedules draft tokens as usual, and the simulated runner
+decides how many are accepted. The draft model is built on the meta device
+too, and its KV cache counts against the budget.
 
 `spec_acceptance_rates` gives the probability that the draft at each position
-is accepted given that all earlier ones were; the last value applies to later
-positions. A timing provider that sets `StepCost.num_accepted` overrides it.
-A step log recorded with speculative decoding stores the accepted count of
-every request, and passing its path instead of a list estimates the rates from
-it:
+is accepted given that all earlier ones were; the last value repeats. A step
+log recorded with speculative decoding holds every request's accepted count,
+and its path estimates the rates instead:
 
 ```python
 simulation_config={
@@ -228,63 +190,43 @@ simulation_config={
 }
 ```
 
-Acceptance is sampled independently per step, so the spread of per-request
-acceptance (and with it P99 TPOT) is narrower than on the real deployment.
-Trace replay is not available with speculative decoding; outputs are fallback
-tokens.
+A provider's `StepCost.num_accepted` overrides the rates. Acceptance is
+sampled independently per step, so per-request acceptance, and with it P99
+TPOT, varies less than on a real deployment. Trace replay is not available
+with speculative decoding.
 
 ### Parallelism
 
-Tensor, pipeline and data parallelism run as in the real deployment: one
-simulated worker per rank, each building its shard of the model on the meta
-device, so per-rank KV-cache specs (and with them the KV capacity) are
-vLLM's own. `--kv-cache-memory-bytes` is per rank. No collective runs during a
-step; every rank derives the same timing from the same scheduler output.
+Tensor, pipeline and data parallelism run as deployed: one simulated worker
+per rank builds its shard of the model, so per-rank KV capacity is vLLM's
+own; `--kv-cache-memory-bytes` is per rank. No collective runs in a step:
+every rank derives the same timing from the same scheduler output.
 
-* **Tensor parallelism**: the ranks run in lockstep and agree on every step's
-  time.
-* **Pipeline parallelism**: no hidden states pass between stages. `device_s`
-  is the step's time through the whole pipeline and each of the balanced
-  stages is busy for an equal share, so consecutive microbatches overlap as on
-  the real pipeline. A step recorded under pipeline parallelism is timed on
-  the last stage from its arrival there, which includes the wait for the
-  earlier stages, i.e. the same through-pipeline time. The last stage's host
-  time includes receiving each step's intermediate tensors, which blocks the
-  host (about 1.2 ms per step for Qwen3-8B on H200), and for prefills the
-  wait for the earlier stages to launch theirs; under load this host time,
-  not the device, bounds the step rate. A recording of the same pipeline
-  layout captures it, so fit host time (see `HostTimeModel`) to one.
-* **Data parallelism**: dense models run independent engines; DP rank
-  i > 0 writes its step log to `<log_path>.dp<i>`. MoE models run their DP
-  ranks in lockstep (their forward passes meet in all-to-all collectives), so
-  a step's cost depends on every rank's batch. Where the real runner
-  synchronizes the ranks (every step that runs the model and every dummy
-  batch of an idle rank), the simulated ranks, and the recording ranks of a
-  real deployment, gather their step descriptors into one joint step. The
-  joint step is priced once, starts on the latest rank, and is what DP rank 0
-  logs; the other ranks write no log. Accepted draft counts are not recorded
-  for joint steps.
+* **Pipeline parallelism**: `device_s` is a step's time through the pipeline,
+  split evenly over the stages, so consecutive microbatches overlap. Steps
+  recorded under pipeline parallelism carry the same through-pipeline time.
+  The last stage's host time includes receiving intermediate tensors, which
+  can bound the step rate under load; fit host time to a recording of the
+  same layout.
+* **Data parallelism**: dense models run independent engines, and DP rank
+  `i > 0` logs to `<log_path>.dp<i>`. MoE models run their DP ranks in
+  lockstep: wherever the real runner synchronizes them, the ranks gather
+  their step descriptors into one joint step, priced once and logged by DP
+  rank 0. Joint steps do not record accepted drafts.
 
 Only the output rank (last pipeline stage, first tensor-parallel rank) writes
-the step log, for simulated and recorded runs alike. On CUDA hosts each rank
-binds its own device, as in the deployment being modeled; a simulated rank
-needs only a few MB of device memory.
+the step log. On CUDA hosts each rank binds its own device, using a few MB of
+its memory.
 
 ### KV cache offloading
 
-CPU offloading by the `OffloadingConnector` (its default CPU spec) runs as in
-the real deployment, except that no data moves. The connector's scheduler side
-is unmodified: the CPU cache's lookups and evictions, and the load and store
-jobs it issues, are the real ones, so a simulation reproduces which prompts hit
-the CPU cache and how long their requests wait for loads. On the worker, a
-simulated transfer worker replaces the copy streams: each direction is a
-serial queue, a transfer starts only once the device has finished the step
-that was running when it was submitted, and it takes `latency + bytes /
-bandwidth` on the simulation clock. Under the `virtual` and `fast_forward`
-clocks an engine with nothing to run but a transfer in flight skips ahead to
-its completion (or the next request arrival).
+CPU offloading by the `OffloadingConnector` (its CPU spec) runs with the real
+scheduler side, so the CPU cache's hits, evictions and load and store jobs are
+the real ones; a simulated worker replaces the copy streams. Each direction
+is a serial queue, a transfer starts once the device has finished the step
+running when it was submitted, and it takes `latency + bytes / bandwidth`.
 
-`kv_transfer_timing` gives the bandwidths, in 1e9 bytes/s, with optional
+`kv_transfer_timing` gives the bandwidths in 1e9 bytes/s, with optional
 latencies:
 
 ```python
@@ -301,32 +243,26 @@ simulation_config={
 },
 ```
 
-A step log recorded with offloading also holds, for every step in which
-transfers completed, their count, bytes and measured duration per direction;
-passing its path as `kv_transfer_timing` fits each direction's latency and
-bandwidth to them by least squares. The fit captures the copy kernels'
-effective throughput on that model's block layout, including any contention
-with the forward pass; the forward pass is not slowed by transfers otherwise.
-A transfer's size is its blocks' KV page size, which overstates layouts where
-the real copy moves less (padded hybrid pages, canonical-layout stores split
-across ranks); rates fitted to a recording of the same model absorb this. A
-step that waits for stores the scheduler must flush pays the wait in the
-simulation; its recorded host time includes it too, so replaying such a step
-counts the wait twice (flushes are rare: they follow preemption or reuse of a
-block still being stored).
+A step log recorded with offloading also holds the transfers completed in
+each step; its path as `kv_transfer_timing` fits each direction's latency and
+bandwidth by least squares. A transfer's size is its blocks' KV page size,
+which overstates layouts where the real copy moves less (padded hybrid pages,
+canonical-layout stores split across ranks); rates fitted to the same model
+absorb this. A step that waits for stores the scheduler flushes pays the wait,
+which its recorded host time also includes.
 
 ### Disaggregated prefill
 
-`vllm.v1.worker.simulated.disaggregated` simulates a deployment of prefill
-and decode instances connected by the `NixlConnector` (pull mode), all in one
-process and in simulated time:
+`vllm.v1.worker.simulated.disaggregated` runs prefill and decode instances
+connected by the `NixlConnector` (pull mode) in one process, in simulated
+time:
 
 ```python
 from vllm.v1.worker.simulated.disaggregated import simulate_disaggregated
 
 result = simulate_disaggregated(
     prefill_args,  # EngineArgs with simulate_forward and a timing provider
-    decode_args,   # and, as below, the served instances' scheduler limits
+    decode_args,
     requests,      # TimedRequests
     num_prefill=2,
     num_decode=1,
@@ -334,56 +270,37 @@ result = simulate_disaggregated(
 )
 ```
 
-`EngineArgs` built in Python take the generic scheduler defaults, not those
-of `vllm serve` (on an H200, a 2048-token budget instead of 8192): set
-`max_num_batched_tokens` and `max_num_seqs` as the served instances have
-them, or a simulated prefill instance batches differently from the real one.
-(`vllm bench sweep simulate` applies `vllm serve`'s defaults itself.)
+`EngineArgs` built in Python take the generic scheduler defaults rather than
+`vllm serve`'s: set `max_num_batched_tokens` and `max_num_seqs` as the served
+instances have them. (`vllm bench sweep simulate` applies `vllm serve`'s
+defaults.)
 
 The driver plays the proxy: a request goes to a prefill instance with
-`max_tokens=1`; when it finishes, the request goes to a decode instance with
-the `kv_transfer_params` it returned. Instances are picked round-robin, as by
-vLLM's example proxies, or with `routing="least_unfinished"` by fewest
-unfinished requests. The
-connector's scheduler side is the real one on both sides: the prefill
-instance holds a finished request's blocks under a lease, and the decode
-instance waits in `WAITING_FOR_REMOTE_KVS`, then recomputes the last prompt
-token. The worker side moves no data. A read takes `latency + bytes /
-bandwidth` (`kv_transfer_timing`'s load rate), reads are serial on each
-instance's link, and a completed read frees the prefill instance's blocks.
-Leases do not expire: a simulated decode instance always reads or releases
-the blocks, which is what the real one's heartbeats ensure. A decode instance recorded with the real
-`NixlConnector` logs its reads, so passing its step log as
-`kv_transfer_timing` fits the rate.
+`max_tokens=1`, then to a decode instance with the `kv_transfer_params` it
+returned. Instances are picked round-robin or, with
+`routing="least_unfinished"`, by fewest unfinished requests;
+`handoff_latency_s` is the proxy's latency between the two. The connector's
+scheduler side is the real one; its worker side moves no data. A read takes
+`latency + bytes / bandwidth` at `kv_transfer_timing`'s load rate, reads
+queue on each instance's link, and a completed read frees the prefill
+instance's blocks. Leases do not expire, since heartbeats run on the wall
+clock. Each instance has one rank and its own virtual clock; the instance
+furthest behind steps next.
 
-Posting a step's reads also holds a decode instance's engine thread, and the
-device idles meanwhile. NIXL merges a run of blocks that are consecutive on
-both instances into one descriptor per KV cache region, so the cost grows
-once a decode instance's blocks scatter. That happens after its KV cache has
-filled once, so a run with fewer requests than the cache holds never shows
-it. The simulated decode instance holds its clock for `post_us_per_read`
-per read plus `post_us_per_run` per such run. A recorded decode instance logs
-each posting and leaves it out of its step's device and host times, and
-`kv_transfer_timing` given as that log fits the two costs. Record past the
-point where the cache has filled, or the cost of scattered reads is
-extrapolated. On H200 with NIXL over `cuda_ipc`, a 2048-token Qwen3-8B read
-took 0.2 ms to post into consecutive blocks and 16 ms into scattered ones.
-The first scattered posting of a fresh decode instance took about 320 ms
-once more; that one-off is not modeled.
-
-Every instance runs on its own virtual clock; the instance furthest behind
-steps next, so the instances run concurrently in simulated time; an
-instance that only waits for transfers moves ahead to the earliest time
-anything can happen. A link reserved by an instance that is ahead in
-simulated time delays a read of an instance behind it by at most that
-difference. Each instance has one rank. `handoff_latency_s` is the proxy's
-latency from a finished prefill to the decode instance receiving the
-request; the instances' API servers are not modeled.
+Posting a step's reads holds a decode instance's engine thread. NIXL merges
+blocks consecutive on both instances into one descriptor per KV cache
+region, so posting slows once a decode instance's blocks scatter, after its
+KV cache has filled once. The simulation charges `post_us_per_read` per read
+plus `post_us_per_run` per run of consecutive blocks. A decode instance
+recorded with the real `NixlConnector` logs its reads and postings, and its
+step log as `kv_transfer_timing` fits the read rate and posting costs. Record
+until its KV cache has filled, or the cost of scattered reads is
+extrapolated.
 
 #### Served instances
 
-Simulated prefill and decode instances also run as ordinary servers, on the
-real clock, with tensor parallelism, behind any proxy or router:
+Simulated prefill and decode instances also run as servers, on the real
+clock, with tensor parallelism, behind any proxy:
 
 ```bash
 VLLM_NIXL_SIDE_CHANNEL_PORT=5600 vllm serve Qwen/Qwen3-8B --port 8100 \
@@ -397,60 +314,31 @@ VLLM_NIXL_SIDE_CHANNEL_PORT=5700 vllm serve Qwen/Qwen3-8B --port 8200 \
 ```
 
 A decode rank books its reads over ZMQ with the prefill ranks the real
-connector maps it to, at the prefill instance's side-channel address from
-the kv_transfer_params: each rank of a `kv_producer` instance listens on the
-side-channel host at port + 10000 + 1000 × rank (rank = pp_rank × tp_size +
-tp_rank), which must be free and at most 65535; two instances collide if their
-side-channel ports differ by a multiple of 1000 smaller than 1000 × their
-rank count. The two
-instances' tensor parallelism may differ, as with the real connector: with
-more decode ranks, each reads its share of one prefill rank's heads, and the
-prefill rank frees a request's blocks once all of them have; with more
-prefill ranks, each decode rank reads from as many prefill ranks (with MLA,
-one copy of the replicated latent, notifying the others). A request's reads
-run concurrently; reads of different requests queue on each rank's link.
-Neither instance may use pipeline parallelism, which the real pull
-connector does not support either, and decode context parallelism and
-hybrid (Mamba) layouts are not modeled. A read that cannot be booked (a
-prefill instance that does not answer within 10 s, or layouts the real
-connector rejects) fails its request, which the decode instance then
-prefills itself, as after a failed NIXL read; a booking lost to a prefill
-instance that stopped answering holds that request's blocks there, as
-simulated leases do not expire. As the proxy, the API servers and the HTTP path run for
-real, they add their own latency, including its variation.
-
-With different tensor parallelism on the two instances, the decode
-instance's recorded reads fit a rate per read, which is what concurrent reads
-achieve.
+connector maps it to. Each prefill rank listens on a port derived from its
+instance's side-channel port and its rank, which must be free. The two
+instances' tensor parallelism may differ as with the real connector, and a
+request's reads from several ranks run concurrently. A read that cannot be
+booked, or a layout the real connector rejects, fails its request, which the
+decode instance then prefills itself. Pipeline parallelism (unsupported by
+the real pull connector), decode context parallelism and hybrid (Mamba)
+layouts are not modeled.
 
 #### Push mode and pipeline parallelism
 
-The real pull connector supports no pipeline parallelism; its push mode
-(`NixlPushConnector`) lets a prefill instance with pipeline parallelism write
-into a decode instance without, and simulated served instances support it
-too. As with the real connector, the proxy sends a request to both
-instances at once, with the prefill instance's coordinates in the decode
-leg's kv_transfer_params (`remote_engine_id`, `remote_host`,
-`remote_port`, `tp_size`, `pp_size`, `remote_request_id`). The decode
-instance allocates the request's blocks and registers them with every
-prefill stage, from each decode rank to the prefill ranks the real connector
-pairs it with; the decode ranks listen too. Each prefill rank writes its
-stage's layers once it has both finished the request and the registration,
-split over its decode ranks as the real push connector maps them, and
-notifies them; a decode rank is done after one write per prefill stage and
-source rank. A prefill rank frees the blocks when its writes end, or when
-the lease of a request that was never registered (a full prefix hit on the
-decode instance) expires; the decode instance forwards its scheduler's
-heartbeats, which extend the leases of requests it still holds, as with the
-real connector. Layouts the real connector rejects fail the request on the
-decode instance, which then prefills it itself. Here the prefill
-instance records the transfers, so its step log is the one to fit
-`kv_transfer_timing` to.
+With the `NixlPushConnector`, a prefill instance with pipeline parallelism
+writes into a decode instance without it. As with the real connector, the
+proxy sends a request to both instances at once. Decode ranks register each
+request with their paired prefill ranks in every stage and forward their
+heartbeats; a prefill rank writes its share once the request is both
+finished and registered, and frees the blocks when its writes end or the
+lease of an unregistered request (a full prefix hit) expires. Here the
+prefill instance records the transfers, so fit `kv_transfer_timing` to its
+step log.
 
 ### Running without a GPU
 
 A CPU build of vLLM (`VLLM_TARGET_DEVICE=cpu`, which installs Triton's CPU
-backend from `requirements/cpu.txt`) runs simulations on any x86-64 host:
+backend) runs simulations on any x86-64 host:
 
 ```bash
 TRITON_CPU_BACKEND=1 vllm serve Qwen/Qwen3-235B-A22B --simulate-forward \
@@ -459,47 +347,25 @@ TRITON_CPU_BACKEND=1 vllm serve Qwen/Qwen3-235B-A22B --simulate-forward \
   --simulation-config '{"timing": "replay", "timing_args": {"path": "steps.jsonl"}}'
 ```
 
-Ranks need no devices there, so a layout larger than the host's GPU count
-(16 ranks above) runs on one CPU host. Simulated workers run only the small
-input-preparation kernels, so instead of each getting its own NUMA node they
-share the host with at most four OpenMP threads each. A simulation keeps the settings of the GPU
-deployment it models rather than the CPU platform's: async scheduling stays
-on and the in-process executor (which the `fast_forward` and `virtual`
-clocks need) stays available. The one exception is the KV block size: the CPU
-attention backend needs a multiple of 32, so the default is 32 instead of the
-GPU default of 16, which coarsens prefix-cache matching. Pass `--block-size`
-to match the deployment when its backend uses a larger one; MLA models on
-CPUs without AMX keep the CPU backend's required size. The CPU build needs
-Python 3.11 or newer for triton-cpu.
-
-## Accuracy
-
-Validated on H200 by replaying a recording of the real deployment (Qwen3-0.6B
-or Qwen3-8B, random or MMLU-Pro prompts):
-
-| Feature | Real vs simulated |
-| --- | --- |
-| Serving (`vllm serve`, `vllm bench serve`) | mean TTFT, TPOT, ITL within about 2% |
-| Speculative decoding (EAGLE3) | TTFT, TPOT, E2E within 2.5% |
-| TP=2, PP=2; MoE DP=2 with expert parallelism | TPOT within 2%; TTFT within 3% (9% for MoE DP); PP=2 when saturated: TPOT 10% low |
-| KV offloading; multi-turn sessions | TTFT within 2%, TPOT within 0.2% |
-| Disaggregated prefill at light load (in-process, served, heterogeneous TP, push with PP) | TPOT within 2%; mean TTFT within 10%; P99 TTFT low, as the HTTP path's latency varies |
-| Disaggregated prefill near saturation, long-running servers (`--fill-kv-caches`) | TPOT −11% to +5%, median TTFT −11% to +22% |
-| `vllm bench sweep simulate` | see [Simulated Sweep](../benchmarking/sweeps.md#simulated-sweep) |
+Ranks need no devices, so a layout larger than any one GPU host runs on a
+CPU host. Simulated workers share the host's cores instead of each taking a
+NUMA node, and keep the modeled GPU deployment's settings (async scheduling,
+the in-process executor) rather than the CPU platform's. The exception is the
+KV block size, which the CPU attention backend needs to be a multiple of 32:
+pass `--block-size` to match the deployment where it uses a larger one. The
+CPU build needs Python 3.11 or newer.
 
 ## Limitations
 
-* Ranks cannot share a device on CUDA hosts, so simulating a deployment there
-  needs as many devices as it has ranks (not their memory); the CPU platform
-  has no such limit.
-* On the CPU platform the KV block size must be a multiple of 32.
+* On CUDA hosts each rank needs its own device (but little of its memory);
+  the CPU platform has no such limit.
 * Pipeline stages are assumed balanced.
-* No LoRA or pooling models, and no KV transfer other than CPU offloading by
-  the `OffloadingConnector` and disaggregated prefill by the `NixlConnector`
-  (in-process instances: pull mode with one rank each; served ones: pull
-  mode without pipeline parallelism, or push mode with it on the prefill
-  instance). Speculative decoding without adaptive verification only,
-  and no diffusion models.
-* The `fast_forward` and `virtual` clocks are offline-only and need a single
-  process (one rank); served and multi-rank simulations run in real time.
-* Prompt and output token ids are not meaningful; only their counts are.
+* No LoRA, pooling or diffusion models, and speculative decoding without
+  adaptive verification only.
+* KV transfer is limited to CPU offloading by the `OffloadingConnector` and
+  disaggregated prefill by the `NixlConnector`: in-process instances in pull
+  mode with one rank each; served instances in pull mode without pipeline
+  parallelism, or in push mode with it on the prefill instance.
+* The `fast_forward` and `virtual` clocks need a single process with one
+  rank; served and multi-rank simulations run on the real clock.
+* Token ids are not meaningful; only their counts are.

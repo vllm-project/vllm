@@ -136,13 +136,10 @@ def run_disaggregated(
     max_stalled_steps: int = MAX_STALLED_STEPS,
     frontend_latency_s: float = 0.0,
 ) -> SimulationResult:
-    """Run `requests` through prefill and decode engines from `make_instance()`
-    and timestamp the decode instances' outputs: TTFT runs from a request's
-    arrival to its first token from the decode instance. `handoff_latency_s`
-    is the proxy's time from a prefill instance finishing a request to the
-    decode instance receiving it (responses, HTTP hops, request parsing);
-    `frontend_latency_s` delays each request's arrival at its prefill
-    instance, as in `offline.run()`."""
+    """Run `requests` through engines from `make_instance()`, timestamping the
+    decode instances' outputs. `handoff_latency_s` is the proxy's time from a
+    finished prefill to the decode instance receiving the request;
+    `frontend_latency_s` is as in `offline.run()`."""
     if any(r.sampling_params.n != 1 for r in requests):
         raise ValueError("Timed runs support n=1 only.")
     engines = [*prefill, *decode]

@@ -144,6 +144,7 @@ steps:
   no_plugin: true
   soft_fail: true
   source_file_dependencies:
+  - vllm/benchmarks/
   - vllm/config/
   - vllm/distributed/kv_transfer/
   - vllm/engine/arg_utils.py
@@ -157,11 +158,13 @@ steps:
   - vllm/v1/worker/
   - tests/conftest.py
   - tests/models/registry.py
+  - tests/benchmarks/sweep/test_simulate.py
   - tests/v1/e2e/test_simulated_forward.py
+  - tests/v1/worker/simulated/
   commands:
     - |
       bash .buildkite/scripts/hardware_ci/run-cpu-test.sh 45m "
-      TRITON_CPU_BACKEND=1 pytest -x -v -s tests/v1/e2e/test_simulated_forward.py"
+      TRITON_CPU_BACKEND=1 pytest -x -v -s tests/v1/worker/simulated tests/benchmarks/sweep/test_simulate.py tests/v1/e2e/test_simulated_forward.py"
 
 - label: CPU-Quantization Model Tests
   key: cpu-quantization-model-tests

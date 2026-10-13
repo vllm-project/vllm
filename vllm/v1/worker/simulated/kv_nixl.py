@@ -267,13 +267,9 @@ class SimulatedNixlWorker:
     def book_read(
         self, req_id: str, num_bytes: int, earliest: float, num_readers: int = 1
     ) -> float:
-        """Prefill side: book a read of `num_bytes` of `req_id`'s KV on this
-        rank's link, starting no earlier than `earliest`; it notifies this
-        rank when it ends, which is returned. The request's blocks are freed
-        once all `num_readers` decode ranks reading this rank notified it.
-        Reads of one request by several decode ranks run concurrently (each at
-        the measured per-read rate); those of different requests one after
-        another."""
+        """Prefill side: book a read of `req_id`'s KV on this rank's link,
+        starting no earlier than `earliest`; returns when it ends. The blocks
+        are freed once all `num_readers` decode ranks have read."""
         assert self.rate is not None
         with self._lock:
             floor = self._read_floor.setdefault(req_id, self.link_free_at)

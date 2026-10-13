@@ -238,7 +238,8 @@ def test_simulated_nixl_frees_blocks_after_all_readers():
     # Two decode ranks each read half of this rank's heads, concurrently;
     # the blocks are freed once both have.
     assert prefill.book_read("p1", 10, 0.0, num_readers=2) == pytest.approx(1.0)
-    assert prefill._notifs and prefill.get_finished() == (set(), set())
+    assert prefill.next_completion() == pytest.approx(1.0)
+    assert prefill.get_finished() == (set(), set())
     assert prefill.book_read("p1", 20, 0.0, num_readers=2) == pytest.approx(2.0)
     clock.sleep_until(1.5)
     assert prefill.get_finished() == (set(), set())
@@ -264,7 +265,7 @@ def test_simulated_nixl_notifies_every_prefill_rank(prefill_tp, decode_tp, kv_he
     readers = 1
     for rank in range(decode_tp):
         worker.tp_rank, worker.tp_size = rank, decode_tp
-        for r in worker._topology.handshake_target_ranks(prefill_tp):
+        for r in worker._paired_ranks(prefill_tp):
             notified[r] += 1
         if (mapping := worker._mapping(prefill_tp)) is not None:
             readers = mapping.local_consumers

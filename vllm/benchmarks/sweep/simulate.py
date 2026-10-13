@@ -20,18 +20,21 @@ import shlex
 import traceback
 from collections.abc import Callable
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from dataclasses import dataclass
-from datetime import datetime
+from dataclasses import dataclass, fields
 from pathlib import Path
-from typing import ClassVar
+from typing import TYPE_CHECKING, ClassVar
 
 import numpy as np
 
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.import_utils import PlaceholderModule
 
-from .param_sweep import ParameterSweep, ParameterSweepItem
-from .serve import _get_comb_base_path
+from .param_sweep import ParameterSweepItem
+from .serve import SweepServeArgs, _comb_is_valid, _get_comb_base_path
+
+if TYPE_CHECKING:
+    from vllm.engine.arg_utils import EngineArgs
+    from vllm.v1.worker.simulated.offline import SimulationResult, TimedRequest
 
 try:
     import pandas as pd
@@ -40,6 +43,12 @@ except ImportError:
 
 _COMPLETION_BACKENDS = ("vllm", "openai")
 _CHAT_BACKENDS = ("openai-chat",)
+# Rate doublings or halvings that bracket the SLO search.
+_BRACKET_STEPS = 8
+# Requests that fill the KV caches, as a multiple of their capacity.
+_KV_FILL_FACTOR = 1.2
+# Fraction of k-NN lookups beyond the recorded range that warrants a warning.
+_MAX_OUTSIDE_RANGE = 0.01
 
 
 def _subcommand_args(cmd: list[str], subcommand: tuple[str, ...]) -> list[str]:
@@ -87,10 +96,7 @@ def max_rate_meeting_slo(
         missing = slo.keys() - run_data.keys()
         if missing:
             raise ValueError(f"SLO metrics {sorted(missing)} are not reported.")
-        # A metric a run does not define (NaN, e.g. TPOT of one-token
-        # outputs) does not bound it.
-        values = {k: float(run_data[k]) for k in slo}  # type: ignore[arg-type]
-        return all(math.isnan(x) or x <= slo[k] for k, x in values.items())
+        return all(float(run_data[k]) <= v for k, v in slo.items())  # type: ignore[arg-type]
 
     batch = evaluate(math.inf)
     if meets(batch):
@@ -99,7 +105,7 @@ def max_rate_meeting_slo(
     if not rate > 0:
         return 0.0
     lo, hi = 0.0, math.inf
-    for _ in range(8):
+    for _ in range(_BRACKET_STEPS):
         if meets(evaluate(rate)):
             lo, rate = rate, rate * 2
         else:
@@ -201,181 +207,200 @@ def _select_devices(index: int, num_ranks: int) -> None:
         os.environ[env_var] = ",".join(devices[start : start + num_ranks])
 
 
-def _simulate_comb(task: _CombTask) -> None:
-    """Simulate one combination in this (fresh) process, writing each run's
-    `summary.json` and, after an SLO search, `result.json`."""
-    from vllm.benchmarks.datasets import get_samples
-    from vllm.benchmarks.serve import add_cli_args as add_bench_cli_args
-    from vllm.benchmarks.serve import get_request_delays
+def _engine_args(cmd: list[str]) -> "EngineArgs":
     from vllm.engine.arg_utils import EngineArgs
     from vllm.entrypoints.launchers.cli_args import make_arg_parser
-    from vllm.sampling_params import SamplingParams
-    from vllm.tokenizers import get_tokenizer
-    from vllm.usage.usage_lib import UsageContext
-    from vllm.v1.engine.llm_engine import LLMEngine
-    from vllm.v1.worker.simulated.disaggregated import (
-        make_instance,
-        run_disaggregated,
+
+    serve_args = make_arg_parser(FlexibleArgumentParser()).parse_args(
+        _subcommand_args(cmd, ("vllm", "serve"))
     )
-    from vllm.v1.worker.simulated.offline import (
-        SimulationResult,
-        TimedRequest,
-        make_engine,
-        run,
-    )
-    from vllm.v1.worker.simulated.timing import knn_lookup_counts
+    if serve_args.model_tag is not None:
+        serve_args.model = serve_args.model_tag
+    return EngineArgs.from_cli_args(serve_args)
 
-    def engine_args_of(cmd: list[str]) -> EngineArgs:
-        serve_args = make_arg_parser(FlexibleArgumentParser()).parse_args(
-            _subcommand_args(cmd, ("vllm", "serve"))
-        )
-        if serve_args.model_tag is not None:
-            serve_args.model = serve_args.model_tag
-        engine_args = EngineArgs.from_cli_args(serve_args)
-        if engine_args.simulation_config.clock == "virtual" or task.num_instances:
-            # Under the virtual clock (which disaggregated instances always
-            # use) host time comes only from the timing model, so the engine's
-            # stats collection costs wall time and changes nothing.
-            engine_args.disable_log_stats = True
-        return engine_args
 
-    role_args = {role: engine_args_of(cmd) for role, cmd in task.serve_cmds.items()}
-    num_ranks = {
-        role: args.tensor_parallel_size
-        * args.pipeline_parallel_size
-        * args.data_parallel_size
-        for role, args in role_args.items()
-    }
-    if task.num_instances and any(n > 1 for n in num_ranks.values()):
-        raise ValueError(
-            "Disaggregated combinations run their instances in one process, "
-            "with one rank each; serve multi-rank instances with "
-            "`vllm serve --simulate-forward` instead."
-        )
-    _select_devices(task.index, 1 if task.num_instances else num_ranks["serve"])
-    engine_args = next(iter(role_args.values()))
+def _bench_args(task: _CombTask, model: str) -> argparse.Namespace:
+    from vllm.benchmarks.serve import add_cli_args
 
-    bench_parser = FlexibleArgumentParser()
-    add_bench_cli_args(bench_parser)
-    bench_args = bench_parser.parse_args(
+    parser = FlexibleArgumentParser()
+    add_cli_args(parser)
+    args = parser.parse_args(
         _subcommand_args(task.bench_cmd, ("vllm", "bench", "serve"))
     )
-    if bench_args.max_concurrency is not None:
+    if args.max_concurrency is not None:
         raise ValueError("Simulated sweeps do not support --max-concurrency.")
     if task.slo is not None and (
-        bench_args.ramp_up_strategy is not None
-        or bench_args.dataset_name == "timed_trace"
-        or bench_args.self_timed
+        args.ramp_up_strategy is not None
+        or args.dataset_name == "timed_trace"
+        or args.self_timed
     ):
         raise ValueError(
             "`--slo` searches the request rate, which ramp-up and timed "
             "traces do not use."
         )
-    bench_args.model = bench_args.model or engine_args.model
-    if bench_args.self_timed is None:
-        bench_args.self_timed = bench_args.dataset_name == "timed_trace"
-    tokenizer = get_tokenizer(
-        bench_args.tokenizer or engine_args.tokenizer or bench_args.model,
-        tokenizer_mode=bench_args.tokenizer_mode,
-        trust_remote_code=bench_args.trust_remote_code,
-    )
-    # Seeded as `vllm bench serve` is, so that the requests and their send
-    # times are the same as in a real benchmark.
-    random.seed(bench_args.seed)
-    np.random.seed(bench_args.seed)
-    samples = get_samples(bench_args, tokenizer)
-    rng_state = np.random.get_state()
-    if any(s.multi_modal_data for s in samples):
-        raise ValueError("Simulated sweeps do not support multimodal requests.")
-    prompts = [
-        _prompt_token_ids(s.prompt, tokenizer, bench_args.backend) for s in samples
-    ]
+    args.model = args.model or model
+    if args.self_timed is None:
+        args.self_timed = args.dataset_name == "timed_trace"
+    return args
 
-    # Unset scheduler limits default as for `vllm serve`.
-    serving = UsageContext.OPENAI_API_SERVER
-    engines: list[LLMEngine]
-    if task.num_instances:
-        prefill = [
-            make_instance(role_args["prefill"], "kv_producer", f"prefill{i}", serving)
-            for i in range(task.num_instances["prefill"])
-        ]
-        decode = [
-            make_instance(role_args["decode"], "kv_consumer", f"decode{i}", serving)
-            for i in range(task.num_instances["decode"])
-        ]
-        engines = [*prefill, *decode]
-        layout: dict[str, object] = {"gpu_count": sum(task.num_instances.values())}
 
-        def simulate_run(requests: list[TimedRequest]) -> SimulationResult:
-            return run_disaggregated(
-                prefill,
-                decode,
-                requests,
-                handoff_latency_s=task.handoff_latency_ms * 1e-3,
-                frontend_latency_s=task.frontend_latency_ms * 1e-3,
+class _CombSimulation:
+    """One combination's engines and requests, in its own process."""
+
+    def __init__(self, task: _CombTask):
+        from vllm.benchmarks.datasets import get_samples
+        from vllm.benchmarks.serve import (
+            GENERATION_PERCENTILE_METRICS,
+            check_goodput_args,
+        )
+        from vllm.tokenizers import get_tokenizer
+
+        self.task = task
+        disaggregated = bool(task.num_instances)
+        role_args = {role: _engine_args(cmd) for role, cmd in task.serve_cmds.items()}
+        for args in role_args.values():
+            # Under the virtual clock (which disaggregated instances always
+            # use) host time comes only from the timing model, so stats
+            # collection costs wall time and changes nothing.
+            if disaggregated or args.simulation_config.clock == "virtual":
+                args.disable_log_stats = True
+        num_ranks = {
+            role: args.tensor_parallel_size
+            * args.pipeline_parallel_size
+            * args.data_parallel_size
+            for role, args in role_args.items()
+        }
+        if disaggregated and any(n > 1 for n in num_ranks.values()):
+            raise ValueError(
+                "Disaggregated combinations run their instances in one process, "
+                "with one rank each; serve multi-rank instances with "
+                "`vllm serve --simulate-forward` instead."
             )
-    else:
-        engine = make_engine(engine_args, usage_context=serving)
-        engines = [engine]
+        _select_devices(task.index, 1 if disaggregated else num_ranks["serve"])
+        engine_args = next(iter(role_args.values()))
+
+        bench = _bench_args(task, engine_args.model)
+        self.bench_args = bench
+        self.percentile_metrics = (
+            bench.percentile_metrics or GENERATION_PERCENTILE_METRICS
+        ).split(",")
+        self.percentiles = [float(p) for p in bench.metric_percentiles.split(",")]
+        self.goodput = check_goodput_args(bench)
+        self.tokenizer = get_tokenizer(
+            bench.tokenizer or engine_args.tokenizer or bench.model,
+            tokenizer_mode=bench.tokenizer_mode,
+            trust_remote_code=bench.trust_remote_code,
+        )
+        # Seeded as `vllm bench serve` is, so that the requests and their send
+        # times are the same as in a real benchmark.
+        random.seed(bench.seed)
+        np.random.seed(bench.seed)
+        self.samples = get_samples(bench, self.tokenizer)
+        self.rng_state = np.random.get_state()
+        if any(s.multi_modal_data for s in self.samples):
+            raise ValueError("Simulated sweeps do not support multimodal requests.")
+        self.prompts = [
+            _prompt_token_ids(s.prompt, self.tokenizer, bench.backend)
+            for s in self.samples
+        ]
+        self._build_engines(role_args)
+        self.runs: dict[float, dict[str, object]] = {}
+
+    def _build_engines(self, role_args: dict[str, "EngineArgs"]) -> None:
+        from vllm.usage.usage_lib import UsageContext
+        from vllm.v1.worker.simulated.disaggregated import make_instance
+        from vllm.v1.worker.simulated.offline import make_engine
+
+        # Unset scheduler limits default as for `vllm serve`.
+        serving = UsageContext.OPENAI_API_SERVER
+        counts = self.task.num_instances
+        if counts:
+            self.prefill = [
+                make_instance(
+                    role_args["prefill"], "kv_producer", f"prefill{i}", serving
+                )
+                for i in range(counts["prefill"])
+            ]
+            self.decode = [
+                make_instance(role_args["decode"], "kv_consumer", f"decode{i}", serving)
+                for i in range(counts["decode"])
+            ]
+            self.engines = [*self.prefill, *self.decode]
+            self.layout: dict[str, object] = {"gpu_count": sum(counts.values())}
+            return
+        engine = make_engine(role_args["serve"], usage_context=serving)
+        self.engines = [engine]
         parallel_config = engine.vllm_config.parallel_config
-        layout = {
+        self.layout = {
             "tensor_parallel_size": parallel_config.tensor_parallel_size,
             "pipeline_parallel_size": parallel_config.pipeline_parallel_size,
             "data_parallel_size": parallel_config.data_parallel_size,
-            "gpu_count": num_ranks["serve"],
+            "gpu_count": parallel_config.world_size_across_dp,
         }
 
-        def simulate_run(requests: list[TimedRequest]) -> SimulationResult:
-            return run(
-                engine, requests, frontend_latency_s=task.frontend_latency_ms * 1e-3
-            )
+    def _run(self, requests: list["TimedRequest"]) -> "SimulationResult":
+        from vllm.v1.worker.simulated.disaggregated import run_disaggregated
+        from vllm.v1.worker.simulated.offline import run
 
-    if task.fill_kv_caches:
-        # Requests of the dataset's mean prompt length, one output token each,
-        # until every instance's KV cache has been used once.
+        frontend_latency_s = self.task.frontend_latency_ms * 1e-3
+        if self.task.num_instances:
+            return run_disaggregated(
+                self.prefill,
+                self.decode,
+                requests,
+                handoff_latency_s=self.task.handoff_latency_ms * 1e-3,
+                frontend_latency_s=frontend_latency_s,
+            )
+        return run(self.engines[0], requests, frontend_latency_s=frontend_latency_s)
+
+    def fill_kv_caches(self) -> None:
+        """Use up every instance's KV cache once, with one-token requests of
+        the dataset's mean prompt length."""
+        from vllm.sampling_params import SamplingParams
+        from vllm.v1.worker.simulated.offline import TimedRequest
+
         cache_tokens = max(
             (e.vllm_config.cache_config.num_gpu_blocks or 0)
             * e.vllm_config.cache_config.block_size
-            for e in engines
+            for e in self.engines
         )
-        prompt_len = max(1, round(float(np.mean([len(p) for p in prompts]))))
-        per_instance = max(task.num_instances.values(), default=1)
-        num_fill = math.ceil(1.2 * per_instance * cache_tokens / prompt_len)
-        rng = np.random.default_rng(bench_args.seed)
-        simulate_run(
+        prompt_len = max(1, round(float(np.mean([len(p) for p in self.prompts]))))
+        per_instance = max(self.task.num_instances.values(), default=1)
+        num_fill = math.ceil(_KV_FILL_FACTOR * per_instance * cache_tokens / prompt_len)
+        rng = np.random.default_rng(self.bench_args.seed)
+        vocab_size = self.tokenizer.vocab_size
+        params = SamplingParams(max_tokens=1, ignore_eos=True, detokenize=False)
+        self._run(
             [
-                TimedRequest(
-                    prompt_token_ids=rng.integers(
-                        0, tokenizer.vocab_size, prompt_len
-                    ).tolist(),
-                    sampling_params=SamplingParams(
-                        max_tokens=1, ignore_eos=True, detokenize=False
-                    ),
-                )
+                TimedRequest(rng.integers(0, vocab_size, prompt_len).tolist(), params)
                 for _ in range(num_fill)
             ]
         )
 
-    runs: dict[float, dict[str, object]] = {}
+    def evaluate(self, rate: float) -> dict[str, object]:
+        """Simulate the benchmark at `rate` and write its `summary.json`."""
+        from vllm.benchmarks.serve import get_request_delays
+        from vllm.sampling_params import SamplingParams
+        from vllm.v1.worker.simulated.offline import TimedRequest
+        from vllm.v1.worker.simulated.timing import knn_lookup_counts
 
-    def evaluate(rate: float) -> dict[str, object]:
-        if rate in runs:
-            return runs[rate]
-        np.random.set_state(rng_state)
+        if rate in self.runs:
+            return self.runs[rate]
+        task, bench = self.task, self.bench_args
+        np.random.set_state(self.rng_state)
         delays, _ = get_request_delays(
-            samples,
+            self.samples,
             rate,
-            bench_args.burstiness,
-            bench_args.ramp_up_strategy,
-            bench_args.ramp_up_start_rps,
-            bench_args.ramp_up_end_rps,
-            bench_args.self_timed,
+            bench.burstiness,
+            bench.ramp_up_strategy,
+            bench.ramp_up_start_rps,
+            bench.ramp_up_end_rps,
+            bench.self_timed,
         )
         requests = [
             TimedRequest(
                 prompt_token_ids=prompt,
-                # Text is not needed; a server detokenizes in its frontend, off
-                # the engine core's thread.
+                # A server detokenizes in its frontend, off the engine core.
                 sampling_params=SamplingParams(
                     max_tokens=sample.expected_output_len,
                     ignore_eos=True,
@@ -383,20 +408,18 @@ def _simulate_comb(task: _CombTask) -> None:
                 ),
                 arrival_time=delay,
             )
-            for prompt, sample, delay in zip(prompts, samples, delays)
+            for prompt, sample, delay in zip(self.prompts, self.samples, delays)
         ]
         # As `vllm bench sweep serve` does between runs.
-        for e in engines:
+        for e in self.engines:
             e.reset_prefix_cache(reset_connector=True)
+        lookups_before, outside_before = knn_lookup_counts()
+        result = self._run(requests)
         lookups, outside = knn_lookup_counts()
-        result = simulate_run(requests)
-        lookups, outside = (
-            a - b for a, b in zip(knn_lookup_counts(), (lookups, outside))
-        )
         run_data = (
             dict(task.serve_comb)
             | dict(task.bench_comb)
-            | layout
+            | self.layout
             | {
                 "request_rate": rate,
                 "frontend_latency_ms": task.frontend_latency_ms,
@@ -408,33 +431,43 @@ def _simulate_comb(task: _CombTask) -> None:
                 ),
                 "wall_time_s": result.wall_time,
                 # Steps timed by k-NN lookups beyond the recorded range.
-                "timing_lookups_outside_range": outside,
-                "timing_lookups": lookups,
+                "timing_lookups_outside_range": outside - outside_before,
+                "timing_lookups": lookups - lookups_before,
             }
-            | result.summary()
+            | result.summary(self.percentile_metrics, self.percentiles, self.goodput)
         )
         rate_dir = task.comb_dir / f"request_rate={rate:g}"
         rate_dir.mkdir(parents=True, exist_ok=True)
         with open(rate_dir / "summary.json", "w") as f:
             json.dump([run_data], f, indent=4)
-        runs[rate] = run_data
+        self.runs[rate] = run_data
         return run_data
 
-    try:
-        if task.slo is None:
-            evaluate(bench_args.request_rate)
-        else:
-            max_rate = max_rate_meeting_slo(evaluate, task.slo, task.search_iters)
-            best = (
-                dict(task.serve_comb) | dict(task.bench_comb) | layout
-                if max_rate == 0
-                else runs[max_rate]
-            )
-            with open(task.comb_dir / "result.json", "w") as f:
-                json.dump(best | {"max_request_rate": max_rate}, f, indent=4)
-    finally:
-        for e in engines:
+    def shutdown(self) -> None:
+        for e in self.engines:
             e.engine_core.shutdown()
+
+
+def _simulate_comb(task: _CombTask) -> None:
+    """Simulate one combination in this (fresh) process, writing each run's
+    `summary.json` and, after an SLO search, `result.json`."""
+    sim = _CombSimulation(task)
+    try:
+        if task.fill_kv_caches:
+            sim.fill_kv_caches()
+        if task.slo is None:
+            sim.evaluate(sim.bench_args.request_rate)
+            return
+        max_rate = max_rate_meeting_slo(sim.evaluate, task.slo, task.search_iters)
+        best = (
+            dict(task.serve_comb) | dict(task.bench_comb) | sim.layout
+            if max_rate == 0
+            else sim.runs[max_rate]
+        )
+        with open(task.comb_dir / "result.json", "w") as f:
+            json.dump(best | {"max_request_rate": max_rate}, f, indent=4)
+    finally:
+        sim.shutdown()
 
 
 def _run_task(task: _CombTask) -> None:
@@ -446,11 +479,7 @@ def _run_task(task: _CombTask) -> None:
 
 
 @dataclass
-class SweepSimulateArgs:
-    serve_cmd: list[str]
-    bench_cmd: list[str]
-    serve_params: ParameterSweep
-    bench_params: ParameterSweep
+class SweepSimulateArgs(SweepServeArgs):
     simulation_config: dict
     slo: dict[str, float] | None
     search_iters: int
@@ -458,45 +487,33 @@ class SweepSimulateArgs:
     handoff_latency_ms: float
     fill_kv_caches: bool
     num_workers: int
-    output_dir: Path
-    experiment_name: str
-    continue_on_error: bool
-    dry_run: bool
-    resume: bool
 
     parser_name: ClassVar[str] = "simulate"
     parser_help: ClassVar[str] = (
-        "Run `vllm bench sweep serve` combinations with simulated execution."
+        "Run `vllm bench sweep serve` combinations with simulated execution. "
+        "Options that only concern a real server or repeated runs are ignored."
     )
 
     @classmethod
     def from_cli_args(cls, args: argparse.Namespace):
+        # NOTE: Don't use super() as `from_cli_args` calls `cls()`
+        base_args = SweepServeArgs.from_cli_args(args)
         slo = None
         if args.slo:
             slo = {
                 k.strip(): float(v)
                 for k, v in (item.split("=") for item in args.slo.split(","))
             }
-        bench_params = (
-            ParameterSweep.read_json(args.bench_params)
-            if args.bench_params
-            else ParameterSweep.from_records([{}])
-        )
-        if slo and any(comb.has_param("request_rate") for comb in bench_params):
+        if slo and any(
+            comb.has_param("request_rate") for comb in base_args.bench_params
+        ):
             raise ValueError("`--slo` searches request_rate; do not set it.")
         if args.frontend_latency_ms < 0 or args.handoff_latency_ms < 0:
             raise ValueError("Latencies should be non-negative.")
         if args.num_workers < 1:
             raise ValueError("`num_workers` should be at least 1.")
         return cls(
-            serve_cmd=shlex.split(args.serve_cmd),
-            bench_cmd=shlex.split(args.bench_cmd),
-            serve_params=(
-                ParameterSweep.read_json(args.serve_params)
-                if args.serve_params
-                else ParameterSweep.from_records([{}])
-            ),
-            bench_params=bench_params,
+            **{f.name: getattr(base_args, f.name) for f in fields(base_args)},
             simulation_config=json.loads(args.simulation_config),
             slo=slo,
             search_iters=args.search_iters,
@@ -504,44 +521,13 @@ class SweepSimulateArgs:
             handoff_latency_ms=args.handoff_latency_ms,
             fill_kv_caches=args.fill_kv_caches,
             num_workers=args.num_workers,
-            output_dir=Path(args.output_dir),
-            experiment_name=(
-                args.experiment_name or datetime.now().strftime("%Y%m%d_%H%M%S")
-            ),
-            continue_on_error=args.continue_on_error,
-            dry_run=args.dry_run,
-            resume=args.resume,
         )
 
     @classmethod
     def add_cli_args(cls, parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
-        parser.add_argument(
-            "--serve-cmd",
-            type=str,
-            required=True,
-            help="The `vllm serve ...` command of the deployment to simulate.",
-        )
-        parser.add_argument(
-            "--bench-cmd",
-            type=str,
-            required=True,
-            help="The `vllm bench serve ...` command whose requests to simulate.",
-        )
-        parser.add_argument(
-            "--serve-params",
-            type=str,
-            default=None,
-            help="JSON file of parameter combinations for `--serve-cmd`, as for "
-            "`vllm bench sweep serve`.",
-        )
-        parser.add_argument(
-            "--bench-params",
-            type=str,
-            default=None,
-            help="JSON file of parameter combinations for `--bench-cmd`, as for "
-            "`vllm bench sweep serve`.",
-        )
-        parser.add_argument(
+        parser = super().add_cli_args(parser)
+        group = parser.add_argument_group("simulation options")
+        group.add_argument(
             "--simulation-config",
             type=str,
             default="{}",
@@ -549,7 +535,7 @@ class SweepSimulateArgs:
             'defaults to "virtual"); combinations can override its keys as '
             "`simulation_config.<key>`.",
         )
-        parser.add_argument(
+        group.add_argument(
             "--slo",
             type=str,
             default=None,
@@ -557,22 +543,20 @@ class SweepSimulateArgs:
             "p99_ttft_ms=500,mean_tpot_ms=30. If set, searches each "
             "combination for the highest request rate meeting them.",
         )
-        parser.add_argument(
+        group.add_argument(
             "--search-iters",
             type=int,
             default=5,
             help="Bisection steps of the request-rate search, after bracketing.",
         )
-        parser.add_argument(
+        group.add_argument(
             "--frontend-latency-ms",
             type=float,
             default=0.0,
             help="Per-request latency of the server outside the engine core "
-            "(HTTP, API server, IPC), added to TTFT and end-to-end latency. "
-            "Calibrate it as the median TTFT of a real run minus that of its "
-            "simulation, at a rate without queueing.",
+            "(HTTP, API server, IPC), added to TTFT and end-to-end latency.",
         )
-        parser.add_argument(
+        group.add_argument(
             "--handoff-latency-ms",
             type=float,
             default=0.0,
@@ -580,64 +564,24 @@ class SweepSimulateArgs:
             "the proxy's time from a prefill instance finishing a request to the "
             "decode instance receiving it.",
         )
-        parser.add_argument(
+        group.add_argument(
             "--fill-kv-caches",
             action="store_true",
             help="Before a combination's first run, use up each instance's KV "
             "cache once, so that the runs see a long-running server's "
-            "scattered KV blocks rather than a fresh one's. Reads into "
-            "scattered blocks are slower to post for a disaggregated decode "
-            "instance.",
+            "scattered KV blocks.",
         )
-        parser.add_argument(
+        group.add_argument(
             "-j",
             "--num-workers",
             type=int,
             default=1,
             help="Number of combinations simulated in parallel.",
         )
-        parser.add_argument(
-            "-o",
-            "--output-dir",
-            type=str,
-            default="results",
-            help="The main directory to which results are written.",
-        )
-        parser.add_argument(
-            "-e",
-            "--experiment-name",
-            type=str,
-            default=None,
-            help="The name of this experiment (defaults to current timestamp). "
-            "Results will be stored under `output_dir/experiment_name`.",
-        )
-        parser.add_argument(
-            "--continue-on-error",
-            action="store_true",
-            help="Record and skip a failed combination instead of terminating "
-            "the entire sweep.",
-        )
-        parser.add_argument(
-            "--dry-run",
-            action="store_true",
-            help="Print the commands to simulate, then exit.",
-        )
-        parser.add_argument(
-            "--resume",
-            action="store_true",
-            help="Only run the combinations without results under "
-            "`output_dir/experiment_name`.",
-        )
         return parser
 
 
-def run_main(args: SweepSimulateArgs):
-    experiment_dir = args.output_dir / args.experiment_name
-    if args.resume and not experiment_dir.exists():
-        raise ValueError(f"Cannot resume from non-existent {experiment_dir=}")
-    if not args.resume and not args.dry_run and experiment_dir.exists():
-        raise ValueError(f"Cannot overwrite existing {experiment_dir=}")
-
+def _make_tasks(args: SweepSimulateArgs, experiment_dir: Path) -> list[_CombTask]:
     tasks: list[_CombTask] = []
     for serve_comb in args.serve_params:
         common, roles, num_instances = split_roles(serve_comb)
@@ -648,6 +592,8 @@ def run_main(args: SweepSimulateArgs):
             for role in (num_instances or ["serve"])
         }
         for bench_comb in args.bench_params:
+            if not _comb_is_valid(serve_comb, bench_comb, args.link_vars):
+                continue
             comb_dir = _get_comb_base_path(experiment_dir, serve_comb, bench_comb)
             if args.resume and (
                 (comb_dir / "result.json").exists()
@@ -674,10 +620,10 @@ def run_main(args: SweepSimulateArgs):
                 print(f"[SIMULATE {role}{count}] {shlex.join(cmd)}")
             print(f"[BENCH] {shlex.join(task.bench_cmd)}")
             tasks.append(task)
-    if args.dry_run:
-        print(f"Experiment will be saved at: {experiment_dir}")
-        return None
+    return tasks
 
+
+def _run_tasks(args: SweepSimulateArgs, tasks: list[_CombTask]) -> None:
     # One process per combination: each builds an engine with its own
     # process-global simulation clock.
     with ProcessPoolExecutor(
@@ -700,6 +646,8 @@ def run_main(args: SweepSimulateArgs):
                 with open(task.comb_dir / ".failure.json", "w") as f:
                     json.dump({"error": traceback.format_exc()}, f, indent=4)
 
+
+def _summarize(args: SweepSimulateArgs, experiment_dir: Path) -> list[dict]:
     all_data = [
         run_data
         for path in sorted(experiment_dir.rglob("summary.json"))
@@ -711,14 +659,15 @@ def run_main(args: SweepSimulateArgs):
         run_data
         for run_data in all_data
         if run_data.get("timing_lookups_outside_range", 0)
-        > 0.01 * run_data.get("timing_lookups", 0)  # type: ignore[operator]
+        > _MAX_OUTSIDE_RANGE * run_data.get("timing_lookups", 0)
     ]
     if extrapolated:
         print(
             f"WARNING: {len(extrapolated)} of {len(all_data)} runs timed more than "
-            "1% of their k-NN lookups beyond the recorded range, where step times "
-            "are underestimated (timing_lookups_outside_range in their summary.json). "
-            "Record the deployment under a load that covers the simulated one."
+            f"{_MAX_OUTSIDE_RANGE:.0%} of their k-NN lookups beyond the recorded "
+            "range, where step times are underestimated "
+            "(timing_lookups_outside_range in their summary.json). Record the "
+            "deployment under a load that covers the simulated one."
         )
     results = [
         json.loads(path.read_text())
@@ -741,8 +690,17 @@ def run_main(args: SweepSimulateArgs):
         columns += ["gpu_count", "max_request_rate", *args.slo]
         columns += ["output_throughput_per_gpu", "timing_outside_range"]
         print(df[[c for c in columns if c in df.columns]].to_string(index=False))
-    print(f"Experiment has been saved at: {experiment_dir}")
     return all_data
+
+
+def run_main(args: SweepSimulateArgs):
+    experiment_dir = args.resolve_experiment_dir()
+    with args.run_ctx(experiment_dir):
+        tasks = _make_tasks(args, experiment_dir)
+        if args.dry_run:
+            return None
+        _run_tasks(args, tasks)
+        return _summarize(args, experiment_dir)
 
 
 def main(args: argparse.Namespace):
