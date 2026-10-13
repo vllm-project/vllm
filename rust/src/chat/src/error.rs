@@ -110,6 +110,11 @@ pub enum Error {
 pub type Result<T> = std::result::Result<T, Error>;
 
 impl Error {
+    /// Whether this error is a retryable frontend admission rejection.
+    pub fn is_admission_rejection(&self) -> bool {
+        matches!(self, Self::Text(error) if error.is_admission_rejection())
+    }
+
     /// Whether this error represents invalid user request parameters.
     pub fn is_request_validation_error(&self) -> bool {
         match self {

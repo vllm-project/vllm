@@ -359,17 +359,6 @@ pub struct EngineUnsupportedArgs {
     #[arg(long)]
     pub collect_detailed_traces: Option<Unsupported>,
 
-    /// Maximum number of requests that can be in-flight (waiting or running)
-    /// at the same time. When the limit is reached, new requests are rejected
-    /// with HTTP 503 so the client can retry on another instance.
-    #[arg(long)]
-    pub max_num_queued_reqs: Option<Unsupported>,
-
-    /// Maximum total prompt tokens of requests currently in the prefill phase.
-    /// When the limit is reached, new requests are rejected with HTTP 503.
-    #[arg(long)]
-    pub max_num_queued_tokens: Option<Unsupported>,
-
     /// Structured outputs configuration.
     #[arg(long)]
     pub structured_outputs_config: Option<Noop>,

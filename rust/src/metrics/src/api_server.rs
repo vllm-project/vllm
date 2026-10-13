@@ -54,6 +54,12 @@ pub struct SleepModeOperationLabels {
     pub operation: &'static str,
 }
 
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct AdmissionRejectionLabels {
+    pub model_name: String,
+    pub reason: &'static str,
+}
+
 pub(crate) type HttpRequestCounterFamily = Family<HttpRequestLabels, U64Counter>;
 pub(crate) type HttpHandlerHistogramFamily =
     Family<HttpHandlerLabels, Histogram, fn() -> Histogram>;
@@ -63,6 +69,7 @@ pub(crate) type WeightOperationGaugeFamily = Family<WeightOperationLabels, U64Ga
 pub(crate) type SleepModeOperationHistogramFamily =
     Family<SleepModeOperationLabels, Histogram, fn() -> Histogram>;
 pub(crate) type SleepModeOperationGaugeFamily = Family<SleepModeOperationLabels, U64Gauge>;
+pub(crate) type AdmissionRejectionCounterFamily = Family<AdmissionRejectionLabels, U64Counter>;
 
 /// API-server Prometheus families exported from the HTTP middleware layer.
 pub struct ApiServerMetrics {
@@ -73,6 +80,7 @@ pub struct ApiServerMetrics {
     pub weight_operations_in_flight: WeightOperationGaugeFamily,
     pub sleep_mode_operation_duration_seconds: SleepModeOperationHistogramFamily,
     pub sleep_mode_operations_in_flight: SleepModeOperationGaugeFamily,
+    pub admission_rejections: AdmissionRejectionCounterFamily,
 }
 
 impl ApiServerMetrics {
@@ -132,6 +140,13 @@ impl ApiServerMetrics {
             sleep_mode_operations_in_flight.clone(),
         );
 
+        let admission_rejections = AdmissionRejectionCounterFamily::default();
+        registry.register(
+            "vllm:admission_rejections",
+            "Number of admission attempts rejected by a queue limit, by reason.",
+            admission_rejections.clone(),
+        );
+
         Self {
             http_requests,
             http_request_duration_seconds,
@@ -140,7 +155,28 @@ impl ApiServerMetrics {
             weight_operations_in_flight,
             sleep_mode_operation_duration_seconds,
             sleep_mode_operations_in_flight,
+            admission_rejections,
         }
+    }
+
+    /// Initialize both admission-rejection time series for one model.
+    pub fn initialize_admission_rejections(&self, model_name: &str) {
+        for reason in ["max_num_queued_reqs", "max_num_queued_tokens"] {
+            let _ = self.admission_rejections.get_or_create(&AdmissionRejectionLabels {
+                model_name: model_name.to_string(),
+                reason,
+            });
+        }
+    }
+
+    /// Record one request rejected by a frontend admission limit.
+    pub fn record_admission_rejection(&self, model_name: &str, reason: &'static str) {
+        self.admission_rejections
+            .get_or_create(&AdmissionRejectionLabels {
+                model_name: model_name.to_string(),
+                reason,
+            })
+            .inc();
     }
 
     /// Track one weight-transfer operation until the returned guard is dropped.
@@ -269,6 +305,22 @@ mod tests {
         );
         assert!(after.contains(
             "vllm:rl_weight_update_operation_duration_seconds_count{operation=\"update\"} 1"
+        ));
+    }
+
+    #[test]
+    fn admission_rejections_are_labeled_by_model_and_reason() {
+        let mut registry = Registry::default();
+        let metrics = ApiServerMetrics::register(&mut registry);
+        metrics.initialize_admission_rejections("test-model");
+        metrics.record_admission_rejection("test-model", "max_num_queued_tokens");
+
+        let rendered = rendered_metrics(&registry);
+        assert!(rendered.contains(
+            "vllm:admission_rejections_total{model_name=\"test-model\",reason=\"max_num_queued_reqs\"} 0"
+        ));
+        assert!(rendered.contains(
+            "vllm:admission_rejections_total{model_name=\"test-model\",reason=\"max_num_queued_tokens\"} 1"
         ));
     }
 }
