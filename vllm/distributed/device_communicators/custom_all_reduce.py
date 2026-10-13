@@ -356,6 +356,10 @@ class CustomAllreduce:
             )
             self.close()
             self.disabled = True
+        if not self.disabled and not self.batch_invariant:
+            # Map the multicast buffer now: creating it on first use would
+            # allocate and rendezvous symmetric memory while serving.
+            self._init_mnnvl_multimem_reduce_scatter_buffer()
 
     def _init_mnnvl_buffer(self, stage_size: int) -> None:
         if torch_symm_mem is None or not current_platform.is_cuda():
@@ -641,13 +645,7 @@ class CustomAllreduce:
             if inp_size <= self.max_mnnvl_reduce_scatter_size:
                 return "mnnvl_lamport"
             if (
-                (
-                    self.mnnvl_multimem_rs_multicast_ptr
-                    or (
-                        self.mnnvl_multimem_rs_supported
-                        and not self.mnnvl_multimem_rs_initialized
-                    )
-                )
+                self.mnnvl_multimem_rs_multicast_ptr
                 and not envs.VLLM_BATCH_INVARIANT
                 and inp_size <= self.max_mnnvl_multimem_reduce_scatter_size
             ):
@@ -668,12 +666,6 @@ class CustomAllreduce:
         backend = self._select_reduce_scatter_backend(inp)
         if backend is None:
             return None
-        if backend == "mnnvl_multimem" and not self.mnnvl_multimem_rs_multicast_ptr:
-            if self._IS_CAPTURING:
-                return None
-            self._init_mnnvl_multimem_reduce_scatter_buffer()
-            if not self.mnnvl_multimem_rs_multicast_ptr:
-                return None
 
         out_shape = (inp.shape[0] // self.world_size,) + inp.shape[1:]
         out = torch.empty(out_shape, dtype=inp.dtype, device=inp.device)

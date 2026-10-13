@@ -345,22 +345,17 @@ def test_mnnvl_multimem_reduce_scatter_platform_gate(
 
 
 @pytest.mark.parametrize(
-    (
-        "message_bytes",
-        "multimem_ptr",
-        "multimem_initialized",
-        "batch_invariant",
-        "expected",
-    ),
+    ("message_bytes", "multimem_ptr", "batch_invariant", "expected"),
     [
-        (16 * 1024 * 1024, 1, True, False, "mnnvl_lamport"),
-        (16 * 1024 * 1024 + 128, 1, True, False, "mnnvl_multimem"),
-        (64 * 1024 * 1024, 1, True, False, "mnnvl_multimem"),
-        (64 * 1024 * 1024 + 128, 1, True, False, None),
-        (32 * 1024 * 1024, 0, True, False, None),
-        (32 * 1024 * 1024, 0, False, False, "mnnvl_multimem"),
-        (8 * 1024 * 1024, 1, True, True, "mnnvl_lamport"),
-        (32 * 1024 * 1024, 1, True, True, None),
+        (16 * 1024 * 1024, 1, False, "mnnvl_lamport"),
+        (16 * 1024 * 1024 + 128, 1, False, "mnnvl_multimem"),
+        (64 * 1024 * 1024, 1, False, "mnnvl_multimem"),
+        (64 * 1024 * 1024 + 128, 1, False, None),
+        # Without a mapped multicast buffer the multimem backend is never
+        # selected: the buffer is created at construction, not on first use.
+        (32 * 1024 * 1024, 0, False, None),
+        (8 * 1024 * 1024, 1, True, "mnnvl_lamport"),
+        (32 * 1024 * 1024, 1, True, None),
     ],
 )
 @pytest.mark.parametrize("world_size", [2, 4, 8])
@@ -369,7 +364,6 @@ def test_mnnvl_reduce_scatter_backend_gate(
     world_size,
     message_bytes,
     multimem_ptr,
-    multimem_initialized,
     batch_invariant,
     expected,
 ):
@@ -382,8 +376,6 @@ def test_mnnvl_reduce_scatter_backend_gate(
     communicator.mnnvl_only = False
     communicator.fully_connected = True
     communicator.mnnvl_multicast_ptr = 1
-    communicator.mnnvl_multimem_rs_supported = True
-    communicator.mnnvl_multimem_rs_initialized = multimem_initialized
     communicator.mnnvl_multimem_rs_multicast_ptr = multimem_ptr
     communicator.max_mnnvl_reduce_scatter_size = 16 * 1024 * 1024
     communicator.max_mnnvl_multimem_reduce_scatter_size = 64 * 1024 * 1024
