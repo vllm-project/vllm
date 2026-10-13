@@ -733,6 +733,10 @@ class SparseAttnIndexerKpool(CustomOp):
         self.topk_backend = (
             cfg.kernel_config.sparse_indexer_topk_backend if cfg is not None else "auto"
         )
+        if cfg is not None and cfg.parallel_config.decode_context_parallel_size > 1:
+            raise NotImplementedError(
+                "SparseAttnIndexerKpool on ROCm does not support DCP."
+            )
 
     def forward_hip(
         self,

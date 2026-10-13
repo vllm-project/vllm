@@ -128,15 +128,12 @@ def _can_use_flashinfer_cutedsl_bf16(
     if (
         k <= 0
         or n <= 0
+        or x.numel() == 0
         or weight.shape[1] != k
         or k % 128 != 0
         or x.data_ptr() % 32 != 0
         or weight.data_ptr() % 32 != 0
     ):
-        return False
-
-    m = x.numel() // k
-    if not 1 <= m <= 32:
         return False
     return bias is None or (
         bias.is_cuda
@@ -291,6 +288,13 @@ def wvsplitkrc_dispatch(n: int, k: int, m: int, cu_count: int) -> tuple[int, boo
 def rocm_unquantized_gemm_impl(
     x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None = None
 ) -> torch.Tensor:
+    if envs.VLLM_BATCH_INVARIANT:
+        from vllm.model_executor.determinism.batch_invariant import (
+            linear_batch_invariant,
+        )
+
+        return linear_batch_invariant(x, weight, bias)
+
     from vllm.platforms.rocm import on_gfx1x, on_gfx9, on_gfx950, on_gfx1250
 
     n = x.numel() // x.size(-1)

@@ -7,12 +7,12 @@ Integration tests for NCCL and IPC weight transfer between processes using Ray.
 """
 
 import builtins
+import importlib.util
 import pickle
 import runpy
 import threading
 import time
 from contextlib import nullcontext
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -216,6 +216,27 @@ class TestSparseNCCLWeightTransferUpdateInfoValidation:
 
 
 # --- Unit Tests: Engine Parsing ---
+
+
+@pytest.mark.parametrize(
+    "engine_type",
+    [
+        NCCLWeightTransferEngine,
+        NCCLTrainerWeightTransferEngine,
+        SparseNCCLWeightTransferEngine,
+        SparseNCCLTrainerWeightTransferEngine,
+    ],
+)
+def test_nccl_shutdown_destroys_communicator_once(engine_type):
+    engine = object.__new__(engine_type)
+    group = MagicMock()
+    engine.model_update_group = group
+
+    engine.shutdown()
+    engine.shutdown()
+
+    group.destroy.assert_called_once_with()
+    assert engine.model_update_group is None
 
 
 class TestNCCLEngineParsing:
@@ -1292,6 +1313,9 @@ class TestTrainerClients:
         handle.finish_weight_update.remote.assert_called_once_with()
         handle.update_weight_version.remote.assert_called_once_with("step-42")
 
+        client.shutdown_weight_transfer_engine()
+        handle.shutdown_weight_transfer_engine.remote.assert_called_once_with()
+
     def test_http_client_pickles_ipc_handles_for_json(self, monkeypatch):
         """HTTP update_weights must encode raw ipc_handles as a base64 pickle."""
         captured = {}
@@ -1322,6 +1346,7 @@ class TestTrainerClients:
         captured = {}
 
         def fake_post(self, path, json=None):
+            captured["path"] = path
             captured["json"] = json
 
         monkeypatch.setattr(HTTPVLLMWeightSyncClient, "_post", fake_post)
@@ -1332,6 +1357,9 @@ class TestTrainerClients:
 
         client.finish_weight_update("step-42")
         assert captured["json"] == {"weight_version": "step-42"}
+
+        client.shutdown_weight_transfer_engine()
+        assert captured == {"path": "shutdown_weight_transfer_engine", "json": None}
 
 
 class TestModuleSource:
@@ -1497,10 +1525,12 @@ class TestDeferredProcessingContract:
     that caller ends up reaching through a getattr."""
 
     def _engines(self):
-        return {
-            name: loader()
-            for name, loader in WeightTransferEngineFactory._registry.items()
-        }
+        registry = dict(WeightTransferEngineFactory._registry)
+        # ModelExpress is an optional, separately installed package, but its
+        # backend is always registered. Skip it when the package is missing.
+        if importlib.util.find_spec("modelexpress") is None:
+            registry.pop("modelexpress")
+        return {name: loader() for name, loader in registry.items()}
 
     def test_every_engine_declares_whether_it_defers(self):
         for name, cls in self._engines().items():
@@ -2054,11 +2084,11 @@ def test_sparse_nccl_trainer_non_sender_skips_client():
 
 
 def _import_modelexpress_shim():
-    path = (
-        Path(__file__).parents[2]
-        / "vllm/distributed/weight_transfer/modelexpress_engine.py"
+    spec = importlib.util.find_spec(
+        "vllm.distributed.weight_transfer.modelexpress_engine"
     )
-    runpy.run_path(str(path), run_name="_test_modelexpress_shim")
+    assert spec is not None and spec.origin is not None
+    runpy.run_path(spec.origin, run_name="_test_modelexpress_shim")
 
 
 @pytest.mark.parametrize(

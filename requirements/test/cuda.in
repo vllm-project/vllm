@@ -20,7 +20,7 @@ httpx
 librosa # required for audio tests
 vector_quantize_pytorch # required for minicpmo_26 test
 vocos # required for minicpmo_26 test
-peft>=0.19.1 # required for phi-4-mm test
+peft>=0.20.0 # required for phi-4-mm test
 pqdm
 ray[cgraph,default]>=2.56.0,<2.57 # Ray Compiled Graph, required by pipeline parallelism tests; sharded-RDT weight transfer needs Ray Direct Transport (>=2.56)
 sentence-transformers>=5.2.0 # required for embedding tests
@@ -40,7 +40,7 @@ datamodel_code_generator>=0.64.0 # required for minicpm3 test
 nltk>=3.10.3 # pin transitive rouge-score/lm-eval dep for known GHSAs
 lm-eval[api]>=0.4.12 # required for model evaluation test
 mteb[bm25s]>=2, <3 # required for mteb test
-transformers==5.17.0
+transformers==5.19.0
 schemathesis>=4.0.0 # Required for openai schema test.
 # quantization
 buildkite-test-collector==0.1.9
