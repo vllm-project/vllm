@@ -66,7 +66,7 @@ if TYPE_CHECKING:
     from vllm.forward_context import ForwardContext
     from vllm.v1.core.block_pool import BlockPool
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
-    from vllm.v1.kv_cache_interface import KVCacheConfig
+    from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
     from vllm.v1.request import Request
 
 # s_tensor_list, d_tensor_list, s_indices, d_indices, direction
@@ -82,6 +82,14 @@ CopyBlocksOp = Callable[
 ]
 
 logger = init_logger(__name__)
+
+
+@dataclass(frozen=True)
+class KVConnectorWorkerMemoryPlan:
+    """GPU memory reserved by a worker-side KV connector before KV sizing."""
+
+    reserved_bytes: int = 0
+    connector_data: Any = None
 
 
 @dataclass
@@ -205,6 +213,15 @@ class KVConnectorBase_V1(ABC):
         """
         return self._kv_transfer_config.is_kv_producer
 
+    @classmethod
+    def build_worker_memory_plan(
+        cls,
+        vllm_config: "VllmConfig",
+        kv_cache_specs: dict[str, "KVCacheSpec"],
+    ) -> KVConnectorWorkerMemoryPlan:
+        """Plan connector-owned GPU memory before KV cache allocation."""
+        return KVConnectorWorkerMemoryPlan()
+
     def __init__(
         self,
         vllm_config: "VllmConfig",
@@ -291,6 +308,12 @@ class KVConnectorBase_V1(ABC):
             kv_caches: dictionary of layer names, kv cache
 
         """
+        return
+
+    def initialize_worker_memory(
+        self, memory_plan: KVConnectorWorkerMemoryPlan | None
+    ) -> None:
+        """Allocate connector-owned memory after KV cache configuration."""
         return
 
     def set_host_xfer_buffer_ops(self, copy_operation: CopyBlocksOp):
