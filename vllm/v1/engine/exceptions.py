@@ -28,8 +28,8 @@ class EngineUnhealthyError(VLLMServerError):
 
     Args:
         message: Human-readable description.
-        reason: Machine-readable not-ready reason reported by ``/ready``.
-        details: Extra JSON-serializable fields reported by ``/ready``.
+        reason: Machine-readable not-ready reason reported by ``/health_generate``.
+        details: Extra JSON-serializable fields reported by ``/health_generate``.
 
     """
 

@@ -234,7 +234,7 @@ async def test_health_check_engine_dead_error():
 @pytest.mark.asyncio
 @pytest.mark.parametrize("error", [EngineDeadError(), EngineUnhealthyError()])
 async def test_ready_check_engine_error(error: Exception):
-    from vllm.entrypoints.serve.instrumentator.health import ready
+    from vllm.entrypoints.serve.instrumentator.health import health_generate
 
     mock_request = Mock(spec=Request)
     mock_app_state = Mock()
@@ -243,14 +243,14 @@ async def test_ready_check_engine_error(error: Exception):
     mock_app_state.engine_client = mock_engine_client
     mock_request.app.state = mock_app_state
 
-    response = await ready(mock_request)
+    response = await health_generate(mock_request)
 
     assert response.status_code == 503
 
 
 @pytest.mark.asyncio
 async def test_ready_check_engine_sleeping_reason():
-    from vllm.entrypoints.serve.instrumentator.health import ready
+    from vllm.entrypoints.serve.instrumentator.health import health_generate
 
     mock_request = Mock(spec=Request)
     mock_app_state = Mock()
@@ -261,7 +261,7 @@ async def test_ready_check_engine_sleeping_reason():
     mock_app_state.engine_client = mock_engine_client
     mock_request.app.state = mock_app_state
 
-    response = await ready(mock_request)
+    response = await health_generate(mock_request)
 
     assert response.status_code == 503
     assert json.loads(response.body) == {
@@ -276,7 +276,7 @@ async def test_ready_check_engine_sleeping_reason():
 @pytest.mark.asyncio
 async def test_ready_check_reports_in_progress_operations():
     """A probe stuck behind a long control call says what the engine is doing."""
-    from vllm.entrypoints.serve.instrumentator.health import ready
+    from vllm.entrypoints.serve.instrumentator.health import health_generate
 
     operation = {
         "operation": "collective_rpc:update_weights",
@@ -295,7 +295,7 @@ async def test_ready_check_reports_in_progress_operations():
     mock_app_state.engine_client = mock_engine_client
     mock_request.app.state = mock_app_state
 
-    response = await ready(mock_request)
+    response = await health_generate(mock_request)
 
     assert response.status_code == 503
     body = json.loads(response.body)

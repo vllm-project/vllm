@@ -298,7 +298,7 @@ def test_async_client_detects_one_stalled_dp_engine():
 @pytest.mark.asyncio
 async def test_async_client_ignores_untracked_engines():
     """Engines removed by an elastic EP scale-down are paused on their way
-    out; their SLEEPING broadcast must not make `/ready` sleeping forever."""
+    out; their SLEEPING broadcast must not make `/health_generate` sleeping forever."""
     client = object.__new__(AsyncMPClient)
     client._ready_progress = {0: EngineCoreReadyProgress()}
 

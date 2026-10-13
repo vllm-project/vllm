@@ -127,8 +127,8 @@ class WorkerBase:
         return
 
     def check_health_gpu(self) -> None:
-        """Readiness probe for `/ready`: run a dummy forward pass and wait for
-        it to complete on the device."""
+        """Readiness probe for `/health_generate`: run a dummy forward pass and
+        wait for it to complete on the device."""
         raise NotImplementedError
 
     def synchronize_device(self) -> None:

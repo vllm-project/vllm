@@ -33,8 +33,8 @@ async def health(raw_request: Request) -> Response:
         return Response(status_code=503)
 
 
-@router.get("/ready", response_class=Response)
-async def ready(raw_request: Request) -> Response:
+@router.get("/health_generate", response_class=Response)
+async def health_generate(raw_request: Request) -> Response:
     """GPU execution and EngineCore progress readiness check."""
     client = engine_client(raw_request)
     if client is None:

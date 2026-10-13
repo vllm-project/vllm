@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""`/ready` against injected failures on a single GPU.
+"""`/health_generate` against injected failures on a single GPU.
 
-`/health` stays 200 for all of these; `/ready` must not.
+`/health` stays 200 for all of these; `/health_generate` must not.
 """
 
 import pytest
@@ -41,7 +41,7 @@ def test_scheduler_stall(server):
 @pytest.mark.parametrize("fault", ["fault_ima_now", "fault_ima_on_next_forward"])
 def test_cuda_error_while_idle(tmp_path, fault: str):
     """An async CUDA fault that nothing has synchronized on yet, raised before
-    or during the probe's own forward pass, fails that same `/ready` call."""
+    or during the probe's own forward pass, fails that same `/health_generate` call."""
     with ready_probe_server(MODEL, [], tmp_path) as srv:
         assert srv.status() == 200
         srv.rpc(fault, "0")

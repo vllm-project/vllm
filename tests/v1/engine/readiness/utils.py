@@ -27,7 +27,7 @@ class ReadyProbeServer:
         self.model = model
         self.fault_dir = fault_dir
 
-    def status(self, path: str = "/ready") -> int | None:
+    def status(self, path: str = "/health_generate") -> int | None:
         """Return the HTTP status, or None if the server is unreachable."""
         try:
             return requests.get(
@@ -37,11 +37,11 @@ class ReadyProbeServer:
             return None
 
     def ready_body(self) -> dict:
-        resp = requests.get(self.server.url_for("ready"), timeout=30)
+        resp = requests.get(self.server.url_for("health_generate"), timeout=30)
         return resp.json() if resp.status_code != 200 else {}
 
     def wait_until_unready(self) -> float | None:
-        """Return seconds until ``/ready`` stops returning 200, or None."""
+        """Return seconds until ``/health_generate`` stops returning 200, or None."""
         start = time.monotonic()
         while time.monotonic() - start < DETECT_DEADLINE_S:
             if self.status() != 200:

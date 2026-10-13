@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Runtime fault injection for `/ready` end-to-end tests.
+"""Runtime fault injection for `/health_generate` end-to-end tests.
 
 Loaded into the server via ``--scheduler-cls`` / ``--worker-extension-cls``.
 Scheduler faults are toggled with flag files under ``$VLLM_READY_FAULT_DIR``

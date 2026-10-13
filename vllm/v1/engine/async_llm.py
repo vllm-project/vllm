@@ -1133,7 +1133,8 @@ class AsyncLLM(EngineClient):
             await self._check_idle_gpu_health(idle_ranks)
 
     def _idle_gpu_probe_task(self, engine_rank: int) -> asyncio.Task[None]:
-        """Concurrent `/ready` callers share one in-flight probe per engine."""
+        """Concurrent `/health_generate` callers share one in-flight probe per
+        engine."""
         task = self._idle_health_probe_tasks.get(engine_rank)
         if task is None or task.done():
             task = asyncio.create_task(
