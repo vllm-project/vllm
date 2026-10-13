@@ -892,6 +892,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
                     varlen_states,
                     ssm_state,
                     query_start_loc_p,
+                    state_len=self.conv_kernel_size - 1,
                 )
             ssm_state[state_indices_tensor_p] = final_states
             if ring_start is not None and self._updates_replayssm_trackers:
