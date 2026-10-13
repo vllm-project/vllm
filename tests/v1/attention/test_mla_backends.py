@@ -366,8 +366,6 @@ MLA_DIMENSIONS_TO_TEST = [
     ("glm", 192, 256),
 ]
 
-TENSOR_PARALLEL_SIZES_TO_TEST = [1, 4, 8, 16]
-
 
 def _prefill_backend_dimension_params():
     device_capability = current_platform.get_device_capability()
@@ -2052,7 +2050,7 @@ def _run_backend_correctness(
     ],
 )
 @pytest.mark.parametrize("model", ["deepseek-ai/DeepSeek-R1"])
-@pytest.mark.parametrize("tensor_parallel_size", TENSOR_PARALLEL_SIZES_TO_TEST)
+@pytest.mark.parametrize("tensor_parallel_size", [1, 4, 8, 16])
 @pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8", "fp8_e4m3"])
 @pytest.mark.parametrize(("q_scale", "k_scale"), [(1.0, 1.0), (2.0, 3.0)])
 @pytest.mark.parametrize(
