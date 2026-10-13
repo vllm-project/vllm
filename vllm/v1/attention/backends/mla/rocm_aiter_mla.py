@@ -143,6 +143,27 @@ def _fp8_mla_prefill_supported() -> bool:
 
 
 @functools.lru_cache(maxsize=1)
+def _fused_mla_prefill_qkv_supported() -> bool:
+    """ ``fused_mla_prefill_qkv_fp8`` only ships gfx950 (and gfx1250) configs 
+
+    Older AITER builds without the kernel fall back to the eager concat/cast.
+    """
+    try:
+        from vllm.platforms.rocm import on_gfx950
+    except Exception:  # noqa: BLE001
+        return False
+    if not on_gfx950():
+        return False
+    try:
+        from aiter.ops.triton.fusions.fused_mla_prefill_qkv_fp8 import (  # noqa: F401
+            fused_mla_prefill_qkv_fp8,
+        )
+    except Exception:  # noqa: BLE001
+        return False
+    return True
+
+
+@functools.lru_cache(maxsize=1)
 def _aiter_mla_native_h24_reducer_supported() -> bool:
     """Whether AITER's JIT reducer supports the native H24/512 shape."""
     try:
@@ -2166,16 +2187,18 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
             is_quantized_kv_cache(kv_cache_dtype)
             and AiterMLAHelper.is_valid_num_heads(self.num_heads)
         )
+        self._fused_prefill_qkv = False
         if self._fp8_prefill_enabled:
             from aiter import mla_prefill_ps_asm_fwd, mla_reduce_v1
 
             self._mla_prefill_ps_asm_fwd = mla_prefill_ps_asm_fwd
             self._mla_reduce_v1 = mla_reduce_v1
             self._fp8_prefill_one_scale: torch.Tensor | None = None
-            # fused_mla_prefill_qkv_fp8 asserts power-of-two head dims.
             head_dims = (self.qk_nope_head_dim, self.qk_rope_head_dim, self.v_head_dim)
-            self._fused_prefill_qkv = rocm_aiter_ops.is_enabled() and not any(
-                d & (d - 1) for d in head_dims
+            self._fused_prefill_qkv = (
+                rocm_aiter_ops.is_enabled()
+                and _fused_mla_prefill_qkv_supported()
+                and not any(d & (d - 1) for d in head_dims)
             )
 
     def _context_parallel_compute_prefill_context(
