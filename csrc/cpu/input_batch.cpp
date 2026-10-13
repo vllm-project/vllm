@@ -54,6 +54,38 @@ void prepare_prefill_inputs_cpu(torch::Tensor& input_ids,
   }
 }
 
+torch::Tensor get_prompt_logprobs_token_ids_cpu(
+    const int64_t num_tokens, const torch::Tensor& query_start_loc,
+    const torch::Tensor& idx_mapping, const torch::Tensor& num_computed_tokens,
+    const torch::Tensor& all_token_ids) {
+  torch::Tensor token_ids =
+      torch::empty({num_tokens}, idx_mapping.options().dtype(torch::kInt64));
+
+  int64_t* token_ids_ptr = token_ids.data_ptr<int64_t>();
+  const int32_t* query_start_loc_ptr = query_start_loc.data_ptr<int32_t>();
+  const int32_t* idx_mapping_ptr = idx_mapping.data_ptr<int32_t>();
+  const int32_t* num_computed_tokens_ptr =
+      num_computed_tokens.data_ptr<int32_t>();
+  const int32_t* all_token_ids_ptr = all_token_ids.data_ptr<int32_t>();
+  const int64_t all_token_ids_stride = all_token_ids.stride(0);
+
+  for (int64_t batch_idx = 0; batch_idx < idx_mapping.size(0); ++batch_idx) {
+    const int32_t req_state_idx = idx_mapping_ptr[batch_idx];
+    const int32_t query_start = query_start_loc_ptr[batch_idx];
+    const int32_t query_end = query_start_loc_ptr[batch_idx + 1];
+    const int32_t target_start = num_computed_tokens_ptr[req_state_idx] + 1;
+    const int32_t* request_tokens =
+        all_token_ids_ptr + req_state_idx * all_token_ids_stride;
+
+    std::transform(request_tokens + target_start,
+                   request_tokens + target_start + query_end - query_start,
+                   token_ids_ptr + query_start, [](int32_t token_id) {
+                     return static_cast<int64_t>(token_id);
+                   });
+  }
+  return token_ids;
+}
+
 void prepare_pos_seq_lens_cpu(const torch::Tensor& idx_mapping,
                               const torch::Tensor& query_start_loc,
                               const torch::Tensor& num_computed_tokens,

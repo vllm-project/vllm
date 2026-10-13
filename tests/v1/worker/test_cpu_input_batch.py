@@ -55,6 +55,26 @@ def test_prepare_prefill_inputs_cpu() -> None:
     assert torch.all(next_prefill_tokens[:, [0, 2, 5]] == -1)
 
 
+def test_get_prompt_logprobs_token_ids_cpu() -> None:
+    all_token_ids_storage = torch.full((6, 12), -1, dtype=torch.int32)
+    all_token_ids = all_token_ids_storage[:, 1:11]
+    for req_state_idx in range(6):
+        all_token_ids[req_state_idx] = req_state_idx * 100 + torch.arange(
+            10, dtype=torch.int32
+        )
+
+    token_ids = ops.get_prompt_logprobs_token_ids_cpu(
+        num_tokens=6,
+        query_start_loc=torch.tensor([0, 3, 5, 6], dtype=torch.int32),
+        idx_mapping=torch.tensor([4, 1, 3], dtype=torch.int32),
+        num_computed_tokens=torch.tensor([0, 4, 0, 1, 2, 0], dtype=torch.int32),
+        all_token_ids=all_token_ids,
+    )
+
+    assert token_ids.dtype == torch.int64
+    assert token_ids.tolist() == [403, 404, 405, 105, 106, 302]
+
+
 def test_prepare_pos_seq_lens_cpu() -> None:
     positions_storage = torch.full((8,), -1, dtype=torch.int64)
     positions = positions_storage[1:]
