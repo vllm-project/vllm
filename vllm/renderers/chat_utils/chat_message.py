@@ -12,7 +12,6 @@ from openai.types.chat import (
     ChatCompletionContentPartImageParam,
     ChatCompletionContentPartInputAudioParam,
     ChatCompletionContentPartRefusalParam,
-    ChatCompletionContentPartTextParam,
     ChatCompletionToolMessageParam,
 )
 from openai.types.responses import ResponseInputImageParam
@@ -21,11 +20,14 @@ from pydantic import TypeAdapter
 
 from vllm.config import ModelConfig
 from vllm.exceptions import VLLMValidationError
+from vllm.inputs import MultiModalDataDict, MultiModalUUIDDict
 from vllm.logger import init_logger
 
-from ...inputs import MultiModalDataDict, MultiModalUUIDDict
-from . import PROMPT_EMBEDS_PLACEHOLDER_TOKEN
-from .content_parser import MODALITY_PLACEHOLDERS_MAP, BaseMultiModalContentParser
+from .content_parser import (
+    MODALITY_PLACEHOLDERS_MAP,
+    PROMPT_EMBEDS_PLACEHOLDER_TOKEN,
+    BaseMultiModalContentParser,
+)
 from .item_tracker import (
     AsyncMultiModalItemTracker,
     BaseMultiModalItemTracker,
