@@ -1035,6 +1035,44 @@ def test_eagle_partial_lookup_loads_attention_proof(missing):
     assert dst_spec.group_sizes == [2, 1]
 
 
+@pytest.mark.parametrize(
+    ("attention_missing", "expected_hit", "expected_lookups"),
+    [
+        # Chunk h3 is looked up once for the boundaries 24 and 20.
+        (None, 20, ["0h3", "0h3", "0h6", "1h5", "0h5", "1h4"]),
+        # A missing chunk h3 skips the boundaries 24, 20 and 16.
+        (b"h3", 0, ["0h3", "0h3", "0h3", "0h2", "1h1", "0h1", "1h0"]),
+    ],
+)
+def test_eagle_partial_lookup_probes_popped_chunk_once(
+    attention_missing, expected_hit, expected_lookups
+):
+    """Boundaries past the popped EAGLE chunk share one lookup of that chunk.
+
+    The Mamba state is stored only at 20 (h4). Before this lookup was shared,
+    the same hits took 7 and 9 lookups.
+    """
+    scheduler = _make_partial_tail_scheduler(eagle=True)
+    _make_partial_tail_request(scheduler)
+    req_status = scheduler._req_status["req"]
+    req_status.num_locally_computed_tokens = 0
+    req_status.update_offload_keys()
+    lookups = []
+
+    def lookup(key, req_context):
+        group_idx = get_offload_group_idx(key)
+        block_hash = get_offload_block_hash(key)
+        lookups.append(f"{group_idx}{block_hash.decode()}")
+        ready = (
+            block_hash == b"h4" if group_idx == 1 else block_hash != attention_missing
+        )
+        return LookupResult.HIT if ready else LookupResult.MISS
+
+    scheduler.manager.lookup.side_effect = lookup
+    assert scheduler._lookup(req_status) == expected_hit
+    assert lookups == expected_lookups
+
+
 @pytest.mark.parametrize("cow_on_proof_step", [False, True])
 def test_eagle_partial_tail_round_trip_serves_mamba_checkpoint(cow_on_proof_step):
     """Store, finish and resend a 30-token prompt with an EAGLE group.

@@ -561,6 +561,15 @@ def _create_req_context(req: Request) -> ReqContext:
     )
 
 
+class _BridgeChunk(NamedTuple):
+    """Complete chunk that a partial tail in the following block also loads."""
+
+    chunk_idx: int
+    keys: list[tuple[GroupOffloadConfig, OffloadKey]]
+    # A key is ready only after a pending load or store finishes.
+    pending: bool
+
+
 class OffloadingConnectorScheduler:
     """Implementation of Scheduler side methods"""
 
@@ -1025,10 +1034,21 @@ class OffloadingConnectorScheduler:
         if max_boundary <= complete_boundary:
             return complete_hit
 
+        # A boundary past the block of complete_boundary also loads that
+        # block's complete chunk. Look it up once, and only if it is needed.
+        block_size = self._partial_tail_block_size
+        bridge_boundary = round_down(complete_boundary, block_size) + block_size
+        bridge: _BridgeChunk | None = None
         pending = False
+        if max_boundary >= bridge_boundary:
+            bridge, pending = self._lookup_bridge_chunk(
+                req_status, complete_boundary // block_size
+            )
+            if bridge is None:
+                max_boundary = bridge_boundary - tokens_per_hash
         for boundary in range(max_boundary, complete_boundary, -tokens_per_hash):
             hit, boundary_pending = self._lookup_partial_tail(
-                req_status, boundary, complete_boundary
+                req_status, boundary, bridge if boundary >= bridge_boundary else None
             )
             if hit:
                 req_status.partial_tail_boundary = boundary
@@ -1045,40 +1065,45 @@ class OffloadingConnectorScheduler:
         """Token position whose hash keys a group's partial-tail block."""
         return boundary + self._eagle_proof_margins.get(group_config.group_idx, 0)
 
+    def _lookup_bridge_chunk(
+        self, req_status: RequestOffloadState, chunk_idx: int
+    ) -> tuple[_BridgeChunk | None, bool]:
+        """Look up a complete chunk in every non-recurrent group.
+
+        Returns ``(bridge, pending)``. ``bridge`` is None if a key misses.
+        ``pending`` is True if a key looked up before a miss is not ready yet.
+        """
+        keys = [
+            (group_config, group_state.offload_keys[chunk_idx])
+            for group_config, group_state in zip(
+                self.config.kv_group_configs, req_status.group_states
+            )
+            if not group_config.requires_cow_source
+        ]
+        pending = any(key in (self._chunks_being_loaded or ()) for _, key in keys)
+        for _, key in keys:
+            result = self.manager.lookup(key, req_status.req_context)
+            if result is LookupResult.MISS:
+                return None, pending
+            pending |= result is not LookupResult.HIT
+        return _BridgeChunk(chunk_idx, keys, pending), pending
+
     def _lookup_partial_tail(
         self,
         req_status: RequestOffloadState,
         boundary: int,
-        complete_boundary: int,
+        bridge: _BridgeChunk | None,
     ) -> tuple[bool, bool]:
         """Look up every key a partial-tail hit at ``boundary`` loads.
 
+        ``bridge`` is the complete chunk that the hit also loads, if any.
         Returns ``(hit, pending)``. ``hit`` is True only if every key is ready.
         ``pending`` is True if a key looked up before the first miss is not
-        ready yet. A boundary past the block that follows ``complete_boundary``
-        also needs that block's complete chunk in every non-recurrent group.
+        ready yet.
         """
         req = req_status.req
         req_context = req_status.req_context
-        block_size = self._partial_tail_block_size
-        bridge_chunk_idx = complete_boundary // block_size
-        bridge_keys = [
-            (group_config, group_state.offload_keys[bridge_chunk_idx])
-            for group_config, group_state in zip(
-                self.config.kv_group_configs, req_status.group_states
-            )
-            if boundary // block_size > bridge_chunk_idx
-            and not group_config.requires_cow_source
-        ]
-        pending = any(
-            key in (self._chunks_being_loaded or ()) for _, key in bridge_keys
-        )
-        for _, key in bridge_keys:
-            result = self.manager.lookup(key, req_context)
-            if result is LookupResult.MISS:
-                return False, pending
-            pending |= result is not LookupResult.HIT
-
+        pending = bridge is not None and bridge.pending
         boundary_keys: list[tuple[GroupOffloadConfig, int, OffloadKey]] = []
         for group_config in self.config.kv_group_configs:
             key_tokens = self._partial_tail_key_tokens(group_config, boundary)
@@ -1093,8 +1118,11 @@ class OffloadingConnectorScheduler:
 
         if pending:
             return False, True
-        for group_config, key in bridge_keys:
-            self._events_tracker.record_lookup(req, group_config, bridge_chunk_idx, key)
+        if bridge is not None:
+            for group_config, key in bridge.keys:
+                self._events_tracker.record_lookup(
+                    req, group_config, bridge.chunk_idx, key
+                )
         for group_config, key_tokens, key in boundary_keys:
             self._events_tracker.record_partial_lookup(
                 req, group_config, key_tokens, key
