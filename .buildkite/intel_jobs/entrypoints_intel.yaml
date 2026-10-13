@@ -1,4 +1,4 @@
-group: Entrypoints
+group: Entrypoints Intel
 depends_on:
   - image-build-xpu
 steps:
