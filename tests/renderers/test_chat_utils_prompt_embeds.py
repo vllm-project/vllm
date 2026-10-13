@@ -22,13 +22,13 @@ from vllm.renderers.chat_utils import parse_chat_messages, parse_chat_messages_a
 from vllm.renderers.chat_utils.chat_message import (
     _PROMPT_EMBEDS_MISSING_DATA_ERROR,
     _RESERVED_PLACEHOLDER_IN_TEXT_ERROR,
+    MM_PARSER_MAP,
 )
 from vllm.renderers.chat_utils.content_parser import (
     _ENABLE_PROMPT_EMBEDS_ERROR,
     MODALITY_PLACEHOLDERS_MAP,
     PROMPT_EMBEDS_PLACEHOLDER_TOKEN,
 )
-from vllm.renderers.chat_utils.mm_parser_map import MM_PARSER_MAP
 from vllm.renderers.hf import (
     _PROMPT_EMBEDS_PLACEHOLDER_SPAN_MISMATCH_ERROR,
     _build_mixed_prompt_embeds,
