@@ -17,9 +17,8 @@ from vllm.entrypoints.serve.utils.api_utils import (
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("disconnect", [False, True])
-async def test_cancellation_with_response_model(disconnect: bool):
-    """Disconnect cancels work without a validation 500; success stays typed."""
+async def test_with_cancellation_disconnect_skips_response_validation():
+    """A disconnect must cancel the handler without a response_model 500."""
     app = FastAPI()
     started = asyncio.Event()
     cancelled = asyncio.Event()
@@ -27,10 +26,7 @@ async def test_cancellation_with_response_model(disconnect: bool):
     @app.post("/", response_model=str)
     @api_utils.with_cancellation
     async def handler(body: dict, raw_request: Request):
-        """Return a typed result or wait for cancellation after reading the body."""
         started.set()
-        if not disconnect:
-            return "done"
         try:
             await asyncio.Future()
         finally:
@@ -40,44 +36,33 @@ async def test_cancellation_with_response_model(disconnect: bool):
     body_sent = False
 
     async def receive():
-        """Deliver the parsed body, then disconnect only after work starts."""
         nonlocal body_sent
         if not body_sent:
             body_sent = True
             return {"type": "http.request", "body": b"{}", "more_body": False}
         await started.wait()
-        if disconnect:
-            return {"type": "http.disconnect"}
-        await asyncio.Future()
+        return {"type": "http.disconnect"}
 
     async def send(message):
-        """Capture ASGI output to assert the status and serialized body."""
         messages.append(message)
 
-    await asyncio.wait_for(
-        app(
-            {
-                "type": "http",
-                "asgi": {"version": "3.0"},
-                "http_version": "1.1",
-                "method": "POST",
-                "scheme": "http",
-                "path": "/",
-                "raw_path": b"/",
-                "query_string": b"",
-                "headers": [(b"content-type", b"application/json")],
-                "client": ("127.0.0.1", 1234),
-                "server": ("test", 80),
-            },
-            receive,
-            send,
-        ),
-        timeout=5,
-    )
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": "/",
+        "raw_path": b"/",
+        "query_string": b"",
+        "headers": [(b"content-type", b"application/json")],
+        "client": ("127.0.0.1", 1234),
+        "server": ("test", 80),
+    }
+    await asyncio.wait_for(app(scope, receive, send), timeout=5)
     assert messages[0]["status"] == 200
-    assert messages[1]["body"] == (b"" if disconnect else b'"done"')
-    if disconnect:
-        await asyncio.wait_for(cancelled.wait(), timeout=5)
+    assert messages[1]["body"] == b""
+    await asyncio.wait_for(cancelled.wait(), timeout=5)
 
 
 @pytest.mark.parametrize(

@@ -17,6 +17,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.entrypoints.serve.utils.api_utils import (
+    json_or_sse_responses,
     load_aware_call,
     validate_json_request,
     with_cancellation,
@@ -41,69 +42,17 @@ def batch_chat(request: Request) -> OpenAIServingChatBatch | None:
 
 @router.post(
     "/v1/chat/completions",
-    response_model=ChatCompletionResponse,
     dependencies=[Depends(validate_json_request)],
-    # Register the streaming model alongside response_model's non-streaming model.
-    # FastAPI also assigns it to application/json; openapi_extra restores the
-    # non-streaming JSON schema after generation.
-    responses={
-        HTTPStatus.OK.value: {
-            "model": ChatCompletionStreamResponse,
-            "description": (
-                "JSON response when stream=false. With stream=true, SSE data "
-                "events contain a response chunk, an error, or [DONE]. "
-                "Keep-alive comments are not data events."
-            ),
-            "content": {
-                "text/event-stream": {
-                    "itemSchema": {
-                        "type": "object",
-                        "required": ["data"],
-                        "properties": {
-                            "data": {
-                                "type": "string",
-                                "anyOf": [
-                                    {"const": "[DONE]"},
-                                    {
-                                        "contentMediaType": "application/json",
-                                        "contentSchema": {
-                                            "$ref": (
-                                                "#/components/schemas/"
-                                                "ChatCompletionStreamResponse"
-                                            )
-                                        },
-                                    },
-                                    {
-                                        "contentMediaType": "application/json",
-                                        "contentSchema": {
-                                            "$ref": "#/components/schemas/ErrorResponse"
-                                        },
-                                    },
-                                ],
-                            },
-                        },
-                    }
-                },
-            },
+    **json_or_sse_responses(
+        ChatCompletionResponse,
+        ChatCompletionStreamResponse,
+        {
+            HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
+            HTTPStatus.NOT_FOUND.value: {"model": ErrorResponse},
+            HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
+            HTTPStatus.NOT_IMPLEMENTED.value: {"model": ErrorResponse},
         },
-        HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
-        HTTPStatus.NOT_FOUND.value: {"model": ErrorResponse},
-        HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
-        HTTPStatus.NOT_IMPLEMENTED.value: {"model": ErrorResponse},
-    },
-    openapi_extra={
-        "responses": {
-            "200": {
-                "content": {
-                    "application/json": {
-                        "schema": {
-                            "$ref": "#/components/schemas/ChatCompletionResponse"
-                        }
-                    }
-                }
-            }
-        }
-    },
+    ),
 )
 @with_cancellation
 @load_aware_call

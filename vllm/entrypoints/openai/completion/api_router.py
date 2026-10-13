@@ -15,6 +15,7 @@ from vllm.entrypoints.openai.completion.protocol import (
 from vllm.entrypoints.openai.completion.serving import OpenAIServingCompletion
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.entrypoints.serve.utils.api_utils import (
+    json_or_sse_responses,
     load_aware_call,
     validate_json_request,
     with_cancellation,
@@ -35,66 +36,16 @@ def completion(request: Request) -> OpenAIServingCompletion | None:
 
 @router.post(
     "/v1/completions",
-    response_model=CompletionResponse,
     dependencies=[Depends(validate_json_request)],
-    # Register the streaming model alongside response_model's non-streaming model.
-    # FastAPI also assigns it to application/json; openapi_extra restores the
-    # non-streaming JSON schema after generation.
-    responses={
-        HTTPStatus.OK.value: {
-            "model": CompletionStreamResponse,
-            "description": (
-                "JSON response when stream=false. With stream=true, SSE data "
-                "events contain a response chunk, an error, or [DONE]. "
-                "Keep-alive comments are not data events."
-            ),
-            "content": {
-                "text/event-stream": {
-                    "itemSchema": {
-                        "type": "object",
-                        "required": ["data"],
-                        "properties": {
-                            "data": {
-                                "type": "string",
-                                "anyOf": [
-                                    {"const": "[DONE]"},
-                                    {
-                                        "contentMediaType": "application/json",
-                                        "contentSchema": {
-                                            "$ref": (
-                                                "#/components/schemas/"
-                                                "CompletionStreamResponse"
-                                            )
-                                        },
-                                    },
-                                    {
-                                        "contentMediaType": "application/json",
-                                        "contentSchema": {
-                                            "$ref": "#/components/schemas/ErrorResponse"
-                                        },
-                                    },
-                                ],
-                            },
-                        },
-                    }
-                },
-            },
+    **json_or_sse_responses(
+        CompletionResponse,
+        CompletionStreamResponse,
+        {
+            HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
+            HTTPStatus.NOT_FOUND.value: {"model": ErrorResponse},
+            HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
         },
-        HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
-        HTTPStatus.NOT_FOUND.value: {"model": ErrorResponse},
-        HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
-    },
-    openapi_extra={
-        "responses": {
-            "200": {
-                "content": {
-                    "application/json": {
-                        "schema": {"$ref": "#/components/schemas/CompletionResponse"}
-                    }
-                }
-            }
-        }
-    },
+    ),
 )
 @with_cancellation
 @load_aware_call
