@@ -29,6 +29,8 @@ def _fused_wo_a_max_tokens(layer: nn.Module) -> int:
 
 def _can_fuse_wo_a(layer: nn.Module) -> bool:
     """Whether the attention layer matches the fused WO-A kernel's layout."""
+    if layer.o_proj_ranks_per_group > 1:
+        return False
     method = getattr(layer.wo_b, "scheme", layer.wo_b.quant_method)
     return (
         current_platform.is_device_capability_family(100)
@@ -92,4 +94,5 @@ def dsv41_o_proj(
         o_lora_rank=layer.o_lora_rank,
         einsum_recipe=layer._einsum_recipe,
         tma_aligned_scales=layer._tma_aligned_scales,
+        ranks_per_group=layer.o_proj_ranks_per_group,
     )

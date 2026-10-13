@@ -72,6 +72,7 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
             o_lora_rank=self.o_lora_rank,
             einsum_recipe=self._einsum_recipe,
             tma_aligned_scales=self._tma_aligned_scales,
+            ranks_per_group=self.o_proj_ranks_per_group,
         )
 
     @classmethod

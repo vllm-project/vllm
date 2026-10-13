@@ -18,13 +18,19 @@ Usage:
     pytest tests/kernels/test_fused_inv_rope_fp8_quant.py -v
 """
 
+from datetime import timedelta
+from types import SimpleNamespace
+
 import pytest
 import torch
+import torch.distributed as dist
+import torch.multiprocessing as mp
 
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     deepgemm_post_process_fp8_weight_block,
 )
 from vllm.models.deepseek_v4.common.ops import fused_inv_rope_fp8_quant
+from vllm.models.deepseek_v4.nvidia.ops import o_proj as projection
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import fp8_einsum
 
@@ -36,6 +42,38 @@ QUANT_GROUP_SIZE = 128
 FP8_MAX = 448.0  # torch.finfo(torch.float8_e4m3fn).max
 FP8_DTYPE = torch.float8_e4m3fn
 EPS = 1e-10
+
+
+@pytest.mark.cpu_test
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize(
+    "tp_size,major,blocks", [(8, 12, {128}), (16, 9, {128}), (32, 12, {32, 128})]
+)
+def test_o_group_warmup_uses_complete_head_groups(tp_size, major, blocks, monkeypatch):
+    """Cross-rank groups must warm the eight-head quantization specialization."""
+    from importlib import import_module
+
+    module = import_module(
+        "vllm.models.deepseek_v4.common.ops.fused_inv_rope_fp8_quant"
+    )
+    monkeypatch.setattr(
+        module,
+        "current_platform",
+        SimpleNamespace(
+            get_device_capability=lambda: SimpleNamespace(major=major),
+            is_arch_support_pdl=lambda: False,
+        ),
+    )
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(num_attention_heads=64, o_groups=8)
+        ),
+        parallel_config=SimpleNamespace(tensor_parallel_size=tp_size),
+    )
+    keys = module._FUSED_INV_ROPE_FP8_QUANT_KERNEL.get_warmup_keys(config)
+    assert keys
+    assert all(key.heads_per_group == 8 for key in keys)
+    assert {key.quant_group_size for key in keys} == blocks
 
 
 @pytest.mark.skipif(
@@ -831,14 +869,99 @@ def _unfused_inv_rope_fp8_quant(
 # =========================================================================
 
 
+def _o_proj_worker(rank, ranks_per_group, store):
+    dist.init_process_group(
+        "gloo",
+        init_method=store,
+        rank=rank,
+        world_size=4,
+        timeout=timedelta(seconds=30),
+    )
+    try:
+        groups, local_heads, local_rank = (
+            4 // ranks_per_group,
+            8 // ranks_per_group,
+            32 // ranks_per_group,
+        )
+        local_groups, partition = projection.get_o_proj_partition(groups, 32, 4)
+        torch.manual_seed(7)
+        # Integer inputs make the BF16 projection exactly representable.
+        o = torch.randint(-2, 3, (7, groups * 8, 4)).bfloat16()
+        wa = torch.randint(-2, 3, (groups, 32, 32)).bfloat16()
+        wb = torch.randint(-2, 3, (12, groups * 32)).double()
+        group, channel = divmod(rank, ranks_per_group)
+        start = channel * local_rank
+
+        def gather(x, dim):
+            peers = [torch.empty_like(x) for _ in range(4)]
+            dist.all_gather(peers, x)
+            return torch.cat(peers, dim=dim)
+
+        def inverse_rope(x, *args, n_groups, heads_per_group, **kwargs):
+            # Identity RoPE isolates the sharding and reduction contract on CPU.
+            return x[:, : n_groups * heads_per_group].reshape(7, n_groups, -1), None
+
+        def wo_b(z):
+            result = z.double() @ wb[:, rank * local_rank : (rank + 1) * local_rank].T
+            dist.all_reduce(result)
+            return result
+
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(projection, "tensor_model_parallel_all_gather", gather)
+            patch.setattr(projection, "get_tensor_model_parallel_rank", lambda: rank)
+            patch.setattr(projection, "fused_inv_rope_fp8_quant", inverse_rope)
+            local = torch.nn.functional.pad(
+                o[:, rank * local_heads : (rank + 1) * local_heads],
+                (0, 0, 0, 2),
+                value=float("nan"),
+            )
+            result = projection.deep_gemm_fp8_o_proj(
+                local,
+                torch.zeros(7, dtype=torch.long),
+                torch.empty(1, 0),
+                SimpleNamespace(
+                    weight=wa[group : group + 1, start : start + local_rank]
+                ),
+                wo_b,
+                n_groups=local_groups,
+                heads_per_group=local_heads,
+                nope_dim=4,
+                rope_dim=0,
+                o_lora_rank=32,
+                einsum_recipe=(1, 1, 128),
+                tma_aligned_scales=False,
+                ranks_per_group=partition,
+            )
+            expected = torch.einsum("tgk,grk->tgr", o.reshape(7, groups, -1), wa)
+            torch.testing.assert_close(
+                result, expected.flatten(1).double() @ wb.T, rtol=0, atol=0
+            )
+    finally:
+        dist.destroy_process_group()
+
+
+@pytest.mark.cpu_test
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize("ranks_per_group", [1, 2, 4])
+def test_cross_rank_o_projection_matches_reference(ranks_per_group, tmp_path):
+    """Real collectives reconstruct both WO-A and WO-B checkpoint shards."""
+    mp.spawn(
+        _o_proj_worker, args=(ranks_per_group, f"file://{tmp_path / 'store'}"), nprocs=4
+    )
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
 @pytest.mark.parametrize("num_tokens", [1, 7, 32, 128, 1024])
+@pytest.mark.parametrize("ranks_per_group", [1, 2, 4])
 @pytest.mark.parametrize(
     "num_heads,n_groups",
     [(64, 8)],
     ids=["H64_G8"],
 )
 @torch.inference_mode()
-def test_einsum_end_to_end(num_tokens, num_heads, n_groups):
+def test_einsum_end_to_end(
+    num_tokens, num_heads, n_groups, ranks_per_group, monkeypatch
+):
     """End-to-end: fused inv_rope+quant → fp8_einsum must match
     unfused CUDA_rope+quant → fp8_einsum bitwise.
 
@@ -914,22 +1037,58 @@ def test_einsum_end_to_end(num_tokens, num_heads, n_groups):
 
     # -- FUSED path --
     wo_a = torch.nn.Module()
+    local_o = o.clone()
+    local_groups = n_groups
+    local_heads = heads_per_group
+    actual_ranks = 1
+    z_expected = z_ref
+    if ranks_per_group > 1:
+        tp_size = n_groups * ranks_per_group
+        rank = tp_size - 1
+        group = rank // ranks_per_group
+        local_rank = o_lora_rank // ranks_per_group
+        start = rank % ranks_per_group * local_rank
+        w_fp8 = w_fp8[group : group + 1, start : start + local_rank]
+        w_scale_t = transform_sf_into_required_layout(
+            sf=w_scale[group : group + 1, start // 128 : (start + local_rank) // 128],
+            mn=local_rank,
+            k=d,
+            recipe=(1, 128, 128),
+            num_groups=1,
+            is_sfa=False,
+        )
+        local_groups, actual_ranks = projection.get_o_proj_partition(
+            n_groups, o_lora_rank, tp_size
+        )
+        local_heads = heads_per_group // ranks_per_group
+        head_start = rank * local_heads
+        local_o = torch.nn.functional.pad(
+            o[:, head_start : head_start + local_heads],
+            (0, 0, 0, 2),
+            value=float("nan"),
+        )
+        monkeypatch.setattr(
+            projection, "tensor_model_parallel_all_gather", lambda x, dim: o
+        )
+        monkeypatch.setattr(projection, "get_tensor_model_parallel_rank", lambda: rank)
+        z_expected = z_ref[:, group : group + 1, start : start + local_rank]
     wo_a.register_buffer("weight", w_fp8)
     wo_a.register_buffer("weight_scale", w_scale_t)
     z_fused = deep_gemm_fp8_o_proj(
-        o.clone(),
+        local_o,
         positions,
         cos_sin_cache,
         wo_a,
         torch.nn.Identity(),
-        n_groups=n_groups,
-        heads_per_group=heads_per_group,
+        n_groups=local_groups,
+        heads_per_group=local_heads,
         nope_dim=NOPE_DIM,
         rope_dim=ROPE_DIM,
         o_lora_rank=o_lora_rank,
         einsum_recipe=recipe,
         tma_aligned_scales=True,
-    ).view_as(z_ref)
+        ranks_per_group=actual_ranks,
+    ).view_as(z_expected)
 
     # -- Checks --
     # Einsum output: Triton and CUDA both rotate in fp32 now, so diffs
@@ -941,7 +1100,7 @@ def test_einsum_end_to_end(num_tokens, num_heads, n_groups):
         sim = 2 * (x * y).sum() / denominator
         return 1 - sim
 
-    z_diff = calc_diff(z_fused, z_ref)
+    z_diff = calc_diff(z_fused, z_expected)
     assert z_diff < 0.01, (
         f"Einsum output diff too large: {z_diff:.6f} (expected < 0.01)"
     )

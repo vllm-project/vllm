@@ -218,6 +218,13 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         self.nope_head_dim = self.head_dim - self.rope_head_dim
         self.n_groups = config.o_groups
         self.n_local_groups = self.n_groups // tp_size
+        self.o_proj_ranks_per_group = 1
+        if current_platform.is_cuda():
+            from .nvidia.ops.o_proj import get_o_proj_partition
+
+            self.n_local_groups, self.o_proj_ranks_per_group = get_o_proj_partition(
+                self.n_groups, self.o_lora_rank, tp_size
+            )
         self.window_size = config.sliding_window
         # Vision variant: image spans are visible bidirectionally, widening
         # prefill SWA index rows by up to max_image_tokens columns.
