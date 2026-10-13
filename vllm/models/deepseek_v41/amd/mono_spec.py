@@ -116,7 +116,7 @@ class LaunchState:
     need_swa: bool = False
 
 
-class LayerKernelBase:
+class DSV41LayerKernel:
     """The ``LayerKernel`` both launches implement: the layer, its width and
     its weight views, with the launch shape left to the subclass."""
 
@@ -141,7 +141,7 @@ class LayerKernelBase:
         raise NotImplementedError
 
 
-class WholeLayer(LayerKernelBase):
+class WholeLayer(DSV41LayerKernel):
     """The whole backbone layer as K1 and K2, from the layer's own inputs."""
 
     def __init__(
@@ -231,7 +231,7 @@ class WholeLayer(LayerKernelBase):
         )
 
 
-class FfnSeam(LayerKernelBase):
+class FfnSeam(DSV41LayerKernel):
     """The FFN seam, MoE and both reductions as one launch, from wo_b's
     unreduced output after vLLM's attention."""
 
@@ -479,7 +479,7 @@ def _bind(ctx: MonoContext, caches) -> list[str]:
 
 def _build(
     ctx: MonoContext, launch_state: LaunchState, layer, width: int
-) -> LayerKernelBase:
+) -> DSV41LayerKernel:
     world = ctx.vllm_config.parallel_config.tensor_parallel_size
     why = _ffn_only(layer)
     if layer.attn.layer_id not in launch_state.weights:

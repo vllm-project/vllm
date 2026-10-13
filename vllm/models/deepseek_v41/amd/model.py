@@ -61,7 +61,7 @@ from vllm.models.common.ops.sequence_parallel import (
 from vllm.models.deepseek_v4.amd.model import (
     DeepseekV4MoE as DeepseekV4MoEBase,
 )
-from vllm.models.deepseek_v41.amd.mono_spec import SPECS_PATH, LayerKernelBase
+from vllm.models.deepseek_v41.amd.mono_spec import SPECS_PATH, DSV41LayerKernel
 from vllm.models.deepseek_v41.amd.rocm import DeepseekV41ROCMAiterMLAAttention
 from vllm.models.deepseek_v41.attention import DeepseekV4Attention
 from vllm.models.deepseek_v41.decoder_replay_layers import DecoderReplayLayers
@@ -280,7 +280,7 @@ class DeepseekV4DecoderLayer(nn.Module):
         mono: MonoRuntime | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         kernel = typing.cast(
-            LayerKernelBase | None, kernel_for(mono, self.attn.layer_id, positions)
+            DSV41LayerKernel | None, kernel_for(mono, self.attn.layer_id, positions)
         )
         step = None if mono is None else mono.step
         if kernel is not None and step is not None and not kernel.ffn_only:
