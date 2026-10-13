@@ -214,13 +214,9 @@ class OffloadingEventsTracker:
         if boundary_tokens % group_config.tokens_per_chunk == 0:
             chunk_idx = boundary_tokens // group_config.tokens_per_chunk - 1
             return self._build_event_metadata(state.request, group_config, chunk_idx)
-        self._record_partial_tail(
-            state.request,
-            group_config,
-            boundary_tokens,
-            offload_key,
+        return self._build_partial_tail_metadata(
+            state.request, group_config, boundary_tokens
         )
-        return self._pending_event_metadata.get(offload_key)
 
     def _record_lazy_metadata(
         self,
@@ -337,15 +333,25 @@ class OffloadingEventsTracker:
         boundary_tokens: int,
         offload_key: OffloadKey,
     ) -> None:
+        if not self.self_describing_enabled:
+            return
+        meta = self._build_partial_tail_metadata(req, group_config, boundary_tokens)
+        if existing := self._pending_event_metadata.get(offload_key):
+            meta.active_residencies.update(existing.active_residencies)
+        self._pending_event_metadata[offload_key] = meta
+
+    def _build_partial_tail_metadata(
+        self,
+        req: Request,
+        group_config: "GroupOffloadConfig",
+        boundary_tokens: int,
+    ) -> _OffloadEventMetadata:
         """Build metadata for the valid prefix of one physical cache block.
 
         A partial recurrent tail ends on a hash boundary but before its
         physical cache block is full. The event describes only the valid
         hashes and tokens, not the unused remainder of that physical block.
         """
-        if not self.self_describing_enabled:
-            return
-
         tokens_per_hash = group_config.tokens_per_chunk // group_config.hashes_per_chunk
         # Subtract one so the boundary token itself cannot select the next
         # physical block when the boundary lies exactly on a block edge.
@@ -378,7 +384,7 @@ class OffloadingEventsTracker:
             boundary_tokens,
             tokens_per_hash,
         )
-        meta = _OffloadEventMetadata(
+        return _OffloadEventMetadata(
             block_hashes=block_hashes,
             parent_block_hash=parent_block_hash,
             token_ids=tuple(req.all_token_ids[chunk_start:boundary_tokens]),
@@ -390,9 +396,6 @@ class OffloadingEventsTracker:
             kv_cache_spec=group_config.kv_event_group_spec,
             active_residencies={(Medium.CPU, None)},
         )
-        if existing := self._pending_event_metadata.get(offload_key):
-            meta.active_residencies.update(existing.active_residencies)
-        self._pending_event_metadata[offload_key] = meta
 
     def take_events(self, events: Iterable[OffloadingEvent]) -> Iterable[KVCacheEvent]:
         """Translate raw OffloadingEvents into self-describing KV events.
@@ -408,13 +411,18 @@ class OffloadingEventsTracker:
         """
         events = list(events)
         if self.self_describing_enabled:
-            # A primary removal can precede its queued secondary store in the
-            # same manager batch. Resolve request-owned store metadata first so
-            # the earlier removal can still expand to all constituent hashes.
+            # Backfill only removals that precede a store in this batch.
+            # BlockStored itself uses the context carried by its raw event.
+            earlier_removed_keys: set[OffloadKey] = set()
             for event in events:
-                if not event.removed and event.req_context is not None:
+                if event.removed:
+                    earlier_removed_keys.update(event.keys)
+                elif event.req_context is not None:
                     for key in event.keys:
-                        if key not in self._pending_event_metadata:
+                        if (
+                            key in earlier_removed_keys
+                            and key not in self._pending_event_metadata
+                        ):
                             self._record_lazy_metadata(event.req_context, key)
 
         removed_keys: set[OffloadKey] = set()
@@ -532,31 +540,39 @@ class OffloadingEventsTracker:
         )
 
     def _take_stored_event(self, event: OffloadingEvent) -> Iterable[KVCacheEvent]:
-        # Metadata is read, NOT popped: the entry must survive until the
-        # eviction event so BlockRemoved can fan out to the same hashes.
-        # Events are self-contained (own parent), so key order is free.
+        # Build BlockStored from this event's request, not from the detached
+        # metadata retained for the legacy expanded BlockRemoved contract.
         locality = event.locality.value if event.locality is not None else None
+        state = (
+            self._request_event_context(event.req_context)
+            if self.self_describing_enabled
+            else None
+        )
         for key in event.keys:
-            meta = self._pending_event_metadata.get(key)
-            if meta is None and self.self_describing_enabled:
-                meta = self._record_lazy_metadata(event.req_context, key)
+            meta = self._metadata_for(state, key) if state is not None else None
+            tracked = self._pending_event_metadata.get(key)
+            if meta is not None:
+                if tracked is None:
+                    tracked = meta
+                    self._pending_event_metadata[key] = tracked
+                elif event.medium is Medium.CPU:
+                    tracked.active_residencies.add((Medium.CPU, None))
+            if event.removal_expected and tracked is not None:
+                tracked.active_residencies.add((event.medium, event.ownership))
             if meta is None:
                 if self.self_describing_enabled:
                     # Expected for unsupported shapes; warn once only.
                     logger.warning_once(
                         "OffloadingEventsTracker: no event metadata for "
                         "offload key during BlockStored emission; emitting a "
-                        "placeholder payload. Expected for non-full-attention "
-                        "groups and promotions not observed as a primary-tier "
-                        "hit before translation."
+                        "placeholder payload. Expected for unsupported groups "
+                        "and stores without usable request context."
                     )
                 yield self._placeholder_stored(
                     key, event.medium, locality, event.ownership
                 )
                 continue
 
-            if event.removal_expected:
-                meta.active_residencies.add((event.medium, event.ownership))
             yield BlockStored(
                 block_hashes=list(
                     maybe_convert_block_hash(h) for h in meta.block_hashes

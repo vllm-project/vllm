@@ -522,6 +522,33 @@ def test_stored_event_without_matching_context_uses_placeholder(event_context):
     assert event.block_size == 0
 
 
+def test_stored_event_uses_context_not_retained_removal_payload():
+    tracker = _tracker()
+    req = _request(block_hashes=[_hash(0)], token_count=4)
+    [key] = _record_chunks(tracker, req, _group_config(), num_chunks=1)
+    tracker.record_hit(req.req_context, key)
+    tracker._pending_event_metadata[key].token_ids = (99, 99, 99, 99)
+
+    [stored] = tracker.take_events([_stored_event([key], req_context=req.req_context)])
+
+    assert stored.token_ids == [1, 2, 3, 4]
+
+
+def test_stored_event_without_context_ignores_retained_removal_payload():
+    tracker = _tracker()
+    req = _request(block_hashes=[_hash(0), _hash(1)], token_count=8)
+    [key] = _record_chunks(
+        tracker, req, _group_config(blocks_per_chunk=2), num_chunks=1
+    )
+    tracker.record_hit(req.req_context, key)
+
+    [stored] = tracker.take_events([_stored_event([key])])
+    [removed] = tracker.take_events([_removed_event([key])])
+
+    assert stored.block_size == 0
+    assert removed.block_hashes == [_wire_hash(_hash(0)), _wire_hash(_hash(1))]
+
+
 @pytest.mark.parametrize("unsafe_path", ["resumable", "mamba_truncation"])
 def test_token_mutating_request_uses_placeholder(unsafe_path):
     tracker = _tracker()
