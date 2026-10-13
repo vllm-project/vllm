@@ -4,10 +4,12 @@
 """Assert the vendored DeepGEMM package has the TORCH_LIBRARY binding layout.
 
 Expects ``deep_gemm/_C.py`` plus a single ``_C_extension*.so`` (abi3) under
-``vllm.third_party.deep_gemm``. Run after vLLM is installed, e.g. the H100
-deepgemm kernel tests in .buildkite/test_areas/kernels.yaml.
+``vllm.third_party.deep_gemm``, and that the package imports: vLLM treats an
+import failure as DeepGEMM being absent. Run after vLLM is installed, e.g. the
+H100 deepgemm kernel tests in .buildkite/test_areas/kernels.yaml.
 """
 
+import importlib
 import importlib.util
 import sys
 from pathlib import Path
@@ -37,6 +39,11 @@ def main() -> int:
     )
     if missing:
         print(f"missing: {missing}", file=sys.stderr)
+        return 1
+    try:
+        importlib.import_module("vllm.third_party.deep_gemm")
+    except Exception as e:
+        print(f"vllm.third_party.deep_gemm failed to import: {e!r}", file=sys.stderr)
         return 1
     return 0
 
