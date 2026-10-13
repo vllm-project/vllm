@@ -499,9 +499,6 @@ Some models are supported only via the [Transformers modeling backend](#transfor
 | `VaultGemmaForCausalLM` | VaultGemma | `google/vaultgemma-1b` | ✅︎ | ✅︎ |
 
 !!! note
-    For Kolibri 1 FP8, set `VLLM_USE_DEEP_GEMM=0` to preserve the checkpoint's FP32 block scales.
-
-!!! note
     Currently, the ROCm version of vLLM supports Mistral and Mixtral only for context lengths up to 4096.
 
 ## List of Multimodal Language Models
