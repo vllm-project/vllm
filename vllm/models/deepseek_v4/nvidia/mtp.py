@@ -340,6 +340,26 @@ class DeepSeekV4MTP(nn.Module):
     ) -> torch.Tensor | None:
         return self.model.compute_logits(hidden_states, spec_step_idx)
 
+    def _to_spec_layer_name(self, name: str) -> str:
+        """Remap V4 `mtp.{i}.*` names to `model.layers.{num_hidden_layers + i}.*`
+        so that get_spec_layer_idx_from_weight_name can identify them."""
+        mtp_layer_idx = 0
+        for subname in name.split("."):
+            try:
+                # we use the first encountered integer
+                mtp_layer_idx = int(subname)
+                break
+            except ValueError:
+                continue
+        return name.replace(
+            f"mtp.{mtp_layer_idx}.",
+            f"model.layers.{self.config.num_hidden_layers + mtp_layer_idx}.",
+        )
+
+    def is_unused_checkpoint_weight(self, name: str) -> bool:
+        name = self._to_spec_layer_name(name)
+        return get_spec_layer_idx_from_weight_name(self.config, name) is None
+
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         # Weight name remapping for checkpoint compatibility.
         # Maps checkpoint weight paths to model parameter paths.
@@ -355,16 +375,6 @@ class DeepSeekV4MTP(nn.Module):
                 if old_pattern in name:
                     name = name.replace(old_pattern, new_pattern)
             return name
-
-        def _find_mtp_layer_idx(name: str) -> int:
-            subnames = name.split(".")
-            for subname in subnames:
-                try:
-                    # we return the first encountered integer
-                    return int(subname)
-                except ValueError:
-                    continue
-            return 0
 
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
@@ -409,15 +419,7 @@ class DeepSeekV4MTP(nn.Module):
         )
 
         for name, loaded_weight in weights:
-            mtp_layer_idx = _find_mtp_layer_idx(name)
-            # V4 checkpoints store MTP weights as `mtp.{i}.*`; remap to
-            # `model.layers.{num_hidden_layers + i}.*` so that
-            # get_spec_layer_idx_from_weight_name can identify them.
-            name = name.replace(
-                f"mtp.{mtp_layer_idx}.",
-                f"model.layers.{self.config.num_hidden_layers + mtp_layer_idx}.",
-            )
-
+            name = self._to_spec_layer_name(name)
             spec_layer = get_spec_layer_idx_from_weight_name(self.config, name)
             if spec_layer is None:
                 continue
@@ -434,6 +436,13 @@ class DeepSeekV4MTP(nn.Module):
                     else ".weight_scale_inv"
                 )
                 name = name.removesuffix(".scale") + suffix
+            if ".shared_experts." in name:
+                experts = self.model.layers[str(spec_layer)].mtp_block.ffn.experts
+                if getattr(experts, "has_fused_shared_experts", False):
+                    loaded_params.add(
+                        experts.load_shared_expert_weight(name, loaded_weight)
+                    )
+                    continue
             if ".shared_experts.w2" in name:
                 name = name.replace(".shared_experts.w2", ".shared_experts.down_proj")
             if self.pad_shared_expert and ".shared_experts." in name:
@@ -527,16 +536,8 @@ class DeepSeekV4MTP(nn.Module):
                     f"Use a checkpoint that includes MTP layer weights, "
                     f"or disable speculative decoding."
                 )
-        self.process_weights_after_loading()
         logger.info_once("MTP draft model loaded: %d params", len(loaded_params))
         return loaded_params
-
-    def finalize_mega_moe_weights(self) -> None:
-        for layer in self.model.layers.values():
-            layer.mtp_block.ffn.finalize_mega_moe_weights()
-
-    def process_weights_after_loading(self) -> None:
-        self.finalize_mega_moe_weights()
 
     def _rewrite_spec_layer_name(self, spec_layer: int, name: str) -> str:
         """Rewrite the weight name to match the format of the original model.
