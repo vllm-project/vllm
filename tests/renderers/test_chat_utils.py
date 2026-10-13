@@ -16,24 +16,24 @@ from vllm.assets.video import VideoAsset
 from vllm.config import ModelConfig
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs import MultiModalDataDict, MultiModalUUIDDict
+from vllm.multimodal.media import MEDIA_CONNECTOR_REGISTRY
 from vllm.multimodal.utils import (
     encode_audio_url,
     encode_image_url,
     encode_video_url,
 )
 from vllm.renderers.chat_utils import (
-    MEDIA_CONNECTOR_REGISTRY,
     AsyncMultiModalItemTracker,
     ChatCompletionMessageParam,
     ConversationMessage,
-    _load_embeds_dict,
-    _parse_chat_message_content,
-    _parse_metadata_array,
-    _postprocess_messages,
+    parse_chat_message_content,
     parse_chat_messages,
     parse_chat_messages_async,
     validate_chat_template,
 )
+from vllm.renderers.chat_utils.chat_message import _postprocess_messages
+from vllm.renderers.chat_utils.content_parser import _load_embeds_dict
+from vllm.renderers.chat_utils.item_tracker import _parse_metadata_array
 from vllm.utils.serial_utils import tensor2base64
 
 KIMI_K2_5_MODEL_ID = "moonshotai/Kimi-K2.5"
@@ -3205,7 +3205,7 @@ def _parse_one(message) -> ConversationMessage:
     parser = tracker.create_parser.return_value
     parser.model_config.enable_prompt_embeds = False
     parser.mm_placeholder_storage.return_value = {}
-    result = _parse_chat_message_content(
+    result = parse_chat_message_content(
         message, tracker, content_format="string", interleave_strings=False
     )
     assert len(result) == 1
