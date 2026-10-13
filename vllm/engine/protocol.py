@@ -290,8 +290,10 @@ class EngineClient(ABC):
         """Get supported tasks."""
         raise NotImplementedError
 
-    async def get_kv_cache_group_metadata(self) -> list[dict[str, Any]]:
-        """Get canonical KV cache group metadata."""
+    async def get_kv_cache_group_metadata(
+        self,
+    ) -> list[dict[str, int | str | None]]:
+        """Get KV cache group metadata."""
         raise NotImplementedError
 
     async def init_weight_transfer_engine(

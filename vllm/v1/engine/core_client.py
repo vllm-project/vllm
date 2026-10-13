@@ -279,7 +279,7 @@ class EngineCoreClient(ABC):
 
     async def get_kv_cache_group_metadata_async(
         self,
-    ) -> list[dict[str, Any]]:
+    ) -> list[dict[str, int | str | None]]:
         raise NotImplementedError
 
     async def add_request_async(self, request: EngineCoreRequest) -> None:
@@ -1300,7 +1300,7 @@ class AsyncMPClient(MPClient):
 
     async def get_kv_cache_group_metadata_async(
         self,
-    ) -> list[dict[str, Any]]:
+    ) -> list[dict[str, int | str | None]]:
         return await self.call_utility_async("get_kv_cache_group_metadata")
 
     async def add_request_async(self, request: EngineCoreRequest) -> None:
