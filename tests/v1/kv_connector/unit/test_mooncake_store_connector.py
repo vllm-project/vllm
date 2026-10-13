@@ -509,7 +509,7 @@ def test_get_kv_connector_kv_cache_events_wraps_worker_events():
 
     mock_worker_cls.return_value.enable_kv_events = True
     mock_worker_cls.return_value.kv_send_thread = MagicMock()
-    mock_worker_cls.return_value.lookup_key_prefixes = ((_namespace(),),)
+    mock_worker_cls.return_value.lookup_key_prefixes = {0: (_namespace(),)}
     mock_worker_cls.return_value.drain_residency.return_value = _residency(
         [event],
         {store_block_key(event): [_namespace()]},
@@ -541,7 +541,7 @@ def test_get_kv_connector_kv_cache_events_checks_coverage_against_the_lookup_tab
 
     mock_worker_cls.return_value.enable_kv_events = True
     mock_worker_cls.return_value.kv_send_thread = MagicMock()
-    mock_worker_cls.return_value.lookup_key_prefixes = ((_namespace(),),)
+    mock_worker_cls.return_value.lookup_key_prefixes = {0: (_namespace(),)}
     mock_worker_cls.return_value.drain_residency.return_value = _residency(
         [event],
         {store_block_key(event): [_namespace(tp_rank=1)]},
@@ -569,7 +569,7 @@ def test_get_kv_connector_kv_cache_events_keeps_empty_worker_contribution():
     worker = mock_worker_cls.return_value
     worker.enable_kv_events = True
     worker.kv_send_thread = MagicMock()
-    worker.lookup_key_prefixes = ((_namespace(),),)
+    worker.lookup_key_prefixes = {0: (_namespace(),)}
     worker.drain_residency.return_value = _residency([], {})
 
     kv_events = connector.get_kv_connector_kv_cache_events()

@@ -153,6 +153,7 @@ def _make_store_sending_thread(
     enable_group_semantics: bool = False,
     supports_group_ids: bool = False,
     enable_kv_event: bool = False,
+    event_groups: list[tuple[int, object]] | None = None,
 ) -> mooncake_store_worker.KVCacheStoreSendingThread:
     if coord is None:
         coord = _default_send_coord()
@@ -174,6 +175,12 @@ def _make_store_sending_thread(
         replicate_config=replicate_config,
         enable_group_semantics=enable_group_semantics,
         supports_group_ids=supports_group_ids,
+        event_groups=event_groups
+        if event_groups is not None
+        else [
+            (group_id, group.kv_cache_spec)
+            for group_id, group in enumerate(coord.kv_cache_groups)
+        ],
     )
     thread.request_queue.task_done = MagicMock()
     return thread
@@ -2661,6 +2668,78 @@ def test_worker_init_excludes_nonprefix_cache_groups(monkeypatch):
     assert [db.block_size for db in store_worker.token_dbs] == [800, 800]
 
 
+def test_nonprefix_cache_group_keeps_its_core_id_in_residency_events(monkeypatch):
+    """The Store drops the QSA group, so its own group 1 is the core's group 2.
+
+    The residency report and the required coverage map both name the core id, so
+    a consumer matching the event against the core's block events sees the same
+    group, while Store keys keep the Store's own index.
+    """
+    from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.connector import (  # noqa: E501
+        MooncakeStoreKVEvents,
+    )
+
+    store = MagicMock()
+    store.setup.return_value = 0
+    _install_fake_mooncake(monkeypatch, store)
+    _patch_worker_runtime(monkeypatch)
+    monkeypatch.setattr(
+        worker.MooncakeStoreConfig,
+        "load_from_config",
+        staticmethod(lambda: _make_config()),
+    )
+    vllm_config = _make_vllm_config()
+    vllm_config.cache_config.block_size = 800
+    vllm_config.cache_config.enable_prefix_caching = True
+    vllm_config.cache_config.prefix_match_unit = None
+
+    store_worker = worker.MooncakeStoreWorker(
+        vllm_config, _make_qsa_hybrid_kv_cache_config()
+    )
+
+    # Cache groups 0 (full attention) and 2 (mamba); 1 is the QSA group.
+    assert [group_id for group_id, _ in store_worker._event_groups] == [0, 2]
+    assert sorted(store_worker.lookup_key_prefixes) == [0, 2]
+
+    source = mooncake_store_worker.StoreResidencyEvents(store_worker._event_groups)
+    db = store_worker.token_dbs[1]
+    block_hash = BlockHash(b"\x11" * 4)
+    source.record(
+        [
+            worker.StoreBlock(
+                group_idx=1,
+                block_hash=block_hash,
+                token_span=(0, 800),
+                parent_hash=None,
+                objects=(worker.StoreObject(db.key_for(block_hash), [0x1000], [256]),),
+            )
+        ],
+        ReqMeta(
+            req_id="req-a",
+            token_len_chunk=800,
+            block_ids=([1], [1]),
+            block_hashes=[block_hash],
+            can_save=True,
+        ),
+        set(),
+    )
+
+    residency = source.drain()
+    assert [event.group_idx for event in residency.events] == [2]
+    assert residency.events[0].kv_cache_spec_kind == "mamba"
+    assert "@group:1@" in db.key_for(block_hash)
+
+    events = MooncakeStoreKVEvents()
+    events.add_residency(
+        residency,
+        {
+            group_id: frozenset(prefixes)
+            for group_id, prefixes in store_worker.lookup_key_prefixes.items()
+        },
+    )
+    assert [event.group_idx for event in events.pop_ready_events()] == [2]
+
+
 def _make_two_full_attention_groups_kv_cache_config():
     """Two full-attention groups with different block sizes: no hybrid
     layers, but block-level failure reporting is still unsupported."""
@@ -3755,6 +3834,81 @@ def test_store_sending_thread_kv_events_use_group_chunk_metadata():
     assert swa_event.block_hashes == [maybe_convert_block_hash(BlockHash(hs[3]))]
 
 
+def test_residency_events_name_the_core_group_the_store_skips():
+    """The Store skips a cache group between the ones it keeps, so its own group
+    1 is the core's group 2: the event has to name 2 so a consumer can match it
+    against the core's own block events, while the Store key stays Store-indexed.
+    """
+    from vllm.v1.kv_cache_interface import (
+        FullAttentionSpec,
+        KVCacheGroupSpec,
+        SlidingWindowSpec,
+    )
+
+    store = MagicMock()
+    store.batch_is_exist.side_effect = lambda keys: [0] * len(keys)
+    store.batch_put_from_multi_buffers.return_value = [256, 256]
+
+    full_spec = FullAttentionSpec(
+        block_size=32, num_kv_heads=8, head_size=64, dtype=None
+    )
+    tail_spec = SlidingWindowSpec(
+        block_size=8,
+        num_kv_heads=8,
+        head_size=64,
+        dtype=None,
+        sliding_window=8,
+    )
+    coord = mooncake_store_worker.MooncakeStoreCoordinator(
+        [KVCacheGroupSpec(["L0"], full_spec), KVCacheGroupSpec(["L1"], tail_spec)],
+        scheduler_block_size=32,
+        hash_block_size=8,
+    )
+
+    db_full = ChunkedTokenDatabase(
+        KeyMetadata("test-model", 0, 0, 0, 0, group_id=0),
+        block_size=32,
+        hash_block_size=8,
+    )
+    db_full.set_kv_caches_base_addr([0x1000])
+    db_full.set_block_len([512])
+    db_tail = ChunkedTokenDatabase(
+        KeyMetadata("test-model", 0, 0, 0, 0, group_id=1),
+        block_size=8,
+        hash_block_size=8,
+    )
+    db_tail.set_kv_caches_base_addr([0x2000])
+    db_tail.set_block_len([128])
+
+    thread = _make_store_sending_thread(
+        store,
+        coord=coord,
+        token_databases=[db_full, db_tail],
+        block_size=32,
+        event_groups=[(0, full_spec), (2, tail_spec)],
+    )
+    thread.enable_kv_event = True
+
+    hs = [bytes([i + 1]) * 4 for i in range(4)]
+    _run_store_req(
+        thread,
+        ReqMeta(
+            req_id="r0",
+            token_len_chunk=32,
+            block_ids=([1], list(range(1, 5))),
+            block_hashes=hs,
+            can_save=True,
+            token_ids=list(range(32)),
+        ),
+    )
+
+    full_event, tail_event = thread.drain_residency().events
+    assert [full_event.group_idx, tail_event.group_idx] == [0, 2]
+    keys, _addrs, _sizes, _ = store.batch_put_from_multi_buffers.call_args.args
+    assert any("@group:1@" in key for key in keys)
+    assert all("@group:2@" not in key for key in keys)
+
+
 def _make_event_store_req(token_len: int, token_ids_start: int = 0) -> ReqMeta:
     num_blocks = token_len // 16
     return ReqMeta(
@@ -3941,6 +4095,7 @@ def _make_bare_worker(
         kv_cache_groups=[group],
     )
     worker._kv_cache_groups = [group]
+    worker._event_groups = ((0, spec),)
     worker.pcp_size = 1
     worker.dcp_size = 1
     worker.hash_block_size = block_size

@@ -558,8 +558,8 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
             self.connector_worker.drain_residency(),
             {
                 group_idx: frozenset(prefixes)
-                for group_idx, prefixes in enumerate(
-                    self.connector_worker.lookup_key_prefixes
+                for group_idx, prefixes in (
+                    self.connector_worker.lookup_key_prefixes.items()
                 )
             },
         )

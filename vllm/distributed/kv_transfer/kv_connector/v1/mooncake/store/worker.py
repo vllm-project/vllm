@@ -391,19 +391,29 @@ class StoreResidencyEvents:
     The single place this connector builds a ``BlockStored`` event, so a write
     path cannot end up persisting blocks without announcing them. Each event
     carries the Store key namespaces its block's objects occupy, which is what
-    the scheduler-side accumulator checks a block's reuse coverage against.
+    the scheduler-side accumulator checks a block's reuse coverage against, and
+    names its cache group by the core's group id, which the Store's own index
+    differs from whenever the Store skips a group the core keeps.
     """
 
-    def __init__(self, group_specs: Sequence[KVCacheSpec]) -> None:
+    def __init__(self, event_groups: Sequence[tuple[int, KVCacheSpec]]) -> None:
+        # A published event names its cache group by the id the core uses, so
+        # consumers can match it against the core's own block events. The Store
+        # index is a different number whenever the Store skips a group the core
+        # keeps, which is why each Store group arrives here paired with the id
+        # its events must carry, along with the spec that id refers to.
+        self._group_ids = tuple(group_id for group_id, _ in event_groups)
         # Mirrors KVCacheManager.kv_cache_event_metadata: consumers classify and
         # filter a group from the spec of the group the event names.
-        self._group_metadata = tuple(
-            (
+        self._group_metadata = {
+            group_id: (
                 get_kv_cache_spec_kind(spec).value,
                 get_kv_cache_spec_sliding_window(spec),
             )
-            for spec in group_specs
-        )
+            for group_id, spec in event_groups
+        }
+        if len(self._group_metadata) != len(self._group_ids):
+            raise ValueError("event_groups must name each cache group once")
         self._lock = threading.Lock()
         self._events: list[BlockStored] = []
         self._covered: dict[BlockKey, frozenset[str]] = {}
@@ -445,7 +455,8 @@ class StoreResidencyEvents:
             if block_failed:
                 continue
             start, end = block.token_span
-            kind, sliding_window = self._group_metadata[block.group_idx]
+            group_idx = self._group_ids[block.group_idx]
+            kind, sliding_window = self._group_metadata[group_idx]
             event = BlockStored(
                 block_hashes=[maybe_convert_block_hash(block.block_hash)],
                 parent_block_hash=(
@@ -458,7 +469,7 @@ class StoreResidencyEvents:
                 lora_id=None,
                 medium=STORE_MEDIUM,
                 lora_name=None,
-                group_idx=block.group_idx,
+                group_idx=group_idx,
                 kv_cache_spec_kind=kind,
                 kv_cache_spec_sliding_window=sliding_window,
             )
@@ -592,6 +603,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
         supports_group_ids: bool = False,
         record_operation: Callable[..., None] | None = None,
         group_participates: Sequence[bool] | None = None,
+        event_groups: Sequence[tuple[int, KVCacheSpec]] | None = None,
     ):
         super().__init__(
             store,
@@ -606,9 +618,13 @@ class KVCacheStoreSendingThread(KVTransferThread):
         self.group_put_steps = group_put_steps
         self.coord = coord
         self.kv_role = kv_role
-        self.residency_events = StoreResidencyEvents(
-            [group.kv_cache_spec for group in coord.kv_cache_groups]
-        )
+        if event_groups is None:
+            raise ValueError(
+                "event_groups must pair every Store group with the cache group id "
+                "its residency events name; the Store index of a group differs "
+                "from that id whenever the Store skips a group before it"
+            )
+        self.residency_events = StoreResidencyEvents(event_groups)
         self.group_participates = (
             list(group_participates)
             if group_participates is not None
@@ -1596,6 +1612,16 @@ class MooncakeStoreWorker:
             kv_cache_config, vllm_config, self.block_size, self.hash_block_size
         )
         self._kv_cache_groups = self.coord.kv_cache_groups
+        # The Store keeps only the prefix-cacheable transferable groups, so a
+        # position in `_kv_cache_groups` is not the id the core publishes for the
+        # same group. Pairing each Store group with its core cache group id keeps
+        # residency events comparable with the core's own block events, while
+        # Store keys and everything else that addresses the Store keep using its
+        # own index.
+        self._event_groups = tuple(
+            (group_id, kv_cache_config.kv_cache_groups[group_id].kv_cache_spec)
+            for group_id in kv_cache_config.prefix_cacheable_group_ids
+        )
         self.store_tp_size, store_namespace, store_layout_cls = (
             self._select_store_layout(extra_config)
         )
@@ -1985,6 +2011,7 @@ class MooncakeStoreWorker:
                     group.kv_cache_spec.prefix_cacheable
                     for group in self._kv_cache_groups
                 ],
+                event_groups=self._event_groups,
             )
             self.kv_send_thread.start()
 
@@ -2349,9 +2376,18 @@ class MooncakeStoreWorker:
             self.kv_send_thread.retire_residency()
 
     @property
-    def lookup_key_prefixes(self) -> tuple[tuple[str, ...], ...]:
-        """Per group, every rank namespace a lookup for it probes."""
-        return self._lookup_key_prefixes
+    def lookup_key_prefixes(self) -> dict[int, tuple[str, ...]]:
+        """Per cache group id, every rank namespace a lookup for it probes.
+
+        Keyed by the id the core uses, which is the id this worker's residency
+        events carry; the Store's own group index can differ from it.
+        """
+        return {
+            group_id: prefixes
+            for (group_id, _), prefixes in zip(
+                self._event_groups, self._lookup_key_prefixes, strict=True
+            )
+        }
 
     def close(self) -> None:
         """Release the MooncakeDistributedStore handle on teardown.
