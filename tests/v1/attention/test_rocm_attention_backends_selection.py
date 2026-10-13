@@ -61,6 +61,31 @@ def test_aiter_unified_attention_uses_dedicated_metadata_builder():
     )
 
 
+def test_rocm_backends_do_not_support_mm_prefix():
+    """Regression test: ROCm backends must not claim mm_prefix support.
+
+    If they do, prefix-LM multimodal models that attend vision tokens
+    bidirectionally (e.g. Gemma3 4B) will use bidirectional attention
+    via the ROCm backend instead of falling back to Triton, producing
+    incorrect results. Remove this test only if support is properly added.
+    """
+    from vllm.v1.attention.backends.rocm_aiter_unified_attn import (
+        RocmAiterUnifiedAttentionBackend,
+    )
+    from vllm.v1.attention.backends.rocm_attn import RocmAttentionBackend
+
+    assert not RocmAttentionBackend.supports_mm_prefix(), (
+        "RocmAttentionBackend does not support mm_prefix — "
+        "defer to Triton unified attention instead for now"
+        "See https://github.com/vllm-project/vllm/issues/48172"
+    )
+    assert not RocmAiterUnifiedAttentionBackend.supports_mm_prefix(), (
+        "RocmAiterUnifiedAttentionBackend does not support mm_prefix — "
+        "defer to Triton unified attention instead for now"
+        "See https://github.com/ROCm/aiter/issues/4168"
+    )
+
+
 def test_segmented_attention_uses_dedicated_backend_components():
     from vllm.v1.attention.backends.rocm_segmented_attn import (
         RocmSegmentedAttentionBackend,
