@@ -337,7 +337,15 @@ class NixlBaseConnectorScheduler:
                 name="nixl_handshake_listener",
             )
             self._nixl_handshake_listener_t.start()
-            ready_event.wait()  # Wait for listener ZMQ socket to be ready.
+            # Wait for listener ZMQ socket to be ready.
+            while not ready_event.wait(timeout=1.0):
+                if not self._nixl_handshake_listener_t.is_alive():
+                    raise RuntimeError(
+                        "NIXL handshake listener failed to start on "
+                        f"{self.side_channel_host}:{self.side_channel_port}. "
+                        "If the port is in use, set VLLM_NIXL_SIDE_CHANNEL_PORT "
+                        "to a free base port."
+                    )
 
     @staticmethod
     def _nixl_handshake_listener(
