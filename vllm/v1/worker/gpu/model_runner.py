@@ -19,8 +19,8 @@ instead of embedding feature-specific logic directly.
 import functools
 import gc
 import time
-from collections.abc import Iterable
-from contextlib import AbstractContextManager
+from collections.abc import Callable, Iterable, Iterator
+from contextlib import AbstractContextManager, contextmanager
 from copy import deepcopy
 from dataclasses import replace
 from typing import Any, NamedTuple
@@ -352,6 +352,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # For transferring state from execute_model to subsequent sample_tokens call.
         self.execute_model_state: ExecuteModelState | None = None
+        self._model_forward_override: Callable[..., Any] | None = None
 
         # Expert parallelism load balancer.
         self.eplb = EPLBController(self.parallel_config, self.device)
@@ -558,6 +559,24 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
     def get_model(self) -> nn.Module:
         return self.model
+
+    @contextmanager
+    def override_model_forward(self, fn: Callable[..., Any]) -> Iterator[None]:
+        """Run `fn(input_batch, **model_inputs)` in place of the eager model call.
+
+        For benchmarking the forward of an exact batch: `execute_model` still
+        prepares the inputs, metadata and forward context. Requires eager
+        execution. `sample_tokens` must not be called, so the step's pending
+        state is dropped on exit.
+        """
+        assert self.compilation_config.cudagraph_mode == CUDAGraphMode.NONE
+        assert self.ubatch_runner is None
+        self._model_forward_override = fn
+        try:
+            yield
+        finally:
+            self._model_forward_override = None
+            self.execute_model_state = None
 
     def get_draft_model(self) -> nn.Module | None:
         speculator = self.speculator
@@ -2038,6 +2057,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     assert self.cudagraph_manager is not None
                     model_output = self.cudagraph_manager.run_pw_graph(
                         self.model, model_inputs
+                    )
+                elif self._model_forward_override is not None:
+                    model_output = self._model_forward_override(
+                        input_batch, **model_inputs
                     )
                 else:
                     # Eager (NONE): call the raw model directly.
