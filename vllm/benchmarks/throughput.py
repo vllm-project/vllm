@@ -178,6 +178,7 @@ def _run_vllm_requests(
                 beam_width=n,
                 max_tokens=output_len,
                 ignore_eos=True,
+                watermarking=False,
             ),
         )
         if do_profile:
@@ -195,8 +196,7 @@ def run_vllm_chat(
     warmup_requests: list[SampleRequest] | None = None,
     prequeue_requests: bool = False,
 ) -> tuple[float, list[RequestOutput]]:
-    """
-    Run vLLM chat benchmark. This function is recommended ONLY for benchmarking
+    """Run vLLM chat benchmark. This function is recommended ONLY for benchmarking
     multimodal models as it properly handles multimodal inputs and chat
     formatting. For non-multimodal models, use run_vllm() instead.
     """
@@ -536,30 +536,38 @@ def _to_serve_args(args: argparse.Namespace) -> argparse.Namespace:
 
     Returns:
         A namespace satisfying get_samples's attribute reads.
+
     """
     d = vars(args).copy()
     # random_*: prefer --random-* over legacy --input/output/prefix-len.
-    d["random_input_len"] = getattr(args, "random_input_len", None) or args.input_len
-    d["random_output_len"] = getattr(args, "random_output_len", None) or args.output_len
-    d["random_prefix_len"] = getattr(args, "random_prefix_len", None) or args.prefix_len
+    # Callers without the legacy flags (e.g. bench mm-processor) omit them, so
+    # read them optionally. Identity checks, not truthiness: an explicit 0
+    # (the default of --random-prefix-len) must not fall through to them.
+    input_len = getattr(args, "input_len", None)
+    output_len = getattr(args, "output_len", None)
+    prefix_len = getattr(args, "prefix_len", None)
+    d["random_input_len"] = getattr(args, "random_input_len", input_len)
+    d["random_output_len"] = getattr(args, "random_output_len", output_len)
+    d["random_prefix_len"] = getattr(args, "random_prefix_len", prefix_len)
     # --output-len maps to the per-dataset output-len entry points get_samples
     # reads. None passes through (each dataset applies its own default),
     # matching prior throughput behaviour of omitting output_len when unset.
-    d["hf_output_len"] = args.output_len
-    d["sharegpt_output_len"] = args.output_len
-    # sonnet reads dedicated attrs; fall back to SonnetDataset's own defaults.
-    d["sonnet_input_len"] = args.input_len if args.input_len is not None else 550
-    d["sonnet_output_len"] = args.output_len if args.output_len is not None else 150
-    d["sonnet_prefix_len"] = args.prefix_len
+    d["hf_output_len"] = output_len
+    d["sharegpt_output_len"] = output_len
     # Explicit --enable-multimodal-chat wins; otherwise auto-enable for the
-    # multimodal chat backend (preserves today's vllm-chat handling).
+    # multimodal chat backend (preserves today's vllm-chat handling). Callers
+    # without a --backend flag (e.g. bench mm-processor) drive every request
+    # through llm.chat, so default to the vllm-chat behaviour.
+    backend = getattr(args, "backend", "vllm-chat")
+    d["backend"] = backend
     d["enable_multimodal_chat"] = bool(
-        getattr(args, "enable_multimodal_chat", False) or args.backend == "vllm-chat"
+        getattr(args, "enable_multimodal_chat", False) or backend == "vllm-chat"
     )
     # serve-only attrs throughput never exposed; keep serve's defaults.
     d.setdefault("disable_shuffle", False)
     d.setdefault("skip_chat_template", False)
     d.setdefault("no_stream", False)
+    d.setdefault("no_oversample", False)
     d.setdefault("request_id_prefix", "")
     d.setdefault("chat_template_kwargs", None)
     return argparse.Namespace(**d)
@@ -567,10 +575,9 @@ def _to_serve_args(args: argparse.Namespace) -> argparse.Namespace:
 
 def get_requests(args, tokenizer):
     serve_args = _to_serve_args(args)
-    # Throughput reuses bench serve's dataset dispatch. vllm-chat is the only
-    # multimodal-capable throughput backend, so it is the only one allowed past
-    # the multimodal gates inside get_samples; other backends raise there.
-    mm_backends = ("vllm-chat",) if args.backend == "vllm-chat" else ()
+    # Both offline vLLM backends forward multi_modal_data to the engine;
+    # "hf" and "mii" are text-only and get rejected inside get_samples.
+    mm_backends = ("vllm", "vllm-chat")
     requests = get_samples(serve_args, tokenizer, multimodal_backends=mm_backends)
     requests = assign_loras(requests, args)
     requests = filter_requests_for_dp(requests, args.data_parallel_size)
@@ -617,19 +624,8 @@ def assign_loras(requests, args):
 
 
 def validate_args(args):
-    """
-    Validate command-line arguments.
-    """
-
-    # === Deprecation and Defaulting ===
-    if args.dataset is not None:
-        warnings.warn(
-            "The '--dataset' argument will be deprecated in the next release. "
-            "Please use '--dataset-name' and '--dataset-path' instead.",
-            stacklevel=2,
-        )
-        args.dataset_path = args.dataset
-
+    """Validate command-line arguments."""
+    # === Defaulting ===
     if not getattr(args, "tokenizer", None):
         args.tokenizer = args.model
 
@@ -643,11 +639,7 @@ def validate_args(args):
         raise ValueError("--prequeue-requests is not supported with --async-engine")
 
     # === Dataset Configuration ===
-    if (
-        not args.dataset
-        and not args.dataset_path
-        and args.dataset_name not in {"prefix_repetition"}
-    ):
+    if not args.dataset_path and args.dataset_name != "prefix_repetition":
         print("When dataset path is not set, it will default to random dataset")
         args.dataset_name = "random"
         random_input_len = getattr(args, "random_input_len", None)
@@ -702,14 +694,14 @@ def validate_args(args):
         )
 
     # --prefix-len: only used when dataset_name is 'random', 'random-mm',
-    # 'sonnet', or not set.
+    # or not set.
     if (
-        args.dataset_name not in {"random", "random-mm", "sonnet", None}
+        args.dataset_name not in {"random", "random-mm", None}
         and args.prefix_len is not None
     ):
         warnings.warn(
             "--prefix-len will be ignored since --dataset-name\
-                 is not 'random', 'random-mm', 'sonnet', or not set.",
+                 is not 'random', 'random-mm', or not set.",
             stacklevel=2,
         )
 
@@ -795,7 +787,6 @@ def add_cli_args(parser: FlexibleArgumentParser):
         choices=[
             "sharegpt",
             "random",
-            "sonnet",
             "burstgpt",
             "hf",
             "prefix_repetition",
@@ -805,15 +796,6 @@ def add_cli_args(parser: FlexibleArgumentParser):
         ],
         help="Name of the dataset to benchmark on.",
         default="sharegpt",
-    )
-    parser.add_argument(
-        "--dataset",
-        type=str,
-        default=None,
-        help="Path to the ShareGPT dataset, will be deprecated in\
-            the next release. The dataset is expected to "
-        "be a json in form of list[dict[..., conversations: "
-        "list[dict[..., value: <prompt_or_response>]]]]",
     )
     parser.add_argument(
         "--dataset-path", type=str, default=None, help="Path to the dataset"
@@ -1134,6 +1116,7 @@ def main(args: argparse.Namespace):
     # Output JSON results if specified
     if args.output_json:
         results = {
+            "model_id": args.model,
             "elapsed_time": elapsed_time,
             "num_requests": len(requests),
             "total_num_tokens": total_num_tokens,

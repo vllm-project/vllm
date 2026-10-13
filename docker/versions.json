@@ -10,6 +10,9 @@
     "UBUNTU_VERSION": {
       "default": "24.04"
     },
+    "INSTALL_RUBIN_PRERELEASE": {
+      "default": "false"
+    },
     "NCCL_VERSION": {
       "default": "2.30.7"
     },
@@ -32,6 +35,9 @@
       "default": "disabled"
     },
     "INSTALL_KV_CONNECTORS": {
+      "default": "false"
+    },
+    "BUILD_NIXL": {
       "default": "false"
     },
     "SCCACHE_BUCKET_NAME": {
@@ -66,9 +72,6 @@
     },
     "RUN_WHEEL_CHECK": {
       "default": "true"
-    },
-    "FLASHINFER_VERSION": {
-      "default": "0.6.17"
     },
     "GDRCOPY_CUDA_VERSION": {
       "default": "12.8"

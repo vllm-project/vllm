@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-HyperCLOVAX V2 (32B Think Model) Implementation.
+"""HyperCLOVAX V2 (32B Think Model) Implementation.
 
 This module contains the V2 architecture that uses Qwen2.5 Vision Transformer
 instead of CLIP/SigLIP used in V1.
@@ -12,14 +11,14 @@ Supports:
 
 from collections.abc import Iterable, Mapping, Sequence
 from functools import partial
-from typing import Annotated, Literal
+from typing import Annotated, Literal, TypedDict
 
 import torch
 import torch.nn as nn
 from transformers import BatchFeature
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.forward_context import set_forward_context
 from vllm.inputs import MultiModalDataDict
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -57,8 +56,7 @@ V2_VIDEO_TOKEN: str = "<|video_start|><|VIDEO_PAD|><|video_end|>"
 
 
 class HCXVisionV2ImagePixelInputs(TensorSchema):
-    """
-    V2 Image inputs using Qwen2.5-VL style grid_thw format.
+    """V2 Image inputs using Qwen2.5-VL style grid_thw format.
 
     Dimensions:
         - np: Number of patches
@@ -72,8 +70,7 @@ class HCXVisionV2ImagePixelInputs(TensorSchema):
 
 
 class HCXVisionV2ImageEmbeddingInputs(TensorSchema):
-    """
-    V2 Image embedding inputs.
+    """V2 Image embedding inputs.
 
     Dimensions:
         - nf: Number of image features
@@ -90,8 +87,7 @@ HCXVisionV2ImageInputs = HCXVisionV2ImagePixelInputs | HCXVisionV2ImageEmbedding
 
 
 class HCXVisionV2VideoPixelInputs(TensorSchema):
-    """
-    V2 Video inputs using Qwen2.5-VL style grid_thw format.
+    """V2 Video inputs using Qwen2.5-VL style grid_thw format.
 
     Dimensions:
         - np: Number of patches
@@ -105,8 +101,7 @@ class HCXVisionV2VideoPixelInputs(TensorSchema):
 
 
 class HCXVisionV2VideoEmbeddingInputs(TensorSchema):
-    """
-    V2 Video embedding inputs.
+    """V2 Video embedding inputs.
 
     Dimensions:
         - nf: Number of video features
@@ -120,6 +115,11 @@ class HCXVisionV2VideoEmbeddingInputs(TensorSchema):
 
 
 HCXVisionV2VideoInputs = HCXVisionV2VideoPixelInputs | HCXVisionV2VideoEmbeddingInputs
+
+
+class HCXVisionV2MultiModalInputs(TypedDict, total=False):
+    image: HCXVisionV2ImageInputs | None
+    video: HCXVisionV2VideoInputs | None
 
 
 class HCXVisionV2ProcessingInfo(BaseProcessingInfo):
@@ -189,67 +189,29 @@ class HCXVisionV2DummyInputsBuilder(BaseDummyInputsBuilder[HCXVisionV2Processing
         num_videos = mm_counts.get("video", 0)
         return V2_IMAGE_TOKEN * num_images + V2_VIDEO_TOKEN * num_videos
 
-    def get_dummy_processor_inputs(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions] | None = None,
-        mm_processor_kwargs: Mapping[str, object] | None = None,
-    ) -> ProcessorInputs:
-        """Build dummy processor inputs for memory profiling."""
-        num_images = mm_counts.get("image", 0)
-        num_videos = mm_counts.get("video", 0)
-        prompt_text = V2_IMAGE_TOKEN * num_images + V2_VIDEO_TOKEN * num_videos
-
-        dummy_mm_data = self.get_dummy_mm_data(
-            seq_len,
-            mm_counts,
-            mm_options,
-            mm_processor_kwargs=mm_processor_kwargs,
-        )
-        dummy_mm_items = self.info.parse_mm_data(dummy_mm_data, validate=False)
-
-        tokenizer = self.info.get_tokenizer()
-        prompt = tokenizer.encode(
-            prompt_text,
-            **self.info.default_tok_params.get_encode_kwargs(),
-        )
-
-        return ProcessorInputs(
-            prompt=prompt,
-            mm_data_items=dummy_mm_items,
-            hf_processor_mm_kwargs=mm_processor_kwargs or {},
-        )
-
     def get_dummy_mm_data(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions] | None = None,
+        mm_options: MultiModalDummyOptions | None = None,
         mm_processor_kwargs: Mapping[str, object] | None = None,
     ) -> MultiModalDataDict:
-        num_images = mm_counts.get("image", 0)
-        num_videos = mm_counts.get("video", 0)
-
         target_width, target_height = self.info.get_image_size_with_most_features()
         target_num_frames = 16  # Default for video
-
-        image_overrides = mm_options.get("image") if mm_options else None
-        video_overrides = mm_options.get("video") if mm_options else None
 
         result: MultiModalDataDict = {
             "image": self._get_dummy_images(
                 width=target_width,
                 height=target_height,
-                num_images=num_images,
-                overrides=image_overrides,  # type: ignore
+                num_images=mm_counts.get("image", 0),
+                overrides=mm_options.get("image") if mm_options else None,
             ),
             "video": self._get_dummy_videos(
                 width=target_width,
                 height=target_height,
                 num_frames=target_num_frames,
-                num_videos=num_videos,
-                overrides=video_overrides,  # type: ignore
+                num_videos=mm_counts.get("video", 0),
+                overrides=mm_options.get("video") if mm_options else None,
             ),
         }
 
@@ -261,34 +223,30 @@ class HCXVisionV2MultiModalProcessor(
 ):
     """Multimodal processor for HyperCLOVAX V2 (32B Think model)."""
 
-    def _call_hf_processor(
+    def get_dummy_inputs(
         self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        images = mm_data.get("images")
-        videos = mm_data.get("videos")
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+        mm_options: MultiModalDummyOptions,
+    ) -> ProcessorInputs:
+        num_images = mm_counts.get("image", 0)
+        num_videos = mm_counts.get("video", 0)
+        prompt_text = V2_IMAGE_TOKEN * num_images + V2_VIDEO_TOKEN * num_videos
 
-        # Get the HF processor
-        hf_processor = self.info.get_hf_processor(**mm_kwargs)
+        builder = self.dummy_inputs
+        dummy_mm_data = builder.get_dummy_mm_data(seq_len, mm_counts, mm_options)
+        dummy_mm_items = self.info.parse_mm_data(dummy_mm_data, validate=False)
 
-        # Build data dict for HF processor (images/videos only)
-        # NOTE: We pass the prompt as-is without token normalization.
-        # Token expansion is handled by vLLM via _get_prompt_updates.
-        data: dict[str, object] = dict(
-            text=prompt,
-            images=images,
-            videos=videos,
+        tokenizer = self.info.get_tokenizer()
+        prompt = tokenizer.encode(
+            prompt_text,
+            **self.info.default_tok_params.get_encode_kwargs(),
         )
 
-        processed_outputs = self.info.ctx.call_hf_processor(
-            hf_processor=hf_processor,
-            data=data,
-            kwargs=mm_kwargs,
-        )
+        return ProcessorInputs(prompt=prompt, mm_data_items=dummy_mm_items)
 
-        return processed_outputs
+    def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
+        return self.dummy_inputs.get_dummy_text(mm_counts)
 
     def _get_prompt_updates(
         self,
@@ -299,7 +257,7 @@ class HCXVisionV2MultiModalProcessor(
         hf_config = self.info.get_hf_config()
 
         # Use token IDs directly from config.
-        # This matches what get_dummy_processor_inputs uses, ensuring consistency.
+        # This matches what get_dummy_inputs uses, ensuring consistency.
         placeholder: dict[str, int] = {
             "image": hf_config.image_token_id,  # 128060 for <|IMAGE_PAD|>
             "video": hf_config.video_token_id,  # 128061 for <|VIDEO_PAD|>
@@ -319,6 +277,7 @@ class HCXVisionV2MultiModalProcessor(
                 if grid_thw_elem is not None:
                     # Access .data to get the actual tensor from MultiModalFieldElem
                     grid_thw = grid_thw_elem.data
+                    assert isinstance(grid_thw, torch.Tensor)
                     # Qwen2.5-VL style calculation
                     h, w = grid_thw[1].item(), grid_thw[2].item()
                     num_tokens = (h * w) // (merge_size**2)
@@ -330,6 +289,7 @@ class HCXVisionV2MultiModalProcessor(
                 if grid_thw_elem is not None:
                     # Access .data to get the actual tensor from MultiModalFieldElem
                     grid_thw = grid_thw_elem.data
+                    assert isinstance(grid_thw, torch.Tensor)
                     t, h, w = grid_thw[0].item(), grid_thw[1].item(), grid_thw[2].item()
                     num_tokens = (t * h * w) // (merge_size**2)
                 else:
@@ -402,8 +362,7 @@ class HCXVisionV2MultiModalProcessor(
     dummy_inputs=HCXVisionV2DummyInputsBuilder,
 )
 class HCXVisionV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
-    """
-    HyperCLOVAX-SEED Vision-Language Model (V2 architecture).
+    """HyperCLOVAX-SEED Vision-Language Model (V2 architecture).
 
     Supports:
     - HyperCLOVAX-SEED-Think-32B: Vision + Text
@@ -596,8 +555,10 @@ class HCXVisionV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         sizes = (grid_thw.prod(-1) // merge_size // merge_size).tolist()
         return video_embeds.split(sizes)
 
-    def _parse_and_validate_multimodal_inputs(self, **kwargs: object) -> dict:
-        modalities = {}
+    def _parse_and_validate_multimodal_inputs(
+        self, **kwargs: object
+    ) -> HCXVisionV2MultiModalInputs:
+        modalities: HCXVisionV2MultiModalInputs = {}
 
         for input_key in kwargs:
             if (

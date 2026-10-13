@@ -3,7 +3,7 @@
 """Fused MLA prefill and decode epilogues for Kimi-K3.
 
 Thin wrappers over the CUDA ops in
-``csrc/libtorch_stable/fused_kimi_k3_mla_key_concat_kv_cache_kernel.cu``, which
+``csrc/fused_kimi_k3_mla_key_concat_kv_cache_kernel.cu``, which
 mirror ``fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_{bf16,fp8}_insert``.
 
 - ``fused_mla_key_concat_kv_cache_insert`` (bf16): optionally apply RoPE,
@@ -76,9 +76,9 @@ def fused_mla_key_concat_ds_mla_insert(
     """Concat full K (bf16) and insert the latent in the fp8_ds_mla layout.
 
     The cache uses DeepSeek's 656-byte block-scaled layout (NoPE in 4 tiles of
-    128 with per-tile dynamic fp8 scales, RoPE as bf16) -- self-scaling, so no
-    scale argument. Returns the bf16 full key; optionally rotates ``q`` and
-    writes ``kv_cache`` in place.
+    128 with per-tile power-of-two scales stored as float32, RoPE as bf16) --
+    self-scaling, so no scale argument. Returns the bf16 full key; optionally
+    rotates ``q`` and writes ``kv_cache`` in place.
     """
     k_pe = k_pe.reshape(k_pe.shape[0], -1)
     tp, num_heads, qk_nope_head_dim = k_nope.shape

@@ -98,6 +98,16 @@ pub fn build_result_json(
         "request_throughput".into(),
         serde_json::json!(metrics.request_throughput),
     );
+    if is_pooling {
+        result.insert(
+            "total_input_sequences".into(),
+            serde_json::json!(metrics.total_input_sequences),
+        );
+        result.insert(
+            "input_sequence_throughput".into(),
+            serde_json::json!(metrics.input_sequence_throughput),
+        );
+    }
     if config.goodput.is_empty() {
         result.insert("request_goodput".into(), Value::Null);
     } else {

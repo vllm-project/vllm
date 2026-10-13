@@ -13,7 +13,9 @@ import requests
 from urllib3.util import parse_url
 
 import vllm.envs as envs
+from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
+from vllm.utils.mem_constants import KiB_bytes, MiB_bytes
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
@@ -25,6 +27,128 @@ _T = TypeVar("_T")
 # Attempt N uses: base_timeout * (_RETRY_BACKOFF_FACTOR ** N) for the
 # per-attempt timeout and sleeps _RETRY_BACKOFF_FACTOR ** N seconds.
 _RETRY_BACKOFF_FACTOR = 4
+_RESPONSE_READ_CHUNK_SIZE = 64 * KiB_bytes
+
+
+class HTTPResponseSizeExceededError(VLLMValidationError):
+    """Raised when an HTTP response exceeds a caller-supplied byte ceiling."""
+
+    def __init__(self, max_bytes: int, received_bytes: int) -> None:
+        self.max_bytes = max_bytes
+        self.received_bytes = received_bytes
+        super().__init__(
+            "Maximum file size exceeded: HTTP response exceeded maximum size "
+            f"of {max_bytes} bytes (received at least {received_bytes} bytes)",
+            parameter="audio_filesize_mb",
+            value=received_bytes / MiB_bytes,
+        )
+
+
+class MediaDownloadSizeExceededError(ValueError):
+    """Raised when a remote media download exceeds the configured byte limit."""
+
+    def __init__(self, max_bytes: int, received_bytes: int | None = None) -> None:
+        self.max_bytes = max_bytes
+        self.received_bytes = received_bytes
+        max_size_mb = max_bytes / MiB_bytes
+        message = (
+            "Remote media download exceeds "
+            f"VLLM_MAX_MEDIA_DOWNLOAD_SIZE_MB={max_size_mb:g}"
+        )
+        if received_bytes is not None:
+            message += f" (received at least {received_bytes} bytes)"
+        super().__init__(message)
+
+
+def _get_media_download_limit_bytes() -> int | None:
+    max_size_mb = envs.VLLM_MAX_MEDIA_DOWNLOAD_SIZE_MB
+    if max_size_mb <= 0:
+        return None
+    return max_size_mb * MiB_bytes
+
+
+def _get_response_size_limit(max_bytes: int | None) -> tuple[int | None, bool]:
+    media_max_bytes = _get_media_download_limit_bytes()
+    if media_max_bytes is not None and (
+        max_bytes is None or media_max_bytes <= max_bytes
+    ):
+        return media_max_bytes, True
+    return max_bytes, False
+
+
+def _raise_size_exceeded(
+    max_bytes: int, received_bytes: int, media_download_limit: bool
+) -> None:
+    if media_download_limit:
+        raise MediaDownloadSizeExceededError(max_bytes, received_bytes)
+    raise HTTPResponseSizeExceededError(max_bytes, received_bytes)
+
+
+def _check_content_length(
+    content_length: str | int | None,
+    max_bytes: int | None,
+    media_download_limit: bool,
+) -> None:
+    if content_length is None or max_bytes is None:
+        return
+    try:
+        parsed_length = int(content_length)
+    except (TypeError, ValueError):
+        return
+    if parsed_length > max_bytes:
+        _raise_size_exceeded(max_bytes, parsed_length, media_download_limit)
+
+
+def _append_chunk(
+    chunks: list[bytes],
+    chunk: bytes,
+    received_bytes: int,
+    max_bytes: int | None,
+    media_download_limit: bool,
+) -> int:
+    if not chunk:
+        return received_bytes
+    received_bytes += len(chunk)
+    if max_bytes is not None and received_bytes > max_bytes:
+        _raise_size_exceeded(max_bytes, received_bytes, media_download_limit)
+    chunks.append(chunk)
+    return received_bytes
+
+
+def _read_response_bytes(response: requests.Response, max_bytes: int | None) -> bytes:
+    max_bytes, media_download_limit = _get_response_size_limit(max_bytes)
+    if max_bytes is None:
+        return response.content
+
+    _check_content_length(
+        response.headers.get("Content-Length"),
+        max_bytes,
+        media_download_limit,
+    )
+    chunks: list[bytes] = []
+    received_bytes = 0
+    for chunk in response.iter_content(_RESPONSE_READ_CHUNK_SIZE):
+        received_bytes = _append_chunk(
+            chunks, chunk, received_bytes, max_bytes, media_download_limit
+        )
+    return b"".join(chunks)
+
+
+async def _async_read_response_bytes(
+    response: aiohttp.ClientResponse, max_bytes: int | None
+) -> bytes:
+    max_bytes, media_download_limit = _get_response_size_limit(max_bytes)
+    if max_bytes is None:
+        return await response.read()
+
+    _check_content_length(response.content_length, max_bytes, media_download_limit)
+    chunks: list[bytes] = []
+    received_bytes = 0
+    async for chunk in response.content.iter_chunked(_RESPONSE_READ_CHUNK_SIZE):
+        received_bytes = _append_chunk(
+            chunks, chunk, received_bytes, max_bytes, media_download_limit
+        )
+    return b"".join(chunks)
 
 
 def _is_retryable(exc: Exception) -> bool:
@@ -277,14 +401,22 @@ class HTTPConnection:
 
     @_sync_retry
     def get_bytes(
-        self, url: str, *, timeout: float | None = None, allow_redirects: bool = True
+        self,
+        url: str,
+        *,
+        timeout: float | None = None,
+        allow_redirects: bool = True,
+        max_bytes: int | None = None,
     ) -> bytes:
         with self.get_response(
-            url, timeout=timeout, allow_redirects=allow_redirects
+            url,
+            stream=True,
+            timeout=timeout,
+            allow_redirects=allow_redirects,
         ) as r:
             r.raise_for_status()
 
-            return r.content
+            return _read_response_bytes(r, max_bytes)
 
     @_async_retry
     async def async_get_bytes(
@@ -293,13 +425,16 @@ class HTTPConnection:
         *,
         timeout: float | None = None,
         allow_redirects: bool = True,
+        max_bytes: int | None = None,
     ) -> bytes:
         async with await self.get_async_response(
-            url, timeout=timeout, allow_redirects=allow_redirects
+            url,
+            timeout=timeout,
+            allow_redirects=allow_redirects,
         ) as r:
             r.raise_for_status()
 
-            return await r.read()
+            return await _async_read_response_bytes(r, max_bytes)
 
     def get_text(self, url: str, *, timeout: float | None = None) -> str:
         with self.get_response(url, timeout=timeout) as r:

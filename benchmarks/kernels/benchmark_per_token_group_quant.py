@@ -15,7 +15,7 @@ from vllm.platforms import current_platform
 
 @contextmanager
 def _triton_mode():
-    """Temporarily force the Triton fallback path"""
+    """Temporarily force the Triton fallback path."""
     with patch("vllm.platforms.current_platform.is_cuda", return_value=False):
         yield
 
@@ -117,7 +117,18 @@ if __name__ == "__main__":
     args = parse_args()
     warmup_iters, bench_iters = args.warmup_iters, args.bench_iters
 
-    shapes = [(32, 128), (64, 256), (16, 512)]
+    shapes = [
+        (32, 128),
+        (64, 256),
+        (16, 512),
+        # Serving-sized activations, where this op is memory-bound and its
+        # schedule dominates: a prefill chunk and a decode batch at two
+        # common hidden sizes.
+        (1024, 6144),
+        (8192, 6144),
+        (1024, 7168),
+        (8192, 7168),
+    ]
     group_sizes = [64, 128]
 
     dtypes = ["fp8", "int8"] if args.dtype == "both" else [args.dtype]

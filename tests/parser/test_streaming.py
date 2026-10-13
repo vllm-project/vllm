@@ -6,8 +6,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from vllm.entrypoints.generate.base.protocol import DeltaMessage
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
-from vllm.entrypoints.openai.engine.protocol import DeltaMessage
 from vllm.parser.abstract_parser import DelegatingParser
 from vllm.parser.engine.registered_adapters import Qwen3ParserReasoningAdapter
 from vllm.reasoning.basic_parsers import BaseThinkingReasoningParser
@@ -660,6 +660,78 @@ def test_engine_reasoning_no_tool_batched_content_passthrough(tokenizer, request
     assert content == "The answer is 42."
     assert "</think>" not in content
     assert "</think>" not in reasoning
+    assert len(tool_calls) == 0
+
+
+@pytest.mark.parametrize(
+    "text_chunks",
+    [
+        # A trailing "<" that the engine holds back (it may start a tag).
+        ["<think>let me think</think>a <", "x> b"],
+        # Whitespace after "</think>" in the same delta as the marker.
+        ["<think>let me think</think>\n\n", "<b>bold</b> done"],
+        # The delta that ends reasoning carries only held-back text.
+        ["<think>let me think", "</think><", "b>bold</b> done"],
+    ],
+)
+def test_engine_reasoning_no_tool_batched_holdback_not_dropped(
+    tokenizer, request_obj, text_chunks
+):
+    """Text the engine buffers when reasoning ends inside a batched delta is
+    returned by finish_streaming(); with no tool parser it must still be
+    emitted as content, not dropped."""
+    parser = Qwen3ReasoningNoToolParser(tokenizer)
+    chunks = [tokenizer.encode(t, add_special_tokens=False) for t in text_chunks]
+
+    results = stream_chunks(parser, tokenizer, chunks, request_obj)
+    reasoning, content, tool_calls = collect_fields(results)
+
+    assert reasoning == "let me think"
+    assert content == "".join(text_chunks).split("</think>", 1)[1]
+    assert len(tool_calls) == 0
+
+
+@pytest.mark.parametrize(
+    ("text_chunks", "include_reasoning", "expected_content"),
+    [
+        # The delta that ends reasoning is also the last one: the held-back
+        # "<" must be emitted exactly once (the end-of-stream flush skips the
+        # reasoning parser once reasoning has ended).
+        (["<think>let me think</think>a <"], True, "a <"),
+        # Whitespace-only content after the marker at the end of the stream.
+        (["<think>let me think</think>\n\n"], True, "\n\n"),
+        # Hiding reasoning must not hide the flushed content.
+        (["<think>let me think</think>\n\n", "<b>bold</b>"], False, "\n\n<b>bold</b>"),
+    ],
+)
+def test_engine_reasoning_no_tool_holdback_finished_and_hidden_reasoning(
+    tokenizer, text_chunks, include_reasoning, expected_content
+):
+    request = ChatCompletionRequest(
+        model="test-model",
+        messages=[{"role": "user", "content": "hi"}],
+        include_reasoning=include_reasoning,
+    )
+    parser = Qwen3ReasoningNoToolParser(tokenizer)
+    chunks = [tokenizer.encode(t, add_special_tokens=False) for t in text_chunks]
+
+    results: list[DeltaMessage | None] = []
+    prompt_token_ids: list[int] | None = []
+    for i, chunk in enumerate(chunks):
+        results.append(
+            parser.parse_delta(
+                tokenizer.decode(chunk),
+                chunk,
+                request,
+                prompt_token_ids=prompt_token_ids,
+                finished=i == len(chunks) - 1,
+            )
+        )
+        prompt_token_ids = None
+    reasoning, content, tool_calls = collect_fields(results)
+
+    assert reasoning == ("let me think" if include_reasoning else "")
+    assert content == expected_content
     assert len(tool_calls) == 0
 
 

@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-LoRA-aware FlashInfer TRT-LLM MoE experts (BF16).
+"""LoRA-aware FlashInfer TRT-LLM MoE experts (BF16).
 
 Reuses the routed API + ``gemm1_lora_delta`` path from FlashInfer PR #3153:
 
@@ -35,12 +34,11 @@ from vllm.model_executor.layers.fused_moe.experts.lora_context import MoELoRACon
 from vllm.model_executor.layers.fused_moe.experts.lora_experts_mixin import (
     LoRAExpertsMixin,
 )
+from vllm.model_executor.layers.fused_moe.experts.trtllm_bf16_moe import (
+    view_as_block_major_k,
+)
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
-)
-from vllm.model_executor.layers.fused_moe.utils import (
-    fi_moe_largest_bucket,
-    trtllm_moe_pack_topk_ids_weights,
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
@@ -113,7 +111,7 @@ def _finalize_lora_kernel(
 
 
 class _TrtLlmLoRAExpertsBase(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
-    """LoRA-aware trtllm MoE experts"""
+    """LoRA-aware trtllm MoE experts."""
 
     def __init__(
         self,
@@ -207,7 +205,7 @@ class _TrtLlmLoRAExpertsBase(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         hidden_states: torch.Tensor,
         w1: torch.Tensor,
         w2: torch.Tensor,
-        packed_topk_ids: torch.Tensor,
+        topk_ids_and_weights: tuple[torch.Tensor, torch.Tensor],
         gemm1_lora_delta: torch.Tensor | None,
         global_num_experts: int,
         a1q_scale: torch.Tensor | None,
@@ -251,10 +249,6 @@ class _TrtLlmLoRAExpertsBase(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         intermediate_size = self.intermediate_size_per_partition
         K = output.size(1)
 
-        # Routing is computed outside the MoE; pack it into the
-        # (eid<<16)|w.bf16 format the routed API expects.
-        packed_topk_ids = trtllm_moe_pack_topk_ids_weights(topk_ids, topk_weights)
-
         # ---- Base-model fast path ----
         # When no token in the batch selects a LoRA adapter, skip the LoRA machinery
         # and run the plain base MoE with do_finalize=True, which writes the finalized
@@ -264,7 +258,7 @@ class _TrtLlmLoRAExpertsBase(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
                 hidden_states=hidden_states,
                 w1=w1,
                 w2=w2,
-                packed_topk_ids=packed_topk_ids,
+                topk_ids_and_weights=(topk_ids, topk_weights),
                 gemm1_lora_delta=None,  # without LoRA, no delta
                 global_num_experts=global_num_experts,
                 a1q_scale=a1q_scale,
@@ -338,7 +332,7 @@ class _TrtLlmLoRAExpertsBase(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
             hidden_states=hidden_states,
             w1=w1,
             w2=w2,
-            packed_topk_ids=packed_topk_ids,
+            topk_ids_and_weights=(topk_ids, topk_weights),
             gemm1_lora_delta=gemm1_lora_delta,
             global_num_experts=global_num_experts,
             a1q_scale=a1q_scale,
@@ -519,7 +513,7 @@ class TrtLlmBf16LoRAExperts(_TrtLlmLoRAExpertsBase):
         hidden_states: torch.Tensor,
         w1: torch.Tensor,
         w2: torch.Tensor,
-        packed_topk_ids: torch.Tensor,
+        topk_ids_and_weights: tuple[torch.Tensor, torch.Tensor],
         gemm1_lora_delta: torch.Tensor | None,
         global_num_experts: int,
         a1q_scale: torch.Tensor | None,
@@ -534,10 +528,10 @@ class TrtLlmBf16LoRAExperts(_TrtLlmLoRAExpertsBase):
         # the caller's buffer via output= so it finalizes in place -- no copy.
         do_finalize = gemm1_lora_delta is None
         ret = flashinfer.fused_moe.trtllm_bf16_routed_moe(
-            topk_ids=packed_topk_ids,
+            topk_ids=topk_ids_and_weights,
             hidden_states=hidden_states,
-            gemm1_weights=w1,
-            gemm2_weights=w2,
+            gemm1_weights=view_as_block_major_k(w1),
+            gemm2_weights=view_as_block_major_k(w2),
             gemm1_lora_delta=gemm1_lora_delta,
             num_experts=global_num_experts,
             top_k=self.topk,
@@ -550,7 +544,6 @@ class TrtLlmBf16LoRAExperts(_TrtLlmLoRAExpertsBase):
             routing_method_type=self.routing_method_type,
             do_finalize=do_finalize,
             output=output if do_finalize else None,
-            tune_max_num_tokens=fi_moe_largest_bucket(self.moe_config),
         )
         if not do_finalize:
             # [gemm2_output, expert_weights, expanded_idx, gemm1_activation]

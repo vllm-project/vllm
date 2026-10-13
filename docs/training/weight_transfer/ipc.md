@@ -110,6 +110,12 @@ mode carries a per-chunk barrier across ranks: without it, a rank could overwrit
 its buffer while its colocated worker is still reading the current chunk. This is
 handled inside `send_weights()`.
 
+## Rank-Local Updates
+
+For different parameter subsets per worker, `update_info` may be a list indexed
+by worker rank. This form is IPC-only because collective backends require every
+worker to participate.
+
 ## Examples
 
 - [RLHF with IPC weight syncing (`vllm serve`, HTTP)](../../../examples/rl/rlhf_http_ipc.py) - **Start here.** Server and training model share a single GPU; HTTP control plane, CUDA IPC data plane. Launches and tears down its own server
