@@ -10,6 +10,7 @@
 
 import torch
 
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
 from .op import exp, log
@@ -439,6 +440,18 @@ def fused_recurrent_gated_delta_rule_packed_decode(
             f"Packed decode kernel only supports NK=1 (got K={K}, BK={BK})."
         )
     BV = min(triton.next_power_of_2(V), 32)
+    if (
+        B <= 256
+        and (H, HV) in ((16, 48), (8, 24), (4, 12), (2, 6))
+        and K == V == 128
+        and mixed_qkv.dtype == torch.bfloat16
+        and initial_state.dtype == torch.float32
+        and use_qk_l2norm_in_kernel
+        and current_platform.is_cuda()
+        and current_platform.is_device_capability_family(100, device_id=dev.index)
+    ):
+        # Smaller value tiles improve decode parallelism on SM100/SM103.
+        BV = 4 if B * HV <= 96 else 8
     num_stages = 3
     num_warps = 1
 
