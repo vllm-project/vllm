@@ -258,7 +258,7 @@ class MappedTable:
         self._maps: dict[str, tuple[mmap.mmap, np.ndarray]] = {}
         libc = ctypes.CDLL(None, use_errno=True)
         libc.madvise.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int]
-        self._libc = libc
+        self._libc: ctypes.CDLL | None = libc
         self._can_populate = True
         for path in sorted({s.path for s in layout.shards}):
             fd = os.open(path, os.O_RDONLY)
@@ -386,7 +386,7 @@ class MappedTable:
         pages wait on reads already in flight; ``MADV_POPULATE_READ`` then maps
         each page (~0.36 ms in total). ctypes releases the GIL in both calls.
         """
-        if not self._can_populate:
+        if not self._can_populate or self._libc is None:
             return False
         starts = []
         for view, index in tasks:
