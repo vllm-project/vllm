@@ -457,9 +457,9 @@ class SpeculativeConfig:
     draft_lm_head_quantization: Literal["fp8", "nvfp4"] | None = None
     """Quantize the drafter's copy of a target lm_head it shares (EAGLE and
     MTP). "fp8" uses per-row weight and per-token activation scales on the
-    platform's FP8 linear kernel; "nvfp4" is weight-only on the Marlin kernel.
-    The target verifies with its own head, so only the acceptance length can
-    change. Model Runner V2 only."""
+    platform's FP8 linear kernel; "nvfp4" is weight-only on the platform's
+    W4A16 kernel. The target verifies with its own head, so only the
+    acceptance length can change. Model Runner V2 only."""
     use_local_argmax_reduction: bool = False
     """Use vocab-parallel local argmax instead of all-gathering full logits
     for draft token generation. Reduces communication from O(vocab_size) to
