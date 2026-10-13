@@ -169,8 +169,8 @@ class Lfm2Attention(nn.Module):
         n_tokens, _ = hidden_states.shape
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        q = q.view(n_tokens, self.num_heads, self.head_dim).contiguous()
-        k = k.view(n_tokens, self.num_kv_heads, self.head_dim).contiguous()
+        q = q.view(n_tokens, self.num_heads, self.head_dim)
+        k = k.view(n_tokens, self.num_kv_heads, self.head_dim)
         q = self.q_layernorm(q)
         k = self.k_layernorm(k)
         q, k = self.rotary_emb(positions, q, k)
@@ -258,7 +258,7 @@ class Lfm2ShortConvDecoderLayer(nn.Module):
             model_config=model_config,
             cache_config=cache_config,
             quant_config=quant_config,
-            prefix=f"{prefix}.conv",
+            prefix=f"{prefix}.short_conv",
         )
 
         self.feed_forward = Lfm2MLP(
@@ -440,6 +440,7 @@ class Lfm2ForCausalLM(
         Returns:
             Tuple containing:
             - conv_state_shape: Shape for convolutional state cache
+
         """
         parallel_config = vllm_config.parallel_config
         hf_config = vllm_config.model_config.hf_config
@@ -457,13 +458,6 @@ class Lfm2ForCausalLM(
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
-        cache_config = vllm_config.cache_config
-        if cache_config.mamba_cache_mode == "all":
-            raise NotImplementedError(
-                "Lfm2 currently does not support 'all' prefix caching, "
-                "please use '--mamba-cache-mode=align' instead"
-            )
-
         super().__init__()
         self.config = config
         self.model = Lfm2Model(
@@ -508,8 +502,5 @@ class Lfm2ForCausalLM(
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=(["lm_head."] if self.config.tie_word_embeddings else None),
-        )
+        loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)

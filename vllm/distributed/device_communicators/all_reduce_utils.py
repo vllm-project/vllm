@@ -47,6 +47,12 @@ CUSTOM_ALL_REDUCE_MAX_SIZES = {
         6: 8 * MiB,  # 8 MB
         8: 4 * MiB,  # 4 MB
     },
+    "10.7": {  # sm_107 (Rubin): reuse 10.3 all-reduce thresholds
+        2: 4 * MiB,  # 4 MB
+        4: 4 * MiB,  # 4 MB
+        6: 8 * MiB,  # 8 MB
+        8: 4 * MiB,  # 4 MB
+    },
 }
 
 SYMM_MEM_ALL_REDUCE_MAX_SIZES = {
@@ -68,6 +74,21 @@ SYMM_MEM_ALL_REDUCE_MAX_SIZES = {
         6: 32 * MiB,  # 32 MB
         8: 64 * MiB,  # 64 MB
     },
+    "10.7": {  # sm_107 (Rubin): reuse 10.3 all-reduce thresholds
+        2: 4 * MiB,  # 4 MB
+        4: 32 * MiB,  # 32 MB
+        6: 32 * MiB,  # 32 MB
+        8: 64 * MiB,  # 64 MB
+    },
+}
+
+# Per-rank input limit for standalone FlashInfer MNNVL all-reduce.
+# The key is (compute capability, world size, node count).
+FI_MNNVL_ALLREDUCE_MAX_SIZE_MB: dict[tuple[int, int, int], float] = {
+    (103, 4, 1): 80,
+    (103, 8, 1): 64,
+    (103, 8, 2): 64,
+    (103, 16, 4): 8,
 }
 
 # NCCL symmetric memory allreduce configuration based on H100 and GB200 benchmarks.
@@ -98,8 +119,7 @@ NCCL_SYMM_MEM_ALL_REDUCE_CONFIG: dict[str, Any] = {
 
 
 def should_nccl_symm_mem_allreduce(world_size: int, input_tensor: torch.Tensor) -> bool:
-    """
-    Determine if NCCL symmetric memory allreduce should be used.
+    """Determine if NCCL symmetric memory allreduce should be used.
 
     Based on H100 and GB200 benchmarks, NCCL symm_mem is preferred for:
     - Small tensors (≤16K): Lower latency than custom_AR
@@ -323,7 +343,6 @@ _gpu_p2p_access_cache: dict[str, bool] | None = None
 
 def gpu_p2p_access_check(src: int, tgt: int) -> bool:
     """Check if GPU src can access GPU tgt."""
-
     # if the cache variable is already calculated,
     # read from the cache instead of checking it again
     global _gpu_p2p_access_cache

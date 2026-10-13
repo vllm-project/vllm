@@ -943,10 +943,14 @@ inline FP16Vec16::FP16Vec16(const FP32Vec16& v) {
 };
 
 inline void fma(FP32Vec16& acc, FP32Vec16& a, FP32Vec16& b) {
-  fmadd(acc.reg.val[0], a.reg.val[0], b.reg.val[0]);
-  fmadd(acc.reg.val[1], a.reg.val[1], b.reg.val[1]);
-  fmadd(acc.reg.val[2], a.reg.val[2], b.reg.val[2]);
-  fmadd(acc.reg.val[3], a.reg.val[3], b.reg.val[3]);
+  // NOTE: at::vec::fmadd(a, b, c) returns a * b + c and does not mutate its
+  // arguments; we must capture the result back into acc, otherwise the FMA
+  // is a no-op. On x86 fma is implemented as `acc = acc + a * b` which does
+  // the assignment; the ARM version previously dropped the return value.
+  acc.reg.val[0] = fmadd(a.reg.val[0], b.reg.val[0], acc.reg.val[0]);
+  acc.reg.val[1] = fmadd(a.reg.val[1], b.reg.val[1], acc.reg.val[1]);
+  acc.reg.val[2] = fmadd(a.reg.val[2], b.reg.val[2], acc.reg.val[2]);
+  acc.reg.val[3] = fmadd(a.reg.val[3], b.reg.val[3], acc.reg.val[3]);
 };
 
 inline BF16Vec8::BF16Vec8(const FP32Vec8& v) {
@@ -967,10 +971,11 @@ inline void fma(FP32Vec16& acc, BF16Vec32& a, BF16Vec32& b) {
   std::tie(b0_low, b0_high) = convert_bfloat16_float(b.reg.val[0]);
   std::tie(b1_low, b1_high) = convert_bfloat16_float(b.reg.val[1]);
 
-  fmadd(acc.reg.val[0], a0_low, b0_low);
-  fmadd(acc.reg.val[1], a0_high, b0_high);
-  fmadd(acc.reg.val[2], a1_low, b1_low);
-  fmadd(acc.reg.val[3], a1_high, b1_high);
+  // Same fmadd semantic as the FP32 overload above: capture the result.
+  acc.reg.val[0] = fmadd(a0_low, b0_low, acc.reg.val[0]);
+  acc.reg.val[1] = fmadd(a0_high, b0_high, acc.reg.val[1]);
+  acc.reg.val[2] = fmadd(a1_low, b1_low, acc.reg.val[2]);
+  acc.reg.val[3] = fmadd(a1_high, b1_high, acc.reg.val[3]);
 };
 
 template <>

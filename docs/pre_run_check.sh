@@ -10,25 +10,20 @@ if [ -n "$GITHUB_TOKEN" ]; then
   CURL_AUTH=(-H "Authorization: Bearer $GITHUB_TOKEN")
 fi
 
-# Docs builds are now manually enabled via the 'build-docs' label.
+# The 'build-docs' label forces a docs build, bypassing the checks below.
 echo "Checking for the 'build-docs' label on PR #${READTHEDOCS_VERSION_NAME}..."
 LABELS=$(curl -sS "${CURL_AUTH[@]}" "https://api.github.com/repos/vllm-project/vllm/issues/${READTHEDOCS_VERSION_NAME}/labels" | python3 -c "import sys, json; print('\n'.join(l.get('name', '') for l in json.load(sys.stdin)))")
 if printf '%s\n' "$LABELS" | grep -qx "build-docs"; then
-  echo "PR has the 'build-docs' label; continuing build."
+  echo "PR has the 'build-docs' label; forcing build."
   exit 0
-else
-  echo "PR does not have the 'build-docs' label; cancelling build."
-  # See https://docs.readthedocs.com/platform/latest/guides/build/skip-build.html for info on exit code
-  exit 183
 fi
 
-# Everything below this line is effectively disabled as a temporary measure.
 echo "Checking for changes to docs-affecting files vs origin/main..."
 DOCS_PATHS=(
   docs/                       # Actual docs content
   examples/                   # Examples are rendered in docs
-  vllm/                       # API & CLI reference
-  requirements/test/cuda.txt  # CLI reference (see docs/mkdocs/hooks/generate_argparse.py)
+  # vllm/                     # API & CLI reference (too broad, use 'build-docs' label)
+  requirements/test/cuda.txt  # CLI reference (see docs/mkdocs/gen_files/generate_argparse.py)
   mkdocs.yaml                 # Affects build process
   .readthedocs.yaml           # Affects build process
   requirements/docs.txt       # Affects build process

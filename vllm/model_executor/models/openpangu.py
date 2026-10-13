@@ -26,7 +26,7 @@ from typing import Any
 
 import torch
 from torch import nn
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ParallelConfig, VllmConfig
@@ -43,7 +43,10 @@ from vllm.model_executor.layers.attention import (
     Attention,
     StaticSinkAttention,
 )
-from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe import (
+    FusedMoEFactory,
+    GateLinear,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -131,7 +134,7 @@ class OpenPanguMLP(nn.Module):
 class OpenPanguMoE(nn.Module):
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         parallel_config: ParallelConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
@@ -142,7 +145,6 @@ class OpenPanguMoE(nn.Module):
 
         self.routed_scaling_factor = config.routed_scaling_factor
         self.ep_group = get_ep_group().device_group
-        self.ep_rank = self.ep_group.rank()
         self.ep_size = self.ep_group.size()
         self.n_routed_experts: int = config.n_routed_experts
         self.n_shared_experts: int = config.n_shared_experts
@@ -150,11 +152,9 @@ class OpenPanguMoE(nn.Module):
         self.is_sequence_parallel = parallel_config.use_sequence_parallel_moe
         check_ffn_act_fn(config.hidden_act)
 
-        self.gate = ReplicatedLinear(
+        self.gate = GateLinear(
             config.hidden_size,
             config.n_routed_experts,
-            bias=False,
-            quant_config=None,
             prefix=f"{prefix}.gate",
         )
         if (
@@ -176,11 +176,7 @@ class OpenPanguMoE(nn.Module):
         self.n_physical_experts = self.n_logical_experts + self.n_redundant_experts
         self.n_local_physical_experts = self.n_physical_experts // self.ep_size
 
-        self.physical_expert_start = self.ep_rank * self.n_local_physical_experts
-        self.physical_expert_end = (
-            self.physical_expert_start + self.n_local_physical_experts
-        )
-
+        self.shared_experts: OpenPanguMLP | None
         if config.n_shared_experts is not None:
             intermediate_size = config.moe_intermediate_size * config.n_shared_experts
             self.shared_experts = OpenPanguMLP(
@@ -195,7 +191,7 @@ class OpenPanguMoE(nn.Module):
         else:
             self.shared_experts = None
 
-        self.experts = FusedMoE(
+        self.experts = FusedMoEFactory(
             shared_experts=self.shared_experts,
             num_experts=config.n_routed_experts,
             top_k=config.num_experts_per_tok,
@@ -244,7 +240,7 @@ class OpenPanguMoE(nn.Module):
 class OpenPanguMLAAttention(nn.Module):
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         hidden_size: int,
         num_heads: int,
         qk_nope_head_dim: int,
@@ -289,7 +285,7 @@ class OpenPanguMLAAttention(nn.Module):
             )
             self.q_a_layernorm = RMSNorm(self.q_lora_rank, eps=config.rms_norm_eps)
             self.q_b_proj = ColumnParallelLinear(
-                q_lora_rank,
+                self.q_lora_rank,
                 self.num_heads * self.qk_head_dim,
                 bias=False,
                 quant_config=quant_config,
@@ -393,7 +389,7 @@ class OpenPanguMLAAttention(nn.Module):
 class OpenPanguEmbeddedAttention(nn.Module):
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         hidden_size: int,
         num_heads: int,
         num_kv_heads: int,
@@ -505,7 +501,7 @@ class OpenPanguEmbeddedAttention(nn.Module):
 
     def _init_rotary_emb(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None,
     ) -> None:
         is_neox_style = True
@@ -526,7 +522,7 @@ class OpenPanguEmbeddedAttention(nn.Module):
 class OpenPanguSinkAttention(nn.Module):
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         hidden_size: int,
         num_heads: int,
         num_kv_heads: int,
@@ -574,6 +570,9 @@ class OpenPanguSinkAttention(nn.Module):
         self.qk_nope_dim = getattr(config, "qk_nope_dim", None)
         self.qk_rope_dim = getattr(config, "qk_rope_dim", None)
         self.v_channels = getattr(config, "v_channels", None)
+        assert self.qk_nope_dim is not None
+        assert self.qk_rope_dim is not None
+        assert self.v_channels is not None
         self.head_dim = self.qk_rope_dim + self.qk_nope_dim
         self.q_size = self.num_heads * self.head_dim
         self.k_size = self.num_kv_heads * self.head_dim
@@ -683,14 +682,18 @@ class OpenPanguSinkAttention(nn.Module):
                     },
                 )
             else:
-                self.param_sink_value = torch.zeros(
-                    (
-                        self.param_sink_number,
-                        self.num_kv_heads,
-                        self.v_channels,
+                self.register_buffer(
+                    "param_sink_value",
+                    torch.zeros(
+                        (
+                            self.param_sink_number,
+                            self.num_kv_heads,
+                            self.v_channels,
+                        ),
+                        device=current_platform.current_device(),
+                        dtype=config.torch_dtype,
                     ),
-                    device=current_platform.current_device(),
-                    dtype=config.torch_dtype,
+                    persistent=False,
                 )
         # To enable dummy run with out weight
         self.post_weight_load()
@@ -699,10 +702,6 @@ class OpenPanguSinkAttention(nn.Module):
         output_dim = getattr(param, "output_dim", None)
 
         is_sharded_weight = getattr(param, "is_sharded_weight", False)
-        use_bitsandbytes_4bit = getattr(param, "use_bitsandbytes_4bit", False)
-        # bitsandbytes loads the weights of the specific portion
-        # no need to narrow
-        is_sharded_weight = is_sharded_weight or use_bitsandbytes_4bit
 
         param_data = param.data
         if output_dim is not None and not is_sharded_weight:
@@ -744,7 +743,7 @@ class OpenPanguSinkAttention(nn.Module):
 
     def _init_rotary_emb(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         rope_parameters: dict[str, Any] | None,
         quant_config: QuantizationConfig | None,
     ) -> None:
@@ -770,7 +769,7 @@ class OpenPanguSinkAttention(nn.Module):
 class OpenPanguDecoderLayer(nn.Module):
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         prefix: str,
         vllm_config: VllmConfig,
     ) -> None:
@@ -1132,7 +1131,7 @@ class OpenPanguModelBase(nn.Module, SupportsPP, SupportsLoRA):
                 prefix=maybe_prefix(prefix, "lm_head"),
             )
             if config.tie_word_embeddings:
-                self.lm_head.weight = self.model.embed_tokens.weight
+                self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
         else:
             self.lm_head = PPMissingLayer()
         self.logits_processor = LogitsProcessor(config.vocab_size)
@@ -1163,10 +1162,7 @@ class OpenPanguModelBase(nn.Module, SupportsPP, SupportsLoRA):
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=(["lm_head."] if self.config.tie_word_embeddings else None),
-        )
+        loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)
 
 

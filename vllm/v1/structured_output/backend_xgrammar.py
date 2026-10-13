@@ -8,8 +8,9 @@ from typing import TYPE_CHECKING, Any
 import torch
 
 import vllm.envs
+from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
-from vllm.sampling_params import SamplingParams
+from vllm.sampling_params import SamplingParams, check_json_nesting
 from vllm.utils.import_utils import LazyLoader
 from vllm.utils.mistral import is_mistral_tokenizer
 from vllm.v1.structured_output.backend_types import (
@@ -20,7 +21,6 @@ from vllm.v1.structured_output.backend_types import (
 from vllm.v1.structured_output.utils import (
     choice_as_grammar,
     compile_regex_with_timeout,
-    convert_lark_to_ebnf,
     grammar_is_likely_lark,
 )
 
@@ -37,6 +37,10 @@ class XgrammarBackend(StructuredOutputBackend):
     def __post_init__(self):
         self.disable_any_whitespace = (
             self.vllm_config.structured_outputs_config.disable_any_whitespace
+        )
+        model_config = self.vllm_config.model_config
+        is_plamo3 = (
+            model_config is not None and model_config.hf_config.model_type == "plamo3"
         )
 
         if is_mistral_tokenizer(self.tokenizer):
@@ -57,6 +61,10 @@ class XgrammarBackend(StructuredOutputBackend):
                 stop_token_ids=stop_token_ids,
                 add_prefix_space=True,
             )
+        elif is_plamo3 and callable(
+            init_xgrammar := getattr(self.tokenizer, "init_xgrammar", None)
+        ):
+            tokenizer_info, _ = init_xgrammar()
         else:
             tokenizer_info = xgr.TokenizerInfo.from_huggingface(
                 self.tokenizer,
@@ -76,18 +84,47 @@ class XgrammarBackend(StructuredOutputBackend):
             )
 
     def compile_grammar(
-        self, request_type: StructuredOutputOptions, grammar_spec: str
+        self,
+        request_type: StructuredOutputOptions,
+        grammar_spec: str,
+        stop_token_ids: set[int] | None = None,
     ) -> StructuredOutputGrammar:
+        # Note(arpera):
+        # Our flag disable_any_whitespace does NOT map directly to
+        # xgrammar's flag any_whitespace
+        # To achieve desired behavior of disable_any_whitespace
+        # we have to set not only any_whitespace
+        # but also specify a list of separators after which
+        # xgrammar must not insert spaces.
+        # This is a requirement of xgrammar's API, so we must comply with it.
+        #
+        # FIXME(arpera):
+        # Currently xgrammar v0.2.8 DOES emit spaces after comma
+        # even if we specify it in separators list.
+        # The bug has been reported to xgrammar team:
+        # https://github.com/mlc-ai/xgrammar/issues/945
+        # Please, track that issue, and once it is resolved remove this comment.
+        # Upd. this bug was fixed in xgrammar main branch on Oct 8, 2026
+        # and will be available in next release.
+        # So, remove this comment once xgrammar updates to v0.2.9
+        separators = (",", ":") if self.disable_any_whitespace else None
         if request_type == StructuredOutputOptions.JSON:
             ctx = self.compiler.compile_json_schema(
-                grammar_spec, any_whitespace=not self.disable_any_whitespace
+                grammar_spec,
+                any_whitespace=not self.disable_any_whitespace,
+                separators=separators,
             )
         elif request_type == StructuredOutputOptions.JSON_OBJECT:
             ctx = self.compiler.compile_json_schema(
-                '{"type": "object"}', any_whitespace=not self.disable_any_whitespace
+                '{"type": "object"}',
+                any_whitespace=not self.disable_any_whitespace,
+                separators=separators,
             )
         elif request_type == StructuredOutputOptions.GRAMMAR:
-            ctx = self.compiler.compile_grammar(grammar_spec)
+            if grammar_is_likely_lark(grammar_spec):
+                ctx = self.compiler.compile_lark(grammar_spec)
+            else:
+                ctx = self.compiler.compile_grammar(grammar_spec)
         elif request_type == StructuredOutputOptions.REGEX:
             ctx = compile_regex_with_timeout(
                 self.compiler.compile_regex,
@@ -119,6 +156,7 @@ class XgrammarBackend(StructuredOutputBackend):
         return XgrammarGrammar(
             matcher=xgr.GrammarMatcher(
                 ctx,
+                override_stop_tokens=list(stop_token_ids) if stop_token_ids else None,
                 max_rollback_tokens=self.num_speculative_tokens,
             ),
             vocab_size=self.vocab_size,
@@ -152,11 +190,12 @@ class XgrammarGrammar(StructuredOutputGrammar):
     def accept_tokens(self, request_id: str, tokens: list[int]) -> bool:
         """Accepts a list of tokens and advances the FSM.
 
-        Returns True if the FSM was advanced successfully.
-        Returns False if the FSM failed to advance.
+        Returns True if all grammar-constrained tokens were accepted.
+        Tokens after termination are ignored. Returns False if the FSM
+        failed to advance.
         """
         if self._is_terminated:
-            return False
+            return True
         for token in tokens:
             if not self.matcher.accept_token(token):
                 logger.error(
@@ -167,7 +206,9 @@ class XgrammarGrammar(StructuredOutputGrammar):
                 )
                 return False
             self.num_processed_tokens += 1
-        self._is_terminated = self.matcher.is_terminated()
+            self._is_terminated = self.matcher.is_terminated()
+            if self._is_terminated:
+                break
         return True
 
     def validate_tokens(self, tokens: list[int]) -> list[int]:
@@ -176,10 +217,15 @@ class XgrammarGrammar(StructuredOutputGrammar):
 
         Returns the prefix list of tokens that are accepted by the FSM.
         """
+        if self._is_terminated:
+            return []
+
         accepted_tokens = []
         for token in tokens:
             if self.matcher.accept_token(token):
                 accepted_tokens.append(token)
+                if self.matcher.is_terminated():
+                    break
             else:
                 break
         if len(accepted_tokens) > 0:
@@ -199,8 +245,9 @@ class XgrammarGrammar(StructuredOutputGrammar):
         return self._is_terminated
 
     def reset(self):
-        self.num_processed_tokens = 0
         self.matcher.reset()
+        self.num_processed_tokens = 0
+        self._is_terminated = False
 
 
 # cf https://github.com/mlc-ai/xgrammar/blob/a32ac892676d2eedc0327416105b9b06edfb94b2/cpp/json_schema_converter.cc
@@ -222,6 +269,24 @@ STRING_SUPPORTED_FORMATS = {
 }
 
 
+def _has_pattern_and_length_bounds(schema: dict[str, Any]) -> bool:
+    return ("pattern" in schema or "format" in schema) and (
+        "minLength" in schema or "maxLength" in schema
+    )
+
+
+# FIXME(arpera): The approach used here needs to be redesigned because of
+# existing bugs: https://github.com/vllm-project/vllm/issues/57550
+def _schema_types(schema: dict[str, Any]) -> set[str]:
+    """Normalize a scalar or list-valued JSON Schema type."""
+    schema_type = schema.get("type")
+    if isinstance(schema_type, str):
+        return {schema_type}
+    if isinstance(schema_type, list):
+        return {item for item in schema_type if isinstance(item, str)}
+    return set()
+
+
 def has_xgrammar_unsupported_json_features(schema: dict[str, Any]) -> bool:
     """Check if JSON schema contains features unsupported by xgrammar."""
 
@@ -229,29 +294,99 @@ def has_xgrammar_unsupported_json_features(schema: dict[str, Any]) -> bool:
         if not isinstance(obj, dict):
             return False
 
-        # Check for numeric ranges
-        if obj.get("type") in ("integer", "number") and ("multipleOf" in obj):
+        schema_types = _schema_types(obj)
+
+        # integer/number + multipleOf is unsupported by xgrammar
+        # This is known behavior and xgrammar emits warning in logs:
+        #   [21:18:08] /project/cpp/json_schema_converter.cc:1053:
+        #   Warning: multipleOf is not supported for type:number; ignoring multipleOf
+        # This warning was added in PR
+        # https://github.com/mlc-ai/xgrammar/pull/670
+        # So, no need to track progress on this
+        if (schema_types & {"integer", "number"}) and ("multipleOf" in obj):
             return True
 
-        # Check for array unsupported keywords
-        if obj.get("type") == "array" and any(
+        # array + some constraints is unsupported by xgrammar
+        # Tracking issue: https://github.com/mlc-ai/xgrammar/issues/968
+        if "array" in schema_types and any(
             key in obj
             for key in ("uniqueItems", "contains", "minContains", "maxContains")
         ):
             return True
 
-        # Unsupported keywords for strings
+        # string + format with unsupported keywords
+        # is unsupported by xgrammar
+        # Tracking issue: https://github.com/mlc-ai/xgrammar/issues/967
+        # See tests on this in test_backend_xgrammar.py
+        # unsupported_string_schemas
         if (
-            obj.get("type") == "string"
+            "string" in schema_types
             and "format" in obj
             and obj["format"] not in STRING_SUPPORTED_FORMATS
         ):
             return True
 
-        # Unsupported keywords for objects
-        if obj.get("type") == "object" and any(
-            key in obj for key in ("patternProperties", "propertyNames")
-        ):
+        # string + format/pattern + length constraint is unsupported by xgrammar
+        # Tracking issue: https://github.com/mlc-ai/xgrammar/issues/966
+        # See tests on this in test_backend_xgrammar.py
+        # unsupported_string_schemas
+        if "string" in schema_types and _has_pattern_and_length_bounds(obj):
+            return True
+
+        # propertyNames is not supported in pair with some constraints
+        # in xgrammar
+        # See tests on this in test_backend_xgrammar.py
+        # unsupported_propertyNames_combinations
+        if "object" in schema_types and "propertyNames" in obj:
+            # propertyNames + maxLength is unsupported by xgrammar
+            # Tracking issue: https://github.com/mlc-ai/xgrammar/issues/960
+            property_names = obj.get("propertyNames")
+            if isinstance(property_names, dict) and _has_pattern_and_length_bounds(
+                property_names
+            ):
+                return True
+            # propertyNames + patternProperties is unsupported by xgrammar
+            # Tracking issue: https://github.com/mlc-ai/xgrammar/issues/959
+            if "patternProperties" in obj:
+                return True
+            # propertyNames + properties is unsupported by xgrammar
+            # Tracking issue: https://github.com/mlc-ai/xgrammar/issues/958
+            if "properties" in obj:
+                return True
+            # propertyNames + unevaluatedProperties is unsupported by xgrammar
+            # Tracking issue: https://github.com/mlc-ai/xgrammar/issues/961
+            if obj.get("unevaluatedProperties", True) is not True:
+                return True
+
+        # patternProperties is not supported in pair with some constraints
+        # in xgrammar
+        # See tests on this in test_backend_xgrammar.py
+        # unsupported_patternProperties_combinations
+        if "object" in schema_types and isinstance(obj.get("patternProperties"), dict):
+            # patternProperties + properties is unsupported by xgrammar
+            # Tracking issue: https://github.com/mlc-ai/xgrammar/issues/964
+            if "properties" in obj:
+                return True
+            # patternProperties + patternProperties is unsupported by xgrammar
+            # Tracking issue: https://github.com/mlc-ai/xgrammar/issues/965
+            if len(obj["patternProperties"]) > 1:
+                return True
+
+        # Note(arpera):
+        # Xgrammar lacks support of multi-branch allOf
+        # For instance, this schema:
+        # {
+        #   "allOf": [
+        #     { "type": "string" },
+        #     { "enum": ["yes", "no"] }
+        #   ]
+        # }
+        # would accept any kind of json, such as
+        # "maybe", "", 42, {}, [], {"a": 1}, etc.
+        # which is NOT what is expected.
+        # Tracking issue: https://github.com/mlc-ai/xgrammar/issues/937
+        allof = obj.get("allOf")
+        if isinstance(allof, list) and len(allof) >= 2:
             return True
 
         # Recursively check all nested objects and arrays
@@ -272,7 +407,7 @@ def has_xgrammar_unsupported_json_features(schema: dict[str, Any]) -> bool:
 def validate_xgrammar_grammar(sampling_params: SamplingParams) -> None:
     """Validate that the request is supported by structured output.
 
-    Raises ValueError if the request is not supported.
+    Raises VLLMValidationError if the request is not supported.
     """
     if sampling_params.structured_outputs is None:
         return
@@ -280,13 +415,21 @@ def validate_xgrammar_grammar(sampling_params: SamplingParams) -> None:
     so_params = sampling_params.structured_outputs
 
     if so_params.regex:
+        # A NUL byte is never meaningful in a regex pattern and is not handled
+        # by xgrammar's native regex converter. Reject it here, before the
+        # pattern reaches that native code; the try/except below does not cover
+        # this case.
+        if "\x00" in so_params.regex:
+            raise ValueError(
+                "structured_outputs.regex must not contain a NUL character ('\\x00')"
+            )
         try:
             compile_regex_with_timeout(
                 xgr.Grammar.from_regex,
                 so_params.regex,
             )
         except Exception as err:
-            raise ValueError(
+            raise VLLMValidationError(
                 f"Failed to transform regex into a grammar: {err}"
             ) from err
 
@@ -295,7 +438,7 @@ def validate_xgrammar_grammar(sampling_params: SamplingParams) -> None:
         try:
             xgr.Grammar.from_ebnf(choice_grammar)
         except Exception as err:
-            raise ValueError(
+            raise VLLMValidationError(
                 f"Failed to transform choices into a grammar: {err}"
             ) from err
         so_params.choice = None
@@ -303,46 +446,44 @@ def validate_xgrammar_grammar(sampling_params: SamplingParams) -> None:
         return
 
     if so_params.json:
+        check_json_nesting(so_params.json)
         if isinstance(so_params.json, str):
             try:
                 schema = json.loads(so_params.json)
             except json.JSONDecodeError as e:
-                raise ValueError("Invalid JSON grammar specification.") from e
+                raise VLLMValidationError("Invalid JSON grammar specification.") from e
         else:
             schema = so_params.json
 
-        if has_xgrammar_unsupported_json_features(schema):
-            raise ValueError(
-                "The provided JSON schema contains features not supported by xgrammar."
-            )
-
         try:
+            if has_xgrammar_unsupported_json_features(schema):
+                raise VLLMValidationError(
+                    "The provided JSON schema contains features not supported "
+                    "by xgrammar."
+                )
             xgr.Grammar.from_json_schema(schema)
+        except VLLMValidationError:
+            raise
         except Exception as err:
-            raise ValueError(
+            raise VLLMValidationError(
                 f"Failed to transform json schema into a grammar: {err}"
             ) from err
         return
 
     if so_params.grammar:
-        if grammar_is_likely_lark(so_params.grammar):
-            # xgrammar supports EBNF grammars only
-            try:
-                so_params.grammar = convert_lark_to_ebnf(so_params.grammar)
-            except ValueError as e:
-                raise ValueError(
-                    "Failed to convert the grammar from Lark to EBNF. "
-                ) from e
-
-        # Test parsing EBNF grammar, possibly already converted from Lark
+        # Parse the grammar with the same syntax `compile_grammar` will use,
+        # but don't compile it. The grammar is passed on unchanged.
         try:
-            # parse the grammar, but we aren't compiling it.
-            xgr.Grammar.from_ebnf(so_params.grammar)
+            if grammar_is_likely_lark(so_params.grammar):
+                xgr.Grammar.from_lark(so_params.grammar)
+            else:
+                xgr.Grammar.from_ebnf(so_params.grammar)
         except Exception as e:
-            raise ValueError("Invalid grammar specification.") from e
+            raise VLLMValidationError("Invalid grammar specification.") from e
         return
 
     if so_params.structural_tag:
+        check_json_nesting(so_params.structural_tag, structural_tag=True)
         try:
             s_tag = json.loads(so_params.structural_tag)
 
@@ -360,4 +501,4 @@ def validate_xgrammar_grammar(sampling_params: SamplingParams) -> None:
             else:
                 xgr.Grammar.from_structural_tag(so_params.structural_tag)
         except Exception as e:
-            raise ValueError("Invalid structural tag specification.") from e
+            raise VLLMValidationError("Invalid structural tag specification.") from e

@@ -3,11 +3,15 @@
 
 import torch
 
-from vllm.model_executor.layers.quantization.utils.humming_utils import (
+from vllm.model_executor.layers.quantization.utils.humming import (
+    apply_humming_linear,
     convert_linear_layer_to_humming_standard,
-    prepare_humming_layer,
+    get_humming_linear_compute_config,
+    prepare_humming_linear_layer_config,
+    quant_key_to_input_schema,
 )
 from vllm.platforms import current_platform
+from vllm.utils.import_utils import has_humming
 
 from .base import MxFp4LinearKernel, MxFp4LinearLayerConfig
 
@@ -22,13 +26,20 @@ class HummingMxFp4LinearKernel(MxFp4LinearKernel):
         if not current_platform.is_cuda():
             return False, "Humming only supported on CUDA"
 
+        if not has_humming():
+            return False, "Humming is not installed"
+
         if not current_platform.has_device_capability(75):
             return False, "Humming only supported on SM75+"
 
         return True, None
 
     @classmethod
-    def can_implement(cls, c: MxFp4LinearLayerConfig) -> tuple[bool, str | None]:
+    def can_implement(cls, config: MxFp4LinearLayerConfig) -> tuple[bool, str | None]:
+        try:
+            quant_key_to_input_schema(config.activation_quant_key)
+        except ValueError as error:
+            return False, str(error)
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
@@ -44,7 +55,12 @@ class HummingMxFp4LinearKernel(MxFp4LinearKernel):
         }
 
         convert_linear_layer_to_humming_standard(layer=layer, name_map=name_map)
-        prepare_humming_layer(layer, quant_config)
+        input_schema = quant_key_to_input_schema(self.config.activation_quant_key)
+        self.layer_config = prepare_humming_linear_layer_config(
+            layer, quant_config, input_schema=input_schema
+        )
+        self.compute_config = get_humming_linear_compute_config()
+        self.locks = torch.zeros(1024, dtype=torch.int32, device=layer.weight.device)
 
     def apply_weights(
         self,
@@ -52,12 +68,11 @@ class HummingMxFp4LinearKernel(MxFp4LinearKernel):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        from vllm.utils.humming import HummingMethod
-
-        flatten_inputs = x.view(-1, x.size(-1))
-        output = HummingMethod.forward_layer(
-            layer=layer,
-            inputs=flatten_inputs,
-            compute_config=layer.compute_config,
+        return apply_humming_linear(
+            layer,
+            x,
+            skip_bias_add=bias is None,
+            layer_config=self.layer_config,
+            compute_config=self.compute_config,
+            locks=self.locks,
         )
-        return output.view(*x.shape[:-1], output.size(-1))

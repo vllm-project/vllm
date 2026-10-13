@@ -3,8 +3,11 @@
 
 use std::sync::Arc;
 
-use tracing::info;
-use vllm_text::backend::hf::{HfTextBackend, ResolvedModelFiles, load_model_config};
+use thiserror_ext::AsReport as _;
+use tracing::{info, warn};
+use vllm_text::backend::hf::{
+    HfTextBackend, ResolvedModelFiles, load_model_config, load_tokenizer_config,
+};
 use vllm_text::tokenizer::DynTokenizer;
 use vllm_text::{DynTextBackend, TextBackend as _};
 
@@ -17,10 +20,11 @@ use crate::multimodal::{MultimodalConfigFiles, MultimodalModelInfo};
 use crate::output::{
     DefaultChatOutputProcessor, HarmonyChatOutputProcessor, validate_harmony_parser_overrides,
 };
+use crate::parser::unified::{HfTemplateError, ResponseTemplate};
 use crate::renderer::hf::{HfChatRenderer, MultimodalRenderInfo};
 use crate::renderer::{
-    DeepSeekV4ChatRenderer, DeepSeekV32ChatRenderer, DynChatRenderer, HarmonyChatRenderer,
-    InklingChatRenderer,
+    DeepSeekV4ChatRenderer, DeepSeekV32ChatRenderer, DeepSeekV41ChatRenderer, DynChatRenderer,
+    HarmonyChatRenderer, InklingChatRenderer, KimiK3ChatRenderer,
 };
 use crate::request::ChatRequest;
 use crate::{DynChatOutputProcessor, RendererSelection};
@@ -32,6 +36,9 @@ pub struct HfChatBackend {
     tokenizer: DynTokenizer,
     chat_renderer: DynChatRenderer,
     multimodal_model_info: Option<MultimodalModelInfo>,
+    /// `response_template` from `tokenizer_config.json` for the `hf` parser, or
+    /// why it is unavailable.
+    response_template: std::result::Result<Arc<ResponseTemplate>, HfTemplateError>,
 }
 
 impl HfChatBackend {
@@ -57,9 +64,11 @@ impl HfChatBackend {
                     processor_config: files.processor_config_path.as_deref(),
                 },
                 tokenizer.clone(),
+                options.limit_mm_per_prompt.clone(),
             )?
         };
         let multimodal_render_info = resolve_multimodal_render_info(multimodal_model_info.as_ref());
+        let response_template = load_response_template(&files)?;
 
         let renderer = options.renderer.resolve(model_type);
         let chat_renderer: DynChatRenderer = match renderer {
@@ -69,10 +78,26 @@ impl HfChatBackend {
                 options,
                 multimodal_render_info,
             )?),
-            RendererSelection::DeepSeekV32 => Arc::new(DeepSeekV32ChatRenderer::new()),
-            RendererSelection::DeepSeekV4 => Arc::new(DeepSeekV4ChatRenderer::new()),
-            RendererSelection::Harmony => Arc::new(HarmonyChatRenderer::new()?),
-            RendererSelection::Inkling => Arc::new(InklingChatRenderer::new(tokenizer.clone())?),
+            RendererSelection::DeepSeekV32 => Arc::new(DeepSeekV32ChatRenderer::new(
+                options.default_chat_template_kwargs,
+            )),
+            RendererSelection::DeepSeekV4 => Arc::new(DeepSeekV4ChatRenderer::new(
+                options.default_chat_template_kwargs,
+            )),
+            RendererSelection::DeepSeekV41 => Arc::new(DeepSeekV41ChatRenderer::new(
+                options.default_chat_template_kwargs,
+            )),
+            RendererSelection::Harmony => Arc::new(HarmonyChatRenderer::new(
+                options.default_chat_template_kwargs,
+            )?),
+            RendererSelection::Inkling => Arc::new(InklingChatRenderer::new(
+                tokenizer.clone(),
+                options.default_chat_template_kwargs,
+            )?),
+            RendererSelection::KimiK3 => Arc::new(KimiK3ChatRenderer::new(
+                tokenizer.clone(),
+                options.default_chat_template_kwargs,
+            )),
         };
 
         info!(
@@ -88,8 +113,33 @@ impl HfChatBackend {
             tokenizer,
             chat_renderer,
             multimodal_model_info,
+            response_template,
         })
     }
+}
+
+/// Load and compile the checkpoint's `response_template`, if any.
+///
+/// A missing or unusable template is kept as an error, so that only requests
+/// selecting the `hf` parser fail.
+fn load_response_template(
+    files: &ResolvedModelFiles,
+) -> Result<std::result::Result<Arc<ResponseTemplate>, HfTemplateError>> {
+    let Some(template) =
+        load_tokenizer_config(files.tokenizer_config_path.as_deref())?.response_template
+    else {
+        return Ok(Err(HfTemplateError::Missing));
+    };
+    Ok(match ResponseTemplate::from_json(&template) {
+        Ok(template) => {
+            info!("loaded response_template for the `hf` parser");
+            Ok(Arc::new(template))
+        }
+        Err(error) => {
+            warn!(error = %error.as_report(), "the `hf` parser cannot execute the model's response_template");
+            Err(error)
+        }
+    })
 }
 
 impl ChatBackend for HfChatBackend {
@@ -111,13 +161,17 @@ impl ChatBackend for HfChatBackend {
             return Ok(Box::new(HarmonyChatOutputProcessor::new(request)?));
         }
 
-        Ok(Box::new(DefaultChatOutputProcessor::new(
-            request,
-            &self.model_id,
-            self.tokenizer.clone(),
-            options.tool_call_parser,
-            options.reasoning_parser,
-        )?))
+        Ok(Box::new(
+            DefaultChatOutputProcessor::with_response_template(
+                request,
+                &self.model_id,
+                self.tokenizer.clone(),
+                &self.response_template,
+                options.tool_call_parser,
+                options.reasoning_parser,
+                options.tool_strict_level,
+            )?,
+        ))
     }
 }
 
@@ -126,9 +180,13 @@ pub(super) async fn load_model_backends(
     model_id: &str,
     options: LoadModelBackendsOptions,
 ) -> Result<LoadedModelBackends> {
-    let files = ResolvedModelFiles::new(model_id).await?;
-    let text_backend =
-        HfTextBackend::from_resolved_model_files(files.clone(), model_id.to_string())?;
+    let mut files = ResolvedModelFiles::new(model_id, options.revision.as_deref()).await?;
+    files.apply_overrides(&options.hf_overrides)?;
+    let text_backend = HfTextBackend::from_resolved_model_files(
+        files.clone(),
+        model_id.to_string(),
+        options.generation_config,
+    )?;
     let tokenizer = text_backend.tokenizer();
     let text_backend: DynTextBackend = Arc::new(text_backend);
 
@@ -160,13 +218,11 @@ fn resolve_multimodal_render_info(
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
-    use std::path::PathBuf;
     use std::sync::Arc;
 
     use tempfile::tempdir;
     use thiserror_ext::AsReport as _;
     use vllm_text::Prompt;
-    use vllm_text::backend::hf::TokenizerSource;
     use vllm_text::tokenizer::DynTokenizer;
     use vllm_tokenizer::test_utils::TestTokenizer;
 
@@ -200,16 +256,12 @@ mod tests {
         write_json(&config_path, config_json);
         write_json(&tokenizer_config_path, tokenizer_config_json);
 
-        vllm_text::backend::hf::ResolvedModelFiles {
-            tokenizer: TokenizerSource::HuggingFace(PathBuf::from("/tmp/unused-tokenizer.json")),
-            tokenizer_config_path: Some(tokenizer_config_path),
-            generation_config_path: None,
-            preprocessor_config_path: None,
-            video_preprocessor_config_path: None,
-            processor_config_path: None,
-            chat_template_path: None,
-            config_path: Some(config_path),
-        }
+        write_json(&root.join("tokenizer.json"), "{}");
+        futures::executor::block_on(vllm_text::backend::hf::ResolvedModelFiles::new(
+            root.to_str().unwrap(),
+            None,
+        ))
+        .unwrap()
     }
 
     fn test_tokenizer() -> DynTokenizer {
@@ -225,11 +277,15 @@ mod tests {
             resolved_files(config_json, tokenizer_config_json),
             "test-model".to_string(),
             LoadModelBackendsOptions {
+                revision: None,
+                hf_overrides: Default::default(),
+                generation_config: Default::default(),
                 renderer,
                 language_model_only: false,
                 chat_template_content_format: Default::default(),
                 chat_template: None,
                 default_chat_template_kwargs: HashMap::new(),
+                limit_mm_per_prompt: HashMap::new(),
             },
             test_tokenizer(),
         )
@@ -276,6 +332,39 @@ mod tests {
     }
 
     #[test]
+    fn native_renderer_inherits_deployment_reasoning_below_request_controls() {
+        let backend = HfChatBackend::from_resolved_model_files(
+            resolved_files(r#"{"model_type":"deepseek_v4"}"#, "{}"),
+            "test-model".to_string(),
+            LoadModelBackendsOptions {
+                default_chat_template_kwargs: [
+                    ("thinking".to_string(), serde_json::json!(false)),
+                    ("reasoning_effort".to_string(), serde_json::json!("low")),
+                ]
+                .into(),
+                ..Default::default()
+            },
+            test_tokenizer(),
+        )
+        .unwrap();
+        let mut request = request_with_user_text("hello");
+        let rendered = backend.chat_renderer().render(&request).unwrap();
+        assert!(rendered.prompt.into_text().unwrap().ends_with("</think>"));
+        assert_eq!(rendered.effective_template_kwargs["enable_thinking"], false);
+
+        request.chat_options.reasoning_effort = Some(crate::EffortValue::from("max"));
+        let rendered = backend.chat_renderer().render(&request).unwrap();
+        let prompt = rendered.prompt.into_text().unwrap();
+        assert!(prompt.contains("Reasoning Effort: Beyond maximum"));
+        assert!(prompt.ends_with("<think>"));
+        assert_eq!(
+            rendered.effective_template_kwargs["reasoning_effort"],
+            "max"
+        );
+        assert_eq!(rendered.effective_template_kwargs["thinking"], true);
+    }
+
+    #[test]
     fn auto_uses_harmony_renderer_and_output_processor_for_gpt_oss_model_type() {
         let backend = backend_for_selection(
             RendererSelection::Auto,
@@ -291,6 +380,7 @@ mod tests {
         let error = match backend.new_chat_output_processor(
             &mut request,
             NewChatOutputProcessorOptions {
+                tool_strict_level: crate::ToolStrictLevel::Auto,
                 tool_call_parser: &ParserSelection::Explicit("json".to_string()),
                 reasoning_parser: &ParserSelection::Auto,
             },
