@@ -1375,6 +1375,40 @@ async fn render_chat_returns_generate_request_with_header_request_id() {
 }
 
 #[tokio::test]
+async fn render_chat_omits_unset_sampling_params() {
+    let mut app = test_render_app();
+    let response = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions/render")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "render-model",
+                        "messages": [{"role": "user", "content": "hello"}],
+                        "max_completion_tokens": 8
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+
+    let sampling_params = json["sampling_params"].as_object().expect("sampling_params object");
+    assert!(
+        sampling_params.values().all(|value| !value.is_null()),
+        "unexpected null in {sampling_params:?}"
+    );
+    assert_eq!(sampling_params["max_tokens"], 8);
+}
+
+#[tokio::test]
 async fn render_chat_uses_processor_owned_parser_selections() {
     let mut app = test_render_app_with_parser_selections(
         ParserSelection::Auto,
