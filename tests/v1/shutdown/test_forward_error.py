@@ -41,21 +41,21 @@ def evil_forward(self, *args, **kwargs):
 
 
 @pytest.fixture
-def rocm_evil_forward(rocm_sitecustomize_factory):
+def evil_forward_fixture(spawn_sitecustomize_factory):
     lines = [
         "from vllm.distributed import get_tensor_model_parallel_rank",
         "from vllm.model_executor.models.llama import LlamaForCausalLM",
         inspect.getsource(evil_forward),
         f"LlamaForCausalLM.forward = {evil_forward.__name__}",
     ]
-    rocm_sitecustomize_factory(lines)
+    spawn_sitecustomize_factory(lines)
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("tensor_parallel_size", [2, 1])
 @pytest.mark.parametrize("model", MODELS)
 async def test_async_llm_model_error(
-    monkeypatch, rocm_evil_forward, tensor_parallel_size: int, model: str
+    monkeypatch, evil_forward_fixture, tensor_parallel_size: int, model: str
 ) -> None:
     """Test that AsyncLLM propagates a forward pass error and frees memory.
 
@@ -118,7 +118,7 @@ async def test_async_llm_model_error(
 @pytest.mark.parametrize("model", MODELS)
 def test_llm_model_error(
     monkeypatch,
-    rocm_evil_forward,
+    evil_forward_fixture,
     tensor_parallel_size: int,
     enable_multiprocessing: bool,
     model: str,
