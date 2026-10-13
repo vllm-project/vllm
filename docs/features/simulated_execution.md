@@ -408,9 +408,9 @@ steps next, so the instances run concurrently in simulated time; an
 instance that only waits for transfers moves ahead to the earliest time
 anything can happen. A link reserved by an instance that is ahead in
 simulated time delays a read of an instance behind it by at most that
-difference. Each instance has one rank. `handoff_latency_s` is the proxy's latency from a
-finished prefill to the decode instance receiving the request; the
-instances' API servers are not modeled.
+difference. Each instance has one rank. `handoff_latency_s` is the proxy's
+latency from a finished prefill to the decode instance receiving the
+request; the instances' API servers are not modeled.
 
 On Qwen3-8B / H200 (one prefill and one decode instance on two GPUs, NIXL
 within the node, the toy proxy from the NIXL integration tests; 120 requests
@@ -447,6 +447,44 @@ from a recording at half the load. Medians are 5–11% high and P99s about
 half the real ones: the real HTTP path's latency varies, the simulation's
 does not.
 
+#### Served instances
+
+Simulated prefill and decode instances also run as ordinary servers, on the
+real clock, with tensor parallelism, behind any proxy or router:
+
+```bash
+VLLM_NIXL_SIDE_CHANNEL_PORT=5600 vllm serve Qwen/Qwen3-8B --port 8100 \
+  --tensor-parallel-size 2 --simulate-forward \
+  --kv-transfer-config '{"kv_connector": "NixlConnector", "kv_role": "kv_producer"}' \
+  --simulation-config '{"timing": "replay", "timing_args": {"path": "p.jsonl"}, "kv_transfer_timing": "d.jsonl"}'
+VLLM_NIXL_SIDE_CHANNEL_PORT=5700 vllm serve Qwen/Qwen3-8B --port 8200 \
+  --tensor-parallel-size 2 --simulate-forward \
+  --kv-transfer-config '{"kv_connector": "NixlConnector", "kv_role": "kv_consumer"}' \
+  --simulation-config '{"timing": "replay", "timing_args": {"path": "d.jsonl"}, "kv_transfer_timing": "d.jsonl"}'
+```
+
+A decode rank books each read with the prefill rank of the same
+tensor-parallel index over ZMQ, at the prefill instance's side-channel
+address from the kv_transfer_params: each rank of a `kv_producer` instance
+listens on the side-channel host at port + 100 × (rank + 1), which must be
+free. The prefill and decode instances need the same tensor parallelism and
+no pipeline parallelism; a read that cannot be booked (a prefill instance
+that does not answer within 10 s, or a different tensor parallelism) fails
+its request, which the decode instance then prefills itself, as after a
+failed NIXL read. As the proxy, the API servers and the HTTP path run for
+real, they add their own latency, including its variation.
+
+On the 1P1D deployment above at 8 req/s, through the toy proxy, served
+simulation reproduces mean TTFT within 6%, P99 TTFT within 23% and TPOT
+within 1% (the in-process driver's P99 was half the real one). With
+tensor parallelism 2 on both instances (four GPUs, the client playing the
+proxy), replaying their recordings:
+
+| | TTFT mean | TTFT median | TTFT P99 | TPOT mean |
+| --- | --- | --- | --- | --- |
+| Real (ms) | 73.4 | 63.7 | 162.8 | 3.874 |
+| Simulated, served (ms) | 75.4 | 66.3 | 145.0 | 3.875 |
+
 ### Running without a GPU
 
 A CPU build of vLLM (`VLLM_TARGET_DEVICE=cpu`, which installs Triton's CPU
@@ -481,7 +519,8 @@ Python 3.11 or newer for triton-cpu.
 * Pipeline stages are assumed balanced.
 * No LoRA or pooling models, and no KV transfer other than CPU offloading by
   the `OffloadingConnector` and disaggregated prefill by the `NixlConnector`
-  (pull mode, in-process instances of one rank each). Speculative decoding
+  (pull mode; in-process instances have one rank, served ones need equal
+  tensor parallelism and no pipeline parallelism). Speculative decoding
   without adaptive verification only, and no diffusion models.
 * The `fast_forward` and `virtual` clocks are offline-only and need a single
   process (one rank); served and multi-rank simulations run in real time.

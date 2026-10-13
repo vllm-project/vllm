@@ -2951,12 +2951,12 @@ class EngineArgs:
                         "disaggregated prefill by the NixlConnector"
                     )
                 )
-            if nixl and self.simulation_config.clock != "virtual":
-                # The instances exchange KV in process, on per-engine clocks.
+            if nixl and self.simulation_config.clock == "fast_forward":
+                # Served instances run on the real clock; in-process ones
+                # (vllm.v1.worker.simulated.disaggregated) on virtual clocks.
                 _raise_unsupported_error(
                     feature_name=(
-                        "simulated disaggregated prefill outside "
-                        "vllm.v1.worker.simulated.disaggregated (virtual clock)"
+                        "simulated disaggregated prefill with the fast_forward clock"
                     )
                 )
             if self.weight_transfer_config is not None:

@@ -463,15 +463,20 @@ def test_kv_transfer_rates_without_stores(tmp_path):
     assert load.bytes_per_s == pytest.approx(1e10) and store is None
 
 
-def _nixl_worker(engine_id: str, clock: VirtualClock):
+def _nixl_worker(engine_id: str, clock, role="kv_both", port=None):
     from vllm.v1.worker.simulated.kv_nixl import SimulatedNixlWorker
 
     group = SimpleNamespace(
         kv_cache_spec=SimpleNamespace(page_size_bytes=10), layer_names=["layer"]
     )
     kv_cache_config = SimpleNamespace(kv_cache_groups=[group], transfer_group_ids=(0,))
-    worker = SimpleNamespace(kv_transfer_config=object())
-    nixl = SimulatedNixlWorker(worker, engine_id, kv_cache_config)
+    config = SimpleNamespace(
+        kv_transfer_config=SimpleNamespace(kv_role=role),
+        parallel_config=SimpleNamespace(data_parallel_index=0),
+    )
+    nixl = SimulatedNixlWorker(config, engine_id, kv_cache_config)
+    if port is not None:
+        nixl.side_channel_port = port
     nixl.configure(clock, TransferRate(latency_s=0.0, bytes_per_s=10.0))
     return nixl
 
@@ -519,3 +524,60 @@ def test_simulated_nixl_reads_notify_the_prefill_instance():
     assert decode.get_finished() == (set(), {"r2"})
     assert prefill.get_finished() == ({"p2"}, set())
     assert decode.next_completion() is None and prefill.next_completion() is None
+
+
+def test_simulated_nixl_books_reads_across_processes(monkeypatch):
+    """A served decode rank books its read with the prefill rank over ZMQ,
+    and fails the request when the prefill rank does not answer."""
+    import zmq
+
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
+        NixlConnectorMetadata,
+        RemoteMeta,
+        ReqMeta,
+    )
+    from vllm.utils.network_utils import get_open_port
+    from vllm.v1.worker.simulated import kv_nixl
+
+    base = get_open_port() - 100
+    prefill = _nixl_worker("sim-served-p", RealClock(), "kv_producer", base)
+    decode = _nixl_worker("sim-served-d", RealClock(), "kv_consumer")
+    # Served instances run in separate processes.
+    monkeypatch.delitem(kv_nixl._workers, "sim-served-p")
+
+    def recv(req_id, remote_req):
+        meta = NixlConnectorMetadata()
+        meta.reqs_to_recv = {
+            req_id: ReqMeta(
+                local_block_ids=([0, 1],),
+                local_physical_block_ids=([0, 1],),
+                tp_size=1,
+                awaiting_kvs=True,
+                remote=RemoteMeta(
+                    [0, 1], "localhost", base, "sim-served-p", remote_req
+                ),
+            )
+        }
+        return meta
+
+    t0 = time.monotonic()
+    decode.start_load_kv(recv("r1", "p1"))
+    # 20 bytes at 10 B/s.
+    assert decode.next_completion() == pytest.approx(t0 + 2.0, abs=0.1)
+    assert prefill.next_completion() == pytest.approx(t0 + 2.0, abs=0.1)
+
+    # A malformed booking is rejected; the prefill rank keeps serving.
+    sock = zmq.Context.instance().socket(zmq.REQ)
+    sock.connect(f"tcp://localhost:{base + 100}")
+    sock.send_json({"req": "x"})
+    assert sock.recv_json() is None
+    sock.close(linger=0)
+    decode.start_load_kv(recv("r2", "p2"))
+    assert decode.next_completion() == pytest.approx(t0 + 2.0, abs=0.1)
+
+    # A prefill rank that does not answer fails the read.
+    monkeypatch.setattr(kv_nixl, "_BOOKING_TIMEOUT_MS", 100)
+    prefill.shutdown()
+    decode.start_load_kv(recv("r3", "p3"))
+    assert decode.get_transfer_results().failed_recving == {"r3"}
+    decode.shutdown()
