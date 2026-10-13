@@ -154,11 +154,15 @@ should split those fields:
   continue to work.
 
 Callers that need only the token layout and item hashes, such as cache-aware
-routers, can set `"return_mm_kwargs": false` on the render request. The response
+routers, can set `"mm_payload": "none"` on the render request. The response
 then keeps `mm_hashes` and `mm_placeholders` and sets `kwargs_data` and
 `mm_metadata` to null, so the processed tensors are neither serialized nor sent.
 Do not forward such a response to `/inference/v1/generate`, which reads a null
-`kwargs_data` as every item being cached.
+`kwargs_data` as every item being cached. The default, `"tensors"`, returns
+both fields.
+
+`"return_mm_kwargs": false` is a deprecated alias for `"mm_payload": "none"`
+and is ignored when `mm_payload` is set.
 
 ## Example
 
