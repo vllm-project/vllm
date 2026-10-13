@@ -560,7 +560,8 @@ class TestTieringOffloadingManager:
         assert (
             reduced[
                 histogram_count_key(
-                    TieringOffloadingMetrics.PROMOTION_LATENCY, ("1:example",)
+                    TieringOffloadingMetrics.PROMOTION_LATENCY,
+                    ("1:example", "success"),
                 )
             ]
             == 1

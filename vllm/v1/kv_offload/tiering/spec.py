@@ -252,10 +252,10 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                     "Histogram of per-job latency for secondary-tier promotion "
                     "attempts, measured from job creation until the tiering "
                     "manager observes completion so that tier queueing is "
-                    "included, labeled by "
-                    "tier, in seconds. Includes failed attempts."
+                    "included, labeled by tier and result, in seconds. Includes "
+                    "failed attempts."
                 ),
-                labelnames=(TIER_LABEL,),
+                labelnames=(TIER_LABEL, "result"),
                 buckets=(
                     0.005,
                     0.01,

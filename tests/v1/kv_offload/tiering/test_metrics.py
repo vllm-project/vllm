@@ -243,7 +243,7 @@ def test_tiering_metrics_tracker_records_promotion_latency_histogram(monkeypatch
     stats = tracker.take_stats()
     assert stats is not None
     observations = stats.data["data"][TieringOffloadingMetrics.PROMOTION_LATENCY]
-    assert observations == {("2:p2p",): [1.5]}
+    assert observations == {("2:p2p", "success"): [1.5]}
 
     cascade_job = JobMetadata(
         TransferJob(1, to_keys([2]), np.array([2]), False, _CTX),
@@ -276,7 +276,7 @@ def test_tiering_metrics_tracker_records_promotion_latency_histogram(monkeypatch
     assert stats is not None
     values = stats.data["data"]
     observations = values[TieringOffloadingMetrics.PROMOTION_LATENCY]
-    assert observations == {("1:fs",): pytest.approx([0.2])}
+    assert observations == {("1:fs", "failure"): pytest.approx([0.2])}
     tracker.assert_idle()
 
 
@@ -299,7 +299,7 @@ def test_tiering_metrics_tracker_records_promotion_latency_without_transfer_time
     stats = tracker.take_stats()
     assert stats is not None
     observations = stats.data["data"][TieringOffloadingMetrics.PROMOTION_LATENCY]
-    assert len(observations[("1:p2p",)]) == 1
+    assert len(observations[("1:p2p", "success")]) == 1
 
 
 def test_tiering_metrics_tracker_records_promotion_allocation_failures():

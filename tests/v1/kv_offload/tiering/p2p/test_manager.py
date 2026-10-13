@@ -587,7 +587,7 @@ class TestPromotionLatency:
         stats = tiering_manager.get_stats()
         assert stats is not None
         observations = stats.data["data"][TieringOffloadingMetrics.PROMOTION_LATENCY]
-        assert len(observations[("1:p2p",)]) == 1
+        assert len(observations[("1:p2p", "success")]) == 1
 
 
 # ---------------------------------------------------------------------------
