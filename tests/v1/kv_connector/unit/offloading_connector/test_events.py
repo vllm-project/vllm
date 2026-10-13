@@ -21,6 +21,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.config import (
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.events import (
     OffloadingEventGroupSpec,
     OffloadingEventsTracker,
+    _RequestEventContext,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
     GroupOffloadConfig,
@@ -435,7 +436,7 @@ def test_request_event_context_builds_payload_lazily():
     tracker = _tracker()
     req = _request(block_hashes=[_hash(0)], token_count=4)
     [key] = _record_chunks(tracker, req, _group_config(), num_chunks=1)
-    state = tracker._request_event_context(req.req_context)
+    state = req.req_context.get_state(_RequestEventContext)
 
     assert state is not None
     assert not state.locators
@@ -456,7 +457,7 @@ def test_request_event_context_indexes_only_valid_group_chunk_tails():
     )
     req = _request(block_hashes=[_hash(i) for i in range(4)], token_count=16)
     tracker.on_new_request(req.req_context, req, (group0, group1))
-    state = tracker._request_event_context(req.req_context)
+    state = req.req_context.get_state(_RequestEventContext)
     assert state is not None
     assert not state.locators
 
@@ -793,7 +794,7 @@ def test_take_events_opt_out_keeps_placeholders():
     _record_lookup_chunks(tracker, req, group_config, num_chunks=3)
 
     assert not tracker.self_describing_enabled
-    assert tracker._request_event_context(req.req_context) is None
+    assert req.req_context.get_state(_RequestEventContext) is None
 
     events = list(
         tracker.take_events(
@@ -829,7 +830,7 @@ def test_event_metadata_skips_non_full_attention_group(
     keys = _record_chunks(tracker, req, group_config, num_chunks=3)
     _record_lookup_chunks(tracker, req, group_config, num_chunks=3)
 
-    state = tracker._request_event_context(req.req_context)
+    state = req.req_context.get_state(_RequestEventContext)
     assert state is not None
     assert not state.locators
 
@@ -969,7 +970,7 @@ def test_removal_keeps_request_context_for_secondary_events():
     key = make_offload_key(req.block_hashes[0], group_config.group_idx)
     list(tracker.take_events([_removed_event([key])]))
 
-    assert tracker._request_event_context(req.req_context) is not None
+    assert req.req_context.get_state(_RequestEventContext) is not None
     [event] = tracker.take_events(
         [_stored_event([key], medium=Medium.STORAGE, req_context=req.req_context)]
     )

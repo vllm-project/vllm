@@ -134,14 +134,6 @@ class OffloadingEventsTracker:
         )
 
     @staticmethod
-    def _request_event_context(
-        req_context: ReqContext | None,
-    ) -> _RequestEventContext | None:
-        if req_context is None:
-            return None
-        return req_context.get_state(_RequestEventContext)
-
-    @staticmethod
     def _extend_locators(state: _RequestEventContext) -> None:
         request = state.request
         if len(request.block_hashes) < state.indexed_hash_count:
@@ -395,11 +387,9 @@ class OffloadingEventsTracker:
     def _take_stored_event(self, event: OffloadingEvent) -> Iterable[KVCacheEvent]:
         # Stored events carry the request context needed to build their payload.
         locality = event.locality.value if event.locality is not None else None
-        state = (
-            self._request_event_context(event.req_context)
-            if self.self_describing_enabled
-            else None
-        )
+        state = None
+        if self.self_describing_enabled and event.req_context is not None:
+            state = event.req_context.get_state(_RequestEventContext)
         for key in event.keys:
             meta = self._metadata_for(state, key) if state is not None else None
             if meta is None:
