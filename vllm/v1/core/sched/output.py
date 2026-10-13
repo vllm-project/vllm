@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import cached_property
 from typing import TYPE_CHECKING
 
@@ -260,9 +260,6 @@ class SchedulerOutput:
     # E.g., if a request has [0, 1], it could mean the vision encoder needs
     # to process that the request's 0-th and 1-th images in the current step.
     scheduled_encoder_inputs: dict[str, list[int]]
-    # Number of common prefix blocks for all requests in each KV cache group.
-    # This can be used for cascade attention.
-    num_common_prefix_blocks: list[int]
 
     # Request IDs that are finished in between the previous and the current
     # steps. This is used to notify the workers about the finished requests
@@ -321,6 +318,10 @@ class SchedulerOutput:
     # Completed capture windows; worker can release their request-local plans.
     finished_hidden_capture_req_ids: set[str] | None = None
 
+    # Deprecated: cascade attention has been removed, so this is always empty.
+    # Kept for out-of-tree schedulers and workers.
+    num_common_prefix_blocks: list[int] = field(default_factory=list)
+
     @classmethod
     def make_empty(cls) -> "SchedulerOutput":
         return cls(
@@ -330,7 +331,6 @@ class SchedulerOutput:
             total_num_scheduled_tokens=0,
             scheduled_spec_decode_tokens={},
             scheduled_encoder_inputs={},
-            num_common_prefix_blocks=[],
             finished_req_ids=set(),
             free_encoder_mm_hashes=[],
         )

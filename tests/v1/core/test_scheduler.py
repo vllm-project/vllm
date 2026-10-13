@@ -922,7 +922,8 @@ def test_same_step_duplicate_encoder_input_stays_cached():
     assert "image" not in cache.freeable
 
 
-def test_no_mm_input_chunking():
+@pytest.mark.parametrize("warm_encoder_cache", [False, True])
+def test_no_mm_input_chunking(warm_encoder_cache: bool):
     # Disable multimodal input chunking.
     scheduler = create_scheduler(
         model="llava-hf/llava-1.5-7b-hf",
@@ -934,6 +935,16 @@ def test_no_mm_input_chunking():
     requests = create_requests(
         num_requests=1, num_tokens=1200, mm_positions=mm_positions
     )
+    if warm_encoder_cache:
+        cached_request = create_requests(
+            num_requests=1,
+            num_tokens=1200,
+            mm_positions=mm_positions,
+            req_ids=["cache-primer"],
+        )[0]
+        scheduler.encoder_cache_manager.allocate(cached_request, 0)
+        scheduler.encoder_cache_manager.free(cached_request)
+
     for request in requests:
         scheduler.add_request(request)
 
@@ -961,6 +972,8 @@ def test_no_mm_input_chunking():
     assert output.scheduled_cached_reqs.num_reqs == 1
     assert len(output.finished_req_ids) == 0
     assert output.num_scheduled_tokens[requests[0].request_id] == 800
+    if warm_encoder_cache:
+        assert not output.scheduled_encoder_inputs
 
     # Test that we fail if we disable chunked mm input and use too small
     # of a max_num_batched_tokens for the mm input.
@@ -970,6 +983,32 @@ def test_no_mm_input_chunking():
             max_num_batched_tokens=100,
             disable_chunked_mm_input=True,
         )
+
+
+def test_no_mm_input_chunking_for_same_step_duplicate():
+    scheduler = create_scheduler(
+        model="llava-hf/llava-1.5-7b-hf",
+        max_num_batched_tokens=1024,
+        disable_chunked_mm_input=True,
+        max_model_len=2048,
+    )
+    request = create_requests(
+        num_requests=1,
+        num_tokens=1352,
+        mm_hashes_list=[["image", "image"]],
+        mm_positions=[
+            [
+                PlaceholderRange(offset=100, length=576),
+                PlaceholderRange(offset=776, length=576),
+            ]
+        ],
+    )[0]
+    scheduler.add_request(request)
+
+    output = scheduler.schedule()
+
+    assert output.num_scheduled_tokens[request.request_id] == 776
+    assert output.scheduled_encoder_inputs == {request.request_id: [0]}
 
 
 @pytest.mark.parametrize("enable_prefix_caching", [True, False])
@@ -1116,7 +1155,6 @@ def test_update_from_output_routes_sampling_masks_by_request():
         total_num_scheduled_tokens=3,
         scheduled_encoder_inputs={},
         scheduled_spec_decode_tokens={},
-        num_common_prefix_blocks=[],
         finished_req_ids=set(),
         free_encoder_mm_hashes=[],
     )
@@ -1160,7 +1198,6 @@ def test_update_from_output_routes_multi_position_sampling_masks():
         total_num_scheduled_tokens=2,
         scheduled_encoder_inputs={},
         scheduled_spec_decode_tokens={},
-        num_common_prefix_blocks=[],
         finished_req_ids=set(),
         free_encoder_mm_hashes=[],
     )
@@ -1208,7 +1245,6 @@ def test_stop_via_update_from_output():
             requests[0].request_id: [],
             requests[1].request_id: [10],
         },
-        num_common_prefix_blocks=[],
         finished_req_ids=set(),
         free_encoder_mm_hashes=[],
     )
@@ -1254,7 +1290,6 @@ def test_stop_via_update_from_output():
             requests[0].request_id: [10, 42],
             requests[1].request_id: [13],
         },
-        num_common_prefix_blocks=[],
         finished_req_ids=set(),
         free_encoder_mm_hashes=[],
     )
@@ -1298,7 +1333,6 @@ def test_stop_via_update_from_output():
             requests[0].request_id: [10, 11],
             requests[1].request_id: [],
         },
-        num_common_prefix_blocks=[],
         finished_req_ids=set(),
         free_encoder_mm_hashes=[],
     )
@@ -1336,7 +1370,6 @@ def test_stop_via_update_from_output():
         total_num_scheduled_tokens=3,
         scheduled_encoder_inputs={},
         scheduled_spec_decode_tokens={requests[0].request_id: [EOS_TOKEN_ID, 10]},
-        num_common_prefix_blocks=[],
         finished_req_ids=set(),
         free_encoder_mm_hashes=[],
     )
@@ -4387,7 +4420,6 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
         total_num_scheduled_tokens=1,
         scheduled_encoder_inputs={},
         scheduled_spec_decode_tokens={},
-        num_common_prefix_blocks=[],
         finished_req_ids=set(),
         free_encoder_mm_hashes=[],
     )
@@ -5862,7 +5894,6 @@ def test_delayed_kv_connector_free_keeps_scheduler_active():
         total_num_scheduled_tokens=0,
         scheduled_encoder_inputs={},
         scheduled_spec_decode_tokens={},
-        num_common_prefix_blocks=[],
         finished_req_ids=set(),
         free_encoder_mm_hashes=[],
     )
@@ -5944,7 +5975,6 @@ def test_scheduler_kv_connector_stats():
             total_num_scheduled_tokens=1,
             scheduled_spec_decode_tokens={},
             scheduled_encoder_inputs={},
-            num_common_prefix_blocks=[0],
             finished_req_ids=set(),
             free_encoder_mm_hashes=[],
         )
@@ -6025,7 +6055,6 @@ def test_scheduler_ec_connector_stats():
             total_num_scheduled_tokens=1,
             scheduled_spec_decode_tokens={},
             scheduled_encoder_inputs={},
-            num_common_prefix_blocks=[0],
             finished_req_ids=set(),
             free_encoder_mm_hashes=[],
         )
@@ -6057,7 +6086,6 @@ def test_ec_connector_update_connector_output_called():
         total_num_scheduled_tokens=0,
         scheduled_encoder_inputs={},
         scheduled_spec_decode_tokens={},
-        num_common_prefix_blocks=[],
         finished_req_ids=set(),
         free_encoder_mm_hashes=[],
     )
