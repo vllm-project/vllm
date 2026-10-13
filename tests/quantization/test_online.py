@@ -89,6 +89,7 @@ from vllm.model_executor.layers.quantization.online.mxfp4 import (
 )
 from vllm.model_executor.layers.quantization.online.mxfp8 import (
     Mxfp8OnlineLinearMethod,
+    Mxfp8OnlineMoEMethod,
 )
 from vllm.model_executor.layers.quantization.online.nvfp4 import (
     Nvfp4OnlineMoEMethod,
@@ -669,19 +670,28 @@ def _nvfp4_moe_checkpoint_tensors(
     reason="Requires FP8 support on CUDA or ROCm.",
 )
 @pytest.mark.parametrize("source_format", ["compressed_tensors", "modelopt"])
+@pytest.mark.parametrize(
+    "online_target",
+    [
+        "fp8_per_tensor",
+        "fp8_per_block",
+        "fp8_per_channel",
+        "mxfp4",
+        "mxfp8",
+        "int8",
+    ],
+)
 def test_online_requantized_moe_reload(
     source_format: str,
+    online_target: str,
     default_vllm_config,
     dist_init,
     monkeypatch,
 ) -> None:
-    """Reload NVFP4 source weights into existing online-quantized FP8 weights.
+    """Convert NVFP4 sources to each online target without retaining staging weights.
 
-    The reload interface remains the original checkpoint format. It restores
-    the deleted NVFP4 source parameters, loads new NVFP4 values, dequantizes
-    them to BF16, and reruns online FP8 quantization. The resulting FP8 values
-    must update the existing target parameters in place so kernel and graph
-    references remain valid.
+    For FP8 per-tensor, also verify that reloading the original checkpoint
+    format updates target parameters in place and changes expert outputs.
     """
     default_vllm_config.model_config = ModelConfig(dtype="bfloat16")
     moe = SimpleNamespace(
@@ -690,22 +700,28 @@ def test_online_requantized_moe_reload(
         is_act_and_mul=True,
         tp_size=1,
     )
+    target_methods = {
+        "fp8_per_tensor": (Fp8PerTensorOnlineMoEMethod, "fp8"),
+        "fp8_per_block": (Fp8PerBlockOnlineMoEMethod, "fp8"),
+        "fp8_per_channel": (Fp8PtpcOnlineMoEMethod, "fp8"),
+        "mxfp4": (Mxfp4OnlineMoEMethod, "mxfp4"),
+        "mxfp8": (Mxfp8OnlineMoEMethod, "mxfp8"),
+        "int8": (Int8OnlineMoEMethod, "int8"),
+    }
+    method_cls, module_name = target_methods[online_target]
     monkeypatch.setattr(
-        "vllm.model_executor.layers.quantization.online.fp8.select_fp8_moe_backend",
+        f"vllm.model_executor.layers.quantization.online.{module_name}."
+        f"select_{module_name}_moe_backend",
         lambda **kwargs: (object(), None),
     )
     source = _make_nvfp4_moe_source(source_format, moe, monkeypatch)
-    method = Fp8PerTensorOnlineMoEMethod(moe=moe)
+    method = method_cls(moe=moe)
 
-    def setup_kernel(
-        layer,
-        w13,
-        w2,
-        w13_scale,
-        w2_scale,
-        w13_input_scale,
-        w2_input_scale,
-    ) -> None:
+    def setup_kernel(layer, *weights, **kwargs) -> None:
+        # INT8 installs its target parameters before kernel setup.
+        if online_target == "int8":
+            return
+        w13, w2, w13_scale, w2_scale = weights[:4]
         replace_parameter(layer, "w13_weight", w13)
         replace_parameter(layer, "w2_weight", w2)
         replace_parameter(layer, "w13_weight_scale", w13_scale)
@@ -718,13 +734,18 @@ def test_online_requantized_moe_reload(
     with torch.device(device):
         layer = torch.nn.Module()
         layer.local_num_experts = 2
+        layer.num_experts = 2
+        layer.moe_config = SimpleNamespace(
+            hidden_dim_unpadded=128,
+            intermediate_size_per_partition_unpadded=128,
+        )
         layer.quant_method = method
         layer.quant_config = SimpleNamespace(online_quantization_config=None)
         method.create_weights(
             layer,
             num_experts=2,
-            hidden_size=32,
-            intermediate_size_per_partition=32,
+            hidden_size=128,
+            intermediate_size_per_partition=128,
             params_dtype=torch.bfloat16,
             weight_loader=default_weight_loader,
         )
@@ -734,7 +755,7 @@ def test_online_requantized_moe_reload(
         source_names = set(source_parameters)
 
         def serialized_weights(value: float) -> dict[str, torch.Tensor]:
-            shape = (2, 32, 32)
+            shape = (2, 128, 128)
             w1 = torch.full(shape, value, device=device, dtype=torch.bfloat16)
             w3 = torch.full(shape, value * 2, device=device, dtype=torch.bfloat16)
             w2 = torch.full(shape, value * 3, device=device, dtype=torch.bfloat16)
@@ -762,8 +783,8 @@ def test_online_requantized_moe_reload(
                 else:
                     parameter.data.copy_(loaded_weight)
 
-        # Initial checkpoint load: NVFP4 source parameters become FP8 runtime
-        # parameters and are then removed from the live layer.
+        # Initial checkpoint load replaces NVFP4 source parameters with online
+        # target parameters and releases the source staging weights.
         load_serialized_weights(serialized_weights(0.25), reload=False)
         method.process_weights_after_loading(layer)
         finalize_layerwise_reload(layer, default_vllm_config.model_config)
@@ -774,6 +795,18 @@ def test_online_requantized_moe_reload(
         for name, parameter in source_parameters.items():
             # No original NVFP4 parameter object may remain attached to the layer.
             assert getattr(layer, name, None) is not parameter
+
+        expected_dtype = {
+            "mxfp4": torch.uint8,
+            "int8": torch.int8,
+        }.get(online_target, current_platform.fp8_dtype())
+        assert layer.w13_weight.dtype == expected_dtype
+        assert layer.w2_weight.dtype == expected_dtype
+        assert not layer.w13_weight.is_meta
+        assert not layer.w2_weight.is_meta
+
+        if online_target != "fp8_per_tensor":
+            return
 
         target_parameters = {
             "w13_weight": layer.w13_weight,
@@ -786,7 +819,7 @@ def test_online_requantized_moe_reload(
         }
 
         def expert_output() -> torch.Tensor:
-            inputs = torch.ones(2, 32, device=device)
+            inputs = torch.ones(2, 128, device=device)
             w13 = layer.w13_weight.float() * layer.w13_weight_scale[:, None, None]
             w2 = layer.w2_weight.float() * layer.w2_weight_scale[:, None, None]
             gate_up = torch.einsum("eh,eih->ei", inputs, w13)
