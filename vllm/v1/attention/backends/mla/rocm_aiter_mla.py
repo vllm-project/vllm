@@ -2,15 +2,16 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import functools
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING, ClassVar, Final
+from typing import TYPE_CHECKING, ClassVar, Final, cast
 
 import torch
 
 from vllm import envs
-from vllm._aiter_ops import rocm_aiter_ops
+from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
 from vllm.config import VllmConfig
 from vllm.config.cache import CacheDType
 from vllm.distributed import get_dcp_group
@@ -22,6 +23,8 @@ from vllm.model_executor.layers.attention.mla_attention import (
     MLACommonMetadata,
     MLACommonMetadataBuilder,
     QueryLenSupport,
+    accumulate_mla_context_chunk,
+    init_mla_context_partial,
 )
 from vllm.triton_utils import tl, triton
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
@@ -38,12 +41,37 @@ from vllm.v1.attention.backends.utils import (
 from vllm.v1.attention.ops.rocm_aiter_mla_merge import (
     merge_mla_segments_triton,
 )
+from vllm.v1.attention.ops.rocm_aiter_mla_prefill import (
+    context_row_indices,
+    expand_context,
+    gather_compressed_context,
+)
 from vllm.v1.kv_cache_interface import AttentionSpec, is_quantized_kv_cache
 
 if TYPE_CHECKING:
     from vllm.platforms.interface import DeviceCapability
 
 logger = init_logger(__name__)
+
+
+def _supports_fused_dcp_prefill_config(
+    kv_cache_dtype: str | None,
+    query_dtype: torch.dtype,
+    kv_lora_rank: int,
+    qk_nope_head_dim: int,
+    qk_rope_head_dim: int,
+    v_head_dim: int,
+) -> bool:
+    """Whether the configuration supports fused DCP context expansion."""
+    return (
+        kv_cache_dtype in ("fp8", "fp8_e4m3")
+        and query_dtype == torch.bfloat16
+        and kv_lora_rank == 512
+        and qk_nope_head_dim == 128
+        and qk_rope_head_dim == 64
+        and v_head_dim == 128
+        and is_aiter_found_and_supported()
+    )
 
 
 def _segmented_mla_page_size(block_size: int) -> int:
@@ -507,6 +535,7 @@ class AiterMLADecodeMetadata(MLACommonDecodeMetadata):
 
 @dataclass
 class AiterMLAMetadata(MLACommonMetadata[AiterMLADecodeMetadata]):
+    dcp_context_row_indices: list[torch.Tensor] | None = None
     work_meta_data: torch.Tensor | None = None
     work_indptr: torch.Tensor | None = None
     work_info_set: torch.Tensor | None = None
@@ -563,8 +592,6 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         # query_start_loc flat for dummy requests. Only synthesize dummy rows
         # when every padded request maps to the same qlen and the q buffer has
         # exactly that many rows.
-        if num_decode_tokens <= int(qo_len.sum().item()):
-            return 0
         if num_decode_tokens % num_reqs != 0:
             return 0
 
@@ -572,19 +599,34 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         if uniform_qo_len <= 1:
             return 0
 
-        positive_qo_len = qo_len[qo_len > 0]
-        if positive_qo_len.numel() == qo_len.numel():
+        # qo_len is derived from query_start_loc_cpu, so it is already
+        # host-side and tiny (one entry per request). Reading it out once and
+        # deciding on Python ints avoids eight separate tensor dispatches --
+        # sum/item, boolean-mask index, all, eq, nonzero, item, any -- on the
+        # metadata-build path, which runs between decode steps while the GPUs
+        # are idle.
+        lens = qo_len.tolist()
+        if num_decode_tokens <= sum(lens):
             return 0
-        if positive_qo_len.numel() > 0:
+
+        first_zero = -1
+        num_positive = 0
+        for i, qlen in enumerate(lens):
+            if qlen > 0:
+                num_positive += 1
+                # A positive entry after a zero breaks the contiguous live
+                # prefix that the padded layout requires.
+                if first_zero >= 0:
+                    return 0
+            elif first_zero < 0:
+                first_zero = i
+
+        if num_positive == num_reqs:
+            return 0
+        if num_positive > 0:
             if max_qo_len != uniform_qo_len:
                 return 0
-            if not torch.all(positive_qo_len == uniform_qo_len):
-                return 0
-
-        zero_positions = torch.nonzero(qo_len == 0, as_tuple=False).flatten()
-        if zero_positions.numel() > 0:
-            first_zero = int(zero_positions[0].item())
-            if torch.any(qo_len[first_zero:] > 0):
+            if any(qlen != uniform_qo_len for qlen in lens if qlen > 0):
                 return 0
 
         return uniform_qo_len
@@ -650,6 +692,19 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             self._mla_max_split_per_batch = torch.cuda.get_device_properties(
                 device
             ).multi_processor_count
+
+        # Use the group's original format: decode normalizes E5M2 to "fp8".
+        kv_cache_dtype = getattr(kv_cache_spec, "cache_dtype_str", None)
+        if kv_cache_dtype is None:
+            kv_cache_dtype = vllm_config.cache_config.cache_dtype
+        self._supports_fused_dcp_prefill = _supports_fused_dcp_prefill_config(
+            kv_cache_dtype,
+            self.q_data_type,
+            self.mla_dims.kv_lora_rank,
+            self.mla_dims.qk_nope_head_dim,
+            self.mla_dims.qk_rope_head_dim,
+            self.mla_dims.v_head_dim,
+        )
 
         self.compilation_config = vllm_config.compilation_config
         self.decode_attn_out_dtype = vllm_config.model_config.dtype
@@ -1564,6 +1619,17 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         attn_metadata = super().build(
             common_prefix_len, common_attn_metadata, fast_build
         )
+        prefill = attn_metadata.prefill
+        if (
+            prefill is not None
+            and prefill.chunked_context is not None
+            and self.dcp_world_size > 1
+            and self._supports_fused_dcp_prefill
+        ):
+            attn_metadata.dcp_context_row_indices = [
+                context_row_indices(chunk, prefill.block_table.device)
+                for chunk in prefill.chunked_context.chunks
+            ]
         if (
             attn_metadata.decode is not None
             and attn_metadata.decode.has_persistent_metadata
@@ -1961,6 +2027,101 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
 
             self._mla_prefill_ps_asm_fwd = mla_prefill_ps_asm_fwd
             self._mla_reduce_v1 = mla_reduce_v1
+
+    def _context_parallel_compute_prefill_context(
+        self,
+        q: torch.Tensor,
+        kv_c_and_k_pe_cache: torch.Tensor,
+        attn_metadata: MLACommonMetadata,
+        k_scale: torch.Tensor,
+        dcp_world_size: int,
+        fused_mla_kv_concat_fn: Callable[
+            [torch.Tensor, torch.Tensor, bool], tuple[torch.Tensor, torch.Tensor]
+        ]
+        | None = None,
+    ):
+        attn_metadata = cast(AiterMLAMetadata, attn_metadata)
+        assert attn_metadata.prefill is not None
+        prefill = attn_metadata.prefill
+        weight = getattr(self.kv_b_proj, "weight", None)
+        eligible = (
+            _supports_fused_dcp_prefill_config(
+                self.kv_cache_dtype,
+                prefill.q_data_type,
+                self.kv_lora_rank,
+                self.qk_nope_head_dim,
+                self.qk_rope_head_dim,
+                self.v_head_dim,
+            )
+            and q.dtype == torch.bfloat16
+            and weight is not None
+            and weight.dtype == torch.bfloat16
+            and weight.shape == (self.num_heads * 256, 512)
+            and weight.is_contiguous()
+            and getattr(self.kv_b_proj, "bias", None) is None
+            and getattr(self.kv_b_proj, "weight_scale", None) is None
+            and kv_c_and_k_pe_cache.is_contiguous()
+            and attn_metadata.dcp_context_row_indices is not None
+        )
+        if not eligible:
+            return super()._context_parallel_compute_prefill_context(
+                q,
+                kv_c_and_k_pe_cache,
+                attn_metadata,
+                k_scale,
+                dcp_world_size,
+                fused_mla_kv_concat_fn,
+            )
+        from vllm.platforms import current_platform
+
+        assert weight is not None
+        assert attn_metadata.dcp_context_row_indices is not None
+        chunked = prefill.chunked_context
+        assert chunked is not None and chunked.dcp_manager is not None
+        assert prefill.prefill_backend is not None
+        assert len(chunked.chunks) == len(attn_metadata.dcp_context_row_indices)
+        output = output_lse = None
+        for chunk, row_indices in zip(
+            chunked.chunks, attn_metadata.dcp_context_row_indices
+        ):
+            gathered = gather_compressed_context(
+                kv_c_and_k_pe_cache,
+                chunked.workspace,
+                prefill.block_table[chunk.request_slice],
+                chunk,
+                chunked.dcp_manager.kv_gather,
+                current_platform.fp8_dtype(),
+            )
+            k, v = expand_context(
+                gathered,
+                k_scale,
+                row_indices,
+                chunk.cu_seq_lens,
+                weight,
+                self.num_heads,
+                self.qk_nope_head_dim,
+                self.qk_rope_head_dim,
+                self.v_head_dim,
+            )
+            attn_output, attn_lse = prefill.prefill_backend.run_prefill_context_chunk(
+                chunk=chunk,
+                q=q[chunk.token_slice],
+                k=k,
+                v=v,
+            )
+            if output is None:
+                if len(chunked.chunks) == 1 and not chunked.empty_token_slices:
+                    return attn_output, attn_lse
+                output, output_lse = init_mla_context_partial(
+                    chunked,
+                    attn_output,
+                    attn_lse,
+                    num_tokens=q.shape[0],
+                )
+            accumulate_mla_context_chunk(
+                chunk, attn_output, attn_lse, output, output_lse
+            )
+        return output, output_lse
 
     def _flash_attn_varlen_diff_headdims(
         self, q, k, v, return_softmax_lse=False, softmax_scale=None, **kwargs
