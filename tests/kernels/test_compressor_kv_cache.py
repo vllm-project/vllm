@@ -1271,7 +1271,7 @@ def test_c128_skip_is_not_baked_into_cuda_graph(monkeypatch):
             compressor(kv_score, positions, rotary)
 
     run()
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
     assert launches.item() == 0, "eager step with no boundary should skip"
 
     graph = torch.cuda.CUDAGraph()
@@ -1279,7 +1279,7 @@ def test_c128_skip_is_not_baked_into_cuda_graph(monkeypatch):
         run()
     launches.zero_()
     graph.replay()
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
     assert launches.item() == 1, "captured graph must not bake in the skip"
 
 
