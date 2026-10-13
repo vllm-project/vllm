@@ -11,6 +11,7 @@ row), the trailing positions are populated with sentinel values
 """
 
 import numpy as np
+import pytest
 import torch
 
 from vllm.logprobs import create_sample_logprobs
@@ -95,7 +96,7 @@ def test_sampled_logprobs_only_keeps_a_float_list_and_no_entries():
     from vllm.sampling_params import SamplingParams
     from vllm.v1.engine import EngineCoreRequest
 
-    params = SamplingParams(logprobs=0, _sampled_logprobs_only=True)
+    params = SamplingParams(sampled_logprobs_only=True)
     request = EngineCoreRequest(
         request_id="r",
         prompt_token_ids=[1, 2, 3],
@@ -127,36 +128,71 @@ def test_sampled_logprobs_only_keeps_a_float_list_and_no_entries():
     assert processor.logprobs is None
 
 
-def test_sampled_logprobs_only_requires_logprobs_zero():
-    import pytest
-
+def test_sampled_logprobs_only_implies_logprobs_zero():
     from vllm.sampling_params import SamplingParams
 
-    with pytest.raises(ValueError, match="sampled_logprobs_only"):
-        SamplingParams(logprobs=2, _sampled_logprobs_only=True)
-    with pytest.raises(ValueError, match="sampled_logprobs_only"):
-        SamplingParams(_sampled_logprobs_only=True)
+    assert SamplingParams(sampled_logprobs_only=True).logprobs == 0
+    assert SamplingParams(logprobs=0, sampled_logprobs_only=True).logprobs == 0
+    assert SamplingParams().sampled_logprobs_only is False
 
 
-def test_sampled_logprobs_only_is_not_client_settable():
-    """Internal flag: a client cannot turn it on through the request schema
-    (that left logprobs None and tripped an assert, a 500), but it still
-    reaches the engine when the server sets it."""
+@pytest.mark.parametrize(
+    "kwargs",
+    [{"logprobs": 2}, {"logprobs": -1}, {"logprob_token_ids": [5]}],
+)
+def test_sampled_logprobs_only_rejects_other_logprobs(kwargs):
+    from vllm.exceptions import VLLMValidationError
+    from vllm.sampling_params import SamplingParams
+
+    with pytest.raises(VLLMValidationError, match="sampled_logprobs_only"):
+        SamplingParams(sampled_logprobs_only=True, **kwargs)
+
+
+@pytest.mark.parametrize(
+    ("logprobs_mode", "ok"),
+    [
+        ("raw_logprobs", True),
+        ("processed_logprobs", True),
+        ("raw_logits", False),
+        ("processed_logits", False),
+    ],
+)
+def test_sampled_logprobs_only_requires_a_logprobs_mode(logprobs_mode, ok):
+    """Checked at engine level, so AsyncLLM callers get it too: the values are
+    returned as logprobs, so logits modes are rejected."""
+    from unittest.mock import MagicMock
+
+    from vllm.exceptions import VLLMValidationError
+    from vllm.sampling_params import SamplingParams
+
+    model_config = MagicMock(logprobs_mode=logprobs_mode, max_logprobs=20)
+    SamplingParams(logprobs=0)._validate_logprobs(model_config)
+    params = SamplingParams(sampled_logprobs_only=True)
+    if ok:
+        params._validate_logprobs(model_config)
+    else:
+        with pytest.raises(VLLMValidationError, match="logprobs-mode"):
+            params._validate_logprobs(model_config)
+
+
+def test_sampled_logprobs_only_from_the_request_schema_reaches_the_engine():
+    """Public field: settable in /inference/v1/generate ``sampling_params`` and
+    carried to the engine over msgpack."""
     from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
         GenerateRequest,
     )
     from vllm.sampling_params import SamplingParams
     from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 
-    for key in ("sampled_logprobs_only", "_sampled_logprobs_only"):
-        request = GenerateRequest.model_validate(
-            {"token_ids": [1, 2], "sampling_params": {"logprobs": 0, key: True}}
-        )
-        assert request.sampling_params.sampled_logprobs_only is False
-
-    params = SamplingParams(logprobs=0, _sampled_logprobs_only=True)
+    request = GenerateRequest.model_validate(
+        {"token_ids": [1, 2], "sampling_params": {"sampled_logprobs_only": True}}
+    )
+    params = request.sampling_params
+    assert params.sampled_logprobs_only is True
+    assert params.logprobs == 0
     decoded = MsgpackDecoder(SamplingParams).decode(MsgpackEncoder().encode(params))
     assert decoded.sampled_logprobs_only is True
+    assert decoded.logprobs == 0
 
 
 def test_aggregated_delta_outputs_merge_sampled_logprobs():

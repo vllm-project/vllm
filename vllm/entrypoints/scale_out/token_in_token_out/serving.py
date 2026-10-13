@@ -39,7 +39,7 @@ from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.exceptions import GenerationError
 from vllm.inputs import EngineInput, TokensPrompt, mm_input
 from vllm.logger import init_logger
-from vllm.logprobs import FlatLogprobs, Logprob, SampleLogprobs
+from vllm.logprobs import Logprob
 from vllm.multimodal.inputs import (
     MultiModalKwargsItem,
     MultiModalKwargsItems,
@@ -87,17 +87,26 @@ def _clamp_logprob(logprob: float) -> float:
 
 def _stream_exclude(
     chunk: GenerateTokensStreamResponse | GenerateTextStreamResponse,
+    sampled_logprobs_only: bool,
 ) -> dict[str, Any]:
     """Fields to leave out of a token-bearing stream chunk: the ones absent from
-    it, and ``logprobs.sampled``, which streaming never sets
-    (``return_token_logprobs`` is non-streaming only)."""
+    it, and ``logprobs.sampled`` unless the request set
+    ``sampling_params.sampled_logprobs_only``."""
     exclude: dict[str, Any] = {
         name: True
         for name in ("prompt_token_ids", "mm_placeholders", "metrics")
         if getattr(chunk, name) is None
     }
-    exclude["choices"] = {"__all__": {"logprobs": {"sampled"}}}
+    if not sampled_logprobs_only:
+        exclude["choices"] = {"__all__": {"logprobs": {"sampled"}}}
     return exclude
+
+
+def _sampled_logprobs(values: list[float] | None) -> GenerateLogProbs:
+    """``GenerateLogProbs`` for a ``sampled_logprobs_only`` request: only
+    ``sampled`` is set, clamped like ``content`` (``-inf`` and NaN become
+    ``-9999.0``) so it stays JSON-representable."""
+    return GenerateLogProbs(sampled=[_clamp_logprob(x) for x in values or ()])
 
 
 def _logprob_token(
@@ -215,45 +224,11 @@ class ServingTokens(GenerateBaseServing):
             raw_request.state.request_metadata = request_metadata
 
         sampling_params = request.sampling_params
-        if request.return_token_logprobs:
-            if request.output_mode != "tokens":
-                # ``sampled`` lives on the tokens-mode ``GenerateLogProbs``.
-                return self.create_error_response(
-                    "return_token_logprobs requires output_mode='tokens'"
-                )
-            if request.stream:
-                return self.create_error_response(
-                    "return_token_logprobs is not supported with stream=True"
-                )
-            if self.model_config.logprobs_mode not in (
-                "raw_logprobs",
-                "processed_logprobs",
-            ):
-                # The field is named for log-probabilities; do not hand back
-                # logits under that name.
-                return self.create_error_response(
-                    "return_token_logprobs requires --logprobs-mode raw_logprobs "
-                    "or processed_logprobs (server runs "
-                    f"{self.model_config.logprobs_mode})"
-                )
-            if sampling_params.logprob_token_ids is not None:
-                # The sampled-only path drops per-token entries, so the
-                # requested token scores would silently disappear.
-                return self.create_error_response(
-                    "return_token_logprobs cannot be combined with "
-                    "sampling_params.logprob_token_ids"
-                )
-            if sampling_params.logprobs is None:
-                sampling_params.logprobs = 0
-            if sampling_params.logprobs == 0:
-                # Only the sampled token's logprob is needed: transport one
-                # float per token from the scheduler and skip per-token
-                # Logprob entries and detokenization entirely.
-                sampling_params._sampled_logprobs_only = True
-            else:
-                # Top logprobs were also requested: keep the object path and
-                # read the sampled column from the flat representation.
-                sampling_params.flat_logprobs = True
+        if sampling_params.sampled_logprobs_only and request.output_mode != "tokens":
+            # ``sampled`` lives on the tokens-mode ``GenerateLogProbs``.
+            return self.create_error_response(
+                "sampling_params.sampled_logprobs_only requires output_mode='tokens'"
+            )
         max_num_seqs = self.engine_client.vllm_config.scheduler_config.max_num_seqs
         if sampling_params.n > max_num_seqs:
             return self.create_error_response(
@@ -470,22 +445,13 @@ class ServingTokens(GenerateBaseServing):
             token_ids = output.token_ids
             out_logprobs = output.logprobs
 
-            sampled = None
-            if request.return_token_logprobs:
-                if output.sampled_logprobs is not None:
-                    sampled = [_clamp_logprob(x) for x in output.sampled_logprobs]
-                else:
-                    assert out_logprobs is not None, "Did not output logprobs"
-                    sampled = self._sampled_token_logprobs(out_logprobs, token_ids)
-
-            # This is top_logprobs in completions API. With
-            # return_token_logprobs the objects are only built when the
-            # caller also asked for top logprobs.
-            if sampling_params.logprobs is not None and not (
-                request.return_token_logprobs and sampling_params.logprobs == 0
-            ):
+            # This is top_logprobs in completions API
+            logprobs: GenerateLogProbs | ChatCompletionLogProbs | None
+            if sampling_params.sampled_logprobs_only:
+                # No per-token entries: content stays None, only sampled is set.
+                logprobs = _sampled_logprobs(output.sampled_logprobs)
+            elif sampling_params.logprobs is not None:
                 assert out_logprobs is not None, "Did not output logprobs"
-                logprobs: GenerateLogProbs | ChatCompletionLogProbs | None
                 if text_mode:
                     logprobs = self._create_text_logprobs(
                         token_ids=token_ids,
@@ -501,14 +467,6 @@ class ServingTokens(GenerateBaseServing):
                     )
             else:
                 logprobs = None
-            if sampled is not None:
-                # Tokens mode only (checked above). With logprobs=0 no content
-                # entries were built: content stays None, only sampled is set.
-                if logprobs is None:
-                    logprobs = GenerateLogProbs(sampled=sampled)
-                else:
-                    assert isinstance(logprobs, GenerateLogProbs)
-                    logprobs.sampled = sampled
 
             routed_experts_b64 = (
                 numpy2base64(output.routed_experts)
@@ -665,10 +623,12 @@ class ServingTokens(GenerateBaseServing):
                     ):
                         continue
 
-                    if sampling_params.logprobs is not None:
+                    logprobs: GenerateLogProbs | ChatCompletionLogProbs | None
+                    if sampling_params.sampled_logprobs_only:
+                        logprobs = _sampled_logprobs(output.sampled_logprobs)
+                    elif sampling_params.logprobs is not None:
                         out_logprobs = output.logprobs
                         assert out_logprobs is not None, "Did not output logprobs"
-                        logprobs: GenerateLogProbs | ChatCompletionLogProbs | None
                         if text_mode:
                             logprobs = self._create_text_logprobs(
                                 token_ids=delta_token_ids,
@@ -731,7 +691,11 @@ class ServingTokens(GenerateBaseServing):
                             total_tokens=(num_prompt_tokens + num_generated_tokens[i]),
                         )
 
-                    data = chunk.model_dump_json(exclude=_stream_exclude(chunk))
+                    data = chunk.model_dump_json(
+                        exclude=_stream_exclude(
+                            chunk, sampling_params.sampled_logprobs_only
+                        )
+                    )
                     yield f"data: {data}\n\n"
 
             total_completion_tokens = sum(num_generated_tokens)
@@ -792,27 +756,6 @@ class ServingTokens(GenerateBaseServing):
         if not text_mode or self.return_tokens_as_token_ids:
             return None
         return self.renderer.tokenizer
-
-    @staticmethod
-    def _sampled_token_logprobs(
-        logprobs: SampleLogprobs, token_ids: GenericSequence[int]
-    ) -> list[float]:
-        """Sampled-token logprob per position.
-
-        From ``FlatLogprobs`` the sampler stores the sampled token first at
-        every position, so its logprob is the entry at each position's start
-        index. Any other representation is read as a sequence of
-        ``{token_id: Logprob}`` per position, where the sampled token is always
-        present. Values go through ``_clamp_logprob`` (``-inf`` and NaN become
-        ``-9999.0``), so they stay JSON-representable.
-        """
-        if isinstance(logprobs, FlatLogprobs):
-            values = logprobs.logprobs
-            return [_clamp_logprob(values[start]) for start in logprobs.start_indices]
-        return [
-            _clamp_logprob(position[token_id].logprob)
-            for position, token_id in zip(logprobs, token_ids)
-        ]
 
     def _create_text_logprobs(
         self,

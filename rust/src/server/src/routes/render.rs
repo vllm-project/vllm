@@ -97,6 +97,7 @@ fn lower_render_request(
         token_ids,
         sampling_params: GenerateSamplingParams {
             n: None,
+            sampled_logprobs_only: None,
             inner: text_request.sampling_params,
         },
         stream,
@@ -113,7 +114,6 @@ fn lower_render_request(
         reasoning_parser_kwargs: (text_request.reasoning_parser_kwargs
             != ReasoningParserKwargs::default())
         .then_some(text_request.reasoning_parser_kwargs),
-        return_token_logprobs: None,
         other: Default::default(),
     };
     validate_generate_request(&request, &state.served_model_names)?;

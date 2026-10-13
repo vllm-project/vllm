@@ -26,6 +26,9 @@ use crate::routes::openai::utils::types::{Normalizable, StreamOptions, Usage};
 pub struct GenerateSamplingParams {
     /// Number of output sequences to generate. Only `1` is supported.
     pub n: Option<u32>,
+    /// `SamplingParams.sampled_logprobs_only` (Python frontend feature).
+    /// Captured so validation rejects it instead of silently dropping it.
+    pub sampled_logprobs_only: Option<bool>,
     /// The supported sampling parameters, lowered to the engine.
     #[serde(flatten)]
     pub inner: SamplingParams,
@@ -57,9 +60,6 @@ pub struct GenerateRequest {
     /// Set by `/render` so the engine-side reasoning parser agrees with the
     /// frontend on flags such as `enable_thinking`.
     pub reasoning_parser_kwargs: Option<ReasoningParserKwargs>,
-    /// Flat per-token sampled logprobs (Python frontend feature); the Rust
-    /// frontend rejects it explicitly rather than ignoring it.
-    pub return_token_logprobs: Option<bool>,
     #[serde(flatten)]
     pub other: Map<String, Value>,
 }
