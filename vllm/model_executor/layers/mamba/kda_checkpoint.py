@@ -21,7 +21,8 @@ def kda_prefill_checkpoint_alignment(backend: str) -> int | None:
 class FlashKDAPrefillCheckpointExporter(MambaPrefillCheckpointExporter):
     """Store FlashKDA recurrent and convolution checkpoint states."""
 
-    state_len: int | None = None
+    # Logical history excludes any speculative scratch capacity.
+    state_len: int
 
     def export(
         self,
@@ -33,9 +34,7 @@ class FlashKDAPrefillCheckpointExporter(MambaPrefillCheckpointExporter):
         recurrent_state: torch.Tensor,
         cu_seqlens: torch.Tensor,
     ) -> None:
-        state_len = (
-            self.state_len if self.state_len is not None else conv_state.shape[-1]
-        )
+        state_len = self.state_len
         width = raw_qkv.shape[-1]
         recurrent_row_size = recurrent_checkpoint[0].numel()
         block_size = 256

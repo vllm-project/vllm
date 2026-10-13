@@ -776,7 +776,9 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                 ((N, H, D, D), self.get_state_dtype()[1]),
                 ((workspace_size,), torch.uint8),
             )
-            self._checkpoint_exporter = FlashKDAPrefillCheckpointExporter()
+            self._checkpoint_exporter = FlashKDAPrefillCheckpointExporter(
+                state_len=self.conv_size - 1
+            )
         elif self.kda_prefill_backend == "flashinfer":
             T = vllm_config.scheduler_config.max_num_batched_tokens
             H, D = self.local_num_heads, self.head_dim
