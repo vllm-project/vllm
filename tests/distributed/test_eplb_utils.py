@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -12,7 +13,27 @@ from vllm.distributed.eplb.eplb_state import (
     _commit_eplb_maps,
     _commit_eplb_maps_for_layer,
 )
+from vllm.models.deepseek_v4.common.eplb_util import dspark_draft_supports_eplb
 from vllm.platforms import current_platform
+
+
+def test_dspark_draft_eplb_disabled_on_rocm(monkeypatch):
+    draft_model_config = SimpleNamespace(
+        hf_config=SimpleNamespace(model_type="deepseek_v41")
+    )
+    monkeypatch.setattr(current_platform, "is_rocm", lambda: True)
+
+    assert not dspark_draft_supports_eplb(draft_model_config)
+
+
+@pytest.mark.parametrize("model_type", ["deepseek_v4", "deepseek_v41"])
+def test_dspark_draft_eplb_supported_off_rocm(monkeypatch, model_type):
+    draft_model_config = SimpleNamespace(
+        hf_config=SimpleNamespace(model_type=model_type)
+    )
+    monkeypatch.setattr(current_platform, "is_rocm", lambda: False)
+
+    assert dspark_draft_supports_eplb(draft_model_config)
 
 
 def _make_model_state(
