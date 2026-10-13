@@ -13,6 +13,8 @@ python3 -m pytest -s -x "${IMPORT_CANARY}"
 tp_configs=(
   "GPU_MEMORY_UTILIZATION=0.6 PREFILLER_TP_SIZE=1 DECODER_TP_SIZE=1"
   "GPU_MEMORY_UTILIZATION=0.6 PREFILLER_TP_SIZE=2 DECODER_TP_SIZE=2"
+  # Sleep and wake up P and D before the eval.
+  "GPU_MEMORY_UTILIZATION=0.6 PREFILLER_TP_SIZE=1 DECODER_TP_SIZE=1 SLEEP_WAKE=1"
 )
 
 configs=("${tp_configs[@]}")
