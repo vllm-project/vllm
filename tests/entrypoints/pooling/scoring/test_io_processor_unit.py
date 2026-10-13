@@ -61,6 +61,7 @@ def llm_reranker_processor() -> CrossEncoderIOProcessor:
     )
     processor.supports_score_template = False
     processor.use_sep_token = False
+    processor.sentence_transformers_config = None
     processor.model = None
     return processor
 
