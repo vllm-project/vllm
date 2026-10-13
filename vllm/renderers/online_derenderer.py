@@ -1141,8 +1141,8 @@ def _convert_chat_logprobs_to_completion_logprobs(
 
     ``generate_logprobs`` is what ``logprobs`` was resolved from. A position
     with no candidates there had no logprobs in the engine output, which
-    /v1/completions reports as ``None``; a position whose candidates were all
-    cut (``logprobs=-1``) is ``{}``, as /v1/completions returns.
+    /v1/completions reports as ``None``; every other position is a dict of
+    the candidates the cut kept.
 
     ``initial_text_offset`` keeps ``text_offset`` absolute across streaming
     chunks, mirroring the generate streaming path.

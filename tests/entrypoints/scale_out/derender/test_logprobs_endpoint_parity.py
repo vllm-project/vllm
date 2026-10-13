@@ -154,8 +154,8 @@ def test_completion_derender_matches_coupled_completion(
         outside = [i for i, r in enumerate(RANKS) if r > k]
         assert all(len(derendered.top_logprobs[i]) == k + 1 for i in outside)
     if k == -1:
-        # /v1/completions keeps entry i when -1 >= i, so none at all.
-        assert all(top == {} for top in derendered.top_logprobs)
+        # /v1/completions returns every candidate for logprobs=-1 (#55717).
+        assert [len(top) for top in derendered.top_logprobs] == [len(d) for d in dicts]
 
 
 def test_without_the_request_derender_keeps_every_candidate(tokenizer, vocab_ids):
@@ -173,8 +173,7 @@ def test_completion_position_without_logprobs_stays_none(
     tokenizer, vocab_ids, serving_completion, k
 ):
     """A position the engine returned no logprobs for is `None` in
-    `/v1/completions`, while a position whose candidates were all cut
-    (`logprobs=-1`) is `{}`; derender keeps the two apart."""
+    `/v1/completions`, not `{}`; derender keeps it that way."""
     token_ids, dicts = _positions(tokenizer, vocab_ids, k, RANKS)
     dicts[3] = None
     coupled = serving_completion._create_completion_logprobs(
