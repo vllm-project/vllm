@@ -8,7 +8,9 @@ from typing import TYPE_CHECKING
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
+from vllm.distributed.kv_transfer.kv_checksum.worker import get_kv_checksum_worker
 from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
+from vllm.distributed.parallel_state import get_pp_group
 from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.v1.outputs import (
     KVConnectorOutput,
@@ -51,7 +53,8 @@ class KVConnectorModelRunnerMixin:
 
     @staticmethod
     def finalize_kv_connector() -> None:
-        """Finalize the KV connector: wait_for_save and clear metadata.
+        """Finalize the KV connector: wait_for_save, clear metadata, and
+        checksum the KV to send.
 
         Call after draft model forward when defer_finalize=True was used.
         """
@@ -59,6 +62,8 @@ class KVConnectorModelRunnerMixin:
             kv_connector = get_kv_transfer_group()
             kv_connector.wait_for_save()
             kv_connector.clear_connector_metadata()
+        if (kv_checksum_worker := get_kv_checksum_worker()) is not None:
+            kv_checksum_worker.finalize_sends()
 
     # This context manager must be used within an active forward context.
     # It encapsulates the entire KV connector lifecycle within execute_model
@@ -75,6 +80,9 @@ class KVConnectorModelRunnerMixin:
         assert isinstance(kv_connector, KVConnectorBase)
         assert scheduler_output.kv_connector_metadata is not None
         kv_connector.bind_connector_metadata(scheduler_output.kv_connector_metadata)
+        kv_checksum_worker = get_kv_checksum_worker()
+        if kv_checksum_worker is not None:
+            kv_checksum_worker.bind(scheduler_output.kv_checksum_scheduled)
 
         # Start this step's KV loads, ordered after any in-flight KV block
         # zeroing. Sync loads feed this step's forward so must precede it;
@@ -102,6 +110,16 @@ class KVConnectorModelRunnerMixin:
             output.kv_connector_stats = kv_connector.get_kv_connector_stats()
             output.kv_cache_events = kv_connector.get_kv_connector_kv_cache_events()
             output.kv_connector_worker_meta = kv_connector.build_connector_worker_meta()
+            if kv_checksum_worker is not None:
+                # The drafter writes KV on the last PP rank after this step;
+                # finalize_kv_connector checksums the sends after it.
+                output.kv_checksums = kv_checksum_worker.post_forward(
+                    transfer_results.finished_recving,
+                    transfer_results.failed_recving,
+                    scheduler_output.finished_req_ids,
+                    transfer_results.kv_checksums,
+                    defer_sends=defer_finalize and get_pp_group().is_last_rank,
+                )
 
             if not defer_finalize:
                 kv_connector.clear_connector_metadata()
