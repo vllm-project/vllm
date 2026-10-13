@@ -9,12 +9,13 @@
 
 import math
 from collections.abc import Iterable, Mapping, Sequence
-from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
+from typing import Annotated, Any, Literal, cast
 
 import numpy as np
 import torch
 import torch.nn as nn
 from einops import rearrange
+from PIL import Image
 from transformers import (
     BartConfig,
     BatchFeature,
@@ -59,9 +60,6 @@ from vllm.renderers import TokenizeParams
 from vllm.transformers_utils.configs.radio import RadioConfig
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from vllm.v1.attention.backend import AttentionType
-
-if TYPE_CHECKING:
-    from PIL import Image
 
 logger = init_logger(__name__)
 
@@ -406,8 +404,29 @@ class NemotronParseDummyInputsBuilder(
         }
 
 
+def _to_pil_image(image: object) -> Image.Image:
+    """Convert a `uint8` array/tensor image item to PIL, since the checkpoint's
+    image processor calls `.convert("RGB")` on every input."""
+    if isinstance(image, Image.Image):
+        return image
+
+    array = image.numpy() if isinstance(image, torch.Tensor) else np.asarray(image)
+    if array.dtype != np.uint8 or array.ndim != 3:
+        raise ValueError(
+            "Nemotron-Parse expects image arrays/tensors to be 3-D uint8, "
+            f"got {array.dtype} {array.shape}"
+        )
+    # Same layout heuristic as `ImageProcessorItems.get_image_size`.
+    if array.shape[-1] not in (1, 3, 4):
+        array = array.transpose(1, 2, 0)
+    if array.shape[-1] == 1:
+        array = array[..., 0]
+
+    return Image.fromarray(np.ascontiguousarray(array))
+
+
 def _build_uint8_canvas(
-    image_processor: Any, images: Sequence["Image.Image"]
+    image_processor: Any, images: Sequence[Image.Image]
 ) -> torch.Tensor:
     """Reproduce the image processor's pipeline up to, but excluding, its
     `ToTensor` rescale, yielding the padded `uint8` canvas as `(N, 3, H, W)`.
@@ -450,24 +469,19 @@ class NemotronParseMultiModalProcessor(
         hf_data: Mapping[str, object],
         hf_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        # `hf_kwargs` are the per-request kwargs; the rescale/normalise flags are
-        # only folded in by the merge that `call_hf_processor` applies later.
-        merged_kwargs = self.info.ctx.get_merged_mm_kwargs(hf_kwargs)
-        images = hf_data.get("images")
+        images = [_to_pil_image(i) for i in cast(list, hf_data.get("images") or [])]
+        if images:
+            hf_data = {**hf_data, "images": images}
 
         # The checkpoint ships its image processor as remote code, and its
         # `preprocess` ignores `do_rescale`/`do_normalize`: it always runs
         # `ToTensor` and normalises from `self.do_normalize`. Build the uint8
         # canvas here so the device-side norm is not applied on top.
-        if (
-            images
-            and set(hf_data) == {"images"}
-            and not merged_kwargs.get("do_rescale", True)
-            and not merged_kwargs.get("do_normalize", True)
-        ):
+        mm_config = self.info.ctx.model_config.get_multimodal_config()
+        if images and set(hf_data) == {"images"} and mm_config.mm_device_do_normalize:
             image_processor = self.info.get_hf_processor().image_processor
             try:
-                pixel_values = _build_uint8_canvas(image_processor, cast(list, images))
+                pixel_values = _build_uint8_canvas(image_processor, images)
             except (AttributeError, TypeError) as exc:
                 raise RuntimeError(
                     f"{type(image_processor).__name__} does not expose the "
