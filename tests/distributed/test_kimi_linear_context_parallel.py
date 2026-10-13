@@ -180,7 +180,6 @@ def _run_k3_partial_prefix_reuse(
         block_size=block_size,
         enable_chunked_prefill=True,
         enable_prefix_caching=True,
-        mamba_cache_mode="align",
     ) as runner:
         assert (
             runner.llm.llm_engine.vllm_config.compilation_config.cudagraph_mode
