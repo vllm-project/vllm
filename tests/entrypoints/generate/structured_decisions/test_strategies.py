@@ -8,7 +8,7 @@ from argparse import Namespace
 from io import BytesIO
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import numpy as np
 import pybase64 as base64
@@ -41,7 +41,6 @@ from vllm.entrypoints.openai.decisions.question_types import (
 from vllm.entrypoints.openai.decisions.serving import OpenAIServingDecisions
 from vllm.entrypoints.openai.decisions.state import init_decisions_state
 from vllm.entrypoints.openai.decisions.strategies import (
-    _MARKER,
     READ_STRATEGIES,
     ClefFlashStrategy,
     D3Strategy,
@@ -352,7 +351,6 @@ async def test_request_metadata_reaches_every_question(
         )
 
 
-# The first question has no "Question:" line, so EDITING_TEMPLATE keeps it as is.
 QUESTIONS = [
     build_question("refund", "noul", "", {"true": "a refund is due"}, 26),
     build_question(
@@ -383,12 +381,6 @@ SPLICE_MODELS = {
 CHATML_TEMPLATE = (
     "{% for m in messages %}<|im_start|>{{ m.role }}\n"
     "{{ m.content }}<|im_end|>\n{% endfor %}<|im_start|>assistant\n"
-)
-EDITING_TEMPLATE = CHATML_TEMPLATE.replace(
-    "{{ m.content }}", "{{ m.content | replace('Question:', 'Q:') }}"
-)
-SEPARATOR_TEMPLATE = CHATML_TEMPLATE.replace(
-    "{{ m.content }}", "{{ m.content | replace('\\n\\n', ' ') }}"
 )
 
 
@@ -421,34 +413,16 @@ async def test_spliced_prompts_match_full_render(make_context, architecture):
     for name, state in SPLICE_STATES.items():
         for instructions in (None, "  You triage tickets.\n"):
             spliced, full = await spliced_and_full(strategy, state, instructions)
-            # Qwen3.5 trims the empty state's separator off, so that one falls back.
+            # An empty state may leave no shared blank line, so it may fall back.
             assert spliced == full or (spliced is None and not state), name
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "chat_template,state",
-    [
-        (EDITING_TEMPLATE, "state"),
-        (None, f"a state with the split marker {_MARKER}"),
-    ],
-    ids=["template_edits_question", "marker_in_state"],
-)
-async def test_splice_falls_back_to_full_render(make_context, chat_template, state):
-    strategy = NextTokenStrategy(make_context(chat_template=chat_template))
-    spliced, _ = await spliced_and_full(strategy, state)
-    assert spliced is None
-    with patch.object(strategy, "_render", wraps=strategy._render) as render:
-        reads = await strategy.read(
-            QUESTIONS,
-            None,
-            state,
-            request_id="r",
-            chat_template_kwargs=None,
-            lora_request=None,
-            priority=0,
-        )
-    assert render.call_count == len(QUESTIONS) == len(reads)
+async def test_token_id_renders_skip_the_splice(make_context):
+    strategy = NextTokenStrategy(make_context())
+    read_request = strategy._read_request({"tokenize": True})
+    contents = [strategy._content("state", q) for q in QUESTIONS]
+    assert await strategy._render_spliced(read_request, contents, None) is None
 
 
 @pytest.mark.asyncio
@@ -542,16 +516,6 @@ async def test_splice_matches_full_render_when_newlines_cross_the_split(make_con
     ]
     spliced, full = await spliced_and_full(strategy, "state", questions=questions)
     assert spliced in (None, full)
-
-
-@pytest.mark.asyncio
-async def test_splice_falls_back_when_the_template_edits_the_separator(make_context):
-    # Tabs then " 0" tokenize alike in the window, so only the separator check sees it.
-    strategy = NextTokenStrategy(make_context(chat_template=SEPARATOR_TEMPLATE))
-    score = build_question("level", "score", "", ["low", "high"], 26)
-    contents = [strategy._content("x" + "\t" * 71, score)] * 2
-    read_request = strategy._read_request(None)
-    assert await strategy._render_spliced(read_request, contents, None) is None
 
 
 @pytest.mark.asyncio

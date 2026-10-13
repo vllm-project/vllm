@@ -8,9 +8,9 @@ import inspect
 import itertools
 import weakref
 from collections import defaultdict, deque
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 from functools import lru_cache
-from typing import TYPE_CHECKING, Any, Final, Literal, TypeVar, cast, overload
+from typing import TYPE_CHECKING, Any, Final, Literal, cast, overload
 
 import jinja2
 import jinja2.ext
@@ -75,8 +75,6 @@ if TYPE_CHECKING:
     from .params import ChatParams
 
 logger = init_logger(__name__)
-
-_R = TypeVar("_R")
 
 
 # Cache of `tokenizer -> prompt_embeds placeholder token ID`. Keyed by the
@@ -1009,12 +1007,6 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
                 f"excessively complex template. Adjust "
                 f"VLLM_CHAT_TEMPLATE_RENDER_TIMEOUT to override."
             ) from None
-
-    async def run_chat_template_job_async(self, fn: Callable[[], _R]) -> _R:
-        """Run ``fn``, which renders chat templates, as one render pool job under
-        the chat template render timeout."""
-        loop = asyncio.get_running_loop()
-        return await self._render_with_timeout(loop.run_in_executor(self._executor, fn))
 
     def _can_produce_offsets(self) -> bool:
         # Only fast tokenizers expose offset_mapping.

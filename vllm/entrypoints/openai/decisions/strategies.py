@@ -46,8 +46,6 @@ from vllm.multimodal.media import (
 from vllm.pooling_params import PoolingParams
 from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
 from vllm.renderers.chat_utils import ChatTemplateContentFormatOption
-from vllm.renderers.hf import HfRenderer
-from vllm.renderers.inputs import TokPrompt
 from vllm.renderers.inputs.preprocess import extract_prompt_components
 from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.sampling_params import SamplingParams
@@ -238,11 +236,7 @@ def cap_pixels(image: Image.Image, max_pixels: int) -> Image.Image:
     return image.resize(size, Image.Resampling.BICUBIC)
 
 
-# Marks where a question goes in the rendered prompt.
-_MARKER = "\ue000"
-
-
-def _messages(content: Any, instructions: str | None) -> list[dict[str, Any]]:
+def _messages(content: Any, instructions: str | None) -> list[Any]:
     messages = [{"role": "user", "content": content}]
     if instructions:
         messages.insert(0, {"role": "system", "content": instructions})
@@ -357,75 +351,49 @@ class NextTokenStrategy(ReadStrategy):
         contents: list[str],
         instructions: str | None,
     ) -> list[EngineInput] | None:
-        """Every prompt with the state tokenized once, or None to fall back."""
+        """Every prompt with the shared start tokenized once, or None to fall back."""
         ctx = self.context
         online_renderer = ctx.online_renderer
         renderer = online_renderer.renderer
-        if not isinstance(renderer, HfRenderer):
-            return None
         chat_params = online_renderer.build_chat_params(
             read_request,
             ctx.chat_template,
             ctx.chat_template_content_format,
             ctx.default_chat_template_kwargs,
         )
-        tok_params = read_request.build_tok_params(online_renderer.model_config)
-
-        # Split after the last "\n\n" the contents share, which ends the state.
-        cut = os.path.commonprefix(contents).rfind("\n\n") + 2
-        if cut < 2:
-            return None
-        suffixes = [c[cut:] for c in contents]
-        # Whitespace after the cut can join a run longer than the head window.
-        if any(q[:1].isspace() for q in suffixes):
-            return None
-
-        def render(content: str) -> str | None:
-            messages: list[Any] = _messages(content, instructions)
-            _, prompt = renderer.render_messages(messages, chat_params)
-            return cast(TextPrompt, prompt).get("prompt")
-
-        def ids(prompts: Sequence[TokPrompt]) -> list[list[int]]:
-            return [list(cast(TokensPrompt, p)["prompt_token_ids"]) for p in prompts]
-
         arrival_time = time.time()
-        probe = await renderer.run_chat_template_job_async(
-            lambda: render(contents[0][:cut] + _MARKER)
-        )
-        if not isinstance(probe, str) or probe.count(_MARKER) != 1:
-            return None
-        prefix, tail = probe.split(_MARKER)
-        if not prefix.endswith("\n\n"):
-            return None
-        (prefix_ids,) = ids(
-            await renderer.tokenize_prompts_async(
-                [TextPrompt(prompt=prefix)], tok_params
+        texts = []
+        for content in contents:
+            _, prompt = await renderer.render_messages_async(
+                _messages(content, instructions), chat_params
             )
-        )
-        head = prefix[-64:]
-        prompts = [prefix + q + tail for q in suffixes]
-
-        def window_ids() -> list[list[int]] | None:
-            if any(render(c) != p for c, p in zip(contents, prompts)):
+            if not isinstance(text := prompt.get("prompt"), str):
                 return None
-            texts = [head, *(head + q + tail for q in suffixes)]
-            return ids(
-                renderer.tokenize_prompts(
-                    [TextPrompt(prompt=t) for t in texts], tok_params
-                )
-            )
-
-        tokenized = await renderer.run_chat_template_job_async(window_ids)
-        if tokenized is None:
+            texts.append(text)
+        # Split after the last blank line all prompts share.
+        cut = os.path.commonprefix(texts).rfind("\n\n") + 2
+        # Whitespace after the cut can join a run longer than the head window.
+        if cut < 2 or any(t[cut : cut + 1].isspace() for t in texts):
             return None
-        head_ids, *windows = tokenized
+        # Tokens of the head must not change when a question follows it.
+        head = texts[0][max(0, cut - 64) : cut]
+        tokenized = await renderer.tokenize_prompts_async(
+            [
+                TextPrompt(prompt=t)
+                for t in (texts[0][:cut], head, *(head + text[cut:] for text in texts))
+            ],
+            read_request.build_tok_params(online_renderer.model_config),
+        )
+        prefix_ids, head_ids, *windows = (
+            cast(TokensPrompt, p)["prompt_token_ids"] for p in tokenized
+        )
         if any(w[: len(head_ids)] != head_ids for w in windows):
             return None
         engine_inputs = await online_renderer.preprocess_cmpl(
             read_request,
             [
-                TokensPrompt(prompt=p, prompt_token_ids=prefix_ids + w[len(head_ids) :])
-                for p, w in zip(prompts, windows)
+                TokensPrompt(prompt=t, prompt_token_ids=prefix_ids + w[len(head_ids) :])
+                for t, w in zip(texts, windows)
             ],
         )
         for engine_input in engine_inputs:
