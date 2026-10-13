@@ -32,11 +32,9 @@ def torch_scaled_mm(
     out = torch.mm(a.to(torch.float32), b.to(torch.float32))
     out = scale_a * out
     out = scale_b.T * out
-    out = out.to(out_dtype)
     if bias is not None:
-        out = out + bias
-
-    return out
+        out = out + bias.float()
+    return out.to(out_dtype)
 
 
 def get_8bit_types():
@@ -123,6 +121,25 @@ def test_scaled_mm(
     c_actual = torch_scaled_mm(a, b, scale_a, scale_b, out_dtype, bias)
 
     torch.testing.assert_close(c_check, c_actual, rtol=1e-1, atol=1e-1)
+
+
+@pytest.mark.parametrize("in_dtype", get_8bit_types())
+@pytest.mark.parametrize("use_heuristic", [True, False])
+def test_scaled_mm_adds_bias_before_rounding(in_dtype, use_heuristic):
+    # The accumulator is 1 + 3 * 2**-10 and the bias 2**-8. Rounding to bf16
+    # first gives 1.0 (1 + 2**-8 is a tie, to even); adding first, 1 + 2**-7.
+    a = torch.ones((1, 32), device=device).to(in_dtype)
+    col = torch.tensor([64.0] * 16 + [2.0, 1.0] + [0.0] * 14, device=device)
+    b = col[:, None].expand(32, 16).to(in_dtype).contiguous()
+    scale_a = torch.ones((1, 1), device=device)
+    scale_b = torch.full((1, 1), 2**-10, device=device)
+    bias = torch.full((16,), 2**-8, device=device, dtype=torch.bfloat16)
+    args = (a, b, scale_a, scale_b, torch.bfloat16, bias)
+
+    out = triton_scaled_mm(*args, use_heuristic=use_heuristic)
+    expected = torch_scaled_mm(*args)
+    assert (expected == 1 + 2**-7).all()
+    torch.testing.assert_close(out, expected, rtol=0, atol=0)
 
 
 # TD operand loads must be bit-exact vs the plain masked-load path.

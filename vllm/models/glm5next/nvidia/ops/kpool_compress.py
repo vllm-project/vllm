@@ -15,6 +15,8 @@ from __future__ import annotations
 import torch
 
 from vllm.triton_utils import tl, triton
+from vllm.utils.deep_gemm import mqa_logits_use_mx_scales
+from vllm.v1.attention.ops.common import pack_ue8m0_x4
 
 # The GLM-5.3-Flash indexer head dimension is fixed at 128.
 INDEX_HEAD_DIM = 128
@@ -172,6 +174,7 @@ def _kpool_softmax_rotate_write_cache_kernel(
     HEAD_DIM: tl.constexpr,
     S_OFFSET_NBYTES_IN_PAGE: tl.constexpr,
     ROUND_SCALE: tl.constexpr,
+    MX_SCALE: tl.constexpr,
     RETURN_COMPRESSED: tl.constexpr,
     WRITE_CACHE: tl.constexpr,
     BLOCK_D: tl.constexpr,
@@ -232,7 +235,13 @@ def _kpool_softmax_rotate_write_cache_kernel(
             + loc_token_offset_in_page
         )
         tl.store(buf_fp8_ptr + out_k_offsets, quantized, mask=mask)
-        tl.store(buf_fp32_ptr + out_s_offset, scale)
+        if MX_SCALE:
+            tl.store(
+                buf_fp32_ptr.to(tl.pointer_type(tl.int32)) + out_s_offset,
+                pack_ue8m0_x4(scale),
+            )
+        else:
+            tl.store(buf_fp32_ptr + out_s_offset, scale)
 
     if RETURN_COMPRESSED:
         tl.store(compressed_k_ptr + row * HEAD_DIM + offs, quantized, mask=mask)
@@ -277,6 +286,7 @@ def _compress_and_write(
         compressed_k, compressed_scale = buf_fp8, buf_fp32
 
     if n_rows > 0:
+        mx_scale = write_cache and mqa_logits_use_mx_scales()
         _kpool_softmax_rotate_write_cache_kernel[(n_rows,)](
             buf_fp8,
             buf_fp32,
@@ -295,7 +305,9 @@ def _compress_and_write(
             POOL_SIZE=pool_size,
             HEAD_DIM=head_dim,
             S_OFFSET_NBYTES_IN_PAGE=page_size * head_dim,
-            ROUND_SCALE=round_scale,
+            # MX scales need power-of-two scales.
+            ROUND_SCALE=round_scale or mx_scale,
+            MX_SCALE=mx_scale,
             RETURN_COMPRESSED=return_compressed,
             WRITE_CACHE=write_cache,
             BLOCK_D=triton.next_power_of_2(head_dim),
@@ -414,11 +426,6 @@ def _kpool_tail_seed_kernel(
     ahead belongs to a different tail block (or is past the batch / padding,
     slot < 0). ``tslot = block * RING + pos % RING``; the destination is
     ``tail[block, {0:K, 1:score}, pos % RING, :]``.
-
-    The tail cache aliases the indexer cache with the indexer's (padded) block
-    stride, so blocks are addressed through ``TAIL_BLOCK_ELEMS`` /
-    ``KPOOL_HEAD`` (``tail.stride(0)`` / ``tail.stride(1)``), never as a dense
-    ``[num_blocks, 2, KPOOL, HEAD_DIM]`` array.
     """
     i = tl.program_id(0)
     t = tl.load(tslot_ptr + i).to(tl.int64)
@@ -502,6 +509,7 @@ def _kpool_decode_update_batched_kernel(
     HEAD_DIM: tl.constexpr,
     S_OFFSET_NBYTES_IN_PAGE: tl.constexpr,
     ROUND_SCALE: tl.constexpr,
+    MX_SCALE: tl.constexpr,
     BLOCK_D: tl.constexpr,
 ):
     """One program per request; iterates its NEXT_N verify tokens in order.
@@ -604,7 +612,13 @@ def _kpool_decode_update_batched_kernel(
                 + loc_token_offset_in_page
             )
             tl.store(buf_fp8_ptr + out_k_offsets, quantized, mask=dim_mask)
-            tl.store(buf_fp32_ptr + out_s_offset, scale)
+            if MX_SCALE:
+                tl.store(
+                    buf_fp32_ptr.to(tl.pointer_type(tl.int32)) + out_s_offset,
+                    pack_ue8m0_x4(scale),
+                )
+            else:
+                tl.store(buf_fp32_ptr + out_s_offset, scale)
 
         # Stash the current token AFTER any completion read so the completion
         # uses prior stashes (and the current token's own key/score via
@@ -718,7 +732,9 @@ def kpool_decode_update_and_maybe_write_cache_batched(
         KPOOL_HEAD=tail_kv_cache.stride(1),
         HEAD_DIM=head_dim,
         S_OFFSET_NBYTES_IN_PAGE=page_size * head_dim,
-        ROUND_SCALE=round_scale,
+        # MX scales need power-of-two scales.
+        ROUND_SCALE=round_scale or mqa_logits_use_mx_scales(),
+        MX_SCALE=mqa_logits_use_mx_scales(),
         BLOCK_D=triton.next_power_of_2(head_dim),
     )
 
