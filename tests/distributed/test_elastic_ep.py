@@ -5,7 +5,6 @@ import os
 import subprocess
 import threading
 import time
-import warnings
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
@@ -137,29 +136,20 @@ def _scale_with_traffic(
     probe_committing = [
         start for start, _, _, phase in probe_result if phase == "committing"
     ]
-    if probe_committing:
-        assert not results or any(
-            status == 200
-            and start_time <= request_start
-            and request_end < probe_committing[0]
-            for responses in results
-            for request_start, request_end, status, _ in responses
-        ), "No request completed successfully during preparation"
-        downtime_seconds = f"{_downtime(probe_result):.3f}"
-    else:
-        warnings.warn(
-            "Scaling probe did not observe commit; the polling interval may "
-            "have missed it. Skipping the preparation traffic assertion; "
-            "downtime is unavailable.",
-            stacklevel=2,
-        )
-        downtime_seconds = "N/A"
+    assert probe_committing, "Scaling probe did not observe commit"
+    assert not results or any(
+        status == 200
+        and start_time <= request_start
+        and request_end < probe_committing[0]
+        for responses in results
+        for request_start, request_end, status, _ in responses
+    ), "No request completed successfully during preparation"
 
     print(
         f"[Elastic EP timing][{source_dp_size}->{new_dp_size}]"
         f"[traffic={traffic_mode}] "
         f"scale_seconds={scale_seconds:.3f} "
-        f"downtime_seconds={downtime_seconds}"
+        f"downtime_seconds={_downtime(probe_result):.3f}"
     )
 
 
