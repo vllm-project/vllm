@@ -1039,7 +1039,7 @@ def test_mamba_conv_ssm_offsets_homogeneous_tp():
     # Homogeneous TP: remote conv slices equal local slices; since local==remote
     # slots, conv local and remote offsets coincide.
     loc_co = split.local_conv_offsets
-    rem_co = split.remote_conv_offsets(0, 1)
+    rem_co = split.remote_conv_offsets(0, 1, 0)
     k = 0
     esz = conv.element_size()
     for ls, rs in zip(local_slots, remote_slots):

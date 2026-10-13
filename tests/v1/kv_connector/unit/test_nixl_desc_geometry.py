@@ -575,7 +575,11 @@ def test_registration_ignores_a_sub_block_padding_tail(page_covers_view):
 
 
 def _make_mla_hybrid_worker(
-    local_block_size, kernel_block_size, num_logical_blocks, worker_cls=None
+    local_block_size,
+    kernel_block_size,
+    num_logical_blocks,
+    worker_cls=None,
+    kda_shapes=((8, 3), (1, 4, 4)),
 ):
     """Build a real worker (pull by default) with a hybrid MLA + 2xKDA HMA
     layout."""
@@ -603,7 +607,7 @@ def _make_mla_hybrid_worker(
     unified_page = mla_spec.page_size_bytes
     kda_spec = MambaSpec(
         block_size=local_block_size,
-        shapes=((8, 3), (1, 4, 4)),
+        shapes=kda_shapes,
         dtypes=(torch.float16, torch.float32),
         page_size_padded=unified_page,
         mamba_type=MambaAttentionBackendEnum.GDN_ATTN,
@@ -900,7 +904,13 @@ def _resolve(
 
 
 def _run_hetero_case(
-    local_block, kernel, remote_block, num_tokens, tp_size=2, remote_kernel=None
+    local_block,
+    kernel,
+    remote_block,
+    num_tokens,
+    tp_size=2,
+    remote_kernel=None,
+    kda_shapes=((8, 3), (1, 4, 4)),
 ):
     """Full pull-path run for one geometry; returns pairing records.
 
@@ -923,15 +933,15 @@ def _run_hetero_case(
         local_block_size=local_block,
         kernel_block_size=kernel,
         num_logical_blocks=max(2 * n_local + 4, 8),
+        kda_shapes=kda_shapes,
     )
-    # Local KDA state pages are (48, 64) bytes; the remote holds 1/tp_size
-    # shards of each.
+    # The remote holds 1/tp_size shards of each local KDA state.
     meta_r = _make_remote_meta(
         worker,
         remote_block_size=remote_block,
         remote_kernel_block_size=remote_kernel,
         remote_num_logical=max(2 * n_remote + 4, 8),
-        remote_ssm_sizes=(48 // tp_size, 64 // tp_size),
+        remote_ssm_sizes=tuple(size // tp_size for size in worker._mamba_ssm_size),
     )
     _register_remote_agents(worker, meta_r, tp_size)
 
@@ -1196,6 +1206,8 @@ def test_mla_hybrid_large_ppl_geometry(num_tokens):
         remote_block=768,
         num_tokens=num_tokens,
         tp_size=8,
+        # Q, K and V columns divisible by the 8 remote ranks.
+        kda_shapes=((24, 3), (2, 4, 4)),
     )
 
 
@@ -1520,6 +1532,7 @@ def test_csa_linear_remote_ple_is_copied_whole():
     descriptors = worker._build_mamba_remote(
         metadata,
         tp_ratio=-2,
+        remote_tp_rank=0,
         transfer_info=SimpleNamespace(remote_physical_blocks_per_logical=1),
     )
     assert descriptors.shape == (5, 5)
@@ -1531,6 +1544,7 @@ def test_csa_linear_remote_ple_is_copied_whole():
         worker._build_mamba_remote(
             metadata,
             tp_ratio=-2,
+            remote_tp_rank=0,
             transfer_info=SimpleNamespace(remote_physical_blocks_per_logical=1),
         )
 

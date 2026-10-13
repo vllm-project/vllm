@@ -535,7 +535,7 @@ def build_mamba_offset_template(
         )
     geom = get_mamba_transfer_geometry(conv, ssm)
     conv_local_offsets = split_info.local_conv_offsets
-    conv_remote_offsets = split_info.remote_conv_offsets(0, 1)
+    conv_remote_offsets = split_info.remote_conv_offsets(0, 1, 0)
     ssm_read_bytes = geom.ssm_slot_bytes
     conv_subprojs = tuple(
         (loff, roff, rsz)
