@@ -5,6 +5,7 @@ import random
 import pytest
 import torch
 
+from vllm.model_executor.layers.sparse_attn_indexer import as_fp32_logits
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import (
     _ceil_to_ue8m0,
@@ -13,10 +14,21 @@ from vllm.utils.deep_gemm import (
     fp8_fp4_paged_mqa_logits,
     get_num_sms,
     get_paged_mqa_logits_metadata,
+    mqa_logits_mx_inputs,
+    mqa_logits_use_mx_scales,
     native_next_n_supported,
 )
 from vllm.utils.import_utils import has_deep_gemm
 from vllm.utils.math_utils import cdiv
+
+
+def encode_indexer_scales(sf: torch.Tensor) -> torch.Tensor:
+    """Per-token power-of-two fp32 scales as the indexer K cache stores them:
+    four equal packed UE8M0 bytes under MX scales, else the fp32 itself."""
+    if not mqa_logits_use_mx_scales():
+        return sf
+    ue8m0 = (sf.view(torch.int32) >> 23).to(torch.uint8)
+    return ue8m0[..., None].repeat_interleave(4, dim=-1).view(torch.int32)[..., 0]
 
 
 def kv_cache_cast_to_fp8(x: torch.Tensor) -> torch.Tensor:
@@ -24,7 +36,7 @@ def kv_cache_cast_to_fp8(x: torch.Tensor) -> torch.Tensor:
     num_blocks, block_size, num_heads, head_dim = x.shape
     assert num_heads == 1
     x_amax = x.abs().float().amax(dim=3, keepdim=True).clamp(1e-4)
-    sf = x_amax / 448.0
+    sf = _ceil_to_ue8m0(x_amax / 448.0)
     x_scaled = (x * (1.0 / sf)).to(torch.float8_e4m3fn)
     x_fp8 = torch.empty(
         (num_blocks, block_size * (head_dim + 4)),
@@ -34,9 +46,9 @@ def kv_cache_cast_to_fp8(x: torch.Tensor) -> torch.Tensor:
     x_fp8[:, : block_size * head_dim] = x_scaled.view(
         num_blocks, block_size * head_dim
     ).view(dtype=torch.uint8)
-    x_fp8[:, block_size * head_dim :] = sf.view(num_blocks, block_size).view(
-        dtype=torch.uint8
-    )
+    x_fp8[:, block_size * head_dim :] = encode_indexer_scales(
+        sf.view(num_blocks, block_size)
+    ).view(dtype=torch.uint8)
     return x_fp8.view(num_blocks, block_size, num_heads, head_dim + 4)
 
 
@@ -91,64 +103,72 @@ def _ref_fp8_mqa_logits(
     return logits
 
 
+def _packed_requests_test_data(seq_len: int, seq_len_kv: int):
+    # Two causal prefill requests packed into one KV buffer, so the second
+    # request's rows start at a nonzero K position.
+    half, half_kv = seq_len // 2, seq_len_kv // 2
+    rows = torch.arange(seq_len, dtype=torch.int, device="cuda")
+    ks = torch.where(rows < half, 0, half_kv).to(torch.int)
+    ke = ks + half_kv - half + 1 + rows % half
+    return ks, ke
+
+
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
 @pytest.mark.skipif(not has_deep_gemm(), reason="DeepGEMM not available")
 @pytest.mark.skipif(
     not current_platform.has_device_capability(90), reason="SM90 and SM100 only"
 )
-@pytest.mark.parametrize("clean_logits", [True, False])
-def test_deepgemm_fp8_mqa_logits(clean_logits: bool):
+@pytest.mark.parametrize("layout", ["cp", "no_cp", "packed"])
+def test_deepgemm_fp8_mqa_logits(layout: str):
+    """FP8 indexer prefill logits, compressed to each row's valid K span."""
     torch.manual_seed(0)
     random.seed(0)
     num_heads, head_dim = 32, 128
-    for seq_len in (512,):
-        for seq_len_kv in (1024,):
-            for disable_cp in (False, True):
-                q = torch.randn(
-                    seq_len,
-                    num_heads,
-                    head_dim,
-                    device="cuda",
-                    dtype=torch.bfloat16,
-                )
-                kv = torch.randn(
-                    seq_len_kv, head_dim, device="cuda", dtype=torch.bfloat16
-                )
-                weights = torch.randn(
-                    seq_len, num_heads, device="cuda", dtype=torch.float32
-                )
+    seq_len, seq_len_kv = 512, 1024
+    q = torch.randn(seq_len, num_heads, head_dim, device="cuda", dtype=torch.bfloat16)
+    kv = torch.randn(seq_len_kv, head_dim, device="cuda", dtype=torch.bfloat16)
+    weights = torch.randn(seq_len, num_heads, device="cuda", dtype=torch.float32)
 
-                if disable_cp:
-                    ks = torch.zeros(seq_len, dtype=torch.int, device="cuda")
-                    ke = torch.arange(seq_len, dtype=torch.int, device="cuda") + (
-                        seq_len_kv - seq_len
-                    )
-                else:
-                    ks, ke = _generate_cp_test_data(seq_len, seq_len_kv)
+    if layout == "cp":
+        ks, ke = _generate_cp_test_data(seq_len, seq_len_kv)
+    elif layout == "no_cp":
+        ks = torch.zeros(seq_len, dtype=torch.int, device="cuda")
+        ke = torch.arange(seq_len, dtype=torch.int, device="cuda") + (
+            seq_len_kv - seq_len
+        )
+    else:
+        ks, ke = _packed_requests_test_data(seq_len, seq_len_kv)
 
-                q_fp8 = q.to(torch.float8_e4m3fn)
-                kv_fp8 = per_custom_dims_cast_to_fp8(kv, (0,), False)
-                logits = fp8_fp4_mqa_logits(
-                    (q_fp8, None), kv_fp8, weights, ks, ke, clean_logits=clean_logits
-                )
+    q_fp8 = q.to(torch.float8_e4m3fn)
+    kv_fp8, kv_sf = per_custom_dims_cast_to_fp8(kv, (0,), True)
+    q_scale, kernel_weights = mqa_logits_mx_inputs(q_fp8, None, weights)
+    max_seqlen_k = int((ke - ks).max())
+    logits = fp8_fp4_mqa_logits(
+        (q_fp8, q_scale),
+        (kv_fp8, encode_indexer_scales(kv_sf)),
+        kernel_weights,
+        ks,
+        ke,
+        max_seqlen_k,
+    )
+    assert logits.shape == (seq_len, max_seqlen_k)
+    logits = as_fp32_logits(logits, ke - ks)
 
-                ref_logits = _ref_fp8_mqa_logits(
-                    q=q,
-                    kv=kv,
-                    weights=weights,
-                    cu_seqlen_ks=ks,
-                    cu_seqlen_ke=ke,
-                )
-                ref_neginf_mask = ref_logits == float("-inf")
-
-                if clean_logits:
-                    neginf_mask = logits == float("-inf")
-                    assert torch.equal(neginf_mask, ref_neginf_mask)
-
-                ref_logits = ref_logits.masked_fill(ref_neginf_mask, 0)
-                logits = logits.masked_fill(ref_neginf_mask, 0)
-                diff = calc_diff(logits, ref_logits)
-                assert diff < 1e-3, f"{diff=}"
+    ref_logits = _ref_fp8_mqa_logits(
+        q=q,
+        kv=kv,
+        weights=kernel_weights.float(),
+        cu_seqlen_ks=ks,
+        cu_seqlen_ke=ke,
+    )
+    # Compressed row i holds K positions [ks[i], ke[i]) from column zero.
+    cols = ks[:, None] + torch.arange(max_seqlen_k, device="cuda")[None, :]
+    valid = cols < ke[:, None]
+    ref_logits = ref_logits.gather(1, cols.clamp(max=seq_len_kv - 1).long())
+    ref_logits = ref_logits.masked_fill(~valid, 0)
+    logits = logits.masked_fill(~valid, 0)
+    diff = calc_diff(logits, ref_logits)
+    assert diff < 1e-3, f"{diff=}"
 
 
 def _ref_fp8_fp4_paged_mqa_logits(
@@ -212,9 +232,6 @@ def test_deepgemm_fp8_fp4_paged_mqa_logits(batch_size: int, next_n: int):
     if not native_next_n_supported(next_n):
         pytest.skip(f"next_n={next_n} has no native kernel on this architecture")
 
-    # NOTE: clean_logits=True is incompatible with the 2D context_lens
-    # required by csrc/apis/attention.hpp; only the False path is exercised.
-    clean_logits = False
     torch.manual_seed(0)
     random.seed(0)
 
@@ -273,26 +290,42 @@ def test_deepgemm_fp8_fp4_paged_mqa_logits(batch_size: int, next_n: int):
             context_lens_2d = (
                 context_lens.unsqueeze(-1) - next_n + 1 + next_n_arange
             ).contiguous()
+            q_scale, kernel_weights = mqa_logits_mx_inputs(q_fp8, None, weights)
+            kernel_q = (q_fp8, q_scale)
+            kernel_context_lens, kernel_block_tables = context_lens_2d, block_tables
+            indices = None
+            if mqa_logits_use_mx_scales():
+                # SM100 only takes varlen rows: one Q token each, tied to its
+                # request by `indices`.
+                assert q_scale is not None
+                kernel_q = (
+                    q_fp8.flatten(0, 1)[:, None],
+                    q_scale.flatten(0, 1)[:, None],
+                )
+                kernel_context_lens = context_lens_2d.view(-1, 1)
+                kernel_block_tables = block_tables.repeat_interleave(next_n, dim=0)
+                indices = torch.arange(batch_size, device="cuda", dtype=torch.int32)
+                indices = indices.repeat_interleave(next_n)
             schedule_metadata = get_paged_mqa_logits_metadata(
-                context_lens_2d,
-                blocksize,
-                get_num_sms(),
+                kernel_context_lens, blocksize, get_num_sms(), indices=indices
             )
             logits = fp8_fp4_paged_mqa_logits(
-                (q_fp8, None),
+                kernel_q,
                 kv_cache_fp8,
-                weights,
-                context_lens_2d,
-                block_tables,
+                kernel_weights,
+                kernel_context_lens,
+                kernel_block_tables,
                 schedule_metadata,
                 max_model_len,
-                clean_logits=clean_logits,
+                indices=indices,
             )
+            if indices is not None:
+                logits = as_fp32_logits(logits, kernel_context_lens.view(-1))
 
             ref_logits = _ref_fp8_fp4_paged_mqa_logits(
                 q,
                 kv_cache,
-                weights,
+                kernel_weights.float(),
                 context_lens,
                 block_tables,
                 max_model_len,
@@ -309,7 +342,7 @@ def test_deepgemm_fp8_fp4_paged_mqa_logits(batch_size: int, next_n: int):
                 context_lens[row_indices] - next_n + next_n_offset
             ).unsqueeze(1)
 
-            logits = logits.masked_fill(~mask, 0)
+            logits = logits.float().masked_fill(~mask, 0)
             ref_logits = ref_logits.masked_fill(~mask, 0)
             diff = calc_diff(logits, ref_logits)
             assert diff < 1e-3, f"{diff=}"
@@ -349,12 +382,28 @@ def test_deepgemm_paged_mqa_packed_manager_block_stride():
     q = torch.randn(1, 1, num_heads, head_dim, device="cuda", dtype=torch.bfloat16).to(
         torch.float8_e4m3fn
     )
-    weights = torch.randn(1, num_heads, device="cuda", dtype=torch.float32)
+    q_scale, weights = mqa_logits_mx_inputs(
+        q, None, torch.randn(1, num_heads, device="cuda", dtype=torch.float32)
+    )
     context_lens = torch.full((1, 1), block_size, device="cuda", dtype=torch.int32)
-    schedule = get_paged_mqa_logits_metadata(context_lens, page_size, get_num_sms())
+    indices = (
+        torch.zeros(1, device="cuda", dtype=torch.int32)
+        if mqa_logits_use_mx_scales()
+        else None
+    )
+    schedule = get_paged_mqa_logits_metadata(
+        context_lens, page_size, get_num_sms(), indices=indices
+    )
     logits = [
         fp8_fp4_paged_mqa_logits(
-            (q, None), cache, weights, context_lens, table, schedule, block_size, False
+            (q, q_scale),
+            cache,
+            weights,
+            context_lens,
+            table,
+            schedule,
+            block_size,
+            indices=indices,
         )
         for cache, table in zip((compact_pages, packed_pages), tables)
     ]
