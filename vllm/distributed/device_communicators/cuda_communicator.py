@@ -201,8 +201,9 @@ class CudaCommunicator(DeviceCommunicatorBase):
 
         # Not gated on use_custom_allreduce: ROCm enables the flat custom
         # all-reduce only on MI300+, but its kernels work inside an XGMI island
-        # and across a GPU pair on MI200. It picks the algorithm by tensor size,
-        # so the reduction order is not batch invariant.
+        # and across a GPU pair on MI200, for a group in one island or spanning
+        # two. It picks the algorithm by tensor size, so the reduction order is
+        # not batch invariant.
         self.island_ar_comm: IslandAllReduce | None = None
         if (
             unique_name.split(":")[0] == "tp"

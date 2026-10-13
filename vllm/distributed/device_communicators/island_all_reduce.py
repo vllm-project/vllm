@@ -15,6 +15,11 @@ step. Instead:
 The islands are found from the link topology, so the TP ranks need not be
 ordered by island.
 
+A TP group inside a single island (e.g. 4x MI210) is fully connected, but the
+flat custom all-reduce is enabled on MI300 and newer only. Such a group gets
+the first stage alone: custom all-reduce for the smaller tensors, RCCL for the
+rest.
+
 The custom kernels always copy the input into the pre-registered IPC buffer,
 also inside CUDA graphs: registered graph buffers return wrong sums on MI210
 with ROCm 7.
@@ -74,15 +79,14 @@ class IslandAllReduce:
         from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
 
         self.disabled = True
-        self.ca_island: CustomAllreduce | None = None
-        self.ca_pair: CustomAllreduce | None = None
+        # One custom all-reduce per level: island, then pair. A single island
+        # has the first only. Empty when the custom path is off.
+        self.ca_stages: list[CustomAllreduce] = []
+        self.nccl_island: PyNcclCommunicator | None = None
+        self.nccl_pair: PyNcclCommunicator | None = None
+        self.hierarchical = False
         world_size = dist.get_world_size(cpu_group)
-        # dist.new_group below must be called by every process of the job.
-        if (
-            not current_platform.is_rocm()
-            or world_size != _ISLAND_WORLD_SIZE
-            or world_size != dist.get_world_size()
-        ):
+        if not current_platform.is_rocm() or world_size < 2:
             return
 
         assert device.index is not None
@@ -93,29 +97,48 @@ class IslandAllReduce:
         gathered = [torch.zeros_like(phys) for _ in range(world_size)]
         dist.all_gather(gathered, phys, group=cpu_group)
         ids = [int(t.item()) for t in gathered]
-        positions = find_two_islands(ids)
-        if positions is None:
-            return
 
-        # A group ranks its members by ascending global rank, so the k-th GPU
-        # of one island pairs with the k-th GPU of the other: the hierarchical
-        # path needs both ends of a pair to hold the same shard.
-        members = [sorted(global_ranks[i] for i in island) for island in positions]
-        islands = [dist.new_group(ranks, backend="gloo") for ranks in members]
-        pairs = [
-            dist.new_group([a, b], backend="gloo")
-            for a, b in zip(members[0], members[1])
-        ]
-        my_rank = global_ranks[dist.get_rank(cpu_group)]
-        side = 0 if my_rank in members[0] else 1
-        island, pair = islands[side], pairs[members[side].index(my_rank)]
+        if current_platform.is_fully_connected(ids):
+            # Platforms with the flat custom all-reduce use that instead.
+            if current_platform.use_custom_allreduce():
+                return
+            island_ids = [ids]
+            groups = [cpu_group]
+        else:
+            # dist.new_group below must be called by every process of the job.
+            if world_size != dist.get_world_size():
+                return
+            positions = find_two_islands(ids)
+            if positions is None:
+                return
+            island_ids = [[ids[i] for i in island] for island in positions]
+
+            # A group ranks its members by ascending global rank, so the k-th
+            # GPU of one island pairs with the k-th GPU of the other: the
+            # hierarchical path needs both ends of a pair to hold the same shard.
+            members = [sorted(global_ranks[i] for i in island) for island in positions]
+            islands = [dist.new_group(ranks, backend="gloo") for ranks in members]
+            pairs = [
+                dist.new_group([a, b], backend="gloo")
+                for a, b in zip(members[0], members[1])
+            ]
+            my_rank = global_ranks[dist.get_rank(cpu_group)]
+            side = 0 if my_rank in members[0] else 1
+            groups = [islands[side], pairs[members[side].index(my_rank)]]
+            # PyNccl rather than torch NCCL process groups: their watchdog
+            # queries events, which HIP forbids during graph capture.
+            self.nccl_island = PyNcclCommunicator(groups[0], device)
+            self.nccl_pair = PyNcclCommunicator(groups[1], device)
+            self.hierarchical = not (
+                self.nccl_island.disabled or self.nccl_pair.disabled
+            )
 
         self.max_custom_bytes = envs.VLLM_ROCM_ISLAND_AR_CUSTOM_MAX_BYTES
         self.min_hier_bytes = envs.VLLM_ROCM_ISLAND_AR_HIER_MIN_BYTES
         # A zero limit turns the custom path off; CustomAllreduce cannot
         # allocate an empty shared buffer.
         if self.max_custom_bytes > 0:
-            ca_island, ca_pair = (
+            stages = [
                 CustomAllreduce(
                     group,
                     device,
@@ -123,24 +146,19 @@ class IslandAllReduce:
                     max_all_gather_size=self.max_custom_bytes,
                     max_reduce_scatter_size=self.max_custom_bytes,
                 )
-                for group in (island, pair)
-            )
-            if not (ca_island.disabled or ca_pair.disabled):
-                self.ca_island, self.ca_pair = ca_island, ca_pair
-        # PyNccl rather than torch NCCL process groups: their watchdog queries
-        # events, which HIP forbids during graph capture.
-        self.nccl_island = PyNcclCommunicator(island, device)
-        self.nccl_pair = PyNcclCommunicator(pair, device)
-        self.hierarchical = not (self.nccl_island.disabled or self.nccl_pair.disabled)
-        if self.ca_island is None and not self.hierarchical:
+                for group in groups
+            ]
+            if not any(ca.disabled for ca in stages):
+                self.ca_stages = stages
+        if not self.ca_stages and not self.hierarchical:
             return
         self.disabled = False
         logger.info_once(
-            "Island all-reduce enabled for GPU islands %s: two-level custom < %d B "
-            "(%s), hierarchical RCCL >= %d B (%s).",
-            str([[ids[i] for i in island] for island in positions]),
+            "Island all-reduce enabled for GPU islands %s: custom < %d B (%s), "
+            "hierarchical RCCL >= %d B (%s).",
+            str(island_ids),
             self.max_custom_bytes,
-            "on" if self.ca_island is not None else "off",
+            "on" if self.ca_stages else "off",
             self.min_hier_bytes,
             "on" if self.hierarchical else "off",
             scope="global",
@@ -152,7 +170,9 @@ class IslandAllReduce:
             return None
         nbytes = input_.numel() * input_.element_size()
         if (
-            self.hierarchical
+            self.nccl_island is not None
+            and self.nccl_pair is not None
+            and self.hierarchical
             and nbytes >= self.min_hier_bytes
             and input_.numel() % 4 == 0
             and input_.is_contiguous()
@@ -167,28 +187,29 @@ class IslandAllReduce:
             self.nccl_island.all_gather(out.view(-1), shard)
             return out
         if (
-            self.ca_island is not None
-            and self.ca_pair is not None
+            self.ca_stages
             and nbytes < self.max_custom_bytes
-            and self.ca_island.should_custom_ar(input_)
+            and self.ca_stages[0].should_custom_ar(input_)
         ):
-            out = self.ca_island.all_reduce(input_, registered=False)
-            return self.ca_pair.all_reduce(out, registered=False)
+            out = input_
+            for ca in self.ca_stages:
+                out = ca.all_reduce(out, registered=False)
+            return out
         return None
 
     @contextmanager
     def capture(self):
         """Exchange the custom kernels' graph buffer addresses after capture."""
         with ExitStack() as stack:
-            if self.ca_island is not None and self.ca_pair is not None:
-                stack.enter_context(self.ca_island.capture())
-                stack.enter_context(self.ca_pair.capture())
+            for ca in self.ca_stages:
+                stack.enter_context(ca.capture())
             yield
 
     def destroy(self):
         if self.disabled:
             return
-        self.nccl_island.destroy()
-        self.nccl_pair.destroy()
-        self.ca_island = self.ca_pair = None
+        for nccl in (self.nccl_island, self.nccl_pair):
+            if nccl is not None:
+                nccl.destroy()
+        self.ca_stages = []
         self.disabled = True
