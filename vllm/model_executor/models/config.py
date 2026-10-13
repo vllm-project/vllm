@@ -70,6 +70,32 @@ class GlmMoeDsaForCausalLM(VerifyAndUpdateConfig):
         )
 
 
+class Glm5NextModelConfig(VerifyAndUpdateConfig):
+    @staticmethod
+    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        from vllm.platforms import current_platform
+
+        cache_config = vllm_config.cache_config
+        if (
+            cache_config.cache_dtype != "auto"
+            or not current_platform.is_cuda()
+            or not current_platform.is_device_capability_family(100)
+            or getattr(vllm_config.model_config.hf_text_config, "index_topk", None)
+            is None
+        ):
+            return
+
+        cache_config.cache_dtype = "fp8"
+        logger.info_once("Using fp8 KV cache for GLM-5.3-Flash")
+        spec_config = vllm_config.speculative_config
+        if (
+            spec_config is not None
+            and spec_config.method != "mtp"
+            and spec_config.kv_cache_dtype is None
+        ):
+            spec_config.kv_cache_dtype = "auto"
+
+
 class Ernie4_5_VLMoeForConditionalGenerationConfig(VerifyAndUpdateConfig):
     @staticmethod
     def verify_and_update_config(vllm_config: "VllmConfig") -> None:
@@ -1075,6 +1101,8 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "Gemma4ForCausalLM": Gemma4Config,
     "Gemma4ForConditionalGeneration": Gemma4Config,
     "Gemma4UnifiedForConditionalGeneration": Gemma4Config,
+    "Glm5NextForCausalLM": Glm5NextModelConfig,
+    "Glm5NextForConditionalGeneration": Glm5NextModelConfig,
     "GlmMoeDsaForCausalLM": GlmMoeDsaForCausalLM,
     "GptOssForCausalLM": GptOssForCausalLMConfig,
     "LongcatFlashNgramForCausalLM": LongcatFlashNgramForCausalLMConfig,
