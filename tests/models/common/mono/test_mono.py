@@ -286,6 +286,16 @@ def test_steps_are_counted_by_path(monkeypatch, one_rank):
     assert failstop.drain() is None
 
 
+def test_a_capture_bakes_its_decision_in_any_runtime_mode(monkeypatch, one_rank):
+    """Model Runner V2 captures FULL graphs with the runtime mode NONE."""
+    _forward_context(monkeypatch, "NONE")
+    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: True)
+    mono = _mono(fake_spec(eligible=lambda ctx, step: None))
+    mono.begin_step(torch.zeros(4))
+    mono.account(4, CUDAGraphMode.FULL)
+    assert failstop.drain() == {"steps:fake:mono": 1}
+
+
 def test_every_width_is_registered_for_jit_warmup(monkeypatch, one_rank):
     registered = []
     monkeypatch.setattr(

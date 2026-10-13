@@ -134,7 +134,11 @@ class Mono:
         reason it runs vLLM's layers."""
         self.step = None
         why = self._decide(positions)
-        if get_forward_context().cudagraph_runtime_mode == CUDAGraphMode.FULL:
+        # Model Runner V2 captures with the runtime mode NONE
+        if (
+            get_forward_context().cudagraph_runtime_mode == CUDAGraphMode.FULL
+            or torch.cuda.is_current_stream_capturing()
+        ):
             self.baked[positions.size(-1)] = why
         self.last = why
         return why
