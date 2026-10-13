@@ -114,3 +114,12 @@ def post_update(
         all_token_ids,
         total_len,
     )
+
+
+def post_update_num_computed_tokens(
+    idx_mapping: torch.Tensor,
+    num_computed_tokens: torch.Tensor,
+    query_start_loc: torch.Tensor,
+) -> None:
+    query_lens = query_start_loc[1:] - query_start_loc[:-1]
+    num_computed_tokens.index_add_(0, idx_mapping, query_lens)
