@@ -10,9 +10,43 @@ import vllm._C  # noqa: F401
 
 from vllm.platforms import current_platform
 from vllm.v1.worker.cpu.gumbel import gumbel_sample
-from vllm.v1.worker.cpu.sampler import CPUSamplingStates
+from vllm.v1.worker.cpu.sampler import CPUSampler, CPUSamplingStates
+from vllm.v1.worker.gpu.sample.logprob import LogprobTokenIdsState
 
 pytestmark = pytest.mark.skipif(not current_platform.is_cpu(), reason="CPU only")
+
+
+@pytest.mark.parametrize("logits_mode", [False, True])
+def test_cpu_sampler_computes_output_logprobs(logits_mode: bool) -> None:
+    logits = torch.tensor(
+        [[4.0, 2.0, 1.0, 0.0], [0.0, 2.0, 1.0, 3.0]],
+        dtype=torch.bfloat16,
+    )
+    sampled_token_ids = torch.tensor([2, 1], dtype=torch.int64)
+    sampler = object.__new__(CPUSampler)
+
+    output = sampler._compute_topk_scores(
+        logits,
+        num_logprobs=2,
+        sampled_token_ids=sampled_token_ids,
+        cu_num_logits=[0, 1, 2],
+        logprob_token_ids_state=object.__new__(LogprobTokenIdsState),
+        expanded_idx_mapping=torch.tensor([0, 1], dtype=torch.int32),
+        max_per_req_token_ids=0,
+        logits_mode=logits_mode,
+    )
+
+    assert output.logprob_token_ids.tolist() == [
+        [2, 0, 1],
+        [1, 3, 1],
+    ]
+    expected_scores = torch.tensor([[1.0, 4.0, 2.0], [2.0, 3.0, 2.0]])
+    if not logits_mode:
+        expected_scores -= torch.logsumexp(logits.float(), dim=-1, keepdim=True)
+    torch.testing.assert_close(output.logprobs, expected_scores)
+    assert output.selected_token_ranks.tolist() == [3, 2]
+    assert output.cu_num_generated_tokens == [0, 1, 2]
+
 
 _UINT32_MASK = (1 << 32) - 1
 _UINT64_MASK = (1 << 64) - 1
