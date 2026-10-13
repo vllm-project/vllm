@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast
 
@@ -503,6 +504,37 @@ class TokenizeParams:
             return slice(-max_length, None)
 
         return slice(0, max_length)
+
+    def _truncation_indices(
+        self, tokenizer: TokenizerLike | None, special_tokens_mask: Sequence[int]
+    ) -> list[int] | None:
+        """The token indices to keep so that truncation spares special tokens.
+
+        `special_tokens_mask` flags the tokens that the tokenizer added around
+        the text, such as `[CLS]` and `[SEP]`. These are all kept and only the
+        text between them is truncated, as the tokenizer's own truncation does.
+
+        `None` means `_truncation_slice` applies as it is: there is nothing to
+        truncate, no special tokens to keep, or no room for them.
+        """
+        length = len(special_tokens_mask)
+        truncation = self._truncation_slice(tokenizer, length)
+        if truncation is None or 0 not in special_tokens_mask:
+            return None
+
+        # Shrink the kept span so that the special tokens at either end fit.
+        num_prefix = special_tokens_mask.index(0)
+        num_suffix = special_tokens_mask[::-1].index(0)
+        start, stop, _ = truncation.indices(length)
+        text_start, text_stop = start + num_prefix, stop - num_suffix
+        if num_prefix + num_suffix == 0 or text_start > text_stop:
+            return None
+
+        return [
+            *range(num_prefix),
+            *range(text_start, text_stop),
+            *range(length - num_suffix, length),
+        ]
 
     def _token_truncation(self, tokenizer: TokenizerLike | None, tokens: _S) -> _S:
         """Apply truncation to prompt tokens if necessary."""
