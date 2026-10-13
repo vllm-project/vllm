@@ -415,8 +415,12 @@ class AttentionImpl<ISA::AMX, scalar_t, head_dim, kv_cache_scalar_t> {
 
   void init_from_input(const AttentionInput* input) {
     if constexpr (fp8_kv) {
-      k_scale = input->k_scale_fp8;
-      v_scale = input->v_scale_fp8;
+      // Compensate for the E4M3/E5M2 decoder's 2^8/2^16 exponent lift.
+      constexpr float dequant_scale =
+          std::is_same_v<kv_cache_t, c10::Float8_e4m3fn> ? 0x1.0p-8f
+                                                         : 0x1.0p-16f;
+      k_scale = input->k_scale_fp8 * dequant_scale;
+      v_scale = input->v_scale_fp8 * dequant_scale;
     }
   }
 

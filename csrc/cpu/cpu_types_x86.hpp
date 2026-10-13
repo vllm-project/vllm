@@ -224,30 +224,23 @@ struct BF16Vec32 : public Vec<BF16Vec32> {
   }
 
   // The cache writer saturates NaN/Inf inputs to finite FP8 encodings.
+  // Flush encoded subnormals to zero before delayed scaling.
   explicit BF16Vec32(const uint8_t* ptr, fp8_bf16_e4m3_tag) {
     __m256i b8 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(ptr));
     __m512i b16 = _mm512_cvtepi8_epi16(b8);
-    __m512i magnitude = _mm512_and_si512(b16, _mm512_set1_epi16(0x7f));
-    __m512i normal = _mm512_add_epi16(_mm512_slli_epi16(magnitude, 4),
-                                      _mm512_set1_epi16(0x3c00));
-    // E4M3 AMX decoding flushes encoded subnormals to signed zero.
-    __m512i result = _mm512_maskz_mov_epi16(
-        _mm512_test_epi16_mask(b16, _mm512_set1_epi16(0x78)), normal);
-    reg =
-        _mm512_ternarylogic_epi32(result, b16, _mm512_set1_epi16(0x8000), 0xf8);
+    __mmask32 normal = _mm512_test_epi16_mask(b16, _mm512_set1_epi16(0x78));
+    b16 = _mm512_ternarylogic_epi32(b16, _mm512_set1_epi16(0x087f),
+                                    _mm512_set1_epi16(0x0400), 0xea);
+    reg = _mm512_maskz_slli_epi16(normal, b16, 4);
   }
 
   explicit BF16Vec32(const uint8_t* ptr, fp8_bf16_e5m2_tag) {
     __m256i b8 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(ptr));
     __m512i b16 = _mm512_cvtepi8_epi16(b8);
-    __m512i magnitude = _mm512_and_si512(b16, _mm512_set1_epi16(0x7f));
-    __m512i normal = _mm512_add_epi16(_mm512_slli_epi16(magnitude, 5),
-                                      _mm512_set1_epi16(0x3800));
-    // E5M2 AMX decoding flushes encoded subnormals to signed zero.
-    __m512i result = _mm512_maskz_mov_epi16(
-        _mm512_test_epi16_mask(b16, _mm512_set1_epi16(0x7c)), normal);
-    reg =
-        _mm512_ternarylogic_epi32(result, b16, _mm512_set1_epi16(0x8000), 0xf8);
+    __mmask32 normal = _mm512_test_epi16_mask(b16, _mm512_set1_epi16(0x7c));
+    b16 = _mm512_ternarylogic_epi32(b16, _mm512_set1_epi16(0x047f),
+                                    _mm512_set1_epi16(0x0200), 0xea);
+    reg = _mm512_maskz_slli_epi16(normal, b16, 5);
   }
 
   void save(void* ptr) const { *reinterpret_cast<__m512i*>(ptr) = reg; }
