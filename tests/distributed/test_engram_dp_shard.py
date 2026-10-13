@@ -429,6 +429,7 @@ def _check_table(
                 ),
                 scheduler_config=vllm_config.scheduler_config,
                 load_config=load_config,
+                model_config=SimpleNamespace(hf_config=SimpleNamespace()),
             )
             with m.context() as init_patch, torch.device("cuda"):
                 init_patch.setattr(
