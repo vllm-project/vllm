@@ -523,8 +523,11 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             self.attn_backend, kv_cache_dtype
         )
         if normalized_kv_cache_dtype != kv_cache_dtype:
-            if cache_config is not None:
-                cache_config.cache_dtype = normalized_kv_cache_dtype
+            # Keep the canonical format layer-local: cache_config is shared
+            # with spec-decode drafters, whose non-MLA layers cannot serve
+            # an MLA-only cache format. Downstream readers (kv cache specs,
+            # metadata builders) take the resolved format from the layer's
+            # spec, so the writeback is no longer needed.
             kv_cache_dtype = normalized_kv_cache_dtype
             logger.info_once(
                 "Using %s KV cache format for %s backend.",
@@ -2423,7 +2426,14 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             self.determine_chunked_prefill_workspace_size(vllm_config)
         )
 
-        use_packed_fp8_cache = vllm_config.cache_config.cache_dtype == "fp8_ds_mla"
+        # Read the resolved layout from the layer's spec: canonicalization
+        # no longer writes the ds_mla format back to cache_config, so the
+        # global value stays the user-facing "fp8" / "nvfp4" alias here.
+        cache_dtype = (
+            getattr(self.kv_cache_spec, "cache_dtype_str", None)
+            or vllm_config.cache_config.cache_dtype
+        )
+        use_packed_fp8_cache = cache_dtype == "fp8_ds_mla"
         self.dcp_manager: MLADCPManager | None = None
         if self.dcp_world_size > 1:
             # Note(hc): The local kvcache is incomplete when DCP is triggered,
