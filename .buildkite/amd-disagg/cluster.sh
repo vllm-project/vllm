@@ -109,7 +109,10 @@ export HSA_NO_SCRATCH_RECLAIM="${HSA_NO_SCRATCH_RECLAIM:-1}"
 #export TRANSFORMERS_OFFLINE="${TRANSFORMERS_OFFLINE:-1}"
 #
 #export HOME=/tmp
-export HF_HOME="${HF_HOME:-/tmp/hf_home}"
+export HF_HOME="${HF_HOME:-/data/${USER:-$(id -un)}/.cache/huggingface}"
+# Remote-code modules are rewritten by every rank on every node at import; keep
+# those writes off the shared NFS cache.
+export HF_MODULES_CACHE="${HF_MODULES_CACHE:-/tmp/hf_modules}"
 export XDG_CACHE_HOME="${XDG_CACHE_HOME:-/tmp/.cache}"
 export VLLM_ENGINE_READY_TIMEOUT_S="${VLLM_ENGINE_READY_TIMEOUT_S:-3600}"
 
