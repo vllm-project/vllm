@@ -14,12 +14,12 @@ from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.warmup.jit_warmup import VllmJitKernel
 from vllm.models.common.mono.guards import (
-    _agree_across_ranks,
     _enabled,
     _load_specs,
     _refusal_message,
     _refuse_model,
     _select_spec,
+    tp_agree,
     tp_group,
 )
 from vllm.models.common.mono.spec import (
@@ -60,18 +60,20 @@ class MonoRuntime:
     """A model's MonoKernels on this rank: built once after load."""
 
     def __init__(self, spec: MonoSpec[Any], model, vllm_config: "VllmConfig"):
-        rank, _, cpu_group = tp_group()
         self.spec = spec
-        _agree_across_ranks(
-            lambda: _refuse_model(spec, model),
-            cpu_group,
-            f"MonoKernel {spec.name} refused for the loaded model",
-        )
-        self.ctx = MonoContext(vllm_config, rank, next(model.parameters()).device)
+        reasons = _refuse_model(spec, model)
+        agreed = tp_agree(not reasons, tp_group()[2])
+        refused = f"MonoKernel {spec.name} refused for the loaded model"
+        if reasons:
+            raise MonoUnsupported(f"{refused}: " + "; ".join(reasons))
+        if not agreed:
+            raise MonoUnsupported(f"{refused}: another TP rank refused")
+        self.ctx = MonoContext(vllm_config, next(model.parameters()).device)
         self.widths = spec.widths(vllm_config)
         self.kernels: dict[tuple[int, int], LayerKernel] = {}
         self.state: Any = None
         self.width: int | None = None
+        self.why: str | None = None
         self._fc: Any = None
         self._checked: tuple | None = None
 
@@ -100,10 +102,8 @@ class MonoRuntime:
         start = getattr(model, "start_layer", 0)
         end = getattr(model, "end_layer", len(model.layers))
         out = []
-        for i in self.spec.layers(model.config):
-            if not start <= i < end:
-                continue
-            why = self.spec.skip_layer(self.ctx, model.layers[i])
+        for i in range(start, end):
+            why = self.spec.skip_layer(model.layers[i])
             if why is None:
                 out.append(i)
             else:
@@ -147,27 +147,25 @@ class MonoRuntime:
             )
         self._checked = key
 
-    def begin_once(self, positions: torch.Tensor) -> None:
-        """Decides this forward's step, on the first kernel layer to ask."""
-        fc = get_forward_context()
-        if fc is not self._fc:
-            self._fc = fc
-            self.begin_step(positions)
-
     def begin_step(self, positions: torch.Tensor) -> str | None:
-        """None runs this step on the kernels (and sets ``width``), else the
-        reason it runs vLLM's layers."""
-        self.width = None
-        if get_forward_context().cudagraph_runtime_mode == CUDAGraphMode.PIECEWISE:
-            return "piecewise"
+        """This forward's decision, taken on the first kernel layer to ask and
+        reused by the rest: None runs the step on the kernels (and sets
+        ``width``), else the reason it runs vLLM's layers."""
+        fc = get_forward_context()
+        if fc is self._fc:
+            return self.why
         n = positions.size(-1)
-        if n not in self.widths:
-            return "width"
-        why = self.spec.skip_step(self.ctx, self.state, n)
-        if why is None:
-            self._refuse_caches()
-            self.width = n
-        return why
+        self._fc, self.width = fc, None
+        if fc.cudagraph_runtime_mode == CUDAGraphMode.PIECEWISE:
+            self.why = "piecewise"
+        elif n not in self.widths:
+            self.why = "width"
+        else:
+            self.why = self.spec.skip_step(self.ctx, self.state, n)
+            if self.why is None:
+                self._refuse_caches()
+                self.width = n
+        return self.why
 
 
 def attach(model, vllm_config: "VllmConfig", specs_path: str) -> MonoRuntime | None:
@@ -209,7 +207,7 @@ def kernel_for_layer(mono: MonoRuntime | None, i: int, positions) -> LayerKernel
     """
     if mono is None:
         return None
-    mono.begin_once(positions)
+    mono.begin_step(positions)
     if mono.width is None:
         return None
     return mono.kernels.get((i, mono.width))

@@ -165,9 +165,8 @@ class MonoConformance:
 
     def test_every_rank_decides_alike(self, config, model):
         decisions = []
-        for rank in range(2):
+        for _ in range(2):
             other = attach(self.make_model(config), config, self.specs_path)
-            other.ctx = replace(other.ctx, rank=rank)
             with forward(
                 config, CUDAGraphMode.NONE, self.decode_metadata(config, model)
             ):
@@ -176,7 +175,7 @@ class MonoConformance:
 
     def test_skipped_step_runs_vllm_layers(self, config, model, mono):
         with forward(config, CUDAGraphMode.NONE, self.skipped_metadata(config, model)):
-            mono.begin_once(self._positions(mono))
+            mono.begin_step(self._positions(mono))
             assert mono.width is None
 
     def test_width_off_the_capture_sizes_runs_vllm_layers(self, config, model, mono):

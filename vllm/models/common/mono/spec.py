@@ -5,7 +5,7 @@
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Generic, Literal, Protocol, TypeVar
+from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeVar
 
 import torch
 
@@ -47,13 +47,11 @@ class MonoContext:
 
     Attributes:
         vllm_config: The engine's config.
-        rank: This rank's index in the TP group.
         device: The device the kernels launch on.
 
     """
 
     vllm_config: "VllmConfig"
-    rank: int
     device: torch.device
 
 
@@ -105,9 +103,6 @@ class MonoSpec(Generic[LaunchStateT]):
         name: Log and metric name.
         supports: Features this spec serves. Default deny: a feature in use
             that is absent from it refuses the deployment.
-        weight_source: ``"views"`` to read vLLM's post-load layout in place,
-            ``"convert"`` to build a second layout once after load.
-        layers: The decoder layers that get a kernel, from the model's config.
         widths: The rows a launch serves, from the engine's config. These
             become the CUDA graph capture sizes.
         refuse_config: Deployment refusals the engine's config answers, before
@@ -116,7 +111,8 @@ class MonoSpec(Generic[LaunchStateT]):
         refuse_caches: Deployment refusals the KV caches the kernels will read
             answer, re-run whenever those caches move.
         skip_layer: Why one layer takes vLLM's path, None when it takes the
-            kernel's.
+            kernel's. Takes only the layer, so what it reads is what every rank
+            of the same model sees alike.
         skip_step: Why one step takes vLLM's path, None when it takes the
             kernel's. Takes the step's width; anything else it needs it reads
             from the forward context, which every rank sees alike.
@@ -129,19 +125,11 @@ class MonoSpec(Generic[LaunchStateT]):
 
     name: str
     supports: frozenset[Feature]
-    weight_source: Literal["views", "convert"]
-
-    # Model shape
-    layers: Callable[[Any], list[int]]
     widths: Callable[["VllmConfig"], tuple[int, ...]]
-
-    # Capabilities
     refuse_config: Callable[["VllmConfig"], list[str]]
     refuse_model: Callable[[Any], list[str]]
     refuse_caches: Callable[[MonoContext, Mapping[str, Any]], list[str]]
-    skip_layer: Callable[[MonoContext, Any], str | None]
+    skip_layer: Callable[[Any], str | None]
     skip_step: Callable[[MonoContext, LaunchStateT, int], str | None]
-
-    # Callbacks
     launch_state: Callable[[Any, MonoContext], LaunchStateT]
     build: Callable[[MonoContext, LaunchStateT, Any, int], LayerKernel]

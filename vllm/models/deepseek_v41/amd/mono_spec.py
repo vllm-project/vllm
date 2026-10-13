@@ -290,7 +290,7 @@ def _refuse_model(model) -> list[str]:
     return reasons
 
 
-def _skip_layer(ctx: MonoContext, layer) -> str | None:
+def _skip_layer(layer) -> str | None:
     """Why this layer keeps vLLM's path for every step, or None when it takes a
     launch (whole or FFN only: ``_build`` picks which)."""
     ffn = layer.ffn
@@ -478,15 +478,9 @@ def _build(
     return kernel
 
 
-def _layers(config) -> list[int]:
-    return list(range(config.num_hidden_layers))
-
-
 MONO_SPEC = MonoSpec[LaunchState](
     name="dsv41-cdna4",
     supports=frozenset({Feature.PIPELINE_PARALLEL, Feature.SPECULATIVE_DECODING}),
-    weight_source="views",
-    layers=_layers,
     widths=_widths,
     refuse_config=_refuse_config,
     refuse_model=_refuse_model,

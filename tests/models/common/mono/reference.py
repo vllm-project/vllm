@@ -78,10 +78,6 @@ class ReferenceKernel:
         self.compiled.append(key)
 
 
-def layers(config) -> list[int]:
-    return list(range(config.num_hidden_layers))
-
-
 def widths(vllm_config) -> tuple[int, ...]:
     most = vllm_config.scheduler_config.max_num_seqs
     return tuple(w for w in (1, 2, 4, 8) if w <= most)
@@ -100,7 +96,7 @@ def refuse_model(model) -> list[str]:
     return [] if isinstance(model, ReferenceModel) else ["not a ReferenceModel"]
 
 
-def skip_layer(ctx: MonoContext, layer) -> str | None:
+def skip_layer(layer) -> str | None:
     return "dense layer" if layer.dense else None
 
 
@@ -132,8 +128,6 @@ def build(ctx: MonoContext, state: LaunchState, layer, width: int) -> ReferenceK
 REFERENCE = MonoSpec[LaunchState](
     name="reference",
     supports=frozenset(),
-    weight_source="views",
-    layers=layers,
     widths=widths,
     refuse_config=refuse_config,
     refuse_model=refuse_model,

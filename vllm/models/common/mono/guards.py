@@ -3,7 +3,7 @@
 """Refusals: the variant a config can serve, and TP agreement on every stage."""
 
 import importlib
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -192,19 +192,3 @@ def configure(vllm_config: "VllmConfig", specs_path: str) -> None:
             "CUDA graphs",
             spec.name,
         )
-
-
-def _agree_across_ranks(refuse: Callable[[], list[str]], group, what: str) -> None:
-    """``refuse``'s reasons on this rank, then every TP rank's verdict agreed: a
-    rank that refused alone would leave the others spinning in-kernel.
-
-    Raises:
-        MonoUnsupported: This rank refused, or another rank did.
-
-    """
-    reasons = refuse()
-    agreed = tp_agree(not reasons, group)
-    if reasons:
-        raise MonoUnsupported(f"{what}: " + "; ".join(reasons))
-    if not agreed:
-        raise MonoUnsupported(f"{what}: another TP rank refused")
