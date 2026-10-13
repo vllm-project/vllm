@@ -2398,8 +2398,6 @@ class rocm_aiter_ops:
     @classmethod
     @if_aiter_supported
     def is_asm_fp4_gemm_supported(cls) -> bool:
-        """The AITER ASM FP4 GEMM can run here; whether a layer uses it depends
-        on aiter's tuned configs for its shape."""
         from vllm.platforms.rocm import on_gfx950
 
         return cls._AITER_ENABLED and on_gfx950()
@@ -3933,8 +3931,7 @@ class rocm_aiter_ops:
     def is_triton_gemm_afp4wfp4_presh_ws_tuned(n: int, k_bytes: int) -> bool:
         if not current_platform.is_rocm():
             return False
-        # k_bytes = weight.shape[1] (two fp4 per byte); aiter names the
-        # config by the logical K.
+        # k_bytes = weight.shape[1] (two fp4 per byte)
         try:
             return _triton_gemm_config_is_tuned(
                 "GEMM-AFP4WFP4_PRESHUFFLED", n, 2 * k_bytes
@@ -3945,7 +3942,6 @@ class rocm_aiter_ops:
     @staticmethod
     @functools.cache
     def is_asm_fp4_gemm_tuned(n: int, k_bytes: int) -> bool:
-        """Aiter has a tuned a4w4 (ASM/CK) config for prefill-sized M."""
         if not current_platform.is_rocm():
             return False
         try:
