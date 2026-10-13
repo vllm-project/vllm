@@ -334,6 +334,34 @@ def test_sampling_states_apply_temperature() -> None:
     assert torch.equal(logits, expected)
 
 
+def test_sampling_states_apply_min_p() -> None:
+    states = CPUSamplingStates.__new__(CPUSamplingStates)
+    min_p = torch.tensor([0.0, 0.25, 0.5, 1.0])
+    states.min_p = SimpleNamespace(np=min_p.numpy(), gpu=min_p)
+
+    logits = torch.tensor(
+        [
+            [2.0, 1.0, 0.0, -1.0],
+            [3.0, 2.0, 1.0, 0.0],
+            [2.0, 2.0, 1.0, 0.0],
+            [4.0, 3.0, 2.0, 1.0],
+        ]
+    )
+    expanded_idx_mapping = torch.tensor([2, 0, 3, 1], dtype=torch.int32)
+    expected = torch.tensor(
+        [
+            [2.0, -torch.inf, -torch.inf, -torch.inf],
+            [3.0, 2.0, 1.0, 0.0],
+            [2.0, 2.0, -torch.inf, -torch.inf],
+            [4.0, 3.0, -torch.inf, -torch.inf],
+        ]
+    )
+
+    states.apply_min_p(logits, expanded_idx_mapping, torch.arange(4).numpy())
+
+    assert torch.equal(logits, expected)
+
+
 @pytest.mark.parametrize("use_fp64", [False, True])
 def test_sampling_matches_target_distribution(use_fp64: bool) -> None:
     counts = _make_heavy_tailed_counts()
