@@ -9,7 +9,13 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 import vllm.envs as envs
-from vllm.connections import HTTPConnection, HTTPResponseSizeExceededError
+from vllm.connections import (
+    HTTPConnection,
+    HTTPResponseSizeExceededError,
+    MediaRequestDownloadBudget,
+)
+
+pytestmark = [pytest.mark.cpu_test, pytest.mark.skip_global_cleanup]
 
 _ONE_MIB = 1024 * 1024
 _SMALL_BODY = b"a" * (_ONE_MIB // 2)
@@ -148,6 +154,49 @@ async def test_async_get_bytes_with_limit_streams_instead_of_materializing() -> 
 
     response.read.assert_not_awaited()
     assert response.content.iterated == 2
+
+
+def test_request_download_budget_counts_across_responses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(envs, "VLLM_MAX_MEDIA_REQUEST_DOWNLOAD_SIZE_MB", 1)
+    budget = MediaRequestDownloadBudget()
+    connection = HTTPConnection()
+    first = _SyncResponse([b"a" * (3 * _ONE_MIB // 4)])
+    second = _SyncResponse([b"b" * (_ONE_MIB // 2)])
+
+    with patch.object(connection, "get_response", side_effect=[first, second]):
+        connection.get_bytes("http://example.com/one", request_budget=budget)
+        with pytest.raises(ValueError, match="VLLM_MAX_MEDIA_REQUEST_DOWNLOAD_SIZE_MB"):
+            connection.get_bytes("http://example.com/two", request_budget=budget)
+
+    assert budget.used == 3 * _ONE_MIB // 4
+    assert second.iterated == 1
+
+
+@pytest.mark.asyncio
+async def test_async_request_download_budget_counts_across_responses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(envs, "VLLM_MAX_MEDIA_REQUEST_DOWNLOAD_SIZE_MB", 1)
+    budget = MediaRequestDownloadBudget()
+    connection = HTTPConnection()
+    first = _AsyncResponse([b"a" * (3 * _ONE_MIB // 4)])
+    second = _AsyncResponse([b"b" * (_ONE_MIB // 2)])
+
+    with patch.object(
+        connection, "get_async_response", new=AsyncMock(side_effect=[first, second])
+    ):
+        await connection.async_get_bytes(
+            "http://example.com/one", request_budget=budget
+        )
+        with pytest.raises(ValueError, match="VLLM_MAX_MEDIA_REQUEST_DOWNLOAD_SIZE_MB"):
+            await connection.async_get_bytes(
+                "http://example.com/two", request_budget=budget
+            )
+
+    assert budget.used == 3 * _ONE_MIB // 4
+    assert second.content.iterated == 1
 
 
 def test_get_bytes_rejects_content_length_over_limit(

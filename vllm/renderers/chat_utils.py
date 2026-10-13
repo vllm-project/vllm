@@ -53,6 +53,7 @@ from typing_extensions import TypedDict, override
 
 from vllm import envs
 from vllm.config import ModelConfig
+from vllm.connections import MediaRequestDownloadBudget
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs import MultiModalDataDict, MultiModalUUIDDict
 from vllm.logger import init_logger
@@ -67,6 +68,7 @@ from vllm.multimodal.inputs import (
     VisionChunkVideo,
 )
 from vllm.multimodal.media import MEDIA_CONNECTOR_REGISTRY, MediaConnector
+from vllm.multimodal.media.base import MediaDecodedBudget
 from vllm.multimodal.processing import BaseMultiModalProcessor
 from vllm.renderers.embed_utils import (
     safe_load_prompt_embeds,
@@ -609,6 +611,8 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
         self._items_by_modality = defaultdict[str, list[_T]](list)
         # Track original modality for each vision_chunk item (image or video)
         self._modality_order = defaultdict[str, list[str]](list)
+        self.decoded_budget = MediaDecodedBudget()
+        self.download_budget = MediaRequestDownloadBudget()
 
     @cached_property
     def use_unified_vision_chunk_modality(self) -> bool:
@@ -1052,6 +1056,8 @@ class MultiModalContentParser(BaseMultiModalContentParser):
             media_io_kwargs=self._tracker.media_io_kwargs,
             allowed_local_media_path=self._tracker.allowed_local_media_path,
             allowed_media_domains=self._tracker.allowed_media_domains,
+            decoded_budget=self._tracker.decoded_budget,
+            download_budget=self._tracker.download_budget,
         )
 
     @property
@@ -1138,6 +1144,10 @@ class MultiModalContentParser(BaseMultiModalContentParser):
     def parse_image_pil(
         self, image_pil: Image.Image | None, uuid: str | None = None
     ) -> None:
+        if image_pil is not None:
+            self._tracker.decoded_budget.charge(
+                image_pil.size[0] * image_pil.size[1] * 4
+            )
         placeholder = self._tracker.add("image", (image_pil, uuid))
         self._add_placeholder("image", placeholder)
 
@@ -1233,6 +1243,8 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
             media_io_kwargs=self._tracker.media_io_kwargs,
             allowed_local_media_path=self._tracker.allowed_local_media_path,
             allowed_media_domains=self._tracker.allowed_media_domains,
+            decoded_budget=self._tracker.decoded_budget,
+            download_budget=self._tracker.download_budget,
         )
 
     @property
@@ -1351,6 +1363,10 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
         image_pil: Image.Image | None,
         uuid: str | None = None,
     ) -> None:
+        if image_pil is not None:
+            self._tracker.decoded_budget.charge(
+                image_pil.size[0] * image_pil.size[1] * 4
+            )
         placeholder = self._tracker.add(
             "image", partial(self._item_with_uuid_async, image_pil, uuid)
         )
