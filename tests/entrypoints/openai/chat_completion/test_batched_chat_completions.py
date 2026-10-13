@@ -39,6 +39,16 @@ from vllm.v1.engine.async_llm import AsyncLLM
 MODEL_NAME = "Qwen/Qwen2.5-1.5B-Instruct"
 
 
+def test_batch_rejects_message_truncation() -> None:
+    messages = [[{"role": "user", "content": "long message", "truncate": True}]]
+    with pytest.raises(VLLMValidationError, match="do not support message truncation"):
+        BatchChatCompletionRequest(messages=messages)
+
+    BatchChatCompletionRequest(
+        messages=[[{"role": "user", "content": "short message", "truncate": False}]]
+    )
+
+
 @pytest.fixture(scope="module")
 def default_server_args():
     return [
