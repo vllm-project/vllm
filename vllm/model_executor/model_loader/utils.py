@@ -6,11 +6,10 @@ import inspect
 import time
 import warnings
 from contextlib import contextmanager, nullcontext
-from typing import Any
+from typing import Any, assert_never
 
 import torch
 from torch import nn
-from typing_extensions import assert_never
 
 import vllm.envs as envs
 from vllm.config import (
@@ -84,6 +83,12 @@ def initialize_model(
         model_config = vllm_config.model_config
     if model_class is None:
         model_class, _ = get_model_architecture(model_config)
+
+    from vllm.model_executor.models.expert_substitution import (
+        as_expert_substitution_model,
+    )
+
+    model_class = as_expert_substitution_model(model_class, model_config)
 
     if vllm_config.quant_config is not None:
         configure_quant_config(vllm_config.quant_config, model_class)
