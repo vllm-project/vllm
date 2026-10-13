@@ -1257,12 +1257,9 @@ def synthid_watermark_logits(
     depth: int,
     stream: int = 0,
 ) -> torch.Tensor:
-    """Return FP32 SynthID-Text log-probs of `logits` [B, V].
-
-    Layers [32 b, 32 b + 32) use the bits of Philox stream `stream + b`.
-    """
+    """Return FP32 SynthID-Text log-probs of `logits` [B, V]."""
     stream_0, stream_1 = stream & _UINT32_MASK_VALUE, stream >> 32
-    assert stream_0 + (depth - 1) // 32 <= _UINT32_MASK_VALUE
+    assert 1 <= depth <= 32
     if logits.stride(-1) != 1:
         logits = logits.contiguous()
     if contexts.stride(-1) != 1:

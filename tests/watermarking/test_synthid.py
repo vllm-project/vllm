@@ -31,17 +31,21 @@ def test_synthid_config_and_factory():
     assert WatermarkConfig(key=42, algorithm="gumbel").depth == 32
 
 
-def test_synthid_config_rejects_invalid_depth():
-    with pytest.raises(ValidationError):
+@pytest.mark.parametrize("depth", [0, 33])
+def test_synthid_config_rejects_invalid_depth(depth):
+    with pytest.raises(
+        ValidationError,
+        match="SynthID-Text depth must be between 1 and 32",
+    ):
         WatermarkConfig(
             key=42,
             algorithm="synthid_text",
-            depth=0,
+            depth=depth,
         )
 
 
-@pytest.mark.parametrize("depth", [1, 32, 33, 64, 65])
-def test_synthid_accepts_positive_depth(depth):
+@pytest.mark.parametrize("depth", [1, 32])
+def test_synthid_accepts_supported_depth(depth):
     config = WatermarkConfig(
         key=42,
         algorithm="synthid_text",
@@ -54,7 +58,8 @@ def test_synthid_accepts_positive_depth(depth):
     ("kwargs", "match"),
     [
         ({"context_width": 0}, "context_width must be positive"),
-        ({"depth": 0}, "SynthID-Text depth must be positive"),
+        ({"depth": 0}, "SynthID-Text depth must be between 1 and 32"),
+        ({"depth": 33}, "SynthID-Text depth must be between 1 and 32"),
         ({"key": -1}, "Philox keys must fit in 64 bits"),
     ],
 )
@@ -69,9 +74,6 @@ def test_synthid_rejects_invalid_constructor_args(kwargs, match):
         (0, 1),
         (42, 5),
         (2**64 - 1, 32),
-        (42, 33),
-        (42, 64),
-        (42, 65),
     ],
 )
 def test_synthid_logits_follow_philox_bits_and_reweighting(key, depth):
@@ -81,17 +83,14 @@ def test_synthid_logits_follow_philox_bits_and_reweighting(key, depth):
 
     expected_probs = torch.softmax(logits, dim=1)
 
+    words = prf.uint32(
+        contexts,
+        torch.arange(logits.shape[1]),
+        stream=_STREAM_DOMAIN,
+    )
+
     for depth_index in range(depth):
-        stream = _STREAM_DOMAIN | depth_index // 32
-        bit = depth_index % 32
-
-        words = prf.uint32(
-            contexts,
-            torch.arange(logits.shape[1]),
-            stream=stream,
-        )
-
-        g = ((words >> bit) & 1).to(logits.dtype)
+        g = ((words >> depth_index) & 1).to(logits.dtype)
         mass = (expected_probs * g).sum(dim=1, keepdim=True)
         expected_probs *= 1 + g - mass
 
@@ -107,7 +106,7 @@ def test_synthid_logits_follow_philox_bits_and_reweighting(key, depth):
 @pytest.mark.skipif(
     not current_platform.is_cuda_alike(), reason="requires a CUDA-like accelerator"
 )
-@pytest.mark.parametrize("depth", [1, 32, 65])
+@pytest.mark.parametrize("depth", [1, 32])
 def test_synthid_accelerator_matches_cpu(depth):
     logits = torch.randn(4, 3000, generator=torch.Generator().manual_seed(0))
     logits[0] *= 30  # peaked row
@@ -170,15 +169,21 @@ def test_synthid_requires_random_sampler():
         SynthIDWatermarker(42).sample(torch.zeros(1, 3), torch.zeros(1, 4))
 
 
+@pytest.mark.parametrize("depth", [0, 33])
+def test_synthid_detector_rejects_invalid_depth(depth):
+    with pytest.raises(
+        ValueError,
+        match="SynthID-Text depth must be between 1 and 32",
+    ):
+        SynthIDWatermarkDetector(42, depth=depth)
+
+
 @pytest.mark.parametrize(
     "key, context_width, depth",
     [
         (0, 1, 1),
         (42, 2, 3),
         (2**64 - 1, 4, 32),
-        (42, 4, 33),
-        (42, 4, 64),
-        (42, 4, 65),
     ],
 )
 def test_synthid_detector_matches_independent_bit_count(
@@ -196,19 +201,15 @@ def test_synthid_detector_matches_independent_bit_count(
     targets = torch.tensor(tokens)[:, None]
     prf = PhiloxPRF(key)
 
+    words = prf.uint32(
+        contexts,
+        targets,
+        stream=_STREAM_DOMAIN,
+    ).flatten()
+
     hits = 0
     for depth_index in range(depth):
-        stream = _STREAM_DOMAIN | depth_index // 32
-        bit = depth_index % 32
-
-        # [N, C] and [N, 1] -> [N, 1] -> [N]
-        words = prf.uint32(
-            contexts,
-            targets,
-            stream=stream,
-        ).flatten()
-
-        hits += sum((int(word) >> bit) & 1 for word in words)
+        hits += sum((int(word) >> depth_index) & 1 for word in words)
 
     trials = len(tokens) * depth
     expected_p_value = sum(math.comb(trials, k) for k in range(hits, trials + 1)) / (
