@@ -77,6 +77,7 @@ from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.math_utils import cdiv
 from vllm.utils.network_utils import make_zmq_path
 from vllm.utils.torch_utils import async_tensor_h2d
+from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
     FullAttentionSpec,
@@ -1892,6 +1893,7 @@ class NixlBaseConnectorWorker:
         self,
         nixl_agent_meta: NixlAgentMetadata,
         tp_ratio: int,
+        remote_tp_rank: int,
         transfer_info: EngineTransferInfo,
     ) -> np.ndarray:
         """Build remote desc regions (conv sub-projections + ssm) per layer.
@@ -1906,8 +1908,17 @@ class NixlBaseConnectorWorker:
         # is replicated (num_kv_heads < tp_size).
         local_offset = self.tp_rank % effective_ratio
         conv_size_remote = nixl_agent_meta.ssm_sizes[0]
+        if self._conv_decomp.mamba2_dims is not None:
+            expected = self._conv_decomp.remote_conv_bytes(tp_ratio)
+            if expected != conv_size_remote:
+                raise ValueError(
+                    f"Remote Mamba2 conv state is {conv_size_remote} bytes, "
+                    f"but its declared TP split gives {expected}."
+                )
 
-        conv_offsets = self._conv_decomp.remote_conv_offsets(local_offset, tp_ratio)
+        conv_offsets = self._conv_decomp.remote_conv_offsets(
+            self.tp_rank, tp_ratio, remote_tp_rank
+        )
         if tp_ratio >= 1:
             ssm_read_size = self._mamba_ssm_size[1]
         else:
@@ -2394,7 +2405,9 @@ class NixlBaseConnectorWorker:
                 engine_id,
                 remote_tp_rank,
             )
-            mamba = self._build_mamba_remote(nixl_agent_meta, tp_ratio, transfer_info)
+            mamba = self._build_mamba_remote(
+                nixl_agent_meta, tp_ratio, remote_tp_rank, transfer_info
+            )
             blocks_data = np.concatenate([blocks_data, mamba])
 
         remote_mem_types = set(self.dst_region_mem_types[engine_id])
@@ -2439,6 +2452,18 @@ class NixlBaseConnectorWorker:
             )
 
         tp_ratio = self.transfer_topo.tp_ratio(remote_tp_size)
+        if tp_ratio != 1 and any(
+            isinstance(spec, MambaSpec)
+            and spec.mamba_type == MambaAttentionBackendEnum.MAMBA2
+            and spec.state_splits is None
+            for spec in self._layer_specs.values()
+        ):
+            raise NotImplementedError(
+                "Heterogeneous TP for Mamba2 layers requires the layer to "
+                "declare its conv state TP split (MambaSpec.state_splits); got "
+                f"local TP={self.transfer_topo.tp_size}, remote "
+                f"TP={remote_tp_size}."
+            )
         block_size_ratio = self.transfer_topo.block_size_ratio(
             nixl_agent_meta.block_size
         )

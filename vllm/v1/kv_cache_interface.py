@@ -1032,6 +1032,21 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
 
 
 @dataclass(frozen=True)
+class MambaStateSplit:
+    """How TP shards one Mamba state.
+
+    Along local dimension ``axis``, the state is a run of segments, each
+    ``(local_size, replicas)``: a segment of global size ``G`` is cut into
+    ``G * replicas / tp_size``-sized shards, the same shard on ``replicas``
+    consecutive ranks, and rank ``r`` holds shard ``r // replicas`` of every
+    segment.
+    """
+
+    axis: int
+    segments: tuple[tuple[int, int], ...]
+
+
+@dataclass(frozen=True)
 class MambaSpec(KVCacheSpec):
     shapes: tuple[tuple[int, ...], ...]
     dtypes: tuple[torch.dtype, ...]
@@ -1046,6 +1061,8 @@ class MambaSpec(KVCacheSpec):
     # False: the state is sharded across TP ranks (e.g. GDN). True: every TP
     # rank holds the full state (e.g. the replicated PLE conv state).
     tp_replicated: bool = False
+    # How TP shards the leading states, if the layer describes it.
+    state_splits: tuple[MambaStateSplit, ...] | None = None
 
     @property
     def state_content_size_bytes(self) -> int:

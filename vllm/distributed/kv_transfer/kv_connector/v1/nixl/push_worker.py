@@ -49,6 +49,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     PUSH_REG_NOTIF_PREFIX,
+    NixlAgentMetadata,
     NixlConnectorMetadata,
     RemoteMeta,
     ReqId,
@@ -150,6 +151,31 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             )
             self._push_writer_thread.start()
             logger.info("nixl-push-writer thread started (rank=%d)", self.tp_rank)
+
+    def _validate_remote_agent_handshake(
+        self,
+        nixl_agent_meta: NixlAgentMetadata,
+        remote_tp_size: int,
+        remote_dcp_size: int = 1,
+    ):
+        super()._validate_remote_agent_handshake(
+            nixl_agent_meta, remote_tp_size, remote_dcp_size
+        )
+        # With a larger consumer TP, each consumer rank gets one chunk of the
+        # producer's page, which can't fill a segment the consumer replicates.
+        assert self.transfer_topo is not None
+        if (
+            self._conv_decomp is not None
+            and self.transfer_topo.tp_ratio(remote_tp_size) < 0
+            and any(r > 1 for _, r in self._conv_decomp.proj_layout(remote_tp_size))
+        ):
+            raise NotImplementedError(
+                "NixlPushConnector does not support a consumer TP larger than "
+                "the producer TP when the consumer replicates Mamba conv "
+                "state (e.g. Mamba2 B/C when TP does not divide n_groups); "
+                f"got producer TP={self.transfer_topo.tp_size}, consumer "
+                f"TP={remote_tp_size}."
+            )
 
     def shutdown(self) -> None:
         self._push_writer_stop.set()
