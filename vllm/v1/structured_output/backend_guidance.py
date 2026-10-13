@@ -176,6 +176,8 @@ class GuidanceBackend(StructuredOutputBackend):
                 "if you see this, please report an issue."
             )
         self.ll_tokenizer = self._build_ll_tokenizer(self.tokenizer, self.vocab_size)
+        # Thread pool for batched mask computation, created on first use.
+        self._ll_executor: llguidance.LLExecutor | None = None
 
     def compile_grammar(
         self,
@@ -210,8 +212,23 @@ class GuidanceBackend(StructuredOutputBackend):
             max_num_seqs, self.ll_tokenizer.vocab_size
         )
 
+    def fill_bitmasks(
+        self, bitmask: torch.Tensor, batch: list[tuple["GuidanceGrammar", int]]
+    ) -> None:
+        """Fill one bitmask row per (grammar, row index), computing all masks
+        in parallel on llguidance's native thread pool."""
+        if self._ll_executor is None:
+            self._ll_executor = llguidance.LLExecutor()
+        llguidance_torch.fill_next_token_bitmask_par(
+            self._ll_executor,
+            [(grammar.ll_matcher, index) for grammar, index in batch],
+            bitmask,
+        )
+        for grammar, _ in batch:
+            grammar.check_error()
+
     def destroy(self):
-        pass
+        self._ll_executor = None
 
 
 @dataclass
