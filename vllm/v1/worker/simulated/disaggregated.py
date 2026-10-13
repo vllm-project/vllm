@@ -37,7 +37,6 @@ from typing import TYPE_CHECKING, Any, Literal
 from vllm.config import KVTransferConfig
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import RequestOutputKind
-from vllm.v1.request import RequestStatus
 from vllm.v1.worker.simulated.kv_nixl import simulated_nixl_worker
 from vllm.v1.worker.simulated.offline import (
     RequestTiming,
@@ -103,16 +102,12 @@ def _steps_in_flight(engine: LLMEngine) -> int:
 
 
 def _only_waits(engine: LLMEngine) -> bool:
-    """Whether no step can make progress until a KV transfer completes: no
-    running requests, and every waiting one waits for its remote KV."""
+    """Whether, having scheduled nothing, no step can make progress until a KV
+    transfer completes: no running requests and no received KV to resume. A
+    waiting request then waits for its remote KV, or for blocks that only
+    those requests free."""
     scheduler = engine.engine_core.engine_core.scheduler  # type: ignore[attr-defined]
-    return (
-        not scheduler.running
-        and not scheduler.finished_recving_kv_req_ids
-        and all(
-            r.status == RequestStatus.WAITING_FOR_REMOTE_KVS for r in scheduler.waiting
-        )
-    )
+    return not scheduler.running and not scheduler.finished_recving_kv_req_ids
 
 
 def run_disaggregated(
