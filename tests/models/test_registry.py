@@ -127,6 +127,22 @@ def test_registry_is_pp(model_arch, is_pp):
     assert model_info.supports_pp is is_pp
 
 
+@pytest.mark.parametrize(
+    "model_arch,supported",
+    [
+        ("Qwen4ExpForCausalLM", not current_platform.is_rocm()),
+        ("Qwen4ExpForConditionalGeneration", not current_platform.is_rocm()),
+        ("Qwen4ExpMTP", not current_platform.is_rocm()),
+        ("LlamaForCausalLM", False),
+    ],
+)
+def test_registry_supports_hc_sp(model_arch, supported):
+    """HC SP is opt-in for each model implementation, including MTP."""
+    model_info = ModelRegistry._try_inspect_model_cls(model_arch)
+    assert model_info is not None
+    assert model_info.supports_hc_sp is supported
+
+
 @create_new_process_for_each_test()
 @pytest.mark.parametrize(
     "model_arch",
