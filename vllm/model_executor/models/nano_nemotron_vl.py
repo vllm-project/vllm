@@ -1001,6 +1001,16 @@ class NemotronH_Nano_VL_V2(
             vision_projection_hidden_size = config.projector_hidden_size
             llm_hidden_size = config.text_config.hidden_size
 
+            # Match the HF vision projector for checkpoints trained with MTP.
+            self.vision_final_layernorm = (
+                nn.LayerNorm(
+                    vit_hidden_size,
+                    eps=getattr(vision_config, "layer_norm_eps", 1e-6),
+                ).to(llm_dtype)
+                if (getattr(config.text_config, "num_nextn_predict_layers", 0) or 0) > 0
+                else None
+            )
+
             mlp1 = nn.Sequential(
                 RMSNorm(
                     hidden_size=vit_hidden_size
@@ -1095,6 +1105,8 @@ class NemotronH_Nano_VL_V2(
         """Dynamic resolution extract_feature for images."""
         _, vit_embeds = self.vision_model(pixel_values, imgs_sizes=imgs_sizes)
         vit_embeds = vit_embeds.to(dtype=torch.bfloat16)
+        if self.vision_final_layernorm is not None:
+            vit_embeds = self.vision_final_layernorm(vit_embeds)
         vit_embeds = self.pixel_shuffle_dynamic_res(vit_embeds, imgs_sizes=imgs_sizes)
         vit_embeds = self.mlp1(vit_embeds)
         return vit_embeds
@@ -1127,6 +1139,8 @@ class NemotronH_Nano_VL_V2(
             else:
                 _, vit_embeds = self.vision_model(chunk)
             vit_embeds = vit_embeds.to(dtype=torch.bfloat16)
+            if self.vision_final_layernorm is not None:
+                vit_embeds = self.vision_final_layernorm(vit_embeds)
             vit_embeds = vit_embeds.reshape(
                 vit_embeds.shape[0], H_patches, W_patches, -1
             )
@@ -1575,7 +1589,7 @@ class NemotronH_Nano_VL_V2(
         """Get the module prefix in multimodal models"""
         return MultiModelKeys.from_string_field(
             language_model="language_model",
-            connector=["mlp1", "sound_encoder.projection"],
+            connector=["mlp1", "sound_encoder.projection", "vision_final_layernorm"],
             tower_model=["vision_model", "sound_encoder.encoder"],
         )
 
@@ -1593,6 +1607,11 @@ class NemotronH_Nano_VL_V2(
             for modality in ("image", "video", "audio")
         )
         adapter_dict = dict(self.mlp1.named_parameters())
+        vision_norm_params = (
+            dict(self.vision_final_layernorm.named_parameters())
+            if load_multimodal_weights and self.vision_final_layernorm is not None
+            else {}
+        )
 
         def is_llm(name: str) -> bool:
             return name.startswith("language_model")
@@ -1605,6 +1624,11 @@ class NemotronH_Nano_VL_V2(
 
         def is_sound_weights(name: str) -> bool:
             return name.startswith("sound")
+
+        vision_norm_prefix = "vision_projector.vision_final_layernorm."
+
+        def is_vision_norm_weights(name: str) -> bool:
+            return name.startswith(vision_norm_prefix)
 
         # LLM weights (the bulk of the model) are streamed lazily through a
         # generator so each tensor is copied into its parameter before the
@@ -1637,6 +1661,15 @@ class NemotronH_Nano_VL_V2(
                         continue
                     assert self.sound_encoder is not None
                     sound_weights.append((name, w.detach().clone()))
+                elif is_vision_norm_weights(name):
+                    if not load_multimodal_weights:
+                        continue
+                    param_name = name.removeprefix(vision_norm_prefix)
+                    assert param_name in vision_norm_params, (
+                        f"Unexpected vision LayerNorm weight: {name}"
+                    )
+                    with torch.no_grad():
+                        default_weight_loader(vision_norm_params[param_name], w)
 
         # Fully drain the generator so every mm tensor is buffered, even if
         # the LLM loader stops iterating early.
