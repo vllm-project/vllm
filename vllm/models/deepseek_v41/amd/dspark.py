@@ -46,13 +46,10 @@ from vllm.models.common.ops.sequence_parallel import (
     sp_padding_mask,
     sp_shard,
 )
-from vllm.models.deepseek_v4.common.eplb_util import collect_moe_layers
 
 from .model import (
     DeepseekV4DecoderLayer,
-    DeepseekV4MixtureOfExperts,
     DeepseekV4Model,
-    DeepseekV4MoE,
     _linear_scale_param_name,
     _use_sequence_parallel,
 )
@@ -296,7 +293,7 @@ def _insert_context_kv(
         )
 
 
-class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV4MixtureOfExperts):
+class DSparkDeepseekV4ForCausalLM(nn.Module):
     # Draft weights ship in the target checkpoint (mtp.*) without embed/head, so
     # load_dspark_model always aliases the target's.
     has_own_embed_tokens = False
@@ -326,16 +323,6 @@ class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV4MixtureOfExperts):
             prefix=maybe_prefix(prefix, "lm_head"),
         )
         self.logits_processor = LogitsProcessor(self.config.vocab_size)
-        self.set_moe_parameters()
-
-    def set_moe_parameters(self) -> None:
-        collect_moe_layers(
-            self,
-            self.model.layers,
-            self.config,
-            decoder_layer_type=DeepseekV4DecoderLayer,
-            moe_type=DeepseekV4MoE,
-        )
 
     # --- Hooks used by the speculator -------------------------------------
 
@@ -401,10 +388,8 @@ class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV4MixtureOfExperts):
         Non-mtp weights (embed/head/main layers) belong to the target model and
         are skipped here. ``embed_tokens``/``lm_head`` are aliased from the target.
         """
-        first_layer = self.model.layers[0]
         # Draft MoE layers use the dspark_* expert counts, not the
-        # backbone's (see DeepseekV4MoE and the reference
-        # ModelArgs.get_moe_config).
+        # backbone's (see the reference ModelArgs.get_moe_config).
         n_draft_experts = (
             getattr(self.config, "dspark_n_routed_experts", 0)
             or self.config.n_routed_experts
@@ -415,7 +400,6 @@ class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV4MixtureOfExperts):
             ckpt_down_proj_name="w2",
             ckpt_up_proj_name="w3",
             num_experts=n_draft_experts,
-            num_redundant_experts=first_layer.ffn.n_redundant_experts,
         )
         expert_scale_suffix = (
             ".weight_scale"

@@ -219,13 +219,40 @@ def test_dspark_draft_supports_eplb_for_dsv4_and_dsv41(dspark_vllm_config):
     )
 
 
-def test_dsv41_dspark_weight_loading_includes_eplb_redundant_experts(monkeypatch):
+@pytest.mark.parametrize("model_type", ["deepseek_v4", "deepseek_v41"])
+def test_dspark_loads_all_local_eplb_redundant_experts(monkeypatch, model_type):
     from torch import nn
 
-    from vllm.models.deepseek_v41.nvidia import dspark as dspark_module
+    if model_type == "deepseek_v4":
+        from vllm.models.deepseek_v4.nvidia import dspark as dspark_module
+    else:
+        from vllm.models.deepseek_v41.nvidia import dspark as dspark_module
 
-    mappings = []
+    attempted_expert_ids = []
+    param_name = "model.layers.0.ffn.experts.routed_experts.w13_weight"
+    param = nn.Parameter(torch.full((5, 2), -1.0))
+
+    def load_local_expert(
+        param,
+        loaded_weight,
+        weight_name,
+        *,
+        shard_id,
+        expert_id,
+        return_success=False,
+    ):
+        assert weight_name == param_name
+        assert shard_id == "w1"
+        assert return_success
+        attempted_expert_ids.append(expert_id)
+        if expert_id >= param.shape[0]:
+            return False
+        param.data[expert_id].copy_(loaded_weight)
+        return True
+
+    param.weight_loader = load_local_expert
     original_mapping = dspark_module.fused_moe_make_expert_params_mapping
+    mappings = []
 
     def capture_mapping(*args, **kwargs):
         mapping = original_mapping(*args, **kwargs)
@@ -252,7 +279,7 @@ def test_dsv41_dspark_weight_loading_includes_eplb_redundant_experts(monkeypatch
             SimpleNamespace(
                 ffn=SimpleNamespace(
                     use_native_mega_moe=False,
-                    n_redundant_experts=3,
+                    n_redundant_experts=6,
                 )
             )
         ],
@@ -260,11 +287,17 @@ def test_dsv41_dspark_weight_loading_includes_eplb_redundant_experts(monkeypatch
     )
     draft.config = SimpleNamespace(
         dspark_n_routed_experts=4,
-        n_routed_experts=8,
+        n_routed_experts=4 if model_type == "deepseek_v4" else 8,
         num_attention_heads=4,
+        expert_dtype="fp4",
     )
+    draft.pad_shared_expert = False
+    draft.quant_config = None
+    draft.named_parameters = lambda: [(param_name, param)]
 
-    draft.load_weights([])
+    # With EP=2, rank 0 owns physical slots 0..4; slots 0 and 4 both map to expert 0.
+    checkpoint_weight = torch.tensor([3.0, 7.0])
+    draft.load_weights([("mtp.0.ffn.experts.0.w1.weight", checkpoint_weight)])
 
     assert len(mappings) == 1
     expert_zero_w1_slots = [
@@ -272,7 +305,10 @@ def test_dsv41_dspark_weight_loading_includes_eplb_redundant_experts(monkeypatch
         for _, checkpoint_name, expert_id, _ in mappings[0]
         if checkpoint_name.startswith("experts.0.w1.")
     ]
-    assert expert_zero_w1_slots == [0, 4]
+    assert expert_zero_w1_slots == [0, 4, 8]
+    assert attempted_expert_ids == [0, 4, 8]
+    torch.testing.assert_close(param[0], checkpoint_weight)
+    torch.testing.assert_close(param[4], checkpoint_weight)
 
 
 def test_eplb_draft_model_name_adds_suffix(dspark_vllm_config):

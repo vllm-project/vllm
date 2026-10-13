@@ -247,64 +247,6 @@ def test_v2_load_model_registers_dspark_speculator_with_eplb(monkeypatch):
     assert speculator.eplb_state is runner.eplb_state
 
 
-def test_v2_load_model_registers_dspark_speculator_with_eplb(monkeypatch):
-    FakeEplbState.instances.clear()
-    target_model = SimpleNamespace(is_moe=True)
-    draft_model = SimpleNamespace(is_moe=True)
-    draft_model_config = SimpleNamespace(
-        model="dspark-draft",
-        hf_config=SimpleNamespace(model_type="deepseek_v4"),
-    )
-
-    class FakeDSparkSpeculator:
-        def __init__(self):
-            self.model = draft_model
-            self.eplb_state = None
-
-        def load_model(self, target_model):
-            return None
-
-        def set_eplb_state(self, state) -> None:
-            self.eplb_state = state
-
-    monkeypatch.setattr(mrv2, "DeviceMemoryProfiler", FakeMemoryProfiler)
-    monkeypatch.setattr(eplb, "EplbState", FakeEplbState)
-    monkeypatch.setattr(mrv2, "DraftModelSpeculator", FakeDSparkSpeculator)
-    monkeypatch.setattr(
-        mrv2,
-        "get_model_loader",
-        lambda load_config: SimpleNamespace(load_model=lambda **_: target_model),
-    )
-    monkeypatch.setattr(
-        mrv2,
-        "init_model_state",
-        lambda *args: SimpleNamespace(num_new_sampled_tokens_per_step=1),
-    )
-    monkeypatch.setattr(
-        eplb,
-        "get_mixture_of_experts_model",
-        lambda model: model if getattr(model, "is_moe", False) else None,
-    )
-
-    speculator = FakeDSparkSpeculator()
-    runner = _make_runner(
-        is_last_pp_rank=False,
-        speculative_config=SimpleNamespace(
-            method="dspark",
-            draft_model_config=draft_model_config,
-        ),
-        speculator=speculator,
-    )
-    mrv2.GPUModelRunner.load_model(runner)
-
-    assert runner.eplb_state is not None
-    assert runner.eplb_state.add_model_calls == [
-        (draft_model, draft_model_config, "dspark-draft (draft)"),
-        (target_model, runner.model_config, None),
-    ]
-    assert speculator.eplb_state is runner.eplb_state
-
-
 def test_v2_sample_tokens_runs_eplb_on_non_last_pp_rank(monkeypatch):
     events = []
     runner = _make_runner(is_last_pp_rank=False, num_speculative_steps=0)

@@ -8,6 +8,7 @@ import pytest
 import torch
 
 from vllm.config import ParallelConfig
+from vllm.platforms import current_platform
 from vllm.v1.kv_cache_interface import FullAttentionSpec
 from vllm.v1.worker.gpu import model_runner
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
@@ -48,7 +49,13 @@ class _FakeParallelConfig:
 
 
 @pytest.mark.parametrize("model_type", ["deepseek_v4", "deepseek_v41"])
-def test_dspark_parallel_config_preserves_eplb_for_dsv4_and_dsv41(model_type: str):
+@pytest.mark.skipif(
+    current_platform.is_rocm(),
+    reason="DSV4/DSV41 EPLB is disabled on ROCm",
+)
+def test_dspark_parallel_config_preserves_eplb_for_dsv4_and_dsv41(
+    model_type: str,
+):
     target_config = _FakeParallelConfig()
     draft_model_config = _FakeModelConfig(
         hf_config=_FakeHFConfig(model_type=model_type)

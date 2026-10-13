@@ -2,17 +2,24 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
 import torch.distributed as dist
+import torch.multiprocessing as mp
 
+import vllm.distributed.eplb.eplb_state as eplb_state_module
+from vllm.distributed.eplb.eplb_communicator import (
+    TorchDistGlooStagedEplbCommunicator,
+)
 from vllm.distributed.eplb.eplb_state import (
     EplbState,
     _commit_eplb_maps,
     _commit_eplb_maps_for_layer,
 )
+from vllm.distributed.eplb.policy import DefaultEplbPolicy
+from vllm.distributed.eplb.rebalance_execute import rearrange_expert_weights_inplace
 from vllm.models.deepseek_v4.common.eplb_util import dspark_draft_supports_eplb
 from vllm.platforms import current_platform
 
@@ -227,3 +234,122 @@ def test_allreduce_list_handles_different_num_physical_experts(dist_init):
         world_size = dist.get_world_size()
         for tensor in result:
             assert torch.all(tensor == world_size)
+
+
+def _rearrange_heterogeneous_model(
+    rank: int,
+    old_map: torch.Tensor,
+    load: torch.Tensor,
+    expected_map: torch.Tensor,
+) -> None:
+    world_size = dist.get_world_size()
+    num_physical_experts = old_map.shape[1]
+    num_local_experts = num_physical_experts // world_size
+    new_map = DefaultEplbPolicy.rebalance_experts(
+        load,
+        num_replicas=num_physical_experts,
+        num_groups=1,
+        num_nodes=1,
+        num_ranks=world_size,
+        old_global_expert_indices=old_map,
+    )
+    assert torch.equal(new_map, expected_map)
+
+    expert_weights = []
+    for layer_idx in range(old_map.shape[0]):
+        start = rank * num_local_experts
+        local_map = old_map[layer_idx, start : start + num_local_experts]
+        expert_weights.append([local_map.float().unsqueeze(1).clone()])
+    expert_buffer = [torch.empty_like(expert_weights[0][0])]
+    communicator = TorchDistGlooStagedEplbCommunicator(dist.group.WORLD)
+
+    # This path only uses CPU tensors; skip the communicator's accelerator stream
+    # synchronization while still exercising its real Gloo transfers.
+    no_op_stream = SimpleNamespace(synchronize=lambda: None)
+    with patch.object(torch.accelerator, "current_stream", return_value=no_op_stream):
+        rearrange_expert_weights_inplace(
+            old_map,
+            new_map,
+            expert_weights,
+            expert_buffer,
+            dist.group.WORLD,
+            communicator,
+        )
+
+    for layer_idx, layer_weights in enumerate(expert_weights):
+        start = rank * num_local_experts
+        expected_local_map = new_map[
+            layer_idx, start : start + num_local_experts
+        ].float()
+        torch.testing.assert_close(layer_weights[0][:, 0], expected_local_map)
+
+
+def _heterogeneous_eplb_worker(rank: int, init_method: str) -> None:
+    world_size = 2
+    dist.init_process_group(
+        backend="gloo",
+        init_method=init_method,
+        rank=rank,
+        world_size=world_size,
+    )
+    try:
+        state = EplbState.__new__(EplbState)
+        ep_group = SimpleNamespace(device_group=dist.group.WORLD)
+        draft_local_load = torch.tensor(
+            [[1, 1, 1, 1] if rank == 0 else [0, 0, 0, 99]], dtype=torch.int32
+        )
+        target_local_load = torch.tensor(
+            [
+                [1, 1, 1, 1, 1, 1] if rank == 0 else [0, 0, 0, 0, 0, 99],
+                [99, 1, 1, 1, 1, 1] if rank == 0 else [1, 0, 0, 0, 0, 0],
+            ],
+            dtype=torch.int32,
+        )
+        with patch.object(eplb_state_module, "get_ep_group", return_value=ep_group):
+            draft_load, target_load = state._allreduce_list(
+                [draft_local_load, target_local_load]
+            )
+
+        expected_draft_load = torch.tensor([[1, 1, 1, 100]], dtype=torch.int32)
+        expected_target_load = torch.tensor(
+            [[1, 1, 1, 1, 1, 100], [100, 1, 1, 1, 1, 1]],
+            dtype=torch.int32,
+        )
+        assert torch.equal(draft_load, expected_draft_load)
+        assert torch.equal(target_load, expected_target_load)
+
+        _rearrange_heterogeneous_model(
+            rank,
+            old_map=torch.tensor([[0, 1, 2, 3, 0, 1]], dtype=torch.long),
+            load=draft_load,
+            expected_map=torch.tensor([[3, 1, 3, 3, 0, 2]], dtype=torch.long),
+        )
+        _rearrange_heterogeneous_model(
+            rank,
+            old_map=torch.tensor(
+                [[0, 1, 2, 3, 4, 5, 0, 1], [0, 1, 2, 3, 4, 5, 0, 1]],
+                dtype=torch.long,
+            ),
+            load=target_load,
+            expected_map=torch.tensor(
+                [
+                    [5, 1, 5, 4, 3, 5, 0, 2],
+                    [0, 0, 5, 4, 3, 2, 0, 1],
+                ],
+                dtype=torch.long,
+            ),
+        )
+    finally:
+        dist.destroy_process_group()
+
+
+@pytest.mark.skipif(not dist.is_gloo_available(), reason="requires Gloo")
+def test_heterogeneous_eplb_rebalance_across_two_ranks(tmp_path):
+    """Reduce and rebalance draft/target models with different expert topologies."""
+    init_method = f"file://{tmp_path / 'eplb_gloo_init'}"
+    mp.spawn(
+        _heterogeneous_eplb_worker,
+        args=(init_method,),
+        nprocs=2,
+        join=True,
+    )
