@@ -653,9 +653,7 @@ class PCPManager:
             idx_mapping=local_to_global_req_idx,
             idx_mapping_np=local_to_global_req_idx_np,
             expanded_idx_mapping=local_to_global_req_idx,
-            expanded_local_pos=torch.zeros(
-                num_local_reqs, dtype=torch.int32, device=self.device
-            ),
+            expanded_local_pos=input_batch.expanded_local_pos.new_zeros(num_local_reqs),
             num_scheduled_tokens=local_num_scheduled_tokens,
             num_tokens=num_local_tokens,
             num_tokens_after_padding=num_local_tokens_padded,
