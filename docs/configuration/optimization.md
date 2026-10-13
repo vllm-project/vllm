@@ -24,6 +24,34 @@ Beyond the optimization levels, three mechanisms reduce time-to-first-token on r
 - **Skip memory profiling with `--kv-cache-memory`.** On startup, vLLM logs the exact `--kv-cache-memory` value that reproduces the current allocation. Passing it back on the next boot skips the memory-profiling measurement and the CUDA-graph memory estimation pass. Note that this has performance implications: the KV cache is sized to exactly the given value instead of being measured, so a conservative value caps batch concurrency (and therefore throughput), while an optimistic one fails at allocation time. The value is only valid on the same GPU with the same initial free memory; if a boot OOMs after hardware or co-tenant changes, remove the flag to re-profile.
 - **Serve without CUDA graphs using `--enforce-eager`.** Skips both compilation and CUDA-graph capture for the fastest possible startup, at the cost of steady-state decode performance. Useful for development loops and for measuring how much of a boot is compile/capture.
 
+## FlashInfer Autotune Measurement
+
+Eligible single-rank deployments using the FlashInfer managed autotune cache can
+choose how warmup measures kernel candidates with
+`KernelConfig.flashinfer_autotune_execution_mode`:
+
+- `auto` (default) preserves FlashInfer's per-operation measurement defaults.
+- `eager` includes recurring host overhead when measuring a candidate.
+- `cuda_graph` measures candidate execution through CUDA Graph replay.
+
+For example, an eager deployment can enable matching measurement with:
+
+```bash
+vllm serve <model> --enforce-eager \
+    --kernel-config '{"enable_flashinfer_autotune": true, "flashinfer_autotune_execution_mode": "eager"}'
+```
+
+The objective applies to the entire autotune warmup; it does not change vLLM's
+runtime CUDA Graph configuration. Mixed eager/graph deployments do not yet
+select separate winners for each runtime path. Keep `auto` unless an explicit
+objective has been validated for the deployment. FlashInfer stores each explicit
+policy in a separate cache namespace and reuses that store after warmup.
+
+Explicit modes require autotuning to be enabled and the managed-cache path to be
+eligible. Legacy-cache deployments reject an explicit mode rather than silently
+ignoring it. Model-level performance and accuracy still need validation when
+changing kernel selection.
+
 ## Preemption
 
 Due to the autoregressive nature of transformer architecture, there are times when KV cache space is insufficient to handle all batched requests.
