@@ -104,14 +104,14 @@ class CPUPrimaryTierOffloadingManager(CPUOffloadingManager):
         cache_policy: str = "lru",
         cache_policy_module_path: str | None = None,
         enable_events: bool = False,
-        enable_event_provenance: bool = False,
+        self_describing_kv_events: bool = False,
     ):
         super().__init__(
             num_chunks=num_chunks,
             cache_policy=cache_policy,
             cache_policy_module_path=cache_policy_module_path,
             enable_events=enable_events,
-            enable_event_provenance=enable_event_provenance,
+            self_describing_kv_events=self_describing_kv_events,
         )
         self._mmap_region = mmap_region
         # read/write is for CPU<->secondary transfers,

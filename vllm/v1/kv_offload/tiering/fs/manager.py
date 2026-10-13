@@ -150,7 +150,7 @@ class FileSystemTierManager(SecondaryTierManager):
                     "emit events.",
                     tier_type,
                 )
-        self._enable_event_provenance = bool(
+        self._self_describing_kv_events = bool(
             self.events is not None
             and offloading_spec.kv_events_config.self_describing_kv_events
         )
@@ -229,7 +229,7 @@ class FileSystemTierManager(SecondaryTierManager):
         keys = list(job_metadata.keys)
         if self.events is not None:
             self._store_job_keys[job_metadata.job_id] = keys
-            if self._enable_event_provenance:
+            if self._self_describing_kv_events:
                 self._store_job_contexts[job_metadata.job_id] = job_metadata.req_context
         task = functools.partial(
             batch_store_block,

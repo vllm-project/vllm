@@ -41,7 +41,7 @@ def make_cpu_manager(
     cache_policy: str = "lru",
     cache_policy_module_path: str | None = None,
     enable_events: bool = False,
-    enable_event_provenance: bool = False,
+    self_describing_kv_events: bool = False,
     store_threshold: int = 0,
     max_tracker_size: int = 64_000,
 ) -> CPUOffloadingManager:
@@ -50,7 +50,7 @@ def make_cpu_manager(
         cache_policy=cache_policy,
         cache_policy_module_path=cache_policy_module_path,
         enable_events=enable_events,
-        enable_event_provenance=enable_event_provenance,
+        self_describing_kv_events=self_describing_kv_events,
         store_threshold=store_threshold,
         max_tracker_size=max_tracker_size,
     )
@@ -152,7 +152,7 @@ def test_cpu_eviction_removed_precedes_stored():
     manager = make_cpu_manager(
         num_chunks=2,
         enable_events=True,
-        enable_event_provenance=True,
+        self_describing_kv_events=True,
     )
 
     manager.prepare_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
@@ -176,7 +176,7 @@ def test_cpu_reset_discards_stores_but_keeps_removals():
     manager = make_cpu_manager(
         num_chunks=1,
         enable_events=True,
-        enable_event_provenance=True,
+        self_describing_kv_events=True,
     )
     key1 = to_keys([1])
     manager.prepare_store(key1, _EMPTY_REQ_CTX)
@@ -199,7 +199,7 @@ def test_cpu_take_events_detaches_queue_before_yielding():
     manager = make_cpu_manager(
         num_chunks=2,
         enable_events=True,
-        enable_event_provenance=True,
+        self_describing_kv_events=True,
     )
     keys = to_keys([1])
     manager.prepare_store(keys, _EMPTY_REQ_CTX)

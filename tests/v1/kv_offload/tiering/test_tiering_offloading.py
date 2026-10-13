@@ -380,7 +380,7 @@ class TestTieringOffloadingManager:
             num_chunks=2,
             mmap_region=mock_region,
             enable_events=True,
-            enable_event_provenance=True,
+            self_describing_kv_events=True,
         )
         secondary = MetricsSecondaryTierManager(
             offloading_spec=_MOCK_OFFLOADING_SPEC,

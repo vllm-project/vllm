@@ -149,7 +149,7 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
                     "emit events.",
                     tier_type,
                 )
-        self._enable_event_provenance = bool(
+        self._self_describing_kv_events = bool(
             self.events is not None
             and offloading_spec.kv_events_config.self_describing_kv_events
         )
@@ -298,7 +298,7 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
     def submit_store(self, job_metadata: TransferJob) -> None:
         if self.events is not None:
             self._store_job_keys[job_metadata.job_id] = list(job_metadata.keys)
-            if self._enable_event_provenance:
+            if self._self_describing_kv_events:
                 self._store_job_contexts[job_metadata.job_id] = job_metadata.req_context
         obj_keys = (self._file_mapper.get_file_name(k) for k in job_metadata.keys)
         try:
