@@ -91,6 +91,8 @@ _QWEN3_OMNI_TARGET_ARCHITECTURES = frozenset(
 )
 _QWEN3_OMNI_DSPARK_ARCHITECTURE = "Qwen3OmniDSparkModel"
 _MUSE_SPARK_DSPARK_ARCHITECTURE = "MuseSparkDSparkModel"
+_LFM2_DSPARK_ARCHITECTURE = "Lfm2DSparkDraftModel"
+_QWEN3_DSPARK_ARCHITECTURE = "Qwen3DSparkModel"
 
 # Draft architectures that carry an XPress refiner. EAGLEConfig rewrites a dflash
 # draft's architecture to DFlash{arch}, so a checkpoint is seen under either name;
@@ -111,6 +113,17 @@ def _rope_only_sizes_cache(hf_config: PreTrainedConfig) -> bool:
         params.get("rope_type", "default") in _CACHE_ONLY_ROPE_TYPES
         for params in iter_rope_parameters(hf_config)
     )
+
+
+def _normalize_lfm2_dspark_config(hf_config: Any) -> None:
+    """Adapt Liquid's architecture, rotary flag, and confidence feature layout."""
+    if getattr(hf_config, "is_neox_style", None) is None:
+        rope_is_neox_style = getattr(hf_config, "rope_is_neox_style", None)
+        if isinstance(rope_is_neox_style, bool):
+            hf_config.is_neox_style = rope_is_neox_style
+    if getattr(hf_config, "confidence_head_with_markov", None) is None:
+        hf_config.confidence_head_with_markov = True
+    hf_config.architectures = [_QWEN3_DSPARK_ARCHITECTURE]
 
 
 def _is_qwen3_omni_target(model_config: ModelConfig) -> bool:
@@ -1157,6 +1170,9 @@ class SpeculativeConfig:
                     "vocab_size": getattr(hf_config, "vocab_size", 202048),
                 }
             )
+        if initial_architecture == _LFM2_DSPARK_ARCHITECTURE:
+            # Normalize before ModelConfig inspects the registry.
+            _normalize_lfm2_dspark_config(hf_config)
 
         return hf_config
 
@@ -1499,7 +1515,7 @@ class SpeculativeConfig:
                     and self.draft_model_config.hf_config.model_type == "qwen3"
                 ):
                     self.draft_model_config.hf_config.architectures = [
-                        "Qwen3DSparkModel"
+                        _QWEN3_DSPARK_ARCHITECTURE
                     ]
                     self.update_arch_()
                 elif self.method == "dspark" and (
