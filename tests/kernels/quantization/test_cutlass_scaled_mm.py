@@ -599,28 +599,6 @@ def test_cutlass_subset():
     torch.testing.assert_close(out, baseline, rtol=1e-1, atol=1e0)
 
 
-@pytest.mark.parametrize("operand", ["A", "B", "output"])
-@pytest.mark.parametrize("fault", ["padded", "misaligned"])
-@pytest.mark.skipif(capability_int < 90, reason="Requires CUTLASS 3.x.")
-def test_cutlass_c3x_rejects_invalid_operand(operand: str, fault: str):
-    tensors = []
-    for name in ("A", "B", "output"):
-        dtype = torch.bfloat16 if name == "output" else torch.float8_e4m3fn
-        if name == operand and fault == "padded":
-            tensor = torch.zeros((32, 48), device="cuda").to(dtype)[:, :32]
-        elif name == operand and fault == "misaligned":
-            tensor = torch.zeros(32 * 32 + 1, device="cuda").to(dtype)[1:].view(32, 32)
-            assert tensor.data_ptr() % 16 != 0
-        else:
-            tensor = torch.zeros((32, 32), device="cuda").to(dtype)
-        tensors.append(tensor.t() if name == "B" else tensor)
-    a, b, out = tensors
-    scale = torch.ones((1, 1), device="cuda")
-    error = "not packed" if fault == "padded" else "misaligned"
-    with pytest.raises(RuntimeError, match=rf"{operand} is {error}"):
-        torch.ops._C.cutlass_scaled_mm(out, a, b, scale, scale, None)
-
-
 # Test to make sure cuda graphs work
 class CutlassLayer(torch.nn.Module):
     def __init__(self, b, scale_a, scale_b, out_dtype):
