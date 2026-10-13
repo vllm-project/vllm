@@ -797,30 +797,6 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], SharedTopkIndicesBuffer, Generic
             kv_c_and_k_pe_cache.dtype
         )
         assert hot_cache.is_contiguous(), "HiSparse hot buffer must be contiguous"
-        if (
-            num_decode_tokens == 0
-            and index_group.cache(layer_index).all_context_pages_resident
-        ):
-            physical_topk, valid_counts = index_group.convert_logical_to_physical_topk(
-                layer_index,
-                topk,
-                attn_metadata,
-                block_stride_rows=None,
-                return_valid_counts=True,
-            )
-            return self._forward_mqa_kernel(
-                q,
-                hot_cache,
-                physical_topk,
-                valid_counts,
-                layer=layer,
-                block_size=block_size,
-                is_decode=False,
-            )
-
-        def q_slice(tokens: slice) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-            return (q[0][tokens], q[1][tokens]) if isinstance(q, tuple) else q[tokens]
-
         # Each lane writes its rows of one output instead of concatenating.
         output = self._new_mqa_output(q) if num_decode_tokens < num_tokens else None
         if num_decode_tokens:
@@ -831,8 +807,13 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], SharedTopkIndicesBuffer, Generic
                 block_stride_rows=None,
                 return_valid_counts=True,
             )
+            q_decode = (
+                (q[0][:num_decode_tokens], q[1][:num_decode_tokens])
+                if isinstance(q, tuple)
+                else q[:num_decode_tokens]
+            )
             decode_out, decode_lse = self._forward_mqa_kernel(
-                q_slice(slice(num_decode_tokens)),
+                q_decode,
                 hot_cache,
                 physical_topk,
                 valid_counts,
@@ -845,24 +826,47 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], SharedTopkIndicesBuffer, Generic
                 return decode_out, decode_lse
 
         assert output is not None
-        for (
-            tokens,
-            staged_cache,
-            physical_topk,
-            valid_counts,
-        ) in index_group.staged_prefills(
-            layer_index, kv_c_and_k_pe_cache, attn_metadata, topk
-        ):
+        cache = index_group.cache(layer_index)
+        if num_decode_tokens == 0 and cache.all_context_pages_resident:
+            physical_topk, valid_counts = index_group.convert_logical_to_physical_topk(
+                layer_index,
+                topk,
+                attn_metadata,
+                block_stride_rows=None,
+                return_valid_counts=True,
+            )
             self._forward_mqa_kernel(
-                q_slice(tokens),
-                staged_cache,
+                q,
+                hot_cache,
                 physical_topk,
                 valid_counts,
                 layer=layer,
                 block_size=block_size,
                 is_decode=False,
-                out=output[tokens],
+                out=output,
             )
+        else:
+            for (
+                tokens,
+                prefill_cache,
+                physical_topk,
+                valid_counts,
+            ) in index_group.staged_prefills(
+                layer_index, kv_c_and_k_pe_cache, attn_metadata, topk
+            ):
+                q_prefill = (
+                    (q[0][tokens], q[1][tokens]) if isinstance(q, tuple) else q[tokens]
+                )
+                self._forward_mqa_kernel(
+                    q_prefill,
+                    prefill_cache,
+                    physical_topk,
+                    valid_counts,
+                    layer=layer,
+                    block_size=block_size,
+                    is_decode=False,
+                    out=output[tokens],
+                )
         # HiSparse runs without DCP, so no lane returns an LSE.
         return output, None
 
