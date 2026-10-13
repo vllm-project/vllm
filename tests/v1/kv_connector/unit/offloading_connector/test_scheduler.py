@@ -2560,7 +2560,10 @@ def test_failed_store_is_not_published_as_cache(request_runner, async_scheduling
     )
     runner.run(decoded_tokens=[0, 0], complete_transfers=False)
     job_id = next(iter(runner.connector_scheduler._jobs))
+    keys = runner.connector_scheduler._jobs[job_id].keys
     runner.manager.complete_store.reset_mock()
+    events_tracker = MagicMock()
+    runner.connector_scheduler._events_tracker = events_tracker
 
     runner.connector_scheduler.update_connector_output(
         KVConnectorOutput(
@@ -2580,6 +2583,7 @@ def test_failed_store_is_not_published_as_cache(request_runner, async_scheduling
     )
     assert runner.manager.complete_store.call_count == 1
     assert runner.manager.complete_store.call_args.kwargs["success"] is False
+    events_tracker.discard_failed_store.assert_called_once_with(keys)
 
 
 @pytest.mark.parametrize("async_scheduling", [True, False])

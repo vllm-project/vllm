@@ -432,6 +432,25 @@ def test_lookup_promotion_factor_gt_1_store_and_remove():
     assert not tracker._pending_event_metadata
 
 
+def test_failed_store_drops_only_its_own_residency():
+    """A failed store emits no event, so nothing else would drop its entry."""
+    tracker = _tracker()
+    req = _request(block_hashes=[_hash(0), _hash(1)], token_count=8)
+    failed_key, shared_key = _record_chunks(tracker, req, _group_config(), 2)
+    list(
+        tracker.take_events(
+            [_stored_event([shared_key], Medium.STORAGE, removal_expected=True)]
+        )
+    )
+
+    tracker.discard_failed_store([failed_key, shared_key])
+
+    assert failed_key not in tracker._pending_event_metadata
+    assert tracker._pending_event_metadata[shared_key].active_residencies == {
+        (Medium.STORAGE, None)
+    }
+
+
 def test_take_events_factor_gt_1_store_is_order_independent():
     blocks_per_chunk = 3
     tracker = _tracker()

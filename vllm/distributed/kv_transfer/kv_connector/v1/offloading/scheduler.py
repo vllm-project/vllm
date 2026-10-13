@@ -1979,6 +1979,7 @@ class OffloadingConnectorScheduler:
                         job_id,
                         len(job_status.keys),
                     )
+                    self._events_tracker.discard_failed_store(job_status.keys)
                 self.manager.complete_store(
                     job_status.keys,
                     req_status.req_context,
