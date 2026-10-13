@@ -404,6 +404,9 @@ class AnthropicServingMessages(OpenAIServingChat):
             return text
         parts: list[str] = []
         for block in msg.content:
+            if block.type in ("tool_addition", "tool_removal"):
+                # Not text, but not ignored: _resolve_tools applies them.
+                continue
             if block.type != "text":
                 logger.warning_once(
                     "Anthropic system messages should only contain "
