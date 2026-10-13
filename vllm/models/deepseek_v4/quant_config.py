@@ -110,6 +110,11 @@ class DeepseekV4FP8Config(Fp8Config):
                 kv_cache_quant_algo=None,
                 exclude_modules=[],
                 group_size=16,
+                quantization_args=(
+                    self.online_quantization_config.args
+                    if self.online_quantization_config is not None
+                    else None
+                ),
             )
         return self._nvfp4_config
 
