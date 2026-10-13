@@ -256,7 +256,7 @@ def test_capture_uses_pcp_persistent_inputs():
     )
     dummy_batch.input_ids.copy_(torch.arange(4))
     dummy_batch.positions.fill_(7)
-    input_batch = manager.prepare_inputs_to_capture(dummy_batch)
+    input_batch = manager.prepare_inputs_for_capture_or_profile(dummy_batch)
 
     assert input_batch is not dummy_batch
     assert input_batch.req_ids == dummy_batch.req_ids
@@ -275,7 +275,7 @@ def test_dummy_context_updates_pcp_local_block_tables():
         input_buffers=manager.input_buffers,
         max_query_len=1,
     )
-    input_batch = manager.prepare_inputs_to_capture(input_batch)
+    input_batch = manager.prepare_inputs_for_capture_or_profile(input_batch)
     local_block_tables = manager.get_dummy_block_tables(input_batch.num_reqs)
 
     set_dummy_context(
@@ -734,6 +734,41 @@ def test_partition_defers_dcp_metadata_to_post_partition_batch():
     )
     assert local_batch.dcp_local_seq_lens is not None
     assert torch.equal(local_batch.dcp_local_seq_lens.cpu(), expected)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs GPU kernels")
+def test_moe_padding_matches_pcp_all_gather():
+    """The PCP batch carries the all-gather of every rank's local padding mask,
+    the rows the MoE routes, even when ranks own different numbers of tokens."""
+    device = torch.device("cuda:0")
+    local_masks, batch_masks = [], []
+    for pcp_rank in range(2):
+        manager = PCPManager(
+            pcp_world_size=2,
+            pcp_rank=pcp_rank,
+            device=device,
+            shard_decode_requests=True,
+            max_num_reqs=4,
+            max_num_tokens=8,
+            moe_gathers_tokens=True,
+        )
+        global_batch = _make_global_decode_batch(
+            [16, 24, 32], InputBuffers(4, 8, device), device
+        )
+        local_batch = manager.partition_batch(
+            global_batch,
+            BatchExecutionDescriptor(
+                cg_mode=CUDAGraphMode.PIECEWISE, num_tokens=4, num_reqs=None
+            ),
+        )
+        num_tokens = local_batch.num_tokens_after_padding
+        local_masks.append(manager.input_buffers.is_padding[:num_tokens].cpu())
+        batch_masks.append(local_batch.is_padding.cpu())
+
+    # Sharded decode puts two requests on rank 0 and one on rank 1.
+    assert [mask.logical_not().sum().item() for mask in local_masks] == [2, 1]
+    for batch_mask in batch_masks:
+        assert torch.equal(batch_mask, torch.cat(local_masks))
 
 
 @pytest.mark.parametrize(
