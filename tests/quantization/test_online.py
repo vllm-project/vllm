@@ -685,13 +685,83 @@ def _nvfp4_moe_checkpoint_tensors(
     return tensors, torch.cat((w1_reference, w3_reference), dim=1), w2_reference
 
 
+@pytest.mark.parametrize("is_act_and_mul", [False, True])
+@pytest.mark.parametrize(
+    "target_hidden,target_intermediate,has_bias,error",
+    [
+        pytest.param(16, 32, False, None, id="unpadded"),
+        pytest.param(24, 48, False, None, id="padded"),
+        pytest.param(24, 48, True, NotImplementedError, id="bias-with-padding"),
+        pytest.param(8, 32, False, ValueError, id="shrinking-hidden"),
+        pytest.param(16, 16, False, ValueError, id="shrinking-intermediate"),
+    ],
+)
+def test_online_requantized_moe_padding(
+    is_act_and_mul: bool,
+    target_hidden: int,
+    target_intermediate: int,
+    has_bias: bool,
+    error: type[Exception] | None,
+) -> None:
+    """Preserve logical expert weights and shard boundaries when padding."""
+    num_shards = 2 if is_act_and_mul else 1
+    w13 = torch.arange(
+        2 * num_shards * 32 * 16, device="cpu", dtype=torch.float32
+    ).reshape(2, num_shards * 32, 16)
+    w2 = torch.arange(2 * 16 * 32, device="cpu", dtype=torch.float32).reshape(2, 16, 32)
+    method = Fp8PerTensorOnlineMoEMethod.__new__(Fp8PerTensorOnlineMoEMethod)
+    method.moe = SimpleNamespace(
+        w13_num_shards=num_shards, is_act_and_mul=is_act_and_mul, has_bias=has_bias
+    )
+    method.requantization_source = Mock()
+    method.requantization_source.dequantize_weight.return_value = (w13, w2)
+    layer = SimpleNamespace(
+        local_num_experts=2,
+        moe_config=SimpleNamespace(
+            hidden_dim_unpadded=16,
+            intermediate_size_per_partition_unpadded=32,
+            hidden_dim=target_hidden,
+            intermediate_size_per_partition=target_intermediate,
+        ),
+        w13_bias=torch.zeros(2, num_shards * 32, device="cpu") if has_bias else None,
+        w2_bias=torch.zeros(2, 16, device="cpu") if has_bias else None,
+    )
+    if error is not None:
+        message = "biases is unsupported" if has_bias else "cannot shrink weights"
+        # Unsupported padding must fail explicitly rather than truncate weights.
+        with pytest.raises(error, match=message):
+            method.get_weights_for_quantization(layer)
+        return
+
+    padded_w13, padded_w2 = method.get_weights_for_quantization(layer)
+    if (target_hidden, target_intermediate) == (16, 32):
+        # Unpadded w13 must not allocate a replacement tensor.
+        assert padded_w13 is w13
+        # Unpadded w2 must not allocate a replacement tensor.
+        assert padded_w2 is w2
+
+    expected_w13 = w13.new_zeros(2, num_shards * target_intermediate, target_hidden)
+
+    for shard in range(num_shards):
+        start = shard * target_intermediate
+        expected_w13[:, start : start + 32, :16] = w13[:, shard * 32 : (shard + 1) * 32]
+
+    expected_w2 = w2.new_zeros(2, target_hidden, target_intermediate)
+    expected_w2[:, :16, :32] = w2
+
+    # Preserve each gate/up shard and zero all added rows and columns.
+    torch.testing.assert_close(padded_w13, expected_w13, rtol=0, atol=0)
+
+    # Preserve the logical down projection and zero both padding dimensions.
+    torch.testing.assert_close(padded_w2, expected_w2, rtol=0, atol=0)
+
+
 @pytest.mark.skipif(
     not (current_platform.is_cuda() or current_platform.is_rocm())
     or not is_quant_method_supported("fp8"),
     reason="Requires FP8 support on CUDA or ROCm.",
 )
 @pytest.mark.skip_global_cleanup
-@pytest.mark.parametrize("logical_size,runtime_size", [(128, 128), (160, 256)])
 @pytest.mark.parametrize("source_format", ["compressed_tensors", "modelopt", "quark"])
 @pytest.mark.parametrize(
     "online_target",
@@ -707,16 +777,10 @@ def _nvfp4_moe_checkpoint_tensors(
 def test_online_requantized_moe_reload(
     source_format: str,
     online_target: str,
-    logical_size: int,
-    runtime_size: int,
     default_vllm_config,
     monkeypatch,
 ) -> None:
-    """Convert NVFP4 sources to each online target without retaining staging weights.
-
-    For FP8 per-tensor, also verify that reloading the original checkpoint
-    format updates target parameters in place and changes expert outputs.
-    """
+    """Reload each online target in place and match a fresh checkpoint conversion."""
     from vllm.model_executor.layers.quantization.online import fp8 as online_fp8
 
     # Test conversion and reload behavior, not torch.compile.
@@ -758,7 +822,6 @@ def test_online_requantized_moe_reload(
         lambda **kwargs: (object(), object()),
     )
     source = _make_nvfp4_moe_source(source_format, moe, monkeypatch)
-    method = method_cls(moe=moe)
 
     if module_name in ("fp8", "mxfp8"):
         kernel_module = "vllm.model_executor.layers.fused_moe.oracle.fp8"
@@ -790,20 +853,24 @@ def test_online_requantized_moe_reload(
     kernel_factory = Mock(return_value=kernel)
     monkeypatch.setattr(f"{kernel_module}.{converter_name}", converter)
     monkeypatch.setattr(f"{kernel_module}.{factory_name}", kernel_factory)
-    monkeypatch.setattr(method, "get_fused_moe_quant_config", lambda layer: object())
-    method.set_requantization_source(source)
-
     device = current_platform.device_type
-    with torch.device(device):
+    size = 128
+
+    def create_layer() -> tuple[torch.nn.Module, Any]:
+        method = method_cls(moe=moe)
+        monkeypatch.setattr(
+            method, "get_fused_moe_quant_config", lambda layer: object()
+        )
+        method.set_requantization_source(source)
         layer = torch.nn.Module()
         layer.local_num_experts = 2
         layer.num_experts = 2
         layer._expert_routing_tables = lambda: None
         layer.moe_config = SimpleNamespace(
-            hidden_dim_unpadded=logical_size,
-            intermediate_size_per_partition_unpadded=logical_size,
-            hidden_dim=runtime_size,
-            intermediate_size_per_partition=runtime_size,
+            hidden_dim_unpadded=size,
+            intermediate_size_per_partition_unpadded=size,
+            hidden_dim=size,
+            intermediate_size_per_partition=size,
             is_act_and_mul=True,
             moe_parallel_config=SimpleNamespace(tp_size=1),
         )
@@ -816,13 +883,16 @@ def test_online_requantized_moe_reload(
         method.create_weights(
             layer,
             num_experts=2,
-            hidden_size=runtime_size,
-            intermediate_size_per_partition=runtime_size,
+            hidden_size=size,
+            intermediate_size_per_partition=size,
             params_dtype=torch.bfloat16,
             weight_loader=default_weight_loader,
         )
         record_metadata_for_reloading(layer)
+        return layer, method
 
+    with torch.device(device):
+        layer, method = create_layer()
         source_parameters = dict(method.requantization_source_parameters)
         source_names = set(source_parameters)
         packed_w13_name = (
@@ -830,17 +900,25 @@ def test_online_requantized_moe_reload(
             if source_format == "compressed_tensors"
             else "w13_weight"
         )
+        # Source allocation must retain the packed NVFP4 checkpoint layout.
         assert source_parameters[packed_w13_name].shape == (
             2,
-            2 * logical_size,
-            logical_size // 2,
+            2 * size,
+            size // 2,
         )
 
         def serialized_weights(value: float) -> dict[str, torch.Tensor]:
-            shape = (2, logical_size, logical_size)
-            w1 = torch.full(shape, value, device=device, dtype=torch.bfloat16)
-            w3 = torch.full(shape, value * 2, device=device, dtype=torch.bfloat16)
-            w2 = torch.full(shape, value * 3, device=device, dtype=torch.bfloat16)
+            shape = (2, size, size)
+            pattern = (
+                torch.linspace(
+                    -1.0, 1.0, size * size, device=device, dtype=torch.bfloat16
+                )
+                .reshape(1, size, size)
+                .expand(shape)
+            )
+            w1 = pattern * value + value**2
+            w3 = pattern.flip(-1) * (value * 2) - value**2
+            w2 = pattern.flip(-2) * (value * 3) + value**2
             w1_global_scale = torch.tensor([96.0, 160.0], device=device)
             w3_global_scale = torch.tensor([40.0, 72.0], device=device)
             w2_global_scale = torch.tensor([128.0, 56.0], device=device)
@@ -856,7 +934,7 @@ def test_online_requantized_moe_reload(
             return tensors
 
         def load_serialized_weights(
-            weights: dict[str, torch.Tensor], *, reload: bool
+            layer: torch.nn.Module, weights: dict[str, torch.Tensor], *, reload: bool
         ) -> None:
             for name, loaded_weight in weights.items():
                 parameter = getattr(layer, name)
@@ -886,37 +964,15 @@ def test_online_requantized_moe_reload(
                 else:
                     parameter.data.copy_(loaded_weight)
 
-        # Initial checkpoint load replaces NVFP4 source parameters with online
-        # target parameters and releases the source staging weights.
-        load_serialized_weights(serialized_weights(0.25), reload=False)
-        source_w13, source_w2 = source.dequantize_weight(layer)
-        padded_w13, padded_w2 = method.get_weights_for_quantization(layer)
-        assert padded_w13.shape == (2, 2 * runtime_size, runtime_size)
-        assert padded_w2.shape == (2, runtime_size, runtime_size)
-        for shard in range(2):
-            start = shard * runtime_size
-            torch.testing.assert_close(
-                padded_w13[:, start : start + logical_size, :logical_size],
-                source_w13[:, shard * logical_size : (shard + 1) * logical_size],
-                rtol=0,
-                atol=0,
-            )
-            assert (
-                torch.count_nonzero(
-                    padded_w13[:, start + logical_size : start + runtime_size]
-                )
-                == 0
-            )
-        torch.testing.assert_close(
-            padded_w2[:, :logical_size, :logical_size], source_w2, rtol=0, atol=0
-        )
-        assert torch.count_nonzero(padded_w13[:, :, logical_size:]) == 0
-        assert torch.count_nonzero(padded_w2[:, logical_size:, :]) == 0
-        assert torch.count_nonzero(padded_w2[:, :, logical_size:]) == 0
+        # Initial loading replaces NVFP4 staging weights with online target weights.
+        load_serialized_weights(layer, serialized_weights(0.25), reload=False)
         method.process_weights_after_loading(layer)
         finalize_layerwise_reload(layer, default_vllm_config.model_config)
+        # Initial processing must invoke backend-format conversion exactly once.
         converter.assert_called_once()
+        # Initial processing must construct the target kernel exactly once.
         kernel_factory.assert_called_once()
+        # The method must attach the kernel returned by the factory.
         assert method.moe_kernel is kernel
 
         # Initial conversion must release references to the NVFP4 parameters.
@@ -930,51 +986,64 @@ def test_online_requantized_moe_reload(
             "mxfp4": torch.uint8,
             "int8": torch.int8,
         }.get(online_target, current_platform.fp8_dtype())
+
+        # Gate/up weights must use the requested target's quantized dtype.
         assert layer.w13_weight.dtype == expected_dtype
+        # Down-projection weights must use the same target dtype.
         assert layer.w2_weight.dtype == expected_dtype
+
         packed_factor = 2 if online_target == "mxfp4" else 1
+        # Target packing must preserve both gate/up shards and expert count.
         assert layer.w13_weight.shape == (
             2,
-            2 * runtime_size,
-            runtime_size // packed_factor,
+            2 * size,
+            size // packed_factor,
         )
-        assert layer.w2_weight.shape == (2, runtime_size, runtime_size // packed_factor)
+        # Target packing must preserve the down-projection dimensions.
+        assert layer.w2_weight.shape == (2, size, size // packed_factor)
+        # Initial processing must materialize gate/up weights on the device.
         assert not layer.w13_weight.is_meta
+        # Initial processing must materialize down-projection weights on the device.
         assert not layer.w2_weight.is_meta
 
-        if online_target != "fp8_per_tensor":
-            return
-
-        target_parameters = {
-            "w13_weight": layer.w13_weight,
-            "w2_weight": layer.w2_weight,
-            "w13_weight_scale": layer.w13_weight_scale,
-            "w2_weight_scale": layer.w2_weight_scale,
+        target_parameters = dict(layer.named_parameters())
+        target_storage = {
+            name: parameter.data_ptr() for name, parameter in target_parameters.items()
         }
         first_weights = {
             name: parameter.clone() for name, parameter in target_parameters.items()
         }
-
-        def expert_output() -> torch.Tensor:
-            inputs = torch.ones(2, runtime_size, device=device)
-            w13 = layer.w13_weight.float() * layer.w13_weight_scale[:, None, None]
-            w2 = layer.w2_weight.float() * layer.w2_weight_scale[:, None, None]
-            gate_up = torch.einsum("eh,eih->ei", inputs, w13)
-            gate, up = gate_up.chunk(2, dim=-1)
-            hidden = torch.nn.functional.silu(gate) * up
-            return torch.einsum("ei,ehi->eh", hidden, w2)
-
-        first_output = expert_output()
+        second_checkpoint = serialized_weights(0.75)
+        fresh_layer, fresh_method = create_layer()
+        load_serialized_weights(fresh_layer, second_checkpoint, reload=False)
+        fresh_method.process_weights_after_loading(fresh_layer)
+        finalize_layerwise_reload(fresh_layer, default_vllm_config.model_config)
+        expected_parameters = dict(fresh_layer.named_parameters())
+        # Fresh conversion must produce the same target parameter schema.
+        assert expected_parameters.keys() == target_parameters.keys()
+        # The reference conversion must also release its NVFP4 staging references.
+        assert not fresh_method.requantization_source_parameters
+        for name in ("w13_weight", "w2_weight"):
+            # Checkpoint B must change both matrices so stale reloads cannot pass.
+            assert not torch.equal(expected_parameters[name], first_weights[name])
+        converter.reset_mock()
+        kernel_factory.reset_mock()
 
         # Reload restores the original NVFP4 checkpoint-facing layout, not the
-        # already-converted FP8 runtime layout.
+        # already-converted target runtime layout.
         initialize_layerwise_reload(layer)
 
         # Reload must recreate every NVFP4 source parameter on the meta device.
         assert all(getattr(layer, name).is_meta for name in source_names)
 
-        load_serialized_weights(serialized_weights(0.75), reload=True)
+        load_serialized_weights(layer, second_checkpoint, reload=True)
         finalize_layerwise_reload(layer, default_vllm_config.model_config)
+        # Reload must reconvert checkpoint B rather than reuse checkpoint A's weights.
+        converter.assert_called_once()
+        # Reload must rebuild the kernel using the newly processed target tensors.
+        kernel_factory.assert_called_once()
+        # The method must attach the kernel returned by the reload factory call.
+        assert method.moe_kernel is kernel
 
     # Reload must not retain references to temporary NVFP4 source parameters.
     assert not method.requantization_source_parameters
@@ -985,18 +1054,17 @@ def test_online_requantized_moe_reload(
     # non-parameter sentinel after reload processing.
     assert all(getattr(layer, name, None) is None for name in source_only_names)
 
+    # Reload must restore exactly the target parameters, without extra staging weights.
+    assert dict(layer.named_parameters()).keys() == target_parameters.keys()
+
     for name, parameter in target_parameters.items():
-        # Reload must update each FP8 target without replacing its Parameter object.
+        # Reload must update target weights and scales without replacing Parameters.
         assert getattr(layer, name) is parameter
 
-    # The second checkpoint must produce different FP8 weights or scales.
-    assert any(
-        not torch.equal(parameter, first_weights[name])
-        for name, parameter in target_parameters.items()
-    )
+        assert parameter.data_ptr() == target_storage[name]
+        assert not parameter.is_meta
 
-    # The updated FP8 weights must change the observable expert computation.
-    assert not torch.equal(expert_output(), first_output)
+        torch.testing.assert_close(parameter, expected_parameters[name], rtol=0, atol=0)
 
 
 def test_activation_only_override_applies_to_checkpoint_method(
