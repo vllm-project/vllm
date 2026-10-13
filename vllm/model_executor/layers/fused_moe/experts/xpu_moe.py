@@ -248,11 +248,13 @@ class _XPUExpertsWithLoRA(LoRAExpertsMixin, XPUExperts):
             K=hidden_size,
             num_experts=impl.num_experts,
         )
+        del remapped
         # Native GEMMs group by expert; the LoRA kernels address original
         # token/top-k rows. Nonlocal routes must never read undefined data.
         route = routing.flatten().long()
         local = route >= 0
         original = grouped.index_select(0, route.clamp_min(0))
+        del grouped
         original.masked_fill_(~local[:, None], 0)
         lora_width = sum(b.shape[-2] for b in ctx.w13_lora_b_stacked)
         delta = output.new_zeros(rows, lora_width)
@@ -271,7 +273,11 @@ class _XPUExpertsWithLoRA(LoRAExpertsMixin, XPUExperts):
             top_k_num=topk,
             add_inputs=False,
         )
-        if impl.inter_size_scale == 1:
+        if self.moe_config.activation == MoEActivation.SWIGLUOAI:
+            # Both packed adapters and the two-slice helper emit interleaved
+            # gate/up channels. Padding follows the last logical pair.
+            original[:, :lora_width].add_(delta)
+        elif impl.inter_size_scale == 1:
             # Each gate/up half may have independent padding in the base weights.
             width = lora_width // 2
             original[:, :width].add_(delta[:, :width])
@@ -280,6 +286,7 @@ class _XPUExpertsWithLoRA(LoRAExpertsMixin, XPUExperts):
             )
         else:
             original[:, :lora_width].add_(delta)
+        del delta
         if impl.gemm1_clamp_limit is not None and impl.gemm1_clamp_limit > 0:
             original[:, : impl.inter_size].clamp_(max=impl.gemm1_clamp_limit)
             original[:, impl.inter_size :].clamp_(
@@ -287,6 +294,7 @@ class _XPUExpertsWithLoRA(LoRAExpertsMixin, XPUExperts):
             )
         activated = output.new_empty(rows, impl.inter_size * impl.inter_size_scale)
         impl.act_func(activated, original)
+        del original
         # The extra row receives nonlocal routes; valid grouped rows are unique.
         # This avoids a device-to-host synchronization from boolean indexing.
         grouped_input = output.new_empty(rows + 1, activated.shape[1])
@@ -304,10 +312,14 @@ class _XPUExpertsWithLoRA(LoRAExpertsMixin, XPUExperts):
             K=activated.shape[1],
             num_experts=impl.num_experts,
         )
-        combined = grouped_output.index_select(0, route.clamp_min(0))
-        combined.masked_fill_(~local[:, None], 0)
-        combined = combined.view(num_tokens, topk, hidden_size)
-        combined.mul_(topk_weights[:, :, None])
+        del grouped_input
+        # Preserve the native FP32 routing-weight multiply and accumulation.
+        # Multiplying each route in BF16/FP16 first adds an extra rounding.
+        torch.ops._moe_C.moe_gather(
+            output, grouped_output, topk_weights, routing, impl.num_experts
+        )
+        del grouped_output
+        combined = output.new_zeros(num_tokens, topk, hidden_size)
         self.apply_w2_lora(
             ctx,
             y=combined,
@@ -322,7 +334,7 @@ class _XPUExpertsWithLoRA(LoRAExpertsMixin, XPUExperts):
             w2=w2,
             top_k_num=topk,
         )
-        torch.sum(combined, dim=1, out=output)
+        output.copy_(combined.sum(dim=1, dtype=torch.float32).add_(output))
 
 
 class XPUExpertsFp8(_XPUExpertsWithLoRA):

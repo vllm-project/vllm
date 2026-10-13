@@ -1327,8 +1327,9 @@ def test_fused_moe_lora_kernel_rejects_bad_block_size_m(device):
 @pytest.mark.parametrize("mapped_experts", [False, True])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("packed", [False, True])
+@pytest.mark.parametrize("activation_name", ["SILU", "SWIGLUOAI"])
 def test_xpu_quantized_moe_lora_reference(
-    recipe, logical_size, mapped_experts, dtype, packed
+    recipe, logical_size, mapped_experts, dtype, packed, activation_name
 ):
     """LoRA must follow token routes, padded gate/up halves and router weights."""
     from tests.kernels.moe.utils import make_dummy_moe_config
@@ -1347,6 +1348,8 @@ def test_xpu_quantized_moe_lora_reference(
         XPUExpertsWNA16,
     )
 
+    activation = MoEActivation[activation_name]
+    interleaved = activation == MoEActivation.SWIGLUOAI
     block_fp8 = recipe == "block_fp8"
     torch.manual_seed(42)
     device = "xpu"
@@ -1355,12 +1358,14 @@ def test_xpu_quantized_moe_lora_reference(
     def rand(*shape):
         return torch.randn(*shape, device=device, dtype=dtype) * 0.05
 
-    x = rand(tokens, hidden)
+    x = rand(tokens, hidden) * 10
     w1 = rand(experts, hidden, 2 * padded)
     w2 = rand(experts, padded, hidden)
     w1[:, :, logical_size:padded] = 0
     w1[:, :, padded + logical_size :] = 0
     w2[:, logical_size:, :] = 0
+    if interleaved:
+        w1 = w1.unflatten(-1, (2, padded)).transpose(-1, -2).flatten(-2).contiguous()
     if recipe == "int4":
 
         def pack(w):
@@ -1403,6 +1408,7 @@ def test_xpu_quantized_moe_lora_reference(
         hidden_dim=hidden,
         intermediate_size=padded,
         in_dtype=dtype,
+        activation=activation,
     )
     if mapped_experts:
         config.moe_parallel_config.ep_size = 2
@@ -1444,6 +1450,13 @@ def test_xpu_quantized_moe_lora_reference(
         wrapper,
         False,
     )
+    # Adapter contributions must exceed the comparison error budget.
+    for tensor in (*a13, *b13, *a2, *b2):
+        tensor.mul_(3)
+    if packed and interleaved:
+        b13[0].copy_(
+            b13[0].unflatten(-2, (2, logical_size)).transpose(-3, -2).flatten(-3, -2)
+        )
     impl.set_lora_context(ctx)
     ids = torch.tensor([[1, 0], [0, 1], [1, 0], [0, 1]], device=device)
     expert_map = None
@@ -1462,7 +1475,7 @@ def test_xpu_quantized_moe_lora_reference(
         w2,
         weights,
         ids,
-        MoEActivation.SILU,
+        activation,
         4 if mapped_experts else experts,
         expert_map,
         None,
@@ -1472,7 +1485,8 @@ def test_xpu_quantized_moe_lora_reference(
         None,
         False,
     )
-    if not packed and not mapped_experts and logical_size == 96:
+    graph = None
+    if not packed and logical_size == 96:
         graph = torch.xpu.XPUGraph()
         with torch.xpu.graph(graph):
             impl.apply(
@@ -1482,8 +1496,8 @@ def test_xpu_quantized_moe_lora_reference(
                 w2,
                 weights,
                 ids,
-                MoEActivation.SILU,
-                experts,
+                activation,
+                4 if mapped_experts else experts,
                 expert_map,
                 None,
                 None,
@@ -1492,43 +1506,88 @@ def test_xpu_quantized_moe_lora_reference(
                 None,
                 False,
             )
-        x.mul_(0.5)
+        x.mul_(0.75)
+        weights.copy_(weights.flip(1))
+        ids.copy_(ids.flip(1))
         graph.replay()
-    reference = torch.zeros_like(x, dtype=torch.float32)
-    for t in range(tokens):
-        for k in range(2):
-            e = int(ids[t, k])
-            if e < 0:
-                continue
-            if expert_map is not None:
-                e = int(expert_map[e])
-            if e < 0:
-                continue
-            base13 = x[t].float() @ ref_w1[e]
-            adapter = mapping[t] - 1
-            if adapter >= 0:
-                for s in range(2):
-                    delta = (
-                        x[t].float()
-                        @ a13[0 if packed else s][adapter, e].float().T
-                        @ (
-                            b13[0][
-                                adapter, e, s * logical_size : (s + 1) * logical_size
-                            ]
-                            if packed
-                            else b13[s][adapter, e]
-                        )
-                        .float()
-                        .T
-                    )
-                    base13[s * padded : s * padded + logical_size] += delta
-            activation = torch.nn.functional.silu(base13[:padded]) * base13[padded:]
-            y = activation @ ref_w2[e]
-            if adapter >= 0:
-                y += (
-                    activation[:logical_size]
-                    @ a2[0][adapter, e].float().T
-                    @ b2[0][adapter, e].float().T
+
+    def reference(with_w13=True, with_w2=True):
+        result = torch.zeros_like(x, dtype=torch.float32)
+        for t in range(tokens):
+            for k in range(2):
+                e = int(ids[t, k])
+                if e < 0:
+                    continue
+                if expert_map is not None:
+                    e = int(expert_map[e])
+                if e < 0:
+                    continue
+                base13 = x[t].float() @ ref_w1[e]
+                gate, up = (
+                    (base13[::2], base13[1::2]) if interleaved else base13.chunk(2)
                 )
-            reference[t] += weights[t, k] * y
-    torch.testing.assert_close(output.float(), reference, atol=2e-3, rtol=2e-2)
+                adapter = mapping[t] - 1
+                if adapter >= 0 and with_w13:
+                    for part, values in enumerate((gate, up)):
+                        b = b13[0 if packed else part][adapter, e]
+                        if packed:
+                            b = b[part::2] if interleaved else b.chunk(2)[part]
+                        values[:logical_size] += (
+                            x[t].float()
+                            @ a13[0 if packed else part][adapter, e].float().T
+                            @ b.float().T
+                        )
+                if interleaved:
+                    gate = gate.clamp(max=7)
+                    act = gate * torch.sigmoid(1.702 * gate) * (up.clamp(-7, 7) + 1)
+                else:
+                    act = torch.nn.functional.silu(gate) * up
+                y = act @ ref_w2[e]
+                if adapter >= 0 and with_w2:
+                    y += (
+                        act[:logical_size]
+                        @ a2[0][adapter, e].float().T
+                        @ b2[0][adapter, e].float().T
+                    )
+                result[t] += weights[t, k] * y
+        return result
+
+    expected = reference()
+    atol, rtol = (2e-3, 1e-2) if dtype == torch.float16 else (2e-2, 3e-2)
+    torch.testing.assert_close(output.float(), expected, atol=atol, rtol=rtol)
+    # Guard the oracle itself: neither omitted projection nor all-zero output
+    # may fit inside the same error budget as a correct implementation.
+    for wrong in (
+        reference(False, True),
+        reference(True, False),
+        torch.zeros_like(expected),
+    ):
+        assert not torch.allclose(wrong, expected, atol=atol, rtol=rtol)
+
+    # Zero deltas must preserve native routing/accumulation, especially in BF16.
+    for b in (*b13, *b2):
+        b.zero_()
+    args = (
+        x,
+        w1,
+        w2,
+        weights,
+        ids,
+        activation,
+        4 if mapped_experts else experts,
+        expert_map,
+        None,
+        None,
+        workspace,
+        workspace,
+        None,
+        False,
+    )
+    impl.apply(output, *args)
+    impl._lora_context = None
+    native = torch.empty_like(output)
+    impl.apply(native, *args)
+    torch.testing.assert_close(output, native, atol=0, rtol=0)
+    if graph is not None:
+        graph.replay()
+        torch.testing.assert_close(output, native, atol=0, rtol=0)
