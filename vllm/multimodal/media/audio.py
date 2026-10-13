@@ -580,36 +580,31 @@ class AudioMediaIO(MediaIO[tuple[npt.NDArray, float]]):
                 backend=self.audio_backend,
             )
 
-        with budget.lock:
-            remaining = budget.remaining()
-            if remaining == 0:
-                raise ValueError(
-                    "Request decoded media exceeds VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES."
-                )
-            max_decode_bytes = envs.VLLM_MAX_AUDIO_DECODE_BYTES
-            if remaining is not None:
-                max_decode_bytes = min(max_decode_bytes, remaining)
+        max_decode_bytes = envs.VLLM_MAX_AUDIO_DECODE_BYTES
+        reserved = budget.reserve(max_decode_bytes)
+        decoded_bytes = 0
+        try:
             try:
                 audio = load_audio(
                     source,
                     sr=None,
                     max_duration_s=envs.VLLM_MAX_AUDIO_DECODE_DURATION_S,
-                    max_decode_bytes=max_decode_bytes,
+                    max_decode_bytes=reserved,
                     backend=self.audio_backend,
                 )
             except ValueError as exc:
-                if (
-                    remaining is not None
-                    and remaining < envs.VLLM_MAX_AUDIO_DECODE_BYTES
-                    and "VLLM_MAX_AUDIO_DECODE_BYTES" in str(exc)
+                if reserved < max_decode_bytes and "VLLM_MAX_AUDIO_DECODE_BYTES" in str(
+                    exc
                 ):
                     raise ValueError(
                         "Request decoded media exceeds "
                         "VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES."
                     ) from exc
                 raise
-            budget.charge(audio[0].nbytes)
+            decoded_bytes = audio[0].nbytes
             return audio
+        finally:
+            budget.settle(reserved, decoded_bytes)
 
     def load_base64(
         self,
