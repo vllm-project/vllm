@@ -2235,7 +2235,8 @@ class MooncakeConnectorWorker:
     def unregister_kv_caches(self) -> None:
         if self._kv_unregistered or not self.seen_base_addresses:
             return
-        if self.engine.batch_unregister_memory(self.seen_base_addresses) != 0:
+        ret_value = self.engine.batch_unregister_memory(self.seen_base_addresses)
+        if ret_value != 0:
             raise RuntimeError("Mooncake batch memory unregistration failed.")
         self._kv_unregistered = True
 

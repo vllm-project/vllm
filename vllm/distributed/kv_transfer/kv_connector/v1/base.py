@@ -300,13 +300,12 @@ class KVConnectorBase_V1(ABC):
         return
 
     def unregister_kv_caches(self) -> None:
-        """Before sleep unmaps the KV cache: drop its memory registrations.
-        The engine has already drained the transfers using it. Idempotent."""
+        """Drop KV cache registrations before sleep. Transfers are already
+        drained. Idempotent."""
         return
 
     def restore_kv_caches(self) -> None:
-        """After wake-up maps the KV cache again: redo `unregister_kv_caches`.
-        Idempotent."""
+        """Redo `unregister_kv_caches` after wake-up. Idempotent."""
         return
 
     def set_host_xfer_buffer_ops(self, copy_operation: CopyBlocksOp):
