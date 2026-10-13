@@ -224,26 +224,38 @@ def test_sync_load_failure(
     assert scheduler.connector.request_finished.call_count == 2
 
 
-def test_sync_load_failure_discards_multitoken_async_frames():
-    vllm_config = create_vllm_config(kv_load_failure_policy="recompute")
+@pytest.mark.parametrize(
+    "num_prompt_blocks,num_external_blocks,invalid_block_idx,num_spec_tokens",
+    [(3, 2, 0, 3), (80, 79, 70, 553)],
+)
+def test_sync_load_failure_discards_multitoken_async_frames(
+    num_prompt_blocks: int,
+    num_external_blocks: int,
+    invalid_block_idx: int,
+    num_spec_tokens: int,
+):
+    vllm_config = create_vllm_config(
+        kv_load_failure_policy="recompute",
+        max_num_batched_tokens=max(64, num_spec_tokens + 1),
+    )
     vllm_config.scheduler_config.async_scheduling = True
     scheduler = create_scheduler(vllm_config)
     # CPU-only unit tests cannot enable MRV2 without Triton. Worker-side
     # consumption of the rewind marker is covered separately.
     scheduler.use_v2_model_runner = True
 
-    # The second frame carries one sampled token plus three speculative tokens.
-    scheduler.num_spec_tokens = 3
+    # The second frame carries one sampled token plus speculative tokens.
+    scheduler.num_spec_tokens = num_spec_tokens
     request = create_request(
-        num_tokens=3 * scheduler.block_size,
-        max_tokens=16,
+        num_tokens=num_prompt_blocks * scheduler.block_size,
+        max_tokens=max(16, num_spec_tokens + 3),
     )
     scheduler.add_request(request)
 
     scheduler.connector = create_mock_connector()
     scheduler.connector.get_num_new_matched_tokens.side_effect = (
         _make_get_num_new_matched_tokens(
-            {request.request_id: 2 * scheduler.block_size},
+            {request.request_id: num_external_blocks * scheduler.block_size},
             async_load=False,
         )
     )
@@ -251,18 +263,30 @@ def test_sync_load_failure_discards_multitoken_async_frames():
     scheduler.connector.take_events.return_value = ()
 
     failed_output = scheduler.schedule()
+    prompt_end = request.num_computed_tokens
     stale_output = scheduler.schedule()
-    assert request.num_output_placeholders == 5
-    assert len(stale_output.scheduled_spec_decode_tokens[request.request_id]) == 3
+    assert request.num_output_placeholders == num_spec_tokens + 2
+    assert (
+        len(stale_output.scheduled_spec_decode_tokens[request.request_id])
+        == num_spec_tokens
+    )
+    # Large placeholder spans must come with the optimistic computed offset
+    # advanced by schedule(), rather than leave it at the prompt end.
+    assert request.num_computed_tokens == prompt_end + num_spec_tokens + 1
+    assert (
+        request.num_computed_tokens - request.num_in_flight_tokens
+        == num_external_blocks * scheduler.block_size
+    )
 
     block_ids = failed_output.scheduled_new_reqs[0].block_ids[0]
     model_runner_output = create_model_runner_output(
-        [request], invalid_block_ids={block_ids[0]}, token_id=101
+        [request], invalid_block_ids={block_ids[invalid_block_idx]}, token_id=101
     )
     scheduler.update_from_output(failed_output, model_runner_output)
 
     stale_tokens = stale_output.num_scheduled_tokens[request.request_id]
-    assert request.num_computed_tokens == 0
+    rewind_offset = invalid_block_idx * scheduler.block_size
+    assert request.num_computed_tokens == rewind_offset
     assert request.num_output_placeholders == 0
     assert request.num_stale_output_tokens == stale_tokens
     assert request.drop_stale_output
@@ -273,7 +297,7 @@ def test_sync_load_failure_discards_multitoken_async_frames():
 
     recovery_output = scheduler.schedule()
     assert recovery_output.scheduled_cached_reqs.rewound_req_ids == {request.request_id}
-    assert recovery_output.scheduled_cached_reqs.num_computed_tokens == [0]
+    assert recovery_output.scheduled_cached_reqs.num_computed_tokens == [rewind_offset]
     assert not scheduler.rewound_req_ids
 
     scheduler.update_from_output(
