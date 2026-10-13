@@ -298,7 +298,8 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
         k_scale = v_scale = None
         if self.kv_cache_dtype in ("fp8", "fp8_e4m3"):
             # The cache is allocated as uint8; on sm_89+ reinterpret the e4m3
-            # bytes. Below sm_89 the kernel byte-decodes the raw storage.
+            # bytes (same itemsize, so shape and strides are preserved). Below
+            # sm_89 the kernel byte-decodes the raw uint8 storage instead.
             if current_platform.has_device_capability(89):
                 key_cache = key_cache.view(torch.float8_e4m3fn)
                 value_cache = value_cache.view(torch.float8_e4m3fn)

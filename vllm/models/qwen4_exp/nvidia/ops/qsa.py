@@ -162,6 +162,8 @@ def _qsa_sparse_paged_gqa_splitk_kernel(
             mask=valid[None, :],
             other=0.0,
         )
+        # e4m3 -> Q dtype is exact; keep the QK dot in Q's dtype (fp8 QK
+        # measured slower here and less accurate).
         keys = _maybe_dequant(keys).to(query.dtype)
         values = tl.load(
             v_cache_ptr
@@ -172,6 +174,9 @@ def _qsa_sparse_paged_gqa_splitk_kernel(
             mask=valid[:, None],
             other=0.0,
         )
+        # Dequant V to fp16 (not bf16) for the PV dot: P <= 1 (online
+        # softmax) so fp16 has the range, its wider mantissa is more
+        # accurate, and the fp8->fp16 upcast with an fp16 PV dot is faster.
         values = _maybe_dequant(values)
         scores = tl.dot(query, keys)
         # Scaling scores avoids re-quantizing a scaled query to BF16; for fp8
