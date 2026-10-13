@@ -322,6 +322,9 @@ def parse_args():
 _BAR_FORMAT = "{desc}: {percentage:3.0f}% Completed | {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]\n"  # noqa: E501
 
 _STAGING_CHUNK_SIZE = 1 << 20
+# aiohttp's default total timeout. The download retries on timeout, with a
+# longer timeout on each attempt.
+_INPUT_DOWNLOAD_TIMEOUT_S = 300
 
 # Responses are written in input order, so a slow request holds back those
 # behind it. Letting up to this many times --max-inflight requests finish ahead
@@ -387,7 +390,10 @@ async def open_batch_input(
             download_path = Path(download_dir, "input.jsonl")
             logger.info("Downloading %s to %s", path_or_url, download_path)
             await global_http_connection.async_download_file(
-                path_or_url, download_path, chunk_size=_STAGING_CHUNK_SIZE
+                path_or_url,
+                download_path,
+                timeout=_INPUT_DOWNLOAD_TIMEOUT_S,
+                chunk_size=_STAGING_CHUNK_SIZE,
             )
             yield stack.enter_context(
                 download_path.open(encoding="utf-8", newline="\n")

@@ -1266,12 +1266,15 @@ async def test_open_batch_input_stages_a_stream(tmp_path, use_tmp_dir):
 
 @pytest.mark.asyncio
 async def test_open_batch_input_downloads_a_url(tmp_path, monkeypatch):
-    """A URL body is downloaded through the shared HTTP client to a file."""
+    """A URL body is downloaded through the shared HTTP client to a file.
+
+    The download needs a timeout, or a stalled server hangs the run forever.
+    """
     payload = "\n".join(INPUT_BATCH.strip().split("\n")[:2]) + "\n"
     downloads = []
 
-    async def fake_download_file(url, save_path, *, chunk_size):
-        downloads.append((url, save_path))
+    async def fake_download_file(url, save_path, *, timeout, chunk_size):
+        downloads.append((url, save_path, timeout))
         save_path.write_text(payload)
         return save_path
 
@@ -1286,8 +1289,9 @@ async def test_open_batch_input_downloads_a_url(tmp_path, monkeypatch):
         f.seek(0)
         assert validate_batch(f) == 2
 
-    ((url, save_path),) = downloads
+    ((url, save_path, timeout),) = downloads
     assert url == "https://example.com/batch.jsonl"
+    assert timeout is not None and timeout > 0
     assert save_path.is_relative_to(tmp_path)
     assert not save_path.exists(), "downloaded copy must be removed"
 
