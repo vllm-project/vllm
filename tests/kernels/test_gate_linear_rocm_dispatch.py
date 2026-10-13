@@ -5,7 +5,8 @@
 These assert the dispatch flags directly, so they run device-free by mocking
 the platform predicates. ``allow_cublas_router_gemm`` selects the
 bf16xbf16->fp32 ``torch.mm`` epilogue, while ``allow_fp32_router_gemm`` selects
-the gfx950 low-M kernel with fp32 weights and output.
+the gfx950 low-M kernel. That kernel takes fp32 weights for its tuned shapes,
+and a bf16 weight for (7168, 896) when the logits are fp32.
 
 The ROCm branch is guarded on ``not bias`` because ``torch.mm`` has no bias
 term; a biased gate must fall back so the bias is not silently dropped.
@@ -108,22 +109,44 @@ def test_rocm_set_out_dtype_respects_bias_guard(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("input_size", "output_size"),
-    [(3072, 256), (4096, 8), (4096, 192), (6144, 128), (6144, 256)],
+    ("input_size", "output_size", "params_dtype", "out_dtype"),
+    [
+        *[
+            (h, e, torch.float32, torch.float32)
+            for h, e in (
+                (3072, 256),
+                (4096, 8),
+                (4096, 192),
+                (6144, 128),
+                (6144, 256),
+            )
+        ],
+        (7168, 896, torch.bfloat16, torch.float32),
+        (7168, 896, torch.bfloat16, None),
+    ],
 )
 def test_rocm_gfx950_enables_fp32_router_gemm(
-    monkeypatch, input_size: int, output_size: int
+    monkeypatch,
+    input_size: int,
+    output_size: int,
+    params_dtype: torch.dtype,
+    out_dtype: torch.dtype | None,
 ) -> None:
     gate = _make_gate(
         monkeypatch,
         is_rocm=True,
-        params_dtype=torch.float32,
+        params_dtype=params_dtype,
+        out_dtype=out_dtype,
         input_size=input_size,
         output_size=output_size,
         on_gfx950=True,
     )
+    if out_dtype is None:
+        assert not gate.allow_fp32_router_gemm
+        gate.set_out_dtype(torch.float32)
     assert gate.allow_fp32_router_gemm
-    assert not gate.allow_cublas_router_gemm
+    if params_dtype == torch.float32:
+        assert not gate.allow_cublas_router_gemm
 
 
 @pytest.mark.parametrize("ep_size", [2, 4, 8])
@@ -144,12 +167,31 @@ def test_rocm_fp32_router_gemm_is_replicated_across_ep_sizes(
 
 
 @pytest.mark.parametrize(
-    ("input_size", "output_size", "params_dtype", "bias", "on_gfx950"),
+    ("input_size", "output_size", "params_dtype", "bias", "on_gfx950", "out_dtype"),
     [
-        pytest.param(6144, 128, torch.float32, False, False, id="gfx942"),
-        pytest.param(2048, 64, torch.float32, False, True, id="shape"),
-        pytest.param(6144, 128, torch.bfloat16, False, True, id="bf16-weight"),
-        pytest.param(6144, 128, torch.float32, True, True, id="bias"),
+        pytest.param(
+            6144, 128, torch.float32, False, False, torch.float32, id="gfx942"
+        ),
+        pytest.param(2048, 64, torch.float32, False, True, torch.float32, id="shape"),
+        pytest.param(
+            6144, 128, torch.bfloat16, False, True, torch.float32, id="bf16-weight"
+        ),
+        pytest.param(6144, 128, torch.float32, True, True, torch.float32, id="bias"),
+        pytest.param(
+            7168, 896, torch.bfloat16, False, False, torch.float32, id="bf16w-gfx942"
+        ),
+        pytest.param(
+            7168, 896, torch.bfloat16, True, True, torch.float32, id="bf16w-bias"
+        ),
+        pytest.param(
+            7168,
+            896,
+            torch.bfloat16,
+            False,
+            True,
+            torch.bfloat16,
+            id="bf16w-bf16-logits",
+        ),
     ],
 )
 def test_rocm_fp32_router_gemm_rejects_unsupported_configs(
@@ -159,12 +201,14 @@ def test_rocm_fp32_router_gemm_rejects_unsupported_configs(
     params_dtype: torch.dtype,
     bias: bool,
     on_gfx950: bool,
+    out_dtype: torch.dtype,
 ) -> None:
     gate = _make_gate(
         monkeypatch,
         is_rocm=True,
         params_dtype=params_dtype,
         bias=bias,
+        out_dtype=out_dtype,
         input_size=input_size,
         output_size=output_size,
         on_gfx950=on_gfx950,
