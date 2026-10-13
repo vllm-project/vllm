@@ -384,6 +384,7 @@ steps:
 
 - label: ":nvidia: (B200) LM Eval Large Models EP"
   key: lm-eval-large-models-ep-2xb200
+  automatic_shard: true
   timeout_in_minutes: 60
   device: b200-k8s
   optional: true

@@ -733,6 +733,7 @@ steps:
 
 - label: ":nvidia: (B200) Batch Invariance"
   key: batch-invariance-b200
+  automatic_shard: true
   timeout_in_minutes: 45
   device: b200-k8s
   source_file_dependencies:
@@ -789,6 +790,7 @@ steps:
 
 - label: ":nvidia: (H100) Batch Invariance (Distributed)"
   key: batch-invariance-distributed-4xh100
+  automatic_shard: true
   timeout_in_minutes: 45
   device: h100
   optional: true
