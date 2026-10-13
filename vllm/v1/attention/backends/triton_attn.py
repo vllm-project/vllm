@@ -39,7 +39,10 @@ from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
     triton_reshape_and_cache_flash,
     triton_reshape_and_cache_flash_per_token_head_quant,
 )
-from vllm.v1.attention.ops.triton_unified_attention import unified_attention
+from vllm.v1.attention.ops.triton_unified_attention import (
+    MAX_3D_QUERY_LEN,
+    unified_attention,
+)
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVQuantMode,
@@ -80,16 +83,8 @@ class TritonAttentionMetadata:
 
     causal: bool | torch.Tensor
 
-    # For cascade attention.
-    use_cascade: bool
-    common_prefix_len: int
-    cu_prefix_query_lens: torch.Tensor | None
-    prefix_kv_lens: torch.Tensor | None
-    suffix_kv_lens: torch.Tensor | None
-
     # Optional aot scheduling
     scheduler_metadata: torch.Tensor | None = None
-    prefix_scheduler_metadata: torch.Tensor | None = None
     mm_prefix_range: dict[int, list[tuple[int, int]]] | None = None
     mm_prefix_range_tensor: torch.Tensor | None = None
     rswa_prefix_lens: torch.Tensor | None = None
@@ -152,7 +147,10 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
             )
 
         self.num_par_softmax_segments = NUM_PAR_SOFTMAX_SEGMENTS
-        # On SM120, batches whose 16-segment grid under-fills the SMs use 64.
+        # On SM120, batches whose 16-segment decode grid under-fills the SMs use
+        # 64. This counts requests, not Q blocks, on purpose: for 1..11 verify
+        # requests (K=3/5, 8 q / 1 KV head, 2k-128k context) 64 segments were
+        # faster or within 6% at 2k, and 1.1-3.6x faster from 8k up.
         self.max_seqs_64_segments = 0
         if current_platform.is_cuda() and current_platform.is_device_capability(
             (12, 0)
@@ -160,18 +158,34 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
             self.max_seqs_64_segments = (current_platform.num_compute_units() - 1) // (
                 NUM_PAR_SOFTMAX_SEGMENTS * self.num_heads_kv
             )
-        max_num_tokens_3d = self.seq_threshold_3D
+        headdim_padded = next_power_of_2(self.headdim)
+        max_query_len_3d = 1
+        speculative_config = vllm_config.speculative_config
+        # The INT4 launcher runs multi-query batches in 2D only.
+        if (
+            speculative_config is not None
+            and kv_cache_spec.kv_quant_mode != KVQuantMode.INT4_PER_TOKEN_HEAD
+        ):
+            num_speculative_tokens = speculative_config.num_speculative_tokens or 0
+            query_len = 1 + num_speculative_tokens * (
+                2 if speculative_config.parallel_drafting else 1
+            )
+            max_query_len_3d = min(query_len, MAX_3D_QUERY_LEN)
+        # Scratch is indexed by query token, including verification tokens.
+        max_num_seqs_3d = min(
+            self.seq_threshold_3D, vllm_config.scheduler_config.max_num_seqs
+        )
+        max_num_tokens_3d = max_num_seqs_3d * max_query_len_3d
         if self.max_seqs_64_segments > 0:
             self.num_par_softmax_segments = 64
             # build() reuses this scratch at 16 segments with proportionally more rows.
             max_num_tokens_3d = max(
-                min(self.max_seqs_64_segments, max_num_tokens_3d),
+                min(self.max_seqs_64_segments, max_num_seqs_3d) * max_query_len_3d,
                 cdiv(
                     max_num_tokens_3d,
                     self.num_par_softmax_segments // NUM_PAR_SOFTMAX_SEGMENTS,
                 ),
             )
-        headdim_padded = next_power_of_2(self.headdim)
         self.softmax_segm_output = torch.empty(
             (
                 max_num_tokens_3d,
@@ -230,23 +244,6 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
         block_table_tensor = common_attn_metadata.block_table_tensor
         slot_mapping = common_attn_metadata.slot_mapping
 
-        use_cascade = common_prefix_len > 0
-
-        if use_cascade:
-            cu_prefix_query_lens = torch.tensor(
-                [0, num_actual_tokens], dtype=torch.int32, device=self.device
-            )
-            prefix_kv_lens = torch.tensor(
-                [common_prefix_len], dtype=torch.int32, device=self.device
-            )
-            suffix_kv_lens = common_attn_metadata.seq_lens.cpu() - common_prefix_len
-            suffix_kv_lens = suffix_kv_lens.to(self.device)
-        else:
-            cu_prefix_query_lens = None
-            prefix_kv_lens = None
-            suffix_kv_lens = None
-            prefix_scheduler_metadata = None
-
         attn_metadata = TritonAttentionMetadata(
             num_actual_tokens=num_actual_tokens,
             max_query_len=max_query_len,
@@ -256,12 +253,6 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
             block_table=block_table_tensor,
             slot_mapping=slot_mapping,
             causal=common_attn_metadata.causal,
-            use_cascade=use_cascade,
-            common_prefix_len=common_prefix_len,
-            cu_prefix_query_lens=cu_prefix_query_lens,
-            prefix_kv_lens=prefix_kv_lens,
-            suffix_kv_lens=suffix_kv_lens,
-            prefix_scheduler_metadata=prefix_scheduler_metadata,
             seq_threshold_3D=self.seq_threshold_3D,
             num_par_softmax_segments=self.num_par_softmax_segments,
             softmax_segm_output=self.softmax_segm_output,
@@ -377,10 +368,6 @@ class TritonAttentionBackend(AttentionBackend):
     @staticmethod
     def get_impl_cls() -> type["TritonAttentionImpl"]:
         return TritonAttentionImpl
-
-    @staticmethod
-    def use_cascade_attention(*args, **kwargs) -> bool:
-        return False
 
     @staticmethod
     def get_builder_cls() -> type["TritonAttentionMetadataBuilder"]:
@@ -621,8 +608,6 @@ class TritonAttentionImpl(AttentionImpl):
         if attn_metadata is None:
             # Profiling run.
             return output.fill_(0)
-
-        assert attn_metadata.use_cascade is False
 
         # IMPORTANT!
         # NOTE(woosuk): With piece-wise CUDA graphs, this method is executed in
