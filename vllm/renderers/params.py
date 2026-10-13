@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Literal, TypeVar
+from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast
 
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs import EmbedsPrompt, TextPrompt, TokensPrompt
@@ -13,7 +13,7 @@ from vllm.utils.import_utils import LazyLoader
 if TYPE_CHECKING:
     import torch
 
-    from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
+    from vllm.renderers.chat_utils import ChatTemplateContentFormatOption
 else:
     torch = LazyLoader("torch", globals(), "torch")
 
@@ -23,6 +23,14 @@ logger = init_logger(__name__)
 
 
 _S = TypeVar("_S", list[int], "torch.Tensor")
+
+# Prompt keys whose entry i describes token i of the prompt, so they must be
+# reduced with the same slice as the prompt tokens themselves. Anything added
+# here is truncated by `TokenizeParams.apply_post_tokenization`.
+_PARALLEL_TO_PROMPT_TOKENS = (
+    "prompt_token_offsets",
+    "prompt_is_token_ids",
+)
 
 
 def merge_kwargs(
@@ -87,9 +95,6 @@ class ChatParams:
     mm_processor_kwargs: dict[str, Any] | None = None
     """The kwargs to pass to the multi-modal processor."""
 
-    return_assistant_tokens_mask: bool = False
-    """Request a per-token assistant mask from apply_chat_template."""
-
     tool_choice: Any | None = None
     """Request-level tool choice for renderers that need API metadata."""
 
@@ -124,7 +129,6 @@ class ChatParams:
                 default_mm_processor_kwargs,
                 self.mm_processor_kwargs,
             ),
-            return_assistant_tokens_mask=self.return_assistant_tokens_mask,
             tool_choice=self.tool_choice,
             response_format=self.response_format,
         )
@@ -203,11 +207,38 @@ class TokenizeParams:
 
     @property
     def max_input_tokens(self) -> int | None:
-        """Maximum allowed number of input tokens."""
+        """Maximum allowed number of input tokens.
+
+        ``max_output_tokens`` is *not* subtracted here: the value represents the
+        actual model context length, not a reservation of output space.
+        Downstream clamping of the sampling ``max_tokens`` is handled by
+        ``get_max_tokens()`` in the entrypoint layer.
+        """
         if self.max_total_tokens is None:
             return None
 
-        return self.max_total_tokens - self.max_output_tokens
+        return self.max_total_tokens
+
+    @property
+    def max_truncation_tokens(self) -> int | None:
+        """Maximum prompt length that truncation may reduce a prompt to.
+
+        For generative requests this is `max_input_tokens` less one, holding a
+        token of context back for output.  Truncating to the full
+        `max_total_tokens` would leave `get_max_tokens()` clamping the sampling
+        budget to 0, turning an over-long prompt into a silent zero-token
+        generation.
+
+        Pooling requests set `max_output_tokens = 0` and emit an embedding
+        rather than generated tokens, so they keep the full input budget.
+        """
+        max_input_tokens = self.max_input_tokens
+        if max_input_tokens is None:
+            return None
+        if self.max_output_tokens == 0:
+            return max_input_tokens
+
+        return max(0, max_input_tokens - 1)
 
     def __post_init__(self) -> None:
         max_total_tokens = self.max_total_tokens
@@ -230,7 +261,7 @@ class TokenizeParams:
             raise VLLMValidationError(
                 f"{self.max_output_tokens_param}={max_output_tokens} "
                 f"cannot be greater than "
-                f"{self.max_total_tokens_param}={max_total_tokens=}. "
+                f"{self.max_total_tokens_param}={max_total_tokens}. "
                 f"Please request fewer output tokens.",
                 parameter=self.max_output_tokens_param,
                 value=max_output_tokens,
@@ -243,14 +274,15 @@ class TokenizeParams:
         ):
             raise VLLMValidationError(
                 f"{self.truncate_prompt_tokens_param}={truncate_prompt_tokens} "
-                f"cannot be greater than {self.max_total_tokens_param} - "
-                f"{self.max_output_tokens_param} = {max_input_tokens}. "
+                f"cannot be greater than {self.max_total_tokens_param} "
+                f"= {max_input_tokens}. "
                 f"Please request a smaller truncation size.",
                 parameter=self.truncate_prompt_tokens_param,
                 value=truncate_prompt_tokens,
             )
 
     def with_kwargs(self, **tokenization_kwargs: Any):
+        has_max_length = "max_length" in tokenization_kwargs
         max_length = tokenization_kwargs.pop("max_length", self.max_input_tokens)
         pad_prompt_tokens = tokenization_kwargs.pop(
             "pad_prompt_tokens", self.pad_prompt_tokens
@@ -297,13 +329,17 @@ class TokenizeParams:
 
         max_total_tokens = self.max_total_tokens
 
+        if has_max_length and max_total_tokens is not None and max_length is not None:
+            max_output_tokens = max_total_tokens - max_length
+        else:
+            # No explicit ``max_length`` override: preserve the original output
+            # budget instead of recomputing it from ``max_input_tokens`` (which
+            # is now the full context length).
+            max_output_tokens = self.max_output_tokens
+
         return TokenizeParams(
             max_total_tokens=max_total_tokens,
-            max_output_tokens=(
-                0
-                if max_total_tokens is None or max_length is None
-                else max_total_tokens - max_length
-            ),
+            max_output_tokens=max_output_tokens,
             pad_prompt_tokens=pad_prompt_tokens,
             truncate_prompt_tokens=truncate_prompt_tokens,
             truncation_side=truncation_side,
@@ -316,7 +352,7 @@ class TokenizeParams:
         """The arguments to pass to `tokenizer.encode`."""
         max_length = self.truncate_prompt_tokens
         if max_length is not None and max_length < 0:
-            max_length = self.max_input_tokens
+            max_length = self.max_truncation_tokens
         elif max_length is None and self.max_input_tokens is not None:
             # This prevents tokenization from taking up more resources than necessary
             # while still failing `self._token_len_check` as expected by users
@@ -351,13 +387,11 @@ class TokenizeParams:
             if len(text) > max_input_chars:
                 raise VLLMValidationError(
                     f"This model's maximum context length is "
-                    f"{self.max_total_tokens} tokens. However, you requested "
-                    f"{self.max_output_tokens} output tokens and your prompt "
+                    f"{self.max_total_tokens} tokens. However, your prompt "
                     f"contains {len(text)} characters (more than "
                     f"{max_input_chars} characters, which is the upper bound "
                     f"for {max_input_tokens} input tokens). "
-                    f"Please reduce the length of the input prompt or the "
-                    f"number of requested output tokens.",
+                    f"Please reduce the length of the input prompt.",
                     parameter="input_text",
                     value=len(text),
                 )
@@ -368,6 +402,31 @@ class TokenizeParams:
                 text = text[:max_input_chars]
 
         return text
+
+    def _get_text_truncation_offset(
+        self, tokenizer: TokenizerLike | None, text: str
+    ) -> int:
+        """Return the number of source characters removed from the left.
+
+        ``_text_len_check`` pre-truncates long text before tokenization when
+        an explicit truncation side is requested. Fast-tokenizer offsets are
+        then relative to that shortened string, so callers need this prefix
+        length to map them back to the original prompt.
+        """
+        max_input_tokens = self.max_input_tokens
+        if (
+            max_input_tokens is None
+            or tokenizer is None
+            or self.truncate_prompt_tokens is None
+            or self.truncation_side != "left"
+        ):
+            return 0
+
+        max_input_chars = max_input_tokens * tokenizer.max_chars_per_token
+        if max_input_chars <= 0:
+            return 0
+
+        return max(len(text) - max_input_chars, 0)
 
     def _text_lowercase(self, tokenizer: TokenizerLike | None, text: str) -> str:
         """Apply lowercase to prompt text if necessary."""
@@ -388,8 +447,7 @@ class TokenizeParams:
         tokenizer: TokenizerLike | None,
         prompt: TextPrompt,
     ) -> TextPrompt:
-        """
-        Ensure that the prompt meets the requirements set out by this config.
+        """Ensure that the prompt meets the requirements set out by this config.
         If that is not possible, raise a `VLLMValidationError`.
 
         This method is run before tokenization occurs.
@@ -408,30 +466,51 @@ class TokenizeParams:
             return tokens
 
         if tokenizer is None:
-            raise ValueError("Cannot pad tokens when `skip_tokenizer_init=True`")
+            raise VLLMValidationError(
+                "Cannot pad tokens when `skip_tokenizer_init=True`",
+                parameter="pad_prompt_tokens",
+            )
         if not isinstance(tokens, list):
-            raise ValueError("Cannot pad tokens for embedding inputs")
+            raise VLLMValidationError(
+                "Cannot pad tokens for embedding inputs",
+                parameter="pad_prompt_tokens",
+            )
 
         return tokens + [tokenizer.pad_token_id] * (pad_length - len(tokens))
 
-    def _token_truncation(self, tokenizer: TokenizerLike | None, tokens: _S) -> _S:
-        """Apply truncation to prompt tokens if necessary."""
+    def _truncation_slice(
+        self, tokenizer: TokenizerLike | None, length: int
+    ) -> slice | None:
+        """The slice truncation applies to a sequence of `length` tokens.
+
+        `None` means no truncation. Anything parallel to the prompt tokens
+        must be reduced with this same slice to stay aligned with them; list
+        such keys in `_PARALLEL_TO_PROMPT_TOKENS`.
+        """
         max_length = self.truncate_prompt_tokens
         if max_length is not None and max_length < 0:
-            max_length = self.max_input_tokens
+            max_length = self.max_truncation_tokens
 
-        if max_length is None or max_length >= len(tokens):
-            return tokens
+        if max_length is None or max_length >= length:
+            return None
         if max_length == 0:
-            return tokens[:0]
+            return slice(0, 0)
 
         side = self.truncation_side or (
             tokenizer.truncation_side if tokenizer is not None else None
         )
         if side == "left":
-            return tokens[-max_length:]
+            return slice(-max_length, None)
 
-        return tokens[:max_length]
+        return slice(0, max_length)
+
+    def _token_truncation(self, tokenizer: TokenizerLike | None, tokens: _S) -> _S:
+        """Apply truncation to prompt tokens if necessary."""
+        truncation = self._truncation_slice(tokenizer, len(tokens))
+        if truncation is None:
+            return tokens
+
+        return tokens[truncation]
 
     def _token_len_check(self, tokenizer: TokenizerLike | None, tokens: _S) -> _S:
         """Apply length checks to prompt tokens if necessary."""
@@ -445,15 +524,12 @@ class TokenizeParams:
             # max_input_tokens + 1 (see get_encode_kwargs), so the
             # actual prompt length could be larger.
             qualifier = "at least " if token_count == max_input_tokens + 1 else ""
-            total = token_count + self.max_output_tokens
             raise VLLMValidationError(
                 f"This model's maximum context length is "
-                f"{self.max_total_tokens} tokens. However, you requested "
-                f"{self.max_output_tokens} output tokens and your prompt "
-                f"contains {qualifier}{token_count} input tokens, "
-                f"for a total of {qualifier}{total} tokens. "
-                f"Please reduce the length of the input prompt or the "
-                f"number of requested output tokens.",
+                f"{self.max_total_tokens} tokens. However, your prompt "
+                f"contains {qualifier}{token_count} input tokens, which "
+                f"exceeds this limit even without any output tokens. "
+                f"Please reduce the length of the input prompt.",
                 parameter="input_tokens",
                 value=token_count,
             )
@@ -462,9 +538,13 @@ class TokenizeParams:
 
     def _validate_tokens(self, tokenizer: TokenizerLike | None, tokens: _S) -> _S:
         """Apply all validators to a token sequence."""
+        # Truncation runs before padding, matching the Transformers pipeline
+        # these parameters are named after. Padding first would let a
+        # subsequent left-side truncation keep only the pad tokens it just
+        # appended, discarding the prompt entirely.
         for validator in (
-            self._token_padding,
             self._token_truncation,
+            self._token_padding,
             self._token_len_check,
         ):
             tokens = validator(tokenizer, tokens)
@@ -476,8 +556,7 @@ class TokenizeParams:
         tokenizer: TokenizerLike | None,
         prompt: TokensPrompt | EmbedsPrompt,
     ) -> TokensPrompt | EmbedsPrompt:
-        """
-        Ensure that the prompt meets the requirements set out by this config.
+        """Ensure that the prompt meets the requirements set out by this config.
         If that is not possible, raise a `VLLMValidationError`.
 
         This method is run after tokenization occurs.
@@ -492,5 +571,13 @@ class TokenizeParams:
                 tokenizer,
                 prompt["prompt_embeds"],  # type: ignore[typeddict-item]
             )
+        prompt_dict = cast(dict, prompt)
+        for key in _PARALLEL_TO_PROMPT_TOKENS:
+            parallel = prompt_dict.get(key)
+            if parallel is None:
+                continue
+            truncation = self._truncation_slice(tokenizer, len(parallel))
+            if truncation is not None:
+                prompt_dict[key] = parallel[truncation]
 
         return prompt

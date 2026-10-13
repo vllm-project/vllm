@@ -3,13 +3,13 @@
 
 import torch.nn as nn
 
-from vllm.v1.worker.gpu.spec_decode.autoregressive.speculator import (
-    AutoRegressiveSpeculator,
-)
 from vllm.v1.worker.gpu.spec_decode.eagle.utils import load_eagle_model
+from vllm.v1.worker.gpu.spec_decode.target_dependent_ar.speculator import (
+    TargetDependentARSpeculator,
+)
 
 
-class MTPSpeculator(AutoRegressiveSpeculator):
+class MTPSpeculator(TargetDependentARSpeculator):
     share_mtp_topk_indices: bool = False
 
     def load_draft_model(
@@ -28,7 +28,8 @@ class MTPSpeculator(AutoRegressiveSpeculator):
         # toggles skip_topk so step 0 computes MTP's own indices and
         # steps 1+ reuse them.
         self.share_mtp_topk_indices = (
-            getattr(draft_hf_config, "index_share_for_mtp_iteration", False)
+            self.vllm_config.parallel_config.prefill_context_parallel_size == 1
+            and getattr(draft_hf_config, "index_share_for_mtp_iteration", False)
             and hasattr(draft_model.model, "set_skip_topk")
             and hasattr(draft_model.model, "compact_topk_indices")
         )

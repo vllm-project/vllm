@@ -23,7 +23,7 @@ FP4_DTYPE = torch.uint8
 FP8_DTYPE = current_platform.fp8_dtype()
 
 DTYPES = [torch.float16, torch.bfloat16]
-SHAPES = [(128, 256), (128, 128), (256, 256), (256, 128)]
+SHAPES = [(128, 256), (128, 128), (256, 256), (256, 128), (1, 256), (64, 256)]
 BLOCK_SIZE = 16
 
 

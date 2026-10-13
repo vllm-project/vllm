@@ -14,6 +14,8 @@ class OffloadingGroupConfig:
     tokens_per_block: int
     # Layer names belonging to this group.
     layer_names: tuple[str, ...]
+    # Original KVCacheConfig group index.
+    group_id: int
 
 
 @dataclass(frozen=True)
@@ -48,6 +50,10 @@ class OffloadingParallelConfig:
     dcp_size: int
     # Data parallel replica index of this engine.
     data_parallel_index: int
+    # Number of data parallel replicas.
+    data_parallel_size: int
+    # Local rank of the data parallel group, set only in SPMD mode.
+    data_parallel_rank_local: int | None
     # True when the bytes that will be persisted for a block are portable
     # across parallelism configurations: for the direct layout, concatenating
     # the block's data across all workers in rank order yields the same bytes
@@ -80,3 +86,5 @@ class OffloadingConfig:
     # True when the canonical per-layer host byte layout was requested via
     # kv_connector_extra_config; certified per-layer at worker registration.
     canonical_layout: bool = False
+    # Resolved KVCacheLayout name of the worker KV cache.
+    kv_cache_layout: str | None = None

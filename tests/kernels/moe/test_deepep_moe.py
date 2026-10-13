@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Test deepep dispatch-combine logic
-"""
+"""Test deepep dispatch-combine logic."""
 
 import dataclasses
 
@@ -56,9 +54,7 @@ MAX_TOKENS_PER_RANK = 64
 def make_weights(
     e, n, k, dtype
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """
-    Return weights w1, w2, w1_scale, w2_scale
-    """
+    """Return weights w1, w2, w1_scale, w2_scale."""
     if dtype in [torch.float16, torch.bfloat16]:
         w1 = torch.randn((e, 2 * n, k), device="cuda", dtype=dtype) / 10
         w2 = torch.randn((e, k, n), device="cuda", dtype=dtype) / 10
@@ -488,16 +484,9 @@ def test_deep_ep_moe(
     world_dp_size: tuple[int, int],
     per_act_token_quant: bool,
     workspace_init,
-    monkeypatch,
 ):
     low_latency_mode = False
     use_fp8_dispatch = False
-
-    if current_platform.is_rocm():
-        # The cooperative kernel launches on this path segfault inside the ROCm
-        # HSA runtime at process exit while rocprofiler-sdk is attached, and
-        # torch attaches it implicitly. Workers are spawned, so they inherit it.
-        monkeypatch.setenv("ROCPROFILER_REGISTER_ENABLED", "0")
 
     set_random_seed(7)
     world_size, dp_size = world_dp_size

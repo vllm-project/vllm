@@ -2,8 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""
-Convert a vLLM Recipes per-hardware JSON rendering into:
+"""Convert a vLLM Recipes per-hardware JSON rendering into:
 
   1) config.yml - native `vllm serve --config` YAML
   2) env.sh     - environment variables required by the recipe
@@ -38,6 +37,7 @@ by the Recipes API instead of synthesizing strategy URLs locally.
 The converter intentionally targets a single `vllm serve` process. If the
 recipe rendering is multi-node, PD-disaggregated, or another multi-process
 deployment, it exits instead of silently generating an incomplete config.
+
 """
 
 from __future__ import annotations
@@ -57,13 +57,38 @@ try:
 except ImportError as exc:
     raise SystemExit("PyYAML is required. Install it with: pip install pyyaml") from exc
 
-
 DEFAULT_API_BASE = "https://recipes.vllm.ai"
 
-SHORT_ALIASES = {
-    "-tp": "tensor-parallel-size",
+VALUE_SHORT_ALIASES = {
+    "-q": "quantization",
     "-pp": "pipeline-parallel-size",
+    "-n": "nnodes",
+    "-r": "node-rank",
+    "-tp": "tensor-parallel-size",
+    "-dcp": "decode-context-parallel-size",
+    "-pcp": "prefill-context-parallel-size",
     "-dp": "data-parallel-size",
+    "-dpn": "data-parallel-rank",
+    "-dpr": "data-parallel-start-rank",
+    "-dpl": "data-parallel-size-local",
+    "-dpa": "data-parallel-address",
+    "-dpp": "data-parallel-rpc-port",
+    "-dpb": "data-parallel-backend",
+    "-asc": "api-server-count",
+}
+
+FLAG_SHORT_ALIASES = {
+    "-dph": "data-parallel-hybrid-lb",
+    "-dpe": "data-parallel-external-lb",
+    "-dpm": "data-parallel-multi-port-external-lb",
+    "-ep": "enable-expert-parallel",
+}
+
+DICT_SHORT_ALIASES = {
+    "-sc": "speculative-config",
+    "-dc": "diffusion-config",
+    "-cc": "compilation-config",
+    "-ac": "attention-config",
 }
 
 
@@ -116,6 +141,121 @@ def parse_args() -> argparse.Namespace:
         "--env-out",
         default="env.sh",
         help="Output shell environment file (default: env.sh)",
+    )
+
+    tuning = p.add_argument_group(
+        "optional runtime tuning",
+        (
+            "Refine the recipe baseline only when additional information is supplied. "
+            "Runtime tuning is enabled only for recipe hardware with a registered "
+            "policy (currently: xeon6)."
+        ),
+    )
+    tuning.add_argument(
+        "--detect-hardware",
+        action="store_true",
+        help=(
+            "Detect effective CPU/NUMA/memory resources and allow the selected "
+            "recipe-hardware policy to override recipe runtime arguments."
+        ),
+    )
+    tuning.add_argument(
+        "--input-tokens",
+        type=int,
+        help="Expected input-token length. Optional workload hint.",
+    )
+    tuning.add_argument(
+        "--output-tokens",
+        type=int,
+        help="Expected output-token length. Optional workload hint.",
+    )
+    tuning.add_argument(
+        "--concurrency",
+        type=int,
+        help="Expected maximum concurrent requests. Optional workload hint.",
+    )
+    tuning.add_argument(
+        "--ttft-sla-ms",
+        type=float,
+        help="Optional time-to-first-token objective in milliseconds.",
+    )
+    tuning.add_argument(
+        "--tpot-sla-ms",
+        type=float,
+        help="Optional time-per-output-token objective in milliseconds.",
+    )
+    tuning.add_argument(
+        "--target-qps",
+        type=float,
+        help="Optional capacity target for future DP/capacity tuning.",
+    )
+    tuning.add_argument(
+        "--tune-scheduler",
+        action="store_true",
+        help=(
+            "Opt in to workload-derived max-num-seqs and "
+            "max-num-batched-tokens. By default scheduler parameters remain "
+            "at recipe/vLLM defaults."
+        ),
+    )
+
+    sweep = p.add_argument_group(
+        "optional performance sweep",
+        ("Generate benchmark files alongside the directly deployable runtime config."),
+    )
+    sweep.add_argument(
+        "--sweep-stage",
+        choices=("parallel-layout", "concurrency", "scheduler", "all"),
+        help="Generate only the selected stage, or all stages in dependency order.",
+    )
+    sweep.add_argument(
+        "--generate-sweep",
+        action="store_true",
+        help="Backward-compatible alias for --generate-scheduler-sweep.",
+    )
+    sweep.add_argument(
+        "--generate-scheduler-sweep",
+        action="store_true",
+        help=("Generate the max-num-seqs/max-num-batched-tokens scheduler sweep."),
+    )
+    sweep.add_argument(
+        "--generate-parallel-layout-sweep",
+        action="store_true",
+        help=(
+            "Generate a standalone NUMA-aware TP/DP sweep. Requires --detect-hardware."
+        ),
+    )
+    sweep.add_argument(
+        "--generate-concurrency-sweep",
+        action="store_true",
+        help=(
+            "Generate a max_concurrency workload sweep using "
+            "vllm bench sweep serve_workload."
+        ),
+    )
+    sweep.add_argument(
+        "--generate-full-sweep",
+        action="store_true",
+        help=(
+            "Generate the end-to-end TP/DP -> max_concurrency -> scheduler "
+            "tuning pipeline. Requires --detect-hardware."
+        ),
+    )
+    sweep.add_argument(
+        "--tp-dp-numa-bind-workaround",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Temporary Xeon TP/DP NUMA-binding workaround. For parallel-layout "
+            "and full sweeps, generate an explicit VLLM_CPU_OMP_THREADS_BIND "
+            "from detected NUMA topology. Enabled by default; disable with "
+            "--no-tp-dp-numa-bind-workaround after the vLLM DP binding fix."
+        ),
+    )
+    sweep.add_argument(
+        "--sweep-out-dir",
+        default="sweep",
+        help="Output directory for optional sweep files (default: sweep).",
     )
     return p.parse_args()
 
@@ -400,6 +540,11 @@ def discover_recipe_source(
 
 def coerce(value: str) -> Any:
     """Convert CLI string values to useful YAML scalar/object types."""
+    # Recipes may preserve Python-style booleans in dotted config aliases,
+    # for example: -cc.pass_config.fuse_rope_kvcache=True.
+    if value in ("True", "False"):
+        return value == "True"
+
     try:
         return json.loads(value)
     except (json.JSONDecodeError, TypeError):
@@ -409,8 +554,19 @@ def coerce(value: str) -> Any:
 def is_option_token(token: str) -> bool:
     if token.startswith("--"):
         return True
-    if token in SHORT_ALIASES or token == "-O":
+
+    short_name = token.split("=", 1)[0]
+    if (
+        short_name in VALUE_SHORT_ALIASES
+        or short_name in FLAG_SHORT_ALIASES
+        or short_name in DICT_SHORT_ALIASES
+        or token == "-O"
+    ):
         return True
+
+    if any(token.startswith(f"{alias}.") for alias in DICT_SHORT_ALIASES):
+        return True
+
     return token.startswith("-O") and len(token) > 2
 
 
@@ -445,8 +601,7 @@ def merge_value(dst: dict[str, Any], path: list[str], value: Any) -> None:
 
 
 def normalize_key(raw_key: str) -> list[str]:
-    """
-    Convert the CLI key to config-file spelling.
+    """Convert the CLI key to config-file spelling.
 
     Only the top-level CLI option name gets underscore -> dash normalization.
     Nested JSON field names after a dot are preserved.
@@ -490,22 +645,85 @@ def argv_to_config(argv: list[Any]) -> dict[str, Any]:
             i += 2
             continue
 
-        # Selected common short aliases.
-        if token in SHORT_ALIASES:
-            if i + 1 >= len(argv):
-                raise ValueError(f"{token} is missing its value")
+        # Dotted dictionary aliases accepted by FlexibleArgumentParser:
+        #   -cc.mode=3
+        #   -cc.mode 3
+        #   -cc.pass_config.foo=True
+        #   -cc.custom_ops+ -quant_fp8
+        # The same syntax applies to -sc, -dc, and -ac.
+        dotted_alias = next(
+            (alias for alias in DICT_SHORT_ALIASES if token.startswith(f"{alias}.")),
+            None,
+        )
+        if dotted_alias is not None:
+            dotted = token[len(dotted_alias) + 1 :]
+            raw_key, separator, raw_value = dotted.partition("=")
+
+            append = raw_key.endswith("+")
+            if append:
+                raw_key = raw_key[:-1]
+
+            if not raw_key:
+                raise ValueError(f"{token} must contain a key after {dotted_alias}.")
+
+            if not separator:
+                if i + 1 >= len(argv):
+                    raise ValueError(f"{token} is missing its value")
+                # Consume the next token unconditionally. Dotted list values may
+                # themselves begin with "-", for example "-quant_fp8".
+                raw_value = argv[i + 1]
+                i += 2
+            else:
+                i += 1
+
+            value: Any = raw_value.split(",") if append else coerce(raw_value)
+
             merge_value(
                 config,
-                [SHORT_ALIASES[token]],
-                coerce(argv[i + 1]),
+                [DICT_SHORT_ALIASES[dotted_alias], *raw_key.split(".")],
+                value,
             )
+            continue
+
+        # Support -alias=value for value-bearing and whole-dict aliases.
+        if "=" in token:
+            short_name, raw_value = token.split("=", 1)
+            if short_name in VALUE_SHORT_ALIASES:
+                merge_value(
+                    config,
+                    [VALUE_SHORT_ALIASES[short_name]],
+                    coerce(raw_value),
+                )
+                i += 1
+                continue
+            if short_name in DICT_SHORT_ALIASES:
+                merge_value(
+                    config,
+                    [DICT_SHORT_ALIASES[short_name]],
+                    coerce(raw_value),
+                )
+                i += 1
+                continue
+
+        # Boolean short aliases are flags and do not consume a value.
+        if token in FLAG_SHORT_ALIASES:
+            merge_value(config, [FLAG_SHORT_ALIASES[token]], True)
+            i += 1
+            continue
+
+        # Scalar and whole-dictionary short aliases consume one value.
+        if token in VALUE_SHORT_ALIASES or token in DICT_SHORT_ALIASES:
+            if i + 1 >= len(argv):
+                raise ValueError(f"{token} is missing its value")
+            key = VALUE_SHORT_ALIASES.get(token) or DICT_SHORT_ALIASES[token]
+            merge_value(config, [key], coerce(argv[i + 1]))
             i += 2
             continue
 
         if not token.startswith("--"):
             raise ValueError(
                 f"Unexpected positional/short argument {token!r}. "
-                "The converter expects Recipes to emit long-form vLLM serve options."
+                "The converter accepts vLLM serve long options and known short aliases."
             )
 
         # --key=value
@@ -598,10 +816,22 @@ def write_config(
     Path(path).write_text("\n".join(metadata) + "\n" + body, encoding="utf-8")
 
 
-def write_env(path: str, source: str, recipe: dict[str, Any]) -> None:
-    env = recipe.get("env") or {}
-    if not isinstance(env, dict):
-        raise ValueError(f"Recipe `env` must be an object, got {type(env).__name__}")
+def write_env(
+    path: str,
+    source: str,
+    recipe: dict[str, Any],
+    *,
+    env_overrides: dict[str, object] | None = None,
+) -> None:
+    recipe_env = recipe.get("env") or {}
+    if not isinstance(recipe_env, dict):
+        raise ValueError(
+            f"Recipe `env` must be an object, got {type(recipe_env).__name__}"
+        )
+
+    env = dict(recipe_env)
+    overrides = env_overrides or {}
+    env.update(overrides)
 
     lines = [
         "#!/usr/bin/env bash",
@@ -609,6 +839,9 @@ def write_env(path: str, source: str, recipe: dict[str, Any]) -> None:
         f"# Source: {source}",
         "",
     ]
+
+    if overrides:
+        lines.append("# Temporary runtime overrides derived from detected hardware.")
 
     if env:
         for key, value in env.items():
@@ -625,6 +858,34 @@ def main() -> int:
     args = parse_args()
 
     try:
+        sweep_modes = {
+            "--generate-sweep": args.generate_sweep,
+            "--generate-scheduler-sweep": args.generate_scheduler_sweep,
+            "--generate-parallel-layout-sweep": args.generate_parallel_layout_sweep,
+            "--generate-concurrency-sweep": args.generate_concurrency_sweep,
+            "--generate-full-sweep": args.generate_full_sweep,
+        }
+        selected_sweep_modes = [
+            name for name, enabled in sweep_modes.items() if enabled
+        ]
+        if len(selected_sweep_modes) > 1:
+            raise ValueError(
+                "Choose exactly one sweep-generation mode: "
+                + ", ".join(selected_sweep_modes)
+            )
+        if args.sweep_stage is not None:
+            if selected_sweep_modes:
+                raise ValueError(
+                    "Do not combine --sweep-stage with --generate-*-sweep options."
+                )
+            stage_flags = {
+                "parallel-layout": "generate_parallel_layout_sweep",
+                "concurrency": "generate_concurrency_sweep",
+                "scheduler": "generate_scheduler_sweep",
+                "all": "generate_full_sweep",
+            }
+            setattr(args, stage_flags[args.sweep_stage], True)
+            selected_sweep_modes = ["--sweep-stage=" + args.sweep_stage]
         source = args.source
         if source is None:
             source = discover_recipe_source(
@@ -642,18 +903,232 @@ def main() -> int:
 
         argv = recipe_argv(recipe)
         config = argv_to_config(argv)
+
+        tuning_requested = (
+            args.detect_hardware
+            or args.tune_scheduler
+            or bool(selected_sweep_modes)
+            or any(
+                value is not None
+                for value in (
+                    args.input_tokens,
+                    args.output_tokens,
+                    args.concurrency,
+                    args.ttft_sla_ms,
+                    args.tpot_sla_ms,
+                    args.target_qps,
+                )
+            )
+        )
+
+        tuning = None
+        sweep_config = None
+        workload = None
+        sweep_writer = None
+        hardware = None
+        env_overrides: dict[str, object] = {}
+        if tuning_requested:
+            # Keep plain Recipes conversion lightweight. vLLM-specific modules
+            # are imported only for optional runtime tuning or sweep generation.
+            from sweep.runtime_tuning import (
+                WorkloadHints,
+                finetune_runtime_config,
+                get_runtime_tuning_policies,
+            )
+
+            workload = WorkloadHints(
+                input_tokens=args.input_tokens,
+                output_tokens=args.output_tokens,
+                concurrency=args.concurrency,
+                ttft_sla_ms=args.ttft_sla_ms,
+                tpot_sla_ms=args.tpot_sla_ms,
+                target_qps=args.target_qps,
+            )
+
+            if selected_sweep_modes:
+                from sweep.sweep_generation import validate_sweep_workload
+
+                validate_sweep_workload(workload)
+
+            if args.generate_sweep or args.generate_scheduler_sweep:
+                from sweep.sweep_generation import write_sweep_files
+
+                sweep_writer = write_sweep_files
+
+            recipe_hardware = recipe.get("hardware")
+            scheduler_tuning_requested = bool(
+                args.tune_scheduler
+                or args.generate_sweep
+                or args.generate_scheduler_sweep
+            )
+            policies = get_runtime_tuning_policies(
+                recipe_hardware,
+                tune_scheduler=scheduler_tuning_requested,
+            )
+
+            if args.detect_hardware:
+                from hardware_detection import (
+                    build_numa_omp_threads_bind,
+                    detect_hardware,
+                )
+
+                hardware = detect_hardware()
+
+                if (
+                    args.tp_dp_numa_bind_workaround
+                    and str(recipe_hardware).lower() == "xeon6"
+                    and (
+                        args.generate_parallel_layout_sweep or args.generate_full_sweep
+                    )
+                ):
+                    recipe_env = recipe.get("env") or {}
+                    current_binding = (
+                        recipe_env.get("VLLM_CPU_OMP_THREADS_BIND")
+                        if isinstance(recipe_env, dict)
+                        else None
+                    )
+
+                    # Preserve an explicit recipe-provided manual binding.
+                    # Replace an unset or "auto" value with the temporary
+                    # topology-derived binding.
+                    if current_binding in (None, "auto"):
+                        env_overrides["VLLM_CPU_OMP_THREADS_BIND"] = (
+                            build_numa_omp_threads_bind(
+                                hardware,
+                                reserved_cores_per_numa=1,
+                            )
+                        )
+
+            tuning = finetune_runtime_config(
+                config,
+                hardware=hardware,
+                workload=workload,
+                policies=policies,
+            )
+            config.update(tuning.overrides)
+            if args.tune_scheduler:
+                config.update(tuning.sweep_overrides)
+            sweep_config = dict(config)
+            sweep_config.update(tuning.sweep_overrides)
+
         write_config(args.config_out, source, recipe, config)
-        write_env(args.env_out, source, recipe)
+        write_env(
+            args.env_out,
+            source,
+            recipe,
+            env_overrides=env_overrides,
+        )
+
+        sweep_files: list[Path] = []
+        if args.generate_full_sweep:
+            if not args.detect_hardware or hardware is None:
+                raise ValueError("--generate-full-sweep requires --detect-hardware.")
+            assert workload is not None
+            from sweep.sweep_generation import write_full_sweep_files
+
+            sweep_files = write_full_sweep_files(
+                args.sweep_out_dir,
+                config_path=args.config_out,
+                env_path=args.env_out,
+                config=config,
+                workload=workload,
+                numa_node_count=hardware.numa_node_count,
+                tune_scheduler=args.tune_scheduler,
+            )
+        elif args.generate_parallel_layout_sweep:
+            if not args.detect_hardware or hardware is None:
+                raise ValueError(
+                    "--generate-parallel-layout-sweep requires --detect-hardware."
+                )
+            assert workload is not None
+            from sweep.sweep_generation import write_parallel_layout_sweep_files
+
+            sweep_files = write_parallel_layout_sweep_files(
+                args.sweep_out_dir,
+                config_path=args.config_out,
+                env_path=args.env_out,
+                config=config,
+                workload=workload,
+                numa_node_count=hardware.numa_node_count,
+                tune_scheduler=args.tune_scheduler,
+            )
+        elif args.generate_concurrency_sweep:
+            assert workload is not None
+            from sweep.sweep_generation import write_concurrency_sweep_files
+
+            sweep_files = write_concurrency_sweep_files(
+                args.sweep_out_dir,
+                config_path=args.config_out,
+                env_path=args.env_out,
+                config=config,
+                workload=workload,
+                tune_scheduler=args.tune_scheduler,
+            )
+        elif args.generate_sweep or args.generate_scheduler_sweep:
+            assert workload is not None
+            assert sweep_writer is not None
+            assert sweep_config is not None
+            sweep_files = sweep_writer(
+                args.sweep_out_dir,
+                config_path=args.config_out,
+                env_path=args.env_out,
+                config=sweep_config,
+                workload=workload,
+            )
+
+        if tuning is not None:
+            if tuning.overrides:
+                print("Initial runtime suggestion:")
+                for key, value in tuning.overrides.items():
+                    print(f"  {key}: {value}")
+            if tuning.sweep_overrides:
+                if args.tune_scheduler:
+                    print("Workload-derived scheduler tuning:")
+                elif selected_sweep_modes:
+                    print("Explicit scheduler sweep seed:")
+                for key, value in tuning.sweep_overrides.items():
+                    print(f"  {key}: {value}")
+            for note in tuning.notes:
+                print(f"  tuning: {note}")
     except Exception as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
 
     print(f"Wrote {args.config_out}")
     print(f"Wrote {args.env_out}")
+    if sweep_files:
+        print(f"Wrote optional sweep package under {args.sweep_out_dir}/")
     print()
     print("Run:")
     print(f"  source {shlex.quote(args.env_out)}")
     print(f"  vllm serve --config {shlex.quote(args.config_out)}")
+    if sweep_files:
+        sweep_dir = Path(args.sweep_out_dir)
+        run_parallel = sweep_dir / "run_parallel_layout_sweep.sh"
+        recommend_parallel = sweep_dir / "recommend_parallel_layout.py"
+        run_concurrency = sweep_dir / "run_concurrency_sweep.sh"
+        recommend_concurrency = sweep_dir / "recommend_concurrency.py"
+        run_sweep = sweep_dir / "run_sweep.sh"
+        recommend = sweep_dir / "recommend.py"
+        run_full = sweep_dir / "run_full_sweep.sh"
+        print()
+        print("Optional performance sweep:")
+        if args.generate_full_sweep:
+            print(f"  {shlex.quote(str(run_full))}")
+        elif args.generate_concurrency_sweep:
+            print(f"  {shlex.quote(str(run_concurrency))} --dry-run")
+            print(f"  {shlex.quote(str(run_concurrency))}")
+            print(f"  {shlex.quote(str(recommend_concurrency))}")
+        elif args.generate_parallel_layout_sweep:
+            print(f"  {shlex.quote(str(run_parallel))} --dry-run")
+            print(f"  {shlex.quote(str(run_parallel))}")
+            print(f"  {shlex.quote(str(recommend_parallel))}")
+        else:
+            print(f"  {shlex.quote(str(run_sweep))} --dry-run")
+            print(f"  {shlex.quote(str(run_sweep))}")
+            print()
+            print("After the sweep:")
+            print(f"  {shlex.quote(str(recommend))}")
     return 0
 
 
