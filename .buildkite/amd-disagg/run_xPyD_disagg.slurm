@@ -62,7 +62,8 @@ CONTAINER_SCRIPTS="${CONTAINER_SCRIPTS:-/vllm-workspace/.buildkite/amd-disagg}"
 CLUSTER_ENV_IN="${CLUSTER_ENV_IN:-${CONTAINER_SCRIPTS}/cluster.sh}"
 
 # Overlay the staged vLLM fixes onto the image's copies: the MXFP4 FP4 dispatch
-# spans prepare_finalize/mori.py, all2all_utils.py and experts/rocm_aiter_moe.py.
+# spans prepare_finalize/mori.py, all2all_utils.py and experts/rocm_aiter_moe.py;
+# moriio_connector.py and deepseek_v32/amd/model.py carry the GLM-5.2 PD fixes.
 # VLLM_DIST_PACKAGES must match the image. If it doesn't, the mounts land on
 # paths nothing imports and the run silently uses the image's copies.
 VLLM_DIST_PACKAGES="${VLLM_DIST_PACKAGES:-/usr/local/lib/python3.12/dist-packages}"
@@ -82,6 +83,16 @@ _a2a_utils_overlay="${DISAGG_SCRIPTS_DIR}/overlays/fused_moe_all2all_utils.py"
 if [ -f "$_a2a_utils_overlay" ]; then
     VLLM_OVERLAY_ARGS+=(-v "${_a2a_utils_overlay}:${_vllm_moe_dir}/all2all_utils.py:ro")
     echo "[disagg-pd] vLLM overlay: all2all_utils.py"
+fi
+_moriio_overlay="${DISAGG_SCRIPTS_DIR}/overlays/kv_connector_moriio_connector.py"
+if [ -f "$_moriio_overlay" ]; then
+    VLLM_OVERLAY_ARGS+=(-v "${_moriio_overlay}:${VLLM_DIST_PACKAGES}/vllm/distributed/kv_transfer/kv_connector/v1/moriio/moriio_connector.py:ro")
+    echo "[disagg-pd] vLLM overlay: moriio/moriio_connector.py"
+fi
+_dsv32_amd_overlay="${DISAGG_SCRIPTS_DIR}/overlays/models_deepseek_v32_amd_model.py"
+if [ -f "$_dsv32_amd_overlay" ]; then
+    VLLM_OVERLAY_ARGS+=(-v "${_dsv32_amd_overlay}:${VLLM_DIST_PACKAGES}/vllm/models/deepseek_v32/amd/model.py:ro")
+    echo "[disagg-pd] vLLM overlay: deepseek_v32/amd/model.py"
 fi
 
 

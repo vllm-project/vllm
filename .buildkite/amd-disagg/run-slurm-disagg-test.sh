@@ -77,6 +77,12 @@ echo "[slurm-submit] staged scripts for compute nodes: ${DISAGG_SCRIPTS_DIR}" >&
 #   prepare_finalize/mori.py, all2all_utils.py and experts/rocm_aiter_moe.py --
 #   under MoRI, MXFP4 is dispatched as packed FP4 with e8m0 scales rather than
 #   FP8-quantized; AITER cannot quantize FP8 input to MXFP4.
+#   moriio/moriio_connector.py -- hybrid-attention models (GLM-5.2 DSA) register
+#   KV layers with different per-layer block lengths (vllm-project/vllm#58585).
+#   deepseek_v32/amd/model.py -- MoRI EP already returns a reduced MoE output, so
+#   skip_final_all_reduce must not be forced (vllm-project/vllm#58589).
+#   Overlays replace the image's whole file: keep these copies in sync with the
+#   image's version, or they roll back its later upstream changes.
 VLLM_REPO_ROOT="${VLLM_REPO_ROOT:-$(cd "${SCRIPT_DIR}/../.." && pwd)}"
 _overlay_src="${VLLM_REPO_ROOT}/vllm/model_executor/layers/fused_moe/prepare_finalize/mori.py"
 if [[ -f "${_overlay_src}" ]]; then
@@ -98,6 +104,20 @@ if [[ -f "${_a2a_utils_src}" ]]; then
     cp -L --no-preserve=ownership,timestamps "${_a2a_utils_src}" \
         "${STAGED_DIR}/overlays/fused_moe_all2all_utils.py"
     echo "[slurm-submit] staged vLLM overlay: all2all_utils.py (MXFP4 FP4 dispatch)" >&2
+fi
+_moriio_src="${VLLM_REPO_ROOT}/vllm/distributed/kv_transfer/kv_connector/v1/moriio/moriio_connector.py"
+if [[ -f "${_moriio_src}" ]]; then
+    mkdir -p "${STAGED_DIR}/overlays"
+    cp -L --no-preserve=ownership,timestamps "${_moriio_src}" \
+        "${STAGED_DIR}/overlays/kv_connector_moriio_connector.py"
+    echo "[slurm-submit] staged vLLM overlay: moriio/moriio_connector.py (per-layer KV block lengths)" >&2
+fi
+_dsv32_amd_src="${VLLM_REPO_ROOT}/vllm/models/deepseek_v32/amd/model.py"
+if [[ -f "${_dsv32_amd_src}" ]]; then
+    mkdir -p "${STAGED_DIR}/overlays"
+    cp -L --no-preserve=ownership,timestamps "${_dsv32_amd_src}" \
+        "${STAGED_DIR}/overlays/models_deepseek_v32_amd_model.py"
+    echo "[slurm-submit] staged vLLM overlay: deepseek_v32/amd/model.py (no forced skip_final_all_reduce)" >&2
 fi
 export IMAGE MODEL_NAME WIDE_EP_MODE xP yD GPUS_PER_NODE RUN_AFTER_HEALTH HEALTH_TIMEOUT_S
 export SHARED_MOUNT LOG_ROOT DRY_RUN MORIIO_READ_MODE
