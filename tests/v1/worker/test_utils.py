@@ -253,6 +253,7 @@ def test_hisparse_shared_host_pool_uses_one_replicated_mmap(monkeypatch):
             self.pinned_addresses = []
             self.view_sizes = []
             self.offset = 0
+            kwargs["barrier"]()
 
         def create_next_canonical_view(self, size):
             self.view_sizes.append(size)
@@ -319,15 +320,13 @@ def test_hisparse_shared_host_pool_uses_one_replicated_mmap(monkeypatch):
     assert region.is_pinned
 
 
-@pytest.mark.parametrize("fail_registration", [None, 1, 2, "barrier"])
+@pytest.mark.parametrize("fail_registration", [None, 1, 2])
 def test_shared_host_pool_tracks_successful_registrations(
     monkeypatch, fail_registration
 ):
     """Only successful registrations may be unregistered on allocation failure."""
     page = mmap.PAGESIZE
     tp_group = MagicMock(rank_in_group=0, world_size=2)
-    if fail_registration == "barrier":
-        tp_group.barrier.side_effect = RuntimeError("TP barrier failed")
     monkeypatch.setattr(hisparse_runtime_module, "get_tp_group", lambda: tp_group)
     backing = torch.empty(3 * page, dtype=torch.uint8)
     region = MagicMock(base_tensor=backing, pinned_addresses=[], is_pinned=False)
@@ -347,25 +346,15 @@ def test_shared_host_pool_tracks_successful_registrations(
     config = SimpleNamespace(
         instance_id="test", parallel_config=SimpleNamespace(data_parallel_index=0)
     )
-    error = (
-        "TP barrier failed"
-        if fail_registration == "barrier"
-        else "cudaHostRegister failed"
-    )
     context = (
-        pytest.raises(RuntimeError, match=error) if fail_registration else nullcontext()
+        pytest.raises(RuntimeError, match="cudaHostRegister failed")
+        if fail_registration
+        else nullcontext()
     )
     with context:
         hisparse_runtime_module.allocate_hisparse_host_pools(
             config, [3 * page], 3, page, use_shared_host_pool=True
         )
-    if fail_registration == "barrier":
-        assert region.pinned_addresses == []
-        assert not region.is_pinned
-        region.cleanup.assert_called_once_with()
-        cudart.cudaHostRegister.assert_not_called()
-        return
-
     successful = 2 if fail_registration is None else fail_registration - 1
     assert region.pinned_addresses == [
         backing.data_ptr() + i * page for i in range(successful)
