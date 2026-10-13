@@ -33,6 +33,7 @@ from vllm.v1.worker.simulated.timing import (
     ZeroTimingProvider,
     acceptance_rates_from_log,
     get_timing_provider,
+    knn_lookup_counts,
 )
 
 
@@ -161,6 +162,26 @@ def test_table_provider_accepts_hand_written_records(tmp_path):
     assert p.estimate(decode1).device_s == pytest.approx(2e-3)
     prefill = _step(1, _req("b", 512, 0, 512))
     assert p.estimate(prefill).device_s == pytest.approx(20e-3)
+
+
+def test_table_counts_lookups_beyond_recorded_range(tmp_path):
+    table = tmp_path / "table.json"
+    table.write_text(
+        json.dumps(
+            [
+                {"num_reqs": 1, "num_tokens": 1, "sum_past_kv": 100, "device_ms": 2.0},
+                {"num_reqs": 4, "num_tokens": 4, "sum_past_kv": 400, "device_ms": 3.0},
+            ]
+        )
+    )
+    p = TableTimingProvider(_Cfg(), path=str(table), k=1)  # type: ignore[arg-type]
+    before = knn_lookup_counts()
+    p.estimate(_step(0, *(_req(str(i), 1, 100, 50) for i in range(2))))
+    # A batch larger than any recorded gets the largest recorded step's time.
+    big = p.estimate(_step(1, *(_req(str(i), 1, 100, 50) for i in range(16))))
+    assert big.device_s == pytest.approx(3e-3)
+    lookups, outside = (a - b for a, b in zip(knn_lookup_counts(), before))
+    assert (lookups, outside) == (2, 1)
 
 
 def test_simulated_async_output_waits_until_deadline():

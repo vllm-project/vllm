@@ -112,9 +112,49 @@ def max_rate_meeting_slo(
     return lo
 
 
+_NUM_INSTANCES = ("_num_prefill", "_num_decode")
+_ROLES = ("prefill", "decode")
+
+
+def split_roles(
+    serve_comb: ParameterSweepItem,
+) -> tuple[ParameterSweepItem, dict[str, ParameterSweepItem], dict[str, int]]:
+    """A combination's parameters for every instance, those of each role of a
+    disaggregated deployment (keys `_prefill.<param>` and `_decode.<param>`),
+    and its instance counts (`_num_prefill` and `_num_decode`, each 1 if only
+    the other is given; empty for an aggregated deployment)."""
+    common = ParameterSweepItem(
+        {
+            k: v
+            for k, v in serve_comb.items()
+            if k not in _NUM_INSTANCES and not k.startswith(("_prefill.", "_decode."))
+        }
+    )
+    roles = {
+        role: ParameterSweepItem(
+            {
+                k.removeprefix(f"_{role}."): v
+                for k, v in serve_comb.items()
+                if k.startswith(f"_{role}.")
+            }
+        )
+        for role in _ROLES
+    }
+    counts = {}
+    if any(k in serve_comb for k in _NUM_INSTANCES) or any(roles.values()):
+        counts = {
+            role: int(serve_comb.get(f"_num_{role}", 1))  # type: ignore[call-overload]
+            for role in _ROLES
+        }
+    return common, roles, counts
+
+
 @dataclass
 class _CombTask:
-    serve_cmd: list[str]
+    serve_cmds: dict[str, list[str]]
+    """`vllm serve` command per role: "serve" for an aggregated deployment,
+    "prefill" and "decode" for a disaggregated one."""
+    num_instances: dict[str, int]
     bench_cmd: list[str]
     serve_comb: ParameterSweepItem
     bench_comb: ParameterSweepItem
@@ -122,6 +162,7 @@ class _CombTask:
     slo: dict[str, float] | None
     search_iters: int
     frontend_latency_ms: float
+    handoff_latency_ms: float
     index: int
 
 
@@ -164,20 +205,43 @@ def _simulate_comb(task: _CombTask) -> None:
     from vllm.entrypoints.launchers.cli_args import make_arg_parser
     from vllm.sampling_params import SamplingParams
     from vllm.tokenizers import get_tokenizer
-    from vllm.v1.worker.simulated.offline import TimedRequest, make_engine, run
+    from vllm.v1.engine.llm_engine import LLMEngine
+    from vllm.v1.worker.simulated.disaggregated import (
+        make_instance,
+        run_disaggregated,
+    )
+    from vllm.v1.worker.simulated.offline import (
+        SimulationResult,
+        TimedRequest,
+        make_engine,
+        run,
+    )
+    from vllm.v1.worker.simulated.timing import knn_lookup_counts
 
-    serve_args = make_arg_parser(FlexibleArgumentParser()).parse_args(
-        _subcommand_args(task.serve_cmd, ("vllm", "serve"))
-    )
-    if serve_args.model_tag is not None:
-        serve_args.model = serve_args.model_tag
-    engine_args = EngineArgs.from_cli_args(serve_args)
-    _select_devices(
-        task.index,
-        engine_args.tensor_parallel_size
-        * engine_args.pipeline_parallel_size
-        * engine_args.data_parallel_size,
-    )
+    def engine_args_of(cmd: list[str]) -> EngineArgs:
+        serve_args = make_arg_parser(FlexibleArgumentParser()).parse_args(
+            _subcommand_args(cmd, ("vllm", "serve"))
+        )
+        if serve_args.model_tag is not None:
+            serve_args.model = serve_args.model_tag
+        engine_args = EngineArgs.from_cli_args(serve_args)
+        if engine_args.simulation_config.clock == "virtual" or task.num_instances:
+            # Under the virtual clock (which disaggregated instances always
+            # use) host time comes only from the timing model, so the engine's
+            # stats collection costs wall time and changes nothing.
+            engine_args.disable_log_stats = True
+        return engine_args
+
+    role_args = {role: engine_args_of(cmd) for role, cmd in task.serve_cmds.items()}
+    num_ranks = {
+        role: args.tensor_parallel_size
+        * args.pipeline_parallel_size
+        * args.data_parallel_size
+        for role, args in role_args.items()
+    }
+    # Disaggregated instances run in this process, with one rank each.
+    _select_devices(task.index, 1 if task.num_instances else num_ranks["serve"])
+    engine_args = next(iter(role_args.values()))
 
     bench_parser = FlexibleArgumentParser()
     add_bench_cli_args(bench_parser)
@@ -206,17 +270,47 @@ def _simulate_comb(task: _CombTask) -> None:
         _prompt_token_ids(s.prompt, tokenizer, bench_args.backend) for s in samples
     ]
 
-    if engine_args.simulation_config.clock == "virtual":
-        # Under the virtual clock host time comes only from the timing model,
-        # so the engine's stats collection costs wall time and changes nothing.
-        engine_args.disable_log_stats = True
-    engine = make_engine(engine_args)
-    parallel_config = engine.vllm_config.parallel_config
-    layout = {
-        "tensor_parallel_size": parallel_config.tensor_parallel_size,
-        "pipeline_parallel_size": parallel_config.pipeline_parallel_size,
-        "data_parallel_size": parallel_config.data_parallel_size,
-    }
+    engines: list[LLMEngine]
+    if task.num_instances:
+        prefill = [
+            make_instance(role_args["prefill"], "kv_producer", f"prefill{i}")
+            for i in range(task.num_instances["prefill"])
+        ]
+        decode = [
+            make_instance(role_args["decode"], "kv_consumer", f"decode{i}")
+            for i in range(task.num_instances["decode"])
+        ]
+        engines = [*prefill, *decode]
+        layout: dict[str, object] = {
+            "gpu_count": sum(
+                n * num_ranks[role] for role, n in task.num_instances.items()
+            )
+        }
+
+        def simulate_run(requests: list[TimedRequest]) -> SimulationResult:
+            return run_disaggregated(
+                prefill,
+                decode,
+                requests,
+                handoff_latency_s=task.handoff_latency_ms * 1e-3,
+                frontend_latency_s=task.frontend_latency_ms * 1e-3,
+            )
+    else:
+        engine = make_engine(engine_args)
+        engines = [engine]
+        parallel_config = engine.vllm_config.parallel_config
+        layout = {
+            "tensor_parallel_size": parallel_config.tensor_parallel_size,
+            "pipeline_parallel_size": parallel_config.pipeline_parallel_size,
+            "data_parallel_size": parallel_config.data_parallel_size,
+            "gpu_count": num_ranks["serve"],
+        }
+
+        def simulate_run(requests: list[TimedRequest]) -> SimulationResult:
+            return run(
+                engine, requests, frontend_latency_s=task.frontend_latency_ms * 1e-3
+            )
+
     runs: dict[float, dict[str, object]] = {}
 
     def evaluate(rate: float) -> dict[str, object]:
@@ -247,9 +341,12 @@ def _simulate_comb(task: _CombTask) -> None:
             for prompt, sample, delay in zip(prompts, samples, delays)
         ]
         # As `vllm bench sweep serve` does between runs.
-        engine.reset_prefix_cache(reset_connector=True)
-        result = run(
-            engine, requests, frontend_latency_s=task.frontend_latency_ms * 1e-3
+        for e in engines:
+            e.reset_prefix_cache(reset_connector=True)
+        lookups, outside = knn_lookup_counts()
+        result = simulate_run(requests)
+        lookups, outside = (
+            a - b for a, b in zip(knn_lookup_counts(), (lookups, outside))
         )
         run_data = (
             dict(task.serve_comb)
@@ -258,7 +355,15 @@ def _simulate_comb(task: _CombTask) -> None:
             | {
                 "request_rate": rate,
                 "frontend_latency_ms": task.frontend_latency_ms,
+                **(
+                    {"handoff_latency_ms": task.handoff_latency_ms}
+                    if task.num_instances
+                    else {}
+                ),
                 "wall_time_s": result.wall_time,
+                # Steps timed by k-NN lookups beyond the recorded range.
+                "timing_lookups_outside_range": outside,
+                "timing_lookups": lookups,
             }
             | result.summary()
         )
@@ -282,7 +387,8 @@ def _simulate_comb(task: _CombTask) -> None:
             with open(task.comb_dir / "result.json", "w") as f:
                 json.dump(best | {"max_request_rate": max_rate}, f, indent=4)
     finally:
-        engine.engine_core.shutdown()
+        for e in engines:
+            e.engine_core.shutdown()
 
 
 def _run_task(task: _CombTask) -> None:
@@ -303,6 +409,7 @@ class SweepSimulateArgs:
     slo: dict[str, float] | None
     search_iters: int
     frontend_latency_ms: float
+    handoff_latency_ms: float
     num_workers: int
     output_dir: Path
     experiment_name: str
@@ -330,8 +437,8 @@ class SweepSimulateArgs:
         )
         if slo and any(comb.has_param("request_rate") for comb in bench_params):
             raise ValueError("`--slo` searches request_rate; do not set it.")
-        if args.frontend_latency_ms < 0:
-            raise ValueError("`frontend_latency_ms` should be non-negative.")
+        if args.frontend_latency_ms < 0 or args.handoff_latency_ms < 0:
+            raise ValueError("Latencies should be non-negative.")
         if args.num_workers < 1:
             raise ValueError("`num_workers` should be at least 1.")
         return cls(
@@ -347,6 +454,7 @@ class SweepSimulateArgs:
             slo=slo,
             search_iters=args.search_iters,
             frontend_latency_ms=args.frontend_latency_ms,
+            handoff_latency_ms=args.handoff_latency_ms,
             num_workers=args.num_workers,
             output_dir=Path(args.output_dir),
             experiment_name=(
@@ -417,6 +525,14 @@ class SweepSimulateArgs:
             "simulation, at a rate without queueing.",
         )
         parser.add_argument(
+            "--handoff-latency-ms",
+            type=float,
+            default=0.0,
+            help="For disaggregated combinations (`_num_prefill`/`_num_decode`): "
+            "the proxy's time from a prefill instance finishing a request to the "
+            "decode instance receiving it.",
+        )
+        parser.add_argument(
             "-j",
             "--num-workers",
             type=int,
@@ -467,9 +583,13 @@ def run_main(args: SweepSimulateArgs):
 
     tasks: list[_CombTask] = []
     for serve_comb in args.serve_params:
-        serve_cmd = simulated_serve_cmd(
-            args.serve_cmd, args.simulation_config, serve_comb
-        )
+        common, roles, num_instances = split_roles(serve_comb)
+        serve_cmds = {
+            role: simulated_serve_cmd(
+                args.serve_cmd, args.simulation_config, common | roles.get(role, {})
+            )
+            for role in (num_instances or ["serve"])
+        }
         for bench_comb in args.bench_params:
             comb_dir = _get_comb_base_path(experiment_dir, serve_comb, bench_comb)
             if args.resume and (
@@ -479,7 +599,8 @@ def run_main(args: SweepSimulateArgs):
             ):
                 continue
             task = _CombTask(
-                serve_cmd=serve_cmd,
+                serve_cmds=serve_cmds,
+                num_instances=num_instances,
                 bench_cmd=bench_comb.apply_to_cmd(args.bench_cmd),
                 serve_comb=serve_comb,
                 bench_comb=bench_comb,
@@ -487,10 +608,13 @@ def run_main(args: SweepSimulateArgs):
                 slo=args.slo,
                 search_iters=args.search_iters,
                 frontend_latency_ms=args.frontend_latency_ms,
+                handoff_latency_ms=args.handoff_latency_ms,
                 index=len(tasks),
             )
-            print(f"[SIMULATE] {shlex.join(task.serve_cmd)}")
-            print(f"           {shlex.join(task.bench_cmd)}")
+            for role, cmd in serve_cmds.items():
+                count = f" x{num_instances[role]}" if num_instances else ""
+                print(f"[SIMULATE {role}{count}] {shlex.join(cmd)}")
+            print(f"[BENCH] {shlex.join(task.bench_cmd)}")
             tasks.append(task)
     if args.dry_run:
         print(f"Experiment will be saved at: {experiment_dir}")
@@ -525,6 +649,19 @@ def run_main(args: SweepSimulateArgs):
     ]
     experiment_dir.mkdir(parents=True, exist_ok=True)
     pd.DataFrame.from_records(all_data).to_csv(experiment_dir / "summary.csv")
+    extrapolated = [
+        run_data
+        for run_data in all_data
+        if run_data.get("timing_lookups_outside_range", 0)
+        > 0.01 * run_data.get("timing_lookups", 0)  # type: ignore[operator]
+    ]
+    if extrapolated:
+        print(
+            f"WARNING: {len(extrapolated)} of {len(all_data)} runs timed more than "
+            "1% of their k-NN lookups beyond the recorded range, where step times "
+            "are underestimated (timing_lookups_outside_range in their summary.json). "
+            "Record the deployment under a load that covers the simulated one."
+        )
     if args.slo:
         df = pd.DataFrame.from_records(
             [
@@ -532,17 +669,20 @@ def run_main(args: SweepSimulateArgs):
                 for path in sorted(experiment_dir.rglob("result.json"))
             ]
         )
-        gpus = (
-            df["tensor_parallel_size"]
-            * df["pipeline_parallel_size"]
-            * df["data_parallel_size"]
+        df["output_throughput_per_gpu"] = (
+            df.get("output_throughput", 0) / df["gpu_count"]
         )
-        df["output_throughput_per_gpu"] = df.get("output_throughput", 0) / gpus
+        if "timing_lookups" in df:
+            df["timing_outside_range"] = (
+                df["timing_lookups_outside_range"] / df["timing_lookups"]
+            ).fillna(0.0)
         df = df.sort_values("output_throughput_per_gpu", ascending=False)
         df.to_csv(experiment_dir / "slo_summary.csv")
         params = {k for comb in (*args.serve_params, *args.bench_params) for k in comb}
-        columns = [c for c in df.columns if c in params]
-        columns += ["max_request_rate", *args.slo, "output_throughput_per_gpu"]
+        # The parameters that tell the combinations apart.
+        columns = [c for c in df.columns if c in params and df[c].nunique() > 1]
+        columns += ["gpu_count", "max_request_rate", *args.slo]
+        columns += ["output_throughput_per_gpu", "timing_outside_range"]
         print(df[[c for c in columns if c in df.columns]].to_string(index=False))
     print(f"Experiment has been saved at: {experiment_dir}")
     return all_data

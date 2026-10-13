@@ -168,6 +168,17 @@ Fix the KV cache size (`--kv-cache-memory-bytes`) in `--serve-cmd`, so that the 
 
 The simulation covers the engine core, not the HTTP and API-server path, which adds a nearly constant latency to every request's TTFT and end-to-end latency (about 8 ms for a local `vllm bench serve` against `vllm serve`). Pass it as `--frontend-latency-ms`. To calibrate it, simulate the runs of the recording (the same `--bench-params`) and take the difference between the real and simulated median TTFT at rates without queueing. Each run is saved as `summary.json` with the metrics of `vllm bench serve`, so [the plots](#visualization) work on the results. The best run of each combination is saved as `result.json` with `max_request_rate`, and `slo_summary.csv` ranks the combinations by output throughput per GPU at that rate.
 
+A combination with `_num_prefill` and/or `_num_decode` simulates a disaggregated deployment of that many prefill and decode instances (NIXL pull mode, one rank each), routed round-robin. Keys prefixed with `_prefill.` or `_decode.` apply to one role only, for example each role's recording as `_prefill.simulation_config.timing_args.path`. `--handoff-latency-ms` is the proxy's time from a prefill instance finishing a request to a decode instance receiving it. `kv_transfer_timing` goes in `--simulation-config`. Throughput per GPU counts all instances' GPUs (`gpu_count`; pass `--gpu-count-var gpu_count` to `plot_pareto`).
+
+```json
+[
+    {"_benchmark_name": "1p2d", "_num_prefill": 1, "_num_decode": 2},
+    {"_benchmark_name": "2p1d", "_num_prefill": 2, "_num_decode": 1}
+]
+```
+
+Replayed step times are only as good as the recording's coverage. A lookup cannot extrapolate: a step larger than any recorded one (a bigger batch, or longer prefill chunks) gets the time of the largest recorded steps, which underestimates it. The sweep therefore counts such lookups in each run (`timing_lookups_outside_range` of `timing_lookups`), reports their share in `slo_summary.csv`, and warns when a run exceeds 1%. Record under the heaviest load the search will simulate. For disaggregated deployments, that means recording a configuration with the most prefill capacity at a high rate, so that the decode instance sees its largest batches. Fit `kv_transfer_timing` from a recording where transfers rarely overlap: reads queue on a simulated link, so the simulation adds contention itself.
+
 !!! note
     The simulated clock needs the engine in one process, so multi-rank combinations (`tensor_parallel_size` or `pipeline_parallel_size` above 1) need `"clock": "real"`, which runs in real time. Request rates (`--request-rate`, `--burstiness`, ramp-up and timed traces) are supported; `--max-concurrency` and multimodal datasets are not.
 

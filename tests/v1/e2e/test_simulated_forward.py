@@ -244,6 +244,70 @@ def test_sweep_simulate_slo(tmp_path) -> None:
     assert (exp / "summary.csv").exists() and (exp / "slo_summary.csv").exists()
 
 
+def test_sweep_simulate_disaggregated(tmp_path) -> None:
+    """A disaggregated combination runs its prefill and decode instances, and a
+    second decode instance raises the SLO-meeting rate of a decode-bound
+    workload; runs record their GPU count."""
+    if not (current_platform.is_cpu() or current_platform.is_cuda_alike()):
+        pytest.skip("Simulated forward needs the CPU or a CUDA-alike platform.")
+    from vllm.benchmarks.sweep.simulate import SweepSimulateArgs, run_main
+    from vllm.utils.argparse_utils import FlexibleArgumentParser
+
+    serve_params = tmp_path / "serve_params.json"
+    serve_params.write_text(
+        json.dumps(
+            [
+                {"_benchmark_name": "1p1d", "_num_prefill": 1, "_num_decode": 1},
+                {"_benchmark_name": "1p2d", "_num_prefill": 1, "_num_decode": 2},
+            ]
+        )
+    )
+    parser = SweepSimulateArgs.add_cli_args(FlexibleArgumentParser())
+    args = parser.parse_args(
+        [
+            "--serve-cmd",
+            "vllm serve Qwen/Qwen3-0.6B --max-model-len 1024 "
+            "--kv-cache-memory-bytes 1073741824",
+            "--bench-cmd",
+            "vllm bench serve --dataset-name random --random-input-len 128 "
+            "--random-output-len 32 --num-prompts 40",
+            "--serve-params",
+            str(serve_params),
+            "--simulation-config",
+            json.dumps(
+                {
+                    "timing": "constant",
+                    "timing_args": {"fixed_us": 1000, "decode_us_per_req": 300},
+                    "kv_transfer_timing": {"load_gbps": 10},
+                }
+            ),
+            "--slo",
+            "mean_tpot_ms=4",
+            "--search-iters",
+            "3",
+            "--handoff-latency-ms",
+            "1",
+            "-o",
+            str(tmp_path),
+            "-e",
+            "exp",
+        ]
+    )
+    run_main(SweepSimulateArgs.from_cli_args(args))
+
+    results = {
+        name: json.loads(
+            (tmp_path / "exp" / f"SERVE--{name}" / "result.json").read_text()
+        )
+        for name in ("1p1d", "1p2d")
+    }
+    assert [r["gpu_count"] for r in results.values()] == [2, 3]
+    assert all(
+        r["mean_tpot_ms"] <= 4 and r["completed"] == 40 for r in results.values()
+    )
+    assert 0 < results["1p1d"]["max_request_rate"] < results["1p2d"]["max_request_rate"]
+
+
 def test_simulate_offline_host_time_holds_engine_thread() -> None:
     """A step whose host time exceeds its device time paces the run by the
     host time: the next step cannot start before the engine thread is free."""

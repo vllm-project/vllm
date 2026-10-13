@@ -5,7 +5,11 @@ import math
 import pytest
 
 from vllm.benchmarks.sweep.param_sweep import ParameterSweepItem
-from vllm.benchmarks.sweep.simulate import max_rate_meeting_slo, simulated_serve_cmd
+from vllm.benchmarks.sweep.simulate import (
+    max_rate_meeting_slo,
+    simulated_serve_cmd,
+    split_roles,
+)
 from vllm.entrypoints.launchers.cli_args import make_arg_parser
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
@@ -58,3 +62,20 @@ def test_simulated_serve_cmd():
     assert sim.simulate_forward and sim.clock == "virtual"
     assert sim.timing == "replay"
     assert sim.timing_args == {"path": "b.jsonl", "k": 2}
+
+
+def test_split_roles():
+    common, roles, counts = split_roles(
+        ParameterSweepItem({"_benchmark_name": "a", "max_model_len": 2048})
+    )
+    assert common == {"_benchmark_name": "a", "max_model_len": 2048}
+    assert counts == {}
+
+    common, roles, counts = split_roles(
+        ParameterSweepItem(
+            {"_num_prefill": 2, "max_model_len": 2048, "_decode.max_num_seqs": 64}
+        )
+    )
+    assert common == {"max_model_len": 2048}
+    assert roles == {"prefill": {}, "decode": {"max_num_seqs": 64}}
+    assert counts == {"prefill": 2, "decode": 1}

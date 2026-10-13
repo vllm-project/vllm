@@ -117,12 +117,15 @@ def run_disaggregated(
     handoff_latency_s: float = 0.0,
     routing: Literal["round_robin", "least_unfinished"] = "round_robin",
     max_stalled_steps: int = 10_000,
+    frontend_latency_s: float = 0.0,
 ) -> SimulationResult:
     """Run `requests` through prefill and decode engines from `make_instance()`
     and timestamp the decode instances' outputs: TTFT runs from a request's
     arrival to its first token from the decode instance. `handoff_latency_s`
     is the proxy's time from a prefill instance finishing a request to the
-    decode instance receiving it (responses, HTTP hops, request parsing)."""
+    decode instance receiving it (responses, HTTP hops, request parsing);
+    `frontend_latency_s` delays each request's arrival at its prefill
+    instance, as in `offline.run()`."""
     if any(r.sampling_params.n != 1 for r in requests):
         raise ValueError("Timed runs support n=1 only.")
     engines = [*prefill, *decode]
@@ -134,7 +137,8 @@ def run_disaggregated(
 
     # (time, seq, request index, kv_transfer_params of a handed-over request).
     events: list[tuple[float, int, int, dict[str, Any] | None]] = [
-        (t0 + r.arrival_time, i, i, None) for i, r in enumerate(requests)
+        (t0 + frontend_latency_s + r.arrival_time, i, i, None)
+        for i, r in enumerate(requests)
     ]
     heapq.heapify(events)
     seq = len(events)
@@ -275,6 +279,7 @@ def simulate_disaggregated(
     handoff_latency_s: float = 0.0,
     routing: Literal["round_robin", "least_unfinished"] = "round_robin",
     max_stalled_steps: int = 10_000,
+    frontend_latency_s: float = 0.0,
 ) -> SimulationResult:
     """Build `num_prefill` prefill and `num_decode` decode instances and run
     `requests` through them. Both argument sets need ``simulate_forward``;
@@ -289,7 +294,13 @@ def simulate_disaggregated(
     ]
     try:
         return run_disaggregated(
-            prefill, decode, requests, handoff_latency_s, routing, max_stalled_steps
+            prefill,
+            decode,
+            requests,
+            handoff_latency_s,
+            routing,
+            max_stalled_steps,
+            frontend_latency_s,
         )
     finally:
         for engine in [*prefill, *decode]:

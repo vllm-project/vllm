@@ -19,6 +19,7 @@ import json
 import math
 import os
 import time
+import weakref
 from collections.abc import Iterator
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -387,11 +388,27 @@ def _step_features(step: StepDescriptor) -> tuple[float, float, float]:
     return (float(step.num_reqs), float(step.num_tokens), float(past))
 
 
+_knn_tables: weakref.WeakSet[_KNNTable] = weakref.WeakSet()
+
+
+def knn_lookup_counts() -> tuple[int, int]:
+    """(lookups, lookups outside the recorded range) over this process's live
+    k-NN timing tables, since they were built."""
+    return (
+        sum(t.num_queries for t in _knn_tables),
+        sum(t.num_outside for t in _knn_tables),
+    )
+
+
 class _KNNTable:
     """Inverse-distance weighted k-NN over z-scored (num_reqs, num_tokens,
     sum_past_kv) features, interpolating (device_s, host_s). Points are
     normalized once; a query is one vectorized distance pass, so lookups stay
-    off the step's critical path."""
+    off the step's critical path.
+
+    k-NN does not extrapolate: a step beyond the recorded range (a larger
+    batch than any recorded) gets the time of the nearest recorded steps, which
+    underestimates it. Such lookups are counted and warned about."""
 
     def __init__(
         self,
@@ -409,8 +426,26 @@ class _KNNTable:
         # times faster than reducing over a length-3 axis, with the same result.
         self.columns = np.ascontiguousarray(((feats - self.mean) / self.std).T)
         self.k = min(max(1, k), len(points))
+        self.lo = feats.min(axis=0).tolist()
+        self.hi = feats.max(axis=0).tolist()
+        self.num_queries = 0
+        self.num_outside = 0
+        _knn_tables.add(self)
 
     def query(self, f: tuple[float, float, float]) -> StepCost:
+        self.num_queries += 1
+        if any(not lo <= v <= hi for v, lo, hi in zip(f, self.lo, self.hi)):
+            if not self.num_outside:
+                logger.warning(
+                    "Step (num_reqs, num_tokens, sum_past_kv) = %s is outside "
+                    "the recorded range %s to %s: its time is that of the "
+                    "nearest recorded steps. Record under a load that covers "
+                    "the simulated one.",
+                    f,
+                    self.lo,
+                    self.hi,
+                )
+            self.num_outside += 1
         q = (np.asarray(f, dtype=np.float64) - self.mean) / self.std
         x, y, z = self.columns
         dist = np.sqrt((x - q[0]) ** 2 + (y - q[1]) ** 2 + (z - q[2]) ** 2)
