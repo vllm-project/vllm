@@ -47,6 +47,8 @@ from vllm.model_executor.layers.fused_moe.oracle import nvfp4 as nvfp4_oracle
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     LinearBase,
+    MergedColumnParallelLinear,
+    RowParallelLinear,
     UnquantizedLinearMethod,
 )
 from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
@@ -685,6 +687,206 @@ def _nvfp4_moe_checkpoint_tensors(
     return tensors, torch.cat((w1_reference, w3_reference), dim=1), w2_reference
 
 
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize("tp_rank", [0, 1])
+@pytest.mark.parametrize("projection", ["column", "row", "merged"])
+@pytest.mark.parametrize("source_format", ["modelopt_mxfp8"])
+def test_weight_loading_requantization(
+    source_format: str,
+    projection: str,
+    tp_rank: int,
+    default_vllm_config,
+    monkeypatch,
+) -> None:
+    """Checkpoint sources retain parameter-specific loaders under online overrides."""
+    default_vllm_config.model_config = SimpleNamespace(dtype=torch.bfloat16)
+    for module in (
+        "vllm.model_executor.layers.linear",
+        "vllm.model_executor.parameter",
+    ):
+        monkeypatch.setattr(f"{module}.get_tensor_model_parallel_rank", lambda: tp_rank)
+        monkeypatch.setattr(f"{module}.get_tensor_model_parallel_world_size", lambda: 2)
+    if source_format == "modelopt_mxfp8":
+        monkeypatch.setattr(
+            "vllm.model_executor.layers.quantization.modelopt.init_mxfp8_linear_kernel",
+            lambda **kwargs: Mock(),
+        )
+        config = _fully_quantized_modelopt_mxfp8_config()
+        expected_source_cls = ModelOptLinearMethod
+    else:
+        pytest.fail(f"Unsupported checkpoint source: {source_format}")
+    config.online_quantization_config = OnlineQuantizationConfig(
+        quant_config_args(linear="fp8_per_channel")
+    )
+    kwargs = dict(
+        input_size=128,
+        bias=False,
+        params_dtype=torch.bfloat16,
+        quant_config=config,
+        prefix="model.layers.0.self_attn.o_proj",
+    )
+    if projection == "merged":
+        layer = MergedColumnParallelLinear(output_sizes=[64, 64], **kwargs)
+    elif projection == "row":
+        layer = RowParallelLinear(output_size=64, **kwargs)
+    else:
+        layer = ColumnParallelLinear(output_size=64, **kwargs)
+    target = layer.quant_method
+    # Online processing must remain assigned to the requested target.
+    assert isinstance(target, Fp8PtpcOnlineLinearMethod)
+    source = target.requantization_source
+    # Checkpoint parameters must belong to the selected source method.
+    assert isinstance(source, expected_source_cls)
+    for name in ("weight", "weight_scale"):
+        # Source registration must choose V2 rather than the online target's loader.
+        assert getattr(layer, name).weight_loader == layer.weight_loader_v2
+
+    torch.manual_seed(11)
+    rows = 128 if projection == "merged" else 64
+    if source_format == "modelopt_mxfp8":
+        checkpoint = {
+            "weight": torch.randn(rows, 128, dtype=torch.bfloat16).to(
+                MXFP8_VALUE_DTYPE
+            ),
+            "weight_scale": torch.randint(124, 131, (rows, 4), dtype=MXFP8_SCALE_DTYPE),
+        }
+    else:
+        pytest.fail(f"Unsupported checkpoint source: {source_format}")
+    expected = {}
+    for name, tensor in checkpoint.items():
+        param = getattr(layer, name)
+        if projection == "merged":
+            for shard, part in enumerate(tensor.chunk(2, dim=0)):
+                param.weight_loader(param, part, shard)
+            expected[name] = torch.cat(
+                [part.chunk(2, dim=0)[tp_rank] for part in tensor.chunk(2, dim=0)]
+            )
+        else:
+            param.weight_loader(param, tensor)
+            expected[name] = tensor.chunk(2, dim=1 if projection == "row" else 0)[
+                tp_rank
+            ]
+        # TP loading must preserve each source weight/scale shard exactly.
+        torch.testing.assert_close(param.cpu(), expected[name], rtol=0, atol=0)
+    actual_weight = source.dequantize_weight(layer)
+    reference = source.dequantize_weight(SimpleNamespace(**expected))
+    # Loaded source shards must dequantize identically to their checkpoint slices.
+    torch.testing.assert_close(actual_weight.cpu(), reference.cpu(), rtol=0, atol=0)
+    # Source loading must leave the online processing method attached.
+    assert layer.quant_method is target
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize(
+    "source_format",
+    [
+        pytest.param("compressed_tensors", id="compressed_tensors_nvfp4"),
+        pytest.param("modelopt", id="modelopt_nvfp4"),
+        pytest.param("quark", id="quark_nvfp4"),
+    ],
+)
+def test_weight_loading_requantization_moe(
+    source_format: str, default_vllm_config, monkeypatch
+) -> None:
+    """Online re-quantization uses the original quant method for loading."""
+    from tests.kernels.moe.utils import make_dummy_moe_config
+
+    # Loading local experts needs parameter TP metadata, not a process group.
+    monkeypatch.setattr(
+        "vllm.model_executor.parameter.get_tensor_model_parallel_rank", lambda: 0
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.parameter.get_tensor_model_parallel_world_size", lambda: 1
+    )
+    default_vllm_config.model_config = SimpleNamespace(dtype=torch.bfloat16)
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.online.fp8.select_fp8_moe_backend",
+        lambda **kwargs: (None, None),
+    )
+    config = make_dummy_moe_config(num_experts=2, hidden_dim=32, intermediate_size=64)
+    source = _make_nvfp4_moe_source(source_format, config, monkeypatch)
+    quant_config = Mock()
+    quant_config.packed_modules_mapping = {}
+    quant_config.get_name.return_value = source_format
+    quant_config.get_quant_method.return_value = source
+    quant_config.online_quantization_config = OnlineQuantizationConfig(
+        quant_config_args(moe="fp8_per_tensor")
+    )
+    prefix = "model.layers.0.mlp.experts"
+    layer = RoutedExperts(
+        prefix,
+        torch.bfloat16,
+        config,
+        quant_config,
+        expert_map_manager=SimpleNamespace(
+            local_num_experts=2,
+            num_fused_shared_experts=0,
+            placement_strategy="linear",
+            expert_map=None,
+            expert_mask=None,
+            routing_tables=None,
+            map_global_to_local=lambda index: index,
+        ),
+    )
+    target = layer.quant_method
+    # Construction must select the override, not execute the checkpoint method.
+    assert isinstance(target, Fp8PerTensorOnlineMoEMethod)
+    # Source allocation and loading must use the original checkpoint method.
+    assert target.requantization_source is source
+    torch.manual_seed(11)
+    w1 = torch.randn(2, 64, 32, dtype=torch.bfloat16)
+    w3 = torch.randn_like(w1)
+    w2 = torch.randn(2, 32, 64, dtype=torch.bfloat16)
+    tensors, expected_w13, expected_w2 = _nvfp4_moe_checkpoint_tensors(
+        source_format,
+        w1,
+        w3,
+        w2,
+        torch.tensor([96.0, 160.0]),
+        torch.tensor([40.0, 72.0]),
+        torch.tensor([128.0, 56.0]),
+    )
+    # Distinct input scales expose gate/up overwrites independently of dequantization.
+    # Quark's existing input-scale loader broadcasts each shard across both slots.
+    input_name = {
+        "compressed_tensors": "w13_input_global_scale",
+        "modelopt": "w13_input_scale",
+        "quark": "w13_input_scale_2",
+    }[source_format]
+    tensors[input_name] = torch.tensor(
+        [[0.25, 0.25], [0.75, 0.75]]
+        if source_format == "quark"
+        else [[0.25, 0.5], [0.75, 1.0]]
+    )
+    checkpoint = []
+    for name, tensor in tensors.items():
+        stem, suffix = name.split("_", 1)
+        projections = ("gate_proj", "up_proj") if stem == "w13" else ("down_proj",)
+        for expert in range(2):
+            parts = (
+                tensor[expert].chunk(2, dim=0) if stem == "w13" else (tensor[expert],)
+            )
+            for projection, part in zip(projections, parts, strict=True):
+                checkpoint.append((f"{expert}.{projection}.{suffix}", part))
+    loaded = set(layer.load_weights(checkpoint))
+
+    # Every source parameter must be reached through checkpoint-name mapping.
+    assert loaded == set(tensors)
+
+    for name, expected in tensors.items():
+        # Public loading must preserve all packed weights and scale conventions.
+        torch.testing.assert_close(getattr(layer, name).cpu(), expected, rtol=0, atol=0)
+    actual_w13, actual_w2 = source.dequantize_weight(layer)
+
+    # Gate/up ordering and distinct global scales must survive source loading.
+    torch.testing.assert_close(actual_w13.cpu(), expected_w13, rtol=0, atol=0)
+    # Down-projection block and global scales must survive source loading.
+    torch.testing.assert_close(actual_w2.cpu(), expected_w2, rtol=0, atol=0)
+
+    # Source-aware loading must not replace the target used for processing/inference.
+    assert layer.quant_method is target
+
+
 @pytest.mark.parametrize("is_act_and_mul", [False, True])
 @pytest.mark.parametrize(
     "target_hidden,target_intermediate,has_bias,error",
@@ -780,7 +982,10 @@ def test_online_requantized_moe_reload(
     default_vllm_config,
     monkeypatch,
 ) -> None:
-    """Reload each online target in place and match a fresh checkpoint conversion."""
+    """Reload each online target in place and match a fresh checkpoint conversion.
+
+    Source loading is covered separately; this test isolates target reload processing.
+    """
     from vllm.model_executor.layers.quantization.online import fp8 as online_fp8
 
     # Test conversion and reload behavior, not torch.compile.
