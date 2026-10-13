@@ -618,6 +618,10 @@ def convert_to_fp8_moe_kernel_format(
             if hasattr(layer, "w13_weight_scale_inv")
             else "weight_scale"
         )
+        # Per-tensor w13 arrives requantized to one scale per expert, but
+        # humming's tensor schema expects one scale per gate/up shard.
+        if w13_scale.numel() == w13.shape[0] and layer.moe_config.activation.is_gated:
+            w13_scale = w13_scale.view(-1, 1).expand(-1, 2).contiguous()
         for prefix, weight, scale, input_scale in (
             ("w13", w13, w13_scale, w13_input_scale),
             ("w2", w2, w2_scale, w2_input_scale),
