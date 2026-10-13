@@ -3,7 +3,6 @@
 
 import os
 from importlib.metadata import version
-from types import SimpleNamespace
 
 import pytest
 import torch
@@ -400,6 +399,12 @@ def test_muse_qk_norm_rope_cache_fuses_all_token_counts(
             use_inductor_graph_partition=True,
         ),
     )
+    text_config = vllm_config.model_config.hf_text_config
+    text_config.head_dim = 128
+    text_config.no_rope_layers = [1]
+    text_config.rms_norm_eps = 1e-6
+    text_config.qk_scale_factor = MuseQKNormRoPEKVCacheTestModel.q_scale
+    text_config.use_qk_norm = True
     with vllm.config.set_current_vllm_config(vllm_config):
         model = MuseQKNormRoPEKVCacheTestModel(
             vllm_config=vllm_config,
@@ -412,16 +417,6 @@ def test_muse_qk_norm_rope_cache_fuses_all_token_counts(
             dtype=torch.bfloat16,
             device=device,
         ).to(device)
-        import vllm.model_executor.models.muse_glimmer as muse_module
-
-        text_config = SimpleNamespace(
-            head_dim=128,
-            no_rope_layers=[1],
-            rms_norm_eps=1e-6,
-            qk_scale_factor=model.q_scale,
-            use_qk_norm=True,
-        )
-        monkeypatch.setattr(muse_module, "_text_config", lambda _: text_config)
         fusion_pass = MuseGlimmerQkRopeCacheFusionPass(vllm_config)
         backend = TestBackend(
             NoOpEliminationPass(vllm_config),
