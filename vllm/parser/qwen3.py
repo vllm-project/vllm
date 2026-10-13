@@ -169,15 +169,23 @@ def qwen3_config(
                 ParserState.TOOL_BETWEEN,
                 (EventType.TOOL_CALL_END,),
             ),
+            # regression issue 58227
+            # <function=...</tool_call>
+            # function name is not closed, go to content
             (ParserState.TOOL_NAME, "TOOL_END"): Transition(
                 ParserState.CONTENT,
                 (EventType.TOOL_CALL_END,),
             ),
-            # Unclosed <function=... followed by another tool call
+            # regression issue 58227
+            # <function=...<tool_call>
+            # unclosed tool call followed by another tool call
             (ParserState.TOOL_NAME, "TOOL_START"): Transition(
                 ParserState.TOOL_PREAMBLE,
                 (EventType.TOOL_CALL_END, EventType.TOOL_CALL_START),
             ),
+            # regression issue 58227
+            # <function=...<function=
+            # unclosed function name followed by another function name
             (ParserState.TOOL_NAME, "FUNC_PREFIX"): Transition(
                 ParserState.TOOL_NAME,
                 (EventType.TOOL_CALL_END, EventType.TOOL_CALL_START),
@@ -186,7 +194,8 @@ def qwen3_config(
                 ParserState.TOOL_BETWEEN,
                 (EventType.TOOL_CALL_END,),
             ),
-            # Consecutive tool call without closing </function>
+            # regression issue 58227
+            # <function=abc>...<function=
             (ParserState.TOOL_ARGS, "FUNC_PREFIX"): Transition(
                 ParserState.TOOL_NAME,
                 (EventType.TOOL_CALL_END, EventType.TOOL_CALL_START),

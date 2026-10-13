@@ -278,9 +278,12 @@ class TestNonStreaming:
         "unclosed_func",
         ["<function=function_name", "<function=function_name>"],
     )
-    def test_unclosed_tool_call_in_prose_does_not_swallow_later_tool_call(
-        self, parser, mock_request, unclosed_func
-    ):
+    def test_regression_issue_58227(self, parser, mock_request, unclosed_func):
+        """Regression issue 58227
+        Check cases:
+        * <function=...<tool_call>
+        * <function=abc>...<function=
+        """
         text = (
             f"Use <tool_call>\n{unclosed_func}\n"
             "Wait, let me call the real tool via <tool_call>:\n"
@@ -298,7 +301,10 @@ class TestNonStreaming:
             "city": "Tokyo",
         }
 
-    def test_tool_call_tag_inside_parameter_value_preserved(self, parser, mock_request):
+    def test_tool_call_tag_is_ok_inside_parameter(self, parser, mock_request):
+        """Regression issue 58227
+        Check that <tool_call> tag is ok inside parameter value
+        """
         text = (
             "<tool_call>\n"
             "<function=write_file>\n"
@@ -680,9 +686,14 @@ class TestStreaming:
         "unclosed_func",
         ["<function=function_name", "<function=function_name>"],
     )
-    def test_streaming_unclosed_tool_call_in_prose_does_not_swallow_later_tool_call(
+    def test_streaming_regression_issue_58227(
         self, parser, mock_request, unclosed_func
     ):
+        """Regression issue 58227
+        Check cases:
+        * <function=...<tool_call>
+        * <function=abc>...<function=
+        """
         chunks = [
             "Use <tool_call>\n",
             f"{unclosed_func}\n",
@@ -714,9 +725,10 @@ class TestStreaming:
         assert last_call["name"] == "get_weather"
         assert json.loads(last_call["arguments"]) == {"city": "Tokyo"}
 
-    def test_streaming_tool_call_tag_inside_parameter_value_preserved(
-        self, parser, mock_request
-    ):
+    def test_streaming_tool_call_tag_is_ok_inside_parameter(self, parser, mock_request):
+        """Regression issue 58227
+        Check that <tool_call> tag is ok inside parameter value
+        """
         chunks = [
             "<tool_call>\n",
             "<function=write_file>\n",
