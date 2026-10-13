@@ -14,10 +14,8 @@ from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.v1.attention.backends.utils import resolve_kv_cache_layout
-from vllm.v1.core.kv_cache_utils import (
-    generate_scheduler_kv_cache_config,
-    get_kv_cache_configs,
-)
+from vllm.v1.core.kv_cache_planning import get_kv_cache_configs
+from vllm.v1.core.kv_cache_utils import generate_scheduler_kv_cache_config
 from vllm.v1.engine.core import EngineCore as V1EngineCore
 
 from ..utils import (
