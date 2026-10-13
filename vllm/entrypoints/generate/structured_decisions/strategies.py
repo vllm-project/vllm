@@ -809,7 +809,63 @@ class JointSchemaStrategy(ReadStrategy):
         return reads
 
 
+class ClefFlashStrategy(JointSchemaStrategy):
+    """Clef-Flash's joint schema prompt with Qwen3.5 image/video processing."""
+
+    modalities = frozenset({"image", "video"})
+    MAX_LENGTH = 16384
+    PLACEHOLDERS = {
+        "image": "<|vision_start|><|image_pad|><|vision_end|>",
+        "video": "<|vision_start|><|video_pad|><|vision_end|>",
+    }
+
+    async def _render_media(
+        self, media: Mapping[str, Sequence[str]], cache_salt: str | None
+    ) -> MultiModalInput:
+        connector = self._connector
+        video_io = VideoMediaIO(ImageMediaIO(), num_frames=-1, fps=self.VIDEO_FPS)
+        try:
+            images, videos = await asyncio.gather(
+                asyncio.gather(
+                    *map(connector.fetch_image_async, media.get("image", ()))
+                ),
+                self._fetch(
+                    media.get("video", ()), video_io, envs.VLLM_VIDEO_FETCH_TIMEOUT
+                ),
+            )
+        except ValueError as e:
+            raise StructuredDecisionError(f"media: {e}") from e
+        text = (
+            self.PLACEHOLDERS["image"] * len(images)
+            + self.PLACEHOLDERS["video"] * len(videos)
+            + "\n"
+        )
+        mm_data: dict[str, Any] = {}
+        if images:
+            mm_data["image"] = images
+        if videos:
+            mm_data["video"] = videos
+        prompt = TokensPrompt(
+            prompt_token_ids=self.prefix + self._tokens(text),
+            multi_modal_data=mm_data,
+            mm_processor_kwargs={"videos_kwargs": {"do_sample_frames": False}},
+        )
+        if cache_salt is not None:
+            prompt["cache_salt"] = cache_salt
+        try:
+            engine_input = (
+                await self.context.online_renderer.renderer.process_for_engine_async(
+                    prompt, time.time()
+                )
+            )
+        except ValueError as e:
+            raise StructuredDecisionError(f"media: {e}") from e
+        assert engine_input["type"] == "multimodal"
+        return engine_input
+
+
 READ_STRATEGIES: dict[str, type[ReadStrategy]] = {
+    "ClefFlashForJointSchema": ClefFlashStrategy,
     "ClefOmniForJointSchema": JointSchemaStrategy,
     "Lfm2VlForConditionalGeneration": LiquidStrategy,
     "Qwen3ForCausalLM": NextTokenStrategy,
