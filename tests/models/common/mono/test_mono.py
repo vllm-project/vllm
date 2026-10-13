@@ -115,19 +115,6 @@ def test_configure_raises_with_every_reason(monkeypatch):
         guards.configure(fake_vllm_config(), "x:SPEC")
 
 
-@pytest.mark.parametrize("monokernel", [True, False])
-def test_the_env_switch_is_deprecated(monkeypatch, caplog_vllm, monokernel):
-    """``VLLM_ROCM_MONO_DECODE=1`` still turns a MonoKernel on, with a warning."""
-    monkeypatch.setattr(guards, "load_spec", lambda path: fake_spec())
-    monkeypatch.setattr("vllm.envs.VLLM_ROCM_MONO_DECODE", not monokernel)
-    cfg = fake_vllm_config(**{"kernel_config.monokernel": monokernel})
-    assert guards.enabled(cfg)
-    guards.configure(cfg, "x:SPEC")
-    assert ("VLLM_ROCM_MONO_DECODE=1 is deprecated" in caplog_vllm.text) == (
-        not monokernel
-    )
-
-
 def test_capture_sizes_up_to_the_widest_are_the_widths(monkeypatch):
     """Configure sets them rather than refusing; larger sizes stay."""
     monkeypatch.setattr(guards, "load_spec", lambda path: fake_spec())
@@ -246,7 +233,6 @@ def test_parameter_names_and_values_do_not_change(monkeypatch, one_rank):
     assert list(after) == list(before)
     assert all(torch.equal(after[k], v) for k, v in before.items())
     cfg.kernel_config.monokernel = False
-    monkeypatch.setattr("vllm.envs.VLLM_ROCM_MONO_DECODE", False)
     assert layer.attach(_Model(), cfg, "x:SPEC") is None
 
 

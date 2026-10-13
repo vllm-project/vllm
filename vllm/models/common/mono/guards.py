@@ -12,7 +12,6 @@ from typing import TYPE_CHECKING
 
 import torch
 
-from vllm import envs
 from vllm.config.compilation import CUDAGraphMode
 from vllm.logger import init_logger
 from vllm.models.common.mono.spec import Feature, MonoSpec, MonoUnsupported
@@ -24,8 +23,8 @@ logger = init_logger(__name__)
 
 
 def enabled(vllm_config: "VllmConfig") -> bool:
-    """``--monokernel``; ``VLLM_ROCM_MONO_DECODE=1`` as well, deprecated."""
-    return vllm_config.kernel_config.monokernel or envs.VLLM_ROCM_MONO_DECODE
+    """``--monokernel``."""
+    return vllm_config.kernel_config.monokernel
 
 
 def load_spec(path: str) -> MonoSpec:
@@ -94,12 +93,6 @@ def set_capture_sizes(spec: MonoSpec, vllm_config: "VllmConfig") -> None:
 
 def configure(vllm_config: "VllmConfig", spec_path: str) -> None:
     spec = load_spec(spec_path)
-    if not vllm_config.kernel_config.monokernel:
-        logger.warning(
-            "VLLM_ROCM_MONO_DECODE=1 is deprecated for MonoKernel %s and will be "
-            "removed; use --monokernel",
-            spec.name,
-        )
     reasons = refuse_config(spec, vllm_config)
     if reasons:
         raise MonoUnsupported(f"MonoKernel {spec.name} refused: " + "; ".join(reasons))
