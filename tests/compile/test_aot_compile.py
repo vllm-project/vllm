@@ -1001,6 +1001,7 @@ def graph_cache_probe(tmp_path):
                 "from tests.compile.test_aot_compile import "
                 "_run_graph_cache_probe; _run_graph_cache_probe()",
             ],
+            cwd=Path(__file__).resolve().parents[2],
             env=env,
             capture_output=True,
             text=True,
