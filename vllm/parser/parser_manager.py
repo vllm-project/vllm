@@ -74,6 +74,29 @@ class ParserManager:
         return parser
 
     @classmethod
+    def validate_parser_tokenizer(
+        cls,
+        parser_cls: type[Parser],
+        tokenizer: TokenizerLike,
+        tool_parser_name: str | None = None,
+        reasoning_parser_name: str | None = None,
+        model_name: str | None = None,
+    ) -> None:
+        """Fail at startup if the tokenizer lacks what the parsers need."""
+        try:
+            parser_cls(tokenizer)
+        except Exception as e:
+            flags = []
+            if parser_cls.tool_parser_cls is not None:
+                flags.append(f"--tool-call-parser {tool_parser_name}")
+            if parser_cls.reasoning_parser_cls is not None:
+                flags.append(f"--reasoning-parser {reasoning_parser_name}")
+            raise TypeError(
+                f"{' and '.join(flags)} cannot be used with the tokenizer of "
+                f"{model_name!r}: {e}"
+            ) from e
+
+    @classmethod
     def get_parser(
         cls,
         tool_parser_name: str | None = None,
@@ -97,13 +120,44 @@ class ParserManager:
                         If True, HarmonyParser is always returned.
             tool_strict_level: Server-side floor for tool-call structural
                 tags (``--tool-strict-level``).
-            tokenizer: Tokenizer whose `response_template` metadata is
-                validated when the `hf` parser is selected.
+            tokenizer: Tokenizer the composed parser is validated against
+                at startup (see :meth:`validate_parser_tokenizer`). ``None``
+                skips the check (e.g. ``skip_tokenizer_init``).
 
         Returns:
             A Parser class, or None if neither parser is specified.
 
         """
+        parser_cls = cls._compose_parser(
+            tool_parser_name=tool_parser_name,
+            reasoning_parser_name=reasoning_parser_name,
+            enable_auto_tools=enable_auto_tools,
+            model_name=model_name,
+            is_harmony=is_harmony,
+            tool_strict_level=tool_strict_level,
+            tokenizer=tokenizer,
+        )
+        if parser_cls is not None and tokenizer is not None:
+            cls.validate_parser_tokenizer(
+                parser_cls,
+                tokenizer,
+                tool_parser_name=tool_parser_name,
+                reasoning_parser_name=reasoning_parser_name,
+                model_name=model_name,
+            )
+        return parser_cls
+
+    @classmethod
+    def _compose_parser(
+        cls,
+        tool_parser_name: str | None,
+        reasoning_parser_name: str | None,
+        enable_auto_tools: bool,
+        model_name: str | None,
+        is_harmony: bool,
+        tool_strict_level: str,
+        tokenizer: TokenizerLike | None,
+    ) -> type[Parser] | None:
         if not tool_parser_name and not reasoning_parser_name:
             return None
 

@@ -24,8 +24,8 @@ from vllm.v1.attention.backends.short_conv_attn import (
     PleShortConvAttentionMetadata,
 )
 
+from ..common.ops.ple import ple_conv, ple_gate
 from .ngram_embedding import Qwen4ExpNGramEmbedding
-from .ops.ple import ple_conv, ple_gate
 
 
 class Qwen4ExpPLEGroupedNorm(nn.Module):

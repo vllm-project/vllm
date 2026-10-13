@@ -15,10 +15,9 @@ in every caller.
 
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, ClassVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar, Self, cast
 
 import torch
-from typing_extensions import Self
 
 from vllm.distributed.weight_transfer.base import (
     TrainerInitInfo,

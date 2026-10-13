@@ -42,15 +42,6 @@ class ECTransferConfig:
     """Whether this vLLM instance produces, consumes EC cache, or both. Choices
     are 'ec_producer', 'ec_consumer', 'ec_both'."""
 
-    ec_rank: int | None = None
-    """The rank of this vLLM instance in the EC cache transfer. Typical value:
-    0 for encoder, 1 for pd instance.
-    Currently only 1P1D is supported."""
-
-    ec_parallel_size: int = 1
-    """The number of parallel instances for EC cache transfer. For
-    PyNcclConnector, this should be 2."""
-
     ec_ip: str = "127.0.0.1"
     """The EC connector ip, used to build distributed connection."""
 

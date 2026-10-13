@@ -17,12 +17,12 @@ from vllm.engine.arg_utils import AsyncEngineArgs, optional_type
 from vllm.entrypoints.anthropic.protocol import (
     AnthropicDisabledThinkingEffortOption,
 )
-from vllm.entrypoints.chat_utils import (
+from vllm.entrypoints.openai.models.protocol import LoRAModulePath
+from vllm.logger import init_logger
+from vllm.renderers.chat_utils import (
     ChatTemplateContentFormatOption,
     validate_chat_template,
 )
-from vllm.entrypoints.openai.models.protocol import LoRAModulePath
-from vllm.logger import init_logger
 from vllm.tool_parsers import ToolParserManager
 from vllm.tool_parsers.tool_strict_level import ToolStrictLevelName
 from vllm.utils.argparse_utils import FlexibleArgumentParser
@@ -207,9 +207,9 @@ class BaseFrontendArgs:
     enable_scale_out: bool = False
     """
     If set to True, register the scale-out endpoints (`/render`, `/derender`,
-    and `/inference/v1/generate`) on `vllm serve`. Has no effect on
-    `vllm launch render` or `vllm serve --tokens-only`, which always register
-    their required endpoints regardless of this flag.
+    `/inference/v1/generate` and `/inference/v1/abort_requests`) on `vllm serve`.
+    Has no effect on `vllm launch render` or `vllm serve --tokens-only` which
+    always register their required endpoints regardless of this flag.
     """
     fingerprint_mode: Literal["full", "hash", "custom", "none"] = "full"
     """Controls the ``system_fingerprint`` field on responses.

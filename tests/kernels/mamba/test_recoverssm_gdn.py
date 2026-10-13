@@ -624,3 +624,20 @@ def test_verify_skips_cuda_graph_padding_rows():
     assert torch.equal(out, ref)
     assert torch.equal(pad_cache, ref_cache)
     assert torch.equal(inp["checkpoint_state"], before)
+
+
+def test_ptr_table_keeps_top_bit_pointers():
+    """XPU pointers can have the top bit set; the table keeps the uint64 bit pattern."""
+    from vllm.model_executor.layers.mamba.recoverssm_utils import recoverssm_ptr_table
+
+    class _Ptr:
+        def __init__(self, p: int):
+            self.p = p
+
+        def data_ptr(self) -> int:
+            return self.p
+
+    ptrs = [0x7FFF_0000_1000, (1 << 63) + 0x2000, (1 << 64) - 0x100]
+    table = recoverssm_ptr_table([_Ptr(p) for p in ptrs], "cpu")
+    assert table.dtype == torch.int64
+    assert [v & ((1 << 64) - 1) for v in table.tolist()] == ptrs
