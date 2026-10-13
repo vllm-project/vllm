@@ -226,7 +226,6 @@ class StandaloneARSpeculator(DraftModelSpeculator):
                 query_start_loc_np=query_start_loc_cpu_expanded.numpy(),
                 seq_lens_cpu_upper_bound=input_batch.seq_lens_cpu_upper_bound,
                 step=0,
-                is_dummy=input_batch.is_dummy,
                 slot_mappings=prefill_slot_mappings,
             )
             prefill_slot_maps_by_layer = build_slot_mappings_by_layer(
@@ -329,7 +328,6 @@ class StandaloneARSpeculator(DraftModelSpeculator):
                     seq_lens_cpu_upper_bound=input_batch.seq_lens_cpu_upper_bound,
                     # Include the correction token inserted during prefill.
                     step=step + 1,
-                    is_dummy=input_batch.is_dummy,
                 )
             hidden_states = self._run_model(
                 self.input_buffers.input_ids[:num_reqs],

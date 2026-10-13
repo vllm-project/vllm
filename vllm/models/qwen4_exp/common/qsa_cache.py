@@ -100,7 +100,7 @@ def _logical_to_physical_qsa_slots(
     if not all(block_table.shape):
         return torch.full_like(positions, PAD_SLOT_ID)
     physical_blocks = block_table[safe_requests, safe_blocks].long()
-    valid &= physical_blocks >= 0
+    valid &= physical_blocks > 0
     slots = physical_blocks * block_size + positions.remainder(block_size)
     return torch.where(valid, slots, PAD_SLOT_ID)
 
@@ -310,7 +310,7 @@ def _build_qsa_metadata_kernel(
             mask=valid,
             other=-1,
         )
-        valid &= physical_block >= 0
+        valid &= physical_block > 0
         slot = physical_block * storage_block_size + (
             compressed_position % storage_block_size
         )
@@ -456,8 +456,6 @@ def build_qsa_metadata_triton(
     )
     if circular_buffer_size == 0 and compress_ratio == 1:
         slot_mapping = common_attn_metadata.slot_mapping[:num_tokens]
-    elif common_attn_metadata.is_dummy_batch:
-        slot_mapping.fill_(PAD_SLOT_ID)
     return token_to_req, logical_positions, visible_blocks, slot_mapping
 
 
@@ -557,10 +555,6 @@ def _build_qsa_metadata_torch(
         k_work_metadata_buffer[:, 1].copy_(
             torch.where(active, work_in_request, -1).to(torch.int32)
         )
-    if (
-        circular_buffer_size > 0 or compress_ratio != 1
-    ) and common_attn_metadata.is_dummy_batch:
-        slot_mapping.fill_(PAD_SLOT_ID)
     return token_to_req, logical_positions, visible_blocks, slot_mapping
 
 

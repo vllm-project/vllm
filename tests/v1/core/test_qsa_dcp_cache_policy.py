@@ -10,9 +10,10 @@ from vllm.config import DeviceConfig, ModelConfig, VllmConfig
 from vllm.models.qwen4_exp.common.qsa_cache import (
     QSACompressedKeyCache,
     QSAStateBackend,
+    _build_qsa_metadata_torch,
     compressed_qsa_slot_mapping,
 )
-from vllm.v1.attention.backend import MultipleOf
+from vllm.v1.attention.backend import CommonAttentionMetadata, MultipleOf
 from vllm.v1.core.kv_cache_planning import (
     get_kv_cache_config_from_groups,
     get_kv_cache_groups,
@@ -38,6 +39,44 @@ from vllm.v1.worker.utils import (
 pytestmark = pytest.mark.cpu_test
 
 BLOCK_SIZE = 784
+
+
+def test_compressed_qsa_null_block_has_no_slot() -> None:
+    """The reserved null block must not receive compressed-cache writes."""
+    slots = compressed_qsa_slot_mapping(
+        torch.tensor([[0, 1]], dtype=torch.int32),
+        torch.zeros(2, dtype=torch.int32),
+        torch.tensor([3, 7], dtype=torch.int64),
+        storage_block_size=1,
+        compress_ratio=4,
+    )
+    assert slots.tolist() == [-1, 1]
+
+
+def test_torch_qsa_metadata_masks_null_block_without_flag() -> None:
+    query_start_loc = torch.tensor([0, 8], dtype=torch.int32)
+    metadata = CommonAttentionMetadata(
+        query_start_loc=query_start_loc,
+        query_start_loc_cpu=query_start_loc,
+        seq_lens=torch.tensor([8], dtype=torch.int32),
+        num_reqs=1,
+        num_actual_tokens=8,
+        max_query_len=8,
+        max_seq_len=8,
+        block_table_tensor=torch.zeros((1, 1), dtype=torch.int32),
+        slot_mapping=torch.full((8,), -1, dtype=torch.int64),
+        _token_to_req_indices_cache=torch.zeros(8, dtype=torch.int32),
+    )
+    slots = _build_qsa_metadata_torch(
+        metadata,
+        torch.empty(8, dtype=torch.int32),
+        torch.empty(8, dtype=torch.int64),
+        torch.empty(8, dtype=torch.int32),
+        torch.empty(8, dtype=torch.int64),
+        storage_block_size=16,
+        compress_ratio=4,
+    )[3]
+    assert slots.tolist() == [-1] * 8
 
 
 class _IndependentSelectorWithoutGenericSlots(MLAAttentionSpec):

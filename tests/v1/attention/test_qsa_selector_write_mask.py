@@ -20,7 +20,7 @@ STORAGE_BLOCK_SIZE = 98
 BUILDERS = [build_qsa_metadata_triton, _build_qsa_metadata_torch]
 
 
-def _metadata(main_slots: torch.Tensor, is_dummy_batch: bool = False):
+def _metadata(main_slots: torch.Tensor, *, null_block: bool = False):
     query_start_loc = torch.tensor([0, NUM_TOKENS], dtype=torch.int32, device="cuda")
     return CommonAttentionMetadata(
         query_start_loc=query_start_loc,
@@ -30,11 +30,12 @@ def _metadata(main_slots: torch.Tensor, is_dummy_batch: bool = False):
         num_actual_tokens=NUM_TOKENS,
         max_query_len=NUM_TOKENS,
         max_seq_len=NUM_TOKENS,
-        block_table_tensor=torch.arange(64, dtype=torch.int32, device="cuda").unsqueeze(
-            0
+        block_table_tensor=(
+            torch.zeros(1, 64, dtype=torch.int32, device="cuda")
+            if null_block
+            else torch.arange(1, 65, dtype=torch.int32, device="cuda").unsqueeze(0)
         ),
         slot_mapping=main_slots,
-        is_dummy_batch=is_dummy_batch,
     )
 
 
@@ -73,14 +74,30 @@ def test_replicated_selector_writes_each_rank(
 
 @pytest.mark.parametrize("builder", BUILDERS, ids=["triton", "torch"])
 @pytest.mark.parametrize("compress_ratio,circular_buffer_size", [(8, 0), (1, 64)])
-def test_dummy_qsa_caches_do_not_write(
+def test_null_block_qsa_caches_do_not_write(
     builder, compress_ratio: int, circular_buffer_size: int
 ) -> None:
     main_slots = torch.full((NUM_TOKENS,), -1, dtype=torch.int64, device="cuda")
     slots = _slots(
         builder,
-        _metadata(main_slots, is_dummy_batch=True),
+        _metadata(main_slots, null_block=True),
         compress_ratio,
         circular_buffer_size,
     )
+    assert not torch.any(slots >= 0)
+
+
+def test_compressed_qsa_cudagraph_replay_masks_null_block() -> None:
+    main_slots = torch.arange(NUM_TOKENS, dtype=torch.int64, device="cuda")
+    metadata = _metadata(main_slots)
+    _slots(build_qsa_metadata_triton, metadata, COMPRESS_RATIO)
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        slots = _slots(build_qsa_metadata_triton, metadata, COMPRESS_RATIO)
+
+    graph.replay()
+    assert int((slots >= 0).sum()) == NUM_TOKENS // COMPRESS_RATIO
+    metadata.block_table_tensor.zero_()
+    graph.replay()
     assert not torch.any(slots >= 0)

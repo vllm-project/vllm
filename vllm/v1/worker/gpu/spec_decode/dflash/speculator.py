@@ -501,7 +501,6 @@ class DFlashSpeculator(DraftModelSpeculator):
             num_query_per_req=self.num_query_per_req,
             seq_lens_cpu_upper_bound=input_batch.seq_lens_cpu_upper_bound,
             step=self.num_query_per_req,
-            is_dummy=input_batch.is_dummy,
             causal=self._group_causal,
         )
 
