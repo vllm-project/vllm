@@ -69,20 +69,46 @@ class XgrammarBackend(StructuredOutputBackend):
         ):
             tokenizer_info, _ = init_xgrammar()
         else:
-            # Structural tags and Lark grammars keep the special tokens, as
-            # they may name control tokens such as tool call markers.
+            # tokenizer for structural tags
+            # accepts some of the special tokens
             full_vocab_tokenizer_info = xgr.TokenizerInfo.from_huggingface(
                 self.tokenizer,
                 vocab_size=self.vocab_size,
             )
-            tokenizer_info = _blank_special_tokens(
+            # tokenizer for json
+            # does NOT accept any special tokens
+            tokenizer_info = self._filter_special_tokens(
                 self.tokenizer, full_vocab_tokenizer_info
             )
-        self.compiler = _create_compiler(tokenizer_info)
+
+        # FIXME(arpera):
+        # Here we create not one but TWO compilers
+        # because xgrammar currently does not properly handle
+        # special tokens.
+        # Proper special tokens handling depends on structured output
+        # request type: json, structural_tag, etc.
+        # Structural tag may accept some of the special tokens
+        # At the same time json must NOT accept any special tokens
+        # Currently xgrammar does not properly handle all the cases
+        # So, we have to implement additional logic on our side
+        # We maintain TWO compilers for different structural output types
+        # If in future xgrammar will fix this problem,
+        # then we can consider to remove this
+        # Also, note that other backends like guidance
+        # do NOT have this problem (as far as I see, I may be wrong).
+        # So, if someone wants to go and fix the problem on xgrammar side
+        # you should first definitely check how other backends deal with it
+        # Some work on xgrammar side has been started:
+        # https://github.com/mlc-ai/xgrammar/issues/832
+
+        # Compiler for json. Must NOT accept any special tokens.
+        self.compiler = self._create_compiler(tokenizer_info)
+
+        # Compiler for structural tag. May accept some of the special tokens.
         self.full_vocab_compiler = (
             self.compiler
             if full_vocab_tokenizer_info is None
-            else _create_compiler(full_vocab_tokenizer_info)
+            else self._create_compiler(full_vocab_tokenizer_info)
         )
 
         self.num_speculative_tokens = 0
@@ -157,37 +183,36 @@ class XgrammarBackend(StructuredOutputBackend):
         del self.compiler
         del self.full_vocab_compiler
 
+    @staticmethod
+    def _create_compiler(
+        tokenizer_info: "xgr.TokenizerInfo",
+    ) -> "xgr.GrammarCompiler":
+        return xgr.GrammarCompiler(
+            tokenizer_info,
+            max_threads=8,
+            cache_enabled=True,
+            cache_limit_bytes=vllm.envs.VLLM_XGRAMMAR_CACHE_MB * 1024 * 1024,
+        )
 
-def _create_compiler(tokenizer_info: "xgr.TokenizerInfo") -> "xgr.GrammarCompiler":
-    return xgr.GrammarCompiler(
-        tokenizer_info,
-        max_threads=8,
-        cache_enabled=True,
-        cache_limit_bytes=vllm.envs.VLLM_XGRAMMAR_CACHE_MB * 1024 * 1024,
-    )
-
-
-def _blank_special_tokens(
-    tokenizer: "TokenizerLike", tokenizer_info: "xgr.TokenizerInfo"
-) -> "xgr.TokenizerInfo":
-    """Return ``tokenizer_info`` with the special added tokens as empty strings.
-
-    xgrammar only treats tokens that decode to an empty string as special, so
-    control tokens such as ``<|im_start|>`` would otherwise match grammar text.
-    Stop tokens stay allowed where the grammar may end.
-    """
-    special_token_ids = {
-        token_id
-        for token_id, token in getattr(tokenizer, "added_tokens_decoder", {}).items()
-        if token.special
-    }
-    encoded_vocab = [""] * tokenizer_info.vocab_size
-    for token, token_id in tokenizer.get_vocab().items():
-        if token_id < len(encoded_vocab) and token_id not in special_token_ids:
-            encoded_vocab[token_id] = token
-    return xgr.TokenizerInfo.from_vocab_and_metadata(
-        encoded_vocab, tokenizer_info.dump_metadata()
-    )
+    @staticmethod
+    def _filter_special_tokens(
+        tokenizer: "TokenizerLike", tokenizer_info: "xgr.TokenizerInfo"
+    ) -> "xgr.TokenizerInfo":
+        """Filter ALL special tokens from tokenizer_info"""
+        special_token_ids = {
+            token_id
+            for token_id, token in getattr(
+                tokenizer, "added_tokens_decoder", {}
+            ).items()
+            if token.special
+        }
+        encoded_vocab = [""] * tokenizer_info.vocab_size
+        for token, token_id in tokenizer.get_vocab().items():
+            if token_id < len(encoded_vocab) and token_id not in special_token_ids:
+                encoded_vocab[token_id] = token
+        return xgr.TokenizerInfo.from_vocab_and_metadata(
+            encoded_vocab, tokenizer_info.dump_metadata()
+        )
 
 
 @dataclass
