@@ -362,7 +362,7 @@ class BaseRenderer(ABC, Generic[_T]):
         no-op if the background warmup — or a prior reset_mm_cache that joined
         it — already ran it.
         """
-        from vllm.renderers.chat_utils import ChatTemplateResolutionError
+        from vllm.exceptions import ChatTemplateResolutionError
 
         # prevent MM processor hangs
         with set_default_torch_num_threads(1):
