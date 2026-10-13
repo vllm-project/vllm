@@ -880,7 +880,6 @@ class QSACompressedKeyCache(_QSAStateCache):
             dtype=self.dtype,
             tokens_per_state=self.compress_ratio,
             dcp_sharded=dcp_world_size == 1,
-            storage_block_size=block_size,
         )
 
 

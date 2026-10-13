@@ -498,6 +498,7 @@ def test_fused_full_graph_maps_split_group_block_tables():
         num_tokens_across_dp=None,
         seq_lens_cpu_upper_bound=None,
         num_speculative_steps=4,
+        is_dummy=False,
     )
 
     assert replayed_tables == [

@@ -44,9 +44,10 @@ def _run_distributed(fn, world_size: int, backend: Backend) -> None:
 def _qsa_config(world_size: int, backend: Backend):
     from dataclasses import replace
 
+    from transformers import Qwen4ExpTextConfig
+
     from vllm.config import ModelConfig, VllmConfig
     from vllm.config.parallel import ParallelConfig
-    from vllm.models.qwen4_exp.config import Qwen4ExpTextConfig
 
     text_config = Qwen4ExpTextConfig(
         hidden_size=256,

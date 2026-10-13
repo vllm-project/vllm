@@ -8,10 +8,8 @@ import torch
 
 from vllm.config import DeviceConfig, ModelConfig, VllmConfig
 from vllm.models.qwen4_exp.common.qsa_cache import QSACompressedKeyCache
-from vllm.v1.core.kv_cache_utils import (
-    generate_scheduler_kv_cache_config,
-    get_kv_cache_groups,
-)
+from vllm.v1.core.kv_cache_planning import get_kv_cache_groups
+from vllm.v1.core.kv_cache_utils import generate_scheduler_kv_cache_config
 from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
     FullAttentionSpec,
@@ -53,7 +51,6 @@ def _selector(dcp_world_size: int) -> MLAAttentionSpec:
         dtype=torch.bfloat16,
         tokens_per_state=8,
         dcp_sharded=False,
-        storage_block_size=block_size,
     )
 
 
@@ -145,7 +142,7 @@ def test_qsa_selector_shares_sharded_main_block_table(
     assert scheduler_spec.dcp_sharded
     assert scheduler_spec.block_size == BLOCK_SIZE
     assert type(scheduler_spec) is FullAttentionSpec
-    assert selector.storage_block_size == BLOCK_SIZE * dcp_world_size
+    assert selector.num_states == BLOCK_SIZE * dcp_world_size // 8
 
 
 def test_different_global_spans_stay_separate_in_grouping() -> None:
@@ -167,7 +164,6 @@ def test_independent_selector_cannot_disable_main_slot_mapping(
         dtype=torch.bfloat16,
         tokens_per_state=8,
         dcp_sharded=False,
-        storage_block_size=BLOCK_SIZE * 2,
     )
     specs = (
         {"selector": selector, "main": _main_kv()}
@@ -180,15 +176,12 @@ def test_independent_selector_cannot_disable_main_slot_mapping(
 
 
 @pytest.mark.parametrize("dcp_world_size", [1, 2, 4])
-def test_selector_storage_block_size_is_pinned_to_its_virtual_block(
+def test_selector_state_count_tracks_its_virtual_block(
     dcp_world_size: int,
 ) -> None:
     selector = _qsa_selector(dcp_world_size)
-    assert (
-        selector.storage_block_size
-        == selector.block_size
-        == (BLOCK_SIZE * dcp_world_size)
-    )
+    assert selector.block_size == BLOCK_SIZE * dcp_world_size
+    assert selector.num_states == selector.block_size // selector.tokens_per_state
     assert selector.dcp_sharded == (dcp_world_size == 1)
 
 
