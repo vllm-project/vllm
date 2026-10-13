@@ -463,7 +463,9 @@ def test_kv_transfer_rates_without_stores(tmp_path):
     assert load.bytes_per_s == pytest.approx(1e10) and store is None
 
 
-def _nixl_worker(engine_id: str, clock, role="kv_both", port=None):
+def _nixl_worker(
+    engine_id: str, clock, role="kv_both", port=None, mla=False, kv_heads=8
+):
     from vllm.v1.worker.simulated.kv_nixl import SimulatedNixlWorker
 
     group = SimpleNamespace(
@@ -473,6 +475,9 @@ def _nixl_worker(engine_id: str, clock, role="kv_both", port=None):
     config = SimpleNamespace(
         kv_transfer_config=SimpleNamespace(kv_role=role),
         parallel_config=SimpleNamespace(data_parallel_index=0),
+        model_config=SimpleNamespace(
+            use_mla=mla, get_total_num_kv_heads=lambda: kv_heads
+        ),
     )
     nixl = SimulatedNixlWorker(config, engine_id, kv_cache_config)
     if port is not None:
@@ -581,3 +586,74 @@ def test_simulated_nixl_books_reads_across_processes(monkeypatch):
     decode.start_load_kv(recv("r3", "p3"))
     assert decode.get_transfer_results().failed_recving == {"r3"}
     decode.shutdown()
+
+
+@pytest.mark.parametrize(
+    ("prefill_tp", "decode_tp", "rank", "mla", "kv_heads", "plan"),
+    [
+        (2, 2, 1, False, 8, [(1, True)]),
+        # Decode ranks split a prefill rank's heads.
+        (2, 4, 3, False, 8, [(1, True)]),
+        # A decode rank gathers the heads of several prefill ranks.
+        (4, 2, 1, False, 8, [(2, True), (3, True)]),
+        # MLA: one replicated copy is read, the other holders notified.
+        (4, 2, 1, True, 1, [(2, True), (3, False)]),
+        # Rejected by the real connector: replicated heads on the prefill
+        # side, and sizes that do not divide.
+        (4, 2, 1, False, 2, None),
+        (3, 2, 1, False, 8, None),
+    ],
+)
+def test_simulated_nixl_maps_tensor_parallel_ranks(
+    prefill_tp, decode_tp, rank, mla, kv_heads, plan
+):
+    worker = _nixl_worker(
+        f"sim-map-{prefill_tp}-{decode_tp}", VirtualClock(), mla=mla, kv_heads=kv_heads
+    )
+    worker.tp_rank, worker.tp_size = rank, decode_tp
+    assert worker._read_plan(prefill_tp) == plan
+
+
+def test_simulated_nixl_frees_blocks_after_all_readers():
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
+        NixlConnectorMetadata,
+    )
+
+    clock = VirtualClock()
+    prefill = _nixl_worker("sim-two-readers", clock)
+    meta = NixlConnectorMetadata()
+    meta.reqs_in_batch = {"p1"}
+    prefill.start_load_kv(meta)
+    # Two decode ranks each read half of this rank's heads, concurrently;
+    # the blocks are freed once both have.
+    assert prefill.book_read("p1", 10, 0.0, num_readers=2) == pytest.approx(1.0)
+    assert prefill._notifs and prefill.get_finished() == (set(), set())
+    assert prefill.book_read("p1", 20, 0.0, num_readers=2) == pytest.approx(2.0)
+    clock.sleep_until(1.5)
+    assert prefill.get_finished() == (set(), set())
+    clock.sleep_until(2.0)
+    assert prefill.get_finished() == ({"p1"}, set())
+    # Another request's read waits for the link.
+    assert prefill.book_read("p2", 10, 0.0) == pytest.approx(3.0)
+
+
+@pytest.mark.parametrize(
+    ("prefill_tp", "decode_tp", "kv_heads"),
+    [(2, 2, 8), (2, 4, 8), (4, 2, 8), (2, 4, 2), (4, 2, 2), (3, 2, 8), (2, 3, 8)],
+)
+def test_simulated_nixl_notifies_every_prefill_rank(prefill_tp, decode_tp, kv_heads):
+    """Whatever the layouts, accepted or not, every prefill rank is notified
+    by exactly as many decode ranks as it waits for."""
+    worker = _nixl_worker(
+        f"sim-notify-{prefill_tp}-{decode_tp}-{kv_heads}",
+        VirtualClock(),
+        kv_heads=kv_heads,
+    )
+    notified = [0] * prefill_tp
+    for rank in range(decode_tp):
+        worker.tp_rank, worker.tp_size = rank, decode_tp
+        plan = worker._read_plan(prefill_tp)
+        ranks = [r for r, _ in plan] if plan else worker._notified_ranks(prefill_tp)
+        for r in ranks:
+            notified[r] += 1
+    assert notified == [worker._num_readers(prefill_tp, r) for r in range(prefill_tp)]

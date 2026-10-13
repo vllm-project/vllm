@@ -463,15 +463,24 @@ VLLM_NIXL_SIDE_CHANNEL_PORT=5700 vllm serve Qwen/Qwen3-8B --port 8200 \
   --simulation-config '{"timing": "replay", "timing_args": {"path": "d.jsonl"}, "kv_transfer_timing": "d.jsonl"}'
 ```
 
-A decode rank books each read with the prefill rank of the same
-tensor-parallel index over ZMQ, at the prefill instance's side-channel
-address from the kv_transfer_params: each rank of a `kv_producer` instance
-listens on the side-channel host at port + 100 × (rank + 1), which must be
-free. The prefill and decode instances need the same tensor parallelism and
-no pipeline parallelism; a read that cannot be booked (a prefill instance
-that does not answer within 10 s, or a different tensor parallelism) fails
-its request, which the decode instance then prefills itself, as after a
-failed NIXL read. As the proxy, the API servers and the HTTP path run for
+A decode rank books its reads over ZMQ with the prefill ranks the real
+connector maps it to, at the prefill instance's side-channel address from
+the kv_transfer_params: each rank of a `kv_producer` instance listens on the
+side-channel host at port + 100 × (rank + 1), which must be free. The two
+instances' tensor parallelism may differ, as with the real connector: with
+more decode ranks, each reads its share of one prefill rank's heads, and the
+prefill rank frees a request's blocks once all of them have; with more
+prefill ranks, each decode rank reads from as many prefill ranks (with MLA,
+one copy of the replicated latent, notifying the others). A request's reads
+run concurrently; reads of different requests queue on each rank's link.
+Neither instance may use pipeline parallelism, which the real pull
+connector does not support either, and decode context parallelism and
+hybrid (Mamba) layouts are not modeled. A read that cannot be booked (a
+prefill instance that does not answer within 10 s, or layouts the real
+connector rejects) fails its request, which the decode instance then
+prefills itself, as after a failed NIXL read; a booking lost to a prefill
+instance that stopped answering holds that request's blocks there, as
+simulated leases do not expire. As the proxy, the API servers and the HTTP path run for
 real, they add their own latency, including its variation.
 
 On the 1P1D deployment above at 8 req/s, through the toy proxy, served
@@ -483,7 +492,21 @@ proxy), replaying their recordings:
 | | TTFT mean | TTFT median | TTFT P99 | TPOT mean |
 | --- | --- | --- | --- | --- |
 | Real (ms) | 73.4 | 63.7 | 162.8 | 3.874 |
-| Simulated, served (ms) | 75.4 | 66.3 | 145.0 | 3.875 |
+| Simulated, served (ms) | 73.2 | 66.4 | 136.0 | 3.874 |
+
+With different tensor parallelism on the two instances (three GPUs),
+the decode instance's recorded reads fit a rate per read, which is what
+concurrent reads achieve: with TP=2 prefill and TP=1 decode the decode rank
+reads half of its KV from each prefill rank (4.5 GB/s per read, as NIXL
+reads the heads' slices); with TP=1 prefill and TP=2 decode both decode ranks
+read their half of the prefill rank's KV (7.4 GB/s per read):
+
+| | TTFT mean | TTFT median | TTFT P99 | TPOT mean |
+| --- | --- | --- | --- | --- |
+| Prefill TP=2, decode TP=1: real (ms) | 122.5 | 109.2 | 206.2 | 6.973 |
+| Prefill TP=2, decode TP=1: simulated (ms) | 124.3 | 116.1 | 203.0 | 6.890 |
+| Prefill TP=1, decode TP=2: real (ms) | 107.5 | 94.8 | 184.0 | 4.071 |
+| Prefill TP=1, decode TP=2: simulated (ms) | 110.8 | 99.3 | 193.0 | 4.035 |
 
 ### Running without a GPU
 
@@ -519,9 +542,9 @@ Python 3.11 or newer for triton-cpu.
 * Pipeline stages are assumed balanced.
 * No LoRA or pooling models, and no KV transfer other than CPU offloading by
   the `OffloadingConnector` and disaggregated prefill by the `NixlConnector`
-  (pull mode; in-process instances have one rank, served ones need equal
-  tensor parallelism and no pipeline parallelism). Speculative decoding
-  without adaptive verification only, and no diffusion models.
+  (pull mode; in-process instances have one rank, served ones no pipeline
+  parallelism). Speculative decoding without adaptive verification only,
+  and no diffusion models.
 * The `fast_forward` and `virtual` clocks are offline-only and need a single
   process (one rank); served and multi-rank simulations run in real time.
 * Prompt and output token ids are not meaningful; only their counts are.
