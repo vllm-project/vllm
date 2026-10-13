@@ -67,12 +67,9 @@ class BlockStored(KVCacheEvent):
     medium: str | None
     lora_name: str | None
 
-    """Extra keys used in block hash computation, one entry per block in
-    block_hashes. Each entry contains, in order, the LoRA name (if
-    `lora_name` is set), `(mm_identifier, offset)` pairs, the cache_salt
-    string and prompt embedding digests for that specific block. These are
-    published untagged; the block hash itself uses each value tagged with
-    its source, e.g. `("lora", name)` or `("mm", mm_identifier, offset)`.
+    """Cache identity metadata, one entry per block in block_hashes.
+    Each non-None entry contains source-tagged LoRA name and path, multimodal
+    identifiers and offsets, cache salt, or prompt embedding digests.
     """
     extra_keys: list[tuple[Any, ...] | None] | None = None
 

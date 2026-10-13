@@ -1205,8 +1205,8 @@ def test_lora_path_change_changes_block_hashes(hash_fn):
     assert first.block_hashes[0] != second.block_hashes[0]
 
 
-def test_to_event_extra_keys_keeps_untagged_event_format():
-    """KV events keep publishing the extra-key shapes consumers already parse."""
+def test_to_event_extra_keys_preserves_tagged_hash_inputs():
+    """Keep the identity fields needed by event consumers."""
     request = make_request(
         "0",
         list(range(10)),
@@ -1225,8 +1225,11 @@ def test_to_event_extra_keys_keeps_untagged_event_format():
         ("mm", "hash1", 2),
         ("cache_salt", "salt"),
     )
-    event_keys = ("adapter", ("hash1", 2), "salt")
-    assert to_event_extra_keys([extra_keys, None]) == [event_keys, None]
+    assert to_event_extra_keys([extra_keys, None]) == [extra_keys, None]
+    different_path_keys = (("lora", "adapter", "/other/path"),) + extra_keys[1:]
+    assert to_event_extra_keys([extra_keys]) != to_event_extra_keys(
+        [different_path_keys]
+    )
     assert to_event_extra_keys([]) is None
     assert to_event_extra_keys(None) is None
 
