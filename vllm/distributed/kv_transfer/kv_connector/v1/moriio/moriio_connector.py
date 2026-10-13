@@ -323,15 +323,6 @@ class MoRIIOConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_scheduler is not None
         return self.connector_scheduler.build_connector_meta(scheduler_output)
 
-    def has_pending_push_work(self) -> bool:
-        scheduler = self.connector_scheduler
-        return bool(
-            scheduler is not None
-            and scheduler.is_producer
-            and scheduler.mode == MoRIIOMode.WRITE
-            and (scheduler._reqs_need_abort or scheduler._deferred_send_deadlines)
-        )
-
     def request_finished(
         self,
         request: "Request",

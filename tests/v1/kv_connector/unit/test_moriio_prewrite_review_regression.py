@@ -114,6 +114,45 @@ def test_unsupported_abort_does_not_take_scheduler_ownership(num_tokens, tp_key)
 
 @pytest.mark.cpu_test
 @pytest.mark.skip_global_cleanup
+def test_never_scheduled_producer_abort_drains_without_new_traffic():
+    scheduler = create_scheduler(create_vllm_config(role="kv_producer"))
+    worker, _, _, task, writes, notifications = _producer_worker()
+    pool = scheduler.kv_cache_manager.block_pool
+    free_before = pool.get_num_free_blocks()
+    request = create_request(num_tokens=32, do_remote_decode=True)
+    _setup_kv_transfer_request(request, fake_transfer_id=task.transfer_id)
+    scheduler.add_request(request)
+
+    # Cancel before the first schedule: no P blocks, layer hooks or writer tasks.
+    scheduler.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
+    assert request.num_computed_tokens == 0
+    assert request.request_id in scheduler.requests
+    assert pool.get_num_free_blocks() == free_before
+    assert not scheduler.has_unfinished_requests()
+
+    step = scheduler.schedule()
+    assert step.total_num_scheduled_tokens == 0
+    assert set(step.kv_connector_metadata.reqs_to_abort) == {request.request_id}
+    assert scheduler.has_requests()
+    worker.start_load_kv(step.kv_connector_metadata)
+    finished_sending, _ = worker.get_finished()
+    assert finished_sending == {request.request_id}
+    scheduler.update_from_output(
+        step, create_model_runner_output([], finished_sending=finished_sending)
+    )
+
+    assert request.request_id not in scheduler.requests
+    assert pool.get_num_free_blocks() == free_before
+    assert not scheduler.has_requests()
+    worker.start_load_kv(scheduler.schedule().kv_connector_metadata)
+    assert worker.get_finished() == (set(), set())
+    assert not worker._pending_unmapped_acks
+    assert writes == []
+    assert notifications == [(task.transfer_id, "write_failed")]
+
+
+@pytest.mark.cpu_test
+@pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize("path", ["early", "queued", "deferred"])
 def test_scheduler_worker_writer_ack_reclaims_once_after_history_eviction(path):
     scheduler = create_scheduler(
