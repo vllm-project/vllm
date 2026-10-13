@@ -23,13 +23,27 @@ Therefore, it is recommended to install vLLM with a **fresh new** environment. I
 
 ```bash
 uv pip install vllm --torch-backend=auto
+vllm download-kernels
 ```
 
 ??? console "pip"
     ```bash
     # Install vLLM with CUDA 12.9.
     pip install vllm --extra-index-url https://download.pytorch.org/whl/cu129
+    vllm download-kernels
     ```
+
+`vllm download-kernels` installs [FlashInfer](https://docs.flashinfer.ai/)'s
+precompiled kernels for the installed FlashInfer and CUDA versions. Without them,
+vLLM downloads and compiles kernels at startup, which can add several minutes on
+Hopper and newer GPUs, **especially Blackwell**, and logs a warning. Run it in the
+same Python environment after every vLLM install or upgrade, and in custom
+container images. The kernels are tied to the FlashInfer version, and FlashInfer
+refuses to import when they do not match, so an upgrade needs them refreshed.
+With a PyTorch built for CUDA older than 12.9, only `flashinfer-cubin` is
+installed, because FlashInfer does not publish `flashinfer-jit-cache` for it.
+For CUDA overrides and nightly kernels, use the
+[FlashInfer CLI](https://docs.flashinfer.ai/cli.html#download-kernels) directly.
 
 We recommend leveraging `uv` to [automatically select the appropriate PyTorch index at runtime](https://docs.astral.sh/uv/guides/integration/pytorch/#automatic-backend-selection) by inspecting the installed CUDA driver version via `--torch-backend=auto` (or `UV_TORCH_BACKEND=auto`). To select a specific backend (e.g., `cu130`), set `--torch-backend=cu130` (or `UV_TORCH_BACKEND=cu130`). If this doesn't work, try running `uv self update` to update `uv` first.
 
@@ -94,9 +108,10 @@ If you only need to change Python code, you can build and install vLLM without c
 git clone https://github.com/vllm-project/vllm.git
 cd vllm
 VLLM_USE_PRECOMPILED=1 uv pip install --editable . --torch-backend=auto
+vllm download-kernels
 ```
 
-This command will do the following:
+The install command will do the following:
 
 1. Look for the current branch in your vLLM clone.
 1. Identify the corresponding base commit in the main branch.

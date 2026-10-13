@@ -71,12 +71,6 @@ else:
 
 logger = init_logger(__name__)
 
-# TODO(rocm): These models are either unsupported by MRV2 or slower with
-# MRV2 on AMD GPUs.
-ROCM_DEFAULT_MRV1_ARCHITECTURES = frozenset(
-    {"DeepseekV32ForCausalLM", "DeepseekV4ForCausalLM", "GlmMoeDsaForCausalLM"}
-)
-
 DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES = frozenset(
     {
         "DeepseekV32MTPModel",
@@ -726,30 +720,6 @@ class VllmConfig:
         use_v2_model_runner = envs.VLLM_USE_V2_MODEL_RUNNER
         if use_v2_model_runner is not None:
             return use_v2_model_runner
-
-        from vllm.platforms import current_platform
-
-        model_config = self.model_config
-        if model_config is not None and current_platform.is_rocm():
-            architectures = getattr(model_config, "architectures", ())
-            if any(arch in ROCM_DEFAULT_MRV1_ARCHITECTURES for arch in architectures):
-                # This default is a speed preference, not a claim that V1 can
-                # serve the config, so it yields where V1 cannot. It yields by
-                # falling through to the checks below, not by selecting V2.
-                v1_unsupported = self._get_v1_model_runner_unsupported_features()
-                if not v1_unsupported:
-                    logger.warning_once(
-                        "Defaulting to V1 model runner on ROCm for model "
-                        "architectures: %s",
-                        ", ".join(architectures),
-                    )
-                    return False
-                logger.warning_once(
-                    "Skipping the ROCm V1 model runner default for %s: V1 does "
-                    "not support %s.",
-                    ", ".join(architectures),
-                    ", ".join(v1_unsupported),
-                )
 
         if not HAS_TRITON:
             logger.warning_once(
@@ -1687,18 +1657,6 @@ class VllmConfig:
                 self.parallel_config.disable_nccl_for_dp_synchronization = False
 
         if (
-            self.speculative_config is not None
-            and self.scheduler_config.async_scheduling
-            and self.model_config is not None
-            and not self.model_config.disable_cascade_attn
-        ):
-            logger.warning_once(
-                "Disabling cascade attention (not yet compatible with "
-                "async speculative decoding).",
-            )
-            self.model_config.disable_cascade_attn = True
-
-        if (
             self.observability_config.per_request_spec_decode_metrics != "none"
             and self.speculative_config is None
         ):
@@ -1828,6 +1786,16 @@ class VllmConfig:
 
         self._maybe_disable_dynamic_sd_for_data_parallel()
         self._maybe_override_dynamic_sd_cudagraph_mode()
+
+        if (
+            self.attention_config.sparse_mla_prefill_workspace_factor is None
+            and self.model_config is not None
+        ):
+            # Resolved once: KV cache auto-fit can lower max_model_len later, and
+            # factor * max_model_len must stay within the workspace reserved at init.
+            self.attention_config.sparse_mla_prefill_workspace_factor = (
+                5 if self.model_config.max_model_len <= 256 * 1024 else 2
+            )
 
         if (
             self.attention_config.hisparse_config is None
@@ -2120,36 +2088,17 @@ class VllmConfig:
         )
 
         # final check of cudagraph mode after all possible updates
-        if current_platform.is_cuda_alike():
-            if (
-                self.compilation_config.cudagraph_mode.has_full_cudagraphs()
-                and self.model_config is not None
-                and not self.model_config.disable_cascade_attn
-                and not self.compilation_config.cudagraph_mode.has_piecewise_cudagraphs()  # noqa: E501
-            ):
-                logger.warning_once(
-                    "No piecewise cudagraph for executing cascade attention. "
-                    "Will fall back to eager execution if a batch runs into "
-                    "cascade attentions."
-                )
-
-            if self.compilation_config.cudagraph_mode.requires_piecewise_compilation():
-                assert (
-                    self.compilation_config.mode == CompilationMode.VLLM_COMPILE
-                    or envs.VLLM_USE_BREAKABLE_CUDAGRAPH
-                ), (
-                    "Compilation mode should be CompilationMode.VLLM_COMPILE "
-                    "when cudagraph_mode piecewise cudagraphs is used, "
-                    f"cudagraph_mode={self.compilation_config.cudagraph_mode}"
-                )
         if (
-            self.model_config
-            and envs.VLLM_BATCH_INVARIANT
-            and not self.model_config.disable_cascade_attn
+            current_platform.is_cuda_alike()
+            and self.compilation_config.cudagraph_mode.requires_piecewise_compilation()
         ):
-            self.model_config.disable_cascade_attn = True
-            logger.warning_once(
-                "Disabling cascade attention when VLLM_BATCH_INVARIANT is enabled.",
+            assert (
+                self.compilation_config.mode == CompilationMode.VLLM_COMPILE
+                or envs.VLLM_USE_BREAKABLE_CUDAGRAPH
+            ), (
+                "Compilation mode should be CompilationMode.VLLM_COMPILE "
+                "when cudagraph_mode piecewise cudagraphs is used, "
+                f"cudagraph_mode={self.compilation_config.cudagraph_mode}"
             )
 
         if self.parallel_config.use_ubatching:
@@ -2166,10 +2115,6 @@ class VllmConfig:
                 "--all2all-backend=deepep_high_throughput, or "
                 "--all2all-backend=nixl_ep and install the matching kernels."
             )
-
-            if not self.model_config.disable_cascade_attn:
-                self.model_config.disable_cascade_attn = True
-                logger.warning_once("Disabling cascade attention when DBO is enabled.")
 
         if not self.instance_id:
             self.instance_id = random_uuid()[:5]
