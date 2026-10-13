@@ -4,10 +4,10 @@
 
 - Whole layers (KDA): K1 (AttnRes, in_proj, f_b, spec conv, the KDA recurrence,
   the gated norm), then K2.
-- FFN layers (MLA, DCP8 over the TP group): vLLM's AttnRes and MLA split as
-  ``mono/mla.py`` does (the query's prologue, AITER's decode, the DCP combine
-  and W_UV), then K2 (o_proj, its all-reduce, the MLP AttnRes and the latent
-  MoE).
+- FFN layers (MLA, DCP1 or DCP8 over the TP group): vLLM's AttnRes and MLA
+  split as ``mono/mla.py`` does: M1a (the query's prologue, at DCP8 its
+  gather), AITER's decode, M1b (at DCP8 the LSE combine, W_UV, the gate), then
+  K2 (o_proj, its all-reduce, the MLP AttnRes and the latent MoE).
 
 A launch serves whole spec-verify requests, at most 64 rows. Weights are views
 of the loaded parameters (``weight_source="views"``), pinned by the MoE
@@ -34,6 +34,7 @@ if TYPE_CHECKING:
 
 TP = 8
 DCP = TP  # the MLA layers' KV shards: one a TP rank
+DCP_SIZES = (1, DCP)  # M1's builds: the whole KV a rank, or DCP over the TP group
 MLA_HEADS, MLA_Q, MLA_KV, MLA_NOPE, MLA_ROPE, MLA_V = 12, 1536, 512, 128, 64, 128
 MAX_TOKENS = 64  # a launch's rows: the MoE route table's token bitmaps
 WHOLE, FFN = "whole", "ffn"
@@ -86,11 +87,10 @@ def refuse_config(vllm_config: "VllmConfig") -> list[str]:
     if tp != TP:
         reasons.append(f"needs TP{TP}, got TP{tp}")
     pc = vllm_config.parallel_config
-    if pc.decode_context_parallel_size != DCP:
-        reasons.append(
-            f"needs DCP{DCP} over the TP group, got DCP{pc.decode_context_parallel_size}"
-        )
-    if pc.cp_kv_cache_interleave_size != 1:
+    dcp = pc.decode_context_parallel_size
+    if dcp not in DCP_SIZES:
+        reasons.append(f"needs DCP1 or DCP{DCP} (over the TP group), got DCP{dcp}")
+    elif dcp > 1 and pc.cp_kv_cache_interleave_size != 1:
         reasons.append(
             f"needs KV interleave 1 (token t on DCP rank t % {DCP}), got "
             f"{pc.cp_kv_cache_interleave_size}"
@@ -190,8 +190,8 @@ def refuse_model(model) -> list[str]:
 
 
 def _refuse_mla(p: str, w, need) -> list[str]:
-    """An MLA layer as ``mono/mla.py`` (and M1) runs it: NoPE, gated, DCP, an
-    fp8 cache, W_UK / W_UV as MXFP4 bmms."""
+    """An MLA layer as ``mono/mla.py`` (and M1) runs it: NoPE, gated, DCP1 or
+    DCP8, an fp8 cache, W_UK / W_UV as MXFP4 bmms."""
     from vllm.models.kimi_k3.amd.ops.mono.attention.kda import HIDDEN as H
 
     reasons = []
@@ -204,9 +204,10 @@ def _refuse_mla(p: str, w, need) -> list[str]:
         reasons.append(f"{p}: needs NoPE, dense, unreplicated-query MLA")
     if w.g_proj is None:
         reasons.append(f"{p}: needs the output gate (g_proj)")
-    if a.impl.dcp_world_size != DCP or a.use_pcp or a.hisparse_cache is not None:
-        reasons.append(f"{p}: needs DCP{DCP}, no PCP / HiSparse")
-    elif a.dcp_manager is None or a.dcp_manager.query_gather is None:
+    dcp = a.impl.dcp_world_size
+    if dcp not in DCP_SIZES or a.use_pcp or a.hisparse_cache is not None:
+        reasons.append(f"{p}: needs DCP1 or DCP{DCP}, no PCP / HiSparse")
+    elif dcp > 1 and (a.dcp_manager is None or a.dcp_manager.query_gather is None):
         reasons.append(f"{p}: no DCP query gather")
     if not a.kv_cache_dtype.startswith("fp8"):
         reasons.append(f"{p}: KV cache {a.kv_cache_dtype}, needs fp8")
@@ -265,7 +266,9 @@ def pack(model, ctx: MonoContext) -> Any:
     from vllm.distributed import get_dcp_group, get_tp_group
 
     dcp = get_dcp_group()
-    if dcp.world_size != DCP or dcp.rank_in_group != get_tp_group().rank_in_group:
+    if dcp.world_size > 1 and (
+        dcp.world_size != DCP or dcp.rank_in_group != get_tp_group().rank_in_group
+    ):
         raise MonoUnsupported(
             f"MonoKernel {MONO_SPEC.name}: DCP rank must be the TP rank "
             f"(DCP{dcp.world_size} rank {dcp.rank_in_group})"
@@ -325,6 +328,11 @@ def eligible(ctx: MonoContext, step: MonoStep) -> str | None:
             return "MLA: not pure decode"
         if a.decode.max_qo_len != q:
             return "MLA: not uniform"
+        # Gluon serves bf16 caches only; M1 hands AITER an fp8 query
+        if getattr(a.decode, "use_gluon_decode", False) or getattr(
+            a.decode, "use_gluon_verify", False
+        ):
+            return "MLA: Gluon decode"
     return None
 
 
@@ -352,7 +360,8 @@ MONO_SPEC = MonoSpec(
             group="attention",
             dtype="fp8 e4m3 (uint8 storage)",
             layout="[blocks, block_size, 576]: kv_c 512 | k_pe 64, rows dense, "
-            "blocks may be strided; a slot of -1 is another DCP rank's token",
+            "blocks may be strided; a slot of -1 is not stored (DCP8: another "
+            "rank's token)",
         ),
     },
     weight_source="views",

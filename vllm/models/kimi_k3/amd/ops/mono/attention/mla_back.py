@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """M1b ``mla_post``: one Kimi-K3 MLA layer from AITER's decode output to
-o_proj's input, at TP8 + DCP8 (the DCP group the TP group).
+o_proj's input, at TP8 + DCP8 (the DCP group the TP group) or TP8 + DCP1.
 
 AITER leaves every rank the partial attention of its KV shard for all the
 gathered heads (``o`` [S, ranks x 12, 512] bf16 and ``lse`` [S, ranks x 12]
@@ -16,6 +16,9 @@ f32, strided views). As ``dcp_a2a_lse_reduce`` -> ``_v_up_proj`` -> the gate:
     W_UV (a wave 16 of the head's 128 rows)
                         the latents -> MXFP4 (aiter's even scale), four FP4
                         MFMAs against W_V -> bf16, times the gate -> ``core``
+
+At DCP1 (``ranks`` 1) ``o`` [S, 12, 512] is already the attention's output, as
+vLLM hands it to ``_v_up_proj``: no push, no LSE; the combine stage loads it.
 """
 
 from dataclasses import dataclass
@@ -24,7 +27,7 @@ import flydsl.compiler as flyc
 import flydsl.expr as fx
 import torch
 from aiter.ops.flydsl.kernels import buffer_ops as bo
-from flydsl.expr import gpu, range_constexpr
+from flydsl.expr import const_expr, gpu, range_constexpr
 from flydsl.expr.typing import Int32, Int64, T
 
 from vllm.models.kimi_k3.amd.ops.mono.attention.kda import (
@@ -91,7 +94,7 @@ _SOURCES = source_digest(".")
 class MlaPostBuild:
     tokens: int  # S
     qlen: int  # tokens a request (1 + speculative)
-    ranks: int = 8
+    ranks: int = 8  # 1: DCP1, no peer memory
     peer_off: int = 0  # CMB's byte offset in a rank's peer buffer
     timeline: bool = False
 
@@ -196,6 +199,29 @@ def stage_combine(c, h, t0):
     tt = tid // (KVL // 4)
     cc = tid % (KVL // 4)
     t = fx.min(t0 + tt, s - 1)
+    if const_expr(R == 1):
+        a = c["args"]
+        o = fx.Vector(
+            bo.buffer_load(
+                rsrc(a["o"]),
+                (t * a["o_sb"] + h * a["o_sh"]) // 2 + 2 * cc,
+                vec_width=2,
+                dtype=T.i32,
+            )
+        )
+        live = t0 + tt < s
+        base = c["lat"] + tt * LROW + 2 * cc
+        fx.ptr_store(live.select(o[0], fx.Int32(0)), base)
+        fx.ptr_store(live.select(o[1], fx.Int32(0)), base + 1)
+    if const_expr(R > 1):
+        combine_ranks(c, h, t0, tt, cc, t)
+    gpu.barrier()
+
+
+@traced
+def combine_ranks(c, h, t0, tt, cc, t):
+    """``stage_combine`` at DCP8: the ranks' CMB partials, LSE-weighted."""
+    s, R = c["S"], c["R"]
     specs = []
     for src in range_constexpr(R):
         at = cmb_pair(c, src, t, h)
@@ -227,7 +253,6 @@ def stage_combine(c, h, t0):
     base = c["lat"] + tt * LROW + 2 * cc
     fx.ptr_store(w0, base)
     fx.ptr_store(w1, base + 1)
-    gpu.barrier()
 
 
 # ---------------------------------------------------------------- W_UV
@@ -362,8 +387,9 @@ def build(key: MlaPostBuild):
         bid = fx.block_idx.x
         lds = fx.SharedAllocator().allocate(Smem).peek()
         mb = Mailbox(step_tag(epoch, layer) - 1, health, alarm, region_ids(REGIONS))
-        bases = peer_bases(peers, R)
-        own = load_ptr64(peers, rank)
+        # DCP1 reads no peer memory (``peers`` may be 0)
+        bases = peer_bases(peers, R) if R > 1 else []
+        own = load_ptr64(peers, rank) if R > 1 else peers
         c = {
             "S": s,
             "Q": key.qlen,
@@ -400,7 +426,8 @@ def build(key: MlaPostBuild):
         }
         on, tls = key.timeline, lds.tls.ptr
         stamp_begin(on, tls, tid, TL_POINTS)
-        stage_push(c)
+        if const_expr(R > 1):
+            stage_push(c)
         stamp(on, tls, tid, 1)
         combine_tasks(c)
         stamp(on, tls, tid, 3)
@@ -488,13 +515,16 @@ def mla_post(
     scratch=None,
 ):
     """Host launcher. ``o`` [S, >= ranks x 12, 512] bf16 and ``lse`` [S, >=
-    ranks x 12] f32, rows and heads strided; ``seq_lens`` [requests] and ``qsl``
+    ranks x 12] f32, rows and heads strided (ranks 1: no ``lse``, ``peers``
+    may be None); ``seq_lens`` [requests] and ``qsl``
     [requests + 1] int32 (the local KV lengths, the query starts); ``w_v`` (12,
     128, 256) u8 MXFP4 and ``w_v_scale`` (12, 128, 16) e8m0, any strides but
     W_V's last; ``gate`` / ``core`` [S, 1536] bf16, dense."""
     del scratch
     assert o.stride(-1) == 1 and w_v.stride(-1) == 1
-    assert o.dtype == torch.bfloat16 and lse.dtype == torch.float32
+    assert o.dtype == torch.bfloat16
+    assert (lse is None) == (key.ranks == 1)
+    assert lse is None or lse.dtype == torch.float32
     assert seq_lens.dtype == torch.int32 and qsl.dtype == torch.int32
     assert gate.is_contiguous() and core.is_contiguous()
     f = build(key)
@@ -502,9 +532,9 @@ def mla_post(
         o.data_ptr(),
         o.stride(0),
         o.stride(1),
-        lse.data_ptr(),
-        lse.stride(0),
-        lse.stride(1),
+        0 if lse is None else lse.data_ptr(),
+        0 if lse is None else lse.stride(0),
+        0 if lse is None else lse.stride(1),
         seq_lens.data_ptr(),
         qsl.data_ptr(),
         w_v.data_ptr(),
@@ -516,7 +546,7 @@ def mla_post(
         w_v_scale.stride(2),
         gate.data_ptr(),
         core.data_ptr(),
-        peers.data_ptr(),
+        0 if peers is None else peers.data_ptr(),
         rank,
         layer,
         epoch.data_ptr(),

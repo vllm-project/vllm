@@ -14,7 +14,7 @@ stores anything else. The kernels see the buffer past the head.
 
 import torch
 
-from vllm.distributed import get_tp_group
+from vllm.distributed import get_dcp_group, get_tp_group
 from vllm.models.common.mono.abi import PEER_HEAD
 from vllm.models.common.mono.peer import PeerBuffer
 from vllm.models.kimi_k3.amd.mono.spec import MAX_TOKENS
@@ -53,13 +53,18 @@ class MonoRunner:
         tp = get_tp_group()
         self.rank = tp.rank_in_group
         self.world = tp.world_size
-        # K2's regions, M1a's gathered query (QG), M1b's partials (CMB)
+        self.dcp = get_dcp_group().world_size  # M1's ranks: 1 or the TP group
+        # K2's regions, M1a's gathered query (QG), M1b's partials (CMB); M1
+        # takes no peer memory at DCP1
+        m1 = self.dcp > 1
         self.mla_peer_off = layer.peer_bytes(MAX_TOKENS)
-        self.mla_post_off = self.mla_peer_off + mla.peer_bytes(MAX_TOKENS, self.world)
+        self.mla_post_off = self.mla_peer_off + (
+            mla.peer_bytes(MAX_TOKENS, self.dcp) if m1 else 0
+        )
         nbytes = (
             PEER_HEAD
             + self.mla_post_off
-            + mla_back.peer_bytes(MAX_TOKENS, self.world)
+            + (mla_back.peer_bytes(MAX_TOKENS, self.dcp) if m1 else 0)
         )
         self.peers = PeerBuffer(nbytes, tp.cpu_group, self.rank, tp.world_size, device)
         self.peers.bytes.zero_()

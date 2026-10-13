@@ -72,13 +72,24 @@ def test_supported_config_is_accepted(monkeypatch):
     assert _refuse(monkeypatch) == []
 
 
+def test_dcp1_is_accepted_whatever_the_interleave(monkeypatch):
+    """DCP1: every rank holds the whole KV; the interleave means nothing."""
+    for interleave in (1, 16):
+        over = {
+            "parallel_config.decode_context_parallel_size": 1,
+            "parallel_config.cp_kv_cache_interleave_size": interleave,
+        }
+        assert _refuse(monkeypatch, **over) == []
+
+
 @pytest.mark.parametrize(
     "over, reason",
     [
         ({"speculative_config": None}, "needs speculative decoding"),
         ({"speculative_config.num_speculative_tokens": 64}, "exceed 64"),
         ({"parallel_config.tensor_parallel_size": 4}, "needs TP8"),
-        ({"parallel_config.decode_context_parallel_size": 1}, "needs DCP8"),
+        ({"parallel_config.decode_context_parallel_size": 2}, "needs DCP1 or DCP8"),
+        ({"parallel_config.decode_context_parallel_size": 4}, "needs DCP1 or DCP8"),
         ({"parallel_config.cp_kv_cache_interleave_size": 16}, "interleave 1"),
         ({"cache_config": SimpleNamespace(cache_dtype="auto")}, "fp8 KV cache"),
         ({"kv_transfer_config": object()}, "kv_connector"),
@@ -160,6 +171,14 @@ def test_eligible_is_pure_uniform_spec_verify(width, md, why):
         ({"num_prefills": 1}, "MLA: not pure decode"),
         ({"num_decode_tokens": 2}, "MLA: not pure decode"),
         ({"decode": SimpleNamespace(max_qo_len=2)}, "MLA: not uniform"),
+        (
+            {"decode": SimpleNamespace(max_qo_len=4, use_gluon_verify=True)},
+            "MLA: Gluon decode",
+        ),
+        (
+            {"decode": SimpleNamespace(max_qo_len=4, use_gluon_decode=True)},
+            "MLA: Gluon decode",
+        ),
     ],
 )
 def test_eligible_checks_the_mla_decode(mla, why):

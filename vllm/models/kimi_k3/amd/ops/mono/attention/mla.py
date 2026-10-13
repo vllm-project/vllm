@@ -2,7 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """M1a ``mla_pre``: one Kimi-K3 MLA layer from the AttnRes seam to AITER's
 decode input, for a spec-verify step (S rows) at TP8 + DCP8 (the DCP group the
-TP group: rank r's 12 heads are heads 12 r .. of the gathered query).
+TP group: rank r's 12 heads are heads 12 r .. of the gathered query) or TP8 +
+DCP1 (``ranks`` 1: the query is this rank's 12 heads, no gather).
 
 One launch a layer, ``BLOCKS`` CTAs x ``THREADS`` threads:
 
@@ -17,12 +18,13 @@ One launch a layer, ``BLOCKS`` CTAs x ``THREADS`` threads:
                         the token's slot is this rank's (>= 0)
     q_b (16 rows, CTAs 64 ..)
                         q_c rows in LDS: q_nope -> QN (bf16 pairs); q_pe -> fp8
-                        -> every rank's QG
+                        -> every rank's QG (DCP1: ``q_out``)
     W_UK (a wave a (token tile, head, 16 latent rows), CTAs 208 ..)
                         q_nope -> MXFP4 (aiter's even scale, a lane a 32-block),
                         one 16x16x128 FP4 MFMA against W_K -> bf16 -> fp8 ->
-                        every rank's QG
-    unpack (every CTA)  this rank's QG -> the dense gathered ``q_out``
+                        every rank's QG (DCP1: ``q_out``)
+    unpack (every CTA, DCP8)
+                        this rank's QG -> the dense gathered ``q_out``
                         [S, ranks 12, 576] fp8
 
 Rounding follows the vLLM path where it is elementwise (bf16 hand-offs, the
@@ -144,7 +146,7 @@ class MlaPreBuild:
     out_eps: float = 1e-5  # input_layernorm
     q_eps: float = 1e-6  # q_a_layernorm
     kv_eps: float = 1e-6  # kv_a_layernorm
-    ranks: int = 8  # the DCP (= TP) group
+    ranks: int = 8  # the DCP (= TP) group; 1: no DCP, no peer memory
     peer_off: int = 0  # QG's byte offset in a rank's peer buffer
     timeline: bool = False
 
@@ -227,10 +229,14 @@ def qg_pair(c, src, t, h, w):
 
 
 def put_qg(c, t, h, w, word):
-    """fp8 word ``w`` of (token t, local head h) -> every rank's QG."""
-    i = qg_pair(c, c["rank"], t, h, w)
-    for p in range_constexpr(c["R"]):
-        c["put_words"](c["qg"][p], i, [word])
+    """fp8 word ``w`` of (token t, local head h) -> every rank's QG; at DCP1
+    straight to ``q_out`` (nothing in this launch reads it)."""
+    if const_expr(c["R"] == 1):
+        bo.buffer_store(word, rsrc(c["args"]["q_out"]), (t * NH + h) * QW + w)
+    if const_expr(c["R"] > 1):
+        i = qg_pair(c, c["rank"], t, h, w)
+        for p in range_constexpr(c["R"]):
+            c["put_words"](c["qg"][p], i, [word])
 
 
 def fp8_word(v):
@@ -571,8 +577,9 @@ def build(key: MlaPreBuild):
         role = alloc.allocate(RoleLds)
         al, gl = role.attn.peek(), role.gemv.peek()
         mb = Mailbox(step_tag(epoch, layer) - 1, health, alarm, region_ids(REGIONS))
-        bases = peer_bases(peers, R)
-        own = load_ptr64(peers, rank)
+        # DCP1 reads no peer memory (``peers`` may be 0)
+        bases = peer_bases(peers, R) if R > 1 else []
+        own = load_ptr64(peers, rank) if R > 1 else peers
         c = {
             "S": s,
             "R": R,
@@ -653,7 +660,8 @@ def build(key: MlaPreBuild):
         stamp(on, tls, tid, 7)
         uk_tasks(c)
         stamp(on, tls, tid, 8)
-        stage_unpack(c)
+        if const_expr(R > 1):
+            stage_unpack(c)
         stamp(on, tls, tid, 9)
         stamp_flush(on, tls, tl, tid, bid, TL_POINTS)
 
@@ -777,7 +785,8 @@ def mla_pre(
     4) e8m0, any strides but W_K's last; ``kv_cache`` [blocks, block_size, 576]
     one-byte, entries dense; ``slots`` [S] int64 (-1: another rank's token);
     ``gate_out`` [S, 1536] bf16; ``q_out`` [S, ranks x 12, 576] fp8 (dense);
-    ``peers`` every rank's peer buffer base (i64 a rank); ``layer`` a slot below
+    ``peers`` every rank's peer buffer base (i64 a rank; unread at ranks 1,
+    may be None); ``layer`` a slot below
     ``kda.TAG_SLOTS``."""
     assert w_k.stride(-1) == 1 and kv_cache.stride(-1) == 1
     assert slots.dtype == torch.int64 and slots.size(0) == key.tokens
@@ -812,7 +821,7 @@ def mla_pre(
         gate_out.data_ptr(),
         q_out.data_ptr(),
         scratch.data_ptr(),
-        peers.data_ptr(),
+        ptr(peers),
         rank,
         layer,
         epoch.data_ptr(),

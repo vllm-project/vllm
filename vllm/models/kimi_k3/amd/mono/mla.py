@@ -4,9 +4,9 @@
 the reference M1a / M1b reproduce):
 
 - ``pre``: qkv_a, the q / kv norms, q_b, W_UK (fp4), the query's fp8 quant,
-  this rank's KV-cache rows, the DCP query all-gather, the output gate.
-- ``attend``: AITER's MLA decode on the gathered query (``forward_mqa``).
-- ``post``: the DCP LSE combine, W_UV (fp4), the gate: o_proj's input.
+  this rank's KV-cache rows, the DCP query all-gather (DCP8), the output gate.
+- ``attend``: AITER's MLA decode on the (gathered) query (``forward_mqa``).
+- ``post``: the DCP LSE combine (DCP8), W_UV (fp4), the gate: o_proj's input.
 
 Pure decode only (every row a decode row), as the mono step is.
 """
@@ -46,14 +46,15 @@ def pre(wrapper, hidden, kv_cache, slots):
     attn.impl.do_kv_cache_update(
         kv_c, k_pe.unsqueeze(1), kv_cache, slots, attn.kv_cache_dtype, attn._k_scale
     )
-    q8 = attn.dcp_manager.query_gather(q8)
+    if attn.impl.dcp_world_size > 1:
+        q8 = attn.dcp_manager.query_gather(q8)
     gate = wrapper.g_proj(hidden)[0].sigmoid()
     return q8, gate
 
 
 def attend(wrapper, q8, kv_cache, md):
     """The partial (this rank's KV) attention: ``o`` [S, heads * dcp, 512] and
-    its LSE [S, heads * dcp], both possibly strided views."""
+    its LSE [S, heads * dcp] (None at DCP1), both possibly strided views."""
     from vllm.platforms import current_platform
 
     attn = wrapper.mla_attn
@@ -65,12 +66,14 @@ def attend(wrapper, q8, kv_cache, md):
 def post(wrapper, o, lse, md, gate):
     """o_proj's input [S, heads * 128] bf16."""
     attn = wrapper.mla_attn
-    latent = attn.dcp_manager.combine(
-        o,
-        lse,
-        seq_lens=md.decode.seq_lens,
-        query_start_loc=md.query_start_loc[: md.num_decodes + 1],
-    )
+    latent = o
+    if attn.impl.dcp_world_size > 1:
+        latent = attn.dcp_manager.combine(
+            o,
+            lse,
+            seq_lens=md.decode.seq_lens,
+            query_start_loc=md.query_start_loc[: md.num_decodes + 1],
+        )
     core = gate.new_empty(gate.shape)
     attn._v_up_proj(latent, out=core)
     return core * gate

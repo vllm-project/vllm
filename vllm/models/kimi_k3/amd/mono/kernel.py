@@ -8,8 +8,8 @@ prefix_delta)``.
   recurrence, the gated norm) writes o_proj's input; K2 runs o_proj, its
   all-reduce, the MLP AttnRes and the latent MoE.
 - ``FfnLayer`` (MLA layers): M1a (AttnRes, the query prologue, the KV write
-  and the DCP query gather), AITER's decode, M1b (the DCP combine, W_UV and
-  the gate), then K2.
+  and, at DCP8, the query gather), AITER's decode, M1b (at DCP8 the LSE
+  combine, W_UV and the gate), then K2.
 
 Weights are views of the loaded parameters, taken at every launch.
 """
@@ -236,7 +236,7 @@ class FfnLayer(_Layer):
             out_eps=layer.input_layernorm.variance_epsilon,
             q_eps=w.q_a_layernorm.variance_epsilon,
             kv_eps=w.kv_a_layernorm.variance_epsilon,
-            ranks=self.runner.world,
+            ranks=self.runner.dcp,
             peer_off=self.runner.mla_peer_off,
         )
 
@@ -246,7 +246,7 @@ class FfnLayer(_Layer):
         return mla_back.MlaPostBuild(
             tokens=self.width,
             qlen=qlen,
-            ranks=self.runner.world,
+            ranks=self.runner.dcp,
             peer_off=self.runner.mla_post_off,
         )
 
@@ -271,7 +271,7 @@ class FfnLayer(_Layer):
         md, _, kv_cache, slots = mla.context(w)
         s = prefix_sum.size(0)
         q8 = prefix_sum.new_empty(
-            s, runner.world * m1.NH, m1.ENTRY,
+            s, runner.dcp * m1.NH, m1.ENTRY,
             dtype=current_platform.fp8_dtype(),
         )  # fmt: skip
         gate = prefix_sum.new_empty(s, m1.GROWS)

@@ -366,8 +366,9 @@ def _fp8_f(t):
 @needs_gfx950
 @pytest.mark.parametrize("S", [4, 8, 16, 32, 64])
 def test_m1a_single_gpu_matches_vllm_ops(S: int) -> None:
-    """M1a (ranks = 1) against attn_res -> qkv_a -> q / kv RMSNorm -> q_b ->
-    aiter's fp4 W_UK -> the fp8 query, the fp8 cache rows and the gate."""
+    """M1a at DCP1 (ranks = 1: no gather, no peer memory) against attn_res ->
+    qkv_a -> q / kv RMSNorm -> q_b -> aiter's fp4 W_UK -> the fp8 query, the
+    fp8 cache rows and the gate."""
     from vllm.models.kimi_k3.amd.ops.mono.attention.mla import (
         ENTRY,
         GROWS,
@@ -375,7 +376,6 @@ def test_m1a_single_gpu_matches_vllm_ops(S: int) -> None:
         NH,
         MlaPreBuild,
         mla_pre,
-        peer_bytes,
         scratch_bytes,
     )
     from vllm.models.kimi_k3.amd.ops.mono.common.plan import HEALTH_WORDS
@@ -387,7 +387,6 @@ def test_m1a_single_gpu_matches_vllm_ops(S: int) -> None:
     prefix, blocks, cache = w["prefix"].clone(), w["blocks"].clone(), w["kv_cache"].clone()
     q = torch.zeros(S, NH, ENTRY, dtype=torch.uint8, device="cuda")
     gate = torch.zeros(S, GROWS, dtype=bf, device="cuda")
-    peer = torch.zeros(peer_bytes(S, 1), dtype=torch.uint8, device="cuda")
     health = torch.zeros(HEALTH_WORDS, dtype=torch.int32, device="cuda")
     flags = torch.zeros(1, dtype=torch.int32, device="cuda")
     mla_pre(
@@ -410,7 +409,7 @@ def test_m1a_single_gpu_matches_vllm_ops(S: int) -> None:
         gate_out=gate,
         q_out=q,
         scratch=torch.zeros(scratch_bytes(key), dtype=torch.uint8, device="cuda"),
-        peers=torch.tensor([peer.data_ptr()], dtype=torch.int64, device="cuda"),
+        peers=None,
         rank=0,
         layer=3,
         epoch=torch.ones(1, dtype=torch.int32, device="cuda"),
@@ -435,7 +434,7 @@ def test_m1a_single_gpu_matches_vllm_ops(S: int) -> None:
     assert errs["gate"] < 1e-2 and errs["cache"] < 2e-2, errs
     assert errs["q_nope"] < 3e-2 and errs["q_pe"] < 3e-2, errs
     assert _cos(_fp8_f(q), ref["q"].float()) > 0.999, errs
-    # rows of another rank's tokens untouched
+    # rows of unstored tokens (slot -1) untouched
     assert errs["cache_same"] > 0.99, errs
 
 
@@ -500,42 +499,39 @@ def _uv_gate(lat, w):
     return out.view(S, -1) * w["gate"]
 
 
-def _mla_back_reference(w, S: int, q: int):
-    lat = _a2a_combine(w["o"].unsqueeze(0), w["lse"].unsqueeze(0),
-                       w["seq_lens"].unsqueeze(0), w["qsl"], q)
-    return _uv_gate(lat, w)
+def _mla_back_reference(w):
+    """DCP1: AITER's output is the latent (vLLM's ``_v_up_proj`` input)."""
+    return _uv_gate(w["o"], w)
 
 
 @needs_gfx950
 @pytest.mark.parametrize("S, q", [(4, 4), (8, 4), (16, 4), (32, 4), (64, 4), (64, 8)])
 def test_m1b_single_gpu_matches_vllm_ops(S: int, q: int) -> None:
-    """M1b (ranks = 1) against the a2a LSE combine (its empty-shard mask) ->
-    aiter's fp4 W_UV -> the gate."""
+    """M1b at DCP1 (ranks = 1: no LSE, no peer memory): AITER's strided
+    output -> aiter's fp4 W_UV -> the gate."""
     from vllm.models.kimi_k3.amd.ops.mono.attention.mla import GROWS
     from vllm.models.kimi_k3.amd.ops.mono.attention.mla_back import (
         MlaPostBuild,
         mla_post,
-        peer_bytes,
     )
     from vllm.models.kimi_k3.amd.ops.mono.common.plan import HEALTH_WORDS
 
     w = _mla_back_inputs(S, q, 1)
-    ref = _mla_back_reference(w, S, q)
-    peer = torch.zeros(peer_bytes(S, 1), dtype=torch.uint8, device="cuda")
+    ref = _mla_back_reference(w)
     health = torch.zeros(HEALTH_WORDS, dtype=torch.int32, device="cuda")
     flags = torch.zeros(1, dtype=torch.int32, device="cuda")
     core = torch.zeros(S, GROWS, dtype=bf, device="cuda")
     mla_post(
         MlaPostBuild(tokens=S, qlen=q, ranks=1),
         o=w["o"],
-        lse=w["lse"],
+        lse=None,
         seq_lens=w["seq_lens"],
         qsl=w["qsl"],
         w_v=w["w_v"],
         w_v_scale=w["w_v_scale"],
         gate=w["gate"],
         core=core,
-        peers=torch.tensor([peer.data_ptr()], dtype=torch.int64, device="cuda"),
+        peers=None,
         rank=0,
         layer=5,
         epoch=torch.ones(1, dtype=torch.int32, device="cuda"),
@@ -544,9 +540,6 @@ def test_m1b_single_gpu_matches_vllm_ops(S: int, q: int) -> None:
     )
     torch.accelerator.synchronize()
     assert not health.any() and not flags.any()
-    # the masked request's rows are exactly zero
-    if S > q:
-        assert not core[:q].any() and not ref[:q].any()
     err = _rel_l2(core, ref)
     assert err < 1e-2 and _cos(core, ref) > COS_MIN, err
 
