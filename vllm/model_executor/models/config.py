@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import TYPE_CHECKING, ClassVar, Literal
+from typing import TYPE_CHECKING, Literal, TypeVar
 
 from pydantic import Field
 
 from vllm.config import utils as config_utils
-from vllm.config.diffusion import DiffusionConfig
+from vllm.config.diffusion import DiffusionConfig, DiffusionModelOptions
 from vllm.logger import init_logger
 from vllm.utils.math_utils import round_up
 
@@ -20,9 +20,6 @@ logger = init_logger(__name__)
 
 
 class VerifyAndUpdateConfig:
-    diffusion_config_cls: ClassVar[type[DiffusionConfig]] = DiffusionConfig
-    """Type `--diffusion-config` is parsed into for this architecture."""
-
     @staticmethod
     def verify_and_update_config(vllm_config: "VllmConfig") -> None:
         return
@@ -75,6 +72,27 @@ class AliceAIForCausalLMConfig(VerifyAndUpdateConfig):
                 "AliceAI does not support speculative method "
                 f"{speculative_method!r} because it requires auxiliary hidden states"
             )
+
+
+_OptionsT = TypeVar("_OptionsT", bound=DiffusionModelOptions)
+
+
+def _parse_diffusion_model_options(
+    vllm_config: "VllmConfig", options_cls: type[_OptionsT]
+) -> _OptionsT:
+    """Validate `--diffusion-config` `model_options` against `options_cls`."""
+    diffusion_config = vllm_config.diffusion_config
+    assert diffusion_config is not None
+    options = diffusion_config.model_options
+    if isinstance(options, dict):
+        options = options_cls(**options)
+    if not isinstance(options, options_cls):
+        raise TypeError(
+            f"Expected {options_cls.__name__} diffusion model_options, "
+            f"got {type(options).__name__}."
+        )
+    diffusion_config.model_options = options
+    return options
 
 
 class DeepseekV32ForCausalLM(VerifyAndUpdateConfig):
@@ -393,6 +411,28 @@ class EmbeddingGemma2ModelConfig(Gemma4Config):
             model_config.max_model_len = 8192
 
 
+@config_utils.config
+class DiffusionGemmaDiffusionOptions(DiffusionModelOptions):
+    """DiffusionGemma `DiffusionConfig.model_options`. Unset options are read
+    from the model's generation_config.json."""
+
+    t_min: float | None = None
+    """Temperature at the last denoising step."""
+
+    t_max: float | None = None
+    """Temperature at the first denoising step."""
+
+    entropy_bound: float | None = Field(default=None, gt=0)
+    """Entropy budget for the EntropyBound sampler."""
+
+    confidence_threshold: float | None = None
+    """Confidence above which a position is committed."""
+
+    stability_threshold: int | None = Field(default=None, ge=0)
+    """Number of previous steps a prediction must match before it is
+    committed."""
+
+
 class DiffusionGemmaModelForBlockDiffusionConfig(VerifyAndUpdateConfig):
     @classmethod
     def verify_and_update_config(cls, vllm_config: "VllmConfig") -> None:
@@ -428,14 +468,14 @@ class DiffusionGemmaModelForBlockDiffusionConfig(VerifyAndUpdateConfig):
             )
 
         # Auto-create DiffusionConfig from HF config if not provided.
+        canvas_length = getattr(
+            vllm_config.model_config.hf_config, "canvas_length", 256
+        )
         if vllm_config.diffusion_config is None:
-            from vllm.config.diffusion import DiffusionConfig
-
-            hf_config = vllm_config.model_config.hf_config
-            canvas_length = getattr(hf_config, "canvas_length", 256)
-            vllm_config.diffusion_config = DiffusionConfig(
-                canvas_length=canvas_length,
-            )
+            vllm_config.diffusion_config = DiffusionConfig(canvas_length=canvas_length)
+        elif vllm_config.diffusion_config.canvas_length is None:
+            vllm_config.diffusion_config.canvas_length = canvas_length
+        _parse_diffusion_model_options(vllm_config, DiffusionGemmaDiffusionOptions)
 
         # The diffusion sampler materializes [num_seqs, canvas_length, vocab]
         # fp32 transients, so concurrency is memory-bound (>8 OOMs a single H200).
@@ -465,8 +505,8 @@ class DiffusionGemmaModelForBlockDiffusionConfig(VerifyAndUpdateConfig):
 
 
 @config_utils.config
-class NemotronDiffusionConfig(DiffusionConfig):
-    """Nemotron Labs Diffusion options for `--diffusion-config`."""
+class NemotronDiffusionOptions(DiffusionModelOptions):
+    """Nemotron Labs Diffusion `DiffusionConfig.model_options`."""
 
     temperature: float | None = Field(default=None, ge=0)
     """Default sampling temperature; explicit request temperatures take
@@ -493,8 +533,6 @@ class NemotronDiffusionConfig(DiffusionConfig):
 
 
 class NemotronLabsDiffusionForBlockDiffusionConfig(VerifyAndUpdateConfig):
-    diffusion_config_cls = NemotronDiffusionConfig
-
     @classmethod
     def verify_and_update_config(cls, vllm_config: "VllmConfig") -> None:
         """Set up the diffusion config and defaults for the Nemotron
@@ -540,20 +578,20 @@ class NemotronLabsDiffusionForBlockDiffusionConfig(VerifyAndUpdateConfig):
         # canvas_length from the HF config.
         hf_config = vllm_config.model_config.hf_config
         if vllm_config.diffusion_config is None:
-            vllm_config.diffusion_config = NemotronDiffusionConfig(
+            vllm_config.diffusion_config = DiffusionConfig(
                 canvas_length=getattr(hf_config, "canvas_length", 32),
             )
         elif vllm_config.diffusion_config.canvas_length is None:
             vllm_config.diffusion_config.canvas_length = getattr(
                 hf_config, "canvas_length", 32
             )
-        assert isinstance(vllm_config.diffusion_config, NemotronDiffusionConfig)
+        options = _parse_diffusion_model_options(vllm_config, NemotronDiffusionOptions)
 
         # Use the ordinary generation defaults; explicit request temperatures
         # always take precedence over this compatibility setting.
-        if vllm_config.diffusion_config.temperature is not None:
+        if options.temperature is not None:
             model_config.override_generation_config.setdefault(
-                "temperature", vllm_config.diffusion_config.temperature
+                "temperature", options.temperature
             )
 
         # The diffusion sampler materializes [num_seqs, canvas_length, vocab]
@@ -1352,8 +1390,3 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "VoyageQwen3BidirectionalEmbedModel": VoyageQwen3BidirectionalEmbedModelConfig,
     "XLMRobertaModel": JinaRobertaModelConfig,
 }
-
-
-def get_diffusion_config_cls(model_config: "ModelConfig") -> type[DiffusionConfig]:
-    cls = MODELS_CONFIG_MAP.get(model_config.architecture, VerifyAndUpdateConfig)
-    return cls.diffusion_config_cls

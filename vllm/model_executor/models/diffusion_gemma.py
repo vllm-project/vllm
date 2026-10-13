@@ -37,6 +37,7 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
 )
+from vllm.model_executor.models.config import DiffusionGemmaDiffusionOptions
 from vllm.model_executor.models.diffusion_gemma_sampler import (
     sample_row_stats,
     sample_row_stats_reference,
@@ -862,13 +863,25 @@ class DiffusionGemmaModelState(ModelState):
         self._pending_mm_embeds: tuple[list[torch.Tensor], torch.Tensor] | None = None
 
         diffusion_config = vllm_config.diffusion_config
-        canvas_length = diffusion_config.canvas_length if diffusion_config else 32
+        assert diffusion_config is not None
+        options = diffusion_config.model_options
+        assert isinstance(options, DiffusionGemmaDiffusionOptions)
+        canvas_length = diffusion_config.canvas_length
 
         text_config = self.model_config.hf_text_config
-        self.gen_config = self.model_config.try_get_generation_config()
-        max_denoising_steps = (
-            diffusion_config.max_denoising_steps if diffusion_config else None
-        ) or self.gen_config.get("max_denoising_steps", 48)
+        overrides = {
+            "t_min": options.t_min,
+            "t_max": options.t_max,
+            "confidence_threshold": options.confidence_threshold,
+            "stability_threshold": options.stability_threshold,
+        }
+        self.gen_config = {
+            **self.model_config.try_get_generation_config(),
+            **{k: v for k, v in overrides.items() if v is not None},
+        }
+        max_denoising_steps = diffusion_config.max_denoising_steps or (
+            self.gen_config.get("max_denoising_steps", 48)
+        )
         self.diffusion_states = DiffusionGemmaRequestStates(
             max_num_reqs=self.max_num_reqs,
             canvas_length=canvas_length,
@@ -910,11 +923,14 @@ class DiffusionGemmaModelState(ModelState):
 
     def custom_sampler(self, sampler: Any) -> tuple[Any, Any] | None:
         diffusion_config = self.vllm_config.diffusion_config
+        assert diffusion_config is not None
+        options = diffusion_config.model_options
+        assert isinstance(options, DiffusionGemmaDiffusionOptions)
         gen = self.gen_config
         sampler_cfg = gen.get("sampler_config") or {}
         if "EntropyBound" not in sampler_cfg.get("_cls_name", ""):
             raise ValueError("DiffusionGemma requires an EntropyBound sampler_config")
-        entropy_bound = sampler_cfg.get("entropy_bound")
+        entropy_bound = options.entropy_bound or sampler_cfg.get("entropy_bound")
         if entropy_bound is None or entropy_bound <= 0:
             raise ValueError(
                 f"entropy_bound must be a positive float (got {entropy_bound})"
