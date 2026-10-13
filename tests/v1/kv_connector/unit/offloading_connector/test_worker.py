@@ -327,7 +327,7 @@ def test_failed_store_is_dropped_and_still_completes():
     """A failed store is a future cache miss, not an error.
 
     It must still be marked completed, or the scheduler's per-job pending
-    count never reaches zero.
+    count never reaches zero, and marked failed so it is not published.
     """
     worker, _ = _make_worker(_kv_cache_config(1))
     worker.prepare_store_kv(_store_metadata(11))
@@ -338,56 +338,32 @@ def test_failed_store_is_dropped_and_still_completes():
 
     assert finished_sending == set()
     assert finished_recving == set()
-    assert worker.get_block_ids_with_load_errors() == set()
+    assert worker.take_failed_recving() == set()
     meta = worker.build_connector_worker_meta()
     assert meta is not None
     assert meta.completed_jobs == {11: 1}
+    assert meta.failed_jobs == {11}
 
 
-def test_failed_load_reports_its_blocks_for_recomputation():
+def test_failed_load_fails_its_request():
     """A failed load leaves undefined KV in its destination blocks.
 
-    The request is still reported as finished (the base contract), and the
-    blocks are handed to the scheduler so it recomputes them.
+    The request is reported as finished, per the base contract, and as failed,
+    which the scheduler handles for any number of KV cache groups.
     """
     worker, _ = _make_worker(_kv_cache_config(1))
-    metadata = OffloadingConnectorMetadata(
-        load_jobs={
-            12: TransferJob(
-                req_id="req",
-                src_spec=LoadStoreSpec(),
-                dst_spec=GPULoadStoreSpec(
-                    [3, 4, 5], group_sizes=(3,), block_indices=(0,)
-                ),
-            )
-        },
-        store_jobs={},
-    )
-    worker.start_kv_transfers(metadata)
+    worker.start_kv_transfers(_load_metadata(12))
     worker.worker.get_finished.return_value = _failed(12)
 
     _, finished_recving = worker.get_finished(set())
 
     assert finished_recving == {"req"}
-    assert worker.get_block_ids_with_load_errors() == {3, 4, 5}
-    assert worker.get_block_ids_with_load_errors() == set()
+    assert worker.take_failed_recving() == {"req"}
+    assert worker.take_failed_recving() == set()
     meta = worker.build_connector_worker_meta()
     assert meta is not None
     assert meta.completed_jobs == {12: 1}
-
-
-def test_failed_load_raises_on_hybrid_models():
-    """Block-level recovery assumes a single KV cache group.
-
-    Continuing would let the request read undefined KV, so a hybrid model
-    must fail loudly rather than silently return wrong output.
-    """
-    worker, _ = _make_worker(_kv_cache_config(2))
-    worker.start_kv_transfers(_load_metadata(13))
-    worker.worker.get_finished.return_value = _failed(13)
-
-    with pytest.raises(RuntimeError, match="multiple KV cache groups"):
-        worker.get_finished(set())
+    assert meta.failed_jobs == {12}
 
 
 def test_offloading_connector_worker_accepts_plugin_spec_default_layout():
