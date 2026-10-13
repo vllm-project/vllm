@@ -79,18 +79,22 @@ class TrtllmRaggedPrefillBackend(MLAPrefillBackend):
             v_head_dim=v_head_dim,
             vllm_config=vllm_config,
         )
-        (self._workspace_buffer,) = current_workspace_manager().get_simultaneous(
-            (
-                (envs.VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE,),
-                torch.uint8,
-            ),
+        self._workspace_spec = (
+            (envs.VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE,),
+            torch.uint8,
         )
+        # Reserve capacity without retaining a view: a retained view would pin
+        # the old buffer when another user grows the shared workspace.
+        current_workspace_manager().get_simultaneous(self._workspace_spec)
 
     def prepare_metadata(
         self,
         prefill_metadata: "MLACommonPrefillMetadata",
     ) -> None:
         super().prepare_metadata(prefill_metadata)
+        (self._workspace_buffer,) = current_workspace_manager().get_simultaneous(
+            self._workspace_spec
+        )
         self._query_seq_lens = (
             prefill_metadata.query_start_loc[1:] - prefill_metadata.query_start_loc[:-1]
         )
