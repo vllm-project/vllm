@@ -216,9 +216,6 @@ class CpuPlatform(Platform):
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
         model_config = vllm_config.model_config
 
-        if model_config is not None:
-            model_config.disable_cascade_attn = True
-
         # Import lazily: vllm.triton_utils imports vllm.platforms.current_platform,
         # which is still being resolved while this platform class is loading.
         from vllm.triton_utils import HAS_TRITON
@@ -323,7 +320,7 @@ class CpuPlatform(Platform):
                     mamba_backend,
                 )
 
-        # Lagecy setting
+        # Legacy setting
         env_key = "VLLM_CPU_KVCACHE_SPACE"
         if env_key in os.environ and os.environ[env_key] != "":
             kv_cache_space = int(os.environ[env_key])

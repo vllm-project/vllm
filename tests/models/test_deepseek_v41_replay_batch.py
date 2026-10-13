@@ -11,6 +11,12 @@ import pytest
 import torch
 
 from vllm.config import CUDAGraphMode
+from vllm.forward_context import (
+    BatchDescriptor,
+    ForwardContext,
+    override_forward_context,
+)
+from vllm.models.deepseek_v41.decoder_replay_layers import DecoderReplayLayers
 from vllm.models.deepseek_v41.nvidia.model_state import DeepseekV41ModelState
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
@@ -59,7 +65,7 @@ def state(monkeypatch):
     cfg.parallel_config.data_parallel_size = 1
     cfg.compilation_config.fast_moe_cold_start = False
     cfg.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
-    layers = SimpleNamespace(window=WINDOW, replay_batch=None, metadata_prefixes=set())
+    layers = DecoderReplayLayers(WINDOW, MagicMock(), MagicMock(), set(), "swa_first")
     model = SimpleNamespace(token_lookback_depth=0, decoder_replay_layers=layers)
     builds: list = []
 
@@ -72,7 +78,7 @@ def state(monkeypatch):
             attn_metadata=object(),
         )
         builds.append(build)
-        return {"swa": build.attn_metadata}
+        return {"swa": build.attn_metadata, "swa_first": build.attn_metadata}
 
     monkeypatch.setattr(DefaultModelState, "prepare_attn", prepare_attn)
     state = DeepseekV41ModelState(cfg, model, None, DEVICE)
@@ -120,7 +126,8 @@ def _slot_mappings(num_tokens: int) -> torch.Tensor:
 
 
 def _prepare(state, batch, cg_mode):
-    """Runs prepare_attn; returns the replay batch and the replay build's inputs."""
+    """Runs prepare_attn; returns the replay batch and the replay build's inputs.
+    The first replay layer's sliding-window build follows the replay build."""
     state.prepare_attn(
         batch,
         cg_mode,
@@ -130,7 +137,7 @@ def _prepare(state, batch, cg_mode):
         GROUPS,
     )
     replay = state.decoder_replay_layers.replay_batch
-    return (None, None) if replay is None else (replay, state.builds[-1])
+    return (None, None) if replay is None else (replay, state.builds[-2])
 
 
 def test_replay_batch_keeps_each_request_window(state):
@@ -151,8 +158,16 @@ def test_replay_batch_keeps_each_request_window(state):
     assert build.replay_start.tolist() == [0, 300 - WINDOW, 50]
     assert torch.equal(sub.positions, batch.positions[rows])
     assert torch.equal(build.slot_mappings, _slot_mappings(401)[:, rows])
+    # The first replay layer keeps the encoder-side window starts: it wrote
+    # every row's window KV.
+    first = state.builds[-1]
+    assert first.batch is sub and first.cg_mode == CUDAGraphMode.NONE
+    assert first.replay_start.tolist() == [0, 0, 50]
     context = replay.forward_context
-    assert context.attn_metadata == {"swa": build.attn_metadata}
+    assert context.attn_metadata == {
+        "swa": build.attn_metadata,
+        "swa_first": first.attn_metadata,
+    }
     assert torch.equal(context.slot_mapping["mla"], _slot_mappings(401)[1, rows])
     assert context.dp_metadata is None and context.is_padding is None
 
@@ -190,7 +205,8 @@ def test_replay_batch_keeps_adaptive_verification_query_bound(state):
 
 def test_graph_steps_trim_only_piecewise_at_threshold(state):
     """A CUDA graph keeps the layers on its whole batch, unless it is a PIECEWISE
-    one at the trim threshold or above; an eager step trims a batch to its rows."""
+    one at the trim threshold or above, as its capture decided; an eager step
+    trims a batch to its rows."""
     batch = _input_batch(QUERY_LENS, SEQ_LENS, PREFILLING, num_tokens_after_padding=512)
     for cg_mode in (CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL):
         assert _prepare(state, batch, cg_mode) == (None, None)
@@ -199,8 +215,21 @@ def test_graph_steps_trim_only_piecewise_at_threshold(state):
     assert replay.rows.tolist() == REPLAY_ROWS
     assert build.cg_mode == CUDAGraphMode.NONE
     assert build.batch.num_tokens_after_padding == len(REPLAY_ROWS)
-    state._trim_threshold = 256
-    replay, _ = _prepare(state, batch, CUDAGraphMode.PIECEWISE)
+    layers = state.decoder_replay_layers
+    graph = ForwardContext(
+        no_compile_layers={},
+        attn_metadata={},
+        slot_mapping={},
+        cudagraph_runtime_mode=CUDAGraphMode.PIECEWISE,
+        batch_descriptor=BatchDescriptor(num_tokens=512),
+    )
+    for threshold in (513, 512):
+        layers.trim_threshold = threshold
+        replay, _ = _prepare(state, batch, CUDAGraphMode.PIECEWISE)
+        with override_forward_context(graph):  # the capture's decision
+            assert (
+                layers.uses_replay_batch() == (replay is not None) == (threshold == 512)
+            )
     assert replay is not None and replay.rows.tolist() == REPLAY_ROWS
     assert _prepare(state, batch, CUDAGraphMode.FULL) == (None, None)
 
@@ -259,6 +288,81 @@ def test_idle_dp_rank_dummy_trims_with_its_peers(dp_state):
     assert replay is not None and replay.rows.shape[0] == 1
     dp_metadata = replay.forward_context.dp_metadata
     assert dp_metadata.num_tokens_across_dp_cpu.tolist() == [1, 129]
+
+
+def test_zero_prefix_window_warms_gather_and_skips_pad(monkeypatch):
+    """ROCm leaves the prefix-cache window at 0. Replay still needs replay_start
+    and a warmed gather kernel. The pad kernel stays on the prefix-cache path."""
+    import vllm.models.deepseek_v41.nvidia.model_state as model_state
+
+    calls = {"pad_warmup": 0, "gather_warmup": 0, "pad_launch": 0}
+
+    def pad_warmup(*args, **kwargs):
+        calls["pad_warmup"] += 1
+
+    def gather_warmup(*args, **kwargs):
+        calls["gather_warmup"] += 1
+
+    class _Pad:
+        warmup = staticmethod(pad_warmup)
+
+        def __getitem__(self, grid):
+            def launch(*args, **kwargs):
+                calls["pad_launch"] += 1
+
+            return launch
+
+    monkeypatch.setattr(model_state, "_pad_replayed_slots_kernel", _Pad())
+    monkeypatch.setattr(
+        model_state._gather_replay_batch_kernel, "warmup", gather_warmup
+    )
+
+    cfg = MagicMock()
+    cfg.model_config.enable_prompt_embeds = False
+    cfg.model_config.uses_mrope = False
+    cfg.model_config.is_multimodal_model = False
+    cfg.scheduler_config.max_num_seqs = 16
+    cfg.scheduler_config.max_num_batched_tokens = 1024
+    cfg.parallel_config.data_parallel_size = 1
+    cfg.compilation_config.fast_moe_cold_start = False
+    cfg.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+    layers = SimpleNamespace(window=WINDOW, replay_batch=None, metadata_prefixes=set())
+    model = SimpleNamespace(token_lookback_depth=0, decoder_replay_layers=layers)
+    groups = SimpleNamespace(
+        kv_cache_groups=[
+            SimpleNamespace(
+                layer_names=["swa"],
+                kv_cache_spec=SimpleNamespace(
+                    prefix_cacheable=False, prefix_replay_tokens=0
+                ),
+            ),
+            SimpleNamespace(
+                layer_names=["mla"],
+                kv_cache_spec=SimpleNamespace(
+                    prefix_cacheable=True, prefix_replay_tokens=0
+                ),
+            ),
+        ]
+    )
+
+    def prepare_attn(self, input_batch, cg_mode, block_tables, slot_mappings, *a, **kw):
+        return {"swa": kw["model_specific_attn_metadata"]}
+
+    monkeypatch.setattr(DefaultModelState, "prepare_attn", prepare_attn)
+    state = DeepseekV41ModelState(cfg, model, None, DEVICE)
+    state._replay_start_np[0] = 16
+    batch = _input_batch([8], [24], [True])
+    state.prepare_attn(
+        batch,
+        CUDAGraphMode.NONE,
+        BLOCK_TABLES,
+        _slot_mappings(batch.num_tokens_after_padding),
+        [],
+        groups,
+    )
+    assert state._replay[0] == 0
+    assert calls == {"pad_warmup": 0, "gather_warmup": 1, "pad_launch": 0}
+    assert state._replay_start[:1].tolist() == [16]
 
 
 def test_dp_ranks_pad_to_one_replay_graph(dp_state):

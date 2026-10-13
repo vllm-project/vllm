@@ -229,6 +229,7 @@ def _mapped_embedding(
     emb.table, emb._rebind_pending = None, False
     emb._pending_table, emb._reload_error = None, None
     emb._prefetch_buffer = torch.empty(0)
+    emb._device = emb._prefetch_buffer.device
     emb._load_format = "auto"
     emb._model_config = SimpleNamespace(
         hf_text_config=SimpleNamespace(split_ngram_parts=parts)
@@ -481,8 +482,8 @@ def test_graph_replay_zeroes_rows_that_become_invalid(tmp_path):
 
 
 @requires_pageable
-def test_full_graph_captures_prefetch_and_forward(tmp_path, monkeypatch):
-    """start_prefetch + forward fit in one FULL cudagraph and replay new ids.
+def test_full_graph_captures_prefetch_and_finalize(tmp_path, monkeypatch):
+    """start_prefetch + finalize_prefetch fit in one FULL cudagraph and replay new ids.
 
     The pinned backend joins its side stream in _finalize_prefetch; this
     backend looks up on the current stream, and joining the (uncaptured) side
@@ -500,17 +501,18 @@ def test_full_graph_captures_prefetch_and_forward(tmp_path, monkeypatch):
     emb._prefetch_buffer = torch.empty(
         4, heads, ROW, dtype=torch.float8_e4m3fn, device="cuda"
     )
+    emb._device = emb._prefetch_buffer.device
     emb._output_dim = heads * ROW
     emb._prefetch_stream = torch.cuda.Stream()
     emb.tp_size, emb.etp_data_parallel_size = 1, 1
+    emb.reduce_results = True
     emb.shard_indices = SimpleNamespace(org_vocab_start_index=0, org_vocab_end_index=12)
     emb.bind_storage_after_loading()
-    hidden = torch.empty(tokens, 8, device="cuda")
     ids = torch.tensor([[0, 5], [7, 11], [3, 3]], device="cuda")
 
     def step():
-        emb.start_prefetch(hidden, ids)
-        return emb.forward(hidden)
+        emb.start_prefetch(ids)
+        return emb.finalize_prefetch(total_tokens=tokens)
 
     ref = _reference(shards)
     eager = step().view(torch.uint8).cpu().numpy()

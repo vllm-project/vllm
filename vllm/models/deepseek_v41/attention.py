@@ -547,11 +547,11 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             swa_bounded_replay = False
         if swa_bounded_replay and current_platform.is_rocm():
             logger.warning_once(
-                "SWA bounded replay is off on ROCm (the sparse SWA metadata "
-                "builders forward replay_start, but the window clamp it relies "
-                "on lives in the FlashInfer and FlashMLA prefill kernels, so "
-                "the padded slots fault); the sliding-window cache takes part "
-                "in prefix caching instead."
+                "Prefix-cache SWA replay is off on ROCm (the sparse SWA "
+                "metadata builders forward replay_start, but the window clamp "
+                "it relies on lives in the FlashInfer and FlashMLA prefill "
+                "kernels, so the padded slots fault); the sliding-window cache "
+                "takes part in prefix caching instead."
             )
             swa_bounded_replay = False
         self.swa_cache_layer = DeepseekV4SWACache(
@@ -685,6 +685,34 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             attn_out,
         )
         return self._o_proj(attn_out, positions)
+
+    def forward_kv(self, positions: torch.Tensor, hidden_states: torch.Tensor) -> None:
+        """Write only the KV ``forward`` writes (SWA KV, compressed KV, index K),
+        skipping wq_b, the indexer's top-k and attention."""
+        attn_metadata = get_forward_context().attn_metadata
+        qr_kv, kv_score, _ = self._run_parallel_input_projections(hidden_states)
+        _, _, kv = self._split_qkv_and_norm(qr_kv)
+        if isinstance(attn_metadata, dict):
+            # The KV half of _fused_qnorm_rope_kv_insert, bit for bit, without
+            # the unused query; same as dspark's _insert_context_kv.
+            cache = self.swa_cache_layer.kv_cache
+            torch.ops._C.fused_deepseek_v4_kv_rope_insert(
+                kv,
+                cache,
+                cast(Any, attn_metadata[self.swa_cache_layer.prefix]).slot_mapping,
+                positions,
+                self.rotary_emb.cos_sin_cache,
+                self.swa_cache_layer.block_size,
+                self._flashinfer_fp8_kv_scale
+                if cache.dtype == torch.float8_e4m3fn
+                else None,
+                self.kv_mxfp8,
+            )
+        if self.compressor is not None:
+            latent = self.compressor(kv_score, positions)
+            self.compressor.insert_cache(latent, positions, self.rotary_emb)
+            if self.indexer is not None and self.indexer.owns_k:
+                self.indexer._produce_k(latent, positions, self.indexer_rotary_emb)
 
     def bind_gemm_rs(self) -> None:
         """Fuse ``wo_b`` with the sequence-parallel TP reduce-scatter.
