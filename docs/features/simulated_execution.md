@@ -387,13 +387,19 @@ from vllm.v1.worker.simulated.disaggregated import simulate_disaggregated
 
 result = simulate_disaggregated(
     prefill_args,  # EngineArgs with simulate_forward and a timing provider
-    decode_args,
+    decode_args,   # and, as below, the served instances' scheduler limits
     requests,      # TimedRequests
     num_prefill=2,
     num_decode=1,
     handoff_latency_s=7e-3,
 )
 ```
+
+`EngineArgs` built in Python take the generic scheduler defaults, not those
+of `vllm serve` (on an H200, a 2048-token budget instead of 8192): set
+`max_num_batched_tokens` and `max_num_seqs` as the served instances have
+them, or a simulated prefill instance batches differently from the real one.
+(`vllm bench sweep simulate` applies `vllm serve`'s defaults itself.)
 
 The driver plays the proxy: a request goes to a prefill instance with
 `max_tokens=1`; when it finishes, the request goes to a decode instance with
@@ -443,13 +449,13 @@ at 4 req/s, ISL 2048, OSL 128), replaying each instance's recording with a
 | | TTFT mean | TTFT median | TTFT P99 | TPOT mean |
 | --- | --- | --- | --- | --- |
 | Real (ms) | 99.2 | 88.7 | 198.6 | 5.294 |
-| Simulated (ms) | 91.1 | 88.7 | 138.5 | 5.307 |
+| Simulated (ms) | 89.8 | 87.3 | 165.6 | 5.309 |
 
 The fitted read rate is 54 GB/s (a 302 MB prefix in about 5.6 ms). The
-TTFT tail is low: on the real deployment the time from a prefill's end to the
-decode instance's first step varies from 10 to over 50 ms with the HTTP path
-through the proxy and the API servers, which the simulation takes as
-constant. A run takes 6 s instead of 35 s.
+TTFT tail is still low: on the real deployment the time from a prefill's end
+to the decode instance's first step varies from 10 to over 50 ms with the
+HTTP path through the proxy and the API servers, which the simulation takes
+as constant. A run takes 6 s instead of 35 s.
 
 To predict other prefill:decode ratios, the same deployment ran 1P1D, 2P1D
 and 1P2D at 8 req/s (240 requests), with the client acting as the proxy
@@ -460,15 +466,15 @@ calibrated once on the 1P1D run (26 ms):
 
 | | TTFT mean real / simulated | TPOT mean real / simulated |
 | --- | --- | --- |
-| 1P1D (calibration) | 116.0 / 116.0 ms | 5.863 / 5.679 ms |
-| 2P1D | 107.1 / 107.2 ms | 5.863 / 5.680 ms |
-| 1P2D | 113.7 / 115.0 ms | 5.362 / 5.246 ms |
+| 1P1D (calibration) | 116.0 / 114.4 ms | 5.863 / 5.680 ms |
+| 2P1D | 107.1 / 105.7 ms | 5.863 / 5.680 ms |
+| 1P2D | 113.7 / 113.7 ms | 5.362 / 5.248 ms |
 
 The prediction gets the ratios' effects (a second prefill instance lowers
-TTFT by 8%, a second decode instance TPOT by 9%) and their means within 3%,
-from a recording at half the load. Medians are 5–11% high and P99s about
-half the real ones: the real HTTP path's latency varies, the simulation's
-does not.
+TTFT by 8%, simulated 8%; a second decode instance TPOT by 9%, simulated 8%)
+and their means within 3%, from a recording at half the load. Medians are
+2–7% high and P99s a third to a half of the real ones: the real HTTP path's
+latency varies, the simulation's does not.
 
 #### Served instances
 
