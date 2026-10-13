@@ -261,7 +261,7 @@ fn parse_parameter(input: &mut &str) -> ModalResult<(String, String)> {
         _: literal(ARG_KEY_END),
         _: ws0,
         _: literal(ARG_VALUE_START),
-        take_until(0.., ARG_VALUE_END).map(str::trim),
+        take_until(0.., ARG_VALUE_END),
         _: literal(ARG_VALUE_END),
     )
     .parse_next(input)?;
@@ -274,7 +274,7 @@ mod tests {
     use serde_json::{Value, json};
     use thiserror_ext::AsReport;
 
-    use super::Glm45MoeToolParser;
+    use super::{Glm45MoeToolParser, Glm47MoeToolParser};
     use crate::tool::test_utils::{collect_stream, split_by_chars, test_tools};
     use crate::tool::{ToolParser, ToolParserTestExt as _};
 
@@ -318,6 +318,38 @@ mod tests {
             serde_json::from_str::<Value>(&output.calls()[0].arguments).unwrap(),
             json!({"city": "Beijing", "date": "2024-12-25"})
         );
+    }
+
+    #[test]
+    fn glm_parse_complete_preserves_string_whitespace() {
+        let tools = test_tools();
+        let text = glm45_tool_call("get_weather", &[("city", "  Paris \n"), ("days", " 2 ")]);
+        for mut parser in [
+            Glm45MoeToolParser::create(&tools).unwrap(),
+            Glm47MoeToolParser::create(&tools).unwrap(),
+        ] {
+            let output = parser.parse_complete(&text).unwrap();
+            assert_eq!(
+                serde_json::from_str::<Value>(&output.calls()[0].arguments).unwrap(),
+                json!({"city": "  Paris \n", "days": 2})
+            );
+        }
+    }
+
+    #[test]
+    fn glm_streaming_preserves_string_whitespace() {
+        let tools = test_tools();
+        let text = glm45_tool_call("get_weather", &[("city", "  Paris \n"), ("days", " 2 ")]);
+        for mut parser in [
+            Glm45MoeToolParser::create(&tools).unwrap(),
+            Glm47MoeToolParser::create(&tools).unwrap(),
+        ] {
+            let output = collect_stream(&mut *parser, &split_by_chars(&text, 7));
+            assert_eq!(
+                serde_json::from_str::<Value>(&output.calls()[0].arguments).unwrap(),
+                json!({"city": "  Paris \n", "days": 2})
+            );
+        }
     }
 
     #[test]

@@ -1111,6 +1111,19 @@ def qwen3_vl_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
     return hf_model
 
 
+def cohere_compass_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
+    """Declare the video modality that CohereCompass omits upstream.
+
+    Without it ``generate`` leaves ``pixel_values_videos`` unconsumed and the
+    forward pass rejects it, see huggingface/transformers#49320. Drop this once
+    the pinned transformers declares the modality itself.
+    """
+    model = hf_model.model
+    if "video" not in model.input_modalities:
+        model.input_modalities = (*model.input_modalities, "video")
+    return hf_model
+
+
 def voxtral_patch_hf_runner(hf_model: "HfRunner") -> "HfRunner":
     """Patch HfRunner for Voxtral's conversation-based processor.
 
@@ -1193,7 +1206,7 @@ def voxtral_patch_hf_runner(hf_model: "HfRunner") -> "HfRunner":
                 output.sequences = output.sequences[:, prompt_len:]
         return output
 
-    hf_model.get_inputs = patched_get_inputs  # type: ignore[method-assign, assignment]
+    hf_model.get_inputs = patched_get_inputs  # type: ignore[method-assign]
     hf_model.model.generate = patched_generate  # type: ignore[method-assign]
     return hf_model
 
