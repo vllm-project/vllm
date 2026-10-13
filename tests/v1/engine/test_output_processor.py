@@ -42,6 +42,7 @@ from vllm.v1.engine.output_processor import (
     OutputProcessor,
     RequestOutputCollector,
     RequestState,
+    StreamingInputOutputCollector,
 )
 from vllm.v1.engine.parallel_sampling import ParentRequest
 from vllm.v1.metrics.loggers import PrometheusStatLogger
@@ -1472,7 +1473,7 @@ async def test_request_output_collector():
     collector.put(outputs[0])
     output = await collector.get()
     assert not collector.ready.is_set()
-    assert not collector.pending
+    assert collector.output is None
     assert output.outputs[0].text == "a"
     assert output.outputs[0].token_ids == [0]
 
@@ -1483,7 +1484,7 @@ async def test_request_output_collector():
         collector.put(outputs[i])
     output = await collector.get()
     assert not collector.ready.is_set()
-    assert not collector.pending
+    assert collector.output is None
 
     assert not output.finished
     # Text, token_ids, and logprobs should get merged.
@@ -1503,7 +1504,7 @@ async def test_request_output_collector():
         collector.put(outputs[i])
     output = await collector.get()
     assert not collector.ready.is_set()
-    assert not collector.pending
+    assert collector.output is None
 
     assert output.finished
     assert output.outputs[0].finish_reason == "length"
@@ -1665,10 +1666,10 @@ def _make_boundary_output(
 
 
 @pytest.mark.asyncio
-async def test_collector_does_not_merge_across_finish_reason_boundary():
+async def test_streaming_input_collector_preserves_chunk_boundary():
     """A pending chunk-boundary marker (finish_reason on a non-finished
     output) must not be erased by merging the next chunk's output into it."""
-    collector = RequestOutputCollector(
+    collector = StreamingInputOutputCollector(
         RequestOutputKind.DELTA, request_id="my-request-id-int"
     )
 
@@ -1684,7 +1685,8 @@ async def test_collector_does_not_merge_across_finish_reason_boundary():
     assert following.outputs[0].finish_reason is None
     assert following.outputs[0].token_ids == [1, 2]
 
-    assert not collector.pending
+    assert collector.output is None
+    assert not collector._backlog
     assert not collector.ready.is_set()
 
 
