@@ -890,6 +890,7 @@ steps:
 
 - label: ":nvidia: (H100) [Nightly] DeepEP FP8 MoE Kernels"
   key: kernels-fp8-moe-test-2xh100
+  automatic_shard: true
   timeout_in_minutes: 45
   device: h100
   num_devices: 2

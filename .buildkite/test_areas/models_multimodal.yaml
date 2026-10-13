@@ -254,6 +254,7 @@ steps:
 
 - label: ":nvidia: (H200 MIG 18GB) [Nightly] Multimodal Models (Extended Pooling)"
   key: multi-modal-models-extended-pooling
+  automatic_shard: true
   optional: true
   device: h200_18gb
   source_file_dependencies:
