@@ -111,9 +111,10 @@ class FlashInferFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         )
 
 
-# Largest M for which CUTLASS beats FlashInfer bmm_fp8 on SM12x by a clear
-# margin with both tuned and default cuBLASLt algorithms (RTX 5090 sweep). At
-# these sizes bmm_fp8 runs cuBLASLt split-K with a memset before every GEMM.
+# Largest M up to which CUTLASS beats FlashInfer bmm_fp8 on SM12x at every
+# tested size with both tuned and default cuBLASLt algorithms (RTX 5090 sweep).
+# At these sizes cuBLASLt often picks a split-K kernel that needs a memset
+# before the GEMM.
 SM12X_FP8_CUTLASS_MAX_M = 32
 
 
