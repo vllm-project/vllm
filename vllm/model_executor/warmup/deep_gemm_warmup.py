@@ -375,7 +375,7 @@ def _get_fp8_fp4_mega_moe_m_values(
             num_max_tokens_per_rank,
             num_tokens,
             experts.top_k,
-            "fp8xfp4",
+            experts.weight_format.mma_type,
         )
         # Keep the largest M: DeepSeek-V4 only calls bf16_mega_gate above a
         # small token threshold, and a config's largest M is always above it.

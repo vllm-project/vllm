@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Triton input-staging kernel for DeepSeek V4 MegaMoE.
+"""Triton input-staging kernel for DeepGEMM MegaMoE.
 
-Quantizes hidden states to fp8 with E8M0 group scales and repacks the
-routing top-k tensors into the int64/float32 layout that the DeepGEMM
-MegaMoE kernels consume.
+Quantizes hidden states to fp8 with E8M0 group scales (or copies them as BF16)
+and repacks the routing top-k tensors into the int64/float32 layout that the
+DeepGEMM MegaMoE kernels consume.
 """
 
 import torch
@@ -22,7 +22,7 @@ _E8M0_SCALE_DTYPES = (torch.uint8, torch.float8_e8m0fnu)
 @triton.jit(do_not_specialize=["num_tokens"])
 def _prepare_megamoe_inputs_kernel(
     hidden_states,
-    x_fp8,
+    x_out,
     x_sf,
     shared_x_sf,
     topk_ids,
@@ -55,6 +55,7 @@ def _prepare_megamoe_inputs_kernel(
     GROUP_K: tl.constexpr,
     BLOCK_TOPK: tl.constexpr,
     SHARED_BLOCK_M: tl.constexpr,
+    QUANTIZE: tl.constexpr,
     USE_UE8M0: tl.constexpr,
 ) -> None:
     token_id = tl.program_id(0) * BLOCK_M + tl.arange(0, BLOCK_M)
@@ -71,72 +72,81 @@ def _prepare_megamoe_inputs_kernel(
         other=0.0,
     ).to(tl.float32)
 
-    num_groups: tl.constexpr = BLOCK_K // GROUP_K
-    hidden_groups = tl.reshape(tl.abs(hidden), [BLOCK_M, num_groups, GROUP_K])
-    amax = tl.max(hidden_groups, axis=2)
-    amax = tl.maximum(amax, 1.0e-4)
-
-    scale = amax / 448.0
-    if USE_UE8M0:
-        scale_bits = scale.to(tl.uint32, bitcast=True)
-        scale_exp = ((scale_bits >> 23) & 0xFF) + ((scale_bits & 0x7FFFFF) != 0).to(
-            tl.uint32
-        )
-        scale_exp = tl.minimum(tl.maximum(scale_exp, 1), 254)
-        quant_scale = (scale_exp << 23).to(tl.float32, bitcast=True)
-    else:
-        quant_scale = scale
-
-    hidden_groups = tl.reshape(hidden, [BLOCK_M, num_groups, GROUP_K])
-    scaled = hidden_groups * (1.0 / quant_scale)[:, :, None]
-    scaled = tl.reshape(scaled, [BLOCK_M, BLOCK_K])
-    fp8 = scaled.to(tl.float8e4nv)
-    tl.store(
-        x_fp8 + token_id[:, None] * x_stride_m + k_offsets[None, :] * x_stride_k,
-        fp8,
-        mask=k_mask,
-    )
-
-    if USE_UE8M0:
-        scale_offsets = tl.arange(0, num_groups)
-        packed_scale = tl.sum(scale_exp << (scale_offsets[None, :] * 8), axis=1).to(
-            tl.int32
-        )
+    if not QUANTIZE:
         tl.store(
-            x_sf + token_id * x_sf_stride_m + k_block_id * x_sf_stride_k,
-            packed_scale,
-            mask=token_mask,
+            x_out + token_id[:, None] * x_stride_m + k_offsets[None, :] * x_stride_k,
+            hidden.to(x_out.dtype.element_ty),
+            mask=k_mask,
         )
     else:
-        sf_offset = tl.arange(0, num_groups)
+        num_groups: tl.constexpr = BLOCK_K // GROUP_K
+        hidden_groups = tl.reshape(tl.abs(hidden), [BLOCK_M, num_groups, GROUP_K])
+        amax = tl.max(hidden_groups, axis=2)
+        amax = tl.maximum(amax, 1.0e-4)
+
+        scale = amax / 448.0
+        if USE_UE8M0:
+            scale_bits = scale.to(tl.uint32, bitcast=True)
+            scale_exp = ((scale_bits >> 23) & 0xFF) + ((scale_bits & 0x7FFFFF) != 0).to(
+                tl.uint32
+            )
+            scale_exp = tl.minimum(tl.maximum(scale_exp, 1), 254)
+            quant_scale = (scale_exp << 23).to(tl.float32, bitcast=True)
+        else:
+            quant_scale = scale
+
+        hidden_groups = tl.reshape(hidden, [BLOCK_M, num_groups, GROUP_K])
+        scaled = hidden_groups * (1.0 / quant_scale)[:, :, None]
+        scaled = tl.reshape(scaled, [BLOCK_M, BLOCK_K])
+        fp8 = scaled.to(tl.float8e4nv)
         tl.store(
-            x_sf
-            + token_id[:, None] * x_sf_stride_m
-            + k_block_id * x_sf_stride_k
-            + sf_offset[None, :],
-            quant_scale,
-            mask=token_mask[:, None],
+            x_out + token_id[:, None] * x_stride_m + k_offsets[None, :] * x_stride_k,
+            fp8,
+            mask=k_mask,
         )
 
-    # DeepGEMM's SM100 shared-expert TMA loads require the activation scales
-    # in an MN-major layout whose row permutation depends on the MegaMoE
-    # scheduler's runtime BLOCK_M. Write that view while the packed UE8M0 scale
-    # is already resident, avoiding another kernel and temporary tensor.
-    if USE_UE8M0 and shared_x_sf is not None:
-        m_block_id = token_id // SHARED_BLOCK_M
-        m_in_block = token_id % SHARED_BLOCK_M
-        aligned_block_m: tl.constexpr = triton.cdiv(SHARED_BLOCK_M, 128) * 128
-        transposed_m = (
-            (m_in_block // 128) * 128 + (m_in_block % 32) * 4 + (m_in_block % 128) // 32
-        )
-        shared_row = m_block_id * aligned_block_m + transposed_m
-        tl.store(
-            shared_x_sf
-            + shared_row * shared_x_sf_stride_m
-            + k_block_id * shared_x_sf_stride_k,
-            packed_scale,
-            mask=token_mask,
-        )
+        if USE_UE8M0:
+            scale_offsets = tl.arange(0, num_groups)
+            packed_scale = tl.sum(scale_exp << (scale_offsets[None, :] * 8), axis=1).to(
+                tl.int32
+            )
+            tl.store(
+                x_sf + token_id * x_sf_stride_m + k_block_id * x_sf_stride_k,
+                packed_scale,
+                mask=token_mask,
+            )
+        else:
+            sf_offset = tl.arange(0, num_groups)
+            tl.store(
+                x_sf
+                + token_id[:, None] * x_sf_stride_m
+                + k_block_id * x_sf_stride_k
+                + sf_offset[None, :],
+                quant_scale,
+                mask=token_mask[:, None],
+            )
+
+        # DeepGEMM's SM100 shared-expert TMA loads require the activation scales
+        # in an MN-major layout whose row permutation depends on the MegaMoE
+        # scheduler's runtime BLOCK_M. Write that view while the packed UE8M0 scale
+        # is already resident, avoiding another kernel and temporary tensor.
+        if USE_UE8M0 and shared_x_sf is not None:
+            m_block_id = token_id // SHARED_BLOCK_M
+            m_in_block = token_id % SHARED_BLOCK_M
+            aligned_block_m: tl.constexpr = triton.cdiv(SHARED_BLOCK_M, 128) * 128
+            transposed_m = (
+                (m_in_block // 128) * 128
+                + (m_in_block % 32) * 4
+                + (m_in_block % 128) // 32
+            )
+            shared_row = m_block_id * aligned_block_m + transposed_m
+            tl.store(
+                shared_x_sf
+                + shared_row * shared_x_sf_stride_m
+                + k_block_id * shared_x_sf_stride_k,
+                packed_scale,
+                mask=token_mask,
+            )
 
     if k_block_id == 0:
         topk_offsets = tl.arange(0, BLOCK_TOPK)
@@ -196,7 +206,7 @@ def _resolve_hidden_quant(hidden_quant: QuantKey, block_k: int) -> tuple[int, bo
         or scale.dtype not in (*_E8M0_SCALE_DTYPES, torch.float32)
     ):
         raise ValueError(
-            "DeepSeek V4 MegaMoE input staging requires symmetric dynamic fp8 "
+            "MegaMoE input staging requires symmetric dynamic fp8 "
             f"per-group quantization with a group size dividing {block_k} and "
             f"E8M0 or fp32 scales, got {hidden_quant}."
         )
@@ -207,14 +217,14 @@ def prepare_megamoe_inputs(
     hidden_states: torch.Tensor,
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,
-    x_fp8: torch.Tensor,
-    x_sf: torch.Tensor,
+    x: torch.Tensor,
+    x_sf: torch.Tensor | None,
     topk_idx_out: torch.Tensor,
     topk_weights_out: torch.Tensor,
     is_padding: torch.Tensor | None = None,
     shared_x_sf: torch.Tensor | None = None,
     shared_block_m: int | None = None,
-    hidden_quant: QuantKey = kMxfp8Dynamic,
+    hidden_quant: QuantKey | None = kMxfp8Dynamic,
 ) -> None:
     """Quantize hidden states and repack top-k routing for DeepGEMM MegaMoE.
 
@@ -222,8 +232,9 @@ def prepare_megamoe_inputs(
         hidden_states: Input activations of shape ``[num_tokens, hidden_dim]``.
         topk_weights: Router top-k weights of shape ``[num_tokens, top_k]``.
         topk_ids: Router top-k expert ids of shape ``[num_tokens, top_k]``.
-        x_fp8: Output buffer for the fp8-quantized hidden states.
-        x_sf: Output buffer for the hidden-state scale factors.
+        x: Output buffer for the dispatched hidden states.
+        x_sf: Output buffer for the hidden-state scale factors; ``None`` when
+            ``hidden_quant`` is ``None``.
         topk_idx_out: Output buffer for the repacked top-k expert ids.
         topk_weights_out: Output buffer for the repacked top-k weights.
         is_padding: Optional per-token mask; padded tokens are not routed.
@@ -232,6 +243,7 @@ def prepare_megamoe_inputs(
         shared_block_m: Block M used to lay out ``shared_x_sf``.
         hidden_quant: Hidden-state quantization scheme. E8M0 scales are packed
             four per int32 into ``x_sf``; fp32 scales are stored directly.
+            ``None`` copies the hidden states into ``x`` unquantized.
 
     """
     num_tokens, hidden_size = hidden_states.shape
@@ -239,25 +251,30 @@ def prepare_megamoe_inputs(
         return
     if hidden_size % 128 != 0:
         raise ValueError(
-            "DeepSeek V4 MegaMoE input staging requires hidden_size to be "
-            "a multiple of 128."
+            "MegaMoE input staging requires hidden_size to be a multiple of 128."
         )
     block_k = 128
-    group_k, use_ue8m0 = _resolve_hidden_quant(hidden_quant, block_k)
+    quantize = hidden_quant is not None
+    if quantize != (x_sf is not None):
+        raise ValueError("MegaMoE input staging needs x_sf iff hidden_quant is set.")
+    group_k, use_ue8m0 = (
+        (block_k, False)
+        if hidden_quant is None
+        else _resolve_hidden_quant(hidden_quant, block_k)
+    )
     top_k = topk_ids.shape[1]
     if topk_weights.shape != topk_ids.shape:
         raise ValueError(
-            "DeepSeek V4 MegaMoE input staging requires topk_weights and "
+            "MegaMoE input staging requires topk_weights and "
             "topk_ids to have the same shape."
         )
     if (shared_x_sf is None) != (shared_block_m is None):
         raise ValueError(
-            "DeepSeek V4 MegaMoE shared input staging requires both "
-            "shared_x_sf and shared_block_m."
+            "MegaMoE shared input staging requires both shared_x_sf and shared_block_m."
         )
     if shared_x_sf is not None and not use_ue8m0:
         raise ValueError(
-            "DeepSeek V4 MegaMoE shared input staging currently requires "
+            "MegaMoE shared input staging currently requires "
             "UE8M0-packed hidden scales."
         )
     if shared_x_sf is not None:
@@ -285,7 +302,7 @@ def prepare_megamoe_inputs(
     padding_stride_m = is_padding.stride(0) if is_padding is not None else 0
     _prepare_megamoe_inputs_kernel[grid](
         hidden_states,
-        x_fp8,
+        x,
         x_sf,
         shared_x_sf,
         topk_ids,
@@ -295,10 +312,10 @@ def prepare_megamoe_inputs(
         topk_weights_out,
         hidden_states.stride(0),
         hidden_states.stride(1),
-        x_fp8.stride(0),
-        x_fp8.stride(1),
-        x_sf.stride(0),
-        x_sf.stride(1),
+        x.stride(0),
+        x.stride(1),
+        x_sf.stride(0) if x_sf is not None else 0,
+        x_sf.stride(1) if x_sf is not None else 0,
         shared_x_sf.stride(0) if shared_x_sf is not None else 0,
         shared_x_sf.stride(1) if shared_x_sf is not None else 0,
         topk_ids.stride(0),
@@ -318,6 +335,7 @@ def prepare_megamoe_inputs(
         GROUP_K=group_k,
         BLOCK_TOPK=block_topk,
         SHARED_BLOCK_M=shared_block_m or 1,
+        QUANTIZE=quantize,
         USE_UE8M0=use_ue8m0,
         num_warps=4,
     )

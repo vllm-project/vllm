@@ -134,7 +134,10 @@ def test_mega_moe_m_values_reach_mega_gate(monkeypatch) -> None:
     module = SimpleNamespace(
         gate=SimpleNamespace(input_size=4096, output_size=128),
         experts=SimpleNamespace(
-            top_k=6, num_experts=128, get_symm_buffer=lambda: buffer
+            top_k=6,
+            num_experts=128,
+            get_symm_buffer=lambda: buffer,
+            weight_format=SimpleNamespace(mma_type="fp8xfp4"),
         ),
         use_sequence_parallel=False,
     )
