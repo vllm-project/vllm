@@ -143,6 +143,25 @@ def init_softmax_M(
 
 
 @triton.jit
+def decode_window_tile_range(
+    seq_len,
+    SLIDING_WINDOW: tl.constexpr,
+    TILE_SIZE: tl.constexpr,
+):
+    """Tiles ``[first, end)`` a single decode query (position ``seq_len - 1``)
+    can attend to under a plain causal sliding window.
+
+    Matches the window pruning in ``compute_tile_loop_bounds`` for a query
+    length of 1; the launcher only uses it for such batches. Shared by the
+    segmented kernel and ``reduce_segments`` so both agree on how the window
+    is split into segments.
+    """
+    first = tl.maximum(seq_len - SLIDING_WINDOW, 0) // TILE_SIZE
+    end = cdiv_fn(seq_len, TILE_SIZE)
+    return first, end
+
+
+@triton.jit
 def compute_tile_loop_bounds(
     context_len,
     seq_len,
@@ -166,6 +185,7 @@ def compute_tile_loop_bounds(
     MAX_MM_RANGES: tl.constexpr = 0,
     mm_prefix_range_ptr=None,
     seq_idx=0,
+    segm_base_tile_or_0=0,
 ):
     """Compute the tile-loop bounds ``(loop_lo, loop_hi)`` and the
     derived ``max_seq_prefix_len`` used for per-tile masking.
@@ -183,7 +203,9 @@ def compute_tile_loop_bounds(
        the base mask and each image range intersecting the query block.
     3. 3D scoping: when ``IS_3D`` is True, further narrows to the
        segment's slice via ``(segm_idx * tiles_per_segment,
-       (segm_idx + 1) * tiles_per_segment)``.
+       (segm_idx + 1) * tiles_per_segment)``, offset by
+       ``segm_base_tile_or_0`` when the segments are laid over the sliding
+       window instead of the whole sequence.
     """
     # compute the length of the longest sequence prefix spanned by any
     # query token in the current q_block (q_block_local_idx)
@@ -273,8 +295,9 @@ def compute_tile_loop_bounds(
         tile_end = tl.minimum((last_allowed_key // TILE_SIZE) + 1, num_tiles)
 
     if IS_3D:
-        loop_lo = max(segm_idx_or_0 * tiles_per_segment_or_0, tile_start)
-        loop_hi = min((segm_idx_or_0 + 1) * tiles_per_segment_or_0, tile_end)
+        segm_lo = segm_base_tile_or_0 + segm_idx_or_0 * tiles_per_segment_or_0
+        loop_lo = max(segm_lo, tile_start)
+        loop_hi = min(segm_lo + tiles_per_segment_or_0, tile_end)
     else:
         loop_lo = tile_start
         loop_hi = tile_end

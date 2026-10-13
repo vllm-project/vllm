@@ -1251,3 +1251,97 @@ def test_softcap_does_not_overflow_on_large_scores() -> None:
     ref = soft_cap * torch.tanh(scores / soft_cap)
     assert torch.isfinite(out).all(), out
     torch.testing.assert_close(out, ref, atol=1e-3, rtol=1e-3)
+
+
+@pytest.mark.parametrize("num_heads", [(8, 1), (5, 1)])
+@pytest.mark.parametrize("sliding_window", [16, 17, 128])
+@pytest.mark.parametrize("use_sinks", [False, True])
+@torch.inference_mode()
+def test_triton_unified_attn_window_aware_segments(
+    num_heads: tuple[int, int],
+    sliding_window: int,
+    use_sinks: bool,
+) -> None:
+    """Decode on the 3D path with contexts far beyond the sliding window.
+
+    Splitting only the window's tiles into segments must give the same result
+    as splitting the whole sequence. Covers sinks (applied by segment 0 only)
+    and windows that are not a multiple of the tile size.
+    """
+    torch.set_default_device(DEVICE_TYPE)
+    set_random_seed(0)
+    num_query_heads, num_kv_heads = num_heads
+    head_size, block_size, num_blocks = 128, 16, 2048
+    dtype = torch.bfloat16
+    num_par_softmax_segments = 16
+
+    # Decode only: one query token per sequence, contexts below, at and far
+    # beyond the window.
+    kv_lens_list = [1, sliding_window - 1, sliding_window, sliding_window + 1]
+    kv_lens_list += [1000, 4103]
+    num_seqs = len(kv_lens_list)
+    max_kv_len = max(kv_lens_list)
+    scale = head_size**-0.5
+
+    query = torch.randn(num_seqs, num_query_heads, head_size, dtype=dtype)
+    key_cache = torch.randn(
+        num_blocks, block_size, num_kv_heads, head_size, dtype=dtype
+    )
+    value_cache = torch.randn_like(key_cache)
+    cu_query_lens = torch.arange(num_seqs + 1, dtype=torch.int32)
+    kv_lens = torch.tensor(kv_lens_list, dtype=torch.int32)
+    max_num_blocks_per_seq = (max_kv_len + block_size - 1) // block_size
+    block_tables = torch.randint(
+        0, num_blocks, (num_seqs, max_num_blocks_per_seq), dtype=torch.int32
+    )
+    sinks = torch.randn(num_query_heads, dtype=torch.float32) if use_sinks else None
+
+    def run(window_aware_segments: bool) -> torch.Tensor:
+        output = torch.empty_like(query)
+        segm_shape = (num_seqs, num_query_heads, num_par_softmax_segments)
+        unified_attention(
+            q=query,
+            k=key_cache,
+            v=value_cache,
+            out=output,
+            cu_seqlens_q=cu_query_lens,
+            seqused_k=kv_lens,
+            max_seqlen_q=1,
+            max_seqlen_k=max_kv_len,
+            softmax_scale=scale,
+            causal=True,
+            window_size=(sliding_window - 1, 0),
+            block_table=block_tables,
+            softcap=0,
+            q_descale=None,
+            k_descale=None,
+            v_descale=None,
+            # num_seqs <= threshold: decode runs on the 3D (segmented) path.
+            seq_threshold_3D=num_seqs,
+            num_par_softmax_segments=num_par_softmax_segments,
+            softmax_segm_output=torch.empty(
+                (*segm_shape, next_power_of_2(head_size)), dtype=torch.float32
+            ),
+            softmax_segm_max=torch.empty(segm_shape, dtype=torch.float32),
+            softmax_segm_expsum=torch.empty(segm_shape, dtype=torch.float32),
+            sinks=sinks,
+            window_aware_segments=window_aware_segments,
+        )
+        return output
+
+    output = run(window_aware_segments=True)
+    torch.testing.assert_close(
+        output, run(window_aware_segments=False), atol=1.5e-2, rtol=1e-2
+    )
+    if not use_sinks:
+        ref_output = ref_paged_attn(
+            query=query.clone(),
+            key_cache=key_cache,
+            value_cache=value_cache,
+            query_lens=[1] * num_seqs,
+            kv_lens=kv_lens_list,
+            block_tables=block_tables,
+            scale=scale,
+            sliding_window=sliding_window,
+        )
+        torch.testing.assert_close(output, ref_output, atol=1.5e-2, rtol=1e-2)
