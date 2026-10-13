@@ -727,6 +727,10 @@ class Fp8PerBlockOnlineMoEMethod(_Fp8OnlineMoEBase):
 
         layer.weight_block_size = block_size
 
+        # Activation quantization is dynamic (including in re-quantization)
+        layer.w13_input_scale = None
+        layer.w2_input_scale = None
+
         # Shuffle weights to runtime format and setup kernel.
         self._setup_kernel(
             layer,
@@ -734,8 +738,8 @@ class Fp8PerBlockOnlineMoEMethod(_Fp8OnlineMoEBase):
             w2,
             w13_scale,
             w2_scale,
-            layer.w13_input_scale,
-            layer.w2_input_scale,
+            w13_input_scale=None,
+            w2_input_scale=None,
         )
         self.release_requantization_source_weights(layer)
 

@@ -99,6 +99,9 @@ from vllm.model_executor.layers.quantization.quark.quark import (
     QuarkConfig,
     QuarkLinearMethod,
 )
+from vllm.model_executor.layers.quantization.quark.quark_moe import (
+    QuarkNvfp4MoEMethod,
+)
 from vllm.model_executor.layers.quantization.utils import quant_utils
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     MXFP8_SCALE_DTYPE,
@@ -112,6 +115,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     amax_for_tp_weight_quant,
     kMxfp8Dynamic,
     kMxfp8Static,
+    kNvfp4Dynamic,
     kNvfp4DynamicToken,
     kNvfp4Static,
     weight_amax,
@@ -131,7 +135,6 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.granitemoe import (
     GraniteMoeModel,
 )
-from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
 from vllm.utils.torch_utils import set_default_torch_dtype
@@ -599,6 +602,18 @@ def _make_nvfp4_moe_source(source_format: str, moe, monkeypatch):
         )
         return CompressedTensorsW4A4Nvfp4MoEMethod(moe)
 
+    if source_format == "quark":
+        monkeypatch.setattr(
+            "vllm.model_executor.layers.quantization.quark.quark_moe."
+            "select_nvfp4_moe_backend",
+            lambda **kwargs: (object(), None),
+        )
+        return QuarkNvfp4MoEMethod(
+            moe=moe,
+            quant_config=QuarkConfig({}),
+            activation_quant_key=kNvfp4Dynamic,
+        )
+
     monkeypatch.setattr(
         "vllm.model_executor.layers.quantization.modelopt.select_nvfp4_moe_backend",
         lambda **kwargs: (object(), None),
@@ -655,10 +670,16 @@ def _nvfp4_moe_checkpoint_tensors(
                 "w13_weight_scale_2": 1.0
                 / torch.stack((w1_global_scale, w3_global_scale), dim=1),
                 "w2_weight_scale_2": 1.0 / w2_global_scale,
-                "w13_input_scale": torch.ones_like(
+                (
+                    "w13_input_scale_2"
+                    if source_format == "quark"
+                    else "w13_input_scale"
+                ): torch.ones_like(
                     torch.stack((w1_global_scale, w3_global_scale), dim=1)
                 ),
-                "w2_input_scale": torch.ones_like(w2_global_scale),
+                (
+                    "w2_input_scale_2" if source_format == "quark" else "w2_input_scale"
+                ): torch.ones_like(w2_global_scale),
             }
         )
     return tensors, torch.cat((w1_reference, w3_reference), dim=1), w2_reference
@@ -669,7 +690,8 @@ def _nvfp4_moe_checkpoint_tensors(
     or not is_quant_method_supported("fp8"),
     reason="Requires FP8 support on CUDA or ROCm.",
 )
-@pytest.mark.parametrize("source_format", ["compressed_tensors", "modelopt"])
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize("source_format", ["compressed_tensors", "modelopt", "quark"])
 @pytest.mark.parametrize(
     "online_target",
     [
@@ -685,7 +707,6 @@ def test_online_requantized_moe_reload(
     source_format: str,
     online_target: str,
     default_vllm_config,
-    dist_init,
     monkeypatch,
 ) -> None:
     """Convert NVFP4 sources to each online target without retaining staging weights.
@@ -693,12 +714,31 @@ def test_online_requantized_moe_reload(
     For FP8 per-tensor, also verify that reloading the original checkpoint
     format updates target parameters in place and changes expert outputs.
     """
-    default_vllm_config.model_config = ModelConfig(dtype="bfloat16")
+    from vllm.model_executor.layers.quantization.online import fp8 as online_fp8
+
+    # Test conversion and reload behavior, not torch.compile.
+    monkeypatch.setattr(
+        online_fp8,
+        "per_block_cast_to_fp8",
+        online_fp8.per_block_cast_to_fp8.__wrapped__,
+    )
+
+    default_vllm_config.model_config = SimpleNamespace(dtype=torch.bfloat16)
+
+    # This is faster than `dist_init` arg.
+    monkeypatch.setattr(
+        "vllm.model_executor.parameter.get_tensor_model_parallel_rank", lambda: 0
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.parameter.get_tensor_model_parallel_world_size", lambda: 1
+    )
+
     moe = SimpleNamespace(
         w13_num_shards=2,
         has_bias=False,
         is_act_and_mul=True,
         tp_size=1,
+        use_mxfp4_w4a4_dsv4=False,
     )
     target_methods = {
         "fp8_per_tensor": (Fp8PerTensorOnlineMoEMethod, "fp8"),
@@ -712,22 +752,42 @@ def test_online_requantized_moe_reload(
     monkeypatch.setattr(
         f"vllm.model_executor.layers.quantization.online.{module_name}."
         f"select_{module_name}_moe_backend",
-        lambda **kwargs: (object(), None),
+        lambda **kwargs: (object(), object()),
     )
     source = _make_nvfp4_moe_source(source_format, moe, monkeypatch)
     method = method_cls(moe=moe)
 
-    def setup_kernel(layer, *weights, **kwargs) -> None:
-        # INT8 installs its target parameters before kernel setup.
-        if online_target == "int8":
-            return
-        w13, w2, w13_scale, w2_scale = weights[:4]
-        replace_parameter(layer, "w13_weight", w13)
-        replace_parameter(layer, "w2_weight", w2)
-        replace_parameter(layer, "w13_weight_scale", w13_scale)
-        replace_parameter(layer, "w2_weight_scale", w2_scale)
+    if module_name in ("fp8", "mxfp8"):
+        kernel_module = "vllm.model_executor.layers.fused_moe.oracle.fp8"
+        converter_name = "convert_to_fp8_moe_kernel_format"
+        factory_name = "make_fp8_moe_kernel"
+        weight_names = ("w13", "w2", "w13_scale", "w2_scale")
+    elif module_name == "mxfp4":
+        kernel_module = "vllm.model_executor.layers.quantization.online.mxfp4"
+        converter_name = "convert_weight_to_mxfp4_moe_kernel_format"
+        factory_name = "make_mxfp4_moe_kernel"
+        weight_names = (
+            "w13_weight",
+            "w2_weight",
+            "w13_weight_scale",
+            "w2_weight_scale",
+            "w13_bias",
+            "w2_bias",
+        )
+    else:
+        kernel_module = "vllm.model_executor.layers.quantization.online.int8"
+        converter_name = "convert_to_int8_moe_kernel_format"
+        factory_name = "make_int8_moe_kernel"
+        weight_names = ("w13", "w2")
 
-    monkeypatch.setattr(method, "_setup_kernel", setup_kernel)
+    converter = Mock(
+        side_effect=lambda **kwargs: tuple(kwargs[name] for name in weight_names)
+    )
+    kernel = Mock()
+    kernel_factory = Mock(return_value=kernel)
+    monkeypatch.setattr(f"{kernel_module}.{converter_name}", converter)
+    monkeypatch.setattr(f"{kernel_module}.{factory_name}", kernel_factory)
+    monkeypatch.setattr(method, "get_fused_moe_quant_config", lambda layer: object())
     method.set_requantization_source(source)
 
     device = current_platform.device_type
@@ -735,6 +795,7 @@ def test_online_requantized_moe_reload(
         layer = torch.nn.Module()
         layer.local_num_experts = 2
         layer.num_experts = 2
+        layer._expert_routing_tables = lambda: None
         layer.moe_config = SimpleNamespace(
             hidden_dim_unpadded=128,
             intermediate_size_per_partition_unpadded=128,
@@ -788,6 +849,9 @@ def test_online_requantized_moe_reload(
         load_serialized_weights(serialized_weights(0.25), reload=False)
         method.process_weights_after_loading(layer)
         finalize_layerwise_reload(layer, default_vllm_config.model_config)
+        converter.assert_called_once()
+        kernel_factory.assert_called_once()
+        assert method.moe_kernel is kernel
 
         # Initial conversion must release references to the NVFP4 parameters.
         assert not method.requantization_source_parameters
@@ -1944,7 +2008,7 @@ def _quantize_moe(weight, scheme, moe_tp_size):
     not is_quant_method_supported("fp8"),
     reason="FP8 is not supported on this GPU type.",
 )
-@pytest.mark.parametrize("source_format", ["compressed_tensors", "modelopt"])
+@pytest.mark.parametrize("source_format", ["compressed_tensors", "modelopt", "quark"])
 def test_nvfp4_moe_dequantization_and_fp8_requantization_numerics(
     source_format: str,
     monkeypatch,
@@ -1995,7 +2059,7 @@ def test_nvfp4_moe_dequantization_and_fp8_requantization_numerics(
         w3_global_scale,
         w2_global_scale,
     )
-    moe = SimpleNamespace(is_act_and_mul=True)
+    moe = SimpleNamespace(is_act_and_mul=True, has_bias=False)
     source = _make_nvfp4_moe_source(source_format, moe, monkeypatch)
     source_layer = SimpleNamespace(
         **checkpoint_tensors,
