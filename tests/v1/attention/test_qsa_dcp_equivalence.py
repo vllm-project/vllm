@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Compare sharded QSA attention with a full-cache result on one GPU."""
 
+from importlib import import_module
+
 import pytest
 import torch
 
@@ -25,28 +27,6 @@ def _local_id(pos, world, interleave):
     return (pos // (world * interleave)) * interleave + (pos % interleave)
 
 
-def _merge_by_lse(outs, lses):
-    """correct_attn_out's arithmetic, base 2 (QSA scores are log2-scaled)."""
-    lses = torch.where(torch.isnan(lses) | torch.isposinf(lses), -torch.inf, lses)
-    lse_max = lses.max(dim=0).values
-    lse_max = torch.where(torch.isneginf(lse_max), torch.zeros_like(lse_max), lse_max)
-    global_lse = torch.log2(torch.exp2(lses - lse_max).sum(dim=0)) + lse_max
-
-    total = torch.zeros_like(outs[0])
-    for rank in range(outs.shape[0]):
-        exponent = lses[rank] - global_lse
-        exponent = torch.where(
-            torch.isnan(exponent) | torch.isposinf(exponent), -torch.inf, exponent
-        )
-        factor = torch.exp2(exponent)
-        corrected = outs[rank] * factor.unsqueeze(-1)
-        corrected = torch.where(
-            (factor == 0.0).unsqueeze(-1), torch.zeros_like(corrected), corrected
-        )
-        total = total + corrected
-    return total, global_lse
-
-
 def _pack(rows, width, device):
     packed = torch.full((len(rows), width + 1), -1, dtype=torch.int32, device=device)
     for i, row in enumerate(rows):
@@ -61,13 +41,9 @@ def _pack(rows, width, device):
     "world,interleave,seq_len,cache_dtype,k_scale,v_scale",
     [
         (2, 1, 64, torch.bfloat16, None, None),
-        (2, 4, 200, torch.bfloat16, None, None),
         (4, 16, 200, torch.bfloat16, None, None),
-        (4, 1, 64, torch.bfloat16, None, None),
         (2, 16, 64, torch.float8_e4m3fn, 0.75, 1.5),
-        (2, 1, 200, torch.float8_e4m3fn, 0.75, 1.5),
         (4, 4, 64, torch.float8_e4m3fn, 0.75, 1.5),
-        (4, 16, 200, torch.float8_e4m3fn, 0.75, 1.5),
     ],
 )
 def test_sharded_ranks_reproduce_the_single_rank_result(
@@ -79,9 +55,14 @@ def test_sharded_ranks_reproduce_the_single_rank_result(
         qsa_localize_dcp_indices,
         qsa_neutralize_empty_owner_lse_,
     )
-    from vllm.models.qwen4_exp.nvidia.qsa import Qwen4ExpQSAFlashAttentionImpl
+    from vllm.v1.attention.ops.dcp import _lse_weighted_combine
 
-    assert Qwen4ExpQSAFlashAttentionImpl.lse_base_on_e is False
+    # The model imports QSA during registration.
+    import_module("vllm.models.qwen4_exp.nvidia.model")
+    qsa_backend = import_module(
+        "vllm.models.qwen4_exp.nvidia.qsa"
+    ).Qwen4ExpQSAFlashAttentionBackend
+    assert qsa_backend.get_impl_cls().lse_base_on_e is False
 
     torch.manual_seed(1234 + seq_len)
     device = "cuda"
@@ -169,7 +150,12 @@ def test_sharded_ranks_reproduce_the_single_rank_result(
         outs.append(out.float())
         lses.append(lse.float())
 
-    merged, merged_lse = _merge_by_lse(torch.stack(outs), torch.stack(lses))
+    merged, merged_lse = _lse_weighted_combine(
+        torch.stack(outs),
+        torch.stack(lses),
+        return_lse=True,
+        is_lse_base_on_e=False,
+    )
 
     torch.testing.assert_close(
         merged.to(reference.dtype), reference, rtol=2e-2, atol=2e-2

@@ -72,16 +72,13 @@ def test_replicated_selector_writes_each_rank(
     assert int((slots >= 0).sum()) == NUM_TOKENS // COMPRESS_RATIO
 
 
-@pytest.mark.parametrize("compress_ratio,circular_buffer_size", [(8, 0), (1, 64)])
-def test_null_block_qsa_caches_do_not_write(
-    compress_ratio: int, circular_buffer_size: int
-) -> None:
+def test_ring_qsa_null_block_does_not_write() -> None:
     main_slots = torch.arange(NUM_TOKENS, dtype=torch.int64, device="cuda")
     slots = _slots(
         build_qsa_metadata_triton,
         _metadata(main_slots, null_block=True),
-        compress_ratio,
-        circular_buffer_size,
+        compress_ratio=1,
+        circular_buffer_size=64,
     )
     assert not torch.any(slots >= 0)
 

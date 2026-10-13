@@ -39,6 +39,7 @@ def test_make_dummy_distributes_remainder(num_reqs: int, num_tokens: int):
         max_num_reqs=num_reqs, max_num_tokens=num_tokens, device=torch.device(DEVICE)
     )
     batch = InputBatch.make_dummy(num_reqs, num_tokens, buffers)
+
     max_per_req = -(-num_tokens // num_reqs)
     assert batch.num_scheduled_tokens.sum() == num_tokens
     assert batch.num_scheduled_tokens.max() == max_per_req

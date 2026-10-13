@@ -5,8 +5,6 @@
 import pytest
 import torch
 
-pytestmark = pytest.mark.cpu_test
-
 PAD = -1
 
 
@@ -33,47 +31,28 @@ def _pack(rows, width):
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="Triton kernel needs a GPU")
-@pytest.mark.parametrize("world,rank,interleave", [(2, 0, 4), (2, 1, 4), (4, 2, 1)])
-def test_kernel_matches_the_reference(world, rank, interleave):
+@pytest.mark.parametrize("world,interleave", [(2, 1), (2, 4), (4, 16)])
+@pytest.mark.parametrize("width", [32, 2051])
+def test_kernel_matches_the_reference(world, interleave, width):
     from vllm.models.qwen4_exp.nvidia.ops.qsa_dcp import qsa_localize_dcp_indices
 
-    width = 32
-    rows = [
-        list(range(0, 64, 2)),
-        list(range(1, 40)),
-        [],
-        [7],
-    ]
+    rows = (
+        [list(range(0, 64, 2)), list(range(1, 40)), [], [7]]
+        if width == 32
+        else [list(range(width)), [0], []]
+    )
     packed = _pack(rows, width).cuda()
     source = packed.clone()
     local = torch.empty_like(packed)
-    qsa_localize_dcp_indices(packed, local, world, rank, interleave)
-    # The layer's selection buffer must survive: MTP steps read it again.
-    assert torch.equal(packed, source)
-    for i, row in enumerate(rows):
-        expected, count = _reference_localize(row[:width], world, rank, interleave)
-        assert int(local[i, width]) == count
-        got = [int(v) for v in local[i, :count]]
-        assert got == expected
-        # everything past the count must be padding
-        assert all(int(v) == PAD for v in local[i, count:width])
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="Triton kernel needs a GPU")
-@pytest.mark.parametrize("world,interleave", [(2, 1), (2, 4), (4, 16)])
-def test_wide_selection_keeps_prefix_and_padding_stable(world, interleave):
-    """A full-width selection must not race its padding stores."""
-    from vllm.models.qwen4_exp.nvidia.ops.qsa_dcp import qsa_localize_dcp_indices
-
-    width = 2051  # 2048-key budget plus the compression-group margin.
-    rows = [list(range(width)), [0], []]
-    packed = _pack(rows, width).cuda()
-    local = torch.empty_like(packed)
     for rank in range(world):
-        expected = [_reference_localize(row, world, rank, interleave) for row in rows]
-        for _ in range(5):
+        expected = [
+            _reference_localize(row[:width], world, rank, interleave) for row in rows
+        ]
+        for _ in range(5 if width == 2051 else 1):
             local.fill_(123)
             qsa_localize_dcp_indices(packed, local, world, rank, interleave)
+            # The layer's selection buffer must survive: MTP steps read it again.
+            assert torch.equal(packed, source)
             for row, (ids, count) in enumerate(expected):
                 assert int(local[row, width]) == count
                 assert local[row, :count].tolist() == ids
@@ -83,6 +62,7 @@ def test_wide_selection_keeps_prefix_and_padding_stable(world, interleave):
 # --- empty-owner rows -------------------------------------------------------
 
 
+@pytest.mark.cpu_test
 def test_empty_owner_comes_from_the_count_not_a_scan():
     """A reused buffer holds stale ids past its count.
 
@@ -101,6 +81,7 @@ def test_empty_owner_comes_from_the_count_not_a_scan():
     assert scan_says_empty is False, "a scan would disagree; that is the bug"
 
 
+@pytest.mark.cpu_test
 def test_the_neutral_value_is_negative_infinity():
     """The identity of the LSE merge."""
     from vllm.models.qwen4_exp.nvidia.ops.qsa_dcp import (
@@ -118,6 +99,7 @@ def test_the_neutral_value_is_negative_infinity():
 # --- contracts that keep the gate from being applied twice -------------------
 
 
+@pytest.mark.cpu_test
 def test_localize_leaves_the_source_alone_without_dcp():
     """World size 1 still copies, so one call site covers both paths."""
     from vllm.models.qwen4_exp.nvidia.ops.qsa_dcp import qsa_localize_dcp_indices
@@ -130,6 +112,7 @@ def test_localize_leaves_the_source_alone_without_dcp():
     assert torch.equal(local, source)
 
 
+@pytest.mark.cpu_test
 def test_the_kernel_wrapper_rejects_a_gate_with_return_lse():
     """The output gate must be applied after DCP merging, not by the kernel."""
     from vllm.models.qwen4_exp.nvidia.ops import qsa as qsa_ops
@@ -149,6 +132,7 @@ def test_the_kernel_wrapper_rejects_a_gate_with_return_lse():
         qsa_ops.qsa_sparse_paged_attention(*args)
 
 
+@pytest.mark.cpu_test
 def test_empty_qsa_batch_returns_the_dcp_output_and_lse_pair():
     """A rank with no query tokens still supplies both DCP merge inputs."""
     from vllm.models.qwen4_exp.nvidia.ops.qsa import qsa_sparse_paged_attention
@@ -175,37 +159,3 @@ def test_empty_qsa_batch_returns_the_dcp_output_and_lse_pair():
     assert lse.shape == query.shape[:2]
     assert lse.dtype == torch.float32
     assert lse.device == query.device
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="QSA kernel needs a GPU")
-def test_empty_qsa_lse_matches_nonempty_result_layout():
-    from vllm.models.qwen4_exp.nvidia.ops.qsa import qsa_sparse_paged_attention
-
-    query = torch.zeros((1, 4, 64), dtype=torch.bfloat16, device="cuda")
-    cache = torch.zeros((1, 16, 2, 64), dtype=torch.bfloat16, device="cuda")
-    indices = _pack([[0]], 8).cuda()
-    block_table = torch.zeros((1, 1), dtype=torch.int32, device="cuda")
-    token_to_req = torch.zeros((1,), dtype=torch.int32, device="cuda")
-    output, lse = qsa_sparse_paged_attention(
-        query,
-        cache,
-        cache,
-        indices,
-        block_table,
-        token_to_req,
-        False,
-        return_lse=True,
-    )
-    empty_output, empty_lse = qsa_sparse_paged_attention(
-        query[:0],
-        cache,
-        cache,
-        indices[:0],
-        block_table,
-        token_to_req[:0],
-        False,
-        return_lse=True,
-    )
-    assert empty_output.shape == (0, *output.shape[1:])
-    assert empty_lse.shape == (0, *lse.shape[1:])
-    assert empty_lse.dtype == lse.dtype

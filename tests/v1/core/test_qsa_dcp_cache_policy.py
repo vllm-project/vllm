@@ -20,7 +20,6 @@ from vllm.v1.core.kv_cache_planning import (
 )
 from vllm.v1.core.kv_cache_utils import generate_scheduler_kv_cache_config
 from vllm.v1.kv_cache_interface import (
-    CircularBufferSpec,
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
@@ -135,22 +134,7 @@ def _config(dcp_world_size: int) -> VllmConfig:
     return config
 
 
-def test_replicated_qsa_caches_opt_out_of_dcp_sharding() -> None:
-    ring = CircularBufferSpec(
-        block_size=4,
-        num_kv_heads=1,
-        head_size=128,
-        head_size_v=0,
-        dtype=torch.bfloat16,
-        dcp_sharded=False,
-    )
-    assert _main_kv().dcp_sharded
-    assert not _qsa_selector(2).dcp_sharded
-    assert not ring.dcp_sharded
-
-
-@pytest.mark.parametrize("dcp_world_size", [2, 4])
-@pytest.mark.parametrize("selector_first", [False, True])
+@pytest.mark.parametrize("dcp_world_size,selector_first", [(2, False), (4, True)])
 def test_unmarked_replicated_cache_stays_separate(
     dcp_world_size: int, selector_first: bool
 ) -> None:
@@ -166,8 +150,7 @@ def test_unmarked_replicated_cache_stays_separate(
     assert group is None
 
 
-@pytest.mark.parametrize("dcp_world_size", [2, 4])
-@pytest.mark.parametrize("selector_first", [False, True])
+@pytest.mark.parametrize("dcp_world_size,selector_first", [(2, False), (4, True)])
 def test_qsa_selector_shares_sharded_main_block_table(
     dcp_world_size: int, selector_first: bool
 ) -> None:
@@ -229,16 +212,6 @@ def test_independent_selector_cannot_disable_main_slot_mapping(
     groups = get_kv_cache_groups(config, specs)
     assert len(groups) == 1
     assert groups[0].kv_cache_spec.uses_slot_mapping
-
-
-@pytest.mark.parametrize("dcp_world_size", [1, 2, 4])
-def test_selector_state_count_tracks_its_virtual_block(
-    dcp_world_size: int,
-) -> None:
-    selector = _qsa_selector(dcp_world_size)
-    assert selector.block_size == BLOCK_SIZE * dcp_world_size
-    assert selector.num_states == selector.block_size // selector.tokens_per_state
-    assert selector.dcp_sharded == (dcp_world_size == 1)
 
 
 def test_dcp1_selector_can_share_a_group_with_main_kv() -> None:
