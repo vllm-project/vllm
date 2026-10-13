@@ -235,18 +235,19 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             f"'auto', 'triton' or 'fused', got {backend!r}."
         )
         gluon_ok = rocm_aiter_ops.is_enabled() and self.use_safe_gate
-        if backend in ("auto", "fused") and gluon_ok:
-            backend = "gluon"
-        elif backend == "auto":
-            backend = "fused" if is_fused_kda_chunk_supported() else "triton"
-        elif backend == "fused" and not is_fused_kda_chunk_supported():
+        if backend == "fused" and not gluon_ok and not is_fused_kda_chunk_supported():
             raise RuntimeError(
                 "The fused KDA chunk kernel requires gfx950 and a build that "
                 "includes it."
             )
-        self.use_gluon_chunk = backend == "gluon"
-        self.use_fused_chunk = backend == "fused"
-        logger.info_once("Kimi-K3 KDA prefill backend: %s", backend)
+        use_fused_chunk = backend == "fused" or (
+            backend == "auto" and is_fused_kda_chunk_supported()
+        )
+        if backend != "triton" and gluon_ok:
+            self.kda_prefill_backend = "gluon"
+        else:
+            self.kda_prefill_backend = "fused" if use_fused_chunk else "triton"
+        logger.info_once("Kimi-K3 KDA prefill backend: %s", self.kda_prefill_backend)
         # TODO: Remove the extra config arg once tested
         self.use_prefill_checkpoint = (
             additional_config.get("kda_prefill_checkpoint", True)
@@ -632,8 +633,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                     cu_seqlens=prefill_query_start_loc,
                     chunk_indices=m.chunk_indices,
                     chunk_offsets=m.chunk_offsets,
-                    use_fused_chunk=self.use_fused_chunk,
-                    use_gluon_chunk=self.use_gluon_chunk,
+                    backend=self.kda_prefill_backend,
                     out=core_attn_out[:, nd_tok:num_actual_tokens] if direct else None,
                     checkpoint_state=checkpoint_state,
                     checkpoint_offsets=checkpoint_offsets,

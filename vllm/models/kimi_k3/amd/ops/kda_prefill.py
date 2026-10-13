@@ -40,8 +40,7 @@ def chunk_kda_prefill(
     cu_seqlens: torch.Tensor | None = None,
     chunk_indices: torch.Tensor | None = None,
     chunk_offsets: torch.Tensor | None = None,
-    use_fused_chunk: bool = False,
-    use_gluon_chunk: bool = False,
+    backend: str = "triton",
     out: torch.Tensor | None = None,
     checkpoint_state: torch.Tensor | None = None,
     checkpoint_offsets: torch.Tensor | None = None,
@@ -69,11 +68,10 @@ def chunk_kda_prefill(
         cu_seqlens: int32 cumulative sequence lengths.
         chunk_indices: precomputed chunk indices for ``cu_seqlens``.
         chunk_offsets: int32 per-sequence first chunk index.
-        use_fused_chunk: request the two-kernel ROCm path. It is used only when
-            every one of its preconditions holds; otherwise the Triton path
-            runs unchanged.
-        use_gluon_chunk: run aiter's chunk_kda instead of the fused or Triton
-            path.
+        backend: ``"triton"`` (the vendored chunk path), ``"fused"`` (the
+            two-kernel ROCm path; used only when every one of its
+            preconditions holds, otherwise the Triton path runs unchanged) or
+            ``"gluon"`` (AITER's ``chunk_kda``).
         out: buffer the result must land in. Honoured by both backends, so the
             caller can hand in a slice of its own output and skip a copy.
         checkpoint_state: destination for mid-prefill recurrent state
@@ -92,6 +90,11 @@ def chunk_kda_prefill(
         The output and, when requested, the final recurrent state.
 
     """
+    if backend not in ("triton", "fused", "gluon"):
+        raise ValueError(
+            "chunk_kda_prefill backend must be 'triton', 'fused' or 'gluon', "
+            f"got {backend!r}."
+        )
     if scale is None:
         scale = k.shape[-1] ** -0.5
 
@@ -99,7 +102,7 @@ def chunk_kda_prefill(
     # needs the raw projections and a bounded gate rather than the pre-normalized
     # tensors the Triton path takes.
     fused = (
-        use_fused_chunk
+        backend == "fused"
         and use_qk_l2norm_in_kernel
         and cu_seqlens is not None
         and lower_bound is not None
@@ -119,7 +122,7 @@ def chunk_kda_prefill(
         if state_indices is None or has_initial_state is None:
             raise ValueError("state_cache needs state_indices and has_initial_state")
 
-    if use_gluon_chunk:
+    if backend == "gluon":
         from aiter.ops.triton.attention.chunk_kda import chunk_kda
 
         return chunk_kda(

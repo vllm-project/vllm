@@ -77,7 +77,7 @@ def _run(inp: dict, use_fused: bool, out: torch.Tensor | None = None, **kw):
         output_final_state=True,
         use_qk_l2norm_in_kernel=True,
         cu_seqlens=inp["cu"],
-        use_fused_chunk=use_fused,
+        backend="fused" if use_fused else "triton",
         out=out,
         **kw,
     )
@@ -648,7 +648,7 @@ def _run_paged(inp: dict, cache, idx, warm, use_fused: bool, **kw):
         has_initial_state=warm,
         use_qk_l2norm_in_kernel=True,
         cu_seqlens=inp["cu"],
-        use_fused_chunk=use_fused,
+        backend="fused" if use_fused else "triton",
         **kw,
     )
 
