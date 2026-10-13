@@ -30,18 +30,14 @@ from vllm.multimodal.inputs import (
     VisionChunkImage,
     VisionChunkVideo,
 )
-from vllm.multimodal.media import MEDIA_CONNECTOR_REGISTRY, MediaConnector
 from vllm.multimodal.media.base import MediaDecodedBudget
 from vllm.multimodal.processing import BaseMultiModalProcessor
-from vllm.renderers.embed_utils import (
-    safe_load_prompt_embeds,
-    safe_load_prompt_embeds_async,
-)
 from vllm.transformers_utils.processor import get_video_processor_cls_name
 from vllm.utils import random_uuid
 from vllm.utils.collection_utils import is_list_of, is_list_of_numbers
 from vllm.utils.import_utils import LazyLoader
 
+from ...connections import MediaRequestDownloadBudget
 from .content_parser import (
     AsyncMultiModalContentParser,
     BaseMultiModalContentParser,
