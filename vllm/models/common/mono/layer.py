@@ -61,7 +61,6 @@ def kernel_for_layer(mono: MonoRuntime | None, i: int, positions) -> LayerKernel
     if mono is None:
         return None
     mono.begin_once(positions)
-    step = mono.step
-    if step is None:
+    if mono.width is None:
         return None
-    return mono.kernels.get((i, step.width))
+    return mono.kernels.get((i, mono.width))

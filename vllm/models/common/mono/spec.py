@@ -10,8 +10,6 @@ from typing import TYPE_CHECKING, Any, Generic, Literal, Protocol, TypeVar
 
 import torch
 
-from vllm.config.compilation import CUDAGraphMode
-
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
@@ -69,37 +67,17 @@ class MonoContext:
     device: torch.device
 
 
-@dataclass
-class MonoStep:
-    """One forward's batch descriptor, built once and read by every layer.
-
-    Attributes:
-        num_tokens: The step's query rows.
-        width: The padded rows the launch serves.
-        positions: The step's position ids.
-        attn_metadata: The forward context's attention metadata, by layer name.
-        runtime_mode: The CUDA graph mode this step runs under.
-
-    """
-
-    num_tokens: int
-    width: int
-    positions: torch.Tensor
-    attn_metadata: Any
-    runtime_mode: CUDAGraphMode
-
-
 class LayerKernel(Protocol):
     """One decoder layer's launch, at one width, on this rank."""
 
     cache_layers: tuple[str, ...]
     """Attention layers whose caches ``MonoSpec.bind`` checks."""
 
-    def launch(self, step: MonoStep, *args, **kwargs) -> Any:
+    def launch(self, *args, **kwargs) -> Any:
         """Takes and returns what the vLLM layer it replaces does, or None to
         decline this call, which sends the layer down vLLM's path. Decline only
-        on what the step descriptor cannot answer, such as the layout of the
-        tensors the layer was handed."""
+        on what ``skip_step`` cannot answer, such as the layout of the tensors
+        the layer was handed."""
         ...
 
     def warmup_keys(self) -> list[Any]:
@@ -149,7 +127,8 @@ class MonoSpec(Generic[LaunchStateT]):
         skip_layer: Why one layer takes vLLM's path, None when it takes the
             kernel's.
         skip_step: Why one step takes vLLM's path, None when it takes the
-            kernel's.
+            kernel's. Takes the step's width; anything else it needs it reads
+            from the forward context, which every rank sees alike.
         launch_state: The weights and launch state, built once at attach. The
             only place a weight copy is ever made. Opaque to the library, which
             only hands it back to the spec's own callbacks.
@@ -171,7 +150,7 @@ class MonoSpec(Generic[LaunchStateT]):
     refuse_config: Callable[["VllmConfig"], list[str]]
     refuse_model: Callable[[Any], list[str]]
     skip_layer: Callable[[MonoContext, Any], str | None]
-    skip_step: Callable[[MonoContext, LaunchStateT, MonoStep], str | None]
+    skip_step: Callable[[MonoContext, LaunchStateT, int], str | None]
 
     # Callbacks
     launch_state: Callable[[Any, MonoContext], LaunchStateT]

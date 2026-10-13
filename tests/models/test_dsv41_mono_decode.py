@@ -476,7 +476,6 @@ def test_whole_launch_runs_the_layer(monkeypatch):
     with forward(mono.ctx.vllm_config, CUDAGraphMode.FULL, _metadata(model)):
         kernel = kernel_for_layer(mono, 1, positions)
         out = kernel.launch(
-            mono.step,
             torch.zeros(1, HIDDEN),
             positions,
             torch.zeros(1, 4, HIDDEN),
@@ -498,9 +497,7 @@ def test_first_layer_takes_the_embedding(monkeypatch):
     positions = torch.zeros(1, dtype=torch.long)
     with forward(mono.ctx.vllm_config, CUDAGraphMode.FULL, _metadata(model)):
         kernel = kernel_for_layer(mono, 0, positions)
-        out = kernel.launch(
-            mono.step, torch.zeros(1, HIDDEN), positions, None, None, None, None
-        )
+        out = kernel.launch(torch.zeros(1, HIDDEN), positions, None, None, None, None)
     assert out[0] == "whole" and not out[2]["fold"]
     assert out[1][2].shape == (1, 4, HIDDEN)
 
@@ -512,7 +509,6 @@ def test_ffn_launch_takes_wo_b_unreduced(monkeypatch):
         kernel = kernel_for_layer(mono, 1, positions)
         assert kernel.ffn_only
         out = kernel.launch(
-            mono.step,
             torch.zeros(1, HIDDEN),
             torch.zeros(1, 4, HIDDEN),
             torch.zeros(1, 4, 1),
@@ -524,12 +520,12 @@ def test_ffn_launch_takes_wo_b_unreduced(monkeypatch):
 
 def test_launch_declines_a_layout_it_cannot_read(monkeypatch):
     """A later pipeline stage's first layer gets a stream without the mixes:
-    the step descriptor cannot see that, so the launch declines it."""
+    ``skip_step`` cannot see that, so the launch declines it."""
     mono, model = _attach(monkeypatch)
     positions = torch.zeros(1, dtype=torch.long)
     with forward(mono.ctx.vllm_config, CUDAGraphMode.FULL, _metadata(model)):
         kernel = kernel_for_layer(mono, 1, positions)
         out = kernel.launch(
-            mono.step, torch.zeros(1, 4, HIDDEN), positions, None, None, None, None
+            torch.zeros(1, 4, HIDDEN), positions, None, None, None, None
         )
     assert out is None

@@ -16,7 +16,8 @@ from typing import Any
 import torch
 
 from vllm.config.compilation import CUDAGraphMode
-from vllm.models.common.mono.spec import CacheReq, MonoContext, MonoSpec, MonoStep
+from vllm.forward_context import get_forward_context
+from vllm.models.common.mono.spec import CacheReq, MonoContext, MonoSpec
 
 CACHE = CacheReq(group="kv", dtype="bfloat16", layout="2nhd")
 
@@ -72,8 +73,8 @@ class ReferenceKernel:
         self.launched: list[int] = []
         self.compiled: list[Any] = []
 
-    def launch(self, step: MonoStep, positions: torch.Tensor, *args, **kwargs):
-        self.launched.append(step.num_tokens)
+    def launch(self, positions: torch.Tensor, *args, **kwargs):
+        self.launched.append(self.width)
         return self.layer(positions, *args, **kwargs)
 
     def warmup_keys(self) -> list[Any]:
@@ -109,8 +110,9 @@ def skip_layer(ctx: MonoContext, layer) -> str | None:
     return "dense layer" if layer.dense else None
 
 
-def skip_step(ctx: MonoContext, state: LaunchState, step: MonoStep) -> str | None:
-    return "prefill" if step.attn_metadata.get("prefill") else None
+def skip_step(ctx: MonoContext, state: LaunchState, width: int) -> str | None:
+    md = get_forward_context().attn_metadata
+    return "prefill" if md.get("prefill") else None
 
 
 def launch_state(model, ctx: MonoContext) -> LaunchState:

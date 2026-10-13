@@ -283,10 +283,8 @@ class DeepseekV4DecoderLayer(nn.Module):
             DSV41LayerKernel | None,
             kernel_for_layer(mono, self.attn.layer_id, positions),
         )
-        step = None if mono is None else mono.step
-        if kernel is not None and step is not None and not kernel.ffn_only:
+        if kernel is not None and not kernel.ffn_only:
             out = kernel.launch(
-                step,
                 x,
                 positions,
                 residual,
@@ -397,8 +395,8 @@ class DeepseekV4DecoderLayer(nn.Module):
         if self.use_sequence_parallel:
             x = sp_reduce_scatter(x)
         elif not self.attn.wo_b.reduce_results:
-            if kernel is not None and step is not None:
-                out = kernel.launch(step, x, residual, post_mix, res_mix, attn_pre)
+            if kernel is not None:
+                out = kernel.launch(x, residual, post_mix, res_mix, attn_pre)
                 if out is not None:
                     return out
             x = tensor_model_parallel_all_reduce(x)

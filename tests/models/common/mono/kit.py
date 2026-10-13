@@ -60,9 +60,8 @@ def forward_layer(mono, i: int, layer, positions, *args, **kwargs):
     """Layer ``i`` on its kernel when this step runs on the kernels, else the
     vLLM layer unchanged: the layer loop a model writes for itself."""
     k = kernel_for_layer(mono, i, positions)
-    step = None if mono is None else mono.step
-    if k is not None and step is not None:
-        out = k.launch(step, positions, *args, **kwargs)
+    if k is not None:
+        out = k.launch(positions, *args, **kwargs)
         if out is not None:
             return out
     return layer(positions, *args, **kwargs)
@@ -190,7 +189,7 @@ class MonoConformance:
     def test_skipped_step_runs_vllm_layers(self, config, model, mono):
         with forward(config, CUDAGraphMode.NONE, self.skipped_metadata(config, model)):
             mono.begin_once(self._positions(mono))
-            assert mono.step is None
+            assert mono.width is None
 
     def test_width_off_the_capture_sizes_runs_vllm_layers(self, config, model, mono):
         off = max(mono.widths) + 1

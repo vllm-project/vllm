@@ -31,7 +31,6 @@ from vllm.models.common.mono.spec import (
     LayerKernel,
     MonoContext,
     MonoSpec,
-    MonoStep,
     MonoUnsupported,
 )
 
@@ -77,7 +76,7 @@ class MonoRuntime:
         self.widths = spec.widths(vllm_config)
         self.kernels: dict[tuple[int, int], LayerKernel] = {}
         self.state: Any = None
-        self.step: MonoStep | None = None
+        self.width: int | None = None
         self._fc: Any = None
         self._bound: tuple | None = None
 
@@ -161,21 +160,19 @@ class MonoRuntime:
             self.begin_step(positions)
 
     def begin_step(self, positions: torch.Tensor) -> str | None:
-        """None runs this step on the kernels (and sets ``step``), else the
+        """None runs this step on the kernels (and sets ``width``), else the
         reason it runs vLLM's layers."""
-        self.step = None
+        self.width = None
         return self._decide(positions)
 
     def _decide(self, positions: torch.Tensor) -> str | None:
-        fc = get_forward_context()
-        if fc.cudagraph_runtime_mode == CUDAGraphMode.PIECEWISE:
+        if get_forward_context().cudagraph_runtime_mode == CUDAGraphMode.PIECEWISE:
             return "piecewise"
         n = positions.size(-1)
         if n not in self.widths:
             return "width"
-        step = MonoStep(n, n, positions, fc.attn_metadata, fc.cudagraph_runtime_mode)
-        why = self.spec.skip_step(self.ctx, self.state, step)
+        why = self.spec.skip_step(self.ctx, self.state, n)
         if why is None:
             self._bind()
-            self.step = step
+            self.width = n
         return why

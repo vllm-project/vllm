@@ -31,13 +31,13 @@ import torch
 
 import vllm.envs as envs
 from vllm.config import CUDAGraphMode
+from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.models.common.mono.spec import (
     CacheReq,
     Feature,
     MonoContext,
     MonoSpec,
-    MonoStep,
 )
 from vllm.platforms import current_platform
 
@@ -137,7 +137,7 @@ class DSV41LayerKernel:
     def compile(self, key: Any) -> None:
         raise NotImplementedError
 
-    def launch(self, step: MonoStep, *args, **kwargs) -> Any:
+    def launch(self, *args, **kwargs) -> Any:
         raise NotImplementedError
 
 
@@ -171,7 +171,6 @@ class WholeLayer(DSV41LayerKernel):
 
     def launch(
         self,
-        step: MonoStep,
         x: torch.Tensor,
         positions: torch.Tensor,
         residual: torch.Tensor | None,
@@ -200,12 +199,13 @@ class WholeLayer(DSV41LayerKernel):
             hashes = engram_hashes[:, layer.engram.layer_hash_index]
             residual = layer.engram(residual, hashes, engram_mask)
             fold = False
-        swa = step.attn_metadata[self.swa_key]
+        md = cast("dict[str, Any]", get_forward_context().attn_metadata)
+        swa = md[self.swa_key]
         kw: dict[str, Any] = {}
         if self.index:
             kw["select"] = lambda normed, qr: _select(layer, positions, normed, qr)
         if self.ratio:
-            comp = step.attn_metadata[self.comp_key]
+            comp = md[cast("str", self.comp_key)]
             kw.update(
                 topk_indices=attn.topk_indices_buffer,
                 comp_cache=_record_view(
@@ -246,7 +246,6 @@ class FfnSeam(DSV41LayerKernel):
 
     def launch(
         self,
-        step: MonoStep,
         part: torch.Tensor,
         residual: torch.Tensor,
         post_mix: torch.Tensor,
@@ -355,18 +354,17 @@ def _ffn_only(layer) -> str | None:
     return None
 
 
-def _skip_step(
-    ctx: MonoContext, launch_state: LaunchState, step: MonoStep
-) -> str | None:
+def _skip_step(ctx: MonoContext, launch_state: LaunchState, width: int) -> str | None:
     """Why this step keeps vLLM's path at every layer, or None when the kernels
     take it. One verdict for every kernel layer, from the batch the whole TP
     group sees alike."""
-    md = step.attn_metadata
-    if not 1 <= step.width <= MAX_ROWS:
-        return f"{step.width} rows"
-    if step.runtime_mode not in (CUDAGraphMode.NONE, CUDAGraphMode.FULL):
+    fc = get_forward_context()
+    md = fc.attn_metadata
+    if not 1 <= width <= MAX_ROWS:
+        return f"{width} rows"
+    if fc.cudagraph_runtime_mode not in (CUDAGraphMode.NONE, CUDAGraphMode.FULL):
         # a PIECEWISE (breakable) capture is replayed for mixed batches too
-        return f"{step.runtime_mode} step"
+        return f"{fc.cudagraph_runtime_mode} step"
     if not isinstance(md, dict):  # a profile / dummy run, or DBO ubatches
         return "no attention metadata"
     if any(md.get(k) is None for k in launch_state.comp_keys):
@@ -377,7 +375,7 @@ def _skip_step(
             return "layer metadata missing"
         if swa.num_prefills != 0 or swa.num_decodes == 0:
             return "not a decode-only step"
-        if swa.num_decode_tokens > step.width:
+        if swa.num_decode_tokens > width:
             return "more decode tokens than rows"
         if not launch_state.need_swa:
             continue
