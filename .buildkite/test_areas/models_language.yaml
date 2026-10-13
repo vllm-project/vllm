@@ -184,8 +184,6 @@ steps:
       source_file_dependencies:
       - vllm/model_executor/models/qwen3_5.py
       - vllm/model_executor/models/qwen3_5_mtp.py
-      - vllm/transformers_utils/configs/qwen3_5.py
-      - vllm/transformers_utils/configs/qwen3_5_moe.py
       - vllm/model_executor/models/qwen2.py
       - vllm/model_executor/models/qwen3.py
       - vllm/model_executor/models/qwen3_next.py
@@ -222,10 +220,10 @@ steps:
       depends_on:
       - image-build-amd
 
-- label: ":nvidia: (H200 MIG 18GB) Language Models (MTEB)"
+- label: ":nvidia: (H200 MIG 35GB) Language Models (MTEB)"
   key: language-models-test-mteb
   timeout_in_minutes: 68
-  device: h200_18gb
+  device: h200_35gb
   optional: true
   source_file_dependencies:
   - vllm/

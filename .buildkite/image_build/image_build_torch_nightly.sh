@@ -61,6 +61,8 @@ NIGHTLY_UBUNTU_VERSION="24.04"
 NIGHTLY_FINAL_BASE_IMAGE="nvidia/cuda:${NIGHTLY_CUDA_VERSION}-base-ubuntu${NIGHTLY_UBUNTU_VERSION}"
 
 echo "--- :docker: Building torch nightly image (CUDA ${NIGHTLY_CUDA_VERSION})"
+# Provenance labels match the bake `_labels` target in docker/docker-bake.hcl;
+# the initialized-snapshot E2E refuses images whose commit labels differ.
 docker buildx build --file docker/Dockerfile \
   --build-arg max_jobs=16 \
   --build-arg buildkite_commit="$BUILDKITE_COMMIT" \
@@ -70,6 +72,10 @@ docker buildx build --file docker/Dockerfile \
   --build-arg BUILD_BASE_IMAGE="${NIGHTLY_BUILD_BASE_IMAGE}" \
   --build-arg FINAL_BASE_IMAGE="${NIGHTLY_FINAL_BASE_IMAGE}" \
   --build-arg torch_cuda_arch_list="8.0 8.9 9.0 10.0 12.0" \
+  --label "org.opencontainers.image.revision=${BUILDKITE_COMMIT}" \
+  --label "ai.vllm.build.commit=${BUILDKITE_COMMIT}" \
+  --label "ai.vllm.build.pipeline=${BUILDKITE_PIPELINE_SLUG:-local}" \
+  --label "ai.vllm.build.url=${BUILDKITE_BUILD_URL:-}" \
   --tag "$IMAGE_TAG" \
   --push \
   --target test \

@@ -8,7 +8,7 @@ import signal
 import socket
 import tempfile
 from argparse import Namespace
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, MutableSequence
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -51,6 +51,9 @@ async def build_async_engine_client(
     # Context manager to handle engine_client lifecycle
     # Ensures everything is shutdown and cleaned up on error/exit
     engine_args = AsyncEngineArgs.from_cli_args(args)
+    from ..cli_args import propagate_flash_late_interaction
+
+    propagate_flash_late_interaction(args, engine_args)
     if client_config:
         engine_args._api_process_count = client_config.get("client_count", 1)
         engine_args._api_process_rank = client_config.get("client_index", 0)
@@ -115,6 +118,7 @@ async def build_and_serve(
     listen_address: str,
     sock: socket.socket,
     args: Namespace,
+    peer_loads: tuple[MutableSequence[int], int] | None = None,
     **uvicorn_kwargs,
 ) -> asyncio.Task:
     """Build FastAPI app, initialize state, and start serving.
@@ -139,6 +143,7 @@ async def build_and_serve(
         app,
         sock=sock,
         enable_ssl_refresh=args.enable_ssl_refresh,
+        peer_loads=peer_loads,
         host=args.host,
         port=args.port,
         log_level=args.uvicorn_log_level,
@@ -182,12 +187,17 @@ async def run_server_worker(
     if args.reasoning_parser_plugin and len(args.reasoning_parser_plugin) > 3:
         ReasoningParserManager.import_reasoning_parser(args.reasoning_parser_plugin)
 
+    peer_loads = None
+    if client_config and "api_server_loads" in client_config:
+        loads = client_config.pop("api_server_loads")
+        peer_loads = (loads, client_config["client_index"])
+
     async with build_async_engine_client(
         args,
         client_config=client_config,
     ) as engine_client:
         shutdown_task = await build_and_serve(
-            engine_client, listen_address, sock, args, **uvicorn_kwargs
+            engine_client, listen_address, sock, args, peer_loads, **uvicorn_kwargs
         )
     # NB: Await server shutdown only after the backend context is exited
     try:

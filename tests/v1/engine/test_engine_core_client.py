@@ -222,6 +222,24 @@ def _make_dplb_client(num_engines: int = 3, client_count: int = 1) -> DPLBAsyncM
     return client
 
 
+def test_dplb_weight_checksums_gather_every_engine():
+    """call_utility_async on a DPLB client would keep only the first engine."""
+    client = _make_dplb_client(num_engines=2)
+
+    async def call_utility(method, *args, engine):
+        assert (method, args) == ("compute_weight_checksums", ())
+        return [{f"dp{engine[0]}:tp{tp}:w": "x"} for tp in (0, 1)]
+
+    client._call_utility_async = call_utility
+    workers = asyncio.run(client.compute_weight_checksums_async())
+    assert [key for worker in workers for key in worker] == [
+        "dp0:tp0:w",
+        "dp0:tp1:w",
+        "dp1:tp0:w",
+        "dp1:tp1:w",
+    ]
+
+
 def test_dplb_late_interaction_sticky_routing():
     client = _make_dplb_client()
 

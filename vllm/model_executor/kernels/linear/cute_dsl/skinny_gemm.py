@@ -26,6 +26,20 @@ class SkinnyGemmConfig:
     static_k: int | None = None
 
 
+def row_stride_ok(a: torch.Tensor, config: SkinnyGemmConfig) -> bool:
+    """Whether the vectorized A loads stay aligned for a row-major ``a``.
+
+    The kernel reads A through its layout, so column slices of a wider buffer
+    are supported without a copy.
+    """
+    vector_bytes = config.vector_width * a.element_size()
+    return (
+        a.stride(1) == 1
+        and a.stride(0) % config.vector_width == 0
+        and a.data_ptr() % vector_bytes == 0
+    )
+
+
 class ShapeDynamicSkinnyGemm:
     def __init__(self) -> None:
         self._compiled: dict[tuple[torch.dtype, SkinnyGemmConfig, bool], Any] = {}
@@ -209,8 +223,8 @@ class ShapeDynamicSkinnyGemm:
             raise ValueError("a and b must have the same BF16 or FP16 dtype")
         if not a.is_cuda or not b.is_cuda or a.device != b.device:
             raise ValueError("a and b must be CUDA tensors on the same device")
-        if not a.is_contiguous() or not b.is_contiguous():
-            raise ValueError("a and b must be contiguous")
+        if not b.is_contiguous():
+            raise ValueError("b must be contiguous")
         if a.shape[1] != b.shape[1]:
             raise ValueError("a and b must have matching K dimensions")
         if not 1 <= a.shape[0] <= 16:
@@ -236,6 +250,8 @@ class ShapeDynamicSkinnyGemm:
             )
         if config.static_k is not None and a.shape[1] != config.static_k:
             raise ValueError("input K must match config static_k")
+        if not row_stride_ok(a, config):
+            raise ValueError("a must be row-major with vector_width-aligned rows")
         has_residual = residual is not None
         cache_key = (a.dtype, config, has_residual)
         if cache_key not in self._compiled:

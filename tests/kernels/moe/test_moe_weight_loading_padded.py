@@ -9,6 +9,8 @@ have the original unpadded size. These tests verify that weight loading
 correctly handles this mismatch.
 """
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 
@@ -564,9 +566,11 @@ class TestLoadWeightsExpertMapping:
         transposed=False,
         quant_method="tensor",
         layer_name="model.layers.0.mlp.experts",
+        is_gated=True,
     ):
         experts = torch.nn.Module()
         experts.layer_name = layer_name
+        experts.moe_config = SimpleNamespace(is_act_and_mul=is_gated)
         experts.get_expert_mapping = lambda **_: mapping
         experts.is_fused_checkpoint_transposed = transposed
         experts._orient_fused_weight = RoutedExperts._orient_fused_weight
@@ -593,7 +597,7 @@ class TestLoadWeightsExpertMapping:
             (("gate_proj", "down_proj", "up_proj"), ""),
             (("w1", "w2", "w3"), ""),
             (("up_proj", "down_proj", "up_proj"), ""),
-            (("up_proj", "down_proj", ""), ""),
+            (("up_proj", "down_proj", None), ""),
             (("gate_proj", "down_proj", "up_proj"), "base_layer."),
         ],
     )
@@ -609,7 +613,10 @@ class TestLoadWeightsExpertMapping:
         self, projs, lora_prefix, suffix, shape, dtype
     ):
         mapping = self._mapping(
-            projs, num_redundant_experts=4, lora_base_layer_prefix=lora_prefix
+            projs,
+            num_redundant_experts=4,
+            lora_base_layer_prefix=lora_prefix,
+            is_gated=projs[2] is not None,
         )
         for logical_id, physical_ids in [(1, (1, 17)), (10, (10,))]:
             for proj in dict.fromkeys(projs):
@@ -649,6 +656,47 @@ class TestLoadWeightsExpertMapping:
             for shard in ("w1", "w3")
         ]
         for call, expected in zip(calls, weight.chunk(2) * 2):
+            torch.testing.assert_close(call[3], expected, rtol=0, atol=0)
+
+    def test_non_gated_mapping_uses_stacked_up_proj_without_warning(self, caplog_vllm):
+        mapping = self._mapping(("up_proj", "down_proj", None), is_gated=False)
+        assert "Unexpected gate/up projection names" not in caplog_vllm.text
+        assert mapping[:2] == [
+            ("experts.w13_weight", "experts.up_proj", 0, "w1"),
+            ("experts.w2_weight", "experts.down_proj", 0, "w2"),
+        ]
+        assert mapping[2:] == [
+            (param, f"experts.{expert}.{proj}.", expert, shard)
+            for expert in range(16)
+            for param, proj, shard in (
+                ("experts.w13_", "up_proj", "w1"),
+                ("experts.w2_", "down_proj", "w2"),
+            )
+        ]
+
+    def test_gated_mapping_with_unknown_names_warns_and_skips_fused(self, caplog_vllm):
+        mapping = self._mapping(("fc1", "fc2", "fc3"))
+        assert "Unexpected gate/up projection names: fc1, fc3" in caplog_vllm.text
+        assert [name for _, name, _, _ in mapping[:3]] == [
+            "experts.0.fc1.",
+            "experts.0.fc2.",
+            "experts.0.fc3.",
+        ]
+
+    def test_stacked_non_gated_tensors_load_unsplit(self):
+        mapping = self._mapping(("up_proj", "down_proj", None), is_gated=False)
+        up_proj = torch.arange(16 * 4 * 3).reshape(16, 4, 3)
+        down_proj = torch.arange(16 * 3 * 4).reshape(16, 3, 4)
+        calls = self._load(
+            mapping,
+            [("up_proj", up_proj), ("down_proj", down_proj)],
+            is_gated=False,
+        )
+        assert [call[:3] for call in calls] == [
+            *(("w13_weight", "w1", expert) for expert in range(16)),
+            *(("w2_weight", "w2", expert) for expert in range(16)),
+        ]
+        for call, expected in zip(calls, [*up_proj, *down_proj]):
             torch.testing.assert_close(call[3], expected, rtol=0, atol=0)
 
     @pytest.mark.parametrize(
