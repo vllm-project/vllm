@@ -50,6 +50,31 @@ def test_filter_subtensors():
         assert tensor is state_dict[key]
 
 
+def _row_stride_padded(rows: int, cols: int, pad: int) -> torch.Tensor:
+    """A view whose row stride exceeds its width, as ROCm weight padding makes."""
+    return torch.nn.functional.pad(torch.randn(rows, cols), (0, pad))[..., :-pad]
+
+
+def test_filter_subtensors_row_stride_padded():
+    padded = _row_stride_padded(4, 8, 2)
+    assert not padded.is_contiguous()
+    filtered_state_dict = ShardedStateLoader._filter_subtensors({"w": padded})
+    assert filtered_state_dict["w"] is padded
+
+
+def test_save_model_row_stride_padded(monkeypatch, tmp_path):
+    from safetensors.torch import load_file
+
+    _mock_pp_group(monkeypatch, 1)
+    model = torch.nn.Linear(8, 4, bias=False)
+    model.weight.data = _row_stride_padded(4, 8, 2)
+
+    ShardedStateLoader.save_model(model, str(tmp_path))
+
+    saved = load_file(tmp_path / "model-rank-0-part-0.safetensors")
+    torch.testing.assert_close(saved["weight"], model.weight.data, rtol=0, atol=0)
+
+
 def _mock_pp_group(
     monkeypatch: pytest.MonkeyPatch,
     world_size: int,
