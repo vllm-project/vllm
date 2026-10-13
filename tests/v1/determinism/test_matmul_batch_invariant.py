@@ -10,7 +10,11 @@ import pytest
 import torch
 from utils import skip_unsupported
 
-from vllm.model_executor.determinism.batch_invariant import matmul_batch_invariant
+import vllm.model_executor.determinism.batch_invariant as bi
+from vllm.model_executor.determinism.batch_invariant import (
+    enable_batch_invariant_mode,
+    matmul_batch_invariant,
+)
 from vllm.model_executor.determinism.batch_invariant_configs import (
     _BATCH_INVARIANT_MATMUL_TUNED_CONFIGS,
     _get_matmul_config,
