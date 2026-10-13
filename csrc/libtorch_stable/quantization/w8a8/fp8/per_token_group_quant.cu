@@ -675,12 +675,15 @@ __global__ void per_token_group_quant_8bit_packed_register_kernel(
     uint32_t words[4];
   #pragma unroll
     for (int i = 0; i < 4; ++i) {
-      const auto q0 = __nv_fp8x2_e4m3(
-          __hmin2(__hmax2(__hmul2(in2[2 * i], scale2), min2), max2));
-      const auto q1 = __nv_fp8x2_e4m3(
-          __hmin2(__hmax2(__hmul2(in2[2 * i + 1], scale2), min2), max2));
-      words[i] =
-          static_cast<uint32_t>(q0.__x) | (static_cast<uint32_t>(q1.__x) << 16);
+      const auto q0 = __nv_cvt_bfloat16raw2_to_fp8x2(
+          static_cast<__nv_bfloat162_raw>(
+              __hmin2(__hmax2(__hmul2(in2[2 * i], scale2), min2), max2)),
+          __NV_SATFINITE, __NV_E4M3);
+      const auto q1 = __nv_cvt_bfloat16raw2_to_fp8x2(
+          static_cast<__nv_bfloat162_raw>(
+              __hmin2(__hmax2(__hmul2(in2[2 * i + 1], scale2), min2), max2)),
+          __NV_SATFINITE, __NV_E4M3);
+      words[i] = static_cast<uint32_t>(q0) | (static_cast<uint32_t>(q1) << 16);
     }
     *reinterpret_cast<uint4*>(group_output) =
         make_uint4(words[0], words[1], words[2], words[3]);
