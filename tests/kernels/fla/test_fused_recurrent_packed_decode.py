@@ -18,17 +18,32 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
 @pytest.mark.parametrize("strided_mixed_qkv", [False, True])
+@pytest.mark.parametrize(
+    "batch,num_key_heads,num_value_heads,dtype,state_dtype",
+    [
+        (32, 4, 8, torch.float16, torch.float16),
+        (32, 4, 8, torch.bfloat16, torch.bfloat16),
+        (32, 4, 8, torch.float32, torch.float32),
+        (1, 16, 64, torch.bfloat16, torch.float32),
+        (9, 4, 12, torch.bfloat16, torch.float32),
+        (1, 4, 12, torch.bfloat16, torch.bfloat16),
+    ],
+)
 def test_fused_recurrent_packed_decode_matches_reference(
-    dtype: torch.dtype, strided_mixed_qkv: bool
+    dtype: torch.dtype,
+    strided_mixed_qkv: bool,
+    batch: int,
+    num_key_heads: int,
+    num_value_heads: int,
+    state_dtype: torch.dtype,
 ):
-    torch.manual_seed(0)
+    generator = torch.Generator(device=DEVICE).manual_seed(0)
 
     # Small but representative GDN config (Qwen3Next defaults are K=128, V=128).
-    B = 32
-    H = 4
-    HV = 8  # grouped value attention: HV must be divisible by H
+    B = batch
+    H = num_key_heads
+    HV = num_value_heads
     K = 128
     V = 128
     qkv_dim = 2 * (H * K) + (HV * V)
@@ -38,22 +53,33 @@ def test_fused_recurrent_packed_decode_matches_reference(
     if strided_mixed_qkv:
         # Simulate a packed view into a larger projection buffer:
         # mixed_qkv.stride(0) > mixed_qkv.shape[1]
-        proj = torch.randn((B, qkv_dim + 64), device=device, dtype=dtype)
+        proj = torch.randn(
+            (B, qkv_dim + 64), device=device, dtype=dtype, generator=generator
+        )
         mixed_qkv = proj[:, :qkv_dim]
     else:
-        mixed_qkv = torch.randn((B, qkv_dim), device=device, dtype=dtype)
+        mixed_qkv = torch.randn(
+            (B, qkv_dim), device=device, dtype=dtype, generator=generator
+        )
 
-    a = torch.randn((B, HV), device=device, dtype=dtype)
-    b = torch.randn((B, HV), device=device, dtype=dtype)
-    A_log = torch.randn((HV,), device=device, dtype=dtype)
-    dt_bias = torch.randn((HV,), device=device, dtype=dtype)
+    a = torch.randn((B, HV), device=device, dtype=dtype, generator=generator)
+    b = torch.randn((B, HV), device=device, dtype=dtype, generator=generator)
+    A_log = torch.randn((HV,), device=device, dtype=dtype, generator=generator)
+    dt_bias = torch.randn((HV,), device=device, dtype=dtype, generator=generator)
 
     # Continuous batching indices (include PAD_SLOT_ID=-1 cases). Index 0 is
     # reserved as NULL_BLOCK_ID (CUDA graph padding), so valid slots start at 1.
     ssm_state_indices = torch.arange(1, B + 1, device=device, dtype=torch.int32)
-    ssm_state_indices[-3:] = -1
+    if B > 3:
+        ssm_state_indices[-3:] = -1
+        ssm_state_indices[-1] = 0
 
-    state0 = torch.randn((B + 1, HV, V, K), device=device, dtype=dtype)
+    state0 = torch.randn(
+        (B + 1, HV, V, K),
+        device=device,
+        dtype=state_dtype,
+        generator=generator,
+    )
     state_ref = state0.clone()
     state_packed = state0.clone()
 
