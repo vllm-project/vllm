@@ -4,8 +4,10 @@
 import numpy as np
 import torch
 
+from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
 from vllm.v1.worker.cpu.gumbel import gumbel_sample
+from vllm.v1.worker.gpu.sample.logprob import LogprobTokenIdsState
 from vllm.v1.worker.gpu.sample.sampler import Sampler
 from vllm.v1.worker.gpu.sample.states import SamplingStates
 
@@ -42,6 +44,43 @@ class CPUSampler(Sampler):
     """CPU extension point for Model Runner V2 sampling."""
 
     sampling_states_cls = CPUSamplingStates
+
+    def _compute_topk_scores(
+        self,
+        logits: torch.Tensor,
+        num_logprobs: int,
+        sampled_token_ids: torch.Tensor,
+        cu_num_logits: list[int] | torch.Tensor | None,
+        logprob_token_ids_state: LogprobTokenIdsState,
+        expanded_idx_mapping: torch.Tensor,
+        max_per_req_token_ids: int,
+        logits_mode: bool,
+    ) -> LogprobsTensors:
+        if max_per_req_token_ids:
+            raise NotImplementedError(
+                "CPU Model Runner V2 does not support logprob_token_ids"
+            )
+
+        scores = (
+            logits.to(torch.float32)
+            if logits_mode
+            else logits.log_softmax(dim=-1, dtype=torch.float32)
+        )
+        topk_scores, topk_token_ids = torch.topk(scores, num_logprobs, dim=-1)
+        sampled_token_ids = sampled_token_ids.to(torch.int64).unsqueeze(-1)
+        sampled_scores = scores.gather(-1, sampled_token_ids)
+        sampled_ranks = (scores >= sampled_scores).sum(-1)
+
+        is_tensor = isinstance(cu_num_logits, torch.Tensor)
+        return LogprobsTensors(
+            logprob_token_ids=torch.cat((sampled_token_ids, topk_token_ids), dim=1).to(
+                torch.int32
+            ),
+            logprobs=torch.cat((sampled_scores, topk_scores), dim=1),
+            selected_token_ranks=sampled_ranks,
+            cu_num_generated_tokens=None if is_tensor else cu_num_logits,
+            cu_num_generated_tokens_tensor=cu_num_logits if is_tensor else None,
+        )
 
     def _sample_random(
         self,

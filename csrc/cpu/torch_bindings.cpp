@@ -393,6 +393,10 @@ void mamba_chunk_scan_fwd_cpu_impl(at::Tensor& out, at::Tensor& final_states,
                                    const c10::optional<at::Tensor>& z,
                                    const at::Tensor& cu_seqlens);
 
+void update_num_accepted_tokens_cpu(
+    const at::Tensor& idx_mapping, const c10::optional<at::Tensor>& num_sampled,
+    at::Tensor& num_accepted_tokens, int64_t num_sampled_value);
+
 torch::Tensor fused_gumbel_argmax(const torch::Tensor& logits,
                                   const torch::Tensor& seeds);
 
@@ -432,6 +436,13 @@ void prepare_pos_seq_lens_cpu(const torch::Tensor& idx_mapping,
                               const torch::Tensor& query_start_loc,
                               const torch::Tensor& num_computed_tokens,
                               torch::Tensor& pos, torch::Tensor& seq_lens);
+void prepare_mrope_positions_cpu(torch::Tensor& positions,
+                                 const torch::Tensor& prefill_positions,
+                                 const torch::Tensor& prefill_delta,
+                                 const torch::Tensor& idx_mapping,
+                                 const torch::Tensor& query_start_loc,
+                                 const torch::Tensor& prefill_lens,
+                                 const torch::Tensor& num_computed_tokens);
 torch::Tensor combine_sampled_and_draft_tokens_cpu(
     torch::Tensor& input_ids, const torch::Tensor& idx_mapping,
     const torch::Tensor& last_sampled_tokens,
@@ -1029,6 +1040,12 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "Tensor? D, Tensor? z, Tensor cu_seqlens) -> ()",
       &mamba_chunk_scan_fwd_cpu_impl);
 
+  ops.def(
+      "update_num_accepted_tokens_cpu("
+      "Tensor idx_mapping, Tensor? num_sampled, "
+      "Tensor(a2!) num_accepted_tokens, int num_sampled_value) -> ()",
+      &update_num_accepted_tokens_cpu);
+
   ops.def("init_cpu_memory_env(SymInt[] node_ids) -> ()", &init_cpu_memory_env);
 
   ops.def(
@@ -1057,6 +1074,13 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "Tensor num_computed_tokens, Tensor(a3!) pos, "
       "Tensor(a4!) seq_lens) -> ()",
       &cpu_utils::prepare_pos_seq_lens_cpu);
+
+  ops.def(
+      "prepare_mrope_positions_cpu("
+      "Tensor(a0!) positions, Tensor prefill_positions, Tensor prefill_delta, "
+      "Tensor idx_mapping, Tensor query_start_loc, Tensor prefill_lens, "
+      "Tensor num_computed_tokens) -> ()",
+      &cpu_utils::prepare_mrope_positions_cpu);
 
   ops.def(
       "combine_sampled_and_draft_tokens_cpu("

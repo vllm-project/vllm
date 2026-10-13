@@ -10,6 +10,7 @@ import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.config.model import PROCESSED_LOGPROBS_MODES, LogprobsMode
 from vllm.sampling_params import SamplingParams
+from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.sample.ops.topk_topp_sampler import (
     apply_top_k_top_p,
     flashinfer_sample,
@@ -133,6 +134,28 @@ class Sampler:
         num_logprobs = max_num_logprobs if max_num_logprobs != NO_LOGPROBS else 0
         return num_logprobs, max_token_ids
 
+    def _compute_topk_scores(
+        self,
+        logits: torch.Tensor,
+        num_logprobs: int,
+        sampled_token_ids: torch.Tensor,
+        cu_num_logits: list[int] | torch.Tensor | None,
+        logprob_token_ids_state: LogprobTokenIdsState,
+        expanded_idx_mapping: torch.Tensor,
+        max_per_req_token_ids: int,
+        logits_mode: bool,
+    ) -> LogprobsTensors:
+        return compute_topk_scores(
+            logits,
+            num_logprobs,
+            sampled_token_ids,
+            cu_num_logits,
+            logprob_token_ids_state=logprob_token_ids_state,
+            expanded_idx_mapping=expanded_idx_mapping,
+            max_per_req_token_ids=max_per_req_token_ids,
+            logits_mode=logits_mode,
+        )
+
     def __call__(
         self,
         logits: torch.Tensor,
@@ -176,7 +199,7 @@ class Sampler:
                 logits = processed_logits
             expanded_logits = logits.shape[0] != idx_mapping_np.shape[0]
             cu_num_logits = cu_num_logits_np.tolist() if expanded_logits else None
-            logprobs_tensors = compute_topk_scores(
+            logprobs_tensors = self._compute_topk_scores(
                 logits,
                 num_logprobs,
                 sampled,

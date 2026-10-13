@@ -1,9 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 
+from vllm import _custom_ops as ops
 from vllm.platforms import current_platform
 from vllm.v1.worker.cpu.input_batch import (
     combine_sampled_and_draft_tokens,
@@ -12,6 +15,7 @@ from vllm.v1.worker.cpu.input_batch import (
     prepare_pos_seq_lens,
     prepare_prefill_inputs,
 )
+from vllm.v1.worker.cpu.model_state import CPURopeState
 
 pytestmark = pytest.mark.skipif(not current_platform.is_cpu(), reason="CPU only")
 
@@ -72,6 +76,55 @@ def test_prepare_pos_seq_lens_cpu() -> None:
     assert seq_lens.tolist() == [5, 9, 11, 0, 0, 0]
     assert positions_storage[0].item() == -1
     assert seq_lens_storage[[0, 7]].tolist() == [-1, -1]
+
+
+def test_prepare_mrope_positions_cpu() -> None:
+    num_dims = 3
+    positions_storage = torch.full((num_dims, 10), -1, dtype=torch.int64)
+    positions = positions_storage[:, 1:9]
+
+    prefill_positions_storage = torch.full((15, 10), -1, dtype=torch.int32)
+    prefill_positions = prefill_positions_storage[:, 1:9]
+    for req_state_idx in range(5):
+        for dim in range(num_dims):
+            prefill_positions[req_state_idx * num_dims + dim] = (
+                req_state_idx * 1000 + dim * 100 + torch.arange(8, dtype=torch.int32)
+            )
+
+    ops.prepare_mrope_positions_cpu(
+        positions,
+        prefill_positions,
+        prefill_delta=torch.tensor([0, 10, 0, 20, 30], dtype=torch.int32),
+        idx_mapping=torch.tensor([3, 1, 4], dtype=torch.int32),
+        query_start_loc=torch.tensor([0, 3, 6, 8], dtype=torch.int32),
+        prefill_lens=torch.tensor([0, 5, 0, 6, 4], dtype=torch.int32),
+        num_computed_tokens=torch.tensor([0, 5, 0, 2, 3], dtype=torch.int32),
+    )
+
+    assert positions.tolist() == [
+        [3002, 3003, 3004, 15, 16, 17, 4003, 34],
+        [3102, 3103, 3104, 15, 16, 17, 4103, 34],
+        [3202, 3203, 3204, 15, 16, 17, 4203, 34],
+    ]
+    assert torch.all(positions_storage[:, [0, 9]] == -1)
+
+
+def test_cpu_rope_state_prepares_positions() -> None:
+    state = object.__new__(CPURopeState)
+    state.positions = torch.full((2, 2), -1, dtype=torch.int64)
+    state.prefill_positions = SimpleNamespace(
+        gpu=torch.tensor([[-1, -1], [-1, -1], [100, -1], [200, -1]], dtype=torch.int32)
+    )
+    state.prefill_delta = SimpleNamespace(gpu=torch.tensor([0, 10], dtype=torch.int32))
+
+    state.prepare_positions(
+        idx_mapping=torch.tensor([1], dtype=torch.int32),
+        query_start_loc=torch.tensor([0, 2], dtype=torch.int32),
+        prefill_lens=torch.tensor([0, 1], dtype=torch.int32),
+        num_computed_tokens=torch.tensor([0, 0], dtype=torch.int32),
+    )
+
+    assert state.positions.tolist() == [[100, 11], [200, 11]]
 
 
 def test_combine_sampled_and_draft_tokens_cpu_basic() -> None:

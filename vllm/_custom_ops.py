@@ -2033,6 +2033,26 @@ def prepare_pos_seq_lens_cpu(
     )
 
 
+def prepare_mrope_positions_cpu(
+    positions: torch.Tensor,
+    prefill_positions: torch.Tensor,
+    prefill_delta: torch.Tensor,
+    idx_mapping: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    prefill_lens: torch.Tensor,
+    num_computed_tokens: torch.Tensor,
+) -> None:
+    torch.ops._C.prepare_mrope_positions_cpu(
+        positions,
+        prefill_positions,
+        prefill_delta,
+        idx_mapping,
+        query_start_loc,
+        prefill_lens,
+        num_computed_tokens,
+    )
+
+
 def combine_sampled_and_draft_tokens_cpu(
     input_ids: torch.Tensor,
     idx_mapping: torch.Tensor,
@@ -2238,6 +2258,20 @@ def mamba_chunk_scan_fwd_cpu(
         D,
         z,
         cu_seqlens,
+    )
+
+
+def update_num_accepted_tokens_cpu(
+    idx_mapping: torch.Tensor,
+    num_sampled: torch.Tensor | None,
+    num_accepted_tokens: torch.Tensor,
+    num_sampled_value: int,
+) -> None:
+    torch.ops._C.update_num_accepted_tokens_cpu(
+        idx_mapping,
+        num_sampled,
+        num_accepted_tokens,
+        num_sampled_value,
     )
 
 

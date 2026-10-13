@@ -136,7 +136,8 @@ from vllm.v1.worker.gpu.lora_utils import (
 )
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.mm.lora import set_active_mm_loras
-from vllm.v1.worker.gpu.model_states import init_model_state
+from vllm.v1.worker.gpu.model_states import init_model_state, resolve_model_state_cls
+from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.gpu.pool.pooling_runner import PoolingRunner
 from vllm.v1.worker.gpu.pp_utils import PPHandler
 from vllm.v1.worker.gpu.sample.batch_shard import (
@@ -429,7 +430,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Initialize the components that require the model.
         self.model_state = init_model_state(
-            self.vllm_config, self.model, self.encoder_cache, self.device
+            self.vllm_config,
+            self.model,
+            self.encoder_cache,
+            self.device,
+            model_state_cls=self.model_state_cls,
         )
 
         self.decode_query_len = (
@@ -805,7 +810,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
     def _init_kv_zero_meta(self) -> None:
         """Build KV-block zeroing metadata; invoked from gpu_worker."""
-        self.kv_block_zeroer = KVBlockZeroer(
+        self.kv_block_zeroer = self.kv_block_zeroer_cls(
             self.device,
             attn_groups_iter=(g for groups in self.attn_groups for g in groups),
             kernel_block_sizes=self.kernel_block_sizes,
@@ -2404,6 +2409,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     @property
     def sampler_cls(self) -> type[Sampler]:
         return Sampler
+
+    @property
+    def model_state_cls(self) -> type[ModelState]:
+        return resolve_model_state_cls(self.vllm_config, self.model)
+
+    @property
+    def kv_block_zeroer_cls(self) -> type[KVBlockZeroer]:
+        return KVBlockZeroer
 
 
 class ExecuteModelState(NamedTuple):

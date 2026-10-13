@@ -20,7 +20,13 @@ from vllm.v1.attention.backends.recoverssm_metadata import (
     RecoverSSMMetadata,
     RecoverSSMPostprocessMetadata,
 )
+from vllm.v1.worker.cpu.model_state import (
+    CPUDefaultModelState,
+    CPUMambaHybridModelState,
+    CPURopeState,
+)
 from vllm.v1.worker.gpu.model_states import mamba_hybrid
+from vllm.v1.worker.gpu.model_states.default import DefaultModelState
 from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
 from vllm.v1.worker.gpu.model_states.recoverssm import RecoverSSMState
 
@@ -358,6 +364,131 @@ def test_postprocess_state_scalar_with_int32_mapping(
         [expected_value, 9, expected_value, 9], dtype=torch.int32, device="cuda"
     )
     torch.testing.assert_close(state.num_accepted_tokens_gpu, expected)
+
+
+@pytest.mark.skipif(not current_platform.is_cpu(), reason="Requires CPU")
+@pytest.mark.parametrize(("num_sampled", "expected_value"), [(0, 1), (3, 3)])
+def test_cpu_postprocess_state_scalar(num_sampled: int, expected_value: int) -> None:
+    state = object.__new__(CPUMambaHybridModelState)
+    state.num_accepted_tokens_gpu = torch.full((4,), 9, dtype=torch.int32)
+    state._align_mode = False
+    state.recoverssm = None
+    state._mamba_ctx = None
+    idx_mapping = torch.tensor([2, -1, 0], dtype=torch.int32)
+
+    state.postprocess_state(idx_mapping, num_sampled)
+
+    assert state.num_accepted_tokens_gpu.tolist() == [
+        expected_value,
+        9,
+        expected_value,
+        9,
+    ]
+
+
+@pytest.mark.skipif(not current_platform.is_cpu(), reason="Requires CPU")
+def test_cpu_postprocess_state_tensor() -> None:
+    state = object.__new__(CPUMambaHybridModelState)
+    state.num_accepted_tokens_gpu = torch.full((5,), 9, dtype=torch.int32)
+    state._align_mode = False
+    state.recoverssm = None
+    state._mamba_ctx = None
+    idx_mapping = torch.tensor([3, -1, 1], dtype=torch.int32)
+    num_sampled = torch.tensor([0, 4, 2], dtype=torch.int32)
+
+    state.postprocess_state(idx_mapping, num_sampled)
+
+    assert state.num_accepted_tokens_gpu.tolist() == [9, 2, 9, 1, 9]
+
+
+@pytest.mark.skipif(not current_platform.is_cpu(), reason="Requires CPU")
+def test_cpu_preprocess_state_copies_state_across_align_boundary() -> None:
+    state = object.__new__(CPUMambaHybridModelState)
+    state._align_mode = True
+    state._mamba_group_ids = [1]
+    state._mamba_spec = SimpleNamespace(block_size=4)
+    state._mamba_state_idx_gpu = torch.tensor([0, 2, -1], dtype=torch.int32)
+    state.num_accepted_tokens_gpu = torch.tensor([5, 6, 7], dtype=torch.int32)
+
+    conv_state = torch.arange(60, dtype=torch.float32).view(10, 2, 3)
+    temporal_state = torch.arange(80, dtype=torch.float32).view(10, 2, 4)
+    expected_conv_state = conv_state.clone()
+    expected_temporal_state = temporal_state.clone()
+    expected_conv_state[7].copy_(conv_state[2])
+    expected_temporal_state[7].copy_(temporal_state[2])
+
+    layer = SimpleNamespace(kv_cache=(conv_state, temporal_state))
+    state.vllm_config = SimpleNamespace(
+        compilation_config=SimpleNamespace(
+            static_forward_context={"gdn": layer},
+        )
+    )
+    kv_cache_config = SimpleNamespace(
+        kv_cache_groups=[
+            SimpleNamespace(layer_names=["attention"]),
+            SimpleNamespace(layer_names=["gdn"]),
+        ]
+    )
+    input_batch = SimpleNamespace(
+        num_reqs=3,
+        idx_mapping=torch.tensor([2, 0, 1], dtype=torch.int32),
+        query_start_loc=torch.tensor([0, 1, 3, 4], dtype=torch.int32),
+    )
+    block_tables = (
+        torch.zeros((3, 4), dtype=torch.int32),
+        torch.tensor(
+            [
+                [1, 0, 0, 0],
+                [2, 7, 0, 0],
+                [0, 0, 6, 0],
+            ],
+            dtype=torch.int32,
+        ),
+    )
+    num_computed_tokens = torch.tensor([3, 9, 0], dtype=torch.int32)
+
+    state.preprocess_state(
+        input_batch,
+        block_tables,
+        kv_cache_config,
+        num_computed_tokens,
+    )
+
+    assert state._mamba_state_idx_gpu.tolist() == [1, 2, 0]
+    assert state.num_accepted_tokens_gpu.tolist() == [1, 6, 7]
+    torch.testing.assert_close(conv_state, expected_conv_state)
+    torch.testing.assert_close(temporal_state, expected_temporal_state)
+
+
+@pytest.mark.skipif(not current_platform.is_cpu(), reason="Requires CPU")
+@pytest.mark.parametrize(
+    ("model_state_cls", "cpu_model_state_cls"),
+    [
+        (DefaultModelState, CPUDefaultModelState),
+        (MambaHybridModelState, CPUMambaHybridModelState),
+    ],
+)
+def test_cpu_runner_selects_model_state_only_without_triton(
+    monkeypatch, model_state_cls, cpu_model_state_cls
+) -> None:
+    from vllm.v1.worker.cpu import model_runner as cpu_model_runner
+    from vllm.v1.worker.gpu import model_runner as gpu_model_runner
+
+    runner = object.__new__(cpu_model_runner.CPUModelRunner)
+    runner.vllm_config = Mock()
+    runner.model = Mock()
+    monkeypatch.setattr(
+        gpu_model_runner,
+        "resolve_model_state_cls",
+        lambda *_: model_state_cls,
+    )
+
+    monkeypatch.setattr(cpu_model_runner, "HAS_TRITON", False)
+    assert runner.model_state_cls is cpu_model_state_cls
+    assert runner.model_state_cls.rope_state_cls is CPURopeState
+
+    monkeypatch.setattr(cpu_model_runner, "HAS_TRITON", True)
+    assert runner.model_state_cls is model_state_cls
 
 
 def test_recoverssm_commits_accepted_window_after_v2_sampling() -> None:

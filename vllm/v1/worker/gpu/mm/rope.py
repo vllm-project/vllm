@@ -126,13 +126,14 @@ def get_rope_state(
     max_num_tokens: int,
     max_model_len: int,
     device: torch.device,
+    rope_state_cls: type[RopeState] = RopeState,
 ) -> RopeState | None:
     """Create a RopeState if the model uses multi-dimensional RoPE."""
     if not model_config.uses_mrope:
         return None
 
     assert isinstance(model, SupportsMRoPE)
-    return RopeState(
+    return rope_state_cls(
         num_dims=model_config.mrope_num_dims,
         max_num_reqs=max_num_reqs,
         max_num_tokens=max_num_tokens,

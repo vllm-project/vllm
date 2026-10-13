@@ -80,6 +80,58 @@ void prepare_pos_seq_lens_cpu(const torch::Tensor& idx_mapping,
   }
 }
 
+void prepare_mrope_positions_cpu(torch::Tensor& positions,
+                                 const torch::Tensor& prefill_positions,
+                                 const torch::Tensor& prefill_delta,
+                                 const torch::Tensor& idx_mapping,
+                                 const torch::Tensor& query_start_loc,
+                                 const torch::Tensor& prefill_lens,
+                                 const torch::Tensor& num_computed_tokens) {
+  int64_t* positions_ptr = positions.data_ptr<int64_t>();
+  const int32_t* prefill_positions_ptr = prefill_positions.data_ptr<int32_t>();
+  const int32_t* prefill_delta_ptr = prefill_delta.data_ptr<int32_t>();
+  const int32_t* idx_mapping_ptr = idx_mapping.data_ptr<int32_t>();
+  const int32_t* query_start_loc_ptr = query_start_loc.data_ptr<int32_t>();
+  const int32_t* prefill_lens_ptr = prefill_lens.data_ptr<int32_t>();
+  const int32_t* num_computed_tokens_ptr =
+      num_computed_tokens.data_ptr<int32_t>();
+
+  const int64_t num_reqs = idx_mapping.size(0);
+  const int64_t num_dims = positions.size(0);
+  const int64_t positions_stride0 = positions.stride(0);
+  const int64_t positions_stride1 = positions.stride(1);
+  const int64_t prefill_positions_stride0 = prefill_positions.stride(0);
+  const int64_t prefill_positions_stride1 = prefill_positions.stride(1);
+
+  for (int64_t batch_idx = 0; batch_idx < num_reqs; ++batch_idx) {
+    const int32_t req_state_idx = idx_mapping_ptr[batch_idx];
+    const int32_t query_start = query_start_loc_ptr[batch_idx];
+    const int32_t query_end = query_start_loc_ptr[batch_idx + 1];
+    const int32_t query_len = query_end - query_start;
+    const int32_t num_computed = num_computed_tokens_ptr[req_state_idx];
+    const int32_t prompt_len = std::min(
+        query_len, std::max(prefill_lens_ptr[req_state_idx] - num_computed, 0));
+    const int32_t delta = prefill_delta_ptr[req_state_idx];
+
+    for (int64_t dim = 0; dim < num_dims; ++dim) {
+      int64_t* output = positions_ptr + dim * positions_stride0 +
+                        query_start * positions_stride1;
+      const int32_t* prompt =
+          prefill_positions_ptr +
+          (req_state_idx * num_dims + dim) * prefill_positions_stride0;
+
+      for (int32_t token_idx = 0; token_idx < prompt_len; ++token_idx) {
+        output[token_idx * positions_stride1] =
+            prompt[(num_computed + token_idx) * prefill_positions_stride1];
+      }
+      for (int32_t token_idx = prompt_len; token_idx < query_len; ++token_idx) {
+        output[token_idx * positions_stride1] =
+            num_computed + token_idx + delta;
+      }
+    }
+  }
+}
+
 torch::Tensor combine_sampled_and_draft_tokens_cpu(
     torch::Tensor& input_ids, const torch::Tensor& idx_mapping,
     const torch::Tensor& last_sampled_tokens,
