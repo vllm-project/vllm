@@ -170,6 +170,8 @@ The simulation covers the engine core, not the HTTP and API-server path, which a
 
 A combination with `_num_prefill` and/or `_num_decode` simulates a disaggregated deployment of that many prefill and decode instances (NIXL pull mode, one rank each), routed round-robin. Keys prefixed with `_prefill.` or `_decode.` apply to one role only, for example each role's recording as `_prefill.simulation_config.timing_args.path`. `--handoff-latency-ms` is the proxy's time from a prefill instance finishing a request to a decode instance receiving it. `kv_transfer_timing` goes in `--simulation-config`. Throughput per GPU counts all instances' GPUs (`gpu_count`; pass `--gpu-count-var gpu_count` to `plot_pareto`).
 
+A fresh server hands out KV cache blocks in order until its cache has filled once, and in scattered order after that. A disaggregated decode instance posts reads into scattered blocks far more slowly, so it is slower once its cache has filled, and stays so (see [Simulated Execution](../features/simulated_execution.md)). `--fill-kv-caches` uses up each instance's cache once before a combination's first run, so that the runs predict a long-running deployment rather than a fresh one. A real benchmark of a fresh server is comparable only without it.
+
 ```json
 [
     {"_benchmark_name": "1p2d", "_num_prefill": 1, "_num_decode": 2},
@@ -177,7 +179,7 @@ A combination with `_num_prefill` and/or `_num_decode` simulates a disaggregated
 ]
 ```
 
-Replayed step times are only as good as the recording's coverage. A lookup cannot extrapolate: a step larger than any recorded one (a bigger batch, or longer prefill chunks) gets the time of the largest recorded steps, which underestimates it. The sweep therefore counts such lookups in each run (`timing_lookups_outside_range` of `timing_lookups`), reports their share in `slo_summary.csv`, and warns when a run exceeds 1%. Record under the heaviest load the search will simulate. For disaggregated deployments, that means recording a configuration with the most prefill capacity at a high rate, so that the decode instance sees its largest batches. Fit `kv_transfer_timing` from a recording where transfers rarely overlap: reads queue on a simulated link, so the simulation adds contention itself.
+Replayed step times are only as good as the recording's coverage. A lookup cannot extrapolate: a step larger than any recorded one (a bigger batch, or longer prefill chunks) gets the time of the largest recorded steps, which underestimates it. The sweep therefore counts such lookups in each run (`timing_lookups_outside_range` of `timing_lookups`), reports their share in `slo_summary.csv`, and warns when a run exceeds 1%. Record under the heaviest load the search will simulate. For disaggregated deployments, that means recording a configuration with the most prefill capacity at a high rate, so that the decode instance sees its largest batches. Fit `kv_transfer_timing` from a recording where transfers rarely overlap: reads queue on a simulated link, so the simulation adds contention itself. Record it past the point where the decode instance's cache has filled (or after filling it with other requests), so that it also times reads into scattered blocks.
 
 !!! note
     The simulated clock needs the engine in one process, so multi-rank combinations (`tensor_parallel_size` or `pipeline_parallel_size` above 1) need `"clock": "real"`, which runs in real time. Request rates (`--request-rate`, `--burstiness`, ramp-up and timed traces) are supported; `--max-concurrency` and multimodal datasets are not.

@@ -163,6 +163,7 @@ class _CombTask:
     search_iters: int
     frontend_latency_ms: float
     handoff_latency_ms: float
+    fill_kv_caches: bool
     index: int
 
 
@@ -314,6 +315,32 @@ def _simulate_comb(task: _CombTask) -> None:
                 engine, requests, frontend_latency_s=task.frontend_latency_ms * 1e-3
             )
 
+    if task.fill_kv_caches:
+        # Requests of the dataset's mean prompt length, one output token each,
+        # until every instance's KV cache has been used once.
+        cache_tokens = max(
+            (e.vllm_config.cache_config.num_gpu_blocks or 0)
+            * e.vllm_config.cache_config.block_size
+            for e in engines
+        )
+        prompt_len = max(1, round(float(np.mean([len(p) for p in prompts]))))
+        per_instance = max(task.num_instances.values(), default=1)
+        num_fill = math.ceil(1.2 * per_instance * cache_tokens / prompt_len)
+        rng = np.random.default_rng(bench_args.seed)
+        simulate_run(
+            [
+                TimedRequest(
+                    prompt_token_ids=rng.integers(
+                        0, tokenizer.vocab_size, prompt_len
+                    ).tolist(),
+                    sampling_params=SamplingParams(
+                        max_tokens=1, ignore_eos=True, detokenize=False
+                    ),
+                )
+                for _ in range(num_fill)
+            ]
+        )
+
     runs: dict[float, dict[str, object]] = {}
 
     def evaluate(rate: float) -> dict[str, object]:
@@ -358,6 +385,7 @@ def _simulate_comb(task: _CombTask) -> None:
             | {
                 "request_rate": rate,
                 "frontend_latency_ms": task.frontend_latency_ms,
+                "kv_caches_filled": task.fill_kv_caches,
                 **(
                     {"handoff_latency_ms": task.handoff_latency_ms}
                     if task.num_instances
@@ -413,6 +441,7 @@ class SweepSimulateArgs:
     search_iters: int
     frontend_latency_ms: float
     handoff_latency_ms: float
+    fill_kv_caches: bool
     num_workers: int
     output_dir: Path
     experiment_name: str
@@ -458,6 +487,7 @@ class SweepSimulateArgs:
             search_iters=args.search_iters,
             frontend_latency_ms=args.frontend_latency_ms,
             handoff_latency_ms=args.handoff_latency_ms,
+            fill_kv_caches=args.fill_kv_caches,
             num_workers=args.num_workers,
             output_dir=Path(args.output_dir),
             experiment_name=(
@@ -536,6 +566,15 @@ class SweepSimulateArgs:
             "decode instance receiving it.",
         )
         parser.add_argument(
+            "--fill-kv-caches",
+            action="store_true",
+            help="Before a combination's first run, use up each instance's KV "
+            "cache once, so that the runs see a long-running server's "
+            "scattered KV blocks rather than a fresh one's. Reads into "
+            "scattered blocks are slower to post for a disaggregated decode "
+            "instance.",
+        )
+        parser.add_argument(
             "-j",
             "--num-workers",
             type=int,
@@ -612,6 +651,7 @@ def run_main(args: SweepSimulateArgs):
                 search_iters=args.search_iters,
                 frontend_latency_ms=args.frontend_latency_ms,
                 handoff_latency_ms=args.handoff_latency_ms,
+                fill_kv_caches=args.fill_kv_caches,
                 index=len(tasks),
             )
             for role, cmd in serve_cmds.items():

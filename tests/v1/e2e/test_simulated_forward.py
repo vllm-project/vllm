@@ -247,7 +247,8 @@ def test_sweep_simulate_slo(tmp_path) -> None:
 def test_sweep_simulate_disaggregated(tmp_path) -> None:
     """A disaggregated combination runs its prefill and decode instances, and a
     second decode instance raises the SLO-meeting rate of a decode-bound
-    workload; runs record their GPU count."""
+    workload, also with filled KV caches and a read posting cost; runs record
+    their GPU count."""
     if not (current_platform.is_cpu() or current_platform.is_cuda_alike()):
         pytest.skip("Simulated forward needs the CPU or a CUDA-alike platform.")
     from vllm.benchmarks.sweep.simulate import SweepSimulateArgs, run_main
@@ -278,11 +279,16 @@ def test_sweep_simulate_disaggregated(tmp_path) -> None:
                 {
                     "timing": "constant",
                     "timing_args": {"fixed_us": 1000, "decode_us_per_req": 300},
-                    "kv_transfer_timing": {"load_gbps": 10},
+                    "kv_transfer_timing": {
+                        "load_gbps": 10,
+                        "post_us_per_read": 100,
+                        "post_us_per_run": 50,
+                    },
                 }
             ),
             "--slo",
             "mean_tpot_ms=4",
+            "--fill-kv-caches",
             "--search-iters",
             "3",
             "--handoff-latency-ms",
@@ -302,6 +308,7 @@ def test_sweep_simulate_disaggregated(tmp_path) -> None:
         for name in ("1p1d", "1p2d")
     }
     assert [r["gpu_count"] for r in results.values()] == [2, 3]
+    assert all(r["kv_caches_filled"] for r in results.values())
     assert all(
         r["mean_tpot_ms"] <= 4 and r["completed"] == 40 for r in results.values()
     )
