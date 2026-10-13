@@ -11,9 +11,9 @@ set -euo pipefail
 TARGET="${1:-all}"
 case "${TARGET}" in
   cuda-13-0 | cuda-12-9 | cuda-13-0-ubuntu-24-04 | \
-    cuda-12-9-ubuntu-24-04 | rocm | xpu | cpu | all) ;;
+    cuda-12-9-ubuntu-24-04 | rocm | rocm72 | xpu | cpu | all) ;;
   *)
-    echo "Usage: $0 {cuda-13-0|cuda-12-9|cuda-13-0-ubuntu-24-04|cuda-12-9-ubuntu-24-04|rocm|xpu|cpu|all}"
+    echo "Usage: $0 {cuda-13-0|cuda-12-9|cuda-13-0-ubuntu-24-04|cuda-12-9-ubuntu-24-04|rocm|rocm72|xpu|cpu|all}"
     exit 2
     ;;
 esac
@@ -143,23 +143,24 @@ if target_enabled cuda-12-9-ubuntu-24-04; then
 fi
 
 # ---- ROCm ----
+# Copied from ECR (publish.sh). The default stack (rocm) also owns the plain :latest / :v<ver> tags.
+
+publish_rocm_stack() {
+  local v s sfx ecr=public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT} hub=vllm/vllm-openai-rocm
+  v=$(buildkite-agent meta-data get "rocm-$1-variant")
+  sfx=("-$v"); if [[ $1 == rocm ]]; then sfx+=(""); fi
+  for s in "${sfx[@]}"; do
+    docker buildx imagetools create -t "$hub:latest$s" -t "$hub:v${RELEASE_VERSION}$s" "$ecr-$v"
+    docker buildx imagetools create -t "$hub:latest$s-base" -t "$hub:v${RELEASE_VERSION}$s-base" "$ecr-$v-base"
+  done
+}
 
 if target_enabled rocm; then
-  ROCM_BASE_CACHE_KEY=$(.buildkite/scripts/cache-rocm-base-wheels.sh key)
-  echo "ROCm base cache key: ${ROCM_BASE_CACHE_KEY}"
+  publish_rocm_stack rocm
+fi
 
-  docker pull "public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-rocm"
-  docker pull "public.ecr.aws/q9t5s3a7/vllm-release-repo:${ROCM_BASE_CACHE_KEY}-rocm-base"
-
-  docker tag "public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-rocm" vllm/vllm-openai-rocm:latest
-  docker tag "public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-rocm" "vllm/vllm-openai-rocm:v${RELEASE_VERSION}"
-  docker push vllm/vllm-openai-rocm:latest
-  docker push "vllm/vllm-openai-rocm:v${RELEASE_VERSION}"
-
-  docker tag "public.ecr.aws/q9t5s3a7/vllm-release-repo:${ROCM_BASE_CACHE_KEY}-rocm-base" vllm/vllm-openai-rocm:latest-base
-  docker tag "public.ecr.aws/q9t5s3a7/vllm-release-repo:${ROCM_BASE_CACHE_KEY}-rocm-base" "vllm/vllm-openai-rocm:v${RELEASE_VERSION}-base"
-  docker push vllm/vllm-openai-rocm:latest-base
-  docker push "vllm/vllm-openai-rocm:v${RELEASE_VERSION}-base"
+if target_enabled rocm72; then
+  publish_rocm_stack rocm_72
 fi
 
 # ---- XPU ----
