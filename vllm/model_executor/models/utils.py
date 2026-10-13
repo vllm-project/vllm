@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import itertools
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Collection, Iterable, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Literal, Protocol, TypeAlias, overload
@@ -507,8 +507,8 @@ def maybe_fuse_shared_experts(
     *,
     n_routed_experts: int,
     n_shared_experts: int,
+    fused_shared_expert_layers: Collection[int],
     ckpt_prefix: str = "mlp.shared_experts",
-    enabled: bool | None = None,
 ) -> Iterable[tuple[str, torch.Tensor]]:
     """Route AITER fused-shared-expert checkpoint weights into fused slots.
 
@@ -524,21 +524,15 @@ def maybe_fuse_shared_experts(
         n_routed_experts: Number of routed experts; offsets the fused slots.
         n_shared_experts: Number of shared experts packed into the tensor.
         ckpt_prefix: Checkpoint module name of the shared experts.
-        enabled: Whether AITER fused-shared-experts is active. Defaults to
-            `rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()`; pass an
-            explicit value only when the model gates on something more (e.g.
-            quant-spec compatibility) and it must match its construction-time
-            decision.
+        fused_shared_expert_layers: Layer indices with shared experts fused
+            at construction time. Only weights belonging to these layers
+            are routed to fused slots.
 
     Yields:
         `(name, tensor)` pairs with shared experts routed to fused slots.
 
     """
-    if enabled is None:
-        from vllm._aiter_ops import rocm_aiter_ops
-
-        enabled = rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
-    if not enabled:
+    if not fused_shared_expert_layers:
         yield from weights
         return
 
@@ -547,6 +541,9 @@ def maybe_fuse_shared_experts(
     prefix = f"{ckpt_prefix}."
     for name, loaded_weight in weights:
         if prefix not in name:
+            yield name, loaded_weight
+            continue
+        if extract_layer_index(name) not in fused_shared_expert_layers:
             yield name, loaded_weight
             continue
         # gate/up split on the output dim; down_proj on the input dim.

@@ -11,9 +11,40 @@ import regex as re
 from vllm.logger import init_logger
 
 if TYPE_CHECKING:
+    from torch import nn
+
     from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 
 logger = init_logger(__name__)
+
+
+def get_fused_shared_expert_layers(
+    layers: "nn.ModuleList",
+    moe_cls: "type[nn.Module]",
+    moe_name: str,
+    enable_eplb: bool = False,
+) -> list[int]:
+    """Collect fused MoE layer indices, rejecting mixed fusion with EPLB."""
+    from vllm.model_executor.models.utils import PPMissingLayer
+
+    fused_layers = []
+    num_moe_layers = 0
+    for idx, layer in enumerate(layers):
+        if isinstance(layer, PPMissingLayer):
+            continue
+        moe = layer
+        for name in moe_name.split("."):
+            moe = getattr(moe, name, None)
+        if not isinstance(moe, moe_cls):
+            continue
+        num_moe_layers += 1
+        if getattr(moe, "is_fused_shared_expert_enabled", False):
+            fused_layers.append(idx)
+    if enable_eplb and 0 < len(fused_layers) < num_moe_layers:
+        raise NotImplementedError(
+            "Mixed per-layer shared-expert fusion is not supported with EPLB"
+        )
+    return fused_layers
 
 
 def get_quark_ocp_mx_group_size(
