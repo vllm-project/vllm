@@ -123,6 +123,8 @@ class MonoSpec(Generic[LaunchStateT]):
         refuse_config: Deployment refusals the engine's config answers, before
             the weights are loaded.
         refuse_model: Deployment refusals only the loaded model answers.
+        refuse_caches: Deployment refusals the KV caches the kernels will read
+            answer, re-run whenever those caches move.
         skip_layer: Why one layer takes vLLM's path, None when it takes the
             kernel's.
         skip_step: Why one step takes vLLM's path, None when it takes the
@@ -131,8 +133,6 @@ class MonoSpec(Generic[LaunchStateT]):
         launch_state: The weights and launch state, built once at attach. The
             only place a weight copy is ever made. Opaque to the library, which
             only hands it back to the spec's own callbacks.
-        refuse_caches: Deployment refusals the KV caches the kernels will read
-            answer, re-run whenever those caches move.
         build: One ``LayerKernel`` for (context, state, layer, width).
 
     """
@@ -149,10 +149,10 @@ class MonoSpec(Generic[LaunchStateT]):
     # Capabilities
     refuse_config: Callable[["VllmConfig"], list[str]]
     refuse_model: Callable[[Any], list[str]]
+    refuse_caches: Callable[[MonoContext, Mapping[str, Any]], list[str]]
     skip_layer: Callable[[MonoContext, Any], str | None]
     skip_step: Callable[[MonoContext, LaunchStateT, int], str | None]
 
     # Callbacks
     launch_state: Callable[[Any, MonoContext], LaunchStateT]
-    refuse_caches: Callable[[MonoContext, Mapping[str, Any]], list[str]]
     build: Callable[[MonoContext, LaunchStateT, Any, int], LayerKernel]

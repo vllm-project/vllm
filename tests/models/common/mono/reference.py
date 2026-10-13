@@ -137,10 +137,10 @@ REFERENCE = MonoSpec[LaunchState](
     widths=widths,
     refuse_config=refuse_config,
     refuse_model=refuse_model,
+    refuse_caches=refuse_caches,
     skip_layer=skip_layer,
     skip_step=skip_step,
     launch_state=launch_state,
-    refuse_caches=refuse_caches,
     build=build,
 )
 
