@@ -121,6 +121,7 @@ class _CombTask:
     comb_dir: Path
     slo: dict[str, float] | None
     search_iters: int
+    frontend_latency_ms: float
     index: int
 
 
@@ -247,12 +248,18 @@ def _simulate_comb(task: _CombTask) -> None:
         ]
         # As `vllm bench sweep serve` does between runs.
         engine.reset_prefix_cache(reset_connector=True)
-        result = run(engine, requests)
+        result = run(
+            engine, requests, frontend_latency_s=task.frontend_latency_ms * 1e-3
+        )
         run_data = (
             dict(task.serve_comb)
             | dict(task.bench_comb)
             | layout
-            | {"request_rate": rate, "wall_time_s": result.wall_time}
+            | {
+                "request_rate": rate,
+                "frontend_latency_ms": task.frontend_latency_ms,
+                "wall_time_s": result.wall_time,
+            }
             | result.summary()
         )
         rate_dir = task.comb_dir / f"request_rate={rate:g}"
@@ -295,6 +302,7 @@ class SweepSimulateArgs:
     simulation_config: dict
     slo: dict[str, float] | None
     search_iters: int
+    frontend_latency_ms: float
     num_workers: int
     output_dir: Path
     experiment_name: str
@@ -322,6 +330,8 @@ class SweepSimulateArgs:
         )
         if slo and any(comb.has_param("request_rate") for comb in bench_params):
             raise ValueError("`--slo` searches request_rate; do not set it.")
+        if args.frontend_latency_ms < 0:
+            raise ValueError("`frontend_latency_ms` should be non-negative.")
         if args.num_workers < 1:
             raise ValueError("`num_workers` should be at least 1.")
         return cls(
@@ -336,6 +346,7 @@ class SweepSimulateArgs:
             simulation_config=json.loads(args.simulation_config),
             slo=slo,
             search_iters=args.search_iters,
+            frontend_latency_ms=args.frontend_latency_ms,
             num_workers=args.num_workers,
             output_dir=Path(args.output_dir),
             experiment_name=(
@@ -395,6 +406,15 @@ class SweepSimulateArgs:
             type=int,
             default=5,
             help="Bisection steps of the request-rate search, after bracketing.",
+        )
+        parser.add_argument(
+            "--frontend-latency-ms",
+            type=float,
+            default=0.0,
+            help="Per-request latency of the server outside the engine core "
+            "(HTTP, API server, IPC), added to TTFT and end-to-end latency. "
+            "Calibrate it as the median TTFT of a real run minus that of its "
+            "simulation, at a rate without queueing.",
         )
         parser.add_argument(
             "-j",
@@ -466,6 +486,7 @@ def run_main(args: SweepSimulateArgs):
                 comb_dir=comb_dir,
                 slo=args.slo,
                 search_iters=args.search_iters,
+                frontend_latency_ms=args.frontend_latency_ms,
                 index=len(tasks),
             )
             print(f"[SIMULATE] {shlex.join(task.serve_cmd)}")

@@ -164,7 +164,9 @@ vllm bench sweep simulate \
     --experiment-name demo-sim
 ```
 
-Fix the KV cache size (`--kv-cache-memory-bytes`) in `--serve-cmd`, so that the simulated deployment has the KV capacity of the real one. Each run is saved as `summary.json` with the metrics of `vllm bench serve`, so [the plots](#visualization) work on the results. The best run of each combination is saved as `result.json` with `max_request_rate`, and `slo_summary.csv` ranks the combinations by output throughput per GPU at that rate.
+Fix the KV cache size (`--kv-cache-memory-bytes`) in `--serve-cmd`, so that the simulated deployment has the KV capacity of the real one.
+
+The simulation covers the engine core, not the HTTP and API-server path, which adds a nearly constant latency to every request's TTFT and end-to-end latency (about 8 ms for a local `vllm bench serve` against `vllm serve`). Pass it as `--frontend-latency-ms`. To calibrate it, simulate the runs of the recording (the same `--bench-params`) and take the difference between the real and simulated median TTFT at rates without queueing. Each run is saved as `summary.json` with the metrics of `vllm bench serve`, so [the plots](#visualization) work on the results. The best run of each combination is saved as `result.json` with `max_request_rate`, and `slo_summary.csv` ranks the combinations by output throughput per GPU at that rate.
 
 !!! note
     The simulated clock needs the engine in one process, so multi-rank combinations (`tensor_parallel_size` or `pipeline_parallel_size` above 1) need `"clock": "real"`, which runs in real time. Request rates (`--request-rate`, `--burstiness`, ramp-up and timed traces) are supported; `--max-concurrency` and multimodal datasets are not.

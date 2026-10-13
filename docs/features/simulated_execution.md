@@ -188,6 +188,11 @@ sweeps `max_num_seqs` this way, and
 the combinations of a `vllm bench sweep serve` experiment, optionally searching
 each for the highest request rate that meets latency targets.
 
+The engine core is all that runs, so a server's latency outside it (HTTP, API
+server, IPC) is missing from TTFT and end-to-end latency. Passing it as
+`frontend_latency_s` to `run()` or `simulate()` delays each request's
+arrival at the engine by that much.
+
 A `TimedSession` is a multi-turn conversation: each `Turn` appends its tokens
 to the previous turn's prompt and output, and arrives `think_time` seconds
 after the previous turn finished. Later turns therefore reuse the

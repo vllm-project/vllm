@@ -199,6 +199,7 @@ def run(
     engine: LLMEngine,
     requests: Sequence[TimedRequest | TimedSession],
     max_stalled_steps: int = 10_000,
+    frontend_latency_s: float = 0.0,
 ) -> SimulationResult:
     """Feed `requests` to `engine` (from `make_engine()`) at their arrival
     times and timestamp the outputs. A request is admitted at the first
@@ -206,7 +207,12 @@ def run(
     up requests between steps; a session's turns arrive one after another.
     The result lists one timing per request, or per turn of a session, in
     input order. Under the virtual clock, `max_stalled_steps` consecutive
-    engine steps without output or clock progress abort the run."""
+    engine steps without output or clock progress abort the run.
+
+    `frontend_latency_s` is a server's per-request latency outside the engine
+    core (HTTP, API server, IPC), which a client sees on top of the engine's:
+    a request reaches the engine that long after its arrival, adding it to
+    TTFT and end-to-end latency (and to the gap between a session's turns)."""
     from vllm.v1.engine.core_client import InprocClient
 
     sim = engine.vllm_config.simulation_config
@@ -248,7 +254,7 @@ def run(
         # Compare absolute times: after jumping to `t0 + arrival_time`,
         # `now - t0` can round to just below `arrival_time`.
         now = clock.now()
-        while pending and t0 + pending[0][0] <= now:
+        while pending and t0 + frontend_latency_s + pending[0][0] <= now:
             arrival, i, k, prompt = heapq.heappop(pending)
             request_id = request_ids[i][k]
             params = turns[i][k].sampling_params.clone()
@@ -260,11 +266,11 @@ def run(
                 outputs_so_far[request_id] = []
         if not engine.has_unfinished_requests():
             # Idle until the next arrival.
-            clock.sleep_until(t0 + pending[0][0])
+            clock.sleep_until(t0 + frontend_latency_s + pending[0][0])
             continue
 
         # Lets an engine waiting only on its own transfers skip ahead.
-        clock.horizon = t0 + pending[0][0] if pending else math.inf
+        clock.horizon = t0 + frontend_latency_s + pending[0][0] if pending else math.inf
         before = clock.now()
         outputs = engine.step()
         t = clock.now() - t0
@@ -314,13 +320,15 @@ def run(
 
 
 def simulate(
-    engine_args: EngineArgs, requests: Sequence[TimedRequest | TimedSession]
+    engine_args: EngineArgs,
+    requests: Sequence[TimedRequest | TimedSession],
+    frontend_latency_s: float = 0.0,
 ) -> SimulationResult:
     """Build an in-process engine from `engine_args` and run `requests`
-    through it. Pass ``simulation_config={"simulate_forward": True,
-    "clock": "fast_forward", ...}`` for a run in simulated time."""
+    through it (see `run()`). Pass ``simulation_config={"simulate_forward":
+    True, "clock": "fast_forward", ...}`` for a run in simulated time."""
     engine = make_engine(engine_args)
     try:
-        return run(engine, requests)
+        return run(engine, requests, frontend_latency_s=frontend_latency_s)
     finally:
         engine.engine_core.shutdown()

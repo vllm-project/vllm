@@ -177,6 +177,16 @@ def test_simulate_offline_virtual_clock() -> None:
     assert result.duration == pytest.approx(10.0 + 8 * step_s)
     assert result.summary()["mean_tpot_ms"] == pytest.approx(step_s * 1e3)
 
+    # A frontend latency delays each request's admission, so it adds to TTFT
+    # and end-to-end latency but not to TPOT.
+    latency_s = 5e-3
+    shifted = simulate(args, requests, frontend_latency_s=latency_s)
+    for before, after in zip(result.requests, shifted.requests):
+        assert after.arrival_time == before.arrival_time
+        assert after.ttft == pytest.approx(before.ttft + latency_s)
+        assert after.e2el == pytest.approx(before.e2el + latency_s)
+        assert after.tpot == pytest.approx(before.tpot)
+
 
 def test_sweep_simulate_slo(tmp_path) -> None:
     """`vllm bench sweep simulate` finds a higher SLO-meeting request rate
