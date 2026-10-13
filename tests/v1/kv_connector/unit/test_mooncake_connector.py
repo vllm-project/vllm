@@ -2588,7 +2588,7 @@ async def test_kv_producer_heterogeneous_tp(monkeypatch, d_tp_size):
 
 @contextlib.contextmanager
 def mooncake_sleep_worker(kv_role: str):
-    """Build a worker with live loops and registered KV caches."""
+    """Build a worker with registered KV caches."""
     vllm_config = create_vllm_config(
         kv_connector="MooncakeConnector",
         kv_role=kv_role,
@@ -2631,30 +2631,3 @@ def test_sleep_cycle_unregisters_and_restores_registration(kv_role: str):
         connector.restore_kv_caches()
         connector.restore_kv_caches()
         assert engine.registered == expected
-
-
-@pytest.mark.parametrize("expired", [False, True], ids=["ready_to_send", "expired"])
-def test_unregister_waits_for_blocks_ready_to_send(monkeypatch, expired: bool):
-    """D may still pull a ready block until it expires."""
-    monkeypatch.setattr(
-        mooncake_connector.envs, "VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT", 0.2
-    )
-    with mooncake_sleep_worker("kv_producer") as (connector, expected):
-        worker = connector.connector_worker
-        send_meta = SendBlockMeta(
-            p_req_id="p-req-1",
-            transfer_id="xfer-req-1",
-            local_block_ids=[[0]],
-            ready=asyncio.Event(),
-            expire_time=float("-inf") if expired else float("inf"),
-        )
-        send_meta.ready.set()
-        worker.reqs_need_send[send_meta.transfer_id] = send_meta
-
-        if not expired:
-            with pytest.raises(TimeoutError, match="did not finish in time"):
-                connector.unregister_kv_caches()
-            assert worker.engine.registered == expected
-        else:
-            connector.unregister_kv_caches()
-            assert worker.engine.registered == {}

@@ -8,9 +8,8 @@ import queue
 import threading
 import time
 from collections import defaultdict
-from collections.abc import Collection, Coroutine
+from collections.abc import Collection
 from concurrent.futures import ThreadPoolExecutor
-from concurrent.futures import TimeoutError as FuturesTimeoutError
 from dataclasses import dataclass
 from enum import IntEnum
 from typing import TYPE_CHECKING, Any, Final
@@ -672,9 +671,6 @@ class SendBlockMeta:
     sent: int = 0
     sending: int = 0
 
-    def expired(self, now: float) -> bool:
-        return bool(self.p_req_id) and self.expire_time < now and self.sending == 0
-
 
 class MooncakeConnectorMetadata(KVConnectorMetadata):
     def __init__(self):
@@ -1263,7 +1259,6 @@ class MooncakeConnectorWorker:
         self.seen_base_addresses: list[int] = []
         self._kv_data_lens: list[int] = []
         self._kv_unregistered = False
-        self._local_pulls = 0
         # Aligned regions depend only on the peer's registered layout.
         # The third item is an error string when alignment cannot proceed.
         self._prepared_transfer_regions: dict[
@@ -2238,17 +2233,8 @@ class MooncakeConnectorWorker:
                 )
 
     def unregister_kv_caches(self) -> None:
-        """Waits up to the abort timeout for pending sends and pulls."""
         if self._kv_unregistered or not self.seen_base_addresses:
             return
-        deadline = time.perf_counter() + envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT
-        try:
-            while self._transfers_pending(deadline):
-                if time.perf_counter() >= deadline:
-                    raise TimeoutError
-                time.sleep(0.01)
-        except (TimeoutError, FuturesTimeoutError) as e:
-            raise TimeoutError("Mooncake KV transfers did not finish in time") from e
         if self.engine.batch_unregister_memory(self.seen_base_addresses) != 0:
             raise RuntimeError("Mooncake batch memory unregistration failed.")
         self._kv_unregistered = True
@@ -2262,49 +2248,6 @@ class MooncakeConnectorWorker:
         if ret_value != 0:
             raise RuntimeError("Mooncake batch memory registration failed.")
         self._kv_unregistered = False
-
-    def _transfers_pending(self, deadline: float) -> bool:
-        pending = []
-        if not self.is_kv_consumer:
-            pending.append(
-                asyncio.run_coroutine_threadsafe(
-                    self._has_pending_sends(), self.sender_loop
-                )
-            )
-        if not self.is_kv_producer:
-            pending.append(
-                asyncio.run_coroutine_threadsafe(
-                    self._has_pending_recvs(), self.receiver_loop
-                )
-            )
-        return any(
-            fut.result(timeout=deadline - time.perf_counter()) for fut in pending
-        )
-
-    async def _has_pending_sends(self) -> bool:
-        # D may still pull a ready request until it expires.
-        now = time.perf_counter()
-        return any(
-            meta.ready.is_set() and not meta.expired(now)
-            for meta in self.reqs_need_send.values()
-        )
-
-    async def _has_pending_recvs(self) -> bool:
-        return self._local_pulls > 0
-
-    def _create_pull_task(
-        self, coro: Coroutine[Any, Any, None], pull_metas: dict[ReqId, PullReqMeta]
-    ) -> None:
-        if any(any(meta.local_block_ids) for meta in pull_metas.values()):
-            self._local_pulls += 1
-            coro = self._counted_pull(coro)
-        asyncio.create_task(coro)
-
-    async def _counted_pull(self, coro: Coroutine[Any, Any, None]) -> None:
-        try:
-            await coro
-        finally:
-            self._local_pulls -= 1
 
     async def fetch_finished_recving_reqs(self) -> set[ReqId]:
         finished_recving_reqs = self.finished_recving_reqs
@@ -2320,7 +2263,11 @@ class MooncakeConnectorWorker:
 
         expired_transfer_id = []
         for transfer_id, send_meta in self.reqs_need_send.items():
-            if send_meta.expired(now):
+            if (
+                send_meta.p_req_id
+                and send_meta.expire_time < now
+                and send_meta.sending == 0
+            ):
                 logger.warning(
                     "Request %s timed out after %d seconds without "
                     "being sent. Freeing its blocks on the producer side.",
@@ -2611,9 +2558,8 @@ class MooncakeConnectorWorker:
         for pull_meta in pull_metas.values():
             pull_meta.pull_tasks_count = count
         for worker_addr in worker_addrs:
-            self._create_pull_task(
-                self.receive_kv_from_single_worker(worker_addr, pull_metas),
-                pull_metas,
+            asyncio.create_task(
+                self.receive_kv_from_single_worker(worker_addr, pull_metas)
             )
 
     async def handle_new_engine_id(
@@ -2644,9 +2590,8 @@ class MooncakeConnectorWorker:
     ):
         for remote_engine_id, pull_metas in reqs_to_recv.items():
             if remote_engine_id not in self._remote_agents:
-                self._create_pull_task(
-                    self.handle_new_engine_id(remote_engine_id, pull_metas),
-                    pull_metas,
+                asyncio.create_task(
+                    self.handle_new_engine_id(remote_engine_id, pull_metas)
                 )
             else:
                 self.receive_kv(remote_engine_id, pull_metas)

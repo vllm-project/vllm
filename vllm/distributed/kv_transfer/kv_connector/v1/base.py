@@ -300,8 +300,8 @@ class KVConnectorBase_V1(ABC):
         return
 
     def unregister_kv_caches(self) -> None:
-        """Before sleep unmaps the KV cache: wait for in-flight transfers and drop
-        its memory registrations. Idempotent."""
+        """Before sleep unmaps the KV cache: drop its memory registrations.
+        The engine has already drained the transfers using it. Idempotent."""
         return
 
     def restore_kv_caches(self) -> None:
