@@ -10,6 +10,9 @@ import torch
 from vllm.model_executor.layers.fused_moe.experts.batched_deep_gemm_moe import (
     persistent_masked_m_silu_mul_quant,
 )
+from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    fused_silu_mul_per_token_group_quant_fp8,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     get_fp8_min_max,
 )
@@ -210,6 +213,21 @@ def token_random(E, T, H2, tokens_per_expert):
             exp = random.choice(range(1, 20))
             y[e, t].uniform_(-(2**exp), 2**exp)
     return y
+
+
+@pytest.mark.parametrize("H", [128, 256, 384, 512, 640])
+@pytest.mark.skipif(
+    not current_platform.is_cuda() or not current_platform.has_device_capability(80),
+    reason="batch-invariant fused SiLU quantization requires CUDA sm80+",
+)
+@torch.inference_mode()
+def test_batch_invariant_packed_scale_padding(H: int):
+    y = torch.randn((4, 2 * H), device=DEVICE, dtype=torch.bfloat16)
+    _, scales = fused_silu_mul_per_token_group_quant_fp8(
+        y, use_ue8m0=True, masked_m=None
+    )
+    scale_bytes = as_uint8(scales)
+    assert torch.all(scale_bytes[:, H // 128 :] == 0)
 
 
 @pytest.mark.parametrize("E,T,H,fp8_type", CASES)

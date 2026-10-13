@@ -227,7 +227,7 @@ def persistent_masked_m_silu_mul_quant(
         dtype=ys_dtype,
         device=y.device,
     )
-    if not full_tokens:
+    if not full_tokens or (quant_scale_fmt == DeepGemmQuantScaleFMT.UE8M0 and G % 4):
         y_s.zero_()
 
     ceil_ue8m0 = quant_scale_fmt in [
