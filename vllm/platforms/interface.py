@@ -946,7 +946,11 @@ class Platform:
         """
         from math import lcm
 
-        from vllm.config.vllm import set_current_vllm_config
+        from vllm.config.vllm import (
+            get_layers_from_vllm_config,
+            set_current_vllm_config,
+        )
+        from vllm.model_executor.layers.mamba.abstract import MambaBase
         from vllm.model_executor.models import ModelRegistry
         from vllm.utils.math_utils import cdiv
         from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
@@ -1080,6 +1084,16 @@ class Platform:
                 # For hybrid MLA/Mamba models, make the manager block size a
                 # multiple of 128 so split kernel blocks keep that invariant.
                 kernel_block_alignment_size = max(kernel_block_alignment_size, 128)
+        # Internal prefill checkpoints sit on block boundaries.
+        mamba_layers = get_layers_from_vllm_config(
+            vllm_config,
+            MambaBase,  # type: ignore[type-abstract]
+        )
+        for layer in mamba_layers.values():
+            if layer.prefill_checkpoint_alignment is not None:
+                kernel_block_alignment_size = lcm(
+                    kernel_block_alignment_size, layer.prefill_checkpoint_alignment
+                )
 
         # Use minimum block size that satisfies both backend alignment and
         # mamba page size compatibility

@@ -24,6 +24,9 @@ class MambaBase(AttentionLayerBase):
     # in the shape specified by `self.get_state_shape`.
     kv_cache: tuple[torch.Tensor, ...]
     supports_dcp: bool = False
+    # If set, the layer's internal prefill checkpoints can only land every this
+    # many tokens, so Mamba blocks are made multiples of it.
+    prefill_checkpoint_alignment: int | None = None
 
     def bind_kv_cache(self, kv_cache: torch.Tensor) -> None:
         """Unpack a raw ``[B, 1, 1, C]`` int8 page view into per-state views.
