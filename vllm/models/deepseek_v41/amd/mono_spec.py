@@ -519,7 +519,6 @@ MONO_SPEC = MonoSpec[LaunchState](
     skip_layer=_skip_layer,
     skip_step=_skip_step,
     launch_state=_launch_state,
-    reload_weights=None,
     bind=_bind,
     build=_build,
 )

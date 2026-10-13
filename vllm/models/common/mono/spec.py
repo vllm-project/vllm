@@ -122,9 +122,9 @@ class MonoSpec(Generic[LaunchStateT]):
     as a ``MONO_SPECS`` tuple the library selects from.
 
     The parameter is the spec's own launch state: ``launch_state`` builds it,
-    and ``reload_weights``, ``skip_step`` and ``build`` are handed back the
-    same object. Annotate the spec with it (``MonoSpec[MyLaunchState](...)``)
-    and those four callbacks are checked against each other.
+    and ``skip_step`` and ``build`` are handed back the same object. Annotate
+    the spec with it (``MonoSpec[MyLaunchState](...)``) and those three
+    callbacks are checked against each other.
 
     Gating runs in tiers, and the prefix is the consequence. ``refuse_*`` says
     the deployment asked for something it cannot have, so it may take the
@@ -153,10 +153,6 @@ class MonoSpec(Generic[LaunchStateT]):
         launch_state: The weights and launch state, built once at attach. The
             only place a weight copy is ever made. Opaque to the library, which
             only hands it back to the spec's own callbacks.
-        reload_weights: Writes new weights into the allocation
-            ``launch_state`` returned, in place, because the kernels and the
-            captured graphs hold its address. None refuses anything that moves
-            weights after attach.
         bind: Checks the KV caches the kernels will read, on every re-bind.
         build: One ``LayerKernel`` for (context, state, layer, width).
 
@@ -179,6 +175,5 @@ class MonoSpec(Generic[LaunchStateT]):
 
     # Callbacks
     launch_state: Callable[[Any, MonoContext], LaunchStateT]
-    reload_weights: Callable[[Any, MonoContext, LaunchStateT], None] | None
     bind: Callable[[MonoContext, Mapping[str, Any]], list[str]]
     build: Callable[[MonoContext, LaunchStateT, Any, int], LayerKernel]

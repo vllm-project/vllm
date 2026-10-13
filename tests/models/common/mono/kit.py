@@ -191,7 +191,6 @@ class MonoConformance:
         with forward(config, CUDAGraphMode.NONE, self.skipped_metadata(config, model)):
             mono.begin_once(self._positions(mono))
             assert mono.step is None
-            assert mono.last is not None
 
     def test_width_off_the_capture_sizes_runs_vllm_layers(self, config, model, mono):
         off = max(mono.widths) + 1

@@ -78,7 +78,6 @@ class MonoRuntime:
         self.kernels: dict[tuple[int, int], LayerKernel] = {}
         self.state: Any = None
         self.step: MonoStep | None = None
-        self.last: str | None = None
         self._fc: Any = None
         self._bound: tuple | None = None
 
@@ -130,21 +129,6 @@ class MonoRuntime:
         if owners:
             MonoWarmup(self.spec.name, owners).register_warmup()
 
-    def reload_weights(self, model) -> None:
-        """Writes ``model``'s current weights into the allocation
-        ``launch_state`` returned, in place.
-
-        Raises:
-            MonoUnsupported: The spec declares no ``reload_weights``, so its
-                weights cannot move after attach.
-
-        """
-        if self.spec.reload_weights is None:
-            raise MonoUnsupported(
-                f"MonoKernel {self.spec.name}: weights cannot move after attach"
-            )
-        self.spec.reload_weights(model, self.ctx, self.state)
-
     def _bind(self) -> None:
         """Re-checks the caches whenever they moved (keyed on every tensor's
         data_ptr and numel): memory profiling runs real steps on throwaway
@@ -180,9 +164,7 @@ class MonoRuntime:
         """None runs this step on the kernels (and sets ``step``), else the
         reason it runs vLLM's layers."""
         self.step = None
-        why = self._decide(positions)
-        self.last = why
-        return why
+        return self._decide(positions)
 
     def _decide(self, positions: torch.Tensor) -> str | None:
         fc = get_forward_context()

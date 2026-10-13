@@ -119,11 +119,6 @@ def launch_state(model, ctx: MonoContext) -> LaunchState:
     )
 
 
-def reload_weights(model, ctx: MonoContext, state: LaunchState) -> None:
-    for i, layer in enumerate(model.layers):
-        state.weights[i].copy_(layer.weight.data)
-
-
 def bind(ctx: MonoContext, caches) -> list[str]:
     reasons = []
     for name, cache in caches.items():
@@ -150,7 +145,6 @@ REFERENCE = MonoSpec[LaunchState](
     skip_layer=skip_layer,
     skip_step=skip_step,
     launch_state=launch_state,
-    reload_weights=reload_weights,
     bind=bind,
     build=build,
 )
