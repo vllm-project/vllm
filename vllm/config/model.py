@@ -310,12 +310,8 @@ class ModelConfig:
     window functionality of the model, capping to sliding window size. If the
     model does not support sliding window, this argument is ignored."""
     disable_cascade_attn: bool = True
-    """Disable cascade attention for V1. While cascade attention does not
-    change the mathematical correctness, disabling it could be useful for
-    preventing potential numerical issues. This defaults to True, so users
-    must opt in to cascade attention by setting this to False. Even when this
-    is set to False, cascade attention will only be used when the heuristic
-    tells that it's beneficial."""
+    """Deprecated: cascade attention has been removed, so this has no effect.
+    It will be removed in v0.33.0."""
     skip_tokenizer_init: bool = False
     """Skip initialization of tokenizer and detokenizer. Expects valid
     `prompt_token_ids` and `None` for prompt from the input. The generated
