@@ -238,13 +238,14 @@ class MambaStateShapeCalculator:
         """Append the physical ReplaySSM ring shapes.
 
         ``base_shapes[1]`` is ``(nheads // tp, head_dim, state_size)``;
-        B_cache uses the un-extended ``n_groups``.
+        B_cache extends ``n_groups`` for head shards as in ``mamba2_state_shape``.
         """
         ring_buffer_len = logical_window
         if backend == MambaBackendEnum.FLASHINFER:
             # FlashInfer keeps the live window and current verify window together.
             ring_buffer_len += 1 + num_speculative_tokens
         local_nheads, head_dim, state_size = base_shapes[1]
+        n_groups = n_groups + cls.extra_groups_for_head_shards(n_groups, tp_world_size)
         local_ngroups = divide(n_groups, tp_world_size)
         return (
             *base_shapes,
