@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Distributed QSA DCP regression coverage."""
 
+from types import SimpleNamespace
 from typing import Literal
 
 import pytest
@@ -194,8 +195,9 @@ def _qsa_dcp_model_path_worker(env: dict[str, str], backend: Backend) -> None:
 
         raw_spec = indexer.raw_key_cache.get_kv_cache_spec(config)
         compressed_spec = indexer.compressed_key_cache.get_kv_cache_spec(config)
+        side_cache_blocks = 2 * world_size + 1
         raw_storage = torch.zeros(
-            4,
+            side_cache_blocks,
             1,
             raw_spec.num_states,
             indexer.raw_key_cache.head_size,
@@ -203,7 +205,7 @@ def _qsa_dcp_model_path_worker(env: dict[str, str], backend: Backend) -> None:
             device=device,
         )
         compressed_storage = torch.zeros(
-            4,
+            side_cache_blocks,
             1,
             compressed_spec.num_states,
             indexer.compressed_key_cache.head_size,
@@ -223,7 +225,9 @@ def _qsa_dcp_model_path_worker(env: dict[str, str], backend: Backend) -> None:
             0,
             _make_common_metadata(
                 torch.tensor(
-                    [[rank * 2], [rank * 2 + 1]], dtype=torch.int32, device=device
+                    [[rank * 2 + 1], [rank * 2 + 2]],
+                    dtype=torch.int32,
+                    device=device,
                 )
             ),
         )
@@ -231,7 +235,9 @@ def _qsa_dcp_model_path_worker(env: dict[str, str], backend: Backend) -> None:
             0,
             _make_common_metadata(
                 torch.tensor(
-                    [[rank * 2], [rank * 2 + 1]], dtype=torch.int32, device=device
+                    [[rank * 2 + 1], [rank * 2 + 2]],
+                    dtype=torch.int32,
+                    device=device,
                 )
             ),
         )
@@ -250,7 +256,11 @@ def _qsa_dcp_model_path_worker(env: dict[str, str], backend: Backend) -> None:
             config,
         ):
             projected_qk, _ = indexer.index_qk_proj(hidden)
-            packed = indexer(projected_qk, positions)
+            packed, _ = indexer(
+                projected_qk,
+                positions,
+                attn=SimpleNamespace(use_fused_qsa_prepare=False),
+            )
 
         group = get_dcp_group()
         _assert_replicated_values(indexer.raw_key_cache.kv_cache, raw_metadata, group)
