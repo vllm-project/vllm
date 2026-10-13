@@ -180,6 +180,9 @@ def test_prepare_dflash_inputs_excludes_rejected_context_suffix(cp_rank, cp_size
     assert out.seeds[2].item() == 17
     assert not out.input_buffers.is_padding[:3].any()
     assert out.input_buffers.is_padding[3:].all()
+    assert (out.input_buffers.input_ids[3:] == 0).all()
+    assert (out.input_buffers.positions[3:] == 0).all()
+    assert (out.query_slot_mapping[3:] == PAD_SLOT_ID).all()
 
 
 def test_prepare_dflash_inputs_excludes_rejected_context_suffix_with_dcp():
