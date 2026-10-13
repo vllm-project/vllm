@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from asyncio import Lock
-from collections import defaultdict
 from http import HTTPStatus
+from weakref import WeakValueDictionary
 
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
@@ -115,7 +115,7 @@ class OpenAIServingModels:
             self.lora_resolvers.append(
                 LoRAResolverRegistry.get_resolver(lora_resolver_name)
             )
-        self.lora_resolver_lock: dict[str, Lock] = defaultdict(Lock)
+        self.lora_resolver_lock: WeakValueDictionary[str, Lock] = WeakValueDictionary()
 
         self.model_config = self.engine_client.model_config
         self.renderer = self.engine_client.renderer
@@ -170,7 +170,7 @@ class OpenAIServingModels:
         lora_name = request.lora_name
 
         # Ensure atomicity based on the lora name
-        async with self.lora_resolver_lock[lora_name]:
+        async with self._get_lora_lock(lora_name):
             error_check_ret = await self._check_load_lora_adapter_request(request)
             if error_check_ret is not None:
                 return error_check_ret
@@ -234,7 +234,7 @@ class OpenAIServingModels:
         lora_name = request.lora_name
 
         # Ensure atomicity based on the lora name
-        async with self.lora_resolver_lock[lora_name]:
+        async with self._get_lora_lock(lora_name):
             error_check_ret = await self._check_unload_lora_adapter_request(request)
             if error_check_ret is not None:
                 return error_check_ret
@@ -297,6 +297,13 @@ class OpenAIServingModels:
 
         return None
 
+    def _get_lora_lock(self, lora_name: str) -> Lock:
+        lock = self.lora_resolver_lock.get(lora_name)
+        if lock is None:
+            lock = Lock()
+            self.lora_resolver_lock[lora_name] = lock
+        return lock
+
     async def resolve_lora(self, lora_name: str) -> LoRARequest | ErrorResponse:
         """Attempt to resolve a LoRA adapter using available resolvers.
 
@@ -309,7 +316,7 @@ class OpenAIServingModels:
             ErrorResponse (400) if adapter(s) are found but none load.
 
         """
-        async with self.lora_resolver_lock[lora_name]:
+        async with self._get_lora_lock(lora_name):
             # First check if this LoRA is already loaded
             if lora_name in self.lora_requests:
                 return self.lora_requests[lora_name]

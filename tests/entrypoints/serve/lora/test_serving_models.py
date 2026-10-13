@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import asyncio
 from http import HTTPStatus
 from unittest.mock import MagicMock
 
@@ -55,6 +56,55 @@ async def _async_serving_models_init_with_mock() -> tuple[
 async def _async_serving_models_init() -> OpenAIServingModels:
     serving_models, _ = await _async_serving_models_init_with_mock()
     return serving_models
+
+
+@pytest.mark.asyncio
+async def test_missing_lora_names_do_not_retain_locks():
+    serving = await _async_serving_models_init()
+    serving.lora_resolvers = []
+    for index in range(100):
+        response = await serving.resolve_lora(f"missing-{index}")
+        assert isinstance(response, ErrorResponse)
+        assert response.error.code == HTTPStatus.NOT_FOUND
+    assert len(serving.lora_resolver_lock) == 0
+
+
+@pytest.mark.asyncio
+async def test_lora_resolver_waiters_remain_serialized_after_cancellation():
+    serving = await _async_serving_models_init()
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    calls = 0
+    active = 0
+
+    async def resolve(*args):
+        nonlocal calls, active
+        calls += 1
+        active += 1
+        assert active == 1
+        entered.set()
+        try:
+            await release.wait()
+        finally:
+            active -= 1
+        return None
+
+    resolver = MagicMock()
+    resolver.resolve_lora = resolve
+    serving.lora_resolvers = [resolver]
+    first = asyncio.create_task(serving.resolve_lora("adapter"))
+    await asyncio.wait_for(entered.wait(), 5)
+    cancelled = asyncio.create_task(serving.resolve_lora("adapter"))
+    waiter = asyncio.create_task(serving.resolve_lora("adapter"))
+    await asyncio.sleep(0)
+    cancelled.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await cancelled
+    assert calls == 1
+    release.set()
+    await asyncio.wait_for(asyncio.gather(first, waiter), 5)
+    assert calls == 2
+    assert len(serving.lora_resolver_lock) == 0
 
 
 @pytest.mark.asyncio
