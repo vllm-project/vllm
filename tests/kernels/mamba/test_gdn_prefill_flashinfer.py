@@ -16,10 +16,10 @@ import flashinfer.gdn_prefill  # noqa: E402
 import torch.nn.functional as F  # noqa: E402
 
 from vllm.model_executor.layers.mamba.checkpoint import (  # noqa: E402
-    ConvRecurrentCheckpointExporter,
     MambaPrefillCheckpointMetadata,
 )
 from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
+    FlashInferGDNPrefillCheckpointExporter,
     fi_chunk_gated_delta_rule,
 )  # noqa: E402
 from vllm.v1.attention.backends.gdn_attn import (  # noqa: E402
@@ -134,7 +134,7 @@ def test_flashinfer_checkpoints_export_the_state_at_each_offset(use_cp, ssm_dtyp
     ssm_state = torch.zeros(
         num_blocks, num_v_heads, head_dim, head_dim, device=device, dtype=ssm_dtype
     )
-    ConvRecurrentCheckpointExporter().export(
+    FlashInferGDNPrefillCheckpointExporter().export(
         MambaPrefillCheckpointMetadata(
             checkpoint_offsets=torch.tensor(offsets, device=device, dtype=torch.int32),
             state_indices=torch.tensor(state_indices, device=device),
