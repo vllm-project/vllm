@@ -31,6 +31,16 @@ class MambaBackendEnum(Enum, metaclass=_MambaBackendEnumMeta):
 
 
 MambaSSUAlgorithm = Literal["auto", "simple", "vertical", "horizontal"]
+FlashInferKdaBackend = Literal[
+    "auto",
+    "cute-dsl",
+    "cute-dsl-persistent",
+    "tirx",
+    "ptx",
+    "cake",
+    "small-bh",
+    "cudnn",
+]
 
 
 @config

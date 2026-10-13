@@ -472,3 +472,76 @@ If you observe that GPU utilization is lower than expected, CPU contention may b
 vLLM supports multiple attention backends optimized for different hardware and use cases. The backend is automatically selected based on your GPU architecture, model type, and configuration, but you can also manually specify one for optimal performance.
 
 For detailed information on available backends, their feature support, and how to configure them, see the [Attention Backend Feature Support](../design/attention_backends.md) documentation.
+
+### FlashInfer GDN and KDA Prefill
+
+The `flashinfer` provider calls FlashInfer's public `chunk_gated_delta_rule`
+or `recurrent_kda` dispatcher. `--flashinfer-gdn-backend` accepts `auto` and
+`cudnn`. `--flashinfer-kda-backend` accepts all eight public KDA choices:
+
+| KDA backend | Recurrent state dtype in this adapter |
+| --- | --- |
+| `auto` | BF16 |
+| `cute-dsl` | BF16 or FP32 |
+| `cute-dsl-persistent` | FP32 |
+| `tirx` | FP32 |
+| `ptx` | FP32 |
+| `cake` | BF16 |
+| `small-bh` | BF16 |
+| `cudnn` | BF16 or FP32 |
+
+The adapter supports SM100/SM103 GPUs, BF16 activations, head dimension 128,
+and bounded KDA gates. FlashInfer checks each backend's further restrictions
+on shapes, hardware, gates and dependencies. `cute-dsl-persistent` and `tirx`
+require heads divisible by eight and a gate bound in `[-5, 0)`. `ptx` requires
+SM103a, H64/H96, at least 32 tokens, and `lower_bound=-5.0`; each sequence must
+contain 1–16384 tokens. See the [FlashInfer KDA API](https://docs.flashinfer.ai/api/kda.html)
+for its full contract. These three backends reject sequence-order hints, so
+vLLM passes only their packed offsets. Their prefill graph capture requires
+an explicit warmed workspace, which this adapter does not manage; use eager
+prefill for these choices.
+
+These paths require FlashInfer **0.7.2** APIs. The full KDA choice list was
+checked against [FlashInfer main at c0e62fa7](https://github.com/flashinfer-ai/flashinfer/blob/c0e62fa7b18cbf051f729214984c235eb521a551/flashinfer/kda.py).
+Use a build containing the selected backend. Native SM100-family CuTe DSL
+prefill requires `nvidia-cutlass-dsl>=4.7` except for `small-bh`. `tirx` also
+requires CUDA-enabled TVM with TIRx and `tirx_kernels.tirx_lite`; `ptx` requires
+`ptxas>=13.2` and TVM FFI. Missing APIs or dependencies raise their normal
+import or call errors.
+
+The cuDNN path requires frontend **1.31.0** with additive KDA normalization
+([frontend #1454](https://github.com/NVIDIA/cudnn-frontend/pull/1454)). Build its
+Python package and native extension from the same revision. Install these
+dependencies after vLLM; the standard FlashInfer 0.7.0.post1 and frontend 1.30.0
+packages do not provide this KDA path. A CUDA toolkit, Ninja and frontend's
+CuTe DSL dependencies are required.
+
+Select the backend for the model's linear attention family:
+
+```bash
+vllm serve Qwen/Qwen3.5-35B-A3B \
+    --gdn-prefill-backend flashinfer --flashinfer-gdn-backend cudnn
+vllm serve moonshotai/Kimi-K3 \
+    --kda-prefill-backend flashinfer --flashinfer-kda-backend cute-dsl \
+    --mamba-ssm-cache-dtype bfloat16
+```
+
+The inner option does not override vLLM's provider selection: KDA provider
+`auto` still chooses FlashKDA or Triton. Within FlashInfer, `auto` delegates
+to its dispatcher and may select cuDNN in newer revisions. Explicit choices
+retain FlashInfer's rejection of unsupported inputs. Kimi-K3, GLM and the shared
+Kimi adapter use this selector. Kimi Linear's unbounded softplus gate remains
+outside this adapter's bounded-gate contract.
+
+Native packed metadata setup can synchronize with the host; evaluate accuracy
+and serving performance before selecting it. cuDNN requires a gate bound in
+`[-5, 0)` and applies additive Q/K normalization with epsilon `1e-6` internally.
+Fusion retains FP32 normalized values through gate scaling, so it can differ
+from external BF16 normalization. The explicit FLA override remains available.
+GDN computes its final state in FP32 before storing it in the configured cache
+dtype. cuDNN protects borrowed KDA state by default; model callers allow updates
+to temporary gathered state before scattering it back to the cache.
+
+Decode keeps the model's existing backend. This adapter does not expose KDA
+state checkpoints or advertise checkpoint alignment. The cuDNN dispatchers do
+not expose `batch_invariant`, so explicit cuDNN rejects `VLLM_BATCH_INVARIANT=1`.
