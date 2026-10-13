@@ -427,10 +427,8 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             self.use_aiter_decode
             and spec_sequence_masks is not None
             and m.num_prefills == 0
-            and m.num_decodes == 0
         ):
-            # Spec-only batch: conv, gate, recurrence and the gated output norm
-            # in one launch.
+            # Spec-only batch (gdn_attn never mixes spec and plain decodes).
             assert spec_state_indices_tensor is not None
             assert spec_query_start_loc is not None
             q, k, v = (
