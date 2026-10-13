@@ -96,16 +96,11 @@ class ProjectedParakeet(nn.Module):
         with the real checkpoint values afterwards, same as every other
         vLLM-native linear in the model.
         """
-
-        def _is_relative_k_proj(qual_name: str, module: nn.Module) -> bool:
-            del module
-            return qual_name.rsplit(".", 1)[-1] == "relative_k_proj"
-
         recursive_replace_linear(
             self.encoder,
             quant_config=None,
             prefix=prefix,
-            skip_predicate=_is_relative_k_proj,
+            skip_names={"relative_k_proj"},
         )
 
     def forward(

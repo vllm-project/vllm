@@ -91,7 +91,6 @@ class _FakeTensor:
 
 
 def test_nano_nemotron_vl_skips_multimodal_weights_in_text_only_mode():
-    """Text-only mode must not inspect or load multimodal weights."""
     model = object.__new__(NemotronH_Nano_VL_V2)
     language_model = _LanguageModel()
     object.__setattr__(model, "model_config", _ModelConfig())
@@ -114,7 +113,6 @@ def test_nano_nemotron_vl_skips_multimodal_weights_in_text_only_mode():
 
 
 def test_nano_nemotron_vl_loads_vision_weights_without_sound_encoder():
-    """Vision weights must load when the model has no sound encoder."""
     model = object.__new__(NemotronH_Nano_VL_V2)
     language_model = _LanguageModel()
     vision_model = _VisionModel()
@@ -140,7 +138,6 @@ def test_nano_nemotron_vl_loads_vision_weights_without_sound_encoder():
 
 
 def test_nano_nemotron_vl_requires_sound_encoder_for_sound_weights():
-    """Sound weights must fail when the model was configured without audio."""
     model = object.__new__(NemotronH_Nano_VL_V2)
     language_model = _LanguageModel()
     vision_model = _VisionModel()
@@ -187,7 +184,8 @@ def test_extract_audio_from_videos_passes_max_duration():
 
 
 def test_extract_audio_from_videos_rejects_oversized_audio():
-    """Oversized audio must be treated as absent instead of crashing extraction."""
+    """When load_audio_pyav raises due to duration limit the video is
+    marked as having no audio instead of crashing the server."""
     mm_items = _make_mm_items_with_video_bytes(b"\x00" * 64)
 
     processor = object.__new__(NanoNemotronVLMultiModalProcessor)

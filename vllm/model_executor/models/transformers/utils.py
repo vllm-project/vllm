@@ -274,7 +274,7 @@ def recursive_replace_linear(
     quant_config: "QuantizationConfig | None",
     prefix: str = "",
     *,
-    skip_predicate: Callable[[str, nn.Module], bool] | None = None,
+    skip_names: set[str] | None = None,
 ):
     """Recursively replace linear modules in the model as needed.
 
@@ -283,12 +283,11 @@ def recursive_replace_linear(
         quant_config: Quantization config for the new linears.
         prefix: Module prefix used to build each replaced submodule's
             qualified name.
-        skip_predicate: Optional callable receiving a submodule's qualified
-            name and the module itself; linears for which it returns True
-            are left untouched instead of being replaced. Useful when a
-            subset of the model's linears cannot use the generic LoRA
-            application (e.g. because they operate on a sequence length
-            that other linears in the same tower don't share).
+        skip_names: Optional set of (unqualified) submodule attribute names
+            to leave untouched instead of replacing. Useful when a subset of
+            the model's linears cannot use the generic LoRA application
+            (e.g. because they operate on a sequence length that other
+            linears in the same tower don't share).
 
     """
 
@@ -298,7 +297,7 @@ def recursive_replace_linear(
             qual_name = maybe_prefix(prefix, child_name)
             # Replace modules as needed
             if isinstance(child_module, nn.Linear) and not (
-                skip_predicate is not None and skip_predicate(qual_name, child_module)
+                skip_names is not None and child_name in skip_names
             ):
                 new_module = replace_linear_class(
                     child_module,
