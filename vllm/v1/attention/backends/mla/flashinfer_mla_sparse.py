@@ -8,10 +8,14 @@ from typing import TYPE_CHECKING, ClassVar
 import torch
 from flashinfer.decode import trtllm_batch_decode_with_kv_cache_mla
 from flashinfer.mla import TrtllmGenMlaDecodeRunner
-from flashinfer.utils import device_support_pdl, get_device_sm_count
+from flashinfer.utils import (
+    device_support_pdl,
+    get_device_sm_count,
+    get_trtllm_gen_multi_ctas_kv_counter_bytes,
+)
 
 from vllm import envs
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.sparse_mla_attention import (
@@ -491,6 +495,13 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
         self._mqa_runner: TrtllmGenMlaDecodeRunner | None = None
         self._mqa_runner_key: tuple[int, torch.Size, torch.dtype, int] | None = None
         self._mqa_out: torch.Tensor | None = None
+        # Caller-owned multi-CTA-KV counter. The runner otherwise regrows its
+        # own counter on a larger batch, freeing the buffer that captured CUDA
+        # graphs still reference.
+        self._mqa_counter: torch.Tensor | None = None
+        self._mqa_counter_max_rows = (
+            get_current_vllm_config().scheduler_config.max_num_batched_tokens
+        )
 
     def forward_mqa(
         self,
@@ -647,6 +658,30 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
                 device=query.device,
             )
         return self._mqa_out[out_offset : out_offset + num_rows]
+
+    def _get_mqa_counter(self, query: torch.Tensor) -> torch.Tensor:
+        num_rows, num_heads = query.size(0), query.size(2)
+        sm_count = get_device_sm_count(query.device)
+        if self._mqa_counter is None:
+            # Sized for the worst case on the first (eager) call, before any
+            # CUDA graph capture, so it never needs to grow.
+            max_rows = max(self._mqa_counter_max_rows, num_rows)
+            self._mqa_counter = torch.zeros(
+                get_trtllm_gen_multi_ctas_kv_counter_bytes(
+                    max_rows, num_heads, sm_count
+                ),
+                dtype=torch.uint8,
+                device=query.device,
+            )
+        required = get_trtllm_gen_multi_ctas_kv_counter_bytes(
+            num_rows, num_heads, sm_count
+        )
+        if required > self._mqa_counter.numel():
+            raise RuntimeError(
+                f"Sparse MLA batch of {num_rows} rows exceeds the multi-CTA-KV "
+                f"counter sized for {self._mqa_counter_max_rows} rows."
+            )
+        return self._mqa_counter
 
     def _get_mqa_runner(
         self, kv_cache: torch.Tensor, sparse_topk_capacity: int
@@ -806,7 +841,11 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
             inputs = [query, block_tables, seq_lens_arg, out]
             if self.is_nope_mla:
                 inputs.append(topk_lens)
-            runner.forward(inputs=inputs, tactic=-1)
+            runner.forward(
+                inputs=inputs,
+                tactic=-1,
+                multi_ctas_kv_counter_buffer=self._get_mqa_counter(query),
+            )
             o, lse = out, None
 
         out = o.view(-1, o.shape[-2], o.shape[-1])
