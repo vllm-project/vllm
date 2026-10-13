@@ -2,58 +2,26 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """CPU-only tests for AliceAI configuration."""
 
-import json
 from types import SimpleNamespace
 
 import pytest
 
 from vllm.model_executor.models.config import AliceAIForCausalLMConfig
-from vllm.transformers_utils.config import get_config
-from vllm.transformers_utils.configs.alice_ai import AliceAIConfig
 
 
-def test_native_config_preserves_parent_overrides() -> None:
-    """Transformers must preserve the parent's config initialization."""
-    config = AliceAIConfig(
-        decoder_sparse_step=2,
-        mlp_only_layers=[0],
-        rope_theta=2_000_000.0,
+def _make_config(**overrides) -> SimpleNamespace:
+    return SimpleNamespace(
+        **{
+            "kda_allow_negative_eigenvalues": False,
+            "router_score_function": "sigmoid",
+            "router_bias_correction": True,
+            **overrides,
+        }
     )
 
-    assert config.decoder_sparse_step == 2
-    assert config.mlp_only_layers == [0]
-    assert config.rope_parameters["rope_type"] == "default"
-    assert config.rope_parameters["rope_theta"] == 2_000_000.0
 
-
-def test_alice_config_defaults() -> None:
-    config = AliceAIConfig()
-
-    assert config.router_score_function == "sigmoid"
-    assert config.router_bias_correction is True
-    assert config.block_attn_res_block_size == 4
-    assert config.kda_allow_negative_eigenvalues is False
-    assert config.number_of_conv_states == 3
-
-
-def test_native_config_warns_when_mtp_is_ignored(tmp_path, caplog) -> None:
-    cfg = {
-        "model_type": "alice_ai",
-        "architectures": ["AliceAIForCausalLM"],
-        "mtp_num_hidden_layers": 1,
-        "auto_map": {
-            "AutoConfig": "configuration_alice_ai.AliceAIConfig",
-            "AutoModelForCausalLM": "modeling_alice_ai.AliceAIForCausalLM",
-        },
-    }
-    (tmp_path / "config.json").write_text(json.dumps(cfg), encoding="utf-8")
-
-    config = get_config(tmp_path, trust_remote_code=True)
-
-    assert isinstance(config, AliceAIConfig)
-    assert config.model_type == "alice_ai"
-    assert config.architectures == ["AliceAIForCausalLM"]
-    assert config.mtp_num_hidden_layers == 1
+def test_model_config_warns_when_mtp_is_ignored(caplog) -> None:
+    config = _make_config(mtp_num_hidden_layers=1)
 
     with caplog.at_level("WARNING"):
         AliceAIForCausalLMConfig.verify_and_update_model_config(
@@ -86,7 +54,7 @@ def test_native_config_warns_when_mtp_is_ignored(tmp_path, caplog) -> None:
 def test_model_config_rejects_unsupported_alice_contract(
     overrides, error_type, error
 ) -> None:
-    model_config = SimpleNamespace(hf_config=AliceAIConfig(**overrides))
+    model_config = SimpleNamespace(hf_config=_make_config(**overrides))
 
     if error is None:
         AliceAIForCausalLMConfig.verify_and_update_model_config(model_config)

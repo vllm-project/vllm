@@ -199,6 +199,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "AfmoeForCausalLM": _HfExamplesInfo("arcee-ai/Trinity-Nano-Preview"),
     "AliceAIForCausalLM": _HfExamplesInfo(
         "yandex/AliceAI-Foundation-80B-A3B-Base",
+        trust_remote_code=True,
     ),
     "ApertusForCausalLM": _HfExamplesInfo("swiss-ai/Apertus-8B-Instruct-2509"),
     "ArceeForCausalLM": _HfExamplesInfo("arcee-ai/AFM-4.5B-Base"),
