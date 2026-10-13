@@ -209,6 +209,11 @@ class BlockPool:
         # the block's descendants.
         self._children: dict[BlockHashWithGroupId, set[int]] = {}
         self._parent_key: dict[int, BlockHashWithGroupId] = {}
+        # KV-cache groups whose lookups walk the hash chain from the first
+        # block (full attention), set by KVCacheManager; None means every
+        # group. A sliding-window or Mamba group can hit a block whose parent
+        # is gone, so its blocks keep no chain links.
+        self.chain_group_ids: frozenset[int] | None = None
 
     def get_cached_block(
         self, block_hash: BlockHash, kv_cache_group_ids: list[int]
@@ -313,7 +318,11 @@ class BlockPool:
                 num_tokens=num_hash_tokens,
             )
             parent_idx = num_cached_blocks + i - 1
-            if parent_idx >= 0 and blk.block_hash == block_hash_with_group_id:
+            if (
+                parent_idx >= 0
+                and blk.block_hash == block_hash_with_group_id
+                and self._chain_group(kv_cache_group_id)
+            ):
                 parent_key = make_block_hash_with_group_id(
                     block_hashes[parent_idx], kv_cache_group_id
                 )
@@ -724,6 +733,9 @@ class BlockPool:
         for block_hash in self._remove_cached_block_hashes(src_block):
             # `num_tokens` only applies to the first (primary) insertion.
             self._insert_block_hash(block_hash, dst_block, num_tokens=num_tokens)
+
+    def _chain_group(self, kv_cache_group_id: int) -> bool:
+        return self.chain_group_ids is None or kv_cache_group_id in self.chain_group_ids
 
     def _owns(self, block: KVCacheBlock) -> bool:
         return block.pool is None or block.pool is self

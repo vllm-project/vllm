@@ -1754,6 +1754,25 @@ class TestChainCascades:
         )  # head left both lists by hand
         assert pool.free_block_queue.popleft() in trunk[1:], "orphans are reused first"
 
+    def test_non_chain_groups_keep_descendants_when_the_head_leaves(self):
+        # A Mamba or sliding-window group can hit a block whose parent is
+        # gone, so its blocks are linked into no chain: evicting the head
+        # neither reaps the deeper blocks nor touches their holds.
+        pool = _chain_pool()
+        pool.chain_group_ids = frozenset()
+        pq = pool.priority_eviction_queue
+        trunk = pool.blocks[1:4]
+        req = self._request([_d(start=0, end=None, priority=80)], "a", 3)
+        _cache_chain(pool, req, trunk, 3)
+        _free_chain(pool, trunk)
+        keys = [b.block_hash for b in trunk]
+        pq.unprotect(trunk[0].block_id)
+        pool._maybe_evict_cached_block(trunk[0])
+        assert pool.cached_block_hash_to_block.get_one_block(keys[0]) is None
+        for b, k in zip(trunk[1:], keys[1:]):
+            assert pool.cached_block_hash_to_block.get_one_block(k) is b
+            assert b in pq and b.block_hash == k
+
     def test_descendants_survive_while_another_copy_remains(self):
         pool = _chain_pool()
         trunk = pool.blocks[1:4]
