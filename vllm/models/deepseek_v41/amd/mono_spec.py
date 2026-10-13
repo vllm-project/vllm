@@ -1,28 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""DeepSeek-V4.1's MonoKernels on ROCm CDNA4 (``--monokernel``, RFC #60904).
-
-A decode step's backbone layer (the attention seam, the attention, its TP
-all-reduce, the FFN seam, the MoE and its all-reduce) runs as two persistent
-FlyDSL launches (``mono``, this directory) on the layer's loaded weights, the
-TP reductions inside the kernels. Every backbone layer of the checkpoint runs
-whole (compress ratio 0, 1 or 2 over ``fp8_ds_mla`` records): the first layer
-and the Engram layers hand K1 a settled residual, and an index source runs
-vLLM's compressor and indexer between the two launches. A layer outside that
-(an MXFP8 KV cache, another indexer) keeps vLLM's attention seam and attention
-and runs the rest as one launch, the FFN launch, from wo_b's unreduced output.
-A step takes the kernels when it is decode only, at a captured width of at most
-``MAX_ROWS`` rows, with causal SWA windows. Anything else runs the layer as
-before; the paths share every tensor at the layer boundary, so they interleave
-freely.
-
-Every TP rank must take the same path at every layer (the kernels wait on each
-other's pushes): the step decision reads only metadata every rank holds alike.
-
-This module is imported by ``mono.configure`` in the engine core process,
-before the weights are loaded and with no device in hand, so it pulls in
-neither FlyDSL nor AITER at import.
-"""
+"""DeepSeek-V4.1's MonoKernels on ROCm CDNA4 (``--monokernel``, RFC #60904)."""
 
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, cast

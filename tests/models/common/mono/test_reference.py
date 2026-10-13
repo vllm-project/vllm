@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The conformance kit against the reference spec: what the kit asserts is the
-library's behaviour, so this is also the library's own test."""
+"""The conformance kit against the reference spec: the library's own test."""
 
 import pytest
 import torch

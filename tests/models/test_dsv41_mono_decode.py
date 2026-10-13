@@ -1,13 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""DeepSeek-V4.1's MonoSpec against the conformance kit, and the choices that
-are its own: which layers take the whole-layer launch and which take the FFN
-launch, and which steps the kernels are exact on (decode only, at most MAX_ROWS
-rows, causal SWA windows, eager or in a FULL graph).
-
-The kernels need CDNA4 and FlyDSL; these tests stub the runner module, so they
-check the spec's decisions on CPU and never launch anything.
-"""
+"""DeepSeek-V4.1's MonoSpec against the conformance kit, plus its own choices."""
 
 import importlib
 import sys

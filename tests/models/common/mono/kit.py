@@ -1,18 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The MonoKernel conformance kit (RFC #60904).
-
-Every model that ships a ``MonoSpec`` subclasses ``MonoConformance`` and fills
-in the five hooks, which gives it the contract the library relies on: refusals
-are complete, the spec module is importable without a kernel backend, the
-capture sizes are the spec's widths, one forward decides once and alike on
-every rank, caches re-bind when they move, attach does not move the model's
-weights, cache checks report every mismatch, and every width is warmed up
-before capture.
-
-The kit never launches a kernel: it drives the library through the spec's own
-callbacks, so a spec whose kernels need a GPU still conforms on CPU.
-"""
+"""The MonoKernel conformance kit (RFC #60904): what a ``MonoSpec`` must satisfy."""
 
 import subprocess
 import sys

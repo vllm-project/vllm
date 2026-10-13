@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The hooks a model calls: ``attach`` after load, ``kernel_for_layer`` in its
-layer loop."""
+"""The hooks a model calls: ``attach``, then ``kernel_for_layer`` per layer."""
 
 from typing import TYPE_CHECKING
 

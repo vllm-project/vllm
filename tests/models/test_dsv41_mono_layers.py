@@ -1,23 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The DeepSeek-V4.1 mono decode path through the real model: a five-layer
-DeepSeek-V4.1-Flash at TP2 and TP4 on CDNA4, served with ``--monokernel`` on
-and off on the same random weights: every decoder layer's outputs at every
-decode step must match. Unlike ``test_dsv41_mono_numerics.py``, which
-checks the kernels against vLLM's ops one stage at a time, this runs
-``DeepseekV4DecoderLayer.forward`` as the engine does -- the model's hooks,
-the per-step path choice, the weights taken off the layer, the metadata and
-the indexer's top-k -- so a change to the decoder layer that the kernels do
-not follow fails here.
-
-Every layer takes the whole-layer path (K1 + K2); the five hold each variant:
-- 0: the first layer, sliding window only (K1 takes the embedding settled)
-- 1: ratio-2 KV and index source (vLLM's compressor and indexer between K1
-  and K2)
-- 2: ratio-2 consumer with an Engram (K1 takes the residual settled)
-- 3: ratio-1 KV, index and candidate source
-- 4: ratio-1 index source over 3's candidates and KV
-"""
+"""DeepSeek-V4.1 mono decode against vLLM's path, through the real model."""
 
 import zlib
 

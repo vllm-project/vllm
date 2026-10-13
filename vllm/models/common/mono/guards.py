@@ -1,18 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Refusals. ``configure``, the only name a model calls, runs once from core
-config post-init, before load: it imports only the model's spec module, picks
-the variant this config can serve, adds its widths to the CUDA graph capture
-sizes and raises with every reason the config is refused. The rest is the
-library's own and stays private to this package: ``_agree_across_ranks`` runs a
-later refusal stage (after load) on every TP rank and agrees on the verdict
-before anything collective follows.
-
-Peer memory is the model's own: only its kernels know what they put where, and
-``tp_group`` is where it reads this rank's place in the TP group. What this
-package keeps is the agreement every stage goes through (``tp_agree``), because
-a rank that refuses alone leaves every other rank waiting in-kernel for ever.
-"""
+"""Refusals: the variant a config can serve, and TP agreement on every stage."""
 
 import importlib
 from collections.abc import Callable, Sequence

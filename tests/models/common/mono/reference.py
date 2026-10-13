@@ -1,13 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The reference MonoKernel: a ``LayerKernel`` that calls the vLLM layer it
-replaces, and the ``MONO_SPECS`` that declare it.
-
-It computes nothing of its own and launches nothing on a device, so it runs on
-CPU in the conformance kit (``kit``). What it is for is the contract: a model
-porting to MonoKernels can read one complete spec, and the library's own
-behaviour can be tested without a GPU or a kernel backend.
-"""
+"""The reference MonoKernel: a ``LayerKernel`` over the layer it replaces."""
 
 from dataclasses import dataclass, replace
 from types import SimpleNamespace

@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""What a model declares to run MonoKernels: its ``MonoSpec``, and the types
-the spec's callbacks see."""
+"""What a model declares to run MonoKernels: ``MonoSpec`` and its callbacks."""
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass

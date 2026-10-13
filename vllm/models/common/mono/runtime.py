@@ -1,17 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The live side of a spec: one ``MonoRuntime`` a rank, built at attach, owning
-this rank's layer kernels and making the per-step decision and cache re-binding.
-It launches nothing itself.
-
-``MonoRuntime.begin_step`` decides once a forward, for every kernel layer, from
-what every rank sees alike: the batch's width and the attention metadata, never
-rank-local state and never a collective. Under a FULL CUDA graph the decision
-is baked in at capture, so it is a function of the captured size: FULL graphs
-serve uniform decode batches and every width is a capture size
-(``guards``), so no replay pads a request's rows. PIECEWISE
-steps run vLLM's layers.
-"""
+"""One ``MonoRuntime`` a rank: the per-step decision and cache re-binding."""
 
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
