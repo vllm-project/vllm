@@ -466,7 +466,10 @@ VLLM_NIXL_SIDE_CHANNEL_PORT=5700 vllm serve Qwen/Qwen3-8B --port 8200 \
 A decode rank books its reads over ZMQ with the prefill ranks the real
 connector maps it to, at the prefill instance's side-channel address from
 the kv_transfer_params: each rank of a `kv_producer` instance listens on the
-side-channel host at port + 100 × (rank + 1), which must be free. The two
+side-channel host at port + 10000 + 1000 × rank (rank = pp_rank × tp_size +
+tp_rank), which must be free and at most 65535; two instances collide if their
+side-channel ports differ by a multiple of 1000 smaller than 1000 × their
+rank count. The two
 instances' tensor parallelism may differ, as with the real connector: with
 more decode ranks, each reads its share of one prefill rank's heads, and the
 prefill rank frees a request's blocks once all of them have; with more
@@ -508,6 +511,48 @@ read their half of the prefill rank's KV (7.4 GB/s per read):
 | Prefill TP=1, decode TP=2: real (ms) | 107.5 | 94.8 | 184.0 | 4.071 |
 | Prefill TP=1, decode TP=2: simulated (ms) | 110.8 | 99.3 | 193.0 | 4.035 |
 
+#### Push mode and pipeline parallelism
+
+The real pull connector supports no pipeline parallelism; its push mode
+(`NixlPushConnector`) lets a prefill instance with pipeline parallelism write
+into a decode instance without, and simulated served instances support it
+too. As with the real connector, the proxy sends a request to both
+instances at once, with the prefill instance's coordinates in the decode
+leg's kv_transfer_params (`remote_engine_id`, `remote_host`,
+`remote_port`, `tp_size`, `pp_size`, `remote_request_id`). The decode
+instance allocates the request's blocks and registers them with every
+prefill stage, from each decode rank to the prefill ranks the real connector
+pairs it with; the decode ranks listen too. Each prefill rank writes its
+stage's layers once it has both finished the request and the registration,
+split over its decode ranks as the real push connector maps them, and
+notifies them; a decode rank is done after one write per prefill stage and
+source rank. A prefill rank frees the blocks when its writes end, or when
+the lease of a request that was never registered (a full prefix hit on the
+decode instance) expires; the decode instance forwards its scheduler's
+heartbeats, which extend the leases of requests it still holds, as with the
+real connector. Layouts the real connector rejects fail the request on the
+decode instance, which then prefills it itself. Here the prefill
+instance records the transfers, so its step log is the one to fit
+`kv_transfer_timing` to.
+
+On Qwen3-8B / H200 at 4 req/s (ISL 2048, OSL 128, the client playing the
+push proxy), replaying each instance's recording, without the first ten
+requests (the real connector's first transfers between each pair of ranks
+include NIXL's setup, up to 2 s):
+
+| Prefill / decode | TTFT mean real / sim | TTFT median real / sim | TPOT real / sim |
+| --- | --- | --- | --- |
+| TP1 / TP1 | 93.5 / 90.8 ms | 84.3 / 85.8 ms | 5.308 / 5.305 ms |
+| TP1 PP2 / TP1 | 93.8 / 98.6 ms | 84.6 / 84.5 ms | 5.308 / 5.312 ms |
+| TP2 / TP1 | 85.7 / 80.1 ms | 81.7 / 75.9 ms | 5.307 / 5.305 ms |
+| TP1 PP2 / TP2 | 115.1 / 95.7 ms | 87.2 / 89.9 ms | 3.759 / 3.761 ms |
+
+A sixth of the real writes take 10–15 times the typical time, throughout
+the run, and the fitted rate averages them in: it leaves out only records
+more than 20 times slower than the fit predicts, which are setup. In the last
+layout NIXL's setup lasts longer than ten requests (real P99 TTFT 731 ms),
+which raises the real mean.
+
 ### Running without a GPU
 
 A CPU build of vLLM (`VLLM_TARGET_DEVICE=cpu`, which installs Triton's CPU
@@ -542,8 +587,9 @@ Python 3.11 or newer for triton-cpu.
 * Pipeline stages are assumed balanced.
 * No LoRA or pooling models, and no KV transfer other than CPU offloading by
   the `OffloadingConnector` and disaggregated prefill by the `NixlConnector`
-  (pull mode; in-process instances have one rank, served ones no pipeline
-  parallelism). Speculative decoding without adaptive verification only,
+  (in-process instances: pull mode with one rank each; served ones: pull
+  mode without pipeline parallelism, or push mode with it on the prefill
+  instance). Speculative decoding without adaptive verification only,
   and no diffusion models.
 * The `fast_forward` and `virtual` clocks are offline-only and need a single
   process (one rank); served and multi-rank simulations run in real time.

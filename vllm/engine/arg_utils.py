@@ -2940,15 +2940,39 @@ class EngineArgs:
                 )
                 == "CPUOffloadingSpec"
             )
-            nixl = (
-                kv_transfer is not None and kv_transfer.kv_connector == "NixlConnector"
+            nixl = kv_transfer is not None and kv_transfer.kv_connector in (
+                "NixlConnector",
+                "NixlPushConnector",
             )
             if kv_transfer is not None and not (cpu_offloading or nixl):
                 _raise_unsupported_error(
                     feature_name=(
                         "simulated forward with KV transfer other than CPU "
                         "offloading by the OffloadingConnector or "
-                        "disaggregated prefill by the NixlConnector"
+                        "disaggregated prefill by the NixlConnector or "
+                        "NixlPushConnector"
+                    )
+                )
+            if (
+                kv_transfer is not None
+                and kv_transfer.kv_connector == "NixlPushConnector"
+                and kv_transfer.kv_role not in ("kv_producer", "kv_consumer")
+            ):
+                _raise_unsupported_error(
+                    feature_name=(
+                        "simulated push-mode disaggregated prefill with "
+                        f"kv_role={kv_transfer.kv_role}"
+                    )
+                )
+            if (
+                kv_transfer is not None
+                and kv_transfer.kv_connector == "NixlPushConnector"
+                and self.simulation_config.clock != "real"
+            ):
+                _raise_unsupported_error(
+                    feature_name=(
+                        "simulated push-mode disaggregated prefill outside "
+                        "served instances (the real clock)"
                     )
                 )
             if nixl and self.simulation_config.clock == "fast_forward":

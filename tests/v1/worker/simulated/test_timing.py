@@ -464,25 +464,42 @@ def test_kv_transfer_rates_without_stores(tmp_path):
 
 
 def _nixl_worker(
-    engine_id: str, clock, role="kv_both", port=None, mla=False, kv_heads=8
+    engine_id: str,
+    clock,
+    role="kv_both",
+    port=None,
+    mla=False,
+    kv_heads=8,
+    push=False,
+    pp_rank=0,
+    bytes_per_s=10.0,
+    tp_rank=0,
+    tp_size=1,
 ):
-    from vllm.v1.worker.simulated.kv_nixl import SimulatedNixlWorker
+    from vllm.v1.worker.simulated.kv_nixl import (
+        SimulatedNixlPushWorker,
+        SimulatedNixlWorker,
+    )
 
     group = SimpleNamespace(
         kv_cache_spec=SimpleNamespace(page_size_bytes=10), layer_names=["layer"]
     )
     kv_cache_config = SimpleNamespace(kv_cache_groups=[group], transfer_group_ids=(0,))
     config = SimpleNamespace(
-        kv_transfer_config=SimpleNamespace(kv_role=role),
+        kv_transfer_config=SimpleNamespace(
+            kv_role=role, get_from_extra_config=lambda key, default: default
+        ),
         parallel_config=SimpleNamespace(data_parallel_index=0),
         model_config=SimpleNamespace(
             use_mla=mla, get_total_num_kv_heads=lambda: kv_heads
         ),
     )
-    nixl = SimulatedNixlWorker(config, engine_id, kv_cache_config)
+    worker_cls = SimulatedNixlPushWorker if push else SimulatedNixlWorker
+    nixl = worker_cls(config, engine_id, kv_cache_config)
+    nixl.pp_rank, nixl.tp_rank, nixl.tp_size = pp_rank, tp_rank, tp_size
     if port is not None:
         nixl.side_channel_port = port
-    nixl.configure(clock, TransferRate(latency_s=0.0, bytes_per_s=10.0))
+    nixl.configure(clock, TransferRate(latency_s=0.0, bytes_per_s=bytes_per_s))
     return nixl
 
 
@@ -544,7 +561,7 @@ def test_simulated_nixl_books_reads_across_processes(monkeypatch):
     from vllm.utils.network_utils import get_open_port
     from vllm.v1.worker.simulated import kv_nixl
 
-    base = get_open_port() - 100
+    base = get_open_port() - 10_000
     prefill = _nixl_worker("sim-served-p", RealClock(), "kv_producer", base)
     decode = _nixl_worker("sim-served-d", RealClock(), "kv_consumer")
     # Served instances run in separate processes.
@@ -573,7 +590,7 @@ def test_simulated_nixl_books_reads_across_processes(monkeypatch):
 
     # A malformed booking is rejected; the prefill rank keeps serving.
     sock = zmq.Context.instance().socket(zmq.REQ)
-    sock.connect(f"tcp://localhost:{base + 100}")
+    sock.connect(f"tcp://localhost:{base + 10_000}")
     sock.send_json({"req": "x"})
     assert sock.recv_json() is None
     sock.close(linger=0)
@@ -657,3 +674,166 @@ def test_simulated_nixl_notifies_every_prefill_rank(prefill_tp, decode_tp, kv_he
         for r in ranks:
             notified[r] += 1
     assert notified == [worker._num_readers(prefill_tp, r) for r in range(prefill_tp)]
+
+
+def test_simulated_nixl_push_writes_from_every_prefill_stage():
+    """In push mode a decode rank registers with each prefill stage, which
+    writes its layers once the request is finished; the decode rank is done
+    after both stages' writes."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
+        NixlConnectorMetadata,
+        RemoteMeta,
+        ReqMeta,
+    )
+    from vllm.utils.network_utils import get_open_port
+
+    p_base = get_open_port() - 10_000
+    d_base = p_base + 100
+
+    def worker(name, role, base, pp_rank=0):
+        return _nixl_worker(
+            name, RealClock(), role, base, push=True, pp_rank=pp_rank, bytes_per_s=100.0
+        )
+
+    # The two stages of one prefill instance, and a decode instance.
+    stages = [worker(f"push-p{i}", "kv_producer", p_base, i) for i in (0, 1)]
+    decode = worker("push-d", "kv_consumer", d_base)
+
+    meta = NixlConnectorMetadata()
+    meta.reqs_to_recv = {
+        "d1-aaaaaaaa": ReqMeta(
+            local_block_ids=([0, 1],),
+            local_physical_block_ids=([0, 1],),
+            tp_size=1,
+            pp_size=2,
+            remote=RemoteMeta([], "localhost", p_base, "push-p", "base"),
+        )
+    }
+    meta.push_registrations = {
+        "d1-aaaaaaaa": {
+            "decode_host": "localhost",
+            "decode_port": d_base,
+            "decode_tp_size": 1,
+            "local_block_ids": ([0, 1],),
+            "remote_host": "localhost",
+            "remote_port": p_base,
+            "remote_tp_size": 1,
+            "remote_pp_size": 2,
+        }
+    }
+    decode.start_load_kv(meta)
+    # The stages finish the request 0.1 s apart; each writes the 2 blocks the
+    # decode instance has (20 bytes at 100 B/s) as it does.
+    started = []
+    for stage in stages:
+        finished = NixlConnectorMetadata()
+        finished.push_finished_blocks = {"d1-bbbbbbbb": ([5, 6, 7],)}
+        started.append(time.monotonic())
+        stage.start_load_kv(finished)
+        time.sleep(0.1)
+    first_end, last_end = started[0] + 0.2, started[1] + 0.2
+    assert stages[0].next_completion() == pytest.approx(first_end, abs=0.02)
+    # Notifications carry durations, so a new connection's setup delays them.
+    assert decode.next_completion() == pytest.approx(last_end, abs=0.08)
+    time.sleep(max(0.0, first_end + 0.02 - time.monotonic()))
+    assert stages[0].get_finished() == ({"d1-bbbbbbbb"}, set())
+    assert decode.get_finished() == (set(), set())
+    time.sleep(max(0.0, last_end + 0.1 - time.monotonic()))
+    assert decode.get_finished() == (set(), {"d1-aaaaaaaa"})
+    for w in (decode, *stages):
+        w.shutdown()
+
+
+def test_simulated_nixl_push_write_before_decode_rank_schedules():
+    """With more decode ranks than prefill ranks, the prefill rank writes to
+    all of them as soon as one registers; a decode rank that schedules the
+    request only afterwards still completes."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
+        NixlConnectorMetadata,
+        RemoteMeta,
+        ReqMeta,
+    )
+    from vllm.utils.network_utils import get_open_port
+
+    p_base = get_open_port() - 10_000
+    d_base = p_base + 100
+
+    def worker(name, role, base, tp_rank=0, tp_size=1):
+        return _nixl_worker(
+            name,
+            RealClock(),
+            role,
+            base,
+            push=True,
+            bytes_per_s=1000.0,
+            tp_rank=tp_rank,
+            tp_size=tp_size,
+        )
+
+    prefill = worker("push-hp", "kv_producer", p_base)
+    # Decode TP=2: each rank listens at its own port.
+    decode = [worker(f"push-hd{r}", "kv_consumer", d_base, r, 2) for r in (0, 1)]
+    try:
+
+        def schedule(d):
+            meta = NixlConnectorMetadata()
+            meta.reqs_to_recv = {
+                "d-aaaaaaaa": ReqMeta(
+                    local_block_ids=([0, 1],),
+                    local_physical_block_ids=([0, 1],),
+                    tp_size=1,
+                    remote=RemoteMeta([], "localhost", p_base, "push-hp", "x"),
+                )
+            }
+            meta.push_registrations = {
+                "d-aaaaaaaa": {
+                    "decode_host": "localhost",
+                    "decode_port": d_base,
+                    "decode_tp_size": 2,
+                    "local_block_ids": ([0, 1],),
+                    "remote_host": "localhost",
+                    "remote_port": p_base,
+                    "remote_tp_size": 1,
+                    "remote_pp_size": 1,
+                }
+            }
+            d.start_load_kv(meta)
+
+        finished = NixlConnectorMetadata()
+        finished.push_finished_blocks = {"d-bbbbbbbb": ([5, 6],)}
+        prefill.start_load_kv(finished)
+        schedule(decode[0])  # matches, and writes to both decode ranks
+        time.sleep(0.05)
+        schedule(decode[1])  # its write is already in
+        time.sleep(0.05)
+        for d in decode:
+            assert d.get_finished() == (set(), {"d-aaaaaaaa"})
+        assert prefill._registrations == {} and prefill._late_registrations == {}
+    finally:
+        for w in (*decode, prefill):
+            w.shutdown()
+
+
+def test_simulated_nixl_push_fails_rejected_layouts():
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
+        NixlConnectorMetadata,
+        RemoteMeta,
+        ReqMeta,
+    )
+
+    decode = _nixl_worker("push-reject", RealClock(), "kv_consumer", push=True)
+    try:
+        decode.tp_size = 2
+        meta = NixlConnectorMetadata()
+        meta.reqs_to_recv = {
+            "r1": ReqMeta(
+                local_block_ids=([0],),
+                local_physical_block_ids=([0],),
+                tp_size=3,
+                remote=RemoteMeta([], "localhost", 1, "x", "r1"),
+            )
+        }
+        decode.start_load_kv(meta)
+        assert decode.get_transfer_results().failed_recving == {"r1"}
+    finally:
+        decode.shutdown()

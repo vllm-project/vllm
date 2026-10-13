@@ -2673,7 +2673,7 @@ class VllmConfig:
             kv_transfer = self.kv_transfer_config
             if (
                 kv_transfer is not None
-                and kv_transfer.kv_connector == "NixlConnector"
+                and kv_transfer.kv_connector in ("NixlConnector", "NixlPushConnector")
                 and not kv_transfer.kv_connector_module_path
             ):
                 # Same scheduler side, simulated worker side.

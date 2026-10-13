@@ -80,11 +80,24 @@ def kv_transfer_rates(
     return load, store
 
 
+def _fit_transfers(a: np.ndarray) -> tuple[float, float]:
+    """Least-squares (latency s, s per GB) of (count, GB, seconds) rows."""
+    sizes = a[:, 1] / a[:, 0]
+    (latency_s, s_per_gb), *_ = np.linalg.lstsq(a[:, :2], a[:, 2], rcond=None)
+    if latency_s < 0 or s_per_gb <= 0 or sizes.max() <= 1.05 * sizes.min():
+        # Latency not separable from bandwidth (no fit, or transfers of one
+        # size): attribute all to bandwidth.
+        latency_s, s_per_gb = 0.0, a[:, 2].sum() / a[:, 1].sum()
+    return float(latency_s), float(s_per_gb)
+
+
 def transfer_rates_from_log(path: str) -> tuple[TransferRate, TransferRate | None]:
     """(load, store) rates fitted by least squares to the transfers of a step
     log recorded with a KV connector; store is None if none were recorded.
     Each `kv_transfers` record sums, per direction, the transfers that
-    completed in one engine step."""
+    completed in one engine step. Records more than 20x slower than the fit
+    predicts (a connection's first transfers, which include its setup) are
+    left out."""
     rows: dict[str, list[tuple[float, float, float]]] = {"load": [], "store": []}
     for rec in load_step_log(path, kv_transfers=True):
         for direction, t in rec["kv_transfers"].items():
@@ -98,11 +111,23 @@ def transfer_rates_from_log(path: str) -> tuple[TransferRate, TransferRate | Non
                 continue
             raise ValueError(f"{path} has no recorded KV {direction}s")
         # Bytes in GB keep the two columns on a similar scale.
-        a[:, 1] *= 1e-9
-        (latency_s, s_per_gb), *_ = np.linalg.lstsq(a[:, :2], a[:, 2], rcond=None)
-        if latency_s < 0 or s_per_gb <= 0:
-            # Latency not separable from bandwidth: attribute all to bandwidth.
-            latency_s, s_per_gb = 0.0, a[:, 2].sum() / a[:, 1].sum()
+        a = a[a[:, 1] > 0] * [1.0, 1e-9, 1.0]
+        latency_s, s_per_gb = _fit_transfers(a)
+        # Leave out records far slower than the fit predicts (a connection's
+        # setup), and refit.
+        for _ in range(3):
+            typical = a[:, 2] <= 20 * (a[:, 0] * latency_s + a[:, 1] * s_per_gb)
+            if typical.all():
+                break
+            logger.info(
+                "Leaving out %d of %d KV %s records from %s as outliers.",
+                (~typical).sum(),
+                len(a),
+                direction,
+                path,
+            )
+            a = a[typical]
+            latency_s, s_per_gb = _fit_transfers(a)
         rate = TransferRate(float(latency_s), float(1e9 / s_per_gb))
         rates.append(rate)
         logger.info(
@@ -260,7 +285,7 @@ def simulated_kv_connector(
     clock: Clock,
     device_free_at: Callable[[], float],
 ) -> SimulatedKVConnector:
-    from vllm.v1.worker.simulated.kv_nixl import NixlConnector
+    from vllm.v1.worker.simulated.kv_nixl import NixlConnector, NixlPushConnector
 
     timing = vllm_config.simulation_config.kv_transfer_timing
     if timing is None:
@@ -286,7 +311,7 @@ def simulated_kv_connector(
             ],
             device_free_at=device_free_at,
         )
-    elif isinstance(connector, NixlConnector):
+    elif isinstance(connector, NixlConnector | NixlPushConnector):
         transfers = connector.worker
         transfers.configure(clock, load)
     else:
