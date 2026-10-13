@@ -376,6 +376,9 @@ class NextTokenStrategy(ReadStrategy):
         if cut < 2:
             return None
         suffixes = [c[cut:] for c in contents]
+        # Whitespace after the cut can join a run longer than the head window.
+        if any(q[:1].isspace() for q in suffixes):
+            return None
 
         def render(content: str) -> str | None:
             messages: list[Any] = _messages(content, instructions)

@@ -392,9 +392,9 @@ SEPARATOR_TEMPLATE = CHATML_TEMPLATE.replace(
 )
 
 
-async def spliced_and_full(strategy, state, instructions=None):
+async def spliced_and_full(strategy, state, instructions=None, questions=QUESTIONS):
     read_request = strategy._read_request(None, "tenant")
-    contents = [strategy._content(state, q) for q in QUESTIONS]
+    contents = [strategy._content(state, q) for q in questions]
     spliced = await strategy._render_spliced(read_request, contents, instructions)
     full = [
         await strategy._render(read_request, _messages(content, instructions))
@@ -530,6 +530,18 @@ async def test_splice_falls_back_when_tokens_join_across_the_split(make_context)
     strategy.context = make_context("openai-community/gpt2", CHATML_TEMPLATE)
     spliced, _ = await spliced_and_full(strategy, "state")
     assert spliced is None
+
+
+@pytest.mark.asyncio
+async def test_splice_matches_full_render_when_newlines_cross_the_split(make_context):
+    # The newline run is longer than the head window.
+    strategy = NextTokenStrategy(make_context())
+    questions = [
+        build_question(qid, "noul", "Note:" + "\n" * n + "Is it urgent?", None, 26)
+        for qid, n in (("a", 200), ("b", 201))
+    ]
+    spliced, full = await spliced_and_full(strategy, "state", questions=questions)
+    assert spliced in (None, full)
 
 
 @pytest.mark.asyncio
