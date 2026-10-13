@@ -5,7 +5,7 @@ use std::ops::Deref;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
-use vllm_llm::TokenUsage;
+use vllm_llm::{RequestTimestamps, TokenUsage};
 use vllm_text::{DecodedLogprobs, DecodedPromptLogprobs};
 
 use crate::FinishReason;
@@ -235,6 +235,8 @@ pub enum ChatEvent {
     Done {
         message: AssistantMessage,
         usage: ChatTokenUsage,
+        /// Engine lifecycle times used by frontend response metrics.
+        timestamps: RequestTimestamps,
         finish_reason: FinishReason,
         /// Connector-specific KV transfer parameters for disaggregated serving.
         /// Boxed, like `ec_transfer_params`, to keep the per-token variants of

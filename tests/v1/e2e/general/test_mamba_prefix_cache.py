@@ -129,6 +129,10 @@ def get_fake_propose_draft_token_ids_fn():
             first_token_id_index = (
                 num_computed_tokens + 1
             )  # bonus token isn't considered as computed
+        # num_accepted_tokens_cpu is filled by a non-blocking D2H copy in the
+        # same step; wait for it or a lagging GPU yields stale counts.
+        if self.num_accepted_tokens_event is not None:
+            self.num_accepted_tokens_event.synchronize()
         first_token_id_index += self.input_batch.num_accepted_tokens_cpu[0].item()
         proposed_draft_token_ids = [
             prompt_token_ids[
@@ -898,7 +902,6 @@ def _run_mamba_prefix_cache_mrv1(
         load_format="dummy",
         enable_prefix_caching=True,
         block_size=BLOCK_SIZE,
-        mamba_cache_mode="align",
         speculative_config={
             "method": "qwen3_next_mtp",
             "num_speculative_tokens": num_speculative_tokens,
@@ -1158,7 +1161,6 @@ def _run_mamba_prefix_cache_mrv2(
         skip_tokenizer_init=True,
         enable_prefix_caching=True,
         block_size=BLOCK_SIZE,
-        mamba_cache_mode="align",
         speculative_config={
             "method": "qwen3_next_mtp",
             "num_speculative_tokens": num_speculative_tokens,
