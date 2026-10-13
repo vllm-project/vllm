@@ -618,6 +618,9 @@ def convert_to_fp8_moe_kernel_format(
             if hasattr(layer, "w13_weight_scale_inv")
             else "weight_scale"
         )
+        # humming expects one per-tensor scale per gated w13 shard.
+        if w13_scale.numel() == w13.size(0) and layer.moe_config.activation.is_gated:
+            w13_scale = w13_scale.view(-1, 1).repeat(1, 2)
         for prefix, weight, scale, input_scale in (
             ("w13", w13, w13_scale, w13_input_scale),
             ("w2", w2, w2_scale, w2_input_scale),
