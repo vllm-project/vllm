@@ -1717,7 +1717,11 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 indices[:, None].expand(-1, max(1, num_actual_tokens)).contiguous()
             )
             output, _ = fused_recurrent_gated_delta_rule(
-                *(x.unsqueeze(0) for x in (q, k, v, g, beta)),
+                q=q.unsqueeze(0),
+                k=k.unsqueeze(0),
+                v=v.unsqueeze(0),
+                g=g.unsqueeze(0),
+                beta=beta.unsqueeze(0),
                 initial_state=ssm_state,
                 inplace_final_state=True,
                 cu_seqlens=non_spec_query_start_loc,
