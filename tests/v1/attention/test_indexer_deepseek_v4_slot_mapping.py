@@ -14,6 +14,7 @@ from vllm.models.deepseek_v4.sparse_mla import DeepseekV4SparseMLABackend
 from vllm.models.deepseek_v41.sparse_mla import (
     DeepseekV4SparseMLABackend as DeepseekV41SparseMLABackend,
 )
+from vllm.utils.deep_gemm import mqa_logits_use_mx_scales
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.mla import indexer as indexer_module
 from vllm.v1.attention.backends.mla.compressor_utils import (
@@ -113,10 +114,17 @@ def test_indexer_draft_decode_metadata_update_is_capture_safe():
         num_reqs, 4
     )
     num_sms = torch.cuda.get_device_properties(device).multi_processor_count
+    # SM100's paged MQA logits only take varlen rows.
+    indices = (
+        torch.arange(num_reqs, dtype=torch.int32, device=device)
+        if mqa_logits_use_mx_scales()
+        else None
+    )
     schedule_metadata = indexer_module.get_paged_mqa_logits_metadata(
         torch.div(seq_lens, 16, rounding_mode="floor").unsqueeze(1),
         64,
         num_sms,
+        indices=indices,
     ).clone()
 
     builder = object.__new__(DeepseekV32IndexerMetadataBuilder)
@@ -139,6 +147,7 @@ def test_indexer_draft_decode_metadata_update_is_capture_safe():
             decode_lens=torch.zeros(num_reqs, dtype=torch.int32, device=device),
             requires_padding=False,
             schedule_metadata=schedule_metadata,
+            indices=indices,
         ),
         block_table=block_table,
     )
@@ -157,7 +166,7 @@ def test_indexer_draft_decode_metadata_update_is_capture_safe():
     torch.testing.assert_close(
         schedule_metadata,
         indexer_module.get_paged_mqa_logits_metadata(
-            expected_decode_seq_lens.unsqueeze(1), 64, num_sms
+            expected_decode_seq_lens.unsqueeze(1), 64, num_sms, indices=indices
         ),
     )
     assert metadata.decode is not None
