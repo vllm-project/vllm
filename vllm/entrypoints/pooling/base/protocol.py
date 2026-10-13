@@ -32,6 +32,15 @@ def reject_removed_pooling_parameters(data):
     return data
 
 
+def reject_unsupported_late_chunking(data):
+    if isinstance(data, dict) and data.get("late_chunking_params") is not None:
+        raise ValueError(
+            "late_chunking_params is only supported for plain-text /pooling "
+            "requests with task='token_embed'"
+        )
+    return data
+
+
 class PoolingBasicRequestMixin(OpenAIBaseModel):
     # --8<-- [start:pooling-common-params]
     model: str | None = None
@@ -95,6 +104,13 @@ class PoolingBasicRequestMixin(OpenAIBaseModel):
         ),
     )
     # --8<-- [end:pooling-common-extra-params]
+
+    @model_validator(mode="before")
+    @classmethod
+    def check_late_chunking_support(cls, data: Any) -> Any:
+        if "late_chunking_params" not in cls.model_fields:
+            return reject_unsupported_late_chunking(data)
+        return data
 
     @model_validator(mode="before")
     @classmethod

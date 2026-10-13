@@ -666,6 +666,25 @@ class EmbedIOProcessor(PoolingIOProcessor):
 class TokenEmbedIOProcessor(PoolingIOProcessor):
     name = "token_embed"
 
+    def get_request_factory_online(
+        self, ctx: PoolingServeContext
+    ) -> Sequence[AnyRenderParam]:
+        requests = super().get_request_factory_online(ctx)
+        if ctx.pooling_params.late_chunking_params is not None:
+            for request in requests:
+                slot = LateChunkingSlot()
+                ctx.late_chunking.append(slot)
+                request["late_chunking"] = slot
+        return requests
+
+    def post_process_online(self, ctx: PoolingServeContext):
+        if ctx.late_chunking:
+            for output, slot in zip(
+                ctx.final_res_batch, ctx.late_chunking, strict=True
+            ):
+                assert slot.metadata is not None
+                attach_late_chunking_metadata(output, slot.metadata)
+
     def get_request_factory_offline(
         self, ctx: AnyOfflineInputsContext
     ) -> tuple[RequestFactory, int]:

@@ -109,6 +109,7 @@ class PoolingServeContext(Generic[PoolingRequestT]):
         None
     )
     final_res_batch: list[PoolingRequestOutput] = field(default_factory=list)
+    late_chunking: list[LateChunkingSlot] = field(default_factory=list)
 
     ## for Long Text Embedding with Chunked Processing
     original_engine_inputs: Sequence["PoolingEngineInput"] | None = None
