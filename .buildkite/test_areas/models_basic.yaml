@@ -379,6 +379,7 @@ steps:
   - tests/models/test_adapters.py
   - tests/models/test_qwen3_5_mtp_config.py
   - tests/models/test_dory.py
+  - tests/models/test_cohere2_moe.py
   - tests/models/test_alice_ai.py
   - tests/models/test_alice_ai_config.py
   - tests/models/test_beam_weight_mapping.py
@@ -413,6 +414,7 @@ steps:
       models/test_alice_ai_config.py
       models/test_beam_weight_mapping.py
       models/test_beam_numerics.py
+      models/test_cohere2_moe.py
       models/test_cohere2_moe_parallel_block.py
 
 - label: ':amd: (MI355) DeepSeek-V4.1 Mono Decode Numerics'
