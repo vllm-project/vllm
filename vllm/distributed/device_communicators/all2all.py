@@ -28,6 +28,7 @@ from vllm.utils.import_utils import (
     has_deep_ep_v2,
     has_mori,
 )
+from vllm.utils.math_utils import round_up
 
 from .base_device_communicator import All2AllManagerBase, Cache
 
@@ -1110,33 +1111,29 @@ def _mori_epv2_arena_bytes(cfg) -> int:
     return cfg.effective_max_recv * per_recv_row + cfg.world_size * 12 + 12 * 256
 
 
+# cco reserves each rank's window in 4 GiB steps.
+_MORI_EPV2_WINDOW_ALIGN = 4 << 30
+
+
+@dataclass
+class _MoriEPv2Window:
+    comm: Any
+    free_bytes: int
+
+
 class MoriEPv2All2AllManager(All2AllManagerBase):
     def __init__(self, cpu_group):
         super().__init__(cpu_group)
-        from mori.cco import (
-            GDA_CONNECTION_NONE,
-            CCODevCommRequirements,
-            Communicator,
-        )
+        from mori.cco import GDA_CONNECTION_NONE, CCODevCommRequirements
 
-        uid = Communicator.get_unique_id() if self.rank == 0 else None
-        values = [uid]
-        dist.broadcast_object_list(values, src=0, group=self.cpu_group)
-        per_rank_vmm_gb = int(os.environ.get("VLLM_MORI_EPV2_PER_RANK_VMM_GB", "4"))
-        if per_rank_vmm_gb <= 0:
-            raise ValueError("VLLM_MORI_EPV2_PER_RANK_VMM_GB must be positive")
-        self._per_rank_vmm = per_rank_vmm_gb * (1 << 30)
-        self._comm = Communicator.init(
-            self.world_size, self.rank, values[0], per_rank_vmm=self._per_rank_vmm
-        )
-        # cco probes fabric handles with hipMemCreate and, where they are
-        # unsupported, leaves hipErrorNotSupported as the HIP last error; the
-        # next torch call that checks it (an allocation) would raise it.
-        ctypes.CDLL("libamdhip64.so").hipGetLastError()
+        self._windows: list[_MoriEPv2Window] = []
+        # Open the first window now so a wrong topology fails before the
+        # weights load; ops that need more get their own window later.
+        comm = self._open_window(_MORI_EPV2_WINDOW_ALIGN).comm
         requirements = CCODevCommRequirements()
         requirements.gda_connection_type = GDA_CONNECTION_NONE
         try:
-            device_comm = self._comm.create_dev_comm(requirements)
+            device_comm = comm.create_dev_comm(requirements)
             lsa_size = device_comm.lsa_size
             device_comm.close()
             if lsa_size != self.world_size:
@@ -1145,17 +1142,32 @@ class MoriEPv2All2AllManager(All2AllManagerBase):
                     f"got LSA size {lsa_size} for {self.world_size} ranks"
                 )
         except Exception:
-            self._comm.destroy()
+            self.destroy()
             raise
         self.handle_cache = Cache()
         logger.warning(
             "MORI EPv2 selected: module=mori.ops.dispatch_combine_v2 "
-            "transport=cco-LSA class=EpDispatchCombineOp rank=%d world=%d "
-            "per_rank_vmm_gb=%d",
+            "transport=cco-LSA class=EpDispatchCombineOp rank=%d world=%d",
             self.rank,
             self.world_size,
-            per_rank_vmm_gb,
         )
+
+    def _open_window(self, nbytes: int) -> _MoriEPv2Window:
+        from mori.cco import Communicator
+
+        uid = Communicator.get_unique_id() if self.rank == 0 else None
+        values = [uid]
+        dist.broadcast_object_list(values, src=0, group=self.cpu_group)
+        comm = Communicator.init(
+            self.world_size, self.rank, values[0], per_rank_vmm=nbytes
+        )
+        # cco probes fabric handles with hipMemCreate and, where they are
+        # unsupported, leaves hipErrorNotSupported as the HIP last error; the
+        # next torch call that checks it (an allocation) would raise it.
+        ctypes.CDLL("libamdhip64.so").hipGetLastError()
+        window = _MoriEPv2Window(comm, nbytes)
+        self._windows.append(window)
+        return window
 
     def _make_handle(self, **kwargs):
         from mori.ops.dispatch_combine_v2 import (
@@ -1170,27 +1182,25 @@ class MoriEPv2All2AllManager(All2AllManagerBase):
             combine_mode="gather",
             **kwargs,
         )
-        # Every op carves its arena out of the one cco window; past it, the
-        # allocation fails deep inside MORI without naming the cause.
-        arena = _mori_epv2_arena_bytes(config)
-        live = sum(
-            _mori_epv2_arena_bytes(op.cfg) for op in self.handle_cache._cache.values()
-        )
-        if live + arena > self._per_rank_vmm:
-            raise ValueError(
-                f"MORI EPv2 needs {(live + arena) / (1 << 30):.2f} GiB of cco window "
-                f"({arena / (1 << 30):.2f} GiB for this op) but "
-                f"VLLM_MORI_EPV2_PER_RANK_VMM_GB is {self._per_rank_vmm >> 30}; raise "
-                "it or lower --max-num-batched-tokens"
-            )
-        handle = EpDispatchCombineOp(config, self._comm)
-        self._comm.barrier()
+        # Each op carves its arena out of a cco window, which only reserves
+        # address space, so open a big enough one instead of failing. Whole
+        # GiB per op keeps MORI's allocation granularity inside the window.
+        arena = round_up(_mori_epv2_arena_bytes(config), 1 << 30)
+        window = next((w for w in self._windows if w.free_bytes >= arena), None)
+        if window is None:
+            window = self._open_window(round_up(arena, _MORI_EPV2_WINDOW_ALIGN))
+        window.free_bytes -= arena
+        handle = EpDispatchCombineOp(config, window.comm)
+        window.comm.barrier()
         logger.warning(
-            "MORI EPv2 op initialized: dispatch=%s combine=%s recv_cap=%d schedule=%s",
+            "MORI EPv2 op initialized: dispatch=%s combine=%s recv_cap=%d "
+            "schedule=%s arena_gb=%d cco_windows=%d",
             config.dispatch_dtype,
             config.combine_dtype,
             config.effective_max_recv,
             config.schedule,
+            arena >> 30,
+            len(self._windows),
         )
         return handle
 
@@ -1198,7 +1208,9 @@ class MoriEPv2All2AllManager(All2AllManagerBase):
         return self.handle_cache.get_or_create(kwargs, self._make_handle)
 
     def destroy(self):
-        self._comm.destroy()
+        for window in self._windows:
+            window.comm.destroy()
+        self._windows.clear()
 
 
 class DeepEPV2All2AllManager(All2AllManagerBase):

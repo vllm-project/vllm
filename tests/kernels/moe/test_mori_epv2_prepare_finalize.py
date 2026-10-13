@@ -178,7 +178,7 @@ def test_mori_epv2_routes_padding_tokens_to_local_experts(monkeypatch):
     assert sent.tolist() == [[0, 7], [2, 3]]
 
 
-def _manager_with_fake_mori(monkeypatch, vmm_gb):
+def _manager_with_fake_mori(monkeypatch):
     from vllm.distributed.device_communicators.all2all import MoriEPv2All2AllManager
     from vllm.distributed.device_communicators.base_device_communicator import (
         All2AllManagerBase,
@@ -194,11 +194,14 @@ def _manager_with_fake_mori(monkeypatch, vmm_gb):
     monkeypatch.setattr(
         torch.distributed, "broadcast_object_list", lambda *a, **kw: None
     )
-    monkeypatch.setenv("VLLM_MORI_EPV2_PER_RANK_VMM_GB", str(vmm_gb))
-    comm = Mock()
-    comm.create_dev_comm.return_value = Mock(lsa_size=8)
     communicator = Mock()
-    communicator.init.return_value = comm
+
+    def init(*args, per_rank_vmm):
+        comm = Mock(per_rank_vmm=per_rank_vmm)
+        comm.create_dev_comm.return_value = Mock(lsa_size=8)
+        return comm
+
+    communicator.init.side_effect = init
     monkeypatch.setitem(
         sys.modules,
         "mori.cco",
@@ -225,6 +228,7 @@ def _manager_with_fake_mori(monkeypatch, vmm_gb):
     class FakeOp:  # the handle cache holds ops by weak reference
         def __init__(self, cfg, comm):
             self.cfg = cfg
+            self.comm = comm
 
     monkeypatch.setitem(
         sys.modules,
@@ -234,21 +238,30 @@ def _manager_with_fake_mori(monkeypatch, vmm_gb):
     return MoriEPv2All2AllManager(object())
 
 
-@pytest.mark.parametrize("vmm_gb,fits", [(4, True), (3, False)])
-def test_mori_epv2_rejects_arenas_past_the_cco_window(monkeypatch, vmm_gb, fits):
-    manager = _manager_with_fake_mori(monkeypatch, vmm_gb)
-    # DeepSeek-V4-Pro at EP8 and 16k tokens per rank: about 3.5 GiB of arena.
-    args = dict(
-        hidden_dim=7168,
-        max_num_inp_token_per_rank=16384,
-        num_experts_per_rank=48,
-        num_experts_per_token=6,
+@pytest.mark.parametrize(
+    "max_tokens,window_gbs",
+    [
+        # DeepSeek-V4-Pro at EP8: a 3.5 GiB arena fits the startup window.
+        (16384, [4]),
+        # A 7 GiB arena gets its own 8 GiB window instead of failing.
+        (32768, [4, 8]),
+    ],
+)
+def test_mori_epv2_sizes_cco_window_to_arena(monkeypatch, max_tokens, window_gbs):
+    manager = _manager_with_fake_mori(monkeypatch)
+    op = manager.get_handle(
+        dict(
+            hidden_dim=7168,
+            max_num_inp_token_per_rank=max_tokens,
+            num_experts_per_rank=48,
+            num_experts_per_token=6,
+        )
     )
-    if fits:
-        assert manager.get_handle(args).cfg.hidden_dim == 7168
-    else:
-        with pytest.raises(ValueError, match="VLLM_MORI_EPV2_PER_RANK_VMM_GB"):
-            manager.get_handle(args)
+    windows = [w.comm.per_rank_vmm >> 30 for w in manager._windows]
+    assert windows == window_gbs
+    assert op.comm is manager._windows[-1].comm
+    manager.destroy()
+    assert not manager._windows
 
 
 class FakeCapacityOp:
