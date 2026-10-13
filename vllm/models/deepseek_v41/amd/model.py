@@ -282,7 +282,17 @@ class DeepseekV4DecoderLayer(nn.Module):
         engram_mask: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         if self.mono is not None:
-            out = self.mono(self, x, positions, residual, post_mix, res_mix, pre_mix)
+            out = self.mono(
+                self,
+                x,
+                positions,
+                residual,
+                post_mix,
+                res_mix,
+                pre_mix,
+                engram_hashes,
+                engram_mask,
+            )
             if out is not None:
                 return out
         # Layer 0's attention seam projects the 2-D embedding with the folded
