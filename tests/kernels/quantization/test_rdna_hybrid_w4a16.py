@@ -471,7 +471,7 @@ def test_rdna_hybrid_w4a16_process_weights_asymmetric_repack(group_size, dist_in
 
 
 # ---------------------------------------------------------------------------
-# process_weights_after_loading: rdna_hybrid_w4a16_prefill_dequant cache
+# process_weights_after_loading: enable_rdna_hybrid_w4a16_prefill_dequant cache
 # ---------------------------------------------------------------------------
 
 _W_DEQUANT_ATTR = RDNAHybridW4A16LinearKernel.DEQUANT_WEIGHT_NAME
@@ -515,19 +515,19 @@ def _build_prefill_dequant_case(K: int, N: int, G: int, has_zp: bool):
     return layer, kernel, w_int4_kn.t().contiguous(), scales_nkg, zp_nkg
 
 
-def _prefill_dequant_vllm_config(mode: str, gpu_memory_utilization: float):
+def _prefill_dequant_vllm_config(enabled: bool, gpu_memory_utilization: float):
     from vllm.config import CacheConfig, KernelConfig, VllmConfig
 
     return VllmConfig(
-        kernel_config=KernelConfig(rdna_hybrid_w4a16_prefill_dequant=mode),
+        kernel_config=KernelConfig(enable_rdna_hybrid_w4a16_prefill_dequant=enabled),
         cache_config=CacheConfig(gpu_memory_utilization=gpu_memory_utilization),
     )
 
 
 @pytest.mark.parametrize("has_zp", [False, True])
-@pytest.mark.parametrize("mode", ["off", "soft", "hard"])
-def test_rdna_hybrid_w4a16_prefill_dequant_cached(mode, has_zp, dist_init):
-    """Within budget, soft/hard cache the dense copy; off caches nothing."""
+@pytest.mark.parametrize("enabled", [False, True])
+def test_rdna_hybrid_w4a16_prefill_dequant_cached(enabled, has_zp, dist_init):
+    """Within budget, enabling caches the dense copy; disabled caches nothing."""
     if not torch.cuda.is_available():
         pytest.skip("CUDA/HIP device not available")
 
@@ -540,10 +540,10 @@ def test_rdna_hybrid_w4a16_prefill_dequant_cached(mode, has_zp, dist_init):
     )
 
     # Utilization 1.0 leaves all free memory in budget, so the tiny layer fits.
-    with set_current_vllm_config(_prefill_dequant_vllm_config(mode, 1.0)):
+    with set_current_vllm_config(_prefill_dequant_vllm_config(enabled, 1.0)):
         kernel.process_weights_after_loading(layer)
 
-    if mode == "off":
+    if not enabled:
         assert not hasattr(layer, _W_DEQUANT_ATTR)
         return
 
@@ -554,11 +554,8 @@ def test_rdna_hybrid_w4a16_prefill_dequant_cached(mode, has_zp, dist_init):
     assert _W_DEQUANT_ATTR not in layer.state_dict()
 
 
-@pytest.mark.parametrize("mode", ["soft", "hard"])
-def test_rdna_hybrid_w4a16_prefill_dequant_budget_exhausted(
-    mode, dist_init, monkeypatch
-):
-    """Over budget, soft keeps the int4 prefill path and hard raises."""
+def test_rdna_hybrid_w4a16_prefill_dequant_budget_exhausted(dist_init, monkeypatch):
+    """Over budget, enabling the cache raises instead of caching a subset."""
     if not torch.cuda.is_available():
         pytest.skip("CUDA/HIP device not available")
 
@@ -578,18 +575,16 @@ def test_rdna_hybrid_w4a16_prefill_dequant_budget_exhausted(
     set_random_seed(0)
     layer, kernel, *_ = _build_prefill_dequant_case(256, 128, 128, has_zp=False)
 
-    with set_current_vllm_config(_prefill_dequant_vllm_config(mode, 0.5)):
-        if mode == "hard":
-            with pytest.raises(ValueError, match="gpu_memory_utilization"):
-                kernel.process_weights_after_loading(layer)
-        else:
-            kernel.process_weights_after_loading(layer)
-            assert not hasattr(layer, _W_DEQUANT_ATTR)
+    with (
+        set_current_vllm_config(_prefill_dequant_vllm_config(True, 0.5)),
+        pytest.raises(ValueError, match="gpu_memory_utilization"),
+    ):
+        kernel.process_weights_after_loading(layer)
 
 
-@pytest.mark.parametrize("min_kv_gib, cached", [(0, True), (8, False)])
+@pytest.mark.parametrize("min_kv_gib, fits", [(0, True), (8, False)])
 def test_rdna_hybrid_w4a16_prefill_dequant_reserves_min_kv(
-    min_kv_gib, cached, dist_init, monkeypatch
+    min_kv_gib, fits, dist_init, monkeypatch
 ):
     """The budget keeps room for one max_model_len request of KV cache."""
     if not torch.cuda.is_available():
@@ -615,9 +610,13 @@ def test_rdna_hybrid_w4a16_prefill_dequant_reserves_min_kv(
     set_random_seed(0)
     layer, kernel, *_ = _build_prefill_dequant_case(256, 128, 128, has_zp=False)
 
-    with set_current_vllm_config(_prefill_dequant_vllm_config("soft", 0.5)):
-        kernel.process_weights_after_loading(layer)
-    assert hasattr(layer, _W_DEQUANT_ATTR) == cached
+    with set_current_vllm_config(_prefill_dequant_vllm_config(True, 0.5)):
+        if fits:
+            kernel.process_weights_after_loading(layer)
+            assert hasattr(layer, _W_DEQUANT_ATTR)
+        else:
+            with pytest.raises(ValueError, match="gpu_memory_utilization"):
+                kernel.process_weights_after_loading(layer)
 
 
 # ---------------------------------------------------------------------------

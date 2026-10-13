@@ -6,14 +6,14 @@ Routes based on the activation shape:
   M <= MAX_SKINNY_BATCH_SIZE and K*M <= MEDIUM_SKINNY_LIMIT_ELEMENTS:
       HIP skinny GEMM (wvSplitK_int4_g)
   M >= MIN_DENSE_BATCH_SIZE:  dense GEMM on a cached dequantized copy, when
-      ``KernelConfig.rdna_hybrid_w4a16_prefill_dequant`` is enabled
+      ``KernelConfig.enable_rdna_hybrid_w4a16_prefill_dequant`` is set
   otherwise: Triton W4A16 fused dequant GEMM
 
 Stores the weights ONCE as int8 [N, K//2] (ExLlama shuffle packed). Both
 paths read this single buffer: the HIP skinny kernel uses it directly, and
 the triton kernel reinterprets it as int32 [N, K//8] via a view (and
 transposes tiles in-register). No dual weight storage unless
-``rdna_hybrid_w4a16_prefill_dequant`` caches the dense prefill copy.
+``enable_rdna_hybrid_w4a16_prefill_dequant`` caches the dense prefill copy.
 """
 
 from contextlib import AbstractContextManager, nullcontext
@@ -21,7 +21,6 @@ from contextlib import AbstractContextManager, nullcontext
 import torch
 
 from vllm.config import get_current_vllm_config
-from vllm.config.kernel import RDNAHybridW4A16PrefillDequantMode
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -583,7 +582,8 @@ class RDNAHybridW4A16LinearKernel(MPLinearKernel):
     Stores the weights once as int8 [N, K//2] (ExLlama shuffle packed). The
     HIP skinny kernel reads it directly; the triton kernel reinterprets the
     same buffer as int32 [N, K//8] via a view, so there is no dual weight
-    storage unless ``rdna_hybrid_w4a16_prefill_dequant`` caches a dense prefill copy.
+    storage unless ``enable_rdna_hybrid_w4a16_prefill_dequant`` caches a dense
+    prefill copy.
     """
 
     SUPPORTED_QUANT_TYPES = [
@@ -635,41 +635,33 @@ class RDNAHybridW4A16LinearKernel(MPLinearKernel):
 
         return True, None
 
-    def _maybe_cache_dequant_weight(
+    def _cache_dequant_weight(
         self,
         layer: torch.nn.Module,
         unpacked: torch.Tensor,
         w_s: torch.Tensor,
         w_zp: torch.Tensor | None,
-        mode: RDNAHybridW4A16PrefillDequantMode,
     ) -> None:
         c = self.config
         N, K = unpacked.shape
         nbytes = N * K * c.act_type.itemsize
+        # All-or-nothing: the compile cache key does not record which layers
+        # hold a copy, so a partial cache can crash or silently skip copies.
         if not _fits_in_memory_budget(nbytes, unpacked.device):
-            msg = (
+            raise ValueError(
                 "Not enough room in the gpu_memory_utilization budget to cache "
                 "a dequantized W4A16 prefill weight "
-                "(kernel_config.rdna_hybrid_w4a16_prefill_dequant) while keeping "
-                "KV cache for one max_model_len request."
+                "(kernel_config.enable_rdna_hybrid_w4a16_prefill_dequant) while "
+                "keeping KV cache for one max_model_len request. Increase "
+                "`gpu_memory_utilization`, lower `max_model_len`, or disable it."
             )
-            if mode == "hard":
-                raise ValueError(
-                    f"{msg} Increase `gpu_memory_utilization`, lower "
-                    "`max_model_len`, or use 'soft'."
-                )
-            logger.warning_once(
-                "%s Layers that do not fit keep the int4 prefill path.", msg
-            )
-            return
 
         logger.info_once(
             "Caching dense %s copies of W4A16 weights for prefill "
-            "(kernel_config.rdna_hybrid_w4a16_prefill_dequant=%s). Each copy is "
-            "4x its int4 weight and is reported in the model loading memory, at "
-            "the expense of KV cache.",
+            "(kernel_config.enable_rdna_hybrid_w4a16_prefill_dequant). Each copy "
+            "is 4x its int4 weight and is reported in the model loading memory, "
+            "at the expense of KV cache.",
             c.act_type,
-            mode,
         )
 
         zp = (
@@ -721,9 +713,9 @@ class RDNAHybridW4A16LinearKernel(MPLinearKernel):
         self._transform_param(layer, self.w_q_name, lambda x: w_q_skinny)
         self._transform_param(layer, self.w_s_name, lambda x: w_s_skinny)
 
-        mode = get_current_vllm_config().kernel_config.rdna_hybrid_w4a16_prefill_dequant
-        if mode != "off":
-            self._maybe_cache_dequant_weight(layer, unpacked, w_s_skinny, w_zp, mode)
+        kernel_config = get_current_vllm_config().kernel_config
+        if kernel_config.enable_rdna_hybrid_w4a16_prefill_dequant:
+            self._cache_dequant_weight(layer, unpacked, w_s_skinny, w_zp)
 
     def apply_weights(
         self,
