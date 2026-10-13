@@ -13,18 +13,23 @@ import torch.nn.functional as F
 from vllm.model_executor.layers.fused_moe.deep_gemm_mega_moe import (
     MEGA_MOE_BF16,
     MEGA_MOE_MXFP4,
+    MEGA_MOE_NVFP4,
     MEGA_MOE_WEIGHT_FORMATS,
     DeepGemmMegaMoEExperts,
     MegaMoEActivation,
-    MegaMoEWeightFormat,
+    MegaMoEWeightSpec,
 )
 from vllm.model_executor.layers.fused_moe.prepare_megamoe import (
     prepare_megamoe_inputs,
+    prepare_megamoe_nvfp4_inputs,
 )
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
     bind_routed_experts_capturer,
 )
-from vllm.model_executor.layers.quantization.utils.quant_utils import kMxfp8Dynamic
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kMxfp8Dynamic,
+    kNvfp4DynamicToken,
+)
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import is_deep_gemm_supported
 
@@ -170,7 +175,9 @@ def _reference_mega_moe_layout(w13, s13, w2, s2):
     )
 
 
-def _make_mega_moe_experts(num_local_experts, num_logical_experts):
+def _make_mega_moe_experts(
+    num_local_experts, num_logical_experts, weight_format=MEGA_MOE_MXFP4
+):
     return _make_experts(
         num_experts=num_local_experts,
         num_local_experts=num_local_experts,
@@ -179,34 +186,44 @@ def _make_mega_moe_experts(num_local_experts, num_logical_experts):
         hidden_size=256,
         intermediate_size=384,
         num_logical_experts=num_logical_experts,
+        weight_format=weight_format,
     )
 
 
 def _load_mega_moe_checkpoint_shuffled(experts, num_logical_experts, seed):
     hidden, inter = experts.hidden_size, experts.intermediate_size
+    routed = experts.weight_format.routed
+    group = routed.scale_group_k
     shapes = {
         "w13_weight": (num_logical_experts, 2 * inter, hidden // 2),
-        "w13_weight_scale": (num_logical_experts, 2 * inter, hidden // 32),
+        "w13_weight_scale": (num_logical_experts, 2 * inter, hidden // group),
         "w2_weight": (num_logical_experts, hidden, inter // 2),
-        "w2_weight_scale": (num_logical_experts, hidden, inter // 32),
+        "w2_weight_scale": (num_logical_experts, hidden, inter // group),
     }
     generator = torch.Generator().manual_seed(seed)
     ckpt = {
         name: torch.randint(0, 256, shape, dtype=torch.uint8, generator=generator)
         for name, shape in shapes.items()
     }
+    if routed.has_global_scale:
+        for name in ("w13_weight_scale_2", "w2_weight_scale_2", "w2_input_scale"):
+            ckpt[name] = torch.rand(num_logical_experts, generator=generator) + 0.5
     shards = []
     for expert_id in range(num_logical_experts):
         for name, tensor in ckpt.items():
             if name.startswith("w2_"):
                 shards.append((name, tensor[expert_id], "w2", expert_id))
+            elif tensor.dim() == 1:
+                # w1 and w3 share one global scale.
+                shards.append((name, tensor[expert_id], "w1", expert_id))
+                shards.append((name, tensor[expert_id], "w3", expert_id))
             else:
                 shards.append((name, tensor[expert_id, :inter], "w1", expert_id))
                 shards.append((name, tensor[expert_id, inter:], "w3", expert_id))
     for i in torch.randperm(len(shards), generator=generator).tolist():
         name, loaded_weight, shard_id, expert_id = shards[i]
-        if name.endswith("scale"):
-            loaded_weight = loaded_weight.view(torch.float8_e8m0fnu)
+        if name.endswith("weight_scale"):
+            loaded_weight = loaded_weight.view(routed.scale_dtype)
         assert experts.weight_loader(
             getattr(experts, name),
             loaded_weight,
@@ -220,7 +237,8 @@ def _load_mega_moe_checkpoint_shuffled(experts, num_logical_experts, seed):
 
 def _expected_mega_moe_layout(ckpt, num_local_experts, num_logical_experts):
     physical = torch.arange(num_local_experts) % num_logical_experts
-    ckpt = {name: tensor[physical] for name, tensor in ckpt.items()}
+    names = ("w13_weight", "w13_weight_scale", "w2_weight", "w2_weight_scale")
+    ckpt = {name: ckpt[name][physical] for name in names}
     expected = _reference_mega_moe_layout(*ckpt.values())
     if is_deep_gemm_supported():
         from vllm.utils.deep_gemm import _import_deep_gemm
@@ -228,16 +246,23 @@ def _expected_mega_moe_layout(ckpt, num_local_experts, num_logical_experts):
         deep_gemm = _import_deep_gemm()
         w13, s13, w2, s2 = (t.cuda() for t in ckpt.values())
         hidden, inter = w2.shape[1], w2.shape[2] * 2
-        scales = [
-            deep_gemm.transform_sf_into_required_layout(
-                (sf.to(torch.int32) << 23).view(torch.float32),
-                mn,
-                k,
-                (1, 32),
-                num_local_experts,
-            )
-            for sf, mn, k in ((s13, 2 * inter, hidden), (s2, hidden, inter))
-        ]
+        if s13.shape[-1] * 16 == hidden:
+            # NVFP4: E4M3 bytes packed four per int32, MN-major.
+            scales = [
+                sf.view(torch.int32).transpose(1, 2).contiguous().transpose(1, 2)
+                for sf in (s13, s2)
+            ]
+        else:
+            scales = [
+                deep_gemm.transform_sf_into_required_layout(
+                    (sf.to(torch.int32) << 23).view(torch.float32),
+                    mn,
+                    k,
+                    (1, 32),
+                    num_local_experts,
+                )
+                for sf, mn, k in ((s13, 2 * inter, hidden), (s2, hidden, inter))
+            ]
         (l1, l1_sf), (l2, l2_sf) = deep_gemm.transform_weights_for_mega_moe(
             (w13.view(torch.int8), scales[0]), (w2.view(torch.int8), scales[1])
         )
@@ -252,24 +277,61 @@ def _assert_mega_moe_layout(experts, expected):
         assert torch.equal(tensor.view(reference.dtype), reference)
 
 
-def test_deep_gemm_mega_moe_loads_shards_into_kernel_layout():
+@pytest.mark.parametrize("weight_format", [MEGA_MOE_MXFP4, MEGA_MOE_NVFP4])
+def test_deep_gemm_mega_moe_loads_shards_into_kernel_layout(weight_format):
     """Shards in any order, including EPLB replicas, land in DeepGEMM's layout."""
-    experts = _make_mega_moe_experts(num_local_experts=4, num_logical_experts=3)
+    experts = _make_mega_moe_experts(4, 3, weight_format)
     ckpt = _load_mega_moe_checkpoint_shuffled(experts, 3, seed=0)
     _assert_mega_moe_layout(experts, _expected_mega_moe_layout(ckpt, 4, 3))
     # DeepGEMM's MN-major scale strides.
-    assert experts.w13_weight_scale.stride() == (768 * 2, 1, 768)
-    assert experts.w2_weight_scale.stride() == (256 * 3, 1, 256)
+    group_k = 4 * weight_format.routed.scale_group_k
+    assert experts.w13_weight_scale.stride() == (768 * 256 // group_k, 1, 768)
+    assert experts.w2_weight_scale.stride() == (256 * 384 // group_k, 1, 256)
+    if weight_format.routed.has_global_scale:
+        physical = torch.arange(4) % 3
+        for name in ("w13_weight_scale_2", "w2_weight_scale_2", "w2_input_scale"):
+            assert torch.equal(getattr(experts, name), ckpt[name][physical])
+        assert experts.l2_activation_scale == ckpt["w2_input_scale"].max().item()
 
 
-def test_deep_gemm_mega_moe_reload_overwrites_kernel_layout_in_place():
+@pytest.mark.parametrize("weight_format", [MEGA_MOE_MXFP4, MEGA_MOE_NVFP4])
+def test_deep_gemm_mega_moe_reload_overwrites_kernel_layout_in_place(weight_format):
     """A second load must update the live kernel tensors without reallocating."""
-    experts = _make_mega_moe_experts(num_local_experts=2, num_logical_experts=2)
+    experts = _make_mega_moe_experts(2, 2, weight_format)
     _load_mega_moe_checkpoint_shuffled(experts, 2, seed=0)
     data_ptrs = [param.data_ptr() for param in experts.parameters()]
     ckpt = _load_mega_moe_checkpoint_shuffled(experts, 2, seed=1)
     assert [param.data_ptr() for param in experts.parameters()] == data_ptrs
     _assert_mega_moe_layout(experts, _expected_mega_moe_layout(ckpt, 2, 2))
+
+
+def test_deep_gemm_mega_moe_nvfp4_l2_scale_covers_every_expert():
+    """Every rank quantizes L2 inputs with the max input scale over all experts,
+    including those it does not own, so EPLB can move experts between ranks."""
+    experts = _make_experts(
+        num_experts=4,
+        num_local_experts=2,
+        experts_start_idx=2,
+        top_k=2,
+        hidden_size=128,
+        intermediate_size=128,
+        weight_format=MEGA_MOE_NVFP4,
+    )
+    assert experts.l2_activation_scale == 1.0
+    for expert_id, scale in enumerate((0.5, 4.0, 1.0, 2.0)):
+        loaded = experts.weight_loader(
+            experts.w2_input_scale,
+            torch.tensor(scale),
+            "experts.w2_input_scale",
+            shard_id="w2",
+            expert_id=expert_id,
+            return_success=True,
+        )
+        assert loaded == (expert_id >= 2)
+    assert experts.l2_activation_scale == 4.0
+    assert experts.w2_input_scale.tolist() == [1.0, 2.0]
+    # Global scales are expert weights that EPLB moves.
+    assert len(experts.get_expert_weights()) == 7
 
 
 @pytest.mark.parametrize("intermediate_size", [512, 2304])
@@ -320,7 +382,7 @@ def _shared_mlp(
 def test_deep_gemm_mega_moe_loads_shared_experts_into_kernel_layout(monkeypatch):
     """Shared expert shards land directly in the MegaMoE kernel layout."""
     monkeypatch.setattr(
-        DeepGemmMegaMoEExperts, "_kernel_fuses_shared_experts", lambda self: True
+        DeepGemmMegaMoEExperts, "_kernel_fuses_shared_experts", lambda self, spec: True
     )
     experts = _make_experts(
         num_experts=2,
@@ -391,16 +453,20 @@ def _fake_deep_gemm(with_shared: bool):
 
     def old_kernel(y): ...
 
-    def new_buffer(group, num_shared_experts=0): ...
+    def new_buffer(group, num_shared_experts=0, shared_dtype=None): ...
 
     def new_kernel(y, shared_l1_weights=None, shared_l2_weights=None): ...
 
     kernel = new_kernel if with_shared else old_kernel
+    buffer = new_buffer if with_shared else old_buffer
     return SimpleNamespace(
-        get_symm_buffer_for_mega_moe=new_buffer if with_shared else old_buffer,
+        get_symm_buffer_for_mega_moe=buffer,
+        NVFP4SymmBuffer=buffer,
         fp8_fp4_mega_moe=kernel,
         bf16_mega_moe=kernel,
+        nvfp4_mega_moe=kernel,
         get_block_m_for_mega_moe=lambda *args: 0,
+        get_block_m_for_nvfp4_mega_moe=lambda *args: 0,
     )
 
 
@@ -441,6 +507,19 @@ def _fake_deep_gemm(with_shared: bool):
         (MEGA_MOE_MXFP4, torch.float8_e4m3fn, torch.uint8, (1, 32), 64, True, False),
         (MEGA_MOE_BF16, torch.bfloat16, None, None, 128, True, True),
         (MEGA_MOE_BF16, torch.float8_e4m3fn, torch.uint8, (1, 32), 128, True, False),
+        (MEGA_MOE_NVFP4, torch.float8_e4m3fn, torch.uint8, (1, 32), 256, True, True),
+        (MEGA_MOE_NVFP4, torch.bfloat16, None, None, 128, True, True),
+        (MEGA_MOE_NVFP4, torch.bfloat16, None, None, 128, False, False),
+        # NVFP4-style E4M3 block scales are not MXFP8.
+        (
+            MEGA_MOE_NVFP4,
+            torch.float8_e4m3fn,
+            torch.float8_e4m3fn,
+            (1, 16),
+            128,
+            True,
+            False,
+        ),
     ],
 )
 def test_deep_gemm_mega_moe_decides_shared_fusion_at_construction(
@@ -473,6 +552,9 @@ def test_deep_gemm_mega_moe_decides_shared_fusion_at_construction(
 
     assert experts.num_shared_experts == (shared_size // 128 if fused else 0)
     assert hasattr(experts, "shared_l1_weight") == fused
+    if fused:
+        assert experts.shared_spec in weight_format.shared
+        assert experts.shared_l1_weight.dtype == weight_dtype
 
 
 def test_deep_gemm_mega_moe_rejects_unsupported_activation():
@@ -496,7 +578,7 @@ def test_deep_gemm_mega_moe_adds_unfused_shared_expert_once(monkeypatch, fused):
     """The fusion decided at init fixes the launch; forward adds only an
     unfused shared expert, and refuses one the layer already fused."""
     monkeypatch.setattr(
-        DeepGemmMegaMoEExperts, "_kernel_fuses_shared_experts", lambda self: True
+        DeepGemmMegaMoEExperts, "_kernel_fuses_shared_experts", lambda self, spec: True
     )
     launches = []
 
@@ -625,6 +707,23 @@ def test_prepare_megamoe_inputs_is_bitwise_exact(num_tokens, hidden_size):
     )
 
 
+def _shared_sf_tma_layout(sf: torch.Tensor, block_m: int) -> torch.Tensor:
+    """Scatter per-token scales into DeepGEMM's padded MN-major UTCCP pages."""
+    aligned_block_m = (block_m + 127) // 128 * 128
+    num_rows = (sf.shape[0] + block_m - 1) // block_m * aligned_block_m
+    m = torch.arange(sf.shape[0], device=sf.device)
+    local = m % block_m
+    rows = (
+        m // block_m * aligned_block_m
+        + local // 128 * 128
+        + local % 32 * 4
+        + local % 128 // 32
+    )
+    out = sf.new_zeros(num_rows, sf.shape[1])
+    out[rows] = sf
+    return out
+
+
 @pytest.mark.parametrize("shared_block_m", [8, 32, 96, 128, 192])
 def test_prepare_megamoe_inputs_stages_shared_scale_tma_layout(shared_block_m):
     from vllm.third_party.deep_gemm.utils import per_token_cast_to_fp8
@@ -664,23 +763,8 @@ def test_prepare_megamoe_inputs_stages_shared_scale_tma_layout(shared_block_m):
         gran_k=32,
         use_packed_ue8m0=True,
     )
-    aligned_block_m = ((shared_block_m + 127) // 128) * 128
-    num_shared_rows = ((num_tokens + shared_block_m - 1) // shared_block_m) * (
-        aligned_block_m
-    )
-    ref_shared_x_sf = torch.zeros(
-        num_shared_rows,
-        hidden_size // 128,
-        dtype=torch.int32,
-        device=device,
-    )
-    for token_id in range(num_tokens):
-        m_in_block = token_id % shared_block_m
-        transposed_m = (
-            (m_in_block // 128) * 128 + (m_in_block % 32) * 4 + (m_in_block % 128) // 32
-        )
-        shared_row = token_id // shared_block_m * aligned_block_m + transposed_m
-        ref_shared_x_sf[shared_row].copy_(ref_x_sf[token_id])
+    ref_shared_x_sf = _shared_sf_tma_layout(ref_x_sf, shared_block_m)
+    num_shared_rows = ref_shared_x_sf.shape[0]
 
     fused_x = torch.empty_like(ref_x)
     fused_x_sf = torch.empty_like(ref_x_sf)
@@ -797,6 +881,92 @@ def test_prepare_megamoe_inputs_masks_padding(nonfinite_padding, num_tokens, qua
     )
 
 
+@pytest.mark.parametrize("shared", [None, "mxfp8", "bf16"])
+@pytest.mark.parametrize("num_tokens", [0, 7, 65, 135])
+def test_prepare_megamoe_nvfp4_inputs_is_bitwise_exact(num_tokens, shared):
+    """Per-token NVFP4 dispatch, shared-expert inputs, unrouted padding and the
+    L2 alphas match DeepGEMM's reference quantizers bit for bit."""
+    from vllm.third_party.deep_gemm.utils import per_token_cast_to_fp8
+    from vllm.third_party.deep_gemm.utils.nvfp4 import per_token_cast_to_nvfp4
+
+    device = torch.device("cuda")
+    hidden_size, top_k, shared_block_m = 5120, 8, 32
+    generator = torch.Generator(device=device).manual_seed(num_tokens)
+    # Rows span four decades, which one tensor-wide scale cannot cover.
+    row_scale = torch.logspace(-3, 1, max(num_tokens, 1), device=device)
+    hidden_states = (
+        torch.randn(num_tokens, hidden_size, device=device, generator=generator)
+        * row_scale[:num_tokens, None]
+    ).bfloat16()
+    if num_tokens:
+        hidden_states[0] = 0
+    topk_ids = torch.randint(
+        0, 256, (num_tokens, top_k), device=device, generator=generator
+    ).int()
+    topk_weights = torch.rand(num_tokens, top_k, device=device, generator=generator)
+    is_padding = torch.zeros(num_tokens, device=device, dtype=torch.bool)
+    is_padding[1::3] = True
+    w2_global_scale = torch.rand(6, device=device, generator=generator)
+
+    x = torch.empty(num_tokens, hidden_size // 2, dtype=torch.int8, device=device)
+    x_sf = torch.empty(num_tokens, hidden_size // 64, dtype=torch.int32, device=device)
+    x_scales = torch.empty(num_tokens, device=device)
+    topk_idx_out = torch.empty(num_tokens, top_k, dtype=torch.int64, device=device)
+    topk_weights_out = torch.empty_like(topk_weights)
+    l2_alpha = torch.empty_like(w2_global_scale)
+    shared_x = shared_x_sf = None
+    if shared is not None:
+        dtype = torch.float8_e4m3fn if shared == "mxfp8" else torch.bfloat16
+        shared_x = torch.empty(num_tokens, hidden_size, dtype=dtype, device=device)
+    if shared == "mxfp8":
+        ref_shared_x, ref_shared_x_sf = per_token_cast_to_fp8(
+            hidden_states, use_ue8m0=True, gran_k=32, use_packed_ue8m0=True
+        )
+        ref_shared_x_sf = _shared_sf_tma_layout(ref_shared_x_sf, shared_block_m)
+        shared_x_sf = torch.full_like(ref_shared_x_sf.t(), -1).t()
+
+    prepare_megamoe_nvfp4_inputs(
+        hidden_states,
+        topk_weights,
+        topk_ids,
+        x,
+        x_sf,
+        x_scales,
+        topk_idx_out,
+        topk_weights_out,
+        is_padding=is_padding,
+        shared_x=shared_x,
+        shared_x_sf=shared_x_sf,
+        shared_block_m=shared_block_m if shared == "mxfp8" else None,
+        w2_global_scale=w2_global_scale,
+        l2_alpha=l2_alpha,
+        l2_activation_scale=0.37,
+    )
+    torch.accelerator.synchronize()
+
+    # Written even without local tokens: other ranks route to these experts.
+    assert torch.equal(l2_alpha, w2_global_scale * 0.37)
+    ref_x_scales = hidden_states.float().abs().amax(-1).clamp_min(1e-12) / 2688
+    ref_x, ref_x_sf = per_token_cast_to_nvfp4(
+        hidden_states.float() / ref_x_scales[:, None]
+    )
+    assert torch.equal(x_scales, ref_x_scales)
+    assert torch.equal(x, ref_x)
+    assert torch.equal(x_sf, ref_x_sf)
+    ref_topk_idx = topk_ids.long().masked_fill(is_padding[:, None], -1)
+    assert torch.equal(topk_idx_out, ref_topk_idx)
+    ref_weights = topk_weights.masked_fill(is_padding[:, None], 0.0)
+    assert torch.equal(topk_weights_out, ref_weights)
+    if shared == "bf16":
+        assert torch.equal(shared_x, hidden_states)
+    elif shared == "mxfp8":
+        assert shared_x is not None and shared_x_sf is not None
+        assert torch.equal(shared_x.view(torch.uint8), ref_shared_x.view(torch.uint8))
+        populated = ref_shared_x_sf != 0
+        assert torch.equal(shared_x_sf[populated], ref_shared_x_sf[populated])
+        assert torch.all(shared_x_sf[~populated] == -1)
+
+
 NUM_EXPERTS, TOP_K, HIDDEN, INTER, NUM_TOKENS = 8, 2, 512, 256, 48
 
 ACTIVATIONS = {
@@ -807,36 +977,56 @@ ACTIVATIONS = {
 }
 
 
-def _quantize(w: torch.Tensor, fmt: MegaMoEWeightFormat, shared: bool):
-    """Return checkpoint ``(weight, scale)`` tensors and the dequantized weight."""
+def _quantize(w: torch.Tensor, spec: MegaMoEWeightSpec):
+    """Return checkpoint ``(weight, scale, global_scale)`` and the dequantized
+    weight; NVFP4 takes ``global_scale`` as ``weight_scale_2``."""
     from vllm.third_party.deep_gemm.utils.math import (
         cast_back_from_fp4,
         cast_back_from_fp8,
         per_token_cast_to_fp4,
         per_token_cast_to_fp8,
     )
+    from vllm.third_party.deep_gemm.utils.nvfp4 import (
+        cast_back_from_nvfp4,
+        per_token_cast_to_nvfp4,
+    )
 
-    spec = fmt.shared if shared else fmt.routed
     if spec.scale_group_k is None:
-        return w, None, w.float()
+        return w, None, None, w.float()
+    if spec.has_global_scale:
+        global_scale = w.float().abs().amax().item() / 2688
+        q, sf = per_token_cast_to_nvfp4(w, global_scale)
+        deq = cast_back_from_nvfp4(q, sf, global_scale)
+        return q, sf.view(torch.float8_e4m3fn), torch.tensor(global_scale), deq
     if spec.values_per_element == 2:
         q, sf = per_token_cast_to_fp4(w, use_ue8m0=True, gran_k=32)
         deq = cast_back_from_fp4(q, sf, gran_k=32)
     else:
         q, sf = per_token_cast_to_fp8(w, use_ue8m0=True, gran_k=32)
         deq = cast_back_from_fp8(q, sf, gran_k=32)
-    return q, (sf.view(torch.int32) >> 23).to(torch.uint8), deq
+    return q, (sf.view(torch.int32) >> 23).to(torch.uint8), None, deq
 
 
-def _dispatch(x: torch.Tensor, fmt: MegaMoEWeightFormat) -> torch.Tensor:
-    """What the kernel computes on: MXFP8-rounded or BF16 activations."""
+def _round_trip(x: torch.Tensor, quant, nvfp4_scale: float | None = None):
+    """What the kernel computes on: x after ``quant`` (None keeps BF16)."""
     from vllm.third_party.deep_gemm.utils.math import (
         cast_back_from_fp8,
         per_token_cast_to_fp8,
     )
+    from vllm.third_party.deep_gemm.utils.nvfp4 import (
+        cast_back_from_nvfp4,
+        per_token_cast_to_nvfp4,
+    )
 
-    if fmt.hidden_quant is None:
+    if quant is None:
         return x.bfloat16().float()
+    if quant == kNvfp4DynamicToken:
+        if nvfp4_scale is not None:
+            q = per_token_cast_to_nvfp4(x, nvfp4_scale)
+            return cast_back_from_nvfp4(*q, nvfp4_scale)
+        x = x.bfloat16().float()
+        scales = x.abs().amax(-1, keepdim=True).clamp_min(1e-12) / 2688
+        return cast_back_from_nvfp4(*per_token_cast_to_nvfp4(x / scales)) * scales
     return cast_back_from_fp8(
         *per_token_cast_to_fp8(x.bfloat16(), use_ue8m0=True, gran_k=32), gran_k=32
     )
@@ -853,21 +1043,26 @@ def _activate(h: torch.Tensor, act: MegaMoEActivation) -> torch.Tensor:
     return gate * torch.sigmoid(act.alpha * gate) * (up + act.beta)
 
 
-def _expert(x, w13, w2, weight, fmt, act):
-    """Reference expert: weighted activation is re-dispatched before L2."""
-    a = _activate(x @ w13.t(), act) * weight[:, None]
-    return _dispatch(a, fmt) @ w2.t()
+def _expert(x, w13, w2, weight, fmt, act, l2_scale):
+    """Reference routed expert. MX and BF16 weight the activation before the
+    L2 dispatch; NVFP4 quantizes the unweighted activation with the global
+    ``l2_scale`` and weights the BF16 output."""
+    a = _activate(x @ w13.t(), act)
+    if fmt.hidden_quant == kNvfp4DynamicToken:
+        a = _round_trip(a, fmt.hidden_quant, l2_scale)
+        return (a @ w2.t()).bfloat16().float() * weight[:, None]
+    return _round_trip(a * weight[:, None], fmt.hidden_quant) @ w2.t()
 
 
 class _ReferenceSharedExpert(torch.nn.Module):
-    def __init__(self, w13, w2, fmt, act):
+    def __init__(self, w13, w2, spec: MegaMoEWeightSpec, act):
         super().__init__()
-        self.w13, self.w2, self.fmt, self.act = w13, w2, fmt, act
+        self.w13, self.w2, self.act = w13, w2, act
+        self.quant = kMxfp8Dynamic if spec.scale_group_k else None
 
     def forward(self, x):
-        x = _dispatch(x, self.fmt)
-        ones = torch.ones(x.shape[0], device=x.device)
-        return _expert(x, self.w13, self.w2, ones, self.fmt, self.act).bfloat16()
+        a = _activate(_round_trip(x, self.quant) @ self.w13.t(), self.act)
+        return (_round_trip(a, self.quant) @ self.w2.t()).bfloat16()
 
 
 def _calc_diff(x: torch.Tensor, y: torch.Tensor) -> float:
@@ -881,13 +1076,22 @@ def _calc_diff(x: torch.Tensor, y: torch.Tensor) -> float:
     ),
     reason="DeepGEMM MegaMoE kernels require SM100 and DeepGEMM",
 )
-@pytest.mark.parametrize("fuse_shared", [False, True])
+@pytest.mark.parametrize(
+    "fmt_name,shared",
+    [
+        (name, shared)
+        for name, fmt in MEGA_MOE_WEIGHT_FORMATS.items()
+        for shared in (None, *(spec.dtype for spec in fmt.shared))
+    ],
+)
 @pytest.mark.parametrize("act_name", list(ACTIVATIONS))
-@pytest.mark.parametrize("fmt_name", list(MEGA_MOE_WEIGHT_FORMATS))
-def test_deep_gemm_mega_moe_matches_reference(
-    dist_init, fmt_name, act_name, fuse_shared
-):
+def test_deep_gemm_mega_moe_matches_reference(dist_init, fmt_name, shared, act_name):
+    """``shared`` is the fused shared-expert dtype; None runs it unfused."""
     fmt, act = MEGA_MOE_WEIGHT_FORMATS[fmt_name], ACTIVATIONS[act_name]
+    shared_spec = next(
+        (spec for spec in fmt.shared if spec.dtype == shared), fmt.shared[0]
+    )
+    fuse_shared = shared is not None
     torch.manual_seed(0)
     device = torch.device("cuda")
     vllm_config = SimpleNamespace(
@@ -899,7 +1103,7 @@ def test_deep_gemm_mega_moe_matches_reference(
         return (torch.randn(*shape, device=device) / fan_in**0.5).bfloat16()
 
     shared_ckpt = [
-        _quantize(randn(*shape, fan_in=k), fmt, shared=True)
+        _quantize(randn(*shape, fan_in=k), shared_spec)
         for shape, k in (((INTER, HIDDEN), HIDDEN),) * 2 + (((HIDDEN, INTER), INTER),)
     ]
     shared_mlp = SimpleNamespace(
@@ -927,7 +1131,7 @@ def test_deep_gemm_mega_moe_matches_reference(
                 activation=act,
                 weight_format=fmt,
                 shared_experts=shared_mlp if fuse_shared else None,
-                prefix=f"model.layers.0.{fmt_name}.{act_name}.{fuse_shared}",
+                prefix=f"model.layers.0.{fmt_name}.{act_name}.{shared}",
             )
 
     if act.name not in fmt.activations:
@@ -936,19 +1140,30 @@ def test_deep_gemm_mega_moe_matches_reference(
         return
     experts = make_experts()
     assert experts.has_fused_shared_experts == fuse_shared
+    assert experts.shared_spec == (shared_spec if fuse_shared else None)
 
     w13 = torch.empty(NUM_EXPERTS, 2 * INTER, HIDDEN, device=device)
     w2 = torch.empty(NUM_EXPERTS, HIDDEN, INTER, device=device)
+    # NVFP4 L2 input scales; the kernel uses their max.
+    l2_scales = [2e-3 * (e + 1) for e in range(NUM_EXPERTS)]
     for e in range(NUM_EXPERTS):
-        for shard_id, rows, fan_in, param, deq_rows in (
-            ("w1", INTER, HIDDEN, "w13", w13[e, :INTER]),
-            ("w3", INTER, HIDDEN, "w13", w13[e, INTER:]),
-            ("w2", HIDDEN, INTER, "w2", w2[e]),
+        # w1 and w3 are quantized together: NVFP4 needs one global scale.
+        w13_ckpt = _quantize(randn(2 * INTER, HIDDEN, fan_in=HIDDEN), fmt.routed)
+        w2_ckpt = _quantize(randn(HIDDEN, INTER, fan_in=INTER), fmt.routed)
+        w13[e], w2[e] = w13_ckpt[3], w2_ckpt[3]
+        for shard_id, param, rows, (weight, scale, global_scale, _) in (
+            ("w1", "w13", slice(0, INTER), w13_ckpt),
+            ("w3", "w13", slice(INTER, None), w13_ckpt),
+            ("w2", "w2", slice(None), w2_ckpt),
         ):
-            k = HIDDEN if param == "w13" else INTER
-            weight, scale, deq = _quantize(randn(rows, k, fan_in=fan_in), fmt, False)
-            deq_rows.copy_(deq)
-            for suffix, tensor in (("weight", weight), ("weight_scale", scale)):
+            tensors = {
+                "weight": weight[rows],
+                "weight_scale": None if scale is None else scale[rows],
+                "weight_scale_2": global_scale,
+            }
+            if shard_id == "w2" and global_scale is not None:
+                tensors["input_scale"] = torch.tensor(l2_scales[e])
+            for suffix, tensor in tensors.items():
                 if tensor is None:
                     continue
                 name = f"{param}_{suffix}"
@@ -961,10 +1176,12 @@ def test_deep_gemm_mega_moe_matches_reference(
                     return_success=True,
                 )
 
-    shared_w13 = torch.cat([shared_ckpt[0][2], shared_ckpt[1][2]])
-    reference_shared = _ReferenceSharedExpert(shared_w13, shared_ckpt[2][2], fmt, act)
+    shared_w13 = torch.cat([shared_ckpt[0][3], shared_ckpt[1][3]])
+    reference_shared = _ReferenceSharedExpert(
+        shared_w13, shared_ckpt[2][3], shared_spec, act
+    )
     if fuse_shared:
-        for (weight, scale, _), shard in zip(shared_ckpt, ("w1", "w3", "w2")):
+        for (weight, scale, _, _), shard in zip(shared_ckpt, ("w1", "w3", "w2")):
             experts.load_shared_expert_weight(f"shared_experts.{shard}.weight", weight)
             if scale is not None:
                 experts.load_shared_expert_weight(
@@ -982,14 +1199,17 @@ def test_deep_gemm_mega_moe_matches_reference(
         None if fuse_shared else reference_shared,
     )
 
-    x = _dispatch(hidden_states, fmt)
+    x = _round_trip(hidden_states.float(), fmt.hidden_quant)
+    l2_scale = experts.l2_activation_scale
     expected = reference_shared(hidden_states).float()
     for e in range(NUM_EXPERTS):
         token, slot = (topk_ids == e).nonzero(as_tuple=True)
         expected.index_add_(
             0,
             token,
-            _expert(x[token], w13[e], w2[e], topk_weights[token, slot], fmt, act),
+            _expert(
+                x[token], w13[e], w2[e], topk_weights[token, slot], fmt, act, l2_scale
+            ),
         )
 
     assert output.dtype == torch.bfloat16
