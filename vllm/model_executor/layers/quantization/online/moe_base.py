@@ -40,14 +40,15 @@ class OnlineMoEMethodBase(OnlineMoERequantizationMixin, FusedMoEMethodBase):
         params_dtype: torch.dtype,
         **extra_weight_attrs,
     ):
-        if self.create_requantization_source_weights(
-            layer,
-            num_experts,
-            hidden_size,
-            intermediate_size_per_partition,
-            params_dtype,
-            **extra_weight_attrs,
-        ):
+        if self.requantization_source is not None:
+            self.create_requantization_source_weights(
+                layer,
+                num_experts,
+                layer.moe_config.hidden_dim_unpadded,
+                layer.moe_config.intermediate_size_per_partition_unpadded,
+                params_dtype,
+                **extra_weight_attrs,
+            )
             return
 
         layer.num_experts = num_experts

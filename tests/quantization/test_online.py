@@ -42,7 +42,7 @@ from vllm.model_executor.kernels.linear.scaled_mm import (
     MarlinFP8ScaledMMLinearKernel,
 )
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.fused_moe import FusedMoEFactory
+from vllm.model_executor.layers.fused_moe import FusedMoEFactory, RoutedExperts
 from vllm.model_executor.layers.fused_moe.oracle import nvfp4 as nvfp4_oracle
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -691,6 +691,7 @@ def _nvfp4_moe_checkpoint_tensors(
     reason="Requires FP8 support on CUDA or ROCm.",
 )
 @pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize("logical_size,runtime_size", [(128, 128), (160, 256)])
 @pytest.mark.parametrize("source_format", ["compressed_tensors", "modelopt", "quark"])
 @pytest.mark.parametrize(
     "online_target",
@@ -706,6 +707,8 @@ def _nvfp4_moe_checkpoint_tensors(
 def test_online_requantized_moe_reload(
     source_format: str,
     online_target: str,
+    logical_size: int,
+    runtime_size: int,
     default_vllm_config,
     monkeypatch,
 ) -> None:
@@ -797,16 +800,24 @@ def test_online_requantized_moe_reload(
         layer.num_experts = 2
         layer._expert_routing_tables = lambda: None
         layer.moe_config = SimpleNamespace(
-            hidden_dim_unpadded=128,
-            intermediate_size_per_partition_unpadded=128,
+            hidden_dim_unpadded=logical_size,
+            intermediate_size_per_partition_unpadded=logical_size,
+            hidden_dim=runtime_size,
+            intermediate_size_per_partition=runtime_size,
+            is_act_and_mul=True,
+            moe_parallel_config=SimpleNamespace(tp_size=1),
+        )
+        layer._get_hidden_dim = RoutedExperts._get_hidden_dim
+        layer._narrow_expert_data_for_padding = (
+            RoutedExperts._narrow_expert_data_for_padding
         )
         layer.quant_method = method
         layer.quant_config = SimpleNamespace(online_quantization_config=None)
         method.create_weights(
             layer,
             num_experts=2,
-            hidden_size=128,
-            intermediate_size_per_partition=128,
+            hidden_size=runtime_size,
+            intermediate_size_per_partition=runtime_size,
             params_dtype=torch.bfloat16,
             weight_loader=default_weight_loader,
         )
@@ -814,9 +825,19 @@ def test_online_requantized_moe_reload(
 
         source_parameters = dict(method.requantization_source_parameters)
         source_names = set(source_parameters)
+        packed_w13_name = (
+            "w13_weight_packed"
+            if source_format == "compressed_tensors"
+            else "w13_weight"
+        )
+        assert source_parameters[packed_w13_name].shape == (
+            2,
+            2 * logical_size,
+            logical_size // 2,
+        )
 
         def serialized_weights(value: float) -> dict[str, torch.Tensor]:
-            shape = (2, 128, 128)
+            shape = (2, logical_size, logical_size)
             w1 = torch.full(shape, value, device=device, dtype=torch.bfloat16)
             w3 = torch.full(shape, value * 2, device=device, dtype=torch.bfloat16)
             w2 = torch.full(shape, value * 3, device=device, dtype=torch.bfloat16)
@@ -841,12 +862,57 @@ def test_online_requantized_moe_reload(
                 parameter = getattr(layer, name)
                 if reload:
                     parameter.weight_loader(parameter, loaded_weight)
+                elif name in (packed_w13_name, "w2_weight", "w2_weight_packed"):
+                    for expert in range(2):
+                        if name == packed_w13_name:
+                            gate, up = loaded_weight[expert].chunk(2, dim=0)
+                            for shard_id, shard_weight in (("w1", gate), ("w3", up)):
+                                RoutedExperts._load_w13(
+                                    layer,
+                                    parameter.data[expert],
+                                    0,
+                                    shard_id,
+                                    shard_weight,
+                                    0,
+                                )
+                        else:
+                            RoutedExperts._load_w2(
+                                layer,
+                                parameter.data[expert],
+                                1,
+                                loaded_weight[expert],
+                                0,
+                            )
                 else:
                     parameter.data.copy_(loaded_weight)
 
         # Initial checkpoint load replaces NVFP4 source parameters with online
         # target parameters and releases the source staging weights.
         load_serialized_weights(serialized_weights(0.25), reload=False)
+        source_w13, source_w2 = source.dequantize_weight(layer)
+        padded_w13, padded_w2 = method.get_weights_for_quantization(layer)
+        assert padded_w13.shape == (2, 2 * runtime_size, runtime_size)
+        assert padded_w2.shape == (2, runtime_size, runtime_size)
+        for shard in range(2):
+            start = shard * runtime_size
+            torch.testing.assert_close(
+                padded_w13[:, start : start + logical_size, :logical_size],
+                source_w13[:, shard * logical_size : (shard + 1) * logical_size],
+                rtol=0,
+                atol=0,
+            )
+            assert (
+                torch.count_nonzero(
+                    padded_w13[:, start + logical_size : start + runtime_size]
+                )
+                == 0
+            )
+        torch.testing.assert_close(
+            padded_w2[:, :logical_size, :logical_size], source_w2, rtol=0, atol=0
+        )
+        assert torch.count_nonzero(padded_w13[:, :, logical_size:]) == 0
+        assert torch.count_nonzero(padded_w2[:, logical_size:, :]) == 0
+        assert torch.count_nonzero(padded_w2[:, :, logical_size:]) == 0
         method.process_weights_after_loading(layer)
         finalize_layerwise_reload(layer, default_vllm_config.model_config)
         converter.assert_called_once()
@@ -866,6 +932,13 @@ def test_online_requantized_moe_reload(
         }.get(online_target, current_platform.fp8_dtype())
         assert layer.w13_weight.dtype == expected_dtype
         assert layer.w2_weight.dtype == expected_dtype
+        packed_factor = 2 if online_target == "mxfp4" else 1
+        assert layer.w13_weight.shape == (
+            2,
+            2 * runtime_size,
+            runtime_size // packed_factor,
+        )
+        assert layer.w2_weight.shape == (2, runtime_size, runtime_size // packed_factor)
         assert not layer.w13_weight.is_meta
         assert not layer.w2_weight.is_meta
 
@@ -883,7 +956,7 @@ def test_online_requantized_moe_reload(
         }
 
         def expert_output() -> torch.Tensor:
-            inputs = torch.ones(2, 128, device=device)
+            inputs = torch.ones(2, runtime_size, device=device)
             w13 = layer.w13_weight.float() * layer.w13_weight_scale[:, None, None]
             w2 = layer.w2_weight.float() * layer.w2_weight_scale[:, None, None]
             gate_up = torch.einsum("eh,eih->ei", inputs, w13)
