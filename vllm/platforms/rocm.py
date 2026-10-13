@@ -737,13 +737,13 @@ class RocmPlatform(Platform):
         # TODO: Make this explicit in the selector in a future PR.
         if is_encoder_decoder and AttentionBackendEnum.ROCM_ATTN in backend_priorities:
             backend_priorities.remove(AttentionBackendEnum.ROCM_ATTN)
-        # On RDNA4 and gfx1100, swap TRITON_ATTN and ROCM_ATTN when ROCM_ATTN
-        # cannot use its HIP paged-attention decode kernel. Other RDNA parts
-        # (e.g. gfx1151) are not switched until TRITON_ATTN is tuned for them.
+        # On RDNA4, swap TRITON_ATTN and ROCM_ATTN when ROCM_ATTN cannot use
+        # its HIP paged-attention decode kernel. Other RDNA parts (e.g. gfx1100,
+        # gfx1151) are not switched until TRITON_ATTN is tuned for them.
         # fp8 KV cache and head_size <= 64 keep ROCM_ATTN: there TRITON_ATTN's
         # prefill is slower than ROCM_ATTN's Triton fallback.
         if (
-            (on_rdna4() or on_gfx1100())
+            on_rdna4()
             and AttentionBackendEnum.ROCM_ATTN in backend_priorities
             and AttentionBackendEnum.TRITON_ATTN in backend_priorities
             and not (attn_selector_config.kv_cache_dtype or "auto").startswith("fp8")

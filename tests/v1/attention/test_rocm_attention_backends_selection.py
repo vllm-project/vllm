@@ -456,10 +456,7 @@ def _rdna_model_config(
             {"max_model_len": 256 * 1024},
             AttentionBackendEnum.TRITON_ATTN,
         ),
-        # gfx1100 behaves like RDNA4.
-        ("gfx1100", {}, {}, AttentionBackendEnum.ROCM_ATTN),
-        ("gfx1100", {"head_size": 64}, {}, AttentionBackendEnum.ROCM_ATTN),
-        # Other archs (e.g. gfx1151, CDNA): unchanged.
+        # Other archs (e.g. gfx1100, gfx1151, CDNA): unchanged.
         ("other", {"head_size": 256}, {}, AttentionBackendEnum.ROCM_ATTN),
     ],
 )
@@ -475,7 +472,6 @@ def test_rdna_prefers_triton_attn_without_custom_paged_attention(
     import vllm.platforms.rocm as rocm
 
     monkeypatch.setattr(rocm, "on_rdna4", lambda: arch == "rdna4")
-    monkeypatch.setattr(rocm, "on_gfx1100", lambda: arch == "gfx1100")
     # use_rocm_custom_paged_attention() takes its RDNA branch.
     monkeypatch.setattr(rocm, "on_cdna", lambda: False)
     monkeypatch.setattr(rocm, "_ON_GFX1X", True)
