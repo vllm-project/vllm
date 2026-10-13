@@ -86,26 +86,26 @@ def _is_fa4_supported() -> tuple[bool, str | None]:
     return True, None
 
 
+# Mapping dictionary linking the version number to its check function
+_FA_SUPPORT_CHECKS = {
+    2: _is_fa2_supported,
+    3: _is_fa3_supported,
+    4: _is_fa4_supported,
+}
+
+
 def is_fa_version_supported(fa_version: int) -> bool:
-    if fa_version == 2:
-        return _is_fa2_supported()[0]
-    elif fa_version == 3:
-        return _is_fa3_supported()[0]
-    elif fa_version == 4:
-        return _is_fa4_supported()[0]
-    else:
+    if fa_version not in _FA_SUPPORT_CHECKS:
         raise ValueError(f"Unsupported FA version: {fa_version}")
+
+    return _FA_SUPPORT_CHECKS[fa_version]()[0]
 
 
 def fa_version_unsupported_reason(fa_version: int) -> str | None:
-    if fa_version == 2:
-        return _is_fa2_supported()[1]
-    elif fa_version == 3:
-        return _is_fa3_supported()[1]
-    elif fa_version == 4:
-        return _is_fa4_supported()[1]
-    else:
+    if fa_version not in _FA_SUPPORT_CHECKS:
         raise ValueError(f"Unsupported FA version: {fa_version}")
+
+    return _FA_SUPPORT_CHECKS[fa_version]()[1]
 
 
 #
