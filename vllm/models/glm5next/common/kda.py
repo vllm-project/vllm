@@ -45,6 +45,7 @@ from vllm.model_executor.utils import (
 )
 from vllm.platforms import current_platform
 from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
+from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.kv_cache_interface import MambaSpec
 from vllm.v1.worker.workspace import current_workspace_manager
@@ -177,29 +178,52 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
 
     def get_state_dtype(
         self,
-    ) -> tuple[torch.dtype, torch.dtype]:
+    ) -> tuple[torch.dtype, ...]:
         if self.model_config is None or self.cache_config is None:
             raise ValueError("model_config and cache_config must be set")
-        return MambaStateDtypeCalculator.kda_state_dtype(
+        dtypes = MambaStateDtypeCalculator.kda_state_dtype(
             self.model_config.dtype,
             self.cache_config.mamba_cache_dtype,
             self.cache_config.mamba_ssm_cache_dtype,
         )
+        if self.cache_config.use_kda_recoverssm:
+            return MambaStateDtypeCalculator.append_kda_recoverssm_record(
+                dtypes, self.model_config.dtype
+            )
+        return dtypes
 
     def get_state_shape(
         self,
-    ) -> tuple[tuple[int, ...], tuple[int, ...]]:
+    ) -> tuple[tuple[int, ...], ...]:
         # conv_state width must include num_spec so the spec-decode conv update
         # (causal_conv1d_update with num_accepted_tokens + max_query_len) can
         # slide the window across the draft-verify tokens without reading past
         # the allocated width. Matches qwen_gdn_linear_attn.get_state_shape.
-        return MambaStateShapeCalculator.kda_state_shape(
+        shapes = MambaStateShapeCalculator.kda_state_shape(
             self.tp_size,
             self.num_heads,
             self.head_dim,
             conv_kernel_size=self.conv_size,
             num_spec=self.num_spec,
         )
+        if self.cache_config.use_kda_recoverssm:
+            return MambaStateShapeCalculator.append_kda_recoverssm_record(
+                shapes,
+                self.num_heads,
+                self.head_dim,
+                tp_world_size=self.tp_size,
+                spec_query_len=1 + self.num_spec,
+            )
+        return shapes
+
+    def get_attn_backend(self) -> type[AttentionBackend]:
+        if self.cache_config.use_kda_recoverssm:
+            from vllm.models.glm5next.common.kda_metadata import (
+                Glm5NextKDAAttentionBackend,
+            )
+
+            return Glm5NextKDAAttentionBackend
+        return super().get_attn_backend()
 
     def __init__(
         self,
@@ -224,8 +248,15 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         projection_size = self.head_dim * self.num_heads
         self.local_projection_size = divide(projection_size, self.tp_size)
 
-        _, recurrent_state_shape = self.get_state_shape()
-        _, recurrent_state_dtype = self.get_state_dtype()
+        self.use_recoverssm = self.cache_config.use_kda_recoverssm
+        if self.cache_config.use_replayssm and not self.use_recoverssm:
+            raise ValueError(
+                "GLM-5.3 supports --use-replayssm only with speculative decoding"
+            )
+        self.spec_query_len = 1 + self.num_spec
+
+        recurrent_state_shape = self.get_state_shape()[1]
+        recurrent_state_dtype = self.get_state_dtype()[1]
         scatter_states.register_warmup(
             state_shape=recurrent_state_shape,
             state_dtype=recurrent_state_dtype,
@@ -542,7 +573,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         g1 = g1[:, :num_actual_tokens]
         beta = beta[:, :num_actual_tokens]
 
-        (conv_state, recurrent_state) = constant_caches
+        conv_state, recurrent_state, *recoverssm_records = constant_caches
         # conv_state must be (..., dim, width-1) for the conv kernels.
         # DS layout stores it that way directly; SD layout needs a transpose.
         # Layout is process-global and resolved once at init (see __init__).
@@ -603,7 +634,11 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             assert spec_state_indices_tensor is not None
             assert num_accepted_tokens is not None
             conv_idx = spec_state_indices_tensor[:, 0][:num_spec_decodes]
-            conv_mql = spec_state_indices_tensor.size(-1)
+            conv_mql = (
+                self.spec_query_len
+                if self.use_recoverssm
+                else spec_state_indices_tensor.size(-1)
+            )
             qkv_spec = causal_conv1d_update(
                 qkv_spec,
                 conv_state,
@@ -663,7 +698,34 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             if non_spec_token_indx is None or non_spec_token_indx.numel() == 0
             else None
         )
-        if use_spec:
+        if use_spec and self.use_recoverssm:
+            assert spec_state_indices_tensor is not None
+            assert spec_query_start_loc is not None
+            from vllm.models.kimi_k3.nvidia.ops.recoverssm import (
+                kda_recoverssm_verify,
+            )
+
+            # Verify from the read-only checkpoint; the accepted tokens are
+            # committed after sampling (Glm5NextKDAMetadata).
+            correction_cache, kg_cache = recoverssm_records
+            core_attn_out_spec = kda_recoverssm_verify(
+                q=_rearr(q_spec),
+                k=_rearr(k_spec),
+                v=_rearr(v_spec),
+                raw_g=g1_spec,
+                raw_beta=beta_spec,
+                A_log=self.A_log.view(-1),
+                dt_bias=self.dt_bias,
+                lower_bound=lower_bound,
+                checkpoint_state=recurrent_state,
+                correction_cache=correction_cache,
+                kg_cache=kg_cache,
+                query_start_loc=spec_query_start_loc[: num_spec_decodes + 1],
+                state_indices=spec_state_indices_tensor[:num_spec_decodes, 0],
+                spec_query_len=self.spec_query_len,
+                out=spec_out,
+            )
+        elif use_spec:
             assert spec_state_indices_tensor is not None
             assert num_accepted_tokens is not None
             assert spec_query_start_loc is not None

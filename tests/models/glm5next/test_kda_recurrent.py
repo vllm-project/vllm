@@ -301,6 +301,8 @@ def test_prefill_checkpoint_resumes_suffix(monkeypatch, dim_first, num_spec, off
     layer.local_projection_size = heads * D
     layer.kda_safe_gate = True
     layer.kda_lower_bound = -5.0
+    layer.use_recoverssm = False
+    layer.spec_query_len = num_spec + 1
     layer.kda_prefill_backend = "flashkda"
     layer._conv_state_dim_first = dim_first
     layer._merged_conv_weight = torch.randn(width, 4, device=device) * 0.1
@@ -430,3 +432,185 @@ def test_prefill_checkpoint_resumes_suffix(monkeypatch, dim_first, num_spec, off
         actual[:, : length - offset], expected[:, suffix], atol=0.003, rtol=0.03
     )
     torch.testing.assert_close(recurrent[3], expected_state, atol=0.003, rtol=0.03)
+
+
+@pytest.mark.parametrize("ssm_cache_dtype", ["float32", "bfloat16"])
+def test_recoverssm_state_layout_from_config(ssm_cache_dtype):
+    """RecoverSSM appends its correction and key/gate records to the state."""
+    from types import SimpleNamespace
+
+    from vllm.models.glm5next.common.model import Glm5NextForCausalLM
+
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            dtype=torch.bfloat16,
+            hf_text_config=SimpleNamespace(
+                linear_num_heads=4, linear_head_dim=32, linear_conv_kernel_dim=4
+            ),
+        ),
+        cache_config=SimpleNamespace(
+            mamba_cache_dtype="auto",
+            mamba_ssm_cache_dtype=ssm_cache_dtype,
+            use_kda_recoverssm=True,
+        ),
+        parallel_config=SimpleNamespace(tensor_parallel_size=2),
+        speculative_config=SimpleNamespace(num_speculative_tokens=3),
+    )
+    assert Glm5NextForCausalLM.get_mamba_state_dtype_from_config(vllm_config) == (
+        torch.bfloat16,
+        {"float32": torch.float32, "bfloat16": torch.bfloat16}[ssm_cache_dtype],
+        torch.float32,
+        torch.bfloat16,
+    )
+    assert Glm5NextForCausalLM.get_mamba_state_shape_from_config(vllm_config)[2:] == (
+        (2, 4, 32),
+        (2, 4, 64),
+    )
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA RecoverSSM")
+@pytest.mark.parametrize("dim_first", [False, True])
+@pytest.mark.parametrize("query_lens", [(4, 4, 4), (1, 3, 4)])
+@torch.inference_mode()
+def test_recoverssm_spec_decode_matches_per_draft_slots(
+    monkeypatch, dim_first, query_lens
+):
+    """RecoverSSM keeps one checkpoint slot and commits after sampling. It must
+    reproduce the per-draft-slot spec decode: the same verify outputs, and the
+    recurrent state and convolution window the baseline reads next step."""
+    from types import SimpleNamespace
+
+    from vllm.models.glm5next.common import kda, kda_metadata
+    from vllm.models.kimi_k3.nvidia.kda_metadata import KDARecoverSSMCommitMetadata
+    from vllm.models.kimi_k3.nvidia.ops import recoverssm
+    from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
+
+    monkeypatch.setattr(recoverssm, "is_conv_state_dim_first", lambda: dim_first)
+    torch.manual_seed(7)
+    device = torch.device("cuda")
+    num_seqs, query_len, heads = 3, 4, 2
+    num_tokens = sum(query_lens)
+    width, state_len = 3 * heads * D, 3 + query_len - 1
+
+    layer = object.__new__(kda.Glm5NextLinearAttention)
+    torch.nn.Module.__init__(layer)
+    layer.prefix = "layer.0"
+    layer.local_num_heads = heads
+    layer.head_dim = D
+    layer.local_projection_size = heads * D
+    layer.kda_safe_gate = True
+    layer.kda_lower_bound = LOWER_BOUND
+    layer._conv_state_dim_first = dim_first
+    layer._merged_conv_weight = torch.randn(width, 4, device=device) * 0.1
+    layer.q_conv1d = SimpleNamespace(bias=None)
+    layer.A_log = torch.randn(1, 1, heads, 1, device=device) * 0.1
+    layer.dt_bias = torch.randn(heads * D, device=device) * 0.1
+    layer.spec_query_len = query_len
+
+    num_slots = 1 + num_seqs * query_len
+    conv_shape = (width, state_len) if dim_first else (state_len, width)
+    conv = torch.randn(num_slots, *conv_shape, device=device, dtype=torch.bfloat16)
+    recurrent = 0.1 * torch.randn(num_slots, heads, D, D, device=device)
+    qkv = torch.randn(num_tokens, width, device=device, dtype=torch.bfloat16)
+    g1 = torch.randn(1, num_tokens, heads, D, device=device, dtype=torch.bfloat16)
+    beta = torch.randn(1, num_tokens, heads, device=device, dtype=torch.bfloat16)
+    slots = 1 + torch.arange(
+        num_seqs * query_len, dtype=torch.int32, device=device
+    ).view(num_seqs, query_len)
+    query_start_loc = torch.tensor(
+        [0, *query_lens], dtype=torch.int32, device=device
+    ).cumsum(0, dtype=torch.int32)
+
+    def run(metadata, kv_cache, use_recoverssm):
+        layer.use_recoverssm = use_recoverssm
+        layer.kv_cache = kv_cache
+        monkeypatch.setattr(
+            kda,
+            "get_forward_context",
+            lambda: SimpleNamespace(attn_metadata={layer.prefix: metadata}),
+        )
+        out = torch.empty(1, num_tokens, heads, D, device=device, dtype=torch.bfloat16)
+        # The spec-decode convolution writes its output over qkv.
+        layer._forward(qkv.clone(), g1, beta, out)
+        return out
+
+    def spec_metadata(cls, state_indices, num_accepted_tokens, **extra):
+        return cls(
+            num_prefills=0,
+            num_prefill_tokens=0,
+            num_decodes=0,
+            num_decode_tokens=0,
+            num_spec_decodes=num_seqs,
+            num_spec_decode_tokens=num_tokens,
+            num_actual_tokens=num_tokens,
+            spec_query_start_loc=query_start_loc,
+            spec_state_indices_tensor=state_indices,
+            spec_sequence_masks=torch.ones(num_seqs, dtype=torch.bool, device=device),
+            num_accepted_tokens=num_accepted_tokens,
+            **extra,
+        )
+
+    base_cache = (conv.clone(), recurrent.clone())
+    rss_cache = (
+        conv.clone(),
+        recurrent.clone(),
+        torch.empty(num_slots, heads, query_len, D, device=device),
+        torch.empty(
+            num_slots, heads, query_len, 2 * D, device=device, dtype=torch.bfloat16
+        ),
+    )
+    layer.kv_cache = rss_cache
+    context = recoverssm.KDARecoverSSMCommitContext.create(
+        [kda_metadata.KDARecoverSSMLayerView.of(layer)],
+        spec_query_len=query_len,
+        max_num_reqs=num_seqs,
+    )
+    ones = torch.ones(num_seqs, dtype=torch.int32, device=device)
+    metadata = spec_metadata(
+        kda_metadata.Glm5NextKDAMetadata,
+        slots[:, :1],
+        ones,
+        recoverssm_commit=KDARecoverSSMCommitMetadata(
+            state_indices=slots[:, :1],
+            query_start_loc=query_start_loc,
+            request_indices=None,
+            align=None,
+        ),
+        recoverssm_context=context,
+    )
+    previous_accepted = ones
+    for step in range(query_len):
+        qkv.normal_()
+        g1.normal_()
+        beta.normal_()
+        expected = run(
+            spec_metadata(GDNAttentionMetadata, slots, previous_accepted),
+            base_cache,
+            False,
+        )
+        checkpoint = rss_cache[1].clone()
+        actual = run(metadata, rss_cache, True)
+        torch.testing.assert_close(actual, expected, rtol=1e-2, atol=1e-3)
+        torch.testing.assert_close(rss_cache[1], checkpoint, rtol=0, atol=0)
+
+        accepted = torch.tensor(query_lens, dtype=torch.int32, device=device)
+        accepted.clamp_max_(step + 1)
+        assert metadata.commit_recoverssm_state(accepted) is None
+        base_conv, rss_conv = base_cache[0], rss_cache[0]
+        if not dim_first:
+            base_conv, rss_conv = (
+                base_conv.transpose(-1, -2),
+                rss_conv.transpose(-1, -2),
+            )
+        for n, length in enumerate(accepted.tolist()):
+            slot = slots[n, 0]
+            torch.testing.assert_close(
+                rss_cache[1][slot],
+                base_cache[1][slots[n, length - 1]],
+                rtol=1e-5,
+                atol=1e-5,
+            )
+            torch.testing.assert_close(
+                rss_conv[slot, :, :3], base_conv[slot, :, length - 1 : length + 2]
+            )
+        previous_accepted = accepted
