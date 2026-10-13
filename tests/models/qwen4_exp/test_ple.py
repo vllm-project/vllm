@@ -611,46 +611,65 @@ def test_ple_embedding_dtype_overrides_modelopt_exclusion() -> None:
     )
 
 
-def test_pinned_embedding_forward_finalizes_prefetched_output(
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float8_e4m3fn])
+@pytest.mark.parametrize("reduce_results", [False, True])
+def test_pinned_embedding_finalize_prefetch_optionally_reduces_output(
     monkeypatch: pytest.MonkeyPatch,
+    dtype: torch.dtype,
+    reduce_results: bool,
 ) -> None:
+    """Deferring reduction must preserve full token rows and wait for the lookup."""
+    total_tokens = 3
     embedding = Qwen4ExpPLEPinnedHostEmbedding.__new__(Qwen4ExpPLEPinnedHostEmbedding)
     nn.Module.__init__(embedding)
-    embedding._prefetch_buffer = torch.empty(4, 2, 3, dtype=torch.float8_e4m3fn)
+    values = torch.arange(1, 13).reshape(4, 3)
+    embedding._prefetch_buffer = torch.stack(
+        (values, torch.zeros_like(values)), dim=1
+    ).to(dtype)
     embedding._output_dim = 6
-    hidden_states = torch.zeros(2, 4, dtype=torch.bfloat16)
-    expected = torch.arange(12).reshape(2, 6).to(torch.float8_e4m3fn)
-
-    def finalize_prefetched(
-        prefetch_output: torch.Tensor,
-        output: torch.Tensor,
-    ) -> None:
-        assert prefetch_output is embedding._prefetch_buffer
-        output.copy_(expected)
-
+    embedding.tp_size = 2
+    embedding.reduce_results = reduce_results
+    embedding.etp_data_parallel_size = 1
+    embedding._prefetch_stream = object()
+    waited_streams: list[object] = []
+    reduced_dtypes = []
     monkeypatch.setattr(
-        embedding,
-        "_finalize_prefetch",
-        finalize_prefetched,
+        torch.cuda,
+        "current_stream",
+        lambda: SimpleNamespace(wait_stream=waited_streams.append),
     )
 
-    output = embedding(hidden_states)
+    def all_reduce(tensor: torch.Tensor) -> torch.Tensor:
+        assert waited_streams == [embedding._prefetch_stream]
+        reduced_dtypes.append(tensor.dtype)
+        # The remote rank owns the other head's vocabulary rows.
+        return tensor + tensor.flip(1)
 
-    assert output.dtype == embedding._prefetch_buffer.dtype
-    assert torch.equal(output, expected)
+    embedding.parallel_group = SimpleNamespace(all_reduce=all_reduce)
+    output = embedding.finalize_prefetch(total_tokens=total_tokens)
+
+    expected = (
+        values.unsqueeze(1).expand(-1, 2, -1).to(dtype)
+        if reduce_results
+        else embedding._prefetch_buffer
+    )
+    expected = expected[:total_tokens].flatten(-2)
+    comm_dtype = torch.int8 if dtype == torch.float8_e4m3fn else dtype
+    assert reduced_dtypes == ([comm_dtype] if reduce_results else [])
+    assert waited_streams == [embedding._prefetch_stream]
+    assert output.dtype == dtype
+    torch.testing.assert_close(output.float(), expected.float(), rtol=0, atol=0)
 
 
-def test_pinned_embedding_forward_requires_prior_start_prefetch() -> None:
-    """Forward before any start_prefetch must fail loudly, not read garbage."""
+def test_pinned_embedding_finalize_prefetch_requires_prior_start_prefetch() -> None:
+    """Finalizing before start_prefetch must fail instead of reading garbage."""
     embedding = Qwen4ExpPLEPinnedHostEmbedding.__new__(Qwen4ExpPLEPinnedHostEmbedding)
     nn.Module.__init__(embedding)
     embedding._prefetch_buffer = None
     embedding._prefetch_stream = None
     embedding._output_dim = 6
-    hidden_states = torch.zeros(2, 4, dtype=torch.bfloat16)
-
     with pytest.raises(RuntimeError, match="prior start_prefetch"):
-        embedding(hidden_states)
+        embedding.finalize_prefetch(total_tokens=2)
 
 
 def test_pinned_embedding_finalize_requires_prior_start_prefetch() -> None:
@@ -781,15 +800,10 @@ def test_ple_pinned_embedding_loads_on_cpu_and_looks_up_through_uva(
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
-def test_pinned_embedding_start_prefetch_allocates_lazily_and_feeds_forward(
+def test_pinned_embedding_start_prefetch_allocates_lazily(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """start_prefetch lazily allocates the stream/buffer, then forward consumes it.
-
-    Exercises the full pinned-prefetch contract end to end: first call
-    allocates the side stream and buffer with the constructor geometry,
-    and forward finalizes the lookup into the returned output.
-    """
+    """Allocate prefetch storage on first use and finalize the lookup results."""
     _mock_etp_group(monkeypatch)
     monkeypatch.setattr(embedding_module, "get_tensor_model_parallel_rank", lambda: 0)
     monkeypatch.setattr(
@@ -825,8 +839,7 @@ def test_pinned_embedding_start_prefetch_allocates_lazily_and_feeds_forward(
     )
 
     ngram_ids = torch.tensor([[3, 0], [1, 2]], device="cuda:0")
-    hidden_states = torch.zeros(2, 4, dtype=torch.bfloat16, device="cuda:0")
-    embedding.start_prefetch(hidden_states, ngram_ids)
+    embedding.start_prefetch(ngram_ids)
 
     buffer = embedding._prefetch_buffer
     assert buffer is not None
@@ -835,7 +848,7 @@ def test_pinned_embedding_start_prefetch_allocates_lazily_and_feeds_forward(
     assert buffer.device.type == "cuda"
     assert embedding._prefetch_stream is not None
 
-    output = embedding(hidden_states)
+    output = embedding.finalize_prefetch(total_tokens=ngram_ids.shape[0])
 
     expected = loaded_weight[ngram_ids.cpu()].to(device="cuda:0").flatten(-2)
     torch.testing.assert_close(output, expected, rtol=0, atol=0)
@@ -1149,7 +1162,7 @@ def test_ngram_prefetch_ids_outlive_start_prefetch() -> None:
     prefetched: list[torch.Tensor] = []
     module.ngram_embedding = SimpleNamespace(
         supports_prefetch=True,
-        start_prefetch=lambda _, ids: prefetched.append(weak_ref_tensor(ids)),
+        start_prefetch=lambda ids: prefetched.append(weak_ref_tensor(ids)),
     )
     expected = _reference_ngram_ids(input_ids, query_start_loc, ngram_context, **params)
 
@@ -1157,7 +1170,7 @@ def test_ngram_prefetch_ids_outlive_start_prefetch() -> None:
     # like a later CUDA graph segment would.
     pool = torch.cuda.MemPool()
     with torch.cuda.use_mem_pool(pool):
-        module.start_prefetch(None, input_ids, query_start_loc, ngram_context)
+        module.start_prefetch(input_ids, query_start_loc, ngram_context)
         torch.full_like(expected, -1)
 
     assert torch.equal(prefetched[0], expected)
@@ -1859,12 +1872,18 @@ def _make_conv_metadata(
     ],
 )
 @pytest.mark.parametrize(
-    "layer_cls", [Qwen4ExpPLELayer, Qwen4ExpPLELayerAMD], ids=["nvidia", "amd"]
+    ("layer_cls", "fuse_residual"),
+    [
+        pytest.param(Qwen4ExpPLELayer, True, id="nvidia-fused"),
+        pytest.param(Qwen4ExpPLELayer, False, id="nvidia-unfused"),
+        pytest.param(Qwen4ExpPLELayerAMD, True, id="amd-fused"),
+    ],
 )
 def test_fused_conv_correctness(
     case: _ConvBatchCase,
     state_layout: str,
     layer_cls: type[nn.Module],
+    fuse_residual: bool,
 ) -> None:
     device = torch.device("cuda")
     metadata, num_real_tokens = _make_conv_metadata(case, device)
@@ -1906,12 +1925,15 @@ def test_fused_conv_correctness(
     )
     null_state = conv_state[NULL_BLOCK_ID].clone()
     residual_kernel = residual.clone()
-    residual_reference = residual.clone()
+    # The unfused kernel must overwrite the buffer without reading its contents.
+    residual_reference = (
+        residual.clone() if fuse_residual else torch.zeros_like(residual)
+    )
 
     module._short_conv_dilated_dispatch(
         inputs=inputs,
         residual=residual_kernel,
-        outer_residual=outer_residual,
+        outer_residual=outer_residual if fuse_residual else None,
         metadata=metadata,
         conv_state=conv_state,
         conv_weights=weights,
@@ -1925,7 +1947,8 @@ def test_fused_conv_correctness(
         conv_state_len=module.conv_state_len,
         dilation=module.short_conv_dilation,
     )
-    residual_reference = outer_residual + residual_reference
+    if fuse_residual:
+        residual_reference = outer_residual + residual_reference
 
     assert torch.equal(
         residual_kernel[:num_real_tokens], residual_reference[:num_real_tokens]
@@ -1935,7 +1958,7 @@ def test_fused_conv_correctness(
     if case.graph_padding:
         assert torch.equal(
             residual_kernel[num_real_tokens:],
-            (outer_residual + residual)[num_real_tokens:],
+            residual_reference[num_real_tokens:],
         )
 
 
