@@ -382,6 +382,7 @@ def allocate_hisparse_host_pools(
         populate_shard=(tp_group.rank_in_group, tp_group.world_size),
     )
     try:
+        # Wait for all population shards before registering the entire pool.
         tp_group.barrier()
         for start, end in _hisparse_registration_ranges(
             tensor_sizes, num_blocks, host_block_stride

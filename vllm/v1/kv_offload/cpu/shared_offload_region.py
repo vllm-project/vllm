@@ -81,8 +81,6 @@ class SharedOffloadRegion:
     the kernel reclaims the memory when the last worker exits, no matter
     how it exits; mappings taken before the unlink stay valid.
 
-    Creator-only population pre-faults the entire region before the barrier
-    and requires that barrier to keep joiners from using unpopulated pages.
     ``populate_shard=(index, count)`` pre-faults only this worker's contiguous
     share, for layouts where every worker maps the same bytes.
     """
@@ -99,11 +97,8 @@ class SharedOffloadRegion:
         barrier: Callable[[], None] | None = None,
         *,
         creator_memory_check: Callable[[int], None] | None = None,
-        populate_only_on_creator: bool = False,
         populate_shard: tuple[int, int] | None = None,
     ) -> None:
-        if populate_only_on_creator and barrier is None:
-            raise ValueError("Creator-only population requires a barrier.")
         self.page_size = mmap.PAGESIZE
         assert kv_bytes_per_chunk % self.page_size == 0
 
@@ -155,10 +150,6 @@ class SharedOffloadRegion:
                 flags=mmap.MAP_SHARED,
                 prot=mmap.PROT_READ | mmap.PROT_WRITE,
             )
-
-            if populate_only_on_creator and self._creator:
-                populate_write_fn = _get_populate_write_fn(self.mmap_obj)
-                populate_write_fn(self.mmap_obj, 0, self.total_size_bytes)
         except Exception:
             if self._creator:
                 with contextlib.suppress(FileNotFoundError):
@@ -210,9 +201,6 @@ class SharedOffloadRegion:
         self._canonical_offset = 0
         self.is_pinned: bool = False
         self.pinned_addresses: list[int] = []
-
-        if populate_only_on_creator:
-            return
 
         populate_write_fn = _get_populate_write_fn(self.mmap_obj)
 

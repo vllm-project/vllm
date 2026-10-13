@@ -217,7 +217,7 @@ def _mp_barrier_construct_and_hold(
             kv_bytes_per_chunk=PAGE_SIZE if replicated else num_workers * PAGE_SIZE,
             cpu_page_size=PAGE_SIZE,
             barrier=lambda: barrier.wait(30),
-            populate_only_on_creator=replicated,
+            populate_shard=(rank, num_workers) if replicated else None,
         )
         # The constructor's barrier precedes the creator's unlink.
         barrier.wait(30)
@@ -1116,9 +1116,7 @@ def test_mp_barrier_unlinks_file_and_survives_sigkill(iid, replicated):
         assert len({r["inode"] for r in results}) == 1, "workers split onto two files"
         assert not any(r["path_exists"] for r in results)
         assert all(r["contents_match"] for r in results)
-        assert sum(r["populate_calls"] for r in results) == (
-            1 if replicated else num_workers
-        )
+        assert sum(r["populate_calls"] for r in results) == num_workers
         assert not os.path.exists(path)
     finally:
         for p in procs:
@@ -1130,7 +1128,7 @@ def test_mp_barrier_unlinks_file_and_survives_sigkill(iid, replicated):
         assert restarted._creator is True, "restart must be able to create anew"
 
 
-@pytest.mark.parametrize("failure_phase", ["shm", "memory", "population"])
+@pytest.mark.parametrize("failure_phase", ["shm", "memory"])
 def test_setup_failure_before_barrier_releases_peers(iid, monkeypatch, failure_phase):
     """A worker that dies before the rendezvous must still arrive at the
     barrier, or its peers block in the collective until it times out."""
@@ -1138,8 +1136,6 @@ def test_setup_failure_before_barrier_releases_peers(iid, monkeypatch, failure_p
     memory_check = failure if failure_phase == "memory" else None
     if failure_phase == "shm":
         monkeypatch.setattr(region_module, "check_shm_free_space", failure)
-    elif failure_phase == "population":
-        monkeypatch.setattr(region_module, "_get_populate_write_fn", failure)
     path = f"/dev/shm/vllm_offload_{iid}.mmap"
     seen_at_barrier = []
     barrier = MagicMock(
@@ -1155,7 +1151,6 @@ def test_setup_failure_before_barrier_releases_peers(iid, monkeypatch, failure_p
             cpu_page_size=PAGE_SIZE,
             barrier=barrier,
             creator_memory_check=memory_check,
-            populate_only_on_creator=True,
         )
 
     barrier.assert_called_once_with()
