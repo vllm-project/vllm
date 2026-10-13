@@ -699,6 +699,9 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
         from flashinfer.decode import trtllm_batch_decode_with_kv_cache_mla
 
         kv_cache = kv_cache.view(q.dtype)
+        page_size = math.gcd(kv_cache.shape[-2], 64)
+        if page_size != kv_cache.shape[-2]:
+            kv_cache = kv_cache.view(-1, page_size, kv_cache.shape[-1])
 
         # Single-token sparse decode. trtllm-gen requires the q_len_per_request
         # dim, but the sparse attention mask is fully per-token (each query token
