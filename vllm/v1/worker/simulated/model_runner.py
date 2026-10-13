@@ -12,6 +12,7 @@ device queue and is paid in `SimulatedAsyncOutput.get_output()`, so the engine
 core can schedule the next step meanwhile.
 """
 
+import contextlib
 import dataclasses
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
@@ -28,7 +29,6 @@ from vllm.distributed.parallel_state import get_dp_group, get_pp_group
 from vllm.logger import init_logger
 from vllm.sequence import IntermediateTensors
 from vllm.v1.outputs import (
-    EMPTY_MODEL_RUNNER_OUTPUT,
     AsyncModelRunnerOutput,
     KVConnectorOutput,
     ModelRunnerOutput,
@@ -212,15 +212,20 @@ class SimulatedModelRunner(GPUModelRunner):
         self._warming_up = True
         self.kv_connector.set_disabled(True)
         try:
-            assert self.execute_model(step) is None
+            self.execute_model(step)
             out = self.sample_tokens(None)
-            assert isinstance(out, SimulatedAsyncOutput)
             # Take the result without paying the simulated time.
-            assert out.output.sampled_token_ids == [[self.fallback_token_id]]
-            self.execute_model(done)
+            if not (
+                isinstance(out, SimulatedAsyncOutput)
+                and out.output.sampled_token_ids == [[self.fallback_token_id]]
+            ):
+                raise RuntimeError(f"Unexpected simulated warmup output: {out}")
             if self.device.type != "cpu":
                 torch.accelerator.synchronize()
         finally:
+            # Drop the warmup request's state, also after a failed step.
+            with contextlib.suppress(Exception):
+                self.execute_model(done)
             self.step_log = step_log
             self.timing_provider = provider
             self._pending_step = None
@@ -247,9 +252,6 @@ class SimulatedModelRunner(GPUModelRunner):
         valid_dummy_state_slots: bool = False,
         randomize_inputs: bool = False,
     ) -> ModelRunnerOutput | None:
-        if dummy_run:
-            return EMPTY_MODEL_RUNNER_OUTPUT
-
         # Blocks until any stores the scheduler must flush have completed.
         self.kv_connector.pre_forward(scheduler_output)
         t_entry = self.clock.now()
@@ -469,14 +471,13 @@ class SimulatedModelRunner(GPUModelRunner):
         """An idle DP rank's dummy batch: join the lockstep step and occupy
         the pipeline like the busy ranks. The host does not wait for it, as
         the real dummy forward returns once launched."""
-        if self.dp_size > 1:
-            descriptor, now = self._dp_joint_step(
-                empty_step_descriptor(self._step_index, self._parallel),
-                self.clock.now(),
-            )
-            cost = self._estimate(descriptor)
-            t_start = self._agree_start(max(now, self._stage_free_at[0]), now)
-            self._run_pipeline(t_start, cost.device_s)
+        descriptor, now = self._dp_joint_step(
+            empty_step_descriptor(self._step_index, self._parallel),
+            self.clock.now(),
+        )
+        cost = self._estimate(descriptor)
+        t_start = self._agree_start(max(now, self._stage_free_at[0]), now)
+        self._run_pipeline(t_start, cost.device_s)
         return None, None
 
     def _num_accepted(

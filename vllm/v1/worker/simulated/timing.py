@@ -19,8 +19,7 @@ import json
 import math
 import os
 import time
-import weakref
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
@@ -82,6 +81,12 @@ def parallel_summary(vllm_config: VllmConfig) -> ParallelSummary:
     )
 
 
+def _replay_key(pairs: Iterable[tuple[int, int]]) -> str:
+    """A batch composition, (scheduled, computed) tokens per request in any
+    order, as the key of `ReplayTimingProvider`."""
+    return json.dumps(sorted(pairs), separators=(",", ":"))
+
+
 @dataclass(frozen=True)
 class StepDescriptor:
     """Everything a timing model may need to price one scheduler step."""
@@ -111,10 +116,9 @@ class StepDescriptor:
 
     def replay_key(self) -> str:
         """Batch composition key shared with recorded step logs."""
-        pairs = sorted(
+        return _replay_key(
             (r.num_scheduled_tokens, r.num_computed_tokens) for r in self.requests
         )
-        return json.dumps(pairs, separators=(",", ":"))
 
     def to_json_dict(self) -> dict[str, Any]:
         d = asdict(self)
@@ -334,7 +338,7 @@ class HostTimeModel:
         )
 
 
-class ConstantTimingProvider:
+class LinearTimingProvider:
     """Linear model: ``fixed_us + prefill_us_per_token * P + decode_us_per_req * D
     + decode_us_per_kv_token * K`` where P is prefill tokens, D decode
     requests and K the KV tokens read by decode requests. Host time is
@@ -388,16 +392,14 @@ def _step_features(step: StepDescriptor) -> tuple[float, float, float]:
     return (float(step.num_reqs), float(step.num_tokens), float(past))
 
 
-_knn_tables: weakref.WeakSet[_KNNTable] = weakref.WeakSet()
+# Lookups of this process's k-NN tables, and those outside the recorded range.
+_knn_lookups = [0, 0]
 
 
 def knn_lookup_counts() -> tuple[int, int]:
-    """(lookups, lookups outside the recorded range) over this process's live
-    k-NN timing tables, since they were built."""
-    return (
-        sum(t.num_queries for t in _knn_tables),
-        sum(t.num_outside for t in _knn_tables),
-    )
+    """(lookups, lookups outside the recorded range) of this process's k-NN
+    timing tables so far."""
+    return _knn_lookups[0], _knn_lookups[1]
 
 
 class _KNNTable:
@@ -428,14 +430,13 @@ class _KNNTable:
         self.k = min(max(1, k), len(points))
         self.lo = feats.min(axis=0).tolist()
         self.hi = feats.max(axis=0).tolist()
-        self.num_queries = 0
-        self.num_outside = 0
-        _knn_tables.add(self)
+        self.warned = False
 
     def query(self, f: tuple[float, float, float]) -> StepCost:
-        self.num_queries += 1
+        _knn_lookups[0] += 1
         if any(not lo <= v <= hi for v, lo, hi in zip(f, self.lo, self.hi)):
-            if not self.num_outside:
+            if not self.warned:
+                self.warned = True
                 logger.warning(
                     "Step (num_reqs, num_tokens, sum_past_kv) = %s is outside "
                     "the recorded range %s to %s: its time is that of the "
@@ -445,7 +446,7 @@ class _KNNTable:
                     self.lo,
                     self.hi,
                 )
-            self.num_outside += 1
+            _knn_lookups[1] += 1
         q = (np.asarray(f, dtype=np.float64) - self.mean) / self.std
         x, y, z = self.columns
         dist = np.sqrt((x - q[0]) ** 2 + (y - q[1]) ** 2 + (z - q[2]) ** 2)
@@ -466,13 +467,12 @@ def load_step_log(
     records of completed KV transfers (`kv_transfers`) or of NIXL read
     postings (`kv_post`)."""
     text = Path(path).read_text()
-    stripped = text.lstrip()
-    if stripped.startswith("["):
-        records = json.loads(text)
-    elif stripped.startswith("{") and "\n" not in stripped.strip():
+    try:
+        # A JSON array, or one object with a "steps" array.
         obj = json.loads(text)
-        records = obj.get("steps", [obj])
-    else:
+        records = obj if isinstance(obj, list) else obj.get("steps", [obj])
+    except json.JSONDecodeError:
+        # JSONL, as StepLogWriter writes.
         records = [json.loads(line) for line in text.splitlines() if line.strip()]
     if kind == "step":
         return [r for r in records if "kv_transfers" not in r and "kv_post" not in r]
@@ -579,12 +579,8 @@ class ReplayTimingProvider:
             cost = _record_cost(rec)
             if "step" in rec:
                 reqs = rec["step"]["requests"]
-                key = json.dumps(
-                    sorted(
-                        (r["num_scheduled_tokens"], r["num_computed_tokens"])
-                        for r in reqs
-                    ),
-                    separators=(",", ":"),
+                key = _replay_key(
+                    (r["num_scheduled_tokens"], r["num_computed_tokens"]) for r in reqs
                 )
                 same_key.setdefault(key, []).append(cost)
             points.append((_record_features(rec), cost))
@@ -600,8 +596,6 @@ class ReplayTimingProvider:
         self.fallback = fallback
         self.miss_fallback_s = miss_fallback_s
         self.table = _KNNTable(points, k) if fallback == "knn" else None
-        self.hits = 0
-        self.misses = 0
         logger.info(
             "Loaded %d replay records (%d exact keys) from %s",
             len(records),
@@ -612,12 +606,10 @@ class ReplayTimingProvider:
     def estimate(self, step: StepDescriptor) -> StepCost:
         cost = self.exact.get(step.replay_key())
         if cost is not None:
-            self.hits += 1
             device_s, host_s = cost
             return StepCost(
                 device_s=device_s, host_s=host_s, breakdown={"replay_exact": 1.0}
             )
-        self.misses += 1
         if self.table is not None:
             return dataclasses.replace(
                 self.table.query(_step_features(step)),
@@ -625,18 +617,10 @@ class ReplayTimingProvider:
             )
         return StepCost(device_s=self.miss_fallback_s, breakdown={"replay_exact": 0.0})
 
-    def metrics(self) -> dict[str, float]:
-        total = self.hits + self.misses
-        return {
-            "replay_exact_match_steps": self.hits,
-            "replay_miss_steps": self.misses,
-            "replay_miss_rate": (self.misses / total) if total else 0.0,
-        }
-
 
 BUILTIN_TIMING_PROVIDERS: dict[str, type] = {
     "zero": ZeroTimingProvider,
-    "constant": ConstantTimingProvider,
+    "linear": LinearTimingProvider,
     "table": TableTimingProvider,
     "replay": ReplayTimingProvider,
 }

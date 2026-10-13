@@ -43,7 +43,7 @@ need Triton's CPU backend (see [Running without a GPU](#running-without-a-gpu)).
 vllm serve Qwen/Qwen3-0.6B \
   --simulate-forward \
   --kv-cache-memory-bytes 8589934592 \
-  --simulation-config '{"timing": "constant",
+  --simulation-config '{"timing": "linear",
                         "timing_args": {"fixed_us": 3000,
                                         "prefill_us_per_token": 20,
                                         "decode_us_per_req": 40},
@@ -57,7 +57,7 @@ from vllm import LLM, SamplingParams
 
 llm = LLM(
     model="Qwen/Qwen3-0.6B",
-    simulation_config={"simulate_forward": True, "timing": "constant",
+    simulation_config={"simulate_forward": True, "timing": "linear",
                        "timing_args": {"fixed_us": 3000, "decode_us_per_req": 40}},
     kv_cache_memory_bytes=4 * 1024**3,
 )
@@ -76,7 +76,7 @@ and preemption behavior depend strongly on it.
 | `timing` | behavior | `timing_args` |
 | --- | --- | --- |
 | `zero` | every step takes no device time (default; KV/scheduler-only simulation) | none |
-| `constant` | `fixed_us + prefill_us_per_token * P + decode_us_per_req * D + decode_us_per_kv_token * K` | those four, plus `host_us` or `host_fit_log` |
+| `linear` | `fixed_us + prefill_us_per_token * P + decode_us_per_req * D + decode_us_per_kv_token * K` | those four, plus `host_us` or `host_fit_log` |
 | `table` | nearest-neighbour interpolation over recorded steps | `path`, `k` |
 | `replay` | exact match on the step's batch composition, nearest-neighbour fallback, reports the miss rate | `path`, `fallback` (`knn`/`zero`), `k`, `miss_fallback_s` |
 | `module.Class` | any class implementing `vllm.v1.worker.simulated.timing.TimingProvider` | passed as keyword arguments |
@@ -89,7 +89,7 @@ of common-prefix blocks and the parallel configuration. It returns a
 
 `HostTimeModel` prices host time as `fixed_us + per_req_us * R +
 per_prefill_token_us * P` and fits it to a recorded step log
-(`HostTimeModel.from_log`, or `host_fit_log` for the `constant` provider), for
+(`HostTimeModel.from_log`, or `host_fit_log` for the `linear` provider), for
 providers that model only the device. Under async scheduling host time shows
 only where it exceeds the device's, mostly in prefill steps of small models,
 so it matters most for TTFT. Host work barely depends on model size: on H200

@@ -510,10 +510,13 @@ class SimulatedNixlWorker:
         self._stop.set()
         if self._server is not None:
             self._server.join()
+            self._server = None
         for sock in self._peers.values():
             sock.close(linger=0)
+        self._peers.clear()
         if self._zmq is not None:
             self._zmq.term()
+            self._zmq = None
 
 
 @dataclass

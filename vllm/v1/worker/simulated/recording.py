@@ -5,13 +5,15 @@
 `RecordingWorker` wraps the stock GPU worker: it builds the same
 `StepDescriptor` the simulated runner would build for the step, brackets the
 step's device work with CUDA events and times the host side with the wall
-clock. The record is written when the step's output is resolved, so the
-measurement never adds a synchronization to the serving path. The resulting
+clock. A step's record is written once its output is known and its device
+work has completed, so the measurement never waits on the device. The resulting
 file is the input of the `table` and `replay` timing providers, and the
 reference a simulated run of the same deployment is validated against.
 """
 
 import time
+from collections import deque
+from dataclasses import dataclass
 from typing import Any
 
 import torch
@@ -42,45 +44,33 @@ from vllm.v1.worker.simulated.timing import (
 logger = init_logger(__name__)
 
 
+@dataclass
+class _StepRecord:
+    start: torch.cuda.Event
+    end: torch.cuda.Event
+    descriptor: StepDescriptor
+    host_s: float
+    t_start: float
+    finished_req_ids: list[str]
+    # Set once the step's output is known.
+    resolved: bool = False
+    num_accepted: tuple[int, ...] | None = None
+
+
 class _RecordedOutput(AsyncModelRunnerOutput):
     def __init__(
         self,
         inner: AsyncModelRunnerOutput,
-        start: torch.cuda.Event,
-        end: torch.cuda.Event,
-        descriptor: StepDescriptor,
-        host_s: float,
-        t_start: float,
-        finished_req_ids: list[str],
-        writer: StepLogWriter,
+        record: _StepRecord,
+        worker: "RecordingWorker",
     ):
         self.inner = inner
-        self.start = start
-        self.end = end
-        self.descriptor = descriptor
-        self.host_s = host_s
-        self.t_start = t_start
-        self.finished_req_ids = finished_req_ids
-        self.writer = writer
+        self.record = record
+        self.worker = worker
 
     def get_output(self) -> ModelRunnerOutput:
         output = self.inner.get_output()
-        _write_transfers(self.writer, output)
-        # The inner output waited for its D2H copy, which was enqueued after
-        # the sampler, so the end event is complete; this does not block.
-        self.end.synchronize()
-        device_s = self.start.elapsed_time(self.end) * 1e-3
-        self.writer.write(
-            self.descriptor,
-            StepCost(
-                device_s=device_s,
-                host_s=self.host_s,
-                num_accepted=_num_accepted(self.descriptor, output),
-            ),
-            self.t_start,
-            self.t_start + max(device_s, self.host_s),
-            self.finished_req_ids,
-        )
+        self.worker._resolve(self.record, output)
         return output
 
 
@@ -105,10 +95,7 @@ def _num_accepted(
     if not all(r.req_id in index for r in descriptor.requests):
         # A joint MoE-DP step: the other ranks' acceptance is not known here.
         return None
-    return tuple(
-        max(len(sampled[index[r.req_id]]) - 1, 0) if r.req_id in index else 0
-        for r in descriptor.requests
-    )
+    return tuple(max(len(sampled[index[r.req_id]]) - 1, 0) for r in descriptor.requests)
 
 
 class RecordingWorker(Worker):
@@ -116,11 +103,13 @@ class RecordingWorker(Worker):
 
     def init_device(self) -> None:
         super().init_device()
-        sim = self.vllm_config.simulation_config
-        if sim.log_path is None:
-            raise ValueError("record_step_timing requires simulation_config.log_path")
         self._pending: tuple[torch.cuda.Event, StepDescriptor, float, list[str]] | None
         self._pending = None
+        # Steps whose records wait for their output or their device work, in
+        # step order: a record is written once its end event has completed,
+        # so that recording never waits on the device.
+        self._unwritten: deque[_StepRecord] = deque()
+        self._sampling = False
         # The output rank of every DP replica describes its steps; under MoE
         # data parallelism they also join each other's lockstep steps.
         self._describes = (
@@ -160,13 +149,15 @@ class RecordingWorker(Worker):
             num_reads, num_runs = nixl_reads(metadata)
             if not num_reads:
                 return start_load_kv(forward_context, **kwargs)
-            if self._pending is not None and self._post_event is None:
+            # Postings at the end of a step (not synchronous loads before its
+            # forward) end its device work.
+            if self._sampling and self._post_event is None:
                 self._post_event = torch.cuda.Event(enable_timing=True)
                 self._post_event.record(torch.cuda.current_stream(self.device))
             t = time.perf_counter()
             start_load_kv(forward_context, **kwargs)
             seconds = time.perf_counter() - t
-            if self._pending is not None:
+            if self._sampling:
                 self._post_s += seconds
             writer.write_kv_post(num_reads, num_runs, seconds, t)
 
@@ -175,6 +166,8 @@ class RecordingWorker(Worker):
     def execute_model(self, scheduler_output):  # type: ignore[override]
         if not self._posts_wrapped:
             self._wrap_read_postings()
+        if self._unwritten:
+            self._write_completed()
         if not self._describes:
             return super().execute_model(scheduler_output)
         descriptor = build_step_descriptor(
@@ -206,36 +199,70 @@ class RecordingWorker(Worker):
         super().execute_dummy_batch()
 
     def sample_tokens(self, grammar_output):  # type: ignore[override]
-        output = super().sample_tokens(grammar_output)
+        self._sampling = True
+        try:
+            output = super().sample_tokens(grammar_output)
+        finally:
+            self._sampling = False
         pending, self._pending = self._pending, None
         if pending is None or output is None:
             return output
         start, descriptor, t_start, finished = pending
-        # A step is pending only when this rank writes a log.
-        writer = self._writer
-        assert writer is not None
         end, self._post_event = self._post_event, None
         if end is None:
             end = torch.cuda.Event(enable_timing=True)
             end.record(torch.cuda.current_stream(self.device))
-        host_s = time.perf_counter() - t_start - self._post_s
-        self._post_s = 0.0
-        if isinstance(output, AsyncModelRunnerOutput):
-            return _RecordedOutput(
-                output, start, end, descriptor, host_s, t_start, finished, writer
-            )
-        end.synchronize()
-        _write_transfers(writer, output)
-        device_s = start.elapsed_time(end) * 1e-3
-        writer.write(
+        record = _StepRecord(
+            start,
+            end,
             descriptor,
-            StepCost(
-                device_s=device_s,
-                host_s=host_s,
-                num_accepted=_num_accepted(descriptor, output),
-            ),
-            t_start,
-            t_start + max(device_s, host_s),
-            finished,
+            host_s=time.perf_counter() - t_start - self._post_s,
+            t_start=t_start,
+            finished_req_ids=finished,
         )
+        self._post_s = 0.0
+        self._unwritten.append(record)
+        if isinstance(output, AsyncModelRunnerOutput):
+            return _RecordedOutput(output, record, self)
+        self._resolve(record, output)
         return output
+
+    def _resolve(self, record: _StepRecord, output: ModelRunnerOutput) -> None:
+        assert self._writer is not None
+        _write_transfers(self._writer, output)
+        record.num_accepted = _num_accepted(record.descriptor, output)
+        record.resolved = True
+        # Outputs are taken in step order: earlier steps still unresolved
+        # (warmup steps, whose outputs are dropped) never will be.
+        while self._unwritten[0] is not record and not self._unwritten[0].resolved:
+            self._unwritten.popleft()
+        self._write_completed()
+
+    def _write_completed(self, wait: bool = False) -> None:
+        """Write the records, in step order, whose device work has completed
+        (with `wait`, all whose output is known)."""
+        assert self._writer is not None
+        while self._unwritten and self._unwritten[0].resolved:
+            record = self._unwritten[0]
+            if wait:
+                record.end.synchronize()
+            elif not record.end.query():
+                return
+            self._unwritten.popleft()
+            device_s = record.start.elapsed_time(record.end) * 1e-3
+            self._writer.write(
+                record.descriptor,
+                StepCost(
+                    device_s=device_s,
+                    host_s=record.host_s,
+                    num_accepted=record.num_accepted,
+                ),
+                record.t_start,
+                record.t_start + max(device_s, record.host_s),
+                record.finished_req_ids,
+            )
+
+    def shutdown(self) -> None:
+        if getattr(self, "_writer", None) is not None:
+            self._write_completed(wait=True)
+        super().shutdown()

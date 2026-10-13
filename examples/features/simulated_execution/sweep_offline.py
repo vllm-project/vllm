@@ -56,7 +56,7 @@ def main() -> None:
         timing = {"timing": "replay", "timing_args": {"path": args.replay}}
     else:
         timing = {
-            "timing": "constant",
+            "timing": "linear",
             "timing_args": {
                 "fixed_us": 1500,
                 "prefill_us_per_token": 10,

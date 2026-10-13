@@ -31,7 +31,7 @@ class SimulationConfig:
     """Replace model forward and sampling with simulated execution."""
 
     timing: str = "zero"
-    """Timing provider for simulated steps: `zero`, `constant`, `table`,
+    """Timing provider for simulated steps: `zero`, `linear`, `table`,
     `replay`, or the fully-qualified name of a class implementing
     `vllm.v1.worker.simulated.timing.TimingProvider`."""
 

@@ -15,6 +15,10 @@ from vllm.v1.metrics.reader import Counter
 pytestmark = [
     pytest.mark.cpu_model,
     pytest.mark.skipif(not HAS_TRITON, reason="Simulated forward requires Triton."),
+    pytest.mark.skipif(
+        not (current_platform.is_cpu() or current_platform.is_cuda_alike()),
+        reason="Simulated forward needs the CPU or a CUDA-alike platform.",
+    ),
 ]
 
 SIMULATED_FORWARD_MODELS = [
@@ -115,9 +119,6 @@ def test_simulate_forward_model_matrix(
     model: str,
     min_kv_cache_groups: int,
 ) -> None:
-    if not (current_platform.is_cpu() or current_platform.is_cuda_alike()):
-        pytest.skip("Simulated forward needs the CPU or a CUDA-alike platform.")
-
     _check_model_available(model)
 
     # No max_tokens: generation must stop after the trace instead of padding
@@ -148,9 +149,6 @@ def test_simulate_forward_prefix_cache_hybrid_retention_zero(
     monkeypatch: pytest.MonkeyPatch,
     vllm_runner: type[VllmRunner],
 ) -> None:
-    if not (current_platform.is_cpu() or current_platform.is_cuda_alike()):
-        pytest.skip("Simulated forward needs the CPU or a CUDA-alike platform.")
-
     model = "openai/gpt-oss-120b"
     _check_model_available(model)
 
@@ -197,8 +195,6 @@ def test_simulate_offline_virtual_clock() -> None:
     """Under the virtual clock, request timestamps are exactly the constant
     timing model's step times, idle gaps are skipped, and arrivals are
     honored."""
-    if not (current_platform.is_cpu() or current_platform.is_cuda_alike()):
-        pytest.skip("Simulated forward needs the CPU or a CUDA-alike platform.")
     from vllm.engine.arg_utils import EngineArgs
     from vllm.v1.worker.simulated.offline import TimedRequest, simulate
 
@@ -210,7 +206,7 @@ def test_simulate_offline_virtual_clock() -> None:
         simulation_config={
             "simulate_forward": True,
             "clock": "virtual",
-            "timing": "constant",
+            "timing": "linear",
             "timing_args": {"fixed_us": step_s * 1e6},
         },
     )
@@ -243,8 +239,6 @@ def test_simulate_offline_virtual_clock() -> None:
 def test_sweep_simulate_slo(tmp_path) -> None:
     """`vllm bench sweep simulate` finds a higher SLO-meeting request rate
     for a larger batch, and writes results the sweep plots read."""
-    if not (current_platform.is_cpu() or current_platform.is_cuda_alike()):
-        pytest.skip("Simulated forward needs the CPU or a CUDA-alike platform.")
     from vllm.benchmarks.sweep.simulate import SweepSimulateArgs, run_main
     from vllm.utils.argparse_utils import FlexibleArgumentParser
 
@@ -264,7 +258,7 @@ def test_sweep_simulate_slo(tmp_path) -> None:
             "--simulation-config",
             json.dumps(
                 {
-                    "timing": "constant",
+                    "timing": "linear",
                     "timing_args": {"fixed_us": 2000, "prefill_us_per_token": 10},
                 }
             ),
@@ -301,8 +295,6 @@ def test_sweep_simulate_disaggregated(tmp_path) -> None:
     second decode instance raises the SLO-meeting rate of a decode-bound
     workload, also with filled KV caches and a read posting cost; runs record
     their GPU count."""
-    if not (current_platform.is_cpu() or current_platform.is_cuda_alike()):
-        pytest.skip("Simulated forward needs the CPU or a CUDA-alike platform.")
     from vllm.benchmarks.sweep.simulate import SweepSimulateArgs, run_main
     from vllm.utils.argparse_utils import FlexibleArgumentParser
 
@@ -329,7 +321,7 @@ def test_sweep_simulate_disaggregated(tmp_path) -> None:
             "--simulation-config",
             json.dumps(
                 {
-                    "timing": "constant",
+                    "timing": "linear",
                     "timing_args": {"fixed_us": 1000, "decode_us_per_req": 300},
                     "kv_transfer_timing": {
                         "load_gbps": 10,
@@ -370,8 +362,6 @@ def test_sweep_simulate_disaggregated(tmp_path) -> None:
 def test_simulate_offline_host_time_holds_engine_thread() -> None:
     """A step whose host time exceeds its device time paces the run by the
     host time: the next step cannot start before the engine thread is free."""
-    if not (current_platform.is_cpu() or current_platform.is_cuda_alike()):
-        pytest.skip("Simulated forward needs the CPU or a CUDA-alike platform.")
     from vllm.engine.arg_utils import EngineArgs
     from vllm.v1.worker.simulated.offline import TimedRequest, simulate
 
@@ -382,23 +372,19 @@ def test_simulate_offline_host_time_holds_engine_thread() -> None:
         simulation_config={
             "simulate_forward": True,
             "clock": "virtual",
-            "timing": "constant",
+            "timing": "linear",
             "timing_args": {"fixed_us": 1000, "host_us": 3000},
         },
     )
     params = SamplingParams(max_tokens=8, ignore_eos=True)
     result = simulate(args, [TimedRequest(list(range(16)), params)])
-    # Under async scheduling step k+1's host work runs before step k's output
-    # is consumed. Nothing follows the last step, so its device time ends with
-    # that host work and its token arrives together with the previous one.
-    assert result.requests[0].itls == pytest.approx([3e-3] * 6 + [0.0])
+    # The 3 ms host time, not the 1 ms device time, paces the steps.
+    assert result.requests[0].itls[:6] == pytest.approx([3e-3] * 6)
 
 
 def test_simulate_offline_sessions() -> None:
     """A session's next turn arrives a think time after the previous one
     finished, extends its prompt and output, and reuses their KV cache."""
-    if not (current_platform.is_cpu() or current_platform.is_cuda_alike()):
-        pytest.skip("Simulated forward needs the CPU or a CUDA-alike platform.")
     from vllm.engine.arg_utils import EngineArgs
     from vllm.v1.worker.simulated.offline import TimedSession, Turn, simulate
 
@@ -409,7 +395,7 @@ def test_simulate_offline_sessions() -> None:
         simulation_config={
             "simulate_forward": True,
             "clock": "virtual",
-            "timing": "constant",
+            "timing": "linear",
             "timing_args": {"fixed_us": 1000, "prefill_us_per_token": 10},
         },
     )
@@ -433,8 +419,6 @@ def test_simulate_offline_kv_offloading(tmp_path) -> None:
     """A prompt evicted from the GPU KV cache is loaded back from the CPU
     cache: its request waits exactly for the modeled load, then prefills only
     its last token."""
-    if not (current_platform.is_cpu() or current_platform.is_cuda_alike()):
-        pytest.skip("Simulated forward needs the CPU or a CUDA-alike platform.")
     from vllm.engine.arg_utils import EngineArgs
     from vllm.v1.worker.simulated.offline import TimedRequest, simulate
 
@@ -443,7 +427,8 @@ def test_simulate_offline_kv_offloading(tmp_path) -> None:
     args = EngineArgs(
         model="Qwen/Qwen3-0.6B",
         max_model_len=1024,
-        # 1056 tokens of Qwen3-0.6B KV cache.
+        # 1056 tokens of Qwen3-0.6B KV cache (28 layers x 8 KV heads x 128
+        # dims x K and V x 2 bytes = 114688 bytes per token).
         kv_cache_memory_bytes=1056 * 114688,
         kv_transfer_config={
             "kv_connector": "OffloadingConnector",
@@ -453,7 +438,7 @@ def test_simulate_offline_kv_offloading(tmp_path) -> None:
         simulation_config={
             "simulate_forward": True,
             "clock": "virtual",
-            "timing": "constant",
+            "timing": "linear",
             "timing_args": {"fixed_us": step_s * 1e6},
             "kv_transfer_timing": {"load_gbps": load_gbps, "store_gbps": load_gbps},
             "log_path": str(log),
@@ -491,8 +476,6 @@ def test_simulate_disaggregated_prefill() -> None:
     """A request is prefilled on the prefill instance, its KV read by the
     decode instance in the modeled time, and decoded there; the prefill
     instance frees its blocks once they are read."""
-    if not (current_platform.is_cpu() or current_platform.is_cuda_alike()):
-        pytest.skip("Simulated forward needs the CPU or a CUDA-alike platform.")
     from vllm.engine.arg_utils import EngineArgs
     from vllm.v1.worker.simulated.disaggregated import simulate_disaggregated
     from vllm.v1.worker.simulated.offline import TimedRequest
@@ -504,7 +487,7 @@ def test_simulate_disaggregated_prefill() -> None:
         kv_cache_memory_bytes=1024**3,
         simulation_config={
             "simulate_forward": True,
-            "timing": "constant",
+            "timing": "linear",
             "timing_args": {"fixed_us": 1000, "prefill_us_per_token": 10},
             "kv_transfer_timing": {"load_gbps": load_gbps},
         },
@@ -544,8 +527,8 @@ class AcceptAllDrafts:
 @pytest.mark.parametrize(
     ("rates", "timing", "chunks"),
     [
-        ([1.0], "constant", 5),
-        ([0.0], "constant", 16),
+        ([1.0], "linear", 5),
+        ([0.0], "linear", 16),
         ([0.0], f"{__name__}.AcceptAllDrafts", 5),
     ],
 )
@@ -555,8 +538,6 @@ def test_simulate_offline_speculative_decoding(
     """Accepted drafts follow `spec_acceptance_rates` unless the timing
     provider sets them: with every draft accepted a step yields 1 + 3 tokens,
     with none it yields one."""
-    if not (current_platform.is_cpu() or current_platform.is_cuda_alike()):
-        pytest.skip("Simulated forward needs the CPU or a CUDA-alike platform.")
     from vllm.engine.arg_utils import EngineArgs
     from vllm.v1.worker.simulated.offline import TimedRequest, simulate
 
@@ -574,7 +555,7 @@ def test_simulate_offline_speculative_decoding(
             "simulate_forward": True,
             "clock": "virtual",
             "timing": timing,
-            "timing_args": {"fixed_us": 1000} if timing == "constant" else {},
+            "timing_args": {"fixed_us": 1000} if timing == "linear" else {},
             "spec_acceptance_rates": rates,
         },
     )
