@@ -502,7 +502,7 @@ class CohereServingChatV2(OpenAIServingChat):
         # Map every content block to a plain ``{"type": "text", "text":
         # ...}`` part, mirroring the shape :meth:`_convert_user_message`
         # emits for multi-part user content. vLLM's
-        # ``_parse_chat_message_content`` collapses a text-only tool
+        # ``parse_chat_message_content`` collapses a text-only tool
         # part list back into ``"\n".join(...)`` on the way to the
         # renderer, so simple chat templates that expect string tool
         # content still work; keeping the list here just preserves the
@@ -512,7 +512,7 @@ class CohereServingChatV2(OpenAIServingChat):
         # Tool message content uses ``ToolMessageV2Content``, a union of
         # ``TextToolContent`` and ``DocumentToolContent``. The latter
         # produces ``{"type": "document", "document": {...}}`` blocks,
-        # which vLLM's shared ``_parse_chat_message_content_parts`` in
+        # which vLLM's shared ``parse_chat_message_content_parts`` in
         # ``vllm/renderers/chat_utils.py`` rejects because the OpenAI
         # ``ChatCompletionContentPartParam`` union only knows text /
         # image / audio / etc. Emitting them anyway triggers a Pydantic

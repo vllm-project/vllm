@@ -29,7 +29,7 @@ from vllm.multimodal.cache import MultiModalProcessorOnlyCache
 from vllm.multimodal.inputs import MultiModalFeatureSpec, batched_tensors_equal
 from vllm.multimodal.processing import BaseMultiModalProcessor, InputProcessingContext
 from vllm.platforms import current_platform
-from vllm.renderers.chat_utils import _get_embeds_data
+from vllm.renderers.chat_utils.item_tracker import _get_embeds_data
 from vllm.tokenizers import TokenizerLike, cached_tokenizer_from_config
 from vllm.utils.mistral import is_mistral_tokenizer
 
