@@ -10,6 +10,18 @@ if TYPE_CHECKING:
     from vllm.sampling_params import SamplingParams
 
 
+def is_single_pass_read(params: "SamplingParams | None") -> bool:
+    if params is None or not params.extra_args:
+        return False
+    extra = params.extra_args
+    return (
+        bool(extra.get("diffusion_read_only"))
+        and extra.get("diffusion_max_steps") == 1
+        and params.prompt_logprobs is None
+        and params.prompt_logprob_token_ids is None
+    )
+
+
 def validate_diffusion_sampling_params(
     params: "SamplingParams",
     *,
