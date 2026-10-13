@@ -246,6 +246,18 @@ class TestCacheExistence:
         assert result[1]  # Second exists
         assert not result[2]  # Third doesn't exist
 
+    def test_has_cache_item_miss_creates_no_folder(
+        self, mock_vllm_config_consumer, temp_storage
+    ):
+        """Test a cache miss leaves no empty folder in the shared storage."""
+        connector = ECExampleConnector(
+            vllm_config=mock_vllm_config_consumer,
+            role=ECConnectorRole.SCHEDULER,
+        )
+
+        assert not connector.has_cache_item("missing_hash")
+        assert os.listdir(temp_storage) == []
+
 
 class TestStateManagement:
     """Test connector state management."""
