@@ -201,6 +201,7 @@ def test_swa_offload_window_covers_unaligned_hit(
 def _make_partial_tail_scheduler(
     recurrent_only: bool = False,
     eagle: bool = False,
+    cache_hit_alignment_tokens: int | None = 4,
 ) -> OffloadingConnectorScheduler:
     vllm_config = _make_vllm_config(extra_config={"self_describing_kv_events": True})
     vllm_config.cache_config.prefix_match_unit = None if recurrent_only else 4
@@ -209,6 +210,8 @@ def _make_partial_tail_scheduler(
         enable_kv_cache_events=True, publisher="null"
     )
     kv_cache_config = _make_mamba_hybrid_kv_cache_config()
+    # Core resolves fine-grained hits for this layout at prefix_match_unit.
+    kv_cache_config.cache_hit_alignment_tokens = cache_hit_alignment_tokens
     # The drafter shares the full-attention group, as in Qwen3-Next MTP.
     kv_cache_config.kv_cache_groups[0].is_eagle_group = eagle
     if recurrent_only:
@@ -885,6 +888,21 @@ def _key_tokens(scheduler: OffloadingConnectorScheduler, keys) -> dict[int, int]
         get_offload_group_idx(key): req_context.get_offload_key_position(key)
         for key in keys
     }
+
+
+@pytest.mark.parametrize(
+    ("cache_hit_alignment_tokens", "proof_tokens"), [(4, 28), (16, 40), (None, 40)]
+)
+def test_eagle_proof_margin_follows_core_hit_alignment(
+    cache_hit_alignment_tokens, proof_tokens
+):
+    """Core drops one hash unit past a fine-grained hit, else one block."""
+    scheduler = _make_partial_tail_scheduler(
+        eagle=True, cache_hit_alignment_tokens=cache_hit_alignment_tokens
+    )
+    attention, mamba = scheduler.config.kv_group_configs
+    assert scheduler._partial_tail_key_tokens(attention, 24) == proof_tokens
+    assert scheduler._partial_tail_key_tokens(mamba, 24) == 24
 
 
 def test_eagle_partial_tail_store_keys_attention_at_proof():

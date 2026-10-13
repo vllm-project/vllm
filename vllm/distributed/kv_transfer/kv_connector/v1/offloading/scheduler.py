@@ -605,20 +605,27 @@ class OffloadingConnectorScheduler:
             else 0
         )
         # Core's prefix cache matches an EAGLE group this many tokens past a
-        # fine-grained hit and then drops them. A partial tail stores and looks
-        # up EAGLE groups at that proof position. Zero without such groups.
-        self._eagle_proof_margin = (
-            eagle_proof_margin(
+        # hit and then drops them. A partial tail stores and looks up EAGLE
+        # groups at that proof position, with the margin rule of the core
+        # coordinator.
+        alignment = kv_cache_config.cache_hit_alignment_tokens
+        partial_hash_hits = (
+            alignment is not None and alignment < self._partial_tail_block_size
+        )
+        self._eagle_proof_margins: dict[int, int] = {
+            config.group_idx: eagle_proof_margin(
                 self._partial_tail_block_size,
                 self.config.tokens_per_hash,
-                fine_grained_lookup=True,
+                partial_hash_hits
+                and config.manager_cls.supports_fine_grained_hash_lookup,
             )
+            for config in self.config.kv_group_configs
             if self.config.supports_partial_tail
-            and any(
-                config.is_eagle_group and not config.requires_cow_source
-                for config in self.config.kv_group_configs
-            )
-            else 0
+            and config.is_eagle_group
+            and not config.requires_cow_source
+        }
+        self._max_eagle_proof_margin = max(
+            self._eagle_proof_margins.values(), default=0
         )
         self._cow_source_groups = frozenset(
             config.group_idx
@@ -995,17 +1002,17 @@ class OffloadingConnectorScheduler:
         tokens_per_hash = self.config.tokens_per_hash
         # A partial tail carries its own EAGLE proof, so it may also lie in
         # the block after the chunk that the complete-chunk lookup pops.
-        num_search_blocks = 2 if self._eagle_proof_margin else 1
+        num_search_blocks = 2 if self._max_eagle_proof_margin else 1
         block_end = complete_boundary + (
             num_search_blocks * self._partial_tail_block_size
         )
         max_boundary = min(req_status.req.num_prompt_tokens - 1, block_end - 1)
-        if self._eagle_proof_margin:
+        if self._max_eagle_proof_margin:
             # The proof key needs a hash of this request past the boundary.
             max_boundary = min(
                 max_boundary,
                 len(req_status.req.block_hashes) * tokens_per_hash
-                - self._eagle_proof_margin,
+                - self._max_eagle_proof_margin,
             )
         if max_num_new_tokens is not None:
             max_boundary = min(max_boundary, local_tokens + max_num_new_tokens)
@@ -1036,9 +1043,7 @@ class OffloadingConnectorScheduler:
         self, group_config: GroupOffloadConfig, boundary: int
     ) -> int:
         """Token position whose hash keys a group's partial-tail block."""
-        if group_config.is_eagle_group and not group_config.requires_cow_source:
-            return boundary + self._eagle_proof_margin
-        return boundary
+        return boundary + self._eagle_proof_margins.get(group_config.group_idx, 0)
 
     def _lookup_partial_tail(
         self,
@@ -1516,17 +1521,17 @@ class OffloadingConnectorScheduler:
             assert boundary % self.config.tokens_per_hash == 0
             assert boundary <= max_boundary
 
-            if self._eagle_proof_margin:
+            if self._max_eagle_proof_margin:
                 # The CoW hand-off arrives on the step that computes the prompt
                 # tokens past the boundary, and it is not offered again. Workers
                 # submit a store at the next step's start, after this step's
                 # forward, so count the prompt tokens this step computes.
-                num_prompt_tokens_after_step = min(
+                prompt_tokens_after_step = min(
                     req.num_computed_tokens
                     + scheduler_output.num_scheduled_tokens.get(req_id, 0),
                     req.num_prompt_tokens,
                 )
-                if boundary + self._eagle_proof_margin > num_prompt_tokens_after_step:
+                if boundary + self._max_eagle_proof_margin > prompt_tokens_after_step:
                     # The EAGLE proof is not computed by the end of this step.
                     continue
 
