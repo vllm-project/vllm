@@ -4157,6 +4157,22 @@ def test_fp8_dcp_head_envelope_guard(local_heads, dcp_world_size, should_raise):
         assert local_pad == gathered_pad
 
 
+@pytest.mark.skipif(
+    torch.cuda.get_device_capability() < (9, 0),
+    reason="FlashMLASparseBackend requires CUDA 9.0 or higher",
+)
+@pytest.mark.parametrize("comm_backend", ["ag_rs", "a2a"])
+def test_fp8_dcp_accepts_comm_backend(comm_backend):
+    """The mixed-batch path returns (out, lse) for every token in the layout
+    both DCP combines consume, so neither comm backend is rejected."""
+    device = torch.device(DEVICE_TYPE)
+    vllm_config = _build_sparse_dcp_vllm_config(16, 4, comm_backend)
+    kv_cache_spec = create_standard_kv_cache_spec(vllm_config)
+    builder_cls = FlashMLASparseBackend.get_builder_cls()
+    builder = builder_cls(kv_cache_spec, ["placeholder"], vllm_config, device)
+    assert builder.fp8_use_mixed_batch
+
+
 def test_fp8_mixed_batch_dcp_neutralizes_empty_rows(monkeypatch):
     """A decode row whose top-k shard holds no local candidates (all -1) has
     undefined kernel out/lse; it must come back as (0, -inf), the identity of
