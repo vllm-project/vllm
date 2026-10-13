@@ -1454,6 +1454,23 @@ class VllmConfig:
 
             self.parallel_config.is_moe_model = self.model_config.is_moe
 
+            if (
+                self.parallel_config.enable_sequence_parallel
+                and not self.model_config.using_transformers_backend()
+            ):
+                flag = (
+                    "--enable-async-tp"
+                    if self.parallel_config.enable_async_tp
+                    else "--enable-sequence-parallel"
+                )
+                logger.warning(
+                    "%s has no effect because %s is not using the Transformers "
+                    "modeling backend. Native models that support sequence "
+                    "parallelism enable it automatically.",
+                    flag,
+                    self.model_config.architecture,
+                )
+
         if (
             self.model_config is not None
             and self.model_config.multimodal_config is not None

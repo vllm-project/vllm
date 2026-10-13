@@ -213,12 +213,26 @@ def test_mla(vllm_runner: type[VllmRunner], example_prompts: list[str]) -> None:
 
 
 @multi_gpu_test(num_gpus=2)
+@pytest.mark.parametrize(
+    "parallel_kwargs",
+    [
+        {},
+        {"enable_sequence_parallel": True},
+        {"enable_async_tp": True},
+    ],
+    ids=["tp", "sp", "async_tp"],
+)
 def test_distributed(
     hf_runner: type[HfRunner],
     vllm_runner: type[VllmRunner],
     example_prompts,
+    parallel_kwargs: dict[str, bool],
 ):
-    kwargs = {"model_impl": "transformers", "tensor_parallel_size": 2}
+    kwargs = {
+        "model_impl": "transformers",
+        "tensor_parallel_size": 2,
+        **parallel_kwargs,
+    }
     check_implementation(
         hf_runner,
         vllm_runner,
