@@ -657,6 +657,7 @@ def qsa_sparse_paged_attention(
     *,
     output_gate: torch.Tensor | None = None,
     return_lse: bool = False,
+    out_lse: torch.Tensor | None = None,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     """Run sparse GQA directly over paged BF16 or FP8-e4m3 K/V caches.
 
@@ -674,6 +675,8 @@ def qsa_sparse_paged_attention(
     _select_config.
 
     With return_lse, returns FP32 ungated output and log2 LSE for a DCP merge.
+    out_lse, if given, receives the LSE ([rows, query heads] fp32, contiguous),
+    so a caller can keep it in a buffer reserved before CUDA graph capture.
     """
     if q.ndim != 3 or k_cache.ndim != 4 or v_cache.shape != k_cache.shape:
         raise ValueError("QSA sparse attention received invalid Q/K/V shapes")
@@ -815,11 +818,15 @@ def qsa_sparse_paged_attention(
     if num_splits == 1 and not return_lse:
         return out
 
-    out_lse = None
-    if return_lse:
+    if not return_lse:
+        out_lse = None
+    elif out_lse is None:
         out_lse = torch.empty(
             (q.shape[0], q.shape[1]), dtype=torch.float32, device=q.device
         )
+    else:
+        assert out_lse.shape == q.shape[:2] and out_lse.dtype == torch.float32
+        assert out_lse.is_contiguous()
 
     _qsa_merge_splitk_kernel[(q.shape[0], q.shape[1])](
         partial_output,

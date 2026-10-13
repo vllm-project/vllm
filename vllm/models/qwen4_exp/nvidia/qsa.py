@@ -255,7 +255,6 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
         if not is_flash_attn_varlen_func_available():
             raise NotImplementedError("Qwen4Exp QSA requires FlashAttention")
         self.cp_kv_cache_interleave_size = 1
-        self._dcp_local_indices: torch.Tensor | None = None
         self._dcp_combine_ctx = CPTritonContext()
         if self.dcp_world_size > 1:
             from vllm.config import get_current_vllm_config
@@ -385,8 +384,17 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
         k_scale: float | None,
         v_scale: float | None,
     ) -> None:
-        """Attend over local selections and merge rank results."""
+        """Attend over local selections and merge rank results.
+
+        The local selection, the partial output, its LSE and the head-major
+        combine buffer come from the shared workspace. They are reserved for
+        max_num_batched_tokens rows, as FlashAttention DCP reserves its
+        context output, so the workspace does not grow after CUDA graph
+        capture. The gathered query and the combine output stay collective
+        outputs, as in FlashAttention DCP.
+        """
         from vllm.distributed.parallel_state import get_dcp_group
+        from vllm.v1.worker.workspace import current_workspace_manager
 
         from .ops.qsa import qsa_sparse_paged_attention
         from .ops.qsa_dcp import (
@@ -396,17 +404,24 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
         )
 
         group = get_dcp_group()
-
-        if self._dcp_local_indices is None:
-            self._dcp_local_indices = torch.empty_like(topk_buffer)
+        query_all_heads = group.all_gather(query.contiguous(), dim=1)
+        reserved = max(num_tokens, self._dcp_max_num_tokens)
+        row_shape = query_all_heads.shape[1:]
+        local_indices, partial_out, partial_lse, heads_first = (
+            current_workspace_manager().get_simultaneous(
+                ((reserved, topk_buffer.shape[1]), topk_buffer.dtype),
+                ((reserved, *row_shape), torch.float32),
+                ((reserved, row_shape[0]), torch.float32),
+                ((reserved * row_shape.numel(),), torch.float32),
+            )
+        )
         local_indices = qsa_localize_dcp_indices(
             topk_buffer[:num_tokens],
-            self._dcp_local_indices[:num_tokens],
+            local_indices[:num_tokens],
             self.dcp_world_size,
             self.dcp_rank,
             self.cp_kv_cache_interleave_size,
         )
-        query_all_heads = group.all_gather(query.contiguous(), dim=1)
         partial_out, partial_lse = qsa_sparse_paged_attention(
             query_all_heads,
             key_cache,
@@ -415,9 +430,11 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
             block_table,
             token_to_req,
             use_prefill_config,
+            partial_out[:num_tokens],
             k_scale=k_scale,
             v_scale=v_scale,
             return_lse=True,
+            out_lse=partial_lse[:num_tokens],
         )
 
         # A row with count 0 runs no tile; the reader writes output 0 and LSE
@@ -430,7 +447,7 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
             partial_lse,
             group,
             self.dcp_combine,
-            torch.empty_like(partial_out),
+            heads_first[: partial_out.numel()],
             ctx=self._dcp_combine_ctx,
             is_lse_base_on_e=self.lse_base_on_e,
         )
