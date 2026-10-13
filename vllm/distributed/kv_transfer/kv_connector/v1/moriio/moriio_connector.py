@@ -92,11 +92,13 @@ from vllm.utils.network_utils import (
     make_zmq_path,
     make_zmq_socket,
 )
-from vllm.v1.attention.selector import get_attn_backend
+from vllm.distributed.kv_transfer.kv_connector.utils import get_current_attn_backends
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
+    MLAAttentionSpec,
     MambaSpec,
+    SlidingWindowMLASpec,
     SlidingWindowSpec,
     is_full_attention_spec,
 )
@@ -566,7 +568,7 @@ class MoRIIOConnectorScheduler:
                 for g in kv_cache_config.transfer_groups
                 if not (
                     is_full_attention_spec(g.kv_cache_spec)
-                    or isinstance(g.kv_cache_spec, (SlidingWindowSpec, MambaSpec))
+                    or isinstance(g.kv_cache_spec, (SlidingWindowSpec, SlidingWindowMLASpec, MambaSpec, MLAAttentionSpec))
                 )
             ]
             if unsupported:
@@ -577,7 +579,12 @@ class MoRIIOConnectorScheduler:
                     f"cache group spec(s): {sorted(set(unsupported))}. Pass "
                     "--disable-hybrid-kv-cache-manager to run without HMA."
                 )
-            if self.mode == MoRIIOMode.WRITE:
+            has_pure_sliding_window = any(
+                isinstance(g.kv_cache_spec, SlidingWindowSpec)
+                and not isinstance(g.kv_cache_spec, SlidingWindowMLASpec)
+                for g in kv_cache_config.transfer_groups
+            )
+            if self.mode == MoRIIOMode.WRITE and has_pure_sliding_window:
                 # TODO(simondanielsson): support HMA in WRITE mode
                 raise NotImplementedError(
                     "MoRIIO WRITE mode does not support hybrid KV cache groups "
@@ -1853,12 +1860,10 @@ class MoRIIOConnectorWorker:
         self._region_session_index: dict[str, list[int]] | None = None
         self.built_session = False
         self.built_write_session: defaultdict[str, list] = defaultdict(list)
-        backend = get_attn_backend(
-            self.model_config.get_head_size(),
-            self.model_config.dtype,
-            self.cache_config.cache_dtype,
-            use_mla=self.use_mla,
-        )
+        backends = get_current_attn_backends(self.vllm_config)
+        self.backend_name = backends[0].get_name()
+        logger.debug("Detected attention backend %s", self.backend_name)
+
         self.transfer_id_to_request_id: dict[TransferId, ReqId] = {}
         # READ-mode producer: a decode release-ACK can arrive BEFORE
         # start_load_kv populates transfer_id_to_request_id (the notify races
@@ -1870,10 +1875,6 @@ class MoRIIOConnectorWorker:
         # (on the tick its mapping exists) -- the heterogeneous-TP ack-counting
         # is preserved.
         self._pending_unmapped_acks: list = []
-
-        # TODO: consider the integration of flashinfer or other backends.
-        self.backend_name = backend.get_name()
-        logger.debug("Detected attention backend %s", self.backend_name)
 
     def schedule_write_blocks(
         self,
@@ -2467,13 +2468,7 @@ class MoRIIOConnectorWorker:
                     base_addr_idx += 1
                 continue
             geometry = self._get_layer_transfer_geometry(layer_name)
-            if hma_enabled:
-                if geometry.block_len != self.block_len:
-                    raise ValueError(
-                        "MoRIIO KV cache block length mismatch for layer "
-                        f"{layer_name}: {geometry.block_len} != {self.block_len}"
-                    )
-            elif geometry.block_size != self.block_size:
+            if not hma_enabled and geometry.block_size != self.block_size:
                 raise ValueError(
                     "MoRIIO KV cache block size mismatch for layer "
                     f"{layer_name}: {geometry.block_size} != {self.block_size}"

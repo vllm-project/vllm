@@ -64,7 +64,7 @@ RUN apt-get update -y \
     && python3 --version && python3 -m pip --version
 
 RUN pip install -U packaging 'cmake<4' ninja wheel 'setuptools<80' 'pybind11<3.1.0' Cython
-RUN apt-get update && apt-get install -y libjpeg-dev libsox-dev libsox-fmt-all sox && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y libgrpc++-dev protobuf-compiler-grpc libjpeg-dev libsox-dev libsox-fmt-all sox && rm -rf /var/lib/apt/lists/*
 
 # Install sccache if USE_SCCACHE is enabled (for release builds)
 ARG USE_SCCACHE
