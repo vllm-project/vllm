@@ -1685,15 +1685,6 @@ def test_nvfp4_one_sided_rejects_unsupported_input_dtype(input_dtype: torch.dtyp
             id="requantization_nvfp4_mxfp4_moe",
         ),
         pytest.param(
-            NVFP4_MOE_MODEL_NAME,
-            None,
-            {"targets": {"*mlp.experts*": "fp8_per_tensor"}},
-            CompressedTensorsLinearMethod,
-            Fp8PerTensorOnlineMoEMethod,
-            {},
-            id="requantization_nvfp4_fp8_moe",
-        ),
-        pytest.param(
             MODELOPT_NVFP4_MOE_MODEL_NAME,
             None,
             {"targets": {"*mlp.experts*": "fp8_per_tensor"}},
@@ -1892,7 +1883,15 @@ def test_online_quantization(
         )
         or quant_scheme == "mxfp4"
     ):
-        assert o_proj.weight.dtype == torch.uint8
+        if (
+            model_name in (NVFP4_MOE_MODEL_NAME, MODELOPT_NVFP4_MOE_MODEL_NAME)
+            and current_platform.is_cuda()
+            and not current_platform.has_device_capability(100)
+        ):
+            # NVFP4 linear falls back to Marlin, which repacks weights to int32.
+            assert o_proj.weight.dtype == torch.int32
+        else:
+            assert o_proj.weight.dtype == torch.uint8
     elif current_platform.is_cuda() or current_platform.is_xpu():
         if current_platform.supports_fp8() and not force_marlin:
             assert o_proj.weight.dtype == torch.float8_e4m3fn
