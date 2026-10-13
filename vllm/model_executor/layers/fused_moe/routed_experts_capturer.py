@@ -112,6 +112,10 @@ class RoutedExpertsCapturer:
             few trailing padding rows which are trimmed by the downstream
             ``[:token_num_per_dp]`` slice.
 
+        With a single DP rank, model-level SP may still shard tokens. The
+        forward token count distinguishes those shards from a full batch
+        and trims SP padding after gathering.
+
         Args:
             layer_id: The layer index.
             topk_ids: Tensor of shape (batch_size, num_routed_experts).
@@ -119,7 +123,26 @@ class RoutedExpertsCapturer:
         """
         ctx = get_forward_context()
         if ctx.dp_metadata is None:
-            local_topk_ids = topk_ids
+            num_local_tokens = ctx.num_tokens
+            n = topk_ids.shape[0]
+            if num_local_tokens is None or n == num_local_tokens:
+                # With one token, TP0 owns the real row and publishes output.
+                local_topk_ids = topk_ids
+            else:
+                shard_n = (num_local_tokens + self.tp_size - 1) // self.tp_size
+                if self.tp_size > 1 and n == shard_n:
+                    local_topk_ids = get_tp_group().all_gather(
+                        topk_ids.contiguous(), dim=0
+                    )[:num_local_tokens]
+                elif self.tp_size > 1 and n == shard_n * self.tp_size:
+                    local_topk_ids = topk_ids[:num_local_tokens]
+                else:
+                    raise AssertionError(
+                        "RoutedExpertsCapturer: unexpected topk_ids batch "
+                        f"dim {n} (expected {num_local_tokens}, {shard_n}, "
+                        f"or {shard_n * self.tp_size} for single DP, "
+                        f"tp_size={self.tp_size})"
+                    )
         else:
             num_tokens_dp = ctx.dp_metadata.num_tokens_across_dp_cpu
             num_local_tokens = int(num_tokens_dp[self.dp_rank].item())

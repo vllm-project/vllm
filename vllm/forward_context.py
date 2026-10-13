@@ -196,6 +196,9 @@ class ForwardContext:
 
     additional_kwargs: dict[str, Any] = field(default_factory=dict)
 
+    # Forward token count before model-level SP, including batch padding.
+    num_tokens: int | None = None
+
     def __post_init__(self):
         assert self.cudagraph_runtime_mode.is_valid_runtime_mode(), (
             f"Invalid cudagraph runtime mode: {self.cudagraph_runtime_mode}"
@@ -238,6 +241,7 @@ def create_forward_context(
     additional_kwargs: dict[str, Any] | None = None,
     skip_compiled: bool = False,
     is_padding: torch.Tensor | None = None,
+    num_tokens: int | None = None,
 ):
     if vllm_config.compilation_config.fast_moe_cold_start:
         all_moe_layers = vllm_config.compilation_config.static_all_moe_layers
@@ -256,6 +260,7 @@ def create_forward_context(
         skip_compiled=skip_compiled,
         additional_kwargs=additional_kwargs or {},
         is_padding=is_padding,
+        num_tokens=num_tokens,
     )
 
 
@@ -355,6 +360,7 @@ def set_forward_context(
         additional_kwargs,
         skip_compiled,
         is_padding=is_padding,
+        num_tokens=num_tokens,
     )
 
     try:

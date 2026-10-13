@@ -10,6 +10,7 @@ import torch
 from vllm.config import VllmConfig
 from vllm.config.compilation import CompilationMode
 from vllm.distributed.eplb.eplb_state import EplbLayerState
+from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
 from vllm.model_executor.layers.fused_moe.experts.cpu_int4_moe import CPUExpertsInt4
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
@@ -319,11 +320,66 @@ def test_routed_experts_capturer_single_dp_no_metadata():
     """dp_metadata is None: capture writes the full topk_ids rows."""
     capturer = _capturer_with_buffer(dp_rank=0)
     topk = torch.tensor([[1, 2], [3, 4], [5, 6]], dtype=torch.int32)
-    ctx = SimpleNamespace(dp_metadata=None)
+    ctx = SimpleNamespace(dp_metadata=None, num_tokens=None)
     with patch(f"{_REC_MODULE}.get_forward_context", return_value=ctx):
         capturer.capture(layer_id=0, topk_ids=topk)
     assert torch.equal(capturer.device_buffer[:3, 0, :], topk)
     assert capturer.device_buffer[3, 0, 0].item() == -1
+
+
+@pytest.mark.parametrize("num_tokens", [6, 3, 1])
+def test_single_dp_ep_capture_restores_tp_shards(num_tokens):
+    """Capture all current rows after model-level SP, including buffer reuse."""
+    capturer = _capturer_with_buffer(tp_size=2)
+    config = SimpleNamespace(
+        parallel_config=SimpleNamespace(
+            data_parallel_size=1,
+            tensor_parallel_size=2,
+            enable_expert_parallel=True,
+            use_sequence_parallel_moe=False,
+            is_moe_model=True,
+        ),
+        compilation_config=SimpleNamespace(
+            fast_moe_cold_start=False, static_forward_context={}
+        ),
+    )
+    tp_group = Mock()
+    shard_n = (num_tokens + 1) // 2
+    with (
+        set_forward_context(None, config, num_tokens=num_tokens),
+        patch(f"{_REC_MODULE}.get_tp_group", return_value=tp_group),
+    ):
+        assert get_forward_context().dp_metadata is None
+        for offset in (20, 1):
+            expected = torch.arange(num_tokens * 2, dtype=torch.int32).reshape(-1, 2)
+            expected += offset
+            padded = torch.full((shard_n * 2, 2), 99, dtype=torch.int32)
+            padded[:num_tokens] = expected
+            tp_group.all_gather.return_value = padded
+            capturer.capture(0, padded[:shard_n])
+            assert torch.equal(
+                capturer.snapshot_routing_data(num_tokens)[:, 0].int(), expected
+            )
+            assert (capturer.device_buffer[num_tokens:, 0] == -1).all()
+    if num_tokens == 1:
+        tp_group.all_gather.assert_not_called()
+    else:
+        assert tp_group.all_gather.call_count == 2
+
+
+@pytest.mark.parametrize("num_tokens, num_rows", [(6, 6), (3, 4)])
+def test_single_dp_tp_capture_does_not_regather_full_batch(num_tokens, num_rows):
+    capturer = _capturer_with_buffer(tp_size=2)
+    topk = torch.arange(num_rows * 2, dtype=torch.int32).reshape(-1, 2)
+    ctx = SimpleNamespace(dp_metadata=None, num_tokens=num_tokens)
+    with (
+        patch(f"{_REC_MODULE}.get_forward_context", return_value=ctx),
+        patch(f"{_REC_MODULE}.get_tp_group") as get_tp_group,
+    ):
+        capturer.capture(0, topk)
+    get_tp_group.assert_not_called()
+    assert torch.equal(capturer.device_buffer[:num_tokens, 0], topk[:num_tokens])
+    assert (capturer.device_buffer[num_tokens:, 0] == -1).all()
 
 
 @pytest.mark.parametrize(
@@ -359,7 +415,7 @@ def test_routed_experts_capturer_narrows_snapshot(output_dtype):
     capturer = _capturer_with_buffer(dtype=torch.int32)
     capturer.output_dtype = output_dtype
     topk = torch.tensor([[1, 2], [254, 255]], dtype=torch.int64)
-    ctx = SimpleNamespace(dp_metadata=None)
+    ctx = SimpleNamespace(dp_metadata=None, num_tokens=None)
     with patch(f"{_REC_MODULE}.get_forward_context", return_value=ctx):
         capturer.capture(layer_id=0, topk_ids=topk)
 
