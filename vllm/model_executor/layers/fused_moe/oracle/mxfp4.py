@@ -315,8 +315,8 @@ def backend_to_kernel_cls(
         )
 
         if _is_rocm_gfx1250():
-            return [AiterW4A4ExpertsMonolithic, AiterExperts]
-        return [AiterExperts]
+            return [AiterW4A4ExpertsMonolithic, AiterMxfp4Experts]
+        return [AiterMxfp4Experts]
 
     elif backend == Mxfp4MoeBackend.XPU:
         from vllm.model_executor.layers.fused_moe.experts.xpu_moe import XPUExpertsMxFp4
