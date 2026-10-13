@@ -742,7 +742,8 @@ class TestLookupFlow:
         session, conn, _ = _make_session()
         session.register_lookup("req-1", b"hA")
         session.flush_pending_lookups()
-        lookup_clock.now = 2 * _LOOKUP_TIMEOUT_S
+        # Complete the handshake before its independent timeout expires.
+        lookup_clock.now = _LOOKUP_TIMEOUT_S - 1
         session.poll()
         assert session.alive
 
