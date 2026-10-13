@@ -15,6 +15,17 @@ Ascend NPU content through overlays.
 
 ## Editing a recipe
 
+Start a new recipe from
+[`templates/text.yaml`](https://github.com/vllm-project/recipes/blob/main/templates/text.yaml)
+or
+[`templates/multimodal.yaml`](https://github.com/vllm-project/recipes/blob/main/templates/multimodal.yaml).
+Fields are defined in
+[SCHEMA.md](https://github.com/vllm-project/recipes/blob/main/SCHEMA.md) and
+checked against [`recipe.schema.json`](https://recipes.vllm.ai/recipe.schema.json)
+on every build; an unknown or misspelled key is an error. For completion and
+inline errors in YAML-aware editors, start the file with
+`# yaml-language-server: $schema=https://recipes.vllm.ai/recipe.schema.json`.
+
 Follow the recipes repository's
 [add-recipe skill](https://github.com/vllm-project/recipes/blob/main/.agents/skills/add-recipe/SKILL.md)
 for the schema and the validation steps. To preview a change, point a
