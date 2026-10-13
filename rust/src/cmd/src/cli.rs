@@ -348,6 +348,11 @@ pub struct SharedRuntimeArgs {
     #[serde(default)]
     pub enable_prompt_tokens_details: bool,
 
+    /// Include per-request timing metrics in API responses.
+    #[arg(long, default_missing_value = "true", num_args = 0..=1)]
+    #[serde(default)]
+    pub enable_per_request_metrics: bool,
+
     /// If specified, API server will add X-Request-Id header to responses.
     #[arg(
         long,
@@ -635,6 +640,7 @@ impl SharedRuntimeArgs {
         ApiServerOptions {
             enable_log_requests: self.enable_log_requests,
             enable_prompt_tokens_details: self.enable_prompt_tokens_details,
+            enable_per_request_metrics: self.enable_per_request_metrics,
             enable_request_id_headers: self.enable_request_id_headers,
             enable_scale_out: self.enable_scale_out,
             sse_keep_alive_interval: (self.sse_keep_alive_interval > 0)
