@@ -11,6 +11,7 @@ import numpy as np
 import torch
 
 from vllm import _custom_ops as ops
+from vllm.distributed.device_communicators.cuda_wrapper import CudaRTLibrary
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON, triton
@@ -34,6 +35,16 @@ from vllm.v1.kv_offload.cpu.swap_blocks_triton import (
 )
 
 logger = init_logger(__name__)
+
+
+def _clear_pending_device_error() -> None:
+    """Clear the error a failed copy left pending for the next kernel launch."""
+    if not current_platform.is_cuda_alike():
+        return
+    try:
+        CudaRTLibrary().cudaGetLastError()
+    except (AssertionError, AttributeError, OSError):
+        logger.warning("Could not clear the pending device error", exc_info=True)
 
 
 def _select_swap_blocks_fn(
@@ -717,6 +728,7 @@ class SingleDirectionOffloadingHandler:
                     )
                 end_event.record(stream)
         except RuntimeError:
+            _clear_pending_device_error()
             logger.exception(
                 "KV offload %s transfer failed for job %d",
                 "GPU->CPU" if self.gpu_to_cpu else "CPU->GPU",
