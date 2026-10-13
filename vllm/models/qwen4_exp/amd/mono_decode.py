@@ -34,7 +34,7 @@ import torch
 
 from vllm import envs
 from vllm.distributed import get_pp_group, get_tp_group
-from vllm.forward_context import get_forward_context
+from vllm.forward_context import get_forward_context, in_piecewise_cudagraph
 from vllm.logger import init_logger
 from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
 from vllm.models.qwen4_exp.amd.mono import layout as L
@@ -304,6 +304,10 @@ class MonoDecode:
     def eligible(self, input_ids, intermediate_tensors):
         """A pure decode step of at most ``MAX_TOKENS`` rows."""
         if not self.ok or intermediate_tensors is not None:
+            return False
+        # A piecewise step runs (or captures) the compiled stock model's graphs;
+        # taking it here would leave them uncaptured for the prefills of that size.
+        if in_piecewise_cudagraph():
             return False
         if input_ids is None or not 1 <= input_ids.size(0) <= L.MAX_TOKENS:
             return False
