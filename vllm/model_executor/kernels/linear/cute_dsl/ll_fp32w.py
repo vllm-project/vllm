@@ -124,7 +124,7 @@ class LLFp32WGemm(VllmJitKernel["LLFp32WGemm.CompileKey"]):
         )
 
     def compile(self, compile_key: CompileKey) -> None:
-        if self._compiled_cache_contains(compile_key):
+        if compile_key in self._compiled_cache:
             return
         if compile_key.token_groups not in (1, 2):
             raise ValueError("ll_fp32w_gemm supports token_groups 1 or 2")
