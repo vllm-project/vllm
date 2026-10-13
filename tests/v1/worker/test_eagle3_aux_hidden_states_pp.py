@@ -105,7 +105,7 @@ def minimax_pp_stage(monkeypatch):
                 model_config=SimpleNamespace(hf_text_config=config),
                 quant_config=None,
                 speculative_config=None,
-                use_v2_model_runner=False,
+                use_v2_model_runner=True,
             )
         )
         model._set_aux_hidden_state_layers(taps)

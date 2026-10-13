@@ -528,6 +528,7 @@ def test_padded_moe_reload_releases_each_layer(
         layer.quant_method = method
         layer.expert_map_manager = SimpleNamespace(map_global_to_local=lambda i: i)
         layer._loaded_expert_biases = set()
+        layer._fused_shared_expert_quantizer = None
         method.create_weights(
             layer,
             experts,
