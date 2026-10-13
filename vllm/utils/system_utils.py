@@ -16,7 +16,6 @@ import psutil
 
 import vllm.envs as envs
 from vllm.logger import init_logger, set_vllm_process_name
-from vllm.platforms import current_platform
 from vllm.platforms.interface import in_wsl
 from vllm.ray.lazy_utils import is_in_ray_actor
 
