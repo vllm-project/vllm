@@ -24,8 +24,17 @@ def _k3_config(**over):
     return fake_vllm_config(**{**cfg, **over})
 
 
-@pytest.mark.parametrize("k, want", [(7, (8,)), (3, (4, 8)), (1, (2, 4, 6, 8))])
-def test_widths_are_whole_requests_up_to_eight_rows(k, want):
+@pytest.mark.parametrize(
+    "k, want",
+    [
+        (7, tuple(range(8, 65, 8))),
+        (3, tuple(range(4, 65, 4))),
+        (1, tuple(range(2, 65, 2))),
+        (15, (16, 32, 48, 64)),
+        (63, (64,)),
+    ],
+)
+def test_widths_are_whole_requests_up_to_max_rows(k, want):
     cfg = _k3_config(**{"speculative_config.num_speculative_tokens": k})
     assert MONO_SPEC.widths(cfg) == want
 
@@ -65,7 +74,7 @@ def test_supported_config_is_accepted(monkeypatch):
     "over, reason",
     [
         ({"speculative_config": None}, "needs speculative decoding"),
-        ({"speculative_config.num_speculative_tokens": 8}, "exceed 8"),
+        ({"speculative_config.num_speculative_tokens": 64}, "exceed 64"),
         ({"parallel_config.tensor_parallel_size": 4}, "needs TP8"),
         ({"kv_transfer_config": object()}, "kv_connector"),
         (

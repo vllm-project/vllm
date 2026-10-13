@@ -7,7 +7,7 @@
 - FFN layers (MLA): vLLM's AttnRes and MLA up to o_proj's input, then K2 (o_proj,
   its all-reduce, the MLP AttnRes and the latent MoE).
 
-A launch serves whole spec-verify requests, at most 8 rows. Weights are views
+A launch serves whole spec-verify requests, at most 64 rows. Weights are views
 of the loaded parameters (``weight_source="views"``), pinned by the MoE
 backend; every refusal stage reports every reason.
 """
@@ -30,7 +30,7 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
 TP = 8
-MAX_TOKENS = 8  # a launch's x rows fit one CTA's LDS
+MAX_TOKENS = 64  # a launch's rows: the MoE route table's token bitmaps
 WHOLE, FFN = "whole", "ffn"
 
 

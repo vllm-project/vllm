@@ -1,7 +1,7 @@
 # Kimi-K3 mono decode (MI355X)
 
 A MonoKernel as RFC #60904 proposes, opt-in with `--monokernel`. A pure
-spec-verify step of at most 8 rows runs each MoE decoder layer as persistent
+spec-verify step of at most 64 rows runs each MoE decoder layer as persistent
 FlyDSL launches (256 CTAs, all resident), the TP all-reduces in-kernel over
 peer memory:
 
