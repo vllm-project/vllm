@@ -199,6 +199,11 @@ def test_is_reasoning_end_ignores_stale_close_from_prior_turn():
             id="open_marker_consumed_as_generation_prefix",
         ),
         pytest.param([*RESPONSE_OPEN_IDS, 11, 12], 0, id="response_only"),
+        pytest.param(
+            [ord("\n"), *RESPONSE_OPEN_IDS, *map(ord, "{}")],
+            6,
+            id="response_open_after_consumed_prefix_is_reasoning",
+        ),
         pytest.param([*OPEN_IDS, 9, 10], 2, id="unterminated_after_open"),
         pytest.param([9, 10, 11], 3, id="unterminated_without_markers"),
         pytest.param([], 0, id="empty"),
