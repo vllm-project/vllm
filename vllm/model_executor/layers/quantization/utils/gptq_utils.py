@@ -20,6 +20,27 @@ else:
     AutoGPTQConfig = object
 
 
+def gptq_qzeros_to_standard_format(
+    qzeros: torch.Tensor, size_bits: int, stores_zero_minus_one: bool
+) -> torch.Tensor:
+    """Convert GPTQ qzeros to the layout the WNA16 kernels take for zero points.
+
+    GPTQ stores qzeros as (G, N // pack) int32, packed along the output dim.
+    The v1 checkpoint format (AutoGPTQ, GPTQModel "gptq") stores z - 1; the
+    "gptq_v2" format stores z. Returns raw zero points as (N // pack, G),
+    still packed along the output dim (the compressed-tensors layout, which
+    is also what the AWQ path converts to). The +1 is applied per element
+    modulo 2**size_bits, so it never carries into the neighbouring value.
+    """
+    mask = (1 << size_bits) - 1
+    shifts = torch.arange(0, 32, size_bits, dtype=torch.int32, device=qzeros.device)
+    unpacked = (qzeros.unsqueeze(-1) >> shifts) & mask  # (G, N // pack, pack)
+    if stores_zero_minus_one:
+        unpacked = (unpacked + 1) & mask
+    repacked = (unpacked.to(torch.int32) << shifts).sum(dim=-1, dtype=torch.int32)
+    return repacked.t().contiguous()
+
+
 def normalize_and_validate_gptq_desc_act(
     desc_act: bool,
     group_size: int | None,
@@ -73,13 +94,7 @@ def override_config(config: AutoGPTQConfig, prefix: str):
     if isinstance(is_sym, bool):
         config.is_sym = is_sym
 
-    if (config.weight_bits, config.is_sym) not in config.TYPE_MAP:
-        raise ValueError(
-            "Unsupported quantization config: "
-            f"bits={config.weight_bits}, sym={config.is_sym}"
-        )
-
-    config.quant_type = config.TYPE_MAP[(config.weight_bits, config.is_sym)]
+    config.quant_type = config.get_quant_type(config.weight_bits, config.is_sym)
 
 
 def get_dynamic_override(
