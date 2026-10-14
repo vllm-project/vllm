@@ -43,7 +43,7 @@ from vllm.renderers.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
     has_non_text_content,
-    normalize_reasoning_content,
+    normalize_message_reasoning_content,
 )
 from vllm.sampling_params import (
     BeamSearchParams,
@@ -540,9 +540,11 @@ class ChatCompletionRequest(OpenAIBaseModel):
     def _normalize_messages_before(cls, data: Any) -> Any:
         """Pre-process message dicts before Pydantic field validation.
 
-        Converts tool_calls generators/iterators to lists so one-shot
-        generators are not consumed during union type matching, then
-        normalizes the deprecated ``reasoning_content`` field.
+        Performs two normalizations in a single pass:
+        - Converts tool_calls generators/iterators to lists so one-shot
+          generators are not consumed during union type matching.
+        - Renames the deprecated ``reasoning_content`` field to
+          ``reasoning`` so downstream code only needs to check one field.
         """
         if not isinstance(data, dict):
             return data
@@ -555,7 +557,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
             tool_calls = msg.get("tool_calls")
             if tool_calls is not None and not isinstance(tool_calls, list):
                 msg["tool_calls"] = list(tool_calls)
-        return normalize_reasoning_content(data)
+            normalize_message_reasoning_content(msg)
+        return data
 
     @model_validator(mode="after")
     def _materialize_tool_calls_after(self) -> "ChatCompletionRequest":
