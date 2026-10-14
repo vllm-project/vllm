@@ -2941,6 +2941,7 @@ class VllmConfig:
 
         if speculative_config is not None:
             if speculative_config.method in (
+                "ngram_hint",
                 "suffix",
                 "medusa",
                 "mlp_speculator",
