@@ -362,6 +362,7 @@ def run_multi_api_server(args: argparse.Namespace):
                 engine_count=expected_engine_count,
                 data_parallel_size=parallel_config.data_parallel_size,
                 stats_update_address=stats_update_address,
+                model_config=vllm_config.model_config,
             )
         else:
             # Start API server(s).
