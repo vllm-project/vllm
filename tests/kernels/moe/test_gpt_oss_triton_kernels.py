@@ -37,6 +37,7 @@ from vllm.model_executor.layers.fused_moe.experts.gpt_oss_triton_kernels_moe imp
 )
 from vllm.model_executor.layers.fused_moe.oracle import mxfp4 as mxfp4_oracle
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import Mxfp4MoeBackend
+from vllm.model_executor.layers.quantization.utils import mxfp4_utils
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import mx_scale_kwargs
 from vllm.utils.math_utils import round_up
 
@@ -317,10 +318,11 @@ def test_equiv(num_token, a_dtype, w_dtype, tp, workspace_init):
         pc2,
     ) = init_compute_data(M, K, N, E, a_dtype, w_dtype, num_warps=8)
 
-    if current_platform.is_device_capability_family(
-        100
-    ) or current_platform.is_device_capability_family(120):
-        # Mirrors `_swizzle_mxfp4`; SM12x also needs epilogue_subtile=1.
+    if any(
+        current_platform.is_device_capability_family(family)
+        for family in (100, 110, 120)
+    ):
+        # Mirrors `_swizzle_mxfp4`.
         constraints = {
             "is_persistent": True,
             "epilogue_subtile": 1,
@@ -376,23 +378,49 @@ def test_sm12x_block_m(num_rows, num_experts, expected):
     assert _sm12x_block_m(num_rows, num_experts) == expected
 
 
-@pytest.mark.parametrize("sm12x", [True, False])
-def test_gpt_oss_priority_prefers_marlin_on_sm12x(
-    monkeypatch: pytest.MonkeyPatch, sm12x: bool
+@pytest.mark.parametrize(
+    ("family", "marlin_first"), [(None, False), (100, False), (110, True), (120, True)]
+)
+def test_gpt_oss_priority_triton_vs_marlin(
+    monkeypatch: pytest.MonkeyPatch, family: int | None, marlin_first: bool
 ):
-    """SM12x runs the OAI Triton kernels at small tiles only, so MARLIN must
-    stay the default there while TRITON remains selectable explicitly."""
+    """MARLIN stays the default on SM110 (unbenchmarked) and SM12x (small tiles
+    only) while TRITON remains selectable explicitly."""
     monkeypatch.setattr(mxfp4_oracle.current_platform, "is_cuda", lambda: True)
     monkeypatch.setattr(
         mxfp4_oracle.current_platform,
         "is_device_capability_family",
-        lambda family: sm12x and family == 120,
+        lambda f: f == family,
     )
     order = mxfp4_oracle._get_priority_backends_for_gpt_oss()
     triton_first = order.index(Mxfp4MoeBackend.TRITON) < order.index(
         Mxfp4MoeBackend.MARLIN
     )
-    assert triton_first is not sm12x
+    assert triton_first is not marlin_first
+
+
+@pytest.mark.parametrize("family", [110, 120])
+def test_swizzle_mxfp4_pins_epilogue_subtile(
+    monkeypatch: pytest.MonkeyPatch, family: int
+):
+    """Without epilogue_subtile=1 the opt_flags heuristic picks a subtiled
+    epilogue with SWAP_XW, which fails to compile in matmul_ogs (#61374)."""
+    monkeypatch.setattr(
+        mxfp4_utils.current_platform, "is_device_capability", lambda cap: False
+    )
+    monkeypatch.setattr(
+        mxfp4_utils.current_platform,
+        "is_device_capability_family",
+        lambda f: f == family,
+    )
+    monkeypatch.setattr(opt_flags, "_opt_flags_constraints", {})
+    w = torch.zeros(1, 256, 128, dtype=torch.uint8, device="cuda")
+    scale = torch.zeros(1, 256, 8, dtype=torch.uint8, device="cuda")
+    mxfp4_utils._swizzle_mxfp4(w, scale)
+    assert opt_flags._opt_flags_constraints == {
+        "is_persistent": True,
+        "epilogue_subtile": 1,
+    }
 
 
 def test_unit_shuffle():
