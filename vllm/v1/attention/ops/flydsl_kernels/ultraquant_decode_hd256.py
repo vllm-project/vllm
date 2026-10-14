@@ -9,8 +9,6 @@
 #   [0:128) K FP4 codes; [128:136) K UE8M0; [136:264) V FP4; [264:272) V UE8M0
 # QK MFMA: A=K, B=Q → C[token, query]; PV MFMA: A=V_T, B=P → C[head_dim, query]
 
-from __future__ import annotations
-
 import math
 
 import flydsl.compiler as flyc
@@ -18,8 +16,6 @@ import flydsl.expr as fx
 from aiter.ops.flydsl.kernels import buffer_ops
 from flydsl.expr import arith, const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr.typing import T
-from flydsl.runtime.device import get_rocm_arch as get_hip_arch
-from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 
 # === Constants (256-wide-head ultraquant decode profile) =======================
 HEAD_SIZE = 256
@@ -65,8 +61,6 @@ Q_ROW_SHIFT = Q_GROUPS_PER_ROW.bit_length() - 1  # 5 for 256
 Q_COL_MASK = Q_GROUPS_PER_ROW - 1  # 31 for 256
 
 # LDS regions
-CENTROID_LDS_BYTES = N_CENTROIDS * 4  # 64
-
 # KV LDS rows are padded by 16 B to reduce bank conflicts while preserving
 # ds_read/ds_write_b128 alignment.
 KV_ROW_PAD_ELEMS = 8
@@ -81,8 +75,6 @@ SCALE_LDS_BYTES = TILE_SIZE * N_GROUPS * 4  # 16*8*4 = 512 for 256
 
 LOG2E = 1.4426950408889634
 NEG_INF_VAL = float("-inf")
-
-allocator = None
 
 
 def build_ultraquant_decode_hd256_module(
@@ -167,8 +159,6 @@ def build_ultraquant_decode_hd256_module(
     )
     assert _PADDED_SLOT % 4 == 0, f"padded_slot={_PADDED_SLOT} must be 4-byte aligned"
 
-    arch = get_hip_arch()
-
     if softmax_scale is None:
         softmax_scale = 1.0 / (HEAD_SIZE**0.5)
     _qk_scale = float(softmax_scale)
@@ -197,32 +187,13 @@ def build_ultraquant_decode_hd256_module(
     _stride_ml_seq = _stride_es_seq
 
     # --- LDS layout ---
-    # `allocator` is intentionally a BUILD-LOCAL captured by the kernel closure
-    # (a freevar), NOT a module global. The @flyc.jit drift guard
-    # (_check_globals_drift) snapshots every module global referenced by the JIT
-    # launcher's dependency tree (which includes this kernel) and ABORTS if one
-    # changes between compiles. When more than one partition variant is
-    # JIT-resident at once (e.g. a ragged/adaptive batch mixes num_partitions
-    # 256 and 512, or fixed cap=512 yields 294@75k and 512@131k), each build
-    # created a fresh SmemAllocator; as a reassigned MODULE GLOBAL that tripped
-    # "global 'allocator' changed since first compile" and crashed the worker.
-    # Keeping it local + a per-variant symbol name lets the variants coexist.
-    # The build-local is handed to the launcher via a module attribute set AFTER
-    # the kernel is built (see end of function); that assignment is safe because
-    # no @flyc.jit function references the module global anymore.
-    allocator = SmemAllocator(
-        None,
-        arch=arch,
-        global_sym_name=(f"ultraquant_hd256_smem_p{int(num_partitions)}"),
-    )
-    centroid_off = 0
-    allocator.ptr = CENTROID_LDS_BYTES
-    q_off = allocator.ptr
-    allocator.ptr += _Q_LDS_BYTES
-    kv_off = allocator.ptr
-    allocator.ptr += KV_TILE_LDS_BYTES_PADDED
-    scale_off = allocator.ptr
-    allocator.ptr += SCALE_LDS_BYTES
+    # Q and the KV tile share one allocation: for QG < 16 the Q reads of MFMA
+    # rows QG..15 run past the Q rows into the KV tile (see the docstring).
+    @fx.struct
+    class SharedStorage:
+        cent: fx.Array[fx.Float32, N_CENTROIDS]
+        q_kv: fx.Array[fx.Int32, (_Q_LDS_BYTES + KV_TILE_LDS_BYTES_PADDED) // 4, 16]
+        scale: fx.Array[fx.Int32, SCALE_LDS_BYTES // 4, 16]
 
     @flyc.kernel
     def ultraquant_decode_hd256_kernel(
@@ -254,17 +225,14 @@ def build_ultraquant_decode_hd256_module(
         ml_rsrc = buffer_ops.create_buffer_resource(max_logits_ptr, max_size=True)
 
         # ---- LDS pointers -----------------------------------------------
-        base = allocator.get_base()
-        cent_lds = SmemPtr(base, centroid_off, T.f32, shape=(N_CENTROIDS,))
-        q_lds_i32 = SmemPtr(base, q_off, T.i32, shape=(_Q_LDS_BYTES // 4,)).get()
-        q_lds_i64 = SmemPtr(base, q_off, T.i64, shape=(_Q_LDS_BYTES // 8,)).get()
-        kv_lds_i32 = SmemPtr(
-            base, kv_off, T.i32, shape=(KV_TILE_LDS_BYTES_PADDED // 4,)
-        ).get()
-        kv_lds_i64 = SmemPtr(
-            base, kv_off, T.i64, shape=(KV_TILE_LDS_BYTES_PADDED // 8,)
-        ).get()
-        scale_lds_i32 = SmemPtr(base, scale_off, T.i32, shape=(TILE_SIZE * N_GROUPS,))
+        lds = fx.SharedAllocator().allocate(SharedStorage).peek()
+        cent_lds = lds.cent
+        scale_lds = lds.scale
+        q_lds_i32 = lds.q_kv.ptr
+        q_lds_i64 = fx.recast_iter(fx.Int64, q_lds_i32)
+        kv_lds_i32 = q_lds_i32 + _Q_LDS_BYTES // 4
+        kv_lds_i64 = fx.recast_iter(fx.Int64, kv_lds_i32)
+        kv_lds_u8 = fx.recast_iter(fx.Uint8, kv_lds_i32)
 
         # ---- Constants ---------------------------------------------------
         NEG_INF = fx.Float32(NEG_INF_VAL)
@@ -288,7 +256,7 @@ def build_ultraquant_decode_hd256_module(
         # ===== STEP A: Load centroids → LDS (cooperative, race-safe) =====
         c_idx_safe = lane & (N_CENTROIDS - 1)
         c_val = buffer_ops.buffer_load(cent_rsrc, c_idx_safe, vec_width=1, dtype=T.f32)
-        cent_lds.store(c_val, [fx.Index(c_idx_safe)])
+        cent_lds[c_idx_safe] = c_val
         gpu.barrier()
 
         # ===== STEP B': in-kernel Q rotation (fused WHT) ==================
@@ -403,9 +371,7 @@ def build_ultraquant_decode_hd256_module(
                             _elems = [_hc[_half * 16 + _q4 * 8 + _e] for _e in range(8)]
                             _vec = fx.Vector.from_elements(_elems, dtype=fx.BFloat16)
                             _dst = _qrow_elem + _perm_base + (_half * 32 + _q4 * 8)
-                            _vec.bitcast(fx.Int32).store(
-                                q_lds_i32, [fx.Index(_dst // 2)]
-                            )
+                            (q_lds_i32 + _dst // 2).store(_vec.bitcast(fx.Int32))
             gpu.barrier()
 
         # ===== STEP B: Load pre-rotated q_rot → row-major Q LDS ==========
@@ -424,7 +390,7 @@ def build_ultraquant_decode_hd256_module(
                 dtype=T.i32,
             )
             q_lds_byte = row * (HEAD_SIZE * 2) + col_elem * 2
-            fx.Vector(q_v).store(q_lds_i32, [fx.Index(q_lds_byte // 4)])
+            (q_lds_i32 + q_lds_byte // 4).store(q_v)
         gpu.barrier()
 
         # Scaled-MFMA Q operands (loop-invariant): one per MFMA issue.
@@ -437,9 +403,7 @@ def build_ultraquant_decode_hd256_module(
                     + (h * GRPS_PER_ISSUE + mfma_col_grp) * 8
                     + j * 2
                 )
-                _q_hoist_v = fx.Vector.load(
-                    T.vec(2, T.i64), q_lds_i64, [fx.Index(_q_hoist_idx)]
-                )
+                _q_hoist_v = fx.Vector((q_lds_i64 + _q_hoist_idx).load(T.vec(2, T.i64)))
                 _q_hoist_words.append(
                     _bf16x8_to_fp8_i64(_q_hoist_v.bitcast(fx.BFloat16))
                 )
@@ -593,12 +557,10 @@ def build_ultraquant_decode_hd256_module(
                     grp = chunk_in_tok * 2 + hf
                     grp_shift = (grp & 3) * 8
                     kscale_byte = (kscale_word >> grp_shift) & 0xFF
-                    fx.Vector(k_packed_list[hf]).store(
-                        kv_lds_i32, [fx.Index(tok_in_tile * KFP4_ROW_I32 + grp * 4)]
+                    (kv_lds_i32 + (tok_in_tile * KFP4_ROW_I32 + grp * 4)).store(
+                        k_packed_list[hf]
                     )
-                    scale_lds_i32.store(
-                        kscale_byte, [fx.Index(tok_in_tile * N_GROUPS + grp)]
-                    )
+                    scale_lds[tok_in_tile * N_GROUPS + grp] = kscale_byte
                 gpu.barrier()
                 # QK: MFMA_ISSUES native scaled MFMAs over K=128,
                 # chained through the accumulator.
@@ -612,15 +574,11 @@ def build_ultraquant_decode_hd256_module(
                 qk_acc = zero_v4
                 for h in range_constexpr(MFMA_ISSUES):
                     grp = mfma_col_grp + h * GRPS_PER_ISSUE
-                    k_op = fx.Vector.load(
-                        T.vec(4, T.i32),
-                        kv_lds_i32,
-                        [fx.Index(mfma_row * KFP4_ROW_I32 + grp * 4)],
+                    k_op = (kv_lds_i32 + (mfma_row * KFP4_ROW_I32 + grp * 4)).load(
+                        T.vec(4, T.i32)
                     )
                     q_op = q_op_hoisted[h]
-                    scbyte = fx.Int32(
-                        scale_lds_i32.load([fx.Index(mfma_row * N_GROUPS + grp)])
-                    )
+                    scbyte = scale_lds[mfma_row * N_GROUPS + grp]
                     kscale = scbyte | 0x7F7F7F00
                     qk_acc = rocdl.mfma_scale_f32_16x16x128_f8f6f4(
                         T.vec(4, T.f32),
@@ -703,9 +661,7 @@ def build_ultraquant_decode_hd256_module(
                             bf16_elems.append(v2[1])
                         v_bf16 = fx.Vector.from_elements(bf16_elems, dtype=fx.BFloat16)
                         v_lds_i64_idx = (v_lds_elem_base + hf * HALF_HDIMS + w * 8) // 4
-                        v_bf16.bitcast(fx.Int64).store(
-                            kv_lds_i64, [fx.Index(v_lds_i64_idx)]
-                        )
+                        (kv_lds_i64 + v_lds_i64_idx).store(v_bf16.bitcast(fx.Int64))
                 # HW V transpose cross-lane LDS fence (see 128 kernel).
                 rocdl.sched_barrier(0)
                 rocdl.s_waitcnt(0xC07F)
@@ -716,13 +672,9 @@ def build_ultraquant_decode_hd256_module(
                 # HW-transpose PV: V_lds row-major V[token][head_dim].
                 token_idx = lane >> 2
                 hd_sub = (lane & 3) * 4
-                v_lane_byte = kv_off + token_idx * KV_ROW_BYTES + hd_sub * 2
+                v_lane_byte = token_idx * KV_ROW_BYTES + hd_sub * 2
                 for h in range_constexpr(PV_N_CHUNKS):
-                    v_byte_i64 = fx.Int64(v_lane_byte + h * 32)
-                    v_ptr = buffer_ops.create_llvm_ptr(
-                        v_byte_i64,
-                        address_space=3,
-                    )
+                    v_ptr = fx.to_llvm_ptr(kv_lds_u8 + (v_lane_byte + h * 32))
                     v_op_raw = rocdl.ds_read_tr16_b64(
                         T.vec(4, T.i16),
                         v_ptr,
@@ -771,11 +723,4 @@ def build_ultraquant_decode_hd256_module(
             buffer_ops.buffer_store(running_max, ml_rsrc, ml_off)
             buffer_ops.buffer_store(running_sum, es_rsrc, es_off)
 
-    # Hand the build-local allocator to the launcher. `_get_kernel` reads
-    # `kmod.allocator` immediately after this returns (before the next build can
-    # run), so each launcher captures its own variant's allocator. This does NOT
-    # reintroduce the drift bug: the kernel above closes over the LOCAL
-    # `allocator`, so no @flyc.jit function references module-global `allocator`
-    # and it is never snapshotted by _check_globals_drift.
-    globals()["allocator"] = allocator
     return ultraquant_decode_hd256_kernel
