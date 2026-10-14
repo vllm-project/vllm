@@ -152,11 +152,9 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
         swa_kv_cache = self.swa_cache_layer.kv_cache
 
         # Split prefill and decode
-        num_decodes = swa_metadata.num_decodes
-        num_prefills = swa_metadata.num_prefills
         num_decode_tokens = swa_metadata.num_decode_tokens
 
-        if num_prefills > 0:
+        if swa_metadata.num_prefill_tokens > 0:
             self._forward_prefill(
                 q=q[num_decode_tokens:],
                 positions=positions[num_decode_tokens:],
@@ -166,7 +164,7 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
                 attn_metadata=flashmla_metadata,
                 swa_metadata=swa_metadata,
             )
-        if num_decodes > 0:
+        if num_decode_tokens > 0:
             self._forward_decode(
                 q=q[:num_decode_tokens],
                 kv_cache=self_kv_cache,

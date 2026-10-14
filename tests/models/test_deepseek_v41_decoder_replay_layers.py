@@ -124,6 +124,41 @@ def test_empty_replay_rank_still_runs_padded_collectives():
     assert not output.count_nonzero()
 
 
+@pytest.mark.parametrize("decode_tokens,prefill_tokens", [(0, 2), (2, 0), (0, 0)])
+def test_pcp_flashmla_skips_empty_replay_query_partitions(
+    decode_tokens, prefill_tokens
+):
+    """A retained batch may still have request metadata for an empty partition."""
+    from vllm.models.deepseek_v41.nvidia.flashmla import DeepseekV4FlashMLAAttention
+
+    layer = MagicMock()
+    layer.use_pcp = True
+    layer.compress_ratio = 0
+    layer.compressed_cache_prefix = None
+    layer.swa_cache_layer.prefix = "swa"
+    metadata = MagicMock(
+        num_decodes=1,
+        num_prefills=1,
+        num_decode_tokens=decode_tokens,
+        num_prefill_tokens=prefill_tokens,
+    )
+    layer._forward_prefill.side_effect = lambda **kw: kw["output"][
+        :prefill_tokens
+    ].fill_(3)
+    layer._forward_decode.side_effect = lambda **kw: kw["output"].fill_(5)
+    q = torch.zeros(5, 2, 3, device=DEVICE)
+    out = torch.full_like(q, -1)
+    with override_forward_context(_context({"swa": metadata})):
+        DeepseekV4FlashMLAAttention.forward_mqa(
+            layer, q, q, torch.arange(5, device=DEVICE), out
+        )
+    assert layer._forward_decode.call_count == int(decode_tokens > 0)
+    assert layer._forward_prefill.call_count == int(prefill_tokens > 0)
+    assert torch.all(out[:decode_tokens] == 5)
+    assert torch.all(out[decode_tokens : decode_tokens + prefill_tokens] == 3)
+    assert not out[decode_tokens + prefill_tokens :].count_nonzero()
+
+
 def test_no_replay_batch_runs_the_whole_batch():
     seen = {}
 

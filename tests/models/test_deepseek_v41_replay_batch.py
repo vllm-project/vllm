@@ -160,13 +160,41 @@ def test_replay_batch_keeps_each_request_window(state):
     assert context.dp_metadata is None and context.is_padding is None
 
 
-@pytest.mark.parametrize("query_len", [300, 0])
-def test_pcp_replay_keeps_local_slots_and_pads_to_peer(state, monkeypatch, query_len):
+@pytest.mark.parametrize(
+    "query_len,seq_len,global_start,global_end,keep_all,prefilling",
+    [
+        (300, 300, 0, 300, False, True),
+        (0, 0, 0, 300, False, False),
+        (100, 100, 0, 600, False, True),
+        (100, 500, 0, 600, False, True),
+        (100, 600, 0, 600, False, True),
+        (100, 1100, 1000, 1100, False, True),
+        (100, 500, 0, 600, True, True),
+        (6, 606, 600, 606, False, False),
+    ],
+)
+def test_pcp_replay_keeps_local_slots_and_pads_to_peer(
+    state,
+    monkeypatch,
+    query_len,
+    seq_len,
+    global_start,
+    global_end,
+    keep_all,
+    prefilling,
+):
     """Gathered cache slots must follow the new rank-major padded KV payload."""
     from vllm.models.deepseek_v41.nvidia import model_state
 
     state.pcp_size = 2
-    padding = WINDOW + 3
+    padding = max(WINDOW + 3, query_len if keep_all else 0)
+    state._keeps_rows_np[0] = keep_all
+    floor = (
+        global_end - WINDOW
+        if prefilling and not keep_all and global_end - global_start > WINDOW
+        else 0
+    )
+    kept = min(query_len, max(seq_len - floor, 0))
     gathers = []
 
     def all_gather(local, dim):
@@ -180,13 +208,17 @@ def test_pcp_replay_keeps_local_slots_and_pads_to_peer(state, monkeypatch, query
     def agree(tensor, **kwargs):
         # The other rank trims and needs WINDOW+3 payload rows; the empty
         # peer must follow the same collectives without inventing a real row.
-        tensor.copy_(torch.tensor([1, padding], dtype=tensor.dtype))
+        if tensor.ndim == 2:
+            tensor[0, 0] = global_end
+            tensor[1, 0] = -global_start
+        else:
+            tensor.copy_(torch.tensor([1, padding], dtype=tensor.dtype))
 
     monkeypatch.setattr(model_state.dist, "all_reduce", agree)
     batch = _input_batch(
         [query_len],
-        [query_len],
-        [bool(query_len)],
+        [seq_len],
+        [prefilling],
         num_tokens_after_padding=max(1, query_len),
     )
     local_slots = _slot_mappings(batch.num_tokens_after_padding)
@@ -203,7 +235,6 @@ def test_pcp_replay_keeps_local_slots_and_pads_to_peer(state, monkeypatch, query
         torch.zeros(1, dtype=torch.int32, device=DEVICE),
     )
     replay = state.decoder_replay_layers.replay_batch
-    kept = min(query_len, WINDOW)
     rows = torch.arange(query_len - kept, query_len, device=DEVICE)
     assert replay is not None and torch.equal(replay.rows, rows)
     assert torch.equal(gathers[0][:, :kept], (local_slots + 10000)[:, rows])
@@ -213,6 +244,8 @@ def test_pcp_replay_keeps_local_slots_and_pads_to_peer(state, monkeypatch, query
         padding - kept
     )
     assert state.builds[-1].batch.positions[kept:].count_nonzero() == 0
+    if kept:
+        assert state.builds[-1].replay_start.tolist() == [floor]
 
 
 def test_replay_batch_keeps_device_decode_boundaries(state):

@@ -241,6 +241,7 @@ class DeepseekV41ModelState(DefaultModelState):
                 self.max_num_tokens, dtype=torch.int64, device=device
             )
             self._kept_slot_mappings: torch.Tensor | None = None
+            self._kept_start_staging = UvaBufferPool(max_local_reqs, torch.int32)
             self._kept_kv_start = torch.zeros(
                 max_local_reqs, dtype=torch.int32, device=device
             )
@@ -480,6 +481,31 @@ class DeepseekV41ModelState(DefaultModelState):
         # A batch of context-free non-prefill rows is a dummy (an idle DP rank's):
         # nothing reads it and its idx_mapping hits stale slots, so keep one row.
         seq_lens = input_batch.seq_lens_cpu_upper_bound[:num_reqs].numpy()
+        global_floor = None
+        if self.pcp_size > 1:
+            # PCP segments share request-state indices. Recover each request's
+            # scheduled global range without reading device positions.
+            indices = input_batch.idx_mapping_np[:num_reqs]
+            bounds = torch.zeros((2, self.max_num_reqs), dtype=torch.int32)
+            bounds[1].fill_(torch.iinfo(torch.int32).min)
+            active = query_lens > 0
+            np.maximum.at(bounds[0].numpy(), indices[active], seq_lens[active])
+            np.maximum.at(
+                bounds[1].numpy(),
+                indices[active],
+                (query_lens - seq_lens)[active],
+            )
+            dist.all_reduce(
+                bounds, op=dist.ReduceOp.MAX, group=get_pcp_group().cpu_group
+            )
+            ends, negative_starts = bounds.numpy()[:, indices]
+            trims = (
+                input_batch.is_prefilling_np[:num_reqs]
+                & ~self._keeps_rows_np[indices]
+                & (ends + negative_starts > layers.window)
+            )
+            global_floor = np.where(trims, ends - layers.window, 0).astype(np.int32)
+            kept_lens = np.minimum(query_lens, np.maximum(seq_lens - global_floor, 0))
         is_dummy = not input_batch.is_prefilling_np[:num_reqs].any() and bool(
             (seq_lens == query_lens).all()
         )
@@ -526,6 +552,13 @@ class DeepseekV41ModelState(DefaultModelState):
             dp_metadata = DPMetadata.make(
                 self.vllm_config.parallel_config, num_padded, dp_tokens
             )
+        if global_floor is not None:
+            # The prefix layers still read replay_start. Stage the late layers'
+            # global floor separately, including segments that need no local trim.
+            kept_start = self._kept_start_staging.copy_to_gpu(
+                global_floor, out=self._kept_kv_start[:num_reqs]
+            )
+            replay_start = torch.maximum(replay_start, kept_start, out=kept_start)
         kept_batch, kept_slot_mappings = self._kept_input_batch(
             input_batch, slot_mappings, replay_start, kept_lens, num_padded
         )
