@@ -40,16 +40,19 @@ def _manager(
 ):
     init_none_hash(sha256)
     config = _make_hybrid_kv_cache_config(block_size, num_blocks, ["full", "mamba"])
+    groups = list(config.kv_cache_groups)
     if eagle_group is not None:
-        groups = list(config.kv_cache_groups)
         groups[eagle_group] = replace(groups[eagle_group], is_eagle_group=True)
-        config = replace(config, kv_cache_groups=groups)
+    elif lookahead:
+        # The scheduler clears ``use_eagle`` here, so flag the groups up front.
+        groups = [replace(group, is_eagle_group=True) for group in groups]
+    config = replace(config, kv_cache_groups=groups)
     return make_kv_cache_manager(
         kv_cache_config=config,
         max_model_len=1 << 20,
         enable_caching=True,
         hash_block_size=hash_block_size,
-        use_eagle=True,
+        use_eagle=not lookahead,
         use_lookahead_block_hashes=lookahead,
         num_prefill_lookahead=num_prefill_lookahead,
         enable_mamba_shared_prefix_checkpoint=shared_prefix_checkpoint,

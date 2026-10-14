@@ -133,10 +133,8 @@ class KVCacheCoordinator(ABC):
         # Conservatively fall back to flag all groups when no group is flagged.
         if use_eagle and not self.eagle_group_ids:
             self.eagle_group_ids = set(range(len(kv_cache_config.kv_cache_groups)))
-        # Lookahead hashes prove the boundary token, so no group drops a block.
-        self.drop_eagle_group_ids = (
-            set() if use_lookahead_block_hashes else self.eagle_group_ids
-        )
+        # Lookahead hashes clear ``use_eagle``: groups stay flagged, none drops.
+        self.drop_eagle_group_ids = self.eagle_group_ids if use_eagle else set()
 
         # During chunked prefill with EAGLE, the single next prefill lookahead
         # token past the chunk boundary is combined with the final hidden state
@@ -177,7 +175,7 @@ class KVCacheCoordinator(ABC):
             for i, kv_cache_group in enumerate(self.kv_cache_config.kv_cache_groups)
         )
         # Match Mamba checkpoints to Eagle's attention replay boundary.
-        if use_eagle and not use_lookahead_block_hashes:
+        if use_eagle:
             for manager in self.single_type_managers:
                 if isinstance(manager, MambaManager):
                     manager.drop_eagle_checkpoint_block = True
