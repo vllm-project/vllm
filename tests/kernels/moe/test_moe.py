@@ -20,9 +20,11 @@ import vllm.model_executor.layers.fused_moe.fused_moe as fused_moe_module
 from tests.kernels.moe.utils import (
     fused_moe,
     make_dummy_moe_config,
+    make_test_quant_config,
     modular_triton_fused_moe,
 )
 from tests.kernels.utils import opcheck, stack_and_dev, torch_experts, torch_moe
+from vllm import _custom_ops as ops
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.fused_moe import (
     MoEActivation,
@@ -42,6 +44,7 @@ from vllm.model_executor.layers.fused_moe.experts.marlin_moe import (
     batched_fused_marlin_moe,
     fused_marlin_moe,
 )
+from vllm.model_executor.layers.fused_moe.experts.triton_moe import TritonExperts
 from vllm.model_executor.layers.fused_moe.utils import (
     moe_use_td_hw_supported,
 )
@@ -2219,3 +2222,57 @@ def test_unquantized_bf16_flashinfer_trtllm_backend(
 
     close = torch.isclose(trtllm_output, baseline_output, atol=1e-1, rtol=0.85)
     assert close.float().mean() > 0.925
+
+
+@pytest.mark.parametrize("m,pad_row", [(3, 2), (8, 0)])
+def test_triton_experts_fp8_skips_unrouted_rows(m: int, pad_row: int):
+    # A padding token routed to expert -1 leaves its workspace rows unwritten
+    # (+inf here). They must not reach the dynamic per-tensor a2 scale, and the
+    # token's own output row must be zero. Its zero input keeps a1 unchanged.
+    set_random_seed(0)
+    e, n, k, topk = 8, 256, 512, 2
+    w1, w2, quant_config = make_test_quant_config(
+        e, n, k, torch.bfloat16, current_platform.fp8_dtype()
+    )
+    moe_config = make_dummy_moe_config(
+        e, experts_per_token=topk, hidden_dim=k, intermediate_size=n
+    )
+    experts = TritonExperts(moe_config, quant_config)
+    a = torch.randn(m, k, device="cuda", dtype=torch.bfloat16)
+    a[pad_row] = 0
+    topk_weights = torch.softmax(torch.randn(m, topk, device="cuda"), dim=-1)
+    topk_ids = torch.stack([torch.randperm(e, device="cuda")[:topk] for _ in range(m)])
+    topk_ids = topk_ids.to(torch.int32)
+    topk_ids[pad_row] = -1
+    full = functools.partial(torch.full, device="cuda", dtype=torch.bfloat16)
+
+    def run(rows: list[int]) -> torch.Tensor:
+        a1q, a1_scale = ops.scaled_fp8_quant(a[rows], None)
+        ws13, ws2, out_shape = experts.workspace_shapes(
+            len(rows), n, k, topk, e, e, None, MoEActivation.SILU
+        )
+        out = full(out_shape, float("nan"))
+        experts.apply(
+            output=out,
+            hidden_states=a1q,
+            w1=w1,
+            w2=w2,
+            topk_weights=topk_weights[rows],
+            topk_ids=topk_ids[rows],
+            activation=MoEActivation.SILU,
+            global_num_experts=e,
+            expert_map=None,
+            a1q_scale=a1_scale,
+            a2_scale=None,
+            workspace13=full(ws13, float("inf")),
+            workspace2=full(ws2, float("inf")),
+            expert_tokens_meta=None,
+            apply_router_weight_on_input=False,
+        )
+        return out
+
+    keep = [i for i in range(m) if i != pad_row]
+    with set_current_vllm_config(vllm_config):
+        out, ref = run(list(range(m))), run(keep)
+    torch.testing.assert_close(out[keep], ref)
+    assert torch.equal(out[pad_row], torch.zeros_like(out[pad_row]))

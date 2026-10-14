@@ -519,6 +519,14 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
                 activation, intermediate_cache2, intermediate_cache1.view(-1, N)
             )
 
+            if a2_scale_is_global:
+                # Top-k slots routed to a negative expert id (e.g. padding tokens
+                # under VLLM_MOE_SKIP_PADDING) are dropped by the alignment, so the
+                # first GEMM never writes their rows. Zero them so the dynamic
+                # per-tensor a2 amax below only sees routed rows.
+                intermediate_cache2.masked_fill_(
+                    (topk_ids.reshape(-1) < 0).unsqueeze(-1), 0
+                )
             qintermediate_cache2, a2q_scale = moe_kernel_quantize_input(
                 intermediate_cache2,
                 a2_scale,
@@ -614,9 +622,11 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         topk_ids: torch.Tensor | None = None,
         expert_map: torch.Tensor | None = None,
     ) -> None:
-        if expert_map is not None:
-            # Skip the slots whose expert is not on this rank: the rows the
-            # alignment dropped, or the zeros the `-1` blocks wrote.
+        if topk_ids is not None:
+            # Skip slots with a negative expert id (e.g. padding tokens under
+            # VLLM_MOE_SKIP_PADDING) and, with EP, slots whose expert is not on
+            # this rank: the rows the alignment dropped, or the zeros the `-1`
+            # blocks wrote.
             ops.moe_sum(input, output, topk_ids, expert_map)
         else:
             ops.moe_sum(input, output)
