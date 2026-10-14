@@ -585,6 +585,82 @@ def _ipc_mesh_probe(group, size: int, flags: int) -> str:
     return f"export {export}, attach {attach}"
 
 
+def _ipc_attach_ceiling(group, size: int, flags: int, limit: int) -> str:
+    """How many of a peer's exports attach before one is refused.
+
+    The export ceiling says nothing about the import side, and the dmabuf
+    implementation breaks there rather than on export, so without this the two
+    implementations cannot be compared at the point where each of them actually
+    fails. One rank exports and the others attach and hold, which means the
+    number the others report can never exceed what that one rank exported, so
+    both counts go into the line.
+    """
+    hip = _lib()
+    source = 0
+    mine = group.rank_in_group == source
+    ptrs: list[ctypes.c_void_p] = []
+    raws: list[bytes] = []
+    opened: list[ctypes.c_void_p] = []
+    stopped = f"no ceiling below {limit}"
+    try:
+        while mine and len(raws) < limit:
+            ptr = ctypes.c_void_p()
+            rc = hip.hipExtMallocWithFlags(
+                ctypes.byref(ptr), ctypes.c_size_t(size), ctypes.c_uint(flags)
+            )
+            if rc != 0:
+                hip.hipGetLastError()
+                stopped = f"malloc stopped first: {_err(rc)}"
+                break
+            ptrs.append(ptr)
+            handle = _HipIpcMemHandle()
+            rc = hip.hipIpcGetMemHandle(ctypes.byref(handle), ptr)
+            hip.hipGetLastError()
+            if rc != 0:
+                stopped = f"export failed: {_err(rc)}"
+                break
+            raws.append(bytes(handle.reserved))
+
+        gathered: list = [None] * group.world_size
+        try:
+            torch.distributed.all_gather_object(
+                gathered, raws if mine else None, group=group.cpu_group
+            )
+        except Exception as e:
+            return f"exchange failed {type(e).__name__}: {e}"
+
+        peer = gathered[source] or []
+        if mine:
+            return f"source, exported {len(raws)}, {stopped}"
+
+        for raw in peer:
+            theirs = _HipIpcMemHandle()
+            ctypes.memmove(ctypes.byref(theirs), raw, _HANDLE_BYTES)
+            got = ctypes.c_void_p()
+            rc = hip.hipIpcOpenMemHandle(
+                ctypes.byref(got), theirs, _IPC_LAZY_ENABLE_PEER_ACCESS
+            )
+            hip.hipGetLastError()
+            if rc != 0:
+                stopped = f"attach failed: {_err(rc)}"
+                break
+            opened.append(got)
+        return f"attached {len(opened)} of {len(peer)}, {stopped}"
+    finally:
+        for got in opened:
+            hip.hipIpcCloseMemHandle(got)
+        hip.hipGetLastError()
+        # The exporter has to outlive every attach, so nothing is freed until
+        # all of them have been closed.
+        try:
+            torch.distributed.barrier(group=group.cpu_group)
+        except Exception:
+            logger.warning("[EEP-DEBUG] attach ceiling barrier failed")
+        for ptr in ptrs:
+            hip.hipFree(ptr)
+        hip.hipGetLastError()
+
+
 def dump(tag: str, groups: dict | None = None, heavy: bool = False) -> None:
     """Heavy adds probes that perturb state, so they stay off at the points
     right before a collective we are trying to observe."""
@@ -619,6 +695,12 @@ def dump(tag: str, groups: dict | None = None, heavy: bool = False) -> None:
             }
         info["ipc_probe_6MiB"] = _ipc_probe(6 << 20)
         info["ipc_probe_plain_6MiB"] = _ipc_probe_plain(6 << 20)
+        # The drop from 1536 in prepare to about 120 at the door happens
+        # somewhere in between, and nothing has measured that stretch yet. A
+        # limit of 256 holds 1.5 GiB for under a tenth of a second, and the same
+        # measurement already runs immediately before a collective that then
+        # succeeds, so it is safe to take here too.
+        info["ipc_export_ceiling_6MiB_256"] = _ipc_export_ceiling(6 << 20, 256)
         if heavy:
             # Burst can exhaust export handles and foreign_device creates a
             # context on a neighbour card, so neither runs near the collective.
@@ -681,6 +763,19 @@ def warm_each(groups: dict, tag: str) -> None:
                     _ipc_mesh_probe(group, 2 << 20, 0x3),
                     _ipc_mesh_probe(group, 6 << 20, 0x0),
                 )
+                # The mesh probe attaches one buffer per peer, which answers
+                # whether attaching works at all but not how many fit. The two
+                # implementations fail on opposite sides, dmabuf on attach and
+                # legacy on export, so the import side needs its own count if
+                # the two are to be compared where each of them breaks.
+                logger.warning(
+                    "[EEP-DEBUG] %s warm %s attach rank=%s/%s 2MiB/uncached %s",
+                    tag,
+                    name,
+                    group.rank_in_group,
+                    group.world_size,
+                    _ipc_attach_ceiling(group, 2 << 20, 0x3, 256),
+                )
                 # The nearest ceiling measurement before this point is the one
                 # in prepare, which is far enough back that it cannot say
                 # whether the headroom was already gone when RCCL started or
@@ -688,16 +783,44 @@ def warm_each(groups: dict, tag: str) -> None:
                 # measures right at the door. The limit stays small on purpose:
                 # walking to 1536 here would hold 9 GiB and would itself be a
                 # suspect if the collective then failed.
+                # Four runs now show one rank falling to about 120 while the
+                # others stay above the limit, so the rank belongs on the line.
+                # Without it there is no way to tell whether it is the same rank
+                # every time, and if it is, that points at what consumes it.
+                #
+                # The measurement runs twice because on this machine the first
+                # of the two ends in a refusal, and a refused export releasing
+                # its slot is not something that can be checked where no ceiling
+                # is ever reached. Two equal numbers here mean the probe itself
+                # is not consuming anything, which is what makes the number on
+                # the far side of the collective readable.
                 logger.warning(
-                    "[EEP-DEBUG] %s warm %s headroom 6MiB/uncached %s",
+                    "[EEP-DEBUG] %s warm %s headroom rank=%s/%s"
+                    " 6MiB/uncached %s, again %s",
                     tag,
                     name,
+                    group.rank_in_group,
+                    group.world_size,
+                    _ipc_export_ceiling(6 << 20, 256),
                     _ipc_export_ceiling(6 << 20, 256),
                 )
                 if os.getenv("VLLM_EEP_DEBUG_SET_DEVICE") == "1":
                     torch.accelerator.set_device_index(group.device.index)
                 torch.distributed.all_reduce(tensor, group=group.device_group)
                 stream.synchronize()
+                # The same measurement on the far side of the collective. RCCL
+                # builds 32 channels in here and keeps their buffers, so if it
+                # consumes the resource this is where the number drops. If it
+                # comes back unchanged, RCCL only ever reads what was already
+                # spent, which is what every run so far suggests.
+                logger.warning(
+                    "[EEP-DEBUG] %s warm %s headroom after rank=%s/%s 6MiB/uncached %s",
+                    tag,
+                    name,
+                    group.rank_in_group,
+                    group.world_size,
+                    _ipc_export_ceiling(6 << 20, 256),
+                )
                 logger.warning("[EEP-DEBUG] %s warm %s ok", tag, name)
             except Exception as e:
                 logger.warning(
