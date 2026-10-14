@@ -143,22 +143,33 @@ def init_softmax_M(
 
 
 @triton.jit
-def decode_window_tile_range(
+def split_k_segment_layout(
     seq_len,
+    NUM_SEGMENTS: tl.constexpr,
     SLIDING_WINDOW: tl.constexpr,
     TILE_SIZE: tl.constexpr,
+    WINDOW_SEGMENTS: tl.constexpr,
 ):
-    """Tiles ``[first, end)`` a single decode query (position ``seq_len - 1``)
-    can attend to under a plain causal sliding window.
+    """Split-K (3D) segment layout of one sequence.
 
-    Matches the window pruning in ``compute_tile_loop_bounds`` for a query
-    length of 1; the launcher only uses it for such batches. Shared by the
-    segmented kernel and ``reduce_segments`` so both agree on how the window
-    is split into segments.
+    Returns ``(base_tile, tiles_per_segment, num_active)``: segment ``s``
+    covers tiles ``[base_tile + s * tiles_per_segment, base_tile + (s + 1) *
+    tiles_per_segment)`` and segments ``s >= num_active`` have no tiles. The
+    segments split the whole sequence, or with ``WINDOW_SEGMENTS`` only the
+    sliding window of a single decode query at position ``seq_len - 1`` (as
+    pruned by ``compute_tile_loop_bounds``). Shared by
+    ``kernel_unified_attention`` and ``reduce_segments``, which must agree on
+    the layout.
     """
-    first = tl.maximum(seq_len - SLIDING_WINDOW, 0) // TILE_SIZE
-    end = cdiv_fn(seq_len, TILE_SIZE)
-    return first, end
+    if WINDOW_SEGMENTS:
+        base_tile = tl.maximum(seq_len - SLIDING_WINDOW, 0) // TILE_SIZE
+        num_tiles = cdiv_fn(seq_len, TILE_SIZE) - base_tile
+    else:
+        base_tile = 0
+        num_tiles = cdiv_fn(seq_len, TILE_SIZE)
+    tiles_per_segment = cdiv_fn(num_tiles, NUM_SEGMENTS)
+    num_active = cdiv_fn(num_tiles, tiles_per_segment)
+    return base_tile, tiles_per_segment, num_active
 
 
 @triton.jit

@@ -18,15 +18,14 @@ from vllm.triton_utils import tl, triton
 from vllm.v1.attention.ops.triton_attention_helpers import (
     apply_alibi_to_score,
     apply_softcap,
-    cdiv_fn,
     compute_kv_seq_mask,
     compute_tile_loop_bounds,
-    decode_window_tile_range,
     find_seq_idx,
     init_softmax_M,
     load_qq_bias_tile,
     resolve_seq_and_query_len,
     softmax_step,
+    split_k_segment_layout,
     store_segm_reduce_scalars,
 )
 from vllm.v1.kv_cache_interface import KVQuantMode
@@ -328,16 +327,10 @@ def kernel_unified_attention(
         return
 
     if IS_3D:
-        if WINDOW_SEGMENTS:
-            win_lo, win_hi = decode_window_tile_range(
-                seq_len, SLIDING_WINDOW, TILE_SIZE
-            )
-            tiles_per_segment = cdiv_fn(win_hi - win_lo, NUM_SEGMENTS_PER_SEQ)
-            segm_base_tile = win_lo
-        else:
-            tiles_per_segment = cdiv_fn(seq_len, NUM_SEGMENTS_PER_SEQ * TILE_SIZE)
-            segm_base_tile = 0
-        if (segm_base_tile + segm_idx * tiles_per_segment) * TILE_SIZE >= seq_len:
+        segm_base_tile, tiles_per_segment, num_active_segments = split_k_segment_layout(
+            seq_len, NUM_SEGMENTS_PER_SEQ, SLIDING_WINDOW, TILE_SIZE, WINDOW_SEGMENTS
+        )
+        if segm_idx >= num_active_segments:
             return
     else:
         tiles_per_segment = 0
@@ -757,14 +750,9 @@ def reduce_segments(
         return
 
     # number of segments for this particular sequence
-    num_segments = NUM_SEGMENTS_PER_SEQ
-    if WINDOW_SEGMENTS:
-        win_lo, win_hi = decode_window_tile_range(seq_len, SLIDING_WINDOW, TILE_SIZE)
-        tiles_per_segment = cdiv_fn(win_hi - win_lo, num_segments)
-        act_num_segments = cdiv_fn(win_hi - win_lo, tiles_per_segment)
-    else:
-        tiles_per_segment = cdiv_fn(seq_len, num_segments * TILE_SIZE)
-        act_num_segments = cdiv_fn(seq_len, tiles_per_segment * TILE_SIZE)
+    _, _, act_num_segments = split_k_segment_layout(
+        seq_len, NUM_SEGMENTS_PER_SEQ, SLIDING_WINDOW, TILE_SIZE, WINDOW_SEGMENTS
+    )
 
     # create masks for subsequent loads
     segm_mask = tl.arange(0, NUM_SEGMENTS_PER_SEQ) < tl.full(
@@ -1122,7 +1110,7 @@ def unified_attention(
     # With a sliding window, splitting the whole sequence into segments leaves
     # most of them outside the window once seq_len exceeds it. For a plain
     # causal window and one query token per sequence (what
-    # decode_window_tile_range assumes), split only the window's tiles
+    # split_k_segment_layout assumes), split only the window's tiles
     # instead. Every other case keeps the whole-sequence split.
     window_segments = (
         use_3d
