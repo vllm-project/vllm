@@ -12,6 +12,8 @@ per-step shuffle.
 
 import torch
 
+from vllm.model_executor.model_loader.weight_utils import composed_weight_loader
+
 HEAD_DIM = 512
 Q_CHUNK = 16
 O_CHUNK = 32
@@ -60,27 +62,13 @@ def _bytes_view(t: torch.Tensor) -> torch.Tensor:
     return t.view(torch.uint8) if t.element_size() == 1 else t
 
 
-def permute_wq_b_(
-    weight: torch.Tensor, weight_scale: torch.Tensor, num_local_heads: int
-) -> None:
-    """Permute an MXFP8 ``wq_b`` shard's rows and per-row scales, in place."""
-    head_dim = weight.shape[0] // num_local_heads
-    perm = q_fused_permutation(num_local_heads, head_dim).to(weight.device)
-    for t in (weight, weight_scale):
-        b = _bytes_view(t)
-        b.copy_(b[perm])
+def permute_on_load(param: torch.Tensor, perm: torch.Tensor, dim: int) -> None:
+    """Make ``param``'s weight loader gather the loaded shard by ``perm``."""
 
+    def gather(t: torch.Tensor) -> torch.Tensor:
+        return _bytes_view(t).index_select(dim, perm.to(t.device)).view(t.dtype)
 
-def permute_wo_a_(
-    weight: torch.Tensor,
-    weight_scale: torch.Tensor,
-    heads_per_group: int = WV_GROUP_SIZE,
-) -> None:
-    """Permute an MXFP8 ``wo_a`` shard's input columns and scales, in place."""
-    head_dim = weight.shape[1] // heads_per_group
-    perm = o_fused_permutation(heads_per_group, head_dim).to(weight.device)
-    w = _bytes_view(weight)
-    w.copy_(w[:, perm])
-    chunk_perm = o_fused_chunk_permutation(heads_per_group, head_dim)
-    s = _bytes_view(weight_scale)
-    s.copy_(s[:, chunk_perm.to(weight.device)])
+    param.weight_loader = composed_weight_loader(  # type: ignore[attr-defined]
+        param.weight_loader,  # type: ignore[attr-defined]
+        gather,
+    )

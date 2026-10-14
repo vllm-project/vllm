@@ -16,7 +16,7 @@ via Gemma4MultimodalEmbedder.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Sequence
 from types import SimpleNamespace
 from typing import Any
 
@@ -25,7 +25,7 @@ import torch
 import torch._dynamo
 from torch import nn
 from torch.nn import functional as F
-from transformers import AutoModel
+from transformers import AutoModel, DiffusionGemmaConfig
 
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
@@ -113,26 +113,13 @@ class DiffusionGemmaSelfConditioning(nn.Module):
 
 
 class DiffusionGemmaProcessingInfo(Gemma4ProcessingInfo):
-    """Processing info for DiffusionGemma.
+    """Processing info for DiffusionGemma, which has no audio tower."""
 
-    Overrides ``get_hf_config`` to accept ``DiffusionGemmaConfig``
-    (which inherits from ``PreTrainedConfig``, not ``Gemma4Config``).
-    Supports image and video modalities.
-    """
+    def get_hf_config(self) -> DiffusionGemmaConfig:
+        return self.ctx.get_hf_config(DiffusionGemmaConfig)
 
-    def get_hf_config(self):
-        # DiffusionGemmaConfig doesn't inherit from Gemma4Config, so we
-        # accept any PreTrainedConfig here.
-        return self.ctx.get_hf_config()
-
-    def get_supported_mm_limits(self) -> Mapping[str, int | None]:
-        # DiffusionGemma supports image and video inputs.
-        return {"image": None, "video": None}
-
-    def get_mm_max_tokens_per_item(
-        self, seq_len: int, mm_counts: Mapping[str, int]
-    ) -> Mapping[str, int] | None:
-        return super().get_mm_max_tokens_per_item(seq_len, mm_counts)
+    def has_audio(self) -> bool:
+        return False
 
 
 @torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)
@@ -281,17 +268,6 @@ class DiffusionGemmaForConditionalGeneration(
             self_conditioning_size=sc_size,
             eps=getattr(text_config, "rms_norm_eps", 1e-6),
         )
-
-    def compute_self_conditioning(
-        self,
-        inputs_embeds: torch.Tensor,
-        probs: torch.Tensor,
-    ) -> torch.Tensor:
-        embed_weight = self.model.embed_tokens.weight
-        soft_embeds = torch.matmul(
-            probs.to(embed_weight.dtype), embed_weight
-        ) * self.model.normalizer.to(inputs_embeds.dtype)
-        return self.self_conditioning(inputs_embeds, soft_embeds)
 
     # ------------------------------------------------------------------ #
     # Multimodal: reuse Gemma4's image parsing, processing & embedding
@@ -445,11 +421,6 @@ def _mask_rows_to_allowed(
     return logits if out is None else out
 
 
-# Tiles specialize the graph on batch size 1, on a tile as wide as the canvas,
-# on compute_sc and on sizes that coincide with the state buffers. That set
-# is small but passes Dynamo's default of 8, after which every step would run
-# eager: about twice as slow for a self-conditioned step.
-@torch._dynamo.config.patch(recompile_limit=64)
 @torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)
 def _denoise_temperature(
     step_tensor: torch.Tensor,
@@ -464,6 +435,12 @@ def _denoise_temperature(
     return t_min + (t_max - t_min) * (remaining / max_denoising_steps)
 
 
+# Tiles specialize the graph on batch size 1, on a tile as wide as the canvas,
+# on compute_sc and on sizes that coincide with the state buffers. That set
+# is small but passes Dynamo's default of 8, after which every step would run
+# eager: about twice as slow for a self-conditioned step.
+@torch._dynamo.config.patch(recompile_limit=64)
+@torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)
 def _compiled_sample_step(
     # Per-position statistics of the temperature-scaled logits, from
     # sample_row_stats: [num_decode, CL] each, and the softmax
