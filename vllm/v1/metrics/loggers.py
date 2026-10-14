@@ -629,7 +629,8 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         gauge_kv_cache_capacity = self._gauge_cls(
             name="vllm:kv_cache_capacity_bytes",
             documentation=(
-                "Physical KV-cache backing capacity in bytes per DP engine."
+                "Device KV-cache backing capacity in bytes per DP engine, "
+                "excluding host pools and allocator padding."
             ),
             multiprocess_mode="mostrecent",
             labelnames=labelnames,

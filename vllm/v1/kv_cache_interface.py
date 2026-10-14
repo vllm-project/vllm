@@ -1504,11 +1504,15 @@ class KVCacheConfig:
 
     @property
     def allocated_bytes(self) -> int:
-        """Bytes in this worker's physical KV cache backing allocation."""
-        if not self.kv_cache_tensors:
+        """Device KV backing bytes, excluding host pools and allocator padding."""
+        sizes = {
+            tensor.size for tensor in self.kv_cache_tensors if not tensor.host_resident
+        }
+        if not sizes:
             return 0
-        sizes = {tensor.size for tensor in self.kv_cache_tensors}
-        assert len(sizes) == 1, "KV cache tensors must share one backing allocation."
+        assert len(sizes) == 1, (
+            "Device KV cache tensors must share one backing allocation."
+        )
         return sizes.pop()
 
     @cached_property
