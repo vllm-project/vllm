@@ -212,6 +212,12 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
 
     can_return_lse_for_decode: bool = True
     supports_dcp: bool = True
+    # Each row reads the global token ids its selection lists, and
+    # qsa_localize_dcp_indices maps them to (owner, local slot) for any
+    # interleave that divides the block size (checked in __init__). No
+    # per-row DCP sequence length is computed, so MTP verify rows are
+    # correct at every such interleave, as in index-based sparse MLA.
+    supports_mtp_with_cp_non_trivial_interleave_size: bool = True
     lse_base_on_e: bool = False
     supports_pcp: bool = False
 
