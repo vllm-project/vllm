@@ -459,8 +459,8 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
         # A row with count 0 runs no tile; the reader writes output 0 and LSE
         # -inf, the identity for the LSE combine.
 
-        # The BF16 partial goes to the combine as is: the reader already
-        # rounded it to BF16, so an fp32 copy only doubles the reduce-scatter.
+        # The reader writes the FP32 partial into the workspace buffer, and the
+        # combine reads it in place.
         merged = qsa_dcp_combine(
             partial_out,
             partial_lse,
