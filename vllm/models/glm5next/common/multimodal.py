@@ -46,6 +46,7 @@ from vllm.model_executor.models.vision import (
 )
 from vllm.models.common.ops import fused_q_kv_rmsnorm
 from vllm.multimodal.parse import ImageSize, MultiModalDataItems
+from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 
@@ -395,7 +396,7 @@ class Glm5NextVisionTransformer(nn.Module):
         head_dim = self.hidden_size // self.num_heads
         self.rotary_pos_emb = get_rope(
             head_size=head_dim,
-            max_position=8192,
+            max_position=text_config.max_position_embeddings,
             is_neox_style=True,
             rope_parameters={"partial_rotary_factor": 0.5},
         )
@@ -479,7 +480,7 @@ class Glm5NextVisionTransformer(nn.Module):
 
         cos, sin = self.rotary_pos_emb.get_cos_sin(max_grid_size)
 
-        pos_ids = pos_ids.to(cos.device, non_blocking=True)
+        pos_ids = async_tensor_h2d(pos_ids, device=cos.device)
         cos_combined = cos[pos_ids].flatten(1)
         sin_combined = sin[pos_ids].flatten(1)
         return cos_combined, sin_combined, pos_ids
@@ -590,7 +591,7 @@ class Glm5NextVisionTransformer(nn.Module):
                 grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0]
             ).cumsum(dim=0, dtype=torch.int32)
             cu_seqlens = torch.cat([cu_seqlens.new_zeros(1), cu_seqlens])
-            cu_seqlens = cu_seqlens.to(self.device, non_blocking=True)
+            cu_seqlens = async_tensor_h2d(cu_seqlens, device=self.device)
             max_seqlen = self.compute_attn_mask_seqlen(cu_seqlens)
 
         # transformers

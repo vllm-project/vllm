@@ -11,10 +11,9 @@ from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 from dataclasses import asdict, dataclass
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING, ClassVar, Self
 
 import torch
-from typing_extensions import Self
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -187,6 +186,7 @@ class SparseNCCLWeightTransferEngine(
 
     def shutdown(self) -> None:
         if self.model_update_group is not None:
+            self.model_update_group.destroy()
             self.model_update_group = None
 
 
@@ -372,4 +372,6 @@ class SparseNCCLTrainerWeightTransferEngine(
             torch.cuda.current_stream().synchronize()
 
     def shutdown(self) -> None:
-        self.model_update_group = None
+        if self.model_update_group is not None:
+            self.model_update_group.destroy()
+            self.model_update_group = None
