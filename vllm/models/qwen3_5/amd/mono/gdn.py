@@ -76,8 +76,15 @@ from vllm.models.kimi_k3.amd.mono.common.plan import (
 from vllm.models.kimi_k3.amd.mono.common.sync import Mailbox, sreg
 from vllm.models.kimi_k3.amd.mono.stages import gemv
 from vllm.models.qwen3_5.amd.mono import layout as L
-from vllm.models.qwen3_5.amd.mono.layer import fp4_gemv, fp4_gemv_loads, quant_x
 from vllm.models.qwen3_5.amd.mono.layout import need
+from vllm.models.qwen3_5.amd.mono.moe import (
+    f32_of,
+    fp4_gemv,
+    fp4_gemv_loads,
+    quant_x,
+    sigmoid,
+    step_tag,
+)
 from vllm.models.qwen3_5.amd.mono.sources import digest
 
 HIDDEN, ROWS, HD = L.HIDDEN, L.ROWS, L.HD
@@ -87,8 +94,6 @@ PTASKS = NPROJ // ROWS  # 290
 QKVZ_TASKS = L.QKVZ // ROWS  # 288
 COLS = 128  # columns a front task
 NRED = HIDDEN // COLS  # 64
-V0 = 2 * KEY  # PROJ / conv channel of v
-Z0 = L.CONV  # PROJ entry of z
 B0 = L.QKVZ  # PROJ entry of b
 A0 = L.QKVZ + NV  # PROJ entry of a
 VCH = 16  # state rows a GDN task
@@ -102,7 +107,6 @@ BA_K = HIDDEN // BA_PARTS
 BA_TASKS = L.BA // ROWS * BA_PARTS  # 16, on CTAs 0 ..
 LOG2E = 1.0 / math.log(2.0)
 LN2 = math.log(2.0)
-TAG_SLOTS = 256
 
 # the CTAs with a second in_proj task are past the front ones
 assert BLOCKS < PTASKS <= 2 * BLOCKS and NRED <= 2 * BLOCKS - PTASKS
@@ -170,16 +174,6 @@ def scratch_bytes(key: K1Build) -> int:
     return max(o + n for o, n in scratch_layout(key).values())
 
 
-def step_tag(epoch, slot):
-    """This launch's mailbox tag: the step's epoch and the launch's slot."""
-    e = uniform(ld_i32(epoch, 0))
-    return (e % (1 << 22)) * TAG_SLOTS + slot + 1
-
-
-def f32_of(w):
-    return w.bitcast(fx.Float32)
-
-
 def ld_i32w(ptr, i):
     return fx.Int32(bo.buffer_load(rsrc(ptr), i, vec_width=1, dtype=T.i32))
 
@@ -204,10 +198,6 @@ def hw_log2(x):
 
 def hw_exp(x):
     return hw_exp2(x * fx.Float32(LOG2E))
-
-
-def sigmoid(z):
-    return fx.Float32(1.0) / (fx.Float32(1.0) + hw_exp(-z))
 
 
 def silu(z):
@@ -317,22 +307,22 @@ def local_x(c):
     gpu.barrier()
 
 
-def ba_loads(c, i):
-    """in_proj_ba part i's weights for this wave (rows 16 (i / 8) ..,
-    K columns ``BA_K`` (i % 8) ..)."""
-    g, q = i // BA_PARTS, i % BA_PARTS
+def ba_loads(c, i, parts, k):
+    """in_proj_ba task i's weights for this wave (rows 16 (i / parts) .., K
+    columns ``k`` (i % parts) .. of ``parts k``)."""
+    g, q = i // parts, i % parts
     return gemv.loads(
-        c["lane"], c["wave"], c["args"]["w_ba"], g * ROWS, BA_K, ldk=HIDDEN, k0=q * BA_K
+        c["lane"], c["wave"], c["args"]["w_ba"], g * ROWS, k, ldk=parts * k, k0=q * k
     )
 
 
 @traced
-def stage_ba(c, i, ops):
-    """in_proj_ba part i on the unquantized x rows -> fp32 BAPART."""
+def stage_ba(c, i, ops, parts, k):
+    """in_proj_ba task i (``ba_loads``) on the unquantized x rows (LDS rows of
+    ``parts k`` + pad) -> fp32 BAPART."""
     s, tid, lane, wave, red = c["S"], c["tid"], c["lane"], c["wave"], c["red"]
-    xrow = HIDDEN + gemv.LDS_PAD
-    xl = c["xl"] + (i % BA_PARTS) * BA_K // 2
-    acc = gemv.mfmas(lane, wave, xl, xrow, BA_K, s, ops)
+    xl = c["xl"] + (i % parts) * k // 2
+    acc = gemv.mfmas(lane, wave, xl, parts * k + gemv.LDS_PAD, k, s, ops)
     fx.ptr_store(acc, red + (wave * 64 + lane) * 4)
     gpu.barrier()
     if tid < ROWS * s:
@@ -340,6 +330,26 @@ def stage_ba(c, i, ops):
         t = tid // ROWS
         c["put"](c["bapart"], (i * s + t) * ROWS + r, row_sum(red, r, t))
     gpu.barrier()
+
+
+def ba_sums(c, t, h, parts):
+    """Head h's b and a of token t (in_proj_ba rows h, nv + h): the tasks'
+    K parts summed in part order, rounded to bf16."""
+    s, nv = c["S"], c["gdn"].nv
+    got = c["poll"](
+        [
+            (c["bapart"], (((ro // ROWS) * parts + q) * s + t) * ROWS + ro % ROWS, 1)
+            for ro in (h, nv + h)
+            for q in range(parts)
+        ]
+    )
+    ba = []
+    for e in range_constexpr(2):
+        v = f32_of(got[e * parts][0])
+        for q in range_constexpr(1, parts):
+            v = v + f32_of(got[e * parts + q][0])
+        ba.append(bf16_round(v))
+    return ba[0], ba[1]
 
 
 @traced
@@ -362,23 +372,34 @@ def stage_proj(c, rg, ops, fp4=False):
     gpu.barrier()
 
 
+def _ba_of(c, t, h):
+    """Head h's b and a of token t: in_proj_ba's K parts summed and rounded to
+    bf16 (``qq``), else its PROJ entries."""
+    if const_expr(c["qq"]):
+        return ba_sums(c, t, h, BA_PARTS)
+    got = c["poll"](
+        [(c["proj"], t * NPROJ + B0 + h, 1), (c["proj"], t * NPROJ + A0 + h, 1)]
+    )
+    return f32_of(got[0][0]), f32_of(got[1][0])
+
+
 # ---------------------------------------------------------------- gdn
 def gdn_stage(c, t, h, ch):
     """The task's inputs that need no hand-off, issued before its first poll:
     the slot, the owned channels' conv window and weights, the state rows and
     the head's constants."""
     tid = c["tid"]
-    a = c["args"]
+    a, g = c["args"], c["gdn"]
     k = {}
     k["slot"] = uniform(ld_i32(a["st_idx"], t))
-    kh = h // HPK
-    k["owner"] = (h % HPK) == 0
+    kh = h // (g.nv // g.nk)
+    k["owner"] = (h % (g.nv // g.nk)) == 0
     # conv: thread < 48 owns channel i of part (q, k, v)
     ct = fx.min(tid, 3 * VCH - 1)
     part = ct // VCH
     i = ct % VCH
-    qk_chan = part * KEY + kh * HD + ch * VCH + i
-    v_chan = V0 + h * HD + ch * VCH + i
+    qk_chan = part * (g.nk * HD) + kh * HD + ch * VCH + i
+    v_chan = 2 * g.nk * HD + h * HD + ch * VCH + i
     chan = (part < 2).select(qk_chan, v_chan)
     k["part"], k["i"], k["chan"] = part, i, chan
     cs = a["conv_st"] + fx.Int64(fx.max(k["slot"], 0)) * fx.Int64(a["cs_seq"]) * 2
@@ -409,10 +430,10 @@ def gdn_conv(c, k, t, h, ch):
     width-4 conv (each product rounded to bf16, fp32 sum), SiLU -> bf16; q / k
     out through QK (the key head's owner tasks), v to LDS."""
     tid = c["tid"]
-    a = c["args"]
+    a, g = c["args"], c["gdn"]
     part, owner = k["part"], k["owner"]
     if tid < 3 * VCH:
-        x = f32_of(c["poll"]([(c["proj"], t * NPROJ + k["chan"], 1)])[0][0])
+        x = f32_of(c["poll"]([(c["proj"], t * g.proj + k["chan"], 1)])[0][0])
         owned = (part == 2) | owner
         if (k["slot"] > 0) & owned:
             rs = rsrc(k["cs"])
@@ -427,8 +448,8 @@ def gdn_conv(c, k, t, h, ch):
         acc = acc + bf16_round(w[3] * x)
         o = bf16_round(silu(acc))
         if (part < 2) & owner:
-            kh = h // HPK
-            at = ((t * NK + kh) * 2 + part) * HD + ch * VCH + k["i"]
+            kh = h // (g.nv // g.nk)
+            at = ((t * g.nk + kh) * 2 + part) * HD + ch * VCH + k["i"]
             c["put"](c["qk"], at, o)
         if part == 2:
             fx.ptr_store(o, c["vloc"] + k["i"])
@@ -438,40 +459,21 @@ def gdn_conv(c, k, t, h, ch):
 @traced
 def gdn_gates(c, k, t, h):
     """The key head's q and k (QK) l2-normed (q scaled by HD^-1/2); the head's
-    decay exp(-exp(A_log) softplus(a + dt_bias)) and beta = sigmoid(b)."""
-    tid, lane, wave = c["tid"], c["lane"], c["wave"]
-    kh = h // HPK
+    decay exp(-exp(A_log) softplus(a + dt_bias)) and beta = sigmoid(b), b and a
+    as the model's ``ba_of`` hands them over."""
+    tid, lane, wave, g = c["tid"], c["lane"], c["wave"], c["gdn"]
+    kh = h // (g.nv // g.nk)
     if tid < 2 * HD:
-        v = c["poll"]([(c["qk"], (t * NK + kh) * 2 * HD + tid, 1)])[0][0]
+        v = c["poll"]([(c["qk"], (t * g.nk + kh) * 2 * HD + tid, 1)])[0][0]
         fx.ptr_store(f32_of(v), c["qkl"] + tid)
     if tid == 2 * HD:
-        if const_expr(c["qq"]):
-            s = c["S"]
-            parts = c["poll"](
-                [
-                    (c["bapart"], ((g * BA_PARTS + q) * s + t) * ROWS + h, 1)
-                    for g in range(2)
-                    for q in range(BA_PARTS)
-                ]
-            )
-            ba = []
-            for g in range_constexpr(2):
-                v = f32_of(parts[g * BA_PARTS][0])
-                for q in range_constexpr(1, BA_PARTS):
-                    v = v + f32_of(parts[g * BA_PARTS + q][0])
-                ba.append([bf16_round(v)])
-            got = ba
-        else:
-            got = c["poll"](
-                [(c["proj"], t * NPROJ + B0 + h, 1), (c["proj"], t * NPROJ + A0 + h, 1)]
-            )
-            got = [[f32_of(got[0][0])], [f32_of(got[1][0])]]
-        x = got[1][0] + k["dtb"]
+        b, a = c["ba_of"](c, t, h)
+        x = a + k["dtb"]
         sp = hw_log2(fx.Float32(1.0) + hw_exp(x)) * fx.Float32(LN2)
         sp = (x <= fx.Float32(SOFTPLUS_THRESHOLD)).select(sp, x)
-        g = -hw_exp(k["a_log"]) * sp
-        fx.ptr_store(hw_exp(g), c["scal"] + 0)
-        fx.ptr_store(sigmoid(got[0][0]), c["scal"] + 1)
+        gl = -hw_exp(k["a_log"]) * sp
+        fx.ptr_store(hw_exp(gl), c["scal"] + 0)
+        fx.ptr_store(sigmoid(b), c["scal"] + 1)
     gpu.barrier()
     if wave < 2:
         x0 = fx.ptr_load(c["qkl"] + (wave * HD + lane))
@@ -521,30 +523,33 @@ def gdn_recur(c, k, t, h, ch):
         for e in range_constexpr(VCH):
             x = fx.ptr_load(c["ol"] + e)
             ss = ss + x * x
-        c["put"](c["onrm"], (t * NV + h) * NVCH + ch, ss)
+        c["put"](c["onrm"], (t * c["gdn"].nv + h) * NVCH + ch, ss)
     gpu.barrier()
 
 
 @traced
 def gdn_norm(c, k, t, h, ch):
     """Rows 16 ch ..: RMSNormGated over the head's 128 (every chunk's partial):
-    bf16(o rstd w silu(z)) -> ``core``."""
+    bf16(o rstd w gate(z)) -> ``core``, the gate the model's ``z_gate``."""
     tid = c["tid"]
-    a = c["args"]
+    a, g = c["args"], c["gdn"]
     if tid < VCH:
         vr = ch * VCH + tid
+        z0 = 2 * g.nk * HD + g.nv * HD
         got = c["poll"](
-            [(c["onrm"], (t * NV + h) * NVCH + q, 1) for q in range(NVCH)]
-            + [(c["proj"], t * NPROJ + Z0 + h * HD + vr, 1)]
+            [(c["onrm"], (t * g.nv + h) * NVCH + q, 1) for q in range(NVCH)]
+            + [(c["proj"], t * g.proj + z0 + h * HD + vr, 1)]
         )
         ss = f32_of(got[0][0])
         for q in range_constexpr(1, NVCH):
             ss = ss + f32_of(got[q][0])
         r = hw_rsq(ss * fx.Float32(1.0 / HD) + fx.Float32(c["norm_eps"]))
         y = fx.ptr_load(c["ol"] + tid) * r * ld_bf(a["norm_w"], vr)
-        y = y * silu(f32_of(got[NVCH][0]))
+        y = y * c["z_gate"](f32_of(got[NVCH][0]))
         y = (k["slot"] > 0).select(y, fx.Float32(0.0))
-        bo.buffer_store(y.to(fx.BFloat16), rsrc(a["core"]), t * L.CORE + h * HD + vr)
+        bo.buffer_store(
+            y.to(fx.BFloat16), rsrc(a["core"]), t * (g.nv * HD) + h * HD + vr
+        )
     gpu.barrier()
 
 
@@ -558,21 +563,21 @@ def gdn_offset(key) -> int:
 def gdn_round(c, r):
     """Round r's task of this CTA (``bid - goff`` cyclically + ``BLOCKS r``,
     clamped into range), its (token, head, chunk) and the round's LDS."""
-    n = c["S"] * GTASKS
+    nv = c["gdn"].nv
+    n = c["S"] * nv * NVCH
     task = (c["bid"] + (BLOCKS - c["goff"])) % BLOCKS + BLOCKS * r
     tc = fx.min(task, n - 1)
     cr = dict(c)
     for name, m in (("qkl", 2 * HD), ("vloc", VCH), ("ol", VCH), ("scal", 4)):
         cr[name] = c[name] + r * m
-    return cr, task < n, tc // GTASKS, (tc // NVCH) % NV, tc % NVCH
+    return cr, task < n, tc // (nv * NVCH), (tc // NVCH) % nv, tc % NVCH
 
 
 @traced
-def gdn_tasks(c):
-    """This CTA's GDN tasks phase by phase: a task waits only on earlier phases
-    of other CTAs' tasks, and every CTA finishes a phase's work before it
-    waits in the next."""
-    rounds = -(-c["S"] * GTASKS // BLOCKS)
+def gdn_tasks(c, rounds):
+    """This CTA's GDN tasks (``rounds`` of them) phase by phase: a task waits
+    only on earlier phases of other CTAs' tasks, and every CTA finishes a
+    phase's work before it waits in the next."""
     tasks = [gdn_round(c, r) for r in range(rounds)]
     ks = [gdn_stage(cr, t, h, ch) for cr, _, t, h, ch in tasks]
     phases = (
@@ -658,6 +663,9 @@ def build(key: K1Build):
         mb = Mailbox(step_tag(epoch, layer) - 1)
         c = {
             "qq": key.qq,
+            "gdn": L.GDN,
+            "ba_of": _ba_of,
+            "z_gate": silu,
             "goff": gdn_offset(key),
             "rs": lds.rs.ptr,
             "S": s,
@@ -722,20 +730,20 @@ def build(key: K1Build):
                 rg2 = 2 * BLOCKS - 1 - bid
                 ops2 = qkvz_fp4_loads(c, rg2)
                 local_x(c)
-                quant_x(c)
+                quant_x(c, HIDDEN)
                 stage_proj(c, rg, ops, fp4=True)
                 stage_proj(c, rg2, ops2, fp4=True)
             if bid < BA_TASKS:
-                bops = ba_loads(c, bid)
+                bops = ba_loads(c, bid, BA_PARTS, BA_K)
                 local_x(c)
-                stage_ba(c, bid, bops)
-                quant_x(c)
+                stage_ba(c, bid, bops, BA_PARTS, BA_K)
+                quant_x(c, HIDDEN)
                 stage_proj(c, rg, ops, fp4=True)
             if (bid >= BA_TASKS) & (bid < 2 * BLOCKS - QKVZ_TASKS):
                 local_x(c)
-                quant_x(c)
+                quant_x(c, HIDDEN)
                 stage_proj(c, rg, ops, fp4=True)
-        gdn_tasks(c)
+        gdn_tasks(c, nr)
 
     @flyc.jit
     def launch(

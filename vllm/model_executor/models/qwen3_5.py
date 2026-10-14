@@ -383,7 +383,7 @@ class Qwen3_5ForCausalLMBase(
         **kwargs: object,
     ):
         if self._mono is not None and self._mono.eligible(
-            input_ids, positions, intermediate_tensors, inputs_embeds
+            input_ids, intermediate_tensors, inputs_embeds
         ):
             return self._mono.forward(input_ids, positions)
         hidden_states = self.model(

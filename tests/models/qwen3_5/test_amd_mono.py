@@ -108,11 +108,11 @@ def _gdn_inputs(s: int, n_real: int, first: bool, slots: int = 16):
     return w
 
 
-def _gdn_reference(w, n: int, proj: torch.Tensor | None = None):
-    """Qwen3_5DecoderLayer's input norm and the GDN decode path on ROCm
-    (``forward_hip`` -> ``_forward_core_decode_aiter`` -> ``_output_projection``
-    without out_proj) on the first ``n`` rows; the rest are the cudagraph pad.
-    ``proj``: in_proj's output to start from instead of computing it."""
+def _gdn_core_ref(w, n: int, qkvz, ba, nk: int, nv: int, gate: str):
+    """The GDN decode path on ROCm from in_proj's outputs (AITER's conv update
+    and fused gated delta rule, then RMSNormGated with a ``gate`` output gate)
+    on the first ``n`` rows; the rest are the cudagraph pad. -> (conv state,
+    SSM state, core [S, NV HD])."""
     from aiter.ops.triton.causal_conv1d_update_single_token import (
         fused_reshape_causal_conv1d_update_single_token,
     )
@@ -121,54 +121,30 @@ def _gdn_reference(w, n: int, proj: torch.Tensor | None = None):
     )
 
     from vllm.config import VllmConfig, set_current_vllm_config
-    from vllm.model_executor.layers.layernorm import GemmaRMSNorm, RMSNormGated
-    from vllm.models.qwen3_5.amd.mono.layout import (
-        CONV,
-        CORE,
-        HD,
-        HIDDEN,
-        KEY,
-        NK,
-        NV,
-        VAL,
-    )
+    from vllm.model_executor.layers.layernorm import RMSNormGated
+    from vllm.models.qwen3_5.amd.mono.layout import HD
 
-    s = w["hidden"].size(0)
+    s = qkvz.size(0)
     with set_current_vllm_config(VllmConfig()):
-        ln = GemmaRMSNorm(HIDDEN, eps=1e-6).cuda()
         norm = RMSNormGated(
-            HD, eps=1e-6, norm_before_gate=True, activation="silu", device="cuda"
+            HD, eps=1e-6, norm_before_gate=True, activation=gate, device="cuda"
         )
-    ln.weight.data = w["ln_w"].clone()
     norm.weight.data = w["norm_w"].clone()
-    if w["residual"] is None:
-        x, res = ln.forward_native(w["hidden"]), w["hidden"].clone()
-    else:
-        x, res = ln.forward_native(w["hidden"], w["residual"].clone())
-    if proj is None:
-        if "w_qkvzs" in w:  # online MXFP4: dynamic MXFP4 of x, fp32 accumulation
-            qkvz = F.linear(_mxfp4_qdq(x).to(bf), w["w_qkvz_ref"])
-        else:
-            qkvz = F.linear(x, w["w_qkvz"])
-        ba = F.linear(x, w["w_ba"])
-    else:
-        qkvz, ba = proj.split([w["w_qkvz"].size(0), w["w_ba"].size(0)], dim=-1)
-        qkvz, ba = qkvz.contiguous(), ba.contiguous()
     conv_state, rstate = w["conv_state"].clone(), w["rstate"].clone()
-    z = torch.empty(s, NV, HD, dtype=bf, device="cuda")
-    core = torch.empty(s, NV, HD, dtype=bf, device="cuda")
+    z = torch.empty(s, nv, HD, dtype=bf, device="cuda")
+    core = torch.empty(s, nv, HD, dtype=bf, device="cuda")
     mixed, b, a = fused_reshape_causal_conv1d_update_single_token(
-        qkvz,
+        qkvz.contiguous(),
         n,
-        NK,
-        NV,
+        nk,
+        nv,
         HD,
         HD,
-        ba,
+        ba.contiguous(),
         z,
         core,
         conv_state,
-        w["conv_w"].view(CONV, 4),
+        w["conv_w"].view(-1, 4),
         None,
         "silu",
         conv_state_indices=w["st_idx"][:n],
@@ -181,8 +157,8 @@ def _gdn_reference(w, n: int, proj: torch.Tensor | None = None):
         b=b,
         dt_bias=w["dt_bias"],
         qkv=mixed,
-        key_dim=KEY,
-        value_dim=VAL,
+        key_dim=nk * HD,
+        value_dim=nv * HD,
         head_k_dim=HD,
         head_v_dim=HD,
         initial_state=rstate,
@@ -192,13 +168,41 @@ def _gdn_reference(w, n: int, proj: torch.Tensor | None = None):
         use_qk_l2norm_in_kernel=True,
         core_attn_out=core.reshape(-1),
     )
+    return conv_state, rstate, norm.forward_native(core, z).reshape(s, nv * HD)
+
+
+def _gdn_reference(w, n: int, proj: torch.Tensor | None = None):
+    """Qwen3_5DecoderLayer's input norm and the GDN decode path on ROCm
+    (``forward_hip`` -> ``_forward_core_decode_aiter`` -> ``_output_projection``
+    without out_proj) on the first ``n`` rows; the rest are the cudagraph pad.
+    ``proj``: in_proj's output to start from instead of computing it."""
+    from vllm.config import VllmConfig, set_current_vllm_config
+    from vllm.model_executor.layers.layernorm import GemmaRMSNorm
+    from vllm.models.qwen3_5.amd.mono.layout import HIDDEN, NK, NV
+
+    with set_current_vllm_config(VllmConfig()):
+        ln = GemmaRMSNorm(HIDDEN, eps=1e-6).cuda()
+    ln.weight.data = w["ln_w"].clone()
+    if w["residual"] is None:
+        x, res = ln.forward_native(w["hidden"]), w["hidden"].clone()
+    else:
+        x, res = ln.forward_native(w["hidden"], w["residual"].clone())
+    if proj is None:
+        if "w_qkvzs" in w:  # online MXFP4: dynamic MXFP4 of x, fp32 accumulation
+            qkvz = F.linear(_mxfp4_qdq(x).to(bf), w["w_qkvz_ref"])
+        else:
+            qkvz = F.linear(x, w["w_qkvz"])
+        ba = F.linear(x, w["w_ba"])
+    else:
+        qkvz, ba = proj.split([w["w_qkvz"].size(0), w["w_ba"].size(0)], dim=-1)
+    conv_state, rstate, core = _gdn_core_ref(w, n, qkvz, ba, NK, NV, "silu")
     return {
         "x": x,
         "residual": res,
         "proj": torch.cat([qkvz, ba], dim=-1),
         "conv_state": conv_state,
         "rstate": rstate,
-        "core": norm.forward_native(core, z).reshape(s, CORE),
+        "core": core,
     }
 
 
@@ -518,9 +522,8 @@ def _moe_emulation(x, mw, ids=None):
     them (``fmoe_bf16_pertokenMXfp4_g1u1_flat``: x and silu(g) u through dynamic
     MXFP4, fp32 accumulation, the route weight after w2), in plain torch; then
     the all-reduce. Deterministic, unlike the kernel."""
-    from vllm.models.qwen3_5.amd.mono.layout import RI
-
     raw = mw["raw"]
+    ri = raw["w2"].shape[-1] * 2  # unpadded
     wts, ids, shared = _route_and_shared(x, mw, ids)
     xq = _mxfp4_qdq(x)
     routed = torch.zeros(x.shape, dtype=torch.float32, device=x.device)
@@ -528,7 +531,7 @@ def _moe_emulation(x, mw, ids=None):
         for k in range(ids.shape[1]):
             e = ids[t, k].item()
             gu = _mxfp4_dequant(raw["w13"][e], raw["w13s"][e]) @ xq[t]
-            h = _mxfp4_qdq(F.silu(gu[:RI]) * gu[RI:])
+            h = _mxfp4_qdq(F.silu(gu[:ri]) * gu[ri:])
             routed[t] += wts[t, k] * (_mxfp4_dequant(raw["w2"][e], raw["w2s"][e]) @ h)
     return _all_reduce_fp32((routed + shared.float()).to(bf))
 

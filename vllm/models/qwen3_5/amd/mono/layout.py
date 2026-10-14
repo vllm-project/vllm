@@ -1,17 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Qwen3.8-2.4T at TP8: the shapes the mono kernels are built for and the
-addresses of the weights they read in place.
+addresses of the weights they read in place; the routed-expert addressing is
+shared with Qwen3.8-Flash-Next (``MoeDims``).
 
 Plain integer arithmetic: the same functions index a tensor on the host (the
 layout tests) and build an address from traced values in a kernel.
 
-Routed experts (``AITER_MXFP4_MXFP4``): ``w13`` (E, 2 RI, HIDDEN / 2) and ``w2``
-(E, HIDDEN, RI / 2) fp4x2, ``[gate; up]`` rows, through
+Routed experts (``AITER_MXFP4_MXFP4``): ``w13`` (E, 2 RIP, HIDDEN / 2) and
+``w2`` (E, HIDDEN, RIP / 2) fp4x2, ``[gate; up]`` rows, each half zero-padded
+from RI to RIP (the backend's 128 alignment), through
 ``shuffle_weight(layout=(16, 16))``: a 16-row group's 16-byte K chunks as
 ``[chunk][row % 16][16 B]``. Their e8m0 scales through ``e8m0_shuffle`` over
-(E N, K / 32): ``scale_index``.
+(E N, K / 32), K / 32 padded to a multiple of 8 (``scale_cols``):
+``scale_index``. The online-MXFP4 linears hold the same layouts, one "expert".
 """
+
+from dataclasses import dataclass
 
 TP = 8
 HIDDEN = 8192
@@ -50,6 +55,34 @@ def need(ok: bool, what: str) -> None:
         raise ValueError(f"Qwen3.8 mono decode: {what}")
 
 
+@dataclass(frozen=True)
+class MoeDims:
+    """A rank's routed-expert shapes, what the shared MoE stages read: the
+    hidden size, the routed intermediate a rank holds (RI) and the weights'
+    padded one (RIP), the shared intermediate of an unfused shared expert."""
+
+    hidden: int
+    ri: int
+    rip: int
+    si: int = 0
+
+
+MOE = MoeDims(HIDDEN, RI, RI, SI)
+
+
+@dataclass(frozen=True)
+class GdnDims:
+    """A rank's GDN shapes, what the shared GDN stages read: its key and value
+    heads and PROJ's entries a token (in_proj's outputs, [q | k | v | z ..])."""
+
+    nk: int
+    nv: int
+    proj: int
+
+
+GDN = GdnDims(NK, NV, QKVZ + BA)
+
+
 def fp4_group_dwords(k):
     """Dwords of one 16-row group of an fp4 weight with K = ``k``."""
     return ROWS * k // 8
@@ -62,21 +95,21 @@ def fp4_tile_dword(expert_base, rg, k, st, lane):
     return expert_base + rg * fp4_group_dwords(k) + st * 256 + lane * 4
 
 
-def w13_base(e):
-    """First dword of expert ``e``'s w13 (2 RI rows, K = HIDDEN). The constant
+def w13_base(d: MoeDims, e):
+    """First dword of expert ``e``'s w13 (2 RIP rows, K = hidden). The constant
     folds first: ``e`` is i32 in the kernel and e 2 RI HIDDEN is 2^31 at e 512."""
-    return e * (2 * RI * HIDDEN // 8)
+    return e * (2 * d.rip * d.hidden // 8)
 
 
-def w13_group(gate_or_up, g):
+def w13_group(d: MoeDims, gate_or_up, g):
     """Row group of w13 holding intermediate columns 16 g .. of the gate (0) or
-    up (1) projection: ``[gate; up]`` rows, not interleaved."""
-    return gate_or_up * (RI // ROWS) + g
+    up (1) projection: ``[gate; up]`` rows, each RIP, not interleaved."""
+    return gate_or_up * (d.rip // ROWS) + g
 
 
-def w2_base(e):
-    """First dword of expert ``e``'s w2 (HIDDEN rows, K = RI)."""
-    return e * (HIDDEN * RI // 8)
+def w2_base(d: MoeDims, e):
+    """First dword of expert ``e``'s w2 (hidden rows, K = RIP)."""
+    return e * (d.hidden * d.rip // 8)
 
 
 def scale_index(row, col, cols):
@@ -88,11 +121,24 @@ def scale_index(row, col, cols):
     return ((((r32 * (cols // 8) + c8) * 4 + f) * 16 + b) * 2 + d) * 2 + a
 
 
-def w13_scale_index(e, n, kb):
-    """Byte of w13's scale for row ``n`` (of 2 RI), K block ``kb`` (of HIDDEN / 32)."""
-    return scale_index(e * 2 * RI + n, kb, HIDDEN // 32)
+def scale_cols(k):
+    """Columns of a shuffled scale for K = ``k``: ``shuffle_scale`` pads K / 32
+    to a multiple of 8 (with e8m0 1.0)."""
+    return (k // 32 + 7) // 8 * 8
 
 
-def w2_scale_index(e, n, kb):
-    """Byte of w2's scale for row ``n`` (of HIDDEN), K block ``kb`` (of RI / 32)."""
-    return scale_index(e * HIDDEN + n, kb, RI // 32)
+def scale_code_shift(st, rg):
+    """Bit offset of K step ``st``'s code for 16-row group ``rg`` in the dword
+    ``scale_index`` puts it in (its block ``4 st + lane / 16``): byte
+    (st % 2) 2 + rg % 2."""
+    return (st % 2) * 16 + (rg % 2) * 8
+
+
+def w13_scale_index(d: MoeDims, e, n, kb):
+    """Byte of w13's scale for row ``n`` (of 2 RIP), K block ``kb``."""
+    return scale_index(e * 2 * d.rip + n, kb, scale_cols(d.hidden))
+
+
+def w2_scale_index(d: MoeDims, e, n, kb):
+    """Byte of w2's scale for row ``n`` (of hidden), K block ``kb``."""
+    return scale_index(e * d.hidden + n, kb, scale_cols(d.rip))

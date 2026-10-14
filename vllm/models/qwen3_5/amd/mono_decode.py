@@ -28,246 +28,113 @@ is zeroed between steps. Each width and kernel has its own scratch.
 """
 
 from itertools import islice
-from typing import Any
 
 import torch
 
-from vllm import envs
-from vllm.distributed import get_pp_group, get_tp_group
 from vllm.forward_context import get_forward_context
-from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_qk_norm_rope import fused_qk_rmsnorm_rope_gate
 from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
+from vllm.models.qwen3_5.amd import mono_base as B
 from vllm.models.qwen3_5.amd.mono import layout as L
 from vllm.platforms import current_platform
 
-logger = init_logger(__name__)
+enabled = B.enabled
 
 
-CDNA_VERSIONS = (4,)
-
-
-def enabled() -> bool:
-    return envs.VLLM_ROCM_MONO_DECODE and current_platform.is_rocm()
-
-
-def _routed_experts(mlp):
-    return getattr(mlp.experts, "routed_experts", mlp.experts)
-
-
-def _o_proj(layer):
-    if layer.layer_type == "linear_attention":
-        return layer.linear_attn.out_proj
-    return layer.self_attn.o_proj
-
-
-def _asm_mxfp4(linear) -> bool:
-    """An online-MXFP4 linear on AITER's ASM FP4 GEMM: its weight and scales
-    shuffled as K2's fp4 o_proj reads them."""
-    from vllm.model_executor.kernels.linear.mxfp4.aiter import AiterMxfp4LinearKernel
-    from vllm.model_executor.layers.quantization.online.mxfp4 import (
-        Mxfp4OnlineLinearMethod,
-    )
-
-    qm = linear.quant_method
-    return (
-        isinstance(qm, Mxfp4OnlineLinearMethod)
-        and isinstance(qm.kernel, AiterMxfp4LinearKernel)
-        and qm.kernel.use_asm_gemm
-    )
-
-
-def _refusals(vllm_config) -> list[str]:
-    """Every reason the kernels cannot run this deployment: an explicit opt-in
-    that cannot run is an error."""
-    from vllm.platforms.rocm import get_cdna_version
-
-    pc = vllm_config.parallel_config
-    why = []
-    if get_cdna_version() not in CDNA_VERSIONS:
-        why.append(f"needs CDNA{'/'.join(map(str, CDNA_VERSIONS))}")
-    if get_tp_group().world_size != L.TP:
-        why.append(f"needs tensor parallel size {L.TP}")
-    if get_pp_group().world_size != 1:
-        why.append("needs no pipeline parallelism")
-    if pc.enable_expert_parallel or pc.enable_eplb or pc.data_parallel_size > 1:
-        why.append("needs tensor parallelism only: no expert or data parallelism")
-    if pc.decode_context_parallel_size > 1 or pc.prefill_context_parallel_size > 1:
-        why.append("needs no context parallelism")
-    if vllm_config.lora_config is not None:
-        why.append("needs no LoRA")
-    if vllm_config.speculative_config is not None:
-        why.append("needs no speculative decoding")
-    if vllm_config.kv_transfer_config is not None:
-        # a KV connector's copies on another stream can hold CUs a resident
-        # grid spin-waits on
-        why.append("needs no KV connector")
-    cus = current_platform.num_compute_units(torch.accelerator.current_device_index())
-    if cus < L.BLOCKS:
-        # every CTA of a launch stays resident: a partitioned GPU deadlocks
-        why.append(f"needs {L.BLOCKS} compute units, the GPU has {cus}")
-    return why
-
-
-def _unsupported(model) -> str | None:
-    """Why the kernels cannot serve this model variant, else None."""
-    from vllm.model_executor.models.qwen3_next import Qwen3NextSparseMoeBlock
-
-    c = model.config
-    shape = (
-        c.hidden_size == L.HIDDEN
-        and c.linear_num_key_heads == L.NK * L.TP
-        and c.linear_num_value_heads == L.NV * L.TP
-        and c.linear_key_head_dim == L.HD
-        and c.linear_value_head_dim == L.HD
-        and c.linear_conv_kernel_dim == L.CONV_W
-        and c.num_experts == L.E
-        and c.num_experts_per_tok == L.TOPK
-        and c.moe_intermediate_size == L.RI * L.TP
-        and c.shared_expert_intermediate_size == L.SI * L.TP
-        and c.hidden_act == "silu"
-        and getattr(c, "norm_topk_prob", True)
-    )
-    if not shape:
-        return "not the Qwen3.8 shape"
-    if model.start_layer != 0 or model.end_layer != len(model.layers):
-        return "partial layers"
-    for layer in model.layers:
-        mlp = layer.mlp
-        if layer.layer_scale or layer.use_attn_reduce_scatter_for_moe:
-            return "layer scale or sequence parallel"
-        if not isinstance(mlp, Qwen3NextSparseMoeBlock):
-            return "dense MLP"
-        fused = mlp.is_fused_shared_expert_enabled
-        if not fused and (mlp.shared_expert is None or mlp.replicate_shared_expert):
-            return "shared expert not TP sharded"
-        if layer.layer_type == "linear_attention":
-            a = layer.linear_attn
-            gdn = (
-                hasattr(a, "in_proj_qkvz")
-                and not a.disable_tp_for_ba_proj
-                and a.qkvz_layout == "flat"
-                and a.activation == "silu"
-                and a.conv1d.bias is None
-                and a.norm.activation in ("silu", "swish")
-                and a.norm.group_size is None
-                and a.norm.norm_before_gate
-            )
-            if not gdn:
-                return "GDN layer variant"
-        else:
-            a = layer.self_attn
-            if a.num_heads * a.head_dim != L.CORE:
-                return "attention width"
-            rope = a.rotary_emb
-            if not (
-                a.attn_output_gate
-                and getattr(rope, "is_neox_style", False)
-                and getattr(rope, "dtype", None) in (torch.float16, torch.bfloat16)
-            ):
-                return "attention without the gated NeoX RoPE front"
-    return None
-
-
-class MonoDecode:
+class MonoDecode(B.QwenMonoDecode):
     """Bound to one ``Qwen3_5Model``; built at model init on every rank."""
 
-    def __init__(self, model, vllm_config):
-        from vllm.models.kimi_k3.amd.mono.common.peer_memory import PeerBuffer
+    LABEL = "Qwen3.8"
+    TP_SIZES = (L.TP,)
+    MAX_TOKENS = L.MAX_TOKENS
+    BLOCKS = L.BLOCKS
+    MTP = False
+
+    def unsupported(self, model) -> str | None:
+        from vllm.model_executor.models.qwen3_next import Qwen3NextSparseMoeBlock
+
+        c = model.config
+        shape = (
+            c.hidden_size == L.HIDDEN
+            and c.linear_num_key_heads == L.NK * L.TP
+            and c.linear_num_value_heads == L.NV * L.TP
+            and c.linear_key_head_dim == L.HD
+            and c.linear_value_head_dim == L.HD
+            and c.linear_conv_kernel_dim == L.CONV_W
+            and c.num_experts == L.E
+            and c.num_experts_per_tok == L.TOPK
+            and c.moe_intermediate_size == L.RI * L.TP
+            and c.shared_expert_intermediate_size == L.SI * L.TP
+            and c.hidden_act == "silu"
+            and getattr(c, "norm_topk_prob", True)
+        )
+        if not shape:
+            return "not the Qwen3.8 shape"
+        if model.start_layer != 0 or model.end_layer != len(model.layers):
+            return "partial layers"
+        for layer in model.layers:
+            mlp = layer.mlp
+            if layer.layer_scale or layer.use_attn_reduce_scatter_for_moe:
+                return "layer scale or sequence parallel"
+            if not isinstance(mlp, Qwen3NextSparseMoeBlock):
+                return "dense MLP"
+            fused = mlp.is_fused_shared_expert_enabled
+            if not fused and (mlp.shared_expert is None or mlp.replicate_shared_expert):
+                return "shared expert not TP sharded"
+            if layer.layer_type == "linear_attention":
+                if not B.gdn_variant(layer.linear_attn, ("silu", "swish")):
+                    return "GDN layer variant"
+            else:
+                a = layer.self_attn
+                if a.num_heads * a.head_dim != L.CORE:
+                    return "attention width"
+                rope = a.rotary_emb
+                if not (
+                    a.attn_output_gate
+                    and getattr(rope, "is_neox_style", False)
+                    and getattr(rope, "dtype", None) in (torch.float16, torch.bfloat16)
+                ):
+                    return "attention without the gated NeoX RoPE front"
+        return None
+
+    def buffer_bytes(self):
         from vllm.models.qwen3_5.amd.mono import gdn, layer
 
-        self.model = model
-        refused = _refusals(vllm_config)
-        if refused:
-            raise ValueError(f"VLLM_ROCM_MONO_DECODE {'; '.join(refused)}.")
-        why = _unsupported(model)
-        self.ok = why is None
-        self._weights_checked = False
-        if not self.ok:
-            logger.info_once("Qwen3.8 mono decode off for this model: %s", why)
-            return
-        self._probe = next(
-            ly.linear_attn.prefix
-            for ly in model.layers
-            if ly.layer_type == "linear_attention"
-        )
-        dev = model.embed_tokens.weight.device
-
-        def buf(n: int) -> torch.Tensor:
-            return torch.zeros((n + 255) // 256 * 256, dtype=torch.uint8, device=dev)
-
-        widths = range(1, L.MAX_TOKENS + 1)
-        self.k1_scratch = {
-            s: buf(
-                max(
-                    gdn.scratch_bytes(gdn.K1Build(tokens=s, first=f, qq=q))
-                    for f in (False, True)
-                    for q in (False, True)
-                )
+        def k1(s):
+            return max(
+                gdn.scratch_bytes(gdn.K1Build(tokens=s, first=f, qq=q))
+                for f in (False, True)
+                for q in (False, True)
             )
-            for s in widths
-        }
-        self.k2_scratch = {
-            s: buf(
-                max(
-                    layer.scratch_bytes(layer.K2Build(tokens=s, fse=f))
-                    for f in (False, True)
-                )
+
+        def k2(s):
+            return max(
+                layer.scratch_bytes(layer.K2Build(tokens=s, fse=f))
+                for f in (False, True)
             )
-            for s in widths
-        }
-        self.epoch = torch.zeros(1, dtype=torch.int32, device=dev)
-        tp = get_tp_group()
-        self.rank = tp.rank_in_group
-        # collective: every rank builds the model, so every rank gets here
-        self.peers = PeerBuffer(
-            layer.peer_bytes(L.MAX_TOKENS),
-            tp.cpu_group,
-            tp.rank_in_group,
-            tp.world_size,
-            dev,
-        )
-        self.peers.bytes.zero_()
-        # compile the attention front's helpers here: a decode graph's first
-        # call can be its capture
+
+        return k1, k2, layer.peer_bytes(L.MAX_TOKENS)
+
+    def warm_up(self, dev) -> None:
         with torch.inference_mode():
             for s in (1, 2):
                 x = torch.zeros(s, L.HIDDEN, dtype=torch.bfloat16, device=dev)
-                _gemma_norm(model.norm, x, x)
-        logger.info_once(
-            "Qwen3.8 mono decode on for decode steps of <= %d rows", L.MAX_TOKENS
-        )
+                _gemma_norm(self.model.norm, x, x)
 
-    def check_weights(self) -> None:
-        """At the first decode step, after loading: every weight in the dtype
-        and layout the kernels read, else an error."""
-        if not self._weights_checked:
-            why = self._weights_unsupported()
-            if why is not None:
-                raise ValueError(f"VLLM_ROCM_MONO_DECODE {why}.")
-            self._weights_checked = True
-
-    def _weights_unsupported(self) -> str | None:
-        from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import Mxfp4MoeBackend
-
-        bf = torch.bfloat16
+    def weights_unsupported(self) -> str | None:
         for layer in self.model.layers:
+            i = layer.layer_idx
             mlp = layer.mlp
             fused = mlp.is_fused_shared_expert_enabled
-            ex = _routed_experts(mlp)
-            backend = getattr(ex.quant_method, "mxfp4_backend", None)
-            if backend is not Mxfp4MoeBackend.AITER_MXFP4_MXFP4:
-                return f"routed experts on {backend}, not AITER_MXFP4_MXFP4"
-            if not getattr(ex.w13_weight, "is_shuffled", False):
-                return "routed experts not shuffled"
-            if ex.w13_weight.shape[0] != L.E + int(fused):
-                return "routed experts not all local"
+            why = B.experts_error(B.routed_experts(mlp), L.E + int(fused))
+            if why is not None:
+                return why
             dense: dict[str, torch.Tensor] = {}
             if layer.layer_type == "linear_attention":
                 a = layer.linear_attn
-                if _asm_mxfp4(a.in_proj_qkvz):
+                if B.asm_mxfp4(a.in_proj_qkvz):
                     if a.in_proj_qkvz.weight.shape != (L.QKVZ, L.HIDDEN // 2):
-                        return f"layer {layer.layer_idx}: in_proj_qkvz shape"
+                        return f"layer {i}: in_proj_qkvz shape"
                 else:
                     dense["in_proj_qkvz"] = a.in_proj_qkvz.weight
                 dense |= {
@@ -278,10 +145,10 @@ class MonoDecode:
                 }
                 if a.A_log.dtype != torch.float32:
                     return "A_log not fp32"
-            o = _o_proj(layer)
-            fp4_o = _asm_mxfp4(o)
+            o = B.o_proj(layer)
+            fp4_o = B.asm_mxfp4(o)
             if o.weight.shape != (L.HIDDEN, L.CORE // 2 if fp4_o else L.CORE):
-                return f"layer {layer.layer_idx}: o_proj shape {tuple(o.weight.shape)}"
+                return f"layer {i}: o_proj shape {tuple(o.weight.shape)}"
             if not fp4_o:
                 dense["o_proj"] = o.weight
             dense |= {
@@ -295,44 +162,20 @@ class MonoDecode:
                     mlp.shared_expert.gate_up_proj.weight
                 )
                 dense["shared_expert.down_proj"] = mlp.shared_expert.down_proj.weight
-            for name, w in dense.items():
-                if w.dtype != bf:
-                    return (
-                        f"layer {layer.layer_idx}: {name} is {w.dtype}, neither "
-                        "bf16 nor in a quantized layout the kernels read"
-                    )
+            why = B.dense_error(i, dense)
+            if why is not None:
+                return why
         return None
 
-    def eligible(self, input_ids, positions, intermediate_tensors, inputs_embeds):
-        """A pure decode step of at most ``MAX_TOKENS`` rows."""
-        if not self.ok or intermediate_tensors is not None or inputs_embeds is not None:
+    def eligible(self, input_ids, intermediate_tensors, inputs_embeds) -> bool:
+        if inputs_embeds is not None or self.model.aux_hidden_state_layers:
             return False
-        if input_ids is None or not 1 <= input_ids.size(0) <= L.MAX_TOKENS:
-            return False
-        if self.model.aux_hidden_state_layers:
-            return False
-        md = get_forward_context().attn_metadata
-        if not isinstance(md, dict):
-            return False
-        m: Any = md.get(self._probe)
-        if m is None or m.spec_sequence_masks is not None:
-            return False
-        if m.num_prefills != 0 or m.num_spec_decodes != 0 or m.num_decodes < 1:
-            return False
-        idx = m.non_spec_state_indices_tensor
-        s = input_ids.size(0)
-        # the graph's pad rows read NULL_BLOCK_ID entries, so the indices cover s
-        if idx is None or idx.dtype != torch.int32 or idx.numel() < s:
-            return False
-        if not idx.is_contiguous():
-            return False
-        self.check_weights()
-        return True
+        return super().eligible(input_ids, intermediate_tensors)
 
     def forward(self, input_ids, positions) -> torch.Tensor:
         model = self.model
         s = input_ids.size(0)
-        logger.info_once("Qwen3.8 mono decode: first mono step (%d rows)", s)
+        self.first_step(s)
         self.epoch.add_(1)
         md = get_forward_context().attn_metadata
         assert isinstance(md, dict)
@@ -360,7 +203,7 @@ class MonoDecode:
         if not is_conv_state_dim_first():
             conv_state = conv_state.transpose(-1, -2)
         s = h.size(0)
-        qq = _asm_mxfp4(a.in_proj_qkvz)
+        qq = B.asm_mxfp4(a.in_proj_qkvz)
         gdn.gdn_pre(
             gdn.K1Build(
                 tokens=s,
@@ -393,9 +236,9 @@ class MonoDecode:
         from vllm.models.qwen3_5.amd.mono import layer as k2
 
         mlp = layer.mlp
-        ex = _routed_experts(mlp)
-        o = _o_proj(layer)
-        oq = _asm_mxfp4(o)
+        ex = B.routed_experts(mlp)
+        o = B.o_proj(layer)
+        oq = B.asm_mxfp4(o)
         fused = mlp.is_fused_shared_expert_enabled
         s = core.size(0)
         out = torch.empty_like(residual)
