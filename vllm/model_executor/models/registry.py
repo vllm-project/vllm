@@ -49,7 +49,7 @@ from .interfaces import (
     is_attention_free,
     is_hybrid,
     requires_raw_input_tokens,
-    supports_mamba_prefix_caching,
+    supports_hc_sp,
     supports_multimodal,
     supports_multimodal_encoder_tp_data,
     supports_multimodal_raw_input_only,
@@ -98,6 +98,7 @@ _TEXT_GENERATION_MODELS = {
     "ExaoneForCausalLM": ("exaone", "ExaoneForCausalLM"),
     "Exaone4ForCausalLM": ("exaone4", "Exaone4ForCausalLM"),
     "ExaoneMoeForCausalLM": ("exaone_moe", "ExaoneMoeForCausalLM"),
+    "ExaoneMoEForCausalLM": ("exaone_moe", "ExaoneMoeForCausalLM"),
     "FalconForCausalLM": ("falcon", "FalconForCausalLM"),
     "FalconMambaForCausalLM": ("mamba", "MambaForCausalLM"),
     "FalconH1ForCausalLM": ("falcon_h1", "FalconH1ForCausalLM"),
@@ -246,6 +247,7 @@ _EMBEDDING_MODELS = {
     # [Multimodal]
     "CLIPModel": ("clip", "CLIPEmbeddingModel"),
     "ColPaliForRetrieval": ("colpali", "ColPaliModel"),
+    "EmbeddingGemma2Model": ("embedding_gemma2", "EmbeddingGemma2Model"),
     "LlamaNemotronVLModel": ("nemotron_vl", "LlamaNemotronVLForEmbedding"),
     "LlavaNextForConditionalGeneration": (
         "llava_next",
@@ -284,6 +286,8 @@ _REWARD_MODELS = {
 
 _TOKEN_CLASSIFICATION_MODELS = {
     "BertForTokenClassification": ("bert", "BertForTokenClassification"),
+    "ClefFlashForJointSchema": ("clef_flash", "ClefFlashForJointSchema"),
+    "ClefOmniForJointSchema": ("clef_omni", "ClefOmniForJointSchema"),
     "ModernBertForTokenClassification": (
         "modernbert",
         "ModernBertForTokenClassification",
@@ -325,6 +329,7 @@ _SEQUENCE_CLASSIFICATION_MODELS = {
         "RobertaForSequenceClassification",
     ),
     # [Multimodal]
+    "D3ForSequenceClassification": ("d3", "D3ForSequenceClassification"),
     "JinaVLForRanking": ("jina_vl", "JinaVLForSequenceClassification"),
     "LlamaNemotronVLForSequenceClassification": (
         "nemotron_vl",
@@ -511,6 +516,10 @@ _MULTIMODAL_MODELS = {
     "MiniCPMV4_6ForConditionalGeneration": (
         "minicpmv4_6",
         "MiniCPMV4_6ForConditionalGeneration",
+    ),
+    "MiniCPMV4_7ForConditionalGeneration": (
+        "minicpmv4_7",
+        "MiniCPMV4_7ForConditionalGeneration",
     ),
     "Mistral3ForConditionalGeneration": (
         "mistral3",
@@ -709,6 +718,7 @@ _TRANSFORMERS_SUPPORTED_MODELS = {
     "HunYuanDenseV1ForCausalLM": ("transformers", "TransformersForCausalLM"),
     "HunYuanMoEV1ForCausalLM": ("transformers", "TransformersMoEForCausalLM"),
     "Jais2ForCausalLM": ("transformers", "TransformersForCausalLM"),
+    "Kolibri1ForCausalLM": ("transformers", "TransformersMoEForCausalLM"),
     "MellumForCausalLM": ("transformers", "TransformersMoEForCausalLM"),
     "NanbeigeForCausalLM": ("transformers", "TransformersForCausalLM"),
     "OlmoForCausalLM": ("transformers", "TransformersForCausalLM"),
@@ -849,6 +859,7 @@ _OOT_SUPPORTED_MODELS = {
     "BartForConditionalGeneration": "https://github.com/vllm-project/bart-plugin",
     "Florence2ForConditionalGeneration": "https://github.com/vllm-project/bart-plugin",
     "MBartForConditionalGeneration": "https://github.com/vllm-project/bart-plugin",
+    "Nemotron3_5AsrForRNNT": "https://github.com/Sohaib-Ahmed21/vllm-nemotron-asr-plugin",
 }
 
 
@@ -866,11 +877,11 @@ class _ModelInfo:
     requires_raw_input_tokens: bool
     supports_multimodal_encoder_tp_data: bool
     supports_pp: bool
+    supports_hc_sp: bool
     has_inner_state: bool
     is_attention_free: bool
     is_hybrid: bool
     has_noops: bool
-    supports_mamba_prefix_caching: bool
     supports_replayssm: bool
     supports_transcription: bool
     supports_transcription_only: bool
@@ -896,10 +907,10 @@ class _ModelInfo:
                 model
             ),
             supports_pp=supports_pp(model),
+            supports_hc_sp=supports_hc_sp(model),
             has_inner_state=has_inner_state(model),
             is_attention_free=is_attention_free(model),
             is_hybrid=is_hybrid(model),
-            supports_mamba_prefix_caching=supports_mamba_prefix_caching(model),
             supports_replayssm=supports_replayssm(model),
             supports_transcription=supports_transcription(model),
             supports_transcription_only=(
@@ -1455,6 +1466,15 @@ class _ModelRegistry:
     ) -> bool:
         model_info, _ = self.inspect_model_cls(architectures, model_config)
         return model_info.supports_pp
+
+    def is_hc_sp_supported_model(
+        self,
+        architectures: str | list[str],
+        model_config: ModelConfig,
+    ) -> bool:
+        """Check support for HC SP without changing MoE parallelism."""
+        model_info, _ = self.inspect_model_cls(architectures, model_config)
+        return model_info.supports_hc_sp
 
     def model_has_inner_state(
         self,

@@ -3,7 +3,7 @@
 import gc
 import itertools
 from collections import defaultdict
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from contextlib import ExitStack
 from dataclasses import dataclass, replace
 from itertools import groupby, product
@@ -44,7 +44,11 @@ from vllm.v1.spec_decode.dynamic.utils import build_dynamic_sd_schedule_lookup
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens
-from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
+from vllm.v1.worker.gpu.input_batch import (
+    InputBatch,
+    InputBuffers,
+    set_dummy_context,
+)
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.ubatch_utils import check_ubatch_thresholds, get_num_ubatches
 from vllm.v1.worker.utils import AttentionGroup, clear_layer_kv_caches
@@ -272,6 +276,7 @@ class CudaGraphManager:
         if (
             speculative_config
             and speculative_config.uses_dynamic_speculative_decoding()
+            and self.decode_query_len > self.vllm_config.num_speculative_tokens
         ):
             # decode_query_len = num_speculative_steps + num_new_sampled_tokens
             # _per_step. Recover num_new_sampled_tokens_per_step
@@ -693,9 +698,18 @@ class ModelCudaGraphManager(CudaGraphManager):
             if desc.num_ubatches > 1:
                 # Prepare and park threads before capture; finish runs inside it.
                 assert self.ubatch_runner is not None
+                input_batch = InputBatch.make_dummy(num_reqs, num_tokens, input_buffers)
+                input_block_tables = block_tables.get_dummy_block_tables(num_reqs)
+                set_dcp_capture_context(
+                    input_batch,
+                    model_state,
+                    block_tables,
+                    input_block_tables,
+                    kv_cache_config,
+                )
                 ubatch_state = self.ubatch_runner.prepare(
-                    InputBatch.make_dummy(num_reqs, num_tokens, input_buffers),
-                    block_tables.get_dummy_block_tables(num_reqs),
+                    input_batch,
+                    input_block_tables,
                     block_tables.get_dummy_slot_mappings(num_tokens),
                     cg_mode=CUDAGraphMode.FULL,
                     for_capture=True,
@@ -782,6 +796,27 @@ class ModelCudaGraphManager(CudaGraphManager):
         return hidden_states, [x[: desc.num_tokens] for x in self.aux_hidden_states]
 
 
+def set_dcp_capture_context(
+    input_batch: InputBatch,
+    model_state: ModelState,
+    block_tables: BlockTables,
+    input_block_tables: Sequence[torch.Tensor],
+    kv_cache_config: KVCacheConfig,
+) -> None:
+    # Capture FULL graphs with KV context so a host-side skip of DCP context
+    # attention is not baked into the graph.
+    if block_tables.cp_size == 1:
+        return
+    set_dummy_context(
+        input_batch,
+        block_tables,
+        block_tables.cp_size * block_tables.cp_interleave,
+        kv_cache_config.num_blocks,
+        model_state.max_model_len,
+        input_block_tables=input_block_tables,
+    )
+
+
 def prepare_inputs_to_capture(
     num_reqs: int,
     num_tokens: int,
@@ -812,6 +847,14 @@ def prepare_inputs_to_capture(
     )
 
     if block_tables.cp_size > 1:
+        if full_cudagraph:
+            set_dcp_capture_context(
+                input_batch,
+                model_state,
+                block_tables,
+                input_block_tables,
+                kv_cache_config,
+            )
         input_batch.dcp_local_seq_lens = prepare_dcp_local_seq_lens(
             input_buffers.dcp_local_seq_lens,
             input_batch.seq_lens,
@@ -988,7 +1031,7 @@ def _extrapolate_full_graph_memory(mem_samples: list[int], total_graphs: int) ->
 
 def _init_minimal_kv_cache_for_profiling(runner: "GPUModelRunner") -> None:
     """Allocate the smallest KV cache that still lets every graph be captured."""
-    from vllm.v1.core.kv_cache_utils import (
+    from vllm.v1.core.kv_cache_planning import (
         get_kv_cache_config_from_groups,
         get_kv_cache_groups,
     )

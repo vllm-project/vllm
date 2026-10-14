@@ -13,6 +13,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.determinism.batch_invariant import rms_norm_batch_invariant
 from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.model_executor.utils import set_weight_attrs
 
 logger = init_logger(__name__)
 
@@ -64,6 +65,9 @@ class RMSNorm(CustomOp):
         self.weight = torch.ones(hidden_size, dtype=weight_dtype)
         if self.has_weight:
             self.weight = nn.Parameter(self.weight)
+            # Dummy weights keep norms neutral: random ones would shrink every
+            # activation and skew data-dependent kernels (e.g. sparse top-k).
+            set_weight_attrs(self.weight, {"dummy_weight_value": 1.0})
 
         # When has_weight=False, pass weight=None so implementations that
         # support a weightless path can skip the per-channel multiply.
@@ -155,6 +159,7 @@ class GemmaRMSNorm(CustomOp):
     ) -> None:
         super().__init__()
         self.weight = nn.Parameter(torch.zeros(hidden_size))
+        set_weight_attrs(self.weight, {"dummy_weight_value": 0.0})
         self.variance_epsilon = eps
 
     def forward_native(
@@ -240,8 +245,10 @@ class LayerNorm(CustomOp):
         self.bias: nn.Parameter | None = None
         if elementwise_affine:
             self.weight = nn.Parameter(torch.ones(hidden_size, dtype=weight_dtype))
+            set_weight_attrs(self.weight, {"dummy_weight_value": 1.0})
             if bias:
                 self.bias = nn.Parameter(torch.zeros(hidden_size, dtype=weight_dtype))
+                set_weight_attrs(self.bias, {"dummy_weight_value": 0.0})
 
     def _compute_dtype(self, x: torch.Tensor) -> torch.dtype:
         if self.weight is None:
@@ -329,6 +336,7 @@ class RMSNormGated(CustomOp):
         self.eps = eps
         self.activation = activation
         self.weight = nn.Parameter(torch.empty(hidden_size, **factory_kwargs))
+        set_weight_attrs(self.weight, {"dummy_weight_value": 1.0})
         self.register_parameter("bias", None)
         self.group_size = group_size
         self.norm_before_gate = norm_before_gate

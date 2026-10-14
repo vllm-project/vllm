@@ -454,8 +454,8 @@ class ElasticEPScalingExecutor:
         torch.compiler.reset()
         with set_current_vllm_config(self.worker.vllm_config):
             reset_compile_wrapper(self.worker.model_runner.get_model())
-            if speculator is not None:
-                reset_compile_wrapper(speculator.model)
+            if draft_model := getattr(speculator, "model", None):
+                reset_compile_wrapper(draft_model)
 
         gc.collect()
         torch.accelerator.synchronize()

@@ -11,6 +11,7 @@ from vllm.config import StructuredOutputsConfig, VllmConfig
 from vllm.config.model import ModelConfig
 from vllm.config.speculative import SpeculativeConfig
 from vllm.parser.engine.adapters import ParserEngineReasoningAdapter
+from vllm.parser.engine.parser_engine import ReasoningEnd
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.v1.request import Request
 from vllm.v1.structured_output import StructuredOutputManager
@@ -113,12 +114,12 @@ class _EngineReasonerStub(ParserEngineReasoningAdapter):
     def reasoning_end_token_ids(self):
         return self._end_token_ids
 
-    def find_reasoning_end_offset(self, token_ids):
+    def find_reasoning_end(self, token_ids):
         self.windows.append(list(token_ids))
         for offset, token in enumerate(token_ids):
             if token in self._end_token_ids:
-                return offset
-        return len(token_ids)
+                return ReasoningEnd(offset, False)
+        return ReasoningEnd(len(token_ids), False)
 
     def is_reasoning_end(self, input_ids):
         return any(token in self._end_token_ids for token in input_ids)

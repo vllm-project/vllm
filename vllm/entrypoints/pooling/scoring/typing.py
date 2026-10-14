@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass
-from typing import TypeAlias
+from typing import Required, TypeAlias
 
-from typing_extensions import Required, TypedDict
+from typing_extensions import TypedDict
 
-from vllm.entrypoints.chat_utils import (
+from vllm.renderers.chat_utils import (
     ChatCompletionContentPartImageEmbedsParam,
     ChatCompletionContentPartImageParam,
     ChatCompletionContentPartTextParam,
