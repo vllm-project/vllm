@@ -55,12 +55,15 @@ class MonoWarmup(VllmJitKernel["MonoWarmup.CompileKey"]):
 
 
 class MonoRuntime(Generic[KernelT, LaunchStateT]):
-    """A model's MonoKernels on this rank: built once after load.
+    """A model's MonoKernels on this rank.
 
-    ``launch_state`` is what the spec built at attach, and the one handle the
-    model reads outside a launch: anything a model needs between steps (the
-    runner the kernels share, its peer buffers, the error words) lives there
-    rather than in a module global.
+    The runtime reads the spec and builds the layer kernels. It also
+    registers them for warmup and handles caching, and drivers the
+    per-step decision whether to run the kernels or the model's layers.
+
+    To build the kernels, it first creates the necessary launch state
+    LaunchStateT. The kernels built by the runtime are of type KernelT
+    and are stored in the `kernels` attribute.
     """
 
     launch_state: LaunchStateT

@@ -47,9 +47,10 @@ class LayerKernel(Protocol):
 
     def launch(self, *args, **kwargs) -> Any:
         """Takes and returns what the vLLM layer it replaces does, or None to
-        decline this call, which sends the layer down vLLM's path. Decline only
-        on what ``skip_step`` cannot answer, such as the layout of the tensors
-        the layer was handed."""
+        decline this call.
+
+        The decline should only trigger on what ``skip_step`` cannot answer,
+        such as the layout of the tensors the layer was handed."""
         ...
 
     def warmup_keys(self) -> list[Any]:
@@ -64,24 +65,7 @@ class LayerKernel(Protocol):
 
 @dataclass(frozen=True)
 class MonoSpec(Generic[LaunchStateT]):
-    """One (model, vendor, ISA)'s declaration: values and callbacks, no
-    behaviour of its own.
-
-    A spec is a value, so a second ISA is ``dataclasses.replace`` of the first
-    at module scope rather than a subclass, and a model exports its candidates
-    as a ``MONO_SPECS`` tuple the library selects from.
-
-    The parameter is the spec's own launch state: ``launch_state`` builds it,
-    and ``refuse_caches``, ``skip_step`` and ``build`` are handed back the same
-    object. Annotate the spec with it (``MonoSpec[MyLaunchState](...)``) and
-    those four callbacks are checked against each other.
-
-    Gating runs in tiers, and the prefix is the consequence. ``refuse_*`` says
-    the deployment asked for something it cannot have, so it may take the
-    engine down; ``skip_*`` says only that this layer, or this step, takes
-    vLLM's path, and never raises. If the same model with the same flags could
-    legitimately have another layer, or a later step, that passes the check, it
-    is a ``skip_*``. Every tier reports all of its reasons, never the first.
+    """Definition of when a monokernel can run, and how to build it.
 
     Attributes:
         name: Log and metric name.
@@ -103,9 +87,7 @@ class MonoSpec(Generic[LaunchStateT]):
             from the forward context, which every rank sees alike.
         launch_state: The weights and launch state, built once at attach, off
             the loaded model (whose parameters carry the device the kernels
-            launch on) and the indices ``skip_layer`` left, in order. The only
-            place a weight copy is ever made. Opaque to the library, which only
-            hands it back to the spec's own callbacks.
+            launch on). The only place a weight copy is ever made.
         build: One layer's kernels, by width, called once a layer with every
             width the spec serves. What a layer prepares once (its weight
             views, anything the layer itself must be told) is prepared here,
