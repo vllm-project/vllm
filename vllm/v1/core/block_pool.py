@@ -593,7 +593,6 @@ class BlockPool:
     ) -> list[BlockHashWithGroupId]:
         if block.block_hash is None:
             # Secondary hashes are only registered on blocks with a primary hash.
-            assert block.block_id not in self.cached_block_hashes_by_block
             return []
         block_hashes = [block.block_hash]
         block_hashes.extend(self.cached_block_hashes_by_block.pop(block.block_id, ()))

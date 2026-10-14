@@ -533,3 +533,57 @@ def test_partial_block_promotes_to_direct_full_block_hash(dcp_world_size: int):
     )
     assert pool.get_cached_block(promoted_full_hash, [kv_cache_group_id]) == [blocks[1]]
     assert pool.get_cached_block(partial_hash, [kv_cache_group_id]) is None
+
+
+def assert_hash_index_consistent(pool: BlockPool) -> None:
+    """The lookup map and each block's recorded hashes describe the same
+    entries; a block without a primary hash owns none."""
+    indexed: dict[int, set] = {}
+    for key, entry in pool.cached_block_hash_to_block._cache.items():
+        for block in entry.values() if isinstance(entry, dict) else (entry,):
+            indexed.setdefault(block.block_id, set()).add(key)
+    for block in pool.blocks:
+        recorded = set(pool.cached_block_hashes_by_block.get(block.block_id, ()))
+        if block.block_hash is None:
+            assert not recorded
+        else:
+            recorded.add(block.block_hash)
+        assert indexed.get(block.block_id, set()) == recorded
+
+
+def test_hash_index_stays_consistent_across_pool_operations():
+    """The no-hash fast paths in ``_remove_cached_block_hashes`` and
+    ``_insert_block_hash`` rely on this; cover every path that writes hashes."""
+    hash_block_size, block_size, group = 2, 6, 0
+    req = make_request("0", list(range(16)), hash_block_size, sha256)
+    pool = BlockPool(
+        num_gpu_blocks=8, enable_caching=True, hash_block_size=hash_block_size
+    )
+    blocks = pool.get_new_blocks(3)
+
+    # Full blocks, plus a shorter partial entry on a full block (secondary).
+    pool.cache_full_blocks(req, blocks, 0, 2, block_size, group)
+    pool.cache_partial_block(req, blocks[1], 8, group, block_size)
+    assert blocks[1].block_id in pool.cached_block_hashes_by_block
+    assert_hash_index_consistent(pool)
+
+    # Partial tail, then its promotion to a full block.
+    pool.cache_partial_block(req, blocks[2], 16, group, block_size)
+    assert_hash_index_consistent(pool)
+    req.append_output_token_ids([16, 17])
+    pool.cache_full_blocks(req, blocks, 2, 3, block_size, group)
+    assert_hash_index_consistent(pool)
+
+    # Move a multi-hash block's entries to a private copy.
+    (copy,) = pool.get_new_blocks(1)
+    pool.move_block_hashes(blocks[1], copy)
+    assert_hash_index_consistent(pool)
+
+    # Evict one block, reset the rest, then reallocate the whole pool.
+    pool.free_blocks([*blocks, copy])
+    pool.evict_blocks({blocks[0].block_id})
+    assert_hash_index_consistent(pool)
+    assert pool.reset_prefix_cache()
+    assert_hash_index_consistent(pool)
+    pool.get_new_blocks(pool.get_num_free_blocks())
+    assert_hash_index_consistent(pool)
