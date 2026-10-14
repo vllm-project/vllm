@@ -114,8 +114,9 @@ class TestPublishedWheelSearch(unittest.TestCase):
         for content, blocks in (
             (build_system + '[project.optional-dependencies]\nzen = ["z"]\n', False),
             (build_system.replace("2.13.0", "2.14.0"), True),
+            ("[build-system", True),
         ):
-            with self.subTest(blocks=blocks):
+            with self.subTest(content=content):
                 self.git("reset", "-q", "--hard", published)
                 pyproject.write_text(content)
                 self.git("commit", "-qam", "pyproject")
@@ -124,9 +125,8 @@ class TestPublishedWheelSearch(unittest.TestCase):
                     with self.assertRaisesRegex(ValueError, "pyproject.toml"):
                         self.search(base)
                     continue
-                with self.assertLogs("setup", "WARNING") as logs:
+                with self.assertNoLogs("setup", "WARNING"):
                     self.assertEqual(self.search(base), published)
-                self.assertIn("pyproject.toml", logs.output[0])
 
     def test_wrong_architecture_is_not_a_match(self):
         with self.assertRaisesRegex(ValueError, "No published precompiled wheel"):

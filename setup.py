@@ -899,16 +899,39 @@ class precompiled_wheel_utils:
     # Publication lags main by roughly 5-10 commits; anything much older is
     # unlikely to still match the checkout's compiled sources.
     WHEEL_SEARCH_DEPTH = 20
-    # Changes here make an older wheel's extensions unusable.
+    # Changes here make an older wheel's extensions unusable, as do changes to
+    # pyproject.toml's [build-system] table.
     WHEEL_BLOCKING_PATHS = (
         "csrc",
         "cmake",
         "CMakeLists.txt",
         "vllm/_custom_ops.py",
     )
-    # Changes here are usually harmless for an older wheel. pyproject.toml
-    # blocks when its [build-system] table changes.
-    WHEEL_WARNING_PATHS = ("rust", "setup.py", "pyproject.toml")
+    # Changes here are usually harmless for an older wheel.
+    WHEEL_WARNING_PATHS = ("rust", "setup.py")
+
+    @staticmethod
+    def build_system_changed(old: str, new: str) -> bool:
+        """Whether pyproject.toml's [build-system] table differs between commits."""
+        import tomllib
+
+        diff = ["git", "diff", "--name-only", old, new, "--", "pyproject.toml"]
+        if not subprocess.check_output(diff, text=True).strip():
+            return False
+        try:
+            old_table, new_table = (
+                tomllib.loads(
+                    subprocess.check_output(
+                        ["git", "show", f"{rev}:pyproject.toml"],
+                        text=True,
+                        stderr=subprocess.DEVNULL,
+                    )
+                ).get("build-system")
+                for rev in (old, new)
+            )
+        except (subprocess.CalledProcessError, tomllib.TOMLDecodeError):
+            return True
+        return old_table != new_table
 
     @staticmethod
     def find_published_wheel_commit(
@@ -955,19 +978,8 @@ class precompiled_wheel_utils:
                 subprocess.check_output([*diff, *paths], text=True).strip()
                 for paths in (utils.WHEEL_BLOCKING_PATHS, utils.WHEEL_WARNING_PATHS)
             )
-            if "pyproject.toml" in warning.splitlines():
-                import tomllib
-
-                old, new = (
-                    tomllib.loads(
-                        subprocess.check_output(
-                            ["git", "show", f"{rev}:pyproject.toml"], text=True
-                        )
-                    ).get("build-system")
-                    for rev in (commit, base_commit)
-                )
-                if old != new:
-                    blocking = "\n".join(filter(None, (blocking, "pyproject.toml")))
+            if utils.build_system_changed(commit, base_commit):
+                blocking = f"{blocking}\npyproject.toml".strip()
             if blocking:
                 raise ValueError(
                     f"No precompiled wheel is published yet for {base_commit}, and "
