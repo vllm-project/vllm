@@ -14,9 +14,10 @@ in every caller.
 """
 
 import socket
+from collections.abc import Mapping
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
-from typing import Any, ClassVar, Self, cast
+from typing import TYPE_CHECKING, Any, ClassVar, Self, cast
 
 import torch
 
@@ -52,6 +53,9 @@ from vllm.distributed.weight_transfer.nccl_common import (
     stateless_init_metadata_group,
 )
 from vllm.logger import init_logger
+
+if TYPE_CHECKING:
+    from vllm.distributed.utils import StatelessProcessGroup
 
 logger = init_logger(__name__)
 
@@ -174,6 +178,8 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
         self._source_digest = ""
         self._dst_mesh: M2NMesh | None = None
         self._dst_placements: list[Placements | None] = []
+        self._metadata_group: StatelessProcessGroup | None = None
+        self._num_trainer_ranks = 0
 
     @classmethod
     def trainer_init(
@@ -208,6 +214,7 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
         source: WeightSource | None,
     ) -> None:
         """Run source validation, metadata agreement, and NCCL rendezvous."""
+        self._num_trainer_ranks = init_info.num_trainer_ranks
         local_source_error: str | None = None
         try:
             if not isinstance(source, M2NWeightSource):
@@ -233,6 +240,8 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
                 self.client.init_weight_transfer_engine,
                 self._worker_init_info(init_info),
             )
+        handle = None
+        group = None
         try:
             reservation = init_info.listen_socket
             try:
@@ -275,17 +284,23 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
             nccl = None
             device = None
             try:
-                nccl, device, self._handle = prepare_m2n_local_runtime(
+                nccl, device, handle = prepare_m2n_local_runtime(
                     self._m2n, init_info.max_cta
                 )
             except Exception as exc:
                 runtime_error = f"{type(exc).__name__}: {exc}"
             check_runtime_ready_agreement(metadata_group, runtime_error)
-            assert nccl is not None and device is not None
-            self.group = create_m2n_communicator(nccl, metadata_group, unique_id_bytes)
-            self._dst_placements = self._receive_destination_plan(
-                init_info.num_trainer_ranks, torch.device("cuda", device)
+            assert nccl is not None and device is not None and handle is not None
+            group = create_m2n_communicator(nccl, metadata_group, unique_id_bytes)
+            destination_placements = self._receive_destination_plan(
+                group,
+                init_info.num_trainer_ranks,
+                torch.device("cuda", device),
             )
+
+            if init_future is not None:
+                init_future.result()
+
             logger.info(
                 "nccl_m2n trainer ready: %d parameters, trainer ranks [0, %d), "
                 "inference ranks [%d, %d)",
@@ -295,27 +310,40 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
                 init_info.world_size,
             )
             logger.info("nccl_m2n source plan digest: %s", plan_digest)
-
-            if init_future is not None:
-                init_future.result()
+        except BaseException:
+            if group is not None:
+                try:
+                    group.destroy()
+                except BaseException:
+                    logger.exception(
+                        "failed to destroy partially initialized nccl_m2n communicator"
+                    )
+            if handle is not None:
+                try:
+                    handle.destroy()
+                except BaseException:
+                    logger.exception(
+                        "failed to destroy partially initialized nccl_m2n handle"
+                    )
+            raise
         finally:
             if executor is not None:
                 executor.shutdown(wait=False, cancel_futures=True)
 
+        self._metadata_group = metadata_group
+        self._handle = handle
+        self.group = group
+        self._dst_placements = destination_placements
+
     def _receive_destination_plan(
-        self, first_worker_rank: int, device: torch.device
+        self, group: Any, first_worker_rank: int, device: torch.device
     ) -> list[Placements | None]:
         """Receive and validate the inference-side per-parameter placements."""
-        if self.group is None or self._dst_mesh is None:
-            raise RuntimeError(
-                "destination plan requires the communicator and destination mesh"
-            )
-
         # The first inference worker publishes one placement per parameter.
         # Every trainer rank receives the complete plan in this single,
         # initialization-time broadcast.
         placements = publish_destination_placements(
-            self.group,
+            group,
             device,
             torch.cuda.current_stream(),
             first_worker_rank,
@@ -394,27 +422,73 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
         if self._handle is None or self.group is None:
             raise RuntimeError("nccl_m2n trainer engine is not initialized")
 
-        if self.is_sender:
-            self.client.start_weight_update()
-            executor = ThreadPoolExecutor(
-                max_workers=1, thread_name_prefix="m2n-weight-sync"
-            )
-            try:
-                update = executor.submit(
-                    self.client.update_weights,
-                    {"names": [m.name for m in self._metas]},
+        try:
+            if self.is_sender:
+                self.client.start_weight_update()
+                executor = ThreadPoolExecutor(
+                    max_workers=1, thread_name_prefix="m2n-weight-sync"
                 )
-                # Surface an immediate worker-side rejection before trainers
-                # enter the collective sequence.
-                if update.done():
+                try:
+                    update = executor.submit(
+                        self.client.update_weights,
+                        {"names": [m.name for m in self._metas]},
+                    )
+                    # Surface an immediate worker-side rejection before trainers
+                    # enter the collective sequence.
+                    if update.done():
+                        update.result()
+                    self._send()
                     update.result()
+                finally:
+                    executor.shutdown(wait=False, cancel_futures=True)
+                self.client.finish_weight_update()
+            else:
                 self._send()
-                update.result()
-            finally:
-                executor.shutdown(wait=False, cancel_futures=True)
-            self.client.finish_weight_update()
+        except BaseException as exc:
+            if self.is_sender:
+                try:
+                    self._publish_round_outcome(exc)
+                except BaseException:
+                    logger.exception("failed to publish nccl_m2n round failure")
+            raise
+
+        if self.is_sender:
+            self._publish_round_outcome(None)
         else:
-            self._send()
+            self._receive_round_outcome()
+
+    def _publish_round_outcome(self, failure: BaseException | None) -> None:
+        """Tell non-sender trainer ranks whether worker finalization passed."""
+        if self._num_trainer_ranks <= 1:
+            return
+        if self._metadata_group is None:
+            raise RuntimeError("nccl_m2n metadata group is unavailable")
+        envelope = {
+            "ok": failure is None,
+            "error": (
+                None if failure is None else f"{type(failure).__name__}: {failure}"
+            ),
+        }
+        for rank in range(1, self._num_trainer_ranks):
+            self._metadata_group.send_obj(envelope, rank)
+
+    def _receive_round_outcome(self) -> None:
+        """Wait until trainer rank zero observed every worker's finish RPC."""
+        if self._metadata_group is None:
+            raise RuntimeError("nccl_m2n metadata group is unavailable")
+        outcome = self._metadata_group.recv_obj(0)
+        if not isinstance(outcome, Mapping) or set(outcome) != {"ok", "error"}:
+            raise RuntimeError("trainer rank zero sent an invalid round outcome")
+        ok = outcome["ok"]
+        error = outcome["error"]
+        if not isinstance(ok, bool) or ok != (error is None):
+            raise RuntimeError("trainer rank zero sent an invalid round outcome")
+        if not ok:
+            if not isinstance(error, str) or not error:
+                raise RuntimeError("trainer rank zero sent an invalid round error")
+            raise RuntimeError(
+                "nccl_m2n worker update failed on trainer rank zero: " + error
+            )
 
     def _send(self) -> None:
         """Reshard each local shard into its worker-planned destination."""
@@ -492,11 +566,29 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
 
     def shutdown(self) -> None:
         """Finish pending GPU work and release M2N communication state."""
-        if self._handle is not None:
-            torch.accelerator.synchronize()
-            self._handle.destroy()
-            self._handle = None
-        if self.group is not None:
-            self.group.destroy()
-            self.group = None
+        handle, self._handle = self._handle, None
+        group, self.group = self.group, None
+        self._metadata_group = None
         self._dst_placements = []
+        self._dst_mesh = None
+        self._m2n = None
+
+        first_error: BaseException | None = None
+
+        def attempt(action: Any, message: str) -> None:
+            nonlocal first_error
+            try:
+                action()
+            except BaseException as exc:
+                if first_error is None:
+                    first_error = exc
+                logger.exception(message)
+
+        if handle is not None or group is not None:
+            attempt(torch.accelerator.synchronize, "failed to synchronize nccl_m2n")
+        if handle is not None:
+            attempt(handle.destroy, "failed to destroy nccl_m2n handle")
+        if group is not None:
+            attempt(group.destroy, "failed to destroy nccl_m2n communicator")
+        if first_error is not None:
+            raise first_error

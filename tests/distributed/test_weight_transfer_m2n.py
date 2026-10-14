@@ -81,17 +81,77 @@ VALID_UID_B64 = base64.b64encode(b"\x00" * 128).decode()
         (M2NTrainerWeightTransferEngine, "group"),
     ],
 )
-def test_shutdown_destroys_communicator_once(engine_type, group_attribute):
+def test_shutdown_destroys_resources_once(monkeypatch, engine_type, group_attribute):
     engine = object.__new__(engine_type)
-    engine._handle = None
+    handle = Mock()
+    engine._handle = handle
     group = Mock()
     setattr(engine, group_attribute, group)
+    synchronize = Mock()
+    monkeypatch.setattr(torch.accelerator, "synchronize", synchronize)
+
+    if engine_type is M2NWeightTransferEngine:
+        engine._parameter_destinations = [Mock()]
+    else:
+        engine._dst_placements = [REPLICATED]
+        engine._metadata_group = Mock()
 
     engine.shutdown()
     engine.shutdown()
 
+    synchronize.assert_called_once_with()
+    handle.destroy.assert_called_once_with()
     group.destroy.assert_called_once_with()
+    assert engine._handle is None
     assert getattr(engine, group_attribute) is None
+    if engine_type is M2NWeightTransferEngine:
+        assert engine._parameter_destinations == []
+    else:
+        assert engine._dst_placements == []
+        assert engine._metadata_group is None
+
+
+@pytest.mark.parametrize(
+    "engine_type,group_attribute",
+    [
+        (M2NWeightTransferEngine, "model_update_group"),
+        (M2NTrainerWeightTransferEngine, "group"),
+    ],
+)
+@pytest.mark.parametrize("failure", ["synchronize", "handle"])
+def test_shutdown_attempts_all_cleanup_after_failure(
+    monkeypatch, engine_type, group_attribute, failure
+):
+    engine = object.__new__(engine_type)
+    handle = Mock()
+    group = Mock()
+    engine._handle = handle
+    setattr(engine, group_attribute, group)
+    if engine_type is M2NTrainerWeightTransferEngine:
+        engine._metadata_group = Mock()
+
+    synchronize = Mock()
+    if failure == "synchronize":
+        synchronize.side_effect = RuntimeError("synchronize failed")
+    else:
+        handle.destroy.side_effect = RuntimeError("handle destroy failed")
+    monkeypatch.setattr(torch.accelerator, "synchronize", synchronize)
+
+    with pytest.raises(RuntimeError, match=failure):
+        engine.shutdown()
+
+    synchronize.assert_called_once_with()
+    handle.destroy.assert_called_once_with()
+    group.destroy.assert_called_once_with()
+    assert engine._handle is None
+    assert getattr(engine, group_attribute) is None
+    if engine_type is M2NTrainerWeightTransferEngine:
+        assert engine._metadata_group is None
+
+    engine.shutdown()
+    synchronize.assert_called_once_with()
+    handle.destroy.assert_called_once_with()
+    group.destroy.assert_called_once_with()
 
 
 class _BufferLike:
@@ -596,6 +656,57 @@ class TestWireTypes:
         init_metadata.assert_called_once()
         make_communicator.assert_called_once_with(nccl, group, b"\x00" * 128)
 
+    def test_partial_worker_initialization_releases_transport_resources(
+        self, monkeypatch
+    ):
+        metadata_group = Mock(rank=1, world_size=3)
+        metadata_group.all_gather_obj.side_effect = lambda envelope: [envelope] * 3
+        monkeypatch.setattr(
+            "vllm.distributed.weight_transfer.m2n_engine.worker_init_metadata_group",
+            Mock(return_value=metadata_group),
+        )
+        monkeypatch.setattr(
+            "vllm.distributed.weight_transfer.m2n_engine.import_m2n", Mock()
+        )
+        monkeypatch.setattr(
+            M2NWeightTransferEngine,
+            "_prepare_destination_plan",
+            lambda engine, info: setattr(engine, "_parameter_destinations", []),
+        )
+        handle = Mock()
+        nccl = Mock()
+        monkeypatch.setattr(
+            "vllm.distributed.weight_transfer.m2n_engine.prepare_m2n_local_runtime",
+            Mock(return_value=(nccl, 0, handle)),
+        )
+        communicator = Mock()
+        monkeypatch.setattr(
+            "vllm.distributed.weight_transfer.m2n_engine.create_m2n_communicator",
+            Mock(return_value=communicator),
+        )
+        monkeypatch.setattr(
+            "vllm.distributed.weight_transfer.m2n_engine."
+            "publish_destination_placements",
+            Mock(side_effect=RuntimeError("late init failure")),
+        )
+        vllm_config = SimpleNamespace(
+            parallel_config=Mock(), model_config=SimpleNamespace(quantization=None)
+        )
+        engine = M2NWeightTransferEngine(
+            WeightTransferConfig(backend="nccl_m2n"),
+            vllm_config,
+            torch.device("cuda:0"),
+            torch.nn.Module(),
+        )
+
+        with pytest.raises(RuntimeError, match="late init failure"):
+            engine.init_transfer_engine(self._init_info(params=[]))
+
+        communicator.destroy.assert_called_once_with()
+        handle.destroy.assert_called_once_with()
+        assert engine.model_update_group is None
+        assert engine._handle is None
+
     @pytest.mark.parametrize("worker_rank_offset", [0, 3])
     def test_worker_rank_offset_must_stay_in_destination_interval(
         self, worker_rank_offset
@@ -877,6 +988,104 @@ class TestTrainerSourceContract:
         engine._dst_placements = [REPLICATED] * len(engine._metas)
         engine.group = Mock(comm=1)
         return engine
+
+    def test_partial_trainer_initialization_releases_transport_resources(
+        self, monkeypatch
+    ):
+        metadata_group = Mock(rank=0, world_size=2)
+        metadata_group.all_gather_obj.side_effect = lambda envelope: [envelope] * 2
+        monkeypatch.setattr(
+            "vllm.distributed.weight_transfer.m2n_trainer."
+            "stateless_init_metadata_group",
+            Mock(return_value=metadata_group),
+        )
+        monkeypatch.setattr(
+            "vllm.distributed.weight_transfer.m2n_trainer.import_m2n", Mock()
+        )
+        handle = Mock()
+        nccl = Mock()
+        monkeypatch.setattr(
+            "vllm.distributed.weight_transfer.m2n_trainer.prepare_m2n_local_runtime",
+            Mock(return_value=(nccl, 0, handle)),
+        )
+        communicator = Mock()
+        monkeypatch.setattr(
+            "vllm.distributed.weight_transfer.m2n_trainer.create_m2n_communicator",
+            Mock(return_value=communicator),
+        )
+        monkeypatch.setattr(
+            "vllm.distributed.weight_transfer.m2n_trainer."
+            "publish_destination_placements",
+            Mock(return_value=[]),
+        )
+        source = _StaticM2NSource([], [])
+        client = Mock()
+        client.init_weight_transfer_engine.side_effect = RuntimeError(
+            "worker init failed"
+        )
+        engine = M2NTrainerWeightTransferEngine(
+            client=client, source=source, is_sender=True
+        )
+        init_info = M2NTrainerInitInfo(
+            rank=0,
+            master_address="127.0.0.1",
+            master_port=1234,
+            world_size=2,
+        )
+
+        with pytest.raises(RuntimeError, match="worker init failed"):
+            engine._initialize(init_info, source)
+
+        communicator.destroy.assert_called_once_with()
+        handle.destroy.assert_called_once_with()
+        assert engine.group is None
+        assert engine._handle is None
+
+    def test_non_sender_observes_rank_zero_finish_failure(self):
+        outcomes: dict[int, dict[str, object]] = {}
+        sender_group = Mock()
+        sender_group.send_obj.side_effect = lambda outcome, rank: outcomes.__setitem__(
+            rank, outcome
+        )
+
+        source = _StaticM2NSource([], [])
+        sender = self._engine(source)
+        sender.is_sender = True
+        sender._metadata_group = sender_group
+        sender._num_trainer_ranks = 4
+        sender._send = Mock()
+        sender.client = Mock()
+        sender.client.finish_weight_update.side_effect = RuntimeError("finish failed")
+
+        with pytest.raises(RuntimeError, match="finish failed"):
+            sender.send_weights()
+
+        sender._send.assert_called_once_with()
+        assert sender_group.send_obj.call_count == 3
+        for trainer_rank in range(1, 4):
+            receiver_group = Mock()
+            receiver_group.recv_obj.side_effect = (
+                lambda _source_rank, trainer_rank=trainer_rank: outcomes.pop(
+                    trainer_rank
+                )
+            )
+            receiver = self._engine(source)
+            receiver._metadata_group = receiver_group
+            receiver._num_trainer_ranks = 4
+            receiver._send = Mock()
+
+            with pytest.raises(
+                RuntimeError,
+                match=(
+                    "worker update failed on trainer rank zero: "
+                    "RuntimeError: finish failed"
+                ),
+            ):
+                receiver.send_weights()
+
+            receiver._send.assert_called_once_with()
+            receiver_group.recv_obj.assert_called_once_with(0)
+        assert not outcomes
 
     @pytest.mark.parametrize(
         ("case", "match"),

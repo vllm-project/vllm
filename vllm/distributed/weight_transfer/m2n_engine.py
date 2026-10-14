@@ -62,9 +62,12 @@ from vllm.distributed.weight_transfer.nccl_common import (
     decode_nccl_unique_id,
     worker_init_metadata_group,
 )
+from vllm.logger import init_logger
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+
+logger = init_logger(__name__)
 
 __all__ = [
     "M2NWeightTransferInitInfo",
@@ -302,44 +305,66 @@ class M2NWeightTransferEngine(
             data_plane_error,
         )
 
-        runtime_error = destination_error
-        nccl = None
-        device = None
-        if runtime_error is None:
-            try:
-                nccl, device, self._handle = prepare_m2n_local_runtime(
-                    self._m2n, init_info.max_cta
-                )
-            except Exception as exc:
-                runtime_error = f"{type(exc).__name__}: {exc}"
-        check_runtime_ready_agreement(metadata_group, runtime_error)
-        assert nccl is not None and device is not None
-        self.model_update_group = create_m2n_communicator(
-            nccl, metadata_group, unique_id_bytes
-        )
+        handle = None
+        group = None
+        try:
+            runtime_error = destination_error
+            nccl = None
+            device = None
+            if runtime_error is None:
+                try:
+                    nccl, device, handle = prepare_m2n_local_runtime(
+                        self._m2n, init_info.max_cta
+                    )
+                except Exception as exc:
+                    runtime_error = f"{type(exc).__name__}: {exc}"
+            check_runtime_ready_agreement(metadata_group, runtime_error)
+            assert nccl is not None and device is not None and handle is not None
+            group = create_m2n_communicator(nccl, metadata_group, unique_id_bytes)
 
-        # Keep the merged destination-placement publication unchanged: source
-        # agreement is independent of worker-side destination selection.
-        mine = [destination.placements for destination in self._parameter_destinations]
-        agreed = publish_destination_placements(
-            self.model_update_group,
-            self.device,
-            torch.cuda.current_stream(),
-            init_info.rank_offset,
-            mine,
-            len(self._metas),
-        )
-        if agreed != mine:
-            mismatched = next(
-                meta.name
-                for meta, ours, theirs in zip(self._metas, mine, agreed)
-                if ours != theirs
+            # Keep the merged destination-placement publication unchanged: source
+            # agreement is independent of worker-side destination selection.
+            mine = [
+                destination.placements for destination in self._parameter_destinations
+            ]
+            agreed = publish_destination_placements(
+                group,
+                self.device,
+                torch.cuda.current_stream(),
+                init_info.rank_offset,
+                mine,
+                len(self._metas),
             )
-            raise RuntimeError(
-                "inference workers resolved different nccl_m2n destinations "
-                f"(first mismatch: '{mismatched}'); all workers must run the "
-                "same model and parallel config"
-            )
+            if agreed != mine:
+                mismatched = next(
+                    meta.name
+                    for meta, ours, theirs in zip(self._metas, mine, agreed)
+                    if ours != theirs
+                )
+                raise RuntimeError(
+                    "inference workers resolved different nccl_m2n destinations "
+                    f"(first mismatch: '{mismatched}'); all workers must run the "
+                    "same model and parallel config"
+                )
+        except BaseException:
+            if group is not None:
+                try:
+                    group.destroy()
+                except BaseException:
+                    logger.exception(
+                        "failed to destroy partially initialized nccl_m2n communicator"
+                    )
+            if handle is not None:
+                try:
+                    handle.destroy()
+                except BaseException:
+                    logger.exception(
+                        "failed to destroy partially initialized nccl_m2n handle"
+                    )
+            raise
+
+        self._handle = handle
+        self.model_update_group = group
 
     def _prepare_source_plan(
         self,
@@ -531,12 +556,32 @@ class M2NWeightTransferEngine(
 
     def shutdown(self) -> None:
         """Finish pending GPU work and release M2N communication state."""
-        if self._handle is not None:
-            # M2N does not synchronize caller streams on finalize.
-            torch.accelerator.synchronize()
-            self._handle.destroy()
-            self._handle = None
-        if self.model_update_group is not None:
-            self.model_update_group.destroy()
-            self.model_update_group = None
+        handle, self._handle = self._handle, None
+        group, self.model_update_group = self.model_update_group, None
+        self._m2n = None
+        self._metas = []
+        self._dst_mesh = None
         self._parameter_destinations = []
+        self._index = {}
+        self._uses_load_weights = False
+
+        first_error: BaseException | None = None
+
+        def attempt(action: Any, message: str) -> None:
+            nonlocal first_error
+            try:
+                action()
+            except BaseException as exc:
+                if first_error is None:
+                    first_error = exc
+                logger.exception(message)
+
+        if handle is not None or group is not None:
+            # M2N does not synchronize caller streams on finalize.
+            attempt(torch.accelerator.synchronize, "failed to synchronize nccl_m2n")
+        if handle is not None:
+            attempt(handle.destroy, "failed to destroy nccl_m2n handle")
+        if group is not None:
+            attempt(group.destroy, "failed to destroy nccl_m2n communicator")
+        if first_error is not None:
+            raise first_error
