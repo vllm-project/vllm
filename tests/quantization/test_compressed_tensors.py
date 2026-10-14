@@ -1112,7 +1112,9 @@ def test_mxfp4_moe_with_fp8_inputs_shares_native_mxfp4_method(monkeypatch):
     assert not hasattr(layer, "w13_weight_packed")
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@pytest.mark.skipif(
+    not current_platform.is_cuda(), reason="FP8 x MXFP4 linear kernels need CUDA"
+)
 def test_mxfp4_linear_with_fp8_inputs_requests_fp8_activations():
     """Dense MXFP4 layers with dynamic FP8 inputs (e.g. GLM-5.3 dense MLPs)
     must not be routed as W4A4."""
