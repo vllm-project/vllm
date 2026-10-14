@@ -13,6 +13,8 @@ from vllm.v1.worker.cpu.structured_outputs import CPUStructuredOutputsWorker
 from vllm.v1.worker.cpu.utils import CPUKVBlockZeroer
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 from vllm.v1.worker.gpu.model_states.default import DefaultModelState
+from vllm.v1.worker.gpu.model_states.encoder_decoder import EncoderDecoderModelState
+from vllm.v1.worker.gpu.model_states.encoder_only import EncoderOnlyModelState
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
 from vllm.v1.worker.gpu.sample.sampler import Sampler
@@ -39,6 +41,12 @@ class CPUModelRunner(GPUModelRunner):
                 return CPUDefaultModelState
             if model_state_cls is MambaHybridModelState:
                 return CPUMambaHybridModelState
+            if model_state_cls in (EncoderOnlyModelState, EncoderDecoderModelState):
+                return model_state_cls
+            raise ValueError(
+                "CPU Model Runner V2 without Triton does not support model state "
+                f"{model_state_cls.__name__}."
+            )
         return model_state_cls
 
     @property
