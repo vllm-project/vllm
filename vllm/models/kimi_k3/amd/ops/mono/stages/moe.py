@@ -154,6 +154,19 @@ def inter_lds(s):
     return s <= INTER_LDS_S
 
 
+def few_rows(s):
+    """At most a pick tile of rows: a slot's picks fit one tile, so a slot is
+    a tile and the MFMAs' columns are the tokens. The route table is then
+    expert flags and each slot's top-k index a token (``kof``), and the
+    latent's scale codes a word each: none of the bitmap, the pick order or
+    the packed codes' atomics."""
+    return s <= PTILE
+
+
+def latsc_words(s):
+    return s * LAT // 32 if few_rows(s) else s * LAT // 128
+
+
 TL_POINTS = 8  # start, early, sdown, ug, down, lnorm, up, reduce
 
 _STREAM = fx.Stream(None)
@@ -495,18 +508,9 @@ def route_id(rt, j):
 
 
 @traced
-def load_route(c):
-    """ROUTE -> LDS (ids, weights), then U, the experts with picks (ascending),
-    and their pick tiles: each expert's slot, each slot's expert, first pick
-    and first tile, the picks (t TOPK + k) in slot order (a slot's tokens
-    ascending) and each tile's slot. A pick ORs its token's bit into its
-    expert's bitmap (``redi``): a slot's picks are the bitmap's popcount, a
-    pick's rank in its slot the bits below its token. The bitmaps are the same
-    whatever order the ORs land in, so every CTA lays out the same table.
-    Returns the pick tiles' count."""
-    s, tid, lane, wave = c["S"], c["tid"], c["lane"], c["wave"]
-    rt, mask = c["rt"], c["redi"]
-    assert s <= MAX_S and 2 * THREADS >= E and MASK_WORDS * E <= WAVES * 256
+def poll_route(c):
+    """ROUTE -> LDS (ids, weights)."""
+    s, tid, rt = c["S"], c["tid"], c["rt"]
     n = s * 2 * TOPK
     per = (n + THREADS - 1) // THREADS
     got = c["poll"](
@@ -515,6 +519,69 @@ def load_route(c):
     for i in range_constexpr(per):
         if tid + THREADS * i < n:
             fx.ptr_store(got[i][0], rt["route"] + (tid + THREADS * i))
+
+
+@traced
+def load_route_few(c):
+    """``few_rows``: ROUTE -> LDS, then U, the experts with picks (ascending):
+    each expert's slot (``eslot``, a flag first), each slot's expert, and
+    kof[slot][t], token t's top-k index of the slot's expert (-1: not
+    picked). Returns |U|, the pick tiles' count."""
+    s, tid, lane, wave = c["S"], c["tid"], c["lane"], c["wave"]
+    rt = c["rt"]
+    npk = s * TOPK
+    assert npk <= THREADS and 2 * THREADS >= E
+    poll_route(c)
+    for i in range_constexpr((E + THREADS - 1) // THREADS):
+        e = tid + THREADS * i
+        if e < E:
+            fx.ptr_store(fx.Int32(0), rt["eslot"] + e)
+    nk = max_u(s) * s
+    for i in range_constexpr((nk + THREADS - 1) // THREADS):
+        j = tid + THREADS * i
+        if j < nk:
+            fx.ptr_store(fx.Int32(-1), rt["kof"] + j)
+    gpu.barrier()
+    if tid < npk:
+        fx.ptr_store(fx.Int32(1), rt["eslot"] + route_id(rt, tid))
+    gpu.barrier()
+    e0 = fx.min(2 * tid, E - 1)
+    f0 = (2 * tid < E).select(fx.ptr_load(rt["eslot"] + e0), fx.Int32(0))
+    f1 = (2 * tid + 1 < E).select(
+        fx.ptr_load(rt["eslot"] + fx.min(2 * tid + 1, E - 1)), fx.Int32(0)
+    )
+    off, tot = block_excl_scan(f0 + f1, lane, wave, c["scan"])
+    gpu.barrier()
+    if f0 == 1:
+        fx.ptr_store(off, rt["eslot"] + 2 * tid)
+        fx.ptr_store(fx.Int32(2 * tid), rt["expert"] + off)
+    if f1 == 1:
+        fx.ptr_store(off + f0, rt["eslot"] + 2 * tid + 1)
+        fx.ptr_store(fx.Int32(2 * tid + 1), rt["expert"] + off + f0)
+    gpu.barrier()
+    if tid < npk:
+        slot = fx.ptr_load(rt["eslot"] + route_id(rt, tid))
+        fx.ptr_store(tid % TOPK, rt["kof"] + (slot * s + tid // TOPK))
+    gpu.barrier()
+    return uniform(tot)
+
+
+@traced
+def load_route(c):
+    """ROUTE -> LDS (ids, weights), then U, the experts with picks (ascending),
+    and their pick tiles: each expert's slot, each slot's expert, first pick
+    and first tile, the picks (t TOPK + k) in slot order (a slot's tokens
+    ascending) and each tile's slot. A pick ORs its token's bit into its
+    expert's bitmap (``redi``): a slot's picks are the bitmap's popcount, a
+    pick's rank in its slot the bits below its token. The bitmaps are the same
+    whatever order the ORs land in, so every CTA lays out the same table.
+    Returns the pick tiles' count. At ``few_rows``, ``load_route_few``."""
+    s, tid, lane, wave = c["S"], c["tid"], c["lane"], c["wave"]
+    if const_expr(few_rows(s)):
+        return load_route_few(c)
+    rt, mask = c["rt"], c["redi"]
+    assert s <= MAX_S and 2 * THREADS >= E and MASK_WORDS * E <= WAVES * 256
+    poll_route(c)
     for i in range_constexpr((MASK_WORDS * E + THREADS - 1) // THREADS):
         j = tid + THREADS * i
         if j < MASK_WORDS * E:
@@ -601,15 +668,17 @@ def pick_tile(c, tile):
 def load_latq(c):
     """LAT (every rank's 448 columns) -> MXFP4 as aiter's inline quant: a
     thread a (token, 32-block): amax of |bf16| bits, the ceil code of amax / 6,
-    v_cvt_scalef32_pk_fp4_bf16 -> latq words, latsc codes (4 a word)."""
+    v_cvt_scalef32_pk_fp4_bf16 -> latq words, latsc codes (a word each at
+    ``few_rows``, else 4 a word)."""
     s, tid = c["S"], c["tid"]
     nblk = s * (LAT // 32)
-    # latsc: a word 4 codes (K blocks 4 st ..), ORed in
-    for i in range_constexpr((nblk // 4 + THREADS - 1) // THREADS):
-        j = tid + THREADS * i
-        if j < nblk // 4:
-            fx.ptr_store(fx.Int32(0), c["latsc"] + j)
-    gpu.barrier()
+    if const_expr(not few_rows(s)):
+        # latsc: a word 4 codes (K blocks 4 st ..), ORed in
+        for i in range_constexpr((nblk // 4 + THREADS - 1) // THREADS):
+            j = tid + THREADS * i
+            if j < nblk // 4:
+                fx.ptr_store(fx.Int32(0), c["latsc"] + j)
+        gpu.barrier()
     for i in range_constexpr((nblk + THREADS - 1) // THREADS):
         b = fx.min(tid + THREADS * i, nblk - 1)
         t = b // (LAT // 32)
@@ -630,11 +699,14 @@ def load_latq(c):
                 for j in range_constexpr(4):
                     pk = pk_fp4_bf16(pk, ws[4 * q + j], scale, j)
                 fx.ptr_store(pk, c["latq"] + (t * (LAT // 8) + kb * 4 + q))
-            fx.llvm.atomic_or(
-                c["latsc"] + (t * (LAT // 128) + kb // 4),
-                code << ((kb % 4) * 8),
-                syncscope="workgroup",
-            )
+            if const_expr(few_rows(s)):
+                fx.ptr_store(code, c["latsc"] + (t * (LAT // 32) + kb))
+            else:
+                fx.llvm.atomic_or(
+                    c["latsc"] + (t * (LAT // 128) + kb // 4),
+                    code << ((kb % 4) * 8),
+                    syncscope="workgroup",
+                )
     gpu.barrier()
 
 
@@ -657,7 +729,10 @@ def ug_loads(c, task):
     and their scale words: issued a task ahead (``stage_ug`` takes them)."""
     lane, wave = c["lane"], c["wave"]
     a, rt = c["args"], c["rt"]
-    slot = uniform(fx.ptr_load(rt["tslot"] + task // UG_GROUPS))
+    if const_expr(few_rows(c["S"])):
+        slot = task // UG_GROUPS
+    else:
+        slot = uniform(fx.ptr_load(rt["tslot"] + task // UG_GROUPS))
     g = task % UG_GROUPS
     e = uniform(fx.ptr_load(rt["expert"] + slot))
     rgl = wave % 4  # 0, 1 gate; 2, 3 up
@@ -684,10 +759,15 @@ def stage_ug(c, task, ops):
     """Pick tile task / 12, 32-column group task % 12: gate rows 32 g .. and up
     rows 384 + 32 g .. of the tile's expert (``ops``: ``ug_loads``) against its
     picks' MXFP4 latent rows (a lane's column a pick); SiTUv2; MXFP4 a 32-column
-    group -> INTER / ISC of each pick."""
-    tid, lane, wave, red = c["tid"], c["lane"], c["wave"], c["red"]
+    group -> INTER / ISC of each pick. At ``few_rows`` the slot's tile is
+    every token (a lane's column a token), its picks those with a ``kof``."""
+    s, tid, lane, wave, red = c["S"], c["tid"], c["lane"], c["wave"], c["red"]
     rt = c["rt"]
-    _, p0, n = pick_tile(c, task // UG_GROUPS)
+    few = few_rows(s)
+    if const_expr(few):
+        slot = task // UG_GROUPS
+    else:
+        _, p0, n = pick_tile(c, task // UG_GROUPS)
     g = task % UG_GROUPS
     rgl = wave % 4
     half = wave // 4
@@ -695,7 +775,10 @@ def stage_ug(c, task, ops):
     steps = [half * (W13_STEPS // 2) + i for i in range(W13_STEPS // 2)]
     av = ops[: len(steps)]
     sw = ops[len(steps) :]
-    t = fx.ptr_load(rt["order"] + (p0 + fx.min(lane % 16, n - 1))) // TOPK
+    if const_expr(few):
+        t = fx.min(lane % 16, s - 1)
+    else:
+        t = fx.ptr_load(rt["order"] + (p0 + fx.min(lane % 16, n - 1))) // TOPK
     kb = lane // 16
     acc = fx.Vector.filled(4, 0.0, fx.Float32)
     for i in range_constexpr(len(steps)):
@@ -706,7 +789,10 @@ def stage_ug(c, task, ops):
                 result_type=fx.Vector.make_type(4, fx.Int32),
             )
         )
-        sb = (fx.ptr_load(c["latsc"] + (t * (LAT // 128) + st)) >> (kb * 8)) & 0xFF
+        if const_expr(few):
+            sb = fx.ptr_load(c["latsc"] + (t * (LAT // 32) + st * 4 + kb))
+        else:
+            sb = (fx.ptr_load(c["latsc"] + (t * (LAT // 128) + st)) >> (kb * 8)) & 0xFF
         # the code's byte (st % 2) 2 + rg % 2 of the word; rg % 2 is the wave's
         sa = (sw[i // 2] >> ((st % 2) * 16 + (rg % 2) * 8)) & 0xFF
         acc = mfma_scaled(av[i], bw, acc, sa, sb, FP4, FP4, 0, 0)
@@ -715,8 +801,14 @@ def stage_ug(c, task, ops):
     # thread (pick, column): g / u summed over the K halves, SiTUv2
     tt = tid // 32
     col = tid % 32
-    live = tt < n
-    tt = fx.min(tt, n - 1)
+    if const_expr(few):
+        live = tt < s
+        tt = fx.min(tt, s - 1)
+        k = fx.ptr_load(rt["kof"] + (slot * s + tt))
+        live = live & (k >= 0)
+    else:
+        live = tt < n
+        tt = fx.min(tt, n - 1)
     first = col < 16  # gate / up row group 0 (waves 0, 2) or 1 (1, 3); +4: K's 2nd half
     r = col % 16
     gv = first.select(
@@ -739,7 +831,10 @@ def stage_ug(c, task, ops):
             x0 = fx.ptr_load(red + (tt * 32 + col * 8 + 2 * j))
             x1 = fx.ptr_load(red + (tt * 32 + col * 8 + 2 * j + 1))
             pk = pk_fp4_f32(pk, x0, x1, scale, j)
-        pick = fx.ptr_load(rt["order"] + (p0 + tt))
+        if const_expr(few):
+            pick = tt * TOPK + k
+        else:
+            pick = fx.ptr_load(rt["order"] + (p0 + tt))
         c["put_words"](c["inter"], pick * 48 + g * 4 + col, [pk])
         if col == 0:
             c["put"](c["isc"], pick * UG_GROUPS + g, code)
@@ -802,10 +897,13 @@ def down_loads(c, rgd, nt, b0):
     r_w = rsrc(c["args"]["w2"])
     rt = c["rt"]
     tiles = [fx.min(b0 + WAVES * j, nt - 1) for j in range(DOWN_BATCH)]
-    es = [
-        uniform(fx.ptr_load(rt["expert"] + fx.ptr_load(rt["tslot"] + tl)))
-        for tl in tiles
-    ]
+    if const_expr(few_rows(c["S"])):
+        es = [uniform(fx.ptr_load(rt["expert"] + tl)) for tl in tiles]
+    else:
+        es = [
+            uniform(fx.ptr_load(rt["expert"] + fx.ptr_load(rt["tslot"] + tl)))
+            for tl in tiles
+        ]
     av = [
         fp4_tile_load(r_w, es[j] * (LAT * RI // 8), rgd, RI, st, lane * 4)
         for j in range(DOWN_BATCH)
@@ -838,9 +936,16 @@ def stage_down(c, rgd, nt, ops0):
         ops_n = down_loads(c, rgd, nt, fx.min(nb, nt - 1))
         for j in range_constexpr(DOWN_BATCH):
             live = (b0 + WAVES * j) < nt
-            _, p0, cnt = pick_tile(c, fx.min(b0 + WAVES * j, nt - 1))
-            picked = lane % 16 < cnt
-            pick = fx.ptr_load(rt["order"] + (p0 + fx.min(lane % 16, cnt - 1)))
+            if const_expr(few_rows(s)):
+                # the slot's tile: lane % 16 a token, picked if it has a kof
+                tq = fx.min(lane % 16, s - 1)
+                kq = fx.ptr_load(rt["kof"] + (fx.min(b0 + WAVES * j, nt - 1) * s + tq))
+                picked = (kq >= 0) & (lane % 16 < s)
+                pick = tq * TOPK + fx.max(kq, 0)
+            else:
+                _, p0, cnt = pick_tile(c, fx.min(b0 + WAVES * j, nt - 1))
+                picked = lane % 16 < cnt
+                pick = fx.ptr_load(rt["order"] + (p0 + fx.min(lane % 16, cnt - 1)))
             if const_expr(not inter_lds(s)):
                 got = poll_inter(c, pick, kb)
             acc = fx.Vector.filled(4, 0.0, fx.Float32)

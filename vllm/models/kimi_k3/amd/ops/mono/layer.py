@@ -207,15 +207,23 @@ def build(key: K2Build):
     play = peer_layout(s)
     half = peer_bytes(s) // 2
 
+    # the route table: a slot's kof row (``few_rows``), else its pick tiles
+    few = k2b.few_rows(s)
+    nkof = k2b.max_u(s) * s if few else 1
+    nslot = 1 if few else k2b.max_u(s) + 1
+    npick = 1 if few else s * k2b.TOPK
+    ntile = 1 if few else k2b.max_tiles(s)
+
     @fx.struct
     class RouteLds:
         route: fx.Array[fx.Int32, s * 2 * k2b.TOPK, 16]
         eslot: fx.Array[fx.Int32, k2b.E, 16]
         expert: fx.Array[fx.Int32, k2b.max_u(s), 16]
-        first: fx.Array[fx.Int32, k2b.max_u(s) + 1, 16]
-        tfirst: fx.Array[fx.Int32, k2b.max_u(s) + 1, 16]
-        order: fx.Array[fx.Int32, s * k2b.TOPK, 16]
-        tslot: fx.Array[fx.Int32, k2b.max_tiles(s), 16]
+        kof: fx.Array[fx.Int32, nkof, 16]
+        first: fx.Array[fx.Int32, nslot, 16]
+        tfirst: fx.Array[fx.Int32, nslot, 16]
+        order: fx.Array[fx.Int32, npick, 16]
+        tslot: fx.Array[fx.Int32, ntile, 16]
         scan: fx.Array[fx.Int32, WAVES, 16]
 
     # red, and as words the route table's token bitmaps (``load_route``)
@@ -245,7 +253,7 @@ def build(key: K2Build):
     @fx.struct
     class UgLds:
         latq: fx.Array[fx.Int32, s * k2b.LAT // 8, 16]
-        latsc: fx.Array[fx.Int32, s * k2b.LAT // 128, 16]
+        latsc: fx.Array[fx.Int32, k2b.latsc_words(s), 16]
 
     # every pick's INTER in LDS, or (polled at use) none
     nq = s * k2b.TOPK if k2b.inter_lds(s) else 1
@@ -377,6 +385,7 @@ def build(key: K2Build):
                 "route": rl.route.ptr,
                 "eslot": rl.eslot.ptr,
                 "expert": rl.expert.ptr,
+                "kof": rl.kof.ptr,
                 "first": rl.first.ptr,
                 "tfirst": rl.tfirst.ptr,
                 "order": rl.order.ptr,
