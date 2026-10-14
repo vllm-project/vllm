@@ -23,6 +23,7 @@ import pytest
 import vllm.benchmarks.lib.endpoint_request_func as request_func_module
 from vllm.benchmarks.lib.endpoint_request_func import (
     RequestFuncInput,
+    StreamedResponseHandler,
     async_request_openai_audio,
     async_request_openai_chat_completions,
     async_request_openai_completions,
@@ -351,6 +352,9 @@ _BOUNDARY_TEXT = " leading 中 trailing "
 
 
 @pytest.mark.parametrize(
+    "separator", ["\n\n", "\r\n\r\n", "\r\r"], ids=["lf", "crlf", "cr"]
+)
+@pytest.mark.parametrize(
     "endpoint_id,request_func,api_url,chat",
     STREAMING_ENDPOINTS,
     ids=[e[0] for e in STREAMING_ENDPOINTS],
@@ -360,9 +364,11 @@ def test_streamed_output_is_invariant_to_transport_chunk_boundaries(
     request_func,
     api_url: str,
     chat: bool,
+    separator: str,
 ) -> None:
-    """iter_any() yields arbitrary transport fragments, so parsing must
-    give the same result no matter where the byte stream is split."""
+    """iter_any() yields arbitrary transport fragments, so parsing must give
+    the same result no matter where the byte stream is split, for every SSE
+    event separator the spec allows."""
     if chat:
         choice: dict[str, Any] = {"index": 0, "delta": {"content": _BOUNDARY_TEXT}}
     else:
@@ -371,7 +377,7 @@ def test_streamed_output_is_invariant_to_transport_chunk_boundaries(
     event = json.dumps(
         {"id": "cmpl-test", "object": "x", "choices": [choice]}, ensure_ascii=False
     )
-    stream = f"data: {event}\n\ndata: [DONE]\n\n".encode()
+    stream = f"data: {event}{separator}data: [DONE]{separator}".encode()
 
     async def run_all_splits() -> list[tuple[int, bool, str, str]]:
         failures = []
@@ -389,6 +395,15 @@ def test_streamed_output_is_invariant_to_transport_chunk_boundaries(
         return failures
 
     assert asyncio.run(run_all_splits()) == []
+
+
+def test_early_emit_fires_after_separator_split_across_reads() -> None:
+    """A separator split across reads leaves a leading newline in the buffer;
+    the next complete event must still be emitted early (its timestamp is the
+    token's arrival) rather than waiting for its own separator."""
+    handler = StreamedResponseHandler()
+    assert handler.add_chunk(b'data: {"a": 1}\n') == ['data: {"a": 1}']
+    assert handler.add_chunk(b'\ndata: {"a": 2}') == ['data: {"a": 2}']
 
 
 # ``benchmarks/backend_request_func.py`` is a standalone script rather than a
