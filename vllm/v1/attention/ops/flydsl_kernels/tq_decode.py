@@ -7,8 +7,7 @@
 # N_CENTROIDS=16, BLOCK_SIZE=16, partitioned mode.
 #
 # === Design ===
-# * 1 wave (64 lanes) per CTA — simpler than 4-warp; trades parallelism for
-#   correctness/debug-ability. A later revision will fan out to 4 warps.
+# * 1 wave (64 lanes) per CTA.
 # * Flash-Attention-2 online softmax: rescale running PV/sum per K-tile,
 #   no QK score storage across tiles, no P-LDS round-trip (qk_acc layout
 #   matches PV B-operand directly).
@@ -99,9 +98,9 @@ def build_tq_decode_module(
     ``query_group_size`` (= num_query_heads // num_kv_heads) selects the
     GQA factor. Supported values: 8 and 16. For 8 the MFMA's 16-row
     capacity is half-used; lanes 8..15 compute garbage and are gated out
-    of all global-memory writes via an OOB-offset trick on the buffer
-    resource. Q load iterates ``QG // 4`` chunks (= 2 for QG=8, 4 for
-    QG=16) so we never read past the real Q rows in HBM.
+    of all global-memory writes by ``mfma_row < QG``. Q load iterates
+    ``QG // 4`` chunks (= 2 for QG=8, 4 for QG=16) so we never read past
+    the real Q rows in HBM.
 
     ``kv_block_size`` is the number of tokens per vLLM cache block. Must
     be a multiple of TILE_SIZE (=16). Supported values: 16 and 32. With
@@ -270,14 +269,8 @@ def build_tq_decode_module(
 
         # ===== STEP E: Sequence-len + partition base ====================
         seq_len = fx.Int32(sl_buf[seq])
-        # ── Bounded num_partitions + internal looping ───────────────────
-        # With TGPP > 1 this CTA owns a contiguous slice of length
-        # ``PARTITION_EXTENT_TOKENS`` that is iterated as ``TGPP`` groups
-        # of 16 K-tiles each. ``partition_start`` is recomputed per
-        # outer ``tg`` iteration below; the FA-2 online-softmax state
-        # (running_max, running_sum, acc_pv) accumulates across all
-        # ``TGPP * 16`` tiles for this CTA — semantically identical to
-        # processing one large 16*TGPP-tile partition.
+        # Each CTA owns PARTITION_EXTENT_TOKENS contiguous tokens, walked as
+        # TGPP groups of 16 K-tiles; the FA-2 state carries across groups.
         partition_base = part * PARTITION_EXTENT_TOKENS
 
         # Per-K-tile dequant lane assignment:
@@ -286,10 +279,6 @@ def build_tq_decode_module(
         # Lane t: token = t / 4, sub-chunk = t % 4 (0..3) → 16 bytes contiguous
         tok_in_tile = lane >> 2
         chunk_in_tok = lane & 3
-        # ``slot`` (= absolute slot index within the cache block, range
-        # 0.._BS-1) is recomputed per tile inside the K-tile loop below
-        # so it reflects ``tile_in_block * TILE_SIZE + tok_in_tile``.
-
         meta_u16_per_kvh = NUM_SOA_FIELDS * _BS
 
         # ===== STEP F: K-tile loop =======================================
@@ -297,49 +286,15 @@ def build_tq_decode_module(
         # per cache block. Tiles within the same block share a block-table
         # entry but address different slot ranges within the block.
         #
-        # ── Per-tile block-table OOB redirect ────────────────────────────
-        # The K-tile loop is unrolled 16 times so every CTA issues 16
-        # block-table reads regardless of (partition, seq_len). When a
-        # partition extends past ``seq_len`` (e.g. num_partitions=2 for
-        # a 256-token sequence — partition 1 covers tokens 256..511, all
-        # masked out) the per-tile bt offset can land beyond the bt
-        # allocation. With ``max_size=True`` the descriptor advertises
-        # 4 GB so the HW returns whatever pre-existing HBM bytes live at
-        # that offset; the resulting garbage ``phys_block`` is multiplied
-        # by ``stride_cache_block`` and the subsequent kv_cache read
-        # jumps into pages that may be unmapped (→ "Memory access fault
-        # by GPU node") or may decode as NaN bytes (→ NaN segm_out).
-        # Allocator-pattern dependent, but reproduces deterministically
-        # at large B (e.g. B=64 seq=256 in the test sweep produces 8 192
-        # NaN entries even on canonical QG=8).
-        #
-        # Fix: when the tile starts at or past ``seq_len`` (so its
-        # qk_acc is going to be killed by the per-token
-        # ``kv_tok < seq_len`` mask anyway), redirect the bt read to
-        # ``bt[seq, 0]`` — always in bounds. The redundant phys_block
-        # decode + kv_cache read is wasted work, but correctness is
-        # preserved without changing the kernel's iteration count.
-        # ===== Runtime-adaptive scf.ForOp w/ iter_args =========
-        # Runtime-adaptive outer loop: trip count derives from
-        # actual seq_len, NOT TGPP_max. At cudagraph-capture warmup
-        # (seq_len=1) only 1 iteration runs; at 32K production
-        # decode all TGPP iterations run. Kernel binary stays small
-        # (single body, looped at runtime) — capture time matches
-        # the legacy 16-tile-only kernel rather than scaling 4x.
-        #
-        # FA-2 state (running_max, running_sum, acc_pv[8]) threads
-        # through scf iter_args; the body reads them at top, runs
-        # the unchanged 16-tile inner body, and yields the new
-        # state at bottom. After the loop, results are pulled out
-        # of for_op.results back into the local Python names so the
-        # downstream STEP G (output) is unmodified.
-        # remaining = seq_len - partition_base   (signed, may be <=0)
+        # Tiles at or past seq_len read bt[seq, 0] instead of their own
+        # entry: the descriptor has no bounds check, so a bt offset past the
+        # allocation returns garbage and sends the KV read to unmapped
+        # pages. Those tiles are masked by kv_tok < seq_len anyway.
+        # The trip count follows seq_len rather than TGPP, so CUDA-graph
+        # capture (seq_len=1) runs one iteration of a single loop body.
+        # For remaining <= 0 trip_raw is garbage; the select zeroes it.
         remaining = seq_len - partition_base
         in_range = remaining > 0
-        # trip_raw = ceil(remaining / KV_COMPUTE_BLOCK)
-        # (when in_range is false, the divisor branch produces
-        # garbage that the select below overrides with zero, so we
-        # don't pre-clamp)
         trip_raw = (remaining + KV_COMPUTE_BLOCK - 1) // KV_COMPUTE_BLOCK
         trip_clamped = (trip_raw > TGPP).select(TGPP, trip_raw)
         trip_or_zero = in_range.select(trip_clamped, 0)
@@ -480,10 +435,7 @@ def build_tq_decode_module(
                 tile_sum = tile_sum + ts2
                 running_sum = running_sum + tile_sum
 
-                # ---- V dequant → LDS (V/scale/zero raw loads were hoisted) -
-                # v_packed, vscale_raw, vzero_raw are already in flight from
-                # the top of this iteration; only the f32 conversion stays
-                # here so the actual consume site is still close to the use.
+                # ---- V dequant → LDS (raw loads issued at the tile top) ----
                 vscale_f32 = fx.Int16(vscale_raw).bitcast(fx.Float16).to(fx.Float32)
                 vzero_f32 = fx.Int16(vzero_raw).bitcast(fx.Float16).to(fx.Float32)
 
@@ -502,31 +454,13 @@ def build_tq_decode_module(
                     v_bf16.bitcast(fx.Int64).store(
                         kv_lds_i64, [fx.Index(v_lds_i64_idx)]
                     )
-                # ── HW V transpose: cross-lane LDS sync ─────────────────────
-                # ds_read_tr16_b64 below introduces a cross-lane LDS read:
-                # consumer lane t reads bytes written by source lanes
-                # 0,4,8,12 (etc.). The compiler's automatic waitcnt insertion
-                # is per-lane and has no awareness of the HW transpose's
-                # cross-lane forwarding, so it can sink the next iteration's
-                # ds_read ahead of these ds_write_b128 ops in the schedule.
-                #
-                # Two-part fence:
-                #   1. sched_barrier(0): MachineScheduler reorder barrier
-                #      (mask=0 → no instruction class may cross). Pure hint,
-                #      generates no runtime instruction. Use the simple
-                #      sched_barrier (NOT sched_group_barrier, which is an
-                #      IGLP marker that requires partner barriers and
-                #      corrupts the schedule when used in isolation).
-                #   2. s_waitcnt lgkmcnt=0: runtime drain of the LDS write
-                #      queue. vmcnt/expcnt left at no-wait so we don't
-                #      stall on speculatively-issued HBM loads (which can
-                #      include OOB-but-masked buffer_load reads from the
-                #      next K-tile's hoisted V prefetch).
-                #
-                # Without this fence the reordered ds_read produces
-                # wrong results on high-partition-count configs (large
-                # padded num_partitions); low-partition configs are
-                # unaffected.
+                # ds_read_tr16_b64 reads bytes written by other lanes, which
+                # the per-lane waitcnt tracking cannot see. sched_barrier(0)
+                # keeps the scheduler from hoisting those reads above these
+                # ds_writes (sched_group_barrier alone corrupts the schedule),
+                # and lgkmcnt=0 drains the LDS writes without waiting on the
+                # in-flight HBM prefetch. Without the fence, high partition
+                # counts read stale V.
                 rocdl.sched_barrier(0)
                 rocdl.s_waitcnt(lgkmcnt=0)
                 gpu.barrier()

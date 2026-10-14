@@ -12,9 +12,9 @@
 #   * Build-time assert allows query_group_size = 6 only (Qwen sizes go to
 #     the canonical tq_decode kernel — NOT this file)
 #   * QG_LOAD_ITERS = (QG + 3) // 4 (round-up; 2 iters for QG=6 loads
-#     8 LDS rows of which only 6 carry real Q; rows 6..7 are zero-padded
-#     by buffer_load OOB protection — gated out by the same mfma_row < QG
-#     predicate the canonical kernel already uses for QG=8)
+#     8 LDS rows of which only 6 carry real Q; rows 6..7 load an
+#     in-bounds dummy row and are gated out by the same mfma_row < QG
+#     predicate the canonical kernel uses for QG=8)
 #
 # All cross-lane operations (xor_shuffle softmax reductions, ds_read_tr16_b64
 # HW V transpose) are mfma_row-isolated and thus already GQA-agnostic. The
@@ -24,8 +24,7 @@
 # Qwen3-32B).
 #
 # === Design ===
-# * 1 wave (64 lanes) per CTA — simpler than 4-warp; trades parallelism for
-#   correctness/debug-ability. A later revision will fan out to 4 warps.
+# * 1 wave (64 lanes) per CTA.
 # * Flash-Attention-2 online softmax: rescale running PV/sum per K-tile,
 #   no QK score storage across tiles, no P-LDS round-trip (qk_acc layout
 #   matches PV B-operand directly).
@@ -119,9 +118,8 @@ def build_tq_decode_gqa6_module(
     lanes 6..15 compute garbage and are gated out of all global-memory
     writes via the same ``mfma_row < QG`` predicate the canonical kernel
     uses for QG=8. Q load iterates ``(QG + 3) // 4`` = 2 chunks (loads
-    8 LDS rows of which rows 6..7 are zero-padded by the buffer-resource
-    OOB protection — they're never consumed because the gating lanes
-    don't write).
+    8 LDS rows; rows 6..7 hold an in-bounds dummy row and their lanes
+    never write).
 
     For GQA-8 or GQA-16 (Qwen models), use the canonical
     ``build_tq_decode_module`` from ``tq_decode.py`` instead.
@@ -145,9 +143,8 @@ def build_tq_decode_gqa6_module(
     PARTITION_EXTENT_TOKENS = TGPP * KV_COMPUTE_BLOCK
 
     QG = int(query_group_size)
-    # Round-up: 2 iters for QG=6 → loads 8 LDS rows (rows 6..7 are
-    # zero-padded by buffer_load OOB protection; never consumed because
-    # mfma_row >= QG lanes are gated out of all global stores below).
+    # Round-up: 2 iters for QG=6 load 8 LDS rows; rows 6..7 are dummies
+    # (see STEP B) and their lanes are gated out of all global stores.
     QG_LOAD_ITERS = (QG + 3) // 4
 
     _BS = int(kv_block_size)
@@ -247,39 +244,12 @@ def build_tq_decode_gqa6_module(
         # (8 rows × 16 col_b) so lanes whose row ∈ {6, 7} address heads that
         # do NOT exist in the Q tensor (Hq = num_kv_heads * 6).
         #
-        # ── Per-lane Q-load OOB redirect ─────────────────────────────────
-        # Hq = num_kv_heads * QG, so head index = kv_h * QG + row. For QG=6
-        # the upper rows alias to (kv_h+1)'s real heads (still in-bounds
-        # for most kv_h), but for the *last* (seq, kv_h) the read tips
-        # past the Q tensor entirely. With ``max_size=True`` the buffer
-        # descriptor advertises 4 GB so the HW does no OOB clamping; the
-        # padding read then touches unmapped pages and the kernel dies
-        # with "Memory access fault by GPU node" the moment the
-        # surrounding allocator state leaves the next page unmapped
-        # (allocator-pattern-dependent → nondeterministic fault).
-        #
-        # Fix: redirect OOB lanes (``row >= QG``) to load Q[0,0,col_elem]
-        # — a byte offset that is always inside the actual Q tensor.
-        # The redundant load is wasted but harmless; the resulting LDS
-        # write to row ∈ {6, 7} is overwritten/ignored downstream because
-        # every global store is gated by the output-time
-        # ``mfma_row < QG`` predicate (the same gate canonical QG=8 uses
-        # for its garbage rows 8..15).
-        #
-        # NB: A ``mask=`` parameter on ``buffer_load`` substitutes the
-        # masked-out offset with 0x7FFFFFFF *bytes*; with ``max_size=True``
-        # this is still inside the 4 GB descriptor and so the HW happily
-        # dereferences ``q_base + 2 GB`` → another unmapped page → fault.
-        # The address-redirect below is the only safe option short of
-        # threading the true Q size through as a runtime kernel arg.
-        #
-        # The canonical Qwen kernel does not need this redirect because
-        # for QG ∈ {8, 16} the (kv_h, row) iteration covers exactly the
-        # real heads; QG=6 is the only case where
-        # ``QG_LOAD_ITERS * 4 != QG``.
-        # STEP B: load pre-rotated q_rot → Q_LDS. QG=6 over-reads
-        # (QG_LOAD_ITERS * 4 != QG), so rows >= QG redirect to a safe
-        # in-bounds offset to avoid faulting past the real Q rows.
+        # For the last (seq, kv_h), rows >= QG would address heads past the
+        # Q tensor, and the descriptor has no bounds check, so they load the
+        # in-bounds offset col_elem instead; their output is gated by
+        # mfma_row < QG. A buffer-load mask does not help: it substitutes a
+        # 2 GiB offset, still inside the unchecked descriptor. QG=6 is the
+        # only supported QG with QG_LOAD_ITERS * 4 != QG.
         for c in range_constexpr(QG_LOAD_ITERS):
             row_chunk = lane + c * WARP_SIZE  # 0..127
             row = row_chunk >> 4  # 0..7
@@ -316,12 +286,8 @@ def build_tq_decode_gqa6_module(
 
         # ===== STEP E: Sequence-len + partition base ====================
         seq_len = fx.Int32(sl_buf[seq])
-        # ── Bounded num_partitions + internal looping ───────────────────
-        # Mirrors the canonical tq_decode kernel: each CTA owns
-        # ``PARTITION_EXTENT_TOKENS = TGPP * KV_COMPUTE_BLOCK`` contiguous
-        # tokens of the seq, processed as TGPP groups of 16 K-tiles each.
-        # FA-2 online-softmax state accumulates across all TGPP * 16 tiles.
-        # With TGPP=1 this is bit-identical to the legacy 16-tile body.
+        # Each CTA owns PARTITION_EXTENT_TOKENS contiguous tokens, walked as
+        # TGPP groups of 16 K-tiles; the FA-2 state carries across groups.
         partition_base = part * PARTITION_EXTENT_TOKENS
 
         # Per-K-tile dequant lane assignment:
@@ -330,10 +296,6 @@ def build_tq_decode_gqa6_module(
         # Lane t: token = t / 4, sub-chunk = t % 4 (0..3) → 16 bytes contiguous
         tok_in_tile = lane >> 2
         chunk_in_tok = lane & 3
-        # ``slot`` (= absolute slot index within the cache block, range
-        # 0.._BS-1) is recomputed per tile inside the K-tile loop below
-        # so it reflects ``tile_in_block * TILE_SIZE + tok_in_tile``.
-
         meta_u16_per_kvh = NUM_SOA_FIELDS * _BS
 
         # ===== STEP F: K-tile loop =======================================
@@ -341,55 +303,15 @@ def build_tq_decode_gqa6_module(
         # per cache block. Tiles within the same block share a block-table
         # entry but address different slot ranges within the block.
         #
-        # ── Per-tile block-table OOB redirect ────────────────────────────
-        # The K-tile loop is unrolled 16 times so every CTA issues 16
-        # block-table reads regardless of (partition, seq_len). When a
-        # partition extends past ``seq_len`` (e.g. num_partitions=2 for a
-        # 256-token sequence — partition 1 covers tokens 256..511, all
-        # masked out) the per-tile bt offset can land beyond the bt
-        # allocation. With ``max_size=True`` the descriptor is 4 GB so
-        # the HW returns whatever pre-existing HBM bytes live at that
-        # offset; the resulting garbage ``phys_block`` is multiplied by
-        # ``stride_cache_block`` and the subsequent kv_cache read jumps
-        # into unmapped pages, killing the whole launch with a
-        # "Memory access fault by GPU node" exactly as the OOB Q load
-        # used to (same allocator-pattern-dependent fault; B=4 makes
-        # it deterministic by adding more colliding CTAs).
-        #
-        # Fix: when the tile starts at or past ``seq_len`` (so its
-        # qk_acc is going to be killed by the per-token
-        # ``kv_tok < seq_len`` mask anyway), redirect the bt read to
-        # ``bt[seq, 0]`` — always in bounds. The redundant phys_block
-        # decode + kv_cache read is wasted work, but correctness is
-        # preserved without changing the kernel's iteration count.
-        #
-        # The canonical Qwen kernel reads the same tiles and is also
-        # exposed to this issue in principle; in practice it surfaces on
-        # GQA-6 first because the surrounding allocator state differs
-        # (extra Q-tail allocation) and shifts the page maps so the bt
-        # overflow lands on unmapped pages. Applying the same redirect to
-        # the canonical kernel is a possible follow-up.
-        # ===== Runtime-adaptive scf.ForOp w/ iter_args =========
-        # Runtime-adaptive outer loop: trip count derives from
-        # actual seq_len, NOT TGPP_max. At cudagraph-capture warmup
-        # (seq_len=1) only 1 iteration runs; at 32K production
-        # decode all TGPP iterations run. Kernel binary stays small
-        # (single body, looped at runtime) — capture time matches
-        # the legacy 16-tile-only kernel rather than scaling 4x.
-        #
-        # FA-2 state (running_max, running_sum, acc_pv[8]) threads
-        # through scf iter_args; the body reads them at top, runs
-        # the unchanged 16-tile inner body, and yields the new
-        # state at bottom. After the loop, results are pulled out
-        # of for_op.results back into the local Python names so the
-        # downstream STEP G (output) is unmodified.
-        # remaining = seq_len - partition_base   (signed, may be <=0)
+        # Tiles at or past seq_len read bt[seq, 0] instead of their own
+        # entry: the descriptor has no bounds check, so a bt offset past the
+        # allocation returns garbage and sends the KV read to unmapped
+        # pages. Those tiles are masked by kv_tok < seq_len anyway.
+        # The trip count follows seq_len rather than TGPP, so CUDA-graph
+        # capture (seq_len=1) runs one iteration of a single loop body.
+        # For remaining <= 0 trip_raw is garbage; the select zeroes it.
         remaining = seq_len - partition_base
         in_range = remaining > 0
-        # trip_raw = ceil(remaining / KV_COMPUTE_BLOCK)
-        # (when in_range is false, the divisor branch produces
-        # garbage that the select below overrides with zero, so we
-        # don't pre-clamp)
         trip_raw = (remaining + KV_COMPUTE_BLOCK - 1) // KV_COMPUTE_BLOCK
         trip_clamped = (trip_raw > TGPP).select(TGPP, trip_raw)
         trip_or_zero = in_range.select(trip_clamped, 0)
@@ -530,10 +452,7 @@ def build_tq_decode_gqa6_module(
                 tile_sum = tile_sum + ts2
                 running_sum = running_sum + tile_sum
 
-                # ---- V dequant → LDS (V/scale/zero raw loads were hoisted) -
-                # v_packed, vscale_raw, vzero_raw are already in flight from
-                # the top of this iteration; only the f32 conversion stays
-                # here so the actual consume site is still close to the use.
+                # ---- V dequant → LDS (raw loads issued at the tile top) ----
                 vscale_f32 = fx.Int16(vscale_raw).bitcast(fx.Float16).to(fx.Float32)
                 vzero_f32 = fx.Int16(vzero_raw).bitcast(fx.Float16).to(fx.Float32)
 
@@ -552,31 +471,13 @@ def build_tq_decode_gqa6_module(
                     v_bf16.bitcast(fx.Int64).store(
                         kv_lds_i64, [fx.Index(v_lds_i64_idx)]
                     )
-                # ── HW V transpose: cross-lane LDS sync ─────────────────────
-                # ds_read_tr16_b64 below introduces a cross-lane LDS read:
-                # consumer lane t reads bytes written by source lanes
-                # 0,4,8,12 (etc.). The compiler's automatic waitcnt insertion
-                # is per-lane and has no awareness of the HW transpose's
-                # cross-lane forwarding, so it can sink the next iteration's
-                # ds_read ahead of these ds_write_b128 ops in the schedule.
-                #
-                # Two-part fence:
-                #   1. sched_barrier(0): MachineScheduler reorder barrier
-                #      (mask=0 → no instruction class may cross). Pure hint,
-                #      generates no runtime instruction. Use the simple
-                #      sched_barrier (NOT sched_group_barrier, which is an
-                #      IGLP marker that requires partner barriers and
-                #      corrupts the schedule when used in isolation).
-                #   2. s_waitcnt lgkmcnt=0: runtime drain of the LDS write
-                #      queue. vmcnt/expcnt left at no-wait so we don't
-                #      stall on speculatively-issued HBM loads (which can
-                #      include OOB-but-masked buffer_load reads from the
-                #      next K-tile's hoisted V prefetch).
-                #
-                # Without this fence the reordered ds_read produces
-                # wrong results on high-partition-count configs (large
-                # padded num_partitions); low-partition configs are
-                # unaffected.
+                # ds_read_tr16_b64 reads bytes written by other lanes, which
+                # the per-lane waitcnt tracking cannot see. sched_barrier(0)
+                # keeps the scheduler from hoisting those reads above these
+                # ds_writes (sched_group_barrier alone corrupts the schedule),
+                # and lgkmcnt=0 drains the LDS writes without waiting on the
+                # in-flight HBM prefetch. Without the fence, high partition
+                # counts read stale V.
                 rocdl.sched_barrier(0)
                 rocdl.s_waitcnt(lgkmcnt=0)
                 gpu.barrier()
