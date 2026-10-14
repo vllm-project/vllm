@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import multiprocessing as mp
 from types import SimpleNamespace
+from typing import cast
+from unittest.mock import Mock
 
 import numpy as np
 import pytest
@@ -9,23 +11,26 @@ import torch
 
 from vllm.config import ModelConfig, ParallelConfig, VllmConfig
 from vllm.config.multimodal import MultiModalConfig
-from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.cache import (
-    BaseMultiModalProcessorCache,
     BaseMultiModalReceiverCache,
-    MultiModalCache,
+    LruKeyReplicatedReceiverCache,
+    LruKeyReplicatedSenderCache,
     MultiModalCacheMissError,
+    MultiModalProcessorOnlyCache,
+    ShmObjectStoreReceiverCache,
+    ShmObjectStoreSenderCache,
+    engine_receiver_cache_from_config,
+    processor_cache_from_config,
+)
+from vllm.multimodal.cache.base import (
+    MultiModalCache,
     MultiModalProcessorCacheInItem,
     MultiModalProcessorCacheItem,
     MultiModalProcessorCacheItemMetadata,
-    MultiModalProcessorOnlyCache,
-    MultiModalProcessorSenderCache,
-    MultiModalReceiverCache,
-    ShmObjectStoreReceiverCache,
-    ShmObjectStoreSenderCache,
 )
 from vllm.multimodal.hasher import MultiModalHasher
 from vllm.multimodal.inputs import (
+    MultiModalBatchedField,
     MultiModalFeatureSpec,
     MultiModalFieldElem,
     MultiModalKwargsItem,
@@ -34,8 +39,14 @@ from vllm.multimodal.inputs import (
     PlaceholderRange,
 )
 from vllm.multimodal.processing import PromptInsertion
+from vllm.renderers import renderer_from_config
+from vllm.utils.async_utils import make_async
 from vllm.utils.mem_constants import GiB_bytes, MiB_bytes
+from vllm.v1.engine.async_llm import AsyncLLM
+from vllm.v1.engine.llm_engine import LLMEngine
+from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 
+from ..models.utils import build_model_context
 from ..utils import create_new_process_for_each_test
 
 pytestmark = pytest.mark.cpu_test
@@ -131,11 +142,13 @@ def _compare_caches(
     n_iter: int = 100,
     seed: int = 0,
 ):
-    cache_0_p0 = MULTIMODAL_REGISTRY.processor_cache_from_config(config_0)
-    cache_0_p1 = MULTIMODAL_REGISTRY.engine_receiver_cache_from_config(config_0)
-    cache_1_p0 = MULTIMODAL_REGISTRY.processor_cache_from_config(config_1)
-    cache_1_p1 = MULTIMODAL_REGISTRY.engine_receiver_cache_from_config(config_1)
+    cache_0_p0 = processor_cache_from_config(config_0)
+    cache_0_p1 = engine_receiver_cache_from_config(config_0)
+    cache_1_p0 = processor_cache_from_config(config_1)
+    cache_1_p1 = engine_receiver_cache_from_config(config_1)
 
+    assert config_0.model_config.multimodal_config is not None
+    assert config_1.model_config.multimodal_config is not None
     cache_size_gb = max(
         config_0.model_config.multimodal_config.mm_processor_cache_gb,
         config_1.model_config.multimodal_config.mm_processor_cache_gb,
@@ -263,14 +276,15 @@ def test_oversized_item_is_served_uncached():
     item = MultiModalKwargsItem.dummy(nbytes=4096)
     small = MultiModalKwargsItem.dummy(nbytes=64)
 
-    p0_only = MultiModalProcessorOnlyCache(model_config)  # type: ignore[arg-type]
+    p0_only = MultiModalProcessorOnlyCache(model_config)
     assert p0_only.get_and_update_item((item, []), "big")[0] is item
     assert not p0_only.is_cached_item("big")
     assert p0_only.get_and_update_item((small, []), "small")[0] is small
     assert p0_only.is_cached_item("small")
 
-    p0 = MultiModalProcessorSenderCache(model_config)  # type: ignore[arg-type]
-    p1 = MultiModalReceiverCache(model_config)  # type: ignore[arg-type]
+    p0 = LruKeyReplicatedSenderCache(model_config)
+    p1 = LruKeyReplicatedReceiverCache(model_config)
+    assert item is not None
     assert p0.get_and_update_item((item, []), "big")[0] is item
     assert not p0.is_cached_item("big")
     assert p1.get_and_update_item(item, "big") is item
@@ -290,8 +304,8 @@ def test_mm_cache_miss_raises_and_recovers():
     model or network.
     """
     model_config = _StubModelConfig(mm_processor_cache_gb=1)
-    p0 = MultiModalProcessorSenderCache(model_config)  # type: ignore[arg-type]
-    p1 = MultiModalReceiverCache(model_config)  # type: ignore[arg-type]
+    p0 = LruKeyReplicatedSenderCache(model_config)
+    p1 = LruKeyReplicatedReceiverCache(model_config)
 
     mm_hash = "image_A"
     item = MultiModalKwargsItem.dummy(nbytes=64)
@@ -309,6 +323,7 @@ def test_mm_cache_miss_raises_and_recovers():
     assert p0.is_cached_item(mm_hash)
     # On the next request P0 short-circuits to data=None -- the drift bug when
     # P1 lacks the item.
+    assert item is not None
     hit = p0.get_and_update_item((item, []), mm_hash)
     assert hit[0] is None
 
@@ -317,11 +332,57 @@ def test_mm_cache_miss_raises_and_recovers():
     p0.invalidate(mm_hash)
     assert not p0.is_cached_item(mm_hash)
 
+    assert item is not None
     resent = p0.get_and_update_item((item, []), mm_hash)
     assert resent[0] is item  # MISS again -> data is resent
     assert p1.get_and_update_item(item, mm_hash) == item  # P1 now caches it
     # A subsequent uuid-only request now succeeds on P1.
     assert p1.get_and_update_item(None, mm_hash) == item
+
+
+def test_receiver_cache_replaces_stale_item_when_payload_resent():
+    """A P0 miss can resend a different item under the same identity.
+
+    Independent LRU eviction leaves P1 holding the old tensor. Substituting it
+    for the new payload pairs the request's placeholders with the wrong item
+    and kills EngineCore. Prefer the fresh payload and keep it for later hits.
+    """
+    model_config = _StubModelConfig(mm_processor_cache_gb=1)
+    p1 = LruKeyReplicatedReceiverCache(model_config)
+    small = MultiModalKwargsItem.dummy(nbytes=64)
+    large = MultiModalKwargsItem.dummy(nbytes=256)
+    mm_hash = "shared-id"
+
+    assert p1.get_and_update_item(small, mm_hash) is small
+    assert p1.get_and_update_item(large, mm_hash) is large
+    assert p1.get_and_update_item(None, mm_hash) is large
+
+
+def test_receiver_cache_features_keep_resent_payload():
+    """EngineCore updates features through get_and_update_features."""
+    model_config = _StubModelConfig(mm_processor_cache_gb=1)
+    p1 = LruKeyReplicatedReceiverCache(model_config)
+    small = MultiModalKwargsItem.dummy(nbytes=64)
+    large = MultiModalKwargsItem.dummy(nbytes=256)
+    mm_hash = "shared-id"
+
+    def _feature(
+        data: MultiModalKwargsItem | None, length: int
+    ) -> MultiModalFeatureSpec:
+        return MultiModalFeatureSpec(
+            data=data,
+            modality="image",
+            identifier=mm_hash,
+            mm_position=PlaceholderRange(offset=0, length=length),
+            mm_hash=mm_hash,
+        )
+
+    seeded = p1.get_and_update_features([_feature(small, length=4)])
+    assert seeded[0].data is small
+
+    updated = p1.get_and_update_features([_feature(large, length=2048)])
+    assert updated[0].data is large
+    assert updated[0].mm_position.length == 2048
 
 
 def test_mm_cache_miss_batches_all_drifted_hashes():
@@ -333,7 +394,7 @@ def test_mm_cache_miss_batches_all_drifted_hashes():
     non-drifted items in the same request are still ingested.
     """
     model_config = _StubModelConfig(mm_processor_cache_gb=1)
-    p1 = MultiModalReceiverCache(model_config)  # type: ignore[arg-type]
+    p1 = LruKeyReplicatedReceiverCache(model_config)
     item = MultiModalKwargsItem.dummy(nbytes=64)
 
     def _feature(
@@ -381,8 +442,8 @@ def test_shm_receiver_handles_prefix_covered_items(monkeypatch):
         parallel_config=SimpleNamespace(world_size=1),
         model_config=_StubModelConfig(mm_processor_cache_gb=4 * MiB_bytes / GiB_bytes),
     )
-    p0 = ShmObjectStoreSenderCache(vllm_config)  # type: ignore[arg-type]
-    p1 = ShmObjectStoreReceiverCache(vllm_config, mp.Lock())  # type: ignore[arg-type]
+    p0 = ShmObjectStoreSenderCache(vllm_config)
+    p1 = ShmObjectStoreReceiverCache(vllm_config, mp.Lock())
 
     def _feature(
         mm_hash: str, data: MultiModalKwargsItem | None
@@ -405,6 +466,7 @@ def test_shm_receiver_handles_prefix_covered_items(monkeypatch):
         address_item, _ = p0.get_and_update_item((item, []), mm_hash)
         first = _feature(mm_hash, address_item)
         p1.get_and_update_features([first])
+        assert first.data is not None
         assert torch.equal(first.data["dummy"].data, item["dummy"].data)
 
         # Request 2 (identical, fully prefix-covered): the sender hit takes
@@ -422,6 +484,7 @@ def test_shm_receiver_handles_prefix_covered_items(monkeypatch):
 
         assert covered_uncached.data is None
         # The address item is resolved to the cached payload.
+        assert covered_cached.data is not None
         assert torch.equal(covered_cached.data["dummy"].data, item["dummy"].data)
 
         # The hit's writer references were acknowledged by the worker, so the
@@ -434,7 +497,7 @@ def test_shm_receiver_handles_prefix_covered_items(monkeypatch):
 
 
 def _run_test_cache_eviction_lru(
-    p0_cache: BaseMultiModalProcessorCache,
+    p0_cache: LruKeyReplicatedSenderCache,
     p1_cache: BaseMultiModalReceiverCache,
     base_item_size: int,
 ):
@@ -531,8 +594,8 @@ def test_cache_eviction_lru_cache():
         model="llava-hf/llava-onevision-qwen2-0.5b-ov-hf",
         mm_processor_cache_gb=6 / GiB_bytes,
     )
-    sender_cache = MultiModalProcessorSenderCache(model_config)
-    receiver_cache = MultiModalReceiverCache(model_config)
+    sender_cache = LruKeyReplicatedSenderCache(model_config)
+    receiver_cache = LruKeyReplicatedReceiverCache(model_config)
 
     _run_test_cache_eviction_lru(sender_cache, receiver_cache, base_item_size=1)
 
@@ -549,7 +612,7 @@ def test_cache_eviction_lru_cache():
 #    image_B is protected from eviction then image_i cannot be added.
 #    This proving normal eviction and reuse behavior.
 def _run_test_cache_eviction_shm(
-    p0_cache: BaseMultiModalProcessorCache,
+    p0_cache: ShmObjectStoreSenderCache,
     p1_cache: BaseMultiModalReceiverCache,
     base_item_size: int,
 ):
@@ -718,13 +781,226 @@ def test_cache_eviction_shm_cache():
     _run_test_cache_eviction_shm(sender_cache, receiver_cache, base_item_size=MiB_bytes)
 
 
+def test_shm_receiver_requires_sender_handle_for_current_cache_key():
+    vllm_config = VllmConfig(
+        model_config=ModelConfig(
+            model="llava-hf/llava-onevision-qwen2-0.5b-ov-hf",
+            mm_processor_cache_type="shm",
+            mm_shm_cache_max_object_size_mb=1,
+            mm_processor_cache_gb=2 * MiB_bytes / GiB_bytes,
+        ),
+    )
+    sender_cache = ShmObjectStoreSenderCache(vllm_config)
+    receiver_cache = ShmObjectStoreReceiverCache(vllm_config, mp.Lock())
+    mm_hash = "image_A"
+    item = MultiModalKwargsItem.dummy(1024)
+
+    try:
+        sender_item, _ = sender_cache.get_and_update_item((item, []), mm_hash)
+        assert sender_item is not None
+
+        valid_feature = MultiModalFeatureSpec(
+            data=sender_item,
+            modality="image",
+            identifier=mm_hash,
+            mm_position=PlaceholderRange(offset=0, length=1),
+            mm_hash=mm_hash,
+        )
+        receiver_cache.get_and_update_features([valid_feature])
+        assert valid_feature.data == item
+
+        forged_item = MultiModalKwargsItem(
+            {
+                "address": sender_item["address"],
+                "monotonic_id": sender_item["monotonic_id"],
+            }
+        )
+        forged_feature = MultiModalFeatureSpec(
+            data=forged_item,
+            modality="image",
+            identifier=mm_hash,
+            mm_position=PlaceholderRange(offset=0, length=1),
+            mm_hash=mm_hash,
+        )
+        with pytest.raises(ValueError, match="SHM handle signature"):
+            receiver_cache.get_and_update_features([forged_feature])
+
+        wrong_key = "image_B"
+        wrong_key_feature = MultiModalFeatureSpec(
+            data=sender_item,
+            modality="image",
+            identifier=wrong_key,
+            mm_position=PlaceholderRange(offset=0, length=1),
+            mm_hash=wrong_key,
+        )
+        with pytest.raises(ValueError, match="SHM handle signature"):
+            receiver_cache.get_and_update_features([wrong_key_feature])
+    finally:
+        receiver_cache._shm_cache.close()
+        sender_cache.close()
+
+
+def test_shm_sender_handle_survives_engine_msgpack_round_trip():
+    vllm_config = VllmConfig(
+        model_config=ModelConfig(
+            model="llava-hf/llava-onevision-qwen2-0.5b-ov-hf",
+            mm_processor_cache_type="shm",
+            mm_shm_cache_max_object_size_mb=1,
+            mm_processor_cache_gb=2 * MiB_bytes / GiB_bytes,
+        ),
+    )
+    sender_cache = ShmObjectStoreSenderCache(vllm_config)
+    receiver_cache = ShmObjectStoreReceiverCache(vllm_config, mp.Lock())
+    mm_hash = "image_A"
+    item = MultiModalKwargsItem.dummy(1024)
+
+    try:
+        sender_item, _ = sender_cache.get_and_update_item((item, []), mm_hash)
+        encoded = MsgpackEncoder().encode(sender_item)
+        decoded = MsgpackDecoder(MultiModalKwargsItem).decode(encoded)
+        feature = MultiModalFeatureSpec(
+            data=decoded,
+            modality="image",
+            identifier=mm_hash,
+            mm_position=PlaceholderRange(offset=0, length=1),
+            mm_hash=mm_hash,
+        )
+
+        receiver_cache.get_and_update_features([feature])
+
+        assert feature.data == item
+    finally:
+        receiver_cache._shm_cache.close()
+        sender_cache.close()
+
+
+def _small_shm_vllm_config() -> VllmConfig:
+    return VllmConfig(
+        model_config=ModelConfig(
+            model="llava-hf/llava-onevision-qwen2-0.5b-ov-hf",
+            mm_processor_cache_type="shm",
+            mm_shm_cache_max_object_size_mb=1,
+            mm_processor_cache_gb=2 * MiB_bytes / GiB_bytes,
+        ),
+    )
+
+
+def _with_elem(item: MultiModalKwargsItem, key: str, data) -> MultiModalKwargsItem:
+    elems = dict(item)
+    elems[key] = MultiModalFieldElem(data=data, field=MultiModalBatchedField())
+    return MultiModalKwargsItem(elems)
+
+
+def test_shm_sender_validates_client_supplied_handles():
+    sender_cache = ShmObjectStoreSenderCache(_small_shm_vllm_config())
+    mm_hash = "image_A"
+
+    try:
+        handle, _ = sender_cache.get_and_update_item(
+            (MultiModalKwargsItem.dummy(1024), []), mm_hash
+        )
+        assert handle is not None
+
+        sender_cache.validate_input_item(handle, mm_hash)
+        sender_cache.validate_input_item(MultiModalKwargsItem.dummy(16), mm_hash)
+
+        signature = cast(list[int], handle["signature"].data)
+        forged = [
+            _with_elem(handle, "signature", [signature[0] ^ 1, *signature[1:]]),
+            _with_elem(handle, "signature", [signature]),
+            _with_elem(handle, "address", True),
+            _with_elem(handle, "address", -1),
+            _with_elem(handle, "monotonic_id", 2**32),
+            MultiModalKwargsItem(
+                {"address": handle["address"], "monotonic_id": handle["monotonic_id"]}
+            ),
+        ]
+        for item in forged:
+            with pytest.raises(ValueError, match="SHM handle signature"):
+                sender_cache.validate_input_item(item, mm_hash)
+        with pytest.raises(ValueError, match="SHM handle signature"):
+            sender_cache.validate_input_item(handle, "image_B")
+
+        sender_cache.clear_cache()
+        with pytest.raises(ValueError, match="SHM handle signature"):
+            sender_cache.validate_input_item(handle, mm_hash)
+    finally:
+        sender_cache.close()
+
+
+def test_shm_receiver_rejects_out_of_range_handle_fields():
+    vllm_config = _small_shm_vllm_config()
+    sender_cache = ShmObjectStoreSenderCache(vllm_config)
+    receiver_cache = ShmObjectStoreReceiverCache(vllm_config, mp.Lock())
+    mm_hash = "image_A"
+
+    try:
+        handle, _ = sender_cache.get_and_update_item(
+            (MultiModalKwargsItem.dummy(1024), []), mm_hash
+        )
+        assert handle is not None
+
+        for key, value in [
+            ("address", -1),
+            ("address", 2**64),
+            ("monotonic_id", -1),
+            ("monotonic_id", 2**32),
+        ]:
+            with pytest.raises(ValueError, match="SHM handle signature"):
+                receiver_cache.get_and_update_item(
+                    _with_elem(handle, key, value), mm_hash
+                )
+    finally:
+        receiver_cache._shm_cache.close()
+        sender_cache.close()
+
+
+def test_shm_handle_issued_before_cache_clear():
+    vllm_config = _small_shm_vllm_config()
+    sender_cache = ShmObjectStoreSenderCache(vllm_config)
+    receiver_cache = ShmObjectStoreReceiverCache(vllm_config, mp.Lock())
+    mm_hash = "image_A"
+    item = MultiModalKwargsItem.dummy(1024)
+
+    def feature(data: MultiModalKwargsItem) -> MultiModalFeatureSpec:
+        return MultiModalFeatureSpec(
+            data=data,
+            modality="image",
+            identifier=mm_hash,
+            mm_position=PlaceholderRange(offset=0, length=1),
+            mm_hash=mm_hash,
+        )
+
+    try:
+        stale_item, _ = sender_cache.get_and_update_item((item, []), mm_hash)
+        assert stale_item is not None
+
+        sender_cache.clear_cache()
+
+        # A request still draining after the clear resolves to its own data.
+        draining = feature(stale_item)
+        receiver_cache.get_and_update_features([draining])
+        assert draining.data == item
+
+        sender_cache.get_and_update_item(
+            (MultiModalKwargsItem.dummy(2048), []),
+            mm_hash,
+        )
+
+        with pytest.raises(ValueError, match="modified or is invalid"):
+            receiver_cache.get_and_update_features([feature(stale_item)])
+    finally:
+        receiver_cache._shm_cache.close()
+        sender_cache.close()
+
+
 def test_processor_cache_shared_across_loras():
     """Test that processor cache uses mm_hash to share data across LoRAs."""
     model_config = ModelConfig(
         model="llava-hf/llava-onevision-qwen2-0.5b-ov-hf",
         mm_processor_cache_gb=1,
     )
-    receiver_cache = MultiModalReceiverCache(model_config)
+    receiver_cache = LruKeyReplicatedReceiverCache(model_config)
 
     base_mm_hash = "image_hash_abc123"
     lora_a_identifier = f"12345:{base_mm_hash}"
@@ -755,6 +1031,74 @@ def test_processor_cache_shared_across_loras():
     assert feature_lora_b.data == item_data
 
 
+@pytest.mark.parametrize("use_async", [False, True])
+@pytest.mark.parametrize(
+    "release_error",
+    [
+        None,
+        "requires a completed pause first",
+        "requires all executor memory to be resident",
+    ],
+    ids=["released", "not-paused", "nonresident-memory"],
+)
+@pytest.mark.asyncio
+async def test_release_kv_cache_resends_mm_payload(use_async, release_error):
+    """Release must not leave a sender hit pointing at a cleared receiver."""
+    ctx = build_model_context(
+        "llava-hf/llava-v1.6-mistral-7b-hf",
+        mm_processor_kwargs=None,
+        limit_mm_per_prompt={"image": 1},
+        mm_processor_cache_gb=1,
+    )
+    model_config = ctx.model_config
+
+    sender = LruKeyReplicatedSenderCache(model_config)
+    receiver = LruKeyReplicatedReceiverCache(model_config)
+    item = _dummy_item({"pixel_values": 16})
+    mm_hash = "image_A"
+    payload, _ = sender.get_and_update_item((item, []), mm_hash)
+    assert receiver.get_and_update_item(payload, mm_hash) is item
+    assert sender.get_and_update_item(None, mm_hash)[0] is None
+
+    renderer = renderer_from_config(VllmConfig(model_config=model_config))
+    renderer._mm_processor_cache = sender
+
+    def release():
+        if release_error:
+            raise RuntimeError(release_error)
+        receiver.clear_cache()
+
+    engine = SimpleNamespace(
+        renderer=renderer,
+        engine_core=SimpleNamespace(
+            release_kv_cache_memory=release,
+            release_kv_cache_memory_async=make_async(
+                release,
+                executor=renderer._executor,
+            ),
+        ),
+        logger_manager=Mock(),
+    )
+
+    async def call_release():
+        if use_async:
+            await AsyncLLM.release_kv_cache_memory(engine)
+        else:
+            LLMEngine.release_kv_cache_memory(engine)
+
+    if release_error:
+        with pytest.raises(RuntimeError, match=release_error):
+            await call_release()
+        engine.logger_manager.record_sleep_state.assert_not_called()
+    else:
+        await call_release()
+        engine.logger_manager.record_sleep_state.assert_called_once_with(1, 0)
+
+    payload, _ = sender.get_and_update_item((item, []), mm_hash)
+    assert payload is item
+    assert receiver.get_and_update_item(payload, mm_hash) is item
+
+
 _SLEEP_VISION_PROMPT = (
     "<|im_start|>system\nYou are a helpful assistant.<|im_end|>"
     "\n<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>"
@@ -772,9 +1116,10 @@ def test_sleep_wake_preserves_mm_cache_consistency():
     """Regression for vllm-project/vllm#42995."""
     from vllm import LLM, SamplingParams
     from vllm.assets.image import ImageAsset
+    from vllm.inputs import TextPrompt
 
     image = ImageAsset("stop_sign").pil_image
-    prompt = {
+    prompt: TextPrompt = {
         "prompt": _SLEEP_VISION_PROMPT,
         "multi_modal_data": {"image": image},
     }

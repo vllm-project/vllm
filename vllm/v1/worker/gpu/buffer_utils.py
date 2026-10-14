@@ -54,8 +54,8 @@ class NonUvaBuffer:
 
     def uva(self, n: int | None = None) -> torch.Tensor:
         if n is None:
-            return self._uva.copy_(self.cpu)
-        return self._uva[:n].copy_(self.cpu[:n])
+            return self._uva.copy_(self.cpu, non_blocking=True)
+        return self._uva[:n].copy_(self.cpu[:n], non_blocking=True)
 
 
 class UvaBufferPool:
@@ -310,7 +310,7 @@ def _apply_write_kernel(
     MULTI_GROUP: tl.constexpr,
 ):
     pid = tl.program_id(0)
-    row_idx = tl.load(write_indices_ptr + pid)
+    row_idx = tl.load(write_indices_ptr + pid).to(tl.int64)
     start_idx = tl.load(write_starts_ptr + pid)
 
     cu_start = tl.load(write_cu_lens_ptr + pid - 1) if pid > 0 else 0
