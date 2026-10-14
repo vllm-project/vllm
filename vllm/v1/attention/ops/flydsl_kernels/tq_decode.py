@@ -30,8 +30,6 @@ from __future__ import annotations
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl._mlir import ir
-from flydsl._mlir.dialects import scf as _scf
 from flydsl.expr import arith, buffer_ops, gpu, range_constexpr, rocdl
 from flydsl.expr.typing import T
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
@@ -50,6 +48,7 @@ WARP_SIZE = 64
 NUM_WARPS = 1
 BLOCK_THREADS = NUM_WARPS * WARP_SIZE
 KV_COMPUTE_BLOCK = 256  # 16 K-tiles × 16 tokens
+N_TILES = KV_COMPUTE_BLOCK // TILE_SIZE
 
 # TQ SoA layout
 NUM_SOA_FIELDS = 3
@@ -215,10 +214,6 @@ def build_tq_decode_module(
         LOG2E_C = fx.Float32(LOG2E)
         QK_SCALE = fx.Float32(_qk_scale)
 
-        # Helper: unwrap fx wrapper → raw ir.Value (used in STEP F)
-        def _ival(v):
-            return v.ir_value() if hasattr(v, "ir_value") else v
-
         # ===== STEP A: Load centroids → LDS (cooperative, race-safe) =====
         c_idx_safe = lane & (N_CENTROIDS - 1)
         c_val = buffer_ops.buffer_load(cent_rsrc, c_idx_safe, vec_width=1, dtype=T.f32)
@@ -341,42 +336,17 @@ def build_tq_decode_module(
         trip_raw = (remaining + KV_COMPUTE_BLOCK - 1) // KV_COMPUTE_BLOCK
         trip_clamped = (trip_raw > TGPP).select(TGPP, trip_raw)
         trip_or_zero = in_range.select(trip_clamped, 0)
-        c_zero_idx = arith.constant(0, index=True)
-        c_one_idx = arith.constant(1, index=True)
-        trip_idx = arith.index_cast(
-            T.index,
-            trip_or_zero.ir_value()
-            if hasattr(trip_or_zero, "ir_value")
-            else trip_or_zero,
-        )
-        # Initial iter_args list: FA-2 accumulator state.
-        # Order: running_max, running_sum, acc_pv[0..PV_N_CHUNKS-1].
-        # NOTE: scf.ForOp requires ir.Value (with .type). The DSL
-        # constants ZERO_F / ONE_F are fx.Float32 (Numeric) wrappers,
-        # not raw ir.Value, so we unwrap via .ir_value() before
-        # passing.  _ival() is defined once near the top of the kernel body.
-        _init_iter = [
-            _ival(running_max),
-            _ival(running_sum),
-            *[_ival(p) for p in acc_pv],
-        ]
-        _for_op = _scf.ForOp(
-            c_zero_idx,
-            trip_idx,
-            c_one_idx,
-            _init_iter,
-        )
-        _for_ip = ir.InsertionPoint(_for_op.body)
-        _for_ip.__enter__()
-        try:
-            tg_idx = _for_op.induction_variable
-            tg_i32 = fx.Int32(arith.index_cast(T.i32, tg_idx))
+        # Loop-carried FA-2 state: running_max, running_sum, acc_pv[...].
+        loop_init = [running_max, running_sum, *acc_pv]
+        results = loop_init
+        for tg_idx, state in range(0, trip_or_zero, 1, init=loop_init):  # type: ignore[call-overload]
+            tg_i32 = fx.Int32(tg_idx)
             partition_start = partition_base + tg_i32 * KV_COMPUTE_BLOCK
             bt_seq_base = seq * _stride_bt_seq + (partition_start // _BS)
-            running_max = _for_op.inner_iter_args[0]
-            running_sum = _for_op.inner_iter_args[1]
-            acc_pv = list(_for_op.inner_iter_args[2:])
-            for n_tile in range_constexpr(16):
+            running_max = fx.Float32(state[0])
+            running_sum = fx.Float32(state[1])
+            acc_pv = [fx.Vector(v) for v in state[2:]]
+            for n_tile in range_constexpr(N_TILES):
                 block_in_part = n_tile // _TILES_PER_BLOCK
                 tile_in_block = n_tile % _TILES_PER_BLOCK
                 tile_start_tok = partition_start + n_tile * TILE_SIZE
@@ -623,19 +593,10 @@ def build_tq_decode_module(
                         T.f32x4, [v_op_raw, p_op, acc_pv[h], 0, 0, 0]
                     )
 
-            _scf.YieldOp(
-                [
-                    _ival(running_max),
-                    _ival(running_sum),
-                    *[_ival(p) for p in acc_pv],
-                ]
-            )
-        finally:
-            _for_ip.__exit__(None, None, None)
-        # Pull final accumulator values out of the for_op results.
-        running_max = _for_op.results[0]
-        running_sum = _for_op.results[1]
-        acc_pv = list(_for_op.results[2:])
+            results = yield [running_max, running_sum, *acc_pv]
+        running_max = fx.Float32(results[0])
+        running_sum = fx.Float32(results[1])
+        acc_pv = [fx.Vector(v) for v in results[2:]]
 
         # ===== STEP G: Output ===========================================
         # acc_pv[h] layout: lane t holds 4 fp32 at M=head_dim=(t/16)*4..+3 + h*16,
@@ -651,13 +612,7 @@ def build_tq_decode_module(
         # Gate all global stores by mfma_row < QG. For QG=16 the predicate is
         # tautological (mfma_row ∈ [0,15]); for QG=8 lanes 8..15 (whose MFMA
         # outputs are computational waste) skip the stores entirely.
-        valid_row_pred = arith.cmpi(
-            arith.CmpIPredicate.ult,
-            mfma_row.ir_value() if hasattr(mfma_row, "ir_value") else mfma_row,
-            arith.constant(QG, type=T.i32),
-        )
-        _if = _scf.IfOp(valid_row_pred)
-        with ir.InsertionPoint(_if.then_block):
+        if mfma_row < QG:
             for h in range_constexpr(PV_N_CHUNKS):
                 pv_i32x2 = (acc_pv[h] * rcp).to(fx.BFloat16).bitcast(fx.Int32)
                 head_dim_start = mfma_col_grp * 4 + h * 16
@@ -683,6 +638,5 @@ def build_tq_decode_module(
             )
             buffer_ops.buffer_store(running_max, ml_rsrc, ml_off)
             buffer_ops.buffer_store(running_sum, es_rsrc, es_off)
-            _scf.YieldOp([])
 
     return tq_decode_kernel
