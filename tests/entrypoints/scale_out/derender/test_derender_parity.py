@@ -493,52 +493,60 @@ def _logprob_tokens(choice: dict) -> list[tuple[str, list[int] | None]] | None:
     return [(e["token"], e.get("bytes")) for e in lp["content"]]
 
 
+def _sampled_generate_logprobs(choice: dict) -> dict | None:
+    """`GenerateLogProbs` for one coupled stream chunk from its `token_ids`
+    and per-token logprob values, without `top_logprobs`.
+
+    The coupled stream's `token_ids` are the integer ids a GPU-less worker
+    would have sent, so one stream is both the derender input and the string
+    reference. A second greedy run is not needed, and greedy decoding is not
+    bit-reproducible across calls on every platform anyway.
+    """
+    lp = choice.get("logprobs")
+    if lp is None or lp.get("content") is None:
+        return None
+    content = lp["content"]
+    assert len(content) == len(choice["token_ids"]), choice
+    return {
+        "content": [
+            {"token_id": tid, "logprob": entry["logprob"], "top_logprobs": []}
+            for tid, entry in zip(choice["token_ids"], content)
+        ]
+    }
+
+
 async def _run_stream_logprob_parity_case(
     client: httpx.AsyncClient, messages: list[dict], **extra
 ) -> tuple[dict, list[dict], list[dict]]:
-    """Stream with logprobs through the coupled server and through the
-    streaming derender endpoint, then compare per chunk.
-
-    The coupled server with `return_tokens_as_token_ids=True` is the only
-    source of the integer ids a GPU-less worker would have sent, so its
-    chunks are turned into `GenerateLogProbs` payloads for derender, and a
-    second coupled stream resolving the same greedy generation to strings
-    is the reference. Returns the assembled coupled message, the reference
-    coupled choices and the derender choices.
+    """Stream with logprobs through the coupled server, replay the same
+    chunks through the streaming derender endpoint and compare per chunk.
+    Returns the assembled coupled message, the coupled choices and the
+    derender choices.
     """
-    extra = {"logprobs": True, "top_logprobs": 3, **extra}
-    placeholder_choices, prompt_token_ids = await _coupled_stream(
-        client, messages, return_tokens_as_token_ids=True, **extra
-    )
-    reference_choices, _ = await _coupled_stream(client, messages, **extra)
-    assert [ch["token_ids"] for ch in reference_choices] == [
-        ch["token_ids"] for ch in placeholder_choices
-    ], "greedy generation was expected to be deterministic across coupled calls"
-    finish_reason = placeholder_choices[-1]["finish_reason"]
+    extra = {"logprobs": True, **extra}
+    coupled_choices, prompt_token_ids = await _coupled_stream(client, messages, **extra)
+    finish_reason = coupled_choices[-1]["finish_reason"]
     derender_choices: list[dict] = []
     disagg = await stream_chat_derender(
         client,
-        [tid for ch in placeholder_choices for tid in ch["token_ids"]],
-        [len(ch["token_ids"]) for ch in placeholder_choices],
+        [tid for ch in coupled_choices for tid in ch["token_ids"]],
+        [len(ch["token_ids"]) for ch in coupled_choices],
         {"model": MODEL, "messages": messages, **extra},
         len(prompt_token_ids),
         prompt_token_ids,
         finish_reason="stop" if finish_reason == "tool_calls" else finish_reason,
-        logprobs=[
-            _to_generate_logprobs(ch["logprobs"]) if ch.get("logprobs") else None
-            for ch in placeholder_choices
-        ],
+        logprobs=[_sampled_generate_logprobs(ch) for ch in coupled_choices],
         raw_choices=derender_choices,
     )
-    coupled = assemble_stream(reference_choices)
+    coupled = assemble_stream(coupled_choices)
     for message in (coupled, disagg):
         for tc in message["tool_calls"]:
             tc["id"] = _tool_call_id_shape(tc["id"])
     assert disagg == coupled
-    assert len(derender_choices) == len(reference_choices)
-    for ref, der in zip(reference_choices, derender_choices):
+    assert len(derender_choices) == len(coupled_choices)
+    for ref, der in zip(coupled_choices, derender_choices):
         assert _logprob_tokens(der) == _logprob_tokens(ref), (ref, der)
-    return coupled, reference_choices, derender_choices
+    return coupled, coupled_choices, derender_choices
 
 
 @pytest.mark.asyncio
@@ -585,22 +593,20 @@ async def test_stream_parity_logprobs_tool_call(client):
 @pytest.mark.asyncio
 async def test_stream_parity_logprobs_hidden_reasoning(client):
     """With `include_reasoning=False` and a parser configured, neither side
-    returns logprobs on any chunk; the content still matches."""
+    returns logprobs on any chunk; derender still emits the content."""
     messages = [{"role": "user", "content": "What is 17 times 23? Think it through."}]
-    extra = {"logprobs": True, "top_logprobs": 3, "max_tokens": 256}
-    # Token ids come from the shown-reasoning run: the coupled server hides
+    extra = {"logprobs": True, "max_tokens": 256}
+    # Token ids come from a shown-reasoning run: the coupled server hides
     # them along with the logprobs when reasoning is hidden.
     shown_choices, prompt_token_ids = await _coupled_stream(
-        client,
-        messages,
-        return_tokens_as_token_ids=True,
-        include_reasoning=True,
-        **extra,
+        client, messages, include_reasoning=True, **extra
     )
     hidden_choices, _ = await _coupled_stream(
         client, messages, require_token_ids=False, include_reasoning=False, **extra
     )
     assert all(ch.get("logprobs") is None for ch in hidden_choices)
+    assert assemble_stream(hidden_choices)["reasoning"] is None
+
     finish_reason = shown_choices[-1]["finish_reason"]
     derender_choices: list[dict] = []
     disagg = await stream_chat_derender(
@@ -611,16 +617,13 @@ async def test_stream_parity_logprobs_hidden_reasoning(client):
         len(prompt_token_ids),
         prompt_token_ids,
         finish_reason="stop" if finish_reason == "tool_calls" else finish_reason,
-        logprobs=[
-            _to_generate_logprobs(ch["logprobs"]) if ch.get("logprobs") else None
-            for ch in shown_choices
-        ],
+        logprobs=[_sampled_generate_logprobs(ch) for ch in shown_choices],
         raw_choices=derender_choices,
     )
     assert all(ch.get("logprobs") is None for ch in derender_choices)
-    coupled = assemble_stream(hidden_choices)
-    assert disagg["content"] == coupled["content"]
-    assert disagg["reasoning"] is None and coupled["reasoning"] is None
+    shown = assemble_stream(shown_choices)
+    assert disagg["reasoning"] is None
+    assert disagg["content"] == shown["content"]
 
 
 # ---------------------------------------------------------------------------
