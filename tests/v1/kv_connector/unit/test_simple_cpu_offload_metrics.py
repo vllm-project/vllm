@@ -5,6 +5,9 @@
 from __future__ import annotations
 
 import dataclasses
+import os
+import subprocess
+import sys
 from types import SimpleNamespace
 from typing import Any
 
@@ -90,6 +93,184 @@ def _stats_payload(types: dict, data: dict) -> dict[str, Any]:
 
 def _values(stats: SimpleCPUOffloadStats, name: str) -> dict:
     return stats.data[_StatsKey.DATA][name]
+
+
+STARTUP_GAUGES = """
+import os
+import sys
+from types import SimpleNamespace
+from prometheus_client import Counter, Gauge, Histogram
+from vllm.v1.metrics.prometheus import (
+    get_prometheus_registry, set_gauge_initial_value, unregister_vllm_metrics,
+)
+
+if sys.argv[1] == "threaded":
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+
+    args = ("vllm:simple_kv_offload_used_blocks", "Used blocks", ["engine"])
+    writer = Gauge(*args, registry=None, multiprocess_mode=sys.argv[2]).labels("0")
+    initializer = Gauge(*args, registry=None, multiprocess_mode=sys.argv[2]).labels("0")
+    registry = get_prometheus_registry()
+    if sys.argv[3] == "before":
+        writer.set(7)
+        set_gauge_initial_value(initializer, 0)
+    else:
+        initializing = Event()
+        updated = Event()
+
+        class InitialValue(float):
+            def __float__(self):
+                initializing.set()
+                assert updated.wait(10), "Writer did not finish"
+                return 0.0
+
+        def update():
+            assert initializing.wait(10), "Initializer did not start"
+            writer.set(7)
+            updated.set()
+
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(update)
+            set_gauge_initial_value(initializer, InitialValue(0))
+            future.result(timeout=10)
+
+    samples = [sample for metric in registry.collect() for sample in metric.samples
+               if sample.name == args[0]]
+    assert [(sample.labels, sample.value) for sample in samples] == [
+        ({"engine": "0"}, 7)
+    ]
+    writer.set(0)
+    assert registry.get_sample_value(args[0], {"engine": "0"}) == 0
+    sys.exit(0)
+
+if sys.argv[1] == "cleanup":
+    name = "vllm:simple_kv_offload_used_blocks"
+    gauge = Gauge(name, "Used blocks", ["engine"], multiprocess_mode="mostrecent")
+    plugin_name = "plugin_pending_stores"
+    plugin = Gauge(plugin_name, "Plugin stores", multiprocess_mode="mostrecent")
+    registry = get_prometheus_registry()
+    set_gauge_initial_value(gauge.labels("0"), 0)
+    set_gauge_initial_value(plugin, 0)
+    assert registry.get_sample_value(name, {"engine": "0"}) == 0
+    assert registry.get_sample_value(plugin_name) == 0
+    unregister_vllm_metrics()
+    assert registry.get_sample_value(name, {"engine": "0"}) is None
+    assert registry.get_sample_value(plugin_name) == 0, "Plugin default was removed"
+    sys.exit(0)
+
+if sys.argv[1] == "native":
+    from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
+        OffloadPromMetrics as PromMetrics, OffloadingConnectorStats as Stats,
+    )
+    from vllm.v1.kv_offload.cpu.common import CPUOffloadingMetrics as Names
+    names = (Names.CPU_CACHE_USAGE_PERC, Names.CPU_CACHE_WRITE_USAGE_PERC,
+             Names.CPU_CACHE_READ_USAGE_PERC)
+else:
+    from vllm.v1.simple_kv_offload.metrics import (
+        SimpleCPUOffloadPromMetrics as PromMetrics, SimpleCPUOffloadStats as Stats,
+        MetricName as Names,
+    )
+    names = (Names.USED_BLOCKS, Names.PENDING_STORE_BLOCKS)
+
+config = SimpleNamespace(
+    kv_transfer_config=SimpleNamespace(kv_connector_extra_config={})
+)
+args = (config, {Gauge: Gauge, Counter: Counter, Histogram: Histogram},
+        ["model_name", "engine"], {0: ["model", "0"], 3: ["model", "3"]})
+prom = PromMetrics(*args)
+initial = float(sys.argv[2]) if len(sys.argv) > 2 else 0
+updated = float(sys.argv[3]) if len(sys.argv) > 3 else 1
+registry = get_prometheus_registry()
+for engine in (0, 3):
+    labels = {"model_name": "model", "engine": str(engine)}
+    if sys.argv[1] == "native" and os.getenv("PROMETHEUS_MULTIPROC_DIR"):
+        labels["pid"] = str(os.getpid())
+    for name in names:
+        assert registry.get_sample_value(name, labels) == initial, (name, engine)
+    stats = Stats()
+    for name in names:
+        stats.set_gauge(name, updated)
+    prom.observe(stats.data, engine)
+    for name in names:
+        assert registry.get_sample_value(name, labels) == updated, (name, engine)
+
+if len(sys.argv) > 4 and sys.argv[4] == "recreate":
+    unregister_vllm_metrics()
+    prom = PromMetrics(*args)
+    registry = get_prometheus_registry()
+    for engine in (0, 3):
+        labels = {"model_name": "model", "engine": str(engine)}
+        if sys.argv[1] == "native":
+            labels["pid"] = str(os.getpid())
+        for name in names:
+            assert registry.get_sample_value(name, labels) == updated, (name, engine)
+        stats = Stats()
+        for name in names:
+            stats.set_gauge(name, 0)
+        prom.observe(stats.data, engine)
+        for name in names:
+            assert registry.get_sample_value(name, labels) == 0, (name, engine)
+"""
+
+
+def _run_usage_probe(tmp_path, multiprocess, *args):
+    env = os.environ.copy()
+    env.pop("PROMETHEUS_MULTIPROC_DIR", None)
+    env.pop("prometheus_multiproc_dir", None)
+    if multiprocess:
+        env["PROMETHEUS_MULTIPROC_DIR"] = str(tmp_path)
+    result = subprocess.run(
+        [sys.executable, "-c", STARTUP_GAUGES, *args],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.cpu_test
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize("multiprocess", [False, True])
+@pytest.mark.parametrize("connector", ["native", "simple"])
+def test_usage_gauges_exported_before_first_stats(tmp_path, multiprocess, connector):
+    """Idle offload gauges exist before stats, which replace their startup zeros."""
+    _run_usage_probe(tmp_path, multiprocess, connector)
+
+
+@pytest.mark.cpu_test
+@pytest.mark.skip_global_cleanup
+def test_late_metrics_writer_preserves_usage_gauges(tmp_path):
+    """A new metrics writer must not replace existing stats with startup zeros."""
+    _run_usage_probe(tmp_path, True, "simple", "0", "7")
+    _run_usage_probe(tmp_path, True, "simple", "7", "9")
+
+
+@pytest.mark.cpu_test
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize("connector,updated", [("native", "0.7"), ("simple", "7")])
+def test_usage_gauges_survive_recorder_recreation(tmp_path, connector, updated):
+    """Recreating a recorder preserves its multiprocess storage's current stats."""
+    _run_usage_probe(tmp_path, True, connector, "0", updated, "recreate")
+
+
+@pytest.mark.cpu_test
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize("mode", ["mostrecent", "livemostrecent"])
+@pytest.mark.parametrize("update", ["before", "during"])
+def test_usage_gauge_initialization_preserves_same_process_updates(
+    tmp_path, mode, update
+):
+    """Startup defaults cannot overwrite updates through another gauge object."""
+    _run_usage_probe(tmp_path, True, "threaded", mode, update)
+
+
+@pytest.mark.cpu_test
+@pytest.mark.skip_global_cleanup
+def test_usage_gauge_unregister_only_removes_vllm_defaults(tmp_path):
+    """VLLM metric cleanup preserves other collectors' startup defaults."""
+    _run_usage_probe(tmp_path, True, "cleanup")
 
 
 # ---------------------------------------------------------------------------
@@ -247,8 +428,8 @@ def test_prom_metrics_observe_routes_each_series() -> None:
 
     assert prom._metrics[(0, SAVE_OUTCOMES, ("stored",))].increments == [3]
     assert prom._metrics[(0, LOAD_BLOCKS, ())].increments == [4]
-    assert prom._metrics[(0, USED_BLOCKS, ())].set_values == [5]
-    assert prom._metrics[(0, PENDING_STORE_BLOCKS, ())].set_values == [1]
+    assert prom._metrics[(0, USED_BLOCKS, ())].set_values == [0, 5]
+    assert prom._metrics[(0, PENDING_STORE_BLOCKS, ())].set_values == [0, 1]
     assert prom._metrics[(0, INFO, ("cpu", "false", "false", "64"))].set_values == [1]
     assert prom._metrics[(0, SAVE_OUTCOMES, ("stored",))].labelvalues == (
         "model",
@@ -309,8 +490,8 @@ def test_prom_metrics_routes_per_engine() -> None:
         ),
         engine_idx=1,
     )
-    assert (0, USED_BLOCKS, ()) not in prom._metrics
-    assert prom._metrics[(1, USED_BLOCKS, ())].set_values == [3]
+    assert prom._metrics[(0, USED_BLOCKS, ())].set_values == [0]
+    assert prom._metrics[(1, USED_BLOCKS, ())].set_values == [0, 3]
 
 
 def test_connector_build_prom_metrics() -> None:
