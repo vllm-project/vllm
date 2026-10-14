@@ -748,9 +748,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self.model_config = vllm_config.model_config
         self.attention_config = vllm_config.attention_config
         self._num_speculative_tokens = vllm_config.num_speculative_tokens
-        self._async_scheduling = (
-            vllm_config.scheduler_config.async_scheduling or False
-        )
+        self._async_scheduling = vllm_config.scheduler_config.async_scheduling or False
         self._workspace_buffer = None
         self._prefill_wrapper: (
             BatchPrefillWithPagedKVCacheWrapper | BatchDCPPrefillWrapper | None
