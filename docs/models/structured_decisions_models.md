@@ -1,7 +1,7 @@
 # Structured Decisions Models
 
 Structured Decisions Models (aka JEV Models) map inputs directly to predefined
-options or categories and return probabilities and confidence scores, commonly 
+options or categories and return probabilities and confidence scores, commonly
 used for classification and routing.
 
 ## Supported Models
