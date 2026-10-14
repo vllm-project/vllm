@@ -17,7 +17,7 @@ from vllm.distributed.device_communicators.shm_broadcast import (
     check_shm_free_space,
 )
 from vllm.logger import init_logger
-from vllm.utils.math_utils import cdiv
+from vllm.utils.math_utils import cdiv, round_up
 from vllm.v1.kv_offload.cpu.host_register import host_unregister
 
 logger = init_logger(__name__)
@@ -100,6 +100,8 @@ class SharedOffloadRegion:
     and requires that barrier to keep joiners from using unpopulated pages.
     ``num_segments`` splits the rows over files ``<path>``, ``<path>.1``, ...
     mapped back to back, so workers pre-fault them in parallel.
+    ``populate_shard=(index, count)`` pre-faults only this worker's contiguous
+    share, for layouts where every worker maps the same bytes.
     """
 
     BLOCK_SIZE_ALIGNMENT: int = mmap.PAGESIZE
@@ -116,6 +118,7 @@ class SharedOffloadRegion:
         creator_memory_check: Callable[[int], None] | None = None,
         populate_only_on_creator: bool = False,
         num_segments: int = 1,
+        populate_shard: tuple[int, int] | None = None,
     ) -> None:
         if populate_only_on_creator and barrier is None:
             raise ValueError("Creator-only population requires a barrier.")
@@ -248,7 +251,14 @@ class SharedOffloadRegion:
 
         populate_write_fn = _get_populate_write_fn(self.mmap_obj)
 
-        if rank is not None:
+        if populate_shard is not None:
+            index, count = populate_shard
+            share = round_up(cdiv(self.total_size_bytes, count), self.page_size)
+            start = min(index * share, self.total_size_bytes)
+            if start < self.total_size_bytes:
+                length = min(share, self.total_size_bytes - start)
+                populate_write_fn(self.mmap_obj, start, length)
+        elif rank is not None:
             # Populate only this worker's pages (one slot per chunk row).
             worker_offset = rank * cpu_page_size
             _t0 = time.perf_counter()
