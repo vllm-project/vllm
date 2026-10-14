@@ -25,6 +25,9 @@ def is_lookahead_block_hashing_enabled(
     # The hash covers only the next token; multi-module MTP reads further ahead.
     if vllm_config.num_prefill_lookahead_tokens > 1:
         return False
+    # HiSparse is not validated with lookahead hashes.
+    if vllm_config.attention_config.hisparse_config is not None:
+        return False
     if vllm_config.kv_transfer_config is not None:
         return bool(
             kv_connector is not None and kv_connector.supports_lookahead_block_hashes
