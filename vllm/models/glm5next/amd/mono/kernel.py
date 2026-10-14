@@ -83,9 +83,7 @@ def pack(model: nn.Module, ctx: MonoContext) -> dict[int, Any]:
         except ValueError as error:
             reasons.append(f"layer {idx}: {error}")
     if reasons:
-        raise ValueError(
-            "VLLM_ROCM_MONO_DECODE cannot run GLM-5.3-Flash: " + "; ".join(reasons)
-        )
+        raise ValueError("--monokernel cannot run GLM-5.3-Flash: " + "; ".join(reasons))
     kda = [_kda_name(model.layers[i]) for i in sorted(packed) if packed[i][2] == "kda"]
     ctx.state["kda_names"] = kda
     ctx.state["dsa_names"] = {
@@ -94,7 +92,7 @@ def pack(model: nn.Module, ctx: MonoContext) -> dict[int, Any]:
     formats = {packed[i][1].fp8 for i in packed if packed[i][2] == "dsa"}
     if len(formats) > 1:
         raise ValueError(
-            "VLLM_ROCM_MONO_DECODE cannot run GLM-5.3-Flash: sparse-attention "
+            "--monokernel cannot run GLM-5.3-Flash: sparse-attention "
             f"projections differ between layers {sorted(formats)}"
         )
     ctx.state["dsa_fp8"] = formats.pop() if formats else (True, True, True)

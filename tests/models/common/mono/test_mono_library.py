@@ -58,7 +58,7 @@ def test_graph_modes(compilation, ok):
 
 
 def test_configure_raises_with_every_reason(monkeypatch):
-    monkeypatch.setattr(guards, "enabled", lambda: True)
+    monkeypatch.setattr(guards, "enabled", lambda vllm_config: True)
     spec = kit.make_spec(config_reasons=("a", "b"))
     monkeypatch.setattr(guards, "load_spec", lambda path: spec)
     with pytest.raises(ValueError, match="a; b"):
