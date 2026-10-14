@@ -121,7 +121,8 @@ class RoutedExpertsCapturer:
             topk_ids: Tensor of shape (batch_size, num_routed_experts).
 
         """
-        local_topk_ids = self._restore_local_topk_ids(topk_ids, get_forward_context())
+        ctx = get_forward_context()
+        local_topk_ids = self._restore_local_topk_ids(topk_ids, ctx)
 
         if not 0 <= layer_id < self.device_buffer.shape[1]:
             raise IndexError(
@@ -129,7 +130,10 @@ class RoutedExpertsCapturer:
                 f"layer count {self.device_buffer.shape[1]}"
             )
 
-        self.device_buffer[: len(local_topk_ids), layer_id] = local_topk_ids
+        start = ctx.additional_kwargs.get("routed_experts_token_start", 0)
+        self.device_buffer[start : start + len(local_topk_ids), layer_id] = (
+            local_topk_ids
+        )
 
     def _restore_local_topk_ids(
         self, topk_ids: torch.Tensor, ctx: ForwardContext

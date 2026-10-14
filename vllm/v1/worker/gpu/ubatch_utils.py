@@ -423,6 +423,9 @@ class UBatchRunner:
                     slot_mapping=slot_mappings_by_layer[i],
                     is_padding=is_padding[i],
                     num_tokens=num_tokens,
+                    additional_kwargs={
+                        "routed_experts_token_start": ubatch_slice.token_slice.start
+                    },
                 )
             )
         return forward_contexts

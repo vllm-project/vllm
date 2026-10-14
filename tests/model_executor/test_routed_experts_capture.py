@@ -10,7 +10,12 @@ import torch
 from vllm.config import VllmConfig
 from vllm.config.compilation import CompilationMode
 from vllm.distributed.eplb.eplb_state import EplbLayerState
-from vllm.forward_context import get_forward_context, set_forward_context
+from vllm.forward_context import (
+    ForwardContext,
+    get_forward_context,
+    override_forward_context,
+    set_forward_context,
+)
 from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
 from vllm.model_executor.layers.fused_moe.experts.cpu_int4_moe import CPUExpertsInt4
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
@@ -35,6 +40,12 @@ from vllm.v1.kv_cache_interface import (
 pytestmark = pytest.mark.cpu_test
 
 _REC_MODULE = "vllm.model_executor.layers.fused_moe.routed_experts_capturer"
+
+
+def _forward_context(**kwargs):
+    return ForwardContext(
+        no_compile_layers={}, attn_metadata={}, slot_mapping={}, **kwargs
+    )
 
 
 def _capturer_with_buffer(
@@ -320,7 +331,7 @@ def test_routed_experts_capturer_single_dp_no_metadata():
     """dp_metadata is None: capture writes the full topk_ids rows."""
     capturer = _capturer_with_buffer(dp_rank=0)
     topk = torch.tensor([[1, 2], [3, 4], [5, 6]], dtype=torch.int32)
-    ctx = SimpleNamespace(dp_metadata=None, num_tokens=None)
+    ctx = _forward_context(dp_metadata=None, num_tokens=None)
     with patch(f"{_REC_MODULE}.get_forward_context", return_value=ctx):
         capturer.capture(layer_id=0, topk_ids=topk)
     assert torch.equal(capturer.device_buffer[:3, 0, :], topk)
@@ -371,7 +382,7 @@ def test_single_dp_ep_capture_restores_tp_shards(num_tokens):
 def test_single_dp_tp_capture_does_not_regather_full_batch(num_tokens, num_rows):
     capturer = _capturer_with_buffer(tp_size=2)
     topk = torch.arange(num_rows * 2, dtype=torch.int32).reshape(-1, 2)
-    ctx = SimpleNamespace(dp_metadata=None, num_tokens=num_tokens)
+    ctx = _forward_context(dp_metadata=None, num_tokens=num_tokens)
     with (
         patch(f"{_REC_MODULE}.get_forward_context", return_value=ctx),
         patch(f"{_REC_MODULE}.get_tp_group") as get_tp_group,
@@ -380,6 +391,33 @@ def test_single_dp_tp_capture_does_not_regather_full_batch(num_tokens, num_rows)
     get_tp_group.assert_not_called()
     assert torch.equal(capturer.device_buffer[:num_tokens, 0], topk[:num_tokens])
     assert (capturer.device_buffer[num_tokens:, 0] == -1).all()
+
+
+def test_microbatches_preserve_routing_rows_in_original_batch_order():
+    """The second microbatch must append its rows, not overwrite the first."""
+    from vllm.config import ParallelConfig
+    from vllm.v1.worker.gpu.ubatch_utils import UBatchRunner
+    from vllm.v1.worker.ubatch_utils import UBatchSlice
+
+    capturer = _capturer_with_buffer()
+    parallel = ParallelConfig(data_parallel_size=2)
+    runner = UBatchRunner.__new__(UBatchRunner)
+    runner.parallel_config = parallel
+    runner.vllm_config = SimpleNamespace(
+        compilation_config=SimpleNamespace(
+            fast_moe_cold_start=False, static_forward_context={}
+        )
+    )
+    slices = [
+        UBatchSlice(slice(0, 1), slice(0, 4)),
+        UBatchSlice(slice(1, 2), slice(4, 8)),
+    ]
+    contexts = runner._make_forward_contexts(slices, [{}, {}], [{}, {}], [None, None])
+    expected = torch.arange(16, dtype=torch.int32).reshape(8, 2)
+    for segment, context in zip(slices, contexts, strict=True):
+        with override_forward_context(context):
+            capturer.capture(0, expected[segment.token_slice])
+    torch.testing.assert_close(capturer.device_buffer[:, 0], expected)
 
 
 @pytest.mark.parametrize(
@@ -415,7 +453,7 @@ def test_routed_experts_capturer_narrows_snapshot(output_dtype):
     capturer = _capturer_with_buffer(dtype=torch.int32)
     capturer.output_dtype = output_dtype
     topk = torch.tensor([[1, 2], [254, 255]], dtype=torch.int64)
-    ctx = SimpleNamespace(dp_metadata=None, num_tokens=None)
+    ctx = _forward_context(dp_metadata=None, num_tokens=None)
     with patch(f"{_REC_MODULE}.get_forward_context", return_value=ctx):
         capturer.capture(layer_id=0, topk_ids=topk)
 
@@ -431,7 +469,7 @@ def test_routed_experts_capturer_dp_naive_concatenated_all_ranks():
     """N == sum(num_tokens_dp): slice this rank's segment from concatenated topk."""
     capturer = _capturer_with_buffer(dp_rank=1)
     num_tokens_dp = torch.tensor([2, 3], dtype=torch.int32)
-    ctx = SimpleNamespace(
+    ctx = _forward_context(
         dp_metadata=SimpleNamespace(num_tokens_across_dp_cpu=num_tokens_dp)
     )
     # Concatenated order: rank0 rows then rank1 rows.
@@ -448,7 +486,7 @@ def test_routed_experts_capturer_dp_modular_local_tokens():
     """N == token_num_per_dp: topk is already local to this DP rank."""
     capturer = _capturer_with_buffer(dp_rank=1)
     num_tokens_dp = torch.tensor([2, 3], dtype=torch.int32)
-    ctx = SimpleNamespace(
+    ctx = _forward_context(
         dp_metadata=SimpleNamespace(num_tokens_across_dp_cpu=num_tokens_dp)
     )
     topk = torch.tensor([[10, 11], [12, 13], [14, 15]], dtype=torch.int32)
@@ -460,7 +498,7 @@ def test_routed_experts_capturer_dp_modular_local_tokens():
 def test_routed_experts_capturer_dp_ep_gathered_shards():
     capturer = _capturer_with_buffer(dp_rank=1, tp_size=2)
     num_tokens_dp = torch.tensor([3, 2], dtype=torch.int32)
-    ctx = SimpleNamespace(
+    ctx = _forward_context(
         dp_metadata=SimpleNamespace(
             num_tokens_across_dp_cpu=num_tokens_dp,
             local_sizes=[2, 2, 1, 1],
@@ -480,7 +518,7 @@ def test_routed_experts_capturer_dp_ep_gathered_shards():
 def test_routed_experts_capturer_sp_modular_gathers_tp_shards():
     capturer = _capturer_with_buffer(dp_rank=1, tp_size=2)
     num_tokens_dp = torch.tensor([2, 3], dtype=torch.int32)
-    ctx = SimpleNamespace(
+    ctx = _forward_context(
         dp_metadata=SimpleNamespace(num_tokens_across_dp_cpu=num_tokens_dp)
     )
     local_shard = torch.tensor([[10, 11], [12, 13]], dtype=torch.int32)
@@ -502,7 +540,7 @@ def test_routed_experts_capturer_dp_unexpected_batch_raises():
     """Mismatch between topk batch dim and DP layout: fail fast."""
     capturer = _capturer_with_buffer(dp_rank=0)
     num_tokens_dp = torch.tensor([2, 3], dtype=torch.int32)
-    ctx = SimpleNamespace(
+    ctx = _forward_context(
         dp_metadata=SimpleNamespace(num_tokens_across_dp_cpu=num_tokens_dp)
     )
     # total=5, local=2: n=1 matches neither naive (5) nor modular (2).
