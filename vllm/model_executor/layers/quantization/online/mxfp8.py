@@ -85,6 +85,7 @@ class Mxfp8OnlineLinearMethod(OnlineLinearBase):
         replace_parameter(layer, "weight_scale", weight_scale.data)
 
         self.kernel.process_weights_after_loading(layer)
+        self.release_requantization_source_weights(layer)
 
         layer._already_called_process_weights_after_loading = True
 
@@ -239,11 +240,12 @@ class Mxfp8OnlineMoEMethod(OnlineMoEMethodBase):
         if getattr(layer, "_already_called_process_weights_after_loading", False):
             return
 
+        w13_weight, w2_weight = self.get_weights_for_quantization(layer)
         layer.w13_input_scale = None
         layer.w2_input_scale = None
 
-        w13, w13_scale = self._quantize_mxfp8_moe_weight(layer.w13_weight)
-        w2, w2_scale = self._quantize_mxfp8_moe_weight(layer.w2_weight)
+        w13, w13_scale = self._quantize_mxfp8_moe_weight(w13_weight)
+        w2, w2_scale = self._quantize_mxfp8_moe_weight(w2_weight)
 
         self._setup_kernel(
             layer,
@@ -254,5 +256,6 @@ class Mxfp8OnlineMoEMethod(OnlineMoEMethodBase):
             layer.w13_input_scale,
             layer.w2_input_scale,
         )
+        self.release_requantization_source_weights(layer)
 
         layer._already_called_process_weights_after_loading = True

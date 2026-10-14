@@ -29,7 +29,7 @@ pub use glm_xml::{Glm45MoeToolParser, Glm47MoeToolParser};
 pub(crate) use hy::{HyDialect, HyToolMarkers, HyToolParser};
 pub use json::{
     Granite4ToolParser, HermesToolParser, Internlm2ToolParser, Llama3JsonToolParser,
-    MistralToolParser, Phi4MiniJsonToolParser, Qwen3XmlToolParser,
+    MistralToolParser, Phi4MiniJsonToolParser, Qwen3JsonToolParser,
 };
 pub use kimi_k2::KimiK2ToolParser;
 pub use mimo::MiMoToolParser;
