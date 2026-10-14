@@ -141,7 +141,7 @@ steps:
     - tests/v1/e2e/general/
   commands:
     - pytest -v -s v1/e2e/general/test_kv_sharing_fast_prefill.py
-    - pytest -v -s v1/e2e/general/test_mamba_prefix_cache.py::test_mamba_prefix_cache_mrv2 v1/e2e/general/test_mamba_prefix_cache.py::test_mamba_prefix_cache_mrv2_async
+    - pytest -v -s v1/e2e/general/test_mamba_prefix_cache.py::test_mamba_prefix_cache_mrv2 v1/e2e/general/test_mamba_prefix_cache.py::test_mamba_prefix_cache_mrv2_async v1/e2e/general/test_mamba_prefix_cache.py::test_mamba_prefix_cache_mrv2_async_flashinfer
   mirror:
     amd:
       label: ":amd: (MI355 DPX) E2E Core Large Memory"
