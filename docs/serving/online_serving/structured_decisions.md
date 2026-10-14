@@ -130,6 +130,79 @@ the request lists them, a `noul` labels its options `yes` and `no`, and a
 | options per `choice` | 26 |
 | levels per `score` | 10 |
 
+## Clef-Flash
+
+[Clef-Flash](https://huggingface.co/Cloudflare/clef-flash) uses a Qwen3.5-9B
+backbone and a joint schema head to score all questions in one forward pass.
+vLLM detects the head and serves the checkpoint as a pooling model.
+
+```bash
+vllm serve Cloudflare/clef-flash --max-model-len 16384
+```
+
+Send requests to `/v1/systemone` using `state` and `questions`, as in the
+examples above. `choice`, `noul` and `score` questions are supported.
+
+- Text and JSON states use the checkpoint's fixed prompt. JSON is compact
+  with sorted keys. `instructions` returns 400; `chat_template_kwargs`
+  has no effect.
+- The state is truncated to fit 16,384 tokens, or `max_model_len` if smaller.
+  A schema that exceeds this bound returns 400.
+- `images` and `videos` are placed before the state. Videos are sampled at
+  2 fps and processed by the Qwen3.5 vision processor. Audio inputs return
+  400, and video soundtracks are ignored.
+- Each request performs one pooling read. `usage.input_tokens` counts the
+  prompt once, `output_tokens` is 0, and `label_mass` is 1.
+
+## Clef-Omni
+
+[Clef-Omni](https://huggingface.co/Cloudflare/clef-omni) is a decision model:
+a joint schema head on the Qwen3-Omni thinker scores every option of every
+question in one forward pass. vLLM serves it as a pooling model.
+
+```bash
+vllm serve Cloudflare/clef-omni
+```
+
+- A request is one read. The prompt is the one the checkpoint's
+  `joint_schema_model.py` builds: the state, then every question with its
+  options. A JSON state is written as compact JSON with sorted keys.
+- A state too long for the model is truncated to fit, as the reference does.
+  A request whose questions alone exceed 64,000 tokens, or `max_model_len`,
+  returns 400.
+- `instructions` returns 400, since the prompt is fixed. `chat_template_kwargs`
+  has no effect.
+- There are no labels, so `label_mass` is 1 and `confidence` is the chosen
+  option's probability. `usage.input_tokens` counts the prompt once, and
+  `output_tokens` is 0.
+- `images`, `audio` and `videos` are read as the reference does: placed
+  before the state, videos sampled at 2 fps, and a video's soundtrack heard
+  with it when every video has one. Audio clips cannot be sent together with
+  videos that have soundtracks.
+
+## Liquid d1
+
+[`LiquidAI/d1-3B`](https://huggingface.co/LiquidAI/d1-3B) is LFM2.5-VL-3B
+post-trained to answer decisions as the first token of its reply. vLLM serves
+it as a generative model.
+
+```bash
+vllm serve LiquidAI/d1-3B
+```
+
+- The server writes the prompt and reads the label tokens the way the
+  `prompt.py` shipped with the checkpoint does, so picks and probabilities
+  match `model.system_one()`. `confidence` and `usage` follow the definitions
+  on this page instead.
+- A JSON state is written as indented JSON. A `null` state leaves the images,
+  or the question alone, as the prompt.
+- `images` are placed before the state and shrunk to at most 1024 x 1024
+  pixels, as the reference does.
+- A `choice` whose option names are all single letters is labeled with those
+  letters.
+- When each request carries one question over a state that changes from
+  request to request, `--no-enable-prefix-caching` lowers latency.
+
 ## Request fields
 
 | field | meaning |
@@ -139,6 +212,7 @@ the request lists them, a `noul` labels its options `yes` and `no`, and a
 | `instructions` | optional context placed ahead of the questions |
 | `chat_template_kwargs` | passed to the chat template, for example `{"enable_thinking": false}` |
 | `cache_salt` | optional [prefix-cache salt](../../usage/security.md#cache-salting) applied to every question |
+| `images`, `audio`, `videos` | optional media URLs or data URLs, for models that take them ([Clef-Flash](#clef-flash), images/video; [Clef-Omni](#clef-omni); [Liquid d1](#liquid-d1), images only) |
 
 A question with any field other than `type`, `instructions` and `criteria` is
 rejected with a 400.
