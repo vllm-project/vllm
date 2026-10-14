@@ -35,6 +35,9 @@ class SpanAttributes:
     TOOL_CALLING_TOOL_COUNT = "tool_calling.tool_count"
     TOOL_CALLING_TOOL_CHOICE = "tool_calling.tool_choice"
     TOOL_CALLING_API_SURFACE = "tool_calling.api_surface"
+    TOOL_CALLING_RESPONSE_HAS_TOOL_CALLS = "tool_calling.response_has_tool_calls"
+    TOOL_CALLING_TOOL_CALLS_COUNT = "tool_calling.tool_calls_count"
+    TOOL_CALLING_PARSER_STATUS = "tool_calling.parser_status"
 
     GEN_AI_REQUEST_ID = "gen_ai.request.id"
     GEN_AI_REQUEST_N = "gen_ai.request.n"

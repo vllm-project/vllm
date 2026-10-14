@@ -7,11 +7,14 @@ from __future__ import annotations
 from collections.abc import Mapping
 from enum import Enum
 from itertools import product
-from typing import Literal, cast
+from typing import TYPE_CHECKING, Literal, cast
 
 from prometheus_client import REGISTRY, Counter
 
 from vllm.tracing.utils import SpanAttributes, extract_trace_headers
+
+if TYPE_CHECKING:
+    from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 
 _model_name: str | None = None
 
@@ -178,6 +181,37 @@ def record_tool_call_response(
     _tool_calls_emitted.labels(model_name=_model_name, api_surface=api_surface).inc(
         tool_calls_count
     )
+
+
+def finish_tool_calling_trace(
+    request: ChatCompletionRequest,
+    *,
+    tool_calls_count: int = 0,
+    parse_failed: bool = False,
+    completed: bool = False,
+) -> None:
+    """Complete transferred inference spans using only bounded response metadata."""
+    spans = request._tool_calling_spans
+    if spans is None:
+        return
+    request._tool_calling_spans = None
+    status = (
+        "parse_failure"
+        if parse_failed
+        else "interrupted"
+        if not completed
+        else "success"
+        if tool_calls_count
+        else "no_tool_calls"
+    )
+    attributes = {
+        SpanAttributes.TOOL_CALLING_RESPONSE_HAS_TOOL_CALLS: tool_calls_count > 0,
+        SpanAttributes.TOOL_CALLING_TOOL_CALLS_COUNT: tool_calls_count,
+        SpanAttributes.TOOL_CALLING_PARSER_STATUS: status,
+    }
+    for span in spans:
+        span.set_attributes(attributes)
+        span.end()
 
 
 def record_tool_parser_invocation(
