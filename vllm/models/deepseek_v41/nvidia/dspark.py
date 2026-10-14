@@ -362,6 +362,9 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
 
     # --- Weight loading ----------------------------------------------------
 
+    def is_unused_checkpoint_weight(self, name: str) -> bool:
+        return self._remap_dspark_name(name) is None
+
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         """Load the ``mtp.{0,1,2}.*`` draft weights from the target checkpoint.
 

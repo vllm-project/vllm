@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from copy import copy
+
 import torch.nn as nn
 
 from vllm.config import ModelConfig, ParallelConfig, VllmConfig, replace
@@ -69,10 +71,25 @@ def _get_dspark_parallel_config(
     )
 
 
+def _inherit_dspark_weights_uri(
+    target_config: ModelConfig, draft_config: ModelConfig
+) -> ModelConfig:
+    if (
+        target_config.model_weights
+        and not draft_config.model_weights
+        and draft_config.model == target_config.model
+    ):
+        draft_config = copy(draft_config)
+        draft_config.model_weights = target_config.model_weights
+    return draft_config
+
+
 def load_dspark_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Module:
     speculative_config = vllm_config.speculative_config
     assert speculative_config is not None
-    draft_model_config = speculative_config.draft_model_config
+    draft_model_config = _inherit_dspark_weights_uri(
+        vllm_config.model_config, speculative_config.draft_model_config
+    )
 
     from vllm.compilation.backends import set_model_tag
     from vllm.model_executor.model_loader import get_model

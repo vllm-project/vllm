@@ -85,6 +85,48 @@ vllm serve /home/meta-llama/Llama-3.2-3B-Instruct \
 !!! note
     For further instructions about tunable parameters and additional parameters configurable through environment variables, read the [Environment Variables Documentation](https://github.com/run-ai/runai-model-streamer/blob/master/docs/src/env-vars.md).
 
+### Experimental DeepSeek V4.1 shared CPU loading
+
+The mixed loading path keeps ordinary weights on the distributed GPU streamer
+and reads oversized Engram shards on CPU. With CPU Engram storage shared across
+DP replicas, one rank reads the shared tables and scales. Other ranks receive
+metadata placeholders and participate in the existing weight-loader barriers.
+Non-shared tensors in those shards are broadcast as CPU bytes and loaded on each
+rank. The CPU staging limit is restored after this phase.
+
+This experimental path requires Run:ai Model Streamer 0.17.0 and the
+[non-distributed rank-discovery fix](https://github.com/dsx-ai-factory/model-streamer/pull/252).
+It was validated through startup with TP1/DP8/EP8 on eight co-located H200 GPUs.
+Request correctness, broader topologies and a generic configuration API remain
+pending. The wrapper and DSpark changes in this patch retain streamed tensor
+lifetimes and use the target's object-storage source for the draft.
+
+For checkpoint revision `5254448`, verify that the checkpoint index places the
+Engram tables in the two filenames below before enabling these settings:
+
+```bash
+export RUNAI_STREAMER_PARTITION_POLICY=spans
+export VLLM_RUNAI_CPU_WEIGHT_FILES=model-00047-of-00048.safetensors,model-00048-of-00048.safetensors
+export VLLM_RUNAI_CPU_MEMORY_LIMIT=107374182400
+export VLLM_RUNAI_SINGLE_ENGRAM_READER=1
+export VLLM_RUNAI_BORROWED_WEIGHTS=1
+export VLLM_RUNAI_USE_LOCAL_WEIGHT_INDEX=1
+vllm serve s3://bucket/deepseek-v4-1-flash/ \
+    --load-format runai_streamer \
+    --model-loader-extra-config '{"distributed":true,"memory_limit":34359738368}' \
+    --tensor-parallel-size 1 --data-parallel-size 8 --enable-expert-parallel \
+    --engram-config '{"cpu_offload":true,"embedding_across_dp":true}' \
+    --speculative-config '{"method":"dspark","num_speculative_tokens":5}'
+```
+
+In streamer 0.17.0, 32 GiB is the distributed node staging budget, giving eight
+readers 4 GiB each. The CPU phase uses a separate 100 GiB budget. These limits
+control checkpoint staging, independently of KV cache and KV offload settings.
+Borrowed GPU tensors still receive vLLM's normal clone; shared CPU tensors are
+consumed synchronously. The local index must match the actual checkpoint and its
+shard headers. These environment flags are experimental; they are disabled
+unless explicitly set.
+
 ## Sharded Model Loading
 
 vLLM also supports loading sharded models using Run:ai Model Streamer. This is particularly useful for large models that are split across multiple files. To use this feature, use the `--load-format runai_streamer_sharded` flag:

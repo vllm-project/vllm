@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
 import os
 import types
 from unittest.mock import patch
@@ -162,6 +163,36 @@ def test_runai_get_all_weights_resolves_source(model_config, expected_source):
     )
 
     assert weights == [(f"{expected_source}@myrev", None)]
+
+
+def test_runai_index_selection_keeps_mixed_shards_and_order(tmp_path):
+    files = ["s3://b/z.safetensors", "s3://b/a.safetensors", "s3://b/m.safetensors"]
+    (tmp_path / "model.safetensors.index.json").write_text(
+        json.dumps(
+            {
+                "weight_map": {
+                    "mtp.0.w": "z.safetensors",
+                    "layers.0.w": "a.safetensors",
+                    "mtp.1.w": "m.safetensors",
+                    "layers.1.w": "m.safetensors",
+                }
+            }
+        )
+    )
+    selected = rsl._select_indexed_weight_files(
+        files, str(tmp_path), lambda name: not name.startswith("mtp.")
+    )
+    assert selected == [files[0], files[2]]
+
+
+@pytest.mark.parametrize("index", [None, {}, {"weight_map": {"mtp.w": "missing"}}])
+def test_runai_index_selection_falls_back_when_metadata_unusable(tmp_path, index):
+    files = ["s3://b/a.safetensors"]
+    if index is not None:
+        (tmp_path / "model.safetensors.index.json").write_text(json.dumps(index))
+    assert (
+        rsl._select_indexed_weight_files(files, str(tmp_path), lambda _: False) == files
+    )
 
 
 @pytest.mark.parametrize(

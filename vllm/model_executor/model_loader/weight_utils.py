@@ -1251,8 +1251,117 @@ def runai_safetensors_weights_iterator(
     hf_weights_files: list[str],
     use_tqdm_on_load: bool,
     is_distributed: bool = False,
+    cpu_weights_group: Any = None,
+    is_shared_cpu_weight: Callable[[str], bool] | None = None,
 ) -> Generator[tuple[str, torch.Tensor], None, None]:
     """Iterate over the weights in the model safetensor files."""
+    cpu_filenames = set(
+        filter(None, os.environ.get("VLLM_RUNAI_CPU_WEIGHT_FILES", "").split(","))
+    )
+    if is_distributed and cpu_filenames:
+        cpu_files = [p for p in hf_weights_files if Path(p).name in cpu_filenames]
+        gpu_files = [p for p in hf_weights_files if Path(p).name not in cpu_filenames]
+        if cpu_files:
+            logger.info(
+                "RunAI mixed loading: %d shards distributed on CUDA; "
+                "%d oversized Engram shards on CPU",
+                len(gpu_files),
+                len(cpu_files),
+            )
+            if gpu_files:
+                yield from runai_safetensors_weights_iterator(
+                    gpu_files, use_tqdm_on_load, is_distributed=True
+                )
+            original_limit = os.environ.get("RUNAI_STREAMER_MEMORY_LIMIT")
+            os.environ["RUNAI_STREAMER_MEMORY_LIMIT"] = os.environ[
+                "VLLM_RUNAI_CPU_MEMORY_LIMIT"
+            ]
+            try:
+                if cpu_weights_group is None:
+                    yield from runai_safetensors_weights_iterator(
+                        cpu_files, use_tqdm_on_load, is_distributed=False
+                    )
+                else:
+                    group = cpu_weights_group
+                    weights = (
+                        iter(
+                            runai_safetensors_weights_iterator(
+                                cpu_files, use_tqdm_on_load, is_distributed=False
+                            )
+                        )
+                        if group.rank_in_group == 0
+                        else None
+                    )
+                    logger.info(
+                        "Shared Engram loading with one reader for %d ranks",
+                        group.world_size,
+                    )
+                    try:
+                        while True:
+                            descriptor: Any = None
+                            tensor = None
+                            if weights is not None:
+                                try:
+                                    name, tensor = next(weights)
+                                    descriptor = (
+                                        name,
+                                        tuple(tensor.shape),
+                                        tensor.dtype,
+                                        bool(
+                                            is_shared_cpu_weight
+                                            and is_shared_cpu_weight(name)
+                                        ),
+                                        None,
+                                    )
+                                except StopIteration:
+                                    pass
+                                except Exception as exc:
+                                    descriptor = (
+                                        None,
+                                        None,
+                                        None,
+                                        None,
+                                        f"{type(exc).__name__}: {exc}",
+                                    )
+                            descriptor = group.broadcast_object(descriptor)
+                            if descriptor is None:
+                                break
+                            name, shape, dtype, shared, error = descriptor
+                            if error is not None:
+                                raise RuntimeError(
+                                    "Shared Engram checkpoint loading failed: " + error
+                                )
+                            if group.rank_in_group != 0:
+                                assert (
+                                    bool(
+                                        is_shared_cpu_weight
+                                        and is_shared_cpu_weight(name)
+                                    )
+                                    == shared
+                                )
+                                tensor = torch.empty(
+                                    shape,
+                                    dtype=dtype,
+                                    device="meta" if shared else "cpu",
+                                )
+                            assert tensor is not None
+                            if not shared:
+                                torch.distributed.broadcast(
+                                    tensor.view(torch.uint8),
+                                    src=group.ranks[0],
+                                    group=group.cpu_group,
+                                )
+                            yield name, tensor
+                    finally:
+                        if weights is not None:
+                            weights.close()
+            finally:
+                if original_limit is None:
+                    os.environ.pop("RUNAI_STREAMER_MEMORY_LIMIT", None)
+                else:
+                    os.environ["RUNAI_STREAMER_MEMORY_LIMIT"] = original_limit
+            return
+
     with SafetensorsStreamer() as streamer:
         is_cuda_alike = current_platform.is_cuda_alike()
         device = (
@@ -1265,6 +1374,11 @@ def runai_safetensors_weights_iterator(
             hf_weights_files,
             device=device,
             is_distributed=is_distributed,
+            **(
+                {"owned": False}
+                if os.environ.get("VLLM_RUNAI_BORROWED_WEIGHTS") == "1"
+                else {}
+            ),
         )
         total_tensors = sum(
             len(tensors_meta)
@@ -1281,7 +1395,12 @@ def runai_safetensors_weights_iterator(
         )
 
         for name, tensor in tensor_iter:
-            yield name, tensor.clone()
+            if device == "cpu" and cpu_filenames and ".engram.embed." in name:
+                # Engram copies into its pinned table before requesting another
+                # tensor. The VL wrapper clones any deferred auxiliary weights.
+                yield name, tensor
+            else:
+                yield name, tensor.clone()
 
 
 def fastsafetensors_weights_iterator(

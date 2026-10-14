@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import json
 import os
-from collections.abc import Generator
+from collections.abc import Callable, Generator
+from pathlib import Path
 
 import torch
 from torch import nn
@@ -9,6 +11,7 @@ from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 
 from vllm.config import ModelConfig
 from vllm.config.load import LoadConfig
+from vllm.logger import init_logger
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
 from vllm.model_executor.model_loader.weight_utils import (
     download_safetensors_index_file_from_hf,
@@ -17,6 +20,33 @@ from vllm.model_executor.model_loader.weight_utils import (
 )
 from vllm.transformers_utils.repo_utils import resolve_revision
 from vllm.transformers_utils.runai_utils import is_runai_obj_uri, list_safetensors
+
+logger = init_logger(__name__)
+
+
+def _select_indexed_weight_files(
+    files: list[str],
+    metadata_dir: str,
+    is_unused_weight: Callable[[str], bool],
+) -> list[str]:
+    # Experimental opt-in: the pinned index has been checked against shard headers.
+    try:
+        weight_map = json.loads(
+            (Path(metadata_dir) / SAFE_WEIGHTS_INDEX_NAME).read_text()
+        )["weight_map"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return files
+    if not isinstance(weight_map, dict) or any(
+        not isinstance(name, str) or not isinstance(shard, str)
+        for name, shard in weight_map.items()
+    ):
+        return files
+    wanted = {shard for name, shard in weight_map.items() if not is_unused_weight(name)}
+    if not wanted or not wanted.issubset({Path(p).name for p in files}):
+        return files
+    selected = [p for p in files if Path(p).name in wanted]
+    logger.info("RunAI model-owned selection: %d/%d shards", len(selected), len(files))
+    return selected
 
 
 class RunaiModelStreamerLoader(BaseModelLoader):
@@ -122,12 +152,26 @@ class RunaiModelStreamerLoader(BaseModelLoader):
         return hf_weights_files
 
     def _get_weights_iterator(
-        self, model_or_path: str, revision: str | None
+        self,
+        model_or_path: str,
+        revision: str | None,
+        is_unused_weight: Callable[[str], bool] | None = None,
+        metadata_dir: str | None = None,
+        cpu_weights_group=None,
+        is_shared_cpu_weight=None,
     ) -> Generator[tuple[str, torch.Tensor], None, None]:
         """Get an iterator for the model weights based on the load format."""
         hf_weights_files = self._prepare_weights(model_or_path, revision)
+        if is_unused_weight is not None and metadata_dir is not None:
+            hf_weights_files = _select_indexed_weight_files(
+                hf_weights_files, metadata_dir, is_unused_weight
+            )
         return runai_safetensors_weights_iterator(
-            hf_weights_files, self.load_config.use_tqdm_on_load, self._is_distributed
+            hf_weights_files,
+            self.load_config.use_tqdm_on_load,
+            self._is_distributed,
+            cpu_weights_group=cpu_weights_group,
+            is_shared_cpu_weight=is_shared_cpu_weight,
         )
 
     def download_model(self, model_config: ModelConfig) -> None:
@@ -142,6 +186,57 @@ class RunaiModelStreamerLoader(BaseModelLoader):
         model_weights = model_config.model
         if model_weights_override := model_config.model_weights:
             model_weights = model_weights_override
+        if (
+            os.environ.get("VLLM_RUNAI_SINGLE_ENGRAM_READER") == "1"
+            and self._is_distributed
+        ):
+            from vllm.models.deepseek_v41.common.engram import DPSharedEngramStorage
+
+            params = dict(model.named_parameters())
+            weight_loader_owners = {
+                name: getattr(getattr(param, "weight_loader", None), "__self__", None)
+                for name, param in params.items()
+            }
+            owners = {
+                name: owner
+                for name, owner in weight_loader_owners.items()
+                if isinstance(owner, DPSharedEngramStorage)
+            }
+            if not owners:
+                yield from self._get_weights_iterator(
+                    model_weights,
+                    model_config.revision,
+                    is_unused_weight=getattr(
+                        model, "is_unused_checkpoint_weight", None
+                    ),
+                    metadata_dir=model_config.model,
+                )
+                return
+            group = next(iter(owners.values())).group
+            assert all(owner.group is group for owner in owners.values())
+
+            def is_shared(name):
+                mapped = model.hf_to_vllm_mapper.apply_list([name])
+                return len(mapped) == 1 and mapped[0] in owners
+
+            yield from self._get_weights_iterator(
+                model_weights,
+                model_config.revision,
+                cpu_weights_group=group,
+                is_shared_cpu_weight=is_shared,
+            )
+            return
+        is_unused_weight = getattr(model, "is_unused_checkpoint_weight", None)
+        if os.environ.get("VLLM_RUNAI_USE_LOCAL_WEIGHT_INDEX") == "1" and callable(
+            is_unused_weight
+        ):
+            yield from self._get_weights_iterator(
+                model_weights,
+                model_config.revision,
+                is_unused_weight=is_unused_weight,
+                metadata_dir=model_config.model,
+            )
+            return
         yield from self._get_weights_iterator(model_weights, model_config.revision)
 
     def load_weights(self, model: nn.Module, model_config: ModelConfig) -> None:
