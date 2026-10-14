@@ -10,17 +10,26 @@ Run `pytest tests/quantization/test_auto_round.py`.
 
 from types import SimpleNamespace
 from typing import Any, cast
+from unittest.mock import MagicMock, Mock
 
 import pytest
 import torch
 
+from tests.utils import multi_gpu_test
+from vllm.config import set_current_vllm_config
 from vllm.model_executor.layers.fused_moe import RoutedExperts
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import Mxfp4MoeBackend
 from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization.auto_gptq import AutoGPTQConfig
-from vllm.model_executor.layers.quantization.inc import INCConfig
+from vllm.model_executor.layers.quantization.inc import (
+    INCConfig,
+    INCOnlineMxFp4Config,
+)
 from vllm.model_executor.layers.quantization.inc.config_parser import INCLayerConfig
 from vllm.model_executor.layers.quantization.inc.inc_linear import INCLinearMethod
+from vllm.model_executor.layers.quantization.inc.online_mxfp4 import (
+    INCOnlineMxFp4LinearMethod,
+)
 from vllm.model_executor.layers.quantization.inc.schemes import (
     INCFp8Scheme,
     INCMxfp4Scheme,
@@ -48,6 +57,12 @@ from vllm.model_executor.layers.quantization.inc.schemes.inc_wna16_linear import
 from vllm.model_executor.layers.quantization.inc.schemes.inc_wna16_scheme import (
     _resolve_awq_moe,
     _resolve_gptq_moe,
+)
+from vllm.model_executor.layers.quantization.modelopt import (
+    ModelOptFp8Config,
+    ModelOptLinearMethod,
+    ModelOptMxFp8Config,
+    ModelOptNvFp4Config,
 )
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.platforms import current_platform
@@ -126,6 +141,17 @@ QWEN3_AUTOROUND_MODELS = [
     ),
 ]
 
+ONLINE_MXFP4_MODELS = [
+    pytest.param(
+        "nvidia/Qwen3.8-27B-NVFP4",
+        marks=pytest.mark.skipif(
+            not current_platform.is_xpu(),
+            reason="Online NVFP4-to-MXFP4 conversion requires Intel XPU.",
+        ),
+        id="inc_online_mxfp4:qwen3-8-27b",
+    ),
+]
+
 MODEL_RUNNER_KWARGS: dict[str, dict[str, Any]] = {
     "INCModel/Qwen3-1.7B-AutoRound-MXFP4-W4A4": {"enforce_eager": True},
     "INCModel/Qwen3-30B-A3B-12L-MXFP4-test": {"enforce_eager": True},
@@ -162,6 +188,41 @@ def test_auto_round_model(vllm_runner, model):
 
     assert output
     print(output[0][1])
+
+
+def _check_inc_online_mxfp4_layers(model) -> int:
+    converted_layers = 0
+    for module in model.modules():
+        if isinstance(
+            getattr(module, "quant_method", None), INCOnlineMxFp4LinearMethod
+        ):
+            assert module.input_scale is None
+            assert not hasattr(module, "weight_scale_2")
+            converted_layers += 1
+    assert converted_layers > 0
+    return converted_layers
+
+
+@multi_gpu_test(num_gpus=4)
+@pytest.mark.parametrize("model", ONLINE_MXFP4_MODELS)
+def test_inc_online_mxfp4_model(vllm_runner, monkeypatch, model):
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+    with vllm_runner(
+        model,
+        quantization="inc_online_mxfp4",
+        tensor_parallel_size=4,
+        max_model_len=4096,
+        gpu_memory_utilization=0.9,
+        enforce_eager=True,
+        enable_chunked_prefill=True,
+        language_model_only=True,
+    ) as llm:
+        converted_layers_per_worker = llm.apply_model(_check_inc_online_mxfp4_layers)
+        output = llm.generate_greedy(["The capital of France is"], max_tokens=8)
+
+    assert len(converted_layers_per_worker) == 4
+    assert all(count > 0 for count in converted_layers_per_worker)
+    assert "Paris" in output[0][1]
 
 
 # ---------------------------------------------------------------------------
@@ -204,6 +265,165 @@ def make_layer_config(**overrides) -> INCLayerConfig:
     }
     kwargs.update(overrides)
     return INCLayerConfig(**kwargs)
+
+
+def make_inc_online_mxfp4_config(
+    quantized_layers: dict,
+) -> INCOnlineMxFp4Config:
+    return INCOnlineMxFp4Config(
+        kv_cache_quant_method=None,
+        exclude_modules=[],
+        quantized_layers=quantized_layers,
+        fp8_config=ModelOptFp8Config(
+            quant_method="FP8",
+            is_checkpoint_fp8_serialized=True,
+            kv_cache_quant_method=None,
+            exclude_modules=[],
+        ),
+        nvfp4_config=ModelOptNvFp4Config(
+            is_checkpoint_nvfp4_serialized=True,
+            kv_cache_quant_algo=None,
+            exclude_modules=[],
+        ),
+        w4a16_nvfp4_config=ModelOptNvFp4Config(
+            quant_method="W4A16_NVFP4",
+            is_checkpoint_nvfp4_serialized=True,
+            kv_cache_quant_algo=None,
+            exclude_modules=[],
+        ),
+        mxfp8_config=ModelOptMxFp8Config(
+            is_checkpoint_mxfp8_serialized=True,
+            kv_cache_quant_algo=None,
+            exclude_modules=[],
+        ),
+    )
+
+
+def test_inc_online_mxfp4_converts_nvfp4_and_preserves_fp8_dispatch(
+    default_vllm_config,
+    monkeypatch,
+):
+    config = make_inc_online_mxfp4_config(
+        {
+            "model.layers.0.mlp.gate_proj": {"quant_algo": "NVFP4"},
+            "model.layers.0.mlp.down_proj": {"quant_algo": "FP8"},
+        }
+    )
+    fake_layer = MagicMock(spec=LinearBase)
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.inc.online_mxfp4."
+        "init_mxfp4_linear_kernel",
+        Mock(),
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.modelopt.init_fp8_linear_kernel",
+        Mock(),
+    )
+
+    with set_current_vllm_config(default_vllm_config):
+        nvfp4_method = config.get_quant_method(
+            fake_layer, "model.layers.0.mlp.gate_proj"
+        )
+        fp8_method = config.get_quant_method(fake_layer, "model.layers.0.mlp.down_proj")
+
+    assert isinstance(nvfp4_method, INCOnlineMxFp4LinearMethod)
+    assert isinstance(fp8_method, ModelOptLinearMethod)
+
+
+def test_inc_online_mxfp4_requantizes_fused_partitions_in_row_chunks(
+    monkeypatch,
+):
+    layer = torch.nn.Module()
+    layer.register_parameter(
+        "weight",
+        torch.nn.Parameter(torch.zeros(4, 16, dtype=torch.uint8), False),
+    )
+    layer.register_parameter(
+        "weight_scale",
+        torch.nn.Parameter(torch.ones(4, 2, dtype=torch.float8_e4m3fn), False),
+    )
+    layer.register_parameter(
+        "weight_scale_2",
+        torch.nn.Parameter(torch.tensor([2.0, 4.0]), False),
+    )
+    layer.register_parameter(
+        "input_scale",
+        torch.nn.Parameter(torch.ones(2), False),
+    )
+    layer.logical_widths = [2, 2]
+    layer.input_size_per_partition = 32
+    layer.output_size_per_partition = 4
+
+    method = INCOnlineMxFp4LinearMethod.__new__(INCOnlineMxFp4LinearMethod)
+    method.quant_config = Mock(group_size=16)
+    method.kernel = Mock()
+    dequantized_scales = []
+
+    def fake_dequantize(weight, scale, global_scale, dtype, **kwargs):
+        dequantized_scales.append(global_scale.flatten().tolist())
+        return torch.ones(weight.shape[0], weight.shape[1] * 2, dtype=dtype)
+
+    def fake_quantize(weight):
+        return (
+            torch.zeros(weight.shape[0], 16, dtype=torch.uint8),
+            torch.zeros(weight.shape[0], 1, dtype=torch.uint8),
+        )
+
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.inc.online_mxfp4."
+        "_REQUANTIZE_CHUNK_ELEMS",
+        64,
+    )
+    dequantize = Mock(side_effect=fake_dequantize)
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.inc.online_mxfp4.dequantize_to_dtype",
+        dequantize,
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.inc.online_mxfp4.mxfp4_quantize",
+        Mock(side_effect=fake_quantize),
+    )
+
+    method.process_weights_after_loading(layer)
+
+    assert dequantized_scales == [[2.0, 2.0], [4.0, 4.0]]
+    assert all(call.kwargs["block_size"] == 16 for call in dequantize.call_args_list)
+    assert all(call.kwargs["swizzle"] is False for call in dequantize.call_args_list)
+    assert layer.weight.shape == (4, 16)
+    assert layer.weight_scale.shape == (4, 1)
+    assert layer.input_scale is None
+    assert not hasattr(layer, "weight_scale_2")
+    method.kernel.process_weights_after_loading.assert_called_once_with(layer)
+
+
+def test_inc_online_mxfp4_marks_fused_scales_for_scalar_loading(monkeypatch):
+    method = INCOnlineMxFp4LinearMethod.__new__(INCOnlineMxFp4LinearMethod)
+    method.quant_config = Mock(
+        is_checkpoint_nvfp4_serialized=True,
+        group_size=16,
+    )
+    method.kernel = Mock()
+    layer = torch.nn.Module()
+    monkeypatch.setattr(
+        "vllm.model_executor.parameter.get_tensor_model_parallel_rank",
+        Mock(return_value=0),
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.parameter.get_tensor_model_parallel_world_size",
+        Mock(return_value=1),
+    )
+
+    method.create_weights(
+        layer,
+        input_size_per_partition=32,
+        output_partition_sizes=[16, 16],
+        input_size=32,
+        output_size=32,
+        params_dtype=torch.bfloat16,
+    )
+
+    assert layer.input_scale.needs_scalar_to_array
+    assert layer.weight_scale_2.needs_scalar_to_array
 
 
 def make_block_fp8_raw_config(**overrides) -> dict[str, object]:

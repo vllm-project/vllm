@@ -22,6 +22,7 @@ QuantizationMethods = Literal[
     "modelopt_fp4",
     "modelopt_mxfp8",
     "modelopt_mixed",
+    "inc_online_mxfp4",
     "auto_gptq",
     "gptq",
     "gptq_marlin",
@@ -141,7 +142,7 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
     from .fp8 import Fp8Config
     from .fp_quant import FPQuantConfig
     from .humming import HummingConfig
-    from .inc import INCConfig
+    from .inc import INCConfig, INCOnlineMxFp4Config
     from .modelopt import (
         ModelOptFp8Config,
         ModelOptMixedPrecisionConfig,
@@ -164,6 +165,7 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
         "modelopt_fp4": ModelOptNvFp4Config,
         "modelopt_mxfp8": ModelOptMxFp8Config,
         "modelopt_mixed": ModelOptMixedPrecisionConfig,
+        "inc_online_mxfp4": INCOnlineMxFp4Config,
         "auto_gptq": AutoGPTQConfig,
         "gptq": AutoGPTQConfig,
         "gptq_marlin": AutoGPTQConfig,
