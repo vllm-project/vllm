@@ -131,6 +131,10 @@ class NixlBaseConnectorWorker:
     # packed KV caches under PP.
     _supports_pp_hma = False
 
+    # Class default so partially-constructed workers (tests bypass __init__)
+    # take the synchronous path; __init__ overrides when polling is enabled.
+    _async_poll = False
+
     def _compute_desc_ids(
         self,
         block_ids: BlockIds,
@@ -635,7 +639,7 @@ class NixlBaseConnectorWorker:
             config = None
         else:
             # Enable telemetry by default for NIXL 0.7.1 and above.
-            # VLLM_NIXL_ASYNC_POLL: a second thread polls transfers, so serialize NIXL calls.
+            # VLLM_NIXL_ASYNC_POLL: the poll thread requires serialized NIXL calls.
             sync_kwargs = {}
             if os.environ.get("VLLM_NIXL_ASYNC_POLL", "0") == "1":
                 from nixl._api import nixl_thread_sync_t
@@ -652,7 +656,7 @@ class NixlBaseConnectorWorker:
             )
 
         self.nixl_wrapper = nixl_wrapper_cls(str(uuid.uuid4()), config)
-        # Background completion polling (VLLM_NIXL_ASYNC_POLL=1): handle -> (state, telemetry|exc).
+        # Async poll results: handle -> (state, telemetry | exception).
         self._async_poll = os.environ.get("VLLM_NIXL_ASYNC_POLL", "0") == "1"
         self._async_poll_lock = threading.Lock()
         self._async_done: dict[int, tuple[str, Any]] = {}
