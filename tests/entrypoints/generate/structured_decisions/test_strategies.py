@@ -1,6 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import asyncio
 import json
+import logging
+import math
+from argparse import Namespace
 from io import BytesIO
 from types import SimpleNamespace
 from typing import Any
@@ -13,6 +17,7 @@ import torch
 from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 from PIL import Image
+from starlette.datastructures import State
 
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
@@ -23,19 +28,26 @@ from vllm.entrypoints.generate.structured_decisions.protocol import (
     StructuredDecisionRequest,
     StructuredDecisionResponse,
 )
-from vllm.entrypoints.generate.structured_decisions.question_types import (
-    LABELS,
-    StructuredDecisionError,
-)
 from vllm.entrypoints.generate.structured_decisions.serving import (
     ServingStructuredDecisions,
     parse_questions,
 )
-from vllm.entrypoints.generate.structured_decisions.strategies import (
+from vllm.entrypoints.openai.decisions.api_router import register_decisions_api_router
+from vllm.entrypoints.openai.decisions.question_types import (
+    LABELS,
+    StructuredDecisionError,
+    build_question,
+)
+from vllm.entrypoints.openai.decisions.serving import OpenAIServingDecisions
+from vllm.entrypoints.openai.decisions.state import init_decisions_state
+from vllm.entrypoints.openai.decisions.strategies import (
+    ClefFlashStrategy,
     DiffusionGemmaCanvasStrategy,
     JointSchemaStrategy,
+    LiquidStrategy,
     NextTokenStrategy,
     ReadContext,
+    cap_pixels,
     reply_label_ids,
     select_read_strategy,
     state_text,
@@ -46,7 +58,8 @@ from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.entrypoints.serve.exception_handling.register import (
     init_exception_handler,
 )
-from vllm.inputs import mm_input
+from vllm.entrypoints.serve.utils.request_logger import RequestLogger
+from vllm.inputs import mm_input, tokens_input
 from vllm.logprobs import Logprob
 from vllm.multimodal.media import MediaConnector, MediaWithBytes
 from vllm.outputs import (
@@ -62,6 +75,8 @@ TRACE_HEADERS = {
     "traceparent": "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01",
     "tracestate": "vendor=value",
 }
+
+pytestmark = [pytest.mark.cpu_test, pytest.mark.skip_global_cleanup]
 
 
 def model(architecture: str, logprobs_mode: str = "raw_logprobs") -> Any:
@@ -79,6 +94,8 @@ def test_strategy_selection():
         select_read_strategy(model("DiffusionGemmaForBlockDiffusion"), generate)
         is DiffusionGemmaCanvasStrategy
     )
+    lfm = "Lfm2VlForConditionalGeneration"
+    assert select_read_strategy(model(lfm), generate) is LiquidStrategy
     with pytest.raises(ValueError, match="does not support LlamaForCausalLM"):
         select_read_strategy(model("LlamaForCausalLM"), generate)
     with pytest.raises(ValueError, match="not raw_logits"):
@@ -89,13 +106,17 @@ def test_strategy_selection():
     # Clef-Omni scores options with its head, so it reads no logprobs.
     clef = model("ClefOmniForJointSchema", "raw_logits")
     assert select_read_strategy(clef, ("token_classify",)) is JointSchemaStrategy
+    clef_flash = model("ClefFlashForJointSchema", "raw_logits")
+    assert select_read_strategy(clef_flash, ("token_classify",)) is ClefFlashStrategy
 
 
 def test_route_is_registered_by_default():
     app = FastAPI()
     register_structured_decisions_api_router(app)
+    register_decisions_api_router(app)
     paths = {getattr(route, "path", None) for route in app.routes}
     assert "/v1/systemone" in paths
+    assert "/v1/decisions" in paths
 
 
 def test_unsupported_model_returns_501():
@@ -117,6 +138,18 @@ def test_unsupported_model_returns_501():
     assert response.status_code == 501
 
 
+def test_decisions_route_returns_501_without_supported_strategy():
+    app = FastAPI()
+    app.state.args = SimpleNamespace(log_error_stack=False)
+    app.state.openai_serving_decisions = None
+    init_exception_handler(app)
+    register_decisions_api_router(app)
+
+    with TestClient(app) as client:
+        response = client.post("/v1/decisions", json=decision_body("decisions"))
+    assert response.status_code == 501
+
+
 def test_structured_state_keeps_unicode_in_prompt():
     state = {"message": "Français 日本語"}
     assert state_text(state) == '{"message": "Français 日本語"}'
@@ -135,6 +168,44 @@ def qwen():
         return_dict=False,
     )
     return tokenizer, prompt_ids
+
+
+def test_decisions_state_initializes(qwen):
+    tokenizer, _ = qwen
+    engine = SimpleNamespace(
+        model_config=model("Qwen3ForCausalLM"), renderer=None, input_processor=None
+    )
+    state = State()
+    state.online_renderer = SimpleNamespace(
+        renderer=SimpleNamespace(get_tokenizer=lambda: tokenizer)
+    )
+    state.openai_serving_models = OpenAIServingModels(
+        engine, [BaseModelPath(name="test-model", model_path="test-model")]
+    )
+    args = Namespace(chat_template_content_format="auto")
+
+    strategy = init_decisions_state(engine, state, args, None, None, {}, ("generate",))
+
+    assert isinstance(strategy, NextTokenStrategy)
+    assert isinstance(state.openai_serving_decisions, OpenAIServingDecisions)
+
+
+def test_unsupported_decisions_state_does_not_block_startup():
+    engine = SimpleNamespace(model_config=model("Qwen3ForCausalLM", "raw_logits"))
+    state = State()
+
+    strategy = init_decisions_state(
+        engine,
+        state,
+        Namespace(chat_template_content_format="auto"),
+        None,
+        None,
+        {},
+        ("generate",),
+    )
+
+    assert strategy is None
+    assert state.openai_serving_decisions is None
 
 
 def test_labels_start_the_reply(qwen):
@@ -361,8 +432,8 @@ JOINT_SCHEMA_REQUEST: dict[str, Any] = dict(
 )
 
 
-@pytest.fixture
-def joint_schema(qwen, engine_and_renderer):
+@pytest.fixture(params=[JointSchemaStrategy, ClefFlashStrategy])
+def joint_schema(request, qwen, engine_and_renderer):
     tokenizer, _ = qwen
     engine, online_renderer = engine_and_renderer
     # The probability the head gives each option, by option id.
@@ -377,9 +448,7 @@ def joint_schema(qwen, engine_and_renderer):
         yield PoolingRequestOutput(request_id, PoolingOutput(data), ids, 0, True)
 
     engine.encode.side_effect = encode
-    strategy = JointSchemaStrategy(
-        ReadContext(engine, online_renderer, None, "auto", {})
-    )
+    strategy = request.param(ReadContext(engine, online_renderer, None, "auto", {}))
     return serving(engine, strategy), engine, tokenizer
 
 
@@ -463,7 +532,10 @@ async def test_media_needs_a_model_that_takes_it(serving_and_engine):
 
 
 @pytest.mark.asyncio
-async def test_joint_schema_reads_media_before_the_state(joint_schema, monkeypatch):
+@pytest.mark.parametrize("num_images", [1, 2])
+async def test_joint_schema_reads_media_before_the_state(
+    joint_schema, monkeypatch, num_images
+):
     serving, engine, tokenizer = joint_schema
     strategy = serving.strategy
     strategy.__dict__["_connector"] = MediaConnector()
@@ -486,23 +558,30 @@ async def test_joint_schema_reads_media_before_the_state(joint_schema, monkeypat
     Image.new("RGB", (8, 8), "red").save(buffer, format="PNG")
     image = "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode()
     response = await serving.create_decision(
-        StructuredDecisionRequest(**JOINT_SCHEMA_REQUEST, images=[image])
+        StructuredDecisionRequest(**JOINT_SCHEMA_REQUEST, images=[image] * num_images)
     )
     assert isinstance(response, StructuredDecisionResponse)
 
-    placeholder = tokenizer.encode(
-        "<|vision_start|><|image_pad|><|vision_end|>\n", add_special_tokens=False
-    )
+    if isinstance(strategy, ClefFlashStrategy):
+        media_text = "<|vision_start|><|image_pad|><|vision_end|>" * num_images + "\n"
+    else:
+        media_text = "<|vision_start|><|image_pad|><|vision_end|>\n" * num_images
+    placeholder = tokenizer.encode(media_text, add_special_tokens=False)
     assert rendered["prompt_token_ids"] == strategy.prefix + placeholder
     assert rendered["multi_modal_data"]["image"][0].size == (8, 8)
-    assert rendered["mm_processor_kwargs"] == {
-        "images_kwargs": {"size": strategy.IMAGE_SIZE}
-    }
+    if isinstance(strategy, ClefFlashStrategy):
+        assert rendered["mm_processor_kwargs"] == {
+            "videos_kwargs": {"do_sample_frames": False}
+        }
+    else:
+        assert rendered["mm_processor_kwargs"] == {
+            "images_kwargs": {"size": strategy.IMAGE_SIZE}
+        }
     prompt = engine.encode.call_args.args[0]
     assert prompt["type"] == "multimodal"
     ids = prompt["prompt_token_ids"]
-    expanded = len(strategy.prefix) + len(placeholder) + 2
-    assert ids[:expanded].count(image_pad) == 3
+    expanded = len(strategy.prefix) + len(placeholder) + 2 * num_images
+    assert ids[:expanded].count(image_pad) == 3 * num_images
     state_and_questions = JOINT_SCHEMA_PROMPT.split("STATE:\n", 1)[1]
     assert tokenizer.decode(ids[expanded:]) == state_and_questions
     assert response.answers["team"]["choice"] == "billing"
@@ -510,7 +589,9 @@ async def test_joint_schema_reads_media_before_the_state(joint_schema, monkeypat
 
 
 @pytest.mark.asyncio
-async def test_joint_schema_hears_video_soundtracks(joint_schema, monkeypatch):
+async def test_joint_schema_video_audio_follows_model_modalities(
+    joint_schema, monkeypatch
+):
     serving, engine, tokenizer = joint_schema
     strategy = serving.strategy
     video = MediaWithBytes(
@@ -527,6 +608,7 @@ async def test_joint_schema_hears_video_soundtracks(joint_schema, monkeypatch):
             return video
 
         async def fetch_audio_async(self, url):
+            assert not isinstance(strategy, ClefFlashStrategy)
             if url == "https://example.org/silent.mp4":
                 raise ValueError("No audio stream found.")
             return track
@@ -547,11 +629,17 @@ async def test_joint_schema_hears_video_soundtracks(joint_schema, monkeypatch):
         )
     )
     assert isinstance(response, StructuredDecisionResponse)
-    assert rendered["multi_modal_data"] == {"video": [video], "audio": [track]}
-    assert rendered["mm_processor_kwargs"] == {
-        "images_kwargs": {"size": strategy.IMAGE_SIZE},
-        "use_audio_in_video": True,
-    }
+    if isinstance(strategy, ClefFlashStrategy):
+        assert rendered["multi_modal_data"] == {"video": [video]}
+        assert rendered["mm_processor_kwargs"] == {
+            "videos_kwargs": {"do_sample_frames": False}
+        }
+    else:
+        assert rendered["multi_modal_data"] == {"video": [video], "audio": [track]}
+        assert rendered["mm_processor_kwargs"] == {
+            "images_kwargs": {"size": strategy.IMAGE_SIZE},
+            "use_audio_in_video": True,
+        }
 
     # A video without a decodable soundtrack is watched silently.
     response = await serving.create_decision(
@@ -561,7 +649,8 @@ async def test_joint_schema_hears_video_soundtracks(joint_schema, monkeypatch):
     )
     assert isinstance(response, StructuredDecisionResponse)
     assert rendered["multi_modal_data"] == {"video": [video]}
-    assert rendered["mm_processor_kwargs"]["use_audio_in_video"] is False
+    if not isinstance(strategy, ClefFlashStrategy):
+        assert rendered["mm_processor_kwargs"]["use_audio_in_video"] is False
 
     # Audio clips cannot be read with videos that have soundtracks.
     response = await serving.create_decision(
@@ -573,3 +662,212 @@ async def test_joint_schema_hears_video_soundtracks(joint_schema, monkeypatch):
     )
     assert isinstance(response, ErrorResponse)
     assert response.error.code == 400
+
+
+@pytest.mark.parametrize(
+    "type_name,criteria,ask",
+    [
+        (
+            "choice",
+            {"billing": "Charges", "app_fault": None},
+            "Which?\n\nOptions:\nA Charges\nB app fault\n\n"
+            "Reply with the option code only.",
+        ),
+        (
+            "choice",
+            {"a": "Berlin", "b": "Paris"},
+            "Which?\n\nOptions:\na Berlin\nb Paris\n\nReply with the option code only.",
+        ),
+        (
+            "noul",
+            {"true": "asks to cancel", "false": "anything else"},
+            "Which?\nYes: asks to cancel\nNo: anything else\n\n"
+            "Reply with yes or no only.",
+        ),
+        (
+            "score",
+            ["low", "high"],
+            "Which?\n\n0 low\n1 high\n\nReply with a single digit 0-1 only.",
+        ),
+    ],
+)
+def test_liquid_prompt_matches_the_checkpoint(type_name, criteria, ask):
+    # The wording of prompt.py in LiquidAI/d1-3B, which the model was trained on.
+    strategy = object.__new__(LiquidStrategy)
+    q = build_question("q", type_name, "Which?", criteria, 26)
+    assert strategy._content(strategy.render_state(None), q) == ask
+    assert strategy._content("Hi.", q) == f"Hi.\n\n\nQUESTION:\n{ask}"
+    state = strategy.render_state({"k": "é"})
+    assert strategy._content(state, q).startswith('{\n  "k": "é"\n}\n\n\nQUEST')
+
+
+def test_liquid_caps_images_like_the_checkpoint():
+    # runner.cap_pixels in LiquidAI/d1-3B: 1600x1598 becomes 1024x1023.
+    cap = LiquidStrategy.max_image_pixels
+    assert cap is not None
+    assert cap_pixels(Image.new("RGB", (1600, 1598)), cap).size == (1024, 1023)
+    small = Image.new("RGB", (640, 480))
+    assert cap_pixels(small, cap) is small
+    assert NextTokenStrategy.max_image_pixels is None
+
+
+@pytest.fixture
+def decision_server(qwen):
+    tokenizer, _ = qwen
+
+    class Engine:
+        model_config = SimpleNamespace(is_encoder_decoder=False)
+        renderer = input_processor = None
+        errored = False
+        failure = None
+
+        def __init__(self):
+            self.admitted = []
+            self.generated = []
+
+        def check_admission(self, count):
+            self.admitted.append(count)
+
+        async def generate(self, prompt, params, request_id, **kwargs):
+            self.generated.append(prompt)
+            if self.failure == "bad_request":
+                raise ValueError("Invalid generation input")
+            if self.failure == "no_result":
+                return
+            ids = params.logprob_token_ids
+            logprobs = {i: Logprob(-math.log(len(ids))) for i in ids}
+            if self.failure == "missing_label":
+                logprobs.pop(ids[-1])
+            output = CompletionOutput(
+                index=0,
+                text="A",
+                token_ids=[ids[0]],
+                cumulative_logprob=None,
+                logprobs=[logprobs],
+                finish_reason="error" if self.failure == "error" else "length",
+            )
+            if self.failure == "no_logprobs":
+                output.logprobs = None
+            yield RequestOutput(
+                request_id=request_id,
+                prompt=None,
+                prompt_token_ids=prompt["prompt_token_ids"],
+                prompt_logprobs=None,
+                outputs=[] if self.failure == "no_output" else [output],
+                finished=True,
+            )
+
+    class Renderer:
+        renderer = SimpleNamespace(get_tokenizer=lambda: tokenizer)
+
+        async def preprocess_chat(self, request, messages, **kwargs):
+            await asyncio.sleep(0)
+            ids = tokenizer.apply_chat_template(
+                messages,
+                add_generation_prompt=True,
+                enable_thinking=False,
+                tokenize=True,
+                return_dict=False,
+            )
+            return [], [tokens_input(ids)]
+
+    engine, renderer = Engine(), Renderer()
+    strategy = NextTokenStrategy(ReadContext(engine, renderer, None, "auto", {}))
+    models = OpenAIServingModels(
+        engine, [BaseModelPath(name="test-model", model_path="test-model")]
+    )
+    request_logger = RequestLogger(max_log_len=None)
+    app = FastAPI()
+    app.state.args = Namespace(log_error_stack=False)
+    app.state.serving_structured_decisions = ServingStructuredDecisions(
+        models, strategy, request_logger=request_logger
+    )
+    app.state.openai_serving_decisions = OpenAIServingDecisions(
+        models, strategy, request_logger=request_logger
+    )
+    init_exception_handler(app)
+    register_structured_decisions_api_router(app)
+    register_decisions_api_router(app)
+    with TestClient(app, headers={"X-Request-Id": "test-request"}) as client:
+        yield SimpleNamespace(
+            client=client, engine=engine, renderer=renderer, tokenizer=tokenizer
+        )
+
+
+def decision_body(endpoint, count=1):
+    questions = [
+        {"type": "choice", "instructions": f"Question {i}"} for i in range(count)
+    ]
+    if endpoint == "decisions":
+        return dict(
+            model="test-model",
+            input="evidence",
+            safety_identifier="test-user",
+            questions=[
+                dict(q, choices=[{"value": "yes"}, {"value": "no"}]) for q in questions
+            ],
+        )
+    return dict(
+        model="test-model",
+        state="evidence",
+        questions={
+            str(i): dict(q, criteria={"yes": None, "no": None})
+            for i, q in enumerate(questions)
+        },
+    )
+
+
+@pytest.mark.parametrize("endpoint", ["decisions", "systemone"])
+@pytest.mark.parametrize("count,status", [(64, 200), (65, 400)])
+def test_model_question_limit_is_enforced_before_admission(
+    decision_server, endpoint, count, status
+):
+    server = decision_server
+    response = server.client.post(
+        f"/v1/{endpoint}", json=decision_body(endpoint, count)
+    )
+    assert response.status_code == status, response.text
+    assert server.engine.admitted == ([count] if status == 200 else [])
+    if status == 400:
+        assert "at most 64" in response.json()["error"]["message"]
+        assert not server.engine.generated
+
+
+@pytest.mark.parametrize("endpoint", ["decisions", "systemone"])
+@pytest.mark.parametrize(
+    "failure",
+    ["no_result", "no_output", "error", "no_logprobs", "missing_label", "bad_request"],
+)
+def test_generation_failures_are_server_errors(decision_server, endpoint, failure):
+    server = decision_server
+    server.engine.failure = failure
+    response = server.client.post(f"/v1/{endpoint}", json=decision_body(endpoint))
+    status = 400 if failure == "bad_request" else 500
+    assert response.status_code == status, response.text
+    assert response.json()["error"]["type"] == (
+        "BadRequestError" if status == 400 else "InternalServerError"
+    )
+    assert len(server.engine.generated) == 1
+
+
+def test_decisions_logging_includes_receipt_and_body(
+    decision_server, caplog, monkeypatch
+):
+    logger_name = "vllm.entrypoints.serve.utils.request_logger"
+    monkeypatch.setattr(logging.getLogger(logger_name), "propagate", True)
+    with caplog.at_level(logging.DEBUG, logger=logger_name):
+        response = decision_server.client.post(
+            "/v1/decisions", json=decision_body("decisions")
+        )
+    assert response.status_code == 200, response.text
+    assert "Received request decision-test-request" in caplog.text
+    assert "evidence" in caplog.text
+    assert '"safety_identifier":"test-user"' in caplog.text
+
+
+def test_prompts_retain_question_order(decision_server):
+    server = decision_server
+    response = server.client.post("/v1/decisions", json=decision_body("decisions", 2))
+    assert response.status_code == 200, response.text
+    for i, prompt in enumerate(server.engine.generated):
+        assert f"Question {i}" in server.tokenizer.decode(prompt["prompt_token_ids"])

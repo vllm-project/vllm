@@ -367,6 +367,74 @@ async def test_completion_render_multiple_prompts(client):
         assert prompt["request_id"].startswith("cmpl-")
 
 
+CHAT_BODY = {
+    "model": MODEL_NAME,
+    "messages": [{"role": "user", "content": "Hello"}],
+}
+
+
+@pytest.mark.asyncio
+async def test_chat_render_honors_body_request_id(client):
+    response = await client.post(
+        "/v1/chat/completions/render", json={**CHAT_BODY, "request_id": "abc"}
+    )
+
+    assert response.status_code == 200
+    assert response.json()["request_id"] == "chatcmpl-abc"
+
+
+@pytest.mark.asyncio
+async def test_chat_render_header_request_id_wins(client):
+    response = await client.post(
+        "/v1/chat/completions/render",
+        json={**CHAT_BODY, "request_id": "abc"},
+        headers={"X-Request-Id": "hdr"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["request_id"] == "chatcmpl-hdr"
+
+
+@pytest.mark.asyncio
+async def test_chat_render_generates_unique_request_ids(client):
+    ids = set()
+    for _ in range(2):
+        response = await client.post("/v1/chat/completions/render", json=CHAT_BODY)
+        assert response.status_code == 200
+        request_id = response.json()["request_id"]
+        assert request_id.startswith("chatcmpl-")
+        ids.add(request_id)
+
+    assert len(ids) == 2
+
+
+@pytest.mark.asyncio
+async def test_completion_render_request_id_single_prompt(client):
+    response = await client.post(
+        "/v1/completions/render",
+        json={"model": MODEL_NAME, "prompt": "Hello world", "request_id": "abc"},
+    )
+
+    assert response.status_code == 200
+    assert [r["request_id"] for r in response.json()] == ["cmpl-abc"]
+
+
+@pytest.mark.asyncio
+async def test_completion_render_request_id_multiple_prompts(client):
+    response = await client.post(
+        "/v1/completions/render",
+        json={
+            "model": MODEL_NAME,
+            "prompt": ["Hello world", "Goodbye world"],
+            "request_id": "abc",
+        },
+        headers={"X-Request-Id": "hdr"},
+    )
+
+    assert response.status_code == 200
+    assert [r["request_id"] for r in response.json()] == ["cmpl-hdr-0", "cmpl-hdr-1"]
+
+
 @pytest.mark.asyncio
 async def test_chat_completion_render_multi_turn(client):
     """Test chat completion render with multi-turn conversation."""
