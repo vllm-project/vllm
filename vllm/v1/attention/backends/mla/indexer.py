@@ -204,8 +204,17 @@ class PrepareUniformDecodeKernel(
         )
 
 
-# Below this many rows per rank, stay replicated (TP4 engages at 64K rows).
-MIN_TP_SHARD_ROWS_PER_RANK = 16_384
+# Below this many TOTAL prefill rows, stay replicated (each rank scores every
+# row). The engagement crossover was calibrated on H200/TP4, where 64K total
+# rows was the first measured win. Per rank, the saved replicated indexer work
+# (~ (1 - 1/tp) * rows) and the all_gatherv index traffic
+# (~ (tp - 1)/tp * rows * topk * 4B) scale identically with tp, so the
+# crossover in TOTAL rows is tp-independent to first order. A per-rank floor
+# would instead grow the total requirement linearly with tp: at TP8 it takes
+# 128K scheduled rows, i.e. --max-num-batched-tokens >= 128K, which 80 GB
+# Hopper nodes cannot fit (the KV-cache budget goes negative during memory
+# profiling).
+MIN_TP_SHARD_TOTAL_ROWS = 65_536
 
 
 def balanced_prefill_row_shard(
@@ -216,7 +225,10 @@ def balanced_prefill_row_shard(
 ) -> list[int] | None:
     """Return contiguous TP row counts balanced by indexer MQA work."""
     num_rows = int(query_lens_cpu.sum())
-    if tp_size < 2 or num_rows < MIN_TP_SHARD_ROWS_PER_RANK * tp_size:
+    min_rows = (
+        envs.VLLM_INDEXER_TP_SHARD_MIN_ROWS or MIN_TP_SHARD_TOTAL_ROWS
+    )
+    if tp_size < 2 or num_rows < min_rows:
         return None
 
     query_lens = query_lens_cpu.to(torch.int64)
@@ -239,6 +251,10 @@ def balanced_prefill_row_shard(
         bounds[i] = max(bounds[i], bounds[i - 1] + 1)
     for i in range(tp_size - 1, 0, -1):
         bounds[i] = min(bounds[i], bounds[i + 1] - 1)
+    logger.info_once(
+        "Indexer TP row sharding engaged: num_rows=%d tp_size=%d", num_rows,
+        tp_size,
+    )
     return [bounds[i + 1] - bounds[i] for i in range(tp_size)]
 
 

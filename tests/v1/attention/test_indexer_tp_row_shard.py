@@ -80,11 +80,11 @@ def test_shard_exchange_reassembles_rows_only(
     assert torch.all(buffer[decode + sum(sizes) :] == -7), "padding untouched"
 
 
-@pytest.mark.parametrize("tp_size", [2, 4])
+@pytest.mark.parametrize("tp_size", [2, 4, 8])
 def test_balanced_row_shard_partitions_and_declines(tp_size: int) -> None:
     """The split covers every row once with >= 1 row per rank and declines
     below the activation floor (or on a single rank)."""
-    n = indexer.MIN_TP_SHARD_ROWS_PER_RANK * tp_size
+    n = indexer.MIN_TP_SHARD_TOTAL_ROWS
     shapes = [
         ([4 * n], [4 * n]),  # fresh prompt: the full causal cost ramp
         # uneven requests at different context depths
@@ -103,6 +103,30 @@ def test_balanced_row_shard_partitions_and_declines(tp_size: int) -> None:
     lens = torch.tensor([n - 1], dtype=torch.int32)
     assert indexer.balanced_prefill_row_shard(lens, lens, ratio, tp_size) is None
     assert indexer.balanced_prefill_row_shard(lens, lens, ratio, 1) is None
+
+
+def test_row_shard_threshold_is_total_not_per_rank() -> None:
+    """The activation floor counts TOTAL rows regardless of tp_size: a
+    per-rank floor would need 128K rows at TP8, i.e. an unschedulable
+    --max-num-batched-tokens of 128K on 80 GB Hopper nodes."""
+    n = indexer.MIN_TP_SHARD_TOTAL_ROWS
+    lens = torch.tensor([n], dtype=torch.int32)
+    for tp_size in (2, 4, 8):
+        assert indexer.balanced_prefill_row_shard(lens, lens, 4, tp_size) is not None
+
+
+def test_row_shard_threshold_env_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """VLLM_INDEXER_TP_SHARD_MIN_ROWS overrides the built-in floor."""
+    monkeypatch.setattr(
+        indexer.envs, "VLLM_INDEXER_TP_SHARD_MIN_ROWS", 2_000_000
+    )
+    lens = torch.tensor([indexer.MIN_TP_SHARD_TOTAL_ROWS], dtype=torch.int32)
+    assert indexer.balanced_prefill_row_shard(lens, lens, 4, 8) is None
+    monkeypatch.setattr(indexer.envs, "VLLM_INDEXER_TP_SHARD_MIN_ROWS", 1)
+    small = torch.tensor([8], dtype=torch.int32)
+    assert indexer.balanced_prefill_row_shard(small, small, 4, 8) is not None
 
 
 def test_row_sharding_gate_rejects_unsupported_configurations(
