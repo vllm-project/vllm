@@ -12,6 +12,7 @@ the global top-k of the replicated selector.
 import torch
 
 from vllm.distributed import get_dcp_group
+from vllm.model_executor.warmup.jit_warmup_triton_helper import TritonWarmupTensor
 from vllm.models.qwen4_exp.common.qsa_cache import QSADCPShard
 from vllm.triton_utils import tl, triton
 
@@ -293,9 +294,77 @@ def expand_localize_qsa_block_indices(
     )
 
 
+def warmup_qsa_dcp_selector(
+    *,
+    logits_width: int,
+    token_topk: int,
+    compress_ratio: int,
+    selector_shard: QSADCPShard,
+    token_shard: QSADCPShard,
+) -> None:
+    """Warm the pack, select and fused expand+localize kernels.
+
+    ``logits_width`` is the decode logits row stride (selector block-table
+    width times its page size). Row counts and the rank are not
+    specialized, so 16 rows compile the only variants.
+    """
+    if selector_shard.world_size <= 1:
+        return
+    rows = 16
+    block_topk = token_topk // compress_ratio
+    output_width = token_topk + compress_ratio - 1
+    _pack_qsa_dcp_candidates_kernel.warmup(
+        TritonWarmupTensor(torch.float32, shape=(rows, logits_width)),
+        TritonWarmupTensor(torch.int32, shape=(rows, block_topk)),
+        TritonWarmupTensor(torch.float32, shape=(rows, block_topk, 2)),
+        logits_width,
+        block_topk,
+        selector_shard.rank,
+        TOPK=block_topk,
+        BLOCK_K=triton.next_power_of_2(block_topk),
+        DCP_WORLD=selector_shard.world_size,
+        DCP_INTERLEAVE=selector_shard.interleave,
+        num_warps=4,
+        grid=(rows,),
+    )
+    block_n = triton.next_power_of_2(selector_shard.world_size * block_topk)
+    _select_qsa_dcp_topk_kernel.warmup(
+        TritonWarmupTensor(
+            torch.int32, shape=(selector_shard.world_size, rows, block_topk, 2)
+        ),
+        TritonWarmupTensor(torch.int32, shape=(rows, block_topk)),
+        rows * block_topk * 2,
+        block_topk,
+        TOPK=block_topk,
+        DCP_WORLD=selector_shard.world_size,
+        BLOCK_N=block_n,
+        num_warps=min(16, max(4, block_n // 256)),
+        grid=(rows,),
+    )
+    _expand_localize_qsa_indices_kernel.warmup(
+        TritonWarmupTensor(torch.int32, shape=(rows, block_topk)),
+        TritonWarmupTensor(torch.int64, shape=(rows,)),
+        TritonWarmupTensor(torch.int32, shape=(rows,)),
+        TritonWarmupTensor(torch.int32, shape=(rows, output_width + 1)),
+        block_topk,
+        1,
+        output_width + 1,
+        1,
+        token_shard.rank,
+        BLOCK_TOPK=block_topk,
+        COMPRESS_RATIO=compress_ratio,
+        DCP_WORLD=token_shard.world_size,
+        DCP_INTERLEAVE=token_shard.interleave,
+        BLOCK_W=triton.next_power_of_2(output_width),
+        num_warps=8,
+        grid=(rows,),
+    )
+
+
 __all__ = [
     "expand_localize_qsa_block_indices",
     "merge_qsa_dcp_topk",
     "pack_qsa_dcp_candidates",
     "select_qsa_dcp_topk",
+    "warmup_qsa_dcp_selector",
 ]

@@ -421,3 +421,29 @@ def test_fused_expand_localize_matches_expand_then_localize(
         qsa_localize_dcp_indices(reference, reference, world, rank, interleave)
 
         assert torch.equal(fused, reference)
+
+
+@requires_cuda_triton
+@pytest.mark.parametrize(("world", "token_interleave"), [(2, 4), (4, 16)])
+def test_sharded_selector_warmup_compiles(world, token_interleave):
+    """The warmup compiles the pack, select and fused expand+localize
+    kernels for a sharded deployment; the world-1 shard warms nothing."""
+    token_topk, compress_ratio = 2048, 4
+    token_shard = qsa_cache.QSADCPShard(world - 1, world, token_interleave)
+    selector_shard = qsa_cache.QSADCPShard(
+        world - 1, world, token_interleave // compress_ratio
+    )
+    qsa_dcp_selector.warmup_qsa_dcp_selector(
+        logits_width=4096,
+        token_topk=token_topk,
+        compress_ratio=compress_ratio,
+        selector_shard=selector_shard,
+        token_shard=token_shard,
+    )
+    qsa_dcp_selector.warmup_qsa_dcp_selector(
+        logits_width=4096,
+        token_topk=token_topk,
+        compress_ratio=compress_ratio,
+        selector_shard=qsa_cache.QSADCPShard(),
+        token_shard=qsa_cache.QSADCPShard(),
+    )

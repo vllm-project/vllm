@@ -104,3 +104,27 @@ def qwen4_exp_qsa_triton_warmup(worker: "Worker") -> None:
             ).cp_kv_cache_interleave_size,
         )
         logger.info("Warmed up Qwen4Exp QSA DCP localization kernel.")
+
+    from vllm.models.qwen4_exp.common.qsa_cache import qsa_dcp_selector_is_sharded
+
+    if dcp_world_size > 1 and qsa_dcp_selector_is_sharded(worker.vllm_config):
+        from vllm.models.qwen4_exp.common.qsa_cache import QSADCPShard
+        from vllm.models.qwen4_exp.nvidia.ops.qsa_dcp_selector import (
+            warmup_qsa_dcp_selector,
+        )
+
+        impl = cast("Qwen4ExpQSAFlashAttentionImpl", owner.impl)
+        token_shard = impl.dcp_token_shard
+        selector_block_table = block_table_for(indexer.compressed_key_cache.prefix)
+        warmup_qsa_dcp_selector(
+            logits_width=selector_block_table.shape[1] * k_cache.shape[1],
+            token_topk=indexer.token_topk,
+            compress_ratio=indexer.compress_ratio,
+            selector_shard=QSADCPShard(
+                token_shard.rank,
+                token_shard.world_size,
+                token_shard.interleave // indexer.compress_ratio,
+            ),
+            token_shard=token_shard,
+        )
+        logger.info("Warmed up Qwen4Exp QSA sharded selector kernels.")
