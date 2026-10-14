@@ -201,7 +201,7 @@ _TEXT_GENERATION_MODELS = {
     "Param2MoEForCausalLM": ("param2moe", "Param2MoEForCausalLM"),
     "PhiMoEForCausalLM": ("phimoe", "PhiMoEForCausalLM"),
     "Plamo3ForCausalLM": ("plamo3", "Plamo3ForCausalLM"),
-    "Qwen3ForCausalLM": ("qwen3", "Qwen3ForCausalLM"),
+    "Qwen3ForCausalLM": ("vllm.models.qwen3", "Qwen3ForCausalLM"),
     "Qwen3MoeForCausalLM": ("qwen3_moe", "Qwen3MoeForCausalLM"),
     "Qwen3_5ForCausalLM": ("vllm.models.qwen3_5", "Qwen3_5ForCausalLM"),
     "Qwen3_5MoeForCausalLM": ("vllm.models.qwen3_5", "Qwen3_5MoeForCausalLM"),
