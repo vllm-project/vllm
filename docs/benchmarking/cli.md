@@ -163,10 +163,22 @@ is 40 ms. TPOT is `(180 ms - 100 ms) / (5 - 1) = 20 ms/token`.
 When the server is started with
 [`--enable-per-request-metrics`](../features/per_request_metrics.md#enabling),
 `vllm bench serve` can preserve the server-side queue time and TTFT for each
-request:
+request. These fields are populated only by the `openai`, `vllm`, and
+`openai-chat` backends.
+
+Start the server:
+
+```bash
+vllm serve meta-llama/Llama-3.1-8B-Instruct \
+  --enable-per-request-metrics
+```
+
+Then run the benchmark in another terminal:
 
 ```bash
 vllm bench serve \
+  --backend openai \
+  --endpoint /v1/completions \
   --model meta-llama/Llama-3.1-8B-Instruct \
   --save-result \
   --save-detailed
@@ -180,7 +192,21 @@ available for any request.
 
 `server_queue_times` measures server scheduler waiting time, while
 `server_ttfts` measures time from scheduling to first token generation.
-These differ from the client-side `queue_times` and `ttfts`.
+Client-side `ttfts` measures time from sending a request until receiving its
+first streamed token. Approximately, for each request:
+
+```text
+ttft ≈ server_queue_time + server_ttft + frontend/network overhead
+```
+
+Frontend/network overhead includes tokenization, chat-template application,
+multimodal preprocessing, detokenization, and transport. Client-side
+`queue_times` measures waiting for a benchmark concurrency slot before the
+request is sent, separately from the TTFT decomposition above.
+
+Enabling per-request metrics adds server CPU overhead, especially at high
+concurrency. Treat these as diagnostic runs rather than headline performance
+measurements.
 
 #### Results Visualization
 

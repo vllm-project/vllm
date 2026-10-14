@@ -13,12 +13,10 @@ use crate::multi_turn::ConversationOutput;
 fn insert_server_metrics(
     result: &mut serde_json::Map<String, Value>,
     outputs: &[RequestFuncOutput],
-    save_detailed: bool,
 ) {
-    if !save_detailed
-        || !outputs
-            .iter()
-            .any(|output| output.server_queue_time.is_some() || output.server_ttft.is_some())
+    if !outputs
+        .iter()
+        .any(|output| output.server_queue_time.is_some() || output.server_ttft.is_some())
     {
         return;
     }
@@ -227,8 +225,8 @@ pub fn build_result_json(
             "start_times".into(),
             serde_json::json!(outputs.iter().map(|o| o.start_time).collect::<Vec<_>>()),
         );
+        insert_server_metrics(&mut result, outputs);
     }
-    insert_server_metrics(&mut result, outputs, config.save_detailed);
 
     // Speculative decoding stats
     if let Some(stats) = spec_decode_stats {
@@ -826,7 +824,7 @@ mod tests {
         ];
         let mut result = serde_json::Map::new();
 
-        insert_server_metrics(&mut result, &outputs, true);
+        insert_server_metrics(&mut result, &outputs);
 
         assert_eq!(
             result["server_queue_times"],
@@ -836,16 +834,9 @@ mod tests {
     }
 
     #[test]
-    fn test_insert_server_metrics_omits_unavailable_or_non_detailed() {
+    fn test_insert_server_metrics_omits_unavailable() {
         let mut result = serde_json::Map::new();
-        insert_server_metrics(&mut result, &[RequestFuncOutput::default()], true);
-        assert!(result.is_empty());
-
-        let outputs = [RequestFuncOutput {
-            server_queue_time: Some(0.1),
-            ..Default::default()
-        }];
-        insert_server_metrics(&mut result, &outputs, false);
+        insert_server_metrics(&mut result, &[RequestFuncOutput::default()]);
         assert!(result.is_empty());
     }
 }

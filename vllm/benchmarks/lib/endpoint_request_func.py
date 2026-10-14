@@ -116,8 +116,11 @@ def _update_server_metrics(
         return
 
     def to_seconds(value: Any) -> float | None:
-        return value / 1000.0 if type(value) in (int, float) else None
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return value / 1000.0
+        return None
 
+    # The server sends metrics only on the final streaming usage chunk.
     output.server_queue_time = to_seconds(metrics.get("queue_time_ms"))
     output.server_ttft = to_seconds(metrics.get("time_to_first_token_ms"))
 
