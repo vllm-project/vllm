@@ -623,9 +623,8 @@ def generate_block_hash_extra_keys(
     extra_keys: list[Any] = []
     if request.lora_request:
         extra_keys += _gen_lora_extra_hash_keys(request)
-    new_start_mm_idx = start_mm_idx
     if request.mm_features:
-        mm_extra_keys, new_start_mm_idx = _gen_mm_extra_hash_keys(
+        mm_extra_keys, start_mm_idx = _gen_mm_extra_hash_keys(
             request, start_token_idx, end_token_idx, start_mm_idx
         )
         extra_keys += mm_extra_keys
@@ -637,9 +636,9 @@ def generate_block_hash_extra_keys(
         )
 
     if not extra_keys:
-        return None, new_start_mm_idx
+        return None, start_mm_idx
 
-    return tuple(extra_keys), new_start_mm_idx
+    return tuple(extra_keys), start_mm_idx
 
 
 def to_event_extra_keys(
