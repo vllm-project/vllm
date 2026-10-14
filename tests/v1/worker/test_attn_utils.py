@@ -437,9 +437,15 @@ def test_profiling_cleanup_keeps_host_pool_for_real_kv_cache(monkeypatch):
 
 
 @pytest.mark.parametrize("failure_phase", ["allocation", "binding", "buffers"])
-def test_init_hisparse_rolls_back_shared_region(monkeypatch, failure_phase):
-    """A failure after mmap allocation must not leak the shared registration."""
+@pytest.mark.parametrize("shared", [False, True])
+def test_init_hisparse_rolls_back_host_pool(monkeypatch, failure_phase, shared):
+    """Failed initialization must release shared or private registrations."""
     region = _FakeSharedHostRegion()
+    registered = torch.empty(4096, dtype=torch.int8)
+    cudart = MagicMock()
+    cudart.cudaHostUnregister.return_value.value = 0
+    monkeypatch.setattr(torch.accelerator, "synchronize", lambda: None)
+    monkeypatch.setattr(torch.cuda, "cudart", lambda: cudart)
     vllm_config = SimpleNamespace(
         cache_config=SimpleNamespace(
             get_resolved_kv_cache_layout=lambda: KVCacheLayout.BLHNC
@@ -451,7 +457,11 @@ def test_init_hisparse_rolls_back_shared_region(monkeypatch, failure_phase):
 
     def allocate(*args):
         pools.append(args[-1])
-        args[-1].shared_region = region
+        if shared:
+            args[-1].shared_region = region
+        else:
+            args[-1].registered = registered
+            args[-1].backing = registered[:8]
         if failure_phase == "allocation":
             raise RuntimeError("initialization failed")
         return {}
@@ -478,7 +488,11 @@ def test_init_hisparse_rolls_back_shared_region(monkeypatch, failure_phase):
             {},
             SimpleNamespace(),
         )
-    assert region.cleanup_calls == 1
+    assert region.cleanup_calls == int(shared)
+    if shared:
+        cudart.cudaHostUnregister.assert_not_called()
+    else:
+        cudart.cudaHostUnregister.assert_called_once_with(registered.data_ptr())
     assert attn_utils_module.get_hisparse_host_pool(vllm_config, None) is not pools[0]
     hisparse_runtime_module.drop_hisparse_host_pool(vllm_config)
 
