@@ -540,8 +540,7 @@ class AiterRMSNormGatedFp8GroupQuantPattern(AiterRMSNormQuantPattern):
 
 
 class AiterRMSNormStaticQuantPattern(AiterRMSNormQuantPattern):
-    """
-    This pattern fuses rms_norm & aiter static per-tensor fp8 quant
+    """This pattern fuses rms_norm & aiter static per-tensor fp8 quant
     into an aiter fused_rms_fp8_per_tensor_static_quant op.
     """
 
@@ -605,8 +604,7 @@ class AiterRMSNormStaticQuantPattern(AiterRMSNormQuantPattern):
 
 
 class AiterFusedAddRMSNormStaticQuantPattern(AiterRMSNormQuantPattern):
-    """
-    This pattern fuses fused_add_rms_norm & aiter static per-tensor fp8
+    """This pattern fuses fused_add_rms_norm & aiter static per-tensor fp8
     quant into an aiter fused_add_rms_fp8_per_tensor_static_quant op.
     """
 
