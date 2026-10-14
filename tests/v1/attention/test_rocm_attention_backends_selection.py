@@ -55,15 +55,15 @@ def test_deepseek_rocm_backend_registry_paths_are_model_specific():
 
 
 @pytest.mark.parametrize(
-    "backend_name",
+    "backend_name, expect_warning",
     [
-        "ROCM_FLASHMLA_SPARSE_DSV4",
-        "ROCM_FLASHMLA_SPARSE_DSV41",
+        ("ROCM_FLASHMLA_SPARSE_DSV4", True),
+        ("ROCM_FLASHMLA_SPARSE_DSV41", False),
     ],
     ids=["legacy", "canonical"],
 )
-def test_deepseek_v41_rocm_accepts_legacy_backend_alias(backend_name):
-    from vllm.models.deepseek_v41.amd.model import _select_dsv4_attn_cls
+def test_deepseek_v41_rocm_accepts_legacy_backend_alias(backend_name, expect_warning):
+    from vllm.models.deepseek_v41.amd import model as dsv41_model
     from vllm.models.deepseek_v41.amd.rocm import (
         DeepseekV41ROCMAiterMLAAttention,
         DeepseekV41ROCMAiterMLASparseBackend,
@@ -73,7 +73,14 @@ def test_deepseek_v41_rocm_accepts_legacy_backend_alias(backend_name):
         attention_config=AttentionConfig(backend=backend_name),
     )
 
-    assert _select_dsv4_attn_cls(config) is DeepseekV41ROCMAiterMLAAttention
+    with patch.object(dsv41_model.logger, "warning_once") as warning_once:
+        selected = dsv41_model._select_dsv4_attn_cls(config)
+
+    assert selected is DeepseekV41ROCMAiterMLAAttention
+    if expect_warning:
+        warning_once.assert_called_once()
+    else:
+        warning_once.assert_not_called()
     assert (
         DeepseekV41ROCMAiterMLASparseBackend.get_name() == "ROCM_FLASHMLA_SPARSE_DSV41"
     )
