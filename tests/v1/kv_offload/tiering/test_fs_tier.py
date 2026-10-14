@@ -756,7 +756,7 @@ def test_successful_store_emits_stored_event(fs_tier_with_events):
     assert event.locality is Locality.LOCAL
     assert not event.removed
     assert event.req_context is _CTX
-    assert tier._store_job_contexts == {}
+    assert tier._store_event_metadata == {}
     # take_events drains the buffer.
     assert list(tier.take_events()) == []
 
@@ -854,8 +854,7 @@ def test_partially_failed_store_emits_no_event(fs_tier_with_events, monkeypatch)
     assert len(results) == 1
     assert not results[0].success
     assert list(tier.take_events()) == []
-    assert tier._store_job_keys == {}
-    assert tier._store_job_contexts == {}
+    assert tier._store_event_metadata == {}
 
 
 def test_events_disabled_by_default(fs_tier):
@@ -865,7 +864,7 @@ def test_events_disabled_by_default(fs_tier):
     assert len(results) == 1
     assert results[0].success
     assert tier.events is None
-    assert tier._store_job_keys == {}
+    assert tier._store_event_metadata == {}
     assert list(tier.take_events()) == []
 
 
@@ -886,7 +885,7 @@ def test_events_require_global_kv_events_flag(tmp_path):
         assert len(results) == 1
         assert results[0].success
         assert list(tier.take_events()) == []
-        assert tier._store_job_keys == {}
+        assert tier._store_event_metadata == {}
     finally:
         tier.shutdown()
 
