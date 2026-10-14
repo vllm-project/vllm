@@ -9,6 +9,7 @@ import torch
 from vllm.distributed.eplb.eplb_state import (
     _commit_eplb_maps,
     _commit_eplb_maps_for_layer,
+    _record_step_expert_load,
 )
 
 
@@ -157,3 +158,89 @@ def test_commit_eplb_maps_for_layer():
 
     # Layer 1 untouched
     assert torch.equal(model_state.physical_to_logical_map[1], original_phy2log[1])
+
+
+def test_record_step_expert_load():
+    """Verify that _record_step_expert_load maps physical loads into logical expert
+    slots at step time and ignores unmapped physical slots."""
+    num_layers, num_logical = 2, 4
+    window_size = 3
+
+    # Layer 0: experts 0, 1, 2, 3, 0, 1 (0 and 1 replicated)
+    # Layer 1: experts 2, 3, 0, 1, -1, -1 (unmapped slots with -1)
+    phy2log = torch.tensor([[0, 1, 2, 3, 0, 1], [2, 3, 0, 1, -1, -1]], dtype=torch.long)
+    expert_load_pass = torch.tensor(
+        [[10, 20, 30, 40, 5, 15], [7, 8, 9, 10, 999, 888]], dtype=torch.int32
+    )
+    expert_load_window = torch.zeros(
+        (window_size, num_layers, num_logical), dtype=torch.int32
+    )
+    logical_load_buffer = torch.zeros((num_layers, num_logical + 1), dtype=torch.int32)
+
+    model_state = MagicMock()
+    model_state.model.num_logical_experts = num_logical
+    model_state.model.num_moe_layers = num_layers
+    model_state.physical_to_logical_map = phy2log
+    model_state.expert_load_pass = expert_load_pass
+    model_state.expert_load_window = expert_load_window
+    model_state.logical_load_buffer = logical_load_buffer
+
+    # Record at window step 0
+    _record_step_expert_load(model_state, window_step=0)
+
+    # Layer 0: expert 0 has 10 + 5 = 15; expert 1 has 20 + 15 = 35;
+    # expert 2 has 30; expert 3 has 40
+    expected_layer_0 = torch.tensor([15, 35, 30, 40], dtype=torch.int32)
+    # Layer 1: expert 2 has 7; expert 3 has 8; expert 0 has 9; expert 1 has 10;
+    # unmapped slots discarded
+    expected_layer_1 = torch.tensor([9, 10, 7, 8], dtype=torch.int32)
+
+    assert torch.equal(expert_load_window[0, 0], expected_layer_0)
+    assert torch.equal(expert_load_window[0, 1], expected_layer_1)
+    # Ensure pass accumulator was zeroed
+    assert torch.all(model_state.expert_load_pass == 0)
+
+
+def test_expert_load_window_historical_mapping_across_rearrangement():
+    """Verify issue #60685: when step_interval < window_size and rearrangement
+    swaps expert physical locations, past step loads in the sliding window are not
+    falsely reattributed to the newly placed expert."""
+    num_layers, num_logical = 1, 2
+    window_size = 2
+
+    # Step 0: slot 0 -> logical 0, slot 1 -> logical 1
+    phy2log = torch.tensor([[0, 1]], dtype=torch.long)
+    expert_load_pass = torch.tensor([[10, 0]], dtype=torch.int32)
+    expert_load_window = torch.zeros(
+        (window_size, num_layers, num_logical), dtype=torch.int32
+    )
+
+    model_state = MagicMock()
+    model_state.model.num_logical_experts = num_logical
+    model_state.model.num_moe_layers = num_layers
+    model_state.physical_to_logical_map = phy2log
+    model_state.expert_load_pass = expert_load_pass
+    model_state.expert_load_window = expert_load_window
+    model_state.logical_load_buffer = None
+
+    # Step 0: Logical expert 0 processes 10 tokens
+    _record_step_expert_load(model_state, window_step=0)
+
+    # Rearrangement swaps experts: slot 0 -> logical 1, slot 1 -> logical 0
+    new_phy2log = torch.tensor([[1, 0]], dtype=torch.long)
+    model_state.physical_to_logical_map = new_phy2log
+
+    # Step 1: Physical slot 0 processes 20 tokens (which is now logical expert 1)
+    model_state.expert_load_pass = torch.tensor([[20, 0]], dtype=torch.int32)
+    _record_step_expert_load(model_state, window_step=1)
+
+    # Aggregating the sliding window across both steps
+    total_window_load = expert_load_window.sum(dim=0)
+
+    # In the bug (#60685), step 0's slot 0 load (10) was reattributed using
+    # the new map [1, 0], falsely assigning all 30 tokens to logical expert 1
+    # and 0 tokens to logical expert 0.
+    # With the fix, step 0 correctly recorded load for expert 0, and step 1
+    # for expert 1.
+    assert total_window_load[0, 0].item() == 10  # Logical expert 0
+    assert total_window_load[0, 1].item() == 20  # Logical expert 1
