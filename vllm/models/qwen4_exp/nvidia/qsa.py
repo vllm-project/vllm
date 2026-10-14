@@ -275,6 +275,27 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
             )
         self.supports_quant_query_input = False
 
+    def localize_dcp_selection_(self, selection: torch.Tensor) -> None:
+        """Keep this rank's share of a packed selection, in place.
+
+        Under DCP the indexer calls this once for each new top-k selection, so
+        ``topk_indices_buffer`` holds rank-local token ids with their count.
+        MTP skip_topk steps and ``compact_topk_indices`` reuse those rows; the
+        attention reads them without localizing again. Without DCP the global
+        selection stays unchanged.
+        """
+        if self.dcp_world_size <= 1:
+            return
+        from .ops.qsa_dcp import qsa_localize_dcp_indices
+
+        qsa_localize_dcp_indices(
+            selection,
+            selection,
+            self.dcp_world_size,
+            self.dcp_rank,
+            self.cp_kv_cache_interleave_size,
+        )
+
     def forward_qsa(
         self,
         layer: torch.nn.Module,
@@ -386,42 +407,34 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
     ) -> None:
         """Attend over local selections and merge rank results.
 
-        The local selection, the partial output, its LSE and the head-major
-        combine buffer come from the shared workspace. They are reserved for
-        max_num_batched_tokens rows, as FlashAttention DCP reserves its
-        context output, so the workspace does not grow after CUDA graph
-        capture. The gathered query and the combine output stay collective
-        outputs, as in FlashAttention DCP.
+        ``topk_buffer`` already holds this rank's local selection: the indexer
+        localizes each new selection once (``localize_dcp_selection_``), and
+        MTP skip_topk steps reuse those rows. The partial output, its LSE and
+        the head-major combine buffer come from the shared workspace. They
+        are reserved for max_num_batched_tokens rows, as FlashAttention DCP
+        reserves its context output, so the workspace does not grow after
+        CUDA graph capture. The gathered query and the combine output stay
+        collective outputs, as in FlashAttention DCP.
         """
         from vllm.distributed.parallel_state import get_dcp_group
         from vllm.v1.worker.workspace import current_workspace_manager
 
         from .ops.qsa import qsa_sparse_paged_attention
-        from .ops.qsa_dcp import (
-            gate_qsa_dcp_output,
-            qsa_dcp_combine,
-            qsa_localize_dcp_indices,
-        )
+        from .ops.qsa_dcp import gate_qsa_dcp_output, qsa_dcp_combine
 
         group = get_dcp_group()
         query_all_heads = group.all_gather(query.contiguous(), dim=1)
         reserved = max(num_tokens, self._dcp_max_num_tokens)
         row_shape = query_all_heads.shape[1:]
-        local_indices, partial_out, partial_lse, heads_first = (
+        partial_out, partial_lse, heads_first = (
             current_workspace_manager().get_simultaneous(
-                ((reserved, topk_buffer.shape[1]), topk_buffer.dtype),
                 ((reserved, *row_shape), torch.float32),
                 ((reserved, row_shape[0]), torch.float32),
                 ((reserved * row_shape.numel(),), torch.float32),
             )
         )
-        local_indices = qsa_localize_dcp_indices(
-            topk_buffer[:num_tokens],
-            local_indices[:num_tokens],
-            self.dcp_world_size,
-            self.dcp_rank,
-            self.cp_kv_cache_interleave_size,
-        )
+        local_indices = topk_buffer[:num_tokens]
+
         partial_out, partial_lse = qsa_sparse_paged_attention(
             query_all_heads,
             key_cache,
@@ -636,6 +649,7 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
         # index; the sparse attention kernel reads it as its loop bound.
         # MTP skip_topk steps reuse rows frozen from step 0; the count is
         # a row column, so compaction/reuse keep it paired with the content.
+        # Under DCP the rows hold this rank's local token ids.
         self.register_buffer(
             "topk_indices_buffer",
             torch.empty(
