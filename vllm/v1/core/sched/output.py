@@ -18,6 +18,7 @@ if TYPE_CHECKING:
         AuxOutputConnectorMetadata,
     )
     from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorMetadata
+    from vllm.distributed.kv_transfer.kv_checksum.checksum import KVChecksumScheduled
     from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
     from vllm.lora.request import LoRARequest
     from vllm.multimodal.inputs import MultiModalFeatureSpec
@@ -28,6 +29,7 @@ if TYPE_CHECKING:
 else:
     AuxOutputConnectorMetadata = object
     ECConnectorMetadata = object
+    KVChecksumScheduled = object
     KVConnectorMetadata = object
     KVCacheBlockCopy = object
     LoRARequest = object
@@ -285,6 +287,9 @@ class SchedulerOutput:
     # Whether any scheduled request consumes KV that the connector loads
     # synchronously during this step (load_async=False).
     has_sync_kv_loads: bool = False
+
+    # KV blocks the workers checksum this step, when KV checksums are enabled.
+    kv_checksum_scheduled: KVChecksumScheduled | None = None
 
     # Execution-auxiliary output control metadata consumed by the worker connector.
     aux_output_connector_metadata: AuxOutputConnectorMetadata | None = None

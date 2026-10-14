@@ -58,6 +58,7 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.config.kv_transfer import KVTransferConfig
     from vllm.distributed.kv_events import KVCacheEvent, KVConnectorKVEvents
+    from vllm.distributed.kv_transfer.kv_checksum.checksum import KVChecksumCarrier
     from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
         KVConnectorPromMetrics,
         KVConnectorStats,
@@ -648,6 +649,24 @@ class KVConnectorBase_V1(ABC):
 
         """
         return False, None
+
+    def kv_checksum_carrier(
+        self, request: "Request", receiving: bool
+    ) -> "KVChecksumCarrier | None":
+        """How this connector carries the request's KV checksums from the
+        producer of its KV to the consumer, when KV checksums are enabled.
+
+        Args:
+            request: The request.
+            receiving: Whether the request is loading KV from a remote
+                producer, rather than producing KV for a remote consumer.
+
+        Returns:
+            The carrier, or None if this connector does not carry checksums
+            for the request, which is then not checksummed.
+
+        """
+        return None
 
     def register_finished_partial_tail(
         self,

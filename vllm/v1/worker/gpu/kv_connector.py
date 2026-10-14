@@ -10,6 +10,7 @@ from vllm.distributed.kv_transfer import (
     has_kv_transfer_group,
     kv_transfer_state,
 )
+from vllm.distributed.kv_transfer.kv_checksum.worker import get_kv_checksum_worker
 from vllm.distributed.kv_transfer.kv_connector.utils import copy_kv_blocks
 from vllm.forward_context import (
     get_forward_context,
@@ -83,6 +84,8 @@ class ActiveKVConnector(KVConnector):
         self._pending_load_kwargs = self._build_load_kwargs(
             scheduler_output, input_batch, attn_metadata
         )
+        if (kv_checksum_worker := get_kv_checksum_worker()) is not None:
+            kv_checksum_worker.bind(scheduler_output.kv_checksum_scheduled)
 
         if scheduler_output.has_sync_kv_loads:
             # Sync loads need to run before this step's forward.
@@ -147,6 +150,12 @@ class ActiveKVConnector(KVConnector):
         output.kv_connector_worker_meta = (
             self.kv_connector.build_connector_worker_meta()
         )
+        if (kv_checksum_worker := get_kv_checksum_worker()) is not None:
+            output.kv_checksums = kv_checksum_worker.post_forward(
+                transfer_results.finished_recving,
+                transfer_results.failed_recving,
+                finished_req_ids,
+            )
         self.kv_connector.clear_connector_metadata()
         return output
 
