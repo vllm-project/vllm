@@ -21,8 +21,7 @@ def get_lora_capture_cases(
     lora_config: "LoRAConfig | None",
     compilation_config: "CompilationConfig",
 ) -> list[int]:
-    """
-    Return num_active_loras values for cudagraph capture.
+    """Return num_active_loras values for cudagraph capture.
 
     When cudagraph_specialize_lora=True: powers of 2 up to max_loras, plus
     max_loras+1. When False: [0, max_loras+1]. When LoRA disabled: [0].

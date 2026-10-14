@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Test that ``InputProcessor.inject_into_mm_cache()`` correctly injects
+"""Test that ``InputProcessor.inject_into_mm_cache()`` correctly injects
 pre-processed mm_kwargs into the processor cache and reports MM cache
 hit rate metrics accurately.
 
@@ -70,6 +69,7 @@ def test_inject_into_mm_cache(
     mm_processor_cache_type,
     caplog_vllm,
     vllm_runner,
+    monkeypatch,
 ):
     """Test that inject_into_mm_cache() injects pre-processed mm_kwargs into
     the processor cache and MM cache hit metrics are updated correctly.
@@ -88,6 +88,9 @@ def test_inject_into_mm_cache(
         limit_mm_per_prompt={"image": 2},
         mm_processor_cache_type=mm_processor_cache_type,
     ) as runner:
+        # The first LLM initialization can reset logger propagation.
+        monkeypatch.setattr(logging.getLogger("vllm"), "propagate", True)
+
         # Step 1: Normal requests to populate the cache
         runner.llm.chat(_make_messages(image_urls[0]))
         assert _get_mm_cache_stats(runner.llm.get_metrics()) == (1, 0)

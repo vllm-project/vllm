@@ -10,6 +10,7 @@ blocks to copy in each direction.
 from collections import deque
 from collections.abc import Sequence
 from dataclasses import dataclass
+from enum import Enum, auto
 from itertools import chain
 from typing import TYPE_CHECKING
 
@@ -38,6 +39,11 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
 logger = init_logger(__name__)
+
+
+class ECCPUTransferDirection(Enum):
+    HOST_TO_DEVICE = auto()
+    DEVICE_TO_HOST = auto()
 
 
 def _coalesce_runs(
@@ -111,8 +117,7 @@ class ECCPUWorker:
         # Model dtype; used to reinterpret raw int8 blocks on load.
         self._dtype = vllm_config.model_config.dtype
 
-        if is_pin_memory_available():
-            self._region.pin_memory()
+        self._pin_shared_region()
 
         # All TP/PCP ranks hold identical encoder output. Only one rank
         # per mmap needs to write — saves host memory bandwidth.
@@ -188,6 +193,34 @@ class ECCPUWorker:
             self._event_pool.append(transfer.end_event)
         return done
 
+    def _pin_shared_region(self) -> None:
+        """Prepare the shared region for device transfers."""
+        if is_pin_memory_available():
+            self._region.pin_memory()
+
+    def _submit_transfer(
+        self,
+        bufs: DescriptorBuffers,
+        count: int,
+        direction: ECCPUTransferDirection,
+    ) -> None:
+        """Submit a transfer on the current backend stream."""
+        src_ptrs = bufs.src_ptrs[:count]
+        dst_ptrs = bufs.dst_ptrs[:count]
+        sizes = bufs.sizes[:count]
+        if direction == ECCPUTransferDirection.HOST_TO_DEVICE:
+            swap_blocks_batch(
+                src_ptrs,
+                dst_ptrs,
+                sizes,
+                is_src_access_order_any=True,
+            )
+        else:
+            swap_blocks_batch(src_ptrs, dst_ptrs, sizes)
+
+    def _shutdown_transfer_backend(self) -> None:
+        """Release backend-specific transfer resources."""
+
     def save_caches(
         self,
         encoder_cache: dict[str, torch.Tensor],
@@ -234,8 +267,7 @@ class ECCPUWorker:
         # so they are added up in uint64; signed arithmetic rejects them.
         src_base = np.uint64(src.view(-1).view(torch.uint8).data_ptr())
         dst_base = self._region.blocks.data_ptr()
-        # Entries are sized by placeholder count, which can exceed the number
-        # of embeddings, so blocks the output never reaches get no descriptor.
+        # Copy only the tensor bytes, excluding any block padding.
         n_used = -(-total_bytes // block_size)
         if n_used:
             slots, first_blocks, num_blocks = _coalesce_runs(block_ids[:n_used])
@@ -269,7 +301,6 @@ class ECCPUWorker:
         bufs = self._save_bufs
         stream = self._save_stream
         assert bufs is not None and stream is not None
-        src_ptrs, dst_ptrs, sizes = bufs.src_ptrs, bufs.dst_ptrs, bufs.sizes
         n = self._save_count
         num_bytes = self._save_bytes
 
@@ -280,7 +311,11 @@ class ECCPUWorker:
         end_event = self._acquire_event()
         with current_platform.stream(stream):
             start_event.record(stream)
-            swap_blocks_batch(src_ptrs[:n], dst_ptrs[:n], sizes[:n])
+            self._submit_transfer(
+                bufs,
+                n,
+                ECCPUTransferDirection.DEVICE_TO_HOST,
+            )
             end_event.record(stream)
 
         self._inflight_saves.append(
@@ -331,7 +366,7 @@ class ECCPUWorker:
         load_items = sorted(
             connector_metadata.loads.items(), key=lambda kv: kv[1][1][0]
         )
-        total_blocks = sum(len(block_ids) for _, (_, block_ids) in load_items)
+        total_blocks = sum(len(block_ids) for _, (_, block_ids, _) in load_items)
 
         stream = self._acquire_stream()
         compute_stream = current_platform.current_stream()
@@ -348,7 +383,7 @@ class ECCPUWorker:
 
             bufs = self._buf_pool.acquire(total_blocks)
             slots, first_blocks, num_blocks = _coalesce_runs(
-                list(chain.from_iterable(ids for _, (_, ids) in load_items))
+                list(chain.from_iterable(ids for _, (_, ids, _) in load_items))
             )
             bufs.add_copies(
                 0,
@@ -357,18 +392,19 @@ class ECCPUWorker:
                 num_blocks * block_size,
             )
             op_idx = slots.size
-            src_ptrs = bufs.src_ptrs[:op_idx]
-            dst_ptrs = bufs.dst_ptrs[:op_idx]
-            sizes = bufs.sizes[:op_idx]
 
             start_event.record(stream)
-            swap_blocks_batch(src_ptrs, dst_ptrs, sizes, is_src_access_order_any=True)
+            self._submit_transfer(
+                bufs,
+                op_idx,
+                ECCPUTransferDirection.HOST_TO_DEVICE,
+            )
             end_event.record(stream)
             self._inflight_loads.append(
                 Transfer(
                     start_event=start_event,
                     end_event=end_event,
-                    completions=[tid for _, (tid, _) in load_items],
+                    completions=[tid for _, (tid, _, _) in load_items],
                     bufs=bufs,
                     stream=stream,
                     num_bytes=total_blocks * block_size,
@@ -377,11 +413,10 @@ class ECCPUWorker:
 
             # Slice contiguous buffer into per-hash views.
             offset = 0
-            for mm_hash, (_, block_ids) in load_items:
+            for mm_hash, (_, block_ids, shape) in load_items:
                 n = len(block_ids)
-                encoder_cache[mm_hash] = (
-                    dst_buf[offset : offset + n].view(dtype).reshape(n, -1)
-                )
+                flat = dst_buf[offset : offset + n].view(dtype).reshape(-1)
+                encoder_cache[mm_hash] = flat[: shape[0] * shape[1]].view(shape)
                 offset += n
 
         current_platform.current_stream().wait_stream(stream)
@@ -404,6 +439,7 @@ class ECCPUWorker:
     def shutdown(self) -> None:
         for transfer in (*self._inflight_saves, *self._inflight_loads):
             transfer.end_event.synchronize()
+        self._shutdown_transfer_backend()
         self._save_bufs = None
         self._save_stream = None
         self._save_count = 0

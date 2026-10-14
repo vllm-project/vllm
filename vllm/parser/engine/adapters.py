@@ -27,7 +27,7 @@ if TYPE_CHECKING:
         ChatCompletionRequest,
     )
     from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
-    from vllm.parser.engine.parser_engine import ParserEngine
+    from vllm.parser.engine.parser_engine import ParserEngine, ReasoningEnd
     from vllm.tokenizers import TokenizerLike
     from vllm.tool_parsers.utils import Tool
 
@@ -64,6 +64,9 @@ class ParserEngineReasoningAdapter(ReasoningParser):
 
     def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
         return self._parser_engine.is_reasoning_end(list(input_ids))
+
+    def find_reasoning_end(self, token_ids: Sequence[int]) -> ReasoningEnd | None:
+        return self._parser_engine.find_reasoning_end(token_ids)
 
     def adjust_initial_state_from_prompt(self, prompt_token_ids: Sequence[int]) -> None:
         self._parser_engine.adjust_initial_state_from_prompt(prompt_token_ids)
@@ -107,6 +110,10 @@ class ParserEngineReasoningAdapter(ReasoningParser):
     @property
     def reasoning_end_str(self) -> str | None:
         return self._parser_engine.reasoning_end_str
+
+    @property
+    def reasoning_end_token_ids(self) -> frozenset[int]:
+        return self._parser_engine.reasoning_end_token_ids
 
     def adjust_request(
         self,

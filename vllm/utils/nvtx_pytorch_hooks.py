@@ -25,7 +25,7 @@ def print_tensor(tensor_obj, prefix, tensor_list=None):
 
 
 def process_layer_params(module_obj):
-    """Extract the static parameters from LLM and VLM relevant layer types"""
+    """Extract the static parameters from LLM and VLM relevant layer types."""
     param_info = {}
     # Extract parameters for layers commonly used in LLMs and VLMs
     if isinstance(module_obj, (torch.nn.Conv1d, torch.nn.Conv2d, torch.nn.Conv3d)):
@@ -186,6 +186,7 @@ def layerwise_nvtx_marker_context(module_name, module_obj, in_tensor=None, kwarg
                                  kwargs=kwargs) as ctx:
             ctx.result = module(*args, **kwargs)
         return ctx.result
+
     """
     holder = ResultHolder()
 
@@ -221,9 +222,9 @@ class PytHooks:
     a PytHook object. Then call the register_hooks method.
 
     Example:
-
         my_hook = PytHook()
         my_hook.register_hooks(my_network_model)
+
     """
 
     def __init__(self):

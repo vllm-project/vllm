@@ -117,39 +117,55 @@ def mm_kwargs_from_features(
     return mm_kwargs
 
 
-def extract_mm_features(
+def placeholder_ranges_from_engine_input(
     engine_input: EngineInput,
-    *,
-    metadata_fields_for: Callable[[str], Collection[str]] | None = None,
-) -> MultiModalFeatures | None:
-    """Extract multimodal features from a rendered engine prompt.
-
-    Returns ``None`` for text-only prompts. ``mm_metadata`` keeps the
-    intersection of processed kwargs that prefill needs after EC transfer:
-    fields declared as embedding metadata, plus fields marked
-    ``keep_on_cpu`` (for example M-RoPE grid dims).
-    """
+) -> dict[str, list[PlaceholderRangeInfo]] | None:
+    """Return per-modality placeholder ranges, or ``None`` for text-only prompts."""
     if engine_input.get("type") != "multimodal":
         return None
 
-    mm_engine_input = cast(MultiModalInput, engine_input)
-    mm_hashes: MultiModalHashes = mm_engine_input["mm_hashes"]
-    raw_placeholders: MultiModalPlaceholders = mm_engine_input["mm_placeholders"]
-
-    mm_placeholders = {
+    raw_placeholders: MultiModalPlaceholders = cast(MultiModalInput, engine_input)[
+        "mm_placeholders"
+    ]
+    return {
         modality: [
             PlaceholderRangeInfo(offset=p.offset, length=p.length) for p in ranges
         ]
         for modality, ranges in raw_placeholders.items()
     }
 
+
+def extract_mm_features(
+    engine_input: EngineInput,
+    *,
+    metadata_fields_for: Callable[[str], Collection[str]] | None = None,
+    include_mm_kwargs: bool = True,
+) -> MultiModalFeatures | None:
+    """Extract multimodal features from a rendered engine prompt.
+
+    Returns ``None`` for text-only prompts. ``mm_metadata`` keeps the
+    intersection of processed kwargs that prefill needs after EC transfer:
+    fields declared as embedding metadata, plus fields marked
+    ``keep_on_cpu`` (for example M-RoPE grid dims). With
+    ``include_mm_kwargs=False`` neither is serialized.
+    """
+    if engine_input.get("type") != "multimodal":
+        return None
+
+    mm_engine_input = cast(MultiModalInput, engine_input)
+    mm_hashes: MultiModalHashes = mm_engine_input["mm_hashes"]
+    mm_placeholders = placeholder_ranges_from_engine_input(engine_input)
+    assert mm_placeholders is not None
+
     kwargs_data: dict[str, list[str | None]] | None = None
     mm_metadata: dict[str, list[str | None]] | None = None
-    if raw_mm_kwargs := mm_engine_input.get("mm_kwargs"):
-        kwargs_data, mm_metadata = _encode_mm_kwargs_with_metadata(
-            raw_mm_kwargs,
-            metadata_fields_for=metadata_fields_for,
-        )
+    if include_mm_kwargs:
+        raw_mm_kwargs = mm_engine_input.get("mm_kwargs")
+        if raw_mm_kwargs:
+            kwargs_data, mm_metadata = _encode_mm_kwargs_with_metadata(
+                raw_mm_kwargs,
+                metadata_fields_for=metadata_fields_for,
+            )
 
     return MultiModalFeatures(
         mm_hashes=mm_hashes,

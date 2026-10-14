@@ -148,7 +148,9 @@ def test_extract_tool_calls():
     }
 
 
-def test_function_calls_block_is_not_accepted():
+def test_function_calls_wrapper_is_not_recognized():
+    # The V3.2 wrapper is not a V4 terminal, so it passes through as content,
+    # but the invoke inside it is still parsed (tool calls anchor on the invoke).
     parser = make_parser()
     model_output = build_tool_call("search", {"query": "vllm"}).replace(
         "tool_calls", "function_calls"
@@ -156,8 +158,38 @@ def test_function_calls_block_is_not_accepted():
 
     result = parser.extract_tool_calls(model_output, make_request())
 
-    assert not result.tools_called
-    assert result.content == model_output
+    assert result.tools_called
+    assert result.tool_calls[0].function.name == "search"
+    assert result.content == "<｜DSML｜function_calls>\n"
+
+
+def test_missing_tool_calls_wrapper_is_recovered():
+    # Regression for #48931: at long context the model omits the
+    # <｜DSML｜tool_calls> START token but still emits a complete invoke.
+    parser = make_parser()
+    model_output = build_tool_call("search", {"query": "vllm"}).replace(
+        TC_START + "\n", ""
+    )
+    assert TC_START not in model_output
+
+    result = parser.extract_tool_calls(model_output, make_request())
+
+    assert result.tools_called
+    assert result.tool_calls[0].function.name == "search"
+    assert json.loads(result.tool_calls[0].function.arguments) == {"query": "vllm"}
+    assert result.content is None
+
+    deltas = stream(make_parser(), model_output, chunk_size=3)
+    names = [
+        tc.function.name
+        for d in deltas
+        if d.tool_calls
+        for tc in d.tool_calls
+        if tc.function.name
+    ]
+    assert names == ["search"]
+    assert json.loads(reconstruct_args(deltas)) == {"query": "vllm"}
+    assert not any(d.content and "DSML" in d.content for d in deltas)
 
 
 def test_streaming_extracts_complete_invokes():

@@ -6,16 +6,33 @@ from typing import Any
 
 import regex as re
 import torch
+from pydantic import TypeAdapter
 
 from vllm.config import (
     CompilationConfig,
+    CompilationMode,
     ModelConfig,
     VllmConfig,
     set_current_vllm_config,
 )
+from vllm.config.quantization import (
+    QuantizationConfigArgs,
+    QuantSpec,
+    resolve_quantization_config,
+)
 from vllm.model_executor.layers.quantization import get_quantization_config
 from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
 from vllm.platforms import current_platform
+
+
+def quant_spec(**kwargs: Any) -> QuantSpec:
+    """Build a `QuantSpec` from user-facing names such as `"mxfp8"`."""
+    return TypeAdapter(QuantSpec).validate_python(kwargs)
+
+
+def quant_config_args(**kwargs: Any) -> QuantizationConfigArgs:
+    """Build `QuantizationConfigArgs` from user-facing shorthand values."""
+    return TypeAdapter(QuantizationConfigArgs).validate_python(kwargs)
 
 
 def _limit_num_hidden_layers(
@@ -27,10 +44,17 @@ def _limit_num_hidden_layers(
     original_load_weights = model.load_weights
 
     def should_load_weight(name: str) -> bool:
-        for prefix in ("model.layers.", "layers."):
-            if name.startswith(prefix):
-                layer_idx = int(name.removeprefix(prefix).split(".", 1)[0])
-                return layer_idx < num_hidden_layers
+        layers_prefix = "layers."
+        if name.startswith(layers_prefix):
+            layer_name = name.removeprefix(layers_prefix)
+        elif ".layers." in name:
+            layer_name = name.split(".layers.", maxsplit=1)[1]
+        else:
+            return True
+
+        layer_idx_str = layer_name.split(".", maxsplit=1)[0]
+        if layer_idx_str.isdigit():
+            return int(layer_idx_str) < num_hidden_layers
         return True
 
     def load_weights(weights):
@@ -58,11 +82,19 @@ def load_model_without_vllm_runner(
         quantization=quantization,
         **(model_config_kwargs or {}),
     )
+    model_config.quantization_config = resolve_quantization_config(
+        model_config.quantization, model_config.quantization_config
+    )
     vllm_config_args = dict(vllm_config_kwargs or {})
-    vllm_config_args.setdefault("compilation_config", CompilationConfig(mode=0))
+    vllm_config_args.setdefault(
+        "compilation_config", CompilationConfig(mode=CompilationMode.NONE)
+    )
     vllm_config = VllmConfig(model_config=model_config, **vllm_config_args)
     hf_overrides = (model_config_kwargs or {}).get("hf_overrides") or {}
-    num_hidden_layers = hf_overrides.get("num_hidden_layers")
+    text_config_overrides = hf_overrides.get("text_config") or {}
+    num_hidden_layers = text_config_overrides.get(
+        "num_hidden_layers", hf_overrides.get("num_hidden_layers")
+    )
 
     with set_current_vllm_config(vllm_config):
         model_loader = model_loader_cls(vllm_config.load_config)

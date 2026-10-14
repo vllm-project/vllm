@@ -9,14 +9,15 @@ use prometheus_client::encoding::text::encode;
 use prometheus_client::metrics::counter::Counter;
 pub use prometheus_client::metrics::family::Family;
 use prometheus_client::metrics::gauge::Gauge;
-use prometheus_client::metrics::histogram::Histogram;
 use prometheus_client::registry::Registry;
 
 mod api_server;
+mod histogram;
 mod request;
 mod scheduler;
 
 pub use api_server::*;
+pub use histogram::Histogram;
 pub use request::*;
 pub use scheduler::*;
 
