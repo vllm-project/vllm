@@ -16,6 +16,8 @@ class OffloadingGroupConfig:
     layer_names: tuple[str, ...]
     # Original KVCacheConfig group index.
     group_id: int
+    # Padded physical bytes per worker block for this group. Zero when unknown.
+    kv_bytes_per_block: int = 0
 
 
 @dataclass(frozen=True)
