@@ -200,6 +200,9 @@ def get_quant_config(
         QuantizationConfigArgs,
         resolve_quantization_config,
     )
+    from vllm.model_executor.layers.quantization.modelopt import (
+        ModelOptQuantConfigBase,
+    )
     from vllm.model_executor.layers.quantization.online.base import (
         OnlineQuantizationConfig,
     )
@@ -219,6 +222,14 @@ def get_quant_config(
             online_args
         )
         return checkpoint_config
+
+    def make_checkpoint_config(config: dict[str, Any]) -> QuantizationConfig:
+        if issubclass(quant_cls, ModelOptQuantConfigBase):
+            assert online_args is None or isinstance(
+                online_args, QuantizationConfigArgs
+            )
+            config = {**config, "_online_quantization_args": online_args}
+        return maybe_compose_online_quantization(quant_cls.from_config(config))
 
     # Read the quantization config from the HF model config, if available.
     hf_quant_config = getattr(model_config.hf_config, "quantization_config", None)
@@ -260,9 +271,7 @@ def get_quant_config(
         ):
             pass  # fall through to file-based loading below
         else:
-            return maybe_compose_online_quantization(
-                quant_cls.from_config(hf_quant_config)
-            )
+            return make_checkpoint_config(hf_quant_config)
 
     # if hf_quant_config is None, we will try to get config from
     # hf_overrides
@@ -376,14 +385,14 @@ def get_quant_config(
 
         if model_config.quantization in ("modelopt", "modelopt_mixed"):
             if config.get("producer", {}).get("name") == "modelopt":
-                return maybe_compose_online_quantization(quant_cls.from_config(config))
+                return make_checkpoint_config(config)
             else:
                 raise ValueError(
                     f"Unsupported quantization config"
                     f" found for {model_config.quantization} in {f}."
                 )
 
-    return maybe_compose_online_quantization(quant_cls.from_config(config))
+    return make_checkpoint_config(config)
 
 
 def get_sparse_attention_config(
@@ -781,6 +790,42 @@ def filter_mm_encoder_only_safetensors_files(
             skipped,
             skipped + len(kept),
             prefixes,
+        )
+    return kept
+
+
+def filter_safetensors_files_by_weight_name(
+    hf_weights_files: list[str],
+    is_unused_weight: Callable[[str], bool],
+) -> list[str]:
+    """Drop safetensors shards in which `is_unused_weight` accepts every tensor.
+
+    Loaders that read whole files (InstantTensor, fastsafetensors, multi-thread,
+    eager, prefetch) cannot skip single tensors, so dropping shards is their
+    only way to avoid reading weights the model does not load.
+
+    Args:
+        hf_weights_files: Safetensors shard paths.
+        is_unused_weight: Returns True for checkpoint weight names the model does
+            not load.
+
+    Returns:
+        The shards holding at least one wanted tensor, or `hf_weights_files`
+        unchanged when no shard does.
+
+    """
+    kept: list[str] = []
+    for st_file in hf_weights_files:
+        with safe_open(st_file, framework="pt") as f:
+            if not all(is_unused_weight(name) for name in f.keys()):  # noqa: SIM118
+                kept.append(st_file)
+    if not kept:
+        return hf_weights_files
+    if len(kept) < len(hf_weights_files):
+        logger.info_once(
+            "Skipped %d/%d safetensors shard(s) holding no weights the model loads",
+            len(hf_weights_files) - len(kept),
+            len(hf_weights_files),
         )
     return kept
 
@@ -1476,18 +1521,54 @@ def composed_weight_loader(
     return composed_loader
 
 
+# E8M0 byte 120 encodes 2**-7: with packed FP4 (|x| <= 6) or the FP8 dummy
+# range below, the dequantized weights stay small and finite.
+_DUMMY_E8M0_SCALE_BYTE = 120
+# Default dummy range of 8-bit floats. +-1e-3 is below FP8 E4M3's smallest
+# normal (2**-6), so it would mostly round to zero or subnormals.
+_DUMMY_FP8_RANGE = 1.0
+
+
 @torch.no_grad()
 def initialize_single_dummy_weight(
     param: torch.Tensor,
-    low: float = -1e-3,
-    high: float = 1e-3,
+    low: float | None = None,
+    high: float | None = None,
     seed: int = 1234,
+    name: str = "",
 ) -> None:
+    """Fill `param` with deterministic dummy values suited to its dtype.
+
+    8-bit integer and packed FP4 params get random bytes (every FP4 code is
+    finite), except uint8 params named like a scale, which hold E8M0 scales
+    and get a fixed exponent. Other integer params (e.g. indices) are left
+    untouched. Float params are sampled from `[low, high]`, which defaults to
+    +-1e-3, or +-1 for 8-bit floats.
+    """
     if param.device.type == "meta":
         return  # deferred to finalize_layerwise_processing (e.g. online quant)
 
     if (dummy_weight_value := getattr(param, "dummy_weight_value", None)) is not None:
         param.fill_(dummy_weight_value)
+        return
+
+    is_e8m0 = param.dtype == torch.float8_e8m0fnu or (
+        param.dtype == torch.uint8 and "scale" in name
+    )
+    if is_e8m0:
+        param.view(torch.uint8).fill_(_DUMMY_E8M0_SCALE_BYTE)
+        return
+
+    if (
+        param.dtype in (torch.uint8, torch.int8, torch.float4_e2m1fn_x2)
+        and not current_platform.is_tpu()
+    ):
+        generator = torch.Generator(device=param.device)
+        generator.manual_seed(seed)
+        if param.dtype == torch.int8:
+            param.random_(-128, 128, generator=generator)
+        else:
+            param.view(torch.uint8).random_(0, 256, generator=generator)
         return
 
     if not torch.is_floating_point(param):
@@ -1497,6 +1578,13 @@ def initialize_single_dummy_weight(
             # across processes. Zero them for reproducibility.
             param.zero_()
         return
+
+    if low is None or high is None:
+        dummy_range = 1e-3
+        if torch.finfo(param.dtype).bits < 16:
+            dummy_range = _DUMMY_FP8_RANGE
+        low = -dummy_range if low is None else low
+        high = dummy_range if high is None else high
 
     if current_platform.is_tpu():
         generator = torch.Generator(device="cpu")
