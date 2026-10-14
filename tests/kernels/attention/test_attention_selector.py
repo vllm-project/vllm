@@ -1140,5 +1140,6 @@ def test_d512_fp8_sinks_supported_but_block_sparsity_rejected(sm90_config):
         )
         assert (reason is None) == (not use_sparse)
         if use_sparse:
+            assert reason is not None
             assert "block sparsity" in reason
             assert "Triton" not in reason
