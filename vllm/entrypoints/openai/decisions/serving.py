@@ -59,6 +59,11 @@ class OpenAIServingDecisions(BaseServingDecisions):
             ]
             lora_request = self._maybe_get_adapters(request)  # type: ignore[arg-type]
             engine.check_admission(len(questions))
+            trace_headers = (
+                None
+                if raw_request is None
+                else await self._get_trace_headers(raw_request.headers)
+            )
             text = input_text(request.input)
             self._log_inputs(request_id, text, None, lora_request)
             reads = await self.strategy.read(
@@ -69,6 +74,8 @@ class OpenAIServingDecisions(BaseServingDecisions):
                 chat_template_kwargs=None,
                 lora_request=lora_request,
                 priority=0,
+                cache_salt=request.cache_salt,
+                trace_headers=trace_headers,
             )
         except StructuredDecisionError as exc:
             return self.create_error_response(exc)
