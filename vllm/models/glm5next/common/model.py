@@ -1140,9 +1140,7 @@ class Glm5NextForCausalLM(
 
     def process_weights_after_loading(self) -> None:
         if self.model.mono is not None:
-            raise ValueError(
-                "VLLM_ROCM_MONO_DECODE: reloading weights is not supported"
-            )
+            raise ValueError("--monokernel: reloading weights is not supported")
         self.model.mono = mono.attach(self.model, self.vllm_config, MONO_SPEC)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
