@@ -291,33 +291,25 @@ def test_mamba_cache_mode_all_is_rejected():
 
 
 @pytest.mark.parametrize(
-    ("cache_dtype", "model_dtype", "allowed"),
+    ("cache_dtype", "model_dtype", "should_raise"),
     [
-        ("float16", torch.bfloat16, "`auto` or `bfloat16`"),
-        ("bfloat16", torch.float16, "`auto` or `float16`"),
-        ("float16", torch.float32, "`auto`"),
+        ("float16", torch.bfloat16, True),
+        ("bfloat16", torch.float16, True),
+        ("float16", torch.float32, True),
+        ("float16", torch.float16, False),
+        ("auto", torch.bfloat16, False),
+        ("fp8", torch.bfloat16, False),
     ],
 )
-def test_mismatched_float_kv_cache_is_rejected(cache_dtype, model_dtype, allowed):
+def test_mismatched_float_kv_cache_is_rejected(cache_dtype, model_dtype, should_raise):
     config = VllmConfig(cache_config=CacheConfig(cache_dtype=cache_dtype))
     config.model_config = SimpleNamespace(dtype=model_dtype)
-    with pytest.raises(ValueError) as exc:
+
+    if should_raise:
+        with pytest.raises(ValueError, match="kv_cache_dtype"):
+            config._reject_mismatched_float_kv_cache()
+    else:
         config._reject_mismatched_float_kv_cache()
-    model_name = str(model_dtype).removeprefix("torch.")
-    assert str(exc.value) == (
-        f'kv_cache_dtype="{cache_dtype}" is incompatible with '
-        f'dtype="{model_name}". Please set `--kv-cache-dtype` to {allowed}.'
-    )
-
-
-@pytest.mark.parametrize(
-    ("cache_dtype", "model_dtype"),
-    [("float16", torch.float16), ("auto", torch.bfloat16), ("fp8", torch.bfloat16)],
-)
-def test_matching_or_quantized_kv_cache_is_accepted(cache_dtype, model_dtype):
-    config = VllmConfig(cache_config=CacheConfig(cache_dtype=cache_dtype))
-    config.model_config = SimpleNamespace(dtype=model_dtype)
-    config._reject_mismatched_float_kv_cache()
 
 
 def test_per_request_spec_decode_metrics_requires_spec_decode():

@@ -1427,11 +1427,7 @@ class VllmConfig:
         logger.info_once("Resolved Engram configuration: %s", str(self.engram_config))
 
     def _reject_mismatched_float_kv_cache(self) -> None:
-        """Reject an explicit float16/bfloat16 KV dtype that differs from the model.
-
-        FlashAttention and FlashInfer need matching query and KV dtypes, and
-        FlexAttention silently produces wrong output (#60859).
-        """
+        """Reject an explicit float16/bfloat16 KV dtype that differs from the model."""
         cache_dtype = self.cache_config.cache_dtype
         if self.model_config is None or cache_dtype not in ("float16", "bfloat16"):
             return
