@@ -69,6 +69,107 @@ def test_kernel_matches_the_reference(world, interleave, width):
                 assert bool((local[row, count:width] == PAD).all())
 
 
+# --- MTP selection reuse ----------------------------------------------------
+
+
+def _localize_in_place(selection, world, rank, interleave):
+    """The indexer's call: the impl localizes the layer buffer in place."""
+    from types import SimpleNamespace
+
+    from vllm.models.qwen4_exp.nvidia.qsa import Qwen4ExpQSAFlashAttentionImpl
+
+    impl = SimpleNamespace(
+        dcp_world_size=world, dcp_rank=rank, cp_kv_cache_interleave_size=interleave
+    )
+    Qwen4ExpQSAFlashAttentionImpl.localize_dcp_selection_(impl, selection)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Triton kernel needs a GPU")
+@pytest.mark.parametrize("world,interleave", [(2, 1), (4, 16)])
+@pytest.mark.parametrize("width", [32, 2051])
+def test_in_place_localize_equals_a_separate_output(world, interleave, width):
+    from vllm.models.qwen4_exp.nvidia.ops.qsa_dcp import qsa_localize_dcp_indices
+
+    rows = [list(range(0, 2 * width, 2)), list(range(1, 40)), [], [7]]
+    packed = _pack(rows, width).cuda()
+    for rank in range(world):
+        expected = qsa_localize_dcp_indices(
+            packed, torch.empty_like(packed), world, rank, interleave
+        )
+        buffer = packed.clone()
+        _localize_in_place(buffer, world, rank, interleave)
+        assert torch.equal(buffer, expected)
+
+
+@pytest.mark.cpu_test
+def test_without_dcp_the_selection_stays_global():
+    selection = _pack([[5, 6], [7]], 8)
+    source = selection.clone()
+    _localize_in_place(selection, 1, 0, 1)
+    assert torch.equal(selection, source)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="QSA kernels need CUDA")
+@pytest.mark.parametrize("world,interleave", [(2, 1), (4, 16)])
+def test_reused_local_rows_match_per_pass_localization(world, interleave):
+    """MTP step 0 localizes once; compaction and skip_topk steps reuse it.
+
+    The old path localized the global rows on every pass. Localization is a
+    per-row function, so it commutes with the row compaction of
+    compact_topk_indices, and the reused rows give bitwise the same partial
+    output and LSE on every pass.
+    """
+    from vllm.models.qwen4_exp.nvidia.ops.qsa import qsa_sparse_paged_attention
+    from vllm.models.qwen4_exp.nvidia.ops.qsa_dcp import qsa_localize_dcp_indices
+
+    torch.manual_seed(7)
+    page, heads, kv_heads, head_dim, seq_len = 16, 8, 2, 64, 256
+    local_blocks = seq_len // world // page + 1
+    shape = (local_blocks, page, kv_heads, head_dim)
+    key = torch.randn(shape, dtype=torch.bfloat16, device="cuda")
+    value = torch.randn(shape, dtype=torch.bfloat16, device="cuda")
+    table = torch.arange(local_blocks, dtype=torch.int32, device="cuda")[None]
+    # Step 0 selects for 6 query rows; compaction keeps rows 5, 1 and 3.
+    rows = [list(range(r, seq_len, r + 2)) for r in range(6)]
+    rows[1] = [0]  # an empty owner on every rank but 0
+    width = max(len(r) for r in rows)
+    selection = _pack(rows, width).cuda()
+    kept = torch.tensor([5, 1, 3], device="cuda")
+    query = torch.randn(3, heads, head_dim, dtype=torch.bfloat16, device="cuda")
+    token_to_req = torch.zeros(3, dtype=torch.int32, device="cuda")
+
+    def attend(local):
+        return qsa_sparse_paged_attention(
+            query, key, value, local, table, token_to_req, False, return_lse=True
+        )
+
+    for rank in range(world):
+        # Old path: the buffer keeps global rows; every pass localizes them.
+        old_buffer = selection.clone()
+        old_buffer[:3].copy_(old_buffer.index_select(0, kept))
+        expected = [
+            attend(
+                qsa_localize_dcp_indices(
+                    old_buffer[:3],
+                    torch.empty_like(old_buffer[:3]),
+                    world,
+                    rank,
+                    interleave,
+                )
+            )
+            for _ in range(3)
+        ]
+        # New path: localize once at selection, compact, then reuse.
+        buffer = selection.clone()
+        _localize_in_place(buffer, world, rank, interleave)
+        buffer[:3].copy_(buffer.index_select(0, kept))
+        for (out, lse), (expected_out, expected_lse) in zip(
+            (attend(buffer[:3]) for _ in range(3)), expected
+        ):
+            assert torch.equal(out, expected_out)
+            assert torch.equal(lse, expected_lse)
+
+
 # --- contracts that keep the gate from being applied twice -------------------
 
 

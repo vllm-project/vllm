@@ -24,7 +24,7 @@ from ..common.qsa_cache import (
 from .ops.qsa_prepare import qsa_prepare
 
 if TYPE_CHECKING:
-    from .qsa import Qwen4ExpQSAAttention
+    from .qsa import Qwen4ExpQSAAttention, Qwen4ExpQSAFlashAttentionImpl
 
 
 def apply_qsa_rope(
@@ -472,6 +472,9 @@ class QSAIndexer(nn.Module):
             self.token_topk,
             out,
         )
+        # Under DCP, keep this rank's share as local token ids once per
+        # selection; skip_topk steps (above) reuse these rows as they are.
+        cast("Qwen4ExpQSAFlashAttentionImpl", attn.impl).localize_dcp_selection_(out)
         return out, main_outputs
 
 
