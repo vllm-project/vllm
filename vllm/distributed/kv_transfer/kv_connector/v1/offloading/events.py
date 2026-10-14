@@ -152,19 +152,19 @@ class OffloadingEventsTracker:
             block_hash = request.block_hashes[hash_idx]
             if block_hash is None:
                 continue
-            for group_config in state.group_configs.values():
-                if group_config.sliding_window_size_in_chunks is not None:
+            for locator_config in state.group_configs.values():
+                if locator_config.sliding_window_size_in_chunks is not None:
                     continue
                 hash_boundary = hash_idx + 1
                 if (
-                    hash_boundary % group_config.hashes_per_chunk != 0
+                    hash_boundary % locator_config.hashes_per_chunk != 0
                     and not state.supports_partial_tail
                 ):
                     continue
                 tokens_per_hash = (
-                    group_config.tokens_per_chunk // group_config.hashes_per_chunk
+                    locator_config.tokens_per_chunk // locator_config.hashes_per_chunk
                 )
-                key = make_offload_key(block_hash, group_config.group_idx)
+                key = make_offload_key(block_hash, locator_config.group_idx)
                 state.locators.setdefault(key, hash_boundary * tokens_per_hash)
         state.indexed_hash_count = len(request.block_hashes)
 
