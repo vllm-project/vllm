@@ -11,7 +11,7 @@ use llm_multimodal::{
 };
 use vllm_engine_core_client::protocol::dtype::ModelDtype;
 
-use super::cache::CacheSlot;
+use super::cache::{CacheSlot, OptionalMmProcessorCache};
 use super::timing::MM_STAGE_TARGET;
 use super::{MultimodalModelInfo, PreparedItem, PreparedMedia, VisionModalitySupport, item};
 use crate::error::{Error, Result, bail_multimodal, multimodal};
@@ -44,15 +44,13 @@ impl MultimodalModelInfo {
             modality: Modality::Image.to_string(),
         })?;
 
-        let (replacements, items) = super::cache::prepare_cached(
-            self.mm_cache_for(Modality::Image),
-            sources,
-            async |misses| {
+        let (replacements, items) = self
+            .mm_cache_for(Modality::Image)
+            .prepare_cached(sources, async |misses| {
                 self.preprocess_image_batch(support, misses, model_dtype, preprocessing_context)
                     .await
-            },
-        )
-        .await?;
+            })
+            .await?;
 
         Ok(PreparedMedia {
             modality: Modality::Image,

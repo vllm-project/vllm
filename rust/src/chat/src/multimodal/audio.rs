@@ -8,7 +8,7 @@ use std::sync::Arc;
 use llm_multimodal::{AudioClip, Modality, PreprocessedEncoderInputs, PromptReplacement};
 use vllm_engine_core_client::protocol::dtype::ModelDtype;
 
-use super::cache::CacheSlot;
+use super::cache::{CacheSlot, OptionalMmProcessorCache};
 use super::timing::MM_STAGE_TARGET;
 use super::{AudioModalitySupport, MultimodalModelInfo, PreparedItem, PreparedMedia, item};
 use crate::error::{Error, Result, bail_multimodal, multimodal};
@@ -36,12 +36,12 @@ impl MultimodalModelInfo {
             modality: Modality::Audio.to_string(),
         })?;
 
-        let (replacements, items) = super::cache::prepare_cached(
-            self.mm_cache_for(Modality::Audio),
-            sources,
-            async |misses| self.preprocess_audio_batch(support, misses).await,
-        )
-        .await?;
+        let (replacements, items) = self
+            .mm_cache_for(Modality::Audio)
+            .prepare_cached(sources, async |misses| {
+                self.preprocess_audio_batch(support, misses).await
+            })
+            .await?;
 
         Ok(PreparedMedia {
             modality: Modality::Audio,

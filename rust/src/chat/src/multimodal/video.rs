@@ -17,7 +17,7 @@ use vllm_engine_core_client::protocol::multimodal::{
     SliceSpec,
 };
 
-use super::cache::CacheSlot;
+use super::cache::{CacheSlot, OptionalMmProcessorCache};
 use super::timing::MM_STAGE_TARGET;
 use super::{MultimodalModelInfo, PreparedItem, PreparedMedia, VisionModalitySupport, tensor};
 use crate::error::{Error, Result, bail_multimodal, multimodal};
@@ -54,19 +54,17 @@ impl MultimodalModelInfo {
             modality: Modality::Video.to_string(),
         })?;
 
-        let (replacements, items) = super::cache::prepare_cached(
-            self.mm_cache_for(Modality::Video),
-            sources,
-            async |misses| {
+        let (replacements, items) = self
+            .mm_cache_for(Modality::Video)
+            .prepare_cached(sources, async |misses| {
                 let mut computed = Vec::with_capacity(misses.len());
                 for (clip, uuid) in misses {
                     computed
                         .push(self.preprocess_video_item(support, clip, uuid, model_dtype).await?);
                 }
                 Ok(computed.into_iter().unzip())
-            },
-        )
-        .await?;
+            })
+            .await?;
 
         Ok(PreparedMedia {
             modality: Modality::Video,

@@ -348,64 +348,90 @@ pub(super) fn attach_fetched<M: HashedMedia>(
         .collect()
 }
 
-/// Drive one modality's prepare through the cache.
+/// The prepare driver as a method on an optional cache reference, so call
+/// sites read `self.mm_cache_for(modality).prepare_cached(...)`; `None`
+/// prepares everything inline.
 ///
 /// `Ready` slots (UUID references resolved before fetch) pass through.
 /// `Pending` items are looked up by their cache key — the client UUID when
 /// supplied, otherwise the content hash — so only true misses reach
 /// `compute`; computed misses are put into shm and shadowed. The result stays
 /// index-aligned with `sources` for placeholder expansion.
-pub(super) async fn prepare_cached<M: HashedMedia>(
-    cache: Option<&MmProcessorCache>,
-    sources: Vec<CacheSlot<M>>,
-    compute: impl AsyncFnOnce(
-        Vec<(M, Option<String>)>,
-    ) -> Result<(Vec<PromptReplacement>, Vec<PreparedItem>)>,
-) -> Result<(Vec<PromptReplacement>, Vec<PreparedItem>)> {
-    let mut slots: Vec<Option<(PreparedItem, PromptReplacement)>> =
-        Vec::with_capacity(sources.len());
-    let mut pending = Vec::new();
-    let mut pending_keys = Vec::new();
-    for source in sources {
-        let (media, uuid) = match source {
-            CacheSlot::Ready(item, replacement) => {
-                slots.push(Some((item, replacement)));
-                continue;
-            }
-            CacheSlot::Pending(media, uuid) => (media, uuid),
-        };
-        let key = match (cache, &uuid) {
-            (Some(_), Some(uuid)) => uuid.clone(),
-            _ => media.content_hash().to_owned(),
-        };
-        let lookup = match cache {
-            Some(cache) => cache.lookup(&key, uuid.clone()),
-            None => CacheLookup::Miss,
-        };
-        match lookup {
-            CacheLookup::Hit(item, replacement) => slots.push(Some((item, replacement))),
-            CacheLookup::Miss => {
-                slots.push(None);
-                pending_keys.push(key);
-                pending.push((media, uuid));
-            }
-        }
-    }
+pub(super) trait OptionalMmProcessorCache {
+    async fn prepare_cached<M, F>(
+        self,
+        sources: Vec<CacheSlot<M>>,
+        compute: F,
+    ) -> Result<(Vec<PromptReplacement>, Vec<PreparedItem>)>
+    where
+        M: HashedMedia,
+        F: AsyncFnOnce(
+            Vec<(M, Option<String>)>,
+        ) -> Result<(Vec<PromptReplacement>, Vec<PreparedItem>)>;
+}
 
-    let mut misses = Vec::with_capacity(pending.len());
-    if !pending.is_empty() {
-        let (replacements, mut items) = compute(pending).await?;
-        for (key, item, replacement) in izip!(&pending_keys, &mut items, &replacements) {
-            // UUID-keyed items report the UUID as `mm_hash` (Python parity:
-            // `hashes.append(uuid_item)`); for content-keyed items this is a
-            // no-op.
-            item.hash = key.clone();
-            item.data =
-                put_or_inline_and_track(cache, key, replacement, std::mem::take(&mut item.data));
+impl OptionalMmProcessorCache for Option<&MmProcessorCache> {
+    async fn prepare_cached<M, F>(
+        self,
+        sources: Vec<CacheSlot<M>>,
+        compute: F,
+    ) -> Result<(Vec<PromptReplacement>, Vec<PreparedItem>)>
+    where
+        M: HashedMedia,
+        F: AsyncFnOnce(
+            Vec<(M, Option<String>)>,
+        ) -> Result<(Vec<PromptReplacement>, Vec<PreparedItem>)>,
+    {
+        let cache = self;
+        let mut slots: Vec<Option<(PreparedItem, PromptReplacement)>> =
+            Vec::with_capacity(sources.len());
+        let mut pending = Vec::new();
+        let mut pending_keys = Vec::new();
+        for source in sources {
+            let (media, uuid) = match source {
+                CacheSlot::Ready(item, replacement) => {
+                    slots.push(Some((item, replacement)));
+                    continue;
+                }
+                CacheSlot::Pending(media, uuid) => (media, uuid),
+            };
+            let key = match (cache, &uuid) {
+                (Some(_), Some(uuid)) => uuid.clone(),
+                _ => media.content_hash().to_owned(),
+            };
+            let lookup = match cache {
+                Some(cache) => cache.lookup(&key, uuid.clone()),
+                None => CacheLookup::Miss,
+            };
+            match lookup {
+                CacheLookup::Hit(item, replacement) => slots.push(Some((item, replacement))),
+                CacheLookup::Miss => {
+                    slots.push(None);
+                    pending_keys.push(key);
+                    pending.push((media, uuid));
+                }
+            }
         }
-        misses = izip!(items, replacements).collect();
+
+        let mut misses = Vec::with_capacity(pending.len());
+        if !pending.is_empty() {
+            let (replacements, mut items) = compute(pending).await?;
+            for (key, item, replacement) in izip!(&pending_keys, &mut items, &replacements) {
+                // UUID-keyed items report the UUID as `mm_hash` (Python
+                // parity: `hashes.append(uuid_item)`); for content-keyed
+                // items this is a no-op.
+                item.hash = key.clone();
+                item.data = put_or_inline_and_track(
+                    cache,
+                    key,
+                    replacement,
+                    std::mem::take(&mut item.data),
+                );
+            }
+            misses = izip!(items, replacements).collect();
+        }
+        Ok(merge_slots(slots, misses))
     }
-    Ok(merge_slots(slots, misses))
 }
 
 /// Put a miss item into the SHM cache when enabled, keeping the inline data
