@@ -248,6 +248,14 @@ def _mono_numerics(monkeypatch, tp_size, pp_size, rank, distributed_init_port):
         # at import, so refresh them
         m.setenv("VLLM_ROCM_USE_AITER", "1")
         m.setenv("VLLM_ROCM_USE_AITER_MOE", "1")
+        # the mono MoE quantizes the stage-2 input as aiter's standalone
+        # fused_dynamic_mxfp8_quant_moe_sort does; the model_configs/ tuned rows
+        # may pick stage-1 kernels that fuse that quant with another scale rule
+        # (round(log2 amax) - 8 from f32 vs ceil(log2(amax / 448)) from bf16),
+        # so pin the reference to aiter's base table
+        from aiter.jit.core import AITER_ROOT_DIR
+
+        m.setenv("AITER_CONFIG_FMOE", f"{AITER_ROOT_DIR}/aiter/configs/tuned_fmoe.csv")
         rocm_aiter_ops.refresh_env_variables()
         device = torch.device(f"cuda:{rank}")
         torch.accelerator.set_device_index(device)
