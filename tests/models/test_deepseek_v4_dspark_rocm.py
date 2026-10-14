@@ -42,10 +42,6 @@ def _disable_distributed_loader_paths(monkeypatch: pytest.MonkeyPatch):
         "fused_moe_make_expert_params_mapping",
         lambda *args, **kwargs: [],
     )
-    monkeypatch.setattr(
-        dspark_module, "get_tensor_model_parallel_world_size", lambda: 1
-    )
-    monkeypatch.setattr(dspark_module, "get_tensor_model_parallel_rank", lambda: 0)
 
 
 @pytest.mark.cpu_test
