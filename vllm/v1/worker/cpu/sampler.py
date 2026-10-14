@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 import torch
 
+from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
 from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
 from vllm.v1.watermarking.gpu_sampler import GPUWatermarkSampler
@@ -209,6 +210,21 @@ class CPURandomSampler(RandomSampler):
         )
 
 
+@torch.compile(
+    dynamic=True,
+    fullgraph=True,
+    backend=current_platform.simple_compile_backend,
+)
+def _apply_min_p(
+    logits: torch.Tensor,
+    expanded_idx_mapping: torch.Tensor,
+    min_p_values: torch.Tensor,
+) -> None:
+    min_p = min_p_values[expanded_idx_mapping].unsqueeze(1)
+    threshold = logits.amax(dim=1, keepdim=True) + min_p.log()
+    logits.masked_fill_((min_p != 0.0) & (logits < threshold), float("-inf"))
+
+
 class CPUSamplingStates(SamplingStates):
     def apply_temperature(
         self,
@@ -232,9 +248,7 @@ class CPUSamplingStates(SamplingStates):
         if np.all(self.min_p.np[idx_mapping_np] == 0.0):
             return
 
-        min_p = self.min_p.gpu[expanded_idx_mapping].unsqueeze(1)
-        threshold = logits.amax(dim=1, keepdim=True) + min_p.log()
-        logits.masked_fill_((min_p != 0.0) & (logits < threshold), float("-inf"))
+        _apply_min_p(logits, expanded_idx_mapping, self.min_p.gpu)
 
 
 class CPUSamplingMaskTensors(SamplingMaskTensors):
