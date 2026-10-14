@@ -352,7 +352,9 @@ async fn generate_merges_outputs_by_stream_interval() {
                     (&[6], "v7", None),
                     (&[7], "v7", Some(EngineCoreFinishReason::Length)),
                 ];
-                for (token_ids, weight_version, finish_reason) in steps {
+                for (step, (token_ids, weight_version, finish_reason)) in
+                    steps.into_iter().enumerate()
+                {
                     send_outputs(
                         push,
                         RequestBatchOutputs {
@@ -364,6 +366,7 @@ async fn generate_merges_outputs_by_stream_interval() {
                                 None,
                             )],
                             weight_version: Some(weight_version.into()),
+                            timestamp: step as f64 + 1.0,
                             ..Default::default()
                         }
                         .into(),
@@ -430,6 +433,9 @@ async fn generate_merges_outputs_by_stream_interval() {
             Some(vec![span("v7", 0, 2), span("v8", 2, 5), span("v7", 5, 7)])
         ]
     );
+    let last_token_timestamps: Vec<_> =
+        outputs.iter().map(|output| output.timestamps.last_token_ts).collect();
+    assert_eq!(last_token_timestamps, [1.0, 4.0, 6.0]);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -549,6 +555,7 @@ async fn collect_output_rejects_partial_sampling_mask() {
         }),
         spec_decode_metrics: None,
         weight_versions: None,
+        timestamps: Default::default(),
     };
 
     let error = futures::stream::iter([Ok(output)]).collect_output().await.unwrap_err();
@@ -898,6 +905,7 @@ async fn generate_records_request_metrics_in_prometheus_output() {
                         engine_index: 4,
                         timestamp: 10.0,
                         outputs: vec![EngineCoreOutput {
+                            num_nans_in_logits: 2,
                             prefill_stats: Some(Box::new(PrefillStats {
                                 num_prompt_tokens: 2,
                                 num_computed_tokens: 2,
@@ -981,6 +989,9 @@ async fn generate_records_request_metrics_in_prometheus_output() {
     )));
     assert!(rendered.contains(&format!(
         "vllm:generation_tokens_total{{model_name=\"{model_name}\",engine=\"4\"}} 3"
+    )));
+    assert!(rendered.contains(&format!(
+        "vllm:corrupted_requests_total{{model_name=\"{model_name}\",engine=\"4\"}} 1"
     )));
     assert!(rendered.contains(&format!(
         "vllm:num_preemptions_total{{model_name=\"{model_name}\",engine=\"4\"}} 1"

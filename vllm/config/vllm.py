@@ -1206,6 +1206,21 @@ class VllmConfig:
         ):
             return
 
+        if self.model_config is not None and self.model_config.enable_sleep_mode:
+            # Lazy import to avoid circular dependencies
+            from vllm.distributed.kv_transfer.kv_connector.factory import (
+                KVConnectorFactory,
+            )
+
+            connector_cls = KVConnectorFactory.get_connector_class(
+                self.kv_transfer_config
+            )
+            if not connector_cls.supports_sleep_mode(self.kv_transfer_config):
+                raise ValueError(
+                    f"{self.kv_transfer_config.kv_connector} does not support "
+                    "sleep mode."
+                )
+
         # PyTorch's expandable_segments allocator uses CUDA VMM, which can
         # remap a virtual address range to different physical pages over the
         # engine's lifetime. KV connectors that pin KV cache memory (e.g.
@@ -1664,18 +1679,6 @@ class VllmConfig:
                 self.parallel_config.disable_nccl_for_dp_synchronization = False
 
         if (
-            self.speculative_config is not None
-            and self.scheduler_config.async_scheduling
-            and self.model_config is not None
-            and not self.model_config.disable_cascade_attn
-        ):
-            logger.warning_once(
-                "Disabling cascade attention (not yet compatible with "
-                "async speculative decoding).",
-            )
-            self.model_config.disable_cascade_attn = True
-
-        if (
             self.observability_config.per_request_spec_decode_metrics != "none"
             and self.speculative_config is None
         ):
@@ -1805,6 +1808,16 @@ class VllmConfig:
 
         self._maybe_disable_dynamic_sd_for_data_parallel()
         self._maybe_override_dynamic_sd_cudagraph_mode()
+
+        if (
+            self.attention_config.sparse_mla_prefill_workspace_factor is None
+            and self.model_config is not None
+        ):
+            # Resolved once: KV cache auto-fit can lower max_model_len later, and
+            # factor * max_model_len must stay within the workspace reserved at init.
+            self.attention_config.sparse_mla_prefill_workspace_factor = (
+                5 if self.model_config.max_model_len <= 256 * 1024 else 2
+            )
 
         if (
             self.attention_config.hisparse_config is None
@@ -2097,36 +2110,17 @@ class VllmConfig:
         )
 
         # final check of cudagraph mode after all possible updates
-        if current_platform.is_cuda_alike():
-            if (
-                self.compilation_config.cudagraph_mode.has_full_cudagraphs()
-                and self.model_config is not None
-                and not self.model_config.disable_cascade_attn
-                and not self.compilation_config.cudagraph_mode.has_piecewise_cudagraphs()  # noqa: E501
-            ):
-                logger.warning_once(
-                    "No piecewise cudagraph for executing cascade attention. "
-                    "Will fall back to eager execution if a batch runs into "
-                    "cascade attentions."
-                )
-
-            if self.compilation_config.cudagraph_mode.requires_piecewise_compilation():
-                assert (
-                    self.compilation_config.mode == CompilationMode.VLLM_COMPILE
-                    or envs.VLLM_USE_BREAKABLE_CUDAGRAPH
-                ), (
-                    "Compilation mode should be CompilationMode.VLLM_COMPILE "
-                    "when cudagraph_mode piecewise cudagraphs is used, "
-                    f"cudagraph_mode={self.compilation_config.cudagraph_mode}"
-                )
         if (
-            self.model_config
-            and envs.VLLM_BATCH_INVARIANT
-            and not self.model_config.disable_cascade_attn
+            current_platform.is_cuda_alike()
+            and self.compilation_config.cudagraph_mode.requires_piecewise_compilation()
         ):
-            self.model_config.disable_cascade_attn = True
-            logger.warning_once(
-                "Disabling cascade attention when VLLM_BATCH_INVARIANT is enabled.",
+            assert (
+                self.compilation_config.mode == CompilationMode.VLLM_COMPILE
+                or envs.VLLM_USE_BREAKABLE_CUDAGRAPH
+            ), (
+                "Compilation mode should be CompilationMode.VLLM_COMPILE "
+                "when cudagraph_mode piecewise cudagraphs is used, "
+                f"cudagraph_mode={self.compilation_config.cudagraph_mode}"
             )
 
         if self.parallel_config.use_ubatching:
@@ -2143,10 +2137,6 @@ class VllmConfig:
                 "--all2all-backend=deepep_high_throughput, or "
                 "--all2all-backend=nixl_ep and install the matching kernels."
             )
-
-            if not self.model_config.disable_cascade_attn:
-                self.model_config.disable_cascade_attn = True
-                logger.warning_once("Disabling cascade attention when DBO is enabled.")
 
         if not self.instance_id:
             self.instance_id = random_uuid()[:5]
@@ -3392,7 +3382,7 @@ class VllmConfig:
                 and not self.use_v2_model_runner
             ):
                 raise ValueError(
-                    "RecoverSSM with align mode requires VLLM_USE_V2_MODEL_RUNNER=1"
+                    "RecoverSSM with prefix caching requires VLLM_USE_V2_MODEL_RUNNER=1"
                 )
             if self.parallel_config.pipeline_parallel_size > 1:
                 raise ValueError(

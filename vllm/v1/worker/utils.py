@@ -27,11 +27,11 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
     MultipleOf,
 )
-from vllm.v1.core.kv_cache_utils import (
-    KVCacheBlockCopy,
+from vllm.v1.core.kv_cache_planning import (
     _get_per_layer_spec,
     get_replayssm_ring_layout,
 )
+from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     EncoderOnlyAttentionSpec,

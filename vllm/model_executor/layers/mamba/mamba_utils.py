@@ -234,6 +234,7 @@ class MambaStateShapeCalculator:
             # FlashInfer keeps the live window and current verify window together.
             ring_buffer_len += 1 + num_speculative_tokens
         local_nheads = divide(num_heads, tp_world_size)
+        n_groups += cls.extra_groups_for_head_shards(n_groups, tp_world_size)
         local_ngroups = divide(n_groups, tp_world_size)
         return (
             (local_nheads, ring_buffer_len, head_dim),

@@ -92,7 +92,6 @@ def _check_replayssm_parity(
         max_model_len=1024,
         trust_remote_code=True,
         enable_prefix_caching=False,
-        mamba_cache_mode="none",
         tensor_parallel_size=tensor_parallel_size,
         mamba_backend=mamba_backend,
     )
@@ -211,7 +210,6 @@ def test_replayssm_flashinfer_mtp(vllm_runner, monkeypatch, use_v2_model_runner)
         max_model_len=1024,
         trust_remote_code=True,
         enable_prefix_caching=False,
-        mamba_cache_mode="none",
         mamba_backend="flashinfer",
         tensor_parallel_size=2,
         disable_log_stats=False,

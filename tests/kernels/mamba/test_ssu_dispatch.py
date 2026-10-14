@@ -604,3 +604,18 @@ def test_replayssm_mixer_selects_mtp_layout(
     else:
         assert kernel.call_args.kwargs["cu_seqlens"] is query_start_loc_d
     assert kernel.call_args.kwargs["max_seqlen"] == expected_max_seqlen
+
+
+def test_replayssm_ring_shape_extends_groups_for_head_shards():
+    """B_cache retains one replicated group on each head shard."""
+    shapes = MambaStateShapeCalculator.replayssm_ring_shapes(
+        num_heads=4,
+        head_dim=64,
+        state_size=128,
+        n_groups=1,
+        tp_world_size=2,
+        logical_window=16,
+        backend=MambaBackendEnum.TRITON,
+    )
+
+    assert shapes == ((2, 16, 64), (2, 16), (1, 16, 128))

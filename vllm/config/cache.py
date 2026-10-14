@@ -176,8 +176,7 @@ class CacheConfig:
     page."""
     mamba_block_size: int | None = Field(default=None, gt=0)
     """Size of a contiguous cache block in number of tokens for mamba cache.
-    Can be set only when prefix caching is enabled.
-    Value must be a multiple of 8 to align with causal_conv1d kernel."""
+    Can be set only when prefix caching is enabled."""
     mamba_cache_dtype: MambaDType = "auto"
     """The data type to use for the Mamba cache (both the conv as well as the
     ssm state). If set to 'auto', the data type will be inferred from the model
@@ -187,19 +186,19 @@ class CacheConfig:
     still be controlled by mamba_cache_dtype). If set to 'auto', the data type
     for the ssm state will be determined by mamba_cache_dtype."""
     mamba_cache_mode: MambaCacheMode = "none"
-    """The cache strategy for Mamba layers:
+    """The cache strategy for Mamba layers, derived from `enable_prefix_caching`:
 
-    - "none": set when prefix caching is disabled.
-    - "align": only cache the mamba state of the last token of each scheduler step and
-      when the token is at position i * block_size. This is the default when prefix
-      caching is enabled.
+    - "none": prefix caching is disabled.
+    - "align": prefix caching is enabled. Only cache the mamba state of the last
+      token of each scheduler step and when the token is at position
+      i * block_size.
     """
     enable_mamba_shared_prefix_checkpoint: bool = False
     """Also register a Mamba "align" checkpoint at the shared-prefix junction --
     where an EAGLE/MTP sibling was observed to resume -- instead of only at the
-    prompt tail. Off by default; only takes effect with `mamba_cache_mode`
-    "align", EAGLE on the Mamba group, and a prefix match unit smaller than the
-    Mamba block size."""
+    prompt tail. Off by default; only takes effect with prefix caching enabled,
+    EAGLE on the Mamba group, and a prefix match unit smaller than the Mamba
+    block size."""
     replayssm_buffer_len: int = Field(default=16, gt=0)
     """ReplaySSM logical history length B for Mamba2. Triton uses B physical
     rows and FlashInfer uses B+T, where T is the target verification length.
@@ -211,7 +210,8 @@ class CacheConfig:
     'none' and 'align' on Model Runner V1 and V2. Mamba2 speculative
     decoding requires FlashInfer. With prefix caching enabled, Triton supports
     'align'; FlashInfer supports 'align'. Pipeline parallelism is not
-    supported."""
+    supported. Flushes are most efficient when mamba_block_size is a
+    multiple of replayssm_buffer_len, but this is not required."""
     use_kda_recoverssm: bool = field(default=False, init=False)
     """Whether Kimi-K3 KDA uses RecoverSSM speculative decode."""
 
