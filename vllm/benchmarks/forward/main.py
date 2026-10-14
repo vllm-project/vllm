@@ -97,36 +97,10 @@ def _setup_env() -> None:
     )
 
 
-def _register_dummy_loader() -> str:
-    """Dummy loader that also runs load-time model finalization.
-
-    TODO(woosuk): Remove once #60096 lands. DeepSeek-V4.1 fuses its MegaMoE
-    shared experts at the end of `load_weights`, before the generic linear
-    post-processing repacks their scales. Dummy loading never calls
-    `load_weights`, so the fusion would fail and the bench would time unfused
-    shared experts.
-    """
-    from vllm.model_executor.model_loader import register_model_loader
-    from vllm.model_executor.model_loader.dummy_loader import DummyModelLoader
-
-    name = "forward_bench_dummy"
-
-    @register_model_loader(name)
-    class ForwardBenchDummyLoader(DummyModelLoader):
-        def load_weights(self, model, model_config) -> None:
-            super().load_weights(model, model_config)
-            if any(hasattr(m, "finalize_mega_moe_weights") for m in model.modules()):
-                model.process_weights_after_loading()
-
-    return name
-
-
 def _make_engine_args(args: argparse.Namespace, cases: list[BenchCase]):
     from vllm.config.compilation import CompilationMode, CUDAGraphMode
 
     engine_args = EngineArgs.from_cli_args(args)
-    if engine_args.load_format == "dummy":
-        engine_args.load_format = _register_dummy_loader()
     engine_args.distributed_executor_backend = "external_launcher"
     engine_args.enable_prefix_caching = False
     engine_args.compilation_config.mode = CompilationMode.NONE

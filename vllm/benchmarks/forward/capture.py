@@ -151,6 +151,8 @@ class ForwardBench:
         # restore: neither rank skew, the restore nor host launch gaps reach
         # the timed interval.
         flag = torch.zeros(1, device=self.device)
+        # TODO(woosuk): Support ROCm. The bench hangs there, likely on these
+        # in-graph events.
         self._events = (
             torch.cuda.Event(enable_timing=True, external=True),
             torch.cuda.Event(enable_timing=True, external=True),
