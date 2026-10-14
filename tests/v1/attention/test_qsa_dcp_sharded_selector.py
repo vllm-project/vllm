@@ -11,7 +11,9 @@ import torch
 
 from tests.v1.core.test_prefix_caching import make_kv_cache_manager
 from vllm.models.qwen4_exp.common import qsa_cache
-from vllm.models.qwen4_exp.nvidia.ops import qsa_dcp_selector
+from vllm.models.qwen4_exp.nvidia.ops import qsa as qsa_ops
+from vllm.models.qwen4_exp.nvidia.ops import qsa_dcp, qsa_dcp_selector
+from vllm.models.qwen4_exp.nvidia.ops import qsa_indexer as qsa_indexer_ops
 from vllm.models.qwen4_exp.nvidia.ops.qsa_dcp import qsa_localize_dcp_indices
 from vllm.models.qwen4_exp.nvidia.ops.qsa_indexer import expand_qsa_block_indices
 from vllm.platforms import current_platform
@@ -447,3 +449,357 @@ def test_sharded_selector_warmup_compiles(world, token_interleave):
         selector_shard=qsa_cache.QSADCPShard(),
         token_shard=qsa_cache.QSADCPShard(),
     )
+
+
+# --- simulated N-rank selection, end to end ----------------------------------
+
+# persistent_topk supports block top-k 512, 1024 or 2048; 2048 tokens / ratio 4
+# = 512 blocks, the selector of the served config.
+E2E_TOKEN_TOPK = 2048
+E2E_STATES_PER_BLOCK = 16
+E2E_INDEX_HEADS, E2E_INDEX_DIM = 4, 64
+# (sequence length, query length): three uniform decodes (MTP verify rows),
+# then two prefill chunks.
+E2E_REQUESTS = ((3000, 4), (2600, 4), (77, 4), (2300, 37), (4100, 120))
+E2E_NUM_DECODES, E2E_DECODE_QUERY_LEN = 3, 4
+
+
+class _TwoPassDCPGroup:
+    """Simulated dim-0 all-gather of the ranks' candidate packs in one process.
+
+    Pass 1 runs every rank and records its packs (the merge result is thrown
+    away). Pass 2 runs every rank again, checks that each pack holds the
+    candidates of its pass-1 record and returns all ranks' packs, this
+    rank's current one in its own slot. The radix top-k may order a row's
+    candidates differently on each run; the merge does not depend on that
+    order.
+    """
+
+    def __init__(self, world):
+        self.world = world
+        self.records = [[] for _ in range(world)]
+        self.calls = [0] * world
+        self.rank = 0
+        self.replay = False
+
+    def all_gather(self, tensor, dim):
+        assert dim == 0
+        index = self.calls[self.rank]
+        self.calls[self.rank] += 1
+        if not self.replay:
+            self.records[self.rank].append(tensor.clone())
+            return torch.zeros(
+                (self.world * tensor.shape[0], *tensor.shape[1:]),
+                dtype=tensor.dtype,
+                device=tensor.device,
+            )
+        assert torch.equal(_by_state(tensor), _by_state(self.records[self.rank][index]))
+        packs = [self.records[r][index] for r in range(self.world)]
+        packs[self.rank] = tensor
+        return torch.cat(packs)
+
+    def start(self, rank, replay):
+        self.rank, self.replay = rank, replay
+        if replay and rank == 0:
+            self.calls = [0] * self.world
+
+
+def _by_state(packed):
+    """A ``[rows, k, 2]`` candidate pack with each row ordered by state id."""
+    order = packed[..., 1].argsort(dim=1, stable=True)
+    return packed.gather(1, order.unsqueeze(-1).expand_as(packed))
+
+
+def _e2e_batch(generator):
+    """Global compressed keys per request, the query rows and their metadata."""
+    keys = [
+        torch.randn(seq_len // COMPRESS_RATIO, E2E_INDEX_DIM, generator=generator)
+        .bfloat16()
+        .cuda()
+        for seq_len, _ in E2E_REQUESTS
+    ]
+    positions = torch.cat([torch.arange(s - q, s) for s, q in E2E_REQUESTS]).cuda()
+    query_lens = torch.tensor([q for _, q in E2E_REQUESTS])
+    token_to_req = torch.repeat_interleave(
+        torch.arange(len(E2E_REQUESTS)), query_lens
+    ).cuda()
+    query_start_loc = (
+        torch.cat((torch.zeros(1, dtype=torch.int64), query_lens.cumsum(0)))
+        .int()
+        .cuda()
+    )
+    visible = ((positions + 1) // COMPRESS_RATIO).int()
+    q = (
+        torch.randn(
+            positions.numel(), E2E_INDEX_HEADS, E2E_INDEX_DIM, generator=generator
+        )
+        .bfloat16()
+        .cuda()
+    )
+    return keys, positions, token_to_req, query_start_loc, visible, q
+
+
+def _e2e_cache(keys, shard):
+    """A compressed key cache written through the (sharded) slot mapping: every
+    token of every request is offered; only group-closing tokens whose state
+    this rank owns get a slot."""
+    max_states = max(k.shape[0] for k in keys)
+    local_states = shard.max_local_length(max_states)
+    blocks_per_request = -(-local_states // E2E_STATES_PER_BLOCK)
+    # Block 0 is the null block.
+    table = (
+        (torch.arange(len(keys) * blocks_per_request, dtype=torch.int32) + 1)
+        .view(len(keys), blocks_per_request)
+        .cuda()
+    )
+    cache = torch.zeros(
+        len(keys) * blocks_per_request + 1,
+        E2E_STATES_PER_BLOCK,
+        1,
+        E2E_INDEX_DIM,
+        dtype=torch.bfloat16,
+        device="cuda",
+    )
+    for request, request_keys in enumerate(keys):
+        positions = torch.arange(request_keys.shape[0] * COMPRESS_RATIO).cuda()
+        slots = qsa_cache.compressed_qsa_slot_mapping(
+            table,
+            torch.full_like(positions, request),
+            positions,
+            E2E_STATES_PER_BLOCK,
+            COMPRESS_RATIO,
+            selector_shard=shard,
+        )
+        rows = request_keys.repeat_interleave(COMPRESS_RATIO, dim=0)
+        qsa_ops.qsa_store_cache_rows(cache, slots, rows)
+    return cache, table
+
+
+def _e2e_select(q, cache, table, query_start_loc, visible, max_seq_len, shard):
+    """The indexer's decode and prefill select calls on one rank."""
+    rows = q.shape[0]
+    decode_rows = E2E_NUM_DECODES * E2E_DECODE_QUERY_LEN
+    block_indices = torch.empty(
+        rows, E2E_TOKEN_TOPK // COMPRESS_RATIO, dtype=torch.int32, device="cuda"
+    )
+    qsa_indexer_ops.qsa_select_paged_decode(
+        q[:decode_rows],
+        cache,
+        table[:E2E_NUM_DECODES],
+        visible[:decode_rows],
+        E2E_TOKEN_TOPK,
+        COMPRESS_RATIO,
+        E2E_DECODE_QUERY_LEN,
+        block_indices[:decode_rows],
+        shard,
+    )
+    qsa_indexer_ops.qsa_select_paged_prefill(
+        q[decode_rows:],
+        cache,
+        table[E2E_NUM_DECODES:],
+        query_start_loc[E2E_NUM_DECODES:],
+        visible[decode_rows:],
+        E2E_TOKEN_TOPK,
+        COMPRESS_RATIO,
+        max(q for _, q in E2E_REQUESTS[E2E_NUM_DECODES:]),
+        block_indices[decode_rows:],
+        max_seq_len,
+        shard,
+    )
+    return block_indices
+
+
+def _sorted_rows(rows):
+    return [sorted(row) for row in rows.tolist()]
+
+
+@requires_cuda_triton
+@pytest.mark.parametrize("through_indexer", [False, True])
+@pytest.mark.parametrize(("world", "token_interleave"), [(2, 4), (4, 4), (4, 16)])
+def test_sharded_selection_matches_replicated_expand_and_localize(
+    world, token_interleave, through_indexer, monkeypatch
+):
+    """Per-rank selector caches written through the sharded slot mapping,
+    scored by the real decode and prefill selectors, merged by a simulated
+    dim-0 all-gather (one call per select call) and expanded+localized by
+    the fused kernel give, on every rank, the rows that the replicated
+    selector on the full cache gives after expand and localize. Order inside
+    a row may differ (the merge orders by score, the radix top-k does not),
+    so rows compare as sorted lists; the counts compare exactly."""
+    generator = torch.Generator().manual_seed(world * 100 + token_interleave)
+    keys, positions, token_to_req, query_start_loc, visible, q = _e2e_batch(generator)
+    max_seq_len = max(s for s, _ in E2E_REQUESTS)
+    output_width = E2E_TOKEN_TOPK + COMPRESS_RATIO - 1
+
+    full_cache, full_table = _e2e_cache(keys, qsa_cache.QSADCPShard())
+    full_blocks = _e2e_select(
+        q, full_cache, full_table, query_start_loc, visible, max_seq_len, None
+    )
+    full_rows = torch.empty(
+        q.shape[0], output_width + 1, dtype=torch.int32, device="cuda"
+    )
+    qsa_indexer_ops.expand_qsa_block_indices(
+        full_blocks, positions, visible, COMPRESS_RATIO, E2E_TOKEN_TOPK, full_rows
+    )
+
+    group = _TwoPassDCPGroup(world)
+    monkeypatch.setattr(qsa_dcp_selector, "get_dcp_group", lambda: group)
+    selector_interleave = token_interleave // COMPRESS_RATIO
+    ranks = []
+    for rank in range(world):
+        shard = qsa_cache.QSADCPShard(rank, world, selector_interleave)
+        cache, table = _e2e_cache(keys, shard)
+        ranks.append((shard, cache, table, shard.local_lengths(visible)))
+
+    def run_rank(rank):
+        shard, cache, table, local_visible = ranks[rank]
+        token_shard = qsa_cache.QSADCPShard(rank, world, token_interleave)
+        local_rows = torch.full(
+            (q.shape[0], output_width + 1), 7, dtype=torch.int32, device="cuda"
+        )
+        if through_indexer:
+            _select_through_indexer(
+                monkeypatch,
+                q,
+                cache,
+                table,
+                positions,
+                token_to_req,
+                query_start_loc,
+                visible,
+                local_visible,
+                max_seq_len,
+                shard,
+                token_shard,
+                local_rows,
+            )
+            return None, local_rows
+        blocks = _e2e_select(
+            q, cache, table, query_start_loc, local_visible, max_seq_len, shard
+        )
+        qsa_dcp_selector.expand_localize_qsa_block_indices(
+            blocks,
+            positions,
+            visible,
+            COMPRESS_RATIO,
+            E2E_TOKEN_TOPK,
+            local_rows,
+            token_shard,
+        )
+        return blocks, local_rows
+
+    for rank in range(world):
+        group.start(rank, replay=False)
+        run_rank(rank)
+    for rank in range(world):
+        group.start(rank, replay=True)
+        blocks, local_rows = run_rank(rank)
+        # One all-gather per select call: decode and prefill.
+        assert group.calls[rank] == 2
+        expected = qsa_dcp.qsa_localize_dcp_indices(
+            full_rows, torch.empty_like(full_rows), world, rank, token_interleave
+        )
+        if blocks is not None:
+            assert _sorted_rows(blocks) == _sorted_rows(full_blocks)
+        assert torch.equal(local_rows[:, -1], expected[:, -1])
+        for row in range(q.shape[0]):
+            count = int(expected[row, -1])
+            assert sorted(local_rows[row, :count].tolist()) == sorted(
+                expected[row, :count].tolist()
+            )
+            assert bool((local_rows[row, count:output_width] == -1).all())
+
+
+def _select_through_indexer(
+    monkeypatch,
+    q,
+    cache,
+    table,
+    positions,
+    token_to_req,
+    query_start_loc,
+    visible,
+    local_visible,
+    max_seq_len,
+    shard,
+    token_shard,
+    out,
+):
+    """QSAIndexer.forward on one rank, sharded branch, real kernels.
+
+    The fused prepare is replaced by a copy of the index queries (the
+    caches are written beforehand)."""
+    from vllm.models.qwen4_exp.nvidia import indexer_qsa
+
+    def prepare(*args, **kwargs):
+        args[7].copy_(q)
+
+    monkeypatch.setattr(indexer_qsa, "qsa_prepare", prepare)
+    rows = q.shape[0]
+    decode_rows = E2E_NUM_DECODES * E2E_DECODE_QUERY_LEN
+    raw_metadata = SimpleNamespace(
+        num_actual_tokens=rows,
+        slot_mapping=torch.full((rows,), -1, device="cuda"),
+        block_table=table,
+        query_start_loc=query_start_loc,
+        logical_positions=positions,
+    )
+    compressed_metadata = SimpleNamespace(
+        num_actual_tokens=rows,
+        slot_mapping=torch.full((rows,), -1, device="cuda"),
+        k_work_metadata=torch.empty(0, 2, dtype=torch.int32, device="cuda"),
+        num_decodes=E2E_NUM_DECODES,
+        num_decode_tokens=decode_rows,
+        decode_query_len=E2E_DECODE_QUERY_LEN,
+        visible_blocks=visible,
+        local_visible_blocks=local_visible,
+        selector_shard=shard,
+        block_table=table,
+        query_start_loc=query_start_loc,
+        logical_positions=positions,
+        max_query_len=max(q for _, q in E2E_REQUESTS),
+        max_seq_len=max_seq_len,
+    )
+    indexer = SimpleNamespace(
+        skip_topk=False,
+        _metadata=lambda: (raw_metadata, compressed_metadata),
+        index_n_heads=E2E_INDEX_HEADS,
+        index_kv_heads=1,
+        index_head_dim=E2E_INDEX_DIM,
+        indexer_dtype=torch.bfloat16,
+        raw_key_cache=SimpleNamespace(
+            kv_cache=torch.empty(0, device="cuda"),
+            rope_position_cache=None,
+            rope_position_offset=0,
+        ),
+        compressed_key_cache=SimpleNamespace(kv_cache=cache),
+        rotary_emb=SimpleNamespace(cos_sin_cache=torch.empty(0, device="cuda")),
+        q_layernorm=SimpleNamespace(weight=torch.ones(1), variance_epsilon=1e-6),
+        k_layernorm=SimpleNamespace(weight=torch.ones(1)),
+        compress_ratio=COMPRESS_RATIO,
+        token_topk=E2E_TOKEN_TOPK,
+        packed_output_width=out.shape[1],
+    )
+    attn = SimpleNamespace(
+        use_fused_qsa_prepare=True,
+        kv_cache=torch.empty(0, 1, 1, 2, device="cuda"),
+        kv_cache_dtype="auto",
+        q_norm=SimpleNamespace(weight=torch.ones(1), variance_epsilon=1e-6),
+        k_norm=SimpleNamespace(weight=torch.ones(1)),
+        _k_scale_float=1.0,
+        _v_scale_float=1.0,
+        impl=SimpleNamespace(dcp_token_shard=token_shard),
+    )
+    projected_qk = torch.zeros(
+        rows, (E2E_INDEX_HEADS + 1) * E2E_INDEX_DIM, device="cuda"
+    )
+    returned, _ = indexer_qsa.QSAIndexer.forward(
+        indexer,
+        projected_qk,
+        positions,
+        out,
+        attn=attn,
+        qkv=torch.zeros(rows, 4, device="cuda"),
+        slot_mapping=torch.full((rows,), -1, device="cuda"),
+    )
+    assert returned is out
