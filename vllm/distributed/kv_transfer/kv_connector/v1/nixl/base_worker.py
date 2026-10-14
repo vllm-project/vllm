@@ -27,7 +27,6 @@ from vllm.distributed.kv_transfer.kv_connector.utils import (
     EngineId,
     EngineTransferInfo,
     TransferTopology,
-    alloc_host_xfer_buffer,
     get_current_attn_backends,
     get_current_attn_backends_and_specs,
     kv_postprocess_blksize_and_layout_on_receive,
@@ -1192,7 +1191,9 @@ class NixlBaseConnectorWorker:
                             kv_shape = tuple(kv_shape[i] for i in inv_order)
                             permute_shape = True
 
-                xfer_buffers[layer_name] = alloc_host_xfer_buffer(kv_shape, kv_dtype)
+                xfer_buffers[layer_name] = torch.empty(
+                    kv_shape, dtype=kv_dtype, device="cpu"
+                )
                 if permute_shape:
                     xfer_buffers[layer_name] = xfer_buffers[layer_name].permute(
                         inv_order

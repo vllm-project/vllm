@@ -7,12 +7,8 @@ import pytest
 import torch
 
 from vllm import _custom_ops as ops
-from vllm.distributed.kv_transfer.kv_connector.utils import (
-    alloc_host_xfer_buffer,
-    copy_kv_blocks,
-)
+from vllm.distributed.kv_transfer.kv_connector.utils import copy_kv_blocks
 from vllm.platforms import current_platform
-from vllm.utils.platform_utils import is_pin_memory_available
 
 pytestmark = pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
 
@@ -162,39 +158,24 @@ def test_mismatched_block_bytes_fall_back(batch_calls):
     assert batch_calls == []
 
 
-def test_alloc_host_xfer_buffer_pins_when_available():
-    buf = alloc_host_xfer_buffer((NUM_BLOCKS, *BLOCK_SHAPE), torch.bfloat16)
-    assert buf.device.type == "cpu"
-    assert buf.shape == (NUM_BLOCKS, *BLOCK_SHAPE)
-    assert buf.dtype == torch.bfloat16
-    assert buf.is_pinned() == is_pin_memory_available()
+def test_registered_pageable_buffer_takes_batched_path(batch_calls):
+    # The NIXL host buffer is allocated pageable and page-locked later, when
+    # the UCX backend registers it; mirror that with cudaHostRegister.
+    device = _caches("cuda")
+    host = _caches("cpu", pin=False)
+    cudart = torch.cuda.cudart()
+    for t in host.values():
+        assert cudart.cudaHostRegister(t.data_ptr(), t.nbytes, 0) == 0
+    try:
+        assert all(t.is_pinned() for t in host.values())
+        for t in device.values():
+            t.copy_(torch.randn(t.shape, dtype=t.dtype))
 
+        copy_kv_blocks(device, host, SRC_IDS, DST_IDS, "d2h")
 
-def _patch_empty(monkeypatch, pinned_error: Exception):
-    real_empty = torch.empty
-
-    def empty(*args, pin_memory=False, **kwargs):
-        if pin_memory:
-            raise pinned_error
-        return real_empty(*args, pin_memory=pin_memory, **kwargs)
-
-    monkeypatch.setattr(torch, "empty", empty)
-
-
-@pytest.mark.skipif(not is_pin_memory_available(), reason="Requires pinning")
-def test_alloc_host_xfer_buffer_falls_back_to_pageable(monkeypatch):
-    _patch_empty(monkeypatch, RuntimeError("CUDA error: out of memory"))
-
-    buf = alloc_host_xfer_buffer((NUM_BLOCKS, *BLOCK_SHAPE), torch.bfloat16)
-
-    assert buf.device.type == "cpu"
-    assert buf.shape == (NUM_BLOCKS, *BLOCK_SHAPE)
-    assert not buf.is_pinned()
-
-
-@pytest.mark.skipif(not is_pin_memory_available(), reason="Requires pinning")
-def test_alloc_host_xfer_buffer_does_not_hide_other_errors(monkeypatch):
-    _patch_empty(monkeypatch, ValueError("unrelated"))
-
-    with pytest.raises(ValueError, match="unrelated"):
-        alloc_host_xfer_buffer((NUM_BLOCKS, *BLOCK_SHAPE), torch.bfloat16)
+        for name in device:
+            assert torch.equal(host[name][DST_IDS], device[name][SRC_IDS].cpu())
+        assert len(batch_calls) == 1
+    finally:
+        for t in host.values():
+            cudart.cudaHostUnregister(t.data_ptr())

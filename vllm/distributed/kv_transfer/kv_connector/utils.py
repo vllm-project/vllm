@@ -18,7 +18,6 @@ from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.platforms import current_platform
-from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig
@@ -205,39 +204,21 @@ def _make_src_and_dst_indices(
     return _to(src_block_ids, src_device), _to(dst_block_ids, dst_device)
 
 
-def alloc_host_xfer_buffer(shape: tuple[int, ...], dtype: torch.dtype) -> torch.Tensor:
-    """Allocate a host KV transfer buffer, pinned on CUDA when possible.
-
-    Pinning lets ``copy_kv_blocks`` DMA blocks directly. A failed pinned
-    allocation (e.g. not enough lockable host memory) falls back to pageable
-    memory, which keeps the slower per-layer copy path working.
-    """
-    if current_platform.is_cuda() and is_pin_memory_available():
-        try:
-            return torch.empty(shape, dtype=dtype, device="cpu", pin_memory=True)
-        except RuntimeError as e:
-            logger.warning_once(
-                "Failed to allocate pinned host KV transfer buffer (%s); "
-                "falling back to pageable memory, host-buffer KV copies "
-                "will be slower.",
-                e,
-            )
-    return torch.empty(shape, dtype=dtype, device="cpu")
-
-
 def _try_copy_kv_blocks_batched(
     src_kv_caches: dict[str, torch.Tensor],
     dst_kv_caches: dict[str, torch.Tensor],
     src_block_ids: list[int],
     dst_block_ids: list[int],
 ) -> bool:
-    """Copy blocks between device and pinned host buffers with one
+    """Copy blocks between device and page-locked host buffers with one
     ``swap_blocks_batch`` submission. Returns False when the fast path does
     not apply.
 
-    The per-layer fallback indexes the host tensor on the CPU. Serving runs
-    with one Torch thread by default, which caps that path at a few GB/s,
-    while ``swap_blocks_batch`` lets the copy engine move each block directly.
+    NIXL's UCX backend page-locks the host transfer buffer when it registers
+    it, so the buffer is pinned by the time blocks are copied. The per-layer
+    fallback indexes the host tensor on the CPU; serving runs with one Torch
+    thread by default, which caps that path at a few GB/s, while
+    ``swap_blocks_batch`` lets the copy engine move each block directly.
     Copies within a batch are unordered, so destination blocks must not
     overlap; block ids within one call are unique.
     """
