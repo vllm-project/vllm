@@ -66,11 +66,11 @@ from vllm.model_executor.models.transformers.fusers.attention import (
 from vllm.model_executor.models.transformers.utils import (
     attrsetter,
     can_enable_torch_compile,
+    disable_noop_dynamic_rope,
     get_feature_request_tip,
     init_on_device_without_buffers,
     log_replacement,
     named_state,
-    remove_noop_dynamic_rope_update,
     replace_conv_class,
     replace_embedding_class,
     replace_layernorm_class,
@@ -185,13 +185,6 @@ class Base(
         self.pipeline_parallel()
         # Substitute remaining layers with vLLM's layers as needed
         self.recursive_replace()
-        # Drop the rope frequency update where it cannot change anything, so the
-        # device sync it performs does not block compilation or graph capture.
-        # Only the decoder qualifies: `max_model_len` bounds its positions, not
-        # the positions any encoder is given.
-        remove_noop_dynamic_rope_update(
-            self.model.get_decoder(), self.model_config.max_model_len
-        )
         # Create attention instances for KV cache allocation
         self._create_attention_instances(prefix)
 
@@ -213,9 +206,12 @@ class Base(
         `_create_attention_instances` are used
         - Sets the dtype to the default torch dtype set by vLLM because Transformers
         uses the config dtype when creating the model
+        - Rewrites dynamic rope to default rope when `max_model_len` keeps it from
+        ever rescaling, removing the device sync it performs in every forward
         """
         self.text_config._attn_implementation = VLLM_ATTN_IMPL
         self.config.dtype = torch.get_default_dtype()
+        disable_noop_dynamic_rope(self.text_config, self.model_config.max_model_len)
 
     @contextmanager
     def _mark_model_components(self, vllm_config: "VllmConfig"):
