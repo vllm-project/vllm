@@ -208,16 +208,16 @@ class P2PSecondaryTierManager(SecondaryTierManager):
 
     Never entered concurrently: every public method runs under the tiering
     manager's ``lock``, held either by the scheduler thread for the length of
-    a step or by the control-plane thread for the length of one round. Peers are
-    not driven by the engine, so this tier sets ``needs_tier_poll_thread``
-    to opt into that thread; without it a peer's lookup or fetch waits
-    for a step boundary, which on a saturated rank can be seconds.
+    a step or by the tier-poll thread for the length of one round. Peers are
+    not driven by the engine, so this tier sets ``tolerates_off_thread_polling``
+    to be serviced from that thread too; without it a peer's lookup or fetch
+    waits for a step boundary, which on a saturated rank can be seconds.
     ``has_pending_work()`` keeps the engine ticking so the control transport
     and existing sessions are polled even when no requests are scheduled.
     """
 
     cache_hit_source: ClassVar[CacheHitSource] = CacheHitSource.P2P
-    needs_tier_poll_thread: ClassVar[bool] = True
+    tolerates_off_thread_polling: ClassVar[bool] = True
 
     def __init__(
         self,
@@ -621,7 +621,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
     def get_finished_jobs(self) -> Iterable[JobResult]:
         # Drive one polling sweep, then hand off whatever has accumulated. The
         # engine calls this once per step (and keeps stepping while
-        # has_pending_work() is True); the control-plane thread calls it between
+        # has_pending_work() is True); the tier-poll thread calls it between
         # steps, so a peer is not left waiting for a step boundary.
         self._poll_once()
         result = self._finished_jobs
@@ -937,7 +937,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         Drains the control transport, polls every session, accumulates
         their results into ``_finished_jobs``, and reaps any dead sessions.
         Runs under the tiering manager's lock, on the scheduler thread or on
-        the control-plane thread.
+        the tier-poll thread.
         """
         new_connections = self._control.poll()
         if new_connections:

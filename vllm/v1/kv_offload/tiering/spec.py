@@ -286,7 +286,7 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
         if not isinstance(self.secondary_tier_configs, list):
             raise ValueError("secondary_tiers must be a list of tier configurations")
 
-        # Pause between control-plane rounds for tiers that need servicing
+        # Pause between tier-poll rounds for tiers that need servicing
         # between engine steps. Zero or negative disables the thread, which
         # restores per-step servicing.
         self.tier_poll_interval_s = float(

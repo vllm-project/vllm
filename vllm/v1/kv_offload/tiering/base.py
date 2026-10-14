@@ -145,8 +145,8 @@ class SecondaryTierManager(ABC):
 
     Methods are called under the tiering manager's lock, so they are never
     entered concurrently -- but not always from the same thread. A tier that
-    sets needs_tier_poll_thread is also serviced from the manager's
-    control-plane thread, and any tier can be reached from there via
+    sets tolerates_off_thread_polling is also serviced from the manager's
+    tier-poll thread, and any tier can be reached from there via
     ParentManager fan-out. Keep per-thread assumptions out of tier state.
     """
 
@@ -163,15 +163,15 @@ class SecondaryTierManager(ABC):
                 Medium.STORAGE: CacheHitSource.DISK,
             }[cls.medium]
 
-    # Whether this tier answers a counterpart the engine does not drive -- a
-    # remote peer, say -- whose requests would otherwise wait for a step
-    # boundary. The tiering manager then services the tier between engine
-    # steps too, not only from on_schedule_end(): on its polling thread, it
-    # calls both get_finished_jobs() and serve_external_requests(); see
-    # poll_tiers(). Overriding serve_external_requests() alone does not opt
-    # in: setting this asserts the tier tolerates those calls off the
-    # scheduler thread.
-    needs_tier_poll_thread: ClassVar[bool] = False
+    # Whether the tiering manager may also service this tier from its
+    # tier-poll thread, between engine steps, rather than only from
+    # on_schedule_end(). That thread calls both get_finished_jobs() and
+    # serve_external_requests(); see poll_tiers(). Set it on a tier that
+    # answers a counterpart the engine does not drive -- a remote peer, say --
+    # whose requests would otherwise wait for a step boundary. Overriding
+    # serve_external_requests() alone does not opt in: setting this asserts
+    # the tier tolerates those calls off the scheduler thread.
+    tolerates_off_thread_polling: ClassVar[bool] = False
 
     def __init__(
         self,
@@ -344,10 +344,10 @@ class SecondaryTierManager(ABC):
         """Process remotely-originated requests using the parent manager.
 
         Called once per scheduler step, BEFORE _flush_pending_promotions(), and
-        additionally once per control-plane round for tiers that set
-        needs_tier_poll_thread. The _flush_pending_promotions() ordering
+        additionally once per tier-poll round for tiers that set
+        tolerates_off_thread_polling. The _flush_pending_promotions() ordering
         holds only for the per-step call: a promotion this method initiates from
-        a control-plane round is submitted at the next on_schedule_end().
+        a tier-poll round is submitted at the next on_schedule_end().
 
         The parent handle is valid only for the duration of this call, and the
         caller holds the manager lock throughout it -- so a lookup() HIT taken
@@ -355,7 +355,7 @@ class SecondaryTierManager(ABC):
         release that lock partway through.
 
         Tiers that don't serve external requests leave this as a no-op. A tier
-        that overrides it without setting needs_tier_poll_thread is served
+        that overrides it without setting tolerates_off_thread_polling is served
         once per step only.
         """
         return

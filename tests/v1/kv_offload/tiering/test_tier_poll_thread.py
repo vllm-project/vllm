@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for OffloadingManager.lock and the tiering control-plane thread.
+"""Tests for OffloadingManager.lock and the tiering tier-poll thread.
 
 The control plane of a tier that answers something the engine does not drive --
 a remote peer, say -- used to advance only from on_schedule_end(), so a peer's
@@ -53,7 +53,7 @@ class _FakeTier(SecondaryTierManager):
     """Tier that records which thread serviced it, and when."""
 
     medium: ClassVar[Medium] = Medium.CPU
-    needs_tier_poll_thread: ClassVar[bool] = True
+    tolerates_off_thread_polling: ClassVar[bool] = True
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -94,7 +94,7 @@ class _FakeTier(SecondaryTierManager):
 
     def shutdown(self) -> None:
         self.shutdown_saw_live_thread = any(
-            t.name == "vllm_offload_control_plane" and t.is_alive()
+            t.name == "vllm_offload_tier_poll" and t.is_alive()
             for t in threading.enumerate()
         )
 
@@ -102,7 +102,7 @@ class _FakeTier(SecondaryTierManager):
 class _QuietTier(_FakeTier):
     """Tier that does not want servicing between steps."""
 
-    needs_tier_poll_thread: ClassVar[bool] = False
+    tolerates_off_thread_polling: ClassVar[bool] = False
 
 
 def _make_manager(tier_cls=_FakeTier, num_chunks: int = 8, **kwargs):
@@ -137,7 +137,7 @@ def _live_control_threads() -> list[threading.Thread]:
     return [
         t
         for t in threading.enumerate()
-        if t.name == "vllm_offload_control_plane" and t.is_alive()
+        if t.name == "vllm_offload_tier_poll" and t.is_alive()
     ]
 
 
@@ -206,7 +206,7 @@ def test_zero_interval_disables_the_thread(manager_and_tier):
     """The escape hatch back to per-step servicing.
 
     Without the thread the tier is serviced only by on_schedule_end, which is
-    the behaviour the control plane had before it existed.
+    the behaviour these tiers had before the thread existed.
     """
     manager, tier = manager_and_tier
 
@@ -368,12 +368,12 @@ def test_shutdown_joins_the_control_thread_before_tier_teardown(manager_and_tier
 
 def _wedge_control_thread(manager, monkeypatch) -> threading.Event:
     """Replace the control thread with one that ignores the stop request."""
-    manager._stop_control_plane()
+    manager._stop_tier_poll_thread()
     release = threading.Event()
     stuck = threading.Thread(target=release.wait, daemon=True)
     stuck.start()
-    manager._control_plane_thread = stuck
-    monkeypatch.setattr(tiering_manager, "_CONTROL_PLANE_JOIN_TIMEOUT_S", 0.1)
+    manager._tier_poll_thread = stuck
+    monkeypatch.setattr(tiering_manager, "_TIER_POLL_JOIN_TIMEOUT_S", 0.1)
     return release
 
 
@@ -411,7 +411,7 @@ def test_failure_burst_does_not_stop_the_thread(manager_and_tier):
     """The give-up budget is time, not rounds.
 
     At a 1 ms interval, a few hundred failing rounds take well under a second;
-    a fault that short must not turn the control plane off for good.
+    a fault that short must not turn the tier-poll thread off for good.
     """
     manager, tier = manager_and_tier
     assert tier.served.wait(_SETTLE_S)
@@ -432,7 +432,7 @@ def test_failure_burst_does_not_stop_the_thread(manager_and_tier):
 
 
 def test_sustained_failure_stops_the_thread(monkeypatch):
-    monkeypatch.setattr(tiering_manager, "_CONTROL_PLANE_GIVE_UP_AFTER_S", 0.2)
+    monkeypatch.setattr(tiering_manager, "_TIER_POLL_GIVE_UP_AFTER_S", 0.2)
     manager, tier = _make_manager()
     try:
         assert tier.served.wait(_SETTLE_S)

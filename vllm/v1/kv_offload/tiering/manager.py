@@ -62,7 +62,7 @@ from vllm.v1.metrics.cache_hit_source import CacheHitSource
 logger = init_logger(__name__)
 
 
-# Default pause between control-plane rounds; the user-facing default of the
+# Default pause between tier-poll rounds; the user-facing default of the
 # ``tier_poll_interval_s`` extra-config key. A round is a non-blocking sweep, so
 # this sets how long a peer's request can sit unserved; 1 ms is three orders of
 # magnitude below the model step it hides, and matches the pause the p2p tier's
@@ -71,21 +71,21 @@ DEFAULT_TIER_POLL_INTERVAL_S = 0.001
 # How long a round waits for the manager lock before giving up and retrying.
 # Bounded so the thread stays responsive to shutdown even if a caller holds the
 # lock for a long time, or leaked it.
-_CONTROL_PLANE_LOCK_TIMEOUT_S = 1.0
+_TIER_POLL_LOCK_TIMEOUT_S = 1.0
 # Warn after this much continuous failure to acquire the lock. Above the 5 s
 # warning drain_jobs() emits, so a slow reset_cache() does not warn twice.
-_CONTROL_PLANE_STALL_WARN_S = 30.0
+_TIER_POLL_STALL_WARN_S = 30.0
 # Give up after rounds have failed continuously for this long. Counted in time,
 # not rounds: at the default 1 ms interval a round budget is spent in a blink,
 # so a transient fault (a peer reconnecting) would turn the thread off for
 # good. on_schedule_end() still serves the tiers, so the fallback is per-step
 # servicing rather than none.
-_CONTROL_PLANE_GIVE_UP_AFTER_S = 30.0
+_TIER_POLL_GIVE_UP_AFTER_S = 30.0
 # Minimum spacing between logged tracebacks for a run of failing rounds, which
 # would otherwise log one per interval.
-_CONTROL_PLANE_ERROR_LOG_INTERVAL_S = 1.0
+_TIER_POLL_ERROR_LOG_INTERVAL_S = 1.0
 # How long shutdown() waits for the thread to finish its round.
-_CONTROL_PLANE_JOIN_TIMEOUT_S = 5.0
+_TIER_POLL_JOIN_TIMEOUT_S = 5.0
 
 
 @dataclass
@@ -229,14 +229,14 @@ class TieringOffloadingManager(OffloadingManager):
             primary_tier: The primary tier manager (CPU-based).
             secondary_tiers: List of secondary tier managers (e.g., Storage,
                             Network). Can be None or empty list.
-            tier_poll_interval_s: Pause between control-plane rounds for
-                tiers that set needs_tier_poll_thread. Zero or negative
+            tier_poll_interval_s: Pause between tier-poll rounds for
+                tiers that set tolerates_off_thread_polling. Zero or negative
                 disables the thread, leaving those tiers serviced once per
                 engine step as before.
 
         """
         # Guards this manager and every tier it composes, the primary tier
-        # included. A real lock because the control-plane thread enters the
+        # included. A real lock because the tier-poll thread enters the
         # manager too; the primary tier has none of its own.
         self._lock = threading.Lock()
         self.primary_tier: CPUPrimaryTierOffloadingManager = primary_tier
@@ -288,13 +288,13 @@ class TieringOffloadingManager(OffloadingManager):
 
         # Tiers that serve external requests, and so must also be serviced
         # between engine steps.
-        self._external_serving_tiers: list[SecondaryTierManager] = [
-            tier for tier in self.secondary_tiers if tier.needs_tier_poll_thread
+        self._polled_tiers: list[SecondaryTierManager] = [
+            tier for tier in self.secondary_tiers if tier.tolerates_off_thread_polling
         ]
         self._tier_poll_interval_s = tier_poll_interval_s
-        self._control_plane_stop = threading.Event()
-        self._control_plane_thread: threading.Thread | None = None
-        self._start_control_plane()
+        self._tier_poll_stop = threading.Event()
+        self._tier_poll_thread: threading.Thread | None = None
+        self._start_tier_poll_thread()
 
     @property
     @override
@@ -302,57 +302,57 @@ class TieringOffloadingManager(OffloadingManager):
         return self._lock
 
     # ------------------------------------------------------------------
-    # Control plane
+    # Tier polling
     # ------------------------------------------------------------------
 
-    def _start_control_plane(self) -> None:
-        """Start the control-plane thread, if any tier asked for one."""
-        if not self._external_serving_tiers or self._tier_poll_interval_s <= 0:
+    def _start_tier_poll_thread(self) -> None:
+        """Start the tier-poll thread, if any tier asked for one."""
+        if not self._polled_tiers or self._tier_poll_interval_s <= 0:
             return
-        self._control_plane_thread = threading.Thread(
-            target=self._control_plane_loop,
-            name="vllm_offload_control_plane",
+        self._tier_poll_thread = threading.Thread(
+            target=self._tier_poll_loop,
+            name="vllm_offload_tier_poll",
             daemon=True,
         )
-        self._control_plane_thread.start()
+        self._tier_poll_thread.start()
         logger.info(
-            "KV offload control-plane thread started for tier(s) %s, interval %.3fs",
-            [tier.tier_type for tier in self._external_serving_tiers],
+            "KV offload tier-poll thread started for tier(s) %s, interval %.3fs",
+            [tier.tier_type for tier in self._polled_tiers],
             self._tier_poll_interval_s,
         )
 
-    def _stop_control_plane(self) -> None:
-        """Stop and join the control-plane thread.
+    def _stop_tier_poll_thread(self) -> None:
+        """Stop and join the tier-poll thread.
 
         Must run before any tier teardown: the thread drives tier transports,
         and closing one underneath it can crash the process rather than raise.
         """
-        self._control_plane_stop.set()
-        thread = self._control_plane_thread
+        self._tier_poll_stop.set()
+        thread = self._tier_poll_thread
         if thread is None:
             return
-        thread.join(timeout=_CONTROL_PLANE_JOIN_TIMEOUT_S)
+        thread.join(timeout=_TIER_POLL_JOIN_TIMEOUT_S)
         if thread.is_alive():
             logger.error(
-                "KV offload control-plane thread did not exit within %.1fs",
-                _CONTROL_PLANE_JOIN_TIMEOUT_S,
+                "KV offload tier-poll thread did not exit within %.1fs",
+                _TIER_POLL_JOIN_TIMEOUT_S,
             )
         else:
-            self._control_plane_thread = None
+            self._tier_poll_thread = None
 
-    def _control_plane_loop(self) -> None:
+    def _tier_poll_loop(self) -> None:
         stalled_since: float | None = None
         # Start of the current run of failed rounds, and when one last logged.
         failing_since: float | None = None
         last_error_log = 0.0
-        while not self._control_plane_stop.is_set():
-            if not self._lock.acquire(timeout=_CONTROL_PLANE_LOCK_TIMEOUT_S):
+        while not self._tier_poll_stop.is_set():
+            if not self._lock.acquire(timeout=_TIER_POLL_LOCK_TIMEOUT_S):
                 now = time.monotonic()
                 if stalled_since is None:
                     stalled_since = now
-                elif now - stalled_since > _CONTROL_PLANE_STALL_WARN_S:
+                elif now - stalled_since > _TIER_POLL_STALL_WARN_S:
                     logger.warning(
-                        "KV offload control-plane thread has not acquired the "
+                        "KV offload tier-poll thread has not acquired the "
                         "manager lock for %.0fs; peer requests are only being "
                         "served at engine-step boundaries.",
                         now - stalled_since,
@@ -366,29 +366,29 @@ class TieringOffloadingManager(OffloadingManager):
             except Exception:
                 # Never let a round kill the thread silently: on_schedule_end()
                 # still serves these tiers, so persistent failure degrades to
-                # per-step servicing instead of stopping the control plane.
+                # per-step servicing instead of stopping the tier-poll thread.
                 now = time.monotonic()
                 if failing_since is None:
                     failing_since = now
-                if now - last_error_log >= _CONTROL_PLANE_ERROR_LOG_INTERVAL_S:
+                if now - last_error_log >= _TIER_POLL_ERROR_LOG_INTERVAL_S:
                     last_error_log = now
-                    logger.exception("KV offload control-plane round failed")
+                    logger.exception("KV offload tier-poll round failed")
             finally:
                 self._lock.release()
             if (
                 failing_since is not None
-                and time.monotonic() - failing_since >= _CONTROL_PLANE_GIVE_UP_AFTER_S
+                and time.monotonic() - failing_since >= _TIER_POLL_GIVE_UP_AFTER_S
             ):
                 logger.error(
-                    "KV offload control-plane thread stopping after %.0fs of "
+                    "KV offload tier-poll thread stopping after %.0fs of "
                     "consecutive failures; falling back to per-step servicing.",
-                    _CONTROL_PLANE_GIVE_UP_AFTER_S,
+                    _TIER_POLL_GIVE_UP_AFTER_S,
                 )
                 return
             # Yield unconditionally, and only after release(). Python locks are
             # not fair, so a release-then-reacquire loop could starve the
             # scheduler thread; this pause is what bounds its wait to one round.
-            self._control_plane_stop.wait(self._tier_poll_interval_s)
+            self._tier_poll_stop.wait(self._tier_poll_interval_s)
 
     def poll_tiers(self) -> None:
         """Advance the control plane of tiers that cannot wait for a step.
@@ -417,8 +417,8 @@ class TieringOffloadingManager(OffloadingManager):
         gate = self._processed_jobs_this_step
         self._processed_jobs_this_step = True
         try:
-            self._process_finished_jobs(self._external_serving_tiers)
-            for tier in self._external_serving_tiers:
+            self._process_finished_jobs(self._polled_tiers)
+            for tier in self._polled_tiers:
                 tier.serve_external_requests(self._tier_parents[tier])
         finally:
             self._processed_jobs_this_step = gate
@@ -1228,7 +1228,7 @@ class TieringOffloadingManager(OffloadingManager):
     def shutdown(self) -> None:
         """Shut down secondary tiers before releasing primary resources.
 
-        Stops the control-plane thread first: it drives tier transports, and
+        Stops the tier-poll thread first: it drives tier transports, and
         tearing one down underneath it (closing a socket, destroying a ZMQ
         context) can take the process down rather than raise. If the thread
         will not exit, hold the manager lock across tier teardown so it cannot
@@ -1238,18 +1238,18 @@ class TieringOffloadingManager(OffloadingManager):
 
         Unlike every other manager method, call this WITHOUT holding
         self.lock: it takes the lock itself, which is not reentrant, and the
-        control-plane thread needs the lock free to notice the stop request
+        tier-poll thread needs the lock free to notice the stop request
         and exit. A caller that does hold it only gets the RuntimeError above,
         after waiting out the timeout.
 
         Every secondary tier is given a shutdown attempt. If any shutdown
         fails, preserve the primary mmap because a failed tier may still use it.
         """
-        self._stop_control_plane()
-        if self._control_plane_thread is not None:
-            if not self._lock.acquire(timeout=_CONTROL_PLANE_JOIN_TIMEOUT_S):
+        self._stop_tier_poll_thread()
+        if self._tier_poll_thread is not None:
+            if not self._lock.acquire(timeout=_TIER_POLL_JOIN_TIMEOUT_S):
                 raise RuntimeError(
-                    "KV offload control-plane thread is still running and the "
+                    "KV offload tier-poll thread is still running and the "
                     "manager lock is unavailable; secondary tiers were not "
                     "shut down. shutdown() must be called without holding "
                     "manager.lock."

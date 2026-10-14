@@ -3,7 +3,7 @@
 """NixlTransport: Data-plane transport for RDMA-based KV block transfers via NIXL.
 
 Threading: the agent is reached from the scheduler thread and, when the tiering
-manager runs one, from its control-plane thread. The manager's lock serializes
+manager runs one, from its tier-poll thread. The manager's lock serializes
 them strictly -- one Python thread inside any agent call at a time, with a full
 memory barrier between.
 

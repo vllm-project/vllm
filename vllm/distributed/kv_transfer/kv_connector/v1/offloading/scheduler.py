@@ -651,7 +651,7 @@ class OffloadingConnectorScheduler:
     # Manager exclusion
     #
     # The manager is entered from the scheduler thread and, for managers that
-    # run one, from a control-plane thread. Manager methods never take their
+    # run one, from a tier-poll thread. Manager methods never take their
     # own lock, so the exclusion boundary lives here. manager.lock may be a
     # no-op for a manager that needs no exclusion; it is entered regardless.
     #
@@ -2197,7 +2197,7 @@ class OffloadingConnectorScheduler:
         assert not self._current_batch_allocated_block_ids
 
         # Held for the whole reset. manager.reset_cache() drains tiers by
-        # polling them itself, so a control-plane thread locked out here loses
+        # polling them itself, so a tier-poll thread locked out here loses
         # nothing; it simply skips rounds until the reset completes.
         with self._manager_locked():
             self._reset_cache()
