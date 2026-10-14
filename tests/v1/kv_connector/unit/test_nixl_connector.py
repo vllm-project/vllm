@@ -3317,12 +3317,16 @@ class TestPeerReplacement:
         assert not self.worker._failed_remote_engines
         assert not self.worker._invalid_remote_engines
 
-    def test_rehandshakes_re_registered_peer(self):
+    @pytest.mark.parametrize("loaded", [True, False])
+    def test_rehandshakes_re_registered_peer(self, loaded):
+        if not loaded:  # our own sleep already dropped the agent
+            self.worker._cleanup_remote_engine("old", log_eviction=False)
+            self.transport.remove_remote_agent.reset_mock()
         metadata = self._request("old")
         metadata.reqs_to_recv["old-req"].remote.registration_epoch = 1
         self.worker.start_load_kv(metadata)
         self.transport.make_prepped_xfer.assert_not_called()
-        self.transport.remove_remote_agent.assert_called_once_with("old")
+        assert self.transport.remove_remote_agent.called is loaded
         assert "old" in self.worker._handshake_futures
 
 

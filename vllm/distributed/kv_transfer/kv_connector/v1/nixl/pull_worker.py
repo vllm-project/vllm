@@ -146,7 +146,8 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         epoch = meta.remote.registration_epoch
         if self._remote_registration_epochs.get(engine_id, 0) < epoch:
             # The remote woke up from sleep and registered its KV cache again.
-            self._cleanup_remote_engine(engine_id, log_eviction=False)
+            if engine_id in self._remote_agents:
+                self._cleanup_remote_engine(engine_id, log_eviction=False)
             self._remote_registration_epochs[engine_id] = epoch
         if engine_id not in self._remote_agents:
             # Also re-handshakes queued requests that outlived invalid-peer cleanup.
