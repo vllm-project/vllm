@@ -722,6 +722,8 @@ class VllmConfig:
             return use_v2_model_runner
 
         if not HAS_TRITON:
+            if current_platform.is_cpu():
+                return True
             logger.warning_once(
                 "Model Runner V2 requires Triton; using the V1 model runner instead."
             )
@@ -3239,6 +3241,7 @@ class VllmConfig:
                         "CPU Model Runner V2 without Triton does not yet support: "
                         f"{', '.join(unsupported)}"
                     )
+                return
             raise ValueError("Model Runner V2 requires Triton.")
 
     def _validate_v1_model_runner(self) -> None:
