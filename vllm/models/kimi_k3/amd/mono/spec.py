@@ -9,7 +9,8 @@
   gather), AITER's decode, M1b (at DCP8 the LSE combine, W_UV, the gate), then
   K2 (o_proj, its all-reduce, the MLP AttnRes and the latent MoE).
 
-A launch serves whole spec-verify requests, at most 64 rows. Weights are views
+A launch serves whole spec-verify requests, at most 16 rows (the kernels tile up
+to 64, but from 32 rows on they are slower than vLLM's path). Weights are views
 of the loaded parameters (``weight_source="views"``), pinned by the MoE
 backend; every refusal stage reports every reason.
 """
@@ -36,16 +37,17 @@ TP = 8
 DCP = TP  # the MLA layers' KV shards: one a TP rank
 DCP_SIZES = (1, DCP)  # M1's builds: the whole KV a rank, or DCP over the TP group
 MLA_HEADS, MLA_Q, MLA_KV, MLA_NOPE, MLA_ROPE, MLA_V = 12, 1536, 512, 128, 64, 128
-MAX_TOKENS = 64  # a launch's rows: the MoE route table's token bitmaps
+MAX_TOKENS = 64  # the kernels' rows: the MoE route table's token bitmaps
+MAX_ROWS = 16  # a served step's rows: at 32 and 64 rows mono loses to vLLM
 WHOLE, FFN = "whole", "ffn"
 
 
 def widths(vllm_config: "VllmConfig") -> tuple[int, ...]:
     """Whole spec-verify requests of ``num_speculative_tokens + 1`` rows, at most
-    MAX_TOKENS rows."""
+    MAX_ROWS rows."""
     spec = vllm_config.speculative_config
     q = 1 if spec is None else spec.num_speculative_tokens + 1
-    return tuple(range(q, MAX_TOKENS + 1, q))
+    return tuple(range(q, MAX_ROWS + 1, q))
 
 
 def layer_kinds(config) -> dict[int, str]:
@@ -100,10 +102,10 @@ def refuse_config(vllm_config: "VllmConfig") -> list[str]:
     spec = vllm_config.speculative_config
     if spec is None:
         reasons.append("needs speculative decoding (spec-verify steps)")
-    elif spec.num_speculative_tokens + 1 > MAX_TOKENS:
+    elif spec.num_speculative_tokens + 1 > MAX_ROWS:
         reasons.append(
             f"{spec.num_speculative_tokens} speculative tokens: a request's "
-            f"{spec.num_speculative_tokens + 1} rows exceed {MAX_TOKENS}"
+            f"{spec.num_speculative_tokens + 1} rows exceed {MAX_ROWS}"
         )
     return reasons
 

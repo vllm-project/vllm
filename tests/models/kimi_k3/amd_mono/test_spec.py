@@ -29,11 +29,10 @@ def _k3_config(**over):
 @pytest.mark.parametrize(
     "k, want",
     [
-        (7, tuple(range(8, 65, 8))),
-        (3, tuple(range(4, 65, 4))),
-        (1, tuple(range(2, 65, 2))),
-        (15, (16, 32, 48, 64)),
-        (63, (64,)),
+        (7, (8, 16)),
+        (3, (4, 8, 12, 16)),
+        (1, tuple(range(2, 17, 2))),
+        (15, (16,)),
     ],
 )
 def test_widths_are_whole_requests_up_to_max_rows(k, want):
@@ -86,7 +85,7 @@ def test_dcp1_is_accepted_whatever_the_interleave(monkeypatch):
     "over, reason",
     [
         ({"speculative_config": None}, "needs speculative decoding"),
-        ({"speculative_config.num_speculative_tokens": 64}, "exceed 64"),
+        ({"speculative_config.num_speculative_tokens": 16}, "exceed 16"),
         ({"parallel_config.tensor_parallel_size": 4}, "needs TP8"),
         ({"parallel_config.decode_context_parallel_size": 2}, "needs DCP1 or DCP8"),
         ({"parallel_config.decode_context_parallel_size": 4}, "needs DCP1 or DCP8"),

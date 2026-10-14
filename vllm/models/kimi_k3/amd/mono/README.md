@@ -1,9 +1,10 @@
 # Kimi-K3 mono decode (MI355X)
 
 A MonoKernel as RFC #60904 proposes, opt-in with `--monokernel`. A pure
-spec-verify step of at most 64 rows runs each MoE decoder layer as persistent
+spec-verify step of at most 16 rows runs each MoE decoder layer as persistent
 FlyDSL launches (256 CTAs, all resident), the TP all-reduces in-kernel over
-peer memory:
+peer memory. The kernels tile up to 64 rows, but at 32 and 64 rows they were
+slower than vLLM's path, so the spec caps a step at 16 (`MAX_ROWS`):
 
 - **Whole layers** (KDA): K1 (AttnRes, in_proj, f_b, spec conv, KDA recurrence,
   gated RMSNorm), then K2.
