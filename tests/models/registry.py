@@ -360,6 +360,9 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "KimiLinearForCausalLM": _HfExamplesInfo(
         "moonshotai/Kimi-Linear-48B-A3B-Instruct", trust_remote_code=True
     ),
+    "Kolibri1ForCausalLM": _HfExamplesInfo(
+        "Aleph-Alpha/Kolibri-1", min_transformers_version="5.20.0"
+    ),
     "LagunaForCausalLM": _HfExamplesInfo("poolside/Laguna-XS.2"),
     "Lfm2ForCausalLM": _HfExamplesInfo("LiquidAI/LFM2-1.2B"),
     "Lfm2MoeForCausalLM": _HfExamplesInfo(
@@ -721,6 +724,11 @@ _TOKEN_CLASSIFICATION_EXAMPLE_MODELS = {
 _SEQUENCE_CLASSIFICATION_EXAMPLE_MODELS = {
     "BertForSequenceClassification": _HfExamplesInfo(
         "cross-encoder/ms-marco-MiniLM-L-6-v2"
+    ),
+    "D3ForSequenceClassification": _HfExamplesInfo(
+        "vllm-sr/d3-edge",
+        extras={"d3": "vllm-sr/d3", "d3-mini": "vllm-sr/d3-mini"},
+        max_model_len=4096,
     ),
     "GPT2ForSequenceClassification": _HfExamplesInfo(
         "nie3e/sentiment-polish-gpt2-small"
@@ -1434,7 +1442,9 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "CohereLabs/cohere-transcribe-03-2026", trust_remote_code=True
     ),
     "NemotronParseForConditionalGeneration": _HfExamplesInfo(
-        "nvidia/NVIDIA-Nemotron-Parse-v1.2", trust_remote_code=True
+        "nvidia/NVIDIA-Nemotron-Parse-v1.2",
+        extras={"2.0": "nvidia/NVIDIA-Nemotron-Parse-2.0"},
+        trust_remote_code=True,
     ),
     "WhisperForConditionalGeneration": _HfExamplesInfo(
         "openai/whisper-large-v3-turbo",
