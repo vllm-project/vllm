@@ -159,36 +159,23 @@ class OffloadingEventsTracker:
                 state.locators.setdefault(key, hash_boundary * tokens_per_hash)
         state.indexed_hash_count = len(request.block_hashes)
 
-    def _locator_for(
-        self,
-        state: _RequestEventContext,
-        offload_key: OffloadKey,
-    ) -> tuple["GroupOffloadConfig", int] | None:
-        self._extend_locators(state)
-        boundary_tokens = state.locators.get(offload_key)
-        group_config = state.group_configs.get(get_offload_group_idx(offload_key))
-        if boundary_tokens is None or group_config is None:
-            return None
-        return group_config, boundary_tokens
-
-    @staticmethod
-    def _request_is_event_safe(request: Request) -> bool:
-        if getattr(request, "resumable", False) is True:
-            return False
-        params = getattr(request, "kv_transfer_params", None)
-        return not (isinstance(params, dict) and params.get("_p_side_truncated"))
-
     def _metadata_for(
         self,
         state: _RequestEventContext,
         offload_key: OffloadKey,
     ) -> _OffloadEventMetadata | None:
-        if not self._request_is_event_safe(state.request):
+        request = state.request
+        if getattr(request, "resumable", False) is True:
             return None
-        locator = self._locator_for(state, offload_key)
-        if locator is None:
+        params = getattr(request, "kv_transfer_params", None)
+        if isinstance(params, dict) and params.get("_p_side_truncated"):
             return None
-        group_config, boundary_tokens = locator
+
+        self._extend_locators(state)
+        boundary_tokens = state.locators.get(offload_key)
+        group_config = state.group_configs.get(get_offload_group_idx(offload_key))
+        if boundary_tokens is None or group_config is None:
+            return None
         if boundary_tokens % group_config.tokens_per_chunk == 0:
             chunk_idx = boundary_tokens // group_config.tokens_per_chunk - 1
             return self._build_event_metadata(state.request, group_config, chunk_idx)
