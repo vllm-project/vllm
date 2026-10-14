@@ -3,7 +3,10 @@
 
 import torch
 
+import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm.distributed.localization import get_localized_resources
+from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
@@ -29,6 +32,18 @@ from vllm.utils.flashinfer import (
     flashinfer_cute_dsl_fused_moe_nvfp4,
     has_flashinfer_cutedsl_moe_nvfp4,
 )
+
+logger = init_logger(__name__)
+
+
+def _one_sm_count(res) -> int:
+    """Return the common SM count required by FlashInfer's scalar interface."""
+    counts = res.split_sm_counts
+    assert counts and len(set(counts)) == 1, (
+        f"localized_sm_count is a scalar but partitions differ: {counts}. "
+        "Widen localized_sm_count to a list in FlashInfer before allowing this."
+    )
+    return counts[0]
 
 
 class FlashInferCuteDSLExperts(mk.FusedMoEExpertsModular):
@@ -65,6 +80,8 @@ class FlashInferCuteDSLExperts(mk.FusedMoEExpertsModular):
         self.gemm1_alpha = quant_config.gemm1_alpha
         self.gemm1_beta = quant_config.gemm1_beta
         self.gemm1_clamp_limit = quant_config.gemm1_clamp_limit
+        # SiTU (Kimi K3). The CuteDSL kernel keys SiTU off situ_beta rather than
+        # off an activation enum, so these ride alongside the base activation.
         self.situ_beta = moe_config.activation_situ_beta
         self.situ_linear_beta = moe_config.activation_situ_linear_beta
         self.per_token_activation = per_token_activation
@@ -75,10 +92,93 @@ class FlashInferCuteDSLExperts(mk.FusedMoEExpertsModular):
                 (1,),
                 NVFP4_PER_TOKEN_BASE_GLOBAL_SCALE,
             )
+        self.autotune_use_cuda_graph = moe_config.max_capture_size > 0
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         layer.w13_weight_scale_2.data.mul_(layer.w13_input_scale)
         layer.w2_weight_scale_2.data.mul_(layer.w2_input_scale)
+        # apply() has no `layer` argument; keep a reference so the
+        # locality-domain shards can be read from it. Looked up lazily, so hook
+        # order is irrelevant.
+        self._localized_layer = layer
+
+    def _localized_call_kwargs(self, w1: torch.Tensor) -> dict:
+        """Locality-domain kwargs for the FlashInfer call, built and cached per layer.
+
+        Empty when localization is off or this layer carries no per-die shards,
+        which leaves the FlashInfer call on its ordinary full-width path.
+        """
+        cached = getattr(self, "_localized_kwargs", None)
+        if cached is not None:
+            return cached
+
+        res = get_localized_resources()
+        shards = getattr(
+            getattr(self, "_localized_layer", None),
+            "localized_shards",
+            None,
+        )
+        if res is None or not shards:
+            if res is not None:
+                logger.warning(
+                    "[locality domains] localization enabled but this layer has "
+                    "no per-die shards; falling back to the full-width MoE path"
+                )
+            self._localized_kwargs = {}
+            return self._localized_kwargs
+
+        logger.info_once(
+            "[locality domains] localized MoE wired: %d per-die shards", len(shards)
+        )
+
+        # vLLM names the fused gate+up weight w13; FlashInfer calls it w1 and its
+        # scales _sf. The alphas and fc2_input_scale are deliberately absent: they
+        # are per-expert or global, so they are invariant under a split on N and
+        # locality domains read the same unsharded tensors from the call site.
+        # FlashInfer validates len(localized_streams) == len(localized_weights).
+        # Check it
+        # here so a future mismatch names this call site instead of surfacing as
+        # a ValueError from inside the kernel wrapper.
+        assert len(res.split_streams) == len(shards), (
+            f"{len(res.split_streams)} split streams for {len(shards)} weight "
+            "shards; these must be 1:1"
+        )
+        self._localized_kwargs = {
+            "localized_weights": [
+                {
+                    "w1_weight": sh["w13_weight"],
+                    "w1_weight_sf": sh["w13_weight_scale"],
+                    "w2_weight": sh["w2_weight"],
+                    "w2_weight_sf": sh["w2_weight_scale"],
+                }
+                for sh in shards
+            ],
+            # split_streams, NOT streams: the list now also carries the
+            # auxiliary memset resource, and FlashInfer validates
+            # len(localized_streams) == len(localized_weights).
+            "localized_streams": res.split_streams,
+            "localized_sm_count": _one_sm_count(res),
+            # When the originals are retained, tune the full-width pipeline
+            # alongside localization for every token bucket. This handles the
+            # non-monotonic Kimi-K3 crossover without a model-specific cutoff.
+            "localized_allow_nonlocalized": (
+                not envs.VLLM_MOE_LOCALIZE_FREE_FULL_WEIGHTS
+            ),
+            "autotune_use_cuda_graph": self.autotune_use_cuda_graph,
+            # Lets FlashInfer run the output memset off the compute
+            # partitions and concurrently with FC1, rather than between the
+            # FC1 and FC2 joins. Which stream this actually is gets logged at
+            # construction as "[locality domains] output-memset stream: ...".
+            # Omitting the
+            # kwarg restores the old
+            # ordering, which is how the change gets A/B tested.
+            **(
+                {"localized_memset_stream": res.aux_stream}
+                if envs.VLLM_MOE_LOCALIZE_MEMSET_OVERLAP
+                else {}
+            ),
+        }
+        return self._localized_kwargs
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
@@ -203,19 +303,6 @@ class FlashInferCuteDSLExperts(mk.FusedMoEExpertsModular):
                 "swiglu_beta": self.gemm1_beta,
                 "swiglu_limit": self.gemm1_clamp_limit,
             }
-        elif activation == MoEActivation.SITU:
-            # The cute_dsl kernel keys SiTU on situ_beta and requires
-            # activation_type to stay a base type (ActivationType.Situ is
-            # rejected by normalize_cute_dsl_moe_activation_type), so the
-            # Swiglu base type is passed below and SiTU rides the betas.
-            if self.situ_beta is None:
-                raise ValueError(
-                    "SITU activation requires moe_config.activation_situ_beta"
-                )
-            swiglu_params = {
-                "situ_beta": self.situ_beta,
-                "situ_linear_beta": self.situ_linear_beta,
-            }
         swiglu_kwargs = {k: v for k, v in swiglu_params.items() if v is not None}
 
         per_token_kwargs = (
@@ -238,9 +325,16 @@ class FlashInferCuteDSLExperts(mk.FusedMoEExpertsModular):
             num_local_experts=self.local_num_experts,
             local_expert_offset=self.local_expert_offset,
             moe_output=output,
+            # normalize_cute_dsl_moe_activation_type rejects ActivationType.Situ,
+            # so SiTU is expressed as the SILU base type plus the betas below.
             activation_type=activation_to_flashinfer_int(
                 MoEActivation.SILU if activation == MoEActivation.SITU else activation
             ),
             **swiglu_kwargs,
             **per_token_kwargs,
+            # Empty unless locality-domain localization is on, in which case both
+            # GEMMs are
+            # split across the device's dies. w1/w2 above stay the full-width
+            # tensors: FlashInfer still reads hidden_size from w2_weight.
+            **self._localized_call_kwargs(w1),
         )

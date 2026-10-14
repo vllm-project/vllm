@@ -509,6 +509,17 @@ class Worker(WorkerBase):
             # Set random seed.
             set_random_seed(self.model_config.seed)
 
+            # Locality-domain localization resources: green contexts, their
+            # streams, and per-die memory pools. Built here because this runs
+            # after the device/distributed setup but BEFORE load_model(), so the
+            # pools exist before weights are allocated and the streams exist
+            # before any CUDA graph capture. No-op unless VLLM_USE_LOCALITY_DOMAINS=1.
+            from vllm.distributed.localization import (
+                maybe_init_localized_resources,
+            )
+
+            self.localized_resources = maybe_init_localized_resources(self.device)
+
             # Now take memory snapshot after NCCL is initialized
             gc.collect()
             torch.accelerator.empty_cache()

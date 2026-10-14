@@ -221,6 +221,9 @@ if TYPE_CHECKING:
     VLLM_ENABLE_GEMM_RS: bool = False
     VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER: bool = True
     VLLM_USE_FLASHINFER_MOE_INT4: bool = False
+    VLLM_USE_LOCALITY_DOMAINS: bool = False
+    VLLM_MOE_LOCALIZE_MEMSET_OVERLAP: bool = True
+    VLLM_MOE_LOCALIZE_FREE_FULL_WEIGHTS: bool = False
     VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR: str | None = None
     VLLM_FLASHINFER_AUTOTUNE_SKIP_OPS: list[str] | None = None
     VLLM_FLASHINFER_ALLREDUCE_BACKEND: Literal["auto", "trtllm", "mnnvl"] = "auto"
@@ -1703,6 +1706,27 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Allow use of FlashInfer MxInt4 MoE kernels for fused moe ops.
     "VLLM_USE_FLASHINFER_MOE_INT4": lambda: bool(
         int(os.getenv("VLLM_USE_FLASHINFER_MOE_INT4", "0"))
+    ),
+    # Split MoE weights and both MoE GEMMs across a multi-die GPU's locality
+    # domains ("locality-domain localization"), using one CUDA green context per die.
+    # Rubin (SM107) NVFP4 only; requires cuda-bindings >= 13.4.
+    "VLLM_USE_LOCALITY_DOMAINS": lambda: bool(
+        int(os.getenv("VLLM_USE_LOCALITY_DOMAINS", "0"))
+    ),
+    # Run the MoE output memset on its own stream, overlapping FC1, instead
+    # of between the FC1 and FC2 joins. On by default; 0 restores the old
+    # ordering so the change can be A/B tested without a rebuild.
+    "VLLM_MOE_LOCALIZE_MEMSET_OVERLAP": lambda: bool(
+        int(os.getenv("VLLM_MOE_LOCALIZE_MEMSET_OVERLAP", "1"))
+    ),
+    # After per-die sharding the full-width MoE weights are dead: the localized
+    # path reads shard["w1_weight"]/shard["w2_weight"], and the only surviving
+    # use of the originals is w2_weight.size(1) for hidden_size. Freeing their
+    # storage returns ~97 GiB/GPU on Kimi K3 (KV cache 45.2 -> ~142 GiB).
+    # Off by default: it is destructive and incompatible with EPLB, which
+    # rearranges experts in place.
+    "VLLM_MOE_LOCALIZE_FREE_FULL_WEIGHTS": lambda: bool(
+        int(os.getenv("VLLM_MOE_LOCALIZE_FREE_FULL_WEIGHTS", "0"))
     ),
     # Control the cache sized used by the xgrammar compiler. The default
     # of 512 MB should be enough for roughly 1000 JSON schemas.
