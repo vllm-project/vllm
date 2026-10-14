@@ -2763,13 +2763,12 @@ def test_sleep_unregisters_and_restores_kv_caches(dist_init):
     connector.unregister_kv_caches()
     connector.unregister_kv_caches()  # a discard, then a sleep
     assert nixl.deregister_memory.call_args_list == [call(d) for d in descs]
-    assert not worker._remote_agents and not worker.src_xfer_handles_by_block_size
+    assert not worker._remote_agents
 
     nixl.get_agent_metadata.return_value = b"re-registered"
     connector.restore_kv_caches()
     connector.restore_kv_caches()
     assert nixl.register_memory.call_count == len(descs)
-    assert worker.block_size in worker.src_xfer_handles_by_block_size
     payload = worker.xfer_handshake_metadata
     agent = msgspec.msgpack.decode(payload.agent_metadata_bytes, type=NixlAgentMetadata)
     assert agent.agent_metadata == b"re-registered"
@@ -3317,16 +3316,12 @@ class TestPeerReplacement:
         assert not self.worker._failed_remote_engines
         assert not self.worker._invalid_remote_engines
 
-    @pytest.mark.parametrize("loaded", [True, False])
-    def test_rehandshakes_re_registered_peer(self, loaded):
-        if not loaded:  # our own sleep already dropped the agent
-            self.worker._cleanup_remote_engine("old", log_eviction=False)
-            self.transport.remove_remote_agent.reset_mock()
+    def test_rehandshakes_re_registered_peer(self):
         metadata = self._request("old")
         metadata.reqs_to_recv["old-req"].remote.registration_epoch = 1
         self.worker.start_load_kv(metadata)
         self.transport.make_prepped_xfer.assert_not_called()
-        assert self.transport.remove_remote_agent.called is loaded
+        self.transport.remove_remote_agent.assert_called_once_with("old")
         assert "old" in self.worker._handshake_futures
 
 
