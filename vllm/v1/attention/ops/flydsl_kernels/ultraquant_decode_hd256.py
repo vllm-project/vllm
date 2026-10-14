@@ -48,14 +48,10 @@ SLOT_CONTENT_BYTES = V_SCALES_OFFSET + N_GROUPS  # 272
 MFMA_N = 16
 PV_N_CHUNKS = HEAD_SIZE // MFMA_N  # 16 for HEAD_SIZE=256
 
-# --- Per-lane data-movement geometry (generalized from the 128 kernel) ------
-# The K/V dequant lane assignment splits each token's packed code bytes across
-# the 4 ``chunk_in_tok`` sub-lanes (lane % 4). Each lane processes
-# ``KEY_CODE_BYTES // 4`` code bytes = 32 B at 256. buffer_load maxes at 16 B
-# (dwordx4) so a lane issues ``HALVES``=2 loads; each 16-B half covers exactly
-# one UE8M0 group of 32 head-dims.
-#   HEAD_SIZE=128: LANE_CODE_BYTES=16, HALVES=1, SUBCHUNK_HDIMS=32
-#   HEAD_SIZE=256: LANE_CODE_BYTES=32, HALVES=2, SUBCHUNK_HDIMS=64
+# --- Per-lane data-movement geometry ----------------------------------------
+# Each token's packed code bytes are split across the 4 ``chunk_in_tok``
+# sub-lanes (lane % 4), 32 B per lane. A buffer load moves at most 16 B, so a
+# lane issues ``HALVES`` = 2 loads, each covering one 32-head-dim UE8M0 group.
 LANE_CODE_BYTES = KEY_CODE_BYTES // 4  # 32 code bytes per lane per K-tile
 HALVES = LANE_CODE_BYTES // 16  # 2 for HEAD_SIZE=256
 HALF_HDIMS = 32  # head-dims per half (= one group)
@@ -139,22 +135,12 @@ def build_ultraquant_decode_hd256_module(
     # The 8-row lane map masks its two inactive rows for GQA-6.
     _FUSE_QROT = bool(fuse_qrot)
 
-    # --- Cache policy on the KV code stream ----------------------------------
-    # KV codes are read EXACTLY ONCE per decode (81.6 MB at B=4/seq=75k) and
-    # never reused, so caching them only evicts Q / block-table / scale lines
-    # that ARE reused. gfx9 buffer aux bits: bit0=sc0, bit1=nt, bit4=sc1.
-    #   0 = default (what we ship today: no hint at all)
-    #   2 = nt        (non-temporal: stream, do not pollute)
-    #  18 = nt|sc1    (also bypass the far cache level)
+    # Cache policy for the read-once KV code stream. gfx9 buffer aux bits:
+    # bit0=sc0, bit1=nt, bit4=sc1; 0 = no hint, 2 = nt, 18 = nt|sc1.
     _KV_AUX = 0
 
-    # --- Occupancy: size the Q LDS to the ACTUAL query group -------------------
-    # STEP B only writes rows [0, QG) and STEP C/F only read those rows. For
-    # QG=8 the upper 4 KB is allocated-but-never-touched, so shrinking it to
-    # QG*HEAD_SIZE*2 is bitwise identical and frees LDS/workgroup (17 KB -> 13 KB
-    # at QG=8), lifting waves/CU (~3 -> ~5) since the kernel is LDS-occupancy
-    # bound. The launcher pads segm pools to QG=16 regardless, so this is purely
-    # an in-kernel LDS footprint reduction.
+    # Q LDS holds only the QG real rows (13 KB instead of 17 KB per workgroup
+    # at QG=8), which raises waves/CU for this LDS-occupancy-bound kernel.
     _Q_LDS_BYTES = QG * HEAD_SIZE * 2
 
     _BS = int(kv_block_size)
@@ -269,19 +255,11 @@ def build_ultraquant_decode_hd256_module(
         gpu.barrier()
 
         # ===== STEP B': in-kernel Q rotation (fused WHT) ==================
-        # The shipped path needs a SEPARATE prologue kernel to compute
-        # q_rot = Q @ PiT. That kernel is ~7 us at B=4 -- essentially ALL fixed
-        # per-dispatch cost (measured: 2.1M MACs, and sweeping its grid 4x moves
-        # it 0%). PiT is the orthonormal Sylvester Hadamard with a column
-        # permutation folded in on the host, so Q @ PiT is a WALSH-HADAMARD
-        # TRANSFORM: 8 butterfly stages (2048 add/sub per row) instead of a
-        # 256x256 matmul (65536 MACs) -- 32x less work, cheap enough to redo
-        # redundantly in every partition and delete the dispatch entirely.
-        #
-        # Verified offline: butterfly vs matmul differs by <=1.8e-6 in fp32, and
-        # after the E4M3 haircut the two agree EXACTLY (0/2048 elements differ),
-        # because e4m3 keeps only 3 mantissa bits. So this is bit-exact, not an
-        # approximation.
+        # PiT is the orthonormal Sylvester Hadamard with a column permutation
+        # folded in on the host, so q_rot = Q @ PiT is a Walsh-Hadamard
+        # transform: 8 butterfly stages instead of a 256x256 matmul, cheap
+        # enough to redo in every partition instead of a separate kernel.
+        # After the E4M3 haircut it matches the matmul bit-for-bit.
         #
         # Lane map: lane L owns row r = L>>3 and the 32 CONSECUTIVE head-dims
         # d = (L&7)*32 + t. That puts butterfly stages 0..4 (strides 1..16)
@@ -506,8 +484,6 @@ def build_ultraquant_decode_hd256_module(
                 )
                 return (_kpl, _vpl, _ksw, _vsw)
 
-            # Depth-1 software prefetch: emit the next tile's HBM loads before
-            # consuming the current tile without changing arithmetic order.
             _PF_DEPTH = 1
             # Prime the pipeline with the first _PF_DEPTH tiles' loads.
             _pf_queue = []
@@ -622,7 +598,7 @@ def build_ultraquant_decode_hd256_module(
                         v_bf16 = fx.Vector.from_elements(bf16_elems, dtype=fx.BFloat16)
                         v_lds_i64_idx = (v_lds_elem_base + hf * HALF_HDIMS + w * 8) // 4
                         (kv_lds_i64 + v_lds_i64_idx).store(v_bf16.bitcast(fx.Int64))
-                # HW V transpose cross-lane LDS fence (see 128 kernel).
+                # HW V transpose cross-lane LDS fence (see tq_decode.py).
                 rocdl.sched_barrier(0)
                 rocdl.s_waitcnt(lgkmcnt=0)
                 gpu.barrier()
