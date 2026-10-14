@@ -52,42 +52,51 @@ class Int8OnlineMoEMethod(OnlineMoEMethodBase):
         if getattr(layer, "_already_called_process_weights_after_loading", False):
             return
 
-        self._quantize_weights(layer)
+        w13_weight, w2_weight = self.get_weights_for_quantization(layer)
+        self._quantize_weights(layer, w13_weight, w2_weight)
         self._setup_kernel(layer)
+        self.release_requantization_source_weights(layer)
 
         layer._already_called_process_weights_after_loading = True
 
-    def _quantize_weights(self, layer: Module) -> None:
+    def _quantize_weights(
+        self,
+        layer: Module,
+        w13_weight: torch.Tensor | None = None,
+        w2_weight: torch.Tensor | None = None,
+    ) -> None:
+        w13_weight = layer.w13_weight if w13_weight is None else w13_weight
+        w2_weight = layer.w2_weight if w2_weight is None else w2_weight
         vmax = torch.iinfo(torch.int8).max
 
-        w13 = torch.empty_like(layer.w13_weight, dtype=torch.int8)
-        w2 = torch.empty_like(layer.w2_weight, dtype=torch.int8)
+        w13 = torch.empty_like(w13_weight, dtype=torch.int8)
+        w2 = torch.empty_like(w2_weight, dtype=torch.int8)
         w13_scale = torch.zeros(
             layer.num_experts,
-            layer.w13_weight.shape[1],
+            w13_weight.shape[1],
             device=w13.device,
             dtype=torch.float32,
         )
         w2_scale = torch.zeros(
             layer.num_experts,
-            layer.w2_weight.shape[1],
+            w2_weight.shape[1],
             device=w2.device,
             dtype=torch.float32,
         )
 
-        w2_amax = weight_amax(layer.w2_weight, dim=-1)
+        w2_amax = weight_amax(w2_weight, dim=-1)
         w2_amax = amax_for_moe_weight_quant(w2_amax, self.moe.tp_size)
 
         for expert in range(layer.local_num_experts):
             # w13: per-row quantization over hidden_size dim
-            w = layer.w13_weight[expert, :, :]
+            w = w13_weight[expert, :, :]
             scales = w.abs().amax(dim=1) / vmax
             q = w.div(scales.unsqueeze(1)).round().clamp(-vmax, vmax)
             w13[expert, :, :] = q.to(torch.int8)
             w13_scale[expert, :] = scales
 
             # w2: per-row quantization over intermediate_size dim
-            w = layer.w2_weight[expert, :, :]
+            w = w2_weight[expert, :, :]
             scales = w2_amax[expert] / vmax
             q = w.div(scales.unsqueeze(1)).round().clamp(-vmax, vmax)
             w2[expert, :, :] = q.to(torch.int8)

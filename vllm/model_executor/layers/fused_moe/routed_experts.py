@@ -700,12 +700,29 @@ class RoutedExperts(PluggableLayer):
                 param.data[:, :dim1, :dim2].copy_(loaded_weight)
             return True if return_success else None
 
-        quant_method_name = self.quant_method.__class__.__name__
+        from vllm.model_executor.layers.quantization.online.moe_base import (
+            OnlineMoEMethodBase,
+        )
+
+        base_quant_method = self.quant_method
+
+        # In case online MOE re-quantization is used, loading is handled
+        # by the original quant method.
+        if (
+            isinstance(base_quant_method, OnlineMoEMethodBase)
+            and base_quant_method.requantization_source is not None
+        ):
+            assert isinstance(
+                base_quant_method.requantization_source, FusedMoEMethodBase
+            )
+            base_quant_method = base_quant_method.requantization_source
+
+        quant_method_name = base_quant_method.__class__.__name__
         global_expert_id = expert_id
         expert_id = self._map_global_expert_id_to_local_expert_id(global_expert_id)
 
         use_global_sf = (
-            getattr(self.quant_method, "use_global_sf", False)
+            getattr(base_quant_method, "use_global_sf", False)
             and "input_scale" in weight_name
         )
 
@@ -842,7 +859,7 @@ class RoutedExperts(PluggableLayer):
         if "ModelOpt" in quant_method_name:
             # Determine per-tensor weight scale patterns based on variant
             # Use the dedicated method instead of brittle string matching
-            uses_weight_scale_2 = self.quant_method.uses_weight_scale_2_pattern()
+            uses_weight_scale_2 = base_quant_method.uses_weight_scale_2_pattern()
             quant_method = getattr(param, "quant_method", None)
 
             # Call _load_per_tensor_weight_scale() to load per-tensor (scalar)
@@ -921,7 +938,7 @@ class RoutedExperts(PluggableLayer):
                 FusedMoeWeightScaleSupported.GROUP.value,
                 FusedMoeWeightScaleSupported.BLOCK.value,
             ]:
-                scale_refine = getattr(self.quant_method, "weight_scale_refine", None)
+                scale_refine = getattr(base_quant_method, "weight_scale_refine", None)
                 if (
                     quant_method == FusedMoeWeightScaleSupported.BLOCK.value
                     and scale_refine is not None
