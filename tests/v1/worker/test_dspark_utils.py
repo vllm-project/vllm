@@ -11,7 +11,10 @@ from vllm.config import ParallelConfig
 from vllm.v1.kv_cache_interface import FullAttentionSpec
 from vllm.v1.worker.gpu import model_runner
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
-from vllm.v1.worker.gpu.spec_decode.dspark.utils import _get_dspark_parallel_config
+from vllm.v1.worker.gpu.spec_decode.dspark.utils import (
+    _get_dspark_parallel_config,
+    _inherit_dspark_weights_uri,
+)
 from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
 
 
@@ -28,6 +31,31 @@ class _FakeModelConfig:
 @dataclass
 class _FakeEPLBConfig:
     num_redundant_experts: int = 0
+
+
+@dataclass
+class _FakeWeightsConfig:
+    model: str
+    model_weights: str = ""
+
+
+@pytest.mark.parametrize(
+    "draft,expected",
+    [
+        (_FakeWeightsConfig("/cache/metadata"), "s3://b/target"),
+        (_FakeWeightsConfig("/cache/metadata", "s3://b/draft"), "s3://b/draft"),
+        (_FakeWeightsConfig("org/other"), ""),
+    ],
+)
+def test_dspark_inherits_only_shared_checkpoint_uri(draft, expected):
+    # Resolved ModelConfig objects also carry non-dataclass runtime fields.
+    draft._hf_config_revision = "pinned-revision"
+    original_weights = draft.model_weights
+    target = _FakeWeightsConfig("/cache/metadata", "s3://b/target")
+    resolved = _inherit_dspark_weights_uri(target, draft)
+    assert resolved.model_weights == expected
+    assert draft.model_weights == original_weights
+    assert resolved._hf_config_revision == "pinned-revision"
 
 
 @dataclass
