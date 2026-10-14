@@ -95,7 +95,10 @@ steps:
       # The failure happens inside RCCL's lazy communicator init, so this run
       # asks RCCL which transport it picks per pair and which buffer it exports.
       - NCCL_DEBUG=INFO NCCL_DEBUG_SUBSYS=INIT,P2P,GRAPH,ALLOC AMD_LOG_LEVEL=1 VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=NCCL_DEBUG,NCCL_DEBUG_SUBSYS,AMD_LOG_LEVEL pytest -v -s distributed/test_elastic_ep.py -k enforce_eager_none || true
-      # If either of these passes, the IPC transport is the trigger and we have
-      # a workaround to propose rather than only a bug to report.
-      - NCCL_P2P_DISABLE=1 AMD_LOG_LEVEL=1 VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=NCCL_P2P_DISABLE,AMD_LOG_LEVEL pytest -v -s distributed/test_elastic_ep.py -k enforce_eager_none || true
-      - NCCL_P2P_LEVEL=SYS AMD_LOG_LEVEL=1 VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=NCCL_P2P_LEVEL,AMD_LOG_LEVEL pytest -v -s distributed/test_elastic_ep.py -k enforce_eager_none
+      # The previous run tried NCCL_P2P_DISABLE and NCCL_P2P_LEVEL and both hit
+      # the same hsa_status 4097. Measured locally, NCCL_P2P_DISABLE=1 already
+      # drops RCCL to zero hipIpcGetMemHandle calls, so that 4097 came from our
+      # own probe rather than from RCCL: no transport setting can avoid it and
+      # there is nothing left to learn from those two passes. Spend the time on
+      # a second clean run instead, which is the one the new probes report on.
+      - AMD_LOG_LEVEL=1 VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=AMD_LOG_LEVEL pytest -v -s distributed/test_elastic_ep.py -k enforce_eager_none

@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import ctypes
 import os
+import subprocess
+import sys
 import traceback
 
 import torch
@@ -117,6 +119,128 @@ def _device_fds() -> dict[str, int]:
     return counts
 
 
+class _HipPointerAttributes(ctypes.Structure):
+    _fields_ = [
+        ("type", ctypes.c_int),
+        ("device", ctypes.c_int),
+        ("device_pointer", ctypes.c_void_p),
+        ("host_pointer", ctypes.c_void_p),
+        ("is_managed", ctypes.c_int),
+        ("allocation_flags", ctypes.c_uint),
+    ]
+
+
+_MEMORY_TYPES = {
+    0: "unregistered",
+    1: "host",
+    2: "device",
+    3: "managed",
+    10: "array",
+    11: "unified",
+}
+
+
+def _pointer_facts(ptr: ctypes.c_void_p) -> str:
+    """What HIP believes the address is that ROCr just refused.
+
+    ROCr answers the export with HSA_STATUS_ERROR_INVALID_ARGUMENT and the
+    argument in question is this pointer, so ask the driver about it directly.
+    A type other than device, a device index that is not ours, or a base that
+    does not match the pointer would each be an answer rather than a guess.
+    """
+    hip = _lib()
+    facts = []
+    attrs = _HipPointerAttributes()
+    rc = hip.hipPointerGetAttributes(ctypes.byref(attrs), ptr)
+    hip.hipGetLastError()
+    if rc != 0:
+        facts.append(f"attrs failed {_err(rc)}")
+    else:
+        facts.append(
+            f"type={_MEMORY_TYPES.get(attrs.type, attrs.type)} "
+            f"device={attrs.device} managed={attrs.is_managed} "
+            f"alloc_flags={attrs.allocation_flags:#x} "
+            f"dev_ptr={attrs.device_pointer or 0:#x} "
+            f"host_ptr={attrs.host_pointer or 0:#x}"
+        )
+    base = ctypes.c_void_p()
+    psize = ctypes.c_size_t()
+    rc = hip.hipMemGetAddressRange(ctypes.byref(base), ctypes.byref(psize), ptr)
+    hip.hipGetLastError()
+    if rc != 0:
+        facts.append(f"range failed {_err(rc)}")
+    else:
+        facts.append(
+            f"base={base.value or 0:#x} size={psize.value} "
+            f"offset={(ptr.value or 0) - (base.value or 0)}"
+        )
+    return ", ".join(facts)
+
+
+_CHILD_EXPORT = r"""
+import ctypes, sys
+
+size, device, flags = int(sys.argv[1]), int(sys.argv[2]), int(sys.argv[3])
+hip = ctypes.CDLL("libamdhip64.so")
+hip.hipGetErrorString.restype = ctypes.c_char_p
+
+
+def err(rc):
+    return f"{rc} {hip.hipGetErrorString(rc).decode()}"
+
+
+rc = hip.hipSetDevice(device)
+if rc != 0:
+    print(f"setDevice failed {err(rc)}")
+    raise SystemExit(0)
+ptr = ctypes.c_void_p()
+rc = hip.hipExtMallocWithFlags(
+    ctypes.byref(ptr), ctypes.c_size_t(size), ctypes.c_uint(flags)
+)
+if rc != 0:
+    print(f"malloc failed {err(rc)}")
+    raise SystemExit(0)
+handle = ctypes.create_string_buffer(64)
+rc = hip.hipIpcGetMemHandle(handle, ptr)
+print("ok" if rc == 0 else f"ipc failed {err(rc)}")
+"""
+
+
+def _ipc_probe_fresh_process(size: int) -> str:
+    """Whether the breakage belongs to this process or to the card.
+
+    By the time an export fails here, this process has been through engine
+    startup, several scaling transitions and thousands of RCCL exports. A child
+    that has done none of that, on the same device, settles the question in one
+    line: exporting fine means the state is ours to find, failing the same way
+    means the card is in a state no process can use.
+
+    It deliberately does not import torch, so it starts in a fraction of a
+    second and costs only a HIP context on the target device. It inherits our
+    environment, so HIP_VISIBLE_DEVICES still maps the index to the same card.
+    """
+    try:
+        out = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                _CHILD_EXPORT,
+                str(size),
+                str(_hip_device()),
+                str(_MALLOC_FLAGS["uncached"]),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+    except subprocess.TimeoutExpired:
+        return "child timed out"
+    said = out.stdout.strip() or "no output"
+    if out.returncode != 0:
+        return f"child exited {out.returncode}: {said} {out.stderr.strip()[-300:]}"
+    return said
+
+
 def _ipc_probe(size: int) -> dict[str, str]:
     hip = _lib()
     results = {}
@@ -131,7 +255,10 @@ def _ipc_probe(size: int) -> dict[str, str]:
             continue
         handle = ctypes.create_string_buffer(64)
         rc = hip.hipIpcGetMemHandle(handle, ptr)
-        results[name] = "ok" if rc == 0 else f"ipc failed {_err(rc)}"
+        if rc == 0:
+            results[name] = "ok"
+        else:
+            results[name] = f"ipc failed {_err(rc)} [{_pointer_facts(ptr)}]"
         hip.hipGetLastError()
         hip.hipFree(ptr)
     try:
@@ -189,10 +316,19 @@ def _ipc_probe_burst(size: int, count: int) -> str:
 
 
 def _ipc_export_ceiling(size: int, limit: int) -> str:
-    """The burst above stops at a fixed count, so a pass tells us nothing about
-    where the ceiling is: on a bare-metal host with amdgpu 6.16.6 the same probe
-    holds 8192 handles without complaint. This reports the count actually
-    reached, so a lower ceiling on another driver becomes visible."""
+    """How many exports fit before the driver refuses one.
+
+    The flags matter and the earlier version of this probe had them wrong. It
+    went through plain hipMalloc, while RCCL allocates the buffers it exports
+    with hipExtMallocWithFlags and hipDeviceMallocUncached:
+
+        p2p_tmp.cc:284 Cuda Alloc Size 6291456 pointer 0x... flags 3
+
+    so every ceiling measured so far was on a different pool from the one that
+    fails. One two-rank group brings up 32 channels and RCCL ends up holding
+    roughly a thousand of these per rank, which is the same order as the counts
+    this probe walks, so a ceiling here would be a direct explanation.
+    """
     hip = _lib()
     ptrs: list[ctypes.c_void_p] = []
     reached = 0
@@ -200,7 +336,11 @@ def _ipc_export_ceiling(size: int, limit: int) -> str:
     try:
         while reached < limit:
             ptr = ctypes.c_void_p()
-            rc = hip.hipMalloc(ctypes.byref(ptr), ctypes.c_size_t(size))
+            rc = hip.hipExtMallocWithFlags(
+                ctypes.byref(ptr),
+                ctypes.c_size_t(size),
+                ctypes.c_uint(_MALLOC_FLAGS["uncached"]),
+            )
             if rc != 0:
                 hip.hipGetLastError()
                 stopped = f"malloc stopped first: {_err(rc)}"
@@ -235,7 +375,9 @@ def _kfd_topology() -> dict:
         "num_xcc",
         "hive_id",
     )
-    out: dict[str, object] = {}
+    gpus: dict[str, object] = {}
+    cpus: list[str] = []
+    unreadable: list[str] = []
     try:
         nodes = sorted(os.listdir(base), key=lambda n: int(n) if n.isdigit() else -1)
     except OSError as e:
@@ -248,10 +390,15 @@ def _kfd_topology() -> dict:
                     key, _, value = line.strip().partition(" ")
                     if key in wanted:
                         props[key] = value.strip()
-        except OSError:
+        except OSError as e:
+            # The earlier version dropped these silently, which made an absent
+            # node indistinguishable from one we simply cannot read. In a VM
+            # that difference is the whole question.
+            unreadable.append(f"{node} ({type(e).__name__})")
             continue
         if props.get("simd_count", "0") == "0":
-            continue  # CPU node, no GPU to report on
+            cpus.append(node)
+            continue
         links = []
         try:
             for link in sorted(os.listdir(f"{base}/{node}/io_links")):
@@ -263,8 +410,28 @@ def _kfd_topology() -> dict:
                 links.append(f"to={fields.get('node_to')} type={fields.get('type')}")
         except OSError:
             pass
-        out[node] = {"props": props, "io_links": links}
-    return out
+        gpus[node] = {"props": props, "io_links": links}
+
+    # RCCL reads this same table, and in CI it claims XGMI towards nodes that
+    # never showed up above. Say so explicitly rather than leaving it to be
+    # noticed by eye.
+    present = set(nodes)
+    for entry in gpus.values():
+        missing = sorted(
+            {
+                link.split("to=", 1)[1].split(" ", 1)[0]
+                for link in entry["io_links"]  # type: ignore[index]
+            }
+            - present
+        )
+        if missing:
+            entry["links_to_absent_nodes"] = missing  # type: ignore[index]
+    return {
+        "nodes_seen": nodes,
+        "cpu_nodes": cpus,
+        "unreadable_nodes": unreadable,
+        "gpus": gpus,
+    }
 
 
 def _ipc_probe_foreign_device(size: int) -> str:
@@ -395,7 +562,11 @@ def dump(tag: str, groups: dict | None = None, heavy: bool = False) -> None:
             # context on a neighbour card, so neither runs near the collective.
             info["ipc_probe_burst_64x6MiB"] = _ipc_probe_burst(6 << 20, 64)
             info["ipc_probe_foreign_device"] = _ipc_probe_foreign_device(6 << 20)
+            info["ipc_probe_fresh_process"] = _ipc_probe_fresh_process(6 << 20)
             info["ipc_export_ceiling_2MiB"] = _ipc_export_ceiling(2 << 20, 4096)
+            # 6 MiB is the size RCCL exports most of, and it holds about a
+            # thousand of them per rank, so walk past that.
+            info["ipc_export_ceiling_6MiB"] = _ipc_export_ceiling(6 << 20, 1536)
         logger.warning("[EEP-DEBUG] %s %s", tag, info)
     except Exception as e:
         logger.warning("[EEP-DEBUG] %s dump failed: %r", tag, e)
