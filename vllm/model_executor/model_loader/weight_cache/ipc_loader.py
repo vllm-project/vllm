@@ -7,13 +7,19 @@ import dataclasses
 import socket
 import time
 from collections.abc import Callable
-from copy import copy
+from copy import copy, deepcopy
 from typing import TypeVar
 
 import torch
 import torch.nn as nn
 
-from vllm.config import ModelConfig, VllmConfig, get_current_vllm_config
+from vllm.config import (
+    CacheConfig,
+    ModelConfig,
+    ParallelConfig,
+    VllmConfig,
+    get_current_vllm_config,
+)
 from vllm.config.load import LoadConfig
 from vllm.distributed import (
     get_dp_group,
@@ -175,7 +181,15 @@ class IpcModelLoader(BaseModelLoader):
         loaded through this loader).
         """
         device_index = torch.accelerator.current_device_index()
-        entries = self._fetch_entries(model_config, is_reload=True).entries
+        cache_config = getattr(model, "_ipc_cache_config", None)
+        parallel_config = getattr(model, "_ipc_parallel_config", None)
+        if cache_config is None or parallel_config is None:
+            vllm_config = get_current_vllm_config()
+            cache_config = vllm_config.cache_config
+            parallel_config = vllm_config.parallel_config
+        entries = self._fetch_entries(
+            model_config, cache_config, parallel_config, is_reload=True
+        ).entries
         params = dict(model.named_parameters())
         buffers = dict(model.named_buffers())
         for name, entry in entries.items():
@@ -210,9 +224,14 @@ class IpcModelLoader(BaseModelLoader):
                     f"was configured for the "
                     f"{'draft' if self.is_draft else 'target'} group"
                 )
-            state = self._fetch_entries(model_config)
+            state = self._fetch_entries(
+                model_config, vllm_config.cache_config, vllm_config.parallel_config
+            )
             state_fetched = True
-            return self._build_model(vllm_config, model_config, prefix, state)
+            model = self._build_model(vllm_config, model_config, prefix, state)
+            model._ipc_cache_config = deepcopy(vllm_config.cache_config)
+            model._ipc_parallel_config = deepcopy(vllm_config.parallel_config)
+            return model
         except (WeightCacheUnavailableError, CacheConfigMismatchError) as e:
             if not self.fallback:
                 raise
@@ -236,7 +255,10 @@ class IpcModelLoader(BaseModelLoader):
             if state_fetched and self.mode == "copy":
                 self._send_release()
             torch.accelerator.empty_cache()
-        return self._fallback_load(vllm_config, model_config, prefix)
+        model = self._fallback_load(vllm_config, model_config, prefix)
+        model._ipc_cache_config = deepcopy(vllm_config.cache_config)
+        model._ipc_parallel_config = deepcopy(vllm_config.parallel_config)
+        return model
 
     def _build_model(
         self,
@@ -345,13 +367,18 @@ class IpcModelLoader(BaseModelLoader):
             _register(alias_name, obj, isinstance(obj, nn.Parameter))
 
     def _fetch_entries(
-        self, model_config: ModelConfig, *, is_reload: bool = False
+        self,
+        model_config: ModelConfig,
+        cache_config: CacheConfig,
+        parallel_config: ParallelConfig,
+        *,
+        is_reload: bool = False,
     ) -> WeightCacheState:
         dp_group = get_dp_group()
         pp_group = get_pp_group()
-        parallel_config = get_current_vllm_config().parallel_config
-        cache_config = WeightCacheKey.from_model_config(
+        cache_key = WeightCacheKey.from_model_config(
             model_config,
+            cache_config=cache_config,
             tp_size=get_tensor_model_parallel_world_size(),
             tp_rank=get_tensor_model_parallel_rank(),
             pp_size=pp_group.world_size,
@@ -364,9 +391,9 @@ class IpcModelLoader(BaseModelLoader):
         )
         if not self.fallback:
             return self._with_startup_wait(
-                lambda: self._request_state(cache_config, is_reload=is_reload)
+                lambda: self._request_state(cache_key, is_reload=is_reload)
             )
-        return self._request_state(cache_config, is_reload=is_reload)
+        return self._request_state(cache_key, is_reload=is_reload)
 
     def _with_startup_wait(self, op: Callable[[], _T]) -> _T:
         """Retry op until the daemon answers or the state timeout elapses;

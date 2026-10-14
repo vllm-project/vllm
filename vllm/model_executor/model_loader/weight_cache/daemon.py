@@ -234,6 +234,7 @@ class WeightCacheDaemon:
         # mutate hf_config.quantization_config.
         self.cache_config = WeightCacheKey.from_model_config(
             self.model_config,
+            cache_config=vllm_config.cache_config,
             tp_size=self.tp_size,
             tp_rank=self.tp_rank,
             pp_size=self.pp_size,
