@@ -65,8 +65,7 @@ def prepare_humming_linear_layer_config(
         BaseInputSchema,
         BaseWeightSchema,
         HummingInputSchema,
-        prepare_layer_config,
-        transform_humming_tensors,
+        prepare_and_transform_humming_tensors,
     )
 
     weight_schema = BaseWeightSchema.from_config(quant_config)
@@ -129,7 +128,8 @@ def prepare_humming_linear_layer_config(
             input_tensors.pop(name, None)
 
     # Step 2: transform weight (humming standard format) for forwarding.
-    config = prepare_layer_config(
+    config, tensors = prepare_and_transform_humming_tensors(
+        tensors=tensors,
         shape_n=sum(layer.output_partition_sizes),
         shape_k=input_size_per_partition,
         weight_schema=weight_schema,
@@ -140,7 +140,6 @@ def prepare_humming_linear_layer_config(
         torch_dtype=layer.params_dtype,
         device=tensors["weight"].device,
     )
-    tensors = transform_humming_tensors(config, tensors)
     tensors.update(input_tensors)
     if "bias" in tensors:
         zero_bias = torch.zeros_like(tensors["bias"])
