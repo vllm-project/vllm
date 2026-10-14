@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The GLM-5.3-Flash MonoKernel spec: whole-layer launches for the KDA MoE layers,
-FFN-layer launches for the sparse-attention ones.
+"""The GLM-5.3-Flash MonoKernel spec: whole-layer launches for the KDA and the
+sparse-attention MoE layers.
 
 Config-time code imports only this module; the model-side callbacks import the
 kernel lazily."""
@@ -28,6 +28,13 @@ NUMERICS = (
     "expert inputs quantized to MXFP8 (vLLM: MXFP4)",
     "attention TP reduce summed in BF16 inside the launch",
     "KDA conv taps, L2 norms, gates and recurrence in FP32, as vLLM's kernels",
+    "sparse-attention FP8 projections on bf16 activations (vLLM: FP8 per 128)",
+    "W_UK / W_UV in bf16 from kv_b_proj (vLLM: AITER FP4 / FP8 BMM)",
+    "split-attention partial sums stored in bf16 before the merge",
+    (
+        "a 2048-token selection a tail overflows drops the last positions of its "
+        "lowest-scored pool (vLLM: the last of its top-k order)"
+    ),
 )
 GEOMETRY = {
     "hidden_size": 4096,
@@ -62,6 +69,10 @@ def is_kda(layer: Any) -> bool:
     return getattr(layer, "layer_kind", None) == "kda"
 
 
+def is_dsa(layer: Any) -> bool:
+    return getattr(layer, "layer_kind", None) == "mla"
+
+
 def refuse_config(vllm_config: VllmConfig) -> list[str]:
     from vllm.platforms import current_platform
 
@@ -84,6 +95,10 @@ def refuse_config(vllm_config: VllmConfig) -> list[str]:
         reasons.append("needs tensor parallel size 2, 4 or 8")
     if vllm_config.parallel_config.use_sequence_parallel_moe:
         reasons.append("sequence-parallel MoE")
+    if vllm_config.cache_config.cache_dtype not in ("auto", "bfloat16"):
+        reasons.append(f"{vllm_config.cache_config.cache_dtype} KV cache (needs bf16)")
+    if vllm_config.speculative_config is not None:
+        reasons.append("speculative decoding (a wider kpool tail ring)")
     return reasons
 
 
@@ -104,6 +119,15 @@ MONO_SPEC = MonoSpec(
     caches={
         "conv": CacheReq("self_attn.kv_cache[0]", (torch.bfloat16,), when=is_kda),
         "rec": CacheReq("self_attn.kv_cache[1]", (torch.float32,), when=is_kda),
+        "mla": CacheReq(
+            "self_attn.mla_attn.mla_attn.kv_cache", (torch.bfloat16,), when=is_dsa
+        ),
+        "icache": CacheReq(
+            "self_attn.indexer.k_cache.kv_cache", (torch.uint8,), when=is_dsa
+        ),
+        "tail": CacheReq(
+            "self_attn.indexer.tail_cache.kv_cache", (torch.bfloat16,), when=is_dsa
+        ),
     },
     weight_source="views",
     grid=GRID,
@@ -118,7 +142,7 @@ MONO_SPEC = MonoSpec(
     options={
         "tokens": STEP_TOKENS,
         "tp_max_width": TP_MAX_WIDTH,
-        "mode": "whole layer (KDA), ffn layer (sparse attention)",
+        "mode": "whole layer (KDA and sparse attention)",
         "numerics": NUMERICS,
     },
 )

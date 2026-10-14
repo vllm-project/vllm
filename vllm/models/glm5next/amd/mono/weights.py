@@ -20,6 +20,7 @@ if TYPE_CHECKING:
     from torch import nn
 
     from vllm.models.glm5next.amd.ops.mono.ffn.op import (
+        FlashDsaWeights,
         FlashFfnWeights,
         FlashKdaWeights,
     )
@@ -152,6 +153,108 @@ def layer_weights(layer: nn.Module, inter: int) -> FlashFfnWeights:
             (HIDDEN,),
             (torch.bfloat16,),
         ),
+    )
+
+
+def _proj(name: str, linear: nn.Module, rows: int, cols: int):
+    """A row-major projection as vLLM keeps it after loading: FP8 E4M3 with f32
+    128 x 128 block scales, or bf16 (scale None)."""
+    w = linear.weight
+    sc = getattr(linear, "weight_scale_inv", None)
+    if sc is None:
+        sc = getattr(linear, "weight_scale", None)
+    if w.dtype == torch.bfloat16 and tuple(w.shape) == (rows, cols):
+        return _need(f"{name}.weight", w, (rows, cols), (torch.bfloat16,)), None
+    if (
+        w.dtype != torch.float8_e4m3fn
+        or tuple(w.shape) != (rows, cols)
+        or not w.is_contiguous()
+        or sc is None
+        or sc.dtype != torch.float32
+        or tuple(sc.shape) != (rows // 128, cols // 128)
+        or not sc.is_contiguous()
+    ):
+        got = None if sc is None else f"{sc.dtype} {tuple(sc.shape)}"
+        raise ValueError(
+            f"needs {name} as row-major bf16 {(rows, cols)}, or FP8 E4M3 with f32 "
+            f"{(rows // 128, cols // 128)} block scales; got {w.dtype} "
+            f"{tuple(w.shape)} and scale {got}"
+        )
+    return w, sc
+
+
+def dsa_weights(layer: nn.Module, tp: int) -> FlashDsaWeights:
+    """A sparse-attention layer's attention side as views of vLLM's parameters;
+    W_UK^T is packed once from kv_b_proj into [H, 512, 256] bf16."""
+    from vllm.models.glm5next.amd.ops.mono.config import (
+        INDEX_DIM,
+        INDEX_HEADS,
+        KPOOL,
+        KV_LORA,
+        NOPE_DIM,
+        Q_LORA,
+        V_DIM,
+        FlashShard,
+    )
+    from vllm.models.glm5next.amd.ops.mono.ffn.op import FlashDsaWeights
+
+    attn = layer.self_attn
+    idx = attn.indexer
+    H = FlashShard(tp).mla_heads
+    bf16, f32 = (torch.bfloat16,), (torch.float32,)
+    w_qkv, s_qkv = _proj(
+        "fused_qkv_a_proj", attn.fused_qkv_a_proj, Q_LORA + KV_LORA, HIDDEN
+    )
+    w_qb, s_qb = _proj("q_b_proj", attn.q_b_proj, H * NOPE_DIM, Q_LORA)
+    w_o, s_o = _proj("o_proj", attn.o_proj, HIDDEN, H * V_DIM)
+    per = NOPE_DIM + V_DIM
+    kv_b = _need("kv_b_proj.weight", attn.kv_b_proj.weight, (H * per, KV_LORA), bf16)
+    w_uk = kv_b.view(H, per, KV_LORA)[:, :NOPE_DIM].transpose(1, 2).contiguous()
+    return FlashDsaWeights(
+        hc_fn=_need("hc_attn_fn", layer.hc_attn_fn, (N_MIX, HC_MULT * HIDDEN), f32),
+        hc_scale=_need("hc_attn_scale", layer.hc_attn_scale, (3,), f32),
+        hc_base=_need("hc_attn_base", layer.hc_attn_base, (N_MIX,), f32),
+        g_norm=_need(
+            "input_layernorm.weight", layer.input_layernorm.weight, (HIDDEN,), bf16
+        ),
+        w_qkv=w_qkv,
+        s_qkv=s_qkv,
+        w_idx=_need(
+            "indexer.wk_weights_proj.weight",
+            idx.wk_weights_proj.weight,
+            (INDEX_DIM + INDEX_HEADS, HIDDEN),
+            bf16,
+        ),
+        w_gate=_need(
+            "indexer.index_kpool_compress_gate",
+            idx.index_kpool_compress_gate,
+            (INDEX_DIM, HIDDEN),
+            bf16,
+        ),
+        g_qa=_need("q_a_layernorm.weight", attn.q_a_layernorm.weight, (Q_LORA,), bf16),
+        g_kv=_need(
+            "kv_a_layernorm.weight", attn.kv_a_layernorm.weight, (KV_LORA,), bf16
+        ),
+        ln_w=_need("indexer.k_norm.weight", idx.k_norm.weight, (INDEX_DIM,), f32),
+        ln_b=_need("indexer.k_norm.bias", idx.k_norm.bias, (INDEX_DIM,), f32),
+        ape=_need(
+            "indexer.index_kpool_compress_ape",
+            idx.index_kpool_compress_ape,
+            (KPOOL, INDEX_DIM),
+            f32,
+        ),
+        w_qb=w_qb,
+        s_qb=s_qb,
+        w_iq=_need(
+            "indexer.wq_b.weight",
+            idx.wq_b.weight,
+            (INDEX_HEADS * INDEX_DIM, Q_LORA),
+            bf16,
+        ),
+        w_uk=w_uk,
+        w_kvb=kv_b,
+        w_o=w_o,
+        s_o=s_o,
     )
 
 
