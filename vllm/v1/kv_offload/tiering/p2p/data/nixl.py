@@ -29,6 +29,22 @@ logger = init_logger(__name__)
 _EMPTY_POLL_RESULT: PollResult = PollResult(done=(), failed=())
 
 
+def _is_remote_disconnect(exc: Exception) -> bool:
+    """True if a NIXL state check failed because the peer disconnected.
+
+    NIXL raises ``nixlRemoteDisconnectError`` (NIXL_ERR_REMOTE_DISCONNECT)
+    from ``check_xfer_state`` once the target endpoint is gone, e.g. after
+    the peer process died, instead of reporting an ``"ERR"`` state. Matched
+    by name and status code so the bindings need not be imported here; an
+    unrecognized error keeps the transfer inflight, the conservative side.
+    """
+    return type(
+        exc
+    ).__name__ == "nixlRemoteDisconnectError" or "NIXL_ERR_REMOTE_DISCONNECT" in str(
+        exc
+    )
+
+
 class _Inflight(NamedTuple):
     """A submitted-but-not-yet-drained transfer.
 
@@ -325,7 +341,9 @@ class NixlTransport(DataTransport):
                     transfer_id,
                     exc,
                 )
-                continue
+                if not _is_remote_disconnect(exc):
+                    continue
+                state = "ERR"
             if state == "DONE":
                 if done_ids is None:
                     done_ids = []
@@ -357,10 +375,14 @@ class NixlTransport(DataTransport):
     ) -> list[int]:
         """Cancel inflight transfers by their IDs.
 
-        See ``DataTransport.cancel`` for the contract. In "wait" mode,
-        transfers whose ``release_xfer_handle`` raises (NIXL could not
-        complete the abort because the backend is still draining) stay
-        in ``self._inflight`` so a later ``poll()`` will observe them.
+        See ``DataTransport.cancel`` for the contract. In "wait" mode, a
+        transfer is released only once NIXL reports it terminal. Releasing
+        a PROC/PEND handle does not stop the WRITE: the UCX backend frees
+        the request without cancelling RMA, and the bytes keep landing. So
+        PROC/PEND transfers, and those whose state check or
+        ``release_xfer_handle`` raises, stay in ``self._inflight`` for a
+        later ``poll()`` to observe. A state check that fails because the
+        peer disconnected counts as terminal.
         """
         if mode == "immediate":
             handles = [
@@ -375,6 +397,27 @@ class NixlTransport(DataTransport):
         for tid in transfer_ids:
             entry = self._inflight.get(tid)
             if entry is None:
+                continue
+            try:
+                state = self._agent.check_xfer_state(entry.handle)
+            except Exception as exc:
+                logger.debug(
+                    "NixlTransport %s: cancel state check failed for "
+                    "transfer_id=%d: %s",
+                    self._agent_name,
+                    tid,
+                    exc,
+                )
+                if not _is_remote_disconnect(exc):
+                    still_inflight.append(tid)
+                    continue
+                # The handle may no longer be releasable; it is terminal
+                # either way, so drop it instead of retrying forever.
+                self._release_handles([entry.handle])
+                del self._inflight[tid]
+                continue
+            if state in ("PROC", "PEND"):
+                still_inflight.append(tid)
                 continue
             try:
                 self._agent.release_xfer_handle(entry.handle)
