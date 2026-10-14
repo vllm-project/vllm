@@ -12,8 +12,8 @@ requires deep_ep to be importable.
                         the receiver still produces the correct output.
   T3 finalize (sync) -> combine is issued synchronously and the output is
                         copied immediately.
-  T4 VLLM_DEEPEP_V2_NUM_SMS -> reaches the dispatch and the manager's
-                        max_sms_used().
+  T4 VLLM_DEEPEP_V2_EXPAND / VLLM_DEEPEP_V2_NUM_SMS -> reach the dispatch and
+                        the manager's max_sms_used().
 """
 
 from types import SimpleNamespace
@@ -132,8 +132,12 @@ def test_finalize_sync():
 class _FakeDispatchBuffer:
     def dispatch(self, x, **kwargs):
         self.kwargs = kwargs
+        # 8 worst-case rows; local experts 0 and 2 got 2 and 3 of them.
         handle = SimpleNamespace(
             num_recv_tokens_per_expert_list=[],
+            psum_num_recv_tokens_per_expert=torch.tensor(
+                [2, 2, 5, 5], dtype=torch.int32
+            ),
             psum_num_recv_tokens_per_scaleup_rank=torch.tensor(
                 [3, 3], dtype=torch.int32
             ),
@@ -145,7 +149,8 @@ class _FakeDispatchBuffer:
 def _dispatch_via_factory(monkeypatch, env: dict[str, str]):
     from tests.kernels.moe.utils import make_ep_prepare_finalize_with_fake_buffer
 
-    monkeypatch.delenv("VLLM_DEEPEP_V2_NUM_SMS", raising=False)
+    for name in ("VLLM_DEEPEP_V2_EXPAND", "VLLM_DEEPEP_V2_NUM_SMS"):
+        monkeypatch.delenv(name, raising=False)
     for name, value in env.items():
         monkeypatch.setenv(name, value)
     buffer = _FakeDispatchBuffer()
@@ -157,6 +162,27 @@ def _dispatch_via_factory(monkeypatch, env: dict[str, str]):
             a1, torch.rand(3, 2), topk_ids, 8, None, False, FusedMoEQuantConfig.make()
         )
     return buffer.kwargs, receiver
+
+
+@requires_deep_ep_v2
+@pytest.mark.parametrize("env", [None, "1"], ids=["unset", "1"])
+def test_deepep_v2_expand_knob(env, monkeypatch):
+    kwargs, receiver = _dispatch_via_factory(
+        monkeypatch, {} if env is None else {"VLLM_DEEPEP_V2_EXPAND": env}
+    )
+    # No CPU sync and the power-of-two bucket either way.
+    assert kwargs["do_expand"] is (env is not None)
+    assert kwargs["do_cpu_sync"] is False
+    assert kwargs["num_max_tokens_per_rank"] == 4
+    if env is None:
+        return  # the padded receiver needs a GPU
+    _, _, meta, ids, weights = receiver()
+    assert ids.dtype == torch.int64
+    assert ids.flatten().tolist() == [0, 0, 2, 2, 2, -1, -1, -1]
+    assert meta.expert_num_tokens is None
+    # The per-expert prefix sum: its last element is the received rows.
+    assert int(meta.psum_recv_per_rank[-1]) == 5
+    assert weights.shape == (8, 1)
 
 
 @requires_deep_ep_v2

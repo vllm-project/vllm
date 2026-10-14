@@ -12,7 +12,10 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceContiguous,
     TopKWeightAndReduceDelegate,
 )
-from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
+from vllm.model_executor.layers.fused_moe.utils import (
+    expanded_recv_topk_ids,
+    moe_kernel_quantize_input,
+)
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     MXFP8_BLOCK_SIZE,
     swizzle_mxfp8_scale,
@@ -79,6 +82,9 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         handle.psum_num_recv_tokens_per_scaleup_rank
       - Fully cudagraph-capturable
       - Expert kernel sorts internally (expert_tokens_meta carries no counts)
+      - With expand=True: do_expand=True instead, one row per (token, local
+        expert) pair grouped by expert, sized for the worst case; recv_topk_idx
+        is built on the device from handle.psum_num_recv_tokens_per_expert
 
     **Prefill mode (use_cudagraph=False):**
       - do_expand=True, do_cpu_sync=True
@@ -116,6 +122,7 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         use_cudagraph: bool = False,
         sp_size: int = 1,
         num_sms: int = 0,
+        expand: bool = False,
     ):
         super().__init__()
         self.buffer = buffer
@@ -129,6 +136,7 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         self.sp_size = sp_size
         # 0 lets DeepEP pick get_theoretical_num_sms.
         self.num_sms = num_sms
+        self.expand = expand
 
         # DBO microbatching: one handle slot per micro-batch.
         self.handles: list[deep_ep.EPHandle | None] = [None, None]
@@ -180,13 +188,14 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         if has_scales:
             token_data = (tokens, token_scales)
 
-        # Decode: do_expand=False + do_cpu_sync=False (cudagraph-safe)
+        # Decode: do_expand=self.expand + do_cpu_sync=False (cudagraph-safe)
         # Prefill: do_expand=True + do_cpu_sync=True (memory-efficient)
-        do_expand = not self.use_cudagraph
+        do_expand = self.expand or not self.use_cudagraph
         do_cpu_sync = not self.use_cudagraph
 
-        # In do_expand=False mode, the recv buffer is the worst case
-        # R * num_max_tokens_per_rank. Defaulting to the buffer's init value
+        # Without a CPU sync, the recv buffer is the worst case
+        # R * num_max_tokens_per_rank (times min(topk, local experts) when
+        # expanded). Defaulting to the buffer's init value
         # (= max_num_batched_tokens) makes the experts process ~R*8192 rows even
         # for a handful of decode tokens. Bound it to the actual DP-padded batch
         # size (uniform across ranks): max(num_tokens_across_dp).
@@ -200,7 +209,7 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         # at the buffer's init capacity for prefill. With sequence parallelism,
         # each EP rank holds a ceil(n / sp_size) shard of its DP rank's batch.
         num_max_tokens_per_rank = None
-        if not do_expand:
+        if not do_cpu_sync:
             dp_meta = get_forward_context().dp_metadata
             if dp_meta is not None:
                 n = int(dp_meta.num_tokens_across_dp_cpu.max())
@@ -238,7 +247,11 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             num_experts,
             handle.num_recv_tokens_per_expert_list,
             recv_topk_weights,
-            handle.psum_num_recv_tokens_per_scaleup_rank,
+            # Expanded without a CPU sync: the per-expert prefix sum, whose
+            # last element is the received row count.
+            handle.psum_num_recv_tokens_per_expert
+            if do_expand and not do_cpu_sync
+            else handle.psum_num_recv_tokens_per_scaleup_rank,
             a1_scale,
             quant_config,
             defer_input_quant=defer_input_quant,
@@ -279,7 +292,7 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             # during profile_run when CUDA graphs are enabled.
             expert_tokens_meta = None
 
-        if recv_topk_idx is None:
+        if recv_topk_idx is None and recv_expert_num_tokens:
             # do_expand=True (prefill mode): build topk_ids from
             # per-expert token counts.
             assert expert_tokens_meta is not None
@@ -299,6 +312,15 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
                     device=expert_x.device,
                 )
             recv_topk_idx = recv_topk_idx.unsqueeze(1)
+        elif recv_topk_idx is None:
+            # do_expand=True without a CPU sync (expand under cudagraph): the
+            # counts stay on the device, in the per-expert prefix sum.
+            recv_topk_idx = expanded_recv_topk_ids(
+                psum_recv_per_rank,
+                len(expert_x),
+                self.rank_expert_offset,
+                torch.int64,
+            )
         else:
             # do_expand=False (decode/cudagraph mode): the dispatch only writes
             # rows [0, num_recv_tokens); the rest of the worst-case-allocated

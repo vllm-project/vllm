@@ -312,6 +312,7 @@ def maybe_make_prepare_finalize(
             use_cudagraph=use_cudagraph,
             sp_size=moe.moe_parallel_config.sp_size,
             num_sms=envs.VLLM_DEEPEP_V2_NUM_SMS,
+            expand=envs.VLLM_DEEPEP_V2_EXPAND,
         )
 
     elif moe.use_nixl_ep_v2_kernels:

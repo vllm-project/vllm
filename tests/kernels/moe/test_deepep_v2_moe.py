@@ -578,6 +578,7 @@ def _deep_ep_v2_moe_backends(
     config: TestConfig,
     use_cudagraph: bool,
     experts_backend: str,
+    expand: bool = False,
 ):
     import tempfile
 
@@ -680,6 +681,7 @@ def _deep_ep_v2_moe_backends(
             dp_size=dp_size,
             v2_args=v2_args,
             use_cudagraph=use_cudagraph,
+            expand=expand,
         )
         mk_kernel = FusedMoEKernel(
             prepare_finalize=a2a,
@@ -731,6 +733,7 @@ def test_deep_ep_v2_moe_backends(
     experts_backend: str,
     use_cudagraph: bool,
     workspace_init,
+    expand: bool = False,
 ):
     if (
         experts_backend == "flashinfer_cutedsl_nvfp4"
@@ -757,4 +760,20 @@ def test_deep_ep_v2_moe_backends(
         config,
         use_cudagraph,
         experts_backend,
+        expand,
+    )
+
+
+@pytest.mark.parametrize("experts_backend", EXPERTS_BACKENDS)
+@multi_gpu_test(num_gpus=2)
+@requires_deep_ep_v2
+@pytest.mark.skipif(
+    not has_flashinfer() or not current_platform.has_device_capability(100),
+    reason="Requires FlashInfer TRTLLM fused MoE (SM100)",
+)
+def test_deep_ep_v2_moe_backends_expand(experts_backend: str, workspace_init):
+    """The experts take the worst-case expanded rows that VLLM_DEEPEP_V2_EXPAND
+    selects under CUDA graphs: IDs -1 past the received rows, no counts."""
+    test_deep_ep_v2_moe_backends(
+        32, 256, 1024, 32, 6, (2, 1), experts_backend, True, workspace_init, True
     )
