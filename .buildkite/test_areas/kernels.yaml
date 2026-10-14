@@ -927,7 +927,7 @@ steps:
     # TODO: fix me
     - >-
       pytest -v -s kernels/moe/test_moe_layer.py
-      --deselect='kernels/moe/test_moe_layer.py::test_moe_layer[False-deepep_low_latency-2-1-True]'
+      --deselect='tests/kernels/moe/test_moe_layer.py::test_moe_layer[False-deepep_low_latency-2-1-True]'
     - pytest -v -s kernels/moe/test_deepep_v2_moe.py
   mirror:
     amd:
