@@ -9,7 +9,6 @@ import time
 import weakref
 from collections.abc import Callable, Sequence
 from contextlib import AbstractContextManager
-from dataclasses import dataclass
 from multiprocessing import connection
 from multiprocessing.process import BaseProcess
 from multiprocessing.queues import Queue
@@ -32,7 +31,6 @@ from vllm.usage.usage_lib import UsageContext, is_usage_stats_enabled, usage_mes
 from vllm.utils.network_utils import ZmqListener, get_open_zmq_ipc_path, get_tcp_uri
 from vllm.utils.system_utils import decorate_logs, kill_process_tree, set_process_title
 from vllm.utils.torch_utils import PIN_MEMORY
-from vllm.v1.core.sched.output import SchedulerOutput
 
 if TYPE_CHECKING:
     import numpy as np
@@ -812,66 +810,3 @@ def tensor_data(tensor: torch.Tensor) -> memoryview:
 
     """
     return tensor.flatten().cpu().contiguous().view(torch.uint8).numpy().data
-
-
-@dataclass
-class IterationDetails:
-    num_ctx_requests: int
-    num_ctx_tokens: int
-    num_generation_requests: int
-    num_generation_tokens: int
-    num_encoder_inputs: int = 0
-    num_encoder_output_tokens: int = 0
-
-    def __repr__(self) -> str:
-        return f"IterationDetails(num_ctx_requests={self.num_ctx_requests},\
-                 num_ctx_tokens={self.num_ctx_tokens}, \
-                 num_generation_requests={self.num_generation_requests}, \
-                 num_generation_tokens={self.num_generation_tokens}, \
-                 num_encoder_inputs={self.num_encoder_inputs}, \
-                 num_encoder_output_tokens={self.num_encoder_output_tokens})"
-
-
-def compute_iteration_details(scheduler_output: SchedulerOutput) -> IterationDetails:
-    """Compute the number of context/generation requests and tokens
-    for the current iteration's scheduler output. A requests is regarded
-    as a context request if its output tokens are still 0, an extended chunk
-    of chunked prefill falls into this category.
-
-    Args:
-        scheduler_output: The scheduler output for the current iteration.
-
-    Returns:
-        An IterationDetails object containing the number of
-        context/generation requests and tokens.
-
-    """
-    num_context_requests = 0
-    num_context_tokens = 0
-    num_generation_requests = 0
-    num_generation_tokens = 0
-    new_req_ids = {new_req.req_id for new_req in scheduler_output.scheduled_new_reqs}
-    for req_id, num_tokens in scheduler_output.num_scheduled_tokens.items():
-        if scheduler_output.scheduled_cached_reqs.is_context_phase(req_id) or (
-            req_id in new_req_ids
-        ):
-            num_context_requests += 1
-            num_context_tokens += num_tokens
-        else:
-            num_generation_requests += 1
-            num_generation_tokens += num_tokens
-    scheduled_encoder_input_stats = scheduler_output.scheduled_encoder_input_stats
-    num_encoder_inputs = 0
-    num_encoder_output_tokens = 0
-    if scheduled_encoder_input_stats is not None:
-        num_encoder_inputs = scheduled_encoder_input_stats.num_inputs
-        num_encoder_output_tokens = scheduled_encoder_input_stats.output_tokens
-
-    return IterationDetails(
-        num_context_requests,
-        num_context_tokens,
-        num_generation_requests,
-        num_generation_tokens,
-        num_encoder_inputs,
-        num_encoder_output_tokens,
-    )

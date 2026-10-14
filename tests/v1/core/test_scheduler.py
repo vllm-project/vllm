@@ -78,8 +78,11 @@ from .utils import EOS_TOKEN_ID, create_requests, create_scheduler, mock_kv
 pytestmark = pytest.mark.cpu_test
 
 
-def test_make_scheduled_encoder_input_stats_output_embeddings():
+def test_scheduled_encoder_input_stats_output_embeddings():
     scheduler = create_scheduler()
+    scheduler.observability_config.enable_logging_iteration_details = True
+    scheduler.max_num_encoder_input_tokens = 441
+    scheduler.encoder_cache_manager = EncoderCacheManager(cache_size=441)
     mm_features = [
         MultiModalFeatureSpec(
             data=MultiModalKwargsItem.dummy(),
@@ -100,13 +103,15 @@ def test_make_scheduled_encoder_input_stats_output_embeddings():
             mm_position=PlaceholderRange(offset=400, length=49),
         ),
     ]
-    scheduler.requests["req"] = Mock(mm_features=mm_features)
+    (request,) = create_requests(num_requests=1, num_tokens=449)
+    request.mm_features = mm_features
+    scheduler.add_request(request)
 
-    stats = scheduler._make_scheduled_encoder_input_stats({"req": [0, 1, 2]})
+    stats = scheduler.schedule().iteration_details
 
     assert stats is not None
-    assert stats.num_inputs == 3
-    assert stats.output_tokens == 441
+    assert stats.num_encoder_inputs == 3
+    assert stats.num_encoder_output_tokens == 441
 
 
 def test_scheduled_encoder_input_stats_disabled_without_iteration_logging(
@@ -114,12 +119,12 @@ def test_scheduled_encoder_input_stats_disabled_without_iteration_logging(
 ):
     scheduler = create_scheduler()
     make_stats = Mock(side_effect=AssertionError("stats should not be computed"))
-    monkeypatch.setattr(scheduler, "_make_scheduled_encoder_input_stats", make_stats)
+    monkeypatch.setattr("vllm.v1.core.sched.scheduler.IterationDetails", make_stats)
 
     scheduler_output = scheduler.schedule()
 
     make_stats.assert_not_called()
-    assert scheduler_output.scheduled_encoder_input_stats is None
+    assert scheduler_output.iteration_details is None
 
 
 def test_scheduled_encoder_input_stats_disabled_without_log_stats(
@@ -129,12 +134,12 @@ def test_scheduled_encoder_input_stats_disabled_without_log_stats(
     scheduler.log_stats = False
     scheduler.observability_config.enable_logging_iteration_details = True
     make_stats = Mock(side_effect=AssertionError("stats should not be computed"))
-    monkeypatch.setattr(scheduler, "_make_scheduled_encoder_input_stats", make_stats)
+    monkeypatch.setattr("vllm.v1.core.sched.scheduler.IterationDetails", make_stats)
 
     scheduler_output = scheduler.schedule()
 
     make_stats.assert_not_called()
-    assert scheduler_output.scheduled_encoder_input_stats is None
+    assert scheduler_output.iteration_details is None
 
 
 def test_add_requests():
