@@ -424,6 +424,10 @@ class QSAIndexer(nn.Module):
         num_decode_tokens = compressed_metadata.num_decode_tokens
         decode_query_len = compressed_metadata.decode_query_len
         visible_blocks = compressed_metadata.visible_blocks[:num_tokens]
+        # The sharded selector scores only this rank's states; its merge in
+        # the select calls makes block_indices the global top-k again.
+        scored_blocks = compressed_metadata.local_visible_blocks[:num_tokens]
+        selector_shard = compressed_metadata.selector_shard
         block_indices = torch.empty(
             num_tokens,
             self.token_topk // self.compress_ratio,
@@ -441,11 +445,12 @@ class QSAIndexer(nn.Module):
                 q[decode_slice],
                 compressed_key_cache,
                 compressed_metadata.block_table[:num_decodes],
-                visible_blocks[decode_slice],
+                scored_blocks[decode_slice],
                 self.token_topk,
                 self.compress_ratio,
                 decode_query_len,
                 block_indices[decode_slice],
+                selector_shard,
             )
 
         # Prefill requests follow the leading decode rows in the reordered batch.
@@ -457,12 +462,13 @@ class QSAIndexer(nn.Module):
                 compressed_key_cache,
                 compressed_metadata.block_table[num_decodes:],
                 compressed_metadata.query_start_loc[num_decodes:],
-                visible_blocks[prefill_slice],
+                scored_blocks[prefill_slice],
                 self.token_topk,
                 self.compress_ratio,
                 compressed_metadata.max_query_len,
                 block_indices[prefill_slice],
                 compressed_metadata.max_seq_len,
+                selector_shard,
             )
         expand_qsa_block_indices(
             block_indices,
