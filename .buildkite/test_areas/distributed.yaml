@@ -77,6 +77,7 @@ steps:
 
 - label: ":nvidia: (L4) Distributed DP Basic"
   key: distributed-dp-tests-2-gpus
+  automatic_shard: true
   timeout_in_minutes: 45
   working_dir: "/vllm-workspace/tests"
   device: l4
@@ -300,6 +301,7 @@ steps:
 
 - label: ":nvidia: (L4) Distributed DP Extended"
   key: distributed-dp-tests-4-gpus
+  automatic_shard: true
   timeout_in_minutes: 45
   working_dir: "/vllm-workspace/tests"
   device: l4
@@ -508,9 +510,7 @@ steps:
       - examples/features/data_parallel/data_parallel_offline.py
       - vllm/_aiter_ops.py
       - vllm/platforms/rocm.py
-      - csrc/custom_quickreduce.cu
-      - csrc/ops.h
-      - csrc/torch_bindings.cpp
+      - csrc/rocm/quickreduce/
       - vllm/model_executor/layers/
       - vllm/entrypoints/llm.py
       - vllm/config/parallel.py
@@ -522,13 +522,17 @@ steps:
       - tests/distributed/test_rocm_aiter_custom_ar.py
       - tests/distributed/test_rocm_quick_reduce.py
       - tests/distributed/test_quick_all_reduce.py
+      - tests/distributed/test_aiter_rms_fallback.py
       - tests/v1/e2e/general/test_rocm_aiter_custom_ar.py
       - tests/utils.py
       - examples/rl/rlhf_async_new_apis.py
       - tests/distributed/test_weight_transfer.py
       - tests/distributed/test_packed_tensor.py
+      - tests/v1/attention/test_rocm_mla_dcp_context.py
+      - vllm/v1/attention/ops/rocm_aiter_mla_prefill.py
       commands:
       - pytest -v -s tests/distributed/test_context_parallel.py
+      - pytest -v -s tests/v1/attention/test_rocm_mla_dcp_context.py
       - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 examples/rl/rlhf_async_new_apis.py
       - VLLM_LOGGING_LEVEL=DEBUG python3 examples/features/data_parallel/data_parallel_offline.py --model=Qwen/Qwen1.5-MoE-A2.7B -tp=1 -dp=2 --max-model-len=2048 --all2all-backend=deepep_high_throughput
       - VLLM_LOGGING_LEVEL=DEBUG python3 examples/features/data_parallel/data_parallel_offline.py --model=Qwen/Qwen1.5-MoE-A2.7B -tp=1 -dp=2 --max-model-len=2048 --all2all-backend=allgather_reducescatter --disable-nccl-for-dp-synchronization
@@ -539,6 +543,7 @@ steps:
       - pytest -v -s tests/v1/e2e/general/test_rocm_aiter_custom_ar.py
       - pytest -v -s tests/distributed/test_rocm_quick_reduce.py
       - pytest -v -s tests/distributed/test_quick_all_reduce.py
+      - pytest -v -s tests/distributed/test_aiter_rms_fallback.py
 
 - label: ":nvidia: (B200) Distributed"
   key: distributed-tests-2xb200
@@ -636,6 +641,7 @@ steps:
 
 - label: ":nvidia: (L4) Pipeline + Context Parallelism"
   key: pipeline-context-parallelism-4-gpus
+  automatic_shard: true
   timeout_in_minutes: 55
   working_dir: "/vllm-workspace/tests"
   device: l4
@@ -677,6 +683,7 @@ steps:
 
 - label: ":nvidia: (L4) RayExecutorV2"
   key: rayexecutorv2-4-gpus
+  automatic_shard: true
   timeout_in_minutes: 45
   working_dir: "/vllm-workspace/tests"
   device: l4
