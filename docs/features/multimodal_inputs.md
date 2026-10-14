@@ -479,6 +479,11 @@ You must enable this feature via `enable_mm_embeds=True`.
 
 #### Image Embeddings
 
+LightOnOCR accepts visual features after the vision projector, with the hidden
+size of its language model. Pass a tensor of shape
+`(num_images, image_feature_size, hidden_size)` or a list of tensors of shape
+`(image_feature_size, hidden_size)` when images have different feature counts.
+
 ??? code
 
     ```python
