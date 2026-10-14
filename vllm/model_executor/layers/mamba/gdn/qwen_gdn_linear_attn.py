@@ -4,7 +4,6 @@
 
 import functools
 import itertools
-import math
 import os
 from dataclasses import replace
 from typing import Literal
@@ -19,7 +18,6 @@ from vllm import envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import (
-    CacheConfig,
     VllmConfig,
     get_current_vllm_config,
 )
@@ -37,6 +35,7 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.mamba.abstract import (
     get_mamba_prefill_checkpoint_alignment,
+    get_mamba_prefill_checkpoint_grid,
 )
 from vllm.model_executor.layers.mamba.checkpoint import (
     MambaPrefillCheckpointExporter,
@@ -306,20 +305,6 @@ def fi_chunk_gated_delta_rule(
         return output.unsqueeze(0), final_state
     else:
         return result.unsqueeze(0), None
-
-
-def _checkpoint_grid(cache_config: CacheConfig) -> int:
-    """Token grid that FlashInfer GDN checkpoint offsets are kept on.
-
-    Prefix-cache boundaries, made multiples of FlashInfer's checkpoint
-    alignment; the platform already keeps blocks on it.
-    """
-    if cache_config.prefix_match_unit is not None:
-        return math.lcm(
-            cache_config.prefix_match_unit, FLASHINFER_GDN_CHECKPOINT_ALIGNMENT
-        )
-    assert cache_config.mamba_block_size is not None
-    return cache_config.mamba_block_size
 
 
 @CustomOp.register("chunk_gated_delta_rule")
@@ -691,7 +676,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         return replace(
             spec,
             num_prefill_checkpoint_blocks=1,
-            prefill_checkpoint_alignment=_checkpoint_grid(vllm_config.cache_config),
+            prefill_checkpoint_alignment=get_mamba_prefill_checkpoint_grid(vllm_config),
         )
 
     @functools.cached_property
@@ -710,7 +695,10 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         # Read lazily: the block size is final only after the model is built.
         return (
             (
-                cdiv(self._max_num_batched_tokens, _checkpoint_grid(self.cache_config)),
+                cdiv(
+                    self._max_num_batched_tokens,
+                    get_mamba_prefill_checkpoint_grid(self._vllm_config),
+                ),
                 self.num_v_heads // self.tp_size,
                 self.head_v_dim,
                 self.head_k_dim,

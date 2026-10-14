@@ -19,6 +19,10 @@ from tests.v1.attention.utils import BatchSpec, create_common_attn_metadata
 from vllm.config import SpeculativeConfig, VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.config.quantization import QuantizationConfigArgs
+from vllm.model_executor.layers.mamba.checkpoint import (
+    MambaPrefillCheckpointExporter,
+    MambaPrefillCheckpointMetadata,
+)
 from vllm.model_executor.layers.quantization.fp8 import Fp8Config
 from vllm.model_executor.layers.quantization.inc import INCConfig
 from vllm.model_executor.layers.quantization.modelopt import (
@@ -31,6 +35,7 @@ from vllm.models.qwen4_exp.amd import ple_layer as amd_ple_layer
 from vllm.models.qwen4_exp.amd.ple_layer import (
     Qwen4ExpPLELayer as Qwen4ExpPLELayerAMD,
 )
+from vllm.models.qwen4_exp.common.ops.ple import ple_conv
 from vllm.models.qwen4_exp.common.ple import (
     PLEShardOverlap,
     compute_ple_shard_overlap,
@@ -1959,6 +1964,7 @@ def _make_conv_metadata(
         ),
         max_prefill_query_len=max(case.prefill_query_lens, default=0),
         num_spec_decodes=num_spec_reqs,
+        checkpoint=None,
     )
     return metadata, token_offset
 
@@ -2117,6 +2123,120 @@ def test_fused_conv_correctness(
             residual_kernel[num_real_tokens:],
             residual_reference[num_real_tokens:],
         )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="fused conv needs CUDA")
+@pytest.mark.parametrize("state_layout", ["SD", "DS"])
+@pytest.mark.parametrize(
+    "case",
+    [
+        pytest.param(
+            _ConvBatchCase(num_decodes=1, prefill_query_lens=(200, 130)),
+            id="decode-prefill",
+        ),
+        pytest.param(
+            _ConvBatchCase(
+                spec_query_lens=(3, 4),
+                num_accepted=(2, 4),
+                num_decodes=1,
+                prefill_query_lens=(200, 130),
+                spec_query_len=4,
+            ),
+            id="mixed",
+        ),
+    ],
+)
+def test_prefill_exports_conv_window_at_checkpoint(
+    case: _ConvBatchCase, state_layout: str
+) -> None:
+    """A checkpoint holds the conv state of the prefill stopped at its offset.
+
+    In the mixed batch the prefills' tokens are reached through the non-spec
+    token map. Nothing else in the cache changes, including the checkpoint
+    block's speculative columns.
+    """
+    device = torch.device("cuda")
+    metadata, num_real_tokens = _make_conv_metadata(case, device)
+    module = object.__new__(Qwen4ExpPLELayer)
+    nn.Module.__init__(module)
+    module.conv_state_len = (case.kernel_size - 1) * case.dilation
+    module.short_conv_dilation = case.dilation
+    module._checkpoint_exporter = MambaPrefillCheckpointExporter(
+        state_len=module.conv_state_len
+    )
+    rng, _, conv_state, weights = _make_conv_case(
+        device,
+        seed=num_real_tokens,
+        channels=case.channels,
+        kernel_size=case.kernel_size,
+        dilation=case.dilation,
+        state_layout=state_layout,
+        spec_query_len=case.spec_query_len,
+    )
+    inputs = torch.randn(
+        metadata.num_actual_tokens,
+        case.channels,
+        device=device,
+        dtype=torch.bfloat16,
+        generator=rng,
+    )
+    without_checkpoint = conv_state.clone()
+
+    # One row per non-spec request; the prefills checkpoint mid-query.
+    offsets = [0] * case.num_decodes + [64, 128]
+    checkpoint_slots = [NULL_BLOCK_ID] * case.num_decodes + [
+        _KERNEL_STATE_BLOCKS - 1,
+        _KERNEL_STATE_BLOCKS - 2,
+    ]
+    metadata.checkpoint = MambaPrefillCheckpointMetadata(
+        torch.tensor(offsets, dtype=torch.int32, device=device),
+        torch.tensor(checkpoint_slots, dtype=torch.int32, device=device),
+    )
+    for state, checkpoint in (
+        (conv_state, metadata.checkpoint),
+        (without_checkpoint, None),
+    ):
+        metadata.checkpoint = checkpoint
+        module._short_conv_dilated_dispatch(
+            inputs=inputs,
+            residual=torch.zeros_like(inputs),
+            outer_residual=None,
+            metadata=metadata,
+            conv_state=state,
+            conv_weights=weights,
+        )
+
+    query_start_loc = metadata.non_spec_query_start_loc.tolist()
+    token_map = metadata.non_spec_token_indx
+    state_len = module.conv_state_len
+    for row in range(case.num_decodes, len(offsets)):
+        tokens = torch.arange(
+            query_start_loc[row], query_start_loc[row] + offsets[row], device=device
+        )
+        if token_map is not None:
+            tokens = token_map[tokens]
+        stopped = without_checkpoint.clone()
+        scratch = torch.tensor([checkpoint_slots[row]], device=device)
+        ple_conv(
+            inputs[tokens].contiguous(),
+            torch.zeros_like(inputs[tokens]),
+            stopped,
+            weights,
+            scratch,
+            None,
+            mode="prefill",
+            dilation=case.dilation,
+            query_start_loc=torch.tensor(
+                [0, offsets[row]], dtype=torch.int32, device=device
+            ),
+            has_initial_states=torch.tensor([False], device=device),
+        )
+        slot = checkpoint_slots[row]
+        assert torch.equal(
+            conv_state[slot, :, :state_len], stopped[slot, :, :state_len]
+        )
+        conv_state[slot, :, :state_len] = without_checkpoint[slot, :, :state_len]
+    assert torch.equal(conv_state, without_checkpoint)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="fused gate needs CUDA")

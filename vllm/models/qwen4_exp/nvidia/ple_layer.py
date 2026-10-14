@@ -2,7 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """GPU-resident Qwen4Exp position-learning enhancement layers."""
 
+import functools
 from collections.abc import Sequence
+from dataclasses import replace
 
 import torch
 from torch import nn
@@ -12,7 +14,14 @@ from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import CacheConfig, ModelConfig, VllmConfig, get_current_vllm_config
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.linear import MergedColumnParallelLinear
-from vllm.model_executor.layers.mamba.abstract import MambaBase
+from vllm.model_executor.layers.mamba.abstract import (
+    MambaBase,
+    get_mamba_prefill_checkpoint_alignment,
+    get_mamba_prefill_checkpoint_grid,
+)
+from vllm.model_executor.layers.mamba.checkpoint import (
+    MambaPrefillCheckpointExporter,
+)
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateDtypeCalculator,
     MambaStateShapeCalculator,
@@ -24,6 +33,7 @@ from vllm.v1.attention.backends.short_conv_attn import (
     PleShortConvAttentionBackend,
     PleShortConvAttentionMetadata,
 )
+from vllm.v1.kv_cache_interface import KVCacheSpec, MambaSpec
 
 from ..common.ops.ple import ple_conv, ple_gate
 from .ngram_embedding import Qwen4ExpNGramEmbedding
@@ -79,6 +89,7 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
         quant_config = vllm_config.quant_config
         self.model_config: ModelConfig = model_config
         self.cache_config: CacheConfig = cache_config
+        self._vllm_config = vllm_config
         self.layer_idx = layer_idx
         self.ple_dense_layer_id = (
             int(ple_dense_layer_id)
@@ -92,6 +103,10 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
         self.conv_kernel_size = int(config.ple_conv_kernel_size)
         self.short_conv_dilation = int(config.ngram_size)
         self.conv_state_len = (self.conv_kernel_size - 1) * self.short_conv_dilation
+        # The conv window ending at a checkpoint is a copy of its last inputs.
+        self._checkpoint_exporter = MambaPrefillCheckpointExporter(
+            state_len=self.conv_state_len
+        )
         self.num_spec_tokens = vllm_config.num_speculative_tokens
         self.activation = "silu"
         self.ple_embedding = Qwen4ExpNGramEmbedding(
@@ -184,6 +199,29 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
             intermediate_size=self.hc_hidden_size,
             conv_kernel=self.conv_state_len + 1,
             num_spec=self.num_spec_tokens,
+        )
+
+    def get_prefill_checkpoint_alignment(self) -> int | None:
+        return 1 if self.cache_config.mamba_cache_mode == "align" else None
+
+    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec | None:
+        spec = super().get_kv_cache_spec(vllm_config)
+        if not self._exports_checkpoints or not isinstance(spec, MambaSpec):
+            return spec
+        grid = get_mamba_prefill_checkpoint_grid(vllm_config)
+        # Offsets are multiples of the grid, so the window holds only inputs.
+        assert grid >= self.conv_state_len
+        return replace(
+            spec, num_prefill_checkpoint_blocks=1, prefill_checkpoint_alignment=grid
+        )
+
+    @functools.cached_property
+    def _exports_checkpoints(self) -> bool:
+        # Known only once every layer is built: the scheduler takes internal
+        # checkpoints only when every Mamba layer can export them.
+        return (
+            self.get_prefill_checkpoint_alignment() is not None
+            and get_mamba_prefill_checkpoint_alignment(self._vllm_config) is not None
         )
 
     def _short_conv_dilated_dispatch(
@@ -313,6 +351,15 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
                 has_initial_states=has_initial_states,
                 token_indices=token_indices_p,
             )
+            if metadata.checkpoint is not None:
+                assert metadata.non_spec_query_start_loc is not None
+                self._checkpoint_exporter.export(
+                    metadata.checkpoint,
+                    raw_qkv=inputs,
+                    conv_state=conv_state,
+                    cu_seqlens=metadata.non_spec_query_start_loc,
+                    token_indices=non_spec_token_indices,
+                )
         else:
             num_decode_rows = (
                 non_spec_token_indices.numel()
