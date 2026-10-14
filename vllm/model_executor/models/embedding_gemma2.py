@@ -999,6 +999,7 @@ class EmbeddingGemma2Model(nn.Module, SupportsMultiModal, VllmModelForPooling):
 
     # TODO(lucianomartins): Extract Gemma4EncoderMixin into a shared module
     # once generative model tests are migrated.
+    # TODO(lucianomartins): Investigate @support_torch_compile integration for encoder.
     _parse_and_validate_image_input = (
         Gemma4ForConditionalGeneration._parse_and_validate_image_input
     )
