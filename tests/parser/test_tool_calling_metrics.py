@@ -7,6 +7,8 @@ from functools import partial
 import pytest
 from prometheus_client import CollectorRegistry, Counter, generate_latest
 
+from vllm.entrypoints.anthropic.protocol import AnthropicMessagesRequest
+from vllm.entrypoints.anthropic.serving import AnthropicServingMessages
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionNamedToolChoiceParam,
     ChatCompletionRequest,
@@ -38,6 +40,7 @@ def _record_and_read(
     *,
     is_tool_called=True,
     outcome="tool_call",
+    request_type="chat_completions",
 ):
     metrics.record_tool_parser_invocation(
         is_tool_called=is_tool_called, is_streaming=is_streaming, request=request
@@ -48,7 +51,7 @@ def _record_and_read(
             "model_name": "test-model",
             "mode": "streaming" if is_streaming else "non_streaming",
             "outcome": outcome,
-            "request_type": "chat_completions",
+            "request_type": request_type,
             "tool_choice": tool_choice,
             "tool_count": tool_count,
         },
@@ -137,12 +140,14 @@ def test_parser_failures_are_distinct_from_no_tool_calls(registry, is_streaming)
         (2, True, False, "parse_failure"),
     ],
 )
+@pytest.mark.parametrize("api_surface", ["chat_completions", "messages"])
 def test_response_counts_use_bounded_labels_and_survive_reinitialization(
-    registry, count, failed, completed, status
+    registry, count, failed, completed, status, api_surface
 ):
     request = ChatCompletionRequest.model_construct(
         tool_choice={"type": "function", "function": {"name": "private-function"}}
     )
+    request._api_surface = api_surface
     metrics.record_tool_call_response(
         request, tool_calls_count=count, parse_failed=failed, completed=completed
     )
@@ -154,7 +159,7 @@ def test_response_counts_use_bounded_labels_and_survive_reinitialization(
                 "model_name": "test-model",
                 "status": status,
                 "tool_choice": "named",
-                "api_surface": "chat_completions",
+                "api_surface": api_surface,
             },
         )
         == 1
@@ -162,7 +167,7 @@ def test_response_counts_use_bounded_labels_and_survive_reinitialization(
     assert (
         registry.get_sample_value(
             "vllm:tool_calls_emitted_total",
-            {"model_name": "test-model", "api_surface": "chat_completions"},
+            {"model_name": "test-model", "api_surface": api_surface},
         )
         == count
     )
@@ -170,8 +175,10 @@ def test_response_counts_use_bounded_labels_and_survive_reinitialization(
 
 
 @pytest.mark.parametrize("count", [0, 2])
-def test_interrupted_responses_only_count_emitted_calls(registry, count):
+@pytest.mark.parametrize("api_surface", ["chat_completions", "messages"])
+def test_interrupted_responses_only_count_emitted_calls(registry, count, api_surface):
     request = ChatCompletionRequest.model_construct(tool_choice="auto")
+    request._api_surface = api_surface
     metrics.record_tool_call_response(request, tool_calls_count=count, completed=False)
     for status in ("success", "parse_failure", "no_tool_calls"):
         assert (
@@ -181,7 +188,7 @@ def test_interrupted_responses_only_count_emitted_calls(registry, count):
                     "model_name": "test-model",
                     "status": status,
                     "tool_choice": "auto",
-                    "api_surface": "chat_completions",
+                    "api_surface": api_surface,
                 },
             )
             is None
@@ -189,7 +196,43 @@ def test_interrupted_responses_only_count_emitted_calls(registry, count):
     assert (
         registry.get_sample_value(
             "vllm:tool_calls_emitted_total",
-            {"model_name": "test-model", "api_surface": "chat_completions"},
+            {"model_name": "test-model", "api_surface": api_surface},
         )
         == count
     )
+
+
+@pytest.mark.parametrize("is_streaming", [False, True])
+def test_converted_messages_are_not_counted_as_chat_requests(registry, is_streaming):
+    request = AnthropicServingMessages.to_chat_completion_request(
+        AnthropicMessagesRequest(
+            model="test-model",
+            max_tokens=1,
+            messages=[],
+            stream=is_streaming,
+            tools=[{"name": "private-function", "input_schema": {"type": "object"}}],
+            tool_choice={"type": "tool", "name": "private-function"},
+        )
+    )
+    assert (
+        _record_and_read(
+            registry, request, is_streaming, "named", "1", request_type="messages"
+        )
+        == 1
+    )
+    metrics.record_tool_call_response(request, tool_calls_count=1)
+    for surface in ("chat_completions", "messages"):
+        assert registry.get_sample_value(
+            "vllm:tool_call_responses_total",
+            {
+                "model_name": "test-model",
+                "status": "success",
+                "tool_choice": "named",
+                "api_surface": surface,
+            },
+        ) == (1 if surface == "messages" else None)
+        assert registry.get_sample_value(
+            "vllm:tool_calls_emitted_total",
+            {"model_name": "test-model", "api_surface": surface},
+        ) == (1 if surface == "messages" else 0)
+    assert b"private-function" not in generate_latest(registry)

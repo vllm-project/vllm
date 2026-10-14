@@ -346,6 +346,7 @@ class AnthropicServingMessages(OpenAIServingChat):
         cls._handle_thinking(req, anthropic_request, disabled_thinking_effort)
         cls._convert_tool_choice(anthropic_request, req)
         cls._convert_tools(anthropic_request, req)
+        req._api_surface = "messages"
         return req
 
     @classmethod
