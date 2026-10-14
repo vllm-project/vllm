@@ -23,6 +23,9 @@ from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
     GateLinear,
 )
+from vllm.model_executor.layers.fused_moe.expert_substitution import (
+    decoder_layer_index,
+)
 from vllm.model_executor.layers.fused_moe.utils import (
     is_model_fused_shared_expert_compatible,
     resolve_layer_fused_shared_expert,
@@ -146,6 +149,14 @@ class Qwen3NextSparseMoeBlock(nn.Module):
         self.ep_group = get_ep_group().device_group
         self.ep_size = self.ep_group.size()
         self.n_routed_experts = config.num_experts
+        # A REAP-pruned checkpoint keeps a different number of experts per
+        # layer, recorded in its quantization config; its gate and expert
+        # weights are compacted to the per-layer count.
+        layer_idx = decoder_layer_index(prefix)
+        if quant_config is not None and layer_idx is not None:
+            layer_num_experts = quant_config.get_num_experts_for_layer(layer_idx)
+            if layer_num_experts is not None:
+                self.n_routed_experts = layer_num_experts
 
         self.is_sequence_parallel = parallel_config.use_sequence_parallel_moe
 
@@ -173,10 +184,10 @@ class Qwen3NextSparseMoeBlock(nn.Module):
                 parallel_config.enable_expert_parallel,
                 self.is_sequence_parallel,
             )
-        if self.tp_size > config.num_experts:
+        if self.tp_size > self.n_routed_experts:
             raise ValueError(
                 f"Tensor parallel size {self.tp_size} is greater than "
-                f"the number of experts {config.num_experts}."
+                f"the number of experts {self.n_routed_experts}."
             )
 
         # Load balancing settings.
@@ -190,7 +201,7 @@ class Qwen3NextSparseMoeBlock(nn.Module):
 
         self.gate = GateLinear(
             config.hidden_size,
-            config.num_experts,
+            self.n_routed_experts,
             prefix=f"{prefix}.gate",
         )
 
