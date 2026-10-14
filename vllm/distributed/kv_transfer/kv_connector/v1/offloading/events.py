@@ -133,9 +133,18 @@ class OffloadingEventsTracker:
             )
         )
 
-    @staticmethod
-    def _extend_locators(state: _RequestEventContext) -> None:
+    def _metadata_for(
+        self,
+        state: _RequestEventContext,
+        offload_key: OffloadKey,
+    ) -> _OffloadEventMetadata | None:
         request = state.request
+        if getattr(request, "resumable", False) is True:
+            return None
+        params = getattr(request, "kv_transfer_params", None)
+        if isinstance(params, dict) and params.get("_p_side_truncated"):
+            return None
+
         if len(request.block_hashes) < state.indexed_hash_count:
             state.indexed_hash_count = 0
             state.locators.clear()
@@ -159,28 +168,64 @@ class OffloadingEventsTracker:
                 state.locators.setdefault(key, hash_boundary * tokens_per_hash)
         state.indexed_hash_count = len(request.block_hashes)
 
-    def _metadata_for(
-        self,
-        state: _RequestEventContext,
-        offload_key: OffloadKey,
-    ) -> _OffloadEventMetadata | None:
-        request = state.request
-        if getattr(request, "resumable", False) is True:
-            return None
-        params = getattr(request, "kv_transfer_params", None)
-        if isinstance(params, dict) and params.get("_p_side_truncated"):
-            return None
-
-        self._extend_locators(state)
         boundary_tokens = state.locators.get(offload_key)
         group_config = state.group_configs.get(get_offload_group_idx(offload_key))
         if boundary_tokens is None or group_config is None:
             return None
         if boundary_tokens % group_config.tokens_per_chunk == 0:
             chunk_idx = boundary_tokens // group_config.tokens_per_chunk - 1
-            return self._build_event_metadata(state.request, group_config, chunk_idx)
-        return self._build_partial_tail_metadata(
-            state.request, group_config, boundary_tokens
+            return self._build_event_metadata(request, group_config, chunk_idx)
+
+        # A partial tail describes only the valid hashes and tokens before
+        # its boundary, not the unused remainder of the physical block.
+        tokens_per_hash = group_config.tokens_per_chunk // group_config.hashes_per_chunk
+        # Subtract one so the boundary token itself cannot select the next
+        # physical block when the boundary lies exactly on a block edge.
+        chunk_start = (
+            (boundary_tokens - 1) // group_config.tokens_per_chunk
+        ) * group_config.tokens_per_chunk
+        first_hash_idx = chunk_start // tokens_per_hash
+        last_hash_idx = boundary_tokens // tokens_per_hash
+        assert chunk_start < boundary_tokens
+        assert boundary_tokens % tokens_per_hash == 0
+        assert last_hash_idx <= len(request.block_hashes)
+
+        # Unlike a complete chunk, a partial tail contains only the hashes
+        # between its physical block start and its valid token boundary.
+        maybe_block_hashes = request.block_hashes[first_hash_idx:last_hash_idx]
+        block_hashes = tuple(
+            block_hash for block_hash in maybe_block_hashes if block_hash is not None
+        )
+        assert block_hashes and len(block_hashes) == len(maybe_block_hashes)
+        parent_block_hash = (
+            request.block_hashes[first_hash_idx - 1] if first_hash_idx > 0 else None
+        )
+        assert first_hash_idx == 0 or parent_block_hash is not None
+
+        lora_id = (
+            request.lora_request.adapter_id
+            if request.lora_request is not None
+            else None
+        )
+        lora_name = (
+            request.lora_request.name if request.lora_request is not None else None
+        )
+        extra_keys = self._build_extra_keys(
+            request,
+            chunk_start,
+            boundary_tokens,
+            tokens_per_hash,
+        )
+        return _OffloadEventMetadata(
+            block_hashes=block_hashes,
+            parent_block_hash=parent_block_hash,
+            token_ids=tuple(request.all_token_ids[chunk_start:boundary_tokens]),
+            block_size=tokens_per_hash,
+            lora_id=lora_id,
+            lora_name=lora_name,
+            extra_keys=extra_keys,
+            group_idx=group_config.group_idx,
+            kv_cache_spec=group_config.kv_event_group_spec,
         )
 
     @staticmethod
@@ -204,62 +249,6 @@ class OffloadingEventsTracker:
             )
             extra_keys.append(block_extra_keys)
         return tuple(extra_keys)
-
-    def _build_partial_tail_metadata(
-        self,
-        req: Request,
-        group_config: "GroupOffloadConfig",
-        boundary_tokens: int,
-    ) -> _OffloadEventMetadata:
-        """Build metadata for the valid prefix of one physical cache block.
-
-        A partial recurrent tail ends on a hash boundary but before its
-        physical cache block is full. The event describes only the valid
-        hashes and tokens, not the unused remainder of that physical block.
-        """
-        tokens_per_hash = group_config.tokens_per_chunk // group_config.hashes_per_chunk
-        # Subtract one so the boundary token itself cannot select the next
-        # physical block when the boundary lies exactly on a block edge.
-        chunk_start = (
-            (boundary_tokens - 1) // group_config.tokens_per_chunk
-        ) * group_config.tokens_per_chunk
-        first_hash_idx = chunk_start // tokens_per_hash
-        last_hash_idx = boundary_tokens // tokens_per_hash
-        assert chunk_start < boundary_tokens
-        assert boundary_tokens % tokens_per_hash == 0
-        assert last_hash_idx <= len(req.block_hashes)
-
-        # Unlike a complete chunk, a partial tail contains only the hashes
-        # between its physical block start and its valid token boundary.
-        maybe_block_hashes = req.block_hashes[first_hash_idx:last_hash_idx]
-        block_hashes = tuple(
-            block_hash for block_hash in maybe_block_hashes if block_hash is not None
-        )
-        assert block_hashes and len(block_hashes) == len(maybe_block_hashes)
-        parent_block_hash = (
-            req.block_hashes[first_hash_idx - 1] if first_hash_idx > 0 else None
-        )
-        assert first_hash_idx == 0 or parent_block_hash is not None
-
-        lora_id = req.lora_request.adapter_id if req.lora_request is not None else None
-        lora_name = req.lora_request.name if req.lora_request is not None else None
-        extra_keys = self._build_extra_keys(
-            req,
-            chunk_start,
-            boundary_tokens,
-            tokens_per_hash,
-        )
-        return _OffloadEventMetadata(
-            block_hashes=block_hashes,
-            parent_block_hash=parent_block_hash,
-            token_ids=tuple(req.all_token_ids[chunk_start:boundary_tokens]),
-            block_size=tokens_per_hash,
-            lora_id=lora_id,
-            lora_name=lora_name,
-            extra_keys=extra_keys,
-            group_idx=group_config.group_idx,
-            kv_cache_spec=group_config.kv_event_group_spec,
-        )
 
     def take_events(self, events: Iterable[OffloadingEvent]) -> Iterable[KVCacheEvent]:
         """Translate raw OffloadingEvents into self-describing KV events.
