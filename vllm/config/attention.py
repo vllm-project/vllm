@@ -85,6 +85,12 @@ class AttentionConfig:
     use_prefill_query_quantization: bool = False
     """If set, quantize query for attention in prefill."""
 
+    use_cute_dsl_prefill_context: bool = False
+    """Use CuTe DSL for cached-context attention with TRTLLM_RAGGED prefill."""
+
+    use_cute_dsl_prefill_new_tokens: bool = False
+    """Use CuTe DSL for causal new-token attention with TRTLLM_RAGGED prefill."""
+
     indexer_kv_dtype: IndexerKVDType = "auto"
     """Data type for the sparse-attention indexer K cache. "auto" picks the
     model's default (bf16 for MiniMax M3, fp8 for the DeepSeek sparse

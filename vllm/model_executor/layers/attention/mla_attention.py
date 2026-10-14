@@ -2123,6 +2123,14 @@ def build_mla_chunked_context_metadata(
         num_tokens = sum(plan.seq_lens)
         num_local_tokens = num_tokens
 
+        # Align every int32 indptr slice to 16 bytes for CuTe prefill.
+        padding = -boundary_offset % 4
+        cu_seq_lens_flat.extend([0] * padding)
+        cu_seqlens_q_flat.extend([0] * padding)
+        if use_dcp:
+            padded_local_cu_seq_lens_flat.extend([0] * padding)
+        boundary_offset += padding
+
         seq_lens_flat.extend(plan.seq_lens)
         cu_seq_lens_flat.extend(itertools.accumulate(plan.seq_lens, initial=0))
         query_base = query_start_loc[plan.request_start]

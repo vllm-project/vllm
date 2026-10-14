@@ -120,6 +120,8 @@ def test_chunks_gather_every_context_row_exactly_once(context_lens, workspace_si
     previous_request_start = -1
     for chunk in metadata.chunks:
         assert chunk.all_rows_active
+        assert chunk.query_start_loc.data_ptr() % 16 == 0
+        assert chunk.cu_seq_lens.data_ptr() % 16 == 0
         assert chunk.num_context_tokens <= workspace_size
         assert chunk.num_context_tokens == int(chunk.cu_seq_lens[-1])
         assert chunk.token_to_seq.shape[0] == chunk.num_context_tokens
@@ -261,6 +263,9 @@ def test_dcp_chunks_fit_the_per_rank_row_budget():
     local_cursor: dict[int, int] = {}
     for chunk in metadata.chunks:
         assert chunk.num_local_context_tokens <= workspace_size // dcp_world_size
+        assert chunk.query_start_loc.data_ptr() % 16 == 0
+        assert chunk.cu_seq_lens.data_ptr() % 16 == 0
+        assert chunk.padded_local_cu_seq_lens.data_ptr() % 16 == 0
         assert chunk.local_starts == chunk.starts.tolist()
         assert chunk.padded_local_cu_seq_lens.tolist() == [0] + list(
             torch.tensor(chunk.padded_local_seq_lens).cumsum(0)
