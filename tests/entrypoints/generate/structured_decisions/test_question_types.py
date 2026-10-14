@@ -151,7 +151,8 @@ def test_score_labels_are_levels():
     [
         ("score", ["1", "2", "3", "4", "5"], "12345", "12345"),
         ("score", ["0", "1", "2", "3", "4"], "01234", "01234"),
-        ("score", ["poor", "2", "3", "4", "excellent"], "ABCDE", "ABCDE"),
+        ("score", ["poor", "2", "3", "4", "excellent"], "01234", "12345"),
+        ("score", [str(i) for i in range(1, 11)], "0123456789", "ABCDEFGHIJ"),
         ("score", ["calm", "annoyed", "furious"], "012", "123"),
         ("choice", ["C", "A", "D", "B"], "CADB", "CADB"),
         ("choice", ["billing", "outage"], "AB", "AB"),
@@ -167,14 +168,15 @@ def test_labels_follow_option_names(gateway, kind, names, labels, on_gateway):
     assert "".join(schema["questions"][0]["labels"]) == on_gateway
 
 
-def test_score_prompt_own_digits_and_letters():
+def test_score_prompt_own_digits():
     q = score(criteria=["1", "2"])
     assert q.type.prompt(q) == (
         "Question: How angry?\n1\n2\nAnswer with the number of one level only."
     )
-    q = score(criteria=["poor", "2"])
+    q = score(criteria=["0", "1", "high"])
     assert q.type.prompt(q) == (
-        "Question: How angry?\nA: poor\nB: 2\nAnswer with the letter of one level only."
+        "Question: How angry?\n0: 0\n1: 1\n2: high\n"
+        "Answer with the number of one level only."
     )
 
 

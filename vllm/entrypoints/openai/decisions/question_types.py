@@ -13,8 +13,6 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any, ClassVar
 
-import regex as re
-
 
 class StructuredDecisionError(ValueError):
     """An invalid request. Returned as a 400."""
@@ -23,9 +21,6 @@ class StructuredDecisionError(ValueError):
 #: Letter labels by option position. A single capital letter is one
 #: token at the start of a reply for the tokenizers tested. Every read checks it.
 LABELS = tuple(string.ascii_uppercase)
-
-_OWN_DIGIT = re.compile(r"\s*([0-9])(?![0-9])")
-_ANY_DIGIT = re.compile(r"\d")
 
 
 @dataclass(frozen=True)
@@ -70,15 +65,12 @@ class QuestionType(ABC):
             else f"{label}: {option.name}"
         )
 
-    def instruction(self, question: Question) -> str:
-        return self.reply_instruction
-
     def prompt(self, question: Question) -> str:
         """The question as the model reads it, after the state."""
         lines = [f"Question: {question.instructions}"] if question.instructions else []
         for label, o in zip(question.labels, question.options):
             lines.append(self.reply_line(label, o))
-        lines.append(self.instruction(question))
+        lines.append(self.reply_instruction)
         return "\n".join(lines)
 
 
@@ -243,24 +235,18 @@ class ScoreQuestion(QuestionType):
         return [Option(str(level)) for level in criteria]
 
     def labels(self, names: list[str]) -> tuple[str, ...]:
-        # Letter labels take their token ids from the choice type's label_set.
-        if not _ANY_DIGIT.search("".join(names)):
-            return super().labels(names)
-        own = tuple(m.group(1) for n in names if (m := _OWN_DIGIT.match(n)))
-        if len(own) == len(names) and len(set(own)) == len(own):
-            return own
-        return LABELS[: len(names)]
+        # Levels named with single digits keep them. Names are distinct.
+        if all(n in self.label_set for n in names):
+            return tuple(names)
+        return super().labels(names)
 
-    def reply_line(self, label: str, option: Option) -> str:
-        # A level numbered with its own digit reads as its name alone.
-        if label.isdigit() and option.name.lstrip().startswith(label):
-            return option.name
-        return f"{label}: {option.name}"
-
-    def instruction(self, question: Question) -> str:
-        if question.labels[0].isdigit():
-            return self.reply_instruction
-        return "Answer with the letter of one level only."
+    def prompt(self, question: Question) -> str:
+        names = tuple(o.name for o in question.options)
+        if question.labels != names:
+            return super().prompt(question)
+        # Levels that are their own labels read as the label alone.
+        lines = [f"Question: {question.instructions}"] if question.instructions else []
+        return "\n".join([*lines, *names, self.reply_instruction])
 
     def answer(
         self, question: Question, probs: list[float], label_mass: float

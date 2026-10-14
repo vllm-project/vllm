@@ -94,7 +94,6 @@ from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pybase64 as base64
-import regex as re
 from transformers import AutoTokenizer
 
 ARGS = None
@@ -129,8 +128,7 @@ class SchemaError(ValueError):
 
 # The label rules of vllm's question_types, pinned to it by a shared test table.
 LABELS = tuple(string.ascii_uppercase)
-OWN_DIGIT = re.compile(r"\s*([0-9])(?![0-9])")
-ANY_DIGIT = re.compile(r"\d")
+DIGITS = tuple(string.digits)
 
 
 def choice_labels(names):
@@ -142,13 +140,11 @@ def choice_labels(names):
 
 
 def score_labels(names):
-    """Own digits, else letters if a name has a digit, else positions from 1."""
-    if ANY_DIGIT.search("".join(names)):
-        own = [m.group(1) for n in names if (m := OWN_DIGIT.match(n))]
-        if len(own) == len(names) and len(set(own)) == len(own):
-            return tuple(own)
-    elif len(names) <= 9:
-        return tuple(string.digits[1 : len(names) + 1])
+    """Distinct single-digit level names keep them, else positions from 1."""
+    if all(n in DIGITS for n in names) and len(set(names)) == len(names):
+        return tuple(names)
+    if len(names) <= 9:
+        return DIGITS[1 : len(names) + 1]
     return LABELS[: len(names)]
 
 
