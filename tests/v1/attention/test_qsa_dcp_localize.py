@@ -41,7 +41,7 @@ def _pack(rows, width, device="cpu"):
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="Triton kernel needs a GPU")
-@pytest.mark.parametrize("world,interleave", [(2, 1), (2, 4), (4, 16)])
+@pytest.mark.parametrize("world,interleave", [(2, 1), (2, 4), (4, 1), (4, 16)])
 @pytest.mark.parametrize("width", [32, 2051])
 def test_kernel_matches_the_reference(world, interleave, width):
     from vllm.models.qwen4_exp.nvidia.ops.qsa_dcp import qsa_localize_dcp_indices
@@ -85,7 +85,7 @@ def _localize_in_place(selection, world, rank, interleave):
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="Triton kernel needs a GPU")
-@pytest.mark.parametrize("world,interleave", [(2, 1), (4, 16)])
+@pytest.mark.parametrize("world,interleave", [(2, 1), (4, 1), (4, 16)])
 @pytest.mark.parametrize("width", [32, 2051])
 def test_in_place_localize_equals_a_separate_output(world, interleave, width):
     from vllm.models.qwen4_exp.nvidia.ops.qsa_dcp import qsa_localize_dcp_indices
@@ -110,7 +110,7 @@ def test_without_dcp_the_selection_stays_global():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="QSA kernels need CUDA")
-@pytest.mark.parametrize("world,interleave", [(2, 1), (4, 16)])
+@pytest.mark.parametrize("world,interleave", [(2, 1), (4, 1), (4, 16)])
 def test_reused_local_rows_match_per_pass_localization(world, interleave):
     """MTP step 0 localizes once; compaction and skip_topk steps reuse it.
 
@@ -168,6 +168,149 @@ def test_reused_local_rows_match_per_pass_localization(world, interleave):
         ):
             assert torch.equal(out, expected_out)
             assert torch.equal(lse, expected_lse)
+
+
+# --- indexer wiring ---------------------------------------------------------
+
+
+def _select_with_indexer(monkeypatch, *, skip_topk, dcp_world_size):
+    """Run QSAIndexer.forward with fake caches; record the DCP localization.
+
+    Returns (selection buffer, impl calls, kernel calls, select calls).
+    """
+    from types import SimpleNamespace
+
+    from vllm.models.qwen4_exp.nvidia import indexer_qsa
+    from vllm.models.qwen4_exp.nvidia.ops import qsa_dcp as qsa_dcp_ops
+    from vllm.models.qwen4_exp.nvidia.ops import qsa_indexer as qsa_indexer_ops
+    from vllm.models.qwen4_exp.nvidia.qsa import Qwen4ExpQSAFlashAttentionImpl
+
+    num_tokens, token_topk, compress_ratio = 2, 4, 2
+    impl_calls, kernel_calls, select_calls = [], [], []
+    impl = SimpleNamespace(
+        dcp_world_size=dcp_world_size, dcp_rank=0, cp_kv_cache_interleave_size=1
+    )
+
+    def localize_dcp_selection_(selection):
+        impl_calls.append(selection)
+        Qwen4ExpQSAFlashAttentionImpl.localize_dcp_selection_(impl, selection)
+
+    impl.localize_dcp_selection_ = localize_dcp_selection_
+    monkeypatch.setattr(
+        qsa_dcp_ops,
+        "qsa_localize_dcp_indices",
+        lambda *args: kernel_calls.append(args),
+    )
+    monkeypatch.setattr(indexer_qsa, "qsa_prepare", lambda *args, **kwargs: None)
+    for name in (
+        "qsa_select_paged_decode",
+        "qsa_select_paged_prefill",
+        "expand_qsa_block_indices",
+    ):
+        monkeypatch.setattr(
+            qsa_indexer_ops,
+            name,
+            lambda *args, _name=name: select_calls.append(_name),
+        )
+
+    raw_metadata = SimpleNamespace(
+        num_actual_tokens=num_tokens,
+        slot_mapping=torch.arange(num_tokens),
+        block_table=torch.empty(0),
+        query_start_loc=torch.arange(num_tokens + 1),
+        logical_positions=torch.arange(num_tokens),
+    )
+    compressed_metadata = SimpleNamespace(
+        num_actual_tokens=num_tokens,
+        slot_mapping=torch.arange(num_tokens),
+        k_work_metadata=torch.empty(0),
+        num_decodes=num_tokens,
+        num_decode_tokens=num_tokens,
+        decode_query_len=1,
+        visible_blocks=torch.ones(num_tokens, dtype=torch.int32),
+        block_table=torch.zeros(num_tokens, 1, dtype=torch.int32),
+        query_start_loc=torch.arange(num_tokens + 1),
+        logical_positions=torch.arange(num_tokens),
+        max_query_len=1,
+        max_seq_len=1,
+    )
+    indexer = SimpleNamespace(
+        skip_topk=skip_topk,
+        _metadata=lambda: (raw_metadata, compressed_metadata),
+        index_n_heads=1,
+        index_kv_heads=1,
+        index_head_dim=1,
+        indexer_dtype=torch.bfloat16,
+        raw_key_cache=SimpleNamespace(
+            kv_cache=torch.empty(0),
+            rope_position_cache=None,
+            rope_position_offset=0,
+        ),
+        compressed_key_cache=SimpleNamespace(kv_cache=torch.empty(0)),
+        rotary_emb=SimpleNamespace(cos_sin_cache=torch.empty(0)),
+        q_layernorm=SimpleNamespace(weight=torch.ones(1), variance_epsilon=1e-6),
+        k_layernorm=SimpleNamespace(weight=torch.ones(1)),
+        compress_ratio=compress_ratio,
+        token_topk=token_topk,
+        packed_output_width=token_topk + 1,
+    )
+    attn = SimpleNamespace(
+        use_fused_qsa_prepare=True,
+        kv_cache=torch.empty(0, 1, 1, 2),
+        kv_cache_dtype="auto",
+        q_norm=SimpleNamespace(weight=torch.ones(1), variance_epsilon=1e-6),
+        k_norm=SimpleNamespace(weight=torch.ones(1)),
+        _k_scale_float=1.0,
+        _v_scale_float=1.0,
+        impl=impl,
+    )
+    selection = _pack([[3, 1], [5, 2, 0]], token_topk)
+    returned, _ = indexer_qsa.QSAIndexer.forward(
+        indexer,
+        torch.zeros(num_tokens, 2),
+        torch.arange(num_tokens),
+        selection,
+        attn=attn,
+        qkv=torch.zeros(num_tokens, 4),
+        slot_mapping=torch.arange(num_tokens),
+    )
+    assert returned is selection
+    return selection, impl_calls, kernel_calls, select_calls
+
+
+@pytest.mark.cpu_test
+def test_indexer_localizes_each_new_selection_once(monkeypatch):
+    selection, impl_calls, kernel_calls, select_calls = _select_with_indexer(
+        monkeypatch, skip_topk=False, dcp_world_size=2
+    )
+
+    assert select_calls == ["qsa_select_paged_decode", "expand_qsa_block_indices"]
+    assert len(impl_calls) == 1 and impl_calls[0] is selection
+    assert len(kernel_calls) == 1
+    source, out, world, rank, interleave = kernel_calls[0]
+    assert source is selection and out is selection
+    assert (world, rank, interleave) == (2, 0, 1)
+
+
+@pytest.mark.cpu_test
+def test_indexer_skip_topk_reuses_the_local_rows(monkeypatch):
+    selection, impl_calls, kernel_calls, select_calls = _select_with_indexer(
+        monkeypatch, skip_topk=True, dcp_world_size=2
+    )
+
+    assert select_calls == [] and impl_calls == [] and kernel_calls == []
+    assert torch.equal(selection, _pack([[3, 1], [5, 2, 0]], 4))
+
+
+@pytest.mark.cpu_test
+def test_indexer_does_not_localize_without_dcp(monkeypatch):
+    selection, _, kernel_calls, select_calls = _select_with_indexer(
+        monkeypatch, skip_topk=False, dcp_world_size=1
+    )
+
+    assert select_calls == ["qsa_select_paged_decode", "expand_qsa_block_indices"]
+    assert kernel_calls == []
+    assert torch.equal(selection, _pack([[3, 1], [5, 2, 0]], 4))
 
 
 # --- one split with return_lse ----------------------------------------------
@@ -328,7 +471,9 @@ def test_empty_qsa_batch_returns_the_dcp_output_and_lse_pair():
     [
         (2, 1, 64, torch.bfloat16, None, None),
         (4, 16, 200, torch.bfloat16, None, None),
+        (4, 1, 200, torch.bfloat16, None, None),
         (2, 16, 64, torch.float8_e4m3fn, 0.75, 1.5),
+        (4, 1, 64, torch.float8_e4m3fn, 0.75, 1.5),
         (4, 4, 64, torch.float8_e4m3fn, 0.75, 1.5),
         (2, 16, 64, torch.uint8, 0.75, 1.5),
     ],
