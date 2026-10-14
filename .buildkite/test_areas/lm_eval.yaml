@@ -105,6 +105,7 @@ steps:
 
 - label: ":nvidia: (H100) LM Eval Large Models"
   key: lm-eval-large-models-4xh100
+  automatic_shard: true
   device: h100
   optional: true
   num_devices: 4
@@ -139,6 +140,7 @@ steps:
 
 - label: ":nvidia: (B200) LM Eval Small Models"
   key: lm-eval-small-models-1xb200
+  automatic_shard: true
   timeout_in_minutes: 50
   device: b200-k8s
   optional: true
