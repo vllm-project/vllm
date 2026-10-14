@@ -40,6 +40,7 @@ from vllm.v1.attention.ops.flydsl_kernels.buffer_utils import (
     load_vec,
     store_vec,
 )
+from vllm.v1.attention.ops.flydsl_kernels.mma_utils import mma
 
 # === Constants (Qwen-class TQ decode profile) ===============================
 HEAD_SIZE = 128
@@ -222,6 +223,8 @@ def build_tq_decode_module(
         ONE_F = fx.Float32(1.0)
         LOG2E_C = fx.Float32(LOG2E)
         QK_SCALE = fx.Float32(_qk_scale)
+        qk_atom = fx.make_mma_atom(fx.rocdl.MFMA(16, 16, 32, fx.BFloat16))
+        pv_atom = fx.make_mma_atom(fx.rocdl.MFMA(16, 16, 16, fx.BFloat16))
 
         # ===== STEP A: Load centroids → LDS (cooperative, race-safe) =====
         c_idx_safe = lane & (N_CENTROIDS - 1)
@@ -427,9 +430,7 @@ def build_tq_decode_module(
                         T.vec(2, T.i64), kv_lds_i64, [fx.Index(k_idx_i64)]
                     )
                     k_op = kv_load.bitcast(fx.BFloat16)
-                    qk_acc = rocdl.mfma_f32_16x16x32_bf16(
-                        T.f32x4, [k_op, q_chunks[chk], qk_acc, 0, 0, 0]
-                    )
+                    qk_acc = mma(qk_atom, qk_acc, k_op, q_chunks[chk])
 
                 # qk_acc layout: lane t holds C[token=(t/16)*4..+3, query=t%16]
                 # 4 fp32/lane = 4 different tokens at SAME query_row.
@@ -535,7 +536,7 @@ def build_tq_decode_module(
                 # ---- PV MFMA: A=V[head_dim, token], B=P (=qk_acc bf16) -----
                 # P operand B layout matches qk_acc: lane t holds 4 bf16 at
                 # K=token=(t/16)*4..+3, N=query=t%16. Just trunc_f to bf16.
-                p_op = qk_acc.to(fx.BFloat16).bitcast(fx.Int16)
+                p_op = qk_acc.to(fx.BFloat16)
 
                 # HW-transpose PV path: V_lds is row-major V[token][head_dim].
                 # MFMA A operand layout: lane t holds 4 bf16 at
@@ -562,9 +563,8 @@ def build_tq_decode_module(
                         T.vec(4, T.i16),
                         v_ptr,
                     ).result
-                    acc_pv[h] = rocdl.mfma_f32_16x16x16bf16_1k(
-                        T.f32x4, [v_op_raw, p_op, acc_pv[h], 0, 0, 0]
-                    )
+                    v_op = fx.Vector(v_op_raw).bitcast(fx.BFloat16)
+                    acc_pv[h] = mma(pv_atom, acc_pv[h], v_op, p_op)
 
             results = yield [running_max, running_sum, *acc_pv]
         running_max = fx.Float32(results[0])
