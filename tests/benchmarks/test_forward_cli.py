@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import json
 import subprocess
+from dataclasses import replace
 from types import SimpleNamespace
 
 import numpy as np
@@ -62,9 +63,14 @@ def test_build_batch_layout():
 
 
 def test_jitter_kv_lens():
-    """Prefixes vary, capped at the max length; queries and fresh prefills don't."""
+    """Prefixes vary, capped at the max length; queries and fresh prefills don't.
+    A case's draw depends only on the seed and its name, so adding or reordering
+    other cases doesn't change it."""
     case = parse_case("c=1000*1@1001,4@64:3,32")
-    jittered = jitter_kv_lens(case, 0.5, 1400, np.random.default_rng(0))
+    jittered = jitter_kv_lens(case, 0.5, 1400, 0)
+    assert jitter_kv_lens(case, 0.5, 1400, 0) == jittered
+    other = jitter_kv_lens(replace(case, name="d"), 0.5, 1400, 0)
+    assert other.requests != jittered.requests
     prefixes = np.array([r.prefix_len for r in jittered.requests[:1000]])
     assert prefixes.min() >= 500 and max(r.kv_len for r in jittered.requests) == 1400
     assert prefixes.std() > 200
@@ -72,9 +78,9 @@ def test_jitter_kv_lens():
         r.query_len for r in case.requests
     ]
     assert jittered.requests[-1] == case.requests[-1]
-    assert jitter_kv_lens(case, 0, 2048, np.random.default_rng(0)) == case
+    assert jitter_kv_lens(case, 0, 2048, 0) == case
     with pytest.raises(ValueError, match="KV length"):
-        jitter_kv_lens(case, 0, 1000, np.random.default_rng(0))
+        jitter_kv_lens(case, 0, 1000, 0)
 
 
 @pytest.mark.benchmark

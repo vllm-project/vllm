@@ -3,6 +3,7 @@
 """Exact batch shapes for `vllm bench forward`."""
 
 import json
+import zlib
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -62,13 +63,15 @@ class BenchCase:
 
 
 def jitter_kv_lens(
-    case: BenchCase, jitter: float, max_kv_len: int, rng: np.random.Generator
+    case: BenchCase, jitter: float, max_kv_len: int, seed: int
 ) -> BenchCase:
     """Draw each request's prefix uniformly within +-jitter of its value.
 
     Query lengths are kept, so a fresh prefill stays one and a non-empty
-    prefix stays non-empty. KV lengths are capped at `max_kv_len`.
+    prefix stays non-empty. KV lengths are capped at `max_kv_len`. The draw
+    depends only on the seed and the case's name, not on the other cases.
     """
+    rng = np.random.default_rng([seed, zlib.crc32(case.name.encode())])
     requests = []
     for req in case.requests:
         if req.kv_len > max_kv_len:

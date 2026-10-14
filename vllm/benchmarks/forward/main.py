@@ -209,9 +209,10 @@ def main(args: argparse.Namespace) -> None:
     llm = LLM.from_engine_args(_make_engine_args(args, cases))
     runner = llm.llm_engine.model_executor.driver_worker.worker.model_runner
     # Same draw on every rank: shapes are balanced across DP ranks.
-    rng = np.random.default_rng(args.seed)
     max_kv_len = runner.model_config.max_model_len
-    cases = [jitter_kv_lens(c, args.kv_len_jitter, max_kv_len, rng) for c in cases]
+    cases = [
+        jitter_kv_lens(c, args.kv_len_jitter, max_kv_len, args.seed) for c in cases
+    ]
     world = get_world_group()
     results = []
     with torch.inference_mode(), set_current_vllm_config(runner.vllm_config):
