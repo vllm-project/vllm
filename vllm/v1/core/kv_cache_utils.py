@@ -655,19 +655,30 @@ def generate_block_hash_extra_keys(
 def to_event_extra_keys(
     extra_keys: Iterable[tuple[Any, ...] | None] | None,
 ) -> list[tuple[Any, ...] | None] | None:
-    """Publish source-tagged extra keys for each event block.
+    """Convert block-hash extra keys to the untagged per-block list published
+    in KV events.
+
+    External KV event consumers parse the pre-tagging shapes: bare LoRA names
+    and cache salts, ``(mm_identifier, offset)`` pairs and bare prompt-embeds
+    digests. Events keep that format until consumers handle the tagged keys.
 
     Args:
-        extra_keys: One entry per event block, as returned by
+        extra_keys: One entry per block, each as returned by
             `generate_block_hash_extra_keys`, or None.
 
     Returns:
-        The per-block keys with tags intact, or None if no entries exist.
+        One untagged entry per block, or None if there are no entries.
 
     """
-    if extra_keys is None:
+    if not extra_keys:
         return None
-    return list(extra_keys) or None
+    event_keys = [
+        None
+        if keys is None
+        else tuple(key[1:] if key[0] == "mm" else key[1] for key in keys)
+        for keys in extra_keys
+    ]
+    return event_keys or None
 
 
 def hash_block_tokens(

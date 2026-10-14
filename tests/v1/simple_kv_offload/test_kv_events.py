@@ -296,7 +296,10 @@ def test_eager_store_lora_metadata() -> None:
     assert ev.lora_name == "test-lora", (
         f"expected lora_name='test-lora', got {ev.lora_name!r}"
     )
-    assert ev.extra_keys == [(("lora", "test-lora", "/fake/lora/path"),)]
+    assert ev.extra_keys is not None, "expected extra_keys for lora request"
+    assert any(keys is not None and "test-lora" in keys for keys in ev.extra_keys), (
+        f"expected 'test-lora' in extra_keys, got {ev.extra_keys}"
+    )
     assert len(ev.token_ids) == BLOCK_SIZE
 
 

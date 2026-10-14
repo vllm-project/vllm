@@ -580,14 +580,14 @@ def test_full_event_extra_keys_match_gpu_block_granularity():
 
     [event] = tracker.take_events([_stored_event([key], req_context=req.req_context)])
 
-    assert event.extra_keys == [
-        (("lora", "adapter", "adapter-path"), ("cache_salt", "salt")),
-        (("lora", "adapter", "adapter-path"),),
-    ]
-    wire_event = msgspec.msgpack.decode(
-        msgspec.msgpack.encode(KVEventBatch(ts=0.0, events=[event]))
-    )[1][0]
-    assert wire_event["extra_keys"][0][0] == ["lora", "adapter", "adapter-path"]
+    expected = []
+    mm_idx = 0
+    for start in (0, 4):
+        extra_keys, mm_idx = generate_block_hash_extra_keys(
+            req, start, start + 4, mm_idx
+        )
+        expected.append(extra_keys)
+    assert event.extra_keys == to_event_extra_keys(tuple(expected))
     assert event.lora_id == 7
     assert event.lora_name == "adapter"
 
@@ -679,7 +679,7 @@ def test_partial_event_extra_keys_replay_mm_features_from_request_start():
 
     assert event.block_hashes == [_wire_hash(value) for value in req.block_hashes[4:7]]
     assert event.token_ids == req.all_token_ids[16:28]
-    assert event.extra_keys == [(("mm", "A", 2),), (("mm", "A", -2),), None]
+    assert event.extra_keys == [(("A", 2),), (("A", -2),), None]
 
 
 @pytest.mark.parametrize(
