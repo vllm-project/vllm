@@ -635,14 +635,17 @@ class NixlBaseConnectorWorker:
         num_threads = vllm_config.kv_transfer_config.get_from_extra_config(
             "num_threads", 4
         )
+        self._async_poll = vllm_config.kv_transfer_config.get_from_extra_config(
+            "async_completion_poll", False
+        )
         if nixl_agent_config is None:
             config = None
         else:
             # Enable telemetry by default for NIXL 0.7.1 and above.
-            # VLLM_NIXL_ASYNC_POLL: the poll thread requires serialized NIXL calls.
+            # A second thread polls transfers, so NIXL calls must be serialized.
             sync_kwargs = {}
-            if os.environ.get("VLLM_NIXL_ASYNC_POLL", "0") == "1":
-                from nixl._api import nixl_thread_sync_t
+            if self._async_poll:
+                from vllm.distributed.nixl_utils import nixl_thread_sync_t
 
                 sync_kwargs["sync_mode"] = nixl_thread_sync_t.NIXL_THREAD_SYNC_STRICT
             config = (
@@ -657,11 +660,15 @@ class NixlBaseConnectorWorker:
 
         self.nixl_wrapper = nixl_wrapper_cls(str(uuid.uuid4()), config)
         # Async poll results: handle -> (state, telemetry | exception).
-        self._async_poll = os.environ.get("VLLM_NIXL_ASYNC_POLL", "0") == "1"
         self._async_poll_lock = threading.Lock()
         self._async_done: dict[int, tuple[str, Any]] = {}
         if self._async_poll:
             self._async_poll_stop = threading.Event()
+            self._async_poll_interval = (
+                vllm_config.kv_transfer_config.get_from_extra_config(
+                    "async_completion_poll_interval_s", 0.001
+                )
+            )
             threading.Thread(
                 target=self._nixl_async_poll_loop, name="nixl-async-poll", daemon=True
             ).start()
@@ -3087,7 +3094,7 @@ class NixlBaseConnectorWorker:
 
     def _nixl_async_poll_loop(self) -> None:
         """Record transfer completions as they happen, independent of engine steps."""
-        interval = float(os.environ.get("VLLM_NIXL_ASYNC_POLL_INTERVAL_S", "0.001"))
+        interval = self._async_poll_interval
         while not self._async_poll_stop.is_set():
             transfers = getattr(self, "_recving_transfers", None)
             if transfers:

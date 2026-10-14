@@ -15,6 +15,7 @@ logger = init_logger(__name__)
 NixlWrapper: Any
 nixl_agent_config: Any
 nixlXferTelemetry: Any
+nixl_thread_sync_t: Any
 
 
 def _maybe_set_ucx_rcache_limit() -> None:
@@ -52,6 +53,7 @@ def _load_nixl_attr(name: str) -> Any:
         "NixlWrapper": "nixl_agent",
         "nixl_agent_config": "nixl_agent_config",
         "nixlXferTelemetry": "nixlXferTelemetry",
+        "nixl_thread_sync_t": "nixl_thread_sync_t",
     }[name]
 
     _maybe_set_ucx_rcache_limit()
@@ -111,6 +113,7 @@ __all__ = [
     "NixlWrapper",
     "nixl_agent_config",
     "nixlXferTelemetry",
+    "nixl_thread_sync_t",
     "is_nixl_available",
     "alias_nixl_for_ray",
 ]
