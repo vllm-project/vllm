@@ -1910,6 +1910,179 @@ def test_derive_mamba_conv_split(
     assert out.conv_rows == conv_rows
 
 
+_M2_HEADS, _M2_HEAD_DIM, _M2_STATE, _M2_ROWS = 8, 4, 4, 3
+_M2_INTERMEDIATE = _M2_HEADS * _M2_HEAD_DIM
+
+
+def _mamba2_spec(tp: int, n_groups: int, with_splits: bool = True):
+    from vllm.model_executor.layers.mamba.mamba_utils import (
+        MambaStateShapeCalculator,
+    )
+    from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
+    from vllm.v1.kv_cache_interface import MambaSpec
+
+    shapes = MambaStateShapeCalculator.mamba2_state_shape(
+        tp_world_size=tp,
+        intermediate_size=_M2_INTERMEDIATE,
+        n_groups=n_groups,
+        num_heads=_M2_HEADS,
+        head_dim=_M2_HEAD_DIM,
+        state_size=_M2_STATE,
+        conv_kernel=_M2_ROWS + 1,
+    )
+    splits = MambaStateShapeCalculator.mamba2_state_splits(
+        tp_world_size=tp,
+        intermediate_size=_M2_INTERMEDIATE,
+        n_groups=n_groups,
+        num_heads=_M2_HEADS,
+        state_size=_M2_STATE,
+    )
+    return MambaSpec(
+        block_size=64,
+        shapes=shapes,
+        dtypes=(torch.float16, torch.float16),
+        mamba_type=MambaAttentionBackendEnum.MAMBA2,
+        state_splits=splits if with_splits else None,
+    )
+
+
+def _mamba2_conv_page(
+    conv: torch.Tensor, tp: int, rank: int, n_groups: int
+) -> torch.Tensor:
+    """Bytes of one rank's DS conv state, sliced from the global [x|B|C]:
+    x is sharded; B and C are sharded by group, or held whole by every rank
+    when TP does not divide n_groups."""
+    groups_ss = n_groups * _M2_STATE
+    x, b, c = conv.split([_M2_INTERMEDIATE, groups_ss, groups_ss])
+    bc_ways = tp if n_groups % tp == 0 else 1
+
+    def shard(seg: torch.Tensor, ways: int) -> torch.Tensor:
+        return seg.chunk(ways)[rank % ways]
+
+    page = torch.cat([shard(x, tp), shard(b, bc_ways), shard(c, bc_ways)])
+    return page.flatten().view(torch.uint8)
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("n_groups", [1, 8])
+@pytest.mark.parametrize("p_tp,d_tp", [(1, 2), (2, 1), (2, 4), (4, 2)])
+def test_mamba2_hetero_tp_conv_reads_assemble_decode_pages(n_groups, p_tp, d_tp):
+    """Every D rank's conv page, assembled from the remote reads of each P
+    rank it pulls from, equals the page D would hold had it computed the
+    state itself, including B/C replicated on every rank (n_groups=1)."""
+    import numpy as np
+
+    from vllm.distributed.kv_transfer.kv_connector.utils import TransferTopology
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import (
+        compute_tp_mapping,
+    )
+    from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import (  # noqa: E501
+        derive_mamba_conv_split,
+    )
+    from vllm.v1.kv_cache_interface import MambaSpec
+
+    conv_dim = _M2_INTERMEDIATE + 2 * n_groups * _M2_STATE
+    conv = torch.arange(conv_dim * _M2_ROWS, dtype=torch.int16)
+    conv = conv.reshape(conv_dim, _M2_ROWS)
+    with patch(
+        "vllm.model_executor.layers.mamba.mamba_utils.get_conv_state_layout",
+        return_value="DS",
+    ):
+        p_info = derive_mamba_conv_split(_mamba2_spec(p_tp, n_groups), p_tp)
+        d_info = derive_mamba_conv_split(_mamba2_spec(d_tp, n_groups), d_tp)
+    p_pages = [_mamba2_conv_page(conv, p_tp, p, n_groups) for p in range(p_tp)]
+    group_spec_types = (FullAttentionSpec, MambaSpec)
+    local_descs = np.array(
+        [(off, size, 0) for off, size in d_info.local_conv_offsets], dtype=np.uint64
+    )
+
+    for d in range(d_tp):
+        topo = object.__new__(TransferTopology)
+        topo.tp_rank, topo.tp_size = d, d_tp
+        topo.is_mla, topo.total_num_kv_heads, topo.dcp_size = False, 8, 1
+        tp_ratio = topo.tp_ratio(p_tp)
+        assert d_info.remote_conv_bytes(tp_ratio) == p_info.ssm_sizes[0]
+        plan = compute_tp_mapping(topo, p_tp, group_spec_types)
+
+        worker = MagicMock(spec=NixlConnectorWorker)
+        worker.use_mla = False
+        worker._group_spec_types = group_spec_types
+        worker._fa_desc_replicated = lambda n, ratio=1: [False] * n
+        worker._ple_region_index = None
+        if NixlConnectorWorker._needs_split_local_xfer_handles(worker, tp_ratio, plan):
+            local_handles = list(
+                NixlConnectorWorker._build_local_splits_from_plan(
+                    worker, plan, local_descs, num_fa_descs=0
+                )
+            )
+        else:
+            local_handles = [local_descs.tolist()]
+
+        d_page = torch.zeros(d_info.ssm_sizes[0], dtype=torch.uint8)
+        for p, handle in zip(plan.all_source_ranks, local_handles, strict=True):
+            reads = d_info.remote_conv_offsets(d, tp_ratio, p)
+            for (dst, dst_size, _), (src, size) in zip(handle, reads, strict=True):
+                assert dst_size == size
+                d_page[dst : dst + size] = p_pages[p][src : src + size]
+        assert torch.equal(d_page, _mamba2_conv_page(conv, d_tp, d, n_groups))
+
+
+@pytest.mark.cpu_test
+def test_mamba2_hetero_tp_without_split_is_rejected():
+    """A Mamba2 layer that does not declare its conv TP split cannot be
+    transferred across TP sizes, since its B/C may be replicated."""
+    worker = MagicMock(spec=NixlConnectorWorker)
+    worker.transfer_topo = MagicMock()
+    worker.transfer_topo.get_engine_info.return_value = SimpleNamespace(
+        remote_tp_size=2, remote_dcp_size=1
+    )
+    worker.transfer_topo.tp_ratio.return_value = -2
+    worker.transfer_topo.tp_size = 1
+    worker.dcp_size = 1
+    worker._has_mamba = True
+    worker._layer_specs = {"mamba.0": _mamba2_spec(1, 1, with_splits=False)}
+
+    with pytest.raises(NotImplementedError, match="state_splits"):
+        NixlConnectorWorker._validate_remote_agent_handshake(
+            worker, SimpleNamespace(engine_id="remote"), remote_tp_size=2
+        )
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("n_groups,rejected", [(1, True), (8, False)])
+def test_push_mamba2_to_larger_tp_with_replicated_bc_is_rejected(n_groups, rejected):
+    """Push writes one chunk of the producer's page to each consumer rank,
+    which cannot fill B/C that a larger consumer TP replicates."""
+    from vllm.distributed.kv_transfer.kv_connector.utils import TransferTopology
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.push_worker import (
+        NixlPushConnectorWorker,
+    )
+    from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import (  # noqa: E501
+        derive_mamba_conv_split,
+    )
+
+    with patch(
+        "vllm.model_executor.layers.mamba.mamba_utils.get_conv_state_layout",
+        return_value="DS",
+    ):
+        conv_decomp = derive_mamba_conv_split(_mamba2_spec(1, n_groups), 1)
+    worker = MagicMock(spec=NixlPushConnectorWorker)
+    worker.transfer_topo = object.__new__(TransferTopology)
+    worker.transfer_topo.tp_size = 1
+    worker._conv_decomp = conv_decomp
+
+    with patch.object(bw.NixlBaseConnectorWorker, "_validate_remote_agent_handshake"):
+        if rejected:
+            with pytest.raises(NotImplementedError, match="NixlPushConnector"):
+                NixlPushConnectorWorker._validate_remote_agent_handshake(
+                    worker, SimpleNamespace(engine_id="remote"), remote_tp_size=2
+                )
+        else:
+            NixlPushConnectorWorker._validate_remote_agent_handshake(
+                worker, SimpleNamespace(engine_id="remote"), remote_tp_size=2
+            )
+
+
 @pytest.mark.cpu_test
 @pytest.mark.parametrize(
     "mamba_enabled,swa_enabled,"

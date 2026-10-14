@@ -67,7 +67,7 @@ what may differ.
 
 <sup>4</sup> MLA KV cache is replicated across TP workers, so heterogeneous TP works but there is no head-splitting. When P TP > D TP, only a single read is executed (redundant ranks are skipped). D TP > P TP also works.
 
-<sup>5</sup> Hybrid SSM (Mamba) models require **homogeneous TP** (`P TP == D TP`). Heterogeneous TP is not yet supported for Mamba layers.
+<sup>5</sup> Mamba layers require `VLLM_SSM_CONV_STATE_LAYOUT=DS` for any NIXL transfer. Mamba2 heterogeneous TP is supported in pull mode, including B/C replicated across TP ranks (`n_groups` not divisible by TP), and in push mode except P TP < D TP with replicated B/C, which is rejected.
 
 <sup>6</sup> HMA (required by hybrid models) does not support different remote block sizes.
 
