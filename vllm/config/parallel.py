@@ -838,6 +838,22 @@ class ParallelConfig:
     def local_world_size(self) -> int:
         return self.world_size // self.nnodes_within_dp
 
+    def get_local_gpu_index(
+        self, local_rank: int, dp_local_rank: int | None = None
+    ) -> int:
+        """Map a worker's local rank to its host-local logical GPU index."""
+        if (
+            self.distributed_executor_backend not in ("ray", "external_launcher")
+            and self.data_parallel_backend != "ray"
+            and self.nnodes_within_dp == 1
+        ):
+            if dp_local_rank is None:
+                dp_local_rank = self.data_parallel_rank_local
+                if dp_local_rank is None:
+                    dp_local_rank = self.data_parallel_index
+            return local_rank + dp_local_rank * self.world_size
+        return local_rank
+
     @staticmethod
     def has_unfinished_dp(dp_group: ProcessGroup, has_unfinished: bool) -> bool:
         tensor = torch.tensor([has_unfinished], dtype=torch.int32, device="cpu")
