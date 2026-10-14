@@ -2,21 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """DeepGEMM MegaMoE experts: fused EP dispatch, expert GEMMs and combine.
 
-Feature matrix of the DeepGEMM MegaMoE kernels (SM100) wired into vLLM:
-
-======  =========  ================  ========  ============  ============
-routed  MMA        kernel            dispatch  fused shared  activations
-======  =========  ================  ========  ============  ============
-mxfp4   fp8xfp4    fp8_fp4_mega_moe  MXFP8     MXFP8         swiglu, situ
-mxfp8   fp8xfp8    fp8_fp4_mega_moe  MXFP8     MXFP8         swiglu, situ
-nvfp4   nvfp4      nvfp4_mega_moe    NVFP4     MXFP8, BF16   swiglu
-bf16    bf16xbf16  bf16_mega_moe     BF16      BF16          swiglu
-======  =========  ================  ========  ============  ============
-
-MX weights and activations carry one UE8M0 scale per 1x32 block. NVFP4 weights
-carry one E4M3 scale per 1x16 block plus a per-expert FP32 global scale; NVFP4
-dispatch scales each token by its own FP32 scale. ``swiglu`` takes an optional
-clamp plus ``alpha``/``beta``; ``situ`` takes ``alpha``/``beta`` only.
+Each ``MEGA_MOE_*`` format is one row of the SM100 feature matrix. MX weights
+and activations carry one UE8M0 scale per 1x32 block. NVFP4 weights carry one
+E4M3 scale per 1x16 block plus a per-expert FP32 global scale; NVFP4 dispatch
+scales each token by its own FP32 scale.
 """
 
 import math
@@ -281,7 +270,7 @@ class DeepGemmMegaMoEExperts(nn.Module):
         hidden_size: int,
         intermediate_size: int,
         activation: MegaMoEActivation,
-        weight_format: MegaMoEWeightFormat = MEGA_MOE_MXFP4,
+        weight_format: MegaMoEWeightFormat,
         shared_experts: nn.Module | None = None,
         num_logical_experts: int | None = None,
         fast_math: bool = True,
@@ -318,8 +307,9 @@ class DeepGemmMegaMoEExperts(nn.Module):
         self.fast_math = fast_math
         self._kernel_kwargs = activation.kernel_kwargs()
         self.eplb_state = EplbLayerState()
-        # Running max of the loaded L2 input scales; 0 until one loads.
-        self._l2_activation_scale = 0.0
+        # L2 input scale of every logical expert; the NVFP4 kernel takes the max.
+        self._w2_input_scales = torch.zeros(self.num_logical_experts, device="cpu")
+        self.l2_activation_scale = 1.0
 
         self.num_shared_experts, self.shared_spec = self._fusable_shared_experts(
             shared_experts
@@ -346,8 +336,7 @@ class DeepGemmMegaMoEExperts(nn.Module):
     def _fusable_shared_experts(
         self, shared_experts: nn.Module | None
     ) -> tuple[int, MegaMoEWeightSpec | None]:
-        """How many shared experts the launch fuses, and in which precision;
-        decided before weights load."""
+        """How many shared experts the launch fuses, and in which precision."""
         if shared_experts is None:
             return 0, None
         gate_up, down = shared_experts.gate_up_proj, shared_experts.down_proj
@@ -417,9 +406,10 @@ class DeepGemmMegaMoEExperts(nn.Module):
         } <= api and (spec.scale_group_k is None or hasattr(deep_gemm, block_m_api))
 
     def _create_weights(self) -> None:
-        """Register ``w13``/``w2`` (and fused ``shared_l1``/``shared_l2``)
-        ``_weight[_scale]`` parameters in the kernel layout. Routed parameters
-        are indexed by local expert on dim 0, which EPLB moves."""
+        """Register the routed and fused shared-expert parameters.
+
+        Routed parameters are indexed by local expert on dim 0, which EPLB moves.
+        """
         e, h, i = self.num_local_experts, self.hidden_size, self.intermediate_size
         fmt = self.weight_format
         self._register_weight("w13", (e, 2 * i, h), fmt.routed)
@@ -471,9 +461,7 @@ class DeepGemmMegaMoEExperts(nn.Module):
         return self._kernel_weights("w2")
 
     def _map_global_expert_id(self, expert_id: int) -> list[int]:
-        """Return local (per-rank) slot offsets where logical expert
-        `expert_id` should land on this rank.
-        """
+        """Local slots that logical expert ``expert_id`` occupies on this rank."""
         physical_ids: list[int] = []
         for p in range(self.experts_start_idx, self.experts_end_idx):
             if p % self.num_logical_experts == expert_id:
@@ -492,9 +480,8 @@ class DeepGemmMegaMoEExperts(nn.Module):
         if weight_name.endswith("w2_input_scale"):
             # One L2 activation scale per launch. Every rank loads the scales of
             # all experts, so ranks agree and EPLB can move experts.
-            self._l2_activation_scale = max(
-                self._l2_activation_scale, float(loaded_weight.max())
-            )
+            self._w2_input_scales[expert_id] = loaded_weight.max()
+            self.l2_activation_scale = float(self._w2_input_scales.max()) or 1.0
         local_expert_ids = self._map_global_expert_id(expert_id)
         param_prefix = "w2_" if shard_id == "w2" else "w13_"
         if not local_expert_ids or param_prefix not in weight_name:
@@ -509,11 +496,6 @@ class DeepGemmMegaMoEExperts(nn.Module):
                     param.data[local_expert_id], loaded_weight, shard_id, is_scale
                 )
         return True if return_success else None
-
-    @property
-    def l2_activation_scale(self) -> float:
-        """Global scale the NVFP4 kernel quantizes L2 inputs with."""
-        return self._l2_activation_scale or 1.0
 
     def load_shared_expert_weight(self, name: str, loaded_weight: torch.Tensor) -> str:
         """Load one shared-expert checkpoint tensor; return the parameter name."""
@@ -545,8 +527,10 @@ class DeepGemmMegaMoEExperts(nn.Module):
         shard_id: str,
         is_scale: bool,
     ) -> None:
-        """Write checkpoint shard ``src`` (``w1``/``w2``/``w3``) into ``dst``, one
-        expert's slice or a shared-expert parameter, in the kernel layout."""
+        """Write checkpoint shard ``src`` into ``dst`` in the kernel layout.
+
+        ``dst`` is one routed expert's slice or a shared-expert parameter.
+        """
         if shard_id not in ("w1", "w2", "w3"):
             raise ValueError(f"Unsupported expert shard id: {shard_id}")
         rows = dst.shape[0] // (1 if shard_id == "w2" else 2)
@@ -719,7 +703,7 @@ class DeepGemmMegaMoEExperts(nn.Module):
         topk_ids: torch.Tensor,
         shared_experts: nn.Module | None = None,
     ) -> torch.Tensor:
-        """Return the routed plus shared expert output for this rank's tokens.
+        """Run the routed and shared experts on this rank's tokens.
 
         Args:
             hidden_states: BF16 ``[num_tokens, hidden_size]`` activations.
@@ -728,6 +712,9 @@ class DeepGemmMegaMoEExperts(nn.Module):
             shared_experts: Unfused shared MLP, run on ``hidden_states`` and
                 added to the output. Must be ``None`` when this layer fused the
                 shared expert at construction.
+
+        Returns:
+            BF16 ``[num_tokens, hidden_size]`` routed plus shared expert output.
 
         """
         if shared_experts is not None and self.has_fused_shared_experts:

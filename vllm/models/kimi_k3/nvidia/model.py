@@ -520,8 +520,6 @@ class KimiMoE(nn.Module):
                 top_k=num_experts_per_token,
                 hidden_size=self.moe_hidden_size,
                 intermediate_size=self.padded_moe_intermediate_size,
-                # DeepGEMM names the SiTU gate tanh scale `alpha` and the
-                # linear/up tanh scale `beta`; beta=0 leaves up untouched.
                 activation=MegaMoEActivation(
                     "situ",
                     alpha=activation_situ_beta or 1.0,

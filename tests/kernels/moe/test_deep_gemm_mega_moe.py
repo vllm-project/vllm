@@ -54,6 +54,7 @@ def _make_experts(**kwargs) -> DeepGemmMegaMoEExperts:
         compilation_config=SimpleNamespace(static_forward_context={}),
     )
     kwargs.setdefault("activation", MegaMoEActivation())
+    kwargs.setdefault("weight_format", MEGA_MOE_MXFP4)
     return DeepGemmMegaMoEExperts(vllm_config, **kwargs)
 
 
@@ -330,6 +331,15 @@ def test_deep_gemm_mega_moe_nvfp4_l2_scale_covers_every_expert():
         assert loaded == (expert_id >= 2)
     assert experts.l2_activation_scale == 4.0
     assert experts.w2_input_scale.tolist() == [1.0, 2.0]
+    # A reload replaces the expert's scale rather than keeping the old max.
+    experts.weight_loader(
+        experts.w2_input_scale,
+        torch.tensor(0.25),
+        "experts.w2_input_scale",
+        shard_id="w2",
+        expert_id=1,
+    )
+    assert experts.l2_activation_scale == 2.0
     # Global scales are expert weights that EPLB moves.
     assert len(experts.get_expert_weights()) == 7
 
@@ -393,8 +403,6 @@ def test_deep_gemm_mega_moe_loads_shared_experts_into_kernel_layout(monkeypatch)
         intermediate_size=384,
         shared_experts=_shared_mlp(256, 384),
     )
-    assert experts.has_fused_shared_experts
-    hidden, inter = 256, 384
     assert experts.has_fused_shared_experts
     hidden, inter = 256, 384
     generator = torch.Generator().manual_seed(42)
@@ -946,7 +954,7 @@ def test_prepare_megamoe_nvfp4_inputs_is_bitwise_exact(num_tokens, shared):
 
     # Written even without local tokens: other ranks route to these experts.
     assert torch.equal(l2_alpha, w2_global_scale * 0.37)
-    ref_x_scales = hidden_states.float().abs().amax(-1).clamp_min(1e-12) / 2688
+    ref_x_scales = hidden_states.float().abs().amax(-1).clamp_min(1e-12) * (1 / 2688)
     ref_x, ref_x_sf = per_token_cast_to_nvfp4(
         hidden_states.float() / ref_x_scales[:, None]
     )
@@ -1077,14 +1085,20 @@ def _calc_diff(x: torch.Tensor, y: torch.Tensor) -> float:
     reason="DeepGEMM MegaMoE kernels require SM100 and DeepGEMM",
 )
 @pytest.mark.parametrize(
-    "fmt_name,shared",
+    "fmt_name,shared,act_name",
     [
-        (name, shared)
+        pytest.param(
+            name,
+            shared,
+            act_name,
+            id=f"{act_name}-{name}-{str(shared).removeprefix('torch.')}",
+        )
+        for act_name, act in ACTIVATIONS.items()
         for name, fmt in MEGA_MOE_WEIGHT_FORMATS.items()
+        if act.name in fmt.activations
         for shared in (None, *(spec.dtype for spec in fmt.shared))
     ],
 )
-@pytest.mark.parametrize("act_name", list(ACTIVATIONS))
 def test_deep_gemm_mega_moe_matches_reference(dist_init, fmt_name, shared, act_name):
     """``shared`` is the fused shared-expert dtype; None runs it unfused."""
     fmt, act = MEGA_MOE_WEIGHT_FORMATS[fmt_name], ACTIVATIONS[act_name]
@@ -1118,27 +1132,20 @@ def test_deep_gemm_mega_moe_matches_reference(dist_init, fmt_name, shared, act_n
         ),
     )
 
-    def make_experts():
-        with torch.device(device):
-            return DeepGemmMegaMoEExperts(
-                vllm_config,
-                num_experts=NUM_EXPERTS,
-                num_local_experts=NUM_EXPERTS,
-                experts_start_idx=0,
-                top_k=TOP_K,
-                hidden_size=HIDDEN,
-                intermediate_size=INTER,
-                activation=act,
-                weight_format=fmt,
-                shared_experts=shared_mlp if fuse_shared else None,
-                prefix=f"model.layers.0.{fmt_name}.{act_name}.{shared}",
-            )
-
-    if act.name not in fmt.activations:
-        with pytest.raises(NotImplementedError):
-            make_experts()
-        return
-    experts = make_experts()
+    with torch.device(device):
+        experts = DeepGemmMegaMoEExperts(
+            vllm_config,
+            num_experts=NUM_EXPERTS,
+            num_local_experts=NUM_EXPERTS,
+            experts_start_idx=0,
+            top_k=TOP_K,
+            hidden_size=HIDDEN,
+            intermediate_size=INTER,
+            activation=act,
+            weight_format=fmt,
+            shared_experts=shared_mlp if fuse_shared else None,
+            prefix=f"model.layers.0.{fmt_name}.{act_name}.{shared}",
+        )
     assert experts.has_fused_shared_experts == fuse_shared
     assert experts.shared_spec == (shared_spec if fuse_shared else None)
 
