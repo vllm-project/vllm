@@ -122,6 +122,7 @@ class HpcIHCPre(HpcModule):
             When given, its weight/eps are folded into the kernel so a single
             launch covers pre + RMSNorm (the caller then skips the separate
             layernorm). None keeps the original pre-only behaviour.
+
     """
 
     def __init__(

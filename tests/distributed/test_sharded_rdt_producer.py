@@ -503,7 +503,7 @@ class TestGatherCredit:
     def test_the_residency_bound_scales_with_the_lookahead(
         self, server_factory, gather_engine
     ):
-        """lookahead + 1, not a hardcoded 2: at lookahead=2 a free-nothing
+        """Lookahead + 1, not a hardcoded 2: at lookahead=2 a free-nothing
         consumer sees exactly 3 groups gathered before the loop parks."""
         server = server_factory(gather_lookahead=2)
         engine = gather_engine(server, 8, lookahead=2)

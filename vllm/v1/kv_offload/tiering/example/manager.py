@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-ExampleSecondaryTierManager: A simple in-memory secondary tier.
+"""ExampleSecondaryTierManager: A simple in-memory secondary tier.
 
 This implementation provides a minimal secondary tier that stores chunks
 in memory (using a dictionary) with immediate completion. It serves as a
@@ -32,11 +31,11 @@ logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from vllm.v1.kv_offload.base import OffloadingSpec
+    from vllm.v1.kv_offload.tiering.backpressure import BackpressureDetector
 
 
 class ExampleSecondaryTierManager(SecondaryTierManager):
-    """
-    A simple in-memory secondary tier.
+    """A simple in-memory secondary tier.
 
     This implementation:
     - Stores chunks in a dictionary (key -> True)
@@ -51,17 +50,23 @@ class ExampleSecondaryTierManager(SecondaryTierManager):
         primary_kv_view: memoryview,
         tier_type: str,
         custom_param: int = 0,
+        backpressure_detector: "BackpressureDetector | None" = None,
     ):
-        """
-        Initialize the example secondary tier.
+        """Initialize the example secondary tier.
 
         Args:
+            offloading_spec: The offloading spec this tier belongs to.
+            primary_kv_view: Memoryview over the primary tier's KV buffer.
+            tier_type: Name identifying this tier type.
             custom_param: Dummy parameter demonstrating custom args.
+            backpressure_detector: Optional backpressure detector.
+
         """
         super().__init__(
             offloading_spec=offloading_spec,
             primary_kv_view=primary_kv_view,
             tier_type=tier_type,
+            backpressure_detector=backpressure_detector,
         )
 
         logger.info(
@@ -78,8 +83,7 @@ class ExampleSecondaryTierManager(SecondaryTierManager):
 
     @override
     def lookup(self, key: OffloadKey, req_context: ReqContext) -> LookupResult:
-        """
-        Check whether a chunk exists in this secondary tier.
+        """Check whether a chunk exists in this secondary tier.
 
         Args:
             key: Offload key to look up.
@@ -87,17 +91,18 @@ class ExampleSecondaryTierManager(SecondaryTierManager):
 
         Returns:
             HIT if the chunk is present, MISS if not found.
+
         """
         return LookupResult.HIT if key in self.chunks else LookupResult.MISS
 
     @override
     def submit_store(self, job_metadata: TransferJob) -> None:
-        """
-        Submit a job to store chunks from primary tier to this tier.
+        """Submit a job to store chunks from primary tier to this tier.
 
         Args:
             job_metadata: Job metadata including job_id, keys, and
                           spec for reading chunks from the primary tier.
+
         """
         keys = job_metadata.keys
         chunk_ids = job_metadata.chunk_ids
@@ -118,12 +123,12 @@ class ExampleSecondaryTierManager(SecondaryTierManager):
 
     @override
     def submit_load(self, job_metadata: TransferJob) -> None:
-        """
-        Submit a job to load chunks from this tier to primary tier.
+        """Submit a job to load chunks from this tier to primary tier.
 
         Args:
             job_metadata: Job metadata including job_id, keys, and
                           spec for writing chunks into the primary tier.
+
         """
         keys = job_metadata.keys
         chunk_ids = job_metadata.chunk_ids
@@ -149,12 +154,12 @@ class ExampleSecondaryTierManager(SecondaryTierManager):
 
     @override
     def get_finished_jobs(self) -> Iterable[JobResult]:
-        """
-        Poll for finished jobs.
+        """Poll for finished jobs.
 
         Returns:
             Iterable of JobResult objects for all jobs that have
             finished since the last call.
+
         """
         result = self.completed_jobs
         self.completed_jobs = []

@@ -19,6 +19,7 @@ class MxFp4LinearLayerConfig:
     Attributes:
         activation_quant_key: Identifies the activation quantization format,
             or `None` when activations must not be quantized.
+
     """
 
     activation_quant_key: QuantKey | None = None

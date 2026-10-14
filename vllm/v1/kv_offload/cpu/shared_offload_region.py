@@ -14,7 +14,8 @@ from vllm.distributed.device_communicators.shm_broadcast import (
     check_shm_free_space,
 )
 from vllm.logger import init_logger
-from vllm.platforms import current_platform
+from vllm.utils.math_utils import cdiv, round_up
+from vllm.v1.kv_offload.cpu.host_register import host_unregister
 
 logger = init_logger(__name__)
 
@@ -69,8 +70,7 @@ def _get_populate_write_fn(
 
 
 class SharedOffloadRegion:
-    """
-    Single mmap-backed memory region shared across all workers for a
+    """Single mmap-backed memory region shared across all workers for a
     vLLM instance.  Workers coordinate via the filesystem: the first worker
     to open the file with O_EXCL becomes the creator and calls ftruncate;
     the rest open the existing file and wait until it reaches the expected
@@ -83,6 +83,8 @@ class SharedOffloadRegion:
 
     Creator-only population pre-faults the entire region before the barrier
     and requires that barrier to keep joiners from using unpopulated pages.
+    ``populate_shard=(index, count)`` pre-faults only this worker's contiguous
+    share, for layouts where every worker maps the same bytes.
     """
 
     BLOCK_SIZE_ALIGNMENT: int = mmap.PAGESIZE
@@ -98,6 +100,7 @@ class SharedOffloadRegion:
         *,
         creator_memory_check: Callable[[int], None] | None = None,
         populate_only_on_creator: bool = False,
+        populate_shard: tuple[int, int] | None = None,
     ) -> None:
         if populate_only_on_creator and barrier is None:
             raise ValueError("Creator-only population requires a barrier.")
@@ -135,7 +138,10 @@ class SharedOffloadRegion:
                 self._creator = True
                 if creator_memory_check is not None:
                     creator_memory_check(self.total_size_bytes)
-                check_shm_free_space(self.total_size_bytes)
+                check_shm_free_space(
+                    self.total_size_bytes,
+                    allocation_name="CPU KV offload shared region in /dev/shm",
+                )
                 os.ftruncate(self.fd, self.total_size_bytes)
                 logger.info(
                     "Created mmap file %s (%.2f GB)",
@@ -210,7 +216,14 @@ class SharedOffloadRegion:
 
         populate_write_fn = _get_populate_write_fn(self.mmap_obj)
 
-        if rank is not None:
+        if populate_shard is not None:
+            index, count = populate_shard
+            share = round_up(cdiv(self.total_size_bytes, count), self.page_size)
+            start = min(index * share, self.total_size_bytes)
+            if start < self.total_size_bytes:
+                length = min(share, self.total_size_bytes - start)
+                populate_write_fn(self.mmap_obj, start, length)
+        elif rank is not None:
             # Populate only this worker's pages (one slot per chunk row).
             worker_offset = rank * cpu_page_size
             _t0 = time.perf_counter()
@@ -261,6 +274,7 @@ class SharedOffloadRegion:
 
         Args:
             tensor_page_size: Bytes per chunk for this tensor.
+
         """
         assert self.rank is not None
         new_offset = self._worker_offset + tensor_page_size
@@ -310,6 +324,7 @@ class SharedOffloadRegion:
 
         Args:
             tensor_page_size: Canonical bytes per chunk for this tensor.
+
         """
         new_offset = self._canonical_offset + tensor_page_size
         assert new_offset <= self._row_stride
@@ -339,20 +354,11 @@ class SharedOffloadRegion:
 
     def cleanup(self) -> None:
         if self.is_pinned and self._base is not None:
-            if current_platform.is_cuda_alike():
-                base_ptr = self._base.data_ptr()
-                addresses = self.pinned_addresses or [base_ptr]
-                for address in reversed(addresses):
-                    result = torch.cuda.cudart().cudaHostUnregister(address)
-                    if result.value != 0:
-                        logger.warning(
-                            "cudaHostUnregister failed for rank=%d, "
-                            "address=%#x (code=%d)",
-                            self.rank,
-                            address,
-                            result.value,
-                        )
-                self.pinned_addresses.clear()
+            base_ptr = self._base.data_ptr()
+            addresses = self.pinned_addresses or [base_ptr]
+            for address in reversed(addresses):
+                host_unregister(address)
+            self.pinned_addresses.clear()
             self.is_pinned = False
         # Release views before _base: each view holds a _base reference and a
         # direct StorageImpl reference.  Freeing views first lets both refcounts

@@ -46,6 +46,22 @@ def _e2m1_inline(nibble):
 
 
 @triton.jit
+def _e4m3_inline(byte):
+    """Decode an FP8 E4M3FN byte to float32 without an FP8 pointer type.
+
+    Typed FP8 loads need SM89+ in Triton; reading the scale as uint8 and
+    decoding here keeps the caller portable.
+    """
+    bits = byte.to(tl.int32)
+    exponent = (bits >> 3) & 0xF
+    mantissa = (bits & 0x7).to(tl.float32)
+    normal = (1.0 + mantissa * 0.125) * tl.exp2((exponent - 7).to(tl.float32))
+    val = tl.where(exponent == 0, mantissa * 0.001953125, normal)
+    val = tl.where((bits & 0x7F) == 0x7F, float("nan"), val)
+    return tl.where((bits & 0x80) != 0, -val, val)
+
+
+@triton.jit
 def _nvfp4_gathered_bias_kernel(
     markov_ptr,
     packed_weight_ptr,
@@ -657,8 +673,7 @@ def ref_nvfp4_quant(x, global_scale, block_size):
 def ref_nvfp4_quant_dequant(
     x: torch.Tensor, global_scale: torch.Tensor, block_size: int
 ) -> torch.Tensor:
-    """
-    NVFP4 quantize-dequantize operation.
+    """NVFP4 quantize-dequantize operation.
 
     `global_scale` is expected to have a single element.
     """

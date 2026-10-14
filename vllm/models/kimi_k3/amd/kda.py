@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from dataclasses import replace
+
 import torch
 from einops import rearrange
 from torch import nn
@@ -11,6 +13,10 @@ from vllm.config import VllmConfig
 from vllm.distributed import divide
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fusion.quant_activation import (
+    QuantizedActivation,
+    get_input_quant_key,
+)
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     RowParallelLinear,
@@ -35,16 +41,19 @@ from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_fn,
     causal_conv1d_update,
 )
+from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 from vllm.model_executor.model_loader.weight_utils import sharded_weight_loader
-from vllm.model_executor.utils import set_weight_attrs
+from vllm.model_executor.utils import is_weights_pre_processed, set_weight_attrs
 from vllm.models.kimi_k3.amd.kda_metadata import KimiK3ROCmKDABackend
+from vllm.models.kimi_k3.amd.ops.kda_checkpoint import (
+    KimiK3ROCmKDAPrefillCheckpointExporter,
+)
 from vllm.models.kimi_k3.amd.ops.kda_chunk import (
+    KDA_CHECKPOINT_ALIGNMENT,
     is_fused_kda_chunk_supported,
 )
 from vllm.models.kimi_k3.amd.ops.kda_decode import (
     is_fused_kda_decode_supported,
-    make_decode_conv1d_weight_loader,
-    make_decode_norm_weight_loader,
 )
 from vllm.models.kimi_k3.amd.ops.kda_prefill import chunk_kda_prefill
 from vllm.models.kimi_k3.amd.ops.third_party.kda import (
@@ -55,6 +64,7 @@ from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
+from vllm.v1.kv_cache_interface import MambaSpec
 
 logger = init_logger(__name__)
 
@@ -77,6 +87,23 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             self.head_dim,
             conv_kernel_size=self.conv_size,
             num_spec=self.num_spec,
+        )
+
+    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> MambaSpec:
+        spec = super().get_kv_cache_spec(vllm_config)
+        assert isinstance(spec, MambaSpec)
+        # Only the fused path exports the checkpoint snapshots
+        can_checkpoint = (
+            self.use_prefill_checkpoint and self.use_fused_chunk and self.use_safe_gate
+        )
+        if can_checkpoint and vllm_config.cache_config.mamba_cache_mode == "align":
+            logger.info_once("Kimi-K3 KDA prefill checkpoint enabled.")
+        return replace(
+            spec,
+            num_prefill_checkpoint_blocks=int(can_checkpoint),
+            prefill_checkpoint_alignment=(
+                KDA_CHECKPOINT_ALIGNMENT if can_checkpoint else None
+            ),
         )
 
     def __init__(
@@ -175,19 +202,11 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         self.register_buffer(
             "decode_conv1d_weight", decode_conv1d_weight, persistent=False
         )
-        if decode_conv1d_weight is None:
-            conv1d_weight_loader = _make_fused_conv1d_weight_loader(
-                [self.projection_size] * 3,
-                self.tp_size,
-                self.tp_rank,
-            )
-        else:
-            conv1d_weight_loader = make_decode_conv1d_weight_loader(
-                [self.projection_size] * 3,
-                self.tp_size,
-                self.tp_rank,
-                decode_conv1d_weight,
-            )
+        conv1d_weight_loader = _make_fused_conv1d_weight_loader(
+            [self.projection_size] * 3,
+            self.tp_size,
+            self.tp_rank,
+        )
         set_weight_attrs(self.conv1d.weight, {"weight_loader": conv1d_weight_loader})
 
         self.A_log = nn.Parameter(
@@ -226,6 +245,15 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             "Kimi-K3 KDA prefill backend: %s",
             "fused" if self.use_fused_chunk else "triton",
         )
+        # TODO: Remove the extra config arg once tested
+        self.use_prefill_checkpoint = (
+            additional_config.get("kda_prefill_checkpoint", True)
+            if isinstance(additional_config, dict)
+            else True
+        )
+        self._checkpoint_exporter = KimiK3ROCmKDAPrefillCheckpointExporter(
+            state_len=self.conv_size - 1
+        )
 
         self.o_norm = FusedRMSNormGated(self.head_dim, activation="sigmoid")
         decode_norm_weight = None
@@ -236,12 +264,6 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                 self.head_dim,
                 dtype=torch.float32,
                 device=self.o_norm.weight.device,
-            )
-            if hasattr(self.o_norm.weight, "weight_loader"):
-                delattr(self.o_norm.weight, "weight_loader")
-            set_weight_attrs(
-                self.o_norm.weight,
-                {"weight_loader": make_decode_norm_weight_loader(decode_norm_weight)},
             )
         self.register_buffer("decode_norm_weight", decode_norm_weight, persistent=False)
         self.o_proj = RowParallelLinear(
@@ -257,6 +279,19 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
 
+    @torch.no_grad()
+    def process_weights_after_loading(self, act_dtype: torch.dtype) -> None:
+        if is_weights_pre_processed():
+            return
+        if self.decode_conv1d_weight is not None:
+            self.decode_conv1d_weight.copy_(
+                self.conv1d.weight.view(
+                    3, self.local_projection_size, self.conv_size
+                ).transpose(1, 2)
+            )
+        if self.decode_norm_weight is not None:
+            self.decode_norm_weight.copy_(self.o_norm.weight)
+
     def rearrange_mixed_qkv(
         self, mixed_qkv: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -267,14 +302,16 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         qkv = qkv.permute(1, 0, 2, 3).contiguous().unsqueeze(1)
         return qkv.unbind(0)
 
+    def get_input_quant_key(self) -> QuantKey | None:
+        return get_input_quant_key(self.in_proj_qkvgfab)
+
     def forward(
         self,
-        hidden_states: torch.Tensor,
+        hidden_states: torch.Tensor | QuantizedActivation,
         positions: torch.Tensor,
-        output: torch.Tensor,
-    ) -> None:
-        num_tokens = hidden_states.size(0)
+    ) -> torch.Tensor:
         projected_qkvgfab = self.in_proj_qkvgfab(hidden_states)[0]
+        num_tokens = projected_qkvgfab.shape[0]
 
         split_sizes = [
             3 * self.local_projection_size,
@@ -294,8 +331,8 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
 
         core_attn_out = torch.empty(
             (1, num_tokens, self.local_num_heads, self.head_dim),
-            dtype=hidden_states.dtype,
-            device=hidden_states.device,
+            dtype=projected_qkvgfab.dtype,
+            device=projected_qkvgfab.device,
         )
 
         self._forward(
@@ -306,7 +343,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             core_attn_out=core_attn_out,
         )
         core_attn_out = rearrange(core_attn_out, "1 n h d -> n (h d)")
-        output[:] = self.o_proj(core_attn_out)[0]
+        return self.o_proj(core_attn_out)[0]
 
     @eager_break_during_capture
     def _forward(
@@ -439,6 +476,14 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                 for x in mixed_qkv_spec.split(self.local_projection_size, dim=-1)
             )
             spec_cu_seqlens = spec_query_start_loc[: m.num_spec_decodes + 1]
+            uniform_sequence_length = m.uniform_spec_sequence_length
+            # Token padding can make the packed tensor larger than the
+            # request-local metadata represented by this length.
+            if (
+                uniform_sequence_length is not None
+                and q_spec.shape[1] != m.num_spec_decodes * uniform_sequence_length
+            ):
+                uniform_sequence_length = None
             # Spec-only batches write directly into core_attn_out.
             spec_out = (
                 core_attn_out[:, : q_spec.shape[1]]
@@ -458,6 +503,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                 cu_seqlens=spec_cu_seqlens,
                 ssm_state_indices=spec_state_indices_tensor,
                 num_accepted_tokens=num_accepted_tokens,
+                uniform_sequence_length=uniform_sequence_length,
                 out=spec_out,
             )
 
@@ -503,10 +549,9 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                 assert non_spec_state_indices_tensor is not None
                 assert has_initial_state is not None
 
-                # A mixed non-spec batch is decode-first: the decodes are
-                # length-1 sequences, and the chunk kernel returns NaN for those.
-                # Send them to the recurrent kernel and give the chunk kernel the
-                # prefill tail only.
+                # Decode-first, so peel the length-1 decodes to the recurrent
+                # kernel. A spec batch interleaves its non-spec rows, so the
+                # peel cannot apply and the chunk kernel takes them.
                 core_attn_out_decode = None
                 split_non_spec = spec_sequence_masks is None and m.num_decodes > 0
                 # Without a spec split the non-spec tokens are exactly
@@ -514,7 +559,6 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                 # can write their slice straight into it. With one, the tokens
                 # are interleaved and have to be scattered by index afterwards.
                 direct = spec_sequence_masks is None
-                use_fused_chunk = self.use_fused_chunk and spec_sequence_masks is None
                 if split_non_spec:
                     assert non_spec_query_start_loc is not None
                     nd_tok = m.num_decode_tokens
@@ -551,6 +595,22 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                     prefill_has_initial_state = has_initial_state
                     nd_tok = 0
 
+                checkpoint = getattr(m, "checkpoint", None)
+                checkpoint_state = None
+                checkpoint_offsets = None
+                checkpoint_state_indices = None
+                if checkpoint is not None:
+                    assert prefill_query_start_loc is not None
+                    checkpoint_state = recurrent_state
+                    checkpoint_offsets = checkpoint.checkpoint_offsets
+                    checkpoint_state_indices = checkpoint.state_indices
+                    self._checkpoint_exporter.export(
+                        checkpoint,
+                        raw_qkv=mixed_qkv_ns[nd_tok:],
+                        conv_state=conv_state,
+                        cu_seqlens=prefill_query_start_loc,
+                    )
+
                 (
                     core_attn_out_non_spec,
                     _,
@@ -570,8 +630,11 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                     cu_seqlens=prefill_query_start_loc,
                     chunk_indices=m.chunk_indices,
                     chunk_offsets=m.chunk_offsets,
-                    use_fused_chunk=use_fused_chunk,
+                    use_fused_chunk=self.use_fused_chunk,
                     out=core_attn_out[:, nd_tok:num_actual_tokens] if direct else None,
+                    checkpoint_state=checkpoint_state,
+                    checkpoint_offsets=checkpoint_offsets,
+                    checkpoint_state_indices=checkpoint_state_indices,
                 )
                 # chunk_kda_prefill updates `recurrent_state` in place, so
                 # there is no final state to write back here.
