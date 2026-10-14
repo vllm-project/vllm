@@ -10,6 +10,8 @@ from unittest.mock import AsyncMock, MagicMock
 import httpx
 import pytest
 import pytest_asyncio
+from fastapi import FastAPI
+from prometheus_client import REGISTRY
 
 from tests.utils import RemoteLaunchRenderServer
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
@@ -21,6 +23,83 @@ from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.renderers.online_renderer import OnlineRenderer
 
 MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
+
+
+@pytest.mark.asyncio
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize("api_surface", ["chat_completions", "messages"])
+@pytest.mark.parametrize("outcome", ["rendered", "returned_error", "raised_error"])
+@pytest.mark.parametrize(
+    "tool_request", [False, True, None], ids=["plain", "named", "null"]
+)
+async def test_render_tool_outcomes(api_surface, outcome, tool_request):
+    """Count each tool render once without exposing request or error values."""
+    app = FastAPI()
+    app.include_router(router)
+    serving = _build_serving_render()
+    serving.model_config.model = MODEL_NAME
+    app.state.serving_render = serving
+    result = {"token_ids": [7, 8, 9]}
+    handler = AsyncMock(return_value=SimpleNamespace(model_dump=lambda: result))
+    if outcome == "returned_error":
+        handler.return_value = serving.create_error_response("private-render-error")
+    elif outcome == "raised_error":
+        handler.side_effect = RuntimeError("private-render-error")
+    payload: dict[str, object] = {
+        "model": "private-request-model",
+        "messages": [{"role": "user", "content": "private-prompt"}],
+    }
+    if api_surface == "messages":
+        serving.render_messages_request = handler
+        payload["max_tokens"] = 1
+        route = "/v1/messages/render"
+        tool: dict[str, object] = {
+            "name": "private-tool",
+            "input_schema": {"type": "object"},
+        }
+        choice: dict[str, object] = {"type": "tool", "name": "private-tool"}
+    else:
+        serving.render_chat_request = handler
+        route = "/v1/chat/completions/render"
+        tool = {
+            "type": "function",
+            "function": {"name": "private-tool", "parameters": {"type": "object"}},
+        }
+        choice = {"type": "function", "function": {"name": "private-tool"}}
+    if tool_request:
+        payload.update(tools=[tool], tool_choice=choice)
+    elif tool_request is None:
+        payload.update(tools=None, tool_choice=None)
+    labels = {
+        "model_name": MODEL_NAME,
+        "api_surface": api_surface,
+        "status": "rendered" if outcome == "rendered" else "error",
+    }
+    metric = "vllm:tool_call_render_requests_total"
+    before = REGISTRY.get_sample_value(metric, labels) or 0
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        if outcome == "raised_error":
+            with pytest.raises(RuntimeError, match="private-render-error"):
+                await client.post(route, json=payload)
+        else:
+            response = await client.post(route, json=payload)
+            assert response.status_code == (200 if outcome == "rendered" else 400)
+            if outcome == "rendered":
+                assert response.json() == result
+    handler.assert_awaited_once()
+    request, _ = handler.call_args.args
+    assert request.model == payload["model"]
+    assert request.tools is not None if tool_request else request.tools is None
+    assert (REGISTRY.get_sample_value(metric, labels) or 0) - before == int(
+        bool(tool_request)
+    )
+    for collector in REGISTRY.collect():
+        for sample in collector.samples:
+            if sample.name == metric:
+                assert set(sample.labels) == {"model_name", "api_surface", "status"}
+                assert "private" not in str(sample.labels)
 
 
 def _build_serving_render() -> ServingRender:
