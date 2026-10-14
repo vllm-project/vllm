@@ -240,7 +240,7 @@ class ExpertMapManager:
         self._init_aiter_shared_experts_topK_buffer()
 
         if self.use_ep and self.rocm_aiter_enabled:
-            expert_mask = self._expert_mask_cpu
+            expert_mask = self._expert_mask
             assert expert_mask is None or torch.all(
                 (expert_mask == 0) | (expert_mask == 1)
             ), "Aiter Fused MoE kernel only supports expert_map with 0 and 1s."
@@ -348,23 +348,23 @@ class ExpertMapManager:
             ValueError: If expert is not on this rank
 
         """
-        if self._expert_map_cpu is None:
+        if self._expert_map is None:
             return global_id
 
-        return self._expert_map_cpu[global_id].item()
+        return self._expert_map[global_id].item()
 
     def is_local_expert(self, global_id: int) -> bool:
         """Check if expert is assigned to this rank."""
-        if self._expert_map_cpu is None:
+        if self._expert_map is None:
             return True
-        return bool(self._expert_map_cpu[global_id] != -1)
+        return bool(self._expert_map[global_id] != -1)
 
     def get_local_expert_ids(self) -> list[int]:
         """Get list of global IDs for experts on this rank."""
-        if self._expert_map_cpu is None:
+        if self._expert_map is None:
             return list(range(self.global_num_experts))
 
-        return torch.where(self._expert_map_cpu != -1)[0].tolist()
+        return torch.where(self._expert_map != -1)[0].tolist()
 
     def update(
         self,
@@ -403,11 +403,11 @@ class ExpertMapManager:
 
         Returns string mapping local to global expert IDs.
         """
-        if self._expert_map_cpu is None:
+        if self._expert_map is None:
             return f"[0..{self.global_num_experts - 1}]"
 
-        global_indices = torch.where(self._expert_map_cpu != -1)[0]
-        local_indices = self._expert_map_cpu[global_indices]
+        global_indices = torch.where(self._expert_map != -1)[0]
+        local_indices = self._expert_map[global_indices]
         return ", ".join(
             f"{local_index.item()}->{global_index.item()}"
             for local_index, global_index in zip(local_indices, global_indices)
@@ -440,13 +440,18 @@ class ExpertMapManager:
 
     def _calculate_expert_maps(self) -> None:
         """Calculate expert mappings based on placement strategy."""
-        # IPC loading constructs the model on meta. Keep host-readable maps
-        # for loading and logging, and device maps for the forward kernels.
-        with torch.device("cpu"):
+        device = torch.get_default_device()
+        if device.type == "meta":
+            # Meta-device construction (e.g. IPC weight-cache loading) never
+            # materializes plain attributes, but host-side queries need real
+            # data. The kernel-facing copy is the RoutedExperts buffer, which
+            # the IPC loader re-registers with the daemon's real tensor.
+            device = torch.device("cpu")
+        with device:
             (
                 self._local_num_experts,
-                self._expert_map_cpu,
-                self._expert_mask_cpu,
+                self._expert_map,
+                self._expert_mask,
             ) = determine_expert_map(
                 ep_size=self.ep_size,
                 ep_rank=self.ep_rank,
@@ -455,13 +460,6 @@ class ExpertMapManager:
                 num_fused_shared_experts=self.num_fused_shared_experts,
                 return_expert_mask=self.rocm_aiter_enabled,
             )
-        device = torch.get_default_device()
-        self._expert_map = (
-            None if self._expert_map_cpu is None else self._expert_map_cpu.to(device)
-        )
-        self._expert_mask = (
-            None if self._expert_mask_cpu is None else self._expert_mask_cpu.to(device)
-        )
 
         self._local_num_experts += self.num_fused_shared_experts
 

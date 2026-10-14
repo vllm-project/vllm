@@ -28,7 +28,7 @@ def test_expert_map_manager_meta_initialization():
             enable_eplb=False,
         )
 
-    assert manager.expert_map.device.type == "meta"
+    assert manager.expert_map.device.type == "cpu"
     assert manager.get_local_expert_ids() == [2, 3]
     assert manager.map_global_to_local(2) == 0
     assert manager.map_global_to_local(0) == -1
