@@ -642,6 +642,17 @@ class Qwen3_5ModelArchConfigConvertor(ModelArchConfigConvertorBase):
                 hf_config.joint_head_config = get_hf_file_to_dict(
                     "joint_head_config.json", model_path, revision
                 )
+        elif getattr(hf_config, "architectures", None) == ["Qwen3_5Model"]:
+            # Decision 3.0 checkpoints are a bare backbone plus a code readout
+            # described by decision_config.json.
+            model_path = hf_config.name_or_path
+            if model_path and file_or_path_exists(
+                model_path, "decision_config.json", revision
+            ):
+                hf_config.architectures = ["D3ForSequenceClassification"]
+                hf_config.decision_config = get_hf_file_to_dict(
+                    "decision_config.json", model_path, revision
+                )
         super().__init__(hf_config, hf_text_config, revision)
 
 
