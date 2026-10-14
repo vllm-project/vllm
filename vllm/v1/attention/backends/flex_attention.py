@@ -145,10 +145,6 @@ class FlexAttentionBackend(AttentionBackend):
     def get_builder_cls() -> type["FlexAttentionMetadataBuilder"]:
         return FlexAttentionMetadataBuilder
 
-    @staticmethod
-    def use_cascade_attention(*args, **kwargs) -> bool:
-        return False
-
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
         return []
@@ -374,12 +370,6 @@ class FlexAttentionMetadata:
     seq_lens: torch.Tensor
     block_table: torch.Tensor
     slot_mapping: torch.Tensor
-
-    use_cascade: bool
-    common_prefix_len: int
-    cu_prefix_query_lens: torch.Tensor | None
-    prefix_kv_lens: torch.Tensor | None
-    suffix_kv_lens: torch.Tensor | None
 
     # Block info
     total_cache_tokens: int
@@ -831,11 +821,6 @@ class FlexAttentionMetadata:
         )
 
     def __post_init__(self):
-        assert self.use_cascade is False, "Not implemented yet."
-        assert self.common_prefix_len == 0, "Not implemented yet."
-        assert self.cu_prefix_query_lens is None, "Not implemented yet."
-        assert self.prefix_kv_lens is None, "Not implemented yet."
-        assert self.suffix_kv_lens is None, "Not implemented yet."
         # Create a lookup mapping from query indices -> request number
         self.doc_ids = _offsets_to_doc_ids_tensor(
             self.query_start_loc_cpu, self.query_start_loc.device
@@ -1029,16 +1014,6 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
         slot_mapping = common_attn_metadata.slot_mapping
         num_blocks_per_seq = cdiv(seq_lens, self.block_size)
 
-        use_cascade = common_prefix_len > 0
-        cu_prefix_query_lens = None
-        prefix_kv_lens = None
-        suffix_kv_lens = None
-        if use_cascade:
-            raise NotImplementedError(
-                "Cascade prefix attention is not yet implemented "
-                "for FlexAttention backend"
-            )
-
         block_size = self.kv_cache_spec.block_size
         max_possible_seq_len = self.model_config.max_model_len
         num_gpu_blocks = self.cache_config.num_gpu_blocks
@@ -1128,11 +1103,6 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
             seq_lens=self.persistent_seq_lens,
             block_table=block_table_tensor,
             slot_mapping=slot_mapping,
-            use_cascade=use_cascade,
-            common_prefix_len=common_prefix_len,
-            cu_prefix_query_lens=cu_prefix_query_lens,
-            prefix_kv_lens=prefix_kv_lens,
-            suffix_kv_lens=suffix_kv_lens,
             block_size=block_size,
             max_possible_sequence_length=max_possible_seq_len,
             num_reqs=num_reqs,
@@ -1165,9 +1135,6 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
                 out.block_mask = out.build_block_mask()
 
         return out
-
-    def use_cascade_attention(self, *args, **kwargs) -> bool:
-        return False
 
 
 class FlexAttentionImpl(AttentionImpl):

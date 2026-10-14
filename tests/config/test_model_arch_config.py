@@ -10,13 +10,11 @@ from typing import cast
 from unittest.mock import Mock
 
 import pytest
-from transformers import PreTrainedConfig
+from transformers import DiffusionGemmaConfig, PreTrainedConfig
 from transformers.models.gemma4.configuration_gemma4 import Gemma4TextConfig
 
 from vllm.config import ModelConfig, ParallelConfig, SpeculativeConfig
 from vllm.config.model_arch import ModelArchitectureConfig
-from vllm.transformers_utils.configs.diffusion_gemma import DiffusionGemmaConfig
-from vllm.transformers_utils.configs.gemma4 import gemma4_layer_config
 from vllm.transformers_utils.model_arch_config_convertor import (
     MODEL_ARCH_CONFIG_CONVERTORS,
     Gemma4ModelArchConfigConvertor,
@@ -70,6 +68,72 @@ def _load_groundtruth(filename: str) -> dict:
     groundtruth_path = Path(__file__).parent / filename
     with open(groundtruth_path) as f:
         return json.load(f)
+
+
+@pytest.mark.parametrize("has_joint_head", [False, True])
+@pytest.mark.parametrize(
+    "architecture", ["Qwen3_5ForConditionalGeneration", "ColQwen3_5"]
+)
+def test_qwen35_joint_head_selects_clef_flash(tmp_path, has_joint_head, architecture):
+    """Only a Qwen3.5 generation checkpoint with a joint head selects Clef."""
+    from transformers import Qwen3_5Config
+
+    head_config = {
+        "hidden_size": 4096,
+        "width": 1024,
+        "routing_layers": 2,
+        "layers": 4,
+        "heads": 16,
+        "feedforward": 4096,
+    }
+    if has_joint_head:
+        (tmp_path / "joint_head_config.json").write_text(json.dumps(head_config))
+    config = Qwen3_5Config(architectures=[architecture])
+    config.name_or_path = str(tmp_path)
+    model_config = SimpleNamespace(
+        hf_config=config,
+        hf_text_config=config.text_config,
+        _supports_multimodal_for_mm_prefix=lambda: True,
+    )
+    converted = ModelConfig.get_model_arch_config(model_config)
+    if has_joint_head and architecture == "Qwen3_5ForConditionalGeneration":
+        assert converted.architectures == ["ClefFlashForJointSchema"]
+        assert config.joint_head_config == head_config
+    else:
+        assert converted.architectures == [architecture]
+        assert not hasattr(config, "joint_head_config")
+
+
+@pytest.mark.parametrize("has_decision_config", [False, True])
+@pytest.mark.parametrize(
+    "architecture", ["Qwen3_5Model", "Qwen3_5ForConditionalGeneration"]
+)
+def test_qwen35_decision_config_selects_d3(tmp_path, has_decision_config, architecture):
+    """Only a bare Qwen3.5 backbone with a decision_config.json selects d3."""
+    from transformers import Qwen3_5Config
+
+    decision_config = {
+        "format_version": 1,
+        "codes": ["A", "B"],
+        "token_ids": [32, 33],
+        "attention_mode": "noncausal_full_attention",
+    }
+    if has_decision_config:
+        (tmp_path / "decision_config.json").write_text(json.dumps(decision_config))
+    config = Qwen3_5Config(architectures=[architecture])
+    config.name_or_path = str(tmp_path)
+    model_config = SimpleNamespace(
+        hf_config=config,
+        hf_text_config=config.text_config,
+        _supports_multimodal_for_mm_prefix=lambda: True,
+    )
+    converted = ModelConfig.get_model_arch_config(model_config)
+    if has_decision_config and architecture == "Qwen3_5Model":
+        assert converted.architectures == ["D3ForSequenceClassification"]
+        assert config.decision_config == decision_config
+    else:
+        assert converted.architectures == [architecture]
+        assert not hasattr(config, "decision_config")
 
 
 def _assert_model_arch_config(
@@ -318,11 +382,7 @@ def _gemma4_text_config(**overrides) -> Gemma4TextConfig:
 
 
 def test_gemma4_head_dims_vary_by_layer_type():
-    """Gemma4's full attention layers are wider than its sliding ones.
-
-    Transformers >= 5.15.0 says so in the config; this exercises the convertor
-    building the same per-layer view from the flat attributes used before that.
-    """
+    """Gemma4's full attention layers are wider than its sliding ones."""
     text_config = _gemma4_text_config(
         num_global_key_value_heads=8, attention_k_eq_v=True
     )
@@ -332,9 +392,9 @@ def test_gemma4_head_dims_vary_by_layer_type():
     assert (arch.head_size, arch.total_num_kv_heads) == (32, 8)
     assert [arch[i].head_size for i in range(6)] == [16] * 5 + [32]
     assert [arch[i].total_num_kv_heads for i in range(6)] == [4] * 5 + [8]
-    # The model files resolve each layer through the same helper, so the KV cache
-    # vLLM allocates and the projections the model builds cannot disagree.
-    assert [gemma4_layer_config(text_config, i).head_dim for i in range(6)] == [
+    # The model files read the same per-layer configs, so the KV cache vLLM
+    # allocates and the projections the model builds cannot disagree.
+    assert [text_config.per_layer_config[i].head_dim for i in range(6)] == [
         arch[i].head_size for i in range(6)
     ]
 
