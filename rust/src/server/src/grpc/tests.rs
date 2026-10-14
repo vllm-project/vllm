@@ -2013,6 +2013,7 @@ async fn control_reports_server_and_model_info() {
     assert_eq!(server.engine_version, "test-vllm-version");
     assert_eq!(server.effective_attention_block_size, Some(64));
     assert_eq!(server.api_version, "vllm");
+    assert_eq!(server.proto_version, pb::VERSION);
     assert_eq!(server.instance_id, "test-instance");
     assert_eq!(server.max_model_len, DEFAULT_MOCK_MAX_MODEL_LEN as u32);
     assert_eq!(server.kv_block_size, DEFAULT_MOCK_BLOCK_SIZE as u32);
