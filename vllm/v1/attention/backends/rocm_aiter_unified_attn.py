@@ -29,7 +29,12 @@ from vllm.v1.attention.backends.rocm_attn import (
     RocmAttentionMetadata,
     RocmAttentionMetadataBuilder,
 )
-from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheLayout
+from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
+    KVCacheLayout,
+    KVQuantMode,
+    get_kv_quant_mode,
+)
 
 logger = init_logger(__name__)
 
@@ -371,7 +376,7 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
                 reshape_and_cache_shuffle_triton,
             )
 
-            if is_quantized_kv_cache(self.kv_cache_dtype):
+            if get_kv_quant_mode(self.kv_cache_dtype) == KVQuantMode.FP8_PER_TENSOR:
                 key_cache = key_cache.view(self.fp8_dtype)
                 value_cache = value_cache.view(self.fp8_dtype)
             _dummy = torch.empty(1, dtype=torch.float32, device=key.device)

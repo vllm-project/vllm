@@ -402,7 +402,7 @@ class TopKTopPSampler(nn.Module):
         k: torch.Tensor | None,
         p: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        """Optimized ROCm/aiter path (same structure as forward_cuda)."""
+        """Optimized ROCm/aiter path."""
         if self.on_gfx1250:
             if (
                 k is None
