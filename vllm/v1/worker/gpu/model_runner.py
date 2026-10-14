@@ -19,6 +19,7 @@ instead of embedding feature-specific logic directly.
 import functools
 import gc
 import time
+from collections.abc import Iterable
 from contextlib import AbstractContextManager
 from copy import deepcopy
 from dataclasses import replace
@@ -46,6 +47,7 @@ from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     initialize_mamba_ssu_backend,
 )
 from vllm.model_executor.model_loader import get_model_loader
+from vllm.model_executor.model_loader.reload.inplace import reload_weights
 from vllm.model_executor.models.interfaces import requires_raw_input_tokens
 from vllm.model_executor.offloader import (
     create_offloader,
@@ -154,6 +156,7 @@ from vllm.v1.worker.gpu.spec_decode.adaptive_verification import (
     resolve_adaptive_cudagraph_mode,
 )
 from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import (
+    requires_aux_hidden_states,
     set_eagle3_aux_hidden_state_layers,
     verify_supports_aux_hidden_states_over_pp,
 )
@@ -295,14 +298,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     self.vllm_config, self.device, self.req_states
                 )
 
-            if self.speculative_config.method in (
-                "eagle3",
-                "dflash",
-                "dspark",
-                "extract_hidden_states",
-            ):
-                # Drafting may require auxiliary hidden states from target model outputs
-                self.use_aux_hidden_state_outputs = True
+            self.use_aux_hidden_state_outputs = requires_aux_hidden_states(
+                self.speculative_config
+            )
 
         # Draft tokens propagation - for spec-dec + struct outputs.
         self.draft_tokens_handler = DraftTokensHandler(self.device)
@@ -373,9 +371,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             tasks.extend(PoolingRunner.get_supported_tasks(self.model))
         return tuple(tasks)
 
-    def load_model(self, load_dummy_weights: bool = False, *args, **kwargs) -> None:
+    def load_model(
+        self,
+        load_dummy_weights: bool = False,
+        *args,
+        model: nn.Module | None = None,
+        **kwargs,
+    ) -> None:
         time_before_load = time.perf_counter()
-        if load_dummy_weights:
+        if model is None and load_dummy_weights:
             self.load_config.load_format = "dummy"
         self.eplb.prepare_load()
         eplb_models_added = False
@@ -385,7 +389,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
             # Capture warmup providers selected while constructing the model.
             with self.jit_warmup_registry.activate():
-                self.model = model_loader.load_model(
+                self.model = model or model_loader.load_model(
                     vllm_config=self.vllm_config,
                     model_config=self.vllm_config.model_config,
                 )
@@ -450,9 +454,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.vllm_config, self.req_states, self.is_pooling_model, config_processors
         )
         if self.is_last_pp_rank and not self.is_pooling_model:
-            # V2 bypasses TopKTopPSampler, which registers native warmups.
-            # ROCm only: on CUDA these warmups add ~2 min to every engine start.
-            if current_platform.is_rocm():
+            # Speculative verification uses native top-k/top-p masking even
+            # when target-only sampling can use FlashInfer's fused sampler.
+            if current_platform.is_rocm() or (
+                current_platform.is_cuda() and self.speculative_config is not None
+            ):
                 from vllm.v1.sample.ops.topk_topp_sampler import (
                     register_top_k_top_p_warmups,
                 )
@@ -557,22 +563,21 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             return None
         return speculator.model
 
-    def reload_weights(self, *args, **kwargs) -> None:
-        # TODO(Wentao): Use full version instead of import when fully migrated to v2
-        from vllm.v1.worker.gpu_model_runner import GPUModelRunner as GPUModelRunnerV1
-
-        GPUModelRunnerV1.reload_weights(self, *args, **kwargs)  # type: ignore[arg-type]
-
-    def update_config(self, *args, **kwargs) -> None:
-        # TODO(Wentao): Use full version instead of import when fully migrated to v2
-        from vllm.v1.worker.gpu_model_runner import GPUModelRunner as GPUModelRunnerV1
-
-        GPUModelRunnerV1.update_config(self, *args, **kwargs)  # type: ignore[arg-type]
-
-        # v2 reads config via self.vllm_config (e.g. in load_model), so keep it
-        # in sync with the attributes the v1 helper just replaced.
-        self.vllm_config.model_config = self.model_config
-        self.vllm_config.load_config = self.load_config
+    def reload_weights(
+        self,
+        weights_iterator: Iterable[tuple[str, torch.Tensor]] | None = None,
+        weights_path: str | None = None,
+        is_checkpoint_format: bool = True,
+    ) -> None:
+        """Reload weights in place."""
+        vllm_config = self.vllm_config
+        model = self.get_model()
+        reload_weights(
+            vllm_config, model, weights_iterator, weights_path, is_checkpoint_format
+        )
+        self.reset_lora_state()
+        self.reset_encoder_cache()
+        self.reset_mm_cache()
 
     @functools.cached_property
     def main_stream(self) -> torch.cuda.Stream:
@@ -850,6 +855,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 - num_reqs * self.speculator.num_extra_query_per_req,
             )
 
+        assert num_tokens <= self.max_num_tokens, (
+            f"Dummy run with {num_tokens} tokens exceeds max_num_batched_tokens "
+            f"({self.max_num_tokens})"
+        )
+
         # Distribute the remainder evenly so no dummy request exceeds
         # ceil(num_tokens / num_reqs) <= max_model_len tokens.
 
@@ -1025,7 +1035,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     @torch.inference_mode()
     def profile_cudagraph_memory(self) -> int:
         """Estimate the GPU memory required to capture CUDA graphs."""
-        return _profile_cudagraph_memory(self)
+        # Runs before the KV cache exists, outside compile_or_warm_up_model.
+        with self.eplb.suppress():
+            return _profile_cudagraph_memory(self)
 
     def needs_cudagraph_capture(self) -> bool:
         """Whether capture_model() has any CUDA graphs left to capture."""
@@ -1891,9 +1903,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
             assert block_tables is not None
             attn_groups = self.attn_groups
-            if dummy_run and is_profile:
+            if dummy_run and is_profile and not valid_dummy_state_slots:
                 # Mamba layers take a cheap warmup path with no metadata;
                 # attention metadata is still built so those kernels tune.
+                # valid_dummy_state_slots runs the real Mamba kernels on distinct
+                # state slots; the caller must restore that state afterwards.
                 attn_groups = [
                     [g for g in groups if not isinstance(g.kv_cache_spec, MambaSpec)]
                     for groups in attn_groups
