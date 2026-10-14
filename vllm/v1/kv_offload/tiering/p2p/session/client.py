@@ -67,9 +67,9 @@ class _ClientRequestState:
     # OffloadKeys registered but not yet flushed onto the wire. Drained and
     # cleared by the next flush_pending_lookups.
     unsent: list[OffloadKey] = field(default_factory=list)
-    # Current lookup round. LookupMsgs carry it, each fetch closes it and
-    # advances it, so every round's supply/demand/completion is isolated
-    # on the wire. PD clients never probe and stay on round 0.
+    # Current lookup round. LookupMsgs carry it; each fetch closes it and
+    # allocates a new session-unique round so a delayed completion for the
+    # retired round cannot match a later load.
     round_seq: int = 0
     # This id ran the symmetric lookup phase (register_lookup); a fetch
     # with keys then requires every key to be a confirmed probe. PD
@@ -136,16 +136,25 @@ class ClientRole:
         # Kept in exact sync with ``st.loads``.
         self._active_loads: set[str] = set()
         self._completed_loads: list[LoadResult] = []
+        # Session-wide round allocator. Rounds are never reused for the
+        # session's life, so a retired round cannot match a later load
+        # for any kv_request_id, in O(1) memory.
+        self._round_alloc: int = 0
 
     # ------------------------------------------------------------------
     # State helpers
     # ------------------------------------------------------------------
 
+    def _alloc_round(self) -> int:
+        round_seq = self._round_alloc
+        self._round_alloc += 1
+        return round_seq
+
     def _get_or_create_request(self, kv_request_id: str) -> _ClientRequestState:
         """Get or create the state entry for a kv_request_id."""
         st = self._requests.get(kv_request_id)
         if st is None:
-            st = _ClientRequestState()
+            st = _ClientRequestState(round_seq=self._alloc_round())
             self._requests[kv_request_id] = st
         return st
 
@@ -201,7 +210,7 @@ class ClientRole:
         )
         st = self._get_or_create_request(kv_request_id)
         round_seq = st.round_seq
-        st.round_seq += 1
+        st.round_seq = self._alloc_round()
         st.loads[round_seq] = _InboundLoadState(
             job_id=job_id,
             submitted_at=time.monotonic(),
