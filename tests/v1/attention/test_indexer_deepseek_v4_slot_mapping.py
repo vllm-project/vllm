@@ -479,6 +479,7 @@ def test_zero_token_pcp_rank_participates_in_compressed_mapping_gather(monkeypat
     builder.cp_kv_cache_interleave_size = 1
     builder.kv_cache_spec = SimpleNamespace(block_size=64, num_states=64)
     builder.compressed_slot_mapping_buffer = torch.zeros(8, dtype=torch.int64)
+    builder.pcp_compressed_slot_mapping_buffer = torch.empty(32, dtype=torch.int64)
 
     def fake_get_compressed_slot_mapping(
         num_tokens,

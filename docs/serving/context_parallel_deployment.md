@@ -16,6 +16,42 @@ Depending on the use case, there are two possible strategies:
 
 Both approaches are under active development.
 
+### DeepSeek-V4.1 decode-only CUDA graphs
+
+DeepSeek-V4.1-Flash supports decode-only CUDA graphs with PCP on NVIDIA CUDA
+using Model Runner V2 and `FLASHMLA_SPARSE_DSV41`. Select
+`-cc.cudagraph_mode=FULL_DECODE_ONLY` explicitly: the default graph mode is not
+changed by this support. Decode batches can replay full graphs; prefill and
+mixed batches run without CUDA graphs. Use `-cc.cudagraph_mode=NONE` for eager
+execution.
+
+For example, a four-GPU TP2/PCP2 instance with fixed-length DSpark can use:
+
+```bash
+vllm serve deepseek-ai/DeepSeek-V4.1-Flash-1017 \
+    --language-model-only --tokenizer-mode deepseek_v41 \
+    --tensor-parallel-size 2 --prefill-context-parallel-size 2 \
+    --enable-expert-parallel --all2all-backend allgather_reducescatter \
+    --attention-backend FLASHMLA_SPARSE_DSV41 \
+    --speculative-config '{"method":"dspark","num_speculative_tokens":5}' \
+    --max-model-len 32768 --max-num-seqs 16 --max-num-batched-tokens 4096 \
+    --no-enable-prefix-caching --no-swa-bounded-replay \
+    --no-async-scheduling -cc.cudagraph_mode=FULL_DECODE_ONLY
+```
+
+Omit `--speculative-config` for ordinary decoding. PCP continues to require
+PP=DP=DCP=1, text-only input, synchronous scheduling, and no KV connector or
+MegaMoE. Adaptive speculative verification is unsupported. Engram tables remain
+TP-sharded and replicated across PCP ranks; account for their host memory when
+choosing the TP/PCP split.
+
+Speculative graph replay requires flattened or variable-length indexer queries,
+including when a PCP rank owns no decode requests. On SM90, fixed DSpark with
+5 speculative tokens uses the flattened path; native multi-query shapes such
+as 1 or 3 speculative tokens are rejected for graph execution. Use eager mode
+for those shapes. `FULL`, `PIECEWISE`, and `FULL_AND_PIECEWISE` are not supported
+for V4.1 PCP by this decode-only path.
+
 ## Decode Context Parallel
 
 Due to the auto-regressive nature of decoding, every decoding step needs to compute a small amount of query tokens w.r.t. a large number of key/value tokens stored in the paged KV cache. The core of decode context parallel is how to shard the KV cache across GPUs.

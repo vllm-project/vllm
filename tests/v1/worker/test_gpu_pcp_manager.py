@@ -147,6 +147,25 @@ def test_input_buffers_are_exposed_for_cudagraph_capture():
     assert manager.input_buffers.is_padding.shape == (8,)
 
 
+@pytest.mark.parametrize(
+    "num_reqs,local_num_reqs", [(0, 0), (1, 1), (3, 1), (4, 1), (5, 2), (8, 2)]
+)
+@pytest.mark.parametrize("has_prefill", [False, True])
+@pytest.mark.parametrize("shard_decode_requests", [False, True])
+def test_decode_graph_dispatch_uses_largest_owner_batch(
+    num_reqs, local_num_reqs, has_prefill, shard_decode_requests
+):
+    """Only sharded pure decode dispatches graphs by the largest owner batch."""
+    manager = PCPManager(
+        pcp_world_size=4,
+        pcp_rank=0,
+        device=torch.device("cpu"),
+        shard_decode_requests=shard_decode_requests,
+    )
+    expected = local_num_reqs if shard_decode_requests and not has_prefill else num_reqs
+    assert manager.get_num_reqs_for_dispatch(num_reqs, has_prefill) == expected
+
+
 def test_sync_drafts_writes_logits_to_request_slots(monkeypatch):
     """Rank 0's draft logits land in each batch request's persistent slot."""
     manager = PCPManager(

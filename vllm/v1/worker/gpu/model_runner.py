@@ -1487,7 +1487,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Get query_start_loc.
         # num_reqs_padded is None for PIECEWISE graphs (no request padding needed)
-        num_reqs_padded = batch_desc.num_reqs or num_reqs
+        # A PCP descriptor sizes the local graph; staging still holds all requests.
+        num_reqs_padded = max(num_reqs, batch_desc.num_reqs or 0)
         query_start_loc_np = np.empty(self.max_num_reqs + 1, dtype=np.int32)
         query_start_loc_np[0] = 0
         np.cumsum(num_scheduled_tokens_np, out=query_start_loc_np[1 : num_reqs + 1])
@@ -1822,6 +1823,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Get batch descriptor and sync across DP ranks.
         num_reqs = len(scheduler_output.num_scheduled_tokens)
+        dispatch_num_reqs = num_reqs
         num_toks = scheduler_output.total_num_scheduled_tokens
         max_query_len: int | None = max(scheduler_output.num_scheduled_tokens.values())
         batch_req_state, uniform_tok_count = self.gather_batch_req_state(
@@ -1834,6 +1836,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 # alone would admit a short prefill.
                 max_query_len = None
             if self.pcp_manager is not None:
+                dispatch_num_reqs = self.pcp_manager.get_num_reqs_for_dispatch(
+                    num_reqs, batch_req_state.has_prefill
+                )
                 num_toks = self.pcp_manager.get_num_tokens_for_dispatch(
                     batch_req_state.num_scheduled_tokens,
                     batch_req_state.is_prefilling_np,
@@ -1855,7 +1860,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         batch_desc, dp_sync_state = dispatch_cg_and_sync_dp(
             self.cudagraph_manager,
-            num_reqs,
+            dispatch_num_reqs,
             num_toks,
             uniform_tok_count,
             self.dp_size,

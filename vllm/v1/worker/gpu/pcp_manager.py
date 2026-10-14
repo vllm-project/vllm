@@ -10,6 +10,8 @@ import torch
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.distributed.parallel_state import get_dcp_group, get_pcp_group
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
+from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID, get_dcp_local_seq_lens
 from vllm.v1.worker.gpu.block_table import BlockTables
@@ -195,6 +197,12 @@ class PCPManager:
                 )
         cudagraph_mode = vllm_config.compilation_config.cudagraph_mode
         is_sparse_mla = hasattr(model_config.hf_text_config, "index_topk")
+        is_v41_decode_graph = (
+            current_platform.is_cuda()
+            and getattr(model_config.hf_text_config, "model_type", None)
+            == "deepseek_v41"
+            and cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY
+        )
         if parallel_config.decode_context_parallel_size > 1 and not is_sparse_mla:
             # Dense MLA prefill sizes its DCP KV gather from each rank's own
             # chunk rows, so the ranks' collectives diverge (#53573).
@@ -205,11 +213,31 @@ class PCPManager:
             and cudagraph_mode != CUDAGraphMode.NONE
             and getattr(model_config.hf_text_config, "model_type", None)
             not in ("deepseek_v32", "glm_moe_dsa")
+            and not is_v41_decode_graph
         ):
             raise NotImplementedError(
                 "MRV2 sparse MLA PCP supports CUDA graphs only for DeepSeek-V3.2 "
-                "and GLM-5.2/5.3. Set -cc.cudagraph_mode=NONE."
+                "and GLM-5.2/5.3, or CUDA DeepSeek-V4.1 with FULL_DECODE_ONLY. "
+                "Set -cc.cudagraph_mode=NONE for other configurations."
             )
+        if (
+            is_v41_decode_graph
+            and speculative_config is not None
+            and speculative_config.num_speculative_tokens > 0
+        ):
+            from vllm.v1.attention.backends.mla.indexer import (
+                _supports_varlen_paged_mqa_logits,
+                _use_flattening,
+            )
+
+            if not (
+                _use_flattening(vllm_config) or _supports_varlen_paged_mqa_logits()
+            ):
+                raise NotImplementedError(
+                    "MRV2 V4.1 PCP speculative CUDA graphs require flattened or "
+                    "varlen indexer queries; native queries do not yet support "
+                    "empty decode owners. Set -cc.cudagraph_mode=NONE."
+                )
         if (
             cudagraph_mode.has_full_cudagraphs()
             and not cudagraph_mode.separate_routine()
@@ -438,6 +466,12 @@ class PCPManager:
             )
             for rank in range(self.pcp_world_size)
         )
+
+    def get_num_reqs_for_dispatch(self, num_reqs: int, has_prefill: bool) -> int:
+        """Match decode graphs to the largest rank-local request count."""
+        if self.shard_decode_requests and not has_prefill:
+            return cdiv(num_reqs, self.pcp_world_size)
+        return num_reqs
 
     @staticmethod
     def _resolve_num_reqs_after_padding(
