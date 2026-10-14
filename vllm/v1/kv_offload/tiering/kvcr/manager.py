@@ -210,8 +210,8 @@ class _FrameworkPinAdapter:
                 cast(tuple[BlockKey, ...], offload_keys)
             )
             make_descriptor = self._tier._make_descriptor
-            for key, chunk_id in zip(job_keys, job.chunk_ids):
-                descriptors[BlockKey(key)] = [make_descriptor(int(chunk_id))]
+            for key, chunk_id in zip(job_keys, job.chunk_ids.tolist()):
+                descriptors[BlockKey(key)] = [make_descriptor(chunk_id)]
             pin_handle = f"kvcr-job-{job.job_id}"
             self._pin_jobs[pin_handle] = job.job_id
             return pin_handle, descriptors
@@ -473,6 +473,7 @@ class KVCRSecondaryTierManager(SecondaryTierManager):
             if local_mapping is not None:
                 local_mapping.close()
             raise
+        self._nixl_agent_name = self._kvcr.config.nixl_agent_name
         self._local_dram_mmap = local_mapping
         self._finished_jobs: list[JobResult] = []
         self._jobs_by_op: dict[OpHandle, _JobState] = {}
@@ -490,9 +491,9 @@ class KVCRSecondaryTierManager(SecondaryTierManager):
     @override
     def submit_load(self, job_metadata: TransferJob) -> None:
         blocks = {
-            self._key_adapter.encode(key): [self._make_descriptor(int(chunk_id))]
+            self._key_adapter.encode(key): [self._make_descriptor(chunk_id)]
             for key, chunk_id in zip(
-                job_metadata.keys, job_metadata.chunk_ids, strict=True
+                job_metadata.keys, job_metadata.chunk_ids.tolist(), strict=True
             )
         }
         if not blocks:
@@ -514,9 +515,9 @@ class KVCRSecondaryTierManager(SecondaryTierManager):
     @override
     def submit_store(self, job_metadata: TransferJob) -> None:
         blocks = {
-            self._key_adapter.encode(key): [self._make_descriptor(int(chunk_id))]
+            self._key_adapter.encode(key): [self._make_descriptor(chunk_id)]
             for key, chunk_id in zip(
-                job_metadata.keys, job_metadata.chunk_ids, strict=True
+                job_metadata.keys, job_metadata.chunk_ids.tolist(), strict=True
             )
         }
         if not blocks:
@@ -563,7 +564,7 @@ class KVCRSecondaryTierManager(SecondaryTierManager):
             job, remaining, success, successful_keys = job_state
             remaining -= len(entries)
             success = success and all(entry.success for entry in entries.values())
-            if successful_keys is not None:
+            if successful_keys is not None and (remaining > 0 or not success):
                 successful_keys.update(
                     OffloadKey(bytes(key))
                     for key, entry in entries.items()
@@ -703,6 +704,6 @@ class KVCRSecondaryTierManager(SecondaryTierManager):
 
     def _make_descriptor(self, chunk_id: int) -> MemoryRef:
         return MemoryRef(
-            end_point_name=self._kvcr.config.nixl_agent_name,
+            end_point_name=self._nixl_agent_name,
             element_index=chunk_id,
         )

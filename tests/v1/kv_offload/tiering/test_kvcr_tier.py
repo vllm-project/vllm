@@ -390,6 +390,7 @@ def test_kvcr_tier_adapts_request_and_load(monkeypatch, backpressure):
     assert list(blocks) == [key]
     (descriptor,) = blocks[key]
     assert descriptor == MemoryRef(end_point_name=kvcr.nixl_agent_name, element_index=2)
+    assert type(descriptor.element_index) is int
     assert list(tier.get_finished_jobs()) == [JobResult(7, True)]
 
     # Here we verify that request cleanup discards the request-scoped hint in
@@ -511,7 +512,7 @@ def test_kvcr_tier_serves_primary_pin_request(
             return TransferJob(
                 job_id=11,
                 keys=requested_keys if job_keys is None else job_keys,
-                chunk_ids=np.array(chunk_ids),
+                chunk_ids=np.array(chunk_ids, dtype=np.int32),
                 is_promotion=True,
                 req_context=req_context,
             )
@@ -539,6 +540,7 @@ def test_kvcr_tier_serves_primary_pin_request(
     assert block_descriptors is not None
     (descriptor,) = block_descriptors
     assert descriptor == MemoryRef(end_point_name=kvcr.nixl_agent_name, element_index=3)
+    assert type(descriptor.element_index) is int
 
     polls = 0
 
@@ -641,6 +643,7 @@ def test_kvcr_tier_stores_and_emits_inventory(monkeypatch):
     assert blocks[key] == [
         MemoryRef(end_point_name=kvcr.nixl_agent_name, element_index=2)
     ]
+    assert type(blocks[key][0].element_index) is int
     assert list(tier.get_finished_jobs()) == [JobResult(11, True)]
 
     assert kvcr.inventory_sink is not None
@@ -670,7 +673,16 @@ def test_kvcr_tier_requires_self_describing_inventory_events(monkeypatch):
         )
 
 
-def test_kvcr_tier_accumulates_block_results(monkeypatch):
+@pytest.mark.parametrize(
+    ("successes", "expected"),
+    [
+        ((True, False), JobResult(13, False, {OffloadKey(b"k0")})),
+        ((False, True), JobResult(13, False, {OffloadKey(b"k1")})),
+        ((True, True), JobResult(13, True)),
+    ],
+    ids=["success-then-failure", "failure-then-success", "all-success"],
+)
+def test_kvcr_tier_accumulates_block_results(monkeypatch, successes, expected):
     """Wait for every block result and preserve partial success while draining."""
     kvcr = RecordingKVCR()
     tier = _make_tier(monkeypatch, kvcr)
@@ -687,13 +699,10 @@ def test_kvcr_tier_accumulates_block_results(monkeypatch):
 
     op_handle, _, _ = kvcr.deliver_calls[0]
     kvcr.completed.clear()
-    kvcr.complete(op_handle, {keys[0]: True})
+    kvcr.complete(op_handle, {keys[0]: successes[0]})
     assert list(tier.get_finished_jobs()) == []
 
-    kvcr.complete(op_handle, {keys[1]: False})
+    kvcr.complete(op_handle, {keys[1]: successes[1]})
     tier.drain_jobs()
 
-    [result] = tier.get_finished_jobs()
-    assert result.job_id == 13
-    assert not result.success
-    assert result.successful_keys == {keys[0]}
+    assert list(tier.get_finished_jobs()) == [expected]
