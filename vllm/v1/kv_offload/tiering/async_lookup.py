@@ -34,6 +34,9 @@ Results are drained on the first lookup after each flush, at flush(), and
 after worker shutdown. In-flight lookups with no remaining request references
 are retained until their results are drained, allowing new requests to share
 the same probe.
+A resolved absent verdict is not shared with new requests: another instance
+may have written the block to a shared tier since, so a new request starts a
+fresh probe. Requests that already hold the verdict keep it.
 """
 
 import queue
@@ -93,8 +96,8 @@ class AsyncLookupManager(ABC):
 
         # key → LookupState; scheduler-owned, no lock needed.
         self._lookup_state: dict[OffloadKey, LookupState] = {}
-        # req_id → keys looked up by that request (reverse index for cleanup).
-        self._req_keys: dict[str, set[OffloadKey]] = {}
+        # req_id → key → the state serving that request's verdict for the key.
+        self._req_keys: dict[str, dict[OffloadKey, LookupState]] = {}
         # Results from an older state must not be applied after cleanup removes
         # and recreates a key.
         self._next_generation = 0
@@ -154,14 +157,17 @@ class AsyncLookupManager(ABC):
             self.drain_results()
             self._need_to_drain = False
         req_id = req_context.req_id
-        state = self._lookup_state.get(key)
+        req_states = self._req_keys.setdefault(req_id, {})
+        state = req_states.get(key)
         if state is None:
-            state = LookupState(generation=self._next_generation)
-            self._next_generation += 1
-            self._lookup_state[key] = state
-            self._lookup_batch.append((key, req_context, state.generation))
-        state.request_ids.add(req_id)
-        self._req_keys.setdefault(req_id, set()).add(key)
+            state = self._lookup_state.get(key)
+            if state is None or state.result is False:
+                state = LookupState(generation=self._next_generation)
+                self._next_generation += 1
+                self._lookup_state[key] = state
+                self._lookup_batch.append((key, req_context, state.generation))
+            state.request_ids.add(req_id)
+            req_states[key] = state
         return state.result
 
     def flush(self) -> None:
@@ -235,10 +241,13 @@ class AsyncLookupManager(ABC):
         Called from the tier's on_request_finished(). Uses the reverse
         index to visit only keys associated with this request.
         """
-        for key in self._req_keys.pop(req_id, ()):
-            state = self._lookup_state[key]
+        for key, state in self._req_keys.pop(req_id, {}).items():
             state.request_ids.discard(req_id)
-            if not state.request_ids and state.phase is not LookupPhase.IN_FLIGHT:
+            if (
+                not state.request_ids
+                and state.phase is not LookupPhase.IN_FLIGHT
+                and self._lookup_state.get(key) is state
+            ):
                 del self._lookup_state[key]
 
     def shutdown(self) -> None:

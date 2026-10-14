@@ -146,6 +146,45 @@ class TestAsyncLookupManager:
         assert mgr.batch_lookup_calls == 1
         assert replacement_result is True
 
+    @pytest.mark.parametrize("miss_source", ["probe", "mark_miss"])
+    def test_new_request_reprobes_cached_miss(self, miss_source: str):
+        """Another instance may write a block to a shared tier after it missed,
+        so a new request re-probes instead of inheriting the cached miss. The
+        earlier request keeps its own verdict, so a failed load's corrected miss
+        cannot flip back to a hit (failed-load livelock, #49176)."""
+        key = _key(1)
+        mgr = InMemoryLookupManager()
+        ctx_a = _ctx("req_a")
+        ctx_b = _ctx("req_b")
+        if miss_source == "mark_miss":
+            mgr._existing.add(key)
+        try:
+            assert mgr.lookup(key, ctx_a) is None
+            mgr.flush()
+            batch = mgr._pending_results.get(timeout=5)
+            mgr._pending_results.put(batch)
+            if miss_source == "mark_miss":
+                assert mgr.lookup(key, ctx_a) is True
+                mgr.mark_miss([key])
+            else:
+                mgr._existing.add(key)
+            assert mgr.lookup(key, ctx_a) is False
+
+            assert mgr.lookup(key, ctx_b) is None
+            mgr.flush()
+            batch = mgr._pending_results.get(timeout=5)
+            mgr._pending_results.put(batch)
+            assert mgr.lookup(key, ctx_b) is True
+            assert mgr.lookup(key, ctx_a) is False
+            assert mgr.batch_lookup_calls == 2
+
+            mgr.cleanup("req_a")
+            assert mgr._lookup_state[key].result is True
+            mgr.cleanup("req_b")
+            assert key not in mgr._lookup_state
+        finally:
+            mgr.shutdown()
+
     @pytest.mark.parametrize(
         "reclaim_at_shutdown", [False, True], ids=["flush", "shutdown"]
     )
