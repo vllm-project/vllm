@@ -1946,31 +1946,27 @@ class OffloadingConnectorScheduler:
             assert job_status.pending_count == 0
 
             req_status = job_status.req_status
-            try:
-                if job_status.is_store:
-                    self.manager.complete_store(job_status.keys, req_status.req_context)
-                else:
-                    self.manager.complete_load(job_status.keys, req_status.req_context)
-            finally:
-                if not job_status.is_store and self._chunks_being_loaded:
+            if job_status.is_store:
+                self.manager.complete_store(job_status.keys, req_status.req_context)
+            else:
+                self.manager.complete_load(job_status.keys, req_status.req_context)
+                if self._chunks_being_loaded:
                     self._chunks_being_loaded.difference_update(job_status.keys)
-                if self._block_id_to_pending_jobs:
-                    # Sliding window blocks are tracked from store creation
-                    # and must be cleaned up unconditionally.
-                    self._remove_pending_job(job_id, job_status.fenced_block_ids)
-                    # Non-sliding-window blocks are only tracked after
-                    # request_finished, so only clean up for finished requests.
-                    if req_status.req.is_finished():
-                        self._remove_pending_job(
-                            job_id, job_status.deferred_fence_block_ids
-                        )
+            if self._block_id_to_pending_jobs:
+                # Sliding window blocks are tracked from store creation
+                # and must be cleaned up unconditionally.
+                self._remove_pending_job(job_id, job_status.fenced_block_ids)
+                # Non-sliding-window blocks are only tracked after
+                # request_finished, so only clean up for finished requests.
+                if req_status.req.is_finished():
+                    self._remove_pending_job(job_id, job_status.deferred_fence_block_ids)
 
-                del self._jobs[job_id]
-                req_status.transfer_jobs.remove(job_id)
-                if req_status.finished_signaled and not req_status.transfer_jobs:
-                    current_status = self._req_status.get(job_status.req_id)
-                    if current_status is req_status:
-                        del self._req_status[job_status.req_id]
+            del self._jobs[job_id]
+            req_status.transfer_jobs.remove(job_id)
+            if req_status.finished_signaled and not req_status.transfer_jobs:
+                current_status = self._req_status.get(job_status.req_id)
+                if current_status is req_status:
+                    del self._req_status[job_status.req_id]
 
     def get_stats(self) -> OffloadingConnectorStats | None:
         stats: OffloadingConnectorStats | None = None

@@ -2545,39 +2545,6 @@ def test_worker_completion_uses_exact_request_state_after_req_id_reuse(
     )
 
 
-def test_worker_completion_cleans_state_when_manager_completion_raises(
-    request_runner,
-):
-    runner = request_runner(
-        block_size=4,
-        num_gpu_blocks=20,
-        async_scheduling=False,
-    )
-    runner.new_request(token_ids=[0] * 4)
-    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
-        generate_store_output(keys)
-    )
-    runner.run(decoded_tokens=[0], complete_transfers=False)
-
-    [job_id] = runner.connector_scheduler._jobs
-    req_status = runner.connector_scheduler._jobs[job_id].req_status
-    runner.manager.complete_store.side_effect = RuntimeError("submit failed")
-
-    with pytest.raises(RuntimeError, match="submit failed"):
-        runner.connector_scheduler.update_connector_output(
-            KVConnectorOutput(
-                kv_connector_worker_meta=OffloadingWorkerMetadata(
-                    completed_jobs={
-                        job_id: runner.connector_scheduler.config.num_workers
-                    }
-                )
-            )
-        )
-
-    assert job_id not in runner.connector_scheduler._jobs
-    assert job_id not in req_status.transfer_jobs
-
-
 @pytest.mark.parametrize("async_scheduling", [True, False])
 def test_max_offload_tokens_validation(request_runner, async_scheduling: bool):
     """Validates max_offload_tokens: type coercion, boundary values, and capping.
