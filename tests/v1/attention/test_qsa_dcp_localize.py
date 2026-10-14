@@ -2,10 +2,20 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """QSA DCP selection localization and empty-owner behavior."""
 
+from importlib import import_module
+
 import pytest
 import torch
 
 PAD = -1
+
+
+def _owner(pos, world, interleave):
+    return (pos // interleave) % world
+
+
+def _local_id(pos, world, interleave):
+    return (pos // (world * interleave)) * interleave + (pos % interleave)
 
 
 def _reference_localize(row, world, rank, interleave):
@@ -14,15 +24,15 @@ def _reference_localize(row, world, rank, interleave):
     for g in row:
         if g < 0:
             continue
-        if (g // interleave) % world != rank:
+        if _owner(g, world, interleave) != rank:
             continue
-        kept.append((g // (world * interleave)) * interleave + (g % interleave))
+        kept.append(_local_id(g, world, interleave))
     return kept, len(kept)
 
 
-def _pack(rows, width):
+def _pack(rows, width, device="cpu"):
     """Build the packed buffer: selection columns plus a trailing count."""
-    out = torch.full((len(rows), width + 1), PAD, dtype=torch.int32)
+    out = torch.full((len(rows), width + 1), PAD, dtype=torch.int32, device=device)
     for i, row in enumerate(rows):
         for j, g in enumerate(row[:width]):
             out[i, j] = g
@@ -159,3 +169,135 @@ def test_empty_qsa_batch_returns_the_dcp_output_and_lse_pair():
     assert lse.shape == query.shape[:2]
     assert lse.dtype == torch.float32
     assert lse.device == query.device
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="QSA kernels need CUDA")
+@pytest.mark.parametrize(
+    "world,interleave,seq_len,cache_dtype,k_scale,v_scale",
+    [
+        (2, 1, 64, torch.bfloat16, None, None),
+        (4, 16, 200, torch.bfloat16, None, None),
+        (2, 16, 64, torch.float8_e4m3fn, 0.75, 1.5),
+        (4, 4, 64, torch.float8_e4m3fn, 0.75, 1.5),
+    ],
+)
+def test_sharded_ranks_reproduce_the_single_rank_result(
+    world, interleave, seq_len, cache_dtype, k_scale, v_scale
+):
+    from vllm.models.qwen4_exp.nvidia.ops.qsa import qsa_sparse_paged_attention
+    from vllm.models.qwen4_exp.nvidia.ops.qsa_dcp import (
+        qsa_dcp_empty_owner_rows,
+        qsa_localize_dcp_indices,
+        qsa_neutralize_empty_owner_lse_,
+    )
+    from vllm.v1.attention.ops.dcp import _lse_weighted_combine
+
+    import_module("vllm.models.qwen4_exp.nvidia.model")
+    qsa_backend = import_module(
+        "vllm.models.qwen4_exp.nvidia.qsa"
+    ).Qwen4ExpQSAFlashAttentionBackend
+    assert qsa_backend.get_impl_cls().lse_base_on_e is False
+
+    torch.manual_seed(1234 + seq_len)
+    device = "cuda"
+    page = 16
+    num_kv_heads = 2
+    head_dim = 64
+    num_q_heads = 8
+
+    full_blocks = (seq_len + page - 1) // page
+    shape = (full_blocks, page, num_kv_heads, head_dim)
+    k_source = torch.randn(shape, dtype=torch.bfloat16, device=device)
+    v_source = torch.randn(shape, dtype=torch.bfloat16, device=device)
+    if cache_dtype == torch.float8_e4m3fn:
+        k_full = (k_source / k_scale).to(cache_dtype)
+        v_full = (v_source / v_scale).to(cache_dtype)
+    else:
+        k_full, v_full = k_source, v_source
+
+    local_len = seq_len // world + page
+    local_blocks = (local_len + page - 1) // page
+    local_shape = (local_blocks, page, num_kv_heads, head_dim)
+    k_rank = [
+        torch.zeros(local_shape, dtype=cache_dtype, device=device) for _ in range(world)
+    ]
+    v_rank = [
+        torch.zeros(local_shape, dtype=cache_dtype, device=device) for _ in range(world)
+    ]
+    for pos in range(seq_len):
+        rank = _owner(pos, world, interleave)
+        local_id = _local_id(pos, world, interleave)
+        k_rank[rank][local_id // page, local_id % page] = k_full[
+            pos // page, pos % page
+        ]
+        v_rank[rank][local_id // page, local_id % page] = v_full[
+            pos // page, pos % page
+        ]
+
+    num_rows = 6
+    selections = [
+        list(range(row, seq_len, row + 2))[: seq_len // 2] for row in range(num_rows)
+    ]
+    selections[0] = [0]
+    width = max(len(s) for s in selections)
+    global_sel = _pack(selections, width, device)
+
+    q = torch.randn(
+        (num_rows, num_q_heads, head_dim), dtype=torch.bfloat16, device=device
+    )
+    token_to_req = torch.zeros(num_rows, dtype=torch.int32, device=device)
+    full_table = torch.arange(full_blocks, dtype=torch.int32, device=device).unsqueeze(
+        0
+    )
+    local_table = torch.arange(
+        local_blocks, dtype=torch.int32, device=device
+    ).unsqueeze(0)
+
+    reference, reference_lse = qsa_sparse_paged_attention(
+        q,
+        k_full,
+        v_full,
+        global_sel,
+        full_table,
+        token_to_req,
+        False,
+        k_scale=k_scale,
+        v_scale=v_scale,
+        return_lse=True,
+    )
+
+    outs, lses = [], []
+    for rank in range(world):
+        local_sel = qsa_localize_dcp_indices(
+            global_sel, torch.empty_like(global_sel), world, rank, interleave
+        )
+        empty = qsa_dcp_empty_owner_rows(local_sel)
+        if rank:
+            assert bool(empty[0])
+        out, lse = qsa_sparse_paged_attention(
+            q,
+            k_rank[rank],
+            v_rank[rank],
+            local_sel,
+            local_table,
+            token_to_req,
+            False,
+            k_scale=k_scale,
+            v_scale=v_scale,
+            return_lse=True,
+        )
+        qsa_neutralize_empty_owner_lse_(lse, empty)
+        outs.append(out.float())
+        lses.append(lse.float())
+
+    merged, merged_lse = _lse_weighted_combine(
+        torch.stack(outs),
+        torch.stack(lses),
+        return_lse=True,
+        is_lse_base_on_e=False,
+    )
+
+    torch.testing.assert_close(
+        merged.to(reference.dtype), reference, rtol=2e-2, atol=2e-2
+    )
+    torch.testing.assert_close(merged_lse, reference_lse.float(), rtol=1e-3, atol=1e-3)

@@ -13,7 +13,11 @@ from vllm.models.qwen4_exp.common.qsa_cache import (
     _build_qsa_metadata_torch,
     compressed_qsa_slot_mapping,
 )
-from vllm.v1.attention.backend import CommonAttentionMetadata, MultipleOf
+from vllm.v1.attention.backend import (
+    AttentionCGSupport,
+    CommonAttentionMetadata,
+    MultipleOf,
+)
 from vllm.v1.core.kv_cache_planning import (
     get_kv_cache_config_from_groups,
     get_kv_cache_groups,
@@ -28,6 +32,8 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.kv_cache_layout import KVCacheLayout
+from vllm.v1.worker.block_table import get_block_table_width
+from vllm.v1.worker.gpu import attn_utils
 from vllm.v1.worker.utils import (
     AttentionGroup,
     allocate_kv_cache,
@@ -88,13 +94,30 @@ class _IndependentSelectorWithoutGenericSlots(MLAAttentionSpec):
         return False
 
 
-def _main_kv() -> FullAttentionSpec:
+def _full(block_size: int, head_size: int = 128) -> FullAttentionSpec:
     return FullAttentionSpec(
-        block_size=BLOCK_SIZE,
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=head_size,
+        dtype=torch.bfloat16,
+    )
+
+
+def _independent_selector(
+    block_size: int, *, tokens_per_state: int = 8, dcp_sharded: bool = False
+) -> _IndependentSelectorWithoutGenericSlots:
+    return _IndependentSelectorWithoutGenericSlots(
+        block_size=block_size,
         num_kv_heads=1,
         head_size=128,
         dtype=torch.bfloat16,
+        tokens_per_state=tokens_per_state,
+        dcp_sharded=dcp_sharded,
     )
+
+
+def _main_kv() -> FullAttentionSpec:
+    return _full(BLOCK_SIZE)
 
 
 def _selector(dcp_world_size: int) -> MLAAttentionSpec:
@@ -124,33 +147,35 @@ def _qsa_selector(dcp_world_size: int, compress_ratio: int = 8) -> MLAAttentionS
     return selector
 
 
-def _config(dcp_world_size: int) -> VllmConfig:
+def _config(
+    dcp_world_size: int,
+    *,
+    max_model_len: int = BLOCK_SIZE * 16,
+    layout: str = "BLHNC",
+) -> VllmConfig:
     config = VllmConfig(
         model_config=ModelConfig(max_model_len=BLOCK_SIZE * 16),
         device_config=DeviceConfig(device="cpu"),
     )
+    config.model_config.max_model_len = max_model_len
     config.parallel_config.decode_context_parallel_size = dcp_world_size
-    config.cache_config.kv_cache_layout = "BLHNC"
+    config.cache_config.kv_cache_layout = layout
     return config
 
 
-@pytest.mark.parametrize("dcp_world_size,selector_first", [(2, False), (4, True)])
-def test_unmarked_replicated_cache_stays_separate(
-    dcp_world_size: int, selector_first: bool
-) -> None:
+@pytest.mark.parametrize("dcp_world_size", [2, 4])
+def test_unmarked_replicated_cache_stays_separate(dcp_world_size: int) -> None:
     main = _main_kv()
     selector = _selector(dcp_world_size)
-    specs = (
-        {"selector": selector, "main": main}
-        if selector_first
-        else {"main": main, "selector": selector}
-    )
+    specs = {"main": main, "selector": selector}
     assert not UniformTypeKVCacheSpecs.is_uniform_type(specs, dcp_world_size)
     group = UniformTypeKVCacheSpecs.from_specs(specs, dcp_world_size)
     assert group is None
 
 
-@pytest.mark.parametrize("dcp_world_size,selector_first", [(2, False), (4, True)])
+@pytest.mark.parametrize(
+    "dcp_world_size,selector_first", [(1, False), (2, False), (4, True)]
+)
 def test_qsa_selector_shares_sharded_main_block_table(
     dcp_world_size: int, selector_first: bool
 ) -> None:
@@ -165,6 +190,7 @@ def test_qsa_selector_shares_sharded_main_block_table(
 
     assert len(groups) == 1
     group = groups[0]
+    assert group.layer_names == list(specs)
     assert isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
     assert group.kv_cache_spec.block_size == BLOCK_SIZE
     assert group.kv_cache_spec.dcp_sharded
@@ -191,35 +217,13 @@ def test_different_global_spans_stay_separate_in_grouping() -> None:
     assert len(groups) == 2
 
 
-@pytest.mark.parametrize("selector_first", [False, True])
-def test_independent_selector_cannot_disable_main_slot_mapping(
-    selector_first: bool,
-) -> None:
+def test_independent_selector_cannot_disable_main_slot_mapping() -> None:
     config = _config(2)
-    selector = _IndependentSelectorWithoutGenericSlots(
-        block_size=BLOCK_SIZE * 2,
-        num_kv_heads=1,
-        head_size=128,
-        dtype=torch.bfloat16,
-        tokens_per_state=8,
-        dcp_sharded=False,
-    )
-    specs = (
-        {"selector": selector, "main": _main_kv()}
-        if selector_first
-        else {"main": _main_kv(), "selector": selector}
-    )
+    selector = _independent_selector(BLOCK_SIZE * 2)
+    specs = {"selector": selector, "main": _main_kv()}
     groups = get_kv_cache_groups(config, specs)
     assert len(groups) == 1
     assert groups[0].kv_cache_spec.uses_slot_mapping
-
-
-def test_dcp1_selector_can_share_a_group_with_main_kv() -> None:
-    config = _config(1)
-    selector = _qsa_selector(1)
-    groups = get_kv_cache_groups(config, {"main": _main_kv(), "selector": selector})
-    assert len(groups) == 1
-    assert groups[0].layer_names == ["main", "selector"]
 
 
 class _QSAMainBackend:
@@ -233,14 +237,8 @@ class _QSAMainBackend:
 
 
 def _packed_qsa_views(dcp_world_size: int):
-    config = _config(dcp_world_size)
-    config.cache_config.kv_cache_layout = "BLNHC"
-    main = FullAttentionSpec(
-        block_size=BLOCK_SIZE,
-        num_kv_heads=1,
-        head_size=256,
-        dtype=torch.bfloat16,
-    )
+    config = _config(dcp_world_size, layout="BLNHC")
+    main = _full(BLOCK_SIZE, head_size=256)
     selector = _qsa_selector(dcp_world_size, compress_ratio=4)
     specs = {"main": main, "selector": selector}
     groups = get_kv_cache_groups(config, specs)
@@ -344,15 +342,15 @@ def test_dcp1_packed_selector_keeps_its_original_view() -> None:
     assert mapped["selector"] is run.views["selector"]
 
 
-def test_packed_uncompressed_cache_still_rejects_virtual_split() -> None:
-    """A token cache cannot use the compressed-cache strided mapping path."""
-    spec = FullAttentionSpec(
-        block_size=2 * BLOCK_SIZE,
-        num_kv_heads=1,
-        head_size=128,
-        dtype=torch.bfloat16,
-    )
-    cache = _single_packed_cache(spec, 2 * spec.page_size_bytes)
+@pytest.mark.parametrize("kind", ["uncompressed", "overlapping_manager_blocks"])
+def test_packed_cache_rejects_unsafe_virtual_split(kind: str) -> None:
+    if kind == "uncompressed":
+        spec = _full(2 * BLOCK_SIZE)
+        stride = 2 * spec.page_size_bytes
+    else:
+        spec = _independent_selector(2 * BLOCK_SIZE, tokens_per_state=4)
+        stride = spec.page_size_bytes // 2
+    cache = _single_packed_cache(spec, stride)
     with pytest.raises(ValueError, match="cannot be split"):
         allocate_kv_cache(cache, torch.device("cpu"), KVCacheLayout.BLNHC, [BLOCK_SIZE])
 
@@ -372,43 +370,9 @@ def _single_packed_cache(spec: FullAttentionSpec, stride: int) -> KVCacheConfig:
     )
 
 
-def test_packed_compressed_cache_without_independent_mapping_rejects_split() -> None:
-    """Compression alone does not authorize a virtual block-table mapping."""
-    spec = MLAAttentionSpec(
-        block_size=2 * BLOCK_SIZE,
-        num_kv_heads=1,
-        head_size=128,
-        dtype=torch.bfloat16,
-        tokens_per_state=4,
-    )
-    cache = _single_packed_cache(spec, 2 * spec.page_size_bytes)
-    with pytest.raises(ValueError, match="cannot be split"):
-        allocate_kv_cache(cache, torch.device("cpu"), KVCacheLayout.BLNHC, [BLOCK_SIZE])
-
-
-def test_packed_compressed_cache_rejects_stride_shorter_than_manager_page() -> None:
-    """Virtual pages must not alias the following manager block."""
-    spec = _IndependentSelectorWithoutGenericSlots(
-        block_size=2 * BLOCK_SIZE,
-        num_kv_heads=1,
-        head_size=128,
-        dtype=torch.bfloat16,
-        tokens_per_state=4,
-    )
-    cache = _single_packed_cache(spec, spec.page_size_bytes // 2)
-    with pytest.raises(ValueError, match="cannot be split"):
-        allocate_kv_cache(cache, torch.device("cpu"), KVCacheLayout.BLNHC, [BLOCK_SIZE])
-
-
 def test_packed_compressed_cache_rejects_nonintegral_state_split() -> None:
     """Each manager state must belong to a kernel page."""
-    spec = _IndependentSelectorWithoutGenericSlots(
-        block_size=10,
-        num_kv_heads=1,
-        head_size=128,
-        dtype=torch.bfloat16,
-        tokens_per_state=3,
-    )
+    spec = _independent_selector(10, tokens_per_state=3)
     cache = torch.zeros(
         (2, 1, spec.num_states, spec.state_content_size_bytes // 2),
         dtype=torch.bfloat16,
@@ -417,3 +381,143 @@ def test_packed_compressed_cache_rejects_nonintegral_state_split() -> None:
     group.kernel_block_size = 5
     with pytest.raises(ValueError, match="cannot be split"):
         group.map_kv_cache_to_kernel_blocks(cache)
+
+
+class _BlockWidthBuilder:
+    requires_block_table_width = True
+
+    def __init__(self, spec, layer_names, config, device, block_table_width):
+        self.block_table_width = block_table_width
+
+    @staticmethod
+    def get_cudagraph_support(config, spec):
+        return AttentionCGSupport.ALWAYS
+
+
+class _BlockWidthBackend:
+    kernel_block_size = BLOCK_SIZE
+
+    @staticmethod
+    def get_name():
+        return "BLOCK_WIDTH_TEST"
+
+    @staticmethod
+    def full_cls_name():
+        return ("block_width_test", "Backend")
+
+    @classmethod
+    def get_supported_kernel_block_sizes(cls, spec=None):
+        return [cls.kernel_block_size]
+
+    @staticmethod
+    def get_builder_cls():
+        return _BlockWidthBuilder
+
+
+def _mixed_group_with_runner_width(
+    monkeypatch: pytest.MonkeyPatch,
+    block_size: int,
+    dcp_world_size: int,
+    max_model_len: int,
+    kernel_block_size: int,
+) -> tuple[AttentionGroup, int]:
+    config = _config(dcp_world_size, max_model_len=max_model_len)
+    main = _full(block_size)
+    selector = _independent_selector(block_size * dcp_world_size)
+    groups = get_kv_cache_groups(config, {"main": main, "selector": selector})
+    assert len(groups) == 1
+    group_spec = groups[0].kv_cache_spec
+    runner_width = get_block_table_width(
+        group_spec.max_num_blocks_per_req(config, max_model_len),
+        group_spec.block_size,
+        token_alignment=group_spec.block_table_token_alignment,
+    )
+
+    monkeypatch.setattr(_BlockWidthBackend, "kernel_block_size", kernel_block_size)
+    layers = {
+        name: SimpleNamespace(get_attn_backend=lambda: _BlockWidthBackend, num_heads=1)
+        for name in ("main", "selector")
+    }
+    monkeypatch.setattr(attn_utils, "get_shared_kv_cache_layers", lambda config: {})
+    monkeypatch.setattr(
+        attn_utils,
+        "get_layers_from_vllm_config",
+        lambda config, layer_type, layer_names: {
+            name: layers[name] for name in layer_names
+        },
+    )
+    attn_groups, _, kernel_sizes = attn_utils.init_attn_backend(
+        KVCacheConfig(num_blocks=2, kv_cache_tensors=[], kv_cache_groups=groups),
+        config,
+        torch.device("cpu"),
+        block_table_widths=[runner_width],
+    )
+    assert kernel_sizes == [kernel_block_size]
+    selector_group = next(
+        group for group in attn_groups[0] if group.layer_names == ["selector"]
+    )
+    return selector_group, runner_width
+
+
+@pytest.mark.parametrize(
+    "block_size,dcp_world_size,max_model_len,kernel_block_size",
+    [(480, 4, 262144, 480), (96, 2, 1152, 48), (128, 2, 1152, 128)],
+    ids=["reported_crash", "cross_row_alias", "b200_safe_shape"],
+)
+def test_mixed_group_mapping_preserves_request_rows(
+    monkeypatch: pytest.MonkeyPatch,
+    block_size: int,
+    dcp_world_size: int,
+    max_model_len: int,
+    kernel_block_size: int,
+) -> None:
+    group, runner_width = _mixed_group_with_runner_width(
+        monkeypatch, block_size, dcp_world_size, max_model_len, kernel_block_size
+    )
+    block_table = torch.tensor(
+        [[1] * runner_width, [10] * runner_width], dtype=torch.int32
+    )
+    mapped = group.map_to_kernel_block_table(block_table)
+    assert group.kernel_block_size is not None
+    blocks_per_kv_block = group.kv_cache_spec.block_size // group.kernel_block_size
+    expected = torch.tensor(
+        [
+            [
+                blocks_per_kv_block * block + offset
+                for block in row
+                for offset in range(blocks_per_kv_block)
+            ]
+            for row in block_table.tolist()
+        ],
+        dtype=torch.int32,
+    )
+    assert torch.equal(mapped, expected)
+    if block_size == 128:
+        layer_width = get_block_table_width(
+            group.kv_cache_spec.max_num_blocks_per_req(
+                _config(dcp_world_size), max_model_len
+            ),
+            group.kv_cache_spec.block_size,
+        )
+        assert runner_width == layer_width
+    assert group.kernel_block_table is not None
+    short_width = runner_width * (blocks_per_kv_block - 1)
+    group.kernel_block_table = group.kernel_block_table[..., :short_width]
+    with pytest.raises(ValueError, match="kernel block table row has"):
+        group.map_to_kernel_block_table(
+            torch.ones((2, runner_width), dtype=torch.int32)
+        )
+
+
+def test_mixed_group_copy_preserves_runner_width(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    group, runner_width = _mixed_group_with_runner_width(
+        monkeypatch, 480, 4, 262144, 480
+    )
+    copied = replace(group, metadata_builders=[])
+    assert copied.block_table_width == runner_width
+    config = _config(4, max_model_len=262144)
+    copied.create_metadata_builders(config, torch.device("cpu"), kernel_block_size=480)
+    assert copied.kernel_block_table is not None
+    assert copied.kernel_block_table.shape[-1] == runner_width * 4

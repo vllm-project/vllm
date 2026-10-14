@@ -280,6 +280,8 @@ class AttentionGroup:
     layer_names: list[str]
     kv_cache_spec: KVCacheSpec
     kv_cache_group_id: int
+    # Row width the runner allocated for this group's block table, in manager blocks.
+    block_table_width: int | None = None
     # Set when the backend needs blocks smaller than the KV cache manager's: its
     # block tables and KV cache views then address kernel blocks, kernel block j
     # of block b being b * kernel_block_stride + j. The stride is set when a
@@ -322,10 +324,15 @@ class AttentionGroup:
         builder_cls = self.backend.get_builder_cls()
         builder_kwargs = {}
         if builder_cls.requires_block_table_width or self.kernel_block_size is not None:
-            max_num_blocks = self.kv_cache_spec.max_num_blocks_per_req(
-                vllm_config, vllm_config.model_config.max_model_len
-            )
-            width = get_block_table_width(max_num_blocks, self.kv_cache_spec.block_size)
+            width = self.block_table_width
+            if width is None:
+                # Groups built outside init_attn_backend have no runner width.
+                max_num_blocks = self.kv_cache_spec.max_num_blocks_per_req(
+                    vllm_config, vllm_config.model_config.max_model_len
+                )
+                width = get_block_table_width(
+                    max_num_blocks, self.kv_cache_spec.block_size
+                )
             if kernel_block_size is not None:
                 width *= self.kv_cache_spec.block_size // kernel_block_size
             if builder_cls.requires_block_table_width:
@@ -402,6 +409,11 @@ class AttentionGroup:
         blocks_per_kv_block = self.kv_cache_spec.block_size // self.kernel_block_size
         rows, cols = block_table.shape
         out = self.kernel_block_table[ubatch_idx, :rows, : cols * blocks_per_kv_block]
+        if out.shape[1] != cols * blocks_per_kv_block:
+            raise ValueError(
+                f"kernel block table row has {out.shape[1]} columns, "
+                f"needs {cols} x {blocks_per_kv_block}"
+            )
         torch.add(
             self.kernel_block_offsets,
             block_table.unsqueeze(-1),

@@ -294,6 +294,9 @@ class DraftModelSpeculator(BaseSpeculator):
             self.attn_vllm_config,
             self.device,
             active_layer_names=self.draft_attn_layer_names,
+            block_table_widths=[
+                table.shape[1] for table in block_tables.input_block_tables
+            ],
         )
         self.block_tables = block_tables
         # The target model runner's buffers and attention groups. Draft

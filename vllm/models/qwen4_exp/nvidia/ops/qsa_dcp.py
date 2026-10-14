@@ -53,19 +53,13 @@ def qsa_localize_dcp_indices(
     cp_kv_cache_interleave_size: int,
 ) -> torch.Tensor:
     """Copy the selection ids this rank owns into local slots."""
-    if packed_indices.ndim != 2:
-        raise ValueError("QSA packed indices must be two-dimensional")
-    if out.shape != packed_indices.shape:
-        raise ValueError("QSA localized output must match the selection shape")
-    if out.dtype != packed_indices.dtype:
-        raise ValueError("QSA localized output must match the selection dtype")
+    assert packed_indices.ndim == 2
+    assert out.shape == packed_indices.shape
+    assert out.dtype == packed_indices.dtype
     rows, width_plus_count = packed_indices.shape
-    if width_plus_count < 2:
-        raise ValueError("QSA packed indices need selection columns plus a count")
-    if not 0 <= dcp_rank < dcp_world_size:
-        raise ValueError("QSA DCP rank must be less than the DCP world size")
-    if cp_kv_cache_interleave_size <= 0:
-        raise ValueError("QSA DCP interleave must be positive")
+    assert width_plus_count >= 2
+    assert 0 <= dcp_rank < dcp_world_size
+    assert cp_kv_cache_interleave_size > 0
     if dcp_world_size <= 1:
         out.copy_(packed_indices)
         return out
@@ -90,8 +84,7 @@ def qsa_localize_dcp_indices(
 
 def qsa_dcp_empty_owner_rows(packed_indices: torch.Tensor) -> torch.Tensor:
     """Return rows without local selections."""
-    if packed_indices.ndim != 2 or packed_indices.shape[1] < 2:
-        raise ValueError("QSA packed indices need selection columns plus a count")
+    # Unlike mask_dcp_empty_shards_, QSA emptiness follows selection count.
     return packed_indices[:, -1] <= 0
 
 
@@ -100,12 +93,7 @@ def qsa_neutralize_empty_owner_lse_(
     empty_rows: torch.Tensor,
 ) -> None:
     """Set rows with no local selection to the merge identity."""
-    if empty_rows.dtype != torch.bool:
-        raise ValueError("empty_rows must be a boolean mask")
-    if lse.shape[0] != empty_rows.shape[0]:
-        raise ValueError("empty_rows must have one entry per row of lse")
-    mask = empty_rows.to(device=lse.device)
-    lse.masked_fill_(mask.view(-1, *([1] * (lse.ndim - 1))), float("-inf"))
+    lse.masked_fill_(empty_rows.to(device=lse.device)[:, None], float("-inf"))
 
 
 def warmup_qsa_localize_dcp_indices(

@@ -20,7 +20,7 @@ STORAGE_BLOCK_SIZE = 98
 BUILDERS = [build_qsa_metadata_triton, _build_qsa_metadata_torch]
 
 
-def _metadata(main_slots: torch.Tensor, *, null_block: bool = False):
+def _metadata(main_slots: torch.Tensor):
     query_start_loc = torch.tensor([0, NUM_TOKENS], dtype=torch.int32, device="cuda")
     return CommonAttentionMetadata(
         query_start_loc=query_start_loc,
@@ -30,11 +30,9 @@ def _metadata(main_slots: torch.Tensor, *, null_block: bool = False):
         num_actual_tokens=NUM_TOKENS,
         max_query_len=NUM_TOKENS,
         max_seq_len=NUM_TOKENS,
-        block_table_tensor=(
-            torch.zeros(1, 64, dtype=torch.int32, device="cuda")
-            if null_block
-            else torch.arange(1, 65, dtype=torch.int32, device="cuda").unsqueeze(0)
-        ),
+        block_table_tensor=torch.arange(
+            1, 65, dtype=torch.int32, device="cuda"
+        ).unsqueeze(0),
         slot_mapping=main_slots,
     )
 
@@ -43,7 +41,6 @@ def _slots(
     builder,
     metadata: CommonAttentionMetadata,
     compress_ratio: int,
-    circular_buffer_size: int = 0,
 ) -> torch.Tensor:
     return builder(
         metadata,
@@ -53,7 +50,6 @@ def _slots(
         torch.zeros(NUM_TOKENS, dtype=torch.int64, device="cuda"),
         storage_block_size=STORAGE_BLOCK_SIZE,
         compress_ratio=compress_ratio,
-        circular_buffer_size=circular_buffer_size,
     )[3]
 
 
@@ -70,17 +66,6 @@ def test_replicated_selector_writes_each_rank(
     )
     slots = _slots(builder, _metadata(main_slots), COMPRESS_RATIO)
     assert int((slots >= 0).sum()) == NUM_TOKENS // COMPRESS_RATIO
-
-
-def test_ring_qsa_null_block_does_not_write() -> None:
-    main_slots = torch.arange(NUM_TOKENS, dtype=torch.int64, device="cuda")
-    slots = _slots(
-        build_qsa_metadata_triton,
-        _metadata(main_slots, null_block=True),
-        compress_ratio=1,
-        circular_buffer_size=64,
-    )
-    assert not torch.any(slots >= 0)
 
 
 def test_compressed_qsa_cudagraph_replay_masks_null_block() -> None:
