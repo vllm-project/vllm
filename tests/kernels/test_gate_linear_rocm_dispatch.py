@@ -360,9 +360,9 @@ def test_rocm_aiter_router_gemm_forward_dispatch(monkeypatch, tuned, expected):
         calls.append("torch.mm")
         return x.new_zeros(x.shape[0], weight_t.shape[1], dtype=out_dtype)
 
-    monkeypatch.setattr(
-        torch.ops.vllm, "rocm_aiter_router_gemm", fake_aiter, raising=False
-    )
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    monkeypatch.setattr(rocm_aiter_ops, "bf16_gemm", staticmethod(fake_aiter))
     monkeypatch.setattr(torch, "mm", fake_mm)
 
     x = torch.zeros(4, gate.input_size, dtype=torch.bfloat16)
