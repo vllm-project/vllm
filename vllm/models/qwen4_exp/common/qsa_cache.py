@@ -21,6 +21,7 @@ from torch import nn
 
 from vllm.config import CacheConfig, VllmConfig
 from vllm.config.cache import CacheDType
+from vllm.distributed import get_dcp_group
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON, tl, triton
@@ -34,6 +35,7 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.attention.backends.utils import (
     PAD_SLOT_ID,
+    get_dcp_local_seq_lens,
     split_decodes_and_prefills,
 )
 from vllm.v1.kv_cache_interface import (
@@ -43,6 +45,58 @@ from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     MLAAttentionSpec,
 )
+
+
+@dataclass(frozen=True)
+class QSADCPShard:
+    """This DCP rank's share of a QSA cache, in units of cache states.
+
+    State ``s`` lives on rank ``(s // interleave) % world_size``, matching the
+    runner's token placement when ``interleave`` covers whole states.
+    """
+
+    rank: int = 0
+    world_size: int = 1
+    interleave: int = 1
+
+    def localize(self, positions: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return whether this rank owns each state and its rank-local position."""
+        owned = positions // self.interleave % self.world_size == self.rank
+        rounds = positions // (self.interleave * self.world_size)
+        return owned, rounds * self.interleave + positions % self.interleave
+
+    def global_positions(self, local_positions: torch.Tensor) -> torch.Tensor:
+        """Map this rank's local state positions back to global positions."""
+        rounds = local_positions // self.interleave
+        return (
+            rounds * self.world_size + self.rank
+        ) * self.interleave + local_positions % self.interleave
+
+    def max_local_length(self, length: int) -> int:
+        """Upper bound of the states this rank owns among ``length`` states."""
+        return cdiv(length, self.interleave * self.world_size) * self.interleave
+
+    def local_lengths(self, lengths: torch.Tensor) -> torch.Tensor:
+        """Count the states this rank owns among the first ``lengths`` states."""
+        return get_dcp_local_seq_lens(
+            lengths, self.world_size, self.rank, self.interleave
+        )
+
+
+_NO_DCP = QSADCPShard()
+
+
+def qsa_dcp_selector_is_sharded(vllm_config: VllmConfig) -> bool:
+    """Whether the opt-in sharded QSA selector is active.
+
+    The default replicated selector keeps the compressed key cache whole on
+    every DCP rank; ``AttentionConfig.qsa_dcp_selector="sharded"`` splits it
+    like the main KV cache. Without DCP there is nothing to split.
+    """
+    return (
+        vllm_config.parallel_config.decode_context_parallel_size > 1
+        and vllm_config.attention_config.qsa_dcp_selector == "sharded"
+    )
 
 
 def canonical_qsa_rope_positions(positions: torch.Tensor) -> torch.Tensor:
@@ -167,13 +221,21 @@ def compressed_qsa_slot_mapping(
     storage_block_size: int,
     compress_ratio: int,
     out: torch.Tensor | None = None,
+    selector_shard: QSADCPShard = _NO_DCP,
 ) -> torch.Tensor:
-    """Build boundary-only slots for an ``MLAAttentionSpec`` QSA cache."""
+    """Build boundary-only slots for an ``MLAAttentionSpec`` QSA cache.
+
+    With a sharded selector, a token whose compressed state another DCP rank
+    owns maps to PAD.
+    """
     if storage_block_size <= 0 or compress_ratio <= 0:
         raise ValueError("QSA block size and compression ratio must be positive")
     compressed_positions = torch.div(
         logical_positions.clamp_min(0), compress_ratio, rounding_mode="floor"
     )
+    owned = None
+    if selector_shard.world_size > 1:
+        owned, compressed_positions = selector_shard.localize(compressed_positions)
     slots = _logical_to_physical_qsa_slots(
         block_table,
         token_to_req,
@@ -183,6 +245,8 @@ def compressed_qsa_slot_mapping(
     valid = (logical_positions >= 0) & (
         (logical_positions + 1).remainder(compress_ratio) == 0
     )
+    if owned is not None:
+        valid &= owned
     slots = torch.where(valid, slots, PAD_SLOT_ID).to(torch.int64)
     if out is not None:
         out.fill_(PAD_SLOT_ID)
@@ -204,6 +268,7 @@ def _metadata_launch_pdl() -> bool:
         "max_num_work",
         "num_search_steps",
         "work_search_steps",
+        "dcp_rank",
     ]
 )
 def _build_qsa_metadata_kernel(
@@ -213,6 +278,7 @@ def _build_qsa_metadata_kernel(
     token_to_req_ptr,
     logical_positions_ptr,
     visible_blocks_ptr,
+    local_visible_blocks_ptr,
     slot_mapping_ptr,
     k_work_metadata_ptr,
     block_table_stride_0: tl.constexpr,
@@ -223,10 +289,13 @@ def _build_qsa_metadata_kernel(
     max_num_work,
     num_search_steps,
     work_search_steps,
+    dcp_rank,
     storage_block_size: tl.constexpr,
     compress_ratio: tl.constexpr,
     circular_buffer_size: tl.constexpr,
     num_block_table_columns: tl.constexpr,
+    DCP_WORLD: tl.constexpr,
+    DCP_INTERLEAVE: tl.constexpr,
     launch_pdl: tl.constexpr,
     TOKEN_BLOCK_SIZE: tl.constexpr,
     REQUEST_SCAN_SIZE: tl.constexpr,
@@ -276,6 +345,18 @@ def _build_qsa_metadata_kernel(
         ),
     ).to(tl.int32)
     tl.store(visible_blocks_ptr + token_idx, visible_blocks, mask=store_mask)
+    if DCP_WORLD > 1:
+        # Sharded selector: same split as get_dcp_local_seq_lens, in states.
+        dcp_span: tl.constexpr = DCP_INTERLEAVE * DCP_WORLD
+        remainder = visible_blocks % dcp_span - dcp_rank * DCP_INTERLEAVE
+        local_visible_blocks = (visible_blocks // dcp_span) * DCP_INTERLEAVE + (
+            tl.minimum(tl.maximum(remainder, 0), DCP_INTERLEAVE)
+        )
+        tl.store(
+            local_visible_blocks_ptr + token_idx,
+            local_visible_blocks,
+            mask=store_mask,
+        )
 
     # circular_buffer_size is constexpr, so each builder instance compiles out
     # the other QSA cache owner's slot-mapping rule.
@@ -298,9 +379,15 @@ def _build_qsa_metadata_kernel(
         )
     elif compress_ratio != 1:
         compressed_position = tl.maximum(logical_position, 0) // compress_ratio
+        owned = mapped
+        if DCP_WORLD > 1:
+            owned &= compressed_position // DCP_INTERLEAVE % DCP_WORLD == dcp_rank
+            compressed_position = (
+                compressed_position // (DCP_INTERLEAVE * DCP_WORLD)
+            ) * DCP_INTERLEAVE + compressed_position % DCP_INTERLEAVE
         logical_block = compressed_position // storage_block_size
         valid = (
-            mapped
+            owned
             & (logical_position >= 0)
             & ((logical_position + 1) % compress_ratio == 0)
             & (logical_block < num_block_table_columns)
@@ -396,8 +483,16 @@ def build_qsa_metadata_triton(
     circular_buffer_size: int = 0,
     k_work_metadata_buffer: torch.Tensor | None = None,
     request_capacity: int | None = None,
+    selector_shard: QSADCPShard = _NO_DCP,
+    local_visible_blocks_buffer: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Build QSA side-cache and optional pre-indexer work metadata."""
+    """Build QSA side-cache and optional pre-indexer work metadata.
+
+    With a sharded selector, ``local_visible_blocks_buffer`` receives the
+    visible compressed states this rank owns.
+    """
+    if selector_shard.world_size > 1:
+        assert local_visible_blocks_buffer is not None
     num_tokens = common_attn_metadata.num_actual_tokens
     num_mapped_tokens = int(common_attn_metadata.query_start_loc_cpu[-1])
     token_to_req = token_to_req_buffer[:num_tokens]
@@ -436,6 +531,7 @@ def build_qsa_metadata_triton(
         token_to_req,
         logical_positions,
         visible_blocks,
+        local_visible_blocks_buffer if selector_shard.world_size > 1 else None,
         slot_mapping,
         k_work_metadata_buffer,
         block_table.stride(0),
@@ -446,10 +542,13 @@ def build_qsa_metadata_triton(
         max_num_work,
         num_search_steps,
         work_search_steps,
+        selector_shard.rank,
         storage_block_size,
         compress_ratio,
         circular_buffer_size,
         block_table.shape[1],
+        DCP_WORLD=selector_shard.world_size,
+        DCP_INTERLEAVE=selector_shard.interleave,
         launch_pdl=_metadata_launch_pdl(),
         TOKEN_BLOCK_SIZE=128,
         REQUEST_SCAN_SIZE=request_scan_size,
@@ -473,6 +572,8 @@ def _build_qsa_metadata_torch(
     circular_buffer_size: int = 0,
     k_work_metadata_buffer: torch.Tensor | None = None,
     request_capacity: int | None = None,
+    selector_shard: QSADCPShard = _NO_DCP,
+    local_visible_blocks_buffer: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     del request_capacity
     num_tokens = common_attn_metadata.num_actual_tokens
@@ -502,6 +603,11 @@ def _build_qsa_metadata_torch(
         .clamp_min_(0)
         .to(torch.int32)
     )
+    if selector_shard.world_size > 1:
+        assert local_visible_blocks_buffer is not None
+        local_visible_blocks_buffer[:num_tokens].copy_(
+            selector_shard.local_lengths(visible_blocks)
+        )
     if circular_buffer_size > 0:
         slot_mapping = circular_qsa_slot_mapping(
             common_attn_metadata.block_table_tensor,
@@ -521,6 +627,7 @@ def _build_qsa_metadata_torch(
             storage_block_size,
             compress_ratio,
             slot_mapping_buffer,
+            selector_shard,
         )
     if k_work_metadata_buffer is not None:
         query_lens = (
@@ -577,6 +684,12 @@ class QSAForwardMetadata(AttentionMetadata):
     token_to_req: torch.Tensor
     logical_positions: torch.Tensor
     visible_blocks: torch.Tensor
+    local_visible_blocks: torch.Tensor
+    """Visible compressed states this DCP rank scores: its own share with the
+    sharded selector, else ``visible_blocks``."""
+    selector_shard: QSADCPShard | None
+    """This rank's share of the compressed key cache with the sharded
+    selector; None otherwise, so the default selection runs no merge."""
     k_work_metadata: torch.Tensor
     num_actual_tokens: int
     num_decodes: int
@@ -594,6 +707,8 @@ class QSAMetadataBuilder(AttentionMetadataBuilder[QSAForwardMetadata]):
     """Build QSA metadata from vLLM's cache-group-specific common metadata."""
 
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
+    selector_shard: QSADCPShard | None = None
+    local_visible_blocks_buffer: torch.Tensor | None = None
 
     def __init__(
         self,
@@ -603,9 +718,11 @@ class QSAMetadataBuilder(AttentionMetadataBuilder[QSAForwardMetadata]):
         device: torch.device,
     ) -> None:
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
-        # The side caches are replicated on every DCP rank (the selector
-        # stores the whole group span), so MTP verify rows keep the decode
-        # path under DCP; without the flag DCP forces the threshold to 1.
+        # The side caches are not sharded like the main K/V: the key ring and
+        # the replicated selector hold the whole group span on every DCP rank,
+        # and the opt-in sharded selector merges the ranks' top-k per row. So
+        # MTP verify rows keep the decode path under DCP; without the flag
+        # DCP forces the threshold to 1.
         self._init_reorder_batch_threshold(
             1, supports_spec_as_decode=True, supports_dcp_with_varlen=True
         )
@@ -633,6 +750,24 @@ class QSAMetadataBuilder(AttentionMetadataBuilder[QSAForwardMetadata]):
         self.visible_blocks_buffer = torch.empty(
             max_tokens, dtype=torch.int32, device=device
         )
+        parallel_config = vllm_config.parallel_config
+        dcp_world_size = parallel_config.decode_context_parallel_size
+        # Only the opt-in sharded selector gives a DCP-sharded compressed spec.
+        if (
+            self.compress_ratio != 1
+            and kv_cache_spec.dcp_sharded
+            and dcp_world_size > 1
+        ):
+            self.selector_shard = QSADCPShard(
+                rank=get_dcp_group().rank_in_group,
+                world_size=dcp_world_size,
+                interleave=(
+                    parallel_config.cp_kv_cache_interleave_size // self.compress_ratio
+                ),
+            )
+            self.local_visible_blocks_buffer = torch.empty_like(
+                self.visible_blocks_buffer
+            )
         max_requests = vllm_config.scheduler_config.max_num_seqs
         self.request_capacity = max_requests
         if not self.is_circular_buffer and self.compress_ratio != 1:
@@ -699,8 +834,15 @@ class QSAMetadataBuilder(AttentionMetadataBuilder[QSAForwardMetadata]):
                 ),
                 k_work_metadata_buffer=k_work_metadata if build_k_work else None,
                 request_capacity=request_capacity,
+                selector_shard=(
+                    _NO_DCP if self.selector_shard is None else self.selector_shard
+                ),
+                local_visible_blocks_buffer=self.local_visible_blocks_buffer,
             )
         )
+        local_visible_blocks = visible_blocks
+        if self.local_visible_blocks_buffer is not None:
+            local_visible_blocks = self.local_visible_blocks_buffer[:num_tokens]
         return QSAForwardMetadata(
             block_table=common_attn_metadata.block_table_tensor,
             slot_mapping=slot_mapping,
@@ -709,6 +851,8 @@ class QSAMetadataBuilder(AttentionMetadataBuilder[QSAForwardMetadata]):
             token_to_req=token_to_req,
             logical_positions=logical_positions,
             visible_blocks=visible_blocks,
+            local_visible_blocks=local_visible_blocks,
+            selector_shard=self.selector_shard,
             k_work_metadata=k_work_metadata,
             num_actual_tokens=num_tokens,
             num_decodes=num_decodes,
@@ -870,22 +1014,37 @@ class QSACompressedKeyCache(_QSAStateCache):
     """Normed, group-first-RoPE key at one row per complete group."""
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
-        dcp_world_size = vllm_config.parallel_config.decode_context_parallel_size
-        block_size = self.cache_config.block_size * dcp_world_size
+        parallel_config = vllm_config.parallel_config
+        dcp_world_size = parallel_config.decode_context_parallel_size
+        sharded = qsa_dcp_selector_is_sharded(vllm_config)
+        if (
+            sharded
+            and parallel_config.cp_kv_cache_interleave_size % self.compress_ratio
+        ):
+            # The rank that owns a group's tokens writes its compressed state.
+            raise ValueError(
+                f"The sharded QSA selector needs cp_kv_cache_interleave_size "
+                f"({parallel_config.cp_kv_cache_interleave_size}) to be a "
+                f"multiple of the indexer compress ratio ({self.compress_ratio})"
+            )
+        # The replicated selector holds the whole group span on every rank.
+        span = 1 if sharded else dcp_world_size
         return _QSACompressedKeySpec(
-            block_size=block_size,
+            block_size=self.cache_config.block_size * span,
             num_kv_heads=1,
             head_size=self.head_size,
             dtype=self.dtype,
             tokens_per_state=self.compress_ratio,
             # Every spec reports sharded at world size 1. Above that this cache
-            # is replicated, with its own block table.
-            dcp_sharded=dcp_world_size == 1,
+            # is replicated, with its own block table, unless the sharded
+            # selector splits it like the main KV cache.
+            dcp_sharded=dcp_world_size == 1 or sharded,
         )
 
 
 __all__ = [
     "QSACompressedKeyCache",
+    "QSADCPShard",
     "QSAForwardMetadata",
     "QSAKeyStateCache",
     "QSAMetadataBuilder",
@@ -893,4 +1052,5 @@ __all__ = [
     "canonical_qsa_rope_positions",
     "circular_qsa_slot_mapping",
     "compressed_qsa_slot_mapping",
+    "qsa_dcp_selector_is_sharded",
 ]

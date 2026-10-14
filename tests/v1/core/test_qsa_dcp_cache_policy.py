@@ -6,9 +6,11 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from vllm.config import DeviceConfig, ModelConfig, VllmConfig
+from vllm.config import AttentionConfig, DeviceConfig, ModelConfig, VllmConfig
+from vllm.models.qwen4_exp.common import qsa_cache
 from vllm.models.qwen4_exp.common.qsa_cache import (
     QSACompressedKeyCache,
+    QSADCPShard,
     QSAStateBackend,
     _build_qsa_metadata_torch,
     compressed_qsa_slot_mapping,
@@ -44,6 +46,8 @@ from vllm.v1.worker.utils import (
 pytestmark = pytest.mark.cpu_test
 
 BLOCK_SIZE = 784
+# A multiple of both compress ratios used here (4 and 8) that divides BLOCK_SIZE.
+SHARDED_INTERLEAVE = 16
 
 
 def test_compressed_qsa_null_block_has_no_slot() -> None:
@@ -132,7 +136,9 @@ def _selector(dcp_world_size: int) -> MLAAttentionSpec:
     )
 
 
-def _qsa_selector(dcp_world_size: int, compress_ratio: int = 8) -> MLAAttentionSpec:
+def _qsa_selector(
+    dcp_world_size: int, compress_ratio: int = 8, selector: str = "replicated"
+) -> MLAAttentionSpec:
     cache = SimpleNamespace(
         cache_config=SimpleNamespace(block_size=BLOCK_SIZE),
         head_size=128,
@@ -140,7 +146,11 @@ def _qsa_selector(dcp_world_size: int, compress_ratio: int = 8) -> MLAAttentionS
         compress_ratio=compress_ratio,
     )
     config = SimpleNamespace(
-        parallel_config=SimpleNamespace(decode_context_parallel_size=dcp_world_size)
+        parallel_config=SimpleNamespace(
+            decode_context_parallel_size=dcp_world_size,
+            cp_kv_cache_interleave_size=SHARDED_INTERLEAVE,
+        ),
+        attention_config=SimpleNamespace(qsa_dcp_selector=selector),
     )
     selector = QSACompressedKeyCache.get_kv_cache_spec(cache, config)
     assert isinstance(selector, MLAAttentionSpec)
@@ -236,10 +246,12 @@ class _QSAMainBackend:
         return [MultipleOf(16)]
 
 
-def _packed_qsa_views(dcp_world_size: int):
+def _packed_qsa_views(dcp_world_size: int, selector_layout: str = "replicated"):
     config = _config(dcp_world_size, layout="BLNHC")
+    config.attention_config.qsa_dcp_selector = selector_layout
+    config.parallel_config.cp_kv_cache_interleave_size = SHARDED_INTERLEAVE
     main = _full(BLOCK_SIZE, head_size=256)
-    selector = _qsa_selector(dcp_world_size, compress_ratio=4)
+    selector = _qsa_selector(dcp_world_size, compress_ratio=4, selector=selector_layout)
     specs = {"main": main, "selector": selector}
     groups = get_kv_cache_groups(config, specs)
     cache = get_kv_cache_config_from_groups(
@@ -545,3 +557,79 @@ def test_qsa_side_cache_builder_keeps_spec_rows_as_decodes(dcp_world_size):
     )
 
     assert builder.reorder_batch_threshold == 4
+    # The replicated selector carries no shard, so its selection runs no merge.
+    assert builder.selector_shard is None
+    assert builder.local_visible_blocks_buffer is None
+
+
+@pytest.mark.parametrize("dcp_world_size", [1, 2, 4])
+def test_sharded_selector_is_opt_in(dcp_world_size: int) -> None:
+    """The default keeps the replicated selector spec. The opt-in sharded
+    selector splits the compressed cache like the main KV cache; without DCP
+    both specs are the same."""
+    assert AttentionConfig().qsa_dcp_selector == "replicated"
+    replicated = _qsa_selector(dcp_world_size)
+    sharded = _qsa_selector(dcp_world_size, selector="sharded")
+
+    assert replicated.block_size == BLOCK_SIZE * dcp_world_size
+    assert replicated.dcp_sharded == (dcp_world_size == 1)
+    assert sharded.block_size == BLOCK_SIZE
+    assert sharded.dcp_sharded
+    assert sharded.has_independent_slot_mapping
+    assert (sharded == replicated) == (dcp_world_size == 1)
+
+
+def test_sharded_selector_needs_whole_groups_per_rank() -> None:
+    """One rank must own all tokens of a compression group."""
+    with pytest.raises(ValueError, match="multiple of the indexer compress ratio"):
+        _qsa_selector(4, compress_ratio=32, selector="sharded")
+
+
+@pytest.mark.parametrize("dcp_world_size,selector_first", [(2, False), (4, True)])
+def test_sharded_selector_joins_the_main_kv_group(
+    dcp_world_size: int, selector_first: bool
+) -> None:
+    """All members are sharded, so the selector shares the main block table
+    through the plain uniform grouping, with 1/N of the replicated states."""
+    config = _config(dcp_world_size)
+    selector = _qsa_selector(dcp_world_size, selector="sharded")
+    specs = (
+        {"selector": selector, "main": _main_kv()}
+        if selector_first
+        else {"main": _main_kv(), "selector": selector}
+    )
+    groups = get_kv_cache_groups(config, specs)
+
+    assert len(groups) == 1
+    group = groups[0].kv_cache_spec
+    assert isinstance(group, UniformTypeKVCacheSpecs)
+    assert group.block_size == BLOCK_SIZE
+    assert group.dcp_sharded
+    assert (
+        group.max_num_blocks_per_req(config, config.model_config.max_model_len)
+        == 16 // dcp_world_size
+    )
+    assert selector.num_states * dcp_world_size == (
+        _qsa_selector(dcp_world_size).num_states
+    )
+
+
+def test_packed_sharded_selector_keeps_its_original_view(monkeypatch) -> None:
+    """The sharded selector has the main block size under DCP, so it binds
+    as the DCP=1 cache does (no virtual pages), and its builder takes this
+    rank's shard in compressed states."""
+    monkeypatch.setattr(
+        qsa_cache, "get_dcp_group", lambda: SimpleNamespace(rank_in_group=1)
+    )
+    run = _packed_qsa_views(2, selector_layout="sharded")
+    assert run.kernel_sizes == [BLOCK_SIZE]
+    assert run.selector.block_size == BLOCK_SIZE
+    assert run.views["selector"].shape == (2, 1, 196, 128)
+    run.selector_group.create_metadata_builders(
+        run.config, torch.device("cpu"), kernel_block_size=BLOCK_SIZE
+    )
+    assert run.selector_group.kernel_block_size is None
+    mapped = map_kv_caches_to_kernel_blocks(run.views, run.attn_groups[0])
+    assert mapped["selector"] is run.views["selector"]
+    builder = run.selector_group.get_metadata_builder()
+    assert builder.selector_shard == QSADCPShard(1, 2, SHARDED_INTERLEAVE // 4)
