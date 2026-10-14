@@ -196,6 +196,13 @@ class EngineCoreEvent(msgspec.Struct):
         return cls(event_type, timestamp)
 
 
+@dataclass(frozen=True)
+class EngineCoreRequestError:
+    code: str
+    message: str
+    retryable: bool = False
+
+
 class EngineCoreOutput(
     msgspec.Struct,
     array_like=True,  # type: ignore[call-arg]
@@ -238,6 +245,9 @@ class EngineCoreOutput(
 
     # [num_scored_rows, num_token_ids]; appended last for array_like compatibility.
     prompt_token_id_logprobs: torch.Tensor | None = None
+
+    # Appended last for array_like compatibility.
+    request_error: EngineCoreRequestError | None = None
 
     @property
     def finished(self) -> bool:
