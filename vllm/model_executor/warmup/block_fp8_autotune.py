@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import math
 from collections import defaultdict
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -22,7 +23,7 @@ from vllm.model_executor.layers.quantization.utils.fp8_block_tuning import (
     valid_m_buckets,
 )
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-    get_w8a8_block_fp8_configs,
+    has_fixed_w8a8_block_fp8_config,
     load_block_fp8_autotune_configs,
     save_block_fp8_configs,
 )
@@ -79,6 +80,10 @@ def discover_block_fp8_shapes(worker: Worker) -> set[BlockFp8Shape]:
 class BlockFp8ConfigTable(TunableConfigTable):
     name = "block_fp8"
 
+    def __init__(self) -> None:
+        # Winners tuned on this rank, as starting points for nearby buckets.
+        self._tuned: dict[tuple[BlockFp8Shape, int], Config] = {}
+
     def pending_items(self, worker: Worker) -> list[TuningItem]:
         if not current_platform.is_cuda_alike():
             return []
@@ -91,10 +96,14 @@ class BlockFp8ConfigTable(TunableConfigTable):
         buckets = valid_m_buckets(worker.scheduler_config.max_num_batched_tokens)
         items = []
         for shape in discover_block_fp8_shapes(worker):
-            has_config = get_w8a8_block_fp8_configs(*shape.file_key) is not None
-            if has_config and not envs.VLLM_TRITON_AUTOTUNE_FORCE:
+            if envs.VLLM_TRITON_AUTOTUNE_FORCE:
+                missing = buckets
+            elif has_fixed_w8a8_block_fp8_config(*shape.file_key):
                 continue
-            items.extend(TuningItem(self.name, shape, m) for m in buckets)
+            else:
+                tuned = load_block_fp8_autotune_configs(*shape.file_key)
+                missing = [m for m in buckets if m not in tuned]
+            items.extend(TuningItem(self.name, shape, m) for m in missing)
         return items
 
     def tune(self, item: TuningItem) -> Config | None:
@@ -112,7 +121,15 @@ class BlockFp8ConfigTable(TunableConfigTable):
         if block_fp8_scratch_bytes(case) > free_bytes // 2:
             logger.warning("Skipping block FP8 tuning for %s: low free memory.", item)
             return None
-        return tune_block_fp8_case(case)
+        # Prefer the same shape when two local winners are equally close.
+        nearby = sorted(
+            self._tuned,
+            key=lambda key: (abs(math.log(key[1] / item.bucket)), key[0] != shape),
+        )[:2]
+        config = tune_block_fp8_case(case, seeds=[self._tuned[key] for key in nearby])
+        if config is not None:
+            self._tuned[shape, item.bucket] = config
+        return config
 
     def commit(self, results: dict[TuningItem, Config]) -> None:
         by_file: dict[tuple[int, int, int, int], dict[int, Config]] = defaultdict(dict)

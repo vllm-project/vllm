@@ -940,52 +940,64 @@ def get_w8a8_block_fp8_config_file_name(
     )
 
 
+def _block_fp8_config_paths(
+    N: int,
+    K: int,
+    block_n: int,
+    block_k: int,
+    *,
+    include_autotune: bool = True,
+) -> list[str]:
+    file_name = get_w8a8_block_fp8_config_file_name(N, K, block_n, block_k)
+    paths = []
+    if envs.VLLM_TUNED_CONFIG_FOLDER is not None:
+        paths.append(os.path.join(envs.VLLM_TUNED_CONFIG_FOLDER, file_name))
+    if include_autotune:
+        paths.append(get_block_fp8_autotune_config_file_path(N, K, block_n, block_k))
+    paths.append(os.path.join(_BLOCK_FP8_CONFIGS_DIR, file_name))
+    return paths
+
+
+def _load_block_fp8_configs(path: str) -> dict[int, Any] | None:
+    if not os.path.exists(path):
+        return None
+    with open(path) as f:
+        raw = json.load(f)
+    if not isinstance(raw, dict):
+        return None
+    return {int(k): value for k, value in raw.items() if k.isdigit()}
+
+
+def has_fixed_w8a8_block_fp8_config(N: int, K: int, block_n: int, block_k: int) -> bool:
+    """Whether a user or bundled config table exists for this shape."""
+    return any(
+        _load_block_fp8_configs(path) is not None
+        for path in _block_fp8_config_paths(
+            N, K, block_n, block_k, include_autotune=False
+        )
+    )
+
+
 @functools.lru_cache
 def get_w8a8_block_fp8_configs(
     N: int, K: int, block_n: int, block_k: int
 ) -> dict[int, Any] | None:
-    """Return optimized configurations for the w8a8 block fp8 kernel.
-    The return value will be a dictionary that maps an irregular grid of
-    batch sizes to configurations of the w8a8 block fp8 kernel. To evaluate the
-    kernel on a given batch size bs, the closest batch size in the grid should
-    be picked and the associated configuration chosen to invoke the kernel.
-    """
-    json_file_name = get_w8a8_block_fp8_config_file_name(N, K, block_n, block_k)
-
-    config_file_paths: list[str] = []
-
-    # User-supplied override
-    user_defined_config_folder = envs.VLLM_TUNED_CONFIG_FOLDER
-    if user_defined_config_folder is not None:
-        config_file_paths.append(
-            os.path.join(user_defined_config_folder, json_file_name)
-        )
-
-    # Configs tuned at startup by --kernel-config.enable_triton_autotune
-    config_file_paths.append(
-        get_block_fp8_autotune_config_file_path(N, K, block_n, block_k)
-    )
-    # Bundled default
-    config_file_paths.append(os.path.join(_BLOCK_FP8_CONFIGS_DIR, json_file_name))
-
-    for path in config_file_paths:
-        if os.path.exists(path):
-            with open(path) as f:
-                logger.info_once(
-                    "Using configuration from %s for W8A8 Block FP8 kernel.",
-                    path,
-                    scope="global",
-                )
-                raw = json.load(f)
-                if isinstance(raw, dict):
-                    # triton_version included in the config file only for reference
-                    raw.pop("triton_version", None)
-                    return {int(k): v for k, v in raw.items() if k.isdigit()}
+    """Load the highest-priority launch-config table for this shape."""
+    paths = _block_fp8_config_paths(N, K, block_n, block_k)
+    for path in paths:
+        configs = _load_block_fp8_configs(path)
+        if configs is not None:
+            logger.info_once(
+                "Using configuration from %s for W8A8 Block FP8 kernel.",
+                path,
+                scope="global",
+            )
+            return configs
 
     logger.warning_once(
         "Using default W8A8 Block FP8 kernel config. Performance might "
         "be sub-optimal! Config file not found at %s",
-        ", ".join(config_file_paths),
+        ", ".join(paths),
     )
     return None
 
@@ -1003,11 +1015,7 @@ def load_block_fp8_autotune_configs(
     N: int, K: int, block_n: int, block_k: int
 ) -> dict[int, dict[str, int]]:
     path = get_block_fp8_autotune_config_file_path(N, K, block_n, block_k)
-    if not os.path.exists(path):
-        return {}
-    with open(path) as f:
-        raw = json.load(f)
-    return {int(k): v for k, v in raw.items() if k.isdigit()}
+    return _load_block_fp8_configs(path) or {}
 
 
 def save_block_fp8_configs(
@@ -1030,8 +1038,6 @@ def save_block_fp8_configs(
 
 
 def _default_w8a8_block_fp8_config(block_size: list[int]) -> dict[str, int]:
-    # Block-wise quant: BLOCK_SIZE_N must be divisible by block_size[0]
-    # BLOCK_SIZE_K must be divisible by block_size[1]
     return {
         "BLOCK_SIZE_M": 64,
         "BLOCK_SIZE_N": block_size[0],
