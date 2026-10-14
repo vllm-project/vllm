@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """KV checksums end to end through a producer's and a consumer's schedulers
-with real checksum workers, for NIXL pull (kv_transfer_params carrier) and
-minimal test connectors carrying them in kv_transfer_params or in their own
-messages: the consumer accepts a correct load whatever the TP and PP sizes,
-and handles a corrupted or unverifiable one per kv_checksum_fail_closed and
-kv_load_failure_policy."""
+with real checksum workers, for NIXL pull (kv_transfer_params carrier), NIXL
+push (connector carrier) and minimal test connectors carrying them in
+kv_transfer_params or in their own messages: the consumer accepts a correct
+load whatever the TP and PP sizes, and handles a corrupted or unverifiable one
+per kv_checksum_fail_closed and kv_load_failure_policy."""
 
 from dataclasses import dataclass
 from typing import Any
@@ -323,7 +323,10 @@ def _prefill(
     assert params is not None
     # A connector carrier ships the checksums in the next step.
     meta = producer.schedule().kv_connector_metadata
-    sent = getattr(meta, "kv_checksums", {}).get(request.request_id)
+    sent = (
+        getattr(meta, "kv_checksums", None)
+        or getattr(meta, "push_finished_kv_checksums", {})
+    ).get(request.request_id)
     return _Transfer(params, sent, block_ids)
 
 
@@ -376,8 +379,13 @@ def _load(
 
 CONNECTORS = pytest.mark.parametrize(
     "connector",
-    ["KVTransferParamsCarrierConnector", "ConnectorCarrierConnector", "NixlConnector"],
-    ids=["kv-transfer-params", "connector-carrier", "nixl-pull"],
+    [
+        "KVTransferParamsCarrierConnector",
+        "ConnectorCarrierConnector",
+        "NixlConnector",
+        "NixlPushConnector",
+    ],
+    ids=["kv-transfer-params", "connector-carrier", "nixl-pull", "nixl-push"],
 )
 
 

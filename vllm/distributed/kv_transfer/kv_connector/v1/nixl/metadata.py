@@ -24,6 +24,10 @@ GET_META_MSG = b"get_meta_msg"
 # Sent worker-to-worker over NIXL: D worker -> P worker, encoded as
 # PUSH_REG_NOTIF_PREFIX + msgpack(registration_data).
 PUSH_REG_NOTIF_PREFIX = b"PUSH_REG:"
+# Push-mode WRITE completion notif carrying the producer's KV checksums:
+# KV_CHECKSUM_NOTIF_PREFIX + msgpack((request_id, tp_size, checksums)).
+# Without checksums the notif is "request_id:tp_size".
+KV_CHECKSUM_NOTIF_PREFIX = b"KV_CHECKSUM:"
 #
 # NIXL Connector Version
 #
@@ -50,8 +54,9 @@ PUSH_REG_NOTIF_PREFIX = b"PUSH_REG:"
 #  12: Add per-region member names for PP push
 #  13: Add packed-member layouts and order-independent packed-push backend hashes
 #  14: Add Qwen3.8-Flash-Next PLE page length - #59997
+#  15: Push WRITE completion notifs can carry KV checksums
 #
-NIXL_CONNECTOR_VERSION: int = 14
+NIXL_CONNECTOR_VERSION: int = 15
 
 
 @dataclass
@@ -284,6 +289,9 @@ class NixlConnectorMetadata(KVConnectorMetadata):
         # Push mode (P side): newly finished request blocks to be matched
         # against pending D registrations on the P worker.
         self.push_finished_blocks: dict[ReqId, BlockIds] = {}
+        # Push mode (P side): KV checksums of push_finished_blocks requests,
+        # sent to D on the WRITE completion notif.
+        self.push_finished_kv_checksums: dict[ReqId, bytes] = {}
 
     def _add_new_req(
         self,

@@ -88,6 +88,8 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
         self._finished_request_blocks: dict[ReqId, BlockIds] = {}
         # P-side: newly finished blocks to ship to P workers on next step.
         self._newly_finished_push_blocks: dict[ReqId, BlockIds] = {}
+        # P-side: their KV checksums, shipped with them.
+        self._newly_finished_kv_checksums: dict[ReqId, bytes] = {}
 
         # Soft watchdog timeout (seconds) for D-side registrations that
         # never receive a push completion. Defaults to the existing
@@ -293,6 +295,11 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
             transfer_mode=self._TRANSFER_MODE,
         )
 
+    def send_kv_checksums(self, request_id: ReqId, checksums: bytes) -> None:
+        """P-side: ship a finished request's KV checksums with its blocks."""
+        if request_id in self._newly_finished_push_blocks:
+            self._newly_finished_kv_checksums[request_id] = checksums
+
     def build_connector_meta(
         self,
         scheduler_output: SchedulerOutput,
@@ -336,6 +343,8 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
         if self._newly_finished_push_blocks:
             meta.push_finished_blocks = dict(self._newly_finished_push_blocks)
             self._newly_finished_push_blocks.clear()
+            meta.push_finished_kv_checksums = self._newly_finished_kv_checksums
+            self._newly_finished_kv_checksums = {}
 
         return meta
 
