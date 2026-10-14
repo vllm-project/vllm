@@ -592,6 +592,12 @@ class SpeculativeConfig:
     O(2 * tp_size) per token. Only applies to greedy draft selection in
     non-tree speculation."""
 
+    use_heterogeneous_vocab: bool = False
+    """Allow draft and target models to use different vocabularies.
+    When enabled, builds a token-level intersection at init and constrains
+    draft logits to shared tokens only (TLI algorithm). Requires
+    method='draft_model'."""
+
     # Ngram proposer configuration
     prompt_lookup_max: int | None = Field(default=None, ge=1)
     """Maximum size of ngram token window when using Ngram proposer. Defaults
@@ -788,6 +794,7 @@ class SpeculativeConfig:
             "disable_lookahead_block_hashes",
             "draft_lm_head_quantization",
             "use_local_argmax_reduction",
+            "use_heterogeneous_vocab",
             "prompt_lookup_max",
             "prompt_lookup_min",
             "parallel_drafting",
@@ -2025,6 +2032,25 @@ class SpeculativeConfig:
             )
         self._verify_draft_eplb_config()
 
+        if self.use_heterogeneous_vocab and not self.uses_draft_model():
+            raise ValueError(
+                "use_heterogeneous_vocab only works with method='draft_model'"
+            )
+
+        if self.use_heterogeneous_vocab and self.draft_sample_method != "greedy":
+            raise ValueError(
+                "use_heterogeneous_vocab currently only supports greedy draft "
+                "sampling. Set draft_sample_method='greedy' (the default) or "
+                "omit it."
+            )
+
+        if self.use_heterogeneous_vocab and self.use_local_argmax_reduction:
+            raise ValueError(
+                "use_heterogeneous_vocab is not compatible with "
+                "use_local_argmax_reduction because token-level intersection "
+                "requires the full draft logits."
+            )
+
         if self.parallel_drafting is not None:
             if self.parallel_drafting and self.method not in ("dflash", "dspark"):
                 raise ValueError(
@@ -2078,7 +2104,8 @@ class SpeculativeConfig:
                 "entropy is computed but never used to defer rejections."
             )
 
-        self.verify_equal_vocab_size_if_draft_model()
+        if not self.use_heterogeneous_vocab:
+            self.verify_equal_vocab_size_if_draft_model()
         return self
 
     def verify_equal_vocab_size_if_draft_model(self):

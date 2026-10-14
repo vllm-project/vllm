@@ -52,7 +52,8 @@ class SpeculatorConfig:
     adaptive_verification_uses_draft_logits: ClassVar[bool] = True
     # Generates all draft tokens in one forward pass (e.g. DFlash).
     parallel_drafting: ClassVar[bool] = False
-    # The draft model has its own vocabulary, which must match the target's.
+    # The draft model has its own vocabulary, which must match the target's
+    # unless use_heterogeneous_vocab is set.
     draft_has_own_vocab: ClassVar[bool] = False
 
     supports_watermarking: ClassVar[bool] = False
@@ -209,7 +210,9 @@ class DraftModelSpeculatorConfig(SpeculatorConfig):
         spec.draft_model_config = ModelConfig(
             model=spec.model,
             runner="draft",
-            tokenizer=target.tokenizer,
+            tokenizer=(
+                spec.model if spec.use_heterogeneous_vocab else target.tokenizer
+            ),
             tokenizer_mode=target.tokenizer_mode,
             trust_remote_code=target.trust_remote_code,
             allowed_local_media_path=target.allowed_local_media_path,
