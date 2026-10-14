@@ -117,6 +117,15 @@ class AttentionConfig:
     When False (default), pure prefill batches use forward_mha when implemented.
     Set to True to always use the MQA path."""
 
+    sparse_mla_prefill_workspace_factor: int | None = Field(default=None, ge=2)
+    """Sparse MLA prefill workspace size, in multiples of `max_model_len`.
+    FlashMLA sparse gathers a prefill step's context KV into this workspace and
+    runs attention in more chunks when the step holds more. The sparse indexer's
+    prefill K buffer is sized to fit in the same memory. Lower values return
+    memory to the KV cache at long `max_model_len`; the minimum of 2 leaves room
+    for a full-length request's context-parallel shard. If None, 5 when
+    `max_model_len` is at most 256K tokens, else 2."""
+
     flex_attn_block_m: int | None = None
     """Triton kernel BLOCK_M tile size for flex attention.
     Must be a power of 2 >= 16. If None and VLLM_BATCH_INVARIANT=1,
