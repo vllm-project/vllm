@@ -10,6 +10,8 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 
+pytestmark = pytest.mark.cpu_test
+
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("endpoint", ["/v1/completions", "/v1/chat/completions"])
