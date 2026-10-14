@@ -96,6 +96,7 @@ def build_question(
     instructions: Any,
     criteria: Any,
     max_options: int,
+    labeled: bool = True,
 ) -> Question:
     if not qid:
         raise StructuredDecisionError("question ids must be non-empty")
@@ -106,7 +107,7 @@ def build_question(
     names = [o.name for o in options]
     if len(set(names)) != len(names):
         raise StructuredDecisionError(f"question {qid!r}: duplicate option names")
-    limit = min(max_options, len(qtype.label_set))
+    limit = min(max_options, len(qtype.label_set)) if labeled else max_options
     if len(options) > limit:
         raise StructuredDecisionError(
             f"question {qid!r}: at most {limit} options for this model"
