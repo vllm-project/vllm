@@ -1560,8 +1560,8 @@ def test_models_fse_init(
 
         for attention in ("Glm5NextLinearAttention", "Glm5NextMLAAttention"):
             monkeypatch.setattr(glm5_next_model, attention, _StubGlm5NextAttention)
-        # The gate allows fusion only at TP4/TP8 on gfx950, and this test
-        # runs at TP1; the gate has its own test.
+        # The gate allows fusion only at the TP sizes AITER is tuned for, and
+        # this test runs at TP1; the gate has its own test.
         monkeypatch.setattr(
             glm5_next_model, "_fused_shared_experts_tuned", lambda _: True
         )
@@ -1902,9 +1902,6 @@ def test_modelopt_mxfp8_shared_expert_fse_keeps_the_stored_format(
     assert (reason is None) is expected
 
 
-_UNTUNED_GPU = "the GPU is neither gfx950 nor a 304-CU gfx942"
-
-
 @pytest.mark.parametrize(
     ("gpu", "setting", "value", "reason"),
     [
@@ -1923,8 +1920,8 @@ _UNTUNED_GPU = "the GPU is neither gfx950 nor a 304-CU gfx942"
             "prefill_context_parallel_size is 2",
         ),
         ("gfx950", "enable_expert_parallel", True, "expert parallelism is enabled"),
-        ("gfx942_80cu", None, None, _UNTUNED_GPU),
-        ("other", None, None, _UNTUNED_GPU),
+        ("gfx942_80cu", None, None, "gfx942 with 80 CUs"),
+        ("other", None, None, "neither gfx950 nor gfx942"),
     ],
 )
 def test_glm5_next_fuses_shared_experts_only_in_tuned_setups(
@@ -1968,7 +1965,9 @@ def test_glm5_next_fuses_shared_experts_only_in_tuned_setups(
         warning.assert_not_called()
     else:
         warning.assert_called_once()
-        assert warning.call_args.args[1] == reason
+        reported = warning.call_args.args[1].split("; ")
+        assert len(reported) == 1
+        assert reason in reported[0]
 
 
 def test_glm5_next_fused_shared_expert_loads_into_the_shared_slot() -> None:
