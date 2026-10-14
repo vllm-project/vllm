@@ -1,17 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterable, Mapping, Sequence
-from typing import cast
 
 import torch
 import torch.nn as nn
 from transformers import BatchFeature
 
 from vllm.config import VllmConfig
-from vllm.model_executor.models.interfaces import MultiModalEmbeddings
 from vllm.model_executor.models.mistral3 import (
     Mistral3DummyInputsBuilder,
     Mistral3ForConditionalGeneration,
+    Mistral3ImageEmbeddingInputs,
+    Mistral3ImageInputs,
     Mistral3MultiModalProjector,
     Mistral3ProcessingInfo,
     init_vision_tower_for_mistral3,
@@ -181,12 +181,14 @@ class LightOnOCRForConditionalGeneration(Mistral3ForConditionalGeneration):
             self.language_model.make_empty_intermediate_tensors
         )
 
-    def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
+    def _parse_and_validate_image_input(
+        self, **kwargs: object
+    ) -> Mistral3ImageInputs | None:
         image_embeds = kwargs.get("image_embeds")
         if image_embeds is not None:
-            return cast(MultiModalEmbeddings, image_embeds)
+            return Mistral3ImageEmbeddingInputs(data=image_embeds)
 
-        return super().embed_multimodal(**kwargs)
+        return super()._parse_and_validate_image_input(**kwargs)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
