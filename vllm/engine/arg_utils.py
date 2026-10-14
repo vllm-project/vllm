@@ -184,6 +184,11 @@ def union_dict_and_str(val: str) -> str | dict[str, str] | None:
     return optional_type(json.loads)(val)
 
 
+def parse_reasoning_parser(val: str) -> str:
+    """Map `none` (any case) to the unset default, as `vllm-rs serve` does."""
+    return "" if val.lower() == "none" else val
+
+
 def is_type(type_hint: TypeHint, type: TypeHintT) -> TypeIs[TypeHintT]:
     """Check if the type hint is a specific type."""
     return type_hint is type or get_origin(type_hint) is type
@@ -450,6 +455,12 @@ def get_kwargs(cls: ConfigType) -> dict[str, dict[str, Any]]:
 _LOG_CONFIG_FILE_DEPRECATION_MESSAGE = (
     "--log-config-file is deprecated and will be removed in v0.33.0. "
     "Use --logging-config.pylogging_config_file instead."
+)
+
+
+_MAMBA_CACHE_MODE_DEPRECATION_MESSAGE = (
+    "--mamba-cache-mode is deprecated and will be removed in v0.33.0. "
+    "It has no effect: Mamba prefix caching follows --enable-prefix-caching."
 )
 
 
@@ -798,7 +809,7 @@ class EngineArgs:
     mamba_ssm_cache_dtype: MambaDType = CacheConfig.mamba_ssm_cache_dtype
     mamba_block_size: int | None = get_field(CacheConfig, "mamba_block_size")
     prefix_match_unit: int | None = get_field(CacheConfig, "prefix_match_unit")
-    mamba_cache_mode: MambaCacheMode = CacheConfig.mamba_cache_mode
+    mamba_cache_mode: MambaCacheMode | None = None
     enable_mamba_shared_prefix_checkpoint: bool = (
         CacheConfig.enable_mamba_shared_prefix_checkpoint
     )
@@ -1108,6 +1119,10 @@ class EngineArgs:
 
         # Structured outputs arguments
         structured_outputs_kwargs = get_kwargs(StructuredOutputsConfig)
+        structured_outputs_kwargs["reasoning_parser"]["type"] = parse_reasoning_parser
+        structured_outputs_kwargs["reasoning_parser"]["help"] += (
+            "\n\n`none` disables reasoning parsing, the same as leaving it unset."
+        )
         structured_outputs_group = parser.add_argument_group(
             title="StructuredOutputsConfig",
             description=StructuredOutputsConfig.__doc__,
@@ -1403,7 +1418,12 @@ class EngineArgs:
             "--prefix-match-unit", **cache_kwargs["prefix_match_unit"]
         )
         cache_group.add_argument(
-            "--mamba-cache-mode", **cache_kwargs["mamba_cache_mode"]
+            "--mamba-cache-mode",
+            **{
+                **cache_kwargs["mamba_cache_mode"],
+                "default": None,
+                "help": _MAMBA_CACHE_MODE_DEPRECATION_MESSAGE,
+            },
         )
         cache_group.add_argument(
             "--enable-mamba-shared-prefix-checkpoint",
@@ -2263,6 +2283,8 @@ class EngineArgs:
         assert self.enable_prefix_caching is not None, (
             "enable_prefix_caching must be set by this point"
         )
+        if self.mamba_cache_mode is not None:
+            logger.warning_once(_MAMBA_CACHE_MODE_DEPRECATION_MESSAGE)
 
         cache_config = CacheConfig(
             block_size=self.block_size,  # type: ignore[arg-type]
@@ -2282,7 +2304,6 @@ class EngineArgs:
             mamba_ssm_cache_dtype=self.mamba_ssm_cache_dtype,
             mamba_block_size=self.mamba_block_size,
             prefix_match_unit=self.prefix_match_unit,
-            mamba_cache_mode=self.mamba_cache_mode,
             enable_mamba_shared_prefix_checkpoint=(
                 self.enable_mamba_shared_prefix_checkpoint
             ),
