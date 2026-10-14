@@ -2151,6 +2151,45 @@ def test_qwen3_5_mtp_draft_group_annotated_on_hybrid_path(caplog_vllm):
     assert "could be identified as the draft model's" not in caplog_vllm.text
 
 
+def _glm5_next_dflash_specs():
+    """GLM-5.3-Flash-shaped hybrid (MLA + Mamba target) with a DFlash2
+    sliding-window drafter: plain GQA layers carrying no draft marker,
+    registered after every target layer."""
+    specs = {
+        "target.attn.0": new_mla_spec(block_size=64),
+        "target.attn.1": new_mla_spec(block_size=64),
+        "target.mamba.0": new_mamba_spec(block_size=64, mamba_cache_mode="align"),
+        "target.mamba.1": new_mamba_spec(block_size=64, mamba_cache_mode="align"),
+    }
+    for i in range(3):
+        specs[f"draft.attn.{i}"] = new_sliding_window_spec(
+            block_size=16, sliding_window=2048
+        )
+    return specs
+
+
+def test_dflash_draft_group_annotated_by_trailing_layer_rule(caplog_vllm):
+    # DFlash drafters register their KV layers after the target layers, but
+    # their plain GQA sliding-window layers carry no draft marker, so only
+    # the positional rule can identify the draft group (#61443). The Mamba
+    # groups must stay unflagged so align-mode checkpointing keeps working.
+    groups = get_kv_cache_groups(
+        _spec_decode_grouping_config(method="dflash", model_type="glm5_next"),
+        _glm5_next_dflash_specs(),
+    )
+
+    flagged = [g for g in groups if g.is_eagle_group]
+    assert len(flagged) == 1
+    assert "draft.attn.0" in flagged[0].layer_names
+    for group in groups:
+        if any(
+            isinstance(spec, MambaSpec)
+            for spec in iter_layer_specs(group.kv_cache_spec)
+        ):
+            assert not group.is_eagle_group
+    assert "could be identified as the draft model's" not in caplog_vllm.text
+
+
 @pytest.mark.parametrize("method", ["eagle", "eagle3", "dspark"])
 def test_non_mtp_eagle_hybrid_still_warns(caplog_vllm, method):
     # Other drafters are not covered by the trailing-layer rule, so an
