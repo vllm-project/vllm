@@ -30,9 +30,9 @@ def key_paths(name: str, stack: str = "") -> set[str]:
     script = (ROOT / ".buildkite/scripts/rocm/build.sh").read_text()
     block = re.search(rf"^{name}=\$\(.*?sha256sum", script, re.M | re.S).group(0)
     paths = set(re.findall(r"\b(?:requirements|tools)/[\w./-]+", block))
-    # therock_wheels.py is injected into Ks via _TRW only for the rocm stack
+    # therock_wheels.py is injected into Ks via a helper variable only for the rocm stack
     if name == "Ks" and stack == "rocm":
-        m = re.search(r"_TRW=.*?tools/[\w./-]+", script, re.S)
+        m = re.search(r"_[Tt][Rr][Ww]=.*?tools/[\w./-]+", script, re.S)
         if m:
             paths.update(re.findall(r"\b(?:requirements|tools)/[\w./-]+", m.group(0)))
     return paths
