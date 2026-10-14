@@ -62,9 +62,10 @@ FP6 = os.environ.get("VLLM_QWEN38_MONO_FP6", "0") == "1"
 @torch.no_grad()
 def pack_fp6(model, rows: int = 1024) -> None:
     """Packs the MXFP6 copies of VLLM_QWEN38_MONO_FP6: for every layer the
-    out_proj or o_proj and, in a GDN layer, in_proj_qkvz, if its weight is
-    bf16. A copy is ``mono_fp6`` = (weight bytes, scale bytes) of the linear,
-    in the layout of moe.fp6_pack.
+    out_proj or o_proj, in a GDN layer in_proj_qkvz and in a full-attention
+    layer qkv_proj (if it has no bias), if its weight is bf16. A copy is
+    ``mono_fp6`` = (weight bytes, scale bytes) of the linear, in the layout
+    of moe.fp6_pack.
 
     The multi-thread loader calls load_weights once for each batch of
     shards, and each call ends here. So a later call packs into the same
@@ -80,6 +81,9 @@ def pack_fp6(model, rows: int = 1024) -> None:
         linears = [B.o_proj(layer)]
         if layer.layer_type == "linear_attention":
             linears.append(layer.linear_attn.in_proj_qkvz)
+        elif getattr(layer.self_attn.qkv_proj, "bias", None) is None:
+            # The attention front kernel (afront.py) reads qkv_proj in MXFP6.
+            linears.append(layer.self_attn.qkv_proj)
         for lin in linears:
             w = getattr(lin, "weight", None)
             if w is None or w.dtype != torch.bfloat16 or w.dim() != 2:
@@ -121,6 +125,18 @@ class MonoDecode(B.QwenMonoDecode):
     MAX_TOKENS = L.MAX_TOKENS
     BLOCKS = L.BLOCKS
     MTP = True
+
+    def __init__(self, model, vllm_config):
+        super().__init__(model, vllm_config)
+        if self.ok:
+            from vllm.models.qwen3_5.amd.mono import afront
+
+            # The mailbox through which the attention front kernel hands q
+            # and k to the CTAs that run their norms and RoPE.
+            n = (afront.SCRATCH_BYTES + 255) // 256 * 256
+            self.af_scratch = torch.zeros(
+                n, dtype=torch.uint8, device=self.epoch.device
+            )
 
     def unsupported(self, model) -> str | None:
         from vllm.model_executor.models.qwen3_next import Qwen3NextSparseMoeBlock
@@ -241,10 +257,11 @@ class MonoDecode(B.QwenMonoDecode):
 
     def _fp6_missing(self) -> str | None:
         """With VLLM_QWEN38_MONO_FP6=1 every layer must have the MXFP6 copy
-        of its out_proj or o_proj and every GDN layer that of in_proj_qkvz.
-        Without that check a layer whose weight was not bf16 would quietly
-        run in its old format."""
-        n_o = n_q = 0
+        of its out_proj or o_proj, every GDN layer that of in_proj_qkvz and
+        every full-attention layer that of qkv_proj. Without that check a
+        layer whose weight was not bf16 would quietly run in its old
+        format."""
+        n_o = n_q = n_a = 0
         for layer in self.model.layers:
             if getattr(B.o_proj(layer), "mono_fp6", None) is None:
                 return (
@@ -259,11 +276,18 @@ class MonoDecode(B.QwenMonoDecode):
                         "in_proj_qkvz"
                     )
                 n_q += 1
+            elif getattr(layer.self_attn.qkv_proj, "mono_fp6", None) is None:
+                return (
+                    f"VLLM_QWEN38_MONO_FP6 layer {layer.layer_idx}: no MXFP6 qkv_proj"
+                )
+            else:
+                n_a += 1
         logger.info_once(
             "Qwen3.8 mono decode: MXFP6 in_proj_qkvz in %d layers, MXFP6 out_proj or "
-            "o_proj in %d layers",
+            "o_proj in %d layers, MXFP6 qkv_proj in %d layers",
             n_q,
             n_o,
+            n_a,
         )
         return None
 
@@ -287,15 +311,130 @@ class MonoDecode(B.QwenMonoDecode):
                 core = torch.empty(s, L.CORE, dtype=h.dtype, device=h.device)
                 res_attn = torch.empty_like(h)
                 self._k1(layer, md, h, residual, res_attn, core)
-            else:
+            elif layer.layer_type == "linear_attention":
                 x, res_attn = _gemma_norm(layer.input_layernorm, h, residual)
-                if layer.layer_type == "linear_attention":
-                    core = B.gdn_core(layer.linear_attn, x)
+                core = B.gdn_core(layer.linear_attn, x)
+            else:
+                fp6 = getattr(layer.self_attn.qkv_proj, "mono_fp6", None)
+                if fp6 is not None and residual is not None:
+                    # The attention front kernel runs the residual add, the
+                    # norm, the MXFP6 qkv_proj, the q and k norms and RoPE in
+                    # one launch, and also the KV cache write where it can.
+                    # It works row by row, so it also serves verify steps.
+                    core, gate, res_attn = self._attn_front(
+                        layer, h, residual, fp6, positions
+                    )
                 else:
-                    core, gate = _attention_core(layer.self_attn, x, positions)
+                    x, res_attn = _gemma_norm(layer.input_layernorm, h, residual)
+                    qkv, _ = layer.self_attn.qkv_proj(x)
+                    core, gate = _attention_core(layer.self_attn, qkv, positions)
             h, residual = self._k2(layer, core, res_attn, gate)
         h, _ = _gemma_norm(model.norm, h, residual)
         return h
+
+    def _attn_front(self, layer, h, residual, fp6, positions):
+        """The attention front kernel: hidden + residual -> input_layernorm
+        -> the MXFP6 qkv_proj -> the q and k norms, RoPE and the split, and
+        the FP8 KV cache write when _af_kv allows it -> the attention ->
+        (attention output, gate, hidden + residual)."""
+        from vllm.models.qwen3_5.amd.mono import afront
+
+        attn = layer.self_attn
+        rope = attn.rotary_emb
+        s = h.size(0)
+        if positions.ndim == 2:
+            # a decode token is text: its M-RoPE positions are all equal
+            positions = positions[0]
+        q = torch.empty(s, L.CORE, dtype=h.dtype, device=h.device)
+        gate = torch.empty_like(q)
+        k = torch.empty(s, afront.HEAD, dtype=h.dtype, device=h.device)
+        v = torch.empty_like(k)
+        res_out = torch.empty_like(h)
+        kv = self._af_kv(attn.attn, s)
+        cache = {}
+        if kv is not None:
+            names = ("k_cache", "v_cache", "slot_mapping", "k_scale", "v_scale")
+            cache = dict(zip(names, kv))
+        afront.attn_front(
+            afront.AFBuild(
+                tokens=s,
+                eps=layer.input_layernorm.variance_epsilon,
+                qk=True,
+                kv=kv is not None,
+                qk_eps=attn.q_norm.variance_epsilon,
+                rot=rope.rotary_dim,
+                cs_f32=rope.cos_sin_cache.dtype == torch.float32,
+                page=kv[0].size(1) if kv is not None else 64,
+            ),
+            hidden=h,
+            residual=residual,
+            res_out=res_out,
+            ln_w=layer.input_layernorm.weight,
+            w=fp6[0],
+            ws=fp6[1],
+            q_out=q,
+            k_out=k,
+            v_out=v,
+            gate_out=gate,
+            qn_w=attn.q_norm.weight,
+            kn_w=attn.k_norm.weight,
+            cos_sin=rope.cos_sin_cache,
+            positions=positions,
+            scratch=self.af_scratch,
+            epoch=self.epoch,
+            slot=layer.layer_idx,
+            **cache,
+        )
+        if kv is None:
+            return attn.attn(q, k, v), gate, res_out
+        return _attention_q_only(attn.attn, q), gate, res_out
+
+    def _af_kv(self, attn_layer, s):
+        """(k_cache, v_cache, slot_mapping, k_scale, v_scale) for the KV
+        cache write in the attention front kernel, or None when vLLM must
+        write the cache. The kernel writes reshape_and_cache_flash's FP8
+        e4m3 values into the unshuffled [blocks, block_size, 1, 256] views,
+        one slot for each row."""
+        from vllm._aiter_ops import rocm_aiter_ops
+        from vllm.v1.attention.backends import rocm_aiter_fa
+
+        why = None
+        if not isinstance(attn_layer.impl, rocm_aiter_fa.AiterFlashAttentionImpl):
+            why = f"the attention backend {type(attn_layer.impl).__name__}"
+        elif (
+            attn_layer.kv_cache_dtype not in ("fp8", "fp8_e4m3")
+            or current_platform.fp8_dtype() != torch.float8_e4m3fn
+        ):
+            why = f"the KV cache dtype {attn_layer.kv_cache_dtype}"
+        elif rocm_aiter_ops.is_shuffle_kv_cache_enabled():
+            why = "the shuffled KV cache layout"
+        elif attn_layer.kv_sharing_target_layer_name is not None:
+            why = "a KV cache shared with another layer"
+        elif attn_layer.query_quant is not None:
+            why = "a quantized query"
+        slots = None
+        if why is None:
+            mapping = get_forward_context().slot_mapping
+            if isinstance(mapping, dict):
+                slots = mapping.get(attn_layer.layer_name)
+            # vLLM can leave the pad rows of the batch out of slot_mapping.
+            # The kernel would then read slots past its end.
+            if slots is None or slots.dtype != torch.int64 or slots.shape != (s,):
+                shape = None if slots is None else tuple(slots.shape)
+                why = f"a slot_mapping of shape {shape} for {s} rows"
+        if why is None:
+            k_cache, v_cache = attn_layer.impl._split_kv_cache(attn_layer.kv_cache)
+            if k_cache.shape[2:] != (1, 256) or k_cache.element_size() != 1:
+                why = f"KV cache views of shape {tuple(k_cache.shape)}"
+        if why is not None:
+            logger.info_once("Qwen3.8 mono decode: vLLM writes the KV cache (%s)", why)
+            return None
+        logger.info_once(
+            "Qwen3.8 mono decode: attn_front writes the FP8 KV cache (blocks of %d "
+            "tokens)",
+            k_cache.size(1),
+        )
+        return k_cache, v_cache, slots, attn_layer._k_scale, attn_layer._v_scale
 
     def _k1(self, layer, md, h, residual, res_out, core) -> None:
         from vllm.models.qwen3_5.amd.mono import gdn
@@ -413,11 +552,11 @@ def _gemma_norm(norm, x, residual):
     return _gemma_add_rms_norm(x, residual, norm.weight, norm.variance_epsilon)
 
 
-def _attention_core(attn, x, positions) -> tuple[torch.Tensor, torch.Tensor]:
-    """Qwen3NextAttention.forward up to the output gate (K2 applies it to
-    o_proj's input), with the split, q / k norms, RoPE and gate copy in one
-    launch as the model's CUDA path runs them -> (attention output, gate)."""
-    qkv, _ = attn.qkv_proj(x)
+def _attention_core(attn, qkv, positions) -> tuple[torch.Tensor, torch.Tensor]:
+    """Qwen3NextAttention.forward from qkv_proj's output up to the output
+    gate (K2 applies it to o_proj's input), with the split, q / k norms, RoPE
+    and gate copy in one launch as the model's CUDA path runs them ->
+    (attention output, gate)."""
     q_gate, k, v = qkv.split([attn.q_size * 2, attn.kv_size, attn.kv_size], dim=-1)
     rope = attn.rotary_emb
     if positions.ndim == 2:
@@ -438,3 +577,30 @@ def _attention_core(attn, x, positions) -> tuple[torch.Tensor, torch.Tensor]:
         norm_beta=1.0,
     )
     return attn.attn(q, k, v), gate
+
+
+def _attention_q_only(attn_layer, q) -> torch.Tensor:
+    """Attention.forward for a q whose k and v the attention front kernel
+    already wrote into the KV cache. It is the direct call of
+    Attention.forward with key and value None, which skips vLLM's KV cache
+    write, and which the backend takes as a layer that projects only q. The
+    custom op that Attention.forward calls on ROCm takes no None for key and
+    value, so this calls the op's Python function."""
+    from vllm.model_executor.layers.attention.attention import (
+        unified_attention_with_output,
+    )
+
+    out = torch.empty(
+        q.size(0),
+        attn_layer.num_heads * attn_layer.head_size_v,
+        dtype=q.dtype,
+        device=q.device,
+    )
+    unified_attention_with_output(
+        q.view(-1, attn_layer.num_heads, attn_layer.head_size),
+        None,
+        None,
+        out.view(-1, attn_layer.num_heads, attn_layer.head_size_v),
+        attn_layer.layer_name,
+    )
+    return out
