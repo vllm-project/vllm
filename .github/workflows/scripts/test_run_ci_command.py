@@ -677,6 +677,24 @@ class RunCiCommandTest(unittest.TestCase):
                     self.assertIn("CI already ran on this commit", github.comments[0])
                     self.assertIn("`/ci retry`", github.comments[0])
 
+    def test_run_waits_for_fork_merge_commit_to_reach_base_repo(self) -> None:
+        github = FakeGitHub(behind=5)
+        updater = FakeBranchUpdater(github)
+        buildkite = FakeBuildkite([[], []])
+
+        with (
+            patch("run_ci_command.time.sleep"),
+            patch.object(
+                github,
+                "get_commits_behind_base",
+                side_effect=[5, ApiError(404, "Not Found"), 0],
+            ),
+        ):
+            run(make_event(COMMAND_RUN_CI), github, buildkite, "", updater)
+
+        self.assertEqual(buildkite.created_builds[0]["commit"], "merge-commit-sha")
+        self.assertTrue(github.comments[0].startswith("✅ "))
+
     def test_run_reports_failed_merge_without_building(self) -> None:
         github = FakeGitHub(behind=5)
         updater = FakeBranchUpdater(github, error=ApiError(422, "merge conflict"))

@@ -861,14 +861,24 @@ def merge_base_into_pr(
         for _ in range(BRANCH_UPDATE_POLL_ATTEMPTS):
             time.sleep(BRANCH_UPDATE_POLL_SECONDS)
             current_pr = github.get_pr(pr["number"])
-            if current_pr["head"]["sha"] != pr["head"]["sha"]:
-                break
+            if current_pr["head"]["sha"] == pr["head"]["sha"]:
+                continue
+            try:
+                behind = github.get_commits_behind_base(
+                    base_ref, current_pr["head"]["sha"]
+                )
+            except ApiError as error:
+                # A fork's new head is briefly unknown to the base repository.
+                if error.status == 404:
+                    continue
+                raise
+            break
         else:
             raise merge_failed("the merge commit did not appear in time")
         if (
             current_pr["state"] != "open"
             or current_pr["base"]["ref"] != base_ref
-            or github.get_commits_behind_base(base_ref, current_pr["head"]["sha"])
+            or behind
         ):
             raise merge_failed("the PR changed during the merge")
     except ApiError as error:
