@@ -123,22 +123,34 @@ def instrument_manual(
     attributes: dict[str, Any] | None = None,
     context: Any = None,
     kind: Any = None,
+    *,
+    defer_end: bool = False,
 ):
     """Manually create a span with explicit timestamps.
 
     Args:
         span_name: Name of the span to create.
         start_time: Start time in nanoseconds since epoch.
-        end_time: Optional end time in nanoseconds. If None, ends immediately.
+        end_time: Optional timestamp for immediate completion; ignored if deferred.
         attributes: Optional dict of span attributes.
         context: Optional trace context (e.g., from extract_trace_context).
         kind: Optional SpanKind (e.g., SpanKind.SERVER).
+        defer_end: Return an open span; the consumer must end it.
+
+    Returns:
+        An open span when deferred, otherwise None.
 
     """
     is_available, _, _, _, manual_instrument_fn = _REGISTERED_TRACING_BACKENDS["otel"]
     if is_available():
         return manual_instrument_fn(
-            span_name, start_time, end_time, attributes, context, kind
+            span_name,
+            start_time,
+            end_time,
+            attributes,
+            context,
+            kind,
+            defer_end=defer_end,
         )
     else:
         return None
