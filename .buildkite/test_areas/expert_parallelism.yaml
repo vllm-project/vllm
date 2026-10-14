@@ -92,6 +92,12 @@ steps:
       commands:
       - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
       - AMD_LOG_LEVEL=1 python3 distributed/rocm_ipc_churn_repro.py --timeout 240 || true
+      # The churn repro passes on the agent that fails the test a minute later,
+      # because it never builds a second communicator while the first one is
+      # alive. This one does exactly that and measures the export headroom
+      # around it, which is the smallest shape of the failure we can hand over
+      # without vLLM, elastic EP, Ray or a model.
+      - AMD_LOG_LEVEL=1 python3 distributed/rocm_ipc_headroom_repro.py --rounds 3 || true
       # ROCr refuses the export in Runtime::IPCCreate, which picks between two
       # unrelated implementations: hsaKmtShareMemory when HSA_ENABLE_IPC_MODE_LEGACY
       # is 1, hsaKmtExportDMABufHandle otherwise. Our images pin the legacy side in
@@ -119,7 +125,24 @@ steps:
       # version of this line lost its shell variable and printed nothing. There is
       # no variable here now, and our own lines are pulled out too, since they go
       # into the file along with everything else.
-      - HSAKMT_DEBUG_LEVEL=7 AMD_LOG_LEVEL=1 VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=HSAKMT_DEBUG_LEVEL,AMD_LOG_LEVEL pytest -v -s distributed/test_elastic_ep.py -k enforce_eager_none > /tmp/kmt.log 2>&1 || true; echo "--- kmt log has $(wc -l < /tmp/kmt.log) lines, $(grep -c hsaKmtShareMemory /tmp/kmt.log) of them share calls"; echo "--- band around the share calls"; grep -n -B 25 -A 60 hsaKmtShareMemory /tmp/kmt.log | tail -n 170; echo "--- our own lines"; grep -n EEP-DEBUG /tmp/kmt.log | tail -n 40; echo "--- anything that looks like a refusal"; grep -niE "errno|operation not|denied|invalid|failed with" /tmp/kmt.log | tail -n 40; echo "--- tail"; tail -n 120 /tmp/kmt.log
+      # Ray collapses identical lines into "[repeated 3188x across cluster]",
+      # which gave us useful totals but destroyed the order, and order is the
+      # whole point of a thunk trace. RAY_DEDUP_LOGS=0 prints every line.
+      - RAY_DEDUP_LOGS=0 HSAKMT_DEBUG_LEVEL=7 AMD_LOG_LEVEL=1 VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=HSAKMT_DEBUG_LEVEL,AMD_LOG_LEVEL,RAY_DEDUP_LOGS pytest -v -s distributed/test_elastic_ep.py -k enforce_eager_none > /tmp/kmt.log 2>&1 || true; echo "--- kmt log has $(wc -l < /tmp/kmt.log) lines, $(grep -c hsaKmtShareMemory /tmp/kmt.log) of them share calls"; echo "--- band around the share calls"; grep -n -B 25 -A 60 hsaKmtShareMemory /tmp/kmt.log | tail -n 170; echo "--- our own lines"; grep -n EEP-DEBUG /tmp/kmt.log | tail -n 40; echo "--- anything that looks like a refusal"; grep -niE "errno|operation not|denied|invalid|failed with" /tmp/kmt.log | tail -n 40; echo "--- tail"; tail -n 120 /tmp/kmt.log
+      # Measured across two jobs and nine passes: the headroom is full in
+      # prepare and down to about 115 at commit, which is where #56610 moved the
+      # first collective to avoid a deadlock. With the deferral off, that
+      # collective runs in prepare again, where there is room. If this pass
+      # gets further than the others, the headroom is what the failure is about
+      # and the deadlock fix needs somewhere else to put the warm-up. If it
+      # fails the same way, the window is not the explanation.
+      - VLLM_EEP_DEBUG_NO_DEFER_WARMUP=1 AMD_LOG_LEVEL=1 VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=VLLM_EEP_DEBUG_NO_DEFER_WARMUP,AMD_LOG_LEVEL pytest -v -s distributed/test_elastic_ep.py -k enforce_eager_none || true
+      # NCCL_P2P_DISABLE=1 ran once before and failed, but measurement later
+      # showed RCCL makes zero IPC calls under it, so that failure came from the
+      # probes in rocm_debug rather than from the test. VLLM_EEP_DEBUG_OFF=1
+      # silences every probe, so this pass answers the one question the earlier
+      # one could not: does the test itself pass without P2P, slow or not.
+      - NCCL_P2P_DISABLE=1 VLLM_EEP_DEBUG_OFF=1 AMD_LOG_LEVEL=1 VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=NCCL_P2P_DISABLE,VLLM_EEP_DEBUG_OFF,AMD_LOG_LEVEL pytest -v -s distributed/test_elastic_ep.py -k enforce_eager_none || true
       # The previous run tried NCCL_P2P_DISABLE and NCCL_P2P_LEVEL and both hit
       # the same hsa_status 4097. Measured locally, NCCL_P2P_DISABLE=1 already
       # drops RCCL to zero hipIpcGetMemHandle calls, so that 4097 came from our

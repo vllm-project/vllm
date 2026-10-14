@@ -661,9 +661,20 @@ def _ipc_attach_ceiling(group, size: int, flags: int, limit: int) -> str:
         hip.hipGetLastError()
 
 
+def _off() -> bool:
+    """Every probe here exports IPC handles, which is the very thing that
+    fails, so a pass that only wants to know whether the test itself passes has
+    to be able to turn all of this off. An earlier NCCL_P2P_DISABLE=1 pass
+    looked like a failure when the only thing that failed was this file.
+    """
+    return os.getenv("VLLM_EEP_DEBUG_OFF") == "1"
+
+
 def dump(tag: str, groups: dict | None = None, heavy: bool = False) -> None:
     """Heavy adds probes that perturb state, so they stay off at the points
     right before a collective we are trying to observe."""
+    if _off():
+        return
     try:
         device = torch.accelerator.current_device_index()
         free, total = torch.accelerator.get_memory_info(device)
@@ -701,6 +712,11 @@ def dump(tag: str, groups: dict | None = None, heavy: bool = False) -> None:
         # measurement already runs immediately before a collective that then
         # succeeds, so it is safe to take here too.
         info["ipc_export_ceiling_6MiB_256"] = _ipc_export_ceiling(6 << 20, 256)
+        # Same question as at the door, but here nothing has disturbed the state
+        # first, so this is the pair to trust: a byte limit should put the 2 MiB
+        # count at roughly three times the 6 MiB one, a handle count should put
+        # them side by side.
+        info["ipc_export_ceiling_2MiB_768"] = _ipc_export_ceiling(2 << 20, 768)
         if heavy:
             # Burst can exhaust export handles and foreign_device creates a
             # context on a neighbour card, so neither runs near the collective.
@@ -719,6 +735,8 @@ def dump(tag: str, groups: dict | None = None, heavy: bool = False) -> None:
 
 
 def dump_static() -> None:
+    if _off():
+        return
     try:
         env = {
             k: v for k, v in sorted(os.environ.items()) if k.startswith(_ENV_PREFIXES)
@@ -737,6 +755,8 @@ def dump_static() -> None:
 
 
 def warm_each(groups: dict, tag: str) -> None:
+    if _off():
+        return
     stream = torch.Stream(device=next(iter(groups.values())).device)
     with stream:
         tensor = torch.zeros(1, dtype=torch.int32, device=stream.device)
@@ -763,19 +783,6 @@ def warm_each(groups: dict, tag: str) -> None:
                     _ipc_mesh_probe(group, 2 << 20, 0x3),
                     _ipc_mesh_probe(group, 6 << 20, 0x0),
                 )
-                # The mesh probe attaches one buffer per peer, which answers
-                # whether attaching works at all but not how many fit. The two
-                # implementations fail on opposite sides, dmabuf on attach and
-                # legacy on export, so the import side needs its own count if
-                # the two are to be compared where each of them breaks.
-                logger.warning(
-                    "[EEP-DEBUG] %s warm %s attach rank=%s/%s 2MiB/uncached %s",
-                    tag,
-                    name,
-                    group.rank_in_group,
-                    group.world_size,
-                    _ipc_attach_ceiling(group, 2 << 20, 0x3, 256),
-                )
                 # The nearest ceiling measurement before this point is the one
                 # in prepare, which is far enough back that it cannot say
                 # whether the headroom was already gone when RCCL started or
@@ -794,15 +801,40 @@ def warm_each(groups: dict, tag: str) -> None:
                 # is ever reached. Two equal numbers here mean the probe itself
                 # is not consuming anything, which is what makes the number on
                 # the far side of the collective readable.
+                #
+                # This goes before anything that needs a collective of its own.
+                # The import ceiling used to run first and its exports on the
+                # source rank left that rank reading zero here, and in the
+                # dmabuf pass the whole thing stopped at that probe and this
+                # line never printed at all.
+                #
+                # The second size is there to tell a byte limit from a handle
+                # count. The reproducible 115 at 6 MiB is 690 MiB; if the limit
+                # is bytes then 2 MiB should reach about three times the count,
+                # and if it is handles both numbers should land near each other.
                 logger.warning(
                     "[EEP-DEBUG] %s warm %s headroom rank=%s/%s"
-                    " 6MiB/uncached %s, again %s",
+                    " 6MiB/uncached %s, again %s | 2MiB/uncached %s",
                     tag,
                     name,
                     group.rank_in_group,
                     group.world_size,
                     _ipc_export_ceiling(6 << 20, 256),
                     _ipc_export_ceiling(6 << 20, 256),
+                    _ipc_export_ceiling(2 << 20, 768),
+                )
+                # The mesh probe attaches one buffer per peer, which answers
+                # whether attaching works at all but not how many fit. The two
+                # implementations fail on opposite sides, dmabuf on attach and
+                # legacy on export, so the import side needs its own count if
+                # the two are to be compared where each of them breaks.
+                logger.warning(
+                    "[EEP-DEBUG] %s warm %s attach rank=%s/%s 2MiB/uncached %s",
+                    tag,
+                    name,
+                    group.rank_in_group,
+                    group.world_size,
+                    _ipc_attach_ceiling(group, 2 << 20, 0x3, 256),
                 )
                 if os.getenv("VLLM_EEP_DEBUG_SET_DEVICE") == "1":
                     torch.accelerator.set_device_index(group.device.index)
