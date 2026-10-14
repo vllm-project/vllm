@@ -85,6 +85,10 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
 
     _supports_pp_hma = True
 
+    # Send completions go through _sending_transfers, which the async poll
+    # thread does not watch.
+    _supports_async_poll = False
+
     def __init__(
         self,
         vllm_config: "VllmConfig",

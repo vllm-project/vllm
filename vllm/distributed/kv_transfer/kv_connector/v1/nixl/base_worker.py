@@ -65,7 +65,11 @@ from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import
     MambaConvSplitInfo,
     derive_mamba_conv_split,
 )
-from vllm.distributed.nixl_utils import NixlWrapper, nixl_agent_config
+from vllm.distributed.nixl_utils import (
+    NixlWrapper,
+    nixl_agent_config,
+    nixl_thread_sync_t,
+)
 from vllm.distributed.parallel_state import (
     get_pcp_group,
     get_tensor_model_parallel_rank,
@@ -104,6 +108,17 @@ _INVALID_PEER_MIN_BACKOFF_S = 1.0
 _INVALID_PEER_MAX_BACKOFF_S = 60.0
 
 
+def _parse_bool_option(key: str, value: Any) -> bool:
+    """Parse a boolean extra-config option, which may arrive as a string."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str) and value.lower() in ("true", "1", "false", "0"):
+        return value.lower() in ("true", "1")
+    raise ValueError(
+        f"kv_connector_extra_config.{key} must be a boolean, got {value!r}"
+    )
+
+
 def _region_sort_key(layer_name: str) -> tuple[tuple[int, int | str], ...]:
     """Sort transfer regions in model-layer order, then by cache name."""
     return tuple(
@@ -131,8 +146,12 @@ class NixlBaseConnectorWorker:
     # packed KV caches under PP.
     _supports_pp_hma = False
 
-    # Class default so partially-constructed workers (tests bypass __init__)
-    # take the synchronous path; __init__ overrides when polling is enabled.
+    # The async completion poll thread watches only _recving_transfers.
+    # Overridden by NixlPushConnectorWorker, which also completes sends.
+    _supports_async_poll = True
+
+    # Set in __init__; the class default keeps workers built without __init__
+    # (unit tests) on the synchronous path.
     _async_poll = False
 
     def _compute_desc_ids(
@@ -635,44 +654,26 @@ class NixlBaseConnectorWorker:
         num_threads = vllm_config.kv_transfer_config.get_from_extra_config(
             "num_threads", 4
         )
-        self._async_poll = vllm_config.kv_transfer_config.get_from_extra_config(
-            "async_completion_poll", False
+        self._async_poll = self._async_poll_enabled(
+            vllm_config.kv_transfer_config.get_from_extra_config(
+                "async_completion_poll", False
+            )
         )
         if nixl_agent_config is None:
             config = None
         else:
             # Enable telemetry by default for NIXL 0.7.1 and above.
-            # A second thread polls transfers, so NIXL calls must be serialized.
-            sync_kwargs = {}
+            agent_kwargs: dict[str, Any] = {"capture_telemetry": True}
             if self._async_poll:
-                from vllm.distributed.nixl_utils import nixl_thread_sync_t
-
-                sync_kwargs["sync_mode"] = nixl_thread_sync_t.NIXL_THREAD_SYNC_STRICT
+                # The poll thread calls NIXL concurrently with the engine.
+                agent_kwargs["sync_mode"] = nixl_thread_sync_t.NIXL_THREAD_SYNC_STRICT
             config = (
-                nixl_agent_config(
-                    backends=self.nixl_backends, capture_telemetry=True, **sync_kwargs
-                )
+                nixl_agent_config(backends=self.nixl_backends, **agent_kwargs)
                 if len(non_ucx_backends) > 0
-                else nixl_agent_config(
-                    num_threads=num_threads, capture_telemetry=True, **sync_kwargs
-                )
+                else nixl_agent_config(num_threads=num_threads, **agent_kwargs)
             )
 
         self.nixl_wrapper = nixl_wrapper_cls(str(uuid.uuid4()), config)
-        # Async poll results: handle -> (state, telemetry | exception).
-        self._async_poll_lock = threading.Lock()
-        self._async_done: dict[int, tuple[str, Any]] = {}
-        if self._async_poll:
-            self._async_poll_stop = threading.Event()
-            self._async_poll_interval = (
-                vllm_config.kv_transfer_config.get_from_extra_config(
-                    "async_completion_poll_interval_s", 0.001
-                )
-            )
-            threading.Thread(
-                target=self._nixl_async_poll_loop, name="nixl-async-poll", daemon=True
-            ).start()
-            logger.info("NIXL async completion polling enabled")
         # Map of engine_id -> {(pp_rank, tp_rank): agent_name, ...}.
         # non-PP remote uses pp_rank 0, i.e. (0, tp_rank).
         self._remote_agents: dict[EngineId, dict[tuple[int, int], str]] = defaultdict(
@@ -836,6 +837,16 @@ class NixlBaseConnectorWorker:
         # [req_id -> list[handle]]
         self._recving_metadata: dict[ReqId, ReqMeta] = {}
         self._recving_transfers = defaultdict[ReqId, list[TransferHandle]](list)
+        # Terminal results recorded by the async poll thread, consumed by
+        # _poll_xfer(): handle -> (state, telemetry), or the exception raised.
+        self._async_poll_lock = threading.Lock()
+        self._async_done: dict[TransferHandle, tuple[str, Any] | Exception] = {}
+        if self._async_poll:
+            self._start_async_poll(
+                vllm_config.kv_transfer_config.get_from_extra_config(
+                    "async_completion_poll_interval_s", 0.001
+                )
+            )
         # Track the expiration time of requests that are waiting to be sent.
         self._reqs_to_send: dict[ReqId, float] = {}
         # Replicated-KV PCP ranks > 0 never transfer; requests they are asked
@@ -3092,58 +3103,93 @@ class NixlBaseConnectorWorker:
                     new_expiry,
                 )
 
-    def _nixl_async_poll_loop(self) -> None:
-        """Record transfer completions as they happen, independent of engine steps."""
-        interval = self._async_poll_interval
+    # Async completion polling (kv_connector_extra_config.async_completion_poll).
+    # NIXL stamps a transfer's telemetry at the first check_xfer_state() that
+    # sees it complete. Normally that check runs once per engine step, so a
+    # long step inflates every in-flight transfer. Here a thread does the
+    # check instead and records the result for the next engine step. Only the
+    # thread checks a handle, and never after a terminal state, since UCCL
+    # frees the transfer status at the first DONE.
+
+    def _async_poll_enabled(self, option: Any) -> bool:
+        if not _parse_bool_option("async_completion_poll", option):
+            return False
+        if not self._supports_async_poll:
+            logger.warning(
+                "async_completion_poll is not supported by %s; ignoring it.",
+                type(self).__name__,
+            )
+            return False
+        if nixl_agent_config is None:
+            # Without an agent config the agent cannot be made thread-safe.
+            logger.warning("async_completion_poll requires nixl_agent_config.")
+            return False
+        return True
+
+    def _start_async_poll(self, interval_s: float) -> None:
+        self._async_poll_interval_s = float(interval_s)
+        self._async_poll_stop = threading.Event()
+        self._async_poll_thread = threading.Thread(
+            target=self._async_poll_loop, name="nixl-async-poll", daemon=True
+        )
+        self._async_poll_thread.start()
+        logger.info("NIXL async completion polling enabled")
+
+    def _stop_async_poll(self) -> None:
+        if not self._async_poll:
+            return
+        self._async_poll_stop.set()
+        self._async_poll_thread.join(timeout=2)
+        if self._async_poll_thread.is_alive():
+            logger.warning("nixl-async-poll thread did not exit within 2s.")
+
+    def _async_poll_loop(self) -> None:
         while not self._async_poll_stop.is_set():
-            transfers = getattr(self, "_recving_transfers", None)
-            if transfers:
+            try:
                 with self._async_poll_lock:
-                    for handles in list(transfers.values()):
-                        for handle in list(handles):
-                            if handle in self._async_done:
-                                continue
-                            try:
-                                state = self.nixl_wrapper.check_xfer_state(handle)
-                            except Exception as e:
-                                self._async_done[handle] = ("EXC", e)
-                                continue
-                            if state == "PROC":
-                                continue
-                            tel = None
-                            if state == "DONE":
-                                try:
-                                    tel = self.nixl_wrapper.get_xfer_telemetry(handle)
-                                except Exception:
-                                    tel = None
-                            self._async_done[handle] = (state, tel)
-            time.sleep(interval)
+                    self._record_completed_recvs()
+            except Exception:
+                # Keep polling: if this thread dies, no transfer ever completes.
+                logger.exception("nixl-async-poll failed; retrying in 1s.")
+                self._async_poll_stop.wait(1.0)
+                continue
+            self._async_poll_stop.wait(self._async_poll_interval_s)
 
-    def _xfer_state(self, handle: int) -> str:
-        if not self._async_poll:
-            return self.nixl_wrapper.check_xfer_state(handle)
-        entry = self._async_done.get(handle)
-        if entry is None:
-            return "PROC"
-        state, val = entry
-        if state == "EXC":
-            del self._async_done[handle]
-            raise val
-        if state != "DONE":
-            del self._async_done[handle]
-        return state
+    def _record_completed_recvs(self) -> None:
+        """Record each newly finished transfer. Caller holds the poll lock."""
+        for handles in list(self._recving_transfers.values()):
+            for handle in handles:
+                if handle in self._async_done:
+                    continue
+                try:
+                    state = self.nixl_wrapper.check_xfer_state(handle)
+                    if state == "PROC":
+                        continue
+                    telemetry = None
+                    if state == "DONE":
+                        telemetry = self.nixl_wrapper.get_xfer_telemetry(handle)
+                    self._async_done[handle] = (state, telemetry)
+                except Exception as e:
+                    self._async_done[handle] = e
 
-    def _xfer_telemetry(self, handle: int):
+    def _poll_xfer(self, handle: TransferHandle) -> tuple[str, Any]:
+        """Return a transfer's state and, once DONE, its telemetry."""
         if not self._async_poll:
-            return self.nixl_wrapper.get_xfer_telemetry(handle)
-        entry = self._async_done.pop(handle, None)
-        return entry[1] if entry is not None else None
+            state = self.nixl_wrapper.check_xfer_state(handle)
+            if state != "DONE":
+                return state, None
+            return state, self.nixl_wrapper.get_xfer_telemetry(handle)
+        result = self._async_done.pop(handle, ("PROC", None))
+        if isinstance(result, Exception):
+            raise result
+        return result
 
     def _pop_done_transfers(
         self, transfers: dict[str, list[int]]
     ) -> tuple[set[str], set[str]]:
         if not self._async_poll:
             return self._pop_done_transfers_impl(transfers)
+        # The poll thread must not check a handle while it is being released.
         with self._async_poll_lock:
             return self._pop_done_transfers_impl(transfers)
 
@@ -3166,11 +3212,9 @@ class NixlBaseConnectorWorker:
             in_progress = []
             for handle in handles:
                 try:
-                    xfer_state = self._xfer_state(handle)
+                    xfer_state, telemetry = self._poll_xfer(handle)
                     if xfer_state == "DONE":
-                        res = self._xfer_telemetry(handle)
-                        if res is not None:
-                            self.xfer_stats.record_transfer(res)
+                        self.xfer_stats.record_transfer(telemetry)
                         self.nixl_wrapper.release_xfer_handle(handle)
                     elif xfer_state == "PROC":
                         in_progress.append(handle)
@@ -3858,8 +3902,11 @@ class NixlBaseConnectorWorker:
             # error happens during init, no need to shutdown
             return
         self._handshake_initiation_executor.shutdown(wait=False)
-        for handles in self._recving_transfers.values():
-            for handle in handles:
-                self.nixl_wrapper.release_xfer_handle(handle)
-        self._recving_transfers.clear()
+        self._stop_async_poll()
+        # Under the poll lock in case the poll thread has not exited yet.
+        with self._async_poll_lock:
+            for handles in self._recving_transfers.values():
+                for handle in handles:
+                    self.nixl_wrapper.release_xfer_handle(handle)
+            self._recving_transfers.clear()
         self._finish_shutdown()
