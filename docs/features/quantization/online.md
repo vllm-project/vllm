@@ -112,6 +112,7 @@ Currently supported combinations are:
 | Checkpoint layer | Online target | Requirements |
 | ---------------- | ------------- | ------------ |
 | Serialized ModelOpt MXFP8 linear | any online linear method | Target-specific hardware requirements |
+| Serialized ModelOpt NVFP4 linear | any online linear method | Target-specific hardware requirements |
 | Serialized compressed-tensors NVFP4 MoE | any online MoE method | Target-specific hardware requirements |
 | Serialized ModelOpt NVFP4 MoE | any online MoE method | Target-specific hardware requirements |
 | Serialized Quark NVFP4 MoE | any online MoE method | Target-specific hardware requirements |
@@ -132,6 +133,20 @@ for example compressed-tensors NVFP4 experts to online MXFP4:
 vllm serve RedHatAI/Qwen3-30B-A3B-NVFP4 \
   --quantization-config '{"targets":{"*mlp.experts*":"mxfp4"}}'
 ```
+
+For ModelOpt NVFP4 checkpoints, `--quantization mxfp4` converts both dense
+linear and MoE expert weights to MXFP4 while retaining the ModelOpt checkpoint
+loader:
+
+```bash
+vllm serve nvidia/Qwen3-30B-A3B-NVFP4 \
+    --quantization mxfp4
+```
+
+The target backend determines activation precision; XPU may use BF16
+activations. Unquantized linear layers, including router gates, are also
+quantized unless excluded through `quantization_config.ignore`. Conversion
+can introduce additional quantization error and does not export a checkpoint.
 
 !!! info
 
