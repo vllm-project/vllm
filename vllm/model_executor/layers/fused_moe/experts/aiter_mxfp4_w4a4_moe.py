@@ -63,6 +63,9 @@ def aiter_triton_kernel_w4a4_moe_forward(
     except ImportError:
         from aiter.ops.triton.moe_routing import routing as _routing_mod
 
+    from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
+        get_aiter_mx_scale_swizzle,
+    )
     from vllm.platforms.rocm import on_gfx1250
 
     if on_gfx1250():
@@ -150,7 +153,7 @@ def aiter_triton_kernel_w4a4_moe_forward(
             "limit": swiglu_limit,
             "swiglu_add_residual": quant_config.gemm1_beta == 1.0,
         }
-    swizzle_mx_scale = "GFX1250_SCALE" if on_gfx1250() else None
+    swizzle_mx_scale = get_aiter_mx_scale_swizzle()
 
     x_q, x_scale = mxfp4_quant(hidden_states.to(torch.bfloat16))
 

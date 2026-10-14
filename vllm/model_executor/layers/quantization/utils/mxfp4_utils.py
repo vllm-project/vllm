@@ -35,6 +35,15 @@ def should_use_cdna4_mx_scale_swizzle() -> bool:
     return on_gfx950() and get_tensor_model_parallel_world_size() <= 2
 
 
+def get_aiter_mx_scale_swizzle() -> str | None:
+    """AITER `swizzle_mx_scale` arg matching the load-time scale swizzle."""
+    if should_use_gfx1250_mx_scale_swizzle():
+        return "GFX1250_SCALE"
+    if should_use_cdna4_mx_scale_swizzle():
+        return "CDNA4_SCALE"
+    return None
+
+
 def weight_mx_scale(precision_config):
     """mxfp4 weight scale from a triton_kernels PrecisionConfig: 3.8 exposes it
     as b_mx_scale, 3.5.1/3.6 as weight_scale.

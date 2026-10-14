@@ -124,17 +124,11 @@ def triton_kernel_fused_mxfp4_w4a8_experts(
     from aiter.ops.triton.quant_moe import downcast_to_static_fp8
 
     from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
-        should_use_cdna4_mx_scale_swizzle,
-        should_use_gfx1250_mx_scale_swizzle,
+        get_aiter_mx_scale_swizzle,
         weight_mx_scale,
     )
 
-    if should_use_gfx1250_mx_scale_swizzle():
-        _swizzle_mx_scale = "GFX1250_SCALE"
-    elif should_use_cdna4_mx_scale_swizzle():
-        _swizzle_mx_scale = "CDNA4_SCALE"
-    else:
-        _swizzle_mx_scale = None
+    _swizzle_mx_scale = get_aiter_mx_scale_swizzle()
 
     assert quant_config.w1_precision is not None, (
         "w1_precision in quant config can't be None"

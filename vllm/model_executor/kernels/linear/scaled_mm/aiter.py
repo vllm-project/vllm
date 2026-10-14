@@ -416,7 +416,7 @@ class AiterFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
                 use_ue8m0=False,
                 column_major_scales=True,
             )
-            logger.debug_once(
+            logger.info_once(
                 "Using aiter A8W8 blockscale B-preshuffle GEMM for N=%d K=%d", n, k
             )
 

@@ -483,34 +483,6 @@ class AiterExperts(mk.FusedMoEExpertsModular):
         return False
 
     @staticmethod
-    def _supports_quant_scheme(
-        weight_key: QuantKey | None,
-        activation_key: QuantKey | None,
-    ) -> bool:
-        SUPPORTED_W_A = [
-            (None, None),
-            (kFp8Static128BlockSym, kFp8Dynamic128Sym),
-            (kFp8StaticTensorSym, kFp8StaticTensorSym),
-            (kFp8StaticTensorSym, kFp8DynamicTensorSym),
-            (kFp8StaticChannelSym, kFp8DynamicTokenSym),
-            (kMxfp4Static, None),
-            (kMxfp4Static, kMxfp4Dynamic),
-        ]
-        if (weight_key, activation_key) not in SUPPORTED_W_A:
-            return False
-        if weight_key == kMxfp4Static:
-            from vllm.platforms.rocm import on_gfx950, on_gfx1250
-
-            if on_gfx950():
-                return True
-
-            if on_gfx1250():
-                return activation_key is None
-
-            return False
-        return True
-
-    @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
         return activation in [
             MoEActivation.SILU,
