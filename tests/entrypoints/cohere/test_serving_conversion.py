@@ -511,7 +511,7 @@ class TestConvertToolMessage:
         # A list of text blocks maps 1-to-1 onto ``text`` content
         # parts, mirroring the shape ``_convert_user_message`` emits
         # for multi-part user content. vLLM's
-        # ``_parse_chat_message_content`` will collapse this back to
+        # ``parse_chat_message_content`` will collapse this back to
         # ``"\n".join(...)`` for the ``ConversationMessage`` handed to
         # renderers (see the tool-role branch in
         # ``vllm/entrypoints/chat_utils.py``), so downstream chat
@@ -533,7 +533,7 @@ class TestConvertToolMessage:
         """Document blocks must not survive on the OpenAI-shaped tool
         message.
 
-        vLLM's shared ``_parse_chat_message_content_parts`` runs a
+        vLLM's shared ``parse_chat_message_content_parts`` runs a
         Pydantic ``ValidatorIterator`` over the OpenAI content-part
         union, which only knows ``text`` / ``image_url`` / etc. and
         rejects ``{"type": "document", ...}`` blocks outright. We
@@ -588,7 +588,7 @@ class TestConvertToolMessage:
     def test_converted_tool_message_content_survives_openai_validation(self):
         """Regression for the reported crash.
 
-        ``vllm/entrypoints/chat_utils.py:_parse_chat_message_content_parts``
+        ``vllm/renders/chat_message_content.py:parse_chat_message_content_parts``
         runs a Pydantic ``ValidatorIterator`` over
         ``list[ChatCompletionContentPartParam]``, which is a
         discriminated union that only accepts ``text`` / ``image_url``

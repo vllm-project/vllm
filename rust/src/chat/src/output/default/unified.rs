@@ -277,6 +277,7 @@ pub(crate) async fn unified_event_stream(
                             engine: finished.usage,
                             reasoning_tokens: state.reasoning_tokens,
                         },
+                        timestamps: finished.timestamps,
                         finish_reason: finished.finish_reason,
                         kv_transfer_params: finished.kv_transfer_params,
                         ec_transfer_params: finished.ec_transfer_params,
@@ -419,6 +420,7 @@ mod tests {
                 kv_transfer_params: None,
                 ec_transfer_params: None,
                 sampling_mask: None,
+                timestamps: Default::default(),
             })),
         }
     }
@@ -742,6 +744,7 @@ mod tests {
                 },
                 AssistantEvent::Done {
                     usage: done_usage(0),
+                    timestamps: Default::default(),
                     finish_reason: crate::FinishReason::Stop(None),
                     kv_transfer_params: None,
                     ec_transfer_params: None,
@@ -782,6 +785,7 @@ mod tests {
                 },
                 AssistantEvent::Done {
                     usage: done_usage(5),
+                    timestamps: Default::default(),
                     finish_reason: crate::FinishReason::Stop(None),
                     kv_transfer_params: None,
                     ec_transfer_params: None,
@@ -814,6 +818,7 @@ mod tests {
                 },
                 AssistantEvent::Done {
                     usage: done_usage(2),
+                    timestamps: Default::default(),
                     finish_reason: crate::FinishReason::Stop(None),
                     kv_transfer_params: None,
                     ec_transfer_params: None,
@@ -866,6 +871,7 @@ mod tests {
                 },
                 AssistantEvent::Done {
                     usage: done_usage(5),
+                    timestamps: Default::default(),
                     finish_reason: crate::FinishReason::Stop(None),
                     kv_transfer_params: None,
                     ec_transfer_params: None,
@@ -912,6 +918,7 @@ mod tests {
                 },
                 AssistantEvent::Done {
                     usage: done_usage(0),
+                    timestamps: Default::default(),
                     finish_reason: crate::FinishReason::Stop(None),
                     kv_transfer_params: None,
                     ec_transfer_params: None,

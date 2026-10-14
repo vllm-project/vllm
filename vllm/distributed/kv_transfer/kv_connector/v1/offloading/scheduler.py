@@ -574,6 +574,10 @@ class OffloadingConnectorScheduler:
         )
         self.manager: OffloadingManager = spec.get_manager()
         self._connector_stats = OffloadingConnectorStats()
+        # The static config facts ride on the first stats payload of this
+        # process. A Prometheus child holds the values it received, so one
+        # payload is enough.
+        self._info_sent = False
 
         full_attention_groups: list[int] = []
         sliding_window_groups: list[int] = []
@@ -1146,6 +1150,14 @@ class OffloadingConnectorScheduler:
     def update_state_after_alloc(
         self, request: Request, blocks: KVCacheBlocks, num_external_tokens: int
     ):
+        # Track allocated block IDs regardless of num_external_tokens so
+        # re-allocation flush detection sees blocks allocated by other
+        # connectors in a MultiConnector setup.
+        for group_blocks in blocks.blocks:
+            self._current_batch_allocated_block_ids.update(
+                block.block_id for block in group_blocks if block.block_id != 0
+            )
+
         if num_external_tokens == 0:
             return
 
@@ -1168,10 +1180,6 @@ class OffloadingConnectorScheduler:
             req_status.group_states,
         ):
             group_blocks = blocks.blocks[group_config.group_idx]
-            self._current_batch_allocated_block_ids.update(
-                block.block_id for block in group_blocks if block.block_id != 0
-            )
-
             tokens_per_block = group_config.tokens_per_block
             tokens_per_chunk = group_config.tokens_per_chunk
             offload_keys = group_state.offload_keys
@@ -1999,6 +2007,14 @@ class OffloadingConnectorScheduler:
                 stats = manager_stats
             else:
                 stats.aggregate(manager_stats)
+
+        if not self._info_sent:
+            if stats is None:
+                stats = OffloadingConnectorStats()
+            # Sent even when the manager reports no facts, so that the metric
+            # exists whenever offloading runs.
+            stats.set_info(self.manager.config_info())
+            self._info_sent = True
 
         return stats
 
