@@ -23,6 +23,7 @@
 # limitations under the License.
 """Inference-only Qwen3 model compatible with HuggingFace weights."""
 
+import torch
 from torch import nn
 from transformers import Qwen3Config
 
@@ -39,6 +40,13 @@ from vllm.model_executor.models.utils import (
     PPMissingLayer,
     maybe_prefix,
 )
+from vllm.models.common.ops.sequence_parallel import (
+    is_sp_active,
+    mark_sp_region,
+    sp_all_gather,
+    sp_shard,
+)
+from vllm.sequence import IntermediateTensors
 
 logger = init_logger(__name__)
 
@@ -75,6 +83,46 @@ class Qwen3Model(Qwen2Model):
         super().__init__(
             vllm_config=vllm_config, prefix=prefix, decoder_layer_type=Qwen3DecoderLayer
         )
+        self.parallel_config = vllm_config.parallel_config
+        if not self.parallel_config.use_sequence_parallel:
+            return
+        assert get_pp_group().world_size == 1, (
+            "Sequence parallelism is not supported with pipeline parallelism"
+        )
+        pc = self.parallel_config
+        # Each layer has two SP regions: [prev down_proj -> qkv_proj] and
+        # [o_proj -> gate_up_proj].
+        prev_down_proj = None  # first region starts at the sharded embeddings
+        for layer in self.layers[self.start_layer : self.end_layer]:
+            mark_sp_region(prev_down_proj, layer.self_attn.qkv_proj, pc)
+            mark_sp_region(layer.self_attn.o_proj, layer.mlp.gate_up_proj, pc)
+            prev_down_proj = layer.mlp.down_proj
+        # Last region ends at the gathered final norm.
+        mark_sp_region(prev_down_proj, None, pc)
+
+    def forward(
+        self,
+        input_ids: torch.Tensor | None,
+        positions: torch.Tensor,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+    ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
+        if not is_sp_active(self.parallel_config):
+            return super().forward(
+                input_ids, positions, intermediate_tensors, inputs_embeds
+            )
+        if inputs_embeds is None:
+            inputs_embeds = self.embed_input_ids(input_ids)
+        output = super().forward(
+            input_ids, positions, intermediate_tensors, sp_shard(inputs_embeds)
+        )
+        num_tokens = positions.shape[-1]
+        if isinstance(output, tuple):
+            hidden_states, aux_hidden_states = output
+            return sp_all_gather(hidden_states)[:num_tokens], [
+                sp_all_gather(x)[:num_tokens] for x in aux_hidden_states
+            ]
+        return sp_all_gather(output)[:num_tokens]
 
 
 class Qwen3ForCausalLM(Qwen3ForCausalLMBase):
