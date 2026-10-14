@@ -316,8 +316,8 @@ class FrontendArgs(BaseFrontendArgs):
     while keeping logs for other endpoints."""
     allow_credentials: bool = False
     """Allow credentials."""
-    allowed_origins: list[str] = field(default_factory=lambda: ["*"])
-    """Allowed origins."""
+    allowed_origins: list[str] = field(default_factory=list)
+    """Allowed origins. Cross-origin browser access is disabled by default."""
     allowed_methods: list[str] = field(default_factory=lambda: ["*"])
     """Allowed methods."""
     allowed_headers: list[str] = field(default_factory=lambda: ["*"])

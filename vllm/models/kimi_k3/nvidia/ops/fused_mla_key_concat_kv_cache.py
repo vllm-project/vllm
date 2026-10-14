@@ -3,7 +3,7 @@
 """Fused MLA prefill and decode epilogues for Kimi-K3.
 
 Thin wrappers over the CUDA ops in
-``csrc/libtorch_stable/fused_kimi_k3_mla_key_concat_kv_cache_kernel.cu``, which
+``csrc/fused_kimi_k3_mla_key_concat_kv_cache_kernel.cu``, which
 mirror ``fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_{bf16,fp8}_insert``.
 
 - ``fused_mla_key_concat_kv_cache_insert`` (bf16): optionally apply RoPE,
