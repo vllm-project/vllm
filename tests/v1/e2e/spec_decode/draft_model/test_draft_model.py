@@ -15,6 +15,7 @@ from vllm.v1.spec_decode.draft_model import DraftModelProposer
 
 from ..utils import (
     Messages,
+    assert_request_outputs_match,
     compute_acceptance_len,
     compute_acceptance_rate,
     evaluate_llm_for_gsm8k,
@@ -163,6 +164,53 @@ def test_draft_model_transformers_backend(vllm_runner):
         expected_acceptance_rate=0.98,  # slight epsilon
     )
     assert_draft_model_correctness(sd_case, vllm_runner)
+
+
+@single_gpu_only
+def test_draft_model_heterogeneous_vocab(monkeypatch: pytest.MonkeyPatch, vllm_runner):
+    """A draft model with a different tokenizer (TLI) must run on Model Runner
+    V2, get its proposals accepted, and keep greedy outputs matching the target
+    model alone."""
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    target_model = "Qwen/Qwen2.5-1.5B-Instruct"
+    draft_model = "HuggingFaceTB/SmolLM2-360M-Instruct"
+    test_prompts = get_messages(dataset="test_prompts", n=100)
+    runner_kwargs = {
+        "block_size": None,
+        "enable_chunked_prefill": None,
+        "compilation_config": CompilationConfig(),
+        "max_model_len": 2048,
+        "gpu_memory_utilization": 0.5,
+        "enforce_eager": True,
+    }
+
+    with vllm_runner(target_model, **runner_kwargs) as ref_runner:
+        ref_outputs = ref_runner.llm.chat(test_prompts, greedy_sampling())
+
+    with vllm_runner(
+        target_model,
+        speculative_config={
+            "model": draft_model,
+            "method": "draft_model",
+            "num_speculative_tokens": 3,
+            "use_heterogeneous_vocab": True,
+        },
+        disable_log_stats=False,
+        **runner_kwargs,
+    ) as spec_runner:
+        spec_outputs = spec_runner.llm.chat(test_prompts, greedy_sampling())
+        acceptance_len = compute_acceptance_len(spec_runner.llm.get_metrics())
+
+    context = f"TLI target={target_model}, draft={draft_model}"
+    print(f"{context}: acceptance_len={acceptance_len:.3f}")
+    assert_request_outputs_match(
+        ref_outputs,
+        spec_outputs,
+        required_matches=int(0.6 * len(ref_outputs)) + 1,
+        context=context,
+    )
+    # ref: 1.92 on an L4
+    assert acceptance_len >= 1.5, f"{context}; acceptance_len={acceptance_len:.3f}"
 
 
 @multi_gpu_only(num_gpus=2)
