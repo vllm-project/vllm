@@ -388,6 +388,7 @@ def test_dense_prefill_builds_sparse_metadata_for_decode_subset(monkeypatch):
         query_start_loc_cpu=query_start_loc,
         seq_lens=seq_lens,
         seq_lens_cpu=seq_lens,
+        seq_lens_cpu_upper_bound=seq_lens,
         max_query_len=4,
         max_seq_len=16,
     )
@@ -474,6 +475,7 @@ def test_long_prefill_shares_full_sparse_metadata_with_decode(monkeypatch):
         query_start_loc_cpu=query_start_loc,
         seq_lens=seq_lens,
         seq_lens_cpu=seq_lens,
+        seq_lens_cpu_upper_bound=seq_lens,
         max_query_len=5,
         max_seq_len=16,
     )
@@ -698,6 +700,7 @@ def test_sparse_metadata_workload_length_dtype_matrix(
         query_start_loc_cpu=query_start_loc,
         seq_lens=seq_lens,
         seq_lens_cpu=seq_lens,
+        seq_lens_cpu_upper_bound=seq_lens,
         max_query_len=max(query_lens),
         max_seq_len=max(seq_lens_list),
     )
