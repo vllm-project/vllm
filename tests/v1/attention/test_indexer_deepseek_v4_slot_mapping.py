@@ -21,6 +21,9 @@ from vllm.v1.attention.backends.mla.compressor_utils import (
     CompressedSlotMappingKernel,
     get_compressed_slot_mapping,
 )
+from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import (
+    FlashInferMLASparseMetadataBuilder,
+)
 from vllm.v1.attention.backends.mla.indexer import (
     BuildPrefillChunkMetadataKernel,
     DeepseekV4IndexerBackend,
@@ -227,6 +230,64 @@ def test_indexer_draft_decode_refresh_follows_new_batch(monkeypatch, compress_ra
     assert torch.all(decode.decode_lens == 1)
     expected_seq_lens = torch.div(seq_lens, compress_ratio, rounding_mode="floor")
     torch.testing.assert_close(decode.seq_lens.flatten(), expected_seq_lens)
+
+
+@pytest.mark.parametrize("dcp_world_size", [1, 2])
+def test_flashinfer_sparse_draft_metadata_support_matches_dcp(
+    monkeypatch, dcp_world_size
+):
+    def mock_common_init(builder, *_args, **_kwargs):
+        builder.dcp_world_size = dcp_world_size
+
+    monkeypatch.setattr(SparseMLACommonMetadataBuilder, "__init__", mock_common_init)
+    monkeypatch.setattr(
+        FlashInferMLASparseMetadataBuilder,
+        "_init_reorder_batch_threshold",
+        lambda *_args, **_kwargs: None,
+    )
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(get_num_attention_heads=lambda _: 32),
+        parallel_config=SimpleNamespace(),
+    )
+
+    builder = FlashInferMLASparseMetadataBuilder(
+        SimpleNamespace(), [], vllm_config, torch.device("cpu")
+    )
+
+    assert builder.supports_draft_decode_metadata_update is (dcp_world_size == 1)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_flashinfer_sparse_draft_metadata_update_is_graph_safe():
+    query_start_loc = torch.tensor([0, 2, 3, 6], dtype=torch.int32, device="cuda")
+    req_id_per_token = torch.full((6,), -1, dtype=torch.int32, device="cuda")
+    metadata = SimpleNamespace(
+        num_decode_tokens=6,
+        query_start_loc=query_start_loc,
+        req_id_per_token=req_id_per_token,
+    )
+    builder = object.__new__(FlashInferMLASparseMetadataBuilder)
+
+    builder.update_draft_decode_metadata(metadata)
+    data_ptr = req_id_per_token.data_ptr()
+    torch.testing.assert_close(
+        req_id_per_token,
+        torch.tensor([0, 0, 1, 2, 2, 2], dtype=torch.int32, device="cuda"),
+    )
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        builder.update_draft_decode_metadata(metadata)
+
+    query_start_loc.copy_(torch.tensor([0, 1, 4, 6], dtype=torch.int32, device="cuda"))
+    graph.replay()
+    torch.accelerator.synchronize()
+
+    assert req_id_per_token.data_ptr() == data_ptr
+    torch.testing.assert_close(
+        req_id_per_token,
+        torch.tensor([0, 1, 1, 1, 2, 2], dtype=torch.int32, device="cuda"),
+    )
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
