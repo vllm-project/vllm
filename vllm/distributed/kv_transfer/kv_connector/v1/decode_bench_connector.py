@@ -336,25 +336,34 @@ class DecodeBenchConnectorScheduler:
             if group_idx in self._startup_fill_group_ids:
                 block_ids_per_group_list.append([])
                 continue
-            is_circular_buffer = all(
-                isinstance(spec, CircularBufferSpec)
+            # Token-range math only applies to token-paged attention caches.
+            # Circular buffers and fixed-size state caches (e.g. Mamba / Kimi
+            # Delta Attention in hybrid models) allocate a fixed number of
+            # blocks per request, so fill all of their allocated blocks.
+            is_token_paged_attention = all(
+                isinstance(spec, AttentionSpec)
+                and not isinstance(spec, CircularBufferSpec)
                 for spec in iter_layer_specs(group.kv_cache_spec)
             )
-            if not is_circular_buffer:
+            if is_token_paged_attention:
                 num_computed_blocks = cdiv(total_computed_tokens, group_block_size)
                 external_block_start = num_local_computed_tokens // group_block_size
-                assert (
-                    0
-                    <= external_block_start
-                    <= num_computed_blocks
-                    <= len(group_blocks)
-                ), (
-                    "DecodeBenchConnector block range exceeds allocated blocks: "
-                    f"request={req_id}, group={group_idx}, "
-                    f"range=[{external_block_start}, {num_computed_blocks}), "
-                    f"allocated={len(group_blocks)}"
-                )
-                selected_blocks = group_blocks[external_block_start:num_computed_blocks]
+                if num_computed_blocks > len(group_blocks):
+                    # Bounded-window attention specs (sliding window, chunked
+                    # local, kpool tail rings, ...) keep only a fixed number
+                    # of blocks per request regardless of sequence length.
+                    # Fill all allocated blocks instead of the token range.
+                    selected_blocks = group_blocks
+                else:
+                    assert 0 <= external_block_start <= num_computed_blocks, (
+                        "DecodeBenchConnector block range exceeds allocated "
+                        f"blocks: request={req_id}, group={group_idx}, "
+                        f"range=[{external_block_start}, {num_computed_blocks}), "
+                        f"allocated={len(group_blocks)}"
+                    )
+                    selected_blocks = group_blocks[
+                        external_block_start:num_computed_blocks
+                    ]
             else:
                 selected_blocks = group_blocks
 
