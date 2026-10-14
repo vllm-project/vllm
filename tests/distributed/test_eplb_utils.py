@@ -6,7 +6,9 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 
+from vllm.distributed.eplb import eplb_state as eplb_state_module
 from vllm.distributed.eplb.eplb_state import (
+    EplbState,
     _commit_eplb_maps,
     _commit_eplb_maps_for_layer,
 )
@@ -157,3 +159,29 @@ def test_commit_eplb_maps_for_layer():
 
     # Layer 1 untouched
     assert torch.equal(model_state.physical_to_logical_map[1], original_phy2log[1])
+
+
+def test_load_window_keeps_logical_load_across_map_change(monkeypatch):
+    """Load recorded before a map change stays with the expert that received it."""
+    monkeypatch.setattr(eplb_state_module, "get_ep_group", MagicMock())
+    state = EplbState.__new__(EplbState)
+    state.expert_load_window_size = state.expert_rearrangement_step_interval = 3
+    state.expert_load_window_step = state.expert_rearrangement_step = 0
+    state.is_async, state.should_record_tensor = False, None
+    phy2log = torch.tensor([[0, 1, 2, 0]])
+    model_state = _make_model_state(
+        phy2log=phy2log,
+        log2phy=torch.full((1, 3, 2), -1, dtype=torch.long),
+        logcnt=torch.zeros(1, 3, dtype=torch.long),
+    )
+    model_state.expert_load_window_index = phy2log.clone()
+    model_state.expert_load_pass = torch.tensor([[1, 2, 3, 4]])
+    model_state.expert_load_window = torch.zeros((3, 1, 4), dtype=torch.long)
+    state.model_states = {"m": model_state}
+
+    state.step()
+    _commit_eplb_maps(model_state, torch.tensor([[2, 1, 0, -1]]))
+    model_state.expert_load_pass.copy_(torch.tensor([[1, 2, 3, 0]]))
+    state.step()
+
+    assert model_state.expert_load_window[..., :-1].sum(dim=0).tolist() == [[8, 4, 4]]
