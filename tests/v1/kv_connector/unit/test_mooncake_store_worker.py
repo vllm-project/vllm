@@ -41,6 +41,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
     RankLocalStoreLayout,
     ReqMeta,
     TailKeyBoundary,
+    chunk_hashes_for_block_size,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.metrics import (
     MooncakeStoreConnectorStats,
@@ -5192,3 +5193,18 @@ def test_blob_block_hashes_empty():
     view = BlobBlockHashes(memoryview(b""), 0)
     assert len(view) == 0
     assert list(view) == []
+
+
+@pytest.mark.parametrize(
+    "idx", [slice(None), slice(1, None), slice(None, None, 2), slice(None, None, -1)]
+)
+def test_blob_block_hashes_chunk_view_slice(idx):
+    """Slicing the compact chunk view over a lazy ``BlobBlockHashes`` slices the
+    backing store directly; it must match the subclass's element mapping."""
+    hashes = [BlockHash(bytes([i]) * 16) for i in range(7)]
+    view = chunk_hashes_for_block_size(
+        BlobBlockHashes(memoryview(b"".join(hashes)), 16), 2, 6
+    )
+    sliced = view[idx]
+    assert isinstance(sliced, list)
+    assert [bytes(h) for h in sliced] == [bytes(h) for h in list(view)[idx]]
