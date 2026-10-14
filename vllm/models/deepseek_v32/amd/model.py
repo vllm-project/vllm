@@ -82,9 +82,7 @@ class DeepseekV32DecoderLayer(torch.nn.Module):
                 quant_config=quant_config,
                 prefix=f"{prefix}.mlp",
             )
-            # The late all-reduce is fused into the next layer's RMSNorm, which
-            # only exists on the TP path. All2all kernels (MoRI EP, DeepEP)
-            # already return a reduced output and must keep the default.
+            # all2all already reduces; only TP defers it to the next RMSNorm.
             moe_parallel_config = self.mlp.experts.moe_config.moe_parallel_config
             if not moe_parallel_config.use_all2all_kernels:
                 self.mlp.experts.moe_config.skip_final_all_reduce = True
