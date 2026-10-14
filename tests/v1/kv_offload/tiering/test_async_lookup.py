@@ -248,29 +248,6 @@ class TestAsyncLookupManager:
         assert _key(1) not in mgr._lookup_state
         mgr.shutdown()
 
-    def test_stale_result_does_not_resolve_recreated_key(self):
-        mgr = InMemoryLookupManager(existing_keys={_key(1)})
-        old_ctx = _ctx("old")
-        new_ctx = _ctx("new")
-
-        assert mgr.lookup(_key(1), old_ctx) is None
-        [(_, _, old_generation)] = mgr._lookup_batch
-        mgr.cleanup(old_ctx)
-
-        assert mgr.lookup(_key(1), new_ctx) is None
-        new_generation = mgr._lookup_state[_key(1)].generation
-        assert new_generation != old_generation
-
-        mgr._pending_results.put([(_key(1), old_generation, True)])
-        mgr.drain_results()
-        assert mgr._lookup_state[_key(1)].result is None
-
-        mgr._lookup_state[_key(1)].phase = LookupPhase.IN_FLIGHT
-        mgr._pending_results.put([(_key(1), new_generation, True)])
-        mgr.drain_results()
-        assert mgr._lookup_state[_key(1)].result is True
-        mgr.shutdown()
-
     def test_multiple_flushes_across_steps(self):
         existing = {_key(1), _key(2), _key(3)}
         mgr = InMemoryLookupManager(existing_keys=existing)

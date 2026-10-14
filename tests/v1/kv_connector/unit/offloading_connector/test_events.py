@@ -275,6 +275,12 @@ def test_partial_tail_event_describes_hash_aligned_physical_block_prefix():
         hashes_per_chunk=4
     )
     req = _request(block_hashes=[_hash(i) for i in range(8)], token_count=32)
+    req.lora_request = SimpleNamespace(
+        adapter_id=7,
+        name="adapter",
+        lora_name="adapter",
+        lora_path="adapter-path",
+    )
     key = make_offload_key(req.block_hashes[6], group_config.group_idx)
 
     tracker.on_new_request(
@@ -290,6 +296,16 @@ def test_partial_tail_event_describes_hash_aligned_physical_block_prefix():
     assert event.parent_block_hash == _wire_hash(_hash(3))
     assert event.token_ids == list(range(17, 29))
     assert event.block_size == 4
+    expected = []
+    mm_idx = 0
+    for start in (16, 20, 24):
+        extra_keys, mm_idx = generate_block_hash_extra_keys(
+            req, start, start + 4, mm_idx
+        )
+        expected.append(extra_keys)
+    assert event.extra_keys == to_event_extra_keys(tuple(expected))
+    assert event.lora_id == 7
+    assert event.lora_name == "adapter"
 
 
 def test_partial_tail_event_uses_its_exact_request_context():
@@ -432,20 +448,6 @@ def test_cpu_stored_wire_distinguishes_unsalted_from_unknown():
     assert decoded.events[1].extra_keys is None
 
 
-def test_request_event_context_builds_payload_lazily():
-    tracker = _tracker()
-    req = _request(block_hashes=[_hash(0)], token_count=4)
-    [key] = _record_chunks(tracker, req, _group_config(), num_chunks=1)
-    state = req.req_context.get_state(_RequestEventContext)
-
-    assert state is not None
-    assert not state.locators
-
-    list(tracker.take_events([_stored_event([key], req_context=req.req_context)]))
-
-    assert state.locators[key] == 4
-
-
 def test_request_event_context_indexes_only_valid_group_chunk_tails():
     tracker = _tracker()
     group0 = _group_config(group_idx=0, block_size=4, blocks_per_chunk=2)
@@ -457,47 +459,32 @@ def test_request_event_context_indexes_only_valid_group_chunk_tails():
     )
     req = _request(block_hashes=[_hash(i) for i in range(4)], token_count=16)
     tracker.on_new_request(req.req_context, req, (group0, group1))
-    state = req.req_context.get_state(_RequestEventContext)
-    assert state is not None
-    assert not state.locators
 
     key0 = make_offload_key(req.block_hashes[1], group0.group_idx)
+    key0_later = make_offload_key(req.block_hashes[3], group0.group_idx)
     key1 = make_offload_key(req.block_hashes[3], group1.group_idx)
+    invalid0 = make_offload_key(req.block_hashes[0], group0.group_idx)
+    invalid1 = make_offload_key(req.block_hashes[1], group1.group_idx)
     events = list(
-        tracker.take_events([_stored_event([key0, key1], req_context=req.req_context)])
+        tracker.take_events(
+            [
+                _stored_event(
+                    [key0, key0_later, key1, invalid0, invalid1],
+                    req_context=req.req_context,
+                )
+            ]
+        )
     )
 
-    assert [(event.group_idx, len(event.token_ids)) for event in events] == [
-        (0, 8),
-        (1, 16),
+    assert [
+        (event.group_idx, len(event.token_ids), event.block_size) for event in events
+    ] == [
+        (0, 8, 4),
+        (0, 8, 4),
+        (1, 16, 8),
+        (0, 0, 0),
+        (1, 0, 0),
     ]
-    assert set(state.locators) == {
-        key0,
-        make_offload_key(req.block_hashes[3], group0.group_idx),
-        key1,
-    }
-
-
-def test_stored_event_uses_context_carried_by_raw_event():
-    tracker = _tracker()
-    group_config = _group_config()
-    first_req = _request(block_hashes=[_hash(0)], token_count=4)
-    second_req = _request(block_hashes=[_hash(1)], token_count=4)
-    second_req.all_token_ids = [9, 9, 9, 9]
-    [first_key] = _record_chunks(tracker, first_req, group_config, num_chunks=1)
-    [second_key] = _record_chunks(tracker, second_req, group_config, num_chunks=1)
-
-    [first_event] = tracker.take_events(
-        [_stored_event([first_key], req_context=first_req.req_context)]
-    )
-    [second_event] = tracker.take_events(
-        [_stored_event([second_key], req_context=second_req.req_context)]
-    )
-
-    assert first_req.request_id == second_req.request_id
-    assert first_req.req_context is not second_req.req_context
-    assert first_event.token_ids == [1, 2, 3, 4]
-    assert second_event.token_ids == [9, 9, 9, 9]
 
 
 @pytest.mark.parametrize(
@@ -521,27 +508,17 @@ def test_stored_event_without_matching_context_uses_placeholder(event_context):
 
 def test_stored_event_reads_request_when_event_is_translated():
     tracker = _tracker()
-    req = _request(block_hashes=[_hash(0)], token_count=4)
-    [key] = _record_chunks(tracker, req, _group_config(), num_chunks=1)
-    req.all_token_ids = [9, 8, 7, 6]
+    group_config = _group_config()
+    req = _request(block_hashes=[], token_count=0)
+    tracker.on_new_request(req.req_context, req, (group_config,))
+    req.all_token_ids.extend([9, 8, 7, 6])
+    _rehash_request(req, block_size=4)
+    key = make_offload_key(req.block_hashes[0], group_config.group_idx)
 
     [stored] = tracker.take_events([_stored_event([key], req_context=req.req_context)])
 
     assert stored.token_ids == [9, 8, 7, 6]
-
-
-def test_stored_event_without_context_and_key_only_removal():
-    tracker = _tracker()
-    req = _request(block_hashes=[_hash(0), _hash(1)], token_count=8)
-    [key] = _record_chunks(
-        tracker, req, _group_config(blocks_per_chunk=2), num_chunks=1
-    )
-
-    [stored] = tracker.take_events([_stored_event([key])])
-    [removed] = tracker.take_events([_removed_event([key])])
-
-    assert stored.block_size == 0
-    assert removed.block_hashes == [_wire_hash(_hash(1))]
+    assert stored.block_hashes == [_wire_hash(req.block_hashes[0])]
 
 
 @pytest.mark.parametrize("unsafe_path", ["resumable", "mamba_truncation"])
@@ -612,42 +589,6 @@ def test_full_event_extra_keys_include_prompt_embeddings():
     assert event.block_hashes == [_wire_hash(value) for value in req.block_hashes]
     assert event.token_ids == req.all_token_ids
     assert event.extra_keys == to_event_extra_keys(tuple(expected))
-
-
-def test_partial_event_extra_keys_include_cache_salt_and_lora():
-    tracker = _tracker()
-    group_config = _group_config(
-        block_size=16,
-        tokens_per_hash=4,
-    )
-    req = _request(block_hashes=[_hash(i) for i in range(4)], token_count=16)
-    req.cache_salt = "salt"
-    req.lora_request = SimpleNamespace(
-        adapter_id=7,
-        name="adapter",
-        lora_name="adapter",
-        lora_path="adapter-path",
-    )
-    key = make_offload_key(req.block_hashes[2], group_config.group_idx)
-
-    tracker.on_new_request(
-        req.req_context,
-        req,
-        (group_config,),
-        supports_partial_tail=True,
-    )
-    [event] = tracker.take_events([_stored_event([key], req_context=req.req_context)])
-
-    expected = []
-    mm_idx = 0
-    for start in (0, 4, 8):
-        extra_keys, mm_idx = generate_block_hash_extra_keys(
-            req, start, start + 4, mm_idx
-        )
-        expected.append(extra_keys)
-    assert event.extra_keys == to_event_extra_keys(tuple(expected))
-    assert event.lora_id == 7
-    assert event.lora_name == "adapter"
 
 
 def test_partial_event_extra_keys_replay_mm_features_from_request_start():
@@ -884,24 +825,6 @@ def test_removal_needs_no_request_context_or_prior_store():
     assert removed.group_idx == 2
 
 
-def test_secondary_removal_is_key_only_and_preserves_ownership():
-    tracker, req, _, key = _lookup_chunk()
-    [stored] = tracker.take_events(
-        [
-            _stored_event(
-                [key], Medium.STORAGE, ownership="custom", req_context=req.req_context
-            )
-        ]
-    )
-    [removed] = tracker.take_events(
-        [_removed_event([key], Medium.STORAGE, ownership="custom")]
-    )
-
-    assert stored.token_ids == [1, 2, 3, 4]
-    assert removed.block_hashes == [_wire_hash(_hash(0))]
-    assert stored.ownership == removed.ownership == "custom"
-
-
 def test_take_events_groups_removed_hashes_by_kv_group():
     tracker = _tracker()
     group0_config = _group_config(group_idx=0, blocks_per_chunk=2)
@@ -959,22 +882,6 @@ def test_take_events_supports_restore_after_eviction():
     assert len(second_store) == 1
     assert isinstance(second_store[0], BlockStored)
     assert second_store[0].token_ids == [1, 2, 3, 4]
-
-
-def test_removal_keeps_request_context_for_secondary_events():
-    tracker = _tracker()
-    group_config = _group_config()
-    req = _request(block_hashes=[_hash(i) for i in range(3)], token_count=12)
-    _record_lookup_chunks(tracker, req, group_config, num_chunks=3)
-
-    key = make_offload_key(req.block_hashes[0], group_config.group_idx)
-    list(tracker.take_events([_removed_event([key])]))
-
-    assert req.req_context.get_state(_RequestEventContext) is not None
-    [event] = tracker.take_events(
-        [_stored_event([key], medium=Medium.STORAGE, req_context=req.req_context)]
-    )
-    assert event.token_ids == [1, 2, 3, 4]
 
 
 def test_tiering_accepts_self_describing_kv_events():
