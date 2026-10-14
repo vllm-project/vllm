@@ -3,17 +3,20 @@
 
 from vllm.logger import init_logger
 from vllm.triton_utils import HAS_TRITON
+from vllm.v1.watermarking.gpu_sampler import GPUWatermarkSampler
 from vllm.v1.worker.cpu.model_state import (
     CPUDefaultModelState,
     CPUMambaHybridModelState,
 )
-from vllm.v1.worker.cpu.sampler import CPUSampler
+from vllm.v1.worker.cpu.sampler import CPUSampler, CPUWatermarkSampler
+from vllm.v1.worker.cpu.structured_outputs import CPUStructuredOutputsWorker
 from vllm.v1.worker.cpu.utils import CPUKVBlockZeroer
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 from vllm.v1.worker.gpu.model_states.default import DefaultModelState
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
 from vllm.v1.worker.gpu.sample.sampler import Sampler
+from vllm.v1.worker.gpu.structured_outputs import StructuredOutputsWorker
 from vllm.v1.worker.utils import KVBlockZeroer
 
 logger = init_logger(__name__)
@@ -25,6 +28,10 @@ class CPUModelRunner(GPUModelRunner):
         return super().sampler_cls if HAS_TRITON else CPUSampler
 
     @property
+    def watermark_sampler_cls(self) -> type[GPUWatermarkSampler]:
+        return super().watermark_sampler_cls if HAS_TRITON else CPUWatermarkSampler
+
+    @property
     def model_state_cls(self) -> type[ModelState]:
         model_state_cls = super().model_state_cls
         if not HAS_TRITON:
@@ -33,6 +40,12 @@ class CPUModelRunner(GPUModelRunner):
             if model_state_cls is MambaHybridModelState:
                 return CPUMambaHybridModelState
         return model_state_cls
+
+    @property
+    def structured_outputs_worker_cls(self) -> type[StructuredOutputsWorker]:
+        if HAS_TRITON:
+            return super().structured_outputs_worker_cls
+        return CPUStructuredOutputsWorker
 
     @property
     def kv_block_zeroer_cls(self) -> type[KVBlockZeroer]:

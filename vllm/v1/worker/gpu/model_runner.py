@@ -493,7 +493,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 watermarker = create_watermarker(wm_config)
                 if self.speculative_config is not None:
                     watermarker = create_speculative_target_watermarker(watermarker)
-                self.sampler = GPUWatermarkSampler(
+                self.sampler = self.watermark_sampler_cls(
                     watermarker,
                     deduplicate_contexts=wm_config.deduplicate_contexts,
                     deduplicate_contexts_max_history=(
@@ -520,7 +520,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.device,
                 logprobs_mode=self.model_config.logprobs_mode,
             )
-            self.structured_outputs_worker = StructuredOutputsWorker(
+            self.structured_outputs_worker = self.structured_outputs_worker_cls(
                 max_num_logits=self.max_num_reqs * self.decode_query_len,
                 vocab_size=self.vocab_size,
                 device=self.device,
@@ -2409,6 +2409,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     @property
     def sampler_cls(self) -> type[Sampler]:
         return Sampler
+
+    @property
+    def watermark_sampler_cls(self) -> type[GPUWatermarkSampler]:
+        return GPUWatermarkSampler
+
+    @property
+    def structured_outputs_worker_cls(self) -> type[StructuredOutputsWorker]:
+        return StructuredOutputsWorker
 
     @property
     def model_state_cls(self) -> type[ModelState]:

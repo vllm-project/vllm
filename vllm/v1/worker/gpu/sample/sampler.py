@@ -42,6 +42,12 @@ from vllm.v1.worker.gpu.states import RequestState
 
 class Sampler:
     sampling_states_cls: type[SamplingStates] = SamplingStates
+    sampling_mask_tensors_cls: type[SamplingMaskTensors] = SamplingMaskTensors
+    logit_bias_state_cls: type[LogitsProcessor] = LogitBiasState
+    penalties_state_cls: type = PenaltiesState
+    bad_words_state_cls: type[LogitsProcessor] = BadWordsState
+    thinking_budget_state_cls: type = ThinkingBudgetState
+    trace_replay_state_cls = TraceReplayState
 
     def __init__(
         self,
@@ -65,9 +71,9 @@ class Sampler:
         self.sampling_states = self.sampling_states_cls(max_num_reqs, vocab_size)
 
         lp_req_state = LogitsProcRequestState.from_request_state(req_states)
-        self.penalties_state = PenaltiesState(vllm_config, lp_req_state)
-        logit_bias_state = LogitBiasState(vllm_config, lp_req_state)
-        bad_words_state = BadWordsState(vllm_config, lp_req_state)
+        self.penalties_state = self.penalties_state_cls(vllm_config, lp_req_state)
+        logit_bias_state = self.logit_bias_state_cls(vllm_config, lp_req_state)
+        bad_words_state = self.bad_words_state_cls(vllm_config, lp_req_state)
 
         # List order is pipeline order: bias adds, penalties scale, so the
         # two do not commute.
@@ -79,11 +85,11 @@ class Sampler:
         ]
 
         self.logprob_token_ids_state = LogprobTokenIdsState(max_num_reqs, device)
-        self.thinking_budget_state = ThinkingBudgetState(
+        self.thinking_budget_state = self.thinking_budget_state_cls(
             req_states, vllm_config.reasoning_config
         )
         self.trace_replay_state = (
-            TraceReplayState(req_states) if enable_trace_replay else None
+            self.trace_replay_state_cls(req_states) if enable_trace_replay else None
         )
         self.needs_logits_processing = np.zeros(max_num_reqs, dtype=bool)
         self.num_speculative_tokens = num_speculative_tokens
@@ -134,6 +140,10 @@ class Sampler:
         num_logprobs = max_num_logprobs if max_num_logprobs != NO_LOGPROBS else 0
         return num_logprobs, max_token_ids
 
+    @staticmethod
+    def _get_num_nans(logits: torch.Tensor) -> torch.Tensor:
+        return get_num_nans(logits)
+
     def _compute_topk_scores(
         self,
         logits: torch.Tensor,
@@ -172,7 +182,7 @@ class Sampler:
 
         # NOTE(woosuk): We intentionally compute num_nans before sampling to make clear
         # that num_nans is computed before applying penalties and temperature.
-        num_nans = get_num_nans(logits) if self.compute_nans else None
+        num_nans = self._get_num_nans(logits) if self.compute_nans else None
 
         logprobs_dims = self.get_logprobs_dims(idx_mapping_np)
 
@@ -227,7 +237,7 @@ class Sampler:
         if self.return_sampling_mask:
             # Size by the validated top_k batch max; wider supports use the bitmask.
             max_num_kept = int(np.max(self.sampling_states.top_k.np[idx_mapping_np]))
-            sampling_mask_tensors = SamplingMaskTensors.from_logits(
+            sampling_mask_tensors = self.sampling_mask_tensors_cls.from_logits(
                 processed_logits,
                 input_batch.cu_num_logits,
                 num_sampled,
