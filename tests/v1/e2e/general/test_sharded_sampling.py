@@ -17,6 +17,7 @@ import pytest
 
 from tests.utils import multi_gpu_test
 from vllm import LLM, SamplingParams
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.logprobs import Logprob, LogprobsOnePosition
 
@@ -188,6 +189,12 @@ def test_sharded_sampling_outputs_match(monkeypatch: pytest.MonkeyPatch):
     # Queue every request before the first step, so both boots schedule the
     # same batches -- see the module docstring.
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    # AITER's tuned bf16 GEMMs include split-K kernels whose output varies from
+    # call to call and suffer from a documented accuracy issue:
+    # https://github.com/ROCm/aiter/issues/6114
+    # TODO(rasmith) Remove when the issue is resolved.
+    if rocm_aiter_ops.is_tgemm_enabled():
+        monkeypatch.setattr(rocm_aiter_ops, "is_tgemm_enabled", lambda: False)
 
     ref_outputs = _generate(monkeypatch, disable_sharding=True)
     shard_outputs = _generate(monkeypatch, disable_sharding=False)
