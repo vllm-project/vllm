@@ -614,3 +614,134 @@ def test_sharded_ranks_reproduce_the_single_rank_result(
         merged.to(reference.dtype), reference, rtol=2e-2, atol=2e-2
     )
     torch.testing.assert_close(merged_lse, reference_lse.float(), rtol=1e-3, atol=1e-3)
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("interleave", [1, 4, 16])
+def test_qsa_impl_passes_the_mtp_interleave_check(monkeypatch, interleave):
+    """The replicated QSA path accepts MTP at any interleave, not only the
+    sharded selector."""
+    from types import SimpleNamespace
+
+    from vllm.v1.worker import cp_utils
+
+    import_module("vllm.models.qwen4_exp.nvidia.model")
+    Qwen4ExpQSAFlashAttentionImpl = import_module(
+        "vllm.models.qwen4_exp.nvidia.qsa"
+    ).Qwen4ExpQSAFlashAttentionImpl
+
+    impl = SimpleNamespace(
+        dcp_world_size=4,
+        need_to_return_lse_for_decode=True,
+        supports_mtp_with_cp_non_trivial_interleave_size=(
+            Qwen4ExpQSAFlashAttentionImpl.supports_mtp_with_cp_non_trivial_interleave_size
+        ),
+    )
+    config = SimpleNamespace(
+        parallel_config=SimpleNamespace(
+            prefill_context_parallel_size=1,
+            decode_context_parallel_size=4,
+            cp_kv_cache_interleave_size=interleave,
+        ),
+        speculative_config=object(),
+    )
+    monkeypatch.setattr(
+        cp_utils,
+        "get_layers_from_vllm_config",
+        lambda *args: {"qsa": SimpleNamespace(impl=impl)},
+    )
+    cp_utils.check_attention_cp_compatibility(config)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="QSA kernels need CUDA")
+@pytest.mark.parametrize("cache_dtype", [torch.bfloat16, torch.float8_e4m3fn])
+@pytest.mark.parametrize("world,interleave", [(4, 1), (4, 4), (4, 16), (2, 8)])
+def test_mtp_verify_rows_match_the_single_rank_result(world, interleave, cache_dtype):
+    """MTP verify rows (one request, consecutive positions, each row
+    selecting causally up to its own position) give the single-rank result
+    at every interleave that divides the block size."""
+    from vllm.models.qwen4_exp.nvidia.ops.qsa import qsa_sparse_paged_attention
+    from vllm.models.qwen4_exp.nvidia.ops.qsa_dcp import qsa_localize_dcp_indices
+    from vllm.platforms import current_platform
+    from vllm.v1.attention.ops.dcp import _lse_weighted_combine
+
+    page, head_dim, num_kv_heads, num_q_heads = 16, 64, 2, 8
+    if cache_dtype == torch.float8_e4m3fn:
+        if current_platform.has_device_capability(89):
+            storage, k_scale, v_scale = torch.float8_e4m3fn, 0.75, 1.5
+        else:
+            storage, k_scale, v_scale = torch.uint8, 0.75, 1.5
+    else:
+        storage, k_scale, v_scale = torch.bfloat16, None, None
+    torch.manual_seed(world * 100 + interleave)
+    device, seq_len, verify_len = "cuda", 300, 4
+    full_blocks = (seq_len + page - 1) // page
+    shape = (full_blocks, page, num_kv_heads, head_dim)
+    k_full = torch.randn(shape, dtype=torch.bfloat16, device=device)
+    v_full = torch.randn(shape, dtype=torch.bfloat16, device=device)
+    if storage != torch.bfloat16:
+        k_full = (k_full / k_scale).to(torch.float8_e4m3fn).view(storage)
+        v_full = (v_full / v_scale).to(torch.float8_e4m3fn).view(storage)
+    local_blocks = (seq_len // world + page + page - 1) // page
+    local_shape = (local_blocks, page, num_kv_heads, head_dim)
+    k_rank = [
+        torch.zeros(local_shape, dtype=storage, device=device) for _ in range(world)
+    ]
+    v_rank = [
+        torch.zeros(local_shape, dtype=storage, device=device) for _ in range(world)
+    ]
+    for pos in range(seq_len):
+        r, lid = _owner(pos, world, interleave), _local_id(pos, world, interleave)
+        k_rank[r][lid // page, lid % page] = k_full[pos // page, pos % page]
+        v_rank[r][lid // page, lid % page] = v_full[pos // page, pos % page]
+
+    # The verify span: the last verify_len positions; row i sees up to its own
+    # position (the drafted tokens of the earlier rows included).
+    positions = range(seq_len - verify_len, seq_len)
+    selections = [list(range(0, p + 1, 3)) + [p] for p in positions]
+    width = max(len(s) for s in selections)
+    global_sel = _pack(selections, width, device)
+    q = torch.randn(
+        (verify_len, num_q_heads, head_dim), dtype=torch.bfloat16, device=device
+    )
+    token_to_req = torch.zeros(verify_len, dtype=torch.int32, device=device)
+    table = torch.arange(full_blocks, dtype=torch.int32, device=device)[None]
+    local_table = torch.arange(local_blocks, dtype=torch.int32, device=device)[None]
+    scales = {"k_scale": k_scale, "v_scale": v_scale}
+
+    reference, reference_lse = qsa_sparse_paged_attention(
+        q,
+        k_full,
+        v_full,
+        global_sel,
+        table,
+        token_to_req,
+        False,
+        return_lse=True,
+        **scales,
+    )
+    outs, lses = [], []
+    for rank in range(world):
+        local_sel = qsa_localize_dcp_indices(
+            global_sel, torch.empty_like(global_sel), world, rank, interleave
+        )
+        out, lse = qsa_sparse_paged_attention(
+            q,
+            k_rank[rank],
+            v_rank[rank],
+            local_sel,
+            local_table,
+            token_to_req,
+            False,
+            return_lse=True,
+            **scales,
+        )
+        outs.append(out.float())
+        lses.append(lse)
+    merged, merged_lse = _lse_weighted_combine(
+        torch.stack(outs), torch.stack(lses), return_lse=True, is_lse_base_on_e=False
+    )
+    torch.testing.assert_close(
+        merged.to(reference.dtype), reference, rtol=2e-2, atol=2e-2
+    )
+    torch.testing.assert_close(merged_lse, reference_lse.float(), rtol=1e-3, atol=1e-3)
