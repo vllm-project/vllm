@@ -1106,7 +1106,7 @@ def test_abort_before_hit_uses_placeholder_then_key_only_removal(request_runner)
     assert len(removed.block_hashes) == 1
 
 
-def test_reset_buffers_queued_key_only_removal(request_runner):
+def test_reset_preserves_queued_key_only_removal(request_runner):
     runner = request_runner(
         block_size=4,
         num_gpu_blocks=10,
@@ -1136,7 +1136,6 @@ def test_reset_buffers_queued_key_only_removal(request_runner):
     [event] = scheduler.take_events()
     assert isinstance(event, BlockRemoved)
     assert len(event.block_hashes) == 1
-    assert not scheduler._pending_events
 
 
 @pytest.mark.parametrize("blocks_per_chunk", [1, 2])
