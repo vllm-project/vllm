@@ -11,10 +11,10 @@ Reproduces the attention shape of
 96 gathered heads, bf16 KV, qlen 6 and the 768-token blocks the hybrid KDA
 layers impose. Segmented MLA tiles those blocks at 128 tokens and needs 128 KiB
 of LDS (gfx942 has 64 KiB). DeepSeek-V3 with MTP and an fp8 KV cache at DCP 8
-hits the same limit through its 128 gathered heads. By default every gfx942
-verify shape runs on AITER's single-token asm decode. With
-VLLM_ROCM_AITER_MLA_GFX942_DCP_VERIFY=triton, shapes segmented MLA fits stay on
-it and the rest take the generic Triton split-KV kernel.
+hits the same limit through its 128 gathered heads. Every gfx942 verify shape
+with an asm kernel for its gathered head count runs on AITER's single-token asm
+decode. Without one, shapes segmented MLA fits stay on it and the rest take the
+generic Triton split-KV kernel.
 
 The real metadata builder and ``forward_mqa`` run on one GPU with the DCP ranks
 simulated one after another. That is sound because this path has no
@@ -223,16 +223,18 @@ def _run_rank(config, spec, layer_name, group, rank, q, q_scale, kv_cache_src, k
 def test_dcp_verify_matches_attention(
     monkeypatch, fake_dcp_groups, heads_per_rank, qlen, block_size, fp8_kv, route
 ):
-    monkeypatch.setenv(
-        "VLLM_ROCM_AITER_MLA_GFX942_DCP_VERIFY",
-        "asm" if route == "ASM_ROWS" else "triton",
-    )
+    import vllm.v1.attention.backends.mla.rocm_aiter_mla as backend
     from vllm.config import set_current_vllm_config
     from vllm.v1.kv_cache_interface import MLAAttentionSpec
     from vllm.v1.worker.workspace import (
         init_workspace_manager,
         is_workspace_manager_initialized,
     )
+
+    if route != "ASM_ROWS":
+        # Exercise the fallback taken when gfx942 has no asm kernel for the
+        # gathered head count.
+        monkeypatch.setattr(backend, "_asm_rows_dcp_verify_heads", lambda *_: 0)
 
     device = torch.device("cuda", torch.accelerator.current_device_index())
     if not is_workspace_manager_initialized():
@@ -321,6 +323,18 @@ def test_asm_rows_split_count():
     # Rows alone fill the GPU, but one split would skip the LSE reducer.
     assert _asm_rows_num_kv_splits(192, 16384, mi325x_cus) == 2
     assert _asm_rows_num_kv_splits(2, 16, mi325x_cus) == 2
+
+
+def test_asm_rows_heads_fall_back_without_a_kernel():
+    from vllm.v1.attention.backends.mla.rocm_aiter_mla import (
+        _asm_rows_dcp_verify_heads,
+    )
+
+    assert _asm_rows_dcp_verify_heads(96, fp8_kv=False) == 128
+    assert _asm_rows_dcp_verify_heads(32, fp8_kv=False) == 32
+    assert _asm_rows_dcp_verify_heads(32, fp8_kv=True) == 128
+    assert _asm_rows_dcp_verify_heads(256, fp8_kv=False) == 0
+    assert _asm_rows_dcp_verify_heads(256, fp8_kv=True) == 0
 
 
 @pytest.mark.parametrize(

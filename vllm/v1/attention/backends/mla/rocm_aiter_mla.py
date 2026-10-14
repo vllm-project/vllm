@@ -385,13 +385,13 @@ def _reserve_triton_dcp_verify_workspace(
 #   round-robin ASM decode rebuilds global positions from g_kv_indptr, cp_rank
 #   and cp_world_size and applies the causal window in-kernel. Kernels exist only
 #   at _NATIVE_CPRR_HEADS; other gathered head counts are padded up.
-# * triton: causal qlen > 1 on gfx942 for shapes segmented MLA cannot fit in
-#   LDS (_segmented_mla_fits_lds). Generic split-KV decode over the same
-#   per-row local window segmented uses.
-# * asm rows: causal qlen > 1 on gfx942 unless
-#   VLLM_ROCM_AITER_MLA_GFX942_DCP_VERIFY=triton. The same row view, run
-#   through AITER's single-token asm decode with the query padded to a head
-#   count gfx942 ships a kernel for. Takes precedence over segmented and triton.
+# * triton: causal qlen > 1 on gfx942 for shapes neither asm rows nor segmented
+#   MLA can serve (_segmented_mla_fits_lds). Generic split-KV decode over the
+#   same per-row local window segmented uses.
+# * asm rows: causal qlen > 1 on gfx942 whenever gfx942 ships a single-token
+#   asm decode kernel for the gathered head count (_asm_rows_dcp_verify_heads).
+#   The same row view, with the query padded to that kernel's head count.
+#   Takes precedence over segmented and triton.
 # * segmented: causal qlen > 1 when cprr is not selected or qlen is below
 #   _MIN_CPRR_QLEN. Each verify token becomes a single-query row whose KV
 #   length encodes its causal window.
@@ -889,10 +889,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             )
         )
         self._asm_rows_dcp_verify_heads = 0
-        if (
-            supports_triton_dcp_verify
-            and envs.VLLM_ROCM_AITER_MLA_GFX942_DCP_VERIFY == "asm"
-        ):
+        if supports_triton_dcp_verify:
             self._asm_rows_dcp_verify_heads = _asm_rows_dcp_verify_heads(
                 self.num_heads * self.dcp_world_size,
                 is_quantized_kv_cache(vllm_config.cache_config.cache_dtype),
