@@ -346,7 +346,7 @@ steps:
   - tests/models/glm5next/
   - vllm/model_executor/layers/mamba/checkpoint.py
   commands:
-    - pytest -v -s models/glm5next
+    - pytest -v -s models/glm5next --ignore=models/glm5next/amd_mono/test_flash_ffn_kernel.py --ignore=models/glm5next/amd_mono/test_flash_kda_kernel.py --ignore=models/glm5next/amd_mono/test_flash_dsa_kernel.py --ignore=models/glm5next/amd_mono/test_flash_moe_vllm.py
   mirror:
     amd:
       automatic_shard: true
@@ -469,6 +469,8 @@ steps:
   - tests/models/test_language_model_cache_is_weak.py
   - tests/models/deepseek_v32/test_sequence_parallel.py
   - tests/models/deepseek_v32/test_pp_topk.py
+  - vllm/models/common/mono/
+  - tests/models/common/mono/
   - tests/models/test_deepseek_v4_fi_moe_ep.py
   - tests/models/test_dspark_mla.py
   - tests/models/transformers/test_layer_registry.py
@@ -488,6 +490,7 @@ steps:
       models/test_language_model_cache_is_weak.py
       models/deepseek_v32/test_sequence_parallel.py
       models/deepseek_v32/test_pp_topk.py
+      models/common/mono
       models/test_deepseek_v4_fi_moe_ep.py
       models/test_dspark_mla.py
       models/transformers/test_layer_registry.py
@@ -497,6 +500,22 @@ steps:
       models/test_beam_weight_mapping.py
       models/test_beam_numerics.py
       models/test_cohere2_moe_parallel_block.py
+
+- label: ':amd: (MI355) GLM-5.3-Flash Mono Decode Kernel'
+  key: glm53-flash-mono-decode-kernel-amd
+  dind: false
+  device: mi355_4
+  num_devices: 4
+  timeout_in_minutes: 40
+  working_dir: /vllm-workspace/
+  depends_on:
+  - image-build-amd
+  source_file_dependencies:
+  - vllm/models/common/mono/
+  - vllm/models/glm5next/amd/
+  - tests/models/glm5next/amd_mono/
+  commands:
+  - pytest -v -s tests/models/glm5next/amd_mono/test_flash_ffn_kernel.py tests/models/glm5next/amd_mono/test_flash_kda_kernel.py tests/models/glm5next/amd_mono/test_flash_dsa_kernel.py tests/models/glm5next/amd_mono/test_flash_moe_vllm.py
 
 - label: ':amd: (MI355) DeepSeek-V4.1 Mono Decode Numerics'
   key: dsv41-mono-decode-numerics-amd
