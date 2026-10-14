@@ -340,6 +340,7 @@ steps:
   depends_on:
   - image-build-amd
   source_file_dependencies:
+  - docker/Dockerfile.rocm_base
   - vllm/models/common/mono/
   - vllm/models/glm5next/amd/
   - tests/models/glm5next/amd_mono/
