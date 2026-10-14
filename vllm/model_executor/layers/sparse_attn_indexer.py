@@ -877,20 +877,20 @@ def sparse_attn_indexer(
             padded_q_scale, decode_weights = mqa_logits_mx_inputs(
                 padded_q_quant_cast, padded_q_scale, weights[:num_padded_tokens]
             )
-            # SM100 decode is varlen: one row and context length per token.
-            logits = as_fp32_logits(
-                fp8_fp4_paged_mqa_logits(
-                    (padded_q_quant_cast, padded_q_scale),
-                    kv_cache,
-                    decode_weights,
-                    seq_lens,
-                    decode_metadata.block_table,
-                    decode_metadata.schedule_metadata,
-                    max_model_len=max_model_len,
-                    indices=decode_metadata.indices,
-                ),
-                seq_lens.view(-1),
+            logits = fp8_fp4_paged_mqa_logits(
+                (padded_q_quant_cast, padded_q_scale),
+                kv_cache,
+                decode_weights,
+                seq_lens,
+                decode_metadata.block_table,
+                decode_metadata.schedule_metadata,
+                max_model_len=max_model_len,
+                indices=decode_metadata.indices,
             )
+            # Keeping bf16 halves top-k/candidate reads; other top-k backends and
+            # DCP need fp32. SM100 decode is varlen: one context length per row.
+            if topk_backend != "deep_select" or dcp_world_size != 1:
+                logits = as_fp32_logits(logits, seq_lens.view(-1))
         num_rows = logits.shape[0]
         if candidate_blocks is not None:
             # Two-level selection (v4.1) on the decode logits; columns are
