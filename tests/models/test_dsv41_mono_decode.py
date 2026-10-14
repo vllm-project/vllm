@@ -13,6 +13,7 @@ import torch
 from tests.models.common.mono.kit import MonoConformance, forward
 from vllm.config.compilation import CUDAGraphMode
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import Mxfp4MoeBackend
+from vllm.models.common.mono.guards import configure
 from vllm.models.common.mono.runtime import attach, kernel_for_layer
 from vllm.models.common.mono.spec import MonoUnsupported
 from vllm.models.deepseek_v41.amd import mono_spec as ms
@@ -291,12 +292,13 @@ def _gpu(monkeypatch, cdna: int = 4, cus: int = BLOCKS) -> None:
 
 def _attach(monkeypatch, config=None, model=None, **layer_overrides):
     _gpu(monkeypatch)
+    kit = TestDsv41Spec()
     config = config or make_config()
-    model = model if model is not None else TestDsv41Spec().make_model(config)
+    model = model if model is not None else kit.make_model(config)
     for layer in model.layers:
         for key, value in layer_overrides.items():
             setattr(layer.attn, key, value)
-    return attach(model, config, SPECS_PATH), model
+    return kit.make_mono(config, model), model
 
 
 def _indexer():
@@ -434,7 +436,7 @@ def test_other_isa_refuses(monkeypatch, cdna):
     model = TestDsv41Spec().make_model(config)
     _gpu(monkeypatch, cdna=cdna)
     with pytest.raises(MonoUnsupported, match="CDNA4"):
-        attach(model, config, SPECS_PATH)
+        attach(model, config, configure(config, SPECS_PATH))
 
 
 def test_too_few_compute_units_refuses(monkeypatch):
@@ -442,7 +444,7 @@ def test_too_few_compute_units_refuses(monkeypatch):
     model = TestDsv41Spec().make_model(config)
     _gpu(monkeypatch, cus=BLOCKS // 2)
     with pytest.raises(MonoUnsupported, match="compute units"):
-        attach(model, config, SPECS_PATH)
+        attach(model, config, configure(config, SPECS_PATH))
 
 
 def test_other_moe_backend_refuses(monkeypatch):
@@ -453,7 +455,7 @@ def test_other_moe_backend_refuses(monkeypatch):
         experts.quant_method.mxfp4_backend = Mxfp4MoeBackend.TRITON
     _gpu(monkeypatch)
     with pytest.raises(MonoUnsupported, match="AITER_MXFP4_BF16"):
-        attach(model, config, SPECS_PATH)
+        attach(model, config, configure(config, SPECS_PATH))
 
 
 def test_off_without_the_flag(monkeypatch):

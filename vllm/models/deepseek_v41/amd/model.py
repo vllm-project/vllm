@@ -50,7 +50,7 @@ from vllm.model_executor.models.utils import (
     make_layers,
     maybe_prefix,
 )
-from vllm.models.common.mono import attach, configure, kernel_for_layer
+from vllm.models.common.mono import MonoSpec, attach, configure, kernel_for_layer
 from vllm.models.common.mono.runtime import MonoRuntime
 from vllm.models.common.ops.sequence_parallel import (
     sp_all_gather,
@@ -61,7 +61,11 @@ from vllm.models.common.ops.sequence_parallel import (
 from vllm.models.deepseek_v4.amd.model import (
     DeepseekV4MoE as DeepseekV4MoEBase,
 )
-from vllm.models.deepseek_v41.amd.mono_spec import SPECS_PATH, DSV41LayerKernel
+from vllm.models.deepseek_v41.amd.mono_spec import (
+    SPECS_PATH,
+    DSV41LayerKernel,
+    LaunchState,
+)
 from vllm.models.deepseek_v41.amd.rocm import DeepseekV41ROCMAiterMLAAttention
 from vllm.models.deepseek_v41.attention import DeepseekV4Attention
 from vllm.models.deepseek_v41.decoder_replay_layers import DecoderReplayLayers
@@ -481,7 +485,9 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         self.rms_norm_eps = config.rms_norm_eps
         self.vllm_config = vllm_config
         self.mono: MonoRuntime[DSV41LayerKernel] | None = None
-        configure(vllm_config, SPECS_PATH)
+        self.mono_spec: MonoSpec[LaunchState] | None = configure(
+            vllm_config, SPECS_PATH
+        )
 
         # Three aux streams: one per non-default input GEMM in
         # DeepseekV4Attention._run_parallel_input_projections
@@ -1413,7 +1419,9 @@ class DeepseekV41LLMForCausalLM(
     def process_weights_after_loading(self) -> None:
         self.model.finalize_mega_moe_weights()
         self.model.finalize_mhc_broadcast_weights()
-        self.model.mono = attach(self.model, self.model.vllm_config, SPECS_PATH)
+        self.model.mono = attach(
+            self.model, self.model.vllm_config, self.model.mono_spec
+        )
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         return self.model.get_expert_mapping()

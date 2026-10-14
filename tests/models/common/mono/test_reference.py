@@ -8,7 +8,7 @@ import torch
 from tests.models.common.mono import reference
 from tests.models.common.mono.kit import MonoConformance, forward, forward_layer
 from vllm.config.compilation import CUDAGraphMode
-from vllm.models.common.mono.guards import _enabled, _select_spec
+from vllm.models.common.mono.guards import _select_spec, configure
 from vllm.models.common.mono.runtime import attach
 from vllm.models.common.mono.spec import MonoUnsupported
 
@@ -39,8 +39,8 @@ class TestReferenceSpec(MonoConformance):
 def test_switch_off_means_no_attach():
     config = reference.make_config()
     config.kernel_config.monokernel = False
-    assert not _enabled(config)
-    assert attach(reference.make_model(config), config, SPECS_PATH) is None
+    assert configure(config, SPECS_PATH) is None
+    assert attach(reference.make_model(config), config, None) is None
 
 
 def test_the_first_servable_variant_wins():
@@ -59,7 +59,7 @@ def test_the_first_servable_variant_wins():
 def test_skipped_layers_keep_vllm_path():
     config = reference.make_config()
     model = reference.make_model(config)
-    mono = attach(model, config, SPECS_PATH)
+    mono = attach(model, config, configure(config, SPECS_PATH))
     assert {i for i, _ in mono.kernels} == {1, 2, 3}
 
 
@@ -67,14 +67,14 @@ def test_kernel_layers_follow_the_pipeline_slice():
     config = reference.make_config()
     model = reference.make_model(config)
     model.start_layer, model.end_layer = 2, 4
-    mono = attach(model, config, SPECS_PATH)
+    mono = attach(model, config, configure(config, SPECS_PATH))
     assert {i for i, _ in mono.kernels} == {2, 3}
 
 
 def test_kernels_run_the_layers_they_replace():
     config = reference.make_config()
     model = reference.make_model(config)
-    mono = attach(model, config, SPECS_PATH)
+    mono = attach(model, config, configure(config, SPECS_PATH))
     width = min(mono.widths)
     positions = torch.zeros(width, dtype=torch.long)
     hidden = torch.zeros(width, model.config.hidden_size)
@@ -88,4 +88,4 @@ def test_kernels_run_the_layers_they_replace():
 def test_model_refusal_is_raised():
     config = reference.make_config()
     with pytest.raises(MonoUnsupported, match="not a ReferenceModel"):
-        attach(torch.nn.Linear(2, 2), config, SPECS_PATH)
+        attach(torch.nn.Linear(2, 2), config, configure(config, SPECS_PATH))

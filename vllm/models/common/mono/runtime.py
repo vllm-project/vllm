@@ -13,15 +13,7 @@ from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.warmup.jit_warmup import VllmJitKernel
-from vllm.models.common.mono.guards import (
-    _enabled,
-    _load_specs,
-    _refusal_message,
-    _refuse_model,
-    _select_spec,
-    tp_agree,
-    tp_group,
-)
+from vllm.models.common.mono.guards import _refuse_model, tp_agree, tp_group
 from vllm.models.common.mono.spec import LayerKernel, MonoSpec, MonoUnsupported
 
 if TYPE_CHECKING:
@@ -174,15 +166,15 @@ class MonoRuntime(Generic[KernelT]):
 
 
 def attach(
-    model, vllm_config: "VllmConfig", specs_path: str
+    model, vllm_config: "VllmConfig", spec: MonoSpec[Any] | None
 ) -> MonoRuntime[Any] | None:
-    """Picks the variant, builds the launch state and this rank's layer
-    kernels. Collective over the TP group.
+    """Builds the launch state and this rank's layer kernels. Collective over
+    the TP group.
 
     Args:
         model: The loaded model, in ``process_weights_after_loading``.
         vllm_config: The engine's config.
-        specs_path: ``"package.module:MONO_SPECS"``.
+        spec: The variant ``configure`` picked, None with the switch off.
 
     Returns:
         This rank's ``MonoRuntime``, or None with the switch off or when no layer
@@ -190,15 +182,11 @@ def attach(
         returns, which is what ``kernel_for_layer`` then hands back.
 
     Raises:
-        MonoUnsupported: Every variant refused the config, or this rank (or
-            another) refused the loaded model.
+        MonoUnsupported: This rank, or another, refused the loaded model.
 
     """
-    if not _enabled(vllm_config):
-        return None
-    spec, refusals = _select_spec(_load_specs(specs_path), vllm_config)
     if spec is None:
-        raise MonoUnsupported("MonoKernel refused: " + _refusal_message(refusals))
+        return None
     mono: MonoRuntime[Any] = MonoRuntime(spec, model, vllm_config)
     if not mono.kernels:
         logger.info("MonoKernel %s: no layer takes a kernel", spec.name)

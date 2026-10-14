@@ -4,8 +4,10 @@
 
 from vllm.models.common.mono.guards import configure
 from vllm.models.common.mono.runtime import attach, kernel_for_layer
+from vllm.models.common.mono.spec import MonoSpec
 
 __all__ = [
+    "MonoSpec",
     "attach",
     "configure",
     "kernel_for_layer",

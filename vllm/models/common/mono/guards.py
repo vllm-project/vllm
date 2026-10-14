@@ -168,20 +168,27 @@ def _set_capture_sizes(spec: MonoSpec[Any], vllm_config: "VllmConfig") -> None:
         cc.cudagraph_capture_sizes = new
 
 
-def configure(vllm_config: "VllmConfig", specs_path: str) -> None:
+def configure(vllm_config: "VllmConfig", specs_path: str) -> MonoSpec[Any] | None:
     """Picks the variant, sets the capture sizes, or raises with every reason.
-    A no-op with ``--monokernel`` off.
+
+    The variant is picked here, once: the model holds what this returns and
+    hands it to ``attach`` after the weights are loaded. A model that prepares
+    anything of its own at load time reads the returned spec to know which
+    variant it is preparing for.
 
     Args:
         vllm_config: The engine's config, before the weights are loaded.
         specs_path: ``"package.module:MONO_SPECS"``.
+
+    Returns:
+        The variant this config runs, or None with ``--monokernel`` off.
 
     Raises:
         MonoUnsupported: Every variant refused this config.
 
     """
     if not _enabled(vllm_config):
-        return
+        return None
     spec, refusals = _select_spec(_load_specs(specs_path), vllm_config)
     if spec is None:
         raise MonoUnsupported("MonoKernel refused: " + _refusal_message(refusals))
@@ -192,3 +199,4 @@ def configure(vllm_config: "VllmConfig", specs_path: str) -> None:
             "CUDA graphs",
             spec.name,
         )
+    return spec

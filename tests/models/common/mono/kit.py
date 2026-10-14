@@ -71,7 +71,7 @@ class MonoConformance:
     module and fill in the hooks below."""
 
     specs_path: str
-    """``"package.module:MONO_SPECS"``, as the model passes it to ``attach``."""
+    """``"package.module:MONO_SPECS"``, as the model passes it to ``configure``."""
 
     def make_config(self, **overrides) -> Any:
         """A config this spec serves, with ``overrides`` applied on top."""
@@ -104,7 +104,13 @@ class MonoConformance:
 
     @pytest.fixture
     def mono(self, config, model):
-        return attach(model, config, self.specs_path)
+        return self.make_mono(config, model)
+
+    def make_mono(self, config, model=None):
+        """This rank's runtime, built the way a model builds it: the variant
+        picked once by ``configure``, then handed to ``attach``."""
+        model = self.make_model(config) if model is None else model
+        return attach(model, config, configure(config, self.specs_path))
 
     def spec(self, config):
         spec, refusals = _select_spec(_load_specs(self.specs_path), config)
@@ -166,7 +172,7 @@ class MonoConformance:
     def test_every_rank_decides_alike(self, config, model):
         decisions = []
         for _ in range(2):
-            other = attach(self.make_model(config), config, self.specs_path)
+            other = self.make_mono(config)
             with forward(
                 config, CUDAGraphMode.NONE, self.decode_metadata(config, model)
             ):
@@ -217,14 +223,14 @@ class MonoConformance:
     def test_attach_does_not_move_weights(self, config):
         model = self.make_model(config)
         before = {n: p.data_ptr() for n, p in model.named_parameters()}
-        attach(model, config, self.specs_path)
+        self.make_mono(config, model)
         after = {n: p.data_ptr() for n, p in model.named_parameters()}
         assert before == after
 
     def test_warmup_registered_for_every_width(self, config):
         registry = JitWarmupRegistry(config)
         with registry.activate():
-            mono = attach(self.make_model(config), config, self.specs_path)
+            mono = self.make_mono(config)
         assert len(registry) >= 1
         by_width: dict[int, set] = defaultdict(set)
         for (_, width), kernel in mono.kernels.items():
