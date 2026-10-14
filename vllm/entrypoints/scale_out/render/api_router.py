@@ -11,7 +11,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionReque
 from vllm.entrypoints.openai.completion.protocol import CompletionRequest
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
-from vllm.entrypoints.serve.utils.api_utils import validate_json_request
+from vllm.entrypoints.serve.utils.api_utils import request_span, validate_json_request
 from vllm.logger import init_logger
 
 from ..token_in_token_out.protocol import GenerateRequest
@@ -69,7 +69,8 @@ async def render_chat_completion(request: ChatCompletionRequest, raw_request: Re
     counter = _tool_render_counter(request)
     status = "error"
     try:
-        result = await handler.render_chat_request(request, raw_request)
+        async with request_span(raw_request, "render_chat_completion"):
+            result = await handler.render_chat_request(request, raw_request)
         if not isinstance(result, ErrorResponse):
             status = "rendered"
     finally:
@@ -137,7 +138,8 @@ async def render_completion(request: CompletionRequest, raw_request: Request):
     if handler is None:
         raise NotImplementedError("The model does not support Completions Render API")
 
-    result = await handler.render_completion_request(request, raw_request)
+    async with request_span(raw_request, "render_completion"):
+        result = await handler.render_completion_request(request, raw_request)
 
     if isinstance(result, ErrorResponse):
         return JSONResponse(content=result.model_dump(), status_code=result.error.code)
