@@ -953,12 +953,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         a: torch.Tensor,
         z: torch.Tensor,
     ) -> torch.Tensor | None:
-        """Flat Qwen MTP verify only. Other steps stay on the stock path.
-
-        Sequences of one width share a launch. When this is an MTP-only
-        step and the kernel cannot run, raise. A silent fallback there would
-        hide a wrong configuration.
-        """
+        """Fused MTP output, or None when this step is not MTP-only."""
         forward_context = get_forward_context()
         attn_metadata_raw = forward_context.attn_metadata
         attn_metadata = None
@@ -1073,7 +1068,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
     def _rocm_mtp_verify_lengths(
         self, attn_metadata: GDNAttentionMetadata
     ) -> list[int] | None:
-        """Per-sequence verify widths. Uniform batches avoid a host sync."""
+        """Per-sequence widths. A uniform batch does not sync the host."""
         n_seq = attn_metadata.num_spec_decodes
         if n_seq < 1:
             return None
@@ -1096,12 +1091,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         z: torch.Tensor,
         core_attn_out: torch.Tensor,
     ) -> None:
-        """Write gated-RMSNorm GDN output into ``core_attn_out``.
-
-        Flat MTP verify uses the fused kernel. Every other step runs the
-        stock core and then ``self.norm``, so the caller only applies
-        ``out_proj``.
-        """
+        """Fused path is already normed. The stock path norms here, once."""
         normed = self._try_rocm_qwen_mtp_gdn(mixed_qkv, b, a, z)
         if normed is not None:
             core_attn_out.zero_()
@@ -2255,11 +2245,7 @@ def qwen_gdn_attention_core_rocm_mtp(
     core_attn_out: torch.Tensor,
     layer_name: LayerNameType,
 ) -> None:
-    """GDN core plus gated RMSNorm, picking the ROCm MTP kernel at runtime.
-
-    The fused-or-stock choice depends on per-step attention metadata, so it
-    must stay inside this opaque op instead of the compiled graph.
-    """
+    """MTP vs stock depends on per-step metadata, so it stays in this op."""
     layer_name = _resolve_layer_name(layer_name)
     forward_context: ForwardContext = get_forward_context()
     self = forward_context.no_compile_layers[layer_name]

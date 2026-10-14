@@ -1,15 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""ROCm Qwen3.8-27B MTP verify kernel against the stock op sequence.
-
-The model is flat Qwen3.8-27B only: 16 key heads, 48 value heads, head dim
-128, width-4 causal conv, SiLU, bf16 activations, and fp32 SSM state.
-Widths 1..4 are that model's MTP verify lengths. The reference is
-``causal_conv1d_update``, ``fused_sigmoid_gating_delta_rule_update``, and
-``RMSNormGated``. Block 3000 is past the int32 ``slot * stride`` overflow
-(one SSM block strides by ``48 * 128 * 128``); that block has to match
-block 1.
-"""
+"""Qwen3.8-27B MTP verify kernel against stock conv, gated delta, and RMSNorm."""
 
 from __future__ import annotations
 
@@ -41,10 +32,10 @@ V = 128
 DIM = 2 * H * K + HV * V
 CONV_LEN = 6
 EPS = 1e-6
-# Same bar as the fused GDN MTP post-conv test. Conv state is exact.
 OUTPUT_REL_L2 = 5e-4
 SSM_ATOL = 1e-3
 SSM_RTOL = 1e-3
+# slot * (48 * 128 * 128) overflows int32 at slot 2731.
 HIGH_BLOCK = 3000
 
 CASES = [
@@ -71,7 +62,6 @@ def _make_inputs(tokens: int, accepted: int, seed: int):
     # chunk leaves a and b non-contiguous, as split_ba does on the model path.
     ba = 0.1 * torch.randn(tokens, 2 * HV, dtype=torch.bfloat16, device=device)
     b, a = ba.chunk(2, dim=-1)
-    # One token is one contiguous row. Longer verifies keep the split stride.
     if tokens > 1:
         assert not a.is_contiguous()
         assert not b.is_contiguous()
@@ -221,7 +211,6 @@ def _assert_close(actual, expected, conv_a, conv_e, ssm_a, ssm_e, where: str) ->
 
 
 def _compare_at_block(inputs, conv, ssm, block: int) -> tuple[torch.Tensor, ...]:
-    """Run fused and stock on the same planted rows. Returns fused outputs."""
     mixed, weight, conv_row, ssm_rows, a, b, a_log, dt_bias, z, norm, accepted = inputs
     tokens = mixed.shape[0]
     indices = _indices(block, tokens)
@@ -273,7 +262,6 @@ def _compare_at_block(inputs, conv, ssm, block: int) -> tuple[torch.Tensor, ...]
 @pytest.mark.parametrize("tokens,accepted", CASES)
 @torch.inference_mode()
 def test_matches_stock_ops(tokens, accepted, default_vllm_config):
-    """Qwen3.8-27B verify widths match stock conv, gated delta, and RMSNorm."""
     del default_vllm_config
     inputs = _make_inputs(tokens, accepted, seed=100 + 10 * tokens + accepted)
     conv, ssm = _pool(tokens + 2)
@@ -283,7 +271,6 @@ def test_matches_stock_ops(tokens, accepted, default_vllm_config):
 @pytest.mark.parametrize("tokens,accepted", CASES)
 @torch.inference_mode()
 def test_high_block_id_matches_block_one(tokens, accepted, default_vllm_config):
-    """Block 3000 matches block 1, and both match the stock ops."""
     del default_vllm_config
     inputs = _make_inputs(tokens, accepted, seed=200 + 10 * tokens + accepted)
     conv, ssm = _pool(HIGH_BLOCK + tokens)
@@ -296,7 +283,6 @@ def test_high_block_id_matches_block_one(tokens, accepted, default_vllm_config):
 
 
 def _compare_packed(batch: int, lengths: list[int], accepted: int, block0: int) -> None:
-    """One packed launch against an independent stock run per sequence."""
     torch.manual_seed(300 + batch * 17 + block0 + sum(lengths))
     device = "cuda"
     total = sum(lengths)
@@ -400,7 +386,6 @@ def _compare_packed(batch: int, lengths: list[int], accepted: int, block0: int) 
 @pytest.mark.parametrize("tokens", [1, 4])
 @torch.inference_mode()
 def test_uniform_batch_matches_stock_ops(batch, tokens, default_vllm_config):
-    """Several sequences of one width share a single fused launch."""
     del default_vllm_config
     _compare_packed(batch, [tokens] * batch, accepted=1, block0=1)
 
@@ -408,13 +393,11 @@ def test_uniform_batch_matches_stock_ops(batch, tokens, default_vllm_config):
 @pytest.mark.parametrize("batch", [4])
 @torch.inference_mode()
 def test_uniform_batch_high_block_id(batch, default_vllm_config):
-    """Batched int64 slots past the int32 overflow still match stock."""
     del default_vllm_config
     _compare_packed(batch, [4] * batch, accepted=2, block0=HIGH_BLOCK)
 
 
 @torch.inference_mode()
 def test_mixed_widths_match_stock_ops(default_vllm_config):
-    """Widths that differ still match, with one launch per width."""
     del default_vllm_config
     _compare_packed(5, [4, 1, 4, 2, 3], accepted=1, block0=1)

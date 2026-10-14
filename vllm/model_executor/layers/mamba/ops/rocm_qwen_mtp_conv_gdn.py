@@ -1,15 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Conv + gated-delta MTP verify kernel for flat Qwen3.8-27B.
+"""Width-1..4 conv plus gated delta for Qwen3.8-27B MTP verify.
 
-One launch does the width-4 conv and the recurrence. A second launch
-writes the conv-state row. Writing that row from the main kernel races
-with other programs that still need the original history.
-
-Each tap product is rounded to bf16 before the sum, matching
-``causal_conv1d_update``. The SiLU result is rounded to bf16 before
-the recurrence. History is read at ``num_accepted_tokens - 1`` on the
-row ``indices[0, 0]``. The row written back is
+The conv-state row is a second launch. Tap products and SiLU are
+rounded to bf16, matching ``causal_conv1d_update``. History is read at
+``num_accepted_tokens - 1``. The stored row is
 ``[history[offset+1], history[offset+2], x0, ..., x_{T-1}]``.
 """
 
@@ -169,7 +164,6 @@ def _mtp_conv_gdn(
     mask_v = o_v < V
     mask_h = mask_v[:, None] & mask_k[None, :]
 
-    # Sequences share one launch. program 2 is the sequence, not another tile.
     seq = tl.program_id(2).to(tl.int64)
     x_ptr = x_ptr + seq * stride_x_batch
     a_ptr = a_ptr + seq * stride_a_batch
@@ -352,7 +346,6 @@ def try_qwen_mtp_conv_gdn(
     mixed_qkv, conv_state, weight, a, b, A_log, dt_bias, ssm_state,
     indices, num_accepted, out,
 ) -> bool:
-    """Run the fused MTP kernel for one flat Qwen sequence."""
     tokens = mixed_qkv.shape[0]
     if tokens not in (1, 2, 3, 4):
         return False

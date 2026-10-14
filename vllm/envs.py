@@ -1414,8 +1414,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ROCM_USE_SKINNY_GEMM": lambda: (
         os.getenv("VLLM_ROCM_USE_SKINNY_GEMM", "True").lower() in ("true", "1")
     ),
-    # Flat Qwen MTP verify: fuse conv, gated delta, and gated RMSNorm.
-    # Off by default. Prefill and non-spec decode stay on the stock path.
+    # Fuse conv, gated delta, and RMSNorm on flat Qwen MTP verify. Default off.
     "VLLM_ROCM_QWEN_MTP_GDN": lambda: (
         os.getenv("VLLM_ROCM_QWEN_MTP_GDN", "0").lower() in ("true", "1")
     ),

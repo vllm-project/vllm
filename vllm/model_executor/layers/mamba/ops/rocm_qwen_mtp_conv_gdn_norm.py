@@ -1,12 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""ROCm MTP verify kernel: width-4 conv, gated delta rule, and gated RMSNorm.
+"""Conv, gated delta, and gated RMSNorm for Qwen3.8-27B MTP verify.
 
-One launch does the conv and the recurrence for every sequence of one
-width. A second launch rolls each conv state and applies
-``rmsnorm(o) * w * silu(z)``. The conv row cannot be written from the
-first launch: other programs are still reading it. Mixed widths are at
-most four launches, one per width.
+Conv state is shifted in a second launch. Mixed widths are one launch
+per width.
 """
 
 from __future__ import annotations
@@ -107,10 +104,9 @@ def launch_conv_gdn_norm(
     gate_sigmoid: bool = False, num_warps: int = 2, bv: int = _BV,
     n_seq: int = 1,
 ) -> None:
-    """core_out, z, normed_out: [n_seq * T, HV, V] bf16, V contiguous.
+    """``core_out``, ``z``, ``normed_out`` are ``[n_seq * T, HV, V]``.
 
-    Sequences are packed in order and share one width T. ``indices`` is
-    [n_seq, T] and ``num_accepted`` is [n_seq].
+    ``indices`` is ``[n_seq, T]``. ``num_accepted`` is ``[n_seq]``.
     """
     tokens = mixed.shape[0]
     if n_seq < 1 or tokens % n_seq != 0:
