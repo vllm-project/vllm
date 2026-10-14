@@ -81,7 +81,7 @@ class LaunchState:
     """
 
     runner: Any
-    first: int
+    embed_layer: int
     words: torch.Tensor
     weights: dict[int, Any] = field(default_factory=dict)
     swa_keys: list[str] = field(default_factory=list)
@@ -131,7 +131,7 @@ class WholeLayer(DSV41LayerKernel):
         )
         # K1's seam folds the owed post into the residual, except where the
         # residual arrives settled: the embedding, or after the Engram write.
-        settled = attn.layer_id == launch_state.first or layer.engram is not None
+        settled = attn.layer_id == launch_state.embed_layer or layer.engram is not None
         self.folds = (True, False) if settled else (True,)
 
     def warmup_keys(self) -> list[Any]:
@@ -363,19 +363,30 @@ def _skip_step(vllm_config, launch_state: LaunchState, width: int) -> str | None
     return None
 
 
-def _launch_state(model, vllm_config) -> LaunchState:
-    """This rank's runner, collective over the TP group."""
+def _launch_state(model, vllm_config, layers: tuple[int, ...]) -> LaunchState:
+    """This rank's runner, collective over the TP group, and the metadata keys
+    of the layers that take a whole-layer launch."""
     from vllm.models.common.mono.guards import tp_group
     from vllm.models.deepseek_v41.amd.mono.runner import MAX_TOKENS, DSV41MonoLayer
 
     assert MAX_TOKENS >= MAX_ROWS, MAX_TOKENS
     rank, world, cpu_group = tp_group()
     device = next(model.parameters()).device
-    return LaunchState(
+    state = LaunchState(
         runner=DSV41MonoLayer(world, rank, cpu_group, device),
-        first=getattr(model, "start_layer", 0),
+        embed_layer=getattr(model, "start_layer", 0),
         words=torch.zeros(world, dtype=torch.int32, device=device),
     )
+    whole = [model.layers[i] for i in layers if _ffn_only(model.layers[i]) is None]
+    state.need_swa = bool(whole)
+    for layer in whole:
+        for key, keys in (
+            (layer.attn.swa_cache_layer.prefix, state.swa_keys),
+            (layer.attn.compressed_cache_prefix, state.comp_keys),
+        ):
+            if key is not None and key not in keys:
+                keys.append(key)
+    return state
 
 
 def _weights(layer, ffn_only: bool, world: int):
@@ -464,15 +475,7 @@ def _build(
         # reduces it on the steps that keep vLLM's path.
         layer.attn.wo_b.reduce_results = False
         return FfnSeam(launch_state, layer, width)
-    kernel = WholeLayer(launch_state, layer, width)
-    launch_state.need_swa = True
-    for key, keys in (
-        (kernel.swa_key, launch_state.swa_keys),
-        (kernel.comp_key, launch_state.comp_keys),
-    ):
-        if key is not None and key not in keys:
-            keys.append(key)
-    return kernel
+    return WholeLayer(launch_state, layer, width)
 
 
 MONO_SPEC = MonoSpec[LaunchState](

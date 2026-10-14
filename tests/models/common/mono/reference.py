@@ -101,10 +101,8 @@ def skip_step(vllm_config, state: LaunchState, width: int) -> str | None:
     return "prefill" if md.get("prefill") else None
 
 
-def launch_state(model, vllm_config) -> LaunchState:
-    return LaunchState(
-        weights={i: layer.weight.data for i, layer in enumerate(model.layers)}
-    )
+def launch_state(model, vllm_config, layers: tuple[int, ...]) -> LaunchState:
+    return LaunchState(weights={i: model.layers[i].weight.data for i in layers})
 
 
 def refuse_caches(vllm_config, caches) -> list[str]:

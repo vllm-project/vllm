@@ -102,8 +102,9 @@ class MonoSpec(Generic[LaunchStateT]):
             from the forward context, which every rank sees alike.
         launch_state: The weights and launch state, built once at attach, off
             the loaded model (whose parameters carry the device the kernels
-            launch on). The only place a weight copy is ever made. Opaque to
-            the library, which only hands it back to the spec's own callbacks.
+            launch on) and the indices ``skip_layer`` left, in order. The only
+            place a weight copy is ever made. Opaque to the library, which only
+            hands it back to the spec's own callbacks.
         build: One ``LayerKernel`` for (config, state, layer, width).
 
     """
@@ -116,5 +117,5 @@ class MonoSpec(Generic[LaunchStateT]):
     refuse_caches: Callable[["VllmConfig", Mapping[str, Any]], list[str]]
     skip_layer: Callable[[Any], str | None]
     skip_step: Callable[["VllmConfig", LaunchStateT, int], str | None]
-    launch_state: Callable[[Any, "VllmConfig"], LaunchStateT]
+    launch_state: Callable[[Any, "VllmConfig", tuple[int, ...]], LaunchStateT]
     build: Callable[["VllmConfig", LaunchStateT, Any, int], LayerKernel]

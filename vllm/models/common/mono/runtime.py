@@ -80,7 +80,7 @@ class MonoRuntime(Generic[KernelT]):
         if not indices:
             self.cache_layers: list[str] = []
             return
-        self.state = spec.launch_state(model, vllm_config)
+        self.state = spec.launch_state(model, vllm_config, tuple(indices))
         for i in indices:
             for w in self.widths:
                 self.kernels[i, w] = cast(
