@@ -173,6 +173,10 @@ def test_gemma4_expert_names_strip_language_model_prefix() -> None:
         for name in (
             "experts.gate_up_proj",
             "experts.3.down_proj.weight_packed",
+            "moe.experts.3.down_proj.weight",
+            "moe.experts.3.gate_proj.weight_scale",
+            "moe.experts.3.up_proj.input_scale",
+            "moe.experts.3.up_proj.weight_scale_2",
             "router.per_expert_scale",
         )
     ]
@@ -185,6 +189,10 @@ def test_gemma4_expert_names_strip_language_model_prefix() -> None:
     assert mapped == [
         ("model.layers.0.experts.gate_up_proj", None),
         ("model.layers.0.experts.3.down_proj.weight_packed", None),
+        ("model.layers.0.experts.3.down_proj.weight", None),
+        ("model.layers.0.experts.3.gate_proj.weight_scale", None),
+        ("model.layers.0.experts.3.up_proj.input_scale", None),
+        ("model.layers.0.experts.3.up_proj.weight_scale_2", None),
         ("model.layers.0.router.per_expert_scale", None),
     ]
 
