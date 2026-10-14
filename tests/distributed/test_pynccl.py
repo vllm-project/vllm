@@ -20,6 +20,7 @@ from vllm.distributed.parallel_state import (
     get_world_group,
     graph_capture,
     init_distributed_environment,
+    set_custom_all_reduce,
 )
 from vllm.utils.system_utils import update_environment_variables
 
@@ -122,6 +123,8 @@ def test_pynccl_multiple_allreduce():
 @worker_fn_wrapper
 def multiple_allreduce_with_vllm_worker_fn():
     device = torch.device(f"cuda:{torch.distributed.get_rank()}")
+    # Custom all-reduce backends would bypass pynccl for eligible sizes.
+    set_custom_all_reduce(False)
     with ensure_current_vllm_config():
         ensure_model_parallel_initialized(2, 2)
     tensor = torch.ones(16, 1024, 1024, dtype=torch.float32, device=device)
