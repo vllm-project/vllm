@@ -21,6 +21,7 @@ used for classification and routing.
 | Architecture                         | Inputs                              | ReadStrategy                   | Task             | Head              | Example HF Models                        |
 |--------------------------------------|-------------------------------------|--------------------------------|------------------|-------------------|------------------------------------------|
 | `ClefOmniForJointSchema`             | T + I + V                           | `JointSchemaStrategy`          | `token_classify` | `JointSchemaHead` | `Cloudflare/clef-omni`                   |
+| `D3ForSequenceClassification`        | T + I + V                           | `D3Strategy`                   | `classify`       | Linear (`score`)  | `vllm-sr/d3`, `vllm-sr/d3-mini`, etc.    |
 | `Lfm2VlForConditionalGeneration`     | T + I<sup>+</sup>                   | `LiquidStrategy`               | `generate`       | N/A               | `LiquidAI/d1-3B`                         |
 | `Qwen3_5ForConditionalGeneration`    | T + I<sup>E+</sup> + V<sup>E+</sup> | `NextTokenStrategy`            | `generate`       | N/A               | `Qwen/Qwen3.5-0.8B`, etc.                |
 | `Qwen3_5MoeForConditionalGeneration` | T + I<sup>E+</sup> + V<sup>E+</sup> | `NextTokenStrategy`            | `generate`       | N/A               | `Qwen/Qwen3.5-35B-A3B`, etc.             |
