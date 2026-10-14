@@ -5,6 +5,7 @@ steps:
 - label: ":nvidia: (H200 MIG 35GB) V1 Spec Decode"
   device: h200_35gb
   key: v1-spec-decode
+  automatic_shard: true
   timeout_in_minutes: 40
   source_file_dependencies:
     - vllm/config/
