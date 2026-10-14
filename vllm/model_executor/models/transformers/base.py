@@ -183,6 +183,8 @@ class Base(
         self._create_hf_to_vllm_mapper()
         # Remove layers not on this pipeline parallel rank
         self.pipeline_parallel()
+        # Skip the device sync of dynamic rope where it can never rescale
+        disable_noop_dynamic_rope(self.model.get_decoder(), vllm_config)
         # Substitute remaining layers with vLLM's layers as needed
         self.recursive_replace()
         # Create attention instances for KV cache allocation
@@ -206,12 +208,9 @@ class Base(
         `_create_attention_instances` are used
         - Sets the dtype to the default torch dtype set by vLLM because Transformers
         uses the config dtype when creating the model
-        - Rewrites dynamic rope to default rope when `max_model_len` keeps it from
-        ever rescaling, removing the device sync it performs in every forward
         """
         self.text_config._attn_implementation = VLLM_ATTN_IMPL
         self.config.dtype = torch.get_default_dtype()
-        disable_noop_dynamic_rope(self.text_config, self.model_config.max_model_len)
 
     @contextmanager
     def _mark_model_components(self, vllm_config: "VllmConfig"):

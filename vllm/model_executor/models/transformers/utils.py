@@ -39,8 +39,6 @@ from vllm.model_executor.models.utils import maybe_prefix
 from vllm.transformers_utils.config import iter_rope_parameters
 
 if TYPE_CHECKING:
-    from transformers import PreTrainedConfig
-
     from vllm.config import VllmConfig
     from vllm.model_executor.layers.quantization import QuantizationConfig
 
@@ -359,28 +357,49 @@ def get_feature_request_tip(
     return f"{prefix}{tip}"
 
 
+def dynamic_rope_update_is_noop(vllm_config: "VllmConfig") -> bool:
+    """Whether `max_model_len` keeps Transformers' dynamic rope from ever rescaling.
+
+    `@dynamic_rope_update` only recomputes `inv_freq` once positions grow past
+    `max_position_embeddings`, which vLLM never feeds beyond `max_model_len`.
+    """
+    text_config = vllm_config.model_config.hf_config.get_text_config()
+    max_position_embeddings = getattr(text_config, "max_position_embeddings", None)
+    if max_position_embeddings is None:
+        return False
+    return vllm_config.model_config.max_model_len <= max_position_embeddings
+
+
 def can_enable_torch_compile(vllm_config: "VllmConfig") -> bool:
     """Callable to be passed to `@support_torch_compile`'s `enable_if` argument.
 
     Defaults to `True` but is disabled in the following situations:
 
-    - The model uses dynamic rope scaling.
+    - The model uses dynamic rope scaling that can still rescale within
+      `max_model_len` (otherwise `disable_noop_dynamic_rope` removes it).
     """
     text_config = vllm_config.model_config.hf_config.get_text_config()
-    # Dynamic rope scaling is not compatible with torch.compile
-    return all(rp["rope_type"] != "dynamic" for rp in iter_rope_parameters(text_config))
+    if any(rp["rope_type"] == "dynamic" for rp in iter_rope_parameters(text_config)):
+        return dynamic_rope_update_is_noop(vllm_config)
+    return True
 
 
-def disable_noop_dynamic_rope(config: "PreTrainedConfig", max_model_len: int) -> None:
-    """Treat dynamic rope as default rope where it can never rescale.
+def disable_noop_dynamic_rope(model: nn.Module, vllm_config: "VllmConfig") -> None:
+    """Skip `@dynamic_rope_update` in rotary modules where it can never rescale.
 
-    Below `max_position_embeddings`, dynamic NTK rope computes the same `inv_freq`
-    as default rope, but `@dynamic_rope_update` still syncs on
-    `torch.max(position_ids)`, which breaks torch.compile and CUDA graph capture.
+    The update syncs on `torch.max(position_ids)` every forward, which breaks
+    torch.compile and CUDA graph capture. Relabelling the module's `rope_type` as
+    "default" skips it while keeping the `inv_freq` computed at init.
     """
-    max_position_embeddings = getattr(config, "max_position_embeddings", None)
-    if max_position_embeddings is None or max_model_len > max_position_embeddings:
+    if not dynamic_rope_update_is_noop(vllm_config):
         return
-    for rope_parameters in iter_rope_parameters(config):
-        if rope_parameters["rope_type"] == "dynamic":
-            rope_parameters["rope_type"] = "default"
+    for module in model.modules():
+        rope_type = getattr(module, "rope_type", None)
+        if not hasattr(module, "max_seq_len_cached") or rope_type is None:
+            continue
+        if isinstance(rope_type, dict):
+            module.rope_type = {
+                k: "default" if v == "dynamic" else v for k, v in rope_type.items()
+            }
+        elif rope_type == "dynamic":
+            module.rope_type = "default"
