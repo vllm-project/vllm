@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
 from unittest.mock import patch
 
 import pytest
@@ -18,16 +19,19 @@ from openai.types.responses.response_reasoning_item import (
 )
 
 from vllm.entrypoints.generate.base.protocol import FunctionCall
+from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.entrypoints.openai.responses.utils import (
     _construct_message_from_response_item,
     build_response_output_items,
     construct_chat_messages_with_tool_call,
     construct_input_messages,
+    construct_tool_dicts,
     decode_custom_tool_input,
     decode_custom_tool_input_prefix,
     should_continue_final_message,
 )
 from vllm.exceptions import VLLMValidationError
+from vllm.tool_parsers.utils import get_json_schema_from_tools
 
 
 def _single_chat_message(item):
@@ -254,6 +258,76 @@ class TestResponsesUtils:
 
 
 class TestCustomTools:
+    @pytest.mark.parametrize(
+        "choice", ["auto", "none", "required", {"type": "custom", "name": "emit"}]
+    )
+    def test_namespace_custom_prompt_and_schema(self, choice):
+        request = ResponsesRequest(
+            input="hi",
+            tools=[
+                {
+                    "type": "namespace",
+                    "name": "editing",
+                    "description": "",
+                    "tools": [{"type": "custom", "name": "emit"}],
+                }
+            ],
+            tool_choice=choice,
+        )
+        rendered = construct_tool_dicts(request.tools, request.tool_choice)
+        assert len(rendered) == 1
+        assert rendered[0]["function"]["name"] == "editing__emit"
+        params = rendered[0]["function"]["parameters"]
+        assert params["properties"]["input"]["type"] == "string"
+        schema = get_json_schema_from_tools(request.tool_choice, request.tools)
+        if choice == "required":
+            assert schema["items"]["anyOf"][0]["properties"]["name"]["enum"] == [
+                "editing__emit"
+            ]
+        elif isinstance(choice, dict):
+            assert schema == params
+        elif choice == "none":
+            assert construct_tool_dicts(request.tools, "none", True) is None
+
+    @pytest.mark.parametrize("as_dict", [False, True])
+    def test_namespace_custom_history(self, as_dict):
+        item = ResponseCustomToolCall(
+            type="custom_tool_call",
+            call_id="call_1",
+            name="emit",
+            namespace="editing",
+            input="你好\npatch",
+        )
+        message = _single_chat_message(item.model_dump() if as_dict else item)
+        call = message["tool_calls"][0]
+        assert call["function"]["name"] == "editing__emit"
+        assert json.loads(call["function"]["arguments"]) == {"input": item.input}
+
+    def test_namespace_custom_output(self):
+        request = ResponsesRequest(
+            input="hi",
+            tools=[
+                {
+                    "type": "namespace",
+                    "name": "editing",
+                    "description": "",
+                    "tools": [{"type": "custom", "name": "emit"}],
+                }
+            ],
+        )
+        [item] = build_response_output_items(
+            None,
+            None,
+            [
+                FunctionCall(
+                    id="call_1", name="editing__emit", arguments='{"input":"pwd"}'
+                )
+            ],
+            tools=request.tools,
+        )
+        assert isinstance(item, ResponseCustomToolCall)
+        assert (item.name, item.namespace, item.input) == ("emit", "editing", "pwd")
+
     def test_custom_tool_call_output_item(self):
         tools = [
             CustomTool(type="custom", name="emit_command", format={"type": "text"}),
