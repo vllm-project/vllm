@@ -130,23 +130,21 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         self._send_heartbeats(metadata)
 
     def _start_read(self, req_id: ReqId, meta: ReqMeta) -> bool:
-        """Read, or handshake first if the agent is missing or older than the
-        request's registration; False while reads through the old agent run."""
+        """Read, or handshake again if the agent is older than the request's
+        registration; False while reads through the old agent run."""
         assert meta.remote is not None
         engine_id = meta.remote.engine_id
-        loaded = engine_id in self._remote_agents  # read once: handshakes install
-        if loaded and (
+        if engine_id in self._remote_agents and (
             self._remote_registration_epochs.get(engine_id, 0)
             < meta.remote.registration_epoch
         ):
             if engine_id in self._engines_with_inflight_transfers():
                 return False
             self._cleanup_remote_engine(engine_id, log_eviction=False)
-            loaded = False
-        if loaded:
-            self._read_blocks_for_req(req_id, meta)
-        else:
             self._background_nixl_handshake(req_id, engine_id, meta)
+            return True
+        # Handshakes first when the agent is missing, as on main.
+        self._read_blocks_for_req(req_id, meta)
         return True
 
     def _is_turn2_read_expired(self, meta: ReqMeta) -> bool:
@@ -163,6 +161,15 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
     def _read_blocks_for_req(self, req_id: str, meta: ReqMeta):
         assert meta.remote is not None and self.transfer_topo is not None
         engine_id = meta.remote.engine_id
+        if engine_id in self._invalid_remote_engines:
+            self._handle_failed_transfer(
+                req_id, None, self._recv_failures, record_failed_transfer=False
+            )
+            return
+        if engine_id not in self._remote_agents:
+            # Also re-handshakes queued requests that outlived invalid-peer cleanup.
+            self._background_nixl_handshake(req_id, engine_id, meta)
+            return
         # Update last activity from this remote. Mind that cleanup is done on main
         # thread (this one), so we don't race on this structure.
         self._engine_last_active[engine_id] = time.perf_counter()
@@ -611,7 +618,16 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         remote_ids = np.asarray(remote_block_descs_ids)
         is_dram = desc_is_dram[local_ids]
 
-        assert local_dram_handle is not None
+        if self._skip_dram_xfer:
+            # TP rank 0 reads the DRAM (shared host pool) part for every
+            # local rank; keep only the device part. Register the request
+            # even if nothing is left, so it still completes and notifies.
+            keep = ~is_dram
+            local_ids = local_ids[keep]
+            remote_ids = remote_ids[keep]
+            is_dram = is_dram[keep]
+            self._recving_transfers.setdefault(request_id, [])
+        assert local_dram_handle is not None or not is_dram.any()
         reads = (
             (is_dram, local_dram_handle),
             (~is_dram, local_device_handle),

@@ -3,8 +3,6 @@
 
 """Tests for KV cache offloading configuration."""
 
-import contextlib
-
 import pytest
 
 from vllm.config import CacheConfig, KVTransferConfig, ParallelConfig, VllmConfig
@@ -144,78 +142,40 @@ def test_kv_connector_rejects_expandable_segments(monkeypatch, kv_connector):
         _build_config(kv_connector=kv_connector)
 
 
-@pytest.mark.parametrize(
-    ("kv_connector", "enable_sleep_mode", "enable_cumem_allocator"),
-    [("MooncakeConnector", True, False), ("NixlConnector", False, True)],
-    ids=["sleep_mode", "cumem_allocator"],
-)
-def test_kv_connector_allows_expandable_segments_with_cumem_allocator(
-    monkeypatch, kv_connector, enable_sleep_mode, enable_cumem_allocator
-):
-    """KV allocations in CuMemAllocator's pool, which sleep mode also enables,
-    auto-disable expandable_segments (see #40812)."""
+def test_kv_connector_allows_expandable_segments_with_sleep_mode(monkeypatch):
+    """Sleep mode routes KV allocations through CuMemAllocator's pool, which
+    auto-disables expandable_segments (see #40812)."""
     monkeypatch.setenv("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
-    _build_config(
-        kv_connector=kv_connector,
-        enable_sleep_mode=enable_sleep_mode,
-        enable_cumem_allocator=enable_cumem_allocator,
-    )
+    _build_config(kv_connector="MooncakeConnector", enable_sleep_mode=True)
 
 
-_MOONCAKE = {"kv_connector": "MooncakeConnector", "kv_role": "kv_both"}
-_MOONCAKE_TCP = {**_MOONCAKE, "kv_connector_extra_config": {"mooncake_protocol": "tcp"}}
-_OFFLOADING = {"kv_connector": "OffloadingConnector", "kv_role": "kv_both"}
-_NIXL = {"kv_connector": "NixlConnector", "kv_role": "kv_both"}
+def test_kv_connector_allows_expandable_segments_with_cumem_allocator(
+    monkeypatch,
+):
+    """Manual CuMem allocation must also bypass expandable_segments."""
+    monkeypatch.setenv("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+    _build_config(kv_connector="NixlConnector", enable_cumem_allocator=True)
 
 
-@pytest.mark.parametrize("enable_sleep_mode", [False, True], ids=["awake", "sleep"])
 @pytest.mark.parametrize(
-    ("kv_connector", "kv_connector_extra_config", "supported"),
+    ("kv_connector", "extra_config", "env"),
     [
-        ("NixlConnector", {}, True),
-        ("NixlConnector", {"backends": ["LIBFABRIC"]}, False),
-        ("NixlPushConnector", {}, False),
-        ("MooncakeConnector", {"mooncake_protocol": "tcp"}, False),
-        ("MooncakeConnector", {"mooncake_protocol": "rdma"}, True),
-        ("MooncakeConnector", {}, True),
-        ("MooncakeStoreConnector", {}, False),
-        ("MoRIIOConnector", {}, False),
-        ("OffloadingConnector", {}, True),
-        ("ExampleConnector", {}, True),
-        ("MultiConnector", {"connectors": [_MOONCAKE, _OFFLOADING]}, True),
-        ("MultiConnector", {"connectors": [_MOONCAKE, _NIXL]}, True),
-        ("MultiConnector", {"connectors": [_OFFLOADING, _MOONCAKE_TCP]}, False),
-    ],
-    ids=[
-        "nixl",
-        "nixl-libfabric",
-        "nixl-push",
-        "mooncake-tcp",
-        "mooncake-rdma",
-        "mooncake-default",
-        "mooncake-store",
-        "moriio",
-        "offloading",
-        "example",
-        "multi-mooncake-offloading",
-        "multi-mooncake-nixl",
-        "multi-offloading-mooncake-tcp",
+        ("NixlConnector", {"backends": ["LIBFABRIC"]}, None),
+        ("NixlPushConnector", {}, None),
+        ("MooncakeConnector", {"mooncake_protocol": "tcp"}, None),
+        ("MooncakeConnector", {}, "MC_USE_TENT"),
     ],
 )
-def test_sleep_mode_requires_kv_connector_support(
-    kv_connector, kv_connector_extra_config, supported, enable_sleep_mode
+def test_sleep_mode_refuses_unsupported_kv_connector(
+    monkeypatch, kv_connector, extra_config, env
 ):
-    """Sleep mode refuses a connector that cannot follow the KV cache remap."""
-    refused = enable_sleep_mode and not supported
-    with (
-        pytest.raises(ValueError, match=f"^{kv_connector} does not support sleep mode")
-        if refused
-        else contextlib.nullcontext()
-    ):
+    if env:
+        monkeypatch.setenv(env, "1")
+    with pytest.raises(ValueError, match=f"^{kv_connector} does not support sleep"):
         _build_config(
             kv_connector=kv_connector,
-            kv_connector_extra_config=kv_connector_extra_config,
-            enable_sleep_mode=enable_sleep_mode,
+            kv_connector_extra_config=extra_config,
+            enable_sleep_mode=True,
         )
 
 

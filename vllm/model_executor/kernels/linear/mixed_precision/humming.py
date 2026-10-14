@@ -4,10 +4,20 @@
 
 import torch
 
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kFp8DynamicTokenSym,
+    kInt8DynamicTokenSym,
+)
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_humming
 
 from .MPLinearKernel import MPLinearKernel, MPLinearLayerConfig
+
+# Per-token activation quantization requested through `act_type`.
+_ACT_QUANT_KEYS = {
+    torch.int8: kInt8DynamicTokenSym,
+    torch.float8_e4m3fn: kFp8DynamicTokenSym,
+}
 
 
 class HummingLinearKernel(MPLinearKernel):
@@ -21,6 +31,8 @@ class HummingLinearKernel(MPLinearKernel):
             return False, "Humming is only supported on CUDA"
         if not has_humming():
             return False, "Humming is not installed"
+        if c.act_type.itemsize == 1 and c.act_type not in _ACT_QUANT_KEYS:
+            return False, f"Activation type ({c.act_type}) not supported by Humming"
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
@@ -28,6 +40,7 @@ class HummingLinearKernel(MPLinearKernel):
             convert_linear_layer_to_humming_standard,
             get_humming_linear_compute_config,
             prepare_humming_linear_layer_config,
+            quant_key_to_input_schema,
         )
 
         name_map = {"weight": self.w_q_name, "weight_scale": self.w_s_name}
@@ -48,8 +61,14 @@ class HummingLinearKernel(MPLinearKernel):
 
         convert_linear_layer_to_humming_standard(layer=layer, name_map=name_map)
         input_quant_config = getattr(layer, "_humming_input_quant_config", None)
+        input_schema = None
+        if (act_key := _ACT_QUANT_KEYS.get(self.config.act_type)) is not None:
+            input_schema = quant_key_to_input_schema(act_key)
         self.layer_config = prepare_humming_linear_layer_config(
-            layer, quant_config, input_quant_config=input_quant_config
+            layer,
+            quant_config,
+            input_quant_config=input_quant_config,
+            input_schema=input_schema,
         )
         self.compute_config = get_humming_linear_compute_config()
         self.locks = torch.zeros(1024, dtype=torch.int32, device=layer.weight.device)

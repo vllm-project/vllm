@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 
-from vllm.config import VllmConfig
+from vllm.config import KVTransferConfig, VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     EngineId,
 )
@@ -58,10 +58,10 @@ from vllm.forward_context import ForwardContext
 from vllm.logger import init_logger
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.outputs import KVConnectorOutput
 
 if TYPE_CHECKING:
-    from vllm.config.kv_transfer import KVTransferConfig
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_scheduler import (
         NixlBaseConnectorScheduler,
     )
@@ -77,6 +77,8 @@ logger = init_logger(__name__)
 
 class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
     """Base connector with common logic shared by pull and push modes."""
+
+    _cache_hit_source = CacheHitSource.P2P
 
     @property
     def supports_divergent_local_hybrid_hits(self) -> bool:
@@ -139,7 +141,7 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
     # Class Methods
     ############################################################
     @classmethod
-    def supports_sleep_mode(cls, kv_transfer_config: "KVTransferConfig") -> bool:
+    def supports_sleep_mode(cls, kv_transfer_config: KVTransferConfig) -> bool:
         # Push producers keep the decoder's KV cache registration across its sleep.
         return False
 
@@ -367,13 +369,13 @@ class NixlPullConnector(NixlBaseConnector):
             )
 
     @classmethod
-    def supports_sleep_mode(cls, kv_transfer_config: "KVTransferConfig") -> bool:
+    def supports_sleep_mode(cls, kv_transfer_config: KVTransferConfig) -> bool:
         # Re-registration and the peer refresh are validated with UCX only.
         return kv_transfer_config.get_from_extra_config("backends", ["UCX"]) == ["UCX"]
 
-    def release_kv_caches(self) -> None:
+    def unregister_kv_caches(self) -> None:
         assert self.connector_worker is not None
-        self.connector_worker.release_kv_caches()
+        self.connector_worker.unregister_kv_caches()
 
     def restore_kv_caches(self) -> None:
         assert self.connector_worker is not None
