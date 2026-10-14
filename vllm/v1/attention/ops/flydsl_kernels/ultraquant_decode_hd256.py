@@ -624,7 +624,7 @@ def build_ultraquant_decode_hd256_module(
                         (kv_lds_i64 + v_lds_i64_idx).store(v_bf16.bitcast(fx.Int64))
                 # HW V transpose cross-lane LDS fence (see 128 kernel).
                 rocdl.sched_barrier(0)
-                rocdl.s_waitcnt(0xC07F)
+                rocdl.s_waitcnt(lgkmcnt=0)
                 gpu.barrier()
 
                 # ---- PV MFMA: A=V[head_dim, token], B=P (=qk_acc bf16) -----
