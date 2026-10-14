@@ -22,7 +22,6 @@ _FLYDSL_AVAILABLE: bool | None = None
 _ULTRAQUANT_MOD: Any = None
 _FLYC: Any = None
 _FX: Any = None
-_TYPING_T: Any = None
 _CC: Any = None
 _IR: Any = None
 
@@ -30,7 +29,7 @@ _IR: Any = None
 def is_ultraquant_flydsl_available() -> bool:
     """Return whether the gfx950 UltraQuant FlyDSL kernel can be loaded."""
     global _FLYDSL_AVAILABLE, _ULTRAQUANT_MOD
-    global _FLYC, _FX, _TYPING_T, _CC, _IR
+    global _FLYC, _FX, _CC, _IR
     if _FLYDSL_AVAILABLE is not None:
         return _FLYDSL_AVAILABLE
     try:
@@ -44,7 +43,6 @@ def is_ultraquant_flydsl_available() -> bool:
         import flydsl.expr as fx
         from flydsl._mlir import ir
         from flydsl.compiler.kernel_function import CompilationContext
-        from flydsl.expr.typing import T
 
         from vllm.v1.attention.ops.flydsl_kernels import (
             ultraquant_decode_hd256 as ultraquant_mod,
@@ -52,7 +50,6 @@ def is_ultraquant_flydsl_available() -> bool:
 
         _FLYC = flyc
         _FX = fx
-        _TYPING_T = T
         _CC = CompilationContext
         _IR = ir
         _ULTRAQUANT_MOD = ultraquant_mod
@@ -371,7 +368,6 @@ def _get_kernel(
     allocator = kmod.allocator
     flyc = _FLYC
     fx = _FX
-    T = _TYPING_T
     CompilationContext = _CC
     ir_mod = _IR
 
@@ -394,13 +390,8 @@ def _get_kernel(
         ctx = CompilationContext.get_current()
         with ir_mod.InsertionPoint(ctx.gpu_module_body):
             allocator.finalize()
-        from flydsl.expr import arith
-
-        grid_x = arith.index_cast(T.index, gx.ir_value())
-        grid_y = arith.index_cast(T.index, gy.ir_value())
-        grid_z = arith.index_cast(T.index, gz.ir_value())
         kfn(out, es, ml, q, kvc, cents, bt, sl).launch(
-            grid=(grid_x, grid_y, grid_z),
+            grid=(gx, gy, gz),
             block=(kmod.BLOCK_THREADS, 1, 1),
             stream=stream,
         )

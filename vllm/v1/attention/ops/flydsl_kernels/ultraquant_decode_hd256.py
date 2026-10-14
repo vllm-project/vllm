@@ -15,29 +15,13 @@ import math
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from aiter.ops.flydsl.kernels import buffer_ops, vector
+from aiter.ops.flydsl.kernels import buffer_ops
 from flydsl._mlir import ir
 from flydsl._mlir.dialects import scf as _scf
-from flydsl.expr import (
-    arith,
-    gpu,
-    rocdl,
-)
-from flydsl.expr.primitive import const_expr, range_constexpr
+from flydsl.expr import arith, const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr.typing import T
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
-
-
-def _vector_insert(value, dest, *, static_position):
-    """Insert a DSL scalar using FlyDSL 0.3's raw vector dialect binding."""
-    return vector.insert(
-        vector.as_ir_value(value),
-        vector.as_ir_value(dest),
-        dynamic_position=[],
-        static_position=static_position,
-    )
-
 
 # === Constants (256-wide-head ultraquant decode profile) =======================
 HEAD_SIZE = 256
@@ -98,12 +82,6 @@ SCALE_LDS_BYTES = TILE_SIZE * N_GROUPS * 4  # 16*8*4 = 512 for 256
 
 LOG2E = 1.4426950408889634
 NEG_INF_VAL = float("-inf")
-
-
-def _vsplat_mul(vec, scalar):
-    s = scalar.ir_value() if hasattr(scalar, "ir_value") else scalar
-    return vec * vector.broadcast(T.f32x4, s)
-
 
 allocator = None
 
@@ -264,8 +242,8 @@ def build_ultraquant_decode_hd256_module(
         kv_h = gpu.block_idx.y
         part = gpu.block_idx.z
         lane = tid  # 0..63
-        mfma_row = lane & fx.Int32(15)
-        mfma_col_grp = lane >> fx.Int32(4)  # 0..3, K-group dim
+        mfma_row = lane & 15
+        mfma_col_grp = lane >> 4  # 0..3, K-group dim
 
         # ---- Buffer resources -------------------------------------------
         q_rsrc = buffer_ops.create_buffer_resource(query_ptr, max_size=True)
@@ -281,9 +259,6 @@ def build_ultraquant_decode_hd256_module(
         cent_lds = SmemPtr(base, centroid_off, T.f32, shape=(N_CENTROIDS,))
         q_lds_i32 = SmemPtr(base, q_off, T.i32, shape=(_Q_LDS_BYTES // 4,)).get()
         q_lds_i64 = SmemPtr(base, q_off, T.i64, shape=(_Q_LDS_BYTES // 8,)).get()
-        # KV / scale views span ALL warps' private regions (W*stride); the
-        # per-warp base offset is folded into the element indices below via
-        # _kvi*/_sci (a literal 0 for W=1, so the single-warp path is unchanged).
         kv_lds_i32 = SmemPtr(
             base, kv_off, T.i32, shape=(KV_TILE_LDS_BYTES_PADDED // 4,)
         ).get()
@@ -292,60 +267,32 @@ def build_ultraquant_decode_hd256_module(
         ).get()
         scale_lds_i32 = SmemPtr(base, scale_off, T.i32, shape=(TILE_SIZE * N_GROUPS,))
 
-        def _kvi32(e):
-            return e
-
-        def _kvi64(e):
-            return e
-
-        def _sci(e):
-            return e
-
         # ---- Constants ---------------------------------------------------
-        c_sq = fx.Int32(_stride_q_seq)
-        c_qh = fx.Int32(_stride_q_head)
-        c_qg = fx.Int32(QG)
-        c_bt = fx.Int32(_stride_bt_seq)
-        c_stride_pos = fx.Int32(_stride_cache_pos)
-        c_stride_head = fx.Int32(_stride_cache_head)
-        c_kscale_off = fx.Int32(K_SCALES_OFFSET)  # 128
-        c_vcode_off = fx.Int32(V_CODES_OFFSET)  # 136
-        c_vscale_off = fx.Int32(V_SCALES_OFFSET)  # 264
-        c_w = fx.Int32(WARP_SIZE)
-
-        NEG_INF = arith.constant(NEG_INF_VAL, type=T.f32)
+        NEG_INF = fx.Float32(NEG_INF_VAL)
         ZERO_F = fx.Float32(0.0)
         ONE_F = fx.Float32(1.0)
-        LOG2E_C = arith.constant(LOG2E, type=T.f32)
-        QK_SCALE = arith.constant(_qk_scale, type=T.f32)
+        LOG2E_C = fx.Float32(LOG2E)
+        QK_SCALE = fx.Float32(_qk_scale)
 
         def _ival(v):
             return v.ir_value() if hasattr(v, "ir_value") else v
 
-        c_zero_i32 = arith.constant(0, type=T.i32)
-
         def _f32x8_to_fp8_i64(f):
             # 8 f32 -> 8 E4M3 bytes packed as i64 (MFMA fp8 operand).
-            w0 = rocdl.cvt_pk_fp8_f32(T.i32, f[0], f[1], c_zero_i32, 0)
+            w0 = rocdl.cvt_pk_fp8_f32(T.i32, f[0], f[1], 0, 0)
             w0 = rocdl.cvt_pk_fp8_f32(T.i32, f[2], f[3], w0, 1)
-            w1 = rocdl.cvt_pk_fp8_f32(T.i32, f[4], f[5], c_zero_i32, 0)
+            w1 = rocdl.cvt_pk_fp8_f32(T.i32, f[4], f[5], 0, 0)
             w1 = rocdl.cvt_pk_fp8_f32(T.i32, f[6], f[7], w1, 1)
-            pv = vector.from_elements(T.vec(2, T.i32), [w0, w1])
-            return vector.extract(
-                vector.bitcast(T.vec(1, T.i64), pv), static_position=[0]
-            )
+            packed = fx.Vector.from_elements([w0, w1], dtype=fx.Int32)
+            return packed.bitcast(fx.Int64)[0]
 
         def _bf16x8_to_fp8_i64(v_bf16):
-            f = [
-                arith.extf(T.f32, vector.extract(v_bf16, static_position=[i]))
-                for i in range(8)
-            ]
-            return _f32x8_to_fp8_i64(f)
+            return _f32x8_to_fp8_i64([v_bf16[i].to(fx.Float32) for i in range(8)])
 
         # ===== STEP A: Load centroids → LDS (cooperative, race-safe) =====
-        c_idx_safe = lane & fx.Int32(N_CENTROIDS - 1)
+        c_idx_safe = lane & (N_CENTROIDS - 1)
         c_val = buffer_ops.buffer_load(cent_rsrc, c_idx_safe, vec_width=1, dtype=T.f32)
-        cent_lds.store(c_val, [arith.index_cast(T.index, c_idx_safe)])
+        cent_lds.store(c_val, [fx.Index(c_idx_safe)])
         gpu.barrier()
 
         # ===== STEP B': in-kernel Q rotation (fused WHT) ==================
@@ -368,42 +315,36 @@ def build_ultraquant_decode_hd256_module(
         # entirely inside one lane's registers, and leaves only stages 5..7
         # (strides 32/64/128 == chunk XOR 1/2/4) needing a cross-lane exchange.
         if const_expr(_FUSE_QROT):
-            _wrow = lane >> fx.Int32(3)  # 0..7  row within the group
-            _wchk = lane & fx.Int32(7)  # 0..7  32-dim chunk
+            _wrow = lane >> 3  # 0..7  row within the group
+            _wchk = lane & 7  # 0..7  32-dim chunk
             # inv(qperm) is a pure bit permutation of the head-dim index:
             #   dest = (d & 0x8F) | ((d>>2)&0x10) | ((d<<1)&0x60)
             # which splits additively into a compile-time part in t and a
             # per-lane part in the chunk index (verified exhaustively):
             #   ct(t) = (t & 0x0F) | ((t & 0x10) << 1)
             #   rt(c) = ((c&2)<<3) | ((c&1)<<6) | ((c&4)<<5)
-            _perm_base = (
-                ((_wchk & fx.Int32(2)) << fx.Int32(3))
-                | ((_wchk & fx.Int32(1)) << fx.Int32(6))
-                | ((_wchk & fx.Int32(4)) << fx.Int32(5))
-            )
-            _inv_sqrtD = arith.constant(1.0 / math.sqrt(HEAD_SIZE), type=T.f32)
+            _perm_base = ((_wchk & 2) << 3) | ((_wchk & 1) << 6) | ((_wchk & 4) << 5)
+            _inv_sqrtD = fx.Float32(1.0 / math.sqrt(HEAD_SIZE))
             for _qit in range_constexpr((QG + 7) // 8):
-                _qrow = _wrow + fx.Int32(_qit * 8)
-                if _qrow < fx.Int32(QG):
+                _qrow = _wrow + _qit * 8
+                if _qrow < QG:
                     _qb = (
-                        seq * c_sq + (kv_h * c_qg + _qrow) * c_qh + _wchk * fx.Int32(32)
+                        seq * _stride_q_seq
+                        + (kv_h * QG + _qrow) * _stride_q_head
+                        + _wchk * 32
                     )
                     # ---- load this lane's 32 raw-Q head-dims (4 x dwordx4) ----
                     _v = []
                     for _j in range_constexpr(4):
                         _raw = buffer_ops.buffer_load(
                             q_rsrc,
-                            (_qb + fx.Int32(_j * 8)) // fx.Int32(2),
+                            (_qb + _j * 8) // 2,
                             vec_width=4,
                             dtype=T.i32,
                         )
-                        _rb = vector.bitcast(T.vec(8, T.bf16), _raw)
+                        _rb = fx.Vector(_raw).bitcast(fx.BFloat16)
                         for _e in range_constexpr(8):
-                            _v.append(
-                                arith.extf(
-                                    T.f32, vector.extract(_rb, static_position=[_e])
-                                )
-                            )
+                            _v.append(_rb[_e].to(fx.Float32))
                     # ---- stages 0..4: in-register, no LDS, no cross-lane ----
                     for _s in range_constexpr(5):
                         _st = 1 << _s
@@ -423,29 +364,19 @@ def build_ultraquant_decode_hd256_module(
                     # partner is always within the same 32-lane group (k<=4).
                     for _s in range_constexpr(3):
                         _k = 1 << _s
-                        _swz = arith.constant((_k << 10) | 0x1F, type=T.i32)
+                        _swz = fx.Int32((_k << 10) | 0x1F).ir_value()
                         # High half of the pair computes (partner - mine), the low
                         # half (mine + partner). Fold that into a single sign
                         # computed ONCE per stage, so each element costs one
                         # multiply-add rather than a branch or a per-element select.
-                        _chk_bit = _wchk & fx.Int32(_k)
-                        _is_hi = arith.cmpi(
-                            arith.CmpIPredicate.ne,
-                            _chk_bit.ir_value()
-                            if hasattr(_chk_bit, "ir_value")
-                            else _chk_bit,
-                            fx.Int32(0).ir_value(),
-                        )
-                        _sf = arith.select(
-                            _is_hi,
-                            arith.constant(-1.0, type=T.f32),
-                            arith.constant(1.0, type=T.f32),
+                        _sf = ((_wchk & _k) != 0).select(
+                            fx.Float32(-1.0), fx.Float32(1.0)
                         )
                         _nx = []
                         for _t in range_constexpr(32):
-                            _mi = arith.bitcast(T.i32, _v[_t])
-                            _pt = arith.bitcast(
-                                T.f32, rocdl.ds_swizzle(T.i32, _mi, _swz)
+                            _mi = _v[_t].bitcast(fx.Int32).ir_value()
+                            _pt = fx.Int32(rocdl.ds_swizzle(T.i32, _mi, _swz)).bitcast(
+                                fx.Float32
                             )
                             _nx.append(_v[_t] * _sf + _pt)
                         _v = _nx
@@ -460,58 +391,44 @@ def build_ultraquant_decode_hd256_module(
                             T.i32,
                             _v[2 * _p] * _inv_sqrtD,
                             _v[2 * _p + 1] * _inv_sqrtD,
-                            fx.Int32(0),
+                            0,
                             0,
                         )
-                        _u = rocdl.cvt_pk_f32_fp8(T.vec(2, T.f32), _w, 0)
-                        _hc.append(
-                            arith.truncf(
-                                T.bf16, vector.extract(_u, static_position=[0])
-                            )
-                        )
-                        _hc.append(
-                            arith.truncf(
-                                T.bf16, vector.extract(_u, static_position=[1])
-                            )
-                        )
+                        _u = fx.Vector(rocdl.cvt_pk_f32_fp8(T.vec(2, T.f32), _w, 0))
+                        _hc.append(_u[0].to(fx.BFloat16))
+                        _hc.append(_u[1].to(fx.BFloat16))
                     # ---- permuted store ----
                     # ct(t) maps t=0..15 -> 0..15 and t=16..31 -> 32..47, i.e. TWO
                     # contiguous 16-element runs, so the scatter is still 4 aligned
                     # 16-byte vector stores rather than 32 scalar writes.
-                    _qrow_elem = _qrow * fx.Int32(HEAD_SIZE)
+                    _qrow_elem = _qrow * HEAD_SIZE
                     for _half in range_constexpr(2):
                         for _q4 in range_constexpr(2):
                             _elems = [_hc[_half * 16 + _q4 * 8 + _e] for _e in range(8)]
-                            _vec = vector.from_elements(T.vec(8, T.bf16), _elems)
-                            _dst = (
-                                _qrow_elem + _perm_base + fx.Int32(_half * 32 + _q4 * 8)
-                            )
-                            vector.store(
-                                vector.bitcast(T.vec(4, T.i32), _vec),
-                                q_lds_i32,
-                                [arith.index_cast(T.index, _dst // fx.Int32(2))],
+                            _vec = fx.Vector.from_elements(_elems, dtype=fx.BFloat16)
+                            _dst = _qrow_elem + _perm_base + (_half * 32 + _q4 * 8)
+                            _vec.bitcast(fx.Int32).store(
+                                q_lds_i32, [fx.Index(_dst // 2)]
                             )
             gpu.barrier()
 
         # ===== STEP B: Load pre-rotated q_rot → row-major Q LDS ==========
         for c in range_constexpr(0 if _FUSE_QROT else QG_LOAD_ITERS):
-            row_chunk = lane + fx.Int32(c * WARP_SIZE)
-            row = row_chunk >> fx.Int32(Q_ROW_SHIFT)  # 0..QG-1
-            col_b = row_chunk & fx.Int32(Q_COL_MASK)  # 0..Q_GROUPS_PER_ROW-1
-            col_elem = col_b * fx.Int32(8)  # bf16 elem
-            q_off_elem = seq * c_sq + (kv_h * c_qg + row) * c_qh + col_elem
+            row_chunk = lane + c * WARP_SIZE
+            row = row_chunk >> Q_ROW_SHIFT  # 0..QG-1
+            col_b = row_chunk & Q_COL_MASK  # 0..Q_GROUPS_PER_ROW-1
+            col_elem = col_b * 8  # bf16 elem
+            q_off_elem = (
+                seq * _stride_q_seq + (kv_h * QG + row) * _stride_q_head + col_elem
+            )
             q_v = buffer_ops.buffer_load(
                 q_rsrc,
-                q_off_elem // fx.Int32(2),
+                q_off_elem // 2,
                 vec_width=4,
                 dtype=T.i32,
             )
-            q_lds_byte = row * fx.Int32(HEAD_SIZE * 2) + col_elem * fx.Int32(2)
-            vector.store(
-                q_v,
-                q_lds_i32,
-                [arith.index_cast(T.index, q_lds_byte // fx.Int32(4))],
-            )
+            q_lds_byte = row * (HEAD_SIZE * 2) + col_elem * 2
+            fx.Vector(q_v).store(q_lds_i32, [fx.Index(q_lds_byte // 4)])
         gpu.barrier()
 
         # Scaled-MFMA Q operands (loop-invariant): one per MFMA issue.
@@ -520,29 +437,26 @@ def build_ultraquant_decode_hd256_module(
             _q_hoist_words = []
             for j in range_constexpr(4):
                 _q_hoist_idx = (
-                    mfma_row * fx.Int32(HEAD_SIZE * 2 // 8)
-                    + (fx.Int32(h * GRPS_PER_ISSUE) + mfma_col_grp) * fx.Int32(8)
-                    + fx.Int32(j * 2)
+                    mfma_row * (HEAD_SIZE * 2 // 8)
+                    + (h * GRPS_PER_ISSUE + mfma_col_grp) * 8
+                    + j * 2
                 )
-                _q_hoist_v = vector.load_op(
-                    T.vec(2, T.i64),
-                    q_lds_i64,
-                    [arith.index_cast(T.index, _q_hoist_idx)],
+                _q_hoist_v = fx.Vector.load(
+                    T.vec(2, T.i64), q_lds_i64, [fx.Index(_q_hoist_idx)]
                 )
                 _q_hoist_words.append(
-                    _bf16x8_to_fp8_i64(vector.bitcast(T.vec(8, T.bf16), _q_hoist_v))
+                    _bf16x8_to_fp8_i64(_q_hoist_v.bitcast(fx.BFloat16))
                 )
             q_op_hoisted.append(
-                vector.bitcast(
-                    T.vec(8, T.i32),
-                    vector.from_elements(T.vec(4, T.i64), _q_hoist_words),
+                fx.Vector.from_elements(_q_hoist_words, dtype=fx.Int64).bitcast(
+                    fx.Int32
                 )
             )
 
         # ===== STEP D: Online softmax + PV state =========================
         running_max = NEG_INF
         running_sum = ZERO_F
-        zero_v4 = arith.constant_vector(0.0, T.f32x4)
+        zero_v4 = fx.Vector.filled(4, 0.0, fx.Float32)
         acc_pv = [zero_v4 for _ in range(PV_N_CHUNKS)]
 
         # ===== STEP E: Sequence-len + partition base ====================
@@ -550,25 +464,20 @@ def build_ultraquant_decode_hd256_module(
 
         # Per-K-tile dequant lane assignment: lane t -> token = t/4,
         # chunk_in_tok = t%4 (each chunk = SUBCHUNK_HDIMS=64 head-dims = 2 groups).
-        tok_in_tile = lane >> fx.Int32(2)
-        chunk_in_tok = lane & fx.Int32(3)
+        tok_in_tile = lane >> 2
+        chunk_in_tok = lane & 3
         # Both UE8M0 group bytes for this lane's chunk (groups 2c, 2c+1) live in
         # the SAME 4-byte scale word at offset (chunk_in_tok>>1)*4 within the
         # 8-byte scale region. Load once; extract per-half below.
-        c_scale_word_off = (chunk_in_tok >> fx.Int32(1)) * fx.Int32(4)
+        c_scale_word_off = (chunk_in_tok >> 1) * 4
 
         # ===== STEP F: K-tile loop =======================================
-        c_kcb = fx.Int32(KV_COMPUTE_BLOCK)
-        c_tgpp = fx.Int32(TGPP)
-        c_zero_i32 = fx.Int32(0)
-        c_one_i32 = fx.Int32(1)
-        c_nparts = fx.Int32(NUM_PARTS_C)
-        total_tgs = (seq_len + c_kcb - c_one_i32) // c_kcb
+        total_tgs = (seq_len + KV_COMPUTE_BLOCK - 1) // KV_COMPUTE_BLOCK
         avail = total_tgs - part
-        in_range = avail > c_zero_i32
-        trip_raw = (avail + c_nparts - c_one_i32) // c_nparts
-        trip_clamped = (trip_raw > c_tgpp).select(c_tgpp, trip_raw)
-        trip_or_zero = in_range.select(trip_clamped, c_zero_i32)
+        in_range = avail > 0
+        trip_raw = (avail + NUM_PARTS_C - 1) // NUM_PARTS_C
+        trip_clamped = (trip_raw > TGPP).select(TGPP, trip_raw)
+        trip_or_zero = in_range.select(trip_clamped, 0)
         c_zero_idx = arith.constant(0, index=True)
         c_one_idx = arith.constant(1, index=True)
         trip_idx = arith.index_cast(
@@ -593,8 +502,8 @@ def build_ultraquant_decode_hd256_module(
         try:
             tg_idx = _for_op.induction_variable
             tg_i32 = fx.Int32(arith.index_cast(T.i32, tg_idx))
-            partition_start = (part + tg_i32 * c_nparts) * c_kcb
-            bt_seq_base = seq * c_bt + (partition_start // fx.Int32(_BS))
+            partition_start = (part + tg_i32 * NUM_PARTS_C) * KV_COMPUTE_BLOCK
+            bt_seq_base = seq * _stride_bt_seq + (partition_start // _BS)
             running_max = _for_op.inner_iter_args[0]
             running_sum = _for_op.inner_iter_args[1]
             acc_pv = list(_for_op.inner_iter_args[2:])
@@ -612,22 +521,13 @@ def build_ultraquant_decode_hd256_module(
             # ...) are consumed only inside this closure; the dequant below
             # needs just the four returned register values.
             def _emit_tile_loads(n_tile):
-                # n_tile is a compile-time int on the single-warp path and a
-                # runtime fx.Int32 on the multi-warp path (each warp strides the
-                # 16 tiles). Compute the block/tile/slot geometry accordingly.
-                if const_expr(isinstance(n_tile, int)):
-                    block_in_part = fx.Int32(n_tile // _TILES_PER_BLOCK)
-                    tile_in_block = n_tile % _TILES_PER_BLOCK
-                    tile_start_tok = partition_start + fx.Int32(n_tile * TILE_SIZE)
-                    slot = fx.Int32(tile_in_block * TILE_SIZE) + tok_in_tile
-                else:
-                    block_in_part = n_tile // fx.Int32(_TILES_PER_BLOCK)
-                    tile_in_block = n_tile - block_in_part * fx.Int32(_TILES_PER_BLOCK)
-                    tile_start_tok = partition_start + n_tile * fx.Int32(TILE_SIZE)
-                    slot = tile_in_block * fx.Int32(TILE_SIZE) + tok_in_tile
+                block_in_part = n_tile // _TILES_PER_BLOCK
+                tile_in_block = n_tile % _TILES_PER_BLOCK
+                tile_start_tok = partition_start + n_tile * TILE_SIZE
+                slot = tok_in_tile + tile_in_block * TILE_SIZE
                 tile_in_seq = tile_start_tok < seq_len
                 bt_off = bt_seq_base + block_in_part
-                bt_off_safe = tile_in_seq.select(bt_off, seq * c_bt)
+                bt_off_safe = tile_in_seq.select(bt_off, seq * _stride_bt_seq)
                 phys_block = buffer_ops.buffer_load(
                     bt_rsrc,
                     bt_off_safe,
@@ -638,26 +538,23 @@ def build_ultraquant_decode_hd256_module(
                 # ``phys_block * c_block`` wraps once the cache view exceeds
                 # 4 GiB. Fold the block base into the descriptor's 64-bit
                 # base pointer and keep only in-block offsets below.
-                blk_off_i64 = arith.extui(T.i64, phys_block) * fx.Int64(
-                    _stride_cache_block
-                )
+                blk_off_i64 = fx.Int64(fx.Uint32(phys_block)) * _stride_cache_block
                 blk_rsrc = buffer_ops.create_buffer_resource(
                     kv_cache_ptr,
                     max_size=True,
                     base_byte_offset=blk_off_i64,
                 )
-                block_base = fx.Int32(0)
 
-                slot_base_byte = block_base + slot * c_stride_pos + kv_h * c_stride_head
+                slot_base_byte = slot * _stride_cache_pos + kv_h * _stride_cache_head
                 # K codes: LANE_CODE_BYTES (=32) at slot_base + chunk*32, in
                 # HALVES x 16-byte buffer_loads.
-                k_byte0 = slot_base_byte + chunk_in_tok * fx.Int32(LANE_CODE_BYTES)
+                k_byte0 = slot_base_byte + chunk_in_tok * LANE_CODE_BYTES
                 _kpl = []
                 for hf in range_constexpr(HALVES):
                     _kpl.append(
                         buffer_ops.buffer_load(
                             blk_rsrc,
-                            (k_byte0 + fx.Int32(hf * 16)) // fx.Int32(4),
+                            (k_byte0 + hf * 16) // 4,
                             vec_width=4,
                             dtype=T.i32,
                             cache_modifier=_KV_AUX,
@@ -666,16 +563,14 @@ def build_ultraquant_decode_hd256_module(
 
                 # ---- V codes + K/V scale HBM loads ------------------------
                 v_byte0 = (
-                    slot_base_byte
-                    + c_vcode_off
-                    + chunk_in_tok * fx.Int32(LANE_CODE_BYTES)
+                    slot_base_byte + V_CODES_OFFSET + chunk_in_tok * LANE_CODE_BYTES
                 )
                 _vpl = []
                 for hf in range_constexpr(HALVES):
                     _vpl.append(
                         buffer_ops.buffer_load(
                             blk_rsrc,
-                            (v_byte0 + fx.Int32(hf * 16)) // fx.Int32(4),
+                            (v_byte0 + hf * 16) // 4,
                             vec_width=4,
                             dtype=T.i32,
                             cache_modifier=_KV_AUX,
@@ -686,13 +581,13 @@ def build_ultraquant_decode_hd256_module(
                 # byte==0 -> +0.0 (zero sentinel).
                 _ksw = buffer_ops.buffer_load(
                     blk_rsrc,
-                    (slot_base_byte + c_kscale_off + c_scale_word_off) // fx.Int32(4),
+                    (slot_base_byte + K_SCALES_OFFSET + c_scale_word_off) // 4,
                     vec_width=1,
                     dtype=T.i32,
                 )
                 _vsw = buffer_ops.buffer_load(
                     blk_rsrc,
-                    (slot_base_byte + c_vscale_off + c_scale_word_off) // fx.Int32(4),
+                    (slot_base_byte + V_SCALES_OFFSET + c_scale_word_off) // 4,
                     vec_width=1,
                     dtype=T.i32,
                 )
@@ -708,7 +603,7 @@ def build_ultraquant_decode_hd256_module(
             _tile_range = range_constexpr(16)
             for _jt in _tile_range:
                 n_tile = _jt
-                _ntile_tok = fx.Int32(n_tile * TILE_SIZE)
+                _ntile_tok = n_tile * TILE_SIZE
                 (k_packed_list, v_packed_list, kscale_word, vscale_word) = (
                     _pf_queue.pop(0)
                 )
@@ -719,31 +614,14 @@ def build_ultraquant_decode_hd256_module(
                 # 16 B = 32 nibbles per UE8M0 group) straight to KV LDS as
                 # the scaled-MFMA A operand — no dequant here.
                 for hf in range_constexpr(HALVES):
-                    grp = chunk_in_tok * fx.Int32(2) + fx.Int32(hf)
-                    grp_shift = (grp & fx.Int32(3)) * fx.Int32(8)
-                    kscale_byte = (kscale_word >> grp_shift) & fx.Int32(0xFF)
-                    k_packed = k_packed_list[hf]
-                    vector.store(
-                        k_packed,
-                        kv_lds_i32,
-                        [
-                            arith.index_cast(
-                                T.index,
-                                _kvi32(
-                                    tok_in_tile * fx.Int32(KFP4_ROW_I32)
-                                    + grp * fx.Int32(4)
-                                ),
-                            )
-                        ],
+                    grp = chunk_in_tok * 2 + hf
+                    grp_shift = (grp & 3) * 8
+                    kscale_byte = (kscale_word >> grp_shift) & 0xFF
+                    fx.Vector(k_packed_list[hf]).store(
+                        kv_lds_i32, [fx.Index(tok_in_tile * KFP4_ROW_I32 + grp * 4)]
                     )
                     scale_lds_i32.store(
-                        kscale_byte,
-                        [
-                            arith.index_cast(
-                                T.index,
-                                _sci(tok_in_tile * fx.Int32(N_GROUPS) + grp),
-                            )
-                        ],
+                        kscale_byte, [fx.Index(tok_in_tile * N_GROUPS + grp)]
                     )
                 gpu.barrier()
                 # QK: MFMA_ISSUES native scaled MFMAs over K=128,
@@ -757,32 +635,17 @@ def build_ultraquant_decode_hd256_module(
                 IDENT = fx.Int32(0x7F)
                 qk_acc = zero_v4
                 for h in range_constexpr(MFMA_ISSUES):
-                    grp = fx.Int32(h * GRPS_PER_ISSUE) + mfma_col_grp
-                    k_op = vector.load_op(
+                    grp = mfma_col_grp + h * GRPS_PER_ISSUE
+                    k_op = fx.Vector.load(
                         T.vec(4, T.i32),
                         kv_lds_i32,
-                        [
-                            arith.index_cast(
-                                T.index,
-                                _kvi32(
-                                    mfma_row * fx.Int32(KFP4_ROW_I32)
-                                    + grp * fx.Int32(4)
-                                ),
-                            )
-                        ],
+                        [fx.Index(mfma_row * KFP4_ROW_I32 + grp * 4)],
                     )
                     q_op = q_op_hoisted[h]
                     scbyte = fx.Int32(
-                        scale_lds_i32.load(
-                            [
-                                arith.index_cast(
-                                    T.index,
-                                    _sci(mfma_row * fx.Int32(N_GROUPS) + grp),
-                                )
-                            ]
-                        )
+                        scale_lds_i32.load([fx.Index(mfma_row * N_GROUPS + grp)])
                     )
-                    kscale = fx.Int32(0x7F7F7F00) | scbyte
+                    kscale = scbyte | 0x7F7F7F00
                     qk_acc = rocdl.mfma_scale_f32_16x16x128_f8f6f4(
                         T.vec(4, T.f32),
                         [
@@ -799,93 +662,73 @@ def build_ultraquant_decode_hd256_module(
                     )
 
                 # Scale + mask out-of-context tokens.
-                qk_acc = _vsplat_mul(qk_acc, QK_SCALE)
+                qk_acc = qk_acc * QK_SCALE
+                masked = []
                 for elem in range_constexpr(4):
-                    kv_tok = (
-                        partition_start
-                        + _ntile_tok
-                        + mfma_col_grp * fx.Int32(4)
-                        + fx.Int32(elem)
-                    )
-                    in_b = kv_tok < seq_len
-                    v = vector.extract(qk_acc, static_position=[elem])
-                    qk_acc = _vector_insert(
-                        in_b.select(v, NEG_INF),
-                        qk_acc,
-                        static_position=[elem],
-                    )
+                    kv_tok = partition_start + _ntile_tok + mfma_col_grp * 4 + elem
+                    masked.append((kv_tok < seq_len).select(qk_acc[elem], NEG_INF))
+                qk_acc = fx.Vector.from_elements(masked, dtype=fx.Float32)
 
                 # FA2 online softmax: per-query-row reduce.
-                local_max = vector.reduction(T.f32, "maxnumf", qk_acc)
-                r1 = local_max.shuffle_xor(fx.Int32(16), c_w)
-                local_max = local_max.maximumf(r1)
-                r2 = local_max.shuffle_xor(fx.Int32(32), c_w)
-                tile_max = local_max.maximumf(r2)
+                local_max = qk_acc.reduce(fx.ReductionOp.MAX)
+                r1 = local_max.shuffle_xor(16, WARP_SIZE)
+                local_max = fx.max(local_max, r1)
+                r2 = local_max.shuffle_xor(32, WARP_SIZE)
+                tile_max = fx.max(local_max, r2)
 
-                new_max = running_max.maximumf(tile_max)
+                new_max = fx.max(running_max, tile_max)
                 max_diff = running_max - new_max
                 safe_diff = (running_max > NEG_INF).select(max_diff, ZERO_F)
                 scale = (safe_diff * LOG2E_C).exp2(fastmath=arith.FastMathFlags.fast)
                 running_sum = running_sum * scale
                 for h in range_constexpr(PV_N_CHUNKS):
-                    acc_pv[h] = _vsplat_mul(acc_pv[h], scale)
+                    acc_pv[h] = acc_pv[h] * scale
                 running_max = new_max
 
                 tile_sum = ZERO_F
+                probs = []
                 for elem in range_constexpr(4):
-                    s = vector.extract(qk_acc, static_position=[elem])
-                    d = s - new_max
+                    d = qk_acc[elem] - new_max
                     d = (new_max > NEG_INF).select(d, NEG_INF)
                     p = (d * LOG2E_C).exp2(fastmath=arith.FastMathFlags.fast)
                     tile_sum = tile_sum + p
-                    qk_acc = _vector_insert(p, qk_acc, static_position=[elem])
+                    probs.append(p)
+                qk_acc = fx.Vector.from_elements(probs, dtype=fx.Float32)
 
-                ts1 = tile_sum.shuffle_xor(fx.Int32(16), c_w)
+                ts1 = tile_sum.shuffle_xor(16, WARP_SIZE)
                 tile_sum = tile_sum + ts1
-                ts2 = tile_sum.shuffle_xor(fx.Int32(32), c_w)
+                ts2 = tile_sum.shuffle_xor(32, WARP_SIZE)
                 tile_sum = tile_sum + ts2
                 running_sum = running_sum + tile_sum
                 # V dequant → LDS [token][head_dim] (ROW-MAJOR, no transpose)
                 # written as ds_write_b128 (vec(2,i64)); read back via the
                 # ds_read_tr16_b64 HW transpose in the PV block below.
-                v_lds_elem_base = tok_in_tile * fx.Int32(
-                    KV_ROW_ELEMS
-                ) + chunk_in_tok * fx.Int32(SUBCHUNK_HDIMS)
+                v_lds_elem_base = (
+                    tok_in_tile * KV_ROW_ELEMS + chunk_in_tok * SUBCHUNK_HDIMS
+                )
                 for hf in range_constexpr(HALVES):
-                    v_packed = v_packed_list[hf]
-                    half_hd = fx.Int32(hf * HALF_HDIMS)
-                    grp_shift = (
-                        (chunk_in_tok * fx.Int32(2) + fx.Int32(hf)) & fx.Int32(3)
-                    ) * fx.Int32(8)
-                    vscale_byte = (vscale_word >> grp_shift) & fx.Int32(0xFF)
-                    vscale_f32 = arith.bitcast(
-                        T.f32, _ival(vscale_byte << fx.Int32(23))
-                    )
+                    v_packed = fx.Vector(v_packed_list[hf])
+                    grp_shift = ((chunk_in_tok * 2 + hf) & 3) * 8
+                    vscale_byte = (vscale_word >> grp_shift) & 0xFF
+                    vscale_f32 = fx.Int32(vscale_byte << 23).bitcast(fx.Float32)
                     for w in range_constexpr(4):
-                        word_i32 = vector.extract(v_packed, static_position=[w])
                         # Native CDNA4 scaled convert: 2-wide
                         # cvt_scalef32_pk_bf16_fp4. srcSel s picks byte s
                         # of the word (nibbles 2s, 2s+1) → 2 bf16 with the
                         # UE8M0 group scale fused. 4 cvt calls/word.
                         bf16_elems = []
                         for s in range_constexpr(4):
-                            v2 = rocdl.cvt_scalef32_pk_bf16_fp4(
-                                T.vec(2, T.bf16),
-                                _ival(word_i32),
-                                _ival(vscale_f32),
-                                int(s),
+                            v2 = fx.Vector(
+                                rocdl.cvt_scalef32_pk_bf16_fp4(
+                                    T.vec(2, T.bf16), v_packed[w], vscale_f32, s
+                                )
                             )
-                            bf16_elems.append(vector.extract(v2, static_position=[0]))
-                            bf16_elems.append(vector.extract(v2, static_position=[1]))
-                        v_bf16 = vector.from_elements(T.vec(8, T.bf16), bf16_elems)
-                        v_i64 = vector.bitcast(T.vec(2, T.i64), v_bf16)
-                        v_lds_i64_idx = (
-                            v_lds_elem_base + half_hd + fx.Int32(w * 8)
-                        ) // fx.Int32(4)
-                        vector.store(
-                            v_i64,
-                            kv_lds_i64,
-                            [arith.index_cast(T.index, _kvi64(v_lds_i64_idx))],
+                            bf16_elems.append(v2[0])
+                            bf16_elems.append(v2[1])
+                        v_bf16 = fx.Vector.from_elements(bf16_elems, dtype=fx.BFloat16)
+                        v_lds_i64_idx = (v_lds_elem_base + hf * HALF_HDIMS + w * 8) // 4
+                        v_bf16.bitcast(fx.Int64).store(
+                            kv_lds_i64, [fx.Index(v_lds_i64_idx)]
                         )
                 # HW V transpose cross-lane LDS fence (see 128 kernel).
                 rocdl.sched_barrier(0)
@@ -893,19 +736,13 @@ def build_ultraquant_decode_hd256_module(
                 gpu.barrier()
 
                 # ---- PV MFMA: A=V[head_dim, token], B=P (=qk_acc bf16) -----
-                p_bf16 = arith.trunc_f(T.vec(4, T.bf16), qk_acc)
-                p_op = vector.bitcast(T.vec(4, T.i16), p_bf16)
+                p_op = qk_acc.to(fx.BFloat16).bitcast(fx.Int16)
                 # HW-transpose PV: V_lds row-major V[token][head_dim].
-                token_idx = lane >> fx.Int32(2)
-                hd_sub = (lane & fx.Int32(3)) * fx.Int32(4)
-                v_lane_byte = (
-                    fx.Int32(kv_off)
-                    + token_idx * fx.Int32(KV_ROW_BYTES)
-                    + hd_sub * fx.Int32(2)
-                )
+                token_idx = lane >> 2
+                hd_sub = (lane & 3) * 4
+                v_lane_byte = kv_off + token_idx * KV_ROW_BYTES + hd_sub * 2
                 for h in range_constexpr(PV_N_CHUNKS):
-                    v_byte_off = v_lane_byte + fx.Int32(h * 32)
-                    v_byte_i64 = fx.Int64(v_byte_off)
+                    v_byte_i64 = fx.Int64(v_lane_byte + h * 32)
                     v_ptr = buffer_ops.create_llvm_ptr(
                         v_byte_i64,
                         address_space=3,
@@ -935,10 +772,9 @@ def build_ultraquant_decode_hd256_module(
         safe_sum = (running_sum > ZERO_F).select(running_sum, ONE_F)
         rcp = ONE_F / safe_sum
 
-        c_os = fx.Int32(_stride_out_seq)
-        c_oh = fx.Int32(_stride_out_head)
-        c_op_ = fx.Int32(_stride_out_part)
-        out_base = seq * c_os + kv_h * c_oh + part * c_op_
+        out_base = (
+            seq * _stride_out_seq + kv_h * _stride_out_head + part * _stride_out_part
+        )
 
         valid_row_pred = arith.cmpi(
             arith.CmpIPredicate.ult,
@@ -948,26 +784,27 @@ def build_ultraquant_decode_hd256_module(
         _if = _scf.IfOp(valid_row_pred)
         with ir.InsertionPoint(_if.then_block):
             for h in range_constexpr(PV_N_CHUNKS):
-                pv_norm = _vsplat_mul(acc_pv[h], rcp)
-                pv_bf16 = arith.trunc_f(T.vec(4, T.bf16), pv_norm)
-                pv_i32x2 = vector.bitcast(T.vec(2, T.i32), pv_bf16)
-                head_dim_start = fx.Int32(h * 16) + mfma_col_grp * fx.Int32(4)
-                out_off_elem = (
-                    out_base + mfma_row * fx.Int32(HEAD_SIZE) + head_dim_start
-                )
+                pv_i32x2 = (acc_pv[h] * rcp).to(fx.BFloat16).bitcast(fx.Int32)
+                head_dim_start = mfma_col_grp * 4 + h * 16
+                out_off_elem = out_base + mfma_row * HEAD_SIZE + head_dim_start
                 buffer_ops.buffer_store(
                     pv_i32x2,
                     out_rsrc,
-                    out_off_elem * fx.Int32(2),
+                    out_off_elem * 2,
                     offset_is_bytes=True,
                 )
 
-            c_npq = fx.Int32(num_partitions * QG)
             ml_off = (
-                seq * fx.Int32(_stride_ml_seq) + kv_h * c_npq + part * c_qg + mfma_row
+                seq * _stride_ml_seq
+                + kv_h * (num_partitions * QG)
+                + part * QG
+                + mfma_row
             )
             es_off = (
-                seq * fx.Int32(_stride_es_seq) + kv_h * c_npq + part * c_qg + mfma_row
+                seq * _stride_es_seq
+                + kv_h * (num_partitions * QG)
+                + part * QG
+                + mfma_row
             )
             buffer_ops.buffer_store(running_max, ml_rsrc, ml_off)
             buffer_ops.buffer_store(running_sum, es_rsrc, es_off)
