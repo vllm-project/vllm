@@ -262,27 +262,6 @@ def create_vllm_config(
     )
 
 
-def create_dummy_kv_cache(
-    block_size: int,
-    num_kv_heads: int,
-    head_size: int,
-    dtype: torch.dtype,
-    device: torch.device,
-    num_blocks: int = 100,
-) -> torch.Tensor:
-    """Create a dummy KV cache tensor for testing."""
-    kv_cache = torch.randn(
-        num_blocks,
-        2,  # K and V
-        block_size,
-        num_kv_heads,
-        head_size,
-        dtype=dtype,
-        device=device,
-    )
-    return kv_cache
-
-
 @dataclass
 class BackendConfig:
     name: str

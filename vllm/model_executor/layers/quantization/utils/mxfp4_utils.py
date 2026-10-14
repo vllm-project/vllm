@@ -36,6 +36,15 @@ def weight_mx_scale(precision_config):
     return precision_config.weight_scale
 
 
+def mx_scale_kwargs(scale):
+    """PrecisionConfig weight-scale kwargs: 3.8 uses b_mx_scale/b_microblock_size,
+    3.5.1/3.6 use weight_scale.
+    """
+    if get_triton_kernels_version() == "3.8":
+        return {"b_mx_scale": scale, "b_microblock_size": 32}
+    return {"weight_scale": scale}
+
+
 def _swizzle_mxfp4(quant_tensor, scale, num_warps=8):
     """Weight swizzle for mxfp4 moe, used for OAI mxfp4 kernel."""
     assert has_triton_kernels()
@@ -111,7 +120,14 @@ def _swizzle_mxfp4(quant_tensor, scale, num_warps=8):
                 K = scale.shape[-1]
                 pad_k = -K % 4
                 scale = torch.nn.functional.pad(scale, (0, pad_k))
-        elif current_platform.is_device_capability_family(100):
+        elif current_platform.is_device_capability_family(
+            100
+        ) or current_platform.is_device_capability_family(120):
+            # Native MXFP (cap >= 10.0) requires the persistent kernel. On
+            # SM12x, epilogue_subtile=1 also keeps the heuristic away from a
+            # triton_kernels 3.5.1 codegen bug (SWAP_XW with a subtiled
+            # epilogue); block_m is pinned per call in
+            # gpt_oss_triton_kernels_moe to fit the 99KB shared memory.
             constraints = {
                 "is_persistent": True,
                 "epilogue_subtile": 1,

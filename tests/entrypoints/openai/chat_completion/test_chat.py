@@ -16,6 +16,7 @@ from openai import BadRequestError
 
 from tests.utils import RemoteOpenAIServer
 from vllm.entrypoints.openai.chat_completion.protocol import (
+    BatchChatCompletionRequest,
     ChatCompletionRequest,
 )
 from vllm.exceptions import VLLMValidationError
@@ -1010,6 +1011,22 @@ def test_chat_completion_request_n_parameter_default():
 
     # SamplingParams.from_optional converts None to 1
     assert sampling_params.n == 1, f"Expected n=1 (default), got n={sampling_params.n}"
+
+
+@pytest.mark.parametrize(
+    ("request_cls", "messages"),
+    [
+        (ChatCompletionRequest, [{"role": "user", "content": "Hello"}]),
+        (BatchChatCompletionRequest, [[{"role": "user", "content": "Hello"}]]),
+    ],
+)
+def test_null_top_logprobs_is_same_as_omitted(request_cls, messages):
+    """`top_logprobs: null` must not switch off `logprobs: true`."""
+    request = request_cls.model_validate(
+        {"messages": messages, "logprobs": True, "top_logprobs": None}
+    )
+
+    assert request.top_logprobs == 0
 
 
 def test_chat_completion_request_accepts_model_specific_reasoning_effort():

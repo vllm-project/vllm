@@ -39,6 +39,9 @@ def test_mtp_sharded_sampling_equivalence(monkeypatch: pytest.MonkeyPatch):
         m.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
         # Required for the collective_rpc mode check below.
         m.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+        # Queue every request before the first step, so both boots schedule
+        # the same batches -- see tests/v1/e2e/general/test_sharded_sampling.py.
+        m.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
 
         def run(disable_sharding: bool):
             llm = LLM(
@@ -79,24 +82,22 @@ def test_mtp_sharded_sampling_equivalence(monkeypatch: pytest.MonkeyPatch):
         ref_greedy, ref_seeded = run(disable_sharding=True)
         shard_greedy, shard_seeded = run(disable_sharding=False)
 
-        # Engine boots are not bitwise deterministic (kernel/collective
-        # selection shifts logits by ~1 ulp, flipping near-tie tokens), so
-        # allow a small number of divergent prompts. A sharding bug produces
-        # wholesale divergence, not isolated near-tie flips.
+        # A sharding bug shows up as wholesale divergence, not isolated flips.
         for name, ref_outputs, shard_outputs in (
             ("greedy", ref_greedy, shard_greedy),
             ("seeded", ref_seeded, shard_seeded),
         ):
-            num_divergent = 0
+            divergent = []
             for i, (ref, out) in enumerate(zip(ref_outputs, shard_outputs)):
                 if list(ref.outputs[0].token_ids) != list(out.outputs[0].token_ids):
-                    num_divergent += 1
+                    divergent.append(i)
                     print(
                         f"{name} prompt {i} diverged:\n"
                         f"  replicated: {ref.outputs[0].text!r}\n"
                         f"  sharded:    {out.outputs[0].text!r}"
                     )
-            assert num_divergent <= 2, (
-                f"{name}: {num_divergent}/{len(ref_outputs)} prompts diverged, "
-                "beyond near-tie boot noise"
+            assert not divergent, (
+                f"{name}: {len(divergent)}/{len(ref_outputs)} prompts diverged "
+                f"at {divergent}; the sampling modes did not agree token for "
+                "token with in-process scheduling"
             )

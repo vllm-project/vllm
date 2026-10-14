@@ -73,7 +73,7 @@ def check_deep_select_layout(num_sparse_cols: int, topk_tokens: int) -> None:
 _INT32_BIG = tl.constexpr(2**31 - 1)
 
 
-@triton.jit
+@triton.jit(do_not_specialize_on_alignment=["end_ptr"])
 def _expand_candidates_kernel(
     cand_ptr,
     cand_stride,
@@ -146,19 +146,21 @@ def _sparse_topk_remap_kernel(
     out_ptr,
     out_stride,
     k,
+    width,
     SBK: tl.constexpr,
     K_POW2: tl.constexpr,
 ):
     """Remap sparse top-k columns to request-local positions.
 
     Column ``j * SBK + o`` scores the token at
-    ``(si[row, j] - ks // SBK) * SBK + o``; -1 columns stay -1.
+    ``(si[row, j] - ks // SBK) * SBK + o``; columns outside ``[0, width)``
+    (including DeepSelect's sentinel for NaN rows) become -1.
     """
     row = tl.program_id(0)
     ks_base = tl.load(ks_ptr + row * ks_stride) // SBK
     cols = tl.arange(0, K_POW2)
     c = tl.load(col_ptr + row * col_stride + cols, mask=cols < k, other=-1)
-    valid = c >= 0
+    valid = (c >= 0) & (c < width)
     cc = tl.where(valid, c, 0)
     blocks = tl.load(si_ptr + row * si_stride + cc // SBK)
     pos = (blocks - ks_base) * SBK + cc % SBK
@@ -301,6 +303,7 @@ def sparse_topk_remap(
         topk_indices,
         topk_indices.stride(0),
         topk_tokens,
+        width,
         SBK=sparse_block_kv,
         K_POW2=triton.next_power_of_2(topk_tokens),
     )

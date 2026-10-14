@@ -13,7 +13,7 @@ import torch.nn.functional as F
 from transformers import BatchFeature
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_rank,
@@ -28,12 +28,15 @@ from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention.mm_encoder_attention import (
     MMEncoderAttention,
 )
-from vllm.model_executor.layers.fused_moe import MoEActivation, fused_experts
+from vllm.model_executor.layers.fused_moe import (
+    GateLinear,
+    MoEActivation,
+    fused_experts,
+)
 from vllm.model_executor.layers.fused_moe.config import biased_moe_quant_config
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     QKVParallelLinear,
-    ReplicatedLinear,
     RowParallelLinear,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -453,11 +456,10 @@ class Moondream3TextMoE(nn.Module):
         self.num_local_experts = self.experts_per_rank
 
         # Router (gate) - use ReplicatedLinear for compatibility
-        self.gate = ReplicatedLinear(
+        self.gate = GateLinear(
             hidden_size,
             num_experts,
             bias=True,
-            quant_config=None,
             prefix=f"{prefix}.gate",
         )
 
@@ -943,15 +945,14 @@ class Moondream3DummyInputsBuilder(BaseDummyInputsBuilder[Moondream3ProcessingIn
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions] | None = None,
+        mm_options: MultiModalDummyOptions | None = None,
         mm_processor_kwargs: Mapping[str, object] | None = None,
     ) -> MultiModalDataDict:
-        num_images = mm_counts.get("image", 0)
         return {
             "image": self._get_dummy_images(
                 width=378,
                 height=378,
-                num_images=num_images,
+                num_images=mm_counts.get("image", 0),
             )
         }
 

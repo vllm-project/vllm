@@ -67,6 +67,22 @@ pub(super) fn validate_request_compat(
         }
     }
 
+    if request.logprob_token_ids.as_ref().is_some_and(|ids| !ids.is_empty()) {
+        if request.logprobs.is_none() {
+            bail_invalid_request!(
+                param = "logprob_token_ids",
+                "when using `logprob_token_ids`, `logprobs` must be set."
+            );
+        }
+        if request.echo && request.max_tokens == Some(0) {
+            bail_invalid_request!(
+                param = "logprob_token_ids",
+                "`logprob_token_ids` is not supported when `echo=True` and \
+                 `max_tokens=0` because no output tokens are generated."
+            );
+        }
+    }
+
     if request.use_beam_search {
         bail_invalid_request!(
             param = "use_beam_search",

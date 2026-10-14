@@ -246,7 +246,7 @@ class AiterW4A8ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
         moe_parallel_config: FusedMoEParallelConfig,
     ) -> bool:
         return (
-            not moe_parallel_config.use_all2all_kernels
+            not moe_parallel_config.use_ep
             and not moe_parallel_config.enable_eplb
             and moe_parallel_config.dp_size <= 1
         )
@@ -289,6 +289,7 @@ class AiterW4A8ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
         e_score_correction_bias: torch.Tensor | None = None,
         routed_scaling_factor: float | None = None,
         topk_group: int | None = None,
+        routing_replay_out: torch.Tensor | None = None,
     ) -> torch.Tensor:
         assert self.moe_config.intermediate_size_per_partition_unpadded is not None
         assert self.moe_config.hidden_dim_unpadded is not None
