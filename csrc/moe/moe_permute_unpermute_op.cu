@@ -92,6 +92,7 @@ torch::stable::Tensor moe_sort_routing(
   auto expanded_rows = n_token * topk;
   auto stream = get_current_cuda_stream(topk_ids.get_device_index());
 
+  // No rows: preprocessTopkIdLauncher would divide by block == 0 (#58789).
   if (expanded_rows == 0) {
     torch::stable::zero_(expert_first_token_offset);
     return maybe_allocate_tensor(maybe_sorted_row_idx, inv_permuted_idx.sizes(),
