@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from dataclasses import dataclass
+
 import numpy as np
 
-from vllm.v1.kv_offload.base import BlockIDsLoadStoreSpec
+from vllm.v1.kv_offload.base import BlockIDsLoadStoreSpec, ConfigInfo
 
 
 class CPUOffloadingMetrics:
@@ -24,3 +26,11 @@ class CPULoadStoreSpec(BlockIDsLoadStoreSpec):
     @property
     def chunk_ids(self) -> np.ndarray:
         return self.block_ids
+
+
+@dataclass(frozen=True)
+class CPUOffloadingInfo(ConfigInfo):
+    """Static facts about the CPU offload tier."""
+
+    # Chunk slots in the tier. Chunks, not GPU blocks.
+    cpu_num_chunks: int

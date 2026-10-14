@@ -3,8 +3,8 @@
 """Core abstractions for KV cache offloading in vLLM v1."""
 
 from abc import ABC, abstractmethod
-from collections.abc import Collection, Iterable, Sequence
-from dataclasses import dataclass, field
+from collections.abc import Collection, Iterable, Mapping, Sequence
+from dataclasses import dataclass, field, fields
 from enum import Enum, auto
 from typing import TYPE_CHECKING, Any, ClassVar, NamedTuple, NewType, TypeVar
 
@@ -214,7 +214,12 @@ class OffloadingCounterMetadata(OffloadingMetricMetadata):
 
 @dataclass(frozen=True)
 class OffloadingGaugeMetadata(OffloadingMetricMetadata):
-    pass
+    # Gauge-only in prometheus_client: how MultiProcessCollector merges samples
+    # written by different API-server processes. Offloading stats reach one
+    # frontend per step as complete per-engine snapshots, so the freshest write
+    # is the correct value and summing would multiply it by the number of
+    # participating frontends.
+    multiprocess_mode: str = "mostrecent"
 
 
 @dataclass(frozen=True)
@@ -230,6 +235,36 @@ class OffloadingKVEventsConfig:
     # OffloadingConnector opt-in for self-describing BlockStored payloads.
     # Effective only when enable_kv_cache_events is true.
     self_describing_kv_events: bool
+
+
+# The labels of one info metric series: a label name mapped to its value.
+ConfigInfoMapping = Mapping[str, str | int | float | bool]
+
+
+@dataclass(frozen=True)
+class ConfigInfo:
+    """Static facts that one component publishes on vllm:kv_offload_config_info.
+
+    Each field is one label. The OffloadingSpec declares the names with
+    config_info_keys(), and the OffloadingManager fills the values with
+    as_config_info(). A declared name that the manager does not fill reads
+    empty, and an undeclared name is dropped. The values must stay fixed for
+    the process lifetime. Document each field in
+    docs/features/kv_offloading_usage.md. See CPUOffloadingInfo for an example.
+    """
+
+    @classmethod
+    def config_info_keys(cls) -> tuple[str, ...]:
+        """Return one label name for each field, in field order."""
+        return tuple(info.name for info in fields(cls))
+
+    def as_config_info(self) -> ConfigInfoMapping:
+        """Return the label values. A None value becomes "None", not empty."""
+        values = (getattr(self, info.name) for info in fields(self))
+        return {
+            key: "None" if value is None else value
+            for key, value in zip(self.config_info_keys(), values)
+        }
 
 
 class OffloadingManager(ABC):
@@ -416,6 +451,13 @@ class OffloadingManager(ABC):
         """Return collected metrics since last call, or None if disabled."""
         return None
 
+    def config_info(self) -> Sequence[ConfigInfoMapping]:
+        """Return the info metric labels, one mapping for each series.
+
+        The scheduler reads this once. See ConfigInfo.
+        """
+        return [{}]
+
     def shutdown(self) -> None:
         """Shutdown the manager and release any resources."""
         return
@@ -601,6 +643,18 @@ class OffloadingSpec(ABC):
     ) -> dict[str, "OffloadingMetricMetadata"]:
         """Return Prometheus metric definitions emitted by this spec."""
         return {}
+
+    @classmethod
+    def config_info_keys(cls, extra_config: dict[str, Any]) -> tuple[str, ...]:
+        """Return the info metric label names that the manager fills.
+
+        See ConfigInfo.
+
+        Args:
+            extra_config: kv_connector_extra_config of this instance.
+
+        """
+        return ()
 
     def __init__(self, config: OffloadingConfig):
         self.config = config
