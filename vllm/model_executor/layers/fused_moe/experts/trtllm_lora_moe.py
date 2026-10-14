@@ -433,7 +433,7 @@ class _TrtLlmLoRAExpertsBase(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         graph's ``has_lora`` dispatch key, so it stays correct on replay.
         """
         meta = getattr(lora_context.punica_wrapper, "token_mapping_meta", None)
-        if meta is None:
+        if meta is None or lora_context.local_token_lora_mapping is not None:
             return False
         flag = meta.no_lora_flag_cpu
         return bool(flag.numel() == 1 and flag.item())
