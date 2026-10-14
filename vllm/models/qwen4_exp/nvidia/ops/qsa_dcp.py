@@ -55,7 +55,11 @@ def qsa_localize_dcp_indices(
     dcp_rank: int,
     cp_kv_cache_interleave_size: int,
 ) -> torch.Tensor:
-    """Copy the selection ids this rank owns into local slots."""
+    """Copy the selection ids this rank owns into local slots.
+
+    ``out`` may be ``packed_indices`` (in place): one program handles one
+    row and loads the whole row before it stores.
+    """
     assert packed_indices.ndim == 2
     assert out.shape == packed_indices.shape
     assert out.dtype == packed_indices.dtype
