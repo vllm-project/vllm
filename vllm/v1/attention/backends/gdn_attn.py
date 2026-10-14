@@ -582,15 +582,20 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         flashinfer_checkpoint_plan: GDNFlashInferCheckpointPlan | None = None
         if checkpoint is not None and self.plan_flashinfer_checkpoints:
             assert checkpoint.offsets is not None
+            assert checkpoint.query_lens is not None
+            # The prefill kernel runs the trailing checkpoint rows.
+            num_prefill_rows = prefill_query_start_loc_cpu.shape[0] - 1
             every_n_tokens, cu_starts, rows = plan_flashinfer_checkpoints(
-                checkpoint.offsets, prefill_query_start_loc_cpu.diff().tolist()
+                checkpoint.offsets, checkpoint.query_lens[-num_prefill_rows:]
             )
-            device = query_start_loc.device
+            plan = async_tensor_h2d(
+                cu_starts + rows, query_start_loc.device, torch.int64
+            )
             flashinfer_checkpoint_plan = GDNFlashInferCheckpointPlan(
                 every_n_tokens=every_n_tokens,
                 num_checkpoints=cu_starts[-1],
-                cu_starts=async_tensor_h2d(cu_starts, device, torch.int64),
-                rows=async_tensor_h2d(rows, device, torch.int64),
+                cu_starts=plan[: len(cu_starts)],
+                rows=plan[len(cu_starts) :],
             )
 
         # Function code counted on either presency non-spec decode or spec decode,
