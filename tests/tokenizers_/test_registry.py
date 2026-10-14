@@ -116,11 +116,13 @@ def test_cached_tokenizer_from_config_registers_local_config(tmp_path: Path):
     )
 
     model_config = SimpleNamespace(
+        model=str(tmp_path),
         skip_tokenizer_init=False,
         tokenizer=str(tmp_path),
         runner_type="generate",
         tokenizer_mode="hf",
         tokenizer_revision=None,
+        code_revision=None,
         trust_remote_code=True,
         hf_config=Qwen3_5MoeConfig(),
     )

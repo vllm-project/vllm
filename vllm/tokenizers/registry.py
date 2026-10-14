@@ -180,6 +180,10 @@ cached_resolve_tokenizer_args = lru_cache(resolve_tokenizer_args)
 
 
 def tokenizer_args_from_config(config: "ModelConfig", **kwargs):
+    kwargs.setdefault(
+        "code_revision",
+        config.code_revision if config.tokenizer == config.model else None,
+    )
     return cached_resolve_tokenizer_args(
         config.tokenizer,
         runner_type=config.runner_type,
@@ -287,6 +291,12 @@ def cached_tokenizer_from_config(model_config: "ModelConfig", **kwargs):
         return None
 
     _maybe_register_hf_config(getattr(model_config, "hf_config", None))
+    kwargs.setdefault(
+        "code_revision",
+        model_config.code_revision
+        if model_config.tokenizer == model_config.model
+        else None,
+    )
 
     return cached_get_tokenizer(
         model_config.tokenizer,
