@@ -46,6 +46,7 @@ def state(monkeypatch):
     cfg.model_config.is_multimodal_model = False
     cfg.scheduler_config.max_num_seqs = 8
     cfg.scheduler_config.max_num_batched_tokens = 64
+    cfg.parallel_config.prefill_context_parallel_size = 1
     seen: dict = {}
 
     def prepare_attn(self, input_batch, cg_mode, block_tables, slot_mappings, *a, **kw):

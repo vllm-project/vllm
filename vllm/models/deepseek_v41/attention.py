@@ -538,9 +538,10 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         if (
             swa_bounded_replay
             and vllm_config.parallel_config.prefill_context_parallel_size > 1
+            and cache_config.enable_prefix_caching
         ):
             logger.warning_once(
-                "SWA bounded replay is off under prefill context parallelism "
+                "Prefix-hit SWA replay is off under prefill context parallelism "
                 "(the replayed tokens' slot padding knows the rank-local batch "
                 "only); the sliding-window cache takes part in prefix caching "
                 "instead."

@@ -1,69 +1,86 @@
-# DeepSeek-V4.1 PCP with SWA bounded replay: implementation plan
+# DeepSeek-V4.1 PCP with decoder SWA bounded replay
 
-Status: implementation plan only. This draft does not enable the feature.
-No GPU execution, model evaluation, or performance result is claimed.
+This draft enables cold-prefill decoder trimming with PCP. It builds on
+[#59857](https://github.com/vllm-project/vllm/pull/59857) and
+[#61553](https://github.com/vllm-project/vllm/pull/61553), which supplies fixed
+DSpark verification and optional shared host Engram storage. Prefix-cache hits,
+KV transfer and CUDA Graph composition remain outside this change.
 
-This is a follow-up to [#59857](https://github.com/vllm-project/vllm/pull/59857),
-pinned initially to `7908ee8906475842ba0ecd1c09eed6d878718f05`. That PR provides the
-NVIDIA text-only DeepSeek-V4.1-Flash PCP baseline. Its MoE padding dependency,
-[#60946](https://github.com/vllm-project/vllm/pull/60946), must be resolved before
-validating the combined runtime. Historical results in the parent PR do not
-validate this branch.
+## Implementation
 
-The initial target is MRV2, FlashMLA sparse attention, PP=DP=DCP=1 and one
-colocated instance. Each follow-up starts independently from the parent;
-combining the three features requires separate integration validation.
+Reuse the existing `ReplayBatch`, `InputBatch`, decoder replay gather kernel,
+attention builders and PCP process group. Prepare the replay builders during
+startup so their constant copies do not first run in a real request. Keep the
+last sliding-window rows of each existing rank-local PCP segment; do not change token ownership or introduce
+another PCP partitioner. This retains some extra segment tails compared with a
+globally selected tail, but preserves the existing interface and KV layout.
 
-## Current boundary
+- Size per-segment replay metadata for PCP's two segments per original request.
+  Original request state remains indexed by the existing global request indices.
+- Agree on whether a replay batch is needed and its largest rank-local size.
+  Short or empty peers execute the same collectives with padded inputs.
+- Select the local slice of the original gathered cache slots, then gather the
+  retained slots in the same rank-major order as the new KV payload. Padding
+  carries `PAD_SLOT_ID`; it does not write cache entries.
+- Reuse the existing decoder-layer runner to gather retained rows and scatter
+  their outputs back. Zero padding is discarded rather than becoming a real row.
 
-`vllm/models/deepseek_v41/attention.py` disables bounded replay under PCP
-because slot padding only knows the rank-local batch. In
-`nvidia/model.py`, prefix caching is rejected with PCP and
-`_decoder_replay_supported` excludes per-rank shrinking replay batches.
-`nvidia/model_state.py` already owns replay starts, cached-group write masks
-and the decoder replay sub-batch for the non-PCP path.
+The model's existing guards continue to require PP=DP=DCP=1, no prefix caching,
+no KV transfer, no microbatching, and a supported MoE/attention backend. The
+existing sparse-PCP runner rejects CUDA graphs. Fixed DSpark remains subject to
+the existing guard that its draft reads no hidden states outside the replay
+window. Requests with prompt logprobs retain all their rows.
 
-## Proposed implementation
+## Validation
 
-1. Define one mapping from original requests and absolute positions to PCP
-   virtual rows. Use it consistently for replay starts, Engram lookback,
-   query boundaries and local versus gathered cache slots.
-2. Pad writes to prefix-cacheable groups for replayed tokens in both the local
-   and gathered views. Rebuild only the required SWA window and retain the
-   lower bound that prevents attention from reading stale window KV.
-3. Make decoder replay sub-batch construction agree across ranks. Ranks with
-   no retained local rows must still participate in required collectives with
-   compatible shapes and ordering. Audit cross-rank ratio-2 compressor pairs.
-4. Validate eager cold-prefill decoder trimming first, then local prefix-cache
-   hits and SWA reconstruction. Lift each restriction only for tested cases.
-   Prefix-cache support needed for this replay flow belongs in this track;
-   external cache transfer, DSpark and graph composition require later work.
+Three existing replay suites passed on H20: **18 tests**. Added coverage checks
+rank-local cache-slot selection, peer padding, empty retained rows and output
+scattering. Existing replay-start, prompt-logprobs, adaptive-boundary and graph
+regressions also pass. Unit tests mock PCP collectives; they do not by themselves
+validate a distributed model. All applicable pre-commit hooks passed.
 
-## Existing work to reuse
+On four H20 GPUs, TP1/PCP4/EP4 with fixed DSpark5, shared Engram and
+`VLLM_GPU_SYNC_CHECK=error` passed 32/32 fixed GSM8K canaries (no HTTP errors or
+truncation; 3,955 of 5,600 draft tokens accepted). Eight additional checks passed:
+exact 1,023/1,025-token prompts, including full-row prompt-logprobs controls, and
+ragged concurrent 8,191/8,193/16,385/65,537-token prompts followed by natural
+decode. These use public GSM8K questions with neutral background context; they
+are targeted regressions, not a complete model accuracy evaluation.
 
-Reuse [#56227](https://github.com/vllm-project/vllm/pull/56227) and
-[#58132](https://github.com/vllm-project/vllm/pull/58132).
-[#60046](https://github.com/vllm-project/vllm/pull/60046) concerns P/D replay
-endpoints; [#58289](https://github.com/vllm-project/vllm/pull/58289) and
-[#57872](https://github.com/vllm-project/vllm/pull/57872) target encoder-only
-P/D. Those are related semantics, not a validated colocated PCP implementation.
+The first real trimming exposed lazy metadata-builder initialization in the hot
+path. Moving that existing initialization to startup fixed the failure while
+keeping GPU synchronization checks enabled. Failed-run evidence is retained.
 
-## Acceptance criteria
+Initial cold-prefill comparison: four H20-3e GPUs, TP1/PCP4/EP4, fixed DSpark5,
+Humming A16, 8,192-token chunks, eager execution, prefix caching off. Each round
+uses eight requests with 65,536 input tokens and one output token, continuously
+replenished by four workers. The three formal samples exclude a warmup round;
+all responses report zero cached tokens.
 
-- [ ] Extend existing replay-start, replay-batch and decoder-replay tests in
-  `tests/models/`, plus `tests/v1/core/test_prefix_replay.py`, at the cheapest
-  level that checks the mapping and write-preservation contracts.
-- [ ] Cover no-hit, partial-hit and full-hit requests; windows around block
-  and PCP boundaries; request reuse; empty local replay rows; chunked prefill;
-  prompt logprobs; and mixed prefill/decode. Compare with replay-disabled runs.
-- [ ] Verify byte preservation of reused cache entries and correct SWA
-  reconstruction, without reads below replay start or duplicate invalid writes.
-- [ ] On a real checkpoint, compare PCP1/2/4 with replay off/on. Test cold
-  prompts and repeated-prefix requests separately, proving the replay path ran.
-- [ ] Report accuracy, input throughput, TTFT, KV memory and replayed token
-  counts at fixed prompt lengths and concurrency; include repeated-run spread.
-- [ ] Record code/checkpoint SHAs and flags; use `VLLM_GPU_SYNC_CHECK=error`.
+| Input tokens/s | Replay off | Replay on |
+| --- | ---: | ---: |
+| Sample 1 | 5,658.45 | 9,302.84 |
+| Sample 2 | 5,665.05 | 9,301.57 |
+| Sample 3 | 5,664.64 | 9,303.91 |
+| Median | 5,664.64 | 9,302.84 |
 
-Reducing decoder work can lower long-prefill cost, but communication and short
-replay windows can limit PCP scaling. A larger benefit than DSpark is a
-hypothesis to measure, not a result of this draft.
+This is an initial **64.23%** median increase from one sequential off/on
+comparison, not three independent A/B pairs. Launch arguments match except for
+replay, and all per-round input hashes match. The baseline predates the replay
+patch and a non-executable type annotation in shared Engram; it has not been
+rerun on the final source. The runtime reuses the lab's compiled extensions,
+rather than a clean full build. No SGLang-relative or decode speedup is claimed.
+
+This follows the existing bounded-replay semantics, including its SWA window
+floor. The canaries do not prove logit equivalence to replay-disabled execution
+or replace a broader model-quality evaluation.
+
+## Relationship to existing work
+
+[#56227](https://github.com/vllm-project/vllm/pull/56227) and
+[#58132](https://github.com/vllm-project/vllm/pull/58132) provide the existing
+replay implementation being reused. This change makes its retained batch obey
+PCP collective and cache-slot contracts. It does not add P/D endpoints
+([#60046](https://github.com/vllm-project/vllm/pull/60046)) or encoder-only
+connectors ([#58289](https://github.com/vllm-project/vllm/pull/58289),
+[#57872](https://github.com/vllm-project/vllm/pull/57872)).

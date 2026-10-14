@@ -57,6 +57,7 @@ def state(monkeypatch):
     cfg.scheduler_config.max_num_seqs = 16
     cfg.scheduler_config.max_num_batched_tokens = 1024
     cfg.parallel_config.data_parallel_size = 1
+    cfg.parallel_config.prefill_context_parallel_size = 1
     cfg.compilation_config.fast_moe_cold_start = False
     cfg.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
     layers = SimpleNamespace(window=WINDOW, replay_batch=None, metadata_prefixes=set())
@@ -90,7 +91,9 @@ def _input_batch(
 ) -> InputBatch:
     num_reqs, num_tokens = len(query_lens), sum(query_lens)
     num_padded = num_tokens_after_padding or num_tokens
-    batch = InputBatch.make_dummy(num_reqs, num_tokens, InputBuffers(16, 1024, DEVICE))
+    batch = InputBatch.make_dummy(
+        num_reqs, max(num_reqs, num_tokens), InputBuffers(16, 1024, DEVICE)
+    )
     return replace(
         batch,
         num_tokens=num_tokens,
@@ -157,6 +160,61 @@ def test_replay_batch_keeps_each_request_window(state):
     assert context.dp_metadata is None and context.is_padding is None
 
 
+@pytest.mark.parametrize("query_len", [300, 0])
+def test_pcp_replay_keeps_local_slots_and_pads_to_peer(state, monkeypatch, query_len):
+    """Gathered cache slots must follow the new rank-major padded KV payload."""
+    from vllm.models.deepseek_v41.nvidia import model_state
+
+    state.pcp_size = 2
+    padding = WINDOW + 3
+    gathers = []
+
+    def all_gather(local, dim):
+        assert dim == 1 and local.shape == (2, padding)
+        gathers.append(local.clone())
+        return torch.cat((local, local), dim=1)
+
+    group = SimpleNamespace(rank_in_group=1, cpu_group=None, all_gather=all_gather)
+    monkeypatch.setattr(model_state, "get_pcp_group", lambda: group)
+
+    def agree(tensor, **kwargs):
+        # The other rank trims and needs WINDOW+3 payload rows; the empty
+        # peer must follow the same collectives without inventing a real row.
+        tensor.copy_(torch.tensor([1, padding], dtype=tensor.dtype))
+
+    monkeypatch.setattr(model_state.dist, "all_reduce", agree)
+    batch = _input_batch(
+        [query_len],
+        [query_len],
+        [bool(query_len)],
+        num_tokens_after_padding=max(1, query_len),
+    )
+    local_slots = _slot_mappings(batch.num_tokens_after_padding)
+    gathered_slots = torch.cat((local_slots, local_slots + 10000), dim=1)
+    state._replay = (WINDOW, torch.tensor([1], dtype=torch.int32, device=DEVICE))
+    state._kept_slot_mappings = torch.empty((2, 1024), dtype=torch.int64, device=DEVICE)
+    state._prepare_replay_batch(
+        batch,
+        CUDAGraphMode.NONE,
+        BLOCK_TABLES,
+        gathered_slots,
+        [],
+        GROUPS,
+        torch.zeros(1, dtype=torch.int32, device=DEVICE),
+    )
+    replay = state.decoder_replay_layers.replay_batch
+    kept = min(query_len, WINDOW)
+    rows = torch.arange(query_len - kept, query_len, device=DEVICE)
+    assert replay is not None and torch.equal(replay.rows, rows)
+    assert torch.equal(gathers[0][:, :kept], (local_slots + 10000)[:, rows])
+    assert torch.all(gathers[0][:, kept:] == -1)
+    assert replay.forward_context.batch_descriptor.num_tokens == padding
+    assert replay.forward_context.is_padding.tolist() == [False] * kept + [True] * (
+        padding - kept
+    )
+    assert state.builds[-1].batch.positions[kept:].count_nonzero() == 0
+
+
 def test_replay_batch_keeps_device_decode_boundaries(state):
     """Adaptive verification resizes decodes on the GPU (CPU [2, 2], device
     [1, 3]): their rows stay and the boundaries shift only by trimmed rows."""
@@ -210,6 +268,8 @@ def test_whole_batch_forwards_get_no_replay_batch(state):
     for cg_mode in (CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL):
         assert _prepare(state, short, cg_mode) == (None, None)
     assert len(state.builds) == 3  # the batch's own metadata only
+    # Startup prepares builders even before a real request first trims.
+    assert state._replay_attn_groups is not None
     # Dummy batches, captures included (prepared as eager), are not prefills and
     # keep their rows.
     dummy = _input_batch(

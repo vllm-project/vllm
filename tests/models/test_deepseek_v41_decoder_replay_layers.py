@@ -67,7 +67,8 @@ def _states(num_tokens: int):
     )
 
 
-def test_run_gathers_states_and_realigns_shared_indexer_buffers():
+@pytest.mark.parametrize("padding", [0, 3])
+def test_run_gathers_states_and_realigns_shared_indexer_buffers(padding):
     topk = torch.arange(NUM_TOKENS * 4, device=DEVICE).view(NUM_TOKENS, 4).int()
     candidates = torch.arange(NUM_TOKENS * 3, device=DEVICE).view(NUM_TOKENS, 3).int()
     topk_before, candidates_before = topk.clone(), candidates.clone()
@@ -85,19 +86,42 @@ def test_run_gathers_states_and_realigns_shared_indexer_buffers():
     hidden, residual = states[0], states[-1]
     full, sub = object(), object()
     _set_replay_batch(layers, REPLAY_ROWS, sub)
+    if padding:
+        layers.replay_batch.forward_context.batch_descriptor = BatchDescriptor(
+            num_tokens=len(REPLAY_ROWS) + padding
+        )
     context = _context(full)
     with override_forward_context(context):
         outputs = layers(*states)
         assert get_forward_context() is context
 
     rows = torch.tensor(REPLAY_ROWS, device=DEVICE)
-    assert torch.equal(seen["hidden_states"], hidden[rows])
+    assert torch.equal(seen["hidden_states"][: len(REPLAY_ROWS)], hidden[rows])
+    assert seen["hidden_states"].shape[0] == len(REPLAY_ROWS) + padding
+    assert not seen["hidden_states"][len(REPLAY_ROWS) :].count_nonzero()
     assert seen["attn_metadata"] is sub and seen["is_padding"] is None
     assert torch.equal(topk[: len(REPLAY_ROWS)], topk_before[rows])
     assert torch.equal(candidates[: len(REPLAY_ROWS)], candidates_before[rows])
     assert len(outputs) == 2 and outputs[0].shape == residual.shape
     assert torch.equal(outputs[0][rows], residual[rows])
     assert outputs[0][1:173].abs().sum() == 0
+
+
+def test_empty_replay_rank_still_runs_padded_collectives():
+    """An empty PCP peer executes the common shape without scattering fake rows."""
+    seen = []
+
+    def run_layers(hidden, *states):
+        seen.append(hidden.shape[0])
+        return (hidden + 1,)
+
+    layers = DecoderReplayLayers(WINDOW, run_layers, [], set())
+    _set_replay_batch(layers, [], {})
+    layers.replay_batch.rows = torch.empty(0, dtype=torch.int64, device=DEVICE)
+    layers.replay_batch.forward_context.batch_descriptor = BatchDescriptor(num_tokens=3)
+    (output,) = layers(*_states(NUM_TOKENS))
+    assert seen == [3] and output.shape == (NUM_TOKENS, HIDDEN)
+    assert not output.count_nonzero()
 
 
 def test_no_replay_batch_runs_the_whole_batch():

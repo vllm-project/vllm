@@ -92,19 +92,34 @@ class DecoderReplayLayers:
         assert isinstance(hidden_states, torch.Tensor)
         rows = replay_batch.rows
         num_rows = rows.shape[0]
+        descriptor = replay_batch.forward_context.batch_descriptor
+        num_padded = descriptor.num_tokens if descriptor is not None else num_rows
         for buf in self.row_buffers:
             buf[:num_rows].copy_(buf.index_select(0, rows))
+            buf[num_rows:num_padded].zero_()
         inputs = (hidden_states, *states)
         with override_forward_context(replay_batch.forward_context):
             if replay_batch.run_graph is not None:
                 row_outputs = replay_batch.run_graph(rows, inputs)
             else:
-                row_outputs = self.run_layers(
-                    *(None if t is None else t.index_select(0, rows) for t in inputs)
-                )
+                row_inputs = [
+                    None if t is None else t.index_select(0, rows) for t in inputs
+                ]
+                if num_padded > num_rows:
+                    row_inputs = [
+                        None
+                        if t is None
+                        else torch.nn.functional.pad(
+                            t, (0, 0) * (t.ndim - 1) + (0, num_padded - num_rows)
+                        )
+                        for t in row_inputs
+                    ]
+                row_outputs = self.run_layers(*row_inputs)
         # The trimmed rows' outputs stay zero; nothing reads them.
         num_tokens = hidden_states.shape[0]
         return tuple(
-            out.new_zeros((num_tokens, *out.shape[1:])).index_copy_(0, rows, out)
+            out.new_zeros((num_tokens, *out.shape[1:])).index_copy_(
+                0, rows, out[:num_rows]
+            )
             for out in row_outputs
         )
