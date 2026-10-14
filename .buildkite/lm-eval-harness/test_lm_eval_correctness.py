@@ -110,7 +110,9 @@ def _drop_previous_checkpoint_cache(model_name: str) -> None:
     Page cache is charged to the container's memory cgroup, which is what the
     safetensors prefetch gate measures, so without this the models evaluated so
     far consume the RAM budget of the ones still to come. The last model's cache
-    is left in place for whichever job lands on the node next.
+    is left in place for whichever job lands on the node next, and a checkpoint
+    evaluated twice in a row keeps its cache because there the warm pages are
+    what makes the second load fast.
 
     ROCm only: the prefetch this protects does not engage upstream.
     """
@@ -119,7 +121,7 @@ def _drop_previous_checkpoint_cache(model_name: str) -> None:
     global _cached_model_name
     previous = _cached_model_name
     _cached_model_name = model_name
-    if previous is not None:
+    if previous is not None and previous != model_name:
         # This module's logger has no handler, so INFO records are dropped.
         print(f"Releasing page cache of checkpoint {previous}", flush=True)
         drop_checkpoint_cache(previous)
