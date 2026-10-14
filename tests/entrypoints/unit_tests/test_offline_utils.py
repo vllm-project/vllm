@@ -55,3 +55,9 @@ def test_matching_lengths_pass_through(mixin: OfflineInferenceMixin):
     ]
     assert mixin._lora_request_to_seq([lora], num_requests=1) == [lora]
     assert mixin._priority_to_seq([3], num_requests=1) == [3]
+
+
+def test_scalar_priority_broadcast(mixin: OfflineInferenceMixin):
+    assert mixin._priority_to_seq(5, num_requests=1) == [5]
+    assert mixin._priority_to_seq(5, num_requests=3) == [5, 5, 5]
+    assert mixin._priority_to_seq(None, num_requests=3) == [0, 0, 0]
