@@ -1099,6 +1099,7 @@ def test_request_block_hasher_incremental_append_with_multiple_mm_features(
             {"disable_lookahead_block_hashes": True}, False, id="disabled-by-config"
         ),
         pytest.param({"kv_connector": True}, False, id="kv-connector"),
+        pytest.param({"hisparse": True}, False, id="hisparse"),
     ],
 )
 def test_lookahead_block_hashing_enabled(overrides: dict[str, Any], expected: bool):
@@ -1120,6 +1121,9 @@ def test_lookahead_block_hashing_enabled(overrides: dict[str, Any], expected: bo
                 "num_prefill_lookahead_tokens", 1
             ),
             kv_transfer_config=object() if overrides.get("kv_connector") else None,
+            attention_config=SimpleNamespace(
+                hisparse_config=object() if overrides.get("hisparse") else None
+            ),
         ),
     )
 
