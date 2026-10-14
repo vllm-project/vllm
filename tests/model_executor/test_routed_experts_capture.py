@@ -13,7 +13,6 @@ from vllm.distributed.eplb.eplb_state import EplbLayerState
 from vllm.forward_context import (
     ForwardContext,
     get_forward_context,
-    override_forward_context,
     set_forward_context,
 )
 from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
@@ -391,33 +390,6 @@ def test_single_dp_tp_capture_does_not_regather_full_batch(num_tokens, num_rows)
     get_tp_group.assert_not_called()
     assert torch.equal(capturer.device_buffer[:num_tokens, 0], topk[:num_tokens])
     assert (capturer.device_buffer[num_tokens:, 0] == -1).all()
-
-
-def test_microbatches_preserve_routing_rows_in_original_batch_order():
-    """The second microbatch must append its rows, not overwrite the first."""
-    from vllm.config import ParallelConfig
-    from vllm.v1.worker.gpu.ubatch_utils import UBatchRunner
-    from vllm.v1.worker.ubatch_utils import UBatchSlice
-
-    capturer = _capturer_with_buffer()
-    parallel = ParallelConfig(data_parallel_size=2)
-    runner = UBatchRunner.__new__(UBatchRunner)
-    runner.parallel_config = parallel
-    runner.vllm_config = SimpleNamespace(
-        compilation_config=SimpleNamespace(
-            fast_moe_cold_start=False, static_forward_context={}
-        )
-    )
-    slices = [
-        UBatchSlice(slice(0, 1), slice(0, 4)),
-        UBatchSlice(slice(1, 2), slice(4, 8)),
-    ]
-    contexts = runner._make_forward_contexts(slices, [{}, {}], [{}, {}], [None, None])
-    expected = torch.arange(16, dtype=torch.int32).reshape(8, 2)
-    for segment, context in zip(slices, contexts, strict=True):
-        with override_forward_context(context):
-            capturer.capture(0, expected[segment.token_slice])
-    torch.testing.assert_close(capturer.device_buffer[:, 0], expected)
 
 
 @pytest.mark.parametrize("num_tokens, num_rows", [(6, 2), (0, 1)])

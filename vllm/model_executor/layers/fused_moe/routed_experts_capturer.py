@@ -91,12 +91,8 @@ class RoutedExpertsCapturer:
                 f"layer count {self.device_buffer.shape[1]}"
             )
 
-        ctx = get_forward_context()
-        local_topk_ids = self._restore_local_topk_ids(topk_ids, ctx)
-        start = ctx.additional_kwargs.get("routed_experts_token_start", 0)
-        self.device_buffer[start : start + len(local_topk_ids), layer_id] = (
-            local_topk_ids
-        )
+        local_topk_ids = self._restore_local_topk_ids(topk_ids, get_forward_context())
+        self.device_buffer[: len(local_topk_ids), layer_id] = local_topk_ids
 
     def _restore_local_topk_ids(
         self, topk_ids: torch.Tensor, ctx: ForwardContext
@@ -123,7 +119,7 @@ class RoutedExpertsCapturer:
 
         Args:
             topk_ids: Routing IDs of shape (rows, num_routed_experts).
-            ctx: Forward context with this microbatch's token counts.
+            ctx: Forward context with the local token counts.
 
         Returns:
             Routing IDs in this DP rank's original local token order.

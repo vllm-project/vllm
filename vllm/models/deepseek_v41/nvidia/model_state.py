@@ -273,7 +273,7 @@ class DeepseekV41ModelState(DefaultModelState):
             params = new_req_data.sampling_params
             self._keeps_rows_np[req_index] = (
                 params is not None and params.prompt_logprobs is not None
-            ) or self.vllm_config.aux_output_config.enable_return_routed_experts
+            )
 
     def prepare_inputs(
         self, input_batch: InputBatch, req_states: RequestState
@@ -546,7 +546,6 @@ class DeepseekV41ModelState(DefaultModelState):
                 dp_metadata=dp_metadata,
                 cudagraph_runtime_mode=cg_mode,
                 batch_descriptor=BatchDescriptor(num_tokens=num_padded),
-                num_tokens=num_padded,
                 slot_mapping=build_slot_mappings_by_layer(
                     kept_slot_mappings, kv_cache_config
                 ),
