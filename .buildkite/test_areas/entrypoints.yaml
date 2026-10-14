@@ -31,6 +31,7 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/entrypoints
+  - vllm/utils/flashinfer.py
   - tests/entrypoints/unit_tests
   - tests/entrypoints/launchers
   commands:
@@ -120,6 +121,7 @@ steps:
 - label: ":nvidia: (H200 MIG 35GB) Entrypoints Integration (OpenAI API chat_completion)"
   device: h200_35gb
   key: entrypoints-integration-api-server-openai-chat_completion
+  automatic_shard: true
   timeout_in_minutes: 83
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
@@ -141,6 +143,7 @@ steps:
 - label: ":nvidia: (H200 MIG 35GB) Entrypoints Integration (API Server Generate)"
   device: h200_35gb
   key: entrypoints-integration-api-server-generate
+  automatic_shard: true
   timeout_in_minutes: 50
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
@@ -213,6 +216,7 @@ steps:
 - label: ":nvidia: (H200 MIG 35GB) Entrypoints Integration (Multimodal)"
   device: h200_35gb
   key: entrypoints-integration-multimodal
+  automatic_shard: true
   timeout_in_minutes: 45
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
