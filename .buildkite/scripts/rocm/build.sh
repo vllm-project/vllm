@@ -9,14 +9,14 @@
 #   build.sh <stack> check    CI-arch build + import smoke, no push (pre-merge signal for the non-default stack)
 #   build.sh <stack> csrc     all-arch csrc compile into the cache (release, serialized per stack)
 #   build.sh <stack> release  all-arch image + wheels             -> rocm/vllm-ci:<stack>-<commit>{-wheels,-base,}
-# <stack>: rocm (TheRock ROCm 10, default) | rocm_72 (apt ROCm 7.2). Force a rebuild: bump ARG REFRESH.
+# <stack>: rocm (TheRock ROCm 10). Force a rebuild: bump ARG REFRESH in docker/Dockerfile.rocm_base.
 # Trust is decided by ci-infra, not here: it sets ROCM_CI_REPO (rocm/vllm-ci for trusted builds, else rocm/vllm-ci-pr).
 set -euo pipefail
 export STACK=$1 PUSH=true CACHE=rocm/vllm-ci-cache CACHE_TO=rocm/vllm-ci-cache:latest
 MODE=$2 REPO=${ROCM_CI_REPO:?set by ci-infra} PFX=""
 if [[ $REPO != rocm/vllm-ci ]]; then PFX="pr${BUILDKITE_PULL_REQUEST:-local}-" CACHE_TO=$REPO:cache-pr${BUILDKITE_PULL_REQUEST:-local}-; fi
 case $STACK in   # literal paths (ci_selector)
-  rocm) SDF=docker/Dockerfile.rocm_base ;; rocm_72) SDF=docker/Dockerfile.rocm_72_base ;; *) exit 2 ;; esac
+  rocm) SDF=docker/Dockerfile.rocm_base ;; *) exit 2 ;; esac
 
 if ! docker buildx inspect vllm-rocm >/dev/null 2>&1; then   # prefer the host buildkitd (and its GC policy)
   if [[ -S /run/buildkit/buildkitd.sock ]]; then drv=(--driver remote unix:///run/buildkit/buildkitd.sock)

@@ -39,29 +39,3 @@ steps:
         - exit_status: -10  # Agent was lost
           limit: 1
 
-  # Pre-merge signal for the non-default stack (apt ROCm 7.2); on main it also pre-warms its runtime for release.
-  - label: "AMD: :docker: check ROCm 7.2 build"
-    key: rocm72-check-amd
-    depends_on: []
-    soft_fail: true
-    device: amd_cpu
-    no_plugin: true
-    source_file_dependencies:
-      - docker/Dockerfile.rocm
-      - docker/Dockerfile.rocm_72_base
-      - requirements/
-      - csrc/
-      - cmake/
-      - CMakeLists.txt
-      - setup.py
-    commands:
-      - bash .buildkite/scripts/rocm/build.sh rocm_72 base && bash .buildkite/scripts/rocm/build.sh rocm_72 check
-    timeout_in_minutes: 180
-    concurrency: 1
-    concurrency_group: "vllm/rocm/base/rocm_72/$ROCM_CI_REPO/$BUILDKITE_PULL_REQUEST/$BUILDKITE_BRANCH"
-    retry:
-      automatic:
-        - exit_status: -1  # Agent was lost
-          limit: 1
-        - exit_status: -10  # Agent was lost
-          limit: 1
