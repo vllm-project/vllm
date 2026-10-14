@@ -130,7 +130,7 @@ vectors = outputs[0].outputs.data  # [num_chunks, embedding_dimension]
 chunks = outputs[0].late_chunking.chunks
 ```
 
-For `N` model-input tokens and chunk size `C`, the output contains `ceil(N / C)` vectors. The last chunk uses its actual length. Special tokens and instruction prefixes count toward both chunk boundaries and means. Omitting `late_chunking_params` preserves ordinary token embeddings.
+For `N` model-input tokens and chunk size `C`, the output contains `ceil(N / C)` vectors. `chunk_size` must be a positive integer less than `2**63`; a value larger than the input token count produces one chunk. The last chunk uses its actual length. Special tokens and instruction prefixes count toward both chunk boundaries and means. Omitting `late_chunking_params` preserves ordinary token embeddings.
 
 Each vector row corresponds to one entry in `chunks`. Its `token_range` and `char_range` are zero-based, half-open ranges. Character ranges index the submitted Python string; use `document[start:end]` to retrieve the source text. A chunk containing only special tokens has `char_range=None`.
 
@@ -174,7 +174,7 @@ vllm serve intfloat/multilingual-e5-small \
     --runner pooling --pooler-config.task token_embed --max-model-len 512
 ```
 
-Set `late_chunking_params.chunk_size` to a positive integer:
+Set `late_chunking_params.chunk_size` to a positive integer less than `2**63`:
 
 ```bash
 curl http://localhost:8000/pooling \

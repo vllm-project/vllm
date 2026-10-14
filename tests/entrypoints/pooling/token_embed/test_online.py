@@ -186,6 +186,7 @@ def test_late_chunking_vectors_and_source_ranges(server, chunk_size, normalize):
         {"truncate_prompt_tokens": 4},
         {"padding": "max_length"},
         {"input": "word " * 600},
+        {"late_chunking_params": {"chunk_size": 2**64}},
     ],
 )
 def test_late_chunking_http_rejects_unsupported_requests(server, overrides):

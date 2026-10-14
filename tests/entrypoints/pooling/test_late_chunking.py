@@ -337,7 +337,7 @@ def test_plain_token_embed_skips_chunk_metadata(late_chunk_processor):
 @pytest.mark.parametrize(
     "params",
     [{}, {"chunk_size": 2, "metadata": {}}, {"chunk_size": 2, "unknown": 1}]
-    + [{"chunk_size": v} for v in (0, -1, True, 1.5, "2", None)],
+    + [{"chunk_size": v} for v in (0, -1, True, 1.5, "2", None, 2**63, 2**64)],
 )
 def test_online_chunk_config_rejects_coercion_and_internal_fields(params):
     with pytest.raises(ValueError):
@@ -346,7 +346,7 @@ def test_online_chunk_config_rejects_coercion_and_internal_fields(params):
         )
 
 
-@pytest.mark.parametrize("chunk_size", [1, 16, 1024])
+@pytest.mark.parametrize("chunk_size", [1, 16, 1024, 2**63 - 1])
 def test_online_chunk_config_converts_to_engine_params(chunk_size):
     request: PoolingCompletionRequest = TypeAdapter(PoolingRequest).validate_python(
         {"input": "a b", "late_chunking_params": {"chunk_size": chunk_size}}

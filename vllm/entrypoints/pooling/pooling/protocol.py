@@ -29,7 +29,7 @@ from ..base.protocol import (
 class LateChunkingConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    chunk_size: int = Field(gt=0, strict=True)
+    chunk_size: int = Field(gt=0, le=2**63 - 1, strict=True)
 
 
 class PoolingCompletionRequest(

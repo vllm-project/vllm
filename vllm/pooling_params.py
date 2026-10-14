@@ -54,8 +54,10 @@ class LateChunkingParams(
         self.verify()
 
     def verify(self) -> None:
-        if type(self.chunk_size) is not int or self.chunk_size <= 0:
-            raise VLLMValidationError("chunk_size must be a positive integer")
+        if type(self.chunk_size) is not int or not 0 < self.chunk_size < 2**63:
+            raise VLLMValidationError(
+                "chunk_size must be a positive integer less than 2**63"
+            )
 
 
 class PoolingParams(
