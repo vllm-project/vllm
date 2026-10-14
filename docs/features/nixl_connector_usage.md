@@ -132,6 +132,18 @@ python tests/v1/kv_connector/nixl_integration/toy_proxy_server.py \
     - In bidirectional mode, the decoder caches KV blocks for multi-turn conversations. This TTL controls how long those blocks are held before being released. Unlike the prefiller lease, this TTL is not renewed via heartbeats.
     - Example: `--kv-transfer-config '{"kv_connector_extra_config": {"decoder_kv_blocks_ttl": 600}}'`
 
+- `async_completion_poll` (via `kv_connector_extra_config`): Poll NIXL transfer completion on a background thread. (Optional)
+    - Default: false
+    - By default, transfer completion is checked once per engine step, so `vllm:nixl_xfer_time_seconds` includes the time until the next step: a long step (e.g. a first-use kernel compile) makes every in-flight transfer look slow. With this enabled, completion and its telemetry are recorded as the transfer finishes. When the engine learns of completions, and how it handles them, does not change.
+    - Creates the NIXL agent in strict thread-sync mode, which serializes all NIXL calls on the worker.
+    - Not supported by `NixlPushConnector`; it is ignored there with a warning.
+    - Example: `--kv-transfer-config '{"kv_connector_extra_config": {"async_completion_poll": true}}'`
+
+- `async_completion_poll_interval_s` (via `kv_connector_extra_config`): Poll interval (in seconds) of the `async_completion_poll` thread. (Optional)
+    - Default: 0.001
+    - Recorded transfer times are accurate to about this interval.
+    - Example: `--kv-transfer-config '{"kv_connector_extra_config": {"async_completion_poll": true, "async_completion_poll_interval_s": 0.002}}'`
+
 ## Bidirectional KV Transfer (Multi-turn)
 
 In standard disaggregated prefilling, KV cache flows in one direction: Prefill (P) computes the KV cache and Decode (D) reads from P. For multi-turn conversations this is wasteful — D already holds the KV cache corresponding to the generated tokens from prior turns, yet P must recompute it from scratch on every new turn. Bidirectional KV transfer lets P **pull** existing KV blocks from D via RDMA before computing only the new tokens, significantly reducing Time-To-First-Token (TTFT) for long-prefill such as **multi-turn heavy scenarios**.
