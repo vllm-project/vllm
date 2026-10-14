@@ -662,50 +662,23 @@ def test_asm_fp4_scale_swizzle_rejects_non_2d():
 
 
 @pytest.mark.skipif(not on_gfx950(), reason="gfx950 ROCm only")
-def test_aiter_mxfp4_process_weights_falls_back_to_triton_for_misaligned_scale(
-    monkeypatch,
-):
-    """A misaligned weight_scale must disable ASM and take the Triton path."""
-    from torch.nn.parameter import Parameter
-
-    from vllm._aiter_ops import rocm_aiter_ops
-    from vllm.model_executor.kernels.linear.mxfp4.aiter import AiterMxfp4LinearKernel
-
-    monkeypatch.setattr(rocm_aiter_ops, "is_asm_fp4_gemm_tuned", lambda n, k: True)
-    monkeypatch.setattr(
-        rocm_aiter_ops, "is_triton_gemm_afp4wfp4_presh_ws_tuned", lambda n, k: True
-    )
-    kernel = object.__new__(AiterMxfp4LinearKernel)
-    kernel.asm_gemm_supported = True
-    kernel.use_asm_gemm = False
-    kernel.out_dtype = torch.bfloat16
-
-    layer = torch.nn.Module()
-    layer.weight = Parameter(
-        torch.zeros(2560, 160, dtype=torch.uint8, device="cpu"), requires_grad=False
-    )
-    layer.weight_scale = Parameter(
-        torch.zeros(2560, 10, dtype=torch.uint8, device="cpu"), requires_grad=False
-    )
-
-    kernel.process_weights_after_loading(layer)
-
-    assert kernel.use_asm_gemm is False
-    # Triton path stores the transposed, contiguous scale.
-    assert tuple(layer.weight_scale.shape) == (10, 2560)
-    assert layer.weight_scale.is_contiguous()
-
-
-@pytest.mark.skipif(not on_gfx950(), reason="gfx950 ROCm only")
 @pytest.mark.parametrize(
-    ("asm_tuned", "preshuffle_tuned", "expected"),
-    [(True, True, True), (True, False, False), (False, True, False)],
+    ("asm_tuned", "preshuffle_tuned", "weight_shape", "scale_shape", "expected"),
+    [
+        (True, True, (1280, 4096), (1280, 256), True),
+        (True, False, (1280, 4096), (1280, 256), False),
+        (False, True, (1280, 4096), (1280, 256), False),
+        # Tuned, but the scale can't be swizzled for ASM (columns % 8 != 0).
+        (True, True, (2560, 160), (2560, 10), False),
+    ],
+    ids=["tuned", "preshuffle_untuned", "asm_untuned", "misaligned_scale"],
 )
 def test_aiter_mxfp4_asm_layout_follows_aiter_tuned_configs(
-    asm_tuned, preshuffle_tuned, expected, monkeypatch
+    asm_tuned, preshuffle_tuned, weight_shape, scale_shape, expected, monkeypatch
 ):
     """A layer takes the ASM layout only when aiter has tuned configs for both
-    the ASM GEMM and the preshuffled Triton GEMM."""
+    the ASM GEMM and the preshuffled Triton GEMM, and the scale can be swizzled.
+    Otherwise it stays on the Triton layout."""
     from torch.nn.parameter import Parameter
 
     from vllm._aiter_ops import rocm_aiter_ops
@@ -724,11 +697,17 @@ def test_aiter_mxfp4_asm_layout_follows_aiter_tuned_configs(
 
     layer = torch.nn.Module()
     layer.weight = Parameter(
-        torch.zeros(1280, 4096, dtype=torch.uint8, device="cuda"), requires_grad=False
+        torch.zeros(weight_shape, dtype=torch.uint8, device="cuda"),
+        requires_grad=False,
     )
     layer.weight_scale = Parameter(
-        torch.zeros(1280, 256, dtype=torch.uint8, device="cuda"), requires_grad=False
+        torch.zeros(scale_shape, dtype=torch.uint8, device="cuda"),
+        requires_grad=False,
     )
     kernel.process_weights_after_loading(layer)
 
     assert kernel.use_asm_gemm is expected
+    if not expected:
+        # Triton path stores the transposed, contiguous scale.
+        assert tuple(layer.weight_scale.shape) == scale_shape[::-1]
+        assert layer.weight_scale.is_contiguous()
