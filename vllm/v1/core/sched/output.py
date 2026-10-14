@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 
 from vllm.config.ec_manager_config import EncoderCacheManagerMetadata
 from vllm.multimodal.utils import strip_covered_mm_data
+from vllm.v1.metrics.iteration_workload import ScheduledIterationWorkload
 
 if TYPE_CHECKING:
     import numpy as np
@@ -149,7 +150,7 @@ class CachedRequestData:
     new_block_ids: list[tuple[list[int], ...] | None]
     num_computed_tokens: list[int]
     num_output_tokens: list[int]
-    # Only collected for detailed worker profiling.
+    # Collected for detailed profiling or async speculative workload correction.
     prefill_req_ids: set[str] | None = None
 
     # Version of dataclass repr with token IDs obfuscated.
@@ -200,6 +201,7 @@ class IterationDetails:
     num_decode_tokens: int = 0
     num_encoder_inputs: int = 0
     num_encoder_output_tokens: int = 0
+    scheduled_workload: ScheduledIterationWorkload | None = None
 
 
 @dataclass

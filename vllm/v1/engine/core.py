@@ -97,6 +97,7 @@ from vllm.v1.kv_cache_interface import (
     is_full_attention_spec,
 )
 from vllm.v1.metrics.iteration import (
+    ITERATION_IDLE_RECORD_INTERVAL,
     ITERATION_TIMING_POLL_INTERVAL,
     ITERATION_TIMING_SHUTDOWN_TIMEOUT,
     IterationMetricsCollector,
@@ -189,7 +190,20 @@ class EngineCore:
         )
         self._initialize_effective_attention_block_size()
         self.iteration_metrics = (
-            IterationMetricsCollector()
+            IterationMetricsCollector(
+                scheduler=(
+                    self.scheduler
+                    if (
+                        vllm_config.observability_config.enable_iteration_workload_metrics
+                    )
+                    else None
+                ),
+                correct_async_spec_lengths=bool(
+                    vllm_config.scheduler_config.async_scheduling
+                    and vllm_config.speculative_config is not None
+                    and not vllm_config.model_config.is_diffusion
+                ),
+            )
             if vllm_config.observability_config.iteration_timing_enabled
             else None
         )
@@ -721,6 +735,8 @@ class EngineCore:
         # Before processing the model output, process any aborts that happened
         # during the model execution.
         self._process_aborts_queue()
+        if self.iteration_metrics is not None:
+            self.iteration_metrics.before_update(scheduler_output, model_output)
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, model_output
         )
@@ -828,6 +844,8 @@ class EngineCore:
         # Before processing the model output, process any aborts that happened
         # during the model execution.
         self._process_aborts_queue()
+        if self.iteration_metrics is not None:
+            self.iteration_metrics.before_update(scheduler_output, model_output)
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, model_output
         )
@@ -1653,9 +1671,30 @@ class EngineCoreProc(EngineCore):
         waited = False
         while not self.has_work() and self.is_running():
             collector = self.iteration_metrics
+            observability = self.vllm_config.observability_config
+            heartbeat = (
+                collector is not None
+                and observability.enable_iteration_workload_metrics
+            )
             if collector is not None and self.input_queue.empty():
                 for client_index, output in self._poll_iteration_metrics().items():
                     self.output_queue.put_nowait((client_index, output))
+                if (
+                    heartbeat
+                    and self.input_queue.empty()
+                    and not collector.has_pending_timing()
+                    and time.monotonic() >= getattr(self, "_next_idle_record", 0.0)
+                ):
+                    idle = collector.make_idle_record()
+                    assert idle is not None
+                    stats = self.scheduler.make_stats() or SchedulerStats()
+                    stats.iteration_records.append(idle)
+                    self.output_queue.put_nowait(
+                        (0, EngineCoreOutputs(scheduler_stats=stats))
+                    )
+                    self._next_idle_record = (
+                        time.monotonic() + ITERATION_IDLE_RECORD_INTERVAL
+                    )
             # Notify callbacks waiting for engine to become idle.
             self._notify_idle_state_callbacks()
             if self.input_queue.empty():
@@ -1668,13 +1707,18 @@ class EngineCoreProc(EngineCore):
             block = self.process_input_queue_block
             pending_timing = collector is not None and collector.has_pending_timing()
             try:
-                if block and pending_timing:
-                    req = self.input_queue.get(timeout=ITERATION_TIMING_POLL_INTERVAL)
+                if block and (pending_timing or heartbeat):
+                    timeout = (
+                        ITERATION_TIMING_POLL_INTERVAL
+                        if pending_timing
+                        else ITERATION_IDLE_RECORD_INTERVAL
+                    )
+                    req = self.input_queue.get(timeout=timeout)
                 else:
                     req = self.input_queue.get(block=block)
                 self._handle_client_request(*req)
             except queue.Empty:
-                if block and pending_timing:
+                if block and (pending_timing or heartbeat):
                     continue
                 break
             if not block:

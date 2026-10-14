@@ -2132,6 +2132,11 @@ class VllmConfig:
         if not self.instance_id:
             self.instance_id = random_uuid()[:5]
 
+        if self.observability_config.enable_iteration_workload_metrics and (
+            reason := self._iteration_timing_unsupported_reason()
+        ):
+            raise ValueError(reason)
+
         if self.reasoning_config is not None and self.model_config is not None:
             self.reasoning_config.initialize_token_ids(self.model_config)
             if not self.reasoning_config.enabled:
@@ -3150,8 +3155,11 @@ class VllmConfig:
         self, log_stats: bool, multiprocess_mode: bool
     ) -> None:
         observability = self.observability_config
+        required = observability.enable_iteration_workload_metrics
         observability.iteration_timing_enabled = False
-        if not log_stats or not observability.enable_logging_iteration_details:
+        if not required and (
+            not log_stats or not observability.enable_logging_iteration_details
+        ):
             return
         reason = (
             self._iteration_timing_unsupported_reason()
@@ -3160,6 +3168,8 @@ class VllmConfig:
         )
         if reason is None:
             observability.iteration_timing_enabled = True
+        elif required:
+            raise ValueError(reason)
         else:
             logger.warning("Logging iteration counts without GPU timing: %s", reason)
 

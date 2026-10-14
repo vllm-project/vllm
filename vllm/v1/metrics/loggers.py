@@ -217,7 +217,11 @@ class LoggingStatLogger(StatLoggerBase):
                 details.num_generation_requests,
                 details.num_generation_tokens,
                 elapsed_msg,
-                " (dummy)" if details.is_dummy else "",
+                " (idle)"
+                if details.is_idle
+                else " (dummy)"
+                if details.is_dummy
+                else "",
                 encoder_msg,
             )
 

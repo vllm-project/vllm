@@ -152,6 +152,92 @@ def test_add_requests():
         assert len(scheduler.waiting) == i + 1
 
 
+@pytest.mark.parametrize("use_v2_model_runner", [False, True])
+@pytest.mark.parametrize("async_scheduling", [False, True])
+def test_iteration_workload_uses_current_chunk_attention_lengths(
+    use_v2_model_runner, async_scheduling
+):
+    scheduler = create_scheduler(
+        max_num_seqs=2,
+        max_model_len=32,
+        max_num_batched_tokens=4,
+        long_prefill_token_threshold=3,
+        use_v2_model_runner=use_v2_model_runner,
+        async_scheduling=async_scheduling,
+    )
+    scheduler.observability_config.iteration_timing_enabled = True
+    scheduler.observability_config.enable_iteration_workload_metrics = True
+    requests = create_requests(num_requests=2, num_tokens=8)
+    for request in requests:
+        scheduler.add_request(request)
+
+    for kv_sum, variance in [(0, 0.25), (4, 2.25)]:
+        output = scheduler.schedule()
+        details = output.iteration_details
+        assert details is not None and details.scheduled_workload is not None
+        assert details.num_prefill_requests == 2
+        assert details.num_prefill_tokens == 4
+        assert details.num_decode_requests == 0
+        assert details.scheduled_workload.sum_prefill_kv_tokens == kv_sum
+        assert details.scheduled_workload.var_prefill_length == variance
+        scheduler.update_from_output(
+            output,
+            ModelRunnerOutput(
+                req_ids=[request.request_id for request in requests],
+                req_id_to_index={r.request_id: i for i, r in enumerate(requests)},
+                sampled_token_ids=[[], []],
+            ),
+        )
+
+
+@pytest.mark.parametrize("use_v2_model_runner", [False, True])
+@pytest.mark.parametrize("async_scheduling", [False, True])
+def test_iteration_workload_classifies_all_recompute_chunks_as_prefill(
+    use_v2_model_runner, async_scheduling
+):
+    scheduler = create_scheduler(
+        max_num_seqs=1,
+        max_model_len=32,
+        max_num_batched_tokens=4,
+        use_v2_model_runner=use_v2_model_runner,
+        async_scheduling=async_scheduling,
+    )
+    scheduler.observability_config.iteration_timing_enabled = True
+    scheduler.observability_config.enable_iteration_workload_metrics = True
+    (request,) = create_requests(num_requests=1, num_tokens=8)
+    request.append_output_token_ids([1, 2])
+    request.status = RequestStatus.PREEMPTED
+    request.num_preemptions = 1
+    scheduler.add_request(request)
+
+    for computed in (0, 4):
+        output = scheduler.schedule()
+        details = output.iteration_details
+        assert details is not None and details.scheduled_workload is not None
+        assert details.num_prefill_requests == 1
+        assert details.num_decode_requests == 0
+        assert details.scheduled_workload.sum_prefill_kv_tokens == computed
+        assert details.scheduled_workload.sum_decode_kv_tokens == 0
+        scheduler.update_from_output(
+            output,
+            ModelRunnerOutput([request.request_id], {request.request_id: 0}, [[]]),
+        )
+
+
+def test_disabled_iteration_workload_does_not_allocate_accumulator(monkeypatch):
+    scheduler = create_scheduler()
+    scheduler.observability_config.iteration_timing_enabled = True
+    accumulator = Mock(side_effect=AssertionError("unexpected workload collection"))
+    monkeypatch.setattr(
+        "vllm.v1.core.sched.scheduler.IterationWorkloadAccumulator", accumulator
+    )
+    (request,) = create_requests(num_requests=1)
+    scheduler.add_request(request)
+    output = scheduler.schedule()
+    accumulator.assert_not_called()
+    assert output.iteration_details.scheduled_workload is None
+
+
 @pytest.mark.parametrize("max_tokens", [1, 2])
 def test_routed_experts_prompt_start_at_prompt_end(max_tokens):
     """A prompt-end offset should return empty routing data, not crash."""

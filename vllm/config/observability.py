@@ -104,6 +104,12 @@ class ObservabilityConfig:
     iteration_timing_enabled: bool = Field(default=False, init=False, repr=False)
     """Internal state resolved at EngineCore startup; not a user option."""
 
+    enable_iteration_workload_metrics: bool = False
+    """Add scheduled context-length and queued-work statistics to complete
+    iteration records. Automatically enables GPU timing, not console logging.
+    Disabled by default.
+    Queue snapshots scan waiting requests after each completed iteration."""
+
     jit_monitor_mode: Literal["warn", "error"] = "warn"
     """How to handle post-warmup JIT compilation events."""
 
@@ -214,6 +220,12 @@ class ObservabilityConfig:
                     "must be strictly increasing"
                 )
         return value
+
+    @model_validator(mode="after")
+    def _enable_iteration_workload_timing(self):
+        if self.enable_iteration_workload_metrics:
+            self.iteration_timing_enabled = True
+        return self
 
     @model_validator(mode="after")
     def _validate_tracing_config(self):

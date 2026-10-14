@@ -60,6 +60,7 @@ from vllm.v1.kv_cache_interface import (
     get_mamba_prefill_checkpoint_position,
     is_mamba_prefill_checkpoint_valid,
 )
+from vllm.v1.metrics.iteration_workload import IterationWorkloadAccumulator
 from vllm.v1.metrics.perf import ModelMetrics, PerfStats
 from vllm.v1.metrics.stats import (
     KV_FETCH_COMPLETED_WAITING,
@@ -220,11 +221,11 @@ class Scheduler(SchedulerInterface):
                 f"Unknown scheduling policy: {self.scheduler_config.policy}"
             ) from e
         # Priority queues for requests.
-        self.waiting = create_request_queue(self.policy)
+        self.waiting: RequestQueue = create_request_queue(self.policy)
         # Waiting requests that hold KV blocks are always drained before
         # self.waiting: a block-holder must never sit behind a request whose
         # failed allocation would stop the scheduling scan.
-        self.kv_holding_waiting = create_request_queue(self.policy)
+        self.kv_holding_waiting: RequestQueue = create_request_queue(self.policy)
         # Waiting requests that are deferred, i.e. were skipped by the scheduling
         # scan or enqueued in a blocked status.
         self.deferred_waiting: set[Request] = set()
@@ -607,6 +608,11 @@ class Scheduler(SchedulerInterface):
         preempted_reqs: list[Request] = []
 
         iteration_details = None
+        workload = (
+            IterationWorkloadAccumulator()
+            if self.observability_config.enable_iteration_workload_metrics
+            else None
+        )
         if (
             self.log_stats
             and self.observability_config.enable_logging_iteration_details
@@ -1476,6 +1482,7 @@ class Scheduler(SchedulerInterface):
                 scheduled_spec_decode_tokens,
                 req_to_new_blocks,
                 iteration_details=iteration_details,
+                workload=workload,
             )
 
         if iteration_details is not None:
@@ -1485,6 +1492,13 @@ class Scheduler(SchedulerInterface):
             iteration_details.num_prefill_tokens = (
                 total_num_scheduled_tokens - iteration_details.num_decode_tokens
             )
+            if workload is not None:
+                for request in scheduled_new_reqs:
+                    workload.add_prefill(
+                        request.num_computed_tokens,
+                        num_scheduled_tokens[request.request_id],
+                    )
+                iteration_details.scheduled_workload = workload.snapshot()
 
         # Record the request ids that were scheduled in this step (MRV1-only).
         if not self.use_v2_model_runner:
@@ -1729,6 +1743,7 @@ class Scheduler(SchedulerInterface):
         spec_decode_tokens: dict[str, list[int]],
         req_to_new_blocks: dict[str, KVCacheBlocks],
         iteration_details: IterationDetails | None = None,
+        workload: IterationWorkloadAccumulator | None = None,
     ) -> CachedRequestData:
         req_ids: list[str] = []
         new_token_ids: list[list[int]] = []
@@ -1741,6 +1756,11 @@ class Scheduler(SchedulerInterface):
         if (
             self.vllm_config.profiler_config.profiler is not None
             and self.vllm_config.profiler_config.detailed_trace_annotation
+        ) or (
+            workload is not None
+            and self.scheduler_config.async_scheduling
+            and self.vllm_config.speculative_config is not None
+            and not self.vllm_config.model_config.is_diffusion
         ):
             prefill_req_ids = set()
 
@@ -1781,6 +1801,13 @@ class Scheduler(SchedulerInterface):
             if iteration_details is not None and not is_prefill:
                 iteration_details.num_decode_requests += 1
                 iteration_details.num_decode_tokens += num_scheduled_tokens[req_id]
+            if workload is not None:
+                if is_prefill:
+                    workload.add_prefill(
+                        req.num_computed_tokens, num_scheduled_tokens[req_id]
+                    )
+                else:
+                    workload.add_decode(req.num_computed_tokens)
             if prefill_req_ids is not None and is_prefill:
                 prefill_req_ids.add(req_id)
 
