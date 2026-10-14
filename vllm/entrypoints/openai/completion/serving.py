@@ -189,10 +189,9 @@ class OpenAIServingCompletion(GenerateBaseServing):
                 lora_request=lora_request,
             )
 
-            trace_headers = (
-                None
-                if raw_request is None
-                else await self._get_trace_headers(raw_request.headers)
+            trace_headers = await self._get_trace_headers(
+                raw_request.headers if raw_request is not None else {},
+                api_surface="completions",
             )
             session_id = self._get_session_id(request, raw_request)
 

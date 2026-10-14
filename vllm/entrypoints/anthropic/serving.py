@@ -370,6 +370,7 @@ class AnthropicServingMessages(OpenAIServingChat):
             merge_inline_system=merge_inline_system,
         )
         req = cls._build_base_request(anthropic_request, openai_messages)
+        req._api_surface = "messages"
         cls._handle_streaming_options(req, anthropic_request)
         cls._handle_output_config(req, anthropic_request)
         cls._handle_thinking(req, anthropic_request, disabled_thinking_effort)
