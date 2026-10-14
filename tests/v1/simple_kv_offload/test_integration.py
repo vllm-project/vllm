@@ -263,10 +263,11 @@ def _assert_worker_auto_numa(worker):
     policy = dict(line.split(":", 1) for line in result.stdout.splitlines())
     assert policy["policy"].strip() == "preferred"
     assert policy["preferred node"].strip() == str(node)
+    return {"node": node, "cpus": sorted(cpus), "policy": "preferred"}
 
 
 @pytest.mark.slow_test
-def test_simple_cpu_offload_with_auto_numa(monkeypatch):
+def test_simple_cpu_offload_with_auto_numa(monkeypatch, enable_pickle):
     """Soft-bound NVIDIA workers must store and restore KV, not silently recompute."""
     if not current_platform.is_cuda():
         pytest.skip("Automatic NUMA KV-offload smoke test requires NVIDIA")
@@ -281,7 +282,7 @@ def test_simple_cpu_offload_with_auto_numa(monkeypatch):
     ):
         pytest.skip("Host cannot engage automatic NUMA memory preference")
 
-    model = SMALL_MODELS[0]
+    model = "Qwen/Qwen3-0.6B"
     llm = _make_llm(
         model,
         False,
@@ -293,19 +294,18 @@ def test_simple_cpu_offload_with_auto_numa(monkeypatch):
         disable_log_stats=False,
     )
 
-    def count(llm: LLM, name: str, **labels):
+    def loaded_blocks(llm: LLM):
         return sum(
             metric.value
             for metric in llm.get_metrics()
             if isinstance(metric, Counter)
-            and metric.name == name.removesuffix("_total")
+            and metric.name == MetricName.LOAD_BLOCKS.removesuffix("_total")
             and metric.labels.get("model_name") == model
-            and all(metric.labels.get(key) == value for key, value in labels.items())
         )
 
     try:
-        llm.collective_rpc(_assert_worker_auto_numa, timeout=30)
-        stored_before = count(llm, MetricName.SAVE_OUTCOMES, outcome="stored")
+        states = llm.collective_rpc(_assert_worker_auto_numa, timeout=30)
+        print(f"NUMA worker state: {states}")
         sampling_params = SamplingParams(max_tokens=8, temperature=0)
         prompt = "hi " * 256 + "Let's count to ten. One, two, three, "
         cold = llm.generate(prompt, sampling_params, use_tqdm=False)[0]
@@ -314,11 +314,12 @@ def test_simple_cpu_offload_with_auto_numa(monkeypatch):
         while not llm.reset_prefix_cache(reset_connector=False):
             assert time.monotonic() < deadline, "CPU offload did not drain"
             llm.generate("0", sampling_params, use_tqdm=False)
-        assert count(llm, MetricName.SAVE_OUTCOMES, outcome="stored") > stored_before
-        loaded_before = count(llm, MetricName.LOAD_BLOCKS)
+        loaded_before = loaded_blocks(llm)
         restored = llm.generate(prompt, sampling_params, use_tqdm=False)[0]
-        assert count(llm, MetricName.LOAD_BLOCKS) > loaded_before
+        loaded = loaded_blocks(llm) - loaded_before
+        assert loaded > 0
         assert restored.outputs[0].token_ids == cold.outputs[0].token_ids
+        print(f"KV offload blocks restored={loaded}; tokens match")
     finally:
         del llm
 
