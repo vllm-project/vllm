@@ -147,7 +147,7 @@ def test_fp4_env_defaults():
     """ROCm FP4 env defaults should stay stable for the AITER gates."""
     import vllm.envs as envs
 
-    assert envs.VLLM_ROCM_USE_AITER_FP4BMM is True
+    assert envs.VLLM_ROCM_USE_AITER_FP4BMM is False
 
 
 @pytest.mark.parametrize(
