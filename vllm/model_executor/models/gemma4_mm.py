@@ -103,25 +103,21 @@ def _get_tower_quant_config(
     tower_config: Any,
     quant_config: "QuantizationConfig | None",
 ) -> "QuantizationConfig | None":
-    """Return the quantization config when a tower supports its kernels.
-
-    Vision and audio towers can have different dimensions. A quantization
-    decision made for one tower must not disable quantization for the other.
-    """
-    if quant_config is None:
-        return None
-
-    # These methods support arbitrary tower dimensions.
-    if quant_config.get_name() in ("bitsandbytes", "torchao", "compressed-tensors"):
+    # BNB/torchao/compressed-tensors handle arbitrary sizes; other methods
+    # (Marlin, FP8, …) require dimensions divisible by 64.
+    # TODO(mgoin): remove this by fixing kernel padding.
+    if quant_config and quant_config.get_name() in [
+        "bitsandbytes",
+        "torchao",
+        "compressed-tensors",
+    ]:
         return quant_config
-
+    # The audio config has no intermediate_size; treat it as always divisible.
     intermediate_size = getattr(tower_config, "intermediate_size", None)
-    if tower_config.hidden_size % 64 != 0 or (
-        intermediate_size is not None and intermediate_size % 64 != 0
-    ):
-        return None
-
-    return quant_config
+    quantizable = tower_config.hidden_size % 64 == 0 and (
+        intermediate_size is None or intermediate_size % 64 == 0
+    )
+    return quant_config if quantizable else None
 
 
 # Video constants — match transformers Gemma4VideoProcessor defaults.
