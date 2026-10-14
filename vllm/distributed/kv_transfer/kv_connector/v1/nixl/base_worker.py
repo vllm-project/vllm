@@ -97,7 +97,7 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 _SHARED_REGION_GROUP_ID = -1
-# Reads and handshakes take seconds; a wedged one fails the sleep, not hangs it.
+# Handshakes take seconds; a wedged one fails the sleep, not hangs it.
 _RELEASE_TIMEOUT_S = 60.0
 
 # Re-handshake delay bounds for a pull peer whose local metadata keeps getting
@@ -1846,18 +1846,15 @@ class NixlBaseConnectorWorker:
         return self._ple_block_len
 
     def unregister_kv_caches(self) -> None:
-        """Deregister the KV caches, with every handle built on them, once no read
-        or handshake uses them; TimeoutError if they do not finish. Idempotent."""
+        """Deregister the KV caches, with every handle built on them. Transfers are
+        already drained, but a background handshake may still prepare handles on
+        them: wait for it, TimeoutError if it does not finish. Idempotent."""
         if self._kv_unregistered or not self._registered_descs:
             return
         deadline = time.perf_counter() + _RELEASE_TIMEOUT_S
-        while self._handshake_pending() or any(
-            self.nixl_wrapper.check_xfer_state(handle) == "PROC"
-            for handles in self._recving_transfers.values()
-            for handle in handles
-        ):
+        while self._handshake_pending():
             if time.perf_counter() >= deadline:
-                raise TimeoutError("NIXL KV transfers did not finish in time")
+                raise TimeoutError("NIXL handshakes did not finish in time")
             time.sleep(0.01)
         self._kv_unregistered = True
         self._release_local_xfer_handles()

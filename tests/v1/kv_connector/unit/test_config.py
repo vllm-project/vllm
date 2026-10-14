@@ -179,6 +179,10 @@ def test_sleep_mode_refuses_unsupported_kv_connector(
         )
 
 
+def test_sleep_mode_allows_nixl_over_ucx():
+    _build_config(kv_connector="NixlConnector", enable_sleep_mode=True)
+
+
 def test_kv_connector_allows_other_alloc_conf(monkeypatch):
     """Other PYTORCH_CUDA_ALLOC_CONF values must not be rejected."""
     monkeypatch.setenv(

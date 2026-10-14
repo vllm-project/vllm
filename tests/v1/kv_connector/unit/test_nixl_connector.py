@@ -2925,27 +2925,18 @@ def test_sleep_mode_ucx_defaults(
         assert {n: os.environ[n] for n in names if n in os.environ} == expected
 
 
-@pytest.mark.parametrize("pending", ["read", "handshake", "wedged"])
-def test_release_waits_for_reads_and_handshakes(monkeypatch, dist_init, pending):
-    """Memory a read may still write, or a handshake may still prepare handles
-    for, stays registered until it finishes; a wedged one fails the release."""
+@pytest.mark.parametrize("wedged", [False, True])
+def test_release_waits_for_handshakes(monkeypatch, dist_init, wedged):
+    """Memory a handshake may still prepare handles for stays registered until it
+    finishes; a wedged one fails the release."""
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl import base_worker
 
     with _sleep_mode_connectors() as (_, connector):
         worker = connector.connector_worker
         nixl = worker.nixl_wrapper
         registered = set(nixl.registered)
-        finished = threading.Event()
-        if pending == "handshake":
-            worker._handshake_futures["peer"] = Future()
-        else:
-            worker._recving_transfers["req"] = [1]
-            monkeypatch.setattr(
-                nixl,
-                "check_xfer_state",
-                lambda handle: "DONE" if finished.is_set() else "PROC",
-            )
-        if pending == "wedged":
+        worker._handshake_futures["peer"] = Future()
+        if wedged:
             monkeypatch.setattr(base_worker, "_RELEASE_TIMEOUT_S", 0.2)
             with pytest.raises(TimeoutError, match="did not finish in time"):
                 connector.unregister_kv_caches()
@@ -2956,7 +2947,6 @@ def test_release_waits_for_reads_and_handshakes(monkeypatch, dist_init, pending)
         releasing.start()
         releasing.join(timeout=0.3)
         assert releasing.is_alive() and nixl.registered == registered
-        finished.set()
         worker._handshake_futures.clear()
         releasing.join(timeout=10)
         assert not releasing.is_alive() and nixl.registered == set()
