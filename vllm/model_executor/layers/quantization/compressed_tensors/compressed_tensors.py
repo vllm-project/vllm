@@ -44,6 +44,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsW4A4Mxfp4,
     CompressedTensorsW4A8Fp8,
     CompressedTensorsW4A8Int,
+    CompressedTensorsW4A8Mxfp4,
     CompressedTensorsW8A8Fp8,
     CompressedTensorsW8A8Int8,
     CompressedTensorsW8A8Mxfp8,
@@ -63,6 +64,11 @@ from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     should_ignore_layer,
 )
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    GroupShape,
+    QuantKey,
+    create_fp8_quant_key,
+)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -449,6 +455,39 @@ class CompressedTensorsConfig(QuantizationConfig):
             and is_symmetric
         )
 
+    @classmethod
+    def _is_mxfp4_w4a8_fp8(
+        cls, weight_quant: QuantizationArgs, input_quant: QuantizationArgs
+    ) -> bool:
+        if not cls._is_mxfp4(weight_quant) or input_quant is None:
+            return False
+
+        is_float_type = input_quant.type == QuantizationType.FLOAT
+        is_8_bits = input_quant.num_bits == 8
+        is_static_weight = not weight_quant.dynamic
+        is_dynamic_input = bool(input_quant.dynamic)
+        is_token_or_group = input_quant.strategy in (
+            QuantizationStrategy.TOKEN,
+            QuantizationStrategy.GROUP,
+        )
+
+        return (
+            is_float_type
+            and is_8_bits
+            and is_static_weight
+            and is_dynamic_input
+            and is_token_or_group
+            and input_quant.symmetric
+        )
+
+    @staticmethod
+    def _fp8_dynamic_input_key(input_quant: QuantizationArgs) -> QuantKey:
+        if input_quant.strategy == QuantizationStrategy.GROUP:
+            group_shape = GroupShape(1, input_quant.group_size)
+        else:
+            group_shape = GroupShape.PER_TOKEN
+        return create_fp8_quant_key(static=False, group_shape=group_shape)
+
     @staticmethod
     def _is_mxfp8(quant_args: QuantizationArgs) -> bool:
         if quant_args is None:
@@ -763,6 +802,11 @@ class CompressedTensorsConfig(QuantizationConfig):
                     "format, None for NVFP4A16"
                 )
             return CompressedTensorsW4A4Fp4()
+
+        if self._is_mxfp4_w4a8_fp8(weight_quant, input_quant):
+            return CompressedTensorsW4A8Mxfp4(
+                activation_quant_key=self._fp8_dynamic_input_key(input_quant)
+            )
 
         if self._is_mxfp4(weight_quant):
             return CompressedTensorsW4A4Mxfp4()
