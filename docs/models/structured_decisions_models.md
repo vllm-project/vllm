@@ -38,16 +38,6 @@ supported read strategy return 501. Supported architectures require
 `--logprobs-mode raw_logprobs` or `processed_logprobs`, since `label_mass` needs
 log probabilities.
 
-At startup, the server renders the chat template with thinking off. If the
-prompt opens a thought, or the template drops thoughts from the history but does
-not close one in the prompt, the endpoint returns 501 and names the reason.
-Thinking-only checkpoints, such as `Qwen/Qwen3-4B-Thinking-2507` and
-`deepseek-ai/DeepSeek-R1-0528-Qwen3-8B`, get 501 this way.
-
-The check reads only the template. A template that turns thinking off for a
-model that still thinks passes it, and its reads are noise:
-`diagnostics.label_mass` is near 0.
-
 #### How it works
 
 1. Each question is one read. The user message is the state, followed by the
