@@ -146,24 +146,26 @@ def _tp_group_worker(rank: int, port: int) -> None:
     iar = get_tp_group().device_communicator.island_ar_comm
     if iar is None or iar.disabled:
         raise SystemExit(NOT_TWO_ISLANDS)
-    tokens, dtype = 8, torch.bfloat16
-    static = _rank_input(rank, tokens, dtype, 0).to(device)
-    tensor_model_parallel_all_reduce(static)
-    torch.accelerator.synchronize()
-    graph = torch.cuda.CUDAGraph()
-    with (
-        graph_capture(device=device) as capture_context,
-        torch.cuda.graph(graph, stream=capture_context.stream),
-    ):
-        graph_out = tensor_model_parallel_all_reduce(static)
-    for seed in range(1, 6):
-        new = _rank_input(rank, tokens, dtype, seed).to(device)
-        static.copy_(new)
-        graph.replay()
+    dtype = torch.bfloat16
+    # One size per path: custom (8 tokens) and hierarchical (256 tokens).
+    for tokens in (8, 256):
+        static = _rank_input(rank, tokens, dtype, 0).to(device)
+        tensor_model_parallel_all_reduce(static)
         torch.accelerator.synchronize()
-        _check(graph_out, tokens, dtype, seed)
-        # Same kernels in the same order, eager and replayed.
-        assert torch.equal(iar.all_reduce(new), graph_out)
+        graph = torch.cuda.CUDAGraph()
+        with (
+            graph_capture(device=device) as capture_context,
+            torch.cuda.graph(graph, stream=capture_context.stream),
+        ):
+            graph_out = tensor_model_parallel_all_reduce(static)
+        for seed in range(1, 6):
+            new = _rank_input(rank, tokens, dtype, seed).to(device)
+            static.copy_(new)
+            graph.replay()
+            torch.accelerator.synchronize()
+            _check(graph_out, tokens, dtype, seed)
+            # Same kernels in the same order, eager and replayed.
+            assert torch.equal(iar.all_reduce(new), graph_out)
 
 
 def _run_workers(target, *args) -> None:
