@@ -824,7 +824,9 @@ def sparse_attn_indexer(
                             )
                     ops.top_k_per_row_prefill(
                         logits,
-                        torch.zeros_like(row_ends) if row_starts is None else row_starts,
+                        torch.zeros_like(row_ends)
+                        if row_starts is None
+                        else row_starts,
                         row_ends,
                         topk_indices[rows],
                         num_rows,
