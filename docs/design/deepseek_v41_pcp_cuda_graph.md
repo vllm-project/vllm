@@ -1,69 +1,66 @@
-# DeepSeek-V4.1 PCP with CUDA Graph: implementation plan
+# DeepSeek-V4.1 PCP with decode-only CUDA graphs
 
-Status: implementation plan only. This draft does not enable the feature.
-No GPU execution, model evaluation, or performance result is claimed.
+The NVIDIA MRV2 path supports `FULL_DECODE_ONLY` for DeepSeek-V4.1 PCP.
+Prefill, including decoder SWA bounded replay, remains eager. This builds on
+the PCP baseline, fixed DSpark verification and shared Engram storage, and
+bounded replay from [#59857](https://github.com/vllm-project/vllm/pull/59857),
+[#61553](https://github.com/vllm-project/vllm/pull/61553), and
+[#61554](https://github.com/vllm-project/vllm/pull/61554).
 
-This is a follow-up to [#59857](https://github.com/vllm-project/vllm/pull/59857),
-pinned initially to `7908ee8906475842ba0ecd1c09eed6d878718f05`. That PR provides the
-NVIDIA text-only DeepSeek-V4.1-Flash PCP baseline. Its MoE padding dependency,
-[#60946](https://github.com/vllm-project/vllm/pull/60946), must be resolved before
-validating the combined runtime. Historical results in the parent PR do not
-validate this branch.
+## Metadata and dispatch
 
-The initial target is MRV2, FlashMLA sparse attention, PP=DP=DCP=1 and one
-colocated instance. Each follow-up starts independently from the parent;
-combining the three features requires separate integration validation.
+Reuse the existing MRV2 target and DFlash/DSpark graph managers. Metadata is
+prepared before graph execution, so tensors referenced by captured kernels
+must retain their storage across requests:
 
-## Current boundary
+- Copy gathered SWA positions and compressed attention/indexer cache slots
+  into persistent buffers.
+- Update compressor gather indices, retained ring-write slots and predecessor
+  indices in place. Captured dummy inputs must not freeze the ring links used
+  after a rejected draft or a change in PCP request ownership.
+- Match decode graphs using the largest rank-local request count and the
+  existing rank-local token count. Global input staging still reserves space
+  for all requests before PCP partitions them.
 
-The parent PR documents eager-only support. Existing graph capability markers
-on individual attention metadata builders do not establish correctness of
-the entire V4.1 PCP execution path. The rank-local compressor links, gathered
-cache slots, sparse/SWA metadata, Engram lookback and MoE routing inputs all
-need to remain valid when a graph replays with different live requests.
+The computation, weights, quantization and speculative acceptance policy are
+unchanged. The existing replicated draft and proposal broadcast are reused.
+Generic PCP graph capture from
+[#53867](https://github.com/vllm-project/vllm/pull/53867) is not reimplemented.
 
-## Proposed implementation
+## Configuration and limits
 
-1. Start with PIECEWISE graphs for the non-speculative, replay-disabled V4.1
-   PCP baseline. Keep FULL mode and the other two feature combinations outside
-   the initial support claim.
-2. Audit capture-time versus per-step work in `compressor.py`,
-   `sparse_mla.py`, `nvidia/model_state.py` and `nvidia/model.py`. Keep graph
-   inputs at stable addresses and refresh values and metadata before replay;
-   do not freeze request-dependent boundaries or valid-token counts.
-3. Ensure rank-local padding, gathered cache-write views, MoE routing rows and
-   collective shapes agree for every supported capture bucket. Padding must
-   neither become a cache write nor change request identity.
-4. Reuse the MRV2 dispatcher and record its global/local width policy. Only
-   introduce model-specific changes needed by V4.1; any generic fix should be
-   factored out and checked against ongoing upstream work.
+Remove `--enforce-eager` and select `FULL_DECODE_ONLY`. For example, the
+H20 validation used this bounded capture ladder:
 
-## Existing work to reuse
+```bash
+--compilation-config '{"mode":0,"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[5,6,10,12,20,24,40,48],"max_cudagraph_capture_size":48}'
+--cudagraph-metrics
+```
 
-[#53639](https://github.com/vllm-project/vllm/pull/53639) proposes dispatch by
-rank-local token count and is an alternative to
-[#53515](https://github.com/vllm-project/vllm/pull/53515). Its files concern the
-generic runner/PCP manager, not V4.1 model capture.
-[#56107](https://github.com/vllm-project/vllm/pull/56107) already includes
-generic PIECEWISE graph support. This track must reuse the applicable upstream
-policy; it is not another implementation of local graph dispatch.
+Capture sizes must accommodate both target verification and draft queries.
+The example covers the tested DSpark5 target and draft batches through global
+concurrency eight; it is not a universal tuning recommendation. Unmatched
+runtime sizes retain the existing eager fallback. Capture logs alone do not
+prove replay; check the target's runtime `CUDAGraph Stats` as well.
 
-## Acceptance criteria
+Existing V4.1 PCP restrictions remain: PP=DP=DCP=1, no microbatching, KV
+transfer, prefix caching or MegaMoE, and fixed DSpark verification when
+speculation is enabled. Speculative graphs require the indexer's existing
+flattened or varlen query path. Native speculative query metadata that cannot
+refresh empty decode owners remains rejected. Prefill graph modes are not
+enabled by this change.
 
-- [ ] Add focused coverage to existing compressor, SWA and PCP suites for
-  metadata refresh and repeated replay, including different request identities
-  that share the same graph bucket.
-- [ ] Test short replicated prefills, empty local decode shards, mixed batches,
-  ratio-2 boundaries, padding buckets and changing batch membership at PCP2/4.
-- [ ] Compare real-checkpoint eager and PIECEWISE runs at matching topology,
-  dtype and workload. Verify graph capture and replay actually occur; an eager
-  fallback does not establish support.
-- [ ] Check numerical/quality agreement, cache integrity and absence of host
-  synchronization using `VLLM_GPU_SYNC_CHECK=error`.
-- [ ] Report graph memory, capture/startup cost, TTFT, TPOT and throughput with
-  repeated-run variability. Evaluate SM90 and SM100 separately when available.
-- [ ] Retain explicit limits until FULL graphs, DSpark and bounded-replay
-  combinations each have their own validation evidence.
+## Validation scope
 
-Graphs can reduce launch overhead but consume persistent memory and may add
-padding work. Measure both prefill and decode workloads before claiming a gain.
+Focused tests cover metadata address stability, request ownership changes,
+rejected-draft ring updates, local dispatch sizing and configuration guards.
+On four H20 GPUs, TP1/PCP4/EP4 with DSpark5, Humming FP8 activations, bounded
+replay and `VLLM_GPU_SYNC_CHECK=error` passed 32 fixed GSM8K canaries, eight
+long/ragged boundary checks, and 27 natural-EOS requests at concurrency
+1, 3, 4, 5, 8, 5, 1. Target FULL execution and nonzero real speculative
+acceptance were observed. These are targeted regressions, not a full model
+accuracy evaluation or a claim of bitwise logit equivalence.
+
+Graphs consume persistent memory and can add padding work. Keep capture,
+warmup and performance measurements separate, and compare matching eager and
+graph workloads. H20 results do not establish performance on other GPUs.
