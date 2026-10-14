@@ -428,16 +428,49 @@ def test_prefix_hit_verifies_only_loaded_blocks():
 
 
 @pytest.mark.parametrize("corrupt", [False, True])
-def test_different_block_sizes_are_unverified(corrupt):
-    """Checksums of different block sizes are not compared: the load is
-    unverified, corrupted or not."""
-    producer = _Engine("kv_producer", block_size=32)
-    consumer = _Engine("kv_consumer", fail_closed=True)
+@pytest.mark.parametrize(
+    "producer_block_size,consumer_block_size", [(16, 32), (32, 16)]
+)
+@CONNECTORS
+def test_different_block_sizes_are_compared(
+    connector, producer_block_size, consumer_block_size, corrupt
+):
+    """With different block sizes the smaller blocks' checksums are summed
+    and compared with the larger ones, including the last partial block."""
+    producer = _Engine("kv_producer", connector, block_size=producer_block_size)
+    consumer = _Engine(
+        "kv_consumer", connector, fail_closed=True, block_size=consumer_block_size
+    )
     params, block_ids = _prefill(
         producer, create_request(1, NUM_TOKENS, do_remote_decode=True)
     )
     request = create_request(1, NUM_TOKENS, do_remote_prefill=True)
     engine_outputs = _load(producer, consumer, request, params, block_ids, corrupt)
+    assert _error_ids(engine_outputs) == ({request.request_id} if corrupt else set())
+
+
+def test_load_starting_inside_a_producer_block_is_unverified():
+    """A consumer with smaller blocks whose local prefix hit ends inside a
+    producer block cannot compare its first loaded block, so the load is
+    unverified rather than verified without it."""
+    producer = _Engine("kv_producer", block_size=32)
+    consumer = _Engine("kv_consumer", fail_closed=True, block_size=16)
+    prefix = 16
+    params, producer_block_ids = _prefill(
+        producer, create_request(1, NUM_TOKENS, prefix, do_remote_decode=True)
+    )
+
+    local = create_request(2, NUM_TOKENS, prefix, max_tokens=1)
+    consumer.scheduler.add_request(local)
+    consumer.finish_step(consumer.schedule())
+    request = create_request(1, NUM_TOKENS, prefix, do_remote_prefill=True)
+    request.kv_transfer_params = {**(params or {}), "do_remote_prefill": True}
+    consumer.scheduler.add_request(request)
+    output = consumer.schedule()
+    start, block_ids = _scheduled_blocks(output, request.request_id, send=False)
+    assert start == 1
+    _copy_blocks(producer, consumer, producer_block_ids, start, block_ids)
+    engine_outputs = consumer.finish_step(output, {request.request_id})
     assert _error_ids(engine_outputs) == {request.request_id}
 
 

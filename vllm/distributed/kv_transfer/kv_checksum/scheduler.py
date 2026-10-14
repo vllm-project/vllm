@@ -459,6 +459,9 @@ class KVChecksumScheduler:
         """The group's mismatching block positions, or None if the group is
         not compared (neither side checksums it).
 
+        With different block sizes, sums of the smaller blocks are compared
+        with the larger ones.
+
         Raises:
             _Unverified: If the group cannot be compared.
 
@@ -478,32 +481,55 @@ class KVChecksumScheduler:
                 "a group holds other layers or dtype on the producer",
                 f"group {group_id}",
             )
+        start, block_ids = pending.blocks.groups[group_id]
         block_size = self._groups[group_id].kv_cache_spec.block_size
-        if sent_block_size != block_size:
+        chunk_size = max(block_size, sent_block_size)
+        if chunk_size % min(block_size, sent_block_size):
             raise _Unverified(
-                "block sizes differ",
+                "block sizes are not multiples of each other",
                 f"group {group_id}: {sent_block_size} on the producer, "
                 f"{block_size} on the consumer",
             )
-        start, block_ids = pending.blocks.groups[group_id]
-        positions = [
-            pos
-            for pos in range(
-                max(start, sent_start),
-                min(start + len(block_ids), sent_start + len(sent_values)),
+        blocks_per_chunk = chunk_size // block_size
+        if start % blocks_per_chunk:
+            # Its producer block also holds tokens the consumer did not load.
+            raise _Unverified(
+                "the first loaded block starts inside a producer block",
+                f"group {group_id}",
             )
-            # Only the last block can hold fewer tokens on one side.
-            if num_valid_tokens(pos, block_size, pending.blocks.num_tokens)
-            == num_valid_tokens(pos, block_size, expected.num_tokens)
+        num_tokens = pending.blocks.num_tokens
+        sent_first, sent_sums = _chunk_sums(
+            sent_values, sent_start, sent_block_size, chunk_size, expected.num_tokens
+        )
+        checks = [
+            _chunk_sums(values, start, block_size, chunk_size, num_tokens)
+            for values in _sum_replicas(
+                pending.group_checksums(group_id), len(block_ids)
+            )
         ]
-        if not positions:
+        first, num_chunks = checks[0][0], len(checks[0][1])
+        chunks = [
+            chunk
+            for chunk in range(
+                max(first, sent_first),
+                min(first + num_chunks, sent_first + len(sent_sums)),
+            )
+            # Only the last chunk can hold fewer tokens on one side.
+            if num_valid_tokens(chunk, chunk_size, num_tokens)
+            == num_valid_tokens(chunk, chunk_size, expected.num_tokens)
+        ]
+        if not chunks:
             raise _Unverified("a group has no block in common", f"group {group_id}")
-        index = np.array(positions)
-        sent_values = sent_values[index - sent_start]
-        bad = np.zeros(len(positions), dtype=bool)
-        for values in _sum_replicas(pending.group_checksums(group_id), len(block_ids)):
-            bad |= values[index - start] != sent_values
-        return index[bad].tolist()
+        index = np.array(chunks)
+        bad = np.zeros(len(chunks), dtype=bool)
+        for _, sums in checks:
+            bad |= sums[index - first] != sent_sums[index - sent_first]
+        return [
+            pos
+            for chunk in index[bad].tolist()
+            for pos in range(chunk * blocks_per_chunk, (chunk + 1) * blocks_per_chunk)
+            if start <= pos < start + len(block_ids)
+        ]
 
 
 def _non_null_run(
@@ -520,6 +546,39 @@ def _non_null_run(
     if any(nulls[offset:]):
         return None
     return first + offset, block_ids[offset:]
+
+
+def _chunk_sums(
+    values: np.ndarray,
+    start: int,
+    block_size: int,
+    chunk_size: int,
+    num_tokens: int,
+) -> tuple[int, np.ndarray]:
+    """Sums of the checksums of consecutive blocks over chunks of
+    ``chunk_size`` tokens: the first chunk and one sum per chunk.
+
+    Args:
+        values: Checksums of consecutive blocks.
+        start: Position of the first block.
+        block_size: Tokens per block.
+        chunk_size: A multiple of ``block_size``.
+        num_tokens: Tokens checksummed; blocks past them are zero.
+
+    Returns:
+        The first chunk the blocks cover whole and the sums of the chunks
+        they cover whole.
+
+    """
+    blocks_per_chunk = chunk_size // block_size
+    end = start + len(values)
+    if end >= cdiv(num_tokens, block_size):
+        values = np.pad(values, (0, -end % blocks_per_chunk))
+        end += -end % blocks_per_chunk
+    first = cdiv(start, blocks_per_chunk)
+    last = max(first, end // blocks_per_chunk)
+    whole = values[first * blocks_per_chunk - start : last * blocks_per_chunk - start]
+    return first, whole.reshape(-1, blocks_per_chunk).sum(axis=1, dtype=np.uint64)
 
 
 def _sum_replicas(
