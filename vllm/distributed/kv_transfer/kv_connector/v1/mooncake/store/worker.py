@@ -62,9 +62,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (  
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.protocol import (  # noqa: E501
     LOOKUP_MSG,
-    RESET_FORGET_MSG,
     RESET_MSG,
-    RESET_PREPARE_MSG,
     RESP_ERR,
     RESP_OK,
     decode_lookup_response,
@@ -1578,12 +1576,10 @@ class MooncakeStoreWorker:
             else None
         )
 
-        # Every rank serves the admin channel: the scheduler queries rank 0 for
-        # lookups and runs the wipe there, and ranks quiesce their own in-flight
-        # stores and buffered residency before that wipe.
-        self.lookup_server: LookupKeyServer | None = LookupKeyServer(
-            self, vllm_config, vllm_config.parallel_config.rank
-        )
+        # Start lookup server on rank 0 for scheduler-side prefix queries
+        self.lookup_server: LookupKeyServer | None = None
+        if vllm_config.parallel_config.rank == 0:
+            self.lookup_server = LookupKeyServer(self, vllm_config)
 
         kv_event_config = vllm_config.kv_events_config
         self.enable_kv_events = False
@@ -2430,27 +2426,20 @@ class MooncakeStoreWorker:
 class LookupKeyServer:
     """ZMQ server on worker rank 0 for the LookupKey admin channel.
 
-    Handles four request types, tagged at frame 0, on the rank's own socket:
-    - ``LOOKUP_MSG``: prefix-cache hit query, returns its load plan. The
-      scheduler queries rank 0.
-    - ``RESET_PREPARE_MSG``: stops this rank from starting anything new that
-      would land after a wipe on another rank, by waiting for the stores it has
-      in flight to finish.
-    - ``RESET_FORGET_MSG``: drops the residency this rank buffered for objects a
-      wipe removed, so it is not announced as residency of the fresh Store.
-    - ``RESET_MSG``: quiesces this rank, runs ``store.remove_all(force=True)``,
-      and drops the residency buffered for what it removed. Caller must have
-      paused the scheduler first and prepared every rank.
+    Handles two request types, tagged at frame 0:
+    - ``LOOKUP_MSG``: prefix-cache hit query, returns its load plan.
+    - ``RESET_MSG``: drains the send thread queue, then runs
+      ``store.remove_all(force=True)``. Caller must have paused the
+      scheduler first.
     """
 
     def __init__(
         self,
         store_worker: MooncakeStoreWorker,
         vllm_config: VllmConfig,
-        rank: int,
     ):
         self.ctx = zmq.Context()  # type: ignore[attr-defined]
-        socket_path = get_zmq_rpc_path_lookup(vllm_config, rank)
+        socket_path = get_zmq_rpc_path_lookup(vllm_config)
         self._ipc_path = socket_path.removeprefix("ipc://")
         if os.path.exists(self._ipc_path):
             os.unlink(self._ipc_path)
@@ -2477,12 +2466,6 @@ class LookupKeyServer:
                     result = self.store_worker.lookup(num_tokens, block_hashes)
                     self.socket.send(encode_lookup_response(result))
 
-                elif msg_type == RESET_PREPARE_MSG:
-                    self.socket.send(self._quiesce())
-
-                elif msg_type == RESET_FORGET_MSG:
-                    self.socket.send(self._forget_residency())
-
                 elif msg_type == RESET_MSG:
                     self.socket.send(self._reset_store())
 
@@ -2496,52 +2479,25 @@ class LookupKeyServer:
         self.thread = threading.Thread(target=process_request, daemon=True)
         self.thread.start()
 
-    def _quiesce(self) -> bytes:
-        """Wait for this rank's in-flight stores, so the wipe is a boundary.
-
-        A store this rank started before the wipe would otherwise land in the
-        fresh Store afterwards, carrying KV the reset was meant to drop.
-        """
+    def _reset_store(self) -> bytes:
+        """Drain in-flight puts, wipe the master, and drop stale reports."""
         try:
+            # Drain in-flight puts before wiping the master; otherwise stale
+            # puts can repopulate it post-reset. Safe across HMA:
+            # store.remove_all wipes the underlying flat key space, clearing
+            # every (group_id, hash) entry.
             if self.store_worker.kv_send_thread is not None:
                 self.store_worker.kv_send_thread.request_queue.join()
-            return RESP_OK
-        except Exception as e:
-            logger.error("Mooncake store quiesce failed: %s", e)
-            return RESP_ERR
-
-    def _forget_residency(self) -> bytes:
-        """Drop residency this rank buffered for objects a wipe removed.
-
-        A job that finished after this rank's last poll left its report buffered
-        for objects that are gone; reporting it into the fresh Store would
-        announce a block that is not there. Runs after the wipe rather than
-        before it, so a wipe that fails leaves reports of objects the Store still
-        holds intact.
-        """
-        try:
-            self.store_worker.retire_residency()
-            return RESP_OK
-        except Exception as e:
-            logger.error("Mooncake store residency forget failed: %s", e)
-            return RESP_ERR
-
-    def _reset_store(self) -> bytes:
-        """Quiesce this rank, wipe the master, and drop the residency buffered
-        for the objects it removed."""
-        if self._quiesce() != RESP_OK:
-            return RESP_ERR
-        try:
-            # Safe across HMA: store.remove_all wipes the underlying flat key
-            # space, clearing every (group_id, hash) entry.
             self.store_worker.store.remove_all(force=True)
+            # A job that finished after this rank's last event poll left its
+            # report buffered for objects the wipe just removed; reporting it
+            # into the fresh Store would announce a block that is not there.
+            self.store_worker.retire_residency()
+            logger.info("Mooncake store reset via remove_all succeeded.")
+            return RESP_OK
         except Exception as e:
             logger.error("Mooncake remove_all failed: %s", e)
             return RESP_ERR
-        if self._forget_residency() != RESP_OK:
-            return RESP_ERR
-        logger.info("Mooncake store reset via remove_all succeeded.")
-        return RESP_OK
 
     def close(self):
         self.socket.close(linger=0)
@@ -2557,15 +2513,14 @@ class LookupKeyServer:
 class LookupKeyClient:
     """ZMQ client for the LookupKey admin channel.
 
-    Each client talks to ``LookupKeyServer`` on one worker rank: lookups go to
-    rank 0, and the admin commands are sent per rank because a rank quiesces its
-    own stores and buffered residency. The first frame of every request is a
-    named tag from ``protocol.py``.
+    Routes both prefix-cache lookups and admin commands (currently:
+    ``reset``) to ``LookupKeyServer`` on worker rank 0. The first frame
+    of every request is a named tag from ``protocol.py``.
     """
 
-    def __init__(self, vllm_config: VllmConfig, rank: int = 0):
+    def __init__(self, vllm_config: VllmConfig):
         self.ctx = zmq.Context()  # type: ignore[attr-defined]
-        socket_path = get_zmq_rpc_path_lookup(vllm_config, rank)
+        socket_path = get_zmq_rpc_path_lookup(vllm_config)
         self.socket = make_zmq_socket(
             self.ctx,
             socket_path,
@@ -2622,36 +2577,13 @@ class LookupKeyClient:
         if future is not None:
             future.cancel()
 
-    def _prepare_reset(self) -> bool:
-        """Wait for this rank's in-flight stores ahead of a wipe elsewhere.
-
-        Ordering assumption: caller MUST ensure no in-flight Mooncake lookups or
-        transfers when invoking a reset. In RL workflows this holds naturally at
-        the step boundary after weight updates and rollout drain. Returns True on
-        ACK, False on NACK.
-        """
-        self.socket.send(RESET_PREPARE_MSG)
-        resp = self.socket.recv()
-        return bytes(resp) == RESP_OK
-
-    def prepare_reset(self) -> bool:
-        return self.executor.submit(self._prepare_reset).result()
-
-    def _forget_residency(self) -> bool:
-        """Drop the residency this rank buffered for objects a wipe removed."""
-        self.socket.send(RESET_FORGET_MSG)
-        resp = self.socket.recv()
-        return bytes(resp) == RESP_OK
-
-    def forget_residency(self) -> bool:
-        return self.executor.submit(self._forget_residency).result()
-
     def _reset(self) -> bool:
-        """Trigger ``store.remove_all(force=True)`` on this client's rank.
+        """Trigger ``store.remove_all(force=True)`` on worker rank 0.
 
-        The rank waits for its own in-flight stores first, so a store it started
-        before the wipe cannot land in the fresh Store afterwards. Returns True
-        on ACK, False on NACK.
+        Ordering assumption: caller MUST ensure no in-flight Mooncake
+        lookups or transfers when invoking reset. In RL workflows this
+        holds naturally at the step boundary after weight updates and
+        rollout drain. Returns True on ACK, False on NACK.
         """
         self.socket.send(RESET_MSG)
         resp = self.socket.recv()
@@ -2665,8 +2597,8 @@ class LookupKeyClient:
         self.socket.close(linger=0)
 
 
-def get_zmq_rpc_path_lookup(vllm_config: VllmConfig, rank: int) -> str:
-    """Construct IPC path for ZMQ lookup socket of one worker rank."""
+def get_zmq_rpc_path_lookup(vllm_config: VllmConfig) -> str:
+    """Construct IPC path for ZMQ lookup socket."""
     assert vllm_config.kv_transfer_config is not None
     dp_rank = vllm_config.parallel_config.data_parallel_index
     base_url = envs.VLLM_RPC_BASE_PATH
@@ -2677,6 +2609,5 @@ def get_zmq_rpc_path_lookup(vllm_config: VllmConfig, rank: int) -> str:
         rpc_port = extra_config["lookup_rpc_port"]
     logger.debug("Base URL: %s, RPC Port: %s", base_url, rpc_port)
     return (
-        f"ipc://{base_url}/lookup_rpc_port_{rpc_port}_host_{hostname}"
-        f"_dp_rank{dp_rank}_rank{rank}"
+        f"ipc://{base_url}/lookup_rpc_port_{rpc_port}_host_{hostname}_dp_rank{dp_rank}"
     )

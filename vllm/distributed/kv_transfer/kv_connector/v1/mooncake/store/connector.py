@@ -550,12 +550,16 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
             or self.connector_worker.kv_send_thread is None
         ):
             return None
-        # A worker with nothing to report still polls an empty container: with
-        # coverage, a step that contributes no namespace neither completes nor
-        # resets another rank's contribution.
+        # A rank with nothing to report contributes nothing: its coverage of a
+        # block it wrote earlier is already in the accumulator, and a step that
+        # reports no block neither completes nor resets another rank's
+        # contribution, so there is no container to carry.
+        residency = self.connector_worker.drain_residency()
+        if not residency.events:
+            return None
         kv_events = MooncakeStoreKVEvents(num_workers=1)
         kv_events.add_residency(
-            self.connector_worker.drain_residency(),
+            residency,
             {
                 group_idx: frozenset(prefixes)
                 for group_idx, prefixes in (

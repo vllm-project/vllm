@@ -551,7 +551,11 @@ def test_get_kv_connector_kv_cache_events_checks_coverage_against_the_lookup_tab
         connector.get_kv_connector_kv_cache_events()
 
 
-def test_get_kv_connector_kv_cache_events_keeps_empty_worker_contribution():
+def test_get_kv_connector_kv_cache_events_returns_none_for_an_empty_poll():
+    """A rank that reports no block carries no container: the coverage it
+    already contributed is in the accumulator, and an empty poll neither
+    completes nor resets another rank's contribution.
+    """
     vllm_config = _make_vllm_config()
     kv_cache_config = _make_kv_cache_config()
 
@@ -572,11 +576,7 @@ def test_get_kv_connector_kv_cache_events_keeps_empty_worker_contribution():
     worker.lookup_key_prefixes = {0: (_namespace(),)}
     worker.drain_residency.return_value = _residency([], {})
 
-    kv_events = connector.get_kv_connector_kv_cache_events()
-
-    assert isinstance(kv_events, mooncake_store_connector.MooncakeStoreKVEvents)
-    assert kv_events.get_number_of_workers() == 1
-    assert kv_events.get_all_events() == []
+    assert connector.get_kv_connector_kv_cache_events() is None
 
 
 def test_block_waits_for_every_lookup_namespace_across_engine_steps():
@@ -1377,147 +1377,6 @@ def test_failed_reset_keeps_buffered_reports():
 
     assert server._reset_store() == protocol.RESP_ERR
     assert call_order == ["join"]
-
-
-def test_reset_prepare_waits_for_puts_without_wiping():
-    """RESET_PREPARE on a rank that another rank will wipe waits for the stores
-    this rank has in flight, and neither wipes nor forgets: the objects are still
-    there, and dropping their reports would lose blocks the Store holds.
-    """
-    server, call_order = _make_lookup_key_server_for_reset(MagicMock())
-
-    assert server._quiesce() == protocol.RESP_OK
-    assert call_order == ["join"]
-    server.store_worker.store.remove_all.assert_not_called()
-    server.store_worker.retire_residency.assert_not_called()
-
-
-def test_reset_prepare_reports_nack_when_a_store_cannot_finish():
-    """A rank that cannot wait for its in-flight stores aborts the reset before
-    any wipe, so a store of its own cannot land in the fresh Store afterwards."""
-    server, _call_order = _make_lookup_key_server_for_reset(MagicMock())
-    server.store_worker.kv_send_thread.request_queue.join.side_effect = RuntimeError(
-        "store thread gone"
-    )
-
-    assert server._quiesce() == protocol.RESP_ERR
-
-
-def test_reset_forget_drops_reports_of_a_wiped_store():
-    """RESET_FORGET drops the residency this rank buffered for objects a wipe on
-    another rank removed, and touches neither the Store nor in-flight stores."""
-    server, call_order = _make_lookup_key_server_for_reset(MagicMock())
-
-    assert server._forget_residency() == protocol.RESP_OK
-    assert call_order == ["retire_residency"]
-    server.store_worker.store.remove_all.assert_not_called()
-    server.store_worker.kv_send_thread.request_queue.join.assert_not_called()
-
-
-def test_admin_channel_paths_differ_per_worker_rank():
-    """Each worker rank binds its own admin socket: a TP group shares one DP
-    index, so the rank has to be part of the path."""
-    vllm_config = _make_vllm_config()
-
-    paths = [worker.get_zmq_rpc_path_lookup(vllm_config, rank) for rank in range(2)]
-
-    assert len(set(paths)) == 2
-    assert all(path.endswith(f"_rank{rank}") for rank, path in enumerate(paths))
-
-
-def _recording_client_factory(calls: list[tuple[str, int]], nacks: set | None = None):
-    """Admin client stand-in that records (command, rank) and honours NACKs."""
-    denied = nacks or set()
-
-    class _RecordingClient:
-        def __init__(self, vllm_config, rank=0):
-            self.rank = rank
-
-        def _record(self, command: str) -> bool:
-            calls.append((command, self.rank))
-            return (command, self.rank) not in denied
-
-        def prepare_reset(self) -> bool:
-            return self._record("prepare")
-
-        def reset(self) -> bool:
-            return self._record("reset")
-
-        def forget_residency(self) -> bool:
-            return self._record("forget")
-
-    return _RecordingClient
-
-
-@pytest.mark.parametrize(
-    ("data_parallel_index", "world_size", "expected"),
-    [
-        (0, 1, [("prepare", 0), ("reset", 0)]),
-        # A TP group shares one DP index, so both ranks are prepared before the
-        # wipe and the rank that did not wipe forgets its buffered residency.
-        (0, 2, [("prepare", 0), ("prepare", 1), ("reset", 0), ("forget", 1)]),
-        # Each DP group addresses its own workers.
-        (1, 2, [("prepare", 2), ("prepare", 3), ("reset", 2), ("forget", 3)]),
-    ],
-    ids=["single-rank", "tp2", "dp1-tp2"],
-)
-def test_scheduler_reset_store_orders_quiesce_wipe_and_forget(
-    data_parallel_index, world_size, expected
-):
-    """A reset prepares every rank, wipes on the group's first rank, then makes
-    the other ranks forget the residency they buffered for the wiped blocks."""
-    vllm_config = _make_vllm_config()
-    vllm_config.parallel_config.data_parallel_index = data_parallel_index
-    vllm_config.parallel_config.world_size = world_size
-    kv_cache_config = _make_kv_cache_config()
-    calls: list[tuple[str, int]] = []
-
-    with (
-        set_current_vllm_config(vllm_config),
-        patch(
-            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
-            "scheduler.LookupKeyClient",
-            _recording_client_factory(calls),
-        ),
-    ):
-        sched = scheduler.MooncakeStoreScheduler(vllm_config, kv_cache_config)
-
-    assert sched.reset_store() is True
-    assert calls == expected
-
-
-@pytest.mark.parametrize(
-    ("refused", "expected"),
-    [
-        (("prepare", 1), [("prepare", 0), ("prepare", 1)]),
-        (("reset", 0), [("prepare", 0), ("prepare", 1), ("reset", 0)]),
-        (
-            ("forget", 1),
-            [("prepare", 0), ("prepare", 1), ("reset", 0), ("forget", 1)],
-        ),
-    ],
-    ids=["rank-cannot-quiesce", "wipe-refused", "rank-cannot-forget"],
-)
-def test_scheduler_reset_store_stops_at_the_first_nack(refused, expected):
-    """A rank that cannot quiesce aborts the reset before the wipe, and a wipe or
-    forget that is refused reports failure instead of claiming the reset."""
-    vllm_config = _make_vllm_config()
-    vllm_config.parallel_config.world_size = 2
-    kv_cache_config = _make_kv_cache_config()
-    calls: list[tuple[str, int]] = []
-
-    with (
-        set_current_vllm_config(vllm_config),
-        patch(
-            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
-            "scheduler.LookupKeyClient",
-            _recording_client_factory(calls, nacks={refused}),
-        ),
-    ):
-        sched = scheduler.MooncakeStoreScheduler(vllm_config, kv_cache_config)
-
-    assert sched.reset_store() is False
-    assert calls == expected
 
 
 def test_shutdown_closes_worker_store():

@@ -158,22 +158,7 @@ class MooncakeStoreScheduler:
         self.enable_kv_events = bool(
             kv_event_config and kv_event_config.enable_kv_cache_events
         )
-        # The wipe runs on the first rank of the group, but every rank takes
-        # part: each one waits for the stores it has in flight before the wipe,
-        # so nothing a rank started lands in the fresh Store afterwards, and
-        # afterwards each one drops the residency it buffered for the blocks the
-        # wipe removed, so a stale report cannot be announced as residency of
-        # the fresh Store.
-        parallel_config = vllm_config.parallel_config
-        first_rank = parallel_config.data_parallel_index * parallel_config.world_size
-        self._worker_ranks = tuple(
-            range(first_rank, first_rank + parallel_config.world_size)
-        )
-        self._wipe_rank = first_rank
-        self.client = LookupKeyClient(vllm_config, self._wipe_rank)
-        self._worker_clients = {
-            rank: LookupKeyClient(vllm_config, rank) for rank in self._worker_ranks
-        }
+        self.client = LookupKeyClient(vllm_config)
         self.kv_cache_config = kv_cache_config
         self._store_group_ids = kv_cache_config.prefix_cacheable_group_ids
         # Map scheduler group IDs to store group indices. Groups outside the
@@ -826,15 +811,10 @@ class MooncakeStoreScheduler:
         return bool(self._pinned_saves)
 
     def reset_store(self) -> bool:
-        """Quiesce every worker rank, wipe the Mooncake master, then forget.
+        """Trigger a global ``remove_all(force=True)`` on the Mooncake master.
 
-        Routes through the LookupKey ZMQ admin channel: every rank is asked to
-        wait for the stores it has in flight, rank 0 then runs
-        ``store.remove_all(force=True)``, and every other rank drops the
-        residency it buffered. Without the first step a store a rank started
-        before the wipe would land in the fresh master; without the last one a
-        report describing objects the wipe removed would be announced as
-        residency of the fresh Store.
+        Routes through the existing LookupKey ZMQ admin channel to worker
+        rank 0, which owns the ``MooncakeDistributedStore`` handle.
 
         Ordering assumption: caller (typically
         ``Scheduler.reset_connector_cache``, invoked via
@@ -844,29 +824,15 @@ class MooncakeStoreScheduler:
         drain. Violating this can allow stale KV to be served on the next
         request, defeating the hard-reset guarantee.
 
-        Returns True once rank 0 acknowledges the wipe, False on NACK or RPC
-        error; a rank that fails to quiesce aborts the reset before any wipe.
+        Returns True on ACK from worker, False on NACK or RPC error.
         """
         try:
-            for rank in self._worker_ranks:
-                if not self._worker_clients[rank].prepare_reset():
-                    logger.error("Mooncake reset prepare NACK from rank %d.", rank)
-                    return False
             ok = self.client.reset()
-            if not ok:
+            if ok:
+                logger.info("Mooncake store reset via remove_all succeeded.")
+            else:
                 logger.warning("Mooncake store reset returned NACK from worker.")
-                return False
-            # The wiping rank dropped its own residency as part of the wipe.
-            forgotten = all(
-                self._worker_clients[rank].forget_residency()
-                for rank in self._worker_ranks
-                if rank != self._wipe_rank
-            )
-            if not forgotten:
-                logger.error("Mooncake reset residency forget NACK from a rank.")
-                return False
-            logger.info("Mooncake store reset via remove_all succeeded.")
-            return True
+            return ok
         except Exception as e:
             logger.error("Mooncake reset_store RPC failed: %s", e)
             return False
