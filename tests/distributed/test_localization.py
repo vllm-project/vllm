@@ -79,6 +79,8 @@ def test_partition_counts_remainder_and_pool_device(cuda_locality):
     result = localization.maybe_init_localized_resources(device)
 
     assert result is not None
+    # Resource diagnostics must not disclose the hardware partition layout.
+    assert str(result) == repr(result) == "LocalizedResources()"
     # Unequal partitions must retain their actual counts, excluding remainder SMs.
     assert result.split_sm_counts == [60, 68]
     assert result.sm_per_resource == [60, 68, 12]

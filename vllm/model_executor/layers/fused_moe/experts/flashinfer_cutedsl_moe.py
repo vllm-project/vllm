@@ -40,7 +40,7 @@ def _one_sm_count(res) -> int:
     """Return the common SM count required by FlashInfer's scalar interface."""
     counts = res.split_sm_counts
     assert counts and len(set(counts)) == 1, (
-        f"localized_sm_count is a scalar but partitions differ: {counts}. "
+        "localized_sm_count requires nonempty, equally sized partitions. "
         "Widen localized_sm_count to a list in FlashInfer before allowing this."
     )
     return counts[0]
@@ -108,13 +108,10 @@ class FlashInferCuteDSLExperts(mk.FusedMoEExpertsModular):
                 )
             return
 
-        logger.info_once(
-            "[locality domains] localized MoE wired: %d per-die shards", len(shards)
-        )
+        logger.info_once("[locality domains] localized MoE shards wired")
 
         assert len(res.split_streams) == len(shards), (
-            f"{len(res.split_streams)} split streams for {len(shards)} weight "
-            "shards; these must be 1:1"
+            "split streams and weight shards must have a one-to-one correspondence"
         )
         self._localized_kwargs = {
             "localized_weights": [

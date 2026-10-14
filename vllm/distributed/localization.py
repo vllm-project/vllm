@@ -30,12 +30,12 @@ class LocalizedResources:
     auxiliary resources, which have no memory pool.
     """
 
-    num_split: int
+    num_split: int = field(repr=False)
     # Keep contexts alive: streams hold weak references and are destroyed with them.
     contexts: list[Any] = field(repr=False)
     streams: list[torch.cuda.Stream] = field(repr=False)
     pools: list[Any | None] = field(repr=False)  # None where no allocator is needed
-    sm_per_resource: list[int] = field(default_factory=list)
+    sm_per_resource: list[int] = field(default_factory=list, repr=False)
 
     @property
     def num_resources(self) -> int:
@@ -59,14 +59,6 @@ class LocalizedResources:
     def split_sm_counts(self) -> list[int]:
         return self.sm_per_resource[: self.num_split]
 
-    def __str__(self) -> str:
-        return (
-            f"LocalizedResources(num_split={self.num_split}, "
-            f"num_resources={self.num_resources}, "
-            f"sm_per_resource={self.sm_per_resource}, "
-            f"pools={sum(p is not None for p in self.pools)})"
-        )
-
 
 # Retain resources for the process lifetime; initialize before model execution.
 _LOCALIZED_RESOURCES: dict[int, LocalizedResources] = {}
@@ -83,9 +75,7 @@ def _locality_contexts(device_index: int, num_domains: int, *, backfill: bool):
     resource = SMPartition.from_device(device_index)
     target_sm_count = resource.sm_count // num_domains if backfill else 0
     if backfill and target_sm_count <= 0:
-        raise RuntimeError(
-            f"cannot split {resource.sm_count} SMs across {num_domains} domains"
-        )
+        raise RuntimeError("insufficient resources for locality-domain backfill")
     partitions, remainder = resource.split(
         num_sms=target_sm_count,
         locality_domain_ids=list(range(num_domains)),
@@ -97,7 +87,7 @@ def _locality_contexts(device_index: int, num_domains: int, *, backfill: bool):
         expected_sm_counts = [target_sm_count] * num_domains
         if sm_counts != expected_sm_counts:
             raise RuntimeError(
-                f"requested backfilled partitions {expected_sm_counts}, got {sm_counts}"
+                "backfilled partitions do not match the requested allocation"
             )
     return contexts, remainder
 
@@ -114,7 +104,7 @@ def _reserved_remainder_stream(remainder):
         return (
             ctx.Stream(),
             ctx,
-            f"reserved {sm_count}-SM remainder green ctx",
+            "reserved remainder green context",
             sm_count,
         )
     except Exception as e:  # noqa: BLE001 - any failure -> full-device fallback
@@ -169,9 +159,8 @@ def maybe_init_localized_resources(
         num_domains = get_num_locality_domains(idx)
         if num_domains <= 1:
             logger.warning(
-                "[locality domains] device %d reports %d locality domains",
+                "[locality domains] device %d does not support domain splitting",
                 idx,
-                num_domains,
             )
             return None
 
@@ -203,9 +192,8 @@ def maybe_init_localized_resources(
         total_sm = torch.cuda.get_device_properties(idx).multi_processor_count
         sm_per_resource = [context.sm_count for context in contexts]
         logger.info(
-            "[locality domains] %s compute partitions: %s SMs",
+            "[locality domains] using %s compute partitions",
             "backfilled" if backfill else "node-local",
-            sm_per_resource,
         )
 
         # Use remainder SMs for memset, falling back to a full-device stream.
