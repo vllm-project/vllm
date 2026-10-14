@@ -4216,7 +4216,7 @@ def test_eagle_identical_prompt_hit(
         make_kv_cache_config(block_size, num_blocks=10),
         max_model_len=8192,
         enable_caching=True,
-        use_eagle=True,
+        use_eagle=not lookahead,
         use_lookahead_block_hashes=lookahead,
         hash_block_size=block_size,
     )
@@ -4248,7 +4248,7 @@ def test_lookahead_token_controls_last_block_hit():
         make_kv_cache_config(block_size, num_blocks=20),
         max_model_len=8192,
         enable_caching=True,
-        use_eagle=True,
+        use_eagle=False,
         use_lookahead_block_hashes=True,
         hash_block_size=block_size,
     )
@@ -4291,7 +4291,7 @@ def test_kv_events_reconstruct_lookahead_block_hashes():
         make_kv_cache_config(block_size, num_blocks=20),
         max_model_len=8192,
         enable_caching=True,
-        use_eagle=True,
+        use_eagle=False,
         use_lookahead_block_hashes=True,
         hash_block_size=block_size,
         enable_kv_cache_events=True,
@@ -4364,7 +4364,7 @@ def test_eagle_hybrid_mamba_hits_partial_prompt_boundary():
         config,
         max_model_len=8192,
         enable_caching=True,
-        use_eagle=True,
+        use_eagle=False,
         use_lookahead_block_hashes=True,
         hash_block_size=hash_block_size,
     )
@@ -4429,7 +4429,7 @@ def test_lookahead_per_group_hits_stay_within_max_length():
         config,
         max_model_len=8192,
         enable_caching=True,
-        use_eagle=True,
+        use_eagle=False,
         use_lookahead_block_hashes=True,
         hash_block_size=block_size,
     )
@@ -5412,7 +5412,7 @@ def test_hybrid_mamba_retention_lookahead_keeps_last_prompt_boundary():
         enable_caching=True,
         hash_block_size=block_size,
         retention_interval=0,
-        use_eagle=True,
+        use_eagle=False,
         use_lookahead_block_hashes=True,
     )
 
