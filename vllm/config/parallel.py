@@ -329,20 +329,22 @@ class ParallelConfig:
     numa_bind: bool | None = None
     """Enable NUMA binding for GPU worker subprocesses.
 
-    When enabled, workers are pinned to their GPU's NUMA-local CPUs and
-    memory; on PCT-capable Xeons they also auto-bind to the SKU's
-    PCT priority cores.
+    Workers are pinned to their GPU's NUMA-local CPUs; on PCT-capable
+    Xeons they also auto-bind to the SKU's PCT priority cores.
 
     If None (default), vLLM binds only when the environment supports it
     (multiple NUMA nodes, `numactl` installed, unrestricted CPU affinity,
     a default NUMA memory policy, and the `spawn` start method with an
     mp/uni executor and mp DP).
     Ray, external launchers, device-ID remapping, and PCP are excluded
-    from automatic binding. Unsupported environments start unbound.
-    With `True`, binding may override an existing memory policy, and a
-    missing `numactl` or undetectable GPU-to-NUMA topology is a startup
-    error; `False` disables binding.
+    from automatic binding. Automatic mode prefers GPU-local memory but
+    permits allocations on other nodes. Unsupported environments start
+    unbound. With `True`, strict memory binding may override an existing
+    policy, and a missing `numactl` or undetectable GPU-to-NUMA topology is
+    a startup error; `False` disables binding.
     """
+    _numa_bind_auto: bool = Field(default=False, repr=False)
+    """Internal launch decision: use soft memory preference in spawned children."""
     numa_bind_nodes: list[int] | None = None
     """NUMA node to bind each GPU worker to.
 
@@ -959,6 +961,7 @@ class ParallelConfig:
             # NUMA node in numa_bind_nodes (see vllm/utils/numa_utils.py
             # `_get_numa_node`), which would otherwise diverge the DP hash.
             "numa_bind",
+            "_numa_bind_auto",
             "numa_bind_nodes",
             "numa_bind_cpus",
             "assigned_physical_gpu_ids",

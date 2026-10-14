@@ -427,11 +427,13 @@ def _get_numactl_worker_args(
     gpu_index = parallel_config.get_local_gpu_index(local_rank, dp_local_rank)
     numa_node = _get_numa_node(parallel_config, gpu_index)
     cpu_binding = _get_cpu_binding(parallel_config, gpu_index, [numa_node])
+    memory_policy = "preferred" if parallel_config._numa_bind_auto else "membind"
+    memory_arg = f"--{memory_policy}={numa_node}"
 
     if cpu_binding is not None:
-        return f"--physcpubind={cpu_binding} --membind={numa_node}"
+        return f"--physcpubind={cpu_binding} {memory_arg}"
 
-    return f"--cpunodebind={numa_node} --membind={numa_node}"
+    return f"--cpunodebind={numa_node} {memory_arg}"
 
 
 def _get_enginecore_numa_nodes(
@@ -475,7 +477,11 @@ def _get_numactl_enginecore_args(
     is also a safe superset by construction).
     """
     shard_nodes = _get_enginecore_numa_nodes(parallel_config, dp_local_rank)
-    membind_arg = ",".join(str(n) for n in shard_nodes)
+    node_binding = ",".join(str(n) for n in shard_nodes)
+    memory_policy = "membind"
+    if parallel_config._numa_bind_auto:
+        memory_policy = "preferred" if len(shard_nodes) == 1 else "preferred-many"
+    memory_arg = f"--{memory_policy}={node_binding}"
 
     pct_cpus = (
         None
@@ -485,9 +491,9 @@ def _get_numactl_enginecore_args(
 
     if pct_cpus is not None:
         cpu_binding = ",".join(str(c) for c in pct_cpus)
-        return f"--physcpubind={cpu_binding} --membind={membind_arg}"
+        return f"--physcpubind={cpu_binding} {memory_arg}"
 
-    return f"--cpunodebind={membind_arg} --membind={membind_arg}"
+    return f"--cpunodebind={node_binding} {memory_arg}"
 
 
 def _log_numactl_show(label: str) -> bool:
@@ -531,9 +537,11 @@ def _probe_numactl_args(numactl_args: str) -> bool:
 
 
 def _resolve_numactl_args(numactl_args: str) -> str:
-    """Drop ``--membind`` if the container rejects it, keeping CPU binding."""
+    """Drop a rejected memory policy, keeping CPU binding when possible."""
     cpu_only = " ".join(
-        t for t in numactl_args.split() if not t.startswith("--membind=")
+        t
+        for t in numactl_args.split()
+        if not t.startswith(("--membind=", "--preferred=", "--preferred-many="))
     )
     for candidate in (numactl_args, cpu_only, ""):
         if _probe_numactl_args(candidate):
@@ -557,14 +565,14 @@ def configure_subprocess(
 ):
     """Temporarily replace the multiprocessing executable with a numactl wrapper."""
     parallel_config = vllm_config.parallel_config
-    automatic = parallel_config.numa_bind is None
-    if automatic:
+    if parallel_config.numa_bind is None:
         # Resolve once in the launching process; spawned children inherit the
         # result through the pickled config instead of re-checking (a bound
         # EngineCore would fail the unconstrained-affinity check).
         parallel_config.numa_bind = _can_auto_bind(
             parallel_config, local_rank, dp_local_rank
         )
+        parallel_config._numa_bind_auto = parallel_config.numa_bind
         if not parallel_config.numa_bind:
             logger.info(
                 "Automatic NUMA binding unavailable on this host; starting "
@@ -591,9 +599,10 @@ def configure_subprocess(
     numactl_args = _resolve_numactl_args(numactl_args)
     if not numactl_args:
         # No NUMA binding possible here; launch without the wrapper.
-        if automatic:
+        if parallel_config._numa_bind_auto:
             parallel_config.numa_bind = False
             parallel_config.numa_bind_nodes = None
+            parallel_config._numa_bind_auto = False
         yield
         return
     if envs.VLLM_WORKER_MULTIPROC_METHOD == "spawn":

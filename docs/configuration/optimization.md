@@ -169,10 +169,13 @@ startup error, or `--no-numa-bind` to disable binding. Passing
 Automatic binding preserves an existing non-default memory policy, such as
 interleave, preferred-node, or bind. Explicit enablement may override it.
 
-When binding, vLLM auto-detects the GPU-to-NUMA mapping and uses
-`--cpunodebind=<node> --membind=<node>` for each worker. When you need a custom
-CPU policy, add `--numa-bind-cpus` and vLLM will switch to
-`--physcpubind=<cpu-list> --membind=<node>`.
+Automatic binding uses `--cpunodebind=<node> --preferred=<node>` for each worker:
+memory allocations prefer the GPU-local node but can fall back to other nodes.
+EngineCore prefers its shard's nodes with `--preferred-many=<nodes>` when the
+shard spans multiple NUMA nodes, or `--preferred=<node>` for a single-node shard.
+Explicit `--numa-bind` or binding lists retain strict `--membind=<nodes>`.
+When you need a custom CPU policy, add `--numa-bind-cpus` and vLLM will switch
+to `--physcpubind=<cpu-list>`.
 
 Automatic eligibility and topology validation happen in each local launcher
 before starting its first bound subprocess, using freshly discovered topology.
@@ -186,8 +189,9 @@ NUMA node IDs are never interpreted as cluster-wide IDs.
 Before each bound launch, vLLM probes the selected policy with
 `numactl <args> true`. If CPU-and-memory binding is rejected, it retries with
 CPU-only binding; if that is also rejected, the subprocess starts unbound.
-Logs report the selected policy or fallback. These probes test policy acceptance,
-not whether future model allocations will fit in the selected NUMA nodes.
+Logs report the selected policy or fallback. If `--preferred-many` is unsupported,
+automatic mode falls back to CPU-only binding, never strict memory binding.
+These probes test policy acceptance, not future allocation capacity.
 
 These `--numa-bind*` options only apply to GPU execution processes. They do not
 configure the CPU backend's separate thread-affinity controls. Automatic
@@ -224,7 +228,7 @@ vllm serve meta-llama/Llama-3.1-8B-Instruct \
 Notes:
 
 - The CLI defaults to `spawn` when `VLLM_WORKER_MULTIPROC_METHOD` is unset. Automatic NUMA binding never changes the start method: if it is `fork`, default binding stays off. Python API usage normally defaults to `fork`; set `VLLM_WORKER_MULTIPROC_METHOD=spawn` to allow binding and follow Python's `if __name__ == "__main__":` requirements.
-- `--membind` restricts host allocations to the selected NUMA nodes. For host-memory-heavy setups (e.g. large CPU KV offload), use `--no-numa-bind` if workers need memory from other NUMA nodes; the policy probes do not check allocation capacity.
+- Automatic memory preference permits allocations on other NUMA nodes when local memory is unavailable. Explicit `--numa-bind` still uses `--membind`, which restricts host allocations to the selected nodes; for host-memory-heavy setups (e.g. large CPU KV offload), avoid explicit strict binding if workers need memory from other nodes. The policy probes do not check allocation capacity or container memory limits.
 - Automatic detection relies on NVML (CUDA) or amdsmi (ROCm) and NUMA support from the host. If it cannot determine the mapping reliably, default mode starts unbound; pass `--numa-bind-nodes` to provide a mapping explicitly.
 - Explicit `--numa-bind-nodes` and `--numa-bind-cpus` values must be valid `numactl` inputs. vLLM does a small amount of validation, but the effective binding semantics are still determined by `numactl`.
 - The current implementation binds GPU execution processes such as `EngineCore` and multiprocessing workers. It does not apply NUMA binding to frontend API server processes or the DP coordinator.
