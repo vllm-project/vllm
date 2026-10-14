@@ -45,6 +45,7 @@ from vllm.model_executor.layers.attention.sparse_mla_attention import (
 from vllm.platforms.interface import DeviceCapability
 from vllm.triton_utils import tl, triton
 from vllm.utils.flashinfer import has_flashinfer_sm90_nope_mla
+from vllm.utils.torch_utils import sync_copy_to_cpu
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionLayer,
@@ -498,7 +499,7 @@ class FlashInferMLASparseSM90Builder(FlashInferMLASparseMetadataBuilder):
         state = self.state
         sl_host = cam.seq_lens_cpu_upper_bound
         if sl_host is None:
-            ctx = self._row_contexts(qsl, cam.seq_lens[:num_reqs].cpu())
+            ctx = self._row_contexts(qsl, sync_copy_to_cpu(cam.seq_lens[:num_reqs]))
             topk, kpool = state.index_topk, state.index_kpool
             lens = torch.where(ctx <= topk, ctx, topk + ctx % kpool)
             return num_rows, lens.to(torch.int32), True
