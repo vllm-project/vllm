@@ -61,6 +61,31 @@ def test_aiter_unified_attention_uses_dedicated_metadata_builder():
     )
 
 
+def test_rocm_backends_do_not_support_mm_prefix():
+    """Regression test: ROCm backends must not claim mm_prefix support.
+
+    If they do, prefix-LM multimodal models that attend vision tokens
+    bidirectionally (e.g. Gemma3 4B) will use bidirectional attention
+    via the ROCm backend instead of falling back to Triton, producing
+    incorrect results. Remove this test only if support is properly added.
+    """
+    from vllm.v1.attention.backends.rocm_aiter_unified_attn import (
+        RocmAiterUnifiedAttentionBackend,
+    )
+    from vllm.v1.attention.backends.rocm_attn import RocmAttentionBackend
+
+    assert not RocmAttentionBackend.supports_mm_prefix(), (
+        "RocmAttentionBackend does not support mm_prefix — "
+        "defer to Triton unified attention instead for now"
+        "See https://github.com/vllm-project/vllm/issues/48172"
+    )
+    assert not RocmAiterUnifiedAttentionBackend.supports_mm_prefix(), (
+        "RocmAiterUnifiedAttentionBackend does not support mm_prefix — "
+        "defer to Triton unified attention instead for now"
+        "See https://github.com/ROCm/aiter/issues/4168"
+    )
+
+
 def test_segmented_attention_uses_dedicated_backend_components():
     from vllm.v1.attention.backends.rocm_segmented_attn import (
         RocmSegmentedAttentionBackend,
@@ -181,7 +206,9 @@ def test_segmented_triton_cache_survives_standalone_compilation(
         RocmSegmentedAttentionImpl(8, 128, 128**-0.5, 2, None, None, "auto")
         assert os.environ["TRITON_CACHE_DIR"] == str(expected)
         assert expected.is_dir()
-        InductorStandaloneAdaptor("binary").initialize_cache(str(tmp_path / model))
+        InductorStandaloneAdaptor(
+            use_aot_compile=True, save_format="binary"
+        ).initialize_cache(str(tmp_path / model))
         assert os.environ["TRITON_CACHE_DIR"] == str(expected)
 
 
@@ -250,7 +277,6 @@ def test_segmented_attention_forward_uses_dedicated_dispatch(monkeypatch):
     output = torch.empty_like(query)
     kv_cache = torch.empty(2, 2, 16, 256, dtype=torch.bfloat16)
     metadata = SimpleNamespace(
-        use_cascade=False,
         num_actual_tokens=3,
         block_table=torch.zeros(1, 1, dtype=torch.int32),
         query_start_loc=torch.tensor([0, 3], dtype=torch.int32),

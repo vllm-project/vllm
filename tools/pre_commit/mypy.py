@@ -10,7 +10,7 @@ Usage:
     python tools/pre_commit/mypy.py <python_version> <changed_files...>
 
 Args:
-    python_version: Python version to use (e.g., "3.10") or "local" to use
+    python_version: Python version to use (e.g., "3.11") or "local" to use
         the local Python version.
     changed_files: List of changed files to check.
 
@@ -38,10 +38,10 @@ SILENT_GROUPS = [
     "tests/entrypoints/generate",
     "tests/entrypoints/multimodal",
     "tests/entrypoints/pooling",
+    "tests/entrypoints/rl",
     "tests/entrypoints/serve",
     "tests/entrypoints/tool_parsers",
     "tests/entrypoints/unit_tests",
-    "tests/entrypoints/weight_transfer",
     "tests/kernels/attention",
     "tests/kernels/core",
     "tests/kernels/helion",
@@ -152,7 +152,7 @@ def mypy(
 
     Args:
         targets: List of files or directories to check.
-        python_version: Python version to use (e.g., "3.10") or None to use
+        python_version: Python version to use (e.g., "3.11") or None to use
             the default mypy version.
         follow_imports: Value for the --follow-imports option or None to use
             the default mypy behavior.
