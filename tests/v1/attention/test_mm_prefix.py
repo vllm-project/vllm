@@ -703,6 +703,50 @@ def test_flashinfer_mm_prefix_rejects_dcp(dcp):
         assert _native_mm_prefix(vllm_config) == (dcp == 1)
 
 
+@pytest.mark.parametrize("soft_cap", [None, 0.0, 50.0], ids=["absent", "0", "50"])
+def test_flashinfer_mm_prefix_skips_soft_capped_models(soft_cap):
+    """The ranges wrapper has no logits soft cap: a soft-capped model keeps the
+    automatic Triton route on SM8x, and an explicit FLASHINFER is rejected
+    instead of failing later in the builder."""
+    import unittest.mock
+
+    from vllm.config import set_current_vllm_config
+    from vllm.platforms.interface import DeviceCapability
+    from vllm.v1.attention.backends.flashinfer import _native_mm_prefix
+    from vllm.v1.attention.backends.registry import AttentionBackendEnum
+    from vllm.v1.attention.selector import _cached_get_attn_backend, get_attn_backend
+
+    vllm_config, _, _ = _flashinfer_builder_env(None)
+    text_config = vllm_config.model_config.hf_text_config
+    if soft_cap is None:
+        text_config.__dict__.pop("attn_logit_softcapping", None)
+    else:
+        text_config.attn_logit_softcapping = soft_cap
+    with (
+        unittest.mock.patch(
+            "vllm.v1.attention.backends.flashinfer._mm_prefix_wrapper_cls",
+            return_value=object,
+        ),
+        unittest.mock.patch.object(
+            type(current_platform),
+            "get_device_capability",
+            return_value=DeviceCapability(8, 0),
+        ),
+        set_current_vllm_config(vllm_config),
+    ):
+        assert _native_mm_prefix(vllm_config) == (not soft_cap)
+        for selected in (None, AttentionBackendEnum.FLASHINFER):
+            vllm_config.attention_config.backend = selected
+            _cached_get_attn_backend.cache_clear()
+            args = (HEAD_SIZE, torch.bfloat16, None)
+            if soft_cap and selected:
+                with pytest.raises(ValueError):
+                    get_attn_backend(*args, use_mm_prefix=True)
+                continue
+            backend = get_attn_backend(*args, use_mm_prefix=True)
+            assert backend.get_name() == ("TRITON_ATTN" if soft_cap else "FLASHINFER")
+
+
 def _flashinfer_builder_env(sliding_window: int | None, cache_dtype: str = "auto"):
     """vllm_config + kv_cache_spec + per-layer-parameter mock for FlashInfer."""
     import unittest.mock

@@ -131,6 +131,10 @@ def _native_mm_prefix(vllm_config: VllmConfig | None) -> bool:
         and vllm_config.model_config.is_mm_prefix_lm
         # The DCP prefill's context/new-token split breaks the ranges.
         and vllm_config.parallel_config.decode_context_parallel_size == 1
+        # The ranges wrapper has no logits soft cap (e.g. Gemma 2 language models).
+        and not getattr(
+            vllm_config.model_config.hf_text_config, "attn_logit_softcapping", None
+        )
         and vllm_config.cache_config.cache_dtype in _MM_PREFIX_KV_DTYPES
         and (wrapper_cls := _mm_prefix_wrapper_cls()) is not None
         and (
