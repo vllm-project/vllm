@@ -295,6 +295,7 @@ def test_flashinfer_per_tensor_moe_fp8_no_graph(
             expert_map=None,
             apply_router_weight_on_input=True,
             routed_scaling_factor=1.0,
+            routing_sink=None,
         )
 
         check_accuracy(
@@ -968,6 +969,7 @@ def test_trtllm_mxfp8_minimax2_routing_applies_routed_scale(m: int, workspace_in
             router_logits=logits,
             e_score_correction_bias=bias,
             routed_scaling_factor=scale,
+            routing_sink=None,
             **common,
         )
         topk_weights, topk_ids = fused_topk_bias(

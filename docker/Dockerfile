@@ -92,6 +92,11 @@ ARG UV_KEYRING_PROVIDER=${PIP_KEYRING_PROVIDER}
 # Flag enables built-in KV-connector dependency libs into docker images
 ARG INSTALL_KV_CONNECTORS=false
 
+# Flag builds NIXL, including its NIXL EP extension for the installed PyTorch,
+# from source and installs it in place of the nixl packages from the KV-connector
+# requirements
+ARG BUILD_NIXL=false
+
 #################### BASE BUILD IMAGE ####################
 # prepare basic build environment
 FROM ${BUILD_BASE_IMAGE} AS base
@@ -148,7 +153,7 @@ RUN if [ "$USE_SCCACHE" = "1" ]; then \
         && export SCCACHE_DOWNLOAD_URL="${SCCACHE_DOWNLOAD_URL:-https://github.com/mozilla/sccache/releases/download/v0.8.1/sccache-v0.8.1-${SCCACHE_ARCH}-unknown-linux-musl.tar.gz}" \
         && curl -L -o sccache.tar.gz ${SCCACHE_DOWNLOAD_URL} \
         && tar -xzf sccache.tar.gz \
-        && sudo mv sccache-v0.8.1-${SCCACHE_ARCH}-unknown-linux-musl/sccache /usr/bin/sccache \
+        && mv sccache-v0.8.1-${SCCACHE_ARCH}-unknown-linux-musl/sccache /usr/bin/sccache \
         && rm -rf sccache.tar.gz sccache-v0.8.1-${SCCACHE_ARCH}-unknown-linux-musl; \
     fi
 
@@ -249,33 +254,6 @@ RUN --mount=type=cache,target=/opt/uv/cache \
     else \
         uv pip install --python /opt/venv/bin/python3 -r requirements/cuda.txt \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
-    fi
-
-# CUDA 13.4 Rubin images need a compatibility link for the prerelease
-# PyTorch wheel's libcurand.so.11 dependency. CUDA 13.5 must use its native
-# libcurand.so.11 instead.
-RUN if [ "${INSTALL_RUBIN_PRERELEASE}" = "true" ]; then \
-        CUDA_MAJOR_MINOR=$(echo "${CUDA_VERSION}" | cut -d. -f1,2) \
-        && if [ "${CUDA_MAJOR_MINOR}" = "13.4" ]; then \
-            CURAND_LIBRARY=$(find -H /usr/local/cuda -name libcurand.so.10 \
-                -print -quit) \
-            && test -n "${CURAND_LIBRARY}" \
-            && ln -sf "${CURAND_LIBRARY}" \
-                /usr/local/cuda/lib64/libcurand.so.11; \
-        elif [ "${CUDA_MAJOR_MINOR}" = "13.5" ]; then \
-            CURAND_LIBRARY=$(find -H /usr/local/cuda -name libcurand.so.11 \
-                -print -quit) \
-            && test -n "${CURAND_LIBRARY}" \
-            && ! readlink -f "${CURAND_LIBRARY}" | grep -q 'libcurand\.so\.10'; \
-        else \
-            echo "Unsupported Rubin CUDA version: ${CUDA_MAJOR_MINOR}" >&2; \
-            exit 1; \
-        fi \
-        && printf '%s\n' \
-            /opt/venv/lib \
-            "/opt/venv/lib/python${PYTHON_VERSION}/site-packages/nvpl/lib" \
-            > /etc/ld.so.conf.d/vllm-rubin-python.conf \
-        && ldconfig; \
     fi
 
 # Track PyTorch lib versions used during build and match in downstream instances.
@@ -518,20 +496,6 @@ ARG NVSHMEM_VER
 ARG NCCL_VERSION
 RUN --mount=type=cache,target=/opt/uv/cache \
     mkdir -p /tmp/ep_kernels_workspace/dist && \
-    if [ "${INSTALL_RUBIN_PRERELEASE}" = "true" ]; then \
-        # The Rubin CUDA builder provides NCCL in its architecture-specific \
-        # toolkit directory rather than as a Python package. Give DeepEP a \
-        # stable prefix that also exists in the Ubuntu runtime image. \
-        NCCL_HEADER=$(find /usr/local/cuda/targets -name nccl.h -print -quit) \
-        && test -n "${NCCL_HEADER}" \
-        && NCCL_LIBRARY=$(find -H /usr/local/cuda/targets \
-            -name libnccl.so.2 -print -quit) \
-        && test -n "${NCCL_LIBRARY}" \
-        && ln -sf "${NCCL_HEADER}" /usr/include/nccl.h \
-        && ln -sf "${NCCL_LIBRARY}" /usr/lib/libnccl.so.2 \
-        && ln -sf libnccl.so.2 /usr/lib/libnccl.so \
-        && export EP_NCCL_ROOT_DIR=/usr; \
-    fi && \
     CUDA_MAJOR=$(echo $CUDA_VERSION | cut -d. -f1) && \
     if [ -n "$NCCL_VERSION" ]; then \
         echo "nvidia-nccl-cu${CUDA_MAJOR}==${NCCL_VERSION}" \
@@ -588,6 +552,24 @@ RUN --mount=type=cache,target=/opt/uv/cache \
         printf '%s\n' disabled > "${TRITON_WORKSPACE}/dist/build-state"; \
         (cd "${TRITON_WORKSPACE}/dist" \
             && sha256sum build-state > wheel.sha256); \
+    fi
+
+# Build NIXL and its NIXL EP extension against the PyTorch installed here when
+# requested. The wheels are installed by the final image, which has no compiler.
+ARG BUILD_NIXL
+COPY tools/build_nixl_with_torch215_for_rubin.py /tmp/build_nixl_for_rubin.py
+RUN --mount=type=bind,source=requirements,target=/tmp/vllm-requirements,ro \
+    set -eux; \
+    NIXL_WORKSPACE=/tmp/nixl_workspace; \
+    mkdir -p "${NIXL_WORKSPACE}/dist"; \
+    if [ "${BUILD_NIXL}" = "true" ]; then \
+        dnf install -y --setopt=install_weak_deps=False autoconf automake libtool; \
+        dnf clean all; \
+        rm -rf /var/cache/dnf; \
+        NIXL_REQUIREMENTS_FILE=/tmp/vllm-requirements/kv_connectors.txt \
+        WHEELS_CACHE_HOME="${NIXL_WORKSPACE}/dist" \
+        MAX_JOBS="${max_jobs:-}" \
+            python3 /tmp/build_nixl_for_rubin.py --skip-system-deps --build-only; \
     fi
 #################### EXTENSIONS BUILD IMAGE ####################
 
@@ -659,10 +641,6 @@ RUN --mount=type=cache,target=/opt/uv/cache \
     if [ "${PYTORCH_NIGHTLY}" = "1" ] || \
         [ "${INSTALL_RUBIN_PRERELEASE}" = "true" ]; then \
         python3 tools/use_existing_torch.py --prefix; \
-    fi \
-    && if [ "${INSTALL_RUBIN_PRERELEASE}" = "true" ]; then \
-        sed -Ei '/^[[:space:]]*(flashinfer-python|nvidia-cutlass-dsl\[cu13\]|quack-kernels)[[:space:]]*==/Id' \
-            requirements/cuda.txt; \
     fi
 
 # Build the vLLM wheel
@@ -764,11 +742,6 @@ ARG DEADSNAKES_MIRROR_URL
 ARG DEADSNAKES_GPGKEY_URL
 ARG GET_PIP_URL
 
-# Keep the output image's CUDA metadata aligned with the selected toolkit.
-# This also normalizes prerelease base images with four-component metadata for
-# OCI runtimes that evaluate NVIDIA's CUDA driver requirement.
-ENV CUDA_VERSION=${CUDA_VERSION}
-
 ENV DEBIAN_FRONTEND=noninteractive
 WORKDIR /vllm-workspace
 
@@ -840,41 +813,6 @@ RUN CUDA_VERSION_DASH=$(echo $CUDA_VERSION | cut -d. -f1,2 | tr '.' '-') && \
 ENV CUDA_HOME=/usr/local/cuda
 ENV PATH="${CUDA_HOME}/bin:${PATH}"
 ENV LD_LIBRARY_PATH="${CUDA_HOME}/lib64:${LD_LIBRARY_PATH}"
-
-# Apply the CUDA 13.4-only libcurand compatibility link described in the build
-# stage. CUDA 13.5 uses its native libcurand.so.11. DeepEP expects NCCL directly
-# under its configured /usr prefix, while Ubuntu installs it in a multiarch
-# subdirectory - but that symlink is only possible when NCCL is already
-# present (e.g. nvcr.io/nvidia/cuda-dl-base bundles it; a bare-CUDA image
-# doesn't, and gets it later via the standard nvidia-nccl-cu* pip package,
-# UV_OVERRIDE below). Check reality (whether libnccl.so.2 is actually found)
-# and tolerate not finding it instead of failing the build.
-RUN if [ "${INSTALL_RUBIN_PRERELEASE}" = "true" ]; then \
-        CUDA_MAJOR_MINOR=$(echo "${CUDA_VERSION}" | cut -d. -f1,2) \
-        && if [ "${CUDA_MAJOR_MINOR}" = "13.4" ]; then \
-            CURAND_LIBRARY=$(find -H /usr/local/cuda -name libcurand.so.10 \
-                -print -quit) \
-            && test -n "${CURAND_LIBRARY}" \
-            && ln -sf "${CURAND_LIBRARY}" \
-                /usr/local/cuda/lib64/libcurand.so.11; \
-        elif [ "${CUDA_MAJOR_MINOR}" = "13.5" ]; then \
-            CURAND_LIBRARY=$(find -H /usr/local/cuda -name libcurand.so.11 \
-                -print -quit) \
-            && test -n "${CURAND_LIBRARY}" \
-            && ! readlink -f "${CURAND_LIBRARY}" | grep -q 'libcurand\.so\.10'; \
-        else \
-            echo "Unsupported Rubin CUDA version: ${CUDA_MAJOR_MINOR}" >&2; \
-            exit 1; \
-        fi \
-        && if NCCL_LIBRARY=$(find /usr/lib -name libnccl.so.2 -print -quit) \
-            && [ -n "${NCCL_LIBRARY}" ]; then \
-            if [ "${NCCL_LIBRARY}" != "/usr/lib/libnccl.so.2" ]; then \
-                ln -sf "${NCCL_LIBRARY}" /usr/lib/libnccl.so.2; \
-            fi \
-            && ln -sf libnccl.so.2 /usr/lib/libnccl.so; \
-        fi \
-        && ldconfig; \
-    fi
 
 # Install the initialized-snapshot runtime on the architecture supported by
 # `vllm snapshot`. CRIU and its CUDA plugin are built from the same pinned
@@ -990,11 +928,7 @@ RUN --mount=type=cache,target=/opt/uv/cache \
         && uv pip install --system -r /tmp/requirements-cuda.txt \
         && uv pip install --system \
             --prerelease=allow --index-strategy unsafe-first-match \
-            -r /tmp/vllm-requirements/rubin-prerelease.txt \
-        && printf '%s\n' \
-            "/usr/local/lib/python${PYTHON_VERSION}/dist-packages/nvpl/lib" \
-            > /etc/ld.so.conf.d/vllm-rubin-python.conf \
-        && ldconfig; \
+            -r /tmp/vllm-requirements/rubin-prerelease.txt; \
     else \
         uv pip install --system \
             -r /tmp/requirements-cuda.txt \
@@ -1002,15 +936,11 @@ RUN --mount=type=cache,target=/opt/uv/cache \
     fi && \
     rm /tmp/requirements-cuda.txt /tmp/common.txt
 
-# Install FlashInfer JIT cache (requires CUDA-version-specific index URL)
-# https://docs.flashinfer.ai/installation.html
-# From versions.json: .flashinfer.version
-ARG FLASHINFER_VERSION=0.7.0.post1
-RUN --mount=type=cache,target=/opt/uv/cache \
-    if [ "${INSTALL_RUBIN_PRERELEASE}" != "true" ]; then \
-        uv pip install --system flashinfer-jit-cache==${FLASHINFER_VERSION} \
-            --index-url https://flashinfer.ai/whl/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
-    fi
+# Install FlashInfer's precompiled kernels for all GPU architectures (the default).
+# `vllm download-kernels` wraps this command but vLLM is only installed in later
+# stages, and running it there would rebuild this large layer for every wheel.
+RUN --mount=type=cache,target=/opt/pip/cache \
+    PIP_CACHE_DIR=/opt/pip/cache flashinfer download-kernels
 
 # ============================================================
 # OPENAI API SERVER DEPENDENCIES
@@ -1023,22 +953,13 @@ ARG GDRCOPY_CUDA_VERSION=12.8
 ARG GDRCOPY_OS_VERSION=Ubuntu24_04
 ARG TARGETPLATFORM
 COPY tools/install_gdrcopy.sh /tmp/install_gdrcopy.sh
-# Some Rubin FINAL_BASE_IMAGE choices (internal Rubin CUDA images,
-# nvcr.io/nvidia/cuda-dl-base) already provide GDRCopy; others don't, so it
-# falls through to the normal install below. Check reality (ldconfig) rather
-# than inferring from which FINAL_BASE_IMAGE flag is set.
 RUN set -eux; \
-    if [ "${INSTALL_RUBIN_PRERELEASE}" = "true" ] && ldconfig -p | grep -q 'libgdrapi\.so'; then \
-        true; \
-    else \
-        case "${TARGETPLATFORM}" in \
-          linux/arm64) UUARCH="aarch64" ;; \
-          linux/amd64) UUARCH="x64" ;; \
-          *) echo "Unsupported TARGETPLATFORM: ${TARGETPLATFORM}" >&2; exit 1 ;; \
-        esac; \
-        /tmp/install_gdrcopy.sh \
-            "${GDRCOPY_OS_VERSION}" "${GDRCOPY_CUDA_VERSION}" "${UUARCH}"; \
-    fi; \
+    case "${TARGETPLATFORM}" in \
+      linux/arm64) UUARCH="aarch64" ;; \
+      linux/amd64) UUARCH="x64" ;; \
+      *) echo "Unsupported TARGETPLATFORM: ${TARGETPLATFORM}" >&2; exit 1 ;; \
+    esac; \
+    /tmp/install_gdrcopy.sh "${GDRCOPY_OS_VERSION}" "${GDRCOPY_CUDA_VERSION}" "${UUARCH}" && \
     rm /tmp/install_gdrcopy.sh
 
 # Install vllm-openai dependencies (saves ~2.6s per build)
@@ -1359,6 +1280,25 @@ RUN --mount=type=cache,target=/opt/uv/cache \
     && rm -f \
         /tmp/install_triton_from_source.sh \
         /tmp/triton-source-wheel.sha256
+
+# Install source-built NIXL last, replacing the nixl packages installed above, so
+# the image has a NIXL EP build for its PyTorch version. There is no GPU driver
+# at build time, so check for the extension instead of importing it.
+ARG BUILD_NIXL
+RUN --mount=type=cache,target=/opt/uv/cache \
+    --mount=type=bind,from=extensions-build,source=/tmp/nixl_workspace/dist,target=/tmp/nixl-dist,ro \
+    set -eu; \
+    if [ "${BUILD_NIXL}" = "true" ]; then \
+        ls /tmp/nixl-dist/*.whl; \
+        uv pip uninstall --system nixl nixl-cu12 nixl-cu13; \
+        uv pip install --system --no-deps /tmp/nixl-dist/*.whl; \
+        python3 -c "import glob, importlib.util as u, os, torch; \
+            spec = u.find_spec('nixl_ep_cu' + os.environ['CUDA_VERSION'].split('.')[0]); \
+            mm = ''.join(torch.__version__.split('.')[:2]); \
+            ext = glob.glob(os.path.join(spec.submodule_search_locations[0], 'nixl_ep_cpp_torch' + mm + '.*')) if spec else []; \
+            assert ext, 'NIXL EP has no build for torch ' + torch.__version__; \
+            print('NIXL EP extension:', ext[0])"; \
+    fi
 
 ENV VLLM_USAGE_SOURCE production-docker-image
 ENV VLLM_BUILD_COMMIT=${VLLM_BUILD_COMMIT:-unknown} \

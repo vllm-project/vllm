@@ -137,6 +137,52 @@ def test_finished_request_releases_unscored_doc_use():
         )
 
 
+@pytest.mark.skip_global_cleanup
+def test_release_queries_is_targeted_and_idempotent():
+    runner = LateInteractionRunner()
+    query_emb = torch.tensor([[1.0, 0.0], [0.0, 1.0]], dtype=torch.float32)
+
+    for query_key in ("query-release", "query-keep"):
+        query_params = _make_pooling_params(
+            build_late_interaction_query_params(query_key=query_key, query_uses=1)
+        )
+        runner.postprocess_pooler_output(
+            raw_pooler_output=[query_emb],
+            pooling_params=[query_params],
+            req_ids=[f"{query_key}-req"],
+            finished_mask=[True],
+        )
+
+    released_doc_params = _make_pooling_params(
+        build_late_interaction_doc_params(query_key="query-release")
+    )
+    kept_doc_params = _make_pooling_params(
+        build_late_interaction_doc_params(query_key="query-keep")
+    )
+    runner.register_request("released-doc", released_doc_params)
+    runner.register_request("kept-doc", kept_doc_params)
+
+    runner.release_queries(["query-release"])
+    runner.release_queries(["query-release"])
+
+    with pytest.raises(ValueError, match="query cache miss"):
+        runner.postprocess_pooler_output(
+            raw_pooler_output=[query_emb],
+            pooling_params=[released_doc_params],
+            req_ids=["released-doc"],
+            finished_mask=[True],
+        )
+
+    kept_output = runner.postprocess_pooler_output(
+        raw_pooler_output=[query_emb],
+        pooling_params=[kept_doc_params],
+        req_ids=["kept-doc"],
+        finished_mask=[True],
+    )
+    assert isinstance(kept_output, list)
+    assert kept_output[0] is not None
+
+
 def test_invalid_query_uses_raises():
     runner = LateInteractionRunner()
     bad_meta = LateInteractionParams(

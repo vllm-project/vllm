@@ -291,6 +291,93 @@ class TestSingleWriterShmObjectStorage(unittest.TestCase):
             reader.touch("key", address, monotonic_id, signature)
 
 
+class TestShmObjectStorageReferenceCounting(unittest.TestCase):
+    """One writer and four readers, as with tensor-parallel workers."""
+
+    def setUp(self):
+        ring_buffer = SingleWriterShmRingBuffer(
+            data_buffer_size=1024 * 100, create=True
+        )
+        self.writer = SingleWriterShmObjectStorage(
+            max_object_size=1024 * 10,
+            n_readers=4,
+            ring_buffer=ring_buffer,
+            serde_class=MsgpackSerde,
+        )
+        self.addCleanup(self.writer.close)
+        handle = self.writer.handle()
+        handle.reader_lock = Lock()
+        self.readers = [
+            SingleWriterShmObjectStorage.create_from_handle(handle) for _ in range(4)
+        ]
+        for reader in self.readers:
+            self.addCleanup(reader.close)
+
+    def _reference(self, key: str) -> tuple[int, int, list[int], str]:
+        """Take one writer reference to the key, as one request item does."""
+        if self.writer.is_cached(key):
+            address, monotonic_id = self.writer.get_cached(key)
+        else:
+            address, monotonic_id = self.writer.put(key, "value")
+        return address, monotonic_id, self.writer.get_signature(key), key
+
+    @staticmethod
+    def _touch(reader: SingleWriterShmObjectStorage, reference) -> None:
+        address, monotonic_id, signature, key = reference
+        reader.touch(key, address, monotonic_id, signature)
+
+    def _is_evictable(self, key: str) -> bool:
+        self.writer.free_unused()
+        return not self.writer.is_cached(key)
+
+    def test_item_referenced_again_before_every_reader_fetched_it(self):
+        """A second request must not leave the item unevictable forever."""
+        first = self._reference("image")
+        self.writer.touch("image")
+        second = self._reference("image")
+        self.writer.release_touches()
+
+        # Every reader starts on the first request; the ones that finish it
+        # go on to the second while the others are still fetching.
+        for reader in self.readers:
+            self._touch(reader, first)
+        for reader in self.readers:
+            reader.get(*first)
+            self._touch(reader, second)
+            reader.get(*second)
+
+        self.assertTrue(self._is_evictable("image"))
+
+    def test_new_item_twice_in_one_request_is_not_evicted_early(self):
+        """The item must stay until the last reader has fetched it."""
+        self.writer.touch("image")
+        references = [self._reference("image"), self._reference("image")]
+        self.writer.release_touches()
+
+        for reader in self.readers[:-1]:
+            for reference in references:
+                self._touch(reader, reference)
+            for reference in references:
+                reader.get(*reference)
+        for reference in references:
+            self._touch(self.readers[-1], reference)
+        self.assertFalse(self._is_evictable("image"))
+
+        for reference in references:
+            self.readers[-1].get(*reference)
+        self.assertTrue(self._is_evictable("image"))
+
+    def test_touch_protects_item_until_released(self):
+        reference = self._reference("image")
+        for reader in self.readers:
+            reader.get(*reference)
+
+        self.writer.touch("image")
+        self.assertFalse(self._is_evictable("image"))
+        self.writer.release_touches()
+        self.assertTrue(self._is_evictable("image"))
+
+
 # Reader process function
 def reader_process(process_id, storage_handle, items_to_read):
     """Reader process that connects to existing shared memory and reads data."""
