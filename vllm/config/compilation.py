@@ -143,8 +143,8 @@ class PassConfig:
     # XPU specific fusions
     fuse_xpu_moe_shared: bool = False
     """Fuse routed and shared experts for XPU decode."""
-    xpu_moe_shared_fusion_max_token_num: int = 8
-    """Largest compile-range end for the XPU MoE fusion."""
+    xpu_moe_shared_fusion_max_token_num: int = Field(default=8, ge=1, le=64)
+    """Largest compile-range end for the XPU MoE fusion (1..64 tokens)."""
 
     # ROCm/AITER specific fusions
     fuse_act_padding: bool = None  # type: ignore[assignment]

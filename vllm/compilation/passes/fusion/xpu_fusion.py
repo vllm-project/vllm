@@ -89,6 +89,7 @@ class XpuMoESharedFusionPass(VllmInductorPass):
             and config.lora_config is None
             and not pc.enable_expert_parallel
             and not pc.enable_eplb
+            and not pc.use_ubatching
             and _xpu_moe_shared_fused_available()
         )
         if not self.enabled:
