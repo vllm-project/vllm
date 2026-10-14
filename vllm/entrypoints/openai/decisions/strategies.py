@@ -24,6 +24,7 @@ import vllm.envs as envs
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.generate.label_reads import next_token_label_reads
+from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel
 from vllm.inputs import EngineInput, MultiModalInput, TokensPrompt, tokens_input
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -35,6 +36,7 @@ from vllm.multimodal.media import (
     VideoMediaIO,
 )
 from vllm.pooling_params import PoolingParams
+from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
 from vllm.renderers.chat_utils import ChatTemplateContentFormatOption
 from vllm.renderers.inputs.preprocess import extract_prompt_components
 from vllm.renderers.online_renderer import OnlineRenderer
@@ -42,7 +44,6 @@ from vllm.sampling_params import SamplingParams
 from vllm.tasks import SupportedTask
 from vllm.tokenizers import TokenizerLike
 
-from .protocol import ReadPromptRequest
 from .question_types import (
     LABELS,
     QUESTION_TYPES,
@@ -78,6 +79,37 @@ class QuestionRead:
     argmax_is_label: bool
     input_tokens: int
     output_tokens: int
+    cached_tokens: int = 0
+    cache_write_tokens: int = 0
+
+
+class ReadPromptRequest(OpenAIBaseModel):
+    """Chat options for one read, ending at the generation prompt so the label
+    is the reply's first token. Thinking is off unless the request enables it."""
+
+    chat_template_kwargs: dict[str, Any] | None = None
+    cache_salt: str | None = None
+
+    def build_chat_params(
+        self,
+        default_template: str | None,
+        default_template_content_format: ChatTemplateContentFormatOption,
+    ) -> ChatParams:
+        return ChatParams(
+            chat_template=default_template,
+            chat_template_content_format=default_template_content_format,
+            chat_template_kwargs=merge_kwargs(
+                merge_kwargs({"enable_thinking": False}, self.chat_template_kwargs),
+                dict(add_generation_prompt=True, continue_final_message=False),
+            ),
+        )
+
+    def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
+        return TokenizeParams(
+            max_total_tokens=model_config.max_model_len,
+            max_output_tokens=1,
+            add_special_tokens=False,
+        )
 
 
 def state_text(state: Any) -> str:
@@ -350,6 +382,10 @@ class NextTokenStrategy(ReadStrategy):
                     and any(output.token_ids[0] in ids for ids in groups),
                     input_tokens=len(label_read.result.prompt_token_ids or ()),
                     output_tokens=len(output.token_ids),
+                    cached_tokens=label_read.result.num_cached_tokens or 0,
+                    cache_write_tokens=(
+                        label_read.result.num_cache_creation_tokens or 0
+                    ),
                 )
             )
         return reads
@@ -809,7 +845,63 @@ class JointSchemaStrategy(ReadStrategy):
         return reads
 
 
+class ClefFlashStrategy(JointSchemaStrategy):
+    """Clef-Flash's joint schema prompt with Qwen3.5 image/video processing."""
+
+    modalities = frozenset({"image", "video"})
+    MAX_LENGTH = 16384
+    PLACEHOLDERS = {
+        "image": "<|vision_start|><|image_pad|><|vision_end|>",
+        "video": "<|vision_start|><|video_pad|><|vision_end|>",
+    }
+
+    async def _render_media(
+        self, media: Mapping[str, Sequence[str]], cache_salt: str | None
+    ) -> MultiModalInput:
+        connector = self._connector
+        video_io = VideoMediaIO(ImageMediaIO(), num_frames=-1, fps=self.VIDEO_FPS)
+        try:
+            images, videos = await asyncio.gather(
+                asyncio.gather(
+                    *map(connector.fetch_image_async, media.get("image", ()))
+                ),
+                self._fetch(
+                    media.get("video", ()), video_io, envs.VLLM_VIDEO_FETCH_TIMEOUT
+                ),
+            )
+        except ValueError as e:
+            raise StructuredDecisionError(f"media: {e}") from e
+        text = (
+            self.PLACEHOLDERS["image"] * len(images)
+            + self.PLACEHOLDERS["video"] * len(videos)
+            + "\n"
+        )
+        mm_data: dict[str, Any] = {}
+        if images:
+            mm_data["image"] = images
+        if videos:
+            mm_data["video"] = videos
+        prompt = TokensPrompt(
+            prompt_token_ids=self.prefix + self._tokens(text),
+            multi_modal_data=mm_data,
+            mm_processor_kwargs={"videos_kwargs": {"do_sample_frames": False}},
+        )
+        if cache_salt is not None:
+            prompt["cache_salt"] = cache_salt
+        try:
+            engine_input = (
+                await self.context.online_renderer.renderer.process_for_engine_async(
+                    prompt, time.time()
+                )
+            )
+        except ValueError as e:
+            raise StructuredDecisionError(f"media: {e}") from e
+        assert engine_input["type"] == "multimodal"
+        return engine_input
+
+
 READ_STRATEGIES: dict[str, type[ReadStrategy]] = {
+    "ClefFlashForJointSchema": ClefFlashStrategy,
     "ClefOmniForJointSchema": JointSchemaStrategy,
     "Lfm2VlForConditionalGeneration": LiquidStrategy,
     "Qwen3ForCausalLM": NextTokenStrategy,
