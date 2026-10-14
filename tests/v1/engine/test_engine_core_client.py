@@ -210,6 +210,7 @@ def _make_dplb_client(num_engines: int = 3, client_count: int = 1) -> DPLBAsyncM
     client = object.__new__(DPLBAsyncMPClient)
     client.client_count = client_count
     client.reqs_in_flight = {}
+    client.streaming_reqs = set()
     client.engine_inflight = Counter()
     client.core_engines = [bytes([i, 0]) for i in range(num_engines)]
     client.lb_engines = [[0, 0, 0.0] for _ in range(num_engines)]
@@ -407,11 +408,11 @@ def test_dplb_finished_requests_release_inflight():
     assert req.request_id not in client.reqs_in_flight
 
 
-@pytest.mark.parametrize("num_aborts", [1, 2])
-def test_dplb_abort_of_finished_request_goes_to_all_engines(num_aborts: int):
-    """The routing entry is dropped when a request finishes, but a
-    streaming-input chunk sent before the finish was seen may re-create it on
-    an engine, so its abort must still reach every engine."""
+@pytest.mark.parametrize("final_sent", [False, True])
+def test_dplb_streaming_session_abort_goes_to_all_engines(final_sent: bool):
+    """A streaming-input chunk in flight when its session finished may
+    re-create it on any engine, so an open session's abort reaches every
+    engine. Other aborts go only to the routed engine."""
     client = _make_dplb_client(num_engines=3)
     client.resources = SimpleNamespace(engine_dead=False)
     sent: dict[bytes, list[str]] = {}
@@ -420,15 +421,27 @@ def test_dplb_abort_of_finished_request_goes_to_all_engines(num_aborts: int):
         sent[engine] = request_ids
 
     client._abort_requests = abort_requests
+
+    chunk = make_request(SamplingParams(max_tokens=1))
+    chunk.resumable = True
+    client.get_core_engine_for_request(chunk)
+    if final_sent:
+        chunk.resumable = False
+        client.get_core_engine_for_request(chunk)
+    # The engine finished the session, dropping its routing entry.
+    outputs = EngineCoreOutputs(finished_requests={chunk.request_id})
+    asyncio.run(DPLBAsyncMPClient.process_engine_outputs(client, outputs))
     client.reqs_in_flight["live"] = client.core_engines[1]
 
-    request_ids = ["finished", "live"][:num_aborts]
-    asyncio.run(client.abort_requests_async(request_ids))
+    asyncio.run(client.abort_requests_async([chunk.request_id, "live"]))
 
-    expected = {engine: ["finished"] for engine in client.core_engines}
-    if num_aborts == 2:
-        expected[client.core_engines[1]] = ["live", "finished"]
+    if final_sent:
+        expected = {client.core_engines[1]: ["live"]}
+    else:
+        expected = {engine: [chunk.request_id] for engine in client.core_engines}
+        expected[client.core_engines[1]].append("live")
     assert sent == expected
+    assert not client.streaming_reqs
 
 
 @pytest.mark.parametrize(

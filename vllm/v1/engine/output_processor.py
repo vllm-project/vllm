@@ -817,13 +817,11 @@ class OutputProcessor:
                     else:
                         req_state.input_chunk_queue = None
                 else:
-                    streaming_input = req_state.streaming_input
                     self._finish_request(req_state)
-                    if streaming_input or not engine_core_output.finished:
-                        # EngineCore may still have the request live: a stop
-                        # string was detected here, or for streaming input, a
-                        # rejected chunk left the session running or a chunk
-                        # sent before this finish was seen re-created it.
+                    if req_state.streaming_input or not engine_core_output.finished:
+                        # EngineCore may still have the request: a stop string
+                        # was detected here, or an in-flight streaming-input
+                        # chunk may re-create the session.
                         reqs_to_abort.append(req_id)
 
                     # Track per-request stats
