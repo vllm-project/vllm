@@ -12,10 +12,8 @@ from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import get_forward_context
 from vllm.models.common.mono.spec import MonoContext, MonoSpec
 
-CACHE_DTYPE = "bfloat16"
-CACHE_LAYOUT = "2nhd"
-
-_LAYOUT_DIMS = {"2nhd": 4}
+CACHE_DTYPE = torch.bfloat16
+CACHE_NDIM = 4
 
 
 class ReferenceLayer(torch.nn.Module):
@@ -44,7 +42,6 @@ class ReferenceModel(torch.nn.Module):
         )
         self.start_layer = 0
         self.end_layer = layers
-        self.mono = None
 
 
 @dataclass
@@ -56,26 +53,25 @@ class LaunchState:
 
 
 class ReferenceKernel:
-    """One layer's launch at one width: calls the layer it replaces."""
+    """One layer's launch at one width: the work of the layer it replaces, off
+    the weight view its launch state holds."""
 
     def __init__(self, ctx: MonoContext, state: LaunchState, layer, width: int):
         self.cache_layers = (layer.attn_name,)
-        self.ctx = ctx
-        self.state = state
-        self.layer = layer
+        self.index = layer.index
+        self.weight = state.weights[layer.index]
         self.width = width
         self.launched: list[int] = []
-        self.compiled: list[Any] = []
 
-    def launch(self, positions: torch.Tensor, *args, **kwargs):
+    def launch(self, positions: torch.Tensor, hidden: torch.Tensor):
         self.launched.append(self.width)
-        return self.layer(positions, *args, **kwargs)
+        return hidden + self.weight
 
     def warmup_keys(self) -> list[Any]:
-        return [(self.layer.index, self.width)]
+        return [(self.index, self.width)]
 
     def compile(self, key: Any) -> None:
-        self.compiled.append(key)
+        pass
 
 
 def widths(vllm_config) -> tuple[int, ...]:
@@ -114,10 +110,10 @@ def launch_state(model, ctx: MonoContext) -> LaunchState:
 def refuse_caches(ctx: MonoContext, caches) -> list[str]:
     reasons = []
     for name, cache in caches.items():
-        if str(cache.dtype).removeprefix("torch.") != CACHE_DTYPE:
+        if cache.dtype is not CACHE_DTYPE:
             reasons.append(f"{name}: dtype {cache.dtype}, needs {CACHE_DTYPE}")
-        if cache.ndim != _LAYOUT_DIMS[CACHE_LAYOUT]:
-            reasons.append(f"{name}: {cache.ndim}d, needs layout {CACHE_LAYOUT}")
+        if cache.ndim != CACHE_NDIM:
+            reasons.append(f"{name}: {cache.ndim}d, needs {CACHE_NDIM}d")
     return reasons
 
 
