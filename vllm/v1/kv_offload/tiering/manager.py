@@ -286,10 +286,8 @@ class TieringOffloadingManager(OffloadingManager):
 
         # Tiers that serve external requests, and so must also be serviced
         # between engine steps.
-        self._external_serving_tiers: list[tuple[int, SecondaryTierManager]] = [
-            (i, tier)
-            for i, tier in enumerate(self.secondary_tiers)
-            if tier.needs_tier_poll_thread
+        self._external_serving_tiers: list[SecondaryTierManager] = [
+            tier for tier in self.secondary_tiers if tier.needs_tier_poll_thread
         ]
         self._tier_poll_interval_s = tier_poll_interval_s
         self._control_plane_stop = threading.Event()
@@ -317,7 +315,7 @@ class TieringOffloadingManager(OffloadingManager):
         self._control_plane_thread.start()
         logger.info(
             "KV offload control-plane thread started for tier(s) %s, interval %.3fs",
-            [tier.tier_type for _, tier in self._external_serving_tiers],
+            [tier.tier_type for tier in self._external_serving_tiers],
             self._tier_poll_interval_s,
         )
 
@@ -418,7 +416,7 @@ class TieringOffloadingManager(OffloadingManager):
         self._processed_jobs_this_step = True
         try:
             self._process_finished_jobs(self._external_serving_tiers)
-            for _, tier in self._external_serving_tiers:
+            for tier in self._external_serving_tiers:
                 tier.serve_external_requests(self._tier_parents[tier])
         finally:
             self._processed_jobs_this_step = gate
@@ -496,7 +494,7 @@ class TieringOffloadingManager(OffloadingManager):
 
     def _process_finished_jobs(
         self,
-        tiers: Sequence[tuple[int, SecondaryTierManager]] | None = None,
+        tiers: Sequence[SecondaryTierManager] | None = None,
     ):
         """Unconditionally poll secondary tiers for completed jobs.
 
@@ -508,13 +506,16 @@ class TieringOffloadingManager(OffloadingManager):
            to make chunks available
 
         Args:
-            tiers: (index, tier) pairs to poll. Defaults to every secondary
-                tier. Pass a subset to poll only the tiers a caller is
-                responsible for, so a tier that expects to be polled on the
-                scheduler thread is not dragged elsewhere.
+            tiers: Tiers to poll. Defaults to every secondary tier. Pass a
+                subset to poll only the tiers a caller is responsible for, so
+                a tier that expects to be polled on the scheduler thread is
+                not dragged elsewhere.
 
         """
-        for i, tier in tiers if tiers is not None else enumerate(self.secondary_tiers):
+        if tiers is None:
+            tiers = self.secondary_tiers
+        for tier in tiers:
+            i = self._tier_index[tier]
             for completed_job in tier.get_finished_jobs():
                 job_id = completed_job.job_id
                 job_metadata = self._pop_job(job_id)
