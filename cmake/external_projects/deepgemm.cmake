@@ -28,12 +28,12 @@ if(DEEPGEMM_SRC_DIR)
   message(STATUS "DeepGEMM using local DEEPGEMM_SRC_DIR: ${deepgemm_SOURCE_DIR}")
 else()
   # Keep in sync with tools/install_deepgemm.sh
-  set(_DEEPGEMM_UPSTREAM_REPO "https://github.com/vllm-project/DeepGEMM.git")
+  set(_DEEPGEMM_UPSTREAM_REPO "https://github.com/cleonard530/DeepGEMM.git")
   # Pinned to the fork's dev branch: upstream's 26/09/30 release (2.8.1)
   # plus the SM120 port, the SM90 paged-MQA kv_block=32/next_n=4 port,
   # configurable SwiGLU alpha/beta, SiTU for FP8/FP4 Mega MoE, and NVFP4
-  # Mega MoE. TORCH_LIBRARY build with a CPython 3.10 stable-ABI floor.
-  set(_DEEPGEMM_UPSTREAM_TAG "6ce1c5ec6627a6bf11dbcc698b0b1e19c9248432")
+  # Mega MoE. TORCH_STABLE_LIBRARY build with a CPython 3.10 stable-ABI floor.
+  set(_DEEPGEMM_UPSTREAM_TAG "4903b688910b2d486a7512b73d74666521d1ada7")
 
   set(_deepgemm_fc_root "${FETCHCONTENT_BASE_DIR}")
   if(NOT _deepgemm_fc_root)
