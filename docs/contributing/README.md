@@ -335,6 +335,10 @@ review process:
   maintainers** enabled on fork PRs. If the merge conflicts or is not allowed,
   the bot reports the count without creating a new build; merge or rebase onto
   the latest target branch yourself, then rerun the command.
+- To avoid repeated full CI runs, the bot only merges into a commit that has no
+  CI build yet. If CI already ran on your current commit, push new changes, use
+  `/ci retry` to rerun failed jobs, or update the branch yourself. Users with
+  write access are exempt.
 - To run CI on an outdated branch at your own risk, append `--allow-stale` to
   any run command, for example `/ci run --allow-stale` or
   `/amd-ci run all --allow-stale`. The same authorization requirements apply.
