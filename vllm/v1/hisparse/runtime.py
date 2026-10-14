@@ -224,9 +224,7 @@ class HiSparseHostPool:
 
     def allocate(self, size: int) -> torch.Tensor:
         if self.backing is not None:
-            if self.backing.numel() != size:
-                raise ValueError("Cannot reuse a HiSparse host pool with a new size.")
-            logger.info("Reusing pinned HiSparse host pool (%.1f GiB).", size / 2**30)
+            assert self.backing.numel() == size, "HiSparse host pool size changed."
             return self.backing
         config = self.kv_cache_config
         if config.hisparse_shared_host_pool:
@@ -256,18 +254,22 @@ class HiSparseHostPool:
             self.backing, self.registered = allocate_pinned_host_pool(size)
         return self.backing
 
-    def rebind_config(self, config: KVCacheConfig) -> None:
-        """Reuse host storage only when its views have identical geometry."""
-        previous = self.kv_cache_config
-        if self.backing is not None and (
-            config.hisparse_shared_host_pool != previous.hisparse_shared_host_pool
-            or config.hisparse_host_num_blocks != previous.hisparse_host_num_blocks
-            or config.hisparse_host_block_stride != previous.hisparse_host_block_stride
-            or [t for t in config.kv_cache_tensors if t.host_resident]
-            != [t for t in previous.kv_cache_tensors if t.host_resident]
-        ):
-            raise ValueError("Cannot reuse a HiSparse host pool with a new layout.")
-        self.kv_cache_config = config
+
+_host_pools: dict[str, HiSparseHostPool] = {}
+
+
+def get_hisparse_host_pool(
+    vllm_config: VllmConfig, kv_cache_config: KVCacheConfig
+) -> HiSparseHostPool:
+    """Return the engine's host pool, which outlives the profiling KV cache."""
+    instance_id = vllm_config.instance_id
+    if instance_id not in _host_pools:
+        _host_pools[instance_id] = HiSparseHostPool(vllm_config, kv_cache_config)
+    return _host_pools[instance_id]
+
+
+def drop_hisparse_host_pool(vllm_config: VllmConfig) -> None:
+    _host_pools.pop(vllm_config.instance_id, None)
 
 
 def use_shared_hisparse_host_pool(vllm_config: VllmConfig) -> bool:
@@ -419,8 +421,6 @@ def release_pinned_state(
     runtimes: list[HiSparseRuntime],
     pinned_host_pools: list[torch.Tensor],
     shared_host_region: SharedOffloadRegion | None = None,
-    *,
-    preserve_host_pool: bool = False,
 ) -> None:
     """Synchronize and release registered host KV pools."""
     if pinned_host_pools or shared_host_region is not None:
@@ -438,7 +438,7 @@ def release_pinned_state(
         cudart = torch.cuda.cudart()
         release_start = time.perf_counter()
         freed_bytes = 0
-        while pinned_host_pools and not preserve_host_pool:
+        while pinned_host_pools:
             tensor = pinned_host_pools[-1]
             err = cudart.cudaHostUnregister(tensor.data_ptr())
             if err.value != 0:
@@ -460,19 +460,10 @@ def release_pinned_state(
             )
 
     for runtime in runtimes:
-        owner = getattr(runtime, "host_pool_owner", None)
-        if (
-            isinstance(owner, HiSparseHostPool)
-            and not preserve_host_pool
-            and not pinned_host_pools
-        ):
-            owner.backing = None
-            owner.registered = None
-            owner.shared_region = None
         del runtime._host_cache
         del runtime.registered_host_pool
         del runtime.hot_backing
-    if shared_host_region is not None and not preserve_host_pool:
+    if shared_host_region is not None:
         shared_host_region.cleanup()
 
 
@@ -784,7 +775,6 @@ class HiSparseRuntime:
         self.resident_source_index = -1
         self.request_state_indices: torch.Tensor | None = None
         self.shared_host_region: SharedOffloadRegion | None = None
-        self.host_pool_owner: HiSparseHostPool | None = None
 
     @property
     def host_cache(self) -> torch.Tensor:

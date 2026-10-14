@@ -373,9 +373,7 @@ def test_shared_host_pool_tracks_successful_registrations(
 
 def test_shared_host_pool_registers_layer_spans_in_one_backing(monkeypatch):
     """Aliased tensor configs must not count the shared backing once per view."""
-    region = SimpleNamespace(
-        base_tensor=torch.empty(64, dtype=torch.int8), cleanup=MagicMock()
-    )
+    region = SimpleNamespace(base_tensor=torch.empty(64, dtype=torch.int8))
     allocate = MagicMock(return_value=([], [], region))
     monkeypatch.setattr(
         hisparse_runtime_module, "allocate_hisparse_host_pools", allocate
@@ -406,36 +404,6 @@ def test_shared_host_pool_registers_layer_spans_in_one_backing(monkeypatch):
     assert backing.numel() == 44
     assert backing.data_ptr() == region.base_tensor.data_ptr()
     assert pool.registered is region.base_tensor
-
-    monkeypatch.setattr(torch.accelerator, "synchronize", lambda: None)
-    monkeypatch.setattr(torch.cuda, "cudart", MagicMock())
-    state = dict(
-        _host_cache=backing,
-        registered_host_pool=pool.registered,
-        hot_backing=object(),
-        host_pool_owner=pool,
-    )
-    runtime = SimpleNamespace(**state)
-    hisparse_runtime_module.release_pinned_state(
-        [runtime],
-        [],
-        region,
-        preserve_host_pool=True,
-    )
-    assert not hasattr(runtime, "hot_backing")
-    region.cleanup.assert_not_called()
-    pool.rebind_config(SimpleNamespace(**{**vars(config), "num_blocks": 1000}))
-    assert pool.allocate(44) is backing
-    assert allocate.call_count == 1
-    with pytest.raises(ValueError, match="new layout"):
-        pool.rebind_config(
-            SimpleNamespace(**{**vars(config), "hisparse_host_block_stride": 8})
-        )
-    with pytest.raises(ValueError, match="new size"):
-        pool.allocate(128)
-    hisparse_runtime_module.release_pinned_state([SimpleNamespace(**state)], [], region)
-    assert pool.backing is None
-    region.cleanup.assert_called_once()
 
 
 def test_hisparse_registration_chunks_end_between_host_blocks():
@@ -1289,6 +1257,8 @@ def test_hisparse_worker_shutdown_releases_pinned_state(monkeypatch):
     worker.cache_handles = []
     worker.pinned_host_pools = []
     worker.shared_host_region = object()
+    worker.vllm_config = SimpleNamespace(instance_id="shutdown")
+    pool = hisparse_runtime_module.get_hisparse_host_pool(worker.vllm_config, None)
     released = False
 
     def release_pinned_state(runtimes, pinned_host_pools, shared_host_region):
@@ -1305,6 +1275,9 @@ def test_hisparse_worker_shutdown_releases_pinned_state(monkeypatch):
     worker.shutdown()
 
     assert released
+    new_pool = hisparse_runtime_module.get_hisparse_host_pool(worker.vllm_config, None)
+    assert new_pool is not pool
+    hisparse_runtime_module.drop_hisparse_host_pool(worker.vllm_config)
 
 
 class _TestReplaySSMMixer(MambaMixer2):
