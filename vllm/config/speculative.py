@@ -4,10 +4,9 @@
 import copy
 import functools
 from collections.abc import Callable, Mapping
-from typing import TYPE_CHECKING, Any, Literal, get_args
+from typing import TYPE_CHECKING, Any, Literal, Self, get_args
 
 from pydantic import Field, SkipValidation, field_validator, model_validator
-from typing_extensions import Self
 
 from vllm.config import LoadConfig
 from vllm.config.cache import CacheDType
@@ -1059,9 +1058,16 @@ class SpeculativeConfig:
             )
         if hf_config.model_type == "glm5_next":
             hf_config.model_type = "glm5_next_mtp"
-            n_predict = hf_config.get_text_config().num_nextn_predict_layers
+            text_config = hf_config.get_text_config()
+            share_mtp_indices = getattr(
+                text_config, "index_share_for_mtp_iteration", False
+            )
             hf_config.update(
-                {"n_predict": n_predict, "architectures": ["Glm5NextMTPModel"]}
+                {
+                    "n_predict": text_config.num_nextn_predict_layers,
+                    "architectures": ["Glm5NextMTPModel"],
+                    "index_share_for_mtp_iteration": share_mtp_indices,
+                }
             )
 
         return hf_config
@@ -1969,6 +1975,9 @@ class SpeculativeConfig:
 
     def use_ngram_gpu(self) -> bool:
         return self.method == "ngram_gpu"
+
+    def use_ngram(self) -> bool:
+        return self.method in ("ngram", "ngram_gpu")
 
     def use_multi_module_mtp(self) -> bool:
         if self.method != "mtp" or self.draft_model_config is None:

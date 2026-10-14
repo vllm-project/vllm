@@ -49,6 +49,7 @@ from vllm.benchmarks.lib.endpoint_request_func import (
     POOLING_BACKENDS,
     RequestFuncInput,
     RequestFuncOutput,
+    async_request_profile,
 )
 from vllm.benchmarks.lib.ready_checker import wait_for_endpoint
 from vllm.benchmarks.lib.utils import (
@@ -252,7 +253,7 @@ async def fetch_spec_decode_metrics(
                 num_accepted_tokens=num_accepted_tokens,
                 accepted_per_pos=accepted_per_pos,
             )
-    except (aiohttp.ClientError, asyncio.TimeoutError):
+    except (TimeoutError, aiohttp.ClientError):
         return None
 
 
@@ -314,7 +315,7 @@ async def fetch_diffusion_metrics(
                 num_canvas_positions=num_canvas_positions,
                 num_committed_tokens=num_committed_tokens,
             )
-    except (aiohttp.ClientError, asyncio.TimeoutError):
+    except (TimeoutError, aiohttp.ClientError):
         return None
 
 
@@ -936,22 +937,10 @@ async def benchmark(
 
     if profile:
         print("Starting profiler...")
-        profile_input = RequestFuncInput(
-            model=model_id,
-            model_name=model_name,
-            prompt=test_prompt,
-            api_url=base_url + "/start_profile",
-            prompt_len=test_prompt_len,
-            output_len=test_output_len,
-            logprobs=logprobs,
-            multi_modal_content=test_mm_content,
-            ignore_eos=ignore_eos,
+        profile_output = await async_request_profile(
+            base_url + "/start_profile",
+            session,
             extra_headers=extra_headers,
-            extra_body=test_extra_body,
-            chat_messages=test_chat_messages,
-        )
-        profile_output = await request_func(
-            request_func_input=profile_input, session=session
         )
         if profile_output.success:
             print("Profiler started")
@@ -1469,16 +1458,10 @@ async def benchmark(
 
     if profile:
         print("Stopping profiler...")
-        profile_input = RequestFuncInput(
-            model=model_id,
-            prompt=test_prompt,
-            api_url=base_url + "/stop_profile",
-            prompt_len=test_prompt_len,
-            output_len=test_output_len,
-            logprobs=logprobs,
-        )
-        profile_output = await request_func(
-            request_func_input=profile_input, session=session
+        profile_output = await async_request_profile(
+            base_url + "/stop_profile",
+            session,
+            extra_headers=extra_headers,
         )
         if profile_output.success:
             print("Profiler stopped")
@@ -1670,8 +1653,7 @@ def add_cli_args(parser: FlexibleArgumentParser):
         "--input-len",
         type=int,
         default=None,
-        help="General input length for datasets. Maps to dataset-specific "
-        "input length arguments (e.g., --random-input-len, --sonnet-input-len). "
+        help="General input length for datasets. Maps to --random-input-len. "
         "If not specified, uses dataset defaults.",
     )
     parser.add_argument(
@@ -1679,7 +1661,7 @@ def add_cli_args(parser: FlexibleArgumentParser):
         type=int,
         default=None,
         help="General output length for datasets. Maps to dataset-specific "
-        "output length arguments (e.g., --random-output-len, --sonnet-output-len). "
+        "output length arguments (e.g., --random-output-len, --hf-output-len). "
         "If not specified, uses dataset defaults.",
     )
     parser.add_argument(
@@ -2132,18 +2114,16 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
         raise ValueError(
             f"Cannot use '{args.dataset_name}' dataset with --dataset-path. "
             "Please specify the appropriate --dataset-name (e.g., "
-            "'sharegpt', 'custom', 'sonnet') for your dataset file: "
+            "'sharegpt', 'custom', 'hf') for your dataset file: "
             f"{args.dataset_path}"
         )
 
-    # Map general --input-len and --output-len to all dataset-specific arguments
+    # Map general length options to dataset-specific arguments.
     if args.input_len is not None:
         args.random_input_len = args.input_len
-        args.sonnet_input_len = args.input_len
 
     if args.output_len is not None:
         args.random_output_len = args.output_len
-        args.sonnet_output_len = args.output_len
         args.sharegpt_output_len = args.output_len
         args.custom_output_len = args.output_len
         args.hf_output_len = args.output_len
@@ -2215,11 +2195,6 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
             raise ValueError(
                 "Sampling parameters are only supported by openai-compatible backends."
             )
-
-        # The Responses API accepts every sampling parameter above except
-        # min_p, which it would silently drop as an unknown field.
-        if args.backend == "openai-responses" and "min_p" in sampling_params:
-            raise ValueError("--min-p is not supported by the Responses API.")
 
         if "temperature" not in sampling_params:
             print(

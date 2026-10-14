@@ -4,7 +4,10 @@
 
 from __future__ import annotations
 
+import fnmatch
 from typing import TYPE_CHECKING, cast
+
+import regex as re
 
 from vllm.config import get_current_vllm_config
 from vllm.config.quantization import QuantSpec
@@ -23,6 +26,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 
 _DEEPSEEK_V4_EXPERT_DTYPES = ("fp4", "fp8")
+_EXPERTS_LAYER_RE = re.compile(r"(?:^|\.)layers\.(\d+)\.ffn\.experts$")
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.quantization.modelopt import (
@@ -54,6 +58,7 @@ class DeepseekV4FP8Config(Fp8Config):
         super().__init__(*args, **kwargs)
         self._resolved_expert_dtype: str | None = None
         self._resolved_moe_quant_algo: str | None = None
+        self._modelopt_ignore: tuple[str, ...] = ()
         self._nvfp4_config: ModelOptNvFp4Config | None = None
         # ``is_scale_e8m0`` is a property that resolves on first read,
         # by which time the current vllm_config has been set.
@@ -103,6 +108,21 @@ class DeepseekV4FP8Config(Fp8Config):
         self._resolve_moe_overrides()
         return self._resolved_moe_quant_algo or ""
 
+    def _is_nvfp4_expert_layer(self, prefix: str) -> bool:
+        if self.moe_quant_algo != "NVFP4":
+            return False
+        match = _EXPERTS_LAYER_RE.search(prefix)
+        if match is None or not self._modelopt_ignore:
+            return True
+        # MTP/draft layers are built as layers.{num_hidden_layers + k} but are
+        # named mtp.{k} in some checkpoints.
+        model_config = get_current_vllm_config().model_config
+        num_layers = model_config.hf_text_config.num_hidden_layers
+        idx = int(match.group(1))
+        layer = f"mtp.{idx - num_layers}" if idx >= num_layers else f"layers.{idx}"
+        name = f"{layer}.ffn.experts"
+        return not any(fnmatch.fnmatchcase(name, p) for p in self._modelopt_ignore)
+
     def _get_nvfp4_config(self) -> ModelOptNvFp4Config:
         if self._nvfp4_config is None:
             from vllm.model_executor.layers.quantization.modelopt import (
@@ -114,6 +134,11 @@ class DeepseekV4FP8Config(Fp8Config):
                 kv_cache_quant_algo=None,
                 exclude_modules=[],
                 group_size=16,
+                quantization_args=(
+                    self.online_quantization_config.args
+                    if self.online_quantization_config is not None
+                    else None
+                ),
             )
         return self._nvfp4_config
 
@@ -168,6 +193,9 @@ class DeepseekV4FP8Config(Fp8Config):
 
     @classmethod
     def from_config(cls, config: dict) -> DeepseekV4FP8Config:
+        # ModelOpt NVFP4 exports keep the experts they ``ignore`` in the native
+        # MXFP4 format, e.g. the bundled MTP/DSpark layers (``mtp.*``).
+        ignore = config.get("ignore")
         # Reroute AMD-Quark fused shared expert MXFP4 checkpoints onto the fp8
         # path: the runtime layout matches the DeepSeek-native fp8 checkpoint,
         # so translate the schema into format Fp8Config.from_config expects.
@@ -183,7 +211,12 @@ class DeepseekV4FP8Config(Fp8Config):
                     name for name in quark_exclude if isinstance(name, str)
                 ],
             }
-        return cast("DeepseekV4FP8Config", super().from_config(config))
+        quant_config = cast("DeepseekV4FP8Config", super().from_config(config))
+        if isinstance(ignore, list):
+            quant_config._modelopt_ignore = tuple(
+                p for p in ignore if isinstance(p, str)
+            )
+        return quant_config
 
     def get_quant_method(self, layer, prefix):
         if (
@@ -216,7 +249,7 @@ class DeepseekV4FP8Config(Fp8Config):
             ):
                 return UnquantizedFusedMoEMethod(layer.moe_config)
             if self.expert_dtype == "fp4":
-                if self.moe_quant_algo == "NVFP4":
+                if self._is_nvfp4_expert_layer(prefix):
                     from vllm.model_executor.layers.quantization.modelopt import (
                         ModelOptNvFp4FusedMoE,
                     )
