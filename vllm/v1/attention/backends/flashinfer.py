@@ -1050,26 +1050,28 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             return AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
 
         kv_specs = iter_layer_specs(kv_cache_spec)
+        if _use_fa2_native_decode():
+            # fa2 decodes uniform causal spec queries.
+            if kv_specs and not vllm_config.attention_config.use_non_causal:
+                return AttentionCGSupport.UNIFORM_BATCH
+            return AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
+
         num_qo_heads = vllm_config.model_config.get_num_attention_heads(
             vllm_config.parallel_config
         )
         is_xqa_arch = current_platform.is_device_capability(
             90
         ) or current_platform.is_device_capability_family(120)
-        use_fa2 = _use_fa2_native_decode()
         has_uniform_batch_support: bool = len(kv_specs) > 0
         for spec in kv_specs:
             if not isinstance(spec, AttentionSpec):
                 # FlashInfer only applies to attention, so we don't consider other types
                 # of KV spec (e.g. Mamba) here. This is mostly for type checking.
                 continue
-            if not (
-                use_fa2
-                or can_use_trtllm_attention(
-                    num_qo_heads=num_qo_heads,
-                    num_kv_heads=spec.num_kv_heads,
-                    is_prefill=False,
-                )
+            if not can_use_trtllm_attention(
+                num_qo_heads=num_qo_heads,
+                num_kv_heads=spec.num_kv_heads,
+                is_prefill=False,
             ) or (
                 is_xqa_arch
                 and (
@@ -1799,9 +1801,11 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                     and pure_decode
                     and num_decode_tokens <= self._decode_cudagraph_max_bs
                 )
-                # Decodes are uniform here; spec decodes are planned per request.
-                q_len_per_req = num_decode_tokens // num_decodes
-                num_input_tokens = num_decodes
+                num_input_tokens, q_len_per_req = num_decode_tokens, 1
+                if self.use_fa2:
+                    # fa2 plans uniform spec decodes per request.
+                    num_input_tokens = num_decodes
+                    q_len_per_req = num_decode_tokens // num_decodes
 
                 decode_wrapper = self._get_decode_wrapper(
                     num_input_tokens, use_cudagraph, q_len_per_req
