@@ -235,19 +235,12 @@ def test_moe_permute_empty_routing(use_scratch: bool) -> None:
     hidden_states = torch.empty((0, 128), dtype=torch.bfloat16, device="cuda")
     topk_ids = torch.empty((0, 2), dtype=torch.int32, device="cuda")
     expert_map = torch.arange(8, dtype=torch.int32, device="cuda")
-    scratch = (
-        get_moe_permute_scratch(
-            max_num_tokens=1,
-            topk=2,
-            num_experts=8,
-            num_local_experts=8,
-            device=hidden_states.device,
-            hidden_size=128,
-            hidden_dtype=hidden_states.dtype,
+    scratch = None
+    if use_scratch:
+        scratch = get_moe_permute_scratch(
+            num_experts=8, num_local_experts=8, device=hidden_states.device
         )
-        if use_scratch
-        else None
-    )
+        scratch.reserve(2)
 
     permuted, _, offsets, inverse, permuted_idx = moe_permute(
         hidden_states, None, topk_ids, 8, expert_map=expert_map, scratch=scratch
