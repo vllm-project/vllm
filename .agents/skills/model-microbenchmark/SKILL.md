@@ -51,9 +51,8 @@ Read `median_us` (each replay is already the max over ranks).
 ## Caveats
 
 - **Dummy weights lie for data-dependent kernels.** Dummy gates route every
-  token to the same experts (hence balanced routing). Dummy norm weights make
-  DSV4 indexer logits degenerate, so `topKPerRowPrefill` runs ~2.6x slow
-  until #61323 lands. Cross-check suspicious kernels with real weights.
+  token to the same experts (hence balanced routing). Cross-check suspicious
+  kernels with real weights.
 - **torch.compile models (e.g. Qwen3/3.5) look slow**: no compile here. Use
   them for correctness only; trust perf for models under `vllm/models/`.
 - `sample spread > 0.5%` warns of unstable timing. DSV4.1 DEP prefill is
