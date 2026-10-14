@@ -609,9 +609,6 @@ class DeepseekVLV2ForCausalLM(
         )
         return h, w
 
-    def get_max_frames_per_video(self) -> int:
-        return 1
-
     def get_encoder_cudagraph_config(self):
         from vllm.v1.worker.encoder_cudagraph_defs import EncoderCudaGraphConfig
 
