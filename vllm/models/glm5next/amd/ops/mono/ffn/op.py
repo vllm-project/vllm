@@ -12,7 +12,11 @@ import torch
 from vllm.models.common.mono.peer import PeerBuffers
 from vllm.models.glm5next.amd.ops.mono.config import HC_MULT, HIDDEN
 from vllm.models.glm5next.amd.ops.mono.ffn.kernel import build_flash_ffn_kernel
-from vllm.models.glm5next.amd.ops.mono.ffn.layout import POLL_STAGES
+from vllm.models.glm5next.amd.ops.mono.ffn.layout import (
+    DSA_TAB,
+    POLL_STAGES,
+    ROW_WORDS,
+)
 
 
 @dataclass
@@ -58,6 +62,56 @@ class FlashKdaWeights:
 
 
 @dataclass
+class FlashDsaWeights:
+    """One sparse-attention layer's attention-side tensors as vLLM holds them.
+    ``w_qkv`` [1536 + 512, HIDDEN] (q_a | kv_a), ``w_qb`` [H * 256, 1536] and ``w_o``
+    [HIDDEN, H * 256] are each FP8 with f32 128 x 128 block scales, or bf16 with no
+    scale; ``w_idx`` bf16 [128 + 32, HIDDEN] (wk | weights_proj), ``w_gate`` bf16
+    [128, HIDDEN]; q_a / kv_a RMSNorm weights; k LayerNorm weight and bias and kpool
+    ``ape`` [4, 128] f32; ``w_iq`` bf16 [32 * 128, 1536]; ``w_uk`` bf16 [H, 512, 256]
+    (W_UK^T, packed once); ``w_kvb`` bf16 [H * 512, 512] (kv_b_proj, W_UV rows at
+    256 ..)."""
+
+    hc_fn: torch.Tensor
+    hc_scale: torch.Tensor
+    hc_base: torch.Tensor
+    g_norm: torch.Tensor
+    w_qkv: torch.Tensor
+    s_qkv: torch.Tensor | None
+    w_idx: torch.Tensor
+    w_gate: torch.Tensor
+    g_qa: torch.Tensor
+    g_kv: torch.Tensor
+    ln_w: torch.Tensor
+    ln_b: torch.Tensor
+    ape: torch.Tensor
+    w_qb: torch.Tensor
+    s_qb: torch.Tensor | None
+    w_iq: torch.Tensor
+    w_uk: torch.Tensor
+    w_kvb: torch.Tensor
+    w_o: torch.Tensor
+    s_o: torch.Tensor | None
+
+    @property
+    def fp8(self) -> tuple[bool, bool, bool]:
+        """Which of q_a | kv_a, q_b, o_proj are FP8 (scales present)."""
+        return tuple(sc is not None for sc in (self.s_qkv, self.s_qb, self.s_o))
+
+
+@dataclass
+class FlashDsaCaches:
+    """One sparse-attention layer's caches: the bf16 MLA latent cache
+    [blocks, block_tokens, 512] (block stride may be padded), the uint8 index
+    cache [blocks, block_tokens / 4, 132] (pool FP8 values, then f32 scales) and
+    the bf16 kpool tail ring [blocks, 2, 4, 128] (k, gate)."""
+
+    kv_cache: torch.Tensor
+    idx_cache: torch.Tensor
+    tail_cache: torch.Tensor
+
+
+@dataclass
 class FlashKdaState:
     """One KDA layer's decode state: bf16 conv state [slots, 3P, 3] or
     [slots, 3, 3P] (as the runtime was built) and fp32 recurrent state
@@ -92,8 +146,13 @@ class FlashFfnRuntime:
         flag_addr: int | None = None,
         kda: bool = False,
         conv_dim_first: bool = True,
+        dsa: bool = False,
+        max_pools: int = 0,
+        dsa_fp8: tuple[bool, bool, bool] = (True, True, True),
     ) -> None:
-        self.width, self.rank, self.npes, self.kda = width, rank, npes, kda
+        self.width, self.rank, self.npes = width, rank, npes
+        self.kda, self.dsa, self.max_pools = kda, dsa, max_pools
+        self.dsa_fp8 = dsa_fp8
         self.launch, self.sc, self.sy = build_flash_ffn_kernel(
             width,
             rank=rank,
@@ -104,6 +163,9 @@ class FlashFfnRuntime:
             poll_early_out=poll_early_out,
             kda=kda,
             conv_dim_first=conv_dim_first,
+            dsa=dsa,
+            max_pools=max_pools,
+            dsa_fp8=dsa_fp8,
         )
         dev = torch.device("cuda", torch.cuda.current_device())
         self.peer = PeerBuffers(self.sy["_bytes"], rank, npes, group)
@@ -164,10 +226,70 @@ class FlashFfnOp:
         weights: FlashFfnWeights,
         layer: int,
         kda: FlashKdaWeights | None = None,
+        dsa: FlashDsaWeights | None = None,
     ):
         if (kda is None) == runtime.kda:
             raise ValueError("a KDA runtime needs KDA weights, and only it")
-        self.rt, self.w, self.layer, self.kda = runtime, weights, layer, kda
+        if (dsa is None) == runtime.dsa:
+            raise ValueError(
+                "a sparse-attention runtime needs DSA weights, and only it"
+            )
+        if dsa is not None and dsa.fp8 != runtime.dsa_fp8:
+            raise ValueError(f"DSA weights {dsa.fp8} on a {runtime.dsa_fp8} runtime")
+        self.rt, self.w, self.layer, self.kda, self.dsa = (
+            runtime,
+            weights,
+            layer,
+            kda,
+            dsa,
+        )
+        # the layer's argument table (``DSA_TAB`` order), refreshed when a cache or
+        # the block table moves; under capture by per-entry fills
+        self.tab: torch.Tensor | None = None
+        self._tab_host: list[int] = []
+        if dsa is not None:
+            self.tab = torch.zeros(
+                len(DSA_TAB), dtype=torch.int64, device=dsa.w_qkv.device
+            )
+
+    def _dsa_table(
+        self,
+        caches: FlashDsaCaches,
+        block_table: torch.Tensor,
+        idx_block_table: torch.Tensor,
+    ) -> torch.Tensor:
+        d, c = self.dsa, caches
+        assert d is not None and self.tab is not None
+        kv, idx, tail = c.kv_cache, c.idx_cache, c.tail_cache
+        values = {
+            **{
+                name: 0 if getattr(d, name) is None else getattr(d, name).data_ptr()
+                for name in DSA_TAB[:16]
+            },
+            "kv_cache": kv.data_ptr(),
+            "idx_cache": idx.data_ptr(),
+            "tail_cache": tail.data_ptr(),
+            "block_table": block_table.data_ptr(),
+            "idx_block_table": idx_block_table.data_ptr(),
+            "bt_stride": block_table.stride(0),
+            "idx_bt_stride": idx_block_table.stride(0),
+            "kv_block_elems": kv.stride(0),
+            "kv_block_tokens": kv.shape[1],
+            "idx_block_bytes": idx.stride(0),
+            "idx_block_pools": idx.shape[1],
+            "tail_block_elems": tail.stride(0),
+            "tail_gate_elems": tail.stride(1),
+        }
+        host = [values[name] for name in DSA_TAB]
+        if host != self._tab_host:
+            if torch.cuda.is_current_stream_capturing():
+                for i, (old, new) in enumerate(zip(self._tab_host, host)):
+                    if old != new:
+                        self.tab[i].fill_(new)
+            else:
+                self.tab.copy_(torch.tensor(host, dtype=torch.int64))
+            self._tab_host = host
+        return self.tab
 
     def launch(
         self,
@@ -177,11 +299,18 @@ class FlashFfnOp:
         comb: torch.Tensor,
         state: FlashKdaState | None = None,
         state_idx: torch.Tensor | None = None,
+        caches: FlashDsaCaches | None = None,
+        rows: torch.Tensor | None = None,
+        block_table: torch.Tensor | None = None,
+        idx_block_table: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """``attn_part``: this rank's unreduced attention output [S, HIDDEN];
         ``residual`` [S, HC, HIDDEN], ``post`` [S, HC, 1], ``comb`` [S, HC, HC]: the
         attention pre's state. A KDA op takes the previous layer's output, its
-        state, and ``state_idx`` int32 [S] (not positive: padding) instead.
+        state, and ``state_idx`` int32 [S] (not positive: padding) instead. A
+        sparse-attention op takes the previous layer's output, its caches, the
+        step's ``rows`` int32 [S, ROW_WORDS] and the int32 block tables of the MLA
+        cache and of the index cache (default: the MLA one).
         Returns the layer's (x, residual, post, comb)."""
         rt, w, S = self.rt, self.w, self.rt.width
         _check("attn_part", attn_part, (S, HIDDEN), torch.bfloat16)
@@ -191,6 +320,22 @@ class FlashFfnOp:
         x_out, res_out, post_out, comb_out = rt.outs[self.layer % 2]
         p = lambda t: t.data_ptr()  # noqa: E731
         kda_args = [0] * 17
+        dsa_args = [0, 0]
+        if self.dsa is not None:
+            if caches is None or rows is None or block_table is None:
+                raise ValueError(
+                    "a sparse-attention launch needs caches, rows and a block table"
+                )
+            _check("rows", rows, (S, ROW_WORDS), torch.int32)
+            if idx_block_table is None:
+                idx_block_table = block_table
+            for bt in (block_table, idx_block_table):
+                if bt.dtype != torch.int32 or bt.stride(1) != 1:
+                    raise ValueError("needs int32 block tables with contiguous rows")
+            d = self.dsa
+            kda_args[:4] = [p(d.hc_fn), p(d.hc_scale), p(d.hc_base), p(d.g_norm)]
+            tab = self._dsa_table(caches, block_table, idx_block_table)
+            dsa_args = [p(tab), p(rows)]
         if self.kda is not None:
             if state is None or state_idx is None:
                 raise ValueError("a KDA launch needs its state and state indices")
@@ -229,6 +374,7 @@ class FlashFfnOp:
             p(w.w_sh_dn),
             p(w.s_sh_dn),
             *kda_args,
+            *dsa_args,
             p(rt.scratch),
             rt.peer.storage.data_ptr(),
             p(rt.peer.addresses),
