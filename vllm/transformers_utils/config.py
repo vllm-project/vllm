@@ -161,6 +161,8 @@ _CONFIG_REGISTRY: dict[str, type[PreTrainedConfig]] = LazyConfigDict(
     step3p5="Step3p5Config",
     qianfan_ocr="QianfanOCRConfig",
     qwen3_asr="Qwen3ASRConfig",
+    # The hub renamed this model type; older revisions still carry the hyphen.
+    unlimited_ocr="UnlimitedOCRConfig",
     **{"unlimited-ocr": "UnlimitedOCRConfig"},
     **{"deepseek_v41": "DeepseekV41Config"},
     inkling_mm_model="InklingMMConfig",

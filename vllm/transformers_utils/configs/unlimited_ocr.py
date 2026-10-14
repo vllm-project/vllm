@@ -12,7 +12,7 @@ from vllm.transformers_utils.configs.deepseek_vl2 import DeepseekVLV2Config
 
 
 class UnlimitedOCRConfig(DeepseekVLV2Config):
-    model_type = "unlimited-ocr"
+    model_type = "unlimited_ocr"
 
     # An explicit ``__init__`` is required: Transformers v5 processes each
     # concrete config class' ``__init__`` signature to build nested sub-configs,
