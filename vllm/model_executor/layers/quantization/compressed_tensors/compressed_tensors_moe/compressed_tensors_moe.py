@@ -68,7 +68,10 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
                 CompressedTensorsW4A8Mxfp4MoEMethod,
             )
 
-            return CompressedTensorsW4A8Mxfp4MoEMethod(layer.moe_config)
+            return CompressedTensorsW4A8Mxfp4MoEMethod(
+                layer.moe_config,
+                activation_key=quant_config._fp8_dynamic_input_key(input_quant),
+            )
 
         if quant_config._is_mxfp4(weight_quant):
             from .compressed_tensors_moe_w4a4_mxfp4 import (

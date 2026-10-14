@@ -10,8 +10,9 @@ _PACKED_WEIGHTS = ("w13_weight", "w2_weight")
 class CompressedTensorsW4A8Mxfp4MoEMethod(Mxfp4MoEMethod):
     """MXFP4 weights with dynamic FP8 activations in compressed-tensors format.
 
-    Only the checkpoint naming differs from the native MXFP4 path, so backend
-    selection, weight conversion and execution are inherited.
+    Only the checkpoint naming and the declared activation scheme differ from
+    the native MXFP4 path, so backend selection, weight conversion and
+    execution are inherited.
     """
 
     # The packed -> unpacked rename means a processed state dict no longer

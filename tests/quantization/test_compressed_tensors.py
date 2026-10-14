@@ -18,7 +18,7 @@ from compressed_tensors.quantization import (
 
 from tests.models.utils import check_logprobs_close
 from tests.quantization.utils import load_model_without_vllm_runner
-from vllm.config import set_current_vllm_config
+from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.config.kernel import KernelConfig
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.kernels.linear import (
@@ -54,6 +54,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     QuantKey,
     ScaleDesc,
+    kFp8Dynamic128Sym,
 )
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.platforms import current_platform
@@ -1097,6 +1098,9 @@ def test_mxfp4_moe_with_fp8_inputs_shares_native_mxfp4_method(monkeypatch):
 
     assert isinstance(layer.quant_method, Mxfp4MoEMethod)
     assert not layer.quant_method.supports_pre_processed_weights
+    # The checkpoint's FP8 activations reach backends such as Humming that
+    # would otherwise default to BF16 activations.
+    assert layer.quant_method.activation_key == kFp8Dynamic128Sym
     assert {"w13_weight_packed", "w2_weight_packed"} <= dict(
         layer.named_parameters()
     ).keys()
@@ -1106,6 +1110,35 @@ def test_mxfp4_moe_with_fp8_inputs_shares_native_mxfp4_method(monkeypatch):
 
     assert layer.w13_weight is w13
     assert not hasattr(layer, "w13_weight_packed")
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_mxfp4_linear_with_fp8_inputs_requests_fp8_activations():
+    """Dense MXFP4 layers with dynamic FP8 inputs (e.g. GLM-5.3 dense MLPs)
+    must not be routed as W4A4."""
+    from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
+        CompressedTensorsW4A8Mxfp4,
+    )
+
+    weights = QuantizationArgs(
+        num_bits=4, type="float", strategy="group", group_size=32, symmetric=True
+    )
+    inputs = QuantizationArgs(
+        num_bits=8,
+        type="float",
+        strategy="group",
+        group_size=128,
+        symmetric=True,
+        dynamic=True,
+    )
+    config = CompressedTensorsConfig.from_config(
+        {"format": "mxfp4-pack-quantized", "config_groups": {}}
+    )
+    with set_current_vllm_config(VllmConfig()):
+        scheme = config._get_scheme_from_parts(weights, inputs)
+
+    assert isinstance(scheme, CompressedTensorsW4A8Mxfp4)
+    assert scheme.kernel.config.activation_quant_key == kFp8Dynamic128Sym
 
 
 def test_mxfp4_moe_with_mxfp4_inputs_keeps_w4a4_method(monkeypatch):
