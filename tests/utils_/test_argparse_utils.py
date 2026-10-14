@@ -83,26 +83,49 @@ def test_with_bool_flag(parser):
     assert args.enable_feature is True
 
 
-def test_disable_alias_for_enable_flag():
-    """`--disable-x` is accepted wherever `--no-enable-x` exists, including in
-    subcommands, but never shadows a real `--disable-x` option."""
+@pytest.fixture
+def bool_parser():
     parser = FlexibleArgumentParser()
     serve = parser.add_subparsers().add_parser("serve")
-    serve.add_argument("--enable-feature", action=BooleanOptionalAction)
-    serve.add_argument("--enable-logs", action=BooleanOptionalAction, default=True)
-    serve.add_argument("--disable-logs", action="store_true")
-    serve.add_argument("--enable-legacy", action="store_true")
+    group = serve.add_argument_group("group")
+    group.add_argument(
+        "--enable-feature", "-ef", action=BooleanOptionalAction, default=None
+    )
+    group.add_argument("--disable-logs", action=BooleanOptionalAction, default=False)
+    group.add_argument("--plain", action=BooleanOptionalAction, default=None)
+    return parser, serve
 
-    assert parser.parse_args(["serve"]).enable_feature is None
-    assert parser.parse_args(["serve", "--disable-feature"]).enable_feature is False
-    assert parser.parse_args(["serve", "--disable_feature"]).enable_feature is False
 
-    args = parser.parse_args(["serve", "--disable-logs"])
-    assert args.disable_logs is True
-    assert args.enable_logs is True
+@pytest.mark.parametrize(
+    ("args", "expected"),
+    [
+        ([], (None, False, None)),
+        (["--enable-feature", "--disable-logs"], (True, True, None)),
+        (["-ef", "--enable-logs"], (True, False, None)),
+        (["--disable-feature"], (False, False, None)),
+        (["--disable_feature"], (False, False, None)),
+        # Hidden backwards-compatible spellings
+        (["--no-enable-feature", "--no-disable-logs"], (False, False, None)),
+        (["--plain"], (None, False, True)),
+        (["--no-plain"], (None, False, False)),
+    ],
+)
+def test_enable_disable_flags(bool_parser, args, expected):
+    """`--enable-x`/`--disable-x` are inverses, and `--no-*` still works."""
+    parser, _ = bool_parser
+    ns = parser.parse_args(["serve", *args])
+    assert (ns.enable_feature, ns.disable_logs, ns.plain) == expected
 
-    with pytest.raises(SystemExit):
-        parser.parse_args(["serve", "--disable-legacy"])
+
+def test_enable_disable_flags_help(bool_parser):
+    """Help advertises `--enable-x`/`--disable-x` but not `--no-enable-x`."""
+    _, serve = bool_parser
+    usage = serve.format_usage()
+    assert "[--enable-feature | -ef | --disable-feature]" in usage
+    assert "[--disable-logs | --enable-logs]" in usage
+    assert "[--plain | --no-plain]" in usage
+    assert "--no-enable-feature" not in usage
+    assert "--no-disable-logs" not in usage
 
 
 def test_invalid_choice(parser):
