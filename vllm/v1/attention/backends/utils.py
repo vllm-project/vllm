@@ -1161,27 +1161,12 @@ def get_dcp_local_seq_lens(
     return dcp_local_seq_lens
 
 
-# `do_not_specialize_on_alignment` on the three pointers: Triton puts pointer
-# alignment in the specialization key, and the MRV1 DBO path hands this kernel
-# `seq_lens[request_slice]` / `block_table_tensor[request_slice]` VIEWS
-# (ubatch_utils.py:278/316). When a ubatch starts at a request index that is
-# not a multiple of 4, the view is differently aligned and a fresh variant
-# JIT-compiles mid-step -- 25-28 ms cold, ~1.5 ms warm, and an error under
-# `jit_monitor_mode=error`. The torch expression this replaced never compiled
-# anything, so that recompile would be a regression introduced by this change.
 @triton.jit(
     do_not_specialize_on_alignment=["out_ptr", "block_table_ptr", "seq_lens_ptr"]
 )
 def _mamba_align_block_table_kernel(
     out_ptr,
     block_table_ptr,
-    # int64, because `req_idx * block_table_stride_0` is otherwise computed in
-    # i32: `program_id` is i32 and Triton specializes a stride below 2^31 to
-    # i32, so the product wraps once a row offset reaches 2^31 elements (a
-    # 4096 x 625000 table faults from row 3436 on MI355X). `torch.gather`,
-    # which this replaces, indexes in 64-bit and has no such limit --
-    # narrowing it silently would be a bad trade for one kernel launch.
-    # `mamba_utils.py:43` annotates its row stride the same way.
     block_table_stride_0: tl.int64,
     block_table_stride_1,
     seq_lens_ptr,
@@ -1203,6 +1188,28 @@ def _mamba_align_block_table_kernel(
     and ``linear_attn`` all call it -- so assuming a column stride of 1 would
     silently read the wrong slots for a caller holding a non-contiguous view.
     ``kimi_k3/nvidia/kda_metadata.py`` passes both strides for the same reason.
+
+    Two annotations above are load-bearing and easy to drop by accident:
+
+    ``block_table_stride_0: tl.int64``
+        Without it ``req_idx * block_table_stride_0`` is computed in i32 --
+        ``program_id`` is i32 and Triton specializes a stride below 2^31 to
+        i32 -- so the product wraps once a row offset reaches 2^31 elements
+        (a 4096 x 625000 table faults from row 3436 on MI355X).
+        ``torch.gather``, which this replaces, indexes in 64-bit and has no
+        such limit, so narrowing it would be a regression.
+        ``mamba_utils.py:43`` annotates its row stride the same way.
+
+    ``do_not_specialize_on_alignment`` on the three pointers
+        Triton puts pointer alignment in the specialization key, and the MRV1
+        DBO path hands this kernel ``seq_lens[request_slice]`` /
+        ``block_table_tensor[request_slice]`` VIEWS (ubatch_utils.py:278/316).
+        When a ubatch starts at a request index that is not a multiple of 4
+        the view is differently aligned and a fresh variant JIT-compiles
+        mid-step -- 25-28 ms cold, ~1.5 ms warm, and an error under
+        ``jit_monitor_mode=error``. The torch expression this replaced never
+        compiled anything, so that recompile would be a regression introduced
+        by this change.
     """
     req_idx = tl.program_id(0)
     seq_len = tl.load(seq_lens_ptr + req_idx * seq_lens_stride)
