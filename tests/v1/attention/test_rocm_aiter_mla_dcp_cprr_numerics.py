@@ -77,11 +77,6 @@ requires_cprr = pytest.mark.skipif(
 )
 
 
-@pytest.fixture(autouse=True)
-def select_asm_route(monkeypatch):
-    monkeypatch.setenv("VLLM_ROCM_AITER_MLA_DCP_VERIFY", "asm")
-
-
 # --------------------------------------------------------------------------
 # reference maths
 # --------------------------------------------------------------------------
