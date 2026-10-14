@@ -61,15 +61,11 @@ from vllm.models.kimi_k3.amd.ops.third_party.kda import (
     fused_recurrent_kda,
     fused_recurrent_kda_packed_decode,
 )
-from vllm.platforms.rocm import get_cdna_version
 from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.kv_cache_interface import MambaSpec
-
-if rocm_aiter_ops.is_enabled():
-    from aiter.ops.triton.attention import kda as aiter_kda
 
 logger = init_logger(__name__)
 
@@ -187,7 +183,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         # into one kernel, which wants a width-major fp32 conv weight staged at
         # load time. Everything else keeps the [channel, width] layout.
         conv_state_dtype, _ = self.get_state_dtype()
-        self.use_aiter_decode = rocm_aiter_ops.is_enabled() and get_cdna_version() >= 4
+        self.use_aiter_decode = bool(rocm_aiter_ops.is_kda_gluon_decode_available())
         use_hip_decode = not self.use_aiter_decode and is_fused_kda_decode_supported(
             self.local_num_heads,
             self.head_dim,
@@ -403,7 +399,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             and m.num_decodes > 0
         ):
             assert non_spec_state_indices_tensor is not None
-            aiter_kda.fused_recurrent_kda_packed_decode(
+            rocm_aiter_ops.kda_fused_recurrent_packed_decode(
                 mixed_qkv=mixed_qkv,
                 g=g1[0],
                 beta=beta[0],
@@ -434,7 +430,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                 for x in mixed_qkv.split(self.local_projection_size, dim=-1)
             )
             n_spec = q.shape[1]
-            aiter_kda.fused_recurrent_kda(
+            rocm_aiter_ops.kda_fused_recurrent_spec_decode(
                 q=q,
                 k=k,
                 v=v,
@@ -447,10 +443,6 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                 cu_seqlens=spec_query_start_loc[: m.num_spec_decodes + 1],
                 ssm_state_indices=spec_state_indices_tensor,
                 num_accepted_tokens=num_accepted_tokens,
-                use_qk_l2norm_in_kernel=True,
-                use_gate_in_kernel=True,
-                use_beta_sigmoid_in_kernel=True,
-                pad_slot_guard=True,
                 conv_state=conv_state,
                 conv_weight=self.decode_conv1d_weight,
                 out_gate=g2[:n_spec].unsqueeze(0),
