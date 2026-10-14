@@ -737,3 +737,59 @@ def test_compress_tokens_short_batch_writes_nothing():
         kv, k, score, ape, slot_map, pool_size, HEAD_DIM, round_scale=ROUND_SCALE
     )
     assert not kv.any()
+
+
+@pytest.mark.parametrize("case", ["strided_features", "unused_slots"])
+def test_pooled_compress_preserves_input_contract(case):
+    """Strided inputs and unused cache slots must not affect returned vectors."""
+    key, score, ape, _ = _flat_batch(
+        POOL_SIZE, [POOL_SIZE], seed=31 if case == "strided_features" else 32
+    )
+    key, score = key.unsqueeze(0), score.unsqueeze(0)
+    loc = torch.zeros(1, device="cuda", dtype=torch.int64)
+    kv = torch.full((1, PAGE_SIZE, HEAD_DIM + 4), 173, device="cuda", dtype=torch.uint8)
+    expected = kpool_compress_and_write_cache(
+        kv, key, score, ape, loc, POOL_SIZE, return_compressed=True, write_cache=False
+    )
+    if case == "strided_features":
+        key = key.repeat_interleave(2, dim=-1)[..., ::2]
+        score = score.repeat_interleave(2, dim=-1)[..., ::2]
+    else:
+        loc.fill_(-1)
+    actual = kpool_compress_and_write_cache(
+        kv, key, score, ape, loc, POOL_SIZE, return_compressed=True, write_cache=False
+    )
+    for value, reference in zip(actual, expected):
+        torch.testing.assert_close(value.float(), reference.float(), rtol=0, atol=0)
+    assert torch.all(kv == 173)
+
+
+@pytest.mark.parametrize("pool_size", [4, 16])
+@pytest.mark.parametrize("writer", ["prefill", "decode"])
+def test_pooling_ignores_leading_negative_infinity_scores(pool_size, writer):
+    """Zero-probability slots must not poison a later finite softmax sum."""
+    torch.manual_seed(29)
+    key = torch.randn(2, pool_size, HEAD_DIM, device="cuda", dtype=torch.bfloat16)
+    score = torch.randn_like(key)
+    ape = torch.randn(pool_size, HEAD_DIM, device="cuda", dtype=torch.float32)
+    results = []
+    for masked_score in (-1e4, -float("inf")):
+        score[:, :2] = masked_score
+        kv = torch.zeros(2, PAGE_SIZE, HEAD_DIM + 4, device="cuda", dtype=torch.uint8)
+        loc = torch.arange(2, device="cuda", dtype=torch.int64) * PAGE_SIZE
+        if writer == "prefill":
+            kpool_compress_and_write_cache(kv, key, score, ape, loc, pool_size)
+        else:
+            pos = torch.arange(pool_size, device="cuda", dtype=torch.int32)
+            pos = pos.expand(2, -1).contiguous()
+            tail_slot = pos + torch.arange(2, device="cuda")[:, None] * pool_size
+            slots = torch.full_like(pos, -1)
+            slots[:, -1] = loc
+            tail = torch.zeros(
+                2, 2, pool_size, HEAD_DIM, device="cuda", dtype=torch.bfloat16
+            )
+            kpool_decode_update_and_maybe_write_cache_batched(
+                kv, tail, tail_slot, key, score, ape, slots, pos, pool_size
+            )
+        results.append(kv)
+    assert torch.equal(*results)

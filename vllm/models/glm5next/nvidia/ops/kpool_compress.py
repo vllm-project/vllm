@@ -185,12 +185,12 @@ def _kpool_softmax_rotate_write_cache_kernel(
     Slot ``s`` of row ``r`` is read at ``(r - row_offset) * stride_row +
     s * stride_slot``: the ``[n_pools, POOL_SIZE, D]`` layout uses
     ``row_offset = 0``, the flat token layout ``row_offset = POOL_SIZE - 1`` so
-    row ``r`` pools tokens ``r - POOL_SIZE + 1 .. r``. Rows with ``loc < 0`` or
-    ``r < row_offset`` are skipped.
+    row ``r`` pools tokens ``r - POOL_SIZE + 1 .. r``. Incomplete pools and
+    cache writes with ``loc < 0`` are skipped.
     """
     row = tl.program_id(0)
     loc = tl.load(loc_ptr + row).to(tl.int64)
-    if (row < row_offset) | (loc < 0):
+    if (row < row_offset) | (WRITE_CACHE & (loc < 0)):
         return
 
     offs = tl.arange(0, BLOCK_D)
@@ -213,8 +213,9 @@ def _kpool_softmax_rotate_write_cache_kernel(
             tl.float32
         )
         new_m = tl.maximum(m, score)
-        rescale = tl.exp(m - new_m)
-        prob = tl.exp(score - new_m)
+        safe_m = tl.where(new_m == -float("inf"), 0.0, new_m)
+        rescale = tl.exp(m - safe_m)
+        prob = tl.exp(score - safe_m)
         denom = denom * rescale + prob
         acc = acc * rescale + k * prob
         m = new_m
@@ -347,7 +348,10 @@ def kpool_compress_and_write_cache(
     """
     assert slot_k.ndim == 3 and slot_k.shape[1:] == (pool_size, head_dim)
     assert slot_score.shape == slot_k.shape
-    assert slot_k.stride(2) == 1 and slot_score.stride(2) == 1
+    if slot_k.stride(2) != 1:
+        slot_k = slot_k.contiguous()
+    if slot_score.stride(2) != 1:
+        slot_score = slot_score.contiguous()
     return _compress_and_write(
         kv_cache,
         slot_k,
@@ -380,7 +384,7 @@ def kpool_compress_tokens_and_write_cache(
 
     ``slot_mapping`` is pool-granular: token ``i`` completes the pool
     ``k[i - pool_size + 1 : i + 1]`` iff ``slot_mapping[i] >= 0``. Pools whose
-    start precedes the batch are dropped (chunk starts are pool-aligned).
+    start precedes the batch are dropped.
     """
     assert k.ndim == 2 and k.shape[1] == head_dim
     assert gate_score.shape == k.shape
@@ -590,8 +594,9 @@ def _kpool_decode_update_batched_kernel(
                 ).to(tl.float32)
                 k = tl.where(is_current, key, k_buf)
                 new_m = tl.maximum(m, score)
-                rescale = tl.exp(m - new_m)
-                prob = tl.exp(score - new_m)
+                safe_m = tl.where(new_m == -float("inf"), 0.0, new_m)
+                rescale = tl.exp(m - safe_m)
+                prob = tl.exp(score - safe_m)
                 denom = denom * rescale + prob
                 acc = acc * rescale + k * prob
                 m = new_m
