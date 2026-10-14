@@ -65,7 +65,11 @@ from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import
     MambaConvSplitInfo,
     derive_mamba_conv_split,
 )
-from vllm.distributed.nixl_utils import NixlWrapper, nixl_agent_config
+from vllm.distributed.nixl_utils import (
+    NixlWrapper,
+    nixl_agent_config,
+    nixl_thread_sync_t,
+)
 from vllm.distributed.parallel_state import (
     get_pcp_group,
     get_tensor_model_parallel_rank,
@@ -634,11 +638,22 @@ class NixlBaseConnectorWorker:
         if nixl_agent_config is None:
             config = None
         else:
+            # The handshake thread and the engine thread call this agent
+            # concurrently, and NIXL guards its state only under a sync mode.
+            sync_kwargs = (
+                {}
+                if nixl_thread_sync_t is None
+                else {"sync_mode": nixl_thread_sync_t.NIXL_THREAD_SYNC_STRICT}
+            )
             # Enable telemetry by default for NIXL 0.7.1 and above.
             config = (
-                nixl_agent_config(backends=self.nixl_backends, capture_telemetry=True)
+                nixl_agent_config(
+                    backends=self.nixl_backends, capture_telemetry=True, **sync_kwargs
+                )
                 if len(non_ucx_backends) > 0
-                else nixl_agent_config(num_threads=num_threads, capture_telemetry=True)
+                else nixl_agent_config(
+                    num_threads=num_threads, capture_telemetry=True, **sync_kwargs
+                )
             )
 
         self.nixl_wrapper = nixl_wrapper_cls(str(uuid.uuid4()), config)
