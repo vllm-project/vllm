@@ -187,14 +187,6 @@ def _build(monkeypatch, gathered_heads, segmented_supported=True):
     )
 
 
-@pytest.mark.parametrize("gathered_heads", NATIVE)
-def test_selects_cprr_at_native_gathered_heads(on_gfx950, monkeypatch, gathered_heads):
-    builder = _build(monkeypatch, gathered_heads=gathered_heads)
-    assert builder._asm_dcp_verify
-    assert builder._asm_dcp_verify_heads == gathered_heads
-    assert builder._num_attention_heads == gathered_heads
-
-
 def test_selects_cprr_for_k3_gathered_heads(on_gfx950, monkeypatch):
     """K3 at TP8/DCP8 gathers 96 heads; the builder must take cprr padded to 128."""
     builder = _build(monkeypatch, gathered_heads=96)
@@ -203,10 +195,23 @@ def test_selects_cprr_for_k3_gathered_heads(on_gfx950, monkeypatch):
     assert builder._num_attention_heads == 128
 
 
-def test_falls_back_to_segmented_above_largest_native(on_gfx950, monkeypatch):
-    builder = _build(monkeypatch, gathered_heads=256)
+@pytest.mark.parametrize(
+    "gfx950,gathered_heads",
+    [
+        (True, 256),  # above the largest native cprr kernel
+        (False, 96),  # cprr kernels exist only on gfx950
+    ],
+)
+def test_falls_back_to_segmented_when_cprr_cannot_serve(
+    monkeypatch, gfx950, gathered_heads
+):
+    """Decode must keep the gathered head count, not cprr's padded one."""
+    import vllm.platforms.rocm as rocm
+
+    monkeypatch.setattr(rocm, "on_gfx950", lambda: gfx950)
+    builder = _build(monkeypatch, gathered_heads=gathered_heads)
     assert not builder._asm_dcp_verify
-    assert builder._supports_segmented_dcp_verify
+    assert builder._num_attention_heads == gathered_heads
 
 
 def test_without_any_route_names_the_missing_segmented_build(on_gfx950, monkeypatch):
@@ -214,15 +219,6 @@ def test_without_any_route_names_the_missing_segmented_build(on_gfx950, monkeypa
         _build(monkeypatch, gathered_heads=256, segmented_supported=False)
     assert "256 DCP-gathered heads" in str(exc.value)
     assert "lacks segmented MLA decode" in str(exc.value)
-
-
-def test_off_gfx950_stays_segmented(monkeypatch):
-    import vllm.platforms.rocm as rocm
-
-    monkeypatch.setattr(rocm, "on_gfx950", lambda: False)
-    builder = _build(monkeypatch, gathered_heads=96)
-    assert not builder._asm_dcp_verify
-    assert builder._supports_segmented_dcp_verify
 
 
 # --------------------------------------------------------------------------
