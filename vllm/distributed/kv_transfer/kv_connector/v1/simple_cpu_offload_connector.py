@@ -101,6 +101,12 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
                 )
             cpu_capacity_per_rank = explicit
 
+        num_cpu_blocks = extra_config.get("num_cpu_blocks")
+        if num_cpu_blocks is not None and (
+            type(num_cpu_blocks) is not int or num_cpu_blocks <= 0
+        ):
+            raise ValueError("num_cpu_blocks must be a positive integer")
+
         lazy_offload = bool(extra_config.get("lazy_offload", False))
 
         kv_offload_backend = str(extra_config.get("kv_offload_backend", "cpu"))
@@ -177,6 +183,7 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
                 lazy_offload=lazy_offload,
                 disk_capacity_bytes=disk_capacity_bytes if disk_mode else 0,
                 use_page_cache=use_page_cache if disk_mode else False,
+                num_cpu_blocks=num_cpu_blocks,
             )
         elif role == KVConnectorRole.WORKER:
             self.worker_handler = SimpleCPUOffloadWorker(
@@ -188,6 +195,7 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
                 disk_capacity_bytes=disk_capacity_bytes,
                 disk_buffer_slots=disk_buffer_slots,
                 use_page_cache=use_page_cache,
+                num_cpu_blocks=num_cpu_blocks,
             )
 
     # --- Worker-side methods ---
