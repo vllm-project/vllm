@@ -580,9 +580,10 @@ def test_triton_unified_attention_per_token_head_scale(
     value_cache_bf16 = torch.randn_like(key_cache_bf16)
 
     if is_int4:
-        # Asymmetric quantization reference (matches the Triton kernel).
-        kf = key_cache_bf16.float()
-        vf = value_cache_bf16.float()
+        # The INT4 cache lives in the RHT domain: rotate K/V before the
+        # asymmetric quantization, like reshape_and_cache_int4 does.
+        kf = single_rht(key_cache_bf16.float()).to(torch.bfloat16).float()
+        vf = single_rht(value_cache_bf16.float()).to(torch.bfloat16).float()
         k_min = kf.amin(dim=-1)
         k_max = kf.amax(dim=-1)
         v_min = vf.amin(dim=-1)
@@ -599,11 +600,22 @@ def test_triton_unified_attention_per_token_head_scale(
             (vf / v_scale_cache[..., None] + v_zp[..., None]).round().clamp(0, 15)
         )
 
-        # Dequantized reference: x_hat = (q - zp) * scale
-        key_cache_deq = (key_cache_q_full - k_zp[..., None]) * k_scale_cache[..., None]
-        value_cache_deq = (value_cache_q_full - v_zp[..., None]) * v_scale_cache[
-            ..., None
-        ]
+        # Dequantized reference: x_hat = (q - zp) * scale, then IRHT/d back
+        # to the original domain the reference attention runs in.
+        key_cache_deq = (
+            single_rht(
+                (key_cache_q_full - k_zp[..., None]) * k_scale_cache[..., None],
+                inverse=True,
+            )
+            / head_size
+        )
+        value_cache_deq = (
+            single_rht(
+                (value_cache_q_full - v_zp[..., None]) * v_scale_cache[..., None],
+                inverse=True,
+            )
+            / head_size
+        )
 
         # Pack two uint4 values into one byte
         def _pack_int4(data_float):
@@ -727,12 +739,4 @@ def test_triton_unified_attention_per_token_head_scale(
         softmax_segm_expsum=softmax_segm_expsum,
     )
 
-    # Coarser quantization → wider tolerance.
-    if is_int4:
-        # Hopper's attention reduction order can move a few BF16 elements by
-        # just over 1.0 after INT4 quantization.
-        atol = 1.1 if current_platform.is_device_capability_family(90) else 0.5
-        rtol = 0.5
-    else:
-        atol, rtol = 5e-2, 5e-2
-    torch.testing.assert_close(output_q, output_ref, atol=atol, rtol=rtol)
+    torch.testing.assert_close(output_q, output_ref, atol=5e-2, rtol=5e-2)
