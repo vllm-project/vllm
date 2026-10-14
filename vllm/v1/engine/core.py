@@ -96,6 +96,7 @@ from vllm.v1.kv_cache_interface import (
     get_kv_cache_spec_kind,
     is_full_attention_spec,
 )
+from vllm.v1.metrics.forward_pass_metrics import ForwardPassMetricsExporter
 from vllm.v1.metrics.iteration import (
     ITERATION_IDLE_RECORD_INTERVAL,
     ITERATION_TIMING_POLL_INTERVAL,
@@ -273,6 +274,10 @@ class EngineCore:
         self.aborts_queue = queue.Queue[list[str]]()
 
         self._idle_state_callbacks: list[Callable] = []
+
+        self.forward_pass_metrics_exporter = (
+            ForwardPassMetricsExporter.from_vllm_config(vllm_config)
+        )
 
         # Mark the startup heap as static so that it's ignored by GC.
         # Reduces pause times of oldest generation collections.
@@ -682,8 +687,9 @@ class EngineCore:
         collector = self.iteration_metrics
         if collector is None or not (records := collector.take_ready()):
             return
-        # A stable observation owner also prevents multiple API processes from
-        # exporting the same engine's records. Preserve the existing stats once.
+        if self.forward_pass_metrics_exporter is not None:
+            self.forward_pass_metrics_exporter.record(records)
+        # Preserve the existing stats once, with one stable frontend observer.
         owner = outputs.get(0)
         if owner is None:
             outputs[0] = owner = EngineCoreOutputs()
@@ -913,6 +919,8 @@ class EngineCore:
                     logger.warning("Dropping unfinished iteration timings at shutdown")
                     break
                 time.sleep(ITERATION_TIMING_POLL_INTERVAL)
+        if self.forward_pass_metrics_exporter is not None:
+            self.forward_pass_metrics_exporter.shutdown()
         if self.model_executor:
             self.model_executor.shutdown()
         if self.scheduler:
@@ -1687,6 +1695,8 @@ class EngineCoreProc(EngineCore):
                 ):
                     idle = collector.make_idle_record()
                     assert idle is not None
+                    if self.forward_pass_metrics_exporter is not None:
+                        self.forward_pass_metrics_exporter.record((idle,))
                     stats = self.scheduler.make_stats() or SchedulerStats()
                     stats.iteration_records.append(idle)
                     self.output_queue.put_nowait(

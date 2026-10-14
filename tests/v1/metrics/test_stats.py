@@ -54,8 +54,10 @@ def test_idle_iteration_records_require_quiescence_and_drained_timing(blocker):
         return {}
 
     outputs: queue.Queue[tuple[int, EngineCoreOutputs]] = queue.Queue()
+    published: list[SchedulerIterationDetails] = []
     core = SimpleNamespace(
         iteration_metrics=collector,
+        forward_pass_metrics_exporter=SimpleNamespace(record=published.extend),
         scheduler=scheduler,
         vllm_config=SimpleNamespace(
             observability_config=SimpleNamespace(enable_iteration_workload_metrics=True)
@@ -73,6 +75,7 @@ def test_idle_iteration_records_require_quiescence_and_drained_timing(blocker):
     EngineCoreProc._process_input_queue(core)
     if blocker is not None:
         assert outputs.empty()
+        assert not published
     else:
         owner, output = outputs.get_nowait()
         assert owner == 0
@@ -80,6 +83,7 @@ def test_idle_iteration_records_require_quiescence_and_drained_timing(blocker):
         (record,) = output.scheduler_stats.iteration_records
         assert record.is_idle and not record.is_dummy
         assert record.elapsed_ms == 0
+        assert published == [record]
 
 
 def test_iteration_stats_repr():
@@ -221,7 +225,11 @@ def test_iteration_records_have_one_stable_frontend_owner():
     collector.complete_timing_samples(((index, 10.0),))
     stats = SchedulerStats(num_running_reqs=7, kv_cache_usage=0.5)
     outputs = {3: EngineCoreOutputs(scheduler_stats=stats)}
-    core = SimpleNamespace(iteration_metrics=collector)
+    published: list[SchedulerIterationDetails] = []
+    core = SimpleNamespace(
+        iteration_metrics=collector,
+        forward_pass_metrics_exporter=SimpleNamespace(record=published.extend),
+    )
     EngineCore._attach_iteration_records(core, outputs)
     assert outputs[3].scheduler_stats is None
     assert outputs[0].scheduler_stats is stats
@@ -229,6 +237,7 @@ def test_iteration_records_have_one_stable_frontend_owner():
     assert [record.iteration_index for record in stats.iteration_records] == [index]
     EngineCore._attach_iteration_records(core, outputs)
     assert len(stats.iteration_records) == 1
+    assert published == stats.iteration_records
 
 
 def _decode_workload_output(lengths: dict[str, int]) -> SchedulerOutput:
