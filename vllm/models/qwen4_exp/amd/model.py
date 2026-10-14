@@ -68,11 +68,7 @@ from vllm.model_executor.models.utils import (
     maybe_fuse_shared_experts,
     maybe_prefix,
 )
-from vllm.models.common.ops.sequence_parallel import (
-    sp_all_gather,
-    sp_reduce_scatter,
-    sp_shard,
-)
+from vllm.models.common.ops.sequence_parallel import sp_all_gather
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.sequence import IntermediateTensors
@@ -82,6 +78,7 @@ from vllm.v1.kv_cache_interface import MambaSpec
 
 from .hyperconnection import GatedResidual, HyperConnectionConfig
 from .low_latency_gemm import enable_qwen4_exp_low_latency_gemm
+from .ops.sequence_parallel import sp_reduce_scatter, sp_shard
 from .ple_layer import Qwen4ExpPLELayer
 from .qsa import Qwen4ExpQSAAttention
 

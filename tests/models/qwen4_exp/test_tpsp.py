@@ -36,7 +36,6 @@ from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
 from vllm.models.common.ops.sequence_parallel import (
     sp_all_gather,
     sp_padding_mask,
-    sp_reduce_scatter,
     sp_shard,
 )
 from vllm.utils.network_utils import get_open_port
@@ -239,6 +238,10 @@ def _check_moe_sp(rank: int, config: VllmConfig) -> None:
 
 def _check_compiled_sp_ops() -> None:
     """Compiled SP collectives stay correct for token counts unseen at trace time."""
+    from vllm.models.qwen4_exp.amd.ops.sequence_parallel import (
+        sp_reduce_scatter,
+        sp_shard,
+    )
 
     def collectives(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         gathered = sp_all_gather(sp_shard(x) * 2)[: x.shape[0]]
@@ -302,6 +305,7 @@ def test_moe_sp_equivalence(monkeypatch) -> None:
     mp.spawn(_run_sp, args=(get_open_port(), True), nprocs=4)
 
 
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm-only SP ops")
 @multi_gpu_test(num_gpus=2)
 def test_compiled_sp_ops_handle_untraced_token_counts() -> None:
     """Padding in compiled SP collectives must not specialize on the traced size."""
