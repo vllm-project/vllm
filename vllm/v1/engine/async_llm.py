@@ -1249,8 +1249,13 @@ class AsyncLLM(EngineClient):
                 "waiting for requests to drain before scaling"
             )
             await self.wait_for_requests_to_drain(drain_timeout)
-        except BaseException:
-            set_scaling_elastic_ep(False)
+        except BaseException as e:
+            if self.vllm_config.parallel_config.data_parallel_external_lb:
+                await self.engine_core.abort_external_elastic_ep(
+                    str(e) or type(e).__name__
+                )
+            else:
+                set_scaling_elastic_ep(False)
             raise
 
     async def scale_elastic_ep(

@@ -274,6 +274,9 @@ class EngineCoreClient(ABC):
     async def prepare_elastic_ep(self, new_data_parallel_size: int) -> None:
         raise NotImplementedError
 
+    async def abort_external_elastic_ep(self, error: str) -> None:
+        raise NotImplementedError
+
     async def get_external_elastic_ep_status(
         self,
     ) -> dict[str, str | int | None] | None:
@@ -1709,11 +1712,18 @@ class DPAsyncMPClient(AsyncMPClient):
     async def commit_elastic_ep(self) -> None:
         await self._get_external_eep_coordinator().commit()
 
+    async def abort_external_elastic_ep(self, error: str) -> None:
+        self._get_external_eep_coordinator().abort(error)
+
     async def get_external_elastic_ep_status(
         self,
     ) -> dict[str, str | int | None] | None:
         coordinator = self.external_eep_coordinator
-        return None if coordinator is None else coordinator.get_status()
+        return (
+            None
+            if coordinator is None
+            else await asyncio.to_thread(coordinator.get_status)
+        )
 
 
 class DPLBAsyncMPClient(DPAsyncMPClient):
