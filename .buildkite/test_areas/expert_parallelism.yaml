@@ -77,7 +77,7 @@ steps:
       label: ':amd: (MI355) Elastic EP Scaling'
       dind: false
       device: mi355_4
-      timeout_in_minutes: 30
+      timeout_in_minutes: 90
       working_dir: /vllm-workspace/tests
       depends_on:
       - image-build-amd
@@ -92,4 +92,10 @@ steps:
       commands:
       - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
       - AMD_LOG_LEVEL=1 python3 distributed/rocm_ipc_churn_repro.py --timeout 240 || true
-      - AMD_LOG_LEVEL=1 VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=AMD_LOG_LEVEL pytest -v -s distributed/test_elastic_ep.py -k enforce_eager_none
+      # The failure happens inside RCCL's lazy communicator init, so this run
+      # asks RCCL which transport it picks per pair and which buffer it exports.
+      - NCCL_DEBUG=INFO NCCL_DEBUG_SUBSYS=INIT,P2P,GRAPH,ALLOC AMD_LOG_LEVEL=1 VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=NCCL_DEBUG,NCCL_DEBUG_SUBSYS,AMD_LOG_LEVEL pytest -v -s distributed/test_elastic_ep.py -k enforce_eager_none || true
+      # If either of these passes, the IPC transport is the trigger and we have
+      # a workaround to propose rather than only a bug to report.
+      - NCCL_P2P_DISABLE=1 AMD_LOG_LEVEL=1 VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=NCCL_P2P_DISABLE,AMD_LOG_LEVEL pytest -v -s distributed/test_elastic_ep.py -k enforce_eager_none || true
+      - NCCL_P2P_LEVEL=SYS AMD_LOG_LEVEL=1 VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=NCCL_P2P_LEVEL,AMD_LOG_LEVEL pytest -v -s distributed/test_elastic_ep.py -k enforce_eager_none

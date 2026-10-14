@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import ctypes
 import os
+import traceback
 
 import torch
 
@@ -57,6 +58,22 @@ def _err(code: int) -> str:
     return f"{code} ({_lib().hipGetErrorString(code).decode()})"
 
 
+def _exception_chain(exc: BaseException) -> str:
+    """While handling a collective failure, torch's c10d logger calls
+    dist.get_backend() for its message dict. On an invalidated group that raises
+    ValueError, which then replaces the RCCL error everywhere downstream, so the
+    CI logs show "Process group <torch..." instead of hipIpcGetMemHandle. Walk
+    the chain so the original error survives."""
+    parts = []
+    seen: set[int] = set()
+    cur: BaseException | None = exc
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        parts.append(f"{type(cur).__name__}: {cur}")
+        cur = cur.__cause__ or cur.__context__
+    return " <- caused by <- ".join(parts)
+
+
 def _hip_device() -> int:
     """HIP's own notion of the current device, which torch does not always set."""
     dev = ctypes.c_int(-1)
@@ -71,10 +88,22 @@ def _hip_device_count() -> int:
 
 
 def _device_fds() -> dict[str, int]:
-    """IPC export needs the device node open; count what this process holds."""
-    counts = {"kfd": 0, "render": 0}
+    """IPC export needs the device node open; count what this process holds.
+
+    The total matters too: every live RCCL communicator costs about ten
+    descriptors, so a process that keeps resizing groups can approach the limit
+    without the device-node counts moving at all.
+    """
+    counts = {"kfd": 0, "render": 0, "total": 0, "limit": 0}
+    try:
+        import resource
+
+        counts["limit"] = resource.getrlimit(resource.RLIMIT_NOFILE)[0]
+    except Exception:
+        pass
     try:
         for fd in os.listdir("/proc/self/fd"):
+            counts["total"] += 1
             try:
                 target = os.readlink(f"/proc/self/fd/{fd}")
             except OSError:
@@ -157,6 +186,85 @@ def _ipc_probe_burst(size: int, count: int) -> str:
             hip.hipFree(ptr)
         hip.hipGetLastError()
     return outcome
+
+
+def _ipc_export_ceiling(size: int, limit: int) -> str:
+    """The burst above stops at a fixed count, so a pass tells us nothing about
+    where the ceiling is: on a bare-metal host with amdgpu 6.16.6 the same probe
+    holds 8192 handles without complaint. This reports the count actually
+    reached, so a lower ceiling on another driver becomes visible."""
+    hip = _lib()
+    ptrs: list[ctypes.c_void_p] = []
+    reached = 0
+    stopped = f"no ceiling below {limit}"
+    try:
+        while reached < limit:
+            ptr = ctypes.c_void_p()
+            rc = hip.hipMalloc(ctypes.byref(ptr), ctypes.c_size_t(size))
+            if rc != 0:
+                hip.hipGetLastError()
+                stopped = f"malloc stopped first: {_err(rc)}"
+                break
+            ptrs.append(ptr)
+            handle = ctypes.create_string_buffer(_HANDLE_BYTES)
+            rc = hip.hipIpcGetMemHandle(handle, ptr)
+            if rc != 0:
+                hip.hipGetLastError()
+                stopped = f"export failed: {_err(rc)}"
+                break
+            reached += 1
+    finally:
+        for ptr in ptrs:
+            hip.hipFree(ptr)
+        hip.hipGetLastError()
+    return f"{reached} held, {stopped}"
+
+
+def _kfd_topology() -> dict:
+    """amd-smi on the CI node reports XGMI as N/A for four of six pairs, which
+    could mean no link or merely no visibility from inside the VM. The driver's
+    own node properties and io_links do not carry that ambiguity."""
+    base = "/sys/class/kfd/kfd/topology/nodes"
+    wanted = (
+        "simd_count",
+        "capability",
+        "gfx_target_version",
+        "location_id",
+        "domain",
+        "drm_render_minor",
+        "num_xcc",
+        "hive_id",
+    )
+    out: dict[str, object] = {}
+    try:
+        nodes = sorted(os.listdir(base), key=lambda n: int(n) if n.isdigit() else -1)
+    except OSError as e:
+        return {"error": f"{type(e).__name__}: {e}"}
+    for node in nodes:
+        props: dict[str, str] = {}
+        try:
+            with open(f"{base}/{node}/properties") as f:
+                for line in f:
+                    key, _, value = line.strip().partition(" ")
+                    if key in wanted:
+                        props[key] = value.strip()
+        except OSError:
+            continue
+        if props.get("simd_count", "0") == "0":
+            continue  # CPU node, no GPU to report on
+        links = []
+        try:
+            for link in sorted(os.listdir(f"{base}/{node}/io_links")):
+                fields: dict[str, str] = {}
+                with open(f"{base}/{node}/io_links/{link}/properties") as f:
+                    for line in f:
+                        key, _, value = line.strip().partition(" ")
+                        fields[key] = value.strip()
+                links.append(f"to={fields.get('node_to')} type={fields.get('type')}")
+        except OSError:
+            pass
+        out[node] = {"props": props, "io_links": links}
+    return out
 
 
 def _ipc_probe_foreign_device(size: int) -> str:
@@ -287,6 +395,7 @@ def dump(tag: str, groups: dict | None = None, heavy: bool = False) -> None:
             # context on a neighbour card, so neither runs near the collective.
             info["ipc_probe_burst_64x6MiB"] = _ipc_probe_burst(6 << 20, 64)
             info["ipc_probe_foreign_device"] = _ipc_probe_foreign_device(6 << 20)
+            info["ipc_export_ceiling_2MiB"] = _ipc_export_ceiling(2 << 20, 4096)
         logger.warning("[EEP-DEBUG] %s %s", tag, info)
     except Exception as e:
         logger.warning("[EEP-DEBUG] %s dump failed: %r", tag, e)
@@ -304,6 +413,7 @@ def dump_static() -> None:
             torch.cuda.nccl.version(),
             env,
         )
+        logger.warning("[EEP-DEBUG] static kfd_topology=%s", _kfd_topology())
     except Exception as e:
         logger.warning("[EEP-DEBUG] static dump failed: %r", e)
 
@@ -342,12 +452,18 @@ def warm_each(groups: dict, tag: str) -> None:
                 logger.warning("[EEP-DEBUG] %s warm %s ok", tag, name)
             except Exception as e:
                 logger.warning(
-                    "[EEP-DEBUG] %s warm %s FAILED rank=%s world_size=%s: %r",
+                    "[EEP-DEBUG] %s warm %s FAILED rank=%s world_size=%s: %s",
                     tag,
                     name,
                     group.rank_in_group,
                     group.world_size,
-                    e,
+                    _exception_chain(e),
+                )
+                logger.warning(
+                    "[EEP-DEBUG] %s warm %s traceback:\n%s",
+                    tag,
+                    name,
+                    traceback.format_exc(),
                 )
                 dump(f"{tag} after {name} failure", groups, heavy=True)
                 raise
