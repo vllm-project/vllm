@@ -11,6 +11,10 @@ symbols to both the ``TYPE_CHECKING`` imports and ``_EXPORTS``, using
 import importlib
 from typing import TYPE_CHECKING, Any
 
+import torch
+
+from vllm.utils.platform_utils import num_compute_units
+
 if TYPE_CHECKING:
     from humming import dtypes as dtypes
     from humming.config import GemmType as GemmType
@@ -91,6 +95,18 @@ _EXPORTS: dict[str, str] = {
     "GptOssMxfp4WeightSchema": "humming.schema:GptOssMxfp4WeightSchema",
     "GPTQWeightSchema": "humming.schema:GPTQWeightSchema",
 }
+
+
+def create_humming_locks(device: torch.device | str) -> torch.Tensor:
+    device = torch.device(device)
+    device_index = device.index
+    if device_index is None:
+        device_index = torch.accelerator.current_device_index()
+    return torch.zeros(
+        num_compute_units(device_index) * 8,
+        dtype=torch.int32,
+        device=device,
+    )
 
 
 def __getattr__(name: str) -> Any:

@@ -610,7 +610,7 @@ class HummingLinearMethod(LinearMethodBase):
             setattr(layer, name, param)
 
         self.compute_config = get_humming_linear_compute_config()
-        self.locks = torch.zeros(1024, dtype=torch.int32, device=layer.weight.device)
+        self.locks = _hm.create_humming_locks(layer.weight.device)
 
     def apply(
         self,
