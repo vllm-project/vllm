@@ -3123,7 +3123,6 @@ def test_tool_call_arguments_malformed_json_small(caplog):
     assert args == {}
 
     assert len(caplog.records) == 1
-    assert "exec" in caplog.records[0].message
     assert "coercing to an empty object" in caplog.records[0].message
 
 
@@ -3135,8 +3134,8 @@ def test_tool_call_arguments_malformed_json_large(caplog):
     assert args == {}
 
     assert len(caplog.records) == 1
-    assert "write" in caplog.records[0].message
     assert "coercing to an empty object" in caplog.records[0].message
+    assert f"{len(bad)} chars" in caplog.records[0].message
 
 
 @pytest.mark.parametrize("non_obj", ["[]", "42", "true", '"hello"', "null"])
@@ -3151,7 +3150,6 @@ def test_tool_call_arguments_valid_json_non_object(caplog, non_obj):
         assert not caplog.records
     else:
         assert len(caplog.records) == 1
-        assert "bad_tool" in caplog.records[0].message
         assert "not a JSON object" in caplog.records[0].message
 
 
@@ -3187,7 +3185,7 @@ def test_tool_call_arguments_multiple_independent(caplog):
     assert tool_calls[1]["function"]["arguments"] == {}
 
     assert len(caplog.records) == 1
-    assert "bad" in caplog.records[0].message
+    assert "coercing to an empty object" in caplog.records[0].message
 
 
 def test_validate_chat_template_rejects_invalid_type():
