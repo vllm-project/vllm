@@ -33,12 +33,25 @@ def make_vllm_config(hf_config, max_model_len: int) -> SimpleNamespace:
 
 
 @pytest.mark.parametrize(
-    "max_model_len,compilable",
-    [(MAX_POSITION_EMBEDDINGS, True), (MAX_POSITION_EMBEDDINGS + 1, False)],
+    "rope_parameters,max_model_len,compilable",
+    [
+        (DYNAMIC, MAX_POSITION_EMBEDDINGS, True),
+        (DYNAMIC, MAX_POSITION_EMBEDDINGS + 1, False),
+        # The longrope layer type still syncs
+        (
+            {"full_attention": DYNAMIC, "sliding_attention": {"rope_type": "longrope"}},
+            MAX_POSITION_EMBEDDINGS,
+            False,
+        ),
+    ],
 )
-def test_can_enable_torch_compile(max_model_len, compilable):
+def test_can_enable_torch_compile(rope_parameters, max_model_len, compilable):
     """Dynamic rope only blocks compilation when it can still rescale."""
-    config = LlamaConfig(**CONFIG_KWARGS, rope_parameters=DYNAMIC)
+    config = SimpleNamespace(
+        max_position_embeddings=MAX_POSITION_EMBEDDINGS,
+        rope_parameters=rope_parameters,
+    )
+    config.get_text_config = lambda: config
     vllm_config = make_vllm_config(config, max_model_len)
     assert can_enable_torch_compile(vllm_config) is compilable
 

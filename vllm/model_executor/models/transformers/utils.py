@@ -379,9 +379,11 @@ def can_enable_torch_compile(vllm_config: "VllmConfig") -> bool:
       `max_model_len` (otherwise `disable_noop_dynamic_rope` removes it).
     """
     text_config = vllm_config.model_config.hf_config.get_text_config()
-    if any(rp["rope_type"] == "dynamic" for rp in iter_rope_parameters(text_config)):
-        return dynamic_rope_update_is_noop(vllm_config)
-    return True
+    rope_types = {rp["rope_type"] for rp in iter_rope_parameters(text_config)}
+    if "dynamic" not in rope_types:
+        return True
+    # Layer types using longrope still sync, even once dynamic rope is disabled
+    return "longrope" not in rope_types and dynamic_rope_update_is_noop(vllm_config)
 
 
 def disable_noop_dynamic_rope(model: nn.Module, vllm_config: "VllmConfig") -> None:
