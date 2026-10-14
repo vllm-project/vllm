@@ -9,8 +9,15 @@
 from vllm.models.glm5next.amd.ops.mono.config import (
     HC_MULT,
     HIDDEN,
+    INDEX_DIM,
+    INDEX_HEADS,
+    KV_LORA,
     MOE_SLOTS,
     N_EXPERTS,
+    NOPE_DIM,
+    Q_LORA,
+    TOPK_TOKENS,
+    V_DIM,
     FlashShard,
 )
 from vllm.models.glm5next.amd.ops.mono.layout import (
@@ -34,12 +41,69 @@ POLL_STAGES = (
     "router",
     "ug",
     "down",
+    "qkv_a",
+    "qnorm",
+    "cache",
+    "q_b",
+    "index_q",
+    "uk",
+    "iscore",
+    "iselect",
+    "split",
+    "uv",
 )
-KDA_STAGES = POLL_STAGES[:6]
 # rows of a projection task: one MFMA tile, or one tile a wave when K is 128
 IN_TILE = 16
 FGB_TILE = 16 * WAVES
 O_TILE = 16
+
+# sparse attention: q_a | kv_a (FP8) then wk | weights_proj | kpool gate (bf16)
+QKV_TILE = 16
+N_QKV_FP8 = (Q_LORA + KV_LORA) // QKV_TILE
+INDEX_ROWS = INDEX_DIM + INDEX_HEADS + INDEX_DIM
+N_QKV = N_QKV_FP8 + INDEX_ROWS // QKV_TILE
+QB_TILE = 32
+UK_TILE = 128
+UV_TILE = 64
+POOLS_PER_TASK = 256
+# split attention: one task 64 selected keys x 8 heads (one head a wave)
+SPLIT_KEYS = 64
+N_SPLIT = TOPK_TOKENS // SPLIT_KEYS
+# per-step row table of a sparse-attention launch (int32 [S, ROW_WORDS])
+ROW_POS, ROW_SLOT, ROW_POOL_SLOT, ROW_TAIL_SLOT, ROW_BT = range(5)
+ROW_WORDS = 8
+# entries of a sparse-attention layer's int64 argument table
+DSA_TAB = (
+    "w_qkv",
+    "s_qkv",
+    "w_idx",
+    "w_gate",
+    "g_qa",
+    "g_kv",
+    "ln_w",
+    "ln_b",
+    "ape",
+    "w_qb",
+    "s_qb",
+    "w_iq",
+    "w_uk",
+    "w_kvb",
+    "w_o",
+    "s_o",
+    "kv_cache",
+    "idx_cache",
+    "tail_cache",
+    "block_table",
+    "idx_block_table",
+    "bt_stride",
+    "idx_bt_stride",
+    "kv_block_elems",
+    "kv_block_tokens",
+    "idx_block_bytes",
+    "idx_block_pools",
+    "tail_block_elems",
+    "tail_gate_elems",
+)
 
 N_ROW_TILES = HIDDEN // ROW_TILE
 # mix projection outputs (pre, post, comb) plus one sum of squares a tile
@@ -79,20 +143,52 @@ def _align(size: int, alignment: int = 256) -> int:
     return (size + alignment - 1) // alignment * alignment
 
 
-def layout(samples: int, npes: int, inter: int, kda: bool = False):
+def layout(
+    samples: int,
+    npes: int,
+    inter: int,
+    kda: bool = False,
+    dsa: bool = False,
+    max_pools: int = 0,
+):
     """Byte offsets of the per-rank scratch and the symmetric peer buffer."""
     pair_bytes = 8
     shard = FlashShard(npes)
     items = []
-    if kda:
+    if kda or dsa:
         items = [
             ("rnew_a", samples * HC_MULT * HIDDEN // 2 * pair_bytes),
             ("pmix_a", samples * N_ROW_TILES * PMIX * pair_bytes),
             ("a_in", samples * HIDDEN // 2 * pair_bytes),
             ("mix_a", samples * HC_MULT * (1 + HC_MULT) * pair_bytes),
+        ]
+    if kda:
+        items += [
             ("proj", samples * shard.kda_in_rows * pair_bytes),
             ("gates", samples * 2 * shard.kda_proj * pair_bytes),
             ("o_in", samples * shard.kda_proj // 2 * pair_bytes),
+        ]
+    if dsa:
+        H = shard.mla_heads
+        items += [
+            ("qa", samples * Q_LORA * pair_bytes),
+            ("kva", samples * KV_LORA * pair_bytes),
+            ("ik", samples * INDEX_DIM * pair_bytes),
+            ("iw", samples * INDEX_HEADS * pair_bytes),
+            ("ig", samples * INDEX_DIM * pair_bytes),
+            ("q_an", samples * Q_LORA // 2 * pair_bytes),
+            ("q_nope", samples * H * NOPE_DIM // 2 * pair_bytes),
+            ("iq8", samples * INDEX_HEADS * INDEX_DIM // 4 * pair_bytes),
+            ("iqw", samples * INDEX_HEADS * pair_bytes),
+            ("q_lat", samples * H * KV_LORA // 2 * pair_bytes),
+            ("kv_ready", samples * pair_bytes),
+            ("iscores", samples * max(max_pools, 1) * pair_bytes),
+            ("tok_sel", samples * TOPK_TOKENS * 4),
+            ("tok_ready", samples * pair_bytes),
+            ("sp_acc", samples * N_SPLIT * H * KV_LORA // 2 * pair_bytes),
+            ("sp_m", samples * N_SPLIT * H * pair_bytes),
+            ("sp_l", samples * N_SPLIT * H * pair_bytes),
+            ("o_in", samples * H * V_DIM // 2 * pair_bytes),
         ]
     items += [
         ("rnew", samples * HC_MULT * HIDDEN // 2 * pair_bytes),
@@ -108,6 +204,7 @@ def layout(samples: int, npes: int, inter: int, kda: bool = False):
         ("poll_err_addr", 8),
         ("poll_xrank_addr", 8),
     ]
+    assert len({name for name, _ in items}) == len(items), "mailbox names"
     offset, scratch = 0, {}
     for name, size in items:
         scratch[name] = offset
@@ -127,10 +224,30 @@ def layout(samples: int, npes: int, inter: int, kda: bool = False):
     return scratch, symmetric
 
 
-def stage_tasks(samples: int, inter: int, npes: int = 1, kda: bool = False):
-    """``(stage name, task count)`` pairs in execution order."""
+def stage_tasks(
+    samples: int, inter: int, npes: int = 1, kda: bool = False, dsa: bool = False
+):
+    """``(stage name, task count)`` pairs in execution order. ``iscore`` is sized
+    per row at run time; its count here only places the next stage."""
     shard = FlashShard(npes)
     attention = []
+    if dsa:
+        H = shard.mla_heads
+        attention = [
+            ("aseam", N_ROW_TILES),
+            ("agate", samples),
+            ("qkv_a", N_QKV),
+            ("qnorm", samples),
+            ("cache", samples),
+            ("q_b", H * NOPE_DIM // QB_TILE),
+            ("index_q", INDEX_HEADS),
+            ("uk", H * KV_LORA // UK_TILE),
+            ("iscore", samples * 8),
+            ("iselect", samples),
+            ("split", samples * (H // WAVES) * N_SPLIT),
+            ("uv", samples * H * (V_DIM // UV_TILE)),
+            ("oproj", HIDDEN // O_TILE),
+        ]
     if kda:
         attention = [
             ("aseam", N_ROW_TILES),
