@@ -118,7 +118,6 @@ def _make_scheduler_output(
         total_num_scheduled_tokens=0,
         scheduled_spec_decode_tokens={},
         scheduled_encoder_inputs={},
-        num_common_prefix_blocks=[],
         finished_req_ids=finished_req_ids,
         free_encoder_mm_hashes=[],
         preempted_req_ids=preempted_req_ids,
@@ -305,7 +304,6 @@ def _make_postprocess_scheduler_output(
         total_num_scheduled_tokens=sum(num_scheduled_tokens.values()),
         scheduled_spec_decode_tokens=scheduled_spec_decode_tokens or {},
         scheduled_encoder_inputs={},
-        num_common_prefix_blocks=[],
         finished_req_ids=set(),
         free_encoder_mm_hashes=[],
         preempted_req_ids=set(),
@@ -659,7 +657,6 @@ def test_v2_align_ctx_binds_request_slot_tables_for_state_copies():
         max_num_batched_tokens=64,
         max_num_blocks_per_group=[4],
         device=device,
-        kernel_block_sizes=[cfg.block_size],
     )
 
     state = object.__new__(MambaHybridModelState)
