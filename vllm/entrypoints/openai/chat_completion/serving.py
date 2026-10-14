@@ -59,7 +59,7 @@ from vllm.logprobs import Logprob
 from vllm.outputs import RequestOutput
 from vllm.parser import ParserManager
 from vllm.parser.abstract_parser import Parser
-from vllm.parser.metrics import record_tool_call_response
+from vllm.parser.metrics import record_tool_call_response, tool_calling_trace_headers
 from vllm.renderers.chat_utils import (
     ChatTemplateContentFormatOption,
     ConversationMessage,
@@ -303,6 +303,10 @@ class OpenAIServingChat(GenerateBaseServing):
         raw_request: Request | None = None,
     ) -> AsyncGenerator[str, None] | ChatCompletionResponse | ErrorResponse:
         # Streaming response
+        # Capture received intent before rendering or parser request adjustments.
+        tool_trace_headers = None
+        if request.tools and await self.engine_client.is_tracing_enabled():
+            tool_trace_headers = tool_calling_trace_headers(request, None)
         tokenizer = self.renderer.tokenizer
         assert tokenizer is not None
         chat_template_kwargs = self._effective_chat_template_kwargs(request)
@@ -378,6 +382,8 @@ class OpenAIServingChat(GenerateBaseServing):
                 if raw_request is None
                 else await self._get_trace_headers(raw_request.headers)
             )
+            if tool_trace_headers is not None:
+                trace_headers = {**(trace_headers or {}), **tool_trace_headers}
             session_id = self._get_session_id(request, raw_request)
 
             if isinstance(sampling_params, BeamSearchParams):

@@ -27,8 +27,10 @@ from vllm.tracing import (
     SpanAttributes,
     SpanKind,
     extract_trace_context,
+    extract_trace_headers,
     instrument_manual,
 )
+from vllm.tracing.utils import tool_calling_trace_attributes
 from vllm.utils import length_from_prompt_token_ids_or_embeds
 from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest, FinishReason
 from vllm.v1.engine.detokenizer import IncrementalDetokenizer
@@ -937,7 +939,9 @@ class OutputProcessor:
 
         metrics = req_state.stats
         arrival_time_ns = int(metrics.arrival_time * 1e9)
-        trace_context = extract_trace_context(engine_core_output.trace_headers)
+        trace_context = extract_trace_context(
+            extract_trace_headers(engine_core_output.trace_headers or {})
+        )
         prompt_length = length_from_prompt_token_ids_or_embeds(
             req_state.prompt_token_ids, req_state.prompt_embeds
         )
@@ -979,6 +983,10 @@ class OutputProcessor:
             )
         if req_state.n:
             attributes[SpanAttributes.GEN_AI_REQUEST_N] = req_state.n
+
+        attributes.update(
+            tool_calling_trace_attributes(engine_core_output.trace_headers)
+        )
 
         instrument_manual(
             span_name="llm_request",

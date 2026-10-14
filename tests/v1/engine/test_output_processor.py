@@ -5,6 +5,7 @@ import math
 import time
 from unittest.mock import MagicMock, Mock
 
+import msgspec
 import numpy as np
 import prometheus_client
 import pytest
@@ -30,6 +31,7 @@ from vllm.outputs import (
 )
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.tokenizers import TokenizerLike
+from vllm.tracing import SpanAttributes
 from vllm.v1.engine import (
     EngineCoreEvent,
     EngineCoreEventType,
@@ -47,8 +49,86 @@ from vllm.v1.engine.output_processor import (
 from vllm.v1.engine.parallel_sampling import ParentRequest
 from vllm.v1.metrics.loggers import PrometheusStatLogger
 from vllm.v1.metrics.prometheus import unregister_vllm_metrics
-from vllm.v1.metrics.stats import IterationStats, PrefillStats, SchedulerStats
+from vllm.v1.metrics.stats import (
+    IterationStats,
+    PrefillStats,
+    RequestStateStats,
+    SchedulerStats,
+)
 from vllm.v1.outputs import SamplingMaskLists
+
+
+@pytest.mark.parametrize("tool_metadata", [False, True])
+@pytest.mark.parametrize("parent_in_headers", [False, True])
+def test_inference_span_adds_sanitized_tool_summary_without_changing_parent(
+    monkeypatch, tool_metadata, parent_in_headers
+):
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
+        InMemorySpanExporter,
+    )
+
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    monkeypatch.setattr(
+        "vllm.tracing.otel.trace.get_tracer", lambda *args: provider.get_tracer("test")
+    )
+    traceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+    headers = {"traceparent": traceparent} if parent_in_headers else {}
+    monkeypatch.setenv("traceparent", traceparent)
+    if tool_metadata:
+        headers.update(
+            {
+                SpanAttributes.TOOL_CALLING_TOOL_COUNT: "2",
+                SpanAttributes.TOOL_CALLING_TOOL_CHOICE: "named",
+                SpanAttributes.TOOL_CALLING_API_SURFACE: "messages",
+                "tool_calling.arguments": "private-data",
+            }
+        )
+    output = EngineCoreOutput(
+        request_id="test-id", new_token_ids=[], trace_headers=headers
+    )
+    output = msgspec.msgpack.decode(
+        msgspec.msgpack.encode(output), type=EngineCoreOutput
+    )
+    state = MagicMock(spec=RequestState)
+    state.stats = RequestStateStats(
+        arrival_time=1,
+        queued_ts=2,
+        scheduled_ts=3,
+        first_token_ts=4,
+        last_token_ts=5,
+        num_generation_tokens=2,
+    )
+    state.prompt_token_ids = [1, 2, 3]
+    state.prompt_embeds = None
+    state.external_req_id = "test-id"
+    state.top_p = state.temperature = state.max_tokens_param = state.n = None
+    OutputProcessor(None, log_stats=True).do_tracing(output, state, IterationStats())
+    spans = exporter.get_finished_spans()
+    assert len(spans) == 1 and spans[0].name == "llm_request"
+    assert spans[0].context.trace_id == int("4bf92f3577b34da6a3ce929d0e0e4736", 16)
+    assert spans[0].parent.span_id == int("00f067aa0ba902b7", 16)
+    attributes = dict(spans[0].attributes)
+    assert attributes[SpanAttributes.GEN_AI_USAGE_PROMPT_TOKENS] == 3
+    assert {
+        key: value
+        for key, value in attributes.items()
+        if key.startswith("tool_calling.")
+    } == (
+        {
+            SpanAttributes.TOOL_CALLING_PRESENT: True,
+            SpanAttributes.TOOL_CALLING_TOOL_COUNT: 2,
+            SpanAttributes.TOOL_CALLING_TOOL_CHOICE: "named",
+            SpanAttributes.TOOL_CALLING_API_SURFACE: "messages",
+        }
+        if tool_metadata
+        else {}
+    )
+    assert "private-data" not in repr(attributes)
+    provider.shutdown()
 
 
 @pytest.mark.parametrize("flat_logprobs", [False, True])

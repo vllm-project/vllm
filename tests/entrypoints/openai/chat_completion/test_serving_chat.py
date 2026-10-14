@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, call
 
 import pytest
 import pytest_asyncio
+from fastapi import Request
 from openai import OpenAI
 
 from tests.entrypoints.openai.utils import (
@@ -658,6 +659,85 @@ def _build_minimal_metrics_serving_chat(
     serving.system_fingerprint = None
     serving.enable_per_request_metrics = enable_per_request_metrics
     return serving
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("api_surface", ["chat_completions", "messages"])
+@pytest.mark.parametrize(
+    "has_tools, tracing, mutate",
+    [
+        (True, True, False),
+        (True, False, False),
+        (False, True, False),
+        (True, True, True),
+    ],
+)
+async def test_tool_request_trace_metadata_is_conditional_and_ignores_client_values(
+    has_tools, tracing, mutate, api_surface
+):
+    from vllm.tracing.utils import SpanAttributes, tool_calling_trace_attributes
+
+    serving = MagicMock(spec=OpenAIServingChat)
+    serving._create_chat_completion = OpenAIServingChat._create_chat_completion.__get__(
+        serving
+    )
+    serving._get_trace_headers = OpenAIServingChat._get_trace_headers.__get__(serving)
+    serving.engine_client = MagicMock(spec=AsyncLLM)
+    serving.engine_client.is_tracing_enabled.return_value = tracing
+    serving.renderer = MagicMock()
+    serving.models = MagicMock()
+    serving.model_config = MagicMock(max_model_len=100)
+    serving.default_sampling_params = {}
+    serving.override_max_tokens = None
+    serving.parser_cls = None
+    serving.render_chat_request.return_value = (
+        [],
+        [{"type": "token", "prompt_token_ids": [1]}],
+    )
+    if mutate:
+
+        async def render_chat_request(request):
+            request.tools = []
+            request.tool_choice = "none"
+            return [], [{"type": "token", "prompt_token_ids": [1]}]
+
+        serving.render_chat_request.side_effect = render_chat_request
+    serving._extract_prompt_len.return_value = 1
+    serving._engine_reasoning_kwargs.return_value = {}
+    request = ChatCompletionRequest(
+        messages=[],
+        max_completion_tokens=1,
+        tools=[{"type": "function", "function": {"name": "private-function"}}]
+        if has_tools
+        else None,
+    )
+    request._api_surface = api_surface
+    traceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+    raw_request = Request(
+        {
+            "type": "http",
+            "headers": [
+                (b"traceparent", traceparent.encode()),
+                (SpanAttributes.TOOL_CALLING_TOOL_CHOICE.encode(), b"private-data"),
+                (SpanAttributes.TOOL_CALLING_TOOL_COUNT.encode(), b"999"),
+            ],
+        }
+    )
+    await serving._create_chat_completion(request, raw_request)
+    headers = serving.engine_client.generate.call_args.kwargs["trace_headers"]
+    assert headers["traceparent"] == traceparent
+    assert "private" not in repr(headers)
+    if has_tools and tracing:
+        assert tool_calling_trace_attributes(headers) == {
+            SpanAttributes.TOOL_CALLING_PRESENT: True,
+            SpanAttributes.TOOL_CALLING_TOOL_COUNT: 1,
+            SpanAttributes.TOOL_CALLING_TOOL_CHOICE: "auto",
+            SpanAttributes.TOOL_CALLING_API_SURFACE: api_surface,
+        }
+    else:
+        assert headers == {"traceparent": traceparent}
+    if not has_tools:
+        serving.engine_client.is_tracing_enabled.assert_not_awaited()
 
 
 def _make_metrics_request_output(
