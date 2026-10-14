@@ -286,8 +286,13 @@ class NixlBaseConnectorWorker:
         SSM uses the rank's positional index.
         """
         fa_idx = next(
-            i for i, t in enumerate(self._group_spec_types) if _is_attention_spec(t)
+            (i for i, t in enumerate(self._group_spec_types) if _is_attention_spec(t)),
+            None,
         )
+        if fa_idx is None:
+            # SSM-only models: their FA slots are layout padding; split them
+            # with the sole non-attention group's source ranks.
+            fa_idx = 0
         fa_num_splits = len(plan.source_ranks_per_group[fa_idx])
 
         has_ssm_descs = num_fa_descs < len(src_blocks_data)
@@ -2014,8 +2019,15 @@ class NixlBaseConnectorWorker:
             "Remote KV cache base addresses must not be empty."
         )
         fa_group_idx = next(
-            i for i, t in enumerate(self._group_spec_types) if _is_attention_spec(t)
+            (i for i, t in enumerate(self._group_spec_types) if _is_attention_spec(t)),
+            None,
         )
+        # SSM-only models have no attention group, but the descriptor layout
+        # still reserves the per-region FA slots that the producer registers
+        # (_build_fa_local) and that _compute_desc_ids offsets SSM desc ids
+        # past. Emit those slots using the sole non-attention group's ranks.
+        if fa_group_idx is None:
+            fa_group_idx = 0
         # SPLIT regions read their head slice from this many remote ranks at a
         # per-rank offset; REPLICATE regions read the whole block once.
         split_reads = len(plan.source_ranks_per_group[fa_group_idx])

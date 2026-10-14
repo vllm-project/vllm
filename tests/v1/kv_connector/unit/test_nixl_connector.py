@@ -72,6 +72,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheLayout,
+    MambaSpec,
     MLAAttentionSpec,
     compute_layer_kv_cache_shape_bytes,
 )
@@ -646,6 +647,52 @@ class FakeNixlConnectorWorker(NixlConnectorWorker):
             remote_agents[(0, remote_tp_rank)] = remote_agent_name
         # Handshake bypasses zmq, so report a zero clock offset to the peer.
         return remote_agents, 0.0
+
+
+def test_build_fa_remote_ssm_only_emits_padding_slots():
+    """SSM-only models have no attention KV group.
+
+    _build_fa_remote must still emit the per-region FA slot padding that the
+    producer registers (_build_fa_local) and that _compute_desc_ids offsets
+    SSM desc ids past; before the fix a bare next() raised StopIteration and
+    aborted the whole handshake (issue #61617).
+    """
+    worker = object.__new__(NixlConnectorWorker)
+    worker._group_spec_types = (MambaSpec,)
+    worker._region_is_mla = [False]
+    worker._transfer_layer_region_indices = None
+    worker.block_len_per_layer = [58368]
+    worker.transfer_topo = SimpleNamespace()
+    plan = SimpleNamespace(source_ranks_per_group=((0,),), rank_offset_factor=0)
+    meta = SimpleNamespace(
+        kv_caches_base_addr=[0x100000],
+        region_num_blocks=[8],
+        block_strides=[58368],
+        device_id=0,
+        num_blocks=8,
+    )
+    descs = worker._build_fa_remote(plan, meta, 1)
+    # One padding descriptor per region block, page-sized.
+    assert descs.shape == (8, 3)
+    assert descs.dtype == np.uint64
+    assert (descs[:, 1] == 58368).all()
+
+
+def test_build_local_splits_from_plan_ssm_only_yields_nothing():
+    """SSM-only models take the padding-slot split path without a FA group."""
+    worker = object.__new__(NixlConnectorWorker)
+    worker._group_spec_types = (MambaSpec,)
+    worker.transfer_topo = SimpleNamespace()
+    worker.block_len_per_layer = []
+    worker.num_regions = 0
+    worker._ple_region_index = None
+    worker._logical_num_blocks = 0
+    plan = SimpleNamespace(
+        all_source_ranks=(),
+        rank_to_attention_slot={},
+        source_ranks_per_group=((0,),),
+    )
+    assert list(worker._build_local_splits_from_plan(plan, np.empty((0, 3)), 0)) == []
 
 
 class TestNixlHandshake:
