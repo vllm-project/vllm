@@ -19,7 +19,7 @@ from vllm.model_executor.layers.mamba.checkpoint import (
 from vllm.third_party.flash_linear_attention.ops.utils import FLA_CHUNK_SIZE
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import next_power_of_2
-from vllm.v1.attention.backend import AttentionCGSupport, max_decode_query_len
+from vllm.v1.attention.backend import max_decode_query_len
 from vllm.v1.attention.backends.gdn_attn import (
     GDNAttentionBackend,
     GDNAttentionMetadata,
@@ -110,11 +110,6 @@ class KimiK3ROCmKDAMetadataBuilder(GDNAttentionMetadataBuilder):
         kv_cache_spec: KVCacheSpec,
     ) -> int | None:
         if not _adaptive_verification_enabled(vllm_config):
-            return None
-        if (
-            cls.get_cudagraph_support(vllm_config, kv_cache_spec)
-            != AttentionCGSupport.UNIFORM_BATCH
-        ):
             return None
         return max_decode_query_len(vllm_config)
 

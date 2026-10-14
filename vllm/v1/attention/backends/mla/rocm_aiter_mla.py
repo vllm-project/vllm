@@ -472,12 +472,6 @@ def _adaptive_varlen_verify_enabled(vllm_config: VllmConfig) -> bool:
     )
 
 
-def _gather_rows(x: torch.Tensor, index: torch.Tensor) -> torch.Tensor:
-    if x.dtype.itemsize == 1 and x.dtype.is_floating_point:
-        return x.view(torch.uint8).index_select(0, index).view(x.dtype)
-    return x.index_select(0, index)
-
-
 class AiterMLABackend(MLACommonBackend):
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
@@ -2727,16 +2721,13 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         q_rows = decode.varlen_q_rows
         if isinstance(q, tuple):
             num_tokens = q[0].shape[0]
-            q = (_gather_rows(q[0], q_rows), _gather_rows(q[1], q_rows))
+            q = (q[0].index_select(0, q_rows), q[1].index_select(0, q_rows))
         else:
             num_tokens = q.shape[0]
-            q = _gather_rows(q, q_rows)
+            q = q.index_select(0, q_rows)
         o, lse = self._forward_mqa(q, kv_c_and_k_pe_cache, attn_metadata, layer)
-        o_rows = decode.varlen_o_rows[:num_tokens]
-        o = o.index_select(0, o_rows)
-        if lse is not None:
-            lse = lse.index_select(0, o_rows)
-        return o, lse
+        assert lse is None
+        return o.index_select(0, decode.varlen_o_rows[:num_tokens]), None
 
     def _forward_mqa(
         self,

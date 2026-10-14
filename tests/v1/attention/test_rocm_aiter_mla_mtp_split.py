@@ -83,14 +83,12 @@ class _ExpandPageIndicesKernel:
             seq_len = int(
                 (paged_kv_indptr[req_idx + 1] - paged_kv_indptr[req_idx]).item()
             )
-            real_len = int(num_real_tokens[req_idx].item()) if CLAMP_TAIL else seq_len
             for token_idx in range(seq_len):
-                source_idx = token_idx if token_idx < real_len else 0
                 block_id = int(
-                    block_table_tensor[req_idx, source_idx // KERNEL_BLOCK_SIZE].item()
+                    block_table_tensor[req_idx, token_idx // KERNEL_BLOCK_SIZE].item()
                 )
                 page_indices[out_start + token_idx] = (
-                    block_id * KERNEL_BLOCK_SIZE + source_idx % KERNEL_BLOCK_SIZE
+                    block_id * KERNEL_BLOCK_SIZE + token_idx % KERNEL_BLOCK_SIZE
                 )
 
 
