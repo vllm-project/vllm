@@ -82,9 +82,14 @@ class DeepseekV32DecoderLayer(torch.nn.Module):
                 quant_config=quant_config,
                 prefix=f"{prefix}.mlp",
             )
-            # all2all already reduces; only TP defers it to the next RMSNorm.
+            # At TP=1 a reducing all2all combine leaves nothing for the RMSNorm.
             moe_parallel_config = self.mlp.experts.moe_config.moe_parallel_config
-            if not moe_parallel_config.use_all2all_kernels:
+            combine_reduces = (
+                moe_parallel_config.use_mori_kernels
+                or moe_parallel_config.use_deepep_ht_kernels
+                or moe_parallel_config.use_deepep_ll_kernels
+            )
+            if not combine_reduces or parallel_config.tensor_parallel_size > 1:
                 self.mlp.experts.moe_config.skip_final_all_reduce = True
         else:
             self.mlp = DeepseekV2MLP(
