@@ -254,16 +254,28 @@ class Worker(WorkerBase):
             )
         return self._sleep_mode_backend
 
+    def _get_sleep_parameters(self, model: nn.Module) -> dict[str, nn.Parameter]:
+        parameters = dict(model.named_parameters())
+        draft = self.get_draft_model()
+        if draft is not None:
+            shared = {id(parameter) for parameter in parameters.values()}
+            parameters.update(
+                (f"draft.{name}", parameter)
+                for name, parameter in draft.named_parameters()
+                if id(parameter) not in shared
+            )
+        return parameters
+
     def _save_sleep_parameters(self, model: nn.Module) -> None:
         patterns = self.model_config.sleep_preserve_parameter_names
         if not patterns:
             self._sleep_saved_parameters = {}
             return
-        parameters = dict(model.named_parameters())
+        parameters = self._get_sleep_parameters(model)
         names: set[str] = set()
         for pattern in patterns:
             matches = fnmatch_filter(parameters, pattern)
-            if not matches:
+            if not matches and pattern != "draft.*":
                 raise ValueError(f"No parameter matches sleep retention: {pattern}")
             names.update(matches)
         self._sleep_saved_parameters = {
@@ -274,8 +286,9 @@ class Worker(WorkerBase):
 
     @torch.no_grad()
     def _restore_sleep_parameters(self, model: nn.Module) -> None:
+        parameters = self._get_sleep_parameters(model)
         for name, value in self._sleep_saved_parameters.items():
-            model.get_parameter(name).copy_(value)
+            parameters[name].copy_(value)
         self._sleep_saved_parameters.clear()
 
     def sleep(self, level: int = 1) -> None:
@@ -295,6 +308,8 @@ class Worker(WorkerBase):
                     name: buffer.cpu().clone() for name, buffer in draft.named_buffers()
                 }
 
+        if has_kv_transfer_group():
+            get_kv_transfer_group().unregister_kv_caches()
         self.sleep_mode_backend.suspend(level)
         if self.vllm_config.model_config.enable_nccl_comm_suspend:
             suspend_device_comms()
@@ -318,6 +333,8 @@ class Worker(WorkerBase):
 
     def wake_up(self, tags: list[str] | None = None) -> None:
         self.sleep_mode_backend.resume(tags)
+        if has_kv_transfer_group() and (tags is None or "kv_cache" in tags):
+            get_kv_transfer_group().restore_kv_caches()
         if self.vllm_config.model_config.enable_nccl_comm_suspend:
             resume_device_comms()
 
@@ -343,6 +360,8 @@ class Worker(WorkerBase):
         self.synchronize_device()
 
     def discard(self, tags: tuple[str, ...]) -> None:
+        if has_kv_transfer_group() and "kv_cache" in tags:
+            get_kv_transfer_group().unregister_kv_caches()
         self.sleep_mode_backend.discard(tags)
 
     def checkpoint_prepare(self) -> None:
@@ -893,6 +912,13 @@ class Worker(WorkerBase):
 
     @instrument(span_name="Warmup (GPU)")
     def compile_or_warm_up_model(self) -> CompilationTimes:
+        if not self.use_v2_model_runner:
+            return self._compile_or_warm_up_model()
+        # MRV2 warmup forwards record expert load like real ones.
+        with self.model_runner.eplb.suppress():  # type: ignore
+            return self._compile_or_warm_up_model()
+
+    def _compile_or_warm_up_model(self) -> CompilationTimes:
         warmup_sizes: list[int] = []
 
         if (
@@ -1481,6 +1507,15 @@ class Worker(WorkerBase):
         # Parse dict into backend-specific typed dataclass
         typed_init_info = self.weight_transfer_engine.parse_init_info(init_info)
         self.weight_transfer_engine.init_transfer_engine(typed_init_info)
+
+    def shutdown_weight_transfer_engine(self) -> None:
+        """Release a trainer connection without shutting down inference."""
+        if self._weight_update_active:
+            raise RuntimeError(
+                "Cannot release a trainer connection during a weight update"
+            )
+        if self.weight_transfer_engine is not None:
+            self.weight_transfer_engine.shutdown()
 
     def start_weight_update(self) -> None:
         """Start a new weight update session.
