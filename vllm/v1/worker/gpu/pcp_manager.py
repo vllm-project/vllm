@@ -812,17 +812,13 @@ class PCPManager:
         return gathered[self._hidden_restore_idx]
 
     def get_draft_input_buffers(
-        self, input_buffers: InputBuffers
-    ) -> InputBatch | InputBuffers:
-        return self.draft_prefill_batch or input_buffers
-
-    def get_draft_moe_is_padding(
-        self, input_buffers: InputBatch | InputBuffers, num_tokens: int
-    ) -> torch.Tensor:
-        """Return the padding layout consumed by MoE during draft execution."""
-        if self.draft_prefill_batch is not None:
-            return self.draft_prefill_batch.is_padding
-        return self.moe_is_padding(input_buffers.is_padding[:num_tokens])
+        self, input_buffers: InputBuffers, num_tokens: int
+    ) -> tuple[InputBatch | InputBuffers, torch.Tensor]:
+        """Return draft inputs and their MoE routing padding mask."""
+        batch = self.draft_prefill_batch
+        if batch is not None:
+            return batch, batch.is_padding
+        return input_buffers, self.moe_is_padding(input_buffers.is_padding[:num_tokens])
 
     def prepare_draft_prefill(
         self, input_batch: InputBatch, input_ids: torch.Tensor

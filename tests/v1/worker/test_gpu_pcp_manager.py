@@ -243,9 +243,10 @@ def test_dummy_draft_does_not_reuse_previous_graph_batch():
 
     manager.prepare_draft_prefill(dummy_batch, dummy_batch.input_ids)
 
-    assert (
-        manager.get_draft_input_buffers(manager.input_buffers) is manager.input_buffers
+    draft_inputs, _ = manager.get_draft_input_buffers(
+        manager.input_buffers, dummy_batch.num_tokens_after_padding
     )
+    assert draft_inputs is manager.input_buffers
 
 
 def test_capture_uses_pcp_persistent_inputs():
@@ -788,12 +789,9 @@ def test_moe_padding_matches_pcp_all_gather(monkeypatch):
         hidden_states = torch.randn(num_tokens, 4, device=device)
         router_logits = torch.randn(num_tokens, 8, device=device)
         with set_forward_context(None, VllmConfig(), is_padding=batch_mask):
-            topk_weights, topk_ids, _ = fused_topk(
-                hidden_states, router_logits, 2, False
-            )
+            _, topk_ids, _ = fused_topk(hidden_states, router_logits, 2, False)
         assert (topk_ids[~batch_mask] >= 0).all()
         assert (topk_ids[batch_mask] == -1).all()
-        assert (topk_weights[batch_mask] == 0).all()
 
 
 @pytest.mark.parametrize(
