@@ -16,11 +16,9 @@ use serde::Serialize;
 use serde_json::Value;
 use uuid::Uuid;
 use vllm_chat::{
-    AssistantBlockKind, AssistantContentBlock, AssistantMessage, AssistantToolCall, ChatEvent,
-    FinishReason,
+    AssistantBlockKind, AssistantContentBlock, AssistantToolCall, ChatEvent, FinishReason,
 };
 
-use super::convert::build_output_items;
 use super::types::{
     AssistantRole, ResponseItemStatus, ResponseOutputContentPart, ResponseOutputItem,
     ResponsesResponse, TextPart,
@@ -168,25 +166,21 @@ pub(crate) enum ResponseStreamPart {
 /// SSE events.
 ///
 /// Items open lazily on the first non-empty delta so empty blocks never
-/// appear in the stream, matching the Python state machine. Item IDs assigned
-/// here are matched back onto the final response's output items in
-/// [`Self::final_output_items`] so streamed events and the terminal payload
-/// agree about IDs.
+/// appear in the stream, matching the Python state machine. Completed items
+/// are the response's `output` for both streaming and non-streaming
+/// requests, so streamed events and the terminal payload agree about items
+/// and IDs.
 pub(crate) struct OutputItemStreamer {
-    /// Index of the next output item.
-    output_index: u32,
     /// The currently open output item, if any.
     current: Option<OpenItem>,
     /// Whether reasoning items appear in the stream and final output.
     include_reasoning: bool,
-    /// IDs of streamed items in emission order, together with their block
-    /// kind. Used to keep final-response item IDs consistent with the stream.
-    streamed_ids: Vec<(AssistantBlockKind, String)>,
-    /// Completed items emitted before the terminal event. This supplies the
-    /// authoritative partial output when an upstream stream fails.
+    /// Items completed so far, in output order.
     completed_items: Vec<ResponseOutputItem>,
-    /// The last item's status is unknown until another item starts or generation ends.
-    pending_item: Option<(u32, ResponseOutputItem)>,
+    /// Whether the last completed item still owes its `output_item.done`
+    /// event: its status is unknown until another item starts or generation
+    /// ends.
+    last_item_done_pending: bool,
 }
 
 /// The currently streamed assistant output item.
@@ -204,19 +198,16 @@ enum OpenItem {
         call_id: String,
         name: String,
         arguments: String,
-        saw_delta: bool,
     },
 }
 
 impl OutputItemStreamer {
     pub(crate) fn new(include_reasoning: bool) -> Self {
         Self {
-            output_index: 0,
             current: None,
             include_reasoning,
-            streamed_ids: Vec::new(),
             completed_items: Vec::new(),
-            pending_item: None,
+            last_item_done_pending: false,
         }
     }
 
@@ -272,12 +263,9 @@ impl OutputItemStreamer {
         if let Some(position) = events
             .iter()
             .position(|event| matches!(event, ResponseStreamEvent::OutputItemAdded { .. }))
-            && let Some((output_index, item)) = self.pending_item.take()
+            && let Some(done) = self.take_last_item_done()
         {
-            events.insert(
-                position,
-                ResponseStreamEvent::OutputItemDone { output_index, item },
-            );
+            events.insert(position, done);
         }
         events
     }
@@ -289,57 +277,35 @@ impl OutputItemStreamer {
         finish_reason: Option<&FinishReason>,
     ) -> Vec<ResponseStreamEvent> {
         let mut events = self.close_current(None);
-        if let Some((output_index, mut item)) = self.pending_item.take() {
-            if matches!(finish_reason, Some(FinishReason::Length)) {
-                item.mark_incomplete();
-                if let Some(last) = self.completed_items.last_mut() {
-                    last.mark_incomplete();
-                }
-            }
-            events.push(ResponseStreamEvent::OutputItemDone { output_index, item });
+        if matches!(finish_reason, Some(FinishReason::Length))
+            && let Some(last) = self.completed_items.last_mut()
+        {
+            last.mark_incomplete();
         }
+        events.extend(self.take_last_item_done());
         events
     }
 
-    /// Build the final response output items, reusing streamed item IDs so
-    /// streamed events and the terminal payload agree about IDs.
-    pub(crate) fn final_output_items(
-        &self,
-        message: &AssistantMessage,
-        finish_reason: &FinishReason,
-    ) -> Vec<ResponseOutputItem> {
-        let mut items = build_output_items(message, self.include_reasoning, finish_reason);
-        let mut consumed = vec![false; self.streamed_ids.len()];
-        for item in &mut items {
-            let kind = match item {
-                ResponseOutputItem::Reasoning { .. } => AssistantBlockKind::Reasoning,
-                ResponseOutputItem::Message { .. } => AssistantBlockKind::Text,
-                ResponseOutputItem::FunctionCall { .. } => AssistantBlockKind::ToolCall,
-            };
-            let Some(index) = self
-                .streamed_ids
-                .iter()
-                .enumerate()
-                .find(|(index, (streamed_kind, _))| *streamed_kind == kind && !consumed[*index])
-                .map(|(index, _)| index)
-            else {
-                continue;
-            };
-            consumed[index] = true;
-            let (_, id) = &self.streamed_ids[index];
-            let id = id.clone();
-            match item {
-                ResponseOutputItem::Message { id: slot, .. }
-                | ResponseOutputItem::FunctionCall { id: slot, .. }
-                | ResponseOutputItem::Reasoning { id: slot, .. } => *slot = id,
-            }
+    /// Take the deferred `output_item.done` event of the last completed item.
+    fn take_last_item_done(&mut self) -> Option<ResponseStreamEvent> {
+        if !std::mem::take(&mut self.last_item_done_pending) {
+            return None;
         }
-        items
+        let item = self.completed_items.last()?.clone();
+        Some(ResponseStreamEvent::OutputItemDone {
+            output_index: self.output_index() - 1,
+            item,
+        })
     }
 
-    /// Return completed streamed items for a failed terminal response.
-    pub(crate) fn completed_output_items(&self) -> Vec<ResponseOutputItem> {
-        self.completed_items.clone()
+    /// Return the completed output items, the response's `output`.
+    pub(crate) fn into_output_items(self) -> Vec<ResponseOutputItem> {
+        self.completed_items
+    }
+
+    /// Index of the next output item.
+    fn output_index(&self) -> u32 {
+        self.completed_items.len() as u32
     }
 
     fn open_reasoning_if_needed(&mut self) -> Vec<ResponseStreamEvent> {
@@ -353,10 +319,7 @@ impl OutputItemStreamer {
             content: None,
             status: Some(ResponseItemStatus::InProgress),
         };
-        if self.include_reasoning {
-            self.streamed_ids.push((AssistantBlockKind::Reasoning, item_id.clone()));
-        }
-        let output_index = self.output_index;
+        let output_index = self.output_index();
         self.current = Some(OpenItem::Reasoning {
             item_id: item_id.clone(),
             text: String::new(),
@@ -383,8 +346,7 @@ impl OutputItemStreamer {
             status: ResponseItemStatus::InProgress,
             content: vec![],
         };
-        self.streamed_ids.push((AssistantBlockKind::Text, item_id.clone()));
-        let output_index = self.output_index;
+        let output_index = self.output_index();
         self.current = Some(OpenItem::Message {
             item_id: item_id.clone(),
             text: String::new(),
@@ -407,14 +369,12 @@ impl OutputItemStreamer {
     fn open_function_call(&mut self, id: &str, name: &str) -> ResponseStreamEvent {
         let item_id = format!("fc_{}", Uuid::new_v4().simple());
         let call_id = id.to_string();
-        self.streamed_ids.push((AssistantBlockKind::ToolCall, item_id.clone()));
-        let output_index = self.output_index;
+        let output_index = self.output_index();
         self.current = Some(OpenItem::FunctionCall {
             item_id: item_id.clone(),
             call_id: call_id.clone(),
             name: name.to_string(),
             arguments: String::new(),
-            saw_delta: false,
         });
         let item = ResponseOutputItem::FunctionCall {
             id: item_id,
@@ -433,7 +393,7 @@ impl OutputItemStreamer {
         text.push_str(&delta);
         ResponseStreamEvent::ReasoningTextDelta {
             item_id: item_id.clone(),
-            output_index: self.output_index,
+            output_index: self.output_index(),
             content_index: 0,
             delta,
         }
@@ -446,7 +406,7 @@ impl OutputItemStreamer {
         text.push_str(&delta);
         ResponseStreamEvent::OutputTextDelta {
             item_id: item_id.clone(),
-            output_index: self.output_index,
+            output_index: self.output_index(),
             content_index: 0,
             delta,
             logprobs: vec![],
@@ -455,19 +415,15 @@ impl OutputItemStreamer {
 
     fn function_call_delta(&mut self, delta: String) -> ResponseStreamEvent {
         let Some(OpenItem::FunctionCall {
-            item_id,
-            arguments,
-            saw_delta,
-            ..
+            item_id, arguments, ..
         }) = self.current.as_mut()
         else {
             unreachable!("function call delta requires an open function call item");
         };
         arguments.push_str(&delta);
-        *saw_delta = true;
         ResponseStreamEvent::FunctionCallArgumentsDelta {
             item_id: item_id.clone(),
-            output_index: self.output_index,
+            output_index: self.output_index(),
             delta,
         }
     }
@@ -483,7 +439,7 @@ impl OutputItemStreamer {
         let Some(open) = self.current.take() else {
             return vec![];
         };
-        let output_index = self.output_index;
+        let output_index = self.output_index();
         let (events, item) = match open {
             OpenItem::Reasoning { item_id, text } => {
                 let part = TextPart::reasoning_text(text.clone());
@@ -547,7 +503,6 @@ impl OutputItemStreamer {
                 call_id,
                 name,
                 arguments,
-                saw_delta: _,
             } => {
                 let (call_id, name, arguments) = match final_call {
                     Some(call) => (call.id.clone(), call.name.clone(), call.arguments.clone()),
@@ -569,9 +524,8 @@ impl OutputItemStreamer {
                 (events, item)
             }
         };
-        self.pending_item = Some((output_index, item.clone()));
         self.completed_items.push(item);
-        self.output_index += 1;
+        self.last_item_done_pending = true;
         events
     }
 
@@ -648,5 +602,46 @@ mod tests {
         assert_eq!(payloads[0]["type"], "response.function_call_arguments.done");
         assert_eq!(payloads[0]["arguments"], "");
         assert_eq!(payloads[1]["type"], "response.output_item.done");
+    }
+
+    #[test]
+    fn empty_reasoning_block_is_not_an_output_item() {
+        let mut streamer = OutputItemStreamer::new(true);
+        for event in [
+            ChatEvent::BlockStart {
+                index: 0,
+                kind: AssistantBlockKind::Reasoning,
+            },
+            ChatEvent::BlockEnd {
+                index: 0,
+                block: AssistantContentBlock::Reasoning {
+                    text: String::new(),
+                },
+            },
+            ChatEvent::BlockStart {
+                index: 1,
+                kind: AssistantBlockKind::Text,
+            },
+            ChatEvent::BlockDelta {
+                index: 1,
+                kind: AssistantBlockKind::Text,
+                delta: "hi".to_string(),
+                token_count: None,
+            },
+            ChatEvent::BlockEnd {
+                index: 1,
+                block: AssistantContentBlock::Text {
+                    text: "hi".to_string(),
+                },
+            },
+        ] {
+            streamer.on_event(&event);
+        }
+
+        let items = streamer.into_output_items();
+        assert!(
+            matches!(&items[..], [ResponseOutputItem::Message { .. }]),
+            "{items:?}"
+        );
     }
 }

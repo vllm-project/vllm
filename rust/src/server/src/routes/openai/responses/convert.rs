@@ -15,7 +15,6 @@ use itertools::Itertools as _;
 use serde_json::Value;
 use thiserror_ext::AsReport as _;
 use tracing::warn;
-use uuid::Uuid;
 use vllm_chat::{
     AssistantContentBlock, AssistantToolCall, ChatContent, ChatContentPart, ChatMessage,
     ChatOptions, ChatRequest, ChatTool, ChatToolChoice, Error as ChatError, GenerationPromptMode,
@@ -25,12 +24,12 @@ use vllm_text::output::TextDecodeOptions;
 use vllm_text::{EffectiveSampling, SamplingParams};
 
 use super::types::{
-    AssistantRole, IncompleteDetails, InputTokensDetails, OutputTokensDetails,
-    ResponseInputContentPart, ResponseInputItem, ResponseInputReasoning, ResponseInputRole,
-    ResponseItemStatus, ResponseMessageContent, ResponseObject, ResponseOutputContentPart,
-    ResponseOutputItem, ResponseTextConfig, ResponseTextFormat, ResponseToolChoice,
-    ResponseToolChoiceObject, ResponseTruncation, ResponseUsage, ResponsesInput,
-    ResponsesReasoning, ResponsesRequest, ResponsesResponse, ResponsesTool, ServiceTier, TextPart,
+    IncompleteDetails, InputTokensDetails, OutputTokensDetails, ResponseInputContentPart,
+    ResponseInputItem, ResponseInputReasoning, ResponseInputRole, ResponseItemStatus,
+    ResponseMessageContent, ResponseObject, ResponseOutputItem, ResponseTextConfig,
+    ResponseTextFormat, ResponseToolChoice, ResponseToolChoiceObject, ResponseTruncation,
+    ResponseUsage, ResponsesInput, ResponsesReasoning, ResponsesRequest, ResponsesResponse,
+    ResponsesTool, ServiceTier,
 };
 use super::validate;
 use crate::error::{ApiError, bail_invalid_request};
@@ -656,60 +655,6 @@ impl ResponseMessageContent {
             }
         }
     }
-}
-
-/// Build the response `output` items from the collected assistant message.
-///
-/// Mirrors `build_response_output_items` in the Python frontend: reasoning
-/// comes first when present and enabled, then visible text, then tool calls —
-/// except items here follow the structured block order, which preserves
-/// interleaved text/tool-call ordering when the parser yields it.
-pub(crate) fn build_output_items(
-    message: &vllm_chat::AssistantMessage,
-    include_reasoning: bool,
-    finish_reason: &vllm_chat::FinishReason,
-) -> Vec<ResponseOutputItem> {
-    let mut items: Vec<_> = message
-        .content
-        .iter()
-        .filter_map(|block| match block {
-            AssistantContentBlock::Reasoning { text } if include_reasoning => {
-                Some(ResponseOutputItem::Reasoning {
-                    id: format!("rs_{}", Uuid::new_v4().simple()),
-                    summary: vec![],
-                    content: Some(vec![TextPart::reasoning_text(text.clone())]),
-                    status: Some(ResponseItemStatus::Completed),
-                })
-            }
-            AssistantContentBlock::Reasoning { .. } => None,
-            AssistantContentBlock::Text { text } if !text.is_empty() => {
-                Some(ResponseOutputItem::Message {
-                    id: format!("msg_{}", Uuid::new_v4().simple()),
-                    role: AssistantRole,
-                    status: ResponseItemStatus::Completed,
-                    content: vec![ResponseOutputContentPart::OutputText {
-                        text: text.clone(),
-                        annotations: vec![],
-                        logprobs: None,
-                    }],
-                })
-            }
-            AssistantContentBlock::Text { .. } => None,
-            AssistantContentBlock::ToolCall(call) => Some(ResponseOutputItem::FunctionCall {
-                id: format!("fc_{}", Uuid::new_v4().simple()),
-                call_id: call.id.clone(),
-                name: call.name.clone(),
-                arguments: call.arguments.clone(),
-                status: Some(ResponseItemStatus::Completed),
-            }),
-        })
-        .collect();
-    if matches!(finish_reason, vllm_chat::FinishReason::Length)
-        && let Some(last) = items.last_mut()
-    {
-        last.mark_incomplete();
-    }
-    items
 }
 
 /// Build the `usage` block of a completed response.
