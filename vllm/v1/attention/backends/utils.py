@@ -835,6 +835,14 @@ def split_decodes_prefills_and_extends(
             0,
         )
 
+    # The batch order cannot always put every request with context ahead of the
+    # first context-less one (padded draft rows must stay at the front), so keep
+    # the prefill region clear of any request that has context.
+    has_context = (seq_lens != query_lens) & (query_lens > 0)
+    context_rows = torch.nonzero(has_context).flatten()
+    if context_rows.numel() > 0:
+        first_prefill = max(first_prefill, int(context_rows[-1]) + 1)
+
     num_extends = first_prefill - num_decodes
     num_prefills = num_reqs - first_prefill
 

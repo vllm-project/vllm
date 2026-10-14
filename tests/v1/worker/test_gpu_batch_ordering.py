@@ -286,9 +286,11 @@ def test_extends_precede_prefills_through_the_splitter():
 
     assert classify(req_ids) == (1, 1, 1)
 
-    # Misordered, "resumed" falls on the prefill side and loses its KV history.
-    # Nothing raises: the split is well formed and only the logits are wrong.
-    assert classify(["d0", "fresh", "resumed"]) == (1, 0, 2)
+    # Misordered, "resumed" keeps its KV history anyway: the splitter will not
+    # start the prefill region before the last request that has context, so the
+    # context-less "fresh" chunk is classified as an extend rather than taking
+    # "resumed" onto the prefill side with it.
+    assert classify(["d0", "fresh", "resumed"]) == (1, 2, 0)
 
 
 def test_ordering_holds_for_the_dcp_splitter_threshold():
@@ -345,27 +347,26 @@ def test_sorted_batches_never_put_context_on_the_prefill_side():
     for decode_query_len in (1, 2, 4, 8):
         for _ in range(250):
             req_ids = [f"r{i}" for i in range(int(rng.integers(2, 7)))]
-            req_id_to_index = {r: i for i, r in enumerate(req_ids)}
+            # Slots differ from batch positions, and free slots hold stale counts.
+            slots = rng.permutation(len(req_ids) + 3)[: len(req_ids)]
+            req_id_to_index = {r: int(s) for r, s in zip(req_ids, slots)}
             # Decode-shaped, short-chunk and long-chunk requests, each of which
             # may or may not already have computed context.
             num_tokens_per_req = {
                 r: int(rng.choice([1, decode_query_len, rng.integers(2, 16), 4096]))
                 for r in req_ids
             }
-            num_computed = np.array(
-                [int(rng.choice([0, rng.integers(1, 100_000)])) for _ in req_ids],
-                dtype=np.int32,
-            )
-            # Only verifying rows carry drafts, which is what the scheduler
-            # does. Handing them to every request with context would make the
-            # draft term sort context first on its own, which is the property
-            # under test, and no batch would exercise the context term.
+            num_computed = np.full(len(req_ids) + 3, 7, dtype=np.int32)
+            for r in req_ids:
+                num_computed[req_id_to_index[r]] = int(
+                    rng.choice([0, rng.integers(1, 100_000)])
+                )
+            # Decode-sized rows carry drafts whether or not they have context: the
+            # scheduler pads a new one-token prompt with placeholder drafts too.
             draft_tokens = {
                 r: [0] * (decode_query_len - 1)
-                for i, r in enumerate(req_ids)
-                if decode_query_len > 1
-                and num_computed[i]
-                and num_tokens_per_req[r] == decode_query_len
+                for r in req_ids
+                if decode_query_len > 1 and num_tokens_per_req[r] == decode_query_len
             }
 
             order = sort_batch_req_ids(
@@ -474,3 +475,37 @@ def test_no_speculator_dispatches_on_query_length_alone():
         "these speculators classify a decode batch by query length alone; use "
         f"get_uniform_decode_token_count instead: {offenders}"
     )
+
+
+def test_padded_drafts_on_a_context_less_prompt_keep_the_prefill_region_clear():
+    """The one row the batch ordering cannot place correctly.
+
+    The scheduler pads a new one-token prompt to decode_query_len and gives it
+    placeholder drafts (scheduler.py, pad_spec_decode). The draft term sorts it
+    ahead of requests that do carry context, and it cannot be ordered behind
+    them: adaptive verification requires drafted requests to stay contiguous at
+    the front. At threshold 1, the caller in cp_utils, the padded row is a
+    prefill, so the splitter has to keep the prefill region clear itself.
+    """
+    num_tokens_per_req = {"running": 4, "one_token_prompt": 4, "prefix_hit": 2048}
+    req_id_to_index = {"running": 0, "one_token_prompt": 1, "prefix_hit": 2}
+    num_computed = np.array([5000, 0, 1024], dtype=np.int32)
+    draft_tokens = {"running": [0] * 3, "one_token_prompt": [-1] * 3}
+
+    order = sort_batch_req_ids(
+        num_tokens_per_req, draft_tokens, 4, num_computed, req_id_to_index
+    )
+    # The padded prompt stays with the drafted requests at the front.
+    assert order == ["running", "one_token_prompt", "prefix_hit"]
+
+    metadata = _make_common_attn_metadata(
+        [num_tokens_per_req[r] for r in order],
+        [int(num_computed[req_id_to_index[r]]) for r in order],
+    )
+    for decode_threshold in (1, 4):
+        num_prefills = split_decodes_prefills_and_extends(metadata, decode_threshold)[2]
+        prefill_rows = order[len(order) - num_prefills :] if num_prefills else []
+        assert all(num_computed[req_id_to_index[r]] == 0 for r in prefill_rows), (
+            f"threshold={decode_threshold} put a request with computed context "
+            f"in the prefill region: {prefill_rows}"
+        )
