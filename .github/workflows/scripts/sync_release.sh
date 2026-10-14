@@ -9,6 +9,7 @@
 #   MIN_TAG   oldest upstream tag to release (default v0.31.0)
 #   TAG       release only this upstream tag, as a new +geo.N even if one exists
 #   DRY_RUN   "true" to stop before anything is pushed or published
+#   (uv must be on PATH for the syntax check)
 #   GH_TOKEN  token that may push tags, branches and workflow files, and write
 #             releases and issues
 set -euo pipefail
@@ -70,7 +71,7 @@ release_one() {
   # Light checks on what the fork changed: whitespace errors and Python syntax.
   git diff --check "refs/tags/${tag}" HEAD
   git diff --name-only --diff-filter=AM "refs/tags/${tag}" HEAD -- '*.py' \
-    | xargs -r python3 -m py_compile
+    | xargs -r uv run --no-project --python 3.12 python -m py_compile
 
   if [ "${DRY_RUN}" = "true" ]; then
     echo "Dry run: would publish ${new} at $(git rev-parse --short HEAD)"

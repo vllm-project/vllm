@@ -42,6 +42,9 @@ jobs:
         with:
           fetch-depth: 0
           token: ${{ secrets.RELEASE_TOKEN }}
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
+        with:
+          python-version: "3.12"
       - name: Release new upstream versions
         env:
           GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
