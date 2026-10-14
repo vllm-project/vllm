@@ -87,6 +87,7 @@ _CONFIG_REGISTRY: dict[str, type[PreTrainedConfig]] = LazyConfigDict(
     qwen3_vl_nemotron_embed="Qwen3VLNemotronEmbedConfig",
     deepseek_vl_v2="DeepseekVLV2Config",
     deepseek_v32="DeepseekV3Config",
+    deepseek_v4="DeepseekV4Config",
     dots3_note="Dots3NoteConfig",
     k3_dspark="K3DSparkConfig",
     funaudiochat="FunAudioChatConfig",
@@ -170,10 +171,7 @@ def is_rope_parameters_nested(rope_parameters: dict[str, Any]) -> bool:
     # Cannot be nested if rope_parameters is empty
     if not rope_parameters:
         return False
-    # DeepSeek-V4 nests by rope type ("main", "compress") instead
-    return set(rope_parameters.keys()).issubset(
-        {*ALLOWED_LAYER_TYPES, "main", "compress"}
-    )
+    return set(rope_parameters.keys()).issubset(ALLOWED_LAYER_TYPES)
 
 
 @contextmanager

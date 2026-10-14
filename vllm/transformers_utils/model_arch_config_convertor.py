@@ -17,7 +17,6 @@ from vllm.transformers_utils.config import (
     ConfigFormat,
     get_safetensors_params_metadata,
 )
-from vllm.transformers_utils.deepseek_v4_utils import get_compress_ratios
 from vllm.utils.torch_utils import common_broadcastable_dtype
 
 logger = init_logger(__name__)
@@ -86,7 +85,7 @@ class ModelArchConfigConvertorBase:
     def get_head_size(self) -> int:
         if self.is_deepseek_mla():
             # special case for deepseek_v4
-            if get_compress_ratios(self.hf_text_config):
+            if hasattr(self.hf_text_config, "compress_ratios"):
                 return self.hf_text_config.head_dim
             qk_rope_head_dim = self._get_qk_rope_head_dim()
             if not envs.VLLM_MLA_DISABLE:
@@ -338,7 +337,7 @@ class ModelArchConfigConvertorBase:
             "hy_v4_mtp",
         ):
             # check is deepseek_v4 model
-            if get_compress_ratios(self.hf_text_config):
+            if hasattr(self.hf_text_config, "compress_ratios"):
                 return getattr(self.hf_text_config, "head_dim", None) is not None
             else:
                 return getattr(self.hf_text_config, "kv_lora_rank", None) is not None
