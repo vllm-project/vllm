@@ -301,6 +301,9 @@ class CompressedTensorsW8A8Fp8MoEMethod(
                 is_act_and_mul=self.moe.is_act_and_mul,
             )
 
+        w13, w2, w13_scale, w2_scale = self.maybe_pad_weights(
+            w13, w2, w13_scale, w2_scale
+        )
         w13, w2, w13_scale, w2_scale = convert_to_fp8_moe_kernel_format(
             fp8_backend=self.fp8_backend,
             layer=layer,

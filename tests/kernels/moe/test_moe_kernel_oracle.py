@@ -222,31 +222,50 @@ def test_maybe_round_up_calls_fp8_moe_round_up_sizes_only_when_needed(
         (2048, 1408, 2048, 1536),  # intermediate only
         (2880, 1536, 2944, 1536),  # hidden only
         (704, 640, 768, 768),  # both padded, small
-        (2048, 1536, 2048, 1536),  # aligned, nothing to zero
+        (2048, 1536, 2048, 1536),  # aligned, nothing to pad
     ],
 )
-def test_maybe_zero_moe_weight_padding(hidden, inter, hidden_pad, inter_pad):
-    """The padding of torch.empty-allocated FP8 expert weights is zeroed before
-    the AITER shuffle, and the checkpoint slices are left untouched."""
+def test_pad_fp8_moe_weights(hidden, inter, hidden_pad, inter_pad):
+    """Loaded FP8 expert weights and per-channel scales are zero-padded to the
+    kernel's sizes, with gate and up each starting at their padded offsets."""
     from tests.kernels.moe.utils import make_dummy_moe_config
-    from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
-        maybe_zero_moe_weight_padding,
-    )
+    from vllm.model_executor.layers.fused_moe.oracle.fp8 import pad_fp8_moe_weights
 
     moe_config = make_dummy_moe_config(
         num_experts=2, hidden_dim=hidden, intermediate_size=inter
     )
-    moe_config.hidden_dim = hidden_pad
-    moe_config.intermediate_size_per_partition = inter_pad
 
+    # Gate is all ones and up all twos, so a misplaced half shows up.
     fp8_dtype = current_platform.fp8_dtype()
-    w13 = torch.ones(2, 2 * inter_pad, hidden_pad).to(fp8_dtype)
-    w2 = torch.ones(2, hidden_pad, inter_pad).to(fp8_dtype)
+    w13 = torch.cat([torch.ones(2, inter, hidden), 2 * torch.ones(2, inter, hidden)], 1)
+    w13 = w13.to(fp8_dtype)
+    w2 = torch.ones(2, hidden, inter).to(fp8_dtype)
+    w13_scale = torch.cat([3 * torch.ones(2, inter, 1), 4 * torch.ones(2, inter, 1)], 1)
+    w2_scale = 5 * torch.ones(2, hidden, 1)
 
-    maybe_zero_moe_weight_padding(moe_config, w13, w2)
+    w13, w2, w13_scale, w2_scale = pad_fp8_moe_weights(
+        moe_config, w13, w2, w13_scale, w2_scale, hidden_pad, inter_pad
+    )
 
-    # fp8 has no comparison ops on ROCm; 0 and 1 convert to float exactly.
+    assert w13.shape == (2, 2 * inter_pad, hidden_pad)
+    assert w2.shape == (2, hidden_pad, inter_pad)
+    assert w13_scale.shape == (2, 2 * inter_pad, 1)
+    assert w2_scale.shape == (2, hidden_pad, 1)
+
+    # fp8 has no comparison ops on ROCm; 0, 1 and 2 convert to float exactly.
     w13, w2 = w13.float(), w2.float()
+
+    # The loaded values are in place.
+    assert (w13[:, :inter, :hidden] == 1).all(), "Expected w13 gate to be all ones."
+    assert (w13[:, inter_pad : inter_pad + inter, :hidden] == 2).all(), (
+        "Expected w13 up to be all twos."
+    )
+    assert (w2[:, :hidden, :inter] == 1).all(), "Expected w2 to be all ones."
+    assert (w13_scale[:, :inter] == 3).all(), "Expected the gate scales."
+    assert (w13_scale[:, inter_pad : inter_pad + inter] == 4).all(), (
+        "Expected the up scales."
+    )
+    assert (w2_scale[:, :hidden] == 5).all(), "Expected the w2 scales."
 
     # The padding is zero.
     assert (w13[:, inter:inter_pad] == 0).all(), "Expected zero w13 gate padding."
@@ -254,10 +273,3 @@ def test_maybe_zero_moe_weight_padding(hidden, inter, hidden_pad, inter_pad):
     assert (w13[:, :, hidden:] == 0).all(), "Expected zero w13 hidden padding."
     assert (w2[:, hidden:] == 0).all(), "Expected zero w2 hidden padding."
     assert (w2[:, :, inter:] == 0).all(), "Expected zero w2 intermediate padding."
-
-    # The checkpoint values are still ones.
-    assert (w13[:, :inter, :hidden] == 1).all(), "Expected w13 gate to be all ones."
-    assert (w13[:, inter_pad : inter_pad + inter, :hidden] == 1).all(), (
-        "Expected w13 up to be all ones."
-    )
-    assert (w2[:, :hidden, :inter] == 1).all(), "Expected w2 to be all ones."

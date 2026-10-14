@@ -930,13 +930,19 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod, FusedFp8MoEMethodBase):
         self._setup_kernel(layer)
 
     def _setup_kernel(self, layer: RoutedExperts) -> None:
+        w13, w2, w13_scale, w2_scale = self.maybe_pad_weights(
+            layer.w13_weight,
+            layer.w2_weight,
+            layer.w13_weight_scale,
+            layer.w2_weight_scale,
+        )
         w13, w2, w13_scale, w2_scale = convert_to_fp8_moe_kernel_format(
             fp8_backend=self.fp8_backend,
             layer=layer,
-            w13=layer.w13_weight,
-            w2=layer.w2_weight,
-            w13_scale=layer.w13_weight_scale,
-            w2_scale=layer.w2_weight_scale,
+            w13=w13,
+            w2=w2,
+            w13_scale=w13_scale,
+            w2_scale=w2_scale,
             w13_input_scale=layer.w13_input_scale,
             w2_input_scale=layer.w2_input_scale,
         )

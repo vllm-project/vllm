@@ -674,6 +674,9 @@ class Fp8MoEMethod(FusedFp8MoEMethodBase):
         w13_input_scale: torch.Tensor | None,
         w2_input_scale: torch.Tensor | None,
     ) -> None:
+        w13, w2, w13_scale, w2_scale = self.maybe_pad_weights(
+            w13, w2, w13_scale, w2_scale
+        )
         # Shuffle weights to runtime format.
         w13, w2, w13_scale, w2_scale = convert_to_fp8_moe_kernel_format(
             fp8_backend=self.fp8_backend,
@@ -710,7 +713,8 @@ class Fp8MoEMethod(FusedFp8MoEMethodBase):
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
         if is_weights_pre_processed():
-            # Weights are already in kernel format; rebuild the kernel only.
+            # Weights are already in kernel format (padded); rebuild the kernel only.
+            self.update_kernel_sizes()
             self._init_moe_kernel(layer)
             return
 
