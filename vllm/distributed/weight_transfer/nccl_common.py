@@ -26,6 +26,7 @@ from vllm.distributed.weight_transfer.packed_tensor import (
     DEFAULT_PACKED_BUFFER_SIZE_BYTES,
     DEFAULT_PACKED_NUM_BUFFERS,
 )
+from vllm.utils.nccl import unpinned_nccl_env
 
 
 def decode_nccl_unique_id(
@@ -154,7 +155,8 @@ def stateless_init_process_group(
     pg = StatelessProcessGroup.create(
         host=master_address, port=master_port, rank=rank, world_size=world_size
     )
-    return PyNcclCommunicator(pg, device=device)
+    with unpinned_nccl_env():
+        return PyNcclCommunicator(pg, device=device)
 
 
 def uid_init_process_group(
@@ -170,12 +172,13 @@ def uid_init_process_group(
     """
     from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
 
-    return PyNcclCommunicator.from_unique_id_bytes(
-        nccl_unique_id_bytes,
-        rank=rank,
-        world_size=world_size,
-        device=device,
-    )
+    with unpinned_nccl_env():
+        return PyNcclCommunicator.from_unique_id_bytes(
+            nccl_unique_id_bytes,
+            rank=rank,
+            world_size=world_size,
+            device=device,
+        )
 
 
 def worker_init_process_group(

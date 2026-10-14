@@ -17,6 +17,23 @@ from .methods import TokenPoolingMethodOutputItem
 TokenPoolerHeadOutputItem: TypeAlias = torch.Tensor | None
 
 
+def _mean_pool_chunks(data: torch.Tensor, chunk_size: int) -> torch.Tensor:
+    """Mean-pool complete contextual states, accumulating in FP32."""
+    chunk_size = min(chunk_size, len(data))
+    num_full, remainder = divmod(len(data), chunk_size)
+    full_end = num_full * chunk_size
+    full_chunks = data[:full_end].reshape(num_full, chunk_size, data.shape[-1])
+    if not remainder:
+        return full_chunks.mean(dim=1, dtype=torch.float32)
+
+    return torch.cat(
+        [
+            full_chunks.mean(dim=1, dtype=torch.float32),
+            data[full_end:].mean(dim=0, keepdim=True, dtype=torch.float32),
+        ]
+    )
+
+
 class TokenPoolerHead(nn.Module, ABC):
     @abstractmethod
     def get_supported_tasks(self) -> Set[PoolingTask]:
@@ -79,6 +96,12 @@ class TokenEmbeddingPoolerHead(TokenPoolerHead):
         # for unfinished chunked prefill
         if pooled_data is None:
             return None
+
+        if (late_chunking := pooling_param.late_chunking_params) is not None:
+            means = _mean_pool_chunks(pooled_data, late_chunking.chunk_size)
+            pooled_data = (
+                means.to(pooled_data.dtype) if self.head_dtype is None else means
+            )
 
         if self.head_dtype is not None:
             pooled_data = pooled_data.to(self.head_dtype)

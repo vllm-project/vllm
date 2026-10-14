@@ -112,6 +112,8 @@ def test_mrv1_kv_pool_only_wraps_backing_allocation(monkeypatch) -> None:
         model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="test")),
         compilation_config=SimpleNamespace(static_forward_context={}),
         kv_caches=[],
+        attn_groups=[],
+        speculative_config=None,
     )
     result = gpu_model_runner.GPUModelRunner.initialize_kv_cache_tensors(
         runner,
