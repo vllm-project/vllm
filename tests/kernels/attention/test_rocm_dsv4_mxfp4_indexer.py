@@ -23,7 +23,7 @@ from vllm.platforms.rocm import get_cdna_version
 if get_cdna_version() != 4:
     pytest.skip("CDNA4-only", allow_module_level=True)
 
-from vllm.models.deepseek_v4.amd.mxfp4_indexer import (
+from vllm.models.deepseek_v4.amd.rocm import (
     DeepseekV4RocmMxfp4Compressor,
 )
 from vllm.utils.math_utils import cdiv

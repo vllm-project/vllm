@@ -193,7 +193,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         """Return whether this instance stores fp8 KV in fp8_ds_mla layout."""
         return self.use_fp8_ds_mla_layout
 
-    def _indexer_cls(self, vllm_config: VllmConfig) -> type["DeepseekV4Indexer"]:
+    def _get_indexer_cls(self, vllm_config: VllmConfig) -> type["DeepseekV4Indexer"]:
         """The indexer for this layer. A platform subclass returns one that
         writes and scores its own index K cache layout."""
         return DeepseekV4Indexer
@@ -307,7 +307,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             indexer_aux_stream = (
                 aux_stream_list[2] if aux_stream_list is not None else None
             )
-            self.indexer = self._indexer_cls(vllm_config)(
+            self.indexer = self._get_indexer_cls(vllm_config)(
                 vllm_config,
                 config=config,
                 hidden_size=self.hidden_size,
@@ -931,10 +931,15 @@ class DeepseekV4IndexerCache(torch.nn.Module, AttentionLayerBase):
 
 class DeepseekV4Indexer(nn.Module):
     # The index K cache, its writer and the scoring layer; a platform subclass
-    # swaps in its own.
-    cache_cls: ClassVar[type["DeepseekV4IndexerCache"]] = DeepseekV4IndexerCache
-    compressor_cls: ClassVar[type[DeepseekCompressor]] = DeepseekCompressor
-    attn_cls: ClassVar[type[SparseAttnIndexer]] = SparseAttnIndexer
+    # returns its own.
+    def _get_cache_cls(self) -> type[DeepseekV4IndexerCache]:
+        return DeepseekV4IndexerCache
+
+    def _get_compressor_cls(self) -> type[DeepseekCompressor]:
+        return DeepseekCompressor
+
+    def _get_attn_cls(self) -> type[SparseAttnIndexer]:
+        return SparseAttnIndexer
 
     def __init__(
         self,
@@ -1022,14 +1027,14 @@ class DeepseekV4Indexer(nn.Module):
             k_cache_head_dim = (
                 self.head_dim + self.head_dim // self.quant_block_size * 4
             )
-        self.k_cache = self.cache_cls(
+        self.k_cache = self._get_cache_cls()(
             head_dim=k_cache_head_dim,
             dtype=torch.uint8,
             prefix=f"{prefix}.k_cache",
             cache_config=cache_config,
             compress_ratio=self.compress_ratio,
         )
-        self.compressor = self.compressor_cls(
+        self.compressor = self._get_compressor_cls()(
             vllm_config=vllm_config,
             compress_ratio=self.compress_ratio,
             hidden_size=hidden_size,
@@ -1040,7 +1045,7 @@ class DeepseekV4Indexer(nn.Module):
             use_fp4_cache=self.use_fp4_kv,
         )
 
-        self.indexer_op = self.attn_cls(
+        self.indexer_op = self._get_attn_cls()(
             self.k_cache,
             self.quant_block_size,
             self.scale_fmt,
