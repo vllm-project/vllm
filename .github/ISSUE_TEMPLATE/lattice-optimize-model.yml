@@ -1,5 +1,5 @@
 name: "Geometric: Optimize a model"
-description: Make a model faster on your chosen engine and GPU.
+description: Make a model faster on your chosen hardware and runtime engine.
 title: "Optimize model: "
 labels: ["optimization"]
 body:
@@ -83,11 +83,6 @@ body:
         and generate about 256 tokens, with a concurrency of 16. Time to first
         token gets noticeably worse at this load. Start by checking the prefill
         attention kernels, and keep the model weights at BF16.
-  - type: input
-    attributes:
-      label: Target size
-      description: How small the model should be, such as 40GB. Required when Quantize or Prune is Yes.
-      placeholder: 40GB
   - type: dropdown
     attributes:
       label: Quantize
@@ -108,11 +103,17 @@ body:
       default: 0
     validations:
       required: true
+  - type: input
+    attributes:
+      label: Target size
+      description: How small the model should be, such as 40GB. Required when Quantize or Prune is Yes.
+      placeholder: 40GB
   - type: dropdown
     attributes:
       label: Quantization formats
-      description: Select the formats to consider. Different layers can use different formats. Choose auto on its own. Leave blank to let us choose for your hardware.
+      description: Select the formats to consider. Different layers can use different formats.
       multiple: true
+      default: 0
       options:
         - auto (we’ll figure out the best formats to use)
         - nvfp4

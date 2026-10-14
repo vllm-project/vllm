@@ -1,4 +1,4 @@
-name: Optimize an endpoint
+name: "Geometric: Optimize an endpoint"
 description: "Geometric: Make an endpoint faster using its real traffic patterns."
 title: "Optimize endpoint: "
 labels: ["optimization"]
@@ -90,11 +90,6 @@ body:
       default: 0
     validations:
       required: true
-  - type: input
-    attributes:
-      label: Target size
-      description: How small the model should be, such as 40GB. Required when Quantize or Prune is Yes.
-      placeholder: 40GB
   - type: dropdown
     attributes:
       label: Quantize
@@ -115,11 +110,17 @@ body:
       default: 0
     validations:
       required: true
+  - type: input
+    attributes:
+      label: Target size
+      description: How small the model should be, such as 40GB. Required when Quantize or Prune is Yes.
+      placeholder: 40GB
   - type: dropdown
     attributes:
       label: Quantization formats
-      description: Select the formats to consider. Different layers can use different formats. Choose auto on its own. Leave blank to let us choose for your hardware.
+      description: Select the formats to consider. Different layers can use different formats.
       multiple: true
+      default: 0
       options:
         - auto (we’ll figure out the best formats to use)
         - nvfp4
