@@ -39,6 +39,7 @@ from vllm.distributed.weight_transfer.m2n_common import (
     check_data_plane_agreement,
     check_runtime_ready_agreement,
     check_source_plan_agreement,
+    check_transferable,
     create_m2n_communicator,
     expected_local_shape,
     import_m2n,
@@ -194,7 +195,7 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
         init_info: M2NTrainerInitInfo,
         *,
         client: VLLMWeightSyncClient,
-        source: WeightSource,  # type: ignore[override]
+        source: WeightSource | None = None,
     ) -> Self:
         """Build the engine and rendezvous with the inference side.
 
@@ -222,7 +223,7 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
     def _initialize(
         self,
         init_info: M2NTrainerInitInfo,
-        source: WeightSource,
+        source: WeightSource | None,
     ) -> None:
         """Run source validation, metadata agreement, and NCCL rendezvous."""
         self._num_trainer_ranks = init_info.num_trainer_ranks
@@ -283,6 +284,7 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
                 metadata_group,
                 source_digest=plan_digest,
                 params=self._wire_params,
+                metas=self._metas,
                 dst_mesh=self._dst_mesh,
                 local_plan=None,
                 local_error=None,
@@ -328,12 +330,16 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
             )
             logger.info("nccl_m2n source plan digest: %s", plan_digest)
         except BaseException:
+            self._destination_plan = []
+            self._destination_commit_token = ""
+            self._dst_placements = []
+            self._dst_mesh = None
             if group is not None:
                 try:
-                    group.destroy()
+                    group.abort()
                 except BaseException:
                     logger.exception(
-                        "failed to destroy partially initialized nccl_m2n communicator"
+                        "failed to abort partially initialized nccl_m2n communicator"
                     )
             if handle is not None:
                 try:
@@ -369,6 +375,7 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
                     f"'{meta.name}'"
                 )
             names.add(meta.name)
+            check_transferable(meta.name, meta.dtype, meta.shape)
             layout = meta.source_layout
             if layout.mesh.start_rank != 0:
                 raise ValueError(
@@ -381,6 +388,7 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
                     f"{layout.mesh.size} ranks, but there are "
                     f"{num_trainer_ranks} trainer ranks"
                 )
+            expected_local_shape(meta)
         self._wire_params = [
             M2NWireParam(
                 name=meta.name,
@@ -458,40 +466,47 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
         if self._handle is None or self.group is None:
             raise RuntimeError("nccl_m2n trainer engine is not initialized")
 
-        try:
-            if self.is_sender:
-                self.client.start_weight_update()
-                executor = ThreadPoolExecutor(
-                    max_workers=1, thread_name_prefix="m2n-weight-sync"
-                )
-                try:
-                    update = executor.submit(
-                        self.client.update_weights,
-                        {"names": [m.name for m in self._metas]},
-                    )
-                    # Surface an immediate worker-side rejection before trainers
-                    # enter the collective sequence.
-                    if update.done():
-                        update.result()
-                    self._send()
-                    update.result()
-                finally:
-                    executor.shutdown(wait=False, cancel_futures=True)
-                self.client.finish_weight_update()
-            else:
+        if not self.is_sender:
+            try:
                 self._send()
-        except BaseException as exc:
-            if self.is_sender:
+            except BaseException:
                 try:
-                    self._publish_round_outcome(exc)
+                    self._receive_round_outcome()
                 except BaseException:
-                    logger.exception("failed to publish nccl_m2n round failure")
+                    logger.exception(
+                        "failed to consume nccl_m2n round outcome after local failure"
+                    )
+                raise
+            self._receive_round_outcome()
+            return
+
+        try:
+            self.client.start_weight_update()
+            executor = ThreadPoolExecutor(
+                max_workers=1, thread_name_prefix="m2n-weight-sync"
+            )
+            try:
+                update = executor.submit(
+                    self.client.update_weights,
+                    {"names": [m.name for m in self._metas]},
+                )
+                # Surface an immediate worker-side rejection before trainers
+                # enter the collective sequence.
+                if update.done():
+                    update.result()
+                self._send()
+                update.result()
+            finally:
+                executor.shutdown(wait=False, cancel_futures=True)
+            self.client.finish_weight_update()
+        except BaseException as exc:
+            try:
+                self._publish_round_outcome(exc)
+            except BaseException:
+                logger.exception("failed to publish nccl_m2n round failure")
             raise
 
-        if self.is_sender:
-            self._publish_round_outcome(None)
-        else:
-            self._receive_round_outcome()
+        self._publish_round_outcome(None)
 
     def _publish_round_outcome(self, failure: BaseException | None) -> None:
         """Tell non-sender trainer ranks whether worker finalization passed."""
@@ -507,12 +522,22 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
         }
         for rank in range(1, self._num_trainer_ranks):
             self._metadata_group.send_obj(envelope, rank)
+        # Keep rank zero's TCPStore alive until every trainer consumed its
+        # outcome. This also keeps the per-rank message counters aligned.
+        expected_ack = {"phase": "round_outcome_consumed"}
+        for rank in range(1, self._num_trainer_ranks):
+            ack = self._metadata_group.recv_obj(rank)
+            if ack != expected_ack:
+                raise RuntimeError(
+                    f"trainer rank {rank} sent an invalid round-outcome acknowledgement"
+                )
 
     def _receive_round_outcome(self) -> None:
         """Wait until trainer rank zero observed every worker's finish RPC."""
         if self._metadata_group is None:
             raise RuntimeError("nccl_m2n metadata group is unavailable")
         outcome = self._metadata_group.recv_obj(0)
+        self._metadata_group.send_obj({"phase": "round_outcome_consumed"}, 0)
         if not isinstance(outcome, Mapping) or set(outcome) != {"ok", "error"}:
             raise RuntimeError("trainer rank zero sent an invalid round outcome")
         ok = outcome["ok"]
@@ -627,6 +652,6 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
         if handle is not None:
             attempt(handle.destroy, "failed to destroy nccl_m2n handle")
         if group is not None:
-            attempt(group.destroy, "failed to destroy nccl_m2n communicator")
+            attempt(group.abort, "failed to abort nccl_m2n communicator")
         if first_error is not None:
             raise first_error

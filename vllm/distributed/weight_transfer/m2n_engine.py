@@ -35,6 +35,7 @@ from vllm.distributed.weight_transfer.base import (
 from vllm.distributed.weight_transfer.m2n_common import (
     DESTINATION_SHARD_AXIS,
     M2N_WIRE_SCHEMA_VERSION,
+    MESH_NDIMS,
     M2NDestinationMode,
     M2NLayout,
     M2NMesh,
@@ -44,7 +45,9 @@ from vllm.distributed.weight_transfer.m2n_common import (
     check_data_plane_agreement,
     check_runtime_ready_agreement,
     check_source_plan_agreement,
+    check_transferable,
     create_m2n_communicator,
+    expected_local_shape,
     import_m2n,
     prepare_m2n_local_runtime,
     resolve_layout,
@@ -137,18 +140,38 @@ class M2NWeightTransferInitInfo(WeightTransferInitInfo):
             or not 0 < self.master_port < 65536
         ):
             raise ValueError("`master_port` must be a valid metadata port")
-        if self.rank_offset < 1 or self.rank_offset >= self.world_size:
+        if (
+            not isinstance(self.rank_offset, int)
+            or isinstance(self.rank_offset, bool)
+            or not isinstance(self.world_size, int)
+            or isinstance(self.world_size, bool)
+            or self.rank_offset < 1
+            or self.rank_offset >= self.world_size
+        ):
             raise ValueError(
                 f"`rank_offset` ({self.rank_offset}) must leave at least one "
                 f"trainer rank and one worker in world_size {self.world_size}"
             )
-        if self.worker_rank_offset is not None and not (
-            self.rank_offset <= self.worker_rank_offset < self.world_size
+        if self.worker_rank_offset is not None and (
+            not isinstance(self.worker_rank_offset, int)
+            or isinstance(self.worker_rank_offset, bool)
+            or not self.rank_offset <= self.worker_rank_offset < self.world_size
         ):
             raise ValueError(
                 "`worker_rank_offset` must lie inside the common destination "
                 f"rank interval [{self.rank_offset}, {self.world_size}); got "
                 f"{self.worker_rank_offset}"
+            )
+        dst = tuple(self.dst_mesh_dims)
+        try:
+            dst_mesh = M2NMesh(cast(tuple[int, int], dst), self.rank_offset)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"invalid `dst_mesh_dims` {dst}: {exc}") from exc
+        num_workers = self.world_size - self.rank_offset
+        if dst_mesh.size != num_workers:
+            raise ValueError(
+                f"`dst_mesh_dims` {dst} must be {MESH_NDIMS} dims covering the "
+                f"{num_workers} inference workers"
             )
 
     @property
@@ -169,6 +192,10 @@ class M2NWeightTransferInitInfo(WeightTransferInitInfo):
                 "unsupported nccl_m2n init schema version "
                 f"{self.schema_version}; expected {M2N_WIRE_SCHEMA_VERSION}"
             )
+        if not isinstance(self.params, list):
+            raise TypeError("`params` must be a list of wire parameter mappings")
+        if not isinstance(self.source_digest, str) or not self.source_digest:
+            raise ValueError("`source_digest` must be a non-empty string")
         wire_params: list[M2NWireParam] = []
         names: set[str] = set()
         for index, value in enumerate(self.params):
@@ -243,6 +270,11 @@ class M2NWeightTransferEngine(
 
     def init_transfer_engine(self, init_info: M2NWeightTransferInitInfo) -> None:
         """Agree on source and local readiness before constructing NCCL."""
+        if self._handle is not None or self.model_update_group is not None:
+            raise RuntimeError(
+                "nccl_m2n weight transfer is already initialized; call "
+                "shutdown_weight_transfer_engine() before initializing again"
+            )
         rendezvous_info = NCCLWeightTransferInitInfo(
             master_address=init_info.master_address,
             master_port=init_info.master_port,
@@ -306,28 +338,32 @@ class M2NWeightTransferEngine(
             ]
         except Exception as exc:
             destination_error = f"{type(exc).__name__}: {exc}"
-            self._parameter_destinations = []
-            self._staging_pool = None
+            self._clear_destination_plan()
 
-        agree_destination_plan(
-            metadata_group,
-            source_digest=plan_digest,
-            params=wire_params,
-            dst_mesh=agreement_mesh,
-            local_plan=local_wire_plan,
-            local_error=destination_error,
-        )
-        unique_id_bytes: bytes | None = None
-        data_plane_error: str | None = None
         try:
-            unique_id_bytes = init_info.nccl_unique_id_bytes
-        except Exception as exc:
-            data_plane_error = f"{type(exc).__name__}: {exc}"
-        check_data_plane_agreement(
-            metadata_group,
-            unique_id_bytes,
-            data_plane_error,
-        )
+            agree_destination_plan(
+                metadata_group,
+                source_digest=plan_digest,
+                params=wire_params,
+                metas=self._metas,
+                dst_mesh=agreement_mesh,
+                local_plan=local_wire_plan,
+                local_error=destination_error,
+            )
+            unique_id_bytes: bytes | None = None
+            data_plane_error: str | None = None
+            try:
+                unique_id_bytes = init_info.nccl_unique_id_bytes
+            except Exception as exc:
+                data_plane_error = f"{type(exc).__name__}: {exc}"
+            check_data_plane_agreement(
+                metadata_group,
+                unique_id_bytes,
+                data_plane_error,
+            )
+        except BaseException:
+            self._clear_destination_plan()
+            raise
         handle = None
         group = None
         try:
@@ -347,10 +383,10 @@ class M2NWeightTransferEngine(
         except BaseException:
             if group is not None:
                 try:
-                    group.destroy()
+                    group.abort()
                 except BaseException:
                     logger.exception(
-                        "failed to destroy partially initialized nccl_m2n communicator"
+                        "failed to abort partially initialized nccl_m2n communicator"
                     )
             if handle is not None:
                 try:
@@ -359,10 +395,20 @@ class M2NWeightTransferEngine(
                     logger.exception(
                         "failed to destroy partially initialized nccl_m2n handle"
                     )
+            self._clear_destination_plan()
             raise
 
         self._handle = handle
         self.model_update_group = group
+
+    def _clear_destination_plan(self) -> None:
+        self._clear_update_bindings()
+        self._dst_mesh = None
+        self._parameter_destinations = []
+        self._uses_load_weights = False
+        self._destination_shard_index = None
+        self._staging_pool = None
+
     def _prepare_source_plan(
         self,
         wire_params: tuple[M2NWireParam, ...],
@@ -377,6 +423,7 @@ class M2NWeightTransferEngine(
                     f"parameter '{param.name}' has invalid dtype name "
                     f"'{param.dtype_name}'; expected the name of a torch.dtype"
                 )
+            check_transferable(param.name, dtype, param.shape)
             layout = M2NLayout(M2NMesh(param.src_mesh_dims, 0), param.src_placements)
             if layout.mesh.size != num_trainer_ranks:
                 raise ValueError(
@@ -384,15 +431,15 @@ class M2NWeightTransferEngine(
                     f"{layout.mesh.size} ranks, but there are "
                     f"{num_trainer_ranks} trainer ranks"
                 )
-            self._metas.append(
-                M2NParamMeta(
-                    param.name,
-                    dtype,
-                    param.shape,
-                    layout,
-                    param.allow_full_fallback,
-                )
+            meta = M2NParamMeta(
+                param.name,
+                dtype,
+                param.shape,
+                layout,
+                param.allow_full_fallback,
             )
+            expected_local_shape(meta)
+            self._metas.append(meta)
 
     def _prepare_destination_plan(
         self,
@@ -729,14 +776,9 @@ class M2NWeightTransferEngine(
         """Finish pending GPU work and release M2N communication state."""
         handle, self._handle = self._handle, None
         group, self.model_update_group = self.model_update_group, None
-        self._clear_update_bindings()
         self._m2n = None
         self._metas = []
-        self._dst_mesh = None
-        self._parameter_destinations = []
-        self._destination_shard_index = None
-        self._staging_pool = None
-        self._uses_load_weights = False
+        self._clear_destination_plan()
 
         first_error: BaseException | None = None
 
@@ -755,6 +797,6 @@ class M2NWeightTransferEngine(
         if handle is not None:
             attempt(handle.destroy, "failed to destroy nccl_m2n handle")
         if group is not None:
-            attempt(group.destroy, "failed to destroy nccl_m2n communicator")
+            attempt(group.abort, "failed to abort nccl_m2n communicator")
         if first_error is not None:
             raise first_error

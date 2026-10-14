@@ -16,9 +16,11 @@ from vllm.distributed.weight_transfer.m2n_common import (
     REPLICATE,
     M2NDestinationMode,
     M2NMesh,
+    M2NParamMeta,
     M2NWireParam,
     Placements,
     source_plan_digest,
+    validate_transfer_plan,
 )
 
 if TYPE_CHECKING:
@@ -415,6 +417,7 @@ def agree_destination_plan(
     *,
     source_digest: str,
     params: Sequence[M2NWireParam],
+    metas: Sequence[M2NParamMeta],
     dst_mesh: M2NMesh,
     local_plan: Sequence[M2NWireDestination] | None,
     local_error: str | None,
@@ -530,22 +533,84 @@ def agree_destination_plan(
             "nccl_m2n destination preflight rejected before NCCL init: "
             + "; ".join(errors)
         )
-    _validate_plan_set(worker_plans, params, canonical_mesh)
+    canonical_plan = worker_plans[0][1]
+    commit_digest: str | None = None
+    commit_error: str | None = None
+    try:
+        _validate_plan_set(worker_plans, params, canonical_mesh)
+        if len(metas) != len(params) or any(
+            meta.name != param.name for meta, param in zip(metas, params)
+        ):
+            raise ValueError("source metadata does not match the wire plan")
+        validate_transfer_plan(
+            metas,
+            canonical_mesh,
+            [destination.placements for destination in canonical_plan],
+        )
+        payload = {
+            "schema_version": M2N_WIRE_SCHEMA_VERSION,
+            "source_digest": canonical_digest,
+            "dst_mesh_dims": list(canonical_mesh.dims),
+            "dst_mesh_start_rank": canonical_mesh.start_rank,
+            "workers": [
+                {
+                    "rank": rank,
+                    "plan": [destination.to_dict() for destination in plan],
+                }
+                for rank, plan in worker_plans
+            ],
+        }
+        commit_digest = hashlib.sha256(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+    except Exception as exc:
+        commit_error = f"{type(exc).__name__}: {exc}"
 
-    payload = {
-        "schema_version": M2N_WIRE_SCHEMA_VERSION,
-        "source_digest": canonical_digest,
-        "dst_mesh_dims": list(canonical_mesh.dims),
-        "dst_mesh_start_rank": canonical_mesh.start_rank,
-        "workers": [
-            {
-                "rank": rank,
-                "plan": [destination.to_dict() for destination in plan],
-            }
-            for rank, plan in worker_plans
-        ],
-    }
-    digest = hashlib.sha256(
-        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
-    return worker_plans[0][1], f"m2n-plan:{digest}"
+    committed = group.all_gather_obj(
+        {
+            "phase": "destination_commit",
+            "digest": commit_digest,
+            "error": commit_error,
+        }
+    )
+    errors = []
+    digests: list[tuple[int, str]] = []
+    expected_fields = {"phase", "digest", "error"}
+    if len(committed) != group.world_size:
+        errors.append(
+            "control-plane all-gather returned "
+            f"{len(committed)} records for world size {group.world_size}"
+        )
+    for rank, item in enumerate(committed):
+        if (
+            not isinstance(item, Mapping)
+            or set(item) != expected_fields
+            or item.get("phase") != "destination_commit"
+        ):
+            errors.append(f"rank {rank}: invalid destination-commit envelope")
+            continue
+        error = item["error"]
+        if error is not None:
+            if not isinstance(error, str) or not error:
+                errors.append(f"rank {rank}: invalid destination-commit error")
+            else:
+                errors.append(f"rank {rank}: {error}")
+            continue
+        digest = item["digest"]
+        if not isinstance(digest, str) or not digest:
+            errors.append(f"rank {rank}: invalid destination-commit digest")
+            continue
+        digests.append((rank, digest))
+    if not errors:
+        canonical_commit_digest = digests[0][1]
+        for rank, digest in digests[1:]:
+            if digest != canonical_commit_digest:
+                errors.append(
+                    f"rank {rank}: destination-commit digest disagrees with rank 0"
+                )
+    if errors:
+        raise RuntimeError(
+            "nccl_m2n complete-plan preflight rejected before NCCL init: "
+            + "; ".join(errors)
+        )
+    return canonical_plan, f"m2n-plan:{digests[0][1]}"

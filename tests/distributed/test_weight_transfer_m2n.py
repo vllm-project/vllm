@@ -3,12 +3,13 @@
 """Unit tests for the NCCL M2N weight transfer backend.
 
 These cover how a transfer is *described* — layout encoding, the vLLM-owned
-source contract, and delegation of descriptor validation to M2N. The transfer
-itself needs the M2N runtime and multiple GPUs, so it is exercised separately.
+source contract, and collective-safe whole-plan validation. The transfer itself
+needs the M2N runtime and multiple GPUs, so it is exercised separately.
 """
 
 import logging
 import socket
+from contextlib import contextmanager
 from functools import wraps
 from types import MethodType, SimpleNamespace
 from unittest.mock import Mock, call
@@ -93,7 +94,7 @@ VALID_UID_B64 = base64.b64encode(b"\x00" * 128).decode()
         (M2NTrainerWeightTransferEngine, "group"),
     ],
 )
-def test_shutdown_destroys_resources_once(monkeypatch, engine_type, group_attribute):
+def test_shutdown_releases_resources_once(monkeypatch, engine_type, group_attribute):
     if engine_type is M2NWeightTransferEngine:
         vllm_config = SimpleNamespace(parallel_config=Mock(), model_config=Mock())
         engine = engine_type(
@@ -116,7 +117,8 @@ def test_shutdown_destroys_resources_once(monkeypatch, engine_type, group_attrib
 
     synchronize.assert_called_once_with()
     handle.destroy.assert_called_once_with()
-    group.destroy.assert_called_once_with()
+    group.abort.assert_called_once_with()
+    group.destroy.assert_not_called()
     assert engine._handle is None
     assert getattr(engine, group_attribute) is None
     if engine_type is M2NWeightTransferEngine:
@@ -165,7 +167,8 @@ def test_shutdown_attempts_all_cleanup_after_failure(
 
     synchronize.assert_called_once_with()
     handle.destroy.assert_called_once_with()
-    group.destroy.assert_called_once_with()
+    group.abort.assert_called_once_with()
+    group.destroy.assert_not_called()
     assert engine._handle is None
     assert getattr(engine, group_attribute) is None
     if engine_type is M2NTrainerWeightTransferEngine:
@@ -174,7 +177,7 @@ def test_shutdown_attempts_all_cleanup_after_failure(
     engine.shutdown()
     synchronize.assert_called_once_with()
     handle.destroy.assert_called_once_with()
-    group.destroy.assert_called_once_with()
+    group.abort.assert_called_once_with()
 
 
 class _BufferLike:
@@ -240,10 +243,25 @@ class TestLayout:
         assert resolved_mesh == mesh
         assert placements == (REPLICATE, 0)
 
-    def test_placement_legality_is_deferred_to_m2n(self):
+    def test_invalid_placement_is_rejected_during_initialization(self):
         layout = M2NLayout(M2NMesh((1, 2), 0), (REPLICATE, 3))
+        source = ManifestM2NWeightSource(
+            [
+                M2NManifestEntry(
+                    "w",
+                    torch.float32,
+                    (4,),
+                    layout,
+                    lambda: _BufferLike(),
+                )
+            ]
+        )
+        engine = M2NTrainerWeightTransferEngine(
+            client=Mock(), source=source, is_sender=False
+        )
 
-        assert layout.placements == (REPLICATE, 3)
+        with pytest.raises(ValueError, match="tensor dim 3"):
+            engine._prepare_source_plan(source, num_trainer_ranks=2)
 
 
 class TestSourceLayout:
@@ -310,7 +328,7 @@ class TestSourceLayout:
         ("dtype", "shape"),
         [(torch.complex64, (4,)), (torch.float32, (2, 2, 2, 2))],
     )
-    def test_transport_capabilities_are_deferred_to_m2n(self, dtype, shape):
+    def test_unsupported_transport_capability_is_rejected_at_init(self, dtype, shape):
         source = ManifestM2NWeightSource(
             [
                 M2NManifestEntry(
@@ -326,10 +344,14 @@ class TestSourceLayout:
             client=Mock(), source=source, is_sender=False
         )
 
-        engine._prepare_source_plan(source, num_trainer_ranks=1)
+        with pytest.raises(ValueError, match=r"parameter 'w'.*(support|rank)"):
+            engine._prepare_source_plan(source, num_trainer_ranks=1)
 
-    @pytest.mark.parametrize("placements", [(REPLICATE, 1), (REPLICATE, 0)])
-    def test_layout_geometry_is_deferred_to_m2n(self, placements):
+    @pytest.mark.parametrize(
+        ("placements", "match"),
+        [((REPLICATE, 1), "tensor dim 1"), ((REPLICATE, 0), "divide evenly")],
+    )
+    def test_invalid_layout_geometry_is_rejected_at_init(self, placements, match):
         source = ManifestM2NWeightSource(
             [
                 M2NManifestEntry(
@@ -345,7 +367,8 @@ class TestSourceLayout:
             client=Mock(), source=source, is_sender=False
         )
 
-        engine._prepare_source_plan(source, num_trainer_ranks=2)
+        with pytest.raises(ValueError, match=match):
+            engine._prepare_source_plan(source, num_trainer_ranks=2)
 
     @pytest.mark.parametrize("case", ["dtype", "shape"])
     def test_local_buffer_must_match_declared_metadata(self, case):
@@ -475,13 +498,33 @@ class TestWireTypes:
         assert info.nccl_unique_id_bytes == b"\x00" * 128
         assert VALID_UID_B64 not in repr(info)
 
-    def test_m2n_communicator_uses_nccl4py_uid(self):
+    def test_m2n_communicator_uses_nccl4py_uid(self, monkeypatch):
         nccl = Mock()
         group = Mock(rank=1, world_size=3)
         unique_id = object()
         communicator = object()
         nccl.UniqueId.from_bytes.return_value = unique_id
-        nccl.Communicator.init.return_value = communicator
+        active = False
+
+        @contextmanager
+        def unpinned():
+            nonlocal active
+            active = True
+            try:
+                yield
+            finally:
+                active = False
+
+        def init(**kwargs):
+            assert active
+            assert kwargs == {"nranks": 3, "rank": 1, "unique_id": unique_id}
+            return communicator
+
+        nccl.Communicator.init.side_effect = init
+        monkeypatch.setattr(
+            "vllm.distributed.weight_transfer.m2n_common.unpinned_nccl_env",
+            unpinned,
+        )
 
         result = create_m2n_communicator(nccl, group, b"shared-id")
 
@@ -547,6 +590,43 @@ class TestWireTypes:
         with pytest.raises(ValueError, match="source digest"):
             info.parse_wire_params()
 
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("rank_offset", True),
+            ("rank_offset", "1"),
+            ("world_size", True),
+            ("world_size", "3"),
+            ("worker_rank_offset", True),
+            ("worker_rank_offset", "1"),
+        ],
+    )
+    def test_rank_fields_require_integers(self, field, value):
+        with pytest.raises(ValueError, match=field):
+            self._init_info(**{field: value})
+
+    def test_init_validates_destination_mesh_coverage(self):
+        with pytest.raises(ValueError, match="dst_mesh_dims"):
+            self._init_info(dst_mesh_dims=[3, 1])
+
+    def test_parse_requires_list_params_and_nonempty_digest(self):
+        info = self._init_info()
+        info.params = ()
+        with pytest.raises(TypeError, match="params.*list"):
+            info.parse_wire_params()
+
+        info = self._init_info()
+        info.source_digest = ""
+        with pytest.raises(ValueError, match="source_digest.*non-empty"):
+            info.parse_wire_params()
+
+    @pytest.mark.parametrize(
+        ("field", "value"), [("name", 1), ("dtype_name", torch.float32)]
+    )
+    def test_wire_parameter_names_and_dtypes_require_strings(self, field, value):
+        with pytest.raises(ValueError):
+            self._param(**{field: value})
+
     def test_trainer_disagreement_is_rejected_before_nccl4py(self, monkeypatch):
         group = Mock(rank=1, world_size=3)
 
@@ -583,6 +663,29 @@ class TestWireTypes:
             engine.init_transfer_engine(self._init_info())
 
         make_communicator.assert_not_called()
+
+    def test_worker_rejects_active_reinitialization(self, monkeypatch):
+        init_metadata = Mock()
+        monkeypatch.setattr(
+            "vllm.distributed.weight_transfer.m2n_engine.worker_init_metadata_group",
+            init_metadata,
+        )
+        vllm_config = SimpleNamespace(
+            parallel_config=Mock(), model_config=SimpleNamespace(quantization=None)
+        )
+        engine = M2NWeightTransferEngine(
+            WeightTransferConfig(backend="nccl_m2n"),
+            vllm_config,
+            torch.device("cuda:0"),
+            torch.nn.Module(),
+        )
+        engine._handle = object()
+        engine.model_update_group = object()
+
+        with pytest.raises(RuntimeError, match="already initialized"):
+            engine.init_transfer_engine(self._init_info(params=[]))
+
+        init_metadata.assert_not_called()
 
     def test_worker_rank_offset_selects_deployment_global_ranks(self, monkeypatch):
         group = Mock(rank=2, world_size=3)
@@ -776,6 +879,69 @@ class TestWireTypes:
 
         make_communicator.assert_not_called()
 
+    def test_destination_agreement_failure_releases_staging_before_nccl(
+        self, monkeypatch
+    ):
+        metadata_group = Mock(rank=1, world_size=3)
+        monkeypatch.setattr(
+            "vllm.distributed.weight_transfer.m2n_engine.worker_init_metadata_group",
+            Mock(return_value=metadata_group),
+        )
+        monkeypatch.setattr(
+            "vllm.distributed.weight_transfer.m2n_engine.import_m2n",
+            Mock(return_value=Mock()),
+        )
+        monkeypatch.setattr(
+            "vllm.distributed.weight_transfer.m2n_engine.check_source_plan_agreement",
+            Mock(return_value=source_plan_digest([])),
+        )
+
+        def prepare_destination_plan(engine, **_kwargs):
+            engine._parameter_destinations = []
+            engine._destination_shard_index = 0
+            engine._staging_pool = Mock()
+            engine._uses_load_weights = True
+
+        monkeypatch.setattr(
+            M2NWeightTransferEngine,
+            "_prepare_destination_plan",
+            prepare_destination_plan,
+        )
+        monkeypatch.setattr(
+            "vllm.distributed.weight_transfer.m2n_engine.agree_destination_plan",
+            Mock(side_effect=RuntimeError("destination agreement failed")),
+        )
+        prepare_runtime = Mock()
+        make_communicator = Mock()
+        monkeypatch.setattr(
+            "vllm.distributed.weight_transfer.m2n_engine.prepare_m2n_local_runtime",
+            prepare_runtime,
+        )
+        monkeypatch.setattr(
+            "vllm.distributed.weight_transfer.m2n_engine.create_m2n_communicator",
+            make_communicator,
+        )
+        vllm_config = SimpleNamespace(
+            parallel_config=Mock(), model_config=SimpleNamespace(quantization=None)
+        )
+        engine = M2NWeightTransferEngine(
+            WeightTransferConfig(backend="nccl_m2n"),
+            vllm_config,
+            torch.device("cuda:0"),
+            torch.nn.Module(),
+        )
+
+        with pytest.raises(RuntimeError, match="destination agreement failed"):
+            engine.init_transfer_engine(self._init_info(params=[]))
+
+        prepare_runtime.assert_not_called()
+        make_communicator.assert_not_called()
+        assert engine._dst_mesh is None
+        assert engine._parameter_destinations == []
+        assert engine._destination_shard_index is None
+        assert engine._staging_pool is None
+        assert not engine._uses_load_weights
+
     def test_partial_worker_initialization_releases_transport_resources(
         self, monkeypatch
     ):
@@ -796,7 +962,8 @@ class TestWireTypes:
         def prepare_destination_plan(engine, **_kwargs):
             engine._parameter_destinations = []
             engine._destination_shard_index = 0
-            engine._staging_pool = None
+            engine._staging_pool = Mock()
+            engine._uses_load_weights = True
 
         monkeypatch.setattr(
             M2NWeightTransferEngine,
@@ -812,8 +979,7 @@ class TestWireTypes:
             Mock(),
         )
         monkeypatch.setattr(
-            "vllm.distributed.weight_transfer.m2n_engine."
-            "check_runtime_ready_agreement",
+            "vllm.distributed.weight_transfer.m2n_engine.check_runtime_ready_agreement",
             Mock(),
         )
         handle = Mock()
@@ -842,6 +1008,11 @@ class TestWireTypes:
         handle.destroy.assert_called_once_with()
         assert engine.model_update_group is None
         assert engine._handle is None
+        assert engine._dst_mesh is None
+        assert engine._parameter_destinations == []
+        assert engine._destination_shard_index is None
+        assert engine._staging_pool is None
+        assert not engine._uses_load_weights
 
     def test_world_must_hold_a_trainer_and_a_worker(self):
         with pytest.raises(ValueError, match="rank_offset"):
@@ -882,24 +1053,15 @@ class TestWireTypes:
         engine._dst_mesh = M2NMesh((1, 4), 32)
         engine._prepare_destination_plan(metadata_rank=32, num_workers=4)
 
-    def test_sharded_destination_defers_capacity_to_m2n(self, monkeypatch):
+    def test_sharded_destination_builds_before_complete_plan_agreement(
+        self, monkeypatch
+    ):
         destination = M2NDestination(
             "w",
             M2NDestinationMode.IN_PLACE,
             (REPLICATE, 0),
             (8, 8),
             torch.empty(8, 8),
-        )
-
-        self._init_32_to_4_plan(monkeypatch, destination)
-
-    def test_replicated_destination_defers_capacity_to_m2n(self, monkeypatch):
-        destination = M2NDestination(
-            "w",
-            M2NDestinationMode.FULL_FALLBACK,
-            REPLICATED,
-            (32, 8),
-            None,
         )
 
         self._init_32_to_4_plan(monkeypatch, destination)
@@ -1298,6 +1460,26 @@ class TestDestinationPlan:
         )
 
     @staticmethod
+    def _meta(param: M2NWireParam) -> M2NParamMeta:
+        return M2NParamMeta(
+            param.name,
+            getattr(torch, param.dtype_name),
+            param.shape,
+            M2NLayout(M2NMesh(param.src_mesh_dims, 0), param.src_placements),
+            param.allow_full_fallback,
+        )
+
+    @staticmethod
+    def _successful_group(envelopes: list[dict], rank: int = 0) -> Mock:
+        group = Mock(rank=rank, world_size=len(envelopes))
+        group.all_gather_obj.side_effect = lambda envelope: (
+            [envelope] * group.world_size
+            if envelope.get("phase") == "destination_commit"
+            else envelopes
+        )
+        return group
+
+    @staticmethod
     def _sharded(rank: int) -> M2NWireDestination:
         return M2NWireDestination(
             name="weight",
@@ -1340,15 +1522,15 @@ class TestDestinationPlan:
 
     def test_full_worker_plans_produce_commit_token(self):
         param = self._param()
-        group = Mock(rank=0, world_size=3)
-        group.all_gather_obj.return_value = self._envelopes(
-            self._sharded(0), self._sharded(1)
+        group = self._successful_group(
+            self._envelopes(self._sharded(0), self._sharded(1))
         )
 
         reference, token = agree_destination_plan(
             group,
             source_digest=source_plan_digest([param]),
             params=[param],
+            metas=[self._meta(param)],
             dst_mesh=M2NMesh((1, 2), 1),
             local_plan=None,
             local_error=None,
@@ -1356,19 +1538,108 @@ class TestDestinationPlan:
 
         assert reference == [self._sharded(0)]
         assert token.startswith("m2n-plan:")
+        assert group.all_gather_obj.call_count == 2
 
-    def test_worker_coordinate_disagreement_fails_before_nccl(self):
+    def test_destination_commit_digest_must_match(self):
         param = self._param()
-        group = Mock(rank=0, world_size=3)
-        group.all_gather_obj.return_value = self._envelopes(
-            self._sharded(0), self._sharded(0)
-        )
+        envelopes = self._envelopes(self._sharded(0), self._sharded(1))
+        group = Mock(rank=0, world_size=len(envelopes))
 
-        with pytest.raises(ValueError, match="invalid shard coordinates"):
+        def gather(envelope):
+            if envelope.get("phase") != "destination_commit":
+                return envelopes
+            peer = dict(envelope)
+            peer["digest"] = "different"
+            return [envelope, peer, envelope]
+
+        group.all_gather_obj.side_effect = gather
+
+        with pytest.raises(RuntimeError, match="destination-commit digest disagrees"):
             agree_destination_plan(
                 group,
                 source_digest=source_plan_digest([param]),
                 params=[param],
+                metas=[self._meta(param)],
+                dst_mesh=M2NMesh((1, 2), 1),
+                local_plan=None,
+                local_error=None,
+            )
+
+    def test_later_cross_sharded_fanin_failure_rejects_complete_plan(self):
+        params = [
+            M2NWireParam("valid", "float32", (32, 8), (8, 4), (REPLICATE, 0)),
+            M2NWireParam("invalid", "float32", (32, 8), (1, 32), (REPLICATE, 0)),
+        ]
+        dst_mesh = M2NMesh((1, 4), 32)
+
+        def worker_plan(shard_index: int) -> list[M2NWireDestination]:
+            return [
+                M2NWireDestination(
+                    name="valid",
+                    mode=M2NDestinationMode.IN_PLACE.value,
+                    dtype_name="float32",
+                    placements=(REPLICATE, 0),
+                    local_shape=(8, 8),
+                    semantic_id=None,
+                    shard_dim=0,
+                    shard_index=shard_index,
+                    num_shards=4,
+                ),
+                M2NWireDestination(
+                    name="invalid",
+                    mode=M2NDestinationMode.IN_PLACE.value,
+                    dtype_name="float32",
+                    placements=(REPLICATE, 1),
+                    local_shape=(32, 2),
+                    semantic_id=None,
+                    shard_dim=1,
+                    shard_index=shard_index,
+                    num_shards=4,
+                ),
+            ]
+
+        digest = source_plan_digest(params)
+
+        def envelope(plan: list[M2NWireDestination] | None) -> dict:
+            return {
+                "ok": True,
+                "error": None,
+                "plan": None if plan is None else [item.to_dict() for item in plan],
+                "source_digest": digest,
+                "dst_mesh_dims": list(dst_mesh.dims),
+                "dst_mesh_start_rank": dst_mesh.start_rank,
+            }
+
+        envelopes = [envelope(None) for _ in range(32)] + [
+            envelope(worker_plan(index)) for index in range(4)
+        ]
+        group = self._successful_group(envelopes)
+
+        with pytest.raises(RuntimeError, match=r"parameter 'invalid'.*MAX_SOURCES=16"):
+            agree_destination_plan(
+                group,
+                source_digest=digest,
+                params=params,
+                metas=[self._meta(param) for param in params],
+                dst_mesh=dst_mesh,
+                local_plan=None,
+                local_error=None,
+            )
+
+        assert group.all_gather_obj.call_count == 2
+
+    def test_worker_coordinate_disagreement_fails_before_nccl(self):
+        param = self._param()
+        group = self._successful_group(
+            self._envelopes(self._sharded(0), self._sharded(0))
+        )
+
+        with pytest.raises(RuntimeError, match="invalid shard coordinates"):
+            agree_destination_plan(
+                group,
+                source_digest=source_plan_digest([param]),
+                params=[param],
+                metas=[self._meta(param)],
                 dst_mesh=M2NMesh((1, 2), 1),
                 local_plan=None,
                 local_error=None,
@@ -1395,6 +1666,7 @@ class TestDestinationPlan:
                 group,
                 source_digest=source_plan_digest([param]),
                 params=[param],
+                metas=[self._meta(param)],
                 dst_mesh=local_mesh,
                 local_plan=local_plans[caller_rank],
                 local_error=None,
@@ -1425,6 +1697,7 @@ class TestDestinationPlan:
                 group,
                 source_digest=local_digest,
                 params=[local_param],
+                metas=[self._meta(local_param)],
                 dst_mesh=M2NMesh((1, 2), 1),
                 local_plan=local_plans[caller_rank],
                 local_error=None,
@@ -1439,6 +1712,7 @@ class TestDestinationPlan:
                 group,
                 source_digest=source_plan_digest([]),
                 params=[],
+                metas=[],
                 dst_mesh=M2NMesh((1, 1), 1),
                 local_plan=None,
                 local_error=None,
@@ -1457,14 +1731,14 @@ class TestDestinationPlan:
             shard_index=0,
             num_shards=1,
         )
-        group = Mock(rank=0, world_size=3)
-        group.all_gather_obj.return_value = self._envelopes(full, full)
+        group = self._successful_group(self._envelopes(full, full))
 
         with pytest.raises(RuntimeError, match="forbidden full fallback"):
             agree_destination_plan(
                 group,
                 source_digest=source_plan_digest([param]),
                 params=[param],
+                metas=[self._meta(param)],
                 dst_mesh=M2NMesh((1, 2), 1),
                 local_plan=None,
                 local_error=None,
@@ -1489,13 +1763,13 @@ class TestDestinationPlan:
                 staging_group_size=2,
             )
 
-        group = Mock(rank=0, world_size=3)
-        group.all_gather_obj.return_value = self._envelopes(staged(0), staged(1))
-        with pytest.raises(ValueError, match="incomplete staging group"):
+        group = self._successful_group(self._envelopes(staged(0), staged(1)))
+        with pytest.raises(RuntimeError, match="incomplete staging group"):
             agree_destination_plan(
                 group,
                 source_digest=source_plan_digest([param]),
                 params=[param],
+                metas=[self._meta(param)],
                 dst_mesh=M2NMesh((1, 2), 1),
                 local_plan=None,
                 local_error=None,
@@ -1523,6 +1797,7 @@ class TestDestinationPlan:
                 group,
                 source_digest=source_plan_digest([param]),
                 params=[param],
+                metas=[self._meta(param)],
                 dst_mesh=M2NMesh((1, 1), 1),
                 local_plan=[invalid_destination],
                 local_error=None,
@@ -1622,8 +1897,7 @@ class TestTrainerSourceContract:
             Mock(return_value=Mock()),
         )
         monkeypatch.setattr(
-            "vllm.distributed.weight_transfer.m2n_trainer."
-            "check_source_plan_agreement",
+            "vllm.distributed.weight_transfer.m2n_trainer.check_source_plan_agreement",
             Mock(return_value=source_plan_digest([])),
         )
         monkeypatch.setattr(
@@ -1631,8 +1905,7 @@ class TestTrainerSourceContract:
             Mock(return_value=([], "m2n-plan:test")),
         )
         monkeypatch.setattr(
-            "vllm.distributed.weight_transfer.m2n_trainer."
-            "check_data_plane_agreement",
+            "vllm.distributed.weight_transfer.m2n_trainer.check_data_plane_agreement",
             Mock(),
         )
         monkeypatch.setattr(
@@ -1643,14 +1916,12 @@ class TestTrainerSourceContract:
         handle = Mock()
         nccl = Mock()
         monkeypatch.setattr(
-            "vllm.distributed.weight_transfer.m2n_trainer."
-            "prepare_m2n_local_runtime",
+            "vllm.distributed.weight_transfer.m2n_trainer.prepare_m2n_local_runtime",
             Mock(return_value=(nccl, 0, handle)),
         )
         communicator = Mock()
         monkeypatch.setattr(
-            "vllm.distributed.weight_transfer.m2n_trainer."
-            "create_m2n_communicator",
+            "vllm.distributed.weight_transfer.m2n_trainer.create_m2n_communicator",
             Mock(return_value=communicator),
         )
         source = _StaticM2NSource([], [])
@@ -1671,10 +1942,15 @@ class TestTrainerSourceContract:
         with pytest.raises(RuntimeError, match="worker init failed"):
             engine._initialize(init_info, source)
 
-        communicator.destroy.assert_called_once_with()
+        communicator.abort.assert_called_once_with()
+        communicator.destroy.assert_not_called()
         handle.destroy.assert_called_once_with()
         assert engine.group is None
         assert engine._handle is None
+        assert engine._destination_plan == []
+        assert engine._destination_commit_token == ""
+        assert engine._dst_placements == []
+        assert engine._dst_mesh is None
 
     def test_non_sender_observes_rank_zero_finish_failure(self):
         outcomes: dict[int, dict[str, object]] = {}
@@ -1682,12 +1958,13 @@ class TestTrainerSourceContract:
         sender_group.send_obj.side_effect = lambda outcome, rank: outcomes.__setitem__(
             rank, outcome
         )
+        sender_group.recv_obj.return_value = {"phase": "round_outcome_consumed"}
 
         source = _StaticM2NSource([], [])
         sender = self._engine(source)
         sender.is_sender = True
         sender._metadata_group = sender_group
-        sender._num_trainer_ranks = 4
+        sender._num_trainer_ranks = 2
         sender._send = Mock()
         sender.client = Mock()
         sender.client.finish_weight_update.side_effect = RuntimeError("finish failed")
@@ -1696,31 +1973,62 @@ class TestTrainerSourceContract:
             sender.send_weights()
 
         sender._send.assert_called_once_with()
-        assert sender_group.send_obj.call_count == 3
-        for trainer_rank in range(1, 4):
-            receiver_group = Mock()
-            receiver_group.recv_obj.side_effect = (
-                lambda _source_rank, trainer_rank=trainer_rank: outcomes.pop(
-                    trainer_rank
-                )
-            )
-            receiver = self._engine(source)
-            receiver._metadata_group = receiver_group
-            receiver._num_trainer_ranks = 4
-            receiver._send = Mock()
+        sender_group.recv_obj.assert_called_once_with(1)
+        receiver_group = Mock()
+        receiver_group.recv_obj.side_effect = lambda _source_rank: outcomes.pop(1)
+        receiver = self._engine(source)
+        receiver._metadata_group = receiver_group
+        receiver._num_trainer_ranks = 2
+        receiver._send = Mock()
 
-            with pytest.raises(
-                RuntimeError,
-                match=(
-                    "worker update failed on trainer rank zero: "
-                    "RuntimeError: finish failed"
-                ),
-            ):
-                receiver.send_weights()
+        with pytest.raises(
+            RuntimeError,
+            match=(
+                "worker update failed on trainer rank zero: RuntimeError: finish failed"
+            ),
+        ):
+            receiver.send_weights()
 
-            receiver._send.assert_called_once_with()
-            receiver_group.recv_obj.assert_called_once_with(0)
+        receiver._send.assert_called_once_with()
+        receiver_group.recv_obj.assert_called_once_with(0)
+        receiver_group.send_obj.assert_called_once_with(
+            {"phase": "round_outcome_consumed"}, 0
+        )
         assert not outcomes
+
+    def test_sender_rejects_invalid_round_outcome_acknowledgement(self):
+        source = _StaticM2NSource([], [])
+        sender = self._engine(source)
+        sender.is_sender = True
+        sender._metadata_group = Mock()
+        sender._metadata_group.recv_obj.return_value = {"phase": "wrong"}
+        sender._num_trainer_ranks = 2
+        sender._send = Mock()
+        sender.client = Mock()
+
+        with pytest.raises(RuntimeError, match="invalid round-outcome acknowledgement"):
+            sender.send_weights()
+
+    def test_non_sender_consumes_outcome_after_local_failure(self):
+        source = _StaticM2NSource([], [])
+        receiver = self._engine(source)
+        receiver._send = Mock(side_effect=[ValueError("local send failed"), None])
+        receiver._metadata_group = Mock()
+        receiver._metadata_group.recv_obj.side_effect = [
+            {"ok": False, "error": "RuntimeError: first round failed"},
+            {"ok": True, "error": None},
+        ]
+
+        with pytest.raises(ValueError, match="local send failed"):
+            receiver.send_weights()
+        receiver.send_weights()
+
+        assert receiver._send.call_count == 2
+        assert receiver._metadata_group.recv_obj.call_count == 2
+        assert receiver._metadata_group.send_obj.call_args_list == [
+            call({"phase": "round_outcome_consumed"}, 0),
+            call({"phase": "round_outcome_consumed"}, 0),
+        ]
 
     def test_plan_summary_reports_bytes_by_destination_mode(self):
         engine = self._engine(_StaticM2NSource([], []))
