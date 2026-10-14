@@ -135,7 +135,10 @@ def test_silu_quant_skips_expert_padding_on_graph_replay(
     x *= 16
     clean_x = x.clone()
     ends = torch.empty(len(counts), device=DEVICE, dtype=torch.int32)
-    output = torch.empty((capacity, hidden_size), device=DEVICE, dtype=FLOAT8_DTYPE)
+    output_dtype = (
+        FLOAT8_DTYPE if scale_format == "packed" else current_platform.fp8_dtype()
+    )
+    output = torch.empty((capacity, hidden_size), device=DEVICE, dtype=output_dtype)
 
     def set_counts(values):
         positions = []
@@ -187,6 +190,7 @@ def test_silu_quant_skips_expert_padding_on_graph_replay(
         output.view(torch.uint8).fill_(91)
         graph.replay()
         reference_q, reference_s = quantize(x)
+        assert actual_q.dtype == reference_q.dtype
         torch.testing.assert_close(
             actual_q.view(torch.uint8)[live],
             reference_q.view(torch.uint8)[live],
