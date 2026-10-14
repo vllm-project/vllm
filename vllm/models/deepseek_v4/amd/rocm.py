@@ -1305,9 +1305,9 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         # the rotation into the decode reduce would apply it twice. Only the
         # BF16 einsum path hands its rotation off to the decode.
         fuse_inv_rope = self._wo_a_fp8_weight is None
-        fuse_decode_inv_rope = fuse_inv_rope and not on_gfx1250()
         rotated = 0
         if num_decodes > 0:
+            fuse_decode_inv_rope = fuse_inv_rope and not on_gfx1250()
             rotated = self._forward_decode(
                 q=q[:num_decode_tokens],
                 positions=(
