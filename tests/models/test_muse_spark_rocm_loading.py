@@ -283,7 +283,7 @@ def test_aiter_kv_workspace_only_for_cache_readers(
         AiterFlashAttentionImpl,
         AiterFlashAttentionMetadataBuilder,
     )
-    from vllm.v1.kv_cache_interface import FullAttentionSpec
+    from vllm.v1.kv_cache_interface import AttentionSpec
 
     layer = Attention.__new__(Attention)
     torch.nn.Module.__init__(layer)
@@ -308,7 +308,7 @@ def test_aiter_kv_workspace_only_for_cache_readers(
             get_head_size=lambda: 64,
         ),
     )
-    spec = FullAttentionSpec(
+    spec = AttentionSpec(
         block_size=16, num_kv_heads=1, head_size=64, dtype=torch.bfloat16
     )
     builder = AiterFlashAttentionMetadataBuilder(

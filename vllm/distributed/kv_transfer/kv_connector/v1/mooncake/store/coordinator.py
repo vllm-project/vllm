@@ -13,31 +13,33 @@ from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     KVCacheBlock,
     eagle_proof_margin,
-    resolve_dcp_kv_cache_spec,
+    is_mamba_group,
+    resolve_dcp_kv_block_size,
 )
 from vllm.v1.core.single_type_kv_cache_manager import (
+    MambaManager,
     SingleTypeKVCacheManager,
+    SlidingWindowManager,
 )
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
     KVCacheConfig,
-    KVCacheGroupSpec,
-    KVCacheSpec,
-    MambaSpec,
-    SlidingWindowSpec,
-    UniformTypeKVCacheSpecs,
+    KVCacheGroup,
+    ManagerConfig,
 )
-from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
 
 class StoreSpecGroup(NamedTuple):
-    spec: KVCacheSpec
+    block_size: int
     group_ids: list[int]
-    manager_cls: type[SingleTypeKVCacheManager]
+    manager_config: ManagerConfig
     use_eagle: bool
+
+    @property
+    def manager_cls(self) -> type[SingleTypeKVCacheManager]:
+        return self.manager_config.manager_cls
 
 
 class ExternalCachedBlockPool:
@@ -83,7 +85,7 @@ class MooncakeStoreCoordinator:
 
     def __init__(
         self,
-        kv_cache_groups: list[KVCacheGroupSpec],
+        kv_cache_groups: list[KVCacheGroup],
         scheduler_block_size: int,
         hash_block_size: int,
         use_eagle: bool = False,
@@ -92,24 +94,24 @@ class MooncakeStoreCoordinator:
     ) -> None:
         # Match core's alignment requirements for prefix-cacheable groups.
         assert all(
-            g.kv_cache_spec.block_size % hash_block_size == 0
+            g.block_size % hash_block_size == 0
             for g in kv_cache_groups
-            if g.kv_cache_spec.prefix_cacheable
+            if g.prefix_cacheable
         ), "block_size must be divisible by hash_block_size"
         assert scheduler_block_size % hash_block_size == 0, (
             f"scheduler_block_size ({scheduler_block_size}) must be a multiple of "
             f"hash_block_size ({hash_block_size})"
         )
         assert all(
-            scheduler_block_size % g.kv_cache_spec.block_size == 0
+            scheduler_block_size % g.block_size == 0
             for g in kv_cache_groups
-            if g.kv_cache_spec.prefix_cacheable
+            if g.prefix_cacheable
         ), "scheduler_block_size must be a multiple of each group's block_size"
         self.kv_cache_groups = kv_cache_groups
         self.mamba_group_ids = {
             group_id
             for group_id, group in enumerate(kv_cache_groups)
-            if isinstance(_unwrap_spec(group.kv_cache_spec), MambaSpec)
+            if is_mamba_group(group)
         }
         self.hash_block_size = hash_block_size
         self.lcm_block_size = scheduler_block_size
@@ -130,7 +132,7 @@ class MooncakeStoreCoordinator:
     ) -> "MooncakeStoreCoordinator":
         """Build the coordinator the connector's scheduler and workers share.
 
-        Specs are DCP-resolved, so a block spans the tokens of one block-table
+        Block sizes are DCP-resolved, so a block spans the tokens of one block-table
         entry. Partial hits follow core's hit alignment, which checks every KV
         cache group and its manager, not only the groups the store transfers;
         unset (a config the engine core did not resolve) keeps hits on the
@@ -142,10 +144,7 @@ class MooncakeStoreCoordinator:
         return cls(
             [
                 replace(
-                    group,
-                    kv_cache_spec=resolve_dcp_kv_cache_spec(
-                        group.kv_cache_spec, dcp_world_size
-                    ),
+                    group, block_size=resolve_dcp_kv_block_size(group, dcp_world_size)
                 )
                 for group in kv_cache_config.prefix_cacheable_groups
             ],
@@ -170,26 +169,28 @@ class MooncakeStoreCoordinator:
         """Group compatible specs using their registered cache managers."""
         attention_groups: list[StoreSpecGroup] = []
         for i, g in enumerate(self.kv_cache_groups):
-            if not g.kv_cache_spec.prefix_cacheable:
+            if not g.prefix_cacheable:
                 continue
-            spec = _coverage_spec(g.kv_cache_spec)
-            manager_cls = KVCacheSpecRegistry.get_manager_class(spec)
-            assert manager_cls is not None, (
-                f"No manager registered for KVCacheSpec {spec}"
-            )
             for idx, group in enumerate(attention_groups):
-                if group.spec == spec:
-                    assert manager_cls is group.manager_cls
+                if (
+                    self.kv_cache_groups[group.group_ids[0]].block_table_key
+                    == g.block_table_key
+                ):
                     group.group_ids.append(i)
                     if g.is_eagle_group and not group.use_eagle:
                         attention_groups[idx] = group._replace(use_eagle=True)
                     break
             else:
                 attention_groups.append(
-                    StoreSpecGroup(spec, [i], manager_cls, g.is_eagle_group)
+                    StoreSpecGroup(
+                        g.block_size,
+                        [i],
+                        _coverage_config(g.manager_config),
+                        g.is_eagle_group,
+                    )
                 )
         # Full attention first (matches upstream convergence ordering).
-        attention_groups.sort(key=lambda g: not isinstance(g.spec, FullAttentionSpec))
+        attention_groups.sort(key=lambda g: not g.manager_cls.is_full_attention)
         # Conservatively flag all groups when use_eagle is set but none is flagged.
         if self.use_eagle and not any(g.use_eagle for g in attention_groups):
             attention_groups = [g._replace(use_eagle=True) for g in attention_groups]
@@ -200,13 +201,13 @@ class MooncakeStoreCoordinator:
         }
         self.eagle_proof_margin_by_group = {
             gid: eagle_proof_margin(
-                group.spec.block_size,
+                group.block_size,
                 self.hash_block_size,
                 self.enable_partial_hash_hits
                 and group.manager_cls.supports_fine_grained_hash_lookup,
             )
             for group in attention_groups
-            if group.use_eagle and not isinstance(group.spec, MambaSpec)
+            if group.use_eagle and not issubclass(group.manager_cls, MambaManager)
             for gid in group.group_ids
         }
 
@@ -327,24 +328,22 @@ class MooncakeStoreCoordinator:
         )
         masks: list[list[bool] | None] = []
         for g_idx, g in enumerate(self.kv_cache_groups):
-            spec = _coverage_spec(g.kv_cache_spec)
-            end_block = aligned_token_len // spec.block_size
-            start_block = min(end_block, max(0, cdiv(start_token, spec.block_size)))
-            if exclude_mamba and isinstance(spec, MambaSpec):
+            end_block = aligned_token_len // g.block_size
+            start_block = min(end_block, max(0, cdiv(start_token, g.block_size)))
+            if exclude_mamba and g_idx in self.mamba_group_ids:
                 masks.append([False] * (end_block - start_block))
                 continue
-            manager_cls = KVCacheSpecRegistry.get_manager_class(spec)
-            assert manager_cls is not None
             use_eagle = g_idx in self.eagle_group_ids
-            mask = manager_cls.reachable_block_mask(
+            mask = g.manager_cls.reachable_block_mask(
                 start_block=start_block,
                 end_block=end_block,
                 alignment_tokens=self.lcm_block_size,
-                kv_cache_spec=spec,
+                block_size=g.block_size,
+                manager_config=_coverage_config(g.manager_config),
                 use_eagle=use_eagle,
                 retention_interval=retention_interval,
                 reachable_boundaries=reachable_boundaries,
-                # Worker initialization has already resolved DCP in this spec.
+                # Worker initialization has already resolved DCP in this block size.
                 dcp_world_size=1,
             )
             if mask is not None:
@@ -367,13 +366,17 @@ class MooncakeStoreCoordinator:
             else self.lcm_block_size
         )
         if len(self.attention_groups) == 1:
-            spec, group_ids, manager_cls, group_eagle = self.attention_groups[0]
+            block_size, group_ids, manager_config, group_eagle = self.attention_groups[
+                0
+            ]
+            manager_cls = manager_config.manager_cls
             hit_blocks, hit_length = manager_cls.find_longest_cache_hit(
                 block_hashes=block_hashes,  # type: ignore[arg-type]
                 max_length=max_length,
                 kv_cache_group_ids=group_ids,
                 block_pool=cast(BlockPool, cached_block_pool),
-                kv_cache_spec=spec,
+                block_size=block_size,
+                manager_config=manager_config,
                 drop_eagle_block=apply_eagle and group_eagle,
                 alignment_tokens=alignment_tokens,
             )
@@ -388,20 +391,22 @@ class MooncakeStoreCoordinator:
         hit_blocks_by_group: list[list[KVCacheBlock] | None] = [None] * num_groups
         hit_length_by_group: list[int] = [0] * num_groups
 
-        is_simple_hybrid = len(self.attention_groups) == 2 and isinstance(
-            self.attention_groups[0].spec, FullAttentionSpec
+        is_simple_hybrid = (
+            len(self.attention_groups) == 2
+            and self.attention_groups[0].manager_cls.is_full_attention
         )
         eagle_verified: set[int] = set()
 
         while True:
             curr_hit_length = hit_length
 
-            for idx, (spec, group_ids, manager_cls, group_eagle) in enumerate(
+            for idx, (block_size, group_ids, manager_config, group_eagle) in enumerate(
                 self.attention_groups
             ):
+                manager_cls = manager_config.manager_cls
                 first_group_id = group_ids[0]
                 cached = hit_blocks_by_group[first_group_id]
-                if isinstance(spec, FullAttentionSpec) and cached is not None:
+                if manager_cls.is_full_attention and cached is not None:
                     curr_hit_length = min(
                         curr_hit_length, hit_length_by_group[first_group_id]
                     )
@@ -414,9 +419,9 @@ class MooncakeStoreCoordinator:
                 # No eagle peek margin for a recurrent (Mamba) group: its finder
                 # never drops a block, so a widened bound would match past the
                 # attention-verified hit and resume from speculative state (#43559).
-                if drop_eagle_block and not isinstance(spec, MambaSpec):
+                if drop_eagle_block and not issubclass(manager_cls, MambaManager):
                     eagle_margin = eagle_proof_margin(
-                        spec.block_size,
+                        block_size,
                         self.hash_block_size,
                         self.enable_partial_hash_hits
                         and manager_cls.supports_fine_grained_hash_lookup,
@@ -430,7 +435,8 @@ class MooncakeStoreCoordinator:
                     max_length=_max_length,
                     kv_cache_group_ids=group_ids,
                     block_pool=cast(BlockPool, cached_block_pool),
-                    kv_cache_spec=spec,
+                    block_size=block_size,
+                    manager_config=manager_config,
                     drop_eagle_block=drop_eagle_block,
                     alignment_tokens=alignment_tokens,
                 )
@@ -453,9 +459,9 @@ class MooncakeStoreCoordinator:
         # other specs already trim themselves inside their hit logic. cdiv keeps
         # the partial tail block when hit_length is not block-aligned.
         for group in self.attention_groups:
-            if not isinstance(group.spec, FullAttentionSpec):
+            if not group.manager_cls.is_full_attention:
                 continue
-            num_blocks = cdiv(hit_length, group.spec.block_size)
+            num_blocks = cdiv(hit_length, group.block_size)
             for group_id in group.group_ids:
                 full_blks = hit_blocks_by_group[group_id]
                 assert full_blks is not None
@@ -468,24 +474,20 @@ class MooncakeStoreCoordinator:
         )
 
 
-def _unwrap_spec(spec: KVCacheSpec) -> KVCacheSpec:
-    if isinstance(spec, UniformTypeKVCacheSpecs):
-        return next(iter(spec.kv_cache_specs.values()))
-    return spec
-
-
-def _coverage_spec(spec: KVCacheSpec) -> KVCacheSpec:
-    """The spec whose window covers every block an external hit restores.
+def _coverage_config(config: ManagerConfig) -> ManagerConfig:
+    """The config whose window covers every block an external hit restores.
 
     An external SWA hit allocates the MTP re-prefill tail
     (``extra_retained_tokens``) below the window, so lookup, load and store
     must cover it too, as the offloading connector does.
     """
-    spec = _unwrap_spec(spec)
-    if isinstance(spec, SlidingWindowSpec) and spec.extra_retained_tokens:
-        return replace(
-            spec,
-            sliding_window=spec.sliding_window + spec.extra_retained_tokens,
+    if (
+        isinstance(config.params, SlidingWindowManager.Params)
+        and config.params.extra_retained_tokens
+    ):
+        return config.replace_params(
+            sliding_window=config.params.sliding_window
+            + config.params.extra_retained_tokens,
             extra_retained_tokens=0,
         )
-    return spec
+    return config

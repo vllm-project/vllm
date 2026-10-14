@@ -18,12 +18,13 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
 from vllm.triton_utils import tl, triton
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.math_utils import cdiv
+from vllm.v1.core.kv_cache_utils import is_mamba_group
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.core.single_type_kv_cache_manager import MambaManager
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
-    KVCacheGroupSpec,
+    KVCacheGroup,
     MambaSpec,
-    UniformTypeKVCacheSpecs,
 )
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
@@ -665,34 +666,36 @@ def batch_memcpy(src_ptrs, dst_ptrs, sizes):
 
 
 def _get_mamba_spec_for_layer(
-    kv_cache_group: KVCacheGroupSpec, layer_name: str
+    kv_cache_group: KVCacheGroup, layer_name: str
 ) -> MambaSpec:
-    kv_cache_spec = kv_cache_group.kv_cache_spec
-    if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
-        kv_cache_spec = kv_cache_spec.kv_cache_specs[layer_name]
+    kv_cache_spec = kv_cache_group.kv_cache_specs[layer_name]
     assert isinstance(kv_cache_spec, MambaSpec)
     return kv_cache_spec
 
 
-def get_mamba_group_ids(mamba_groups: dict[MambaSpec, list[int]]) -> list[int]:
-    """Return the sorted group ids of all mamba groups, without duplicates.
+class MambaGroupPolicy(NamedTuple):
+    """Cache scheduling policy that the worker applies to every Mamba group."""
 
-    A group whose layers use different ``MambaSpec``s is listed under one key
-    per spec, so the same group id can appear more than once.
-    """
-    return sorted(
-        {group_id for group_ids in mamba_groups.values() for group_id in group_ids}
-    )
+    group_ids: list[int]
+    block_size: int
+    params: MambaManager.Params
+
+
+def get_mamba_group_policy(kv_cache_config: KVCacheConfig) -> MambaGroupPolicy:
+    groups = kv_cache_config.kv_cache_groups
+    group_ids = [i for i, group in enumerate(groups) if is_mamba_group(group)]
+    policies = {(groups[i].block_size, groups[i].manager_config) for i in group_ids}
+    assert len(policies) == 1, "all mamba groups must share cache scheduling parameters"
+    ((block_size, config),) = policies
+    assert isinstance(config.params, MambaManager.Params)
+    return MambaGroupPolicy(group_ids, block_size, config.params)
 
 
 def get_mamba_groups(kv_cache_config: KVCacheConfig) -> dict[MambaSpec, list[int]]:
     """Return a mapping from each distinct MambaSpec to its sorted group_ids."""
     mamba_groups: dict[MambaSpec, set[int]] = {}
     for i, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups):
-        kv_cache_spec = kv_cache_group.kv_cache_spec
-        if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
-            kv_cache_spec = kv_cache_spec.first_spec
-        if not isinstance(kv_cache_spec, MambaSpec):
+        if not is_mamba_group(kv_cache_group):
             continue
         for layer_name in kv_cache_group.layer_names:
             mamba_spec = _get_mamba_spec_for_layer(kv_cache_group, layer_name)
@@ -723,7 +726,8 @@ class MambaCopyBuffers:
     dst_ptrs: CpuGpuBuffer
     sizes: CpuGpuBuffer
     mamba_group_ids: list[int]
-    mamba_spec: MambaSpec
+    block_size: int
+    mamba_params: MambaManager.Params
     offset: int = 0
 
     @classmethod
@@ -734,15 +738,9 @@ class MambaCopyBuffers:
         copy_funcs: MambaStateCopyFuncsByType,
         make_buffer: Callable[..., CpuGpuBuffer],
     ) -> "MambaCopyBuffers":
-        mamba_groups = get_mamba_groups(kv_cache_config)
-        mamba_spec = next(iter(mamba_groups))
-        assert all(
-            spec.block_size == mamba_spec.block_size
-            and spec.num_speculative_blocks == mamba_spec.num_speculative_blocks
-            and spec.mamba_cache_mode == mamba_spec.mamba_cache_mode
-            for spec in mamba_groups
-        ), "all mamba groups must share cache scheduling parameters"
-        mamba_group_ids = get_mamba_group_ids(mamba_groups)
+        mamba_group_ids, block_size, mamba_params = get_mamba_group_policy(
+            kv_cache_config
+        )
         entries_per_req = sum(
             len(
                 copy_funcs[
@@ -761,7 +759,8 @@ class MambaCopyBuffers:
             dst_ptrs=make_buffer(n, dtype=torch.uint64),
             sizes=make_buffer(n, dtype=torch.int32),
             mamba_group_ids=mamba_group_ids,
-            mamba_spec=mamba_spec,
+            block_size=block_size,
+            mamba_params=mamba_params,
         )
 
 
@@ -840,14 +839,9 @@ class MambaSpecDecodeGPUContext:
     ) -> "MambaSpecDecodeGPUContext":
         """Create context with allocated buffers (metadata populated later)."""
         mamba_groups = get_mamba_groups(kv_cache_config)
-        mamba_group_ids = get_mamba_group_ids(mamba_groups)
-        mamba_spec = next(iter(mamba_groups))
-        assert all(
-            spec.block_size == mamba_spec.block_size
-            and spec.num_speculative_blocks == mamba_spec.num_speculative_blocks
-            and spec.mamba_cache_mode == mamba_spec.mamba_cache_mode
-            for spec in mamba_groups
-        ), "all mamba groups must share cache scheduling parameters"
+        mamba_group_ids, block_size, mamba_params = get_mamba_group_policy(
+            kv_cache_config
+        )
         copy_funcs_by_spec = {
             spec: copy_funcs[spec.mamba_type] for spec in mamba_groups
         }
@@ -891,7 +885,7 @@ class MambaSpecDecodeGPUContext:
             state_dim_row_stride=torch.zeros(
                 total_states, dtype=torch.int64, device=device
             ),
-            block_size=mamba_spec.block_size,
+            block_size=block_size,
             num_states=total_states,
             mamba_group_ids=mamba_group_ids,
             num_groups=len(mamba_group_ids),
@@ -908,7 +902,7 @@ class MambaSpecDecodeGPUContext:
                 (
                     len(mamba_group_ids),
                     max_num_reqs,
-                    1 + mamba_spec.num_speculative_blocks,
+                    1 + mamba_params.num_speculative_blocks,
                 ),
                 dtype=torch.int32,
                 device=device,
@@ -1460,11 +1454,10 @@ def preprocess_mamba(
     """
     fused = _resolve_fused_precopy(align_ctx)
     mamba_group_ids = copy_bufs.mamba_group_ids
-    mamba_spec = copy_bufs.mamba_spec
-    num_speculative_blocks = mamba_spec.num_speculative_blocks
+    num_speculative_blocks = copy_bufs.mamba_params.num_speculative_blocks
     # TODO(Chen): we need to optimize this function a lot
     assert cache_config.enable_prefix_caching
-    block_size = mamba_spec.block_size
+    block_size = copy_bufs.block_size
     cleanup_mamba_state_idx(scheduler_output, mamba_state_idx)
 
     copy_bufs.offset = 0

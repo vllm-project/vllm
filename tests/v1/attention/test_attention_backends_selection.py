@@ -23,7 +23,7 @@ from vllm.v1.attention.backends.mamba1_attn import Mamba1AttentionBackend
 from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionBackend
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.attention.backends.short_conv_attn import ShortConvAttentionBackend
-from vllm.v1.kv_cache_interface import MambaSpec
+from vllm.v1.core.single_type_kv_cache_manager import MambaManager
 
 
 @pytest.mark.parametrize(("use_replayssm", "expected_blocks"), [(False, 3), (True, 0)])
@@ -35,6 +35,7 @@ def test_replayssm_does_not_reserve_speculative_state_blocks(
         get_state_dtype=lambda: (torch.float32,),
         mamba_type=MambaAttentionBackendEnum.MAMBA2,
         is_kv_cache_tp_replicated=False,
+        get_kv_cache_checkpoint_alignment=lambda vllm_config: None,
     )
     vllm_config = SimpleNamespace(
         cache_config=SimpleNamespace(
@@ -46,11 +47,12 @@ def test_replayssm_does_not_reserve_speculative_state_blocks(
         num_speculative_tokens=3,
     )
 
-    spec = MambaBase.get_kv_cache_spec(layer, vllm_config)
+    layer_config = MambaBase.get_kv_cache_config(layer, vllm_config)
 
-    assert spec is not None
-    assert isinstance(spec, MambaSpec)
-    assert spec.num_speculative_blocks == expected_blocks
+    assert layer_config is not None
+    manager_config = layer_config.manager_config
+    assert isinstance(manager_config.params, MambaManager.Params)
+    assert manager_config.params.num_speculative_blocks == expected_blocks
 
 
 @pytest.mark.parametrize(

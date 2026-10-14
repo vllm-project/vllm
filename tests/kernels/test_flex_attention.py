@@ -12,6 +12,7 @@ from tests.v1.attention.utils import (
     create_common_attn_metadata,
     create_standard_kv_cache_spec,
     create_vllm_config,
+    registered_attention_layers,
 )
 from vllm.config import AttentionConfig
 from vllm.model_executor.layers.attention import Attention
@@ -316,7 +317,10 @@ def test_block_mask_direct_vs_slow_path():
         batch_spec, vllm_config.cache_config.block_size, device
     )
 
-    builder = FlexAttentionMetadataBuilder(kv_cache_spec, [], vllm_config, device)
+    with registered_attention_layers(vllm_config, ["layer"]):
+        builder = FlexAttentionMetadataBuilder(
+            kv_cache_spec, ["layer"], vllm_config, device
+        )
 
     metadata_direct = builder.build(
         common_prefix_len=0, common_attn_metadata=common_attn_metadata
@@ -379,9 +383,10 @@ def test_flex_attention_request_count_changes_reuse_compiled_graph(direct_build)
         max_num_seqs=8,
         max_num_batched_tokens=128,
     )
-    builder = FlexAttentionMetadataBuilder(
-        create_standard_kv_cache_spec(config), [], config, device
-    )
+    with registered_attention_layers(config, ["layer"]):
+        builder = FlexAttentionMetadataBuilder(
+            create_standard_kv_cache_spec(config), ["layer"], config, device
+        )
     builder.direct_build = direct_build
     query = torch.randn(1, 2, 32, 64, device=device)
     key = torch.randn(1, 2, 640, 64, device=device)
@@ -499,7 +504,10 @@ def test_block_sparsity_hint_prunes_blocks():
         batch_spec, vllm_config.cache_config.block_size, device
     )
 
-    builder = FlexAttentionMetadataBuilder(kv_cache_spec, [], vllm_config, device)
+    with registered_attention_layers(vllm_config, ["layer"]):
+        builder = FlexAttentionMetadataBuilder(
+            kv_cache_spec, ["layer"], vllm_config, device
+        )
 
     metadata_no_hint = builder.build(
         common_prefix_len=0, common_attn_metadata=common_attn_metadata

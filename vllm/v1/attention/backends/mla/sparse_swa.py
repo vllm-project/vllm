@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass, field
-from typing import Any, ClassVar, cast
+from typing import Any, ClassVar
 
 import torch
 from transformers import DeepseekV4Config
@@ -36,10 +36,10 @@ from vllm.v1.attention.backends.mla.compressor_utils import (
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 from vllm.v1.attention.ops.flashmla import FlashMLASchedMeta, get_mla_metadata
 from vllm.v1.attention.ops.metadata import compute_token_to_req_indices
+from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
 from vllm.v1.kv_cache_interface import (
-    KVCacheSpec,
+    KVCacheLayerConfig,
     MLAAttentionSpec,
-    SlidingWindowMLASpec,
     get_kv_quant_mode,
 )
 
@@ -117,7 +117,7 @@ class DeepseekV4SWACache(torch.nn.Module, AttentionLayerBase):
         # [B, H=1, N, C] -> [B, N, C]
         self.kv_cache = kv_cache.squeeze(1)
 
-    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
+    def get_kv_cache_config(self, vllm_config: VllmConfig) -> KVCacheLayerConfig:
         # fp8_ds_mla's UE8M0 paged layout rounds its page up to the decode
         # kernel's TMA stride; contiguous bf16/fp8 cache uses the natural
         # element-size page.
@@ -125,14 +125,12 @@ class DeepseekV4SWACache(torch.nn.Module, AttentionLayerBase):
             "fp8_ds_mla",
             "nvfp4_ds_mla",
         )
-        return SlidingWindowMLASpec(
-            bounded_replay=self.bounded_replay,
+        spec = MLAAttentionSpec(
             block_size=self.block_size,
             num_kv_heads=1,
             max_tp_shards=1,
             head_size=self.head_dim,
             dtype=self.dtype,
-            sliding_window=self.window_size,
             cache_dtype_str=self.cache_config.cache_dtype,
             state_content_bytes=(
                 self.packed_bytes_per_token if uses_fp8_ds_mla_layout else None
@@ -144,6 +142,9 @@ class DeepseekV4SWACache(torch.nn.Module, AttentionLayerBase):
             ),
             model_version="deepseek_v4",
             kv_quant_mode=get_kv_quant_mode(self.cache_config.cache_dtype),
+        )
+        return SlidingWindowManager.layer_config(
+            spec, sliding_window=self.window_size, bounded_replay=self.bounded_replay
         )
 
     def forward(self): ...
@@ -453,8 +454,8 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        assert isinstance(self.kv_cache_spec, SlidingWindowMLASpec | MLAAttentionSpec)
-        mla_spec = cast(SlidingWindowMLASpec | MLAAttentionSpec, self.kv_cache_spec)
+        assert isinstance(self.kv_cache_spec, MLAAttentionSpec)
+        mla_spec = self.kv_cache_spec
         self.head_size = mla_spec.head_size  # Already considered quantization.
         assert isinstance(mla_spec.tokens_per_state, int)
         self.compress_ratio = mla_spec.tokens_per_state

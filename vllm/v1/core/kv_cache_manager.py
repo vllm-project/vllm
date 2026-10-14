@@ -15,15 +15,15 @@ from vllm.v1.core.kv_cache_coordinator import (
 )
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import KVCacheBlock, KVCacheBlockCopy, trim_null_head
-from vllm.v1.core.single_type_kv_cache_manager import MambaManager
+from vllm.v1.core.single_type_kv_cache_manager import (
+    CrossAttentionManager,
+    EncoderOnlyAttentionManager,
+    MambaManager,
+    get_kv_cache_kind,
+)
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
-    CrossAttentionSpec,
-    EncoderOnlyAttentionSpec,
     KVCacheConfig,
-    MambaSpec,
-    get_kv_cache_spec_kind,
-    get_kv_cache_spec_sliding_window,
 )
 from vllm.v1.metrics.stats import PrefixCacheStats
 from vllm.v1.request import Request, RequestStatus
@@ -210,8 +210,10 @@ class KVCacheManager:
         self.watermark_blocks = int(watermark * kv_cache_config.num_blocks)
         self.kv_cache_event_metadata = tuple(
             (
-                get_kv_cache_spec_kind(group.kv_cache_spec).value,
-                get_kv_cache_spec_sliding_window(group.kv_cache_spec),
+                get_kv_cache_kind(
+                    group.manager_config, group.kv_cache_specs.values()
+                ).value,
+                group.sliding_window,
             )
             for group in kv_cache_config.kv_cache_groups
         )
@@ -745,14 +747,17 @@ class KVCacheManager:
         block_ids = self.get_block_ids(request_id)
         clipped_block_ids: list[list[int]] = []
         for group, ids in zip(self.kv_cache_config.kv_cache_groups, block_ids):
-            spec = group.kv_cache_spec
-            if not isinstance(spec, AttentionSpec) or isinstance(
-                spec, (CrossAttentionSpec, EncoderOnlyAttentionSpec)
+            is_attention = all(
+                isinstance(spec, AttentionSpec)
+                for spec in group.kv_cache_specs.values()
+            )
+            if not is_attention or issubclass(
+                group.manager_cls, (CrossAttentionManager, EncoderOnlyAttentionManager)
             ):
                 clipped_block_ids.append(ids)
                 continue
 
-            num_valid_blocks = cdiv(num_computed_tokens, spec.block_size)
+            num_valid_blocks = cdiv(num_computed_tokens, group.block_size)
             clipped_block_ids.append(ids[:num_valid_blocks])
         return tuple(clipped_block_ids)
 
@@ -763,11 +768,10 @@ class KVCacheManager:
             self.kv_cache_config.kv_cache_groups,
             self.get_blocks(request.request_id).blocks,
         ):
-            if not group.kv_cache_spec.prefix_cacheable:
+            if not group.prefix_cacheable:
                 continue
-            if isinstance(
-                group.kv_cache_spec,
-                (CrossAttentionSpec, EncoderOnlyAttentionSpec),
+            if issubclass(
+                group.manager_cls, (CrossAttentionManager, EncoderOnlyAttentionManager)
             ):
                 # Cross-attention and encoder-only groups are not prefix cached.
                 continue
@@ -821,7 +825,7 @@ class KVCacheManager:
             self.kv_cache_config.kv_cache_groups,
             strict=True,
         ):
-            if not group.kv_cache_spec.prefix_cacheable:
+            if not group.prefix_cacheable:
                 # Scratch groups (e.g. the CSA compressor ring) hold a fixed
                 # block covering no token range, so a lookup result never
                 # carries computed blocks for them and their block size does
@@ -831,7 +835,7 @@ class KVCacheManager:
                 continue
             assert num_computed_tokens % manager.block_size == 0
             num_blocks = num_computed_tokens // manager.block_size
-            if isinstance(group.kv_cache_spec, MambaSpec):
+            if issubclass(group.manager_cls, MambaManager):
                 num_blocks = min(num_blocks, len(group_blocks))
             else:
                 assert num_blocks <= len(group_blocks)

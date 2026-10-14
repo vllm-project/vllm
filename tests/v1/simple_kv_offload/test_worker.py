@@ -23,6 +23,9 @@ if not current_platform.is_cuda_alike():
     pytest.skip("Requires CUDA or ROCm", allow_module_level=True)
 
 from tests.v1.attention.utils import dense_kv_cache_tensor, dense_kv_cache_views
+from tests.v1.kv_connector.unit.offloading_connector.utils import (
+    make_kv_cache_group_from_specs,
+)
 from tests.v1.kv_connector.unit.test_kv_connector_lifecycle import (
     _make_empty_scheduler_output,
 )
@@ -31,19 +34,18 @@ from vllm.distributed.kv_transfer.kv_connector.v1.simple_cpu_offload_connector i
     SimpleCPUOffloadConnector,
 )
 from vllm.v1.core.kv_cache_planning import (
+    can_share_block_table,
     get_kv_cache_config_from_groups,
-    is_kv_cache_spec_uniform,
 )
 from vllm.v1.core.kv_cache_utils import resolve_kv_cache_block_sizes
+from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
+    AttentionSpec,
     KVCacheConfig,
-    KVCacheGroupSpec,
     KVCacheLayout,
     KVCacheSpec,
     KVCacheTensor,
     MLAAttentionSpec,
-    UniformTypeKVCacheSpecs,
 )
 from vllm.v1.simple_kv_offload.copy_backend import DmaCopyBackend
 from vllm.v1.simple_kv_offload.cuda_mem_ops import (
@@ -325,7 +327,7 @@ def test_build_params_src_access_order():
 def test_register_shared_kv_cache_storage(monkeypatch, layout: KVCacheLayout):
     num_blocks = 4
     num_layers = 2
-    spec = FullAttentionSpec(
+    spec = AttentionSpec(
         block_size=2,
         num_kv_heads=2,
         head_size=2,
@@ -472,7 +474,7 @@ def test_register_separate_kv_head_groups(monkeypatch):
     layout = KVCacheLayout.LHBNC
     num_blocks = 4
     num_layers = 2
-    spec = FullAttentionSpec(
+    spec = AttentionSpec(
         block_size=2,
         num_kv_heads=2,
         head_size=2,
@@ -575,9 +577,9 @@ def _dsa_specs(num_layers: int, block_size: int) -> dict[str, KVCacheSpec]:
     cache, whose pages differ in size (``MLAAttentionSpec`` off ``head_size``:
     512 + 64 for the latent, 128 fp8 keys + one fp32 scale per 128 elements for
     the indexer). Both are ``MLAAttentionSpec`` with the same block size, so the
-    hybrid allocator puts them in one ``UniformTypeKVCacheSpecs`` cache group.
-    See ``DeepseekV32IndexerCache.get_kv_cache_spec`` and
-    ``MLAAttention.get_kv_cache_spec``.
+    hybrid allocator puts them in one cache group.
+    See ``DeepseekV32IndexerCache.get_kv_cache_config`` and
+    ``MLAAttention.get_kv_cache_config``.
     """
     specs: dict[str, KVCacheSpec] = {}
     for i in range(num_layers):
@@ -610,12 +612,11 @@ def test_register_mixed_page_sizes_in_one_cache_group(monkeypatch):
     specs = _dsa_specs(num_layers, block_size)
     # Differing head sizes make the specs non-identical but same-type, which is
     # what lands both caches of a layer in one group.
-    assert not is_kv_cache_spec_uniform(specs)
-    assert UniformTypeKVCacheSpecs.is_uniform_type(specs)
-    group = KVCacheGroupSpec(
-        list(specs),
-        UniformTypeKVCacheSpecs(block_size=block_size, kv_cache_specs=specs),
+    assert len(set(specs.values())) > 1
+    assert can_share_block_table(
+        {name: FullAttentionManager.layer_config(s) for name, s in specs.items()}
     )
+    group = make_kv_cache_group_from_specs(specs)
 
     # DEEPSEEK_V32_INDEXER declares no supported layouts, so resolution lands on
     # the default preference: layer-outermost, one region per layer.
@@ -674,10 +675,7 @@ def test_register_mixed_page_sizes_odd_block_counts(monkeypatch, rank_blocks):
     num_layers = 4
     block_size = 64
     specs = _dsa_specs(num_layers, block_size)
-    group = KVCacheGroupSpec(
-        list(specs),
-        UniformTypeKVCacheSpecs(block_size=block_size, kv_cache_specs=specs),
-    )
+    group = make_kv_cache_group_from_specs(specs)
     layout = KVCacheLayout.LBNHC
     vllm_config = MagicMock()
     vllm_config.cache_config = CacheConfig()
@@ -723,10 +721,7 @@ def test_mixed_page_byte_placement_is_dcp_invariant():
 
     placements = []
     for dcp_size in (1, 2):
-        group = KVCacheGroupSpec(
-            list(specs),
-            UniformTypeKVCacheSpecs(block_size=128, kv_cache_specs=specs),
-        )
+        group = make_kv_cache_group_from_specs(specs)
         vllm_config = MagicMock()
         vllm_config.cache_config = CacheConfig()
         vllm_config.cache_config.block_size = 128

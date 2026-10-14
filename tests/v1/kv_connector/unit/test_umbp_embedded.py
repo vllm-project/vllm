@@ -55,12 +55,15 @@ from vllm.distributed.kv_transfer.kv_connector.v1.umbp.worker import (
     UMBPStoreConnectorWorker,
 )
 from vllm.platforms import current_platform
+from vllm.v1.core.single_type_kv_cache_manager import (
+    FullAttentionManager,
+    SlidingWindowManager,
+)
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
+    AttentionSpec,
     KVCacheConfig,
-    KVCacheGroupSpec,
+    KVCacheGroup,
     KVCacheTensor,
-    SlidingWindowSpec,
 )
 from vllm.v1.request import RequestStatus
 
@@ -629,12 +632,16 @@ def _run_to_completion(scheduler, worker) -> dict[str, int]:
 
 
 def _attention_and_sliding_window_config() -> KVCacheConfig:
-    shape = dict(block_size=16, num_kv_heads=2, head_size=8, dtype=torch.float16)
+    spec = AttentionSpec(
+        block_size=16, num_kv_heads=2, head_size=8, dtype=torch.float16
+    )
     groups = [
-        KVCacheGroupSpec(["full"], FullAttentionSpec(**shape)),
-        KVCacheGroupSpec(["window"], SlidingWindowSpec(**shape, sliding_window=64)),
+        KVCacheGroup.from_layers({"full": FullAttentionManager.layer_config(spec)}),
+        KVCacheGroup.from_layers(
+            {"window": SlidingWindowManager.layer_config(spec, sliding_window=64)}
+        ),
     ]
-    page_bytes = groups[0].kv_cache_spec.page_size_bytes
+    page_bytes = groups[0].page_size_bytes
     return KVCacheConfig(
         num_blocks=16,
         kv_cache_groups=groups,

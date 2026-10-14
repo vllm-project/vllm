@@ -31,8 +31,9 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 import torch
 
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.logger import init_logger
+from vllm.model_executor.layers.attention import Attention
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backend import (
@@ -148,9 +149,13 @@ class FlashInferTSMetadataBuilder(AttentionMetadataBuilder[FlashInferTSMetadata]
         self.num_qo_heads = vllm_config.model_config.get_num_attention_heads(
             vllm_config.parallel_config
         )
-        # FullAttentionSpec records the window when the hybrid KV cache manager
-        # is disabled; SlidingWindowSpec carries it directly.
-        self.sliding_window: int | None = getattr(kv_cache_spec, "sliding_window", None)
+        layers = get_layers_from_vllm_config(vllm_config, Attention, layer_names)
+        sliding_windows = {
+            getattr(layer.impl, "sliding_window", None) for layer in layers.values()
+        }
+        self.sliding_window: int | None = (
+            sliding_windows.pop() if len(sliding_windows) == 1 else None
+        )
         self.query_len = max_decode_query_len(vllm_config)
         self._plans: dict[tuple[int, int, bool], Any] = {}
         self._init_reorder_batch_threshold(1, supports_spec_as_decode=True)

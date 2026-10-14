@@ -8,6 +8,7 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 
+from tests.v1.core.utils import uniform_spec
 from tests.v1.kv_connector.unit.utils import (
     EOS_TOKEN_ID,
     create_model_runner_output,
@@ -36,12 +37,22 @@ from vllm.v1.core.kv_cache_utils import (
 )
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.scheduler import Scheduler
+from vllm.v1.core.single_type_kv_cache_manager import (
+    CircularBufferManager,
+    FullAttentionManager,
+    MambaManager,
+    SingleTypeKVCacheManager,
+    SlidingWindowManager,
+)
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
-    FullAttentionSpec,
     KVCacheConfig,
-    KVCacheGroupSpec,
+    KVCacheGroup,
+    KVCacheLayerConfig,
+    KVCacheSpec,
     KVCacheTensor,
+    MambaSpec,
+    ManagerConfig,
 )
 from vllm.v1.kv_offload.base import (
     CanonicalKVCaches,
@@ -61,6 +72,68 @@ from vllm.v1.kv_offload.config import OffloadingConfig
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.request import Request
 from vllm.v1.structured_output import StructuredOutputManager
+
+
+def make_kv_cache_group_from_specs(
+    specs: dict[str, KVCacheSpec],
+    manager_cls: type[SingleTypeKVCacheManager] | None = None,
+    manager_config: ManagerConfig | None = None,
+    **kwargs,
+) -> KVCacheGroup:
+    """Group of the given per-layer specs under one manager, defaulting to
+    full attention (or Mamba, for ``MambaSpec`` layers)."""
+    if manager_cls is None:
+        first = next(iter(specs.values()))
+        manager_cls = (
+            MambaManager if isinstance(first, MambaSpec) else FullAttentionManager
+        )
+    config = manager_config or manager_cls.config()
+    return KVCacheGroup.from_layers(
+        {name: KVCacheLayerConfig(config, spec) for name, spec in specs.items()},
+        **kwargs,
+    )
+
+
+def make_kv_cache_group(
+    layer_names: list[str],
+    layer: KVCacheSpec | KVCacheLayerConfig,
+    manager_cls: type[SingleTypeKVCacheManager] | None = None,
+    manager_config: ManagerConfig | None = None,
+    **kwargs,
+) -> KVCacheGroup:
+    """Group of layers sharing one spec (or layer config)."""
+    if isinstance(layer, KVCacheLayerConfig):
+        assert manager_cls is None and manager_config is None
+        return KVCacheGroup.from_layers(dict.fromkeys(layer_names, layer), **kwargs)
+    return make_kv_cache_group_from_specs(
+        dict.fromkeys(layer_names, layer), manager_cls, manager_config, **kwargs
+    )
+
+
+def sliding_window_layer(
+    *, sliding_window: int, extra_retained_tokens: int = 0, **spec_kwargs
+) -> KVCacheLayerConfig:
+    """Sliding-window attention layer with a ``AttentionSpec`` layout."""
+    return SlidingWindowManager.layer_config(
+        AttentionSpec(**spec_kwargs),
+        sliding_window=sliding_window,
+        extra_retained_tokens=extra_retained_tokens,
+    )
+
+
+def mamba_layer(
+    *, mamba_cache_mode: str = "none", num_speculative_blocks: int = 0, **spec_kwargs
+) -> KVCacheLayerConfig:
+    return MambaManager.layer_config(
+        MambaSpec(**spec_kwargs),
+        mamba_cache_mode=mamba_cache_mode,
+        num_speculative_blocks=num_speculative_blocks,
+    )
+
+
+def circular_buffer_layer(**spec_kwargs) -> KVCacheLayerConfig:
+    """Per-request ring (scratch) layer with a ``AttentionSpec`` layout."""
+    return CircularBufferManager.layer_config(AttentionSpec(**spec_kwargs))
 
 
 def to_key(int_hash: int) -> OffloadKey:
@@ -190,15 +263,14 @@ class RequestRunner:
         num_gpu_blocks: int,
         blocks_per_chunk: int = 1,
         async_scheduling: bool = True,
-        kv_cache_groups: list[KVCacheGroupSpec] | None = None,
+        kv_cache_groups: list[KVCacheGroup] | None = None,
         extra_config_overrides: dict[str, Any] | None = None,
         worker_count: int = 1,
         retention_interval: int | None = None,
         speculative_config: Any | None = None,
     ):
         assert blocks_per_chunk == 1 or all(
-            group.kv_cache_spec.block_size == block_size
-            for group in kv_cache_groups or ()
+            group.block_size == block_size for group in kv_cache_groups or ()
         ), "blocks_per_chunk > 1 requires every group to use block_size"
 
         self.blocks_per_chunk: int = blocks_per_chunk
@@ -248,9 +320,9 @@ class RequestRunner:
 
         if kv_cache_groups is None:
             kv_cache_groups = [
-                KVCacheGroupSpec(
+                make_kv_cache_group(
                     ["layer"],
-                    FullAttentionSpec(
+                    AttentionSpec(
                         block_size=block_size,
                         num_kv_heads=1,
                         head_size=1,
@@ -260,16 +332,13 @@ class RequestRunner:
             ]
 
         # Groups overlay one allocation, sized by the largest group.
-        block_stride = max(
-            group.kv_cache_spec.page_size_bytes * len(group.layer_names)
-            for group in kv_cache_groups
-        )
+        block_stride = max(group.page_size_bytes for group in kv_cache_groups)
         kv_cache_tensors = [
             KVCacheTensor(
                 size=block_stride * num_gpu_blocks,
                 layers=list(group.layer_names),
-                layer_stride=group.kv_cache_spec.page_size_bytes * num_gpu_blocks,
-                block_stride=group.kv_cache_spec.page_size_bytes,
+                layer_stride=uniform_spec(group).page_size_bytes * num_gpu_blocks,
+                block_stride=uniform_spec(group).page_size_bytes,
             )
             for group in kv_cache_groups
         ]
@@ -303,7 +372,7 @@ class RequestRunner:
         # register worker kv_caches to enable OffloadingWorker creations
         kv_caches: dict[str, torch.Tensor] = {}
         for group in kv_cache_groups:
-            spec = group.kv_cache_spec
+            spec = uniform_spec(group)
             assert isinstance(spec, AttentionSpec)
             for layer_name in group.layer_names:
                 # Shape follows FlashAttention layout:
@@ -340,7 +409,7 @@ class RequestRunner:
             self.connector_scheduler.config.kv_group_configs,
             kv_cache_config.kv_cache_groups,
         ):
-            tokens_per_block = kv_cache_group.kv_cache_spec.block_size
+            tokens_per_block = kv_cache_group.block_size
             assert group_config.tokens_per_block == tokens_per_block
             assert group_config.tokens_per_chunk == tokens_per_block * blocks_per_chunk
 

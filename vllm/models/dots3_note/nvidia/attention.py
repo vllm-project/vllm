@@ -12,11 +12,13 @@ from typing import ClassVar
 import torch
 
 import vllm._custom_ops as ops
+from vllm.config import get_layers_from_vllm_config
 from vllm.model_executor.layers.attention.mla_attention import (
     MLACommonDecodeMetadata,
     MLACommonMetadata,
     QueryLenSupport,
 )
+from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import (
@@ -323,7 +325,16 @@ class Dots3NoteMLAMetadataBuilder(TritonMLAMetadataBuilder):
     query_len_support = QueryLenSupport.UNIFORM
 
     def __init__(self, kv_cache_spec, layer_names, vllm_config, device):
-        self.sliding_window = kv_cache_spec.sliding_window
+        windows = set()
+        for layer in get_layers_from_vllm_config(
+            vllm_config,
+            AttentionLayerBase,  # type: ignore[type-abstract]
+            layer_names,
+        ).values():
+            assert isinstance(layer.impl, Dots3NoteTritonMLAImpl)
+            windows.add(layer.impl.sliding_window)
+        assert len(windows) == 1, f"Mixed sliding windows in a group: {windows}"
+        self.sliding_window = windows.pop()
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
 
     def _reserve_attn_logits_workspace(self) -> None:

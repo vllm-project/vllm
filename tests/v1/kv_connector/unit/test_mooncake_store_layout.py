@@ -38,10 +38,10 @@ def _reset_conv_state_layout_cache():
 def _attention_specs(
     num_layers: int, block_size: int, local_heads: int, content_size: int = 4
 ):
-    from vllm.v1.kv_cache_interface import FullAttentionSpec
+    from vllm.v1.kv_cache_interface import AttentionSpec
 
     return tuple(
-        FullAttentionSpec(
+        AttentionSpec(
             block_size=block_size,
             num_kv_heads=local_heads,
             head_size=content_size // 2,

@@ -42,12 +42,8 @@ from vllm.v1.core.kv_cache_utils import (
     resolve_block_hashes,
     to_event_extra_keys,
 )
-from vllm.v1.kv_cache_interface import (
-    KVCacheGroupSpec,
-    MambaSpec,
-    get_kv_cache_spec_kind,
-    get_kv_cache_spec_sliding_window,
-)
+from vllm.v1.core.single_type_kv_cache_manager import MambaManager, get_kv_cache_kind
+from vllm.v1.kv_cache_interface import KVCacheGroup
 from vllm.v1.kv_offload.base import (
     Medium,
     OffloadingEvent,
@@ -80,12 +76,13 @@ class OffloadingEventGroupSpec(NamedTuple):
 
 
 def get_offloading_event_group_spec(
-    kv_cache_group: KVCacheGroupSpec,
+    kv_cache_group: KVCacheGroup,
 ) -> OffloadingEventGroupSpec:
-    kv_cache_spec = kv_cache_group.kv_cache_spec
     return OffloadingEventGroupSpec(
-        kv_cache_spec_kind=get_kv_cache_spec_kind(kv_cache_spec).value,
-        kv_cache_spec_sliding_window=get_kv_cache_spec_sliding_window(kv_cache_spec),
+        kv_cache_spec_kind=get_kv_cache_kind(
+            kv_cache_group.manager_config, kv_cache_group.kv_cache_specs.values()
+        ).value,
+        kv_cache_spec_sliding_window=kv_cache_group.sliding_window,
     )
 
 
@@ -117,7 +114,7 @@ class _OffloadEventMetadata(
 def describes_group(group_config: "GroupOffloadConfig") -> bool:
     """Whether the tracker builds self-describing payloads for this group.
 
-    Full-attention groups and recurrent state groups (``MambaSpec``) do;
+    Full-attention groups and recurrent state groups (``MambaManager``) do;
     windowed attention groups (sliding window, chunked local) keep the legacy
     placeholder because a window's hashes do not identify a reusable prefix.
     """
@@ -127,7 +124,7 @@ def describes_group(group_config: "GroupOffloadConfig") -> bool:
 
 
 def _is_recurrent_group(group_config: "GroupOffloadConfig") -> bool:
-    return isinstance(group_config.kv_cache_spec, MambaSpec)
+    return issubclass(group_config.manager_cls, MambaManager)
 
 
 def _as_state_checkpoint(meta: _OffloadEventMetadata) -> _OffloadEventMetadata:

@@ -402,6 +402,7 @@ def test_build_attention_metadata_zeros_stale_is_prefilling():
     from unittest.mock import MagicMock, patch
 
     from vllm.v1.attention.backend import CommonAttentionMetadata
+    from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
     num_reqs = 3
@@ -414,7 +415,7 @@ def test_build_attention_metadata_zeros_stale_is_prefilling():
 
     runner = MagicMock()
     runner.kv_cache_config.kv_cache_groups = [
-        MagicMock()
+        MagicMock(manager_cls=FullAttentionManager)
     ]  # non-empty: skip early return
     runner.attn_groups = [[]]  # empty inner list: inner loop never runs
     runner.input_batch.num_computed_tokens_cpu_tensor = num_computed

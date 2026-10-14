@@ -25,7 +25,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_tp_mapping impor
     _rank_heads,
     compute_write_tp_mapping,
 )
-from vllm.v1.kv_cache_interface import FullAttentionSpec, compute_layout_strides
+from vllm.v1.kv_cache_interface import AttentionSpec, compute_layout_strides
 from vllm.v1.kv_cache_layout import KVCacheLayout
 
 pytestmark = pytest.mark.cpu_test
@@ -164,8 +164,8 @@ def _view(buffer: torch.Tensor, spec, num_blocks, layout) -> torch.Tensor:
     return torch.as_strided(buffer, shape, strides)
 
 
-def _spec(num_kv_heads: int) -> FullAttentionSpec:
-    return FullAttentionSpec(
+def _spec(num_kv_heads: int) -> AttentionSpec:
+    return AttentionSpec(
         block_size=4, num_kv_heads=num_kv_heads, head_size=2, dtype=torch.bfloat16
     )
 

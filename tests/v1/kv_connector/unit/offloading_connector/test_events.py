@@ -7,6 +7,7 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 
+from tests.v1.kv_connector.unit.offloading_connector.utils import make_kv_cache_group
 from tests.v1.kv_connector.unit.utils import create_vllm_config
 from vllm.config import KVEventsConfig, KVTransferConfig
 from vllm.distributed.kv_events import (
@@ -26,15 +27,15 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
     OffloadingConnectorScheduler,
 )
 from vllm.v1.core.kv_cache_utils import BlockHash, maybe_convert_block_hash
-from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
-    KVCacheConfig,
-    KVCacheGroupSpec,
-    KVCacheSpec,
-    KVCacheSpecKind,
-    MambaSpec,
+from vllm.v1.core.single_type_kv_cache_manager import (
+    FullAttentionManager,
+    MambaManager,
 )
-from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
+from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
+    KVCacheConfig,
+    KVCacheSpecKind,
+)
 from vllm.v1.kv_offload.base import (
     Locality,
     LookupResult,
@@ -102,35 +103,22 @@ def _group_config(
         tokens_per_hash = block_size
     tokens_per_chunk = block_size * blocks_per_chunk
     assert tokens_per_chunk % tokens_per_hash == 0
-    kv_spec: KVCacheSpec
     if mamba:
         # A recurrent group: one state per chunk, offloaded in align mode.
-        kv_spec = MambaSpec(
-            block_size=block_size,
-            shapes=((1, 1),),
-            dtypes=(torch.float32,),
-            mamba_cache_mode="align",
-        )
+        manager_config = MambaManager.config(mamba_cache_mode="align")
         sliding_window_size_in_chunks = 1
         event_spec = _MAMBA_EVENT_SPEC
     else:
-        kv_spec = FullAttentionSpec(
-            block_size=block_size,
-            num_kv_heads=1,
-            head_size=1,
-            dtype=torch.float32,
-        )
+        manager_config = FullAttentionManager.config()
         event_spec = _FULL_ATTENTION_EVENT_SPEC
-    manager_cls = KVCacheSpecRegistry.get_manager_class(kv_spec)
-    assert manager_cls is not None
     return GroupOffloadConfig(
         group_idx=group_idx,
         tokens_per_block=block_size,
         tokens_per_chunk=tokens_per_chunk,
         hashes_per_chunk=tokens_per_chunk // tokens_per_hash,
         sliding_window_size_in_chunks=sliding_window_size_in_chunks,
-        kv_cache_spec=kv_spec,
-        manager_cls=manager_cls,
+        block_size=block_size,
+        manager_config=manager_config,
         kv_event_group_spec=event_spec,
         requires_cow_source=mamba,
     )
@@ -961,9 +949,9 @@ def test_tiering_accepts_self_describing_kv_events():
         num_blocks=0,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            make_kv_cache_group(
                 ["layer"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=4,
                     num_kv_heads=1,
                     head_size=1,
@@ -1003,9 +991,9 @@ def _build_tiering_spec(secondary_tiers, *, top_level_backpressure=None):
         num_blocks=0,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            make_kv_cache_group(
                 ["layer"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=4,
                     num_kv_heads=1,
                     head_size=1,

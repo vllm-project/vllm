@@ -4,7 +4,6 @@
 
 import itertools
 from collections.abc import Sequence
-from dataclasses import replace
 
 import torch
 from torch import nn
@@ -70,7 +69,7 @@ from vllm.utils.torch_utils import (
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadata
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
-from vllm.v1.kv_cache_interface import KVCacheGroupSpec, KVCacheSpec, MambaSpec
+from vllm.v1.kv_cache_interface import KVCacheGroup
 
 logger = init_logger(__name__)
 
@@ -1105,17 +1104,12 @@ class MambaMixer2(MambaBase, PluggableLayer):
                     is_blackwell=self.is_blackwell,
                 )
 
-    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec | None:
-        spec = super().get_kv_cache_spec(vllm_config)
-        if not isinstance(spec, MambaSpec):
-            return spec
+    def get_kv_cache_checkpoint_alignment(self, vllm_config: VllmConfig) -> int | None:
         # The block-boundary state can be exported from inside one forward
         # pass, so the scheduler need not split the prefill; every reader
         # acts on this only in align mode. The metadata builder puts a chunk
         # end exactly on the checkpoint, so any token position works.
-        return replace(
-            spec, num_prefill_checkpoint_blocks=1, prefill_checkpoint_alignment=1
-        )
+        return 1
 
     def get_state_dtype(self) -> tuple[torch.dtype, ...]:
         assert self.model_config is not None
@@ -1163,7 +1157,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
 def share_replayssm_ring_trackers(
     ordered_layer_names: list[str],
     forward_context: dict[str, Attention],
-    kv_cache_groups: Sequence[KVCacheGroupSpec] | None = None,
+    kv_cache_groups: Sequence[KVCacheGroup] | None = None,
 ) -> None:
     """Share ring cursors within each cache-slot index namespace.
 

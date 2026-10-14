@@ -14,6 +14,12 @@ import pytest
 import torch
 
 from tests.v1.attention.utils import dense_kv_cache_views
+from tests.v1.kv_connector.unit.offloading_connector.utils import (
+    circular_buffer_layer,
+    make_kv_cache_group,
+    mamba_layer,
+    sliding_window_layer,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store import (
     worker as mooncake_store_worker,
 )
@@ -39,14 +45,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.worker import (
 from vllm.v1.core.kv_cache_planning import get_kv_cache_config_from_groups
 from vllm.v1.core.kv_cache_utils import BlockHash
 from vllm.v1.kv_cache_interface import (
-    CircularBufferSpec,
-    FullAttentionSpec,
+    AttentionSpec,
     KVCacheConfig,
-    KVCacheGroupSpec,
     KVCacheTensor,
-    MambaSpec,
     MLAAttentionSpec,
-    SlidingWindowSpec,
 )
 from vllm.v1.kv_cache_layout import KVCacheLayout
 from vllm.v1.worker.utils import allocate_kv_cache
@@ -190,8 +192,8 @@ def test_e2e_swa_plus_full_save_then_lookup_hits():
     Also verify that evicting SWA's early blocks (outside its window) still
     allows a full hit because the window covers the tail.
     """
-    full = FullAttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
-    swa = SlidingWindowSpec(
+    full = AttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
+    swa = sliding_window_layer(
         block_size=16,
         num_kv_heads=8,
         head_size=64,
@@ -208,15 +210,15 @@ def test_e2e_swa_plus_full_save_then_lookup_hits():
                 block_stride=full.page_size_bytes,
             ),
             KVCacheTensor(
-                size=4 * swa.page_size_bytes,
+                size=4 * swa.spec.page_size_bytes,
                 layers=["L1"],
-                layer_stride=4 * swa.page_size_bytes,
-                block_stride=swa.page_size_bytes,
+                layer_stride=4 * swa.spec.page_size_bytes,
+                block_stride=swa.spec.page_size_bytes,
             ),
         ],
         kv_cache_groups=[
-            KVCacheGroupSpec(["L0"], full),
-            KVCacheGroupSpec(["L1"], swa),
+            make_kv_cache_group(["L0"], full),
+            make_kv_cache_group(["L1"], swa),
         ],
     )
     vllm_config = _minimal_vllm_config(cache_block_size=16)
@@ -230,10 +232,10 @@ def test_e2e_swa_plus_full_save_then_lookup_hits():
     # Register kv_caches using mocked thread classes so register_kv_caches
     # doesn't try to start real background threads (which set ready_event).
     raw_full = torch.zeros(4 * full.page_size_bytes, dtype=torch.int8)
-    raw_swa = torch.zeros(4 * swa.page_size_bytes, dtype=torch.int8)
+    raw_swa = torch.zeros(4 * swa.spec.page_size_bytes, dtype=torch.int8)
     kv_caches = {
         "L0": dense_kv_cache_views(raw_full, full, 4, 1, KVCacheLayout.LBNHC)[0],
-        "L1": dense_kv_cache_views(raw_swa, swa, 4, 1, KVCacheLayout.LBNHC)[0],
+        "L1": dense_kv_cache_views(raw_swa, swa.spec, 4, 1, KVCacheLayout.LBNHC)[0],
     }
 
     _register_with_fake_threads(worker, kv_caches)
@@ -308,18 +310,18 @@ def test_hybrid_mamba_values_hold_only_group_states():
     its own layers' states: not the layer slot only attention uses, and not
     the padding of each state up to the attention page. Restoring the value
     brings back the states."""
-    attn = FullAttentionSpec(
+    attn = AttentionSpec(
         block_size=16, num_kv_heads=1, head_size=16, dtype=torch.float16
     )
     page = attn.page_size_bytes
-    mamba = MambaSpec(
+    mamba = mamba_layer(
         block_size=16,
         shapes=((4, 8), (2, 8)),
         dtypes=(torch.float32, torch.float16),
         page_size_padded=page,
         mamba_cache_mode="align",
     )
-    assert mamba.state_content_size_bytes == 160 < page
+    assert mamba.spec.state_content_size_bytes == 160 < page
     num_layers, num_blocks = 3, 4
 
     def tensor(layers):
@@ -334,8 +336,8 @@ def test_hybrid_mamba_values_hold_only_group_states():
         num_blocks=num_blocks,
         kv_cache_tensors=[tensor(["A0", "A1", "A2"]), tensor(["M0", "M1"])],
         kv_cache_groups=[
-            KVCacheGroupSpec(["A0", "A1", "A2"], attn),
-            KVCacheGroupSpec(["M0", "M1"], mamba),
+            make_kv_cache_group(["A0", "A1", "A2"], attn),
+            make_kv_cache_group(["M0", "M1"], mamba),
         ],
     )
     worker = _build_worker_with_dict_store(
@@ -389,10 +391,8 @@ def test_hybrid_mamba_values_hold_only_group_states():
     assert torch.equal(raw, expected)
 
 
-_ATTN = FullAttentionSpec(
-    block_size=16, num_kv_heads=2, head_size=16, dtype=torch.float16
-)
-_MAMBA = MambaSpec(
+_ATTN = AttentionSpec(block_size=16, num_kv_heads=2, head_size=16, dtype=torch.float16)
+_MAMBA = mamba_layer(
     block_size=16,
     shapes=((4, 8), (2, 8)),
     dtypes=(torch.float32, torch.float16),
@@ -414,7 +414,7 @@ _MODELS = {
         (["A0", "A1"], _ATTN),
         (
             ["S0", "S1"],
-            SlidingWindowSpec(
+            sliding_window_layer(
                 block_size=16,
                 num_kv_heads=2,
                 head_size=16,
@@ -434,7 +434,7 @@ _MODELS = {
         (["A0", "A1"], _ATTN),
         (
             ["B0", "B1", "B2"],
-            FullAttentionSpec(
+            AttentionSpec(
                 block_size=16, num_kv_heads=1, head_size=8, dtype=torch.float16
             ),
         ),
@@ -468,7 +468,7 @@ def test_store_values_round_trip_every_layout(model, layout):
     block, and restores it exactly. Without padding the value is the group's
     whole block, as before; with Mamba padding it is exactly the states."""
     num_blocks, block = 4, 2
-    groups = [KVCacheGroupSpec(names, spec) for names, spec in _MODELS[model]]
+    groups = [make_kv_cache_group(names, spec) for names, spec in _MODELS[model]]
     planner_config = SimpleNamespace(
         cache_config=SimpleNamespace(
             get_resolved_kv_cache_layout=lambda: layout,
@@ -545,9 +545,9 @@ def test_store_values_round_trip_every_layout(model, layout):
 def test_recv_skips_swa_blocks_before_window():
     """Producer stored every block for both groups; consumer must only fetch
     SWA blocks within the sliding window, not the head."""
-    full = FullAttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
+    full = AttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
     # sliding_window=32, block_size=16 → 2 contiguous blocks within window.
-    swa = SlidingWindowSpec(
+    swa = sliding_window_layer(
         block_size=16,
         num_kv_heads=8,
         head_size=64,
@@ -555,8 +555,8 @@ def test_recv_skips_swa_blocks_before_window():
         sliding_window=32,
     )
     groups = [
-        KVCacheGroupSpec(["L0"], full),
-        KVCacheGroupSpec(["L1"], swa),
+        make_kv_cache_group(["L0"], full),
+        make_kv_cache_group(["L1"], swa),
     ]
     md0 = KeyMetadata("m", 0, 0, 0, 0, group_id=0)
     md1 = KeyMetadata("m", 0, 0, 0, 0, group_id=1)
@@ -655,16 +655,16 @@ def test_sub_block_partial_tail_offload_reads_cow_block():
     partial tail is offloaded for both groups under the boundary sub-hash. The
     full-attention block is read from the request block table; the mamba block
     is the core-provided CoW target, not block_ids."""
-    full = FullAttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
-    mamba = MambaSpec(
+    full = AttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
+    mamba = mamba_layer(
         block_size=16,
         shapes=((1, 1),),
         dtypes=(torch.float32,),
         mamba_cache_mode="align",
     )
     groups = [
-        KVCacheGroupSpec(["L0"], full),
-        KVCacheGroupSpec(["L1"], mamba),
+        make_kv_cache_group(["L0"], full),
+        make_kv_cache_group(["L1"], mamba),
     ]
     coord = MooncakeStoreCoordinator(
         groups,
@@ -741,16 +741,16 @@ def test_offload_syncs_event_before_put():
     """An offload-carrying meta synchronizes its CoW-fence event before the
     store put reads the blocks, then completes in one pass and drains the
     completion counter."""
-    full = FullAttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
-    mamba = MambaSpec(
+    full = AttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
+    mamba = mamba_layer(
         block_size=16,
         shapes=((1, 1),),
         dtypes=(torch.float32,),
         mamba_cache_mode="align",
     )
     groups = [
-        KVCacheGroupSpec(["L0"], full),
-        KVCacheGroupSpec(["L1"], mamba),
+        make_kv_cache_group(["L0"], full),
+        make_kv_cache_group(["L1"], mamba),
     ]
     coord = MooncakeStoreCoordinator(
         groups,
@@ -819,16 +819,16 @@ def test_sub_block_partial_tail_offload_covers_smaller_group_blocks():
     consumer's per-group lookup would miss. The mamba boundary block still
     reads the core-provided CoW target. Without EAGLE, the 12-token prompt's
     resend-safe checkpoint is 8, leaving two attention blocks to save."""
-    full = FullAttentionSpec(block_size=4, num_kv_heads=8, head_size=64, dtype=None)
-    mamba = MambaSpec(
+    full = AttentionSpec(block_size=4, num_kv_heads=8, head_size=64, dtype=None)
+    mamba = mamba_layer(
         block_size=16,
         shapes=((1, 1),),
         dtypes=(torch.float32,),
         mamba_cache_mode="align",
     )
     groups = [
-        KVCacheGroupSpec(["L0"], full),
-        KVCacheGroupSpec(["L1"], mamba),
+        make_kv_cache_group(["L0"], full),
+        make_kv_cache_group(["L1"], mamba),
     ]
     coord = MooncakeStoreCoordinator(
         groups,
@@ -907,8 +907,8 @@ def test_worker_lookup_hits_sub_block_partial_tail():
     mamba block (16) exceeds the hash unit (4), so ``enable_partial_hash_hits``
     is on and the lookup must find the stored boundary at 8.
     """
-    full = FullAttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
-    mamba = MambaSpec(
+    full = AttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
+    mamba = mamba_layer(
         block_size=16,
         shapes=((1, 1),),
         dtypes=(torch.float32,),
@@ -924,15 +924,15 @@ def test_worker_lookup_hits_sub_block_partial_tail():
                 block_stride=full.page_size_bytes,
             ),
             KVCacheTensor(
-                size=4 * mamba.page_size_bytes,
+                size=4 * mamba.spec.page_size_bytes,
                 layers=["L1"],
-                layer_stride=4 * mamba.page_size_bytes,
-                block_stride=mamba.page_size_bytes,
+                layer_stride=4 * mamba.spec.page_size_bytes,
+                block_stride=mamba.spec.page_size_bytes,
             ),
         ],
         kv_cache_groups=[
-            KVCacheGroupSpec(["L0"], full),
-            KVCacheGroupSpec(["L1"], mamba),
+            make_kv_cache_group(["L0"], full),
+            make_kv_cache_group(["L1"], mamba),
         ],
         # The hit alignment the engine core resolves for this config.
         cache_hit_alignment_tokens=4,
@@ -995,15 +995,15 @@ def test_worker_setup_tolerates_finer_scratch_group():
     store/load/lookup, so setup must skip them and lookup must still hit
     stored sub-block boundaries on the participating groups.
     """
-    full = FullAttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
-    mamba = MambaSpec(
+    full = AttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
+    mamba = mamba_layer(
         block_size=16,
         shapes=((1, 1),),
         dtypes=(torch.float32,),
         mamba_cache_mode="align",
     )
     # Scratch block 4 is not divisible by the hash unit 8 below.
-    scratch = CircularBufferSpec(
+    scratch = circular_buffer_layer(
         block_size=4,
         num_kv_heads=2,
         head_size=64,
@@ -1020,22 +1020,22 @@ def test_worker_setup_tolerates_finer_scratch_group():
                 block_stride=full.page_size_bytes,
             ),
             KVCacheTensor(
-                size=4 * mamba.page_size_bytes,
+                size=4 * mamba.spec.page_size_bytes,
                 layers=["L1"],
-                layer_stride=4 * mamba.page_size_bytes,
-                block_stride=mamba.page_size_bytes,
+                layer_stride=4 * mamba.spec.page_size_bytes,
+                block_stride=mamba.spec.page_size_bytes,
             ),
             KVCacheTensor(
-                size=4 * scratch.page_size_bytes,
+                size=4 * scratch.spec.page_size_bytes,
                 layers=["L2"],
-                layer_stride=4 * scratch.page_size_bytes,
-                block_stride=scratch.page_size_bytes,
+                layer_stride=4 * scratch.spec.page_size_bytes,
+                block_stride=scratch.spec.page_size_bytes,
             ),
         ],
         kv_cache_groups=[
-            KVCacheGroupSpec(["L0"], full),
-            KVCacheGroupSpec(["L1"], mamba),
-            KVCacheGroupSpec(["L2"], scratch),
+            make_kv_cache_group(["L0"], full),
+            make_kv_cache_group(["L1"], mamba),
+            make_kv_cache_group(["L2"], scratch),
         ],
         # The hit alignment the engine core resolves for this config.
         cache_hit_alignment_tokens=8,
@@ -1095,12 +1095,12 @@ def test_worker_setup_tolerates_finer_scratch_group():
 
 
 def test_ring_scratch_group_is_never_stored_and_does_not_block_hits():
-    """A per-request ring group (CircularBufferSpec, capacity as block_size)
+    """A per-request ring group (CircularBufferManager, capacity as block_size)
     sits beside the paged group: worker setup tolerates its block size (the
     DeepSeek-V4.1 compressor ring is 8 rows), saving a request stores paged
     blocks only, and lookup hits on the paged group alone."""
-    full = FullAttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
-    ring = CircularBufferSpec(
+    full = AttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
+    ring = circular_buffer_layer(
         block_size=8, num_kv_heads=1, head_size=64, head_size_v=0, dtype=torch.uint8
     )
     cfg = KVCacheConfig(
@@ -1113,15 +1113,15 @@ def test_ring_scratch_group_is_never_stored_and_does_not_block_hits():
                 block_stride=full.page_size_bytes,
             ),
             KVCacheTensor(
-                size=4 * ring.page_size_bytes,
+                size=4 * ring.spec.page_size_bytes,
                 layers=["L1"],
-                layer_stride=4 * ring.page_size_bytes,
-                block_stride=ring.page_size_bytes,
+                layer_stride=4 * ring.spec.page_size_bytes,
+                block_stride=ring.spec.page_size_bytes,
             ),
         ],
         kv_cache_groups=[
-            KVCacheGroupSpec(["L0"], full),
-            KVCacheGroupSpec(["L1"], ring),
+            make_kv_cache_group(["L0"], full),
+            make_kv_cache_group(["L1"], ring),
         ],
     )
     vllm_config = _minimal_vllm_config(cache_block_size=16)
@@ -1135,10 +1135,10 @@ def test_ring_scratch_group_is_never_stored_and_does_not_block_hits():
     assert worker.token_dbs[0].hash_block_size == 16
 
     raw_full = torch.zeros(4 * full.page_size_bytes, dtype=torch.int8)
-    raw_ring = torch.zeros(4 * ring.page_size_bytes, dtype=torch.int8)
+    raw_ring = torch.zeros(4 * ring.spec.page_size_bytes, dtype=torch.int8)
     kv_caches = {
         "L0": dense_kv_cache_views(raw_full, full, 4, 1, KVCacheLayout.LBNHC)[0],
-        "L1": dense_kv_cache_views(raw_ring, ring, 4, 1, KVCacheLayout.LBNHC)[0],
+        "L1": dense_kv_cache_views(raw_ring, ring.spec, 4, 1, KVCacheLayout.LBNHC)[0],
     }
 
     def _fake_thread_init(*args, **kwargs):

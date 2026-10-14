@@ -1243,8 +1243,9 @@ def _warmup_segmented_attention(layer, device, **limits) -> None:
     impl = layer.impl
     config = impl._segmented_attention_config
     assert config is not None
-    spec = layer.get_kv_cache_spec(config)
-    assert spec is not None
+    layer_config = layer.get_kv_cache_config(config)
+    assert layer_config is not None
+    spec = layer_config.spec
     sliding_window = impl.sliding_window[0]
     query_limit = getattr(layer, "segmented_query_limit", None)
     if not isinstance(query_limit, int):
@@ -1289,7 +1290,6 @@ def rocm_segmented_attn_autotune_warmup(worker: Worker) -> None:
     from vllm.v1.attention.backends.rocm_segmented_attn import (
         RocmSegmentedAttentionImpl,
     )
-    from vllm.v1.kv_cache_interface import FullAttentionSpec
 
     if not on_gfx1x():
         return
@@ -1310,14 +1310,14 @@ def rocm_segmented_attn_autotune_warmup(worker: Worker) -> None:
     if not layers:
         return
 
-    specs = worker.get_kv_cache_spec()
+    layer_configs = worker.get_kv_cache_layer_configs()
     layouts = tuple(
         (
-            (spec.block_size, spec.page_size_bytes)
-            if isinstance(spec, FullAttentionSpec)
-            else (0, spec.max_memory_usage_bytes(worker.vllm_config))
+            (lc.spec.block_size, lc.spec.page_size_bytes)
+            if lc.manager_cls.is_full_attention
+            else (0, lc.max_memory_usage_bytes(worker.vllm_config))
         )
-        for spec in specs.values()
+        for lc in layer_configs.values()
     )
     cache_budget = sum(
         tensor.size

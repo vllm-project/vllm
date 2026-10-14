@@ -463,7 +463,7 @@ def test_pd_dcp_interleave_size_is_adjusted_to_block_size(
         kv_transfer_config=kv_transfer_config,
     )
 
-    kv_cache_groups = [SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=16))]
+    kv_cache_groups = [SimpleNamespace(block_size=16)]
     with caplog.at_level(logging.INFO):
         config.adjust_dcp_kv_cache_interleave_size(kv_cache_groups)
 
@@ -487,7 +487,7 @@ def test_kv_offloading_does_not_adjust_dcp_interleave_size():
         ),
     )
 
-    kv_cache_groups = [SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=16))]
+    kv_cache_groups = [SimpleNamespace(block_size=16)]
     config.adjust_dcp_kv_cache_interleave_size(kv_cache_groups)
 
     assert config.parallel_config.cp_kv_cache_interleave_size == 1

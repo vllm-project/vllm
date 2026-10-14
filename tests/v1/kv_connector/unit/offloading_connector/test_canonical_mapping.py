@@ -5,6 +5,7 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 
+from tests.v1.kv_connector.unit.offloading_connector.utils import make_kv_cache_group
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.canonical_mapping import (
     _layer_mapping,
     _opaque_fallback_mapping,
@@ -14,8 +15,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.canonical_mapping i
 )
 from vllm.v1.attention.backends.triton_attn import TritonAttentionBackend
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
-    KVCacheGroupSpec,
+    AttentionSpec,
     KVCacheSpec,
     KVQuantMode,
     MLAAttentionSpec,
@@ -36,10 +36,10 @@ def _ctx(rank, tp=1, dcp=1, pcp=1, interleave=1, total=None, heads=2):
     )
 
 
-def _full_spec(num_kv_heads: int = 2, **kwargs) -> FullAttentionSpec:
+def _full_spec(num_kv_heads: int = 2, **kwargs) -> AttentionSpec:
     # block_size=4, head_dim=64, int8
     return TritonAttentionBackend.customize_spec(
-        FullAttentionSpec(
+        AttentionSpec(
             block_size=4,
             num_kv_heads=num_kv_heads,
             head_size=64,
@@ -442,9 +442,9 @@ def test_derive_mixed_model_with_dcp():
     )
     kv_cache_config = _kv_cache_config(
         [
-            KVCacheGroupSpec(layer_names=["attn"], kv_cache_spec=attn_spec),
-            KVCacheGroupSpec(layer_names=["mla"], kv_cache_spec=mla_spec),
-            KVCacheGroupSpec(layer_names=["quant"], kv_cache_spec=quant_spec),
+            make_kv_cache_group(["attn"], attn_spec),
+            make_kv_cache_group(["mla"], mla_spec),
+            make_kv_cache_group(["quant"], quant_spec),
         ]
     )
     kv_caches = {
@@ -467,9 +467,7 @@ def test_derive_mixed_model_with_dcp():
 
 def test_derive_refuses_foreign_worker_groups():
     attn_spec = _full_spec()
-    kv_cache_config = _kv_cache_config(
-        [KVCacheGroupSpec(layer_names=["attn"], kv_cache_spec=attn_spec)]
-    )
+    kv_cache_config = _kv_cache_config([make_kv_cache_group(["attn"], attn_spec)])
     kv_caches = {"attn": _split_nhd_cache(attn_spec)}
     assert (
         derive_canonical_mappings(

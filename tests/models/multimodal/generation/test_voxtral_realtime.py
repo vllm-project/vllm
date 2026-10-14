@@ -20,8 +20,9 @@ from vllm.engine.protocol import StreamingInput
 from vllm.platforms import current_platform
 from vllm.renderers.inputs.preprocess import parse_model_prompt
 from vllm.utils.math_utils import cdiv
+from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
 from vllm.v1.engine.async_llm import AsyncLLM
-from vllm.v1.kv_cache_interface import SlidingWindowSpec
+from vllm.v1.kv_cache_interface import AttentionSpec
 
 from ....utils import ROCM_ENGINE_KWARGS, create_new_process_for_each_test
 
@@ -70,24 +71,31 @@ def _normalize(texts: list[str]) -> list[str]:
 def assert_encoder_kv_cache_spec(engine: LLM) -> None:
     vllm_config = engine.llm_engine.vllm_config
     audio_config = vllm_config.model_config.hf_config.audio_config
-    kv_cache_specs_per_rank = engine.llm_engine.model_executor.get_kv_cache_specs()
+    layer_configs_per_rank = (
+        engine.llm_engine.model_executor.get_kv_cache_layer_configs()
+    )
 
-    assert len(kv_cache_specs_per_rank) == 1
-    kv_cache_specs = kv_cache_specs_per_rank[0]
-    assert AUDIO_LAYER_NAME in kv_cache_specs, kv_cache_specs.keys()
-    spec = kv_cache_specs[AUDIO_LAYER_NAME]
+    assert len(layer_configs_per_rank) == 1
+    layer_configs = layer_configs_per_rank[0]
+    assert AUDIO_LAYER_NAME in layer_configs, layer_configs.keys()
+    layer_config = layer_configs[AUDIO_LAYER_NAME]
+    spec = layer_config.spec
+    manager_config = layer_config.manager_config
 
     assert audio_config.sliding_window == 750
     assert audio_config.block_pool_size == 4
-    assert isinstance(spec, SlidingWindowSpec)
+    assert layer_config.manager_cls is SlidingWindowManager
+    assert isinstance(spec, AttentionSpec)
     assert spec.block_size == 16
     assert spec.num_kv_heads == 32
     assert spec.tokens_per_state == Fraction(1, 4)
     # cdiv(750, 4) == 188 pooled tokens cover the model's window; the extra
-    # +1 is an eviction margin (see whisper_causal.py get_kv_cache_spec).
-    assert spec.sliding_window == cdiv(750, 4) + 1 == 189
+    # +1 is an eviction margin (see whisper_causal.py get_kv_cache_config).
+    assert manager_config.sliding_window == cdiv(750, 4) + 1 == 189
     assert (
-        spec.max_admission_blocks_per_request(
+        SlidingWindowManager.max_admission_blocks(
+            manager_config,
+            spec.block_size,
             max_in_flight_tokens=1,
             max_model_len=vllm_config.model_config.max_model_len,
         )

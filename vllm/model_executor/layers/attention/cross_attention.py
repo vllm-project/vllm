@@ -18,9 +18,10 @@ from vllm.v1.attention.backend import (
     subclass_attention_backend_with_overrides,
 )
 from vllm.v1.attention.selector import get_attn_backend
+from vllm.v1.core.single_type_kv_cache_manager import CrossAttentionManager
 from vllm.v1.kv_cache_interface import (
-    CrossAttentionSpec,
-    KVCacheSpec,
+    AttentionSpec,
+    KVCacheLayerConfig,
     get_kv_quant_mode,
 )
 
@@ -30,7 +31,7 @@ logger = init_logger(__name__)
 def _get_cross_slot_mapping(
     encoder_seq_lens: np.ndarray,
     block_table_tensor: torch.Tensor,
-    kv_cache_spec: CrossAttentionSpec,
+    kv_cache_spec: AttentionSpec,
     device: torch.device,
 ) -> torch.Tensor:
     """Get cross-attention slot mappings."""
@@ -229,11 +230,12 @@ class CrossAttention(Attention):
             **kwargs,
         )
 
-    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
-        return CrossAttentionSpec(
+    def get_kv_cache_config(self, vllm_config: VllmConfig) -> KVCacheLayerConfig:
+        spec = AttentionSpec(
             block_size=vllm_config.cache_config.block_size,
             num_kv_heads=self.num_kv_heads,
             head_size=self.head_size,
             dtype=self.kv_cache_torch_dtype,
             kv_quant_mode=get_kv_quant_mode(self.kv_cache_dtype),
         )
+        return CrossAttentionManager.layer_config(spec)

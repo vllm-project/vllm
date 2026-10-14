@@ -8,27 +8,21 @@ import torch.nn as nn
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.mamba.mamba_utils import MambaStateCopyFuncsByType
 from vllm.v1.core.sched.output import NewRequestData
-from vllm.v1.kv_cache_interface import (
-    KVCacheConfig,
-    KVCacheGroupSpec,
-    MambaSpec,
-    UniformTypeKVCacheSpecs,
-)
+from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheGroup, MambaSpec
 from vllm.v1.worker.cpu.block_table import CPUBlockTables
 from vllm.v1.worker.cpu.encoder_cache import EncoderCache
 from vllm.v1.worker.cpu.input_batch import InputBatch
 from vllm.v1.worker.cpu.model_states.default import DefaultModelState
 from vllm.v1.worker.mamba_utils import (
-    get_mamba_group_ids,
+    MambaGroupPolicy,
+    get_mamba_group_policy,
     get_mamba_groups,
     validate_mamba_state_copy_funcs,
 )
 
 
-def _get_mamba_spec(kv_cache_group: KVCacheGroupSpec, layer_name: str) -> MambaSpec:
-    spec = kv_cache_group.kv_cache_spec
-    if isinstance(spec, UniformTypeKVCacheSpecs):
-        spec = spec.kv_cache_specs[layer_name]
+def _get_mamba_spec(kv_cache_group: KVCacheGroup, layer_name: str) -> MambaSpec:
+    spec = kv_cache_group.kv_cache_specs[layer_name]
     assert isinstance(spec, MambaSpec)
     return spec
 
@@ -50,8 +44,7 @@ class MambaHybridModelState(DefaultModelState):
             self._mamba_state_idx = torch.zeros(
                 self.max_num_reqs, dtype=torch.int32, device=self.device
             )
-            self._mamba_group_ids: list[int] = []
-            self._mamba_spec: MambaSpec | None = None
+            self._mamba_policy: MambaGroupPolicy | None = None
             self._mamba_state_copy_funcs: MambaStateCopyFuncsByType | None = None
 
     def add_request(self, req_index: int, new_req_data: NewRequestData) -> None:
@@ -63,28 +56,17 @@ class MambaHybridModelState(DefaultModelState):
                 new_req_data.num_computed_tokens - 1
             ) // mamba_block_size
 
-    def _get_mamba_group_info(
-        self, kv_cache_config: KVCacheConfig
-    ) -> tuple[list[int], MambaSpec]:
-        if self._mamba_spec is None:
-            mamba_groups = get_mamba_groups(kv_cache_config)
-            mamba_spec = next(iter(mamba_groups))
-            assert all(
-                spec.block_size == mamba_spec.block_size
-                and spec.num_speculative_blocks == mamba_spec.num_speculative_blocks
-                and spec.mamba_cache_mode == mamba_spec.mamba_cache_mode
-                for spec in mamba_groups
-            ), "all mamba groups must share cache scheduling parameters"
-            self._mamba_group_ids = get_mamba_group_ids(mamba_groups)
-            self._mamba_spec = mamba_spec
-        return self._mamba_group_ids, self._mamba_spec
+    def _get_mamba_policy(self, kv_cache_config: KVCacheConfig) -> MambaGroupPolicy:
+        if self._mamba_policy is None:
+            self._mamba_policy = get_mamba_group_policy(kv_cache_config)
+        return self._mamba_policy
 
     def initialize_kv_cache(
         self, kv_cache_config: KVCacheConfig, block_tables: CPUBlockTables
     ) -> None:
         if not self._align_mode:
             return
-        self._get_mamba_group_info(kv_cache_config)
+        self._get_mamba_policy(kv_cache_config)
         if self._mamba_state_copy_funcs is None:
             mamba_groups = get_mamba_groups(kv_cache_config)
             mamba_types = {spec.mamba_type for spec in mamba_groups}
@@ -102,14 +84,14 @@ class MambaHybridModelState(DefaultModelState):
         if not self._align_mode or input_batch.num_reqs == 0:
             return
 
-        mamba_group_ids, mamba_spec = self._get_mamba_group_info(kv_cache_config)
+        mamba_group_ids, mamba_block_size, _ = self._get_mamba_policy(kv_cache_config)
         req_indices = input_batch.idx_mapping
         previous_state_indices = self._mamba_state_idx[req_indices]
         query_lens = input_batch.query_start_loc[1:] - input_batch.query_start_loc[:-1]
         computed_after = num_computed_tokens[req_indices] + query_lens
         current_state_indices = (
-            computed_after + mamba_spec.block_size - 1
-        ) // mamba_spec.block_size - 1
+            computed_after + mamba_block_size - 1
+        ) // mamba_block_size - 1
         self._mamba_state_idx[req_indices] = current_state_indices
 
         crossed_rows = (

@@ -10,7 +10,7 @@ from vllm.model_executor.layers.attention import Attention
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.attention.backend import AttentionType, CommonAttentionMetadata
 from vllm.v1.core.sched.output import NewRequestData
-from vllm.v1.kv_cache_interface import EncoderOnlyAttentionSpec, KVCacheConfig
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig
 from vllm.v1.worker.cpu.encoder_cache import EncoderCache
 from vllm.v1.worker.cpu.input_batch import InputBatch
 from vllm.v1.worker.cpu.model_states.default import DefaultModelState
@@ -24,7 +24,7 @@ class EncoderOnlyModelState(DefaultModelState):
 
     Encoder attention needs no KV cache: it runs full, bidirectional
     self-attention over each request's tokens in a single forward. Such layers
-    return no ``get_kv_cache_spec`` and therefore never enter
+    return no ``get_kv_cache_config`` and therefore never enter
     ``kv_cache_config.kv_cache_groups``, so the KV-backed attention path never
     builds their metadata. We build their (non-causal) metadata here, keeping
     the normal KV-backed path untouched.
@@ -66,7 +66,7 @@ class EncoderOnlyModelState(DefaultModelState):
             )
             group = groups.get(key)
             if group is None:
-                spec = EncoderOnlyAttentionSpec(
+                spec = AttentionSpec(
                     block_size=cache_config.block_size,
                     num_kv_heads=layer.num_kv_heads,
                     head_size=layer.head_size,

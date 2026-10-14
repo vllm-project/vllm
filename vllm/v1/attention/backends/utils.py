@@ -25,6 +25,7 @@ from vllm.utils.math_utils import cdiv, round_down
 from vllm.utils.torch_utils import PIN_MEMORY, async_tensor_h2d, np_to_pinned_tensor
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
+    KVCacheLayerConfig,
     KVCacheLayout,
     KVCacheSpec,
     MambaSpec,
@@ -303,7 +304,7 @@ def record_kv_cache_layout(cache_config: CacheConfig, layout_name: str) -> None:
 def resolve_kv_cache_layout(
     vllm_config: VllmConfig,
     supported_layouts: list[list[str]],
-    kv_cache_specs: Iterable[KVCacheSpec] | None = None,
+    layer_configs: Iterable[KVCacheLayerConfig] | None = None,
 ) -> KVCacheLayout:
     """Resolve one KV cache layout for the whole model.
 
@@ -343,9 +344,8 @@ def resolve_kv_cache_layout(
     # bytes is the same. If not block-compact, each spec must agree on HNC to alias
     # the same page (this aliasing is done by the Hybrid Memory Allocator, HMA).
     # Specs without per-layer views lay out their own raw backing tensor.
-    kv_cache_specs = tuple(
-        spec for spec in kv_cache_specs or () if spec.has_layer_views
-    )
+    layer_configs = tuple(lc for lc in layer_configs or () if lc.spec.has_layer_views)
+    kv_cache_specs = [lc.spec for lc in layer_configs]
     hnc_shapes = {
         (spec.num_heads, spec.num_states, spec.page_size_bytes)
         for spec in kv_cache_specs
@@ -361,9 +361,9 @@ def resolve_kv_cache_layout(
     # Self-addressed per-request rings (e.g. the kpool tail) are replicated
     # state like Mamba and don't need a separate draft group.
     dcp_sharding = {
-        spec.dcp_sharded
-        for spec in kv_cache_specs
-        if isinstance(spec, AttentionSpec) and spec.uses_slot_mapping
+        lc.spec.dcp_sharded
+        for lc in layer_configs
+        if isinstance(lc.spec, AttentionSpec) and lc.manager_cls.uses_slot_mapping
     }
     page_sizes = {spec.page_size_bytes for spec in kv_cache_specs}
     if len(dcp_sharding) > 1 and len(page_sizes) > 1:
@@ -1334,11 +1334,26 @@ def _mamba_align_block_table_kernel(
     tl.store(out_ptr + req_idx * n_out + offs, vals, mask=mask)
 
 
+def get_attn_type_from_layers(vllm_config: VllmConfig, layer_names: list[str]) -> str:
+    """The ``AttentionType`` shared by the given attention layers."""
+    from vllm.model_executor.layers.attention import Attention
+
+    attn_types = {
+        layer.attn_type
+        for layer in get_layers_from_vllm_config(
+            vllm_config, Attention, layer_names
+        ).values()
+    }
+    assert len(attn_types) == 1, f"Mixed attention types in a group: {attn_types}"
+    return attn_types.pop()
+
+
 def mamba_get_block_table_tensor(
     block_table: torch.Tensor,
     seq_lens: torch.Tensor,
     kv_cache_spec: KVCacheSpec,
     mamba_cache_mode: str,
+    num_speculative_blocks: int,
 ) -> torch.Tensor:
     """Get the block table tensor for mamba kernels from the input
     common_attn_metadata.block_table_tensor given different mamba cache modes.
@@ -1360,7 +1375,7 @@ def mamba_get_block_table_tensor(
         # one-request decode. One Triton kernel does the same work in one
         # launch. Zero-length requests in a CUDA graph still clamp to row 0.
         num_reqs = block_table.shape[0]
-        n_out = 1 + kv_cache_spec.num_speculative_blocks
+        n_out = 1 + num_speculative_blocks
         # The expression this replaced took its row count from `seq_lens` (a
         # `torch.gather` whose index tensor is built from it), so a mismatch
         # raised and a cross-device pair raised. Taking `num_reqs` from

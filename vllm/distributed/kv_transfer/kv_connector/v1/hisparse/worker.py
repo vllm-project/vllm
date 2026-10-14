@@ -23,6 +23,7 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
+from vllm.v1.core.single_type_kv_cache_manager import HiSparseHotManager
 from vllm.v1.hisparse.backend import get_hisparse_backend
 from vllm.v1.hisparse.layout import HISPARSE_HOT_SUFFIX
 from vllm.v1.hisparse.runtime import (
@@ -35,7 +36,6 @@ from vllm.v1.hisparse.runtime import (
 )
 from vllm.v1.hisparse.types import SparseKVPageTransfer, SparseKVRowMirror
 from vllm.v1.kv_cache_interface import (
-    HiSparseHotSpec,
     KVCacheConfig,
 )
 from vllm.v1.worker.utils import copy_kv_cache_blocks_inplace
@@ -203,7 +203,7 @@ class HiSparseConnectorWorker:
         cache_handles: list[HiSparseCacheHandle] = []
         cache_layer_names: list[str] = []
         for group in self.kv_cache_config.kv_cache_groups:
-            if not isinstance(group.kv_cache_spec, HiSparseHotSpec):
+            if not issubclass(group.manager_cls, HiSparseHotManager):
                 continue
             for cache_name in group.layer_names:
                 assert cache_name.endswith(HISPARSE_HOT_SUFFIX)

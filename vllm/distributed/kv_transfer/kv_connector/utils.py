@@ -21,7 +21,7 @@ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import AttentionBackend
-from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig, iter_layer_specs
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 
 if TYPE_CHECKING:
@@ -392,15 +392,13 @@ def get_current_attn_backends_and_specs(
     pairs: dict[tuple[type[AttentionBackend], AttentionSpec | None], None] = {}
     layer_type = cast(type[Any], AttentionLayerBase)
     for group in kv_cache_config.transfer_groups:
-        specs = getattr(group.kv_cache_spec, "kv_cache_specs", {})
         layers = get_layers_from_vllm_config(vllm_config, layer_type, group.layer_names)
         for name, layer in layers.items():
-            spec = specs.get(name, group.kv_cache_spec)
+            spec = group.kv_cache_specs[name]
             if isinstance(spec, AttentionSpec) and spec.tokens_per_state > 1:
                 continue
-            if not isinstance(spec, AttentionSpec):
-                spec = None
-            pairs[layer.get_attn_backend(), spec] = None
+            attn_spec = spec if isinstance(spec, AttentionSpec) else None
+            pairs[layer.get_attn_backend(), attn_spec] = None
     if not pairs:
         return fallback, [None] * len(fallback)
     return [backend for backend, _ in pairs], [spec for _, spec in pairs]
@@ -413,7 +411,7 @@ def check_compressed_kernel_split(
     if vllm_config.cache_config.get_resolved_kv_cache_layout().is_block_outermost:
         return
     for group in kv_cache_config.transfer_groups:
-        for spec in iter_layer_specs(group.kv_cache_spec):
+        for spec in group.kv_cache_specs.values():
             if (
                 isinstance(spec, AttentionSpec)
                 and spec.tokens_per_state > 1

@@ -11,8 +11,8 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.v1.kv_cache_interface import (
         KVCacheConfig,
-        KVCacheGroupSpec,
-        KVCacheSpec,
+        KVCacheGroup,
+        KVCacheLayerConfig,
     )
 
 
@@ -38,8 +38,8 @@ class KVCacheConfigBuilder(ABC):
     def get_kv_cache_groups(
         self,
         vllm_config: "VllmConfig",
-        kv_cache_spec: dict[str, "KVCacheSpec"],
-    ) -> list["KVCacheGroupSpec"]:
+        layer_configs: dict[str, "KVCacheLayerConfig"],
+    ) -> list["KVCacheGroup"]:
         """Split the given layers into KV cache groups.
 
         Planning passes all workers' layers; profiling passes one worker's.
@@ -56,7 +56,7 @@ class KVCacheConfigBuilder(ABC):
     def get_kv_cache_config_from_groups(
         self,
         vllm_config: "VllmConfig",
-        kv_cache_groups: list["KVCacheGroupSpec"],
+        kv_cache_groups: list["KVCacheGroup"],
         num_blocks: int,
     ) -> "KVCacheConfig":
         """Materialize the groups for exactly ``num_blocks`` blocks.
@@ -72,7 +72,7 @@ class KVCacheConfigBuilder(ABC):
     def _get_pool_bytes_per_block(
         self,
         vllm_config: "VllmConfig",
-        kv_cache_groups: list["KVCacheGroupSpec"],
+        kv_cache_groups: list["KVCacheGroup"],
     ) -> int | None:
         """Return the device bytes one block ID consumes, or ``None``.
 

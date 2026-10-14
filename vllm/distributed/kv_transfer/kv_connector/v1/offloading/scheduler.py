@@ -4,7 +4,7 @@ import time
 from collections import Counter
 from collections.abc import Iterable, Iterator, Sequence
 from contextlib import ExitStack, contextmanager
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from itertools import chain
 from typing import Any, NamedTuple
 
@@ -17,9 +17,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
     OffloadingWorkerMetadata,
     ReqId,
     TransferJob,
-)
-from vllm.distributed.kv_transfer.kv_connector.v1.offloading.config import (
-    _group_kv_bytes_per_block,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.events import (
     OffloadingEventGroupSpec,
@@ -34,16 +31,17 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv, round_down
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
-from vllm.v1.core.kv_cache_utils import eagle_proof_margin
+from vllm.v1.core.kv_cache_utils import eagle_proof_margin, is_mamba_align_group
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.core.single_type_kv_cache_manager import SingleTypeKVCacheManager
+from vllm.v1.core.single_type_kv_cache_manager import (
+    MambaManager,
+    SingleTypeKVCacheManager,
+    SlidingWindowManager,
+)
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
-    KVCacheSpec,
-    MambaSpec,
-    SlidingWindowSpec,
+    ManagerConfig,
 )
-from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 from vllm.v1.kv_offload.base import (
     GPULoadStoreSpec,
     Locality,
@@ -105,9 +103,9 @@ class GroupOffloadConfig(NamedTuple):
     kv_event_group_spec: OffloadingEventGroupSpec
     # None below means full attention
     sliding_window_size_in_chunks: int | None
-    kv_cache_spec: KVCacheSpec
-    # Cached manager class for this group's KV cache spec, resolved at init time
-    manager_cls: type[SingleTypeKVCacheManager]
+    # The group's block size before DCP scaling.
+    block_size: int
+    manager_config: ManagerConfig
     # Partial-tail data for this group comes from the scheduler's CoW hand-off
     # rather than the request block table.
     requires_cow_source: bool = False
@@ -116,9 +114,14 @@ class GroupOffloadConfig(NamedTuple):
     # be excluded from store and load scheduling.
     is_eagle_group: bool = False
 
+    @property
+    def manager_cls(self) -> type[SingleTypeKVCacheManager]:
+        return self.manager_config.manager_cls
+
     def load_window_size_in_chunks(self, num_tokens: int) -> int | None:
         window = self.sliding_window_size_in_chunks
-        if isinstance(self.kv_cache_spec, SlidingWindowSpec):
+        config = self.manager_config
+        if isinstance(config.params, SlidingWindowManager.Params):
             assert window is not None
             # Lookup rounds the right edge up, but allocation retains the
             # window ending at the actual hit boundary, possibly one chunk left.
@@ -126,9 +129,9 @@ class GroupOffloadConfig(NamedTuple):
             window = max(
                 window,
                 cdiv(
-                    self.kv_cache_spec.sliding_window
+                    config.params.sliding_window
                     - 1
-                    + self.kv_cache_spec.extra_retained_tokens
+                    + config.params.extra_retained_tokens
                     + right_padding,
                     self.tokens_per_chunk,
                 ),
@@ -142,15 +145,14 @@ def resolve_mamba_align_size(
     """Scan all KV cache groups in *spec* and return the single mamba alignment
     size, or None if no group requires mamba alignment.
 
-    For MambaSpec groups in "align" cache mode the hit window must be
+    For Mamba groups in "align" cache mode the hit window must be
     rounded down to a multiple of the offloaded chunk size. Asserts that all
     such groups agree on the same value.
     """
     mamba_align_size: int | None = None
     for group in spec.config.groups:
         tokens_per_block = group.tokens_per_block
-        kv_spec = kv_cache_config.kv_cache_groups[group.group_id].kv_cache_spec
-        if isinstance(kv_spec, MambaSpec) and kv_spec.mamba_cache_mode == "align":
+        if is_mamba_align_group(kv_cache_config.kv_cache_groups[group.group_id]):
             tokens_per_chunk = tokens_per_block * spec.blocks_per_chunk
             assert mamba_align_size is None or mamba_align_size == tokens_per_chunk
             mamba_align_size = tokens_per_chunk
@@ -246,11 +248,6 @@ class SchedulerOffloadConfig(NamedTuple):
             group_id = group.group_id
             tokens_per_block = group.tokens_per_block
             kv_cache_group = kv_cache_config.kv_cache_groups[group_id]
-            kv_spec = kv_cache_group.kv_cache_spec
-            manager_cls = KVCacheSpecRegistry.get_manager_class(kv_spec)
-            assert manager_cls is not None, (
-                f"No manager found for KV cache spec {type(kv_spec).__name__}"
-            )
             kv_group_configs_list.append(
                 GroupOffloadConfig(
                     group_idx=group_id,
@@ -261,14 +258,11 @@ class SchedulerOffloadConfig(NamedTuple):
                         // spec.tokens_per_hash
                     ),
                     sliding_window_size_in_chunks=group.sliding_window_size_in_chunks,
-                    kv_cache_spec=kv_spec,
-                    manager_cls=manager_cls,
+                    block_size=kv_cache_group.block_size,
+                    manager_config=kv_cache_group.manager_config,
                     kv_event_group_spec=get_offloading_event_group_spec(kv_cache_group),
                     is_eagle_group=group_id in eagle_groups,
-                    requires_cow_source=(
-                        isinstance(kv_spec, MambaSpec)
-                        and kv_spec.mamba_cache_mode == "align"
-                    ),
+                    requires_cow_source=is_mamba_align_group(kv_cache_group),
                 )
             )
         kv_group_configs = tuple(kv_group_configs_list)
@@ -326,7 +320,7 @@ class SchedulerOffloadConfig(NamedTuple):
                 spec.extra_config.get("sync_load_budget_bytes", 0)
             ),
             kv_bytes_per_token=sum(
-                _group_kv_bytes_per_block(kv_cache_config.kv_cache_groups[g.group_id])
+                kv_cache_config.kv_cache_groups[g.group_id].page_size_bytes
                 // g.tokens_per_block
                 for g in spec.config.groups
             ),
@@ -1536,7 +1530,7 @@ class OffloadingConnectorScheduler:
                         )
                     )
                 keys_to_load.extend(group_keys_to_load)
-                if isinstance(group_config.kv_cache_spec, MambaSpec):
+                if issubclass(group_config.manager_cls, MambaManager):
                     req_status.load_key_ranges.extend(
                         (num_locally_computed_tokens, num_cached_tokens, key)
                         for key in group_keys_to_load
@@ -1865,16 +1859,17 @@ class OffloadingConnectorScheduler:
     ) -> list[bool] | None:
         """Build the block mask for a range of candidate offload chunks."""
         blocks_per_chunk = self.config.blocks_per_chunk
-        kv_cache_spec = group_config.kv_cache_spec
-        if isinstance(kv_cache_spec, SlidingWindowSpec) and (
-            kv_cache_spec.extra_retained_tokens
+        manager_config = group_config.manager_config
+        if (
+            isinstance(manager_config.params, SlidingWindowManager.Params)
+            and manager_config.params.extra_retained_tokens
         ):
             # Offload restores all allocated history, including MTP re-prefill
             # tokens. Widen only the store mask, not the model's attention window.
-            kv_cache_spec = replace(
-                kv_cache_spec,
+            manager_config = manager_config.replace_params(
                 sliding_window=(
-                    kv_cache_spec.sliding_window + kv_cache_spec.extra_retained_tokens
+                    manager_config.params.sliding_window
+                    + manager_config.params.extra_retained_tokens
                 ),
                 extra_retained_tokens=0,
             )
@@ -1882,7 +1877,8 @@ class OffloadingConnectorScheduler:
             start_block=start_chunk_idx * blocks_per_chunk,
             end_block=end_chunk_idx * blocks_per_chunk,
             alignment_tokens=self.config.alignment_tokens,
-            kv_cache_spec=kv_cache_spec,
+            block_size=group_config.block_size,
+            manager_config=manager_config,
             use_eagle=group_config.is_eagle_group,
             retention_interval=self.config.retention_interval,
             reachable_boundaries=reachable_boundaries,
@@ -1902,7 +1898,7 @@ class OffloadingConnectorScheduler:
         if (
             alignment_tokens is None
             or group_config.is_eagle_group
-            or not isinstance(group_config.kv_cache_spec, SlidingWindowSpec)
+            or not issubclass(group_config.manager_cls, SlidingWindowManager)
             or alignment_tokens % group_config.tokens_per_block != 0
         ):
             return None

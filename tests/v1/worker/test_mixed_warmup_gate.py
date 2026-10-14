@@ -5,8 +5,11 @@
 from types import SimpleNamespace
 
 import pytest
+import torch
 
+from tests.v1.core.utils import new_kv_cache_group
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.worker.gpu import warmup
 from vllm.v1.worker.gpu.warmup import run_mixed_prefill_decode_warmup
 
@@ -39,7 +42,12 @@ def test_mixed_warmup_disables_watermarking():
         max_num_reqs=2,
         kv_cache_config=SimpleNamespace(
             kv_cache_groups=[
-                SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=16))
+                new_kv_cache_group(
+                    ["layer"],
+                    AttentionSpec(
+                        block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32
+                    ),
+                )
             ],
             num_blocks=128,
         ),

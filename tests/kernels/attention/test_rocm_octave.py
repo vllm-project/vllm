@@ -12,7 +12,7 @@ from tests.v1.attention.utils import dense_kv_cache_views
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.rocm_octave_attn import RocmOctaveAttentionBackend
 from vllm.v1.attention.ops import rocm_octave as sq
-from vllm.v1.kv_cache_interface import FullAttentionSpec, get_kv_quant_mode
+from vllm.v1.kv_cache_interface import AttentionSpec, get_kv_quant_mode
 
 
 def _arch() -> str | None:
@@ -318,7 +318,7 @@ def test_kernels_follow_declared_cache_layouts(layout):
     signs = sq.sign_bits(HEAD).to(dev)
     sq.register_rope_dim(HEAD, ROPE)
     spec = RocmOctaveAttentionBackend.customize_spec(
-        FullAttentionSpec(
+        AttentionSpec(
             block_size=BLOCK,
             num_kv_heads=hkv,
             head_size=HEAD,
