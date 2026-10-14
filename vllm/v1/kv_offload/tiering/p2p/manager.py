@@ -1018,11 +1018,12 @@ class P2PSecondaryTierManager(SecondaryTierManager):
     def _drain_inflight_for_shutdown(self) -> None:
         """Best-effort drain of inflight transfers before closing _data.
 
-        Mirrors session._drain_abort but as a single bounded loop. Collects
-        inflight transfer_ids from each session, repeatedly calls
+        Collects inflight transfer_ids from each session, repeatedly calls
         _data.cancel(..., mode="wait") and _data.poll() so handles can
-        surface as done/failed, and falls back to mode="immediate" once
-        _SHUTDOWN_DRAIN_TIMEOUT_S elapses so a wedged peer can't hang us.
+        surface as done/failed. Unlike session._drain_abort, which never
+        force-releases, it falls back to mode="immediate" once
+        _SHUTDOWN_DRAIN_TIMEOUT_S elapses: the engine is exiting, and a
+        wedged peer must not hang shutdown.
         """
         ids = [tid for s in self._sessions.values() for tid in s._server._inflight]
         if not ids:
