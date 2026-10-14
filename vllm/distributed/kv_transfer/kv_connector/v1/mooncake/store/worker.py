@@ -20,6 +20,7 @@ import time
 from collections.abc import Callable, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import AbstractContextManager
+from itertools import accumulate
 from typing import Any, NamedTuple, TypeVar
 
 import torch
@@ -355,34 +356,6 @@ class StoreBlock(NamedTuple):
     token_span: tuple[int, int]
     parent_hash: BlockHash | None
     objects: tuple[StoreObject, ...]
-
-
-def _select_objects(
-    blocks: Sequence[StoreBlock], keep: Callable[[int], bool]
-) -> tuple[list[StoreBlock], list[int]]:
-    """Restrict each block to the objects whose flat index satisfies ``keep``.
-
-    A block that keeps no object drops out: every object of it is already
-    resident, so it needs no put. Returns the blocks as prepared for the write
-    and the original flat index of each kept object, which is how a failed key
-    is mapped back to the block it belongs to.
-    """
-    selected: list[StoreBlock] = []
-    original_indices: list[int] = []
-    index = 0
-    for block in blocks:
-        objects: list[StoreObject] = []
-        for offset, obj in enumerate(block.objects):
-            if not keep(index + offset):
-                continue
-            objects.append(obj)
-            original_indices.append(index + offset)
-        index += len(block.objects)
-        if len(objects) == len(block.objects):
-            selected.append(block)
-        elif objects:
-            selected.append(block._replace(objects=tuple(objects)))
-    return selected, original_indices
 
 
 class StoreResidencyEvents:
@@ -890,28 +863,37 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 self.residency_events.record(blocks, req_meta, set())
             return True
 
-        # Objects already in the Store are satisfied; only the missing ones of
-        # each block are written, and the block is announced once they all are.
-        pending, original_indices = _select_objects(
-            blocks, lambda index: index in missing
-        )
+        # Objects already in the Store are satisfied; only the missing ones are
+        # written, and the block is announced once all of its objects are there.
+        # Each written object keeps the flat index it has among ``blocks`` and the
+        # block it came from: the first maps a failed key back to its block, the
+        # second gives the object its Store group id.
+        offsets = list(accumulate([0, *(len(block.objects) for block in blocks)]))
+        selected = [
+            (obj, offsets[block_index] + offset, block_index)
+            for block_index, block in enumerate(blocks)
+            for offset, obj in enumerate(block.objects)
+            if offsets[block_index] + offset in missing
+        ]
 
-        keys = [obj.key for block in pending for obj in block.objects]
-        addrs = [obj.addr for block in pending for obj in block.objects]
-        sizes = [obj.size for block in pending for obj in block.objects]
+        keys = [obj.key for obj, _, _ in selected]
+        addrs = [obj.addr for obj, _, _ in selected]
+        sizes = [obj.size for obj, _, _ in selected]
         if req_meta.current_event is not None:
             # Fence the CoW block copy enqueued earlier this step.
             req_meta.current_event.synchronize()
         if self.enable_group_semantics and self.supports_group_ids:
             # One group id per Store object, aligned with ``keys``.
-            group_ids: list[str] = []
-            for block in pending:
-                group_id = _make_mooncake_group_id(
-                    self.token_databases[block.group_idx].metadata,
-                    block.block_hash.hex(),
+            group_id_by_block = {
+                block_index: _make_mooncake_group_id(
+                    self.token_databases[blocks[block_index].group_idx].metadata,
+                    blocks[block_index].block_hash.hex(),
                 )
-                group_ids.extend([group_id] * len(block.objects))
-            self.replicate_config.group_ids = group_ids
+                for _, _, block_index in selected
+            }
+            self.replicate_config.group_ids = [
+                group_id_by_block[block_index] for _, _, block_index in selected
+            ]
         batch_bytes = _sum_batch_bytes(sizes)
         put_start = time.perf_counter()
         try:
@@ -970,7 +952,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
             self.residency_events.record(
                 blocks,
                 req_meta,
-                {original_indices[index] for index in failed},
+                {selected[index][1] for index in failed},
             )
 
         if failed:
