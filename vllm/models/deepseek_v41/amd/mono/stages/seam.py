@@ -141,6 +141,8 @@ def slice_loads(c, c0, e):
     """Element e's loads of ``stage_slice`` (e clamped into the step's)."""
     a = c["args"]
     t, o, col = slice_at(c0, e)
+    if const_expr(not c.get("fold", True)):
+        return (ld_bf(a["res_in"], (t * HC + o) * HIDDEN + col),)
     r = [ld_bf(a["res_in"], (t * HC + h) * HIDDEN + col) for h in range(HC)]
     cm = [ld_f32(a["comb_in"], (t * HC + h) * HC + o) for h in range(HC)]
     return r, cm, ld_f32(a["post_in"], t * HC + o)
@@ -150,15 +152,19 @@ def slice_row(c, c0, e, got):
     """Element e of ``stage_slice``'s R_new from ``slice_loads``' values."""
     a = c["args"]
     t, o, col = slice_at(c0, e)
-    r, cm, post = got
-    # aiter's mhc_fused_post_pre_delayed_rmsnorm: ((post x + c0 r0)
-    # + c1 r1) + c2 r2, each product rounded, then fma(c3, r3, ..)
-    v = post * pend_value(c, t, col, e % COLS) + (r[0] * cm[0])
-    for h in range_constexpr(1, HC - 1):
-        v = v + cm[h] * r[h]
-    # bf16 R_new is what the collapse, the sums of squares and the
-    # mix projection all read
-    v = bf16_round(fma(cm[HC - 1], r[HC - 1], v))
+    if const_expr(not c.get("fold", True)):
+        # a settled residual (no owed post): stream o as it arrives
+        v = got[0]
+    else:
+        r, cm, post = got
+        # aiter's mhc_fused_post_pre_delayed_rmsnorm: ((post x + c0 r0)
+        # + c1 r1) + c2 r2, each product rounded, then fma(c3, r3, ..)
+        v = post * pend_value(c, t, col, e % COLS) + (r[0] * cm[0])
+        for h in range_constexpr(1, HC - 1):
+            v = v + cm[h] * r[h]
+        # bf16 R_new is what the collapse, the sums of squares and the
+        # mix projection all read
+        v = bf16_round(fma(cm[HC - 1], r[HC - 1], v))
     bo.buffer_store(v.to(fx.BFloat16), rsrc(a["res_out"]), (t * HC + o) * HIDDEN + col)
     fx.ptr_store(v, c["rl"] + (t * KT + o * COLS + e % COLS))
 
