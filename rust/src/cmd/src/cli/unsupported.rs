@@ -359,10 +359,6 @@ pub struct EngineUnsupportedArgs {
     #[arg(long)]
     pub collect_detailed_traces: Option<Unsupported>,
 
-    /// The interval (or buffer size) for streaming in terms of token length.
-    #[arg(long)]
-    pub stream_interval: Option<Unsupported>,
-
     /// Maximum number of requests that can be in-flight (waiting or running)
     /// at the same time. When the limit is reached, new requests are rejected
     /// with HTTP 503 so the client can retry on another instance.
@@ -479,15 +475,6 @@ pub struct ServerUnsupportedArgs {
     /// log. The default of None means unlimited.
     #[arg(long)]
     pub max_log_len: Option<Unsupported>,
-
-    /// If set to True, include per-request timing metrics in API responses.
-    #[arg(
-        long,
-        visible_alias = "no-enable-per-request-metrics",
-        default_missing_value = "true",
-        num_args = 0..=1
-    )]
-    pub enable_per_request_metrics: Option<Unsupported>,
 
     /// If set to True, enable tracking server_load_metrics in the app state.
     #[arg(
