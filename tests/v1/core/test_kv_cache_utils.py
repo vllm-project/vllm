@@ -1104,6 +1104,7 @@ def test_request_block_hasher_incremental_append_with_multiple_mm_features(
             id="supporting-connector",
         ),
         pytest.param({"connector_support": False}, False, id="unsupported-connector"),
+        pytest.param({"hisparse": True}, False, id="hisparse"),
     ],
 )
 def test_lookahead_block_hashing_enabled(overrides: dict[str, Any], expected: bool):
@@ -1126,6 +1127,9 @@ def test_lookahead_block_hashing_enabled(overrides: dict[str, Any], expected: bo
                 "num_prefill_lookahead_tokens", 1
             ),
             kv_transfer_config=None if connector_support is None else object(),
+            attention_config=SimpleNamespace(
+                hisparse_config=object() if overrides.get("hisparse") else None
+            ),
         ),
     )
     connector = (
