@@ -352,15 +352,16 @@ routed and shared weights must be FP8 E4M3 with per-tensor FP32 scales
 The current pass targets Qwen MoE configurations with hidden size 2048,
 256 experts, top-k 8, and matching routed/shared intermediate sizes, using
 SiLU without bias. It was validated on Qwen3.6-35B-A3B with TP2.
-LoRA, expert parallelism, EPLB, data parallelism, prefill context parallelism
-and sequence parallelism are not supported by this pass.
+LoRA, expert parallelism, EPLB, data parallelism, prefill context parallelism,
+sequence parallelism and microbatching (DBO or a fixed `ubatch_size` > 1)
+are not supported by this pass.
 
 **Default and token range.** Disabled at every optimization level unless
 `pass_config.fuse_xpu_moe_shared=true`. The pass applies only to compile ranges
 ending at or below `pass_config.xpu_moe_shared_fusion_max_token_num`
-(default: 8 tokens). Larger ranges keep the original MoE path. If the native
-op is unavailable, a MoE layer is unsupported, or the graph pattern does not
-match, the original operations are kept.
+(default: 8 tokens; supported setting: 1–64). Larger ranges keep the original
+MoE path. If the native op is unavailable, a MoE layer is unsupported, or the
+graph pattern does not match, the original operations are kept.
 
 **Compile without graph.** This enables the fusion through vLLM's Inductor
 pipeline, while disabling graph capture/replay:

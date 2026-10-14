@@ -482,3 +482,61 @@ def test_bf16_shared_gate_must_match_activation(fake_kernel_interface):
         1, HIDDEN, dtype=torch.float16
     )
     assert _reason(runner) is not None
+
+
+@pytest.mark.parametrize(
+    "enable_dbo,ubatch_size", [(False, 0), (False, 1), (False, 2), (True, 0)]
+)
+def test_microbatching_keeps_original_moe_graph(monkeypatch, enable_dbo, ubatch_size):
+    from vllm.compilation.passes.fusion import xpu_fusion as mod
+    from vllm.config.parallel import ParallelConfig
+
+    monkeypatch.setattr(mod, "_is_fp8_per_tensor", lambda _: True)
+    monkeypatch.setattr(mod, "_xpu_moe_shared_fused_available", lambda: True)
+    monkeypatch.setattr(
+        mod.XpuMoESharedFusionPass,
+        "_all_moe_layers_supported",
+        staticmethod(lambda _: True),
+    )
+    config = VllmConfig()
+    config.model_config = SimpleNamespace(
+        dtype=torch.float16,
+        hf_text_config=SimpleNamespace(
+            hidden_size=2048,
+            num_experts=256,
+            num_experts_per_tok=8,
+            shared_expert_intermediate_size=512,
+        ),
+    )
+    config.parallel_config = ParallelConfig(
+        enable_dbo=enable_dbo, ubatch_size=ubatch_size
+    )
+    pass_ = mod.XpuMoESharedFusionPass(config)
+    expected = not config.parallel_config.use_ubatching
+    assert pass_.is_applicable_for_range(Range(1, 8)) == expected
+    g, _ = _graph()
+    if pass_.is_applicable_for_range(Range(1, 8)):
+        pass_(g)
+    g.lint()
+    assert _count(g, FUSED) == (2 if expected else 0)
+    assert _count(g, MOE) == (0 if expected else 2)
+
+
+@pytest.mark.parametrize("limit", [0, 65])
+def test_fusion_limit_rejects_unsupported_native_token_count(limit):
+    from vllm.config.compilation import PassConfig
+
+    with pytest.raises(ValueError):
+        PassConfig(xpu_moe_shared_fusion_max_token_num=limit)
+
+
+@pytest.mark.parametrize("limit", [1, 64])
+def test_fusion_limit_accepts_native_token_boundaries(limit):
+    from vllm.config.compilation import PassConfig
+
+    assert (
+        PassConfig(
+            xpu_moe_shared_fusion_max_token_num=limit
+        ).xpu_moe_shared_fusion_max_token_num
+        == limit
+    )
