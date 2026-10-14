@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Production-oriented AliceAI using upstream KDA and AttnRes kernels."""
+"""Inference-only AliceAI model."""
 
 from collections.abc import Iterable
 from copy import copy
@@ -9,10 +9,23 @@ from typing import cast
 
 import torch
 from torch import nn
+from transformers import PreTrainedConfig, Qwen3NextConfig
 
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
-from vllm.distributed import get_pp_group
+from vllm.distributed import (
+    get_ep_group,
+    get_pp_group,
+    get_tensor_model_parallel_world_size,
+)
+from vllm.model_executor.layers.fused_moe import FusedMoEFactory, GateLinear
+from vllm.model_executor.layers.fused_moe.utils import (
+    is_model_fused_shared_expert_compatible,
+    resolve_layer_fused_shared_expert,
+)
+from vllm.model_executor.layers.layernorm import GemmaRMSNorm
 from vllm.model_executor.layers.linear import ReplicatedLinear
+from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.gdn.kimi_gdn_linear_attn import (
     KimiGatedDeltaNetAttention,
 )
@@ -22,24 +35,40 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateDtypeCalculator,
     MambaStateShapeCalculator,
 )
+from vllm.model_executor.layers.quantization.utils.config_utils import (
+    get_quark_ocp_mx_group_size,
+)
+from vllm.model_executor.layers.vocab_parallel_embedding import (
+    ParallelLMHead,
+    VocabParallelEmbedding,
+)
+from vllm.model_executor.models.interfaces import (
+    HasInnerState,
+    IsHybrid,
+    MixtureOfExperts,
+    SupportsLoRA,
+)
+from vllm.model_executor.models.qwen2_moe import Qwen2MoeMLP
 from vllm.model_executor.models.qwen3_next import (
     Qwen3NextAttention,
-    Qwen3NextDecoderLayer,
-    Qwen3NextForCausalLM,
-    Qwen3NextModel,
-    Qwen3NextRMSNorm,
-    Qwen3NextSparseMoeBlock,
+    _should_replicate_misaligned_shared_expert,
 )
-from vllm.model_executor.models.utils import WeightsMapper, extract_layer_index
+from vllm.model_executor.models.utils import (
+    AutoWeightsLoader,
+    WeightsMapper,
+    extract_layer_index,
+    make_layers,
+    maybe_fuse_shared_experts,
+    maybe_prefix,
+)
 from vllm.model_executor.offloader import (
     PrefetchOffloader,
     UVAOffloader,
     get_offloader,
 )
-from vllm.models.kimi_k3.nvidia.ops import attn_res as upstream_attn_res
+from vllm.models.kimi_k3.nvidia.ops import attn_res
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
-from vllm.transformers_utils.configs.qwen3_next import Qwen3NextConfig
 
 _SPLIT_KDA_CONV_SHARDS = {
     ".linear_attn.q_conv1d": (".linear_attn.conv1d", 0),
@@ -86,7 +115,7 @@ def get_attn_res_block_size(hf_config: object) -> int:
     return block_size
 
 
-def _make_kimi_kda_config(config: Qwen3NextConfig) -> KimiLinearConfig:
+def _make_kimi_kda_config(config: PreTrainedConfig) -> KimiLinearConfig:
     """Adapt the flat AliceAI KDA geometry to the existing upstream Kimi layer."""
     num_heads = config.linear_num_key_heads
     num_value_heads = config.linear_num_value_heads
@@ -109,49 +138,24 @@ def _make_kimi_kda_config(config: Qwen3NextConfig) -> KimiLinearConfig:
 
 
 def _make_alice_ai_full_attention_config(
-    config: Qwen3NextConfig,
+    config: PreTrainedConfig,
 ) -> Qwen3NextConfig:
     adapted = copy(config)
     adapted.attn_output_gate = True
     adapted.qkv_bias = False
     adapted.dual_chunk_attention_config = None
     adapted.is_causal = True
-    return adapted
+    return cast(Qwen3NextConfig, adapted)
 
 
-def _mix_attn_res(
-    prefix: torch.Tensor,
-    residual_bank: torch.Tensor,
-    norm_weight: torch.Tensor,
-    query_weight: torch.Tensor,
-    *,
-    num_blocks: int,
-    eps: float,
-) -> torch.Tensor:
-    """Use the upstream Kimi primitive without mutating AliceAI residual state."""
-    return upstream_attn_res(
-        prefix,
-        None,
-        residual_bank,
-        norm_weight,
-        query_weight,
-        None,
-        num_blocks,
-        -1,
-        eps,
-        0.0,
-    )
-
-
-class _AttentionResidualFinalMixer(nn.Module):
+class _AttentionResidualFinal(nn.Module):
     def __init__(self, hidden_size: int, rms_norm_eps: float, prefix: str) -> None:
         super().__init__()
         self.rms_norm_eps = rms_norm_eps
         self.res_proj = ReplicatedLinear(
-            hidden_size,
-            1,
+            input_size=hidden_size,
+            output_size=1,
             bias=False,
-            quant_config=None,
             prefix=f"{prefix}.res_proj",
         )
         self.res_norm_weight = nn.Parameter(torch.ones(hidden_size))
@@ -170,17 +174,137 @@ class _AttentionResidualFinalMixer(nn.Module):
         else:
             prefix = partial
             num_blocks = num_completed_sources
-        return _mix_attn_res(
-            prefix,
-            residual_bank,
-            self.res_norm_weight,
-            self.res_proj.weight.squeeze(0),
+        return attn_res(
+            prefix=prefix,
+            delta=None,
+            blocks=residual_bank,
+            norm_weight=self.res_norm_weight,
+            qk_weight=self.res_proj.weight.squeeze(0),
+            output_norm_weight=None,
             num_blocks=num_blocks,
+            block_write_idx=-1,
             eps=self.rms_norm_eps,
+            output_norm_eps=0.0,
         )
 
 
-class AliceAIDecoderBlock(Qwen3NextDecoderLayer):
+class AliceAISparseMoeBlock(nn.Module):
+    def __init__(self, vllm_config: VllmConfig, prefix: str = "") -> None:
+        super().__init__()
+
+        config = vllm_config.model_config.hf_text_config
+        parallel_config = vllm_config.parallel_config
+        quant_config = vllm_config.quant_config
+
+        self.tp_size = get_tensor_model_parallel_world_size()
+        self.ep_size = get_ep_group().device_group.size()
+        self.n_routed_experts = config.num_experts
+        if self.tp_size > self.n_routed_experts:
+            raise ValueError(
+                f"Tensor parallel size {self.tp_size} is greater than "
+                f"the number of experts {self.n_routed_experts}."
+            )
+
+        self.is_fused_shared_expert_enabled = False
+        if config.shared_expert_intermediate_size > 0:
+            self.is_fused_shared_expert_enabled = resolve_layer_fused_shared_expert(
+                quant_config=quant_config,
+                prefix=prefix,
+                shared_expert_name="shared_expert",
+            )
+
+        self.replicate_shared_expert = False
+        if not self.is_fused_shared_expert_enabled:
+            shared_expert_group_size = get_quark_ocp_mx_group_size(
+                quant_config=quant_config,
+                layer_name=f"{prefix}.shared_expert.down_proj",
+            )
+            self.replicate_shared_expert = _should_replicate_misaligned_shared_expert(
+                intermediate_size=config.shared_expert_intermediate_size,
+                tp_size=self.tp_size,
+                group_size=shared_expert_group_size,
+                enable_expert_parallel=parallel_config.enable_expert_parallel,
+                is_sequence_parallel=False,
+            )
+
+        self.enable_eplb = parallel_config.enable_eplb
+        self.n_logical_experts = self.n_routed_experts
+        self.n_redundant_experts = parallel_config.eplb_config.num_redundant_experts
+        self.n_physical_experts = self.n_logical_experts + self.n_redundant_experts
+        self.n_local_physical_experts = self.n_physical_experts // self.ep_size
+
+        self.gate = GateLinear(
+            input_size=config.hidden_size,
+            output_size=config.num_experts,
+            prefix=f"{prefix}.gate",
+        )
+        self.gate.e_score_correction_bias = nn.Parameter(
+            torch.empty(config.num_experts, dtype=torch.float32),
+            requires_grad=False,
+        )
+        self.shared_expert_gate = ReplicatedLinear(
+            input_size=config.hidden_size,
+            output_size=1,
+            bias=False,
+            prefix=f"{prefix}.shared_expert_gate",
+        )
+
+        if (
+            self.is_fused_shared_expert_enabled
+            or config.shared_expert_intermediate_size <= 0
+        ):
+            self.shared_expert = None
+        else:
+            self.shared_expert = Qwen2MoeMLP(
+                hidden_size=config.hidden_size,
+                intermediate_size=config.shared_expert_intermediate_size,
+                hidden_act=config.hidden_act,
+                quant_config=quant_config,
+                reduce_results=False,
+                expert_gate=self.shared_expert_gate,
+                disable_tp=self.replicate_shared_expert,
+                prefix=f"{prefix}.shared_expert",
+            )
+
+        self.experts = FusedMoEFactory(
+            shared_experts=(
+                None if self.replicate_shared_expert else self.shared_expert
+            ),
+            gate=self.gate,
+            num_experts=self.n_routed_experts,
+            top_k=config.num_experts_per_tok,
+            hidden_size=config.hidden_size,
+            intermediate_size=config.moe_intermediate_size,
+            renormalize=getattr(config, "norm_topk_prob", True),
+            scoring_func="sigmoid",
+            e_score_correction_bias=self.gate.e_score_correction_bias,
+            quant_config=quant_config,
+            prefix=f"{prefix}.experts",
+            enable_eplb=self.enable_eplb,
+            num_redundant_experts=self.n_redundant_experts,
+            n_shared_experts=1 if self.shared_expert is None else None,
+            fuse_shared_experts=self.is_fused_shared_expert_enabled,
+            shared_expert_prefix=f"{prefix}.shared_expert",
+            shared_expert_gate=self.shared_expert_gate
+            if self.shared_expert is None
+            else None,
+        )
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        orig_shape = hidden_states.shape
+        hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
+        shared_output = (
+            self.shared_expert(hidden_states)
+            if self.replicate_shared_expert and self.shared_expert is not None
+            else None
+        )
+        output = self.experts(hidden_states=hidden_states, router_logits=hidden_states)
+        if shared_output is not None:
+            output += shared_output
+        return output.view(orig_shape)
+
+
+class AliceAIDecoderBlock(nn.Module):
     """AliceAI topology with upstream Qwen, Kimi KDA, MoE and AttnRes operations."""
 
     def __init__(
@@ -189,7 +313,7 @@ class AliceAIDecoderBlock(Qwen3NextDecoderLayer):
         layer_type: str,
         prefix: str = "",
     ) -> None:
-        nn.Module.__init__(self)
+        super().__init__()
 
         config = vllm_config.model_config.hf_text_config
         model_config = vllm_config.model_config
@@ -206,18 +330,17 @@ class AliceAIDecoderBlock(Qwen3NextDecoderLayer):
         self.layer_idx = extract_layer_index(prefix)
         self.attn_res_block_size = get_attn_res_block_size(config)
         self.attn_res_rms_norm_eps = float(config.rms_norm_eps)
-        self.use_attn_reduce_scatter_for_moe = False
 
         if layer_type == "linear_attention":
             self.linear_attn = KimiGatedDeltaNetAttention(
-                _make_kimi_kda_config(config),
-                vllm_config,
+                config=_make_kimi_kda_config(config),
+                vllm_config=vllm_config,
                 prefix=f"{prefix}.linear_attn",
             )
             self.linear_attn.o_norm.eps = float(config.rms_norm_eps)
         elif layer_type == "full_attention":
             self.self_attn = Qwen3NextAttention(
-                _make_alice_ai_full_attention_config(config),
+                config=_make_alice_ai_full_attention_config(config),
                 model_config=model_config,
                 cache_config=cache_config,
                 quant_config=quant_config,
@@ -226,38 +349,34 @@ class AliceAIDecoderBlock(Qwen3NextDecoderLayer):
         else:
             raise ValueError(f"Invalid layer_type {layer_type}")
 
-        self.mlp = Qwen3NextSparseMoeBlock(
+        self.mlp = AliceAISparseMoeBlock(
             vllm_config=vllm_config,
             prefix=f"{prefix}.mlp",
         )
-        self.input_layernorm = Qwen3NextRMSNorm(
-            config.hidden_size, eps=config.rms_norm_eps
+        self.input_layernorm = GemmaRMSNorm(
+            hidden_size=config.hidden_size, eps=config.rms_norm_eps
         )
-        self.post_attention_layernorm = Qwen3NextRMSNorm(
-            config.hidden_size, eps=config.rms_norm_eps
+        self.post_attention_layernorm = GemmaRMSNorm(
+            hidden_size=config.hidden_size, eps=config.rms_norm_eps
         )
-
-        self.layer_scale = False
 
         if self.layer_idx > 0:
             self.attn_res_proj = ReplicatedLinear(
-                config.hidden_size,
-                1,
+                input_size=config.hidden_size,
+                output_size=1,
                 bias=False,
-                quant_config=None,
                 prefix=f"{prefix}.attn_res_proj",
             )
             self.attn_res_norm_weight = nn.Parameter(torch.ones(config.hidden_size))
         self.mlp_res_proj = ReplicatedLinear(
-            config.hidden_size,
-            1,
+            input_size=config.hidden_size,
+            output_size=1,
             bias=False,
-            quant_config=None,
             prefix=f"{prefix}.mlp_res_proj",
         )
         self.mlp_res_norm_weight = nn.Parameter(torch.ones(config.hidden_size))
 
-    def _mix_attention_residuals(
+    def _apply_attention_residual(
         self,
         residual_bank: torch.Tensor,
         num_completed_sources: int,
@@ -274,20 +393,24 @@ class AliceAIDecoderBlock(Qwen3NextDecoderLayer):
         else:
             prefix = partial
             num_blocks = num_completed_sources
-        return _mix_attn_res(
-            prefix,
-            residual_bank,
-            getattr(self, norm_weight_name),
-            projection.weight.squeeze(0),
+        return attn_res(
+            prefix=prefix,
+            delta=None,
+            blocks=residual_bank,
+            norm_weight=getattr(self, norm_weight_name),
+            qk_weight=projection.weight.squeeze(0),
+            output_norm_weight=None,
             num_blocks=num_blocks,
+            block_write_idx=-1,
             eps=self.attn_res_rms_norm_eps,
+            output_norm_eps=0.0,
         )
 
-    def _run_attention(
+    def _apply_attention(
         self, hidden_states: torch.Tensor, positions: torch.Tensor
     ) -> torch.Tensor:
         if self.layer_type == "linear_attention":
-            return self.linear_attn(hidden_states, positions)
+            return self.linear_attn(hidden_states=hidden_states, positions=positions)
         return self.self_attn(hidden_states=hidden_states, positions=positions)
 
     def forward_attn_res(
@@ -307,21 +430,23 @@ class AliceAIDecoderBlock(Qwen3NextDecoderLayer):
         if self.layer_idx == 0:
             hidden_states = residual_bank[:, 0]
         else:
-            hidden_states = self._mix_attention_residuals(
-                residual_bank,
-                num_completed_sources,
-                partial,
+            hidden_states = self._apply_attention_residual(
+                residual_bank=residual_bank,
+                num_completed_sources=num_completed_sources,
+                partial=partial,
                 projection=self.attn_res_proj,
                 norm_weight_name="attn_res_norm_weight",
             )
         hidden_states = self.input_layernorm(hidden_states)
-        attention_output = self._run_attention(hidden_states, positions)
+        attention_output = self._apply_attention(
+            hidden_states=hidden_states, positions=positions
+        )
         partial = attention_output if partial is None else partial + attention_output
 
-        hidden_states = self._mix_attention_residuals(
-            residual_bank,
-            num_completed_sources,
-            partial,
+        hidden_states = self._apply_attention_residual(
+            residual_bank=residual_bank,
+            num_completed_sources=num_completed_sources,
+            partial=partial,
             projection=self.mlp_res_proj,
             norm_weight_name="mlp_res_norm_weight",
         )
@@ -330,7 +455,8 @@ class AliceAIDecoderBlock(Qwen3NextDecoderLayer):
         return num_completed_sources, partial + mlp_output
 
 
-class AliceAIModel(Qwen3NextModel):
+@support_torch_compile
+class AliceAIModel(nn.Module):
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_substr={
             ".linear_attn.a_log_bias": ".linear_attn.A_log",
@@ -350,18 +476,44 @@ class AliceAIModel(Qwen3NextModel):
     )
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
+        super().__init__()
         config = vllm_config.model_config.hf_text_config
-        self.attn_res_block_size = get_attn_res_block_size(config)
-        super().__init__(
-            vllm_config=vllm_config,
-            prefix=prefix,
-            decoder_layer_type=AliceAIDecoderBlock,
+        self.config = config
+        self.vocab_size = config.vocab_size
+        self.num_redundant_experts = (
+            vllm_config.parallel_config.eplb_config.num_redundant_experts
         )
-        self.attnres_final = _AttentionResidualFinalMixer(
-            config.hidden_size,
-            float(config.rms_norm_eps),
+        self.attn_res_block_size = get_attn_res_block_size(config)
+        self.embed_tokens = VocabParallelEmbedding(
+            num_embeddings=config.vocab_size, embedding_dim=config.hidden_size
+        )
+
+        def get_layer(prefix: str) -> AliceAIDecoderBlock:
+            return AliceAIDecoderBlock(
+                vllm_config=vllm_config,
+                layer_type=config.layer_types[extract_layer_index(prefix)],
+                prefix=prefix,
+            )
+
+        self.start_layer, self.end_layer, self.layers = make_layers(
+            num_hidden_layers=config.num_hidden_layers,
+            layer_fn=get_layer,
+            prefix=f"{prefix}.layers",
+        )
+        self.is_fused_shared_expert_enabled = is_model_fused_shared_expert_compatible(
+            layers=self.layers, moe_cls=AliceAISparseMoeBlock, moe_name="mlp"
+        )
+        self.norm = GemmaRMSNorm(
+            hidden_size=config.hidden_size, eps=config.rms_norm_eps
+        )
+        self.attnres_final = _AttentionResidualFinal(
+            hidden_size=config.hidden_size,
+            rms_norm_eps=float(config.rms_norm_eps),
             prefix=f"{prefix}.attnres_final",
         )
+
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.embed_tokens(input_ids)
 
     def _init_residual_bank(self, hidden_states: torch.Tensor) -> torch.Tensor:
         residual_bank = hidden_states.new_empty(
@@ -384,10 +536,6 @@ class AliceAIModel(Qwen3NextModel):
     ) -> torch.Tensor | IntermediateTensors:
         if intermediate_tensors is not None:
             raise NotImplementedError("AliceAI does not support pipeline parallelism")
-        if self.aux_hidden_state_layers:
-            raise NotImplementedError(
-                "AliceAI does not support auxiliary hidden states"
-            )
         if not get_pp_group().is_first_rank or not get_pp_group().is_last_rank:
             raise NotImplementedError("AliceAI requires pipeline_parallel_size=1")
 
@@ -402,19 +550,40 @@ class AliceAIModel(Qwen3NextModel):
         partial = None
         for layer in islice(self.layers, self.start_layer, self.end_layer):
             num_completed_sources, partial = layer.forward_attn_res(
-                positions, residual_bank, num_completed_sources, partial
+                positions=positions,
+                residual_bank=residual_bank,
+                num_completed_sources=num_completed_sources,
+                partial=partial,
             )
         if partial is None:
             raise RuntimeError("AttnRes produced an empty final block")
         hidden_states = self.attnres_final(
-            residual_bank, num_completed_sources, partial
+            residual_bank=residual_bank,
+            num_completed_sources=num_completed_sources,
+            partial=partial,
         )
         return self.norm(hidden_states)
 
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        weights = maybe_fuse_shared_experts(
+            weights=weights,
+            enabled=self.is_fused_shared_expert_enabled,
+            n_routed_experts=self.config.num_experts,
+            n_shared_experts=1,
+            ckpt_prefix="mlp.shared_expert",
+        )
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights=weights, mapper=self.hf_to_vllm_mapper)
 
-class AliceAIForCausalLM(Qwen3NextForCausalLM):
+
+class AliceAIForCausalLM(
+    nn.Module, HasInnerState, IsHybrid, SupportsLoRA, MixtureOfExperts
+):
+    hf_to_vllm_mapper = WeightsMapper(orig_to_new_prefix={"mtp.": None})
+
     packed_modules_mapping = {
-        **Qwen3NextForCausalLM.packed_modules_mapping,
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+        "gate_up_proj": ["gate_proj", "up_proj"],
         "in_proj_qkvgfab": [
             "q_proj",
             "k_proj",
@@ -437,15 +606,80 @@ class AliceAIForCausalLM(Qwen3NextForCausalLM):
         ):
             raise NotImplementedError("AliceAI CPU offloading requires UVA")
 
-        super().__init__(vllm_config=vllm_config, prefix=prefix, model_cls=AliceAIModel)
+        super().__init__()
+        config = vllm_config.model_config.hf_text_config
+        self.vllm_config = vllm_config
+        self.model_config = vllm_config.model_config
+        self.scheduler_config = vllm_config.scheduler_config
+        self.quant_config = vllm_config.quant_config
+        self.config = config
+        self.model = AliceAIModel(
+            vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
+        )
+        self.lm_head = ParallelLMHead(
+            num_embeddings=config.vocab_size,
+            embedding_dim=config.hidden_size,
+            prefix=maybe_prefix(prefix, "lm_head"),
+        )
+        self.logits_processor = LogitsProcessor(config.vocab_size)
+        self.set_moe_parameters()
+
+    def set_moe_parameters(self) -> None:
+        self.moe_layers = [layer.mlp.experts for layer in self.model.layers]
+        moe = self.model.layers[self.model.start_layer].mlp
+        self.num_moe_layers = len(self.moe_layers)
+        self.num_expert_groups = 1
+        self.num_shared_experts = 0
+        self.num_logical_experts = moe.n_logical_experts
+        self.num_physical_experts = moe.n_physical_experts
+        self.num_local_physical_experts = moe.n_local_physical_experts
+        self.num_routed_experts = moe.n_routed_experts
+        self.num_redundant_experts = moe.n_redundant_experts
+
+    def update_physical_experts_metadata(
+        self,
+        num_physical_experts: int,
+        num_local_physical_experts: int,
+    ) -> None:
+        assert self.num_local_physical_experts == num_local_physical_experts
+        self.num_physical_experts = num_physical_experts
+        self.num_local_physical_experts = num_local_physical_experts
+        self.num_redundant_experts = num_physical_experts - self.num_logical_experts
+        for layer in self.model.layers:
+            moe = layer.mlp
+            moe.n_local_physical_experts = num_local_physical_experts
+            moe.n_physical_experts = num_physical_experts
+            moe.n_redundant_experts = self.num_redundant_experts
+            moe.experts.update_expert_map()
+
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.embed_input_ids(input_ids)
+
+    def forward(
+        self,
+        input_ids: torch.Tensor | None,
+        positions: torch.Tensor,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+        **kwargs: object,
+    ) -> torch.Tensor | IntermediateTensors:
+        return self.model(
+            input_ids=input_ids,
+            positions=positions,
+            intermediate_tensors=intermediate_tensors,
+            inputs_embeds=inputs_embeds,
+        )
+
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
+        return self.logits_processor(lm_head=self.lm_head, hidden_states=hidden_states)
 
     @classmethod
     def get_mamba_state_dtype_from_config(
         cls, vllm_config: VllmConfig
     ) -> tuple[torch.dtype, torch.dtype]:
         return MambaStateDtypeCalculator.kda_state_dtype(
-            vllm_config.model_config.dtype,
-            vllm_config.cache_config.mamba_cache_dtype,
+            model_dtype=vllm_config.model_config.dtype,
+            mamba_cache_dtype=vllm_config.cache_config.mamba_cache_dtype,
         )
 
     @classmethod
@@ -459,9 +693,9 @@ class AliceAIForCausalLM(Qwen3NextForCausalLM):
             else 0
         )
         return MambaStateShapeCalculator.kda_state_shape(
-            vllm_config.parallel_config.tensor_parallel_size,
-            config.linear_num_key_heads,
-            config.linear_key_head_dim,
+            tp_world_size=vllm_config.parallel_config.tensor_parallel_size,
+            num_heads=config.linear_num_key_heads,
+            head_dim=config.linear_key_head_dim,
             conv_kernel_size=config.linear_conv_kernel_dim,
             num_spec=num_spec,
         )
@@ -473,13 +707,15 @@ class AliceAIForCausalLM(Qwen3NextForCausalLM):
         return MambaStateCopyFuncCalculator.gated_delta_net_state_copy_func()
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        weights = self.hf_to_vllm_mapper.apply(weights)
         manually_loaded: set[str] = set()
         weights = _load_split_kda_conv_weights(
-            weights,
-            dict(self.named_parameters()),
-            manually_loaded,
+            weights=weights,
+            params=dict(self.named_parameters()),
+            loaded=manually_loaded,
         )
-        loaded = super().load_weights(weights)
+        loader = AutoWeightsLoader(self)
+        loaded = loader.load_weights(weights=weights)
         loaded.update(manually_loaded)
         expected_target_weights = {
             name

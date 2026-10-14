@@ -193,11 +193,6 @@ class Qwen3NextSparseMoeBlock(nn.Module):
             config.num_experts,
             prefix=f"{prefix}.gate",
         )
-        if getattr(config, "router_bias_correction", False):
-            self.gate.e_score_correction_bias = nn.Parameter(
-                torch.empty(config.num_experts, dtype=torch.float32),
-                requires_grad=False,
-            )
 
         self.shared_expert_gate = ReplicatedLinear(
             config.hidden_size,
@@ -235,8 +230,6 @@ class Qwen3NextSparseMoeBlock(nn.Module):
             hidden_size=config.hidden_size,
             intermediate_size=config.moe_intermediate_size,
             renormalize=getattr(config, "norm_topk_prob", True),
-            scoring_func=getattr(config, "router_score_function", "softmax"),
-            e_score_correction_bias=getattr(self.gate, "e_score_correction_bias", None),
             quant_config=quant_config,
             prefix=f"{prefix}.experts",
             enable_eplb=self.enable_eplb,
@@ -651,13 +644,7 @@ class Qwen3NextModel(nn.Module, EagleModelMixin):
         }
     )
 
-    def __init__(
-        self,
-        *,
-        vllm_config: VllmConfig,
-        prefix: str = "",
-        decoder_layer_type: type[Qwen3NextDecoderLayer] = Qwen3NextDecoderLayer,
-    ):
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
         config: Qwen3NextConfig = vllm_config.model_config.hf_text_config
@@ -676,7 +663,7 @@ class Qwen3NextModel(nn.Module, EagleModelMixin):
         )
 
         def get_layer(prefix: str):
-            return decoder_layer_type(
+            return Qwen3NextDecoderLayer(
                 vllm_config,
                 layer_type=config.layer_types[extract_layer_index(prefix)],
                 prefix=prefix,
@@ -846,13 +833,7 @@ class Qwen3NextForCausalLM(
         "in_proj_ba": ["in_proj_ba"],
     }
 
-    def __init__(
-        self,
-        *,
-        vllm_config: VllmConfig,
-        prefix: str = "",
-        model_cls: type[Qwen3NextModel] = Qwen3NextModel,
-    ):
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         config = vllm_config.model_config.hf_text_config
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
@@ -863,7 +844,7 @@ class Qwen3NextForCausalLM(
         super().__init__()
         self.config = config
         self.scheduler_config = scheduler_config
-        self.model = model_cls(
+        self.model = Qwen3NextModel(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
 
@@ -911,7 +892,7 @@ class Qwen3NextForCausalLM(
     @classmethod
     def get_mamba_state_shape_from_config(
         cls, vllm_config: "VllmConfig"
-    ) -> tuple[tuple[int, int], tuple[int, int, int]]:
+    ) -> tuple[tuple[int, int], tuple[int, int]]:
         parallel_config = vllm_config.parallel_config
         hf_config = vllm_config.model_config.hf_text_config
         tp_size = parallel_config.tensor_parallel_size

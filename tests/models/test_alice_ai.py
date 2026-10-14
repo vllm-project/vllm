@@ -12,7 +12,7 @@ from vllm.model_executor.models.alice_ai import (
     AliceAIDecoderBlock,
     AliceAIForCausalLM,
     AliceAIModel,
-    _AttentionResidualFinalMixer,
+    _AttentionResidualFinal,
     _load_split_kda_conv_weights,
 )
 from vllm.model_executor.offloader import PrefetchOffloader, UVAOffloader
@@ -159,8 +159,8 @@ def _make_state_layer(
     return layer
 
 
-def _make_final_mixer() -> _AttentionResidualFinalMixer:
-    final = _AttentionResidualFinalMixer.__new__(_AttentionResidualFinalMixer)
+def _make_final_attn_res() -> _AttentionResidualFinal:
+    final = _AttentionResidualFinal.__new__(_AttentionResidualFinal)
     torch.nn.Module.__init__(final)
     final.rms_norm_eps = 1e-6
     final.res_proj = torch.nn.Linear(1, 1, bias=False)
@@ -175,19 +175,23 @@ def test_attn_res_block_grouping_and_final_norm(
 
     def reference_attn_res(
         prefix,
-        residual_bank,
+        delta,
+        blocks,
         norm_weight,
-        query_weight,
-        *,
+        qk_weight,
+        output_norm_weight,
         num_blocks,
+        block_write_idx,
         eps,
+        output_norm_eps,
     ):
-        del norm_weight, query_weight, eps
-        sources = [residual_bank[:, index] for index in range(num_blocks)] + [prefix]
+        del delta, norm_weight, qk_weight, output_norm_weight
+        del block_write_idx, eps, output_norm_eps
+        sources = [blocks[:, index] for index in range(num_blocks)] + [prefix]
         calls.append([source.detach().clone() for source in sources])
         return torch.stack(sources).sum(dim=0)
 
-    monkeypatch.setattr(alice_ai_module, "_mix_attn_res", reference_attn_res)
+    monkeypatch.setattr(alice_ai_module, "attn_res", reference_attn_res)
     monkeypatch.setattr(
         alice_ai_module,
         "get_pp_group",
@@ -207,7 +211,7 @@ def test_attn_res_block_grouping_and_final_norm(
         ]
     )
     model.config = SimpleNamespace(num_hidden_layers=len(raw_outputs))
-    model.attnres_final = _make_final_mixer()
+    model.attnres_final = _make_final_attn_res()
     model.norm = torch.nn.Linear(1, 1, bias=False)
     with torch.no_grad():
         model.norm.weight.fill_(2)
