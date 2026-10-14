@@ -17,6 +17,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+import vllm.v1.kv_offload.tiering.manager as tiering_manager
 from vllm.v1.kv_offload.base import (
     LookupResult,
     Medium,
@@ -363,6 +364,47 @@ def test_shutdown_joins_the_control_thread_before_tier_teardown(manager_and_tier
 
     assert tier.shutdown_saw_live_thread is False
     assert not _live_control_threads()
+
+
+def _wedge_control_thread(manager, monkeypatch) -> threading.Event:
+    """Replace the control thread with one that ignores the stop request."""
+    manager._stop_control_plane()
+    release = threading.Event()
+    stuck = threading.Thread(target=release.wait, daemon=True)
+    stuck.start()
+    manager._control_plane_thread = stuck
+    monkeypatch.setattr(tiering_manager, "_CONTROL_PLANE_JOIN_TIMEOUT_S", 0.1)
+    return release
+
+
+def test_shutdown_tears_down_under_the_lock_when_the_thread_is_stuck(
+    manager_and_tier, monkeypatch
+):
+    manager, tier = manager_and_tier
+    release = _wedge_control_thread(manager, monkeypatch)
+    try:
+        manager.shutdown()
+    finally:
+        release.set()
+    assert tier.shutdown_saw_live_thread is not None
+    assert manager.lock.acquire(timeout=0.5), "lock leaked by shutdown"
+    manager.lock.release()
+
+
+def test_shutdown_raises_when_the_caller_holds_the_lock(manager_and_tier, monkeypatch):
+    """Skipping tier teardown must not be silent.
+
+    The lock is not reentrant, so a caller that wraps shutdown() in it can only
+    time out; that has to surface instead of leaking the tiers.
+    """
+    manager, tier = manager_and_tier
+    release = _wedge_control_thread(manager, monkeypatch)
+    try:
+        with manager.lock, pytest.raises(RuntimeError, match="without holding"):
+            manager.shutdown()
+    finally:
+        release.set()
+    assert tier.shutdown_saw_live_thread is None
 
 
 def test_lock_releases_on_error(manager_and_tier):

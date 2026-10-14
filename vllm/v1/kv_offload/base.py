@@ -250,11 +250,11 @@ class OffloadingManager(ABC):
 
         Scope is the manager, every tier it composes, and any front-end state
         those tiers own (e.g. a tier's async lookup front end). Every caller of
-        an OffloadingManager method must hold it. Manager methods never enter
-        it themselves, so a caller may hold it across an arbitrary sequence of
-        operations -- which is required wherever one call establishes a fact a
-        later call relies on, such as a lookup() HIT followed by the
-        prepare_load() that pins it.
+        an OffloadingManager method, except shutdown(), must hold it. Manager
+        methods never enter it themselves, so a caller may hold it across an
+        arbitrary sequence of operations -- which is required wherever one call
+        establishes a fact a later call relies on, such as a lookup() HIT
+        followed by the prepare_load() that pins it.
 
         The default is a no-op, for managers that are only ever entered from
         one thread. A manager that may be entered from another thread -- its
@@ -452,7 +452,12 @@ class OffloadingManager(ABC):
         return None
 
     def shutdown(self) -> None:
-        """Shutdown the manager and release any resources."""
+        """Shutdown the manager and release any resources.
+
+        The one exception to the rule that callers hold ``lock``: call this
+        without it. A manager with a background thread stops that thread here
+        and may need the lock to do so.
+        """
         return
 
 

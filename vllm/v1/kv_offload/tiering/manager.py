@@ -1194,8 +1194,15 @@ class TieringOffloadingManager(OffloadingManager):
         tearing one down underneath it (closing a socket, destroying a ZMQ
         context) can take the process down rather than raise. If the thread
         will not exit, hold the manager lock across tier teardown so it cannot
-        be mid-round, and skip teardown entirely if even that is unavailable --
-        a lingering daemon thread in an exiting process beats a crash.
+        be mid-round, and raise if even that is unavailable -- tearing a tier
+        down under a live round risks a crash, and skipping it silently would
+        leak the primary's shared memory region.
+
+        Unlike every other manager method, call this WITHOUT holding
+        self.lock: it takes the lock itself, which is not reentrant, and the
+        control-plane thread needs the lock free to notice the stop request
+        and exit. A caller that does hold it only gets the RuntimeError above,
+        after waiting out the timeout.
 
         Every secondary tier is given a shutdown attempt. If any shutdown
         fails, preserve the primary mmap because a failed tier may still use it.
@@ -1203,11 +1210,12 @@ class TieringOffloadingManager(OffloadingManager):
         self._stop_control_plane()
         if self._control_plane_thread is not None:
             if not self._lock.acquire(timeout=_CONTROL_PLANE_JOIN_TIMEOUT_S):
-                logger.error(
+                raise RuntimeError(
                     "KV offload control-plane thread is still running and the "
-                    "manager lock is unavailable; skipping tier shutdown."
+                    "manager lock is unavailable; secondary tiers were not "
+                    "shut down. shutdown() must be called without holding "
+                    "manager.lock."
                 )
-                return
             try:
                 self._shutdown_tiers()
             finally:
