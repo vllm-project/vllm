@@ -51,6 +51,29 @@ Key flags (plus all `EngineArgs`):
 
 Read `median_us` (each replay is already the max over ranks).
 
+## Kernel breakdown
+
+Add `--profile-dir DIR` to see where the time goes. After timing, each case is
+replayed 3 more times under `torch.profiler`; every rank writes
+`DIR/<case>.rank<r>.kernels.json` (GPU time per kernel per forward, sorted)
+and `DIR/<case>.rank<r>.trace.json.gz` (open in Perfetto). Rank 0's top
+kernels are printed and included in `--output-json`.
+
+```bash
+python -m vllm.benchmarks.forward.profile DIR/decode.rank0.kernels.json
+# Before/after a change, same case: per-kernel deltas, largest first.
+python -m vllm.benchmarks.forward.profile base/decode.rank0.kernels.json new/decode.rank0.kernels.json
+```
+
+- Kernels are grouped by name without template or function arguments; the
+  JSON keeps one full name per group in `example`.
+- Only the timed forward is included: the in-graph KV restore and rank
+  rendezvous are excluded (`pre_forward_us`). `span_us` (first to last
+  forward kernel) should be close to `median_us`, a bit higher from profiler
+  overhead; `busy_us` can exceed it when streams overlap.
+- Compare the same rank across runs: under EP, ranks differ (e.g. collective
+  wait time shows up inside communication kernels).
+
 ## Caveats
 
 - **Dummy weights lie for data-dependent kernels.** Dummy gates route every
