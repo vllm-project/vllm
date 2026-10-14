@@ -16,7 +16,7 @@ import numpy as np
 import torch
 import zmq
 
-from vllm.config import CUDAGraphMode, VllmConfig
+from vllm.config import CUDAGraphMode, KVTransferConfig, VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     BlockIds,
     clip_ssm_state_blocks,
@@ -228,6 +228,10 @@ def resolve_moriio_transfer_ack(
 
 class MoRIIOConnector(KVConnectorBase_V1, SupportsHMA):
     _cache_hit_source = CacheHitSource.P2P
+
+    @classmethod
+    def supports_sleep_mode(cls, kv_transfer_config: KVTransferConfig) -> bool:
+        return False
 
     @property
     def supports_divergent_local_hybrid_hits(self) -> bool:
