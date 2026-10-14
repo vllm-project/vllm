@@ -85,8 +85,6 @@ from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     MambaSpec,
-    SlidingWindowSpec,
-    UniformTypeKVCacheSpecs,
     get_block_table_width,
 )
 from vllm.v1.outputs import (
@@ -115,7 +113,7 @@ from vllm.v1.worker.gpu.async_utils import (
 from vllm.v1.worker.gpu.attn_utils import (
     FastPrefillHelper,
     build_slot_mappings_by_layer,
-    get_kv_cache_spec,
+    get_kv_cache_layer_configs,
     init_attn_backend,
     init_kv_cache,
 )
@@ -648,17 +646,20 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         encoder_runner = getattr(self.model_state, "encoder_runner", None)
         return encoder_runner.get_encoder_timing_stats() if encoder_runner else {}
 
-    def get_kv_cache_spec(self):
-        kv_cache_spec = get_kv_cache_spec(self.vllm_config)
+    def get_kv_cache_layer_configs(self):
+        configs = get_kv_cache_layer_configs(self.vllm_config)
         # A draft running at DCP=1 under a DCP target keeps a replicated cache.
         if (
             isinstance(self.speculator, DraftModelSpeculator)
             and self.speculator.dcp_size == 1
             and self.dcp_size > 1
         ):
-            for name in self.speculator.draft_attn_layer_names & kv_cache_spec.keys():
-                kv_cache_spec[name] = replace(kv_cache_spec[name], dcp_sharded=False)
-        return kv_cache_spec
+            for name in self.speculator.draft_attn_layer_names & configs.keys():
+                config = configs[name]
+                configs[name] = replace(
+                    config, spec=replace(config.spec, dcp_sharded=False)
+                )
+        return configs
 
     def initialize_kv_cache(
         self,
@@ -701,29 +702,21 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         dcp_sharded = []
         sliding_window_reach = []
         for kv_cache_group in kv_cache_config.kv_cache_groups:
-            spec = kv_cache_group.kv_cache_spec
-            block_sizes.append(spec.block_size)
-            layer_spec = (
-                spec.first_spec if isinstance(spec, UniformTypeKVCacheSpecs) else spec
-            )
-            slot_mapping_enabled.append(spec.uses_slot_mapping)
-            dcp_sharded.append(spec.dcp_sharded)
-            sliding_window_reach.append(
-                layer_spec.num_retained_tokens
-                if isinstance(layer_spec, SlidingWindowSpec)
-                else 0
-            )
+            block_sizes.append(kv_cache_group.block_size)
+            slot_mapping_enabled.append(kv_cache_group.uses_slot_mapping)
+            dcp_sharded.append(kv_cache_group.dcp_sharded)
+            sliding_window_reach.append(kv_cache_group.sliding_window_reach)
             # Let each cache type account for CP. Attention KV is DCP-sharded,
             # while Mamba/GDN recurrent state is replicated across DCP ranks.
-            max_num_blocks = spec.max_num_blocks_per_req(
+            max_num_blocks = kv_cache_group.max_num_blocks_per_req(
                 self.vllm_config, block_table_max_model_len
             )
             # Preserve each cache type's alignment requirements after applying
             # its topology-aware block-table width.
             max_num_blocks = get_block_table_width(
                 max_num_blocks,
-                spec.block_size,
-                token_alignment=spec.block_table_token_alignment,
+                kv_cache_group.block_size,
+                token_alignment=kv_cache_group.block_table_token_alignment,
             )
             max_num_blocks_per_group.append(max_num_blocks)
 

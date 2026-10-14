@@ -12,11 +12,11 @@ import zmq
 from vllm.platforms import current_platform
 from vllm.utils.network_utils import make_zmq_socket
 from vllm.v1.kv_cache_interface import (
-    KVCacheGroupSpec,
+    AttentionSpec,
+    KVCacheGroup,
     KVCacheSpec,
+    MambaSpec,
     MLAAttentionSpec,
-    SlidingWindowMLASpec,
-    UniformTypeKVCacheSpecs,
 )
 
 # Supported platforms and types of kv transfer buffer.
@@ -55,25 +55,23 @@ def zmq_ctx(socket_type: Any, addr: str) -> Iterator[zmq.Socket]:
             ctx.destroy(linger=0)
 
 
-def get_representative_spec_type(spec: KVCacheSpec) -> type[KVCacheSpec]:
-    if isinstance(spec, UniformTypeKVCacheSpecs):
-        # All inner specs are the same type; pick any.
-        inner = next(iter(spec.kv_cache_specs.values()))
-        return type(inner)
-    return type(spec)
+def get_representative_spec_type(group: KVCacheGroup) -> type[KVCacheSpec]:
+    if group.kv_cache_specs:
+        return type(next(iter(group.kv_cache_specs.values())))
+    # A PP stage holding none of the group's layers transfers none of them.
+    from vllm.v1.core.single_type_kv_cache_manager import MambaManager
+
+    return MambaSpec if issubclass(group.manager_cls, MambaManager) else AttentionSpec
 
 
-def get_dcp_replicated_group_ids(groups: Sequence[KVCacheGroupSpec]) -> set[int]:
+def get_dcp_replicated_group_ids(groups: Sequence[KVCacheGroup]) -> set[int]:
     """MLA groups held whole on every DCP rank, e.g. a draft running at DCP=1
     under a DCP target."""
     return {
         i
         for i, group in enumerate(groups)
-        if issubclass(
-            get_representative_spec_type(group.kv_cache_spec),
-            (MLAAttentionSpec, SlidingWindowMLASpec),
-        )
-        and not group.kv_cache_spec.dcp_sharded
+        if issubclass(get_representative_spec_type(group), MLAAttentionSpec)
+        and not group.dcp_sharded
     }
 
 

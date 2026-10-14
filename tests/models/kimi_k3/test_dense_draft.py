@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from tests.v1.core.utils import full_layer, mamba_layer, sliding_window_layer
 from vllm.model_executor.layers.mamba.mamba_utils import MambaStateShapeCalculator
 from vllm.model_executor.models.config import KimiK3ForConditionalGenerationConfig
 from vllm.models.kimi_k3.common import dsa_cache
@@ -21,9 +22,9 @@ from vllm.v1.core.kv_cache_planning import (
     get_kv_cache_groups,
 )
 from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
     MambaSpec,
     MLAAttentionSpec,
-    SlidingWindowSpec,
     SparseCacheRole,
 )
 from vllm.v1.kv_cache_layout import KVCacheLayout
@@ -131,24 +132,29 @@ def test_gqa_draft_gets_its_own_group_and_a_fitting_block(
         ),
         scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
     )
-    mla = MLAAttentionSpec(
+    mla_spec = MLAAttentionSpec(
         block_size=block_size, num_kv_heads=1, head_size=576, dtype=torch.uint8
     )
-    kda = MambaSpec(
-        block_size=block_size,
-        shapes=((2, 512), (3, 32, 32)),
-        dtypes=(torch.float32, torch.float32),
-        page_size_padded=mla.page_size_bytes,
+    mla = full_layer(mla_spec)
+    kda = mamba_layer(
+        MambaSpec(
+            block_size=block_size,
+            shapes=((2, 512), (3, 32, 32)),
+            dtypes=(torch.float32, torch.float32),
+            page_size_padded=mla_spec.page_size_bytes,
+        ),
         mamba_cache_mode="align",
     )
     target = {
         f"model.layers.{i}": mla if i % 4 == 3 or i == 92 else kda for i in range(93)
     }
-    draft = SlidingWindowSpec(
-        block_size=block_size,
-        num_kv_heads=draft_kv_heads,
-        head_size=64,
-        dtype=torch.bfloat16,
+    draft = sliding_window_layer(
+        AttentionSpec(
+            block_size=block_size,
+            num_kv_heads=draft_kv_heads,
+            head_size=64,
+            dtype=torch.bfloat16,
+        ),
         sliding_window=2048,
     )
     specs = target | {f"model.layers.{93 + i}.attn": draft for i in range(5)}
@@ -157,9 +163,11 @@ def test_gqa_draft_gets_its_own_group_and_a_fitting_block(
 
     # The target keeps its 4 groups; the 5 draft layers form a fifth.
     assert [len(g.layer_names) for g in groups] == [23, 23, 23, 24, 5]
-    assert groups[-1].kv_cache_spec.block_size == draft_block_size
+    assert groups[-1].block_size == draft_block_size
     # The draft's pages are padded to the target's (one page size for all groups).
-    assert {g.kv_cache_spec.page_size_bytes for g in groups} == {mla.page_size_bytes}
+    assert {
+        spec.page_size_bytes for g in groups for spec in g.kv_cache_specs.values()
+    } == {mla_spec.page_size_bytes}
     # Without a draft, the default grouping is unchanged.
     assert GQADraftKVCacheGrouping.get_kv_cache_groups(
         vllm_config, target
@@ -252,20 +260,24 @@ def test_packed_dsa_block_counts_a_dense_mla_draft_in_the_row(monkeypatch):
 
     specs = {}
     for i in K31_DSA_LAYERS:
-        specs[f"model.layers.{i}.self_attn"] = mla(
-            576, cache_dtype_str="fp8_ds_mla", state_content_bytes=MLA_BYTES
+        specs[f"model.layers.{i}.self_attn"] = full_layer(
+            mla(576, cache_dtype_str="fp8_ds_mla", state_content_bytes=MLA_BYTES)
         )
-        specs[f"model.layers.{i}.indexer"] = mla(
-            INDEX_BYTES, cache_role=SparseCacheRole.INDEXER
+        specs[f"model.layers.{i}.indexer"] = full_layer(
+            mla(INDEX_BYTES, cache_role=SparseCacheRole.INDEXER)
         )
     for i in K31_PACKED_TEXT_CONFIG.linear_attn_config["kda_layers"]:
-        specs[f"model.layers.{i}.kda"] = replace(kda, block_size=block_size)
+        specs[f"model.layers.{i}.kda"] = mamba_layer(
+            replace(kda, block_size=block_size)
+        )
     for i in range(draft_layers):
-        specs[f"draft.layers.{i}.self_attn"] = mla(
-            576,
-            dtype=torch.float8_e4m3fn,
-            cache_dtype_str="fp8",
-            non_causal_multi_token_decode=True,
+        specs[f"draft.layers.{i}.self_attn"] = full_layer(
+            mla(
+                576,
+                dtype=torch.float8_e4m3fn,
+                cache_dtype_str="fp8",
+                non_causal_multi_token_decode=True,
+            )
         )
     vllm_config = SimpleNamespace(
         cache_config=SimpleNamespace(

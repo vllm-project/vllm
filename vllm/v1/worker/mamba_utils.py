@@ -17,11 +17,12 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
 from vllm.triton_utils import tl, triton
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
+from vllm.v1.core.kv_cache_utils import is_mamba_align_group, is_mamba_group
+from vllm.v1.core.single_type_kv_cache_manager import MambaManager
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
-    KVCacheGroupSpec,
+    KVCacheGroup,
     MambaSpec,
-    UniformTypeKVCacheSpecs,
 )
 from vllm.v1.worker.replayssm_utils import (
     ReplaySSMModelContext,
@@ -647,11 +648,9 @@ def precopy_mamba_align_fused_kernel(
 
 
 def _get_mamba_spec_for_layer(
-    kv_cache_group: KVCacheGroupSpec, layer_name: str
+    kv_cache_group: KVCacheGroup, layer_name: str
 ) -> MambaSpec:
-    kv_cache_spec = kv_cache_group.kv_cache_spec
-    if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
-        kv_cache_spec = kv_cache_spec.kv_cache_specs[layer_name]
+    kv_cache_spec = kv_cache_group.kv_cache_specs[layer_name]
     assert isinstance(kv_cache_spec, MambaSpec)
     return kv_cache_spec
 
@@ -667,14 +666,23 @@ def get_mamba_group_ids(mamba_groups: dict[MambaSpec, list[int]]) -> list[int]:
     )
 
 
+def get_mamba_group_params(
+    kv_cache_config: KVCacheConfig, mamba_group_ids: list[int]
+) -> tuple[int, MambaManager.Params]:
+    """Return the block size and manager params shared by the mamba groups."""
+    groups = kv_cache_config.kv_cache_groups
+    shared = {(groups[i].block_size, groups[i].manager_config) for i in mamba_group_ids}
+    assert len(shared) == 1, "all mamba groups must share cache scheduling parameters"
+    ((block_size, config),) = shared
+    assert isinstance(config.params, MambaManager.Params)
+    return block_size, config.params
+
+
 def get_mamba_groups(kv_cache_config: KVCacheConfig) -> dict[MambaSpec, list[int]]:
     """Return a mapping from each distinct MambaSpec to its sorted group_ids."""
     mamba_groups: dict[MambaSpec, set[int]] = {}
     for i, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups):
-        kv_cache_spec = kv_cache_group.kv_cache_spec
-        if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
-            kv_cache_spec = kv_cache_spec.first_spec
-        if not isinstance(kv_cache_spec, MambaSpec):
+        if not is_mamba_group(kv_cache_group):
             continue
         for layer_name in kv_cache_group.layer_names:
             mamba_spec = _get_mamba_spec_for_layer(kv_cache_group, layer_name)
@@ -788,13 +796,9 @@ class MambaSpecDecodeGPUContext:
         """Create context with allocated buffers (metadata populated later)."""
         mamba_groups = get_mamba_groups(kv_cache_config)
         mamba_group_ids = get_mamba_group_ids(mamba_groups)
-        mamba_spec = next(iter(mamba_groups))
-        assert all(
-            spec.block_size == mamba_spec.block_size
-            and spec.num_speculative_blocks == mamba_spec.num_speculative_blocks
-            and spec.mamba_cache_mode == mamba_spec.mamba_cache_mode
-            for spec in mamba_groups
-        ), "all mamba groups must share cache scheduling parameters"
+        block_size, mamba_params = get_mamba_group_params(
+            kv_cache_config, mamba_group_ids
+        )
         # Count physical state tensors across all Mamba groups. Different
         # groups may expose different state specs.
         total_states = sum(
@@ -836,7 +840,7 @@ class MambaSpecDecodeGPUContext:
             state_dim_row_stride=torch.zeros(
                 total_states, dtype=torch.int64, device=device
             ),
-            block_size=mamba_spec.block_size,
+            block_size=block_size,
             num_states=total_states,
             mamba_group_ids=mamba_group_ids,
             num_groups=len(mamba_group_ids),
@@ -853,7 +857,7 @@ class MambaSpecDecodeGPUContext:
                 (
                     len(mamba_group_ids),
                     max_num_reqs,
-                    1 + mamba_spec.num_speculative_blocks,
+                    1 + mamba_params.num_speculative_blocks,
                 ),
                 dtype=torch.int32,
                 device=device,
@@ -1041,14 +1045,12 @@ class MambaSpecDecodeGPUContext:
                     idx += 1
 
             if mixers:
-                spec = kv_cache_group.kv_cache_spec
-                if not isinstance(spec, MambaSpec):
-                    raise TypeError(
-                        "ReplaySSM tracker layers require a Mamba cache spec; "
-                        f"got {type(spec).__name__}"
-                    )
                 replayssm_groups.append(
-                    (mixers, spec, aligned_index_block_tables[group_local_idx])
+                    (
+                        mixers,
+                        _get_mamba_spec_for_layer(kv_cache_group, layer_names[0]),
+                        aligned_index_block_tables[group_local_idx],
+                    )
                 )
 
         assert idx == self.num_states
@@ -1079,6 +1081,9 @@ class MambaSpecDecodeGPUContext:
             self.replayssm = ReplaySSMModelContext.create(
                 replayssm_groups,
                 self.num_accepted_tokens_snapshot.numel(),
+                materialize_prefixes=is_mamba_align_group(
+                    kv_cache_config.kv_cache_groups[self.mamba_group_ids[0]]
+                ),
             )
 
         self.is_initialized = True
