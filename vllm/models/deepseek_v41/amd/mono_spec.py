@@ -11,11 +11,7 @@ import vllm.envs as envs
 from vllm.config import CUDAGraphMode
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
-from vllm.models.common.mono.spec import (
-    Feature,
-    MonoContext,
-    MonoSpec,
-)
+from vllm.models.common.mono.spec import Feature, MonoSpec
 from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
@@ -331,7 +327,7 @@ def _ffn_only(layer) -> str | None:
     return None
 
 
-def _skip_step(ctx: MonoContext, launch_state: LaunchState, width: int) -> str | None:
+def _skip_step(vllm_config, launch_state: LaunchState, width: int) -> str | None:
     """Why this step keeps vLLM's path at every layer, or None when the kernels
     take it. One verdict for every kernel layer, from the batch the whole TP
     group sees alike."""
@@ -367,17 +363,18 @@ def _skip_step(ctx: MonoContext, launch_state: LaunchState, width: int) -> str |
     return None
 
 
-def _launch_state(model, ctx: MonoContext) -> LaunchState:
+def _launch_state(model, vllm_config) -> LaunchState:
     """This rank's runner, collective over the TP group."""
     from vllm.models.common.mono.guards import tp_group
     from vllm.models.deepseek_v41.amd.mono.runner import MAX_TOKENS, DSV41MonoLayer
 
     assert MAX_TOKENS >= MAX_ROWS, MAX_TOKENS
     rank, world, cpu_group = tp_group()
+    device = next(model.parameters()).device
     return LaunchState(
-        runner=DSV41MonoLayer(world, rank, cpu_group, ctx.device),
+        runner=DSV41MonoLayer(world, rank, cpu_group, device),
         first=getattr(model, "start_layer", 0),
-        words=torch.zeros(world, dtype=torch.int32, device=ctx.device),
+        words=torch.zeros(world, dtype=torch.int32, device=device),
     )
 
 
@@ -435,7 +432,7 @@ def _attn_weights(a, world: int):
     return attn
 
 
-def _refuse_caches(ctx: MonoContext, caches) -> list[str]:
+def _refuse_caches(vllm_config, caches) -> list[str]:
     """Every reason the kernels cannot read these caches: they index each as
     [blocks, block, RECORD] bytes."""
     reasons = []
@@ -453,9 +450,9 @@ def _refuse_caches(ctx: MonoContext, caches) -> list[str]:
 
 
 def _build(
-    ctx: MonoContext, launch_state: LaunchState, layer, width: int
+    vllm_config, launch_state: LaunchState, layer, width: int
 ) -> DSV41LayerKernel:
-    world = ctx.vllm_config.parallel_config.tensor_parallel_size
+    world = vllm_config.parallel_config.tensor_parallel_size
     why = _ffn_only(layer)
     if layer.attn.layer_id not in launch_state.weights:
         launch_state.weights[layer.attn.layer_id] = _weights(

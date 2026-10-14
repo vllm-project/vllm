@@ -7,8 +7,6 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeVar
 
-import torch
-
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
@@ -39,20 +37,6 @@ it, so a spec chooses the type and the callbacks that receive it agree."""
 
 class MonoUnsupported(Exception):
     """The configuration or the loaded model is outside what a spec serves."""
-
-
-@dataclass(frozen=True)
-class MonoContext:
-    """One rank's view of the deployment, built once at attach.
-
-    Attributes:
-        vllm_config: The engine's config.
-        device: The device the kernels launch on.
-
-    """
-
-    vllm_config: "VllmConfig"
-    device: torch.device
 
 
 class LayerKernel(Protocol):
@@ -116,10 +100,11 @@ class MonoSpec(Generic[LaunchStateT]):
         skip_step: Why one step takes vLLM's path, None when it takes the
             kernel's. Takes the step's width; anything else it needs it reads
             from the forward context, which every rank sees alike.
-        launch_state: The weights and launch state, built once at attach. The
-            only place a weight copy is ever made. Opaque to the library, which
-            only hands it back to the spec's own callbacks.
-        build: One ``LayerKernel`` for (context, state, layer, width).
+        launch_state: The weights and launch state, built once at attach, off
+            the loaded model (whose parameters carry the device the kernels
+            launch on). The only place a weight copy is ever made. Opaque to
+            the library, which only hands it back to the spec's own callbacks.
+        build: One ``LayerKernel`` for (config, state, layer, width).
 
     """
 
@@ -128,8 +113,8 @@ class MonoSpec(Generic[LaunchStateT]):
     widths: Callable[["VllmConfig"], tuple[int, ...]]
     refuse_config: Callable[["VllmConfig"], list[str]]
     refuse_model: Callable[[Any], list[str]]
-    refuse_caches: Callable[[MonoContext, Mapping[str, Any]], list[str]]
+    refuse_caches: Callable[["VllmConfig", Mapping[str, Any]], list[str]]
     skip_layer: Callable[[Any], str | None]
-    skip_step: Callable[[MonoContext, LaunchStateT, int], str | None]
-    launch_state: Callable[[Any, MonoContext], LaunchStateT]
-    build: Callable[[MonoContext, LaunchStateT, Any, int], LayerKernel]
+    skip_step: Callable[["VllmConfig", LaunchStateT, int], str | None]
+    launch_state: Callable[[Any, "VllmConfig"], LaunchStateT]
+    build: Callable[["VllmConfig", LaunchStateT, Any, int], LayerKernel]

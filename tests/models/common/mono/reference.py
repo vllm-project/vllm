@@ -10,7 +10,7 @@ import torch
 
 from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import get_forward_context
-from vllm.models.common.mono.spec import MonoContext, MonoSpec
+from vllm.models.common.mono.spec import MonoSpec
 
 CACHE_DTYPE = torch.bfloat16
 CACHE_NDIM = 4
@@ -56,7 +56,7 @@ class ReferenceKernel:
     """One layer's launch at one width: the work of the layer it replaces, off
     the weight view its launch state holds."""
 
-    def __init__(self, ctx: MonoContext, state: LaunchState, layer, width: int):
+    def __init__(self, vllm_config, state: LaunchState, layer, width: int):
         self.cache_layers = (layer.attn_name,)
         self.index = layer.index
         self.weight = state.weights[layer.index]
@@ -96,18 +96,18 @@ def skip_layer(layer) -> str | None:
     return "dense layer" if layer.dense else None
 
 
-def skip_step(ctx: MonoContext, state: LaunchState, width: int) -> str | None:
+def skip_step(vllm_config, state: LaunchState, width: int) -> str | None:
     md = get_forward_context().attn_metadata
     return "prefill" if md.get("prefill") else None
 
 
-def launch_state(model, ctx: MonoContext) -> LaunchState:
+def launch_state(model, vllm_config) -> LaunchState:
     return LaunchState(
         weights={i: layer.weight.data for i, layer in enumerate(model.layers)}
     )
 
 
-def refuse_caches(ctx: MonoContext, caches) -> list[str]:
+def refuse_caches(vllm_config, caches) -> list[str]:
     reasons = []
     for name, cache in caches.items():
         if cache.dtype is not CACHE_DTYPE:
@@ -117,8 +117,8 @@ def refuse_caches(ctx: MonoContext, caches) -> list[str]:
     return reasons
 
 
-def build(ctx: MonoContext, state: LaunchState, layer, width: int) -> ReferenceKernel:
-    return ReferenceKernel(ctx, state, layer, width)
+def build(vllm_config, state: LaunchState, layer, width: int) -> ReferenceKernel:
+    return ReferenceKernel(vllm_config, state, layer, width)
 
 
 REFERENCE = MonoSpec[LaunchState](

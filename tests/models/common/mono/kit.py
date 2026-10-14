@@ -202,7 +202,9 @@ class MonoConformance:
         assert len(checks) == 2
 
     def test_refuse_caches_reports_every_reason(self, config, model, mono):
-        reasons = mono.spec.refuse_caches(mono.ctx, self.bad_caches(config, model))
+        reasons = mono.spec.refuse_caches(
+            mono.vllm_config, self.bad_caches(config, model)
+        )
         assert len(reasons) >= 2, reasons
 
     def test_mismatched_caches_refuse_the_step(self, config, model, mono):

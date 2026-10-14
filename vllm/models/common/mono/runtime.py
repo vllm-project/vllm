@@ -22,12 +22,7 @@ from vllm.models.common.mono.guards import (
     tp_agree,
     tp_group,
 )
-from vllm.models.common.mono.spec import (
-    LayerKernel,
-    MonoContext,
-    MonoSpec,
-    MonoUnsupported,
-)
+from vllm.models.common.mono.spec import LayerKernel, MonoSpec, MonoUnsupported
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -68,7 +63,7 @@ class MonoRuntime:
             raise MonoUnsupported(f"{refused}: " + "; ".join(reasons))
         if not agreed:
             raise MonoUnsupported(f"{refused}: another TP rank refused")
-        self.ctx = MonoContext(vllm_config, next(model.parameters()).device)
+        self.vllm_config = vllm_config
         self.widths = spec.widths(vllm_config)
         self.kernels: dict[tuple[int, int], LayerKernel] = {}
         self.state: Any = None
@@ -81,11 +76,11 @@ class MonoRuntime:
         if not indices:
             self.cache_layers: list[str] = []
             return
-        self.state = spec.launch_state(model, self.ctx)
+        self.state = spec.launch_state(model, vllm_config)
         for i in indices:
             for w in self.widths:
                 self.kernels[i, w] = spec.build(
-                    self.ctx, self.state, model.layers[i], w
+                    vllm_config, self.state, model.layers[i], w
                 )
         self.cache_layers = sorted(
             {n for k in self.kernels.values() for n in k.cache_layers}
@@ -127,7 +122,7 @@ class MonoRuntime:
         """Re-checks the caches whenever they moved (keyed on every tensor's
         data_ptr and numel): memory profiling runs real steps on throwaway
         caches before the real ones exist."""
-        sfc = self.ctx.vllm_config.compilation_config.static_forward_context
+        sfc = self.vllm_config.compilation_config.static_forward_context
         caches = {n: sfc[n].kv_cache for n in self.cache_layers}
         key = tuple(
             (t.data_ptr(), t.numel())
@@ -140,7 +135,7 @@ class MonoRuntime:
             raise MonoUnsupported(
                 f"MonoKernel {self.spec.name}: caches moved during CUDA graph capture"
             )
-        reasons = self.spec.refuse_caches(self.ctx, caches)
+        reasons = self.spec.refuse_caches(self.vllm_config, caches)
         if reasons:
             raise MonoUnsupported(
                 f"MonoKernel {self.spec.name} caches: " + "; ".join(reasons)
@@ -161,7 +156,7 @@ class MonoRuntime:
         elif n not in self.widths:
             self.why = "width"
         else:
-            self.why = self.spec.skip_step(self.ctx, self.state, n)
+            self.why = self.spec.skip_step(self.vllm_config, self.state, n)
             if self.why is None:
                 self._refuse_caches()
                 self.width = n
