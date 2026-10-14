@@ -204,7 +204,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
     Never entered concurrently: every public method runs under the tiering
     manager's ``lock``, held either by the scheduler thread for the length of
     a step or by the control-plane thread for the length of one round. Peers are
-    not driven by the engine, so this tier sets ``serves_external_requests``
+    not driven by the engine, so this tier sets ``needs_tier_poll_thread``
     to opt into that thread; without it a peer's lookup or fetch waits
     for a step boundary, which on a saturated rank can be seconds.
     ``has_pending_work()`` keeps the engine ticking so the control transport
@@ -212,7 +212,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
     """
 
     cache_hit_source: ClassVar[CacheHitSource] = CacheHitSource.P2P
-    serves_external_requests: ClassVar[bool] = True
+    needs_tier_poll_thread: ClassVar[bool] = True
 
     def __init__(
         self,

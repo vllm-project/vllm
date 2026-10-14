@@ -142,7 +142,7 @@ class SecondaryTierManager(ABC):
 
     Methods are called under the tiering manager's lock, so they are never
     entered concurrently -- but not always from the same thread. A tier that
-    sets serves_external_requests is also serviced from the manager's
+    sets needs_tier_poll_thread is also serviced from the manager's
     control-plane thread, and any tier can be reached from there via
     ParentManager fan-out. Keep per-thread assumptions out of tier state.
     """
@@ -168,7 +168,7 @@ class SecondaryTierManager(ABC):
     # poll_tiers(). Overriding serve_external_requests() alone does not opt
     # in: setting this asserts the tier tolerates those calls off the
     # scheduler thread.
-    serves_external_requests: ClassVar[bool] = False
+    needs_tier_poll_thread: ClassVar[bool] = False
 
     def __init__(
         self,
@@ -342,7 +342,7 @@ class SecondaryTierManager(ABC):
 
         Called once per scheduler step, BEFORE _flush_pending_promotions(), and
         additionally once per control-plane round for tiers that set
-        serves_external_requests. The _flush_pending_promotions() ordering
+        needs_tier_poll_thread. The _flush_pending_promotions() ordering
         holds only for the per-step call: a promotion this method initiates from
         a control-plane round is submitted at the next on_schedule_end().
 
@@ -352,7 +352,7 @@ class SecondaryTierManager(ABC):
         release that lock partway through.
 
         Tiers that don't serve external requests leave this as a no-op. A tier
-        that overrides it without setting serves_external_requests is served
+        that overrides it without setting needs_tier_poll_thread is served
         once per step only.
         """
         return

@@ -222,7 +222,7 @@ class TieringOffloadingManager(OffloadingManager):
             secondary_tiers: List of secondary tier managers (e.g., Storage,
                             Network). Can be None or empty list.
             tier_poll_interval_s: Pause between control-plane rounds for
-                tiers that set serves_external_requests. Zero or negative
+                tiers that set needs_tier_poll_thread. Zero or negative
                 disables the thread, leaving those tiers serviced once per
                 engine step as before.
 
@@ -283,7 +283,7 @@ class TieringOffloadingManager(OffloadingManager):
         self._external_serving_tiers: list[tuple[int, SecondaryTierManager]] = [
             (i, tier)
             for i, tier in enumerate(self.secondary_tiers)
-            if tier.serves_external_requests
+            if tier.needs_tier_poll_thread
         ]
         self._tier_poll_interval_s = tier_poll_interval_s
         self._control_plane_stop = threading.Event()

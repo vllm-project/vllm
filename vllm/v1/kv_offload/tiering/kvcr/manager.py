@@ -269,7 +269,7 @@ class KVCRSecondaryTierManager(SecondaryTierManager):
     # once per step for now: opting in would also poll the KVCR library from
     # the tiering manager's polling thread, which it is not yet verified to
     # tolerate.
-    serves_external_requests: ClassVar[bool] = False
+    needs_tier_poll_thread: ClassVar[bool] = False
 
     @classmethod
     @override
