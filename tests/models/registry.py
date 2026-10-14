@@ -725,6 +725,11 @@ _SEQUENCE_CLASSIFICATION_EXAMPLE_MODELS = {
     "BertForSequenceClassification": _HfExamplesInfo(
         "cross-encoder/ms-marco-MiniLM-L-6-v2"
     ),
+    "D3ForSequenceClassification": _HfExamplesInfo(
+        "vllm-sr/d3-edge",
+        extras={"d3": "vllm-sr/d3", "d3-mini": "vllm-sr/d3-mini"},
+        max_model_len=4096,
+    ),
     "GPT2ForSequenceClassification": _HfExamplesInfo(
         "nie3e/sentiment-polish-gpt2-small"
     ),
