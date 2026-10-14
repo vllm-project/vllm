@@ -963,22 +963,30 @@ def unified_attention(
     # Tuned launch parameters; ``None`` lets Triton pick its defaults.
     launch_num_warps: int | None = None
     launch_num_stages: int | None = None
+    tuned_prefill_tile: int | None = None
 
-    # head_size 256 with many query rows per sequence (e.g. diffusion-gemma
-    # bidirectional canvas passes) is prefill-shaped, but the decode-oriented
-    # defaults (BLOCK_Q=8, TILE=32, 4 warps) under-tile it. A wider KV tile +
-    # more query rows per block + 8 warps is ~2x faster on B200.
+    # Prefill-shaped head_size 256 batches (diffusion-gemma canvas, gemma-4
+    # sliding layers) are under-tiled by the decode defaults. BLOCK_M=32 is
+    # ~2x faster on B200 (128 KV tile, 8 warps) and ~1.6x on B70 (4 warps:
+    # XPU warps are 16 lanes). XPU keeps short spec-decode verify batches on
+    # the 3D split-K path, which is faster for them.
+    is_xpu = current_platform.is_xpu()
     tuned_large_head = (
         head_size == 256
         and max_seqlen_q > 1
         and num_queries_per_kv <= 16
-        and current_platform.is_device_capability_family(100)
+        and (
+            (is_xpu and max_seqlen_q > MAX_3D_QUERY_LEN)
+            or current_platform.is_device_capability_family(100)
+        )
     )
     if tuned_large_head:
         BLOCK_M = 32
         BLOCK_Q = BLOCK_M // num_queries_per_kv
-        launch_num_warps = 8
+        launch_num_warps = 4 if is_xpu else 8
         launch_num_stages = 2
+        if not is_xpu:
+            tuned_prefill_tile = 128
 
     # Ideally we would launch with kernel with:
     # \sum_i[ceil(query_len[i] / BLOCK_Q)] blocks.
@@ -1008,10 +1016,9 @@ def unified_attention(
         head_size, sliding_window_val, q.element_size(), is_prefill=False
     )
 
-    # Wider KV tile for the tuned large-head path (see above). Only the 2D
-    # path (used when max_seqlen_q > 1) reads TILE_SIZE_PREFILL.
-    if tuned_large_head:
-        TILE_SIZE_PREFILL = 128
+    # Only the 2D path (used when max_seqlen_q > 1) reads TILE_SIZE_PREFILL.
+    if tuned_prefill_tile is not None:
+        TILE_SIZE_PREFILL = tuned_prefill_tile
 
     # USE_TD requires BLOCK_SIZE % TILE_SIZE == 0 (enforced by a
     # ``tl.static_assert`` in the kernel).  The default prefill tile
