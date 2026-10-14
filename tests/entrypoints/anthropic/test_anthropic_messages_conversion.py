@@ -12,6 +12,7 @@ blocks echoed back by Anthropic clients, and streaming conversion in
 Also covers cache usage computation in ``_build_anthropic_usage``.
 """
 
+import asyncio
 import json
 from argparse import Namespace
 from http import HTTPStatus
@@ -1080,6 +1081,121 @@ def _tc(*, args, id=None, name=None):
     )
 
 
+@pytest.fixture
+def tool_response_record(monkeypatch):
+    record = MagicMock()
+    monkeypatch.setattr(
+        "vllm.entrypoints.anthropic.serving.record_tool_call_response", record
+    )
+    return record
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure",
+    [
+        "none",
+        "no-calls",
+        "no-tools",
+        "metadata-only",
+        "conversion",
+        "engine",
+        "invalid-frame",
+        "truncated",
+        "cancel",
+        "close-before",
+        "close-after",
+    ],
+)
+async def test_message_stream_metrics_count_only_emitted_tool_blocks(
+    tool_response_record, failure
+):
+    request = _convert(
+        _make_request(
+            [],
+            stream=True,
+            tools=None
+            if failure == "no-tools"
+            else [{"name": "f", "input_schema": {}}],
+        )
+    )
+    closed = False
+
+    async def source():
+        nonlocal closed
+        try:
+            yield _make_stream_chunk(delta=DeltaMessage(role="assistant"))
+            if failure in ("no-calls", "no-tools"):
+                yield _make_stream_chunk(delta=DeltaMessage(content="answer"))
+            else:
+                yield _make_stream_chunk(
+                    delta=DeltaMessage(
+                        tool_calls=[
+                            _tc(
+                                id="call-0",
+                                name=None if failure == "metadata-only" else "f",
+                                args="{",
+                            )
+                        ]
+                    )
+                )
+                yield _make_stream_chunk(delta=DeltaMessage(tool_calls=[_tc(args="}")]))
+            if failure == "conversion":
+                yield "data: not-json"
+            if failure == "engine":
+                raise RuntimeError("fixture engine error")
+            if failure == "cancel":
+                raise asyncio.CancelledError()
+            if failure == "invalid-frame":
+                yield "invalid frame"
+            if failure != "truncated":
+                yield _make_stream_chunk(finish_reason="stop")
+                yield "data: [DONE]"
+        finally:
+            closed = True
+
+    stream = _make_stream_converter().message_stream_converter(
+        source(), request=request
+    )
+    chunks = []
+    cancelled = False
+    try:
+        async for chunk in stream:
+            chunks.append(chunk)
+            event, data = _parse_sse_events([chunk])[0]
+            if failure == "close-before" or (
+                failure == "close-after"
+                and event == "content_block_start"
+                and data["content_block"]["type"] == "tool_use"
+            ):
+                break
+    except asyncio.CancelledError:
+        cancelled = True
+    finally:
+        await stream.aclose()
+
+    events = _parse_sse_events(chunks)
+    count = sum(
+        event == "content_block_start" and data["content_block"]["type"] == "tool_use"
+        for event, data in events
+    )
+    assert count == (
+        0 if failure in ("no-calls", "no-tools", "metadata-only", "close-before") else 1
+    )
+    assert closed
+    assert cancelled == (failure == "cancel")
+    if failure == "no-tools":
+        tool_response_record.assert_not_called()
+    else:
+        tool_response_record.assert_called_once_with(
+            request,
+            tool_calls_count=count,
+            completed=failure in ("none", "no-calls", "metadata-only"),
+        )
+    if failure in ("conversion", "engine", "invalid-frame"):
+        assert sum(event == "error" for event, _ in events) == 1
+
+
 class TestMessageStreamConverterToolUseContentBuffering:
     """Regression test for tool_use arguments being silently dropped.
 
@@ -1506,6 +1622,64 @@ class TestMessagesFullConverter:
         assert len(result.content) == 1
         assert result.content[0].type == "text"
         assert result.content[0].text == ""
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "arguments, has_tools, error",
+    [
+        (["{}", "{}"], True, None),
+        ([], True, None),
+        ([], False, None),
+        (["{}", "not-json"], True, json.JSONDecodeError),
+        (["[]"], True, ValidationError),
+    ],
+)
+async def test_messages_full_metrics_wait_for_successful_conversion(
+    tool_response_record, arguments, has_tools, error
+):
+    handler = _make_full_converter()
+    handler.create_messages = AnthropicServingMessages.create_messages.__get__(handler)
+    handler.to_chat_completion_request = _convert
+    handler._merge_inline_system = False
+    response = ChatCompletionResponse(
+        model="test-model",
+        choices=[
+            ChatCompletionResponseChoice(
+                index=0,
+                message=ChatMessage(
+                    role="assistant",
+                    tool_calls=[
+                        ToolCall(function=FunctionCall(name="f", arguments=args))
+                        for args in arguments
+                    ],
+                ),
+            )
+        ],
+        usage=UsageInfo(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+    )
+    handler.create_chat_completion = AsyncMock(return_value=response)
+    request = _make_request(
+        [], tools=[{"name": "f", "input_schema": {}}] if has_tools else None
+    )
+    if error is not None:
+        with pytest.raises(error):
+            await handler.create_messages(request)
+    else:
+        result = await handler.create_messages(request)
+        assert sum(block.type == "tool_use" for block in result.content) == len(
+            arguments
+        )
+    chat_request = handler.create_chat_completion.call_args.args[0]
+    assert chat_request._api_surface == "messages"
+    if error is not None:
+        tool_response_record.assert_called_once_with(chat_request, parse_failed=True)
+    elif has_tools:
+        tool_response_record.assert_called_once_with(
+            chat_request, tool_calls_count=len(arguments)
+        )
+    else:
+        tool_response_record.assert_not_called()
 
 
 # ======================================================================

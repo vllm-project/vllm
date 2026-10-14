@@ -495,7 +495,7 @@ class OpenAIServingChat(GenerateBaseServing):
         num_cache_creation_tokens = None
         tools_streamed = [False] * num_choices
         emitted_tool_calls: set[tuple[int, int]] | None = (
-            set() if request.tools else None
+            set() if request.tools and request._api_surface != "messages" else None
         )
         parse_failed = False
         stream_completed = False
@@ -949,6 +949,9 @@ class OpenAIServingChat(GenerateBaseServing):
                     parse_failed=parse_failed,
                     completed=stream_completed,
                 )
+            elif request.tools and parse_failed:
+                # Messages counts emitted blocks after its own conversion.
+                record_tool_call_response(request, parse_failed=True, completed=False)
         # Send the final done message after all response.n are finished
         yield "data: [DONE]\n\n"
 
@@ -1252,7 +1255,7 @@ class OpenAIServingChat(GenerateBaseServing):
                         delta=False,
                     )
 
-        if request.tools:
+        if request.tools and request._api_surface != "messages":
             record_tool_call_response(
                 request,
                 tool_calls_count=sum(
