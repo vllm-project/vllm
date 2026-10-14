@@ -287,6 +287,7 @@ class FlashInferCuteDSLExperts(mk.FusedMoEExpertsModular):
             top_k=self.topk,
             num_local_experts=self.local_num_experts,
             local_expert_offset=self.local_expert_offset,
+            output_dtype=output.dtype,
             moe_output=output,
             # normalize_cute_dsl_moe_activation_type rejects ActivationType.Situ,
             # so SiTU is expressed as the SILU base type plus the betas below.

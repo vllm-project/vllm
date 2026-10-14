@@ -30,6 +30,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
     RoutingMethodType,
+    nvfp4_moe_quant_config,
 )
 from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutedsl_moe import (
     FlashInferCuteDSLExperts,
@@ -168,11 +169,18 @@ def _dequantize_nvfp4_linear(
 
 @pytest.mark.parametrize(
     "m,n,k,e,topk",
-    [(16, 128, 512, 4, 2), (16, 192, 512, 4, 2), (16, 192, 2688, 4, 2)],
+    [
+        (16, 128, 512, 4, 2),
+        (16, 192, 512, 4, 2),
+        (16, 192, 2688, 4, 2),
+        (16, 256, 512, 1, 1),
+        (16, 256, 512, 4, 2),
+    ],
 )
 @pytest.mark.parametrize("activation,alpha,beta,limit", _ACT_CASES)
 @pytest.mark.parametrize("per_token_activation", [False, True])
-@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("localization", ["off", "retain", "free"])
 @torch.inference_mode()
 def test_flashinfer_cutedsl_fp4_moe(
     m: int,
@@ -186,8 +194,39 @@ def test_flashinfer_cutedsl_fp4_moe(
     limit: float | None,
     per_token_activation: bool,
     dtype: torch.dtype,
+    localization: str,
+    monkeypatch,
     workspace_init,
 ):
+    import vllm.distributed.localization as loc
+    import vllm.model_executor.layers.fused_moe.experts.flashinfer_cutedsl_moe as mod
+
+    if current_platform.is_device_capability(107) and (
+        alpha is not None or beta is not None or limit is not None
+    ):
+        pytest.skip("Rubin CuTeDSL does not support custom SwiGLU parameters")
+    resources = None
+    if localization != "off":
+        if per_token_activation:
+            pytest.skip("Localized CuTeDSL MoE does not support per-token scales")
+        if n != 256:
+            pytest.skip("Localized regression uses aligned per-domain shards")
+        if not current_platform.is_device_capability(107):
+            pytest.skip("Localized CuTeDSL MoE requires Rubin")
+        if not hasattr(torch.cuda, "LocalizedAllocator") or not hasattr(
+            torch.cuda, "execute_on_streams"
+        ):
+            pytest.skip(
+                "Requires PyTorch locality allocation and stream execution APIs"
+            )
+        monkeypatch.setenv("VLLM_USE_LOCALITY_DOMAINS", "1")
+        resources = loc.maybe_init_localized_resources(torch.device("cuda"))
+        assert resources is not None, "localization initialization failed"
+    monkeypatch.setattr(loc, "get_localized_resources", lambda: resources)
+    monkeypatch.setattr(mod, "get_localized_resources", lambda: resources)
+    monkeypatch.setenv(
+        "VLLM_MOE_LOCALIZE_FREE_FULL_WEIGHTS", str(int(localization == "free"))
+    )
     set_random_seed(7)
     with set_current_vllm_config(
         VllmConfig(parallel_config=ParallelConfig(pipeline_parallel_size=1))
@@ -223,7 +262,9 @@ def test_flashinfer_cutedsl_fp4_moe(
             routing_method=RoutingMethodType.TopK,
             max_num_tokens=next_power_of_2(m),
         )
-        fake_layer = SimpleNamespace(activation=activation, moe_config=moe_config)
+        fake_layer = torch.nn.Module()
+        fake_layer.activation = activation
+        fake_layer.moe_config = moe_config
         a1_scale = torch.ones(1, device="cuda", dtype=torch.float32)
         a2_scale = torch.ones(1, device="cuda", dtype=torch.float32)
         (
@@ -237,11 +278,11 @@ def test_flashinfer_cutedsl_fp4_moe(
             a2_scale,
         ) = prepare_nvfp4_moe_layer_for_flashinfer_cutedsl(
             layer=fake_layer,
-            w13=w1_q,
+            w13=w1_q.clone(),
             w13_scale=w1_scale,
             w13_scale_2=(1.0 / w1_global_scale),
             a13_scale=a1_scale,
-            w2=w2_q,
+            w2=w2_q.clone(),
             w2_scale=w2_scale,
             w2_scale_2=(1.0 / w2_global_scale),
             a2_scale=a2_scale,
@@ -272,6 +313,45 @@ def test_flashinfer_cutedsl_fp4_moe(
             swiglu_limit=limit,
         )
 
+        if resources is not None and activation.is_gated:
+            from cuda.bindings import driver
+            from torch.cuda._utils import _check_cuda_bindings as check
+
+            for domain, shard in enumerate(fake_layer.localized_shards):
+                for name in ("w13_weight", "w2_weight"):
+                    weight = shard[name]
+                    assert weight.untyped_storage().nbytes() > 0
+                    handle = check(
+                        driver.cuMemRetainAllocationHandle(weight.data_ptr())
+                    )
+                    try:
+                        prop = check(
+                            driver.cuMemGetAllocationPropertiesFromHandle(handle)
+                        )
+                        assert prop.location.type == (
+                            driver.CUmemLocationType.CU_MEM_LOCATION_TYPE_DEVICE_LOCALITY_DOMAIN
+                        )
+                        assert prop.location.localized.localityDomainId == domain
+                        assert prop.location.localized.deviceId == weight.device.index
+                    finally:
+                        check(driver.cuMemRelease(handle))
+            if localization == "free":
+                assert w1_cutedsl.untyped_storage().nbytes() == 0
+                assert w2_cutedsl.untyped_storage().nbytes() == 0
+        else:
+            assert not getattr(fake_layer, "localized_shards", None)
+            assert w1_cutedsl.untyped_storage().nbytes() > 0
+            assert w2_cutedsl.untyped_storage().nbytes() > 0
+
+        experts = FlashInferCuteDSLExperts(
+            moe_config, quant_config, per_token_activation=per_token_activation
+        )
+        fake_layer.w13_weight_scale_2 = w1_alpha
+        fake_layer.w2_weight_scale_2 = w2_alpha
+        fake_layer.w13_input_scale = a1_scale
+        fake_layer.w2_input_scale = a2_scale
+        experts.process_weights_after_loading(fake_layer)
+
         cutedsl_experts = mk.FusedMoEKernel(
             maybe_make_prepare_finalize(
                 moe=moe_config,
@@ -279,26 +359,36 @@ def test_flashinfer_cutedsl_fp4_moe(
                 allow_new_interface=True,
                 use_monolithic=False,
             ),
-            FlashInferCuteDSLExperts(
-                moe_config=moe_config,
-                quant_config=quant_config,
-                per_token_activation=per_token_activation,
-            ),
+            experts,
         )
 
-        cutedsl_output = cutedsl_experts.apply(
-            # The model runner pads inputs and trims outputs around this kernel.
-            hidden_states=torch.nn.functional.pad(hidden_states, (0, expected_k - k)),
-            w1=w1_cutedsl,
-            w2=w2_cutedsl,
-            topk_weights=topk_weights,
-            topk_ids=topk_ids,
-            activation=activation,
-            global_num_experts=e,
-            expert_map=None,
-            apply_router_weight_on_input=False,
+        # The model runner pads inputs and trims outputs around this kernel.
+        padded_hidden_states = torch.nn.functional.pad(
+            hidden_states, (0, expected_k - k)
         )
-        cutedsl_output = cutedsl_output[:, :k]
+
+        def run():
+            return cutedsl_experts.apply(
+                hidden_states=padded_hidden_states,
+                w1=w1_cutedsl,
+                w2=w2_cutedsl,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                activation=activation,
+                global_num_experts=e,
+                expert_map=None,
+                apply_router_weight_on_input=False,
+            )[:, :k]
+
+        cutedsl_output = run()
+        assert cutedsl_output.dtype == dtype
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            captured_output = run()
+        for _ in range(3):
+            graph.replay()
+        torch.accelerator.synchronize()
+        torch.testing.assert_close(captured_output, cutedsl_output)
 
         a_global_scale = torch.ones(1, device="cuda", dtype=torch.float32)
         if per_token_activation:

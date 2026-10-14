@@ -145,8 +145,14 @@ def _shard_nvfp4_moe_weights_per_die(layer, res, w13, w13_scale, w2, w2_scale):
         with torch.cuda.use_mem_pool(pool):
             a, b = i * n13, i * n2
             shard = {
-                "w13_weight": w13[:, a : a + n13, :].contiguous(),
-                "w2_weight": w2[:, b : b + n2, :].contiguous(),
+                # A single-expert slice is already contiguous; always allocate
+                # independent storage in this domain's pool.
+                "w13_weight": w13[:, a : a + n13, :].clone(
+                    memory_format=torch.contiguous_format
+                ),
+                "w2_weight": w2[:, b : b + n2, :].clone(
+                    memory_format=torch.contiguous_format
+                ),
             }
             # Register contiguous, expert-major scales for EPLB, not the MMA view.
             # Keep each source alive until its asynchronous swizzle completes.
@@ -247,7 +253,8 @@ def prepare_nvfp4_moe_layer_for_flashinfer_cutedsl(
     from vllm.distributed.localization import get_localized_resources
 
     _localized_resources = get_localized_resources()
-    if _localized_resources is not None:
+    # FlashInfer's localized half-GEMM requires a gated activation.
+    if _localized_resources is not None and layer.activation.is_gated:
         layer.localized_shards = _shard_nvfp4_moe_weights_per_die(
             layer, _localized_resources, w13, w13_scale, w2, w2_scale
         )
@@ -256,7 +263,7 @@ def prepare_nvfp4_moe_layer_for_flashinfer_cutedsl(
         # for KV cache. Retain shape metadata; EPLB uses the registered shards.
         if envs.VLLM_MOE_LOCALIZE_FREE_FULL_WEIGHTS:
             # Surface asynchronous sharding errors before releasing source storage.
-            torch.cuda.synchronize()
+            torch.accelerator.synchronize()
             freed = 0
             for _t in (w13, w2):
                 _st = _t.untyped_storage()
