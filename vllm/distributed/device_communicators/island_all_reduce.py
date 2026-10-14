@@ -7,9 +7,9 @@ only by PCIe (e.g. 8x MI210). There the flat custom all-reduce is unavailable
 (the group is not fully connected) and a flat RCCL ring crosses PCIe twice per
 step. Instead:
 
-* large tensors (eager only): RCCL reduce-scatter inside the island, all-reduce
+* large tensors: RCCL reduce-scatter inside the island, all-reduce
   of the quarter-size shard across the pairs, all-gather inside the island;
-* smaller tensors, and CUDA graphs: vLLM's custom all-reduce inside each
+* smaller tensors: vLLM's custom all-reduce inside each
   island, then across the GPU pair at the same island position.
 
 The islands are found from the link topology, so the TP ranks need not be
@@ -156,7 +156,6 @@ class IslandAllReduce:
             and nbytes >= self.min_hier_bytes
             and input_.numel() % 4 == 0
             and input_.is_contiguous()
-            and not torch.cuda.is_current_stream_capturing()
         ):
             flat = input_.view(-1)
             shard = torch.empty(
