@@ -1421,6 +1421,9 @@ class Scheduler(SchedulerInterface):
                         EngineCoreEventType.SCHEDULED, scheduled_timestamp
                     )
                 if request.status == RequestStatus.WAITING:
+                    # A fresh schedule re-registers prompt logprobs on the
+                    # runner's new-request path; drop any stale redo marker.
+                    request.prompt_logprobs_dropped = False
                     scheduled_new_reqs.append(request)
                 elif request.status == RequestStatus.PREEMPTED:
                     scheduled_resumed_reqs.append(request)
@@ -1503,6 +1506,10 @@ class Scheduler(SchedulerInterface):
 
         # Construct the scheduler output.
         if self.use_v2_model_runner:
+            # The V2 runner re-registers prompt logprobs for resumed requests
+            # on its new-request path, so a redo marker is moot there.
+            for req in scheduled_resumed_reqs:
+                req.prompt_logprobs_dropped = False
             scheduled_new_reqs.extend(scheduled_resumed_reqs)
             scheduled_resumed_reqs.clear()
             new_reqs_data = [
@@ -1792,11 +1799,15 @@ class Scheduler(SchedulerInterface):
         num_computed_tokens: list[int] = []
         num_output_tokens: list[int] = []
         resumed_req_ids = set()
+        redo_prompt_logprobs_req_ids: set[str] = set()
 
         num_running_reqs = len(running_reqs)
         for idx, req in enumerate(itertools.chain(running_reqs, resumed_reqs)):
             req_id = req.request_id
             req_ids.append(req_id)
+            if req.prompt_logprobs_dropped:
+                redo_prompt_logprobs_req_ids.add(req_id)
+                req.prompt_logprobs_dropped = False
             # NOTE: In PP+async scheduling, we consume token ids via a direct GPU
             # broadcast path (`input_batch.prev_sampled_token_ids`), so we can
             # omit this payload.
@@ -1834,6 +1845,7 @@ class Scheduler(SchedulerInterface):
             new_block_ids=new_block_ids,
             num_computed_tokens=num_computed_tokens,
             num_output_tokens=num_output_tokens,
+            redo_prompt_logprobs_req_ids=redo_prompt_logprobs_req_ids,
         )
 
     def _reject_on_encoder_cache_embed_mismatch(
@@ -2193,6 +2205,11 @@ class Scheduler(SchedulerInterface):
 
             # Drop-mode stale output (same-step resume) is discarded entirely.
             if output_is_stale and request.drop_stale_output:
+                if prompt_logprobs_dict and req_id in prompt_logprobs_dict:
+                    # The dropped output carried the completed prompt
+                    # logprobs; the resumed prefill must recompute them
+                    # (#61490).
+                    request.prompt_logprobs_dropped = True
                 continue
 
             req_index = model_runner_output.req_id_to_index[req_id]
