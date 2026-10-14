@@ -683,6 +683,36 @@ OpenTelemetry has a
 Since metrics is a big enough topic on its own, we consider the topic
 of tracing to be quite separate from metrics.
 
+### Tool-calling Inference Attributes
+
+With `--otlp-traces-endpoint` configured, tool-bearing Chat Completions and
+Messages requests add the following bounded attributes to the existing
+`llm_request` inference spans, for both streaming and non-streaming responses:
+
+| Attribute | Value |
+| --- | --- |
+| `tool_calling.present` | Boolean indicating supplied tools. Absent for non-tool requests. |
+| `tool_calling.tool_count` | Integer tool-definition count captured before renderer/parser adjustments. |
+| `tool_calling.tool_choice` | `unset`, `auto`, `none`, `required`, `named`, or `other`. |
+| `tool_calling.api_surface` | `chat_completions` or `messages`, preserved through internal conversion. |
+| `tool_calling.response_has_tool_calls` | Boolean indicating calls actually emitted. |
+| `tool_calling.tool_calls_count` | Integer emitted-call count, not a bucket or streaming-fragment count. |
+| `tool_calling.parser_status` | `success`, `no_tool_calls`, `parse_failure`, or `interrupted`. |
+
+Spans transferred to serving remain open until response parsing/conversion or
+interruption finishes. This includes Messages conversion; an intermediate Chat
+response is not a completed Messages response. Each transferred inference span
+receives the request-level response summary, including counts across choices.
+No extra inference spans are created, and W3C parent propagation is unchanged.
+Span duration includes serving completion; engine timing attributes retain their
+existing meaning. Unclaimed spans close during engine cleanup without a response
+summary. Beam search retains request-only attributes.
+
+Parser failure takes precedence over interruption; other failures/cancellation
+use `interrupted`. See [tool-calling metrics](../usage/metrics.md#tool-calling-metrics)
+for counting rules and surfaced-error limitations. These attributes contain no
+tool names, schemas, arguments, bodies, or content-derived hashes.
+
 ### OpenTelemetry Model Forward vs Execute Time
 
 The current implementation exposes the following two metrics:
