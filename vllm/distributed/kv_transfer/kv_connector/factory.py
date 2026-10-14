@@ -14,11 +14,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1 import (
     KVConnectorRole,
     supports_hma,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.prefix_cache import (
-    is_lookahead_block_hashing_enabled,
-)
 from vllm.logger import init_logger
 from vllm.utils.func_utils import supports_kw
+from vllm.v1.core.kv_cache_utils import is_lookahead_block_hashing_enabled
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig

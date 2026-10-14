@@ -8,13 +8,11 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
-from vllm.distributed.kv_transfer.kv_connector.v1.prefix_cache import (
-    is_lookahead_block_hashing_enabled,
-)
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
+from vllm.v1.core.kv_cache_utils import is_lookahead_block_hashing_enabled
 from vllm.v1.kv_cache_interface import (
     MambaSpec,
     get_mamba_prefill_checkpoint_position,
