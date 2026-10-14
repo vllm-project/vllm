@@ -2,11 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import abstractmethod
 from collections.abc import Iterable
-from math import prod
+from math import lcm, prod
 
 import torch
 
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.attention.backend import AttentionBackend
@@ -93,3 +93,21 @@ class MambaBase(AttentionLayerBase):
     def get_attn_backend(self) -> type[AttentionBackend]:
         """Get the attention backend class for this Mamba layer."""
         return get_mamba_attn_backend(self.mamba_type)
+
+
+def get_mamba_prefill_checkpoint_alignment(vllm_config: VllmConfig) -> int | None:
+    """LCM of the Mamba layers' prefill checkpoint alignments.
+
+    None unless every Mamba layer declares one: the scheduler takes internal
+    checkpoints only when every Mamba group can export them.
+    """
+    alignment = 1
+    for layer in get_layers_from_vllm_config(
+        vllm_config,
+        MambaBase,  # type: ignore[type-abstract]
+    ).values():
+        layer_alignment = layer.get_prefill_checkpoint_alignment()
+        if layer_alignment is None:
+            return None
+        alignment = lcm(alignment, layer_alignment)
+    return alignment

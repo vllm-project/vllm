@@ -936,24 +936,6 @@ class Platform:
             cache_config.mamba_page_size_padded = shared_page
 
     @classmethod
-    def _mamba_checkpoint_alignment(cls, vllm_config: "VllmConfig") -> int:
-        """LCM of the Mamba layers' prefill checkpoint alignments, 1 if none."""
-        from vllm.config.vllm import get_layers_from_vllm_config
-        from vllm.model_executor.layers.mamba.abstract import MambaBase
-
-        mamba_layers = get_layers_from_vllm_config(
-            vllm_config,
-            MambaBase,  # type: ignore[type-abstract]
-        )
-        return math.lcm(
-            *(
-                alignment
-                for layer in mamba_layers.values()
-                if (alignment := layer.get_prefill_checkpoint_alignment()) is not None
-            )
-        )
-
-    @classmethod
     def _align_hybrid_block_size(
         cls,
         vllm_config: "VllmConfig",
@@ -965,6 +947,9 @@ class Platform:
         from math import lcm
 
         from vllm.config.vllm import set_current_vllm_config
+        from vllm.model_executor.layers.mamba.abstract import (
+            get_mamba_prefill_checkpoint_alignment,
+        )
         from vllm.model_executor.models import ModelRegistry
         from vllm.utils.math_utils import cdiv
         from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
@@ -1102,7 +1087,7 @@ class Platform:
             # Internal prefill checkpoints land on block boundaries.
             kernel_block_alignment_size = lcm(
                 kernel_block_alignment_size,
-                cls._mamba_checkpoint_alignment(vllm_config),
+                get_mamba_prefill_checkpoint_alignment(vllm_config) or 1,
             )
 
         # Use minimum block size that satisfies both backend alignment and

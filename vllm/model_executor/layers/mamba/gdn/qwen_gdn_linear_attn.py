@@ -35,6 +35,9 @@ from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
     RowParallelLinear,
 )
+from vllm.model_executor.layers.mamba.abstract import (
+    get_mamba_prefill_checkpoint_alignment,
+)
 from vllm.model_executor.layers.mamba.checkpoint import (
     MambaPrefillCheckpointExporter,
 )
@@ -635,6 +638,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             and self.gdn_prefill_backend == "flashinfer"
         ):
             self._checkpoint_alignment = FLASHINFER_GDN_CHECKPOINT_ALIGNMENT
+            self._vllm_config = vllm_config
             self._max_num_batched_tokens = (
                 vllm_config.scheduler_config.max_num_batched_tokens
             )
@@ -679,7 +683,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec | None:
         spec = super().get_kv_cache_spec(vllm_config)
-        if self._checkpoint_alignment is None or not isinstance(spec, MambaSpec):
+        if not self._exports_checkpoints or not isinstance(spec, MambaSpec):
             return spec
         # FlashInfer emits states at one stride for the whole batch, the gcd of
         # the offsets; keeping every offset on the prefix-cache grid keeps that
@@ -688,6 +692,16 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             spec,
             num_prefill_checkpoint_blocks=1,
             prefill_checkpoint_alignment=_checkpoint_grid(vllm_config.cache_config),
+        )
+
+    @functools.cached_property
+    def _exports_checkpoints(self) -> bool:
+        # Known only once every layer is built: a Mamba layer that cannot
+        # checkpoint (e.g. Qwen4Exp's PLE short conv) keeps the scheduler
+        # splitting the prefill instead.
+        return (
+            self._checkpoint_alignment is not None
+            and get_mamba_prefill_checkpoint_alignment(self._vllm_config) is not None
         )
 
     @functools.cached_property
@@ -1247,7 +1261,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         if self._prefill_kernels_warmed_up:
             return
         self._prefill_kernels_warmed_up = True
-        if self._checkpoint_alignment is not None:
+        if self._exports_checkpoints:
             # Size the workspace while profiling; it is locked afterwards.
             current_workspace_manager().get_simultaneous(self._checkpoint_buffer_spec)
 
@@ -1378,7 +1392,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         wherever the heuristic can pick it; ``use_cp=False`` forces the other.
         """
         checkpoint_buffers: list[torch.Tensor | None] = [None]
-        if self._checkpoint_alignment is not None:
+        if self._exports_checkpoints:
             (state_checkpoints,) = current_workspace_manager().get_simultaneous(
                 self._checkpoint_buffer_spec
             )

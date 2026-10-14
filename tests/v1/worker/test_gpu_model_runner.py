@@ -532,30 +532,35 @@ class _CheckpointingMambaLayer(MambaBase):
         return ()
 
 
-def _align_qwen3_5_blocks(prefill_checkpoint_alignment: int | None):
+def _align_qwen3_5_blocks(*prefill_checkpoint_alignments: int | None):
     from tests.v1.attention.utils import create_vllm_config
 
     vllm_config = create_vllm_config(model_name="Qwen/Qwen3.5-0.8B")
     cache_config = vllm_config.cache_config
     cache_config.mamba_cache_mode = "align"
-    vllm_config.compilation_config.static_forward_context["linear_attn"] = (
-        _CheckpointingMambaLayer(prefill_checkpoint_alignment)
-    )
+    forward_context = vllm_config.compilation_config.static_forward_context
+    for i, alignment in enumerate(prefill_checkpoint_alignments):
+        forward_context[f"mamba.{i}"] = _CheckpointingMambaLayer(alignment)
     Platform._align_hybrid_block_size(vllm_config, _mock_backend([MultipleOf(16)]))
     return cache_config
 
 
-@pytest.mark.parametrize("prefill_checkpoint_alignment", [64, None])
-def test_blocks_land_on_the_mamba_checkpoint_grid(prefill_checkpoint_alignment):
+@pytest.mark.parametrize(
+    ("prefill_checkpoint_alignments", "block_size"),
+    [((64,), 576), ((None,), 544), ((64, None), 544)],
+)
+def test_blocks_land_on_the_mamba_checkpoint_grid(
+    prefill_checkpoint_alignments, block_size
+):
     """A layer that checkpoints every 64 tokens needs 64-aligned blocks.
 
     Unaligned, Qwen3.5-0.8B's block (544) puts every other checkpoint off the
-    grid.
+    grid. A Mamba layer that cannot checkpoint (like Qwen4Exp's PLE short conv)
+    stops the scheduler from taking any, so the block stays.
     """
-    cache_config = _align_qwen3_5_blocks(prefill_checkpoint_alignment)
+    cache_config = _align_qwen3_5_blocks(*prefill_checkpoint_alignments)
 
-    expected = 576 if prefill_checkpoint_alignment else 544
-    assert cache_config.block_size == expected
+    assert cache_config.block_size == block_size
 
 
 def test_xpu_gdn_rounding_rejected_by_a_sibling_backend_raises(monkeypatch):
