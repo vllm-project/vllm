@@ -115,9 +115,13 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         use_fp8_dispatch: bool = False,
         use_cudagraph: bool = False,
         sp_size: int = 1,
+        num_sms: int = 0,
     ):
         super().__init__()
         self.buffer = buffer
+        # SM count for dispatch; combine reuses it from the handle. 0 lets
+        # DeepEP pick its theoretical count.
+        self.num_sms = num_sms
         self.num_dispatchers_ = num_dispatchers
         self.dp_size = dp_size
         self.rank_expert_offset = rank_expert_offset
@@ -226,6 +230,7 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             do_expand=do_expand,
             do_cpu_sync=do_cpu_sync,
             async_with_compute_stream=False,
+            num_sms=self.num_sms,
         )
 
         a2a_idx = dbo_current_ubatch_id()
