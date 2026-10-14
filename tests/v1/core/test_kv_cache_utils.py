@@ -29,9 +29,6 @@ from vllm.config import (
 from vllm.config.attention import HiSparseConfig
 from vllm.config.kv_events import KVEventsConfig
 from vllm.config.speculative import SpeculativeConfig
-from vllm.distributed.kv_transfer.kv_connector.v1.prefix_cache import (
-    is_lookahead_block_hashing_enabled,
-)
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import (
     MultiModalFeatureSpec,
@@ -55,6 +52,7 @@ from vllm.v1.core.kv_cache_utils import (
     get_request_block_hasher,
     hash_block_tokens,
     init_none_hash,
+    is_lookahead_block_hashing_enabled,
     make_block_hash_with_group_id,
     tensor_data,
     to_event_extra_keys,

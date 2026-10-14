@@ -30,9 +30,6 @@ from vllm.distributed import (
 from vllm.distributed.ec_transfer.ec_connector.encoder_output_width import (
     measure_encoder_output_widths,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.prefix_cache import (
-    is_lookahead_block_hashing_enabled,
-)
 from vllm.envs import enable_envs_cache
 from vllm.logger import configure_logging, init_logger
 from vllm.logging_utils.dump_input import dump_engine_exception
@@ -59,6 +56,7 @@ from vllm.v1.core.kv_cache_utils import (
     generate_scheduler_kv_cache_config,
     get_request_block_hasher,
     init_none_hash,
+    is_lookahead_block_hashing_enabled,
     resolve_cache_hit_alignment_tokens,
     resolve_kv_cache_block_sizes,
     update_kv_cache_capacity,

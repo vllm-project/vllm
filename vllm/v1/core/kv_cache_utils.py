@@ -936,6 +936,26 @@ def resolve_cache_hit_alignment_tokens(
     return scheduler_block_size
 
 
+def is_lookahead_block_hashing_enabled(vllm_config: VllmConfig) -> bool:
+    speculative_config = vllm_config.speculative_config
+    if (
+        speculative_config is None
+        or not speculative_config.use_eagle_block_drop()
+        or speculative_config.disable_lookahead_block_hashes
+    ):
+        return False
+    # The hash covers only the next token; multi-module MTP reads further ahead.
+    if vllm_config.num_prefill_lookahead_tokens > 1:
+        return False
+    # HiSparse is not validated with lookahead hashes.
+    if vllm_config.attention_config.hisparse_config is not None:
+        return False
+    # KV connectors keep the legacy hashes.
+    if vllm_config.kv_transfer_config is not None:
+        return False
+    return vllm_config.cache_config.enable_prefix_caching
+
+
 def get_request_block_hasher(
     hash_block_size: int,
     caching_hash_fn: Callable[[Any], bytes],
