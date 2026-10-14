@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """KV checksums end to end through a producer's and a consumer's schedulers
-with real checksum workers and a connector carrying them in
-kv_transfer_params: the consumer accepts a correct load whatever the TP and
-PP sizes, and handles a corrupted or unverifiable one per
+with real checksum workers, for NIXL pull and a minimal connector carrying
+them in kv_transfer_params: the consumer accepts a correct load whatever the
+TP and PP sizes, and handles a corrupted or unverifiable one per
 kv_checksum_fail_closed and kv_load_failure_policy."""
 
 from typing import Any
@@ -144,6 +144,7 @@ class _Engine:
     def __init__(
         self,
         kv_role: str,
+        connector: str = "KVTransferParamsCarrierConnector",
         tp_size: int = 1,
         pp_size: int = 1,
         fail_closed: bool = False,
@@ -154,7 +155,7 @@ class _Engine:
         """``extra_group``: None, or whether the workers can checksum a second
         group ("covered") or skip it for lack of a cache ("skipped")."""
         vllm_config = create_vllm_config(
-            kv_connector="KVTransferParamsCarrierConnector",
+            kv_connector=connector,
             kv_role=kv_role,
             block_size=block_size,
             kv_load_failure_policy=policy,
@@ -312,6 +313,13 @@ def _load(
     return consumer.finish_step(output, {request.request_id})
 
 
+CONNECTORS = pytest.mark.parametrize(
+    "connector",
+    ["KVTransferParamsCarrierConnector", "NixlConnector"],
+    ids=["kv-transfer-params", "nixl-pull"],
+)
+
+
 def _error_ids(engine_outputs) -> set[str]:
     return {
         o.request_id
@@ -329,7 +337,10 @@ def test_sent_checksums_do_not_depend_on_tp_and_pp(tp_size, pp_size):
     any producer layout sends what a single worker holding the whole model
     sends."""
     payloads = []
-    for producer in (_Engine("kv_producer"), _Engine("kv_producer", tp_size, pp_size)):
+    for producer in (
+        _Engine("kv_producer"),
+        _Engine("kv_producer", tp_size=tp_size, pp_size=pp_size),
+    ):
         request = create_request(1, NUM_TOKENS, do_remote_decode=True)
         payloads.append(_sent(_prefill(producer, request)[0]))
     expected, sent = payloads
@@ -371,12 +382,15 @@ def test_no_checksums_sent_unless_every_worker_reported():
     + [((1, 2), (1, 1)), ((1, 1), (2, 2))],
     ids=lambda tp_pp: f"tp{tp_pp[0]}pp{tp_pp[1]}",
 )
-def test_correct_load_is_verified(producer_tp_pp, consumer_tp_pp):
+@CONNECTORS
+def test_correct_load_is_verified(connector, producer_tp_pp, consumer_tp_pp):
     """Checksums and group fingerprints sum over TP shards and PP stages, so
     any TP and PP pairing verifies."""
     (p_tp, p_pp), (c_tp, c_pp) = producer_tp_pp, consumer_tp_pp
-    producer = _Engine("kv_producer", tp_size=p_tp, pp_size=p_pp)
-    consumer = _Engine("kv_consumer", tp_size=c_tp, pp_size=c_pp, fail_closed=True)
+    producer = _Engine("kv_producer", connector, tp_size=p_tp, pp_size=p_pp)
+    consumer = _Engine(
+        "kv_consumer", connector, tp_size=c_tp, pp_size=c_pp, fail_closed=True
+    )
     params, block_ids = _prefill(
         producer, create_request(1, NUM_TOKENS, do_remote_decode=True)
     )
@@ -428,12 +442,15 @@ def test_different_block_sizes_are_unverified(corrupt):
 @pytest.mark.parametrize(
     "fail_closed,policy", [(False, "fail"), (True, "fail"), (True, "recompute")]
 )
-def test_bad_load_follows_failure_policy(fault, fail_closed, policy, caplog_vllm):
+@CONNECTORS
+def test_bad_load_follows_failure_policy(
+    connector, fault, fail_closed, policy, caplog_vllm
+):
     """A corrupted load, or one with missing or malformed checksums, is only
     logged when fail-open; when fail-closed it is a KV load failure: the
     request fails, or recomputes its prompt locally."""
-    producer = _Engine("kv_producer")
-    consumer = _Engine("kv_consumer", fail_closed=fail_closed, policy=policy)
+    producer = _Engine("kv_producer", connector)
+    consumer = _Engine("kv_consumer", connector, fail_closed=fail_closed, policy=policy)
     params, block_ids = _prefill(
         producer, create_request(1, NUM_TOKENS, do_remote_decode=True)
     )
