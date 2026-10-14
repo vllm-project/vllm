@@ -18,7 +18,10 @@ from vllm.entrypoints.common.cli_args import (
 from vllm.entrypoints.common.startup import VLLM_SUBCMD_PARSER_EPILOG
 from vllm.entrypoints.launchers.api_server.entry import run_server, setup_server
 from vllm.entrypoints.launchers.dp_supervisor import run_dp_supervisor
-from vllm.entrypoints.launchers.launcher import create_server_socket
+from vllm.entrypoints.launchers.launcher import (
+    create_server_socket,
+    remove_unix_socket_file,
+)
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParserManager
 from vllm.usage.usage_lib import UsageContext
@@ -405,3 +408,5 @@ def run_multi_api_server(args: argparse.Namespace):
             local_engine_manager.shutdown(timeout=to_timeout(shutdown_by))
         if coordinator:
             coordinator.shutdown(timeout=to_timeout(shutdown_by))
+        if args.uds:
+            remove_unix_socket_file(args.uds)
