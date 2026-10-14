@@ -1442,26 +1442,25 @@ class VllmConfig:
         logger.info_once("Resolved Engram configuration: %s", str(self.engram_config))
 
     def _reject_mismatched_float_kv_cache(self) -> None:
-        """Reject an explicit float16/bfloat16 KV dtype that differs from the model."""
-        if self.model_config is None:
+        """Reject an explicit float16/bfloat16 KV dtype that differs from the model.
+
+        FlashAttention and FlashInfer need matching query and KV dtypes, and
+        FlexAttention silently produces wrong output (#60859).
+        """
+        cache_dtype = self.cache_config.cache_dtype
+        if self.model_config is None or cache_dtype not in ("float16", "bfloat16"):
             return
-        kv_dtype = {"float16": torch.float16, "bfloat16": torch.bfloat16}.get(
-            self.cache_config.cache_dtype
+        model_dtype = str(self.model_config.dtype).removeprefix("torch.")
+        if model_dtype == cache_dtype:
+            return
+        allowed = (
+            f"`auto` or `{model_dtype}`"
+            if model_dtype in ("float16", "bfloat16")
+            else "`auto`"
         )
-        if kv_dtype is None or self.model_config.dtype == kv_dtype:
-            return
-        model_dtype = {
-            torch.float16: "float16",
-            torch.bfloat16: "bfloat16",
-            torch.float32: "float32",
-        }.get(self.model_config.dtype, str(self.model_config.dtype))
-        if model_dtype in ("float16", "bfloat16"):
-            hint = f"Please set `--kv-cache-dtype` to `auto` or `{model_dtype}`."
-        else:
-            hint = "Please set `--kv-cache-dtype` to `auto`."
         raise ValueError(
-            f'kv_cache_dtype="{self.cache_config.cache_dtype}" is incompatible '
-            f'with dtype="{model_dtype}". {hint}'
+            f'kv_cache_dtype="{cache_dtype}" is incompatible with '
+            f'dtype="{model_dtype}". Please set `--kv-cache-dtype` to {allowed}.'
         )
 
     def __post_init__(self):
