@@ -28,4 +28,4 @@ quack-kernels==0.6.5  # Required by MSA
 tokenspeed-mla==2.0.2; platform_system == "Linux"
 
 # Humming kernels for quantization gemm
-humming-kernels[cu13] @ https://github.com/vllm-project/humming/archive/a7bd1d9ad1b2ad3d5f28166049dcce21d20e784b.tar.gz
+humming-kernels[cu13] @ https://github.com/vllm-project/humming/archive/e5679478e4d015df29d108981daad6eb829ef80c.tar.gz
