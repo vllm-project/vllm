@@ -1714,7 +1714,11 @@ def test_flashinfer_xqa_nvfp4_decode_correctness(
     from vllm.v1.attention.backends import flashinfer as fi
 
     seq_lens, bs, d = [40, 300, 1027], 16, 256
-    config = create_vllm_config(max_model_len=max(seq_lens), block_size=bs)
+    config = create_vllm_config(
+        model_name="Qwen/Qwen3-0.6B",
+        max_model_len=max(seq_lens),
+        block_size=bs,
+    )
     # GQA 6 at head_dim 256, as Qwen3.8-27B at TP=2.
     config.model_config.model_arch_config = replace(
         config.model_config.model_arch_config,
