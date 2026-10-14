@@ -16,8 +16,6 @@ import math
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from aiter.ops.flydsl.kernels import buffer_ops
-from flydsl._mlir import ir
-from flydsl._mlir.dialects import scf as _scf
 from flydsl.expr import arith, const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr.typing import T
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
@@ -32,6 +30,7 @@ QUERY_GROUP_SIZE = 16  # default for tests; overridable via build(...)
 WARP_SIZE = 64
 BLOCK_THREADS = WARP_SIZE
 KV_COMPUTE_BLOCK = 256  # 16 K-tiles × 16 tokens
+N_TILES = KV_COMPUTE_BLOCK // TILE_SIZE
 
 # ultraquant AoS slot layout (per (slot, head), D=256, group_size=32 => 8 groups)
 FP8_GROUP_SIZE = 32
@@ -274,9 +273,6 @@ def build_ultraquant_decode_hd256_module(
         LOG2E_C = fx.Float32(LOG2E)
         QK_SCALE = fx.Float32(_qk_scale)
 
-        def _ival(v):
-            return v.ir_value() if hasattr(v, "ir_value") else v
-
         def _f32x8_to_fp8_i64(f):
             # 8 f32 -> 8 E4M3 bytes packed as i64 (MFMA fp8 operand).
             w0 = rocdl.cvt_pk_fp8_f32(T.i32, f[0], f[1], 0, 0)
@@ -478,35 +474,15 @@ def build_ultraquant_decode_hd256_module(
         trip_raw = (avail + NUM_PARTS_C - 1) // NUM_PARTS_C
         trip_clamped = (trip_raw > TGPP).select(TGPP, trip_raw)
         trip_or_zero = in_range.select(trip_clamped, 0)
-        c_zero_idx = arith.constant(0, index=True)
-        c_one_idx = arith.constant(1, index=True)
-        trip_idx = arith.index_cast(
-            T.index,
-            trip_or_zero.ir_value()
-            if hasattr(trip_or_zero, "ir_value")
-            else trip_or_zero,
-        )
-        _init_iter = [
-            _ival(running_max),
-            _ival(running_sum),
-            *[_ival(p) for p in acc_pv],
-        ]
-        _for_op = _scf.ForOp(
-            c_zero_idx,
-            trip_idx,
-            c_one_idx,
-            _init_iter,
-        )
-        _for_ip = ir.InsertionPoint(_for_op.body)
-        _for_ip.__enter__()
-        try:
-            tg_idx = _for_op.induction_variable
-            tg_i32 = fx.Int32(arith.index_cast(T.i32, tg_idx))
+        loop_init = [running_max, running_sum, *acc_pv]
+        results = loop_init
+        for tg_idx, state in range(0, trip_or_zero, 1, init=loop_init):  # type: ignore[call-overload]
+            tg_i32 = fx.Int32(tg_idx)
             partition_start = (part + tg_i32 * NUM_PARTS_C) * KV_COMPUTE_BLOCK
             bt_seq_base = seq * _stride_bt_seq + (partition_start // _BS)
-            running_max = _for_op.inner_iter_args[0]
-            running_sum = _for_op.inner_iter_args[1]
-            acc_pv = list(_for_op.inner_iter_args[2:])
+            running_max = fx.Float32(state[0])
+            running_sum = fx.Float32(state[1])
+            acc_pv = [fx.Vector(v) for v in state[2:]]
 
             # ==== SOFTWARE PREFETCH =====================================
             # Emit ONLY the HBM buffer_loads for one tile (K codes, V codes,
@@ -520,7 +496,7 @@ def build_ultraquant_decode_hd256_module(
             # arithmetic. All addressing locals (slot_base_byte, blk_rsrc,
             # ...) are consumed only inside this closure; the dequant below
             # needs just the four returned register values.
-            def _emit_tile_loads(n_tile):
+            def _emit_tile_loads(n_tile, partition_start, bt_seq_base):
                 block_in_part = n_tile // _TILES_PER_BLOCK
                 tile_in_block = n_tile % _TILES_PER_BLOCK
                 tile_start_tok = partition_start + n_tile * TILE_SIZE
@@ -598,18 +574,18 @@ def build_ultraquant_decode_hd256_module(
             _PF_DEPTH = 1
             # Prime the pipeline with the first _PF_DEPTH tiles' loads.
             _pf_queue = []
-            for _pi in range_constexpr(min(_PF_DEPTH, 16)):
-                _pf_queue.append(_emit_tile_loads(_pi))
-            _tile_range = range_constexpr(16)
-            for _jt in _tile_range:
-                n_tile = _jt
+            for _pi in range_constexpr(min(_PF_DEPTH, N_TILES)):
+                _pf_queue.append(_emit_tile_loads(_pi, partition_start, bt_seq_base))
+            for n_tile in range_constexpr(N_TILES):
                 _ntile_tok = n_tile * TILE_SIZE
                 (k_packed_list, v_packed_list, kscale_word, vscale_word) = (
                     _pf_queue.pop(0)
                 )
                 _pf_nxt = n_tile + _PF_DEPTH
-                if const_expr(_pf_nxt < 16):
-                    _pf_queue.append(_emit_tile_loads(_pf_nxt))
+                if const_expr(_pf_nxt < N_TILES):
+                    _pf_queue.append(
+                        _emit_tile_loads(_pf_nxt, partition_start, bt_seq_base)
+                    )
                 # Store raw FP4 codes (natural contiguous order,
                 # 16 B = 32 nibbles per UE8M0 group) straight to KV LDS as
                 # the scaled-MFMA A operand — no dequant here.
@@ -755,18 +731,10 @@ def build_ultraquant_decode_hd256_module(
                         T.f32x4, [v_op_raw, p_op, acc_pv[h], 0, 0, 0]
                     )
 
-            _scf.YieldOp(
-                [
-                    _ival(running_max),
-                    _ival(running_sum),
-                    *[_ival(p) for p in acc_pv],
-                ]
-            )
-        finally:
-            _for_ip.__exit__(None, None, None)
-        running_max = _for_op.results[0]
-        running_sum = _for_op.results[1]
-        acc_pv = list(_for_op.results[2:])
+            results = yield [running_max, running_sum, *acc_pv]
+        running_max = fx.Float32(results[0])
+        running_sum = fx.Float32(results[1])
+        acc_pv = [fx.Vector(v) for v in results[2:]]
 
         # ===== STEP G: Output ===========================================
         safe_sum = (running_sum > ZERO_F).select(running_sum, ONE_F)
@@ -776,13 +744,7 @@ def build_ultraquant_decode_hd256_module(
             seq * _stride_out_seq + kv_h * _stride_out_head + part * _stride_out_part
         )
 
-        valid_row_pred = arith.cmpi(
-            arith.CmpIPredicate.ult,
-            mfma_row.ir_value() if hasattr(mfma_row, "ir_value") else mfma_row,
-            arith.constant(QG, type=T.i32),
-        )
-        _if = _scf.IfOp(valid_row_pred)
-        with ir.InsertionPoint(_if.then_block):
+        if mfma_row < QG:
             for h in range_constexpr(PV_N_CHUNKS):
                 pv_i32x2 = (acc_pv[h] * rcp).to(fx.BFloat16).bitcast(fx.Int32)
                 head_dim_start = mfma_col_grp * 4 + h * 16
@@ -808,7 +770,6 @@ def build_ultraquant_decode_hd256_module(
             )
             buffer_ops.buffer_store(running_max, ml_rsrc, ml_off)
             buffer_ops.buffer_store(running_sum, es_rsrc, es_off)
-            _scf.YieldOp([])
 
     # Hand the build-local allocator to the launcher. `_get_kernel` reads
     # `kmod.allocator` immediately after this returns (before the next build can
