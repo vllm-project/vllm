@@ -42,7 +42,7 @@ from .utils import (
     create_vllm_config,
 )
 
-pytestmark = pytest.mark.cpu_test
+pytestmark = [pytest.mark.cpu_test, pytest.mark.usefixtures("cuda_stream_stubs")]
 
 BLOCK_SIZE = 16
 NUM_BLOCKS = 32
