@@ -40,16 +40,27 @@ class _Caller:
     num_spec: int = 0
     # "none", "per_row" (row i holds checkpoint i), or "rows" (a row map).
     recurrent: str = "none"
+    # SSM cache dtype; the emitted states are FP32.
+    recurrent_dtype: torch.dtype = torch.float32
     token_map: bool = False
 
 
 CALLERS = {
-    "gdn-flashinfer": _Caller(
+    # Qwen3.5 and Qwen4Exp default to an FP32 SSM cache, Qwen3-Next to BF16.
+    "gdn-flashinfer-fp32-ssm": _Caller(
         MambaPrefillCheckpointExporter(state_len=3),
         width=96,
         conv_window=3,
         num_spec=2,
         recurrent="rows",
+    ),
+    "gdn-flashinfer-bf16-ssm": _Caller(
+        MambaPrefillCheckpointExporter(state_len=3),
+        width=96,
+        conv_window=3,
+        num_spec=2,
+        recurrent="rows",
+        recurrent_dtype=torch.bfloat16,
     ),
     # Leaves state_len unset: its conv cache has no spec slots.
     "kimi-k3-flashkda": _Caller(
@@ -117,7 +128,7 @@ def test_exporter_stores_each_callers_checkpoints(caller: str, state_layout: str
             NUM_SLOTS, state_width, c.width, device=device, dtype=torch.bfloat16
         ).transpose(-1, -2)
     recurrent_state = torch.randn(
-        NUM_SLOTS, *RECURRENT_SHAPE, device=device, dtype=torch.bfloat16
+        NUM_SLOTS, *RECURRENT_SHAPE, device=device, dtype=c.recurrent_dtype
     )
     # FP32 like the kernels emit, with values the cache dtype holds exactly.
     emitted = (
@@ -138,7 +149,7 @@ def test_exporter_stores_each_callers_checkpoints(caller: str, state_layout: str
         expected_conv[slot, :, : c.conv_window] = raw_qkv[window].T
         if c.recurrent != "none":
             row = rows[i] if c.recurrent == "rows" else i
-            expected_recurrent[slot] = emitted[row].to(torch.bfloat16)
+            expected_recurrent[slot] = emitted[row].to(c.recurrent_dtype)
 
     checkpoint = MambaPrefillCheckpointMetadata(
         torch.tensor(OFFSETS, dtype=torch.int32, device=device),
