@@ -59,6 +59,7 @@ from vllm.logprobs import Logprob
 from vllm.outputs import RequestOutput
 from vllm.parser import ParserManager
 from vllm.parser.abstract_parser import Parser
+from vllm.parser.metrics import record_tool_call_response
 from vllm.renderers.chat_utils import (
     ChatTemplateContentFormatOption,
     ConversationMessage,
@@ -990,12 +991,17 @@ class OpenAIServingChat(GenerateBaseServing):
                 logprobs = None
 
             if parser is not None:
-                reasoning, content, tool_calls = parser.parse(
-                    output.text,
-                    request,
-                    enable_auto_tools=self.enable_auto_tools,
-                    model_output_token_ids=token_ids,
-                )
+                try:
+                    reasoning, content, tool_calls = parser.parse(
+                        output.text,
+                        request,
+                        enable_auto_tools=self.enable_auto_tools,
+                        model_output_token_ids=token_ids,
+                    )
+                except Exception:
+                    if request.tools:
+                        record_tool_call_response(request, parse_failed=True)
+                    raise
                 suppress_metadata = not request.include_reasoning and parser is not None
                 if not request.include_reasoning:
                     reasoning = None
@@ -1222,6 +1228,13 @@ class OpenAIServingChat(GenerateBaseServing):
                         delta=False,
                     )
 
+        if request.tools:
+            record_tool_call_response(
+                request,
+                tool_calls_count=sum(
+                    len(choice.message.tool_calls) for choice in choices
+                ),
+            )
         return response
 
     def _get_top_logprobs(

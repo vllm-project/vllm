@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from enum import Enum
 from itertools import product
-from typing import cast
+from typing import Literal, cast
 
 from prometheus_client import REGISTRY, Counter
 
@@ -14,6 +14,8 @@ _model_name: str | None = None
 
 _TOOL_CALL_PARSER_INVOCATIONS_TOTAL = "vllm:tool_call_parser_invocations_total"
 _tool_call_parser_invocations: Counter | None = None
+_tool_call_responses: Counter | None = None
+_tool_calls_emitted: Counter | None = None
 
 
 class ToolCallOutcome(Enum):
@@ -28,35 +30,56 @@ class RequestType(Enum):
     OTHER = "other"
 
 
+def _register_counter(name: str, documentation: str, labelnames: list[str]) -> Counter:
+    try:
+        return Counter(name=name, documentation=documentation, labelnames=labelnames)
+    except ValueError:
+        return cast(Counter, REGISTRY._names_to_collectors[name])
+
+
 def init_parser_metrics(*, model_name: str) -> None:
     """Lazily register parser metrics and cache the shared model label."""
     global _model_name
     _model_name = model_name
 
     global _tool_call_parser_invocations
-    try:
-        _tool_call_parser_invocations = Counter(
-            name=_TOOL_CALL_PARSER_INVOCATIONS_TOTAL,
-            documentation=(
-                "Total number of ToolParser invocations. "
-                "Non-streaming increments once per choice; "
-                "streaming increments once per delta. "
-                "Tool choices are normalized and tool counts are bucketed."
-            ),
-            labelnames=[
-                "model_name",
-                "mode",
-                "outcome",
-                "request_type",
-                "tool_choice",
-                "tool_count",
-            ],
+    _tool_call_parser_invocations = _register_counter(
+        _TOOL_CALL_PARSER_INVOCATIONS_TOTAL,
+        (
+            "Total number of ToolParser invocations. "
+            "Non-streaming increments once per choice; "
+            "streaming increments once per delta. "
+            "Tool choices are normalized and tool counts are bucketed."
+        ),
+        [
+            "model_name",
+            "mode",
+            "outcome",
+            "request_type",
+            "tool_choice",
+            "tool_count",
+        ],
+    )
+
+    global _tool_call_responses, _tool_calls_emitted
+    _tool_call_responses = _register_counter(
+        "vllm:tool_call_responses_total",
+        "Tool-calling response outcomes, counted once per request.",
+        ["model_name", "status", "tool_choice", "api_surface"],
+    )
+    _tool_calls_emitted = _register_counter(
+        "vllm:tool_calls_emitted_total",
+        "Individual tool-call objects emitted to clients.",
+        ["model_name", "api_surface"],
+    )
+    for status in ("success", "parse_failure", "no_tool_calls"):
+        _tool_call_responses.labels(
+            model_name=_model_name,
+            status=status,
+            tool_choice="unset",
+            api_surface="chat_completions",
         )
-    except ValueError:
-        _tool_call_parser_invocations = cast(
-            Counter,
-            REGISTRY._names_to_collectors[_TOOL_CALL_PARSER_INVOCATIONS_TOTAL],
-        )
+    _tool_calls_emitted.labels(model_name=_model_name, api_surface="chat_completions")
 
     for mode, outcome, request_type in product(
         ("streaming", "non_streaming"),
@@ -94,6 +117,34 @@ def _tool_count_bucket(count: int) -> str:
     if count <= 10:
         return "6-10"
     return "10+"
+
+
+def record_tool_call_response(
+    request: object,
+    *,
+    tool_calls_count: int = 0,
+    parse_failed: bool = False,
+    api_surface: Literal["chat_completions", "messages"] = "chat_completions",
+) -> None:
+    """Record a request outcome and the calls actually returned to the client."""
+    if _tool_call_responses is None or _tool_calls_emitted is None:
+        return
+    status = (
+        "parse_failure"
+        if parse_failed
+        else "success"
+        if tool_calls_count
+        else "no_tool_calls"
+    )
+    _tool_call_responses.labels(
+        model_name=_model_name,
+        status=status,
+        tool_choice=_tool_choice_label(getattr(request, "tool_choice", None)),
+        api_surface=api_surface,
+    ).inc()
+    _tool_calls_emitted.labels(model_name=_model_name, api_surface=api_surface).inc(
+        tool_calls_count
+    )
 
 
 def record_tool_parser_invocation(

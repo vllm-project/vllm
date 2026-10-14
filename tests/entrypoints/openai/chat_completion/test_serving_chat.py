@@ -4,7 +4,7 @@ import asyncio
 import json
 from collections.abc import AsyncIterator
 from contextlib import suppress
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -22,6 +22,7 @@ from vllm._aiter_ops import is_aiter_found_and_supported
 from vllm.config import MultiModalConfig
 from vllm.entrypoints.generate.base.protocol import (
     DeltaMessage,
+    FunctionCall,
     RequestResponseMetadata,
 )
 from vllm.entrypoints.generate.base.serving import build_per_request_timing_metrics
@@ -789,6 +790,110 @@ async def test_chat_per_request_metrics_suppressed_for_n_greater_than_one():
         request_metadata=RequestResponseMetadata(request_id="chatcmpl-test-id"),
     )
     assert response.metrics is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "fields, calls_per_choice, n, expected_count",
+    [
+        ({"tool_choice": "auto"}, 2, 2, 4),
+        ({"tool_choice": "auto", "parallel_tool_calls": False}, 2, 2, 2),
+        ({"tool_choice": "auto"}, 0, 1, 0),
+        ({"tool_choice": "none"}, 2, 1, 0),
+        ({"tool_choice": "required"}, 1, 1, 1),
+        ({"tool_choice": {"type": "function", "function": {"name": "f"}}}, 1, 1, 1),
+        ({"tools": None, "tool_choice": "none"}, 0, 1, None),
+    ],
+)
+async def test_full_tool_response_metrics_count_returned_calls_once(
+    monkeypatch, fields, calls_per_choice, n, expected_count
+):
+    record = MagicMock()
+    monkeypatch.setattr(
+        "vllm.entrypoints.openai.chat_completion.serving.record_tool_call_response",
+        record,
+    )
+    serving = _build_minimal_metrics_serving_chat(enable_per_request_metrics=False)
+    serving.enable_auto_tools = True
+    serving.parser_cls = MagicMock(tool_parser_cls=object())
+    serving.default_chat_template_kwargs = {}
+    serving.chat_template = None
+    serving.chat_template_content_format = "auto"
+    parser = MagicMock()
+    parser.parse.return_value = (
+        None,
+        "answer",
+        [FunctionCall(name="f", arguments="{}") for _ in range(calls_per_choice)],
+    )
+    parser.count_reasoning_tokens.return_value = 0
+    serving._make_parser = MagicMock(return_value=parser)
+    request = ChatCompletionRequest(
+        messages=[],
+        n=n,
+        **{"tools": [{"type": "function", "function": {"name": "f"}}], **fields},
+    )
+    output = _make_metrics_request_output()
+    output.outputs = [replace(output.outputs[0], index=i) for i in range(n)]
+    response = await serving.chat_completion_full_generator(
+        request,
+        _single_request_output(output),
+        "test-id",
+        "test-model",
+        [],
+        MagicMock(),
+        RequestResponseMetadata(request_id="test-id"),
+        parser=parser,
+    )
+    returned_count = sum(len(choice.message.tool_calls) for choice in response.choices)
+    if expected_count is None:
+        record.assert_not_called()
+        assert returned_count == 0
+    else:
+        assert returned_count == expected_count
+        record.assert_called_once_with(request, tool_calls_count=expected_count)
+
+
+@pytest.mark.asyncio
+async def test_full_tool_response_metrics_report_parse_error_not_emitted_calls(
+    monkeypatch,
+):
+    record = MagicMock()
+    monkeypatch.setattr(
+        "vllm.entrypoints.openai.chat_completion.serving.record_tool_call_response",
+        record,
+    )
+    serving = _build_minimal_metrics_serving_chat(enable_per_request_metrics=False)
+    serving.enable_auto_tools = True
+    serving.parser_cls = MagicMock(tool_parser_cls=object())
+    serving.default_chat_template_kwargs = {}
+    serving.chat_template = None
+    serving.chat_template_content_format = "auto"
+    error = ValueError("fixture parse error")
+    parser = MagicMock()
+    parser.parse.side_effect = [
+        (None, "", [FunctionCall(name="f", arguments="{}")]),
+        error,
+    ]
+    parser.count_reasoning_tokens.return_value = 0
+    serving._make_parser = MagicMock(return_value=parser)
+    request = ChatCompletionRequest(
+        messages=[], n=2, tools=[{"type": "function", "function": {"name": "f"}}]
+    )
+    output = _make_metrics_request_output()
+    output.outputs = [replace(output.outputs[0], index=i) for i in range(2)]
+    with pytest.raises(ValueError) as caught:
+        await serving.chat_completion_full_generator(
+            request,
+            _single_request_output(output),
+            "test-id",
+            "test-model",
+            [],
+            MagicMock(),
+            RequestResponseMetadata(request_id="test-id"),
+            parser=parser,
+        )
+    assert caught.value is error
+    record.assert_called_once_with(request, parse_failed=True)
 
 
 @pytest.mark.asyncio
