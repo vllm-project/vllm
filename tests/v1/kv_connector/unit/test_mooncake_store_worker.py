@@ -1085,6 +1085,7 @@ def _make_partial_tail_send_thread(
     enable_group_semantics=False,
     supports_group_ids=False,
     enable_kv_event=False,
+    event_group_ids=(0, 1),
 ):
     coord = SimpleNamespace(
         enable_partial_hash_hits=True,
@@ -1118,6 +1119,9 @@ def _make_partial_tail_send_thread(
         enable_group_semantics=enable_group_semantics,
         supports_group_ids=supports_group_ids,
         enable_kv_event=enable_kv_event,
+        event_groups=list(
+            zip(event_group_ids, [g.kv_cache_spec for g in coord.kv_cache_groups])
+        ),
     )
 
 
@@ -1491,13 +1495,23 @@ def test_block_aligned_snapshot_offload_uses_provided_block():
     assert addrs == [[0x2000 + 7 * 256]]
 
 
-def test_block_aligned_snapshot_offload_announces_mamba_group():
+@pytest.mark.parametrize(
+    "mamba_core_group_id",
+    [1, 2],
+    ids=["store-index-matches-core", "store-skips-a-core-group"],
+)
+def test_block_aligned_snapshot_offload_announces_mamba_group(mamba_core_group_id):
     """The aligned snapshot is the mamba group's only stored block, so its
-    residency event has to name that group like the positional save's do."""
+    residency event has to name that group like the positional save's do — under
+    the id the core gives the group, which differs from the Store's own index when
+    the Store skips a group, while the Store key stays Store-indexed.
+    """
     store = MagicMock()
     store.batch_is_exist.side_effect = lambda keys: [0] * len(keys)
     store.batch_put_from_multi_buffers.side_effect = lambda keys, *a: [256] * len(keys)
-    thread = _make_partial_tail_send_thread(store, enable_kv_event=True)
+    thread = _make_partial_tail_send_thread(
+        store, enable_kv_event=True, event_group_ids=(0, mamba_core_group_id)
+    )
 
     hs = [bytes([i + 1]) * 4 for i in range(8)]
     req = ReqMeta(
@@ -1513,10 +1527,12 @@ def test_block_aligned_snapshot_offload_announces_mamba_group():
     events = thread.drain_residency().events
     assert len(events) == 1
     event = events[0]
-    assert event.group_idx == 1
+    assert event.group_idx == mamba_core_group_id
     assert event.block_hashes == [maybe_convert_block_hash(BlockHash(hs[7]))]
     assert event.block_size == 16
     assert event.kv_cache_spec_kind == "mamba"
+    keys = store.batch_put_from_multi_buffers.call_args.args[0]
+    assert all("@group:1@" in key for key in keys)
 
 
 @pytest.mark.parametrize("saved_tokens", [0, 32])

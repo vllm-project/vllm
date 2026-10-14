@@ -616,17 +616,23 @@ class MooncakeStoreScheduler:
         block_ids: tuple[list[int], ...],
         partial_tail_offloads: list[tuple[int, int, int]],
     ) -> bool:
-        """Queue and pin a finish-time tail for the next connector step."""
+        """Queue and pin a finish-time tail for the next connector step.
+
+        A decline here can be a request's last hand-off, so each one surfaces the
+        counters before returning: nothing later would bring them to the log.
+        """
         if not partial_tail_offloads:
             return False
         stats = self._boundary_store_stats
         stats.published += len(partial_tail_offloads)
         if self.kv_role == "kv_consumer":
             stats.dropped_consumer_role += len(partial_tail_offloads)
+            self._maybe_log_boundary_drops()
             return False
         tracker = self._request_trackers.get(request.request_id)
         if tracker is None or not any(block_ids):
             stats.dropped_request_gone += len(partial_tail_offloads)
+            self._maybe_log_boundary_drops()
             return False
         boundaries = {boundary for _, _, boundary in partial_tail_offloads}
         if len(boundaries) != 1:
@@ -636,6 +642,7 @@ class MooncakeStoreScheduler:
         boundary_tokens = next(iter(boundaries))
         if boundary_tokens > tracker.prefill_end_tokens:
             stats.dropped_past_prefill_end += len(partial_tail_offloads)
+            self._maybe_log_boundary_drops()
             return False
 
         mamba_puts: list[BoundaryPut] = []
@@ -643,9 +650,11 @@ class MooncakeStoreScheduler:
             store_group_id = self._store_group_id_by_kv_cache_group_id.get(group_id)
             if store_group_id not in self._boundary_state_group_ids:
                 stats.dropped_group_not_boundary += len(partial_tail_offloads)
+                self._maybe_log_boundary_drops()
                 return False
             if block_id == NULL_BLOCK_ID:
                 stats.dropped_null_block += len(partial_tail_offloads)
+                self._maybe_log_boundary_drops()
                 return False
             mamba_puts.append(BoundaryPut(store_group_id, block_id, boundary))
         stats.accepted += len(mamba_puts)

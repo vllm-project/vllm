@@ -3,7 +3,7 @@
 
 import time
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
@@ -1607,10 +1607,19 @@ def test_boundary_store_stats_count_the_consumer_role_discard():
     assert all(not m.boundary_puts for m in meta.requests)
 
 
-def test_boundary_store_stats_cover_the_finish_time_tail_path():
-    """The finish-time tail declines whole hand-offs; they are counted too."""
+def test_boundary_store_stats_cover_the_finish_time_tail_path(monkeypatch):
+    """The finish-time tail declines whole hand-offs; they are counted too, and a
+    decline surfaces them, since it can be the request's last hand-off and no
+    later step would bring the counters to the log."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store import (
+        scheduler as mooncake_scheduler,
+    )
+
+    log = MagicMock()
+    monkeypatch.setattr(mooncake_scheduler, "logger", log)
     scheduler = _make_bare_scheduler(hash_block_size=4, enable_partial_hash_hits=True)
     scheduler._store_group_ids = (0, 1)
+    scheduler._last_boundary_stats_log = time.monotonic() - 61
     request = SimpleNamespace(request_id="req-0", block_hashes=[b"h0", b"h1", b"h2"])
     scheduler._request_trackers["req-0"] = RequestTracker(
         req_id="req-0",
@@ -1628,6 +1637,7 @@ def test_boundary_store_stats_cover_the_finish_time_tail_path():
     assert stats.published == 1
     assert stats.accepted == 0
     assert stats.dropped_past_prefill_end == 1
+    log.info.assert_called_once()
 
 
 def test_boundary_store_stats_are_a_snapshot():
