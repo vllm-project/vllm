@@ -647,18 +647,19 @@ class RunCiCommandTest(unittest.TestCase):
         self.assertIn("5 commits behind", github.comments[0])
         self.assertIn("Merged upstream `main`", github.comments[0])
 
-    def test_run_merges_again_only_for_committers_after_ci_ran(self) -> None:
+    def test_only_committers_can_rerun_a_commit_that_already_ran_ci(self) -> None:
         finished_build = {
             "created_at": "2026-07-28T01:00:00Z",
             "pull_request": {"id": 42},
             "state": "failed",
             "web_url": "https://buildkite.example/builds/122",
         }
-        for actor, permission, merged in (
-            ("author", "read", False),
-            ("reviewer", "write", True),
+        for actor, permission, command, allowed in (
+            ("author", "read", COMMAND_RUN_CI, False),
+            ("author", "read", f"{COMMAND_RUN_CI} --allow-stale", False),
+            ("reviewer", "write", COMMAND_RUN_CI, True),
         ):
-            with self.subTest(actor=actor):
+            with self.subTest(actor=actor, command=command):
                 github = FakeGitHub(
                     behind=5,
                     permission=permission,
@@ -668,20 +669,13 @@ class RunCiCommandTest(unittest.TestCase):
                 buildkite = FakeBuildkite([[], [finished_build]])
 
                 with patch("run_ci_command.time.sleep"):
-                    run(
-                        make_event(COMMAND_RUN_CI, actor),
-                        github,
-                        buildkite,
-                        "",
-                        updater,
-                    )
+                    run(make_event(command, actor), github, buildkite, "", updater)
 
-                self.assertEqual(bool(updater.calls), merged)
-                self.assertEqual(bool(buildkite.created_builds), merged)
-                if not merged:
+                self.assertEqual(bool(buildkite.created_builds), allowed)
+                if not allowed:
+                    self.assertEqual(updater.calls, [])
                     self.assertIn("CI already ran on this commit", github.comments[0])
                     self.assertIn("`/ci retry`", github.comments[0])
-                    self.assertIn("`/ci run --allow-stale`", github.comments[0])
 
     def test_run_reports_failed_merge_without_building(self) -> None:
         github = FakeGitHub(behind=5)

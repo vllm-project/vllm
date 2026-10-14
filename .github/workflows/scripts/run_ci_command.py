@@ -888,7 +888,6 @@ def prepare_pr_for_ci(
     pr: Mapping[str, Any],
     command: str,
     branch_updater: GitHubClient | None = None,
-    tested_build: Mapping[str, Any] | None = None,
 ) -> tuple[dict[str, Any], str]:
     base_ref = pr["base"]["ref"]
     no_action = "No new CI build was started."
@@ -924,15 +923,6 @@ def prepare_pr_for_ci(
             print(warning)
         return current_pr, warning
 
-    if behind and branch_updater is not None and tested_build is not None:
-        raise CiPreparationError(
-            f"{lag} CI already ran on this commit ({tested_build['web_url']}), so "
-            f"the bot will not merge `{base_ref}` into it again. {no_action} "
-            f"Push new changes, use `{retry_command_for_command(command)}` to "
-            f"rerun failed jobs, merge or rebase onto the latest `{base_ref}` "
-            f"yourself, or use `{command}{ALLOW_STALE_SUFFIX}` to test this "
-            "branch as is."
-        )
     if behind and branch_updater is not None:
         return merge_base_into_pr(github, branch_updater, current_pr, command, lag)
     if behind:
@@ -955,7 +945,7 @@ def handle_run_ci(
     github: GitHubClient,
     pr: Mapping[str, Any],
     branch_updater: GitHubClient | None = None,
-    allow_repeat_merge: bool = False,
+    allow_repeat_run: bool = False,
 ) -> str:
     ci_name = ci_name_for_command(command)
     duplicate_builds = buildkite.list_builds(
@@ -982,17 +972,19 @@ def handle_run_ci(
             f"{ci_name} is already running for this commit: {active_build['web_url']}"
         )
 
-    tested_build = (
-        None
-        if allow_repeat_merge
-        else select_latest_build(
-            [b for b in current_builds if b.get("state") != "canceled"],
-            pr["number"],
+    tested_build = select_latest_build(
+        [build for build in current_builds if build.get("state") != "canceled"],
+        pr["number"],
+    )
+    if tested_build and not allow_repeat_run:
+        raise CiPreparationError(
+            f"{ci_name} already ran on this commit: {tested_build['web_url']}. "
+            "No new CI build was started. Push new changes to run CI again, use "
+            f"`{retry_command_for_command(command)}` to rerun failed jobs, or ask "
+            "a reviewer with write access to rerun it."
         )
-    )
-    current_pr, warning = prepare_pr_for_ci(
-        github, pr, command, branch_updater, tested_build
-    )
+
+    current_pr, warning = prepare_pr_for_ci(github, pr, command, branch_updater)
 
     build = buildkite.create_build(
         create_build_payload(
@@ -1263,7 +1255,7 @@ def run(
                 github=github,
                 pr=pr,
                 branch_updater=branch_updater,
-                allow_repeat_merge=is_trusted_permission(permission),
+                allow_repeat_run=is_trusted_permission(permission),
             )
         elif command in RETRY_COMMANDS:
             message = handle_retry_failed(
