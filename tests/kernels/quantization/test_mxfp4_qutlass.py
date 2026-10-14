@@ -29,12 +29,9 @@ from vllm.utils.torch_utils import set_random_seed
 if not torch.cuda.is_available():
     pytest.skip("CUDA required for these tests.", allow_module_level=True)
 
-if not (
-    current_platform.has_device_capability(100)
-    or current_platform.has_device_capability(120)
-):
+if not current_platform.is_device_capability_family(100):
     pytest.skip(
-        reason="Tests require compute capability 10.0 (100) or 12.0 (120).",
+        reason="QuTLASS kernels are built for compute capability 10.x only.",
         allow_module_level=True,
     )
 
