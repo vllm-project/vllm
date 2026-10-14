@@ -4,7 +4,7 @@
 
 from collections import defaultdict
 from collections.abc import Iterable, Iterator
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NotRequired, TypedDict
 
 import numpy as np
 import torch
@@ -129,6 +129,18 @@ def build_cost_tables_from_curves(
     return draft_table, verify_table
 
 
+class ProfileBatch(TypedDict):
+    """`_dummy_run` kwargs for one profiled step.
+
+    `num_scheduled_tokens_per_req` is present only for a step whose even split
+    would not be a shape the scheduler can produce.
+    """
+
+    num_tokens: int
+    context_len: int
+    num_scheduled_tokens_per_req: NotRequired[list[int]]
+
+
 class AdaptiveVerificationManager:
     def __init__(
         self,
@@ -220,9 +232,7 @@ class AdaptiveVerificationManager:
         split += [base + (i < extra) for i in range(num_prefill_reqs)]
         return split
 
-    def batches_to_profile(
-        self, capture_sizes: list[int]
-    ) -> Iterator[dict[str, int | list[int]]]:
+    def batches_to_profile(self, capture_sizes: list[int]) -> Iterator[ProfileBatch]:
         """Dummy-run kwargs whose step timings seed the cost tables.
 
         Run these inside StepTimingCollector.collect(), then hand the block's
@@ -240,7 +250,7 @@ class AdaptiveVerificationManager:
                 tail_sizes.add(size)
             tail_sizes -= set(capture_sizes)
         for num_tokens in capture_sizes + sorted(tail_sizes):
-            batch: dict[str, int | list[int]] = {
+            batch: ProfileBatch = {
                 "num_tokens": num_tokens,
                 "context_len": envs.VLLM_ADAPTIVE_VERIFICATION_PROFILE_CONTEXT_LEN,
             }
@@ -252,7 +262,7 @@ class AdaptiveVerificationManager:
                 if split is not None:
                     batch["num_scheduled_tokens_per_req"] = split
             for _ in range(_PROFILE_REPLAYS):
-                yield dict(batch)
+                yield batch.copy()
 
     def set_initial_cost_curves(self, samples: list[StepTimingSample]) -> None:
         def median_curve(
