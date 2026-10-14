@@ -2,8 +2,7 @@
 #   docker buildx bake -f docker/docker-bake-rocm.hcl                    # test image, everything from source
 #   STACK_IMAGE=vllm/vllm-openai-rocm:base-nightly RUNTIME=vllm/vllm-openai-rocm:base-nightly \
 #     docker buildx bake -f docker/docker-bake-rocm.hcl vllm-openai        # compile only vLLM
-#   STACK=rocm_72 docker buildx bake -f docker/docker-bake-rocm.hcl --set vllm-openai.args.ARCH=gfx942 vllm-openai
-variable "STACK"        { default = "rocm" }   # rocm: TheRock ROCm 10 (default) | rocm_72: apt ROCm 7.2
+variable "STACK"        { default = "rocm" }   # rocm: TheRock ROCm 10
 variable "STACK_IMAGE"  { default = "" }       # prebuilt stack ref@digest; empty: build it in this graph
 variable "STACK_WHEELS" { default = "" }       # that stack's -wheels image
 variable "RUNTIME"      { default = "" }       # prebuilt runtime ref@digest; empty: build it in this graph
@@ -48,10 +47,6 @@ target "_stack" {
 target "stack-rocm" {
   inherits   = ["_stack"]
   dockerfile = "docker/Dockerfile.rocm_base"
-}
-target "stack-rocm_72" {
-  inherits   = ["_stack"]
-  dockerfile = "docker/Dockerfile.rocm_72_base"
 }
 target "stack-wheels" {
   inherits = ["stack-${STACK}"]

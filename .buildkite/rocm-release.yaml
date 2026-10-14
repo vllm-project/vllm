@@ -1,5 +1,5 @@
 # ROCm release mode for one stack, uploaded by the trigger-only `amd-release` pipeline, which
-# release-pipeline.yaml triggers once per stack with ROCM_STACK=rocm|rocm_72. Builds and GPU-smokes
+# release-pipeline.yaml triggers with ROCM_STACK=rocm. Builds and GPU-smokes
 # rocm/vllm-ci:<stack>-<commit>{,-wheels,-base}; publishing happens back on AWS (rocm/publish.sh).
 env:
   ROCM_CI_REPO: rocm/vllm-ci
