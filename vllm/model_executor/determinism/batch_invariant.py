@@ -1424,6 +1424,15 @@ def override_envs_for_invariance():
 
     # torch.compile settings
     os.environ["VLLM_USE_AOT_COMPILE"] = "0"
+    # Inductor's reduction kernels (e.g. the lowered RMSNorm when the custom op
+    # is off) get their tile configs from size hints and on-device autotuning,
+    # and candidate configs sum in different orders. Inductor's own
+    # batch-invariant mode pins those choices so a row's result does not
+    # depend on the batch it is computed in; it implies inductor's
+    # deterministic mode.
+    import torch._inductor.config as inductor_config
+
+    inductor_config.batch_invariant = True
 
 
 def init_batch_invariance():
