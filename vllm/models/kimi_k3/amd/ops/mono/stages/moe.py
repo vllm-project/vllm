@@ -101,6 +101,8 @@ HIDDEN = 7168
 LAT = 3584
 E = 896
 TOPK = 16
+TOPK_BITS = TOPK.bit_length() - 1
+assert 1 << TOPK_BITS == TOPK
 RI = 384  # routed intermediate a rank
 SI = 768  # shared intermediate a rank
 ROWS = 16
@@ -941,11 +943,14 @@ def stage_down(c, rgd, nt, ops0):
                 tq = fx.min(lane % 16, s - 1)
                 kq = fx.ptr_load(rt["kof"] + (fx.min(b0 + WAVES * j, nt - 1) * s + tq))
                 picked = (kq >= 0) & (lane % 16 < s)
-                pick = tq * TOPK + fx.max(kq, 0)
+                t, k = tq, fx.max(kq, 0)
+                pick = t * TOPK + k
             else:
                 _, p0, cnt = pick_tile(c, fx.min(b0 + WAVES * j, nt - 1))
                 picked = lane % 16 < cnt
                 pick = fx.ptr_load(rt["order"] + (p0 + fx.min(lane % 16, cnt - 1)))
+                # a pick is >= 0: shifts, not signed division
+                t, k = pick >> TOPK_BITS, pick & (TOPK - 1)
             if const_expr(not inter_lds(s)):
                 got = poll_inter(c, pick, kb)
             acc = fx.Vector.filled(4, 0.0, fx.Float32)
@@ -980,8 +985,6 @@ def stage_down(c, rgd, nt, ops0):
                 )
             # lane: rows 4 (lane / 16) + i of pick lane % 16
             if live & picked:
-                t = pick // TOPK
-                k = pick % TOPK
                 wt = fx.ptr_load(rt["route"] + (t * 2 * TOPK + TOPK + k)).bitcast(
                     fx.Float32
                 )
@@ -1056,7 +1059,9 @@ def stage_sdown(c, j, ops):
     """Shared down rows 16 j .. (K 768) against h in LDS (``load_h``): bf16
     partial -> SHP (this rank's up columns) or every rank's FINAL."""
     s = c["S"]
-    for t0, n in gemv.token_tiles(s):
+    for i, (t0, n) in enumerate(gemv.token_tiles(s)):
+        if const_expr(i > 0):
+            gpu.barrier()  # the last tile's red read
         sdown_tile(c, j, ops, t0, n)
     lo = c["rank"] * UP_TASKS
     mine = (j >= lo) & (j < lo + UP_TASKS)
@@ -1105,7 +1110,6 @@ def sdown_tile(c, j, ops, t0, n):
                     (c["rank"] * s + tt) * HIDDEN + j * ROWS + 2 * rp,
                     [v0, v1],
                 )
-    gpu.barrier()
 
 
 @traced
