@@ -7,7 +7,10 @@ import pytest
 import torch
 
 from vllm import _custom_ops as ops
-from vllm.distributed.kv_transfer.kv_connector.utils import copy_kv_blocks
+from vllm.distributed.kv_transfer.kv_connector.utils import (
+    _try_copy_kv_blocks_batched,
+    copy_kv_blocks,
+)
 from vllm.platforms import current_platform
 
 pytestmark = pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
@@ -158,24 +161,95 @@ def test_mismatched_block_bytes_fall_back(batch_calls):
     assert batch_calls == []
 
 
-def test_registered_pageable_buffer_takes_batched_path(batch_calls):
+@pytest.mark.parametrize("direction", ["d2h", "h2d"])
+def test_registered_pageable_buffer_takes_batched_path(direction, batch_calls):
     # The NIXL host buffer is allocated pageable and page-locked later, when
-    # the UCX backend registers it; mirror that with cudaHostRegister.
+    # the backend registers it; mirror that with cudaHostRegister.
     device = _caches("cuda")
     host = _caches("cpu", pin=False)
+    src, dst = (device, host) if direction == "d2h" else (host, device)
     cudart = torch.cuda.cudart()
-    for t in host.values():
-        assert cudart.cudaHostRegister(t.data_ptr(), t.nbytes, 0) == 0
+    registered = []
     try:
+        for t in host.values():
+            assert cudart.cudaHostRegister(t.data_ptr(), t.nbytes, 0) == 0
+            registered.append(t)
         assert all(t.is_pinned() for t in host.values())
-        for t in device.values():
+        for t in src.values():
             t.copy_(torch.randn(t.shape, dtype=t.dtype))
 
-        copy_kv_blocks(device, host, SRC_IDS, DST_IDS, "d2h")
+        copy_kv_blocks(src, dst, SRC_IDS, DST_IDS, direction)
 
-        for name in device:
-            assert torch.equal(host[name][DST_IDS], device[name][SRC_IDS].cpu())
+        for name in src:
+            assert torch.equal(dst[name][DST_IDS].cpu(), src[name][SRC_IDS].cpu())
         assert len(batch_calls) == 1
     finally:
-        for t in host.values():
-            cudart.cudaHostUnregister(t.data_ptr())
+        for t in registered:
+            assert cudart.cudaHostUnregister(t.data_ptr()) == 0
+
+
+def test_overlapping_destinations_fall_back(batch_calls):
+    # Layers sharing a KV cache map to one device tensor but have separate
+    # host buffers; the per-layer path writes them in order, last one wins.
+    host = _caches("cpu", pin=True)
+    for t in host.values():
+        t.copy_(torch.randn(t.shape, dtype=t.dtype))
+    shared = torch.zeros(
+        (NUM_BLOCKS, *BLOCK_SHAPE), dtype=torch.bfloat16, device="cuda"
+    )
+    device = {name: shared for name in host}
+
+    copy_kv_blocks(host, device, SRC_IDS, DST_IDS, "h2d")
+
+    last = host[f"layer.{NUM_LAYERS - 1}"]
+    assert torch.equal(shared[DST_IDS].cpu(), last[SRC_IDS])
+    assert batch_calls == []
+
+
+@pytest.mark.parametrize("bad_id", [-1, NUM_BLOCKS])
+def test_out_of_range_block_ids_fall_back(bad_id, batch_calls):
+    # The batched path would turn these into addresses outside the buffers;
+    # leave them to tensor indexing, which wraps -1 and raises on the rest.
+    device = _caches("cuda")
+    host = _caches("cpu", pin=True)
+    ids = [*SRC_IDS[:-1], bad_id]
+
+    assert not _try_copy_kv_blocks_batched(device, host, ids, DST_IDS)
+    assert not _try_copy_kv_blocks_batched(device, host, SRC_IDS, ids)
+    assert batch_calls == []
+
+
+@pytest.mark.skipif(torch.cuda.device_count() < 2, reason="Requires 2 GPUs")
+@pytest.mark.parametrize("direction", ["d2h", "h2d"])
+def test_tensors_on_non_current_device(direction, batch_calls):
+    device = _caches("cuda:1")
+    host = _caches("cpu", pin=True)
+    src, dst = (device, host) if direction == "d2h" else (host, device)
+    ref = _random_like(src)
+    if direction == "h2d":
+        for name in host:
+            host[name].copy_(ref[name])
+    # Use non-default streams on both GPUs, as serving does: the legacy
+    # default streams would order a copy issued on the wrong device anyway.
+    prev_stream = torch.cuda.current_stream(1)
+    torch.cuda.set_stream(torch.cuda.Stream(device=1))
+    try:
+        # Enqueue work on cuda:1 behind a stall: the source writes for d2h,
+        # and for h2d a write to the destination that the copy must land
+        # after. A copy ordered on the current device's stream gets it wrong.
+        with torch.cuda.device(1):
+            _stall_current_stream()
+            for name in device:
+                if direction == "d2h":
+                    device[name].copy_(ref[name], non_blocking=True)
+                else:
+                    device[name].zero_()
+
+        with torch.cuda.device(0), torch.cuda.stream(torch.cuda.Stream(device=0)):
+            copy_kv_blocks(src, dst, SRC_IDS, DST_IDS, direction)
+
+        for name in src:
+            assert torch.equal(dst[name][DST_IDS].cpu(), ref[name][SRC_IDS])
+        assert len(batch_calls) == 1
+    finally:
+        torch.cuda.set_stream(prev_stream)
