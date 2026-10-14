@@ -36,7 +36,7 @@ from vllm.model_executor.layers.fused_moe.experts.aiter_mxfp4_w4a16_moe import (
 )
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
     Mxfp4MoeBackend,
-    convert_gpt_oss_weight_to_mxfp4_moe_kernel_format,
+    convert_weight_to_mxfp4_moe_kernel_format,
 )
 from vllm.platforms import current_platform
 from vllm.transformers_utils.repo_utils import hf_api
@@ -193,8 +193,8 @@ def test_aiter_mxfp4_moe_ignores_padded_rows(
     is_w4a8 = mxfp4_backend is Mxfp4MoeBackend.AITER_MXFP4_FP8
 
     # TODO: clean this in oracle/mxfp4.
-    # `convert_gpt_oss_weight_to_mxfp4_moe_kernel_format` maps
-    # AITER_MXFP4_BF16 onto the CK layout (`shuffle_weight_a16w4`), which the
+    # `convert_weight_to_mxfp4_moe_kernel_format` maps AITER_MXFP4_BF16
+    # onto the CK layout (AITER `shuffle_weight`), which the
     # triton monolithic cannot consume -- it wants the `_swizzle_mxfp4`
     # PrecisionConfig that the TRITON branch of the same converter produces.
     weight_backend = (
@@ -254,7 +254,7 @@ def test_aiter_mxfp4_moe_ignores_padded_rows(
         w2_scale,
         w13_bias,
         w2_bias,
-    ) = convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
+    ) = convert_weight_to_mxfp4_moe_kernel_format(
         weight_backend,
         layer,
         layer.w13_weight,
@@ -263,6 +263,7 @@ def test_aiter_mxfp4_moe_ignores_padded_rows(
         layer.w2_weight_scale,
         w13_bias=layer.w13_bias,
         w2_bias=layer.w2_bias,
+        is_w13_interleaved=True,
     )
 
     quant_config_factory = (
