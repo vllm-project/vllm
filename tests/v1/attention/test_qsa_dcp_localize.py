@@ -184,15 +184,19 @@ def test_reused_local_rows_match_per_pass_localization(world, interleave):
 # --- indexer wiring ---------------------------------------------------------
 
 
-def _select_with_indexer(monkeypatch, *, skip_topk, dcp_world_size):
+def _select_with_indexer(
+    monkeypatch, *, skip_topk, dcp_world_size, selector_world_size=1
+):
     """Run QSAIndexer.forward with fake caches; record the DCP localization.
 
     Returns (selection buffer, impl calls, kernel calls, select calls).
     """
     from types import SimpleNamespace
 
+    from vllm.models.qwen4_exp.common.qsa_cache import QSADCPShard
     from vllm.models.qwen4_exp.nvidia import indexer_qsa
     from vllm.models.qwen4_exp.nvidia.ops import qsa_dcp as qsa_dcp_ops
+    from vllm.models.qwen4_exp.nvidia.ops import qsa_dcp_selector
     from vllm.models.qwen4_exp.nvidia.ops import qsa_indexer as qsa_indexer_ops
 
     Qwen4ExpQSAFlashAttentionImpl = _qsa_module().Qwen4ExpQSAFlashAttentionImpl
@@ -200,7 +204,10 @@ def _select_with_indexer(monkeypatch, *, skip_topk, dcp_world_size):
     num_tokens, token_topk, compress_ratio = 2, 4, 2
     impl_calls, kernel_calls, select_calls = [], [], []
     impl = SimpleNamespace(
-        dcp_world_size=dcp_world_size, dcp_rank=0, cp_kv_cache_interleave_size=1
+        dcp_world_size=dcp_world_size,
+        dcp_rank=0,
+        cp_kv_cache_interleave_size=1,
+        dcp_token_shard=QSADCPShard(0, dcp_world_size, 1),
     )
 
     def localize_dcp_selection_(selection):
@@ -224,6 +231,11 @@ def _select_with_indexer(monkeypatch, *, skip_topk, dcp_world_size):
             name,
             lambda *args, _name=name: select_calls.append(_name),
         )
+    monkeypatch.setattr(
+        qsa_dcp_selector,
+        "expand_localize_qsa_block_indices",
+        lambda *args: select_calls.append("expand_localize_qsa_block_indices"),
+    )
 
     raw_metadata = SimpleNamespace(
         num_actual_tokens=num_tokens,
@@ -241,7 +253,9 @@ def _select_with_indexer(monkeypatch, *, skip_topk, dcp_world_size):
         decode_query_len=1,
         visible_blocks=torch.ones(num_tokens, dtype=torch.int32),
         local_visible_blocks=torch.ones(num_tokens, dtype=torch.int32),
-        selector_shard=None,
+        selector_shard=(
+            None if selector_world_size == 1 else QSADCPShard(0, selector_world_size, 1)
+        ),
         block_table=torch.zeros(num_tokens, 1, dtype=torch.int32),
         query_start_loc=torch.arange(num_tokens + 1),
         logical_positions=torch.arange(num_tokens),
@@ -314,6 +328,19 @@ def test_indexer_skip_topk_reuses_the_local_rows(monkeypatch):
 
     assert select_calls == [] and impl_calls == [] and kernel_calls == []
     assert torch.equal(selection, _pack([[3, 1], [5, 2, 0]], 4))
+
+
+@pytest.mark.cpu_test
+def test_indexer_sharded_selector_localizes_in_the_fused_expand(monkeypatch):
+    _, impl_calls, kernel_calls, select_calls = _select_with_indexer(
+        monkeypatch, skip_topk=False, dcp_world_size=2, selector_world_size=2
+    )
+
+    assert select_calls == [
+        "qsa_select_paged_decode",
+        "expand_localize_qsa_block_indices",
+    ]
+    assert impl_calls == [] and kernel_calls == []
 
 
 @pytest.mark.cpu_test

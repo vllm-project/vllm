@@ -12,6 +12,8 @@ import torch
 from tests.v1.core.test_prefix_caching import make_kv_cache_manager
 from vllm.models.qwen4_exp.common import qsa_cache
 from vllm.models.qwen4_exp.nvidia.ops import qsa_dcp_selector
+from vllm.models.qwen4_exp.nvidia.ops.qsa_dcp import qsa_localize_dcp_indices
+from vllm.models.qwen4_exp.nvidia.ops.qsa_indexer import expand_qsa_block_indices
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON
 from vllm.v1.kv_cache_interface import (
@@ -364,3 +366,58 @@ def test_merge_gives_every_rank_the_dcp1_topk(dcp_size, monkeypatch):
     for shard, logits, local in ranks:
         qsa_dcp_selector.merge_qsa_dcp_topk(logits, local, shard)
         assert local.tolist() == expected
+
+
+def _expand_inputs(rows, compress_ratio, positions_dtype, token_topk=2048):
+    """Block indices with -1 padding, query positions with -1 rows and open
+    and closed compression groups, and visible counts with zero rows."""
+    block_topk = token_topk // compress_ratio
+    num_blocks = block_topk * 3
+    generator = torch.Generator().manual_seed(rows + compress_ratio)
+    blocks = torch.rand(rows, num_blocks, generator=generator).argsort(1)
+    keep = torch.randint(0, block_topk + 1, (rows, 1), generator=generator)
+    keep[: rows // 2] = block_topk
+    block_indices = torch.where(
+        torch.arange(block_topk) < keep, blocks[:, :block_topk], -1
+    )
+    positions = torch.randint(
+        0, num_blocks * compress_ratio, (rows,), generator=generator
+    )
+    positions[::7] = -1
+    positions[1::5] = (positions[1::5] // compress_ratio + 1) * compress_ratio - 1
+    visible = torch.randint(0, block_topk * 2, (rows,), generator=generator)
+    visible[::9] = 0
+    return [
+        block_indices.int().cuda(),
+        positions.to(positions_dtype).cuda(),
+        visible.int().cuda(),
+    ]
+
+
+@requires_cuda_triton
+@pytest.mark.parametrize("rows", [80, 1024])
+@pytest.mark.parametrize("compress_ratio", [2, 4, 8])
+@pytest.mark.parametrize("positions_dtype", [torch.int32, torch.int64])
+def test_fused_expand_localize_matches_expand_then_localize(
+    rows, compress_ratio, positions_dtype
+):
+    """The fused kernel writes what expand_qsa_block_indices followed by the
+    in-place qsa_localize_dcp_indices writes, on every rank."""
+    token_topk, world, interleave = 2048, 4, 16
+    inputs = _expand_inputs(rows, compress_ratio, positions_dtype, token_topk)
+    width = token_topk + compress_ratio - 1
+    expanded = torch.full((rows, width + 1), 9, dtype=torch.int32, device="cuda")
+    expand_qsa_block_indices(*inputs, compress_ratio, token_topk, expanded)
+    for rank in range(world):
+        fused = torch.full_like(expanded, 9)
+        qsa_dcp_selector.expand_localize_qsa_block_indices(
+            *inputs,
+            compress_ratio,
+            token_topk,
+            fused,
+            qsa_cache.QSADCPShard(rank, world, interleave),
+        )
+        reference = expanded.clone()
+        qsa_localize_dcp_indices(reference, reference, world, rank, interleave)
+
+        assert torch.equal(fused, reference)
