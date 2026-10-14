@@ -46,7 +46,7 @@ from .mamba import MambaBackendEnum, MambaConfig
 from .model import ModelConfig
 from .observability import ObservabilityConfig
 from .offload import OffloadConfig
-from .parallel import ParallelConfig
+from .parallel import ParallelConfig, resolve_mori_all2all
 from .profiler import ProfilerConfig
 from .reasoning import ReasoningConfig
 from .scheduler import SchedulerConfig
@@ -2058,6 +2058,10 @@ class VllmConfig:
         # Re-compute compile ranges after platform-specific config updates
         # (e.g., XPU may lower max_num_batched_tokens when MLA is enabled)
         self._set_compile_ranges()
+
+        resolve_mori_all2all(
+            self.parallel_config, self.model_config, self.kernel_config.moe_backend
+        )
 
         if self.parallel_config.all2all_backend == "moonep":
             if (

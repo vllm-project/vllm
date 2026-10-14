@@ -1001,6 +1001,7 @@ class MoriAll2AllManager(All2AllManagerBase):
         assert all2all_backend in (
             "mori_high_throughput",
             "mori_low_latency",
+            "mori",
         ), f"unsupported MoRI all2all backend: {all2all_backend!r}"
         import mori
 
@@ -1044,9 +1045,16 @@ class MoriAll2AllManager(All2AllManagerBase):
             warp_num_per_block = 16
             block_num = 80
         else:
-            # Multi-node: kernel follows --all2all-backend (mirrors deepep_* split).
-            # mori_low_latency → InterNodeV1LL; mori_high_throughput → V1.
-            if self._all2all_backend == "mori_low_latency":
+            # Multi-node: mori_low_latency → InterNodeV1LL; mori_high_throughput
+            # → V1; mori → V1LL for small per-rank token budgets, else V1.
+            if self._all2all_backend == "mori":
+                use_ll = (
+                    max_num_tokens_per_dp_rank
+                    <= envs.VLLM_MORI_DISPATCH_INTER_KERNEL_SWITCH_THRESHOLD
+                )
+            else:
+                use_ll = self._all2all_backend == "mori_low_latency"
+            if use_ll:
                 kernel_type = mori.ops.EpDispatchCombineKernelType.InterNodeV1LL
             else:
                 kernel_type = mori.ops.EpDispatchCombineKernelType.InterNodeV1

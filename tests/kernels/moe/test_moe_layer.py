@@ -112,7 +112,7 @@ PARALLEL_COMBOS = [
 BACKENDS = ["allgather_reducescatter"]
 
 if has_mori():
-    BACKENDS += ["mori_high_throughput", "mori_low_latency", "mori_epv2"]
+    BACKENDS += ["mori_high_throughput", "mori_low_latency", "mori"]
 
 if has_flashinfer_nvlink_two_sided():
     BACKENDS += ["flashinfer_nvlink_two_sided"]
@@ -127,7 +127,7 @@ if has_nixl_ep():
     BACKENDS += ["nixl_ep"]
 
 DEEPEP_BACKENDS = {"deepep_high_throughput", "deepep_low_latency"}
-MORI_BACKENDS = {"mori_high_throughput", "mori_low_latency", "mori_epv2"}
+MORI_BACKENDS = {"mori_high_throughput", "mori_low_latency", "mori"}
 
 QUANT_METHODS = [
     None,
@@ -143,7 +143,7 @@ BACKEND_SUPPORTED_QUANTS: dict[str, set[str | None]] = {
     "allgather_reducescatter":     {None,         "fp8", "modelopt_fp8", "modelopt_fp4"}, # noqa: E501
     "mori_high_throughput":        {None,         "fp8", "modelopt_fp8"},
     "mori_low_latency":            {None,         "fp8", "modelopt_fp8"},
-    "mori_epv2":                   {None,         "fp8", "modelopt_fp8"},
+    "mori":                        {None,         "fp8", "modelopt_fp8"},
     "flashinfer_nvlink_two_sided": {None, "fp8_blocked",                 "modelopt_fp4"}, # noqa: E501
     "flashinfer_nvlink_one_sided": {None, "fp8_blocked",                 "modelopt_fp4"}, # noqa: E501
     "deepep_low_latency":          {None, "fp8_blocked",                 "modelopt_fp4"}, # noqa: E501
@@ -156,7 +156,7 @@ BACKEND_EP_DP_TP_SUPPORT: dict[str, tuple[bool, bool, bool, bool]] = {
     "allgather_reducescatter":     (True,  True,  True,  True),
     "mori_high_throughput":        (True, False, False,  True),
     "mori_low_latency":            (True, False, False,  True),
-    "mori_epv2":                   (True, False, False,  True),
+    "mori":                        (True, False, False,  True),
     "flashinfer_nvlink_two_sided": (False, True, False, False),
     "flashinfer_nvlink_one_sided": (False, True, False, False),
     "deepep_low_latency":          (True, False, False,  True),
@@ -2139,6 +2139,8 @@ def test_moe_layer(
         tensor_parallel_size=tp_size,
         enable_expert_parallel=use_ep,
         all2all_backend=backend,
+        # Pin "mori" to EPv2; mori_high_throughput/mori_low_latency cover EPv1.
+        mori_ep_v2=True if backend == "mori" else None,
         enable_eplb=enable_eplb,
         eplb_config=eplb_config,
     )

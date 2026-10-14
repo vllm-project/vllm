@@ -254,7 +254,7 @@ if has_mori():
         standard_format,
         [torch.bfloat16],
         blocked_quantization_support=False,
-        backend="mori_epv2",
+        backend="mori",
         supports_apply_weight_on_input=False,
     )
 

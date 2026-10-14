@@ -10,6 +10,7 @@ import pytest
 import torch
 
 import vllm.model_executor.layers.fused_moe.prepare_finalize.mori_epv2 as mori_epv2
+from vllm.config.parallel import resolve_mori_all2all
 from vllm.model_executor.layers.fused_moe.prepare_finalize.mori_epv2 import (
     MoriEPv2PrepareAndFinalize,
 )
@@ -231,3 +232,93 @@ def test_experts_it_cannot_feed_are_rejected(
     else:
         with pytest.raises(ValueError, match="MORI EPv2"):
             prepare_finalize.post_init_setup(experts)
+
+
+def _parallel_config(**overrides):
+    fields = dict(
+        all2all_backend="mori",
+        mori_ep_v2=None,
+        tensor_parallel_size=1,
+        data_parallel_size=8,
+        prefill_context_parallel_size=1,
+    )
+    return SimpleNamespace(**(fields | overrides))
+
+
+def _model_config(**overrides):
+    return SimpleNamespace(**({"dtype": torch.bfloat16} | overrides))
+
+
+@pytest.mark.parametrize(
+    "parallel,model,moe_backend,env,ep_v2",
+    [
+        ({}, {}, "aiter", {}, True),
+        ({"data_parallel_size": 16}, {}, "aiter", {}, False),
+        ({}, {}, "aiter", {"MORI_ENABLE_SDMA": "1"}, False),
+        ({}, {}, "aiter_mega_moe", {}, False),
+        ({}, {"dtype": torch.float16}, "aiter", {}, False),
+        # An explicit VLLM_MORI_EP_V2 wins over the deployment checks.
+        ({}, {"dtype": torch.float16}, "aiter", {"VLLM_MORI_EP_V2": "1"}, True),
+        ({}, {}, "aiter", {"VLLM_MORI_EP_V2": "0"}, False),
+        # Already resolved: kept as is.
+        ({"mori_ep_v2": True}, {"dtype": torch.float16}, "aiter", {}, True),
+        # Other MoRI backends always run EPv1.
+        ({"all2all_backend": "mori_high_throughput"}, {}, "aiter", {}, None),
+    ],
+)
+def test_mori_picks_epv2_where_supported(
+    monkeypatch, parallel, model, moe_backend, env, ep_v2
+):
+    monkeypatch.delenv("VLLM_MORI_EP_V2", raising=False)
+    monkeypatch.delenv("MORI_ENABLE_SDMA", raising=False)
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    parallel_config = _parallel_config(**parallel)
+    resolve_mori_all2all(parallel_config, _model_config(**model), moe_backend)
+    assert parallel_config.mori_ep_v2 is ep_v2
+
+
+@pytest.mark.parametrize(
+    "backend,internode,max_tokens,kernel",
+    [
+        ("mori", False, 4096, "IntraNode"),
+        ("mori", True, 256, "InterNodeV1LL"),
+        ("mori", True, 257, "InterNodeV1"),
+        ("mori_high_throughput", True, 128, "InterNodeV1"),
+        ("mori_low_latency", True, 4096, "InterNodeV1LL"),
+    ],
+)
+def test_mori_epv1_kernel_choice(monkeypatch, backend, internode, max_tokens, kernel):
+    from vllm.distributed.device_communicators import all2all
+
+    kernel_types = SimpleNamespace(
+        IntraNode="IntraNode", InterNodeV1="InterNodeV1", InterNodeV1LL="InterNodeV1LL"
+    )
+    fake_mori = SimpleNamespace(
+        ops=SimpleNamespace(EpDispatchCombineKernelType=kernel_types)
+    )
+    monkeypatch.setitem(sys.modules, "mori", fake_mori)
+    monkeypatch.setitem(
+        sys.modules,
+        "vllm.platforms.rocm",
+        SimpleNamespace(on_gfx942=lambda: False, on_gfx950=lambda: True),
+    )
+    monkeypatch.delenv(
+        "VLLM_MORI_DISPATCH_INTER_KERNEL_SWITCH_THRESHOLD", raising=False
+    )
+    manager = object.__new__(all2all.MoriAll2AllManager)
+    manager.internode = internode
+    manager._all2all_backend = backend
+    kwargs = manager._make_all2all_kwargs(
+        rank=0,
+        num_ep_ranks=16,
+        input_dtype=torch.bfloat16,
+        quant_dtype=torch.bfloat16,
+        token_hidden_size=7168,
+        scale_dim=0,
+        scale_type_size=4,
+        max_num_tokens_per_dp_rank=max_tokens,
+        num_local_experts=16,
+        num_experts_per_token=8,
+    )
+    assert kwargs["kernel_type"] == kernel

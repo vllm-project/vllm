@@ -176,6 +176,9 @@ class Config:
         }
 
         vllm_config.parallel_config.all2all_backend = self.all2all_backend()
+        # "mori" labels the MORI EPv2 prepare/finalize here.
+        if self.all2all_backend() == "mori":
+            vllm_config.parallel_config.mori_ep_v2 = True
 
         return vllm_config, env_dict
 
@@ -270,7 +273,7 @@ class Config:
         return info.backend in (
             "mori_high_throughput",
             "mori_low_latency",
-            "mori_epv2",
+            "mori",
         )
 
     def all2all_backend(self):
