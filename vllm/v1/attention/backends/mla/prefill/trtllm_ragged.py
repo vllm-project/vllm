@@ -156,7 +156,8 @@ class TrtllmRaggedPrefillBackend(MLAPrefillBackend):
             return out
 
         ret = trtllm_ragged_attention_deepseek(
-            query=q,
+            # The kernel reads the query as packed, ignoring its strides
+            query=q.contiguous(),
             key=k,
             value=v,
             workspace_buffer=self._workspace_buffer,
@@ -207,7 +208,8 @@ class TrtllmRaggedPrefillBackend(MLAPrefillBackend):
             )
 
         attn_out, lse = trtllm_ragged_attention_deepseek(
-            query=q,
+            # The kernel reads the query as packed, ignoring its strides
+            query=q.contiguous(),
             key=k,
             value=v,
             workspace_buffer=self._workspace_buffer,

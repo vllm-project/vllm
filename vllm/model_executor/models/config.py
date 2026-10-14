@@ -1042,6 +1042,54 @@ class ColQwen3_5Config(Qwen3_5ForConditionalGenerationConfig):
             config.is_causal = is_causal
 
 
+class D3ForSequenceClassificationConfig(Qwen3_5ForConditionalGenerationConfig):
+    """Apply the contract declared by a Decision 3.0 `decision_config.json`."""
+
+    @staticmethod
+    def verify_and_update_model_config(model_config: "ModelConfig") -> None:
+        hf_config = model_config.hf_config
+        decision = getattr(hf_config, "decision_config", None)
+        if not isinstance(decision, dict):
+            raise ValueError("Decision 3.0 checkpoints need a decision_config.json")
+        if decision.get("format_version") != 1:
+            raise ValueError(
+                "unsupported decision_config.json format_version "
+                f"{decision.get('format_version')!r}; vLLM reads version 1"
+            )
+        if decision.get("pooling", "last") != "last":
+            raise ValueError(
+                f"unsupported decision_config.json pooling {decision['pooling']!r}"
+            )
+        attention_mode = decision.get("attention_mode", "causal")
+        if attention_mode not in ("causal", "noncausal_full_attention"):
+            raise ValueError(
+                f"unsupported decision_config.json attention_mode {attention_mode!r}"
+            )
+        codes = decision.get("codes")
+        token_ids = decision.get("token_ids")
+        if not codes or not isinstance(token_ids, list) or len(codes) != len(token_ids):
+            raise ValueError(
+                "decision_config.json must list one token id per answer code"
+            )
+
+        # The full attention layers read the whole prompt in both directions;
+        # the Gated DeltaNet layers stay causal.
+        is_causal = attention_mode == "causal"
+        for config in {
+            id(config): config for config in (hf_config, model_config.hf_text_config)
+        }.values():
+            config.is_causal = is_causal
+        # One readout row per answer code.
+        hf_config.id2label = dict(enumerate(codes))
+
+        # Probabilities only exist over a question's own options, so the head
+        # returns raw code logits unless activation is requested.
+        pooler_config = model_config.pooler_config
+        assert pooler_config is not None
+        if pooler_config.use_activation is None:
+            pooler_config.use_activation = False
+
+
 class SnowflakeGteNewModelConfig(VerifyAndUpdateConfig):
     @staticmethod
     def verify_and_update_model_config(model_config: "ModelConfig") -> None:
@@ -1089,6 +1137,7 @@ class LongcatFlashNgramForCausalLMConfig(VerifyAndUpdateConfig):
 MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "ColBERTJinaRobertaModel": JinaRobertaModelConfig,
     "ColQwen3_5": ColQwen3_5Config,
+    "D3ForSequenceClassification": D3ForSequenceClassificationConfig,
     "DeepseekV4ForCausalLM": DeepseekV4ForCausalLMConfig,
     "DeepseekV4ForConditionalGeneration": DeepseekV4ForCausalLMConfig,
     "DeepseekV41ForCausalLM": DeepseekV4ForCausalLMConfig,
