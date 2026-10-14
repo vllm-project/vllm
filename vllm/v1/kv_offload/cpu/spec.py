@@ -170,16 +170,21 @@ class CPUOffloadingSpec(OffloadingSpec):
         # num_chunks == 0 would size the region to zero bytes, which cannot be
         # mmap'd; fall back to the tensor path (empty tensors) as before.
         if self._uses_shared_region() and self.num_chunks > 0:
-            # Replicated layout puts all ranks on slot 0 (single MLA copy);
-            # otherwise each worker uses its own rank-indexed slot.
-            rank = 0 if self.replicated_layout else self.config.parallel.rank
+            # Use the logical worker rank for each slot, and distribute the
+            # replicated region's pre-faulting work across the worker group.
+            world_size = self.config.parallel.world_size
+            worker_index = self.config.parallel.rank
+
             mmap_region = SharedOffloadRegion(
                 engine_id=self.config.engine_id,
                 num_chunks=self.num_chunks,
-                rank=rank,
+                rank=0 if self.replicated_layout else worker_index,
                 kv_bytes_per_chunk=self.kv_bytes_per_chunk,
                 cpu_page_size=self.cpu_page_size_per_worker,
                 barrier=_all_workers_barrier,
+                populate_shard=(
+                    (worker_index, world_size) if self.replicated_layout else None
+                ),
             )
         try:
             return CPUOffloadingWorker(
