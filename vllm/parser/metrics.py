@@ -26,6 +26,7 @@ class ToolCallOutcome(Enum):
 
 class RequestType(Enum):
     CHAT_COMPLETIONS = "chat_completions"
+    MESSAGES = "messages"
     RESPONSES = "responses"
     OTHER = "other"
 
@@ -119,13 +120,20 @@ def _tool_count_bucket(count: int) -> str:
     return "10+"
 
 
+def _request_api_surface(request: object) -> Literal["chat_completions", "messages"]:
+    return (
+        "messages"
+        if getattr(request, "_api_surface", None) == "messages"
+        else "chat_completions"
+    )
+
+
 def record_tool_call_response(
     request: object,
     *,
     tool_calls_count: int = 0,
     parse_failed: bool = False,
     completed: bool = True,
-    api_surface: Literal["chat_completions", "messages"] = "chat_completions",
 ) -> None:
     """Record a request outcome and the calls actually returned to the client.
 
@@ -133,6 +141,7 @@ def record_tool_call_response(
     """
     if _tool_call_responses is None or _tool_calls_emitted is None:
         return
+    api_surface = _request_api_surface(request)
     status = (
         "parse_failure"
         if parse_failed
@@ -171,7 +180,7 @@ def record_tool_parser_invocation(
 
     match request:
         case ChatCompletionRequest():
-            request_type = RequestType.CHAT_COMPLETIONS
+            request_type = RequestType(_request_api_surface(request))
         case ResponsesRequest():
             request_type = RequestType.RESPONSES
         case _:

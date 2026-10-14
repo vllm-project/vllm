@@ -42,6 +42,7 @@ from vllm.entrypoints.generate.base.protocol import (
     ToolCall,
 )
 from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionRequest,
     ChatCompletionResponse,
     ChatCompletionResponseChoice,
     ChatCompletionResponseStreamChoice,
@@ -68,6 +69,23 @@ def _make_request(
         messages=messages,
         **kwargs,
     )
+
+
+class TestApiAttribution:
+    @pytest.mark.parametrize("stream", [False, True])
+    def test_messages_attribution_is_private_and_survives_request_copy(self, stream):
+        result = _convert(_make_request([], stream=stream))
+        assert result._api_surface == "messages"
+        assert result.model_copy(deep=True)._api_surface == "messages"
+        assert "_api_surface" not in result.model_dump()
+        assert "_api_surface" not in result.model_json_schema()["properties"]
+
+    @pytest.mark.parametrize("value", ["messages", "private-label"])
+    def test_chat_clients_cannot_override_api_attribution(self, value):
+        result = ChatCompletionRequest.model_validate(
+            {"messages": [], "_api_surface": value}
+        )
+        assert result._api_surface == "chat_completions"
 
 
 # ======================================================================
