@@ -6,6 +6,7 @@ import torch
 import torch.nn as nn
 
 from vllm.distributed import (
+    get_o_proj_tp_group,
     get_tensor_model_parallel_rank,
     tensor_model_parallel_all_gather,
 )
@@ -130,7 +131,17 @@ def deep_gemm_fp8_o_proj(
             grouped_weight.transpose(1, 2),
             out=z.transpose(0, 1),
         )
-    return wo_b(z.flatten(1))
+    z_flat = z.flatten(1)
+    if ranks_per_group > 1:
+        z_all = tensor_model_parallel_all_gather(z_flat, dim=-1)
+        group_width = z_flat.shape[-1] * ranks_per_group
+        group = get_o_proj_tp_group().rank_in_group
+        z_flat = z_all[:, group * group_width : (group + 1) * group_width]
+        z_flat = z_flat.contiguous()
+    output = wo_b(z_flat)
+    if ranks_per_group > 1:
+        output = get_o_proj_tp_group().all_reduce(output)
+    return output
 
 
 # TRTLLM-gen's DSv4 RopeQuant epilogue (flashinfer-ai/flashinfer#4918) has one

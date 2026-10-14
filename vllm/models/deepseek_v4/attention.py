@@ -39,7 +39,11 @@ from vllm.config import (
     VllmConfig,
     get_current_vllm_config,
 )
-from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.distributed import (
+    get_tensor_model_parallel_rank,
+    get_tensor_model_parallel_world_size,
+    init_o_proj_tp_group,
+)
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
@@ -281,13 +285,22 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         )
         self.wo_a.is_bmm = True
         self.wo_a.bmm_batch_size = self.n_local_groups
+        wo_b_tp_rank = None
+        wo_b_tp_size = None
+        if self.o_proj_ranks_per_group > 1:
+            init_o_proj_tp_group(self.n_groups)
+            wo_b_tp_rank = get_tensor_model_parallel_rank() % self.n_groups
+            wo_b_tp_size = self.n_groups
         self.wo_b = RowParallelLinear(
             self.n_groups * self.o_lora_rank,
             self.hidden_size,
             bias=False,
             quant_config=quant_config,
+            reduce_results=self.o_proj_ranks_per_group == 1,
             return_bias=False,
             prefix=f"{prefix}.wo_b",
+            tp_rank=wo_b_tp_rank,
+            tp_size=wo_b_tp_size,
         )
 
         # Initialize rotary embedding before the indexer/compressor consume it.

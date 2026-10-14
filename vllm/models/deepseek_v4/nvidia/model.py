@@ -1077,6 +1077,10 @@ class DeepseekV4DecoderLayer(nn.Module):
             topk_indices_buffer=topk_indices_buffer,
             aux_stream_list=aux_stream_list,
         )
+        if self.use_sequence_parallel and self.attn.o_proj_ranks_per_group > 1:
+            raise ValueError(
+                "Sequence parallelism does not support cross-rank O-groups"
+            )
         if self.use_sequence_parallel:
             self.attn.wo_b.reduce_results = False
         self.ffn = DeepseekV4MoE(

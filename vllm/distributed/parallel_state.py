@@ -1583,11 +1583,69 @@ def _replace_active_groups(
 
 
 _TP: GroupCoordinator | None = None
+_O_PROJ_TP: GroupCoordinator | None = None
 
 
 def get_tp_group() -> GroupCoordinator:
     assert _TP is not None, "tensor model parallel group is not initialized"
     return _TP
+
+
+def get_o_proj_tp_group() -> GroupCoordinator:
+    assert _O_PROJ_TP is not None, "O-projection TP group is not initialized"
+    return _O_PROJ_TP
+
+
+def init_o_proj_tp_group(group_size: int) -> GroupCoordinator:
+    """Create node-local TP-shaped groups for mirrored O projections."""
+    global _O_PROJ_TP
+    if _O_PROJ_TP is not None:
+        if _O_PROJ_TP.world_size != group_size:
+            raise ValueError("O-projection TP group size changed after initialization")
+        return _O_PROJ_TP
+
+    tp = get_tp_group()
+    if tp.world_size % group_size:
+        raise ValueError("O-projection group size must divide TP size")
+    physical_fi = getattr(tp.device_communicator, "fi_ar_comm", None)
+    if physical_fi is not None and not physical_fi.disabled:
+        raise ValueError(
+            "Cross-rank O-groups cannot share an active FlashInfer TP workspace"
+        )
+    from vllm.distributed.device_communicators.pynccl_allocator import (
+        is_symmetric_memory_enabled,
+    )
+
+    if is_symmetric_memory_enabled():
+        raise ValueError(
+            "Cross-rank O-groups do not support NCCL symmetric-memory collectives"
+        )
+
+    group_ranks = [
+        ranks[start : start + group_size]
+        for ranks in tp.group_ranks
+        for start in range(0, len(ranks), group_size)
+    ]
+    group = init_model_parallel_group(
+        group_ranks,
+        get_world_group().local_rank,
+        tp.torch_distributed_backend,
+        group_name="tp",
+    )
+    if group.rank_in_group != tp.rank_in_group % group_size:
+        group.destroy()
+        raise ValueError("O-projection subgroup rank does not match TP-local rank")
+    if not all(in_the_same_node_as(group.cpu_group, source_rank=0)):
+        group.destroy()
+        raise ValueError("O-projection TP groups must be node-local")
+
+    _O_PROJ_TP = group
+    logger.info_once(
+        "Initialized node-local O-projection TP group %s with size %d",
+        group.unique_name,
+        group_size,
+    )
+    return group
 
 
 _ETP: GroupCoordinator | None = None
@@ -1695,8 +1753,12 @@ def graph_capture(device: torch.device):
     from other kernels possibly launched on background in the default stream.
     """
     context = GraphCaptureContext(torch.cuda.Stream(device=device))
+    o_proj_capture = (
+        _O_PROJ_TP.graph_capture(context) if _O_PROJ_TP is not None else nullcontext()
+    )
     with (
         get_tp_group().graph_capture(context),
+        o_proj_capture,
         get_pp_group().graph_capture(context),
         get_dp_group().graph_capture(context),
     ):
@@ -2452,11 +2514,15 @@ def get_node_count() -> int:
 
 def destroy_model_parallel():
     """Set the groups to none and destroy them."""
-    global _TP, _ETP
+    global _TP, _O_PROJ_TP, _ETP
 
     if _ETP and _ETP is not _TP:
         _ETP.destroy()
     _ETP = None
+
+    if _O_PROJ_TP:
+        _O_PROJ_TP.destroy()
+    _O_PROJ_TP = None
 
     if _TP:
         _TP.destroy()
