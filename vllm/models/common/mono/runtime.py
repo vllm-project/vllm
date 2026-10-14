@@ -74,10 +74,15 @@ class MonoRuntime(Generic[KernelT]):
             return
         self.state = spec.launch_state(model, vllm_config, tuple(indices))
         for i in indices:
-            for w in self.widths:
-                self.kernels[i, w] = cast(
-                    KernelT, spec.build(vllm_config, self.state, model.layers[i], w)
+            built = spec.build(vllm_config, self.state, model.layers[i], self.widths)
+            missing = set(self.widths) - set(built)
+            if missing:
+                raise MonoUnsupported(
+                    f"MonoKernel {spec.name}: layer {i} has no kernel for widths "
+                    f"{sorted(missing)}"
                 )
+            for w in self.widths:
+                self.kernels[i, w] = cast(KernelT, built[w])
         self.cache_layers = sorted(
             {n for k in self.kernels.values() for n in k.cache_layers}
         )
@@ -131,7 +136,7 @@ class MonoRuntime(Generic[KernelT]):
             raise MonoUnsupported(
                 f"MonoKernel {self.spec.name}: caches moved during CUDA graph capture"
             )
-        reasons = self.spec.refuse_caches(self.vllm_config, caches)
+        reasons = self.spec.refuse_caches(self.vllm_config, self.state, caches)
         if reasons:
             raise MonoUnsupported(
                 f"MonoKernel {self.spec.name} caches: " + "; ".join(reasons)

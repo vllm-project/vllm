@@ -208,7 +208,7 @@ class MonoConformance:
 
     def test_refuse_caches_reports_every_reason(self, config, model, mono):
         reasons = mono.spec.refuse_caches(
-            mono.vllm_config, self.bad_caches(config, model)
+            mono.vllm_config, mono.state, self.bad_caches(config, model)
         )
         assert len(reasons) >= 2, reasons
 
@@ -226,6 +226,15 @@ class MonoConformance:
         self.make_mono(config, model)
         after = {n: p.data_ptr() for n, p in model.named_parameters()}
         assert before == after
+
+    def test_build_runs_once_a_layer(self, config, model):
+        calls: list = []
+        spec = _spy(configure(config, self.specs_path), "build", calls)
+        mono = attach(model, config, spec)
+        layers = sorted({i for i, _ in mono.kernels})
+        assert [args[2] for args in calls] == [model.layers[i] for i in layers]
+        assert all(set(args[3]) == set(mono.widths) for args in calls)
+        assert set(mono.kernels) == {(i, w) for i in layers for w in mono.widths}
 
     def test_warmup_registered_for_every_width(self, config):
         registry = JitWarmupRegistry(config)

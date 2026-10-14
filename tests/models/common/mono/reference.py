@@ -105,7 +105,7 @@ def launch_state(model, vllm_config, layers: tuple[int, ...]) -> LaunchState:
     return LaunchState(weights={i: model.layers[i].weight.data for i in layers})
 
 
-def refuse_caches(vllm_config, caches) -> list[str]:
+def refuse_caches(vllm_config, state: LaunchState, caches) -> list[str]:
     reasons = []
     for name, cache in caches.items():
         if cache.dtype is not CACHE_DTYPE:
@@ -115,8 +115,10 @@ def refuse_caches(vllm_config, caches) -> list[str]:
     return reasons
 
 
-def build(vllm_config, state: LaunchState, layer, width: int) -> ReferenceKernel:
-    return ReferenceKernel(vllm_config, state, layer, width)
+def build(
+    vllm_config, state: LaunchState, layer, widths: tuple[int, ...]
+) -> dict[int, ReferenceKernel]:
+    return {w: ReferenceKernel(vllm_config, state, layer, w) for w in widths}
 
 
 REFERENCE = MonoSpec[LaunchState](

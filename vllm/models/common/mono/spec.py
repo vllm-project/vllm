@@ -72,9 +72,9 @@ class MonoSpec(Generic[LaunchStateT]):
     as a ``MONO_SPECS`` tuple the library selects from.
 
     The parameter is the spec's own launch state: ``launch_state`` builds it,
-    and ``skip_step`` and ``build`` are handed back the same object. Annotate
-    the spec with it (``MonoSpec[MyLaunchState](...)``) and those three
-    callbacks are checked against each other.
+    and ``refuse_caches``, ``skip_step`` and ``build`` are handed back the same
+    object. Annotate the spec with it (``MonoSpec[MyLaunchState](...)``) and
+    those four callbacks are checked against each other.
 
     Gating runs in tiers, and the prefix is the consequence. ``refuse_*`` says
     the deployment asked for something it cannot have, so it may take the
@@ -93,7 +93,8 @@ class MonoSpec(Generic[LaunchStateT]):
             the weights are loaded.
         refuse_model: Deployment refusals only the loaded model answers.
         refuse_caches: Deployment refusals the KV caches the kernels will read
-            answer, re-run whenever those caches move.
+            answer, re-run whenever those caches move. Takes the launch state,
+            so the caches are checked against what the kernels were built for.
         skip_layer: Why one layer takes vLLM's path, None when it takes the
             kernel's. Takes only the layer, so what it reads is what every rank
             of the same model sees alike.
@@ -105,7 +106,10 @@ class MonoSpec(Generic[LaunchStateT]):
             launch on) and the indices ``skip_layer`` left, in order. The only
             place a weight copy is ever made. Opaque to the library, which only
             hands it back to the spec's own callbacks.
-        build: One ``LayerKernel`` for (config, state, layer, width).
+        build: One layer's kernels, by width, called once a layer with every
+            width the spec serves. What a layer prepares once (its weight
+            views, anything the layer itself must be told) is prepared here,
+            and the widths share it. Must return a kernel for every width.
 
     """
 
@@ -114,8 +118,10 @@ class MonoSpec(Generic[LaunchStateT]):
     widths: Callable[["VllmConfig"], tuple[int, ...]]
     refuse_config: Callable[["VllmConfig"], list[str]]
     refuse_model: Callable[[Any], list[str]]
-    refuse_caches: Callable[["VllmConfig", Mapping[str, Any]], list[str]]
+    refuse_caches: Callable[["VllmConfig", LaunchStateT, Mapping[str, Any]], list[str]]
     skip_layer: Callable[[Any], str | None]
     skip_step: Callable[["VllmConfig", LaunchStateT, int], str | None]
     launch_state: Callable[[Any, "VllmConfig", tuple[int, ...]], LaunchStateT]
-    build: Callable[["VllmConfig", LaunchStateT, Any, int], LayerKernel]
+    build: Callable[
+        ["VllmConfig", LaunchStateT, Any, tuple[int, ...]], Mapping[int, LayerKernel]
+    ]

@@ -443,7 +443,7 @@ def _attn_weights(a, world: int):
     return attn
 
 
-def _refuse_caches(vllm_config, caches) -> list[str]:
+def _refuse_caches(vllm_config, launch_state: LaunchState, caches) -> list[str]:
     """Every reason the kernels cannot read these caches: they index each as
     [blocks, block, RECORD] bytes."""
     reasons = []
@@ -461,21 +461,19 @@ def _refuse_caches(vllm_config, caches) -> list[str]:
 
 
 def _build(
-    vllm_config, launch_state: LaunchState, layer, width: int
-) -> DSV41LayerKernel:
+    vllm_config, launch_state: LaunchState, layer, widths: tuple[int, ...]
+) -> dict[int, DSV41LayerKernel]:
     world = vllm_config.parallel_config.tensor_parallel_size
     why = _ffn_only(layer)
-    if layer.attn.layer_id not in launch_state.weights:
-        launch_state.weights[layer.attn.layer_id] = _weights(
-            layer, why is not None, world
-        )
+    launch_state.weights[layer.attn.layer_id] = _weights(layer, why is not None, world)
+    kernel: type[DSV41LayerKernel] = WholeLayer
     if why is not None:
         logger.info_once("DSv4.1 MonoKernel: the FFN launch for layers with %s", why)
         # A decode step hands wo_b's TP partial to the FFN launch; the layer
         # reduces it on the steps that keep vLLM's path.
         layer.attn.wo_b.reduce_results = False
-        return FfnSeam(launch_state, layer, width)
-    return WholeLayer(launch_state, layer, width)
+        kernel = FfnSeam
+    return {w: kernel(launch_state, layer, w) for w in widths}
 
 
 MONO_SPEC = MonoSpec[LaunchState](
