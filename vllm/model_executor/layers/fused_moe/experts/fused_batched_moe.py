@@ -602,6 +602,8 @@ def invoke_moe_batched_triton_kernel(
     BLOCK_M = config["BLOCK_SIZE_M"]
     BLOCK_N = config["BLOCK_SIZE_N"]
     BLOCK_K = config["BLOCK_SIZE_K"]
+    if block_shape is not None:
+        BLOCK_K = min(BLOCK_K, min(block_shape[0], block_shape[1]))
 
     # Consecutive programs share an expert's weight tile, which is faster on XPU.
     swap_grid = current_platform.is_xpu()

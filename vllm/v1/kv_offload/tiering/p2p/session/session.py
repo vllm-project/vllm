@@ -11,8 +11,11 @@ dispatch — each parsed message is forwarded to the corresponding role.
 
 Wire protocol is unchanged. Both sides advertise their NIXL metadata
 via ConnectMsg when their session is connected; the peer's ConnectMsg
-triggers transport.add_remote_peer; ConnectAckMsg confirms the peer
-received our ConnectMsg, after which queued outgoing messages are flushed.
+starts transport.add_remote_peer_async off the scheduler thread, and
+ConnectAckMsg is sent only once that registration lands. ConnectAckMsg
+confirms the peer received our ConnectMsg, after which queued outgoing
+messages are flushed — so a peer that may send is a peer we have already
+registered.
 """
 
 from __future__ import annotations
@@ -20,6 +23,7 @@ from __future__ import annotations
 import contextlib
 import time
 from collections.abc import Sequence
+from concurrent.futures import Future
 from typing import TYPE_CHECKING, NamedTuple
 
 import vllm.envs as envs
@@ -100,9 +104,11 @@ class P2PSession:
         the decoder connects).
       - Constructor with conn != None ⇒ connected. Sends our own ConnectMsg
         immediately; the peer's ConnectMsg arrives in poll() and is
-        dispatched to _on_connect (which calls transport.add_remote_peer
-        and replies with ConnectAckMsg). Outgoing sends are queued until
-        ConnectAckMsg confirms our metadata reached the peer.
+        dispatched to _on_connect, which starts
+        transport.add_remote_peer_async. A later poll() sees the
+        registration land and replies with ConnectAckMsg; a failed
+        registration marks the connection dead instead. Outgoing sends are
+        queued until ConnectAckMsg confirms our metadata reached the peer.
       - attach_connection(conn) on a pending session ⇒ same as above,
         starting from pending.
     """
@@ -140,6 +146,13 @@ class P2PSession:
         # submit_store batches parked before the binding existed.
         self._new_fetch_ids: list[str] = []
 
+        # In-flight peer registration started by _on_connect. Registration
+        # is O(num_blocks) and runs off this thread, so ConnectAckMsg is
+        # held back until the future resolves — the ack is what tells the
+        # peer it may start sending, and nothing may be served before the
+        # peer's blocks are registered here.
+        self._pending_registration: Future[None] | None = None
+
         self._client = ClientRole(peer_id=peer_id, send=self._send)
         self._server = ServerRole(
             peer_id=peer_id,
@@ -172,7 +185,11 @@ class P2PSession:
     @property
     def has_pending_work(self) -> bool:
         """True while inbound loads or outbound transfers are outstanding."""
-        return self._client.has_active_loads or self._server.has_inflight_transfers
+        return (
+            self._pending_registration is not None
+            or self._client.has_active_loads
+            or self._server.has_inflight_transfers
+        )
 
     @property
     def last_activity_at(self) -> float:
@@ -278,9 +295,21 @@ class P2PSession:
         for msg in messages:
             self._on_message(msg)
 
+        # After dispatch: a ConnectMsg handled just above may already have a
+        # resolved registration (transports that register inline ack in the
+        # same tick), and a registration started on an earlier tick may have
+        # landed while the engine was busy elsewhere. This runs before the
+        # handshake deadline below so a registration that just resolved gets
+        # its ConnectAckMsg out rather than being judged as timed out, and so
+        # a failed registration's mark_dead() short-circuits that check.
+        self._poll_registration()
+
         # Handshake deadline: a peer that never completes the handshake
         # is stuck in connected-but-not-ready state. Mark it dead so the
         # manager reaps it instead of accumulating sockets indefinitely.
+        # Note this also covers the peer registering *our* region before it
+        # acks, so the deadline must exceed remote registration time; the
+        # 30s default leaves ample room for the descriptor build.
         if (
             not self._send_ready
             and self._conn.alive
@@ -320,6 +349,14 @@ class P2PSession:
             ``parent.on_request_finished`` (the manager flushes these on
             its next ``serve_external_requests``).
         """
+        # Abandon any in-flight registration: nothing will ack this peer
+        # now. The manager's remove_remote_peer bumps the transport's
+        # generation for this peer, so a worker already past cancellation
+        # releases its handles instead of publishing them.
+        if self._pending_registration is not None:
+            self._pending_registration.cancel()
+            self._pending_registration = None
+
         client_result = self._client.close()
         failed_stores, failed_serves = self._server.close()
 
@@ -470,10 +507,11 @@ class P2PSession:
         # Validation failures here mean an incompatible or malicious peer.
         # Mark the connection dead so the manager reaps the session;
         # don't call add_remote_peer or send connect_ack.
-        if self._send_ready:
-            # We've already received connect_ack, so the handshake is
-            # complete. A second connect from the peer is a protocol
-            # violation — re-registering would corrupt transport state.
+        if self._send_ready or self._pending_registration is not None:
+            # Either the handshake completed (we hold the peer's ack) or a
+            # registration for this peer is already in flight. A second
+            # connect either way is a protocol violation — re-registering
+            # would corrupt transport state.
             self._protocol_error("duplicate connect after handshake")
             return
         try:
@@ -498,7 +536,7 @@ class P2PSession:
                     f"local={self._local_hash_seed!r}. Ensure PYTHONHASHSEED "
                     "(if set) matches on all P2P peers."
                 )
-            self._transport.add_remote_peer(
+            registration = self._transport.add_remote_peer_async(
                 self.peer_id,
                 agent_metadata=msg[ConnectMsg.AGENT_METADATA],
                 base_addr=msg[ConnectMsg.BASE_ADDR],
@@ -511,7 +549,35 @@ class P2PSession:
                 self._conn.mark_dead()
             return
 
-        if self._conn is not None:
+        # ConnectAckMsg is deferred to _poll_registration once the
+        # registration lands; sending it now would let the peer fetch
+        # against blocks this side has not registered yet.
+        self._pending_registration = registration
+
+    def _poll_registration(self) -> None:
+        """Ack or reject the peer once its registration resolves.
+
+        Called from poll() after message dispatch. A successful
+        registration releases ConnectAckMsg — the peer treats that as
+        permission to send, so it must not go out earlier. A failed one
+        marks the connection dead so the manager reaps the session.
+        """
+        registration = self._pending_registration
+        if registration is None or not registration.done():
+            return
+        self._pending_registration = None
+        try:
+            registration.result()
+        except Exception as exc:
+            logger.error(
+                "P2PSession %s: peer registration failed, rejecting peer: %s",
+                self.peer_id,
+                exc,
+            )
+            if self._conn is not None:
+                self._conn.mark_dead()
+            return
+        if self._conn is not None and self._conn.alive:
             self._conn.send(
                 {
                     TYPE_KEY: ConnectAckMsg.TYPE,
