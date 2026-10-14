@@ -29,6 +29,16 @@ EP extension for the installed PyTorch, with `tools/build_nixl_with_torch215_for
 `vllm-openai-base` then replaces the NIXL packages installed from the KV-connector
 requirements with these wheels.
 
+The AWS EFA images are built separately by `docker/Dockerfile.efa` on top of a
+`vllm-openai` image built with `INSTALL_KV_CONNECTORS=true`. It adds the AWS EFA
+userspace stack, the EFA Mooncake wheel (x86_64 only), and DeepEP built for
+NCCL GIN over EFA. Kernel modules and host limits remain host-managed.
+
+```bash
+docker build -f docker/Dockerfile.efa \
+    --build-arg BASE_IMAGE=vllm/vllm-openai:latest -t vllm:openai-efa docker/
+```
+
   > <figure markdown="span">
   >   ![](../../assets/contributing/dockerfile-stages-dependency.png){ align="center" alt="query" width="100%" }
   > </figure>

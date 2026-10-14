@@ -1,0 +1,161 @@
+# AWS EFA variant of a vllm-openai image. Adds the EFA userspace stack
+# (libfabric, rdma-core, aws-ofi-nccl), the EFA Mooncake wheel (x86_64 only),
+# and DeepEP rebuilt from the amazon-contributing fork for NCCL GIN over EFA.
+#
+# The base must be built with INSTALL_KV_CONNECTORS=true (NIXL and Mooncake):
+#   docker build -f docker/Dockerfile.efa \
+#       --build-arg BASE_IMAGE=vllm/vllm-openai:latest -t vllm:openai-efa docker/
+#
+# The host still provides the EFA kernel module and memlock limits.
+ARG BASE_IMAGE=vllm/vllm-openai:latest
+FROM ${BASE_IMAGE}
+
+ARG TARGETARCH
+ARG EFA_INSTALLER_VERSION=1.50.0
+ARG EFA_INSTALLER_SHA256=fa6dff8593d866866c13cb4640d9059835cd4efa427971f100ab40c97bef2841
+
+# Without the KV connectors there is no NIXL plugin or Mooncake wheel to use EFA.
+RUN set -eu; \
+    if ! python3 -c "import importlib.metadata as m; m.version('nixl')" \
+            2>/dev/null; then \
+        echo "Dockerfile.efa needs a base image built with \
+--build-arg INSTALL_KV_CONNECTORS=true" >&2; \
+        exit 1; \
+    fi
+
+# Install the AWS EFA userspace stack.
+RUN set -eux; \
+    EFA_INSTALLER_ARCHIVE="/tmp/aws-efa-installer-${EFA_INSTALLER_VERSION}.tar.gz"; \
+    curl -fsSL --retry 3 --retry-all-errors \
+        "https://efa-installer.amazonaws.com/aws-efa-installer-${EFA_INSTALLER_VERSION}.tar.gz" \
+        -o "${EFA_INSTALLER_ARCHIVE}"; \
+    echo "${EFA_INSTALLER_SHA256}  ${EFA_INSTALLER_ARCHIVE}" | sha256sum -c -; \
+    tar -xzf "${EFA_INSTALLER_ARCHIVE}" -C /tmp; \
+    # The installer apt-installs dependencies; the base image purged the lists.
+    apt-get update -y; \
+    # Not --minimal: it skips libfabric, which NIXL's LIBFABRIC plugin needs.
+    (cd /tmp/aws-efa-installer && \
+        ./efa_installer.sh -y --skip-kmod --skip-limit-conf --no-verify); \
+    test -x /opt/amazon/efa/bin/fi_info; \
+    /opt/amazon/efa/bin/fi_info --version; \
+    # `-l` lists providers without EFA hardware, so this works in a build.
+    /opt/amazon/efa/bin/fi_info -l | grep -q '^efa:'; \
+    EFA_NIXL_PLUGIN=$(find /usr/local/lib -name libplugin_LIBFABRIC.so \
+        -print -quit); \
+    test -n "${EFA_NIXL_PLUGIN}"; \
+    ldd "${EFA_NIXL_PLUGIN}" | grep -q 'libfabric\.so\.1 => /opt/amazon/efa/lib/'; \
+    # Plugins that NCCL_NET_PLUGIN=ofi and NCCL_TUNER_PLUGIN=ofi resolve to.
+    test -f /opt/amazon/ofi-nccl/lib/libnccl-net-ofi.so; \
+    test -f /opt/amazon/ofi-nccl/lib/libnccl-tuner-ofi.so; \
+    apt-get clean; \
+    rm -rf "${EFA_INSTALLER_ARCHIVE}" /tmp/aws-efa-installer \
+        /var/lib/apt/lists/*
+
+# Route NCCL over EFA. Override with `-e NCCL_NET_PLUGIN= -e NCCL_TUNER_PLUGIN=`
+# to run this image on a non-EFA host.
+ENV NCCL_NET_PLUGIN=ofi \
+    NCCL_TUNER_PLUGIN=ofi
+
+# Swap in the EFA Mooncake wheel at the base image's Mooncake version. Both
+# wheels own the `mooncake` module; the EFA wheels are published for x86_64 only.
+RUN --mount=type=cache,target=/opt/uv/cache \
+    set -eu; \
+    pkg_version() { python3 -c "import importlib.metadata as m, sys; \
+print(m.version(sys.argv[1]))" "$1" 2>/dev/null; }; \
+    if MOONCAKE_VERSION=$(pkg_version mooncake-transfer-engine-cuda13); then \
+        MOONCAKE_PKG=mooncake-transfer-engine-cuda13; \
+        MOONCAKE_EFA_PKG=mooncake-transfer-engine-efa-cuda13; \
+    elif MOONCAKE_VERSION=$(pkg_version mooncake-transfer-engine); then \
+        MOONCAKE_PKG=mooncake-transfer-engine; \
+        MOONCAKE_EFA_PKG=mooncake-transfer-engine-efa; \
+    else \
+        echo "No Mooncake wheel in the base image; build it with \
+--build-arg INSTALL_KV_CONNECTORS=true" >&2; \
+        exit 1; \
+    fi; \
+    if [ "${TARGETARCH}" != "amd64" ]; then \
+        echo "TARGETARCH=${TARGETARCH}: ${MOONCAKE_EFA_PKG} is x86_64-only, \
+keeping ${MOONCAKE_PKG} (Mooncake EFA protocol unavailable)"; \
+    else \
+        echo "Swapping ${MOONCAKE_PKG}==${MOONCAKE_VERSION} for \
+${MOONCAKE_EFA_PKG}==${MOONCAKE_VERSION}"; \
+        uv pip uninstall --system "${MOONCAKE_PKG}"; \
+        uv pip install --system --no-deps \
+            "${MOONCAKE_EFA_PKG}==${MOONCAKE_VERSION}"; \
+        test "$(pkg_version "${MOONCAKE_EFA_PKG}")" = "${MOONCAKE_VERSION}"; \
+        # `! cmd` is exempt from `set -e`, so check explicitly.
+        if pkg_version "${MOONCAKE_PKG}" >/dev/null; then \
+            echo "${MOONCAKE_PKG} is still installed" >&2; \
+            exit 1; \
+        fi; \
+    fi
+
+# Only amd64 has the EFA Mooncake wheel; other arches use tcp. ENV cannot be
+# conditional, so this is "tcp if TARGETARCH is not amd64, else efa".
+ARG ARCH_IF_NOT_AMD64=${TARGETARCH#amd64}
+ARG PROTOCOL_IF_NOT_AMD64=${ARCH_IF_NOT_AMD64:+tcp}
+ENV MOONCAKE_PROTOCOL=${PROTOCOL_IF_NOT_AMD64:-efa}
+
+# Replace the base image's upstream DeepEP with the amazon-contributing fork,
+# whose deepep_v2 backend carries EP traffic over EFA through NCCL GIN.
+ARG DEEPEP_REPO="https://github.com/amazon-contributing/DeepEP.git"
+ARG DEEPEP_REF="874779c9ccd2294b56304bd6cc5f138f1f71d097"
+ARG DEEPEP_CUDA_ARCH_LIST="9.0a;10.0a;10.3a"
+
+# Headers and git for DeepEP's nvcc build. `reinstall` also installs packages
+# that are absent.
+RUN set -eux; \
+    CUDA_PKG_VERSION=$(nvcc --version \
+        | grep -oP 'release \K[0-9]+\.[0-9]+' | tr '.' '-'); \
+    DEBIAN_FRONTEND=noninteractive apt-get update -y; \
+    DEBIAN_FRONTEND=noninteractive apt-get reinstall -y --no-install-recommends \
+        git \
+        libcusparse-dev-${CUDA_PKG_VERSION} \
+        libcusolver-dev-${CUDA_PKG_VERSION} \
+        cuda-nvrtc-dev-${CUDA_PKG_VERSION}; \
+    rm -rf /var/lib/apt/lists/*
+
+RUN --mount=type=cache,target=/opt/uv/cache \
+    set -eux; \
+    git clone "${DEEPEP_REPO}" /tmp/deepep; \
+    cd /tmp/deepep; \
+    git checkout "${DEEPEP_REF}"; \
+    git submodule update --init --recursive; \
+    uv pip uninstall --system deep_ep 2>/dev/null || true; \
+    NCCL_ROOT="$(python3 -c "import importlib.util, os; \
+s = importlib.util.find_spec('nvidia.nccl'); \
+print(os.path.dirname(s.origin or s.submodule_search_locations[0]))")/nccl"; \
+    export EP_NCCL_ROOT_DIR="${NCCL_ROOT}"; \
+    export LD_LIBRARY_PATH="${NCCL_ROOT}/lib:${LD_LIBRARY_PATH:-}"; \
+    # The CUDA driver stubs let DeepEP link libcuda in a builder with no driver.
+    export LIBRARY_PATH="${NCCL_ROOT}/lib:/usr/local/cuda/lib64/stubs:\
+/usr/local/cuda/targets/x86_64-linux/lib/stubs:${LIBRARY_PATH:-}"; \
+    export DISABLE_AGGRESSIVE_PTX_INSTRS=1; \
+    export TORCH_CUDA_ARCH_LIST="${DEEPEP_CUDA_ARCH_LIST}"; \
+    uv pip install --system --no-deps -vv --no-build-isolation .; \
+    cd /; \
+    rm -rf /tmp/deepep; \
+    # vLLM only logs when the deepep_v2 backend is unavailable, so fail here.
+    python3 -c "import deep_ep; assert hasattr(deep_ep, 'ElasticBuffer'), \
+'DeepEP built without the ElasticBuffer (v2) API'"
+
+# Provenance. Build args from docker-build-metadata-args.sh override the values
+# inherited from the base image; without them the base's values are kept.
+ARG BASE_IMAGE
+ARG VLLM_BUILD_COMMIT
+ARG VLLM_BUILD_PIPELINE
+ARG VLLM_BUILD_URL
+ARG VLLM_IMAGE_TAG
+ENV VLLM_BUILD_COMMIT=${VLLM_BUILD_COMMIT} \
+    VLLM_BUILD_PIPELINE=${VLLM_BUILD_PIPELINE} \
+    VLLM_BUILD_URL=${VLLM_BUILD_URL} \
+    VLLM_IMAGE_TAG=${VLLM_IMAGE_TAG}
+LABEL org.opencontainers.image.revision="${VLLM_BUILD_COMMIT}" \
+      org.opencontainers.image.version="${VLLM_IMAGE_TAG}" \
+      org.opencontainers.image.url="${VLLM_BUILD_URL}" \
+      ai.vllm.build.commit="${VLLM_BUILD_COMMIT}" \
+      ai.vllm.build.pipeline="${VLLM_BUILD_PIPELINE}" \
+      ai.vllm.build.url="${VLLM_BUILD_URL}" \
+      ai.vllm.image.tag="${VLLM_IMAGE_TAG}" \
+      ai.vllm.efa.base-image="${BASE_IMAGE}" \
+      ai.vllm.efa.installer-version="${EFA_INSTALLER_VERSION}"
