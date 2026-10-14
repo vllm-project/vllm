@@ -42,6 +42,7 @@ from kvcr.types import (
     BlockKey,
     CacheTier,
     InventoryEvent,
+    KVCRStartupError,
     MemoryRef,
     OpHandle,
     PinRequestId,
@@ -262,6 +263,12 @@ class _VllmKeyAdapter:
 _JobState = tuple[int, int, bool, set[OffloadKey] | None]
 
 
+# Held for the process lifetime after a startup failure that could not stop
+# native work: an export blocks close() and keeps the mapping alive against GC,
+# so nothing can unmap memory NIXL may still be writing into.
+_RETAINED_NATIVE_BUFFERS: list[object] = []
+
+
 class KVCRSecondaryTierManager(SecondaryTierManager):
     """Secondary tier wrapper around the KVCR KV P2P API."""
 
@@ -447,7 +454,17 @@ class KVCRSecondaryTierManager(SecondaryTierManager):
                 ),
                 guard_config,
             )
-        except BaseException:
+        except BaseException as exc:
+            if not isinstance(exc, Exception) or isinstance(exc, KVCRStartupError):
+                # Native work may still touch these.
+                _RETAINED_NATIVE_BUFFERS.append(
+                    ctypes.c_char.from_buffer(primary_kv_view)
+                )
+                if local_mapping is not None:
+                    _RETAINED_NATIVE_BUFFERS.append(
+                        ctypes.c_char.from_buffer(local_mapping)
+                    )
+                raise
             control.close()
             if local_mapping is not None:
                 local_mapping.close()
