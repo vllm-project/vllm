@@ -50,7 +50,7 @@ PUSH_REG_NOTIF_PREFIX = b"PUSH_REG:"
 #  12: Add per-region member names for PP push
 #  13: Add packed-member layouts and order-independent packed-push backend hashes
 #  14: Add Qwen3.8-Flash-Next PLE page length - #59997
-#  15: Add remote_registration_epoch to kv_transfer_params
+#  15: Add remote_registration_generation to kv_transfer_params
 #
 NIXL_CONNECTOR_VERSION: int = 15
 
@@ -237,8 +237,8 @@ class RemoteMeta:
     request_id: str
     blocks_expiry_time: float | None = None
     num_tokens: int | None = None
-    # Bumped each time the remote re-registers its KV cache after a sleep.
-    registration_epoch: int = 0
+    # Bumped each time the remote publishes a changed KV cache registration.
+    registration_generation: int = 0
 
 
 @dataclass
@@ -339,6 +339,8 @@ class NixlConnectorMetadata(KVConnectorMetadata):
             port=kv_transfer_params["remote_port"],
             blocks_expiry_time=kv_transfer_params.get("remote_blocks_expiry_time"),
             num_tokens=kv_transfer_params.get("remote_num_tokens"),
-            registration_epoch=kv_transfer_params.get("remote_registration_epoch", 0),
+            registration_generation=kv_transfer_params.get(
+                "remote_registration_generation", 0
+            ),
         )
         self.reqs_to_recv[request_id] = req

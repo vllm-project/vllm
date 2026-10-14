@@ -2192,7 +2192,7 @@ def recv_worker():
     worker._engine_by_address = {}
     worker._failed_remote_engines = set()
     worker._invalid_remote_engines = set()
-    worker._remote_registration_epochs = {}
+    worker._remote_registration_generations = {}
     worker._replicated_pcp_done_sending = set()
     worker._invalid_block_ids = queue.Queue()
     worker._pending_recv_notifs = {}
@@ -2775,6 +2775,25 @@ def test_sleep_unregisters_and_restores_kv_caches(dist_init):
     connector.shutdown()
 
 
+def test_registration_generation_bumps_on_changed_payload(
+    default_vllm_config, dist_init
+):
+    """Peers handshake again only when the published registration changed."""
+    vllm_config = create_vllm_config()
+    scheduler = NixlConnectorScheduler(
+        vllm_config, vllm_config.kv_transfer_config.engine_id, make_kv_cache_config(16)
+    )
+    scheduler._nixl_handshake_listener_t = MagicMock()  # already serving
+    generations: list[int] = []
+    for agent in (b"old", b"old", b"new"):  # startup, same keys, changed keys
+        payload = NixlHandshakePayload(
+            compatibility_hash="h", agent_metadata_bytes=agent
+        )
+        scheduler.set_xfer_handshake_metadata({(0, 0): payload})
+        generations.append(scheduler._registration_generation)
+    assert generations[0] == generations[1] < generations[2]
+
+
 # ── TTL-based remote engine eviction tests ──────────────────────────
 
 
@@ -3318,7 +3337,7 @@ class TestPeerReplacement:
 
     def test_rehandshakes_re_registered_peer(self):
         metadata = self._request("old")
-        metadata.reqs_to_recv["old-req"].remote.registration_epoch = 1
+        metadata.reqs_to_recv["old-req"].remote.registration_generation = 1
         self.worker.start_load_kv(metadata)
         self.transport.make_prepped_xfer.assert_not_called()
         self.transport.remove_remote_agent.assert_called_once_with("old")

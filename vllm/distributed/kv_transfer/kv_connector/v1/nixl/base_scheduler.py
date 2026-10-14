@@ -115,7 +115,7 @@ class NixlBaseConnectorScheduler:
         self._stop_event = threading.Event()
         # Payloads the listener serves; a republish after a wake-up updates them.
         self._handshake_data: dict[tuple[int, int], bytes] = {}
-        self._registration_epoch = 0
+        self._registration_generation = 0
 
         # Requests that need to start recv/send.
         # New requests are added by update_state_after_alloc in
@@ -302,9 +302,6 @@ class NixlBaseConnectorScheduler:
             metadata (dict): the handshake metadata to set.
 
         """
-        if self._handshake_data:
-            # A wake-up re-registered the KV cache: peers must handshake again.
-            self._registration_epoch += 1
         encoder = msgspec.msgpack.Encoder()
         for (pp_rank, tp_rank), rank_metadata in metadata.items():
             if not isinstance(rank_metadata, NixlHandshakePayload):
@@ -312,7 +309,11 @@ class NixlBaseConnectorScheduler:
                     "NixlConnectorScheduler expects NixlHandshakePayload for "
                     "handshake metadata."
                 )
-            self._handshake_data[(pp_rank, tp_rank)] = encoder.encode(rank_metadata)
+            encoded = encoder.encode(rank_metadata)
+            if self._handshake_data.get((pp_rank, tp_rank)) != encoded:
+                # Peers must handshake again to load the changed registration.
+                self._registration_generation += 1
+            self._handshake_data[(pp_rank, tp_rank)] = encoded
             logger.debug(
                 "PP rank %d, TP rank %d: encoded NixlHandshakePayload size: %s bytes",
                 pp_rank,

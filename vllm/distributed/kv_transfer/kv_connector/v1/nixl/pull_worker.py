@@ -43,8 +43,8 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         kv_cache_config: "KVCacheConfig",
     ):
         super().__init__(vllm_config, engine_id, kv_cache_config)
-        # Registration epoch of each remote engine's loaded agent.
-        self._remote_registration_epochs: dict[EngineId, int] = {}
+        # Registration generation of each remote engine's loaded agent.
+        self._remote_registration_generations: dict[EngineId, int] = {}
 
     def start_load_kv(self, metadata: NixlConnectorMetadata):
         """Start loading by triggering non-blocking nixl_xfer.
@@ -143,12 +143,12 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                 req_id, None, self._recv_failures, record_failed_transfer=False
             )
             return
-        epoch = meta.remote.registration_epoch
-        if self._remote_registration_epochs.get(engine_id, 0) < epoch:
-            # The remote woke up from sleep and registered its KV cache again.
+        generation = meta.remote.registration_generation
+        if self._remote_registration_generations.get(engine_id, 0) < generation:
+            # The remote registered its KV cache again, eg after a sleep.
             if engine_id in self._remote_agents:
                 self._cleanup_remote_engine(engine_id, log_eviction=False)
-            self._remote_registration_epochs[engine_id] = epoch
+            self._remote_registration_generations[engine_id] = generation
         if engine_id not in self._remote_agents:
             # Also re-handshakes queued requests that outlived invalid-peer cleanup.
             self._background_nixl_handshake(req_id, engine_id, meta)
