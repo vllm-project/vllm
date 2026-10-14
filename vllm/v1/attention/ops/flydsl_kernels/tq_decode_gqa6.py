@@ -31,8 +31,8 @@
 #   matches PV B-operand directly).
 # * Centroids loaded once into LDS at kernel start (LDS-resident LUT).
 # * K dequant → LDS [token, head_dim] (natural layout)
-# * V dequant → LDS [head_dim, token] (TRANSPOSED — required so PV MFMA's
-#   A=V operand can be loaded as 4-bf16 contiguous via 1 ds_read_b64).
+# * V dequant → LDS [token, head_dim]; the PV MFMA's A=V operand is read
+#   back through the ds_read_tr16_b64 hardware transpose.
 #
 # MFMA layouts used:
 #   QK:  mfma(A=K, B=Q, C=qk_acc)    →  C[m=token, n=query],  4 fp32/lane
@@ -118,7 +118,6 @@ def build_tq_decode_gqa6_module(
     softmax_scale: float | None = None,
     query_group_size: int = QUERY_GROUP_SIZE,
     kv_block_size: int = KV_BLOCK_SIZE,
-    use_hw_v_transpose: bool = False,
     tile_groups_per_partition: int = 1,
 ):
     """Build a TQ decode GQA-6 kernel module (MiniMax-M2.5).
@@ -137,9 +136,6 @@ def build_tq_decode_gqa6_module(
 
     ``kv_block_size`` is the number of tokens per vLLM cache block. Must
     be a multiple of TILE_SIZE (=16). Supported values: 16 and 32.
-
-    ``use_hw_v_transpose`` (CDNA4 / gfx950 only) — see canonical kernel
-    docstring for details. Same fence pattern applies here.
     """
     assert query_group_size == 6, (
         f"build_tq_decode_gqa6_module is GQA-6 only; got "
@@ -153,7 +149,6 @@ def build_tq_decode_gqa6_module(
     assert int(tile_groups_per_partition) >= 1, (
         f"tile_groups_per_partition must be >= 1; got {tile_groups_per_partition}"
     )
-    USE_HW_TR = bool(use_hw_v_transpose)
     TGPP = int(tile_groups_per_partition)
     PARTITION_EXTENT_TOKENS = TGPP * KV_COMPUTE_BLOCK
 
@@ -238,8 +233,6 @@ def build_tq_decode_gqa6_module(
         q_lds_i64 = SmemPtr(base, q_off, T.i64, shape=(Q_LDS_BYTES // 8,)).get()
         kv_lds_i32 = SmemPtr(base, kv_off, T.i32, shape=(KV_TILE_LDS_BYTES // 4,)).get()  # noqa: F841
         kv_lds_i64 = SmemPtr(base, kv_off, T.i64, shape=(KV_TILE_LDS_BYTES // 8,)).get()
-        kv_lds_i16 = SmemPtr(base, kv_off, T.i16, shape=(KV_TILE_LDS_BYTES // 2,)).get()
-
         # ---- Constants ---------------------------------------------------
         c_sq = fx.Int32(_stride_q_seq)
         c_qh = fx.Int32(_stride_q_head)
@@ -671,85 +664,58 @@ def build_tq_decode_gqa6_module(
                 vscale_f32 = arith.extf(T.f32, arith.bitcast(T.f16, vscale_raw))
                 vzero_f32 = arith.extf(T.f32, arith.bitcast(T.f16, vzero_raw))
 
-                if USE_HW_TR:
-                    # V dequant → LDS [token][head_dim] (ROW-MAJOR, no transpose).
-                    # Each lane writes 32 contiguous bf16 (one token, head_dims
-                    # chunk_in_tok*32..+31) as 4× ds_write_b128 = 4× vec(2,i64).
-                    # Replaces 32× ds_write_b16 of the legacy transposed path.
-                    v_lds_elem_base = tok_in_tile * fx.Int32(
-                        HEAD_SIZE
-                    ) + chunk_in_tok * fx.Int32(32)
-                    for w in range_constexpr(4):
-                        word_i32 = vector.extract(v_packed, static_position=[w])
-                        bf16_elems = []
-                        for n in range_constexpr(8):
-                            nibble = (word_i32 >> fx.Int32(n * 4)) & fx.Int32(0xF)
-                            nibble_f32 = arith.sitofp(T.f32, nibble)
-                            elem_f32 = nibble_f32 * vscale_f32 + vzero_f32
-                            elem_bf16 = arith.trunc_f(T.bf16, elem_f32)
-                            bf16_elems.append(elem_bf16)
-                        v_bf16 = vector.from_elements(T.vec(8, T.bf16), bf16_elems)
-                        v_i64 = vector.bitcast(T.vec(2, T.i64), v_bf16)
-                        v_lds_i64_idx = (v_lds_elem_base + fx.Int32(w * 8)) // fx.Int32(
-                            4
-                        )
-                        vector.store(
-                            v_i64,
-                            kv_lds_i64,
-                            [arith.index_cast(T.index, v_lds_i64_idx)],
-                        )
-                    # ── HW V transpose: cross-lane LDS sync ─────────────────────
-                    # ds_read_tr16_b64 below introduces a cross-lane LDS read:
-                    # consumer lane t reads bytes written by source lanes
-                    # 0,4,8,12 (etc.). The compiler's automatic waitcnt insertion
-                    # is per-lane and has no awareness of the HW transpose's
-                    # cross-lane forwarding, so it can sink the next iteration's
-                    # ds_read ahead of these ds_write_b128 ops in the schedule.
-                    #
-                    # Two-part fence:
-                    #   1. sched_barrier(0): MachineScheduler reorder barrier
-                    #      (mask=0 → no instruction class may cross). Pure hint,
-                    #      generates no runtime instruction. Use the simple
-                    #      sched_barrier (NOT sched_group_barrier, which is an
-                    #      IGLP marker that requires partner barriers and
-                    #      corrupts the schedule when used in isolation).
-                    #   2. s_waitcnt lgkmcnt=0: runtime drain of the LDS write
-                    #      queue. vmcnt/expcnt left at no-wait so we don't
-                    #      stall on speculatively-issued HBM loads (which can
-                    #      include OOB-but-masked buffer_load reads from the
-                    #      next K-tile's hoisted V prefetch).
-                    #
-                    # The SW path below does NOT need this because each lane
-                    # only reads cells it itself wrote (no cross-lane dep), and
-                    # the per-lane same-address waitcnt the compiler emits is
-                    # correct.
-                    #
-                    # Without this fence the reordered ds_read produces
-                    # wrong results on high-partition-count configs (large
-                    # padded num_partitions); low-partition configs are
-                    # unaffected.
-                    rocdl.sched_barrier(0)
-                    # encode_waitcnt(vmcnt=63, expcnt=7, lgkmcnt=0)
-                    #   = 0xF | (7<<4) | (0<<8) | (3<<14) = 0xC07F
-                    rocdl.s_waitcnt(0xC07F)
-                else:
-                    # Legacy transposed V_LDS path: 32 ds_write_b16 per lane.
-                    for w in range_constexpr(4):
-                        word_i32 = vector.extract(v_packed, static_position=[w])
-                        for n in range_constexpr(8):
-                            nibble = (word_i32 >> fx.Int32(n * 4)) & fx.Int32(0xF)
-                            nibble_f32 = arith.sitofp(T.f32, nibble)
-                            elem_f32 = nibble_f32 * vscale_f32 + vzero_f32
-                            elem_bf16 = arith.trunc_f(T.bf16, elem_f32)
-                            elem_i16 = arith.bitcast(T.i16, elem_bf16)
-                            head_dim = chunk_in_tok * fx.Int32(32) + fx.Int32(w * 8 + n)
-                            v_idx_i16 = head_dim * fx.Int32(TILE_SIZE) + tok_in_tile
-                            v_vec = vector.from_elements(T.vec(1, T.i16), [elem_i16])
-                            vector.store(
-                                v_vec,
-                                kv_lds_i16,
-                                [arith.index_cast(T.index, v_idx_i16)],
-                            )
+                # V dequant → LDS [token][head_dim] (ROW-MAJOR, no transpose).
+                # Each lane writes 32 contiguous bf16 (one token, head_dims
+                # chunk_in_tok*32..+31) as 4× ds_write_b128 = 4× vec(2,i64).
+                v_lds_elem_base = tok_in_tile * fx.Int32(
+                    HEAD_SIZE
+                ) + chunk_in_tok * fx.Int32(32)
+                for w in range_constexpr(4):
+                    word_i32 = vector.extract(v_packed, static_position=[w])
+                    bf16_elems = []
+                    for n in range_constexpr(8):
+                        nibble = (word_i32 >> fx.Int32(n * 4)) & fx.Int32(0xF)
+                        nibble_f32 = arith.sitofp(T.f32, nibble)
+                        elem_f32 = nibble_f32 * vscale_f32 + vzero_f32
+                        elem_bf16 = arith.trunc_f(T.bf16, elem_f32)
+                        bf16_elems.append(elem_bf16)
+                    v_bf16 = vector.from_elements(T.vec(8, T.bf16), bf16_elems)
+                    v_i64 = vector.bitcast(T.vec(2, T.i64), v_bf16)
+                    v_lds_i64_idx = (v_lds_elem_base + fx.Int32(w * 8)) // fx.Int32(4)
+                    vector.store(
+                        v_i64,
+                        kv_lds_i64,
+                        [arith.index_cast(T.index, v_lds_i64_idx)],
+                    )
+                # ── HW V transpose: cross-lane LDS sync ─────────────────────
+                # ds_read_tr16_b64 below introduces a cross-lane LDS read:
+                # consumer lane t reads bytes written by source lanes
+                # 0,4,8,12 (etc.). The compiler's automatic waitcnt insertion
+                # is per-lane and has no awareness of the HW transpose's
+                # cross-lane forwarding, so it can sink the next iteration's
+                # ds_read ahead of these ds_write_b128 ops in the schedule.
+                #
+                # Two-part fence:
+                #   1. sched_barrier(0): MachineScheduler reorder barrier
+                #      (mask=0 → no instruction class may cross). Pure hint,
+                #      generates no runtime instruction. Use the simple
+                #      sched_barrier (NOT sched_group_barrier, which is an
+                #      IGLP marker that requires partner barriers and
+                #      corrupts the schedule when used in isolation).
+                #   2. s_waitcnt lgkmcnt=0: runtime drain of the LDS write
+                #      queue. vmcnt/expcnt left at no-wait so we don't
+                #      stall on speculatively-issued HBM loads (which can
+                #      include OOB-but-masked buffer_load reads from the
+                #      next K-tile's hoisted V prefetch).
+                #
+                # Without this fence the reordered ds_read produces
+                # wrong results on high-partition-count configs (large
+                # padded num_partitions); low-partition configs are
+                # unaffected.
+                rocdl.sched_barrier(0)
+                # encode_waitcnt(vmcnt=63, expcnt=7, lgkmcnt=0)
+                #   = 0xF | (7<<4) | (0<<8) | (3<<14) = 0xC07F
+                rocdl.s_waitcnt(0xC07F)
                 gpu.barrier()
 
                 # ---- PV MFMA: A=V[head_dim, token], B=P (=qk_acc bf16) -----
@@ -758,57 +724,38 @@ def build_tq_decode_gqa6_module(
                 p_bf16 = arith.trunc_f(T.vec(4, T.bf16), qk_acc)
                 p_op = vector.bitcast(T.vec(4, T.i16), p_bf16)
 
-                if USE_HW_TR:
-                    # HW-transpose PV path: V_lds is row-major V[token][head_dim].
-                    # MFMA A operand layout: lane t holds 4 bf16 at
-                    #   M=head_dim=mfma_row + h*16, K=token=(t/16)*4..+3
-                    # ds_read_tr16_b64 (4-element 16-bit transpose, per-16-lane block):
-                    #   result[lane=t, elem=e] = Input[source_lane=e*4 + (t%16)//4,
-                    #                                   col=t%4]
-                    # Per-lane address: token_idx = lane // 4 (covers 0..15 across
-                    # all four 16-lane MFMA blocks), hd_sub = (lane % 4)*4 selects
-                    # the 4-element column window inside the h*16 chunk.
-                    # Total LDS byte offset = kv_off + token_idx*HEAD_SIZE*2
-                    #                        + (h*16 + hd_sub)*2
-                    token_idx = lane >> fx.Int32(2)
-                    hd_sub = (lane & fx.Int32(3)) * fx.Int32(4)
-                    v_lane_byte = (
-                        fx.Int32(kv_off)
-                        + token_idx * fx.Int32(HEAD_SIZE * 2)
-                        + hd_sub * fx.Int32(2)
+                # HW-transpose PV path: V_lds is row-major V[token][head_dim].
+                # MFMA A operand layout: lane t holds 4 bf16 at
+                #   M=head_dim=mfma_row + h*16, K=token=(t/16)*4..+3
+                # ds_read_tr16_b64 (4-element 16-bit transpose, per-16-lane block):
+                #   result[lane=t, elem=e] = Input[source_lane=e*4 + (t%16)//4,
+                #                                   col=t%4]
+                # Per-lane address: token_idx = lane // 4 (covers 0..15 across
+                # all four 16-lane MFMA blocks), hd_sub = (lane % 4)*4 selects
+                # the 4-element column window inside the h*16 chunk.
+                # Total LDS byte offset = kv_off + token_idx*HEAD_SIZE*2
+                #                        + (h*16 + hd_sub)*2
+                token_idx = lane >> fx.Int32(2)
+                hd_sub = (lane & fx.Int32(3)) * fx.Int32(4)
+                v_lane_byte = (
+                    fx.Int32(kv_off)
+                    + token_idx * fx.Int32(HEAD_SIZE * 2)
+                    + hd_sub * fx.Int32(2)
+                )
+                for h in range_constexpr(PV_N_CHUNKS):
+                    v_byte_off = v_lane_byte + fx.Int32(h * 32)
+                    v_byte_i64 = fx.Int64(v_byte_off)
+                    v_ptr = buffer_ops.create_llvm_ptr(
+                        v_byte_i64,
+                        address_space=3,
                     )
-                    for h in range_constexpr(PV_N_CHUNKS):
-                        v_byte_off = v_lane_byte + fx.Int32(h * 32)
-                        v_byte_i64 = fx.Int64(v_byte_off)
-                        v_ptr = buffer_ops.create_llvm_ptr(
-                            v_byte_i64,
-                            address_space=3,
-                        )
-                        v_op_raw = rocdl.ds_read_tr16_b64(
-                            T.vec(4, T.i16),
-                            v_ptr,
-                        ).result
-                        acc_pv[h] = rocdl.mfma_f32_16x16x16bf16_1k(
-                            T.f32x4, [v_op_raw, p_op, acc_pv[h], 0, 0, 0]
-                        )
-                else:
-                    # Legacy transposed-LDS PV: 1 ds_read_b64 per chunk.
-                    # Byte addr = (mfma_row + h*16) * TILE_SIZE * 2 + (col_grp*4) * 2
-                    #          = (mfma_row + h*16) * 32 + col_grp*8
-                    # i64 idx  = (mfma_row + h*16) * 4 + col_grp
-                    for h in range_constexpr(PV_N_CHUNKS):
-                        v_idx_i64 = (mfma_row + fx.Int32(h * 16)) * fx.Int32(
-                            4
-                        ) + mfma_col_grp
-                        kv_load = vector.load_op(
-                            T.vec(1, T.i64),
-                            kv_lds_i64,
-                            [arith.index_cast(T.index, v_idx_i64)],
-                        )
-                        v_op = vector.bitcast(T.vec(4, T.i16), kv_load)
-                        acc_pv[h] = rocdl.mfma_f32_16x16x16bf16_1k(
-                            T.f32x4, [v_op, p_op, acc_pv[h], 0, 0, 0]
-                        )
+                    v_op_raw = rocdl.ds_read_tr16_b64(
+                        T.vec(4, T.i16),
+                        v_ptr,
+                    ).result
+                    acc_pv[h] = rocdl.mfma_f32_16x16x16bf16_1k(
+                        T.f32x4, [v_op_raw, p_op, acc_pv[h], 0, 0, 0]
+                    )
 
             _scf.YieldOp(
                 [

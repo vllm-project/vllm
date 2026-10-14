@@ -334,32 +334,6 @@ class _SegmBufPool:
 _SEGM_POOL = _SegmBufPool()
 
 
-_HW_TR_CACHED: bool | None = None
-
-
-def _hw_tr_enabled() -> bool:
-    """Resolve the HW V-transpose build flag.
-
-    ON for gfx950+ (ds_read_tr16_b64 is bit-exact vs baseline and faster
-    on Qwen-class shapes), off elsewhere. Resolved from the GPU arch.
-    """
-    global _HW_TR_CACHED
-    if _HW_TR_CACHED is not None:
-        return _HW_TR_CACHED
-    try:
-        from flydsl.runtime.device import get_rocm_arch as _arch
-
-        a = str(_arch() or "")
-        _HW_TR_CACHED = a.startswith("gfx950")
-    except Exception:  # noqa: BLE001
-        _HW_TR_CACHED = False
-    if _HW_TR_CACHED:
-        logger.info_once("FlyDSL TQ: HW V transpose ON (default for gfx950+)")
-    else:
-        logger.info_once("FlyDSL TQ: HW V transpose OFF")
-    return _HW_TR_CACHED
-
-
 _GET_KERNEL_STATS = {"hits": 0, "misses": 0, "build_total_s": 0.0}
 
 
@@ -370,7 +344,6 @@ def _get_kernel(
     scale: float,
     query_group_size: int,
     kv_block_size: int,
-    use_hw_v_transpose: bool = False,
     num_seqs_hint: int = 1,
     tile_groups_per_partition: int = 1,
 ):
@@ -388,7 +361,6 @@ def _get_kernel(
         round(float(scale), 8),
         int(query_group_size),
         int(kv_block_size),
-        bool(use_hw_v_transpose),
         int(tile_groups_per_partition),
     )
     cached = _KERN_CACHE.get(key)
@@ -421,7 +393,6 @@ def _get_kernel(
             softmax_scale=float(scale),
             query_group_size=qg,
             kv_block_size=int(kv_block_size),
-            use_hw_v_transpose=bool(use_hw_v_transpose),
             tile_groups_per_partition=int(tile_groups_per_partition),
         )
     else:
@@ -434,7 +405,6 @@ def _get_kernel(
             softmax_scale=float(scale),
             query_group_size=qg,
             kv_block_size=int(kv_block_size),
-            use_hw_v_transpose=bool(use_hw_v_transpose),
             tile_groups_per_partition=int(tile_groups_per_partition),
         )
     al = kmod.allocator
@@ -781,7 +751,6 @@ def flydsl_turboquant_decode_attention(
 
     # ---- FlyDSL kernel launch -------------------------------------------
     max_bps = int(block_table.shape[1])
-    use_hw_tr = _hw_tr_enabled()
     launch = _get_kernel(
         Hk,
         num_partitions,
@@ -789,7 +758,6 @@ def flydsl_turboquant_decode_attention(
         scale,
         QG,
         block_size,
-        use_hw_v_transpose=use_hw_tr,
         num_seqs_hint=int(B),
         tile_groups_per_partition=int(tile_groups_per_partition),
     )
@@ -802,7 +770,7 @@ def flydsl_turboquant_decode_attention(
             "FlyDSL launcher invoked (UNIFORM_BATCH cudagraph): "
             "B=%d Hk=%d Hq=%d D=%d QG=%d num_partitions=%d (actual=%d, "
             "cap=%d) TGPP=%d max_bps=%d block_size=%d max_seq_len=%d "
-            "hw_v_transpose=%s (coverage=%d tokens, worst_case=%d tokens)",
+            "(coverage=%d tokens, worst_case=%d tokens)",
             B,
             Hk,
             Hq,
@@ -815,7 +783,6 @@ def flydsl_turboquant_decode_attention(
             max_bps,
             int(block_size),
             int(max_seq_len),
-            use_hw_tr,
             num_partitions * tile_groups_per_partition * kv_compute_block,
             worst_case_max_seq_len,
         )
