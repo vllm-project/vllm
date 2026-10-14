@@ -8,6 +8,13 @@ import pytest
 import torch
 
 PAD = -1
+# The cache dtypes the QSA reader takes: e4m3 bytes as uint8 everywhere, the
+# e4m3 view only on sm_89+ (Triton has no fp8e4nv pointer type below).
+READER_CACHE_DTYPES = ["bf16", "uint8"] + (
+    ["e4m3"]
+    if torch.cuda.is_available() and torch.cuda.get_device_capability() >= (8, 9)
+    else []
+)
 
 
 def _owner(pos, world, interleave):
@@ -343,7 +350,7 @@ def _dcp_cache(cache_dtype, shape, k_scale, v_scale):
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="QSA kernels need CUDA")
-@pytest.mark.parametrize("cache_dtype", ["bf16", "uint8", "e4m3"])
+@pytest.mark.parametrize("cache_dtype", READER_CACHE_DTYPES)
 @pytest.mark.parametrize("with_empty_rows", [False, True])
 def test_one_split_stores_the_bits_of_the_merge(
     monkeypatch, cache_dtype, with_empty_rows
@@ -352,10 +359,7 @@ def test_one_split_stores_the_bits_of_the_merge(
     the LSE itself. Both equal, bit for bit, the old path: fp32 partials of
     one split and the merge kernel."""
     from vllm.models.qwen4_exp.nvidia.ops import qsa as qsa_ops
-    from vllm.platforms import current_platform
 
-    if cache_dtype == "e4m3" and not current_platform.has_device_capability(89):
-        pytest.skip("Triton has no e4m3 pointer type below sm_89")
     _force_num_splits(monkeypatch, 1)
     torch.manual_seed(5 + with_empty_rows)
     page, seq_len, heads, kv_heads, head_dim = 16, 512, 8, 2, 64
@@ -483,8 +487,15 @@ def test_sharded_ranks_reproduce_the_single_rank_result(
 ):
     from vllm.models.qwen4_exp.nvidia.ops.qsa import qsa_sparse_paged_attention
     from vllm.models.qwen4_exp.nvidia.ops.qsa_dcp import qsa_localize_dcp_indices
+    from vllm.platforms import current_platform
     from vllm.v1.attention.ops.dcp import _lse_weighted_combine
 
+    if (
+        cache_dtype == torch.float8_e4m3fn
+        and not current_platform.has_device_capability(89)
+    ):
+        # Below sm_89 the reader takes the e4m3 bytes as uint8.
+        cache_dtype = torch.uint8
     import_module("vllm.models.qwen4_exp.nvidia.model")
     qsa_backend = import_module(
         "vllm.models.qwen4_exp.nvidia.qsa"
