@@ -3,9 +3,8 @@
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <math_constants.h>
-constexpr unsigned SampleQ = 8, SampleN = 8192;
-// target: candidate count the gate aims for (0 = legacy 4096/6144 by visible
-// length).
+constexpr unsigned SampleQ = 8;
+// target: candidate count the gate aims for.
 struct SampleBuffers {
   float* ring;
   float* retained;
@@ -37,8 +36,7 @@ __device__ __forceinline__ float sample_floor(unsigned b) {
 }
 __device__ void finish_sample(SampleShared& s, SampleBuffers b, unsigned local,
                               unsigned row, unsigned visible, unsigned tid) {
-  const unsigned target =
-      b.target ? b.target : (visible <= 65536 ? 4096u : 6144u);
+  const unsigned target = b.target;
   if (visible <= target) {
     if (tid == 0) b.ring[row] = -CUDART_INF_F;
     __syncwarp();

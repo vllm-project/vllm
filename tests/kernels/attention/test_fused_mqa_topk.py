@@ -23,25 +23,37 @@ LOGITS_BUDGET = 512 * 1024**2
 
 def _dense(q, k, scales, weights, starts, ends):
     """Upstream dense path: budgeted DeepGEMM logits + top_k_per_row_prefill."""
-    from vllm.utils.deep_gemm import fp8_fp4_mqa_logits
+    from vllm.model_executor.layers.sparse_attn_indexer import as_fp32_logits
+    from vllm.utils.deep_gemm import (
+        fp8_fp4_mqa_logits,
+        mqa_logits_mx_inputs,
+        mqa_logits_use_mx_scales,
+    )
 
+    k_scale = scales
+    if mqa_logits_use_mx_scales():
+        # Power-of-two scales as four equal UE8M0 bytes, like the K cache.
+        exp = torch.log2(scales).round().to(torch.int64) + 127
+        k_scale = (exp * 0x01010101).to(torch.int32)
     rows = q.shape[0]
     out = torch.full((rows, TOPK), -1, device=q.device, dtype=torch.int32)
-    step = max(1, LOGITS_BUDGET // (4 * k.shape[0]))
+    lens = ends - starts
+    max_len = max(1, int(lens.max()))
+    step = max(1, LOGITS_BUDGET // (4 * max_len))
     for i in range(0, rows, step):
         j = min(rows, i + step)
-        logits = fp8_fp4_mqa_logits(
-            (q[i:j], None),
-            (k, scales),
-            weights[i:j],
-            starts[i:j],
-            ends[i:j],
-            clean_logits=False,
+        q_scale, w = mqa_logits_mx_inputs(q[i:j], None, weights[i:j])
+        logits = as_fp32_logits(
+            fp8_fp4_mqa_logits(
+                (q[i:j], q_scale), (k, k_scale), w, starts[i:j], ends[i:j], max_len
+            ),
+            lens[i:j],
         )
+        # Compressed logits: row r holds keys [starts[r], ends[r]) from column 0.
         ops.top_k_per_row_prefill(
             logits,
-            starts[i:j],
-            ends[i:j],
+            torch.zeros_like(lens[i:j]),
+            lens[i:j],
             out[i:j],
             j - i,
             logits.stride(0),
@@ -51,10 +63,24 @@ def _dense(q, k, scales, weights, starts, ends):
     return out
 
 
-def _check(rel, q, k, scales, weights, starts, ends):
-    """Indices relative to the row start: count, bounds, uniqueness, scores."""
-    from vllm.utils.deep_gemm import fp8_fp4_mqa_logits
+def _logits(q, k, scales, weights, starts, ends):
+    """fp32 reference scores: sum_h w * relu(q . k) * scale, -inf off-range."""
+    kf = k.float()
+    out = torch.zeros(q.shape[0], k.shape[0], device=q.device)
+    for h in range(q.shape[1]):
+        out += weights[:, h, None] * torch.relu(q[:, h].float() @ kf.T)
+    out *= scales[None]
+    n = torch.arange(k.shape[0], device=q.device)
+    off = (n[None] < starts[:, None]) | (n[None] >= ends[:, None])
+    return out.masked_fill(off, -torch.inf)
 
+
+def _check(rel, q, k, scales, weights, starts, ends, scores=True):
+    """Indices relative to the row start: count, bounds, uniqueness, scores.
+
+    ``scores`` compares the selected scores with the exact fp32 top-k; the
+    SM100 dense path rounds its logits to bf16, so it is checked without.
+    """
     visible = (ends - starts).clamp(min=0)
     valid = rel >= 0
     assert (valid.sum(1) == visible.clamp(max=TOPK)).all(), "valid count"
@@ -63,18 +89,13 @@ def _check(rel, q, k, scales, weights, starts, ends):
     assert ((~valid) | ((idx >= starts[:, None]) & (idx < ends[:, None]))).all()
     srt = idx.masked_fill(~valid, -1).sort().values
     assert ((srt[:, 1:] < 0) | (srt.diff(dim=1) > 0)).all(), "duplicates"
+    if not scores:
+        return
     # Check scores in row blocks so the reference logits stay small.
     step = max(1, LOGITS_BUDGET // (4 * k.shape[0]))
     for i in range(0, q.shape[0], step):
         j = min(q.shape[0], i + step)
-        logits = fp8_fp4_mqa_logits(
-            (q[i:j], None),
-            (k, scales),
-            weights[i:j],
-            starts[i:j],
-            ends[i:j],
-            clean_logits=True,
-        )
+        logits = _logits(q[i:j], k, scales, weights[i:j], starts[i:j], ends[i:j])
         ref = logits.topk(TOPK, dim=1).values
         chosen = logits.gather(1, idx[i:j].clamp(min=0)).masked_fill(
             ~valid[i:j], -torch.inf
@@ -148,7 +169,7 @@ def test_single_request_matches_dense(keys, rows, case):
     # Same convention and valid counts as the dense path (key sets may differ
     # only among equal scores at the top-k boundary).
     dense = _dense(q, k, scales, weights, starts, ends)
-    _check(dense, q, k, scales, weights, starts, ends)
+    _check(dense, q, k, scales, weights, starts, ends, scores=False)
     assert ((out >= 0).sum(1) == (dense >= 0).sum(1)).all()
 
 
@@ -172,7 +193,7 @@ def test_multi_request_chunk_matches_dense(lens):
     assert fused_mqa_topk_prefill(q, k, scales, weights, starts, ends, out)
     _check(out, q, k, scales, weights, starts, ends)
     dense = _dense(q, k, scales, weights, starts, ends)
-    _check(dense, q, k, scales, weights, starts, ends)
+    _check(dense, q, k, scales, weights, starts, ends, scores=False)
     assert ((out >= 0).sum(1) == (dense >= 0).sum(1)).all()
     # Both paths agree on (nearly) every selected key.
     overlap = sum(

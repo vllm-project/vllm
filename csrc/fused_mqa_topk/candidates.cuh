@@ -29,15 +29,6 @@ CUTLASS_DEVICE uint32_t candidate_load_score_code(const CandidateValue value,
          static_cast<uint32_t>(value);
 }
 
-CUTLASS_DEVICE float candidate_decode_score(const CandidateValue value,
-                                            const int32_t packed_idx) {
-  const uint32_t code = candidate_load_score_code(value, packed_idx);
-  const uint32_t ordered = code << 8;
-  const uint32_t bits =
-      (ordered & 0x80000000u) ? (ordered ^ 0x80000000u) : ~ordered;
-  return __uint_as_float(bits);
-}
-
 CUTLASS_DEVICE int32_t candidate_decode_index(const int32_t packed_idx) {
   return static_cast<int32_t>(static_cast<uint32_t>(packed_idx) &
                               kCandidateIndexMask);
@@ -52,20 +43,14 @@ CUTLASS_DEVICE void store_candidate(CandidateValue* value_dst,
          static_cast<int32_t>(candidate_pack_index(payload, kv_index)));
 }
 
-CUTLASS_DEVICE void store_candidate_payload(CandidateValue* value_dst,
-                                            int32_t* index_dst,
-                                            const uint32_t payload,
-                                            const uint32_t kv_index) {
-  __stcg(value_dst, static_cast<CandidateValue>(payload));
-  __stcg(index_dst,
-         static_cast<int32_t>(candidate_pack_index(payload, kv_index)));
-}
-
+// Stores a candidate whose fp24 code was already computed (ring records).
 CUTLASS_DEVICE void store_candidate_record(CandidateValue* value_dst,
                                            int32_t* index_dst,
                                            const uint32_t payload,
                                            const uint32_t kv_index) {
-  store_candidate_payload(value_dst, index_dst, payload, kv_index);
+  __stcg(value_dst, static_cast<CandidateValue>(payload));
+  __stcg(index_dst,
+         static_cast<int32_t>(candidate_pack_index(payload, kv_index)));
 }
 
 }  // namespace fused_candidates
