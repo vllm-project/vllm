@@ -1,0 +1,53 @@
+name: Sync upstream releases
+
+# Publishes a GeometricAGI release (vX.Y.Z+geo.N) for each stable upstream vLLM
+# release (vX.Y.Z or vX.Y.Z.postN): the upstream tag plus the fork's own commits.
+# See .github/workflows/scripts/sync_release.sh.
+#
+# Needs the secret RELEASE_TOKEN: a GitHub App installation token or a PAT that
+# can push tags, branches and workflow files, and write releases and issues. The
+# default GITHUB_TOKEN cannot push upstream's changes under .github/workflows.
+
+on:
+  schedule:
+    # Daily at 6:00 AM UTC
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release only this upstream tag (e.g. v0.31.0), as a new +geo.N'
+        required: false
+        type: string
+      dry_run:
+        description: 'Build and check, but push and publish nothing'
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: sync-upstream-releases
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  sync:
+    # Only the fork runs this; upstream has its own release process.
+    if: github.repository == 'GeometricAGI/vllm'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.RELEASE_TOKEN }}
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
+        with:
+          python-version: "3.12"
+      - name: Release new upstream versions
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          TAG: ${{ inputs.tag }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: .github/workflows/scripts/sync_release.sh
