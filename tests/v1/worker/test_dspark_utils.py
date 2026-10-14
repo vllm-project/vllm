@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from vllm.config import ParallelConfig
+from vllm.config import EngramConfig, ParallelConfig
 from vllm.v1.kv_cache_interface import FullAttentionSpec
 from vllm.v1.worker.gpu import model_runner
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
@@ -75,6 +75,7 @@ def test_draft_context_parallelism_without_changing_target(
     )
     target_config = SimpleNamespace(
         parallel_config=target_parallel,
+        engram_config=EngramConfig(pcp_shared_memory=pcp_size > 1),
         speculative_config=SimpleNamespace(
             draft_model_config=SimpleNamespace(use_mla=use_mla)
         ),
@@ -90,6 +91,8 @@ def test_draft_context_parallelism_without_changing_target(
     with pytest.raises(CapturedConfig) as captured:
         DFlashSpeculator(target_config, device=None)
     draft_parallel = captured.value.args[0].parallel_config
+    assert not captured.value.args[0].engram_config.pcp_shared_memory
+    assert target_config.engram_config.pcp_shared_memory == (pcp_size > 1)
     assert draft_parallel.tensor_parallel_size == 4
     assert draft_parallel.prefill_context_parallel_size == 1
     assert draft_parallel.decode_context_parallel_size == (dcp_size if use_mla else 1)

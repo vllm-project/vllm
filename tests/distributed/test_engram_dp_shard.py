@@ -211,12 +211,13 @@ def _worker(rank: int, tp_size: int, port: int) -> None:
         cleanup_dist_env_and_memory()
 
 
-def _check_shared_storage_lifetime_and_failures(failure):
+def _check_shared_storage_lifetime_and_failures(failure, group=None):
     """One peer's failure must roll back every mapping/registration, without hangs."""
     import gc
     import weakref
 
-    group = get_engram_dp_group()
+    if group is None:
+        group = get_engram_dp_group()
     runtime = torch.cuda.cudart()
     make_file = engram_ops.tempfile.NamedTemporaryFile
     map_file = engram_ops.mmap.mmap
@@ -664,6 +665,131 @@ def test_engram_table_shared_across_dp_replicas(tp_size, monkeypatch):
     monkeypatch.setenv("VLLM_USE_BREAKABLE_CUDAGRAPH", "1")
     mp.spawn(_worker, args=(tp_size, get_open_port()), nprocs=WORLD_SIZE)
     cleanup_dist_env_and_memory()
+
+
+def _pcp_shared_worker(rank, tp_size, port):
+    torch.accelerator.set_device_index(rank)
+    update_environment_variables(
+        dict(
+            RANK=str(rank),
+            LOCAL_RANK=str(rank),
+            WORLD_SIZE=str(WORLD_SIZE),
+            MASTER_ADDR="localhost",
+            MASTER_PORT=str(port),
+        )
+    )
+    config = VllmConfig(
+        parallel_config=ParallelConfig(
+            tensor_parallel_size=tp_size,
+            prefill_context_parallel_size=WORLD_SIZE // tp_size,
+        )
+    )
+    try:
+        init_distributed_environment()
+        with set_current_vllm_config(config):
+            initialize_model_parallel(
+                tensor_model_parallel_size=tp_size,
+                prefill_context_model_parallel_size=WORLD_SIZE // tp_size,
+            )
+        group = parallel_state.get_pcp_group()
+        assert get_engram_dp_size() == 1
+        for failure in ("create", "open", "mmap", "register", "pinned", None):
+            _check_shared_storage_lifetime_and_failures(failure, group)
+
+        heads = HEAD_SIZES[:7]  # An uneven TP shard must preserve padded zeros.
+        weight, scales = _full_table(sum(heads))
+        assert engram_ops.can_share_engram_tables(
+            SimpleNamespace(num_embeddings=(sum(heads),), head_dim=DIM), pcp=True
+        )
+        with torch.device("cuda"):
+            shared = ParallelEngramEmbedding(
+                sum(heads), DIM, heads, cpu_offload=True, pcp_shared_memory=True
+            )
+            private = ParallelEngramEmbedding(sum(heads), DIM, heads, cpu_offload=True)
+        for layer in (shared, private):
+            leader = layer is private or group.rank_in_group == 0
+            layer.weight.weight_loader(layer.weight, weight if leader else None)
+            layer.weight_scale_inv.weight_loader(
+                layer.weight_scale_inv, scales if leader else None
+            )
+        assert shared.weight.is_pinned() and shared.dp_size == 1
+        torch.testing.assert_close(
+            shared.weight.float(), private.weight.float(), atol=0, rtol=0
+        )
+        torch.testing.assert_close(
+            shared.weight_scale_inv, private.weight_scale_inv, atol=0, rtol=0
+        )
+
+        # A single writer changes all mappings, not a private copy per replica.
+        torch.distributed.barrier(group=group.cpu_group)
+        if group.rank_in_group == 0:
+            shared.weight_scale_inv[0].fill_(127)
+        torch.distributed.barrier(group=group.cpu_group)
+        assert torch.all(shared.weight_scale_inv[0] == 127)
+        torch.distributed.barrier(group=group.cpu_group)
+        shared.weight_scale_inv.weight_loader(
+            shared.weight_scale_inv, scales if group.rank_in_group == 0 else None
+        )
+
+        # Different PCP replicas own different IDs and can be empty independently.
+        for count in (0 if group.rank_in_group == 1 else 7, 3, 11):
+            ids = _make_ids(heads, count, seed=group.rank_in_group + 31)
+            if count:
+                ids[-1].fill_(-1)
+            out = torch.empty(
+                (count, shared.part_n_hash_cols, DIM),
+                device="cuda",
+                dtype=torch.bfloat16,
+            )
+            ref = torch.empty_like(out)
+            private.lookup(ids, ref)
+            shared.lookup(ids, out)
+            torch.testing.assert_close(out, ref, atol=0, rtol=0)
+            if not count:
+                continue
+            torch.accelerator.synchronize()
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                shared.lookup(ids, out)
+            for seed in (42, 57, 42):
+                ids.copy_(_make_ids(heads, count, seed=seed + group.rank_in_group))
+                out.fill_(float("nan"))
+                graph.replay()
+                private.lookup(ids, ref)
+                torch.testing.assert_close(out, ref, atol=0, rtol=0)
+        torch.accelerator.synchronize()
+        del shared, private
+    finally:
+        cleanup_dist_env_and_memory()
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
+@pytest.mark.parametrize("tp_size", [1, 2])
+def test_engram_table_shared_across_pcp_replicas(tp_size):
+    """PCP sharing keeps TP head slices, exact lookups and graph addresses intact."""
+    if torch.accelerator.device_count() < WORLD_SIZE:
+        pytest.skip(f"Need {WORLD_SIZE} GPUs")
+    mp.spawn(_pcp_shared_worker, args=(tp_size, get_open_port()), nprocs=WORLD_SIZE)
+
+
+@pytest.mark.parametrize("same_host,shm_ok", [(False, True), (True, False)])
+def test_engram_pcp_shared_memory_fails_closed(monkeypatch, same_host, shm_ok):
+    """Explicit PCP sharing must not fall back to OOM-prone private tables."""
+    group = SimpleNamespace(
+        world_size=2, rank_in_group=0, cpu_group=None, broadcast_object=lambda obj: obj
+    )
+    monkeypatch.setattr(engram_ops, "get_pcp_group", lambda: group)
+    monkeypatch.setattr(engram_ops, "in_the_same_node_as", lambda *a: [True, same_host])
+
+    def check(*a, **kw):
+        if not shm_ok:
+            raise OSError("full")
+
+    monkeypatch.setattr(engram_ops, "check_shm_free_space", check)
+    with pytest.raises((ValueError, RuntimeError), match="same-host|Insufficient"):
+        engram_ops.can_share_engram_tables(
+            SimpleNamespace(num_embeddings=(128,), head_dim=DIM), pcp=True
+        )
 
 
 @pytest.mark.parametrize(

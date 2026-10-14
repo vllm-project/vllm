@@ -1205,7 +1205,8 @@ def test_v41_pcp_ring_links_match_request_positions(
         capacity=capacity,
         device=torch.device("cpu"),
         vllm_config=SimpleNamespace(
-            scheduler_config=SimpleNamespace(max_num_seqs=len(lengths))
+            scheduler_config=SimpleNamespace(max_num_seqs=len(lengths)),
+            speculative_config=None,
         ),
     )
     expected_rows = {
@@ -1265,7 +1266,10 @@ def _build_pcp_ring_metadata(ranks, all_gather, spec, config, device, monkeypatc
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Triton kernel")
 @pytest.mark.parametrize("pcp_size", [2, 4])
-def test_v41_pcp_compressor_preserves_pairs_and_decode_state(pcp_size, monkeypatch):
+@pytest.mark.parametrize("num_speculative_tokens", [0, 5, 9])
+def test_v41_pcp_compressor_preserves_pairs_and_decode_state(
+    pcp_size, num_speculative_tokens, monkeypatch
+):
     """Pairs split across PCP chunks and decode owner changes keep exact latents."""
     from vllm.forward_context import ForwardContext, override_forward_context
     from vllm.models.deepseek_v41 import compressor as compressor_module
@@ -1281,23 +1285,39 @@ def test_v41_pcp_compressor_preserves_pairs_and_decode_state(pcp_size, monkeypat
     device = torch.device("cuda")
     norm = torch.randn(512, dtype=torch.bfloat16, device=device)
     # Block 0 is reserved as the null block; requests use physical blocks 1/2.
-    reference_state = torch.zeros(3, 8, 1024, device=device)
+    capacity = max(8, 1 << (num_speculative_tokens + 1).bit_length())
+    reference_state = torch.zeros(3, capacity, 1024, device=device)
     rank_states = [reference_state.clone() for _ in range(pcp_size)]
     config = SimpleNamespace(
         scheduler_config=SimpleNamespace(max_num_batched_tokens=32, max_num_seqs=4),
         parallel_config=SimpleNamespace(prefill_context_parallel_size=pcp_size),
-        speculative_config=None,
+        speculative_config=SimpleNamespace() if num_speculative_tokens else None,
     )
     spec = CircularBufferSpec(
-        block_size=8, num_kv_heads=1, head_size=1024, head_size_v=0, dtype=torch.float32
+        block_size=capacity,
+        num_kv_heads=1,
+        head_size=1024,
+        head_size_v=0,
+        dtype=torch.float32,
     )
     starts = np.zeros(2, dtype=np.int32)
-    for lengths, prefilling in [
-        ([7, 3], [True, True]),
-        ([9, 1], [True, False]),
-        ([1, 1], [False, False]),
-        ([1, 1], [False, False]),
-    ]:
+    steps = [
+        ([7, 3], [True, True], [7, 3]),
+        ([9, 1], [True, False], [9, 1]),
+        ([1, 1], [False, False], [1, 1]),
+        ([1, 1], [False, False], [1, 1]),
+    ]
+    if num_speculative_tokens:
+        # Resume after zero, partial and full acceptance, overwriting rejected
+        # rows with different inputs, including across ring-capacity boundaries.
+        verify = num_speculative_tokens + 1
+        steps += [
+            ([verify, verify], [False, False], [1, 3]),
+            ([verify, verify], [False, False], [2, verify]),
+            ([1, verify], [False, False], [1, 1]),
+            ([verify, 1], [False, False], [verify, 1]),
+        ]
+    for lengths, prefilling, advanced in steps:
         lengths = np.array(lengths, dtype=np.int32)
         query_start = np.concatenate(([0], np.cumsum(lengths))).astype(np.int32)
         qsl = torch.from_numpy(query_start).to(device)
@@ -1308,7 +1328,7 @@ def test_v41_pcp_compressor_preserves_pairs_and_decode_state(pcp_size, monkeypat
             torch.arange(2, device=device, dtype=torch.int32),
             torch.from_numpy(lengths).to(device),
         )
-        slots = (req_ids.long() + 1) * 8 + positions % 8
+        slots = (req_ids.long() + 1) * capacity + positions % capacity
         raw = torch.randn(sum(lengths), 1024, device=device)
         expected = torch.empty(sum(lengths), 512, dtype=torch.bfloat16, device=device)
         fused_save_compress_norm(
@@ -1408,7 +1428,7 @@ def test_v41_pcp_compressor_preserves_pairs_and_decode_state(pcp_size, monkeypat
             )
         for state in rank_states[1:]:
             torch.testing.assert_close(state, rank_states[0], rtol=0, atol=0)
-        starts += lengths
+        starts += np.array(advanced, dtype=np.int32)
 
 
 def _on_gfx950() -> bool:

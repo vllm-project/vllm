@@ -8,6 +8,7 @@ import torch.nn as nn
 
 from vllm.config import VllmConfig, replace
 from vllm.config.compilation import CUDAGraphMode
+from vllm.distributed import get_pcp_group
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
 from vllm.triton_utils import tl, triton
@@ -49,6 +50,11 @@ class DFlashSpeculator(DraftModelSpeculator):
                 else 1
             ),
         )
+        if vllm_config.engram_config and vllm_config.engram_config.pcp_shared_memory:
+            # Replicated drafts disable PCP; keep the target's storage unchanged.
+            vllm_config.engram_config = replace(
+                vllm_config.engram_config, pcp_shared_memory=False
+            )
         super().__init__(vllm_config, device)
 
         self.hidden_states = torch.zeros(
@@ -515,6 +521,16 @@ class DFlashSpeculator(DraftModelSpeculator):
                 num_tokens_across_dp=num_tokens_across_dp,
                 cudagraph_runtime_mode=batch_desc.cg_mode,
             )
+
+        if self.pcp_manager is not None and not dummy_run:
+            # Replicated draft forwards can differ numerically. Every target
+            # shard must verify the same proposal and proposal distribution.
+            pcp_group = get_pcp_group()
+            pcp_group.broadcast(self.draft_tokens[:num_reqs], src=0)
+            if self.draft_logits is not None:
+                pcp_group.broadcast(self.draft_logits[:num_reqs], src=0)
+            if self.enable_adaptive_verification:
+                pcp_group.broadcast(self.draft_token_confidence_probs[:num_reqs], src=0)
 
         return self.draft_tokens[:num_reqs]
 
