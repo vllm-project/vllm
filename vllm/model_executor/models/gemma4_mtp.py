@@ -427,9 +427,10 @@ class Gemma4MTPDecoderLayer(nn.Module):
         )
 
         hidden_states = self.post_attention_layernorm(hidden_states)
-        hidden_states, residual = self.pre_feedforward_layernorm(
-            hidden_states, residual
-        )
+        hidden_states = hidden_states + residual
+        residual = hidden_states
+
+        hidden_states = self.pre_feedforward_layernorm(hidden_states)
         hidden_states = self.mlp(hidden_states)
 
         hidden_states = self.post_feedforward_layernorm(hidden_states)
@@ -678,8 +679,9 @@ class Gemma4MTP(nn.Module):
             )
         else:
             logits = self.logits_processor(self.lm_head, hidden_states)
-        if logits is not None and self._suppress_idx is not None:
-            logits.index_fill_(1, self._suppress_idx, -float("inf"))
+        suppress_idx = getattr(self, "_suppress_idx", None)
+        if logits is not None and suppress_idx is not None:
+            logits.index_fill_(1, suppress_idx, -float("inf"))
         return logits
 
     def get_top_tokens(
@@ -687,13 +689,21 @@ class Gemma4MTP(nn.Module):
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
         """Return greedy top token IDs directly without materializing full-vocab
-        logits.
+        softcapped logits.
         """
         if self.masked_embedding is not None:
             return self.masked_embedding.get_top_tokens(
                 hidden_states,
                 self._get_full_lm_head_weight(),
             )
+        if self.lm_head.tp_size == 1 and self.logits_processor.scale > 0.0:
+            logits = self.logits_processor._apply_head(
+                self.lm_head, hidden_states, None
+            )
+            suppress_idx = getattr(self, "_suppress_idx", None)
+            if suppress_idx is not None:
+                logits.index_fill_(1, suppress_idx, -float("inf"))
+            return logits[:, : self.logits_processor.org_vocab_size].argmax(dim=-1)
         return self.logits_processor.get_top_tokens(self.lm_head, hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:

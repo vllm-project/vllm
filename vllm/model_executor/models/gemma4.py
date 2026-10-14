@@ -127,15 +127,34 @@ def _gemma4_layer_weights_mapper(config) -> WeightsMapper:
     )
 
 
+_GEMMA4_MOE_CAP_S: int = 0
+_GEMMA4_MOE_CHUNK_LEN: int = 1
+
+
+def set_gemma4_moe_cap(
+    cap_s: int,
+    chunk_len: int = 1,
+    device: torch.device | None = None,
+) -> None:
+    """Configure the per-request active MoE expert cap for speculative verification."""
+    del device
+    global _GEMMA4_MOE_CAP_S, _GEMMA4_MOE_CHUNK_LEN
+    _GEMMA4_MOE_CAP_S = int(cap_s)
+    _GEMMA4_MOE_CHUNK_LEN = int(chunk_len)
+
+
 @triton.jit
 def _gemma4_routing_kernel(
     gating_ptr,
     per_expert_scale_ptr,
     topk_weights_ptr,
     topk_ids_ptr,
+    T,
     E: tl.constexpr,
     K: tl.constexpr,
     BLOCK_E: tl.constexpr,
+    CAP_S: tl.constexpr,
+    CHUNK_LEN: tl.constexpr,
 ):
     pid = tl.program_id(0)
     offs_e = tl.arange(0, BLOCK_E)
@@ -147,10 +166,54 @@ def _gemma4_routing_kernel(
         other=-float("inf"),
     ).to(tl.float32)
 
+    MIN32 = -2147483648
+    if CAP_S > K and CHUNK_LEN > 1:
+        # Two-stage bitonic active-expert cap per request verification chunk:
+        # Stage 1 preserves all K experts selected by the guaranteed token 0
+        # (`req_base`). Stage 2 adds the top (CAP_S - K) highest-scoring experts
+        # across the remaining draft tokens `1 .. CHUNK_LEN - 1`, bounding the
+        # unique active expert set |S| <= CAP_S per request chunk.
+        pos_in_req = pid % CHUNK_LEN
+        req_base = (pid // CHUNK_LEN) * CHUNK_LEN
+        if pos_in_req > 0 and (req_base + CHUNK_LEN) <= T:
+            logits_0 = tl.load(
+                gating_ptr + req_base * E + offs_e,
+                mask=valid,
+                other=-float("inf"),
+            ).to(tl.float32)
+            bits_0 = logits_0.to(tl.int32, bitcast=True)
+            sign_0 = bits_0 >> 31
+            key_0 = tl.where(sign_0 == 0, bits_0 ^ -1, bits_0 ^ MIN32)
+            key_0 = tl.where(valid, key_0, 0x7FFFFFFF)
+            sk64_0 = key_0.to(tl.int64) & 0x00000000FFFFFFFF
+            packed_0 = (sk64_0 << 32) | offs_e.to(tl.int64)
+            sorted_0 = tl.sort(packed_0, descending=False)
+            thresh_0 = tl.sum(tl.where(offs_e == (K - 1), sorted_0, 0), axis=0)
+            in_s0 = packed_0 <= thresh_0
+
+            draft_max = tl.full((BLOCK_E,), -float("inf"), dtype=tl.float32)
+            for p in range(1, CHUNK_LEN):
+                lp = tl.load(
+                    gating_ptr + (req_base + p) * E + offs_e,
+                    mask=valid,
+                    other=-float("inf"),
+                ).to(tl.float32)
+                draft_max = tl.maximum(draft_max, lp)
+
+            bits_d = draft_max.to(tl.int32, bitcast=True)
+            sign_d = bits_d >> 31
+            key_d = tl.where(sign_d == 0, bits_d ^ -1, bits_d ^ MIN32)
+            key_d = tl.where(valid & (~in_s0), key_d, 0x7FFFFFFF)
+            sk64_d = key_d.to(tl.int64) & 0x00000000FFFFFFFF
+            packed_d = (sk64_d << 32) | offs_e.to(tl.int64)
+            sorted_d = tl.sort(packed_d, descending=False)
+            thresh_d = tl.sum(tl.where(offs_e == (CAP_S - K - 1), sorted_d, 0), axis=0)
+            in_s = in_s0 | (packed_d <= thresh_d)
+            logits = tl.where(in_s, logits, -float("inf"))
+
     max_l = tl.max(logits, axis=0)
 
     # Float32 → ascending-sortable bijection
-    MIN32 = -2147483648
     logit_bits = logits.to(tl.int32, bitcast=True)
     sign_b = logit_bits >> 31
     key = tl.where(sign_b == 0, logit_bits ^ -1, logit_bits ^ MIN32)
@@ -210,9 +273,12 @@ def gemma4_fused_routing_kernel_triton(
         per_expert_scale,
         weights,
         ids,
+        T,
         E,
         topk,
         BLOCK_E,
+        CAP_S=_GEMMA4_MOE_CAP_S,
+        CHUNK_LEN=_GEMMA4_MOE_CHUNK_LEN,
         num_warps=num_warps,
     )
     return weights, ids

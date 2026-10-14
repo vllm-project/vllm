@@ -46,7 +46,7 @@ class SpeculatorCudaGraphManager(CudaGraphManager):
             desc if desc in self.graphs else replace(desc, cg_mode=CUDAGraphMode.NONE)
         )
 
-    def capture(
+    def capture(  # type: ignore[override]
         self,
         forward_fn: Callable,
         model_state: ModelState,
@@ -56,6 +56,7 @@ class SpeculatorCudaGraphManager(CudaGraphManager):
         kv_cache_config: KVCacheConfig,
         progress_bar_desc: str = "Capturing CUDA graphs",
         specialize_spec_tokens: bool = False,
+        include_single_step: bool = False,
     ) -> None:
         if specialize_spec_tokens:
             speculative_config = self.vllm_config.speculative_config
@@ -65,11 +66,12 @@ class SpeculatorCudaGraphManager(CudaGraphManager):
                 vllm_max_batch_size=self.max_num_reqs,
                 vllm_num_speculative_tokens=self.vllm_config.num_speculative_tokens,
             )
+            excluded = {0} if include_single_step else {0, 1}
             self._capture_descs = {
                 mode: [
                     SpeculatorBatchDescriptor(**vars(desc), num_speculative_tokens=k)
                     for desc in descs
-                    for k in sorted(set(dense_schedule) - {0, 1}, reverse=True)
+                    for k in sorted(set(dense_schedule) - excluded, reverse=True)
                 ]
                 for mode, descs in self._capture_descs.items()
             }
