@@ -456,11 +456,6 @@ class CPUOffloadingManager(OffloadingManager):
             self.events = []
             yield from events
 
-    @override
-    def shutdown(self) -> None:
-        if self.events is not None:
-            self.events.clear()
-
     def get_stats(self) -> OffloadingConnectorStats | None:
         stats = OffloadingConnectorStats()
 

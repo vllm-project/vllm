@@ -1052,9 +1052,3 @@ class TieringOffloadingManager(OffloadingManager):
             raise shutdown_error
 
         self.primary_tier.shutdown()
-        for state in self._live_req_states.values():
-            state.req_context.pop_state(_RequestStateRef)
-        self._jobs.clear()
-        self._pending_load_submissions.clear()
-        self._req_state.clear()
-        self._live_req_states.clear()

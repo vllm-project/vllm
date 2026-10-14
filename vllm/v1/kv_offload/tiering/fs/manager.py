@@ -367,7 +367,3 @@ class FileSystemTierManager(SecondaryTierManager):
         """
         self._lookup_manager.shutdown()
         self._pool.shutdown(wait=True)
-        self._store_job_keys.clear()
-        self._store_job_contexts.clear()
-        if self.events is not None:
-            self.events.clear()

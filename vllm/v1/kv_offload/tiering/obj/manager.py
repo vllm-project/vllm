@@ -462,10 +462,6 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
             except Exception as exc:
                 logger.warning("deregister_memory failed for job %d: %s", job_id, exc)
         self._transfers.clear()
-        self._store_job_keys.clear()
-        self._store_job_contexts.clear()
-        if self.events is not None:
-            self.events.clear()
         if self._dram_prepped_handle is not None:
             try:
                 self._agent.release_dlist_handle(self._dram_prepped_handle)
