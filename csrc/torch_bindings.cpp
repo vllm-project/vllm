@@ -10,13 +10,13 @@
 STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
 #ifdef VLLM_ENABLE_FUSED_MQA_TOPK
   // Single-launch fused FP8 MQA-logits + top-2048 prefill selection (SM100
-  // family). Workspace tensors are caller-owned; slot_flags must be zero.
+  // family). Workspace tensors are caller-owned; counter must be zero.
   ops.def(
       "fused_mqa_topk_prefill(Tensor q, Tensor k, Tensor scales, "
       "Tensor weights, Tensor starts, Tensor ends, Tensor! out, "
-      "Tensor! slot_flags, Tensor! values, Tensor! indices, Tensor! retained, "
-      "Tensor! retained_indices, Tensor! counts, Tensor! gates, "
-      "Tensor! stats, bool relative) -> ()");
+      "Tensor! counter, Tensor! values, Tensor! indices, Tensor! retained, "
+      "Tensor! retained_indices, Tensor! counts, Tensor! defer, "
+      "bool relative) -> ()");
 #endif
 
   // Compute per-token-group FP8 quantized tensor and scaling factor.

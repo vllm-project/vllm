@@ -7,9 +7,10 @@ of each query row with the DeepSeek sparse-attention indexer and selects the
 row's top-2048 keys, without materializing the ``[rows, keys]`` logits matrix
 that the dense path (``fp8_fp4_mqa_logits`` + ``top_k_per_row_prefill``) needs.
 
-Scratch memory is a fixed pool of 8-row slots (2 per SM, ~311 MB on a 148-SM
-GPU) that is allocated once per device and reused by every call, independently
-of the number of rows or keys.
+Above 4K keys the kernel is persistent (one CTA per SM); each CTA owns two
+8-row candidate slots. The scratch (~296 MiB on a 148-SM GPU) is allocated once
+per device and reused by every call, independently of the number of rows or
+keys.
 """
 
 from dataclasses import dataclass
@@ -31,32 +32,29 @@ FUSED_MQA_TOPK_MAX_KEYS = 1 << 20
 _CANDIDATES_PER_ROW = 16384
 _RETAINED_PER_ROW = 4096
 _SLOTS_PER_SM = 2
-_STATS_PER_CTA = 7
 
 
 @dataclass
 class FusedMQATopKWorkspace:
     """Caller-owned scratch of the fused kernel (see fused_mqa_topk.cu)."""
 
-    slot_flags: torch.Tensor  # [S] int32, zero between calls
-    values: torch.Tensor  # [8S, 16384] fp16
+    counter: torch.Tensor  # [2] int32, zero between calls (the kernel restores it)
+    values: torch.Tensor  # [8S, 16384] fp16, S = 2 slots per SM
     indices: torch.Tensor  # [8S, 16384] int32
     retained: torch.Tensor  # [8S, 4096] fp32
     retained_indices: torch.Tensor  # [8S, 4096] int32
-    counts: torch.Tensor  # [16384] int32
-    gates: torch.Tensor  # [16384] fp32
-    stats: torch.Tensor  # [16384 / 8 * 7] int32, per-CTA diagnostics
+    counts: torch.Tensor  # [16384] int32, per-row candidate counts
+    defer: torch.Tensor  # [16384 / 8] int32, blocks queued for the exact rescan
 
     def as_args(self) -> tuple[torch.Tensor, ...]:
         return (
-            self.slot_flags,
+            self.counter,
             self.values,
             self.indices,
             self.retained,
             self.retained_indices,
             self.counts,
-            self.gates,
-            self.stats,
+            self.defer,
         )
 
 
@@ -75,8 +73,7 @@ def fused_mqa_topk_available() -> bool:
 def get_fused_mqa_topk_workspace(device: torch.device) -> FusedMQATopKWorkspace:
     """Return the per-device workspace, allocating it on first use.
 
-    The slot flags are zeroed once; every kernel launch releases the slots it
-    claimed, so the flags are zero again whenever the stream is idle.
+    The block counter is zeroed once; every launch leaves it zeroed again.
     """
     index = (
         device.index
@@ -90,7 +87,7 @@ def get_fused_mqa_topk_workspace(device: torch.device) -> FusedMQATopKWorkspace:
         slots = _SLOTS_PER_SM * num_sms
         rows = FUSED_MQA_TOPK_MAX_ROWS
         ws = FusedMQATopKWorkspace(
-            slot_flags=torch.zeros(slots, dtype=torch.int32, device=dev),
+            counter=torch.zeros(2, dtype=torch.int32, device=dev),
             values=torch.empty(
                 (8 * slots, _CANDIDATES_PER_ROW), dtype=torch.float16, device=dev
             ),
@@ -104,10 +101,7 @@ def get_fused_mqa_topk_workspace(device: torch.device) -> FusedMQATopKWorkspace:
                 (8 * slots, _RETAINED_PER_ROW), dtype=torch.int32, device=dev
             ),
             counts=torch.empty(rows, dtype=torch.int32, device=dev),
-            gates=torch.empty(rows, dtype=torch.float32, device=dev),
-            stats=torch.empty(
-                rows // 8 * _STATS_PER_CTA, dtype=torch.int32, device=dev
-            ),
+            defer=torch.empty(rows // 8, dtype=torch.int32, device=dev),
         )
         nbytes = sum(t.numel() * t.element_size() for t in ws.as_args())
         logger.info(
