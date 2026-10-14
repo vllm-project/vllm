@@ -528,9 +528,7 @@ def build_tq_decode_module(
                 # padded num_partitions); low-partition configs are
                 # unaffected.
                 rocdl.sched_barrier(0)
-                # encode_waitcnt(vmcnt=63, expcnt=7, lgkmcnt=0)
-                #   = 0xF | (7<<4) | (0<<8) | (3<<14) = 0xC07F
-                rocdl.s_waitcnt(0xC07F)
+                rocdl.s_waitcnt(lgkmcnt=0)
                 gpu.barrier()
 
                 # ---- PV MFMA: A=V[head_dim, token], B=P (=qk_acc bf16) -----
