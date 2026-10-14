@@ -904,11 +904,11 @@ class precompiled_wheel_utils:
         "csrc",
         "cmake",
         "CMakeLists.txt",
-        "pyproject.toml",
         "vllm/_custom_ops.py",
     )
-    # Changes here are usually harmless for an older wheel.
-    WHEEL_WARNING_PATHS = ("rust", "setup.py")
+    # Changes here are usually harmless for an older wheel. pyproject.toml
+    # blocks when its [build-system] table changes.
+    WHEEL_WARNING_PATHS = ("rust", "setup.py", "pyproject.toml")
 
     @staticmethod
     def find_published_wheel_commit(
@@ -955,6 +955,19 @@ class precompiled_wheel_utils:
                 subprocess.check_output([*diff, *paths], text=True).strip()
                 for paths in (utils.WHEEL_BLOCKING_PATHS, utils.WHEEL_WARNING_PATHS)
             )
+            if "pyproject.toml" in warning.splitlines():
+                import tomllib
+
+                old, new = (
+                    tomllib.loads(
+                        subprocess.check_output(
+                            ["git", "show", f"{rev}:pyproject.toml"], text=True
+                        )
+                    ).get("build-system")
+                    for rev in (commit, base_commit)
+                )
+                if old != new:
+                    blocking = "\n".join(filter(None, (blocking, "pyproject.toml")))
             if blocking:
                 raise ValueError(
                     f"No precompiled wheel is published yet for {base_commit}, and "
