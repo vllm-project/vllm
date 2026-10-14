@@ -225,10 +225,7 @@ def balanced_prefill_row_shard(
 ) -> list[int] | None:
     """Return contiguous TP row counts balanced by indexer MQA work."""
     num_rows = int(query_lens_cpu.sum())
-    min_rows = (
-        envs.VLLM_INDEXER_TP_SHARD_MIN_ROWS or MIN_TP_SHARD_TOTAL_ROWS
-    )
-    if tp_size < 2 or num_rows < min_rows:
+    if tp_size < 2 or num_rows < MIN_TP_SHARD_TOTAL_ROWS:
         return None
 
     query_lens = query_lens_cpu.to(torch.int64)

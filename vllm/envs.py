@@ -134,7 +134,6 @@ if TYPE_CHECKING:
     VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE: bool = True
     VLLM_GDN_DECODE_KERNEL: Literal["cuda", "triton"] = "cuda"
     VLLM_DISABLE_PYNCCL: bool = False
-    VLLM_INDEXER_TP_SHARD_MIN_ROWS: int = 0
     VLLM_USE_OINK_OPS: bool = False
     VLLM_MXFP4_EMULATION_DEQUANT_AT_LOAD: bool = False
     VLLM_MXFP8_EMULATION_DEQUANT_AT_LOAD: bool = True
@@ -1253,11 +1252,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Disable pynccl (using torch.distributed instead)
     "VLLM_DISABLE_PYNCCL": lambda: (
         os.getenv("VLLM_DISABLE_PYNCCL", "False").lower() in ("true", "1")
-    ),
-    # Total scheduled prefill rows required before the sparse-indexer TP row
-    # sharding engages; 0 uses the built-in default (see mla/indexer.py).
-    "VLLM_INDEXER_TP_SHARD_MIN_ROWS": lambda: int(
-        os.getenv("VLLM_INDEXER_TP_SHARD_MIN_ROWS", "0")
     ),
     # Optional: enable external Oink custom ops (e.g., Blackwell RMSNorm).
     # Disabled by default.

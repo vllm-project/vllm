@@ -115,20 +115,6 @@ def test_row_shard_threshold_is_total_not_per_rank() -> None:
         assert indexer.balanced_prefill_row_shard(lens, lens, 4, tp_size) is not None
 
 
-def test_row_shard_threshold_env_override(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """VLLM_INDEXER_TP_SHARD_MIN_ROWS overrides the built-in floor."""
-    monkeypatch.setattr(
-        indexer.envs, "VLLM_INDEXER_TP_SHARD_MIN_ROWS", 2_000_000
-    )
-    lens = torch.tensor([indexer.MIN_TP_SHARD_TOTAL_ROWS], dtype=torch.int32)
-    assert indexer.balanced_prefill_row_shard(lens, lens, 4, 8) is None
-    monkeypatch.setattr(indexer.envs, "VLLM_INDEXER_TP_SHARD_MIN_ROWS", 1)
-    small = torch.tensor([8], dtype=torch.int32)
-    assert indexer.balanced_prefill_row_shard(small, small, 4, 8) is not None
-
-
 def test_row_sharding_gate_rejects_unsupported_configurations(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
