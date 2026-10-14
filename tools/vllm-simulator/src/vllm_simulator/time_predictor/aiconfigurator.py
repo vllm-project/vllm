@@ -1,26 +1,24 @@
-import os
+import typing
 from typing import Optional
 
 import numpy as np
 from aiconfigurator.sdk import models
 from aiconfigurator.sdk.backends.factory import get_backend
 from aiconfigurator.sdk.common import (
-    CommQuantMode,
     DatabaseMode,
-    FMHAQuantMode,
-    GEMMQuantMode,
     KVCacheQuantMode,
-    MoEQuantMode,
 )
 from aiconfigurator.sdk.config import ModelConfig, RuntimeConfig
 from aiconfigurator.sdk.inference_session import InferenceSession
-from aiconfigurator.sdk.perf_database import get_database, get_systems_paths
+from aiconfigurator.sdk.perf_database import (
+    get_database,
+    get_systems_paths,
+    resolve_query_version,
+)
 from vllm_simulator.simulation.types import (
     SchedulerConfig,
 )
 from vllm_simulator.spec.accelerator import AcceleratorInfo
-from vllm_simulator.spec.data_type import DataType
-from vllm_simulator.spec.model import ModelInfo
 from vllm_simulator.time_predictor.base import (
     InferTimePredictor,
     ScheduleBatch,
@@ -28,87 +26,36 @@ from vllm_simulator.time_predictor.base import (
 )
 from vllm_simulator.utils import get_logger
 
-# Map the common data types to AIConfigurator data types.
-MAP_DTYPE_TO_GEMMQuantMode = {
-    DataType.FP16: GEMMQuantMode.bfloat16,
-    DataType.BF16: GEMMQuantMode.bfloat16,
-    DataType.FP8: GEMMQuantMode.fp8_block,
-    DataType.INT8: GEMMQuantMode.int8_wo,
-    DataType.FP4: GEMMQuantMode.nvfp4,
-    DataType.INT4: GEMMQuantMode.int4_wo,
-    DataType.FP16_TENSOR: GEMMQuantMode.bfloat16,
-    DataType.BF16_TENSOR: GEMMQuantMode.bfloat16,
-    DataType.FP8_TENSOR: GEMMQuantMode.fp8,
-    DataType.INT8_TENSOR: GEMMQuantMode.int8_wo,
-    DataType.FP4_TENSOR: GEMMQuantMode.nvfp4,
-    DataType.INT4_TENSOR: GEMMQuantMode.int4_wo,
-}
-
-MAP_DTYPE_TO_KVCacheQuantMode = {
-    DataType.FP16: KVCacheQuantMode.bfloat16,
-    DataType.BF16: KVCacheQuantMode.bfloat16,
-    DataType.FP8: KVCacheQuantMode.fp8,
-    DataType.INT8: KVCacheQuantMode.int8,
-}
-
-MAP_DTYPE_TO_FMHAQuantMode = {
-    DataType.FP16: FMHAQuantMode.bfloat16,
-    DataType.BF16: FMHAQuantMode.bfloat16,
-    DataType.FP8: FMHAQuantMode.fp8,
-}
-
-MAP_DTYPE_TO_MoEQuantMode = {
-    DataType.FP16: MoEQuantMode.bfloat16,
-    DataType.BF16: MoEQuantMode.bfloat16,
-    DataType.FP8: MoEQuantMode.fp8_block,
-    DataType.INT8: MoEQuantMode.fp8,
-    DataType.FP4: MoEQuantMode.nvfp4,
-    DataType.INT4: MoEQuantMode.int4_wo,
-}
-
-MAP_DTYPE_TO_CommQunatMode = {
-    DataType.FP16: CommQuantMode.half,
-    DataType.BF16: CommQuantMode.half,
-    DataType.FP8: CommQuantMode.fp8,
-    DataType.FP4: CommQuantMode.fp8,  # FIXME
-    DataType.INT8: CommQuantMode.int8,
-}
-
+if typing.TYPE_CHECKING:
+    import vllm.config
 
 logger = get_logger()
 
 
 def get_perf_model(
     sched_config: SchedulerConfig,
-    model: ModelInfo,
+    model: "vllm.config.ModelConfig",
     workload_distribution: str = "balanced",
 ) -> models.BaseModel:
+    # Quant modes left as None are inferred by AIConfigurator from the
+    # checkpoint's quantization_config. Only a runtime --kv-cache-dtype is
+    # invisible to the checkpoint, so it is forwarded explicitly.
     model_config = ModelConfig(
         pp_size=sched_config.pp_size,
         tp_size=sched_config.attn_tp_size,
         moe_tp_size=sched_config.moe_tp_size,
         moe_ep_size=sched_config.moe_ep_size,
         attention_dp_size=sched_config.attn_dp_size,
-        gemm_quant_mode=MAP_DTYPE_TO_GEMMQuantMode.get(
-            sched_config.data_type, GEMMQuantMode.bfloat16
-        ),
-        moe_quant_mode=MAP_DTYPE_TO_MoEQuantMode.get(
-            sched_config.data_type, MoEQuantMode.bfloat16
-        ),
-        kvcache_quant_mode=MAP_DTYPE_TO_KVCacheQuantMode.get(
-            sched_config.kv_cache_data_type, KVCacheQuantMode.bfloat16
-        ),
-        fmha_quant_mode=MAP_DTYPE_TO_FMHAQuantMode.get(
-            sched_config.kv_cache_data_type, FMHAQuantMode.bfloat16
-        ),
-        comm_quant_mode=MAP_DTYPE_TO_CommQunatMode.get(
-            sched_config.data_type, CommQuantMode.half
+        kvcache_quant_mode=(
+            KVCacheQuantMode.fp8
+            if sched_config.kv_cache_dtype.startswith("fp8")
+            else None
         ),
         workload_distribution=workload_distribution,
     )
 
     return models.get_model(
-        model_path=model.model_path,
+        model_path=model.model,
         model_config=model_config,
         backend_name=sched_config.backend_name,
     )
@@ -117,7 +64,7 @@ def get_perf_model(
 class AIConfiguratorTimePredictor(InferTimePredictor):
     def __init__(
         self,
-        model: ModelInfo,
+        model: "vllm.config.ModelConfig",
         hw: AcceleratorInfo,
         config: SchedulerConfig,
         database_path: Optional[str] = None,
@@ -133,28 +80,21 @@ class AIConfiguratorTimePredictor(InferTimePredictor):
         self.prefill_scale_factor = prefill_scale_factor
         self.decode_scale_factor = decode_scale_factor
         self.prefill_min_latency = prefill_min_latency
-        self.fixed_step_latency_s = self._get_fixed_step_latency_s()
         self.enable_oom_check = enable_oom_check
-        self._is_oom = False
-
-        if self.fixed_step_latency_s is not None:
-            logger.info(
-                "AIConfigurator predictor bypassed: fixed step latency = %.6f s",
-                self.fixed_step_latency_s,
-            )
-            self._session = None
-            return
 
         if isinstance(database_mode, str):
             database_mode = self._get_database_mode(database_mode)
 
+        systems_paths = (
+            [database_path] if database_path is not None else get_systems_paths()
+        )
         database = get_database(
             system=hw.name,
             backend=config.backend_name,
-            version=config.backend_version,
-            systems_paths=(
-                [database_path] if database_path is not None else get_systems_paths()
+            version=self._resolve_database_version(
+                hw.name, config.backend_name, config.backend_version, systems_paths
             ),
+            systems_paths=systems_paths,
         )
 
         if database is None:
@@ -162,49 +102,41 @@ class AIConfiguratorTimePredictor(InferTimePredictor):
 
         database.set_default_database_mode(database_mode)
 
-        # # --- Replace the original function to support more flexible request input. --- #
-
-        # db_nearest_1d_point_helper = database._nearest_1d_point_helper
-
-        # def wrapped_nearest_1d_point_helper(
-        #     x: int, values: list[int], inner_only: bool = False
-        # ):
-        #     # Disable the inner_only by default
-        #     return db_nearest_1d_point_helper(x, values, inner_only)
-
-        # database._nearest_1d_point_helper = wrapped_nearest_1d_point_helper
-
-        # # --- End --- #
-
         self._session = InferenceSession(
             model=get_perf_model(config, model, workload_distribution),
             backend=get_backend(self.config.backend_name),
             database=database,
         )
 
-        self.enable_oom_check = enable_oom_check
-
-    def _get_fixed_step_latency_s(self) -> Optional[float]:
-        value = os.environ.get("VLLM_SIMULATOR_FIXED_STEP_LATENCY_MS")
-        if value is None or value == "":
-            return None
+    def _resolve_database_version(
+        self,
+        system: str,
+        backend: str,
+        version: Optional[str],
+        systems_paths: list[str],
+    ) -> str:
+        # AIC only serves versions within its queryable slots (current/previous/next);
+        # fall back to the 'current' slot when the requested version is unlisted.
+        if not version:
+            return "current"
         try:
-            latency_ms = float(value)
+            return resolve_query_version(
+                system, backend, version, systems_paths=systems_paths
+            )
         except ValueError:
-            logger.warning(
-                "Invalid VLLM_SIMULATOR_FIXED_STEP_LATENCY_MS=%r, "
-                "falling back to AIConfigurator predictor.",
-                value,
+            resolved = resolve_query_version(
+                system, backend, "current", systems_paths=systems_paths
             )
-            return None
-        if latency_ms < 0:
             logger.warning(
-                "Invalid VLLM_SIMULATOR_FIXED_STEP_LATENCY_MS=%r: "
-                "latency must be non-negative, falling back to AIConfigurator predictor.",
-                value,
+                "AIConfigurator has no queryable %s/%s on %s, falling back to "
+                "'current' slot %s. Set AIC_ALLOW_UNLISTED_VERSIONS=1 to force "
+                "the raw version.",
+                backend,
+                version,
+                system,
+                resolved,
             )
-            return None
-        return latency_ms / 1e3
+            return resolved
 
     def _get_database_mode(self, mode: str) -> DatabaseMode:
         return {
@@ -256,25 +188,22 @@ class AIConfiguratorTimePredictor(InferTimePredictor):
             mean_input = np.mean([req.extend_length for req in batch.reqs])
             isl = int(mean_past + mean_input)
             prefix = int(mean_past)
-            runtime_config = RuntimeConfig(
-                batch_size=batch.batch_size, isl=isl, prefix=prefix, osl=1
-            )
 
             seq_imbalance_correction_scale = self.ctx_attn_flops_ratio_with_avg(
                 batch.reqs
             )
-            if seq_imbalance_correction_scale >= 0.4:
-                runtime_config = RuntimeConfig(
-                    batch_size=batch.batch_size,
-                    isl=isl,
-                    prefix=prefix,
-                    osl=1,
-                    seq_imbalance_correction_scale=seq_imbalance_correction_scale,
-                )
-            else:
-                runtime_config = RuntimeConfig(
-                    batch_size=batch.batch_size, isl=isl, prefix=prefix, osl=1
-                )
+            extra_kwargs = (
+                {"seq_imbalance_correction_scale": seq_imbalance_correction_scale}
+                if seq_imbalance_correction_scale >= 0.4
+                else {}
+            )
+            runtime_config = RuntimeConfig(
+                batch_size=batch.batch_size,
+                isl=isl,
+                prefix=prefix,
+                osl=1,
+                **extra_kwargs,
+            )
 
             if self.enable_oom_check:
                 summary = self._session.run_static(runtime_config, mode="static_ctx")
@@ -291,25 +220,14 @@ class AIConfiguratorTimePredictor(InferTimePredictor):
         return latency_dict
 
     def predict_infer_time(self, batch: ScheduleBatch) -> float:
-        if self.fixed_step_latency_s is not None:
-            return self.fixed_step_latency_s
-
         latency_dict = self.predict_infer_latency_dict(batch)
         infer_time = sum(latency_dict.values())
 
-        if self._is_oom:
-            logger.warning("Out of memory detected during estimation.")
-            infer_time = -infer_time
         if batch.is_decode():
             infer_time *= self.decode_scale_factor
         else:
-            infer_time *= self.prefill_scale_factor
-
-        if not batch.is_decode():
-            infer_time = (
-                max(infer_time, self.prefill_min_latency)
-                if infer_time > 0
-                else infer_time
+            infer_time = max(
+                infer_time * self.prefill_scale_factor, self.prefill_min_latency
             )
 
         return infer_time / 1e3

@@ -1,35 +1,25 @@
 """Online serving benchmark client for the vLLM simulator.
 
-Hijacks ``vllm.benchmarks.serve`` (the implementation behind
-``vllm bench serve``) so that:
+Hijacks ``vllm.benchmarks.serve`` so that:
 
-1. Traffic is replayed logically instead of in real time: the client never
-   sleeps between requests. Every request carries ``simulation.created_time``
-   (its logical arrival offset in seconds) and the server replays the traffic
-   pattern from that timestamp (see ``C_VLLMSchedulerHook``).
-2. Reported metrics come from the simulator backend: after the run, the
-   per-request stats dumped by the server-side profile hook
-   (``request.jsonl``) are aggregated with ``calc_metrics`` and substituted
-   into the benchmark result.
+1. The client never sleeps between requests; each request carries
+   ``simulation.created_time`` and the server replays arrivals from it
+   (see ``C_VLLMEngineCoreHook``).
+2. Reported metrics are aggregated by ``calc_metrics`` from the
+   ``request.jsonl`` dumped by the server's profile hook.
 
 Usage:
     python -m vllm_simulator.simulation.bench_serving [vllm bench serve args...]
 
-The server must be the simulator server (see
-``vllm_simulator.simulation.vllm.launch_server``). The profile hook uses
-/start_profile and /stop_profile as simulation round markers (dump + reset);
-the EngineArgs hook internally defaults the profiler to "cuda" so those
-routes always exist, and the hijacked ``EngineCore.profile`` never runs a
-real profiler.
+Requires the simulator server (``vllm_simulator.simulation.vllm.launch_server``),
+which uses /start_profile and /stop_profile as round markers.
 """
 
 import argparse
 import json
 import os
-import re
-from typing import AsyncGenerator, Literal, Optional
+from typing import AsyncGenerator, Literal
 
-import aiohttp
 import numpy as np
 from vllm.benchmarks import serve
 from vllm.benchmarks.datasets import SampleRequest
@@ -37,51 +27,10 @@ from vllm.benchmarks.datasets import SampleRequest
 from vllm_simulator.simulation.manager import Envs
 from vllm_simulator.simulation.utils import calc_metrics
 
-# Hijack aiohttp request sending to rewrite simulation metadata into a
-# server-visible path.
-#
-# ``override_get_request`` attaches ``simulation`` to each request through
-# ``SampleRequest.request_overrides``, so it lands in the request payload as a
-# top-level field. vLLM's OpenAI protocol keeps unknown top-level fields as
-# ignored extras; only ``vllm_xargs`` is forwarded into
-# ``SamplingParams.extra_args``, which is where the server-side scheduler hook
-# reads the metadata. ``vllm_xargs`` values are restricted to scalars/lists by
-# pydantic, so the nested dict is JSON-encoded; the server hook decodes it.
-_ORIG_AIOHTTP_REQUEST = None
 
-
-def install_aiohttp_json_hijack(
-    *,
-    hijack_url_regex: Optional[str],
-) -> None:
-    global _ORIG_AIOHTTP_REQUEST
-    if _ORIG_AIOHTTP_REQUEST is not None:
-        return
-
-    pattern = re.compile(hijack_url_regex) if hijack_url_regex else None
-    _ORIG_AIOHTTP_REQUEST = aiohttp.ClientSession._request
-
-    async def _patched_request(self, method, url, **kwargs):
-        if pattern is not None and pattern.search(url):
-            payload = kwargs.get("json", None)
-            if isinstance(payload, dict) and "simulation" in payload:
-                vllm_xargs = payload.setdefault("vllm_xargs", {})
-                vllm_xargs["simulation"] = json.dumps(payload.pop("simulation"))
-                kwargs["json"] = payload
-
-        return await _ORIG_AIOHTTP_REQUEST(self, method, url, **kwargs)
-
-    aiohttp.ClientSession._request = _patched_request
-
-
-# Override request generation for simulation mode.
-#
-# Same delay model as the native ``serve.get_request`` (gamma arrivals with
-# burstiness, optional ramp-up, self-timed traces), but the client never
-# sleeps: the cumulative delay becomes ``simulation.created_time`` on each
-# request, and the simulator replays the traffic pattern against its (virtual)
-# clock. Self-timed traces are normalized relative to the first request so the
-# simulation clock starts at zero.
+# Same arrival model as ``serve.get_request``, but the cumulative delay becomes
+# ``simulation.created_time`` instead of a sleep.  Self-timed traces are shifted
+# so the first request starts at zero.
 async def override_get_request(
     input_requests: list[SampleRequest],
     request_rate: float,
@@ -104,8 +53,6 @@ async def override_get_request(
     delay_ts: list[float] = []
 
     if self_timed:
-        # Sort by timestamp for correct replay, then normalize relative to
-        # the first request.
         input_requests.sort(key=lambda r: r.timestamp or 0.0)
         first_ts = input_requests[0].timestamp or 0.0
         for request in input_requests:
@@ -140,32 +87,29 @@ async def override_get_request(
         for i in range(1, len(delay_ts)):
             delay_ts[i] += delay_ts[i - 1]
         if ramp_up_strategy is None and delay_ts[-1] != 0:
-            # Same stabilization as the native generator: close the gap
-            # between the sampled total delay and the target duration so
-            # throughput is stable across random seeds.
+            # Same total-duration normalization as the native generator.
             target_total_delay_s = total_requests / request_rate
             normalize_factor = target_total_delay_s / delay_ts[-1]
             delay_ts = [delay * normalize_factor for delay in delay_ts]
 
     for request_index, request in enumerate(input_requests):
+        # vllm_xargs is the only path into SamplingParams.extra_args; values
+        # must be scalars/lists, hence the JSON string.
         overrides = dict(request.request_overrides or {})
-        overrides["simulation"] = {
-            "created_time": delay_ts[request_index],
-            "total_request": total_requests,
+        overrides["vllm_xargs"] = {
+            **overrides.get("vllm_xargs", {}),
+            "simulation": json.dumps({
+                "created_time": delay_ts[request_index],
+                "total_request": total_requests,
+            }),
         }
         request.request_overrides = overrides
         yield request, request_rates[request_index]
 
 
-# Replace benchmark-side metrics with backend-generated simulation metrics.
-#
-# Client-side metrics describe the local execution path of the benchmark tool,
-# not the simulated execution on the backend. The server-side profile hook
-# dumps per-request stats to ``request.jsonl`` on /stop_profile, which
-# ``serve.benchmark`` issues right before returning, so the wrapped benchmark
-# can aggregate them and override the result.
-#
-# If the backend stats file is missing, the client-side result is kept.
+# Replace client-side metrics with the simulated ones from ``request.jsonl``,
+# dumped on the /stop_profile that ``serve.benchmark`` issues before returning.
+# The client-side result is kept if the file is missing.
 _BASE_RESULT_KEYS = {
     "duration": "duration",
     "completed": "completed",
@@ -190,10 +134,9 @@ _EXTRA_RESULT_KEYS = (
     "input_throughput",
     "mean_queue_ms",
     "max_itl_ms",
-    "prefix_cache_reused_ratio",
-    "kv_cache_device_hit_ratio",
-    "kv_cache_host_hit_ratio",
-    "kv_cache_storage_hit_ratio",
+    "prompt_tokens_cached_ratio",
+    "prompt_tokens_local_cache_hit_ratio",
+    "prompt_tokens_external_kv_transfer_ratio",
 )
 
 
@@ -248,18 +191,15 @@ async def wrapped_benchmark(*args, **kwargs):
     _apply_simulation_metrics(result, sim_metrics)
 
     print("{s:{c}^{n}}".format(s=" Simulation Metrics ", n=50, c="="))
-    print("{:<40} {:<10}".format("Completed requests:", sim_metrics["completed"]))
-    print("{:<40} {:<10.2f}".format("Simulated duration (s):", sim_metrics["duration"]))
-    print(
-        "{:<40} {:<10.2f}".format(
-            "Output token throughput (tok/s):", sim_metrics["output_throughput"]
-        )
-    )
-    print("{:<40} {:<10.2f}".format("Mean TTFT (ms):", sim_metrics["mean_ttft_ms"]))
-    print("{:<40} {:<10.2f}".format("Mean TPOT (ms):", sim_metrics["mean_tpot_ms"]))
-    print(
-        "{:<40} {:<10.2f}".format("Mean E2EL (ms):", sim_metrics["mean_e2e_latency_ms"])
-    )
+    print(f"{'Completed requests:':<40} {sim_metrics['completed']:<10}")
+    for label, key in (
+        ("Simulated duration (s):", "duration"),
+        ("Output token throughput (tok/s):", "output_throughput"),
+        ("Mean TTFT (ms):", "mean_ttft_ms"),
+        ("Mean TPOT (ms):", "mean_tpot_ms"),
+        ("Mean E2EL (ms):", "mean_e2e_latency_ms"),
+    ):
+        print(f"{label:<40} {sim_metrics[key]:<10.2f}")
     print("=" * 50)
     return result
 
@@ -268,8 +208,7 @@ original_main_async = serve.main_async
 
 
 async def wrapped_main_async(args: argparse.Namespace):
-    # /start_profile and /stop_profile double as simulation round markers on
-    # the server (stats dump + reset), so profiling is always on.
+    # Profile routes are the round markers, so profiling is always on.
     args.profile = True
     return await original_main_async(args)
 
@@ -277,8 +216,6 @@ async def wrapped_main_async(args: argparse.Namespace):
 serve.get_request = override_get_request
 serve.benchmark = wrapped_benchmark
 serve.main_async = wrapped_main_async
-
-install_aiohttp_json_hijack(hijack_url_regex=r"completions$")
 
 
 if __name__ == "__main__":

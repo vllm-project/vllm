@@ -8,11 +8,11 @@ Test vLLM server-mode simulation.
 Two modes are covered:
 - BLOCKING: raw requests against the server, engine sleeps the predicted
   GPU span per step (test_vllm_serving_blocking).
-- OFFLINE: the hijacked `vllm bench serve` client
+- NON_BLOCKING: the hijacked `vllm bench serve` client
   (vllm_simulator.simulation.bench_serving) replays the traffic logically
   through simulation.created_time, and the benchmark result is substituted
   with the backend-dumped simulation metrics
-  (test_vllm_serving_offline_bench_serving).
+  (test_vllm_serving_non_blocking).
 """
 
 import json
@@ -29,9 +29,8 @@ os.environ["VLLM_SIMULATOR_CONFIG_PATH"] = (
     os.path.dirname(__file__) + "/assets/config_vllm.json"
 )
 os.environ["VLLM_SIMULATOR_OUTPUT_MODE"] = "BLOCKING"
-os.environ["CUDA_VISIBLE_DEVICES"] = ""
 
-MODEL_PATH = "/host/models/Qwen/Qwen3-0.6B/"
+MODEL_PATH = "Qwen/Qwen3-8B"
 SERVER_PORT = 18100
 
 
@@ -140,8 +139,8 @@ def test_vllm_serving_blocking():
         runner.shutdown()
 
 
-def test_vllm_serving_offline_bench_serving():
-    """OFFLINE-mode serving driven by the hijacked `vllm bench serve` client.
+def test_vllm_serving_non_blocking():
+    """NON_BLOCKING-mode serving driven by the hijacked `vllm bench serve` client.
 
     The client (vllm_simulator.simulation.bench_serving) does not pace
     requests in real time; each request carries simulation.created_time and
@@ -150,14 +149,14 @@ def test_vllm_serving_offline_bench_serving():
     """
     num_prompts = 8
     request_rate = 10
-    output_dir = tempfile.mkdtemp(prefix="sim_offline_output_")
-    result_dir = tempfile.mkdtemp(prefix="sim_offline_result_")
+    output_dir = tempfile.mkdtemp(prefix="sim_non_blocking_output_")
+    result_dir = tempfile.mkdtemp(prefix="sim_non_blocking_result_")
 
     runner = VLLMServingRunner(
         model=MODEL_PATH,
         port=SERVER_PORT + 1,
         env_overrides={
-            "VLLM_SIMULATOR_OUTPUT_MODE": "OFFLINE",
+            "VLLM_SIMULATOR_OUTPUT_MODE": "NON_BLOCKING",
             "VLLM_SIMULATOR_OUTPUT_DIR": output_dir,
         },
         # No --profiler-config needed: the EngineArgs hook internally
@@ -208,7 +207,7 @@ def test_vllm_serving_offline_bench_serving():
         assert result["mean_ttft_ms"] > 0
         assert result["mean_e2el_ms"] > 0
         # Sim-only extra stats prove the result came from the backend dump.
-        assert "kv_cache_device_hit_ratio" in result
+        assert "prompt_tokens_local_cache_hit_ratio" in result
 
         # Backend per-request stats: all requests replayed by created_time.
         stats_path = os.path.join(output_dir, "request.jsonl")
@@ -224,11 +223,11 @@ def test_vllm_serving_offline_bench_serving():
             for r in req_stats
         )
 
-        print("\n[PASS] test_vllm_serving_offline_bench_serving passed!")
+        print("\n[PASS] test_vllm_serving_non_blocking passed!")
     finally:
         runner.shutdown()
 
 
 if __name__ == "__main__":
     test_vllm_serving_blocking()
-    test_vllm_serving_offline_bench_serving()
+    test_vllm_serving_non_blocking()

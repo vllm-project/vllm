@@ -3,12 +3,7 @@
         "accelerator": {
             "name": "b300_sxm",
             "hbm_capacity_gb": 80000
-        },
-        "disk_read_bandwidth_gb": 8,
-        "disk_write_bandwidth_gb": 8,
-        "memory_read_bandwidth_gb": 64,
-        "memory_write_bandwidth_gb": 64,
-        "num_device_per_node": 8
+        }
     },
     "predictor": {
         "name": "aiconfigurator",
@@ -19,6 +14,6 @@
         "ep_size": 1,
         "dp_size": 1,
         "backend_name": "vllm",
-        "backend_version": "0.19.0"
+        "backend_version": "0.24.0"
     }
 }

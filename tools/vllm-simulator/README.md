@@ -34,8 +34,8 @@ python3 -m vllm_simulator.simulation.vllm.launch_server \
 > - Use `--sim-config-path` to specify the simulation configuration file, which is equivalent to the system environment variable `VLLM_SIMULATOR_CONFIG_PATH`.
 > - The server accepts standard vLLM serving arguments (`--max-model-len`, `--gpu-memory-utilization`, etc.). Do **not** configure TP/EP parallelism here; see the `scheduler` section of the config file below.
 > - The simulator uses `/start_profile` and `/stop_profile` as benchmark round markers (dump + reset simulation stats). vLLM only registers those routes when a profiler is configured, so the EngineArgs hook internally defaults the profiler to `"cuda"`—no `--profiler-config` needed. It stays inert: the hijacked `EngineCore.profile` never reaches the real profiler.
-> - On CPU-only machines, set `CUDA_VISIBLE_DEVICES=""` so vLLM's platform detection stays consistent with the simulated environment.
-> - The provided [config file](test/assets/config_vllm.json) is for testing. Adjust hardware bandwidth and other parameters to match your actual deployment scenario for higher fidelity.
+> - `CUDA_VISIBLE_DEVICES` defaults to `""` inside the simulator so vLLM's platform detection stays consistent with the simulated environment.
+> - The provided [config file](test/assets/config_vllm.json) is for testing. Adjust the accelerator and other parameters to match your actual deployment scenario for higher fidelity.
 
 #### Run the Simulation Benchmark
 The benchmark client is a hijacked `vllm bench serve` and accepts the same arguments:
@@ -85,8 +85,8 @@ Mean E2EL (ms):                          3431.84
 ### Mock Simulation (Inference Simulation)
 vllm_simulator uses **dynamic interception** to hijack the execution flow of vLLM, bypassing actual LLM computation:
 
-- **Platform / Worker**: stub CUDA operations and KV-cache allocation so the engine runs on CPU while preserving GPU deployment semantics.
-- **Scheduler** (`vllm.v1.core.sched.scheduler.Scheduler`): holds requests in a future queue and dispatches them by `simulation.created_time`; records per-request queueing and prefix-cache hit stats.
+- **Platform / Worker**: stub CUDA operations and KV-cache allocation so the engine runs on CPU while preserving GPU deployment semantics. The model runner is replaced by a stand-in for Model Runner V2 (`VLLM_USE_V2_MODEL_RUNNER=1` is forced; the V1 runner is not modelled).
+- **EngineCore** (`vllm.v1.engine.core.EngineCore`): holds requests in a future queue and dispatches them by `simulation.created_time`; records per-request queueing and prefix-cache hit stats.
 - **Executor** (`UniProcExecutor.execute_model`): accounts the predicted GPU span of each step (AIConfigurator prediction + sampler/logprobs compensation) and advances the simulation clock.
 - **EngineCore.profile**: `/start_profile` and `/stop_profile` double as benchmark round markers—each call dumps `request.jsonl` / `iteration.jsonl` to the output directory and resets the stats.
 
@@ -95,10 +95,9 @@ Key environment variables:
 | Variable | Meaning | Default |
 | --- | --- | --- |
 | `VLLM_SIMULATOR_CONFIG_PATH` | Simulation config JSON (see below) | — (required) |
-| `VLLM_SIMULATOR_OUTPUT_MODE` | `OFFLINE` (virtual-clock replay) or `BLOCKING` (engine sleeps the predicted GPU span in real time) | `OFFLINE` |
+| `VLLM_SIMULATOR_OUTPUT_MODE` | `NON_BLOCKING` (virtual-clock replay) or `BLOCKING` (engine sleeps the predicted GPU span in real time) | `NON_BLOCKING` |
 | `VLLM_SIMULATOR_OUTPUT_DIR` | Where the server dumps `request.jsonl` / `iteration.jsonl`; the benchmark client reads them from here | `/tmp/vllm_simulator/output/` |
 | `VLLM_SIMULATOR_MAX_DECODE_STEPS` | Force every request's output length | unset |
-| `VLLM_SIMULATOR_COLD_START_S` | One-time engine cold-start overhead (BLOCKING mode) | `0` |
 
 The benchmark client and the server must share the same `VLLM_SIMULATOR_OUTPUT_DIR`.
 
@@ -112,16 +111,34 @@ The benchmark client and the server must share the same `VLLM_SIMULATOR_OUTPUT_D
   ```
 
 ---
+### Data Collection (Collector)
+The collector runs a **real** vLLM server on GPUs and records per-step and per-request traces, used to calibrate the simulator, train `ml` predictor models, and build `replay` predictor tables. It accepts the same arguments as the `vllm` CLI:
+```bash
+VLLM_SIMULATOR_COLLECTOR_OUTPUT_DIR=/path/to/output \
+python3 -m vllm_simulator.collector.launch_server serve "Qwen/Qwen3-8B" --port 8000
+
+curl -X POST http://127.0.0.1:8000/start_profile
+# ... send benchmark traffic ...
+curl -X POST http://127.0.0.1:8000/stop_profile
+```
+
+Only traffic between `/start_profile` and `/stop_profile` is recorded. `/stop_profile` writes `rank0.schedule_batch.jsonl` (per-step batch composition and latency) and `requests.jsonl` (per-request timing, KV hits and token ids) synchronously, overwriting the previous window. Under TP only rank 0 is collected.
+
+| Variable | Meaning | Default |
+| --- | --- | --- |
+| `VLLM_SIMULATOR_COLLECTOR_OUTPUT_DIR` | Export directory | current working directory |
+| `VLLM_SIMULATOR_COLLECTOR_EXPORT_TOKEN_IDS` | Export `input_ids` / `output_ids` | `1` |
+| `VLLM_SIMULATOR_COLLECTOR_EXPORT_GZIP` | Write `.jsonl.gz` instead of `.jsonl` | `1` |
+
+---
 ### Configuration File Format (`VLLM_SIMULATOR_CONFIG_PATH`)
 The config file is a JSON file with three main sections:
 
-- **`platform`**: Hardware and bandwidth settings
+- **`platform`**: Hardware settings
   - `accelerator`: GPU model (e.g., `"h100_sxm"`, `"b300_sxm"`) and `hbm_capacity_gb`
-  - `disk_*_bandwidth_gb`: L3 (disk) read/write bandwidth (GB/s)
-  - `memory_*_bandwidth_gb`: L2 (memory) read/write bandwidth (GB/s)
 
 - **`predictor`**: Time prediction module
-  - `name`: predictor type (`"aiconfigurator"`)
+  - `name`: predictor type (`"aiconfigurator"`, `"ml"`, `"replay"` or `"linear"`)
   - See the **TimePredictor** section below for details
 
 - **`scheduler`**: Parallelism and backend metadata
@@ -135,12 +152,7 @@ The config file is a JSON file with three main sections:
         "accelerator": {
             "name": "b300_sxm",
             "hbm_capacity_gb": 80000
-        },
-        "disk_read_bandwidth_gb": 8,
-        "disk_write_bandwidth_gb": 8,
-        "memory_read_bandwidth_gb": 64,
-        "memory_write_bandwidth_gb": 64,
-        "num_device_per_node": 8
+        }
     },
     "predictor": {
         "name": "aiconfigurator",
@@ -151,7 +163,7 @@ The config file is a JSON file with three main sections:
         "ep_size": 1,
         "dp_size": 1,
         "backend_name": "vllm",
-        "backend_version": "0.19.0"
+        "backend_version": "0.24.0"
     }
 }
 ```
@@ -174,5 +186,20 @@ The config file is a JSON file with three main sections:
   "database_mode": "SOL",
   "prefill_scale_factor": 1.02040816,
   "decode_scale_factor": 1.01010101
+}
+```
+
+### Linear
+Predicts every non-empty step as `base_ms + per_token_ms * scheduled_tokens`, bypassing any performance model (debugging). KV-cache length is not modelled. Set `per_token_ms` to 0 for a constant per-step latency.
+- Parameters:
+  - `base_ms`: (optional) fixed per-step latency in milliseconds; defaults to 0
+  - `per_token_ms`: (optional) latency per scheduled token in milliseconds; defaults to 0
+
+**Example**:
+```json
+{
+  "name": "linear",
+  "base_ms": 10,
+  "per_token_ms": 0.02
 }
 ```

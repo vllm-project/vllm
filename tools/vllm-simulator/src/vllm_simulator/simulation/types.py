@@ -1,18 +1,13 @@
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Optional, Union
-
-from vllm_simulator.spec import AcceleratorInfo, DataType
+from typing import Optional
 
 
 @dataclass
 class SchedulerConfig:
-    data_type: Optional[DataType] = (
-        None  # Data type for model weights and activations. If none is set, it will be automatically detected.
-    )
-    kv_cache_data_type: Optional[DataType] = None
+    # vLLM cache_config.cache_dtype string (e.g. "auto", "fp8", "fp8_e4m3").
+    kv_cache_dtype: str = "auto"
     mem_fraction_static: Optional[float] = None
-    max_total_tokens: Optional[int] = None
 
     tp_size: int = 1
     ep_size: int = 1
@@ -25,7 +20,7 @@ class SchedulerConfig:
 
     @property
     def attn_tp_size(self) -> int:
-        return self.tp_size / self.dp_size
+        return self.tp_size // self.dp_size
 
     @property
     def attn_dp_size(self) -> int:
@@ -33,7 +28,7 @@ class SchedulerConfig:
 
     @property
     def moe_tp_size(self) -> int:
-        return self.tp_size / self.ep_size
+        return self.tp_size // self.ep_size
 
     @property
     def moe_ep_size(self) -> int:
@@ -42,7 +37,7 @@ class SchedulerConfig:
 
 class SimulationMode(Enum):
     BLOCKING = "BLOCKING"
-    OFFLINE = "OFFLINE"
+    NON_BLOCKING = "NON_BLOCKING"
 
 
 @dataclass(slots=True)
@@ -52,18 +47,7 @@ class RequestStats:
     input_length: int = 1
     output_length: int = 1
 
-    # Prefix cache stats
-    recv_device_hit_len: int = 0
-    # Device hit length before `get_new_batch_prefill`.
-    # It may decrease if queued requests trigger KV eviction.
-    before_adder_device_hit_len: int = 0
-    final_device_hit_len: int = 0
-    recv_host_hit_len: int = 0  # Host hit length before prefetch
-    final_host_hit_len: int = 0  # Host hit length after prefetch
-    recv_storage_hit_len: int = 0  # Storage hit length at prefetch enqueue
-    final_storage_hit_len: int = 0  # Storage hit length at prefetch end
-    # vLLM v6d cross-node split of final_device_hit_len:
-    # local radix reuse vs external (remote v6d) computed tokens.
+    # Prefix cache hits: local prefix cache vs KV connector.
     local_kv_hit_len: int = 0
     ext_kv_hit_len: int = 0
 
@@ -72,32 +56,19 @@ class RequestStats:
     created_time: float = -1
     gen_token_latencies: list[float] = field(default_factory=list)
 
-    def is_complete(self) -> bool:
-        return True
 
+@dataclass(slots=True)
+class IterationStats:
+    # [extend_length, past_kv_length] per scheduled request.
+    requests: list[list[int]] = field(default_factory=list)
+    # RPC-1 only, matching the predictor's training label.
+    forward_latency: float = 0.0
+    sample_tokens_latency: float = 0.0
+    logprobs_latency: float = 0.0
+    total_tokens: int = 0
 
-def _bandwidth_property(gb_attr: str):
-    def getter(self):
-        gb_value = getattr(self, gb_attr)
-        return gb_value * 1e9 if gb_value else None
-
-    return property(getter)
-
-
-@dataclass
-class PlatformConfig:
-    device: Union[AcceleratorInfo, str]
-    # Storage configuration for hierarchical cache management.
-    disk_capacity_gb: Optional[float] = None
-    disk_read_bandwidth_gb: Optional[float] = None
-    disk_write_bandwidth_gb: Optional[float] = None
-    memory_capacity_gb: Optional[float] = None
-    memory_read_bandwidth_gb: Optional[float] = None
-    memory_write_bandwidth_gb: Optional[float] = None
-    num_device_per_node: int = 8
-
-    # Bandwidth properties (in bytes, converted from GB)
-    disk_read_bandwidth = _bandwidth_property("disk_read_bandwidth_gb")
-    disk_write_bandwidth = _bandwidth_property("disk_write_bandwidth_gb")
-    memory_read_bandwidth = _bandwidth_property("memory_read_bandwidth_gb")
-    memory_write_bandwidth = _bandwidth_property("memory_write_bandwidth_gb")
+    @property
+    def full_step_latency(self) -> float:
+        return (
+            self.forward_latency + self.sample_tokens_latency + self.logprobs_latency
+        )

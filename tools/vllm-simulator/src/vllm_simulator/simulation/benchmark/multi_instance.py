@@ -1,11 +1,6 @@
 import asyncio
-from typing import Iterator
 
-import numpy as np
-from vllm_simulator.dataset import (
-    BaseDataset,
-    GenericRequest,
-)
+from vllm_simulator.simulation.benchmark.request import GenericRequest
 from vllm_simulator.simulation.benchmark.base_runner import (
     BaseBenchmarkRunner,
     BaseWorker,
@@ -25,94 +20,50 @@ class MultiInstanceBenchmarkRunner(BaseBenchmarkRunner):
     def __init__(
         self, workers: list[BaseWorker], lb_proxy: LoadBalancingPolicy | None = None
     ):
+        super().__init__()
         self.workers = workers
         self.lb_proxy = lb_proxy if lb_proxy is not None else RoundRobinPolicy()
         self.lb_proxy.init_workers(workers)
-        self.loop = asyncio.new_event_loop()
 
-        # Worker's name -> requests
-        self.lb_routing_records: dict[str, list[GenericRequest]] = {}
-
-    def get_request(
-        self,
-        dataset: BaseDataset,
-        ignore_timestamp: bool = False,
-        request_rate: float = float("inf"),
-    ) -> Iterator[GenericRequest]:
-        yield_delay = 0
-        for req in dataset:
-            if ignore_timestamp:
-                created_time = yield_delay
-                yield_delay += np.random.exponential(1.0 / request_rate)
-            else:
-                created_time = req.custom_params.get("created_time", 0)
-
-            req.custom_params.update(
-                {
-                    "total_request": len(dataset),  # include the warmup requests.
-                    "created_time": created_time,
-                }
-            )
-
-            yield req
+    @property
+    def all_workers(self) -> list[BaseWorker]:
+        return self.workers
 
     async def async_benchmark(
         self,
         benchmark_config: BenchmarkConfig,
-        dataset: BaseDataset,
+        requests: list[GenericRequest],
     ):
-
         for worker in self.workers:
-            worker.reset_stats()
             await worker.trigger_simulation()
-            await worker.pause_generation()
+
+        self._assign_created_time(requests, benchmark_config)
+        logger.info(f"Created {len(requests)} request tasks.")
+
+        async def _generate_with_callback(w: BaseWorker, r: GenericRequest):
+            try:
+                result = await w.async_generate(r)
+                self.lb_proxy.on_request_complete(w.name, True, r)
+                return result
+            except Exception:
+                self.lb_proxy.on_request_complete(w.name, False, r)
+                raise
 
         tasks = []
-        logger.info(f"Created {len(dataset)} request tasks.")
-        for req in self.get_request(
-            dataset,
-            ignore_timestamp=benchmark_config.ignore_request_timestamp,
-            request_rate=benchmark_config.request_rate,
-        ):
+        for req in requests:
+            # NON_BLOCKING engines start dispatching after this many requests.
+            req.custom_params["total_request"] = len(requests)
             worker = self.lb_proxy.select_worker(self.workers, req)
-            if worker.name not in self.lb_routing_records:
-                self.lb_routing_records[worker.name] = []
-            self.lb_routing_records[worker.name].append(req)
+            self._record_routing(worker, req)
+            tasks.append(asyncio.create_task(_generate_with_callback(worker, req)))
 
-            async def _generate_with_callback(w=worker, r=req):
-                try:
-                    result = await w.async_generate(r)
-                    self.lb_proxy.on_request_complete(w.name, True, req)
-                    return result
-                except Exception:
-                    self.lb_proxy.on_request_complete(w.name, False, req)
-                    raise
-
-            task = asyncio.create_task(_generate_with_callback())
-            tasks.append(task)
-
-        for worker in self.workers:
-            await worker.continue_generation()
-
-        _ = await asyncio.gather(*tasks)
+        await asyncio.gather(*tasks)
 
         # dump result
         for worker in self.workers:
             await worker.trigger_simulation()
 
-        request_stats = self.get_request_stats()
-        metrics = calc_metrics(request_stats)
-
-        return metrics
-
-    def set_lb_proxy(self, lb_proxy: LoadBalancingPolicy):
-        self.lb_proxy = lb_proxy
-
-    def benchmark(self, benchmark_config: BenchmarkConfig, dataset: BaseDataset):
-
-        return self.loop.run_until_complete(
-            self.async_benchmark(benchmark_config, dataset)
-        )
+        return calc_metrics(self.get_request_stats())
 
     def get_request_stats(self) -> list[dict]:
         result = []
@@ -122,23 +73,3 @@ class MultiInstanceBenchmarkRunner(BaseBenchmarkRunner):
                 item["worker"] = worker.name
             result.extend(request_stats)
         return result
-
-    def get_iteration_stats(self):
-        result = []
-        for worker in self.workers:
-            iteration_stats = worker.get_iteration_stats()
-            for item in iteration_stats:
-                item["worker"] = worker.name
-            result.extend(iteration_stats)
-        return result
-
-    def get_lb_routing_records(self) -> dict[str, list[GenericRequest]]:
-        return self.lb_routing_records
-    
-    def shutdown(self):
-        for worker in self.workers:
-            worker.shutdown()
-
-    def flush_cache(self):
-        for worker in self.workers:
-            worker.flush_cache()

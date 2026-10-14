@@ -1,39 +1,45 @@
 import gzip
 import json
 import os
-import threading
 import time
 import torch
-from typing import Optional
-from collections import defaultdict
+from typing import TYPE_CHECKING, Callable, Optional
 from dataclasses import dataclass, field, asdict
 from array import array
 
 from vllm_simulator.hook import BaseHook
+from vllm_simulator.simulation.vllm.utils import kv_hit_split
 from vllm_simulator.utils.json import CustomJsonEncoder
 
-# Single knob for export shaping, comma-separated flags
-# (SIM_COLLECTOR_EXPORT):
-#   content: "ids" (default) keeps input_ids/output_ids, "no_ids" drops them
-#   format:  "gzip" (default) writes .jsonl.gz, "plain" writes plain .jsonl
-_EXPORT_FLAGS = frozenset(
-    os.getenv("SIM_COLLECTOR_EXPORT", "ids,gzip").lower().split(",")
-)
-EXPORT_TOKEN_IDS = "no_ids" not in _EXPORT_FLAGS
-EXPORT_GZIP = "plain" not in _EXPORT_FLAGS
+if TYPE_CHECKING:
+    from vllm.v1.core.sched.output import SchedulerOutput
+
+def _env_flag(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() not in ("0", "false", "no", "off", "")
+
+
+# Environment variables:
+#   VLLM_SIMULATOR_COLLECTOR_OUTPUT_DIR: export base directory (default: cwd)
+#   VLLM_SIMULATOR_COLLECTOR_EXPORT_TOKEN_IDS: keep input_ids/output_ids in
+#       requests export (default on)
+#   VLLM_SIMULATOR_COLLECTOR_EXPORT_GZIP: write .jsonl.gz instead of .jsonl
+#       (default on)
+OUTPUT_DIR = os.getenv("VLLM_SIMULATOR_COLLECTOR_OUTPUT_DIR", os.getcwd())
+EXPORT_TOKEN_IDS = _env_flag("VLLM_SIMULATOR_COLLECTOR_EXPORT_TOKEN_IDS", True)
+EXPORT_GZIP = _env_flag("VLLM_SIMULATOR_COLLECTOR_EXPORT_GZIP", True)
 
 
 @dataclass(slots=True)
 class RequestInfos:
     rid: str = ""
     created_time: Optional[float] = None
-    client_created_time: Optional[float] = None  # client created time
-    server_created_time: Optional[float] = None
     queue_start: float = 0.0
     queue_end: float = 0.0
     output_length: int = 0
     input_length: int = 0
-    total_kv_hit_len: int = 0
     local_kv_hit_len: int = 0
     ext_kv_hit_len: int = 0
     input_ids: array = field(default_factory=lambda: array("i"))
@@ -54,56 +60,83 @@ class BatchInfos:
     logprobs_n: int = 0
 
 
+# Data is collected only between start_profile and stop_profile.  Worker
+# and EngineCore may live in different processes, so each side keeps its
+# own collecting flag, toggled by its own profile() call.
+_COLLECTING_BATCHES = False
+_COLLECTING_REQUESTS = False
+
 BATCH_INFOS: list[BatchInfos] = []
-BATCH_SAMPLE_TOKENS_LATENCIES: list[float] = []
 
-REQUEST_INFOS: dict[str, RequestInfos] = defaultdict(RequestInfos)
+REQUEST_INFOS: dict[str, RequestInfos] = {}
 
 
-def _round6(value: Optional[float]) -> Optional[float]:
-    """Round to 6 decimals to shrink the exported payload (None-safe)."""
-    return round(value, 6) if value is not None else None
+# Timing uses CUDA event pairs instead of torch.cuda.synchronize(), which
+# would break async-scheduling overlap and skew the measurement.  Elapsed
+# time is read after vLLM's own sync (AsyncModelRunnerOutput.get_output),
+# so the hook never synchronizes by itself.
+
+
+class _EventTimer:
+    """A start/end pair of timing cuda events for one measured region."""
+
+    __slots__ = ("_start", "_end")
+
+    def __init__(self) -> None:
+        self._start = torch.cuda.Event(enable_timing=True)
+        self._end = torch.cuda.Event(enable_timing=True)
+
+    def record_start(self) -> None:
+        self._start.record()
+
+    def record_end(self) -> None:
+        self._end.record()
+
+    def elapsed_s(self) -> Optional[float]:
+        """Elapsed seconds, or None if an event has not completed (guards a
+        rare race so it never crashes the engine)."""
+        try:
+            return self._start.elapsed_time(self._end) / 1000.0
+        except RuntimeError:
+            return None
+
+
+# Hands the execute_model (RPC-1) finalizer to the same step's sample_tokens
+# (RPC-2); one slot suffices since the two run back-to-back.
+_PENDING_EXEC: Optional[Callable[[Optional[float]], None]] = None
+
+
+def _finalize_on_get_output(output, finalize):
+    """Run ``finalize`` once vLLM has synced this step's output: inside
+    get_output() for async outputs, immediately otherwise."""
+    original_get_output = getattr(output, "get_output", None)
+    if original_get_output is None:
+        finalize()
+        return output
+
+    def wrapped_get_output(*args, **kwargs):
+        result = original_get_output(*args, **kwargs)
+        finalize()
+        return result
+
+    output.get_output = wrapped_get_output
+    return output
 
 
 def _open_export(path: str):
     """Open a JSONL export file; gzip-compressed (level 1) when EXPORT_GZIP."""
+
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+
     if EXPORT_GZIP:
         return gzip.open(path, "wt", compresslevel=1)
     return open(path, "w")
 
 
-_LAST_EXPORT_THREAD: Optional[threading.Thread] = None
-
-
-def _run_export(export_fn, is_start: bool) -> None:
-    """Export on a side thread for start_profile (the engine keeps
-    serving), blocking for stop_profile (data flushed before moving on)."""
-    global _LAST_EXPORT_THREAD
-    # Exports of one process write the same file: wait out the previous one.
-    if _LAST_EXPORT_THREAD is not None:
-        _LAST_EXPORT_THREAD.join()
-        _LAST_EXPORT_THREAD = None
-    if is_start:
-        _LAST_EXPORT_THREAD = threading.Thread(target=export_fn, daemon=True)
-        _LAST_EXPORT_THREAD.start()
-    else:
-        export_fn()
-
-
-def get_output_dir() -> str:
-    base = os.getenv("SIM_COLLECTOR_OUTPUT_DIR", os.getcwd())
-    engine_rank = os.getenv("DS_LLM_PROC_RANK")
-    if engine_rank is not None:
-        sub_dir = f"engine{engine_rank}"
-    else:
-        sub_dir = f"pid{os.getpid()}"
-    output_dir = os.path.join(base, sub_dir)
-    os.makedirs(output_dir, exist_ok=True)
-    return output_dir
-
-
 class C_VLLMEngineArgsHook(BaseHook):
-    """Hook EngineArgs to default the profiler to nsys (cudaProfilerApi)."""
+    """Hook EngineArgs to default the profiler so /start_profile and
+    /stop_profile (the collection window markers) are registered; the
+    hooked Worker.profile never starts it."""
 
     HOOK_CLASS_NAME = "EngineArgs"
     HOOK_MODULE_NAME = "vllm.engine.arg_utils"
@@ -113,22 +146,16 @@ class C_VLLMEngineArgsHook(BaseHook):
         original_post_init = target.__post_init__
 
         def wrapped_post_init(self):
+            if self.profiler_config.profiler is None:
+                self.profiler_config.profiler = "cuda"
             original_post_init(self)
-            profiler_config = getattr(self, "profiler_config", None)
-            if isinstance(profiler_config, dict):
-                if profiler_config.get("profiler") is None:
-                    profiler_config["profiler"] = "cuda"
-            elif profiler_config is not None:
-                if profiler_config.profiler is None:
-                    profiler_config.profiler = "cuda"
 
         target.__post_init__ = wrapped_post_init
 
 
-class C_WorkerWrapperBaseHook(BaseHook):
-
-    HOOK_CLASS_NAME = "WorkerWrapperBase"    
-    HOOK_MODULE_NAME = "vllm.v1.worker.worker_base"
+class C_WorkerHook(BaseHook):
+    HOOK_MODULE_NAME = "vllm.v1.worker.gpu_worker"
+    HOOK_CLASS_NAME = "Worker"
 
     @classmethod
     def hook(cls, target) -> None:
@@ -136,6 +163,8 @@ class C_WorkerWrapperBaseHook(BaseHook):
         original_execute_model = target.execute_model
 
         def wrapped_execute_model(self, scheduler_output: "SchedulerOutput"):
+            if not _COLLECTING_BATCHES:
+                return original_execute_model(self, scheduler_output)
 
             batch_req_infos = {}
             for req_id, sched_token in scheduler_output.num_scheduled_tokens.items():
@@ -151,15 +180,16 @@ class C_WorkerWrapperBaseHook(BaseHook):
             
             for req in scheduler_output.scheduled_new_reqs:
                 batch_req_infos[req.req_id]["past_kv_len"] = req.num_computed_tokens
-                batch_req_infos[req.req_id]["output_len"] = 0
+                # V2 also sends resumed requests here, with prefill_token_ids
+                # covering the prompt plus the outputs generated so far.
+                batch_req_infos[req.req_id]["output_len"] = (
+                    len(req.prefill_token_ids) - req.prompt_len
+                )
 
             forward_mode = 2 if all([num_token == 1 for num_token in scheduler_output.num_scheduled_tokens.values()]) else 1
 
-            # Per-step logprobs form (for independent logprobs-compensation
-            # training). Only new reqs carry sampling_params in SchedulerOutput;
-            # cached reqs (decode steps) would need engine-side hook or a
-            # differential stress test to capture. total_num_scheduled_tokens
-            # is the step-level token count used as the MTP-compensation feature.
+            # Logprobs features for compensation training.  Only new reqs
+            # carry sampling_params, so decode steps are not counted.
             logprobs_req_count = 0
             logprobs_tokens = 0
             logprobs_n = 0
@@ -172,103 +202,111 @@ class C_WorkerWrapperBaseHook(BaseHook):
                     )
                     logprobs_n = max(logprobs_n, sp.logprobs)
 
-            torch.cuda.synchronize()
-            start = time.time()
+            global _PENDING_EXEC
+
+            exec_timer = _EventTimer()
+            start_wall = time.time()
+            exec_timer.record_start()
             ret = original_execute_model(self, scheduler_output)
-            torch.cuda.synchronize()
-            end = time.time()
+            exec_timer.record_end()
 
+            batch_info = None
             if len(batch_req_infos):
-                BATCH_INFOS.append(
-                    BatchInfos(
-                        start_timestamp=_round6(start),
-                        end_timestamp=_round6(end),
-                        forward_mode=forward_mode,
-                        # Keep only the last 12 chars of rid.
-                        requests=[
-                            (
-                                rid[-12:],
-                                req_info["extend_input_len"],
-                                req_info["past_kv_len"],
-                                req_info["output_len"],
-                            )
-                            for rid, req_info in batch_req_infos.items()
-                        ],
-                        iter_latency=_round6(end - start),
-                        logprobs_req_count=logprobs_req_count,
-                        logprobs_tokens=logprobs_tokens,
-                        logprobs_n=logprobs_n,
-                    )
+                batch_info = BatchInfos(
+                    start_timestamp=start_wall,
+                    # end_timestamp / iter_latency are set by _finalize_exec.
+                    forward_mode=forward_mode,
+                    # Keep only the last 12 chars of rid.
+                    requests=[
+                        (
+                            rid[-12:] if len(rid) > 12 else rid,
+                            req_info["extend_input_len"],
+                            req_info["past_kv_len"],
+                            req_info["output_len"],
+                        )
+                        for rid, req_info in batch_req_infos.items()
+                    ],
+                    logprobs_req_count=logprobs_req_count,
+                    logprobs_tokens=logprobs_tokens,
+                    logprobs_n=logprobs_n,
                 )
+                BATCH_INFOS.append(batch_info)
 
-            return ret
-        
+            def _finalize_exec(sample_latency: Optional[float] = None):
+                if batch_info is None:
+                    return
+                iter_latency = exec_timer.elapsed_s()
+                if iter_latency is None:
+                    return
+                batch_info.iter_latency = iter_latency
+                batch_info.end_timestamp = start_wall + iter_latency
+                if sample_latency is not None:
+                    batch_info.sample_tokens_latency = sample_latency
+
+            # Two-RPC vLLM: the output comes from sample_tokens; finalize
+            # there.
+            if ret is None:
+                _PENDING_EXEC = _finalize_exec
+                return ret
+
+            return _finalize_on_get_output(ret, _finalize_exec)
+
         target.execute_model = wrapped_execute_model
 
-
-
-class C_WorkerHook(BaseHook):
-    HOOK_MODULE_NAME = "vllm.v1.worker.gpu_worker"
-    HOOK_CLASS_NAME = "Worker"
-
-    @classmethod
-    def hook(cls, target) -> None:
-
-        # Two-window collection (X1): if this vllm version has sample_tokens
-        # (two-RPC architecture), clamp it with cuda.sync to measure the full
-        # RPC-2 span (sampler + MTP draft forward + bookkeeping D2H + output
-        # construction). It aligns 1:1 by call order with the execute_model
-        # window (RPC-1, measured by C_WorkerWrapperBaseHook).
-        # Skipped automatically on older vllm without this method; the
-        # iter_latency semantics remain unchanged.
+        # RPC-2 window (sampler + MTP draft + bookkeeping D2H + output
+        # build), paired 1:1 with the execute_model window.  Skipped on vLLM
+        # without sample_tokens.
         original_sample_tokens = getattr(target, "sample_tokens", None)
         if original_sample_tokens is not None:
 
             def wrapped_sample_tokens(self, *args, **kwargs):
-                torch.cuda.synchronize()
-                start = time.time()
+                global _PENDING_EXEC
+
+                pending_exec = _PENDING_EXEC
+                _PENDING_EXEC = None
+                # Nothing pending: execute_model ran outside the window.
+                if pending_exec is None:
+                    return original_sample_tokens(self, *args, **kwargs)
+
+                sample_timer = _EventTimer()
+                sample_timer.record_start()
                 ret = original_sample_tokens(self, *args, **kwargs)
-                torch.cuda.synchronize()
-                BATCH_SAMPLE_TOKENS_LATENCIES.append(_round6(time.time() - start))
-                return ret
+                sample_timer.record_end()
+
+                def _finalize():
+                    pending_exec(sample_timer.elapsed_s())
+
+                return _finalize_on_get_output(ret, _finalize)
 
             target.sample_tokens = wrapped_sample_tokens
-
-        original_profile = getattr(target, "profile", None)
 
         def override_profile(
             self, is_start: bool = True, profile_prefix: str | None = None
         ):
-            global BATCH_INFOS
+            global BATCH_INFOS, _COLLECTING_BATCHES
 
-            output_dir = get_output_dir()
-            rank_suffix = f"rank{self.rank}"
+            # Only rank0 (the executor's output rank under TP) has its async
+            # output synced via get_output(); other ranks would never get
+            # their latencies filled, so they collect nothing.
+            if self.rank != 0:
+                return
 
-            n_st = len(BATCH_SAMPLE_TOKENS_LATENCIES)
-            for i, batch_info in enumerate(BATCH_INFOS):
-                # Backward compatible: under the old hook / old vllm,
-                # i >= n_st and sample_tokens_latency stays 0.0.
-                if i < n_st:
-                    batch_info.sample_tokens_latency = (
-                        BATCH_SAMPLE_TOKENS_LATENCIES[i]
-                    )
+            if is_start:
+                BATCH_INFOS = []
+                _COLLECTING_BATCHES = True
+                return
 
+            _COLLECTING_BATCHES = False
             batch_infos = BATCH_INFOS
             BATCH_INFOS = []
-            BATCH_SAMPLE_TOKENS_LATENCIES.clear()
 
-            def _export():
-                path = f"{output_dir}/{rank_suffix}.schedule_batch.jsonl"
-                if EXPORT_GZIP:
-                    path += ".gz"
-                with _open_export(path) as f:
-                    for batch_info in batch_infos:
-                        f.write(
-                            json.dumps(batch_info, cls=CustomJsonEncoder) + "\n"
-                        )
-                print(f"Schedule batch data has been saved to {path}")
-
-            _run_export(_export, is_start)
+            path = f"{OUTPUT_DIR}/rank{self.rank}.schedule_batch.jsonl"
+            if EXPORT_GZIP:
+                path += ".gz"
+            with _open_export(path) as f:
+                for batch_info in batch_infos:
+                    f.write(json.dumps(batch_info, cls=CustomJsonEncoder) + "\n")
+            print(f"Schedule batch data has been saved to {path}")
 
         target.profile = override_profile
 
@@ -287,30 +325,30 @@ class C_EngineCoreHook(BaseHook):
         def wrapped_profile(
             self, is_start: bool = True, profile_prefix: str | None = None
         ):
-            global REQUEST_INFOS
+            global REQUEST_INFOS, _COLLECTING_REQUESTS
 
-            output_dir = get_output_dir()
+            if is_start:
+                REQUEST_INFOS = {}
+                _COLLECTING_REQUESTS = True
+                return original_profile(self, is_start, profile_prefix)
 
+            _COLLECTING_REQUESTS = False
             request_infos = REQUEST_INFOS
-            REQUEST_INFOS = defaultdict(RequestInfos)
+            REQUEST_INFOS = {}
 
-            def _export():
-                path = f"{output_dir}/rank0.requests.jsonl"
-                if EXPORT_GZIP:
-                    path += ".gz"
-                with _open_export(path) as f:
-                    for req_infos in request_infos.values():
-                        row = asdict(req_infos)
-                        if not EXPORT_TOKEN_IDS:
-                            # Token ids dominate the payload; drop on request.
-                            del row["input_ids"]
-                            del row["output_ids"]
-                        f.write(json.dumps(row, cls=CustomJsonEncoder) + "\n")
-                print(f"Request data has been saved to {path}")
+            path = f"{OUTPUT_DIR}/requests.jsonl"
+            if EXPORT_GZIP:
+                path += ".gz"
+            with _open_export(path) as f:
+                for req_infos in request_infos.values():
+                    row = asdict(req_infos)
+                    if not EXPORT_TOKEN_IDS:
+                        # Token ids dominate the payload; drop on request.
+                        del row["input_ids"]
+                        del row["output_ids"]
+                    f.write(json.dumps(row, cls=CustomJsonEncoder) + "\n")
+            print(f"Request data has been saved to {path}")
 
-            _run_export(_export, is_start)
-            
-            # Call the original profile method to trigger the lower-level worker
             return original_profile(self, is_start, profile_prefix)
 
         target.profile = wrapped_profile
@@ -328,13 +366,15 @@ class C_SchedulerHook(BaseHook):
         original_schedule = target.schedule
         original_free_request = target._free_request
 
+        # Only requests arriving inside the window are tracked; schedule
+        # and free skip ids absent from REQUEST_INFOS.
         def wrapped_add_request(self, request):
-            recv_time = time.time()
-            req_info = REQUEST_INFOS[request.request_id]
-            req_info.rid = request.request_id
-            req_info.queue_start = _round6(recv_time)
-            req_info.server_created_time = _round6(request.arrival_time)
-            req_info.created_time = _round6(request.arrival_time)
+            if _COLLECTING_REQUESTS:
+                REQUEST_INFOS[request.request_id] = RequestInfos(
+                    rid=request.request_id,
+                    created_time=request.arrival_time,
+                    queue_start=time.time(),
+                )
             return original_add_request(self, request)
 
         def wrapped_schedule(self, *args, **kwargs):
@@ -344,45 +384,27 @@ class C_SchedulerHook(BaseHook):
                 prefill_timestamp = time.time()
                 for new_req_data in scheduler_output.scheduled_new_reqs:
                     req_id = new_req_data.req_id
+                    req_info = REQUEST_INFOS.get(req_id)
                     request = self.requests.get(req_id)
-                    if request is None:
+                    if req_info is None or request is None:
                         continue
-                    req_info = REQUEST_INFOS[req_id]
                     if req_info.queue_end == 0:
-                        req_info.queue_end = _round6(prefill_timestamp)
+                        req_info.queue_end = prefill_timestamp
                         req_info.input_length = request.num_prompt_tokens
                         req_info.output_length = request.max_tokens
 
-                        # Current vLLM dropped Request.num_cached_tokens /
-                        # num_external_computed_tokens; the local/external hit
-                        # split lives on prefill_stats, set during schedule()
-                        # and intact until take_prefill_stats at output build.
-                        prefill_stats = getattr(request, "prefill_stats", None)
-                        if prefill_stats is not None and prefill_stats.num_prompt_tokens:
-                            req_info.total_kv_hit_len = (
-                                prefill_stats.num_cached_tokens
-                            )
-                            req_info.ext_kv_hit_len = (
-                                prefill_stats.num_external_cached_tokens
-                            )
-                            req_info.local_kv_hit_len = (
-                                prefill_stats.num_local_cached_tokens
-                            )
-                        else:
-                            # Fallback: NewRequestData.num_computed_tokens is
-                            # local+external combined at this seam.
-                            total = max(new_req_data.num_computed_tokens or 0, 0)
-                            req_info.total_kv_hit_len = total
-                            req_info.ext_kv_hit_len = 0
-                            req_info.local_kv_hit_len = total
+                        # The local/external hit split lives on prefill_stats.
+                        req_info.local_kv_hit_len, req_info.ext_kv_hit_len = (
+                            kv_hit_split(request, new_req_data.num_computed_tokens)
+                        )
 
             return scheduler_output
 
         def wrapped_free_request(self, request, *args, **kwargs):
             # Token ids dominate REQUEST_INFOS memory; skip collecting them
             # entirely when they are not exported.
-            if EXPORT_TOKEN_IDS and request.is_finished():
-                req_info = REQUEST_INFOS[request.request_id]
+            req_info = REQUEST_INFOS.get(request.request_id)
+            if req_info is not None and EXPORT_TOKEN_IDS and request.is_finished():
                 req_info.input_ids = (
                     array("i", request.prompt_token_ids)
                     if request.prompt_token_ids is not None

@@ -38,12 +38,7 @@ class Envs:
     @classmethod
     def simulation_mode(cls) -> str:
         VLLM_SIMULATOR_OUTPUT_MODE = os.getenv(
-            "VLLM_SIMULATOR_OUTPUT_MODE", "OFFLINE"
+            "VLLM_SIMULATOR_OUTPUT_MODE", "NON_BLOCKING"
         ).upper()
-        assert VLLM_SIMULATOR_OUTPUT_MODE in ("BLOCKING", "OFFLINE")
+        assert VLLM_SIMULATOR_OUTPUT_MODE in ("BLOCKING", "NON_BLOCKING")
         return VLLM_SIMULATOR_OUTPUT_MODE
-
-    @classmethod
-    def num_warmup(cls) -> int:
-        # The number of warmup requests.
-        return int(os.getenv("VLLM_SIMULATOR_NUM_WARMUP", "0"))

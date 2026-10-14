@@ -1,9 +1,25 @@
-import asyncio
-import random
-from typing import Iterator
+"""PD-disaggregated benchmark runner for vLLM simulation workers.
 
-import numpy as np
-from vllm_simulator.dataset import BaseDataset, GenericRequest
+Mirrors vLLM's PD proxy flow: each request first runs on a prefill worker
+with ``max_tokens=1``, then on a decode worker with the original output
+length.  Decode workers must be configured with the DecodeBenchConnector
+(``kv_transfer_config={"kv_connector": "DecodeBenchConnector",
+"kv_role": "kv_both"}``) so the prompt KV is treated as already transferred
+and only the last prompt token is recomputed.  The transfer itself is
+modelled as instantaneous.
+
+Per-request stats only exist in each engine's ``request.jsonl`` dump, so the
+two phases are separated by a round boundary on the prefill workers: the
+prefill finish time read back from the dump becomes the decode request's
+``created_time``.
+"""
+
+import asyncio
+import dataclasses
+import uuid
+from collections import Counter
+
+from vllm_simulator.simulation.benchmark.request import GenericRequest
 from vllm_simulator.simulation.benchmark.base_runner import (
     BaseBenchmarkRunner,
     BaseWorker,
@@ -27,42 +43,19 @@ class PDDisaggBenchmarkRunner(BaseBenchmarkRunner):
         prefill_lb_proxy: LoadBalancingPolicy | None = None,
         decode_lb_proxy: LoadBalancingPolicy | None = None,
     ):
+        super().__init__()
         self.prefill_workers = prefill_workers
         self.decode_workers = decode_workers
         self.prefill_lb_proxy = prefill_lb_proxy or RoundRobinPolicy()
         self.decode_lb_proxy = decode_lb_proxy or RoundRobinPolicy()
         self.prefill_lb_proxy.init_workers(prefill_workers)
         self.decode_lb_proxy.init_workers(decode_workers)
-        self.loop = asyncio.new_event_loop()
 
-        self.lb_routing_records: dict[str, list[GenericRequest]] = {}
         self.request_stats: list[dict] = []
 
     @property
     def all_workers(self) -> list[BaseWorker]:
         return self.prefill_workers + self.decode_workers
-
-    def get_request(
-        self,
-        dataset: BaseDataset,
-        ignore_timestamp: bool = False,
-        request_rate: float = float("inf"),
-    ) -> Iterator[GenericRequest]:
-        yield_delay = 0
-        for req in dataset:
-            if ignore_timestamp:
-                created_time = yield_delay
-                yield_delay += np.random.exponential(1.0 / request_rate)
-            else:
-                created_time = req.custom_params.get("created_time", 0)
-
-            req.custom_params.update(
-                {
-                    # "total_request": len(dataset),
-                    "created_time": created_time,
-                }
-            )
-            yield req
 
     def _pair_request(self, req: GenericRequest):
         """Pair a request with its prefill and decode workers."""
@@ -72,185 +65,158 @@ class PDDisaggBenchmarkRunner(BaseBenchmarkRunner):
         decode_worker = self.decode_lb_proxy.select_worker(
             self.decode_workers, req
         )
-        if prefill_worker:
-            self.lb_routing_records.setdefault(prefill_worker.name, []).append(req)
-        if decode_worker:
-            self.lb_routing_records.setdefault(decode_worker.name, []).append(req)
+        self._record_routing(prefill_worker, req)
+        self._record_routing(decode_worker, req)
 
-        req.extra_args.update({
-            "bootstrap_host": "2.2.2.2",   # fake bootstrap host
-            "bootstrap_port": 30500,
-            "bootstrap_room": random.randint(0, 2**63 - 1),
-        })
+        # Shared id joins the two engines' request.jsonl records.
+        req.custom_params["request_id"] = uuid.uuid4().hex
         req.custom_params["prefill_worker"] = prefill_worker
         req.custom_params["decode_worker"] = decode_worker
 
-    async def _run_prefill_request(self, req: GenericRequest):
-        """Run prefill phase for a single request."""
-        prefill_worker = req.custom_params.get("prefill_worker")
-        if not prefill_worker:
-            return {}
+    @staticmethod
+    def _phase_request(
+        req: GenericRequest, total_request: int, **overrides
+    ) -> GenericRequest:
+        """Per-phase copy of a request.
 
-        prefill_response = await prefill_worker.async_generate(req)
-        prefill_sim_stat = prefill_response['meta_info']['finish_reason'].get("simulation_stat")
-        if not prefill_sim_stat:
-            logger.error("Prefill response does not contain simulation result.")
-            return {}
+        ``total_request`` is the number of requests routed to the target
+        worker: NON_BLOCKING engines start dispatching only after receiving
+        that many requests.
+        """
+        custom_params = {
+            **req.custom_params,
+            "total_request": total_request,
+            **overrides.pop("custom_params", {}),
+        }
+        return dataclasses.replace(req, custom_params=custom_params, **overrides)
 
-        # update the created_time which should be the end of prefilling.
-        req.custom_params["created_time"] = prefill_sim_stat["last_event_time"]
-        return prefill_sim_stat
-
-    async def _run_decode_request(self, req: GenericRequest):
-        """Run decode phase for a single request."""
-        decode_worker = req.custom_params.get("decode_worker")
-        if not decode_worker:
-            return {}
-
-        decode_response = await decode_worker.async_generate(req)
-        decode_sim_stat = decode_response['meta_info']['finish_reason'].get("simulation_stat")
-        return decode_sim_stat or {}
-
-    def _collect_request_stats(
+    async def _run_phase(
         self,
-        req: GenericRequest,
-        prefill_sim_stat: dict | None,
-        decode_sim_stat: dict | None,
-    ):
-        """Collect per-request stats from prefill and decode results."""
-        prefill_sim_stat = prefill_sim_stat or {}
-        decode_sim_stat = decode_sim_stat or {}
+        workers: list[BaseWorker],
+        role: str,
+        phase_requests: list[GenericRequest],
+    ) -> dict[str, dict]:
+        """Run one phase to completion and return its stats keyed by rid."""
+        await asyncio.gather(
+            *(req.custom_params[role].async_generate(req) for req in phase_requests)
+        )
 
-        prefill_worker = req.custom_params.get("prefill_worker")
-        decode_worker = req.custom_params.get("decode_worker")
+        # Round boundary: dump this phase's per-request stats.
+        for worker in workers:
+            await worker.trigger_simulation()
+        return {
+            item["rid"]: item
+            for worker in workers
+            for item in worker.get_request_stats()
+        }
 
-        if not prefill_sim_stat and not decode_sim_stat:
-            return
+    @staticmethod
+    def _merge_request_stats(
+        req: GenericRequest, prefill_stat: dict, decode_stat: dict
+    ) -> dict:
+        """Merge P/D stats as seen by a client of vLLM's PD proxy.
 
-        def pick_first_not_none(key, *stats_dicts):
-            """Return the first non-None value for the given key."""
-            for stats in stats_dicts:
-                value = stats.get(key)
-                if value is not None:
-                    return value
-            return None
+        The client only receives the decode stream, so the first token
+        latency spans the whole prefill plus the decode instance's first
+        step; later token latencies are the decode instance's.
+        """
+        prefill_latencies = prefill_stat.get("gen_token_latencies") or []
+        decode_latencies = decode_stat.get("gen_token_latencies") or []
+        if decode_latencies:
+            gen_token_latencies = [
+                sum(prefill_latencies) + decode_latencies[0]
+            ] + decode_latencies[1:]
+        else:
+            gen_token_latencies = prefill_latencies
 
-        self.request_stats.append({
-            "prefill_worker": prefill_worker.name if prefill_worker else None,
-            "decode_worker": decode_worker.name if decode_worker else None,
-            "last_event_time": pick_first_not_none(
-                "last_event_time", decode_sim_stat, prefill_sim_stat
+        return {
+            "rid": prefill_stat["rid"],
+            "prefill_worker": req.custom_params["prefill_worker"].name,
+            "decode_worker": req.custom_params["decode_worker"].name,
+            "created_time": prefill_stat["created_time"],
+            "queue_start": prefill_stat["queue_start"],
+            "queue_end": prefill_stat["queue_end"],
+            "last_event_time": decode_stat.get(
+                "last_event_time", prefill_stat["last_event_time"]
             ),
-            "queue_start": pick_first_not_none(
-                "queue_start", prefill_sim_stat, decode_sim_stat
-            ),
-            "queue_end": pick_first_not_none(
-                "queue_end", prefill_sim_stat, decode_sim_stat
-            ),
-            # The prefix cache only considers the prefill worker
-            "final_device_hit_len": prefill_sim_stat.get("final_device_hit_len"),
-            "final_host_hit_len": prefill_sim_stat.get("final_host_hit_len"),
-            "final_storage_hit_len": prefill_sim_stat.get("final_storage_hit_len"),
-            "input_length": pick_first_not_none(
-                "input_length", prefill_sim_stat, decode_sim_stat
-            ),
-            "output_length": pick_first_not_none(
-                "output_length", prefill_sim_stat, decode_sim_stat
-            ),
-            "gen_token_latencies": (
-                (prefill_sim_stat.get("gen_token_latencies") or [])
-                + (decode_sim_stat.get("gen_token_latencies") or [])
-            ),
-        })
+            "input_length": prefill_stat["input_length"],
+            "output_length": decode_stat.get("output_length", 1),
+            # The prefix cache only matters on the prefill worker; the
+            # decode worker's external hit is the simulated transfer.
+            "local_kv_hit_len": prefill_stat["local_kv_hit_len"],
+            "ext_kv_hit_len": prefill_stat["ext_kv_hit_len"],
+            "gen_token_latencies": gen_token_latencies,
+        }
 
     async def async_benchmark(
         self,
         benchmark_config: BenchmarkConfig,
-        dataset: BaseDataset,
+        requests: list[GenericRequest],
     ):
+        self.request_stats = []
         for worker in self.all_workers:
-            worker.reset_stats()
             await worker.trigger_simulation()
-            await worker.pause_generation()
 
-        # Collect requests
-        requests = list(self.get_request(
-            dataset,
-            ignore_timestamp=benchmark_config.ignore_request_timestamp,
-            request_rate=benchmark_config.request_rate,
-        ))
+        self._assign_created_time(requests, benchmark_config)
         logger.info(f"Created {len(requests)} PD disagg request tasks.")
 
-        # Phase 1: Pair P/D workers for each request
         for req in requests:
             self._pair_request(req)
 
-        # Phase 2: P workers execute, wait for all results
-        prefill_gen_tasks = []
-        for req in requests:
-            prefill_gen_tasks.append(asyncio.create_task(
-                self._run_prefill_request(req)
-            ))
-
-        for worker in self.prefill_workers:
-            await worker.continue_generation()
-        
-        prefill_stats_list = await asyncio.gather(*prefill_gen_tasks)
-
-        decode_gen_tasks = []
-        for req in requests:
-            decode_gen_tasks.append(asyncio.create_task(
-                self._run_decode_request(req)
-            ))
-
-        for worker in self.decode_workers:
-            await worker.continue_generation()
-        
-        decode_stats_list = await asyncio.gather(*decode_gen_tasks)
-
-        # Collect stats
-        for req, p_stat, d_stat in zip(requests, prefill_stats_list, decode_stats_list):
-            self._collect_request_stats(req, p_stat, d_stat)
-
-        for worker in self.all_workers:
-            await worker.trigger_simulation()
-
-        request_stats = self.get_request_stats()
-        metrics = calc_metrics(request_stats)
-        return metrics
-
-    def benchmark(self, benchmark_config: BenchmarkConfig, dataset: BaseDataset):
-        return self.loop.run_until_complete(
-            self.async_benchmark(benchmark_config, dataset)
+        # Phase 1: prefill only (first token), as vLLM's PD proxy does.
+        prefill_counts = Counter(
+            req.custom_params["prefill_worker"].name for req in requests
+        )
+        prefill_stats = await self._run_phase(
+            self.prefill_workers,
+            "prefill_worker",
+            [
+                self._phase_request(
+                    req,
+                    prefill_counts[req.custom_params["prefill_worker"].name],
+                    output_length=1,
+                )
+                for req in requests
+            ],
         )
 
+        # Phase 2: decode, arriving when the prefill finishes.
+        paired = []
+        for req in requests:
+            prefill_stat = prefill_stats.get(req.custom_params["request_id"])
+            if prefill_stat is None:
+                logger.error(
+                    "No prefill stats for request %s; skipping its decode.",
+                    req.custom_params["request_id"],
+                )
+                continue
+            paired.append((req, prefill_stat))
+
+        decode_counts = Counter(
+            req.custom_params["decode_worker"].name for req, _ in paired
+        )
+        decode_stats = await self._run_phase(
+            self.decode_workers,
+            "decode_worker",
+            [
+                self._phase_request(
+                    req,
+                    decode_counts[req.custom_params["decode_worker"].name],
+                    custom_params={
+                        "created_time": prefill_stat["last_event_time"]
+                    },
+                )
+                for req, prefill_stat in paired
+            ],
+        )
+
+        for req, prefill_stat in paired:
+            decode_stat = decode_stats.get(req.custom_params["request_id"], {})
+            self.request_stats.append(
+                self._merge_request_stats(req, prefill_stat, decode_stat)
+            )
+
+        return calc_metrics(self.request_stats)
+
     def get_request_stats(self) -> list[dict]:
-        if self.request_stats:
-            return self.request_stats
-        result = []
-        for worker in self.decode_workers:
-            request_stats = worker.get_request_stats()
-            for item in request_stats:
-                item["worker"] = worker.name
-            result.extend(request_stats)
-        return result
-
-    def get_iteration_stats(self) -> list[dict]:
-        result = []
-        for worker in self.all_workers:
-            iteration_stats = worker.get_iteration_stats()
-            for item in iteration_stats:
-                item["worker"] = worker.name
-            result.extend(iteration_stats)
-        return result
-
-    def get_lb_routing_records(self) -> dict[str, list[GenericRequest]]:
-        return self.lb_routing_records
-
-    def shutdown(self):
-        for worker in self.all_workers:
-            worker.shutdown()
-
-    def flush_cache(self):
-        for worker in self.all_workers:
-            worker.flush_cache()
+        return self.request_stats

@@ -1,6 +1,6 @@
 from typing import Optional
 
-from vllm_simulator.dataset import GenericRequest
+from vllm_simulator.simulation.benchmark.request import GenericRequest
 from vllm_simulator.simulation.benchmark.base_runner import BaseWorker
 from vllm_simulator.simulation.benchmark.load_balance.base import LoadBalancingPolicy
 
@@ -22,6 +22,3 @@ class RoundRobinPolicy(LoadBalancingPolicy):
 
     def name(self) -> str:
         return "round_robin"
-
-    def reset(self):
-        self._counter = 0

@@ -7,6 +7,7 @@ the serving backend beyond the simulator's common ``ScheduleBatch`` interface.
 
 import math
 import os
+import typing
 import warnings
 
 import joblib
@@ -14,9 +15,11 @@ from sklearn.exceptions import InconsistentVersionWarning
 
 from vllm_simulator.simulation.types import SchedulerConfig
 from vllm_simulator.spec.accelerator import AcceleratorInfo
-from vllm_simulator.spec.model import ModelInfo
 from vllm_simulator.time_predictor.base import InferTimePredictor, ScheduleBatch
 from vllm_simulator.utils import get_logger
+
+if typing.TYPE_CHECKING:
+    from vllm.config import ModelConfig
 
 
 logger = get_logger()
@@ -48,7 +51,7 @@ class MLTimePredictor(InferTimePredictor):
 
     def __init__(
         self,
-        model: ModelInfo,
+        model: "ModelConfig",
         hw: AcceleratorInfo,
         config: SchedulerConfig,
         database_path: str,
@@ -97,27 +100,17 @@ class MLTimePredictor(InferTimePredictor):
             )
 
         self._latency_scale = float(latency_scale)
-        # Extra linear cost for requests that enable logprobs (GPU topk /
-        # D2H / tolists, proportional to tokens). Only needed when the
-        # baseline was collected without logprobs but the target deployment
-        # enables them; must be calibrated from independent measurement.
+        # Extra per-token cost of logprobs requests, for baselines collected
+        # without logprobs.  Must be calibrated separately.
         self.logprobs_cost_s_per_token = float(logprobs_cost_us_per_token) / 1e6
 
-        # RPC-2 (sample_tokens) compensation. The trained label above covers
-        # only the first RPC (execute_model / main-model forward), so the
-        # second RPC -- sampler + speculative draft propose + bookkeeping D2H
-        # + output construction -- is missing from the predicted step time.
-        # It is modelled as a continuous piecewise-linear (hinge) function of
-        # this step's scheduled token count:
+        # RPC-2 (sample_tokens) compensation; the trained label covers RPC-1
+        # only.  Hinge function of the step's scheduled tokens:
         #
         #   sample_tokens_s = base + a_lo * tt + (a_hi - a_lo) * max(0, tt - s)
         #
-        # ``base`` is the token-independent RPC-2 floor, ``a_lo`` the marginal
-        # cost while the sampling pipeline is not yet saturated and ``a_hi``
-        # the steeper post-saturation slope. Kept as a SEPARATE term: it is
-        # never folded into the predictor's own output so the iter_latency
-        # label semantics stay intact. Disabled by default (base == 0 and
-        # both slopes == 0 leave the value at zero).
+        # Kept separate from the label prediction; disabled when all terms
+        # are 0.
         self.sample_tokens_base_s = float(sample_tokens_base_ms) / 1e3
         self.sample_tokens_lo_s_per_token = float(sample_tokens_lo_us_per_token) / 1e6
         self.sample_tokens_hi_s_per_token = float(sample_tokens_hi_us_per_token) / 1e6

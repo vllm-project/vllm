@@ -1,14 +1,9 @@
 """
-vLLM Platform Hook - Hijacks the Platform class to inject a mock CUDA platform.
+Platform hook: inject a mock CUDA platform on CPU-only hosts.
 
-On CPU-only environments (no NVIDIA driver), vLLM's platform detection returns
-UnspecifiedPlatform with empty device_type, causing DeviceConfig to crash.
-This hook intercepts Platform class construction and injects a lightweight mock
-that reports device_type='cuda' without importing CUDA-dependent modules.
-
-The hook fires when `Platform` is being defined in `vllm.platforms.interface`.
-At that point `vllm.platforms` is already in sys.modules (parent package loads
-first), so we can set `current_platform` immediately.
+Without a driver, detection yields UnspecifiedPlatform and DeviceConfig
+fails.  The hook fires while vllm.platforms.interface defines Platform;
+vllm.platforms is already in sys.modules, so current_platform is set there.
 """
 
 import sys
@@ -37,14 +32,11 @@ class C_VLLMPlatformHook(BaseHook):
             device_type = "cuda"
             device_name = "cuda"
             dispatch_key = "CUDA"
-            device_control_env_var = "CUDA_VISIBLE_DEVICES"
 
-            # ---- Attributes accessed directly (not via method call) ----
             empty_cache = None  # checked as `if empty_cache is not None`
 
             def is_cuda(self) -> bool:
-                # Return False to skip module-level CUDA ops checks
-                # (cutlass_scaled_mm_supports_fp8, etc.) that need libcuda.so.
+                # False skips import-time CUDA op checks that need libcuda.so.
                 return False
 
             def is_cuda_alike(self) -> bool:
@@ -56,14 +48,18 @@ class C_VLLMPlatformHook(BaseHook):
 
             @classmethod
             def get_device_capability(cls, device_id=0):
+                # A100 equivalent; the meta model build swaps in the
+                # simulated accelerator's capability.
                 from vllm.platforms.interface import DeviceCapability
-                return DeviceCapability(8, 0)  # A100 equivalent
+                return DeviceCapability(8, 0)
 
             @classmethod
             def has_device_capability(
-                cls, capability: int, device_id: int = 0
+                cls, capability, device_id: int = 0
             ) -> bool:
-                return capability <= 80
+                if isinstance(capability, tuple):
+                    capability = capability[0] * 10 + capability[1]
+                return capability <= cls.get_device_capability().to_int()
 
             @classmethod
             def check_and_update_config(cls, vllm_config) -> None:
@@ -75,7 +71,6 @@ class C_VLLMPlatformHook(BaseHook):
 
             @classmethod
             def pre_register_and_update(cls, parser=None) -> None:
-                """No-op: nothing to pre-register in simulation."""
                 pass
 
             @classmethod
@@ -88,7 +83,6 @@ class C_VLLMPlatformHook(BaseHook):
 
             @classmethod
             def set_device(cls, device) -> None:
-                """No-op: skip torch.cuda.set_device on CPU simulation."""
                 pass
 
             @classmethod
@@ -97,21 +91,33 @@ class C_VLLMPlatformHook(BaseHook):
 
             @classmethod
             def get_device_total_memory(cls, device_id: int = 0) -> int:
-                """Return 80 GiB (A100 equivalent) for profiling calculations."""
                 return 80 * (1 << 30)
 
             @classmethod
-            def get_attn_backend_cls(cls, *args, **kwargs):
-                # Simulation never runs a real attention kernel (the model
-                # runner is stubbed), but vLLM still resolves a backend
-                # class for KV-cache-layout queries.  Mirror CpuPlatform and
-                # force the CPU backend: it supports LBHNC layout and needs
-                # no CUDA.  Lazy import: this hook fires while
-                # vllm.platforms.interface is still being defined.
+            def get_attn_backend_cls(
+                cls, selected_backend, attn_selector_config, num_heads=None
+            ):
+                # Only resolved for KV-cache-layout queries; the CPU backend
+                # needs no CUDA.  Lazy import: vllm.platforms.interface is
+                # still being defined.
                 from vllm.v1.attention.backends.registry import (
                     AttentionBackendEnum,
                 )
-                return AttentionBackendEnum.CPU_ATTN.get_path()
+                if not attn_selector_config.use_mla:
+                    return AttentionBackendEnum.CPU_ATTN.get_path()
+
+                # No CPU MLA backend, and the MLA backend decides the KV
+                # cache layout: select like CUDA for the simulated arch.
+                from vllm.platforms.cuda import CudaPlatformBase
+                valid, invalid = CudaPlatformBase.get_valid_backends(
+                    cls.get_device_capability(), attn_selector_config, num_heads
+                )
+                if not valid:
+                    raise ValueError(
+                        f"No valid MLA backend for {attn_selector_config}: "
+                        f"{invalid}"
+                    )
+                return min(valid, key=lambda c: c.priority).backend.get_path()
 
             @classmethod
             def verify_quantization(cls, quant: str) -> None:
@@ -122,13 +128,12 @@ class C_VLLMPlatformHook(BaseHook):
                 return 0.0
 
             def __getattr__(self, name):
-                """Fallback for any unimplemented platform method.
-                Returns a no-op callable to avoid AttributeError crashes."""
+                """Unimplemented platform methods resolve to no-ops."""
                 def _noop(*args, **kwargs):
                     return None
                 return _noop
 
-        # Use sys.modules directly: at hook time the parent module's attribute
-        # binding is not yet complete, so `import vllm.platforms` would fail.
+        # The parent module's attribute binding is incomplete at hook time,
+        # so `import vllm.platforms` would fail.
         platforms_module = sys.modules["vllm.platforms"]
         platforms_module.current_platform = _MockCudaPlatform()

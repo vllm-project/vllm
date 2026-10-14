@@ -1,21 +1,17 @@
 """
-vLLM Simulation Server Launcher - Starts vLLM's OpenAI-compatible API server
-with simulation hooks installed.
+vLLM's OpenAI-compatible API server with simulation hooks installed.
 
 Usage:
     python -m vllm_simulator.simulation.vllm.launch_server --model <model_path> [vLLM args...]
 
 Environment variables:
     VLLM_SIMULATOR_CONFIG_PATH: Path to simulation config JSON
-    VLLM_SIMULATOR_OUTPUT_MODE: "BLOCKING" or "OFFLINE" (default: BLOCKING for server)
+    VLLM_SIMULATOR_OUTPUT_MODE: "BLOCKING" or "NON_BLOCKING" (default)
 """
 
 import os
 
-# Default to BLOCKING mode for server scenario
-os.environ.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
-os.environ.setdefault("VLLM_DISABLE_REQUEST_ID_RANDOMIZATION", "1")
-
+from vllm_simulator.simulation.manager import Envs
 from vllm_simulator.simulation.vllm.startup import init_hook
 from vllm_simulator.utils import get_logger
 
@@ -26,8 +22,8 @@ logger = get_logger()
 
 if __name__ == "__main__":
     import uvloop
-    from vllm.entrypoints.openai.api_server import run_server
-    from vllm.entrypoints.openai.cli_args import (
+    from vllm.entrypoints.launchers.api_server.entry import run_server
+    from vllm.entrypoints.launchers.cli_args import (
         make_arg_parser,
         validate_parsed_serve_args,
     )
@@ -56,8 +52,7 @@ if __name__ == "__main__":
         logger.info(f"Using config from arg: {args.sim_config_path}")
 
     logger.info(
-        "Starting vLLM simulation server in %s mode.",
-        os.environ.get("VLLM_SIMULATOR_OUTPUT_MODE", "BLOCKING"),
+        "Starting vLLM simulation server in %s mode.", Envs.simulation_mode()
     )
 
     uvloop.run(run_server(args))

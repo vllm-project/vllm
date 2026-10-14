@@ -22,12 +22,15 @@ import gzip
 import json
 import math
 import os
+import typing
 
 from vllm_simulator.simulation.types import SchedulerConfig
 from vllm_simulator.spec.accelerator import AcceleratorInfo
-from vllm_simulator.spec.model import ModelInfo
 from vllm_simulator.time_predictor.base import InferTimePredictor, ScheduleBatch
 from vllm_simulator.utils import get_logger
+
+if typing.TYPE_CHECKING:
+    from vllm.config import ModelConfig
 
 logger = get_logger()
 
@@ -67,7 +70,7 @@ class ReplayTimePredictor(InferTimePredictor):
         complete oracle. Typical k=3.
 
     For workloads where sim batch composition diverges from real (e.g., bursty
-    max-tps), the miss rate can be high — always check the post-run hit ratio.
+    max-tps), the miss rate can be high; prefer "knn" there.
     """
 
     @staticmethod
@@ -132,7 +135,7 @@ class ReplayTimePredictor(InferTimePredictor):
 
     def __init__(
         self,
-        model: ModelInfo,
+        model: "ModelConfig",
         hw: AcceleratorInfo,
         config: SchedulerConfig,
         database_path: str,
@@ -155,8 +158,6 @@ class ReplayTimePredictor(InferTimePredictor):
         self._miss_strategy = miss_strategy
         self._miss_fallback = float(miss_fallback_seconds)
         self._miss_knn_k = int(miss_knn_k)
-        self._hits = 0
-        self._misses = 0
 
         if self._miss_strategy == "knn":
             self._prep_knn_index()
@@ -230,27 +231,7 @@ class ReplayTimePredictor(InferTimePredictor):
         key = _encode_key([req.extend_length, req.past_kv_length] for req in batch.reqs)
         v = self._table.get(key)
         if v is None:
-            self._misses += 1
             if self._miss_strategy == "knn":
                 return self._knn_predict(_shape_feat(extends, pasts))
             return self._miss_fallback
-        self._hits += 1
         return float(v)
-
-    def get_metrics(self) -> dict:
-        total = self._hits + self._misses
-        return {
-            "replay_exact_match_steps": self._hits,
-            "replay_miss_steps": self._misses,
-            "replay_zero_fallback_steps": (
-                self._misses if self._miss_strategy == "zero" else 0
-            ),
-            "replay_knn_fallback_steps": (
-                self._misses if self._miss_strategy == "knn" else 0
-            ),
-            "replay_fallback_rate": self._misses / total if total else 0.0,
-        }
-
-    def reset_metrics(self) -> None:
-        self._hits = 0
-        self._misses = 0

@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod
 from typing import Optional
 
-from vllm_simulator.dataset import GenericRequest
+from vllm_simulator.simulation.benchmark.request import GenericRequest
 from vllm_simulator.simulation.benchmark.base_runner import BaseWorker
 
 
@@ -17,11 +17,5 @@ class LoadBalancingPolicy(ABC):
     def on_request_complete(self, worker_name: str, success: bool, req: GenericRequest | None  = None):
         pass
 
-    def update_loads(self, loads: dict[str, int]):
-        pass
-
     def init_workers(self, workers: list[BaseWorker]):
-        pass
-
-    def reset(self):
         pass

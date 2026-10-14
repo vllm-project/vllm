@@ -1,17 +1,9 @@
 from typing import List, Optional, Union
 
-from vllm_simulator.utils import get_logger
-
-logger = get_logger()
-
 
 class BaseHook:
     HOOK_CLASS_NAME: Optional[str] = None
     HOOK_MODULE_NAME: Optional[str] = None
-    REGEX: bool = False
-
-    def __init__(self):
-        pass
 
     @classmethod
     def hook(cls, target) -> None:

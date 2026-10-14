@@ -6,14 +6,14 @@ behind RoundRobinPolicy: every request carries an explicit created_time
 worker distribution.
 
 Two deviations from the single-worker tests are required:
-- BLOCKING mode: the OFFLINE future queue lives in class-level hook state
+- BLOCKING mode: the NON_BLOCKING future queue lives in class-level hook state
   shared by every Scheduler in the process, so with multiple engines any
   engine may dispatch (and finish) another engine's request. BLOCKING
   bypasses the future queue; each engine only runs the requests enqueued
   to it.
 - Request-id randomization is re-enabled: vllm_worker disables it by
   default and each LLM numbers its requests from 0, so three engines in
-  one process would collide in the shared request_stats_manager.
+  one process would collide in the shared per-request stats.
 """
 
 import os
@@ -28,15 +28,18 @@ os.environ["VLLM_SIMULATOR_CONFIG_PATH"] = (
 os.environ["VLLM_SIMULATOR_OUTPUT_MODE"] = "BLOCKING"
 os.environ["VLLM_DISABLE_REQUEST_ID_RANDOMIZATION"] = "0"
 
-from vllm_simulator.dataset import DatasetArgs, get_dataset
 from vllm_simulator.simulation.benchmark import (
     BenchmarkConfig,
     MultiInstanceBenchmarkRunner,
+    from_sample_requests,
 )
 from vllm_simulator.simulation.benchmark.load_balance import RoundRobinPolicy
 from vllm_simulator.simulation.vllm.vllm_worker import EngineArgs, VLLMWorker
 
-MODEL_PATH = "/nfs/lvm/models/Qwen/Qwen3-8B/"
+# After vllm_worker: its import installs the hooks vLLM must see first.
+from vllm.benchmarks.datasets import RandomDataset  # noqa: E402
+
+MODEL_PATH = "Qwen/Qwen3-8B"
 NUM_WORKERS = 3
 
 
@@ -49,7 +52,7 @@ def _create_workers(model_path, num_workers=NUM_WORKERS):
                     model=model_path,
                     block_size=16,
                     max_model_len=2048,
-                    num_gpu_blocks_override=100,
+                    num_gpu_blocks_override=200,
                 ),
                 name=f"worker{idx}",
             )
@@ -57,20 +60,17 @@ def _create_workers(model_path, num_workers=NUM_WORKERS):
     return workers
 
 
-def _create_dataset(model_path, num_workers):
-    dataset_args = DatasetArgs(
-        "random_ids",
-        num_prompts=num_workers * 10,
-        min_input_len=128,
-        max_input_len=129,
-        min_output_len=1,
-        max_output_len=2,
-    )
+def _create_requests(model_path, num_workers):
     tokenizer = AutoTokenizer.from_pretrained(model_path)
-    dataset = get_dataset(dataset_args, tokenizer=tokenizer)
-    for idx, req in enumerate(dataset):
+    requests = from_sample_requests(RandomDataset().sample(
+        tokenizer=tokenizer,
+        num_requests=num_workers * 10,
+        input_len=128,
+        output_len=1,
+    ))
+    for idx, req in enumerate(requests):
         req.custom_params["created_time"] = idx
-    return dataset
+    return requests
 
 
 def test_benchmark_round_robin():
@@ -83,10 +83,10 @@ def test_benchmark_round_robin():
     )
 
     benchmark_config = BenchmarkConfig(ignore_request_timestamp=False)
-    dataset = _create_dataset(MODEL_PATH, len(workers))
+    requests = _create_requests(MODEL_PATH, len(workers))
 
-    metrics = runner.benchmark(benchmark_config, dataset=dataset)
-    assert metrics["completed"] == len(dataset)
+    metrics = runner.benchmark(benchmark_config, requests=requests)
+    assert metrics["completed"] == len(requests)
 
     request_stats = runner.get_request_stats()
     request_stats = sorted(request_stats, key=lambda x: x["created_time"])
