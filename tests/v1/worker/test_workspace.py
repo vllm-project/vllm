@@ -187,3 +187,94 @@ def test_persistent_tensor_preserves_contents_and_rejects_changes() -> None:
     assert manager.get_persistent("locks", (8,), torch.int32) is first
     with pytest.raises(AssertionError, match="was not allocated during warmup"):
         manager.get_persistent("new", (8,), torch.int32)
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+@pytest.mark.parametrize(
+    ("num_ubatches", "num_lanes"), [(1, 1), (2, 1), (1, 2), (2, 2)]
+)
+def test_reserve_covers_all_slots(monkeypatch, device, num_ubatches, num_lanes):
+    """Construction reservations must serve even unwarmed slots after locking."""
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA is not available")
+    active_ubatch = 0
+    monkeypatch.setattr(workspace, "dbo_current_ubatch_id", lambda: active_ubatch)
+    manager = workspace.WorkspaceManager(
+        torch.device(device), num_ubatches=num_ubatches, num_lanes=num_lanes
+    )
+    specs = (((3, 7), torch.float32), ((257,), torch.uint8))
+    manager.reserve(*specs)
+    manager.lock()
+
+    buffers: list[torch.Tensor] = []
+    for ubatch in range(num_ubatches):
+        active_ubatch = ubatch
+        for lane in range(num_lanes):
+            with workspace.use_workspace_lane(lane):
+                first, second = manager.get_simultaneous(*specs)
+                assert second.data_ptr() - first.data_ptr() == 256
+                first.fill_(len(buffers) + 1)
+                second.fill_(17)
+                buffers.append(first)
+                assert (
+                    manager.get_simultaneous(*specs)[0].data_ptr() == first.data_ptr()
+                )
+                with pytest.raises(AssertionError, match="Workspace is locked"):
+                    manager.get_simultaneous(((769,), torch.uint8))
+
+    assert len({buffer.data_ptr() for buffer in buffers}) == num_ubatches * num_lanes
+    for value, buffer in enumerate(buffers, 1):
+        torch.testing.assert_close(buffer, torch.full_like(buffer, value))
+    manager.reserve(*specs)
+    with pytest.raises(AssertionError, match="Workspace is locked"):
+        manager.reserve(((1024,), torch.uint8))
+
+
+def test_runtime_growth_does_not_resize_reserved_peers(monkeypatch):
+    """A forward request must not invalidate other slots' reserved storage."""
+    active_ubatch = 0
+    monkeypatch.setattr(workspace, "dbo_current_ubatch_id", lambda: active_ubatch)
+    manager = workspace.WorkspaceManager(torch.device("cpu"), num_ubatches=2)
+    manager.reserve(((256,), torch.uint8))
+    (peer,) = manager.get_simultaneous(((256,), torch.uint8))
+    peer.fill_(23)
+    active_ubatch = 1
+    manager.get_simultaneous(((1024,), torch.uint8))
+    active_ubatch = 0
+    (reused,) = manager.get_simultaneous(((256,), torch.uint8))
+    assert reused.data_ptr() == peer.data_ptr()
+    assert torch.all(reused == 23)
+    manager.lock()
+    with pytest.raises(AssertionError, match="Workspace is locked"):
+        manager.get_simultaneous(((1024,), torch.uint8))
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is not available")
+def test_reserved_slots_replay_cuda_graphs(monkeypatch):
+    """Graphs captured for each slot retain separate, stable scratch addresses."""
+    active_ubatch = 0
+    monkeypatch.setattr(workspace, "dbo_current_ubatch_id", lambda: active_ubatch)
+    manager = workspace.WorkspaceManager(
+        torch.device("cuda"), num_ubatches=2, num_lanes=2
+    )
+    spec = ((64,), torch.float32)
+    manager.reserve(spec)
+    manager.lock()
+    graphs: list[torch.cuda.CUDAGraph] = []
+    outputs: list[torch.Tensor] = []
+    for ubatch in range(2):
+        active_ubatch = ubatch
+        for lane in range(2):
+            with workspace.use_workspace_lane(lane):
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph):
+                    (scratch,) = manager.get_simultaneous(spec)
+                    scratch.fill_(len(graphs) + 1)
+                    output = scratch.square()
+                graphs.append(graph)
+                outputs.append(output)
+    for _ in range(3):
+        for graph in reversed(graphs):
+            graph.replay()
+        for value, output in enumerate(outputs, 1):
+            torch.testing.assert_close(output, torch.full_like(output, value**2))

@@ -333,7 +333,7 @@ class Dots3NoteMLAMetadataBuilder(TritonMLAMetadataBuilder):
         batch = self.vllm_config.scheduler_config.max_num_seqs
         max_query_len = self.reorder_batch_threshold or 1
         gather_len = (self.sliding_window + max_query_len - 1 + 7) // 8 * 8
-        current_workspace_manager().get_simultaneous(
+        current_workspace_manager().reserve(
             (
                 (
                     batch,
