@@ -344,6 +344,48 @@ def test_deep_gemm_mega_moe_nvfp4_l2_scale_covers_every_expert():
     assert len(experts.get_expert_weights()) == 7
 
 
+def test_deep_gemm_mega_moe_nvfp4_rejects_mismatched_l1_scales():
+    """The kernel takes one L1 alpha per expert, so w1 and w3 must agree."""
+    experts = _make_mega_moe_experts(1, 1, MEGA_MOE_NVFP4)
+
+    def load(shard_id, scale):
+        experts.weight_loader(
+            experts.w13_weight_scale_2,
+            torch.tensor(scale),
+            "experts.w13_weight_scale_2",
+            shard_id=shard_id,
+            expert_id=0,
+        )
+
+    load("w1", 0.5)
+    load("w3", 0.5)
+    # A reload may change the scale while the old pair is still live.
+    load("w3", 2.0)
+    load("w1", 2.0)
+    load("w1", 1.0)
+    with pytest.raises(ValueError, match="one L1 scale per expert"):
+        load("w3", 4.0)
+
+
+def test_deep_gemm_mega_moe_nvfp4_meta_load_skips_host_scales():
+    """Reload dry runs load meta stand-ins, which must not reach host state."""
+    experts = _make_mega_moe_experts(1, 1, MEGA_MOE_NVFP4)
+    for name, shard_id in (
+        ("w2_input_scale", "w2"),
+        ("w13_weight_scale_2", "w1"),
+        ("w13_weight_scale_2", "w3"),
+    ):
+        assert experts.weight_loader(
+            getattr(experts, name).to("meta"),
+            torch.empty((), device="meta"),
+            f"experts.{name}",
+            shard_id=shard_id,
+            expert_id=0,
+            return_success=True,
+        )
+    assert experts.l2_activation_scale == 1.0
+
+
 @pytest.mark.parametrize("intermediate_size", [512, 2304])
 def test_deep_gemm_mega_moe_preserves_checkpoint_dimensions(intermediate_size):
     """Keep native widths so V4.1 routed and shared experts can fuse."""

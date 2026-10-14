@@ -310,6 +310,8 @@ class DeepGemmMegaMoEExperts(nn.Module):
         # L2 input scale of every logical expert; the NVFP4 kernel takes the max.
         self._w2_input_scales = torch.zeros(self.num_logical_experts, device="cpu")
         self.l2_activation_scale = 1.0
+        # The first of each expert's w1/w3 weight_scale_2 until the other loads.
+        self._pending_l1_scales: dict[int, tuple[str, float]] = {}
 
         self.num_shared_experts, self.shared_spec = self._fusable_shared_experts(
             shared_experts
@@ -477,11 +479,8 @@ class DeepGemmMegaMoEExperts(nn.Module):
         expert_id: int,
         return_success: bool = False,
     ) -> bool | None:
-        if weight_name.endswith("w2_input_scale"):
-            # One L2 activation scale per launch. Every rank loads the scales of
-            # all experts, so ranks agree and EPLB can move experts.
-            self._w2_input_scales[expert_id] = loaded_weight.max()
-            self.l2_activation_scale = float(self._w2_input_scales.max()) or 1.0
+        if not loaded_weight.is_meta:
+            self._record_global_scale(weight_name, loaded_weight, shard_id, expert_id)
         local_expert_ids = self._map_global_expert_id(expert_id)
         param_prefix = "w2_" if shard_id == "w2" else "w13_"
         if not local_expert_ids or param_prefix not in weight_name:
@@ -496,6 +495,30 @@ class DeepGemmMegaMoEExperts(nn.Module):
                     param.data[local_expert_id], loaded_weight, shard_id, is_scale
                 )
         return True if return_success else None
+
+    def _record_global_scale(
+        self, weight_name: str, scale: torch.Tensor, shard_id: str, expert_id: int
+    ) -> None:
+        """Track NVFP4 global scales the kernel takes one of per launch or expert.
+
+        Every rank sees the scales of all experts, so ranks agree and EPLB can
+        move experts.
+        """
+        if weight_name.endswith("w2_input_scale"):
+            self._w2_input_scales[expert_id] = scale.max()
+            self.l2_activation_scale = float(self._w2_input_scales.max()) or 1.0
+        elif weight_name.endswith("w13_weight_scale_2"):
+            # Compare w1 and w3 of the same load, not the live (maybe stale) slot.
+            prev = self._pending_l1_scales.pop(expert_id, None)
+            value = float(scale)
+            if prev is None or prev[0] == shard_id:
+                self._pending_l1_scales[expert_id] = (shard_id, value)
+            elif not math.isclose(value, prev[1], rel_tol=1e-5):
+                raise ValueError(
+                    f"MegaMoE NVFP4 expert {expert_id}: {prev[0]} weight_scale_2 "
+                    f"{prev[1]} != {shard_id} weight_scale_2 {value}; the kernel "
+                    "takes one L1 scale per expert."
+                )
 
     def load_shared_expert_weight(self, name: str, loaded_weight: torch.Tensor) -> str:
         """Load one shared-expert checkpoint tensor; return the parameter name."""
