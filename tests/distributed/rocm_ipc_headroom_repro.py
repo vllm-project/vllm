@@ -86,7 +86,7 @@ def _log(rank, point, msg):
 
 def _worker(rank: int, port: int, rounds: int) -> None:
     try:
-        torch.cuda.set_device(rank)
+        torch.accelerator.set_device_index(rank)
         os.environ["MASTER_ADDR"] = "127.0.0.1"
         os.environ["MASTER_PORT"] = str(port)
         dist.init_process_group(
@@ -102,7 +102,7 @@ def _worker(rank: int, port: int, rounds: int) -> None:
 
         t = torch.ones(1, device="cuda")
         dist.all_reduce(t)
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
         _log(rank, "2 after first collective", _ceiling(hip, SIZE, LIMIT))
 
         # A second communicator over the same ranks, which is what a scale up
@@ -113,7 +113,7 @@ def _worker(rank: int, port: int, rounds: int) -> None:
             _log(rank, f"3 round {r} second group built", _ceiling(hip, SIZE, LIMIT))
             t2 = torch.ones(1, device="cuda")
             dist.all_reduce(t2, group=extra)
-            torch.cuda.synchronize()
+            torch.accelerator.synchronize()
             _log(rank, f"4 round {r} after its collective", _ceiling(hip, SIZE, LIMIT))
             dist.destroy_process_group(extra)
             _log(
@@ -131,7 +131,7 @@ def main() -> int:
     ap.add_argument("--rounds", type=int, default=3)
     args = ap.parse_args()
 
-    if torch.cuda.device_count() < WORLD:
+    if torch.accelerator.device_count() < WORLD:
         print(f"[HEADROOM] need {WORLD} GPUs, skipping", flush=True)
         return 0
 
