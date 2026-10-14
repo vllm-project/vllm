@@ -4,9 +4,11 @@
 import asyncio
 import warnings
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Literal
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
+import jinja2.sandbox
 import pytest
 import regex as re
 import torch
@@ -3450,6 +3452,13 @@ def test_custom_role_that_template_renders_is_kept():
 
 def test_role_header_without_content_is_rejected():
     """Emitting the role token and dropping the text is still data loss."""
+    template = """
+    {% for message in messages %}
+    {% if message['role'] == 'user' %}
+    {{ message['content'] }}
+    {% endif %}
+    {% endfor %}
+    """
 
     def render_text(messages):
         return "\n".join(str(message.get("role")) for message in messages)
@@ -3457,9 +3466,26 @@ def test_role_header_without_content_is_rejected():
     with pytest.raises(VLLMValidationError, match="'wizard'"):
         assert_chat_template_rendered_messages(
             [{"role": "wizard", "content": "secret"}],
-            _CUSTOM_ROLE_TEMPLATE,
+            template,
             render_text,
         )
+
+
+def test_dynamic_role_output_is_not_a_suspect():
+    """``{{ message['role'] }}`` for other roles is not probed."""
+    calls = 0
+
+    def render_text(messages):
+        nonlocal calls
+        calls += 1
+        return "\n".join(str(message.get("role")) for message in messages)
+
+    assert_chat_template_rendered_messages(
+        [{"role": "wizard", "content": "secret"}],
+        _CUSTOM_ROLE_TEMPLATE,
+        render_text,
+    )
+    assert calls == 0
 
 
 @pytest.mark.parametrize("content", ["", "   ", None])
@@ -3740,9 +3766,32 @@ def test_rejectattr_keeps_a_role_it_does_not_name():
         template,
         render_text,
     )
-    with pytest.raises(VLLMValidationError, match="'tool'"):
+    with patch("vllm.renderers.chat_utils.rendered_roles.logger.warning_once") as warn:
         assert_chat_template_rendered_messages(
             [{"role": "tool", "content": "result", "tool_call_id": "call_1"}],
+            template,
+            render_text,
+        )
+    warn.assert_called_once()
+    assert "tool" in str(warn.call_args)
+
+
+def test_rejectattr_still_rejects_a_nonstandard_role():
+    template = (
+        "{% for message in messages | rejectattr('role', 'equalto', 'wizard') %}"
+        "{{ message.role }}:{{ message.content }}{% endfor %}"
+    )
+
+    def render_text(rendered_messages):
+        return "\n".join(
+            f"{message.get('role')}:{message.get('content')}"
+            for message in rendered_messages
+            if message.get("role") != "wizard"
+        )
+
+    with pytest.raises(VLLMValidationError, match="'wizard'"):
+        assert_chat_template_rendered_messages(
+            [{"role": "wizard", "content": "secret"}],
             template,
             render_text,
         )
@@ -3910,6 +3959,192 @@ def test_dropped_role_error_is_http_400():
     assert response.error.type == "BadRequestError"
     assert response.error.param == "messages"
     assert "usr" in response.error.message
+
+
+def _read_repo_template(*parts: str) -> str:
+    root = Path(__file__).resolve().parents[2]
+    return root.joinpath(*parts).read_text()
+
+
+def _render_chat_template(template: str, messages) -> str:
+    env = jinja2.sandbox.ImmutableSandboxedEnvironment(
+        trim_blocks=True,
+        lstrip_blocks=True,
+    )
+    return env.from_string(template).render(
+        messages=[dict(message) for message in messages],
+        add_generation_prompt=False,
+        bos_token="",
+    )
+
+
+def _tool_call(name: str = "get_weather") -> dict:
+    return {
+        "id": "call_1",
+        "type": "function",
+        "function": {"name": name, "arguments": '{"city": "Paris"}'},
+    }
+
+
+def test_llama31_tool_call_with_text_is_not_rejected():
+    """Assistant text plus a tool call still contributes, so it is not a 400."""
+    template = _read_repo_template("examples", "tool_chat_template_llama3.1_json.jinja")
+    messages = [
+        {"role": "system", "content": "You are helpful."},
+        {"role": "user", "content": "What is the weather?"},
+        {
+            "role": "assistant",
+            "content": "Let me check",
+            "tool_calls": [_tool_call()],
+        },
+    ]
+    rendered = _render_chat_template(template, messages)
+    assert "get_weather" in rendered
+    assert "Let me check" not in rendered
+    calls = 0
+
+    def render_text(rendered_messages):
+        nonlocal calls
+        calls += 1
+        return _render_chat_template(template, rendered_messages)
+
+    assert_chat_template_rendered_messages(messages, template, render_text)
+    assert calls == 0
+
+
+def test_llama31_reasoning_with_tool_call_is_not_rejected():
+    """Empty content plus reasoning must not be probed as dropped text."""
+    template = _read_repo_template("examples", "tool_chat_template_llama3.1_json.jinja")
+    messages = [
+        {"role": "user", "content": "What is the weather?"},
+        {
+            "role": "assistant",
+            "content": None,
+            "reasoning": "I should call a tool",
+            "tool_calls": [_tool_call()],
+        },
+    ]
+    rendered = _render_chat_template(template, messages)
+    assert "get_weather" in rendered
+    assert "I should call a tool" not in rendered
+    calls = 0
+
+    def render_text(rendered_messages):
+        nonlocal calls
+        calls += 1
+        return _render_chat_template(template, rendered_messages)
+
+    assert_chat_template_rendered_messages(messages, template, render_text)
+    assert calls == 0
+
+
+def test_reasoning_only_custom_role_is_not_rejected():
+    """A probe token belongs in content, never in reasoning."""
+
+    def render_text(messages):
+        raise AssertionError("reasoning-only turns must not be probed")
+
+    assert_chat_template_rendered_messages(
+        [{"role": "wizard", "content": "", "reasoning": "chain of thought"}],
+        _FILTERING_TEMPLATE,
+        render_text,
+    )
+
+
+def test_rendered_tool_call_keeps_a_turn_whose_text_was_omitted():
+    """A turn that still prints its tool call is not a silent drop."""
+    template = """
+    {% for message in messages %}
+    {% if message['role'] == 'user' or message['role'] == 'assistant' %}
+    {{ message['content'] }}
+    {% elif message.tool_calls %}
+    {{ message.tool_calls[0].function.name }}
+    {% endif %}
+    {% endfor %}
+    """
+    message = {
+        "role": "wizard",
+        "content": "Let me check",
+        "tool_calls": [_tool_call()],
+    }
+
+    def render_text(rendered_messages):
+        return _render_chat_template(template, rendered_messages)
+
+    rendered = render_text([message])
+    assert "get_weather" in rendered
+    assert "Let me check" not in rendered
+    assert_chat_template_rendered_messages([message], template, render_text)
+
+
+_USER_ASSISTANT_TEMPLATES = [
+    ("examples", "template_falcon.jinja"),
+    ("examples", "template_chatglm2.jinja"),
+    (
+        "vllm",
+        "transformers_utils",
+        "chat_templates",
+        "template_blip2.jinja",
+    ),
+]
+
+
+@pytest.mark.parametrize("template_path", _USER_ASSISTANT_TEMPLATES)
+def test_ignored_system_prompt_warns_and_is_not_a_400(template_path):
+    template = _read_repo_template(*template_path)
+    messages = [
+        {"role": "system", "content": "You are a helpful assistant."},
+        {"role": "user", "content": "hello"},
+    ]
+    rendered = _render_chat_template(template, messages)
+    assert "hello" in rendered
+    assert "You are a helpful assistant." not in rendered
+    calls = 0
+
+    def render_text(rendered_messages):
+        nonlocal calls
+        calls += 1
+        return _render_chat_template(template, rendered_messages)
+
+    with patch("vllm.renderers.chat_utils.rendered_roles.logger.warning_once") as warn:
+        assert_chat_template_rendered_messages(messages, template, render_text)
+    assert calls == 0
+    warn.assert_called_once()
+    assert "system" in str(warn.call_args)
+
+
+def test_ignored_developer_role_warns_and_is_not_a_400():
+    template = _read_repo_template("examples", "template_falcon.jinja")
+    messages = [
+        {"role": "developer", "content": "Be concise."},
+        {"role": "user", "content": "hello"},
+    ]
+    calls = 0
+
+    def render_text(rendered_messages):
+        nonlocal calls
+        calls += 1
+        return _render_chat_template(template, rendered_messages)
+
+    with patch("vllm.renderers.chat_utils.rendered_roles.logger.warning_once") as warn:
+        assert_chat_template_rendered_messages(messages, template, render_text)
+    assert calls == 0
+    warn.assert_called_once()
+    assert "developer" in str(warn.call_args)
+
+
+@pytest.mark.parametrize("template_path", _USER_ASSISTANT_TEMPLATES)
+@pytest.mark.parametrize("role", ["usr", "assistan", "USER"])
+def test_typo_role_on_user_assistant_template_is_rejected(template_path, role):
+    template = _read_repo_template(*template_path)
+    with pytest.raises(VLLMValidationError, match=re.escape(repr(role))):
+        assert_chat_template_rendered_messages(
+            [{"role": role, "content": "hello"}],
+            template,
+            lambda rendered_messages: _render_chat_template(
+                template, rendered_messages
+            ),
+        )
 
 
 def _parse_one(message) -> ConversationMessage:

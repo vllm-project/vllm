@@ -841,7 +841,8 @@ def safe_apply_chat_template(
 
     # Post-condition: a non-empty message whose role the template does not
     # handle must not vanish from the prompt. Custom roles still render
-    # when the template emits their content. HTTP 400 names the role.
+    # when the template emits their content. A non-standard role is HTTP
+    # 400; a standard role the template ignores is logged and kept.
     assert_chat_template_rendered_messages(
         conversation,
         chat_template,
