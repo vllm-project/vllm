@@ -926,14 +926,17 @@ def _process_weights_rdna3(
 ]:
     """RDNA3 (gfx1100) W4A16 weight post-processing.
 
-    Interleaves the packed nibbles per expert (the exllama shuffle the dense
-    RDNA3 kernel also uses) and synthesizes the symmetric zero points that
-    ``moe_gptq_gemm_rdna3`` dequantizes with. The packed layout
-    ``[E, K // 8, N]`` and the ``[E, groups, N]`` scales are already what the
-    kernel wants, so neither is repacked.
+    Transposes the canonical N-first inputs to the K-first layout of
+    ``moe_gptq_gemm_rdna3`` (weights ``[E, K // 8, N]``, scales
+    ``[E, groups, N]``), interleaves the packed nibbles per expert (the exllama
+    shuffle the dense RDNA3 kernel also uses) and synthesizes the symmetric
+    zero points the kernel dequantizes with.
     """
     device = w13.device
     num_experts = w13.size(0)
+
+    w13 = w13.transpose(1, 2).contiguous()
+    w2 = w2.transpose(1, 2).contiguous()
 
     for e in range(num_experts):
         w13_e = w13[e].contiguous()
@@ -950,8 +953,8 @@ def _process_weights_rdna3(
     return (
         w13,
         w2,
-        w13_scale.contiguous(),
-        w2_scale.contiguous(),
+        w13_scale.transpose(1, 2).contiguous(),
+        w2_scale.transpose(1, 2).contiguous(),
         _qzeros(w13),
         _qzeros(w2),
         None,  # w13_input_global_scale
