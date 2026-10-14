@@ -7,8 +7,10 @@
 //! `vllm/distributed/device_communicators/shm_object_storage.py`.
 
 use std::collections::HashMap;
-use std::ffi::CString;
-use std::ptr::NonNull;
+use std::fs::OpenOptions;
+use std::os::unix::fs::OpenOptionsExt;
+
+use memmap2::MmapMut;
 
 use crate::error::{Error, Result, bail_mm_shm_cache_create};
 
@@ -66,7 +68,7 @@ pub(crate) struct SingleWriterShmRingBuffer {
     /// Python engine via `VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME`.
     name: String,
     data_buffer_size: usize,
-    ptr: NonNull<u8>,
+    map: MmapMut,
     /// monotonic_id -> start address.
     metadata: HashMap<u32, usize>,
     monotonic_id_end: u32,
@@ -75,49 +77,34 @@ pub(crate) struct SingleWriterShmRingBuffer {
     data_buffer_end: usize,
 }
 
-// SAFETY: the mapped segment lives until `Drop`; all writer-side accesses are
-// serialized by the owning cache's lock, and cross-process readers only touch
-// bytes the writer has already published.
-unsafe impl Send for SingleWriterShmRingBuffer {}
-unsafe impl Sync for SingleWriterShmRingBuffer {}
-
 impl SingleWriterShmRingBuffer {
     /// Create a new shared memory buffer, failing if `name` already exists.
     ///
     /// Python's `shared_memory.SharedMemory(name=X, create=True)` maps to the
-    /// file `/dev/shm/X`, i.e. `shm_open("/" + name, O_RDWR|O_CREAT|O_EXCL)`.
+    /// file `/dev/shm/X` (tmpfs), so a plain exclusive-create file plus
+    /// `memmap2` is layout-compatible with it.
     pub(crate) fn create(data_buffer_size: usize, name: &str) -> Result<Self> {
         if data_buffer_size == 0 {
             bail_mm_shm_cache_create!(name = name.to_string(), "buffer size must be positive");
         }
-        let c_name = match CString::new(format!("/{name}")) {
-            Ok(c_name) => c_name,
-            Err(_) => {
-                bail_mm_shm_cache_create!(name = name.to_string(), "name contains NUL byte")
-            }
-        };
+        let path = format!("/dev/shm/{name}");
 
-        // SAFETY: `c_name` is a valid NUL-terminated string.
-        let fd = unsafe {
-            libc::shm_open(
-                c_name.as_ptr(),
-                libc::O_RDWR | libc::O_CREAT | libc::O_EXCL,
-                0o600,
-            )
-        };
-        if fd == -1 {
-            let error = std::io::Error::last_os_error();
-            bail_mm_shm_cache_create!(name = name.to_string(), "shm_open failed: {error}");
-        }
-        // On failure after `shm_open`, unlink the segment we just created.
-        let result = Self::map(fd, data_buffer_size + DATA_OFFSET);
-        // SAFETY: closing a live fd; mmap keeps the mapping valid afterwards.
-        unsafe { libc::close(fd) };
-        let ptr = match result {
-            Ok(ptr) => ptr,
+        let create_result = (|| {
+            let file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&path)?;
+            file.set_len((data_buffer_size + DATA_OFFSET) as u64)?;
+            // SAFETY: `file` is a fresh shm file of at least the mapped size.
+            unsafe { MmapMut::map_mut(&file) }
+        })();
+        let map = match create_result {
+            Ok(map) => map,
             Err(error) => {
-                // SAFETY: `c_name` is still a valid NUL-terminated string.
-                unsafe { libc::shm_unlink(c_name.as_ptr()) };
+                // On failure after creation, unlink the segment we created.
+                let _ = std::fs::remove_file(&path);
                 bail_mm_shm_cache_create!(name = name.to_string(), "{error}");
             }
         };
@@ -125,7 +112,7 @@ impl SingleWriterShmRingBuffer {
         let mut buffer = Self {
             name: name.to_string(),
             data_buffer_size,
-            ptr,
+            map,
             metadata: HashMap::new(),
             monotonic_id_end: 0,
             monotonic_id_start: 0,
@@ -137,42 +124,15 @@ impl SingleWriterShmRingBuffer {
         Ok(buffer)
     }
 
-    fn map(fd: libc::c_int, size: usize) -> std::result::Result<NonNull<u8>, std::io::Error> {
-        // SAFETY: `fd` is a live shm fd opened above.
-        if unsafe { libc::ftruncate(fd, size as libc::off_t) } == -1 {
-            return Err(std::io::Error::last_os_error());
-        }
-        // SAFETY: `fd` refers to a shm object of at least `size` bytes.
-        let ptr = unsafe {
-            libc::mmap(
-                std::ptr::null_mut(),
-                size,
-                libc::PROT_READ | libc::PROT_WRITE,
-                libc::MAP_SHARED,
-                fd,
-                0,
-            )
-        };
-        if ptr == libc::MAP_FAILED {
-            return Err(std::io::Error::last_os_error());
-        }
-        Ok(NonNull::new(ptr.cast::<u8>()).expect("mmap never returns null"))
-    }
-
     /// Write the random handle-signing secret at the start of the segment.
     fn init_auth_secret(&mut self) {
         let secret: [u8; AUTH_SECRET_BYTES] = rand::random();
-        self.write_bytes(0, &secret);
+        self.map[..AUTH_SECRET_BYTES].copy_from_slice(&secret);
     }
 
     /// Return the current handle-signing secret.
     pub(crate) fn auth_secret(&self) -> [u8; AUTH_SECRET_BYTES] {
-        let mut secret = [0u8; AUTH_SECRET_BYTES];
-        // SAFETY: the secret region is within the mapped segment.
-        unsafe {
-            std::ptr::copy_nonoverlapping(self.ptr.as_ptr(), secret.as_mut_ptr(), AUTH_SECRET_BYTES)
-        };
-        secret
+        self.map[..AUTH_SECRET_BYTES].try_into().expect("secret region is 32 bytes")
     }
 
     /// Clear the ring buffer.
@@ -246,12 +206,14 @@ impl SingleWriterShmRingBuffer {
     /// is done byte-wise with volatile semantics.
     pub(crate) fn reader_count(&self, address: usize) -> i32 {
         let offset = self.chunk_offset(address) + MD_SIZE;
-        let mut bytes = [0u8; 4];
-        for (i, byte) in bytes.iter_mut().enumerate() {
-            // SAFETY: `offset + i` stays within the mapped segment.
-            *byte = unsafe { std::ptr::read_volatile(self.ptr.as_ptr().add(offset + i)) };
+        let bytes = &self.map[offset..offset + 4];
+        let mut out = [0u8; 4];
+        for (i, byte) in out.iter_mut().enumerate() {
+            // SAFETY: `offset + i` stays within the mapped segment; volatile
+            // because readers in other processes mutate these bytes.
+            *byte = unsafe { std::ptr::read_volatile(bytes.as_ptr().add(i)) };
         }
-        i32::from_le_bytes(bytes)
+        i32::from_le_bytes(out)
     }
 
     /// Write `data` at `payload_offset` bytes into the payload of the chunk at
@@ -342,34 +304,18 @@ impl SingleWriterShmRingBuffer {
 
     fn write_bytes(&mut self, offset: usize, data: &[u8]) {
         debug_assert!(offset + data.len() <= self.segment_size());
-        // SAFETY: `offset + data.len()` is within the mapped segment and the
-        // writer has exclusive access to these bytes (chunk ownership).
-        unsafe {
-            std::ptr::copy_nonoverlapping(data.as_ptr(), self.ptr.as_ptr().add(offset), data.len())
-        };
+        self.map[offset..offset + data.len()].copy_from_slice(data);
     }
 
     fn read_i32(&self, offset: usize) -> i32 {
-        let mut bytes = [0u8; 4];
-        // SAFETY: `offset + 4` is within the mapped segment.
-        unsafe {
-            std::ptr::copy_nonoverlapping(self.ptr.as_ptr().add(offset), bytes.as_mut_ptr(), 4)
-        };
-        i32::from_le_bytes(bytes)
+        i32::from_le_bytes(self.map[offset..offset + 4].try_into().expect("4-byte read"))
     }
 }
 
 impl Drop for SingleWriterShmRingBuffer {
     fn drop(&mut self) {
-        // SAFETY: `ptr` is a live mapping of `data_buffer_size + DATA_OFFSET`
-        // bytes created in `create`; this runs exactly once.
-        unsafe {
-            libc::munmap(self.ptr.as_ptr().cast(), self.segment_size());
-        }
-        if let Ok(c_name) = CString::new(format!("/{}", self.name)) {
-            // SAFETY: `c_name` is a valid NUL-terminated string.
-            unsafe { libc::shm_unlink(c_name.as_ptr()) };
-        }
+        // `MmapMut` unmaps on drop; the writer also unlinks the segment.
+        let _ = std::fs::remove_file(format!("/dev/shm/{}", self.name));
     }
 }
 
@@ -399,7 +345,7 @@ mod tests {
             Ok(_) => panic!("creating an existing segment must fail"),
             Err(error) => error,
         };
-        assert!(error.to_string().contains("shm_open failed"));
+        assert!(error.to_string().contains("File exists"), "{error}");
     }
 
     #[test]
