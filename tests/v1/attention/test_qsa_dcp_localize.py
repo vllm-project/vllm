@@ -170,6 +170,93 @@ def test_reused_local_rows_match_per_pass_localization(world, interleave):
             assert torch.equal(lse, expected_lse)
 
 
+# --- one split with return_lse ----------------------------------------------
+
+
+def _force_num_splits(monkeypatch, num_splits):
+    """Make the reader use num_splits (at most its tile count)."""
+    from vllm.models.qwen4_exp.nvidia.ops import qsa as qsa_ops
+
+    select_config = qsa_ops._select_config
+
+    def forced(*args, **kwargs):
+        block_n, num_warps, num_tiles, _ = select_config(*args, **kwargs)
+        return block_n, num_warps, num_tiles, min(num_splits, num_tiles)
+
+    monkeypatch.setattr(qsa_ops, "_select_config", forced)
+
+
+def _dcp_cache(cache_dtype, shape, k_scale, v_scale):
+    """Random K/V of the requested storage: BF16, uint8 e4m3 or e4m3."""
+    key = torch.randn(shape, dtype=torch.bfloat16, device="cuda")
+    value = torch.randn(shape, dtype=torch.bfloat16, device="cuda")
+    if cache_dtype == "bf16":
+        return key, value, None, None
+    key = (key / k_scale).to(torch.float8_e4m3fn)
+    value = (value / v_scale).to(torch.float8_e4m3fn)
+    if cache_dtype == "uint8":
+        key, value = key.view(torch.uint8), value.view(torch.uint8)
+    return key, value, k_scale, v_scale
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="QSA kernels need CUDA")
+@pytest.mark.parametrize("cache_dtype", ["bf16", "uint8", "e4m3"])
+@pytest.mark.parametrize("with_empty_rows", [False, True])
+def test_one_split_stores_the_bits_of_the_merge(
+    monkeypatch, cache_dtype, with_empty_rows
+):
+    """With one split and return_lse the split kernel stores the output and
+    the LSE itself. Both equal, bit for bit, the old path: fp32 partials of
+    one split and the merge kernel."""
+    from vllm.models.qwen4_exp.nvidia.ops import qsa as qsa_ops
+    from vllm.platforms import current_platform
+
+    if cache_dtype == "e4m3" and not current_platform.has_device_capability(89):
+        pytest.skip("Triton has no e4m3 pointer type below sm_89")
+    _force_num_splits(monkeypatch, 1)
+    torch.manual_seed(5 + with_empty_rows)
+    page, seq_len, heads, kv_heads, head_dim = 16, 512, 8, 2, 64
+    blocks = seq_len // page
+    key, value, k_scale, v_scale = _dcp_cache(
+        cache_dtype, (blocks, page, kv_heads, head_dim), 0.75, 1.5
+    )
+    table = torch.arange(blocks, dtype=torch.int32, device="cuda")[None]
+    rows = [list(range(r, seq_len, r + 1)) for r in range(7)]
+    if with_empty_rows:
+        rows[2] = []
+        rows[5] = []
+    selection = _pack(rows, max(len(r) for r in rows)).cuda()
+    if with_empty_rows:
+        selection[5, :8] = torch.arange(8, dtype=torch.int32)  # stale, count 0
+    query = torch.randn(len(rows), heads, head_dim, dtype=torch.bfloat16).cuda()
+    token_to_req = torch.zeros(len(rows), dtype=torch.int32, device="cuda")
+
+    def attend():
+        return qsa_ops.qsa_sparse_paged_attention(
+            query,
+            key,
+            value,
+            selection,
+            table,
+            token_to_req,
+            False,
+            k_scale=k_scale,
+            v_scale=v_scale,
+            return_lse=True,
+        )
+
+    direct_out, direct_lse = attend()
+    monkeypatch.setattr(qsa_ops, "_merges_splits", lambda num_splits: True)
+    merged_out, merged_lse = attend()
+
+    assert torch.equal(direct_out.view(torch.int16), merged_out.view(torch.int16))
+    assert torch.equal(direct_lse.view(torch.int32), merged_lse.view(torch.int32))
+    if with_empty_rows:
+        assert bool(torch.isneginf(direct_lse[[2, 5]]).all())
+        assert bool((direct_out[[2, 5]] == 0).all())
+    assert bool(torch.isfinite(direct_lse[[0, 1, 3]]).all())
+
+
 # --- contracts that keep the gate from being applied twice -------------------
 
 
