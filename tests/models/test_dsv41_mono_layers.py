@@ -206,7 +206,7 @@ class MonoProbe:
             )
             for i in self._decoder_layers()
         }
-        runner = None if mono is None else mono.state.runner
+        runner = None if mono is None else mono.launch_state.runner
         return {
             "layers": layers,
             "epoch": -1 if runner is None else int(runner.epoch[0]),

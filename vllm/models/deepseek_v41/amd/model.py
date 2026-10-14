@@ -281,7 +281,7 @@ class DeepseekV4DecoderLayer(nn.Module):
         residual: torch.Tensor | None = None,
         engram_hashes: torch.Tensor | None = None,
         engram_mask: torch.Tensor | None = None,
-        mono: MonoRuntime[DSV41LayerKernel] | None = None,
+        mono: MonoRuntime[DSV41LayerKernel, LaunchState] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         kernel = kernel_for_layer(mono, self.attn.layer_id, positions)
         if kernel is not None and not kernel.ffn_only:
@@ -484,7 +484,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         self.hc_dim = self.hc_mult * config.hidden_size
         self.rms_norm_eps = config.rms_norm_eps
         self.vllm_config = vllm_config
-        self.mono: MonoRuntime[DSV41LayerKernel] | None = None
+        self.mono: MonoRuntime[DSV41LayerKernel, LaunchState] | None = None
         self.mono_spec: MonoSpec[LaunchState] | None = configure(
             vllm_config, SPECS_PATH
         )

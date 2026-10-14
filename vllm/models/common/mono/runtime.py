@@ -14,7 +14,12 @@ from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.warmup.jit_warmup import VllmJitKernel
 from vllm.models.common.mono.guards import _refuse_model, tp_agree, tp_group
-from vllm.models.common.mono.spec import LayerKernel, MonoSpec, MonoUnsupported
+from vllm.models.common.mono.spec import (
+    LaunchStateT,
+    LayerKernel,
+    MonoSpec,
+    MonoUnsupported,
+)
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -24,7 +29,8 @@ logger = init_logger(__name__)
 KernelT = TypeVar("KernelT", bound=LayerKernel)
 """The kernel type one spec's ``build`` returns. ``LayerKernel`` is only the
 lower bound, so a model annotates its runtime with its own kernel class
-(``MonoRuntime[MyLayerKernel]``) and reads what that class adds."""
+(``MonoRuntime[MyLayerKernel, MyLaunchState]``) and reads what that class
+adds."""
 
 
 class MonoWarmup(VllmJitKernel["MonoWarmup.CompileKey"]):
@@ -48,10 +54,20 @@ class MonoWarmup(VllmJitKernel["MonoWarmup.CompileKey"]):
         self._compiled_cache[compile_key] = True
 
 
-class MonoRuntime(Generic[KernelT]):
-    """A model's MonoKernels on this rank: built once after load."""
+class MonoRuntime(Generic[KernelT, LaunchStateT]):
+    """A model's MonoKernels on this rank: built once after load.
 
-    def __init__(self, spec: MonoSpec[Any], model, vllm_config: "VllmConfig"):
+    ``launch_state`` is what the spec built at attach, and the one handle the
+    model reads outside a launch: anything a model needs between steps (the
+    runner the kernels share, its peer buffers, the error words) lives there
+    rather than in a module global.
+    """
+
+    launch_state: LaunchStateT
+    """What ``MonoSpec.launch_state`` built, set whenever a layer takes a
+    kernel, which is the only case ``attach`` hands the runtime back."""
+
+    def __init__(self, spec: MonoSpec[LaunchStateT], model, vllm_config: "VllmConfig"):
         self.spec = spec
         reasons = _refuse_model(spec, model)
         agreed = tp_agree(not reasons, tp_group()[2])
@@ -63,7 +79,6 @@ class MonoRuntime(Generic[KernelT]):
         self.vllm_config = vllm_config
         self.widths = spec.widths(vllm_config)
         self.kernels: dict[tuple[int, int], KernelT] = {}
-        self.state: Any = None
         self._why: str | None = None
         self._fc: Any = None
         self._checked: tuple | None = None
@@ -72,9 +87,11 @@ class MonoRuntime(Generic[KernelT]):
         if not indices:
             self.cache_layers: list[str] = []
             return
-        self.state = spec.launch_state(model, vllm_config, tuple(indices))
+        self.launch_state = spec.launch_state(model, vllm_config, tuple(indices))
         for i in indices:
-            built = spec.build(vllm_config, self.state, model.layers[i], self.widths)
+            built = spec.build(
+                vllm_config, self.launch_state, model.layers[i], self.widths
+            )
             missing = set(self.widths) - set(built)
             if missing:
                 raise MonoUnsupported(
@@ -136,7 +153,7 @@ class MonoRuntime(Generic[KernelT]):
             raise MonoUnsupported(
                 f"MonoKernel {self.spec.name}: caches moved during CUDA graph capture"
             )
-        reasons = self.spec.refuse_caches(self.vllm_config, self.state, caches)
+        reasons = self.spec.refuse_caches(self.vllm_config, self.launch_state, caches)
         if reasons:
             raise MonoUnsupported(
                 f"MonoKernel {self.spec.name} caches: " + "; ".join(reasons)
@@ -163,7 +180,7 @@ class MonoRuntime(Generic[KernelT]):
         elif n not in self.widths:
             why = "width"
         else:
-            why = self.spec.skip_step(self.vllm_config, self.state, n)
+            why = self.spec.skip_step(self.vllm_config, self.launch_state, n)
             if why is None:
                 self._refuse_caches()
         self._fc, self._why = fc, why
@@ -171,8 +188,8 @@ class MonoRuntime(Generic[KernelT]):
 
 
 def attach(
-    model, vllm_config: "VllmConfig", spec: MonoSpec[Any] | None
-) -> MonoRuntime[Any] | None:
+    model, vllm_config: "VllmConfig", spec: MonoSpec[LaunchStateT] | None
+) -> MonoRuntime[Any, LaunchStateT] | None:
     """Builds the launch state and this rank's layer kernels. Collective over
     the TP group.
 
@@ -184,7 +201,8 @@ def attach(
     Returns:
         This rank's ``MonoRuntime``, or None with the switch off or when no layer
         takes a kernel. Annotate it with the kernel class the spec's ``build``
-        returns, which is what ``kernel_for_layer`` then hands back.
+        returns (which is what ``kernel_for_layer`` then hands back) and the
+        spec's launch state.
 
     Raises:
         MonoUnsupported: This rank, or another, refused the loaded model.
@@ -192,7 +210,7 @@ def attach(
     """
     if spec is None:
         return None
-    mono: MonoRuntime[Any] = MonoRuntime(spec, model, vllm_config)
+    mono: MonoRuntime[Any, LaunchStateT] = MonoRuntime(spec, model, vllm_config)
     if not mono.kernels:
         logger.info("MonoKernel %s: no layer takes a kernel", spec.name)
         return None
@@ -200,7 +218,7 @@ def attach(
 
 
 def kernel_for_layer(
-    mono: MonoRuntime[KernelT] | None, i: int, positions
+    mono: MonoRuntime[KernelT, Any] | None, i: int, positions
 ) -> KernelT | None:
     """Layer ``i``'s kernel when this step runs on the kernels, else None.
 

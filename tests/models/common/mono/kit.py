@@ -208,7 +208,7 @@ class MonoConformance:
 
     def test_refuse_caches_reports_every_reason(self, config, model, mono):
         reasons = mono.spec.refuse_caches(
-            mono.vllm_config, mono.state, self.bad_caches(config, model)
+            mono.vllm_config, mono.launch_state, self.bad_caches(config, model)
         )
         assert len(reasons) >= 2, reasons
 
