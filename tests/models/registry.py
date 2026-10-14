@@ -360,6 +360,9 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "KimiLinearForCausalLM": _HfExamplesInfo(
         "moonshotai/Kimi-Linear-48B-A3B-Instruct", trust_remote_code=True
     ),
+    "Kolibri1ForCausalLM": _HfExamplesInfo(
+        "Aleph-Alpha/Kolibri-1", min_transformers_version="5.20.0"
+    ),
     "LagunaForCausalLM": _HfExamplesInfo("poolside/Laguna-XS.2"),
     "Lfm2ForCausalLM": _HfExamplesInfo("LiquidAI/LFM2-1.2B"),
     "Lfm2MoeForCausalLM": _HfExamplesInfo(
@@ -801,6 +804,10 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "Blip2ForConditionalGeneration": _HfExamplesInfo(
         "Salesforce/blip2-opt-2.7b",
         extras={"6b": "Salesforce/blip2-opt-6.7b"},
+    ),
+    "ClefFlashForJointSchema": _HfExamplesInfo(
+        "Cloudflare/clef-flash",
+        max_model_len=4096,
     ),
     "Cohere2VisionForConditionalGeneration": _HfExamplesInfo(
         "CohereLabs/command-a-vision-07-2025",
@@ -1349,6 +1356,10 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     ),
     "Qwen3OmniMoeForConditionalGeneration": _HfExamplesInfo(
         "Qwen/Qwen3-Omni-30B-A3B-Instruct",
+        max_model_len=4096,
+    ),
+    "ClefOmniForJointSchema": _HfExamplesInfo(
+        "Cloudflare/clef-omni",
         max_model_len=4096,
     ),
     "Qwen3ASRForConditionalGeneration": _HfExamplesInfo(
