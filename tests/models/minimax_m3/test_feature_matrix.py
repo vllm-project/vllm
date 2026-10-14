@@ -102,6 +102,7 @@ ANSWER_SCHEMA = {
 class Instance:
     tp: int = 1
     dp: int = 1
+    ep: bool = False
     image: bool = False
     kv_config: dict | None = None
     extra_args: tuple[str, ...] = ()
@@ -119,7 +120,9 @@ class Instance:
             json.dumps(spec),
         ]
         if self.dp > 1:
-            args += ["--data-parallel-size", str(self.dp), "--enable-expert-parallel"]
+            args += ["--data-parallel-size", str(self.dp)]
+        if self.ep:
+            args.append("--enable-expert-parallel")
         if not self.image:
             args.append("--language-model-only")
         if self.kv_config is not None:
@@ -151,13 +154,17 @@ class Deployment:
 
 
 DEPLOYMENTS = {
-    "tp4-ep-image": Deployment(
-        Instance(tp=4, image=True, extra_args=("--enable-expert-parallel",))
-    ),
+    "tp4-ep-image": Deployment(Instance(tp=4, ep=True, image=True)),
     "dep4": Deployment(
-        Instance(dp=4, extra_args=("--all2all-backend", "flashinfer_nvlink_one_sided"))
+        Instance(
+            dp=4,
+            ep=True,
+            extra_args=("--all2all-backend", "flashinfer_nvlink_one_sided"),
+        )
     ),
-    "simple-offload": Deployment(Instance(kv_config=SIMPLE_OFFLOAD), offload=True),
+    "simple-offload-tp2-ep": Deployment(
+        Instance(tp=2, ep=True, kv_config=SIMPLE_OFFLOAD), offload=True
+    ),
     "pd-image": Deployment(
         Instance(image=True, kv_config=NIXL),
         prefill=Instance(image=True, kv_config=NIXL),
@@ -166,7 +173,7 @@ DEPLOYMENTS = {
         Instance(kv_config=NIXL_PUSH_D), prefill=Instance(kv_config=NIXL_PUSH_P)
     ),
     "pd-tp2-dep2": Deployment(
-        Instance(dp=2, kv_config=NIXL), prefill=Instance(tp=2, kv_config=NIXL)
+        Instance(dp=2, ep=True, kv_config=NIXL), prefill=Instance(tp=2, kv_config=NIXL)
     ),
     "pd-offloading": Deployment(
         Instance(kv_config=NIXL_OFFLOADING),
@@ -201,7 +208,6 @@ def model_dirs(tmp_path_factory) -> tuple[str, str]:
     text = config["text_config"]
     text["num_hidden_layers"] = NUM_LAYERS
     text["moe_layer_freq"] = LAYER_KINDS
-    text["num_mtp_modules"] = 1
     sparse = text["sparse_attention_config"]
     sparse["sparse_attention_freq"] = LAYER_KINDS
     sparse["sparse_disable_index_value"] = LAYER_KINDS
@@ -374,17 +380,19 @@ def test_dspark_deployment(name: str, model_dirs: tuple[str, str]) -> None:
         else:
             proxy = _proxy(compute_url, decode_url)
         with proxy as url:
-            external_before = _metric(
-                decode_url,
-                "vllm:prompt_tokens_by_source_total",
-                source="external_kv_transfer",
-            )
-            output = _complete(url, model, prompt, "first")
             if deployment.prefill is not None:
+                external_before = _metric(
+                    decode_url,
+                    "vllm:prompt_tokens_by_source_total",
+                    source="external_kv_transfer",
+                )
+            output = _complete(url, model, prompt, "first")
+            # Dummy weights differ across TP sizes, so only same-TP P/D compares.
+            if deployment.prefill is not None and (
+                deployment.prefill.tp == deployment.decode.tp
+            ):
                 recompute = _complete(decode_url, model, prompt, "recompute")
-                # Dummy weights differ across TP sizes.
-                if deployment.prefill.tp == deployment.decode.tp:
-                    comparisons.append(("kv_transfer", recompute, output))
+                comparisons.append(("kv_transfer", recompute, output))
             if deployment.offload:
                 _reset_gpu_prefix_cache(compute_url)
                 reload = _complete(compute_url, model, prompt, "first")
