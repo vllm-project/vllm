@@ -11,6 +11,7 @@ from vllm.model_executor.layers.attention.sparse_mla_attention import (
     SparseMLACommonMetadataBuilder,
 )
 from vllm.models.deepseek_v4.sparse_mla import DeepseekV4SparseMLABackend
+from vllm.models.deepseek_v41 import sparse_mla as v41_sparse_module
 from vllm.models.deepseek_v41.sparse_mla import (
     DeepseekV4SparseMLABackend as DeepseekV41SparseMLABackend,
 )
@@ -463,9 +464,12 @@ def test_index_conversion_warmup_uses_physical_block_stride():
     assert {key.block_stride_rows for key in keys} == {4096}
 
 
-def test_zero_token_pcp_rank_participates_in_compressed_mapping_gather(monkeypatch):
+@pytest.mark.parametrize("compress_ratio", [2, 4])
+def test_zero_token_pcp_rank_participates_in_compressed_mapping_gather(
+    monkeypatch, compress_ratio
+):
     builder = object.__new__(DeepseekV32IndexerMetadataBuilder)
-    builder.compress_ratio = 4
+    builder.compress_ratio = compress_ratio
     builder.use_pcp = True
     builder.pcp_world_size = 4
     builder.pcp_rank = 0
@@ -474,6 +478,7 @@ def test_zero_token_pcp_rank_participates_in_compressed_mapping_gather(monkeypat
     builder.kernel_block_size = None
     builder.kv_cache_spec = SimpleNamespace(block_size=64, num_states=64)
     builder.compressed_slot_mapping_buffer = torch.zeros(8, dtype=torch.int64)
+    builder.pcp_compressed_slot_mapping_buffer = torch.empty(32, dtype=torch.int64)
 
     def fake_get_compressed_slot_mapping(
         num_tokens,
@@ -490,11 +495,11 @@ def test_zero_token_pcp_rank_participates_in_compressed_mapping_gather(monkeypat
         assert num_tokens == 0
         assert dcp_world_size == 1
         assert block_size == 64
-        assert compress_ratio == 4
+        assert compress_ratio == builder.compress_ratio
         out.fill_(-1)
         return out[:num_tokens]
 
-    gathered_slot_mapping = torch.tensor([123, -1, -1, -1], dtype=torch.int64)
+    gathered_slot_mapping = torch.tensor([-1, 123, -1, -1], dtype=torch.int64)
 
     class FakePCPGroup:
         def __init__(self):
@@ -504,7 +509,7 @@ def test_zero_token_pcp_rank_participates_in_compressed_mapping_gather(monkeypat
             self.calls += 1
             assert dim == 0
             torch.testing.assert_close(tensor, torch.tensor([-1]))
-            return gathered_slot_mapping
+            return gathered_slot_mapping.clone()
 
     fake_pcp_group = FakePCPGroup()
     monkeypatch.setattr(
@@ -538,6 +543,82 @@ def test_zero_token_pcp_rank_participates_in_compressed_mapping_gather(monkeypat
     assert metadata.num_prefills == 0
     assert metadata.num_prefill_tokens == 0
     torch.testing.assert_close(metadata.slot_mapping, gathered_slot_mapping)
+
+    # A captured graph retains the first tensor, including on an empty owner.
+    captured_slots = metadata.slot_mapping
+    gathered_slot_mapping[1] = 456
+    refreshed = builder.build(common_prefix_len=0, common_attn_metadata=common)
+    assert fake_pcp_group.calls == 2
+    assert refreshed.slot_mapping.data_ptr() == captured_slots.data_ptr()
+    torch.testing.assert_close(captured_slots, gathered_slot_mapping)
+
+
+@pytest.mark.parametrize("field", ["cache_positions", "slot_mapping"])
+def test_v41_pcp_metadata_refreshes_captured_buffers(monkeypatch, field):
+    """A later build updates the tensor already retained by a captured graph."""
+    qsl = torch.tensor([0, 2], dtype=torch.int32)
+    common = CommonAttentionMetadata(
+        query_start_loc=qsl,
+        query_start_loc_cpu=qsl,
+        seq_lens=torch.tensor([16], dtype=torch.int32),
+        num_reqs=1,
+        num_actual_tokens=2,
+        max_query_len=2,
+        max_seq_len=16,
+        block_table_tensor=torch.tensor([[3]], dtype=torch.int32),
+        slot_mapping=torch.arange(10, 18, dtype=torch.int64),
+        positions=torch.tensor([14, 15], dtype=torch.int64),
+    )
+    common._token_to_req_indices_cache = torch.zeros(2, dtype=torch.int32)
+
+    def all_gather(tensor, dim=0):
+        assert dim == 0 and tensor.numel() == 2
+        return torch.cat([tensor] * 4)
+
+    monkeypatch.setattr(
+        v41_sparse_module,
+        "get_pcp_group",
+        lambda: SimpleNamespace(all_gather=all_gather),
+    )
+    if field == "cache_positions":
+        builder = object.__new__(v41_sparse_module.DeepseekV41SparseSWAMetadataBuilder)
+        builder.cache_positions_buffer = torch.empty(32, dtype=torch.int64)
+
+        def build_swa(self, common_prefix_len, cm, fast_build, replay_start):
+            torch.testing.assert_close(cm.slot_mapping, common.slot_mapping[2:4])
+            return SimpleNamespace()
+
+        monkeypatch.setattr(
+            v41_sparse_module.DeepseekSparseSWAMetadataBuilder, "build", build_swa
+        )
+        source = common.positions
+        assert source is not None
+    else:
+        builder = object.__new__(v41_sparse_module.DeepseekV4SparseMLAMetadataBuilder)
+        builder.compress_ratio = 2
+        builder.compressed_slot_mapping_buffer = torch.empty(8, dtype=torch.int64)
+        builder.pcp_compressed_slot_mapping_buffer = torch.empty(32, dtype=torch.int64)
+        builder.req_id_per_token_buffer = torch.empty(8, dtype=torch.int32)
+        builder.kv_cache_spec = SimpleNamespace(block_size=64, num_states=32)
+        builder.topk_tokens = 2048
+
+        def compress(num_tokens, slots, qsl, seq, bt, block_size, ratio, out):
+            assert ratio == 2 and num_tokens == 2
+            torch.testing.assert_close(slots, common.slot_mapping[2:4])
+            return out[:num_tokens].copy_(slots)
+
+        monkeypatch.setattr(v41_sparse_module, "get_compressed_slot_mapping", compress)
+        source = common.slot_mapping[2:4]
+    builder.pcp_size = 4
+    builder.pcp_rank = 1
+
+    metadata = builder.build(0, common)
+    captured = getattr(metadata, field)
+    torch.testing.assert_close(captured, torch.cat([source] * 4))
+    source.add_(10)
+    refreshed = builder.build(0, common)
+    assert getattr(refreshed, field).data_ptr() == captured.data_ptr()
+    torch.testing.assert_close(captured, torch.cat([source] * 4))
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")

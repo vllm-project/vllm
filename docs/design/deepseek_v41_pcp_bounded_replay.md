@@ -4,7 +4,7 @@ This draft enables cold-prefill decoder trimming with PCP. It builds on
 [#59857](https://github.com/vllm-project/vllm/pull/59857) and
 [#61553](https://github.com/vllm-project/vllm/pull/61553), which supplies fixed
 DSpark verification and optional shared host Engram storage. Prefix-cache hits,
-KV transfer and CUDA Graph composition remain outside this change.
+KV transfer and CUDA Graphs for prefill remain outside this change.
 
 ## Implementation
 
@@ -36,8 +36,11 @@ SGLang's interleave CP layout, which distributes that tail across ranks.
 
 The model's existing guards continue to require PP=DP=DCP=1, no prefix caching,
 no KV transfer, no microbatching, and a supported MoE/attention backend. The
-existing sparse-PCP runner rejects CUDA graphs. Fixed DSpark remains subject to
-the existing guard that its draft reads no hidden states outside the replay
+NVIDIA V4.1 path supports `FULL_DECODE_ONLY` CUDA graphs while prefill and its
+bounded replay remain eager. Speculative decode requires flattened or varlen
+indexer queries; native multi-query metadata is not supported with empty PCP
+decode owners. Prefix caching remains unsupported. Fixed DSpark remains subject
+to the existing guard that its draft reads no hidden states outside the replay
 window. Requests with prompt logprobs retain all their rows.
 
 ## Validation

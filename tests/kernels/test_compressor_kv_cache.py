@@ -1204,6 +1204,9 @@ def test_v41_pcp_ring_links_match_request_positions(
     builder = SimpleNamespace(
         capacity=capacity,
         device=torch.device("cpu"),
+        gather_tokens_buffer=torch.empty(num_rows, dtype=torch.int64),
+        ring_write_slots_buffer=torch.empty(pcp_size * num_rows, dtype=torch.int64),
+        prev_row_indices_buffer=torch.empty(num_rows, dtype=torch.int64),
         vllm_config=SimpleNamespace(
             scheduler_config=SimpleNamespace(max_num_seqs=len(lengths)),
             speculative_config=None,
@@ -1248,6 +1251,66 @@ def test_v41_pcp_ring_links_match_request_positions(
                 assert gathered_keys[row] == expected_rows[slot // capacity]
                 assert (gathered_keys[row] & 0xFFFFFFFF) % capacity == slot % capacity
     torch.testing.assert_close(torch.cat(contributed_keys), keys)
+
+
+@pytest.mark.parametrize("speculative", [False, True])
+def test_v41_pcp_ring_links_refresh_captured_buffers(speculative, monkeypatch):
+    """An owner change and rejected drafts update the first graph's ring links."""
+    from vllm.models.deepseek_v41 import compressor as compressor_module
+    from vllm.models.deepseek_v41.compressor import (
+        CompressorMetadata,
+        CompressorMetadataBuilder,
+    )
+
+    capacity, num_rows = 8, 4
+    tail_rows = capacity if speculative else 1
+    width = num_rows * tail_rows
+    builder = SimpleNamespace(
+        capacity=capacity,
+        device=torch.device("cpu"),
+        gather_tokens_buffer=torch.empty(width, dtype=torch.int64),
+        ring_write_slots_buffer=torch.empty(2 * width, dtype=torch.int64),
+        prev_row_indices_buffer=torch.empty(num_rows, dtype=torch.int64),
+        vllm_config=SimpleNamespace(
+            scheduler_config=SimpleNamespace(max_num_seqs=2),
+            speculative_config=SimpleNamespace() if speculative else None,
+        ),
+    )
+    peer_keys = torch.full((width,), -1, dtype=torch.int64)
+    monkeypatch.setattr(
+        compressor_module,
+        "get_pcp_group",
+        lambda: SimpleNamespace(
+            all_gather=lambda local, dim: torch.cat((local, peer_keys), dim=dim)
+        ),
+    )
+    fields = ("gather_tokens", "ring_write_slots", "prev_row_indices")
+    captured = snapshots = None
+    steps = [
+        ([3, 4, 5, 6], [1, 2, 2, 2], [0, 1, 4], 2, [width, -1]),
+        # Request 2 resumes before its previous tail; request 1 changes row.
+        ([2, 3, 4, 7], [2, 2, 2, 1], [0, 3, 4], 6, [-1, width]),
+    ]
+    for positions, blocks, qsl, peer_position, expected_prev in steps:
+        positions = torch.tensor(positions, dtype=torch.int64)
+        slots = torch.tensor(blocks) * capacity + positions.remainder(capacity)
+        metadata = CompressorMetadata(
+            slot_mapping=slots,
+            query_start_loc=torch.tensor(qsl, dtype=torch.int32),
+            token_to_req_indices=torch.empty(0, dtype=torch.int32),
+        )
+        peer_keys[0] = (1 << 32) | peer_position
+        CompressorMetadataBuilder._link_pcp_chunks(builder, metadata, 2, positions)
+        outputs = tuple(getattr(metadata, field) for field in fields)
+        assert metadata.prev_row_indices.tolist() == expected_prev
+        if captured is None:
+            captured = outputs
+            snapshots = tuple(tensor.clone() for tensor in outputs)
+        else:
+            for original, snapshot, refreshed in zip(captured, snapshots, outputs):
+                assert original.data_ptr() == refreshed.data_ptr()
+                torch.testing.assert_close(original, refreshed)
+                assert not torch.equal(original, snapshot)
 
 
 def _build_pcp_ring_metadata(ranks, all_gather, spec, config, device, monkeypatch):

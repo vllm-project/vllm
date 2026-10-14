@@ -70,11 +70,69 @@ def test_validate_config_accepts_decode_only_full_graphs(cudagraph_mode):
     PCPManager.validate_config(_make_config(cudagraph_mode), supports_mm_inputs=False)
 
 
+@pytest.mark.parametrize("model_type", ["deepseek_v41", "deepseek_v32"])
+@pytest.mark.parametrize("is_cuda", [False, True])
+@pytest.mark.parametrize(
+    "cudagraph_mode",
+    [
+        CUDAGraphMode.NONE,
+        CUDAGraphMode.FULL_DECODE_ONLY,
+        CUDAGraphMode.FULL_AND_PIECEWISE,
+        CUDAGraphMode.PIECEWISE,
+        CUDAGraphMode.FULL,
+    ],
+)
+def test_sparse_pcp_graphs_are_scoped_to_v41_decode(
+    monkeypatch, model_type, is_cuda, cudagraph_mode
+):
+    monkeypatch.setattr(pcp_manager_module.current_platform, "is_cuda", lambda: is_cuda)
+    config = _make_config(cudagraph_mode)
+    config.model_config.hf_text_config = SimpleNamespace(
+        model_type=model_type, index_topk=2048
+    )
+    if cudagraph_mode == CUDAGraphMode.NONE or (
+        is_cuda
+        and model_type == "deepseek_v41"
+        and cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY
+    ):
+        PCPManager.validate_config(config, supports_mm_inputs=False)
+    else:
+        with pytest.raises(NotImplementedError, match="sparse MLA PCP"):
+            PCPManager.validate_config(config, supports_mm_inputs=False)
+
+
 def test_validate_config_rejects_full_graph_for_prefills():
     with pytest.raises(NotImplementedError, match="decode-only routines"):
         PCPManager.validate_config(
             _make_config(CUDAGraphMode.FULL), supports_mm_inputs=False
         )
+
+
+@pytest.mark.parametrize(
+    "flattening,varlen", [(False, False), (True, False), (False, True)]
+)
+def test_v41_pcp_graph_rejects_native_speculative_empty_owners(
+    monkeypatch, flattening, varlen
+):
+    from vllm.v1.attention.backends.mla import indexer
+
+    monkeypatch.setattr(pcp_manager_module.current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(indexer, "_use_flattening", lambda config: flattening)
+    monkeypatch.setattr(indexer, "_supports_varlen_paged_mqa_logits", lambda: varlen)
+    config = _make_config(CUDAGraphMode.FULL_DECODE_ONLY)
+    config.model_config.hf_text_config = SimpleNamespace(
+        model_type="deepseek_v41", index_topk=2048
+    )
+    config.speculative_config = SimpleNamespace(
+        use_dspark=lambda: True,
+        draft_model_config=SimpleNamespace(use_mla=True),
+        num_speculative_tokens=3,
+    )
+    if flattening or varlen:
+        PCPManager.validate_config(config, supports_mm_inputs=False)
+    else:
+        with pytest.raises(NotImplementedError, match="empty decode owners"):
+            PCPManager.validate_config(config, supports_mm_inputs=False)
 
 
 @pytest.mark.parametrize("draft_uses_mla", [False, True])
@@ -143,6 +201,27 @@ def test_input_buffers_are_exposed_for_cudagraph_capture():
     assert manager.input_buffers.input_ids.shape == (8,)
     assert manager.input_buffers.positions.shape == (8,)
     assert manager.input_buffers.is_padding.shape == (8,)
+
+
+@pytest.mark.parametrize("num_reqs", [1, 3, 4, 5, 8])
+@pytest.mark.parametrize("has_prefill", [False, True])
+def test_sharded_decode_dispatch_uses_largest_local_request_count(
+    num_reqs, has_prefill
+):
+    manager = PCPManager(4, 0, torch.device("cpu"), shard_decode_requests=True)
+    scheduled = np.full(num_reqs, 6, dtype=np.int32)
+    prefilling = np.full(num_reqs, has_prefill, dtype=np.bool_)
+    expected = (
+        num_reqs
+        if has_prefill
+        else max(
+            sum(1 for _ in manager._iter_rank_chunks(rank, scheduled, prefilling))
+            for rank in range(4)
+        )
+    )
+    assert manager.get_num_reqs_for_dispatch(num_reqs, has_prefill) == expected
+    manager.shard_decode_requests = False
+    assert manager.get_num_reqs_for_dispatch(num_reqs, has_prefill) == num_reqs
 
 
 @pytest.mark.parametrize(
