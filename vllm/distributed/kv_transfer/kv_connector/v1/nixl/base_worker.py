@@ -102,6 +102,7 @@ _SHARED_REGION_GROUP_ID = -1
 # invalidated, eg due to a persistent RDMA fault.
 _INVALID_PEER_MIN_BACKOFF_S = 1.0
 _INVALID_PEER_MAX_BACKOFF_S = 60.0
+_MAX_HYBRID_BLOCK_SPLIT = 128
 
 
 def _region_sort_key(layer_name: str) -> tuple[tuple[int, int | str], ...]:
@@ -2145,13 +2146,32 @@ class NixlBaseConnectorWorker:
         """
         if self.block_size % meta.block_size == 0:
             return
-        split = meta.block_size // math.gcd(self.block_size, meta.block_size)
+        unit = math.gcd(self.block_size, meta.block_size)
+        split = meta.block_size // unit
+        if max(split, self.block_size // unit) > _MAX_HYBRID_BLOCK_SPLIT:
+            logger.warning(
+                "Not pairing remote %d-token blocks with local %d-token blocks: "
+                "their %d-token common unit would split each block into more "
+                "than %d transfers.",
+                meta.block_size,
+                self.block_size,
+                unit,
+                _MAX_HYBRID_BLOCK_SPLIT,
+            )
+            return
         if (
             meta.block_strides != meta.block_lens
             or meta.ple_block_len is not None
             or any(block_len % split for block_len in meta.block_lens)
         ):
             return
+        logger.info_once(
+            "Transferring remote %d-token blocks as %d-token kernel blocks to "
+            "pair them with local %d-token blocks.",
+            meta.block_size,
+            unit,
+            self.block_size,
+        )
         meta.block_size //= split
         meta.physical_blocks_per_logical_kv_block *= split
         meta.num_blocks *= split

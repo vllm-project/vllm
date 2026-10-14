@@ -1053,6 +1053,25 @@ def test_hetero_non_divisible_block_sizes(local_block, remote_block, num_tokens)
 
 
 @pytest.mark.cpu_test
+def test_hetero_block_split_is_bounded():
+    """A pair whose gcd would split each block into very many transfers fails
+    the handshake rather than multiplying the descriptor lists."""
+    worker = _make_mla_hybrid_worker(
+        local_block_size=257, kernel_block_size=257, num_logical_blocks=8
+    )
+    meta_r = _make_remote_meta(
+        worker,
+        remote_block_size=256,
+        remote_kernel_block_size=256,
+        remote_num_logical=8,
+        remote_ssm_sizes=(24, 32),
+    )
+    with pytest.raises(AssertionError, match="not divisible"):
+        _register_remote_agents(worker, meta_r, tp_size=2)
+    assert meta_r.block_size == 256
+
+
+@pytest.mark.cpu_test
 @pytest.mark.parametrize(
     "num_tokens",
     # Residues around the remote kernel block (4), the local kernel block
