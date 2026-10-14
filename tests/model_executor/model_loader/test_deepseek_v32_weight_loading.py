@@ -55,42 +55,46 @@ def _fused_weight_loader(param, loaded_weight, shard_id):
         param.data[WK_ROWS : WK_ROWS + rows] = loaded_weight
 
 
-class _StubDSAWeights(deepseek_v32_model.DeepseekV32Model):
-    """Real ``load_weights`` over a single fused ``wk_weights_proj`` param."""
+if current_platform.is_cuda():
+    # The stubs subclass the CUDA-only modules and must only be defined on
+    # CUDA: pytest evaluates class bodies at collection time, before the
+    # skipif above can skip the tests, so a plain definition would crash
+    # collection on the ROCm mirrors where the modules are None.
+    class _StubDSAWeights(deepseek_v32_model.DeepseekV32Model):
+        """Real ``load_weights`` over a single fused ``wk_weights_proj`` param."""
 
-    def __init__(self, prefix: str = "model.layers.1"):
-        nn.Module.__init__(self)
-        self.config = SimpleNamespace(n_routed_experts=0, num_hidden_layers=2)
-        self.num_redundant_experts = 0
-        self.prefix = prefix
-        self.weight = nn.Parameter(
-            torch.zeros(WK_ROWS + WP_ROWS, IN_FEATURES, dtype=torch.bfloat16),
-            requires_grad=False,
-        )
-        self.weight.weight_loader = _fused_weight_loader
+        def __init__(self, prefix: str = "model.layers.1"):
+            nn.Module.__init__(self)
+            self.config = SimpleNamespace(n_routed_experts=0, num_hidden_layers=2)
+            self.num_redundant_experts = 0
+            self.prefix = prefix
+            self.weight = nn.Parameter(
+                torch.zeros(WK_ROWS + WP_ROWS, IN_FEATURES, dtype=torch.bfloat16),
+                requires_grad=False,
+            )
+            self.weight.weight_loader = _fused_weight_loader
 
-    def named_parameters(self, *, remove_duplicate=True, **kwargs):
-        yield f"{self.prefix}.self_attn.indexer.wk_weights_proj.weight", self.weight
+        def named_parameters(self, *, remove_duplicate=True, **kwargs):
+            yield f"{self.prefix}.self_attn.indexer.wk_weights_proj.weight", self.weight
 
+    class _StubMTPWeights(deepseek_v32_mtp.DeepseekV32MTP):
+        def __init__(self):
+            nn.Module.__init__(self)
+            self.config = SimpleNamespace(
+                n_routed_experts=0, num_hidden_layers=2, num_nextn_predict_layers=1
+            )
+            self.model = SimpleNamespace(mtp_start_layer_idx=2, num_mtp_layers=1)
+            self.weight = nn.Parameter(
+                torch.zeros(WK_ROWS + WP_ROWS, IN_FEATURES, dtype=torch.bfloat16),
+                requires_grad=False,
+            )
+            self.weight.weight_loader = _fused_weight_loader
 
-class _StubMTPWeights(deepseek_v32_mtp.DeepseekV32MTP):
-    def __init__(self):
-        nn.Module.__init__(self)
-        self.config = SimpleNamespace(
-            n_routed_experts=0, num_hidden_layers=2, num_nextn_predict_layers=1
-        )
-        self.model = SimpleNamespace(mtp_start_layer_idx=2, num_mtp_layers=1)
-        self.weight = nn.Parameter(
-            torch.zeros(WK_ROWS + WP_ROWS, IN_FEATURES, dtype=torch.bfloat16),
-            requires_grad=False,
-        )
-        self.weight.weight_loader = _fused_weight_loader
-
-    def named_parameters(self, *, remove_duplicate=True, **kwargs):
-        yield (
-            "model.layers.2.mtp_block.self_attn.indexer.wk_weights_proj.weight",
-            self.weight,
-        )
+        def named_parameters(self, *, remove_duplicate=True, **kwargs):
+            yield (
+                "model.layers.2.mtp_block.self_attn.indexer.wk_weights_proj.weight",
+                self.weight,
+            )
 
 
 class _StubLMHead(nn.Module):
