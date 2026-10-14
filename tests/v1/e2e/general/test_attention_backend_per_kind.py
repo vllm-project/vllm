@@ -20,12 +20,10 @@ MODEL = "google/gemma-3-1b-it"
 
 def _collect_group_backends(worker) -> list[tuple[str, str]]:
     """Runs on the worker: returns (spec_kind, backend_name) per attn group."""
-    from vllm.v1.kv_cache_interface import get_kv_cache_spec_kind
-
     out: list[tuple[str, str]] = []
     for kv_group in worker.model_runner.attn_groups:
         for attn_group in kv_group:
-            kind = get_kv_cache_spec_kind(attn_group.kv_cache_spec)
+            kind = attn_group.manager_cls.kv_cache_kind([attn_group.kv_cache_spec])
             out.append((kind.value, attn_group.backend.get_name()))
     return out
 

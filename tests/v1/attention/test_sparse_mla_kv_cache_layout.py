@@ -21,9 +21,9 @@ from vllm.v1.attention.backends.mla.sparse_utils import (
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.backends.utils import get_supported_kv_cache_layouts
 from vllm.v1.core.kv_cache_planning import get_kv_cache_config_from_groups
-from vllm.v1.kv_cache_interface import KVCacheGroupSpec, UniformTypeKVCacheSpecs
+from vllm.v1.kv_cache_interface import KVCacheGroupSpec
 from vllm.v1.kv_cache_layout import KVCacheLayout
-from vllm.v1.worker.utils import allocate_kv_cache, customize_attention_spec
+from vllm.v1.worker.utils import allocate_kv_cache, customize_layer_config
 
 pytestmark = pytest.mark.skip_global_cleanup
 
@@ -88,13 +88,15 @@ def test_allocation_and_warmup_follow_addressing_mode(
         non_causal_multi_token_decode=False,
     )
     layer._uses_flat_kv_cache = MethodType(MLAAttention._uses_flat_kv_cache, layer)
-    spec = customize_attention_spec(
-        backend, MLAAttention.get_kv_cache_spec(layer, config)
+    layer_config = customize_layer_config(
+        backend, MLAAttention.get_kv_cache_config(layer, config)
     )
+    spec = layer_config.spec
     indexer = SimpleNamespace(
         cache_config=config.cache_config, head_dim=132, dtype=torch.uint8
     )
-    index_spec = DeepseekV32IndexerCache.get_kv_cache_spec(indexer, config)
+    index_config = DeepseekV32IndexerCache.get_kv_cache_config(indexer, config)
+    index_spec = index_config.spec
     assert spec.block_stride_alignment == stride_alignment
     assert index_spec.block_stride_alignment is None
     assert layout in get_supported_kv_cache_layouts(
@@ -102,9 +104,7 @@ def test_allocation_and_warmup_follow_addressing_mode(
         [backend, DeepseekV32IndexerBackend]  # type: ignore[type-abstract]
     )
     specs = {"mla": spec, "indexer": index_spec}
-    group = KVCacheGroupSpec(
-        list(specs), UniformTypeKVCacheSpecs(block_size=64, kv_cache_specs=specs)
-    )
+    group = KVCacheGroupSpec.from_layers({"mla": layer_config, "indexer": index_config})
     cache = get_kv_cache_config_from_groups(config, [group], 2**20)
     views = allocate_kv_cache(cache, torch.device(device), layout)
     register = MagicMock()

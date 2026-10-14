@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 import torch
 
+from tests.v1.core.utils import new_kv_cache_group
 from vllm.distributed.kv_transfer.kv_connector.v1.umbp.data import (
     BlockTransferPlan,
     KVLayoutDescriptor,
@@ -25,9 +26,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.umbp.runtime.factory import (
     UMBPRuntimeFactory,
 )
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
+    AttentionSpec,
     KVCacheConfig,
-    KVCacheGroupSpec,
     KVCacheTensor,
 )
 
@@ -237,7 +237,7 @@ def handshake(scheduler_connector, worker_connector) -> None:
 
 
 def _kv_cache_config() -> KVCacheConfig:
-    spec = FullAttentionSpec(
+    spec = AttentionSpec(
         block_size=16, num_kv_heads=2, head_size=8, dtype=torch.float16
     )
     return KVCacheConfig(
@@ -250,7 +250,7 @@ def _kv_cache_config() -> KVCacheConfig:
                 block_stride=1024,
             )
         ],
-        kv_cache_groups=[KVCacheGroupSpec(["layer1", "layer2"], spec)],
+        kv_cache_groups=[new_kv_cache_group(["layer1", "layer2"], spec)],
     )
 
 

@@ -147,15 +147,16 @@ class Mamba2AttentionMetadataBuilder(
         layer_names: list[str],
         vllm_config: VllmConfig,
         device: torch.device,
+        **kwargs,
     ):
-        super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+        super().__init__(kv_cache_spec, layer_names, vllm_config, device, **kwargs)
         chunk_size = vllm_config.model_config.get_mamba_chunk_size()
         assert chunk_size is not None, (
             "chunk_size needs to be set in the model config for Mamba2 models"
         )
         self.chunk_size: int = chunk_size
         self.checkpoint_builder = MambaPrefillCheckpointBuilder(
-            vllm_config, kv_cache_spec
+            vllm_config, kv_cache_spec, self.mamba_config
         )
 
     def build(

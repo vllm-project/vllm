@@ -4,7 +4,6 @@
 
 import copy
 from collections.abc import Iterable, Iterator
-from dataclasses import replace
 
 import torch
 from torch import nn
@@ -52,7 +51,7 @@ from vllm.models.deepseek_v32.nvidia.model import (
     DeepseekV32Model,
 )
 from vllm.platforms import current_platform
-from vllm.v1.kv_cache_interface import MLAAttentionSpec
+from vllm.v1.kv_cache_interface import KVCacheLayerConfig, MLAAttentionSpec
 
 from .attention import (
     Dots3NoteFlashAttnPrefillBackend,
@@ -233,10 +232,10 @@ class Dots3NotePaddedMLAAttention(MLAAttention):
         assert physical_head_size >= self.head_size
         self.physical_head_size = physical_head_size
 
-    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> MLAAttentionSpec:
-        spec = super().get_kv_cache_spec(vllm_config)
-        assert isinstance(spec, MLAAttentionSpec)
-        return replace(spec, head_size=self.physical_head_size)
+    def get_kv_cache_config(self, vllm_config: VllmConfig) -> KVCacheLayerConfig:
+        layer_config = super().get_kv_cache_config(vllm_config)
+        assert isinstance(layer_config.spec, MLAAttentionSpec)
+        return layer_config.replace_spec(head_size=self.physical_head_size)
 
 
 class Dots3NoteFullAttention(DeepseekV2MLAAttention):

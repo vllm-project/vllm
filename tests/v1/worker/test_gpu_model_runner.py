@@ -12,6 +12,7 @@ import torch
 
 import vllm.model_executor.model_loader.reload.inplace as reload_inplace_module
 import vllm.v1.worker.gpu_model_runner as gpu_model_runner_module
+from tests.v1.core.utils import new_kv_cache_group
 from vllm.config import (
     AttentionConfig,
     CacheConfig,
@@ -52,10 +53,10 @@ from vllm.v1.core.kv_cache_planning import (
     get_kv_cache_configs,
 )
 from vllm.v1.core.sched.output import CachedRequestData, NewRequestData, SchedulerOutput
+from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
+    AttentionSpec,
     KVCacheConfig,
-    KVCacheGroupSpec,
     KVCacheSpec,
     KVCacheTensor,
 )
@@ -92,7 +93,7 @@ def _restore_default_dtype():
 
 def initialize_kv_cache(runner: GPUModelRunner):
     """Only perform necessary steps in GPUModelRunner.initialize_kv_cache()."""
-    attn_spec = FullAttentionSpec(
+    attn_spec = AttentionSpec(
         block_size=BLOCK_SIZE,
         num_kv_heads=runner.model_config.get_num_kv_heads(runner.parallel_config),
         head_size=runner.model_config.get_head_size(),
@@ -110,7 +111,10 @@ def initialize_kv_cache(runner: GPUModelRunner):
             ),
         ],
         kv_cache_groups=[
-            KVCacheGroupSpec(layer_names=["layer.0"], kv_cache_spec=attn_spec)
+            new_kv_cache_group(
+                ["layer.0"],
+                attn_spec,
+            )
         ],
     )
     runner.kv_cache_config = kv_cache_config
@@ -120,7 +124,7 @@ def initialize_kv_cache(runner: GPUModelRunner):
         max_num_batched_tokens=runner.max_num_tokens,
         device=runner.device,
         vocab_size=runner.model_config.get_vocab_size(),
-        block_sizes=[kv_cache_config.kv_cache_groups[0].kv_cache_spec.block_size],
+        block_sizes=[kv_cache_config.kv_cache_groups[0].block_size],
         max_num_blocks_per_req=[NUM_BLOCKS],
     )
     runner.initialize_attn_backend(kv_cache_config)
@@ -314,8 +318,8 @@ def _make_mock_backend_for_kernel_block_size(
     return _MockBackend()
 
 
-def _make_kv_cache_spec() -> FullAttentionSpec:
-    return FullAttentionSpec(block_size=1, num_kv_heads=1, head_size=1, dtype="float16")
+def _make_kv_cache_spec() -> AttentionSpec:
+    return AttentionSpec(block_size=1, num_kv_heads=1, head_size=1, dtype="float16")
 
 
 def test_select_common_block_size_prefers_manager_block_size():
@@ -1372,21 +1376,21 @@ def test_init_kv_cache_without_kv_sharing(default_vllm_config):
     vllm_config.model_config.max_model_len = 3_000_000
     vllm_ctx = vllm_config.compilation_config.static_forward_context
     runner = GPUModelRunner(vllm_config, DEVICE_TYPE)
-    kv_cache_spec = runner.get_kv_cache_spec()
-    assert len(kv_cache_spec) == 2
+    layer_configs = runner.get_kv_cache_layer_configs()
+    assert len(layer_configs) == 2
     assert len(runner.shared_kv_cache_layers) == 0
 
     available_memory = 20 * GiB_bytes
-    # page size for layer 0's kv_cache_spec is 32KB
+    # page size for layer 0's kv cache spec is 32KB
     num_expected_blocks = 327680  # 20GB / 32KB / 2 (num layers)
     kv_cache_config = get_kv_cache_configs(
-        vllm_config, [kv_cache_spec], [available_memory]
+        vllm_config, [layer_configs], [available_memory]
     )[0]
     assert kv_cache_config.num_blocks == num_expected_blocks
     assert len(kv_cache_config.kv_cache_tensors) == 1
     assert kv_cache_config.kv_cache_tensors[0].size == available_memory
 
-    max_context_len = estimate_max_model_len(vllm_config, kv_cache_spec, 5 * GiB_bytes)
+    max_context_len = estimate_max_model_len(vllm_config, layer_configs, 5 * GiB_bytes)
     # max context len with KV sharing should be 2x as large as without
     assert max_context_len == 1310720
 
@@ -1394,7 +1398,7 @@ def test_init_kv_cache_without_kv_sharing(default_vllm_config):
     # this will only allocate 1 block worth of memory per layer (2 layers * 32kb)
     kv_cache_config.num_blocks = 1
     for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
-        page_size = kv_cache_spec[kv_cache_tensor.layers[0]].page_size_bytes
+        page_size = layer_configs[kv_cache_tensor.layers[0]].spec.page_size_bytes
         kv_cache_tensor.size = page_size * len(kv_cache_tensor.layers)
         # One block per layer: a layer's region is exactly one page.
         kv_cache_tensor.layer_stride = page_size
@@ -1441,18 +1445,18 @@ def test_init_kv_cache_with_kv_sharing_valid(default_vllm_config):
     vllm_config.model_config.max_model_len = 3_000_000
     vllm_ctx = vllm_config.compilation_config.static_forward_context
     runner = GPUModelRunner(vllm_config, DEVICE_TYPE)
-    kv_cache_spec = runner.get_kv_cache_spec()
-    assert len(kv_cache_spec) == 1
-    assert layer_0 in kv_cache_spec
+    layer_configs = runner.get_kv_cache_layer_configs()
+    assert len(layer_configs) == 1
+    assert layer_0 in layer_configs
     assert runner.shared_kv_cache_layers[layer_1] == layer_0
 
     available_memory = 20 * GiB_bytes
-    # page size for layer 0's kv_cache_spec is 32KB
+    # page size for layer 0's kv cache spec is 32KB
     # with KV sharing, we can allocate (available_mem//page_size//1) blocks
     # which is twice as many as without KV sharing
     num_expected_blocks = 655360  # 20GB / 32KB
     kv_cache_config = get_kv_cache_configs(
-        vllm_config, [kv_cache_spec], [available_memory]
+        vllm_config, [layer_configs], [available_memory]
     )[0]
     assert kv_cache_config.num_blocks == num_expected_blocks
     assert len(kv_cache_config.kv_cache_tensors) == 1
@@ -1460,14 +1464,14 @@ def test_init_kv_cache_with_kv_sharing_valid(default_vllm_config):
     # compared to no KV sharing
     assert kv_cache_config.kv_cache_tensors[0].size == available_memory
 
-    max_context_len = estimate_max_model_len(vllm_config, kv_cache_spec, 5 * GiB_bytes)
+    max_context_len = estimate_max_model_len(vllm_config, layer_configs, 5 * GiB_bytes)
     # max context len with KV sharing should be 2x as large as without
     assert max_context_len == 2 * 1310720
 
     # important: override tensor size to prevent large mem alloc during test
     # this will only allocate 1 block worth of memory (32kb)
     kv_cache_config.num_blocks = 1
-    page_size = kv_cache_spec[layer_0].page_size_bytes
+    page_size = layer_configs[layer_0].spec.page_size_bytes
     kv_cache_config.kv_cache_tensors[0].size = page_size
     kv_cache_config.kv_cache_tensors[0].layer_stride = page_size
 
@@ -1582,11 +1586,11 @@ def test_hybrid_attention_mamba_tensor_shapes():
 
         runner = GPUModelRunner(vllm_config, DEVICE_TYPE)
         current_platform.update_block_size_for_backend(vllm_config)
-        kv_cache_spec = runner.get_kv_cache_spec()
+        layer_configs = runner.get_kv_cache_layer_configs()
 
         available_memory = 5 * GiB_bytes
         kv_cache_config = get_kv_cache_configs(
-            vllm_config, [kv_cache_spec], [available_memory]
+            vllm_config, [layer_configs], [available_memory]
         )[0]
         runner.initialize_kv_cache(kv_cache_config)
 
@@ -1708,20 +1712,15 @@ def test_input_batch_reinitialized_after_late_interleave_adjustment(monkeypatch)
     jit_warmup_registry.activate.return_value = nullcontext()
     runner.jit_warmup_registry = jit_warmup_registry  # type: ignore[attr-defined]  # set by JitWarmupRegistry.capture
 
-    spec = SimpleNamespace(
+    group = SimpleNamespace(
         block_size=16,
+        kind=gpu_model_runner_module.KVCacheSpecKind.FULL_ATTENTION,
+        manager_cls=FullAttentionManager,
         max_num_blocks_per_req=lambda *_: 4,
     )
-    kv_cache_config = SimpleNamespace(
-        kv_cache_groups=[SimpleNamespace(kv_cache_spec=spec)]
-    )
+    kv_cache_config = SimpleNamespace(kv_cache_groups=[group])
     input_batch_cls = Mock(return_value=SimpleNamespace())
     monkeypatch.setattr(gpu_model_runner_module, "InputBatch", input_batch_cls)
-    monkeypatch.setattr(
-        gpu_model_runner_module,
-        "get_kv_cache_spec_kind",
-        lambda _: gpu_model_runner_module.KVCacheSpecKind.FULL_ATTENTION,
-    )
 
     runner.may_reinitialize_input_batch(kv_cache_config)
 
@@ -1787,7 +1786,7 @@ def test_hybrid_cache_integration(default_vllm_config, dist_init):
     runner = GPUModelRunner(vllm_config, DEVICE_TYPE)
 
     # Initialize KV cache with configuration
-    attn_spec = FullAttentionSpec(
+    attn_spec = AttentionSpec(
         block_size=16,  # Use kernel block size directly
         num_kv_heads=runner.model_config.get_num_kv_heads(runner.parallel_config),
         head_size=runner.model_config.get_head_size(),
@@ -1805,7 +1804,10 @@ def test_hybrid_cache_integration(default_vllm_config, dist_init):
             ),
         ],
         kv_cache_groups=[
-            KVCacheGroupSpec(layer_names=["layer.0"], kv_cache_spec=attn_spec)
+            new_kv_cache_group(
+                ["layer.0"],
+                attn_spec,
+            )
         ],
     )
     runner.kv_cache_config = kv_cache_config
@@ -1817,7 +1819,7 @@ def test_hybrid_cache_integration(default_vllm_config, dist_init):
         max_num_batched_tokens=runner.max_num_tokens,
         device=runner.device,
         vocab_size=runner.model_config.get_vocab_size(),
-        block_sizes=[kv_cache_config.kv_cache_groups[0].kv_cache_spec.block_size],
+        block_sizes=[kv_cache_config.kv_cache_groups[0].block_size],
         max_num_blocks_per_req=[NUM_BLOCKS],
     )
 
@@ -1825,9 +1827,7 @@ def test_hybrid_cache_integration(default_vllm_config, dist_init):
 
     # Verify hybrid block table configuration
     block_table = runner.input_batch.block_table.block_tables[0]
-    assert block_table.block_size == (
-        kv_cache_config.kv_cache_groups[0].kv_cache_spec.block_size
-    )
+    assert block_table.block_size == (kv_cache_config.kv_cache_groups[0].block_size)
 
     # Test request processing with hybrid blocks
     req_id = "hybrid_req_0"
@@ -2014,11 +2014,11 @@ def test_mamba_cache_raises_when_max_num_seqs_exceeds_blocks():
 
         runner = GPUModelRunner(vllm_config, DEVICE_TYPE)
         current_platform.update_block_size_for_backend(vllm_config)
-        kv_cache_spec = runner.get_kv_cache_spec()
+        layer_configs = runner.get_kv_cache_layer_configs()
 
         available_memory = 5 * GiB_bytes
         kv_cache_config = get_kv_cache_configs(
-            vllm_config, [kv_cache_spec], [available_memory]
+            vllm_config, [layer_configs], [available_memory]
         )[0]
         num_blocks = kv_cache_config.num_blocks
 

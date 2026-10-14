@@ -20,7 +20,7 @@ from vllm.v1.attention.backends.flashinfer import (
     FlashInferMetadataBuilder,
 )
 from vllm.v1.attention.backends.utils import PerLayerParameters
-from vllm.v1.kv_cache_interface import FullAttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec
 
 
 def test_flashinfer_gqa_dcp_spec_decode_clamps_reorder_threshold(monkeypatch):
@@ -53,7 +53,7 @@ def test_flashinfer_gqa_dcp_spec_decode_clamps_reorder_threshold(monkeypatch):
         },
     )
 
-    kv_cache_spec = FullAttentionSpec(
+    kv_cache_spec = AttentionSpec(
         block_size=16,
         num_kv_heads=vllm_config.model_config.get_num_kv_heads(
             vllm_config.parallel_config

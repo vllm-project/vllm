@@ -2,7 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Utility functions for attention-related v1 tests."""
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -29,9 +32,9 @@ from vllm.v1.attention.backends.mamba_attn import (
     BaseMambaAttentionMetadataBuilder,
 )
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
+from vllm.v1.core.single_type_kv_cache_manager import MambaManager
 from vllm.v1.kv_cache_interface import (
-    EncoderOnlyAttentionSpec,
-    FullAttentionSpec,
+    AttentionSpec,
     KVCacheLayout,
     KVCacheSpec,
     KVCacheTensor,
@@ -149,34 +152,42 @@ def try_backend_includes_kv_cache_update(
         raise AssertionError("unreachable") from None
 
 
-def create_standard_kv_cache_spec(
-    vllm_config: VllmConfig,
-    attn_type: AttentionType = AttentionType.DECODER,
-) -> FullAttentionSpec | EncoderOnlyAttentionSpec:
-    """Create an AttentionSpec from VllmConfig.
-
-    Returns an EncoderOnlyAttentionSpec for encoder-only attention (no KV
-    cache), and a FullAttentionSpec otherwise.
-    """
-    if attn_type == AttentionType.ENCODER_ONLY:
-        return EncoderOnlyAttentionSpec(
-            block_size=vllm_config.cache_config.block_size,
-            num_kv_heads=vllm_config.model_config.get_num_kv_heads(
-                vllm_config.parallel_config
-            ),
-            head_size=vllm_config.model_config.get_head_size(),
-            dtype=vllm_config.model_config.dtype,
-        )
-    return FullAttentionSpec(
+def create_standard_kv_cache_spec(vllm_config: VllmConfig) -> AttentionSpec:
+    """Create a AttentionSpec from VllmConfig."""
+    return AttentionSpec(
         block_size=vllm_config.cache_config.block_size,
         num_kv_heads=vllm_config.model_config.get_num_kv_heads(
             vllm_config.parallel_config
         ),
         head_size=vllm_config.model_config.get_head_size(),
         dtype=vllm_config.model_config.dtype,
-        sliding_window=vllm_config.model_config.get_sliding_window(),
         kv_quant_mode=get_kv_quant_mode(vllm_config.cache_config.cache_dtype),
     )
+
+
+@contextmanager
+def registered_attention_layers(
+    vllm_config: VllmConfig,
+    layer_names: list[str],
+    attn_type: str = AttentionType.DECODER,
+    sliding_window: int | None = None,
+) -> Iterator[None]:
+    """Register stand-in ``Attention`` layers for builders that read the
+    attention type or window from their group's layers."""
+    from vllm.model_executor.layers.attention import Attention
+
+    forward_context = vllm_config.compilation_config.static_forward_context
+    for name in layer_names:
+        layer = Attention.__new__(Attention)
+        torch.nn.Module.__init__(layer)
+        layer.attn_type = attn_type
+        layer.impl = SimpleNamespace(sliding_window=sliding_window)
+        forward_context[name] = layer
+    try:
+        yield
+    finally:
+        for name in layer_names:
+            forward_context.pop(name, None)
 
 
 def create_vllm_config(
@@ -365,7 +376,13 @@ class MockMambaBuilder(BaseMambaAttentionMetadataBuilder[BaseMambaAttentionMetad
         mamba_spec = MambaSpec(
             block_size=block_size, shapes=((1,), (1,)), dtypes=(torch.float32,)
         )
-        builder = cls(mamba_spec, ["layer0"], vllm_config, device)
+        builder = cls(
+            mamba_spec,
+            ["layer0"],
+            vllm_config,
+            device,
+            kv_cache_manager_config=MambaManager.Config(),
+        )
         batch_spec = BatchSpec(seq_lens=seq_lens, query_lens=query_lens)
         common_metadata = create_common_attn_metadata(
             batch_spec, block_size=block_size, device=device, arange_block_indices=True

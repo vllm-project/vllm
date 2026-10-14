@@ -24,20 +24,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
     KVConnectorWorkerMetadata,
 )
-from vllm.v1.kv_cache_interface import (
-    KVCacheConfig,
-    KVCacheGroupSpec,
-    KVCacheSpec,
-    UniformTypeKVCacheSpecs,
-)
-
-
-def _layer_specs(group: KVCacheGroupSpec) -> dict[str, KVCacheSpec]:
-    """Map each layer of a cache group to the spec describing its own pages."""
-    spec = group.kv_cache_spec
-    if isinstance(spec, UniformTypeKVCacheSpecs):
-        return {name: spec.kv_cache_specs[name] for name in group.layer_names}
-    return dict.fromkeys(group.layer_names, spec)
+from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 
 
 def _spec_fingerprint(spec: KVCacheSpec) -> dict[str, str]:
@@ -151,8 +138,8 @@ class UMBPNamespace:
     ) -> UMBPNamespace:
         """Derive the namespace from a worker's per-layer KV cache config.
 
-        The scheduler's config flattens UniformTypeKVCacheSpecs groups, so the
-        scheduler adopts the namespace its workers report instead.
+        The scheduler holds a single worker's config, so it adopts the
+        namespace its workers report instead.
         """
         if (configured := cls.configured(vllm_config)) is not None:
             return configured
@@ -180,10 +167,11 @@ class UMBPNamespace:
             "groups": [
                 {
                     "layers": group.layer_names,
-                    "block_size": group.kv_cache_spec.block_size,
+                    "block_size": group.block_size,
+                    "kind": repr(group.manager_config),
                     "layer_specs": {
                         name: _spec_fingerprint(spec)
-                        for name, spec in _layer_specs(group).items()
+                        for name, spec in group.kv_cache_specs.items()
                     },
                 }
                 for group in kv_cache_config.kv_cache_groups
@@ -317,7 +305,7 @@ class KVLayoutPlanner:
             layer: (group_id, spec)
             for group_id, group in enumerate(config.kv_cache_groups)
             if group.enable_kv_transfer
-            for layer, spec in _layer_specs(group).items()
+            for layer, spec in group.kv_cache_specs.items()
         }
         regions: list[KVRegion] = []
         offset = 0

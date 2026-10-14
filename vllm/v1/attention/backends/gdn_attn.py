@@ -27,7 +27,8 @@ from vllm.v1.attention.backends.utils import (
     mamba_get_block_table_tensor,
     split_decodes_and_prefills,
 )
-from vllm.v1.kv_cache_interface import MambaSpec
+from vllm.v1.core.single_type_kv_cache_manager import MambaManager
+from vllm.v1.kv_cache_interface import MambaSpec, ManagerConfig
 
 # FlashInfer's GDN prefill emits states every N tokens, N a multiple of its
 # 64-token chunk, so checkpoint offsets must be multiples of 64.
@@ -134,6 +135,7 @@ class GDNAttentionMetadata:
 class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]):
     kv_cache_spec: MambaSpec
     _cudagraph_support = AttentionCGSupport.UNIFORM_BATCH
+    requires_kv_cache_manager_config = True
 
     reorder_batch_threshold: int = 1
 
@@ -143,12 +145,16 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         layer_names: list[str],
         vllm_config: VllmConfig,
         device: torch.device,
+        *,
+        kv_cache_manager_config: ManagerConfig,
     ):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+        assert isinstance(kv_cache_manager_config, MambaManager.Config)
+        self.mamba_config = kv_cache_manager_config
         self.compilation_config = vllm_config.compilation_config
         self.speculative_config = vllm_config.speculative_config
         self.checkpoint_builder = MambaPrefillCheckpointBuilder(
-            vllm_config, kv_cache_spec
+            vllm_config, kv_cache_spec, self.mamba_config
         )
         from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
             _resolve_gdn_prefill_backend,
@@ -161,7 +167,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         self._check_chunk_metadata_override(type(self), self.gdn_prefill_backend)
         # Only the Qwen GDN layer opts in on FlashInfer; KDA layers sharing this
         # backend export checkpoints their own way.
-        checkpoint_alignment = kv_cache_spec.prefill_checkpoint_alignment
+        checkpoint_alignment = self.mamba_config.prefill_checkpoint_alignment
         self.plan_flashinfer_checkpoints = (
             self.gdn_prefill_backend == "flashinfer"
             and checkpoint_alignment is not None
@@ -330,8 +336,8 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             block_table_tensor = mamba_get_block_table_tensor(
                 m.block_table_tensor,
                 m.seq_lens,
-                self.kv_cache_spec,
-                self.vllm_config.cache_config.mamba_cache_mode,
+                self.kv_cache_spec.block_size,
+                self.mamba_config,
             )
 
         uniform_spec_sequence_length = None

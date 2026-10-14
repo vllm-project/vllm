@@ -35,7 +35,12 @@ from vllm.models.glm5next.sparse_indexer import SparseAttnIndexerKpool
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv, next_power_of_2
 from vllm.v1.attention.backends.mla.indexer import Glm5NextIndexerBackend
-from vllm.v1.kv_cache_interface import CircularBufferSpec, MLAAttentionSpec
+from vllm.v1.core.single_type_kv_cache_manager import CircularBufferManager
+from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
+    KVCacheLayerConfig,
+    MLAAttentionSpec,
+)
 
 logger = init_logger(__name__)
 
@@ -109,14 +114,12 @@ class Glm5NextIndexerCache(DeepseekV32IndexerCache):
         assert index_kpool > 1, "Glm5NextIndexerCache expects index_kpool > 1"
         self._index_kpool = index_kpool
 
-    def get_kv_cache_spec(self, vllm_config: VllmConfig):
-        from dataclasses import replace
-
-        spec = super().get_kv_cache_spec(vllm_config)
+    def get_kv_cache_config(self, vllm_config: VllmConfig) -> KVCacheLayerConfig:
+        layer_config = super().get_kv_cache_config(vllm_config)
         # ``tokens_per_state`` is the KV-spec representation of kpool
         # compression in the current cache-layout API.
-        assert isinstance(spec, MLAAttentionSpec)
-        return replace(spec, tokens_per_state=self._index_kpool)
+        assert isinstance(layer_config.spec, MLAAttentionSpec)
+        return layer_config.replace_spec(tokens_per_state=self._index_kpool)
 
     def get_attn_backend(self):
         return Glm5NextIndexerBackend
@@ -129,7 +132,7 @@ class Glm5NextTailCache(DeepseekV32IndexerCache):
     ``ring`` slots per request, overwritten in place by ``pos % ring``
     as decode/spec-decode advances. Prefill seeds it (instead of discarding the
     tail raw K+gate); the connector transfers it across PD; decode reads it to
-    compress the boundary pool correctly. ``CircularBufferSpec`` provides the
+    compress the boundary pool correctly. ``CircularBufferManager`` provides the
     no-prune, 1-block/req allocation that lets the in-progress pool survive
     across steps and across transfer.
 
@@ -153,7 +156,7 @@ class Glm5NextTailCache(DeepseekV32IndexerCache):
         assert index_kpool > 1, "Glm5NextTailCache expects index_kpool > 1"
         self._index_kpool = index_kpool
 
-    def get_kv_cache_spec(self, vllm_config: VllmConfig):
+    def get_kv_cache_config(self, vllm_config: VllmConfig) -> KVCacheLayerConfig:
         # The two head slots form [K, gate score] in the generic
         # [block, head, state, content] cache view.
         # Drafts are stashed before acceptance. With a one-pool ring, the
@@ -167,7 +170,7 @@ class Glm5NextTailCache(DeepseekV32IndexerCache):
             f"({self.cache_config.block_size}) must be a multiple of the "
             f"tail ring ({ring})"
         )
-        return CircularBufferSpec(
+        spec = AttentionSpec(
             block_size=ring,
             num_kv_heads=2,
             head_size=self.head_dim,
@@ -177,6 +180,7 @@ class Glm5NextTailCache(DeepseekV32IndexerCache):
             # rank owning a pool can compress it.
             dcp_sharded=False,
         )
+        return CircularBufferManager.layer_config(spec)
 
     def get_attn_backend(self):
         from vllm.v1.attention.backends.mla.indexer import KpoolTailBackend

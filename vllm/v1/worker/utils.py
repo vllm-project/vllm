@@ -28,15 +28,17 @@ from vllm.v1.attention.backend import (
     MultipleOf,
 )
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
+from vllm.v1.core.single_type_kv_cache_manager import (
+    EncoderOnlyAttentionManager,
+)
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
-    EncoderOnlyAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
+    KVCacheLayerConfig,
     KVCacheLayout,
     KVCacheSpec,
     MambaSpec,
-    UniformTypeKVCacheSpecs,
     create_kv_cache_views,
 )
 from vllm.v1.worker.block_table import get_block_table_width
@@ -287,6 +289,7 @@ class AttentionGroup:
         device,
         kernel_block_size: int | None = None,
         num_metadata_builders: int = 1,
+        kv_cache_group: KVCacheGroupSpec | None = None,
     ):
         spec = self.kv_cache_spec
         if kernel_block_size is not None and isinstance(spec, AttentionSpec):
@@ -304,11 +307,13 @@ class AttentionGroup:
                 kernel_block_size
             )
         builder_cls = self.backend.get_builder_cls()
-        builder_kwargs = {}
+        builder_kwargs: dict[str, Any] = {}
+        if builder_cls.requires_kv_cache_manager_config:
+            assert kv_cache_group is not None
+            builder_kwargs["kv_cache_manager_config"] = kv_cache_group.manager_config
         if builder_cls.requires_block_table_width or self.kernel_block_size is not None:
-            max_num_blocks = self.kv_cache_spec.max_num_blocks_per_req(
-                vllm_config, vllm_config.model_config.max_model_len
-            )
+            assert kv_cache_group is not None
+            max_num_blocks = kv_cache_group.max_num_blocks_per_req(vllm_config)
             width = get_block_table_width(max_num_blocks, self.kv_cache_spec.block_size)
             if kernel_block_size is not None:
                 width *= self.kv_cache_spec.block_size // kernel_block_size
@@ -486,6 +491,17 @@ def customize_attention_spec(
     return spec
 
 
+def customize_layer_config(
+    backend: type[AttentionBackend], layer_config: KVCacheLayerConfig
+) -> KVCacheLayerConfig:
+    """Apply ``customize_attention_spec`` to an attention layer's spec."""
+    if not isinstance(layer_config.spec, AttentionSpec):
+        return layer_config
+    return replace(
+        layer_config, spec=customize_attention_spec(backend, layer_config.spec)
+    )
+
+
 def _block_size_is_supported(
     backends: list[type[AttentionBackend]],
     block_size: int,
@@ -603,10 +619,7 @@ def allocate_kv_cache(
             for group_id, group in enumerate(kv_cache_config.kv_cache_groups)
             if layer_name in group.layer_names
         )
-        spec = group.kv_cache_spec
-        if isinstance(spec, UniformTypeKVCacheSpecs):
-            spec = spec.kv_cache_specs[layer_name]
-
+        spec = group.kv_cache_specs[layer_name]
         if not spec.has_layer_views:
             kv_caches.update((name, buf) for name in tensor.layers)
             continue
@@ -646,18 +659,19 @@ def prepare_kernel_block_sizes(
     """
     kernel_block_sizes = []
     for kv_cache_gid, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups):
-        kv_cache_spec = kv_cache_group.kv_cache_spec
-        if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
-            # All layers in the UniformTypeKVCacheSpecs have the same type,
-            # pick an arbitrary one to dispatch.
-            kv_cache_spec = next(iter(kv_cache_spec.kv_cache_specs.values()))
-        if isinstance(kv_cache_spec, EncoderOnlyAttentionSpec):
+        if issubclass(kv_cache_group.manager_cls, EncoderOnlyAttentionManager):
             continue
+        if not kv_cache_group.kv_cache_specs:
+            # A PP stage holding none of the group's layers splits no blocks.
+            kernel_block_sizes.append(kv_cache_group.block_size)
+            continue
+        # All layers of a group have the same kind of spec; pick any to dispatch.
+        kv_cache_spec = next(iter(kv_cache_group.kv_cache_specs.values()))
         if not kv_cache_spec.has_layer_views:
             kernel_block_sizes.append(kv_cache_spec.block_size)
         elif isinstance(kv_cache_spec, AttentionSpec):
             # This is an attention backend that supports virtual block splitting.
-            kv_manager_block_size = kv_cache_group.kv_cache_spec.block_size
+            kv_manager_block_size = kv_cache_group.block_size
             group_backends = [g.backend for g in attn_groups[kv_cache_gid]]
             group_specs = [g.kv_cache_spec for g in attn_groups[kv_cache_gid]]
             # Block-outermost packing puts other layers' pages between the
@@ -678,9 +692,7 @@ def prepare_kernel_block_sizes(
             # This is likely Mamba or other non-attention cache, no splitting.
             kernel_block_sizes.append(kv_cache_spec.block_size)
         else:
-            raise NotImplementedError(
-                f"unknown kv cache spec {kv_cache_group.kv_cache_spec}"
-            )
+            raise NotImplementedError(f"unknown kv cache spec {kv_cache_spec}")
     return kernel_block_sizes
 
 
@@ -802,7 +814,8 @@ def add_kv_sharing_layers_to_kv_cache_groups(
 
     for layer_name, target_layer_name in shared_kv_cache_layers.items():
         tgt_kv_cache_group = layer_to_kv_cache_group[target_layer_name]
-        tgt_kv_cache_group.layer_names.append(layer_name)
+        specs = tgt_kv_cache_group.kv_cache_specs
+        specs[layer_name] = specs[target_layer_name]
 
         if runner_only_attn_layers is not None:
             runner_only_attn_layers.add(layer_name)

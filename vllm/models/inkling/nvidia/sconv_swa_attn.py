@@ -3,7 +3,7 @@
 """Inkling short-conv state managed as a sliding-window KV cache.
 
 Each decoder layer owns one ``InklingConvState`` (an ``AttentionLayerBase``) that
-emits a single ``SlidingWindowSpec`` for the layer's 4 sconv streams (K, V,
+emits a single sliding-window KV cache for the layer's 4 sconv streams (K, V,
 attn-output, mlp-output), packed head-major into one block:
 
     H = num_kv_heads (per-rank), N = block_size = sconv_kernel_size,
@@ -32,7 +32,8 @@ from vllm.v1.attention.backend import (
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
 )
-from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec, SlidingWindowSpec
+from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheLayerConfig
 
 from .ops.sconv import sconv_seq_metadata
 
@@ -59,7 +60,7 @@ class InklingSconvMetadataBuilder(AttentionMetadataBuilder[InklingSconvMetadata]
         device: torch.device,
     ) -> None:
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
-        assert isinstance(kv_cache_spec, SlidingWindowSpec)
+        assert isinstance(kv_cache_spec, AttentionSpec)
         # Persistent per-token buffers for CUDA graph capture.
         max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
         self.seq_idx_buffer = torch.empty(
@@ -171,7 +172,7 @@ class InklingConvState(nn.Module, AttentionLayerBase):
             f"sconv SWA cache supports bfloat16 only, got {self._dtype}"
         )
         # Register in the forward context so the runner enumerates this owner as
-        # an attention-like layer (get_kv_cache_spec / get_attn_backend).
+        # an attention-like layer (get_kv_cache_config / get_attn_backend).
         compilation_config = vllm_config.compilation_config
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
@@ -182,12 +183,14 @@ class InklingConvState(nn.Module, AttentionLayerBase):
     def get_attn_backend(self) -> type[AttentionBackend]:
         return InklingSconvBackend
 
-    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
-        return SlidingWindowSpec(
+    def get_kv_cache_config(self, vllm_config: VllmConfig) -> KVCacheLayerConfig:
+        spec = AttentionSpec(
             block_size=self.block_size,
             num_kv_heads=self.num_kv_heads,
             head_size=self.head_size,
             head_size_v=0,  # all 4 streams packed into head_size
             dtype=self._dtype,
-            sliding_window=self.sliding_window,
+        )
+        return SlidingWindowManager.layer_config(
+            spec, sliding_window=self.sliding_window
         )

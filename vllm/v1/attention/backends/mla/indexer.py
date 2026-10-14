@@ -295,7 +295,7 @@ class Glm5NextIndexerBackend(DeepseekV32IndexerBackend):
     @staticmethod
     def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
         if kv_cache_spec is not None:
-            # Worker get_kv_cache_spec: runs without the current config.
+            # Worker get_kv_cache_layer_configs: runs without the current config.
             index_kpool = int(kv_cache_spec.tokens_per_state)
         else:
             # Platform block-size selection: no spec yet, under the current config.

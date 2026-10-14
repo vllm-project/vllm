@@ -41,6 +41,7 @@ from vllm.v1.attention.backends.gdn_attn import (  # noqa: E402
     GDNAttentionMetadata,
     GDNAttentionMetadataBuilder,
 )
+from vllm.v1.core.single_type_kv_cache_manager import MambaManager  # noqa: E402
 from vllm.v1.kv_cache_interface import MambaSpec  # noqa: E402
 
 NUM_SPEC = 3
@@ -269,11 +270,11 @@ def test_fused_model_path_matches_reference(
             block_size=BLOCK_SIZE,
             shapes=((16, 64),),
             dtypes=(torch.float16,),
-            num_speculative_blocks=NUM_SPEC,
         ),
         layer_names=[PREFIX],
         vllm_config=vllm_config,
         device=device,
+        kv_cache_manager_config=MambaManager.Config(num_speculative_blocks=NUM_SPEC),
     )
     batch = BatchSpec(seq_lens=seq_lens, query_lens=query_lens)
     common = create_common_attn_metadata(

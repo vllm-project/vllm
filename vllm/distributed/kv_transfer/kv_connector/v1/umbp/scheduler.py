@@ -80,7 +80,7 @@ class UMBPStoreConnectorScheduler:
         self.kv_cache_config = kv_cache_config
         dcp_size = vllm_config.parallel_config.decode_context_parallel_size
         self.group_block_sizes = {
-            group_id: resolve_dcp_kv_block_size(group.kv_cache_spec, dcp_size)
+            group_id: resolve_dcp_kv_block_size(group, dcp_size)
             for group_id, group in enumerate(kv_cache_config.kv_cache_groups)
         }
         self.runtime = runtime

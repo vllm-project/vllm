@@ -7,6 +7,11 @@ from unittest.mock import patch
 import pytest
 import torch
 
+from tests.v1.kv_connector.unit.offloading_connector.utils import (
+    circular_buffer_layer,
+    make_kv_cache_group,
+    mamba_layer,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.coordinator import (
     MooncakeStoreCoordinator,
 )
@@ -28,11 +33,8 @@ from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.kv_cache_utils import KVCacheBlock
 from vllm.v1.core.sched.output import KVConnectorBlockState
 from vllm.v1.kv_cache_interface import (
-    CircularBufferSpec,
-    FullAttentionSpec,
+    AttentionSpec,
     KVCacheConfig,
-    KVCacheGroupSpec,
-    MambaSpec,
 )
 
 
@@ -70,18 +72,18 @@ def _make_bare_scheduler(
     scheduler._boundary_state_group_ids = frozenset({1})
     scheduler._store_coord = MooncakeStoreCoordinator(
         [
-            KVCacheGroupSpec(
+            make_kv_cache_group(
                 ["attention"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=max(16, hash_block_size),
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float32,
                 ),
             ),
-            KVCacheGroupSpec(
+            make_kv_cache_group(
                 ["mamba"],
-                MambaSpec(
+                mamba_layer(
                     block_size=max(16, hash_block_size),
                     shapes=((1,),),
                     dtypes=(torch.float32,),
@@ -274,15 +276,15 @@ def test_pending_load_for_non_chosen_connector_is_dropped():
 
 
 def _make_qsa_hybrid_cache_config():
-    full = FullAttentionSpec(block_size=800, num_kv_heads=8, head_size=64, dtype=None)
-    circular = CircularBufferSpec(
+    full = AttentionSpec(block_size=800, num_kv_heads=8, head_size=64, dtype=None)
+    circular = circular_buffer_layer(
         block_size=8,
         num_kv_heads=1,
         head_size=64,
         head_size_v=0,
         dtype=torch.float16,
     )
-    mamba = MambaSpec(
+    mamba = mamba_layer(
         block_size=800,
         shapes=((1, 1),),
         dtypes=(torch.float32,),
@@ -292,9 +294,9 @@ def _make_qsa_hybrid_cache_config():
         num_blocks=4,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(["full"], full),
-            KVCacheGroupSpec(["qsa"], circular),
-            KVCacheGroupSpec(["mamba"], mamba),
+            make_kv_cache_group(["full"], full),
+            make_kv_cache_group(["qsa"], circular),
+            make_kv_cache_group(["mamba"], mamba),
         ],
     )
 
@@ -1197,9 +1199,9 @@ def test_finished_partial_tail_is_pre_pinned_as_store_job(
     scheduler.client = SimpleNamespace(discard=lambda *_: None)
     scheduler._num_workers = num_workers
     groups = list(scheduler._store_coord.kv_cache_groups)
-    groups[0] = KVCacheGroupSpec(
+    groups[0] = make_kv_cache_group(
         ["attention"],
-        FullAttentionSpec(
+        AttentionSpec(
             block_size=attention_block_size,
             num_kv_heads=1,
             head_size=1,
@@ -1298,15 +1300,15 @@ def test_partial_tail_boundary_follows_eagle_block_drop_not_group_flags():
     """Core drops the Mamba checkpoint whenever EAGLE block drop is on, even if
     only the Mamba group carries the eagle flag."""
     groups = [
-        KVCacheGroupSpec(
+        make_kv_cache_group(
             ["attention"],
-            FullAttentionSpec(
+            AttentionSpec(
                 block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32
             ),
         ),
-        KVCacheGroupSpec(
+        make_kv_cache_group(
             ["mamba"],
-            MambaSpec(
+            mamba_layer(
                 block_size=16,
                 shapes=((1,),),
                 dtypes=(torch.float32,),
@@ -1351,16 +1353,16 @@ def test_shared_prefix_junction_handoff_adds_no_attention_tail(
     """``--enable-mamba-shared-prefix-checkpoint`` also hands off a sub-block
     Mamba state at the shared-prefix junction, below the prompt checkpoint."""
     groups = [
-        KVCacheGroupSpec(
+        make_kv_cache_group(
             ["attention"],
-            FullAttentionSpec(
+            AttentionSpec(
                 block_size=4, num_kv_heads=1, head_size=1, dtype=torch.float32
             ),
             is_eagle_group=True,
         ),
-        KVCacheGroupSpec(
+        make_kv_cache_group(
             ["mamba"],
-            MambaSpec(
+            mamba_layer(
                 block_size=16,
                 shapes=((1,),),
                 dtypes=(torch.float32,),

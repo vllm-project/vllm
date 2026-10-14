@@ -24,13 +24,13 @@ from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import PIN_MEMORY, async_tensor_h2d, np_to_pinned_tensor
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
+    KVCacheLayerConfig,
     KVCacheLayout,
-    KVCacheSpec,
-    MambaSpec,
 )
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
+    from vllm.v1.core.single_type_kv_cache_manager import MambaManager
     from vllm.v1.worker.gpu_input_batch import InputBatch
 
 import vllm.envs as envs
@@ -260,7 +260,7 @@ def record_kv_cache_layout(cache_config: CacheConfig, layout_name: str) -> None:
 def resolve_kv_cache_layout(
     vllm_config: VllmConfig,
     supported_layouts: list[list[str]],
-    kv_cache_specs: Iterable[KVCacheSpec] | None = None,
+    layer_configs: Iterable[KVCacheLayerConfig] = (),
 ) -> KVCacheLayout:
     """Resolve one KV cache layout for the whole model.
 
@@ -293,9 +293,8 @@ def resolve_kv_cache_layout(
     # bytes is the same. If not block-compact, each spec must agree on HNC to alias
     # the same page (this aliasing is done by the Hybrid Memory Allocator, HMA).
     # Specs without per-layer views lay out their own raw backing tensor.
-    kv_cache_specs = tuple(
-        spec for spec in kv_cache_specs or () if spec.has_layer_views
-    )
+    layer_configs = tuple(lc for lc in layer_configs if lc.spec.has_layer_views)
+    kv_cache_specs = [lc.spec for lc in layer_configs]
     hnc_shapes = {
         (spec.num_heads, spec.num_states, spec.page_size_bytes)
         for spec in kv_cache_specs
@@ -311,9 +310,9 @@ def resolve_kv_cache_layout(
     # Self-addressed per-request rings (e.g. the kpool tail) are replicated
     # state like Mamba and don't need a separate draft group.
     dcp_sharding = {
-        spec.dcp_sharded
-        for spec in kv_cache_specs
-        if isinstance(spec, AttentionSpec) and spec.uses_slot_mapping
+        lc.spec.dcp_sharded
+        for lc in layer_configs
+        if isinstance(lc.spec, AttentionSpec) and lc.manager_cls.uses_slot_mapping
     }
     page_sizes = {spec.page_size_bytes for spec in kv_cache_specs}
     if len(dcp_sharding) > 1 and len(page_sizes) > 1:
@@ -1230,11 +1229,25 @@ def _mamba_align_block_table_kernel(
     tl.store(out_ptr + req_idx * n_out + offs, vals, mask=mask)
 
 
+def get_attn_type_from_layers(vllm_config: VllmConfig, layer_names: list[str]) -> str:
+    """The ``AttentionType`` shared by the given attention layers."""
+    from vllm.model_executor.layers.attention import Attention
+
+    attn_types = {
+        layer.attn_type
+        for layer in get_layers_from_vllm_config(
+            vllm_config, Attention, layer_names
+        ).values()
+    }
+    assert len(attn_types) == 1, f"Mixed attention types in a group: {attn_types}"
+    return attn_types.pop()
+
+
 def mamba_get_block_table_tensor(
     block_table: torch.Tensor,
     seq_lens: torch.Tensor,
-    kv_cache_spec: KVCacheSpec,
-    mamba_cache_mode: str,
+    block_size: int,
+    mamba_config: "MambaManager.Config",
 ) -> torch.Tensor:
     """Get the block table tensor for mamba kernels from the input
     common_attn_metadata.block_table_tensor given different mamba cache modes.
@@ -1246,17 +1259,16 @@ def mamba_get_block_table_tensor(
                output (#requests, 1 + num_speculative_blocks), which are the last
                1 + num_speculative_blocks of each request.
     """
-    if mamba_cache_mode == "none":
+    if mamba_config.mamba_cache_mode == "none":
         return block_table
     else:
-        assert isinstance(kv_cache_spec, MambaSpec)
         # The arithmetic here is trivial -- a divide, a clamp, an arange, an
         # add, a cast and a gather -- but as PyTorch ops it was seven kernel
         # launches over a (num_reqs,) tensor, which holds a single element in a
         # one-request decode. One Triton kernel does the same work in one
         # launch. Zero-length requests in a CUDA graph still clamp to row 0.
         num_reqs = block_table.shape[0]
-        n_out = 1 + kv_cache_spec.num_speculative_blocks
+        n_out = 1 + mamba_config.num_speculative_blocks
         # The expression this replaced took its row count from `seq_lens` (a
         # `torch.gather` whose index tensor is built from it), so a mismatch
         # raised and a cross-device pair raised. Taking `num_reqs` from
@@ -1284,7 +1296,7 @@ def mamba_get_block_table_tensor(
             # keep it for the CPU path rather than narrowing the contract.
             # kimi_k3/nvidia/kda_metadata.py asserts `is_cuda` instead; a
             # shared utility cannot, because its callers legitimately pass CPU.
-            start_indices = (seq_lens - 1) // kv_cache_spec.block_size
+            start_indices = (seq_lens - 1) // block_size
             start_indices = start_indices.clamp(min=0)
             offsets = torch.arange(n_out, device=block_table.device, dtype=torch.int32)
             return torch.gather(
@@ -1300,7 +1312,7 @@ def mamba_get_block_table_tensor(
             block_table.stride(1),
             seq_lens,
             seq_lens.stride(0),
-            kv_cache_spec.block_size,
+            block_size,
             n_out,
             BLOCK=triton.next_power_of_2(n_out),
         )

@@ -73,10 +73,8 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
-    FullAttentionSpec,
     KVCacheSpec,
     KVQuantMode,
-    SlidingWindowSpec,
     is_quantized_kv_cache,
 )
 from vllm.v1.worker.cp_utils import (
@@ -148,6 +146,7 @@ class FA4DenseAttentionKernel(VllmJitKernel["FA4DenseAttentionKernel.CompileKey"
         vllm_config: VllmConfig,
         kv_cache_spec: AttentionSpec,
         num_qo_heads: int,
+        window_size: tuple[int, int],
     ) -> list[CompileKey]:
         capability = current_platform.get_device_capability()
         major = capability.major if capability is not None else None
@@ -156,15 +155,11 @@ class FA4DenseAttentionKernel(VllmJitKernel["FA4DenseAttentionKernel.CompileKey"
             or vllm_config.model_config.rswa_window is not None
             or kv_cache_spec.kv_quant_mode != KVQuantMode.NONE
             or kv_cache_spec.dtype not in FA4_DENSE_FLOAT_DTYPES
-            or not isinstance(kv_cache_spec, (FullAttentionSpec, SlidingWindowSpec))
+            or not isinstance(kv_cache_spec, AttentionSpec)
         ):
             return []
         head_dim = kv_cache_spec.head_size
         page_size = kv_cache_spec.block_size
-        sliding_window = kv_cache_spec.sliding_window
-        window_size = (
-            (sliding_window - 1, 0) if sliding_window is not None else (-1, -1)
-        )
         softcap = float(
             getattr(
                 vllm_config.model_config.hf_text_config, "attn_logit_softcapping", 0
@@ -717,11 +712,19 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             and self.model_config.hf_config.model_type in ("gemma4", "gemma4_unified")
             and fa_version == 4
         ):
-            _FA4_DENSE_ATTENTION_KERNEL.register_warmup(
-                vllm_config=vllm_config,
-                kv_cache_spec=kv_cache_spec,
-                num_qo_heads=self.num_heads_q,
-            )
+            window_sizes = {
+                getattr(layer.impl, "sliding_window", None)
+                for layer in get_layers_from_vllm_config(
+                    vllm_config, Attention, layer_names
+                ).values()
+            }
+            if len(window_sizes) == 1:
+                _FA4_DENSE_ATTENTION_KERNEL.register_warmup(
+                    vllm_config=vllm_config,
+                    kv_cache_spec=kv_cache_spec,
+                    num_qo_heads=self.num_heads_q,
+                    window_size=window_sizes.pop() or (-1, -1),
+                )
 
         self.dcp_world_size, self.dcp_rank = get_dcp_world_size_and_rank(
             kv_cache_spec.dcp_sharded

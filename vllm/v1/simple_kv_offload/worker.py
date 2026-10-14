@@ -155,7 +155,7 @@ class SimpleCPUOffloadWorker:
                 unique_gpu_caches[key_name] = region
 
         # Compute per-tensor bytes_per_block. Tensors may have different
-        # page_size_bytes (e.g., UniformTypeKVCacheSpecs with varying head_size).
+        # page_size_bytes (e.g., layers of one group with varying head_size).
         per_tensor_bpb = [
             t.stride(0) * t.element_size() for t in unique_gpu_caches.values()
         ]

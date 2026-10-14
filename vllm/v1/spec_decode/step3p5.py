@@ -13,7 +13,6 @@ from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheSpec,
-    UniformTypeKVCacheSpecs,
 )
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.eagle import EagleProposer
@@ -184,31 +183,9 @@ class Step3p5MTPProposer(EagleProposer):
         layer_to_gid: dict[str, int] = {}
         layer_to_spec: dict[str, KVCacheSpec] = {}
         for gid, group in enumerate(kv_cache_config.kv_cache_groups):
-            group_spec = group.kv_cache_spec
             for layer_name in group.layer_names:
                 layer_to_gid[layer_name] = gid
-                if isinstance(group_spec, UniformTypeKVCacheSpecs):
-                    if layer_name in group_spec.kv_cache_specs:
-                        layer_to_spec[layer_name] = group_spec.kv_cache_specs[
-                            layer_name
-                        ]
-                    else:
-                        target_layer_name = getattr(
-                            all_attn_layers.get(layer_name),
-                            "kv_sharing_target_layer_name",
-                            None,
-                        )
-                        if (
-                            target_layer_name
-                            and target_layer_name in group_spec.kv_cache_specs
-                        ):
-                            layer_to_spec[layer_name] = group_spec.kv_cache_specs[
-                                target_layer_name
-                            ]
-                        else:
-                            layer_to_spec[layer_name] = group_spec
-                else:
-                    layer_to_spec[layer_name] = group_spec
+                layer_to_spec[layer_name] = group.kv_cache_specs[layer_name]
 
         attention_groups: dict[tuple[tuple[str, str], int], AttentionGroup] = {}
         for layer_name in sorted(self._draft_attn_layer_names):
@@ -236,6 +213,7 @@ class Step3p5MTPProposer(EagleProposer):
                     self.vllm_config,
                     self.device,
                     kernel_block_size=kernel_block_size,
+                    kv_cache_group=kv_cache_config.kv_cache_groups[gid],
                 )
                 attention_groups[group_key] = attn_group
             else:
@@ -247,9 +225,7 @@ class Step3p5MTPProposer(EagleProposer):
             self.block_size = self.draft_attn_groups[0].kv_cache_spec.block_size
         else:
             self.kv_cache_gid = 0
-            self.block_size = kv_cache_config.kv_cache_groups[
-                0
-            ].kv_cache_spec.block_size
+            self.block_size = kv_cache_config.kv_cache_groups[0].block_size
 
     def _sample_draft_tokens_for_step(
         self,

@@ -32,7 +32,8 @@ from vllm.v1.attention.backends.short_conv_attn import (
     PleShortConvAttentionBackend,
     PleShortConvAttentionMetadata,
 )
-from vllm.v1.kv_cache_interface import KVCacheSpec, MambaSpec
+from vllm.v1.core.single_type_kv_cache_manager import MambaManager
+from vllm.v1.kv_cache_interface import KVCacheLayerConfig
 
 from ..common.ops.ple import ple_conv, ple_gate
 from .ngram_embedding import Qwen4ExpNGramEmbedding
@@ -202,21 +203,28 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
     def get_prefill_checkpoint_alignment(self) -> int | None:
         return 1 if self.cache_config.mamba_cache_mode == "align" else None
 
-    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec | None:
-        spec = super().get_kv_cache_spec(vllm_config)
+    def get_kv_cache_config(self, vllm_config: VllmConfig) -> KVCacheLayerConfig | None:
+        layer_config = super().get_kv_cache_config(vllm_config)
         # The scheduler takes internal checkpoints only when every Mamba layer
         # can export them.
         if (
             self.get_prefill_checkpoint_alignment() is None
             or get_mamba_prefill_checkpoint_alignment(vllm_config) is None
-            or not isinstance(spec, MambaSpec)
+            or layer_config is None
         ):
-            return spec
+            return layer_config
+        config = layer_config.manager_config
+        assert isinstance(config, MambaManager.Config)
         grid = get_mamba_prefill_checkpoint_grid(vllm_config)
         # Offsets are multiples of the grid, so the window holds only inputs.
         assert grid >= self.conv_state_len
         return replace(
-            spec, num_prefill_checkpoint_blocks=1, prefill_checkpoint_alignment=grid
+            layer_config,
+            manager_config=replace(
+                config,
+                num_prefill_checkpoint_blocks=1,
+                prefill_checkpoint_alignment=grid,
+            ),
         )
 
     def _short_conv_dilated_dispatch(

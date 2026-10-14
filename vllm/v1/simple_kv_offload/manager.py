@@ -30,6 +30,7 @@ from vllm.v1.core.kv_cache_utils import (
     generate_block_hash_extra_keys,
     get_block_hash,
     get_group_id,
+    is_mamba_group,
     make_block_hash_with_group_id,
     maybe_convert_block_hash,
     resolve_block_hashes,
@@ -37,13 +38,6 @@ from vllm.v1.core.kv_cache_utils import (
     to_event_extra_keys,
 )
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
-    MambaSpec,
-    SlidingWindowSpec,
-    get_kv_cache_spec_kind,
-    get_kv_cache_spec_sliding_window,
-)
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.simple_kv_offload.metadata import (
     SimpleCPUOffloadMetadata,
@@ -188,7 +182,7 @@ class SimpleCPUOffloadScheduler:
         # Find the full attention kv group for prefix cache matching.
         self.fa_gidx = -1
         for g_idx, g in enumerate(self.cpu_kv_cache_config.kv_cache_groups):
-            if isinstance(g.kv_cache_spec, FullAttentionSpec):
+            if g.is_full_attention:
                 self.fa_gidx = g_idx
                 break
         assert 0 <= self.fa_gidx < len(self.cpu_kv_cache_config.kv_cache_groups)
@@ -332,12 +326,11 @@ class SimpleCPUOffloadScheduler:
         WATERMARK_RATIO = 1.0  # Reserve larger space to avoid running out of GPU blocks
         target = 0
         for g in kv_cache_config.prefix_cacheable_groups:
-            spec = g.kv_cache_spec
-            block_size = resolve_dcp_kv_block_size(spec, cp_world_size)
-            if isinstance(spec, MambaSpec):
+            block_size = resolve_dcp_kv_block_size(g, cp_world_size)
+            if is_mamba_group(g):
                 target += 2
-            elif isinstance(spec, SlidingWindowSpec):
-                target += cdiv(spec.sliding_window, block_size) + 1
+            elif g.sliding_window is not None:
+                target += cdiv(g.sliding_window, block_size) + 1
             else:
                 target += cdiv(max_num_batched_tokens, block_size)
         return int(target * (1 + WATERMARK_RATIO))
@@ -1131,9 +1124,7 @@ class SimpleCPUOffloadScheduler:
 
                 for block_hash, meta, event_block_size in events_to_emit:
                     group_idx = get_group_id(block_hash)
-                    spec = self.cpu_kv_cache_config.kv_cache_groups[
-                        group_idx
-                    ].kv_cache_spec
+                    group = self.cpu_kv_cache_config.kv_cache_groups[group_idx]
                     if meta is not None and len(meta.token_ids) != event_block_size:
                         # token_ids were sliced with a different g_block_size
                         # (e.g. Mamba+DCP where capture uses spec.block_size *
@@ -1159,10 +1150,8 @@ class SimpleCPUOffloadScheduler:
                             lora_name=meta.lora_name if meta else None,
                             extra_keys=to_event_extra_keys(extra_keys and [extra_keys]),
                             group_idx=group_idx,
-                            kv_cache_spec_kind=get_kv_cache_spec_kind(spec).value,
-                            kv_cache_spec_sliding_window=(
-                                get_kv_cache_spec_sliding_window(spec)
-                            ),
+                            kv_cache_spec_kind=group.kind.value,
+                            kv_cache_spec_sliding_window=group.sliding_window,
                             locality="LOCAL",
                         )
                     )

@@ -50,15 +50,18 @@ from vllm.v1.core.sched.diffusion_scheduler import (
 from vllm.v1.core.sched.interface import PauseState
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
-from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
+from vllm.v1.core.single_type_kv_cache_manager import (
+    CrossAttentionManager,
+    FullAttentionManager,
+    MambaManager,
+)
 from vllm.v1.engine import FinishReason
 from vllm.v1.engine.core import EngineCore
 from vllm.v1.executor.uniproc_executor import UniProcExecutor
 from vllm.v1.hisparse.coordinator import get_hisparse_coordinator
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
+    AttentionSpec,
     KVCacheConfig,
-    KVCacheGroupSpec,
     MambaSpec,
 )
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
@@ -73,7 +76,13 @@ from vllm.v1.outputs import (
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.structured_output import StructuredOutputGrammar, StructuredOutputManager
 
-from .utils import EOS_TOKEN_ID, create_requests, create_scheduler, mock_kv
+from .utils import (
+    EOS_TOKEN_ID,
+    create_requests,
+    create_scheduler,
+    mock_kv,
+    new_kv_cache_group,
+)
 
 pytestmark = pytest.mark.cpu_test
 
@@ -3851,13 +3860,15 @@ def create_scheduler_with_priority(
         num_blocks=num_blocks,  # A large number of blocks to hold all requests
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["layer"],
-                FullAttentionSpec(
-                    block_size=block_size,
-                    num_kv_heads=1,
-                    head_size=1,
-                    dtype=torch.float32,
+                FullAttentionManager.layer_config(
+                    AttentionSpec(
+                        block_size=block_size,
+                        num_kv_heads=1,
+                        head_size=1,
+                        dtype=torch.float32,
+                    )
                 ),
             )
         ],
@@ -6300,12 +6311,11 @@ def _create_encoder_decoder_scheduler(
     """Create a scheduler configured for encoder-decoder cross-attention
     block allocation testing.
 
-    Constructs a scheduler with both FullAttentionSpec (self-attention) and
-    CrossAttentionSpec (cross-attention) KV cache groups, then patches it
+    Constructs a scheduler with both AttentionSpec (self-attention) and
+    CrossAttentionManager (cross-attention) KV cache groups, then patches it
     to behave as an encoder-decoder model.
     """
     from vllm.v1.core.encoder_cache_manager import EncoderDecoderCacheManager
-    from vllm.v1.kv_cache_interface import CrossAttentionSpec
 
     model_config = ModelConfig(
         model="facebook/opt-125m",
@@ -6340,22 +6350,26 @@ def _create_encoder_decoder_scheduler(
         num_blocks=num_blocks,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["self_attn_layer"],
-                FullAttentionSpec(
-                    block_size=block_size,
-                    num_kv_heads=1,
-                    head_size=1,
-                    dtype=torch.float32,
+                FullAttentionManager.layer_config(
+                    AttentionSpec(
+                        block_size=block_size,
+                        num_kv_heads=1,
+                        head_size=1,
+                        dtype=torch.float32,
+                    )
                 ),
             ),
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["cross_attn_layer"],
-                CrossAttentionSpec(
-                    block_size=block_size,
-                    num_kv_heads=1,
-                    head_size=1,
-                    dtype=torch.float32,
+                CrossAttentionManager.layer_config(
+                    AttentionSpec(
+                        block_size=block_size,
+                        num_kv_heads=1,
+                        head_size=1,
+                        dtype=torch.float32,
+                    )
                 ),
             ),
         ],
@@ -7493,27 +7507,30 @@ def _create_hybrid_mamba_connector_scheduler(
         num_blocks=num_blocks,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["fa"],
-                FullAttentionSpec(
-                    block_size=block_size,
-                    num_kv_heads=1,
-                    head_size=1,
-                    dtype=torch.float32,
+                FullAttentionManager.layer_config(
+                    AttentionSpec(
+                        block_size=block_size,
+                        num_kv_heads=1,
+                        head_size=1,
+                        dtype=torch.float32,
+                    )
                 ),
             ),
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["mamba"],
-                MambaSpec(
-                    block_size=block_size,
-                    shapes=((1, 1),),
-                    dtypes=(torch.float32,),
+                MambaManager.layer_config(
+                    MambaSpec(
+                        block_size=block_size,
+                        shapes=((1, 1),),
+                        dtypes=(torch.float32,),
+                    ),
                     mamba_cache_mode="align",
                 ),
             ),
         ],
     )
-    register_all_kvcache_specs(vllm_config)
     return Scheduler(
         vllm_config=vllm_config,
         kv_cache_config=kv_cache_config,

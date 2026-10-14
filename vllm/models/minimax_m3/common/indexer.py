@@ -51,9 +51,10 @@ from vllm.v1.attention.backend import (
     MultipleOf,
 )
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
+from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
-    KVCacheSpec,
+    KVCacheLayerConfig,
     MLAAttentionSpec,
     SparseCacheRole,
 )
@@ -142,15 +143,16 @@ class MiniMaxM3IndexerCache(nn.Module, AttentionLayerBase):
         # [B, H=1, N, C] -> [B, N, C]
         self.kv_cache = kv_cache.squeeze(1)
 
-    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
+    def get_kv_cache_config(self, vllm_config: VllmConfig) -> KVCacheLayerConfig:
         # Key-only: MLAAttentionSpec budgets one vector/token (not 2x for K+V).
-        return MLAAttentionSpec(
+        spec = MLAAttentionSpec(
             block_size=vllm_config.cache_config.block_size,
             num_kv_heads=1,
             head_size=self.head_dim,
             dtype=self.dtype,
             cache_role=SparseCacheRole.INDEXER,
         )
+        return FullAttentionManager.layer_config(spec)
 
     def forward(self) -> None: ...
 

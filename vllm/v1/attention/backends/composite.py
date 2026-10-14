@@ -274,18 +274,30 @@ def create_composite_attention_backend(
             general_builder_cls.requires_block_table_width
             or causal_builder_cls.requires_block_table_width
         )
+        requires_kv_cache_manager_config = (
+            general_builder_cls.requires_kv_cache_manager_config
+            or causal_builder_cls.requires_kv_cache_manager_config
+        )
 
         def __init__(self, kv_cache_spec, layer_names, vllm_config, device, **kwargs):
             super().__init__(kv_cache_spec, layer_names, vllm_config, device)
             args = (kv_cache_spec, layer_names, vllm_config, device)
-            # Only the variant that asked for the extra ctor kwargs receives them.
+
+            # Only the variant that asked for an extra ctor kwarg receives it.
+            def builder_kwargs(builder_cls) -> dict:
+                requested = {
+                    "block_table_width": builder_cls.requires_block_table_width,
+                    "kv_cache_manager_config": (
+                        builder_cls.requires_kv_cache_manager_config
+                    ),
+                }
+                return {k: v for k, v in kwargs.items() if requested[k]}
+
             self.general_builder = general_builder_cls(
-                *args,
-                **(kwargs if general_builder_cls.requires_block_table_width else {}),
+                *args, **builder_kwargs(general_builder_cls)
             )
             self.causal_builder = causal_builder_cls(
-                *args,
-                **(kwargs if causal_builder_cls.requires_block_table_width else {}),
+                *args, **builder_kwargs(causal_builder_cls)
             )
             self.reorder_batch_threshold = min(
                 (

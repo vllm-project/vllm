@@ -4,8 +4,9 @@
 import pytest
 import torch
 
+from tests.v1.core.utils import full_layer
 from vllm.v1.core.kv_cache_planning import check_enough_kv_cache_memory
-from vllm.v1.kv_cache_interface import FullAttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec
 
 
 def test_kv_cache_oom_no_memory():
@@ -15,11 +16,13 @@ def test_kv_cache_oom_no_memory():
     config.model_config.max_model_len = 2048
 
     spec = {
-        "layer_0": FullAttentionSpec(
-            block_size=16,
-            num_kv_heads=8,
-            head_size=128,
-            dtype=torch.float16,
+        "layer_0": full_layer(
+            AttentionSpec(
+                block_size=16,
+                num_kv_heads=8,
+                head_size=128,
+                dtype=torch.float16,
+            )
         )
     }
 
@@ -43,11 +46,13 @@ def test_kv_cache_oom_insufficient_memory(monkeypatch):
     )
 
     spec = {
-        "layer_0": FullAttentionSpec(
-            block_size=16,
-            num_kv_heads=8,
-            head_size=128,
-            dtype=torch.float16,
+        "layer_0": full_layer(
+            AttentionSpec(
+                block_size=16,
+                num_kv_heads=8,
+                head_size=128,
+                dtype=torch.float16,
+            )
         )
     }
 

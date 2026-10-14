@@ -29,6 +29,7 @@ from vllm.v1.attention.backend import (
     MultipleOf,
 )
 from vllm.v1.attention.backends.utils import (
+    get_attn_type_from_layers,
     get_num_attention_heads_from_layers,
 )
 from vllm.v1.attention.backends.zentorch_sdpa import (
@@ -37,8 +38,6 @@ from vllm.v1.attention.backends.zentorch_sdpa import (
 )
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
-    CrossAttentionSpec,
-    EncoderOnlyAttentionSpec,
     KVCacheLayout,
     is_quantized_kv_cache,
 )
@@ -161,10 +160,9 @@ class CPUAttentionMetadataBuilder(AttentionMetadataBuilder[CPUAttentionMetadata]
             self.kv_cache_dtype,
         )
         self._set_isa_to_layers(layer_names)
-        self.is_cross_attention = isinstance(kv_cache_spec, CrossAttentionSpec)
-        self.is_encoder_only_attention = isinstance(
-            kv_cache_spec, EncoderOnlyAttentionSpec
-        )
+        attn_type = get_attn_type_from_layers(vllm_config, layer_names)
+        self.is_cross_attention = attn_type == AttentionType.ENCODER_DECODER
+        self.is_encoder_only_attention = attn_type == AttentionType.ENCODER_ONLY
 
     def _set_isa_to_layers(self, layer_names: list[str]) -> None:
         attn_layers = get_layers_from_vllm_config(

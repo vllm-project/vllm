@@ -8,7 +8,12 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 
-from tests.v1.kv_connector.unit.offloading_connector.utils import MockOffloadingSpec
+from tests.v1.core.utils import uniform_spec
+from tests.v1.kv_connector.unit.offloading_connector.utils import (
+    MockOffloadingSpec,
+    make_kv_cache_group,
+    make_kv_cache_group_from_specs,
+)
 from vllm.config import KVTransferConfig, ParallelConfig, VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.config import (
     build_offloading_config,
@@ -19,9 +24,13 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
 from vllm.platforms import current_platform
 from vllm.v1.core.kv_cache_planning import kv_cache_groups_tp_replicas
 from vllm.v1.core.kv_cache_utils import generate_scheduler_kv_cache_config
+from vllm.v1.core.single_type_kv_cache_manager import (
+    CircularBufferManager,
+    MambaManager,
+    SlidingWindowManager,
+)
 from vllm.v1.kv_cache_interface import (
-    CircularBufferSpec,
-    FullAttentionSpec,
+    AttentionSpec,
     HiddenStateCacheSpec,
     KVCacheConfig,
     KVCacheGroupRole,
@@ -30,11 +39,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheTensor,
     MambaSpec,
     MLAAttentionSpec,
-    SlidingWindowMLASpec,
-    SlidingWindowSpec,
-    UniformTypeKVCacheSpecs,
 )
-from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 from vllm.v1.kv_offload.file_mapper import FileMapper
 from vllm.v1.kv_offload.tiering.spec import TieringOffloadingSpec
 
@@ -80,7 +85,7 @@ def _make_vllm_config(
 
 def _make_kv_cache_config() -> KVCacheConfig:
     num_blocks = 16
-    spec = FullAttentionSpec(
+    spec = AttentionSpec(
         block_size=16,
         num_kv_heads=1,
         head_size=1,
@@ -95,7 +100,7 @@ def _make_kv_cache_config() -> KVCacheConfig:
     return KVCacheConfig(
         num_blocks=num_blocks,
         kv_cache_tensors=[kv_tensor],
-        kv_cache_groups=[KVCacheGroupSpec(["layer"], spec)],
+        kv_cache_groups=[make_kv_cache_group(["layer"], spec)],
     )
 
 
@@ -134,9 +139,9 @@ def _make_sizing_kv_cache_config(packed: bool) -> KVCacheConfig:
         num_blocks=num_blocks,
         kv_cache_tensors=kv_cache_tensors,
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            make_kv_cache_group(
                 ["layer0", "layer1"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=16,
                     num_kv_heads=1,
                     head_size=1,
@@ -147,8 +152,8 @@ def _make_sizing_kv_cache_config(packed: bool) -> KVCacheConfig:
     )
 
 
-def _full_attention_spec(block_size: int = 16) -> FullAttentionSpec:
-    return FullAttentionSpec(
+def _full_attention_spec(block_size: int = 16) -> AttentionSpec:
+    return AttentionSpec(
         block_size=block_size,
         num_kv_heads=4,
         head_size=128,
@@ -205,7 +210,7 @@ def _make_mla_kv_cache_config(
     return KVCacheConfig(
         num_blocks=num_blocks,
         kv_cache_tensors=kv_cache_tensors,
-        kv_cache_groups=[KVCacheGroupSpec(layer_names, spec)],
+        kv_cache_groups=[make_kv_cache_group(layer_names, spec)],
     )
 
 
@@ -233,30 +238,31 @@ def _make_hybrid_kv_cache_config() -> KVCacheConfig:
             ),
         ],
         kv_cache_groups=[
-            KVCacheGroupSpec(["full_layer"], full_spec),
-            KVCacheGroupSpec(["mla_layer"], mla_spec),
+            make_kv_cache_group(["full_layer"], full_spec),
+            make_kv_cache_group(["mla_layer"], mla_spec),
         ],
     )
 
 
+_MAMBA_ALIGN = MambaManager.Config(mamba_cache_mode="align")
+
+
 def _mamba_spec() -> MambaSpec:
-    return MambaSpec(
-        block_size=16,
-        shapes=((1, 1),),
-        dtypes=(torch.float32,),
-        mamba_cache_mode="align",
-    )
+    return MambaSpec(block_size=16, shapes=((1, 1),), dtypes=(torch.float32,))
 
 
-def _uniform_spec(spec_kind: str) -> UniformTypeKVCacheSpecs:
-    # DSA models merge their indexer and MLA layers into a UniformType group,
-    # a container rather than an AttentionSpec, but still sharded across DCP.
-    specs: dict[str, Any] = (
-        {"mla_layer": _mla_spec(), "indexer_layer": _mla_spec(head_size=128)}
-        if spec_kind == "attention"
-        else {"mamba_layer0": _mamba_spec(), "mamba_layer1": _mamba_spec()}
-    )
-    return UniformTypeKVCacheSpecs(block_size=16, kv_cache_specs=specs)
+def _mamba_group(layer_names: list[str]) -> KVCacheGroupSpec:
+    return make_kv_cache_group(layer_names, _mamba_spec(), MambaManager, _MAMBA_ALIGN)
+
+
+def _multi_layer_group(layer_names: list[str], spec_kind: str) -> KVCacheGroupSpec:
+    # DSA models group their indexer and MLA layers, whose layouts differ, but
+    # the group is still sharded across DCP.
+    if spec_kind == "attention":
+        return make_kv_cache_group_from_specs(
+            dict(zip(layer_names, (_mla_spec(), _mla_spec(head_size=128))))
+        )
+    return _mamba_group(layer_names)
 
 
 def _make_mamba_hybrid_kv_cache_config() -> KVCacheConfig:
@@ -264,16 +270,8 @@ def _make_mamba_hybrid_kv_cache_config() -> KVCacheConfig:
         num_blocks=4,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(["full_layer"], _full_attention_spec()),
-            KVCacheGroupSpec(
-                ["mamba_layer"],
-                MambaSpec(
-                    block_size=16,
-                    shapes=((1, 1),),
-                    dtypes=(torch.float32,),
-                    mamba_cache_mode="align",
-                ),
-            ),
+            make_kv_cache_group(["full_layer"], _full_attention_spec()),
+            _mamba_group(["mamba_layer"]),
         ],
     )
 
@@ -348,28 +346,25 @@ def _replicated_layout(
     return worker_offload_config.replicated_layout
 
 
-_SWA_MLA_PAGE = SlidingWindowMLASpec(
-    block_size=16,
-    num_kv_heads=1,
-    max_tp_shards=1,
-    head_size=512,
-    dtype=torch.float32,
-    sliding_window=128,
-).page_size_bytes
+_SWA_MLA_PAGE = _MLA_PAGE
+
+
+def _swa_group(
+    layer_names: list[str], spec: KVCacheSpec, sliding_window: int = 128
+) -> KVCacheGroupSpec:
+    return make_kv_cache_group(
+        layer_names,
+        spec,
+        SlidingWindowManager,
+        SlidingWindowManager.Config(sliding_window=sliding_window),
+    )
 
 
 def _make_swa_mla_kv_cache_config(
     num_blocks: int = 4,
 ) -> KVCacheConfig:
-    """Single SlidingWindowMLASpec group — DSV4 sliding-window layers."""
-    spec = SlidingWindowMLASpec(
-        block_size=16,
-        num_kv_heads=1,
-        max_tp_shards=1,
-        head_size=512,
-        dtype=torch.float32,
-        sliding_window=128,
-    )
+    """Single sliding-window MLA group — DSV4 sliding-window layers."""
+    spec = _mla_spec()
     return KVCacheConfig(
         num_blocks=num_blocks,
         kv_cache_tensors=[
@@ -380,68 +375,44 @@ def _make_swa_mla_kv_cache_config(
                 block_stride=_SWA_MLA_PAGE,
             )
         ],
-        kv_cache_groups=[KVCacheGroupSpec(["layer"], spec)],
+        kv_cache_groups=[_swa_group(["layer"], spec)],
     )
 
 
 def _make_dsv4_flash_kv_cache_config(num_blocks: int = 4) -> KVCacheConfig:
-    """Minimal fake of DeepSeek-V4-Flash's five UniformTypeKVCacheSpecs groups.
+    """Minimal fake of DeepSeek-V4-Flash's five multi-layer groups.
 
     The real model has the following groups (layer counts from runtime logs);
     2 per group is enough to exercise the structural properties that govern
     replicated_layout:
-        group[0]: 22 SlidingWindowMLASpec layers, sliding_window=128
-        group[1]: 21 SlidingWindowMLASpec layers, sliding_window=128
+        group[0]: 22 sliding-window MLA layers, sliding_window=128
+        group[1]: 21 sliding-window MLA layers, sliding_window=128
         group[2]: 62 MLAAttentionSpec layers  (MLA + indexer.k_cache)
-        group[3]: 42 SlidingWindowMLASpec layers, sliding_window=8
-        group[4]: 20 SlidingWindowMLASpec layers, sliding_window=128
+        group[3]: 42 sliding-window MLA layers, sliding_window=8
+        group[4]: 20 sliding-window MLA layers, sliding_window=128
     All inner specs have num_kv_heads=1 → every group is TP-replicated.
     """
     block_size = 16
     dtype = torch.float32
     head_size = 512
 
-    def _swa_group(tag: str, sw: int) -> KVCacheGroupSpec:
-        names = [f"{tag}_0", f"{tag}_1"]
-        spec = SlidingWindowMLASpec(
-            block_size=block_size,
-            num_kv_heads=1,
-            max_tp_shards=1,
-            head_size=head_size,
-            dtype=dtype,
-            sliding_window=sw,
-        )
-        return KVCacheGroupSpec(
-            names,
-            UniformTypeKVCacheSpecs(
-                block_size=block_size,
-                kv_cache_specs={name: spec for name in names},
-            ),
-        )
+    spec = MLAAttentionSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        max_tp_shards=1,
+        head_size=head_size,
+        dtype=dtype,
+    )
 
-    def _mla_group(tag: str) -> KVCacheGroupSpec:
-        names = [f"{tag}_0", f"{tag}_1"]
-        spec = MLAAttentionSpec(
-            block_size=block_size,
-            num_kv_heads=1,
-            max_tp_shards=1,
-            head_size=head_size,
-            dtype=dtype,
-        )
-        return KVCacheGroupSpec(
-            names,
-            UniformTypeKVCacheSpecs(
-                block_size=block_size,
-                kv_cache_specs={name: spec for name in names},
-            ),
-        )
+    def _names(tag: str) -> list[str]:
+        return [f"{tag}_0", f"{tag}_1"]
 
     groups = [
-        _swa_group("swa_128a", 128),  # group[0]: SWA-MLA, sw=128
-        _swa_group("swa_128b", 128),  # group[1]: SWA-MLA, sw=128
-        _mla_group("mla"),  # group[2]: MLA + indexer layers
-        _swa_group("swa_8", 8),  # group[3]: SWA-MLA, sw=8
-        _swa_group("swa_128c", 128),  # group[4]: SWA-MLA, sw=128
+        _swa_group(_names("swa_128a"), spec, 128),  # group[0]: SWA-MLA, sw=128
+        _swa_group(_names("swa_128b"), spec, 128),  # group[1]: SWA-MLA, sw=128
+        make_kv_cache_group(_names("mla"), spec),  # group[2]: MLA + indexer layers
+        _swa_group(_names("swa_8"), spec, 8),  # group[3]: SWA-MLA, sw=8
+        _swa_group(_names("swa_128c"), spec, 128),  # group[4]: SWA-MLA, sw=128
     ]
     # All specs share the same page size (num_kv_heads=1, head_size=512, fp32).
     page = MLAAttentionSpec(
@@ -463,13 +434,13 @@ def _make_dsv4_flash_kv_cache_config(num_blocks: int = 4) -> KVCacheConfig:
 
 
 def _make_dsv3_2_kv_cache_config(num_blocks: int = 4) -> KVCacheConfig:
-    """Minimal fake of DeepSeek-V3.2-Exp's single UniformTypeKVCacheSpecs group.
+    """Minimal fake of DeepSeek-V3.2-Exp's single multi-layer group.
 
     The real model has 1 group (layer counts from runtime logs):
         group[0]: 122 MLAAttentionSpec layers (self_attn.attn + indexer.k_cache)
     All inner specs have num_kv_heads=1 → the group is TP-replicated.
 
-    GLM-5.3 has the same topology (one UniformType group of MLAAttentionSpec
+    GLM-5.3 has the same topology (one group of MLAAttentionSpec
     layers, num_kv_heads=1) with 99 layers instead of 122, so this config
     covers both models.
     """
@@ -482,13 +453,7 @@ def _make_dsv3_2_kv_cache_config(num_blocks: int = 4) -> KVCacheConfig:
         head_size=512,
         dtype=torch.float32,
     )
-    group = KVCacheGroupSpec(
-        names,
-        UniformTypeKVCacheSpecs(
-            block_size=block_size,
-            kv_cache_specs={name: spec for name in names},
-        ),
-    )
+    group = make_kv_cache_group(names, spec)
     return KVCacheConfig(
         num_blocks=num_blocks,
         kv_cache_tensors=[
@@ -524,14 +489,15 @@ def test_offloading_skips_scratch_group():
     kv_cache_config = _make_mamba_hybrid_kv_cache_config()
     kv_cache_config.kv_cache_groups.insert(
         1,
-        KVCacheGroupSpec(
+        make_kv_cache_group(
             ["scratch"],
-            CircularBufferSpec(
+            AttentionSpec(
                 block_size=4, num_kv_heads=1, head_size=128, dtype=torch.float32
             ),
+            CircularBufferManager,
         ),
     )
-    page_size = kv_cache_config.kv_cache_groups[0].kv_cache_spec.page_size_bytes
+    page_size = uniform_spec(kv_cache_config.kv_cache_groups[0]).page_size_bytes
     kv_cache_config.kv_cache_tensors = [
         KVCacheTensor(
             size=page_size * kv_cache_config.num_blocks,
@@ -553,12 +519,12 @@ def test_offloading_skips_scratch_group():
 
 
 def test_hisparse_offloads_only_indexer_group():
-    source = KVCacheGroupSpec(
+    source = make_kv_cache_group(
         ["source"],
         _full_attention_spec(),
         host_resident=True,
     )
-    indexer = KVCacheGroupSpec(
+    indexer = make_kv_cache_group(
         ["indexer"],
         _full_attention_spec(),
         role=KVCacheGroupRole.HISPARSE_INDEXER,
@@ -582,40 +548,32 @@ def test_hisparse_offloads_only_indexer_group():
     assert [group.group_idx for group in scheduler_config.kv_group_configs] == [1]
 
 
-def test_hisparse_partial_group_size_survives_scheduler_flattening():
-    """Worker and scheduler representations must produce identical mmap rows."""
-    layer_specs = {name: _full_attention_spec() for name in ("indexer.0", "indexer.1")}
-    wrapped = UniformTypeKVCacheSpecs.from_specs(layer_specs)
-    assert wrapped is not None
-    source = KVCacheGroupSpec(
-        ["source"],
+def test_hisparse_multi_layer_group_size_matches_scheduler():
+    """Worker and scheduler configs must produce identical mmap rows that span
+    every layer of the indexer group."""
+    source = make_kv_cache_group(["source"], _full_attention_spec(), host_resident=True)
+    indexer = make_kv_cache_group(
+        ["indexer.0", "indexer.1"],
         _full_attention_spec(),
-        host_resident=True,
-        role=KVCacheGroupRole.HISPARSE_SOURCE,
-    )
-    worker_indexer = KVCacheGroupSpec(
-        list(layer_specs), wrapped, role=KVCacheGroupRole.HISPARSE_INDEXER
-    )
-    scheduler_indexer = KVCacheGroupSpec(
-        list(layer_specs),
-        next(iter(layer_specs.values())),
         role=KVCacheGroupRole.HISPARSE_INDEXER,
     )
-
-    def make_config(indexer: KVCacheGroupSpec) -> KVCacheConfig:
-        return KVCacheConfig(
-            num_blocks=4,
-            kv_cache_tensors=[],
-            kv_cache_groups=[source, indexer],
-            hisparse_host_num_blocks=4,
-        )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=4,
+        kv_cache_tensors=[],
+        kv_cache_groups=[source, indexer],
+        hisparse_host_num_blocks=4,
+    )
 
     config = _make_vllm_config()
-    worker = build_offloading_config(config, make_config(worker_indexer))
-    scheduler = build_offloading_config(config, make_config(scheduler_indexer))
+    worker = build_offloading_config(config, kv_cache_config)
+    scheduler = build_offloading_config(
+        config, generate_scheduler_kv_cache_config([kv_cache_config])
+    )
 
     assert worker.worker_kv_bytes_per_block == scheduler.worker_kv_bytes_per_block
-    assert worker.worker_kv_bytes_per_block == wrapped.page_size_bytes
+    assert (
+        worker.worker_kv_bytes_per_block == 2 * _full_attention_spec().page_size_bytes
+    )
 
 
 def test_zero_blocks_skips_tensor_layout_validation():
@@ -660,20 +618,19 @@ def test_dcp_scales_attention_but_not_mamba_group_blocks():
     mamba_group = scheduler_config.kv_group_configs[1]
     assert mamba_group.sliding_window_size_in_chunks == 1
     assert scheduler_config.alignment_tokens is not None
-    manager_cls = KVCacheSpecRegistry.get_manager_class(mamba_group.kv_cache_spec)
-    assert manager_cls is not None
-    block_mask = manager_cls.reachable_block_mask(
+    block_mask = mamba_group.manager_cls.reachable_block_mask(
         start_block=0,
         end_block=4,
         alignment_tokens=scheduler_config.alignment_tokens,
-        kv_cache_spec=mamba_group.kv_cache_spec,
+        block_size=mamba_group.block_size,
+        manager_config=mamba_group.manager_config,
         use_eagle=mamba_group.is_eagle_group,
     )
     assert block_mask is None or [i for i in range(4) if block_mask[i]] == [1, 3]
 
 
 @pytest.mark.parametrize("dcp_size,expected", [(1, 16), (2, 32)])
-def test_dcp_scales_uniform_type_attention_group_blocks(dcp_size, expected):
+def test_dcp_scales_multi_layer_attention_group_blocks(dcp_size, expected):
     config = _make_vllm_config(
         tensor_parallel_size=2, decode_context_parallel_size=dcp_size
     )
@@ -688,7 +645,7 @@ def test_dcp_scales_uniform_type_attention_group_blocks(dcp_size, expected):
             )
         ],
         kv_cache_groups=[
-            KVCacheGroupSpec(["mla_layer", "indexer_layer"], _uniform_spec("attention"))
+            _multi_layer_group(["mla_layer", "indexer_layer"], "attention")
         ],
     )
 
@@ -702,20 +659,20 @@ def test_dcp_scales_uniform_type_attention_group_blocks(dcp_size, expected):
     "spec_kind,expected",
     [
         ("attention", 32),
-        # Mamba state is replicated across DCP ranks, so a uniform group of
-        # Mamba layers keeps its span.
+        # Mamba state is replicated across DCP ranks, so a multi-layer group
+        # of Mamba layers keeps its span.
         ("mamba", 16),
     ],
 )
-def test_dcp_scales_uniform_type_group_alongside_mamba(spec_kind, expected):
+def test_dcp_scales_multi_layer_group_alongside_mamba(spec_kind, expected):
     config = _make_vllm_config(tensor_parallel_size=2, decode_context_parallel_size=2)
     config.speculative_config = None
     kv_cache_config = KVCacheConfig(
         num_blocks=4,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(["layer0", "layer1"], _uniform_spec(spec_kind)),
-            KVCacheGroupSpec(["mamba_layer"], _mamba_spec()),
+            _multi_layer_group(["layer0", "layer1"], spec_kind),
+            _mamba_group(["mamba_layer"]),
         ],
     )
 
@@ -769,7 +726,7 @@ def test_replicated_layout_enabled_for_pure_mla_tp_mp_single_node(
 
 @pytest.mark.parametrize("world_size", [2, 4])
 def test_replicated_layout_enabled_for_swa_mla(world_size: int):
-    """SlidingWindowMLASpec groups are also replicated and qualify."""
+    """Sliding-window MLA groups are also replicated and qualify."""
     assert _replicated_layout(
         _make_swa_mla_kv_cache_config(),
         tensor_parallel_size=world_size,
@@ -778,7 +735,7 @@ def test_replicated_layout_enabled_for_swa_mla(world_size: int):
 
 @pytest.mark.parametrize("world_size", [2, 4, 8])
 def test_replicated_layout_dsv4_flash(world_size: int):
-    """DeepSeek-V4-Flash: all 5 UniformType groups are MLA/SWA-MLA with
+    """DeepSeek-V4-Flash: all 5 groups are MLA/SWA-MLA with
     num_kv_heads=1, so replicated_layout must be True under TP/mp single-node."""
     assert _replicated_layout(
         _make_dsv4_flash_kv_cache_config(),
@@ -788,7 +745,7 @@ def test_replicated_layout_dsv4_flash(world_size: int):
 
 @pytest.mark.parametrize("world_size", [2, 4, 8])
 def test_replicated_layout_dsv3_2(world_size: int):
-    """DeepSeek-V3.2 / GLM-5.3: single UniformType group of MLAAttentionSpec
+    """DeepSeek-V3.2 / GLM-5.3: single group of MLAAttentionSpec
     layers (122 and 99 respectively), num_kv_heads=1 → replicated_layout must
     be True under TP/mp single-node."""
     assert _replicated_layout(
@@ -797,15 +754,14 @@ def test_replicated_layout_dsv3_2(world_size: int):
     )
 
 
-def test_replicated_layout_enabled_for_uniform_wrapper_mla():
-    """UniformTypeKVCacheSpecs wrapping MLA layers of different sizes qualifies:
-    each layer is replicated and the page accounting sums correctly."""
+def test_replicated_layout_enabled_for_mixed_layout_mla_group():
+    """A group of MLA layers of different sizes qualifies: each layer is
+    replicated and the page accounting sums correctly."""
     mla_layers = ["layer0", "layer1"]
-    spec = UniformTypeKVCacheSpecs(
-        block_size=16,
-        kv_cache_specs={"layer0": _mla_spec(), "layer1": _mla_spec(head_size=256)},
+    group = make_kv_cache_group_from_specs(
+        {"layer0": _mla_spec(), "layer1": _mla_spec(head_size=256)}
     )
-    total_page = spec.page_size_bytes
+    total_page = group.page_size_bytes
     num_blocks = 4
     kv_cache_config = KVCacheConfig(
         num_blocks=num_blocks,
@@ -817,7 +773,7 @@ def test_replicated_layout_enabled_for_uniform_wrapper_mla():
                 block_stride=total_page,
             )
         ],
-        kv_cache_groups=[KVCacheGroupSpec(mla_layers, spec)],
+        kv_cache_groups=[group],
     )
     assert _replicated_layout(kv_cache_config)
 
@@ -837,7 +793,7 @@ def test_replicated_layout_enabled_for_uniform_wrapper_mla():
                     )
                 ],
                 kv_cache_groups=[
-                    KVCacheGroupSpec(
+                    make_kv_cache_group(
                         ["layer"],
                         HiddenStateCacheSpec(
                             block_size=16,
@@ -870,8 +826,8 @@ def test_replicated_layout_enabled_for_uniform_wrapper_mla():
                     ),
                 ],
                 kv_cache_groups=[
-                    KVCacheGroupSpec(["mla"], _mla_spec()),
-                    KVCacheGroupSpec(["full"], _full_attention_spec()),
+                    make_kv_cache_group(["mla"], _mla_spec()),
+                    make_kv_cache_group(["full"], _full_attention_spec()),
                 ],
             ),
             "mla-full-hybrid",
@@ -894,8 +850,8 @@ def test_replicated_layout_enabled_for_uniform_wrapper_mla():
                     ),
                 ],
                 kv_cache_groups=[
-                    KVCacheGroupSpec(["mla"], _mla_spec()),
-                    KVCacheGroupSpec(["mamba"], _MAMBA_SPEC),
+                    make_kv_cache_group(["mla"], _mla_spec()),
+                    make_kv_cache_group(["mamba"], _MAMBA_SPEC),
                 ],
             ),
             "mla-mamba-hybrid",
@@ -929,17 +885,7 @@ def test_replicated_layout_excludes_unproven_cache_shapes(
                     )
                 ],
                 kv_cache_groups=[
-                    KVCacheGroupSpec(
-                        ["layer"],
-                        SlidingWindowMLASpec(
-                            block_size=16,
-                            num_kv_heads=1,
-                            max_tp_shards=1,
-                            head_size=512,
-                            dtype=torch.float32,
-                            sliding_window=128,
-                        ),
-                    )
+                    _swa_group(["layer"], _mla_spec()),
                 ],
             ),
             "sliding-window-mla",
@@ -964,19 +910,15 @@ def test_replicated_layout_excludes_unproven_cache_shapes(
                     ),
                 ],
                 kv_cache_groups=[
-                    KVCacheGroupSpec(
-                        ["layer0", "layer1"],
-                        UniformTypeKVCacheSpecs(
-                            block_size=16,
-                            kv_cache_specs={
-                                "layer0": _mla_spec(),
-                                "layer1": _mla_spec(head_size=256),
-                            },
-                        ),
+                    make_kv_cache_group_from_specs(
+                        {
+                            "layer0": _mla_spec(),
+                            "layer1": _mla_spec(head_size=256),
+                        }
                     )
                 ],
             ),
-            "uniform-wrapper",
+            "mixed-layout-group",
         ),
         (
             KVCacheConfig(
@@ -991,8 +933,8 @@ def test_replicated_layout_excludes_unproven_cache_shapes(
                     for layer in ("layer0", "layer1")
                 ],
                 kv_cache_groups=[
-                    KVCacheGroupSpec(["layer0"], _mla_spec()),
-                    KVCacheGroupSpec(["layer1"], _mla_spec()),
+                    make_kv_cache_group(["layer0"], _mla_spec()),
+                    make_kv_cache_group(["layer1"], _mla_spec()),
                 ],
             ),
             "multi-group-mla",
@@ -1000,7 +942,7 @@ def test_replicated_layout_excludes_unproven_cache_shapes(
     ],
     ids=[
         "sliding-window-mla",
-        "uniform-wrapper",
+        "mixed-layout-group",
         "multi-group-mla",
     ],
 )
@@ -1025,12 +967,12 @@ def test_replicated_layout_supported_cache_shapes(
             False,
         ),
     ],
-    ids=["uniform-mla-indexer", "uniform-mla-fa"],
+    ids=["mla-indexer", "mla-fa"],
 )
 def test_replicated_layout_for_dsa_style_groups(
     main_spec: KVCacheSpec, add_spec: KVCacheSpec, expected: bool
 ):
-    """KV Cache groups with packed-specs inside a UniformTypeKVCacheSpec."""
+    """KV cache groups whose layers have different layouts."""
     num_blocks = 4
     main_layers = [f"main_{i}" for i in range(61)]
     add_layers = [f"add_{i}" for i in range(61)]
@@ -1043,10 +985,6 @@ def test_replicated_layout_for_dsa_style_groups(
         **{layer: main_spec for layer in main_layers},
         **{layer: add_spec for layer in add_layers},
     }
-    layer_names = main_layers + add_layers
-    group_spec: KVCacheSpec = UniformTypeKVCacheSpecs(
-        block_size=16, kv_cache_specs=kv_cache_specs
-    )
 
     kv_cache_config = KVCacheConfig(
         num_blocks=num_blocks,
@@ -1065,7 +1003,7 @@ def test_replicated_layout_for_dsa_style_groups(
                 offset=main_bytes * num_blocks,
             ),
         ],
-        kv_cache_groups=[KVCacheGroupSpec(layer_names, group_spec)],
+        kv_cache_groups=[make_kv_cache_group_from_specs(kv_cache_specs)],
     )
 
     assert _replicated_layout(kv_cache_config) == expected
@@ -1105,45 +1043,40 @@ def test_replicated_layout_parallel_gate(kwargs: dict[str, Any], case: str):
 def test_parallelism_agnostic_for_single_full_attention_group():
     # The direct (non-canonical) parallelism-agnostic layout is MRV1-only.
     assert _parallelism_agnostic(
-        [KVCacheGroupSpec(["l0"], _full_attention_spec())], v2=False
+        [make_kv_cache_group(["l0"], _full_attention_spec())], v2=False
     )
 
 
-_SWA_SPEC = SlidingWindowSpec(
-    block_size=16,
-    num_kv_heads=4,
-    head_size=128,
-    dtype=torch.float32,
-    sliding_window=128,
-)
-_SWA_MLA_SPEC = SlidingWindowMLASpec(
-    block_size=16,
-    num_kv_heads=1,
-    max_tp_shards=1,
-    head_size=576,
-    dtype=torch.float32,
-    sliding_window=128,
-)
+_SWA = "swa"
+_SWA_MLA = "swa-mla"
 
 
-def _groups(*specs: KVCacheSpec) -> list[KVCacheGroupSpec]:
-    return [KVCacheGroupSpec([f"l{i}"], spec) for i, spec in enumerate(specs)]
+def _groups(*specs: KVCacheSpec | str) -> list[KVCacheGroupSpec]:
+    """One group per spec; ``_SWA``/``_SWA_MLA`` select a sliding-window group
+    of full-attention/MLA layout."""
+    groups = []
+    for i, spec in enumerate(specs):
+        if spec == _SWA:
+            groups.append(_swa_group([f"l{i}"], _full_attention_spec()))
+        elif spec == _SWA_MLA:
+            groups.append(_swa_group([f"l{i}"], _mla_spec(head_size=576)))
+        else:
+            assert isinstance(spec, KVCacheSpec)
+            groups.append(make_kv_cache_group([f"l{i}"], spec))
+    return groups
 
 
-def _uniform_group(*specs: KVCacheSpec) -> KVCacheGroupSpec:
-    """GLM-5.2/DSv3.2-style wrapper: same-type layers whose specs differ."""
+def _mixed_layout_group(*specs: KVCacheSpec) -> KVCacheGroupSpec:
+    """GLM-5.2/DSv3.2-style group: same-type layers whose specs differ."""
     names = [f"l{i}" for i in range(len(specs))]
-    return KVCacheGroupSpec(
-        names,
-        UniformTypeKVCacheSpecs(block_size=16, kv_cache_specs=dict(zip(names, specs))),
-    )
+    return make_kv_cache_group_from_specs(dict(zip(names, specs)))
 
 
 @pytest.mark.parametrize(
     "kv_cache_groups",
     [
         _groups(_mla_spec(head_size=576)),
-        _groups(_SWA_SPEC),
+        _groups(_SWA),
         _groups(_full_attention_spec(), _full_attention_spec()),
     ],
 )
@@ -1158,23 +1091,27 @@ def test_parallelism_agnostic_excluded(kv_cache_groups: list[KVCacheGroupSpec]):
     [
         pytest.param(_groups(_mla_spec(head_size=576)), True, id="mla-latent"),
         pytest.param(
-            _groups(_full_attention_spec(), _SWA_SPEC), True, id="attention-hybrid"
+            _groups(_full_attention_spec(), _SWA), True, id="attention-hybrid"
         ),
-        pytest.param(_groups(_SWA_MLA_SPEC), False, id="swa-mla"),
+        pytest.param(_groups(_SWA_MLA), False, id="swa-mla"),
         pytest.param(
             list(_make_mamba_hybrid_kv_cache_config().kv_cache_groups),
             False,
             id="mamba-hybrid",
         ),
         pytest.param(
-            [_uniform_group(_mla_spec(head_size=576), _mla_spec(head_size=128))],
+            [_mixed_layout_group(_mla_spec(head_size=576), _mla_spec(head_size=128))],
             True,
-            id="uniform-mla-wrapper",
+            id="mixed-layout-mla-group",
         ),
         pytest.param(
-            [_uniform_group(_mla_spec(head_size=576), _mla_spec(tokens_per_state=2))],
+            [
+                _mixed_layout_group(
+                    _mla_spec(head_size=576), _mla_spec(tokens_per_state=2)
+                )
+            ],
             False,
-            id="uniform-uncertifiable-inner",
+            id="mixed-layout-uncertifiable-layer",
         ),
     ],
 )
@@ -1186,11 +1123,13 @@ def test_canonical_layout_gate(kv_cache_groups, certified):
 
 
 @pytest.mark.parametrize(
-    ("spec"),
-    [_SWA_MLA_SPEC, _mla_spec(tokens_per_state=2)],
+    ("spec", "sliding_window"),
+    [(_mla_spec(head_size=576), 128), (_mla_spec(tokens_per_state=2), None)],
     ids=["swa", "compressed-mla"],
 )
-def test_uncertifiable_canonical_layout_resets_replication(spec: KVCacheSpec):
+def test_uncertifiable_canonical_layout_resets_replication(
+    spec: KVCacheSpec, sliding_window: int | None
+):
     def _get_offloading_config(canonical: bool):
         config = _make_vllm_config(
             tensor_parallel_size=2,
@@ -1210,7 +1149,9 @@ def test_uncertifiable_canonical_layout_resets_replication(spec: KVCacheSpec):
                 )
             ],
             kv_cache_groups=[
-                KVCacheGroupSpec(["layer"], spec),
+                make_kv_cache_group(["layer"], spec)
+                if sliding_window is None
+                else _swa_group(["layer"], spec, sliding_window)
             ],
         )
 
@@ -1246,18 +1187,18 @@ def test_canonical_mla_dsa_rows_are_tp_independent(tp_size, scheduler):
         f"l{i}": _mla_spec(block_size=64, head_size=size, dtype=torch.uint8)
         for i, size in enumerate([656] * 4 + [132] * 3)
     }
-    uniform = UniformTypeKVCacheSpecs(block_size=64, kv_cache_specs=specs)
+    group = make_kv_cache_group_from_specs(specs)
     kv_cache_config = KVCacheConfig(
         num_blocks=4,
         kv_cache_tensors=[
             KVCacheTensor(
-                size=4 * uniform.page_size_bytes,
+                size=4 * group.page_size_bytes,
                 layers=list(specs),
                 layer_stride=0,
-                block_stride=uniform.page_size_bytes,
+                block_stride=group.page_size_bytes,
             )
         ],
-        kv_cache_groups=[KVCacheGroupSpec(list(specs), uniform)],
+        kv_cache_groups=[group],
     )
     if scheduler:
         kv_cache_config = generate_scheduler_kv_cache_config([kv_cache_config])
@@ -1281,7 +1222,7 @@ def test_parallelism_agnostic_disabled_on_v2_model_runner():
     kv_cache_config = KVCacheConfig(
         num_blocks=0,
         kv_cache_tensors=[],
-        kv_cache_groups=[KVCacheGroupSpec(["l0"], _full_attention_spec())],
+        kv_cache_groups=[make_kv_cache_group(["l0"], _full_attention_spec())],
     )
 
     offloading_config = build_offloading_config(config, kv_cache_config)

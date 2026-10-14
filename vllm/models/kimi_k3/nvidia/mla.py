@@ -101,8 +101,9 @@ from vllm.v1.attention.backends.mla.prefill import get_mla_prefill_backend
 from vllm.v1.attention.ops.dcp import MLADCPManager
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
 from vllm.v1.attention.selector import get_attn_backend
+from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
 from vllm.v1.kv_cache_interface import (
-    KVCacheSpec,
+    KVCacheLayerConfig,
     MLAAttentionSpec,
     get_kv_quant_mode,
     is_quantized_kv_cache,
@@ -418,12 +419,11 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
     def get_attn_backend(self) -> type[AttentionBackend]:
         return self.attn_backend
 
-    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
+    def get_kv_cache_config(self, vllm_config: VllmConfig) -> KVCacheLayerConfig:
         kv_cache_dtype = kv_cache_dtype_str_to_dtype(
             self.kv_cache_dtype, vllm_config.model_config
         )
-        # TODO: Remove this mypy workaround once the K3 PR is fully merged.
-        return MLAAttentionSpec(  # type: ignore[call-arg]
+        spec = MLAAttentionSpec(
             block_size=vllm_config.cache_config.block_size,
             num_kv_heads=1,
             max_tp_shards=1,
@@ -435,6 +435,7 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
             state_content_bytes=656 if self.kv_cache_dtype == "fp8_ds_mla" else None,
             non_causal_multi_token_decode=self.non_causal_multi_token_decode,
         )
+        return FullAttentionManager.layer_config(spec)
 
     def process_weights_after_loading(self, act_dtype: torch.dtype) -> None:
         """Absorb ``kv_b_proj`` into decode-time ``W_UK_T`` / ``W_UV`` bmm weights.

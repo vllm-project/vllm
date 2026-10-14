@@ -56,13 +56,13 @@ from vllm.distributed.kv_transfer.kv_connector.v1.umbp.worker import (
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.core.kv_cache_utils import generate_scheduler_kv_cache_config
+from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
+    AttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheTensor,
     KVQuantMode,
-    UniformTypeKVCacheSpecs,
 )
 
 mori_available = importlib.util.find_spec("mori") is not None
@@ -72,19 +72,19 @@ pytestmark = pytest.mark.skipif(
     reason="UMBP is only available on ROCm with the mori package installed",
 )
 
-_LAYER1_SPEC = FullAttentionSpec(
+_LAYER1_SPEC = AttentionSpec(
     block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float16
 )
 _LAYER2_SPEC = replace(_LAYER1_SPEC, num_kv_heads=2)
 
 
 def _uniform_type_kv_cache_config(
-    layer2: FullAttentionSpec = _LAYER2_SPEC,
+    layer2: AttentionSpec = _LAYER2_SPEC,
     *,
     block_stride: int | None = None,
     num_blocks: int = 8,
 ) -> KVCacheConfig:
-    """One UniformTypeKVCacheSpecs group whose two layers have unequal pages.
+    """One full-attention group whose two layers have unequal pages.
 
     Without ``block_stride`` each layer is laid out layer-major with its own
     page as the block stride; with it both pages share one block-major stride.
@@ -104,12 +104,13 @@ def _uniform_type_kv_cache_config(
             )
         )
         offset += spec.page_size_bytes
-    group_spec = UniformTypeKVCacheSpecs.from_specs(specs)
-    assert group_spec is not None
+    group = KVCacheGroupSpec.from_layers(
+        {name: FullAttentionManager.layer_config(spec) for name, spec in specs.items()}
+    )
     return KVCacheConfig(
         num_blocks=num_blocks,
         kv_cache_tensors=tensors,
-        kv_cache_groups=[KVCacheGroupSpec(list(specs), group_spec)],
+        kv_cache_groups=[group],
     )
 
 
@@ -298,7 +299,7 @@ def test_namespace_fingerprints_uniform_type_layer_specs(baseline, variant):
 
 
 def test_scheduler_uses_worker_namespace_for_uniform_type_groups(monkeypatch):
-    """The scheduler sees a flattened group spec; keys must still match."""
+    """The scheduler adopts the workers' namespace, so keys match."""
     install_memory_runtime(monkeypatch)
     worker_config = _uniform_type_kv_cache_config(block_stride=192)
     vllm_config = _vllm_config({"mode": "embedded"})

@@ -3,8 +3,9 @@
 import itertools
 from abc import ABC, abstractmethod
 from collections import defaultdict
-from collections.abc import Sequence
-from typing import TYPE_CHECKING, ClassVar
+from collections.abc import Iterable, Sequence
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from vllm.distributed.kv_events import MEDIUM_CPU
 from vllm.utils.math_utils import cdiv
@@ -20,30 +21,26 @@ from vllm.v1.core.kv_cache_utils import (
 )
 from vllm.v1.hisparse.block_pool import SharedEventQueueBlockPool
 from vllm.v1.kv_cache_interface import (
-    AttentionSpec,
-    ChunkedLocalAttentionSpec,
-    CircularBufferSpec,
-    CrossAttentionSpec,
-    FullAttentionSpec,
-    HiddenStateCacheSpec,
-    HiSparseHotSpec,
-    HiSparseResidentSpec,
-    KVCacheGroupRole,
+    KVCacheGroupSpec,
+    KVCacheLayerConfig,
     KVCacheSpec,
-    MambaSpec,
+    KVCacheSpecKind,
+    ManagerConfig,
     MLAAttentionSpec,
-    RSWASpec,
-    SinkFullAttentionSpec,
-    SlidingWindowMLASpec,
-    SlidingWindowSpec,
     get_mamba_prefill_checkpoint_position,
     is_mamba_prefill_checkpoint_valid,
 )
-from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 from vllm.v1.request import Request
 
 if TYPE_CHECKING:
+    from vllm.config import VllmConfig
     from vllm.v1.hisparse.coordinator import HiSparseCoordinator
+
+
+_MLA_KINDS = {
+    KVCacheSpecKind.FULL_ATTENTION: KVCacheSpecKind.MLA_ATTENTION,
+    KVCacheSpecKind.SLIDING_WINDOW: KVCacheSpecKind.SLIDING_WINDOW_MLA,
+}
 
 
 class SingleTypeKVCacheManager(ABC):
@@ -51,10 +48,133 @@ class SingleTypeKVCacheManager(ABC):
     logic of one specific type of attention layer.
     """
 
+    Config: ClassVar[type[ManagerConfig]] = ManagerConfig
+
+    def __init_subclass__(cls, **kwargs):
+        super().__init_subclass__(**kwargs)
+        if "Config" in cls.__dict__:
+            cls.Config.manager_cls = cls
+        elif not cls.__name__.startswith("_"):
+            # An inherited Config would name the parent manager.
+            raise TypeError(f"{cls.__name__} must define its own Config")
+
+    # Whether every token keeps its KV for the request's lifetime, so cache
+    # hits are downward-closed.
+    is_full_attention: ClassVar[bool] = False
+
+    # Reported kind of the groups this manager allocates for.
+    kind: ClassVar[KVCacheSpecKind] = KVCacheSpecKind.UNKNOWN
+
+    # Whether the worker computes a per-token slot mapping for the group. Groups
+    # that address their pages themselves (raw storage, ring buffers) take none.
+    uses_slot_mapping: ClassVar[bool] = True
+
+    block_table_token_alignment: ClassVar[int | None] = 128
+
     supports_fine_grained_hash_lookup: ClassVar[bool] = False
+
+    # Whether worker-side KV cache zeroing applies to this manager's blocks.
+    zeroes_new_blocks: ClassVar[bool] = True
 
     # Keep this group's longer prefix until external cache lookup completes.
     retains_longer_hit: bool = False
+
+    @classmethod
+    def layer_config(cls, spec: KVCacheSpec, **config: Any) -> KVCacheLayerConfig:
+        """A layer whose KV cache this manager allocates with ``Config(**config)``."""
+        return KVCacheLayerConfig(cls.Config(**config), spec)
+
+    @classmethod
+    def prefix_cacheable(cls, config: ManagerConfig) -> bool:
+        """Whether groups managed by this policy participate in prefix caching."""
+        return True
+
+    @classmethod
+    def prefix_replay_tokens(cls, config: ManagerConfig) -> int:
+        """Tokens replayed before a prefix hit (DeepSeek-V4.1 bounded replay)."""
+        return 0
+
+    @classmethod
+    def attention_window(cls, config: ManagerConfig) -> int | None:
+        return None
+
+    @classmethod
+    def can_share_block_table(cls, specs: Sequence[KVCacheSpec]) -> bool:
+        """Whether layers with these layouts can share one block table, given
+        they already share this manager's policy, block size and DCP sharding."""
+        return True
+
+    @classmethod
+    def kv_cache_kind(cls, specs: Iterable[KVCacheSpec]) -> KVCacheSpecKind:
+        """The kind of a group of ``specs`` with this policy."""
+        if all(isinstance(spec, MLAAttentionSpec) for spec in specs):
+            return _MLA_KINDS.get(cls.kind, cls.kind)
+        return cls.kind
+
+    @classmethod
+    def max_admission_blocks(
+        cls,
+        config: ManagerConfig,
+        block_size: int,
+        max_in_flight_tokens: int,
+        max_model_len: int,
+    ) -> int | None:
+        """Per-request admission cap in blocks, for managers that recycle blocks.
+
+        Single source of truth for both startup pool sizing
+        (``max_blocks_per_request``) and the runtime admission gate, so requests
+        admitted by startup can also be admitted at runtime. ``None`` means no
+        cap: the request holds every block until it finishes.
+        """
+        return None
+
+    @classmethod
+    def max_blocks_per_request(
+        cls,
+        config: ManagerConfig,
+        block_size: int,
+        dcp_sharded: bool,
+        vllm_config: "VllmConfig",
+    ) -> int:
+        """The most blocks one request can hold at once in a group."""
+        max_model_len = vllm_config.model_config.max_model_len
+        max_blocks = cls.max_admission_blocks(
+            config,
+            block_size,
+            max_in_flight_tokens=vllm_config.max_in_flight_tokens,
+            max_model_len=max_model_len,
+        )
+        if max_blocks is not None:
+            return max_blocks
+        dcp_world_size = vllm_config.parallel_config.decode_context_parallel_size
+        if dcp_sharded and dcp_world_size > 1:
+            max_model_len = cdiv(max_model_len, dcp_world_size)
+        return cdiv(max_model_len, block_size)
+
+    @classmethod
+    def max_num_blocks_per_req(
+        cls,
+        config: ManagerConfig,
+        block_size: int,
+        dcp_sharded: bool,
+        vllm_config: "VllmConfig",
+        max_len: int,
+    ) -> int:
+        """The number of block table entries needed per request, i.e. the row
+        length of the worker-side block table for a group.
+
+        Args:
+            config: The group's manager config.
+            block_size: The group's block size.
+            dcp_sharded: Whether DCP shards the group's token positions.
+            vllm_config: The vllm config.
+            max_len: The maximum sequence length to size for, including the
+                encoder length for encoder-decoder models.
+
+        """
+        dcp_world_size = vllm_config.parallel_config.decode_context_parallel_size
+        kv_shard_count = dcp_world_size if dcp_sharded else 1
+        return cdiv(max_len, block_size * kv_shard_count)
 
     @property
     def has_positionally_stable_blocks(self) -> bool:
@@ -68,7 +188,7 @@ class SingleTypeKVCacheManager(ABC):
 
     def __init__(
         self,
-        kv_cache_spec: KVCacheSpec,
+        kv_cache_group: KVCacheGroupSpec,
         block_pool: BlockPool,
         enable_caching: bool,
         kv_cache_group_id: int,
@@ -81,7 +201,7 @@ class SingleTypeKVCacheManager(ABC):
         """Initializes the SingleTypeKVCacheManager.
 
         Args:
-            kv_cache_spec: The kv_cache_spec for this manager.
+            kv_cache_group: The KV cache group this manager allocates for.
             block_pool: The block pool.
             enable_caching: Whether prefix caching is enabled.
             kv_cache_group_id: The id of the kv cache group of this manager.
@@ -93,31 +213,30 @@ class SingleTypeKVCacheManager(ABC):
                 newly allocated block IDs from this manager.
             max_admission_blocks_per_request: Recycling-aware per-request
                 block cap used by `get_num_blocks_to_allocate`. Only set for
-                spec types that recycle blocks across chunks (SWA,
+                managers that recycle blocks across chunks (SWA,
                 chunked-local); `None` (the default) means no cap, which is
-                correct for full-attention-style specs that hold every
+                correct for full-attention-style managers that hold every
                 block until the request finishes.
 
         """
+        assert kv_cache_group.manager_cls is type(self)
+        self.manager_config = kv_cache_group.manager_config
         self.scheduler_block_size = scheduler_block_size
         # Hybrid fine-grained lookup may lower this after all participating
         # managers have been validated by the coordinator.
         self.cache_hit_alignment_tokens = scheduler_block_size
         # The block size for this manager; used for actual block allocation.
-        self.dcp_world_size = dcp_world_size if kv_cache_spec.dcp_sharded else 1
-        self.pcp_world_size = pcp_world_size if kv_cache_spec.dcp_sharded else 1
-        self.block_size = kv_cache_spec.block_size * self.dcp_world_size
-        self.kv_cache_spec = kv_cache_spec
+        self.dcp_world_size = dcp_world_size if kv_cache_group.dcp_sharded else 1
+        self.pcp_world_size = pcp_world_size if kv_cache_group.dcp_sharded else 1
+        # The group's block size before DCP scaling.
+        self.group_block_size = kv_cache_group.block_size
+        self.block_size = kv_cache_group.block_size * self.dcp_world_size
         self.block_pool = block_pool
         self.enable_caching = enable_caching
         self.max_admission_blocks_per_request = max_admission_blocks_per_request
         # Record newly allocated block ids only when worker-side zeroing will
-        # consume them and this manager holds a spec type that gets zeroed.
-        self._record_new_block_ids = (
-            needs_kv_cache_zeroing
-            and isinstance(kv_cache_spec, AttentionSpec)
-            and not isinstance(kv_cache_spec, CircularBufferSpec)
-        )
+        # consume them and this manager's blocks get zeroed.
+        self._record_new_block_ids = needs_kv_cache_zeroing and self.zeroes_new_blocks
         self.new_block_ids: list[int] = []
 
         # Mapping from request ID to blocks to track the blocks allocated
@@ -215,8 +334,7 @@ class SingleTypeKVCacheManager(ABC):
         if apply_admission_cap and self.max_admission_blocks_per_request is not None:
             # Recycling-aware specs (SWA, chunked-local) cap the per-request
             # reservation here so admission matches the startup pool sizer
-            # (`SlidingWindowSpec.max_admission_blocks_per_request` / its
-            # chunked-local counterpart). `remove_skipped_blocks` runs from
+            # (`max_admission_blocks`). `remove_skipped_blocks` runs from
             # `allocate_slots` before each chunk's `get_num_blocks_to_allocate`,
             # so per-request peak real-held blocks <= this cap, which keeps
             # `sum(reservations) <= pool` <=> `sum(peak_real_held) <= pool`.
@@ -496,7 +614,7 @@ class SingleTypeKVCacheManager(ABC):
                 can resume at, from ``replay_boundaries``.
 
         """
-        if not self.kv_cache_spec.prefix_cacheable:
+        if not self.prefix_cacheable(self.manager_config):
             return
         num_cached_blocks = self.num_cached_block.get(request.request_id, 0)
         num_full_blocks = num_tokens // self.block_size
@@ -522,7 +640,8 @@ class SingleTypeKVCacheManager(ABC):
             start_block=num_cached_blocks,
             end_block=num_full_blocks,
             alignment_tokens=self.cache_hit_alignment_tokens,
-            kv_cache_spec=self.kv_cache_spec,
+            block_size=self.group_block_size,
+            manager_config=self.manager_config,
             use_eagle=self.use_eagle,
             retention_interval=retention_interval,
             reachable_boundaries=reachable_boundaries,
@@ -546,7 +665,8 @@ class SingleTypeKVCacheManager(ABC):
         start_block: int,
         end_block: int,
         alignment_tokens: int | None,
-        kv_cache_spec: KVCacheSpec,
+        block_size: int,
+        manager_config: ManagerConfig,
         use_eagle: bool,
         retention_interval: int | None = None,
         reachable_boundaries: Sequence[int] = (),
@@ -605,7 +725,8 @@ class SingleTypeKVCacheManager(ABC):
         max_length: int,
         kv_cache_group_ids: list[int],
         block_pool: BlockPool,
-        kv_cache_spec: KVCacheSpec,
+        block_size: int,
+        manager_config: ManagerConfig,
         drop_eagle_block: bool,
         alignment_tokens: int,
         dcp_world_size: int = 1,
@@ -629,7 +750,8 @@ class SingleTypeKVCacheManager(ABC):
             max_length: The maximum length of the cache hit prefix.
             kv_cache_group_ids: The ids of the kv cache groups.
             block_pool: The block pool.
-            kv_cache_spec: The kv cache spec.
+            block_size: The groups' block size.
+            manager_config: The groups' manager config.
             drop_eagle_block: Whether to drop the last matched block for EAGLE/MTP.
                 Always False for non-EAGLE/MTP groups, but can be False for EAGLE/MTP
                 groups too if the last block is already dropped (e.g., in a
@@ -738,6 +860,16 @@ class SingleTypeKVCacheManager(ABC):
 class FullAttentionManager(SingleTypeKVCacheManager):
     supports_fine_grained_hash_lookup: ClassVar[bool] = True
 
+    @dataclass(frozen=True)
+    class Config(ManagerConfig):
+        non_causal: bool = False
+        """Whether the layer attends non-causally (e.g. Prefix LM). The engine
+        core disables chunked prefill and prefix caching for such models."""
+
+    is_full_attention: ClassVar[bool] = True
+
+    kind: ClassVar[KVCacheSpecKind] = KVCacheSpecKind.FULL_ATTENTION
+
     @classmethod
     def find_longest_cache_hit(
         cls,
@@ -745,19 +877,13 @@ class FullAttentionManager(SingleTypeKVCacheManager):
         max_length: int,
         kv_cache_group_ids: list[int],
         block_pool: BlockPool,
-        kv_cache_spec: KVCacheSpec,
+        block_size: int,
+        manager_config: ManagerConfig,
         drop_eagle_block: bool,
         alignment_tokens: int,
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
     ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
-        assert isinstance(
-            kv_cache_spec, FullAttentionSpec | ChunkedLocalAttentionSpec
-        ), (
-            "FullAttentionManager can only be used for full attention "
-            "and chunked local attention groups"
-        )
-        block_size = kv_cache_spec.block_size
         if dcp_world_size > 1:
             # DCP shards each block's KV across ranks; hashes must be viewed at
             # the sharded block size.
@@ -902,9 +1028,14 @@ class RSWAManager(FullAttentionManager):
     growing linearly with decode length.
     """
 
-    def __init__(self, kv_cache_spec: RSWASpec, **kwargs) -> None:
-        super().__init__(kv_cache_spec, **kwargs)
-        self.rswa_window: int = kv_cache_spec.rswa_window
+    @dataclass(frozen=True, kw_only=True)
+    class Config(FullAttentionManager.Config):
+        rswa_window: int
+
+    def __init__(self, kv_cache_group: KVCacheGroupSpec, **kwargs) -> None:
+        super().__init__(kv_cache_group, **kwargs)
+        assert isinstance(self.manager_config, RSWAManager.Config)
+        self.rswa_window: int = self.manager_config.rswa_window
 
     def remove_skipped_blocks(
         self,
@@ -940,13 +1071,95 @@ class RSWAManager(FullAttentionManager):
 
 
 class SlidingWindowManager(SingleTypeKVCacheManager):
-    def __init__(self, kv_cache_spec: SlidingWindowSpec, **kwargs) -> None:
-        super().__init__(kv_cache_spec, **kwargs)
-        self.sliding_window = kv_cache_spec.sliding_window
+    @dataclass(frozen=True)
+    class Config(ManagerConfig):
+        sliding_window: int
+        extra_retained_tokens: int = 0
+        """The trailing edge of the window is extended by this many tokens so
+        their blocks are retained (but not attended). Needed for multi-module
+        spec decoding, which can re-prefill the last
+        num_spec_prefill_tokens - 1 tokens from the end of the sequence and so
+        must delay freeing/caching of blocks."""
+        bounded_replay: bool = False
+        """DeepSeek-V4.1: replay the window instead of prefix caching it."""
+
+        @property
+        def num_retained_tokens(self) -> int:
+            """Tokens below a request's first scheduled position that must stay
+            readable. The worker nulls a step's block-table entries wholly below
+            that many tokens.
+            """
+            return self.sliding_window - 1 + self.extra_retained_tokens
+
+    @classmethod
+    def prefix_cacheable(cls, config: ManagerConfig) -> bool:
+        assert isinstance(config, SlidingWindowManager.Config)
+        return not config.bounded_replay
+
+    @classmethod
+    def attention_window(cls, config: ManagerConfig) -> int | None:
+        assert isinstance(config, SlidingWindowManager.Config)
+        return config.sliding_window
+
+    kind: ClassVar[KVCacheSpecKind] = KVCacheSpecKind.SLIDING_WINDOW
+
+    @classmethod
+    def prefix_replay_tokens(cls, config: ManagerConfig) -> int:
+        assert isinstance(config, SlidingWindowManager.Config)
+        return config.sliding_window if config.bounded_replay else 0
+
+    @classmethod
+    def max_admission_blocks(
+        cls,
+        config: ManagerConfig,
+        block_size: int,
+        max_in_flight_tokens: int,
+        max_model_len: int,
+    ) -> int | None:
+        # Per-request real-held blocks plateau at this bound because
+        # `remove_skipped_blocks` runs from `allocate_slots` before each chunk's
+        # `get_num_blocks_to_allocate`. During chunked prefill, we hold KV for
+        # the last `sliding_window-1` computed tokens plus the in-flight tokens
+        # (frees happen on the processed-token basis); never more than
+        # `max_model_len`. An additional `extra_retained_tokens` trailing tokens
+        # are kept alive below the window for multi-module spec decoding.
+        assert isinstance(config, SlidingWindowManager.Config)
+        num_tokens = min(
+            config.sliding_window
+            - 1
+            + config.extra_retained_tokens
+            + max_in_flight_tokens,
+            max_model_len,
+        )
+        # +1 because the sliding window may not start from the beginning of
+        # the block. E.g. block size 4 and num_token 4 needs two blocks
+        # [XXCD][EF] to store the 6-token window [CDEF].
+        return cdiv(num_tokens, block_size) + 1
+
+    @classmethod
+    def max_blocks_per_request(
+        cls,
+        config: ManagerConfig,
+        block_size: int,
+        dcp_sharded: bool,
+        vllm_config: "VllmConfig",
+    ) -> int:
+        assert (
+            not dcp_sharded
+            or vllm_config.parallel_config.decode_context_parallel_size == 1
+        ), "DCP not support sliding window."
+        return super().max_blocks_per_request(
+            config, block_size, dcp_sharded, vllm_config
+        )
+
+    def __init__(self, kv_cache_group: KVCacheGroupSpec, **kwargs) -> None:
+        super().__init__(kv_cache_group, **kwargs)
+        assert isinstance(self.manager_config, SlidingWindowManager.Config)
+        self.sliding_window = self.manager_config.sliding_window
         # Extra trailing tokens to retain below the window (never attended) so a
         # multi-module MTP store-side lag can still reconstruct the window from
         # cached blocks.
-        self.extra_retained_tokens = kv_cache_spec.extra_retained_tokens
+        self.extra_retained_tokens = self.manager_config.extra_retained_tokens
 
     @classmethod
     def _contiguous_blocks_for_hit(
@@ -968,13 +1181,14 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         max_length: int,
         kv_cache_group_ids: list[int],
         block_pool: BlockPool,
-        kv_cache_spec: KVCacheSpec,
+        block_size: int,
+        manager_config: ManagerConfig,
         drop_eagle_block: bool,
         alignment_tokens: int,
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
     ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
-        assert isinstance(kv_cache_spec, SlidingWindowSpec), (
+        assert isinstance(manager_config, SlidingWindowManager.Config), (
             "SlidingWindowManager can only be used for sliding window groups"
         )
         assert dcp_world_size == 1, "DCP not support sliding window attn now."
@@ -985,14 +1199,14 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         block_hashes = resolve_block_hashes(
             block_hashes,
             block_pool.hash_block_size,
-            kv_cache_spec.block_size,
+            block_size,
             supports_fine_grained_hash_lookup=cls.supports_fine_grained_hash_lookup,
             alignment_tokens=alignment_tokens,
         )
 
         # The number of contiguous blocks needed for a prefix cache hit.
         sliding_window_contiguous_blocks = cls._contiguous_blocks_for_hit(
-            kv_cache_spec.sliding_window, kv_cache_spec.block_size, drop_eagle_block
+            manager_config.sliding_window, block_size, drop_eagle_block
         )
 
         # TODO: reduce i by sliding_window_contiguous_blocks when cache miss, to
@@ -1000,12 +1214,11 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         # O(max_num_blocks / sliding_window_contiguous_blocks +
         # sliding_window_contiguous_blocks),
         # which is good for low cache hit rate scenarios.
-        max_num_blocks = max_length // kv_cache_spec.block_size
+        max_num_blocks = max_length // block_size
         computed_blocks: tuple[list[KVCacheBlock], ...] = tuple(
             [block_pool.null_block] * max_num_blocks
             for _ in range(len(kv_cache_group_ids))
         )
-        block_size = kv_cache_spec.block_size
         num_contiguous_blocks = 0
         match_found = False
         # Search from right to left and early stop when a match is found.
@@ -1065,18 +1278,19 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         start_block: int,
         end_block: int,
         alignment_tokens: int | None,
-        kv_cache_spec: KVCacheSpec,
+        block_size: int,
+        manager_config: ManagerConfig,
         use_eagle: bool,
         retention_interval: int | None = None,
         reachable_boundaries: Sequence[int] = (),
         dcp_world_size: int = 1,
         final_segment_end_block: int | None = None,
     ) -> list[bool] | None:
-        assert isinstance(kv_cache_spec, SlidingWindowSpec)
+        assert isinstance(manager_config, SlidingWindowManager.Config)
         if alignment_tokens is None:
             # Fast path: when the coordinator imposes no alignment constraint.
             return None
-        block_size = kv_cache_spec.block_size * dcp_world_size
+        block_size = block_size * dcp_world_size
         if alignment_tokens % block_size != 0:
             # The mask is block-granular, so a sub-block alignment cannot be
             # represented exactly. This happens for hybrid offloading, where
@@ -1088,7 +1302,7 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
 
         # Contiguous blocks a hit needs at a boundary (incl. the EAGLE peek).
         need = cls._contiguous_blocks_for_hit(
-            window_size=kv_cache_spec.sliding_window,
+            window_size=manager_config.sliding_window,
             block_size=block_size,
             use_eagle=use_eagle,
         )
@@ -1180,7 +1394,51 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
 
 
 class CircularBufferManager(FullAttentionManager):
-    """Claims the ring's single block per request; prefix caching disabled."""
+    """One block per request holding the raw keys of the token group that is
+    still being compressed; prefix caching is disabled.
+
+    ``block_size`` is the ring capacity. It must exceed the compression ratio
+    by the speculative lookahead: a speculative step stores all of its rows,
+    drafts included, before acceptance is known, while the next step still
+    reads the open group's committed keys from the ring.
+    """
+
+    is_full_attention: ClassVar[bool] = False
+    zeroes_new_blocks: ClassVar[bool] = False
+
+    @dataclass(frozen=True)
+    class Config(ManagerConfig):
+        pass
+
+    kind: ClassVar[KVCacheSpecKind] = KVCacheSpecKind.UNKNOWN
+    uses_slot_mapping: ClassVar[bool] = False
+    block_table_token_alignment: ClassVar[int | None] = None
+
+    @classmethod
+    def prefix_cacheable(cls, config: ManagerConfig) -> bool:
+        return False
+
+    @classmethod
+    def max_blocks_per_request(
+        cls,
+        config: ManagerConfig,
+        block_size: int,
+        dcp_sharded: bool,
+        vllm_config: "VllmConfig",
+    ) -> int:
+        # The ring occupies one block per request for its whole lifetime.
+        return 1
+
+    @classmethod
+    def max_num_blocks_per_req(
+        cls,
+        config: ManagerConfig,
+        block_size: int,
+        dcp_sharded: bool,
+        vllm_config: "VllmConfig",
+        max_len: int,
+    ) -> int:
+        return 1
 
     supports_fine_grained_hash_lookup: ClassVar[bool] = False
 
@@ -1230,7 +1488,8 @@ class CircularBufferManager(FullAttentionManager):
         max_length: int,
         kv_cache_group_ids: list[int],
         block_pool: BlockPool,
-        kv_cache_spec: KVCacheSpec,
+        block_size: int,
+        manager_config: ManagerConfig,
         drop_eagle_block: bool,
         alignment_tokens: int,
         dcp_world_size: int = 1,
@@ -1270,9 +1529,32 @@ class CircularBufferManager(FullAttentionManager):
 
 
 class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
-    def __init__(self, kv_cache_spec: ChunkedLocalAttentionSpec, **kwargs) -> None:
-        super().__init__(kv_cache_spec, **kwargs)
-        self.attention_chunk_size = kv_cache_spec.attention_chunk_size
+    @dataclass(frozen=True)
+    class Config(ManagerConfig):
+        attention_chunk_size: int
+
+    kind: ClassVar[KVCacheSpecKind] = KVCacheSpecKind.CHUNKED_LOCAL_ATTENTION
+
+    @classmethod
+    def max_admission_blocks(
+        cls,
+        config: ManagerConfig,
+        block_size: int,
+        max_in_flight_tokens: int,
+        max_model_len: int,
+    ) -> int | None:
+        # During chunked prefill, we hold KV for at most one chunk window plus
+        # the in-flight tokens, since frees happen on the processed-token basis.
+        assert isinstance(config, ChunkedLocalAttentionManager.Config)
+        num_tokens = min(
+            config.attention_chunk_size + max_in_flight_tokens, max_model_len
+        )
+        return cdiv(num_tokens, block_size)
+
+    def __init__(self, kv_cache_group: KVCacheGroupSpec, **kwargs) -> None:
+        super().__init__(kv_cache_group, **kwargs)
+        assert isinstance(self.manager_config, ChunkedLocalAttentionManager.Config)
+        self.attention_chunk_size = self.manager_config.attention_chunk_size
 
     @classmethod
     def find_longest_cache_hit(
@@ -1281,7 +1563,8 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
         max_length: int,
         kv_cache_group_ids: list[int],
         block_pool: BlockPool,
-        kv_cache_spec: KVCacheSpec,
+        block_size: int,
+        manager_config: ManagerConfig,
         drop_eagle_block: bool,
         alignment_tokens: int,
         dcp_world_size: int = 1,
@@ -1311,7 +1594,8 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
             max_length: The maximum length of the cache hit prefix.
             kv_cache_group_ids: The ids of the kv cache groups.
             block_pool: The block pool.
-            kv_cache_spec: The kv cache spec.
+            block_size: The groups' block size.
+            manager_config: The groups' manager config.
             drop_eagle_block: Whether to drop the last matched block for EAGLE/MTP.
             dcp_world_size: The world size of decode context parallelism.
             pcp_world_size: The world size of prefill context parallelism.
@@ -1322,7 +1606,7 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
             A list of cached blocks
 
         """
-        assert isinstance(kv_cache_spec, ChunkedLocalAttentionSpec), (
+        assert isinstance(manager_config, ChunkedLocalAttentionManager.Config), (
             "ChunkedLocalAttentionManager can only be used for "
             "chunked local attention groups"
         )
@@ -1331,23 +1615,23 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
         )
         assert dcp_world_size == 1, "DCP not support chunked local attn now."
         assert pcp_world_size == 1, "PCP not support chunked local attn now."
-        assert kv_cache_spec.block_size == alignment_tokens, (
+        assert block_size == alignment_tokens, (
             "KV cache groups with different block sizes are not compatible with "
             "chunked local attention now"
         )
         block_hashes = resolve_block_hashes(
             block_hashes,
             block_pool.hash_block_size,
-            kv_cache_spec.block_size,
+            block_size,
             supports_fine_grained_hash_lookup=cls.supports_fine_grained_hash_lookup,
             alignment_tokens=alignment_tokens,
         )
-        max_num_blocks = max_length // kv_cache_spec.block_size
+        max_num_blocks = max_length // block_size
         if max_length > 0:
             local_attention_start_idx = (
                 max_length
-                // kv_cache_spec.attention_chunk_size
-                * kv_cache_spec.attention_chunk_size
+                // manager_config.attention_chunk_size
+                * manager_config.attention_chunk_size
             )
         else:
             local_attention_start_idx = 0
@@ -1355,9 +1639,7 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
         # with null blocks, and blocks inside window based on cache lookup
         # result [null] [null] ... [null] [hit block 1 (1st block contain
         # last window)] [hit block 2] ... [hit block x]
-        local_attention_start_block_idx = (
-            local_attention_start_idx // kv_cache_spec.block_size
-        )
+        local_attention_start_block_idx = local_attention_start_idx // block_size
         computed_blocks: tuple[list[KVCacheBlock], ...] = tuple(
             [block_pool.null_block] * local_attention_start_block_idx
             for _ in range(len(kv_cache_group_ids))
@@ -1371,7 +1653,7 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
                     computed.append(cached)
             else:
                 break
-        hit_length = len(computed_blocks[0]) * kv_cache_spec.block_size
+        hit_length = len(computed_blocks[0]) * block_size
         return computed_blocks, hit_length
 
     def get_num_skipped_tokens(self, num_computed_tokens: int) -> int:
@@ -1423,6 +1705,7 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
 
 class MambaManager(SingleTypeKVCacheManager):
     supports_fine_grained_hash_lookup: ClassVar[bool] = True
+    zeroes_new_blocks: ClassVar[bool] = False
 
     @property
     def has_positionally_stable_blocks(self) -> bool:
@@ -1430,18 +1713,75 @@ class MambaManager(SingleTypeKVCacheManager):
         # blocks in place. Other modes retain positional identity.
         return self.mamba_cache_mode != "align"
 
+    @dataclass(frozen=True)
+    class Config(ManagerConfig):
+        mamba_cache_mode: str = "none"
+        num_speculative_blocks: int = 0
+        num_prefill_checkpoint_blocks: int = 0
+        prefill_checkpoint_alignment: int | None = None
+
+    kind: ClassVar[KVCacheSpecKind] = KVCacheSpecKind.MAMBA
+    block_table_token_alignment: ClassVar[int | None] = None
+
+    @classmethod
+    def can_share_block_table(cls, specs: Sequence[KVCacheSpec]) -> bool:
+        # Each state block holds one state, so every layer's page must match.
+        return (
+            len({spec.page_size_bytes for spec in specs}) == 1
+            and len({getattr(spec, "tp_replicated", False) for spec in specs}) == 1
+        )
+
+    @classmethod
+    def max_blocks_per_request(
+        cls,
+        config: ManagerConfig,
+        block_size: int,
+        dcp_sharded: bool,
+        vllm_config: "VllmConfig",
+    ) -> int:
+        assert isinstance(config, MambaManager.Config)
+        if config.mamba_cache_mode == "align":
+            return (
+                2 + config.num_speculative_blocks + config.num_prefill_checkpoint_blocks
+            )
+        return 1 + config.num_speculative_blocks
+
+    @classmethod
+    def max_num_blocks_per_req(
+        cls,
+        config: ManagerConfig,
+        block_size: int,
+        dcp_sharded: bool,
+        vllm_config: "VllmConfig",
+        max_len: int,
+    ) -> int:
+        # Mamba state is replicated across DCP/PCP ranks, never sharded, so
+        # no CP scaling applies.
+        assert isinstance(config, MambaManager.Config)
+        if config.mamba_cache_mode == "align":
+            # Block table rows are position-indexed over the full sequence
+            # even though only 2 + num_speculative_blocks state blocks are
+            # resident at a time (earlier states are nulled out by
+            # remove_skipped_blocks), so the row length must cover max_len
+            # rather than max_blocks_per_request.
+            return cdiv(max_len, block_size) + config.num_speculative_blocks
+        return cls.max_blocks_per_request(config, block_size, dcp_sharded, vllm_config)
+
     def __init__(
-        self, kv_cache_spec: MambaSpec, block_pool: BlockPool, **kwargs
+        self, kv_cache_group: KVCacheGroupSpec, block_pool: BlockPool, **kwargs
     ) -> None:
-        super().__init__(kv_cache_spec, block_pool, **kwargs)
-        self.mamba_cache_mode = kv_cache_spec.mamba_cache_mode
+        super().__init__(kv_cache_group, block_pool, **kwargs)
+        config = self.manager_config
+        assert isinstance(config, MambaManager.Config)
+        self.mamba_cache_mode = config.mamba_cache_mode
         assert self.mamba_cache_mode == "align" or not self.enable_caching, (
             "Mamba prefix caching requires mamba_cache_mode='align'"
         )
-        self.num_speculative_blocks: int = kv_cache_spec.num_speculative_blocks
+        self.num_speculative_blocks: int = config.num_speculative_blocks
+        self.prefill_checkpoint_alignment = config.prefill_checkpoint_alignment
         self.has_prefill_checkpoint_blocks = (
             self.mamba_cache_mode == "align"
-            and kv_cache_spec.num_prefill_checkpoint_blocks > 0
+            and config.num_prefill_checkpoint_blocks > 0
         )
         # Mamba checkpoints follow Eagle's global replay boundary.
         self.drop_eagle_checkpoint_block = False
@@ -1469,21 +1809,19 @@ class MambaManager(SingleTypeKVCacheManager):
         max_length: int,
         kv_cache_group_ids: list[int],
         block_pool: BlockPool,
-        kv_cache_spec: KVCacheSpec,
+        block_size: int,
+        manager_config: ManagerConfig,
         drop_eagle_block: bool,
         alignment_tokens: int,
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
     ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
-        assert isinstance(kv_cache_spec, MambaSpec), (
-            "MambaManager can only be used for mamba groups"
-        )
         assert dcp_world_size == 1, "DCP not support mamba now."
         assert pcp_world_size == 1, "PCP not support mamba now."
         block_hashes = resolve_block_hashes(
             block_hashes,
             block_pool.hash_block_size,
-            kv_cache_spec.block_size,
+            block_size,
             supports_fine_grained_hash_lookup=cls.supports_fine_grained_hash_lookup,
             alignment_tokens=alignment_tokens,
         )
@@ -1491,8 +1829,6 @@ class MambaManager(SingleTypeKVCacheManager):
             [] for _ in range(len(kv_cache_group_ids))
         )
         hit_length = 0
-
-        block_size = kv_cache_spec.block_size
         if alignment_tokens < block_size and block_size % alignment_tokens == 0:
             # list or lazy BlobBlockHashes view
             assert isinstance(block_hashes, Sequence)
@@ -1547,7 +1883,8 @@ class MambaManager(SingleTypeKVCacheManager):
         start_block: int,
         end_block: int,
         alignment_tokens: int | None,
-        kv_cache_spec: KVCacheSpec,
+        block_size: int,
+        manager_config: ManagerConfig,
         use_eagle: bool,
         retention_interval: int | None = None,
         reachable_boundaries: Sequence[int] = (),
@@ -1569,8 +1906,6 @@ class MambaManager(SingleTypeKVCacheManager):
         if retention_interval is None or alignment_tokens is None:
             # Dense caching (default) or no alignment constraint imposed.
             return None
-        assert isinstance(kv_cache_spec, MambaSpec)
-        block_size = kv_cache_spec.block_size
         mask = [False] * (end_block - start_block)
 
         # (1) Segment-boundary states. A Mamba hit needs exactly the single
@@ -1628,8 +1963,6 @@ class MambaManager(SingleTypeKVCacheManager):
         processed_computed_tokens: int,
         num_prompt_tokens: int | None = None,
     ) -> None:
-        assert isinstance(self.kv_cache_spec, MambaSpec)
-
         super().remove_skipped_blocks(
             request_id, processed_computed_tokens, num_prompt_tokens
         )
@@ -1660,7 +1993,6 @@ class MambaManager(SingleTypeKVCacheManager):
         checkpoint_position: int,
         prefill_end: int,
     ) -> bool:
-        assert isinstance(self.kv_cache_spec, MambaSpec)
         checkpoint_idx = cdiv(query_end, self.block_size) - 2
         blocks = self.req_to_blocks[request_id]
         return (
@@ -1672,7 +2004,7 @@ class MambaManager(SingleTypeKVCacheManager):
                 checkpoint_position=checkpoint_position,
                 hash_block_size=self.block_pool.hash_block_size,
                 mamba_block_size=self.block_size,
-                checkpoint_alignment=(self.kv_cache_spec.prefill_checkpoint_alignment),
+                checkpoint_alignment=self.prefill_checkpoint_alignment,
             )
             and checkpoint_idx >= 0
             and (
@@ -1696,7 +2028,6 @@ class MambaManager(SingleTypeKVCacheManager):
         apply_admission_cap: bool = False,
         prefill_end: int = 0,
     ) -> int:
-        assert isinstance(self.kv_cache_spec, MambaSpec)
         if (
             len(new_computed_blocks) > 0
             and new_computed_blocks[-1].block_hash in self.cached_blocks_this_step
@@ -1710,9 +2041,7 @@ class MambaManager(SingleTypeKVCacheManager):
             # Allocate extra `num_speculative_blocks` blocks for
             # speculative decoding (MTP/EAGLE) with linear attention.
             if self.num_speculative_blocks > 0:
-                num_tokens += (
-                    self.kv_cache_spec.block_size * self.num_speculative_blocks
-                )
+                num_tokens += self.block_size * self.num_speculative_blocks
             return super().get_num_blocks_to_allocate(
                 request_id,
                 num_tokens,
@@ -1792,7 +2121,6 @@ class MambaManager(SingleTypeKVCacheManager):
     def allocate_new_blocks(
         self, request_id: str, num_tokens: int, num_tokens_main_model: int
     ) -> list[KVCacheBlock]:
-        assert isinstance(self.kv_cache_spec, MambaSpec)
         if self.mamba_cache_mode != "align":
             # Allocate extra `num_speculative_blocks` blocks for
             # speculative decoding (MTP/EAGLE) with linear attention.
@@ -2052,7 +2380,8 @@ class MambaManager(SingleTypeKVCacheManager):
                     block_idx,
                     block_idx + 1,
                     self.cache_hit_alignment_tokens,
-                    self.kv_cache_spec,
+                    self.group_block_size,
+                    self.manager_config,
                     self.drop_eagle_checkpoint_block,
                     retention_interval=retention_interval,
                 )
@@ -2127,6 +2456,24 @@ class MambaManager(SingleTypeKVCacheManager):
 class CrossAttentionManager(SingleTypeKVCacheManager):
     """Manager for cross-attention KV cache in encoder-decoder models."""
 
+    @dataclass(frozen=True)
+    class Config(ManagerConfig):
+        pass
+
+    kind: ClassVar[KVCacheSpecKind] = KVCacheSpecKind.CROSS_ATTENTION
+
+    @classmethod
+    def max_blocks_per_request(
+        cls,
+        config: ManagerConfig,
+        block_size: int,
+        dcp_sharded: bool,
+        vllm_config: "VllmConfig",
+    ) -> int:
+        # Cross-attention caches encoder states (e.g., 1500 for Whisper).
+        max_encoder_len = vllm_config.scheduler_config.max_num_encoder_input_tokens
+        return cdiv(max_encoder_len, block_size)
+
     def add_local_computed_blocks(
         self,
         request_id: str,
@@ -2167,15 +2514,13 @@ class CrossAttentionManager(SingleTypeKVCacheManager):
         max_length: int,
         kv_cache_group_ids: list[int],
         block_pool: BlockPool,
-        kv_cache_spec: KVCacheSpec,
+        block_size: int,
+        manager_config: ManagerConfig,
         drop_eagle_block: bool,
         alignment_tokens: int,
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
     ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
-        assert isinstance(kv_cache_spec, CrossAttentionSpec), (
-            "CrossAttentionManager can only be used for cross-attention groups"
-        )
         # Cross-attention does not benefit from prefix caching since:
         # 1. Encoder states are unique per request (different audio/image
         #    inputs)
@@ -2185,28 +2530,46 @@ class CrossAttentionManager(SingleTypeKVCacheManager):
         raise NotImplementedError("CrossAttentionManager does not support caching")
 
 
+class EncoderOnlyAttentionManager(SingleTypeKVCacheManager):
+    """Policy for encoder-only attention layers, which hold no KV cache.
+
+    Their groups only exist on the worker to build attention metadata; the
+    scheduler never instantiates this manager.
+    """
+
+    @dataclass(frozen=True)
+    class Config(ManagerConfig):
+        pass
+
+    kind: ClassVar[KVCacheSpecKind] = KVCacheSpecKind.ENCODER_ONLY_ATTENTION
+
+    @classmethod
+    def max_blocks_per_request(
+        cls,
+        config: ManagerConfig,
+        block_size: int,
+        dcp_sharded: bool,
+        vllm_config: "VllmConfig",
+    ) -> int:
+        return 0
+
+    @classmethod
+    def find_longest_cache_hit(cls, *args, **kwargs):
+        raise NotImplementedError("Encoder-only attention has no KV cache.")
+
+
 class SinkFullAttentionManager(FullAttentionManager):
-    def __init__(
-        self,
-        kv_cache_spec: SinkFullAttentionSpec,
-        block_pool: BlockPool,
-        enable_caching: bool,
-        kv_cache_group_id: int,
-        scheduler_block_size: int,
-        dcp_world_size: int = 1,
-        pcp_world_size: int = 1,
-    ):
-        super().__init__(
-            kv_cache_spec=kv_cache_spec,
-            block_pool=block_pool,
-            enable_caching=enable_caching,
-            kv_cache_group_id=kv_cache_group_id,
-            scheduler_block_size=scheduler_block_size,
-            dcp_world_size=dcp_world_size,
-            pcp_world_size=pcp_world_size,
-        )
-        sink_len = kv_cache_spec.sink_len
-        assert sink_len is not None and sink_len > 0 and sink_len % self.block_size == 0
+    @dataclass(frozen=True, kw_only=True)
+    class Config(FullAttentionManager.Config):
+        sink_len: int
+
+    kind: ClassVar[KVCacheSpecKind] = KVCacheSpecKind.SINK_FULL_ATTENTION
+
+    def __init__(self, kv_cache_group: KVCacheGroupSpec, **kwargs) -> None:
+        super().__init__(kv_cache_group, **kwargs)
+        assert isinstance(self.manager_config, SinkFullAttentionManager.Config)
+        sink_len = self.manager_config.sink_len
+        assert sink_len > 0 and sink_len % self.block_size == 0
 
 
 class HiSparseSourceManager(FullAttentionManager):
@@ -2215,6 +2578,10 @@ class HiSparseSourceManager(FullAttentionManager):
     Every page gets a host block: allocation fails when the host pool cannot
     back it, so each GPU-resident page can be written back and later reclaimed.
     """
+
+    @dataclass(frozen=True)
+    class Config(FullAttentionManager.Config):
+        pass
 
     coordinator: "HiSparseCoordinator | None" = None
     # The host tier keeps prefixes the device groups have already lost.
@@ -2233,7 +2600,8 @@ class HiSparseSourceManager(FullAttentionManager):
         device_pool = self.block_pool
         self.block_pool = SharedEventQueueBlockPool(
             num_gpu_blocks=num_blocks,
-            enable_caching=self.enable_caching and self.kv_cache_spec.prefix_cacheable,
+            enable_caching=self.enable_caching
+            and self.prefix_cacheable(self.manager_config),
             hash_block_size=device_pool.hash_block_size,
             enable_kv_cache_events=device_pool.enable_kv_cache_events,
             metrics_collector=(
@@ -2346,6 +2714,11 @@ class _HiSparseAuxiliaryManager(SingleTypeKVCacheManager):
     """Base for ephemeral groups whose host source owns prefix caching."""
 
     coordinator: "HiSparseCoordinator | None" = None
+    zeroes_new_blocks: ClassVar[bool] = False
+
+    @classmethod
+    def prefix_cacheable(cls, config: ManagerConfig) -> bool:
+        return False
 
     def cache_blocks(
         self,
@@ -2364,7 +2737,8 @@ class _HiSparseAuxiliaryManager(SingleTypeKVCacheManager):
         max_length: int,
         kv_cache_group_ids: list[int],
         block_pool: BlockPool,
-        kv_cache_spec: KVCacheSpec,
+        block_size: int,
+        manager_config: ManagerConfig,
         drop_eagle_block: bool,
         alignment_tokens: int,
         dcp_world_size: int = 1,
@@ -2376,9 +2750,40 @@ class _HiSparseAuxiliaryManager(SingleTypeKVCacheManager):
 class HiSparseHotManager(_HiSparseAuxiliaryManager):
     """Allocate a hot region only after a request acquires CPU-only history."""
 
-    def __init__(self, kv_cache_spec: HiSparseHotSpec, **kwargs) -> None:
-        super().__init__(kv_cache_spec, **kwargs)
-        self.blocks_per_request = kv_cache_spec.blocks_per_request
+    @dataclass(frozen=True)
+    class Config(ManagerConfig):
+        blocks_per_request: int
+
+    uses_slot_mapping: ClassVar[bool] = False
+    block_table_token_alignment: ClassVar[int | None] = None
+
+    @classmethod
+    def max_blocks_per_request(
+        cls,
+        config: ManagerConfig,
+        block_size: int,
+        dcp_sharded: bool,
+        vllm_config: "VllmConfig",
+    ) -> int:
+        assert isinstance(config, HiSparseHotManager.Config)
+        return config.blocks_per_request
+
+    @classmethod
+    def max_num_blocks_per_req(
+        cls,
+        config: ManagerConfig,
+        block_size: int,
+        dcp_sharded: bool,
+        vllm_config: "VllmConfig",
+        max_len: int,
+    ) -> int:
+        assert isinstance(config, HiSparseHotManager.Config)
+        return config.blocks_per_request
+
+    def __init__(self, kv_cache_group: KVCacheGroupSpec, **kwargs) -> None:
+        super().__init__(kv_cache_group, **kwargs)
+        assert isinstance(self.manager_config, HiSparseHotManager.Config)
+        self.blocks_per_request = self.manager_config.blocks_per_request
         self.hot_required: set[str] = set()
 
     def require_hot(self, request_id: str) -> None:
@@ -2461,10 +2866,24 @@ class HiSparseHotManager(_HiSparseAuxiliaryManager):
 class HiSparseResidentManager(_HiSparseAuxiliaryManager):
     """Track GPU-resident pages for otherwise host-backed KV."""
 
+    @dataclass(frozen=True)
+    class Config(ManagerConfig):
+        pass
+
     max_admission_blocks_per_request: int
 
-    def __init__(self, kv_cache_spec: HiSparseResidentSpec, **kwargs) -> None:
-        super().__init__(kv_cache_spec, **kwargs)
+    @classmethod
+    def max_admission_blocks(
+        cls,
+        config: ManagerConfig,
+        block_size: int,
+        max_in_flight_tokens: int,
+        max_model_len: int,
+    ) -> int | None:
+        return cdiv(min(max_in_flight_tokens, max_model_len), block_size)
+
+    def __init__(self, kv_cache_group: KVCacheGroupSpec, **kwargs) -> None:
+        super().__init__(kv_cache_group, **kwargs)
         self.residency_changes: dict[str, dict[int, KVCacheBlock]] = {}
 
     def get_num_blocks_to_allocate(
@@ -2594,126 +3013,32 @@ class HiSparseResidentManager(_HiSparseAuxiliaryManager):
         ]
 
 
-def get_manager_for_kv_cache_spec(
-    kv_cache_spec: KVCacheSpec,
+def create_single_type_manager(
+    kv_cache_group: KVCacheGroupSpec,
     max_in_flight_tokens: int,
     max_model_len: int,
-    role: str | None = None,
     **kwargs,
 ) -> SingleTypeKVCacheManager:
-    """Get the appropriate manager for a given KVCacheSpec.
-
-    Uses the KVCacheSpecRegistry to look up the manager class, supporting
-    both built-in and custom specs registered via @register_kv_cache_spec
-    and KVCacheSpecRegistry.register.
+    """Instantiate the manager of one KV cache group.
 
     Args:
-        kv_cache_spec: The KVCacheSpec instance
+        kv_cache_group: The KV cache group.
         max_in_flight_tokens: The max tokens scheduled but not yet settled
             (one batch per concurrent step); see `VllmConfig.max_in_flight_tokens`
         max_model_len: The maximum context length the model could serve
-        role: Optional KV cache group role used to select a role-specific
-            manager
-    Returns:
-        An instance of the appropriate SingleTypeKVCacheManager subclass
 
     """
-    manager_class = KVCacheSpecRegistry.get_manager_class(kv_cache_spec, role)
-    assert manager_class is not None, (
-        f"No manager registered for KVCacheSpec {type(kv_cache_spec)}"
+    # Managers that recycle blocks take the same admission cap the startup pool
+    # sizer uses. R-SWA also recycles gap blocks but peak physical KV still
+    # fits the full-attention bound (prefix + window <= max_model_len), so it
+    # takes no separate cap.
+    manager_cls = kv_cache_group.manager_cls
+    max_admission_blocks = manager_cls.max_admission_blocks(
+        kv_cache_group.manager_config,
+        kv_cache_group.block_size,
+        max_in_flight_tokens=max_in_flight_tokens,
+        max_model_len=max_model_len,
     )
-    # SlidingWindow / ChunkedLocalAttention managers recycle blocks;
-    # the runtime admission cap must match the recycling-aware bound the
-    # startup pool sizer uses (single source of truth: the spec method).
-    # R-SWA also recycles gap blocks but peak physical KV still fits the
-    # full-attention bound (prefix + window <= max_model_len), so it inherits
-    # FullAttentionSpec sizing without a separate admission cap.
-    if isinstance(
-        kv_cache_spec,
-        (SlidingWindowSpec, ChunkedLocalAttentionSpec, HiSparseResidentSpec),
-    ):
-        kwargs["max_admission_blocks_per_request"] = (
-            kv_cache_spec.max_admission_blocks_per_request(
-                max_in_flight_tokens=max_in_flight_tokens,
-                max_model_len=max_model_len,
-            )
-        )
-    manager = manager_class(kv_cache_spec, **kwargs)
-    return manager
-
-
-def register_all_kvcache_specs(vllm_config):
-    """Built-in spec registration"""
-    KVCacheSpecRegistry.register_role_manager(
-        KVCacheGroupRole.HISPARSE_SOURCE, HiSparseSourceManager
-    )
-    KVCacheSpecRegistry.register(
-        FullAttentionSpec,
-        FullAttentionManager,
-        uniform_type_base_spec=FullAttentionSpec,
-    )
-    KVCacheSpecRegistry.register(
-        HiSparseHotSpec,
-        HiSparseHotManager,
-        uniform_type_base_spec=HiSparseHotSpec,
-    )
-    KVCacheSpecRegistry.register(
-        HiSparseResidentSpec,
-        HiSparseResidentManager,
-        uniform_type_base_spec=HiSparseResidentSpec,
-    )
-
-    KVCacheSpecRegistry.register(
-        SlidingWindowSpec,
-        SlidingWindowManager,
-        uniform_type_base_spec=SlidingWindowSpec,
-    )
-    KVCacheSpecRegistry.register(
-        CircularBufferSpec,
-        CircularBufferManager,
-        uniform_type_base_spec=CircularBufferSpec,
-    )
-    KVCacheSpecRegistry.register(
-        SlidingWindowMLASpec,
-        SlidingWindowManager,
-        uniform_type_base_spec=SlidingWindowMLASpec,
-    )
-
-    KVCacheSpecRegistry.register(
-        MambaSpec, MambaManager, uniform_type_base_spec=MambaSpec
-    )
-    KVCacheSpecRegistry.register(
-        ChunkedLocalAttentionSpec,
-        ChunkedLocalAttentionManager,
-        uniform_type_base_spec=ChunkedLocalAttentionSpec,
-    )
-    KVCacheSpecRegistry.register(
-        CrossAttentionSpec,
-        CrossAttentionManager,
-        uniform_type_base_spec=CrossAttentionSpec,
-    )
-
-    # FullAttentionSpec subclasses — grouped with FullAttentionSpec
-    KVCacheSpecRegistry.register(
-        MLAAttentionSpec, FullAttentionManager, uniform_type_base_spec=FullAttentionSpec
-    )
-    KVCacheSpecRegistry.register(
-        RSWASpec, RSWAManager, uniform_type_base_spec=FullAttentionSpec
-    )
-    # NOTE(Mengqing): HiddenStateCacheSpec won't take part in
-    # grouping, thus the uniform_type_base_spec is just a
-    # placeholder.
-    KVCacheSpecRegistry.register(
-        HiddenStateCacheSpec,
-        FullAttentionManager,
-        uniform_type_base_spec=FullAttentionSpec,
-    )
-    KVCacheSpecRegistry.register(
-        SinkFullAttentionSpec,
-        SinkFullAttentionManager,
-        uniform_type_base_spec=FullAttentionSpec,
-    )
-
-    from vllm.platforms import current_platform
-
-    current_platform.register_custom_kv_cache_specs(vllm_config)
+    if max_admission_blocks is not None:
+        kwargs["max_admission_blocks_per_request"] = max_admission_blocks
+    return manager_cls(kv_cache_group, **kwargs)

@@ -226,11 +226,11 @@ def test_colqwen3_5_bidirectional_contract_builds_encoder_only_attention(
     assert captured["attn_type"] is AttentionType.ENCODER_ONLY
 
 
-def test_colqwen3_5_encoder_only_attention_has_no_kv_cache_spec() -> None:
+def test_colqwen3_5_encoder_only_attention_has_no_kv_cache_config() -> None:
     from vllm.model_executor.layers.attention import Attention
     from vllm.v1.attention.backend import AttentionType
 
     attention = SimpleNamespace(attn_type=AttentionType.ENCODER_ONLY)
     vllm_config = SimpleNamespace(cache_config=SimpleNamespace(block_size=16))
 
-    assert Attention.get_kv_cache_spec(attention, vllm_config) is None
+    assert Attention.get_kv_cache_config(attention, vllm_config) is None

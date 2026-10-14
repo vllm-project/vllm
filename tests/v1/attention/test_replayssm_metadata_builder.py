@@ -19,6 +19,7 @@ from tests.v1.attention.utils import (
 from vllm.config import SpeculativeConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.config.mamba import MambaBackendEnum
+from vllm.v1.core.single_type_kv_cache_manager import MambaManager
 from vllm.v1.kv_cache_interface import MambaSpec
 
 BLOCK_SIZE = 16
@@ -242,6 +243,7 @@ def _create_replayssm_builder(
         ["layer0"],
         vllm_config,
         DEVICE,
+        kv_cache_manager_config=MambaManager.Config(mamba_cache_mode=mamba_cache_mode),
     )
 
 

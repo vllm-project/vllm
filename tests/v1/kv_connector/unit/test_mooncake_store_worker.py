@@ -17,6 +17,13 @@ import pytest
 import torch
 
 from tests.v1.attention.utils import dense_kv_cache_views
+from tests.v1.kv_connector.unit.offloading_connector.utils import (
+    circular_buffer_layer,
+    make_kv_cache_group,
+    make_kv_cache_group_from_specs,
+    mamba_layer,
+    sliding_window_layer,
+)
 from vllm.distributed import mooncake_store
 from vllm.distributed.kv_events import KVEventAggregator
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake import (
@@ -50,13 +57,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.scheduler impor
 )
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.core.kv_cache_utils import BlockHash, maybe_convert_block_hash
+from vllm.v1.core.single_type_kv_cache_manager import RSWAManager
 from vllm.v1.kv_cache_interface import (
-    CircularBufferSpec,
-    FullAttentionSpec,
+    AttentionSpec,
     KVCacheConfig,
-    KVCacheGroupSpec,
-    MambaSpec,
-    RSWASpec,
 )
 from vllm.v1.kv_cache_layout import KVCacheLayout
 
@@ -91,11 +95,11 @@ class _RecordingBlockHashes:
 
 
 def _default_send_coord() -> mooncake_store_worker.MooncakeStoreCoordinator:
-    from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec
+    from vllm.v1.kv_cache_interface import AttentionSpec
 
-    spec = FullAttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
+    spec = AttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
     return mooncake_store_worker.MooncakeStoreCoordinator(
-        [KVCacheGroupSpec(["layer0"], spec)],
+        [make_kv_cache_group(["layer0"], spec)],
         scheduler_block_size=16,
         hash_block_size=16,
     )
@@ -184,16 +188,16 @@ def _make_store_recving_thread(
     disk_offload_buffer_budget_bytes: int | None = None,
     is_hma_required: bool = False,
 ) -> mooncake_store_worker.KVCacheStoreRecvingThread:
-    from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec
+    from vllm.v1.kv_cache_interface import AttentionSpec
 
     token_database = ChunkedTokenDatabase(
         KeyMetadata("test-model", 0, 0, 0, 0), block_size=16
     )
     token_database.set_kv_caches_base_addr([0x1000])
     token_database.set_block_len([256])
-    spec = FullAttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
+    spec = AttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
     coord = mooncake_store_worker.MooncakeStoreCoordinator(
-        [KVCacheGroupSpec(["layer0"], spec)],
+        [make_kv_cache_group(["layer0"], spec)],
         scheduler_block_size=16,
         hash_block_size=16,
     )
@@ -344,18 +348,17 @@ def _make_kv_cache_config(
 ) -> object:
     """Minimal single-group KVCacheConfig for topology tests."""
     from vllm.v1.kv_cache_interface import (
-        FullAttentionSpec,
+        AttentionSpec,
         KVCacheConfig,
-        KVCacheGroupSpec,
     )
 
-    spec = FullAttentionSpec(
+    spec = AttentionSpec(
         block_size=block_size, num_kv_heads=8, head_size=64, dtype=None
     )
     return KVCacheConfig(
         num_blocks=10,
         kv_cache_tensors=[],
-        kv_cache_groups=[KVCacheGroupSpec(["layer0"], spec)],
+        kv_cache_groups=[make_kv_cache_group(["layer0"], spec)],
         prefix_cache_retention_interval=prefix_cache_retention_interval,
     )
 
@@ -365,18 +368,18 @@ def _make_qsa_hybrid_kv_cache_config():
         num_blocks=10,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            make_kv_cache_group(
                 ["full"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=800,
                     num_kv_heads=8,
                     head_size=64,
                     dtype=None,
                 ),
             ),
-            KVCacheGroupSpec(
+            make_kv_cache_group(
                 ["qsa"],
-                CircularBufferSpec(
+                circular_buffer_layer(
                     block_size=8,
                     num_kv_heads=1,
                     head_size=64,
@@ -384,9 +387,9 @@ def _make_qsa_hybrid_kv_cache_config():
                     dtype=torch.float16,
                 ),
             ),
-            KVCacheGroupSpec(
+            make_kv_cache_group(
                 ["mamba"],
-                MambaSpec(
+                mamba_layer(
                     block_size=800,
                     shapes=((1, 1),),
                     dtypes=(torch.float32,),
@@ -606,14 +609,14 @@ def test_tp_shared_kv_event_counts_existing_shards_as_satisfied():
 
 
 def test_tp_shared_receiving_reads_each_local_store_shard():
-    from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec
+    from vllm.v1.kv_cache_interface import AttentionSpec
 
     store = MagicMock()
     store.batch_get_into_multi_buffers.return_value = [1, 1, 1, 1]
     db, _ = _make_tp_shared_db()
-    spec = FullAttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
+    spec = AttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
     coord = mooncake_store_worker.MooncakeStoreCoordinator(
-        [KVCacheGroupSpec(["layer0"], spec)],
+        [make_kv_cache_group(["layer0"], spec)],
         scheduler_block_size=16,
         hash_block_size=16,
     )
@@ -1090,8 +1093,7 @@ def test_partial_tail_offload_skips_null_source_blocks():
 
 def test_store_sending_thread_skips_null_sparse_group_blocks():
     from vllm.v1.kv_cache_interface import (
-        FullAttentionSpec,
-        KVCacheGroupSpec,
+        AttentionSpec,
     )
 
     store = MagicMock()
@@ -1099,12 +1101,12 @@ def test_store_sending_thread_skips_null_sparse_group_blocks():
     store.batch_put_from_multi_buffers.side_effect = (
         lambda keys, addrs, sizes, replicate_config: [256] * len(keys)
     )
-    full = FullAttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
-    sparse = FullAttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
+    full = AttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
+    sparse = AttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
     coord = mooncake_store_worker.MooncakeStoreCoordinator(
         [
-            KVCacheGroupSpec(["full"], full),
-            KVCacheGroupSpec(["sparse"], sparse),
+            make_kv_cache_group(["full"], full),
+            make_kv_cache_group(["sparse"], sparse),
         ],
         scheduler_block_size=16,
         hash_block_size=16,
@@ -1149,19 +1151,17 @@ def test_partial_tail_offload_skips_cap_omitted_mamba_group():
     """A Mamba group omitted by the handoff cap must not fall back to the
     connector's positional block table."""
     from vllm.v1.kv_cache_interface import (
-        FullAttentionSpec,
-        KVCacheGroupSpec,
-        MambaSpec,
+        AttentionSpec,
     )
 
     store = MagicMock()
     store.batch_is_exist.side_effect = lambda keys: [0] * len(keys)
     store.batch_put_from_multi_buffers.side_effect = lambda keys, *a: [256] * len(keys)
 
-    full_spec = FullAttentionSpec(
+    full_spec = AttentionSpec(
         block_size=4, num_kv_heads=8, head_size=64, dtype=torch.float32
     )
-    mamba_spec = MambaSpec(
+    mamba_spec = mamba_layer(
         block_size=16,
         shapes=((1, 1),),
         dtypes=(torch.float32,),
@@ -1169,9 +1169,9 @@ def test_partial_tail_offload_skips_cap_omitted_mamba_group():
     )
     coord = mooncake_store_worker.MooncakeStoreCoordinator(
         [
-            KVCacheGroupSpec(["full"], full_spec),
-            KVCacheGroupSpec(["mamba-1"], mamba_spec),
-            KVCacheGroupSpec(["mamba-2"], mamba_spec),
+            make_kv_cache_group(["full"], full_spec),
+            make_kv_cache_group(["mamba-1"], mamba_spec),
+            make_kv_cache_group(["mamba-2"], mamba_spec),
         ],
         scheduler_block_size=16,
         hash_block_size=4,
@@ -1285,26 +1285,25 @@ def test_normal_save_excludes_mamba_group_and_null_blocks():
     block tables are not append-only) and must skip chunks whose block is the
     reserved null block, for any group."""
     from vllm.v1.kv_cache_interface import (
-        FullAttentionSpec,
-        KVCacheGroupSpec,
-        MambaSpec,
+        AttentionSpec,
     )
 
     store = MagicMock()
     store.batch_is_exist.side_effect = lambda keys: [0] * len(keys)
     store.batch_put_from_multi_buffers.side_effect = lambda keys, *a: [256] * len(keys)
 
-    full_spec = FullAttentionSpec(
-        block_size=16, num_kv_heads=8, head_size=64, dtype=None
-    )
-    mamba_spec = MambaSpec(
+    full_spec = AttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
+    mamba_spec = mamba_layer(
         block_size=16,
         shapes=((1, 1),),
         dtypes=(torch.float32,),
         mamba_cache_mode="align",
     )
     coord = mooncake_store_worker.MooncakeStoreCoordinator(
-        [KVCacheGroupSpec(["L0"], full_spec), KVCacheGroupSpec(["L1"], mamba_spec)],
+        [
+            make_kv_cache_group(["L0"], full_spec),
+            make_kv_cache_group(["L1"], mamba_spec),
+        ],
         scheduler_block_size=16,
         hash_block_size=16,
     )
@@ -2078,17 +2077,17 @@ def test_store_sending_thread_multiple_segments_share_logical_group_id():
 
 
 def test_store_sending_thread_group_ids_share_across_kv_cache_groups():
-    from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec
+    from vllm.v1.kv_cache_interface import AttentionSpec
 
     store = MagicMock()
     store.batch_is_exist.return_value = [0, 0, 0, 0]
     store.batch_put_from_multi_buffers.return_value = [256, 256, 256, 256]
     replicate_config = SimpleNamespace(group_ids=None)
-    spec = FullAttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
+    spec = AttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
     coord = mooncake_store_worker.MooncakeStoreCoordinator(
         [
-            KVCacheGroupSpec(["layer0"], spec),
-            KVCacheGroupSpec(["layer1"], spec),
+            make_kv_cache_group(["layer0"], spec),
+            make_kv_cache_group(["layer1"], spec),
         ],
         scheduler_block_size=16,
         hash_block_size=16,
@@ -2478,9 +2477,7 @@ def test_worker_init_excludes_nonprefix_cache_groups(monkeypatch):
         vllm_config, _make_qsa_hybrid_kv_cache_config()
     )
 
-    assert [
-        group.kv_cache_spec.block_size for group in store_worker._kv_cache_groups
-    ] == [800, 800]
+    assert [group.block_size for group in store_worker._kv_cache_groups] == [800, 800]
     assert [db.block_size for db in store_worker.token_dbs] == [800, 800]
 
 
@@ -2491,15 +2488,13 @@ def _make_two_full_attention_groups_kv_cache_config():
         num_blocks=10,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            make_kv_cache_group(
                 ["full0"],
-                FullAttentionSpec(
-                    block_size=800, num_kv_heads=8, head_size=64, dtype=None
-                ),
+                AttentionSpec(block_size=800, num_kv_heads=8, head_size=64, dtype=None),
             ),
-            KVCacheGroupSpec(
+            make_kv_cache_group(
                 ["full1"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=1600, num_kv_heads=8, head_size=64, dtype=None
                 ),
             ),
@@ -2693,18 +2688,19 @@ def test_worker_enables_lbnhc_store_tp_layout(tmp_path, monkeypatch):
     assert len(w._lookup_key_prefixes[0]) == 4
 
 
-def test_tp_sharded_layout_rejects_full_attention_subclasses():
-    spec = RSWASpec(
-        block_size=16,
-        num_kv_heads=8,
-        head_size=64,
-        dtype=None,
-        rswa_window=32,
-    )
+def test_tp_sharded_layout_rejects_full_attention_variants():
+    """Full-attention variants (here R-SWA, which frees decode-gap blocks)
+    have different cache-lifetime semantics and must not use the TP-sharded
+    layout, even though their cache layout is a plain ``AttentionSpec``."""
+    spec = AttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
     store_worker = object.__new__(worker.MooncakeStoreWorker)
     store_worker.pcp_size = 1
     store_worker.dcp_size = 1
-    store_worker._kv_cache_groups = [SimpleNamespace(kv_cache_spec=spec)]
+    store_worker._kv_cache_groups = [
+        make_kv_cache_group(
+            ["layer0"], spec, RSWAManager, RSWAManager.Config(rswa_window=32)
+        )
+    ]
 
     assert not store_worker._supports_tp_sharded_store_layout(LBHNCStoreLayout, {})
 
@@ -2982,11 +2978,8 @@ def test_requester_worker_init_builds_replicate_config_for_preferred_segment(
     assert w.store_replicate_config.preferred_segment == "10.0.0.7:50053"
 
 
-def test_worker_scales_uniform_attention_group_under_dcp(tmp_path, monkeypatch):
-    from vllm.v1.kv_cache_interface import (
-        KVCacheConfig,
-        UniformTypeKVCacheSpecs,
-    )
+def test_worker_scales_mixed_layout_attention_group_under_dcp(tmp_path, monkeypatch):
+    from vllm.v1.kv_cache_interface import KVCacheConfig
 
     store = MagicMock()
     store.setup.return_value = 0
@@ -3005,21 +2998,17 @@ def test_worker_scales_uniform_attention_group_under_dcp(tmp_path, monkeypatch):
         ),
     )
     inner_specs = {
-        "layer0": FullAttentionSpec(
+        "layer0": AttentionSpec(
             block_size=16, num_kv_heads=8, head_size=64, dtype=None
         ),
-        "layer1": FullAttentionSpec(
+        "layer1": AttentionSpec(
             block_size=16, num_kv_heads=4, head_size=64, dtype=None
         ),
     }
-    uniform_spec = UniformTypeKVCacheSpecs(
-        block_size=16,
-        kv_cache_specs=inner_specs,
-    )
     kv_cache_config = KVCacheConfig(
         num_blocks=10,
         kv_cache_tensors=[],
-        kv_cache_groups=[KVCacheGroupSpec(list(inner_specs), uniform_spec)],
+        kv_cache_groups=[make_kv_cache_group_from_specs(inner_specs)],
     )
 
     w = worker.MooncakeStoreWorker(
@@ -3027,11 +3016,8 @@ def test_worker_scales_uniform_attention_group_under_dcp(tmp_path, monkeypatch):
         kv_cache_config,
     )
 
-    scaled_spec = w._kv_cache_groups[0].kv_cache_spec
-    assert isinstance(scaled_spec, UniformTypeKVCacheSpecs)
-    assert scaled_spec.block_size == 64
-    assert all(spec.block_size == 64 for spec in scaled_spec.kv_cache_specs.values())
-    assert w.coord.attention_groups[0].spec.block_size == 64
+    assert w._kv_cache_groups[0].block_size == 64
+    assert w.coord.attention_groups[0].block_size == 64
     assert w.token_dbs[0].block_size == 64
 
 
@@ -3307,13 +3293,13 @@ def test_store_sending_thread_clamps_token_len_to_lcm():
 def test_store_sending_thread_skips_when_token_len_below_lcm():
     """Requests shorter than lcm_block_size cannot produce any aligned chunk,
     so neither the existence check nor the put should be issued."""
-    from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec
+    from vllm.v1.kv_cache_interface import AttentionSpec
 
     store = MagicMock()
     # lcm=64 via single full-attn block_size=64.
-    spec = FullAttentionSpec(block_size=64, num_kv_heads=8, head_size=64, dtype=None)
+    spec = AttentionSpec(block_size=64, num_kv_heads=8, head_size=64, dtype=None)
     coord = mooncake_store_worker.MooncakeStoreCoordinator(
-        [KVCacheGroupSpec(["L"], spec)],
+        [make_kv_cache_group(["L"], spec)],
         scheduler_block_size=64,
         hash_block_size=64,
     )
@@ -3354,9 +3340,7 @@ def test_store_sending_thread_only_stores_swa_blocks_in_window():
     ending at 32 and the block ending at 64.
     """
     from vllm.v1.kv_cache_interface import (
-        FullAttentionSpec,
-        KVCacheGroupSpec,
-        SlidingWindowSpec,
+        AttentionSpec,
     )
 
     store = MagicMock()
@@ -3367,10 +3351,8 @@ def test_store_sending_thread_only_stores_swa_blocks_in_window():
 
     store.batch_put_from_multi_buffers.side_effect = successful_put
 
-    full_spec = FullAttentionSpec(
-        block_size=32, num_kv_heads=8, head_size=64, dtype=None
-    )
-    swa_spec = SlidingWindowSpec(
+    full_spec = AttentionSpec(block_size=32, num_kv_heads=8, head_size=64, dtype=None)
+    swa_spec = sliding_window_layer(
         block_size=8,
         num_kv_heads=8,
         head_size=64,
@@ -3378,7 +3360,7 @@ def test_store_sending_thread_only_stores_swa_blocks_in_window():
         sliding_window=8,
     )
     coord = mooncake_store_worker.MooncakeStoreCoordinator(
-        [KVCacheGroupSpec(["L0"], full_spec), KVCacheGroupSpec(["L1"], swa_spec)],
+        [make_kv_cache_group(["L0"], full_spec), make_kv_cache_group(["L1"], swa_spec)],
         scheduler_block_size=32,
         hash_block_size=8,
     )
@@ -3431,9 +3413,7 @@ def test_store_sending_thread_only_stores_swa_blocks_in_window():
 
 def test_store_sending_thread_delta_saves_only_new_swa_boundary_chunks():
     from vllm.v1.kv_cache_interface import (
-        FullAttentionSpec,
-        KVCacheGroupSpec,
-        SlidingWindowSpec,
+        AttentionSpec,
     )
 
     store = MagicMock()
@@ -3442,10 +3422,8 @@ def test_store_sending_thread_delta_saves_only_new_swa_boundary_chunks():
         lambda keys, addrs, sizes, replicate_config: [256] * len(keys)
     )
 
-    full_spec = FullAttentionSpec(
-        block_size=32, num_kv_heads=8, head_size=64, dtype=None
-    )
-    swa_spec = SlidingWindowSpec(
+    full_spec = AttentionSpec(block_size=32, num_kv_heads=8, head_size=64, dtype=None)
+    swa_spec = sliding_window_layer(
         block_size=8,
         num_kv_heads=8,
         head_size=64,
@@ -3453,7 +3431,7 @@ def test_store_sending_thread_delta_saves_only_new_swa_boundary_chunks():
         sliding_window=8,
     )
     coord = mooncake_store_worker.MooncakeStoreCoordinator(
-        [KVCacheGroupSpec(["L0"], full_spec), KVCacheGroupSpec(["L1"], swa_spec)],
+        [make_kv_cache_group(["L0"], full_spec), make_kv_cache_group(["L1"], swa_spec)],
         scheduler_block_size=32,
         hash_block_size=8,
     )
@@ -3503,19 +3481,15 @@ def test_store_sending_thread_delta_saves_only_new_swa_boundary_chunks():
 def test_store_sending_thread_kv_events_use_group_chunk_metadata():
     from vllm.v1.core.kv_cache_utils import BlockHash, maybe_convert_block_hash
     from vllm.v1.kv_cache_interface import (
-        FullAttentionSpec,
-        KVCacheGroupSpec,
-        SlidingWindowSpec,
+        AttentionSpec,
     )
 
     store = MagicMock()
     store.batch_is_exist.side_effect = lambda keys: [0] * len(keys)
     store.batch_put_from_multi_buffers.return_value = [256, 256]
 
-    full_spec = FullAttentionSpec(
-        block_size=32, num_kv_heads=8, head_size=64, dtype=None
-    )
-    swa_spec = SlidingWindowSpec(
+    full_spec = AttentionSpec(block_size=32, num_kv_heads=8, head_size=64, dtype=None)
+    swa_spec = sliding_window_layer(
         block_size=8,
         num_kv_heads=8,
         head_size=64,
@@ -3523,7 +3497,7 @@ def test_store_sending_thread_kv_events_use_group_chunk_metadata():
         sliding_window=8,
     )
     coord = mooncake_store_worker.MooncakeStoreCoordinator(
-        [KVCacheGroupSpec(["L0"], full_spec), KVCacheGroupSpec(["L1"], swa_spec)],
+        [make_kv_cache_group(["L0"], full_spec), make_kv_cache_group(["L1"], swa_spec)],
         scheduler_block_size=32,
         hash_block_size=8,
     )
@@ -3729,9 +3703,8 @@ def _make_bare_worker(
     # lookup path works (the connector no longer carries a legacy single-group
     # path; everything flows through the coordinator).
     from vllm.v1.kv_cache_interface import (
-        FullAttentionSpec,
+        AttentionSpec,
         KVCacheConfig,
-        KVCacheGroupSpec,
         KVCacheTensor,
     )
 
@@ -3742,10 +3715,10 @@ def _make_bare_worker(
     worker._kv_connector_stats_lock = threading.Lock()
     worker.kv_connector_stats = MooncakeStoreConnectorStats()
 
-    spec = FullAttentionSpec(
+    spec = AttentionSpec(
         block_size=block_size, num_kv_heads=8, head_size=64, dtype=None
     )
-    group = KVCacheGroupSpec(["layer0", "__cross_layer__"], spec)
+    group = make_kv_cache_group(["layer0", "__cross_layer__"], spec)
     worker._kv_cache_config = KVCacheConfig(
         num_blocks=num_gpu_blocks,
         kv_cache_tensors=[
@@ -3794,16 +3767,16 @@ def test_mooncake_lookup_reuses_resolved_hash_checkpoint(
     )
 
     groups = [
-        KVCacheGroupSpec(
+        make_kv_cache_group(
             ["full"],
-            FullAttentionSpec(
+            AttentionSpec(
                 block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32
             ),
             is_eagle_group=use_eagle,
         ),
-        KVCacheGroupSpec(
+        make_kv_cache_group(
             ["mamba"],
-            MambaSpec(
+            mamba_layer(
                 block_size=mamba_block_size,
                 shapes=(1, 1),
                 dtypes=(torch.float32,),
@@ -3868,15 +3841,15 @@ def test_scheduler_follows_core_hit_alignment(alignment, expected):
     )
 
     groups = [
-        KVCacheGroupSpec(
+        make_kv_cache_group(
             ["full"],
-            FullAttentionSpec(
+            AttentionSpec(
                 block_size=32, num_kv_heads=1, head_size=1, dtype=torch.float32
             ),
         ),
-        KVCacheGroupSpec(
+        make_kv_cache_group(
             ["mamba"],
-            MambaSpec(
+            mamba_layer(
                 block_size=32,
                 shapes=(1, 1),
                 dtypes=(torch.float32,),
@@ -3979,24 +3952,22 @@ def test_lookup_key_prefixes_cover_pcp_rank_namespaces():
 def test_lookup_key_prefixes_expand_tp_sharded_groups_per_rank():
     """Replicated attention needs one namespace; sharded Mamba needs every rank."""
     from vllm.v1.kv_cache_interface import (
-        FullAttentionSpec,
-        KVCacheGroupSpec,
-        MambaSpec,
+        AttentionSpec,
     )
 
     worker = _make_bare_worker(block_size=16)
     worker.tp_size = 2
     worker.num_kv_head = 1
-    fa = FullAttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
-    mamba = MambaSpec(
+    fa = AttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
+    mamba = mamba_layer(
         block_size=16,
         shapes=((1, 1),),
         dtypes=(torch.float32,),
         mamba_cache_mode="align",
     )
     worker._kv_cache_groups = [
-        KVCacheGroupSpec(["l0"], fa),
-        KVCacheGroupSpec(["l1"], mamba),
+        make_kv_cache_group(["l0"], fa),
+        make_kv_cache_group(["l1"], mamba),
     ]
     worker.token_dbs = [
         ChunkedTokenDatabase(
@@ -4019,9 +3990,7 @@ def test_lookup_key_prefixes_expand_tp_sharded_groups_per_rank():
 
 def test_group_tp_replication_factors_mixed_mla_gqa_mamba():
     from vllm.v1.kv_cache_interface import (
-        FullAttentionSpec,
-        KVCacheGroupSpec,
-        MambaSpec,
+        AttentionSpec,
         MLAAttentionSpec,
     )
 
@@ -4029,17 +3998,17 @@ def test_group_tp_replication_factors_mixed_mla_gqa_mamba():
     worker.tp_size = 4
     worker.num_kv_head = 2
     mla = MLAAttentionSpec(block_size=16, num_kv_heads=1, head_size=64, dtype=None)
-    gqa = FullAttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
-    mamba = MambaSpec(
+    gqa = AttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
+    mamba = mamba_layer(
         block_size=16,
         shapes=((1, 1),),
         dtypes=(torch.float32,),
         mamba_cache_mode="align",
     )
     worker._kv_cache_groups = [
-        KVCacheGroupSpec(["l0"], mla),
-        KVCacheGroupSpec(["l1"], gqa),
-        KVCacheGroupSpec(["l2"], mamba),
+        make_kv_cache_group(["l0"], mla),
+        make_kv_cache_group(["l1"], gqa),
+        make_kv_cache_group(["l2"], mamba),
     ]
     worker.token_dbs = [
         ChunkedTokenDatabase(
@@ -4066,12 +4035,10 @@ def test_group_tp_replication_factors_mixed_mla_gqa_mamba():
 
 
 @pytest.mark.parametrize("spec_order", [("mla", "gqa"), ("gqa", "mla")])
-def test_uniform_group_uses_common_inner_replication_factor(spec_order):
+def test_mixed_layout_group_uses_common_inner_replication_factor(spec_order):
     from vllm.v1.kv_cache_interface import (
-        FullAttentionSpec,
-        KVCacheGroupSpec,
+        AttentionSpec,
         MLAAttentionSpec,
-        UniformTypeKVCacheSpecs,
     )
 
     worker = _make_bare_worker(block_size=16)
@@ -4081,18 +4048,10 @@ def test_uniform_group_uses_common_inner_replication_factor(spec_order):
         "mla": MLAAttentionSpec(
             block_size=16, num_kv_heads=1, head_size=64, dtype=None
         ),
-        "gqa": FullAttentionSpec(
-            block_size=16, num_kv_heads=1, head_size=64, dtype=None
-        ),
+        "gqa": AttentionSpec(block_size=16, num_kv_heads=1, head_size=64, dtype=None),
     }
     inner_specs = {name: specs_by_name[name] for name in spec_order}
-    uniform_spec = UniformTypeKVCacheSpecs(
-        block_size=16,
-        kv_cache_specs=inner_specs,
-    )
-    worker._kv_cache_groups = [
-        KVCacheGroupSpec(list(inner_specs), uniform_spec),
-    ]
+    worker._kv_cache_groups = [make_kv_cache_group_from_specs(inner_specs)]
 
     _refresh_group_tp_replication_factors(worker)
 
@@ -4105,24 +4064,22 @@ def test_uniform_group_uses_common_inner_replication_factor(spec_order):
 
 def test_lookup_rejects_boundary_missing_one_mamba_shard():
     from vllm.v1.kv_cache_interface import (
-        FullAttentionSpec,
-        KVCacheGroupSpec,
-        MambaSpec,
+        AttentionSpec,
     )
 
     worker = _make_bare_worker(block_size=16)
     worker.tp_size = 2
     worker.num_kv_head = 1
-    fa = FullAttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
-    mamba = MambaSpec(
+    fa = AttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
+    mamba = mamba_layer(
         block_size=16,
         shapes=((1, 1),),
         dtypes=(torch.float32,),
         mamba_cache_mode="align",
     )
     worker._kv_cache_groups = [
-        KVCacheGroupSpec(["l0"], fa),
-        KVCacheGroupSpec(["l1"], mamba),
+        make_kv_cache_group(["l0"], fa),
+        make_kv_cache_group(["l1"], mamba),
     ]
     worker.token_dbs = [
         ChunkedTokenDatabase(
@@ -4176,22 +4133,20 @@ def test_lookup_partial_prefix_returns_first_hit_length():
 def test_lookup_partial_tail_uses_hash_alignment():
     """A stored sub-block tail can serve a request extending past it."""
     from vllm.v1.kv_cache_interface import (
-        FullAttentionSpec,
-        KVCacheGroupSpec,
-        MambaSpec,
+        AttentionSpec,
     )
 
     worker = _make_bare_worker(block_size=16)
-    full = FullAttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
-    mamba = MambaSpec(
+    full = AttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
+    mamba = mamba_layer(
         block_size=16,
         shapes=((1, 1),),
         dtypes=(torch.float32,),
         mamba_cache_mode="align",
     )
     worker._kv_cache_groups = [
-        KVCacheGroupSpec(["full"], full),
-        KVCacheGroupSpec(["mamba"], mamba),
+        make_kv_cache_group(["full"], full),
+        make_kv_cache_group(["mamba"], mamba),
     ]
     worker.hash_block_size = 4
     worker.token_dbs = [
@@ -4249,22 +4204,20 @@ def test_lookup_full_hit_with_eagle_pops_once_not_twice():
 
 def test_lookup_plan_resolves_group_tail_keys_from_existing_hashes():
     from vllm.v1.kv_cache_interface import (
-        FullAttentionSpec,
-        KVCacheGroupSpec,
-        MambaSpec,
+        AttentionSpec,
     )
 
     worker = _make_bare_worker(block_size=16)
-    full = FullAttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
-    mamba = MambaSpec(
+    full = AttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
+    mamba = mamba_layer(
         block_size=16,
         shapes=((1, 1),),
         dtypes=(torch.float32,),
         mamba_cache_mode="align",
     )
     worker._kv_cache_groups = [
-        KVCacheGroupSpec(["full"], full),
-        KVCacheGroupSpec(["mamba"], mamba),
+        make_kv_cache_group(["full"], full),
+        make_kv_cache_group(["mamba"], mamba),
     ]
     worker.hash_block_size = 4
     worker.token_dbs = [
@@ -4320,22 +4273,20 @@ def test_lookup_plan_resolves_group_tail_keys_from_existing_hashes():
 
 def test_lookup_plan_recovers_tail_key_after_multi_chunk_convergence():
     from vllm.v1.kv_cache_interface import (
-        FullAttentionSpec,
-        KVCacheGroupSpec,
-        MambaSpec,
+        AttentionSpec,
     )
 
     worker = _make_bare_worker(block_size=16)
-    full = FullAttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
-    mamba = MambaSpec(
+    full = AttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
+    mamba = mamba_layer(
         block_size=16,
         shapes=((1, 1),),
         dtypes=(torch.float32,),
         mamba_cache_mode="align",
     )
     worker._kv_cache_groups = [
-        KVCacheGroupSpec(["full"], full),
-        KVCacheGroupSpec(["mamba"], mamba),
+        make_kv_cache_group(["full"], full),
+        make_kv_cache_group(["mamba"], mamba),
     ]
     worker.hash_block_size = 4
     worker.token_dbs = [
@@ -4390,13 +4341,11 @@ def test_lookup_full_hit_swa_degrades_when_no_stored_boundary_is_usable():
     so every load failed and the recompute re-entered the same lookup. The
     re-derivation must report that no stored boundary below the request end
     is usable."""
-    from vllm.v1.kv_cache_interface import KVCacheGroupSpec, SlidingWindowSpec
-
     worker = _make_bare_worker(block_size=16)
-    swa = SlidingWindowSpec(
+    swa = sliding_window_layer(
         block_size=16, num_kv_heads=8, head_size=64, dtype=None, sliding_window=32
     )
-    worker._kv_cache_groups = [KVCacheGroupSpec(["layer0"], swa)]
+    worker._kv_cache_groups = [make_kv_cache_group(["layer0"], swa)]
     worker.coord = mooncake_store_worker.MooncakeStoreCoordinator(
         worker._kv_cache_groups,
         scheduler_block_size=worker.hash_block_size,
@@ -4412,13 +4361,11 @@ def test_lookup_swa_single_group_returns_full_when_tail_window_present():
     """Single-SWA, sliding_window=32 (= 2 blocks): producer stored only the
     tail. Coordinator-driven lookup returns full prefix even though the
     pre-window blocks are absent."""
-    from vllm.v1.kv_cache_interface import KVCacheGroupSpec, SlidingWindowSpec
-
     worker = _make_bare_worker(block_size=16)
-    swa = SlidingWindowSpec(
+    swa = sliding_window_layer(
         block_size=16, num_kv_heads=8, head_size=64, dtype=None, sliding_window=32
     )
-    worker._kv_cache_groups = [KVCacheGroupSpec(["layer0"], swa)]
+    worker._kv_cache_groups = [make_kv_cache_group(["layer0"], swa)]
     worker.coord = mooncake_store_worker.MooncakeStoreCoordinator(
         worker._kv_cache_groups,
         scheduler_block_size=worker.hash_block_size,
@@ -4434,19 +4381,17 @@ def test_lookup_checks_all_potential_swa_hit_boundaries():
     current request's replay boundary.
     """
     from vllm.v1.kv_cache_interface import (
-        FullAttentionSpec,
-        KVCacheGroupSpec,
-        SlidingWindowSpec,
+        AttentionSpec,
     )
 
     worker = _make_bare_worker(block_size=8)
-    full = FullAttentionSpec(block_size=32, num_kv_heads=8, head_size=64, dtype=None)
-    swa = SlidingWindowSpec(
+    full = AttentionSpec(block_size=32, num_kv_heads=8, head_size=64, dtype=None)
+    swa = sliding_window_layer(
         block_size=8, num_kv_heads=8, head_size=64, dtype=None, sliding_window=8
     )
     worker._kv_cache_groups = [
-        KVCacheGroupSpec(["full"], full),
-        KVCacheGroupSpec(["swa"], swa),
+        make_kv_cache_group(["full"], full),
+        make_kv_cache_group(["swa"], swa),
     ]
     worker.token_dbs = [
         ChunkedTokenDatabase(
@@ -4495,19 +4440,17 @@ def test_lookup_applies_swa_mask_before_accessing_hashes():
     false-mask chunks pay neither the hash access nor the key-construction cost.
     """
     from vllm.v1.kv_cache_interface import (
-        FullAttentionSpec,
-        KVCacheGroupSpec,
-        SlidingWindowSpec,
+        AttentionSpec,
     )
 
     worker = _make_bare_worker(block_size=8)
-    full = FullAttentionSpec(block_size=32, num_kv_heads=8, head_size=64, dtype=None)
-    swa = SlidingWindowSpec(
+    full = AttentionSpec(block_size=32, num_kv_heads=8, head_size=64, dtype=None)
+    swa = sliding_window_layer(
         block_size=8, num_kv_heads=8, head_size=64, dtype=None, sliding_window=8
     )
     worker._kv_cache_groups = [
-        KVCacheGroupSpec(["full"], full),
-        KVCacheGroupSpec(["swa"], swa),
+        make_kv_cache_group(["full"], full),
+        make_kv_cache_group(["swa"], swa),
     ]
     worker.token_dbs = [
         ChunkedTokenDatabase(
@@ -4604,7 +4547,7 @@ def test_register_kv_caches_shared_storage(layout: KVCacheLayout):
     num_blocks = 10
     num_layers = 2
     worker = _make_bare_worker(num_gpu_blocks=num_blocks)
-    spec = FullAttentionSpec(
+    spec = AttentionSpec(
         block_size=16,
         num_kv_heads=2,
         head_size=8,
@@ -4647,25 +4590,24 @@ def test_register_kv_caches_uses_transfer_group_memory_domain():
     from vllm.v1.kv_cache_interface import (
         KVCacheConfig,
         KVCacheGroupRole,
-        KVCacheGroupSpec,
         KVCacheTensor,
     )
 
     host_num_blocks = 4
     gpu_num_blocks = 2
     page_size = 32
-    source_spec = FullAttentionSpec(
+    source_spec = AttentionSpec(
         block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float16
     )
-    indexer_spec = FullAttentionSpec(
+    indexer_spec = AttentionSpec(
         block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float16
     )
-    source_group = KVCacheGroupSpec(
+    source_group = make_kv_cache_group(
         ["source"],
         source_spec,
         host_resident=True,
     )
-    indexer_group = KVCacheGroupSpec(
+    indexer_group = make_kv_cache_group(
         ["indexer"],
         indexer_spec,
         enable_kv_transfer=False,
@@ -4744,7 +4686,7 @@ def test_register_kv_caches_separate_head_groups():
     num_blocks = 3
     num_layers = 2
     worker = _make_bare_worker(num_gpu_blocks=num_blocks)
-    spec = FullAttentionSpec(
+    spec = AttentionSpec(
         block_size=4,
         num_kv_heads=2,
         head_size=8,
@@ -4753,7 +4695,7 @@ def test_register_kv_caches_separate_head_groups():
         state_content_bytes=2 * 8 * 2,
     )
     layer_names = ["layer0", "__cross_layer__"]
-    worker._kv_cache_groups = [KVCacheGroupSpec(layer_names, spec)]
+    worker._kv_cache_groups = [make_kv_cache_group(layer_names, spec)]
     raw = torch.zeros(
         num_blocks * num_layers * spec.page_size_bytes,
         dtype=torch.int8,

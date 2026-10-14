@@ -183,23 +183,6 @@ def test_noncausal_decode_metadata_keeps_live_request_buffers():
     )
 
 
-def test_mla_cache_marker_is_promoted_to_group_capability():
-    kwargs = {
-        "block_size": 64,
-        "num_kv_heads": 1,
-        "head_size": 576,
-        "dtype": torch.bfloat16,
-    }
-    marked = MLAAttentionSpec(**kwargs, non_causal_multi_token_decode=True)
-    unmarked = MLAAttentionSpec(**kwargs)
-
-    assert MLAAttentionSpec.merge([marked, marked]).non_causal_multi_token_decode
-    assert not MLAAttentionSpec.merge(
-        [unmarked, unmarked]
-    ).non_causal_multi_token_decode
-    assert MLAAttentionSpec.merge([unmarked, marked]).non_causal_multi_token_decode
-
-
 def test_builder_scopes_noncausal_capability_to_its_layers():
     merged_spec = _merged_mla_spec()
     static_forward_context = {

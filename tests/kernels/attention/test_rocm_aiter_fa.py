@@ -313,19 +313,17 @@ def test_aiter_mha_backend_validates_kv_cache_block_size():
     """The backend should reject KV cache specs that cannot be gathered
     correctly by the ROCm kernel."""
     from vllm.v1.attention.backends.rocm_aiter_fa import AiterFlashAttentionBackend
-    from vllm.v1.kv_cache_interface import FullAttentionSpec
+    from vllm.v1.kv_cache_interface import AttentionSpec
 
     with pytest.raises(ValueError, match="Block size must be a multiple of 16"):
         AiterFlashAttentionBackend.customize_spec(
-            FullAttentionSpec(
+            AttentionSpec(
                 block_size=15, num_kv_heads=8, head_size=128, dtype=torch.bfloat16
             )
         )
     # block_size == 1 is the per-token page-size probe and must pass through.
     AiterFlashAttentionBackend.customize_spec(
-        FullAttentionSpec(
-            block_size=1, num_kv_heads=8, head_size=128, dtype=torch.bfloat16
-        )
+        AttentionSpec(block_size=1, num_kv_heads=8, head_size=128, dtype=torch.bfloat16)
     )
 
 

@@ -18,7 +18,8 @@ from vllm.v1.attention.backend import (
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
 )
-from vllm.v1.kv_cache_interface import CircularBufferSpec, KVCacheSpec
+from vllm.v1.core.single_type_kv_cache_manager import CircularBufferManager
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheLayerConfig
 
 # One bf16 ``[index_k | index_z]`` row: 2 * 256 * 2 bytes.
 _ROW_ELEMENTS = 512
@@ -78,7 +79,7 @@ class Step5CSATailRingMetadataBuilder(AttentionMetadataBuilder):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        spec = cast(CircularBufferSpec, self.kv_cache_spec)
+        spec = cast(AttentionSpec, self.kv_cache_spec)
         self.capacity = spec.page_size_bytes // _ROW_BYTES
         context = self.vllm_config.compilation_config.static_forward_context
         self.layers = [cast("Step5CSATailRing", context[n]) for n in self.layer_names]
@@ -163,9 +164,11 @@ class Step5CSATailRing(nn.Module, AttentionLayerBase):
         self.capacity = 0
         self.rows_per_block = 0
 
-    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
+    def get_kv_cache_config(self, vllm_config: VllmConfig) -> KVCacheLayerConfig:
         main = self._static_forward_context[self.main_layer_name]
-        main_spec = main.get_kv_cache_spec(vllm_config)
+        main_layer_config = main.get_kv_cache_config(vllm_config)
+        assert main_layer_config is not None
+        main_spec = main_layer_config.spec
         page_bytes = main_spec.page_size_bytes
         if page_bytes % _ROW_BYTES or page_bytes // _ROW_BYTES < self.required_rows:
             raise ValueError(
@@ -177,7 +180,7 @@ class Step5CSATailRing(nn.Module, AttentionLayerBase):
         # Declare the main block size so the ring does not coarsen the hybrid
         # prefix-cache alignment; the page holds ``capacity`` 1 KB rows.
         block_size = main_spec.block_size
-        return CircularBufferSpec(
+        spec = AttentionSpec(
             block_size=block_size,
             num_kv_heads=1,
             head_size=page_bytes // (block_size * torch.bfloat16.itemsize),
@@ -186,6 +189,7 @@ class Step5CSATailRing(nn.Module, AttentionLayerBase):
             # Rows are addressed across blocks, which may be strided.
             block_stride_alignment=_ROW_BYTES,
         )
+        return CircularBufferManager.layer_config(spec)
 
     def get_attn_backend(self) -> type[AttentionBackend]:
         return Step5CSATailRingBackend

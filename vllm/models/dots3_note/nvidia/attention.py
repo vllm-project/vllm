@@ -45,6 +45,7 @@ from vllm.v1.attention.backends.mla.triton_mla import (
     TritonMLAImpl,
     TritonMLAMetadataBuilder,
 )
+from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
 from vllm.v1.kv_cache_interface import KVCacheLayout, is_quantized_kv_cache
 from vllm.v1.worker.workspace import (
     current_workspace_manager,
@@ -321,9 +322,13 @@ class Dots3NoteMLAMetadataBuilder(TritonMLAMetadataBuilder):
 
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
     query_len_support = QueryLenSupport.UNIFORM
+    requires_kv_cache_manager_config: ClassVar[bool] = True
 
-    def __init__(self, kv_cache_spec, layer_names, vllm_config, device):
-        self.sliding_window = kv_cache_spec.sliding_window
+    def __init__(
+        self, kv_cache_spec, layer_names, vllm_config, device, kv_cache_manager_config
+    ):
+        assert isinstance(kv_cache_manager_config, SlidingWindowManager.Config)
+        self.sliding_window = kv_cache_manager_config.sliding_window
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
 
     def _reserve_attn_logits_workspace(self) -> None:

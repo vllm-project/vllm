@@ -12,7 +12,7 @@ if TYPE_CHECKING:
     from vllm.v1.kv_cache_interface import (
         KVCacheConfig,
         KVCacheGroupSpec,
-        KVCacheSpec,
+        KVCacheLayerConfig,
     )
 
 
@@ -38,7 +38,7 @@ class KVCacheConfigBuilder(ABC):
     def get_kv_cache_groups(
         self,
         vllm_config: "VllmConfig",
-        kv_cache_spec: dict[str, "KVCacheSpec"],
+        layer_configs: dict[str, "KVCacheLayerConfig"],
     ) -> list["KVCacheGroupSpec"]:
         """Split the given layers into KV cache groups.
 
