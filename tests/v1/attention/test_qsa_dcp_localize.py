@@ -240,6 +240,8 @@ def _select_with_indexer(monkeypatch, *, skip_topk, dcp_world_size):
         num_decode_tokens=num_tokens,
         decode_query_len=1,
         visible_blocks=torch.ones(num_tokens, dtype=torch.int32),
+        local_visible_blocks=torch.ones(num_tokens, dtype=torch.int32),
+        selector_shard=None,
         block_table=torch.zeros(num_tokens, 1, dtype=torch.int32),
         query_start_loc=torch.arange(num_tokens + 1),
         logical_positions=torch.arange(num_tokens),

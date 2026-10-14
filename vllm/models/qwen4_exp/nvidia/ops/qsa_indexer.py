@@ -8,8 +8,11 @@ import vllm.envs as envs
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     TritonWarmupTensor,
 )
+from vllm.models.qwen4_exp.common.qsa_cache import QSADCPShard
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+
+from .qsa_dcp_selector import merge_qsa_dcp_topk
 
 _TOPK_WORKSPACE_BYTES = 1024 * 1024
 _DECODE_BLOCK_N = 64
@@ -480,6 +483,7 @@ def _topk(
     compress_ratio: int,
     block_indices: torch.Tensor,
     topk_workspace: torch.Tensor,
+    selector_shard: QSADCPShard | None,
 ) -> None:
     # similar dispatch logic as DeepSeek indexer
     block_topk = token_topk // compress_ratio
@@ -502,6 +506,8 @@ def _topk(
         block_topk,
         logits.shape[1],
     )
+    if selector_shard is not None:
+        merge_qsa_dcp_topk(logits, block_indices, selector_shard)
 
 
 def qsa_select_paged_decode(
@@ -513,6 +519,7 @@ def qsa_select_paged_decode(
     compress_ratio: int,
     decode_query_len: int,
     block_indices: torch.Tensor,
+    selector_shard: QSADCPShard | None = None,
 ) -> None:
     """Score and select compressed blocks for a request-major decode batch.
 
@@ -527,6 +534,10 @@ def qsa_select_paged_decode(
         compress_ratio: Number of logical tokens represented by a cache row.
         decode_query_len: Number of query tokens per request.
         block_indices: Compressed-index output buffer.
+        selector_shard: This rank's share of the compressed cache with the
+            sharded selector. Scoring then covers this rank's states
+            (``visible_blocks`` must be rank-local) and the output holds the
+            global top-k states.
 
     """
     assert token_topk % compress_ratio == 0
@@ -572,6 +583,7 @@ def qsa_select_paged_decode(
         compress_ratio,
         block_indices,
         torch.empty((_TOPK_WORKSPACE_BYTES,), dtype=torch.uint8, device=q.device),
+        selector_shard,
     )
 
 
@@ -586,6 +598,7 @@ def qsa_select_paged_prefill(
     max_query_len: int,
     block_indices: torch.Tensor,
     max_seq_len: int,
+    selector_shard: QSADCPShard | None = None,
 ) -> None:
     """Score and select compressed prefill blocks in bounded chunks.
 
@@ -602,6 +615,7 @@ def qsa_select_paged_prefill(
         max_query_len: Maximum number of query tokens in one request.
         block_indices: Compressed-index output buffer.
         max_seq_len: Longest context length in the batch this step.
+        selector_shard: As for ``qsa_select_paged_decode``.
 
     """
     assert token_topk % compress_ratio == 0
@@ -609,9 +623,12 @@ def qsa_select_paged_prefill(
     assert q.dtype == k_cache.dtype, "Q and the compressed K cache must match"
     rows = q.shape[0]
     # No row scores beyond cdiv(max_seq_len, compress_ratio) compressed
-    # columns. Round up to 64 to keep the logits row stride
-    # cooperative_topk-compatible.
-    logits_width = triton.cdiv(triton.cdiv(max_seq_len, compress_ratio), 64) * 64
+    # columns, or this rank's share of them. Round up to 64 to keep the
+    # logits row stride cooperative_topk-compatible.
+    max_states = triton.cdiv(max_seq_len, compress_ratio)
+    if selector_shard is not None:
+        max_states = selector_shard.max_local_length(max_states)
+    logits_width = triton.cdiv(max_states, 64) * 64
     logits_width = min(max(64, logits_width), page_table.shape[1] * k_cache.shape[1])
 
     # chunk the inputs to keep temp logits below VLLM_SPARSE_INDEXER_MAX_LOGITS_MB
@@ -648,6 +665,7 @@ def qsa_select_paged_prefill(
             compress_ratio,
             block_indices[query_slice],
             topk_workspace,
+            selector_shard,
         )
 
 
