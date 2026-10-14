@@ -240,13 +240,7 @@ class FileSystemTierManager(SecondaryTierManager):
             self._use_o_direct,
         )
         self._job_block_counts[job_metadata.job_id] = len(keys)
-        try:
-            self._pool.enqueue_store(job_metadata.job_id, 1, [task])
-        except Exception:
-            self._job_block_counts.pop(job_metadata.job_id, None)
-            self._store_job_keys.pop(job_metadata.job_id, None)
-            self._store_job_contexts.pop(job_metadata.job_id, None)
-            raise
+        self._pool.enqueue_store(job_metadata.job_id, 1, [task])
 
     @override
     def submit_load(self, job_metadata: TransferJob) -> None:
@@ -342,9 +336,8 @@ class FileSystemTierManager(SecondaryTierManager):
     @override
     def take_events(self) -> Iterable[OffloadingEvent]:
         if self.events is not None:
-            events = self.events
-            self.events = []
-            yield from events
+            yield from self.events
+            self.events.clear()
 
     @override
     def drain_jobs(self) -> None:

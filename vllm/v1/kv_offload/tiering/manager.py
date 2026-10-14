@@ -222,8 +222,9 @@ class TieringOffloadingManager(OffloadingManager):
 
         # Pending promotion requests accumulated during lookup() calls; flushed
         # as one batched submit_load() per (tier, request) in on_schedule_end().
-        # Outer key: tier index. Inner key: ReqContext identity.
-        self._pending_load_submissions: dict[int, dict[int, PendingPromotion]] = {}
+        # Outer key: tier index. Inner key: req_context.req_id — the same ReqContext
+        # object is reused for all chunk lookups of a given request per engine step.
+        self._pending_load_submissions: dict[int, dict[str, PendingPromotion]] = {}
 
         # Gate for once-per-step execution of _maybe_process_finished_jobs().
         # Reset at the end of each step in on_schedule_end().
@@ -534,7 +535,7 @@ class TieringOffloadingManager(OffloadingManager):
         # Defer submit_load to on_schedule_end(). Group by (tier, request) so
         # each request's chunks are submitted as one batched job per tier.
         tier_pending = self._pending_load_submissions.setdefault(tier_idx, {})
-        ctx_id = id(req_context)
+        ctx_id = req_context.req_id
         if ctx_id not in tier_pending:
             tier_pending[ctx_id] = PendingPromotion(
                 keys=[], chunk_ids=[], req_context=req_context

@@ -748,16 +748,15 @@ def test_successful_store_emits_stored_event(fs_tier_with_events):
     tier.submit_store(make_job(1, keys, [0, 1]))
     assert all(r.success for r in drain(tier))
 
-    event_iter = iter(tier.take_events())
-    event = next(event_iter)
-    assert tier.events == []
+    events = list(tier.take_events())
+    assert len(events) == 1
+    event = events[0]
     assert event.keys == keys
     assert event.medium == Medium.STORAGE
     assert event.locality is Locality.LOCAL
     assert not event.removed
     assert event.req_context is _CTX
     assert tier._store_job_contexts == {}
-    event_iter.close()
     # take_events drains the buffer.
     assert list(tier.take_events()) == []
 

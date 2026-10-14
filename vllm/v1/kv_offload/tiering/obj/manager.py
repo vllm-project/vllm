@@ -301,14 +301,9 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
             if self._self_describing_kv_events:
                 self._store_job_contexts[job_metadata.job_id] = job_metadata.req_context
         obj_keys = (self._file_mapper.get_file_name(k) for k in job_metadata.keys)
-        try:
-            self._submit_transfer(
-                job_metadata.job_id, job_metadata.chunk_ids, obj_keys, NIXL_WRITE
-            )
-        except Exception:
-            self._store_job_keys.pop(job_metadata.job_id, None)
-            self._store_job_contexts.pop(job_metadata.job_id, None)
-            raise
+        self._submit_transfer(
+            job_metadata.job_id, job_metadata.chunk_ids, obj_keys, NIXL_WRITE
+        )
 
     def submit_load(self, job_metadata: TransferJob) -> None:
         self._load_job_keys[job_metadata.job_id] = list(job_metadata.keys)
@@ -416,9 +411,8 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
 
     def take_events(self) -> Iterable[OffloadingEvent]:
         if self.events is not None:
-            events = self.events
-            self.events = []
-            yield from events
+            yield from self.events
+            self.events.clear()
 
     def drain_jobs(self) -> None:
         """Block until every submitted transfer has completed or failed.
