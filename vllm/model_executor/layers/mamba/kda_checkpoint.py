@@ -29,18 +29,24 @@ class KDAPrefillCheckpointSplit:
     final state is the checkpoint, and the tail is rerun from it. Unlike the
     GDN split, no chunk-kernel metadata is carried: the KDA chunk kernels
     derive their chunk indices from the segment cu_seqlens themselves.
+
+    Attributes:
+        seg_bounds: cu_seqlens of the non-spec rows, each checkpointed row
+            cut in two.
+        first_seg: first segment of each non-spec row.
+        ckpt_rows: non-spec row of each checkpoint.
+        tail_tokens: token indices of the tails into the non-spec tensors.
+        tail_bounds: cu_seqlens of the tails.
+        rows: checkpoint of each row of ``MambaPrefillCheckpointMetadata``,
+            0 if none.
+
     """
 
-    # cu_seqlens of the non-spec rows, with each checkpointed row cut in two.
     seg_bounds: torch.Tensor
-    # First segment of each non-spec row.
     first_seg: torch.Tensor
-    # Non-spec row of each checkpoint.
     ckpt_rows: torch.Tensor
-    # Token indices of the tails into the non-spec tensors, and cu_seqlens.
     tail_tokens: torch.Tensor
     tail_bounds: torch.Tensor
-    # Checkpoint of each row of MambaPrefillCheckpointMetadata, 0 if none.
     rows: torch.Tensor
 
 

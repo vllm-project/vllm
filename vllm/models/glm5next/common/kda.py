@@ -172,14 +172,12 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         assert isinstance(spec, MambaSpec)
         alignment = kda_prefill_checkpoint_alignment(self.kda_prefill_backend)
         cache_config = vllm_config.cache_config
+        # The split export runs in the eager prefill branch, which spec-decode
+        # batches skip, and tails shorter than the prefix match unit cannot be
+        # reused.
         if (
             alignment is None
             and self.kda_prefill_backend == "triton"
-            # The Triton chunk kernel only returns final states, so the
-            # export splits checkpointed rows and reruns their tails inside
-            # one forward. It runs in the eager prefill branch, which
-            # spec-decode batches skip, and tails shorter than the prefix
-            # match unit cannot be reused.
             and cache_config.mamba_cache_mode == "align"
             and vllm_config.speculative_config is None
             and cache_config.prefix_match_unit in (None, spec.block_size)
@@ -394,8 +392,6 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
                     vllm_config.model_config.dtype,
                 ),
             )
-        # Both prefill backends export checkpoints through the same exporter;
-        # the Triton backend does it by splitting rows at each checkpoint.
         if self.kda_prefill_backend in ("flashkda", "triton"):
             self._checkpoint_exporter = FlashKDAPrefillCheckpointExporter(
                 state_len=self.conv_size - 1
@@ -756,8 +752,6 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
                     k=_rearr(k_ns),
                     v=_rearr(v_ns),
                     raw_g=g1_ns,
-                    # Chunk path wants the pre-sigmoided fp32 beta (its
-                    # kernels don't sigmoid); beta_ns is raw bf16 from forward.
                     beta=_cast_sigmoid(beta_ns.squeeze(0)).unsqueeze(0),
                     initial_state=initial_state,
                     A_log=self.A_log,

@@ -44,8 +44,8 @@ BLOCK_SIZE = 64
 
 
 def test_split_plan_cuts_only_checkpointed_rows() -> None:
-    # One decode row, then a checkpointed 200-token prefill and a plain
-    # 128-token one. The decode row stays its own segment.
+    # One decode row, a checkpointed 200-token prefill and a plain 128-token
+    # one; the decode row stays its own segment.
     qsl = [0, 1, 201, 329]
     offsets = [0, 192, 0]
     split = build_kda_prefill_checkpoint_split(
@@ -64,8 +64,7 @@ def test_split_plan_cuts_only_checkpointed_rows() -> None:
 
 
 def test_split_plan_segments_tile_all_tokens() -> None:
-    # Segments cover every non-spec token exactly once, so the segment run
-    # writes every output row the unsplit call would.
+    # The segment run must write every output row the unsplit call would.
     qsl = [0, 5, 133, 260, 316]
     offsets = [0, 64, 64, 0]
     split = build_kda_prefill_checkpoint_split(
