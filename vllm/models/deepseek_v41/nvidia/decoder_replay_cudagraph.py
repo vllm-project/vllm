@@ -13,6 +13,7 @@ from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.config.kernel import NATIVE_MEGA_MOE_BACKENDS
 from vllm.forward_context import get_forward_context, override_forward_context
 from vllm.models.deepseek_v41.decoder_replay_layers import DecoderReplayLayers
+from vllm.platforms import current_platform
 from vllm.v1.worker.gpu.cudagraph_utils import (
     BatchExecutionDescriptor,
     CudaGraphManager,
@@ -26,7 +27,7 @@ class DecoderReplayCudaGraphManager(CudaGraphManager):
     def __init__(self, vllm_config: VllmConfig, device, layers: DecoderReplayLayers):
         compilation = copy(vllm_config.compilation_config)
         scheduler = vllm_config.scheduler_config
-        sizes = compilation.decoder_replay_cudagraph_capture_sizes
+        sizes = list(compilation.decoder_replay_cudagraph_capture_sizes)
         if not sizes:
             bound = min(
                 compilation.max_cudagraph_capture_size,
@@ -38,6 +39,18 @@ class DecoderReplayCudaGraphManager(CudaGraphManager):
             while s < bound:
                 sizes.append(s)
                 s += max(layers.window, 1 << max(s.bit_length() - 4, 0))
+            # A 1-row unfinished chunk has to land on a captured size.
+            if current_platform.is_rocm():
+                sizes.extend(
+                    s
+                    for s in (1, 2, 4, 6, 8, 12, 16, 24, 32, 48, 64, 96)
+                    if s < min(layers.window, bound)
+                )
+        elif current_platform.is_rocm() and 1 not in sizes:
+            raise ValueError(
+                "decoder_replay_cudagraph_capture_sizes must include 1 on ROCm "
+                "so an unfinished prefill replay stays on a graph"
+            )
         sizes = sorted(set(sizes))
         if max(sizes) > scheduler.max_num_batched_tokens:
             raise ValueError(
