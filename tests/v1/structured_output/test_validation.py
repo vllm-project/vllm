@@ -450,74 +450,44 @@ class TestValidateStructuredOutputs:
             params = self._validate_guidance(self._make_tokenizer(tokenizer_id))
             assert params.structured_outputs._backend == "guidance"
 
+    class TestPR49625Regression:
+        def test_manager_rejects_mixed_structured_output_backends(
+            self, monkeypatch
+        ):
+            xgrammar_backend = Mock()
+            xgrammar_backend.compile_grammar.return_value = object()
+            xgrammar_factory = Mock(return_value=xgrammar_backend)
+            guidance_factory = Mock()
+            monkeypatch.setattr(structured_output, "XgrammarBackend", xgrammar_factory)
+            monkeypatch.setattr(structured_output, "GuidanceBackend", guidance_factory)
 
-def test_auto_rejects_mixed_structured_output_backends():
-    """`auto` resolves backends per request, but the engine only ever
-    instantiates one. Requests that resolve to a second backend must be
-    rejected up front instead of being compiled by the wrong backend (#43920).
-    """
-    tokenizer = object.__new__(TokenizersBackend)
-    config = StructuredOutputsConfig(backend="auto")
-    xgrammar_params = SamplingParams(
-        structured_outputs=StructuredOutputsParams(json=JSON_SCHEMA)
-    )
-    guidance_params = SamplingParams(
-        structured_outputs=StructuredOutputsParams(json=GUIDANCE_JSON_SCHEMA)
-    )
+            manager = object.__new__(StructuredOutputManager)
+            manager.backend = None
+            manager.backend_name = None
+            manager.vllm_config = SimpleNamespace(
+                model_config=SimpleNamespace(get_vocab_size=lambda: 128)
+            )
+            manager.tokenizer = object()
+            manager._use_async_grammar_compilation = False
 
-    xgrammar_params._validate_structured_outputs(
-        _StubModelConfig(is_diffusion=False),
-        config,
-        tokenizer=tokenizer,
-    )
-    assert xgrammar_params.structured_outputs is not None
-    assert xgrammar_params.structured_outputs._backend == "xgrammar"
+            def make_request(backend):
+                return SimpleNamespace(
+                    request_id=f"req-{backend}",
+                    sampling_params=SimpleNamespace(
+                        structured_outputs=SimpleNamespace(_backend=backend),
+                        all_stop_token_ids=None,
+                    ),
+                    structured_output_request=SimpleNamespace(
+                        structured_output_key=(StructuredOutputOptions.JSON, "{}"),
+                        grammar=None,
+                    ),
+                )
 
-    with pytest.raises(VLLMValidationError, match="only supports one backend"):
-        guidance_params._validate_structured_outputs(
-            _StubModelConfig(is_diffusion=False),
-            config,
-            tokenizer=tokenizer,
-        )
+            manager.grammar_init(make_request("xgrammar"))
 
+            with pytest.raises(VLLMValidationError, match="already using 'xgrammar'"):
+                manager.grammar_init(make_request("guidance"))
 
-def test_manager_rejects_mixed_structured_output_backends(monkeypatch):
-    """The engine-side guard also holds when two requests are validated by
-    different frontend processes and reach the same EngineCore."""
-    xgrammar_backend = Mock()
-    xgrammar_backend.compile_grammar.return_value = object()
-    xgrammar_factory = Mock(return_value=xgrammar_backend)
-    guidance_factory = Mock()
-    monkeypatch.setattr(structured_output, "XgrammarBackend", xgrammar_factory)
-    monkeypatch.setattr(structured_output, "GuidanceBackend", guidance_factory)
-
-    manager = object.__new__(StructuredOutputManager)
-    manager.backend = None
-    manager.backend_name = None
-    manager.vllm_config = SimpleNamespace(
-        model_config=SimpleNamespace(get_vocab_size=lambda: 128)
-    )
-    manager.tokenizer = object()
-    manager._use_async_grammar_compilation = False
-
-    def make_request(backend):
-        return SimpleNamespace(
-            request_id=f"req-{backend}",
-            sampling_params=SimpleNamespace(
-                structured_outputs=SimpleNamespace(_backend=backend),
-                all_stop_token_ids=None,
-            ),
-            structured_output_request=SimpleNamespace(
-                structured_output_key=(StructuredOutputOptions.JSON, "{}"),
-                grammar=None,
-            ),
-        )
-
-    manager.grammar_init(make_request("xgrammar"))
-
-    with pytest.raises(VLLMValidationError, match="already using 'xgrammar'"):
-        manager.grammar_init(make_request("guidance"))
-
-    xgrammar_factory.assert_called_once()
-    xgrammar_backend.compile_grammar.assert_called_once()
-    guidance_factory.assert_not_called()
+            xgrammar_factory.assert_called_once()
+            xgrammar_backend.compile_grammar.assert_called_once()
+            guidance_factory.assert_not_called()

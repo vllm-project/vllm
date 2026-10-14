@@ -799,6 +799,8 @@ class AsyncLLM(EngineClient):
                 assert isinstance(out, RequestOutput)
                 finished = out.finished
                 if out is not STREAM_FINISHED:
+                    if out.error is not None and out.error.code == "validation_error":
+                        raise VLLMValidationError(out.error.message)
                     yield out
 
         # If the request is disconnected by the client, generate()

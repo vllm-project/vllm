@@ -51,6 +51,10 @@ class StructuredOutputManager:
 
     def __init__(self, vllm_config: VllmConfig):
         self.backend: StructuredOutputBackend | None = None
+        # FIXME(arpera):
+        # We store backend_name because
+        # currently we support only one backend per engine
+        # This is a known limitation
         self.backend_name: str | None = None
         # We only store the class of the reasoner in the manager.
         # The parser instance is request-scoped because some reasoning parsers
@@ -130,8 +134,9 @@ class StructuredOutputManager:
         if request.structured_output_request is None:
             return
 
-        assert request.sampling_params is not None
-        structured_outputs = request.sampling_params.structured_outputs
+        sampling_params = request.sampling_params
+        assert sampling_params is not None
+        structured_outputs = sampling_params.structured_outputs
         assert structured_outputs is not None
         request_backend = structured_outputs._backend
         assert request_backend is not None
