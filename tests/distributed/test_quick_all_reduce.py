@@ -318,6 +318,9 @@ def test_rocm_aiter_fused_rmsnorm_uses_aiter_qr_rmsnorm_for_prefill(
         def __init__(self):
             self.checked_input = None
 
+        def uses_flydsl_int4(self, inp):
+            return False
+
         def should_quick_allreduce(self, inp):
             self.checked_input = inp
             return True

@@ -1096,6 +1096,24 @@ def _rocm_aiter_rmsnorm_fused_dynamic_quant_fake(
     return out, y_scale
 
 
+def _unfused_allreduce_rmsnorm(
+    input_: torch.Tensor,
+    residual: torch.Tensor,
+    weight: torch.Tensor,
+    epsilon: float,
+    gemma_norm: bool,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    from vllm.distributed import tensor_model_parallel_all_reduce
+
+    return torch.ops.vllm_aiter.fused_add_rms_norm(
+        tensor_model_parallel_all_reduce(input_),
+        residual,
+        weight,
+        epsilon,
+        gemma_norm,
+    )
+
+
 def _rocm_aiter_fused_allreduce_rmsnorm_impl(
     input_: torch.Tensor,
     residual: torch.Tensor,
@@ -1113,6 +1131,12 @@ def _rocm_aiter_fused_allreduce_rmsnorm_impl(
 
         device_comm = get_tp_group().device_communicator
         qr_comm = getattr(device_comm, "qr_comm", None)
+        if qr_comm is not None and qr_comm.uses_flydsl_int4(input_):
+            # FlyDSL QuickReduce has no fused RMSNorm kernel, and at this size
+            # it plus a separate RMSNorm is faster than the fused kernels.
+            return _unfused_allreduce_rmsnorm(
+                input_, residual, weight, epsilon, gemma_norm
+            )
         hidden_dim = input_.shape[-1]
         row_size = hidden_dim * input_.element_size()
         fused_qr_rmsnorm_ok = (
@@ -1167,15 +1191,7 @@ def _rocm_aiter_fused_allreduce_rmsnorm_impl(
         gemma_norm=gemma_norm,
     )
     if result is None:
-        from vllm.distributed import tensor_model_parallel_all_reduce
-
-        return torch.ops.vllm_aiter.fused_add_rms_norm(
-            tensor_model_parallel_all_reduce(input_),
-            residual,
-            weight,
-            epsilon,
-            gemma_norm,
-        )
+        return _unfused_allreduce_rmsnorm(input_, residual, weight, epsilon, gemma_norm)
     return result[0], result[1]
 
 
@@ -2044,7 +2060,6 @@ class rocm_aiter_ops:
     # Chunk length the AITER FlyDSL K5 prefill kernels are compiled for.
     GDN_FLYDSL_CHUNK_SIZE = 64
     _CUSTOM_ALL_REDUCE_ENABLED = envs.VLLM_ROCM_USE_AITER_CUSTOM_AR
-    _FLYDSL_QUICK_REDUCE_ENABLED = envs.VLLM_ROCM_QUICK_REDUCE_USE_FLYDSL
     _LINEAR_ENABLED = envs.VLLM_ROCM_USE_AITER_LINEAR
     _FMOE_ENABLED = envs.VLLM_ROCM_USE_AITER_MOE
     _MLA_ENABLED = envs.VLLM_ROCM_USE_AITER_MLA
@@ -2078,7 +2093,6 @@ class rocm_aiter_ops:
         """
         cls._AITER_ENABLED = envs.VLLM_ROCM_USE_AITER
         cls._CUSTOM_ALL_REDUCE_ENABLED = envs.VLLM_ROCM_USE_AITER_CUSTOM_AR
-        cls._FLYDSL_QUICK_REDUCE_ENABLED = envs.VLLM_ROCM_QUICK_REDUCE_USE_FLYDSL
         cls._LINEAR_ENABLED = envs.VLLM_ROCM_USE_AITER_LINEAR
         cls._FMOE_ENABLED = envs.VLLM_ROCM_USE_AITER_MOE
         cls._MLA_ENABLED = envs.VLLM_ROCM_USE_AITER_MLA
@@ -2311,8 +2325,16 @@ class rocm_aiter_ops:
 
     @classmethod
     @if_aiter_supported
-    def is_flydsl_quick_reduce_enabled(cls) -> bool:
-        return cls._AITER_ENABLED and cls._FLYDSL_QUICK_REDUCE_ENABLED
+    def is_flydsl_quick_reduce_available(cls) -> bool:
+        """Whether AITER's FlyDSL INT4 QuickReduce can run here.
+
+        It runs AITER kernels, so VLLM_ROCM_USE_AITER remains the one switch
+        that turns it off. AITER's QuickAllReduceInt4 supports gfx942 and
+        gfx950 only (CDNA 3 and 4); `> 2` would also admit gfx1250.
+        """
+        from vllm.platforms.rocm import get_cdna_version
+
+        return cls._AITER_ENABLED and get_cdna_version() in (3, 4)
 
     @staticmethod
     def create_flydsl_quick_all_reduce_int4(

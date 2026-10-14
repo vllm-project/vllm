@@ -1593,14 +1593,6 @@ class RocmAiterAllReduceFusionPass(VllmFusionPatternMatcherPass):
             return
         self.ca_comm = ca_comm
 
-        if rocm_aiter_ops.is_flydsl_quick_reduce_enabled():
-            logger.warning_once(
-                "FlyDSL QuickReduce has no fused all-reduce + RMSNorm kernel, "
-                "so with fuse_allreduce_rms the all-reduces in its size range "
-                "run on AITER's HIP QuickReduce. Set fuse_allreduce_rms=false "
-                "to route them through FlyDSL."
-            )
-
         hidden_dim = config.model_config.get_hidden_size()
         element_size = torch.tensor([], dtype=self.model_dtype).element_size()
         max_size = ca_comm.effective_max_size()
