@@ -1,6 +1,6 @@
 # Structured Decisions Models
 
-Structured Decisions Models (aka JEV Models) map inputs directly to predefined 
+Structured Decisions Models (aka JEV Models) map inputs directly to predefined
 options or categories and return probabilities and confidence scores, commonly 
 used for classification and routing.
 
@@ -8,7 +8,7 @@ used for classification and routing.
 
 ### Text-only Models
 
-| Architecture              | ReadStrategy        | Task             | Head              | Example HF Models       | 
+| Architecture              | ReadStrategy        | Task             | Head              | Example HF Models       |
 |---------------------------|---------------------|------------------|-------------------|-------------------------|
 | `ClefFlashForJointSchema` | `ClefFlashStrategy` | `token_classify` | `JointSchemaHead` | `Cloudflare/clef-flash` |
 | `Qwen3ForCausalLM`        | `NextTokenStrategy` | `generate`       | N/A               | `Qwen/Qwen3-0.6B`, etc. |
@@ -18,13 +18,13 @@ used for classification and routing.
 !!! note
     For more information about multimodal models inputs, see [this page](./supported_models.md#list-of-multimodal-language-models).
 
-| Architecture                         | Inputs | ReadStrategy                   | Task             | Head              | Example HF Models                        | 
-|--------------------------------------|--------|--------------------------------|------------------|-------------------|------------------------------------------|
-| `ClefOmniForJointSchema`             |        | `JointSchemaStrategy`          | `token_classify` | `JointSchemaHead` | `Cloudflare/clef-omni`                   |
-| `Lfm2VlForConditionalGeneration`     |        | `LiquidStrategy`               | `generate`       | N/A               | `LiquidAI/d1-3B`                         |
-| `Qwen3_5ForConditionalGeneration`    |        | `NextTokenStrategy`            | `generate`       | N/A               | `Qwen/Qwen3.5-0.8B`, etc.                |
-| `Qwen3_5MoeForConditionalGeneration` |        | `NextTokenStrategy`            | `generate`       | N/A               | `Qwen/Qwen3.5-35B-A3B`, etc.             |
-| `DiffusionGemmaForBlockDiffusion`    |        | `DiffusionGemmaCanvasStrategy` | `generate`       | N/A               | `google/diffusiongemma-26B-A4B-it`, etc. |
+| Architecture                         | Inputs                              | ReadStrategy                   | Task             | Head              | Example HF Models                        |
+|--------------------------------------|-------------------------------------|--------------------------------|------------------|-------------------|------------------------------------------|
+| `ClefOmniForJointSchema`             | T + I + V                           | `JointSchemaStrategy`          | `token_classify` | `JointSchemaHead` | `Cloudflare/clef-omni`                   |
+| `Lfm2VlForConditionalGeneration`     | T + I<sup>+</sup>                   | `LiquidStrategy`               | `generate`       | N/A               | `LiquidAI/d1-3B`                         |
+| `Qwen3_5ForConditionalGeneration`    | T + I<sup>E+</sup> + V<sup>E+</sup> | `NextTokenStrategy`            | `generate`       | N/A               | `Qwen/Qwen3.5-0.8B`, etc.                |
+| `Qwen3_5MoeForConditionalGeneration` | T + I<sup>E+</sup> + V<sup>E+</sup> | `NextTokenStrategy`            | `generate`       | N/A               | `Qwen/Qwen3.5-35B-A3B`, etc.             |
+| `DiffusionGemmaForBlockDiffusion`    | T + I<sup>+</sup> + V<sup>+</sup>   | `DiffusionGemmaCanvasStrategy` | `generate`       | N/A               | `google/diffusiongemma-26B-A4B-it`, etc. |
 
 ## Online Serving
 
