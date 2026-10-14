@@ -48,7 +48,6 @@ _TQ_MOD: Any = None  # kernels.tq_decode module (Qwen GQA-{8,16})
 _TQ_MOD_GQA6: Any = None  # kernels.tq_decode_gqa6 module (MiniMax GQA-6, optional)
 _FLYC: Any = None  # flydsl.compiler
 _FX: Any = None  # flydsl.expr
-_TYPING_T: Any = None
 _CC: Any = None  # CompilationContext
 _IR: Any = None
 
@@ -62,7 +61,7 @@ def is_flydsl_available() -> bool:
     only GQA-6 dispatches will fail with a clear error at launch time.
     """
     global _FLYDSL_AVAILABLE, _TQ_MOD, _TQ_MOD_GQA6
-    global _FLYC, _FX, _TYPING_T, _CC, _IR
+    global _FLYC, _FX, _CC, _IR
     if _FLYDSL_AVAILABLE is not None:
         return _FLYDSL_AVAILABLE
     try:
@@ -76,7 +75,6 @@ def is_flydsl_available() -> bool:
         import flydsl.expr as fx  # noqa: F401
         from flydsl._mlir import ir
         from flydsl.compiler.kernel_function import CompilationContext
-        from flydsl.expr.typing import T  # noqa: F401
 
         # Kernel is vendored in-tree (ships with vLLM); FlyDSL provides only
         # the compiler/runtime framework (imported above).
@@ -84,7 +82,6 @@ def is_flydsl_available() -> bool:
 
         _FLYC = flyc
         _FX = fx
-        _TYPING_T = T
         _CC = CompilationContext
         _IR = ir
         _TQ_MOD = tq_mod
@@ -412,7 +409,6 @@ def _get_kernel(
 
     flyc = _FLYC
     fx = _FX
-    T = _TYPING_T
     CompilationContext = _CC
     ir_mod = _IR
 
@@ -436,13 +432,8 @@ def _get_kernel(
         ctx = CompilationContext.get_current()
         with ir_mod.InsertionPoint(ctx.gpu_module_body):
             al.finalize()
-        from flydsl.expr import arith
-
-        grid_x = arith.index_cast(T.index, gx.ir_value())
-        grid_y = arith.index_cast(T.index, gy.ir_value())
-        grid_z = arith.index_cast(T.index, gz.ir_value())
         kfn(out, es, ml, q, kvc, cents, bt, sl).launch(
-            grid=(grid_x, grid_y, grid_z),
+            grid=(gx, gy, gz),
             block=(block_threads, 1, 1),
             stream=stream,
         )

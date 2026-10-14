@@ -49,16 +49,8 @@ import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir import ir
 from flydsl._mlir.dialects import scf as _scf
-from flydsl.expr import (
-    arith,
-    buffer_ops,
-    const_expr,  # noqa: F401  kept for kernel-DSL API parity
-    gpu,
-    range_constexpr,
-    rocdl,
-    vector,
-)
-from flydsl.expr.typing import Int32, T  # noqa: F401  Int32 via fx.Int32
+from flydsl.expr import arith, buffer_ops, gpu, range_constexpr, rocdl
+from flydsl.expr.typing import T
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 
@@ -100,12 +92,6 @@ KV_TILE_LDS_BYTES = TILE_SIZE * HEAD_SIZE * 2  # 4096
 
 LOG2E = 1.4426950408889634
 NEG_INF_VAL = float("-inf")
-
-
-def _vsplat_mul(vec, scalar):
-    s = scalar.ir_value() if hasattr(scalar, "ir_value") else scalar
-    return vec * vector.broadcast(T.f32x4, s)
-
 
 allocator = None
 
@@ -157,7 +143,6 @@ def build_tq_decode_gqa6_module(
     # zero-padded by buffer_load OOB protection; never consumed because
     # mfma_row >= QG lanes are gated out of all global stores below).
     QG_LOAD_ITERS = (QG + 3) // 4
-    OOB_OFFSET = 0x7FFFFFF0  # noqa: F841  ~2GB byte offset; > any plausible buffer
 
     _BS = int(kv_block_size)
     _TILES_PER_BLOCK = _BS // TILE_SIZE  # 1 for BS=16, 2 for BS=32
@@ -175,7 +160,8 @@ def build_tq_decode_gqa6_module(
     _stride_q_head = HEAD_SIZE
     _stride_bt_seq = max_blocks_per_seq
 
-    _data_region_bytes = _BS * num_kv_heads * DATA_BYTES_PER_SLOT
+    _stride_data_slot = num_kv_heads * DATA_BYTES_PER_SLOT
+    _data_region_bytes = _BS * _stride_data_slot
     _meta_region_bytes = num_kv_heads * NUM_SOA_FIELDS * _BS * 2
     _stride_cache_block = _data_region_bytes + _meta_region_bytes
     _meta_region_offset = _data_region_bytes
@@ -212,9 +198,9 @@ def build_tq_decode_gqa6_module(
         kv_h = gpu.block_idx.y
         part = gpu.block_idx.z
         lane = tid  # 0..63
-        mfma_row = lane & fx.Int32(15)  # = query_row (B's N) /
+        mfma_row = lane & 15  # = query_row (B's N) /
         #   token (A's M for QK)
-        mfma_col_grp = lane >> fx.Int32(4)  # 0..3, K-group dim
+        mfma_col_grp = lane >> 4  # 0..3, K-group dim
 
         # ---- Buffer resources -------------------------------------------
         q_rsrc = buffer_ops.create_buffer_resource(query_ptr, max_size=True)
@@ -231,30 +217,18 @@ def build_tq_decode_gqa6_module(
         cent_lds = SmemPtr(base, centroid_off, T.f32, shape=(N_CENTROIDS,))
         q_lds_i32 = SmemPtr(base, q_off, T.i32, shape=(Q_LDS_BYTES // 4,)).get()
         q_lds_i64 = SmemPtr(base, q_off, T.i64, shape=(Q_LDS_BYTES // 8,)).get()
-        kv_lds_i32 = SmemPtr(base, kv_off, T.i32, shape=(KV_TILE_LDS_BYTES // 4,)).get()  # noqa: F841
         kv_lds_i64 = SmemPtr(base, kv_off, T.i64, shape=(KV_TILE_LDS_BYTES // 8,)).get()
         # ---- Constants ---------------------------------------------------
-        c_sq = fx.Int32(_stride_q_seq)
-        c_qh = fx.Int32(_stride_q_head)
-        c_qg = fx.Int32(QG)
-        c_bt = fx.Int32(_stride_bt_seq)
-        c_block = fx.Int32(_stride_cache_block)
-        c_meta_off = fx.Int32(_meta_region_offset)
-        c_data_per_slot = fx.Int32(DATA_BYTES_PER_SLOT)
-        c_kv_heads = fx.Int32(num_kv_heads)
-        c_keydata = fx.Int32(KEY_DATA_BYTES)
-        c_w = fx.Int32(WARP_SIZE)
-
-        NEG_INF = arith.constant(NEG_INF_VAL, type=T.f32)
+        NEG_INF = fx.Float32(NEG_INF_VAL)
         ZERO_F = fx.Float32(0.0)
         ONE_F = fx.Float32(1.0)
-        LOG2E_C = arith.constant(LOG2E, type=T.f32)
-        QK_SCALE = arith.constant(_qk_scale, type=T.f32)
+        LOG2E_C = fx.Float32(LOG2E)
+        QK_SCALE = fx.Float32(_qk_scale)
 
         # ===== STEP A: Load centroids → LDS (cooperative, race-safe) =====
-        c_idx_safe = lane & fx.Int32(N_CENTROIDS - 1)
+        c_idx_safe = lane & (N_CENTROIDS - 1)
         c_val = buffer_ops.buffer_load(cent_rsrc, c_idx_safe, vec_width=1, dtype=T.f32)
-        cent_lds.store(c_val, [arith.index_cast(T.index, c_idx_safe)])
+        cent_lds.store(c_val, [fx.Index(c_idx_safe)])
         gpu.barrier()
 
         # ===== STEP B: Load Q → row-major LDS [query_row, head_dim] ======
@@ -297,25 +271,22 @@ def build_tq_decode_gqa6_module(
         # (QG_LOAD_ITERS * 4 != QG), so rows >= QG redirect to a safe
         # in-bounds offset to avoid faulting past the real Q rows.
         for c in range_constexpr(QG_LOAD_ITERS):
-            row_chunk = lane + fx.Int32(c * WARP_SIZE)  # 0..127
-            row = row_chunk >> fx.Int32(4)  # 0..7
-            col_b = row_chunk & fx.Int32(15)  # 0..15
-            col_elem = col_b * fx.Int32(8)  # 0..120 in bf16
-            q_off_real = seq * c_sq + (kv_h * c_qg + row) * c_qh + col_elem
-            row_in_qg = row < fx.Int32(QG)
-            q_off_elem = row_in_qg.select(q_off_real, col_elem)
+            row_chunk = lane + c * WARP_SIZE  # 0..127
+            row = row_chunk >> 4  # 0..7
+            col_b = row_chunk & 15  # 0..15
+            col_elem = col_b * 8  # 0..120 in bf16
+            q_off_real = (
+                seq * _stride_q_seq + (kv_h * QG + row) * _stride_q_head + col_elem
+            )
+            q_off_elem = (row < QG).select(q_off_real, col_elem)
             q_v = buffer_ops.buffer_load(
                 q_rsrc,
-                q_off_elem // fx.Int32(2),
+                q_off_elem // 2,
                 vec_width=4,
                 dtype=T.i32,
             )
-            q_lds_byte = row * fx.Int32(HEAD_SIZE * 2) + col_elem * fx.Int32(2)
-            vector.store(
-                q_v,
-                q_lds_i32,
-                [arith.index_cast(T.index, q_lds_byte // fx.Int32(4))],
-            )
+            q_lds_byte = row * (HEAD_SIZE * 2) + col_elem * 2
+            fx.Vector(q_v).store(q_lds_i32, [fx.Index(q_lds_byte // 4)])
         gpu.barrier()
 
         # ===== STEP C: Pre-load Q operands for QK_K_CHUNKS = 4 K-chunks ===
@@ -328,22 +299,14 @@ def build_tq_decode_gqa6_module(
         # Load 16 bytes (= 8 bf16 = 2 i64) per chunk via vec(2, i64).
         q_chunks = []
         for chk in range_constexpr(QK_K_CHUNKS):
-            q_idx_i64 = (
-                mfma_row * fx.Int32(HEAD_SIZE * 2 // 8)
-                + fx.Int32(chk * 8)
-                + mfma_col_grp * fx.Int32(2)
-            )
-            qv = vector.load_op(
-                T.vec(2, T.i64),
-                q_lds_i64,
-                [arith.index_cast(T.index, q_idx_i64)],
-            )
-            q_chunks.append(vector.bitcast(T.vec(8, T.bf16), qv))
+            q_idx_i64 = mfma_row * (HEAD_SIZE * 2 // 8) + chk * 8 + mfma_col_grp * 2
+            qv = fx.Vector.load(T.vec(2, T.i64), q_lds_i64, [fx.Index(q_idx_i64)])
+            q_chunks.append(qv.bitcast(fx.BFloat16))
 
         # ===== STEP D: Online softmax + PV state =========================
         running_max = NEG_INF
         running_sum = ZERO_F
-        zero_v4 = arith.constant_vector(0.0, T.f32x4)
+        zero_v4 = fx.Vector.filled(4, 0.0, fx.Float32)
         acc_pv = [zero_v4 for _ in range(PV_N_CHUNKS)]
 
         # ===== STEP E: Sequence-len + partition base ====================
@@ -354,22 +317,19 @@ def build_tq_decode_gqa6_module(
         # tokens of the seq, processed as TGPP groups of 16 K-tiles each.
         # FA-2 online-softmax state accumulates across all TGPP * 16 tiles.
         # With TGPP=1 this is bit-identical to the legacy 16-tile body.
-        partition_base = part * fx.Int32(PARTITION_EXTENT_TOKENS)
+        partition_base = part * PARTITION_EXTENT_TOKENS
 
         # Per-K-tile dequant lane assignment:
         # 16 tokens × 64 packed bytes per token = 1024 bytes
         # 64 lanes × 16 bytes/lane = 1024 ✓
         # Lane t: token = t / 4, sub-chunk = t % 4 (0..3) → 16 bytes contiguous
-        tok_in_tile = lane >> fx.Int32(2)
-        chunk_in_tok = lane & fx.Int32(3)
+        tok_in_tile = lane >> 2
+        chunk_in_tok = lane & 3
         # ``slot`` (= absolute slot index within the cache block, range
         # 0.._BS-1) is recomputed per tile inside the K-tile loop below
         # so it reflects ``tile_in_block * TILE_SIZE + tok_in_tile``.
 
-        c_meta_u16_per_kvh = fx.Int32(NUM_SOA_FIELDS * _BS)
-        c_knorm_off_u16 = fx.Int32(SOA_K_NORM * _BS)
-        c_vscale_off_u16 = fx.Int32(SOA_V_SCALE * _BS)
-        c_vzero_off_u16 = fx.Int32(SOA_V_ZERO * _BS)
+        meta_u16_per_kvh = NUM_SOA_FIELDS * _BS
 
         # ===== STEP F: K-tile loop =======================================
         # With kv_block_size > TILE_SIZE there are _TILES_PER_BLOCK tiles
@@ -418,20 +378,16 @@ def build_tq_decode_gqa6_module(
         # state at bottom. After the loop, results are pulled out
         # of for_op.results back into the local Python names so the
         # downstream STEP G (output) is unmodified.
-        c_kcb = fx.Int32(KV_COMPUTE_BLOCK)
-        c_tgpp = fx.Int32(TGPP)
-        c_zero_i32 = fx.Int32(0)
-        c_one_i32 = fx.Int32(1)
         # remaining = seq_len - partition_base   (signed, may be <=0)
         remaining = seq_len - partition_base
-        in_range = remaining > c_zero_i32
+        in_range = remaining > 0
         # trip_raw = ceil(remaining / KV_COMPUTE_BLOCK)
         # (when in_range is false, the divisor branch produces
         # garbage that the select below overrides with zero, so we
         # don't pre-clamp)
-        trip_raw = (remaining + c_kcb - c_one_i32) // c_kcb
-        trip_clamped = (trip_raw > c_tgpp).select(c_tgpp, trip_raw)
-        trip_or_zero = in_range.select(trip_clamped, c_zero_i32)
+        trip_raw = (remaining + KV_COMPUTE_BLOCK - 1) // KV_COMPUTE_BLOCK
+        trip_clamped = (trip_raw > TGPP).select(TGPP, trip_raw)
+        trip_or_zero = in_range.select(trip_clamped, 0)
         c_zero_idx = arith.constant(0, index=True)
         c_one_idx = arith.constant(1, index=True)
         trip_idx = arith.index_cast(
@@ -466,42 +422,40 @@ def build_tq_decode_gqa6_module(
         try:
             tg_idx = _for_op.induction_variable
             tg_i32 = fx.Int32(arith.index_cast(T.i32, tg_idx))
-            partition_start = partition_base + tg_i32 * c_kcb
-            bt_seq_base = seq * c_bt + (partition_start // fx.Int32(_BS))
+            partition_start = partition_base + tg_i32 * KV_COMPUTE_BLOCK
+            bt_seq_base = seq * _stride_bt_seq + (partition_start // _BS)
             running_max = _for_op.inner_iter_args[0]
             running_sum = _for_op.inner_iter_args[1]
             acc_pv = list(_for_op.inner_iter_args[2:])
             for n_tile in range_constexpr(16):
                 block_in_part = n_tile // _TILES_PER_BLOCK
                 tile_in_block = n_tile % _TILES_PER_BLOCK
-                tile_start_tok = partition_start + fx.Int32(n_tile * TILE_SIZE)
+                tile_start_tok = partition_start + n_tile * TILE_SIZE
                 tile_in_seq = tile_start_tok < seq_len
-                bt_off = bt_seq_base + fx.Int32(block_in_part)
-                bt_off_safe = tile_in_seq.select(bt_off, seq * c_bt)
+                bt_off = bt_seq_base + block_in_part
+                bt_off_safe = tile_in_seq.select(bt_off, seq * _stride_bt_seq)
                 phys_block = buffer_ops.buffer_load(
                     bt_rsrc,
                     bt_off_safe,
                     vec_width=1,
                     dtype=T.i32,
                 )
-                block_base = phys_block * c_block
+                block_base = phys_block * _stride_cache_block
                 data_region = block_base
-                meta_region = block_base + c_meta_off
+                meta_region = block_base + _meta_region_offset
 
                 # ``slot`` is the absolute slot index within the cache block
                 # (range 0.._BS-1). For BS=16 it equals tok_in_tile; for BS=32
                 # it equals tile_in_block * 16 + tok_in_tile. Used both for
                 # the K/V data region and SoA metadata region addressing.
-                slot = fx.Int32(tile_in_block * TILE_SIZE) + tok_in_tile
+                slot = tok_in_tile + tile_in_block * TILE_SIZE
                 data_bases_byte = (
-                    data_region
-                    + slot * (c_kv_heads * c_data_per_slot)
-                    + kv_h * c_data_per_slot
+                    data_region + slot * _stride_data_slot + kv_h * DATA_BYTES_PER_SLOT
                 )
-                k_byte = data_bases_byte + chunk_in_tok * fx.Int32(16)
+                k_byte = data_bases_byte + chunk_in_tok * 16
                 k_packed = buffer_ops.buffer_load(
                     kv_rsrc,
-                    k_byte // fx.Int32(4),
+                    k_byte // 4,
                     vec_width=4,
                     dtype=T.i32,
                 )
@@ -510,24 +464,23 @@ def build_tq_decode_gqa6_module(
                 # These are async; their s_waitcnt is pushed by the compiler
                 # past the K dequant + QK MFMA + softmax block, hiding most
                 # of the V HBM latency behind compute.
-                v_byte = data_bases_byte + c_keydata + chunk_in_tok * fx.Int32(16)
-                v_packed = buffer_ops.buffer_load(
-                    kv_rsrc,
-                    v_byte // fx.Int32(4),
-                    vec_width=4,
-                    dtype=T.i32,
+                v_byte = data_bases_byte + KEY_DATA_BYTES + chunk_in_tok * 16
+                v_packed = fx.Vector(
+                    buffer_ops.buffer_load(
+                        kv_rsrc,
+                        v_byte // 4,
+                        vec_width=4,
+                        dtype=T.i32,
+                    )
                 )
                 vscale_u16 = (
-                    meta_region // fx.Int32(2)
-                    + kv_h * c_meta_u16_per_kvh
-                    + c_vscale_off_u16
+                    meta_region // 2
+                    + kv_h * meta_u16_per_kvh
+                    + SOA_V_SCALE * _BS
                     + slot
                 )
                 vzero_u16 = (
-                    meta_region // fx.Int32(2)
-                    + kv_h * c_meta_u16_per_kvh
-                    + c_vzero_off_u16
-                    + slot
+                    meta_region // 2 + kv_h * meta_u16_per_kvh + SOA_V_ZERO * _BS + slot
                 )
                 vscale_raw = buffer_ops.buffer_load(
                     kv_rsrc,
@@ -543,10 +496,7 @@ def build_tq_decode_gqa6_module(
                 )
 
                 knorm_u16 = (
-                    meta_region // fx.Int32(2)
-                    + kv_h * c_meta_u16_per_kvh
-                    + c_knorm_off_u16
-                    + slot
+                    meta_region // 2 + kv_h * meta_u16_per_kvh + SOA_K_NORM * _BS + slot
                 )
                 knorm_raw = buffer_ops.buffer_load(
                     kv_rsrc,
@@ -554,29 +504,23 @@ def build_tq_decode_gqa6_module(
                     vec_width=1,
                     dtype=T.i16,
                 )
-                knorm_f16 = arith.bitcast(T.f16, knorm_raw)
-                knorm_f32 = arith.extf(T.f32, knorm_f16)
+                knorm_f32 = fx.Int16(knorm_raw).bitcast(fx.Float16).to(fx.Float32)
 
                 # K dequant → LDS [token, head_dim] (natural)
                 # Lane writes 32 bf16 (= 4×8) for token=tok_in_tile,
                 # head_dims chunk_in_tok*32..+31 (4 sub-chunks of 8).
-                tok_kreg = tok_in_tile * fx.Int32(HEAD_SIZE * 2 // 8)
-                chunk_kreg = tok_kreg + chunk_in_tok * fx.Int32(8)
+                tok_kreg = tok_in_tile * (HEAD_SIZE * 2 // 8)
+                chunk_kreg = tok_kreg + chunk_in_tok * 8
+                k_words = fx.Vector(k_packed)
                 for w in range_constexpr(4):
-                    word_i32 = vector.extract(k_packed, static_position=[w])
                     bf16_elems = []
                     for n in range_constexpr(8):
-                        nibble = (word_i32 >> fx.Int32(n * 4)) & fx.Int32(0xF)
-                        nibble_idx = arith.index_cast(T.index, nibble)
-                        cent_f32 = cent_lds.load([nibble_idx])
-                        elem_bf16 = arith.trunc_f(T.bf16, cent_f32 * knorm_f32)
-                        bf16_elems.append(elem_bf16)
-                    v_bf16 = vector.from_elements(T.vec(8, T.bf16), bf16_elems)
-                    v_i64 = vector.bitcast(T.vec(2, T.i64), v_bf16)
-                    vector.store(
-                        v_i64,
-                        kv_lds_i64,
-                        [arith.index_cast(T.index, chunk_kreg + fx.Int32(w * 2))],
+                        nibble = (k_words[w] >> (n * 4)) & 0xF
+                        cent_f32 = fx.Float32(cent_lds.load([fx.Index(nibble)]))
+                        bf16_elems.append((cent_f32 * knorm_f32).to(fx.BFloat16))
+                    v_bf16 = fx.Vector.from_elements(bf16_elems, dtype=fx.BFloat16)
+                    v_bf16.bitcast(fx.Int64).store(
+                        kv_lds_i64, [fx.Index(chunk_kreg + w * 2)]
                     )
                 gpu.barrier()
 
@@ -586,16 +530,12 @@ def build_tq_decode_gqa6_module(
                 qk_acc = zero_v4
                 for chk in range_constexpr(QK_K_CHUNKS):
                     k_idx_i64 = (
-                        mfma_row * fx.Int32(HEAD_SIZE * 2 // 8)
-                        + fx.Int32(chk * 8)
-                        + mfma_col_grp * fx.Int32(2)
+                        mfma_row * (HEAD_SIZE * 2 // 8) + chk * 8 + mfma_col_grp * 2
                     )
-                    kv_load = vector.load_op(
-                        T.vec(2, T.i64),
-                        kv_lds_i64,
-                        [arith.index_cast(T.index, k_idx_i64)],
+                    kv_load = fx.Vector.load(
+                        T.vec(2, T.i64), kv_lds_i64, [fx.Index(k_idx_i64)]
                     )
-                    k_op = vector.bitcast(T.vec(8, T.bf16), kv_load)
+                    k_op = kv_load.bitcast(fx.BFloat16)
                     qk_acc = rocdl.mfma_f32_16x16x32_bf16(
                         T.f32x4, [k_op, q_chunks[chk], qk_acc, 0, 0, 0]
                     )
@@ -604,56 +544,47 @@ def build_tq_decode_gqa6_module(
                 # 4 fp32/lane = 4 different tokens at SAME query_row.
 
                 # Scale + mask out-of-context tokens.
-                qk_acc = _vsplat_mul(qk_acc, QK_SCALE)
+                qk_acc = qk_acc * QK_SCALE
+                masked = []
                 for elem in range_constexpr(4):
                     kv_tok = (
-                        partition_start
-                        + fx.Int32(n_tile * TILE_SIZE)
-                        + mfma_col_grp * fx.Int32(4)
-                        + fx.Int32(elem)
+                        partition_start + n_tile * TILE_SIZE + mfma_col_grp * 4 + elem
                     )
-                    in_b = kv_tok < seq_len
-                    v = vector.extract(qk_acc, static_position=[elem])
-                    qk_acc = vector.insert(
-                        in_b.select(v, NEG_INF),
-                        qk_acc,
-                        static_position=[elem],
-                        dynamic_position=[],
-                    )
+                    masked.append((kv_tok < seq_len).select(qk_acc[elem], NEG_INF))
+                qk_acc = fx.Vector.from_elements(masked, dtype=fx.Float32)
 
                 # FA2 online softmax: per-query-row reduce.
                 # Per-row max: max over 4 fp32 in lane, then xor-shuffle 16, 32
                 # (across the 4 col_grps that share same mfma_row).
-                local_max = vector.reduction(T.f32, "maxnumf", qk_acc)
-                r1 = local_max.shuffle_xor(fx.Int32(16), c_w)
-                local_max = local_max.maximumf(r1)
-                r2 = local_max.shuffle_xor(fx.Int32(32), c_w)
-                tile_max = local_max.maximumf(r2)
+                local_max = qk_acc.reduce(fx.ReductionOp.MAX)
+                r1 = local_max.shuffle_xor(16, WARP_SIZE)
+                local_max = fx.max(local_max, r1)
+                r2 = local_max.shuffle_xor(32, WARP_SIZE)
+                tile_max = fx.max(local_max, r2)
 
-                new_max = running_max.maximumf(tile_max)
+                new_max = fx.max(running_max, tile_max)
                 max_diff = running_max - new_max
                 safe_diff = (running_max > NEG_INF).select(max_diff, ZERO_F)
                 scale = (safe_diff * LOG2E_C).exp2(fastmath=arith.FastMathFlags.fast)
                 running_sum = running_sum * scale
                 for h in range_constexpr(PV_N_CHUNKS):
-                    acc_pv[h] = _vsplat_mul(acc_pv[h], scale)
+                    acc_pv[h] = acc_pv[h] * scale
                 running_max = new_max
 
                 # Compute probs: p = exp((qk - new_max) * LOG2E)
                 tile_sum = ZERO_F
+                probs = []
                 for elem in range_constexpr(4):
-                    s = vector.extract(qk_acc, static_position=[elem])
-                    d = s - new_max
+                    d = qk_acc[elem] - new_max
                     d = (new_max > NEG_INF).select(d, NEG_INF)
                     p = (d * LOG2E_C).exp2(fastmath=arith.FastMathFlags.fast)
                     tile_sum = tile_sum + p
-                    qk_acc = vector.insert(
-                        p, qk_acc, static_position=[elem], dynamic_position=[]
-                    )
+                    probs.append(p)
+                qk_acc = fx.Vector.from_elements(probs, dtype=fx.Float32)
 
-                ts1 = tile_sum.shuffle_xor(fx.Int32(16), c_w)
+                ts1 = tile_sum.shuffle_xor(16, WARP_SIZE)
                 tile_sum = tile_sum + ts1
-                ts2 = tile_sum.shuffle_xor(fx.Int32(32), c_w)
+                ts2 = tile_sum.shuffle_xor(32, WARP_SIZE)
                 tile_sum = tile_sum + ts2
                 running_sum = running_sum + tile_sum
 
@@ -661,31 +592,23 @@ def build_tq_decode_gqa6_module(
                 # v_packed, vscale_raw, vzero_raw are already in flight from
                 # the top of this iteration; only the f32 conversion stays
                 # here so the actual consume site is still close to the use.
-                vscale_f32 = arith.extf(T.f32, arith.bitcast(T.f16, vscale_raw))
-                vzero_f32 = arith.extf(T.f32, arith.bitcast(T.f16, vzero_raw))
+                vscale_f32 = fx.Int16(vscale_raw).bitcast(fx.Float16).to(fx.Float32)
+                vzero_f32 = fx.Int16(vzero_raw).bitcast(fx.Float16).to(fx.Float32)
 
                 # V dequant → LDS [token][head_dim] (ROW-MAJOR, no transpose).
                 # Each lane writes 32 contiguous bf16 (one token, head_dims
                 # chunk_in_tok*32..+31) as 4× ds_write_b128 = 4× vec(2,i64).
-                v_lds_elem_base = tok_in_tile * fx.Int32(
-                    HEAD_SIZE
-                ) + chunk_in_tok * fx.Int32(32)
+                v_lds_elem_base = tok_in_tile * HEAD_SIZE + chunk_in_tok * 32
                 for w in range_constexpr(4):
-                    word_i32 = vector.extract(v_packed, static_position=[w])
                     bf16_elems = []
                     for n in range_constexpr(8):
-                        nibble = (word_i32 >> fx.Int32(n * 4)) & fx.Int32(0xF)
-                        nibble_f32 = arith.sitofp(T.f32, nibble)
-                        elem_f32 = nibble_f32 * vscale_f32 + vzero_f32
-                        elem_bf16 = arith.trunc_f(T.bf16, elem_f32)
-                        bf16_elems.append(elem_bf16)
-                    v_bf16 = vector.from_elements(T.vec(8, T.bf16), bf16_elems)
-                    v_i64 = vector.bitcast(T.vec(2, T.i64), v_bf16)
-                    v_lds_i64_idx = (v_lds_elem_base + fx.Int32(w * 8)) // fx.Int32(4)
-                    vector.store(
-                        v_i64,
-                        kv_lds_i64,
-                        [arith.index_cast(T.index, v_lds_i64_idx)],
+                        nibble = (v_packed[w] >> (n * 4)) & 0xF
+                        elem_f32 = nibble.to(fx.Float32) * vscale_f32 + vzero_f32
+                        bf16_elems.append(elem_f32.to(fx.BFloat16))
+                    v_bf16 = fx.Vector.from_elements(bf16_elems, dtype=fx.BFloat16)
+                    v_lds_i64_idx = (v_lds_elem_base + w * 8) // 4
+                    v_bf16.bitcast(fx.Int64).store(
+                        kv_lds_i64, [fx.Index(v_lds_i64_idx)]
                     )
                 # ── HW V transpose: cross-lane LDS sync ─────────────────────
                 # ds_read_tr16_b64 below introduces a cross-lane LDS read:
@@ -721,8 +644,7 @@ def build_tq_decode_gqa6_module(
                 # ---- PV MFMA: A=V[head_dim, token], B=P (=qk_acc bf16) -----
                 # P operand B layout matches qk_acc: lane t holds 4 bf16 at
                 # K=token=(t/16)*4..+3, N=query=t%16. Just trunc_f to bf16.
-                p_bf16 = arith.trunc_f(T.vec(4, T.bf16), qk_acc)
-                p_op = vector.bitcast(T.vec(4, T.i16), p_bf16)
+                p_op = qk_acc.to(fx.BFloat16).bitcast(fx.Int16)
 
                 # HW-transpose PV path: V_lds is row-major V[token][head_dim].
                 # MFMA A operand layout: lane t holds 4 bf16 at
@@ -735,16 +657,11 @@ def build_tq_decode_gqa6_module(
                 # the 4-element column window inside the h*16 chunk.
                 # Total LDS byte offset = kv_off + token_idx*HEAD_SIZE*2
                 #                        + (h*16 + hd_sub)*2
-                token_idx = lane >> fx.Int32(2)
-                hd_sub = (lane & fx.Int32(3)) * fx.Int32(4)
-                v_lane_byte = (
-                    fx.Int32(kv_off)
-                    + token_idx * fx.Int32(HEAD_SIZE * 2)
-                    + hd_sub * fx.Int32(2)
-                )
+                token_idx = lane >> 2
+                hd_sub = (lane & 3) * 4
+                v_lane_byte = kv_off + token_idx * (HEAD_SIZE * 2) + hd_sub * 2
                 for h in range_constexpr(PV_N_CHUNKS):
-                    v_byte_off = v_lane_byte + fx.Int32(h * 32)
-                    v_byte_i64 = fx.Int64(v_byte_off)
+                    v_byte_i64 = fx.Int64(v_lane_byte + h * 32)
                     v_ptr = buffer_ops.create_llvm_ptr(
                         v_byte_i64,
                         address_space=3,
@@ -778,10 +695,9 @@ def build_tq_decode_gqa6_module(
         safe_sum = (running_sum > ZERO_F).select(running_sum, ONE_F)
         rcp = ONE_F / safe_sum
 
-        c_os = fx.Int32(_stride_out_seq)
-        c_oh = fx.Int32(_stride_out_head)
-        c_op_ = fx.Int32(_stride_out_part)
-        out_base = seq * c_os + kv_h * c_oh + part * c_op_
+        out_base = (
+            seq * _stride_out_seq + kv_h * _stride_out_head + part * _stride_out_part
+        )
 
         # Gate all global stores by mfma_row < QG. For QG=16 the predicate is
         # tautological (mfma_row ∈ [0,15]); for QG=8 lanes 8..15 (whose MFMA
@@ -794,26 +710,27 @@ def build_tq_decode_gqa6_module(
         _if = _scf.IfOp(valid_row_pred)
         with ir.InsertionPoint(_if.then_block):
             for h in range_constexpr(PV_N_CHUNKS):
-                pv_norm = _vsplat_mul(acc_pv[h], rcp)
-                pv_bf16 = arith.trunc_f(T.vec(4, T.bf16), pv_norm)
-                pv_i32x2 = vector.bitcast(T.vec(2, T.i32), pv_bf16)
-                head_dim_start = fx.Int32(h * 16) + mfma_col_grp * fx.Int32(4)
-                out_off_elem = (
-                    out_base + mfma_row * fx.Int32(HEAD_SIZE) + head_dim_start
-                )
+                pv_i32x2 = (acc_pv[h] * rcp).to(fx.BFloat16).bitcast(fx.Int32)
+                head_dim_start = mfma_col_grp * 4 + h * 16
+                out_off_elem = out_base + mfma_row * HEAD_SIZE + head_dim_start
                 buffer_ops.buffer_store(
                     pv_i32x2,
                     out_rsrc,
-                    out_off_elem * fx.Int32(2),
+                    out_off_elem * 2,
                     offset_is_bytes=True,
                 )
 
-            c_npq = fx.Int32(num_partitions * QG)
             ml_off = (
-                seq * fx.Int32(_stride_ml_seq) + kv_h * c_npq + part * c_qg + mfma_row
+                seq * _stride_ml_seq
+                + kv_h * (num_partitions * QG)
+                + part * QG
+                + mfma_row
             )
             es_off = (
-                seq * fx.Int32(_stride_es_seq) + kv_h * c_npq + part * c_qg + mfma_row
+                seq * _stride_es_seq
+                + kv_h * (num_partitions * QG)
+                + part * QG
+                + mfma_row
             )
             buffer_ops.buffer_store(running_max, ml_rsrc, ml_off)
             buffer_ops.buffer_store(running_sum, es_rsrc, es_off)
