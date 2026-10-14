@@ -460,15 +460,6 @@ class TestMockObjTierFailures:
         assert results[0].job_id == 2
         assert not results[0].success
 
-    def test_submit_load_exception_clears_job_keys(self):
-        tier, _ = _make_tier(num_blocks=4)
-        tier._submit_transfer = MagicMock(side_effect=RuntimeError("submit failed"))
-
-        with pytest.raises(RuntimeError, match="submit failed"):
-            tier.submit_load(make_job(2, [key(1)], [0]))
-
-        assert tier._load_job_keys == {}
-
     def test_submit_store_make_prepped_xfer_failure_reported_in_get_finished(self):
         tier, agent = _make_tier(num_blocks=4)
         agent.make_prepped_xfer = lambda *a, **k: None

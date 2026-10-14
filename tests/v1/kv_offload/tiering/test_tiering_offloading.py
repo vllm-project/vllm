@@ -945,31 +945,6 @@ class TestTieringOffloadingManager:
         assert set(jm_b.keys) == {chunks[2], chunks[3]}
         assert jm_b.req_context is ctx_b
 
-    def test_promotion_submit_exception_unwinds_registered_job(self, manager_setup):
-        chunks = to_keys([42, 43])
-        contexts = [
-            ReqContext(req_id="promotion-submit-error-a"),
-            ReqContext(req_id="promotion-submit-error-b"),
-        ]
-        for chunk in chunks:
-            self.secondary_tier1.chunks[chunk] = True
-        self.secondary_tier1.submit_load = MagicMock(
-            side_effect=RuntimeError("submit failed")
-        )
-
-        for chunk, ctx in zip(chunks, contexts):
-            assert self.manager.lookup(chunk, ctx) is LookupResult.HIT_PENDING
-        with pytest.raises(RuntimeError, match="submit failed"):
-            self.manager.on_schedule_end(
-                ScheduleEndContext(new_req_ids=(), preempted_req_ids=())
-            )
-
-        assert self.manager._jobs == {}
-        assert self.manager._pending_load_submissions == {}
-        assert self.manager._metrics._tier_states[0].active_promotion_count == 0
-        for chunk, ctx in zip(chunks, contexts):
-            assert self.primary_tier.lookup(chunk, ctx) is LookupResult.MISS
-
     def test_lookup_shared_chunk_no_duplicate_promotion(self, manager_setup):
         """A chunk looked up by two requests in the same step is promoted once.
 
@@ -1020,24 +995,6 @@ class TestTieringOffloadingManager:
         assert self.secondary_tier1.submit_store.call_count == 1
         job_metadata = self.secondary_tier1.submit_store.call_args.args[0]
         assert job_metadata.req_context is ctx
-
-    def test_cascade_submit_exception_unwinds_registered_job(self, manager_setup):
-        chunks = to_keys(range(2))
-        ctx = ReqContext(req_id="cascade-submit-error")
-        self._start_request(ctx)
-        result = self.manager.prepare_store(chunks, ctx)
-        assert result is not None
-        self.secondary_tier1.submit_store = MagicMock(
-            side_effect=RuntimeError("submit failed")
-        )
-
-        with pytest.raises(RuntimeError, match="submit failed"):
-            self.manager.complete_store(chunks, ctx, success=True)
-
-        assert self.manager._jobs == {}
-        assert self.manager._metrics._tier_states[0].active_cascade_count == 0
-        assert all(self.primary_tier._policy.get(key).ref_cnt == 0 for key in chunks)
-        assert self.manager._get_request_state(ctx).pending_primary_stores == 0
 
     def test_on_request_finished_delays_only_secondary_until_store_submitted(
         self, manager_setup

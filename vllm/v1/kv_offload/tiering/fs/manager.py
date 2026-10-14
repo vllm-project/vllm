@@ -286,12 +286,7 @@ class FileSystemTierManager(SecondaryTierManager):
                 )
                 raise
 
-        try:
-            self._pool.enqueue_load(job_id, 1, [load_task])
-        except Exception:
-            self._load_job_keys.pop(job_id, None)
-            self._load_progress.pop(job_id, None)
-            raise
+        self._pool.enqueue_load(job_id, 1, [load_task])
 
     @override
     def get_finished_jobs(self) -> Iterable[JobResult]:

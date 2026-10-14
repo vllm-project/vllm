@@ -859,21 +859,6 @@ def test_partially_failed_store_emits_no_event(fs_tier_with_events, monkeypatch)
     assert tier._store_job_contexts == {}
 
 
-def test_submit_load_exception_clears_job_keys(fs_tier, monkeypatch):
-    tier, _ = fs_tier
-    monkeypatch.setattr(
-        tier._pool,
-        "enqueue_load",
-        MagicMock(side_effect=RuntimeError("submit failed")),
-    )
-
-    with pytest.raises(RuntimeError, match="submit failed"):
-        tier.submit_load(make_job(1, [key(1)], [0], is_promotion=True))
-
-    assert tier._load_job_keys == {}
-    assert tier._load_progress == {}
-
-
 def test_events_disabled_by_default(fs_tier):
     tier, _ = fs_tier
     tier.submit_store(make_job(1, [key(1)], [0]))

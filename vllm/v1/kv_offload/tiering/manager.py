@@ -273,14 +273,6 @@ class TieringOffloadingManager(OffloadingManager):
     def _pop_job(self, job_id: JobId) -> JobMetadata | None:
         return self._jobs.pop(job_id, None)
 
-    def _cancel_registered_job(self, job_id: JobId) -> JobMetadata:
-        job_metadata = self._jobs.pop(job_id)
-        self._metrics.on_job_finished(
-            job_metadata,
-            JobResult(job_id=job_id, success=False),
-        )
-        return job_metadata
-
     def _maybe_process_finished_jobs(self):
         """Poll secondary tiers for completed jobs (at most once per step).
 
@@ -564,17 +556,9 @@ class TieringOffloadingManager(OffloadingManager):
         if not self._pending_load_submissions:
             return
 
-        pending_submissions = self._pending_load_submissions
-        self._pending_load_submissions = {}
-        entries = [
-            (tier_idx, entry)
-            for tier_idx, pending_by_ctx in pending_submissions.items()
-            for entry in pending_by_ctx.values()
-        ]
-        for entry_idx, (tier_idx, entry) in enumerate(entries):
+        for tier_idx, pending_by_ctx in self._pending_load_submissions.items():
             tier = self.secondary_tiers[tier_idx]
-            job_id: JobId | None = None
-            try:
+            for entry in pending_by_ctx.values():
                 job_id = self._next_job_id()
                 job_metadata = TransferJob(
                     job_id=job_id,
@@ -585,17 +569,8 @@ class TieringOffloadingManager(OffloadingManager):
                 )
                 self._register_job(job_metadata, tier_idx)
                 tier.submit_load(job_metadata)
-            except Exception:
-                if job_id is not None and job_id in self._jobs:
-                    self._cancel_registered_job(job_id)
-                self.primary_tier.complete_write(entry.keys, entry.req_context, False)
-                for _, remaining in entries[entry_idx + 1 :]:
-                    self.primary_tier.complete_write(
-                        remaining.keys,
-                        remaining.req_context,
-                        False,
-                    )
-                raise
+
+        self._pending_load_submissions.clear()
 
     @override
     def prepare_load(
@@ -701,21 +676,9 @@ class TieringOffloadingManager(OffloadingManager):
                 k for k in keys if k not in keys_to_store_set
             )
             if keys_already_in_primary:
-                try:
-                    self._cascade_existing_chunks_to_request_level_tiers(
-                        keys_already_in_primary, req_context, request_level_tiers
-                    )
-                except Exception:
-                    if primary_result.keys_to_store:
-                        self.primary_tier.complete_store(
-                            primary_result.keys_to_store,
-                            req_context,
-                            False,
-                        )
-                        state = self._get_request_state(req_context)
-                        state.pending_primary_stores -= 1
-                        self._maybe_finalize_request(state)
-                    raise
+                self._cascade_existing_chunks_to_request_level_tiers(
+                    keys_already_in_primary, req_context, request_level_tiers
+                )
 
         return primary_result
 
@@ -758,12 +721,7 @@ class TieringOffloadingManager(OffloadingManager):
             if not self._should_store_to_tier(tier, len(ready_keys)):
                 continue
             job_metadata = self.create_store_job(ready_keys, req_context, tier_idx)
-            try:
-                tier.submit_store(job_metadata)
-            except Exception:
-                self._cancel_registered_job(job_metadata.job_id)
-                self.primary_tier.complete_read(ready_keys, req_context)
-                raise
+            tier.submit_store(job_metadata)
 
     def _flush_pending_cascades(self) -> None:
         """Retry request-level cascades parked on an in-flight primary write.
@@ -809,33 +767,24 @@ class TieringOffloadingManager(OffloadingManager):
         # Step 1: Complete store in primary tier (makes chunks loadable)
         self.primary_tier.complete_store(keys, req_context, success)
 
-        state = self._get_request_state(req_context)
-        try:
-            if success:
-                # Step 2: Cascade to ALL secondary tiers
-                # For each secondary tier, call primary.prepare_read() to get the
-                # LoadStoreSpec AND to increment ref_cnt (protecting chunks from
-                # eviction during the async transfer). One prepare_read() call per
-                # secondary tier.
-                for tier_idx, tier in enumerate(self.secondary_tiers):
-                    if not self._should_store_to_tier(tier, len(keys)):
-                        continue
-                    job_metadata = self.create_store_job(keys, req_context, tier_idx)
-                    try:
-                        tier.submit_store(job_metadata)
-                    except Exception:
-                        self._cancel_registered_job(job_metadata.job_id)
-                        self.primary_tier.complete_read(keys, req_context)
-                        raise
-        finally:
-            # The GPU->primary completion has been consumed even if a secondary
-            # submission fails synchronously.
-            assert state.pending_primary_stores > 0
-            state.pending_primary_stores -= 1
-            self._maybe_finalize_request(state)
+        if success:
+            # Step 2: Cascade to ALL secondary tiers
+            # For each secondary tier, call primary.prepare_read() to get the
+            # LoadStoreSpec AND to increment ref_cnt (protecting chunks from
+            # eviction during the async transfer). One prepare_read() call per
+            # secondary tier.
+            for tier_idx, tier in enumerate(self.secondary_tiers):
+                if not self._should_store_to_tier(tier, len(keys)):
+                    continue
+                job_metadata = self.create_store_job(keys, req_context, tier_idx)
+                tier.submit_store(job_metadata)
 
         # Note: The async transfers are now in flight. Their completion is
         # tracked via get_finished_jobs() / _maybe_process_finished_jobs().
+        state = self._get_request_state(req_context)
+        assert state.pending_primary_stores > 0
+        state.pending_primary_stores -= 1
+        self._maybe_finalize_request(state)
 
     def create_store_job(
         self,

@@ -311,14 +311,11 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
             raise
 
     def submit_load(self, job_metadata: TransferJob) -> None:
-        job_id = job_metadata.job_id
-        self._load_job_keys[job_id] = list(job_metadata.keys)
+        self._load_job_keys[job_metadata.job_id] = list(job_metadata.keys)
         obj_keys = (self._file_mapper.get_file_name(k) for k in job_metadata.keys)
-        try:
-            self._submit_transfer(job_id, job_metadata.chunk_ids, obj_keys, NIXL_READ)
-        except Exception:
-            self._load_job_keys.pop(job_id, None)
-            raise
+        self._submit_transfer(
+            job_metadata.job_id, job_metadata.chunk_ids, obj_keys, NIXL_READ
+        )
 
     def on_request_finished(self, req_context: ReqContext) -> None:
         self._lookup_manager.cleanup(req_context)
