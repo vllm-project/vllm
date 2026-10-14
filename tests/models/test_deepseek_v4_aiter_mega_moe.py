@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from types import SimpleNamespace
+import sys
+from types import ModuleType, SimpleNamespace
 
 import pytest
 import torch
@@ -111,8 +112,26 @@ def test_experts_load_into_local_slots(monkeypatch):
 
 
 @pytest.mark.cpu_test
-@pytest.mark.parametrize("fixed_slot", [True, False])
-def test_decode_runtime_selected_by_max_tokens_across_dp(monkeypatch, fixed_slot):
+@pytest.mark.parametrize(
+    "fixed_slot_max_mtpr, fixed_slot, decode_capacity",
+    [(255, True, 128), (511, True, 256), (255, False, None)],
+)
+def test_decode_runtime_selected_by_max_tokens_across_dp(
+    monkeypatch, fixed_slot_max_mtpr, fixed_slot, decode_capacity
+):
+    for name in (
+        "aiter",
+        "aiter.ops",
+        "aiter.ops.flydsl",
+        "aiter.ops.flydsl.kernels",
+        "aiter.ops.flydsl.kernels.mega_moe",
+    ):
+        monkeypatch.setitem(sys.modules, name, ModuleType(name))
+    monkeypatch.setitem(
+        sys.modules,
+        "aiter.ops.flydsl.kernels.mega_moe.mega_moe_config",
+        SimpleNamespace(FIXED_SLOT_MAX_MTPR=fixed_slot_max_mtpr),
+    )
     experts = _make_experts(monkeypatch, max_num_batched_tokens=3000)
     monkeypatch.setattr(
         mega_moe_module.rocm_aiter_ops, "shuffle_weight_a16w4", lambda w, *_: w
@@ -120,11 +139,18 @@ def test_decode_runtime_selected_by_max_tokens_across_dp(monkeypatch, fixed_slot
     monkeypatch.setattr(
         mega_moe_module.rocm_aiter_ops, "shuffle_scale_a16w4", lambda s, *_: s
     )
-    monkeypatch.setattr(experts, "_uses_fixed_slot", lambda mtpr: fixed_slot)
-    monkeypatch.setattr(experts, "_get_runtime", lambda mtpr: f"runtime{mtpr}")
+    probed = []
+
+    def uses_fixed_slot(mtpr):
+        probed.append(mtpr)
+        return fixed_slot
+
+    monkeypatch.setattr(experts, "_uses_fixed_slot", uses_fixed_slot)
+    monkeypatch.setattr(experts, "get_runtime", lambda mtpr: f"runtime{mtpr}")
     experts.finalize_weights()
 
-    expected_capacities = [128, 4096] if fixed_slot else [4096]
+    assert probed == [128 if decode_capacity is None else decode_capacity]
+    expected_capacities = [4096] if decode_capacity is None else [decode_capacity, 4096]
     assert [c for c, _ in experts._runtimes] == expected_capacities
 
     across_dp = torch.tensor([0])
@@ -136,11 +162,12 @@ def test_decode_runtime_selected_by_max_tokens_across_dp(monkeypatch, fixed_slot
             dp_metadata=SimpleNamespace(num_tokens_across_dp_cpu=across_dp)
         ),
     )
-    decode = "runtime128" if fixed_slot else "runtime4096"
+    cap = decode_capacity or 128
+    decode = f"runtime{decode_capacity or 4096}"
     for local, others, expected in [
-        (128, [1, 128], decode),
-        (4, [4, 129], "runtime4096"),
-        (129, [129, 4], "runtime4096"),
+        (cap, [1, cap], decode),
+        (4, [4, cap + 1], "runtime4096"),
+        (cap + 1, [cap + 1, 4], "runtime4096"),
         (4096, [4096], "runtime4096"),
     ]:
         across_dp = torch.tensor(others)

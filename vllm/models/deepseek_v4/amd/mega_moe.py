@@ -21,11 +21,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.triton_utils import tl, triton
-from vllm.utils.math_utils import next_power_of_2
-
-# Largest max_tok_per_rank for which MegaMoEV2 uses fixed-slot dispatch, which
-# is much cheaper than the compact path at decode batch sizes.
-FIXED_SLOT_MAX_TOKENS = 128
+from vllm.utils.math_utils import next_power_of_2, prev_power_of_2
 
 
 @triton.jit
@@ -171,11 +167,19 @@ class DeepseekV4AiterMegaMoEExperts(nn.Module):
         self.w2_weight_scale.data = rocm_aiter_ops.shuffle_scale_a16w4(
             self.w2_weight_scale.data.view(-1, self.intermediate_size // 32), n, False
         )
+        from aiter.ops.flydsl.kernels.mega_moe.mega_moe_config import (
+            FIXED_SLOT_MAX_MTPR,
+        )
+
+        # MegaMoEV2 takes fixed-slot dispatch up to FIXED_SLOT_MAX_MTPR (255 by
+        # default, raised via AITER_MEGA_FIXED_SLOT_MAX_MTPR); max_tok_per_rank
+        # must also be a power of two.
+        fixed_slot_max_tokens = prev_power_of_2(FIXED_SLOT_MAX_MTPR)
         capacities = [self.max_num_tokens]
-        if self.max_num_tokens > FIXED_SLOT_MAX_TOKENS and self._uses_fixed_slot(
-            FIXED_SLOT_MAX_TOKENS
+        if self.max_num_tokens > fixed_slot_max_tokens and self._uses_fixed_slot(
+            fixed_slot_max_tokens
         ):
-            capacities.insert(0, FIXED_SLOT_MAX_TOKENS)
+            capacities.insert(0, fixed_slot_max_tokens)
         self._runtimes = [(c, self.get_runtime(c)) for c in capacities]
 
     def _uses_fixed_slot(self, max_tok_per_rank: int) -> bool:
