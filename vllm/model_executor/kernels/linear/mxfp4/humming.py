@@ -11,6 +11,7 @@ from vllm.model_executor.layers.quantization.utils.humming import (
     quant_key_to_input_schema,
 )
 from vllm.platforms import current_platform
+from vllm.utils.humming import create_humming_locks
 from vllm.utils.import_utils import has_humming
 
 from .base import MxFp4LinearKernel, MxFp4LinearLayerConfig
@@ -60,7 +61,7 @@ class HummingMxFp4LinearKernel(MxFp4LinearKernel):
             layer, quant_config, input_schema=input_schema
         )
         self.compute_config = get_humming_linear_compute_config()
-        self.locks = torch.zeros(1024, dtype=torch.int32, device=layer.weight.device)
+        self.locks = create_humming_locks(layer.weight.device)
 
     def apply_weights(
         self,

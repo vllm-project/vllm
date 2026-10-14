@@ -584,7 +584,9 @@ class HummingLinearMethod(LinearMethodBase):
             param_dtype=layer.param_dtype,
             allow_fallback=self.quant_config.allow_input_schema_fallback,
         )
-        self.layer_config = _hm.prepare_layer_config(
+        source_tensors = dict(layer.named_parameters())
+        self.layer_config, tensors = _hm.prepare_and_transform_humming_tensors(
+            tensors=source_tensors,
             shape_n=layer.output_partition_sizes_sum,
             shape_k=layer.input_size_per_partition,
             weight_schema=self.weight_schema,
@@ -595,8 +597,6 @@ class HummingLinearMethod(LinearMethodBase):
             torch_dtype=layer.param_dtype,
             device=layer.weight.device,
         )
-        source_tensors = dict(layer.named_parameters())
-        tensors = _hm.transform_humming_tensors(self.layer_config, source_tensors)
         name = self.input_schema.static_tensor_scale_name
         if name is not None:
             tensors[name] = source_tensors[name]
@@ -610,7 +610,7 @@ class HummingLinearMethod(LinearMethodBase):
             setattr(layer, name, param)
 
         self.compute_config = get_humming_linear_compute_config()
-        self.locks = torch.zeros(1024, dtype=torch.int32, device=layer.weight.device)
+        self.locks = _hm.create_humming_locks(layer.weight.device)
 
     def apply(
         self,
