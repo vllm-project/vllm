@@ -229,6 +229,8 @@ def test_aiter_flydsl_prefill_matches_triton_reference(
 
     if in_place:
         assert flydsl_out.data_ptr() == out_buffer.data_ptr()
+        # Padding past the slice. A store there overwrites the NaN with a
+        # bf16 value; the written prefix is checked against the reference.
         assert out_buffer[total_tokens:].isnan().all()
     assert flydsl_state.dtype == state_dtype
     torch.testing.assert_close(
