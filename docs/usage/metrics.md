@@ -37,6 +37,35 @@ The following metrics are exposed:
 
 --8<-- "gen:metrics-general"
 
+## HTTP Render Tool-Calling Observability
+
+`/v1/chat/completions/render` and `/v1/messages/render` expose
+`vllm:tool_call_render_requests_total` on `/metrics`. It counts validated
+requests with explicitly provided, non-null tool fields once per render
+attempt, including requests with `tool_choice=none`.
+
+Labels are the configured `model_name`, `api_surface` (`chat_completions` or
+`messages`), and `status` (`rendered` or `error`). `rendered` means the render
+handler succeeded; `error` covers returned errors and interrupted/failed
+handlers. Validation errors before the handler runs are not counted.
+Non-tool requests are excluded, and counting does not require tracing.
+
+Configure the render server's existing `--otlp-traces-endpoint` option to
+export W3C-linked server spans. Recording spans for tool requests include
+`tool_calling.present`, `tool_calling.tool_count`, `tool_calling.tool_choice`,
+`tool_calling.api_surface`, and `tool_calling.render_status`. Choices are
+normalized to `unset`, `auto`, `none`, `required`, `named`, or `other`;
+Messages `any` maps to `required` and `tool` maps to `named`.
+Names, schemas, arguments, bodies, and exception text are not included in
+these server-span attributes or metric labels. Existing request/error logging
+is unchanged.
+
+These observations confirm server receipt and render outcome, not semantic
+preservation by arbitrary templates. Template-intent tests must check the
+rendered metadata and tool-choice policy, including intentional tool exclusion
+when `--exclude-tools-when-tool-choice-none` is enabled. This is separate from
+inference tool-call response metrics.
+
 ## Speculative Decoding Metrics
 
 --8<-- "gen:metrics-spec-decode"
