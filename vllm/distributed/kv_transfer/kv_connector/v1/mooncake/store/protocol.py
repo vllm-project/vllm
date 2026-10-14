@@ -3,7 +3,9 @@
 """Wire-format constants for the LookupKey ZMQ admin channel.
 
 This is the single source of truth shared by ``LookupKeyClient`` and
-``LookupKeyServer`` on the scheduler<->worker rank-0 admin channel.
+``LookupKeyServer`` on the scheduler<->worker admin channel. The channel is
+addressed per worker rank, so an admin command that concerns every rank is sent
+to each of them in turn.
 
 Wire format (REQ/REP over IPC):
 
@@ -20,9 +22,25 @@ Wire format (REQ/REP over IPC):
                   or more 8-byte tail-key boundaries. Each entry is group_id
                   (u32), then boundary_tokens (u32).
 
+      msg_type == RESET_PREPARE_MSG:
+          (no payload frames)
+        Response: [RESP_OK] or [RESP_ERR]. Waits for the stores one rank has in
+        flight, so a store it started before a wipe on another rank cannot land
+        in the fresh master afterwards. Sent to every rank before the wipe.
+
+      msg_type == RESET_FORGET_MSG:
+          (no payload frames)
+        Response: [RESP_OK] or [RESP_ERR]. Drops the residency one rank
+        buffered, which describes objects a wipe removed and would otherwise be
+        announced as residency of the fresh Store. Sent to every rank after the
+        wipe, so a wipe that fails leaves reports of objects the master still
+        holds intact.
+
       msg_type == RESET_MSG:
           (no payload frames)
-        Response: [RESP_OK] or [RESP_ERR]
+        Response: [RESP_OK] or [RESP_ERR]. Waits for the stores this rank has in
+        flight, wipes the master, and drops the residency it buffered for what
+        was removed. Runs on one rank, after ``RESET_PREPARE_MSG`` on every rank.
 
 The first frame of every request is a named bytes tag (not a numeric
 sentinel that aliases the data field) so the protocol stays
@@ -40,6 +58,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
 
 # Request message-type tags. Frame 0 of every request.
 LOOKUP_MSG: bytes = b"lookup"
+RESET_PREPARE_MSG: bytes = b"reset_prepare"
+RESET_FORGET_MSG: bytes = b"reset_forget"
 RESET_MSG: bytes = b"reset"
 
 # Single-byte response status codes for admin commands.

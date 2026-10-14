@@ -704,6 +704,57 @@ def test_retire_residency_drops_reports_buffered_for_a_wiped_store():
     assert residency.covered == {}
 
 
+def test_reset_forget_keeps_a_stale_rank_report_out_of_the_announcement():
+    """TP=2 reset: rank 1 wrote a block before the wipe and rank 0's report for
+    it arrives after, covering the group's second namespace.
+
+    Rank 1's pre-wipe report names one namespace of the group; the wipe removes
+    the objects it describes, so coverage that counted on it announces a block
+    the fresh Store does not hold. The forget sent to rank 1 after the wipe is
+    what keeps it out, and it is the pre-wipe report rank 1 buffered — not a
+    failed write — that this pins down.
+    """
+    from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.connector import (  # noqa: E501
+        MooncakeStoreKVEvents,
+    )
+
+    def rank_write(*, forget: bool):
+        store = MagicMock()
+        store.batch_is_exist.return_value = [0]
+        store.batch_put_from_multi_buffers.return_value = [256]
+        thread = _make_store_sending_thread(store)
+        thread.enable_kv_event = True
+        _run_store_req(thread, _make_event_store_req(16))
+        if forget:
+            thread.retire_residency()
+        return thread.drain_residency()
+
+    stale = rank_write(forget=False)
+    assert len(stale.events) == 1
+    event = stale.events[0]
+    key = store_block_key(event)
+    other_rank_namespace = "test-model@tp_rank:1@pcp0@dcp0@pp_rank:0@group:0"
+    required = {key[0]: frozenset(stale.covered[key] | {other_rank_namespace})}
+    # Rank 0's report for the same block, written into the fresh Store.
+    fresh = mooncake_store_worker.StoreResidency(
+        [event], {key: frozenset({other_rank_namespace})}
+    )
+
+    counted_stale = MooncakeStoreKVEvents()
+    counted_stale.add_residency(stale, required)
+    counted_stale.add_residency(fresh, required)
+    assert [released.group_idx for released in counted_stale.pop_ready_events()] == [
+        key[0]
+    ]
+
+    forgotten = rank_write(forget=True)
+    assert forgotten.events == []
+    after_forget = MooncakeStoreKVEvents()
+    after_forget.add_residency(forgotten, required)
+    after_forget.add_residency(fresh, required)
+    assert after_forget.pop_ready_events() == []
+
+
 def test_tp_shared_receiving_reads_each_local_store_shard():
     from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec
 
@@ -4160,7 +4211,9 @@ def test_mooncake_lookup_reuses_resolved_hash_checkpoint(
             prefix_match_unit=prefix_match_unit,
         ),
         parallel_config=SimpleNamespace(
-            decode_context_parallel_size=dcp_world_size, world_size=dcp_world_size
+            decode_context_parallel_size=dcp_world_size,
+            world_size=dcp_world_size,
+            data_parallel_index=0,
         ),
     )
     with patch(
@@ -4230,7 +4283,9 @@ def test_scheduler_follows_core_hit_alignment(alignment, expected):
         cache_config=SimpleNamespace(
             block_size=32, enable_prefix_caching=True, prefix_match_unit=8
         ),
-        parallel_config=SimpleNamespace(decode_context_parallel_size=1, world_size=1),
+        parallel_config=SimpleNamespace(
+            decode_context_parallel_size=1, world_size=1, data_parallel_index=0
+        ),
     )
     with patch(
         "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."

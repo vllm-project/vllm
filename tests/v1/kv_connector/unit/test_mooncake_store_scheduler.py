@@ -314,7 +314,9 @@ def test_scheduler_projects_nonprefix_groups_and_mamba_ids():
         cache_config=SimpleNamespace(
             block_size=800, enable_prefix_caching=True, prefix_match_unit=None
         ),
-        parallel_config=SimpleNamespace(decode_context_parallel_size=1, world_size=1),
+        parallel_config=SimpleNamespace(
+            decode_context_parallel_size=1, world_size=1, data_parallel_index=0
+        ),
     )
 
     with patch(
