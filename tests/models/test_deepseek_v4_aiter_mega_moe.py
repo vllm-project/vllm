@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import sys
-from types import ModuleType, SimpleNamespace
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -113,67 +112,27 @@ def test_experts_load_into_local_slots(monkeypatch):
 
 @pytest.mark.cpu_test
 @pytest.mark.parametrize(
-    "fixed_slot_max_mtpr, fixed_slot, decode_capacity",
-    [(255, True, 128), (511, True, 256), (255, False, None)],
+    "tokens_across_dp, expected",
+    [([4, 128], "decode"), ([4, 129], "prefill")],
 )
-def test_decode_runtime_selected_by_max_tokens_across_dp(
-    monkeypatch, fixed_slot_max_mtpr, fixed_slot, decode_capacity
+def test_runtime_selected_by_max_tokens_across_dp(
+    monkeypatch, tokens_across_dp, expected
 ):
-    for name in (
-        "aiter",
-        "aiter.ops",
-        "aiter.ops.flydsl",
-        "aiter.ops.flydsl.kernels",
-        "aiter.ops.flydsl.kernels.mega_moe",
-    ):
-        monkeypatch.setitem(sys.modules, name, ModuleType(name))
-    monkeypatch.setitem(
-        sys.modules,
-        "aiter.ops.flydsl.kernels.mega_moe.mega_moe_config",
-        SimpleNamespace(FIXED_SLOT_MAX_MTPR=fixed_slot_max_mtpr),
-    )
-    experts = _make_experts(monkeypatch, max_num_batched_tokens=3000)
-    monkeypatch.setattr(
-        mega_moe_module.rocm_aiter_ops, "shuffle_weight_a16w4", lambda w, *_: w
-    )
-    monkeypatch.setattr(
-        mega_moe_module.rocm_aiter_ops, "shuffle_scale_a16w4", lambda s, *_: s
-    )
-    probed = []
-
-    def uses_fixed_slot(mtpr):
-        probed.append(mtpr)
-        return fixed_slot
-
-    monkeypatch.setattr(experts, "_uses_fixed_slot", uses_fixed_slot)
-    monkeypatch.setattr(experts, "get_runtime", lambda mtpr: f"runtime{mtpr}")
-    experts.finalize_weights()
-
-    assert probed == [128 if decode_capacity is None else decode_capacity]
-    expected_capacities = [4096] if decode_capacity is None else [decode_capacity, 4096]
-    assert [c for c, _ in experts._runtimes] == expected_capacities
-
-    across_dp = torch.tensor([0])
+    experts = _make_experts(monkeypatch)
+    experts._runtimes = [(128, "decode"), (4096, "prefill")]
     monkeypatch.setattr(mega_moe_module, "is_forward_context_available", lambda: True)
     monkeypatch.setattr(
         mega_moe_module,
         "get_forward_context",
         lambda: SimpleNamespace(
-            dp_metadata=SimpleNamespace(num_tokens_across_dp_cpu=across_dp)
+            dp_metadata=SimpleNamespace(
+                num_tokens_across_dp_cpu=torch.tensor(tokens_across_dp)
+            )
         ),
     )
-    cap = decode_capacity or 128
-    decode = f"runtime{decode_capacity or 4096}"
-    for local, others, expected in [
-        (cap, [1, cap], decode),
-        (4, [4, cap + 1], "runtime4096"),
-        (cap + 1, [cap + 1, 4], "runtime4096"),
-        (4096, [4096], "runtime4096"),
-    ]:
-        across_dp = torch.tensor(others)
-        assert experts.select_runtime(local) == expected
-    with pytest.raises(ValueError):
-        experts.select_runtime(4097)
+    # Every rank must take the same runtime, so a small local batch still gets
+    # the prefill runtime when another DP rank is over the decode capacity.
+    assert experts.select_runtime(4) == expected
 
 
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="Requires ROCm")
