@@ -9,6 +9,10 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm.config.mamba import MambaBackendEnum
+from vllm.model_executor.layers.mamba.abstract import (
+    get_kv_cache_checkpoint_alignment,
+    get_mamba_num_speculative_blocks,
+)
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import (
@@ -98,6 +102,10 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         device: torch.device,
     ):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+        self.num_speculative_blocks = get_mamba_num_speculative_blocks(vllm_config)
+        self.checkpoint_alignment = get_kv_cache_checkpoint_alignment(
+            vllm_config, layer_names
+        )
 
         # Enable speculative decoding support
         self.speculative_config = vllm_config.speculative_config
@@ -471,6 +479,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             common_attn_metadata.seq_lens,
             self.kv_cache_spec,
             self.vllm_config.cache_config.mamba_cache_mode,
+            self.num_speculative_blocks,
         )
 
         if state_indices_tensor.dim() == 1:
@@ -731,6 +740,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             metadata.seq_lens,
             self.kv_cache_spec,
             self.vllm_config.cache_config.mamba_cache_mode,
+            self.num_speculative_blocks,
         )
         if state_indices_tensor.dim() == 1:
             state_indices_tensor = state_indices_tensor.unsqueeze(-1)

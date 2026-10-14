@@ -1050,10 +1050,9 @@ def _init_minimal_kv_cache_for_profiling(runner: "GPUModelRunner") -> None:
     from vllm.v1.core.kv_cache_config_builder import get_kv_cache_config_builder
     from vllm.v1.core.kv_cache_planning import get_kv_cache_groups_from_builder
 
-    kv_cache_spec = runner.get_kv_cache_spec()
     builder = get_kv_cache_config_builder(runner.vllm_config)
     kv_cache_groups = get_kv_cache_groups_from_builder(
-        builder, runner.vllm_config, kv_cache_spec
+        builder, runner.vllm_config, runner.get_kv_cache_layer_configs()
     )
     # At least one block per sequence is required to capture the graphs.
     min_blocks = (
@@ -1078,10 +1077,8 @@ def _teardown_profiling_state(runner: "GPUModelRunner") -> None:
     # profiling KVCacheConfig: the real (e.g. PP-projected) config may
     # place Mamba layers into a different group layout, so it must be
     # re-derived from the real config.
-    if hasattr(runner.model_state, "_mamba_group_ids"):
-        runner.model_state._mamba_group_ids = []
-    if hasattr(runner.model_state, "_mamba_spec"):
-        runner.model_state._mamba_spec = None
+    if hasattr(runner.model_state, "_mamba_policy"):
+        runner.model_state._mamba_policy = None
     if hasattr(runner, "kv_caches"):
         runner.kv_caches.clear()
     if hasattr(runner, "attn_groups"):

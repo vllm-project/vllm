@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import torch
 
-from tests.v1.core.utils import create_requests
+from tests.v1.core.utils import create_requests, new_kv_cache_group
 from vllm.config import (
     CacheConfig,
     ModelConfig,
@@ -16,9 +16,8 @@ from vllm.config import (
 )
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
+    AttentionSpec,
     KVCacheConfig,
-    KVCacheGroupSpec,
 )
 from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
@@ -74,9 +73,9 @@ def _create_dflash_scheduler(num_speculative_tokens: int) -> Scheduler:
         num_blocks=NUM_BLOCKS,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["layer"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=BLOCK_SIZE,
                     num_kv_heads=1,
                     head_size=1,

@@ -9,11 +9,10 @@ import pytest
 import torch
 
 from tests.v1.attention.test_gdn_metadata_builder import (
-    BLOCK_SIZE,
-    DEVICE,
+    _common_attn_metadata,
     _create_gdn_builder,
 )
-from tests.v1.attention.utils import BatchSpec, create_common_attn_metadata
+from tests.v1.attention.utils import BatchSpec
 from vllm.config.compilation import CUDAGraphMode
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.recoverssm_metadata import (
@@ -151,8 +150,8 @@ def test_padded_prompt_tail_builds_as_spec_decode(
     assert mamba_metadata.is_prefilling.tolist() == [False, False, True]
 
     builder = _create_gdn_builder(num_speculative_tokens=k)
-    common = create_common_attn_metadata(
-        BatchSpec(seq_lens=seq_lens, query_lens=query_lens), BLOCK_SIZE, DEVICE
+    common = _common_attn_metadata(
+        builder, BatchSpec(seq_lens=seq_lens, query_lens=query_lens)
     ).replace(**mamba_metadata.get_extra_common_attn_kwargs(0, 3))
     meta = builder.build(
         common_prefix_len=0,

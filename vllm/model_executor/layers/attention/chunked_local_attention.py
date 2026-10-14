@@ -19,8 +19,10 @@ from vllm.v1.attention.backends.utils import (
     make_local_attention_virtual_batches,
 )
 from vllm.v1.attention.selector import get_attn_backend
+from vllm.v1.core.single_type_kv_cache_manager import ChunkedLocalAttentionManager
 from vllm.v1.kv_cache_interface import (
-    ChunkedLocalAttentionSpec,
+    AttentionSpec,
+    KVCacheLayerConfig,
     KVCacheSpec,
     get_kv_quant_mode,
 )
@@ -116,13 +118,15 @@ class ChunkedLocalAttention(Attention):
             attn_backend=attn_backend,
         )
 
-    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
+    def get_kv_cache_config(self, vllm_config: VllmConfig) -> KVCacheLayerConfig:
         assert self.attention_chunk_size
-        return ChunkedLocalAttentionSpec(
+        spec = AttentionSpec(
             block_size=vllm_config.cache_config.block_size,
             num_kv_heads=self.num_kv_heads,
             head_size=self.head_size,
             dtype=self.kv_cache_torch_dtype,
             kv_quant_mode=get_kv_quant_mode(self.kv_cache_dtype),
-            attention_chunk_size=self.attention_chunk_size,
+        )
+        return ChunkedLocalAttentionManager.layer_config(
+            spec, attention_chunk_size=self.attention_chunk_size
         )

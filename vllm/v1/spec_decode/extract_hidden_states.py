@@ -306,8 +306,10 @@ class ExtractHiddenStatesProposer:
             raise ValueError("No attention layers found for ExtractHiddenStatesModel")
         layer = next(iter(draft_attn_layers.values()))
         attn_backend = layer.get_attn_backend()
+        layer_config = layer.get_kv_cache_config(self.vllm_config)
+        assert layer_config is not None
         return attn_backend.get_builder_cls()(
-            layer.get_kv_cache_spec(self.vllm_config),
+            layer_config.spec,
             self.attn_layer_names,
             self.vllm_config,
             self.device,

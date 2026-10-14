@@ -103,13 +103,14 @@ def _mamba_get_block_table_tensor(
     seq_lens: torch.Tensor,
     kv_cache_spec: MambaSpec,
     mamba_cache_mode: str,
+    num_speculative_blocks: int,
 ) -> torch.Tensor:
     if mamba_cache_mode == "none":
         return block_table
 
     assert block_table.is_cuda and seq_lens.is_cuda
     num_requests = block_table.shape[0]
-    num_state_slots = 1 + kv_cache_spec.num_speculative_blocks
+    num_state_slots = 1 + num_speculative_blocks
     state_indices = torch.empty(
         (num_requests, num_state_slots),
         dtype=block_table.dtype,
@@ -386,6 +387,7 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
                     m.seq_lens,
                     self.kv_cache_spec,
                     self.vllm_config.cache_config.mamba_cache_mode,
+                    self.num_speculative_blocks,
                 )
         else:
             block_table_tensor = m.block_table_tensor
@@ -669,7 +671,7 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
             assert spec_state_indices_tensor is not None
             assert spec_query_start_loc is not None
             align = None
-            if self.kv_cache_spec.mamba_cache_mode == "align":
+            if self.vllm_config.cache_config.mamba_cache_mode == "align":
                 align = KDARecoverSSMAlignMetadata(
                     block_table=m.block_table_tensor,
                     num_computed_tokens=m.compute_num_computed_tokens(),

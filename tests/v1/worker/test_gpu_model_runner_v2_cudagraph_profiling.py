@@ -443,8 +443,8 @@ def test_profile_cudagraph_memory_frees_throwaway_pool(monkeypatch):
 def test_teardown_profiling_state_clears_mamba_align_metadata(monkeypatch):
     """Profiling-cached Mamba align metadata must be invalidated at teardown.
 
-    ``MambaHybridModelState`` lazily caches ``_mamba_group_ids`` and
-    ``_mamba_spec`` from whichever KVCacheConfig it first sees. When the
+    ``MambaHybridModelState`` lazily caches ``_mamba_policy`` from whichever
+    KVCacheConfig it first sees. When the
     profiling config's group layout differs from the real (e.g. PP-projected)
     config, reusing the stale metadata mismatches the real block tables
     ("expected 3 block tables, got 4" at
@@ -455,8 +455,7 @@ def test_teardown_profiling_state_clears_mamba_align_metadata(monkeypatch):
     runner.model_state = SimpleNamespace(
         supports_mm_inputs=False,
         _mamba_ctx=object(),
-        _mamba_group_ids=[0, 1],
-        _mamba_spec=object(),
+        _mamba_policy=object(),
     )
     runner.cache_config = SimpleNamespace(num_gpu_blocks=1)
     runner.kv_caches = []
@@ -472,5 +471,4 @@ def test_teardown_profiling_state_clears_mamba_align_metadata(monkeypatch):
     cgu._teardown_profiling_state(runner)
 
     assert runner.model_state._mamba_ctx is None
-    assert runner.model_state._mamba_group_ids == []
-    assert runner.model_state._mamba_spec is None
+    assert runner.model_state._mamba_policy is None

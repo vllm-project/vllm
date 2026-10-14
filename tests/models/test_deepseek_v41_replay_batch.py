@@ -37,15 +37,13 @@ GROUPS = SimpleNamespace(
     kv_cache_groups=[
         SimpleNamespace(
             layer_names=["swa"],
-            kv_cache_spec=SimpleNamespace(
-                prefix_cacheable=False, prefix_replay_tokens=WINDOW
-            ),
+            prefix_cacheable=False,
+            prefix_replay_tokens=WINDOW,
         ),
         SimpleNamespace(
             layer_names=["mla"],
-            kv_cache_spec=SimpleNamespace(
-                prefix_cacheable=True, prefix_replay_tokens=0
-            ),
+            prefix_cacheable=True,
+            prefix_replay_tokens=0,
         ),
     ]
 )
@@ -503,15 +501,13 @@ def test_zero_prefix_window_warms_gather_and_skips_pad(monkeypatch):
         kv_cache_groups=[
             SimpleNamespace(
                 layer_names=["swa"],
-                kv_cache_spec=SimpleNamespace(
-                    prefix_cacheable=False, prefix_replay_tokens=0
-                ),
+                prefix_cacheable=False,
+                prefix_replay_tokens=0,
             ),
             SimpleNamespace(
                 layer_names=["mla"],
-                kv_cache_spec=SimpleNamespace(
-                    prefix_cacheable=True, prefix_replay_tokens=0
-                ),
+                prefix_cacheable=True,
+                prefix_replay_tokens=0,
             ),
         ]
     )

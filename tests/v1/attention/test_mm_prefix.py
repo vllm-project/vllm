@@ -60,7 +60,7 @@ if _fa4_available():
         FlashAttentionMetadataBuilder,
         _make_mm_prefix_mask_mod,
     )
-    from vllm.v1.kv_cache_interface import FullAttentionSpec, get_kv_quant_mode
+    from vllm.v1.kv_cache_interface import AttentionSpec, get_kv_quant_mode
     from vllm.vllm_flash_attn.flash_attn_interface import flash_attn_varlen_func
 
 DEVICE = torch.device("cuda:0")
@@ -550,12 +550,11 @@ def test_mm_prefix_kv_cache_path(head_size: int):
     batch = BatchSpec(
         seq_lens=PAGED_SEQ_LENS, query_lens=PAGED_QUERY_LENS, name="mm_prefix_mixed"
     )
-    kv_cache_spec = FullAttentionSpec(
+    kv_cache_spec = AttentionSpec(
         block_size=BLOCK_SIZE,
         num_kv_heads=num_kv_heads,
         head_size=head_size,
         dtype=mc.dtype,
-        sliding_window=SLIDING_WINDOW,
         kv_quant_mode=get_kv_quant_mode(vllm_config.cache_config.cache_dtype),
     )
     common = create_common_attn_metadata(batch, BLOCK_SIZE, DEVICE)
@@ -721,7 +720,7 @@ def test_composite_shared_cache_across_image_and_causal_steps(
     from vllm.v1.attention.backends.triton_flashinfer import (
         TritonFlashInferBackend,
     )
-    from vllm.v1.kv_cache_interface import FullAttentionSpec, SlidingWindowSpec
+    from vllm.v1.kv_cache_interface import AttentionSpec
 
     if causal_backend_name == "FLASHINFER":
         backend = TritonFlashInferBackend
@@ -758,11 +757,7 @@ def test_composite_shared_cache_across_image_and_causal_steps(
         dtype=storage_dtype,
         kv_quant_mode=get_kv_quant_mode(cache_dtype),
     )
-    spec = (
-        SlidingWindowSpec(**spec_kwargs, sliding_window=window)
-        if window
-        else FullAttentionSpec(**spec_kwargs)
-    )
+    spec = AttentionSpec(**spec_kwargs)
     if reverse_children:
         # Swapping the children and policy must preserve outputs and KV writes;
         # dispatch cannot depend on a particular child's class or position.

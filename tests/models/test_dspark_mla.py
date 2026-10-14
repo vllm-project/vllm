@@ -481,12 +481,12 @@ def test_k3_dspark_mla_kv_cache_spec_groups_with_target_mla():
     draft_attn = SimpleNamespace(
         kv_cache_dtype="fp8", head_size=576, non_causal_multi_token_decode=True
     )
-    target_spec = MLAAttention.get_kv_cache_spec(target_attn, vllm_config)
-    draft_spec = MultiHeadLatentAttention.get_kv_cache_spec(draft_attn, vllm_config)
+    target_config = MLAAttention.get_kv_cache_config(target_attn, vllm_config)
+    draft_config = MultiHeadLatentAttention.get_kv_cache_config(draft_attn, vllm_config)
 
-    kv_cache_spec = {f"model.layers.{i}.attn": target_spec for i in range(24)}
-    kv_cache_spec |= {f"draft.layers.{i}.attn": draft_spec for i in range(5)}
+    layer_configs = {f"model.layers.{i}.attn": target_config for i in range(24)}
+    layer_configs |= {f"draft.layers.{i}.attn": draft_config for i in range(5)}
 
-    groups = _get_kv_cache_groups_uniform_page_size(kv_cache_spec)
+    groups = _get_kv_cache_groups_uniform_page_size(layer_configs)
     assert len(groups) == 1
     assert len(groups[0].layer_names) == 29

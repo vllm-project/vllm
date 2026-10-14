@@ -71,7 +71,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_layout import (
     MambaOffsetTemplate,
     MambaStateLayout,
     apply_mamba_offset_template,
-    build_layer_to_spec,
     build_mamba_offset_template,
     compute_block_transfer_offsets,
     compute_head_slice_offsets,
@@ -106,18 +105,16 @@ from vllm.utils.network_utils import (
     make_zmq_path,
     make_zmq_socket,
 )
+from vllm.v1.core.kv_cache_utils import is_mamba_group, resolve_dcp_kv_block_size
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.core.single_type_kv_cache_manager import (
+    CircularBufferManager,
+    MambaManager,
+)
 from vllm.v1.kv_cache_interface import (
-    CircularBufferSpec,
-    FullAttentionSpec,
     KVCacheConfig,
-    KVCacheSpec,
     MambaSpec,
-    SlidingWindowMLASpec,
-    SlidingWindowSpec,
-    get_kv_cache_spec_sliding_window,
-    is_full_attention_spec,
-    iter_layer_specs,
+    MLAAttentionSpec,
 )
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.outputs import KVConnectorOutput
@@ -308,7 +305,7 @@ class MoRIIOConnector(KVConnectorBase_V1, SupportsHMA):
         )
         self.mode = get_moriio_mode(self.kv_transfer_config)
         self._transfers_mamba_state = any(
-            group.enable_kv_transfer and _is_mamba_group_spec(group.kv_cache_spec)
+            group.enable_kv_transfer and is_mamba_group(group)
             for group in kv_cache_config.kv_cache_groups
         )
         if role == KVConnectorRole.SCHEDULER:
@@ -500,19 +497,11 @@ class MoRIIOConnector(KVConnectorBase_V1, SupportsHMA):
             return False
 
 
-def _is_mamba_group_spec(kv_cache_spec: KVCacheSpec) -> bool:
-    """True if every layer spec in the group is a MambaSpec."""
-    layer_specs = iter_layer_specs(kv_cache_spec)
-    return len(layer_specs) > 0 and all(
-        isinstance(spec, MambaSpec) for spec in layer_specs
-    )
-
-
 def _split_kv_cache_group_kinds(
     kv_cache_config: "KVCacheConfig",
 ) -> tuple[list[int], list[int]]:
     """Classify kv_cache_groups into (attention_group_indices,
-    mamba_group_indices) by whether each group's layers are MambaSpecs.
+    mamba_group_indices) by whether each group is a Mamba group.
 
     Groups that opt out of external transfer are absent from
     ``KVCacheConfig.transfer_groups``. Returned indices address that filtered
@@ -521,7 +510,7 @@ def _split_kv_cache_group_kinds(
     attn: list[int] = []
     mamba: list[int] = []
     for gi, group in enumerate(kv_cache_config.transfer_groups):
-        if _is_mamba_group_spec(group.kv_cache_spec):
+        if is_mamba_group(group):
             mamba.append(gi)
         else:
             attn.append(gi)
@@ -589,34 +578,35 @@ class MoRIIOConnectorScheduler:
             mamba_specs = [
                 cast(MambaSpec, spec)
                 for group_id in self._mamba_group_ids
-                for spec in iter_layer_specs(
-                    kv_cache_config.transfer_groups[group_id].kv_cache_spec
-                )
+                for spec in kv_cache_config.transfer_groups[
+                    group_id
+                ].kv_cache_specs.values()
             ]
             mamba_spec = _validate_mamba_specs(mamba_specs)
             if self.mode == MoRIIOMode.WRITE:
                 _validate_hybrid_speculation(vllm_config)
-        self._num_ssm_scratch_blocks = (
-            mamba_spec.num_speculative_blocks if mamba_spec is not None else 0
-        )
+        self._num_ssm_scratch_blocks = 0
+        if mamba_spec is not None:
+            mamba_config = kv_cache_config.transfer_groups[
+                self._mamba_group_ids[0]
+            ].manager_config
+            assert isinstance(mamba_config.params, MambaManager.Params)
+            self._num_ssm_scratch_blocks = mamba_config.params.num_speculative_blocks
         self.block_size = vllm_config.cache_config.block_size
         attn_block_size = self.block_size
         max_decode_tail_tokens = 1 + vllm_config.num_lookahead_tokens
         # Per attention group: not prefix-cacheable, so read even on a full hit.
         self._attn_group_is_state: list[bool] = []
         if self._has_mamba:
-            attn_specs = [
-                kv_cache_config.transfer_groups[group_id].kv_cache_spec
+            attn_groups = [
+                kv_cache_config.transfer_groups[group_id]
                 for group_id in self._attn_group_ids
             ]
-            self._attn_group_is_state = [
-                not spec.prefix_cacheable for spec in attn_specs
-            ]
+            self._attn_group_is_state = [not g.prefix_cacheable for g in attn_groups]
             dcp_size = vllm_config.parallel_config.decode_context_parallel_size
             # The smallest attention block bounds every group's local tail.
             attn_block_size = min(
-                spec.block_size * (dcp_size if spec.dcp_sharded else 1)
-                for spec in attn_specs
+                resolve_dcp_kv_block_size(g, dcp_size) for g in attn_groups
             )
             # Admission can pad the final prompt token to 1 + num_spec rows;
             # allocate_slots reserves drafter lookahead in addition to those.
@@ -626,28 +616,24 @@ class MoRIIOConnectorScheduler:
 
         self._is_hma_required = (
             not vllm_config.scheduler_config.disable_hybrid_kv_cache_manager
-            and any(
-                not is_full_attention_spec(g.kv_cache_spec)
-                for g in kv_cache_config.transfer_groups
-            )
+            and any(not g.is_full_attention for g in kv_cache_config.transfer_groups)
         )
         if self._is_hma_required:
             # MoRIIO handles sliding-window and mamba/KDA groups in READ mode, and
             # circular-buffer groups only alongside mamba/KDA in READ mode. Other
             # hybrid cache specs still fail closed.
-            supported: tuple[type[KVCacheSpec], ...] = (
-                FullAttentionSpec,
-                SlidingWindowSpec,
-                MambaSpec,
-            )
-            if self._has_mamba and self.mode == MoRIIOMode.READ:
-                supported += (CircularBufferSpec,)
+            allow_circular_buffer = self._has_mamba and self.mode == MoRIIOMode.READ
             unsupported = [
-                type(g.kv_cache_spec).__name__
+                g.manager_cls.__name__
                 for g in kv_cache_config.transfer_groups
-                if not all(
-                    isinstance(spec, supported)
-                    for spec in iter_layer_specs(g.kv_cache_spec)
+                if not (
+                    g.is_full_attention
+                    or g.sliding_window is not None
+                    or is_mamba_group(g)
+                    or (
+                        allow_circular_buffer
+                        and issubclass(g.manager_cls, CircularBufferManager)
+                    )
                 )
             ]
             if unsupported:
@@ -655,13 +641,16 @@ class MoRIIOConnectorScheduler:
                     "MoRIIO only supports sliding-window hybrid models (e.g. "
                     "Gemma) and mamba/KDA groups under the hybrid KV cache "
                     "manager. Unsupported KV "
-                    f"cache group spec(s): {sorted(set(unsupported))}. Pass "
+                    f"cache group manager(s): {sorted(set(unsupported))}. Pass "
                     "--disable-hybrid-kv-cache-manager to run without HMA."
                 )
-            # SlidingWindowMLASpec slots are MLA latents — WRITE handles them.
+            # Sliding-window MLA slots are MLA latents — WRITE handles them.
             if self.mode == MoRIIOMode.WRITE and any(
-                isinstance(g.kv_cache_spec, SlidingWindowSpec)
-                and not isinstance(g.kv_cache_spec, SlidingWindowMLASpec)
+                g.sliding_window is not None
+                and not any(
+                    isinstance(spec, MLAAttentionSpec)
+                    for spec in g.kv_cache_specs.values()
+                )
                 for g in kv_cache_config.transfer_groups
             ):
                 raise NotImplementedError(
@@ -671,8 +660,8 @@ class MoRIIOConnectorScheduler:
                 )
 
         sw_sizes_tokens: list[tuple[int, int]] = [
-            (sliding_window, g.kv_cache_spec.block_size)
-            if (sliding_window := get_kv_cache_spec_sliding_window(g.kv_cache_spec))
+            (g.sliding_window, g.block_size)
+            if g.sliding_window is not None
             else (0, self.block_size)
             for g in kv_cache_config.transfer_groups
         ]
@@ -685,8 +674,7 @@ class MoRIIOConnectorScheduler:
         # the connector's block payload), used to clamp each full-attention group
         # to its prompt length on the WRITE save path.
         self._group_block_sizes = [
-            getattr(g.kv_cache_spec, "block_size", self.block_size)
-            for g in kv_cache_config.transfer_groups
+            g.block_size for g in kv_cache_config.transfer_groups
         ]
         # The WRITE-mode prompt-block clamp only covers full-attention groups, so
         # MoRIIO + speculative decoding is not yet safe on sliding-window /
@@ -709,11 +697,9 @@ class MoRIIOConnectorScheduler:
         self._full_attn_group_idx = 0
         self._full_attn_block_size = self.block_size
         for gi, group in enumerate(kv_cache_config.kv_cache_groups):
-            if is_full_attention_spec(group.kv_cache_spec):
+            if group.is_full_attention:
                 self._full_attn_group_idx = gi
-                self._full_attn_block_size = getattr(
-                    group.kv_cache_spec, "block_size", self.block_size
-                )
+                self._full_attn_block_size = group.block_size
                 break
 
         self.host_ip = resolve_host_ip(
@@ -1354,13 +1340,15 @@ class MoRIIOConnectorScheduler:
             for group, blocks in zip(
                 self.kv_cache_config.transfer_groups, transfer_blocks, strict=True
             ):
-                spec = group.kv_cache_spec
-                if isinstance(spec, MambaSpec):
+                config = group.manager_config
+                if isinstance(config.params, MambaManager.Params):
                     clamped_hybrid.append(
-                        clip_ssm_state_blocks(list(blocks), spec.num_speculative_blocks)
+                        clip_ssm_state_blocks(
+                            list(blocks), config.params.num_speculative_blocks
+                        )
                     )
                 else:
-                    block_size = spec.block_size * (dcp_size if spec.dcp_sharded else 1)
+                    block_size = resolve_dcp_kv_block_size(group, dcp_size)
                     clamped_hybrid.append(
                         list(blocks[: cdiv(req.num_prompt_tokens, block_size)])
                     )
@@ -1812,7 +1800,11 @@ class MoRIIOConnectorWorker:
         )
         self.kv_transfer_config = vllm_config.kv_transfer_config
         self.is_producer = self.kv_transfer_config.is_kv_producer
-        self.layer_to_spec = build_layer_to_spec(kv_cache_config)
+        self.layer_to_spec = {
+            name: spec
+            for group in kv_cache_config.kv_cache_groups
+            for name, spec in group.kv_cache_specs.items()
+        }
         # we transfer by layer, but store by kv cache group
         self.layer_to_group = dict(kv_cache_config.transfer_group_index_by_layer)
         self._transfer_layer_names = set(self.layer_to_group)
