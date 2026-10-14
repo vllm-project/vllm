@@ -158,25 +158,28 @@ desired NUMA policy from the beginning.
 
 By default, vLLM binds automatically when the environment supports it:
 CUDA-alike platform, multiple NUMA nodes, `numactl` installed, permission to
-set NUMA memory policy, unrestricted CPU affinity, the `spawn` multiprocessing
-start method (the CLI default), and a local `mp` or `uni` executor with
-multiprocessing DP. Ray, external launchers, `--device-ids` remapping, and
-prefill context parallelism (PCP) are excluded from automatic binding.
+set NUMA memory policy, unrestricted CPU affinity, a default NUMA memory policy,
+the `spawn` multiprocessing start method (the CLI default), and a local `mp` or
+`uni` executor with multiprocessing DP. Ray, external launchers, `--device-ids`
+remapping, and prefill context parallelism (PCP) are excluded from automatic binding.
 Otherwise vLLM starts unbound. Use
 `--numa-bind` to make a missing `numactl` or undetectable GPU-to-NUMA topology a
 startup error, or `--no-numa-bind` to disable binding. Passing
 `--numa-bind-nodes` or `--numa-bind-cpus` implies `--numa-bind`.
+Automatic binding preserves an existing non-default memory policy, such as
+interleave, preferred-node, or bind. Explicit enablement may override it.
 
 When binding, vLLM auto-detects the GPU-to-NUMA mapping and uses
 `--cpunodebind=<node> --membind=<node>` for each worker. When you need a custom
 CPU policy, add `--numa-bind-cpus` and vLLM will switch to
 `--physcpubind=<cpu-list> --membind=<node>`.
 
-Automatic eligibility and topology validation happen in the local launcher
-before starting the first bound subprocess. The mapping must cover all visible
-GPUs and local workers, and each mapped NUMA node must have CPUs. The resolved
-decision and mapping are passed to spawned children, so an already-bound
-EngineCore does not repeat detection under its restricted CPU affinity.
+Automatic eligibility and topology validation happen in each local launcher
+before starting its first bound subprocess, using freshly discovered topology.
+The mapping must cover all visible GPUs and local workers, and each mapped NUMA
+node must have CPUs. The resolved decision and mapping are passed to spawned
+children, so an already-bound EngineCore does not repeat detection under its
+restricted CPU affinity.
 Multi-node multiprocessing launchers resolve their own host-local mapping;
 NUMA node IDs are never interpreted as cluster-wide IDs.
 

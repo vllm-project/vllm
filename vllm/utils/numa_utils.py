@@ -26,6 +26,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 _NUMACTL_ARGS_ENV = "_VLLM_INTERNAL_NUMACTL_ARGS"
 _NUMACTL_PYTHON_EXECUTABLE_ENV = "_VLLM_INTERNAL_NUMACTL_PYTHON_EXECUTABLE"
+_MPOL_DEFAULT = 0
 
 
 @cache
@@ -41,32 +42,30 @@ def get_libnuma():
     return libnuma
 
 
-def _can_set_mempolicy() -> bool:
-    """Check whether the current process can use NUMA memory policy syscalls."""
+def _get_mempolicy() -> int | None:
+    """Return the current memory-policy mode, or None if it cannot be read."""
     try:
         libnuma = get_libnuma()
         if libnuma is None or libnuma.numa_available() < 0:
-            return False
+            return None
         mode = ctypes.c_int()
         ret = libnuma.get_mempolicy(
             ctypes.byref(mode), None, ctypes.c_ulong(0), None, ctypes.c_ulong(0)
         )
-        return ret == 0
+        return mode.value if ret == 0 else None
     except Exception:
-        return False
+        return None
 
 
-def _is_auto_numa_available(
-    verbose: bool = True, *, strict_affinity: bool = False
-) -> bool:
+def _is_auto_numa_available(verbose: bool = True, *, strict: bool = False) -> bool:
     """Check whether automatic GPU-to-NUMA detection should be attempted.
 
     Args:
         verbose: Log why detection is skipped at warning level; otherwise at
             debug level, for the default mode where skipping is expected.
-        strict_affinity: Skip automatic default binding if CPU availability
-            cannot be checked. Explicit topology discovery keeps its existing
-            best-effort affinity check.
+        strict: Require known unrestricted CPU affinity and the default memory
+            policy for automatic default binding. Explicit topology discovery
+            keeps its existing best-effort checks.
 
     """
     from vllm.platforms import current_platform
@@ -92,19 +91,28 @@ def _is_auto_numa_available(
                 "explicitly to override."
             )
             return False
-        if cpu_count is None and strict_affinity:
+        if cpu_count is None and strict:
             log("Could not determine CPU availability for automatic NUMA binding.")
             return False
     except (AttributeError, NotImplementedError, psutil.Error):
-        if strict_affinity:
+        if strict:
             log("Could not check CPU affinity for automatic NUMA binding.")
             return False
 
-    if not _can_set_mempolicy():
+    mempolicy = _get_mempolicy()
+    if mempolicy is None:
         log(
-            "User lacks permission to set NUMA memory policy. "
+            "Could not read NUMA memory policy. "
             "Automatic NUMA detection may not work; if you are using Docker, "
             "try adding --cap-add SYS_NICE."
+        )
+        return False
+    if strict and mempolicy != _MPOL_DEFAULT:
+        log(
+            "NUMA memory policy is already set for this process (mode=%d). "
+            "Skipping automatic NUMA binding; pass --numa-bind explicitly "
+            "to override.",
+            mempolicy,
         )
         return False
 
@@ -118,7 +126,6 @@ def _is_auto_numa_available(
     return True
 
 
-@cache
 def get_auto_numa_nodes() -> list[int] | None:
     """Auto-detect NUMA nodes for all visible GPUs."""
     from vllm.platforms import current_platform
@@ -166,7 +173,7 @@ def _can_auto_bind(
         from vllm.platforms import current_platform
         from vllm.utils.cpu_resource_utils import parse_id_list
 
-        if not _is_auto_numa_available(verbose=False, strict_affinity=True):
+        if not _is_auto_numa_available(verbose=False, strict=True):
             return False
         numa_nodes = get_auto_numa_nodes()
         if not numa_nodes:
