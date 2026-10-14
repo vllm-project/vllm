@@ -214,12 +214,18 @@ class MooncakeStoreKVEvents(KVConnectorKVEvents):
             self._release(key, pending.event)
 
     def _release(self, key: BlockKey, event: BlockStored) -> None:
-        """Announce one block for the rest of this residency epoch."""
+        """Announce one block for the rest of this residency epoch.
+
+        The payload announced is the one this accumulator already holds for the
+        block, when it holds one: a completing report can be a step container
+        carrying the block released with no token ids of its own, and announcing
+        that instead would publish a block a consumer cannot match to tokens.
+        """
         if key in self._released:
             return
+        pending = self._pending.pop(key, None)
         self._released.add(key)
-        self._pending.pop(key, None)
-        self._ready.append(event)
+        self._ready.append(pending.event if pending is not None else event)
 
     def _retire_epoch(self) -> None:
         """Forget everything learned before the current residency epoch ended.

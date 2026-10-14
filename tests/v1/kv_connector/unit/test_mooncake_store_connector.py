@@ -793,10 +793,21 @@ def test_one_block_is_announced_once_with_the_first_payload():
 def test_completed_block_leaves_no_pending_state_behind():
     """A step container that completes a block's coverage arrives with the event
     already released; folding it in must also drop the partial coverage an
-    earlier step left, so no stale payload stays behind.
+    earlier step left, and announce the payload that step saw — the container's
+    own copy can be a report with no token ids.
     """
     accumulator = mooncake_store_connector.MooncakeStoreKVEvents()
     event = _make_block_stored(b"block", group_idx=0)
+    without_tokens = BlockStored(
+        block_hashes=[b"block"],
+        parent_block_hash=None,
+        token_ids=[],
+        block_size=16,
+        lora_id=None,
+        medium="cpu",
+        lora_name=None,
+        group_idx=0,
+    )
     required = [_namespace(0, tp_rank=0), _namespace(0, tp_rank=1)]
 
     accumulator.add_residency(
@@ -806,9 +817,9 @@ def test_completed_block_leaves_no_pending_state_behind():
     assert accumulator.pop_ready_events() == []
 
     completed = _worker_container(
-        _residency([event], {store_block_key(event): required}), {0: required}
+        _residency([without_tokens], {store_block_key(event): required}), {0: required}
     )
-    assert completed.get_all_events() == [event]
+    assert completed.get_all_events() == [without_tokens]
 
     accumulator.merge(completed)
 

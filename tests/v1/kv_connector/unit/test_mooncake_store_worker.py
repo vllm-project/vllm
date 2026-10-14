@@ -3756,7 +3756,18 @@ def test_store_sending_thread_delta_saves_only_new_swa_boundary_chunks():
     assert swa_hashes == [hs[7].hex()]
 
 
-def test_store_sending_thread_kv_events_use_group_chunk_metadata():
+@pytest.mark.parametrize(
+    "event_group_ids",
+    [(0, 1), (0, 2)],
+    ids=["store-index-matches-core", "store-skips-a-core-group"],
+)
+def test_store_sending_thread_kv_events_use_group_chunk_metadata(event_group_ids):
+    """Each event carries its own group's chunk metadata and names the cache
+    group id that group has in the core.
+
+    The Store index differs from that id when the Store skipped a group the core
+    keeps, while Store keys stay indexed the Store's own way.
+    """
     from vllm.v1.core.kv_cache_utils import BlockHash, maybe_convert_block_hash
     from vllm.v1.kv_cache_interface import (
         FullAttentionSpec,
@@ -3804,6 +3815,7 @@ def test_store_sending_thread_kv_events_use_group_chunk_metadata():
         coord=coord,
         token_databases=[db_full, db_swa],
         block_size=32,
+        event_groups=list(zip(event_group_ids, (full_spec, swa_spec))),
     )
     thread.enable_kv_event = True
 
@@ -3821,92 +3833,19 @@ def test_store_sending_thread_kv_events_use_group_chunk_metadata():
     )
 
     full_event, swa_event = thread.drain_residency().events
-    assert full_event.group_idx == 0
+    assert [full_event.group_idx, swa_event.group_idx] == list(event_group_ids)
     assert full_event.block_size == 32
     assert full_event.token_ids == list(range(32))
     # block_size=32 over hash_block_size=8 (scale 4): the chunk is keyed by its
     # last sub-hash, not the concatenation of all four.
     assert full_event.block_hashes == [maybe_convert_block_hash(BlockHash(hs[3]))]
 
-    assert swa_event.group_idx == 1
     assert swa_event.block_size == 8
     assert swa_event.token_ids == list(range(24, 32))
     assert swa_event.block_hashes == [maybe_convert_block_hash(BlockHash(hs[3]))]
 
-
-def test_residency_events_name_the_core_group_the_store_skips():
-    """The Store skips a cache group between the ones it keeps, so its own group
-    1 is the core's group 2: the event has to name 2 so a consumer can match it
-    against the core's own block events, while the Store key stays Store-indexed.
-    """
-    from vllm.v1.kv_cache_interface import (
-        FullAttentionSpec,
-        KVCacheGroupSpec,
-        SlidingWindowSpec,
-    )
-
-    store = MagicMock()
-    store.batch_is_exist.side_effect = lambda keys: [0] * len(keys)
-    store.batch_put_from_multi_buffers.return_value = [256, 256]
-
-    full_spec = FullAttentionSpec(
-        block_size=32, num_kv_heads=8, head_size=64, dtype=None
-    )
-    tail_spec = SlidingWindowSpec(
-        block_size=8,
-        num_kv_heads=8,
-        head_size=64,
-        dtype=None,
-        sliding_window=8,
-    )
-    coord = mooncake_store_worker.MooncakeStoreCoordinator(
-        [KVCacheGroupSpec(["L0"], full_spec), KVCacheGroupSpec(["L1"], tail_spec)],
-        scheduler_block_size=32,
-        hash_block_size=8,
-    )
-
-    db_full = ChunkedTokenDatabase(
-        KeyMetadata("test-model", 0, 0, 0, 0, group_id=0),
-        block_size=32,
-        hash_block_size=8,
-    )
-    db_full.set_kv_caches_base_addr([0x1000])
-    db_full.set_block_len([512])
-    db_tail = ChunkedTokenDatabase(
-        KeyMetadata("test-model", 0, 0, 0, 0, group_id=1),
-        block_size=8,
-        hash_block_size=8,
-    )
-    db_tail.set_kv_caches_base_addr([0x2000])
-    db_tail.set_block_len([128])
-
-    thread = _make_store_sending_thread(
-        store,
-        coord=coord,
-        token_databases=[db_full, db_tail],
-        block_size=32,
-        event_groups=[(0, full_spec), (2, tail_spec)],
-    )
-    thread.enable_kv_event = True
-
-    hs = [bytes([i + 1]) * 4 for i in range(4)]
-    _run_store_req(
-        thread,
-        ReqMeta(
-            req_id="r0",
-            token_len_chunk=32,
-            block_ids=([1], list(range(1, 5))),
-            block_hashes=hs,
-            can_save=True,
-            token_ids=list(range(32)),
-        ),
-    )
-
-    full_event, tail_event = thread.drain_residency().events
-    assert [full_event.group_idx, tail_event.group_idx] == [0, 2]
     keys, _addrs, _sizes, _ = store.batch_put_from_multi_buffers.call_args.args
-    assert any("@group:1@" in key for key in keys)
-    assert all("@group:2@" not in key for key in keys)
+    assert sorted(key.split("@group:")[1].split("@")[0] for key in keys) == ["0", "1"]
 
 
 def _make_event_store_req(token_len: int, token_ids_start: int = 0) -> ReqMeta:
