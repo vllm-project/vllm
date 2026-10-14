@@ -15,10 +15,12 @@ import torch
 @pytest.fixture
 def flash_attn_interface():
     # Load the wrapper without requiring the package's CUDA extensions.
-    path = (
-        Path(__file__).resolve().parents[3]
-        / "vllm/vllm_flash_attn/flash_attn_interface.py"
-    )
+    root = Path(__file__).resolve().parents[3]
+    relative_path = Path("vllm/vllm_flash_attn/flash_attn_interface.py")
+    path = root / relative_path
+    if not path.is_file():
+        # CI images move the source tree under src/ to test the installed wheel.
+        path = root / "src" / relative_path
     spec = importlib.util.spec_from_file_location("flash_attn_interface", path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -36,6 +38,7 @@ def test_fa4_descale_layout(
     flash_attn_interface, monkeypatch, batch_size, num_kv_heads, layout, dtype
 ):
     """FA4 receives unit-stride descales, including scalar-expanded (1, 1)."""
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda: (10, 0))
     shape = (batch_size, num_kv_heads)
     descales: dict[str, torch.Tensor | None] = {}
     for i, name in enumerate(("q_descale", "k_descale", "v_descale")):
