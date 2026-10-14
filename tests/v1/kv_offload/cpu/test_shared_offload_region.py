@@ -10,12 +10,14 @@ import os
 import threading
 import time
 import uuid
+from types import SimpleNamespace
 from unittest.mock import MagicMock, call
 
 import pytest
 
 from vllm.utils.system_utils import get_mp_context
 from vllm.v1.kv_offload.cpu import gpu_worker
+from vllm.v1.kv_offload.cpu import host_register as host_register_module
 from vllm.v1.kv_offload.cpu import shared_offload_region as region_module
 from vllm.v1.kv_offload.cpu.shared_offload_region import (
     SharedOffloadRegion,
@@ -796,6 +798,7 @@ def host_register(monkeypatch):
     register = MagicMock(return_value=True)
     unregister = MagicMock()
     monkeypatch.setattr(gpu_worker, "MAX_HOST_REGISTER_CHUNK_BYTES", 7 * PAGE_SIZE)
+    monkeypatch.setattr(gpu_worker, "MIN_HOST_REGISTER_SAVED_BYTES", PAGE_SIZE)
     monkeypatch.setattr(gpu_worker, "host_register", register)
     monkeypatch.setattr(gpu_worker, "host_unregister", unregister)
     monkeypatch.setattr(region_module, "host_unregister", unregister)
@@ -827,9 +830,13 @@ def test_pin_mmap_region_registers_row_aligned_chunks(
     ]
 
 
-def test_pin_mmap_region_worker_slot_only_registers_own_slots(iid, host_register):
+def test_pin_mmap_region_worker_slot_only_registers_own_slots(
+    iid, host_register, monkeypatch
+):
     """Rank 1's 1.5-page slot in 4-page rows registers pages [1, 3) of each row."""
     register, _ = host_register
+    populate = MagicMock()
+    monkeypatch.setattr(region_module, "_get_populate_write_fn", lambda _: populate)
     region = SharedOffloadRegion(
         engine_id=iid,
         num_chunks=3,
@@ -843,9 +850,127 @@ def test_pin_mmap_region_worker_slot_only_registers_own_slots(iid, host_register
         assert register.call_args_list == [
             call(base + row * 4 * PAGE_SIZE, 2 * PAGE_SIZE) for row in range(3)
         ]
+        assert populate.call_args_list == [
+            call(region.mmap_obj, (1 + row * 4) * PAGE_SIZE, 2 * PAGE_SIZE)
+            for row in range(3)
+        ]
     finally:
         region.cleanup()
         _cleanup_file(region.mmap_path)
+
+
+def _unmapped_registration_region(num_chunks, slot_size, num_workers):
+    """Describe a large region without allocating it; registration is mocked."""
+    region = object.__new__(SharedOffloadRegion)
+    region.rank = 1
+    region.num_chunks = num_chunks
+    region.page_size = PAGE_SIZE
+    region.cpu_page_size = slot_size
+    region._row_stride = num_workers * slot_size
+    region.total_size_bytes = region.num_chunks * region._row_stride
+    region._base = SimpleNamespace(data_ptr=lambda: 0x100000)
+    region.pinned_addresses = []
+    region.is_pinned = False
+    return region
+
+
+def test_pin_mmap_region_many_rows_keeps_worker_slot_registration(monkeypatch):
+    """A large row count must not make workers register their peers' slots."""
+    slot = 1 << 20
+    region = _unmapped_registration_region((1 << 16) + 1, slot, 4)
+    sizes = []
+
+    def register(ptr, size):
+        sizes.append(size)
+        return True
+
+    monkeypatch.setattr(gpu_worker, "host_register", register)
+
+    gpu_worker.pin_mmap_region(region, worker_slot_only=True)
+
+    assert region.is_pinned
+    assert sizes == [slot] * region.num_chunks
+    assert region.pinned_addresses == [
+        0x100000 + (4 * row + 1) * slot for row in range(region.num_chunks)
+    ]
+
+
+@pytest.mark.parametrize("slot_mib,own_slots", [(2, False), (3, True)])
+def test_pin_mmap_region_selects_by_bytes_saved_per_row(
+    monkeypatch, slot_mib, own_slots
+):
+    """Use fewer calls for small rows, but pin own slots when savings amortize them."""
+    slot = slot_mib * 1024**2
+    region = _unmapped_registration_region(2, slot, 2)
+    register = MagicMock(return_value=True)
+    monkeypatch.setattr(gpu_worker, "host_register", register)
+
+    gpu_worker.pin_mmap_region(region, worker_slot_only=True)
+
+    assert region.is_pinned
+    assert register.call_args_list == (
+        [call(0x100000 + slot, slot), call(0x100000 + 3 * slot, slot)]
+        if own_slots
+        else [call(0x100000, 4 * slot)]
+    )
+
+
+@pytest.mark.parametrize("fail_at", [0, 1, 2])
+def test_pin_worker_slots_failure_rolls_back(iid, host_register, fail_at):
+    """A failed slot registration releases all earlier slots."""
+    register, unregister = host_register
+    register.side_effect = [True] * fail_at + [False]
+    with _region(iid, num_chunks=3, num_workers=2, rank=1) as region:
+        base = region._base.data_ptr() + PAGE_SIZE
+        gpu_worker.pin_mmap_region(region, worker_slot_only=True)
+        assert not region.is_pinned
+        assert region.pinned_addresses == []
+        assert register.call_args_list == [
+            call(base + row * 2 * PAGE_SIZE, PAGE_SIZE) for row in range(fail_at + 1)
+        ]
+    assert unregister.call_args_list == [
+        call(base + row * 2 * PAGE_SIZE) for row in reversed(range(fail_at))
+    ]
+
+
+def test_host_registration_reuses_cudart(monkeypatch):
+    """Registering and releasing multiple slots constructs one runtime wrapper."""
+    cudart = MagicMock()
+    cudart.cudaHostRegister.return_value = 0
+    cudart.cudaHostUnregister.return_value = 0
+    constructor = MagicMock(return_value=cudart)
+    monkeypatch.setattr(host_register_module, "CudaRTLibrary", constructor)
+    monkeypatch.setattr(
+        host_register_module.current_platform, "is_cuda_alike", lambda: True
+    )
+    host_register_module._get_cudart.cache_clear()
+    try:
+        for ptr in (0x100000, 0x200000):
+            assert host_register_module.host_register(ptr, PAGE_SIZE)
+            host_register_module.host_unregister(ptr)
+        constructor.assert_called_once_with()
+        assert cudart.cudaHostRegister.call_count == 2
+        assert cudart.cudaHostUnregister.call_count == 2
+    finally:
+        host_register_module._get_cudart.cache_clear()
+
+
+def test_cudart_load_failure_is_retryable(monkeypatch):
+    """A failed runtime lookup must not cache an unavailable runtime forever."""
+    cudart = MagicMock()
+    cudart.cudaHostRegister.return_value = 0
+    constructor = MagicMock(side_effect=[OSError("not loaded"), cudart])
+    monkeypatch.setattr(host_register_module, "CudaRTLibrary", constructor)
+    monkeypatch.setattr(
+        host_register_module.current_platform, "is_cuda_alike", lambda: True
+    )
+    host_register_module._get_cudart.cache_clear()
+    try:
+        assert not host_register_module.host_register(0x100000, PAGE_SIZE)
+        assert host_register_module.host_register(0x100000, PAGE_SIZE)
+        assert constructor.call_count == 2
+    finally:
+        host_register_module._get_cudart.cache_clear()
 
 
 @pytest.mark.parametrize("fail_at", [0, 1, 2])
