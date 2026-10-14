@@ -90,3 +90,31 @@ def test_explicit_kwargs_without_device_normalize():
     values = processor([0], mm_items=mm_items)["mm_kwargs"].get_data()["pixel_values"]
     # The remote processor ignores these kwargs and still normalises on the host.
     assert values.is_floating_point()
+
+
+@pytest.mark.usefixtures("default_vllm_config")
+@pytest.mark.parametrize("mm_device_do_normalize", [None, True])
+def test_causal_prefix_preserves_host_normalized_packed_images(
+    mm_device_do_normalize: bool | None,
+):
+    """Packed Parse 3.5 inputs must not inherit legacy device normalization."""
+    ctx = build_model_context(
+        "nvidia/Nemotron-3.5-Parse",
+        limit_mm_per_prompt={"image": 1},
+        model_config_kwargs={"mm_device_do_normalize": mm_device_do_normalize},
+    )
+    assert not ctx.model_config.multimodal_config.mm_device_do_normalize
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    image = _noise_image(310, 470)
+    expected = processor.info.get_hf_processor().image_processor(
+        [image], return_tensors="pt"
+    )
+    mm_items = processor.info.parse_mm_data({"image": [image]})
+    actual = processor([1], mm_items=mm_items)["mm_kwargs"].get_data()
+
+    assert actual["pixel_values"].is_floating_point()
+    assert actual["pixel_values"].shape[-1] == 3 * 16**2
+    for name in ("pixel_values", "image_sizes", "content_sizes"):
+        torch.testing.assert_close(
+            actual[name], expected[name].to(actual[name].dtype), rtol=0, atol=0
+        )
