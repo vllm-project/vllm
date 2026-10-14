@@ -353,8 +353,8 @@ The current pass targets Qwen MoE configurations with hidden size 2048,
 256 experts, top-k 8, and matching routed/shared intermediate sizes, using
 SiLU without bias. It was validated on Qwen3.6-35B-A3B with TP2.
 LoRA, expert parallelism, EPLB, data parallelism, prefill context parallelism,
-sequence parallelism and microbatching (DBO or a fixed `ubatch_size` > 1)
-are not supported by this pass.
+sequence parallelism, zero-expert routing and microbatching (DBO or a fixed
+`ubatch_size` > 1) are not supported by this pass.
 
 **Default and token range.** Disabled at every optimization level unless
 `pass_config.fuse_xpu_moe_shared=true`. The pass applies only to compile ranges
