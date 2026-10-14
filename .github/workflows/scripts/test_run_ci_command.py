@@ -40,6 +40,7 @@ from run_ci_command import (
     reply_unrecognized_command,
     resolve_workflow_run_pr,
     run,
+    run_on_auto_merge,
     select_latest_build,
 )
 
@@ -676,6 +677,41 @@ class RunCiCommandTest(unittest.TestCase):
                     self.assertEqual(updater.calls, [])
                     self.assertIn("CI already ran on this commit", github.comments[0])
                     self.assertIn("`/ci retry`", github.comments[0])
+
+    def test_enabling_auto_merge_runs_ci_on_the_updated_head(self) -> None:
+        github = FakeGitHub(behind=5)
+        updater = FakeBranchUpdater(github)
+        buildkite = FakeBuildkite([[], [], []])
+        event = {"pull_request": {"number": 42}, "sender": {"login": "reviewer"}}
+
+        with patch("run_ci_command.time.sleep"):
+            run_on_auto_merge(event, github, buildkite, updater)
+
+        self.assertEqual(buildkite.created_builds[0]["commit"], "merge-commit-sha")
+        self.assertIn("Auto-merge was enabled by @reviewer", github.comments[0])
+
+    def test_enabling_auto_merge_skips_tested_heads_and_untrusted_users(
+        self,
+    ) -> None:
+        existing_build = {
+            "created_at": "2026-07-28T01:00:00Z",
+            "pull_request": {"id": 42},
+            "state": "passed",
+            "web_url": "https://buildkite.example/builds/122",
+        }
+        for permission, builds in (("write", [existing_build]), ("read", [])):
+            with self.subTest(permission=permission):
+                github = FakeGitHub(permission=permission)
+                buildkite = FakeBuildkite([builds, [], []])
+                event = {
+                    "pull_request": {"number": 42},
+                    "sender": {"login": "someone"},
+                }
+
+                run_on_auto_merge(event, github, buildkite)
+
+                self.assertEqual(buildkite.created_builds, [])
+                self.assertEqual(github.comments, [])
 
     def test_run_reports_failed_merge_without_building(self) -> None:
         github = FakeGitHub(behind=5)

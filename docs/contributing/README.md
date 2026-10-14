@@ -324,6 +324,8 @@ review process:
   the `ready` label, the PR author can use `/ci run`, `/ci retry`, `/ci cancel`,
   or the corresponding `/amd-ci` variants. New commits do not start upstream
   CI automatically.
+- When a reviewer with write access enables auto-merge, the bot runs `/ci run`
+  for them if the PR head has no CI build yet.
 - Before creating a Buildkite build, `/ci run` and `/amd-ci run`, including
   `all` and `nightly`, check the requested PR commit against its target branch
   in the upstream repository. Your branch must contain every commit currently

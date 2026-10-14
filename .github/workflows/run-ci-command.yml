@@ -3,9 +3,14 @@ name: Run CI from PR comment
 on:
   issue_comment:
     types: [created]
+  pull_request_target:
+    types: [auto_merge_enabled]
 
 concurrency:
-  group: run-ci-comment-${{ github.event.issue.number }}
+  group: >-
+    run-ci-comment-${{
+      github.event.issue.number || github.event.pull_request.number
+    }}
   cancel-in-progress: false
 
 permissions:
@@ -17,9 +22,10 @@ jobs:
   run-ci-command:
     if: >-
       github.repository_owner == 'vllm-project' &&
-      github.event.issue.pull_request &&
+      (github.event_name == 'pull_request_target' ||
+      (github.event.issue.pull_request &&
       (startsWith(github.event.comment.body, '/ci') ||
-      startsWith(github.event.comment.body, '/amd-ci'))
+      startsWith(github.event.comment.body, '/amd-ci'))))
     runs-on: [self-hosted, linux, x64, vllm-runners]
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -50,5 +56,5 @@ jobs:
             await github.rest.issues.createComment({
               ...context.repo,
               issue_number: context.issue.number,
-              body: `❌ @${context.payload.comment.user.login}, your CI command failed with an unexpected error, so CI may not have started. See the [workflow run](${runUrl}) for details.`,
+              body: `❌ @${context.payload.sender.login}, your CI command failed with an unexpected error, so CI may not have started. See the [workflow run](${runUrl}) for details.`,
             });

@@ -1164,6 +1164,53 @@ def handle_cancel_ci(
     )
 
 
+def run_on_auto_merge(
+    event: Mapping[str, Any],
+    github: GitHubClient,
+    buildkite: BuildkiteClient,
+    branch_updater: GitHubClient | None = None,
+) -> None:
+    actor = event["sender"]["login"]
+    pr = github.get_pr(event["pull_request"]["number"])
+    if pr["state"] != "open" or pr["draft"]:
+        return
+    if not is_trusted_permission(github.get_permission(actor)):
+        print(f"@{actor} enabled auto-merge without write access; not running CI.")
+        return
+    tested_build = select_latest_build(
+        [
+            build
+            for build in buildkite.list_builds(pr["head"]["sha"])
+            if build.get("state") != "canceled"
+        ],
+        pr["number"],
+    )
+    if tested_build:
+        print(f"CI already exists for the PR head: {tested_build['web_url']}")
+        return
+
+    try:
+        message = handle_run_ci(
+            actor=actor,
+            buildkite=buildkite,
+            comment_id=0,
+            command=COMMAND_RUN_CI,
+            github=github,
+            pr=pr,
+            branch_updater=branch_updater,
+            allow_repeat_run=True,
+        )
+    except CiPreparationError as error:
+        github.add_comment(
+            pr["number"],
+            f"❌ Auto-merge was enabled by @{actor}, but CI was not started. {error}",
+        )
+        return
+    github.add_comment(
+        pr["number"], f"✅ Auto-merge was enabled by @{actor}. {message}"
+    )
+
+
 def reply_unrecognized_command(
     event: Mapping[str, Any],
     github: GitHubClient,
@@ -1297,6 +1344,24 @@ def main() -> None:
         os.environ["GITHUB_REPOSITORY"],
     )
     event_name = os.environ.get("GITHUB_EVENT_NAME", "issue_comment")
+    branch_update_token = os.environ.get("GH_BRANCH_UPDATE_TOKEN", "")
+    branch_updater = (
+        GitHubClient(branch_update_token, os.environ["GITHUB_REPOSITORY"])
+        if branch_update_token
+        else None
+    )
+    if event.get("action") == "auto_merge_enabled":
+        run_on_auto_merge(
+            event,
+            github,
+            BuildkiteClient(
+                os.environ.get("BUILDKITE_API_TOKEN", ""),
+                os.environ.get("BUILDKITE_ORGANIZATION", "vllm"),
+                os.environ.get("BUILDKITE_PIPELINE", "ci"),
+            ),
+            branch_updater,
+        )
+        return
     if event_name == "pull_request_target":
         notify_authorized(
             event,
@@ -1337,15 +1402,12 @@ def main() -> None:
         os.environ.get("BUILDKITE_ORGANIZATION", "vllm"),
         pipeline,
     )
-    branch_update_token = os.environ.get("GH_BRANCH_UPDATE_TOKEN", "")
     run(
         event,
         github,
         buildkite,
         os.environ.get("CI_TRUSTED_USERS", ""),
-        GitHubClient(branch_update_token, os.environ["GITHUB_REPOSITORY"])
-        if branch_update_token
-        else None,
+        branch_updater,
     )
 
 
