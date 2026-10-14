@@ -17,6 +17,45 @@ from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 
 DEVICE = current_platform.device_type
 
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="H200 producer path")
+@pytest.mark.parametrize("projection_dim", [127, 4096])
+@pytest.mark.parametrize("has_bias", [False, True])
+@pytest.mark.parametrize("state_dtype", [torch.bfloat16, torch.float32])
+def test_causal_conv1d_dense_qkv_preserves_varlen_output_and_state(
+    projection_dim, has_bias, state_dtype
+):
+    """A grouped output must remove packing without changing cache updates."""
+    torch.manual_seed(19)
+    lengths = [1, 3, 17] if projection_dim == 127 else [2048, 7]
+    dim, total = 3 * projection_dim, sum(lengths)
+    x = torch.randn(total, dim + 64, device=DEVICE, dtype=torch.bfloat16)[:, :dim]
+    weight = torch.randn(dim, 4, device=DEVICE, dtype=torch.bfloat16) * 0.1
+    bias = torch.randn(dim, device=DEVICE, dtype=torch.float32) if has_bias else None
+    pool = torch.randn(9, dim, 3, device=DEVICE, dtype=state_dtype)
+    baseline_pool = pool.clone()
+    offsets = torch.tensor([0, *lengths], device=DEVICE, dtype=torch.int32).cumsum(0)
+    slots = torch.tensor([7, 2, 5][: len(lengths)], device=DEVICE, dtype=torch.int32)
+    has_state = torch.tensor(
+        [True, False, True][: len(lengths)], device=DEVICE, dtype=torch.bool
+    )
+    kwargs = dict(
+        x=x.T,
+        weight=weight,
+        bias=bias,
+        query_start_loc=offsets,
+        cache_indices=slots,
+        has_initial_state=has_state,
+    )
+    baseline = causal_conv1d_fn(**kwargs, conv_states=baseline_pool).T
+    grouped = causal_conv1d_fn(**kwargs, conv_states=pool, output_qkv=True)
+    assert grouped.shape == (3, total, projection_dim)
+    for actual, expected in zip(grouped.unbind(0), baseline.split(projection_dim, -1)):
+        assert actual.is_contiguous()
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    torch.testing.assert_close(pool, baseline_pool, rtol=0, atol=0)
+
+
 pytestmark = pytest.mark.skipif(
     not (
         current_platform.is_cuda_alike()

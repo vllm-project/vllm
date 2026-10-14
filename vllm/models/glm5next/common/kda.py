@@ -341,6 +341,19 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         self._conv_state_dim_first = is_conv_state_dim_first()
 
         additional_config = vllm_config.additional_config
+        capability = current_platform.get_device_capability()
+        self._dense_qkv_prefill = (
+            current_platform.is_cuda()
+            and capability is not None
+            and capability.major == 9
+            and self.head_dim == 128
+            and vllm_config.model_config.dtype == torch.bfloat16
+            and (
+                additional_config.get("kda_dense_qkv", True)
+                if isinstance(additional_config, dict)
+                else True
+            )
+        )
         self.kda_prefill_backend = _resolve_kda_prefill_backend(
             additional_config.get("kda_prefill_backend", "auto")
             if isinstance(additional_config, dict)
@@ -622,6 +635,12 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         q_ns = k_ns = v_ns = None
         if attn_metadata_narrowed.num_prefills > 0:
             assert qkv_ns is not None
+            dense_qkv = (
+                self._dense_qkv_prefill
+                and self.kda_prefill_backend == "flashkda"
+                and not use_spec
+                and attn_metadata_narrowed.num_decodes == 0
+            )
             qkv_ns = causal_conv1d_fn(
                 qkv_ns.transpose(0, 1),
                 conv_weights,
@@ -632,8 +651,13 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
                 cache_indices=non_spec_state_indices_tensor,
                 query_start_loc=non_spec_query_start_loc,
                 metadata=attn_metadata_narrowed,
-            ).transpose(0, 1)
-            q_ns, k_ns, v_ns = qkv_ns.split(self.local_projection_size, dim=-1)
+                output_qkv=dense_qkv,
+            )
+            if dense_qkv:
+                q_ns, k_ns, v_ns = qkv_ns.unbind(0)
+            else:
+                qkv_ns = qkv_ns.transpose(0, 1)
+                q_ns, k_ns, v_ns = qkv_ns.split(self.local_projection_size, dim=-1)
         elif attn_metadata_narrowed.num_decodes > 0:
             assert non_spec_state_indices_tensor is not None
             decode_conv_indices = non_spec_state_indices_tensor[
