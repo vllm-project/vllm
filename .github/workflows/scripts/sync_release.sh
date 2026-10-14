@@ -19,6 +19,9 @@ TAG="${TAG:-}"
 DRY_RUN="${DRY_RUN:-false}"
 STABLE_RE='^v[0-9]+\.[0-9]+\.[0-9]+(\.post[0-9]+)?$'
 
+# The checkout has an upstream remote, so gh would otherwise default to vllm-project/vllm.
+export GH_REPO="${GITHUB_REPOSITORY:-GeometricAGI/vllm}"
+
 git config user.name "geometric-release-bot"
 git config user.email "release-bot@geometric.so"
 
