@@ -50,7 +50,7 @@ def slerp_alpha(a, b, alpha, alpha_scale):
 
 
 class DoryAttention(nn.Module):
-    """S / * layer: GQA attention with nGPT qk-norm, output gate, fngpt justnorm."""
+    """GQA attention with nGPT qk-norm, output gate, and fngpt justnorm."""
 
     def __init__(
         self, config, layer_idx, cache_config, quant_config, prefix, num_loops=1
@@ -59,10 +59,10 @@ class DoryAttention(nn.Module):
         self.hidden_size = config.hidden_size
         self.num_heads = config.num_attention_heads
         self.num_kv_heads = config.num_key_value_heads
-        self.head_dim = config.attention_head_dim
+        self.head_dim = config.head_dim
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
-        std = config.init_method_std
+        std = config.initializer_range
 
         self.qkv_proj = QKVParallelLinear(
             self.hidden_size,
@@ -96,21 +96,11 @@ class DoryAttention(nn.Module):
             g0 = config.hidden_size**0.5
         self._s_gate_factor = g0**0.5 / std
 
-        self.is_swa = config.hybrid_layer_pattern[layer_idx] == "S"
-        profile = config.rope_profile_layers[layer_idx]
-        rope_theta = config.rope_theta_2 if profile == 2 else config.rope_theta
+        layer_type = config.layers_block_type[layer_idx]
         self.rotary_emb = get_rope(
             self.head_dim,
             max_position=config.max_position_embeddings,
-            rope_parameters=dict(
-                rope_type="default",
-                rope_theta=rope_theta,
-                partial_rotary_factor=(
-                    config.partial_rotary_factor_2
-                    if profile == 2
-                    else config.partial_rotary_factor
-                ),
-            ),
+            rope_parameters=config.rope_parameters[layer_type],
             is_neox_style=True,
         )
 
@@ -132,7 +122,9 @@ class DoryAttention(nn.Module):
                     cache_config=cache_config,
                     quant_config=quant_config,
                     per_layer_sliding_window=(
-                        config.swa_window_size if self.is_swa else None
+                        config.sliding_window
+                        if layer_type == "sliding_attention"
+                        else None
                     ),
                     prefix=f"{unique_prefix}.attn",
                 )
@@ -169,7 +161,7 @@ class DoryAttention(nn.Module):
 
 
 class DoryMLP(nn.Module):
-    """'-' layer: swiglu with nGPT suv scaling and fngpt justnorm."""
+    """SwiGLU with nGPT suv scaling and fngpt justnorm."""
 
     def __init__(self, config, quant_config, prefix):
         super().__init__()
@@ -210,10 +202,9 @@ class DoryDecoderLayer(nn.Module):
         self, config, layer_idx, cache_config, quant_config, prefix, num_loops=1
     ):
         super().__init__()
-        char = config.hybrid_layer_pattern[layer_idx]
-        self.char = char
-        self._alpha_scale = config.ngpt_alpha_init / config.init_method_std
-        if char in ("S", "*"):
+        self.is_attention = config.layers_block_type[layer_idx] != "mlp"
+        self._alpha_scale = config.ngpt_alpha_init / config.initializer_range
+        if self.is_attention:
             self.mixer = DoryAttention(
                 config,
                 layer_idx,
@@ -223,15 +214,13 @@ class DoryDecoderLayer(nn.Module):
                 num_loops=num_loops,
             )
             self.attn_alpha = nn.Parameter(torch.empty(config.hidden_size))
-        elif char == "-":
+        else:
             self.mixer = DoryMLP(config, quant_config, f"{prefix}.mixer")
             self.mlp_alpha = nn.Parameter(torch.empty(config.hidden_size))
-        else:
-            raise NotImplementedError(f"pattern char {char!r} not supported by Dory")
 
     def forward(self, positions, hidden_states, loop_idx=0):
         residual = hidden_states
-        if self.char in ("S", "*"):
+        if self.is_attention:
             out = self.mixer(positions, hidden_states, loop_idx=loop_idx)
             return slerp_alpha(residual, out, self.attn_alpha, self._alpha_scale)
         out = self.mixer(hidden_states)
@@ -336,7 +325,7 @@ class DoryForCausalLM(nn.Module):
         logits = self.logits_processor(self.lm_head, hidden_states)
         if logits is not None:
             logits = logits.float() * (
-                self.lm_head.logit_scale.float() / self.config.init_method_std
+                self.lm_head.logit_scale.float() / self.config.initializer_range
             )
         return logits
 
@@ -364,7 +353,7 @@ class DoryForCausalLM(nn.Module):
                         if shard_id == "q"
                         else self.config.num_key_value_heads
                     )
-                    rows = heads * self.config.attention_head_dim
+                    rows = heads * self.config.head_dim
                 else:
                     rows = self.config.intermediate_size
                 self._check_weight_shape(name, w, (rows, self.config.hidden_size))

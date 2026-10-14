@@ -2,182 +2,142 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Configuration for the normalized latent recurrent Dory architecture."""
 
+from huggingface_hub.dataclasses import strict
 from transformers.configuration_utils import PreTrainedConfig
 
 
+@strict
 class DoryConfig(PreTrainedConfig):
     model_type = "dory"
+    attribute_map = {"layer_types": "layers_block_type"}
 
-    def __init__(
-        self,
-        dory_format_version=1,
-        vocab_size=131072,
-        hidden_size=2560,
-        num_hidden_layers=72,
-        intermediate_size=7168,
-        num_attention_heads=16,
-        num_key_value_heads=4,
-        attention_head_dim=256,
-        max_position_embeddings=8192,
-        tie_word_embeddings=False,
-        hybrid_layer_pattern=None,
-        swa_window_size=1024,
-        swa_num_attention_heads=None,
-        swa_num_key_value_heads=None,
-        swa_head_dim=None,
-        rope_theta=10000,
-        partial_rotary_factor=1.0,
-        rope_theta_2=None,
-        partial_rotary_factor_2=None,
-        rope_profile_layers=None,
-        no_rope_layers=None,
-        ngpt=True,
-        fngpt=True,
-        init_method_std=0.02,
-        ngpt_alpha_init=0.05,
-        ngpt_enable_final_norm=False,
-        attention_output_gate=True,
-        attention_output_gate_logit_scale_init=None,
-        mlp_hidden_act="silu",
-        mlp_bias=False,
-        attention_bias=False,
-        n_input_layers=0,
-        n_recurrent_layers=None,
-        n_output_layers=0,
-        n_recurrent_loops=1,
-        recurrent_kv_cache_mode="per_loop",
-        initial_state="input_copy",
-        input_transform="residual",
-        output_transform="replace",
-        mixer_type=None,
-        **kwargs,
-    ):
-        self.dory_format_version = dory_format_version
-        self.vocab_size = vocab_size
-        self.hidden_size = hidden_size
-        self.num_hidden_layers = num_hidden_layers
-        self.intermediate_size = intermediate_size
-        self.num_attention_heads = num_attention_heads
-        self.num_key_value_heads = num_key_value_heads
-        self.attention_head_dim = attention_head_dim
-        self.head_dim = attention_head_dim
-        self.max_position_embeddings = max_position_embeddings
-        self.hybrid_layer_pattern = (
-            "S-S-S-*-" * (num_hidden_layers // 8)
-            if hybrid_layer_pattern is None
-            else hybrid_layer_pattern
-        )
-        self.swa_window_size = swa_window_size
-        self.swa_num_attention_heads = swa_num_attention_heads
-        self.swa_num_key_value_heads = swa_num_key_value_heads
-        self.swa_head_dim = swa_head_dim
-        self.rope_theta = rope_theta
-        self.partial_rotary_factor = partial_rotary_factor
-        # Per-layer RoPE profile: 1 = rope_theta, 2 = rope_theta_2.
-        # Absent in legacy single-RoPE artifacts, which are all profile 1.
-        self.rope_profile_layers = (
-            [1] * num_hidden_layers
-            if rope_profile_layers is None
-            else rope_profile_layers
-        )
-        self.rope_theta_2 = rope_theta if rope_theta_2 is None else rope_theta_2
-        self.partial_rotary_factor_2 = (
-            partial_rotary_factor
-            if partial_rotary_factor_2 is None
-            else partial_rotary_factor_2
-        )
-        self.no_rope_layers = (
-            [0] * num_hidden_layers if no_rope_layers is None else no_rope_layers
-        )
-        self.ngpt = ngpt
-        self.fngpt = fngpt
-        self.init_method_std = init_method_std
-        self.ngpt_alpha_init = ngpt_alpha_init
-        self.ngpt_enable_final_norm = ngpt_enable_final_norm
-        self.attention_output_gate = attention_output_gate
-        self.attention_output_gate_logit_scale_init = (
-            attention_output_gate_logit_scale_init
-        )
-        self.mlp_hidden_act = mlp_hidden_act
-        self.mlp_bias = mlp_bias
-        self.attention_bias = attention_bias
-        self.n_input_layers = n_input_layers
-        self.n_recurrent_layers = (
-            num_hidden_layers - n_input_layers - n_output_layers
-            if n_recurrent_layers is None
-            else n_recurrent_layers
-        )
-        self.n_output_layers = n_output_layers
-        self.n_recurrent_loops = n_recurrent_loops
-        # Recurrent attention KV: "per_loop" keeps one cache per loop. "last_loop"
-        # keeps one cache that each loop overwrites.
-        self.recurrent_kv_cache_mode = recurrent_kv_cache_mode
-        self.initial_state = initial_state
-        self.input_transform = input_transform
-        self.output_transform = output_transform
-        self.mixer_type = mixer_type
-        # Older exports use attention_head_dim, rather than HF's head_dim.
-        head_dim = kwargs.pop("head_dim", attention_head_dim)
-        if head_dim != attention_head_dim:
-            raise ValueError("head_dim and attention_head_dim must agree")
-        super().__init__(tie_word_embeddings=tie_word_embeddings, **kwargs)
-        self.validate_architecture()
+    dory_format_version: int = 1
+    vocab_size: int = 131072
+    hidden_size: int = 2560
+    num_hidden_layers: int = 72
+    intermediate_size: int = 7168
+    num_attention_heads: int = 16
+    num_key_value_heads: int = 4
+    head_dim: int = 256
+    max_position_embeddings: int = 8192
+    tie_word_embeddings: bool = False
+    hidden_act: str = "silu"
+    # Also normalizes the learned nGPT scales at inference time.
+    initializer_range: float = 0.02
+    sliding_window: int | None = 1024
+    rope_parameters: dict | None = None
+    layers_block_type: list[str] | None = None
+    ngpt: bool = True
+    fngpt: bool = True
+    ngpt_alpha_init: float = 0.05
+    ngpt_enable_final_norm: bool = False
+    attention_output_gate: bool = True
+    attention_output_gate_logit_scale_init: float | None = None
+    mlp_bias: bool = False
+    attention_bias: bool = False
+    n_input_layers: int = 0
+    n_recurrent_layers: int | None = None
+    n_output_layers: int = 0
+    n_recurrent_loops: int = 1
+    # "last_loop" reuses one cache, overwritten by each recurrent loop.
+    recurrent_kv_cache_mode: str = "per_loop"
+    initial_state: str = "input_copy"
+    input_transform: str = "residual"
+    output_transform: str = "replace"
+
+    def __post_init__(self, **kwargs):
+        if self.layers_block_type is None:
+            self.layers_block_type = [
+                "mlp"
+                if i % 2
+                else "full_attention"
+                if i % 8 == 6
+                else "sliding_attention"
+                for i in range(self.num_hidden_layers)
+            ]
+        if self.rope_parameters is None:
+            self.rope_parameters = {
+                kind: {
+                    "rope_type": "default",
+                    "rope_theta": 10000,
+                    "partial_rotary_factor": 1.0,
+                }
+                for kind in ("sliding_attention", "full_attention")
+            }
+        if self.n_recurrent_layers is None:
+            self.n_recurrent_layers = (
+                self.num_hidden_layers - self.n_input_layers - self.n_output_layers
+            )
+        super().__post_init__(**kwargs)
+
+    def validate_layer_type(self):
+        # Each physical block is attention-only or MLP-only.
+        valid_types = {"sliding_attention", "full_attention", "mlp"}
+        if not isinstance(self.layers_block_type, list) or any(
+            not isinstance(kind, str) or kind not in valid_types
+            for kind in self.layers_block_type
+        ):
+            raise ValueError(
+                "layers_block_type must be a list of sliding_attention, "
+                "full_attention, or mlp"
+            )
+        if len(self.layers_block_type) != self.num_hidden_layers:
+            raise ValueError("layers_block_type must have num_hidden_layers entries")
 
     def validate_architecture(self):
         if self.dory_format_version != 1:
             raise ValueError("Only Dory format version 1 is supported")
-        if len(self.hybrid_layer_pattern) != self.num_hidden_layers or set(
-            self.hybrid_layer_pattern
-        ) - {"S", "*", "-"}:
-            raise ValueError(
-                "hybrid_layer_pattern must contain one S, *, or - per layer"
-            )
-        if min(
-            self.n_input_layers, self.n_recurrent_layers, self.n_output_layers
-        ) < 0 or (
-            self.n_input_layers + self.n_recurrent_layers + self.n_output_layers
-            != self.num_hidden_layers
+        self.validate_layer_type()
+        if self.layers_block_type is None or self.n_recurrent_layers is None:
+            raise ValueError("Dory layer layout must be initialized")
+        partitions = (
+            self.n_input_layers,
+            self.n_recurrent_layers,
+            self.n_output_layers,
+        )
+        if (
+            any(type(n) is not int or n < 0 for n in partitions)
+            or sum(partitions) != self.num_hidden_layers
         ):
             raise ValueError(
                 "Dory input, recurrent, and output layers must sum to num_hidden_layers"
             )
-        if not isinstance(self.n_recurrent_loops, int) or self.n_recurrent_loops < 1:
+        if type(self.n_recurrent_loops) is not int or self.n_recurrent_loops < 1:
             raise ValueError("n_recurrent_loops must be a positive integer")
         if self.recurrent_kv_cache_mode not in ("per_loop", "last_loop"):
             raise ValueError("recurrent_kv_cache_mode must be per_loop or last_loop")
-        for field, allowed in (
-            ("rope_profile_layers", {0, 1, 2}),
-            ("no_rope_layers", {0, 1}),
+        if any(
+            type(n) is not int or n <= 0
+            for n in (self.head_dim, self.num_attention_heads, self.num_key_value_heads)
         ):
-            values = getattr(self, field)
-            if len(values) != self.num_hidden_layers or set(values) - allowed:
-                raise ValueError(f"{field} must contain one valid value per layer")
-        if 0 in self.rope_profile_layers or any(self.no_rope_layers):
-            raise ValueError(
-                "Dory does not support NoPE layers: rope_profile_layers must use "
-                "profiles 1 or 2 and no_rope_layers must be all zeros"
-            )
-        if "S" in self.hybrid_layer_pattern and (
-            self.swa_window_size is None or self.swa_window_size <= 0
-        ):
-            raise ValueError("S layers require a positive swa_window_size")
-        for swa, full in (
-            ("swa_num_attention_heads", "num_attention_heads"),
-            ("swa_num_key_value_heads", "num_key_value_heads"),
-            ("swa_head_dim", "attention_head_dim"),
-        ):
-            if getattr(self, swa) not in (None, getattr(self, full)):
-                raise ValueError(
-                    "Dory requires matching sliding and full attention dimensions"
-                )
+            raise ValueError("Attention dimensions must be positive integers")
         if self.num_attention_heads % self.num_key_value_heads:
             raise ValueError(
                 "num_attention_heads must be divisible by num_key_value_heads"
             )
-        if self.init_method_std <= 0:
-            raise ValueError("init_method_std must be positive")
-        for fraction in (self.partial_rotary_factor, self.partial_rotary_factor_2):
-            rotary_dim = int(self.attention_head_dim * fraction)
+        if self.initializer_range <= 0:
+            raise ValueError("initializer_range must be positive")
+        if "sliding_attention" in self.layers_block_type and (
+            type(self.sliding_window) is not int or self.sliding_window <= 0
+        ):
+            raise ValueError("sliding_window must be a positive integer")
+        attention_types = set(self.layers_block_type) - {"mlp"}
+        if not isinstance(self.rope_parameters, dict) or (
+            set(self.rope_parameters) - {"sliding_attention", "full_attention"}
+            or attention_types - self.rope_parameters.keys()
+        ):
+            raise ValueError("rope_parameters must define each attention block type")
+        for rope in self.rope_parameters.values():
+            if (
+                not isinstance(rope, dict)
+                or rope.get("rope_type") != "default"
+                or rope.get("rope_theta", 0) <= 0
+            ):
+                raise ValueError(
+                    "Dory requires default RoPE with a positive rope_theta"
+                )
+            fraction = rope.get("partial_rotary_factor", 1.0)
+            rotary_dim = int(self.head_dim * fraction)
             if not 0 < fraction <= 1 or rotary_dim <= 0 or rotary_dim % 2:
                 raise ValueError(
                     "Rotary dimensions must be positive, even, and <= head_dim"
@@ -186,7 +146,7 @@ class DoryConfig(PreTrainedConfig):
             raise ValueError("Dory requires ngpt=True, fngpt=True, and no final norm")
         if not self.attention_output_gate or self.attention_bias or self.mlp_bias:
             raise ValueError("Dory requires gated attention and bias-free projections")
-        if self.mlp_hidden_act != "silu" or self.tie_word_embeddings:
+        if self.hidden_act != "silu" or self.tie_word_embeddings:
             raise ValueError("Dory requires SiLU and untied embeddings")
         if self.initial_state != "input_copy" or self.input_transform != "residual":
             raise ValueError(
@@ -194,5 +154,3 @@ class DoryConfig(PreTrainedConfig):
             )
         if self.output_transform != "replace":
             raise ValueError("Dory requires the replace output transform")
-        if self.mixer_type is not None:
-            raise ValueError("Unsupported Dory mixer")

@@ -72,17 +72,28 @@ def model_factory(monkeypatch):
             intermediate_size=24,
             num_attention_heads=2,
             num_key_value_heads=1,
-            attention_head_dim=8,
+            head_dim=8,
             num_hidden_layers=8,
             n_input_layers=2,
             n_recurrent_layers=4,
             n_output_layers=2,
             n_recurrent_loops=3,
             max_position_embeddings=32,
-            swa_window_size=3,
             output_transform="replace",
-            rope_profile_layers=[2, 1, 1, 1, 2, 1, 1, 1],
-            rope_theta_2=100,
+            layers_block_type=["sliding_attention", "mlp"] * 3
+            + ["full_attention", "mlp"],
+            sliding_window=3,
+            rope_parameters={
+                kind: {
+                    "rope_type": "default",
+                    "rope_theta": theta,
+                    "partial_rotary_factor": 1.0,
+                }
+                for kind, theta in (
+                    ("sliding_attention", 100),
+                    ("full_attention", 10000),
+                )
+            },
         )
         kwargs.update(overrides)
         cfg = DoryConfig(**kwargs)
@@ -161,7 +172,7 @@ def test_last_loop_kv_matches_final_loop_history(model_factory, num_loops):
         actual = shared(tokens[start:end], positions[start:end])
         torch.testing.assert_close(actual, expected)
         for layer, ref_layer in zip(shared.backbone.layers, reference.backbone.layers):
-            if layer.char == "-":
+            if not layer.is_attention:
                 continue
             cache, final = layer.mixer.attn[0], ref_layer.mixer.attn[-1]
             assert cache.keys.shape[1] == end
@@ -211,7 +222,7 @@ def test_logits_apply_vocab_scale_after_projection(model_factory, monkeypatch, d
     hidden = torch.randn(3, 16, dtype=dtype)
     model.load_weights([("lm_head.weight", head), ("lm_head.logit_scale", scale)])
     expected = torch.nn.functional.linear(hidden, head).float() * (
-        scale.float() / model.config.init_method_std
+        scale.float() / model.config.initializer_range
     )
     torch.testing.assert_close(model.compute_logits(hidden), expected)
 
