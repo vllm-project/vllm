@@ -7,7 +7,7 @@ requires = [
     "setuptools>=77.0.3,<81.0.0",
     "setuptools-scm>=8.0",
     "setuptools-rust>=1.9.0",
-    "torch == 2.13.0",
+    "torch == 2.14.0",
     "wheel",
     "jinja2",
 ]
@@ -36,11 +36,11 @@ dynamic = [ "version", "dependencies"]
 
 [project.optional-dependencies]
 # AMD Zen CPU optimizations via zentorch
-zen = ["zentorch==2.13.0.1"]
+zen = ["zentorch==2.14.0.0"]
 bench = ["pandas", "matplotlib", "seaborn", "datasets", "scipy", "plotly"]
 tensorizer = ["tensorizer==2.10.1"]
 fastsafetensors = ["fastsafetensors >= 0.3.3"]
-instanttensor = ["instanttensor >= 0.1.9"]
+instanttensor = ["instanttensor >= 0.2.2"]
 runai = ["runai-model-streamer[s3,gcs,azure] >= 0.15.7"]
 # Required for audio processing
 audio = [
