@@ -56,9 +56,17 @@ class HummingMxFp4LinearKernel(MxFp4LinearKernel):
         }
 
         convert_linear_layer_to_humming_standard(layer=layer, name_map=name_map)
-        input_schema = quant_key_to_input_schema(self.config.activation_quant_key)
+        act_key = self.config.activation_quant_key
+        input_schema = quant_key_to_input_schema(act_key)
+        # Keep checkpoint-declared FP8 activations instead of falling back to
+        # A16 for group-scaled weights.
         self.layer_config = prepare_humming_linear_layer_config(
-            layer, quant_config, input_schema=input_schema
+            layer,
+            quant_config,
+            input_schema=input_schema,
+            allow_input_schema_fallback=(
+                act_key is None or act_key.dtype != current_platform.fp8_dtype()
+            ),
         )
         self.compute_config = get_humming_linear_compute_config()
         self.locks = create_humming_locks(layer.weight.device)
