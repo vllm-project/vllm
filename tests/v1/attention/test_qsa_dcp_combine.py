@@ -15,23 +15,30 @@ requires_cuda_triton = pytest.mark.skipif(
 )
 
 
-def test_other_combines_are_called_with_base2_lse():
-    """A combine other than cp_lse_ag_out_rs (for example the all-to-all
-    one) gets the partial output and LSE unchanged, in base 2."""
+@pytest.mark.parametrize(
+    "combine_is_ag_rs,is_lse_base_on_e", [(False, False), (False, True), (True, True)]
+)
+def test_other_combines_get_ctx_and_lse_base(
+    monkeypatch, combine_is_ag_rs, is_lse_base_on_e
+):
+    """A combine other than the copy-free path (another combine, or a base-e
+    LSE) gets the partial output, the LSE, ctx and the LSE base unchanged."""
     partial = torch.randn(5, 12, 16)
     lse = torch.randn(5, 12)
+    ctx = object()
     calls = []
 
-    def combine(out, out_lse, group, *, is_lse_base_on_e):
-        calls.append((out, out_lse, group, is_lse_base_on_e))
+    def combine(out, out_lse, group, *, ctx, is_lse_base_on_e):
+        calls.append((out, out_lse, group, ctx, is_lse_base_on_e))
         return out[:, :3]
 
-    merged = qsa_dcp.qsa_dcp_combine(partial, lse, "group", combine, None)
+    if combine_is_ag_rs:
+        monkeypatch.setattr(qsa_dcp, "cp_lse_ag_out_rs", combine)
+    merged = qsa_dcp.qsa_dcp_combine(
+        partial, lse, "group", combine, None, ctx=ctx, is_lse_base_on_e=is_lse_base_on_e
+    )
 
-    assert len(calls) == 1
-    out, out_lse, group, is_lse_base_on_e = calls[0]
-    assert out is partial and out_lse is lse and group == "group"
-    assert is_lse_base_on_e is False
+    assert calls == [(partial, lse, "group", ctx, is_lse_base_on_e)]
     assert torch.equal(merged, partial[:, :3])
 
 
