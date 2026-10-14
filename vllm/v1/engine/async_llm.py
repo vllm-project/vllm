@@ -23,6 +23,7 @@ from vllm.distributed.weight_transfer.base import (
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient, StreamingInput
 from vllm.entrypoints.serve.elastic_ep.middleware import set_scaling_elastic_ep
+from vllm.envs import enable_envs_cache
 from vllm.exceptions import (
     GracefulHTTPError,
     MaxQueuedTokensError,
@@ -205,6 +206,12 @@ class AsyncLLM(EngineClient):
             self.logger_manager.log_engine_initialized()
 
         self._client_count = client_count
+
+        # The engine is built; environment overrides are no longer expected.
+        # Cache the envs lookups so the per-output and per-request paths in
+        # this process stop re-reading the environment, as the engine core
+        # and the multiprocess executor already do once they are initialized.
+        enable_envs_cache()
 
         self.output_handler: asyncio.Task | None = None
         try:
