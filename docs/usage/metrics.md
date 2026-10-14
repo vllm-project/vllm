@@ -37,6 +37,37 @@ The following metrics are exposed:
 
 --8<-- "gen:metrics-general"
 
+## Tool-calling Metrics
+
+All three counters include `model_name`:
+
+| Counter | Additional labels | Counts |
+| --- | --- | --- |
+| `vllm:tool_call_parser_invocations_total` | `mode`, `outcome`, `request_type`, `tool_choice`, `tool_count` | Parser invocations, not responses: once per choice in non-streaming mode or per delta in streaming mode. Coverage depends on the parser using the recording hook. |
+| `vllm:tool_call_responses_total` | `status`, `tool_choice`, `api_surface` | One outcome per completed tool-bearing Chat Completions or Messages request, or per surfaced tool-parser failure. |
+| `vllm:tool_calls_emitted_total` | `api_surface` | Individual tool calls returned after filtering and API conversion. Repeated streaming argument fragments are not new calls. |
+
+`tool_choice` is normalized to `unset`, `auto`, `none`, `required`, `named`,
+or `other`; named choices never include the function name. The invocation
+counter's `tool_count` buckets are `0`, `1`, `2-5`, `6-10`, and `10+`
+(more than ten tools). Its `mode` is `streaming` or `non_streaming`,
+`outcome` is `tool_call`, `no_tool_call`, or `parse_failure`, and
+`request_type` is `chat_completions`, `messages`, `responses`, or `other`.
+The response counters' `api_surface` is `chat_completions` or `messages`.
+
+Response `status` is `success` when calls are emitted, `no_tool_calls` for
+a completed response without calls, or `parse_failure` for a surfaced parser
+error. Failure takes precedence over earlier emitted calls. A failed full
+response emits zero calls; Messages argument-conversion errors also count as
+parse failures. Interrupted streams retain calls already yielded but do not
+record a success/no-tool outcome. Generic engine errors and cancellation are
+not inferred to be parser failures.
+
+Requests without tools bypass the response counters. Errors swallowed inside
+a parser cannot be distinguished from ordinary no-tool output by these shared
+paths. The new tool dimensions contain no tool names, schemas, arguments,
+bodies, or content-derived hashes; existing application logging is separate.
+
 ## Speculative Decoding Metrics
 
 --8<-- "gen:metrics-spec-decode"
