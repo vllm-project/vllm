@@ -96,12 +96,10 @@ class SharedOffloadRegion:
     the kernel reclaims the memory when the last worker exits, no matter
     how it exits; mappings taken before the unlink stay valid.
 
-    Creator-only population pre-faults the entire region before the barrier
-    and requires that barrier to keep joiners from using unpopulated pages.
-    ``num_segments`` splits the rows over files ``<path>``, ``<path>.1``, ...
-    mapped back to back, so workers pre-fault them in parallel.
     ``populate_shard=(index, count)`` pre-faults only this worker's contiguous
-    share, for layouts where every worker maps the same bytes.
+    share, for layouts where every worker maps the same bytes. The barrier
+    also waits for all shards to finish pre-faulting before returning.
+    ``num_segments`` splits backing files beneath the contiguous mapping.
     """
 
     BLOCK_SIZE_ALIGNMENT: int = mmap.PAGESIZE
@@ -116,12 +114,9 @@ class SharedOffloadRegion:
         barrier: Callable[[], None] | None = None,
         *,
         creator_memory_check: Callable[[int], None] | None = None,
-        populate_only_on_creator: bool = False,
-        num_segments: int = 1,
         populate_shard: tuple[int, int] | None = None,
+        num_segments: int = 1,
     ) -> None:
-        if populate_only_on_creator and barrier is None:
-            raise ValueError("Creator-only population requires a barrier.")
         self.page_size = mmap.PAGESIZE
         assert kv_bytes_per_chunk % self.page_size == 0
 
@@ -148,6 +143,7 @@ class SharedOffloadRegion:
             self._worker_offset = rank * cpu_page_size
             # exclusive upper bound for this worker's area within each row
             self._worker_area_end = (rank + 1) * cpu_page_size
+        barriers_remaining = 2 if populate_shard is not None else 1
         try:
             try:
                 self.fd: int | None = os.open(
@@ -192,53 +188,48 @@ class SharedOffloadRegion:
             )
             if not single:
                 self._map_segments()
-
-            if populate_only_on_creator and self._creator:
+            if barrier is not None:
+                barriers_remaining -= 1
+                barrier()
+                if self._creator:
+                    self._unlink()
+                    self._creator = False
+                    logger.info("Unlinked mmap file %s", self.mmap_path)
+            if populate_shard is not None:
                 populate_write_fn = _get_populate_write_fn(self.mmap_obj)
-                populate_write_fn(self.mmap_obj, 0, self.total_size_bytes)
+                index, count = populate_shard
+                share = round_up(cdiv(self.total_size_bytes, count), self.page_size)
+                start = min(index * share, self.total_size_bytes)
+                if start < self.total_size_bytes:
+                    length = min(share, self.total_size_bytes - start)
+                    populate_write_fn(self.mmap_obj, start, length)
+                if barrier is not None:
+                    barriers_remaining -= 1
+                    barrier()
         except Exception:
             if self._creator:
                 self._unlink()
                 self._creator = False
             if hasattr(self, "mmap_obj") and self.mmap_obj is not None:
-                self.mmap_obj.close()
+                # The prefault traceback may retain an exported buffer.
+                with contextlib.suppress(BufferError):
+                    self.mmap_obj.close()
                 self.mmap_obj = None
             if hasattr(self, "fd") and self.fd is not None:
                 os.close(self.fd)
                 self.fd = None
-            # Peers block inside the barrier until the collective times out if
-            # we die before reaching it.  Arrive anyway so every worker calls
-            # barrier() exactly once and they fail on their own errors instead
-            # of hanging; a failure here must not replace ours.
+            # Join remaining barriers so peers do not wait until the collective
+            # times out. A barrier failure must not replace the setup error.
             if barrier is not None:
-                try:
-                    barrier()
-                except Exception:
-                    logger.warning(
-                        "Failed to release peers waiting at the mmap barrier",
-                        exc_info=True,
-                    )
+                for _ in range(barriers_remaining):
+                    try:
+                        barrier()
+                    except Exception:
+                        logger.warning(
+                            "Failed to release peers waiting at the mmap barrier",
+                            exc_info=True,
+                        )
             raise
-
-        if barrier is not None:
-            # Every worker has mapped the file once the barrier releases, so
-            # its name is no longer needed and dropping it here means no exit
-            # path — including SIGKILL — can leak the file.
-            try:
-                barrier()
-            except Exception:
-                if self._creator:
-                    self._unlink()
-                    self._creator = False
-                self.mmap_obj.close()
-                os.close(self.fd)
-                self.mmap_obj = None
-                self.fd = None
-                raise
-            if self._creator:
-                self._unlink()
-                self._creator = False
-                logger.info("Unlinked mmap file %s", self.mmap_path)
 
         self._base = torch.frombuffer(memoryview(self.mmap_obj), dtype=torch.int8)
         self._views: list[torch.Tensor] = []
@@ -246,19 +237,11 @@ class SharedOffloadRegion:
         self.is_pinned: bool = False
         self.pinned_addresses: list[int] = []
 
-        if populate_only_on_creator:
+        if populate_shard is not None:
             return
-
         populate_write_fn = _get_populate_write_fn(self.mmap_obj)
 
-        if populate_shard is not None:
-            index, count = populate_shard
-            share = round_up(cdiv(self.total_size_bytes, count), self.page_size)
-            start = min(index * share, self.total_size_bytes)
-            if start < self.total_size_bytes:
-                length = min(share, self.total_size_bytes - start)
-                populate_write_fn(self.mmap_obj, start, length)
-        elif rank is not None:
+        if rank is not None:
             # Populate only this worker's pages (one slot per chunk row).
             worker_offset = rank * cpu_page_size
             _t0 = time.perf_counter()
@@ -432,11 +415,22 @@ class SharedOffloadRegion:
             self._views.clear()
         self._base = None
         if self.mmap_obj:
+            retained = False
             try:
                 self.mmap_obj.close()
+            except BufferError:
+                # A native user still exports this mapping, so unmapping would
+                # let the NIC write into reused address space. Keep it mapped;
+                # dropping the fd and the pathname below is still safe.
+                retained = True
+                logger.warning(
+                    "Keeping %s mapped: buffers are still exported to native users",
+                    self.mmap_path,
+                )
             except Exception:
                 logger.warning("Failed to close mmap_obj", exc_info=True)
-            self.mmap_obj = None
+            if not retained:
+                self.mmap_obj = None
         if self.fd is not None:
             try:
                 os.close(self.fd)
