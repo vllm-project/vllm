@@ -34,9 +34,15 @@ def _is_remote_disconnect(exc: Exception) -> bool:
 
     NIXL raises ``nixlRemoteDisconnectError`` (NIXL_ERR_REMOTE_DISCONNECT)
     from ``check_xfer_state`` once the target endpoint is gone, e.g. after
-    the peer process died, instead of reporting an ``"ERR"`` state.
+    the peer process died, instead of reporting an ``"ERR"`` state. Matched
+    by name and status code so the bindings need not be imported here; an
+    unrecognized error keeps the transfer inflight, the conservative side.
     """
-    return type(exc).__name__ == "nixlRemoteDisconnectError"
+    return type(
+        exc
+    ).__name__ == "nixlRemoteDisconnectError" or "NIXL_ERR_REMOTE_DISCONNECT" in str(
+        exc
+    )
 
 
 class _Inflight(NamedTuple):

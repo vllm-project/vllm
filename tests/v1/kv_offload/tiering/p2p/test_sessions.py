@@ -1858,6 +1858,45 @@ class TestServerFlows:
         assert terminal[0][TransferDoneMsg.SUCCESS] is False
         assert session.poll().stores == []
 
+    def test_failed_transfer_keeps_sibling_pins_until_terminal(self, monkeypatch):
+        """A failed transfer fails its round, but a sibling transfer that may
+        still be writing is not force-cancelled: its pin and the round's
+        TransferDoneMsg wait until it is terminal."""
+        monkeypatch.setattr(server_mod, "_CANCEL_RETRY_INTERVAL_S", 0.0)
+        session, conn, transport = _make_session()
+        _activate(session, conn)
+        conn.enqueue(
+            {
+                TYPE_KEY: FetchMsg.TYPE,
+                FetchMsg.ROUND_SEQ: 0,
+                FetchMsg.KV_REQUEST_ID: "req-1",
+                FetchMsg.KEYS: [b"k1", b"k2"],
+                FetchMsg.BLOCK_INDEXES: [5, 6],
+            }
+        )
+        session.poll()
+        session.add_stored_blocks("req-1", [b"k1"], [0], job_id=1)
+        session.add_stored_blocks("req-1", [b"k2"], [1], job_id=2)
+        first, second = list(transport._transfers)
+        transport._cancel_still_inflight.add(second)
+
+        transport._poll_failed.append(first)
+        assert session.poll().stores == [StoreResult(job_id=1, success=False)]
+        for _ in range(3):
+            assert session.poll().stores == []
+        assert second in session._server._inflight
+        assert 2 in session._server._store_jobs
+        assert transport._cancel_calls
+        assert all(mode == "wait" for _, mode in transport._cancel_calls)
+        assert not any(m[TYPE_KEY] == TransferDoneMsg.TYPE for m in conn._sent)
+
+        transport._cancel_still_inflight.clear()
+        assert session.poll().stores == [StoreResult(job_id=2, success=False)]
+        terminal = [m for m in conn._sent if m[TYPE_KEY] == TransferDoneMsg.TYPE]
+        assert len(terminal) == 1
+        assert terminal[0][TransferDoneMsg.SUCCESS] is False
+        assert session.poll().stores == []
+
     def test_abort_during_store_timeout_keeps_unconfirmed_pins(self, monkeypatch):
         monkeypatch.setattr(server_mod, "_CANCEL_RETRY_INTERVAL_S", 0.0)
         session, conn, transport = _make_session()

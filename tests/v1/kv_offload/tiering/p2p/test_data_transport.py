@@ -350,7 +350,15 @@ class TestNixlTransportWithMockedAgent:
         assert tid not in transport._inflight
         assert transport.poll() == PollResult(done=(), failed=())
 
-    def test_poll_reports_remote_disconnect_as_failed(self):
+    @pytest.mark.parametrize(
+        "exc",
+        [
+            _remote_disconnect(),
+            # Recognized by status code even if the binding class is renamed.
+            RuntimeError("getXferStatus: NIXL_ERR_REMOTE_DISCONNECT"),
+        ],
+    )
+    def test_poll_reports_remote_disconnect_as_failed(self, exc):
         """check_xfer_state raises instead of returning ERR once the peer
         disconnected; poll must surface that as a failure, not keep the
         transfer inflight forever."""
@@ -358,7 +366,7 @@ class TestNixlTransportWithMockedAgent:
         transport.add_remote_peer("peer:1", b"meta", 0x1000, 8, 1024)
 
         tid = transport.write_blocks("peer:1", [0], [1])
-        transport._agent.check_xfer_state.side_effect = _remote_disconnect()
+        transport._agent.check_xfer_state.side_effect = exc
 
         result = transport.poll()
         assert result.done == ()

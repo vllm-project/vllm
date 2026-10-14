@@ -806,7 +806,6 @@ class ServerRole:
                     )
             self._maybe_prune(xfer.kv_request_id)
 
-        failed_rounds: list[tuple[str, _OutboundRequestState]] | None = None
         for tid in poll_result.failed:
             xfer = self._inflight_pop(tid)
             if xfer is None:
@@ -819,41 +818,20 @@ class ServerRole:
                     tid,
                 )
                 continue
-            results.extend(self._settle_xfer_jobs(xfer, success=False))
             rnd = xfer.round
             st = self._requests.get(xfer.kv_request_id)
-            if st is not None and st.outbound.get(xfer.round_key) is rnd:
-                if rnd.cancelled:
-                    if rnd.inflight == 0:
-                        self._finalize_cancelled(xfer.kv_request_id, xfer.round_key)
-                    continue
-                del st.outbound[xfer.round_key]
-                if failed_rounds is None:
-                    failed_rounds = []
-                failed_rounds.append((xfer.kv_request_id, rnd))
-                self._send(
-                    {
-                        TYPE_KEY: TransferDoneMsg.TYPE,
-                        TransferDoneMsg.KV_REQUEST_ID: xfer.kv_request_id,
-                        TransferDoneMsg.SUCCESS: False,
-                        TransferDoneMsg.ROUND_SEQ: xfer.round_key,
-                    }
-                )
+            in_round = st is not None and st.outbound.get(xfer.round_key) is rnd
+            if in_round and not rnd.cancelled:
+                # One failed transfer fails the round, but its other
+                # transfers may still be writing. Cancel them like a
+                # timed-out round: their pins and the TransferDoneMsg wait
+                # until they are terminal.
+                rnd.cancelled = True
+                results.extend(self._fail_unwritten_round_jobs(rnd))
+            results.extend(self._settle_xfer_jobs(xfer, success=False))
+            if in_round and rnd.inflight == 0:
+                self._finalize_cancelled(xfer.kv_request_id, xfer.round_key)
             self._maybe_prune(xfer.kv_request_id)
-
-        # Cancel each failed round's other inflight and fail its
-        # remaining store jobs — nothing else will settle them.
-        if failed_rounds:
-            for kv_request_id, rnd in failed_rounds:
-                ids_to_cancel = [
-                    tid for tid, x in self._inflight.items() if x.round is rnd
-                ]
-                for tid in ids_to_cancel:
-                    self._inflight_pop(tid)
-                if ids_to_cancel:
-                    self._transport.cancel(ids_to_cancel)
-                results.extend(self._fail_round_jobs(rnd))
-                self._maybe_prune(kv_request_id)
 
         return results
 
@@ -946,11 +924,7 @@ class ServerRole:
         result.
         """
         results: list[StoreResult] = []
-        still_pinned = (
-            {jid for active in self._inflight.values() for jid in active.job_ids}
-            if xfer.round.cancelled
-            else set()
-        )
+        still_pinned = self._read_job_ids() if xfer.round.cancelled else set()
         for job_id in xfer.job_ids:
             if job_id in still_pinned:
                 continue
@@ -987,6 +961,16 @@ class ServerRole:
             send_done=(kv_request_id, round_key) not in self._pending_aborts,
         )
 
+    def _read_job_ids(self, rnd: _OutboundRequestState | None = None) -> set[int]:
+        """Jobs whose blocks an inflight transfer (of ``rnd``, if given)
+        still reads; their pins must be held."""
+        return {
+            jid
+            for xfer in self._inflight.values()
+            if rnd is None or xfer.round is rnd
+            for jid in xfer.job_ids
+        }
+
     def _fail_unwritten_round_jobs(
         self, rnd: _OutboundRequestState
     ) -> list[StoreResult]:
@@ -995,12 +979,7 @@ class ServerRole:
         Jobs that an inflight transfer carries keep their pins; they settle
         when that transfer turns terminal (``_settle_xfer_jobs``).
         """
-        written = {
-            jid
-            for xfer in self._inflight.values()
-            if xfer.round is rnd
-            for jid in xfer.job_ids
-        }
+        written = self._read_job_ids(rnd)
         results: list[StoreResult] = []
         for job_id in list(rnd.pending_job_ids):
             if job_id in written:
@@ -1274,9 +1253,7 @@ class ServerRole:
 
         # Cancellation may still be draining. Keep every affected pin until
         # the transport confirms that no transfer reads its primary slot.
-        inflight_job_ids = {
-            jid for xfer in self._inflight.values() for jid in xfer.job_ids
-        }
+        inflight_job_ids = self._read_job_ids()
         for jid in timed_out:
             if jid in inflight_job_ids:
                 continue
