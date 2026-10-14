@@ -3146,8 +3146,10 @@ class NixlBaseConnectorWorker:
     def _async_poll_loop(self) -> None:
         while not self._async_poll_stop.is_set():
             try:
-                with self._async_poll_lock:
-                    self._record_completed_recvs()
+                # Skip the lock while idle, e.g. always on a pull-mode producer.
+                if self._recving_transfers:
+                    with self._async_poll_lock:
+                        self._record_completed_recvs()
             except Exception:
                 # Keep polling: if this thread dies, no transfer ever completes.
                 logger.exception("nixl-async-poll failed; retrying in 1s.")

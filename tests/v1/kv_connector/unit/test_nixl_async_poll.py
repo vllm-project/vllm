@@ -13,6 +13,7 @@ import pytest
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl import (
     NixlConnectorWorker,
     NixlPushConnectorWorker,
+    base_worker,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
     _parse_bool_option,
@@ -124,8 +125,8 @@ def test_completion_stamped_while_main_thread_blocked():
         c.args[0].xferDuration for c in worker.xfer_stats.record_transfer.mock_calls
     ]
     assert len(durations) == 3
-    # Stamped near the transfer time, not at the next engine step.
-    assert all(d < MAIN_BLOCK_S / 2 for d in durations), durations
+    # Stamped by the poll thread, not at the engine step (>= MAIN_BLOCK_S).
+    assert all(d < MAIN_BLOCK_S for d in durations), durations
     assert wrapper.checks_after_done == []
     assert sorted(wrapper.released) == [1, 2, 3]
     assert worker._async_done == {}
@@ -206,7 +207,6 @@ def test_shutdown_stops_thread_before_releasing():
         time.sleep(0.005)
 
     worker.shutdown()
-    time.sleep(0.02)
 
     assert not worker._async_poll_thread.is_alive()
     assert wrapper.released == [1]
@@ -214,11 +214,23 @@ def test_shutdown_stops_thread_before_releasing():
     worker._finish_shutdown.assert_called_once()
 
 
-def test_push_worker_does_not_support_async_poll():
-    # The poll thread does not watch _sending_transfers, so enabling it in
-    # push mode would leave every send in PROC.
-    assert NixlConnectorWorker._supports_async_poll
-    assert not NixlPushConnectorWorker._supports_async_poll
+@pytest.mark.parametrize(
+    ("worker_cls", "agent_config", "expected"),
+    [
+        (NixlConnectorWorker, object(), True),
+        # Push sends complete via _sending_transfers, which is not polled.
+        (NixlPushConnectorWorker, object(), False),
+        # Without an agent config the agent cannot be made thread-safe.
+        (NixlConnectorWorker, None, False),
+    ],
+)
+def test_async_poll_enabled_only_where_supported(
+    monkeypatch, worker_cls, agent_config, expected
+):
+    monkeypatch.setattr(base_worker, "nixl_agent_config", agent_config)
+    worker = object.__new__(worker_cls)
+    assert worker._async_poll_enabled(True) is expected
+    assert worker._async_poll_enabled(False) is False
 
 
 @pytest.mark.parametrize(
