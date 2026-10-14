@@ -785,8 +785,9 @@ def _packed_group(tokens_per_state, row_bytes, supported_sizes):
     return AttentionGroup(backend, ["layer.0"], spec, 0)
 
 
-def test_packed_compressed_group_without_independent_mapping_rejects_kernel_view():
-    """A compressed cache using group slots cannot bind packed kernel pages."""
+def test_packed_compressed_group_gets_kernel_block_table():
+    """A packed indexer cache whose kernel needs 64-state pages gets a table and
+    a bound view in kernel blocks that address the same packed-block rows."""
     row, stride_rows = 132, 5 * 64
     group = _packed_group(4, row, [128, 256])
     group.create_metadata_builders(_VLLM_CONFIG, "cpu", kernel_block_size=1024)
@@ -794,8 +795,12 @@ def test_packed_compressed_group_without_independent_mapping_rejects_kernel_view
 
     backing = torch.arange(3 * stride_rows).repeat_interleave(row)
     manager = backing.view(3, 1, stride_rows, row)[:, :, :256]
-    with pytest.raises(ValueError, match="cannot be split"):
-        map_kv_caches_to_kernel_blocks({"layer.0": manager}, [group])
+    pages = map_kv_caches_to_kernel_blocks({"layer.0": manager}, [group])["layer.0"]
+    metadata = create_common_attn_metadata(BatchSpec([2048], [1]), 1024, "cpu")
+    metadata.block_table_tensor = torch.tensor([[0, 2]], dtype=torch.int32)
+    table = group.build_metadata(metadata)
+    assert table.tolist() == [[0, 1, 2, 3, 10, 11, 12, 13]]
+    assert torch.equal(pages[table[0, 4:], 0].flatten(0, 1), manager[2, 0])
 
 
 def test_split_group_maps_manager_block_table():

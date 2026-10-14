@@ -199,6 +199,8 @@ def init_attn_backend(
     device: torch.device,
     active_layer_names: set[str] | None = None,
     draft_layer_names: set[str] | None = None,
+    # Replicated layers in a DCP-sharded group can have larger blocks and
+    # narrower per-layer rows than the runner's shared block table.
     block_table_widths: list[int] | None = None,
 ) -> tuple[list[list[AttentionGroup]], AttentionCGSupportInfo, list[int]]:
     if block_table_widths is not None:

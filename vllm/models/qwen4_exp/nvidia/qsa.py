@@ -53,6 +53,7 @@ from vllm.v1.attention.backends.flash_attn import (
     FlashAttentionMetadata,
     FlashAttentionMetadataBuilder,
 )
+from vllm.v1.attention.ops.dcp import CPTritonContext
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheSpec,
@@ -141,10 +142,6 @@ class Qwen4ExpQSAMetadataBuilder(FlashAttentionMetadataBuilder):
     """Flash metadata supporting uniform decode and target-verify graphs."""
 
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
-
-    def __init__(self, *args, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
-        self._init_reorder_batch_threshold(None, supports_dcp_with_varlen=True)
 
 
 class Qwen4ExpQSAFlashAttentionBackend(FlashAttentionBackend):
@@ -259,6 +256,7 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
             raise NotImplementedError("Qwen4Exp QSA requires FlashAttention")
         self.cp_kv_cache_interleave_size = 1
         self._dcp_local_indices: torch.Tensor | None = None
+        self._dcp_combine_ctx = CPTritonContext()
         if self.dcp_world_size > 1:
             from vllm.config import get_current_vllm_config
 
@@ -427,13 +425,12 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
                 partial_out.float(),
                 partial_lse.float(),
                 group,
+                ctx=self._dcp_combine_ctx,
                 is_lse_base_on_e=self.lse_base_on_e,
             ),
         )
 
-        gated = merged.to(output.dtype).float() * torch.sigmoid(
-            output_gate.view_as(merged).float()
-        )
+        gated = merged * torch.sigmoid(output_gate.view_as(merged).float())
         output.copy_(gated)
 
 

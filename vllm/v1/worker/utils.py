@@ -264,7 +264,7 @@ def packed_kernel_blocks_are_mappable(
     """Whether packed manager blocks can be viewed as kernel blocks."""
     kernel_rows = spec.get_num_kernel_states(kernel_block_size)
     return (
-        spec.has_independent_slot_mapping
+        spec.tokens_per_state > 1
         and spec.num_heads == 1
         and spec.block_size % kernel_block_size == 0
         and kernel_rows > 0
@@ -429,7 +429,7 @@ class AttentionGroup:
         kernel_rows = spec.get_num_kernel_states(self.kernel_block_size)
         if kv_cache.shape[-2] == kernel_rows:
             return kv_cache
-        # Only caches with independent block-table slot mappings can use
+        # Only compressed caches written from their block table can use
         # virtual kernel pages.
         if not packed_kernel_blocks_are_mappable(
             spec, self.kernel_block_size, kv_cache.stride(0) * kv_cache.element_size()
@@ -445,9 +445,8 @@ class AttentionGroup:
         # spans the other layers' pages between blocks (never addressing them),
         # which ``view`` cannot express.
         page_stride = kernel_rows * kv_cache.stride(-2)
-        assert page_stride * kv_cache.element_size() == (
-            kernel_rows * spec.state_content_size_bytes
-        )
+        if page_stride <= 0 or kv_cache.stride(0) % page_stride:
+            raise ValueError("Packed KV blocks must contain whole kernel pages")
         self.kernel_block_stride = kv_cache.stride(0) // page_stride
         num_pages = (kv_cache.shape[0] - 1) * self.kernel_block_stride + (
             kv_cache.shape[-2] // kernel_rows

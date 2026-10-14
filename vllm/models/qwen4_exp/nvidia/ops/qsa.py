@@ -297,10 +297,9 @@ def _qsa_merge_splitk_kernel(
     )
     merged = tl.sum(partial_output * weights[:, None], axis=0)
     merged = tl.where(denominator > 0, merged / denominator, 0.0)
-    # Preserve the unfused path's BF16 attention-output rounding before
-    # applying the gate in FP32.
-    merged = merged.to(output_ptr.dtype.element_ty)
     if APPLY_GATE:
+        # Match the unfused path's BF16 output before applying the gate.
+        merged = merged.to(output_ptr.dtype.element_ty)
         output_gate = tl.load(
             output_gate_ptr
             + row * stride_output_gate_row
@@ -654,7 +653,7 @@ def qsa_sparse_paged_attention(
     tile-loop bound. use_prefill_config only steers the top of the config table; see
     _select_config.
 
-    With return_lse, returns ungated output and log2 LSE for a DCP merge.
+    With return_lse, returns FP32 ungated output and log2 LSE for a DCP merge.
     """
     if q.ndim != 3 or k_cache.ndim != 4 or v_cache.shape != k_cache.shape:
         raise ValueError("QSA sparse attention received invalid Q/K/V shapes")
@@ -701,10 +700,11 @@ def qsa_sparse_paged_attention(
     assert token_to_req.stride(0) == 1
 
     if out is None:
-        out = torch.empty_like(q)
+        out = torch.empty_like(q, dtype=torch.float32 if return_lse else q.dtype)
     if out.shape != q.shape:
         raise ValueError("QSA sparse output must match its query")
-    assert out.dtype == q.dtype and out.device == q.device
+    assert out.dtype == (torch.float32 if return_lse else q.dtype)
+    assert out.device == q.device
     assert out.stride(2) == 1
     if return_lse:
         if output_gate is not None:
@@ -887,9 +887,10 @@ def warmup_qsa_sparse_paged_attention(
     )
     token_to_req_ptr = TritonWarmupTensor(torch.int32)
     output_ptr = TritonWarmupTensor(
-        torch.bfloat16, shape=(num_rows, num_query_heads, head_dim)
+        torch.float32 if return_lse else torch.bfloat16,
+        shape=(num_rows, num_query_heads, head_dim),
     )
-    # The output gate is mandatory at runtime; warm the gated specialization.
+    # DCP applies the gate after combining ranks; other runs gate in the kernel.
     output_gate_ptr = TritonWarmupTensor(
         torch.bfloat16, shape=(num_rows, num_query_heads, head_dim)
     )

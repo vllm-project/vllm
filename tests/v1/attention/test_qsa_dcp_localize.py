@@ -165,7 +165,7 @@ def test_empty_qsa_batch_returns_the_dcp_output_and_lse_pair():
     )
 
     assert output.shape == query.shape
-    assert output.dtype == query.dtype
+    assert output.dtype == torch.float32
     assert lse.shape == query.shape[:2]
     assert lse.dtype == torch.float32
     assert lse.device == query.device
@@ -179,6 +179,7 @@ def test_empty_qsa_batch_returns_the_dcp_output_and_lse_pair():
         (4, 16, 200, torch.bfloat16, None, None),
         (2, 16, 64, torch.float8_e4m3fn, 0.75, 1.5),
         (4, 4, 64, torch.float8_e4m3fn, 0.75, 1.5),
+        (2, 16, 64, torch.uint8, 0.75, 1.5),
     ],
 )
 def test_sharded_ranks_reproduce_the_single_rank_result(
@@ -209,9 +210,12 @@ def test_sharded_ranks_reproduce_the_single_rank_result(
     shape = (full_blocks, page, num_kv_heads, head_dim)
     k_source = torch.randn(shape, dtype=torch.bfloat16, device=device)
     v_source = torch.randn(shape, dtype=torch.bfloat16, device=device)
-    if cache_dtype == torch.float8_e4m3fn:
-        k_full = (k_source / k_scale).to(cache_dtype)
-        v_full = (v_source / v_scale).to(cache_dtype)
+    if cache_dtype in (torch.float8_e4m3fn, torch.uint8):
+        k_full = (k_source / k_scale).to(torch.float8_e4m3fn)
+        v_full = (v_source / v_scale).to(torch.float8_e4m3fn)
+        if cache_dtype == torch.uint8:
+            k_full = k_full.view(torch.uint8)
+            v_full = v_full.view(torch.uint8)
     else:
         k_full, v_full = k_source, v_source
 
@@ -265,6 +269,22 @@ def test_sharded_ranks_reproduce_the_single_rank_result(
         v_scale=v_scale,
         return_lse=True,
     )
+    assert reference.dtype == torch.float32
+    if cache_dtype == torch.uint8:
+        native_out, native_lse = qsa_sparse_paged_attention(
+            q,
+            k_full.view(torch.float8_e4m3fn),
+            v_full.view(torch.float8_e4m3fn),
+            global_sel,
+            full_table,
+            token_to_req,
+            False,
+            k_scale=k_scale,
+            v_scale=v_scale,
+            return_lse=True,
+        )
+        torch.testing.assert_close(reference, native_out, rtol=2e-2, atol=2e-2)
+        torch.testing.assert_close(reference_lse, native_lse, rtol=1e-3, atol=1e-3)
 
     outs, lses = [], []
     for rank in range(world):

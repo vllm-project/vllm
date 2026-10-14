@@ -492,14 +492,17 @@ def test_mixed_group_mapping_preserves_request_rows(
         dtype=torch.int32,
     )
     assert torch.equal(mapped, expected)
-    if block_size == 128:
+    if block_size in (128, 480):
         layer_width = get_block_table_width(
             group.kv_cache_spec.max_num_blocks_per_req(
-                _config(dcp_world_size), max_model_len
+                _config(dcp_world_size, max_model_len=max_model_len), max_model_len
             ),
             group.kv_cache_spec.block_size,
         )
-        assert runner_width == layer_width
+        if block_size == 128:
+            assert runner_width == layer_width
+        else:
+            assert layer_width < runner_width
     assert group.kernel_block_table is not None
     short_width = runner_width * (blocks_per_kv_block - 1)
     group.kernel_block_table = group.kernel_block_table[..., :short_width]
