@@ -61,7 +61,7 @@ kernel_tests() {
     pytest -x -v -s tests/v1/worker/test_cpu_block_table.py
     pytest -x -v -s tests/v1/worker/test_kv_block_zeroer.py
     pytest -x -v -s tests/v1/worker/test_mamba_hybrid_model_state.py \
-        -k 'cpu_postprocess_state or cpu_runner_selects_mamba_state'
+        -k 'cpu_postprocess_state or cpu_runner_selects_model_state'
     pytest -x -v -s tests/v1/worker/test_cpu_gumbel_sample.py"
 }
 

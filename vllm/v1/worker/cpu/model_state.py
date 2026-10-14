@@ -8,6 +8,7 @@ import torch
 from vllm import _custom_ops as ops
 from vllm.v1.worker.gpu.mm.rope import RopeState
 from vllm.v1.worker.gpu.model_states.default import DefaultModelState
+from vllm.v1.worker.gpu.model_states.encoder_only import EncoderOnlyModelState
 from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
 
 if TYPE_CHECKING:
@@ -36,6 +37,10 @@ class CPURopeState(RopeState):
 
 
 class CPUDefaultModelState(DefaultModelState):
+    rope_state_cls = CPURopeState
+
+
+class CPUEncoderOnlyModelState(EncoderOnlyModelState):
     rope_state_cls = CPURopeState
 
 
