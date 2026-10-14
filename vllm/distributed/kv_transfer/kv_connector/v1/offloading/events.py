@@ -27,6 +27,7 @@ from vllm.distributed.kv_events import (
     KVCacheEvent,
 )
 from vllm.logger import init_logger
+from vllm.multimodal.utils import get_mm_features_in_window
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     generate_block_hash_extra_keys,
@@ -97,11 +98,13 @@ class _OffloadEventMetadata:
 
 
 def _block_extra_keys(
-    req: "Request", start: int, end: int, block_size: int
+    req: Request, start: int, end: int, block_size: int
 ) -> tuple[tuple[Any, ...] | None, ...]:
     """Each block's hash extra keys, as the GPU block pool publishes them."""
     keys: list[tuple[Any, ...] | None] = []
     mm_idx = 0
+    if start > 0 and req.mm_features:
+        mm_idx, _ = get_mm_features_in_window(req.mm_features, start, end)
     for block_start in range(start, end, block_size):
         block_keys, mm_idx = generate_block_hash_extra_keys(
             req, block_start, block_start + block_size, mm_idx

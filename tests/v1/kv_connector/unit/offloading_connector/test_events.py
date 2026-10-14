@@ -352,15 +352,20 @@ def test_rich_store_carries_per_block_extra_keys():
     req.lora_request = MagicMock(adapter_id=7, lora_name="a", lora_path="/a")
     req.lora_request.name = "a"
     req.cache_salt = "salt"
-    image = SimpleNamespace(offset=2, length=8)
-    req.mm_features = [SimpleNamespace(identifier="img", mm_position=image)]
+    req.mm_features = [
+        SimpleNamespace(identifier=identifier, mm_position=position)
+        for identifier, position in (
+            ("img0", SimpleNamespace(offset=1, length=2)),
+            ("img1", SimpleNamespace(offset=6, length=8)),
+        )
+    ]
     keys = _record_chunks(tracker, req, group_config, num_chunks=2)
 
     first, second = tracker.take_events([_stored_event(keys)])
 
     assert first.lora_id == 7 and first.lora_name == "a"
-    assert first.extra_keys == [("a", ("img", 2), "salt"), ("a", ("img", -2))]
-    assert second.extra_keys == [("a", ("img", -6)), ("a",)]
+    assert first.extra_keys == [("a", ("img0", 1), "salt"), ("a", ("img1", 2))]
+    assert second.extra_keys == [("a", ("img1", -2)), ("a", ("img1", -6))]
 
 
 def test_promotion_emits_full_cpu_stored_event():
