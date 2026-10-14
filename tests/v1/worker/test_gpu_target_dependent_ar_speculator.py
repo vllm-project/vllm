@@ -534,11 +534,6 @@ def test_update_draft_decode_metadata_updates_fa3_scheduler_metadata(
         seq_lens=torch.tensor([5, 6], dtype=torch.int32),
         block_table=torch.zeros((2, 1), dtype=torch.int32),
         slot_mapping=torch.zeros(3, dtype=torch.int32),
-        use_cascade=False,
-        common_prefix_len=0,
-        cu_prefix_query_lens=None,
-        prefix_kv_lens=None,
-        suffix_kv_lens=None,
         max_dcp_context_kv_len=None,
         dcp_context_kv_lens=None,
         num_decode_reqs=2,
@@ -546,7 +541,6 @@ def test_update_draft_decode_metadata_updates_fa3_scheduler_metadata(
         num_decode_tokens=3,
         num_prefill_tokens=0,
         scheduler_metadata=torch.tensor([-1, -1, -1], dtype=torch.int32),
-        prefix_scheduler_metadata=None,
         max_num_splits=4,
         causal=True,
         mm_prefix_query_range_tensor=None,
@@ -584,11 +578,6 @@ def test_update_draft_decode_metadata_skips_without_scheduler_metadata(monkeypat
         seq_lens=torch.tensor([1], dtype=torch.int32),
         block_table=torch.zeros((1, 1), dtype=torch.int32),
         slot_mapping=torch.zeros(1, dtype=torch.int32),
-        use_cascade=False,
-        common_prefix_len=0,
-        cu_prefix_query_lens=None,
-        prefix_kv_lens=None,
-        suffix_kv_lens=None,
         max_dcp_context_kv_len=None,
         dcp_context_kv_lens=None,
         num_decode_reqs=1,
@@ -596,7 +585,6 @@ def test_update_draft_decode_metadata_skips_without_scheduler_metadata(monkeypat
         num_decode_tokens=1,
         num_prefill_tokens=0,
         scheduler_metadata=None,
-        prefix_scheduler_metadata=None,
         max_num_splits=1,
         causal=True,
         mm_prefix_query_range_tensor=None,
@@ -609,3 +597,25 @@ def test_update_draft_decode_metadata_skips_without_scheduler_metadata(monkeypat
 
     assert not called
     assert metadata.scheduler_metadata is None
+
+
+@pytest.mark.parametrize(("num_speculative_steps", "expected"), [(1, False), (3, True)])
+def test_decode_metadata_update_needs_draft_decode_steps(
+    num_speculative_steps, expected
+):
+    """One speculative step runs no draft decodes, so the in-place metadata
+    update (and its fallback log) does not apply even on a capable backend."""
+    speculator = object.__new__(_TestSpeculator)
+    speculator.num_speculative_steps = num_speculative_steps
+    speculator.attn_groups = [
+        [
+            SimpleNamespace(
+                supports_draft_decode_metadata_update=True,
+                backend=SimpleNamespace(get_name=lambda: "CAPABLE"),
+            )
+        ]
+    ]
+
+    speculator._configure_decode_metadata_update()
+
+    assert speculator.supports_decode_metadata_update is expected
