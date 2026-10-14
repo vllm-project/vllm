@@ -13,6 +13,7 @@ without modifying core code:
     })
 """
 
+import functools
 import importlib
 import inspect
 import sys
@@ -24,6 +25,9 @@ from vllm.logger import init_logger
 logger = init_logger(__name__)
 
 _registry: dict[str, tuple[Callable[..., Any], Callable[..., Any]]] = {}
+
+# Consumed by Triton itself rather than passed to the kernel.
+_LAUNCH_OPTIONS = frozenset(("num_warps", "num_stages", "num_ctas", "maxnreg"))
 
 
 def _kernel_arg_names(kernel: Callable[..., Any]) -> tuple[str, ...]:
@@ -39,12 +43,14 @@ def _kernel_arg_names(kernel: Callable[..., Any]) -> tuple[str, ...]:
 class KernelOverride:
     """Stands in for a Triton kernel and routes launches to ``impl``.
 
-    The JIT warmup infrastructure launches kernels as
-    ``kernel[grid](**kwargs)`` where ``kwargs`` are keyed by the original
-    kernel's argument names. This wrapper forwards those launch arguments
-    to the platform implementation: by keyword when the implementation's
-    parameter names match the kernel's, otherwise positionally in the
-    kernel's parameter order.
+    Launch arguments are bound to the original kernel's argument names.
+    When every parameter of ``impl`` is a kernel argument, ``impl`` receives
+    just the arguments it declares, by keyword, so kernel arguments it does
+    not use can be added or reordered without breaking it. Otherwise
+    ``impl`` must mirror the kernel's full signature and receives the
+    arguments positionally. Triton launch options (``num_warps``, ...) are
+    dropped, and implementations with a ``grid`` parameter receive the
+    launch grid.
     """
 
     def __init__(self, kernel: Callable[..., Any], impl: Callable[..., Any]) -> None:
@@ -56,25 +62,51 @@ class KernelOverride:
         self.func = impl
         self.__name__ = getattr(impl, "__name__", "kernel_override")
         self.__module__ = getattr(kernel, "__module__", "")
-        self._forward_by_name = (
-            tuple(inspect.signature(impl).parameters) == self.arg_names
-        )
+        params = inspect.signature(impl).parameters
+        self._takes_grid = "grid" in params
+        names = tuple(name for name in params if name != "grid")
+        # Parameters with defaults may outlive the kernel argument they mirrored.
+        unknown = [
+            name
+            for name in names
+            if name not in self.arg_names
+            and params[name].default is inspect.Parameter.empty
+        ]
+        # Parameters to forward by keyword, or None to forward positionally.
+        self._forward_names: tuple[str, ...] | None = None if unknown else names
+        if unknown and len(names) != len(self.arg_names):
+            logger.warning(
+                "Override %r takes %s, which are not arguments of the kernel %s",
+                self.__name__,
+                unknown,
+                self.arg_names,
+            )
 
     def __getitem__(self, grid: Any) -> Callable[..., Any]:
+        if self._takes_grid:
+            return functools.partial(self._launch, grid=grid)
         return self._launch
 
     def _launch(self, *args: Any, **kwargs: Any) -> Any:
+        for option in _LAUNCH_OPTIONS.intersection(kwargs):
+            del kwargs[option]
+        extra = {"grid": kwargs.pop("grid")} if self._takes_grid else {}
+        if self._forward_names is not None:
+            kwargs.update(zip(self.arg_names, args))
+            names = self._forward_names
+            used = {name: kwargs[name] for name in names if name in kwargs}
+            return self._impl(**used, **extra)
         if args:
-            return self._impl(*args, **kwargs)
-        if self._forward_by_name:
-            return self._impl(**kwargs)
+            return self._impl(*args, **kwargs, **extra)
         unexpected = [name for name in kwargs if name not in self.arg_names]
         if unexpected:
             raise RuntimeError(
                 f"Override for {self.__name__!r} received unexpected launch "
                 f"arguments: {unexpected}"
             )
-        return self._impl(*(kwargs[name] for name in self.arg_names if name in kwargs))
+        return self._impl(
+            *(kwargs[name] for name in self.arg_names if name in kwargs), **extra
+        )
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
         return self._impl(*args, **kwargs)
@@ -135,8 +167,9 @@ def _rebind_kernels(
             # kernel as an instance attribute; read the instance dict directly
             # so module-level __getattr__ hooks are never triggered, and so
             # this scan needs no dependency on the warmup machinery.
-            if hasattr(value, "__dict__"):
-                wrapper = lookup(vars(value).get("kernel"))
+            instance_dict = getattr(value, "__dict__", None)
+            if isinstance(instance_dict, dict):
+                wrapper = lookup(instance_dict.get("kernel"))
             if wrapper is None:
                 continue
             value.kernel = wrapper

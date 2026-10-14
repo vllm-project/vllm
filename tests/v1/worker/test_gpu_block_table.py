@@ -8,14 +8,25 @@ from vllm.platforms import current_platform
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.worker.gpu.block_table import BlockTables
 
+if current_platform.is_cpu():
+    # The CPU model runner swaps in CPUBlockTables; run the same checks on it.
+    import vllm.v1.worker.cpu.shm  # noqa: F401
+    from vllm.v1.worker.cpu.block_table import CPUBlockTables as BlockTables
+
+    current_platform.register_triton_kernel_overrides()
+
+DEVICE = torch.device("cpu" if current_platform.is_cpu() else "cuda")
+
 pytestmark = pytest.mark.skipif(
-    not current_platform.is_cuda(),
-    reason="requires CUDA",
+    not (current_platform.is_cuda() or current_platform.is_cpu()),
+    reason="requires CUDA or CPU",
 )
+cuda_only = pytest.mark.skipif(not current_platform.is_cuda(), reason="requires CUDA")
 
 
+@cuda_only
 def test_block_tables_apply_staged_writes_fuses_kv_groups(monkeypatch):
-    device = torch.device("cuda")
+    device = DEVICE
     block_tables = BlockTables(
         block_sizes=[16, 32, 8],
         max_num_reqs=4,
@@ -106,7 +117,7 @@ def test_block_tables_apply_staged_writes_fuses_kv_groups(monkeypatch):
 
 
 def test_block_tables_apply_staged_writes_single_group():
-    device = torch.device("cuda")
+    device = DEVICE
     block_tables = BlockTables(
         block_sizes=[16],
         max_num_reqs=2,
@@ -130,7 +141,7 @@ def test_block_tables_apply_staged_writes_single_group():
 
 
 def test_block_tables_skip_custom_slot_mapping_groups():
-    device = torch.device("cuda")
+    device = DEVICE
     block_tables = BlockTables(
         block_sizes=[8, 262144],
         max_num_reqs=1,
@@ -167,7 +178,7 @@ def test_block_tables_skip_custom_slot_mapping_groups():
 @pytest.mark.parametrize("cp_rank", range(4))
 def test_dcp_slot_mapping_only_shards_sharded_groups(cp_rank: int):
     """Only sharded groups use DCP interleave in logical-block coordinates."""
-    device = torch.device("cuda")
+    device = DEVICE
     block_tables = BlockTables(
         block_sizes=[128, 128],
         max_num_reqs=1,
@@ -209,6 +220,7 @@ def test_dcp_slot_mapping_only_shards_sharded_groups(cp_rank: int):
     assert torch.equal(actual[1], positions + 10 * 128)
 
 
+@cuda_only
 def test_v1_block_table_move_row_clears_vacated_row():
     """condense() moves the last row into a freed slot; the vacated row must
     not keep stale block ids. Padded dummy-run batches dereference stale rows
@@ -246,7 +258,7 @@ def test_get_dummy_block_tables_returns_zeroed_rows():
     state writes at freed — possibly reallocated — blocks.
     get_dummy_block_tables must hand out zeroed (null block) rows while
     preserving the persistent storage address for CUDA graphs."""
-    device = torch.device("cuda")
+    device = DEVICE
     block_tables = BlockTables(
         block_sizes=[16],
         max_num_reqs=4,
@@ -277,7 +289,7 @@ def test_dummy_request_slot_mapping_is_pad():
     block-table row of a real request slot, which may be stale and point at
     blocks that are now in the prefix cache.
     """
-    device = torch.device("cuda")
+    device = DEVICE
     block_tables = BlockTables(
         block_sizes=[4],
         max_num_reqs=2,

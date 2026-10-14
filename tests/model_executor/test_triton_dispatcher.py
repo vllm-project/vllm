@@ -102,6 +102,41 @@ def test_override_forwards_positionally_for_mismatched_names(
     assert calls == [(1, 2, 0, None)]
 
 
+def test_override_tolerates_kernel_args_it_does_not_use(
+    _fake_module: Any,
+) -> None:
+    """An override declaring a subset of the kernel's arguments gets just
+    those, so kernel arguments it ignores can be added or reordered; extra
+    defaulted parameters keep their defaults."""
+    calls: list[tuple[Any, ...]] = []
+
+    def cpu_impl(replace_from, output_ptr, removed_arg=None):
+        calls.append((output_ptr, replace_from, removed_arg))
+
+    register_kernels({"vllm.tests.fake_kernel_home.expand_kernel": cpu_impl})
+    overridden = _fake_module.expand_kernel
+    overridden[(4,)](1, 2, 0, MAX_NUM_TOKENS=8)
+    overridden[(4,)](output_ptr=1, input_ptr=2, replace_from=0)
+    assert calls == [(1, 0, None), (1, 0, None)]
+
+
+def test_override_receives_grid_and_drops_launch_options(
+    _fake_module: Any,
+) -> None:
+    """Triton-only launch options never reach the impl; the grid does when
+    the impl asks for it, since some kernels encode sizes only there."""
+    calls: list[tuple[Any, ...]] = []
+
+    def cpu_impl(output_ptr, input_ptr, replace_from, MAX_NUM_TOKENS=None, *, grid):
+        calls.append((output_ptr, input_ptr, replace_from, MAX_NUM_TOKENS, grid))
+
+    register_kernels({"vllm.tests.fake_kernel_home.expand_kernel": cpu_impl})
+    overridden = _fake_module.expand_kernel
+    overridden[(4, 2)](1, 2, 0, MAX_NUM_TOKENS=8, num_warps=4)
+    overridden[(3,)](output_ptr=1, input_ptr=2, replace_from=0, num_stages=1)
+    assert calls == [(1, 2, 0, 8, (4, 2)), (1, 2, 0, None, (3,))]
+
+
 def test_override_covers_from_import_copies(_fake_module: Any) -> None:
     import types
 

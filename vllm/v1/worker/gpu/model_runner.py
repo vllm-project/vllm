@@ -480,7 +480,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 "custom_logits_processors": custom_logits_processors,
             }
             if self.vllm_config.watermark_config is None:
-                self.sampler = Sampler(**sampler_kwargs)
+                self.sampler = self.sampler_cls(**sampler_kwargs)
             else:
                 wm_config = self.vllm_config.watermark_config
                 watermarker = create_watermarker(wm_config)
@@ -688,7 +688,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             additional_attn_cg_support=additional_attn_cg_support,
         )
 
-        self.block_tables = BlockTables(
+        self.block_tables = self.block_tables_cls(
             block_sizes=block_sizes,
             max_num_reqs=self.max_num_reqs,
             max_num_batched_tokens=self.max_num_tokens,
@@ -2398,6 +2398,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     @property
     def pcp_manager_cls(self) -> type[pcp.PCPManager]:
         return pcp.PCPManager
+
+    # Hardware runners can select the sampler and block table classes.
+    @property
+    def sampler_cls(self) -> type[Sampler]:
+        return Sampler
+
+    @property
+    def block_tables_cls(self) -> type[BlockTables]:
+        return BlockTables
 
 
 class ExecuteModelState(NamedTuple):

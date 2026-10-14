@@ -2937,7 +2937,14 @@ class VllmConfig:
         ):
             unsupported.append("pipeline parallelism with external_launcher")
 
+        # The CPU runner has no Triton-free speculators, rejection sampler or
+        # sampling-mask compaction yet.
+        model_config = self.model_config
+        if not HAS_TRITON and model_config and model_config.return_sampling_mask:
+            unsupported.append("return_sampling_mask without Triton")
         if speculative_config is not None:
+            if not HAS_TRITON:
+                unsupported.append("speculative decoding without Triton")
             if speculative_config.method in (
                 "suffix",
                 "medusa",
@@ -3199,7 +3206,10 @@ class VllmConfig:
 
     def _validate_v2_model_runner(self) -> None:
         """Check for features not yet supported by the V2 model runner."""
-        if not HAS_TRITON:
+        from vllm.platforms import current_platform
+
+        # CPU registers torch implementations of the runner's Triton kernels.
+        if not HAS_TRITON and not current_platform.is_cpu():
             raise ValueError("Model Runner V2 requires Triton.")
 
         unsupported = self._get_v2_model_runner_unsupported_features()
