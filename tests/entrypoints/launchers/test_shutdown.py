@@ -550,7 +550,11 @@ async def test_request_rejection_during_shutdown():
 
 @pytest.mark.asyncio
 async def test_multi_api_server_shutdown():
-    """Verify shutdown works with multiple API servers."""
+    """Verify shutdown works with multiple API servers.
+
+    ``--shutdown-timeout`` must drain in-flight requests even with
+    ``--api-server-count > 1``.  Regression test for #61561.
+    """
     server_args = [
         "--dtype",
         "bfloat16",
@@ -584,7 +588,11 @@ async def test_multi_api_server_shutdown():
             _concurrent_request_loop(client, state, sigterm_sent, concurrency=8)
         )
 
-        await asyncio.sleep(0.5)
+        # Drain can only complete requests the engine already admitted, so
+        # wait for the server to report one instead of guessing with a sleep.
+        admission_delay = await _wait_for_running_request(
+            remote_server.url_for("metrics")
+        )
 
         # Send SIGTERM to parent - should propagate to all children
         proc.send_signal(signal.SIGTERM)
@@ -599,6 +607,20 @@ async def test_multi_api_server_shutdown():
             if not request_task.done():
                 request_task.cancel()
             await asyncio.gather(request_task, return_exceptions=True)
+
+        # With the fix the engines drain while the API servers still relay
+        # outputs; in-flight requests should NOT all fail with EngineDeadError.
+        assert state.requests_after_sigterm > 0, (
+            f"Wait timeout should complete in-flight requests. "
+            f"admission_delay: {admission_delay:.3f}s, "
+            f"503: {state.got_503}, 500: {state.got_500}, "
+            f"conn_errors: {state.connection_errors}, errors: {state.errors}"
+        )
+        # Server must stop accepting new requests (503, 500, or connection close)
+        assert state.got_503 or state.got_500 or state.connection_errors > 0, (
+            f"Server should stop accepting requests. "
+            f"completed: {state.requests_after_sigterm}, errors: {state.errors}"
+        )
 
         for _ in range(300):  # up to 30 seconds
             if proc.poll() is not None:
