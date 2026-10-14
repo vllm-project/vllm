@@ -493,6 +493,8 @@ class MBartDecoderNoPos(nn.Module, EagleModelMixin):
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight)
+            # Track destination parameters, not individual QKV/KV source shards.
+            # Complete fused weights and biases rely on checkpoint integrity.
             loaded_params.add(name)
         return loaded_params
 
@@ -551,10 +553,6 @@ class NemotronParseProcessingInfo(BaseProcessingInfo):
 
     def get_num_image_tokens(self) -> int:
         config = self.get_hf_config()
-        configured_tokens = getattr(config, "num_image_tokens", None)
-        if configured_tokens is not None:
-            return configured_tokens
-
         final_size = config.image_size
         patch_size = config.encoder.patch_size
 
@@ -999,18 +997,6 @@ class RadioWithNeck(nn.Module):
         self.model_encoder.load_weights(model_encoder_weights)
 
 
-def resize_vision_embeddings(
-    embeddings: torch.Tensor,
-    num_tokens: int | None,
-) -> torch.Tensor:
-    """Tile or crop vision embeddings to an experiment-specific length."""
-    if num_tokens is None or embeddings.shape[1] == num_tokens:
-        return embeddings
-
-    repeats = (num_tokens + embeddings.shape[1] - 1) // embeddings.shape[1]
-    return embeddings.repeat(1, repeats, 1)[:, :num_tokens]
-
-
 @MULTIMODAL_REGISTRY.register_processor(
     NemotronParseMultiModalProcessor,
     info=NemotronParseProcessingInfo,
@@ -1131,26 +1117,21 @@ class NemotronParseForConditionalGeneration(
         dtype = next(self.encoder.parameters()).dtype
         flat = self.input_norm(pixel_values.flatten(1), dtype)
         pixel_values = flat.view(pixel_values.shape)
-        with torch.cuda.nvtx.range("nemotron_parse.vision_encoder"):
-            if image_input["type"] == "packed_pixel_values":
-                image_sizes = [
-                    (int(height), int(width))
-                    for height, width in image_input["image_sizes"].tolist()
-                ]
-                content_sizes = [
-                    (int(height), int(width))
-                    for height, width in image_input["content_sizes"].tolist()
-                ]
-                return self.encoder(
-                    pixel_values,
-                    image_sizes=image_sizes,
-                    content_sizes=content_sizes,
-                )
-            embeddings = self.encoder(pixel_values)
-        return resize_vision_embeddings(
-            embeddings,
-            getattr(self.config, "num_image_tokens", None),
-        )
+        if image_input["type"] == "packed_pixel_values":
+            image_sizes = [
+                (int(height), int(width))
+                for height, width in image_input["image_sizes"].tolist()
+            ]
+            content_sizes = [
+                (int(height), int(width))
+                for height, width in image_input["content_sizes"].tolist()
+            ]
+            return self.encoder(
+                pixel_values,
+                image_sizes=image_sizes,
+                content_sizes=content_sizes,
+            )
+        return self.encoder(pixel_values)
 
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings | None:
         image_input = self._parse_and_validate_image_input(**kwargs)
@@ -1280,11 +1261,12 @@ class RadioMBartPrefixForCausalLM(NemotronParseForConditionalGeneration):
         raise ValueError("Only image modality is supported")
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        """Load Parse 3.5 weights with complete parameter accounting.
+        """Load Parse 3.5 weights and report loaded destination parameters.
 
         The shared Parse/RADIO loaders predate strict weight tracking and do
         not propagate their delegated load sets.  Returning the fully-prefixed
-        set here lets ``DefaultModelLoader`` reject an incomplete checkpoint.
+        set here lets ``DefaultModelLoader`` detect missing parameters, but
+        does not validate individual source shards of fused parameters.
         """
         encoder_weights: list[tuple[str, torch.Tensor]] = []
         decoder_weights: list[tuple[str, torch.Tensor]] = []

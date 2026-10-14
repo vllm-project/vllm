@@ -6,6 +6,7 @@ import pytest
 import regex as re
 from transformers import AutoModel
 
+from tests.models.registry import HF_EXAMPLE_MODELS
 from tests.models.utils import check_logprobs_close
 from vllm.assets.image import ImageAsset
 from vllm.logprobs import Logprob, SampleLogprobs
@@ -13,7 +14,6 @@ from vllm.tokenizers import TokenizerLike
 
 from ....conftest import HfRunner, PromptImageInput, VllmRunner
 
-IMAGE = ImageAsset("paper-11").pil_image_ext(ext="png").convert("RGB")
 PROMPT = (
     "</s><s><predict_bbox><predict_classes><output_markdown><predict_no_text_in_pic>"
 )
@@ -164,11 +164,16 @@ def run_test(
 def test_models(
     hf_runner, vllm_runner, model: str, dtype: str, num_logprobs: int
 ) -> None:
+    if model == "nvidia/Nemotron-3.5-Parse":
+        model_info = HF_EXAMPLE_MODELS.get_hf_info("RadioMBartPrefixForCausalLM")
+        model_info.check_available_online(on_fail="skip")
+
+    image = ImageAsset("paper-11").pil_image_ext(ext="png").convert("RGB")
     run_test(
         hf_runner,
         vllm_runner,
         inputs=[
-            ([PROMPT] * 10, [IMAGE] * 10),
+            ([PROMPT] * 10, [image] * 10),
         ],
         model=model,
         dtype=dtype,

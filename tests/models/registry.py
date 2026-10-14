@@ -1383,7 +1383,10 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     ),
     "RForConditionalGeneration": _HfExamplesInfo("YannQi/R-4B", trust_remote_code=True),
     "RadioMBartPrefixForCausalLM": _HfExamplesInfo(
-        "nvidia/Nemotron-3.5-Parse", trust_remote_code=True
+        "nvidia/Nemotron-3.5-Parse",
+        trust_remote_code=True,
+        # Enable online initialization once the checkpoint is public.
+        is_available_online=False,
     ),
     "SkyworkR1VChatModel": _HfExamplesInfo(
         "Skywork/Skywork-R1V-38B",
@@ -1806,6 +1809,13 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
     ),
     "OpenPanguMTPModel": _HfExamplesInfo(
         "FreedomIntelligence/openPangu-Ultra-MoE-718B-V1.1",
+        trust_remote_code=True,
+        is_available_online=False,
+    ),
+    "ParseAuxMTPModel": _HfExamplesInfo(
+        "nvidia/Nemotron-3.5-Parse",
+        speculative_model="nvidia/Nemotron-3.5-Parse",
+        speculative_method="mtp",
         trust_remote_code=True,
         is_available_online=False,
     ),
