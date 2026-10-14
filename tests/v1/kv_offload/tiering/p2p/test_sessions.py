@@ -13,7 +13,8 @@ completes its own load.
 from __future__ import annotations
 
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
+from concurrent.futures import Future
 
 import numpy as np
 import pytest
@@ -74,7 +75,13 @@ class FakeDataTransport:
         num_blocks: int = 16,
         block_len: int = 4096,
         config_fingerprint: str = "",
+        defer_registration: bool = False,
     ) -> None:
+        # When True, add_remote_peer_async parks the registration until
+        # complete_registrations() resolves it, standing in for the real
+        # transport's worker thread.
+        self.defer_registration = defer_registration
+        self._deferred: list[tuple[Future[None], Callable[[], None]]] = []
         self._base_addr = base_addr
         self._num_blocks = num_blocks
         self._block_len = block_len
@@ -115,6 +122,38 @@ class FakeDataTransport:
             "num_blocks": num_blocks,
             "block_len": block_len,
         }
+
+    def add_remote_peer_async(
+        self, peer_id, agent_metadata, base_addr, num_blocks, block_len
+    ) -> Future[None]:
+        future: Future[None] = Future()
+
+        def apply() -> None:
+            self.add_remote_peer(
+                peer_id, agent_metadata, base_addr, num_blocks, block_len
+            )
+
+        if self.defer_registration:
+            self._deferred.append((future, apply))
+            return future
+        apply()
+        future.set_result(None)
+        return future
+
+    def complete_registrations(self, exc: Exception | None = None) -> int:
+        """Resolve parked registrations the way the worker thread would.
+
+        Returns the number resolved so callers can assert one was actually
+        in flight rather than silently testing nothing.
+        """
+        deferred, self._deferred = self._deferred, []
+        for future, apply in deferred:
+            if exc is not None:
+                future.set_exception(exc)
+            else:
+                apply()
+                future.set_result(None)
+        return len(deferred)
 
     def remove_remote_peer(self, peer_id: str) -> None:
         self._remote_peers.pop(peer_id, None)
@@ -389,6 +428,67 @@ class TestConnectHandshake:
         assert "peer:8000" in transport._remote_peers
         ack = next(m for m in conn._sent if m[TYPE_KEY] == ConnectAckMsg.TYPE)
         assert ack[ConnectAckMsg.PEER_ID] == "local:9000"
+
+    def test_ack_withheld_until_registration_completes(self):
+        """ConnectAck must not precede registration.
+
+        The peer treats ConnectAck as permission to send, so acking while
+        registration is still in flight would let a FetchMsg arrive for
+        blocks this side cannot yet write to.
+        """
+        transport = FakeDataTransport(defer_registration=True)
+        session, conn, _ = _make_session(transport=transport)
+        conn.enqueue(_peer_connect_msg())
+        session.poll()
+
+        assert "peer:8000" not in transport._remote_peers
+        assert not any(m[TYPE_KEY] == ConnectAckMsg.TYPE for m in conn._sent)
+
+        assert transport.complete_registrations() == 1
+        session.poll()
+
+        assert "peer:8000" in transport._remote_peers
+        ack = next(m for m in conn._sent if m[TYPE_KEY] == ConnectAckMsg.TYPE)
+        assert ack[ConnectAckMsg.PEER_ID] == "local:9000"
+
+    def test_pending_registration_is_pending_work(self):
+        """An in-flight registration keeps the engine ticking.
+
+        Nothing else drives poll(), so if the session reported idle the
+        ack would never be sent.
+        """
+        transport = FakeDataTransport(defer_registration=True)
+        session, conn, _ = _make_session(transport=transport)
+        conn.enqueue(_peer_connect_msg())
+        session.poll()
+        assert session.has_pending_work
+
+        transport.complete_registrations()
+        session.poll()
+        assert not session.has_pending_work
+
+    def test_failed_registration_rejects_peer(self):
+        """A registration that fails kills the connection instead of acking."""
+        transport = FakeDataTransport(defer_registration=True)
+        session, conn, _ = _make_session(transport=transport)
+        conn.enqueue(_peer_connect_msg())
+        session.poll()
+
+        transport.complete_registrations(exc=RuntimeError("nixl exploded"))
+        session.poll()
+
+        assert not conn.alive
+        assert not any(m[TYPE_KEY] == ConnectAckMsg.TYPE for m in conn._sent)
+
+    def test_duplicate_connect_during_registration_is_rejected(self):
+        """A second ConnectMsg mid-registration is a protocol violation."""
+        transport = FakeDataTransport(defer_registration=True)
+        session, conn, _ = _make_session(transport=transport)
+        conn.enqueue(_peer_connect_msg())
+        session.poll()
+        conn.enqueue(_peer_connect_msg())
+        session.poll()
+        assert not conn.alive
 
     def test_connect_ack_makes_session_ready(self):
         """Session.ready becomes True after ConnectAckMsg."""
