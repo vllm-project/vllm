@@ -106,23 +106,37 @@ class TestPublishedWheelSearch(unittest.TestCase):
         self.assertIn("rust/src/main.rs", logs.output[0])
 
     def test_pyproject_blocks_only_on_build_system_changes(self):
+        (without_pyproject,) = self.published
         build_system = '[build-system]\nrequires = ["torch == 2.13.0"]\n'
         pyproject = self.repo / "pyproject.toml"
         pyproject.write_text(build_system)
-        published = self.commit("vllm/b.py")
-        self.published.add(published)
-        for content, blocks in (
-            (build_system + '[project.optional-dependencies]\nzen = ["z"]\n', False),
-            (build_system.replace("2.13.0", "2.14.0"), True),
-            ("[build-system", True),
+        with_pyproject = self.commit("vllm/b.py")
+        self.published.add(with_pyproject)
+        for published, content, blocks in (
+            (
+                with_pyproject,
+                build_system + '[project.optional-dependencies]\nzen = ["z"]\n',
+                False,
+            ),
+            (
+                with_pyproject,
+                build_system.replace("requires", "# ABI pin\nrequires"),
+                False,
+            ),
+            (with_pyproject, build_system.replace("2.13.0", "2.14.0"), True),
+            (with_pyproject, "[build-system", True),
+            (without_pyproject, build_system, True),
         ):
-            with self.subTest(content=content):
+            with self.subTest(content=content, published=published):
                 self.git("reset", "-q", "--hard", published)
                 pyproject.write_text(content)
-                self.git("commit", "-qam", "pyproject")
+                self.git("add", "-A")
+                self.git("commit", "-qm", "pyproject")
                 base = self.git("rev-parse", "HEAD")
                 if blocks:
-                    with self.assertRaisesRegex(ValueError, "pyproject.toml"):
+                    with self.assertRaisesRegex(
+                        ValueError, r"pyproject.toml \[build-system\]"
+                    ):
                         self.search(base)
                     continue
                 with self.assertNoLogs("setup", "WARNING"):

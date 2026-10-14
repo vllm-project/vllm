@@ -6,10 +6,11 @@ zentorch (the AMD Zen CPU optimization extra) tracks the torch release that
 vLLM depends on, differing only by an extra trailing "patch level" segment.
 Concretely, torch ``X.Y.Z`` corresponds to zentorch ``X.Y.Z.W``.
 
-This test parses the raw text of ``pyproject.toml`` and ``requirements/cpu.txt`` and
-string-matches the versions.
+This test reads the ``zen`` extra from ``pyproject.toml`` and string-matches it
+against the raw text of ``requirements/cpu.txt``.
 """
 
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -26,11 +27,16 @@ CPU_REQUIREMENTS = REPO_ROOT / "requirements" / "cpu.txt"
 
 def _extract_zentorch_version() -> str:
     """Pull the pinned zentorch version out of pyproject.toml's `zen` extra."""
-    text = PYPROJECT.read_text()
-    matches = re.findall(r"zentorch==([0-9][0-9A-Za-z.\-+]*)", text)
-    assert matches, f"No 'zentorch==<version>' pin found in {PYPROJECT}"
-    assert len(set(matches)) == 1, (
-        f"Multiple conflicting zentorch pins found in {PYPROJECT}: {matches}"
+    with PYPROJECT.open("rb") as f:
+        zen = tomllib.load(f)["project"]["optional-dependencies"]["zen"]
+    matches = [
+        m.group(1)
+        for req in zen
+        if (m := re.fullmatch(r"zentorch==([0-9][0-9A-Za-z.\-+]*)", req))
+    ]
+    assert len(matches) == 1, (
+        f"Expected one 'zentorch==<version>' pin in the zen extra of {PYPROJECT}, "
+        f"got {zen}"
     )
     return matches[0]
 

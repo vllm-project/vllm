@@ -922,7 +922,7 @@ class precompiled_wheel_utils:
             old_table, new_table = (
                 tomllib.loads(
                     subprocess.check_output(
-                        ["git", "show", f"{rev}:pyproject.toml"],
+                        ["git", "show", f"{rev}:./pyproject.toml"],
                         text=True,
                         stderr=subprocess.DEVNULL,
                     )
@@ -978,8 +978,8 @@ class precompiled_wheel_utils:
                 subprocess.check_output([*diff, *paths], text=True).strip()
                 for paths in (utils.WHEEL_BLOCKING_PATHS, utils.WHEEL_WARNING_PATHS)
             )
-            if utils.build_system_changed(commit, base_commit):
-                blocking = f"{blocking}\npyproject.toml".strip()
+            if not blocking and utils.build_system_changed(commit, base_commit):
+                blocking = "pyproject.toml [build-system]"
             if blocking:
                 raise ValueError(
                     f"No precompiled wheel is published yet for {base_commit}, and "
