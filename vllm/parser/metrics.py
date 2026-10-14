@@ -124,9 +124,13 @@ def record_tool_call_response(
     *,
     tool_calls_count: int = 0,
     parse_failed: bool = False,
+    completed: bool = True,
     api_surface: Literal["chat_completions", "messages"] = "chat_completions",
 ) -> None:
-    """Record a request outcome and the calls actually returned to the client."""
+    """Record a request outcome and the calls actually returned to the client.
+
+    Interrupted streams retain emitted counts without a success/no-tool outcome.
+    """
     if _tool_call_responses is None or _tool_calls_emitted is None:
         return
     status = (
@@ -136,12 +140,13 @@ def record_tool_call_response(
         if tool_calls_count
         else "no_tool_calls"
     )
-    _tool_call_responses.labels(
-        model_name=_model_name,
-        status=status,
-        tool_choice=_tool_choice_label(getattr(request, "tool_choice", None)),
-        api_surface=api_surface,
-    ).inc()
+    if completed or parse_failed:
+        _tool_call_responses.labels(
+            model_name=_model_name,
+            status=status,
+            tool_choice=_tool_choice_label(getattr(request, "tool_choice", None)),
+            api_surface=api_surface,
+        ).inc()
     _tool_calls_emitted.labels(model_name=_model_name, api_surface=api_surface).inc(
         tool_calls_count
     )

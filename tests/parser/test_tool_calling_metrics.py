@@ -129,17 +129,22 @@ def test_parser_failures_are_distinct_from_no_tool_calls(registry, is_streaming)
 
 
 @pytest.mark.parametrize(
-    "count, failed, status",
-    [(3, False, "success"), (0, False, "no_tool_calls"), (0, True, "parse_failure")],
+    "count, failed, completed, status",
+    [
+        (3, False, True, "success"),
+        (0, False, True, "no_tool_calls"),
+        (0, True, False, "parse_failure"),
+        (2, True, False, "parse_failure"),
+    ],
 )
 def test_response_counts_use_bounded_labels_and_survive_reinitialization(
-    registry, count, failed, status
+    registry, count, failed, completed, status
 ):
     request = ChatCompletionRequest.model_construct(
         tool_choice={"type": "function", "function": {"name": "private-function"}}
     )
     metrics.record_tool_call_response(
-        request, tool_calls_count=count, parse_failed=failed
+        request, tool_calls_count=count, parse_failed=failed, completed=completed
     )
     metrics.init_parser_metrics(model_name="test-model")
     assert (
@@ -162,3 +167,29 @@ def test_response_counts_use_bounded_labels_and_survive_reinitialization(
         == count
     )
     assert b"private-function" not in generate_latest(registry)
+
+
+@pytest.mark.parametrize("count", [0, 2])
+def test_interrupted_responses_only_count_emitted_calls(registry, count):
+    request = ChatCompletionRequest.model_construct(tool_choice="auto")
+    metrics.record_tool_call_response(request, tool_calls_count=count, completed=False)
+    for status in ("success", "parse_failure", "no_tool_calls"):
+        assert (
+            registry.get_sample_value(
+                "vllm:tool_call_responses_total",
+                {
+                    "model_name": "test-model",
+                    "status": status,
+                    "tool_choice": "auto",
+                    "api_surface": "chat_completions",
+                },
+            )
+            is None
+        )
+    assert (
+        registry.get_sample_value(
+            "vllm:tool_calls_emitted_total",
+            {"model_name": "test-model", "api_surface": "chat_completions"},
+        )
+        == count
+    )
