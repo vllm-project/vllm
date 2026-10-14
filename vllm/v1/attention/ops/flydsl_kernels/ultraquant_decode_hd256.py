@@ -21,6 +21,7 @@ from vllm.v1.attention.ops.flydsl_kernels.buffer_utils import (
     load_vec,
     store_vec,
 )
+from vllm.v1.attention.ops.flydsl_kernels.mma_utils import mma
 
 # === Constants (256-wide-head ultraquant decode profile) =======================
 HEAD_SIZE = 256
@@ -245,6 +246,10 @@ def build_ultraquant_decode_hd256_module(
         ONE_F = fx.Float32(1.0)
         LOG2E_C = fx.Float32(LOG2E)
         QK_SCALE = fx.Float32(_qk_scale)
+        qk_atom = fx.make_mma_atom(
+            fx.rocdl.cdna4.MFMA_Scale(16, 16, 128, fx.Float4E2M1FN, fx.Float8E4M3FN)
+        )
+        pv_atom = fx.make_mma_atom(fx.rocdl.MFMA(16, 16, 16, fx.BFloat16))
 
         def _f32x8_to_fp8_i64(f):
             # 8 f32 -> 8 E4M3 bytes packed as i64 (MFMA fp8 operand).
@@ -536,8 +541,6 @@ def build_ultraquant_decode_hd256_module(
                 #   B = Q E4M3 (vec8 i32 = 32 B) for the same group
                 #   scaleA = per-(token,group) UE8M0 byte at op_sel byte 0
                 #   scaleB = 0x7F identity (Q carries no scale)
-                BLGP_E2M1 = 4  # A operand type code = fp4 e2m1
-                CBSZ_E4M3 = 0  # B operand type code = fp8 e4m3
                 IDENT = fx.Int32(0x7F)
                 qk_acc = zero_v4
                 for h in range_constexpr(MFMA_ISSUES):
@@ -548,19 +551,8 @@ def build_ultraquant_decode_hd256_module(
                     q_op = q_op_hoisted[h]
                     scbyte = scale_lds[mfma_row * N_GROUPS + grp]
                     kscale = scbyte | 0x7F7F7F00
-                    qk_acc = rocdl.mfma_scale_f32_16x16x128_f8f6f4(
-                        T.vec(4, T.f32),
-                        [
-                            k_op,
-                            q_op,
-                            qk_acc,
-                            BLGP_E2M1,
-                            CBSZ_E4M3,
-                            0,
-                            kscale,
-                            0,
-                            IDENT,
-                        ],
+                    qk_acc = mma(
+                        qk_atom, qk_acc, k_op, q_op, scale_a=kscale, scale_b=IDENT
                     )
 
                 # Scale + mask out-of-context tokens.
@@ -636,7 +628,7 @@ def build_ultraquant_decode_hd256_module(
                 gpu.barrier()
 
                 # ---- PV MFMA: A=V[head_dim, token], B=P (=qk_acc bf16) -----
-                p_op = qk_acc.to(fx.BFloat16).bitcast(fx.Int16)
+                p_op = qk_acc.to(fx.BFloat16)
                 # HW-transpose PV: V_lds row-major V[token][head_dim].
                 token_idx = lane >> 2
                 hd_sub = (lane & 3) * 4
@@ -647,9 +639,8 @@ def build_ultraquant_decode_hd256_module(
                         T.vec(4, T.i16),
                         v_ptr,
                     ).result
-                    acc_pv[h] = rocdl.mfma_f32_16x16x16bf16_1k(
-                        T.f32x4, [v_op_raw, p_op, acc_pv[h], 0, 0, 0]
-                    )
+                    v_op = fx.Vector(v_op_raw).bitcast(fx.BFloat16)
+                    acc_pv[h] = mma(pv_atom, acc_pv[h], v_op, p_op)
 
             results = yield [running_max, running_sum, *acc_pv]
         running_max = fx.Float32(results[0])
