@@ -700,9 +700,14 @@ def xpu_moe_shared_fused_unsupported_reason(runner) -> str | None:
     """
     from vllm.model_executor.layers.activation import SiluAndMul
     from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+    from vllm.model_executor.layers.fused_moe.router.zero_expert_router import (
+        ZeroExpertRouter,
+    )
 
     if not xpu_moe_shared_fused_available():
         return "vllm-xpu-kernels op not available"
+    if isinstance(runner.router, ZeroExpertRouter):
+        return "zero-expert routing requires post-reduction output processing"
     from vllm_xpu_kernels.moe_shared_fused_interface import supports
 
     mlp = _xpu_moe_shared_fused_shared_mlp(runner)

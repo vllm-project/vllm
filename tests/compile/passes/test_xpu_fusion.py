@@ -247,6 +247,7 @@ def _stub_runner(w13, w2, s13, s2, sw13, ss13, sw2, ss2, gate_w):
     return SimpleNamespace(
         layer_name="model.layers.0.mlp.experts",
         gate=object(),
+        router=object(),
         shared_expert_gate=None,
         shared_experts=SimpleNamespace(_layer=mlp),
         routed_scaling_factor=1.0,
@@ -540,3 +541,42 @@ def test_fusion_limit_accepts_native_token_boundaries(limit):
         ).xpu_moe_shared_fusion_max_token_num
         == limit
     )
+
+
+@pytest.mark.parametrize("subclass", [False, True])
+def test_zero_expert_router_preserves_unfused_path(
+    fake_kernel_interface, monkeypatch, subclass
+):
+    from vllm.compilation.passes.fusion import xpu_fusion as mod
+    from vllm.model_executor.layers.fused_moe.router.zero_expert_router import (
+        ZeroExpertRouter,
+    )
+
+    class DerivedZeroExpertRouter(ZeroExpertRouter):
+        pass
+
+    router_cls = DerivedZeroExpertRouter if subclass else ZeroExpertRouter
+    runner = _base_runner()
+    runner.router = router_cls(
+        top_k=8,
+        global_num_experts=E,
+        e_score_correction_bias=torch.zeros(E),
+        num_logical_experts=E - 8,
+        zero_expert_type="identity",
+    )
+    reason = _reason(runner)
+    assert reason is not None and "zero-expert" in reason
+    monkeypatch.setattr(
+        mod, "get_layers_from_vllm_config", lambda *_: {"layer": runner}
+    )
+    assert not mod.XpuMoESharedFusionPass._all_moe_layers_supported(VllmConfig())
+
+
+def test_standard_router_remains_supported(fake_kernel_interface):
+    from vllm.model_executor.layers.fused_moe.router.fused_topk_router import (
+        FusedTopKRouter,
+    )
+
+    runner = _base_runner()
+    runner.router = FusedTopKRouter(top_k=8, global_num_experts=E)
+    assert _reason(runner) is None
