@@ -1760,10 +1760,6 @@ class DeepseekV4RocmMxfp4Compressor(DeepseekCompressor):
             self.max_num_batched_tokens, self.head_dim, self.device
         )
 
-    def _register_store_warmup(self, vllm_config: VllmConfig) -> None:
-        # The fused store kernel packs FP4 with CUDA PTX and never runs here.
-        pass
-
     def _compress_norm_rope_store(
         self,
         state_metadata: CompressorMetadata,
