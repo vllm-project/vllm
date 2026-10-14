@@ -494,6 +494,11 @@ class OpenAIServingChat(GenerateBaseServing):
         num_cached_tokens = None
         num_cache_creation_tokens = None
         tools_streamed = [False] * num_choices
+        emitted_tool_calls: set[tuple[int, int]] | None = (
+            set() if request.tools else None
+        )
+        parse_failed = False
+        stream_completed = False
 
         previous_texts = [""] * num_choices
 
@@ -667,13 +672,17 @@ class OpenAIServingChat(GenerateBaseServing):
                         # Finished without output: send the final chunk unparsed.
                         delta_message = DeltaMessage()
                     elif parser is not None:
-                        delta_message = parser.parse_delta(
-                            delta_text=delta_text,
-                            delta_token_ids=as_list(output.token_ids),
-                            request=request,
-                            prompt_token_ids=res.prompt_token_ids,
-                            finished=output.finish_reason is not None,
-                        )
+                        try:
+                            delta_message = parser.parse_delta(
+                                delta_text=delta_text,
+                                delta_token_ids=as_list(output.token_ids),
+                                request=request,
+                                prompt_token_ids=res.prompt_token_ids,
+                                finished=output.finish_reason is not None,
+                            )
+                        except Exception:
+                            parse_failed = True
+                            raise
                         if delta_message is not None and delta_message.tool_calls:
                             tools_streamed[i] = True
 
@@ -823,6 +832,12 @@ class OpenAIServingChat(GenerateBaseServing):
                         )
 
                     data = chunk.model_dump_json(exclude_unset=True)
+                    if emitted_tool_calls is not None:
+                        # Argument fragments reuse the same call index per choice.
+                        emitted_tool_calls.update(
+                            (i, tool_call.index)
+                            for tool_call in choice_data.delta.tool_calls or ()
+                        )
                     yield f"data: {data}\n\n"
 
             if self._include_reasoning_tokens_details and not include_continuous_usage:
@@ -919,12 +934,21 @@ class OpenAIServingChat(GenerateBaseServing):
                         delta=False,
                     )
 
+            stream_completed = True
         except GenerationError as e:
             yield f"data: {self._convert_generation_error_to_streaming_response(e)}\n\n"
         except Exception as e:
             logger.exception("Error in chat completion stream generator.")
             data = self.create_streaming_error_response(e)
             yield f"data: {data}\n\n"
+        finally:
+            if emitted_tool_calls is not None:
+                record_tool_call_response(
+                    request,
+                    tool_calls_count=len(emitted_tool_calls),
+                    parse_failed=parse_failed,
+                    completed=stream_completed,
+                )
         # Send the final done message after all response.n are finished
         yield "data: [DONE]\n\n"
 
