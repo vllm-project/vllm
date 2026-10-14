@@ -81,7 +81,10 @@ def _make_main_inputs(num_tokens: int, main_fp8: bool = False) -> dict:
     """Random main-attention arguments with a paged cache in vLLM's layout."""
     num_blocks = num_tokens // MAIN_PAGE + 2
     if main_fp8:
-        # ROCm fp8 KV-cache layout: uint8 storage holding e4m3fnuz codes.
+        # ROCm fp8 KV-cache layout: uint8 storage holding e4m3 codes in
+        # the given flavor (FNUZ is the CDNA3/ROCm convention; OCP is
+        # what the gfx950 typed views reinterpret the cache as).
+        fp8_dtype = torch.float8_e4m3fnuz if main_fp8 == "fnuz" else torch.float8_e4m3fn
         cache = (
             torch.zeros(
                 num_blocks,
@@ -91,7 +94,7 @@ def _make_main_inputs(num_tokens: int, main_fp8: bool = False) -> dict:
                 dtype=torch.uint8,
                 device="cuda",
             )
-            .view(torch.float8_e4m3fnuz)
+            .view(fp8_dtype)
             .transpose(1, 2)
         )
     else:
@@ -144,7 +147,7 @@ def _check_main_outputs(main: dict, q_out, gate_out, rope, positions) -> None:
     ).view(num_tokens, -1)
     q, k = rope(positions, q, k)
     kv_cache = main["main_kv_cache"]
-    if kv_cache.dtype == torch.float8_e4m3fnuz:
+    if kv_cache.dtype in (torch.float8_e4m3fnuz, torch.float8_e4m3fn):
         # The FP8 cache stores value / scale as e4m3fnuz codes. Compare
         # against a torch-side conversion: the C++ cache-update reference
         # mis-encodes fnuz destinations on gfx950, so it cannot referee.
@@ -157,10 +160,10 @@ def _check_main_outputs(main: dict, q_out, gate_out, rope, positions) -> None:
         # not in BF16, before the fp8 cast.
         expected_k = (
             k.view(-1, MAIN_HK, MAIN_D)[valid].float() / main["main_k_scale"]
-        ).to(torch.float8_e4m3fnuz)
+        ).to(kv_cache.dtype)
         expected_v = (
             v.view(-1, MAIN_HK, MAIN_D)[valid].float() / main["main_v_scale"]
-        ).to(torch.float8_e4m3fnuz)
+        ).to(kv_cache.dtype)
         torch.testing.assert_close(q_out.flatten(1), q, rtol=RTOL, atol=ATOL)
         assert torch.equal(gate_out, gate)
 
@@ -205,7 +208,7 @@ def _check_main_outputs(main: dict, q_out, gate_out, rope, positions) -> None:
 
 @requires_qsa_kernels
 @pytest.mark.usefixtures("default_vllm_config")
-@pytest.mark.parametrize("main_fp8", [False, True])
+@pytest.mark.parametrize("main_fp8", [False, "fnuz", "ocp"])
 @pytest.mark.parametrize("indexer_dtype", [torch.bfloat16, torch.float8_e4m3fn])
 @pytest.mark.parametrize(
     "mrope,is_2d_positions,cache_rope_positions,state_size,seq_lens,query_lens,history_lens",

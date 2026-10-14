@@ -132,6 +132,7 @@ def _make_attn(*, use_fused: bool) -> SimpleNamespace:
     return SimpleNamespace(
         use_fused_qsa_prepare=use_fused,
         kv_cache=torch.zeros(1, 2, 16, 8),
+        kv_cache_dtype="auto",
         q_norm=GemmaRMSNorm(4, eps=1e-6),
         k_norm=GemmaRMSNorm(4, eps=1e-6),
         _k_scale_float=1.0,

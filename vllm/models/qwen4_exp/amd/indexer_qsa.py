@@ -311,6 +311,15 @@ class QSAIndexer(nn.Module):
             self.index_head_dim,
             dtype=self.indexer_dtype,
         )
+        main_kv_cache = attn.kv_cache.transpose(1, 2)
+        if attn.kv_cache_dtype in ("fp8", "fp8_e4m3"):
+            # Reinterpret the uint8 cache in the platform's native fp8 flavor
+            # (OCP on gfx950, FNUZ on gfx942), matching the C++ cache-update
+            # op and the attention backend's read-side views.
+            from vllm.platforms.rocm import on_gfx950
+
+            fp8_dtype = torch.float8_e4m3fn if on_gfx950() else torch.float8_e4m3fnuz
+            main_kv_cache = main_kv_cache.view(fp8_dtype)
         main_outputs = qsa_prepare(
             projected_q,
             raw_keys,
@@ -339,7 +348,7 @@ class QSAIndexer(nn.Module):
             main_q_norm_weight=attn.q_norm.weight,
             main_k_norm_weight=attn.k_norm.weight,
             main_eps=attn.q_norm.variance_epsilon,
-            main_kv_cache=attn.kv_cache.transpose(1, 2),
+            main_kv_cache=main_kv_cache,
             main_slot_mapping=slot_mapping[:num_tokens],
             main_k_scale=attn._k_scale_float,
             main_v_scale=attn._v_scale_float,
