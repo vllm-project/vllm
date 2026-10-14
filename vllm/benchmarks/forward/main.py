@@ -168,6 +168,7 @@ def run_case(runner, case: BenchCase, args: argparse.Namespace) -> dict[str, Any
         touched_kv_views(
             context, kv_config.kv_cache_groups, batch, kv_config.num_blocks, dcp_size
         ),
+        case.name,
         profile_prefix,
     )
     routing, balanced = install_routing(

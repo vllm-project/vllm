@@ -8,6 +8,11 @@ summary (`<case>.rank<r>.kernels.json`): per-kernel time per forward, sorted.
 
 Summarize one file or compare two (e.g. before/after a change):
 `python -m vllm.benchmarks.forward.profile A.kernels.json [B.kernels.json]`.
+
+The same replays run between `cudaProfilerStart`/`Stop` in an NVTX range per
+case (with or without `--profile-dir`), so Nsight Systems can record just them:
+`nsys profile --capture-range=cudaProfilerApi --capture-range-end=repeat
+--cuda-graph-trace=node vllm bench forward ...`.
 """
 
 import argparse
@@ -81,7 +86,12 @@ def summarize(events: list[dict], replays: int, skip: int) -> dict[str, Any]:
         (e for e in events if e.get("cat") in _GPU_CATEGORIES and "dur" in e),
         key=lambda e: e["ts"],
     )
-    if not acts or len(acts) % replays:
+    if not acts:
+        raise ValueError(
+            "No GPU activity recorded. Another profiler (e.g. nsys) may hold "
+            "CUPTI; don't combine --profile-dir with it."
+        )
+    if len(acts) % replays:
         raise ValueError(
             f"{len(acts)} GPU activities don't split into {replays} replays"
         )
@@ -130,16 +140,34 @@ def summarize(events: list[dict], replays: int, skip: int) -> dict[str, Any]:
 
 
 def profile_graph(
-    graph: torch.cuda.CUDAGraph, prefix: str, skip: int, replays: int = 3
-) -> dict[str, Any]:
-    """Trace `replays` replays; write `prefix.trace.json.gz` and
-    `prefix.kernels.json`. Every rank must call this (replays may contain
-    collectives)."""
+    graph: torch.cuda.CUDAGraph,
+    name: str,
+    prefix: str | None,
+    skip: int,
+    replays: int = 3,
+) -> dict[str, Any] | None:
+    """Replay `replays` times between `cudaProfilerStart`/`Stop`, in an NVTX
+    range named after the case, for `nsys --capture-range=cudaProfilerApi`.
+
+    With `prefix`, also trace them with `torch.profiler` and write
+    `prefix.trace.json.gz` and `prefix.kernels.json`. Every rank must call
+    this (replays may contain collectives).
+    """
+
+    def run() -> None:
+        torch.cuda.profiler.start()
+        with torch.cuda.nvtx.range(f"forward/{name}"):
+            for _ in range(replays):
+                graph.replay()
+                torch.accelerator.synchronize()
+        torch.cuda.profiler.stop()
+
+    if prefix is None:
+        run()
+        return None
     activities = [torch.profiler.ProfilerActivity.CUDA]
     with torch.profiler.profile(activities=activities) as prof:
-        for _ in range(replays):
-            graph.replay()
-            torch.accelerator.synchronize()
+        run()
     trace = f"{prefix}.trace.json.gz"
     prof.export_chrome_trace(trace)
     with gzip.open(trace, "rt") as f:
