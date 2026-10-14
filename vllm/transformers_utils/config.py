@@ -161,7 +161,7 @@ _CONFIG_REGISTRY: dict[str, type[PreTrainedConfig]] = LazyConfigDict(
     step3p5="Step3p5Config",
     qianfan_ocr="QianfanOCRConfig",
     qwen3_asr="Qwen3ASRConfig",
-    **{"unlimited-ocr": "UnlimitedOCRConfig"},
+    **{"unlimited-ocr": "UnlimitedOCRConfig", "unlimited_ocr": "UnlimitedOCRConfig"},
     **{"deepseek_v41": "DeepseekV41Config"},
     inkling_mm_model="InklingMMConfig",
     inkling_model="InklingModelConfig",
