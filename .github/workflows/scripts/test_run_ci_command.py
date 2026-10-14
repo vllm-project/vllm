@@ -144,6 +144,23 @@ class FakeGitHub:
         self.comments.append(body)
 
 
+class FakeBranchUpdater:
+    def __init__(self, github: FakeGitHub, error: ApiError | None = None) -> None:
+        self.calls: list[tuple[int, str]] = []
+        self.error = error
+        self.github = github
+
+    def update_branch(self, number: int, expected_head_sha: str) -> None:
+        self.calls.append((number, expected_head_sha))
+        if self.error:
+            raise self.error
+        self.github.prs[number] = {
+            **self.github.prs[number],
+            "head": {**self.github.prs[number]["head"], "sha": "merge-commit-sha"},
+        }
+        self.github.behind = 0
+
+
 class FakeBuildkite:
     def __init__(
         self,
@@ -615,6 +632,32 @@ class RunCiCommandTest(unittest.TestCase):
                             "No new CI build was started.", github.comments[0]
                         )
                         self.assertIn(command, github.comments[0])
+
+    def test_run_merges_base_into_outdated_branch_before_building(self) -> None:
+        github = FakeGitHub(behind=5)
+        updater = FakeBranchUpdater(github)
+        buildkite = FakeBuildkite([[], []])
+
+        with patch("run_ci_command.time.sleep"):
+            run(make_event(COMMAND_RUN_CI), github, buildkite, "", updater)
+
+        self.assertEqual(updater.calls, [(42, "0123456789abcdef")])
+        self.assertEqual(buildkite.created_builds[0]["commit"], "merge-commit-sha")
+        self.assertTrue(github.comments[0].startswith("✅ "))
+        self.assertIn("5 commits behind", github.comments[0])
+        self.assertIn("Merged upstream `main`", github.comments[0])
+
+    def test_run_reports_failed_merge_without_building(self) -> None:
+        github = FakeGitHub(behind=5)
+        updater = FakeBranchUpdater(github, error=ApiError(422, "merge conflict"))
+        buildkite = FakeBuildkite([[], []])
+
+        run(make_event(COMMAND_RUN_CI), github, buildkite, "", updater)
+
+        self.assertEqual(buildkite.created_builds, [])
+        self.assertTrue(github.comments[0].startswith("❌ "))
+        self.assertIn("merge conflict", github.comments[0])
+        self.assertIn("No new CI build was started.", github.comments[0])
 
     def test_allow_stale_preserves_author_permissions_and_run_configuration(
         self,
