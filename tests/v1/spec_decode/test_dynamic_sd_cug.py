@@ -34,8 +34,7 @@ def _create_vllm_config_for_dsd(
 
     By default the test uses an exact capture-size grid so that every valid
     uniform decode shape has a directly matching FULL graph candidate.
-    ``cudagraph_capture_sizes`` overrides that with an explicit ladder, which
-    is what a served config actually gets.
+    ``cudagraph_capture_sizes`` overrides that with an explicit ladder.
 
     ``num_spec_per_batch_size`` lets a test supply an explicit DSD schedule of
     ``(range_start, range_end, num_speculative_tokens)`` tuples. When omitted,
@@ -453,7 +452,7 @@ def test_dynamic_sd_tier_is_not_shadowed_on_a_strided_capture_ladder(monkeypatch
     max_decode_query_len = max_spec_tokens + 1
     # (range_start, range_end, num_speculative_tokens): query lengths 7, 5, 4.
     schedule = [(1, 8, 6), (9, 32, 4), (33, 128, 3)]
-    # The strided ladder a default config builds: 1, 2, 4, then step 8, then 16.
+    # The token-strided part of the default ladder: 1, 2, 4, step 8, then 16.
     capture_sizes = sorted({1, 2, 4} | set(range(8, 256, 8)) | set(range(256, 513, 16)))
 
     monkeypatch.setattr(
