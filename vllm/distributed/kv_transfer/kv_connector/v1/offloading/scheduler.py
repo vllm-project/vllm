@@ -1146,12 +1146,16 @@ class OffloadingConnectorScheduler:
     def update_state_after_alloc(
         self, request: Request, blocks: KVCacheBlocks, num_external_tokens: int
     ):
+        # Track allocated block IDs regardless of num_external_tokens so
+        # re-allocation flush detection sees blocks allocated by other
+        # connectors in a MultiConnector setup.
+        for group_blocks in blocks.blocks:
+            self._current_batch_allocated_block_ids.update(
+                block.block_id for block in group_blocks
+                if block.block_id != 0
+            )
+
         if num_external_tokens == 0:
-            for group_blocks in blocks.blocks:
-                self._current_batch_allocated_block_ids.update(
-                    block.block_id for block in group_blocks
-                    if block.block_id != 0
-                )
             return
 
         req_status = self._req_status[request.request_id]
@@ -1173,10 +1177,6 @@ class OffloadingConnectorScheduler:
             req_status.group_states,
         ):
             group_blocks = blocks.blocks[group_config.group_idx]
-            self._current_batch_allocated_block_ids.update(
-                block.block_id for block in group_blocks if block.block_id != 0
-            )
-
             tokens_per_block = group_config.tokens_per_block
             tokens_per_chunk = group_config.tokens_per_chunk
             offload_keys = group_state.offload_keys
