@@ -13,9 +13,14 @@ import math
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from aiter.ops.flydsl.kernels import buffer_ops
 from flydsl.expr import arith, const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr.typing import T
+
+from vllm.v1.attention.ops.flydsl_kernels.buffer_utils import (
+    buffer_view,
+    load_vec,
+    store_vec,
+)
 
 # === Constants (256-wide-head ultraquant decode profile) =======================
 HEAD_SIZE = 256
@@ -215,14 +220,14 @@ def build_ultraquant_decode_hd256_module(
         mfma_row = lane & 15
         mfma_col_grp = lane >> 4  # 0..3, K-group dim
 
-        # ---- Buffer resources -------------------------------------------
-        q_rsrc = buffer_ops.create_buffer_resource(query_ptr, max_size=True)
-        bt_rsrc = buffer_ops.create_buffer_resource(block_tables_ptr, max_size=True)
-        sl_rsrc = buffer_ops.create_buffer_resource(seq_lens_ptr, max_size=True)
-        cent_rsrc = buffer_ops.create_buffer_resource(centroids_ptr, max_size=True)
-        out_rsrc = buffer_ops.create_buffer_resource(out_ptr, max_size=True)
-        es_rsrc = buffer_ops.create_buffer_resource(exp_sums_ptr, max_size=True)
-        ml_rsrc = buffer_ops.create_buffer_resource(max_logits_ptr, max_size=True)
+        # ---- Buffer views -----------------------------------------------
+        q_buf = buffer_view(query_ptr, fx.Int32, 4)
+        bt_buf = buffer_view(block_tables_ptr, fx.Int32)
+        sl_buf = buffer_view(seq_lens_ptr, fx.Int32)
+        cent_buf = buffer_view(centroids_ptr, fx.Float32)
+        out_buf = buffer_view(out_ptr, fx.BFloat16, 4)
+        es_buf = buffer_view(exp_sums_ptr, fx.Float32)
+        ml_buf = buffer_view(max_logits_ptr, fx.Float32)
 
         # ---- LDS pointers -----------------------------------------------
         lds = fx.SharedAllocator().allocate(SharedStorage).peek()
@@ -255,8 +260,7 @@ def build_ultraquant_decode_hd256_module(
 
         # ===== STEP A: Load centroids → LDS (cooperative, race-safe) =====
         c_idx_safe = lane & (N_CENTROIDS - 1)
-        c_val = buffer_ops.buffer_load(cent_rsrc, c_idx_safe, vec_width=1, dtype=T.f32)
-        cent_lds[c_idx_safe] = c_val
+        cent_lds[c_idx_safe] = fx.Float32(cent_buf[c_idx_safe])
         gpu.barrier()
 
         # ===== STEP B': in-kernel Q rotation (fused WHT) ==================
@@ -300,13 +304,8 @@ def build_ultraquant_decode_hd256_module(
                     # ---- load this lane's 32 raw-Q head-dims (4 x dwordx4) ----
                     _v = []
                     for _j in range_constexpr(4):
-                        _raw = buffer_ops.buffer_load(
-                            q_rsrc,
-                            (_qb + _j * 8) // 2,
-                            vec_width=4,
-                            dtype=T.i32,
-                        )
-                        _rb = fx.Vector(_raw).bitcast(fx.BFloat16)
+                        _raw = load_vec(q_buf, (_qb + _j * 8) // 2, 4)
+                        _rb = _raw.bitcast(fx.BFloat16)
                         for _e in range_constexpr(8):
                             _v.append(_rb[_e].to(fx.Float32))
                     # ---- stages 0..4: in-register, no LDS, no cross-lane ----
@@ -383,12 +382,7 @@ def build_ultraquant_decode_hd256_module(
             q_off_elem = (
                 seq * _stride_q_seq + (kv_h * QG + row) * _stride_q_head + col_elem
             )
-            q_v = buffer_ops.buffer_load(
-                q_rsrc,
-                q_off_elem // 2,
-                vec_width=4,
-                dtype=T.i32,
-            )
+            q_v = load_vec(q_buf, q_off_elem // 2, 4)
             q_lds_byte = row * (HEAD_SIZE * 2) + col_elem * 2
             (q_lds_i32 + q_lds_byte // 4).store(q_v)
         gpu.barrier()
@@ -420,7 +414,7 @@ def build_ultraquant_decode_hd256_module(
         acc_pv = [zero_v4 for _ in range(PV_N_CHUNKS)]
 
         # ===== STEP E: Sequence-len + partition base ====================
-        seq_len = buffer_ops.buffer_load(sl_rsrc, seq, vec_width=1, dtype=T.i32)
+        seq_len = fx.Int32(sl_buf[seq])
 
         # Per-K-tile dequant lane assignment: lane t -> token = t/4,
         # chunk_in_tok = t%4 (each chunk = SUBCHUNK_HDIMS=64 head-dims = 2 groups).
@@ -457,7 +451,7 @@ def build_ultraquant_decode_hd256_module(
             # latency (the decode kernel is ~85% HBM-stalled at low batch).
             # This is bit-identical to the pre-prefetch path -- only the
             # *emission order* of independent loads changes, never any
-            # arithmetic. All addressing locals (slot_base_byte, blk_rsrc,
+            # arithmetic. All addressing locals (slot_base_byte, blk_buf,
             # ...) are consumed only inside this closure; the dequant below
             # needs just the four returned register values.
             def _emit_tile_loads(n_tile, partition_start, bt_seq_base):
@@ -468,22 +462,14 @@ def build_ultraquant_decode_hd256_module(
                 tile_in_seq = tile_start_tok < seq_len
                 bt_off = bt_seq_base + block_in_part
                 bt_off_safe = tile_in_seq.select(bt_off, seq * _stride_bt_seq)
-                phys_block = buffer_ops.buffer_load(
-                    bt_rsrc,
-                    bt_off_safe,
-                    vec_width=1,
-                    dtype=T.i32,
-                )
+                phys_block = fx.Int32(bt_buf[bt_off_safe])
                 # A buffer descriptor addresses with a 32-bit voffset, so
                 # ``phys_block * c_block`` wraps once the cache view exceeds
                 # 4 GiB. Fold the block base into the descriptor's 64-bit
                 # base pointer and keep only in-block offsets below.
                 blk_off_i64 = fx.Int64(fx.Uint32(phys_block)) * _stride_cache_block
-                blk_rsrc = buffer_ops.create_buffer_resource(
-                    kv_cache_ptr,
-                    max_size=True,
-                    base_byte_offset=blk_off_i64,
-                )
+                blk_buf4 = buffer_view(kv_cache_ptr, fx.Int32, 4, blk_off_i64)
+                blk_buf = buffer_view(kv_cache_ptr, fx.Int32, 1, blk_off_i64)
 
                 slot_base_byte = slot * _stride_cache_pos + kv_h * _stride_cache_head
                 # K codes: LANE_CODE_BYTES (=32) at slot_base + chunk*32, in
@@ -492,13 +478,7 @@ def build_ultraquant_decode_hd256_module(
                 _kpl = []
                 for hf in range_constexpr(HALVES):
                     _kpl.append(
-                        buffer_ops.buffer_load(
-                            blk_rsrc,
-                            (k_byte0 + hf * 16) // 4,
-                            vec_width=4,
-                            dtype=T.i32,
-                            cache_modifier=_KV_AUX,
-                        )
+                        load_vec(blk_buf4, (k_byte0 + hf * 16) // 4, 4, _KV_AUX)
                     )
 
                 # ---- V codes + K/V scale HBM loads ------------------------
@@ -508,28 +488,16 @@ def build_ultraquant_decode_hd256_module(
                 _vpl = []
                 for hf in range_constexpr(HALVES):
                     _vpl.append(
-                        buffer_ops.buffer_load(
-                            blk_rsrc,
-                            (v_byte0 + hf * 16) // 4,
-                            vec_width=4,
-                            dtype=T.i32,
-                            cache_modifier=_KV_AUX,
-                        )
+                        load_vec(blk_buf4, (v_byte0 + hf * 16) // 4, 4, _KV_AUX)
                     )
                 # UE8M0 group scale words (one 4-byte word covers this lane's
                 # two groups). scale = 2^(byte-127) = bitcast_f32(byte<<23);
                 # byte==0 -> +0.0 (zero sentinel).
-                _ksw = buffer_ops.buffer_load(
-                    blk_rsrc,
-                    (slot_base_byte + K_SCALES_OFFSET + c_scale_word_off) // 4,
-                    vec_width=1,
-                    dtype=T.i32,
+                _ksw = fx.Uint32(
+                    blk_buf[(slot_base_byte + K_SCALES_OFFSET + c_scale_word_off) // 4]
                 )
-                _vsw = buffer_ops.buffer_load(
-                    blk_rsrc,
-                    (slot_base_byte + V_SCALES_OFFSET + c_scale_word_off) // 4,
-                    vec_width=1,
-                    dtype=T.i32,
+                _vsw = fx.Uint32(
+                    blk_buf[(slot_base_byte + V_SCALES_OFFSET + c_scale_word_off) // 4]
                 )
                 return (_kpl, _vpl, _ksw, _vsw)
 
@@ -698,15 +666,10 @@ def build_ultraquant_decode_hd256_module(
 
         if mfma_row < QG:
             for h in range_constexpr(PV_N_CHUNKS):
-                pv_i32x2 = (acc_pv[h] * rcp).to(fx.BFloat16).bitcast(fx.Int32)
+                pv_bf16x4 = (acc_pv[h] * rcp).to(fx.BFloat16)
                 head_dim_start = mfma_col_grp * 4 + h * 16
                 out_off_elem = out_base + mfma_row * HEAD_SIZE + head_dim_start
-                buffer_ops.buffer_store(
-                    pv_i32x2,
-                    out_rsrc,
-                    out_off_elem * 2,
-                    offset_is_bytes=True,
-                )
+                store_vec(out_buf, out_off_elem, pv_bf16x4, 4)
 
             ml_off = (
                 seq * _stride_ml_seq
@@ -720,7 +683,7 @@ def build_ultraquant_decode_hd256_module(
                 + part * QG
                 + mfma_row
             )
-            buffer_ops.buffer_store(running_max, ml_rsrc, ml_off)
-            buffer_ops.buffer_store(running_sum, es_rsrc, es_off)
+            ml_buf[ml_off] = running_max
+            es_buf[es_off] = running_sum
 
     return ultraquant_decode_hd256_kernel
