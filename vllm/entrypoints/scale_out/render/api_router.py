@@ -4,6 +4,7 @@ from http import HTTPStatus
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
+from prometheus_client import Counter
 
 from vllm.entrypoints.anthropic.protocol import AnthropicMessagesRequest
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
@@ -19,6 +20,28 @@ from .serving import ServingRender
 logger = init_logger(__name__)
 
 router = APIRouter()
+_tool_call_render_requests: Counter | None = None
+
+
+def _tool_render_counter(
+    request: ChatCompletionRequest | AnthropicMessagesRequest,
+) -> Counter | None:
+    if not any(
+        field in request.model_fields_set and getattr(request, field, None) is not None
+        for field in ("tools", "tool_choice", "parallel_tool_calls")
+    ):
+        return None
+
+    global _tool_call_render_requests
+    if _tool_call_render_requests is None:
+        _tool_call_render_requests = Counter(
+            "vllm:tool_call_render_requests_total",
+            "Validated tool-field requests handled by HTTP render endpoints, "
+            "counted once per request. "
+            "Rendered means rendering succeeded, not template equivalence.",
+            ["model_name", "api_surface", "status"],
+        )
+    return _tool_call_render_requests
 
 
 def render(request: Request) -> ServingRender | None:
@@ -43,7 +66,19 @@ async def render_chat_completion(request: ChatCompletionRequest, raw_request: Re
             "The model does not support Chat Completions Render API"
         )
 
-    result = await handler.render_chat_request(request, raw_request)
+    counter = _tool_render_counter(request)
+    status = "error"
+    try:
+        result = await handler.render_chat_request(request, raw_request)
+        if not isinstance(result, ErrorResponse):
+            status = "rendered"
+    finally:
+        if counter is not None:
+            counter.labels(
+                model_name=handler.model_config.model,
+                api_surface="chat_completions",
+                status=status,
+            ).inc()
 
     if isinstance(result, ErrorResponse):
         return JSONResponse(content=result.model_dump(), status_code=result.error.code)
@@ -67,7 +102,19 @@ async def render_messages(request: AnthropicMessagesRequest, raw_request: Reques
     if handler is None:
         raise NotImplementedError("The model does not support Messages Render API")
 
-    result = await handler.render_messages_request(request, raw_request)
+    counter = _tool_render_counter(request)
+    status = "error"
+    try:
+        result = await handler.render_messages_request(request, raw_request)
+        if not isinstance(result, ErrorResponse):
+            status = "rendered"
+    finally:
+        if counter is not None:
+            counter.labels(
+                model_name=handler.model_config.model,
+                api_surface="messages",
+                status=status,
+            ).inc()
 
     if isinstance(result, ErrorResponse):
         return JSONResponse(content=result.model_dump(), status_code=result.error.code)
