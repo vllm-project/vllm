@@ -6,7 +6,6 @@
 
 use std::sync::Arc;
 
-use itertools::izip;
 use llm_multimodal::{
     FieldLayout, Modality, PreprocessedEncoderInputs, PromptReplacement, VideoClip,
 };
@@ -18,11 +17,9 @@ use vllm_engine_core_client::protocol::multimodal::{
     SliceSpec,
 };
 
-use super::cache::{CacheLookup, MmProcessorCache, merge_slots, put_or_inline_and_track};
+use super::cache::{CacheSlot, MmProcessorCache};
 use super::timing::MM_STAGE_TARGET;
-use super::{
-    ItemSource, MultimodalModelInfo, PreparedItem, PreparedMedia, VisionModalitySupport, tensor,
-};
+use super::{MultimodalModelInfo, PreparedItem, PreparedMedia, VisionModalitySupport, tensor};
 use crate::error::{Error, Result, bail_multimodal, multimodal};
 
 /// Forward-kwargs name of the primary video encoder input.
@@ -39,12 +36,9 @@ impl MultimodalModelInfo {
     /// (a batch of one), so its tensors are complete per item and need no
     /// cross-item slicing.
     ///
-    /// With the SHM processor cache enabled, cached clips skip preprocessing
-    /// entirely: their prompt replacements come from the cache shadow and
-    /// their feature data is the shm address item.
-    ///
-    /// A clip carrying a client UUID is keyed by that UUID instead of its
-    /// content hash, and its `mm_hash` is the UUID.
+    /// Cache control flow lives in [`cache::prepare_cached`]: `Ready` slots
+    /// (UUID references and content-hash hits) skip preprocessing entirely;
+    /// misses are preprocessed here per clip.
     #[tracing::instrument(
         name = "mm_stage",
         target = MM_STAGE_TARGET,
@@ -53,7 +47,7 @@ impl MultimodalModelInfo {
     )]
     pub(super) async fn prepare_videos(
         &self,
-        sources: Vec<ItemSource<Arc<VideoClip>>>,
+        sources: Vec<CacheSlot<Arc<VideoClip>>>,
         cache: Option<&MmProcessorCache>,
         model_dtype: ModelDtype,
     ) -> Result<PreparedMedia> {
@@ -61,47 +55,14 @@ impl MultimodalModelInfo {
             modality: Modality::Video.to_string(),
         })?;
 
-        let mut slots = Vec::with_capacity(sources.len());
-        let mut miss_clips = Vec::new();
-        let mut miss_uuids = Vec::new();
-        let mut miss_keys = Vec::new();
-        for source in sources {
-            let (clip, uuid) = match source {
-                ItemSource::Cached(item, replacement) => {
-                    slots.push(Some((item, replacement)));
-                    continue;
-                }
-                ItemSource::Fetch(clip, uuid) => (clip, uuid),
-            };
-            let mm_hash = match (cache, &uuid) {
-                (Some(_), Some(uuid)) => uuid.clone(),
-                _ => clip.hash.clone(),
-            };
-            let lookup = match cache {
-                Some(cache) => cache.lookup(&mm_hash, uuid),
-                None => CacheLookup::Miss(uuid),
-            };
-            match lookup {
-                CacheLookup::Hit(item, replacement) => slots.push(Some((item, replacement))),
-                CacheLookup::Miss(uuid) => {
-                    slots.push(None);
-                    miss_keys.push(mm_hash);
-                    miss_clips.push(clip);
-                    miss_uuids.push(uuid);
-                }
+        let (replacements, items) = super::cache::prepare_cached(cache, sources, async |misses| {
+            let mut computed = Vec::with_capacity(misses.len());
+            for (clip, uuid) in misses {
+                computed.push(self.preprocess_video_item(support, clip, uuid, model_dtype).await?);
             }
-        }
-
-        let mut misses = Vec::with_capacity(miss_clips.len());
-        for (clip, uuid, key) in izip!(miss_clips, miss_uuids, miss_keys) {
-            let (replacement, mut item) =
-                self.preprocess_video_item(support, clip, uuid, model_dtype).await?;
-            item.data =
-                put_or_inline_and_track(cache, &key, &replacement, std::mem::take(&mut item.data));
-            item.hash = key;
-            misses.push((item, replacement));
-        }
-        let (replacements, items) = merge_slots(slots, misses);
+            Ok(computed.into_iter().unzip())
+        })
+        .await?;
 
         Ok(PreparedMedia {
             modality: Modality::Video,

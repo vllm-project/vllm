@@ -11,12 +11,14 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use llm_multimodal::PromptReplacement;
+use itertools::izip;
+use llm_multimodal::{MediaContentPart, Modality, PromptReplacement};
 use parking_lot::Mutex;
 use vllm_engine_core_client::mm_cache::MmProcessorShmCache;
 use vllm_engine_core_client::protocol::multimodal::MmKwargsItem;
 
 use super::{PreparedItem, VisionModalitySupport};
+use crate::error::{Result, bail_mm_uuid_reference};
 
 /// Vision processors whose preprocessing output depends on the per-request
 /// `VisionPreprocessingContext` (today: only Nemotron-H Omni's
@@ -61,9 +63,8 @@ pub(crate) struct MmProcessorCache {
 pub(super) enum CacheLookup {
     /// Cache hit: the address item plus the shadowed prompt replacement.
     Hit(PreparedItem, PromptReplacement),
-    /// Cache miss: preprocess on the miss path. Carries back the request UUID
-    /// passed to `lookup`.
-    Miss(Option<String>),
+    /// Cache miss: preprocess on the miss path.
+    Miss,
 }
 
 impl MmProcessorCache {
@@ -106,7 +107,7 @@ impl MmProcessorCache {
     pub(super) fn lookup(&self, key: &str, uuid: Option<String>) -> CacheLookup {
         let replacement = self.shadow.lock().get(key).cloned();
         let Some(replacement) = replacement else {
-            return CacheLookup::Miss(uuid);
+            return CacheLookup::Miss;
         };
         match self.shm.address_item_for_cached(key) {
             Some(data) => CacheLookup::Hit(
@@ -117,7 +118,7 @@ impl MmProcessorCache {
                 },
                 replacement,
             ),
-            None => CacheLookup::Miss(uuid),
+            None => CacheLookup::Miss,
         }
     }
 
@@ -131,14 +132,10 @@ impl MmProcessorCache {
     ///
     /// On a hit the returned [`PreparedItem`] carries the UUID as its `hash`
     /// (Python parity: `hashes.append(uuid_item)`).
-    pub(super) fn lookup_uuid(
-        &self,
-        key: &str,
-        uuid: &str,
-    ) -> Option<(PreparedItem, PromptReplacement)> {
-        let replacement = self.shadow.lock().get(key).cloned()?;
-        self.touch(key);
-        let data = self.shm.address_item_for_cached(key)?;
+    pub(super) fn lookup_uuid(&self, uuid: &str) -> Option<(PreparedItem, PromptReplacement)> {
+        let replacement = self.shadow.lock().get(uuid).cloned()?;
+        self.touch(uuid);
+        let data = self.shm.address_item_for_cached(uuid)?;
         Some((
             PreparedItem {
                 data,
@@ -189,6 +186,226 @@ impl Drop for TouchesGuard<'_> {
     fn drop(&mut self) {
         self.0.release_touches();
     }
+}
+
+/// Fetched media carrying its raw-content hash, used for cache keying.
+pub(super) trait HashedMedia {
+    fn content_hash(&self) -> &str;
+}
+
+macro_rules! impl_hashed_media {
+    ($($ty:ty),*) => {$(
+        impl HashedMedia for $ty {
+            fn content_hash(&self) -> &str {
+                &self.hash
+            }
+        }
+    )*};
+}
+
+impl_hashed_media!(
+    llm_multimodal::ImageFrame,
+    llm_multimodal::VideoClip,
+    llm_multimodal::AudioClip
+);
+
+impl<T: HashedMedia + ?Sized> HashedMedia for Arc<T> {
+    fn content_hash(&self) -> &str {
+        (**self).content_hash()
+    }
+}
+
+/// One media item routed through the cache pipeline.
+pub(super) enum CacheSlot<M> {
+    /// Resolved without compute: a UUID reference or content-hash hit.
+    Ready(PreparedItem, PromptReplacement),
+    /// Fetched media pending preprocessing, with its request UUID.
+    Pending(M, Option<String>),
+}
+
+/// One media item after UUID resolution.
+pub(super) enum UuidSlot {
+    /// Pre-fetch cache hit.
+    Ready(PreparedItem, PromptReplacement),
+    /// Must be fetched and preprocessed; carries the request UUID.
+    Fetch(Option<String>),
+}
+
+/// Media items after resolving UUID cache references: per-modality slots (one
+/// per item, in request order) plus the parts that still need fetching.
+pub(super) struct UuidPartition {
+    pub(super) slots: HashMap<Modality, Vec<UuidSlot>>,
+    pub(super) fetch_parts: Vec<MediaContentPart>,
+}
+
+/// The client UUID, content presence, and modality of one media part.
+///
+/// Returns `None` for text parts. "No content" means an empty `url` or empty
+/// `data`, i.e. a pure UUID cache reference that is never fetched.
+fn media_part_identity(part: &MediaContentPart) -> Option<(Option<&str>, bool, Modality)> {
+    match part {
+        MediaContentPart::Text { .. } => None,
+        MediaContentPart::ImageUrl { url, uuid, .. } => {
+            Some((uuid.as_deref(), !url.is_empty(), Modality::Image))
+        }
+        MediaContentPart::ImageData { data, uuid, .. } => {
+            Some((uuid.as_deref(), !data.is_empty(), Modality::Image))
+        }
+        MediaContentPart::ImageEmbeds { uuid, .. } => {
+            Some((uuid.as_deref(), true, Modality::Image))
+        }
+        MediaContentPart::AudioUrl { url, uuid, .. } => {
+            Some((uuid.as_deref(), !url.is_empty(), Modality::Audio))
+        }
+        MediaContentPart::AudioData { data, uuid, .. } => {
+            Some((uuid.as_deref(), !data.is_empty(), Modality::Audio))
+        }
+        MediaContentPart::VideoUrl { url, uuid, .. } => {
+            Some((uuid.as_deref(), !url.is_empty(), Modality::Video))
+        }
+        MediaContentPart::VideoData { data, uuid, .. } => {
+            Some((uuid.as_deref(), !data.is_empty(), Modality::Video))
+        }
+    }
+}
+
+/// Resolve client-supplied UUIDs against the cache before any fetch,
+/// mirroring Python's `mm_uuids` handling: the UUID (not the content hash)
+/// keys the item, and a UUID part without content is a pure cache reference
+/// that is never fetched.
+///
+/// `budget_sensitive_images` reports whether the model's image processor
+/// output depends on the per-request token budget; such images bypass the
+/// cache entirely, so UUID references for them are rejected.
+pub(super) fn resolve_uuid_references<'a>(
+    cache_for: impl Fn(Modality) -> Option<&'a MmProcessorCache>,
+    budget_sensitive_images: bool,
+    media_parts: Vec<MediaContentPart>,
+) -> Result<UuidPartition> {
+    let mut slots: HashMap<Modality, Vec<UuidSlot>> = HashMap::new();
+    let mut fetch_parts = Vec::new();
+    for part in media_parts {
+        let Some((uuid, has_content, modality)) = media_part_identity(&part) else {
+            continue;
+        };
+        let modality_slots = slots.entry(modality).or_default();
+        let index = modality_slots.len();
+
+        match (cache_for(modality), uuid) {
+            (Some(cache), Some(uuid)) => {
+                if let Some((item, replacement)) = cache.lookup_uuid(uuid) {
+                    modality_slots.push(UuidSlot::Ready(item, replacement));
+                    continue;
+                }
+                if !has_content {
+                    bail_mm_uuid_reference!(
+                        "Cache miss for {modality} at index {index} but data is not provided."
+                    );
+                }
+                modality_slots.push(UuidSlot::Fetch(Some(uuid.to_owned())));
+                fetch_parts.push(part);
+            }
+            (None, Some(_)) if !has_content => {
+                if modality == Modality::Image && budget_sensitive_images {
+                    bail_mm_uuid_reference!(
+                        "{modality} part at index {index} carries a UUID but no content, \
+                         and cache references are not supported for this model: its image \
+                         preprocessing depends on the per-request token budget and bypasses \
+                         the SHM multimodal processor cache"
+                    );
+                }
+                bail_mm_uuid_reference!(
+                    "{modality} part at index {index} carries a UUID but no content, \
+                     which requires the SHM multimodal processor cache \
+                     (--mm-processor-cache-type shm)"
+                );
+            }
+            _ => {
+                modality_slots.push(UuidSlot::Fetch(uuid.map(str::to_owned)));
+                fetch_parts.push(part);
+            }
+        }
+    }
+    Ok(UuidPartition { slots, fetch_parts })
+}
+
+/// Attach fetched media to its fetch slots, producing cache slots for
+/// [`prepare_cached`].
+pub(super) fn attach_fetched<M: HashedMedia>(
+    slots: Vec<UuidSlot>,
+    fetched: impl IntoIterator<Item = M>,
+) -> Vec<CacheSlot<M>> {
+    let mut fetched = fetched.into_iter();
+    slots
+        .into_iter()
+        .map(|slot| match slot {
+            UuidSlot::Ready(item, replacement) => CacheSlot::Ready(item, replacement),
+            UuidSlot::Fetch(uuid) => CacheSlot::Pending(
+                fetched.next().expect("tracker output aligns with fetched parts"),
+                uuid,
+            ),
+        })
+        .collect()
+}
+
+/// Drive one modality's prepare through the cache.
+///
+/// `Ready` slots (UUID references resolved before fetch) pass through.
+/// `Pending` items are looked up by their cache key — the client UUID when
+/// supplied, otherwise the content hash — so only true misses reach
+/// `compute`; computed misses are put into shm and shadowed. The result stays
+/// index-aligned with `sources` for placeholder expansion.
+pub(super) async fn prepare_cached<M: HashedMedia>(
+    cache: Option<&MmProcessorCache>,
+    sources: Vec<CacheSlot<M>>,
+    compute: impl AsyncFnOnce(
+        Vec<(M, Option<String>)>,
+    ) -> Result<(Vec<PromptReplacement>, Vec<PreparedItem>)>,
+) -> Result<(Vec<PromptReplacement>, Vec<PreparedItem>)> {
+    let mut slots: Vec<Option<(PreparedItem, PromptReplacement)>> =
+        Vec::with_capacity(sources.len());
+    let mut pending = Vec::new();
+    let mut pending_keys = Vec::new();
+    for source in sources {
+        let (media, uuid) = match source {
+            CacheSlot::Ready(item, replacement) => {
+                slots.push(Some((item, replacement)));
+                continue;
+            }
+            CacheSlot::Pending(media, uuid) => (media, uuid),
+        };
+        let key = match (cache, &uuid) {
+            (Some(_), Some(uuid)) => uuid.clone(),
+            _ => media.content_hash().to_owned(),
+        };
+        let lookup = match cache {
+            Some(cache) => cache.lookup(&key, uuid.clone()),
+            None => CacheLookup::Miss,
+        };
+        match lookup {
+            CacheLookup::Hit(item, replacement) => slots.push(Some((item, replacement))),
+            CacheLookup::Miss => {
+                slots.push(None);
+                pending_keys.push(key);
+                pending.push((media, uuid));
+            }
+        }
+    }
+
+    let mut misses = Vec::with_capacity(pending.len());
+    if !pending.is_empty() {
+        let (replacements, mut items) = compute(pending).await?;
+        for (key, item, replacement) in izip!(&pending_keys, &mut items, &replacements) {
+            // UUID-keyed items report the UUID as `mm_hash` (Python parity:
+            // `hashes.append(uuid_item)`); for content-keyed items this is a
+            // no-op.
+            item.hash = key.clone();
+            item.data =
+                put_or_inline_and_track(cache, key, replacement, std::mem::take(&mut item.data));
+        }
+        misses = izip!(items, replacements).collect();
+    }
+    Ok(merge_slots(slots, misses))
 }
 
 /// Put a miss item into the SHM cache when enabled, keeping the inline data
@@ -321,7 +538,7 @@ pub(crate) mod tests {
         let sent = cache.put_or_inline_and_track("hash-a", &test_replacement(), item.clone());
         assert_eq!(sent, item, "before set_n_readers the item goes inline");
         assert!(
-            matches!(cache.lookup("hash-a", None), CacheLookup::Miss(None)),
+            matches!(cache.lookup("hash-a", None), CacheLookup::Miss),
             "before set_n_readers nothing is cached"
         );
     }
@@ -353,7 +570,7 @@ pub(crate) mod tests {
 
         assert!(matches!(
             cache.lookup("hash-c", Some("uuid-2".into())),
-            CacheLookup::Miss(Some(uuid)) if uuid == "uuid-2"
+            CacheLookup::Miss
         ));
     }
 
@@ -448,7 +665,6 @@ pub(crate) mod tests {
                 &mut tokens_first,
                 ModelDtype::Float32,
                 None,
-                true,
             )
             .await
             .expect("first image prepare should succeed");
@@ -466,7 +682,6 @@ pub(crate) mod tests {
                 &mut tokens_second,
                 ModelDtype::Float32,
                 None,
-                true,
             )
             .await
             .expect("second image prepare should succeed");
@@ -520,7 +735,6 @@ pub(crate) mod tests {
                 &mut tokens_first,
                 ModelDtype::Float32,
                 None,
-                true,
             )
             .await
             .expect("first image prepare should succeed");
@@ -542,7 +756,6 @@ pub(crate) mod tests {
                 &mut tokens_second,
                 ModelDtype::Float32,
                 None,
-                true,
             )
             .await
             .expect("a UUID cache reference should resolve without fetching");
@@ -584,7 +797,6 @@ pub(crate) mod tests {
                 &mut tokens_first,
                 ModelDtype::Float32,
                 None,
-                true,
             )
             .await
             .expect("first image prepare should succeed");
@@ -600,7 +812,6 @@ pub(crate) mod tests {
                 &mut tokens_second,
                 ModelDtype::Float32,
                 None,
-                true,
             )
             .await
             .expect("a UUID cache hit should skip fetching unreachable content");
@@ -632,7 +843,6 @@ pub(crate) mod tests {
                 &mut vec![1, QWEN3_IMAGE_PAD_ID, 2],
                 ModelDtype::Float32,
                 None,
-                true,
             )
             .await
             .expect_err("a UUID reference without cached data must fail");
@@ -663,7 +873,6 @@ pub(crate) mod tests {
                 &mut vec![1, QWEN3_IMAGE_PAD_ID, 2],
                 ModelDtype::Float32,
                 None,
-                true,
             )
             .await
             .expect_err("a UUID reference without the cache must fail");
@@ -705,7 +914,6 @@ pub(crate) mod tests {
                     &mut tokens,
                     ModelDtype::Float32,
                     max_model_len,
-                    true,
                 )
                 .await
                 .expect("budget-sensitive image prepare should succeed");
@@ -741,7 +949,6 @@ pub(crate) mod tests {
                 &mut vec![11, NEMOTRON_IMAGE_ID],
                 ModelDtype::Float32,
                 Some(512),
-                true,
             )
             .await
             .expect_err("budget-sensitive models reject UUID cache references");

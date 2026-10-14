@@ -69,6 +69,11 @@ use vllm_text::{Prompt, TextLlm, TextRequest, TextRequestProcessor};
 /// Chat request preparation shared by inference and render-only frontends.
 pub struct ChatRequestProcessor {
     backend: DynChatBackend,
+    /// Multimodal pipeline without the SHM processor cache, used by the
+    /// /tokenize path: tokenization never submits to the engine, so no worker
+    /// would read the shm chunks and cached puts would leak writer references
+    /// (Python uses a separate processor-only cache for tokenize).
+    tokenize_mm_model_info: Option<multimodal::MultimodalModelInfo>,
     /// Effective model dtype reported by the engine.
     /// Absent for text-only frontends without an engine handshake.
     model_dtype: Option<ModelDtype>,
@@ -87,8 +92,12 @@ impl ChatRequestProcessor {
     /// Create a processor with multimodal support using the effective model
     /// dtype reported by the engine.
     fn new(backend: DynChatBackend, model_dtype: ModelDtype, max_model_len: u32) -> Self {
+        let tokenize_mm_model_info = backend
+            .multimodal_model_info()
+            .map(|info| info.clone().with_mm_processor_cache(None));
         Self {
             backend,
+            tokenize_mm_model_info,
             model_dtype: Some(model_dtype),
             max_model_len: Some(max_model_len as usize),
             tool_call_parser: ParserSelection::Auto,
@@ -101,6 +110,7 @@ impl ChatRequestProcessor {
     pub fn render_only(backend: DynChatBackend) -> Self {
         Self {
             backend,
+            tokenize_mm_model_info: None,
             model_dtype: None,
             max_model_len: None,
             tool_call_parser: ParserSelection::Auto,
@@ -130,7 +140,7 @@ impl ChatRequestProcessor {
         &self,
         request: &ChatRequest,
         rendered: RenderedPrompt,
-        use_mm_cache: bool,
+        mm_info: Option<&multimodal::MultimodalModelInfo>,
     ) -> Result<(Prompt, Option<MmFeatures>)> {
         let media_is_empty = match &rendered.media_order {
             Some(media_order) => media_order.is_empty(),
@@ -141,10 +151,9 @@ impl ChatRequestProcessor {
                 multimodal::finalize_rendered_prompt(
                     request,
                     rendered,
-                    self.backend.multimodal_model_info(),
+                    mm_info,
                     model_dtype,
                     self.max_model_len,
-                    use_mm_cache,
                 )
                 .await
             }
@@ -171,7 +180,7 @@ impl ChatRequestProcessor {
                 let model_dtype = self.model_dtype.ok_or(Error::UnsupportedMultimodalRenderer)?;
                 // This path always submits to the engine, so the shm cache
                 // stays enabled.
-                info.prepare_multimodal(parts, token_ids, model_dtype, self.max_model_len, true)
+                info.prepare_multimodal(parts, token_ids, model_dtype, self.max_model_len)
                     .await?
             }
             multimodal::MultimodalInput::Preprocessed(features) => {
@@ -184,7 +193,7 @@ impl ChatRequestProcessor {
     async fn prepare_text_request(
         &self,
         request: ChatRequest,
-        use_mm_cache: bool,
+        mm_info: Option<&multimodal::MultimodalModelInfo>,
     ) -> Result<TextRequest> {
         // Stamp before rendering so render and tokenize count toward TTFT/e2e.
         let arrival_time = vllm_llm::current_unix_timestamp_secs();
@@ -196,7 +205,7 @@ impl ChatRequestProcessor {
         .map_err(|e| Error::ChatTemplate(format!("render task join error: {e}")))??;
         let chat_template_kwargs = std::mem::take(&mut rendered.effective_template_kwargs);
         let (prompt, mm_features) =
-            self.finalize_rendered_prompt(&request, rendered, use_mm_cache).await?;
+            self.finalize_rendered_prompt(&request, rendered, mm_info).await?;
         Ok(TextRequest {
             request_id: request.request_id,
             prompt,
@@ -222,13 +231,11 @@ impl ChatRequestProcessor {
 
     /// Prepare one chat request for tokenization without constructing an output processor.
     ///
-    /// Tokenization never submits to the engine, so the SHM multimodal
-    /// processor cache is bypassed: no worker would read the shm chunks, and
-    /// cached puts would leak writer references (Python uses a separate
-    /// processor-only cache for tokenize).
+    /// Runs on the cacheless multimodal pipeline
+    /// (`Self::tokenize_mm_model_info`); see its doc comment.
     pub async fn prepare_for_tokenization(&self, request: ChatRequest) -> Result<TextRequest> {
         request.validate()?;
-        self.prepare_text_request(request, false).await
+        self.prepare_text_request(request, self.tokenize_mm_model_info.as_ref()).await
     }
 
     /// Prepare one chat request without submitting it to an engine.
@@ -252,7 +259,8 @@ impl ChatRequestProcessor {
                 tool_strict_level: self.tool_strict_level,
             },
         )?;
-        let mut text_request = self.prepare_text_request(request, true).await?;
+        let mut text_request =
+            self.prepare_text_request(request, self.backend.multimodal_model_info()).await?;
 
         // Initialize the output processor from the final prompt token IDs and apply
         // the output grammar to the request, if any.

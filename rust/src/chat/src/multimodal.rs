@@ -34,7 +34,7 @@ use vllm_engine_core_client::protocol::multimodal::{MmFeatureSpec, MmFeatures, M
 use vllm_text::Prompt;
 use vllm_text::tokenizer::{DynTokenizer, Tokenizer};
 
-use crate::error::{Error, Result, bail_mm_uuid_reference, bail_multimodal, multimodal};
+use crate::error::{Error, Result, bail_multimodal, multimodal};
 use crate::renderer::{MediaPartSource, RenderedPrompt};
 use crate::request::{ChatContent, ChatContentPart, ChatMessage, ChatRequest};
 
@@ -330,6 +330,29 @@ struct FetchedMedia {
     audio_uuids: Vec<Option<String>>,
 }
 
+impl FetchedMedia {
+    /// Every fetched item as `(modality, content hash, uuid)` in per-modality
+    /// request order.
+    fn iter_items(&self) -> impl Iterator<Item = (Modality, &str, &Option<String>)> {
+        let images = self
+            .images
+            .iter()
+            .zip(&self.image_uuids)
+            .map(|(frame, uuid)| (Modality::Image, frame.hash.as_str(), uuid));
+        let videos = self
+            .videos
+            .iter()
+            .zip(&self.video_uuids)
+            .map(|(clip, uuid)| (Modality::Video, clip.hash.as_str(), uuid));
+        let audios = self
+            .audios
+            .iter()
+            .zip(&self.audio_uuids)
+            .map(|(clip, uuid)| (Modality::Audio, clip.hash.as_str(), uuid));
+        images.chain(videos).chain(audios)
+    }
+}
+
 /// One modality's preprocessed output, ready for the shared expansion and
 /// feature-assembly tail.
 struct PreparedMedia {
@@ -348,45 +371,51 @@ pub(super) struct PreparedItem {
     uuid: Option<String>,
 }
 
-/// One per-modality media item's source: a pre-fetch UUID cache hit, or
-/// fetched content to look up and preprocess.
-pub(super) enum ItemSource<M> {
-    /// UUID cache hit resolved before fetch: the shm address item plus the
-    /// shadowed prompt replacement.
-    Cached(PreparedItem, PromptReplacement),
-    /// Fetched media with its request UUID, to cache-look-up and preprocess.
-    Fetch(M, Option<String>),
-}
+/// Expand placeholders in `prompt_token_ids` and assemble the engine-bound
+/// features in prompt order, mirroring the Python frontend's
+/// `argsort_mm_positions`.
+fn expand_and_assemble_features(
+    prepared: Vec<PreparedMedia>,
+    prompt_token_ids: &mut Vec<u32>,
+    media_parts_len: usize,
+) -> Result<MmFeatures> {
+    let mut ranges = expand_prompt_token_ids(prompt_token_ids, &prepared)?;
 
-/// The client UUID, content presence, and modality of one media part.
-///
-/// Returns `None` for text parts. "No content" means an empty `url` or empty
-/// `data`, i.e. a pure UUID cache reference that is never fetched.
-fn media_part_identity(part: &MediaContentPart) -> Option<(Option<&str>, bool, Modality)> {
-    match part {
-        MediaContentPart::Text { .. } => None,
-        MediaContentPart::ImageUrl { url, uuid, .. } => {
-            Some((uuid.as_deref(), !url.is_empty(), Modality::Image))
+    let mut features = Vec::with_capacity(media_parts_len);
+    for media in prepared {
+        let media_ranges = ranges.remove(&media.modality).unwrap_or_default();
+        if media_ranges.len() != media.items.len() {
+            bail_multimodal!(
+                "number of expanded `{}` placeholders {} does not match number of media items {}",
+                media.modality,
+                media_ranges.len(),
+                media.items.len()
+            );
         }
-        MediaContentPart::ImageData { data, uuid, .. } => {
-            Some((uuid.as_deref(), !data.is_empty(), Modality::Image))
-        }
-        MediaContentPart::ImageEmbeds { uuid, .. } => {
-            Some((uuid.as_deref(), true, Modality::Image))
-        }
-        MediaContentPart::AudioUrl { url, uuid, .. } => {
-            Some((uuid.as_deref(), !url.is_empty(), Modality::Audio))
-        }
-        MediaContentPart::AudioData { data, uuid, .. } => {
-            Some((uuid.as_deref(), !data.is_empty(), Modality::Audio))
-        }
-        MediaContentPart::VideoUrl { url, uuid, .. } => {
-            Some((uuid.as_deref(), !url.is_empty(), Modality::Video))
-        }
-        MediaContentPart::VideoData { data, uuid, .. } => {
-            Some((uuid.as_deref(), !data.is_empty(), Modality::Video))
+        for (item, range) in izip!(media.items, media_ranges) {
+            features.push(MmFeatureSpec {
+                data: Some(item.data),
+                modality: match media.modality {
+                    Modality::Image | Modality::ImageEmbeds => MmModality::Image,
+                    Modality::Video => MmModality::Video,
+                    Modality::Audio => MmModality::Audio,
+                },
+                identifier: item.uuid.unwrap_or_else(|| item.hash.clone()),
+                mm_position: range,
+                mm_hash: Some(item.hash),
+            });
         }
     }
+    features.sort_by_key(|feature| feature.mm_position.offset);
+
+    if features.len() != media_parts_len {
+        bail_multimodal!(
+            "number of built multimodal features {} does not match number of media parts {}",
+            features.len(),
+            media_parts_len
+        );
+    }
+    Ok(features)
 }
 
 impl MultimodalModelInfo {
@@ -657,13 +686,15 @@ impl MultimodalModelInfo {
 /// Text-only requests pass through unchanged as `Prompt::Text`. Multimodal
 /// requests are tokenized in chat, their media placeholders are expanded, and
 /// preprocessed media features are attached for engine-core transport.
+///
+/// `info` selects the multimodal pipeline: the tokenize path passes a
+/// cacheless copy so it never touches the SHM processor cache.
 pub(crate) async fn finalize_rendered_prompt(
     request: &ChatRequest,
     rendered: RenderedPrompt,
     info: Option<&MultimodalModelInfo>,
     model_dtype: ModelDtype,
     max_model_len: Option<usize>,
-    use_mm_cache: bool,
 ) -> Result<(Prompt, Option<MmFeatures>)> {
     let media_parts = extract_media_parts(request, rendered.media_order.as_deref())?;
     if media_parts.is_empty() {
@@ -684,7 +715,6 @@ pub(crate) async fn finalize_rendered_prompt(
             &mut prompt_token_ids,
             model_dtype,
             max_model_len,
-            use_mm_cache,
         )
         .instrument(mm_request_span(&request.request_id))
         .await?;
@@ -884,29 +914,23 @@ impl MultimodalModelInfo {
     /// changes both the final prompt and the offsets recorded in
     /// `PlaceholderRange`.
     ///
-    /// With `use_mm_cache` false the SHM processor cache is bypassed entirely
-    /// (no lookup, no put): `/tokenize` and other paths that never submit to
-    /// the engine must not leave unclaimed writer references in shm (Python
-    /// uses a separate processor-only cache for tokenize).
+    /// The SHM processor cache engagement is a property of `self`: paths that
+    /// never submit to the engine (`/tokenize`) run on a cacheless copy of
+    /// the model info, because no worker would read the shm chunks and cached
+    /// puts would leak writer references (Python uses a separate
+    /// processor-only cache for tokenize).
     pub(crate) async fn prepare_multimodal(
         &self,
         media_parts: Vec<MediaContentPart>,
         prompt_token_ids: &mut Vec<u32>,
         model_dtype: ModelDtype,
         max_model_len: Option<usize>,
-        use_mm_cache: bool,
     ) -> Result<MmFeatures> {
         if media_parts.is_empty() {
             return Ok(Vec::new());
         }
-        self.prepare_multimodal_timed(
-            media_parts,
-            prompt_token_ids,
-            model_dtype,
-            max_model_len,
-            use_mm_cache,
-        )
-        .await
+        self.prepare_multimodal_timed(media_parts, prompt_token_ids, model_dtype, max_model_len)
+            .await
     }
 
     /// Timed body of [`Self::prepare_multimodal`]; each stage is a `tracing`
@@ -923,217 +947,64 @@ impl MultimodalModelInfo {
         prompt_token_ids: &mut Vec<u32>,
         model_dtype: ModelDtype,
         max_model_len: Option<usize>,
-        use_mm_cache: bool,
     ) -> Result<MmFeatures> {
         let media_parts_len = media_parts.len();
         self.validate_mm_limits(&media_parts)?;
         let vision_context = self.vision_preprocessing_context(prompt_token_ids, max_model_len);
-        // Per-modality view of the SHM processor cache: `use_mm_cache=false`
-        // bypasses it entirely, and budget-sensitive image processors never
-        // use it (see [`Self::mm_cache_for`]).
-        let cache_for = |modality: Modality| {
-            if use_mm_cache {
-                self.mm_cache_for(modality)
-            } else {
-                None
-            }
-        };
         // Release this request's touch protections when the merge completes,
         // on success OR error (Python: `finally: release_sender_touches()`).
-        let _touches_guard = if use_mm_cache {
-            self.mm_processor_cache.as_ref().map(MmProcessorCache::touches_guard)
-        } else {
-            None
-        };
+        let _touches_guard = self.mm_processor_cache.as_ref().map(MmProcessorCache::touches_guard);
 
-        // Resolve client-supplied UUIDs against the cache before any fetch,
-        // mirroring Python's `mm_uuids` handling: the UUID (not the content
-        // hash) keys the item, and a UUID part without content is a pure
-        // cache reference that is never fetched.
-        let mut uuid_hits: Vec<Option<(PreparedItem, PromptReplacement)>> =
-            Vec::with_capacity(media_parts_len);
-        let mut part_modalities: Vec<Option<Modality>> = Vec::with_capacity(media_parts_len);
-        let mut fetch_parts = Vec::new();
-        let mut modality_counts: HashMap<Modality, usize> = HashMap::new();
-        for part in media_parts {
-            let Some((uuid, has_content, modality)) = media_part_identity(&part) else {
-                uuid_hits.push(None);
-                part_modalities.push(None);
-                continue;
-            };
-            let count = modality_counts.entry(modality).or_insert(0);
-            let index = *count;
-            *count += 1;
-            part_modalities.push(Some(modality));
-            let uuid = uuid.map(str::to_owned);
-
-            match (cache_for(modality), uuid.as_deref()) {
-                (Some(cache), Some(uuid)) => {
-                    if let Some(hit) = cache.lookup_uuid(uuid, uuid) {
-                        uuid_hits.push(Some(hit));
-                        continue;
-                    }
-                    if !has_content {
-                        bail_mm_uuid_reference!(
-                            "Cache miss for {modality} at index {index} but data is not provided."
-                        );
-                    }
-                    uuid_hits.push(None);
-                    fetch_parts.push(part);
-                }
-                (None, Some(_)) if !has_content => {
-                    if modality == Modality::Image
-                        && self.image.as_ref().is_some_and(cache::is_budget_sensitive)
-                    {
-                        bail_mm_uuid_reference!(
-                            "{modality} part at index {index} carries a UUID but no content, \
-                             and cache references are not supported for this model: its image \
-                             preprocessing depends on the per-request token budget and bypasses \
-                             the SHM multimodal processor cache"
-                        );
-                    }
-                    bail_mm_uuid_reference!(
-                        "{modality} part at index {index} carries a UUID but no content, \
-                         which requires the SHM multimodal processor cache \
-                         (--mm-processor-cache-type shm)"
-                    );
-                }
-                _ => {
-                    uuid_hits.push(None);
-                    fetch_parts.push(part);
-                }
-            }
-        }
-
-        let fetched = self.fetch_media(fetch_parts).await?;
-
-        // Pre-touch every cache key of the request before any per-item
-        // get/put, mirroring the pre-touch in Python's `_merge_mm_kwargs`.
-        // A probed-hit item is held in the cache's touched set so it cannot
-        // be evicted before this request's `address_item_for_cached` /
-        // `put_or_inline` calls (or until `_touches_guard` releases the
-        // touches at the end of the request). Keys must match the prepare
-        // step exactly: the UUID for UUID-keyed items, otherwise the content
-        // hash. Budget-sensitive image processors bypass the cache, so their
-        // items are never touched.
-        if let Some(cache) = cache_for(Modality::Image) {
-            for (frame, uuid) in fetched.images.iter().zip(&fetched.image_uuids) {
-                cache.touch(uuid.as_deref().unwrap_or(&frame.hash));
-            }
-        }
-        if let Some(cache) = cache_for(Modality::Video) {
-            for (clip, uuid) in fetched.videos.iter().zip(&fetched.video_uuids) {
-                cache.touch(uuid.as_deref().unwrap_or(&clip.hash));
-            }
-        }
-        if let Some(cache) = cache_for(Modality::Audio) {
-            for (clip, uuid) in fetched.audios.iter().zip(&fetched.audio_uuids) {
-                cache.touch(uuid.as_deref().unwrap_or(&clip.hash));
-            }
-        }
-
-        // Interleave pre-fetch UUID hits with fetched items, preserving
-        // per-modality request order.
-        let mut images = fetched.images.into_iter().zip(fetched.image_uuids);
-        let mut videos = fetched.videos.into_iter().zip(fetched.video_uuids);
-        let mut audios = fetched.audios.into_iter().zip(fetched.audio_uuids);
-        let mut image_sources = Vec::new();
-        let mut video_sources = Vec::new();
-        let mut audio_sources = Vec::new();
-        for (hit, modality) in uuid_hits.into_iter().zip(part_modalities) {
-            let Some(modality) = modality else {
-                continue;
-            };
-            if let Some((item, replacement)) = hit {
-                match modality {
-                    Modality::Image | Modality::ImageEmbeds => {
-                        image_sources.push(ItemSource::Cached(item, replacement));
-                    }
-                    Modality::Video => video_sources.push(ItemSource::Cached(item, replacement)),
-                    Modality::Audio => audio_sources.push(ItemSource::Cached(item, replacement)),
-                }
-                continue;
-            }
-            match modality {
-                Modality::Image | Modality::ImageEmbeds => {
-                    let (frame, uuid) =
-                        images.next().expect("tracker output aligns with fetched parts");
-                    image_sources.push(ItemSource::Fetch(frame, uuid));
-                }
-                Modality::Video => {
-                    let (clip, uuid) =
-                        videos.next().expect("tracker output aligns with fetched parts");
-                    video_sources.push(ItemSource::Fetch(clip, uuid));
-                }
-                Modality::Audio => {
-                    let (clip, uuid) =
-                        audios.next().expect("tracker output aligns with fetched parts");
-                    audio_sources.push(ItemSource::Fetch(clip, uuid));
-                }
-            }
-        }
+        let mut partition = cache::resolve_uuid_references(
+            |modality| self.mm_cache_for(modality),
+            self.image.as_ref().is_some_and(cache::is_budget_sensitive),
+            media_parts,
+        )?;
+        let fetched = self.fetch_media(partition.fetch_parts).await?;
+        self.touch_fetched_items(&fetched);
 
         let mut prepared = Vec::new();
-        if !image_sources.is_empty() {
+        if let Some(slots) = partition.slots.remove(&Modality::Image) {
+            let sources = cache::attach_fetched(slots, fetched.images);
             prepared.push(
                 self.prepare_images(
-                    image_sources,
-                    cache_for(Modality::Image),
+                    sources,
+                    self.mm_cache_for(Modality::Image),
                     model_dtype,
                     vision_context,
                 )
                 .await?,
             );
         }
-        if !video_sources.is_empty() {
+        if let Some(slots) = partition.slots.remove(&Modality::Video) {
+            let sources = cache::attach_fetched(slots, fetched.videos);
             prepared.push(
-                self.prepare_videos(video_sources, cache_for(Modality::Video), model_dtype)
+                self.prepare_videos(sources, self.mm_cache_for(Modality::Video), model_dtype)
                     .await?,
             );
         }
-        if !audio_sources.is_empty() {
-            prepared.push(self.prepare_audios(audio_sources, cache_for(Modality::Audio)).await?);
+        if let Some(slots) = partition.slots.remove(&Modality::Audio) {
+            let sources = cache::attach_fetched(slots, fetched.audios);
+            prepared.push(self.prepare_audios(sources, self.mm_cache_for(Modality::Audio)).await?);
         }
 
-        let mut ranges = expand_prompt_token_ids(prompt_token_ids, &prepared)?;
+        expand_and_assemble_features(prepared, prompt_token_ids, media_parts_len)
+    }
 
-        let mut features = Vec::with_capacity(media_parts_len);
-        for media in prepared {
-            let media_ranges = ranges.remove(&media.modality).unwrap_or_default();
-            if media_ranges.len() != media.items.len() {
-                bail_multimodal!(
-                    "number of expanded `{}` placeholders {} does not match number of media items {}",
-                    media.modality,
-                    media_ranges.len(),
-                    media.items.len()
-                );
-            }
-            for (item, range) in izip!(media.items, media_ranges) {
-                features.push(MmFeatureSpec {
-                    data: Some(item.data),
-                    modality: match media.modality {
-                        Modality::Image | Modality::ImageEmbeds => MmModality::Image,
-                        Modality::Video => MmModality::Video,
-                        Modality::Audio => MmModality::Audio,
-                    },
-                    identifier: item.uuid.unwrap_or_else(|| item.hash.clone()),
-                    mm_position: range,
-                    mm_hash: Some(item.hash),
-                });
+    /// Pre-touch every cache key of the request before any per-item get/put,
+    /// mirroring the pre-touch in Python's `_merge_mm_kwargs`. A probed-hit
+    /// item is held in the cache's touched set so it cannot be evicted before
+    /// this request's `address_item_for_cached` / `put_or_inline` calls (or
+    /// until the touches guard releases them at the end of the request). Keys
+    /// must match the prepare step exactly: the UUID for UUID-keyed items,
+    /// otherwise the content hash. Budget-sensitive image processors bypass
+    /// the cache, so their items are never touched.
+    fn touch_fetched_items(&self, fetched: &FetchedMedia) {
+        for (modality, hash, uuid) in fetched.iter_items() {
+            if let Some(cache) = self.mm_cache_for(modality) {
+                cache.touch(uuid.as_deref().unwrap_or(hash));
             }
         }
-        // Mirror the Python frontend (`argsort_mm_positions`): features are
-        // ordered by their placeholder position in the prompt.
-        features.sort_by_key(|feature| feature.mm_position.offset);
-
-        if features.len() != media_parts_len {
-            bail_multimodal!(
-                "number of built multimodal features {} does not match number of media parts {}",
-                features.len(),
-                media_parts_len
-            );
-        }
-        Ok(features)
     }
 
     /// Fetch all connector-backed media parts and split them per modality,
@@ -1394,7 +1265,6 @@ pub(crate) mod tests {
                 &mut tokens,
                 ModelDtype::Float32,
                 Some(512),
-                true,
             )
             .await
             .unwrap();
@@ -1426,13 +1296,7 @@ pub(crate) mod tests {
         );
 
         let error = info
-            .prepare_multimodal(
-                vec![media],
-                &mut prompt,
-                ModelDtype::Float32,
-                Some(100),
-                true,
-            )
+            .prepare_multimodal(vec![media], &mut prompt, ModelDtype::Float32, Some(100))
             .await
             .unwrap_err();
         assert!(

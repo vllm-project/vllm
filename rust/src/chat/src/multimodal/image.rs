@@ -6,17 +6,14 @@
 
 use std::sync::Arc;
 
-use itertools::izip;
 use llm_multimodal::{
     ImageFrame, Modality, PreprocessedEncoderInputs, PromptReplacement, VisionPreprocessingContext,
 };
 use vllm_engine_core_client::protocol::dtype::ModelDtype;
 
-use super::cache::{CacheLookup, MmProcessorCache, merge_slots, put_or_inline_and_track};
+use super::cache::{CacheSlot, MmProcessorCache};
 use super::timing::MM_STAGE_TARGET;
-use super::{
-    ItemSource, MultimodalModelInfo, PreparedItem, PreparedMedia, VisionModalitySupport, item,
-};
+use super::{MultimodalModelInfo, PreparedItem, PreparedMedia, VisionModalitySupport, item};
 use crate::error::{Error, Result, bail_multimodal, multimodal};
 
 /// Forward-kwargs name of the primary image encoder input.
@@ -26,14 +23,11 @@ impl MultimodalModelInfo {
     /// Preprocess all fetched image frames as one batch and build per-item
     /// features.
     ///
-    /// With the SHM processor cache enabled, cached frames skip preprocessing
-    /// entirely: their prompt replacements come from the cache shadow and
-    /// their feature data is the shm address item. Cache misses are
-    /// preprocessed as one batch. Budget-sensitive processors bypass the
-    /// cache (`cache` is `None` for them), so they always preprocess inline.
-    ///
-    /// A frame carrying a client UUID is keyed by that UUID instead of its
-    /// content hash, and its `mm_hash` is the UUID.
+    /// Cache control flow lives in [`cache::prepare_cached`]: `Ready` slots
+    /// (UUID references and content-hash hits) skip preprocessing entirely;
+    /// misses are preprocessed here as one batch. Budget-sensitive processors
+    /// bypass the cache (`cache` is `None` for them), so they always
+    /// preprocess inline.
     #[tracing::instrument(
         name = "mm_stage",
         target = MM_STAGE_TARGET,
@@ -42,7 +36,7 @@ impl MultimodalModelInfo {
     )]
     pub(super) async fn prepare_images(
         &self,
-        sources: Vec<ItemSource<Arc<ImageFrame>>>,
+        sources: Vec<CacheSlot<Arc<ImageFrame>>>,
         cache: Option<&MmProcessorCache>,
         model_dtype: ModelDtype,
         preprocessing_context: VisionPreprocessingContext,
@@ -51,64 +45,11 @@ impl MultimodalModelInfo {
             modality: Modality::Image.to_string(),
         })?;
 
-        let mut slots = Vec::with_capacity(sources.len());
-        let mut miss_frames = Vec::new();
-        let mut miss_uuids = Vec::new();
-        let mut miss_hashes = Vec::new();
-        for source in sources {
-            let (frame, uuid) = match source {
-                ItemSource::Cached(item, replacement) => {
-                    slots.push(Some((item, replacement)));
-                    continue;
-                }
-                ItemSource::Fetch(frame, uuid) => (frame, uuid),
-            };
-            // A client UUID keys the item when the cache is enabled;
-            // otherwise the item is content-addressed.
-            let mm_hash = match (cache, &uuid) {
-                (Some(_), Some(uuid)) => uuid.clone(),
-                _ => frame.hash.clone(),
-            };
-            let lookup = match cache {
-                Some(cache) => cache.lookup(&mm_hash, uuid),
-                None => CacheLookup::Miss(uuid),
-            };
-            match lookup {
-                CacheLookup::Hit(item, replacement) => slots.push(Some((item, replacement))),
-                CacheLookup::Miss(uuid) => {
-                    slots.push(None);
-                    miss_hashes.push(mm_hash);
-                    miss_frames.push(frame);
-                    miss_uuids.push(uuid);
-                }
-            }
-        }
-
-        let mut misses = Vec::new();
-        if !miss_frames.is_empty() {
-            let (replacements, mut items) = self
-                .preprocess_image_batch(
-                    support,
-                    miss_frames,
-                    miss_uuids,
-                    model_dtype,
-                    preprocessing_context,
-                )
-                .await?;
-            for (item, replacement, hash) in izip!(&mut items, &replacements, &miss_hashes) {
-                item.data = put_or_inline_and_track(
-                    cache,
-                    hash,
-                    replacement,
-                    std::mem::take(&mut item.data),
-                );
-                // UUID-keyed items report the UUID as `mm_hash` (Python
-                // parity: `hashes.append(uuid_item)`).
-                item.hash = hash.clone();
-            }
-            misses = izip!(items, replacements).collect();
-        }
-        let (replacements, items) = merge_slots(slots, misses);
+        let (replacements, items) = super::cache::prepare_cached(cache, sources, async |misses| {
+            self.preprocess_image_batch(support, misses, model_dtype, preprocessing_context)
+                .await
+        })
+        .await?;
 
         Ok(PreparedMedia {
             modality: Modality::Image,
@@ -123,11 +64,11 @@ impl MultimodalModelInfo {
     async fn preprocess_image_batch(
         &self,
         support: &VisionModalitySupport,
-        frames: Vec<Arc<ImageFrame>>,
-        uuids: Vec<Option<String>>,
+        misses: Vec<(Arc<ImageFrame>, Option<String>)>,
         model_dtype: ModelDtype,
         preprocessing_context: VisionPreprocessingContext,
     ) -> Result<(Vec<PromptReplacement>, Vec<PreparedItem>)> {
+        let (frames, uuids): (Vec<_>, Vec<_>) = misses.into_iter().unzip();
         let preprocessed = self.preprocess_images(support, &frames, preprocessing_context).await?;
         let replacements = support.spec.prompt_replacements_for(&self.context, &preprocessed)?;
         if replacements.len() != frames.len() {
