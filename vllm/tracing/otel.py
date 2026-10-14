@@ -184,8 +184,10 @@ def manual_instrument_otel(
     attributes: dict[str, Any] | None = None,
     context: Context | None = None,
     kind: Any = None,  # SpanKind, but typed as Any for when OTEL unavailable
+    *,
+    defer_end: bool = False,
 ):
-    """Manually create and end a span with explicit timestamps."""
+    """Create a span with explicit timestamps, optionally deferring its end."""
     if not _IS_OTEL_AVAILABLE:
         return
 
@@ -204,6 +206,8 @@ def manual_instrument_otel(
     span = tracer.start_span(**span_kwargs)
     if attributes:
         span.set_attributes(attributes)
+    if defer_end:
+        return span
     if end_time is not None:
         span.end(end_time=end_time)
     else:

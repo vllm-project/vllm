@@ -11,6 +11,8 @@ logger = init_logger(__name__)
 
 # Standard W3C headers used for context propagation
 TRACE_HEADERS = ["traceparent", "tracestate"]
+# Internal engine metadata; never accepted from incoming HTTP headers.
+DEFER_TOOL_CALLING_SPAN = "_vllm_defer_tool_calling_span"
 
 
 class SpanAttributes:

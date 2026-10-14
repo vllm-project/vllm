@@ -158,6 +158,9 @@ class RequestOutput:
 
     """
 
+    # Frontend-only span ownership; not part of API responses or repr.
+    _tool_calling_spans: list[Any] | None = None
+
     def __init__(
         self,
         request_id: str,

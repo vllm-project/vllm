@@ -559,7 +559,11 @@ class AsyncLLM(EngineClient):
                 if self.log_requests:
                     logger.info("Added request %s.", child_request.request_id)
         except BaseException:
-            await self.abort(parent_request.request_id, internal=True)
+            try:
+                await self.abort(parent_request.request_id, internal=True)
+            finally:
+                if queue._tool_calling_spans is not None:
+                    queue.close()
             raise
         return queue
 
@@ -580,7 +584,12 @@ class AsyncLLM(EngineClient):
         self.output_processor.add_request(request, prompt, parent_req, index, queue)
 
         # Add the EngineCoreRequest to EngineCore (separate process).
-        await self.engine_core.add_request_async(request)
+        try:
+            await self.engine_core.add_request_async(request)
+        except BaseException:
+            if queue._tool_calling_spans is not None:
+                queue.close()
+            raise
 
         if self.log_requests:
             logger.info("Added request %s.", request.request_id)
@@ -790,6 +799,8 @@ class AsyncLLM(EngineClient):
                 assert isinstance(out, RequestOutput)
                 finished = out.finished
                 if out is not STREAM_FINISHED:
+                    if q._tool_calling_spans is not None:
+                        out._tool_calling_spans = q.take_tool_calling_spans()
                     yield out
 
         # If the request is disconnected by the client, generate()
