@@ -132,6 +132,7 @@ def test_piecewise_capture_uses_pcp_dummy_slot_mappings():
     pcp_block_tables = SimpleNamespace(
         num_kv_cache_groups=1,
         input_block_tables=(torch.zeros(num_reqs * 2, 1, dtype=torch.int32),),
+        cp_interleave=1,
     )
     pcp_manager = PCPManager(
         pcp_world_size=pcp_world_size,

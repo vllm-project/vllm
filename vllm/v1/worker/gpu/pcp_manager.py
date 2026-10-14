@@ -94,6 +94,8 @@ class PCPManager:
     def set_block_tables(self, block_tables: BlockTables | None) -> None:
         """Attach the KV block tables, which only exist after KV cache init."""
         self._block_tables = block_tables
+        if block_tables is not None:
+            self.cp_interleave = block_tables.cp_interleave
         max_num_local_reqs = self._max_num_local_reqs
         max_num_tokens = self._max_num_tokens
         device, pcp_world_size = self.device, self.pcp_world_size
@@ -813,6 +815,14 @@ class PCPManager:
         self, input_buffers: InputBuffers
     ) -> InputBatch | InputBuffers:
         return self.draft_prefill_batch or input_buffers
+
+    def get_draft_moe_is_padding(
+        self, input_buffers: InputBatch | InputBuffers, num_tokens: int
+    ) -> torch.Tensor:
+        """Return the padding layout consumed by MoE during draft execution."""
+        if self.draft_prefill_batch is not None:
+            return self.draft_prefill_batch.is_padding
+        return self.moe_is_padding(input_buffers.is_padding[:num_tokens])
 
     def prepare_draft_prefill(
         self, input_batch: InputBatch, input_ids: torch.Tensor

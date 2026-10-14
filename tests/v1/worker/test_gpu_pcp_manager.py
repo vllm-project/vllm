@@ -7,7 +7,9 @@ import numpy as np
 import pytest
 import torch
 
-from vllm.config import CUDAGraphMode, ParallelConfig
+from vllm.config import CUDAGraphMode, ParallelConfig, VllmConfig
+from vllm.forward_context import set_forward_context
+from vllm.model_executor.layers.fused_moe.router.fused_topk_router import fused_topk
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID, get_dcp_local_seq_lens
 from vllm.v1.attention.ops import pcp as attention_pcp
 from vllm.v1.worker.gpu import cp_utils as gpu_cp_utils
@@ -48,6 +50,7 @@ def _make_capture_manager(block_table: torch.Tensor):
         input_block_tables=(block_table,),
         num_kv_cache_groups=1,
         block_sizes=(2,),
+        cp_interleave=1,
     )
     manager = PCPManager(
         pcp_world_size=2,
@@ -264,6 +267,17 @@ def test_capture_uses_pcp_persistent_inputs():
         actual = getattr(input_batch, name)
         torch.testing.assert_close(actual, getattr(dummy_batch, name))
         assert actual.data_ptr() == getattr(manager.input_buffers, name).data_ptr()
+
+
+def test_block_table_rebind_updates_interleave():
+    manager, block_tables = _make_capture_manager(torch.ones((4, 2), dtype=torch.int32))
+    final_block_tables = SimpleNamespace(**vars(block_tables))
+    final_block_tables.cp_interleave = 64
+
+    manager.set_block_tables(final_block_tables)
+
+    assert manager._block_tables is final_block_tables
+    assert manager.cp_interleave == 64
 
 
 def test_dummy_context_updates_pcp_local_block_tables():
@@ -737,9 +751,10 @@ def test_partition_defers_dcp_metadata_to_post_partition_batch():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs GPU kernels")
-def test_moe_padding_matches_pcp_all_gather():
+def test_moe_padding_matches_pcp_all_gather(monkeypatch):
     """The PCP batch carries the all-gather of every rank's local padding mask,
     the rows the MoE routes, even when ranks own different numbers of tokens."""
+    monkeypatch.setenv("VLLM_MOE_SKIP_PADDING", "1")
     device = torch.device("cuda:0")
     local_masks, batch_masks = [], []
     for pcp_rank in range(2):
@@ -763,12 +778,22 @@ def test_moe_padding_matches_pcp_all_gather():
         )
         num_tokens = local_batch.num_tokens_after_padding
         local_masks.append(manager.input_buffers.is_padding[:num_tokens].cpu())
-        batch_masks.append(local_batch.is_padding.cpu())
+        batch_masks.append(local_batch.is_padding.clone())
 
     # Sharded decode puts two requests on rank 0 and one on rank 1.
     assert [mask.logical_not().sum().item() for mask in local_masks] == [2, 1]
     for batch_mask in batch_masks:
-        assert torch.equal(batch_mask, torch.cat(local_masks))
+        assert torch.equal(batch_mask.cpu(), torch.cat(local_masks))
+        num_tokens = batch_mask.numel()
+        hidden_states = torch.randn(num_tokens, 4, device=device)
+        router_logits = torch.randn(num_tokens, 8, device=device)
+        with set_forward_context(None, VllmConfig(), is_padding=batch_mask):
+            topk_weights, topk_ids, _ = fused_topk(
+                hidden_states, router_logits, 2, False
+            )
+        assert (topk_ids[~batch_mask] >= 0).all()
+        assert (topk_ids[batch_mask] == -1).all()
+        assert (topk_weights[batch_mask] == 0).all()
 
 
 @pytest.mark.parametrize(
