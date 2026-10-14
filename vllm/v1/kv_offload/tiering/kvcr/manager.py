@@ -201,20 +201,17 @@ class _FrameworkPinAdapter:
 
             job = parent.create_store_job(hit_keys, req_context)
             job_keys = tuple(job.keys)
-            chunk_ids = tuple(int(chunk_id) for chunk_id in job.chunk_ids)
-            if len(job_keys) != len(chunk_ids) or set(job_keys) != set(hit_keys):
+            if len(job_keys) != len(job.chunk_ids) or (
+                job_keys is not hit_keys and set(job_keys) != set(hit_keys)
+            ):
                 return None
 
-            descriptors: dict[BlockKey, list[MemoryRef] | None] = {
-                BlockKey(bytes(key)): None for key in offload_keys
-            }
-            descriptors.update(
-                (
-                    BlockKey(bytes(key)),
-                    [self._tier._make_descriptor(chunk_id)],
-                )
-                for key, chunk_id in zip(job_keys, chunk_ids)
+            descriptors: dict[BlockKey, list[MemoryRef] | None] = dict.fromkeys(
+                cast(tuple[BlockKey, ...], offload_keys)
             )
+            make_descriptor = self._tier._make_descriptor
+            for key, chunk_id in zip(job_keys, job.chunk_ids):
+                descriptors[BlockKey(key)] = [make_descriptor(int(chunk_id))]
             pin_handle = f"kvcr-job-{job.job_id}"
             self._pin_jobs[pin_handle] = job.job_id
             return pin_handle, descriptors
