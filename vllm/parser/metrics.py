@@ -197,7 +197,7 @@ def finish_tool_calling_trace(
     request._tool_calling_spans = None
     status = (
         "parse_failure"
-        if parse_failed
+        if parse_failed or request._tool_calling_parse_failed
         else "interrupted"
         if not completed
         else "success"
