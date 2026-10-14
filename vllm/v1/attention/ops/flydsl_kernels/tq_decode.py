@@ -30,10 +30,16 @@ from __future__ import annotations
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl.expr import arith, buffer_ops, gpu, range_constexpr, rocdl
+from flydsl.expr import arith, gpu, range_constexpr, rocdl
 from flydsl.expr.typing import T
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
+
+from vllm.v1.attention.ops.flydsl_kernels.buffer_utils import (
+    buffer_view,
+    load_vec,
+    store_vec,
+)
 
 # === Constants (Qwen-class TQ decode profile) ===============================
 HEAD_SIZE = 128
@@ -192,15 +198,16 @@ def build_tq_decode_module(
         #   token (A's M for QK)
         mfma_col_grp = lane >> 4  # 0..3, K-group dim
 
-        # ---- Buffer resources -------------------------------------------
-        q_rsrc = buffer_ops.create_buffer_resource(query_ptr, max_size=True)
-        kv_rsrc = buffer_ops.create_buffer_resource(kv_cache_ptr, max_size=True)
-        bt_rsrc = buffer_ops.create_buffer_resource(block_tables_ptr, max_size=True)
-        sl_rsrc = buffer_ops.create_buffer_resource(seq_lens_ptr, max_size=True)
-        cent_rsrc = buffer_ops.create_buffer_resource(centroids_ptr, max_size=True)
-        out_rsrc = buffer_ops.create_buffer_resource(out_ptr, max_size=True)
-        es_rsrc = buffer_ops.create_buffer_resource(exp_sums_ptr, max_size=True)
-        ml_rsrc = buffer_ops.create_buffer_resource(max_logits_ptr, max_size=True)
+        # ---- Buffer views -----------------------------------------------
+        q_buf = buffer_view(query_ptr, fx.Int32, 4)
+        kv_buf4 = buffer_view(kv_cache_ptr, fx.Int32, 4)
+        kv_buf_i16 = buffer_view(kv_cache_ptr, fx.Int16)
+        bt_buf = buffer_view(block_tables_ptr, fx.Int32)
+        sl_buf = buffer_view(seq_lens_ptr, fx.Int32)
+        cent_buf = buffer_view(centroids_ptr, fx.Float32)
+        out_buf = buffer_view(out_ptr, fx.BFloat16, 4)
+        es_buf = buffer_view(exp_sums_ptr, fx.Float32)
+        ml_buf = buffer_view(max_logits_ptr, fx.Float32)
 
         # ---- LDS pointers -----------------------------------------------
         base = allocator.get_base()
@@ -218,12 +225,12 @@ def build_tq_decode_module(
 
         # ===== STEP A: Load centroids → LDS (cooperative, race-safe) =====
         c_idx_safe = lane & (N_CENTROIDS - 1)
-        c_val = buffer_ops.buffer_load(cent_rsrc, c_idx_safe, vec_width=1, dtype=T.f32)
+        c_val = fx.Float32(cent_buf[c_idx_safe])
         cent_lds.store(c_val, [fx.Index(c_idx_safe)])
         gpu.barrier()
 
         # ===== STEP B: Load pre-rotated q_rot → row-major LDS ============
-        # q_rsrc points to the externally-rotated q_rot tensor. Load 8 bf16
+        # q_buf points to the externally-rotated q_rot tensor. Load 8 bf16
         # per lane per iter (vec_width=4 i32) in QG_LOAD_ITERS iterations.
         for c in range_constexpr(QG_LOAD_ITERS):
             row_chunk = lane + c * WARP_SIZE  # 0..QG*16-1
@@ -233,12 +240,7 @@ def build_tq_decode_module(
             q_off_elem = (
                 seq * _stride_q_seq + (kv_h * QG + row) * _stride_q_head + col_elem
             )
-            q_v = buffer_ops.buffer_load(
-                q_rsrc,
-                q_off_elem // 2,
-                vec_width=4,
-                dtype=T.i32,
-            )
+            q_v = load_vec(q_buf, q_off_elem // 2, 4)
             q_lds_byte = row * (HEAD_SIZE * 2) + col_elem * 2
             fx.Vector(q_v).store(q_lds_i32, [fx.Index(q_lds_byte // 4)])
         gpu.barrier()
@@ -264,7 +266,7 @@ def build_tq_decode_module(
         acc_pv = [zero_v4 for _ in range(PV_N_CHUNKS)]
 
         # ===== STEP E: Sequence-len + partition base ====================
-        seq_len = buffer_ops.buffer_load(sl_rsrc, seq, vec_width=1, dtype=T.i32)
+        seq_len = fx.Int32(sl_buf[seq])
         # ── Bounded num_partitions + internal looping ───────────────────
         # With TGPP > 1 this CTA owns a contiguous slice of length
         # ``PARTITION_EXTENT_TOKENS`` that is iterated as ``TGPP`` groups
@@ -355,12 +357,7 @@ def build_tq_decode_module(
                 tile_in_seq = tile_start_tok < seq_len
                 bt_off = bt_seq_base + block_in_part
                 bt_off_safe = tile_in_seq.select(bt_off, seq * _stride_bt_seq)
-                phys_block = buffer_ops.buffer_load(
-                    bt_rsrc,
-                    bt_off_safe,
-                    vec_width=1,
-                    dtype=T.i32,
-                )
+                phys_block = fx.Int32(bt_buf[bt_off_safe])
                 block_base = phys_block * _stride_cache_block
                 data_region = block_base
                 meta_region = block_base + _meta_region_offset
@@ -374,26 +371,14 @@ def build_tq_decode_module(
                     data_region + slot * _stride_data_slot + kv_h * DATA_BYTES_PER_SLOT
                 )
                 k_byte = data_bases_byte + chunk_in_tok * 16
-                k_packed = buffer_ops.buffer_load(
-                    kv_rsrc,
-                    k_byte // 4,
-                    vec_width=4,
-                    dtype=T.i32,
-                )
+                k_packed = load_vec(kv_buf4, k_byte // 4, 4)
 
                 # ---- HOISTED: issue V data + meta HBM loads early ---------
                 # These are async; their s_waitcnt is pushed by the compiler
                 # past the K dequant + QK MFMA + softmax block, hiding most
                 # of the V HBM latency behind compute.
                 v_byte = data_bases_byte + KEY_DATA_BYTES + chunk_in_tok * 16
-                v_packed = fx.Vector(
-                    buffer_ops.buffer_load(
-                        kv_rsrc,
-                        v_byte // 4,
-                        vec_width=4,
-                        dtype=T.i32,
-                    )
-                )
+                v_packed = load_vec(kv_buf4, v_byte // 4, 4)
                 vscale_u16 = (
                     meta_region // 2
                     + kv_h * meta_u16_per_kvh
@@ -403,28 +388,13 @@ def build_tq_decode_module(
                 vzero_u16 = (
                     meta_region // 2 + kv_h * meta_u16_per_kvh + SOA_V_ZERO * _BS + slot
                 )
-                vscale_raw = buffer_ops.buffer_load(
-                    kv_rsrc,
-                    vscale_u16,
-                    vec_width=1,
-                    dtype=T.i16,
-                )
-                vzero_raw = buffer_ops.buffer_load(
-                    kv_rsrc,
-                    vzero_u16,
-                    vec_width=1,
-                    dtype=T.i16,
-                )
+                vscale_raw = kv_buf_i16[vscale_u16]
+                vzero_raw = kv_buf_i16[vzero_u16]
 
                 knorm_u16 = (
                     meta_region // 2 + kv_h * meta_u16_per_kvh + SOA_K_NORM * _BS + slot
                 )
-                knorm_raw = buffer_ops.buffer_load(
-                    kv_rsrc,
-                    knorm_u16,
-                    vec_width=1,
-                    dtype=T.i16,
-                )
+                knorm_raw = kv_buf_i16[knorm_u16]
                 knorm_f32 = fx.Int16(knorm_raw).bitcast(fx.Float16).to(fx.Float32)
 
                 # K dequant → LDS [token, head_dim] (natural)
@@ -580,12 +550,13 @@ def build_tq_decode_module(
                 #                        + (h*16 + hd_sub)*2
                 token_idx = lane >> 2
                 hd_sub = (lane & 3) * 4
+                lds_u8_ptr = fx.PointerType.get(
+                    fx.Uint8.ir_type, fx.AddressSpace.Shared, 1
+                )
                 v_lane_byte = kv_off + token_idx * (HEAD_SIZE * 2) + hd_sub * 2
                 for h in range_constexpr(PV_N_CHUNKS):
-                    v_byte_i64 = fx.Int64(v_lane_byte + h * 32)
-                    v_ptr = buffer_ops.create_llvm_ptr(
-                        v_byte_i64,
-                        address_space=3,
+                    v_ptr = fx.to_llvm_ptr(
+                        fx.inttoptr(lds_u8_ptr, fx.Int64(v_lane_byte + h * 32))
                     )
                     v_op_raw = rocdl.ds_read_tr16_b64(
                         T.vec(4, T.i16),
@@ -616,15 +587,10 @@ def build_tq_decode_module(
         # outputs are computational waste) skip the stores entirely.
         if mfma_row < QG:
             for h in range_constexpr(PV_N_CHUNKS):
-                pv_i32x2 = (acc_pv[h] * rcp).to(fx.BFloat16).bitcast(fx.Int32)
+                pv_bf16x4 = (acc_pv[h] * rcp).to(fx.BFloat16)
                 head_dim_start = mfma_col_grp * 4 + h * 16
                 out_off_elem = out_base + mfma_row * HEAD_SIZE + head_dim_start
-                buffer_ops.buffer_store(
-                    pv_i32x2,
-                    out_rsrc,
-                    out_off_elem * 2,
-                    offset_is_bytes=True,
-                )
+                store_vec(out_buf, out_off_elem, pv_bf16x4, 4)
 
             ml_off = (
                 seq * _stride_ml_seq
@@ -638,7 +604,7 @@ def build_tq_decode_module(
                 + part * QG
                 + mfma_row
             )
-            buffer_ops.buffer_store(running_max, ml_rsrc, ml_off)
-            buffer_ops.buffer_store(running_sum, es_rsrc, es_off)
+            ml_buf[ml_off] = running_max
+            es_buf[es_off] = running_sum
 
     return tq_decode_kernel
