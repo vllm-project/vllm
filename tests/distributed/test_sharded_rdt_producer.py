@@ -20,17 +20,23 @@ covered by the GPU tests in `test_sharded_rdt_trainer.py`.
 
 import contextlib
 import gc
+import os
+import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeout
+from types import ModuleType, SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 import torch
 
 import vllm.distributed.weight_transfer.sharded_rdt_trainer as trainer_mod
+from vllm.distributed.nixl_utils import alias_nixl_for_ray
 from vllm.distributed.weight_transfer.sharded_rdt_common import (
     buffer_alloc_bytes,
+    register_nixl_memory,
 )
 from vllm.distributed.weight_transfer.sharded_rdt_trainer import (
     DEFAULT_GATHER_LOOKAHEAD,
@@ -43,6 +49,114 @@ from vllm.distributed.weight_transfer.sharded_rdt_trainer import (
 GI_A, GI_B = 0, 1
 GROUP_A = ("model.layers.0.w", "model.layers.0.b")
 GROUP_B = ("model.layers.1.w",)
+
+
+@pytest.fixture
+def ray_nixl_transport(monkeypatch):
+    import ray
+    from ray.experimental.rdt import util
+    from ray.experimental.rdt.nixl_tensor_transport import NixlTensorTransport
+
+    from vllm.distributed import nixl_utils
+    from vllm.platforms import current_platform
+
+    transport = NixlTensorTransport()
+    package = ModuleType("nixl_rocm")
+    api = ModuleType("nixl_rocm._api")
+    api.__dict__.update(nixl_agent=Mock(), nixl_agent_config=Mock())
+    package.__dict__["_api"] = api
+    modules = {package.__name__: package, api.__name__: api}
+    imported_rcache_limits = []
+
+    def import_nixl(name):
+        imported_rcache_limits.append(os.environ.get("UCX_RCACHE_MAX_UNRELEASED"))
+        monkeypatch.setitem(sys.modules, name, modules[name])
+        return modules[name]
+
+    nixl_names = ("nixl", "nixl._api", *modules)
+    for name in nixl_names:
+        monkeypatch.delitem(sys.modules, name, raising=False)
+    monkeypatch.delenv("UCX_RCACHE_MAX_UNRELEASED", raising=False)
+    importer = Mock(side_effect=import_nixl)
+    monkeypatch.setattr(
+        nixl_utils, "importlib", SimpleNamespace(import_module=importer)
+    )
+    monkeypatch.setattr(nixl_utils, "is_nixl_available", lambda: True)
+    monkeypatch.setattr(util, "transport_managers", {"NIXL": transport})
+    monkeypatch.setattr(current_platform, "is_rocm", lambda: True)
+    monkeypatch.setattr(
+        ray,
+        "get_runtime_context",
+        lambda: SimpleNamespace(get_actor_id=lambda: "rdt-actor"),
+    )
+    try:
+        yield transport, api, importer, imported_rcache_limits
+    finally:
+        # The helper inserts aliases directly; remove them before monkeypatch
+        # restores any modules and environment values present before this test.
+        for name in nixl_names:
+            sys.modules.pop(name, None)
+        os.environ.pop("UCX_RCACHE_MAX_UNRELEASED", None)
+
+
+def test_ray_registers_memory_through_rocm_alias(ray_nixl_transport):
+    """Ray's registration must reach the ROCm agent through the alias."""
+    _, api, importer, _ = ray_nixl_transport
+    register_nixl_memory(torch.empty(4, dtype=torch.uint8))
+    api.nixl_agent.return_value.register_memory.assert_called()
+    assert sys.modules["nixl"] is sys.modules["nixl_rocm"]
+    assert sys.modules["nixl._api"] is api
+
+    importer.reset_mock()
+    alias_nixl_for_ray()
+    importer.assert_not_called()
+
+
+@pytest.mark.parametrize("rcache_limit", [None, "4096"])
+def test_ray_nixl_sets_ucx_limit_before_import(
+    monkeypatch, ray_nixl_transport, rcache_limit
+):
+    """UCX must see the default or the user's override during the first import."""
+    _, _, _, imported_rcache_limits = ray_nixl_transport
+    if rcache_limit is not None:
+        monkeypatch.setenv("UCX_RCACHE_MAX_UNRELEASED", rcache_limit)
+    alias_nixl_for_ray()
+    assert imported_rcache_limits == [rcache_limit or "1024"] * 2
+
+
+@pytest.mark.parametrize("existing_api", [False, True])
+def test_ray_nixl_preserves_non_rocm_or_existing_imports(
+    monkeypatch, ray_nixl_transport, existing_api
+):
+    from vllm.platforms import current_platform
+
+    _, _, importer, _ = ray_nixl_transport
+    if existing_api:
+        api = ModuleType("nixl._api")
+        monkeypatch.setitem(sys.modules, "nixl._api", api)
+    else:
+        monkeypatch.setattr(current_platform, "is_rocm", lambda: False)
+    alias_nixl_for_ray()
+    importer.assert_not_called()
+    assert "UCX_RCACHE_MAX_UNRELEASED" not in os.environ
+    if existing_api:
+        assert sys.modules["nixl._api"] is api
+    else:
+        assert "nixl._api" not in sys.modules
+
+
+def test_ray_nixl_alias_reports_missing_rocm_package(monkeypatch, ray_nixl_transport):
+    from vllm.distributed import nixl_utils
+
+    transport, api, importer, _ = ray_nixl_transport
+    monkeypatch.setattr(nixl_utils, "is_nixl_available", lambda: False)
+    with pytest.raises(ImportError, match="nixl_rocm"):
+        register_nixl_memory(torch.empty(1))
+    assert transport._nixl_agent is None
+    api.nixl_agent.assert_not_called()
+    importer.assert_not_called()
+    assert "nixl" not in sys.modules
+    assert "nixl._api" not in sys.modules
 
 
 @pytest.fixture
@@ -389,7 +503,7 @@ class TestGatherCredit:
     def test_the_residency_bound_scales_with_the_lookahead(
         self, server_factory, gather_engine
     ):
-        """lookahead + 1, not a hardcoded 2: at lookahead=2 a free-nothing
+        """Lookahead + 1, not a hardcoded 2: at lookahead=2 a free-nothing
         consumer sees exactly 3 groups gathered before the loop parks."""
         server = server_factory(gather_lookahead=2)
         engine = gather_engine(server, 8, lookahead=2)

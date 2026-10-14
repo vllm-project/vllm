@@ -6,7 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
-from transformers import AutoConfig
+from transformers import AutoConfig, Qwen3_5MoeConfig
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 
 from vllm.tokenizers import TokenizerLike
@@ -18,7 +18,6 @@ from vllm.tokenizers.registry import (
     get_tokenizer,
     resolve_tokenizer_args,
 )
-from vllm.transformers_utils.configs.qwen3_5_moe import Qwen3_5MoeConfig
 
 
 class TestTokenizer(TokenizerLike):
@@ -66,6 +65,30 @@ def test_resolve_tokenizer_args_idempotent(runner_type):
     assert (tokenizer_mode, tokenizer_name, args, kwargs) == resolve_tokenizer_args(
         tokenizer_name, *args, **kwargs
     )
+
+
+@pytest.mark.parametrize("input_kwargs", [{}, {"mistral_format": False}])
+def test_resolve_tokenizer_args_forces_hf_mistral_format_false(input_kwargs):
+    resolved_mode, _, _, kwargs = resolve_tokenizer_args(
+        "mistralai/Mistral-Nemo-Instruct-2407",
+        tokenizer_mode="hf",
+        **input_kwargs,
+    )
+
+    assert resolved_mode == "hf"
+    assert kwargs["mistral_format"] is False
+
+
+def test_resolve_tokenizer_args_rejects_hf_mistral_format_true():
+    with pytest.raises(
+        ValueError,
+        match="mistral_format=True is not supported with tokenizer_mode='hf'",
+    ):
+        resolve_tokenizer_args(
+            "mistralai/Mistral-Nemo-Instruct-2407",
+            tokenizer_mode="hf",
+            mistral_format=True,
+        )
 
 
 def test_customized_tokenizer():

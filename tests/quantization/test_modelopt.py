@@ -6,6 +6,8 @@ Run `pytest tests/quantization/test_modelopt.py`.
 """
 
 import os
+from contextlib import nullcontext
+from types import SimpleNamespace
 from typing import Any, NoReturn
 from unittest.mock import MagicMock, Mock, patch
 
@@ -17,7 +19,9 @@ from tests.quantization.utils import (
     load_model_without_vllm_runner,
 )
 from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.config.load import LoadConfig
 from vllm.config.model import ModelConfig
+from vllm.config.quantization import QuantizationConfigArgs
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.kernels.linear import (
     FlashInferCuteDslNvFp4W4A16LinearKernel,
@@ -40,12 +44,14 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp8Dynamic,
     kMxfp8Static,
     kNvfp4Dynamic,
+    kNvfp4DynamicToken,
     kNvfp4Static,
 )
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
+from vllm.model_executor.model_loader.weight_utils import get_quant_config
 from vllm.platforms import current_platform
 
 
@@ -113,11 +119,13 @@ def _mixed_precision_config(quantized_layers: dict) -> ModelOptMixedPrecisionCon
     )
 
 
-def test_modelopt_nvfp4_quantizes_parallel_lm_head():
+@pytest.mark.parametrize("moe_activation", [None, "nvfp4_per_token"])
+def test_modelopt_nvfp4_quantizes_parallel_lm_head(moe_activation):
     config = ModelOptNvFp4Config(
         is_checkpoint_nvfp4_serialized=True,
         kv_cache_quant_algo=None,
         exclude_modules=[],
+        quantization_args=QuantizationConfigArgs(moe={"activation": moe_activation}),
     )
 
     method = config.get_quant_method(_mock_lm_head(), prefix="lm_head")
@@ -125,6 +133,53 @@ def test_modelopt_nvfp4_quantizes_parallel_lm_head():
     assert isinstance(method, ModelOptLinearMethod)
     assert method.spec.weight is kNvfp4Static
     assert method.spec.activation is kNvfp4Dynamic
+
+
+def test_modelopt_mxfp8_preserves_per_row_checkpoint_scales(dist_init, monkeypatch):
+    """Standard MXFP8 checkpoints already have one scale row per weight row."""
+    from vllm.model_executor.layers.linear import ReplicatedLinear
+
+    kernel = Mock()
+    kernel.input_quant_key.return_value = None
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.modelopt.init_mxfp8_linear_kernel",
+        lambda **kwargs: kernel,
+    )
+    config = ModelOptMxFp8Config.from_config({"quant_method": "mxfp8"})
+    linear = ReplicatedLinear(64, 64, bias=False, quant_config=config)
+    scales = torch.arange(128, dtype=torch.uint8).reshape(64, 2)
+    linear.weight_scale.weight_loader(linear.weight_scale, scales)
+    assert torch.equal(linear.weight_scale, scales)
+
+
+def test_modelopt_mxfp8_pre_processed_weights_follow_kernel(monkeypatch):
+    """The weight cache daemon can only serve MXFP8 layers whose kernel needs
+    no post-load state beyond the parameters it exports."""
+    from vllm.config.quantization import QuantSpec
+    from vllm.model_executor.kernels.linear.mxfp8 import Mxfp8LinearKernel
+
+    method = ModelOptLinearMethod.__new__(ModelOptLinearMethod)
+    method.spec = QuantSpec(weight=kMxfp8Static, activation=kMxfp8Dynamic)
+    method.kernel = None
+    assert not method.supports_pre_processed_weights
+
+    method.kernel = Mock(spec=Mxfp8LinearKernel)
+    method.kernel.supports_pre_processed_weights = False
+    assert not method.supports_pre_processed_weights
+    method.kernel.supports_pre_processed_weights = True
+    assert method.supports_pre_processed_weights
+
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.modelopt.is_weights_pre_processed",
+        lambda: True,
+    )
+    layer = torch.nn.Module()
+    method.process_weights_after_loading(layer)
+    method.kernel.process_weights_after_loading.assert_not_called()
+
+    method.kernel.supports_pre_processed_weights = False
+    with pytest.raises(RuntimeError, match="pre-processed"):
+        method.process_weights_after_loading(layer)
 
 
 def test_modelopt_fp8_updates_weight_dims_after_transpose():
@@ -324,7 +379,7 @@ def test_modelopt_mixed_precision_composes_gemma4_mappers():
                 "quant_algo": "NVFP4",
                 "group_size": 16,
             },
-            "model.language_model.layers.1.moe.experts.gate_up_proj": {
+            "model.language_model.layers.1.experts.gate_up_proj": {
                 "quant_algo": "NVFP4",
                 "group_size": 16,
             },
@@ -336,10 +391,10 @@ def test_modelopt_mixed_precision_composes_gemma4_mappers():
     )
     config.apply_vllm_mapper(Gemma4ForCausalLM.hf_to_vllm_mapper.get_rename_mapper())
 
-    expected_prefix = "language_model.model.layers.0.moe.experts"
+    expected_prefix = "language_model.model.layers.0.experts"
     assert set(config.quantized_layers) == {
         expected_prefix,
-        "language_model.model.layers.1.moe.gate_up_proj",
+        "language_model.model.layers.1.experts.gate_up_proj",
     }
     assert config._resolve_quant_algo(expected_prefix) == "NVFP4"
 
@@ -641,7 +696,8 @@ def test_modelopt_linear_method_builder_registry_override(monkeypatch):
 @pytest.mark.parametrize(
     ("linear_backend", "kernel_cls"),
     [
-        ("auto", MarlinNvFp4LinearKernel),
+        ("auto", None),
+        ("marlin", MarlinNvFp4LinearKernel),
         ("humming", HummingNvFp4LinearKernel),
         ("flashinfer_cutedsl", FlashInferCuteDslNvFp4W4A16LinearKernel),
     ],
@@ -649,7 +705,7 @@ def test_modelopt_linear_method_builder_registry_override(monkeypatch):
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
 def test_modelopt_w4a16_respects_linear_backend(linear_backend, kernel_cls):
     """W4A16 (`activation=None`) kernel selection honors ``--linear-backend``:
-    ``use_a16=True`` defaults to Marlin, but an explicit backend wins. The
+    ``use_a16=True`` follows platform priorities, but an explicit backend wins. The
     generic method routes this through ``select_linear_kernel``."""
     from vllm.config.quantization import QuantSpec
     from vllm.model_executor.layers.quantization.modelopt import (
@@ -657,7 +713,20 @@ def test_modelopt_w4a16_respects_linear_backend(linear_backend, kernel_cls):
         select_linear_kernel,
     )
 
-    if linear_backend != "auto":
+    if linear_backend == "auto":
+        capability = current_platform.get_device_capability()
+        assert capability is not None
+        cc = capability.to_int()
+        if (
+            cc in (100, 103)
+            and FlashInferCuteDslNvFp4W4A16LinearKernel.is_supported()[0]
+        ):
+            kernel_cls = FlashInferCuteDslNvFp4W4A16LinearKernel
+        elif cc == 90 and HummingNvFp4LinearKernel.is_supported()[0]:
+            kernel_cls = HummingNvFp4LinearKernel
+        else:
+            kernel_cls = MarlinNvFp4LinearKernel
+    else:
         is_supported, reason = kernel_cls.is_supported()
         if not is_supported:
             pytest.skip(reason)
@@ -669,49 +738,6 @@ def test_modelopt_w4a16_respects_linear_backend(linear_backend, kernel_cls):
     with set_current_vllm_config(vllm_config):
         kernel = select_linear_kernel(spec, MagicMock(), rt)
     assert isinstance(kernel, kernel_cls)
-
-
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
-def test_modelopt_linear_exposes_humming_layer_attrs(dist_init, monkeypatch):
-    """``prepare_humming_linear_layer_config`` reads ``output_partition_sizes``
-    and ``has_bias`` straight off the layer, so ``--linear-backend=humming``
-    needs create_weights to leave both there. Nothing else sets
-    ``output_partition_sizes``; ``LinearBase`` sets ``has_bias`` but
-    ``ParallelLMHead`` does not.
-    """
-    from vllm.config.quantization import QuantSpec
-    from vllm.model_executor.layers.quantization import modelopt as mo
-
-    monkeypatch.setattr(
-        mo, "select_linear_kernel", lambda spec, layer, rt, **kwargs: Mock()
-    )
-    monkeypatch.setattr(mo, "expose_input_quant_key", lambda layer, kernel: None)
-
-    def build(layer):
-        method = ModelOptLinearMethod.__new__(ModelOptLinearMethod)
-        method.spec = QuantSpec(weight=kNvfp4Static, activation=None)
-        method.ctx = mo.CkptCtx(group_size=16)
-        method.fmt = mo.FormatScheme()
-        method.wkey = mo.SCHEME_FOR[kNvfp4Static]
-        method.akey = None
-        method.input_dtype = method.out_dtype = torch.bfloat16
-        method.marlin_input_dtype = None
-        method.create_weights(
-            layer, 64, [32, 32], 64, 64, torch.bfloat16, weight_loader=Mock()
-        )
-
-    # ParallelLMHead-style: a bias slot but no has_bias attribute.
-    lm_head = torch.nn.Module()
-    lm_head.register_parameter("bias", None)
-    build(lm_head)
-    assert lm_head.output_partition_sizes == [32, 32]
-    assert lm_head.has_bias is False
-
-    # LinearBase already decided has_bias; we must not overwrite it.
-    linear = torch.nn.Module()
-    linear.has_bias = True
-    build(linear)
-    assert linear.has_bias is True
 
 
 @pytest.mark.parametrize(
@@ -770,6 +796,74 @@ def test_modelopt_nvfp4_moe_dispatches_to_marlin_when_w4a16(
         assert kwargs["activation_key"] is None
     else:
         assert kwargs["activation_key"] is kNvfp4Dynamic
+
+
+@pytest.mark.parametrize("quantization", ["modelopt_fp4", "modelopt_mixed"])
+@pytest.mark.parametrize("per_token", [False, True])
+def test_modelopt_nvfp4_moe_activation_override(quantization, per_token):
+    """Runtime overrides reach NVFP4 configs without changing HF metadata."""
+    hf_config = {
+        "quant_method": "modelopt",
+        "quant_algo": "MIXED_PRECISION"
+        if quantization == "modelopt_mixed"
+        else "NVFP4",
+        "quantized_layers": {"experts": {"quant_algo": "NVFP4"}},
+    }
+    args = (
+        QuantizationConfigArgs(moe={"activation": "nvfp4_per_token"})
+        if per_token
+        else None
+    )
+    config = get_quant_config(
+        Mock(
+            quantization=quantization,
+            quantization_config=args,
+            hf_config=Mock(quantization_config=hf_config),
+        ),
+        LoadConfig(),
+    )
+    if isinstance(config, ModelOptMixedPrecisionConfig):
+        config = config.nvfp4_config
+    assert isinstance(config, ModelOptNvFp4Config)
+    assert config.moe_activation_override == (kNvfp4DynamicToken if per_token else None)
+    assert "_online_quantization_args" not in hf_config
+
+
+@pytest.mark.parametrize(
+    "quant_method,activation,backend,error",
+    [
+        ("NVFP4", kNvfp4DynamicToken, "FLASHINFER_TRTLLM", None),
+        ("W4A16_NVFP4", kNvfp4DynamicToken, "FLASHINFER_TRTLLM", "W4A4 checkpoint"),
+        (
+            "NVFP4",
+            kMxfp8Dynamic,
+            "FLASHINFER_TRTLLM",
+            "Unsupported.*activation override",
+        ),
+        ("NVFP4", kNvfp4DynamicToken, "MARLIN", "requires the FlashInfer TRTLLM"),
+    ],
+)
+def test_modelopt_nvfp4_moe_validates_activation_override(
+    quant_method, activation, backend, error
+):
+    from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import NvFp4MoeBackend
+    from vllm.model_executor.layers.quantization.modelopt import ModelOptNvFp4FusedMoE
+
+    config = ModelOptNvFp4Config(
+        quant_method=quant_method,
+        quantization_args=QuantizationConfigArgs(moe={"activation": activation}),
+    )
+    expected = pytest.raises(ValueError, match=error) if error else nullcontext()
+    with (
+        patch(
+            "vllm.model_executor.layers.quantization.modelopt.select_nvfp4_moe_backend",
+            return_value=(NvFp4MoeBackend[backend], Mock()),
+        ) as select_backend,
+        expected,
+    ):
+        method = ModelOptNvFp4FusedMoE(config, Mock())
+        assert method.per_token_activation
+        assert select_backend.call_args.kwargs["activation_key"] == activation
 
 
 @pytest.mark.parametrize(
@@ -839,6 +933,7 @@ def test_modelopt_mixed_precision_builds_w4a16_sibling_config():
     }
     config = m.ModelOptMixedPrecisionConfig.from_config(hf_quant_config)
 
+    assert isinstance(config, m.ModelOptMixedPrecisionConfig)
     assert config.nvfp4_config.quant_method == "NVFP4"
     assert config.w4a16_nvfp4_config.quant_method == "W4A16_NVFP4"
 
@@ -932,4 +1027,249 @@ def test_modelopt_fp8_pb_wo_rejects_non_128_input():
     with pytest.raises(ValueError, match="in divisible by 128"):
         scheme.create_weights(
             torch.nn.Module(), mo.WEIGHT, mo.CkptCtx(), shapes, Mock()
+        )
+
+
+def _iq2_xs_moe_config(tp_size=1, tp_rank=0):
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+
+    return SimpleNamespace(
+        moe_backend="b12x",
+        in_dtype=torch.bfloat16,
+        activation=MoEActivation.SILU,
+        has_bias=False,
+        swiglu_limit=None,
+        swiglu_alpha=None,
+        swiglu_beta=None,
+        hidden_dim=256,
+        intermediate_size_per_partition=512 // tp_size,
+        tp_rank=tp_rank,
+        moe_parallel_config=SimpleNamespace(
+            use_ep=False,
+            ep_size=1,
+            use_all2all_kernels=False,
+            enable_eplb=False,
+            tp_size=tp_size,
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    "codec,block_size,block_bytes",
+    [("iq2_xs", 256, 74), ("iq2_xxs", 256, 66), ("q8_0", 32, 34)],
+)
+def test_modelopt_mixed_precision_dispatches_iq2_xs_experts(
+    monkeypatch, codec, block_size, block_bytes
+):
+    from vllm.model_executor.layers.fused_moe.b12x import B12xExperts
+    from vllm.model_executor.layers.quantization.modelopt_block_quant import (
+        ModelOptBlockQuantMoEMethod,
+    )
+
+    monkeypatch.setattr(B12xExperts, "_supports_current_device", lambda: True)
+    config = _mixed_precision_config(
+        {
+            "model.language_model.layers.0.mlp.experts": {
+                "quant_algo": codec.upper(),
+                "group_size": block_size,
+                "block_payload_bytes": block_bytes,
+                "packing": "ggml",
+            },
+        }
+    )
+    layer = MagicMock(spec=RoutedExperts)
+    layer.moe_config = _iq2_xs_moe_config()
+    method = config.get_quant_method(
+        layer,
+        "language_model.model.layers.0.mlp.experts",
+    )
+    assert isinstance(method, ModelOptBlockQuantMoEMethod)
+    quant = method.get_fused_moe_quant_config(layer)
+    assert quant.weight_quant_dtype == codec
+    assert quant.quant_dtype is None
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("group_size", 0),
+        ("block_payload_bytes", 75),
+        ("packing", "unknown"),
+    ],
+)
+@pytest.mark.parametrize(
+    "codec,block_size,block_bytes",
+    [("iq2_xs", 256, 74), ("iq2_xxs", 256, 66), ("q8_0", 32, 34)],
+)
+def test_modelopt_block_quant_rejects_incompatible_block_metadata(
+    field, value, codec, block_size, block_bytes
+):
+    recipe = {
+        "quant_algo": codec.upper(),
+        "group_size": block_size,
+        "block_payload_bytes": block_bytes,
+        "packing": "ggml",
+        field: value,
+    }
+    with pytest.raises(ValueError, match=f"unsupported {codec.upper()} block contract"):
+        _mixed_precision_config({"model.layers.0.mlp.experts": recipe})
+
+
+@pytest.mark.parametrize("parallel", ["row", "column"])
+@pytest.mark.parametrize("tp_rank", [0, 1])
+@pytest.mark.parametrize(
+    "codec,block_size,block_bytes",
+    [("iq2_xs", 256, 74), ("iq2_xxs", 256, 66), ("q8_0", 32, 34)],
+)
+def test_modelopt_block_quant_dense_loading_preserves_whole_blocks(
+    monkeypatch, parallel, tp_rank, codec, block_size, block_bytes
+):
+    import vllm.model_executor.parameter as parameter_module
+    import vllm.utils.b12x as b12x_utils
+    from vllm.model_executor.layers.linear import LinearBase
+    from vllm.model_executor.layers.quantization.modelopt_block_quant import (
+        ModelOptBlockQuantLinearMethod,
+    )
+
+    monkeypatch.setattr(
+        b12x_utils,
+        "get_b12x_blockscaled",
+        lambda: SimpleNamespace(
+            BlockQuantLinearWeight=object,
+            is_supported=lambda: True,
+        ),
+    )
+    monkeypatch.setattr(
+        parameter_module, "get_tensor_model_parallel_rank", lambda: tp_rank
+    )
+    monkeypatch.setattr(
+        parameter_module, "get_tensor_model_parallel_world_size", lambda: 2
+    )
+    prefix = "model.layers.1.mixer.shared_experts.up_proj"
+    config = _mixed_precision_config(
+        {
+            prefix: {
+                "quant_algo": codec.upper(),
+                "group_size": block_size,
+                "block_payload_bytes": block_bytes,
+                "packing": "ggml",
+            }
+        }
+    )
+    method = config.get_quant_method(MagicMock(spec=LinearBase), prefix)
+    assert isinstance(method, ModelOptBlockQuantLinearMethod)
+    layer = torch.nn.Module()
+    n, k = (128, 256) if parallel == "row" else (64, 512)
+    method.create_weights(
+        layer, k, [n], 512, 128, torch.bfloat16, weight_loader=lambda *args: None
+    )
+    source = torch.randint(
+        0, 256, (128, 512 // block_size, block_bytes), dtype=torch.uint8
+    )
+    if parallel == "row":
+        layer.weight.load_row_parallel_weight(source)
+        expected = source[
+            :, tp_rank * (256 // block_size) : (tp_rank + 1) * (256 // block_size)
+        ]
+    else:
+        layer.weight.load_column_parallel_weight(source)
+        expected = source[tp_rank * n : (tp_rank + 1) * n]
+    torch.testing.assert_close(layer.weight, expected, atol=0, rtol=0)
+
+
+@pytest.mark.parametrize("tp_size,tp_rank", [(1, 0), (2, 0), (2, 1)])
+@pytest.mark.parametrize("gated", [True, False])
+@pytest.mark.parametrize(
+    "codec,block_size,block_bytes",
+    [("iq2_xs", 256, 74), ("iq2_xxs", 256, 66), ("q8_0", 32, 34)],
+)
+def test_modelopt_block_quant_loads_expert_blocks_with_aligned_tp_slices(
+    monkeypatch,
+    tp_size,
+    tp_rank,
+    gated,
+    codec,
+    block_size,
+    block_bytes,
+):
+    import vllm.model_executor.parameter as parameter_module
+    from vllm.model_executor.layers.fused_moe.b12x import B12xExperts
+    from vllm.model_executor.layers.quantization.modelopt_block_quant import (
+        ModelOptBlockQuantMoEMethod,
+    )
+
+    monkeypatch.setattr(B12xExperts, "_supports_current_device", lambda: True)
+    monkeypatch.setattr(
+        parameter_module, "get_tensor_model_parallel_rank", lambda: tp_rank
+    )
+    monkeypatch.setattr(
+        parameter_module, "get_tensor_model_parallel_world_size", lambda: tp_size
+    )
+    config = _iq2_xs_moe_config(tp_size, tp_rank)
+    if not gated:
+        from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+
+        config.activation = MoEActivation.RELU2_NO_MUL
+    method = ModelOptBlockQuantMoEMethod(config, codec=codec)
+    layer = torch.nn.Module()
+    layer.layer_name = "model.layers.0.mlp.experts"
+    layer.is_fused_checkpoint_transposed = False
+    layer._orient_fused_weight = RoutedExperts._orient_fused_weight
+    layer.get_expert_mapping = lambda **kwargs: (
+        RoutedExperts.build_expert_params_mapping(
+            "gate_proj",
+            "down_proj",
+            "up_proj",
+            num_experts=2,
+            routed_experts_prefix="",
+            **kwargs,
+        )
+    )
+    local_i = 512 // tp_size
+    method.create_weights(layer, 2, 256, local_i, torch.bfloat16)
+    assert layer.w13_weight.shape[1] == local_i * (2 if gated else 1)
+    layer.w13_weight.data.zero_()
+    layer.w2_weight.data.zero_()
+    for shard, name in (
+        ("w1", "w13_weight"),
+        ("w3", "w13_weight"),
+        ("w2", "w2_weight"),
+    ):
+        if shard == "w3" and not gated:
+            continue
+        shape = (
+            (256, 512 // block_size, block_bytes)
+            if shard == "w2"
+            else (512, 256 // block_size, block_bytes)
+        )
+        source = torch.randint(1, 256, shape, dtype=torch.uint8)
+        param = getattr(layer, name)
+        projection = {"w1": "gate", "w3": "up", "w2": "down"}[shard]
+        loaded = list(
+            RoutedExperts.load_weights(
+                layer,
+                [(f"1.{projection}_proj.weight", source)],
+            )
+        )
+        assert loaded == [name]
+        if shard == "w2":
+            expected = source[
+                :,
+                tp_rank * (local_i // block_size) : (tp_rank + 1)
+                * (local_i // block_size),
+            ]
+            actual = param[1]
+        else:
+            expected = source[tp_rank * local_i : (tp_rank + 1) * local_i]
+            offset = 0 if shard == "w1" else local_i
+            actual = param[1, offset : offset + local_i]
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+        assert param[0].count_nonzero() == 0
+    with pytest.raises(ValueError, match="invalid packed tensor"):
+        layer.w2_weight.weight_loader(
+            layer.w2_weight,
+            torch.zeros(256, 512),
+            "w2_weight",
+            "w2",
+            0,
         )

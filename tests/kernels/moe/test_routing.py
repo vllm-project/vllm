@@ -87,6 +87,21 @@ def test_multiple_expert_groups_use_grouped_topk() -> None:
     )
 
     assert isinstance(router, GroupedTopKRouter)
+    assert not router.skip_padding
+
+
+def test_grouped_topk_padding_skip_must_be_enabled() -> None:
+    router = create_fused_moe_router(
+        top_k=4,
+        global_num_experts=128,
+        use_grouped_topk=True,
+        num_expert_group=8,
+        topk_group=4,
+        skip_padding=True,
+    )
+
+    assert isinstance(router, GroupedTopKRouter)
+    assert router.skip_padding
 
 
 def test_degenerate_grouped_config_with_bias_uses_topk_bias() -> None:
@@ -152,6 +167,38 @@ def test_single_expert_group_with_non_unit_scale_uses_grouped_topk() -> None:
     assert isinstance(router, GroupedTopKRouter)
 
 
+def test_sigmoid_bias_routing_with_routed_scale_is_minimax2() -> None:
+    """FlashInfer's MiniMax2 routing applies routed_scaling_factor, so a
+    non-unit scale (MiniMax-M3 uses 2.0) must not block fused routing."""
+    router = create_fused_moe_router(
+        top_k=4,
+        global_num_experts=128,
+        scoring_func="sigmoid",
+        renormalize=True,
+        routed_scaling_factor=2.0,
+        e_score_correction_bias=torch.empty(128),
+    )
+
+    assert isinstance(router, FusedTopKBiasRouter)
+    assert router.routing_method_type == RoutingMethodType.MiniMax2
+
+
+def test_zero_expert_routing_is_unspecified() -> None:
+    """Zero experts are resolved in the router, so kernels with built-in
+    routing must never be selected for them."""
+    router = create_fused_moe_router(
+        top_k=4,
+        global_num_experts=128,
+        scoring_func="sigmoid",
+        renormalize=True,
+        e_score_correction_bias=torch.empty(160),
+        zero_expert_type="identity",
+        num_logical_experts=160,
+    )
+
+    assert router.routing_method_type == RoutingMethodType.Unspecified
+
+
 def setup_eplb_state(
     enable_eplb: bool, global_num_experts: int
 ) -> EplbLayerState | None:
@@ -214,8 +261,7 @@ def assert_routing_results_close(
     rtol: float = 1e-3,
     atol: float = 1e-3,
 ):
-    """
-    Compare routing results, sorting by expert ID first to handle non-deterministic
+    """Compare routing results, sorting by expert ID first to handle non-deterministic
     ordering from sorted=False in topk.
     """
     # Sort both results by expert IDs for consistent comparison
@@ -294,8 +340,7 @@ def assert_aiter_routing_valid(
 def baseline_fused_topk(
     router_logits: torch.Tensor, top_k: int, renormalize: bool
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    Baseline for standard fused top-k routing.
+    """Baseline for standard fused top-k routing.
 
     Algorithm:
     1. Apply softmax to router logits
@@ -320,8 +365,7 @@ def baseline_fused_topk_bias(
     e_score_correction_bias: torch.Tensor,
     routed_scaling_factor: float,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    Baseline for fused top-k with bias correction.
+    """Baseline for fused top-k with bias correction.
 
     Algorithm:
     1. Apply softmax to router logits
@@ -364,8 +408,7 @@ def baseline_grouped_topk(
     e_score_correction_bias: torch.Tensor | None,
     routed_scaling_factor: float,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    Baseline for grouped top-k routing (e.g., DeepSeek).
+    """Baseline for grouped top-k routing (e.g., DeepSeek).
 
     Algorithm:
     1. Apply scoring function (softmax or sigmoid)
@@ -436,8 +479,7 @@ def baseline_grouped_topk(
 def baseline_custom_llama4(
     router_logits: torch.Tensor, top_k: int
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    Baseline for Llama4 custom routing.
+    """Baseline for Llama4 custom routing.
 
     Algorithm:
     1. Select top-k expert indices (without softmax)

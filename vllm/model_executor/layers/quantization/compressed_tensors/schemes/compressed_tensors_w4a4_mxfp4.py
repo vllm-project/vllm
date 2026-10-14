@@ -21,8 +21,7 @@ __all__ = ["CompressedTensorsW4A4Mxfp4"]
 
 
 class CompressedTensorsW4A4Mxfp4(CompressedTensorsScheme):
-    """
-    Compressed tensors scheme for MXFP4.
+    """Compressed tensors scheme for MXFP4.
 
     Supports models quantized with the compressed-tensors mxfp4-pack-quantized
     format.

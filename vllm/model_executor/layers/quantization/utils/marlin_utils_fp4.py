@@ -10,7 +10,6 @@ from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     USE_FP32_REDUCE_DEFAULT,
     get_marlin_input_dtype,
-    marlin_make_workspace_new,
     marlin_pad_dim,
     marlin_pad_qweight,
     marlin_pad_scales,
@@ -42,7 +41,6 @@ def _nvfp4_compute_scale_factor(
     """Compute the power-of-2 scale_factor needed so that all non-zero
     values in marlin_scales * 2^7 are >= 2 after rescaling.
     Returns a Python float (power of 2, >= 1.0)."""
-
     # Since half has a smaller dynamic range compared to bfloat16,
     # no rescaling is applied here if active dtype is half.
     if a_dtype is not None and a_dtype == torch.half:
@@ -76,9 +74,12 @@ def nvfp4_marlin_process_scales(
             given value is used directly. The caller is responsible for
             dividing ``global_scale`` by the returned ``scale_factor`` to
             preserve numerical correctness.
+        a_dtype: dtype of the activations the scales will be used with. None
+            keeps the dtype of ``marlin_scales``.
 
     Returns:
         A tuple of (processed_scales, scale_factor).
+
     """
     if not (marlin_scales >= 0).all():
         logger.warning_once(
@@ -159,7 +160,7 @@ def apply_fp4_marlin_linear(
     weight: torch.Tensor,
     weight_scale: torch.Tensor,
     weight_global_scale: torch.Tensor | None,
-    workspace: torch.Tensor,
+    workspace: torch.Tensor | None,
     size_n: int,
     size_k: int,
     bias: torch.Tensor | None = None,
@@ -194,9 +195,8 @@ def apply_fp4_marlin_linear(
 
         inputs, a_scales = marlin_quant_input(inputs, torch.float8_e4m3fn)
 
-    output = ops.marlin_gemm(
+    output = torch.ops.vllm.marlin_gemm(
         a=inputs,
-        c=None,
         b_q_weight=weight,
         b_bias=bias,
         b_scales=weight_scale,
@@ -204,7 +204,7 @@ def apply_fp4_marlin_linear(
         global_scale=weight_global_scale,
         b_zeros=None,
         workspace=workspace,
-        b_q_type=scalar_types.float4_e2m1f,
+        b_q_type_id=scalar_types.float4_e2m1f.id,
         size_m=reshaped_x.size(0),
         size_n=padded_n,
         size_k=padded_k,
@@ -234,13 +234,6 @@ def prepare_fp4_layer_for_marlin(
     param_dtype = layer.params_dtype
 
     assert layer.weight.shape == (part_size_n, part_size_k // 2)
-
-    device = layer.weight.device
-
-    # WORKSPACE
-    layer.workspace = marlin_make_workspace_new(
-        device, existing=getattr(layer, "workspace", None)
-    )
 
     # WEIGHT
     # Repack weights to marlin format
@@ -387,14 +380,8 @@ def prepare_nvfp4_moe_layer_for_marlin(
             return x
         return torch.nn.functional.pad(x, (0, (padded_N - N) // packing))
 
-    device = w13.device
     param_dtype = layer.params_dtype
     is_a_8bit = input_dtype is not None and input_dtype.itemsize == 1
-
-    # WORKSPACE
-    layer.workspace = marlin_make_workspace_new(
-        device, 4, existing=getattr(layer, "workspace", None)
-    )
 
     # WEIGHT
     # Repack weights to marlin format
@@ -479,12 +466,7 @@ def prepare_moe_fp4_layer_for_marlin(
     k = layer.moe_config.hidden_dim
     n = layer.moe_config.intermediate_size_per_partition
 
-    # WORKSPACE
-    device = layer.w13_weight.device
     param_dtype = layer.params_dtype
-    layer.workspace = marlin_make_workspace_new(
-        device, 4, existing=getattr(layer, "workspace", None)
-    )
     is_a_8bit = input_dtype is not None and input_dtype.itemsize == 1
 
     # WEIGHT

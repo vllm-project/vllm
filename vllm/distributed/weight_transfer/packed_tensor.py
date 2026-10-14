@@ -45,11 +45,12 @@ def unpack_tensor(
         shapes: List of tensor shapes
         dtypes: List of tensor dtypes
         tensor_sizes: List of tensor sizes in bytes
+
     """
     unpacked_tensors = packed_tensor.split(tensor_sizes)
 
     return [
-        (name, tensor.contiguous().view(dtype).view(*shape))
+        (name, tensor.contiguous().view(dtype).view(shape))
         for name, shape, dtype, tensor in zip(names, shapes, dtypes, unpacked_tensors)
     ]
 
@@ -85,6 +86,7 @@ def pack_tensors(
         tensor_list: Pre-existing tensor list to append to (for NCCL
                     multi-buffer reuse). If None, a fresh list is created.
         current_size: Byte count already accumulated in tensor_list
+
     """
     if tensor_list is None:
         tensor_list = []
@@ -103,7 +105,7 @@ def pack_tensors(
 
         name, orig_tensor = item
         # Apply post processing and convert to linearized uint8 tensor
-        tensor = post_iter_func(item).contiguous().view(torch.uint8).view(-1)
+        tensor = post_iter_func(item).contiguous().view(-1).view(torch.uint8)
 
         if tensor.numel() > buffer_size_bytes:
             import warnings
@@ -335,6 +337,7 @@ def packed_ipc_producer(
         buffer_size_bytes: Exact capacity of the reusable IPC buffer.
             Every chunk is guaranteed to fit within this size.  A
             ``ValueError`` is raised if any single tensor exceeds it.
+
     """
     ipc_buffer = torch.empty(buffer_size_bytes, dtype=torch.uint8, device="cuda")
     _, ipc_args = reduce_tensor(ipc_buffer)
@@ -347,7 +350,7 @@ def packed_ipc_producer(
 
     for name, orig_tensor in iterator:
         flat = (
-            post_iter_func((name, orig_tensor)).contiguous().view(torch.uint8).view(-1)
+            post_iter_func((name, orig_tensor)).contiguous().view(-1).view(torch.uint8)
         )
 
         if flat.numel() > buffer_size_bytes:
@@ -463,6 +466,7 @@ def packed_ipc_consumer(
             export so the buffer mapping is opened and released exactly once
             (see ``PackedBufferImporter``). ``None`` builds an ephemeral one,
             which is only safe for single-chunk consumption.
+
     """
     props = torch.cuda.get_device_properties(device_index)
     physical_gpu_id = str(props.uuid)
