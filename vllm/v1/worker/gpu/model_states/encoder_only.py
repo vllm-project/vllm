@@ -15,7 +15,7 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
 )
 from vllm.v1.core.sched.output import NewRequestData
-from vllm.v1.kv_cache_interface import EncoderOnlyAttentionSpec, KVCacheConfig
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.model_states.default import DefaultModelState
@@ -29,7 +29,7 @@ class EncoderOnlyModelState(DefaultModelState):
 
     Encoder attention needs no KV cache: it runs full, bidirectional
     self-attention over each request's tokens in a single forward. Such layers
-    return no ``get_kv_cache_spec`` and therefore never enter
+    return no ``get_kv_cache_config`` and therefore never enter
     ``kv_cache_config.kv_cache_groups``, so the KV-backed attention path never
     builds their metadata. We build their (non-causal) metadata here, keeping
     the normal KV-backed path untouched.
@@ -74,7 +74,7 @@ class EncoderOnlyModelState(DefaultModelState):
             )
             group = groups.get(key)
             if group is None:
-                spec = EncoderOnlyAttentionSpec(
+                spec = AttentionSpec(
                     block_size=cache_config.block_size,
                     num_kv_heads=layer.num_kv_heads,
                     head_size=layer.head_size,
@@ -191,7 +191,10 @@ class EncoderOnlyModelState(DefaultModelState):
         return attn_metadata
 
     def _build_encoder_attn_metadata(
-        self, input_batch: InputBatch, cudagraph_mode: CUDAGraphMode, for_capture: bool
+        self,
+        input_batch: InputBatch,
+        cudagraph_mode: CUDAGraphMode,
+        for_capture: bool,
     ) -> dict[str, Any]:
         if cudagraph_mode == CUDAGraphMode.FULL:
             num_reqs = input_batch.num_reqs_after_padding

@@ -21,7 +21,7 @@ from vllm.tracing import instrument
 from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.engine import ReconfigureDistributedRequest
-from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
+from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheLayerConfig
 from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
 from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
 
@@ -156,8 +156,8 @@ class Executor(ABC):
     def determine_available_memory(self) -> list[int]:  # in bytes
         return self.collective_rpc("determine_available_memory")
 
-    def get_kv_cache_specs(self) -> list[dict[str, KVCacheSpec]]:
-        return self.collective_rpc("get_kv_cache_spec")
+    def get_kv_cache_layer_configs(self) -> list[dict[str, KVCacheLayerConfig]]:
+        return self.collective_rpc("get_kv_cache_layer_configs")
 
     def get_supported_kv_cache_layouts(self) -> list[list[str]]:
         """Layouts each worker's backends support, most preferred first."""

@@ -26,6 +26,7 @@ from vllm.v1.attention.backends.mla.flashmla_sparse import (
     FlashMLASparseBackend,
     _fp8_kv_pages,
 )
+from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
@@ -120,9 +121,25 @@ def test_flashmla_bf16_nope_accepts_packed_manager_blocks():
                 block_stride=len(layers) * page_size,
             )
         ],
-        kv_cache_groups=[KVCacheGroupSpec(layers, spec)],
+        kv_cache_groups=[
+            KVCacheGroupSpec.from_layers(
+                {layer: FullAttentionManager.layer_config(spec) for layer in layers}
+            )
+        ],
     )
-    groups = [[AttentionGroup(FlashMLASparseBackend, layers, spec, 0)]]
+    groups = [
+        [
+            AttentionGroup(
+                FlashMLASparseBackend,
+                layers,
+                spec,
+                0,
+                KVCacheGroupSpec.from_layers(
+                    {layer: FullAttentionManager.layer_config(spec) for layer in layers}
+                ),
+            )
+        ]
+    ]
 
     kernel_block_sizes = prepare_kernel_block_sizes(config, groups)
     caches = allocate_kv_cache(

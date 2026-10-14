@@ -16,7 +16,8 @@ from vllm.v1.attention.backends.utils import (
     mamba_get_block_table_tensor,
     split_decodes_and_prefills,
 )
-from vllm.v1.kv_cache_interface import KVCacheSpec, MambaSpec
+from vllm.v1.core.single_type_kv_cache_manager import MambaManager
+from vllm.v1.kv_cache_interface import KVCacheSpec, MambaSpec, ManagerConfig
 
 
 class LinearAttentionBackend(AttentionBackend):
@@ -50,6 +51,7 @@ class LinearAttentionMetadataBuilder(AttentionMetadataBuilder[LinearAttentionMet
     reorder_batch_threshold: int = 1
 
     _cudagraph_support = AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
+    requires_kv_cache_manager_config = True
 
     def __init__(
         self,
@@ -57,8 +59,12 @@ class LinearAttentionMetadataBuilder(AttentionMetadataBuilder[LinearAttentionMet
         layer_names: list[str],
         vllm_config: VllmConfig,
         device: torch.device,
+        *,
+        kv_cache_manager_config: ManagerConfig,
     ):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+        assert isinstance(kv_cache_manager_config, MambaManager.Config)
+        self.mamba_config = kv_cache_manager_config
 
     def build(
         self,
@@ -72,8 +78,8 @@ class LinearAttentionMetadataBuilder(AttentionMetadataBuilder[LinearAttentionMet
         state_indices_tensor = mamba_get_block_table_tensor(
             common_attn_metadata.block_table_tensor,
             common_attn_metadata.seq_lens,
-            self.kv_cache_spec,
-            self.vllm_config.cache_config.mamba_cache_mode,
+            self.kv_cache_spec.block_size,
+            self.mamba_config,
         )[:, 0]
 
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
@@ -130,8 +136,9 @@ class BailingLinearAttentionMetadataBuilder(LinearAttentionMetadataBuilder):
         layer_names: list[str],
         vllm_config: VllmConfig,
         device: torch.device,
+        **kwargs,
     ):
-        super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+        super().__init__(kv_cache_spec, layer_names, vllm_config, device, **kwargs)
         self.compilation_config: CompilationConfig = vllm_config.compilation_config
         self.num_spec_tokens: int = vllm_config.num_speculative_tokens
         self.use_spec_decode: bool = self.num_spec_tokens > 0
@@ -197,8 +204,8 @@ class BailingLinearAttentionMetadataBuilder(LinearAttentionMetadataBuilder):
         state_indices_tensor = mamba_get_block_table_tensor(
             common_attn_metadata.block_table_tensor,
             common_attn_metadata.seq_lens,
-            self.kv_cache_spec,
-            self.vllm_config.cache_config.mamba_cache_mode,
+            self.kv_cache_spec.block_size,
+            self.mamba_config,
         )
         if state_indices_tensor.dim() == 1:
             state_indices_tensor = state_indices_tensor.unsqueeze(-1)

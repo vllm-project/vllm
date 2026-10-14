@@ -11,7 +11,8 @@ from vllm.model_executor.layers.attention.encoder_only_attention import (
 )
 from vllm.v1.attention.backend import AttentionType
 from vllm.v1.attention.selector import get_attn_backend
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheSpec
+from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
+from vllm.v1.kv_cache_interface import KVCacheLayerConfig
 
 
 class PrefillPrefixLMAttention(Attention):
@@ -70,17 +71,19 @@ class PrefillPrefixLMAttention(Attention):
             **kwargs,
         )
 
-    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec | None:
-        """Tag the KV cache spec as non-causal.
+    def get_kv_cache_config(self, vllm_config: VllmConfig) -> KVCacheLayerConfig | None:
+        """Tag the KV cache config as non-causal.
 
         The layout is identical to a regular decoder full-attention layer, so
-        we reuse the base spec and only flip ``non_causal=True``. The engine
+        we reuse the base config and only flip ``non_causal=True``. The engine
         core reads this flag (across the worker/engine process boundary, via
-        the pickled spec) to disable scheduling features that assume causal
+        the pickled config) to disable scheduling features that assume causal
         attention -- chunked prefill and prefix caching -- which would
         otherwise corrupt the bidirectional prefill of a Prefix LM.
         """
-        spec = super().get_kv_cache_spec(vllm_config)
-        if isinstance(spec, FullAttentionSpec):
-            return replace(spec, non_causal=True)
-        return spec
+        config = super().get_kv_cache_config(vllm_config)
+        if config is not None and config.manager_cls is FullAttentionManager:
+            return replace(
+                config, manager_config=FullAttentionManager.Config(non_causal=True)
+            )
+        return config

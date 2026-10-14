@@ -46,7 +46,8 @@ from vllm.model_executor.utils import (
 from vllm.platforms import current_platform
 from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
-from vllm.v1.kv_cache_interface import MambaSpec
+from vllm.v1.core.single_type_kv_cache_manager import MambaManager
+from vllm.v1.kv_cache_interface import KVCacheLayerConfig
 from vllm.v1.worker.workspace import current_workspace_manager
 
 if current_platform.is_rocm():
@@ -165,14 +166,18 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
     num_heads: int
     conv_size: int
 
-    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> MambaSpec:
-        spec = super().get_kv_cache_spec(vllm_config)
-        assert isinstance(spec, MambaSpec)
+    def get_kv_cache_config(self, vllm_config: VllmConfig) -> KVCacheLayerConfig:
+        layer_config = super().get_kv_cache_config(vllm_config)
+        assert layer_config is not None
+        assert isinstance(layer_config.manager_config, MambaManager.Config)
         alignment = kda_prefill_checkpoint_alignment(self.kda_prefill_backend)
         return replace(
-            spec,
-            num_prefill_checkpoint_blocks=int(alignment is not None),
-            prefill_checkpoint_alignment=alignment,
+            layer_config,
+            manager_config=replace(
+                layer_config.manager_config,
+                num_prefill_checkpoint_blocks=int(alignment is not None),
+                prefill_checkpoint_alignment=alignment,
+            ),
         )
 
     def get_state_dtype(

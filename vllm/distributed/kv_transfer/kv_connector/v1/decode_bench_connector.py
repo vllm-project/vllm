@@ -61,13 +61,11 @@ from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.kv_cache_utils import (
     resolve_dcp_kv_block_size,
 )
+from vllm.v1.core.single_type_kv_cache_manager import CircularBufferManager
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
-    CircularBufferSpec,
     KVCacheSpec,
     KVQuantMode,
-    UniformTypeKVCacheSpecs,
-    iter_layer_specs,
 )
 
 if TYPE_CHECKING:
@@ -111,10 +109,12 @@ def _get_startup_fill_group_ids(kv_cache_config: "KVCacheConfig") -> set[int]:
     """
     group_ids = set()
     for group_idx, group in enumerate(kv_cache_config.kv_cache_groups):
-        spec = group.kv_cache_spec
-        if any(isinstance(s, CircularBufferSpec) for s in iter_layer_specs(spec)):
+        if issubclass(group.manager_cls, CircularBufferManager):
             continue
-        if kv_cache_config.needs_kv_cache_zeroing and isinstance(spec, AttentionSpec):
+        if (
+            kv_cache_config.needs_kv_cache_zeroing
+            and group.manager_cls.zeroes_new_blocks
+        ):
             continue
         group_ids.add(group_idx)
     return group_ids
@@ -258,7 +258,7 @@ class DecodeBenchConnectorScheduler:
         dcp_world_size = vllm_config.parallel_config.decode_context_parallel_size
         self.kv_cache_groups = kv_cache_config.kv_cache_groups
         self.group_block_sizes = tuple(
-            resolve_dcp_kv_block_size(group.kv_cache_spec, dcp_world_size)
+            resolve_dcp_kv_block_size(group, dcp_world_size)
             for group in self.kv_cache_groups
         )
 
@@ -336,11 +336,7 @@ class DecodeBenchConnectorScheduler:
             if group_idx in self._startup_fill_group_ids:
                 block_ids_per_group_list.append([])
                 continue
-            is_circular_buffer = all(
-                isinstance(spec, CircularBufferSpec)
-                for spec in iter_layer_specs(group.kv_cache_spec)
-            )
-            if not is_circular_buffer:
+            if not issubclass(group.manager_cls, CircularBufferManager):
                 num_computed_blocks = cdiv(total_computed_tokens, group_block_size)
                 external_block_start = num_local_computed_tokens // group_block_size
                 assert (
@@ -432,10 +428,7 @@ class DecodeBenchConnectorWorker:
         # Layers whose uint8 KV cache stores plain fp8 values
         self._fp8_dtypes: dict[str, torch.dtype] = {}
         for group in kv_cache_config.kv_cache_groups:
-            for layer_name in group.layer_names:
-                spec = group.kv_cache_spec
-                if isinstance(spec, UniformTypeKVCacheSpecs):
-                    spec = spec.kv_cache_specs[layer_name]
+            for layer_name, spec in group.kv_cache_specs.items():
                 fp8_dtype = _get_fp8_dtype(spec, vllm_config.cache_config.cache_dtype)
                 if fp8_dtype is not None:
                     self._fp8_dtypes[layer_name] = fp8_dtype
@@ -448,10 +441,7 @@ class DecodeBenchConnectorWorker:
         self._zero_fill_group_ids = {
             group_idx
             for group_idx, group in enumerate(kv_cache_config.kv_cache_groups)
-            if any(
-                isinstance(spec, CircularBufferSpec)
-                for spec in iter_layer_specs(group.kv_cache_spec)
-            )
+            if issubclass(group.manager_cls, CircularBufferManager)
         }
         num_zeroed_groups = len(
             self.group_to_layers.keys()

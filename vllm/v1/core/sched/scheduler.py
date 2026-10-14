@@ -53,10 +53,10 @@ from vllm.v1.core.sched.request_queue import (
     create_request_queue,
 )
 from vllm.v1.core.sched.utils import check_stop, remove_all
+from vllm.v1.core.single_type_kv_cache_manager import MambaManager
 from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
-    MambaSpec,
     get_mamba_prefill_checkpoint_position,
     is_mamba_prefill_checkpoint_valid,
 )
@@ -293,10 +293,10 @@ class Scheduler(SchedulerInterface):
         self.prefix_replay_group_ids = tuple(
             group_id
             for group_id, group in enumerate(kv_cache_config.kv_cache_groups)
-            if group.kv_cache_spec.prefix_replay_tokens > 0
+            if group.prefix_replay_tokens > 0
         )
         replay_windows = {
-            kv_cache_config.kv_cache_groups[group_id].kv_cache_spec.prefix_replay_tokens
+            kv_cache_config.kv_cache_groups[group_id].prefix_replay_tokens
             for group_id in self.prefix_replay_group_ids
         }
         assert len(replay_windows) <= 1, (
@@ -353,7 +353,7 @@ class Scheduler(SchedulerInterface):
         self._spec_decode_step_blocks = sum(
             cdiv(num_spec_decode_tokens, manager.block_size)
             for manager in self.kv_cache_manager.coordinator.single_type_managers
-            if not isinstance(manager.kv_cache_spec, MambaSpec)
+            if not isinstance(manager, MambaManager)
         )
         # Bind after construction so connectors can access the cache manager.
         if self.connector is not None:
@@ -411,15 +411,15 @@ class Scheduler(SchedulerInterface):
         # prefill checkpoint alignments instead of selecting the first one.
         self.mamba_prefill_checkpoint_alignment = next(
             (
-                group.kv_cache_spec.prefill_checkpoint_alignment
+                group.manager_config.prefill_checkpoint_alignment
                 for group in kv_cache_config.kv_cache_groups
-                if isinstance(group.kv_cache_spec, MambaSpec)
+                if isinstance(group.manager_config, MambaManager.Config)
             ),
             None,
         )
         self.mamba_has_prefill_checkpoint_blocks = self.has_mamba_layers and all(
-            not isinstance(group.kv_cache_spec, MambaSpec)
-            or group.kv_cache_spec.num_prefill_checkpoint_blocks > 0
+            not isinstance(group.manager_config, MambaManager.Config)
+            or group.manager_config.num_prefill_checkpoint_blocks > 0
             for group in kv_cache_config.kv_cache_groups
         )
         # Fine-grained hits reuse the prompt's hash-aligned Mamba checkpoint.

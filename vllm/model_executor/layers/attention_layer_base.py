@@ -8,7 +8,7 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm.v1.attention.backend import AttentionBackend, AttentionImpl
-from vllm.v1.kv_cache_interface import KVCacheSpec
+from vllm.v1.kv_cache_interface import KVCacheLayerConfig
 
 
 class AttentionLayerBase(ABC):
@@ -38,8 +38,8 @@ class AttentionLayerBase(ABC):
         pass
 
     @abstractmethod
-    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec | None:
-        """Get the KV cache spec for this layer.
+    def get_kv_cache_config(self, vllm_config: VllmConfig) -> KVCacheLayerConfig | None:
+        """Get the KV cache config for this layer.
         May be None if the layer does not need KV cache.
         """
         pass

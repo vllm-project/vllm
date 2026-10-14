@@ -341,7 +341,7 @@ class _ReloadableAttentionLayer(
     def get_attn_backend(self):
         raise NotImplementedError
 
-    def get_kv_cache_spec(self, vllm_config):
+    def get_kv_cache_config(self, vllm_config):
         return None
 
     def process_weights_after_loading(self, act_dtype: torch.dtype) -> None:

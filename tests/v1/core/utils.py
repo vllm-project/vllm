@@ -30,16 +30,22 @@ from vllm.utils.hashing import sha256
 from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.scheduler import Scheduler
-from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
+from vllm.v1.core.single_type_kv_cache_manager import (
+    ChunkedLocalAttentionManager,
+    FullAttentionManager,
+    MambaManager,
+    SlidingWindowManager,
+)
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
+    AttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
+    KVCacheLayerConfig,
     KVCacheSpec,
     KVQuantMode,
     MambaSpec,
+    ManagerConfig,
     MLAAttentionSpec,
-    SlidingWindowSpec,
 )
 from vllm.v1.request import Request
 from vllm.v1.structured_output import StructuredOutputManager
@@ -82,7 +88,7 @@ def create_scheduler(
     use_ec_connector: bool = False,
     ec_role: str | None = None,
     use_v2_model_runner: bool | None = None,
-    kv_cache_spec: KVCacheSpec | None = None,
+    kv_cache_layer_config: KVCacheLayerConfig | None = None,
     runner: RunnerOption = "auto",
     per_request_spec_decode_metrics: str = "none",
     prefill_schedule_interval: int = 1,
@@ -220,20 +226,21 @@ def create_scheduler(
             per_request_spec_decode_metrics=per_request_spec_decode_metrics,
         ),
     )
-    if kv_cache_spec is None:
-        kv_cache_spec = FullAttentionSpec(
-            block_size=block_size,
-            num_kv_heads=1,
-            head_size=1,
-            dtype=torch.float32,
+    if kv_cache_layer_config is None:
+        kv_cache_layer_config = full_layer(
+            AttentionSpec(
+                block_size=block_size,
+                num_kv_heads=1,
+                head_size=1,
+                dtype=torch.float32,
+            )
         )
     kv_cache_config = KVCacheConfig(
         num_blocks=num_blocks,  # A large number of blocks to hold all requests
         kv_cache_tensors=[],
-        kv_cache_groups=[KVCacheGroupSpec(["layer"], kv_cache_spec)],
+        kv_cache_groups=[new_kv_cache_group(["layer"], kv_cache_layer_config)],
     )
     cache_config.num_gpu_blocks = num_blocks
-    register_all_kvcache_specs(vllm_config)
     if scheduler_cls is None:
         scheduler_cls = AsyncScheduler if async_scheduling else Scheduler
     scheduler = scheduler_cls(
@@ -347,37 +354,15 @@ def new_kv_cache_spec(
     head_size=64,
     dtype=torch.float32,
     page_size_padded=None,
-    sliding_window=None,
-    attention_chunk_size=None,
     kv_quant_mode=KVQuantMode.NONE,
 ):
-    return FullAttentionSpec(
+    return AttentionSpec(
         block_size=block_size,
         num_kv_heads=num_kv_heads,
         head_size=head_size,
         dtype=dtype,
         page_size_padded=page_size_padded,
-        sliding_window=sliding_window,
-        attention_chunk_size=attention_chunk_size,
         kv_quant_mode=kv_quant_mode,
-    )
-
-
-def new_sliding_window_spec(
-    block_size=16,
-    num_kv_heads=2,
-    head_size=64,
-    dtype=torch.float32,
-    page_size_padded=None,
-    sliding_window=1,
-):
-    return SlidingWindowSpec(
-        block_size=block_size,
-        num_kv_heads=num_kv_heads,
-        head_size=head_size,
-        dtype=dtype,
-        page_size_padded=page_size_padded,
-        sliding_window=sliding_window,
     )
 
 
@@ -385,8 +370,6 @@ def new_mamba_spec(
     block_size=16,
     shapes=((2, 512), (3, 32, 32)),
     dtypes=(torch.float32, torch.float32),
-    num_speculative_blocks=2,
-    mamba_cache_mode="none",
     page_size_padded=None,
 ):
     return MambaSpec(
@@ -394,8 +377,91 @@ def new_mamba_spec(
         shapes=shapes,
         dtypes=dtypes,
         page_size_padded=page_size_padded,
+    )
+
+
+def full_layer(spec: KVCacheSpec, non_causal: bool = False) -> KVCacheLayerConfig:
+    return FullAttentionManager.layer_config(spec, non_causal=non_causal)
+
+
+def sliding_window_layer(
+    spec: KVCacheSpec, sliding_window: int, **config_kwargs
+) -> KVCacheLayerConfig:
+    return SlidingWindowManager.layer_config(
+        spec, sliding_window=sliding_window, **config_kwargs
+    )
+
+
+def chunked_local_layer(
+    spec: KVCacheSpec, attention_chunk_size: int
+) -> KVCacheLayerConfig:
+    return ChunkedLocalAttentionManager.layer_config(
+        spec, attention_chunk_size=attention_chunk_size
+    )
+
+
+def mamba_layer(
+    spec: MambaSpec, mamba_cache_mode="none", num_speculative_blocks=2, **config_kwargs
+) -> KVCacheLayerConfig:
+    return MambaManager.layer_config(
+        spec,
         mamba_cache_mode=mamba_cache_mode,
         num_speculative_blocks=num_speculative_blocks,
+        **config_kwargs,
+    )
+
+
+def new_kv_cache_layer(sliding_window=None, attention_chunk_size=None, **spec_kwargs):
+    """Attention layer config; the window args pick the manager."""
+    spec = new_kv_cache_spec(**spec_kwargs)
+    if sliding_window is not None:
+        return sliding_window_layer(spec, sliding_window)
+    if attention_chunk_size is not None:
+        return chunked_local_layer(spec, attention_chunk_size)
+    return full_layer(spec)
+
+
+def new_sliding_window_layer(sliding_window=1, **spec_kwargs):
+    return sliding_window_layer(new_kv_cache_spec(**spec_kwargs), sliding_window)
+
+
+def new_mamba_layer(
+    mamba_cache_mode="none", num_speculative_blocks=2, **spec_kwargs
+) -> KVCacheLayerConfig:
+    return mamba_layer(
+        new_mamba_spec(**spec_kwargs),
+        mamba_cache_mode=mamba_cache_mode,
+        num_speculative_blocks=num_speculative_blocks,
+    )
+
+
+def uniform_spec(group: KVCacheGroupSpec) -> KVCacheSpec:
+    """The layout every layer of ``group`` shares."""
+    (spec,) = set(group.kv_cache_specs.values())
+    return spec
+
+
+def new_kv_cache_group(
+    layer_names: list[str],
+    layer: KVCacheLayerConfig | KVCacheSpec,
+    manager_config: ManagerConfig | None = None,
+    **kwargs,
+) -> KVCacheGroupSpec:
+    """Group spec from a layer config, or from a bare spec with the default
+    manager for its type (full attention, or Mamba for ``MambaSpec``)."""
+    if isinstance(layer, KVCacheSpec):
+        manager_cls = (
+            MambaManager if isinstance(layer, MambaSpec) else FullAttentionManager
+        )
+        layer = KVCacheLayerConfig(manager_config or manager_cls.Config(), layer)
+    else:
+        assert manager_config is None
+    return KVCacheGroupSpec(
+        dict.fromkeys(layer_names, layer.spec),
+        layer.manager_config,
+        layer.spec.block_size,
+        layer.spec.dcp_sharded,
+        **kwargs,
     )
 
 

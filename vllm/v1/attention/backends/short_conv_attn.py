@@ -115,8 +115,9 @@ class PleShortConvAttentionMetadataBuilder(ShortConvAttentionMetadataBuilder):
         layer_names: list[str],
         vllm_config: VllmConfig,
         device: torch.device,
+        **kwargs,
     ) -> None:
-        super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+        super().__init__(kv_cache_spec, layer_names, vllm_config, device, **kwargs)
         self.num_spec = self.num_spec_tokens
         self.use_full_cuda_graph = (
             self.compilation_config.cudagraph_mode.has_full_cudagraphs()
@@ -270,8 +271,8 @@ class PleShortConvAttentionMetadataBuilder(ShortConvAttentionMetadataBuilder):
         block_table_tensor = mamba_get_block_table_tensor(
             m.block_table_tensor,
             m.seq_lens,
-            self.kv_cache_spec,
-            self.vllm_config.cache_config.mamba_cache_mode,
+            self.kv_cache_spec.block_size,
+            self.mamba_config,
         )
 
         if query_start_loc.device.type == "cpu":

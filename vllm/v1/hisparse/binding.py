@@ -4,15 +4,21 @@
 
 from collections.abc import Mapping
 from copy import copy
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 import torch
 
 from vllm.config import VllmConfig
+from vllm.v1.core.single_type_kv_cache_manager import (
+    HiSparseHotManager,
+    HiSparseResidentManager,
+)
 from vllm.v1.hisparse.layout import (
     HISPARSE_HOT_SUFFIX,
     HISPARSE_RESIDENT_SUFFIX,
     get_hisparse_kv_cache_groups,
+    is_hisparse_source_layer,
 )
 from vllm.v1.hisparse.runtime import (
     HiSparseCacheHandle,
@@ -23,13 +29,10 @@ from vllm.v1.hisparse.runtime import (
     release_pinned_state,
 )
 from vllm.v1.kv_cache_interface import (
-    HiSparseHotSpec,
-    HiSparseResidentSpec,
+    HiSparsePageSpec,
     KVCacheConfig,
+    KVCacheLayerConfig,
     KVCacheLayout,
-    KVCacheSpec,
-    MLAAttentionSpec,
-    UniformTypeKVCacheSpecs,
     create_kv_cache_views,
 )
 from vllm.v1.worker.utils import allocate_kv_cache, select_common_block_size
@@ -41,23 +44,21 @@ if TYPE_CHECKING:
 
 def resolve_hisparse_specs(
     vllm_config: VllmConfig,
-    kv_cache_spec: dict[str, KVCacheSpec],
+    layer_configs: dict[str, KVCacheLayerConfig],
     attn_layers: Mapping[str, "AttentionLayerBase"],
-) -> dict[str, KVCacheSpec]:
+) -> dict[str, KVCacheLayerConfig]:
     """Resolve a common kernel block size for HiSparse MLA specs, and add the
     resident/hot specs HiSparse derives from them."""
     mla_specs = {
-        name: spec
-        for name, spec in kv_cache_spec.items()
-        if isinstance(spec, MLAAttentionSpec)
+        name: lc for name, lc in layer_configs.items() if is_hisparse_source_layer(lc)
     }
     if not mla_specs:
-        return kv_cache_spec
-    block_sizes = {spec.block_size for spec in mla_specs.values()}
+        return layer_configs
+    block_sizes = {lc.spec.block_size for lc in mla_specs.values()}
     if len(block_sizes) != 1:
         raise ValueError("HiSparse requires one scheduler block size.")
     backends = [attn_layers[name].get_attn_backend() for name in mla_specs]
-    specs = list(mla_specs.values())
+    specs = [lc.spec for lc in mla_specs.values()]
     try:
         block_size = select_common_block_size(block_sizes.pop(), backends, specs)
     except ValueError as error:
@@ -65,17 +66,17 @@ def resolve_hisparse_specs(
             "HiSparse requires a GPU block size supported by every sparse "
             f"attention and indexer backend: {error}"
         ) from error
-    kv_cache_spec = kv_cache_spec | {
-        name: spec.copy_with_new_block_size(block_size)
-        for name, spec in mla_specs.items()
+    layer_configs = layer_configs | {
+        name: replace(lc, spec=lc.spec.copy_with_new_block_size(block_size))
+        for name, lc in mla_specs.items()
     }
-    groups = get_hisparse_kv_cache_groups(vllm_config, kv_cache_spec)
+    groups = get_hisparse_kv_cache_groups(vllm_config, layer_configs)
     assert groups is not None
-    return kv_cache_spec | {
-        layer_name: group.kv_cache_spec
+    return layer_configs | {
+        layer_name: KVCacheLayerConfig(group.manager_config, spec)
         for group in groups
-        if isinstance(group.kv_cache_spec, (HiSparseResidentSpec, HiSparseHotSpec))
-        for layer_name in group.layer_names
+        for layer_name, spec in group.kv_cache_specs.items()
+        if isinstance(spec, HiSparsePageSpec)
     }
 
 
@@ -100,13 +101,9 @@ def allocate_hisparse_kv_caches(
     (host_size,) = {tensor.size for tensor in host_tensors}
     backing = host_pool.allocate(host_size)
     (host_group_id,) = kv_cache_config.host_group_ids
-    host_spec = kv_cache_config.kv_cache_groups[host_group_id].kv_cache_spec
+    host_specs = kv_cache_config.kv_cache_groups[host_group_id].kv_cache_specs
     for tensor in host_tensors:
-        spec = (
-            host_spec.kv_cache_specs[tensor.layers[0]]
-            if isinstance(host_spec, UniformTypeKVCacheSpecs)
-            else host_spec
-        )
+        spec = host_specs[tensor.layers[0]]
         views = create_kv_cache_views(
             backing,
             spec,
@@ -199,7 +196,7 @@ def bind_hisparse_kv_caches(
     resident_groups = [
         (group_id, group)
         for group_id, group in enumerate(kv_cache_config.kv_cache_groups)
-        if isinstance(group.kv_cache_spec, HiSparseResidentSpec)
+        if issubclass(group.manager_cls, HiSparseResidentManager)
     ]
     residency: torch.Tensor | None = None
     if resident_groups:
@@ -227,7 +224,7 @@ def bind_hisparse_kv_caches(
                 byte_offset=byte_offset,
                 block_stride=tensor_config.block_stride,
                 num_blocks=kv_cache_config.num_blocks,
-                block_size=group.kv_cache_spec.block_size,
+                block_size=group.block_size,
                 block_table=residency[:, resident_source_index],
                 slot_mapping=block_tables.slot_mappings[group_id],
             )
@@ -239,7 +236,7 @@ def bind_hisparse_kv_caches(
     hot_backing: torch.Tensor | None = None
     cache_handles: list[HiSparseCacheHandle] = []
     for group_id, group in enumerate(kv_cache_config.kv_cache_groups):
-        if not isinstance(group.kv_cache_spec, HiSparseHotSpec):
+        if not issubclass(group.manager_cls, HiSparseHotManager):
             continue
         for cache_name in group.layer_names:
             assert cache_name.endswith(HISPARSE_HOT_SUFFIX)
@@ -259,7 +256,7 @@ def bind_hisparse_kv_caches(
                 byte_offset=byte_offset,
                 block_stride=tensor_config.block_stride,
                 num_blocks=kv_cache_config.num_blocks,
-                block_size=group.kv_cache_spec.block_size,
+                block_size=group.block_size,
                 block_table=block_tables.input_block_tables[group_id],
             )
             resident = cache_handle.view

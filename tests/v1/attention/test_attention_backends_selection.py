@@ -45,10 +45,10 @@ def test_replayssm_does_not_reserve_speculative_state_blocks(
         num_speculative_tokens=3,
     )
 
-    spec = MambaBase.get_kv_cache_spec(layer, vllm_config)
+    layer_config = MambaBase.get_kv_cache_config(layer, vllm_config)
 
-    assert spec is not None
-    assert spec.num_speculative_blocks == expected_blocks
+    assert layer_config is not None
+    assert layer_config.manager_config.num_speculative_blocks == expected_blocks
 
 
 @pytest.mark.parametrize(

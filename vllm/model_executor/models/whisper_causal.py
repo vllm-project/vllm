@@ -38,7 +38,8 @@ from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
 from vllm.v1.attention.backends.rocm_attn import RocmAttentionBackend
 from vllm.v1.attention.backends.triton_attn import TritonAttentionBackend
 from vllm.v1.attention.selector import get_attn_backend
-from vllm.v1.kv_cache_interface import AttentionSpec, SlidingWindowSpec
+from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheLayerConfig
 
 from .utils import make_layers
 
@@ -125,7 +126,6 @@ class WhisperCausalConv1d(nn.Conv1d):
 def create_whisper_attention_backend_with_block_pooling(
     underlying_attn_backend: type[AttentionBackend],
     block_pool_size: int,
-    sliding_window: int | None = None,
 ) -> type[AttentionBackend]:
     prefix = "WhisperCausalAttentionWithBlockPooling_"
     underlying_builder = underlying_attn_backend.get_builder_cls()
@@ -154,13 +154,6 @@ def create_whisper_attention_backend_with_block_pooling(
                 block_size=kv_cache_spec.block_size * block_pool_size,
                 tokens_per_state=1,
             )
-            if isinstance(kv_cache_spec, SlidingWindowSpec):
-                # The manager keeps `sliding_window` in pooled units; the kernel
-                # runs on the expanded sequence, so give it the model's window in
-                # unpooled units (`get_kv_cache_spec` sizes the pooled window so
-                # this window always stays resident).
-                assert sliding_window is not None
-                kv_cache_spec = replace(kv_cache_spec, sliding_window=sliding_window)
             super().__init__(kv_cache_spec, layer_names, vllm_config, device)
             # Override model_config-derived values with the actual
             # encoder values from kv_cache_spec
@@ -388,7 +381,7 @@ class WhisperCausalAttentionWithBlockPooling(Attention):
             attn_type=attn_type,
         )
         attn_backend = create_whisper_attention_backend_with_block_pooling(
-            underlying_attn_backend, block_pool_size, per_layer_sliding_window
+            underlying_attn_backend, block_pool_size
         )
 
         super().__init__(
@@ -408,22 +401,22 @@ class WhisperCausalAttentionWithBlockPooling(Attention):
             **extra_impl_args,
         )
 
-    def get_kv_cache_spec(self, vllm_config: VllmConfig):
-        kv_cache_spec = super().get_kv_cache_spec(vllm_config)
-        assert isinstance(kv_cache_spec, AttentionSpec)
-        kv_cache_spec = replace(
-            kv_cache_spec,
-            tokens_per_state=Fraction(1, self.block_pool_size),
-        )
-        if isinstance(kv_cache_spec, SlidingWindowSpec):
+    def get_kv_cache_config(self, vllm_config: VllmConfig) -> KVCacheLayerConfig:
+        config = super().get_kv_cache_config(vllm_config)
+        assert config is not None
+        assert isinstance(config.spec, AttentionSpec)
+        config = config.replace_spec(tokens_per_state=Fraction(1, self.block_pool_size))
+        sw_config = config.manager_config
+        if isinstance(sw_config, SlidingWindowManager.Config):
             # The manager counts blocks in pooled units, so express the window in
             # pooled units to avoid reserving `block_pool_size`x too many blocks.
             # The `+1` is an eviction margin: block-aligned eviction only keeps
             # `pooled - 1` pooled tokens, so this guarantees the kernel's full
             # (unpooled) window still stays resident.
-            pooled = cdiv(kv_cache_spec.sliding_window, self.block_pool_size) + 1
-            kv_cache_spec = replace(kv_cache_spec, sliding_window=pooled)
-        return kv_cache_spec
+            pooled = cdiv(sw_config.sliding_window, self.block_pool_size) + 1
+            sw_config = replace(sw_config, sliding_window=pooled)
+            config = replace(config, manager_config=sw_config)
+        return config
 
 
 class WhisperCausalAttention(nn.Module):

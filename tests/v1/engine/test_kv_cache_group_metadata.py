@@ -6,11 +6,12 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from tests.v1.core.utils import new_kv_cache_group
 from vllm.v1.core.kv_cache_manager import KVCacheManager
+from vllm.v1.core.single_type_kv_cache_manager import MambaManager
 from vllm.v1.engine.core import EngineCore
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
-    KVCacheGroupSpec,
     MambaSpec,
     MLAAttentionSpec,
 )
@@ -32,14 +33,15 @@ def _make_engine_core_with_dcp_manager() -> EngineCore:
         block_size=BASE_BLOCK_SIZE,
         shapes=((1, 1),),
         dtypes=(torch.float32,),
-        mamba_cache_mode="align",
     )
     config = KVCacheConfig(
         num_blocks=32,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(["mla"], mla_spec),
-            KVCacheGroupSpec(["mamba"], mamba_spec),
+            new_kv_cache_group(["mla"], mla_spec),
+            new_kv_cache_group(
+                ["mamba"], mamba_spec, MambaManager.Config(mamba_cache_mode="align")
+            ),
         ],
     )
     manager = KVCacheManager(

@@ -11,14 +11,9 @@ from vllm.v1.core.kv_cache_utils import (
 )
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
-    FullAttentionSpec,
     KVCacheGroupRole,
     KVCacheSpec,
     MLAAttentionSpec,
-    SlidingWindowMLASpec,
-    SlidingWindowSpec,
-    UniformTypeKVCacheSpecs,
-    iter_layer_specs,
 )
 from vllm.v1.kv_offload.config import (
     OffloadingCacheConfig,
@@ -43,19 +38,6 @@ def get_offloading_group_ids(kv_cache_config: "KVCacheConfig") -> tuple[int, ...
     )
 
 
-def _group_kv_bytes_per_block(group: "KVCacheGroupSpec") -> int:
-    """Return the physical bytes occupied by one block of a cache group.
-
-    Worker configs may retain ``UniformTypeKVCacheSpecs`` while scheduler
-    configs flatten that wrapper to one representative per-layer spec.  Keep
-    the result invariant across those two representations.
-    """
-    spec = group.kv_cache_spec
-    if isinstance(spec, UniformTypeKVCacheSpecs):
-        return spec.page_size_bytes
-    return spec.page_size_bytes * len(group.layer_names)
-
-
 def build_offloading_config(
     vllm_config: "VllmConfig",
     kv_cache_config: "KVCacheConfig",
@@ -78,8 +60,7 @@ def build_offloading_config(
         OffloadingGroupConfig(
             group_id=group_id,
             tokens_per_block=resolve_dcp_kv_block_size(
-                group.kv_cache_spec,
-                parallel_config.decode_context_parallel_size,
+                group, parallel_config.decode_context_parallel_size
             ),
             layer_names=tuple(group.layer_names),
         )
@@ -147,13 +128,19 @@ def build_offloading_config(
         worker_kv_bytes_per_block = total_gpu_kv_bytes // kv_cache_config.num_blocks
     elif kv_cache_config.num_blocks > 0:
         worker_kv_bytes_per_block = sum(
-            _group_kv_bytes_per_block(group) for _, group in selected_groups
+            group.page_size_bytes for _, group in selected_groups
         )
 
-    single_group_spec = (
-        kv_cache_config.kv_cache_groups[0].kv_cache_spec
+    single_group = (
+        kv_cache_config.kv_cache_groups[0]
         if len(kv_cache_config.kv_cache_groups) == 1
         else None
+    )
+    single_group_specs = (
+        set(single_group.kv_cache_specs.values()) if single_group else set()
+    )
+    single_group_spec = (
+        single_group_specs.pop() if len(single_group_specs) == 1 else None
     )
     replicated_layout = (
         vllm_config.model_config.use_mla
@@ -178,8 +165,9 @@ def build_offloading_config(
     # layout are all excluded.
     is_parallelism_agnostic = (
         not vllm_config.use_v2_model_runner
-        and single_group_spec is not None
-        and isinstance(single_group_spec, FullAttentionSpec)
+        and single_group is not None
+        and single_group.is_full_attention
+        and isinstance(single_group_spec, AttentionSpec)
         and not isinstance(single_group_spec, MLAAttentionSpec)
         and single_group_spec.num_kv_heads * parallel_config.tensor_parallel_size
         == vllm_config.model_config.get_total_num_kv_heads()
@@ -194,35 +182,34 @@ def build_offloading_config(
         tp_size = parallel_config.tensor_parallel_size
         total_kv_heads = vllm_config.model_config.get_total_num_kv_heads()
 
-        def spec_certifiable(spec: KVCacheSpec) -> bool:
+        def spec_certifiable(group: "KVCacheGroupSpec", spec: KVCacheSpec) -> bool:
             """Conservative static mirror of _layer_mapping's per-layer checks."""
             if not isinstance(spec, AttentionSpec):
                 return False
             if spec.kv_quant_mode.is_per_token_head:
                 return False
-            if type(spec) is MLAAttentionSpec:
+            if type(spec) is MLAAttentionSpec and group.is_full_attention:
                 return (
                     spec.tokens_per_state == 1
                     and spec.real_page_size_bytes % spec.block_size == 0
                 )
-            if isinstance(spec, (SlidingWindowMLASpec, MLAAttentionSpec)):
+            if isinstance(spec, MLAAttentionSpec):
                 return False
-            if not isinstance(spec, (FullAttentionSpec, SlidingWindowSpec)):
+            if not (group.is_full_attention or group.sliding_window is not None):
                 return False
             return (
                 total_kv_heads % tp_size == 0 or tp_size % total_kv_heads == 0
             ) and spec.num_kv_heads == max(1, total_kv_heads // tp_size)
 
-        # UniformTypeKVCacheSpecs groups (e.g. MLA plus its DSA indexer) hold
-        # one spec per layer; certify per layer, as the mapping derivation does.
+        # Certify per layer, as the mapping derivation does.
         layer_specs = [
-            spec
+            (group, spec)
             for group in kv_cache_config.kv_cache_groups
-            for spec in iter_layer_specs(group.kv_cache_spec)
+            for spec in group.kv_cache_specs.values()
         ]
         is_parallelism_agnostic = (
             len(layer_specs) > 0
-            and all(spec_certifiable(spec) for spec in layer_specs)
+            and all(spec_certifiable(group, spec) for group, spec in layer_specs)
             and parallel_config.decode_context_parallel_size == 1
             and parallel_config.prefill_context_parallel_size == 1
             and parallel_config.world_size == tp_size
@@ -234,7 +221,7 @@ def build_offloading_config(
             and all(
                 type(spec) is MLAAttentionSpec
                 for _, group in selected_groups
-                for spec in iter_layer_specs(group.kv_cache_spec)
+                for spec in group.kv_cache_specs.values()
             )
             and parallel_config.nnodes_within_dp == 1
             and (

@@ -12,7 +12,11 @@ from vllm.models.glm5next.common.attention import Glm5NextIndexerCache
 from vllm.v1.attention.backend import AttentionBackend, MultipleOf
 from vllm.v1.attention.backends.mla import indexer as indexer_mod
 from vllm.v1.attention.backends.mla.indexer import Glm5NextIndexerBackend
-from vllm.v1.kv_cache_interface import MLAAttentionSpec
+from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
+from vllm.v1.kv_cache_interface import (
+    KVCacheGroupSpec,
+    MLAAttentionSpec,
+)
 from vllm.v1.worker.utils import prepare_kernel_block_sizes, select_common_block_size
 
 pytestmark = pytest.mark.cpu_test
@@ -44,7 +48,7 @@ def _kpool_storage_spec(manager_block: int) -> MLAAttentionSpec:
             cache_config=SimpleNamespace(block_size=manager_block),
             index_kpool=INDEX_KPOOL,
         )
-        spec = cache.get_kv_cache_spec(VllmConfig())
+        spec = cache.get_kv_cache_config(VllmConfig()).spec
     assert isinstance(spec, MLAAttentionSpec)
     return spec
 
@@ -52,8 +56,9 @@ def _kpool_storage_spec(manager_block: int) -> MLAAttentionSpec:
 def _prepare(
     spec: MLAAttentionSpec, backends: list[type[AttentionBackend]]
 ) -> list[int]:
+    layer_config = FullAttentionManager.layer_config(spec)
     kv_cache_config = SimpleNamespace(
-        kv_cache_groups=[SimpleNamespace(kv_cache_spec=spec, layer_names=[])],
+        kv_cache_groups=[KVCacheGroupSpec.from_layers({"layer": layer_config})],
         kv_cache_tensors=[],
     )
     attn_groups = [

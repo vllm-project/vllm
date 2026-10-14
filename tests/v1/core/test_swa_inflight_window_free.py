@@ -12,7 +12,11 @@ back), so `allocate_slots` frees on the processed-token basis:
 import torch
 
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.kv_cache_interface import ChunkedLocalAttentionSpec, SlidingWindowSpec
+from vllm.v1.core.single_type_kv_cache_manager import (
+    ChunkedLocalAttentionManager,
+    SlidingWindowManager,
+)
+from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.outputs import ModelRunnerOutput
 
 from .utils import create_requests, create_scheduler, mock_kv
@@ -48,11 +52,13 @@ def _create_swa_scheduler(async_scheduling: bool):
     return create_scheduler(
         block_size=BLOCK_SIZE,
         async_scheduling=async_scheduling,
-        kv_cache_spec=SlidingWindowSpec(
-            block_size=BLOCK_SIZE,
-            num_kv_heads=1,
-            head_size=1,
-            dtype=torch.float32,
+        kv_cache_layer_config=SlidingWindowManager.layer_config(
+            AttentionSpec(
+                block_size=BLOCK_SIZE,
+                num_kv_heads=1,
+                head_size=1,
+                dtype=torch.float32,
+            ),
             sliding_window=SLIDING_WINDOW,
         ),
     )
@@ -62,11 +68,13 @@ def _create_chunked_scheduler(async_scheduling: bool):
     return create_scheduler(
         block_size=BLOCK_SIZE,
         async_scheduling=async_scheduling,
-        kv_cache_spec=ChunkedLocalAttentionSpec(
-            block_size=BLOCK_SIZE,
-            num_kv_heads=1,
-            head_size=1,
-            dtype=torch.float32,
+        kv_cache_layer_config=ChunkedLocalAttentionManager.layer_config(
+            AttentionSpec(
+                block_size=BLOCK_SIZE,
+                num_kv_heads=1,
+                head_size=1,
+                dtype=torch.float32,
+            ),
             attention_chunk_size=CHUNK_SIZE,
         ),
     )
@@ -149,20 +157,20 @@ def test_swa_free_immediate_when_sync():
 
 
 def test_swa_admission_cap_accounts_for_overlapping_batches():
-    spec = SlidingWindowSpec(
-        block_size=16,
-        num_kv_heads=1,
-        head_size=1,
-        dtype=torch.float32,
-        sliding_window=1024,
-    )
-    base = spec.max_admission_blocks_per_request(
-        max_in_flight_tokens=1024, max_model_len=16384
+    config = SlidingWindowManager.Config(sliding_window=1024)
+    base = SlidingWindowManager.max_admission_blocks(
+        config,
+        16,
+        max_in_flight_tokens=1024,
+        max_model_len=16384,
     )
     # (1024 - 1 + 1024) tokens -> 128 blocks, +1 for window misalignment.
     assert base == 129
-    overlapped = spec.max_admission_blocks_per_request(
-        max_in_flight_tokens=2 * 1024, max_model_len=16384
+    overlapped = SlidingWindowManager.max_admission_blocks(
+        config,
+        16,
+        max_in_flight_tokens=2 * 1024,
+        max_model_len=16384,
     )
     # One extra in-flight chunk is held back: (1024 - 1 + 2 * 1024) tokens.
     assert overlapped == 193
@@ -202,20 +210,20 @@ def test_chunked_local_free_waits_for_in_flight_step():
 
 
 def test_chunked_local_admission_cap_accounts_for_overlapping_batches():
-    spec = ChunkedLocalAttentionSpec(
-        block_size=16,
-        num_kv_heads=1,
-        head_size=1,
-        dtype=torch.float32,
-        attention_chunk_size=1024,
-    )
-    base = spec.max_admission_blocks_per_request(
-        max_in_flight_tokens=1024, max_model_len=16384
+    config = ChunkedLocalAttentionManager.Config(attention_chunk_size=1024)
+    base = ChunkedLocalAttentionManager.max_admission_blocks(
+        config,
+        16,
+        max_in_flight_tokens=1024,
+        max_model_len=16384,
     )
     # (1024 + 1024) tokens -> 128 blocks.
     assert base == 128
-    overlapped = spec.max_admission_blocks_per_request(
-        max_in_flight_tokens=2 * 1024, max_model_len=16384
+    overlapped = ChunkedLocalAttentionManager.max_admission_blocks(
+        config,
+        16,
+        max_in_flight_tokens=2 * 1024,
+        max_model_len=16384,
     )
     # One extra in-flight chunk is held back: (1024 + 2 * 1024) tokens.
     assert overlapped == 192
@@ -231,11 +239,13 @@ def test_connector_finish_frees_on_settled_basis():
         block_size=BLOCK_SIZE,
         async_scheduling=True,
         use_kv_connector=mock_kv(matched_tokens=0, is_async=False),
-        kv_cache_spec=SlidingWindowSpec(
-            block_size=BLOCK_SIZE,
-            num_kv_heads=1,
-            head_size=1,
-            dtype=torch.float32,
+        kv_cache_layer_config=SlidingWindowManager.layer_config(
+            AttentionSpec(
+                block_size=BLOCK_SIZE,
+                num_kv_heads=1,
+                head_size=1,
+                dtype=torch.float32,
+            ),
             sliding_window=SLIDING_WINDOW,
         ),
     )

@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass, replace
+from typing import TYPE_CHECKING
 
 import torch
 
@@ -16,6 +17,9 @@ from vllm.v1.kv_cache_interface import (
     get_mamba_prefill_checkpoint_position,
     is_mamba_prefill_checkpoint_valid,
 )
+
+if TYPE_CHECKING:
+    from vllm.v1.core.single_type_kv_cache_manager import MambaManager
 
 
 def compute_mamba_prefill_checkpoints(
@@ -96,18 +100,24 @@ class MambaPrefillCheckpointMetadata:
 class MambaPrefillCheckpointBuilder:
     """Build backend-neutral prefill checkpoint locations."""
 
-    def __init__(self, vllm_config: VllmConfig, kv_cache_spec: MambaSpec) -> None:
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        kv_cache_spec: MambaSpec,
+        mamba_config: "MambaManager.Config",
+    ) -> None:
         self.vllm_config = vllm_config
         self.kv_cache_spec = kv_cache_spec
+        self.mamba_config = mamba_config
 
     def build(
         self,
         m: CommonAttentionMetadata,
         request_rows: list[int],
     ) -> MambaPrefillCheckpointMetadata | None:
-        if self.vllm_config.cache_config.mamba_cache_mode != "align":
+        if self.mamba_config.mamba_cache_mode != "align":
             return None
-        if self.kv_cache_spec.num_prefill_checkpoint_blocks == 0:
+        if self.mamba_config.num_prefill_checkpoint_blocks == 0:
             return None
         cache_config = self.vllm_config.cache_config
         hash_block_size = cache_config.hash_block_size
@@ -129,7 +139,7 @@ class MambaPrefillCheckpointBuilder:
             query_lens,
             hash_block_size=hash_block_size,
             mamba_block_size=block_size,
-            checkpoint_alignment=self.kv_cache_spec.prefill_checkpoint_alignment,
+            checkpoint_alignment=self.mamba_config.prefill_checkpoint_alignment,
             drop_eagle_block=drop_eagle_block,
             cache_hit_alignment_tokens=cache_hit_alignment_tokens,
         )

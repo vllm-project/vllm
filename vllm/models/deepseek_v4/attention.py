@@ -63,8 +63,9 @@ from vllm.v1.attention.backends.mla.indexer import (
     get_max_prefill_buffer_size,
 )
 from vllm.v1.attention.backends.mla.sparse_swa import DeepseekV4SWACache
+from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
 from vllm.v1.kv_cache_interface import (
-    KVCacheSpec,
+    KVCacheLayerConfig,
     MLAAttentionSpec,
     get_kv_quant_mode,
 )
@@ -852,7 +853,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
     def get_attn_backend(self) -> type[AttentionBackend]:
         return self.backend_cls
 
-    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec | None:
+    def get_kv_cache_config(self, vllm_config: VllmConfig) -> KVCacheLayerConfig | None:
         if (
             self.compress_ratio <= 1
         ):  # SWA part. Allocated separately as DeepseekV4SWACache.
@@ -861,7 +862,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         # alignment; plain bf16 / per-tensor fp8 rows use natural element-size
         # pages.
         uses_fp8_ds_mla_layout = self.kv_cache_dtype == "fp8_ds_mla"
-        return MLAAttentionSpec(
+        spec = MLAAttentionSpec(
             block_size=vllm_config.cache_config.block_size,
             num_kv_heads=1,
             max_tp_shards=1,
@@ -876,6 +877,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             # head_size stays semantic (512).
             state_content_bytes=584 if uses_fp8_ds_mla_layout else None,
         )
+        return FullAttentionManager.layer_config(spec)
 
 
 class DeepseekV4IndexerCache(torch.nn.Module, AttentionLayerBase):
@@ -903,11 +905,11 @@ class DeepseekV4IndexerCache(torch.nn.Module, AttentionLayerBase):
         # [B, H=1, N, C] -> [B, N, C]
         self.kv_cache = kv_cache.squeeze(1)
 
-    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
+    def get_kv_cache_config(self, vllm_config: VllmConfig) -> KVCacheLayerConfig:
         # head_dim already carries the fp8 scale padding
         # tokens_per_state=1 for V3.2, >1 for DeepseekV4; same cache layout.
         uses_fp8_ds_mla_layout = vllm_config.cache_config.cache_dtype == "fp8_ds_mla"
-        return MLAAttentionSpec(
+        spec = MLAAttentionSpec(
             block_size=self.cache_config.block_size,
             num_kv_heads=1,
             max_tp_shards=1,
@@ -917,6 +919,7 @@ class DeepseekV4IndexerCache(torch.nn.Module, AttentionLayerBase):
             # 576B for FlashMLA packing; 512B for FlashInfer sparse (#44577).
             alignment=576 if uses_fp8_ds_mla_layout else 512,
         )
+        return FullAttentionManager.layer_config(spec)
 
     def forward(self): ...
 

@@ -29,7 +29,7 @@ from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.attention.backends.utils import record_kv_cache_layout
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
+    AttentionSpec,
     KVCacheLayout,
     MLAAttentionSpec,
     compute_layer_kv_cache_shape_bytes,
@@ -59,8 +59,8 @@ def _layer_stride_order(layout: KVCacheLayout, ndim: int) -> tuple[int, ...]:
     return stride_order
 
 
-def _main_spec() -> FullAttentionSpec:
-    return FullAttentionSpec(
+def _main_spec() -> AttentionSpec:
+    return AttentionSpec(
         block_size=BLOCK_SIZE,
         num_kv_heads=NUM_KV_HEADS,
         head_size=HEAD_DIM,
@@ -1728,7 +1728,7 @@ def test_aiter_sparse_pa_layout_contract(monkeypatch, layout):
 
     nb, h = 3, 1
     cache_dtype = current_platform.fp8_dtype()
-    spec = FullAttentionSpec(
+    spec = AttentionSpec(
         block_size=BLOCK_SIZE,
         num_kv_heads=h,
         head_size=HEAD_DIM,
@@ -2777,7 +2777,7 @@ def test_decode_wrong_layout_breaks_parity():
 
 def test_main_cache_byte_identical_through_production_allocator():
     """AC-2: drive the real allocator (`create_kv_cache_views`) for the M3 main
-    `FullAttentionSpec` under HND and assert the backend-visible view has the
+    `AttentionSpec` under HND and assert the backend-visible view has the
     same shape, stride, and storage offset as the packed-HND allocation."""
     nb = 4
     spec = _main_spec()
@@ -2805,7 +2805,7 @@ def test_padded_main_cache_is_flagged():
 
     stride_order = KVCacheLayout.LBHNC.layer_view_order
 
-    good = FullAttentionSpec(
+    good = AttentionSpec(
         block_size=BLOCK_SIZE,
         num_kv_heads=NUM_KV_HEADS,
         head_size=HEAD_DIM,
@@ -2814,7 +2814,7 @@ def test_padded_main_cache_is_flagged():
     )
     _require_unpadded_block_first(good, stride_order)  # passes
 
-    padded = FullAttentionSpec(
+    padded = AttentionSpec(
         block_size=BLOCK_SIZE,
         num_kv_heads=NUM_KV_HEADS,
         head_size=HEAD_DIM,

@@ -168,7 +168,7 @@ def test_paged_prefill_indices_match_gathered_prefill(
     from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
         build_prefill_topk_ragged_indices,
     )
-    from vllm.v1.kv_cache_interface import SlidingWindowMLASpec
+    from vllm.v1.kv_cache_interface import MLAAttentionSpec
 
     rocm = importlib.import_module(f"vllm.models.{model}.amd.rocm")
     builder_cls = (
@@ -207,12 +207,11 @@ def test_paged_prefill_indices_match_gathered_prefill(
             "sliding_window": window,
         },
     )
-    swa_spec = SlidingWindowMLASpec(
+    swa_spec = MLAAttentionSpec(
         block_size=block_size,
         num_kv_heads=1,
         head_size=512,
         dtype=torch.bfloat16,
-        sliding_window=window,
         cache_dtype_str="fp8_ds_mla",
         model_version="deepseek_v4",
     )

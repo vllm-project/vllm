@@ -30,6 +30,7 @@ import torch
 
 from vllm.model_executor.layers.mamba import mamba_utils as layer_mamba_utils
 from vllm.platforms import current_platform
+from vllm.v1.core.single_type_kv_cache_manager import MambaManager
 from vllm.v1.worker import mamba_utils as worker_mamba_utils
 from vllm.v1.worker.mamba_utils import (
     _TEMPORAL_TILES,
@@ -394,7 +395,10 @@ def _make_preprocess_case(token_bias):
 @_parametrize("token_bias", [1, 2])
 def test_preprocess_fused_align_matches_scalar_bookkeeping(monkeypatch, token_bias):
     block_size = 4
-    mamba_spec = SimpleNamespace(block_size=block_size, num_speculative_blocks=1)
+    mamba_spec = SimpleNamespace(block_size=block_size)
+    mamba_config = MambaManager.Config(
+        mamba_cache_mode="align", num_speculative_blocks=1
+    )
     # Fakes stand in for real config/context objects. The fused path tests
     # below only touch the attributes preprocess_mamba actually reads.
     cache_config: Any = SimpleNamespace(enable_prefix_caching=True)
@@ -432,6 +436,7 @@ def test_preprocess_fused_align_matches_scalar_bookkeeping(monkeypatch, token_bi
     scalar_copy_bufs: Any = SimpleNamespace(
         mamba_group_ids=[0],
         mamba_spec=mamba_spec,
+        mamba_config=mamba_config,
         offset=0,
     )
     worker_mamba_utils.preprocess_mamba(
@@ -450,6 +455,7 @@ def test_preprocess_fused_align_matches_scalar_bookkeeping(monkeypatch, token_bi
     fused_copy_bufs: Any = SimpleNamespace(
         mamba_group_ids=[0],
         mamba_spec=mamba_spec,
+        mamba_config=mamba_config,
         offset=0,
     )
     worker_mamba_utils.preprocess_mamba(
