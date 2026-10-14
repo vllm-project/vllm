@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 import numpy as np
 
 from vllm.v1.kv_offload.base import (
+    ConfigInfoMapping,
     Locality,
     LookupResult,
     Medium,
@@ -35,6 +36,8 @@ if TYPE_CHECKING:
 
 # Type alias for job IDs used in async transfer tracking
 JobId = int
+
+TIER_LABEL = "tier"
 
 
 class TieringOffloadingMetrics:
@@ -370,3 +373,23 @@ class SecondaryTierManager(ABC):
     def get_stats(self) -> "OffloadingConnectorStats | None":
         """Return and reset metric observations collected by this tier."""
         return None
+
+    @classmethod
+    def config_info_keys(cls, tier_config: dict[str, Any]) -> tuple[str, ...]:
+        """Return the info metric label names of this tier.
+
+        TieringOffloadingSpec merges the names of all tiers and adds
+        TIER_LABEL, so a tier must not declare it. See ConfigInfo.
+
+        Args:
+            tier_config: Configuration dict of this tier.
+
+        """
+        return ()
+
+    def config_info(self) -> ConfigInfoMapping:
+        """Return the info metric labels of this tier, for its one series.
+
+        TieringOffloadingManager adds TIER_LABEL. See ConfigInfo.
+        """
+        return {}
