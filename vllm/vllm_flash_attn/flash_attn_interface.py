@@ -313,14 +313,15 @@ def flash_attn_varlen_func(
         "seqused_k must be provided if block_table is provided"
     )
 
-    sm90_fp8_kv = (
-        k.dtype == torch.float8_e4m3fn and torch.cuda.get_device_capability()[0] == 9
-    )
-    fa4_fp8_kv_dequant = (
-        sm90_fp8_kv and q.shape[-1] == k.shape[-1] == v.shape[-1] == 512
-    )
-    if fa_version == 4 and sm90_fp8_kv and not fa4_fp8_kv_dequant:
-        if (
+    fa4_fp8_kv_dequant = False
+    if (
+        fa_version == 4
+        and k.dtype == torch.float8_e4m3fn
+        and torch.cuda.get_device_capability()[0] == 9
+    ):
+        if q.shape[-1] == k.shape[-1] == v.shape[-1] == 512:
+            fa4_fp8_kv_dequant = True
+        elif (
             q.dtype == torch.float8_e4m3fn
             and q.shape[-1] <= 256
             and k.shape[-1] == q.shape[-1] == v.shape[-1]
