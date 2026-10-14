@@ -370,6 +370,86 @@ def test_k1_matches_vllm_ops(
     torch.testing.assert_close(conv_state[0], w["conv_state"][0], atol=0, rtol=0)
 
 
+@pytest.mark.parametrize(
+    "s,n_real,first", [(1, 1, False), (2, 2, False), (5, 4, False), (8, 7, True)]
+)
+@torch.inference_mode()
+def test_k1_mxfp6_matches_vllm_ops(
+    monkeypatch: pytest.MonkeyPatch, s: int, n_real: int, first: bool
+) -> None:
+    """K1 with the MXFP6 in_proj_qkvz (``q6``, moe.fp6_pack's layout) against
+    the same ops on the weight rounded to MXFP6 (mxfp6.round_e2m3), as the
+    model runs it with VLLM_QWEN38_FAKE_MXFP6_PROJ. At 2 rows the GDN tasks
+    fill one round, so the task placement ``qp`` also moves the owner heads'
+    tasks. The build without ``qp`` must give the same outputs bit for bit."""
+    from vllm.models.qwen3_5.amd.mono import gdn
+    from vllm.models.qwen3_5.amd.mono.layout import CORE, HIDDEN
+    from vllm.models.qwen3_5.amd.mono.moe import fp6_pack
+    from vllm.models.qwen3_5.amd.mxfp6 import round_e2m3
+
+    w = _gdn_inputs(s, n_real, first)
+    w6, w6s = fp6_pack(w["w_qkvz"])
+    # The reference multiplies the bf16 x rows with the MXFP6 values, which
+    # bf16 holds exactly.
+    w["w_qkvz"] = round_e2m3(w["w_qkvz"])
+    ref = _gdn_reference(w, n_real)
+    key = gdn.K1Build(tokens=s, first=first, qq=True, q6=True)
+    assert key.qp
+
+    def run() -> tuple[torch.Tensor, ...]:
+        conv_state, rstate = w["conv_state"].clone(), w["rstate"].clone()
+        res_out = torch.empty(s, HIDDEN, dtype=bf, device="cuda")
+        core = torch.full((s, CORE), float("nan"), dtype=bf, device="cuda")
+        scratch = torch.zeros(gdn.scratch_bytes(key), dtype=torch.uint8, device="cuda")
+        gdn.gdn_pre(
+            key,
+            hidden=w["hidden"],
+            residual=w["residual"],
+            res_out=res_out,
+            ln_w=w["ln_w"],
+            w_qkvz=w6,
+            w_qkvzs=w6s,
+            w_ba=w["w_ba"],
+            conv_w=w["conv_w"],
+            conv_state=conv_state,
+            a_log=w["a_log"],
+            dt_bias=w["dt_bias"],
+            norm_w=w["norm_w"],
+            rstate=rstate,
+            st_idx=w["st_idx"],
+            core=core,
+            scratch=scratch,
+            epoch=torch.ones(1, dtype=torch.int32, device="cuda"),
+            layer=0,
+        )
+        torch.accelerator.synchronize()
+        return res_out, core, conv_state, rstate
+
+    got = run()
+    res_out, core, conv_state, rstate = got
+    torch.testing.assert_close(res_out, ref["residual"], atol=0, rtol=0)
+    live = w["st_idx"][:n_real].long()
+    errs = {
+        "conv_state": _rel_l2(conv_state[live], ref["conv_state"][live]),
+        "rstate": _rel_l2(rstate[live], ref["rstate"][live]),
+        "core": _rel_l2(core[:n_real], ref["core"][:n_real]),
+    }
+    # Only the summation order of in_proj differs from the reference, as in
+    # the bf16 build.
+    assert errs["conv_state"] < 5e-4 and errs["rstate"] < 5e-4, errs
+    assert _cos(core[:n_real], ref["core"][:n_real]) > COS_MIN, errs
+    assert torch.equal(core[n_real:], torch.zeros_like(core[n_real:]))
+    torch.testing.assert_close(rstate[0], w["rstate"][0], atol=0, rtol=0)
+    torch.testing.assert_close(conv_state[0], w["conv_state"][0], atol=0, rtol=0)
+
+    # qp only moves tasks between CTAs. An empty build cache makes the build
+    # without it compile instead of returning the qp kernel.
+    monkeypatch.setattr(gdn, "_BUILDS", {})
+    monkeypatch.setattr(gdn.K1Build, "qp", property(lambda self: False))
+    for name, a, b in zip(("res_out", "core", "conv_state", "rstate"), run(), got):
+        assert torch.equal(a, b), f"{name} differs without qp"
+
+
 # ---------------------------------------------------------------- K2
 
 
@@ -495,10 +575,28 @@ def _route_and_shared(x, mw, ids=None):
     return wts, ids, shared
 
 
-def _check_route(scratch, region, x, mw):
+def _rm_logits(core, residual, w_rm, rank, rstd):
+    """``rm``'s router logits as K2 computes them: this rank's w_rm times its
+    core rows and its slice of the residual in fp32, summed over the ranks,
+    times the post-attention norm's rstd and rounded to bf16."""
+    from vllm.models.qwen3_5.amd.mono import layer as k2
+
+    piece = slice(rank * k2.RM_K, (rank + 1) * k2.RM_K)
+    part = torch.cat([core, residual[:, piece]], dim=1).float() @ w_rm.float().T
+    dist.all_reduce(part)
+    return (part * rstd).to(bf)
+
+
+def _check_route(scratch, region, x, mw, rm_logits=None):
     """The kernel's ROUTE: each token's picks a top-10 of the bf16 logits up
     to ties (the kernel's logit sums round to bf16 in another order, and equal
     keys go to the lower expert), their weights the renormalized softmax.
+    With ``rm`` the kernel's logits are ``rm_logits``. They are other fp32
+    sums than the bf16 GEMM's, so a logit can round to the next bf16 value.
+    At the test's top logits of 4 to 8 that step is 2^-5, which moves the
+    weight by about 3%, more than the tolerance. So the picks are checked
+    against the router's logits, where the slack allows two such steps, and
+    the weights against the softmax of ``rm_logits``.
     Returns the picks, so the numerics compare on the same experts."""
     from vllm.models.qwen3_5.amd.mono.layout import TOPK
 
@@ -512,7 +610,11 @@ def _check_route(scratch, region, x, mw):
     slack = 2 * 2.0**-7 * tenth.abs()
     assert (logits.gather(-1, ids) >= tenth - slack).all(), "picks not a top-10"
     assert all(len(set(r.tolist())) == TOPK for r in ids), "repeated pick"
-    want = _route_and_shared(x, mw, ids)[0][:, :TOPK]
+    if rm_logits is None:
+        want = _route_and_shared(x, mw, ids)[0][:, :TOPK]
+    else:
+        want = torch.softmax(rm_logits.float(), dim=-1).gather(-1, ids)
+        want = want / want.sum(-1, keepdim=True)
     torch.testing.assert_close(wts, want, rtol=1e-2, atol=1e-3)
     return ids
 
@@ -580,6 +682,8 @@ def _k2_worker(
     from vllm.models.kimi_k3.amd.mono.common.peer_memory import PeerBuffer
     from vllm.models.qwen3_5.amd.mono import layer as k2
     from vllm.models.qwen3_5.amd.mono.layout import CORE, HIDDEN, MAX_TOKENS
+    from vllm.models.qwen3_5.amd.mono.moe import fp6_pack
+    from vllm.models.qwen3_5.amd.mxfp6 import round_e2m3
 
     tp = get_tp_group()
     peers = PeerBuffer(k2.peer_bytes(MAX_TOKENS), tp.cpu_group, rank, tp_size, device)
@@ -588,6 +692,7 @@ def _k2_worker(
     step = 0
     for flags in K2_MODES:
         fse, oq = flags.get("fse", False), flags.get("oq", False)
+        o6, rm = flags.get("o6", False), flags.get("rm", False)
         mw = _moe_weights(rank, device, fse=fse)
         gc = torch.Generator(device=device).manual_seed(11)
         gr = torch.Generator(device=device).manual_seed(200 + rank)
@@ -595,13 +700,24 @@ def _k2_worker(
         if oq:
             oq_raw, os_raw, w_o, w_os = _mxfp4_linear(gr, HIDDEN, CORE)
             w_o_ref = _mxfp4_dequant(oq_raw, os_raw).to(bf)
+        elif o6:
+            # The MXFP6 values, which bf16 holds exactly, and their packing.
+            w_o_ref = round_e2m3(_randn(gr, HIDDEN, CORE, scale=0.02))
+            w_o, w_os = fp6_pack(w_o_ref)
         else:
             w_o, w_os = _randn(gr, HIDDEN, CORE, scale=0.02), None
+        # rm_pack folds the router into the o_proj values that K2 multiplies.
+        w_rm = None
+        if rm:
+            w_rm = k2.rm_pack(mw["w_gate"], ln_w, w_o_ref if o6 else w_o, rank)
         mode = str(flags)
 
         # both epoch parities, a layer slot each; 1 row (the picks as the union),
-        # 4 and 8 (the fused shared expert's tasks before the route)
-        for s in (1, 3, 4, 8, 8):
+        # 2 and 3 (a union slot a pick), 4 and 8 (the fused shared expert's
+        # tasks before the route). mono_decode takes rm below 6 rows only.
+        for s in (1, 2, 3, 4, 8, 8):
+            if rm and s >= 6:
+                continue
             step += 1
             epoch.add_(1)
             key = k2.K2Build(tokens=s, **flags)
@@ -628,6 +744,7 @@ def _k2_worker(
                 rank=rank,
                 epoch=epoch,
                 layer=step,
+                w_rm=w_rm,
                 **{k: v for k, v in mw.items() if k != "raw"},
             )
             torch.accelerator.synchronize()
@@ -639,7 +756,7 @@ def _k2_worker(
                 part_stock = _mxfp4_linear_stock(core, w_o, w_os)
                 assert _cos(part_stock, part) > STOCK_COS_MIN, (mode, s)
             else:
-                part = F.linear(core, w_o)
+                part = F.linear(core, w_o_ref if o6 else w_o)
             res_ref = _all_reduce_fp32(part) + residual
             # the kernel sums the ranks in rank order, NCCL in its own order
             assert _rel_l2(res_out, res_ref) < 1e-2, (mode, s)
@@ -650,10 +767,12 @@ def _k2_worker(
             x = scratch[lay : lay + s * HIDDEN * 2].view(bf).view(s, HIDDEN)
             # the AR sums: x is the consumers' (stage_norm's arithmetic)
             v = x.float() + residual.float()
-            x = v * torch.rsqrt(v.pow(2).mean(-1, keepdim=True) + 1e-6)
-            x = (x * (1.0 + ln_w.float())).to(bf)
+            rstd = torch.rsqrt(v.pow(2).mean(-1, keepdim=True) + 1e-6)
+            x = (v * rstd * (1.0 + ln_w.float())).to(bf)
             assert _cos(x, x_ref) > COS_MIN, (mode, s)
-            ids = _check_route(scratch, k2.scratch_layout(key)["route"], x, mw)
+            rm_logits = _rm_logits(core, residual, w_rm, rank, rstd) if key.rm else None
+            region = k2.scratch_layout(key)["route"]
+            ids = _check_route(scratch, region, x, mw, rm_logits)
             emu = _cos(out, _moe_emulation(x.clone(), mw, ids))
             assert emu > COS_MIN, (mode, s, emu)
             # fused_moe's flat kernel varies run to run
@@ -669,12 +788,16 @@ def _k2_worker(
 
 # the bf16 shared expert and o_proj; the stock weekly flags' fused shared
 # expert, with the bf16 o_proj (attention, with and without its output gate)
-# and the MXFP4 out_proj
+# and the MXFP4 out_proj; with VLLM_QWEN38_MONO_FP6, the MXFP6 out_proj and
+# o_proj (o6), with the router logits through them (rm)
 K2_MODES: tuple[dict[str, bool], ...] = (
     {},
     {"fse": True},
     {"fse": True, "og": True},
     {"fse": True, "oq": True},
+    {"fse": True, "o6": True},
+    {"fse": True, "o6": True, "rm": True},
+    {"fse": True, "og": True, "o6": True, "rm": True},
 )
 
 
@@ -705,6 +828,8 @@ def _replay_worker(
     from vllm.models.qwen3_5.amd.mono import gdn
     from vllm.models.qwen3_5.amd.mono import layer as k2
     from vllm.models.qwen3_5.amd.mono.layout import CORE, HIDDEN, MAX_TOKENS, QKVZ
+    from vllm.models.qwen3_5.amd.mono.moe import fp6_pack
+    from vllm.models.qwen3_5.amd.mxfp6 import round_e2m3
 
     tp = get_tp_group()
     peers = PeerBuffer(k2.peer_bytes(MAX_TOKENS), tp.cpu_group, rank, tp_size, device)
@@ -713,25 +838,46 @@ def _replay_worker(
     gr = torch.Generator(device=device).manual_seed(300 + rank)
     ln_w = _randn(gr, HIDDEN, scale=0.1)
     w = _gdn_inputs(MAX_TOKENS, MAX_TOKENS, False)
-    # two GDN layers, each with its own state, as MonoDecode.forward runs them:
-    # the bf16 weights, then the stock weekly flags' (MXFP4 in_proj_qkvz and
-    # out_proj, the fused shared expert)
+    # three GDN layers, each with its own state, as MonoDecode.forward runs
+    # them: the bf16 weights, then the stock weekly flags' (MXFP4
+    # in_proj_qkvz and out_proj, the fused shared expert), then
+    # VLLM_QWEN38_MONO_FP6's (MXFP6 in_proj_qkvz and out_proj, the fused
+    # shared expert, the router logits through out_proj below 6 rows)
     layers = []
-    for fp4 in (False, True):
-        lw = {"mw": _moe_weights(rank, device, fse=fp4), "fp4": fp4}
+    for kind in ("bf16", "fp4", "fp6"):
+        fse = kind != "bf16"
+        lw = {"mw": _moe_weights(rank, device, fse=fse)}
         lw["mw"].pop("raw")
-        if fp4:
+        if kind == "fp4":
             _, _, lw["w_qkvz"], lw["w_qkvzs"] = _mxfp4_linear(gr, QKVZ, HIDDEN)
             _, _, lw["w_o"], lw["w_os"] = _mxfp4_linear(gr, HIDDEN, CORE)
+        elif kind == "fp6":
+            lw["w_qkvz"], lw["w_qkvzs"] = fp6_pack(w["w_qkvz"])
+            w_o = round_e2m3(_randn(gr, HIDDEN, CORE, scale=0.02))
+            lw["w_o"], lw["w_os"] = fp6_pack(w_o)
+            lw["w_rm"] = k2.rm_pack(lw["mw"]["w_gate"], ln_w, w_o, rank)
         else:
             lw["w_qkvz"], lw["w_qkvzs"] = w["w_qkvz"], None
             lw["w_o"], lw["w_os"] = _randn(gr, HIDDEN, CORE, scale=0.02), None
+        lw["k1"] = {
+            "bf16": {},
+            "fp4": {"qq": True},
+            "fp6": {"qq": True, "q6": True},
+        }[kind]
+        lw["k2"] = {
+            "bf16": lambda s: {},
+            "fp4": lambda s: {"fse": True, "oq": True},
+            "fp6": lambda s: {"fse": True, "o6": True, "rm": s < 6},
+        }[kind]
         layers.append(lw)
     states0 = [(w["conv_state"].clone(), w["rstate"].clone()) for _ in layers]
     states = [(c.clone(), r.clone()) for c, r in states0]
+    # The qq layout ends with the in_proj_ba parts, so it is the larger one.
     k1_scr = {
         s: torch.zeros(
-            gdn.scratch_bytes(gdn.K1Build(tokens=s)), dtype=torch.uint8, device=device
+            gdn.scratch_bytes(gdn.K1Build(tokens=s, qq=True)),
+            dtype=torch.uint8,
+            device=device,
         )
         for s in set(REPLAY_WIDTHS)
     }
@@ -760,11 +906,10 @@ def _replay_worker(
             h, res = w["hidden"][:s].contiguous(), w["residual"][:s].contiguous()
             idx = idxs[s]
             for li, ((conv, rstate), lw) in enumerate(zip(states, layers)):
-                fp4 = lw["fp4"]
                 core = torch.empty(s, CORE, dtype=bf, device=device)
                 res_attn = torch.empty_like(h)
                 gdn.gdn_pre(
-                    gdn.K1Build(tokens=s, qq=fp4),
+                    gdn.K1Build(tokens=s, **lw["k1"]),
                     hidden=h,
                     residual=res,
                     res_out=res_attn,
@@ -786,9 +931,9 @@ def _replay_worker(
                 )
                 h = outs[i] if li == len(states) - 1 else torch.empty_like(h)
                 res = torch.empty_like(h)
+                key = k2.K2Build(tokens=s, **lw["k2"](s))
                 k2.layer_post(
-                    # the second layer: production's flags
-                    k2.K2Build(tokens=s, fse=fp4, oq=fp4),
+                    key,
                     core=core,
                     residual=res_attn,
                     w_o=lw["w_o"],
@@ -801,6 +946,7 @@ def _replay_worker(
                     rank=rank,
                     epoch=epoch,
                     layer=k2.TAG_SLOTS // 2 + li,
+                    w_rm=lw["w_rm"] if key.rm else None,
                     **lw["mw"],
                 )
 
@@ -835,10 +981,12 @@ def _replay_worker(
 
 @multi_gpu_test(num_gpus=8)
 def test_mixed_width_graph_replay(monkeypatch: pytest.MonkeyPatch) -> None:
-    """K1 and K2 of two layers at six consecutive decode steps of widths 1-8
+    """K1 and K2 of three layers at six consecutive decode steps of widths 1-8
     (pad rows included), captured in one HIP graph as a FULL decode graph holds
     them and replayed 300 times: bit-identical to the eager run every time, on
     every rank. Steps of different widths share the peer buffer and the epoch;
     a scratch race between widths shows up as a mismatch. The second layer
-    runs the MXFP4 in_proj_qkvz / out_proj and fused-shared-expert variants."""
+    runs the MXFP4 in_proj_qkvz / out_proj and fused-shared-expert variants,
+    the third the MXFP6 in_proj_qkvz / out_proj with the router logits
+    through out_proj below 6 rows."""
     multi_process_parallel(monkeypatch, 8, 1, _replay_worker)
