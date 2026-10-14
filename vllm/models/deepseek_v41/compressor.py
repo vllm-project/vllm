@@ -61,9 +61,9 @@ class CompressorMetadata:
     slot_mapping: torch.Tensor
     query_start_loc: torch.Tensor  # [num_reqs + 1]
     token_to_req_indices: torch.Tensor  # [num_tokens]
-    # PCP only: every rank gathers the last row of each rank's local requests.
+    # PCP only: gather chunk tails (a full ring with speculative decoding).
     gather_tokens: torch.Tensor | None = None  # [rows] this rank's rows
-    # [pcp * rows] ring slot of each request's newest row if it is open, else -1.
+    # [pcp * rows] unique retained ring writes; -1 for unused candidates.
     ring_write_slots: torch.Tensor | None = None
     # [num_reqs] gathered row preceding each local chunk, or -1 to use the ring.
     prev_row_indices: torch.Tensor | None = None
@@ -113,8 +113,6 @@ class CompressorMetadataBuilder(AttentionMetadataBuilder):
         self.slot_mapping_buffer = torch.empty(
             max_num_batched_tokens, dtype=torch.int64, device=self.device
         )
-        # The ring keeps only the open row under PCP, too few for spec decoding.
-        assert self.pcp_size == 1 or self.vllm_config.speculative_config is None
 
     def build(
         self,
@@ -155,9 +153,10 @@ class CompressorMetadataBuilder(AttentionMetadataBuilder):
     ) -> None:
         """Link ratio-2 groups split across PCP chunks and pick the ring writes.
 
-        Every rank gathers ``(ring block, position)`` of each local request's
-        last token; the ring block names a request on every rank. Sorted, they
-        give each local chunk's predecessor row and each request's newest row.
+        Gather each chunk's last row to close cross-rank pairs. Speculative
+        verification also retains its ring tail: rejected drafts can make the
+        next step resume before the newest row. The ring block identifies a
+        request independently of its local row or decode owner.
         """
         num_tokens = metadata.slot_mapping.numel()
         # Equal on every rank, so the gathers line up.
@@ -171,19 +170,40 @@ class CompressorMetadataBuilder(AttentionMetadataBuilder):
         def key(slots: torch.Tensor, pos: torch.Tensor) -> torch.Tensor:
             return torch.where(slots >= 0, (slots // self.capacity) << 32 | pos, -1)
 
-        local_keys = torch.full((num_rows,), -1, dtype=torch.int64, device=self.device)
-        local_keys[:num_reqs] = key(
-            torch.where(nonempty, metadata.slot_mapping[last], -1), positions[last]
+        speculative = self.vllm_config.speculative_config is not None
+        tail_rows = self.capacity if speculative else 1
+        offsets = torch.arange(tail_rows, device=self.device)
+        tail = last[:, None] - offsets
+        valid = nonempty[:, None] & (tail >= starts[:, None])
+        tail = tail.clamp(min=0)
+        local_keys = torch.full(
+            (num_rows, tail_rows), -1, dtype=torch.int64, device=self.device
         )
+        local_keys[:num_reqs] = key(
+            torch.where(valid, metadata.slot_mapping[tail], -1), positions[tail]
+        )
+        local_keys = local_keys.flatten()
         sorted_keys, order = get_pcp_group().all_gather(local_keys, dim=0).sort()
 
         blocks, sorted_positions = sorted_keys >> 32, sorted_keys & 0xFFFFFFFF
         newest = torch.ones_like(sorted_keys, dtype=torch.bool)
         newest[:-1] = blocks[:-1] != blocks[1:]
-        is_open = (sorted_keys >= 0) & newest & (sorted_positions % 2 == 0)
+        if speculative:
+            indices = torch.arange(order.numel(), device=self.device)
+            last_indices = torch.where(newest, indices, order.numel())
+            last_indices = last_indices.flip(0).cummin(0).values.flip(0)
+            unique = torch.ones_like(newest)
+            unique[:-1] = sorted_keys[:-1] != sorted_keys[1:]
+            retain = (
+                (sorted_keys >= 0)
+                & unique
+                & (sorted_positions > sorted_positions[last_indices] - self.capacity)
+            )
+        else:
+            retain = (sorted_keys >= 0) & newest & (sorted_positions % 2 == 0)
         ring_write_slots = torch.empty_like(sorted_keys)
         ring_write_slots[order] = torch.where(
-            is_open, blocks * self.capacity + sorted_positions % self.capacity, -1
+            retain, blocks * self.capacity + sorted_positions % self.capacity, -1
         )
 
         first_positions = positions[starts]
@@ -196,9 +216,11 @@ class CompressorMetadataBuilder(AttentionMetadataBuilder):
             & (sorted_keys[found] == wanted)
         )
 
-        gather_tokens = torch.zeros_like(local_keys)
-        gather_tokens[:num_reqs] = last
-        metadata.gather_tokens = gather_tokens
+        gather_tokens = torch.zeros(
+            (num_rows, tail_rows), dtype=torch.int64, device=self.device
+        )
+        gather_tokens[:num_reqs] = tail
+        metadata.gather_tokens = gather_tokens.flatten()
         metadata.ring_write_slots = ring_write_slots
         metadata.prev_row_indices = torch.where(has_prev, order[found], -1)
 
@@ -329,8 +351,8 @@ class DeepseekCompressor(nn.Module):
         """Save states and return the BF16 latent for cache insertion and indexing.
 
         Only valid group-boundary rows are written. Under PCP each rank pools
-        its own rows; the last row of every rank's chunks is gathered, both to
-        close groups split across chunks and to keep every rank's ring equal.
+        its own rows; chunk tails are gathered to close groups split across
+        chunks and keep every rank's ring equal, including draft rollback rows.
         """
         attn_metadata = get_forward_context().attn_metadata
         if not isinstance(attn_metadata, dict):
