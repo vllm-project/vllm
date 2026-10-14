@@ -16,7 +16,10 @@ from vllm.entrypoints.openai.responses.context import (
     ParsableContext,
     SimpleContext,
 )
-from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+from vllm.entrypoints.openai.responses.protocol import (
+    ResponsesRequest,
+    ResponsesResponse,
+)
 from vllm.entrypoints.openai.responses.serving import OpenAIServingResponses
 from vllm.envs import disable_envs_cache
 from vllm.exceptions import GenerationError, RetryableRequestError
@@ -191,7 +194,14 @@ async def test_background_response_marks_retryable_error_failed():
         store=True,
         background=True,
     )
-    stored_response = SimpleNamespace(status="queued")
+    stored_response = ResponsesResponse.from_request(
+        request,
+        SamplingParams(max_tokens=1),
+        model_name="test-model",
+        created_time=0,
+        output=[],
+        status="queued",
+    )
     serving = OpenAIServingResponses.__new__(OpenAIServingResponses)
     serving.responses_full_generator = AsyncMock(
         side_effect=RetryableRequestError("Multi-modal processor cache miss.")
@@ -200,9 +210,19 @@ async def test_background_response_marks_retryable_error_failed():
     serving.response_store_lock = asyncio.Lock()
 
     await serving._run_background_request(request)
+    retrieved_response = await serving.retrieve_responses(
+        request.request_id,
+        starting_after=None,
+        stream=False,
+    )
 
     serving.responses_full_generator.assert_awaited_once_with(request)
-    assert stored_response.status == "failed"
+    assert isinstance(retrieved_response, ResponsesResponse)
+    assert retrieved_response.status == "failed"
+    serialized_error = retrieved_response.model_dump(mode="json")["error"]
+    assert serialized_error is not None
+    assert serialized_error["code"] == "server_error"
+    assert serialized_error["message"] == "Multi-modal processor cache miss."
 
 
 @pytest.mark.asyncio
@@ -240,6 +260,8 @@ async def test_background_stream_terminates_after_retryable_error():
     ]
     assert events[-1].code == "ServiceUnavailableError"
     assert stored_response.status == "failed"
+    assert stored_response.error.code == "server_error"
+    assert stored_response.error.message == "Multi-modal processor cache miss."
 
 
 @pytest.mark.asyncio

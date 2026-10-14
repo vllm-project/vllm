@@ -11,6 +11,7 @@ from typing import Any, Final, cast
 
 from fastapi import Request
 from openai.types.responses import (
+    ResponseError,
     ResponseErrorEvent,
     ResponseOutputItem,
     ResponseOutputItemDoneEvent,
@@ -1101,10 +1102,16 @@ class OpenAIServingResponses(GenerateBaseServing):
             async for event in generator:
                 event_deque.append(event)
                 if event.type == "error":
-                    await self._mark_background_response_failed(request.request_id)
+                    await self._mark_background_response_failed(
+                        request.request_id,
+                        event,
+                    )
                 new_event_signal.set()  # Signal new event available
-        except Exception:
-            await self._mark_background_response_failed(request.request_id)
+        except Exception as exc:
+            await self._mark_background_response_failed(
+                request.request_id,
+                exc,
+            )
             raise
         finally:
             finished_signal.set()
@@ -1124,25 +1131,46 @@ class OpenAIServingResponses(GenerateBaseServing):
                 request.request_id,
                 exc,
             )
-            await self._mark_background_response_failed(request.request_id)
+            await self._mark_background_response_failed(
+                request.request_id,
+                exc,
+            )
             return
-        except Exception:
+        except Exception as exc:
             logger.exception(
                 "Background response generation failed for request %s",
                 request.request_id,
             )
-            await self._mark_background_response_failed(request.request_id)
+            await self._mark_background_response_failed(
+                request.request_id,
+                exc,
+            )
             return
 
         if isinstance(response, ErrorResponse):
-            await self._mark_background_response_failed(request.request_id)
+            await self._mark_background_response_failed(
+                request.request_id,
+                response,
+            )
 
-    async def _mark_background_response_failed(self, response_id: str) -> None:
+    async def _mark_background_response_failed(
+        self,
+        response_id: str,
+        error: Exception | ErrorResponse | ResponseErrorEvent,
+    ) -> None:
+        if isinstance(error, ErrorResponse):
+            message = error.error.message
+        elif isinstance(error, ResponseErrorEvent):
+            message = error.message
+        else:
+            message = self.create_error_response(error).error.message
+        response_error = ResponseError(code="server_error", message=message)
         async with self.response_store_lock:
             stored_response = self.response_store.get(response_id)
             assert stored_response is not None
             if stored_response.status not in ("completed", "cancelled"):
                 stored_response.status = "failed"
+                stored_response.error = response_error
 
     async def responses_background_stream_generator(
         self,
