@@ -50,11 +50,16 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionStreamResponse,
     ChatMessage,
 )
-from vllm.entrypoints.serve.engine.protocol import PromptTokenUsageInfo, UsageInfo
+from vllm.entrypoints.serve.engine.protocol import (
+    ErrorResponse,
+    PromptTokenUsageInfo,
+    UsageInfo,
+)
 from vllm.entrypoints.serve.exception_handling.handlers.validation import (
     validation_exception_handler,
 )
 from vllm.exceptions import VLLMValidationError
+from vllm.tracing.utils import SpanAttributes
 
 _convert = AnthropicServingMessages.to_chat_completion_request
 _img_url = AnthropicServingMessages._convert_image_source_to_url
@@ -1090,6 +1095,17 @@ def tool_response_record(monkeypatch):
     return record
 
 
+def _assert_response_span(span, count, status):
+    span.set_attributes.assert_called_once_with(
+        {
+            SpanAttributes.TOOL_CALLING_RESPONSE_HAS_TOOL_CALLS: count > 0,
+            SpanAttributes.TOOL_CALLING_TOOL_CALLS_COUNT: count,
+            SpanAttributes.TOOL_CALLING_PARSER_STATUS: status,
+        }
+    )
+    span.end.assert_called_once_with()
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "failure",
@@ -1120,6 +1136,9 @@ async def test_message_stream_metrics_count_only_emitted_tool_blocks(
         )
     )
     closed = False
+    span = MagicMock()
+    if request.tools:
+        request._tool_calling_spans = [span]
 
     async def source():
         nonlocal closed
@@ -1152,6 +1171,7 @@ async def test_message_stream_metrics_count_only_emitted_tool_blocks(
                 yield _make_stream_chunk(finish_reason="stop")
                 yield "data: [DONE]"
         finally:
+            span.end.assert_not_called()
             closed = True
 
     stream = _make_stream_converter().message_stream_converter(
@@ -1186,12 +1206,21 @@ async def test_message_stream_metrics_count_only_emitted_tool_blocks(
     assert cancelled == (failure == "cancel")
     if failure == "no-tools":
         tool_response_record.assert_not_called()
+        span.end.assert_not_called()
     else:
         tool_response_record.assert_called_once_with(
             request,
             tool_calls_count=count,
             completed=failure in ("none", "no-calls", "metadata-only"),
         )
+        _assert_response_span(
+            span,
+            count,
+            ("success" if count else "no_tool_calls")
+            if failure in ("none", "no-calls", "metadata-only")
+            else "interrupted",
+        )
+        assert request._tool_calling_spans is None
     if failure in ("conversion", "engine", "invalid-frame"):
         assert sum(event == "error" for event, _ in events) == 1
 
@@ -1658,7 +1687,14 @@ async def test_messages_full_metrics_wait_for_successful_conversion(
         ],
         usage=UsageInfo(prompt_tokens=1, completion_tokens=1, total_tokens=2),
     )
-    handler.create_chat_completion = AsyncMock(return_value=response)
+    span = MagicMock()
+
+    async def create_chat_completion(chat_request, raw_request):
+        if has_tools:
+            chat_request._tool_calling_spans = [span]
+        return response
+
+    handler.create_chat_completion = AsyncMock(side_effect=create_chat_completion)
     request = _make_request(
         [], tools=[{"name": "f", "input_schema": {}}] if has_tools else None
     )
@@ -1680,6 +1716,49 @@ async def test_messages_full_metrics_wait_for_successful_conversion(
         )
     else:
         tool_response_record.assert_not_called()
+    if has_tools:
+        _assert_response_span(
+            span,
+            0 if error else len(arguments),
+            "parse_failure" if error else "success" if arguments else "no_tool_calls",
+        )
+        assert chat_request._tool_calling_spans is None
+    else:
+        span.end.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["engine", "cancel", "parser", "error-response"])
+async def test_messages_trace_closes_when_chat_generation_fails(failure):
+    handler = _make_full_converter()
+    handler.to_chat_completion_request = _convert
+    handler._merge_inline_system = False
+    span = MagicMock()
+
+    async def create_chat_completion(chat_request, raw_request):
+        chat_request._tool_calling_spans = [span]
+        chat_request._tool_calling_parse_failed = failure == "parser"
+        if failure == "error-response":
+            return ErrorResponse(
+                error={"message": "fixture", "type": "InternalServerError", "code": 500}
+            )
+        if failure == "cancel":
+            raise asyncio.CancelledError()
+        raise RuntimeError("fixture failure")
+
+    handler.create_chat_completion = AsyncMock(side_effect=create_chat_completion)
+    request = _make_request([], tools=[{"name": "f", "input_schema": {}}])
+    if failure == "error-response":
+        result = await AnthropicServingMessages.create_messages(handler, request)
+        assert isinstance(result, ErrorResponse)
+    else:
+        with pytest.raises(
+            asyncio.CancelledError if failure == "cancel" else RuntimeError
+        ):
+            await AnthropicServingMessages.create_messages(handler, request)
+    _assert_response_span(
+        span, 0, "parse_failure" if failure == "parser" else "interrupted"
+    )
 
 
 # ======================================================================

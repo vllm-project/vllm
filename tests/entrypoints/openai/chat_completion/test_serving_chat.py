@@ -741,7 +741,7 @@ async def test_tool_request_trace_metadata_is_conditional_and_ignores_client_val
         }
     else:
         assert headers == {"traceparent": traceparent}
-    deferred = has_tools and tracing and not beam_search and api_surface != "messages"
+    deferred = has_tools and tracing and not beam_search
     assert (headers.get(DEFER_TOOL_CALLING_SPAN) == "1") == deferred
     assert (request._tool_calling_spans is not None) == deferred
     assert "_tool_calling_spans" not in request.model_dump()
@@ -1019,6 +1019,7 @@ async def test_full_tool_response_metrics_report_parse_error_not_emitted_calls(
             parser=parser,
         )
     assert caught.value is error
+    assert request._tool_calling_parse_failed
     record.assert_called_once_with(request, parse_failed=True)
     if api_surface != "messages":
         _assert_tool_response_span(span, 0, "parse_failure")
@@ -1302,6 +1303,8 @@ async def test_messages_stream_tool_response_metrics_count_parser_failure_once(
         tools=[{"type": "function", "function": {"name": "f"}}],
     )
     request._api_surface = "messages"
+    request._tool_calling_spans = []
+    span = MagicMock()
     parser.parse_delta.side_effect = (
         [
             DeltaMessage(
@@ -1318,6 +1321,7 @@ async def test_messages_stream_tool_response_metrics_count_parser_failure_once(
         else []
     ) + [ValueError("fixture parse error")]
     outputs = [_reasoning_lifecycle_output()] * (2 if emitted_first else 1)
+    outputs[0]._tool_calling_spans = [span]
     chat_stream = serving.chat_completion_stream_generator(
         request,
         _stream_request_outputs(*outputs),
@@ -1336,6 +1340,8 @@ async def test_messages_stream_tool_response_metrics_count_parser_failure_once(
         call(request, parse_failed=True, completed=False),
         call(request, tool_calls_count=int(emitted_first), completed=False),
     ]
+    _assert_tool_response_span(span, int(emitted_first), "parse_failure")
+    assert request._tool_calling_spans is None
 
 
 @pytest.mark.asyncio

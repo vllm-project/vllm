@@ -615,6 +615,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
         default="chat_completions"
     )
     _tool_calling_spans: list[Any] | None = PrivateAttr(default=None)
+    # Messages conversion finishes the span after shared Chat parsing.
+    _tool_calling_parse_failed: bool = PrivateAttr(default=False)
 
     _grammar_from_parser: bool = PrivateAttr(default=False)
     """CAUTION: Should only be set by the parser-engine adapter's adjust_request."""

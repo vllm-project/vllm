@@ -321,7 +321,7 @@ class OpenAIServingChat(GenerateBaseServing):
         if request.tools and await self.engine_client.is_tracing_enabled():
             tool_trace_headers = tool_calling_trace_headers(request, None)
             # Beam search replaces engine outputs rather than handing spans through.
-            if request._api_surface != "messages" and not request.use_beam_search:
+            if not request.use_beam_search:
                 tool_trace_headers[DEFER_TOOL_CALLING_SPAN] = "1"
                 request._tool_calling_spans = []
         tokenizer = self.renderer.tokenizer
@@ -708,6 +708,7 @@ class OpenAIServingChat(GenerateBaseServing):
                             )
                         except Exception:
                             parse_failed = True
+                            request._tool_calling_parse_failed = True
                             raise
                         if delta_message is not None and delta_message.tool_calls:
                             tools_streamed[i] = True
@@ -974,7 +975,10 @@ class OpenAIServingChat(GenerateBaseServing):
                     if close is not None:
                         await close()
             finally:
-                if request._tool_calling_spans is not None:
+                if (
+                    request._tool_calling_spans is not None
+                    and request._api_surface != "messages"
+                ):
                     finish_tool_calling_trace(
                         request,
                         tool_calls_count=len(emitted_tool_calls or ()),
@@ -1070,6 +1074,7 @@ class OpenAIServingChat(GenerateBaseServing):
                         model_output_token_ids=token_ids,
                     )
                 except Exception:
+                    request._tool_calling_parse_failed = True
                     if request._api_surface != "messages":
                         finish_tool_calling_trace(request, parse_failed=True)
                     if request.tools:
