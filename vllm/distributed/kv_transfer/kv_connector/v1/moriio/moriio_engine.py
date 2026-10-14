@@ -215,6 +215,7 @@ class MoRIIOWriter:
                     task.request_id,
                 )
                 self._mark_request_done(task.transfer_id)
+                self._send_write_failed(task)
 
     def _process_deferred_tasks(self) -> None:
         """Process tasks that were previously deferred."""
@@ -237,6 +238,7 @@ class MoRIIOWriter:
                         task.request_id,
                     )
                     self._mark_request_done(task.transfer_id)
+                    self._send_write_failed(task)
             elif (
                 now - task.enqueue_time > defer_timeout
                 and self.worker.moriio_wrapper.fail_unallocated_write(task.transfer_id)
@@ -255,8 +257,12 @@ class MoRIIOWriter:
             task.request_id,
             age,
         )
-        # No remote allocation arrived, so the decode DP rank that owns the
-        # request is unknown. Tell every rank; the others drop it.
+        self._send_write_failed(task)
+
+    def _send_write_failed(self, task: WriteTask) -> None:
+        """Tell the consumer the load failed so it does not wait for it. The
+        decode DP rank that owns the request may be unknown: tell every rank;
+        the others drop it."""
         for decode_dp_rank in range(max(task.remote_dp_size, 1)):
             remote_ip, remote_port = self._resolve_notify_endpoint(task, decode_dp_rank)
             try:
@@ -268,7 +274,7 @@ class MoRIIOWriter:
                 )
             except Exception:
                 logger.exception(
-                    "Failed to notify decode DP rank %d that transfer %s timed out",
+                    "Failed to notify decode DP rank %d that transfer %s failed",
                     decode_dp_rank,
                     task.transfer_id,
                 )

@@ -10,17 +10,20 @@ leaves the peer's queue pair unusable, so peers must forget the metadata first.
 
 import threading
 import time
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import msgpack
 import msgspec
+import pytest
 import zmq
 
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
+    HandshakeError,
     MoRIIOAgentMetadata,
     MoRIIOConstants,
+    MoRIIOError,
     zmq_ctx,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_connector import (
@@ -108,7 +111,7 @@ def test_restore_registers_each_region_once_and_serves_it_again():
     assert msgpack.loads(W._serve_kv_metadata(worker, peer)) == metas
 
 
-def test_drop_remote_engine_forgets_only_that_peer_then_drains():
+def test_drop_remote_engine_forgets_only_that_peers_regions_then_drains():
     drained = []
     worker = SimpleNamespace(
         _handshake_lock=threading.RLock(),
@@ -128,8 +131,9 @@ def test_drop_remote_engine_forgets_only_that_peer_then_drains():
 
     assert set(worker.layer_name_to_remote_kv_cache_metadata) == {"B_dp0"}
     assert set(worker.remote_moriio_metadata) == {"B_dp0"}
-    assert set(worker._remote_agents) == {"AB_dp0"}
-    assert not worker._handshake_futures
+    # The connection is kept: only the region metadata is fetched again.
+    assert set(worker._remote_agents) == {"A", "A_dp0", "AB_dp0"}
+    assert worker._handshake_futures == {"A_dp0": None}
     assert set(worker.built_write_session) == {"B_dp0"}
     assert worker._eager_handshaked_engines == {"B_dp0"}
     assert drained == [True]
@@ -138,6 +142,60 @@ def test_drop_remote_engine_forgets_only_that_peer_then_drains():
     assert W._dropped_since(worker, 0, "A_dp1")
     assert not W._dropped_since(worker, 0, "B_dp0")
     assert not W._dropped_since(worker, 1, "A_dp1")
+
+
+def _session_worker(handshake):
+    return SimpleNamespace(
+        _kv_released=False,
+        layer_name_to_remote_kv_cache_metadata={},
+        layer_name_to_local_kv_cache_metadata={"l0": [b"local"]},
+        remote_moriio_metadata={},
+        built_write_session=defaultdict(list),
+        _handshake_args={"A_dp0": ("h", 1, 1, "A_dp0", 0, None)},
+        _moriio_handshake=handshake,
+        moriio_wrapper=MagicMock(
+            get_unpack_memory_metadata=lambda m: m,
+            build_session=lambda local, remote: (local, remote),
+        ),
+    )
+
+
+def test_session_lookup_refetches_regions_of_a_peer_that_re_registered():
+    def handshake(*args):
+        worker.layer_name_to_remote_kv_cache_metadata["A_dp0"] = {"l0": [b"new"]}
+        worker.remote_moriio_metadata["A_dp0"] = "meta"
+        return {"agent"}
+
+    worker = _session_worker(MagicMock(side_effect=handshake))
+
+    sessions, meta = W._get_built_session_locked(worker, "A_dp0")
+
+    worker._moriio_handshake.assert_called_once_with("h", 1, 1, "A_dp0", 0, None)
+    assert sessions == [(b"local", b"new")]
+    assert meta == "meta"
+
+
+def test_session_lookup_fails_cleanly_while_the_peer_is_asleep():
+    worker = _session_worker(MagicMock(side_effect=HandshakeError("asleep")))
+    with pytest.raises(MoRIIOError, match="cannot refresh"):
+        W._get_built_session_locked(worker, "A_dp0")
+
+
+def test_write_load_fails_after_recv_abort_timeout():
+    worker = SimpleNamespace(
+        moriio_config=SimpleNamespace(recv_abort_timeout=10.0),
+        _awaiting_write={"tx-late": "late", "tx-new": "new", "tx-done": "done"},
+        _write_wait_since={
+            "tx-late": time.monotonic() - 11,
+            "tx-new": time.monotonic(),
+            "tx-done": time.monotonic() - 11,
+        },
+        _timed_out_writes=OrderedDict(),
+    )
+
+    assert W._expire_awaited_writes(worker, done_recving={"done"}) == {"late"}
+    assert list(worker._timed_out_writes) == ["tx-late"]
+    assert set(worker._write_wait_since) == {"tx-new", "tx-done"}
 
 
 class _Status:

@@ -526,6 +526,9 @@ class MoRIIOConnectorMetadata(KVConnectorMetadata):
         self.reqs_to_save: dict[ReqId, ReqMeta] = {}
         self.reqs_to_send: dict[ReqId, float] = {}
         self.transfer_id_to_request_id: dict[TransferId, ReqId] = {}
+        # WRITE consumer: transfers whose blocks were sent to the producer and
+        # whose completion has not been reported yet.
+        self.awaiting_write: dict[TransferId, ReqId] = {}
 
     def __repr__(self):
         return (

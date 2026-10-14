@@ -143,6 +143,7 @@ def _setup_kv_transfer_request(
 
 def _write_consumer_scheduler_for_finished_request(tp_size: int = 2):
     scheduler = MoRIIOConnectorScheduler.__new__(MoRIIOConnectorScheduler)
+    scheduler._awaiting_write = {}
     scheduler.is_producer = False
     scheduler.mode = MoRIIOMode.WRITE
     scheduler.tp_size = tp_size
@@ -155,6 +156,7 @@ def _write_producer_scheduler(block_size: int = 1) -> Any:
     """Bare WRITE-mode PRODUCER scheduler exercising the save path without a
     real engine/RDMA stack. Uses a single full-attention KV group (index 0)."""
     scheduler = MoRIIOConnectorScheduler.__new__(MoRIIOConnectorScheduler)
+    scheduler._awaiting_write = {}
     scheduler.mode = MoRIIOMode.WRITE
     scheduler.is_producer = True
     scheduler.block_size = block_size
@@ -943,6 +945,7 @@ def test_clamp_to_prompt_blocks_clamps_each_group_by_its_own_block_size():
     # Two full-attention groups with different block sizes are each clamped to
     # their own prompt-block count; a sliding-window group is left untouched.
     scheduler = MoRIIOConnectorScheduler.__new__(MoRIIOConnectorScheduler)
+    scheduler._awaiting_write = {}
     scheduler.blocks_per_sw = [0, 0, 3]
     scheduler._group_block_sizes = [16, 32, 16]
 
