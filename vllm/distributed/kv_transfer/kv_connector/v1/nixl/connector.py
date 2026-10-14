@@ -370,7 +370,7 @@ class NixlPullConnector(NixlBaseConnector):
 
     @classmethod
     def supports_sleep_mode(cls, kv_transfer_config: KVTransferConfig) -> bool:
-        # Re-registration and the peer refresh are validated with UCX only.
+        # Sleep mode is only validated with the UCX backend.
         return kv_transfer_config.get_from_extra_config("backends", ["UCX"]) == ["UCX"]
 
     def unregister_kv_caches(self) -> None:

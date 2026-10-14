@@ -7,13 +7,12 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from vllm.distributed.kv_transfer.kv_connector.utils import BlockIds
+from vllm.distributed.kv_transfer.kv_connector.utils import BlockIds, EngineId
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
     NixlBaseConnectorWorker,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     NixlConnectorMetadata,
-    ReqId,
     ReqMeta,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import (
@@ -44,12 +43,13 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         kv_cache_config: "KVCacheConfig",
     ):
         super().__init__(vllm_config, engine_id, kv_cache_config)
+        # Registration epoch of each remote engine's loaded agent.
+        self._remote_registration_epochs: dict[EngineId, int] = {}
 
     def start_load_kv(self, metadata: NixlConnectorMetadata):
         """Start loading by triggering non-blocking nixl_xfer.
         We check for these trnxs to complete in each step().
         """
-        deferred: list[tuple[ReqId, ReqMeta]] = []
         for req_id, meta in metadata.reqs_to_recv.items():
             meta.local_physical_block_ids = self._logical_to_kernel_block_ids(
                 meta.local_block_ids, self._physical_blocks_per_logical_kv_block
@@ -74,16 +74,11 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
             # Aborted cleanup requests have already been removed from the scheduler.
             if meta.awaiting_kvs or any(meta.local_block_ids):
                 self._recving_metadata[req_id] = meta
-            if not self._start_read(req_id, meta):
-                deferred.append((req_id, meta))
+            self._read_blocks_for_req(req_id, meta)
 
         # Start transfers for requests whose handshakes have now finished.
         while not self._ready_requests.empty():
-            req_id, meta = self._ready_requests.get_nowait()
-            if not self._start_read(req_id, meta):
-                deferred.append((req_id, meta))
-        for entry in deferred:
-            self._ready_requests.put(entry)
+            self._read_blocks_for_req(*self._ready_requests.get_nowait())
 
         if self.pcp_rank > 0 and not self.pcp_dcp_sharded:
             # Replicated-KV PCP: only PCP rank 0 serves the KV, so this rank
@@ -129,24 +124,6 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         # requests sit in the D scheduler WAITING queue.
         self._send_heartbeats(metadata)
 
-    def _start_read(self, req_id: ReqId, meta: ReqMeta) -> bool:
-        """Read, or handshake again if the agent is older than the request's
-        registration; False while reads through the old agent run."""
-        assert meta.remote is not None
-        engine_id = meta.remote.engine_id
-        if engine_id in self._remote_agents and (
-            self._remote_registration_epochs.get(engine_id, 0)
-            < meta.remote.registration_epoch
-        ):
-            if engine_id in self._engines_with_inflight_transfers():
-                return False
-            self._cleanup_remote_engine(engine_id, log_eviction=False)
-            self._background_nixl_handshake(req_id, engine_id, meta)
-            return True
-        # Handshakes first when the agent is missing, as on main.
-        self._read_blocks_for_req(req_id, meta)
-        return True
-
     def _is_turn2_read_expired(self, meta: ReqMeta) -> bool:
         """Whether D's cached blocks for this turn-2 readback have (nearly) expired."""
         assert meta.remote is not None
@@ -166,6 +143,11 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                 req_id, None, self._recv_failures, record_failed_transfer=False
             )
             return
+        epoch = meta.remote.registration_epoch
+        if self._remote_registration_epochs.get(engine_id, 0) < epoch:
+            # The remote woke up from sleep and registered its KV cache again.
+            self._cleanup_remote_engine(engine_id, log_eviction=False)
+            self._remote_registration_epochs[engine_id] = epoch
         if engine_id not in self._remote_agents:
             # Also re-handshakes queued requests that outlived invalid-peer cleanup.
             self._background_nixl_handshake(req_id, engine_id, meta)

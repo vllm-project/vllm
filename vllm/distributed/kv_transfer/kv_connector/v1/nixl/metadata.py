@@ -50,7 +50,7 @@ PUSH_REG_NOTIF_PREFIX = b"PUSH_REG:"
 #  12: Add per-region member names for PP push
 #  13: Add packed-member layouts and order-independent packed-push backend hashes
 #  14: Add Qwen3.8-Flash-Next PLE page length - #59997
-#  15: Add registration_epoch to the handshake payload and kv_transfer_params
+#  15: Add remote_registration_epoch to kv_transfer_params
 #
 NIXL_CONNECTOR_VERSION: int = 15
 
@@ -98,8 +98,6 @@ class NixlHandshakePayload(KVConnectorHandshakeMetadata):
 
     compatibility_hash: str
     agent_metadata_bytes: bytes  # NixlAgentMetadata encoded
-    # Bumped when sleep mode re-registers the KV cache; peers then re-handshake.
-    registration_epoch: int = 0
 
 
 def _get_speculative_compatibility_factors(
@@ -239,6 +237,7 @@ class RemoteMeta:
     request_id: str
     blocks_expiry_time: float | None = None
     num_tokens: int | None = None
+    # Bumped each time the remote re-registers its KV cache after a sleep.
     registration_epoch: int = 0
 
 

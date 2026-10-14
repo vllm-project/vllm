@@ -97,8 +97,6 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 _SHARED_REGION_GROUP_ID = -1
-# Handshakes take seconds; a wedged one fails the sleep, not hangs it.
-_RELEASE_TIMEOUT_S = 60.0
 
 # Re-handshake delay bounds for a pull peer whose local metadata keeps getting
 # invalidated, eg due to a persistent RDMA fault.
@@ -644,16 +642,10 @@ class NixlBaseConnectorWorker:
             )
 
         if vllm_config.model_config.enable_sleep_mode:
-            # Released KV pages stay pinned by UCX's registration cache and by peers'
-            # cuda_ipc imports; UCX reads both settings when the agent is created.
-            defaults = {"UCX_RCACHE_ENABLE": "n", "UCX_TLS": "^cuda_ipc"}
-            if applied := {k: v for k, v in defaults.items() if k not in os.environ}:
-                os.environ.update(applied)
-                logger.info_once(
-                    "Sleep mode: setting %s process-wide, so that UCX does not keep "
-                    "released KV cache pages pinned.",
-                    ", ".join(f"{k}={v}" for k, v in applied.items()),
-                )
+            # UCX's registration cache and peers' cuda_ipc imports would keep the
+            # slept KV cache resident. UCX reads both when the agent is created.
+            os.environ.setdefault("UCX_RCACHE_ENABLE", "n")
+            os.environ.setdefault("UCX_TLS", "^cuda_ipc")
         self.nixl_wrapper = nixl_wrapper_cls(str(uuid.uuid4()), config)
         # Map of engine_id -> {(pp_rank, tp_rank): agent_name, ...}.
         # non-PP remote uses pp_rank 0, i.e. (0, tp_rank).
@@ -666,8 +658,6 @@ class NixlBaseConnectorWorker:
         # Invalid engine -> (backoff, earliest release time). Kept across release
         # so that repeat invalidations back off.
         self._invalid_engine_backoff: dict[EngineId, tuple[float, float]] = {}
-        # Registration epoch of the payload each remote agent was loaded from.
-        self._remote_registration_epochs: dict[EngineId, int] = {}
         # Map of engine_id -> clock offset.
         self._engine_clock_offset: dict[EngineId, float] = {}
 
@@ -1040,7 +1030,6 @@ class NixlBaseConnectorWorker:
         # higher RTT is just noise that skews the midpoint estimate.
         best_rtt = float("inf")
         best_offset: float | None = None
-        epochs: list[int] = []
 
         with zmq_ctx(zmq.REQ, path) as sock:
             for remote_pp_rank, remote_rank in itertools.product(
@@ -1143,7 +1132,6 @@ class NixlBaseConnectorWorker:
                     remote_agent_name = self.add_remote_agent(
                         metadata, remote_rank, remote_tp_size, metadata.dcp_size
                     )
-                epochs.append(handshake_payload.registration_epoch)
                 setup_agent_time = time.perf_counter()
                 logger.debug(
                     "NIXL handshake: add agent took: %s (notif_agents_only=%s)",
@@ -1154,8 +1142,6 @@ class NixlBaseConnectorWorker:
                 remote_rank_to_agent_name[remote_ranks] = remote_agent_name
 
         assert best_offset is not None
-        # The oldest payload loaded, in case ranks were republished mid-handshake.
-        self._remote_registration_epochs[expected_engine_id] = min(epochs)
         return remote_rank_to_agent_name, best_offset
 
     def _add_notif_only_remote_agent(
@@ -1846,32 +1832,17 @@ class NixlBaseConnectorWorker:
         return self._ple_block_len
 
     def unregister_kv_caches(self) -> None:
-        """Deregister the KV caches, with every handle built on them. Transfers are
-        already drained, but a background handshake may still prepare handles on
-        them: wait for it, TimeoutError if it does not finish. Idempotent."""
         if self._kv_unregistered or not self._registered_descs:
             return
-        deadline = time.perf_counter() + _RELEASE_TIMEOUT_S
-        while self._handshake_pending():
-            if time.perf_counter() >= deadline:
-                raise TimeoutError("NIXL handshakes did not finish in time")
-            time.sleep(0.01)
-        self._kv_unregistered = True
         self._release_local_xfer_handles()
-        # Only add_remote_agent rebuilds split and remote-block-size local handles.
+        # Remote engines hold local handles too; they handshake again on demand.
         for engine_id in list(self._remote_agents):
             self._cleanup_remote_engine(engine_id, log_eviction=False)
         for descs in self._registered_descs:
             self.nixl_wrapper.deregister_memory(descs)
-
-    def _handshake_pending(self) -> bool:
-        # The done callback drops the future and installs the agent under the lock.
-        with self._handshake_lock:
-            return bool(self._handshake_futures)
+        self._kv_unregistered = True
 
     def restore_kv_caches(self) -> None:
-        """Register the unregistered KV caches again and rebuild the handshake payload
-        with the new agent metadata. Idempotent."""
         if not self._kv_unregistered:
             return
         for descs in self._registered_descs:
@@ -1879,6 +1850,7 @@ class NixlBaseConnectorWorker:
         self.src_xfer_handles_by_block_size[self.block_size], self.src_blocks_data = (
             self.register_local_xfer_handler(self.block_size)
         )
+        # Peers load the new registration from the agent metadata.
         payload = self.xfer_handshake_metadata
         assert payload is not None
         agent_metadata = msgspec.msgpack.decode(
@@ -3773,7 +3745,6 @@ class NixlBaseConnectorWorker:
         self.dst_uses_region_group_mapping.pop(engine_id, None)
         self.dst_region_mem_types.pop(engine_id, None)
         self.tp_mappings.pop(engine_id, None)
-        self._remote_registration_epochs.pop(engine_id, None)
         if self.transfer_topo is not None:
             self.transfer_topo.unregister_remote_engine(engine_id)
 
@@ -3794,19 +3765,24 @@ class NixlBaseConnectorWorker:
             self.shutdown()
 
     def _release_local_xfer_handles(self) -> None:
-        handles = [
-            *self.src_xfer_handles_by_block_size.values(),
-            *self._dram_src_handles_by_block_size.values(),
-            *itertools.chain(*self.src_xfer_handles_by_tp_ratio.values()),
-            *itertools.chain(*self._dram_src_handles_by_tp_ratio.values()),
-        ]
-        self.src_xfer_handles_by_block_size.clear()
-        self._dram_src_handles_by_block_size.clear()
-        self.src_xfer_handles_by_tp_ratio.clear()
-        self._dram_src_handles_by_tp_ratio.clear()
-        for handle in handles:
-            if handle is not None:  # DRAM handles are None without a host pool
+        try:
+            for handle in self.src_xfer_handles_by_block_size.values():
                 self.nixl_wrapper.release_dlist_handle(handle)
+            for handles in self.src_xfer_handles_by_tp_ratio.values():
+                for handle in handles:
+                    self.nixl_wrapper.release_dlist_handle(handle)
+            for dram_handles in self._dram_src_handles_by_tp_ratio.values():
+                for dram_handle in dram_handles:
+                    if dram_handle is not None:
+                        self.nixl_wrapper.release_dlist_handle(dram_handle)
+            for dram_handle in self._dram_src_handles_by_block_size.values():
+                if dram_handle is not None:
+                    self.nixl_wrapper.release_dlist_handle(dram_handle)
+        finally:
+            self.src_xfer_handles_by_block_size.clear()
+            self.src_xfer_handles_by_tp_ratio.clear()
+            self._dram_src_handles_by_tp_ratio.clear()
+            self._dram_src_handles_by_block_size.clear()
 
     def _finish_shutdown(self) -> None:
         self._recving_transfers.clear()
