@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-This example shows how to use vLLM for running offline inference
+"""This example shows how to use vLLM for running offline inference
 with the correct prompt format on audio language models.
 
 For most models, the prompt format should follow corresponding examples
@@ -286,8 +285,7 @@ def run_minicpmo(question: str, audio_count: int) -> ModelRequestData:
 
 # Phi-4-multimodal-instruct
 def run_phi4mm(question: str, audio_count: int) -> ModelRequestData:
-    """
-    Phi-4-multimodal-instruct supports both image and audio inputs. Here, we
+    """Phi-4-multimodal-instruct supports both image and audio inputs. Here, we
     show how to process audio inputs.
     """
     model_path = snapshot_download("microsoft/Phi-4-multimodal-instruct")
@@ -496,30 +494,9 @@ def run_whisper(question: str, audio_count: int) -> ModelRequestData:
     )
 
 
-# FireRedLID
-def run_fireredlid(question: str, audio_count: int) -> ModelRequestData:
-    assert audio_count == 1, "FireRedLID only supports single audio input per prompt"
-    model_name = "PatchyTisa/FireRedLID-vllm"
-
-    prompt = "<sos>"
-
-    engine_args = EngineArgs(
-        model=model_name,
-        max_model_len=8,
-        max_num_seqs=5,
-        limit_mm_per_prompt={"audio": audio_count},
-    )
-
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompt=prompt,
-    )
-
-
 model_example_map = {
     "audioflamingo3": run_audioflamingo3,
     "cohere_asr": run_cohere_asr,
-    "fireredlid": run_fireredlid,
     "funaudiochat": run_funaudiochat,
     "gemma3n": run_gemma3n,
     "glmasr": run_glmasr,

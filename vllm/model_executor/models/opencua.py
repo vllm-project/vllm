@@ -7,6 +7,7 @@
 
 """Inference-only OpenCUA-7B model compatible with HuggingFace weights."""
 
+import typing
 from collections.abc import Mapping, Sequence
 from typing import Any
 
@@ -27,6 +28,7 @@ from vllm.multimodal.inputs import (
 )
 from vllm.multimodal.parse import MultiModalDataItems
 from vllm.multimodal.processing import (
+    BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
     PromptReplacement,
     PromptUpdate,
@@ -57,7 +59,7 @@ class OpenCUAProcessingInfo(Qwen2VLProcessingInfo):
         return Qwen2VLMultiModalDataParser(
             self.get_hf_config().vision_config.spatial_merge_size,
             expected_hidden_size=self._get_expected_hidden_size(),
-            embeds_from_ec_connector=self.embeds_from_ec_connector,
+            allow_missing_mm_embeddings=self.allow_missing_mm_embeddings,
         )
 
     def get_hf_config(self):
@@ -141,16 +143,6 @@ class OpenCUAMultiModalProcessor(BaseMultiModalProcessor[OpenCUAProcessingInfo])
             self.info.get_hf_config().vision_config.spatial_merge_size
         )(hf_inputs)
 
-    def _hf_processor_applies_updates(
-        self,
-        prompt_text: str,
-        mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
-        tokenization_kwargs: Mapping[str, object],
-    ) -> bool:
-        """vLLM이 prompt 업데이트를 처리하도록 False 반환."""
-        return False
-
     def _get_prompt_updates(
         self,
         mm_items: MultiModalDataItems,
@@ -188,7 +180,13 @@ class OpenCUAMultiModalProcessor(BaseMultiModalProcessor[OpenCUAProcessingInfo])
         ]
 
 
-class OpenCUADummyInputsBuilder(Qwen2VLDummyInputsBuilder):
+if typing.TYPE_CHECKING:
+    _OpenCUADummyInputsBuilderBase = BaseDummyInputsBuilder[OpenCUAProcessingInfo]
+else:
+    _OpenCUADummyInputsBuilderBase = Qwen2VLDummyInputsBuilder
+
+
+class OpenCUADummyInputsBuilder(_OpenCUADummyInputsBuilderBase):
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         num_images = mm_counts.get("image", 0)
 
@@ -230,7 +228,7 @@ class OpenCUAForConditionalGeneration(Qwen2_5_VLForConditionalGeneration):
         nn.Module.__init__(self)
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
-        multimodal_config = vllm_config.model_config.multimodal_config
+        multimodal_config = vllm_config.model_config.get_multimodal_config()
 
         self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
         self.config = config

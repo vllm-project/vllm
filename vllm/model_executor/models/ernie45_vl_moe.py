@@ -29,7 +29,7 @@ from typing import Any
 
 import torch
 from torch import nn
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 # from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
@@ -192,7 +192,7 @@ class Ernie4_5_VLMoeAttention(nn.Module):
 class Ernie4_5_VLMoeMoE(nn.Module):
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
@@ -232,6 +232,7 @@ class Ernie4_5_VLMoeMoE(nn.Module):
 
         assert text_moe_layer_start_index <= text_moe_layer_end_index
 
+        self.shared_experts: Ernie4_5_VLMoeMLP | None
         if self.has_shared_experts:
             intermediate_size = (
                 config.moe_intermediate_size[0] * config.moe_num_shared_experts
@@ -384,7 +385,7 @@ class Ernie4_5_VLMoeMoE(nn.Module):
 class Ernie4_5_VLMoeDecoderLayer(nn.Module):
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
@@ -771,9 +772,10 @@ class Ernie4_5_VLMoeForCausalLM(nn.Module, SupportsPP):
                     if is_pp_missing_parameter(name, self):
                         continue
                     # Remapping the name of FP8 kv-scale.
-                    name = maybe_remap_kv_scale_name(name, params_dict)
-                    if name is None:
+                    remapped_name = maybe_remap_kv_scale_name(name, params_dict)
+                    if remapped_name is None:
                         continue
+                    name = remapped_name
 
                     param = params_dict[name]
 

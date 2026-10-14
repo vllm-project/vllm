@@ -29,7 +29,7 @@ from typing import Any
 
 import torch
 from torch import nn
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
@@ -70,7 +70,7 @@ from .utils import (
 class MiniMaxM2MoE(nn.Module):
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
@@ -249,7 +249,7 @@ class MiniMaxM2Attention(nn.Module):
 class MiniMaxM2DecoderLayer(nn.Module):
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         prefix: str,
         model_config: ModelConfig,
         cache_config: CacheConfig | None = None,
@@ -371,6 +371,14 @@ class MiniMaxM2Model(nn.Module, EagleModelMixin):
             ["hidden_states", "residual"], config.hidden_size
         )
 
+        # Drop spec-decode (MTP) layers; they are appended after the main
+        # decoder layers and have no destination in the main model.
+        if num_mtp := getattr(config, "num_mtp_modules", 0):
+            base = config.num_hidden_layers
+            self.hf_to_vllm_mapper = self.hf_to_vllm_mapper | WeightsMapper(
+                orig_to_new_prefix={f"layers.{base + i}.": None for i in range(num_mtp)}
+            )
+
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
@@ -413,17 +421,7 @@ class MiniMaxM2Model(nn.Module, EagleModelMixin):
         return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        # Skip spec-decode (MTP) layers; they are appended after the main
-        # decoder layers and have no destination in the main model.
-        skip_prefixes = None
-        num_mtp = getattr(self.config, "num_mtp_modules", 0)
-        if num_mtp:
-            base = self.config.num_hidden_layers
-            skip_prefixes = [f"layers.{base + i}." for i in range(num_mtp)]
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=skip_prefixes,
-        )
+        loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 

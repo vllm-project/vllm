@@ -18,8 +18,8 @@ def _write_dspark_config(path, **overrides):
         "hidden_size": 7168,
         "intermediate_size": 14336,
         "num_hidden_layers": 5,
-        "num_attention_heads": 64,
-        "num_key_value_heads": 64,
+        "num_attention_heads": 96,
+        "num_key_value_heads": 96,
         "q_lora_rank": 1536,
         "kv_lora_rank": 512,
         "qk_nope_head_dim": 128,
@@ -97,9 +97,20 @@ def test_dspark_mla_rejects_unsupported_checkpoint_options(tmp_path, overrides):
         get_config(draft_path, trust_remote_code=False)
 
 
-def test_dspark_mla_uses_latent_kv_geometry(tmp_path):
+@pytest.mark.parametrize(
+    ("num_attention_heads", "expected_local_heads"),
+    [(64, 8), (96, 12)],
+    ids=["released-64-head", "block5-96-head"],
+)
+def test_dspark_mla_uses_latent_kv_geometry(
+    tmp_path, num_attention_heads, expected_local_heads
+):
     draft_path = tmp_path / "draft"
-    _write_dspark_config(draft_path)
+    _write_dspark_config(
+        draft_path,
+        num_attention_heads=num_attention_heads,
+        num_key_value_heads=num_attention_heads,
+    )
     model_config = ModelConfig(
         model=str(draft_path),
         tokenizer_mode="skip",
@@ -116,7 +127,7 @@ def test_dspark_mla_uses_latent_kv_geometry(tmp_path):
         tensor_parallel_size=8, distributed_executor_backend="external_launcher"
     )
     assert model_config.get_num_kv_heads(parallel_config) == 1
-    assert model_config.get_num_attention_heads(parallel_config) == 8
+    assert model_config.get_num_attention_heads(parallel_config) == expected_local_heads
     assert model_config.get_num_experts() == 0
 
 

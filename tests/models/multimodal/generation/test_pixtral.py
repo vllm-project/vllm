@@ -5,17 +5,13 @@ from dataclasses import asdict
 from typing import TYPE_CHECKING, Any
 
 import pytest
-from mistral_common.multimodal import download_image
-from mistral_common.protocol.instruct.chunk import ImageURLChunk
-from mistral_common.protocol.instruct.request import ChatCompletionRequest
-from mistral_common.tokens.tokenizers.mistral import MistralTokenizer
-from mistral_common.tokens.tokenizers.multimodal import image_from_chunk
-from transformers import AutoProcessor
+import torch
 
-from vllm import SamplingParams, TextPrompt, TokensPrompt
-from vllm.inputs import MultiModalDataBuiltins
+from vllm import SamplingParams
 from vllm.logprobs import Logprob, SampleLogprobs
+from vllm.model_executor.models.pixtral import _make_packed_sequence_metadata
 from vllm.platforms import current_platform
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from ....utils import VLLM_PATH, large_gpu_test
 from ...utils import check_logprobs_close
@@ -53,59 +49,6 @@ def _create_msg_format(urls: list[str]) -> list[dict[str, Any]]:
     ]
 
 
-def _create_msg_format_hf(urls: list[str]) -> list[dict[str, Any]]:
-    return [
-        {
-            "role": "user",
-            "content": [
-                {
-                    "type": "text",
-                    "content": PROMPT,
-                },
-                *({"type": "image", "image": download_image(url)} for url in urls),
-            ],
-        }
-    ]
-
-
-def _create_engine_inputs(urls: list[str]) -> TokensPrompt:
-    msg = _create_msg_format(urls)
-
-    tokenizer = MistralTokenizer.from_model("pixtral")
-
-    request = ChatCompletionRequest(messages=msg)  # type: ignore[type-var]
-    tokenized = tokenizer.encode_chat_completion(request)
-
-    engine_inputs = TokensPrompt(prompt_token_ids=tokenized.tokens)
-
-    images = []
-    for chunk in request.messages[0].content:
-        if isinstance(chunk, ImageURLChunk):
-            images.append(image_from_chunk(chunk))
-
-    mm_data = MultiModalDataBuiltins(image=images)
-    engine_inputs["multi_modal_data"] = mm_data
-
-    return engine_inputs
-
-
-def _create_engine_inputs_hf(urls: list[str]) -> TextPrompt:
-    msg = _create_msg_format_hf(urls)
-
-    tokenizer = AutoProcessor.from_pretrained("mistral-community/pixtral-12b")
-    prompt = tokenizer.apply_chat_template(msg)
-
-    images = []
-    for chunk in msg[0]["content"]:
-        if chunk["type"] == "image":
-            images.append(chunk["image"])
-
-    mm_data = MultiModalDataBuiltins(image=images)
-    engine_inputs = TextPrompt(prompt=prompt, multi_modal_data=mm_data)
-
-    return engine_inputs
-
-
 SAMPLING_PARAMS = SamplingParams(max_tokens=512, temperature=0.0, logprobs=5)
 LIMIT_MM_PER_PROMPT = dict(image=4)
 
@@ -121,6 +64,37 @@ FIXTURE_LOGPROBS_CHAT = {
 }
 
 OutputsLogprobs = list[tuple[list[int], str, SampleLogprobs | None]]
+
+
+@pytest.mark.parametrize(
+    "backend",
+    [
+        AttentionBackendEnum.FLASH_ATTN,
+        AttentionBackendEnum.FLASHINFER,
+        AttentionBackendEnum.TORCH_SDPA,
+    ],
+)
+def test_packed_sequence_metadata(backend: AttentionBackendEnum) -> None:
+    cu_seqlens, max_seqlen, sequence_lengths = _make_packed_sequence_metadata(
+        [4, 6],
+        backend,
+        hidden_size=64,
+        tp_size=1,
+        device=torch.device("cpu"),
+    )
+
+    assert cu_seqlens.dtype == torch.int32
+    assert max_seqlen.dtype == torch.int32
+    if backend == AttentionBackendEnum.FLASHINFER:
+        assert max_seqlen.item() >= 6
+        assert sequence_lengths is not None
+        assert sequence_lengths.dtype == torch.int32
+        assert len(cu_seqlens) % 2 == 0
+    else:
+        expected_max_seqlen = 6 if backend == AttentionBackendEnum.FLASH_ATTN else 0
+        assert max_seqlen.item() == expected_max_seqlen
+        assert cu_seqlens.tolist() == [0, 4, 10]
+        assert sequence_lengths is None
 
 
 # For the test author to store golden output in JSON

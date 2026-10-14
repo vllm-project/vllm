@@ -56,7 +56,7 @@ pub fn default_ready_response() -> EngineCoreReadyResponse {
         dtype: ModelDtype::Float32,
         vllm_version: "test-vllm-version".to_string(),
         world_size: 1,
-        data_parallel_size: 1,
+        effective_data_parallel_size: 1,
         tensor_parallel_size: 1,
         pipeline_parallel_size: 1,
         decode_context_parallel_size: 1,
@@ -72,6 +72,7 @@ pub fn default_ready_response() -> EngineCoreReadyResponse {
         weight_transfer_backend: None,
         enable_sleep_mode: false,
         supports_draft_weight_updates: false,
+        effective_attention_block_size: None,
     }
 }
 

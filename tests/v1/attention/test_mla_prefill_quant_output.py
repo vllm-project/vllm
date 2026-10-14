@@ -10,6 +10,7 @@ Covers two things:
     + standalone static-FP8-quant path it replaces (GPU-only, SM100/SM110).
 """
 
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -97,6 +98,38 @@ def test_flash_attn_supports_quant_output_unknown_device():
     with patch(f"{_FA_MODULE}.current_platform") as plat:
         plat.get_device_capability.return_value = None
         assert backend.supports_quant_output(kFp8StaticTensorSym) is False
+
+
+@pytest.mark.parametrize(
+    ("version", "enable_jit_warmup", "expected_calls"),
+    [(4, True, 1), (4, False, 0), (3, True, 0)],
+)
+def test_flash_attn_registers_warmup_only_for_fa4(
+    version: int,
+    enable_jit_warmup: bool,
+    expected_calls: int,
+):
+    vllm_config = SimpleNamespace(
+        kernel_config=SimpleNamespace(enable_jit_warmup=enable_jit_warmup)
+    )
+    with (
+        patch(f"{_FA_MODULE}.flash_attn_varlen_func"),
+        patch(f"{_FA_MODULE}.get_flash_attn_version", return_value=version),
+        patch(f"{_FA_MODULE}._FA4_MLA_PREFILL_KERNEL.register_warmup") as register,
+        patch(f"{_FA_MODULE}.current_platform") as platform,
+    ):
+        platform.get_device_capability.return_value = DeviceCapability(10, 0)
+        FlashAttnPrefillBackend(
+            num_heads=16,
+            scale=1.0,
+            kv_lora_rank=512,
+            qk_nope_head_dim=128,
+            qk_rope_head_dim=64,
+            v_head_dim=128,
+            vllm_config=vllm_config,
+        )
+
+    assert register.call_count == expected_calls
 
 
 def test_flash_attn_prefill_backend_signature_accepts_fused_kwargs():

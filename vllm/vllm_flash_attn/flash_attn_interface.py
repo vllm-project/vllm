@@ -214,6 +214,8 @@ def flash_attn_varlen_func(
     aux_tensors=None,
     aux_tensor_leading_dims=None,
     dynamic_causal: "torch.Tensor | None" = None,
+    gather_kv_indices=None,
+    gather_kv_valid_length=None,
 ):
     """dropout_p should be set to 0.0 during evaluation
     Supports multi-query and grouped-query attention (MQA/GQA) by passing in K, V with fewer heads
@@ -261,16 +263,50 @@ def flash_attn_varlen_func(
         return_attn_probs: bool. Whether to return the attention probabilities. This option is for
            testing only. The returned probabilities are not guaranteed to be correct
            (they might not have the right scaling).
+        seqused_k: (batch_size,), dtype torch.int32. Actual number of key tokens per
+           sequence. Mutually exclusive with cu_seqlens_k except on FA4, which reads
+           cu_seqlens_k as the KV offset and seqused_k as the length. Required when
+           block_table is given.
+        q_v: optional value tensor fused with q. FA3 and FA4 only.
+        block_table: (batch_size, max_blocks_per_seq), dtype torch.int32. Paged KV
+           cache block table. Requires seqused_k.
+        return_softmax_lse: bool. Whether to also return softmax_lse.
+        out: optional tensor to write the output into.
+        scheduler_metadata: precomputed scheduling metadata. Not supported by FA2.
+        q_descale: descale factor for FP8 q. Not supported by FA2, and ignored by
+           FA4 when the inputs are not FP8.
+        k_descale: descale factor for FP8 k. Same constraints as q_descale.
+        v_descale: descale factor for FP8 v. Same constraints as q_descale.
+        num_splits: int. Number of splits for the split-KV kernel; 0 lets the kernel
+           choose. FA2 only supports 0 or 1.
+        output_scale: scale for fused FP8 output quantization. FA4 only.
+        fa_version: int. FlashAttention major version to dispatch to.
+        s_aux: learnable per-head attention sink logits. Not supported by FA2.
+        cp_world_size: int. Context parallel world size.
+        cp_rank: int. Rank of this shard within the context parallel group.
+        cp_tot_seqused_k: (batch_size,), dtype torch.int32. Key lengths across the
+           whole context parallel group.
+        mask_mod: optional callable applying a custom mask. Not supported by FA2.
+        block_sparse_tensors: block-sparse index tensors. FA4 only, and must
+           materialize full_block_cnt and full_block_idx.
+        aux_tensors: auxiliary tensors consumed by mask_mod. FA4 only.
+        aux_tensor_leading_dims: leading dimensions of each entry in aux_tensors.
+        dynamic_causal: optional per-sequence causal offsets. FA4 only.
+        gather_kv_indices: (total_q, k) int32 KV rows per query token, `-1` padded,
+            k a multiple of 128. Requires q_v, excludes block_table. FA4 only.
+        gather_kv_valid_length: (total_q,) int32, real entries per row. FA4 only.
+
     Return:
         out: (total, nheads, headdim).
-        softmax_lse [optional, if return_softmax_lse=True]: (nheads, total_q_seqlen). The
-            logsumexp of each row of the matrix QK^T * scaling (e.g., log of the softmax
-            normalization factor).
+        softmax_lse [optional, if return_softmax_lse=True]: (nheads, total_q_seqlen), or
+            (total_q, nheads) on FA4's q_v path. The logsumexp of each row of the matrix
+            QK^T * scaling (e.g., log of the softmax normalization factor).
+
     """
     assert cu_seqlens_k is not None or seqused_k is not None, (
         "cu_seqlens_k or seqused_k must be provided"
     )
-    assert cu_seqlens_k is None or seqused_k is None, (
+    assert fa_version == 4 or cu_seqlens_k is None or seqused_k is None, (
         "cu_seqlens_k and seqused_k cannot be provided at the same time"
     )
     assert block_table is None or seqused_k is not None, (
@@ -281,6 +317,9 @@ def flash_attn_varlen_func(
         f"Fused FP8 output (output_scale) is only supported by FA4, "
         f"got fa_version={fa_version}"
     )
+    assert fa_version == 4 or (
+        gather_kv_indices is None and gather_kv_valid_length is None
+    ), f"gather_kv_* is only supported by FA4, got fa_version={fa_version}"
 
     if softmax_scale is None:
         softmax_scale = q.shape[-1] ** (-0.5)
@@ -411,25 +450,20 @@ def flash_attn_varlen_func(
             k.dtype == torch.float8_e4m3fn
             and torch.cuda.get_device_capability()[0] == 9
         )
-        if fa4_fp8_kv_dequant:
-            fa4_q_descale = None
-            fa4_k_descale = k_descale
-            fa4_v_descale = v_descale
-        else:
-            fa4_q_descale = None
-            fa4_k_descale = None
-            fa4_v_descale = None
 
         out, softmax_lse, _, _ = _flash_attn_fwd(
             q,
             k,
             v,
+            qv=q_v,
             cu_seqlens_q=cu_seqlens_q,
             cu_seqlens_k=cu_seqlens_k,
             seqused_k=seqused_k,
             max_seqlen_q=max_seqlen_q,
             max_seqlen_k=max_seqlen_k,
             page_table=block_table,
+            gather_kv_indices=gather_kv_indices,
+            gather_kv_valid_length=gather_kv_valid_length,
             softmax_scale=softmax_scale,
             causal=causal,
             dynamic_causal=dynamic_causal,
@@ -444,9 +478,9 @@ def flash_attn_varlen_func(
             block_sparse_tensors=block_sparse_tensors,
             aux_tensors=aux_tensors,
             aux_tensor_leading_dims=aux_tensor_leading_dims,
-            q_descale=fa4_q_descale,
-            k_descale=fa4_k_descale,
-            v_descale=fa4_v_descale,
+            q_descale=None if fa4_fp8_kv_dequant else q_descale,
+            k_descale=k_descale,
+            v_descale=v_descale,
             output_scale=output_scale,
             fp8_kv_dequant=fa4_fp8_kv_dequant,
         )
@@ -462,6 +496,7 @@ def compile_flash_attn_varlen_func_from_specs(
     v_shape: tuple[int, ...],
     q_dtype: torch.dtype,
     v_stride: tuple[int, ...] | None = None,
+    k_stride: tuple[int, ...] | None = None,
     cu_seqlens_q_shape: tuple[int, ...] | None = None,
     cu_seqlens_k_shape: tuple[int, ...] | None = None,
     max_seqlen_q: int | None = None,
@@ -474,6 +509,9 @@ def compile_flash_attn_varlen_func_from_specs(
     return_softmax_lse=False,
     num_splits: int = 0,
     fa_version: int = DEFAULT_FA_VERSION,
+    seqused_k_shape: tuple[int, ...] | None = None,
+    page_table_shape: tuple[int, ...] | None = None,
+    softcap: float | None = None,
 ) -> None:
     if fa_version != 4:
         raise ValueError(
@@ -484,7 +522,8 @@ def compile_flash_attn_varlen_func_from_specs(
     del deterministic
 
     from vllm.vllm_flash_attn.cute.interface import (
-        compile_flash_attn_varlen_func_from_specs as _fa4_compile_flash_attn_varlen_func_from_specs,
+        _flash_attn_fwd,
+        _make_compile_only_tensor_spec,
     )
 
     real_window_size: tuple[int, int]
@@ -497,21 +536,50 @@ def compile_flash_attn_varlen_func_from_specs(
     if softmax_scale is None:
         softmax_scale = q_shape[-1] ** (-0.5)
 
-    return _fa4_compile_flash_attn_varlen_func_from_specs(
-        q_shape=q_shape,
-        k_shape=k_shape,
-        v_shape=v_shape,
-        q_dtype=q_dtype,
-        v_stride=v_stride,
-        cu_seqlens_q_shape=cu_seqlens_q_shape,
-        cu_seqlens_k_shape=cu_seqlens_k_shape,
+    q = _make_compile_only_tensor_spec(q_shape, q_dtype)
+    k = _make_compile_only_tensor_spec(k_shape, q_dtype, stride=k_stride)
+    v = _make_compile_only_tensor_spec(v_shape, q_dtype, stride=v_stride)
+    cu_seqlens_q = _make_compile_only_tensor_spec(cu_seqlens_q_shape, torch.int32, 4)
+    out = _make_compile_only_tensor_spec(
+        (*q_shape[:-1], v_shape[-1]),
+        q_dtype,
+    )
+    lse = None
+    if return_softmax_lse:
+        assert q is not None
+        if cu_seqlens_q_shape is None:
+            lse_shape = (*q.shape[:-3], q.shape[-2], q.shape[-3])
+            lse_stride = None
+        else:
+            lse_shape = (q.shape[-2], q.shape[0])
+            lse_stride = (None, 1)
+        lse = _make_compile_only_tensor_spec(
+            lse_shape,
+            torch.float32,
+            4,
+            stride=lse_stride,
+        )
+
+    _flash_attn_fwd(
+        q=q,
+        k=k,
+        v=v,
+        cu_seqlens_q=cu_seqlens_q,
+        cu_seqlens_k=_make_compile_only_tensor_spec(cu_seqlens_k_shape, torch.int32, 4),
+        seqused_k=_make_compile_only_tensor_spec(seqused_k_shape, torch.int32, 4),
+        page_table=_make_compile_only_tensor_spec(page_table_shape, torch.int32, 4),
         max_seqlen_q=max_seqlen_q,
         max_seqlen_k=max_seqlen_k,
         softmax_scale=softmax_scale,
         causal=causal,
-        window_size=real_window_size,
+        softcap=softcap,
+        window_size_left=real_window_size[0],
+        window_size_right=real_window_size[1],
         num_splits=num_splits,
         return_lse=return_softmax_lse,
+        out=out,
+        lse=lse,
+        compile_only=True,
     )
 
 
@@ -560,11 +628,16 @@ def sparse_attn_func(
         return_attn_probs: bool. Whether to return the attention probabilities. This option is for
            testing only. The returned probabilities are not guaranteed to be correct
            (they might not have the right scaling).
+        softcap: float. Anything > 0 activates softcapping attention.
+        return_softmax_lse: bool. Whether to also return softmax_lse.
+        out: optional tensor to write the output into.
+
     Return:
         out: (batch_size, seqlen, nheads, headdim).
         softmax_lse [optional, if return_softmax_lse=True]: (batch_size, nheads, seqlen). The
             logsumexp of each row of the matrix QK^T * scaling (e.g., log of the softmax
             normalization factor).
+
     """
     if softmax_scale is None:
         softmax_scale = q.shape[-1] ** (-0.5)
@@ -646,11 +719,15 @@ def sparse_attn_varlen_func(
         return_attn_probs: bool. Whether to return the attention probabilities. This option is for
            testing only. The returned probabilities are not guaranteed to be correct
            (they might not have the right scaling).
+        return_softmax_lse: bool. Whether to also return softmax_lse.
+        out: optional tensor to write the output into.
+
     Return:
         out: (total, nheads, headdim).
         softmax_lse [optional, if return_softmax_lse=True]: (nheads, total_q_seqlen). The
             logsumexp of each row of the matrix QK^T * scaling (e.g., log of the softmax
             normalization factor).
+
     """
     if softmax_scale is None:
         softmax_scale = q.shape[-1] ** (-0.5)
