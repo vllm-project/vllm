@@ -1959,7 +1959,9 @@ class OffloadingConnectorScheduler:
                 # Non-sliding-window blocks are only tracked after
                 # request_finished, so only clean up for finished requests.
                 if req_status.req.is_finished():
-                    self._remove_pending_job(job_id, job_status.deferred_fence_block_ids)
+                    self._remove_pending_job(
+                        job_id, job_status.deferred_fence_block_ids
+                    )
 
             del self._jobs[job_id]
             req_status.transfer_jobs.remove(job_id)
