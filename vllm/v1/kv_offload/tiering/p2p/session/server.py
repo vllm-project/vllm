@@ -1135,4 +1135,17 @@ class ServerRole:
             del self._store_jobs[jid]
             results.append(StoreResult(job_id=jid, success=False))
             logger.warning("P2PSession %s: store job %d timed out", self._peer_id, jid)
+        # A failed store job's primary slots are unpinned by the engine, so its
+        # blocks must no longer be offered to a fetch. A symmetric round then
+        # fails fast in on_fetch instead of reading a slot that may be reused.
+        expired = set(timed_out)
+        for st in self._requests.values():
+            for rnd in st.outbound.values():
+                if rnd.pending_job_ids & expired:
+                    rnd.pending_job_ids -= expired
+                    rnd.available = {
+                        key: entry
+                        for key, entry in rnd.available.items()
+                        if entry[0] not in expired
+                    }
         return results
