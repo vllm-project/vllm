@@ -379,7 +379,7 @@ def align_moe_weights_for_fi(
     return padded_w13, padded_w2, padded_intermediate
 
 
-def align_mxfp8_moe_weights_for_fi(
+def align_mxfp8_moe_weights_for_fi_trtllm(
     w13: torch.Tensor,
     w2: torch.Tensor,
     w13_scale: torch.Tensor,
@@ -388,8 +388,9 @@ def align_mxfp8_moe_weights_for_fi(
     min_alignment: int,
     hidden_alignment: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, int, int]:
-    """align_moe_weights_for_fi for MXFP8 weights and their UE8M0 block scales,
-    which also pads the hidden size to a multiple of hidden_alignment.
+    """align_moe_weights_for_fi for MXFP8 weights and their UE8M0 block scales
+    for the FlashInfer TRT-LLM MoE kernel, which also pads the hidden size to a
+    multiple of hidden_alignment.
 
     Padded weights are zero and padded scales are 127 (UE8M0 for 1.0), so the
     padded rows and columns contribute nothing. Scales may be 3D
@@ -406,7 +407,7 @@ def align_mxfp8_moe_weights_for_fi(
 
     if padded_hidden != hidden_size:
         logger.info_once(
-            "Padding hidden size from %d to %d for MXFP8 MoE weights.",
+            "Padding hidden size from %d to %d for MXFP8 TRTLLM MoE kernel.",
             hidden_size,
             padded_hidden,
         )
@@ -575,7 +576,7 @@ def prepare_fp8_moe_layer_for_fi(
         # The kernel needs intermediate % 128 == 0 and hidden % 256 == 0. The
         # MoE runner pads the activations to the padded hidden size.
         w13, w2, w13_scale, w2_scale, new_intermediate, new_hidden = (
-            align_mxfp8_moe_weights_for_fi(
+            align_mxfp8_moe_weights_for_fi_trtllm(
                 w13,
                 w2,
                 w13_scale,
