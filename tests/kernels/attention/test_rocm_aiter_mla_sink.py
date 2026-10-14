@@ -476,6 +476,8 @@ def test_sparse_mla_sink_forward_mqa_preserves_split_query(dtype):
         (num_tokens, 128), -1, dtype=torch.int32, device="cuda"
     )
     impl.topk_indices_buffer[:, : selected.shape[1]] = selected
+    impl.owns_indexer = True
+    impl.index_epoch = 0
     impl.q_concat_buffer = torch.empty_like(q)
     metadata = SimpleNamespace(
         attn_out_dtype=dtype,
