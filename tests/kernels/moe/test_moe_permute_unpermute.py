@@ -227,6 +227,61 @@ def test_moe_permute_unpermute(
     torch.testing.assert_close(result4, gold4, atol=2e-2, rtol=0)
 
 
+@pytest.mark.parametrize("use_scratch", [False, True])
+def test_moe_permute_empty_routing(use_scratch: bool) -> None:
+    """An empty batch (no tokens) must be routed without crashing.
+
+    Regression test for #58789: with a non-trivial expert_map the topk-id
+    preprocessing kernel was launched with a zero-sized grid and divided by
+    zero (``block`` became 0, then ``(size + block - 1) / block``).
+    """
+    if not moe_permute_unpermute_supported():
+        pytest.skip("moe_permute_unpermute is not supported on this platform.")
+
+    device = torch.device("cuda:0")
+    n_expert = 16
+    n_hidden = 2048
+    topk = 2
+    # A non-identity expert_map routes the call through the topk-id
+    # preprocessing kernel that used to divide by zero for an empty batch.
+    expert_map = torch.arange(n_expert, dtype=torch.int32, device=device)
+
+    hidden_states = torch.empty((0, n_hidden), dtype=torch.bfloat16, device=device)
+    topk_ids = torch.empty((0, topk), dtype=torch.int32, device=device)
+
+    scratch = None
+    if use_scratch:
+        scratch = get_moe_permute_scratch(
+            num_experts=n_expert,
+            num_local_experts=n_expert,
+            device=device,
+        )
+        # Scratch buffers are allocated lazily; prime them so the empty batch
+        # follows the same path as a reused production scratch.
+        scratch.reserve(topk)
+
+    (
+        permuted_hidden_states,
+        a1q_scale,
+        expert_first_token_offset,
+        inv_permuted_idx,
+        permuted_idx,
+    ) = moe_permute(
+        hidden_states,
+        None,
+        topk_ids,
+        n_expert,
+        expert_map=expert_map,
+        scratch=scratch,
+    )
+
+    assert permuted_hidden_states.shape == (0, n_hidden)
+    assert a1q_scale is None
+    assert expert_first_token_offset.tolist() == [0] * (n_expert + 1)
+    assert inv_permuted_idx.numel() == 0
+    assert permuted_idx.numel() == 0
+
+
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("n_token", [1, 33, 128])
 @pytest.mark.parametrize("topk", [1, 6, 8])

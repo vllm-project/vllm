@@ -92,6 +92,17 @@ torch::stable::Tensor moe_sort_routing(
   auto expanded_rows = n_token * topk;
   auto stream = get_current_cuda_stream(topk_ids.get_device_index());
 
+  // Empty routing: there is nothing to sort. The sorting and topk-id
+  // preprocessing kernels below require at least one key-value pair, and
+  // preprocessTopkIdLauncher would divide by zero (block == 0). Zero the
+  // expert offsets and return an empty row mapping instead.
+  if (expanded_rows == 0) {
+    torch::stable::zero_(expert_first_token_offset);
+    return maybe_allocate_tensor(maybe_sorted_row_idx, inv_permuted_idx.sizes(),
+                                 torch::headeronly::ScalarType::Int, device,
+                                 "sorted_row_idx");
+  }
+
   auto sorter_size = moe_permute_sort_workspace_size(expanded_rows, n_expert);
   auto sort_workspace = maybe_allocate_tensor(
       maybe_sort_workspace, {sorter_size}, torch::headeronly::ScalarType::Char,
@@ -147,6 +158,14 @@ void moe_permute_impl(
       topk, expert_first_token_offset, inv_permuted_idx, maybe_sort_workspace,
       maybe_permuted_experts_id, maybe_sorted_row_idx, maybe_topk_ids_for_sort,
       false);
+
+  // No tokens to expand; the expand kernel below would otherwise be launched
+  // with an empty grid. The expert offsets are already zeroed by
+  // moe_sort_routing.
+  if (input.size(0) == 0) {
+    return;
+  }
+
   auto stream = get_current_cuda_stream(input.get_device_index());
   auto n_token = input.size(0);
   auto n_hidden = input.size(1);
