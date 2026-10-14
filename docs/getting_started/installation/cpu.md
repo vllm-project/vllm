@@ -30,7 +30,7 @@ When open a Github issue about the CPU backend, please add `[CPU Backend]` in th
 
 ## Requirements
 
-- Python: 3.10 -- 3.13
+- Python: 3.11 -- 3.14
 
 === "Intel/AMD x86"
 
@@ -241,6 +241,9 @@ export VLLM_VERSION=$(curl -s https://api.github.com/repos/vllm-project/vllm/rel
 uv pip install "vllm[zen]" --extra-index-url https://wheels.vllm.ai/${VLLM_VERSION}/cpu --index-strategy first-index --torch-backend cpu
 ```
 
+!!! warning
+    `zentorch` is not supported with vLLM 0.27.0 and 0.27.1.
+
 vLLM auto-detects the platform and routes linear layers through ZenDNN-optimized kernels - no flag needed. To verify it is engaged, look for the platform-selection line in the server's startup logs:
 
 ```bash
@@ -290,7 +293,7 @@ See [AMD Zen optimizations](#amd-zen-optimizations) for detection rules, support
 
 ### How to decide `VLLM_CPU_KVCACHE_SPACE`?
 
-This value is 4GB by default. Larger space can support more concurrent requests, longer context length. However, users should take care of memory capacity of each NUMA node. The memory usage of each TP rank is the sum of `weight shard size` and `VLLM_CPU_KVCACHE_SPACE`, if it exceeds the capacity of a single NUMA node, the TP worker will be killed with `exitcode 9` due to out-of-memory.
+This value is 0 by default, which means vLLM doesn't override the KV cache size through this variable. When set, the value is in GiB (e.g, `VLLM_CPU_KVCACHE_SPACE`=40 means 40 GiB). Larger space can support more concurrent requests, longer context length. However, users should take care of memory capacity of each NUMA node. The memory usage of each TP rank is the sum of `weight shard size` and `VLLM_CPU_KVCACHE_SPACE`, if it exceeds the capacity of a single NUMA node, the TP worker will be killed with `exitcode 9` due to out-of-memory. This is a legacy setting; use `--kv-cache-memory-bytes` instead.
 
 ### How to do performance tuning for vLLM CPU?
 

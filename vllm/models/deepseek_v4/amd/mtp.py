@@ -46,6 +46,7 @@ from vllm.models.deepseek_v4.common.ops.fused_mtp_input_rmsnorm import (
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
+from .mega_moe import finalize_mega_moe_weights
 from .model import DeepseekV4DecoderLayer
 
 logger = init_logger(__name__)
@@ -392,12 +393,16 @@ class DeepSeekV4MTP(nn.Module):
         head_rank_end = n_local_head * (tp_rank + 1)
 
         # Pre-compute expert mapping ONCE.
+        first_layer = next(iter(self.model.layers.values()))
         expert_mapping = fused_moe_make_expert_params_mapping(
             self,
             ckpt_gate_proj_name="w1",
             ckpt_down_proj_name="w2",
             ckpt_up_proj_name="w3",
             num_experts=self.config.n_routed_experts,
+            routed_experts_prefix=(
+                "" if first_layer.mtp_block.ffn.use_mega_moe else "routed_experts"
+            ),
         )
 
         # FP8 experts register ``..._weight_scale_inv`` (block_quant) while
@@ -525,6 +530,9 @@ class DeepSeekV4MTP(nn.Module):
                 )
         logger.info_once("MTP draft model loaded: %d params", len(loaded_params))
         return loaded_params
+
+    def process_weights_after_loading(self) -> None:
+        finalize_mega_moe_weights(self)
 
     def _rewrite_spec_layer_name(self, spec_layer: int, name: str) -> str:
         """Rewrite the weight name to match the format of the original model.

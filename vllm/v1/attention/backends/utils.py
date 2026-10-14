@@ -291,7 +291,10 @@ def resolve_kv_cache_layout(
     # specs can re-interpret HNC with different sizes as long as the total number of
     # bytes is the same. If not block-compact, each spec must agree on HNC to alias
     # the same page (this aliasing is done by the Hybrid Memory Allocator, HMA).
-    kv_cache_specs = tuple(kv_cache_specs or ())
+    # Specs without per-layer views lay out their own raw backing tensor.
+    kv_cache_specs = tuple(
+        spec for spec in kv_cache_specs or () if spec.has_layer_views
+    )
     hnc_shapes = {
         (spec.num_heads, spec.num_states, spec.page_size_bytes)
         for spec in kv_cache_specs
@@ -304,8 +307,12 @@ def resolve_kv_cache_layout(
                 f"none is in every supported set: {supported_layouts}."
             )
 
+    # Self-addressed per-request rings (e.g. the kpool tail) are replicated
+    # state like Mamba and don't need a separate draft group.
     dcp_sharding = {
-        spec.dcp_sharded for spec in kv_cache_specs if isinstance(spec, AttentionSpec)
+        spec.dcp_sharded
+        for spec in kv_cache_specs
+        if isinstance(spec, AttentionSpec) and spec.uses_slot_mapping
     }
     page_sizes = {spec.page_size_bytes for spec in kv_cache_specs}
     if len(dcp_sharding) > 1 and len(page_sizes) > 1:

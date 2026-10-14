@@ -20,8 +20,10 @@ steps:
   - tests/kernels/moe/test_cpu_fused_moe.py
   - tests/kernels/moe/test_cpu_quant_fused_moe.py
   - tests/kernels/moe/test_zen_cpu_int8_moe.py
+  - tests/test_zentorch_version_pin.py
   - vllm/model_executor/layers/fused_moe/experts/cpu_moe.py
   - tests/kernels/test_onednn.py
+  - tests/kernels/test_cpu_fused_sampling.py
   - tests/kernels/test_awq_int4_to_int8.py
   - tests/kernels/quantization/test_cpu_fp8_scaled_mm.py
   - tests/kernels/quantization/test_zen_da8w4.py
@@ -45,8 +47,10 @@ steps:
       tests/kernels/moe/test_cpu_fused_moe.py \
       tests/kernels/moe/test_cpu_quant_fused_moe.py \
       tests/kernels/moe/test_zen_cpu_int8_moe.py \
+      tests/test_zentorch_version_pin.py \
       tests/kernels/mamba/test_cpu_short_conv.py \
       tests/kernels/test_onednn.py \
+      tests/kernels/test_cpu_fused_sampling.py \
       tests/kernels/test_awq_int4_to_int8.py \
       tests/kernels/quantization/test_cpu_fp8_scaled_mm.py \
       tests/kernels/quantization/test_zen_da8w4.py \
@@ -85,7 +89,7 @@ steps:
     - |
       bash .buildkite/scripts/hardware_ci/run-cpu-test.sh 30m "
       pytest -x -v -s \
-      tests/v1/worker/test_gpu_autoregressive_speculator.py \
+      tests/v1/worker/test_gpu_target_dependent_ar_speculator.py \
       tests/v1/worker/test_gpu_extract_hidden_states_speculator.py \
       tests/v1/worker/test_gpu_batch_ordering.py \
       tests/v1/worker/test_gpu_rejection_sampler_chunking.py \
@@ -228,3 +232,57 @@ steps:
     "$$BUILDKITE_PARALLEL_JOB"
     "$REGISTRY/$REPO:$BUILDKITE_COMMIT-arm64-cpu"
   parallelism: 3
+
+- label: ":docker: Build Zen CPU image"
+  key: zen-cpu-image-build
+  # Reuse the shared `<repo>:<commit>-cpu` image that image-build-cpu publishes
+  # to public ECR, so Dockerfile.zen just layers on top instead of recompiling
+  # vLLM from source. If the pull fails, the build script still falls back to
+  # building the CPU base from source.
+  depends_on:
+    - image-build-cpu
+  soft_fail: true
+  agents:
+    queue: amd-cpu
+  source_file_dependencies:
+    - .buildkite/hardware_tests/cpu.yaml
+    - .buildkite/image_build/image_build_zen_cpu.sh
+    - docker/Dockerfile.zen
+    - docker/Dockerfile.cpu
+    - requirements/cpu.txt
+    - requirements/build/cpu.txt
+    - requirements/test/cpu.txt
+    - cmake/cpu_extension.cmake
+    - vllm/model_executor/layers/utils.py
+    - vllm/model_executor/kernels/linear/zentorch_utils.py
+    - vllm/model_executor/kernels/linear/scaled_mm/zentorch.py
+    - vllm/model_executor/kernels/linear/mixed_precision/zentorch.py
+    - vllm/platforms/cpu.py
+    - vllm/platforms/zen_cpu.py
+    - vllm/platforms/__init__.py
+    - tests/model_executor/test_cpu_unquantized_gemm_dispatch.py
+    - tests/test_zen_cpu_platform_detection.py
+    - tests/kernels/moe/test_zen_cpu_fused_moe.py
+    - tests/kernels/moe/test_zen_cpu_int8_moe.py
+    - vllm/v1/attention/backends/zentorch_sdpa.py
+    - tests/test_zentorch_version_pin.py
+    - vllm/v1/attention/backends/mla/prefill/zen_cpu_sdpa.py
+    - vllm/model_executor/layers/fused_moe/experts/zentorch_moe.py
+    - tests/kernels/quantization/test_zen_da8w4.py
+  commands:
+    - .buildkite/image_build/image_build_zen_cpu.sh "$REGISTRY" "$REPO" "$BUILDKITE_COMMIT"
+  env:
+    DOCKER_BUILDKIT: "1"
+    # Install zentorch directly (if-branch in Dockerfile.zen) instead of
+    # `uv pip install "vllm[zen]"`, which forces uv to re-resolve vLLM's full
+    # dependency closure and chokes on its transitive triton-cpu URL dependency.
+    # Keep this pin in sync with the `zen` extra in setup.py.
+    ZENTORCH_VERSION: "2.13.0.1"
+  retry:
+    automatic:
+      - exit_status: 1  # Transient Docker/BuildKit failure
+        limit: 1
+      - exit_status: -1  # Agent was lost
+        limit: 2
+      - exit_status: -10  # Agent was lost
+        limit: 2
