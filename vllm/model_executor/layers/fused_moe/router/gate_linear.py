@@ -220,13 +220,14 @@ class GateLinear(ReplicatedLinear):
                 and self.out_dtype == torch.float32
             )
 
-        # AITER tuned GEMM eligibility
-        self.allow_aiter_router_gemm = (
+        # AITER tuned GEMM eligibility. The tuned-shape check depends on the
+        # output dtype, so set_out_dtype recomputes it.
+        self._aiter_router_gemm_capable = (
             self.is_unquantized
             and can_use_aiter_tuned_gemm
             and self.weight.dtype == torch.bfloat16
-            and rocm_aiter_ops.is_bf16_gemm_tuned(output_size, input_size)
         )
+        self.allow_aiter_router_gemm = self._aiter_router_gemm_tuned()
 
         self._register_ll_fp32w_warmup()
 
@@ -248,6 +249,14 @@ class GateLinear(ReplicatedLinear):
             a_dtypes=(torch.bfloat16, torch.float32),
         )
 
+    def _aiter_router_gemm_tuned(self) -> bool:
+        if not self._aiter_router_gemm_capable:
+            return False
+        out_dtype = self.out_dtype if self.out_dtype is not None else self.weight.dtype
+        return rocm_aiter_ops.is_bf16_gemm_tuned(
+            self.output_size, self.input_size, out_dtype
+        )
+
     def set_out_dtype(self, out_dtype: torch.dtype) -> None:
         """Set output dtype for the router logits after init.
 
@@ -266,6 +275,7 @@ class GateLinear(ReplicatedLinear):
             self.allow_cublas_router_gemm = self.weight.dtype == torch.bfloat16
 
         # out_dtype may start as None -> recompute eligibility here
+        self.allow_aiter_router_gemm = self._aiter_router_gemm_tuned()
         self.allow_rocm_bf16x3_router_gemm = (
             self._rocm_bf16x3_weight_eligible and out_dtype == torch.float32
         )

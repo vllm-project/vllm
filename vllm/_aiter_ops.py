@@ -246,15 +246,17 @@ def _triton_gemm_config_is_tuned(config_name: str, N: int, K: int) -> bool:
     return get_gemm_config(config_name, M_TUNE_PROBE, N, K)[1]
 
 
-def _bf16_gemm_shape_is_tuned(N: int, K: int) -> bool:
+def _bf16_gemm_shape_is_tuned(N: int, K: int, out_dtype: torch.dtype) -> bool:
     # get_GEMM_A16W16_config builds a default on a miss; only tuned rows carry
-    # the tuner's "us" field.
+    # the tuner's "us" field. Rows are keyed by output dtype, so a shape tuned
+    # for bf16 output does not count as tuned for fp32 output.
     try:
         from aiter.tuned_gemm import get_GEMM_A16W16_config
 
         bf16 = str(torch.bfloat16)
+        otype = str(out_dtype)
         return any(
-            "us" in get_GEMM_A16W16_config(M, N, K, False, bf16, bf16)
+            "us" in get_GEMM_A16W16_config(M, N, K, False, bf16, otype)
             for M in (1, 2, 4, 8, 16, 32, 64, 128, 256)
         )
     except (AttributeError, ImportError, OSError):
@@ -559,10 +561,11 @@ def _rocm_aiter_bf16_gemm_impl(
     weight: torch.Tensor,
     out_dtype: torch.dtype,
 ) -> torch.Tensor:
-    # AITER's bf16 tuned configs output bf16: run bf16, cast to out_dtype.
+    # Pass out_dtype as otype so tgemm looks up the rows tuned for that output
+    # dtype and the kernel writes it directly (e.g. fp32 router logits).
     from aiter.tuned_gemm import tgemm
 
-    out = tgemm.mm(x, weight, None)
+    out = tgemm.mm(x, weight, otype=out_dtype)
     return out if out.dtype == out_dtype else out.to(out_dtype)
 
 
@@ -4062,8 +4065,10 @@ class rocm_aiter_ops:
 
     @staticmethod
     @functools.cache
-    def is_bf16_gemm_tuned(N: int, K: int) -> bool:
-        return _bf16_gemm_shape_is_tuned(N, K)
+    def is_bf16_gemm_tuned(
+        N: int, K: int, out_dtype: torch.dtype = torch.bfloat16
+    ) -> bool:
+        return _bf16_gemm_shape_is_tuned(N, K, out_dtype)
 
     @staticmethod
     @functools.cache

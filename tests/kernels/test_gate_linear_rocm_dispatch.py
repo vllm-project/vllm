@@ -275,8 +275,8 @@ def _make_aiter_gate(monkeypatch, *, tgemm=True, tuned=True, **kwargs):
 
     tuned_calls = []
 
-    def is_bf16_gemm_tuned(n, k):
-        tuned_calls.append((n, k))
+    def is_bf16_gemm_tuned(n, k, out_dtype):
+        tuned_calls.append((n, k, out_dtype))
         return tuned
 
     monkeypatch.setattr(rocm_aiter_ops, "is_tgemm_enabled", staticmethod(lambda: tgemm))
@@ -317,7 +317,49 @@ class _OnlineQuantConfig:
 def test_rocm_aiter_router_gemm_enabled_for_tuned_bf16_gate(monkeypatch):
     gate, tuned_calls = _make_aiter_gate(monkeypatch, input_size=6144, output_size=256)
     assert gate.allow_aiter_router_gemm
-    assert tuned_calls == [(256, 6144)]
+    assert tuned_calls == [(256, 6144, torch.float32)]
+
+
+def test_rocm_aiter_router_gemm_rechecks_tuning_on_set_out_dtype(monkeypatch):
+    """Tuned rows are keyed by output dtype, so a gate built without an
+    out_dtype probes bf16 first and must re-probe once fp32 is set."""
+    gate, tuned_calls = _make_aiter_gate(
+        monkeypatch, out_dtype=None, input_size=6144, output_size=256
+    )
+    gate.set_out_dtype(torch.float32)
+    assert gate.allow_aiter_router_gemm
+    assert tuned_calls == [
+        (256, 6144, torch.bfloat16),
+        (256, 6144, torch.float32),
+    ]
+
+
+@pytest.mark.parametrize("out_dtype", [torch.float32, torch.bfloat16])
+def test_rocm_aiter_bf16_gemm_passes_out_dtype_as_otype(monkeypatch, out_dtype):
+    """The op must ask tgemm for out_dtype directly, not run a bf16 GEMM and
+    upcast: tgemm keys its tuned rows by output dtype."""
+    import sys
+    import types
+
+    from vllm._aiter_ops import _rocm_aiter_bf16_gemm_impl
+
+    calls = []
+
+    class _FakeTgemm:
+        def mm(self, inp, weights, bias=None, otype=None):
+            calls.append((bias, otype))
+            return inp.new_zeros(inp.shape[0], weights.shape[0], dtype=otype)
+
+    fake_module = types.ModuleType("aiter.tuned_gemm")
+    fake_module.tgemm = _FakeTgemm()
+    monkeypatch.setitem(sys.modules, "aiter.tuned_gemm", fake_module)
+
+    x = torch.zeros(4, 16, dtype=torch.bfloat16)
+    weight = torch.zeros(8, 16, dtype=torch.bfloat16)
+    out = _rocm_aiter_bf16_gemm_impl(x, weight, out_dtype)
+
+    assert calls == [(None, out_dtype)]
+    assert out.dtype == out_dtype
 
 
 @pytest.mark.parametrize(
@@ -376,12 +418,14 @@ def test_rocm_aiter_router_gemm_forward_dispatch(monkeypatch, tuned, expected):
 # ---------------------------------------------------------------------------
 # ROCm AITER tuned GEMM tier on hardware, shape tuned for only one M
 # ---------------------------------------------------------------------------
-ROUTER_N, ROUTER_K = 256, 6144
+# A router shape AITER tunes with fp32 output (GateLinear's out_dtype).
+ROUTER_N, ROUTER_K = 128, 6144
 
 
 @pytest.fixture
 def aiter_router_shape_tuned_only_at_m1(monkeypatch):
-    """Keep only the M=1 row of AITER's bf16 tuned table for the router shape."""
+    """Keep only the M=1 fp32-output row of AITER's bf16 tuned table for the
+    router shape."""
     if not current_platform.is_rocm():
         pytest.skip("requires ROCm")
     from vllm._aiter_ops import rocm_aiter_ops
@@ -399,8 +443,9 @@ def aiter_router_shape_tuned_only_at_m1(monkeypatch):
         for key, row in tuned_gemm.get_GEMM_A16W16_config_().items()
         if key[3:5] != (ROUTER_N, ROUTER_K) or key[2] == 1
     }
-    if not any(key[2:5] == (1, ROUTER_N, ROUTER_K) for key in table):
-        pytest.skip("AITER has no M=1 tuned row for the router shape")
+    fp32 = str(torch.float32)
+    if not any(key[2:5] == (1, ROUTER_N, ROUTER_K) and key[7] == fp32 for key in table):
+        pytest.skip("AITER has no M=1 fp32-output tuned row for the router shape")
 
     monkeypatch.setattr(tuned_gemm, "get_GEMM_A16W16_config_", lambda: table)
     tuned_gemm.get_GEMM_A16W16_config.cache_clear()
