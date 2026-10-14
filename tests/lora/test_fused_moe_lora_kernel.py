@@ -1328,8 +1328,9 @@ def test_fused_moe_lora_kernel_rejects_bad_block_size_m(device):
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("packed", [False, True])
 @pytest.mark.parametrize("activation_name", ["SILU", "SWIGLUOAI"])
+@pytest.mark.parametrize("hidden", [256, 1024])
 def test_xpu_quantized_moe_lora_reference(
-    recipe, logical_size, mapped_experts, dtype, packed, activation_name
+    recipe, logical_size, mapped_experts, dtype, packed, activation_name, hidden
 ):
     """LoRA must follow token routes, padded gate/up halves and router weights."""
     from tests.kernels.moe.utils import make_dummy_moe_config
@@ -1353,12 +1354,13 @@ def test_xpu_quantized_moe_lora_reference(
     block_fp8 = recipe == "block_fp8"
     torch.manual_seed(42)
     device = "xpu"
-    tokens, experts, hidden, padded, rank = 4, 2, 256, 128, 8
+    tokens, experts, padded, rank = 4, 2, 128, 8
 
     def rand(*shape):
         return torch.randn(*shape, device=device, dtype=dtype) * 0.05
 
-    x = rand(tokens, hidden) * 10
+    # Keep projection variance comparable across hidden sizes.
+    x = rand(tokens, hidden) * (10 * (256 / hidden) ** 0.5)
     w1 = rand(experts, hidden, 2 * padded)
     w2 = rand(experts, padded, hidden)
     w1[:, :, logical_size:padded] = 0
@@ -1410,6 +1412,7 @@ def test_xpu_quantized_moe_lora_reference(
         in_dtype=dtype,
         activation=activation,
     )
+    config.is_lora_enabled = True
     if mapped_experts:
         config.moe_parallel_config.ep_size = 2
     quant = fp8_w8a16_moe_quant_config(
@@ -1466,8 +1469,14 @@ def test_xpu_quantized_moe_lora_reference(
     weights = torch.tensor(
         [[0.2, 0.8], [0.7, 0.3], [0.6, 0.4], [0.9, 0.1]], device=device
     )
-    output = torch.empty_like(x)
-    workspace = torch.empty(0, device=device)
+    shape13, shape2, _ = impl.workspace_shapes(
+        tokens, 2 * padded, hidden, 2, config.num_experts, experts, None, activation
+    )
+    workspace13 = torch.empty(shape13, device=device, dtype=dtype)
+    workspace2 = torch.empty(shape2, device=device, dtype=dtype)
+    # Modular MoE may alias the output with workspace13. Exercise that case
+    # as well as an independent output across the existing adapter matrix.
+    output = torch.empty_like(x) if packed else workspace13[: x.numel()].view_as(x)
     impl.apply(
         output,
         x,
@@ -1480,8 +1489,8 @@ def test_xpu_quantized_moe_lora_reference(
         expert_map,
         None,
         None,
-        workspace,
-        workspace,
+        workspace13,
+        workspace2,
         None,
         False,
     )
@@ -1501,8 +1510,8 @@ def test_xpu_quantized_moe_lora_reference(
                 expert_map,
                 None,
                 None,
-                workspace,
-                workspace,
+                workspace13,
+                workspace2,
                 None,
                 False,
             )
@@ -1578,8 +1587,8 @@ def test_xpu_quantized_moe_lora_reference(
         expert_map,
         None,
         None,
-        workspace,
-        workspace,
+        workspace13,
+        workspace2,
         None,
         False,
     )
