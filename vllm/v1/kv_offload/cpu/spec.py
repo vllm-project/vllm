@@ -192,10 +192,10 @@ class CPUOffloadingSpec(OffloadingSpec):
                 kv_bytes_per_chunk=self.kv_bytes_per_chunk,
                 cpu_page_size=self.cpu_page_size_per_worker,
                 barrier=_all_workers_barrier,
+                num_segments=_REGION_SEGMENTS,
                 populate_shard=(
                     (worker_index, world_size) if self.replicated_layout else None
                 ),
-                num_segments=_REGION_SEGMENTS,
             )
         try:
             return CPUOffloadingWorker(
