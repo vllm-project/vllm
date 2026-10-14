@@ -101,7 +101,8 @@ class LightOnOCRMultiModalProcessor(BaseMultiModalProcessor[LightOnOCRProcessing
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
-        image_token_id = self.info.get_hf_config().image_token_index
+        hf_config = self.info.get_hf_config()
+        image_token_id = hf_config.image_token_index
 
         def replace(item_idx: int):
             images = mm_items.get_items(
