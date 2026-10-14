@@ -7,7 +7,9 @@ n-gram embedding table can be kept in pinned host memory and looked up through
 Unified Virtual Addressing on any CUDA-alike platform.
 """
 
+import fcntl
 import hashlib
+import json
 import mmap
 import os
 import tempfile
@@ -17,7 +19,7 @@ import weakref
 from abc import ABC, abstractmethod
 from contextlib import ExitStack
 from pathlib import Path
-from typing import ClassVar
+from typing import ClassVar, NamedTuple
 
 import numpy as np
 import torch
@@ -921,43 +923,245 @@ def _map_shared_ple_file(
     return flat, owner, mapping
 
 
-def shared_ple_table_path(
-    directory: str,
-    model: str,
-    revision: str | None,
-    prefix: str,
+class SharedPLETable(NamedTuple):
+    """Where independent processes share a model's PLE tables, and which model.
+
+    ``table_id`` names the model, revision and layer; each process adds the
+    shape, dtype and ETP shard it holds (``shared_ple_table_identity``).
+    """
+
+    directory: str
+    table_id: str
+
+
+def shared_ple_table_identity(
+    table_id: str,
     shape: tuple[int, int],
     dtype: torch.dtype,
-) -> str:
-    """The file independent processes of one model share for one PLE table."""
-    key = hashlib.sha256(
-        f"{model}|{revision}|{prefix}|{shape[0]}x{shape[1]}|{dtype}".encode()
-    ).hexdigest()[:24]
-    return os.path.join(directory, f"vllm_ple_{key}")
+    *,
+    etp_rank: int,
+    etp_size: int,
+    vocab_range: tuple[int, int],
+) -> dict[str, object]:
+    """What one shared table file holds: one ETP shard of one PLE layer.
+
+    The table is vocab-sharded over the ETP group and every shard has the same
+    shape, so the shard is part of the identity: equal sizes must never let
+    one rank map another rank's rows.
+    """
+    return {
+        "table": table_id,
+        "shape": [int(shape[0]), int(shape[1])],
+        "dtype": str(dtype),
+        "etp_rank": int(etp_rank),
+        "etp_size": int(etp_size),
+        "vocab_range": [int(vocab_range[0]), int(vocab_range[1])],
+    }
 
 
-# How long a reader waits for the writer to finish loading the shared table.
+def shared_ple_table_path(directory: str, identity: dict[str, object]) -> str:
+    """The file independent processes share for one table shard."""
+    key = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
+    return os.path.join(directory, f"vllm_ple_{key[:24]}")
+
+
+# How long a process waits for another, still running, to finish loading a
+# shared table. A loader that dies releases its lock, which waiters notice
+# within one poll instead.
 PLE_SHARED_TABLE_READY_TIMEOUT_S = 3600
+PLE_SHARED_TABLE_POLL_S = 0.5
+
+
+def _try_flock(fd: int, operation: int) -> bool:
+    try:
+        fcntl.flock(fd, operation | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return False
+    return True
+
+
+def _shared_table_loader_alive(lock_fd: int) -> bool:
+    """Whether a process holds the loader's exclusive lock.
+
+    Probed with a shared lock, which only an exclusive holder refuses, so
+    waiters probing at the same time never mistake each other for a loader.
+    """
+    if not _try_flock(lock_fd, fcntl.LOCK_SH):
+        return True
+    fcntl.flock(lock_fd, fcntl.LOCK_UN)
+    return False
+
+
+def _check_shared_table_ready(
+    path: str, identity: dict[str, object], num_bytes: int
+) -> None:
+    """Refuse a ready table that is not the shard this process holds."""
+    mark = Path(path + ".ready").read_text()
+    try:
+        published = json.loads(mark)
+    except ValueError:
+        published = mark
+    expected = {**identity, "bytes": num_bytes}
+    if published != expected or os.stat(path).st_size != num_bytes:
+        raise RuntimeError(
+            f"shared PLE table {path} holds {published!r}, this process needs "
+            f"{expected!r}: remove the file and its .ready and .lock and start "
+            "again"
+        )
+
+
+def _claim_shared_table(
+    path: str, identity: dict[str, object], num_bytes: int
+) -> int | None:
+    """Become the process that loads ``path``, or wait until one has sized it.
+
+    The loader holds an exclusive ``flock`` on ``<path>.lock`` from before it
+    sizes the file until after it publishes ``<path>.ready``; the kernel
+    releases it when the process exits. So a file without a ready mark and
+    without a lock holder was left by a loader that died, and the next process
+    to take the lock loads it again; exactly one can. Returns the lock's file
+    descriptor for the loader (released by ``_publish_shared_table``), None for
+    a process that maps the table another loads or has loaded.
+    """
+    ready = path + ".ready"
+    if os.path.exists(ready):
+        _check_shared_table_ready(path, identity, num_bytes)
+        return None
+    lock_fd = os.open(path + ".lock", os.O_CREAT | os.O_RDWR, 0o600)
+    deadline = time.monotonic() + PLE_SHARED_TABLE_READY_TIMEOUT_S
+    try:
+        while True:
+            if os.path.exists(ready):
+                _check_shared_table_ready(path, identity, num_bytes)
+                return None
+            if _try_flock(lock_fd, fcntl.LOCK_EX):
+                # A loader publishes the mark before it unlocks.
+                if os.path.exists(ready):
+                    fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                    continue
+                _size_shared_table(path, num_bytes)
+                loader_fd, lock_fd = lock_fd, -1
+                return loader_fd
+            if _shared_table_loader_alive(lock_fd):
+                # A live loader: map the table once it is sized.
+                try:
+                    if os.stat(path).st_size == num_bytes:
+                        return None
+                except FileNotFoundError:
+                    pass
+            # Otherwise only waiters' probes held the lock: try again.
+            if time.monotonic() > deadline:
+                raise RuntimeError(
+                    f"shared PLE table {path} was not sized within "
+                    f"{PLE_SHARED_TABLE_READY_TIMEOUT_S} s by the process "
+                    "loading it"
+                )
+            time.sleep(PLE_SHARED_TABLE_POLL_S)
+    finally:
+        if lock_fd >= 0:
+            os.close(lock_fd)
+
+
+def _size_shared_table(path: str, num_bytes: int) -> None:
+    """Create or resize the table file. Never truncated below its size:
+    processes waiting on an interrupted load may already have its pages
+    mapped and pinned, and they see the reload in place."""
+    created = not os.path.exists(path)
+    fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        current = os.fstat(fd).st_size
+        if current != num_bytes:
+            check_shm_free_space(
+                max(num_bytes - current, 0),
+                shm_path=os.path.dirname(path),
+                allocation_name="shared PLE table",
+            )
+            os.ftruncate(fd, num_bytes)
+    except Exception:
+        if created:
+            os.unlink(path)
+        raise
+    finally:
+        os.close(fd)
+
+
+def _publish_shared_table(
+    path: str, identity: dict[str, object], num_bytes: int, lock_fd: int
+) -> None:
+    """Loader: mark the table ready, then release the lock."""
+    mark = Path(path + ".ready")
+    tmp = mark.with_name(mark.name + ".tmp")
+    tmp.write_text(json.dumps({**identity, "bytes": num_bytes}, sort_keys=True))
+    os.replace(tmp, mark)
+    os.close(lock_fd)
+
+
+def _await_shared_table(path: str, identity: dict[str, object], num_bytes: int) -> None:
+    """Wait for the loader's ready mark; fail at once if the loader died.
+
+    This process has skipped the table's load by then, so it cannot take over:
+    it fails with the reason, and its restart (or any other process's) loads
+    the table, since nobody holds the lock any more.
+    """
+    ready = path + ".ready"
+    lock_fd = os.open(path + ".lock", os.O_CREAT | os.O_RDWR, 0o600)
+    deadline = time.monotonic() + PLE_SHARED_TABLE_READY_TIMEOUT_S
+    next_log = 0.0
+    try:
+        while not os.path.exists(ready):
+            if not _shared_table_loader_alive(lock_fd):
+                if os.path.exists(ready):
+                    break
+                raise RuntimeError(
+                    f"the process loading shared PLE table {path} exited "
+                    "before marking it ready; start this process again and "
+                    "the first to start loads it"
+                )
+            now = time.monotonic()
+            if now > deadline:
+                raise RuntimeError(
+                    f"shared PLE table {path} was not marked ready within "
+                    f"{PLE_SHARED_TABLE_READY_TIMEOUT_S} s by the process "
+                    "still loading it"
+                )
+            if now >= next_log:
+                logger.info(
+                    "Waiting for %s to be marked ready by the process loading it",
+                    path,
+                )
+                next_log = now + 30
+            time.sleep(PLE_SHARED_TABLE_POLL_S)
+    finally:
+        os.close(lock_fd)
+    _check_shared_table_ready(path, identity, num_bytes)
 
 
 class Qwen4ExpPLEFileSharedHostEmbedding(Qwen4ExpPLEPinnedHostEmbedding):
     """PLE table in a named host file shared by independent engine processes.
 
-    No process group: the first process to create the file (O_EXCL) is the
-    writer — it loads the table and writes a `.ready` mark after its weights
-    are loaded; every other process maps the same file, skips the load and
-    waits for the mark in `process_weights_after_loading`. Lookups are the
-    pinned backend's. The file outlives the processes (see
-    `EngramConfig.shared_host_table_dir`).
+    No process group: each ETP shard of each layer is one file, named by its
+    identity (``shared_ple_table_identity``). The first process to take the
+    file's lock loads the shard and publishes a ``.ready`` mark after its
+    weights are loaded; every other process maps the same file, skips the
+    load and waits for the mark in ``process_weights_after_loading``. A load
+    interrupted by the loader's exit is taken over by the next process to
+    start. Lookups are the pinned backend's. The file outlives the processes
+    (see ``EngramConfig.shared_host_table_dir``).
     """
 
-    def __init__(self, *args, table_path: str, **kwargs) -> None:
-        self._table_path = table_path
-        self._table_is_writer = False
+    def __init__(self, *args, shared_table: SharedPLETable, **kwargs) -> None:
+        self._shared_table = shared_table
+        self._table_path = ""
+        self._table_identity: dict[str, object] = {}
         self._table_bytes = 0
+        self._table_lock_fd: int | None = None
         self._shared_owner: np.ndarray | None = None
         self._shared_mapping: mmap.mmap | None = None
         super().__init__(*args, **kwargs)
+
+    @property
+    def _table_is_writer(self) -> bool:
+        return self._table_lock_fd is not None
 
     @property
     def ready_mark(self) -> str:
@@ -977,33 +1181,29 @@ class Qwen4ExpPLEFileSharedHostEmbedding(Qwen4ExpPLEPinnedHostEmbedding):
             )
         num_bytes = num_embeddings * embedding_dim * dtype.itemsize
         self._table_bytes = num_bytes
-        try:
-            fd = os.open(self._table_path, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
-            try:
-                check_shm_free_space(
-                    num_bytes,
-                    shm_path=os.path.dirname(self._table_path),
-                    allocation_name="shared PLE table",
-                )
-                os.ftruncate(fd, num_bytes)
-            except Exception:
-                os.close(fd)
-                os.unlink(self._table_path)
-                raise
-            os.close(fd)
-            self._table_is_writer = True
-        except FileExistsError:
-            size = os.stat(self._table_path).st_size
-            if size != num_bytes:
-                raise RuntimeError(
-                    f"shared PLE table {self._table_path} holds {size} bytes, "
-                    f"this model needs {num_bytes}: remove the stale file (and "
-                    "its .ready mark) and start again"
-                ) from None
+        self._table_identity = shared_ple_table_identity(
+            self._shared_table.table_id,
+            (num_embeddings, embedding_dim),
+            dtype,
+            etp_rank=self.tp_rank,
+            etp_size=self.tp_size,
+            vocab_range=(
+                self.shard_indices.org_vocab_start_index,
+                self.shard_indices.org_vocab_end_index,
+            ),
+        )
+        self._table_path = shared_ple_table_path(
+            self._shared_table.directory, self._table_identity
+        )
+        self._table_lock_fd = _claim_shared_table(
+            self._table_path, self._table_identity, num_bytes
+        )
         flat, owner, mapping = _map_shared_ple_file(self._table_path, num_bytes)
         self._shared_owner, self._shared_mapping = owner, mapping
         logger.info(
-            "PLE table %s %s (%.1f GiB); this process %s it",
+            "PLE table shard %d/%d %s %s (%.1f GiB); this process %s it",
+            self.tp_rank,
+            self.tp_size,
             "created at" if self._table_is_writer else "mapped from",
             self._table_path,
             num_bytes / (1 << 30),
@@ -1017,35 +1217,20 @@ class Qwen4ExpPLEFileSharedHostEmbedding(Qwen4ExpPLEPinnedHostEmbedding):
         loaded_weight: torch.Tensor,
         checkpoint_start: int | None = None,
     ) -> None:
-        # Only the table is shared; the per-tensor scale is every process's own.
+        # Only the table is shared; the scales are every process's own.
         if param is not self.weight or self._table_is_writer:
             super().weight_loader(param, loaded_weight, checkpoint_start)
 
     def finish_shared_table(self) -> None:
-        """Writer: publish the ready mark. Reader: wait for it."""
-        mark = Path(self.ready_mark)
-        if self._table_is_writer:
-            tmp = mark.with_name(mark.name + ".tmp")
-            tmp.write_text(str(self._table_bytes))
-            os.replace(tmp, mark)
+        """Loader: publish the ready mark. Others: wait for it."""
+        if self._table_lock_fd is not None:
+            lock_fd, self._table_lock_fd = self._table_lock_fd, None
+            _publish_shared_table(
+                self._table_path, self._table_identity, self._table_bytes, lock_fd
+            )
             logger.info("PLE table %s loaded and marked ready", self._table_path)
             return
-        deadline = time.monotonic() + PLE_SHARED_TABLE_READY_TIMEOUT_S
-        waited = 0
-        while not mark.exists():
-            if time.monotonic() > deadline:
-                raise RuntimeError(
-                    f"shared PLE table {self._table_path} was never marked ready; "
-                    "the process loading it may have died — remove the file and "
-                    "start again"
-                )
-            if waited % 30 == 0:
-                logger.info(
-                    "Waiting for %s to be marked ready by the process loading it",
-                    self._table_path,
-                )
-            time.sleep(1)
-            waited += 1
+        _await_shared_table(self._table_path, self._table_identity, self._table_bytes)
 
 
 class Qwen4ExpPLESharedHostEmbedding(Qwen4ExpPLEPinnedHostEmbedding):

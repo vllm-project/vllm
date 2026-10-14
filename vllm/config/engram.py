@@ -61,9 +61,10 @@ class EngramConfig:
     shared_host_table_dir: str | None = None
     """Share CPU-offloaded tables between **independent** engine processes on
     this host through files in this directory (a tmpfs such as /dev/shm),
-    named by model, layer and shape. The first process to create a file loads
+    one per ETP shard of each layer. The first process to lock a file loads
     the table and marks it ready; later ones map it, skip the load and wait
-    for the mark. No process group is involved, so two single-card replicas
+    for the mark, and a load interrupted by its process's exit is redone by
+    the next process to start. No process group is involved, so two single-card replicas
     of a model whose table does not fit twice in host memory can share it,
     and a restart maps the loaded table instead of reading it again. The
     files outlive the processes: remove them to free the memory or after a

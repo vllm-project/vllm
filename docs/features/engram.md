@@ -145,7 +145,8 @@ MoE layer gathers and reduce-scatters across the DP ranks, which a board whose
 GPUs have no peer path cannot do. `shared_host_table_dir` shares an offloaded
 PLE table between **independent engine processes** on one host instead, with
 no process group: each process maps a file in that directory (a tmpfs such as
-`/dev/shm`), named by model, revision, layer and shape.
+`/dev/shm`), one per ETP shard, named by model, revision, layer, shape and
+the shard (ETP rank, ETP size and vocabulary range).
 
 ```bash
 # one single-card server per GPU, same model and flags
@@ -153,15 +154,19 @@ vllm serve Qwen/Qwen3.8-Flash-Next \
   --engram-config '{"cpu_offload": true, "shared_host_table_dir": "/dev/shm"}'
 ```
 
-The first process to create the file loads the table and marks it ready
-(`<file>.ready`) once its weights are loaded; later processes map the same
-file, skip the load and wait for the mark. Host memory drops from one table per
-process to one per host, and a process that restarts maps the loaded table
-instead of reading it again.
+The first process to take the file's lock (`<file>.lock`, an exclusive
+`flock`) loads the table and marks it ready (`<file>.ready`) once its weights
+are loaded; later processes map the same file, skip the load and wait for the
+mark. Host memory drops from one table per process to one per host, and a
+process that restarts maps the loaded table instead of reading it again. If
+the loading process exits before the mark, its lock is released: the next
+process to start loads the table again, and processes already waiting on it
+fail at once with the reason rather than waiting for a timeout.
 
 The files outlive the processes by design. Remove them to free the memory, and
 after changing the checkpoint served under the same model name and revision:
-the file name carries the shape, not the contents. Requirements: `cpu_offload`
+the file name carries the shape, not the contents (remove the `.ready` and
+`.lock` files with it). Requirements: `cpu_offload`
 enabled and a directory large enough for the table on every process's mount
 namespace (in containers, `--ipc=host` and a `/dev/shm` sized for it).
 
