@@ -55,11 +55,9 @@ gate. FULL-only graph metadata is excluded from these KDA fusion paths.
 InferenceX conc8 with CPU offload and FULL graphs therefore does not exercise
 the complete pipeline.
 
-The numerical suite is `tests/models/kimi_k3/test_amd_mono.py`. Kernel
-benchmarks live under `benchmarks/kernels/benchmark_kimi_k3_mono*.py`; they
-include actual original-PR and non-mono operator chains, state/reset checks and
-changed-input graph replay. Full-model accuracy equivalence is not established
-by kernel-level checks.
+The numerical suite is `tests/models/kimi_k3/test_amd_mono.py`, including
+state/reset checks and changed-input graph replay. Full-model accuracy
+equivalence is not established by kernel-level checks.
 
 The rev022 serving snapshot measured 472.28 output tok/s at 8k/1k, conc8/k5,
 GPU KV and PIECEWISE graphs: +5.83% versus saved non-mono and -0.74% versus
