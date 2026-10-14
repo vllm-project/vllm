@@ -273,6 +273,7 @@ steps:
   depends_on:
   - image-build-amd
   source_file_dependencies:
+  - docker/Dockerfile.rocm_base
   - vllm/models/deepseek_v41/amd/
   - tests/models/test_dsv41_mono_numerics.py
   - tests/models/test_dsv41_mono_layers.py
