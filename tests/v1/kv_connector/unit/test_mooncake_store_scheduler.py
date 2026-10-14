@@ -1357,9 +1357,56 @@ def test_partial_tail_boundary_follows_eagle_block_drop_not_group_flags():
         boundary_puts=[BoundaryPut(1, 50, 44)],
     )
 
-    assert _partial_tail_non_mamba_puts(coord, req_meta, [16, 16]) == [
-        BoundaryPut(0, 3, 44)
+    assert _partial_tail_non_mamba_puts(
+        coord, req_meta, [16, 16], apply_eagle=True
+    ) == [BoundaryPut(0, 3, 44)]
+
+
+@pytest.mark.parametrize(
+    "apply_eagle, mamba_tail, expected",
+    [
+        # Legacy: checkpoint 72 - 4 = 68; the 8-token proof (76) is not computed.
+        (True, 68, []),
+        # Lookahead: core keeps the checkpoint at 72 and needs no proof block.
+        (False, 72, [BoundaryPut(0, 9, 72)]),
+    ],
+)
+def test_partial_tail_follows_lookahead_checkpoint(apply_eagle, mamba_tail, expected):
+    """Lookahead hashes move the prompt checkpoint and drop the proof margin."""
+    groups = [
+        KVCacheGroupSpec(
+            ["attention"],
+            FullAttentionSpec(
+                block_size=8, num_kv_heads=1, head_size=1, dtype=torch.float32
+            ),
+            is_eagle_group=True,
+        ),
+        KVCacheGroupSpec(
+            ["mamba"],
+            MambaSpec(
+                block_size=16,
+                shapes=((1,),),
+                dtypes=(torch.float32,),
+                mamba_cache_mode="align",
+            ),
+        ),
     ]
+    coord = MooncakeStoreCoordinator(groups, 16, 4, use_eagle=True)
+    req_meta = ReqMeta(
+        req_id="req-0",
+        token_len_chunk=0,
+        block_ids=(list(range(1, 11)), [50, 51, 52, 53, 54]),
+        block_hashes=[bytes([i]) for i in range(18)],
+        num_prompt_tokens=75,
+        completed_token_len=75,
+        boundary_puts=[BoundaryPut(1, 60, mamba_tail)],
+        publish_partial_tail=True,
+    )
+
+    assert (
+        _partial_tail_non_mamba_puts(coord, req_meta, [8, 16], apply_eagle=apply_eagle)
+        == expected
+    )
 
 
 @pytest.mark.parametrize(
@@ -1413,7 +1460,10 @@ def test_shared_prefix_junction_handoff_adds_no_attention_tail(
         publish_partial_tail=publish,
     )
 
-    assert _partial_tail_non_mamba_puts(coord, req_meta, [4, 16]) == expected
+    assert (
+        _partial_tail_non_mamba_puts(coord, req_meta, [4, 16], apply_eagle=True)
+        == expected
+    )
 
 
 def test_decode_boundary_state_offload_dropped_unclaimed():

@@ -63,6 +63,8 @@ def _partial_tail_non_mamba_puts(
     coord: MooncakeStoreCoordinator,
     req_meta: ReqMeta,
     block_sizes: Sequence[int],
+    *,
+    apply_eagle: bool,
 ) -> list[BoundaryPut]:
     """Locate the non-Mamba blocks a partial-tail save publishes.
 
@@ -83,7 +85,8 @@ def _partial_tail_non_mamba_puts(
     junction (``--enable-mamba-shared-prefix-checkpoint``), adds no puts here.
 
     ``block_sizes`` are the per-group block sizes, indexed like
-    ``req_meta.block_ids``.
+    ``req_meta.block_ids``. ``apply_eagle`` is False under lookahead block
+    hashes, where the core neither backs off the checkpoint nor needs a proof.
     """
     mamba_tails = [
         put.num_tokens
@@ -101,8 +104,9 @@ def _partial_tail_non_mamba_puts(
     hash_block_size = coord.hash_block_size
     # Core drops the Mamba checkpoint whenever EAGLE block drop is on, whichever
     # groups carry the eagle flag.
+    drop_eagle_block = apply_eagle and coord.use_eagle
     boundary = get_mamba_prefill_checkpoint_position(
-        prompt_tokens, hash_block_size, coord.use_eagle
+        prompt_tokens, hash_block_size, drop_eagle_block
     )
     # Any other sub-block Mamba hand-off is a shared-prefix junction. Its
     # attention KV, EAGLE proof included, ends on an attention block end no later
@@ -117,7 +121,9 @@ def _partial_tail_non_mamba_puts(
     for group_id, block_size in enumerate(block_sizes):
         if group_id in coord.mamba_group_ids:
             continue
-        proof_end = boundary + coord.eagle_proof_margin_by_group.get(group_id, 0)
+        proof_end = boundary
+        if drop_eagle_block:
+            proof_end += coord.eagle_proof_margin_by_group.get(group_id, 0)
         if proof_end > completed or proof_end // hash_block_size > num_hashes:
             continue
         group_blocks = req_meta.block_ids[group_id]
@@ -584,7 +590,12 @@ class MooncakeStoreScheduler:
         )
         coord = self._store_coord
         block_sizes = [g.kv_cache_spec.block_size for g in coord.kv_cache_groups]
-        if tail := _partial_tail_non_mamba_puts(coord, req_meta, block_sizes):
+        if tail := _partial_tail_non_mamba_puts(
+            coord,
+            req_meta,
+            block_sizes,
+            apply_eagle=not self.use_lookahead_block_hashes,
+        ):
             req_meta.boundary_puts = [*tail, *(req_meta.boundary_puts or [])]
         req_meta.store_job_id = store_job_id = self._next_store_job_id
         self._next_store_job_id += 1
@@ -694,6 +705,7 @@ class MooncakeStoreScheduler:
                 coord,
                 req_meta,
                 [g.kv_cache_spec.block_size for g in coord.kv_cache_groups],
+                apply_eagle=not self.use_lookahead_block_hashes,
             ),
             *mamba_puts,
         ]

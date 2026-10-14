@@ -386,7 +386,10 @@ def _resolve_partial_tail(thread, req: ReqMeta) -> ReqMeta:
     """Add the tail's non-Mamba puts as the scheduler does before the worker."""
     req.boundary_puts = [BoundaryPut(*put) for put in req.boundary_puts or []]
     req.boundary_puts[:0] = _partial_tail_non_mamba_puts(
-        thread.coord, req, [db.block_size for db in thread.token_databases]
+        thread.coord,
+        req,
+        [db.block_size for db in thread.token_databases],
+        apply_eagle=True,
     )
     return req
 
