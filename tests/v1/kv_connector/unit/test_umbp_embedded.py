@@ -58,12 +58,15 @@ from vllm.distributed.kv_transfer.kv_connector.v1.umbp.worker import (
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.core.kv_cache_planning import get_kv_cache_config_from_groups
+from vllm.v1.core.single_type_kv_cache_manager import (
+    FullAttentionManager,
+    SlidingWindowManager,
+)
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
+    AttentionSpec,
     KVCacheConfig,
-    KVCacheGroupSpec,
+    KVCacheGroup,
     KVCacheTensor,
-    SlidingWindowSpec,
 )
 from vllm.v1.kv_cache_layout import KVCacheLayout
 from vllm.v1.request import RequestStatus
@@ -159,10 +162,14 @@ def test_every_kv_cache_layout_restores_blocks_exactly(
 ):
     """Restoring a stored block equals copying each layer's block, whatever the
     layout interleaves with it (LHBNC and BHLNC split pages per head)."""
-    shape = dict(block_size=16, num_kv_heads=2, head_size=16, dtype=torch.float16)
+    spec = AttentionSpec(
+        block_size=16, num_kv_heads=2, head_size=16, dtype=torch.float16
+    )
+    full = FullAttentionManager.layer_config(spec)
+    window = SlidingWindowManager.layer_config(spec, sliding_window=32)
     groups = [
-        KVCacheGroupSpec(["a0", "a1"], FullAttentionSpec(**shape)),
-        KVCacheGroupSpec(["s0", "s1"], SlidingWindowSpec(**shape, sliding_window=32)),
+        KVCacheGroup.from_layers({"a0": full, "a1": full}),
+        KVCacheGroup.from_layers({"s0": window, "s1": window}),
     ]
     planner_config = SimpleNamespace(
         cache_config=SimpleNamespace(
@@ -761,12 +768,16 @@ def _run_to_completion(scheduler, worker) -> dict[str, int]:
 
 
 def _attention_and_sliding_window_config() -> KVCacheConfig:
-    shape = dict(block_size=16, num_kv_heads=2, head_size=8, dtype=torch.float16)
+    spec = AttentionSpec(
+        block_size=16, num_kv_heads=2, head_size=8, dtype=torch.float16
+    )
     groups = [
-        KVCacheGroupSpec(["full"], FullAttentionSpec(**shape)),
-        KVCacheGroupSpec(["window"], SlidingWindowSpec(**shape, sliding_window=64)),
+        KVCacheGroup.from_layers({"full": FullAttentionManager.layer_config(spec)}),
+        KVCacheGroup.from_layers(
+            {"window": SlidingWindowManager.layer_config(spec, sliding_window=64)}
+        ),
     ]
-    page_bytes = groups[0].kv_cache_spec.page_size_bytes
+    page_bytes = groups[0].page_size_bytes
     return KVCacheConfig(
         num_blocks=16,
         kv_cache_groups=groups,

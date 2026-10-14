@@ -16,7 +16,7 @@ from vllm.v1.attention.backends.cpu_attn import (
     CPUAttentionMetadataBuilder,
 )
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadataBuilder
-from vllm.v1.kv_cache_interface import FullAttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec
 
 requires_cpu = pytest.mark.skipif(
     not current_platform.is_cpu(), reason="CPU attention backend"
@@ -262,7 +262,7 @@ def _triton_builder(
     else:
         vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.FULL_AND_PIECEWISE
         vllm_config.compilation_config.cudagraph_capture_sizes = capture_sizes
-    kv_cache_spec = FullAttentionSpec(
+    kv_cache_spec = AttentionSpec(
         block_size=16,
         num_kv_heads=spec_num_kv_heads,
         head_size=spec_head_size,
