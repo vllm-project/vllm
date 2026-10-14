@@ -14,6 +14,7 @@ import huggingface_hub
 import torch
 import transformers.configuration_utils as hf_configuration_utils
 from huggingface_hub import constants
+from huggingface_hub.utils import HFValidationError, validate_repo_id
 from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
 from transformers import GenerationConfig, PreTrainedConfig
 from transformers.configuration_utils import ALLOWED_LAYER_TYPES
@@ -162,6 +163,7 @@ _CONFIG_REGISTRY: dict[str, type[PreTrainedConfig]] = LazyConfigDict(
     qianfan_ocr="QianfanOCRConfig",
     qwen3_asr="Qwen3ASRConfig",
     **{"unlimited-ocr": "UnlimitedOCRConfig"},
+    unlimited_ocr="UnlimitedOCRConfig",
     **{"deepseek_v41": "DeepseekV41Config"},
     inkling_mm_model="InklingMMConfig",
     inkling_model="InklingModelConfig",
@@ -843,6 +845,19 @@ def maybe_override_with_speculators(
 
     # Override model and tokenizer with the verifier model from config
     verifier_model = speculators_config["verifier"]["name_or_path"]
+    verifier_error = (
+        "Speculators verifier must name a remote model repository. "
+        "Select local verifiers explicitly with --model and --speculative-config."
+    )
+    if not isinstance(verifier_model, str):
+        raise ValueError(verifier_error)
+    try:
+        validate_repo_id(verifier_model)
+    except HFValidationError as exc:
+        raise ValueError(verifier_error) from exc
+    verifier_path = Path(verifier_model)
+    if verifier_path.exists() or verifier_path.is_symlink():
+        raise ValueError(verifier_error)
     model = tokenizer = verifier_model
 
     return model, tokenizer, speculative_config
