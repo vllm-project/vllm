@@ -14,7 +14,6 @@ from vllm.model_executor.layers.mamba.ops.cpu.causal_conv1d import (
 )
 from vllm.model_executor.layers.mamba.ops.cpu.causal_conv1d import (
     causal_conv1d_update_cpu,
-    causal_conv1d_update_torch,
 )
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.utils.torch_utils import (
@@ -56,7 +55,7 @@ def _causal_conv1d_fwd_cpu(
     cache_indices: torch.Tensor,
     has_initial_state: torch.Tensor,
     silu_activation: bool,
-    is_vnni: bool,
+    is_weight_packed: bool,
 ) -> torch.Tensor:
     if not is_conv_state_dim_first():
         return ops.causal_conv1d_fwd_cpu(
@@ -68,7 +67,7 @@ def _causal_conv1d_fwd_cpu(
             cache_indices=cache_indices,
             has_initial_state=has_initial_state,
             silu_activation=silu_activation,
-            is_vnni=is_vnni,
+            is_weight_packed=is_weight_packed,
         )
 
     scratch, identity_indices = _stage_ds_conv_states(conv_states, cache_indices)
@@ -81,7 +80,7 @@ def _causal_conv1d_fwd_cpu(
         cache_indices=identity_indices,
         has_initial_state=has_initial_state,
         silu_activation=silu_activation,
-        is_vnni=is_vnni,
+        is_weight_packed=is_weight_packed,
     )
     _scatter_ds_conv_states(conv_states, cache_indices, scratch)
     return out
@@ -95,7 +94,7 @@ def _causal_conv1d_update_cpu(
     bias: torch.Tensor | None,
     silu_activation: bool,
     conv_state_indices: torch.Tensor,
-    is_vnni: bool,
+    is_weight_packed: bool,
     num_accepted_tokens: torch.Tensor | None = None,
 ) -> torch.Tensor:
     if not is_conv_state_dim_first():
@@ -106,7 +105,7 @@ def _causal_conv1d_update_cpu(
             bias=bias,
             silu_activation=silu_activation,
             conv_state_indices=conv_state_indices,
-            is_vnni=is_vnni,
+            is_weight_packed=is_weight_packed,
             num_accepted_tokens=num_accepted_tokens,
         )
 
@@ -118,11 +117,18 @@ def _causal_conv1d_update_cpu(
         bias=bias,
         silu_activation=silu_activation,
         conv_state_indices=identity_indices,
-        is_vnni=is_vnni,
+        is_weight_packed=is_weight_packed,
         num_accepted_tokens=num_accepted_tokens,
     )
     _scatter_ds_conv_states(conv_states, conv_state_indices, scratch)
     return out
+
+
+def is_arm_bf16() -> bool:
+    return (
+        current_platform.get_cpu_architecture() == CpuArchEnum.ARM
+        and torch.cpu.get_capabilities().get("bf16", False)
+    )
 
 
 def cpu_gdn_attention_core(
@@ -201,9 +207,10 @@ def _cpu_gdn_attention_nonspec(
     assert state_indices_tensor is not None
     assert query_start_loc is not None
 
-    # C++ conv (conv.cpp) uses VDPBF16PS, not AMX tiles, so it runs on any
-    # AVX-512BF16 CPU; weight is VNNI-packed on this same predicate at load time.
-    use_cpp_conv = torch.cpu._is_avx512_bf16_supported()
+    # C++ conv (conv.cpp) runs on aarch64 with bf16 support and on x86 uses VDPBF16PS,
+    # not AMX tiles, so it runs on any AVX-512BF16 CPU. The weights are packed on this
+    # same predicate at load time.
+    use_cpp_conv = torch.cpu._is_avx512_bf16_supported() or is_arm_bf16()
 
     conv_state = layer.kv_cache[0]
     if use_cpp_conv:
@@ -244,28 +251,17 @@ def _cpu_gdn_attention_nonspec(
                 bias=layer.conv1d.bias,
                 silu_activation=(layer.activation == "silu"),
                 conv_state_indices=decode_state_indices,
-                is_vnni=True,
+                is_weight_packed=True,
             )
         else:
-            if current_platform.get_cpu_architecture() == CpuArchEnum.ARM:
-                decode_conv_state = conv_state[decode_state_indices].contiguous()
-                decode_mixed_qkv = causal_conv1d_update_torch(
-                    x=decode_mixed_qkv.unsqueeze(-1),
-                    conv_state=decode_conv_state,
-                    weight=conv_weights,
-                    bias=layer.conv1d.bias,
-                    activation=layer.activation,
-                ).squeeze(-1)
-                conv_state[decode_state_indices] = decode_conv_state
-            else:
-                decode_mixed_qkv = causal_conv1d_update_cpu(
-                    x=decode_mixed_qkv,
-                    conv_state=conv_state,
-                    weight=conv_weights,
-                    bias=layer.conv1d.bias,
-                    activation=layer.activation,
-                    conv_state_indices=decode_state_indices,
-                )
+            decode_mixed_qkv = causal_conv1d_update_cpu(
+                x=decode_mixed_qkv,
+                conv_state=conv_state,
+                weight=conv_weights,
+                bias=layer.conv1d.bias,
+                activation=layer.activation,
+                conv_state_indices=decode_state_indices,
+            )
 
         query, key, value = layer.rearrange_mixed_qkv(decode_mixed_qkv)
 
@@ -315,7 +311,7 @@ def _cpu_gdn_attention_nonspec(
                 cache_indices=prefill_state_indices,
                 has_initial_state=prefill_has_initial_state,
                 silu_activation=layer.activation == "silu",
-                is_vnni=True,
+                is_weight_packed=True,
             ).transpose(0, 1)
         else:
             prefill_mixed_qkv = causal_conv1d_torch(
@@ -383,9 +379,9 @@ def _ssm_state_view(layer) -> torch.Tensor:
 def _unpacked_conv_weight(layer) -> torch.Tensor:
     """Return the plain (dim, width) conv weight.
 
-    On AMX the conv1d weight is VNNI-packed in place at load time (only usable
-    by the AMX C++ kernel), so the torch spec-decode path relies on the
-    un-packed copy stashed by ``dispatch_cpu_unquantized_gemm``.
+    On AMX and aarch64+bf16 the conv1d weight is packed in place at load time,
+    so the torch spec-decode path relies on the un-packed copy stashed by
+    ``dispatch_cpu_unquantized_gemm``.
     """
     w = getattr(layer.conv1d, "_cpu_unpacked_conv_weight", None)
     if w is not None:
@@ -505,13 +501,15 @@ def _spec_forward(
     seq_starts = spec_qsl_cpu[:-1]
     seq_lens = spec_qsl_cpu[1:] - spec_qsl_cpu[:-1]
 
+    is_amx = torch.cpu._is_amx_tile_supported()
+
     # ---- 1. Convolution (per-sequence rolling buffer) ----
     dim = mixed_qkv_spec.size(-1)
     bias = layer.conv1d.bias
     silu = layer.activation == "silu"
 
     can_use_native_conv = (
-        torch.cpu._is_amx_tile_supported()
+        (is_amx or is_arm_bf16())
         and width == 4
         and num_spec_decodes > 0
         and bool(torch.all(seq_lens == seq_lens[0]).item())
@@ -528,7 +526,7 @@ def _spec_forward(
             conv_state_indices=spec_state_indices[:num_spec_decodes, 0]
             .to("cpu", torch.int32)
             .contiguous(),
-            is_vnni=True,
+            is_weight_packed=True,
             num_accepted_tokens=num_accepted[:num_spec_decodes].to("cpu", torch.int32),
         ).view_as(mixed_qkv_spec)
     else:
@@ -603,9 +601,9 @@ def _spec_aware_nonspec(
     assert query_start_loc is not None
     state_indices_tensor = state_indices_tensor.contiguous()
 
-    is_amx = torch.cpu._is_amx_tile_supported()
+    can_use_native_conv = torch.cpu._is_amx_tile_supported() or is_arm_bf16()
 
-    if not is_amx:
+    if not can_use_native_conv:
         conv_weights = _unpacked_conv_weight(layer)
 
     num_decodes = attn_metadata_i.num_decodes
@@ -618,7 +616,8 @@ def _spec_aware_nonspec(
         decode_b = b[:num_decode_tokens]
         decode_a = a[:num_decode_tokens]
         decode_state_indices = state_indices_tensor[:num_decodes]
-        if is_amx:
+
+        if can_use_native_conv:
             decode_mixed_qkv = _causal_conv1d_update_cpu(
                 x=decode_mixed_qkv,
                 conv_states=conv_buf,
@@ -626,30 +625,19 @@ def _spec_aware_nonspec(
                 bias=layer.conv1d.bias,
                 silu_activation=layer.activation == "silu",
                 conv_state_indices=decode_state_indices,
-                is_vnni=True,
+                is_weight_packed=True,
             )
         else:
             # Only the first ``width-1`` columns hold the real conv state.
             conv_state_view = conv_buf[:, :, : width - 1]
-            if current_platform.get_cpu_architecture() == CpuArchEnum.ARM:
-                decode_conv_state = conv_state_view[decode_state_indices].contiguous()
-                decode_mixed_qkv = causal_conv1d_update_torch(
-                    x=decode_mixed_qkv.unsqueeze(-1),
-                    conv_state=decode_conv_state,
-                    weight=conv_weights,
-                    bias=layer.conv1d.bias,
-                    activation=layer.activation,
-                ).squeeze(-1)
-                conv_state_view[decode_state_indices] = decode_conv_state
-            else:
-                decode_mixed_qkv = causal_conv1d_update_cpu(
-                    x=decode_mixed_qkv,
-                    conv_state=conv_state_view,
-                    weight=conv_weights,
-                    bias=layer.conv1d.bias,
-                    activation=layer.activation,
-                    conv_state_indices=decode_state_indices,
-                )
+            decode_mixed_qkv = causal_conv1d_update_cpu(
+                x=decode_mixed_qkv,
+                conv_state=conv_state_view,
+                weight=conv_weights,
+                bias=layer.conv1d.bias,
+                activation=layer.activation,
+                conv_state_indices=decode_state_indices,
+            )
 
         query, key, value = layer.rearrange_mixed_qkv(decode_mixed_qkv)
         attn_out = ops.fused_sigmoid_gating_delta_rule_update_cpu(
@@ -685,7 +673,8 @@ def _spec_aware_nonspec(
         prefill_has_initial_state = has_initial_state[
             num_decodes : num_decodes + num_prefills
         ]
-        if is_amx:
+
+        if can_use_native_conv:
             prefill_mixed_qkv = _causal_conv1d_fwd_cpu(
                 x=prefill_mixed_qkv.transpose(0, 1),
                 weight=layer.conv1d.weight,
@@ -695,7 +684,7 @@ def _spec_aware_nonspec(
                 cache_indices=prefill_state_indices,
                 has_initial_state=prefill_has_initial_state,
                 silu_activation=layer.activation == "silu",
-                is_vnni=True,
+                is_weight_packed=True,
             ).transpose(0, 1)
         else:
             prefill_mixed_qkv = causal_conv1d_torch(
@@ -757,8 +746,9 @@ def _spec_aware_nonspec_subset(
     prefill_state_indices = prefill_state_indices.contiguous()
 
     is_amx = torch.cpu._is_amx_tile_supported()
+    can_use_native_conv = is_amx or is_arm_bf16()
 
-    if is_amx:
+    if can_use_native_conv:
         conv_out = _causal_conv1d_fwd_cpu(
             x=mixed_qkv.transpose(0, 1),
             weight=layer.conv1d.weight,
@@ -768,7 +758,7 @@ def _spec_aware_nonspec_subset(
             cache_indices=prefill_state_indices,
             has_initial_state=has_initial_state,
             silu_activation=layer.activation == "silu",
-            is_vnni=True,
+            is_weight_packed=True,
         ).transpose(0, 1)
     else:
         conv_weights = _unpacked_conv_weight(layer)

@@ -25,6 +25,7 @@ from vllm.model_executor.layers.attention.attention import (
     set_default_quant_scales,
 )
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory
+from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.model_executor.layers.quantization.fp8 import (
     Fp8Config,
     Fp8LinearMethod,
@@ -79,17 +80,22 @@ def test_deepseek_v41_mxfp8_scale_loading(
     for module in (model_module, linear_module):
         monkeypatch.setattr(module, "get_tensor_model_parallel_world_size", lambda: 2)
         monkeypatch.setattr(module, "get_tensor_model_parallel_rank", lambda: tp_rank)
-    tp_args = dict(quant_config=quant_config, bias=False)
     block = torch.nn.Module()
     block.attn = torch.nn.Module()
-    block.attn.wq_b = ColumnParallelLinear(128, 128, **tp_args)
-    block.attn.fused_wqa_wkv = MergedColumnParallelLinear(128, [128, 64], **tp_args)
+    block.attn.wq_b = ColumnParallelLinear(
+        128, 128, quant_config=quant_config, bias=False
+    )
+    block.attn.fused_wqa_wkv = MergedColumnParallelLinear(
+        128, [128, 64], quant_config=quant_config, bias=False
+    )
     block.ffn = torch.nn.Module()
     block.ffn.shared_experts = torch.nn.Module()
     block.ffn.shared_experts.gate_up_proj = MergedColumnParallelLinear(
-        128, [128, 128], **tp_args
+        128, [128, 128], quant_config=quant_config, bias=False
     )
-    block.ffn.shared_experts.down_proj = RowParallelLinear(128, 128, **tp_args)
+    block.ffn.shared_experts.down_proj = RowParallelLinear(
+        128, 128, quant_config=quant_config, bias=False
+    )
     block.ffn.experts = torch.nn.Module()
     block.ffn.experts.register_parameter(
         "weight_scale", torch.nn.Parameter(torch.empty(3, 4, dtype=torch.uint8), False)
@@ -111,9 +117,11 @@ def test_deepseek_v41_mxfp8_scale_loading(
     model.config = SimpleNamespace(num_attention_heads=2)
     model.quant_config = quant_config
     model.use_sequence_parallel = False
-    model.get_expert_mapping = lambda: [
-        ("experts.weight_scale", "experts.0.w1.weight_scale", 0, "w1")
-    ]
+    monkeypatch.setattr(
+        model,
+        "get_expert_mapping",
+        lambda: [("experts.weight_scale", "experts.0.w1.weight_scale", 0, "w1")],
+    )
 
     checkpoints = [
         ("attn.wq_b", "attn.wq_b", 128, 128, 0, None),
@@ -211,7 +219,10 @@ def test_deepseek_v41_vl_mapper_routes_linear_scales(
     vllm_config = SimpleNamespace(
         quant_config=SimpleNamespace(weight_block_size=weight_block_size)
     )
-    resolved = model_module._linear_scale_param_name(vllm_config, expert_dtype)
+    resolved = model_module._linear_scale_param_name(
+        vllm_config,
+        expert_dtype,
+    )
     assert resolved == scale_name
 
     mapper = vl_module._make_deepseek_v4_vl_weights_mapper(expert_dtype, resolved)
@@ -307,6 +318,82 @@ def test_deepseek_v41_declines_quark_configs():
     )
 
 
+_DSV41_NVFP4 = {
+    "moe_quant_algo": "NVFP4",
+    "ignore": ["*.attn.*", "*.ffn.shared_experts.*", "head", "mtp.*"],
+}
+_DSV4_NVFP4_DSPARK = {
+    "moe_quant_algo": "NVFP4",
+    "ignore": ["*.attn.*", "*.ffn.shared_experts.*", "head"],
+}
+
+
+@pytest.mark.parametrize(
+    ("ckpt_quant_cfg", "prefix", "expected"),
+    [
+        pytest.param(_DSV41_NVFP4, "model.layers.1.ffn.experts", "nvfp4", id="target"),
+        pytest.param(
+            _DSV41_NVFP4,
+            "language_model.model.layers.0.ffn.experts",
+            "nvfp4",
+            id="target-vl-prefix",
+        ),
+        pytest.param(
+            _DSV41_NVFP4, "model.layers.40.ffn.experts", "mxfp4", id="ignored-mtp0"
+        ),
+        pytest.param(
+            _DSV41_NVFP4, "model.layers.42.ffn.experts", "mxfp4", id="ignored-mtp2"
+        ),
+        pytest.param(
+            _DSV4_NVFP4_DSPARK,
+            "model.layers.41.ffn.experts",
+            "nvfp4",
+            id="quantized-mtp1",
+        ),
+        pytest.param(
+            {"moe_quant_algo": "NVFP4"},
+            "model.layers.40.ffn.experts",
+            "nvfp4",
+            id="no-ignore-list",
+        ),
+        pytest.param({}, "model.layers.1.ffn.experts", "mxfp4", id="not-nvfp4"),
+    ],
+)
+def test_deepseek_v41_nvfp4_export_keeps_ignored_experts_mxfp4(
+    monkeypatch, ckpt_quant_cfg, prefix, expected
+):
+    """NVFP4 exports keep the routed experts they ``ignore`` in MXFP4, e.g. the
+    bundled DSpark draft (``mtp.*``, built as ``layers.{40 + k}``) of
+    DeepSeek-V4.1-Flash-NVFP4. The ignore list is read from the checkpoint
+    passed to ``from_config``: the current hf_config below carries none."""
+    import vllm.model_executor.layers.quantization.modelopt as modelopt
+    import vllm.models.deepseek_v41.quant_config as dsv41_qc
+    from vllm.model_executor.layers.fused_moe import RoutedExperts
+
+    hf_config = SimpleNamespace(
+        expert_dtype="fp4",
+        quantization_config={"moe_quant_algo": ckpt_quant_cfg.get("moe_quant_algo")},
+    )
+    model_config = SimpleNamespace(
+        hf_config=hf_config, hf_text_config=SimpleNamespace(num_hidden_layers=40)
+    )
+    monkeypatch.setattr(
+        dsv41_qc,
+        "get_current_vllm_config",
+        lambda: SimpleNamespace(model_config=model_config),
+    )
+    monkeypatch.setattr(dsv41_qc, "Mxfp4MoEMethod", lambda moe_config: "mxfp4")
+    monkeypatch.setattr(modelopt, "ModelOptNvFp4FusedMoE", lambda **kwargs: "nvfp4")
+
+    config = dsv41_qc.DeepseekV4FP8Config.from_config(
+        {"quant_method": "fp8", "activation_scheme": "dynamic", **ckpt_quant_cfg}
+    )
+    monkeypatch.setattr(config, "_get_nvfp4_config", lambda: None)
+    layer = RoutedExperts.__new__(RoutedExperts)
+    layer.moe_config = None
+    assert config.get_quant_method(layer, prefix) == expected
+
+
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="DeepGEMM requires CUDA")
 @pytest.mark.parametrize("scale_dtype", [torch.uint8, torch.float8_e8m0fnu])
 @pytest.mark.parametrize(
@@ -373,7 +460,7 @@ def test_deepgemm_mxfp8_preserves_weight_and_scale_values(
 @pytest.mark.parametrize("config_source", ["deepseek", "mxfp8"])
 @pytest.mark.parametrize("num_tokens", [1, 7, 128])
 def test_mxfp8_bmm_loads_and_projects_grouped_weights(
-    dist_init, default_vllm_config, prequantized, config_source, num_tokens
+    dist_init, default_vllm_config, monkeypatch, prequantized, config_source, num_tokens
 ):
     """BMM metadata set after construction selects grouped weight processing."""
     from vllm.model_executor.kernels.linear.mxfp8.deep_gemm import (
@@ -398,10 +485,11 @@ def test_mxfp8_bmm_loads_and_projects_grouped_weights(
         pytest.skip("DeepGEMM MXFP8 BMM requires Blackwell")
 
     default_vllm_config.model_config = SimpleNamespace(dtype=torch.bfloat16)
-    quant_config = DeepseekV4FP8Config(
+    deepseek_config = DeepseekV4FP8Config(
         is_checkpoint_fp8_serialized=True, weight_block_size=[32, 32]
     )
-    quant_config._resolved_expert_dtype = "fp4"
+    deepseek_config._resolved_expert_dtype = "fp4"
+    quant_config: QuantizationConfig = deepseek_config
     if config_source == "mxfp8":
         quant_config = get_quantization_config("mxfp8").from_config(
             {"quant_method": "mxfp8"}
@@ -432,7 +520,7 @@ def test_mxfp8_bmm_loads_and_projects_grouped_weights(
     model.config = SimpleNamespace(num_attention_heads=2)
     model.quant_config = quant_config
     model.use_sequence_parallel = False
-    model.get_expert_mapping = lambda: []
+    monkeypatch.setattr(model, "get_expert_mapping", lambda: [])
     model.load_weights(
         [
             ("layers.0.attn.wo_a.weight", weight),
@@ -443,6 +531,7 @@ def test_mxfp8_bmm_loads_and_projects_grouped_weights(
         weight.float().reshape(8, 32, 16, 32)
         * torch.exp2(scales.float() - 127)[:, None, :, None]
     ).reshape(2, 128, 512)
+    assert isinstance(linear.quant_method, ModelOptLinearMethod)
     linear.quant_method.process_weights_after_loading(linear)
     linear.quant_method.process_weights_after_loading(linear)
     assert isinstance(linear.quant_method.kernel, DeepGemmMxfp8BmmLinearKernel)
