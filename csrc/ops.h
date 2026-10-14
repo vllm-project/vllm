@@ -511,7 +511,7 @@ void selective_scan_fwd(
 using fptr_t = int64_t;
 fptr_t init_custom_ar(const std::vector<int64_t>& fake_ipc_ptrs,
                       torch::stable::Tensor& rank_data, int64_t rank,
-                      bool fully_connected);
+                      bool fully_connected, bool release_start);
 void all_reduce(fptr_t _fa, torch::stable::Tensor& inp,
                 torch::stable::Tensor& out, fptr_t reg_buffer,
                 int64_t reg_buffer_sz_bytes);

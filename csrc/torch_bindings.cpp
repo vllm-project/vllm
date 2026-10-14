@@ -1096,7 +1096,7 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C_cache_ops, ops) {
 STABLE_TORCH_LIBRARY_FRAGMENT(_C_custom_ar, custom_ar) {
   custom_ar.def(
       "init_custom_ar(int[] ipc_tensors, Tensor rank_data, "
-      "int rank, bool fully_connected) -> int");
+      "int rank, bool fully_connected, bool release_start=False) -> int");
   custom_ar.def(
       "all_reduce(int fa, Tensor inp, Tensor! out, int reg_buffer, "
       "int reg_buffer_sz_bytes) -> ()");

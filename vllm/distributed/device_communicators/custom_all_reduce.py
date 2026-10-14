@@ -149,6 +149,7 @@ class CustomAllreduce:
         symm_mem_enabled=False,
         *,
         register_graph_buffers: bool = True,
+        release_start: bool = False,
     ) -> None:
         """Args:
             group: the process group to work on. If None, it will use the
@@ -156,6 +157,11 @@ class CustomAllreduce:
             device: the device to bind the CustomAllreduce to. If None,
                 it will be bound to f"cuda:{local_rank}".
             register_graph_buffers: whether graph capture IPC-registers its buffers.
+            release_start: open the all-reduce kernels with a system-scope
+                release/acquire barrier instead of a relaxed one, so writes made
+                before the kernel (e.g. by the kernel that produced the input)
+                are visible to peers that read registered inputs in place. Needed
+                when peer-to-peer reads are not cache-coherent (e.g. PCIe).
         It is the caller's responsibility to make sure each communicator
         is bind to a unique device, and all communicators in this group
         are in the same node.
@@ -163,6 +169,7 @@ class CustomAllreduce:
         """
         self._IS_CAPTURING = False
         self._capture_registered = register_graph_buffers
+        self._release_start = release_start
         self._ptr = 0
         self.disabled = True
         self.mnnvl_buffer = None
@@ -335,7 +342,11 @@ class CustomAllreduce:
         self.world_size = world_size
         self.fully_connected = fully_connected
         self._ptr = ops.init_custom_ar(
-            self.meta_ptrs, self.rank_data, rank, self.fully_connected
+            self.meta_ptrs,
+            self.rank_data,
+            rank,
+            self.fully_connected,
+            release_start=self._release_start,
         )
         ops.register_buffer(self._ptr, self.buffer_ptrs)
         self._init_mnnvl_buffer(

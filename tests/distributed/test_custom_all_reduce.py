@@ -705,6 +705,133 @@ def chunked_allreduce(
         assert torch.equal(out, ref)
 
 
+def _producer_in_graph_allreduce(
+    monkeypatch: pytest.MonkeyPatch,
+    tp_size,
+    pp_size,
+    rank,
+    distributed_init_port,
+    release_start,
+    algo=None,
+):
+    """A kernel writes each input right before its all-reduce, inside the same
+    CUDA graph, with fresh values on every replay: the decode pattern where an
+    o_proj/down_proj GEMM feeds the all-reduce. Peers read the registered input
+    in place, so they must see the producer's writes, not stale memory."""
+    with monkeypatch.context() as m:
+        m.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+        m.delenv("HIP_VISIBLE_DEVICES", raising=False)
+        if algo is not None:
+            m.setenv("VLLM_CUSTOM_ALLREDUCE_ALGO", algo)
+        device = torch.device(f"cuda:{rank}")
+        torch.accelerator.set_device_index(device)
+        init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
+        ensure_model_parallel_initialized(tp_size, pp_size)
+        group = get_tp_group().device_group
+        if release_start is None:
+            # The communicator vLLM itself builds for this platform.
+            fa = get_tp_group().device_communicator.ca_comm
+        else:
+            fa = car.CustomAllreduce(
+                group=get_tp_group().cpu_group,
+                device=device,
+                release_start=release_start,
+            )
+        if fa is None or fa.disabled:
+            # Not used here, e.g. more than two GPUs without full NVLink.
+            return
+        try:
+            num_bufs = 16
+            gen = torch.Generator(device=device).manual_seed(rank)
+            for numel in (4096, 2 * 4096, 4 * 4096, 8 * 4096):
+                # With reuse_input, every all-reduce in the graph reads the same
+                # buffer, so peers must not see a copy cached by an earlier call.
+                for reuse_input in (False, True):
+                    srcs = [
+                        torch.empty(numel, dtype=torch.bfloat16, device=device)
+                        for _ in range(num_bufs)
+                    ]
+                    if reuse_input:
+                        inps = [torch.empty_like(srcs[0])] * num_bufs
+                    else:
+                        inps = [torch.empty_like(s) for s in srcs]
+                    assert fa.should_custom_ar(inps[0])
+                    with fa.capture():
+                        graph = torch.cuda.CUDAGraph()
+                        with torch.cuda.graph(graph):
+                            outs = []
+                            for src, inp in zip(srcs, inps):
+                                inp.copy_(src)
+                                outs.append(fa.all_reduce(inp, registered=True))
+                    # Replay only after leaving capture(), which registers the
+                    # buffers.
+                    for _ in range(5):
+                        for src in srcs:
+                            # Small integers: exact in bf16, so the sum is
+                            # bitwise exact.
+                            src.copy_(
+                                torch.randint(
+                                    -8, 8, src.shape, generator=gen, device=device
+                                )
+                            )
+                        torch.accelerator.synchronize()
+                        dist.barrier(group=group)
+                        graph.replay()
+                        torch.accelerator.synchronize()
+                        for src, out in zip(srcs, outs):
+                            ref = src.clone()
+                            dist.all_reduce(ref, group=group)
+                            assert torch.equal(out, ref)
+                    del graph
+        finally:
+            if release_start is not None:
+                fa.close()
+
+
+@ray.remote(num_gpus=1, max_calls=1)
+def producer_in_graph_allreduce(monkeypatch, tp_size, pp_size, rank, port):
+    # The communicator vLLM builds for this platform.
+    _producer_in_graph_allreduce(monkeypatch, tp_size, pp_size, rank, port, None)
+
+
+@ray.remote(num_gpus=1, max_calls=1)
+def producer_in_graph_allreduce_release_1stage(
+    monkeypatch, tp_size, pp_size, rank, port
+):
+    _producer_in_graph_allreduce(
+        monkeypatch, tp_size, pp_size, rank, port, True, "1stage"
+    )
+
+
+@ray.remote(num_gpus=1, max_calls=1)
+def producer_in_graph_allreduce_release_2stage(
+    monkeypatch, tp_size, pp_size, rank, port
+):
+    _producer_in_graph_allreduce(
+        monkeypatch, tp_size, pp_size, rank, port, True, "2stage"
+    )
+
+
+@pytest.mark.parametrize("tp_size", [2, 4])
+@pytest.mark.parametrize(
+    "test_target",
+    [
+        producer_in_graph_allreduce,
+        producer_in_graph_allreduce_release_1stage,
+        producer_in_graph_allreduce_release_2stage,
+    ],
+    ids=["platform_default", "release_1stage", "release_2stage"],
+)
+def test_custom_allreduce_producer_in_graph(
+    monkeypatch: pytest.MonkeyPatch, tp_size, test_target
+):
+    if tp_size > torch.accelerator.device_count():
+        pytest.skip("Not enough GPUs to run the test.")
+    if not current_platform.use_custom_allreduce():
+        pytest.skip("Custom all-reduce is not used on this platform.")
+    multi_process_parallel(monkeypatch, tp_size, 1, test_target)
+
+
 @pytest.mark.parametrize("tp_size", [2, 4])
 def test_custom_allreduce_chunked(monkeypatch: pytest.MonkeyPatch, tp_size):
     if tp_size > torch.accelerator.device_count():
