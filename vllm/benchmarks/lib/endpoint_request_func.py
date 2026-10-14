@@ -26,7 +26,11 @@ class StreamedResponseHandler:
 
     def __init__(self):
         self.buffer = ""
-        self._decoder = codecs.getincrementaldecoder("utf-8")()
+        # SSE allows \r\n and \r line endings too; translate them to \n,
+        # including endings split across reads.
+        self._decoder = io.IncrementalNewlineDecoder(
+            codecs.getincrementaldecoder("utf-8")(), translate=True
+        )
 
     def add_chunk(self, chunk_bytes: bytes) -> list[str]:
         """Add a chunk of bytes to the buffer and return any complete
@@ -45,15 +49,17 @@ class StreamedResponseHandler:
 
         # if self.buffer is not empty, check if it is a complete message
         # by removing data: prefix and check if it is a valid JSON
-        if self.buffer.startswith("data: "):
-            message_content = self.buffer.removeprefix("data: ").strip()
+        # (a separator split across reads can leave leading newlines)
+        pending = self.buffer.lstrip("\n")
+        if pending.startswith("data: "):
+            message_content = pending.removeprefix("data: ").strip()
             if message_content == "[DONE]":
-                messages.append(self.buffer.strip())
+                messages.append(pending.strip())
                 self.buffer = ""
             elif message_content:
                 try:
                     json.loads(message_content)
-                    messages.append(self.buffer.strip())
+                    messages.append(pending.strip())
                     self.buffer = ""
                 except json.JSONDecodeError:
                     # Incomplete JSON, wait for more chunks.
