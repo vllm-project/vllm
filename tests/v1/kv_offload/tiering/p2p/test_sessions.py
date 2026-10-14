@@ -13,7 +13,8 @@ completes its own load.
 from __future__ import annotations
 
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
+from concurrent.futures import Future
 
 import numpy as np
 import pytest
@@ -74,7 +75,13 @@ class FakeDataTransport:
         num_blocks: int = 16,
         block_len: int = 4096,
         config_fingerprint: str = "",
+        defer_registration: bool = False,
     ) -> None:
+        # When True, add_remote_peer_async parks the registration until
+        # complete_registrations() resolves it, standing in for the real
+        # transport's worker thread.
+        self.defer_registration = defer_registration
+        self._deferred: list[tuple[Future[None], Callable[[], None]]] = []
         self._base_addr = base_addr
         self._num_blocks = num_blocks
         self._block_len = block_len
@@ -115,6 +122,38 @@ class FakeDataTransport:
             "num_blocks": num_blocks,
             "block_len": block_len,
         }
+
+    def add_remote_peer_async(
+        self, peer_id, agent_metadata, base_addr, num_blocks, block_len
+    ) -> Future[None]:
+        future: Future[None] = Future()
+
+        def apply() -> None:
+            self.add_remote_peer(
+                peer_id, agent_metadata, base_addr, num_blocks, block_len
+            )
+
+        if self.defer_registration:
+            self._deferred.append((future, apply))
+            return future
+        apply()
+        future.set_result(None)
+        return future
+
+    def complete_registrations(self, exc: Exception | None = None) -> int:
+        """Resolve parked registrations the way the worker thread would.
+
+        Returns the number resolved so callers can assert one was actually
+        in flight rather than silently testing nothing.
+        """
+        deferred, self._deferred = self._deferred, []
+        for future, apply in deferred:
+            if exc is not None:
+                future.set_exception(exc)
+            else:
+                apply()
+                future.set_result(None)
+        return len(deferred)
 
     def remove_remote_peer(self, peer_id: str) -> None:
         self._remote_peers.pop(peer_id, None)
@@ -259,13 +298,13 @@ class FakeParent:
     ) -> TransferJob:
         keys_list = list(keys)
         self.calls.append(("create_store_job", tuple(keys_list), ctx.req_id))
-        block_ids = np.array([self.stored[k] for k in keys_list], dtype=np.int32)
+        chunk_ids = np.array([self.stored[k] for k in keys_list], dtype=np.int32)
         job_id = self._next_job_id
         self._next_job_id += 1
         return TransferJob(
             job_id=job_id,
             keys=keys_list,
-            block_ids=block_ids,
+            chunk_ids=chunk_ids,
             is_promotion=False,
             req_context=ctx,
         )
@@ -288,17 +327,17 @@ def _make_session(
     session = P2PSession(
         peer_id=peer_id,
         local_id=local_id,
-        transport=transport,  # type: ignore[arg-type]
+        transport=transport,
         local_block_len=transport.block_len,
         local_hash_seed=local_hash_seed,
-        conn=conn,  # type: ignore[arg-type]
+        conn=conn,
     )
     return session, conn, transport
 
 
 def _serve(session: P2PSession, parent: FakeParent) -> None:
     """Resolve enqueued inbound lookups, as the manager does each step."""
-    session.serve_external_requests(parent)  # type: ignore[arg-type]
+    session.serve_external_requests(parent)
 
 
 def _activate(
@@ -389,6 +428,67 @@ class TestConnectHandshake:
         assert "peer:8000" in transport._remote_peers
         ack = next(m for m in conn._sent if m[TYPE_KEY] == ConnectAckMsg.TYPE)
         assert ack[ConnectAckMsg.PEER_ID] == "local:9000"
+
+    def test_ack_withheld_until_registration_completes(self):
+        """ConnectAck must not precede registration.
+
+        The peer treats ConnectAck as permission to send, so acking while
+        registration is still in flight would let a FetchMsg arrive for
+        blocks this side cannot yet write to.
+        """
+        transport = FakeDataTransport(defer_registration=True)
+        session, conn, _ = _make_session(transport=transport)
+        conn.enqueue(_peer_connect_msg())
+        session.poll()
+
+        assert "peer:8000" not in transport._remote_peers
+        assert not any(m[TYPE_KEY] == ConnectAckMsg.TYPE for m in conn._sent)
+
+        assert transport.complete_registrations() == 1
+        session.poll()
+
+        assert "peer:8000" in transport._remote_peers
+        ack = next(m for m in conn._sent if m[TYPE_KEY] == ConnectAckMsg.TYPE)
+        assert ack[ConnectAckMsg.PEER_ID] == "local:9000"
+
+    def test_pending_registration_is_pending_work(self):
+        """An in-flight registration keeps the engine ticking.
+
+        Nothing else drives poll(), so if the session reported idle the
+        ack would never be sent.
+        """
+        transport = FakeDataTransport(defer_registration=True)
+        session, conn, _ = _make_session(transport=transport)
+        conn.enqueue(_peer_connect_msg())
+        session.poll()
+        assert session.has_pending_work
+
+        transport.complete_registrations()
+        session.poll()
+        assert not session.has_pending_work
+
+    def test_failed_registration_rejects_peer(self):
+        """A registration that fails kills the connection instead of acking."""
+        transport = FakeDataTransport(defer_registration=True)
+        session, conn, _ = _make_session(transport=transport)
+        conn.enqueue(_peer_connect_msg())
+        session.poll()
+
+        transport.complete_registrations(exc=RuntimeError("nixl exploded"))
+        session.poll()
+
+        assert not conn.alive
+        assert not any(m[TYPE_KEY] == ConnectAckMsg.TYPE for m in conn._sent)
+
+    def test_duplicate_connect_during_registration_is_rejected(self):
+        """A second ConnectMsg mid-registration is a protocol violation."""
+        transport = FakeDataTransport(defer_registration=True)
+        session, conn, _ = _make_session(transport=transport)
+        conn.enqueue(_peer_connect_msg())
+        session.poll()
+        conn.enqueue(_peer_connect_msg())
+        session.poll()
+        assert not conn.alive
 
     def test_connect_ack_makes_session_ready(self):
         """Session.ready becomes True after ConnectAckMsg."""
@@ -533,6 +633,94 @@ class TestClientFlows:
         abort = conn._sent[-1]
         assert abort[TYPE_KEY] == AbortFetchMsg.TYPE
         assert abort[AbortFetchMsg.KV_REQUEST_ID] == "req-1"
+
+    def test_finish_preserves_active_load_until_terminal_result(self):
+        session, conn, _ = _make_session()
+        _activate(session, conn)
+        session.request_blocks(
+            job_id=7, kv_request_id="req-1", keys=[b"k"], block_ids=[0]
+        )
+
+        session.finish_request("req-1")
+
+        load = _client_load(session, "req-1")
+        assert load.job_id == 7
+        assert load.aborted_at is not None
+        aborted_at = load.aborted_at
+        assert session._client.has_active_loads is True
+        session.finish_request("req-1")
+        assert _client_load(session, "req-1").aborted_at == aborted_at
+        aborts = [m for m in conn._sent if m[TYPE_KEY] == AbortFetchMsg.TYPE]
+        assert len(aborts) == 1
+        assert aborts[0][AbortFetchMsg.ROUND_SEQ] == 0
+
+    def test_finish_abort_ack_emits_one_failure(self):
+        session, conn, _ = _make_session()
+        _activate(session, conn)
+        session.request_blocks(
+            job_id=8, kv_request_id="req-1", keys=[b"k"], block_ids=[0]
+        )
+        session.finish_request("req-1")
+
+        conn.enqueue(
+            {
+                TYPE_KEY: AbortAckMsg.TYPE,
+                AbortAckMsg.ROUND_SEQ: 0,
+                AbortAckMsg.KV_REQUEST_ID: "req-1",
+            }
+        )
+        loads = session.poll().loads
+        assert loads == [LoadResult(job_id=8, kv_request_id="req-1", success=False)]
+        assert session._client.has_active_loads is False
+        assert "req-1" not in session._client._requests
+        assert session.poll().loads == []
+
+    def test_finish_abort_timeout_emits_one_failure(self):
+        session, conn, _ = _make_session()
+        _activate(session, conn)
+        session.request_blocks(
+            job_id=9, kv_request_id="req-1", keys=[b"k"], block_ids=[0]
+        )
+        session.finish_request("req-1")
+        _client_load(session, "req-1").aborted_at = (
+            time.monotonic() - _ABORT_ACK_TIMEOUT_S - 1.0
+        )
+
+        loads = session.poll().loads
+        assert loads == [LoadResult(job_id=9, kv_request_id="req-1", success=False)]
+        assert session._client.has_active_loads is False
+        assert "req-1" not in session._client._requests
+        assert session.poll().loads == []
+
+    def test_late_transfer_done_after_abort_ack_is_ignored(self):
+        session, conn, _ = _make_session()
+        _activate(session, conn)
+        session.request_blocks(
+            job_id=10, kv_request_id="req-1", keys=[b"k"], block_ids=[0]
+        )
+        session.finish_request("req-1")
+
+        conn.enqueue(
+            {
+                TYPE_KEY: AbortAckMsg.TYPE,
+                AbortAckMsg.ROUND_SEQ: 0,
+                AbortAckMsg.KV_REQUEST_ID: "req-1",
+            }
+        )
+        assert session.poll().loads == [
+            LoadResult(job_id=10, kv_request_id="req-1", success=False)
+        ]
+
+        conn.enqueue(
+            {
+                TYPE_KEY: TransferDoneMsg.TYPE,
+                TransferDoneMsg.ROUND_SEQ: 0,
+                TransferDoneMsg.KV_REQUEST_ID: "req-1",
+                TransferDoneMsg.SUCCESS: True,
+            }
+        )
+        assert session.poll().loads == []
+        assert session._client.has_active_loads is False
 
     def test_active_loads_work_list_tracks_in_flight(self):
         """collect_results / has_active_loads use the _active_loads work-list,
@@ -739,7 +927,7 @@ class TestLookupFlow:
         assert fresh[0][LookupMsg.KEYS] == [b"hA"]
 
     def test_flush_uses_work_list_not_full_scan(self):
-        """flush drains a work-list rather than scanning every live request.
+        """Flush drains a work-list rather than scanning every live request.
 
         A request with no newly-registered keys is not revisited: after a
         flush the work-list is empty, an idle re-flush sends nothing, and a
@@ -1863,7 +2051,7 @@ class TestFinishRequestServerSide:
         )
         session.poll()
         # Force write_blocks to fail on the next call.
-        transport.write_blocks = lambda *a, **kw: None  # type: ignore[assignment]
+        transport.write_blocks = lambda *a, **kw: None  # type: ignore[method-assign]
 
         session.add_stored_blocks("req-1", [b"k1"], [0], job_id=42)
 
@@ -1969,7 +2157,7 @@ class TestFinishRequestServerSide:
         assert outbound.finishing is False
 
         # Round 2: write_blocks fails for k2 while transfer_1 is still inflight.
-        transport.write_blocks = lambda *a, **kw: None  # type: ignore[assignment]
+        transport.write_blocks = lambda *a, **kw: None  # type: ignore[method-assign]
         session.add_stored_blocks("req-1", [b"k2"], [1], job_id=200)
         # No new transfer was registered.
         assert list(session._server._inflight.keys()) == [tid_1]
@@ -2075,7 +2263,7 @@ class TestPendingSession:
         session = P2PSession(
             peer_id="peer:8000",
             local_id="local:9000",
-            transport=transport,  # type: ignore[arg-type]
+            transport=transport,
             local_block_len=4096,
             local_hash_seed=_DEFAULT_HASH_SEED,
             conn=None,
@@ -2095,13 +2283,13 @@ class TestPendingSession:
         session = P2PSession(
             peer_id="peer:8000",
             local_id="local:9000",
-            transport=transport,  # type: ignore[arg-type]
+            transport=transport,
             local_block_len=4096,
             local_hash_seed=_DEFAULT_HASH_SEED,
             conn=None,
         )
         conn = FakeConnection(peer_id="peer:8000")
-        session.attach_connection(conn)  # type: ignore[arg-type]
+        session.attach_connection(conn)
         assert conn._sent
         assert conn._sent[0][TYPE_KEY] == ConnectMsg.TYPE
 
@@ -2109,7 +2297,7 @@ class TestPendingSession:
         """attach_connection on an already-connected session raises."""
         session, conn, _ = _make_session()
         with pytest.raises(ValueError, match="already connected"):
-            session.attach_connection(FakeConnection())  # type: ignore[arg-type]
+            session.attach_connection(FakeConnection())
 
     def test_pending_close_returns_pending_stores(self):
         """Closing a pending session reports buffered stores as failed."""
@@ -2117,7 +2305,7 @@ class TestPendingSession:
         session = P2PSession(
             peer_id="peer:8000",
             local_id="local:9000",
-            transport=transport,  # type: ignore[arg-type]
+            transport=transport,
             local_block_len=4096,
             local_hash_seed=_DEFAULT_HASH_SEED,
             conn=None,
@@ -2225,7 +2413,7 @@ class TestAdversarial:
     def test_non_dict_message(self):
         session, conn, _ = _make_session()
         _activate(session, conn)
-        conn._inbox.append(42)  # type: ignore[arg-type]
+        conn._inbox.append(42)
         result_ = session.poll()
         loads = result_.loads
         stores = result_.stores
@@ -2314,7 +2502,7 @@ class TestDispatchErrorHandling:
         def _boom(*args, **kwargs):
             raise RuntimeError("simulated internal bug")
 
-        session._server.on_fetch = _boom  # type: ignore[assignment]
+        session._server.on_fetch = _boom
         conn.enqueue(
             {
                 TYPE_KEY: FetchMsg.TYPE,
@@ -2337,7 +2525,7 @@ class TestDispatchErrorHandling:
         def _boom(*args, **kwargs):
             raise RuntimeError("simulated internal bug")
 
-        session._server.on_fetch = _boom  # type: ignore[assignment]
+        session._server.on_fetch = _boom
         for _ in range(_MAX_CONSECUTIVE_DISPATCH_ERRORS):
             conn.enqueue(
                 {
@@ -2366,7 +2554,7 @@ class TestDispatchErrorHandling:
         # Alternate (boom, success) (_MAX-1) times: counter rises to 1
         # then resets to 0 each cycle, never reaching the threshold.
         for _ in range(_MAX_CONSECUTIVE_DISPATCH_ERRORS - 1):
-            session._server.on_fetch = _boom  # type: ignore[assignment]
+            session._server.on_fetch = _boom
             conn.enqueue(
                 {
                     TYPE_KEY: FetchMsg.TYPE,
@@ -2377,7 +2565,7 @@ class TestDispatchErrorHandling:
                 }
             )
             session.poll()
-            session._server.on_fetch = original_on_fetch  # type: ignore[assignment]
+            session._server.on_fetch = original_on_fetch
             # A benign no-op message (unknown type) dispatches cleanly
             # and resets the consecutive-error counter.
             conn.enqueue({TYPE_KEY: "unknown_for_test"})
@@ -2610,3 +2798,141 @@ class TestTransferDoneMsgValidation:
         }
         with pytest.raises(ValueError, match="success"):
             TransferDoneMsg.validate(msg)
+
+
+# ---------------------------------------------------------------------------
+# Tests for handshake deadline
+# ---------------------------------------------------------------------------
+
+
+class TestHandshakeDeadline:
+    """A connected-but-not-ready session is marked dead after the
+    handshake timeout expires."""
+
+    def test_marks_dead_after_timeout(self, monkeypatch):
+        monkeypatch.setenv("VLLM_P2P_HANDSHAKE_TIMEOUT_S", "1")
+        import vllm.envs
+
+        vllm.envs.__dict__.pop("VLLM_P2P_HANDSHAKE_TIMEOUT_S", None)
+
+        transport = FakeDataTransport()
+        conn = FakeConnection(peer_id="stale:9999")
+        session = P2PSession(
+            peer_id="stale:9999",
+            local_id="local:1",
+            transport=transport,
+            local_block_len=4096,
+            local_hash_seed=_DEFAULT_HASH_SEED,
+            conn=conn,
+        )
+
+        assert session.connected
+        assert not session.ready
+        assert session.alive
+
+        session._connected_at = time.monotonic() - 5
+
+        session.poll()
+        assert not session.alive
+
+    def test_no_timeout_when_ready(self, monkeypatch):
+        monkeypatch.setenv("VLLM_P2P_HANDSHAKE_TIMEOUT_S", "1")
+        import vllm.envs
+
+        vllm.envs.__dict__.pop("VLLM_P2P_HANDSHAKE_TIMEOUT_S", None)
+
+        transport = FakeDataTransport()
+        conn = FakeConnection(peer_id="good:1234")
+        session = P2PSession(
+            peer_id="good:1234",
+            local_id="local:1",
+            transport=transport,
+            local_block_len=4096,
+            local_hash_seed=_DEFAULT_HASH_SEED,
+            conn=conn,
+        )
+
+        # Complete the handshake by feeding ConnectMsg + ConnectAckMsg.
+        conn._inbox = [
+            {
+                TYPE_KEY: ConnectMsg.TYPE,
+                ConnectMsg.PEER_ID: "good:1234",
+                ConnectMsg.AGENT_METADATA: b"meta",
+                ConnectMsg.BASE_ADDR: 0x1000,
+                ConnectMsg.NUM_BLOCKS: 16,
+                ConnectMsg.BLOCK_LEN: 4096,
+                ConnectMsg.CONFIG_FINGERPRINT: "",
+                ConnectMsg.HASH_SEED: _DEFAULT_HASH_SEED,
+            },
+            {TYPE_KEY: ConnectAckMsg.TYPE, ConnectAckMsg.PEER_ID: "good:1234"},
+        ]
+        session.poll()
+        assert session.ready
+
+        session._connected_at = time.monotonic() - 100
+        session.poll()
+        assert session.alive
+
+    def test_buffered_ack_at_deadline_completes_handshake(self, monkeypatch):
+        """A ConnectAck already in the inbox at the deadline must complete
+        the handshake instead of being discarded by mark_dead."""
+        monkeypatch.setenv("VLLM_P2P_HANDSHAKE_TIMEOUT_S", "1")
+        import vllm.envs
+
+        vllm.envs.__dict__.pop("VLLM_P2P_HANDSHAKE_TIMEOUT_S", None)
+
+        transport = FakeDataTransport()
+        conn = FakeConnection(peer_id="late-ack:1")
+        session = P2PSession(
+            peer_id="late-ack:1",
+            local_id="local:1",
+            transport=transport,
+            local_block_len=4096,
+            local_hash_seed=_DEFAULT_HASH_SEED,
+            conn=conn,
+        )
+        session._connected_at = time.monotonic() - 5
+        conn._inbox = [
+            {
+                TYPE_KEY: ConnectMsg.TYPE,
+                ConnectMsg.PEER_ID: "late-ack:1",
+                ConnectMsg.AGENT_METADATA: b"meta",
+                ConnectMsg.BASE_ADDR: 0x1000,
+                ConnectMsg.NUM_BLOCKS: 16,
+                ConnectMsg.BLOCK_LEN: 4096,
+                ConnectMsg.CONFIG_FINGERPRINT: "",
+                ConnectMsg.HASH_SEED: _DEFAULT_HASH_SEED,
+            },
+            {TYPE_KEY: ConnectAckMsg.TYPE, ConnectAckMsg.PEER_ID: "late-ack:1"},
+        ]
+        session.poll()
+        assert session.ready
+        assert session.alive
+
+    def test_activity_timestamp_updated_on_recv(self):
+        transport = FakeDataTransport()
+        conn = FakeConnection(peer_id="peer:1")
+        session = P2PSession(
+            peer_id="peer:1",
+            local_id="local:1",
+            transport=transport,
+            local_block_len=4096,
+            local_hash_seed=_DEFAULT_HASH_SEED,
+            conn=conn,
+        )
+        before = session._last_activity_at
+
+        conn._inbox = [
+            {
+                TYPE_KEY: ConnectMsg.TYPE,
+                ConnectMsg.PEER_ID: "peer:1",
+                ConnectMsg.AGENT_METADATA: b"meta",
+                ConnectMsg.BASE_ADDR: 0x1000,
+                ConnectMsg.NUM_BLOCKS: 16,
+                ConnectMsg.BLOCK_LEN: 4096,
+                ConnectMsg.CONFIG_FINGERPRINT: "",
+                ConnectMsg.HASH_SEED: _DEFAULT_HASH_SEED,
+            },
+        ]
+        session.poll()
+        assert session._last_activity_at >= before

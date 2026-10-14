@@ -7,6 +7,10 @@ namespace vllm {
 constexpr int kMnnvlLamportAgThreads = 128;
 constexpr int kMnnvlLamportRsThreads = 256;
 constexpr int kMnnvlLamportConcurrentPollMaxPacks = 8192;
+constexpr int kMnnvlMultimemRsThreads = 1024;
+constexpr int kMnnvlMultimemRsBlockLimit = 8;
+constexpr int kMnnvlMultimemRsVectorBytes = 16;
+constexpr int kMnnvlMultimemRsUnroll = 8;
 
 using CopyPack = array_t<uint64_t, 2>;
 
@@ -47,6 +51,127 @@ __global__ void __launch_bounds__(512, 1)
   }
   barrier_at_end<ngpus, true>(sg, self_sg, rank);
 }
+
+// Multimem reduce-scatter reduces through an NVLS multicast mapping, which
+// has no AMD equivalent. The whole path is compiled out on ROCm and the host
+// entry point rejects the call instead of launching anything.
+#if !defined(USE_ROCM)
+
+template <typename T>
+DINLINE void multimem_load_reduce_16(uint32_t (&result)[4], const T* address) {
+  #if CUDA_VERSION >= 12020 && defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
+  if constexpr (std::is_same<T, nv_bfloat16>::value) {
+    asm volatile(
+        "multimem.ld_reduce.relaxed.sys.global.add.acc::f32.v4.bf16x2 "
+        "{%0,%1,%2,%3}, [%4];"
+        : "=r"(result[0]), "=r"(result[1]), "=r"(result[2]), "=r"(result[3])
+        : "l"(address)
+        : "memory");
+  } else if constexpr (std::is_same<T, half>::value) {
+    asm volatile(
+        "multimem.ld_reduce.relaxed.sys.global.add.acc::f32.v4.f16x2 "
+        "{%0,%1,%2,%3}, [%4];"
+        : "=r"(result[0]), "=r"(result[1]), "=r"(result[2]), "=r"(result[3])
+        : "l"(address)
+        : "memory");
+  } else {
+    static_assert(std::is_same<T, float>::value);
+    asm volatile(
+        "multimem.ld_reduce.relaxed.sys.global.add.v4.f32 "
+        "{%0,%1,%2,%3}, [%4];"
+        : "=r"(result[0]), "=r"(result[1]), "=r"(result[2]), "=r"(result[3])
+        : "l"(address)
+        : "memory");
+  }
+  #else
+  asm volatile("trap;");
+  #endif
+}
+
+DINLINE void store_global_16(void* address, const uint32_t (&value)[4]) {
+  asm volatile("st.global.v4.u32 [%0], {%1,%2,%3,%4};"
+               :
+               : "l"(address), "r"(value[0]), "r"(value[1]), "r"(value[2]),
+                 "r"(value[3])
+               : "memory");
+}
+
+DINLINE void mnnvl_multimem_publish_flag(FlagType* flag_addr, FlagType flag) {
+  #if CUDA_VERSION >= 12020 && defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
+  asm volatile("multimem.st.release.sys.global.u32 [%0], %1;"
+               :
+               : "l"(flag_addr), "r"(flag)
+               : "memory");
+  // The flag is stored through the multicast alias and polled through the
+  // local unicast alias in the same grid.
+  asm volatile("fence.proxy.alias;" ::: "memory");
+  #else
+  asm volatile("trap;");
+  #endif
+}
+
+template <bool ready, int ngpus>
+__global__ void mnnvl_multimem_barrier_kernel(Signal* local_signal,
+                                              Signal* multicast_signal,
+                                              int rank) {
+  FlagType flag = local_signal->_flag[0] + 1;
+  FlagType* multicast_counters =
+      ready ? multicast_signal->start[0] : multicast_signal->end[0];
+  FlagType* local_counters =
+      ready ? local_signal->start[0] : local_signal->end[0];
+  // Replicate this rank's counter into every backing allocation.
+  mnnvl_multimem_publish_flag(&multicast_counters[rank], flag);
+  #pragma unroll
+  for (int peer = 0; peer < ngpus; ++peer) {
+    while (ld_flag_acquire(&local_counters[peer]) != flag);
+  }
+  local_signal->_flag[0] = flag;
+}
+
+template <typename T, int ngpus>
+__global__ void __launch_bounds__(kMnnvlMultimemRsThreads, 1)
+    mnnvl_multimem_reduce_scatter_kernel(const T* __restrict__ multicast_input,
+                                         T* __restrict__ result, int rank,
+                                         int packs_per_rank) {
+  constexpr int kThreadsPerWarp = 32;
+  constexpr int kWarpsPerCta = kMnnvlMultimemRsThreads / kThreadsPerWarp;
+  constexpr int kPacksPerWarpIteration =
+      kThreadsPerWarp * kMnnvlMultimemRsUnroll;
+
+  int lane;
+  asm volatile("mov.u32 %0, %%laneid;" : "=r"(lane));
+  int warp = blockIdx.x * kWarpsPerCta + threadIdx.x / kThreadsPerWarp;
+  int num_warps = gridDim.x * kWarpsPerCta;
+  int pack_offset = warp * kPacksPerWarpIteration + lane;
+  int pack_stride = num_warps * kPacksPerWarpIteration;
+  auto* rank_input = reinterpret_cast<const char*>(multicast_input) +
+                     rank * packs_per_rank * kMnnvlMultimemRsVectorBytes;
+  auto* rank_output = reinterpret_cast<char*>(result);
+
+  while (pack_offset < packs_per_rank) {
+    uint32_t reduced[kMnnvlMultimemRsUnroll][4];
+  #pragma unroll
+    for (int u = 0; u < kMnnvlMultimemRsUnroll; ++u) {
+      int pack = pack_offset + u * kThreadsPerWarp;
+      if (pack < packs_per_rank) {
+        multimem_load_reduce_16<T>(
+            reduced[u], reinterpret_cast<const T*>(
+                            rank_input + pack * kMnnvlMultimemRsVectorBytes));
+      }
+    }
+  #pragma unroll
+    for (int u = 0; u < kMnnvlMultimemRsUnroll; ++u) {
+      int pack = pack_offset + u * kThreadsPerWarp;
+      if (pack < packs_per_rank) {
+        store_global_16(rank_output + pack * kMnnvlMultimemRsVectorBytes,
+                        reduced[u]);
+      }
+    }
+    pack_offset += pack_stride;
+  }
+}
+
+#endif  // !defined(USE_ROCM)
 
 template <typename P>
 union LamportPack {
@@ -102,6 +227,38 @@ DINLINE P sanitize_lamport_payload(P packed) {
     if (value.words[i] == 0x80000000U) value.words[i] = 0;
   }
   return value.packed;
+}
+
+__host__ __device__ constexpr int mnnvl_lamport_dirty_stage(int current_stage) {
+  return (current_stage + 2) % 3;
+}
+
+__host__ __device__ constexpr int mnnvl_lamport_next_stage(int current_stage) {
+  return (current_stage + 1) % 3;
+}
+
+template <typename P>
+DINLINE void store_multimem_lamport_payload(P* ptr, P packed) {
+  static_assert(sizeof(P) == 16);
+  // multimem was introduced in PTX 8.1 (CUDA 12.1) for SM90 and newer.
+#if !defined(USE_ROCM) && CUDA_VERSION >= 12010 && defined(__CUDA_ARCH__) && \
+    (__CUDA_ARCH__ >= 900)
+  LamportPack<P> value{.packed = packed};
+  // The local alias remains sentinel until the multicast payload becomes
+  // observable; readers reject prior or partial values and retry.
+  asm volatile("multimem.st.relaxed.sys.global.v4.f32 [%0], {%1,%2,%3,%4};"
+               :
+               : "l"(ptr), "r"(value.words[0]), "r"(value.words[1]),
+                 "r"(value.words[2]), "r"(value.words[3])
+               : "memory");
+#elif defined(USE_ROCM)
+  __builtin_trap();
+#else
+  // Multicast mappings do not exist before SM90. Fail closed if this kernel is
+  // ever dispatched for an unsupported target instead of issuing an undefined
+  // ordinary store to a multicast address.
+  asm volatile("trap;");
+#endif
 }
 
 template <typename P>
@@ -199,7 +356,9 @@ __global__ void __launch_bounds__(kMnnvlLamportAgThreads, 1)
   int stride = gridDim.x * blockDim.x;
   uint32_t epoch = epochs[0];
   int current_stage = epoch % 3;
-  int dirty_stage = (epoch + 1) % 3;
+  // A peer may start the next epoch after we publish but before we finish.
+  // Clean the previous stage, which cannot be reused until two epochs later.
+  int dirty_stage = mnnvl_lamport_dirty_stage(current_stage);
   int dirty_size = epochs[2 + dirty_stage];
   auto local_buffer = reinterpret_cast<P*>(const_cast<void*>(dp.ptrs[rank]));
   auto current_local = local_buffer + current_stage * stage_size;
@@ -213,8 +372,11 @@ __global__ void __launch_bounds__(kMnnvlLamportAgThreads, 1)
   P local_value;
   if (tid < size_per_rank) {
     local_value = packed_input[tid];
-    current_multicast[rank * size_per_rank + tid] =
-        sanitize_lamport_payload(local_value);
+    // A CUDA multicast mapping may only be accessed with multimem PTX;
+    // ordinary global loads and stores have undefined behavior.
+    store_multimem_lamport_payload(
+        current_multicast + rank * size_per_rank + tid,
+        sanitize_lamport_payload(local_value));
   }
 #if !defined(USE_ROCM) && CUDA_VERSION >= 12000 && defined(__CUDA_ARCH__) && \
     (__CUDA_ARCH__ >= 900)
@@ -241,7 +403,7 @@ __global__ void __launch_bounds__(kMnnvlLamportAgThreads, 1)
   if (tid == 0) {
     while (*reinterpret_cast<volatile uint32_t*>(&epochs[1]) < gridDim.x);
     epochs[2 + current_stage] = total_size;
-    epochs[0] = epoch + 1;
+    epochs[0] = mnnvl_lamport_next_stage(current_stage);
     epochs[1] = 0;
   }
 }
@@ -267,7 +429,9 @@ __global__ void __launch_bounds__(kMnnvlLamportRsThreads, 1)
   int stride = gridDim.x * blockDim.x;
   uint32_t epoch = epochs[0];
   int current_stage = epoch % 3;
-  int dirty_stage = (epoch + 1) % 3;
+  // A peer may start the next epoch after we publish but before we finish.
+  // Clean the previous stage, which cannot be reused until two epochs later.
+  int dirty_stage = mnnvl_lamport_dirty_stage(current_stage);
   int dirty_size = epochs[2 + dirty_stage];
   auto local_buffer = reinterpret_cast<P*>(const_cast<void*>(dp.ptrs[rank]));
   auto current_local = local_buffer + current_stage * stage_size;
@@ -319,7 +483,7 @@ __global__ void __launch_bounds__(kMnnvlLamportRsThreads, 1)
   if (tid == 0) {
     while (*reinterpret_cast<volatile uint32_t*>(&epochs[1]) < gridDim.x);
     epochs[2 + current_stage] = size_per_rank * ngpus;
-    epochs[0] = epoch + 1;
+    epochs[0] = mnnvl_lamport_next_stage(current_stage);
     epochs[1] = 0;
   }
 }

@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Unit tests for Helion ConfigManager and ConfigSet.
+"""Unit tests for Helion ConfigManager and ConfigSet.
 
 Tests the simplified configuration management system for Helion custom kernels.
 """
@@ -80,7 +79,7 @@ class TestConfigSet:
         config_set = ConfigSet("test_kernel")
 
         with pytest.raises(KeyError, match="platform 'h100' not found"):
-            config_set.get_config("h100", "nonexistent")
+            config_set.get_config("h100", CaseKey({"batch": 32}))
 
         config_data = {"num_warps": 8, "num_stages": 4}
         data = {

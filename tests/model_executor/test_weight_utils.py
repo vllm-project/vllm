@@ -2,15 +2,20 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import tempfile
+from unittest.mock import Mock
 
 import huggingface_hub.constants
 import pytest
+import torch
 from huggingface_hub.utils import LocalEntryNotFoundError
 
 from vllm.model_executor.model_loader.weight_utils import (
     download_weights_from_hf,
+    drop_checkpoint_cache,
+    initialize_single_dummy_weight,
     maybe_remap_kv_scale_name,
 )
+from vllm.platforms import current_platform
 
 
 def test_download_weights_from_hf():
@@ -72,28 +77,28 @@ class TestMaybeRemapKvScaleName:
         assert result == "model.layers.0.self_attn.attn.v_scale"
 
     def test_modelopt_k_proj_k_scale(self):
-        """ModelOpt format: k_proj.k_scale -> attn.k_scale"""
+        """ModelOpt format: k_proj.k_scale -> attn.k_scale."""
         result = maybe_remap_kv_scale_name(
             "model.layers.0.self_attn.k_proj.k_scale", self.PARAMS_DICT
         )
         assert result == "model.layers.0.self_attn.attn.k_scale"
 
     def test_modelopt_v_proj_v_scale(self):
-        """ModelOpt format: v_proj.v_scale -> attn.v_scale"""
+        """ModelOpt format: v_proj.v_scale -> attn.v_scale."""
         result = maybe_remap_kv_scale_name(
             "model.layers.0.self_attn.v_proj.v_scale", self.PARAMS_DICT
         )
         assert result == "model.layers.0.self_attn.attn.v_scale"
 
     def test_deprecated_kv_scale(self):
-        """Old format: kv_scale -> attn.k_scale (deprecated)"""
+        """Old format: kv_scale -> attn.k_scale (deprecated)."""
         result = maybe_remap_kv_scale_name(
             "model.layers.0.self_attn.kv_scale", self.PARAMS_DICT
         )
         assert result == "model.layers.0.self_attn.attn.k_scale"
 
     def test_default_bare_k_scale(self):
-        """Default format: .k_scale -> .attn.k_scale"""
+        """Default format: .k_scale -> .attn.k_scale."""
         result = maybe_remap_kv_scale_name(
             "model.layers.0.self_attn.k_scale", self.PARAMS_DICT
         )
@@ -158,6 +163,17 @@ class TestMaybeRemapKvScaleName:
             "model.layers.0.self_attn.qkv_proj.k_scale", empty_params
         )
         assert result is None
+
+
+def test_checkpoint_weight_mapper_discards_serialized_g_idx():
+    from vllm.model_executor.layers.quantization.base_config import (
+        QuantizationConfig,
+    )
+
+    mapper = QuantizationConfig.get_checkpoint_weight_mapper()
+
+    assert mapper._map_name("model.layers.0.g_idx") is None
+    assert mapper._map_name("model.layers.0.qweight") == "model.layers.0.qweight"
 
 
 class TestKvCacheScaleMapper:
@@ -279,6 +295,83 @@ class TestKvCacheScaleMapper:
             combined._map_name("model.layers.0.self_attn.k_scale")
             == "model.layers.0.self_attn.attn.k_scale"
         )
+
+
+@pytest.mark.parametrize("fails", [False, True])
+def test_drop_checkpoint_cache_releases_local_weight_files(
+    tmp_path, monkeypatch, fails
+):
+    """Evict only weights; cache eviction errors must not prevent loading."""
+    for name in ("weights.safetensors", "config.json"):
+        (tmp_path / name).touch()
+    fadvise = Mock(side_effect=OSError("cache eviction failed") if fails else None)
+    monkeypatch.setattr("os.posix_fadvise", fadvise)
+    drop_checkpoint_cache(str(tmp_path))
+    fadvise.assert_called_once()
+
+
+@pytest.mark.parametrize("dtype", [torch.float8_e4m3fn, torch.float8_e5m2])
+def test_dummy_fp8_weight_is_not_degenerate(dtype):
+    """+-1e-3 underflows in FP8, so 8-bit floats default to +-1."""
+    param = torch.empty(4096, dtype=dtype)
+    initialize_single_dummy_weight(param)
+    values = param.float()
+    assert values.isfinite().all()
+    assert values.abs().max() <= 1.0
+    assert (values != 0).float().mean() > 0.99
+
+
+@pytest.mark.parametrize(
+    ("dtype", "name"),
+    [(torch.float8_e8m0fnu, "weight_scale_inv"), (torch.uint8, "w13_weight_scale")],
+)
+def test_dummy_e8m0_scale_is_fixed_exponent(dtype, name):
+    """E8M0 scales, including uint8-stored ones, get a finite 2**-7."""
+    param = torch.empty(64, dtype=dtype)
+    initialize_single_dummy_weight(param, name=name)
+    assert (param.view(torch.uint8) == 120).all()
+
+
+@pytest.mark.parametrize("dtype", [torch.uint8, torch.int8, torch.float4_e2m1fn_x2])
+def test_dummy_packed_weight_gets_random_bytes(dtype):
+    """Packed weights are filled deterministically instead of left uninitialized."""
+    # Some backends can't fill packed FP4 directly, so view zeroed bytes.
+    params = [torch.zeros(4096, dtype=torch.uint8).view(dtype) for _ in range(2)]
+    for param in params:
+        initialize_single_dummy_weight(param, name="w13_weight")
+    raw = params[0].view(torch.uint8)
+    assert raw.unique().numel() > 250
+    assert torch.equal(raw, params[1].view(torch.uint8))
+
+
+@pytest.mark.skipif(current_platform.is_rocm(), reason="ROCm zeroes integer params")
+def test_dummy_wide_integer_param_is_untouched():
+    """Wider integer params may be indices, so random values are unsafe."""
+    param = torch.arange(16, dtype=torch.int32)
+    initialize_single_dummy_weight(param, name="g_idx")
+    assert torch.equal(param, torch.arange(16, dtype=torch.int32))
+
+
+def test_dummy_norm_weights_are_neutral(default_vllm_config):
+    """Dummy norms stay identity-like, keeping activations at a realistic scale."""
+    from vllm.model_executor.layers.layernorm import (
+        GemmaRMSNorm,
+        LayerNorm,
+        RMSNorm,
+        RMSNormGated,
+    )
+
+    expected = {
+        RMSNorm(16): {"weight": 1.0},
+        GemmaRMSNorm(16): {"weight": 0.0},
+        LayerNorm(16): {"weight": 1.0, "bias": 0.0},
+        RMSNormGated(16): {"weight": 1.0},
+    }
+    for norm, values in expected.items():
+        for name, param in norm.named_parameters():
+            param.data.uniform_(-5, 5)
+            initialize_single_dummy_weight(param, name=name)
+            assert torch.all(param == values[name]), (type(norm).__name__, name)
 
 
 if __name__ == "__main__":

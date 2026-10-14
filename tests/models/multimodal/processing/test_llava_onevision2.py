@@ -202,7 +202,7 @@ def test_validate_relative_bare_path_blocked():
 # ---------------------------------------------------------------------------
 # Frame backend marker -> PIL + timestamps (_frame_video_to_pil_and_timestamps)
 #
-# Non-codec videos reach _call_hf_processor as a ``(frames_ndarray, metadata)``
+# Non-codec videos reach _apply_hf_processor_main as a ``(frames_ndarray, metadata)``
 # tuple -- produced by the registered ``LlavaOnevision2VideoBackend`` for real
 # ``video_url`` inputs, or by the dummy-inputs builder during profiling
 # (``video_needs_metadata=True``). The helper materialises PIL frames and

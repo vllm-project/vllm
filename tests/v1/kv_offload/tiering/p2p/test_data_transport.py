@@ -5,9 +5,11 @@
 from __future__ import annotations
 
 import ctypes
+import threading
 from unittest.mock import MagicMock, patch
 
 import numpy as np
+import pytest
 
 from vllm.v1.kv_offload.tiering.p2p.data.base import PollResult
 from vllm.v1.kv_offload.tiering.p2p.data.nixl import NixlTransport
@@ -107,6 +109,59 @@ class TestNixlTransportWithMockedAgent:
         transport = self._make_transport()
         assert transport.get_agent_metadata() == b"test-metadata"
 
+    def test_add_remote_peer_async_registers_off_the_caller_thread(self):
+        """The O(num_blocks) registration must not run on the caller thread.
+
+        This is the whole point of the async path: the scheduler thread
+        hands the work off rather than paying prep_xfer_dlist inline.
+        """
+        transport = self._make_transport()
+        caller = threading.get_ident()
+        worker_threads: list[int] = []
+
+        def record_thread(*args, **kwargs):
+            worker_threads.append(threading.get_ident())
+            return MagicMock(name="remote_dlist")
+
+        transport._agent.prep_xfer_dlist.side_effect = record_thread
+
+        future = transport.add_remote_peer_async("peer:1", b"meta", 0x1000, 8, 1024)
+        future.result(timeout=5)
+
+        assert worker_threads and caller not in worker_threads
+        assert transport.write_blocks("peer:1", [0], [1]) is not None
+
+    def test_registration_landing_after_remove_is_discarded(self):
+        """A late registration must not revive a peer that was reaped.
+
+        The session is torn down and remove_remote_peer runs while the
+        worker is still building descriptors; publishing afterwards would
+        leave a registered peer with no session and leak its handles.
+        """
+        transport = self._make_transport()
+        building = threading.Event()
+        release = threading.Event()
+
+        def blocking_prep(*args, **kwargs):
+            building.set()
+            release.wait(timeout=5)
+            return MagicMock(name="remote_dlist")
+
+        transport._agent.prep_xfer_dlist.side_effect = blocking_prep
+
+        future = transport.add_remote_peer_async("peer:1", b"meta", 0x1000, 8, 1024)
+        assert building.wait(timeout=5)
+        transport.remove_remote_peer("peer:1")
+        release.set()
+
+        with pytest.raises(RuntimeError, match="superseded"):
+            future.result(timeout=5)
+        assert "peer:1" not in transport._remote_dlists
+        assert transport.write_blocks("peer:1", [0], [1]) is None
+        # The handles the worker built were released rather than leaked.
+        assert transport._agent.release_dlist_handle.called
+        assert transport._agent.remove_remote_agent.called
+
     def test_write_blocks_returns_none_for_unknown_peer(self):
         """write_blocks returns None if peer not registered."""
         transport = self._make_transport()
@@ -132,7 +187,7 @@ class TestNixlTransportWithMockedAgent:
         assert tid1 != tid2
 
     def test_poll_empty_when_no_inflight(self):
-        """poll returns empty when nothing is inflight."""
+        """Poll returns empty when nothing is inflight."""
         transport = self._make_transport()
         result = transport.poll()
         assert result == PollResult(done=(), failed=())
@@ -213,7 +268,7 @@ class TestNixlTransportWithMockedAgent:
         assert tid2 not in transport._inflight
 
     def test_cancel_removes_inflight(self):
-        """cancel removes transfers and releases handles."""
+        """Cancel removes transfers and releases handles."""
         transport = self._make_transport()
         transport.add_remote_peer("peer:1", b"meta", 0x1000, 8, 1024)
 
@@ -226,7 +281,7 @@ class TestNixlTransportWithMockedAgent:
         transport._agent.release_xfer_handle.assert_called()
 
     def test_cancel_ignores_unknown_ids(self):
-        """cancel with unknown IDs doesn't crash."""
+        """Cancel with unknown IDs doesn't crash."""
         transport = self._make_transport()
         assert transport.cancel([999, 1000]) == []
         assert transport.cancel([999, 1000], mode="wait") == []
@@ -286,7 +341,7 @@ class TestNixlTransportWithMockedAgent:
         transport._agent.remove_remote_agent.assert_called()
 
     def test_close_releases_everything(self):
-        """close releases all handles and clears state."""
+        """Close releases all handles and clears state."""
         transport = self._make_transport()
         transport.add_remote_peer("peer:1", b"meta", 0x1000, 8, 1024)
         transport.write_blocks("peer:1", [0], [1])

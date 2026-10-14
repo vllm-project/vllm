@@ -5,19 +5,10 @@
 Run `pytest tests/quantization/test_configs.py --forked`.
 """
 
-from dataclasses import dataclass
-
 import pytest
 
 from vllm.config import ModelConfig
 from vllm.platforms import current_platform
-
-
-@dataclass
-class ModelPair:
-    model_marlin: str
-    model_gptq: str
-
 
 # Model Id // Quantization Arg // Expected Type
 MODEL_ARG_EXPTYPES = [
