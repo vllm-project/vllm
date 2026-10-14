@@ -161,12 +161,15 @@ class TestReasoningEndTokenIds:
         )
         engine = _make_engine(cfg)
         assert engine.reasoning_end_token_ids == {201, 202}
+        assert engine.implicit_reasoning_end_token_ids == {202}
         assert engine.find_reasoning_end([5, 201]) == ReasoningEnd(1, False)
         assert engine.find_reasoning_end([5, 202]) == ReasoningEnd(1, True)
 
     def test_transition_staying_in_reasoning_is_ignored(self):
         cfg = _with_reasoning_exits(("THINK_START", ParserState.REASONING, ()))
-        assert _make_engine(cfg).reasoning_end_token_ids == {201}
+        engine = _make_engine(cfg)
+        assert engine.reasoning_end_token_ids == {201}
+        assert engine.implicit_reasoning_end_token_ids == frozenset()
 
     def test_unreported_exit_fails_closed(self):
         cfg = _with_reasoning_exits(
