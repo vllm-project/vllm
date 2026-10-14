@@ -266,6 +266,10 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     ),
     "Exaone4ForCausalLM": _HfExamplesInfo("LGAI-EXAONE/EXAONE-4.0-32B"),
     "ExaoneMoeForCausalLM": _HfExamplesInfo("LGAI-EXAONE/K-EXAONE-236B-A23B"),
+    "ExaoneMoEForCausalLM": _HfExamplesInfo(
+        "LGAI-EXAONE/K-EXAONE-236B-A23B",
+        hf_overrides={"architectures": ["ExaoneMoEForCausalLM"]},
+    ),
     "FalconForCausalLM": _HfExamplesInfo("tiiuae/falcon-7b"),
     "FalconH1ForCausalLM": _HfExamplesInfo("tiiuae/Falcon-H1-0.5B-Base"),
     "FlexOlmoForCausalLM": _HfExamplesInfo("allenai/Flex-reddit-2x7B-1T"),
@@ -355,6 +359,9 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     ),
     "KimiLinearForCausalLM": _HfExamplesInfo(
         "moonshotai/Kimi-Linear-48B-A3B-Instruct", trust_remote_code=True
+    ),
+    "Kolibri1ForCausalLM": _HfExamplesInfo(
+        "Aleph-Alpha/Kolibri-1", min_transformers_version="5.20.0"
     ),
     "LagunaForCausalLM": _HfExamplesInfo("poolside/Laguna-XS.2"),
     "Lfm2ForCausalLM": _HfExamplesInfo("LiquidAI/LFM2-1.2B"),
@@ -583,7 +590,6 @@ _EMBEDDING_EXAMPLE_MODELS = {
     ),
     "EmbeddingGemma2Model": _HfExamplesInfo(
         "google/embeddinggemma-2",
-        min_transformers_version="5.18.0",
         is_available_online=False,
     ),
     "Gemma2Model": _HfExamplesInfo("BAAI/bge-multilingual-gemma2"),
@@ -776,10 +782,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     # [Decoder-only]
     "AriaForConditionalGeneration": _HfExamplesInfo("rhymes-ai/Aria"),
     "AudioFlamingo3ForConditionalGeneration": _HfExamplesInfo(
-        "nvidia/audio-flamingo-3-hf",
-        transformers_version_reason={
-            "vllm": "Needs https://github.com/huggingface/transformers/pull/43538"
-        },
+        "nvidia/audio-flamingo-3-hf"
     ),
     "BagelForConditionalGeneration": _HfExamplesInfo("ByteDance-Seed/BAGEL-7B-MoT"),
     "BailingMoeV3VLForConditionalGeneration": _HfExamplesInfo(
@@ -802,6 +805,10 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "Salesforce/blip2-opt-2.7b",
         extras={"6b": "Salesforce/blip2-opt-6.7b"},
     ),
+    "ClefFlashForJointSchema": _HfExamplesInfo(
+        "Cloudflare/clef-flash",
+        max_model_len=4096,
+    ),
     "Cohere2VisionForConditionalGeneration": _HfExamplesInfo(
         "CohereLabs/command-a-vision-07-2025",
         extras={"command-a-plus": "CohereLabs/command-a-plus-05-2026-bf16"},
@@ -818,12 +825,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "nvidia/Cosmos3-Edge",
         max_model_len=4096,
         use_original_num_layers=True,
-        hf_overrides={
-            "text_config": {
-                "num_hidden_layers": 2,
-                "hybrid_override_pattern": "*-",
-            }
-        },
+        hf_overrides={"text_config": {"layers_block_type": ["full_attention", "mlp"]}},
     ),
     "DeepseekVLV2ForCausalLM": _HfExamplesInfo(
         "deepseek-ai/deepseek-vl2-tiny",
@@ -1123,6 +1125,11 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "MiniCPMV4_6ForConditionalGeneration": _HfExamplesInfo(
         "openbmb/MiniCPM-V-4_6",
     ),
+    "MiniCPMV4_7ForConditionalGeneration": _HfExamplesInfo(
+        "openbmb/MiniCPM-V-4_7",
+        min_transformers_version="5.18.0",
+        is_available_online=False,
+    ),
     "MiniMaxM3SparseForConditionalGeneration": _HfExamplesInfo(
         "MiniMaxAI/MiniMax-M3",
         trust_remote_code=True,
@@ -1349,6 +1356,10 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     ),
     "Qwen3OmniMoeForConditionalGeneration": _HfExamplesInfo(
         "Qwen/Qwen3-Omni-30B-A3B-Instruct",
+        max_model_len=4096,
+    ),
+    "ClefOmniForJointSchema": _HfExamplesInfo(
+        "Cloudflare/clef-omni",
         max_model_len=4096,
     ),
     "Qwen3ASRForConditionalGeneration": _HfExamplesInfo(
