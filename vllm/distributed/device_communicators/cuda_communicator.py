@@ -413,6 +413,17 @@ class CudaCommunicator(DeviceCommunicatorBase):
             out = ca_comm.custom_all_reduce(input_)
             assert out is not None
             return out
+        if (
+            envs.VLLM_BATCH_INVARIANT
+            and current_platform.is_rocm()
+            and input_.is_floating_point()
+        ):
+            # Integer sums are exact in any order and stay on RCCL.
+            from vllm.model_executor.determinism.batch_invariant import (
+                all_reduce_batch_invariant,
+            )
+
+            return all_reduce_batch_invariant(input_, self.device_group)
         symm_mem_comm = self.symm_mem_comm
         if symm_mem_comm is not None and symm_mem_comm.should_use_symm_mem(input_):
             out = symm_mem_comm.all_reduce(input_)
@@ -498,7 +509,17 @@ class CudaCommunicator(DeviceCommunicatorBase):
         chunk_size = input_tensor.shape[0] // world_size
         output_shape = (chunk_size,) + input_tensor.shape[1:]
 
-        if should_nccl_symm_mem_ag_rs():
+        if (
+            envs.VLLM_BATCH_INVARIANT
+            and current_platform.is_rocm()
+            and input_.is_floating_point()
+        ):
+            from vllm.model_executor.determinism.batch_invariant import (
+                reduce_scatter_batch_invariant,
+            )
+
+            output = reduce_scatter_batch_invariant(input_tensor, self.device_group)
+        elif should_nccl_symm_mem_ag_rs():
             output = self._reduce_scatter_symm_mem(input_tensor)
         else:
             output = torch.empty(
@@ -562,6 +583,22 @@ class CudaCommunicator(DeviceCommunicatorBase):
             assert output.dtype == input_tensor.dtype
             assert output.device == input_tensor.device
             assert output.is_contiguous()
+
+        if (
+            envs.VLLM_BATCH_INVARIANT
+            and current_platform.is_rocm()
+            and input_.is_floating_point()
+        ):
+            from vllm.model_executor.determinism.batch_invariant import (
+                reduce_scatter_batch_invariant,
+            )
+
+            result = reduce_scatter_batch_invariant(
+                input_tensor, self.device_group, sizes=sizes
+            )
+            if output is not None:
+                return output.copy_(result)
+            return result.movedim(0, dim).contiguous()
 
         if self._can_use_aiter_ag_rs(sizes):
             aiter_comm = self.aiter_ar_comm

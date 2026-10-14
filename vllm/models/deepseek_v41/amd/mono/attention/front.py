@@ -188,6 +188,8 @@ def stage_kt(c, t):
     ntopk."""
     tid = c["tid"]
     a, ratio = c["args"], c["ratio"]
+    # device scope where this launch reads the table (K2's)
+    cm = CM_DEV if const_expr(c.get("dev", False)) else 0
     slot = ld_i32(a["slot"], 2 * t)
     live = slot >= 0
     nswa = live.select(ld_i32(a["swa_lens"], t), fx.Int32(0))
@@ -212,10 +214,10 @@ def stage_kt(c, t):
             c_val = (local >= 0).select(c_slot, fx.Int32(-1))
             val = (k < ntopk).select(c_val, val)
         if k < KEYS:
-            bo.buffer_store(val, rsrc(a["kt"]), t * KEYS + k)
+            bo.buffer_store(val, rsrc(a["kt"]), t * KEYS + k, cache_modifier=cm)
     if tid == 0:
-        bo.buffer_store(kv_len, rsrc(a["klen"]), t)
-        bo.buffer_store(ntopk, rsrc(a["klen"]), c["S"] + t)
+        bo.buffer_store(kv_len, rsrc(a["klen"]), t, cache_modifier=cm)
+        bo.buffer_store(ntopk, rsrc(a["klen"]), c["S"] + t, cache_modifier=cm)
 
 
 # ---------------------------------------------------------------- wqkv_a
@@ -357,6 +359,20 @@ def stage_qkv(c, t):
         amax = fx.max(amax, abs(y))
     code = mx_code(butterfly(amax, (1, 2), fx.max))
     mul = mx_mul(code)
+    if const_expr(c.get("index", False)):  # noqa: SIM102
+        # the bf16 qr, vLLM's indexer's input
+        if mine & (tt * 8 < Q_RANK):
+            words = [
+                fx.Vector.from_elements([ys[2 * i], ys[2 * i + 1]], fx.Float32)
+                .to(fx.BFloat16)
+                .bitcast(fx.Int32)[0]
+                for i in range(4)
+            ]
+            bo.buffer_store(
+                fx.Vector.from_elements(words, fx.Int32),
+                rsrc(a["qr_out"]),
+                t * (Q_RANK // 2) + 4 * tt,
+            )
     if mine & (tt * 8 < Q_RANK):
         w0 = fp8_pack4(*[clamp_fp8(ys[i] * mul) for i in range(4)])
         w1 = fp8_pack4(*[clamp_fp8(ys[4 + i] * mul) for i in range(4)])
@@ -597,8 +613,10 @@ def run_front(c, key, bid, x8_given=False, before_wqkv=None, after_wqkv=None):
                 u = free + n_free * tid
                 if u < xq_units:
                     c["mb"].put(c["xrdy"], u, fx.Int32(1))
-    for t in range(is_free.select(free, fx.Int32(s)), s, n_free):
-        stage_kt(c, t)
+    if const_expr(not c.get("index", False)):
+        # an index source's top-k comes after this launch: K2 builds its table
+        for t in range(is_free.select(free, fx.Int32(s)), s, n_free):
+            stage_kt(c, t)
     stamp(c, 1)
     poss = [wqb_pos(c, t0, n) for t0, n in tiles]
 
