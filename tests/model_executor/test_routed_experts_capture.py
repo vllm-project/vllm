@@ -338,14 +338,14 @@ def test_routed_experts_capturer_single_dp_no_metadata():
     assert capturer.device_buffer[3, 0, 0].item() == -1
 
 
-@pytest.mark.parametrize("num_tokens", [6, 3, 1])
-def test_single_dp_ep_capture_restores_tp_shards(num_tokens):
+@pytest.mark.parametrize("tp_size, num_tokens", [(2, 6), (2, 3), (2, 1), (4, 2)])
+def test_single_dp_ep_capture_restores_tp_shards(tp_size, num_tokens):
     """Capture all current rows after model-level SP, including buffer reuse."""
-    capturer = _capturer_with_buffer(tp_size=2)
+    capturer = _capturer_with_buffer(tp_size=tp_size)
     config = SimpleNamespace(
         parallel_config=SimpleNamespace(
             data_parallel_size=1,
-            tensor_parallel_size=2,
+            tensor_parallel_size=tp_size,
             enable_expert_parallel=True,
             use_sequence_parallel_moe=False,
             is_moe_model=True,
@@ -355,7 +355,7 @@ def test_single_dp_ep_capture_restores_tp_shards(num_tokens):
         ),
     )
     tp_group = Mock()
-    shard_n = (num_tokens + 1) // 2
+    shard_n = (num_tokens + tp_size - 1) // tp_size
     with (
         set_forward_context(None, config, num_tokens=num_tokens),
         patch(f"{_REC_MODULE}.get_tp_group", return_value=tp_group),
@@ -364,7 +364,7 @@ def test_single_dp_ep_capture_restores_tp_shards(num_tokens):
         for offset in (20, 1):
             expected = torch.arange(num_tokens * 2, dtype=torch.int32).reshape(-1, 2)
             expected += offset
-            padded = torch.full((shard_n * 2, 2), 99, dtype=torch.int32)
+            padded = torch.full((shard_n * tp_size, 2), 99, dtype=torch.int32)
             padded[:num_tokens] = expected
             tp_group.all_gather.return_value = padded
             capturer.capture(0, padded[:shard_n])
@@ -378,7 +378,7 @@ def test_single_dp_ep_capture_restores_tp_shards(num_tokens):
         assert tp_group.all_gather.call_count == 2
 
 
-@pytest.mark.parametrize("num_tokens, num_rows", [(6, 6), (3, 4)])
+@pytest.mark.parametrize("num_tokens, num_rows", [(6, 6), (3, 4), (0, 0)])
 def test_single_dp_tp_capture_does_not_regather_full_batch(num_tokens, num_rows):
     capturer = _capturer_with_buffer(tp_size=2)
     topk = torch.arange(num_rows * 2, dtype=torch.int32).reshape(-1, 2)
@@ -418,6 +418,21 @@ def test_microbatches_preserve_routing_rows_in_original_batch_order():
         with override_forward_context(context):
             capturer.capture(0, expected[segment.token_slice])
     torch.testing.assert_close(capturer.device_buffer[:, 0], expected)
+
+
+@pytest.mark.parametrize("num_tokens, num_rows", [(6, 2), (0, 1)])
+def test_single_dp_tp_capture_rejects_unexpected_batch_without_writing(
+    num_tokens, num_rows
+):
+    capturer = _capturer_with_buffer(tp_size=2)
+    topk = torch.ones(num_rows, 2, dtype=torch.int32)
+    ctx = _forward_context(dp_metadata=None, num_tokens=num_tokens)
+    with (
+        patch(f"{_REC_MODULE}.get_forward_context", return_value=ctx),
+        pytest.raises(AssertionError, match="unexpected topk_ids batch dim"),
+    ):
+        capturer.capture(0, topk)
+    assert (capturer.device_buffer == -1).all()
 
 
 @pytest.mark.parametrize(
@@ -515,13 +530,19 @@ def test_routed_experts_capturer_dp_ep_gathered_shards():
     assert torch.equal(capturer.device_buffer[:2, 0], topk[4:])
 
 
-def test_routed_experts_capturer_sp_modular_gathers_tp_shards():
-    capturer = _capturer_with_buffer(dp_rank=1, tp_size=2)
+@pytest.mark.parametrize("single_dp", [False, True])
+def test_routed_experts_capturer_sp_modular_gathers_tp_shards(single_dp):
+    capturer = _capturer_with_buffer(dp_rank=0 if single_dp else 1, tp_size=2)
     num_tokens_dp = torch.tensor([2, 3], dtype=torch.int32)
     ctx = _forward_context(
-        dp_metadata=SimpleNamespace(num_tokens_across_dp_cpu=num_tokens_dp)
+        dp_metadata=(
+            None
+            if single_dp
+            else SimpleNamespace(num_tokens_across_dp_cpu=num_tokens_dp)
+        ),
+        num_tokens=3,
     )
-    local_shard = torch.tensor([[10, 11], [12, 13]], dtype=torch.int32)
+    local_shard = torch.tensor([[10, 12], [11, 13]], dtype=torch.int32).t()
     gathered = torch.tensor([[10, 11], [12, 13], [14, 15], [-1, -1]], dtype=torch.int32)
     tp_group = Mock()
     tp_group.all_gather.return_value = gathered
@@ -532,8 +553,75 @@ def test_routed_experts_capturer_sp_modular_gathers_tp_shards():
     ):
         capturer.capture(layer_id=0, topk_ids=local_shard)
 
-    tp_group.all_gather.assert_called_once_with(local_shard, dim=0)
+    tp_group.all_gather.assert_called_once()
+    gather_input = tp_group.all_gather.call_args.args[0]
+    assert gather_input.is_contiguous()
+    torch.testing.assert_close(gather_input, local_shard)
+    assert tp_group.all_gather.call_args.kwargs == {"dim": 0}
     assert torch.equal(capturer.device_buffer[:3, 0], gathered[:3])
+
+
+def test_routed_experts_capturer_rejects_incomplete_dp_shard_groups():
+    """Invalid gather metadata must not silently select another rank's rows."""
+    capturer = _capturer_with_buffer(dp_rank=1, tp_size=2)
+    ctx = _forward_context(
+        dp_metadata=SimpleNamespace(
+            num_tokens_across_dp_cpu=torch.tensor([3, 2]),
+            local_sizes=[2, 2, 2],
+        )
+    )
+    with (
+        patch(f"{_REC_MODULE}.get_forward_context", return_value=ctx),
+        pytest.raises(ValueError, match="not divisible by DP rank count"),
+    ):
+        capturer.capture(0, torch.ones(6, 2, dtype=torch.int32))
+    assert (capturer.device_buffer == -1).all()
+
+
+@pytest.mark.parametrize("layer_id", [-1, 4])
+def test_routed_experts_capturer_rejects_layer_before_restoring_rows(layer_id):
+    capturer = _capturer_with_buffer(tp_size=2)
+    ctx = _forward_context(dp_metadata=None, num_tokens=3)
+    with (
+        patch(f"{_REC_MODULE}.get_forward_context", return_value=ctx),
+        patch(f"{_REC_MODULE}.get_tp_group") as get_tp_group,
+        pytest.raises(IndexError, match="exceeds capture buffer"),
+    ):
+        capturer.capture(layer_id, torch.ones(2, 2, dtype=torch.int32))
+    get_tp_group.assert_not_called()
+    assert (capturer.device_buffer == -1).all()
+
+
+@pytest.mark.parametrize(
+    ("counts", "local_sizes", "start", "stop"),
+    [
+        ([3, 0], [2, 2, 0, 0], 3, 3),
+        ([0, 3], None, 0, 3),
+        ([0, 0], [0, 0, 0, 0], 0, 0),
+        ([2, 2], [1, 1, 1, 1], 2, 4),
+    ],
+    ids=["idle-rank", "only-active-rank", "all-idle", "unpadded-gather-tie"],
+)
+def test_routed_experts_capturer_dp_preserves_empty_and_unpadded_spans(
+    counts, local_sizes, start, stop
+):
+    capturer = _capturer_with_buffer(dp_rank=1, tp_size=2)
+    topk = torch.arange(sum(counts) * 2, dtype=torch.int32).reshape(-1, 2)
+    ctx = _forward_context(
+        dp_metadata=SimpleNamespace(
+            num_tokens_across_dp_cpu=torch.tensor(counts), local_sizes=local_sizes
+        )
+    )
+    with (
+        patch(f"{_REC_MODULE}.get_forward_context", return_value=ctx),
+        patch(f"{_REC_MODULE}.get_tp_group") as get_tp_group,
+    ):
+        capturer.capture(0, topk)
+    get_tp_group.assert_not_called()
+    torch.testing.assert_close(
+        capturer.device_buffer[: stop - start, 0], topk[start:stop]
+    )
+    assert (capturer.device_buffer[stop - start :, 0] == -1).all()
 
 
 def test_routed_experts_capturer_dp_unexpected_batch_raises():
