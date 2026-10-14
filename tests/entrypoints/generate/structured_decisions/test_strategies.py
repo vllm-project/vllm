@@ -689,6 +689,11 @@ async def test_joint_schema_video_audio_follows_model_modalities(
             ["low", "high"],
             "Which?\n\n0 low\n1 high\n\nReply with a single digit 0-1 only.",
         ),
+        (
+            "score",
+            ["1", "2"],
+            "Which?\n\n0 1\n1 2\n\nReply with a single digit 0-1 only.",
+        ),
     ],
 )
 def test_liquid_prompt_matches_the_checkpoint(type_name, criteria, ask):
