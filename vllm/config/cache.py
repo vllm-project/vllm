@@ -229,7 +229,7 @@ class CacheConfig:
     kv_cache_max_concurrency: float | None = field(default=None, init=False)
     """Per-DP-engine maximum concurrency at max_model_len tokens."""
     kv_cache_capacity_bytes: dict[int, int] = field(default_factory=dict, init=False)
-    """Physical KV cache capacity in bytes keyed by global DP rank."""
+    """Device KV backing bytes keyed by global DP rank, excluding host pools."""
 
     # The two differ when hashes are finer than the scheduler block but partial
     # hash hits are off (e.g. a sliding-window group cannot look up sub-block

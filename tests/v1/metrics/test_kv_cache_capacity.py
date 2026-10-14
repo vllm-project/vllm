@@ -56,6 +56,7 @@ def test_kv_cache_capacity_is_preserved_per_dp_engine(monkeypatch):
             custom_histogram_buckets=None,
         ),
         speculative_config=None,
+        watermark_config=None,
         lora_config=None,
         kv_transfer_config=None,
         ec_transfer_config=None,
