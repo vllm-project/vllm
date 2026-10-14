@@ -10,7 +10,7 @@ DEEPGEMM_GIT_REPO="https://github.com/cleonard530/DeepGEMM.git"
 # NOTE: This targets the vLLM fork's dev branch: upstream's 26/09/30 release
 # plus the sm120 and sm90 paged-MQA ports, the SwiGLU alpha/beta and SiTU
 # Mega MoE activations, and NVFP4 Mega MoE.
-DEEPGEMM_GIT_REF="6af2d3a8a74970dc8994a07dac4b2e37ea197a80"
+DEEPGEMM_GIT_REF="695dbadc176ca50340483220bce84c521ef2420c"
 WHEEL_DIR=""
 
 # Parse command line arguments
