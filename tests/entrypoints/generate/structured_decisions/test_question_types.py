@@ -4,7 +4,7 @@ from typing import Any
 
 import pytest
 
-from vllm.entrypoints.generate.structured_decisions.question_types import (
+from vllm.entrypoints.openai.decisions.question_types import (
     QUESTION_TYPES,
     Option,
     Question,
@@ -105,7 +105,7 @@ def test_noul_labels_and_prompt():
     assert q.labels == ("yes", "no")
     assert [a.name for a in q.options] == ["yes", "no"]
     assert q.type.prompt(q) == (
-        "Question: Reply within the hour?\nAnswer with yes or no only."
+        "Question: Reply within the hour?\nyes\nno\nAnswer with yes or no only."
     )
     described = noul(criteria={"true": "same day", "false": "later"})
     assert described.type.prompt(described) == (
