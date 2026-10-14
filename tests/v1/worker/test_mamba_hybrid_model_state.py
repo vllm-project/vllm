@@ -22,6 +22,7 @@ from vllm.v1.attention.backends.recoverssm_metadata import (
 )
 from vllm.v1.worker.cpu.model_state import (
     CPUDefaultModelState,
+    CPUEncoderOnlyModelState,
     CPUMambaHybridModelState,
     CPURopeState,
 )
@@ -468,7 +469,7 @@ def test_cpu_preprocess_state_copies_state_across_align_boundary() -> None:
     [
         (DefaultModelState, CPUDefaultModelState),
         (MambaHybridModelState, CPUMambaHybridModelState),
-        (EncoderOnlyModelState, EncoderOnlyModelState),
+        (EncoderOnlyModelState, CPUEncoderOnlyModelState),
         (EncoderDecoderModelState, EncoderDecoderModelState),
     ],
 )
@@ -489,7 +490,11 @@ def test_cpu_runner_selects_model_state(
 
     monkeypatch.setattr(cpu_model_runner, "HAS_TRITON", False)
     assert runner.model_state_cls is cpu_model_state_cls
-    if cpu_model_state_cls in (CPUDefaultModelState, CPUMambaHybridModelState):
+    if cpu_model_state_cls in (
+        CPUDefaultModelState,
+        CPUEncoderOnlyModelState,
+        CPUMambaHybridModelState,
+    ):
         assert runner.model_state_cls.rope_state_cls is CPURopeState
 
     monkeypatch.setattr(cpu_model_runner, "HAS_TRITON", True)

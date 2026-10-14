@@ -6,6 +6,7 @@ from vllm.triton_utils import HAS_TRITON
 from vllm.v1.watermarking.gpu_sampler import GPUWatermarkSampler
 from vllm.v1.worker.cpu.model_state import (
     CPUDefaultModelState,
+    CPUEncoderOnlyModelState,
     CPUMambaHybridModelState,
 )
 from vllm.v1.worker.cpu.sampler import CPUSampler, CPUWatermarkSampler
@@ -41,7 +42,9 @@ class CPUModelRunner(GPUModelRunner):
                 return CPUDefaultModelState
             if model_state_cls is MambaHybridModelState:
                 return CPUMambaHybridModelState
-            if model_state_cls in (EncoderOnlyModelState, EncoderDecoderModelState):
+            if model_state_cls is EncoderOnlyModelState:
+                return CPUEncoderOnlyModelState
+            if model_state_cls is EncoderDecoderModelState:
                 return model_state_cls
             raise ValueError(
                 "CPU Model Runner V2 without Triton does not support model state "
