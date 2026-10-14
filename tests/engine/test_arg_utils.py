@@ -13,6 +13,7 @@ from vllm.config import (
     AttentionConfig,
     CacheConfig,
     CompilationConfig,
+    MambaConfig,
     ModelConfig,
     config,
 )
@@ -609,6 +610,82 @@ def test_attention_config():
     engine_args = EngineArgs.from_cli_args(args)
     with pytest.raises(ValueError, match="mutually exclusive"):
         engine_args.create_engine_config()
+
+
+def test_mamba_config():
+    from vllm.config.mamba import MambaBackendEnum
+
+    # default value
+    engine_args = EngineArgs(model="facebook/opt-125m")
+    assert engine_args.mamba_config == MambaConfig()
+    assert engine_args.mamba_backend is None
+
+    # set backend via --mamba-backend shorthand
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    args = parser.parse_args(["--mamba-backend", "FLASHINFER"])
+    assert args is not None
+    engine_args = EngineArgs.from_cli_args(args)
+    assert engine_args.mamba_backend is not None
+    # from_cli_args leaves this as the raw CLI string; create_engine_config
+    # does the str -> enum conversion (same as --attention-backend)
+    assert engine_args.mamba_backend == "FLASHINFER"
+
+    # test --mamba-backend flows into VllmConfig.mamba_config, instead of
+    # being silently overridden back to MambaConfig's own default (#61188)
+    args = parser.parse_args(
+        [
+            "--model",
+            "facebook/opt-125m",
+            "--mamba-backend",
+            "FLASHINFER",
+        ]
+    )
+    assert args is not None
+    engine_args = EngineArgs.from_cli_args(args)
+    vllm_config = engine_args.create_engine_config()
+    assert vllm_config.mamba_config.backend == MambaBackendEnum.FLASHINFER
+
+    # test mamba_config's backend (set via the Python API -- there is no
+    # --mamba-config.backend CLI flag, unlike --attention-config.backend)
+    # flows into VllmConfig.mamba_config, instead of being silently
+    # overridden back to TRITON (#61188's core symptom)
+    engine_args = EngineArgs(
+        model="facebook/opt-125m", mamba_config={"backend": "flashinfer"}
+    )
+    vllm_config = engine_args.create_engine_config()
+    assert vllm_config.mamba_config.backend == MambaBackendEnum.FLASHINFER
+
+    # test --mamba-backend and a non-default mamba_config.backend (set via
+    # the Python API) are mutually exclusive. Note: this check can only
+    # detect a conflict when mamba_config.backend is set to something other
+    # than MambaConfig's own default (TRITON) -- unlike attention_backend's
+    # equivalent check, MambaConfig.backend defaults to TRITON rather than
+    # None, so an explicit mamba_config={"backend": "triton"} (matching the
+    # default) is indistinguishable from never setting mamba_config at all,
+    # and would NOT raise here. That is a known, narrower limitation of this
+    # fix relative to the attention_backend pattern it mirrors, not
+    # something this fix regresses -- the same ambiguity would need
+    # MambaConfig.backend to default to None to fully resolve, which is out
+    # of scope for #61188.
+    engine_args = EngineArgs(
+        model="facebook/opt-125m",
+        mamba_backend="flashinfer",
+        mamba_config={"backend": "cpu"},
+    )
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        engine_args.create_engine_config()
+
+    # test setting backend=flashinfer via mamba_config no longer raises when
+    # ssu_algorithm is also set (#61188): the backend override used to
+    # always fire with the TRITON default, clobbering an explicit flashinfer
+    # choice made via mamba_config before this check could pass
+    engine_args = EngineArgs(
+        model="facebook/opt-125m",
+        mamba_config={"backend": "flashinfer", "ssu_algorithm": "vertical"},
+    )
+    vllm_config = engine_args.create_engine_config()
+    assert vllm_config.mamba_config.backend == MambaBackendEnum.FLASHINFER
+    assert vllm_config.mamba_config.ssu_algorithm == "vertical"
 
 
 def test_multi_node_world_size_includes_pcp(monkeypatch):
