@@ -172,6 +172,7 @@ def build_tq_decode_gqa6_module(
     _stride_ml_seq = _stride_es_seq
 
     # --- LDS layout ---
+    # Legacy SmemAllocator kept to match tq_decode.py (see the note there).
     allocator = SmemAllocator(None, arch=arch, global_sym_name="tq_gqa6_smem")
     centroid_off = 0
     allocator.ptr = CENTROID_LDS_BYTES

@@ -161,6 +161,8 @@ def build_tq_decode_module(
     _stride_ml_seq = _stride_es_seq
 
     # --- LDS layout ---
+    # Legacy SmemAllocator kept: fx.SharedAllocator is bit-exact but ~18% slower
+    # on QG=8, BS=32 with TGPP > 1 (FlyDSL 0.3.4.1).
     allocator = SmemAllocator(None, arch=arch, global_sym_name="tq_smem")
     centroid_off = 0
     allocator.ptr = CENTROID_LDS_BYTES
