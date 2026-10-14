@@ -655,6 +655,101 @@ def test_configure_subprocess_auto_binds_and_records_result(monkeypatch):
         assert os.environ[numa_utils._NUMACTL_ARGS_ENV] == "--cpunodebind=0 --membind=0"
 
 
+def test_auto_numa_redetects_when_visible_devices_change(monkeypatch):
+    """Independent launchers must not reuse another visible GPU set's mapping."""
+    _patch_auto_numa(
+        monkeypatch, "spawn", numa_utils.get_auto_numa_nodes, visible_gpus=2
+    )
+    monkeypatch.setattr(numa_utils.subprocess, "run", _fake_numactl_run([]))
+    detections = []
+
+    def detect():
+        devices = os.environ["CUDA_VISIBLE_DEVICES"]
+        detections.append(devices)
+        return {"0,1": [0, 0], "2,3": [1, 1]}[devices]
+
+    monkeypatch.setattr(
+        "vllm.platforms.current_platform.get_all_device_numa_nodes",
+        detect,
+        raising=False,
+    )
+    for devices, node in [("0,1", 0), ("2,3", 1)]:
+        monkeypatch.setenv("CUDA_VISIBLE_DEVICES", devices)
+        vllm_config = _make_config(numa_bind=None, tensor_parallel_size=2)
+        with numa_utils.configure_subprocess(
+            vllm_config, local_rank=0, process_kind="EngineCore"
+        ):
+            numactl_args = os.environ[numa_utils._NUMACTL_ARGS_ENV]
+            assert numactl_args == f"--cpunodebind={node} --membind={node}"
+        assert vllm_config.parallel_config.numa_bind_nodes == [node, node]
+    assert detections == ["0,1", "2,3"]
+
+
+@pytest.mark.parametrize("explicit", [False, True], ids=["automatic", "explicit"])
+@pytest.mark.parametrize(
+    "policy",
+    [0, 1, 2, 3, 4, 5, None],
+    ids=[
+        "default",
+        "preferred",
+        "bind",
+        "interleave",
+        "local",
+        "preferred-many",
+        "unreadable",
+    ],
+)
+def test_configure_subprocess_respects_existing_mempolicy(
+    monkeypatch, policy, explicit
+):
+    """Only explicit enablement may replace an existing non-default policy."""
+    is_auto_numa_available = numa_utils._is_auto_numa_available
+    _patch_auto_numa(monkeypatch, "spawn", numa_utils.get_auto_numa_nodes)
+    monkeypatch.setattr(numa_utils, "_is_auto_numa_available", is_auto_numa_available)
+    monkeypatch.setattr("vllm.platforms.current_platform.is_cuda_alike", lambda: True)
+    monkeypatch.setattr(numa_utils.os.path, "isdir", lambda path: True)
+    monkeypatch.setattr(numa_utils.psutil, "cpu_count", lambda: 4)
+    monkeypatch.setattr(
+        numa_utils.psutil,
+        "Process",
+        lambda pid: SimpleNamespace(cpu_affinity=lambda: [0, 1, 2, 3]),
+    )
+    monkeypatch.setattr(
+        "vllm.platforms.current_platform.get_all_device_numa_nodes",
+        lambda: [0],
+        raising=False,
+    )
+
+    def get_mempolicy(mode, *_args):
+        if policy is None:
+            return -1
+        mode._obj.value = policy
+        return 0
+
+    monkeypatch.setattr(
+        numa_utils,
+        "get_libnuma",
+        lambda: SimpleNamespace(numa_available=lambda: 0, get_mempolicy=get_mempolicy),
+    )
+    monkeypatch.setattr(numa_utils.subprocess, "run", _fake_numactl_run([]))
+    vllm_config = _make_config(numa_bind=True if explicit else None)
+    if explicit and policy is None:
+        with (
+            pytest.raises(RuntimeError, match="could not detect"),
+            numa_utils.configure_subprocess(vllm_config, local_rank=0),
+        ):
+            pass
+        return
+
+    expected_bind = policy is not None and (policy == 0 or explicit)
+    with numa_utils.configure_subprocess(vllm_config, local_rank=0):
+        numactl_args = os.environ.get(numa_utils._NUMACTL_ARGS_ENV)
+        assert numactl_args == (
+            "--cpunodebind=0 --membind=0" if expected_bind else None
+        )
+    assert vllm_config.parallel_config.numa_bind is expected_bind
+
+
 def _raise_probe_error():
     raise RuntimeError("amdsmi init failed")
 
@@ -859,12 +954,12 @@ def test_auto_numa_checks_cpu_affinity(monkeypatch, affinity):
     if affinity is not None:
         process.cpu_affinity = lambda: affinity
     monkeypatch.setattr(numa_utils.psutil, "Process", lambda pid: process)
-    monkeypatch.setattr(numa_utils, "_can_set_mempolicy", lambda: True)
+    monkeypatch.setattr(numa_utils, "_get_mempolicy", lambda: 0)
     monkeypatch.setattr(
         "vllm.platforms.current_platform.get_all_device_numa_nodes",
         lambda: [0, 1],
         raising=False,
     )
-    assert numa_utils._is_auto_numa_available(verbose=False, strict_affinity=True) is (
+    assert numa_utils._is_auto_numa_available(verbose=False, strict=True) is (
         affinity == [3, 2, 1, 0]
     )

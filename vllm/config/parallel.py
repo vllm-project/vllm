@@ -335,11 +335,13 @@ class ParallelConfig:
 
     If None (default), vLLM binds only when the environment supports it
     (multiple NUMA nodes, `numactl` installed, unrestricted CPU affinity,
-    and the `spawn` start method with an mp/uni executor and mp DP).
+    a default NUMA memory policy, and the `spawn` start method with an
+    mp/uni executor and mp DP).
     Ray, external launchers, device-ID remapping, and PCP are excluded
     from automatic binding. Unsupported environments start unbound.
-    With `True`, a missing `numactl` or undetectable GPU-to-NUMA topology
-    is a startup error; `False` disables binding.
+    With `True`, binding may override an existing memory policy, and a
+    missing `numactl` or undetectable GPU-to-NUMA topology is a startup
+    error; `False` disables binding.
     """
     numa_bind_nodes: list[int] | None = None
     """NUMA node to bind each GPU worker to.
