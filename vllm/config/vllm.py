@@ -2132,6 +2132,11 @@ class VllmConfig:
         if not self.instance_id:
             self.instance_id = random_uuid()[:5]
 
+        if self.observability_config.enable_iteration_timing and (
+            reason := self._iteration_timing_unsupported_reason()
+        ):
+            raise ValueError(reason)
+
         if self.reasoning_config is not None and self.model_config is not None:
             self.reasoning_config.initialize_token_ids(self.model_config)
             if not self.reasoning_config.enabled:
@@ -3136,6 +3141,37 @@ class VllmConfig:
             unsupported.append("dual batch overlap with encoder only models")
 
         return unsupported
+
+    def _iteration_timing_unsupported_reason(self) -> str | None:
+        if self.device_config.device_type != "cuda":
+            return "Iteration GPU timing requires a CUDA device"
+        if self.model_config is None or self.model_config.runner_type != "generate":
+            return "Iteration GPU timing supports generative models only"
+        if self.parallel_config.pipeline_parallel_size > 1:
+            return "Iteration GPU timing does not support PP > 1"
+        if self.parallel_config.distributed_executor_backend not in (None, "uni", "mp"):
+            return "Iteration GPU timing supports uni and mp executors only"
+        return None
+
+    def maybe_enable_iteration_timing_for_logging(
+        self, log_stats: bool, multiprocess_mode: bool
+    ) -> None:
+        observability = self.observability_config
+        if (
+            observability.enable_iteration_timing
+            or not log_stats
+            or not observability.enable_logging_iteration_details
+        ):
+            return
+        reason = (
+            self._iteration_timing_unsupported_reason()
+            if multiprocess_mode
+            else "In-process EngineCore cannot deliver idle timing records"
+        )
+        if reason is None:
+            observability.enable_iteration_timing = True
+        else:
+            logger.warning("Logging iteration counts without GPU timing: %s", reason)
 
     def _validate_profiler_config(self) -> None:
         if self.profiler_config.profiler != "proton":

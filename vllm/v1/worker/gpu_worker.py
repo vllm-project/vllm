@@ -92,6 +92,10 @@ from vllm.utils.torch_utils import set_random_seed, set_torch_threads_for_runtim
 from vllm.v1.attention.backends.utils import record_kv_cache_layout
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
+from vllm.v1.metrics.iteration_timing import (
+    is_iteration_output_rank,
+    make_iteration_timer,
+)
 from vllm.v1.outputs import (
     AsyncModelRunnerOutput,
     DraftTokenIds,
@@ -544,6 +548,10 @@ class Worker(WorkerBase):
             alloc_context=lambda: self._maybe_get_memory_pool_context("workspace"),
         )
         self.model_runner: GPUModelRunner = self._make_model_runner()
+        self.model_runner.iteration_timer = make_iteration_timer(
+            self.vllm_config,
+            is_output_rank=is_iteration_output_rank(self.vllm_config, self.rank),
+        )
         if self.rank == 0:
             # If usage stat is enabled, collect relevant info.
             report_usage_stats(self.vllm_config)
@@ -1293,7 +1301,16 @@ class Worker(WorkerBase):
     def sample_tokens(
         self, grammar_output: "GrammarOutput | None"
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput:
-        return self.model_runner.sample_tokens(grammar_output)
+        timer = self.model_runner.iteration_timer
+        if timer is None:
+            return self.model_runner.sample_tokens(grammar_output)
+        try:
+            output = self.model_runner.sample_tokens(grammar_output)
+        except Exception:
+            timer.cancel()
+            raise
+        timer.finish()
+        return timer.drain_into(output)
 
     @torch.inference_mode()
     @with_gpu_sync_check
@@ -1323,9 +1340,25 @@ class Worker(WorkerBase):
             )
 
         with self.annotate_profile(scheduler_output):
-            output = self.model_runner.execute_model(
-                scheduler_output, intermediate_tensors
-            )
+            timer = self.model_runner.iteration_timer
+            if timer is None:
+                output = self.model_runner.execute_model(
+                    scheduler_output, intermediate_tensors
+                )
+            else:
+                timer.start(
+                    scheduler_output.iteration_metrics_id if forward_pass else None
+                )
+                try:
+                    output = self.model_runner.execute_model(
+                        scheduler_output, intermediate_tensors
+                    )
+                except Exception:
+                    timer.cancel()
+                    raise
+                # Sampling and speculative drafting may happen in sample_tokens.
+                if output is not None:
+                    timer.finish()
             if (
                 self.use_v2_model_runner
                 and self.model_runner.is_pooling_model
@@ -1335,6 +1368,8 @@ class Worker(WorkerBase):
             if isinstance(
                 output, ModelRunnerOutput | AsyncModelRunnerOutput | NoneType
             ):
+                if timer is not None and isinstance(output, ModelRunnerOutput):
+                    output = timer.drain_into(output)
                 return output
 
         assert isinstance(output, IntermediateTensors)
@@ -1356,6 +1391,11 @@ class Worker(WorkerBase):
         if self.use_v2_model_runner and self.model_runner.is_pooling_model:
             return self.model_runner.pool()  # type: ignore
         return None
+
+    def poll_iteration_timing(self) -> tuple[tuple[int, float], ...]:
+        """Return ready output-rank timings without waiting for GPU work."""
+        timer = self.model_runner.iteration_timer
+        return () if timer is None else timer.drain_samples()
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:
         return self.model_runner.take_draft_token_ids()
@@ -1426,13 +1466,32 @@ class Worker(WorkerBase):
             and self.parallel_config.data_parallel_size > 1
         )
 
-    def execute_dummy_batch(self) -> None:
+    def execute_dummy_batch(
+        self, iteration_metrics_id: int | None = None
+    ) -> tuple[tuple[int, float], ...] | None:
         num_tokens = getattr(self.model_runner, "uniform_decode_query_len", 1)
-        self.model_runner._dummy_run(
-            num_tokens,
-            uniform_decode=True,
-            randomize_inputs=self.randomize_dummy_inputs,
-        )
+        timer = self.model_runner.iteration_timer
+        if iteration_metrics_id is None or timer is None:
+            self.model_runner._dummy_run(
+                num_tokens,
+                uniform_decode=True,
+                randomize_inputs=self.randomize_dummy_inputs,
+            )
+            return None if iteration_metrics_id is None else ()
+        # Recycle old ready pairs before queuing the next dummy interval.
+        samples = timer.drain_samples()
+        timer.start(iteration_metrics_id)
+        try:
+            self.model_runner._dummy_run(
+                num_tokens,
+                uniform_decode=True,
+                randomize_inputs=self.randomize_dummy_inputs,
+            )
+        except Exception:
+            timer.cancel()
+            raise
+        timer.finish()
+        return samples
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.model_runner.add_lora(lora_request)

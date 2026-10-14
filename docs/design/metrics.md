@@ -716,3 +716,31 @@ higher-resolution timings to justify the overhead.
 
 Since we are going to treat the question of OpenTelemetry support
 separately, we will include these particular metrics under that topic.
+
+### Optional GPU iteration timing
+
+`--enable-logging-iteration-details` automatically collects CUDA-stream durations
+for scheduled model steps when log statistics are enabled and GPU timing is
+supported. There is no separate timing CLI flag. Unsupported configurations keep
+logging request/token counts without durations, rather than reporting EngineCore's
+remaining CPU result-wait time as execution time. Timing remains disabled when
+iteration logging is off, unless another iteration-metrics consumer requests it.
+
+The `model_step_cuda` interval spans target-model execution, sampling, and
+speculative drafting for the next batch on the recorded stream. It includes
+CPU submission gaps within those boundaries, but not previously queued work or
+independent work on other streams. Events are reused and queried without GPU
+synchronization. Request outputs are not delayed for telemetry: completed
+records retain their original scheduling snapshot and iteration ID and can
+arrive later, including in stats-only output packets.
+
+Final records are best-effort at shutdown. The engine gives pending timings a
+bounded drain period, but a synchronous shutdown can stop the asynchronous
+frontend receiver before those records are consumed. This is not a lossless
+flush or durability guarantee; normal idle collection requires a live receiver.
+
+Timing currently supports generative CUDA models with pipeline parallel size 1,
+the `uni` or `mp` model executor, and an out-of-process EngineCore. Ray,
+external-launcher, and in-process EngineCore timing are not supported. Each DP
+replica times only its output worker, including dummy model executions. This
+option does not start an external telemetry publisher.

@@ -668,6 +668,40 @@ def test_reader_rechecks_shm_after_idle_wait_timeout_without_notify():
             socket.close(linger=0)
 
 
+@pytest.mark.parametrize("overflow", [False, True])
+def test_readiness_probes_leave_next_message_untouched(overflow):
+    writer = MessageQueue(
+        n_reader=1,
+        n_local_reader=1,
+        max_chunk_bytes=1024,
+        max_chunks=1,
+        connect_ip="127.0.0.1",
+    )
+    reader = MessageQueue.create_from_handle(writer.export_handle(), rank=0)
+    try:
+        writer.wait_until_ready()
+        reader.wait_until_ready()
+        assert writer.can_enqueue()
+        assert not reader.can_dequeue()
+        payload = "x" * (2048 if overflow else 16)
+        writer.enqueue(payload)
+        assert not writer.can_enqueue()
+        if overflow:
+            # SHM metadata alone is insufficient until the socket body arrives.
+            with mock.patch.object(reader.local_socket, "poll", return_value=0) as poll:
+                assert not reader.can_dequeue()
+                poll.assert_called_once_with(timeout=0)
+            assert reader.local_socket.poll(timeout=1000)
+        assert reader.can_dequeue()
+        assert reader.can_dequeue()
+        assert reader.dequeue(timeout=0.1) == payload
+        assert not reader.can_dequeue()
+        assert writer.can_enqueue()
+    finally:
+        reader.shutdown()
+        writer.shutdown()
+
+
 def test_acquire_read_releases_slot_when_reader_raises():
     writer = MessageQueue(
         n_reader=1,

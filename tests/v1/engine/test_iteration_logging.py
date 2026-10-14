@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import time
 from types import SimpleNamespace
 
+import pytest
+
+from vllm.config import ObservabilityConfig, VllmConfig
 from vllm.v1.engine import EngineCoreOutputs
 from vllm.v1.engine.core import EngineCore
 from vllm.v1.metrics.stats import SchedulerIterationDetails, SchedulerStats
@@ -27,19 +29,59 @@ def make_iteration_details() -> SchedulerIterationDetails:
     )
 
 
-def make_fake_engine(log_stats: bool = True) -> SimpleNamespace:
+def make_fake_engine(
+    log_stats: bool = True, enable_iteration_timing: bool = False
+) -> SimpleNamespace:
     return SimpleNamespace(
         log_stats=log_stats,
         vllm_config=SimpleNamespace(
-            observability_config=SimpleNamespace(
+            observability_config=ObservabilityConfig(
                 enable_logging_iteration_details=True,
+                enable_iteration_timing=enable_iteration_timing,
             )
         ),
     )
 
 
-def test_capture_iteration_details_disabled_without_log_stats():
-    engine = make_fake_engine(log_stats=False)
+@pytest.mark.parametrize(
+    "logging,stats,mp,device,runner,pp,executor,required,expected",
+    [
+        (True, True, True, "cuda", "generate", 1, "uni", False, True),
+        (False, True, True, "cuda", "generate", 1, "mp", False, False),
+        (True, False, True, "cuda", "generate", 1, "mp", False, False),
+        (True, True, False, "cuda", "generate", 1, "uni", False, False),
+        (True, True, True, "cpu", "generate", 1, "uni", False, False),
+        (True, True, True, "cuda", "pooling", 1, "uni", False, False),
+        (True, True, True, "cuda", "generate", 2, "mp", False, False),
+        (True, True, True, "cuda", "generate", 1, "ray", False, False),
+        (True, True, True, "cuda", "generate", 1, "external_launcher", False, False),
+        (True, False, True, "cuda", "generate", 1, "mp", True, True),
+    ],
+)
+def test_iteration_logging_enables_supported_timing_only(
+    logging, stats, mp, device, runner, pp, executor, required, expected, caplog
+):
+    config = VllmConfig()
+    config.model_config = SimpleNamespace(runner_type=runner)
+    config.device_config.device_type = device
+    config.parallel_config.pipeline_parallel_size = pp
+    config.parallel_config.distributed_executor_backend = executor
+    config.observability_config = ObservabilityConfig(
+        enable_logging_iteration_details=logging, enable_iteration_timing=required
+    )
+
+    config.maybe_enable_iteration_timing_for_logging(stats, mp)
+
+    assert config.observability_config.enable_iteration_timing is expected
+    if logging and stats and not expected:
+        assert "Logging iteration counts without GPU timing" in caplog.text
+
+
+@pytest.mark.parametrize("log_stats, gpu_timing", [(False, False), (True, True)])
+def test_legacy_iteration_details_skip_disabled_logging_and_gpu_timing(
+    log_stats, gpu_timing
+):
+    engine = make_fake_engine(log_stats, enable_iteration_timing=gpu_timing)
 
     with EngineCore.capture_iteration_details(engine, None) as iteration_details:
         assert iteration_details is None
@@ -47,17 +89,16 @@ def test_capture_iteration_details_disabled_without_log_stats():
     assert not hasattr(engine, "_iteration_index")
 
 
-def test_capture_iteration_details_fills_elapsed_time():
+def test_capture_iteration_details_without_gpu_timing_omits_elapsed_time():
     engine = make_fake_engine()
 
     with EngineCore.capture_iteration_details(engine, None) as iteration_details:
         assert iteration_details is not None
-        assert iteration_details.elapsed_ms == 0.0
+        assert iteration_details.elapsed_ms is None
         assert iteration_details.is_dummy
-        time.sleep(0.001)
 
     assert iteration_details is not None
-    assert iteration_details.elapsed_ms > 0.0
+    assert iteration_details.elapsed_ms is None
     assert engine._iteration_index == 1
 
 

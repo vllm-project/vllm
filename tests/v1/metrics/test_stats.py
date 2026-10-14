@@ -1,8 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from types import SimpleNamespace
+
+import pytest
+
+from vllm.v1.core.sched.output import IterationDetails, SchedulerOutput
 from vllm.v1.engine import EngineCoreOutputs, FinishReason
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
+from vllm.v1.metrics.iteration import IterationMetricsCollector
 from vllm.v1.metrics.stats import (
     IterationStats,
     PrefillStats,
@@ -12,6 +18,7 @@ from vllm.v1.metrics.stats import (
     SchedulerIterationDetails,
     SchedulerStats,
 )
+from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 
 
@@ -35,6 +42,7 @@ def test_scheduler_iteration_details_serialization():
         scheduler_stats=SchedulerStats(
             kv_cache_usage=0.5,
             iteration_details=iteration_details,
+            iteration_records=[iteration_details],
         )
     )
 
@@ -44,6 +52,107 @@ def test_scheduler_iteration_details_serialization():
     assert decoded.scheduler_stats is not None
     assert decoded.scheduler_stats.kv_cache_usage == 0.5
     assert decoded.scheduler_stats.iteration_details == iteration_details
+    assert decoded.scheduler_stats.iteration_records == [iteration_details]
+
+
+def test_iteration_timing_keeps_original_batch_when_results_arrive_late():
+    collector = IterationMetricsCollector()
+    output = SchedulerOutput.make_empty()
+    output.num_scheduled_tokens = {"request": 8}
+    output.total_num_scheduled_tokens = 8
+    output.iteration_details = IterationDetails(
+        num_prefill_requests=1, num_prefill_tokens=8
+    )
+    collector.begin_iteration(output)
+    index = output.iteration_metrics_id
+    assert index is not None
+
+    collector.complete_iteration(output, ModelRunnerOutput([], {}))
+    assert not collector.take_ready()
+    assert collector.has_pending_timing()
+    output.iteration_details.num_prefill_tokens = 99
+    collector.complete_timing_samples(((index, 0.012),))
+    (record,) = collector.take_ready()
+    assert record.num_ctx_tokens == 8
+    assert record.elapsed_ms == 12
+    assert record.timing_scope == "model_step_cuda"
+    assert not collector.has_pending_timing()
+
+
+def test_dummy_tail_timings_survive_more_than_batch_queue_depth():
+    collector = IterationMetricsCollector()
+    indices = [collector.begin_dummy_iteration() for _ in range(64)]
+    assert collector.has_pending_timing()
+    assert not collector.take_ready()
+    output = SchedulerOutput.make_empty()
+    collector.complete_iteration(
+        output,
+        ModelRunnerOutput(
+            [], {}, iteration_timing_samples=tuple((index, 0.01) for index in indices)
+        ),
+    )
+    records = collector.take_ready()
+    assert [record.iteration_index for record in records] == indices
+    assert all(record.is_dummy and record.elapsed_ms == 10 for record in records)
+    assert all(
+        record.num_ctx_tokens == record.num_generation_tokens == 0 for record in records
+    )
+    assert not collector.has_pending_timing()
+
+
+@pytest.mark.parametrize("dummy", [False, True])
+def test_completed_idle_timing_poll_is_consumed_when_inference_resumes(dummy):
+    collector = IterationMetricsCollector()
+    old_id = collector.begin_dummy_iteration()
+    submitted = []
+
+    def start_poll():
+        submitted.append(True)
+        return lambda: ((old_id, 0.01),)
+
+    collector.poll_timing(SimpleNamespace(start_iteration_timing_poll=start_poll))
+    if dummy:
+        iteration_id = collector.begin_dummy_iteration()
+        collector.complete_timing_samples(((iteration_id, 0.02),))
+    else:
+        output = SchedulerOutput.make_empty()
+        output.num_scheduled_tokens = {"request": 1}
+        output.total_num_scheduled_tokens = 1
+        output.iteration_details = IterationDetails(
+            num_decode_requests=1, num_decode_tokens=1
+        )
+        collector.begin_iteration(output)
+        iteration_id = output.iteration_metrics_id
+        collector.complete_iteration(
+            output,
+            ModelRunnerOutput([], {}, iteration_timing_samples=((iteration_id, 0.02),)),
+        )
+    records = collector.take_ready()
+    assert [record.iteration_index for record in records] == [
+        old_id,
+        iteration_id,
+    ]
+    assert [record.elapsed_ms for record in records] == [10, 20]
+    assert not collector.has_pending_timing()
+    assert submitted == [True]  # No new timing RPC on the active inference path.
+
+
+def test_iteration_records_have_one_stable_frontend_owner():
+    from vllm.v1.engine.core import EngineCore
+
+    collector = IterationMetricsCollector()
+    index = collector.begin_dummy_iteration()
+    collector.complete_timing_samples(((index, 0.01),))
+    stats = SchedulerStats(num_running_reqs=7, kv_cache_usage=0.5)
+    outputs = {3: EngineCoreOutputs(scheduler_stats=stats)}
+    core = SimpleNamespace(iteration_metrics=collector)
+    EngineCore._attach_iteration_records(core, outputs)
+    assert outputs[3].scheduler_stats is None
+    assert outputs[0].scheduler_stats is stats
+    assert stats.num_running_reqs == 7
+    assert [record.iteration_index for record in stats.iteration_records] == [index]
+    EngineCore._attach_iteration_records(core, outputs)
+    assert len(stats.iteration_records) == 1
 
 
 def test_prefix_cache_stats_hits_by_source_accumulate():

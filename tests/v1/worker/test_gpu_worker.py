@@ -3,7 +3,7 @@
 
 from contextlib import nullcontext
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 import torch
@@ -11,6 +11,8 @@ import torch
 from tests.utils import create_new_process_for_each_test
 from vllm.platforms import current_platform
 from vllm.utils.mem_constants import GiB_bytes
+from vllm.v1.metrics.iteration_timing import IterationTimer
+from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.worker import gpu_worker, startup_plan
 from vllm.v1.worker.gpu_worker import maybe_rocm_profiling_fallback
 from vllm.v1.worker.startup_plan import (
@@ -425,7 +427,9 @@ def test_execute_model_waits_previous_pp_send_before_forward(
             ),
         ),
         use_v2_model_runner=True,
-        model_runner=SimpleNamespace(execute_model=run_model, is_pooling_model=False),
+        model_runner=SimpleNamespace(
+            execute_model=run_model, is_pooling_model=False, iteration_timer=None
+        ),
         annotate_profile=lambda scheduler_output: nullcontext(),
         _pp_send_work=[previous_tensor_send],
     )
@@ -437,6 +441,95 @@ def test_execute_model_waits_previous_pp_send_before_forward(
 
     assert log == ["wait:prev-tensor", "forward", "isend"]
     assert worker._pp_send_work == [tensor_handle]
+
+
+@pytest.mark.parametrize("timed", [False, True])
+def test_iteration_timing_finishes_after_deferred_sampling_and_draft(
+    monkeypatch, timed
+):
+    milestones = []
+    events = [Mock(), Mock(query=Mock(return_value=False))]
+    events[0].record.side_effect = lambda: milestones.append("start")
+    events[0].elapsed_time.return_value = 15.0
+    events[1].record.side_effect = lambda: milestones.append("end")
+    timer = IterationTimer(1, event_factory=iter(events).__next__) if timed else None
+    output = ModelRunnerOutput(req_ids=[], req_id_to_index={})
+
+    def execute_model(*args):
+        milestones.append("forward")
+
+    def sample_tokens(*args):
+        milestones.extend(("sample", "draft"))
+        return output
+
+    monkeypatch.setattr(
+        gpu_worker, "get_pp_group", lambda: SimpleNamespace(is_first_rank=True)
+    )
+    worker = SimpleNamespace(
+        model_runner=SimpleNamespace(
+            iteration_timer=timer,
+            execute_model=execute_model,
+            sample_tokens=sample_tokens,
+            is_pooling_model=False,
+        ),
+        _pp_send_work=[],
+        use_v2_model_runner=True,
+        annotate_profile=lambda _: nullcontext(),
+    )
+    scheduler_output = SimpleNamespace(
+        total_num_scheduled_tokens=4, iteration_metrics_id=3
+    )
+    assert gpu_worker.Worker.execute_model(worker, scheduler_output) is None
+    returned = gpu_worker.Worker.sample_tokens(worker, None)
+    assert returned is output and returned.iteration_timing_samples == ()
+    if timed:
+        assert milestones == ["start", "forward", "sample", "draft", "end"]
+        events[1].query.return_value = True
+        assert gpu_worker.Worker.poll_iteration_timing(worker) == ((3, 0.015),)
+    else:
+        assert milestones == ["forward", "sample", "draft"]
+        assert gpu_worker.Worker.poll_iteration_timing(worker) == ()
+    for event in events:
+        event.synchronize.assert_not_called()
+
+
+@pytest.mark.parametrize("timed", [False, True])
+def test_dummy_iteration_recycles_old_timing_and_preserves_randomized_inputs(timed):
+    milestones = []
+    events = [Mock(), Mock(query=Mock(return_value=False))]
+    events[0].record.side_effect = lambda: milestones.append("start")
+    events[0].elapsed_time.return_value = 20.0
+    events[1].record.side_effect = lambda: milestones.append("end")
+    timer = IterationTimer(1, event_factory=iter(events).__next__) if timed else None
+
+    def dummy_run(num_tokens, *, uniform_decode, randomize_inputs):
+        assert num_tokens == 4 and uniform_decode and randomize_inputs
+        milestones.extend(("forward", "draft"))
+
+    worker = SimpleNamespace(
+        randomize_dummy_inputs=True,
+        model_runner=SimpleNamespace(
+            uniform_decode_query_len=4,
+            iteration_timer=timer,
+            _dummy_run=dummy_run,
+        ),
+    )
+    for iteration_id in range(3):
+        samples = gpu_worker.Worker.execute_dummy_batch(
+            worker, iteration_id if timed else None
+        )
+        if timed:
+            assert samples == (() if iteration_id == 0 else ((iteration_id - 1, 0.02),))
+            events[1].query.return_value = True
+        else:
+            assert samples is None
+    if timed:
+        assert milestones == ["start", "forward", "draft", "end"] * 3
+        assert gpu_worker.Worker.poll_iteration_timing(worker) == ((2, 0.02),)
+    else:
+        assert milestones == ["forward", "draft"] * 3
+    for event in events:
+        event.synchronize.assert_not_called()
 
 
 def test_jit_monitor_activation_follows_enable_jit_warmup(

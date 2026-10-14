@@ -272,6 +272,7 @@ class SchedulerOutput:
 
     # Optional scheduling-time snapshot, before worker-side token adjustments.
     iteration_details: IterationDetails | None = None
+    iteration_metrics_id: int | None = None
 
     # Request IDs that are preempted in this step.
     # Only used for v2 model runner.
