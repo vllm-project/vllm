@@ -242,9 +242,6 @@ def test_qsa_fused_prepare_matches_unfused(
 ) -> None:
     from vllm.model_executor.layers.rotary_embedding import get_rope
 
-    if indexer_dtype == torch.float8_e4m3fn:
-        pytest.skip("the AMD QSA indexer cache is bf16-only")
-
     # The FP8 comparison below is a one-ulp bound on data this test generates,
     # so an unseeded run decides for itself whether it reproduces a rounding
     # difference. Seed it, or the kernel's bit-exactness is only sampled.

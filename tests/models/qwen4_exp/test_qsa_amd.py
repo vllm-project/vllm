@@ -152,6 +152,7 @@ def _make_indexer(*, use_fused: bool, num_tokens: int = 2) -> QSAIndexer:
     indexer.index_kv_heads = 1
     indexer.index_head_dim = head_dim
     indexer.compress_ratio = 2
+    indexer.indexer_dtype = torch.bfloat16
     indexer.use_fused_pre_indexer = use_fused
     indexer.skip_topk = True
     indexer.index_qk_proj = lambda hidden_states: (

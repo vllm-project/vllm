@@ -131,6 +131,19 @@ class QSAIndexer(nn.Module):
 
         cache_config = vllm_config.cache_config
         cache_prefix = f"{prefix}." if prefix else ""
+        self.indexer_kv_dtype = vllm_config.attention_config.resolve_indexer_kv_dtype(
+            "bf16"
+        )
+        if self.indexer_kv_dtype == "fp8":
+            indexer_dtype = torch.float8_e4m3fn
+        elif self.indexer_kv_dtype == "bf16":
+            indexer_dtype = torch.bfloat16
+        else:
+            raise NotImplementedError(
+                f"indexer_kv_dtype={self.indexer_kv_dtype!r} is not supported "
+                "by the Qwen4Exp QSA indexer (only 'bf16' or 'fp8')."
+            )
+        self.indexer_dtype = indexer_dtype
         self.raw_key_cache = QSAKeyStateCache(
             head_size=self.index_head_dim,
             dtype=torch.bfloat16,
@@ -142,7 +155,7 @@ class QSAIndexer(nn.Module):
         )
         self.compressed_key_cache = QSACompressedKeyCache(
             head_size=self.index_head_dim,
-            dtype=torch.bfloat16,
+            dtype=indexer_dtype,
             compress_ratio=self.compress_ratio,
             prefix=f"{cache_prefix}compressed_key_cache",
             cache_config=cache_config,
@@ -180,6 +193,7 @@ class QSAIndexer(nn.Module):
             q.reshape(-1, self.index_head_dim),
         ).reshape_as(q)
         q = apply_qsa_rope(self.rotary_emb, positions, q)
+        q = q.to(self.indexer_dtype)
         return q, token_k.reshape(-1, 1, self.index_head_dim)
 
     def normalize_compressed_keys(
@@ -291,7 +305,12 @@ class QSAIndexer(nn.Module):
         """
         num_tokens = raw_metadata.num_actual_tokens
         raw_key_cache = self.raw_key_cache
-        q = projected_q.new_empty(num_tokens, self.index_n_heads, self.index_head_dim)
+        q = projected_q.new_empty(
+            num_tokens,
+            self.index_n_heads,
+            self.index_head_dim,
+            dtype=self.indexer_dtype,
+        )
         main_outputs = qsa_prepare(
             projected_q,
             raw_keys,
