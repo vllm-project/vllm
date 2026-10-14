@@ -61,10 +61,13 @@ def test_supported_config_is_accepted(monkeypatch):
     assert _refuse(monkeypatch) == []
 
 
+def test_plain_decode_config_is_accepted(monkeypatch):
+    assert _refuse(monkeypatch, speculative_config=None) == []
+
+
 @pytest.mark.parametrize(
     "over, reason",
     [
-        ({"speculative_config": None}, "needs speculative decoding"),
         ({"speculative_config.num_speculative_tokens": 8}, "exceed 8"),
         ({"parallel_config.tensor_parallel_size": 4}, "needs TP8"),
         ({"kv_transfer_config": object()}, "kv_connector"),
@@ -123,12 +126,34 @@ def _step(width: int, **md) -> MonoStep:
     ],
 )
 def test_eligible_is_pure_uniform_spec_verify(width, md, why):
-    ctx = SimpleNamespace(state=SimpleNamespace(kda_prefix="kda"))
+    ctx = SimpleNamespace(state=SimpleNamespace(kda_prefix="kda", num_spec=3))
     assert MONO_SPEC.eligible(ctx, _step(width, **md)) == why
 
 
+_PLAIN = {
+    "spec_sequence_masks": None,
+    "num_spec_decodes": 0,
+    "spec_state_indices_tensor": None,
+    "uniform_spec_sequence_length": None,
+}
+
+
+@pytest.mark.parametrize(
+    "width, md, why",
+    [
+        (1, {"num_decodes": 1}, None),
+        (8, {"num_decodes": 8}, None),
+        (4, {"num_decodes": 3}, "not pure decode"),
+        (4, {"num_decodes": 3, "num_prefills": 1}, "not pure decode"),
+    ],
+)
+def test_eligible_without_spec_is_pure_decode(width, md, why):
+    ctx = SimpleNamespace(state=SimpleNamespace(kda_prefix="kda", num_spec=0))
+    assert MONO_SPEC.eligible(ctx, _step(width, **_PLAIN, **md)) == why
+
+
 def test_eligible_needs_metadata():
-    ctx = SimpleNamespace(state=SimpleNamespace(kda_prefix="kda"))
+    ctx = SimpleNamespace(state=SimpleNamespace(kda_prefix="kda", num_spec=3))
     step = MonoStep(4, 4, torch.zeros(4), None, CUDAGraphMode.FULL)
     assert MONO_SPEC.eligible(ctx, step) == "no metadata"
 

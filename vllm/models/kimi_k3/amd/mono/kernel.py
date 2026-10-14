@@ -233,3 +233,40 @@ class FfnLayer(_Layer):
         core = layer.self_attn.mla_attn.forward_core(positions, hidden_states)
         out = _k2(layer, self.runner, core, prefix_sum, block_residual)
         return prefix_sum, block_residual, out
+
+
+class KdaFfnLayer(_Layer):
+    """KDA layers in plain decode (K1 serves spec-verify rows only): vLLM's
+    AttnRes and KDA up to o_proj's input, then K2."""
+
+    def __init__(self, layer, runner: MonoRunner, width: int):
+        super().__init__(layer, runner, width)
+        self.cache_layers = (layer.self_attn.prefix,)
+
+    def launch(
+        self, step: MonoStep, positions, prefix_sum, block_residual, prefix_delta
+    ):
+        from vllm.models.kimi_k3.amd.linear import _apply_attn_res
+
+        layer = self.layer
+        if self.first:
+            self.runner.step_begin()
+        hidden_states = _apply_attn_res(
+            prefix_sum,
+            block_residual,
+            layer.self_attention_res_proj,
+            layer.self_attention_res_norm,
+            layer.prev_valid_blocks,
+            delta=prefix_delta,
+            output_norm=layer.input_layernorm,
+            block_write_idx=layer.block_write_idx if layer.is_block_write_layer else -1,
+            quant_key=layer.self_attn.get_input_quant_key(),
+        )
+        core = layer.self_attn.forward_core(hidden_states, positions)
+        if layer.is_block_write_layer:
+            # the prefix restarts at the attention's output
+            prefix_sum = torch.empty_like(prefix_sum)
+            out = _k2(layer, self.runner, core, prefix_sum, block_residual, reset=True)
+        else:
+            out = _k2(layer, self.runner, core, prefix_sum, block_residual)
+        return prefix_sum, block_residual, out

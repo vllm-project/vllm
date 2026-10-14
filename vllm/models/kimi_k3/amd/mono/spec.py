@@ -6,8 +6,11 @@
   the gated norm), then K2.
 - FFN layers (MLA): vLLM's AttnRes and MLA up to o_proj's input, then K2 (o_proj,
   its all-reduce, the MLP AttnRes and the latent MoE).
+- Without speculative decoding, KDA layers run vLLM's AttnRes and KDA up to
+  o_proj's input, then K2 (K1 serves spec-verify rows only).
 
-A launch serves whole spec-verify requests, at most 8 rows. Weights are views
+A launch serves whole spec-verify requests, or a plain decode step, at most 8
+rows. Weights are views
 of the loaded parameters (``weight_source="views"``), pinned by the MoE
 backend; every refusal stage reports every reason.
 """
@@ -81,9 +84,7 @@ def refuse_config(vllm_config: "VllmConfig") -> list[str]:
     if tp != TP:
         reasons.append(f"needs TP{TP}, got TP{tp}")
     spec = vllm_config.speculative_config
-    if spec is None:
-        reasons.append("needs speculative decoding (spec-verify steps)")
-    elif spec.num_speculative_tokens + 1 > MAX_TOKENS:
+    if spec is not None and spec.num_speculative_tokens + 1 > MAX_TOKENS:
         reasons.append(
             f"{spec.num_speculative_tokens} speculative tokens: a request's "
             f"{spec.num_speculative_tokens + 1} rows exceed {MAX_TOKENS}"
@@ -207,13 +208,19 @@ def bind(ctx: MonoContext, caches: Mapping[str, Any]) -> list[str]:
 
 
 def eligible(ctx: MonoContext, step: MonoStep) -> str | None:
-    """A pure spec-verify step of whole uniform requests, by the KDA metadata
-    (the same on every rank)."""
+    """A pure spec-verify step of whole uniform requests, or without speculative
+    decoding a pure decode step, by the KDA metadata (the same on every rank)."""
     md = step.attn_metadata
     if not isinstance(md, dict):
         return "no metadata"
     m: Any = md.get(ctx.state.kda_prefix)
-    if m is None or m.spec_sequence_masks is None:
+    if m is None:
+        return "no KDA metadata"
+    if ctx.state.num_spec == 0:
+        if m.num_prefills or m.num_spec_decodes or m.num_decodes != step.width:
+            return "not pure decode"
+        return None
+    if m.spec_sequence_masks is None:
         return "not spec-verify"
     if m.num_prefills or m.num_decodes or m.num_spec_decodes < 1:
         return "not pure decode"
@@ -225,10 +232,11 @@ def eligible(ctx: MonoContext, step: MonoStep) -> str | None:
 
 def build(ctx: MonoContext, packed, layer, width: int):
     from vllm.models.kimi_k3.amd.kda import KimiK3DeltaAttention
-    from vllm.models.kimi_k3.amd.mono.kernel import FfnLayer, WholeLayer
+    from vllm.models.kimi_k3.amd.mono.kernel import FfnLayer, KdaFfnLayer, WholeLayer
 
-    whole = isinstance(layer.self_attn, KimiK3DeltaAttention)
-    return (WholeLayer if whole else FfnLayer)(layer, packed, width)
+    if not isinstance(layer.self_attn, KimiK3DeltaAttention):
+        return FfnLayer(layer, packed, width)
+    return (WholeLayer if packed.num_spec else KdaFfnLayer)(layer, packed, width)
 
 
 MONO_SPEC = MonoSpec(
