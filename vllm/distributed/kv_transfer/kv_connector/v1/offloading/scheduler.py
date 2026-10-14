@@ -1151,8 +1151,7 @@ class OffloadingConnectorScheduler:
         # connectors in a MultiConnector setup.
         for group_blocks in blocks.blocks:
             self._current_batch_allocated_block_ids.update(
-                block.block_id for block in group_blocks
-                if block.block_id != 0
+                block.block_id for block in group_blocks if block.block_id != 0
             )
 
         if num_external_tokens == 0:
