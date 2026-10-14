@@ -198,6 +198,10 @@ class _FrameworkPinAdapter:
                 return None
 
             job = parent.create_store_job(hit_keys, req_context)
+            if job is None:
+                # Admission policy rejected the pin; report pin failure
+                # without a job to track.
+                return None
             job_keys = tuple(job.keys)
             chunk_ids = tuple(int(chunk_id) for chunk_id in job.chunk_ids)
             if len(job_keys) != len(chunk_ids) or set(job_keys) != set(hit_keys):

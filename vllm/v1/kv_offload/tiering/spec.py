@@ -69,6 +69,7 @@ from vllm.v1.kv_offload.config import OffloadingConfig
 from vllm.v1.kv_offload.cpu.gpu_worker import CPUOffloadingWorker
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
+from vllm.v1.kv_offload.tiering.admission import BackpressureAdmissionPolicy
 from vllm.v1.kv_offload.tiering.base import TieringOffloadingMetrics
 from vllm.v1.kv_offload.tiering.factory import SecondaryTierFactory
 from vllm.v1.kv_offload.tiering.manager import (
@@ -247,32 +248,9 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
             tier_cls = SecondaryTierFactory.get_tier_class(tier_config)
             metrics.update(tier_cls.build_metric_definitions(tier_config))
 
-        metrics[TieringOffloadingMetrics.BACKPRESSURE_STORE_LATENCY_EMA] = (
-            OffloadingGaugeMetadata(
-                documentation=(
-                    "Exponential moving average of store latency "
-                    "for back-pressure detection, in s/MiB."
-                ),
-                labelnames=("tier",),
-            )
-        )
-        metrics[TieringOffloadingMetrics.BACKPRESSURE_STORES_DROPPED] = (
-            OffloadingCounterMetadata(
-                documentation=(
-                    "Number of store operations dropped due to "
-                    "back-pressure on a secondary tier."
-                ),
-                labelnames=("tier",),
-            )
-        )
-        metrics[TieringOffloadingMetrics.BACKPRESSURE_BLOCKS_DROPPED] = (
-            OffloadingCounterMetadata(
-                documentation=(
-                    "Number of blocks dropped due to back-pressure on a secondary tier."
-                ),
-                labelnames=("tier",),
-            )
-        )
+        # Backpressure metric definitions come from the admission policy
+        # that produces them, not from the spec.
+        metrics.update(BackpressureAdmissionPolicy.build_metric_definitions())
 
         return metrics
 
@@ -383,9 +361,11 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                 # Create TieringOffloadingManager. GPU↔CPU transfers use the inherited
                 # get_worker(). Secondary tier transfers are handled by the
                 # secondary tier managers and need no additional workers here.
+                # The backpressure policy needs the constructed tier instances.
                 tiering_manager = TieringOffloadingManager(
                     primary_tier=primary_tier,
                     secondary_tiers=secondary_tiers,
+                    admission_policy=BackpressureAdmissionPolicy(secondary_tiers),
                 )
                 self._manager = tiering_manager
             except Exception:
