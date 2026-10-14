@@ -23,6 +23,8 @@ use crate::protocol::lora::LoraRequest;
 use crate::protocol::request::{EngineCoreRequest, EngineCoreRequestType};
 use crate::protocol::utility::{EngineCoreUtilityRequest, PauseMode};
 use crate::runtime::{BackgroundShutdownRuntime, build_zmq_runtime};
+#[cfg(test)]
+use crate::transport::EngineId;
 use crate::transport::{self, ConnectedEngine};
 
 pub(crate) mod imp;
@@ -490,6 +492,14 @@ impl EngineCoreClient {
     /// socket.
     pub fn ready_responses(&self) -> Vec<&EngineCoreReadyResponse> {
         self.engines.iter().map(|engine| &engine.ready_response).collect()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn install_abort_send_gate(
+        &self,
+        engine_id: EngineId,
+    ) -> Arc<imp::TestAbortSendGate> {
+        self.inner.install_abort_send_gate(engine_id)
     }
 
     /// Return the first engine's ready response.
