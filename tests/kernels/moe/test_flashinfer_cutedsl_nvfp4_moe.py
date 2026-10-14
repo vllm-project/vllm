@@ -451,8 +451,9 @@ def test_flashinfer_cutedsl_fp4_moe(
 @pytest.mark.parametrize("localized", [False, True])
 @pytest.mark.parametrize("overlap", [False, True])
 @pytest.mark.parametrize("max_capture_size", [0, 256])
+@pytest.mark.parametrize("activation", [MoEActivation.SILU, MoEActivation.SITU])
 def test_localization_arguments_initialized_after_loading(
-    monkeypatch, localized, overlap, max_capture_size
+    monkeypatch, localized, overlap, max_capture_size, activation
 ):
     import vllm.model_executor.layers.fused_moe.experts.flashinfer_cutedsl_moe as mod
 
@@ -464,7 +465,9 @@ def test_localization_arguments_initialized_after_loading(
         intermediate_size=128,
         num_local_experts=2,
         num_logical_experts=2,
-        activation=MoEActivation.SILU,
+        activation=activation,
+        activation_situ_beta=1.0 if activation == MoEActivation.SITU else None,
+        activation_situ_linear_beta=0.5 if activation == MoEActivation.SITU else None,
         device="cpu",
         in_dtype=torch.bfloat16,
         moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
@@ -516,7 +519,7 @@ def test_localization_arguments_initialized_after_loading(
         w2=scale,
         topk_weights=scale,
         topk_ids=scale.int(),
-        activation=MoEActivation.SILU,
+        activation=activation,
         global_num_experts=2,
         expert_map=None,
         a1q_scale=scale,
@@ -527,6 +530,15 @@ def test_localization_arguments_initialized_after_loading(
         apply_router_weight_on_input=False,
     )
     kwargs = backend.call_args.kwargs
+    if activation == MoEActivation.SITU:
+        assert kwargs["situ_beta"] == 1.0
+        assert kwargs["situ_linear_beta"] == 0.5
+        assert kwargs["activation_type"] == mod.activation_to_flashinfer_int(
+            MoEActivation.SILU
+        )
+    else:
+        assert "situ_beta" not in kwargs
+        assert "situ_linear_beta" not in kwargs
     assert kwargs["autotune_use_cuda_graph"] is (max_capture_size > 0)
     if localized:
         assert kwargs["localized_weights"][0]["w1_weight"] is shard["w13_weight"]

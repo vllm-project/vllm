@@ -265,6 +265,19 @@ class FlashInferCuteDSLExperts(mk.FusedMoEExpertsModular):
                 "swiglu_beta": self.gemm1_beta,
                 "swiglu_limit": self.gemm1_clamp_limit,
             }
+        elif activation == MoEActivation.SITU:
+            # The cute_dsl kernel keys SiTU on situ_beta and requires
+            # activation_type to stay a base type (ActivationType.Situ is
+            # rejected by normalize_cute_dsl_moe_activation_type), so the
+            # Swiglu base type is passed below and SiTU rides the betas.
+            if self.situ_beta is None:
+                raise ValueError(
+                    "SITU activation requires moe_config.activation_situ_beta"
+                )
+            swiglu_params = {
+                "situ_beta": self.situ_beta,
+                "situ_linear_beta": self.situ_linear_beta,
+            }
         swiglu_kwargs = {k: v for k, v in swiglu_params.items() if v is not None}
 
         per_token_kwargs = (
