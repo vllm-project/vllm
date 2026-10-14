@@ -13,3 +13,4 @@ Qwen3-30B-A3B-BF16-triton.yaml
 Qwen3-30B-A3B-BF16-moonep.yaml
 Qwen3-30B-A3B-BF16-nixl_ep_v2.yaml
 Qwen3-30B-A3B-BF16-nixl_ep_v2-expand.yaml
+Qwen3-30B-A3B-Fp8-fi-trtllm-nixl_ep_v2.yaml
