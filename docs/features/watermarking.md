@@ -56,6 +56,34 @@ watermarking algorithm that does not support it natively, at the cost of
 weaker detectability. See
 [Speculative decoding](#speculative-decoding).
 
+## Monitoring
+
+When `watermark_config` is set, the Prometheus counter
+`vllm:watermark_requests_total` counts finished requests by `status`:
+
+- `watermarked`: the request was sampled with the watermark switched on.
+- `skipped`: the request asked for the watermark (omitted or `true`) but could
+  not use it, such as `temperature=0` and trace replay requests. A beam search
+  request that asks for the watermark runs without it and logs a warning. Its
+  beam steps count as `not_watermarked`, not `skipped`.
+- `not_watermarked`: all other finished requests. This includes explicit
+  opt-outs, pooling requests, and the internal requests of beam search (one
+  per beam step), generative scoring and language detection.
+
+Each finished request has exactly one status, so the sum over `status` equals
+`vllm:request_success_total` on the same instance. Requests that the client
+aborts are in neither counter. The counter does not exist without
+`watermark_config`. With `n > 1`, each sequence counts once. In a
+disaggregated prefill/decode deployment, both instances count a request: sum
+over decode instances only. For streaming input, the first input chunk sets
+the status.
+
+The status is per request, not per token. A `watermarked` request can contain
+tokens without the watermark: accepted draft tokens with
+`allow_target_only_watermarking`, tokens whose context repeats
+(`deduplicate_contexts`), the first `context_width` generated tokens with
+`deduplicate_contexts: "all"`, and tokens that a grammar forces.
+
 ## Architecture
 
 `WatermarkConfig` selects an algorithm and PRF. Model Runner V2 constructs the

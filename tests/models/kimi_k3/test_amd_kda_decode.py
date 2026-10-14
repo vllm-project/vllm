@@ -289,3 +289,59 @@ def test_fused_kda_decode_skips_null_block_padding() -> None:
     torch.testing.assert_close(actual_state[0], inp.recurrent_state[0], atol=0, rtol=0)
     torch.testing.assert_close(actual_conv, expected_conv, atol=0, rtol=0)
     torch.testing.assert_close(actual_state, expected_state, atol=2e-3, rtol=2e-3)
+
+
+def test_decode_weights_staged_after_loading(dist_init) -> None:
+    """The fused-decode weight copies must not depend on the weight loaders.
+
+    Loaders that bypass ``weight_loader`` (e.g. ``--load-format dummy``) left
+    them uninitialized, so decode could read NaN. Loading runs with grad mode
+    on, so the copies must also stay out of autograd.
+    """
+    _requires_kernel()
+    from tests.v1.attention.utils import create_vllm_config
+    from vllm.config import set_current_vllm_config
+    from vllm.model_executor.model_loader.utils import process_weights_after_loading
+    from vllm.models.kimi_k3.amd.kda import KimiK3DeltaAttention
+    from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
+
+    config = KimiLinearConfig(
+        hidden_size=256,
+        linear_attn_config={
+            "kda_layers": [1],
+            "full_attn_layers": [],
+            "head_dim": HEAD_DIM,
+            "num_heads": 12,
+            "short_conv_kernel_size": CONV_WIDTH,
+            "use_full_rank_gate": True,
+            "gate_lower_bound": GATE_LOWER_BOUND,
+        },
+    )
+    vllm_config = create_vllm_config(model_name="Qwen/Qwen3.5-0.8B", dtype=DTYPE)
+    with set_current_vllm_config(vllm_config), torch.device("cuda"):
+        layer = KimiK3DeltaAttention(
+            config, vllm_config, prefix="model.layers.0.self_attn"
+        )
+    assert layer.decode_conv1d_weight is not None
+    with torch.no_grad():
+        for param in layer.parameters():
+            param.normal_()
+        layer.decode_conv1d_weight.fill_(float("nan"))
+        layer.decode_norm_weight.fill_(float("nan"))
+
+    process_weights_after_loading(
+        torch.nn.ModuleList([layer]), vllm_config.model_config, torch.device("cuda")
+    )
+
+    dim = layer.local_projection_size
+    conv_weights = layer.conv1d.weight.squeeze(1)
+    expected_conv = torch.stack(
+        [conv_weights[i * dim : (i + 1) * dim].transpose(0, 1) for i in range(3)]
+    )
+    torch.testing.assert_close(
+        layer.decode_conv1d_weight, expected_conv, atol=0, rtol=0
+    )
+    torch.testing.assert_close(
+        layer.decode_norm_weight, layer.o_norm.weight.float(), atol=0, rtol=0
+    )
+    assert not layer.decode_norm_weight.requires_grad

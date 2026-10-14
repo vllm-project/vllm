@@ -859,6 +859,27 @@ def _supports_pp_inspect(model: type[object] | object) -> bool:
 
 
 @runtime_checkable
+class SupportsHCSP(Protocol):
+    """Support sequence-parallel HC without changing MoE parallelism."""
+
+    supports_hc_sp: ClassVar[Literal[True]] = True
+
+
+@overload
+def supports_hc_sp(model: type[object]) -> TypeIs[type[SupportsHCSP]]: ...
+
+
+@overload
+def supports_hc_sp(model: object) -> TypeIs[SupportsHCSP]: ...
+
+
+def supports_hc_sp(
+    model: type[object] | object,
+) -> TypeIs[type[SupportsHCSP]] | TypeIs[SupportsHCSP]:
+    return getattr(model, "supports_hc_sp", False)
+
+
+@runtime_checkable
 class HasInnerState(Protocol):
     """The interface required for all models that has inner state."""
 
@@ -1113,12 +1134,9 @@ def has_noops(
 
 @runtime_checkable
 class SupportsMambaPrefixCaching(Protocol):
-    """The interface for models whose mamba layers support prefix caching.
-
-    This is currently experimental.
+    """The interface for attention-free Mamba models that support prefix
+    caching. Hybrid models get the same methods from `IsHybrid`.
     """
-
-    supports_mamba_prefix_caching: ClassVar[Literal[True]] = True
 
     @classmethod
     def get_mamba_state_copy_func(cls) -> tuple["MambaStateCopyFunc", ...]:
@@ -1133,24 +1151,6 @@ class SupportsMambaPrefixCaching(Protocol):
         """Map legacy copy functions to each requested Mamba backend."""
         copy_funcs = cls.get_mamba_state_copy_func()
         return {mamba_type: copy_funcs for mamba_type in mamba_types}
-
-
-@overload
-def supports_mamba_prefix_caching(
-    model: type[object],
-) -> TypeIs[type[SupportsMambaPrefixCaching]]: ...
-
-
-@overload
-def supports_mamba_prefix_caching(
-    model: object,
-) -> TypeIs[SupportsMambaPrefixCaching]: ...
-
-
-def supports_mamba_prefix_caching(
-    model: type[object] | object,
-) -> TypeIs[type[SupportsMambaPrefixCaching]] | TypeIs[SupportsMambaPrefixCaching]:
-    return getattr(model, "supports_mamba_prefix_caching", False)
 
 
 @runtime_checkable

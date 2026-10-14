@@ -87,7 +87,7 @@ def _torch_topk_softplus_sqrt(
     "backend,expected_experts",
     [
         ("aiter_triton_mxfp4_bf16", "AiterW4A16ExpertsMonolithic"),
-        ("aiter", "AiterExperts"),
+        ("aiter", "AiterMxfp4Experts"),
         ("triton_unfused", "UnfusedOAITritonExperts"),
     ],
 )
@@ -302,15 +302,18 @@ def test_fused_topk_softplus_sqrt_hash(
 @pytest.mark.parametrize(
     ("num_tokens", "num_experts", "indices_type"),
     [
-        (0, 256, torch.uint32),
-        (17, 256, torch.uint32),
+        (0, 256, torch.int32),
+        (17, 256, torch.int32),
         (17, 384, torch.int64),
     ],
 )
+@pytest.mark.parametrize("use_padding", [False, True])
 def test_dsv4_fast_topk(
     num_tokens: int,
     num_experts: int,
     indices_type: torch.dtype,
+    use_padding: bool,
+    monkeypatch: pytest.MonkeyPatch,
 ):
     torch.manual_seed(0)
     gating_output = torch.randn(
@@ -325,8 +328,25 @@ def test_dsv4_fast_topk(
         routed_scaling_factor=1.5,
         e_score_correction_bias=correction_bias,
     )
-    topk_weights, topk_ids = dsv4_topk(
-        gating_output, correction_bias, indices_type, 1.5
+    is_padding = torch.arange(num_tokens, device="cuda") % 2 == 1
+    if use_padding:
+        monkeypatch.setattr(
+            "vllm.model_executor.layers.fused_moe.router."
+            "fused_topk_bias_router._get_padding_mask",
+            lambda _: is_padding,
+        )
+        gating_output[is_padding] = float("nan")
+        topk_weights_ref[is_padding] = 0
+        topk_ids_ref[is_padding] = -1
+    topk_weights, topk_ids = fused_topk_bias(
+        gating_output,
+        gating_output,
+        "sqrtsoftplus",
+        correction_bias,
+        6,
+        True,
+        indices_type=indices_type,
+        routed_scaling_factor=1.5,
     )
 
     assert topk_ids.dtype == indices_type
@@ -337,6 +357,17 @@ def test_dsv4_fast_topk(
         atol=2e-5,
         rtol=2e-5,
     )
+
+    if use_padding and num_tokens:
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            weights, ids = dsv4_topk(
+                gating_output, correction_bias, indices_type, 1.5, is_padding=is_padding
+            )
+        is_padding.fill_(True)
+        graph.replay()
+        assert (ids == -1).all()
+        assert (weights == 0).all()
 
 
 @pytest.mark.skipif(

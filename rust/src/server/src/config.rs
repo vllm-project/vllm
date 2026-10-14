@@ -56,6 +56,8 @@ pub struct ApiServerOptions {
     pub enable_log_requests: bool,
     /// When `true`, include prompt token cache details in response usage.
     pub enable_prompt_tokens_details: bool,
+    /// Include request timing metrics in OpenAI chat and completion responses.
+    pub enable_per_request_metrics: bool,
     /// When `true`, set `X-Request-Id` on every HTTP response.
     pub enable_request_id_headers: bool,
     /// When `true`, register the scale-out `/inference/v1/generate` route.
@@ -296,6 +298,11 @@ impl Config {
     /// Validate frontend configuration that can be checked before engine
     /// startup.
     pub fn validate(&self) -> Result<()> {
+        if self.api_server_options.enable_per_request_metrics && self.disable_log_stats {
+            bail!(
+                "--enable-per-request-metrics requires engine statistics logging; remove --disable-log-stats"
+            );
+        }
         vllm_chat::validate_parser_overrides(&self.tool_call_parser, &self.reasoning_parser)?;
         self.cors.validate()?;
         if let Some(tls) = &self.tls {

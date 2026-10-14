@@ -7,9 +7,9 @@ from typing import Any, TypeAlias, cast
 import torch.nn.functional as F
 
 from vllm import PoolingParams, PoolingRequestOutput, TokensPrompt
+from vllm.exceptions import ChatTemplateResolutionError
 from vllm.logger import init_logger
 from vllm.renderers import TokenizeParams
-from vllm.renderers.chat_utils import ChatTemplateResolutionError
 from vllm.renderers.hf import safe_apply_chat_template
 from vllm.renderers.inputs.preprocess import (
     extract_target_prompt,

@@ -125,6 +125,10 @@ class AttentionBackendEnum(Enum, metaclass=_AttentionBackendEnumMeta):
     FLASH_ATTN_MLA_SPARSE = (
         "vllm.v1.attention.backends.mla.flashattn_mla_sparse.FlashAttnMLASparseBackend"
     )
+    FLASH_ATTN_MLA_SPARSE_FA4 = (
+        "vllm.v1.attention.backends.mla.flashattn_mla_sparse."
+        "FlashAttnMLASparseFA4Backend"
+    )
     MINIMAX_M3_SPARSE = (
         "vllm.models.minimax_m3.common.sparse_attention.MiniMaxM3SparseBackend"
     )

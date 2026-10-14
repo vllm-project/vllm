@@ -282,6 +282,7 @@ class Base(
             dynamic_arg_dims=dynamic_arg_dims,
             enable_if=enable_if,
             is_encoder=is_encoder,
+            use_aot_compile=False,
         )(cls)
 
     def _decorate_for_torch_compile(self):

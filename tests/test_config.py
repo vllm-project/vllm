@@ -4110,6 +4110,47 @@ def test_revision_resolved_for_model(mock_resolve):
 
 
 @pytest.mark.parametrize(
+    "enabled,supported,is_cuda,tp_size,pp_size,error",
+    [
+        (True, True, True, 2, 1, None),
+        (True, False, True, 2, 1, "not supported for this model"),
+        (True, True, False, 2, 1, "requires CUDA"),
+        (True, True, True, 1, 1, None),
+        (True, False, False, 1, 2, None),
+        (True, True, True, 2, 2, "requires PP=1"),
+        (False, False, False, 2, 1, None),
+    ],
+)
+def test_hc_sp_model_support(enabled, supported, is_cuda, tp_size, pp_size, error):
+    """Validate active HC SP configurations and ignore the flag with TP=1."""
+    from vllm.model_executor.models.registry import ModelRegistry
+
+    model = SimpleNamespace(
+        architectures=["HCModel"],
+        registry=ModelRegistry,
+        model_arch_config=SimpleNamespace(total_num_attention_heads=8),
+        multimodal_config=None,
+    )
+    parallel = ParallelConfig(
+        enable_hc_sp=enabled,
+        tensor_parallel_size=tp_size,
+        pipeline_parallel_size=pp_size,
+        # Avoid backend auto-detection in this config-only test.
+        distributed_executor_backend="mp",
+    )
+    with (
+        patch("vllm.config.model.current_platform.is_cuda", return_value=is_cuda),
+        patch.object(ModelRegistry, "is_hc_sp_supported_model", return_value=supported),
+        patch.object(ModelRegistry, "is_pp_supported_model", return_value=True),
+    ):
+        if error:
+            with pytest.raises(ValueError, match=error):
+                ModelConfig.verify_with_parallel_config(model, parallel)
+        else:
+            ModelConfig.verify_with_parallel_config(model, parallel)
+
+
+@pytest.mark.parametrize(
     ("layer_types", "expected_attention"),
     [
         # Qwen3-Next / Qwen3.5 spell their attention layers "full_attention".

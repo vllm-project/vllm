@@ -16,23 +16,24 @@ from vllm.assets.video import VideoAsset
 from vllm.config import ModelConfig
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs import MultiModalDataDict, MultiModalUUIDDict
+from vllm.multimodal.media import MEDIA_CONNECTOR_REGISTRY
 from vllm.multimodal.utils import (
     encode_audio_url,
     encode_image_url,
     encode_video_url,
 )
 from vllm.renderers.chat_utils import (
-    MEDIA_CONNECTOR_REGISTRY,
     AsyncMultiModalItemTracker,
     ChatCompletionMessageParam,
     ConversationMessage,
-    _load_embeds_dict,
-    _parse_metadata_array,
-    _postprocess_messages,
+    parse_chat_message_content,
     parse_chat_messages,
     parse_chat_messages_async,
     validate_chat_template,
 )
+from vllm.renderers.chat_utils.chat_message import _postprocess_messages
+from vllm.renderers.chat_utils.content_parser import _load_embeds_dict
+from vllm.renderers.chat_utils.item_tracker import _parse_metadata_array
 from vllm.utils.serial_utils import tensor2base64
 
 KIMI_K2_5_MODEL_ID = "moonshotai/Kimi-K2.5"
@@ -3196,3 +3197,48 @@ def test_validate_chat_template_rejects_invalid_type():
     ) as exc_info:
         validate_chat_template(123)
     assert exc_info.value.parameter == "chat_template"
+
+
+def _parse_one(message) -> ConversationMessage:
+    # Plain-text content only reads these two tracker attributes.
+    tracker = MagicMock()
+    parser = tracker.create_parser.return_value
+    parser.model_config.enable_prompt_embeds = False
+    parser.mm_placeholder_storage.return_value = {}
+    result = parse_chat_message_content(
+        message, tracker, content_format="string", interleave_strings=False
+    )
+    assert len(result) == 1
+    return result[0]
+
+
+def test_assistant_reasoning_is_mirrored_to_reasoning_content():
+    """``reasoning`` is mirrored to ``reasoning_content`` for legacy templates."""
+    conv_msg = _parse_one(
+        {
+            "role": "assistant",
+            "content": "4",
+            "reasoning": "2+2 equals 4",
+        }
+    )
+
+    assert conv_msg.get("reasoning") == "2+2 equals 4"
+    assert conv_msg.get("reasoning_content") == "2+2 equals 4"
+
+
+def test_assistant_without_reasoning_sets_neither_field():
+    """No reasoning in, no reasoning keys out: no empty thinking block in templates."""
+    conv_msg = _parse_one({"role": "assistant", "content": "Hi"})
+
+    assert "reasoning" not in conv_msg
+    assert "reasoning_content" not in conv_msg
+
+
+def test_non_assistant_reasoning_is_not_mirrored():
+    """Only assistant turns carry reasoning; a user turn must not."""
+    conv_msg = _parse_one(
+        {"role": "user", "content": "Hi", "reasoning": "should be ignored"}
+    )
+
+    assert "reasoning" not in conv_msg
+    assert "reasoning_content" not in conv_msg

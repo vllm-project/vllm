@@ -4,7 +4,7 @@ import contextlib
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
-from typing import TYPE_CHECKING, assert_never
+from typing import TYPE_CHECKING, assert_never, cast
 
 import huggingface_hub
 from typing_extensions import TypeVar
@@ -14,11 +14,12 @@ from vllm.logger import init_logger
 from vllm.transformers_utils.config import _maybe_register_hf_config, get_config
 from vllm.transformers_utils.repo_utils import (
     any_pattern_in_repo_files,
+    get_non_weight_snapshot_path,
     is_mistral_model_repo,
 )
 from vllm.utils.import_utils import resolve_obj_by_qualname
 
-from .hf import CachedHfTokenizer
+from .hf import CachedHfTokenizer, HfTokenizer
 from .protocol import TokenizerLike
 
 if TYPE_CHECKING:
@@ -164,6 +165,13 @@ def resolve_tokenizer_args(
                 "mistral_format=True is not supported with tokenizer_mode='hf'"
             )
         kwargs["mistral_format"] = False
+        if kwargs.get("code_revision") in (None, revision):
+            tokenizer_name = get_non_weight_snapshot_path(
+                str(tokenizer_name),
+                revision=revision,
+                cache_dir=download_dir,
+                token=kwargs.get("token"),
+            )
 
     return tokenizer_mode, tokenizer_name, args, kwargs
 
@@ -202,6 +210,7 @@ def get_tokenizer(
 
         apply_fastokens_patch()
 
+    requested_name = str(tokenizer_name)
     tokenizer_mode, tokenizer_name, args, kwargs = cached_resolve_tokenizer_args(
         tokenizer_name,
         *args,
@@ -254,6 +263,9 @@ def get_tokenizer(
         kwargs.setdefault("config", config)
 
     tokenizer = tokenizer_cls_.from_pretrained(tokenizer_name, *args, **kwargs)
+    # Report the Hub ID rather than the local snapshot it was loaded from
+    if tokenizer_mode == "hf" and not envs.VLLM_USE_MODELSCOPE:
+        cast(HfTokenizer, tokenizer).name_or_path = requested_name
     if model_type in _MODEL_TYPES_WITH_INCORRECT_TOKENIZER_CLASS:
         from vllm.tokenizers.hf import get_cached_tokenizer
 

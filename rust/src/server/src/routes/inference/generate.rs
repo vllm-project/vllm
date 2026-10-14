@@ -226,6 +226,8 @@ async fn generate_chunk_stream(
                     None
                 };
 
+                let stop_reason =
+                    finish_reason.as_ref().and_then(|reason| reason.as_stop_reason().cloned());
                 let prompt_token_ids = prompt_token_ids.take();
                 y.yield_ok(GenerateStreamResponse {
                     request_id: request_id.clone(),
@@ -233,8 +235,10 @@ async fn generate_chunk_stream(
                         index: 0,
                         logprobs,
                         finish_reason: finish_reason.map(|reason| reason.as_str().to_string()),
+                        stop_reason,
                         token_ids,
                         sampling_mask: output.sampling_mask.map(|mask| mask.rows),
+                        weight_versions: output.weight_versions,
                     }],
                     usage: include_continuous_usage
                         .then(|| Usage::from_token_usage(usage, enable_prompt_tokens_details)),
@@ -318,6 +322,7 @@ fn collect_generate(
         None
     };
     let finish_reason = collected.finish_reason.as_str().to_string();
+    let stop_reason = collected.finish_reason.as_stop_reason().cloned();
 
     if enable_log_requests {
         info!(
@@ -334,8 +339,10 @@ fn collect_generate(
             index: 0,
             logprobs,
             finish_reason: Some(finish_reason),
+            stop_reason,
             token_ids: collected.token_ids,
             sampling_mask: collected.sampling_mask.map(|mask| mask.rows),
+            weight_versions: collected.weight_versions,
         }],
         prompt_logprobs,
         prompt_token_id_logprobs: collected
@@ -535,7 +542,7 @@ mod tests {
 
     use futures::{TryStreamExt as _, stream};
     use vllm_engine_core_client::protocol::multimodal::{MmModality, PlaceholderRange};
-    use vllm_engine_core_client::protocol::output::RequestSpecDecodeMetrics;
+    use vllm_engine_core_client::protocol::output::{RequestSpecDecodeMetrics, StopReason};
     use vllm_engine_core_client::protocol::sampling_mask::SamplingMask;
     use vllm_llm::GeneratePromptInfo;
 
@@ -629,6 +636,8 @@ mod tests {
                 ec_transfer_params: None,
                 sampling_mask: None,
                 spec_decode_metrics: None,
+                weight_versions: None,
+                timestamps: Default::default(),
             }),
             Ok(GenerateOutput {
                 request_id: String::new(),
@@ -645,6 +654,8 @@ mod tests {
                 ec_transfer_params: None,
                 sampling_mask: None,
                 spec_decode_metrics: None,
+                weight_versions: None,
+                timestamps: Default::default(),
             }),
         ]);
 
@@ -731,6 +742,8 @@ mod tests {
             ec_transfer_params: None,
             sampling_mask: None,
             spec_decode_metrics: None,
+            weight_versions: None,
+            timestamps: Default::default(),
         }
     }
 
@@ -905,6 +918,7 @@ mod tests {
                 rows: vec![vec![30, 40]],
             }),
             spec_decode_metrics: None,
+            weight_versions: None,
         };
 
         let response = collect_generate(
@@ -959,6 +973,7 @@ mod tests {
             prompt_token_ids: vec![10],
             sampling_mask: None,
             spec_decode_metrics: Some(metrics.clone()),
+            weight_versions: None,
         };
 
         let response = collect_generate(
@@ -1051,6 +1066,7 @@ mod tests {
             prompt_token_ids: vec![10, 20],
             sampling_mask: None,
             spec_decode_metrics: None,
+            weight_versions: None,
         };
 
         let response = collect_generate(
@@ -1086,6 +1102,7 @@ mod tests {
             ec_transfer_params: None,
             sampling_mask: None,
             spec_decode_metrics: None,
+            weight_versions: None,
             prompt_token_ids,
         };
 
@@ -1115,5 +1132,70 @@ mod tests {
             None,
         )
         .expect_err("multi-token prompt without payload is an engine failure");
+    }
+
+    #[tokio::test]
+    async fn generate_chunk_stream_reports_stop_reason() {
+        let chunks = collect_chunks(
+            vec![
+                stream_output(Some(&[11, 22]), vec![33], None),
+                stream_output(
+                    Some(&[11, 22]),
+                    vec![44],
+                    Some(FinishReason::Stop(Some(StopReason::Text(
+                        "wor".to_string(),
+                    )))),
+                ),
+            ],
+            false,
+            None,
+        )
+        .await;
+
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0].choices[0].stop_reason, None);
+        assert_eq!(chunks[1].choices[0].finish_reason.as_deref(), Some("stop"));
+        assert_eq!(
+            chunks[1].choices[0].stop_reason,
+            Some(StopReason::Text("wor".to_string()))
+        );
+    }
+
+    #[test]
+    fn collect_generate_reports_stop_token_id() {
+        let output = CollectedGenerateOutput {
+            request_id: "raw-stop".to_string(),
+            prompt_logprobs: None,
+            prompt_token_id_logprobs: None,
+            token_ids: vec![30, 7],
+            logprobs: None,
+            finish_reason: FinishReason::Stop(Some(StopReason::TokenId(7))),
+            usage: TokenUsage {
+                prompt_token_count: 2,
+                output_token_count: 2,
+                cached_token_count: 0,
+            },
+            kv_transfer_params: None,
+            ec_transfer_params: None,
+            prompt_token_ids: vec![10, 20],
+            sampling_mask: None,
+            spec_decode_metrics: None,
+            weight_versions: None,
+        };
+
+        let response = collect_generate(
+            output,
+            "raw-stop".to_string(),
+            ApiServerOptions::default(),
+            ResponseOptions::default(),
+            None,
+        )
+        .expect("response");
+
+        assert_eq!(response.choices[0].finish_reason.as_deref(), Some("stop"));
+        assert_eq!(
+            response.choices[0].stop_reason,
+            Some(StopReason::TokenId(7))
+        );
     }
 }

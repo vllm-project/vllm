@@ -1205,6 +1205,84 @@ def test_get_c128_boundary(starts, query_start_loc, expected):
     assert _get_c128_boundary(metadata) is expected
 
 
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
+@torch.inference_mode()
+def test_c128_skip_is_not_baked_into_cuda_graph(monkeypatch):
+    """A graph captured on a batch with no C128 boundary must still launch the
+    compressor on replay; only eager steps may skip it."""
+    from vllm.config import CUDAGraphMode
+    from vllm.forward_context import ForwardContext, override_forward_context
+    from vllm.models.deepseek_v4 import compressor as compressor_mod
+    from vllm.models.deepseek_v4.compressor import DeepseekCompressor
+    from vllm.models.deepseek_v4.nvidia.ops import sparse_attn_compress_cutedsl
+
+    launches = torch.zeros(1, dtype=torch.int32, device="cuda")
+    monkeypatch.setattr(
+        compressor_mod, "_SAVE_PARTIAL_STATES_KERNEL", lambda **kw: None
+    )
+    monkeypatch.setattr(
+        sparse_attn_compress_cutedsl,
+        "_SPARSE_ATTN_COMPRESSOR_CUTEDSL_KERNEL",
+        lambda **kw: launches.add_(1),
+    )
+
+    compressor = DeepseekCompressor.__new__(DeepseekCompressor)
+    torch.nn.Module.__init__(compressor)
+    compressor.head_dim, compressor.rope_head_dim = 512, 64
+    compressor.compress_ratio, compressor.coff, compressor.overlap = 128, 1, False
+    compressor.use_fp4_cache = False
+    compressor._use_two_stage_fused_compressor = False
+    compressor._quant_block = 64
+    compressor._token_stride = 576
+    compressor._scale_dim = 8
+    compressor.rms_norm_eps = 1e-6
+    compressor.ape = torch.zeros(128, 512, device="cuda")
+    compressor.norm = SimpleNamespace(weight=torch.ones(512, device="cuda"))
+    compressor.state_cache = SimpleNamespace(
+        prefix="state", kv_cache=torch.zeros(2, 8, 1024, device="cuda")
+    )
+    compressor.k_cache_prefix = "main"
+    kv_cache = torch.zeros(1, 64, 584, dtype=torch.uint8, device="cuda")
+    compressor._static_forward_context = {"main": SimpleNamespace(kv_cache=kv_cache)}
+
+    num_tokens = 4
+    slots = torch.arange(num_tokens, device="cuda")
+    metadata = {
+        "state": SimpleNamespace(
+            slot_mapping=slots,
+            block_table=torch.zeros(num_tokens, 1, dtype=torch.int32, device="cuda"),
+            block_size=8,
+            token_to_req_indices=torch.arange(
+                num_tokens, dtype=torch.int32, device="cuda"
+            ),
+            c128_boundary=False,
+        ),
+        "main": SimpleNamespace(slot_mapping=slots),
+    }
+    kv_score = torch.zeros(num_tokens, 1024, device="cuda")
+    positions = torch.arange(num_tokens, device="cuda")
+    rotary = SimpleNamespace(cos_sin_cache=torch.zeros(1, 64, device="cuda"))
+    context = ForwardContext(
+        {}, metadata, {}, cudagraph_runtime_mode=CUDAGraphMode.PIECEWISE
+    )
+
+    def run():
+        with override_forward_context(context):
+            compressor(kv_score, positions, rotary)
+
+    run()
+    torch.accelerator.synchronize()
+    assert launches.item() == 0, "eager step with no boundary should skip"
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        run()
+    launches.zero_()
+    graph.replay()
+    torch.accelerator.synchronize()
+    assert launches.item() == 1, "captured graph must not bake in the skip"
+
+
 # ── Test A: DeepseekV4 Attention path ──────────────────────────────────────────────
 
 
@@ -1422,7 +1500,10 @@ def test_dequantize_and_gather_k_cache(
 
 @pytest.mark.parametrize("num_tokens", [1, 4, 8, 17])
 @pytest.mark.parametrize("block_size", [16, 64])
-def test_indexer_quant_cache_roundtrip(num_tokens: int, block_size: int):
+@pytest.mark.parametrize("scale_fmt", ["ue8m0", "mxfp8"])
+def test_indexer_quant_cache_roundtrip(
+    num_tokens: int, block_size: int, scale_fmt: str
+):
     """K → indexer_k_quant_and_cache → cp_gather_indexer_k_quant_cache
     → manual dequant → compare against original."""
     HEAD_DIM = 128
@@ -1442,7 +1523,9 @@ def test_indexer_quant_cache_roundtrip(num_tokens: int, block_size: int):
     )
     slot_mapping = torch.arange(num_tokens, dtype=torch.int64, device=device)
 
-    ops.indexer_k_quant_and_cache(k, kv_cache, slot_mapping, QUANT_BLOCK_SIZE, "ue8m0")
+    ops.indexer_k_quant_and_cache(
+        k, kv_cache, slot_mapping, QUANT_BLOCK_SIZE, scale_fmt
+    )
 
     # ── Gather ──────────────────────────────────────────────────────────
     max_blocks_per_seq = num_blocks
@@ -1465,7 +1548,12 @@ def test_indexer_quant_cache_roundtrip(num_tokens: int, block_size: int):
 
     # ── Manual dequant ──────────────────────────────────────────────────
     k_fp8 = dst_k.view(torch.float8_e4m3fn).float()  # [num_tokens, 128]
-    scale = dst_scale.view(torch.float32)  # [num_tokens, 1]
+    if scale_fmt == "mxfp8":
+        # One UE8M0 byte per 32 elements, all equal to the token's scale.
+        assert (dst_scale == dst_scale[:, :1]).all()
+        scale = (dst_scale[:, :1].to(torch.int32) << 23).view(torch.float32)
+    else:
+        scale = dst_scale.view(torch.float32)  # [num_tokens, 1]
     k_recovered = k_fp8 * scale  # [num_tokens, 128]
 
     # ── Compare ─────────────────────────────────────────────────────────
@@ -1749,8 +1837,13 @@ def _reference_kv_compress_norm_rope(
         ),
     ],
 )
-def test_fused_kv_insert_indexer(num_tokens: int, kv_block_size: int, use_fp4: bool):
+@pytest.mark.parametrize("mx_scale", [False, True])
+def test_fused_kv_insert_indexer(
+    num_tokens: int, kv_block_size: int, use_fp4: bool, mx_scale: bool
+):
     """Fused K compress+norm+rope+quant+insert for the indexer KV cache."""
+    if use_fp4 and mx_scale:
+        pytest.skip("MX scales only change the FP8 cache")
     HEAD_DIM = 128
     ROPE_DIM = 64
     BLOCK_SIZE = 16
@@ -1833,6 +1926,7 @@ def test_fused_kv_insert_indexer(num_tokens: int, kv_block_size: int, use_fp4: b
         TOKEN_STRIDE=TOKEN_STRIDE,
         SCALE_DIM=SCALE_DIM,
         KV_BLOCK_STRIDE=kv_cache.stride(0),
+        MX_SCALE=mx_scale,
         num_warps=1,
     )
 
@@ -1876,12 +1970,18 @@ def test_fused_kv_insert_indexer(num_tokens: int, kv_block_size: int, use_fp4: b
             ), f"token {i}: FP8 bytes differ"
 
             scale_off = kv_block_size * TOKEN_STRIDE + pos * SCALE_DIM
-            actual_scale = kv_cache[blk, scale_off : scale_off + SCALE_DIM].view(
-                torch.float32
-            )
-            assert torch.equal(actual_scale, scale[i : i + 1]), (
-                f"token {i}: scale {actual_scale.item()} != {scale[i].item()}"
-            )
+            actual_scale = kv_cache[blk, scale_off : scale_off + SCALE_DIM]
+            if mx_scale:
+                # The power-of-two scale's exponent as 4 equal UE8M0 bytes.
+                ue8m0 = (scale[i : i + 1].view(torch.int32) >> 23).to(torch.uint8)
+                assert torch.equal(actual_scale, ue8m0.repeat(SCALE_DIM)), (
+                    f"token {i}: mx scale {actual_scale.tolist()} != {ue8m0.item()}"
+                )
+            else:
+                actual_scale = actual_scale.view(torch.float32)
+                assert torch.equal(actual_scale, scale[i : i + 1]), (
+                    f"token {i}: scale {actual_scale.item()} != {scale[i].item()}"
+                )
 
 
 @pytest.mark.parametrize("compress_ratio", [4, 128])

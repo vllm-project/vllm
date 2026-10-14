@@ -122,6 +122,16 @@ class VideoMediaIO(MediaIO[MediaWithBytes[tuple[DecodedFrames, dict[str, Any]]]]
         video = self.video_loader.load_bytes(
             data, num_frames=self.num_frames, **self.kwargs
         )
+        frames = video[0] if isinstance(video, tuple) else video
+        budget = getattr(self.image_io, "decoded_budget", None)
+        shape = getattr(frames, "shape", None)
+        if budget is not None and shape is not None and len(shape) >= 3:
+            decoded_bytes = (
+                frames.numel() * frames.element_size()
+                if isinstance(frames, torch.Tensor)
+                else frames.nbytes
+            )
+            budget.charge(decoded_bytes)
         return MediaWithBytes(video, data)
 
     def load_base64(

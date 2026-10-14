@@ -160,6 +160,11 @@ class OnlineDerenderer:
             else {}
         )
 
+        return_token_ids = (
+            chat_request is not None
+            and chat_request.return_token_ids
+            and (not has_parser or chat_request.include_reasoning)
+        )
         for choice in generate_response.choices:
             if not choice.token_ids:
                 raise ValueError(f"choice {choice.index} has empty or null token_ids")
@@ -201,6 +206,8 @@ class OnlineDerenderer:
                     message=message,
                     logprobs=resolved_logprobs,
                     finish_reason=choice.finish_reason,
+                    stop_reason=choice.stop_reason,
+                    token_ids=choice.token_ids if return_token_ids else None,
                 )
             )
 
@@ -432,6 +439,7 @@ class OnlineDerenderer:
         stream_choices: list[ChatCompletionResponseStreamChoice] = []
         updated_state = state
 
+        return_token_ids = chat_request is not None and chat_request.return_token_ids
         for choice in generate_chunk.choices:
             delta_tids = choice.token_ids or []
             new_text, updated_state = await self._detokenize_delta_async(
@@ -477,6 +485,8 @@ class OnlineDerenderer:
                     delta=delta,
                     logprobs=resolved_logprobs,
                     finish_reason=choice.finish_reason,
+                    stop_reason=choice.stop_reason,
+                    token_ids=choice.token_ids if return_token_ids else None,
                 )
             )
 
@@ -583,6 +593,10 @@ class OnlineDerenderer:
         tools_streamed = state.tools_streamed
         last_tool_call_ids = list(state.last_tool_call_ids)
 
+        return_token_ids = (
+            chat_request.return_token_ids and chat_request.include_reasoning
+        )
+
         # At most one choice: the caller (derender_chat_stream) already
         # rejects >1 before dispatching here. role_sent/tools_streamed/
         # output_token_ids below are updated for that single choice, not
@@ -660,6 +674,8 @@ class OnlineDerenderer:
                 index=choice.index,
                 delta=delta_message,
                 finish_reason=finish_reason,
+                stop_reason=choice.stop_reason,
+                token_ids=choice.token_ids if return_token_ids else None,
             )
             stream_choices.append(
                 maybe_filter_parallel_tool_calls(stream_choice, chat_request)
@@ -764,6 +780,7 @@ class OnlineDerenderer:
                         index=index,
                         text=decoded_text,
                         finish_reason=choice.finish_reason,
+                        stop_reason=choice.stop_reason,
                         logprobs=completion_logprobs,
                     )
                 )
@@ -865,6 +882,7 @@ class OnlineDerenderer:
                     text=new_text,
                     logprobs=completion_logprobs,
                     finish_reason=choice.finish_reason,
+                    stop_reason=choice.stop_reason,
                 )
             )
 

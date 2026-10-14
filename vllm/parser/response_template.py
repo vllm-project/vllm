@@ -9,7 +9,7 @@ import json
 from collections.abc import Callable, Iterable, Sequence
 from typing import TYPE_CHECKING, Any, cast
 
-from openai.types.responses import ToolChoiceFunction
+from openai.types.responses import ToolChoiceCustom, ToolChoiceFunction
 
 from vllm.entrypoints.generate.base.protocol import (
     DeltaFunctionCall,
@@ -173,7 +173,8 @@ def _streaming_template(template: dict[str, Any]) -> ResponseTemplate:
 
 def _is_named_tool_choice(request: ChatCompletionRequest | ResponsesRequest) -> bool:
     return isinstance(
-        request.tool_choice, (ToolChoiceFunction, ChatCompletionNamedToolChoiceParam)
+        request.tool_choice,
+        (ToolChoiceFunction, ToolChoiceCustom, ChatCompletionNamedToolChoiceParam),
     )
 
 

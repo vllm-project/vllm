@@ -24,8 +24,6 @@ class XPUModelRunner(GPUModelRunner):
     ):
         with _torch_cuda_wrapper():
             super().__init__(vllm_config, device)
-        # FIXME: To be verified.
-        self.cascade_attn_enabled = False
 
 
 class XPUModelRunnerV2(GPUModelRunnerV2):

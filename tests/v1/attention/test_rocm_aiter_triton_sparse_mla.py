@@ -96,6 +96,8 @@ def test_forward_mqa_prepares_triton_sparse_mla_inputs(
     impl.sinks = torch.randn(num_heads, generator=gen).to(device)
     impl.kv_cache_dtype = kv_cache_dtype
     impl.topk_indices_buffer = topk_indices.to(device)
+    impl.owns_indexer = True
+    impl.index_epoch = 0
     impl.use_aiter_sparse_mla = True
     layer = SimpleNamespace(
         _q_scale=torch.tensor([0.02], device=device),

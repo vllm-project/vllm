@@ -975,8 +975,6 @@ def test_flashinfer_xqa_single_token_decode_preserves_cudagraph_padding(monkeypa
         causal=True,
         prefill=None,
         decode=decode,
-        use_cascade=False,
-        cascade_wrapper=None,
     )
 
     seen_shapes = {}
