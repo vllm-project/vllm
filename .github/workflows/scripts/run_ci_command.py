@@ -847,39 +847,33 @@ def merge_base_into_pr(
     lag: str,
 ) -> tuple[dict[str, Any], str]:
     base_ref = pr["base"]["ref"]
-    no_action = "No new CI build was started."
+
+    def merge_failed(reason: str) -> CiPreparationError:
+        return CiPreparationError(
+            f"{lag} The bot could not merge upstream `{base_ref}` into this "
+            f"branch ({reason}). No new CI build was started. Either merge or "
+            f"rebase onto the latest `{base_ref}` yourself and rerun `{command}`, "
+            f"or use `{command}{ALLOW_STALE_SUFFIX}` to test this branch as is."
+        )
+
     try:
         branch_updater.update_branch(pr["number"], pr["head"]["sha"])
+        for _ in range(BRANCH_UPDATE_POLL_ATTEMPTS):
+            time.sleep(BRANCH_UPDATE_POLL_SECONDS)
+            current_pr = github.get_pr(pr["number"])
+            if current_pr["head"]["sha"] != pr["head"]["sha"]:
+                break
+        else:
+            raise merge_failed("the merge commit did not appear in time")
+        if (
+            current_pr["state"] != "open"
+            or current_pr["base"]["ref"] != base_ref
+            or github.get_commits_behind_base(base_ref, current_pr["head"]["sha"])
+        ):
+            raise merge_failed("the PR changed during the merge")
     except ApiError as error:
-        raise CiPreparationError(
-            f"{lag} Could not merge upstream `{base_ref}` into this branch "
-            f"automatically: {error} {no_action} Resolve any merge conflicts, or "
-            'enable "Allow edits by maintainers" on the PR, then rerun '
-            f"`{command}`. To test this branch at your own risk, use "
-            f"`{command}{ALLOW_STALE_SUFFIX}`."
-        ) from error
+        raise merge_failed(str(error)) from error
 
-    for _ in range(BRANCH_UPDATE_POLL_ATTEMPTS):
-        time.sleep(BRANCH_UPDATE_POLL_SECONDS)
-        current_pr = github.get_pr(pr["number"])
-        if current_pr["head"]["sha"] != pr["head"]["sha"]:
-            break
-    else:
-        raise CiPreparationError(
-            f"Requested a merge of upstream `{base_ref}` into this branch, but "
-            f"the PR head did not change in time. {no_action} "
-            f"Rerun `{command}` once the merge commit appears."
-        )
-
-    if (
-        current_pr["state"] != "open"
-        or current_pr["base"]["ref"] != base_ref
-        or github.get_commits_behind_base(base_ref, current_pr["head"]["sha"])
-    ):
-        raise CiPreparationError(
-            f"The PR changed while merging upstream `{base_ref}`. {no_action} "
-            f"Comment `{command}` again."
-        )
     note = (
         f"ℹ️ {lag} Merged upstream `{base_ref}` into this branch as "
         f"`{current_pr['head']['sha'][:12]}` before starting CI. "

@@ -656,8 +656,10 @@ class RunCiCommandTest(unittest.TestCase):
 
         self.assertEqual(buildkite.created_builds, [])
         self.assertTrue(github.comments[0].startswith("❌ "))
+        self.assertIn("could not merge upstream `main`", github.comments[0])
         self.assertIn("merge conflict", github.comments[0])
         self.assertIn("No new CI build was started.", github.comments[0])
+        self.assertIn("`/ci run --allow-stale`", github.comments[0])
 
     def test_allow_stale_preserves_author_permissions_and_run_configuration(
         self,
