@@ -6,11 +6,13 @@ import types
 from unittest.mock import patch
 
 import pytest
+import torch
 
 from vllm import SamplingParams
 from vllm.config.load import LoadConfig
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.model_loader import runai_streamer_loader as rsl
+from vllm.utils.mem_constants import GiB_bytes
 
 load_format = "runai_streamer"
 test_model = "openai-community/gpt2"
@@ -122,3 +124,94 @@ def test_runai_invalid_extra_config_leaves_environ_untouched():
         with pytest.raises(ValueError, match="memory_limit must be an integer >= -1"):
             _runai_loader({"concurrency": 16, "memory_limit": -5})
         assert "RUNAI_STREAMER_CONCURRENCY" not in os.environ
+
+
+@pytest.mark.parametrize(
+    "model_config,expected_source",
+    [
+        # Object storage: model_weights holds the URI, model the pulled config dir.
+        (
+            types.SimpleNamespace(
+                model="/tmp/pulled-config-files",
+                model_weights="s3://bucket/weights",
+                revision="myrev",
+            ),
+            "s3://bucket/weights",
+        ),
+        # HF repo or local path: model_weights is empty, model is the source.
+        (
+            types.SimpleNamespace(
+                model="org/model", model_weights="", revision="myrev"
+            ),
+            "org/model",
+        ),
+    ],
+    ids=["object_storage", "hf_repo"],
+)
+def test_runai_get_all_weights_resolves_source(model_config, expected_source):
+    fake_self = types.SimpleNamespace(
+        _get_weights_iterator=lambda path, revision: iter(
+            [(f"{path}@{revision}", None)]
+        )
+    )
+
+    weights = list(
+        rsl.RunaiModelStreamerLoader.get_all_weights(
+            fake_self, model_config, model=None
+        )
+    )
+
+    assert weights == [(f"{expected_source}@myrev", None)]
+
+
+@pytest.mark.parametrize(
+    "base_model,mul_model,add_model",
+    [
+        (
+            "Qwen/Qwen3-0.6B",
+            "inference-optimization/Qwen3-0.6B-debug-multiply",
+            "inference-optimization/Qwen3-0.6B-debug-add",
+        ),
+    ],
+)
+def test_runai_deep_sleep_reload_weights(base_model, mul_model, add_model, vllm_runner):
+    free, total = torch.accelerator.get_memory_info()
+    used_bytes_baseline = total - free
+
+    def sleep_and_reload(llm, path):
+        # Level 2 discards the parameter memory, so after wake_up the weights
+        # can only come from the reload: a tensor the streamer fails to
+        # deliver changes the output instead of keeping a stale valid value.
+        llm.get_llm().sleep(level=2)
+        free, total = torch.accelerator.get_memory_info()
+        assert total - free - used_bytes_baseline < 3 * GiB_bytes
+        llm.get_llm().wake_up(tags=["weights"])
+        llm.collective_rpc("reload_weights", kwargs={"weights_path": path})
+        free, total = torch.accelerator.get_memory_info()
+        assert total - free - used_bytes_baseline < 4 * GiB_bytes
+        llm.get_llm().wake_up(tags=["kv_cache"])
+
+    with vllm_runner(
+        model_name=base_model,
+        load_format=load_format,
+        enable_sleep_mode=True,
+        enable_prefix_caching=False,
+        max_model_len=16,
+        max_num_seqs=1,
+    ) as llm:
+        base_output = llm.generate_greedy(["3 4 ="], max_tokens=4)
+
+        sleep_and_reload(llm, mul_model)
+        mul_perp = llm.generate_prompt_perplexity(["3 4 = 12"], mask=["3 4 ="])[0]
+        add_perp = llm.generate_prompt_perplexity(["3 4 = 7"], mask=["3 4 ="])[0]
+        assert mul_perp < add_perp
+
+        sleep_and_reload(llm, add_model)
+        mul_perp = llm.generate_prompt_perplexity(["3 4 = 12"], mask=["3 4 ="])[0]
+        add_perp = llm.generate_prompt_perplexity(["3 4 = 7"], mask=["3 4 ="])[0]
+        assert add_perp < mul_perp
+
+        # Round trip to the original weights over discarded memory must
+        # reproduce the pre-sleep output.
+        sleep_and_reload(llm, base_model)
+        assert llm.generate_greedy(["3 4 ="], max_tokens=4) == base_output
