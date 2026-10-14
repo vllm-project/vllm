@@ -144,15 +144,17 @@ def _fp8_mla_prefill_supported() -> bool:
 
 @functools.lru_cache(maxsize=1)
 def _fused_mla_prefill_qkv_supported() -> bool:
-    """ ``fused_mla_prefill_qkv_fp8`` only ships gfx950 (and gfx1250) configs 
+    """Gate ``fused_mla_prefill_qkv_fp8`` to CDNA4 (gfx950).
 
     Older AITER builds without the kernel fall back to the eager concat/cast.
     """
-    try:
-        from vllm.platforms.rocm import on_gfx950
-    except Exception:  # noqa: BLE001
+    from vllm.platforms import current_platform
+
+    if not current_platform.is_rocm():
         return False
-    if not on_gfx950():
+    from vllm.platforms.rocm import get_cdna_version
+
+    if get_cdna_version() != 4:
         return False
     try:
         from aiter.ops.triton.fusions.fused_mla_prefill_qkv_fp8 import (  # noqa: F401
