@@ -27,7 +27,7 @@ from torch.multiprocessing.reductions import rebuild_cuda_tensor, reduce_tensor
 from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 
 import vllm.version
-from vllm.config import ModelConfig
+from vllm.config import CacheConfig, ModelConfig
 from vllm.config.utils import normalize_value
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.model_loader.weight_cache.utils import (
@@ -293,6 +293,8 @@ class WeightCacheKey:
     dtype: str
     quantization: str | None
     quant_config_hash: str
+    kv_cache_dtype: str
+    kv_cache_dtype_skip_layers: tuple[str, ...]
     revision: str | None
     vllm_version: str
     pp_size: int = 1
@@ -309,6 +311,7 @@ class WeightCacheKey:
         tp_size: int,
         tp_rank: int,
         *,
+        cache_config: CacheConfig,
         pp_size: int = 1,
         pp_rank: int = 0,
         is_draft: bool = False,
@@ -342,6 +345,10 @@ class WeightCacheKey:
             quant_config_hash=_hash_quant_config(
                 quant_config=quant_config,
                 runtime_quant_config=model_config.quantization_config,
+            ),
+            kv_cache_dtype=cache_config.cache_dtype,
+            kv_cache_dtype_skip_layers=tuple(
+                sorted(set(cache_config.kv_cache_dtype_skip_layers))
             ),
             revision=model_config.revision,
             vllm_version=vllm.version.__version__,
