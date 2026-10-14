@@ -26,10 +26,10 @@ def _run_prepare(
     cp_size: int = 1,
     cp_interleave: int = 1,
     draft_dcp_size: int | None = None,
+    max_num_reqs: int = 4,
+    max_num_tokens: int = 16,
 ):
     device = torch.device("cuda")
-    max_num_reqs = 4
-    max_num_tokens = 16
     num_speculative_steps = 3
 
     input_buffers = SimpleNamespace(
@@ -163,15 +163,28 @@ def test_prepare_dflash_inputs_pads_the_unused_buffer_tail():
     them passes no matter how they regress.
 
     Shape here is num_reqs=1, num_query_per_req=num_speculative_steps=3,
-    max_num_reqs=4, max_num_tokens=16, so last_query_end=3 and every buffer
-    has a tail wider than one block.
+    max_num_reqs=4, max_num_tokens=4096, so last_query_end=3 and
+    pad_span=4093. That matters: PAD_BLOCK_SIZE caps at 1024, so the launch
+    is a FOUR-program grid and `tl.program_id(0)` takes four distinct values.
+
+    At the 16-token shape this test used to run, pad_span was 13 and
+    PAD_BLOCK_SIZE was next_power_of_2(13)=16, so the grid was a single
+    program and `program_id(0)` was always 0. `offs = program_id(0)*BLOCK +
+    arange(0, BLOCK)` is then indistinguishable from `offs = arange(0,
+    BLOCK)`, and a regression that dropped the program offset would leave
+    every slot past the first block stale -- in production
+    (max_num_tokens=16384, a 16-program grid) that is
+    query_slot_mapping[1024:] holding real slot IDs from the target's
+    previous step, which is exactly what this padding exists to prevent.
 
     `_run_prepare` pre-fills every buffer with a sentinel (-1 / -2), so an
     unwritten tail shows up as the sentinel rather than as a plausible zero.
     """
+    max_num_tokens = 4096
     out = _run_prepare(
         target_positions=[10, 11, 12, 13],
         block_table_values=[0, 0, 7, 8, 9, 10, 11, 12],
+        max_num_tokens=max_num_tokens,
     )
     last_query_end = 3
 
@@ -189,7 +202,9 @@ def test_prepare_dflash_inputs_pads_the_unused_buffer_tail():
 
     # Slots past the real query tokens must be PAD so a larger replay writes
     # no K/V.
-    assert out.query_slot_mapping.tolist()[last_query_end:] == [PAD_SLOT_ID] * 13
+    assert out.query_slot_mapping.tolist()[last_query_end:] == [PAD_SLOT_ID] * (
+        max_num_tokens - last_query_end
+    )
 
 
 @pytest.mark.parametrize("cp_rank,cp_size", [(0, 1), (0, 2), (1, 2)])
