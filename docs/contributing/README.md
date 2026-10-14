@@ -329,9 +329,15 @@ review process:
   in the upstream repository. Your branch must contain every commit currently
   on that branch: **zero commits behind**. This also applies to PRs targeting
   release branches or another PR's branch.
-- If the PR is behind, the bot reports the count without creating a new build.
-  Merge or rebase onto the latest target branch, then rerun the command. If the
-  target branch advances in the meantime, update your branch and try again.
+- If the PR is behind, the bot merges the target branch into your PR branch
+  (like the **Update branch** button) and runs CI on the resulting merge commit.
+  Pull the branch before pushing more changes. This needs **Allow edits by
+  maintainers** enabled on fork PRs. If the merge conflicts or is not allowed,
+  the bot reports the count without creating a new build; merge or rebase onto
+  the latest target branch yourself, then rerun the command.
+- PR authors without write access cannot start another full run (including
+  `--allow-stale`) on a commit that already has a CI build. Push new changes,
+  use `/ci retry` to rerun failed jobs, or ask a reviewer with write access.
 - To run CI on an outdated branch at your own risk, append `--allow-stale` to
   any run command, for example `/ci run --allow-stale` or
   `/amd-ci run all --allow-stale`. The same authorization requirements apply.
@@ -339,9 +345,8 @@ review process:
   failures. Before merging, merge or rebase onto the latest target branch and
   rerun CI without `--allow-stale` on the latest PR commit.
 - Retrying or cancelling builds does not check branch freshness.
-- These commands do not modify your branch or enforce merge requirements.
-  Direct Buildkite launches are outside this workflow. No additional token is
-  needed.
+- Apart from that merge, these commands do not modify your branch or enforce
+  merge requirements. Direct Buildkite launches are outside this workflow.
 
 Maintainers must configure required Buildkite status checks on the latest PR
 commit and enable GitHub's
