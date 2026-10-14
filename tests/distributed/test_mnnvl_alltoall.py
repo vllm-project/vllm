@@ -305,8 +305,7 @@ def test_two_sided_manager_lifecycle(world_size):
 # Test 2: One-sided manager lifecycle (init, cleanup, reinit)
 # ---------------------------------------------------------------------------
 #
-# The new wrapper allocates MNNVL workspaces for the EP group. Exercise the
-# DP=EP setup used by the dispatch/combine tests below.
+# With TP=PCP=PP=1, the DP and EP groups have the same ranks.
 # ---------------------------------------------------------------------------
 
 
@@ -314,8 +313,9 @@ def _one_sided_lifecycle_worker(rank, world_size):
     from vllm.distributed.device_communicators.all2all import (
         FlashInferNVLinkOneSidedManager,
     )
+    from vllm.distributed.parallel_state import get_dp_group
 
-    cpu_group = get_ep_group().cpu_group
+    cpu_group = get_dp_group().cpu_group
     manager = FlashInferNVLinkOneSidedManager(cpu_group)
 
     assert not manager.initialized
@@ -381,13 +381,14 @@ def _one_sided_workspace_grow_worker(rank, world_size):
     from vllm.distributed.device_communicators.all2all import (
         FlashInferNVLinkOneSidedManager,
     )
+    from vllm.distributed.parallel_state import get_dp_group
 
-    cpu_group = get_ep_group().cpu_group
+    cpu_group = get_dp_group().cpu_group
     manager = FlashInferNVLinkOneSidedManager(cpu_group)
 
     base_kwargs = dict(
         max_num_tokens=1024,
-        top_k=4,
+        top_k=2,
         num_experts=world_size * 8,
         hidden_size=4096,
     )
@@ -463,8 +464,9 @@ def _one_sided_workspace_grow_worker(rank, world_size):
         width = hidden // 2 if packed else hidden
         x = torch.arange(tokens * width, device=device).view(tokens, width) % 13
         x = (x + rank).to(torch.uint8 if packed else torch.bfloat16)
-        ids = torch.arange(4, dtype=torch.int32, device=device).repeat(tokens, 1)
-        weights = torch.ones(tokens, 4, device=device)
+        top_k = base_kwargs["top_k"]
+        ids = torch.arange(top_k, dtype=torch.int32, device=device).repeat(tokens, 1)
+        weights = torch.ones(tokens, top_k, device=device)
         received = shared.dispatch(x, ids, weights, max_tokens_per_rank=world_size + 2)
         local = (received.topk_ids >= rank * 8) & (received.topk_ids < (rank + 1) * 8)
         values = received.hidden_states.to(torch.bfloat16)
@@ -478,7 +480,7 @@ def _one_sided_workspace_grow_worker(rank, world_size):
             0,
         )
         output = shared.combine(contribution.contiguous())
-        torch.testing.assert_close(output, expected * 4, rtol=0, atol=0)
+        torch.testing.assert_close(output, expected * top_k, rtol=0, atol=0)
     manager.cleanup()
 
 
@@ -990,13 +992,14 @@ def _one_sided_data_worker(rank, world_size, *, padded_mxfp8):
     from vllm.distributed.device_communicators.all2all import (
         FlashInferNVLinkOneSidedManager,
     )
+    from vllm.distributed.parallel_state import get_dp_group
     from vllm.forward_context import get_forward_context
     from vllm.model_executor.layers.fused_moe.all2all_utils import (
         flashinfer_one_sided_dispatch_layout,
     )
     from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 
-    cpu_group = get_ep_group().cpu_group
+    cpu_group = get_dp_group().cpu_group
     device = torch.device(f"{DEVICE}:{rank}")
 
     hidden_size = 160 if padded_mxfp8 else 256
