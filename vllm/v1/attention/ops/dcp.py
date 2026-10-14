@@ -1588,7 +1588,7 @@ class MLADCPManager:
                 direct_workspace,
             )
         # Only created on ROCm when aiter is enabled for the group
-        aiter_comm = getattr(self.group.device_communicator, "aiter_ag_comm", None)
+        aiter_comm = getattr(self.group.device_communicator, "aiter_ar_comm", None)
         if aiter_comm is not None:
             logger.info_once("Using AITER custom all-gather for the MLA DCP query.")
             return functools.partial(self._aiter_query_gather, aiter_comm)

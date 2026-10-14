@@ -1658,6 +1658,7 @@ def graph_capture(device: torch.device):
         get_tp_group().graph_capture(context),
         get_pp_group().graph_capture(context),
         get_dp_group().graph_capture(context),
+        get_dcp_group().graph_capture(context),
     ):
         yield context
 
