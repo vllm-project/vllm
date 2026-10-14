@@ -370,7 +370,7 @@ def test_moe_routing_outside_the_kernels_keeps_vllm_path(monkeypatch):
 
 def _step(mono, model, metadata, width=1):
     with forward(mono.vllm_config, CUDAGraphMode.FULL, metadata):
-        return mono.begin_step(torch.zeros(width, dtype=torch.long))
+        return mono.skip_reason(torch.zeros(width, dtype=torch.long))
 
 
 @pytest.mark.parametrize(

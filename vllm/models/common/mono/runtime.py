@@ -72,8 +72,7 @@ class MonoRuntime(Generic[KernelT]):
         self.widths = spec.widths(vllm_config)
         self.kernels: dict[tuple[int, int], KernelT] = {}
         self.state: Any = None
-        self.width: int | None = None
-        self.why: str | None = None
+        self._why: str | None = None
         self._fc: Any = None
         self._checked: tuple | None = None
 
@@ -147,25 +146,31 @@ class MonoRuntime(Generic[KernelT]):
             )
         self._checked = key
 
-    def begin_step(self, positions: torch.Tensor) -> str | None:
-        """This forward's decision, taken on the first kernel layer to ask and
-        reused by the rest: None runs the step on the kernels (and sets
-        ``width``), else the reason it runs vLLM's layers."""
+    def skip_reason(self, positions: torch.Tensor) -> str | None:
+        """Why this forward runs vLLM's layers, None when it runs on the
+        kernels. Decided on the first kernel layer to ask and reused by the
+        rest, so every layer of one forward is answered alike.
+
+        Raises:
+            MonoUnsupported: The caches the kernels would read moved to
+                something this spec cannot serve.
+
+        """
         fc = get_forward_context()
         if fc is self._fc:
-            return self.why
+            return self._why
         n = positions.size(-1)
-        self._fc, self.width = fc, None
+        why: str | None
         if fc.cudagraph_runtime_mode == CUDAGraphMode.PIECEWISE:
-            self.why = "piecewise"
+            why = "piecewise"
         elif n not in self.widths:
-            self.why = "width"
+            why = "width"
         else:
-            self.why = self.spec.skip_step(self.vllm_config, self.state, n)
-            if self.why is None:
+            why = self.spec.skip_step(self.vllm_config, self.state, n)
+            if why is None:
                 self._refuse_caches()
-                self.width = n
-        return self.why
+        self._fc, self._why = fc, why
+        return why
 
 
 def attach(
@@ -210,9 +215,6 @@ def kernel_for_layer(
     calls ``launch`` where it suits the layer, and runs the vLLM layer
     unchanged when this returns None.
     """
-    if mono is None:
+    if mono is None or mono.skip_reason(positions) is not None:
         return None
-    mono.begin_step(positions)
-    if mono.width is None:
-        return None
-    return mono.kernels.get((i, mono.width))
+    return mono.kernels.get((i, positions.size(-1)))

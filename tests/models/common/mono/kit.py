@@ -170,23 +170,22 @@ class MonoConformance:
             with forward(
                 config, CUDAGraphMode.NONE, self.decode_metadata(config, model)
             ):
-                decisions.append(other.begin_step(self._positions(other)))
+                decisions.append(other.skip_reason(self._positions(other)))
         assert decisions[0] == decisions[1] is None
 
     def test_skipped_step_runs_vllm_layers(self, config, model, mono):
         with forward(config, CUDAGraphMode.NONE, self.skipped_metadata(config, model)):
-            mono.begin_step(self._positions(mono))
-            assert mono.width is None
+            assert mono.skip_reason(self._positions(mono)) is not None
 
     def test_width_off_the_capture_sizes_runs_vllm_layers(self, config, model, mono):
         off = max(mono.widths) + 1
         with forward(config, CUDAGraphMode.NONE, self.decode_metadata(config, model)):
-            assert mono.begin_step(torch.zeros(off, dtype=torch.long)) == "width"
+            assert mono.skip_reason(torch.zeros(off, dtype=torch.long)) == "width"
 
     def test_piecewise_runs_vllm_layers(self, config, model, mono):
         meta = self.decode_metadata(config, model)
         with forward(config, CUDAGraphMode.PIECEWISE, meta):
-            assert mono.begin_step(self._positions(mono)) == "piecewise"
+            assert mono.skip_reason(self._positions(mono)) == "piecewise"
 
     def test_caches_rechecked_when_they_move(self, config, model, mono):
         checks: list = []
@@ -239,7 +238,7 @@ class MonoConformance:
 
     def _decode(self, config, model, mono) -> None:
         with forward(config, CUDAGraphMode.NONE, self.decode_metadata(config, model)):
-            mono.begin_step(self._positions(mono))
+            mono.skip_reason(self._positions(mono))
 
     def _run_layers(self, mono, model) -> None:
         hidden = torch.zeros(min(mono.widths), model.config.hidden_size)
