@@ -1261,10 +1261,14 @@ def _fused_shared_experts_tuned(parallel_config: ParallelConfig) -> bool:
     tuned_tp_sizes: tuple[int, ...] = ()
     if on_gfx950():
         tuned_tp_sizes = (4, 8)
-    elif on_gfx942() and current_platform.num_compute_units() == 304:
-        tuned_tp_sizes = (2, 4, 8)
+    elif on_gfx942():
+        num_cus = current_platform.num_compute_units()
+        if num_cus == 304:
+            tuned_tp_sizes = (2, 4, 8)
+        else:
+            reasons.append(f"the GPU is a gfx942 with {num_cus} CUs")
     else:
-        reasons.append("the GPU is neither gfx950 nor a 304-CU gfx942")
+        reasons.append("the GPU is neither gfx950 nor gfx942")
     if tuned_tp_sizes and parallel_config.tensor_parallel_size not in tuned_tp_sizes:
         reasons.append(
             f"tensor_parallel_size is {parallel_config.tensor_parallel_size}"
