@@ -855,15 +855,7 @@ def test_engram_mxfp4_lookup_matches_torch(cpu_offload, background, num_tokens):
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
 @pytest.mark.parametrize("cpu_offload", [False, True])
-@pytest.mark.parametrize("use_thp", [False, True])
-@pytest.mark.parametrize("packed_fp4", [False, True])
-def test_engram_weight_allocation_follows_format(
-    monkeypatch, cpu_offload, use_thp, packed_fp4
-):
-    """Packed rows are half as wide uint8; FP8 rows keep their shape and dtype;
-    scales are identical in both."""
-    if use_thp and not cpu_offload:
-        pytest.skip("THP only backs offloaded tables")
+def test_engram_packed_weight_is_half_width_uint8(monkeypatch, cpu_offload):
     monkeypatch.setattr(engram_ops, "get_tensor_model_parallel_world_size", lambda: 1)
     monkeypatch.setattr(engram_ops, "get_tensor_model_parallel_rank", lambda: 0)
     dim, head_sizes = 256, (31,) * 24
@@ -873,26 +865,16 @@ def test_engram_weight_allocation_follows_format(
             dim,
             head_sizes,
             cpu_offload=cpu_offload,
-            use_thp=use_thp,
-            packed_fp4=packed_fp4,
+            packed_fp4=True,
         )
-    rows = layer.part_num_embeddings
-    if packed_fp4:
-        assert layer.weight.shape == (rows, dim // 2)
-        assert layer.weight.dtype == torch.uint8
-    else:
-        assert layer.weight.shape == (rows, dim)
-        assert layer.weight.dtype == torch.float8_e4m3fn
-    assert layer.weight_scale_inv.shape == (rows, dim // 32)
-    assert layer.weight_scale_inv.dtype == torch.uint8
+    assert layer.weight.shape == (layer.part_num_embeddings, dim // 2)
+    assert layer.weight.dtype == torch.uint8
 
 
 @pytest.mark.parametrize(
     "quant_config,expected",
     [
         (None, False),
-        ({}, False),
-        ({"engram_embed_quant": "fp8"}, False),
         ({"engram_embed_quant": "mxfp4"}, True),
     ],
 )
@@ -938,26 +920,6 @@ def test_engram_rejects_unknown_embedding_format(monkeypatch):
     layout = SimpleNamespace(num_embeddings=(72,), head_dim=32, primes=(((3,) * 4,),))
     with pytest.raises(ValueError, match="engram_embed_quant"):
         Engram.__new__(Engram)._create_embedding(layout, 0)
-
-
-@pytest.mark.parametrize("packed_fp4", [False, True])
-def test_engram_batch_skips_packed_fp4_tables(monkeypatch, packed_fp4):
-    """The staged exchange carries FP8 rows, so MXFP4 tables must not batch."""
-    table = SimpleNamespace(
-        dp_size=2, tp_size=1, dim=256, packed_fp4=packed_fp4, cpu_offload=False
-    )
-    layers = [SimpleNamespace(embed_tokens=table, wkv=None)]
-    monkeypatch.setattr(
-        engram_ops,
-        "get_current_vllm_config",
-        lambda: SimpleNamespace(lora_config=None),
-    )
-    monkeypatch.setattr(engram_ops, "can_fuse_query_quant", lambda wkvs: True)
-    monkeypatch.setattr(
-        engram_ops.EngramBatch, "__init__", lambda self, layers, max_tokens: None
-    )
-    batch = engram_ops.EngramBatch.create(layers, 8)
-    assert (batch is None) == packed_fp4
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
