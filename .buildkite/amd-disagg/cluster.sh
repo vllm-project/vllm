@@ -115,6 +115,7 @@ export HF_HOME="${HF_HOME:-/data/${USER:-$(id -un)}/.cache/huggingface}"
 export HF_MODULES_CACHE="${HF_MODULES_CACHE:-/tmp/hf_modules}"
 export XDG_CACHE_HOME="${XDG_CACHE_HOME:-/tmp/.cache}"
 export VLLM_ENGINE_READY_TIMEOUT_S="${VLLM_ENGINE_READY_TIMEOUT_S:-3600}"
+export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS="${VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS:-3600}"
 
 # ----------------------------------------------------------------- scale
 # DP/EP group formation timeout across nodes (seconds).
