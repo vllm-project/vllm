@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
+from unittest.mock import MagicMock
 
 import pytest
 import torch
@@ -16,6 +17,7 @@ from vllm.lora.layers import (
     ReplicatedLinearWithLoRA,
     RowParallelLinearWithLoRA,
 )
+from vllm.lora.layers.base import BaseLayerWithLoRA
 from vllm.lora.layers.fused_moe import FusedMoE3DWithLoRA, FusedMoEWithLoRA
 from vllm.lora.lora_model import LoRAModel
 from vllm.lora.lora_weights import LoRALayerWeights, PackedLoRALayerWeights
@@ -426,6 +428,106 @@ def test_get_dummy_lora_warmup_rank_for_fully_sharded_moe():
     }
 
     assert manager.get_dummy_lora_warmup_rank(8) == 32
+
+
+def _bare_manager(modules=None, packed_modules=None):
+    manager = LoRAModelManager.__new__(LoRAModelManager)
+    manager.modules = modules or {}
+    manager.packed_modules = packed_modules or {}
+    manager.is_pooling_model = False
+    manager._is_3d_moe_model = True
+    manager._enable_mixed_moe_lora_format = False
+    return manager
+
+
+@pytest.fixture
+def count_pins(monkeypatch):
+    """Enable pinning on CPU-only hosts and count pin_memory calls."""
+    pinned = []
+
+    def fake_pin(self):
+        pinned.append(self)
+        return self.clone()
+
+    monkeypatch.setattr("vllm.lora.model_manager.PIN_MEMORY", True)
+    monkeypatch.setattr(torch.Tensor, "pin_memory", fake_pin)
+    return pinned
+
+
+@pytest.mark.parametrize("v_only", [False, True])
+def test_pin_memory_for_packed_lora(count_pins, v_only):
+    """The device of a packed LoRA is read from a tensor, not the tensor.
+    The first sub-LoRA can also be None (e.g. a v-only adapter)."""
+
+    def make(name):
+        return LoRALayerWeights(name, 4, 4, torch.zeros(4, 8), torch.zeros(8, 4))
+
+    subloras = [None, None, make("v_proj")] if v_only else [make("q_proj")] * 3
+    lora_model = LoRAModel(1, 4, {"qkv_proj": PackedLoRALayerWeights.pack(subloras)})
+
+    _bare_manager()._create_merged_loras_inplace(lora_model)
+
+    assert len(count_pins) == 2 * sum(t is not None for t in subloras)
+
+
+def test_3d_moe_lora_pinned_once(count_pins):
+    """gate_up tensors are shared by the base_layer entry and the experts
+    entry. Only the experts entry may survive, or they get pinned twice."""
+    num_experts, rank = 2, 4
+    module = MagicMock(spec=FusedMoE3DWithLoRA)
+    module.w13_lora_a_stacked = (torch.zeros(1, num_experts, rank, 8),)
+    module.global_num_experts = num_experts
+    module.ep_rank = 0
+
+    gate_up = LoRALayerWeights(
+        "experts.base_layer",
+        rank,
+        rank,
+        torch.randn(rank * num_experts, 8),
+        torch.randn(16, rank * num_experts),
+    )
+    down = LoRALayerWeights(
+        "experts",
+        rank,
+        rank,
+        torch.randn(rank * num_experts, 16),
+        torch.randn(8, rank * num_experts),
+    )
+    lora_model = LoRAModel(1, rank, {"experts.base_layer": gate_up, "experts": down})
+
+    _bare_manager(modules={"experts": module})._create_merged_loras_inplace(lora_model)
+
+    assert list(lora_model.loras) == ["experts"]
+    assert len(count_pins) == 4
+
+
+@pytest.mark.parametrize("ep_size", [1, 2, 3])
+def test_dummy_3d_moe_lora_is_sized_by_global_experts(ep_size):
+    """With EP the stacked buffers hold local experts, but the 3D stacking
+    reshapes by global experts, so a rank not divisible by ep_size used to
+    fail at warmup."""
+    global_experts, rank = 6, 4
+    local = global_experts // ep_size
+
+    class FusedMoE3DWithLoRA(BaseLayerWithLoRA):
+        w2_input_size, w2_output_size = 16, 8
+        w13_input_size, w13_output_size = 8, 32
+
+        def __init__(self):
+            super().__init__()
+            self.w2_lora_a_stacked = (torch.zeros(1, local, rank, 16),)
+            self.w13_lora_a_stacked = (torch.zeros(1, local, rank, 8),)
+            self.global_num_experts = global_experts
+
+    manager = _bare_manager()
+    manager.model = nn.ModuleDict({"experts": FusedMoE3DWithLoRA()})
+    manager.supported_lora_modules = ["experts"]
+    manager._match_target_modules = lambda name: True
+    manager._get_punica_wrapper = lambda name: object()
+    dummy = manager.create_dummy_lora(1, rank, EMBEDDING_MODULES)
+
+    assert dummy.loras["experts"].lora_a.shape[0] == rank * global_experts
+    assert dummy.loras["experts.base_layer"].lora_a.shape[0] == rank * global_experts
 
 
 @pytest.mark.parametrize("device", DEVICES)
